@@ -1,0 +1,36 @@
+[project]
+name = "irimi"
+version = "0.0.1"
+description = "Shadow mode for AI agents: reads are real, writes are virtual, and reads see the writes."
+readme = "README.md"
+requires-python = ">=3.12"  # floor for end users; development pins 3.14 via .python-version
+dependencies = [
+    "mitmproxy>=11",
+    "pyyaml>=6",
+]
+
+[project.scripts]
+irimi = "irimi.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/irimi"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

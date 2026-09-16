@@ -1,6 +1,8 @@
+import socket
+
 import pytest
 
-from irimi import __version__
+from irimi import __version__, ca, paths
 from irimi.cli import main
 
 
@@ -14,3 +16,36 @@ def test_version_flag(capsys):
 def test_no_command_prints_help_and_fails(capsys):
     assert main([]) == 1
     assert "usage: irimi" in capsys.readouterr().out
+
+
+def test_serve_without_ca_fails(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
+    assert main(["serve"]) == 1
+    assert "irimi init" in capsys.readouterr().err
+
+
+def test_help_lists_serve(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["--help"])
+    assert exc.value.code == 0
+    assert "serve" in capsys.readouterr().out
+
+
+def test_serve_help_has_port(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["serve", "--help"])
+    assert exc.value.code == 0
+    assert "--port" in capsys.readouterr().out
+
+
+def test_serve_port_in_use_fails(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
+    ca.generate_ca(ca.ca_paths())
+    sock = socket.socket()
+    try:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen()
+        assert main(["serve", "--port", str(sock.getsockname()[1])]) == 1
+        assert "did not start" in capsys.readouterr().err
+    finally:
+        sock.close()

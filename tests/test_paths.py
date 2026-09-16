@@ -17,3 +17,13 @@ def test_irimi_home_honours_env(monkeypatch, tmp_path):
 def test_irimi_home_expands_tilde(monkeypatch):
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, "~/custom")
     assert paths.irimi_home() == Path.home() / "custom"
+
+
+def test_mitm_dir_under_irimi_home(monkeypatch, tmp_path):
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
+    assert paths.mitm_dir() == paths.irimi_home() / "mitm"
+
+
+def test_listen_defaults():
+    assert paths.DEFAULT_PORT == 4000
+    assert paths.LISTEN_HOST == "127.0.0.1"

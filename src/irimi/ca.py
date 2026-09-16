@@ -99,3 +99,13 @@ def _write_with_mode(path: Path, data: bytes, mode: int) -> None:
     with os.fdopen(fd, "wb") as f:
         os.fchmod(fd, mode)
         f.write(data)
+
+
+def write_mitm_bundle(p: CAPaths, confdir: Path) -> Path:
+    """Write <confdir>/mitmproxy-ca.pem = CA key + CA cert (mode 0600), the file mitmproxy's
+    TlsConfig loads to mint per-host leaf certs. Always rewritten so `init --force` is picked up."""
+    bundle = confdir / paths.MITM_CA_BUNDLE_NAME
+    confdir.mkdir(parents=True, exist_ok=True)
+    os.chmod(confdir, DIR_MODE)
+    _write_with_mode(bundle, p.key.read_bytes() + p.cert.read_bytes(), KEY_MODE)
+    return bundle

@@ -11,6 +11,10 @@ from irimi.exchange import Exchange
 OnExchange = Callable[[Exchange], None]
 
 
+class EngineStartError(RuntimeError):
+    """The engine could not bind its listener (port in use, bad config) or was stopped first."""
+
+
 @dataclass(frozen=True)
 class EngineConfig:
     run_id: str

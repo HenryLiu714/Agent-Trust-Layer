@@ -1,7 +1,7 @@
 import argparse
 import sys
 
-from irimi import __version__
+from irimi import __version__, paths
 
 NON_HTTP_NOTICE = (
     "Note: irimi only sees HTTP(S). Side effects that are not HTTP "
@@ -40,8 +40,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
     import asyncio
     import secrets
 
-    from irimi import ca, paths
-    from irimi.engine import EngineConfig
+    from irimi import ca
+    from irimi.engine import EngineConfig, EngineStartError
     from irimi.engine.mitm import MitmEngine
     from irimi.exchange import Exchange
     from irimi.overlay import NoOverlay
@@ -74,14 +74,11 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
     async def _main() -> None:
         task = asyncio.ensure_future(engine.run())
-        ready = asyncio.ensure_future(engine.wait_ready())
-        await asyncio.wait({task, ready}, return_when=asyncio.FIRST_COMPLETED)
-        if task.done():
-            ready.cancel()
-            task.result()  # re-raise if run() raised
-            raise RuntimeError(
-                f"proxy did not start on {cfg.listen_host}:{cfg.listen_port} (port in use?)"
-            )
+        try:
+            await engine.wait_ready()
+        except EngineStartError:
+            await asyncio.gather(task, return_exceptions=True)  # let mitmproxy finish stopping
+            raise
         print(
             f"irimi serve · run {run_id} · listening on "
             f"{cfg.listen_host}:{engine.listen_port()} · ca {p.cert}"
@@ -95,12 +92,6 @@ def cmd_serve(args: argparse.Namespace) -> int:
         pass
     except (RuntimeError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 1
-    except SystemExit:  # mitmproxy's ErrorCheck calls sys.exit(1) when startup logged an error
-        print(
-            f"error: proxy did not start on {cfg.listen_host}:{cfg.listen_port} (port in use?)",
-            file=sys.stderr,
-        )
         return 1
     return 0
 
@@ -120,7 +111,12 @@ def build_parser() -> argparse.ArgumentParser:
     init.set_defaults(func=cmd_init)
 
     serve = subparsers.add_parser("serve", help="run the shadow proxy in the foreground (dev)")
-    serve.add_argument("--port", type=int, default=4000, help="port on 127.0.0.1 (default 4000)")
+    serve.add_argument(
+        "--port",
+        type=int,
+        default=paths.DEFAULT_PORT,
+        help=f"port on {paths.LISTEN_HOST} (default {paths.DEFAULT_PORT})",
+    )
     serve.set_defaults(func=cmd_serve)
     return parser
 

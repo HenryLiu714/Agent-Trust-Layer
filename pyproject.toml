@@ -5,6 +5,7 @@ description = "Shadow mode for AI agents: reads are real, writes are virtual, an
 readme = "README.md"
 requires-python = ">=3.12"  # floor for end users; development pins 3.14 via .python-version
 dependencies = [
+    "cryptography>=42",
     "mitmproxy>=11",
     "pyyaml>=6",
 ]

@@ -1,7 +1,7 @@
 import argparse
 import sys
 
-from irimi import __version__, ca
+from irimi import __version__
 
 NON_HTTP_NOTICE = (
     "Note: irimi only sees HTTP(S). Side effects that are not HTTP "
@@ -10,6 +10,8 @@ NON_HTTP_NOTICE = (
 
 
 def cmd_init(args: argparse.Namespace) -> int:
+    from irimi import ca  # deferred: keeps --version and --help free of the cryptography import
+
     p = ca.ca_paths()
     if ca.ca_exists(p) and not args.force:
         print(f"CA already exists at {p.key.parent} (use --force to regenerate).")
@@ -22,7 +24,11 @@ def cmd_init(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    ca.generate_ca(p)
+    try:
+        ca.generate_ca(p)
+    except OSError as exc:
+        print(f"error: could not write CA to {p.key.parent}: {exc}", file=sys.stderr)
+        return 1
     print("Generated CA:")
     print(f"  key:  {p.key}")
     print(f"  cert: {p.cert}")

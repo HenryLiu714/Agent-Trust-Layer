@@ -45,3 +45,14 @@ def test_init_incomplete_dir_errors_without_force(tmp_path, monkeypatch, capsys)
     assert "incomplete" in capsys.readouterr().err
     assert main(["init", "--force"]) == 0
     assert p.cert.is_file()
+
+
+def test_init_refuses_symlinked_key(tmp_path, monkeypatch, capsys):
+    p = _setup(tmp_path, monkeypatch)
+    p.key.parent.mkdir(parents=True)
+    victim = tmp_path / "victim"
+    victim.write_bytes(b"do not touch")
+    p.key.symlink_to(victim)
+    assert main(["init", "--force"]) == 1
+    assert "could not write CA" in capsys.readouterr().err
+    assert victim.read_bytes() == b"do not touch"

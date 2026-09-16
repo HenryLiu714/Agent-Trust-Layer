@@ -89,8 +89,13 @@ def generate_ca(p: CAPaths) -> None:
 
 
 def _write_with_mode(path: Path, data: bytes, mode: int) -> None:
-    """Create-or-truncate `path` with `mode`, never leaving it world-readable in between."""
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    """Create-or-truncate `path` with `mode`, never leaving it world-readable in between.
+
+    Refuses to follow a symlink at `path`, and fixes the mode on the open descriptor
+    before any bytes are written (O_CREAT's mode is subject to umask and ignored when
+    the file already exists).
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, mode)
     with os.fdopen(fd, "wb") as f:
+        os.fchmod(fd, mode)
         f.write(data)
-    os.chmod(path, mode)  # O_CREAT mode is subject to umask and ignored if the file existed

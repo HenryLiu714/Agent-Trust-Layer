@@ -10,6 +10,8 @@ build/
 
 # Local config and secrets
 .env
+.env.*
+!.env.example
 
 # irimi state if someone points IRIMI_HOME at the repo
 .irimi/

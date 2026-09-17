@@ -1,4 +1,5 @@
 import socket
+from pathlib import Path
 
 import pytest
 
@@ -49,3 +50,28 @@ def test_serve_port_in_use_fails(tmp_path, monkeypatch, capsys):
         assert "did not start" in capsys.readouterr().err
     finally:
         sock.close()
+
+
+def test_help_lists_shadow(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["--help"])
+    assert exc.value.code == 0
+    assert "shadow" in capsys.readouterr().out
+
+
+def test_shadow_help_has_port(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["shadow", "--help"])
+    assert exc.value.code == 0
+    assert "--port" in capsys.readouterr().out
+
+
+def test_no_mode_env_var_anywhere():
+    src = Path(__file__).resolve().parents[1] / "src" / "irimi"
+    offenders = [
+        f"{py.name}: {line.strip()}"
+        for py in src.rglob("*.py")
+        for line in py.read_text().splitlines()
+        if "IRIMI_MODE" in line
+    ]
+    assert offenders == [], "mode comes only from the subcommand:\n" + "\n".join(offenders)

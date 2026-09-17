@@ -35,6 +35,18 @@ This creates the venv, installs irimi in editable mode, and runs `irimi init`. T
 uv run irimi --help
 ```
 
+## Try the proxy
+
+`irimi serve` runs the shadow proxy in the foreground on `127.0.0.1:4000`. Reads are forwarded to
+the real service; anything that is not a safe HTTP method is answered locally with a placeholder
+`fake-L0` response and never reaches the network. Each exchange prints as one line.
+
+    uv run irimi serve
+    # in another terminal
+    curl --proxy 127.0.0.1:4000 --cacert ~/.irimi/ca/ca.pem https://api.stripe.com/v1/charges
+
+The launcher that starts the proxy and your agent together (`irimi shadow -- <cmd>`) is the next step.
+
 ## Installing as a standalone tool
 
 If you do not want a venv, run one of these from the repo root:

@@ -47,3 +47,25 @@ def test_generate_overwrites_and_fixes_mode(tmp_path, monkeypatch):
     ca.generate_ca(p)
     assert p.key.read_bytes() != before
     assert stat.S_IMODE(p.key.stat().st_mode) == 0o600
+
+
+def test_write_mitm_bundle_is_key_then_cert_with_modes(tmp_path, monkeypatch):
+    p = _paths(tmp_path, monkeypatch)
+    ca.generate_ca(p)
+    confdir = tmp_path / "mitm"
+    bundle = ca.write_mitm_bundle(p, confdir)
+    assert bundle == confdir / "mitmproxy-ca.pem"
+    assert stat.S_IMODE(bundle.stat().st_mode) == 0o600
+    assert stat.S_IMODE(confdir.stat().st_mode) == 0o700
+    assert bundle.read_bytes() == p.key.read_bytes() + p.cert.read_bytes()
+
+
+def test_write_mitm_bundle_picks_up_regenerated_ca(tmp_path, monkeypatch):
+    p = _paths(tmp_path, monkeypatch)
+    confdir = tmp_path / "mitm"
+    ca.generate_ca(p)
+    old = ca.write_mitm_bundle(p, confdir).read_bytes()
+    ca.generate_ca(p)
+    bundle = ca.write_mitm_bundle(p, confdir)
+    assert bundle.read_bytes() != old
+    assert bundle.read_bytes() == p.key.read_bytes() + p.cert.read_bytes()

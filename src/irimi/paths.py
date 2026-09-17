@@ -16,3 +16,14 @@ def irimi_home() -> Path:
 
 def ca_dir() -> Path:
     return irimi_home() / "ca"
+
+
+MITM_DIR_NAME = "mitm"
+MITM_CA_BUNDLE_NAME = "mitmproxy-ca.pem"  # name mitmproxy's TlsConfig addon looks for
+LISTEN_HOST = "127.0.0.1"
+DEFAULT_PORT = 4000
+
+
+def mitm_dir() -> Path:
+    """mitmproxy's confdir: holds the key+cert bundle mitmproxy mints leaf certs from."""
+    return irimi_home() / MITM_DIR_NAME

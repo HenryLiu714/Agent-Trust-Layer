@@ -163,3 +163,32 @@ def test_engine_start_failure_does_not_spawn_child(home, monkeypatch, capsys):
         assert not (home / "SHOULD_NOT_EXIST").exists()
     finally:
         sock.close()
+
+
+def test_interrupt_before_ready_exits_cleanly(home, monkeypatch, capsys):
+    """Ctrl-C during engine startup must not escape main() as a traceback."""
+    from irimi import runner
+
+    monkeypatch.chdir(home)  # so SHOULD_NOT_EXIST would land here, not in the repo
+    real = runner.start_engine
+
+    def interrupted(engine, timeout=runner.READY_TIMEOUT_S):
+        handle = real(engine, timeout)
+        handle.stop()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(runner, "start_engine", interrupted)
+    assert main(["shadow", *_py("open('SHOULD_NOT_EXIST','w')")]) == 130
+    assert "interrupted before the proxy was ready" in capsys.readouterr().err
+    assert not (home / "SHOULD_NOT_EXIST").exists()
+
+
+def test_interrupt_while_waiting_exits_cleanly(home, monkeypatch, capsys):
+    """Ctrl-C that escapes _wait_for_child still stops the engine and prints the summary."""
+    from irimi import cli
+
+    monkeypatch.setattr(
+        cli, "_wait_for_child", lambda proc: (_ for _ in ()).throw(KeyboardInterrupt)
+    )
+    assert main(["shadow", *_py("pass")]) == 130
+    assert "0 exchange(s)" in capsys.readouterr().out

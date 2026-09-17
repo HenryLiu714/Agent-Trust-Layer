@@ -67,6 +67,11 @@ is the only thing that chooses the mode.
 ships its own CA bundle, talks to the real service. The banner says `backstop: none (Phase 4)` for
 exactly this reason.
 
+Those CA variables *replace* the child's trust store rather than adding to it, so while the command
+runs it trusts the irimi CA and nothing else. Traffic through the proxy is fine, but a TLS
+connection that skips the proxy — anything on `localhost` or `127.0.0.1`, which `NO_PROXY` excludes
+— will fail to verify. Point such a client at plain HTTP, or give it its own CA bundle.
+
 ## Installing as a standalone tool
 
 If you do not want a venv, run one of these from the repo root:

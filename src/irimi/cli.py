@@ -7,6 +7,8 @@ from irimi import __version__, paths
 if TYPE_CHECKING:  # the quoted annotation on _wait_for_child; no runtime import
     import subprocess
 
+SIGINT_EXIT_CODE = 130  # 128 + SIGINT, the shell convention for a Ctrl-C'd command
+
 NON_HTTP_NOTICE = (
     "Note: irimi only sees HTTP(S). Side effects that are not HTTP "
     "(database writes, files, gRPC, WebSockets) are not virtualized and happen for real."
@@ -146,6 +148,9 @@ def cmd_shadow(args: argparse.Namespace) -> int:
         reason = str(exc) or f"proxy did not start within {runner.READY_TIMEOUT_S:.0f}s"
         print(f"error: {reason}", file=sys.stderr)
         return 1  # fail closed: the child is never spawned without the proxy
+    except KeyboardInterrupt:
+        print("error: interrupted before the proxy was ready.", file=sys.stderr)
+        return SIGINT_EXIT_CODE
 
     try:
         for line in runner.banner_lines("shadow", run_id, paths.LISTEN_HOST, handle.port(), p.cert):
@@ -160,8 +165,14 @@ def cmd_shadow(args: argparse.Namespace) -> int:
             print(f"error: could not run {cmd[0]}: {exc}", file=sys.stderr)
             return 126
         code = runner.exit_code_for(_wait_for_child(proc))
+    except KeyboardInterrupt:  # Ctrl-C outside _wait_for_child's own handling
+        code = SIGINT_EXIT_CODE
     finally:
-        handle.stop()
+        # An impatient second Ctrl-C lands here, while the engine thread is being joined.
+        try:
+            handle.stop()
+        except KeyboardInterrupt:
+            pass
 
     for line in runner.summary_lines(run_id, exchanges):
         print(line, flush=True)
@@ -174,6 +185,8 @@ def _wait_for_child(proc: "subprocess.Popen[bytes]") -> int:
     Ctrl-C in a terminal reaches the whole foreground process group, so the child already got its
     own SIGINT; give it time to exit, then escalate.
     """
+    import signal
+
     from irimi import runner
 
     try:
@@ -192,7 +205,11 @@ def _wait_for_child(proc: "subprocess.Popen[bytes]") -> int:
     except Exception:
         pass
     proc.kill()
-    return proc.wait()
+    try:
+        return proc.wait(timeout=runner.CHILD_GRACE_S)
+    except Exception:
+        # SIGKILL did not reap it (uninterruptible I/O). Don't block the CLI forever.
+        return -signal.SIGKILL
 
 
 def build_parser() -> argparse.ArgumentParser:

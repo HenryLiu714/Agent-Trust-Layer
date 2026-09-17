@@ -11,7 +11,8 @@ log of every write the agent would have made.
 
 ## Status
 
-Early skeleton. Only `irimi init` works; the proxy is being built in the Phase 1 issues at
+Early. `irimi init`, `irimi serve` and `irimi shadow` work; the rest is being built in the Phase 1
+issues at
 https://github.com/HenryLiu714/Agent-Trust-Layer/issues.
 
 ## Requirements
@@ -45,7 +46,31 @@ the real service; anything that is not a safe HTTP method is answered locally wi
     # in another terminal
     curl --proxy 127.0.0.1:4000 --cacert ~/.irimi/ca/ca.pem https://api.stripe.com/v1/charges
 
-The launcher that starts the proxy and your agent together (`irimi shadow -- <cmd>`) is the next step.
+## Run an agent in shadow mode
+
+`irimi shadow -- <command>` starts the proxy, runs your command with the proxy and CA environment
+variables already set, and prints a summary when the command exits. The command's exit code is
+passed through.
+
+    uv run irimi shadow -- python agent.py
+
+Every exchange prints as one line while it runs; at the end you get a count of what was forwarded
+live and what was virtualized. The child is given `HTTP_PROXY`, `HTTPS_PROXY`,
+`NO_PROXY=localhost,127.0.0.1`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`,
+`NODE_EXTRA_CA_CERTS`, `NODE_USE_ENV_PROXY=1`, plus `IRIMI_ENGINE_ACTIVE=1` and `IRIMI_RUN` naming
+the run. That covers requests, httpx, urllib, curl and Node's fetch without any code change.
+
+One process tree is one run. There is no `IRIMI_MODE` variable and no config file: the subcommand
+is the only thing that chooses the mode.
+
+**Nothing stops an agent from bypassing the proxy yet** — a client that ignores these variables, or
+ships its own CA bundle, talks to the real service. The banner says `backstop: none (Phase 4)` for
+exactly this reason.
+
+Those CA variables *replace* the child's trust store rather than adding to it, so while the command
+runs it trusts the irimi CA and nothing else. Traffic through the proxy is fine, but a TLS
+connection that skips the proxy — anything on `localhost` or `127.0.0.1`, which `NO_PROXY` excludes
+— will fail to verify. Point such a client at plain HTTP, or give it its own CA bundle.
 
 ## Installing as a standalone tool
 

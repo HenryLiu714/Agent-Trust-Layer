@@ -92,20 +92,27 @@ def test_shadow_help_has_allow_host(capsys):
     assert "--allow-host" in capsys.readouterr().out
 
 
-def test_reverse_hosts_are_the_mapped_hosts():
+def _shipped_index(tmp_path, monkeypatch):
+    """The shipped maps with no overrides file in play: a real ./irimi.maps.yaml or
+    $IRIMI_HOME/maps.yaml would otherwise change the index, or refuse to load at all."""
     from irimi import servicemap
+
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "ambient-home"))
+    return servicemap.load(maps_dir=servicemap.shipped_dir(), cwd=tmp_path)
+
+
+def test_reverse_hosts_are_the_mapped_hosts(tmp_path, monkeypatch):
     from irimi.cli import _reverse_hosts
 
-    index = servicemap.load(maps_dir=servicemap.shipped_dir())
+    index = _shipped_index(tmp_path, monkeypatch)
     assert _reverse_hosts(argparse.Namespace(allow_host=[]), index) == index.hosts
     assert {"api.stripe.com", "slack.com"} <= index.hosts
 
 
-def test_reverse_hosts_adds_allow_host_lower_cased():
-    from irimi import servicemap
+def test_reverse_hosts_adds_allow_host_lower_cased(tmp_path, monkeypatch):
     from irimi.cli import _reverse_hosts
 
-    index = servicemap.load(maps_dir=servicemap.shipped_dir())
+    index = _shipped_index(tmp_path, monkeypatch)
     args = argparse.Namespace(allow_host=[" Foo.Example ", "", "bar.example"])
     assert _reverse_hosts(args, index) == index.hosts | {"foo.example", "bar.example"}
 

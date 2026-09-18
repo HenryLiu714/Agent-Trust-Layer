@@ -78,18 +78,22 @@ Some SDKs ship their own CA bundle or ignore `HTTPS_PROXY`. stripe-python is the
 it verifies against its bundled CA and ignores `REQUESTS_CA_BUNDLE`. For those, the same listener
 also accepts plain HTTP at
 
-    http://localhost:4000/<upstream-host>/<path>
+    http://127.0.0.1:4000/<upstream-host>/<path>
 
 and forwards it to `https://<upstream-host>/<path>`, after which it is handled exactly like any
 other request: reads go live, writes are answered locally. For stripe-python, point the base URLs
 at the door and nothing else changes:
 
 ```python
-stripe.api_base = "http://localhost:4000/api.stripe.com"
-stripe.upload_api_base = "http://localhost:4000/files.stripe.com"
-stripe.connect_api_base = "http://localhost:4000/connect.stripe.com"
-stripe.meter_events_api_base = "http://localhost:4000/meter-events.stripe.com"
+stripe.api_base = "http://127.0.0.1:4000/api.stripe.com"
+stripe.upload_api_base = "http://127.0.0.1:4000/files.stripe.com"
+stripe.connect_api_base = "http://127.0.0.1:4000/connect.stripe.com"
+stripe.meter_events_api_base = "http://127.0.0.1:4000/meter-events.stripe.com"
 ```
+
+Write `127.0.0.1`, not `localhost`. irimi listens on IPv4 loopback only, and on macOS `localhost`
+resolves to `::1` first, so if anything else is listening on `[::1]:4000` it would receive the
+request, credentials included, and irimi would never see it.
 
 Under `irimi shadow`, `NO_PROXY=localhost,127.0.0.1` is what keeps these requests from also being
 sent through the forward proxy.

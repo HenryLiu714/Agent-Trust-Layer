@@ -107,6 +107,22 @@ def test_reverse_hosts_adds_allow_host_lower_cased():
     assert _reverse_hosts(args) == BUILTIN_REVERSE_HOSTS | {"foo.example", "bar.example"}
 
 
+@pytest.mark.parametrize("value", ["127.0.0.1:8443", "https://x.example", "x.example/", " "])
+def test_allow_host_rejects_scheme_port_or_path(value, capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["serve", "--allow-host", value])
+    assert exc.value.code == 2
+    assert "bare host name" in capsys.readouterr().err
+
+
+def test_allow_host_is_lower_cased():
+    from irimi.cli import build_parser
+
+    assert build_parser().parse_args(["serve", "--allow-host", " Foo.Example "]).allow_host == [
+        "foo.example"
+    ]
+
+
 def test_reverse_hosts_without_flag_is_builtin():
     from irimi.cli import BUILTIN_REVERSE_HOSTS, _reverse_hosts
 

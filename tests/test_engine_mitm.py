@@ -44,11 +44,19 @@ class _Upstream(BaseHTTPRequestHandler):
         pass
 
 
+def _serve(ssl_context=None):
+    """An _Upstream server on a free loopback port, plain or TLS. Caller shuts it down."""
+    srv = HTTPServer(("127.0.0.1", 0), _Upstream)
+    if ssl_context is not None:
+        srv.socket = ssl_context.wrap_socket(srv.socket, server_side=True)
+    # A short poll interval keeps shutdown() from blocking for the default 0.5 s.
+    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
+    return srv
+
+
 @pytest.fixture
 def upstream():
-    srv = HTTPServer(("127.0.0.1", 0), _Upstream)
-    t = threading.Thread(target=srv.serve_forever, daemon=True)
-    t.start()
+    srv = _serve()
     yield srv.server_address[1]
     srv.shutdown()
 
@@ -85,7 +93,10 @@ def _start(cfg, overlay=None, trust_upstream_ca=None):
         # Test-only. mitmproxy verifies upstream TLS against certifi's bundle; the TLS upstream in
         # these tests presents a leaf signed by the irimi CA, so trust that instead. This reaches
         # into the engine on purpose; there is no product option for it.
-        eng._master.options.update(ssl_verify_upstream_trusted_ca=str(trust_upstream_ca))
+        async def trust() -> None:  # on the engine's loop, like every other options change
+            eng._master.options.update(ssl_verify_upstream_trusted_ca=str(trust_upstream_ca))
+
+        asyncio.run_coroutine_threadsafe(trust(), loop).result(timeout=15)
 
     def stop():
         eng.shutdown()
@@ -162,12 +173,9 @@ def _leaf_cert_for_loopback(p: ca.CAPaths, out: Path) -> Path:
 
 def _serve_tls(leaf_pem: Path) -> HTTPServer:
     """The same _Upstream handler, behind TLS. Caller shuts it down."""
-    srv = HTTPServer(("127.0.0.1", 0), _Upstream)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(leaf_pem)
-    srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return srv
+    return _serve(ctx)
 
 
 def test_get_is_forwarded_live(engine, upstream):
@@ -184,6 +192,7 @@ def test_get_is_forwarded_live(engine, upstream):
     assert ex.validation == "unvalidated"
     assert ex.flags == ()
     assert ex.door == "forward"
+    assert ex.request.port == upstream  # a loopback upstream on another port is not the door
     assert ex.response.status == 200
 
 
@@ -333,16 +342,13 @@ def test_store_is_closed_when_setup_fails(tmp_path, monkeypatch):
     assert closed == [True]
 
 
-@pytest.mark.parametrize("host_name", ["127.0.0.1", "localhost"])
-def test_reverse_door_forwards_to_tls_upstream(tmp_path, monkeypatch, host_name):
+def test_reverse_door_forwards_to_tls_upstream(tmp_path, monkeypatch):
     cfg = _config(tmp_path, monkeypatch, reverse_hosts=frozenset({"127.0.0.1"}))
     srv = _serve_tls(_leaf_cert_for_loopback(cfg.ca, tmp_path / "leaf.pem"))
     up = srv.server_address[1]
     eng, seen, stop = _start(cfg, trust_upstream_ca=cfg.ca.cert)
     try:
-        status, data = _reverse(
-            eng.listen_port(), "GET", f"/127.0.0.1:{up}/hello?x=1", host_name=host_name
-        )
+        status, data = _reverse(eng.listen_port(), "GET", f"/127.0.0.1:{up}/hello?x=1")
     finally:
         stop()
         srv.shutdown()
@@ -404,7 +410,7 @@ def test_reverse_door_upstream_error_is_flagged(tmp_path, monkeypatch):
     cfg = _config(tmp_path, monkeypatch, reverse_hosts=frozenset({"127.0.0.1"}))
     eng, seen, stop = _start(cfg)
     try:
-        status, _ = _reverse(eng.listen_port(), "GET", "/127.0.0.1:1/x")
+        status, _ = _reverse(eng.listen_port(), "GET", "/127.0.0.1:1/x", host_name="localhost")
     finally:
         stop()
     assert status == 502
@@ -432,9 +438,37 @@ def test_absolute_url_to_listener_is_reverse_door(tmp_path, monkeypatch):
     assert "upstream-error" in seen[0].flags
 
 
-def test_forward_door_to_loopback_upstream_stays_forward(engine, upstream):
-    eng, seen = engine
-    status, _ = _via_proxy(eng.listen_port(), "GET", f"http://127.0.0.1:{upstream}/hello")
-    assert status == 200
-    assert seen[0].door == "forward"
-    assert seen[0].request.port == upstream
+@pytest.mark.parametrize("host_name", ["0.0.0.0", "127.1", "[::ffff:127.0.0.1]"])
+def test_self_addressed_alias_is_reverse_door_not_a_loop(tmp_path, monkeypatch, host_name):
+    # Any spelling of "this listener" must take the door; forwarding it would make the proxy
+    # connect to itself and re-receive the same request until the ports run out.
+    cfg = _config(tmp_path, monkeypatch, reverse_hosts=frozenset({"127.0.0.1"}))
+    eng, seen, stop = _start(cfg)
+    try:
+        status, _ = _reverse(eng.listen_port(), "GET", "/127.0.0.1:1/x", host_name=host_name)
+    finally:
+        stop()
+    assert status == 502
+    assert len(seen) == 1
+    assert seen[0].door == "reverse"
+    assert seen[0].request.port == 1
+
+
+def test_reverse_door_request_without_host_header_gets_one(tmp_path, monkeypatch):
+    # An HTTP/1.0 absolute-form request carries no Host header; the upstream still needs one.
+    cfg = _config(tmp_path, monkeypatch, reverse_hosts=frozenset({"127.0.0.1"}))
+    eng, seen, stop = _start(cfg)
+    port = eng.listen_port()
+    try:
+        sock = socket.create_connection(("127.0.0.1", port), timeout=10)
+        sock.sendall(f"GET http://127.0.0.1:{port}/127.0.0.1:1/x HTTP/1.0\r\n\r\n".encode())
+        raw = b""
+        while chunk := sock.recv(65536):
+            raw += chunk
+        sock.close()
+    finally:
+        stop()
+    assert b" 502 " in raw.split(b"\r\n", 1)[0]
+    assert len(seen) == 1
+    assert seen[0].door == "reverse"
+    assert ("host", "127.0.0.1:1") in seen[0].request.headers

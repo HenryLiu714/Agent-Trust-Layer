@@ -92,7 +92,6 @@ class IrimiAddon:
         self.on_exchange = on_exchange
         self.on_running = on_running
         self.write_log: list[Exchange] = []
-        self.listen_port: int = config.listen_port  # replaced by the bound port in running()
 
     def running(self) -> None:
         # Without mitmproxy's ErrorCheck addon a failed bind does not sys.exit(); Master.run()
@@ -100,8 +99,7 @@ class IrimiAddon:
         proxyserver = ctx.master.addons.get("proxyserver")
         addrs = proxyserver.listen_addrs()
         if addrs:
-            self.listen_port = addrs[0][1]
-            self.on_running(self.listen_port, None)
+            self.on_running(addrs[0][1], None)
             return
         cause = next((s.last_exception for s in proxyserver.servers if s.last_exception), None)
         where = f"{self.config.listen_host}:{self.config.listen_port}"
@@ -115,13 +113,20 @@ class IrimiAddon:
             logger.warning("irimi: refusing request that could not be parsed: %s", exc)
             flow.response = http.Response.make(400, b"irimi: could not parse request\n")
             return
-        door = pipeline.detect_door(req, self.listen_port)
+        # sockname is the socket this request arrived on, i.e. our own listener.
+        door = pipeline.detect_door(req, flow.client_conn.sockname[1])
         if door == "reverse":
             try:
                 req = self._through_reverse_door(flow, req)
             except pipeline.ReverseDoorRefused as exc:
                 logger.warning("irimi: %s", exc)
                 flow.response = http.Response.make(403, f"irimi: {exc}\n".encode())
+                return
+            except Exception as exc:  # never fail open: an unrewritten flow would go to ourselves
+                logger.warning(
+                    "irimi: refusing reverse-door request that could not be rewritten: %s", exc
+                )
+                flow.response = http.Response.make(400, b"irimi: could not rewrite request\n")
                 return
         cls = pipeline.classify(req)
         run_id = pipeline.attribute_run(req, self.config.run_id)
@@ -134,8 +139,9 @@ class IrimiAddon:
         """Rewrite a reverse-door request to its upstream, on our Request and on the flow.
 
         mitmproxy opens the server connection after this hook, so changing the flow's target here
-        is enough to forward there. The host/port setters also rewrite the Host header. Raises
-        ReverseDoorRefused for a non-loopback client or a host that is not allowed.
+        is enough to forward there. The Host header is set explicitly: the host/port setters only
+        rewrite one that already exists. Raises ReverseDoorRefused for a non-loopback client or a
+        host that is not allowed.
         """
         peer = flow.client_conn.peername[0] if flow.client_conn.peername else ""
         if not pipeline.is_loopback(peer):
@@ -145,6 +151,7 @@ class IrimiAddon:
         flow.request.host = req.host
         flow.request.port = req.port
         flow.request.path = f"{req.path}?{req.query}" if req.query else req.path
+        flow.request.host_header = next(v for k, v in req.headers if k == "host")
         return req
 
     def response(self, flow: http.HTTPFlow) -> None:

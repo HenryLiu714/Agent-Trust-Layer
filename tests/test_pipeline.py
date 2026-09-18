@@ -11,6 +11,7 @@ from irimi.pipeline import (
     classify,
     detect_door,
     is_loopback,
+    is_self_host,
     parse,
     respond,
     rewrite_reverse,
@@ -168,9 +169,48 @@ def test_respond_returns_none_without_response():
     assert respond(ex) is None
 
 
-@pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "::1"])
+@pytest.mark.parametrize(
+    "host",
+    [
+        "localhost",
+        "localhost.",
+        "127.0.0.1",
+        "127.0.0.2",
+        "127.1",
+        "::1",
+        "::ffff:127.0.0.1",
+        "0.0.0.0",
+        "::",
+    ],
+)
 def test_detect_door_reverse_for_loopback_hosts(host):
     assert detect_door(_door_req("/api.stripe.com/v1", host=host), 4000) == "reverse"
+
+
+def test_detect_door_resolves_unknown_name_on_own_port(monkeypatch):
+    import socket
+
+    from irimi import pipeline
+
+    def fake_getaddrinfo(host, port, **kwargs):
+        if host == "self.test":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))]
+        raise socket.gaierror("no such host")
+
+    monkeypatch.setattr(pipeline.socket, "getaddrinfo", fake_getaddrinfo)
+    assert detect_door(_door_req("/api.stripe.com/v1", host="self.test"), 4000) == "reverse"
+    assert detect_door(_door_req("/api.stripe.com/v1", host="nowhere.test"), 4000) == "forward"
+    # Other ports never resolve anything.
+    assert detect_door(_door_req("/x", host="self.test", port=4001), 4000) == "forward"
+
+
+def test_is_self_host():
+    for host in ["localhost", "127.0.0.1", "127.255.0.1", "127.1", "::1", "::ffff:127.0.0.1"]:
+        assert is_self_host(host), host
+    assert is_self_host("0.0.0.0")
+    assert is_self_host("::")
+    for host in ["10.0.0.1", "api.stripe.com", "", "nonsense", "::ffff:10.0.0.1"]:
+        assert not is_self_host(host), host
 
 
 def test_detect_door_forward_for_other_port():
@@ -207,6 +247,18 @@ def test_rewrite_reverse_rewrites_host_header():
     assert ("host", "api.stripe.com") in req.headers
     assert ("accept", "*/*") in req.headers
     assert not any("localhost" in value for _, value in req.headers)
+
+
+def test_rewrite_reverse_adds_missing_host_header():
+    bare = replace(_door_req("/api.stripe.com/v1"), headers=(("accept", "*/*"),))
+    assert ("host", "api.stripe.com") in rewrite_reverse(bare, ALLOWED).headers
+    bare = replace(_door_req("/127.0.0.1:8443/v1"), headers=())
+    assert rewrite_reverse(bare, ALLOWED).headers == (("host", "127.0.0.1:8443"),)
+
+
+def test_rewrite_reverse_refuses_ipv6_literal():
+    with pytest.raises(ReverseDoorRefused, match="IPv6"):
+        rewrite_reverse(_door_req("/[::1]:8443/x"), ALLOWED | {"::1"})
 
 
 def test_rewrite_reverse_lower_cases_host():

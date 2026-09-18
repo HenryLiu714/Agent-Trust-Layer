@@ -21,6 +21,38 @@ BUILTIN_REVERSE_HOSTS: frozenset[str] = frozenset(
 )
 
 
+def _host_arg(value: str) -> str:
+    """argparse type for --allow-host: a bare host name, lower-cased. The port belongs on the
+    request path (/127.0.0.1:8443/...), so a value with a scheme, port or path is a mistake that
+    would otherwise never match anything."""
+    host = value.strip().lower()
+    if not host or "/" in host or ":" in host:
+        raise argparse.ArgumentTypeError(
+            f"{value!r}: give a bare host name with no scheme, port or path "
+            "(the port goes on the request path, e.g. /127.0.0.1:8443/...)"
+        )
+    return host
+
+
+def _add_engine_args(parser: argparse.ArgumentParser) -> None:
+    """The options `serve` and `shadow` share."""
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=paths.DEFAULT_PORT,
+        help=f"port on {paths.LISTEN_HOST} (default {paths.DEFAULT_PORT})",
+    )
+    parser.add_argument(
+        "--allow-host",
+        action="append",
+        default=[],
+        type=_host_arg,
+        metavar="HOST",
+        help=f"also let the reverse door http://{paths.LISTEN_HOST}:<port>/<host>/<path> relay "
+        "to HOST, a bare host name (repeatable; the built-in Stripe hosts are always allowed)",
+    )
+
+
 def _reverse_hosts(args: argparse.Namespace) -> frozenset[str]:
     """Built-in hosts plus every --allow-host, lower-cased and stripped."""
     extra = frozenset(h.strip().lower() for h in args.allow_host if h.strip())
@@ -241,39 +273,13 @@ def build_parser() -> argparse.ArgumentParser:
     init.set_defaults(func=cmd_init)
 
     serve = subparsers.add_parser("serve", help="run the shadow proxy in the foreground (dev)")
-    serve.add_argument(
-        "--port",
-        type=int,
-        default=paths.DEFAULT_PORT,
-        help=f"port on {paths.LISTEN_HOST} (default {paths.DEFAULT_PORT})",
-    )
-    serve.add_argument(
-        "--allow-host",
-        action="append",
-        default=[],
-        metavar="HOST",
-        help="also let the reverse door http://127.0.0.1:<port>/<host>/<path> relay to HOST "
-        "(repeatable; the built-in Stripe hosts are always allowed)",
-    )
+    _add_engine_args(serve)
     serve.set_defaults(func=cmd_serve)
 
     shadow = subparsers.add_parser(
         "shadow", help="run a command with its HTTP(S) traffic in shadow mode"
     )
-    shadow.add_argument(
-        "--port",
-        type=int,
-        default=paths.DEFAULT_PORT,
-        help=f"port on {paths.LISTEN_HOST} (default {paths.DEFAULT_PORT})",
-    )
-    shadow.add_argument(
-        "--allow-host",
-        action="append",
-        default=[],
-        metavar="HOST",
-        help="also let the reverse door http://127.0.0.1:<port>/<host>/<path> relay to HOST "
-        "(repeatable; the built-in Stripe hosts are always allowed)",
-    )
+    _add_engine_args(shadow)
     shadow.add_argument(
         "cmd",
         nargs=argparse.REMAINDER,

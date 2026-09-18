@@ -104,6 +104,35 @@ map (today: the four Stripe hosts above) or named with `--allow-host <host>` (re
 host may carry a port (`/127.0.0.1:8443/...`); the scheme is always https. Each exchange records
 which door it came through.
 
+## The example agent
+
+`examples/refund_agent/agent.py` is the fixture the proxy is tested against: it lists charges from
+Stripe (a real read) and refunds one of them (a write). It is **test mode only** and refuses any
+key that is not `sk_test_`; the README GIF is recorded elsewhere, on a live account with a
+restricted key.
+
+Put a Stripe test-mode key in your environment, then seed one charge to refund:
+
+    export STRIPE_API_KEY=sk_test_...
+    uv run --with stripe python examples/refund_agent/seed.py
+
+Run it bare and the refund is **real** (visible in the Stripe test dashboard):
+
+    uv run --with stripe python examples/refund_agent/agent.py
+
+Run the same command under `irimi shadow` and the refund never leaves your machine:
+
+    uv run --with stripe irimi shadow -- python examples/refund_agent/agent.py
+
+The read still goes to Stripe and returns your real test-mode charges; the POST to `/v1/refunds` is
+answered locally, so the agent prints `(no id - answered by irimi at L0)` where the refund id would
+be. That placeholder goes away once irimi mints realistic fake objects.
+
+The agent points `stripe.api_base` at the reverse door only when `IRIMI_ENGINE_ACTIVE=1`, and reads
+the port from `HTTPS_PROXY`, so `--port` works and a bare run is unaffected. Set `SLACK_BOT_TOKEN`
+and `SLACK_CHANNEL` (and add `--with slack_sdk`) to have it post the result to Slack as well;
+`slack_sdk` honors the proxy variables, so that write goes through the forward proxy.
+
 ## Installing as a standalone tool
 
 If you do not want a venv, run one of these from the repo root:

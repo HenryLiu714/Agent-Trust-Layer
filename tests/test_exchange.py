@@ -50,3 +50,7 @@ def test_exchange_default_flags_empty():
 
 def test_exchanges_from_same_args_are_equal():
     assert _exchange() == _exchange()
+
+
+def test_exchange_default_door_is_forward():
+    assert _exchange().door == "forward"

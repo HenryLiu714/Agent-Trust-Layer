@@ -1,3 +1,4 @@
+import argparse
 import socket
 from pathlib import Path
 
@@ -75,3 +76,54 @@ def test_no_mode_env_var_anywhere():
         if "IRIMI_MODE" in line
     ]
     assert offenders == [], "mode comes only from the subcommand:\n" + "\n".join(offenders)
+
+
+def test_serve_help_has_allow_host(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["serve", "--help"])
+    assert exc.value.code == 0
+    assert "--allow-host" in capsys.readouterr().out
+
+
+def test_shadow_help_has_allow_host(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["shadow", "--help"])
+    assert exc.value.code == 0
+    assert "--allow-host" in capsys.readouterr().out
+
+
+def test_builtin_reverse_hosts_are_the_four_stripe_hosts():
+    from irimi.cli import BUILTIN_REVERSE_HOSTS
+
+    assert BUILTIN_REVERSE_HOSTS == frozenset(
+        {"api.stripe.com", "connect.stripe.com", "files.stripe.com", "meter-events.stripe.com"}
+    )
+
+
+def test_reverse_hosts_adds_allow_host_lower_cased():
+    from irimi.cli import BUILTIN_REVERSE_HOSTS, _reverse_hosts
+
+    args = argparse.Namespace(allow_host=[" Foo.Example ", "", "bar.example"])
+    assert _reverse_hosts(args) == BUILTIN_REVERSE_HOSTS | {"foo.example", "bar.example"}
+
+
+@pytest.mark.parametrize("value", ["127.0.0.1:8443", "https://x.example", "x.example/", " "])
+def test_allow_host_rejects_scheme_port_or_path(value, capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["serve", "--allow-host", value])
+    assert exc.value.code == 2
+    assert "bare host name" in capsys.readouterr().err
+
+
+def test_allow_host_is_lower_cased():
+    from irimi.cli import build_parser
+
+    assert build_parser().parse_args(["serve", "--allow-host", " Foo.Example "]).allow_host == [
+        "foo.example"
+    ]
+
+
+def test_reverse_hosts_without_flag_is_builtin():
+    from irimi.cli import BUILTIN_REVERSE_HOSTS, _reverse_hosts
+
+    assert _reverse_hosts(argparse.Namespace(allow_host=[])) == BUILTIN_REVERSE_HOSTS

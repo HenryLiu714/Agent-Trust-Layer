@@ -47,6 +47,17 @@ def _env_dump_source(dump) -> str:
     return f"import json, os, sys;open({str(dump)!r}, 'w').write(json.dumps(dict(os.environ)))"
 
 
+def _reverse_source(path: str) -> str:
+    """Child that talks to the reverse door on the listener it was given, then prints the reply."""
+    return (
+        "import http.client, os, urllib.parse;"
+        "u = urllib.parse.urlparse(os.environ['HTTPS_PROXY']);"
+        "c = http.client.HTTPConnection(u.hostname, u.port, timeout=10);"
+        f"c.request('GET', {path!r});"
+        "r = c.getresponse(); print(r.status, r.read().decode())"
+    )
+
+
 def test_child_receives_proxy_env(home, capsys):
     dump = home / "env.json"
     assert main(["shadow", *_py(_env_dump_source(dump))]) == 0
@@ -192,3 +203,33 @@ def test_interrupt_while_waiting_exits_cleanly(home, monkeypatch, capsys):
     )
     assert main(["shadow", *_py("pass")]) == 130
     assert "0 exchange(s)" in capsys.readouterr().out
+
+
+def test_reverse_door_refuses_unlisted_host(home, capfd):
+    # capfd, not capsys: the child writes to the inherited fd 1, which capsys does not see.
+    assert main(["shadow", *_py(_reverse_source("/evil.example/x"))]) == 0
+    out = capfd.readouterr().out
+    assert (
+        "403 irimi: reverse door: host 'evil.example' is not in a loaded map or --allow-host" in out
+    )
+    assert "0 exchange(s)" in out
+
+
+def test_reverse_door_allow_host(home, capfd):
+    argv = [
+        "shadow",
+        "--port",
+        "0",
+        "--allow-host",
+        "127.0.0.1",
+        "--",
+        sys.executable,
+        "-c",
+        _reverse_source("/127.0.0.1:1/x"),
+    ]
+    assert main(argv) == 0
+    out = capfd.readouterr().out
+    assert "502" in out
+    assert "127.0.0.1/x" in out
+    assert "[upstream-error]" in out
+    assert "1 exchange(s)" in out

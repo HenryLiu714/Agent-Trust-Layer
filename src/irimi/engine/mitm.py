@@ -12,7 +12,7 @@ from mitmproxy.options import Options
 
 from irimi import ca, pipeline
 from irimi.engine import EngineConfig, EngineStartError, OnExchange
-from irimi.exchange import AnsweredBy, Exchange, Headers, Request, Response
+from irimi.exchange import AnsweredBy, Door, Exchange, Headers, Request, Response
 from irimi.overlay import Overlay
 from irimi.policy import AnswerPolicy
 from irimi.store import TraceStore
@@ -32,6 +32,7 @@ class _Pending:
     classification: pipeline.Classification
     run_id: str
     answered_by: AnsweredBy
+    door: Door
 
 
 def _headers_from_fields(fields: Sequence[tuple[bytes, bytes]]) -> Headers:
@@ -112,12 +113,46 @@ class IrimiAddon:
             logger.warning("irimi: refusing request that could not be parsed: %s", exc)
             flow.response = http.Response.make(400, b"irimi: could not parse request\n")
             return
+        # sockname is the socket this request arrived on, i.e. our own listener.
+        door = pipeline.detect_door(req, flow.client_conn.sockname[1])
+        if door == "reverse":
+            try:
+                req = self._through_reverse_door(flow, req)
+            except pipeline.ReverseDoorRefused as exc:
+                logger.warning("irimi: %s", exc)
+                flow.response = http.Response.make(403, f"irimi: {exc}\n".encode())
+                return
+            except Exception as exc:  # never fail open: an unrewritten flow would go to ourselves
+                logger.warning(
+                    "irimi: refusing reverse-door request that could not be rewritten: %s", exc
+                )
+                flow.response = http.Response.make(400, b"irimi: could not rewrite request\n")
+                return
         cls = pipeline.classify(req)
         run_id = pipeline.attribute_run(req, self.config.run_id)
         ans = self.policy.answer(req, cls.kind)
-        flow.metadata[META_KEY] = _Pending(req, cls, run_id, ans.answered_by)
+        flow.metadata[META_KEY] = _Pending(req, cls, run_id, ans.answered_by, door)
         if ans.response is not None:
             flow.response = _to_mitm_response(ans.response)
+
+    def _through_reverse_door(self, flow: http.HTTPFlow, req: Request) -> Request:
+        """Rewrite a reverse-door request to its upstream, on our Request and on the flow.
+
+        mitmproxy opens the server connection after this hook, so changing the flow's target here
+        is enough to forward there. The Host header is set explicitly: the host/port setters only
+        rewrite one that already exists. Raises ReverseDoorRefused for a non-loopback client or a
+        host that is not allowed.
+        """
+        peer = flow.client_conn.peername[0] if flow.client_conn.peername else ""
+        if not pipeline.is_loopback(peer):
+            raise pipeline.ReverseDoorRefused(f"reverse door: loopback only, refusing {peer!r}")
+        req = pipeline.rewrite_reverse(req, self.config.reverse_hosts)
+        flow.request.scheme = req.scheme
+        flow.request.host = req.host
+        flow.request.port = req.port
+        flow.request.path = f"{req.path}?{req.query}" if req.query else req.path
+        flow.request.host_header = next(v for k, v in req.headers if k == "host")
+        return req
 
     def response(self, flow: http.HTTPFlow) -> None:
         pending: _Pending | None = flow.metadata.pop(META_KEY, None)
@@ -128,7 +163,12 @@ class IrimiAddon:
         if pending.answered_by == "live" and pending.classification.kind == "read":
             resp = self.overlay(self.write_log, pending.request, upstream)
         ex = pipeline.annotate(
-            pending.request, resp, pending.classification, pending.answered_by, pending.run_id
+            pending.request,
+            resp,
+            pending.classification,
+            pending.answered_by,
+            pending.run_id,
+            door=pending.door,
         )
         if ex.answered_by != "live":
             self.write_log.append(ex)
@@ -148,6 +188,7 @@ class IrimiAddon:
             pending.answered_by,
             pending.run_id,
             extra_flags=(UPSTREAM_ERROR_FLAG,),
+            door=pending.door,
         )
         self._finish(ex)
 

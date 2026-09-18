@@ -14,6 +14,50 @@ NON_HTTP_NOTICE = (
     "(database writes, files, gRPC, WebSockets) are not virtualized and happen for real."
 )
 
+# Hosts the reverse door may relay to without --allow-host. Issue #6 replaces this constant with
+# the union of hosts in the loaded service maps; until then it is stripe-python's four hosts.
+BUILTIN_REVERSE_HOSTS: frozenset[str] = frozenset(
+    {"api.stripe.com", "connect.stripe.com", "files.stripe.com", "meter-events.stripe.com"}
+)
+
+
+def _host_arg(value: str) -> str:
+    """argparse type for --allow-host: a bare host name, lower-cased. The port belongs on the
+    request path (/127.0.0.1:8443/...), so a value with a scheme, port or path is a mistake that
+    would otherwise never match anything."""
+    host = value.strip().lower()
+    if not host or "/" in host or ":" in host:
+        raise argparse.ArgumentTypeError(
+            f"{value!r}: give a bare host name with no scheme, port or path "
+            "(the port goes on the request path, e.g. /127.0.0.1:8443/...)"
+        )
+    return host
+
+
+def _add_engine_args(parser: argparse.ArgumentParser) -> None:
+    """The options `serve` and `shadow` share."""
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=paths.DEFAULT_PORT,
+        help=f"port on {paths.LISTEN_HOST} (default {paths.DEFAULT_PORT})",
+    )
+    parser.add_argument(
+        "--allow-host",
+        action="append",
+        default=[],
+        type=_host_arg,
+        metavar="HOST",
+        help=f"also let the reverse door http://{paths.LISTEN_HOST}:<port>/<host>/<path> relay "
+        "to HOST, a bare host name (repeatable; the built-in Stripe hosts are always allowed)",
+    )
+
+
+def _reverse_hosts(args: argparse.Namespace) -> frozenset[str]:
+    """Built-in hosts plus every --allow-host, lower-cased and stripped."""
+    extra = frozenset(h.strip().lower() for h in args.allow_host if h.strip())
+    return BUILTIN_REVERSE_HOSTS | extra
+
 
 def cmd_init(args: argparse.Namespace) -> int:
     from irimi import ca  # deferred: keeps --version and --help free of the cryptography import
@@ -65,6 +109,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         confdir=paths.mitm_dir(),
         listen_host=paths.LISTEN_HOST,
         listen_port=args.port,
+        reverse_hosts=_reverse_hosts(args),
     )
 
     def on_exchange(ex: Exchange) -> None:
@@ -134,6 +179,7 @@ def cmd_shadow(args: argparse.Namespace) -> int:
             confdir=paths.mitm_dir(),
             listen_host=paths.LISTEN_HOST,
             listen_port=args.port,
+            reverse_hosts=_reverse_hosts(args),
         ),
         ShadowPolicy(),
         NullStore(),
@@ -227,23 +273,13 @@ def build_parser() -> argparse.ArgumentParser:
     init.set_defaults(func=cmd_init)
 
     serve = subparsers.add_parser("serve", help="run the shadow proxy in the foreground (dev)")
-    serve.add_argument(
-        "--port",
-        type=int,
-        default=paths.DEFAULT_PORT,
-        help=f"port on {paths.LISTEN_HOST} (default {paths.DEFAULT_PORT})",
-    )
+    _add_engine_args(serve)
     serve.set_defaults(func=cmd_serve)
 
     shadow = subparsers.add_parser(
         "shadow", help="run a command with its HTTP(S) traffic in shadow mode"
     )
-    shadow.add_argument(
-        "--port",
-        type=int,
-        default=paths.DEFAULT_PORT,
-        help=f"port on {paths.LISTEN_HOST} (default {paths.DEFAULT_PORT})",
-    )
+    _add_engine_args(shadow)
     shadow.add_argument(
         "cmd",
         nargs=argparse.REMAINDER,

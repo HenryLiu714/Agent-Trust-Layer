@@ -11,8 +11,8 @@ log of every write the agent would have made.
 
 ## Status
 
-Early. `irimi init`, `irimi serve` and `irimi shadow` work; the rest is being built in the Phase 1
-issues at
+Early. `irimi init`, `irimi serve`, `irimi shadow` and the reverse door work; the rest is being
+built in the Phase 1 issues at
 https://github.com/HenryLiu714/Agent-Trust-Layer/issues.
 
 ## Requirements
@@ -71,6 +71,34 @@ Those CA variables *replace* the child's trust store rather than adding to it, s
 runs it trusts the irimi CA and nothing else. Traffic through the proxy is fine, but a TLS
 connection that skips the proxy — anything on `localhost` or `127.0.0.1`, which `NO_PROXY` excludes
 — will fail to verify. Point such a client at plain HTTP, or give it its own CA bundle.
+
+## The reverse door (for SDKs that ignore proxy variables)
+
+Some SDKs ship their own CA bundle or ignore `HTTPS_PROXY`. stripe-python is the canonical case:
+it verifies against its bundled CA and ignores `REQUESTS_CA_BUNDLE`. For those, the same listener
+also accepts plain HTTP at
+
+    http://localhost:4000/<upstream-host>/<path>
+
+and forwards it to `https://<upstream-host>/<path>`, after which it is handled exactly like any
+other request: reads go live, writes are answered locally. For stripe-python, point the base URLs
+at the door and nothing else changes:
+
+```python
+stripe.api_base = "http://localhost:4000/api.stripe.com"
+stripe.upload_api_base = "http://localhost:4000/files.stripe.com"
+stripe.connect_api_base = "http://localhost:4000/connect.stripe.com"
+stripe.meter_events_api_base = "http://localhost:4000/meter-events.stripe.com"
+```
+
+Under `irimi shadow`, `NO_PROXY=localhost,127.0.0.1` is what keeps these requests from also being
+sent through the forward proxy.
+
+The door is loopback-only and is not an open relay. It forwards only to hosts in a loaded service
+map (today: the four Stripe hosts above) or named with `--allow-host <host>` (repeatable, on
+`serve` and `shadow`); anything else is answered `403` with a one-line explanation. The upstream
+host may carry a port (`/127.0.0.1:8443/...`); the scheme is always https. Each exchange records
+which door it came through.
 
 ## Installing as a standalone tool
 

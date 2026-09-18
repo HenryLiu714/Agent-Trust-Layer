@@ -14,6 +14,18 @@ NON_HTTP_NOTICE = (
     "(database writes, files, gRPC, WebSockets) are not virtualized and happen for real."
 )
 
+# Hosts the reverse door may relay to without --allow-host. Issue #6 replaces this constant with
+# the union of hosts in the loaded service maps; until then it is stripe-python's four hosts.
+BUILTIN_REVERSE_HOSTS: frozenset[str] = frozenset(
+    {"api.stripe.com", "connect.stripe.com", "files.stripe.com", "meter-events.stripe.com"}
+)
+
+
+def _reverse_hosts(args: argparse.Namespace) -> frozenset[str]:
+    """Built-in hosts plus every --allow-host, lower-cased and stripped."""
+    extra = frozenset(h.strip().lower() for h in args.allow_host if h.strip())
+    return BUILTIN_REVERSE_HOSTS | extra
+
 
 def cmd_init(args: argparse.Namespace) -> int:
     from irimi import ca  # deferred: keeps --version and --help free of the cryptography import
@@ -65,6 +77,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         confdir=paths.mitm_dir(),
         listen_host=paths.LISTEN_HOST,
         listen_port=args.port,
+        reverse_hosts=_reverse_hosts(args),
     )
 
     def on_exchange(ex: Exchange) -> None:
@@ -134,6 +147,7 @@ def cmd_shadow(args: argparse.Namespace) -> int:
             confdir=paths.mitm_dir(),
             listen_host=paths.LISTEN_HOST,
             listen_port=args.port,
+            reverse_hosts=_reverse_hosts(args),
         ),
         ShadowPolicy(),
         NullStore(),
@@ -233,6 +247,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=paths.DEFAULT_PORT,
         help=f"port on {paths.LISTEN_HOST} (default {paths.DEFAULT_PORT})",
     )
+    serve.add_argument(
+        "--allow-host",
+        action="append",
+        default=[],
+        metavar="HOST",
+        help="also let the reverse door http://127.0.0.1:<port>/<host>/<path> relay to HOST "
+        "(repeatable; the built-in Stripe hosts are always allowed)",
+    )
     serve.set_defaults(func=cmd_serve)
 
     shadow = subparsers.add_parser(
@@ -243,6 +265,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=paths.DEFAULT_PORT,
         help=f"port on {paths.LISTEN_HOST} (default {paths.DEFAULT_PORT})",
+    )
+    shadow.add_argument(
+        "--allow-host",
+        action="append",
+        default=[],
+        metavar="HOST",
+        help="also let the reverse door http://127.0.0.1:<port>/<host>/<path> relay to HOST "
+        "(repeatable; the built-in Stripe hosts are always allowed)",
     )
     shadow.add_argument(
         "cmd",

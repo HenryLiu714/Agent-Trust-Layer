@@ -6,6 +6,7 @@ from typing import Literal
 Kind = Literal["read", "write", "llm", "telemetry", "unknown"]
 AnsweredBy = Literal["live", "fake-L0"]
 Validation = Literal["validated", "unvalidated"]
+Door = Literal["forward", "reverse"]
 
 KINDS: tuple[Kind, ...] = ("read", "write", "llm", "telemetry", "unknown")
 SAFE_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -49,4 +50,5 @@ class Exchange:
     answered_by: AnsweredBy
     validation: Validation
     run_id: str
+    door: Door = "forward"  # "reverse" = came in as /<host>/<path> on the listener itself
     flags: tuple[str, ...] = field(default_factory=tuple)

@@ -1,13 +1,19 @@
+from dataclasses import replace
+
 import pytest
 
 from irimi.exchange import Request, Response
 from irimi.pipeline import (
     Classification,
+    ReverseDoorRefused,
     annotate,
     attribute_run,
     classify,
+    detect_door,
+    is_loopback,
     parse,
     respond,
+    rewrite_reverse,
 )
 
 
@@ -34,6 +40,25 @@ def _req(method: str = "GET", headers: tuple[tuple[str, str], ...] = ()) -> Requ
         path="/v1/charges",
         query="",
         headers=headers,
+        body=b"",
+    )
+
+
+ALLOWED = frozenset({"api.stripe.com", "127.0.0.1"})
+
+
+def _door_req(
+    path: str, host: str = "localhost", port: int = 4000, query: str = "", method: str = "GET"
+) -> Request:
+    """What the reverse door sees: plain http, addressed to the listener, host header set."""
+    return Request(
+        method=method,
+        scheme="http",
+        host=host,
+        port=port,
+        path=path,
+        query=query,
+        headers=(("host", f"{host}:{port}"), ("accept", "*/*")),
         body=b"",
     )
 
@@ -141,3 +166,109 @@ def test_respond_returns_exchange_response():
 def test_respond_returns_none_without_response():
     ex = annotate(_req(), None, classify(_req()), "live", "7f3a")
     assert respond(ex) is None
+
+
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "::1"])
+def test_detect_door_reverse_for_loopback_hosts(host):
+    assert detect_door(_door_req("/api.stripe.com/v1", host=host), 4000) == "reverse"
+
+
+def test_detect_door_forward_for_other_port():
+    assert detect_door(_door_req("/api.stripe.com/v1", port=4001), 4000) == "forward"
+
+
+def test_detect_door_forward_for_real_host():
+    assert detect_door(_req(), 4000) == "forward"
+
+
+def test_is_loopback():
+    assert is_loopback("127.0.0.1")
+    assert is_loopback("127.0.0.2")
+    assert is_loopback("::1")
+    assert not is_loopback("10.0.0.1")
+    assert not is_loopback("")
+    assert not is_loopback("nonsense")
+
+
+def test_rewrite_reverse_basic():
+    req = rewrite_reverse(_door_req("/api.stripe.com/v1/charges", query="limit=1"), ALLOWED)
+    assert req.scheme == "https"
+    assert req.host == "api.stripe.com"
+    assert req.port == 443
+    assert req.path == "/v1/charges"
+    assert req.query == "limit=1"
+    assert req.method == "GET"
+    assert req.body == b""
+    assert req.url == "https://api.stripe.com/v1/charges?limit=1"
+
+
+def test_rewrite_reverse_rewrites_host_header():
+    req = rewrite_reverse(_door_req("/api.stripe.com/v1/charges", query="limit=1"), ALLOWED)
+    assert ("host", "api.stripe.com") in req.headers
+    assert ("accept", "*/*") in req.headers
+    assert not any("localhost" in value for _, value in req.headers)
+
+
+def test_rewrite_reverse_lower_cases_host():
+    assert rewrite_reverse(_door_req("/API.Stripe.COM/v1"), ALLOWED).host == "api.stripe.com"
+
+
+def test_rewrite_reverse_explicit_port():
+    req = rewrite_reverse(_door_req("/127.0.0.1:8443/hello"), ALLOWED)
+    assert req.host == "127.0.0.1"
+    assert req.port == 8443
+    assert req.path == "/hello"
+    assert ("host", "127.0.0.1:8443") in req.headers
+
+
+@pytest.mark.parametrize("path", ["/api.stripe.com", "/api.stripe.com/"])
+def test_rewrite_reverse_bare_host_becomes_root(path):
+    assert rewrite_reverse(_door_req(path), ALLOWED).path == "/"
+
+
+def test_rewrite_reverse_keeps_deeper_path():
+    req = rewrite_reverse(_door_req("/api.stripe.com/v1/charges/ch_1/refunds"), ALLOWED)
+    assert req.path == "/v1/charges/ch_1/refunds"
+
+
+def test_rewrite_reverse_keeps_method_and_body():
+    door = _door_req("/api.stripe.com/v1/refunds", method="POST")
+    req = rewrite_reverse(replace(door, body=b"charge=ch_1"), ALLOWED)
+    assert req.method == "POST"
+    assert req.body == b"charge=ch_1"
+
+
+def test_rewrite_reverse_refuses_unlisted_host():
+    with pytest.raises(ReverseDoorRefused) as exc:
+        rewrite_reverse(_door_req("/evil.example/x"), ALLOWED)
+    assert "evil.example" in str(exc.value)
+    assert "--allow-host" in str(exc.value)
+
+
+def test_rewrite_reverse_refuses_missing_host():
+    with pytest.raises(ReverseDoorRefused) as exc:
+        rewrite_reverse(_door_req("/"), ALLOWED)
+    assert "/<upstream-host>/<path>" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "path", ["/api.stripe.com:abc/v1", "/api.stripe.com:0/v1", "/api.stripe.com:70000/v1"]
+)
+def test_rewrite_reverse_refuses_bad_port(path):
+    with pytest.raises(ReverseDoorRefused) as exc:
+        rewrite_reverse(_door_req(path), ALLOWED)
+    assert "bad port" in str(exc.value)
+
+
+def test_rewrite_reverse_empty_allowlist_refuses_everything():
+    with pytest.raises(ReverseDoorRefused):
+        rewrite_reverse(_door_req("/api.stripe.com/v1"), frozenset())
+
+
+def test_annotate_door_defaults_to_forward():
+    assert annotate(_req(), None, classify(_req()), "live", "7f3a").door == "forward"
+
+
+def test_annotate_records_reverse_door():
+    ex = annotate(_req(), None, classify(_req()), "live", "7f3a", door="reverse")
+    assert ex.door == "reverse"

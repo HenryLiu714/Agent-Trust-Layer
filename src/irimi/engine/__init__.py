@@ -22,6 +22,7 @@ class EngineConfig:
     confdir: Path
     listen_host: str
     listen_port: int  # 0 = pick a free port
+    reverse_hosts: frozenset[str] = frozenset()  # hosts the reverse door may relay to; empty = none
 
 
 class Engine(Protocol):

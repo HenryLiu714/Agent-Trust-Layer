@@ -1,11 +1,19 @@
 import asyncio
+import datetime as dt
 import http.client
+import ipaddress
 import json
 import socket
+import ssl
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 
 from irimi import ca, paths
 from irimi.engine import EngineConfig, EngineStartError
@@ -45,16 +53,21 @@ def upstream():
     srv.shutdown()
 
 
-def _config(tmp_path, monkeypatch, port=0):
+def _config(tmp_path, monkeypatch, port=0, reverse_hosts=frozenset()):
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
     p = ca.ca_paths()
     ca.generate_ca(p)
     return EngineConfig(
-        run_id="t3st", ca=p, confdir=paths.mitm_dir(), listen_host="127.0.0.1", listen_port=port
+        run_id="t3st",
+        ca=p,
+        confdir=paths.mitm_dir(),
+        listen_host="127.0.0.1",
+        listen_port=port,
+        reverse_hosts=reverse_hosts,
     )
 
 
-def _start(cfg, overlay=None):
+def _start(cfg, overlay=None, trust_upstream_ca=None):
     """Serve `cfg` on a background loop until the returned stop() is called."""
     seen = []
     eng = MitmEngine(
@@ -68,6 +81,11 @@ def _start(cfg, overlay=None):
     t = threading.Thread(target=lambda: loop.run_until_complete(eng.run()), daemon=True)
     t.start()
     asyncio.run_coroutine_threadsafe(eng.wait_ready(), loop).result(timeout=15)
+    if trust_upstream_ca is not None:
+        # Test-only. mitmproxy verifies upstream TLS against certifi's bundle; the TLS upstream in
+        # these tests presents a leaf signed by the irimi CA, so trust that instead. This reaches
+        # into the engine on purpose; there is no product option for it.
+        eng._master.options.update(ssl_verify_upstream_trusted_ca=str(trust_upstream_ca))
 
     def stop():
         eng.shutdown()
@@ -97,6 +115,61 @@ def _via_proxy(proxy_port, method, url, body=None, extra_headers=None):
     return resp.status, data
 
 
+def _reverse(proxy_port, method, path, body=None, host_name="127.0.0.1"):
+    """Talk to the reverse door: an origin-form request addressed to the listener itself."""
+    conn = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=10)
+    headers = {"host": f"{host_name}:{proxy_port}"}
+    if body is not None:
+        headers["content-type"] = "application/json"
+    conn.request(method, path, body=body, headers=headers)
+    resp = conn.getresponse()
+    data = resp.read()
+    conn.close()
+    return resp.status, data
+
+
+def _leaf_cert_for_loopback(p: ca.CAPaths, out: Path) -> Path:
+    """Mint a leaf for 127.0.0.1 signed by the irimi CA; writes cert+key PEM to `out`."""
+    ca_key = serialization.load_pem_private_key(p.key.read_bytes(), None)
+    ca_cert = x509.load_pem_x509_certificate(p.cert.read_bytes())
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    now = dt.datetime.now(dt.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")]))
+        .issuer_name(ca_cert.subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - dt.timedelta(days=1))
+        .not_valid_after(now + dt.timedelta(days=1))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
+            critical=False,
+        )
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .sign(ca_key, hashes.SHA256())
+    )
+    out.write_bytes(
+        cert.public_bytes(serialization.Encoding.PEM)
+        + key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    return out
+
+
+def _serve_tls(leaf_pem: Path) -> HTTPServer:
+    """The same _Upstream handler, behind TLS. Caller shuts it down."""
+    srv = HTTPServer(("127.0.0.1", 0), _Upstream)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(leaf_pem)
+    srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
 def test_get_is_forwarded_live(engine, upstream):
     eng, seen = engine
     status, data = _via_proxy(eng.listen_port(), "GET", f"http://127.0.0.1:{upstream}/hello")
@@ -110,6 +183,7 @@ def test_get_is_forwarded_live(engine, upstream):
     assert ex.run_id == "t3st"
     assert ex.validation == "unvalidated"
     assert ex.flags == ()
+    assert ex.door == "forward"
     assert ex.response.status == 200
 
 
@@ -257,3 +331,110 @@ def test_store_is_closed_when_setup_fails(tmp_path, monkeypatch):
     with pytest.raises(FileNotFoundError):
         asyncio.run(eng.run())
     assert closed == [True]
+
+
+@pytest.mark.parametrize("host_name", ["127.0.0.1", "localhost"])
+def test_reverse_door_forwards_to_tls_upstream(tmp_path, monkeypatch, host_name):
+    cfg = _config(tmp_path, monkeypatch, reverse_hosts=frozenset({"127.0.0.1"}))
+    srv = _serve_tls(_leaf_cert_for_loopback(cfg.ca, tmp_path / "leaf.pem"))
+    up = srv.server_address[1]
+    eng, seen, stop = _start(cfg, trust_upstream_ca=cfg.ca.cert)
+    try:
+        status, data = _reverse(
+            eng.listen_port(), "GET", f"/127.0.0.1:{up}/hello?x=1", host_name=host_name
+        )
+    finally:
+        stop()
+        srv.shutdown()
+    assert (status, data) == (200, b"hello from upstream")
+    assert len(seen) == 1
+    ex = seen[0]
+    assert ex.door == "reverse"
+    assert ex.request.scheme == "https"
+    assert ex.request.host == "127.0.0.1"
+    assert ex.request.port == up
+    assert ex.request.path == "/hello"
+    assert ex.request.query == "x=1"
+    assert ex.kind == "read"
+    assert ex.answered_by == "live"
+    assert ex.flags == ()
+    assert ex.response.status == 200
+    assert ("host", f"127.0.0.1:{up}") in ex.request.headers
+    assert ex.service == "127.0.0.1"
+    assert ex.operation == "GET /hello"
+
+
+def test_reverse_door_refuses_unlisted_host(engine):
+    eng, seen = engine
+    status, data = _reverse(eng.listen_port(), "GET", "/api.stripe.com/v1")
+    assert status == 403
+    assert b"not in a loaded map or --allow-host" in data
+    assert b"api.stripe.com" in data
+    assert seen == []
+
+
+def test_reverse_door_refuses_missing_host(engine):
+    eng, seen = engine
+    status, data = _reverse(eng.listen_port(), "GET", "/")
+    assert status == 403
+    assert b"/<upstream-host>/<path>" in data
+    assert seen == []
+
+
+def test_reverse_door_write_is_faked(tmp_path, monkeypatch):
+    cfg = _config(tmp_path, monkeypatch, reverse_hosts=frozenset({"127.0.0.1"}))
+    eng, seen, stop = _start(cfg)
+    try:
+        status, data = _reverse(eng.listen_port(), "POST", "/127.0.0.1:1/things", body=b'{"a":1}')
+    finally:
+        stop()
+    assert status == 200
+    assert json.loads(data) == {}
+    ex = seen[0]
+    assert ex.door == "reverse"
+    assert ex.answered_by == "fake-L0"
+    assert ex.kind == "unknown"
+    assert ex.request.host == "127.0.0.1"
+    assert ex.request.port == 1
+    assert ex.request.path == "/things"
+    assert ex.request.body == b'{"a":1}'
+
+
+def test_reverse_door_upstream_error_is_flagged(tmp_path, monkeypatch):
+    cfg = _config(tmp_path, monkeypatch, reverse_hosts=frozenset({"127.0.0.1"}))
+    eng, seen, stop = _start(cfg)
+    try:
+        status, _ = _reverse(eng.listen_port(), "GET", "/127.0.0.1:1/x")
+    finally:
+        stop()
+    assert status == 502
+    ex = seen[0]
+    assert ex.door == "reverse"
+    assert ex.response is None
+    assert "upstream-error" in ex.flags
+    assert ex.request.host == "127.0.0.1"
+    assert ex.request.port == 1
+    assert ex.request.scheme == "https"
+
+
+def test_absolute_url_to_listener_is_reverse_door(tmp_path, monkeypatch):
+    cfg = _config(tmp_path, monkeypatch, reverse_hosts=frozenset({"127.0.0.1"}))
+    eng, seen, stop = _start(cfg)
+    port = eng.listen_port()
+    try:
+        status, _ = _via_proxy(port, "GET", f"http://127.0.0.1:{port}/127.0.0.1:1/x")
+    finally:
+        stop()
+    assert status == 502
+    assert len(seen) == 1
+    assert seen[0].door == "reverse"
+    assert seen[0].request.port == 1
+    assert "upstream-error" in seen[0].flags
+
+
+def test_forward_door_to_loopback_upstream_stays_forward(engine, upstream):
+    eng, seen = engine
+    status, _ = _via_proxy(eng.listen_port(), "GET", f"http://127.0.0.1:{upstream}/hello")
+    assert status == 200
+    assert seen[0].door == "forward"
+    assert seen[0].request.port == upstream

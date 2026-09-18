@@ -1,0 +1,96 @@
+# Stripe, derived from the SDK spec's `x-stripeOperations.method_type`: `list` and `retrieve` are
+# reads, `create`, `update` and `delete` are writes. Phase 1 ships the ten routes the refund agent
+# exercises; the OpenAPI importer that generates the rest is a later phase. No route here sets a
+# `target:` — shipped maps never do. Put yours in ./irimi.maps.yaml instead.
+#
+# `match:` is written in block style on purpose: a YAML flow mapping cannot hold a plain scalar
+# containing `{`, so `match: {method: GET, path: /v1/charges/{charge}}` is a parse error.
+version: 1
+service: stripe
+verbs: honest # Stripe reads are GETs, so the HTTP method carries information here
+hosts:
+  - api.stripe.com
+  - connect.stripe.com
+  - files.stripe.com
+  - meter-events.stripe.com
+routes:
+  - match:
+      method: GET
+      path: /v1/charges
+    operation: charges.list
+    kind: read
+    human: list charges
+
+  - match:
+      method: GET
+      path: /v1/charges/{charge}
+    operation: charges.retrieve
+    kind: read
+    human: get charge {charge}
+
+  - match:
+      method: POST
+      path: /v1/refunds
+    operation: refunds.create
+    kind: write
+    human: refund {amount} on {charge}
+    ids:
+      id: re_
+      balance_transaction: txn_
+    # The Idempotency-Key header. Duplicate-write detection canonicalizes a write's arguments
+    # before comparing them, and a fresh key must not hide a repeat.
+    volatile:
+      - idempotency_key
+
+  - match:
+      method: GET
+      path: /v1/refunds
+    operation: refunds.list
+    kind: read
+    human: list refunds
+
+  - match:
+      method: GET
+      path: /v1/refunds/{refund}
+    operation: refunds.retrieve
+    kind: read
+    human: get refund {refund}
+
+  - match:
+      method: GET
+      path: /v1/customers/{customer}
+    operation: customers.retrieve
+    kind: read
+    human: get customer {customer}
+
+  - match:
+      method: POST
+      path: /v1/customers/{customer}
+    operation: customers.update
+    kind: write
+    human: update customer {customer}
+    ids:
+      id: cus_
+
+  - match:
+      method: GET
+      path: /v1/payment_intents/{payment_intent}
+    operation: payment_intents.retrieve
+    kind: read
+    human: get payment intent {payment_intent}
+
+  - match:
+      method: POST
+      path: /v1/payment_intents/{payment_intent}/cancel
+    operation: payment_intents.cancel
+    kind: write
+    human: cancel {payment_intent}
+    ids:
+      id: pi_
+
+  - match:
+      method: GET
+      path: /v1/balance_transactions/{balance_transaction}
+    operation: balance_transactions.retrieve
+    kind: read
+    human: get balance transaction {balance_transaction}

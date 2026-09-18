@@ -5,6 +5,9 @@
 #
 # hooks.slack.com (incoming webhooks) is deliberately absent: the URL is the credential there, so
 # it gets its own route rules and its own rules about targets.
+#
+# Quote any `human:` template containing `#`. An unquoted `#` preceded by a space starts a YAML
+# comment, which silently truncates the template at the channel name.
 version: 1
 service: slack
 verbs: post-only
@@ -38,21 +41,21 @@ routes:
       path: /api/conversations.history
     operation: conversations.history
     kind: read
-    human: read the #{channel} history
+    human: "read the #{channel} history"
 
   - match:
       method: POST
       path: /api/conversations.replies
     operation: conversations.replies
     kind: read
-    human: read a thread in #{channel}
+    human: "read a thread in #{channel}"
 
   - match:
       method: POST
       path: /api/conversations.info
     operation: conversations.info
     kind: read
-    human: look up #{channel}
+    human: "look up #{channel}"
 
   - match:
       method: POST

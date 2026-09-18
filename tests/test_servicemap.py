@@ -43,6 +43,15 @@ routes:
 """
 
 
+@pytest.fixture(autouse=True)
+def no_ambient_overrides(tmp_path, monkeypatch):
+    """The loader reads `./irimi.maps.yaml` and then `$IRIMI_HOME/maps.yaml`, so a developer who
+    keeps a real overrides file would otherwise change what every test here sees. Point both at
+    empty directories; the tests that exercise override precedence set them again themselves."""
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "ambient-home"))
+    monkeypatch.chdir(tmp_path)
+
+
 def write_maps(tmp_path, *docs: str):
     """Write each document as its own <n>.yaml in a fresh maps directory and return it."""
     directory = tmp_path / "maps"

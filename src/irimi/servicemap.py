@@ -203,12 +203,24 @@ def load(
 
 
 def load_shipped(maps_dir: Path | None = None) -> list[ServiceMap]:
-    """Parse every `*.yaml` in the maps directory, in file-name order."""
+    """Parse every `*.yaml` in the maps directory, in file-name order.
+
+    A directory that cannot be scanned, or that holds no maps at all, is a MapError like every
+    other refusal here. It is not an empty index: an empty index silently empties the reverse
+    door's allow-list and sends every route to the RFC fallback, so a damaged install would look
+    like a working one that classifies nothing.
+    """
     directory = maps_dir if maps_dir is not None else shipped_dir()
+    try:
+        entries = sorted(p for p in directory.iterdir() if p.suffix == ".yaml")
+    except OSError as exc:
+        raise MapError(f"{directory}: cannot read the service maps directory: {exc}") from None
     maps: list[ServiceMap] = []
-    for path in sorted(p for p in directory.iterdir() if p.suffix == ".yaml"):
+    for path in entries:
         for doc in _read_documents(path):
             maps.append(parse_service(doc, str(path)))
+    if not maps:
+        raise MapError(f"{directory}: no service maps found (expected at least one *.yaml file)")
     _check_unique(maps)
     return maps
 

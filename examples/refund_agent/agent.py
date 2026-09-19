@@ -48,9 +48,9 @@ def door_base(env: Mapping[str, str], host: str) -> str | None:
 def field(obj: Any, name: str) -> Any:
     """One attribute of a StripeObject, or None when it is absent.
 
-    A shadowed write is answered `{}` today (issue #11 mints a real `re_...` object), so every
-    field of the refund is missing and plain attribute access would raise AttributeError. `.get()`
-    is not an option: StripeObject rejects it.
+    A shadowed write is answered with the L0 echo, which mints the ids the route's map names, so
+    `.id` reads back. A field the echo does not carry is still missing, and plain attribute access
+    would raise AttributeError. `.get()` is not an option: StripeObject rejects it.
     """
     try:
         return getattr(obj, name)

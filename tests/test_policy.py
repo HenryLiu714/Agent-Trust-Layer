@@ -150,10 +150,15 @@ def test_slack_write_reads_the_json_body_slack_sdk_actually_posts():
     assert body["channel"] == "C1"
 
 
-def test_an_unlisted_slack_route_still_gets_the_slack_envelope():
-    """The shape keys on the classified service, so an unmapped path on a mapped host is covered."""
-    ans = _answer(_req("POST", host="slack.com", path="/api/chat.scheduleMessage"))
-    assert json.loads(ans.response.body)["ok"] is True
+def test_an_unlisted_slack_route_does_not_get_the_slack_envelope():
+    """`ok: true` is a claim of success, and we only know what success looks like for a route the
+    maps claim. Answering an unmapped call with the envelope sends slack_sdk down its success
+    branch into an uncatchable crash later (`files_upload_v2` reads `upload_url = None` and dies
+    inside urllib); the generic echo leaves it raising the SlackApiError callers already catch."""
+    ans = _answer(_req("POST", host="slack.com", path="/api/files.getUploadURLExternal"))
+    body = json.loads(ans.response.body)
+    assert "ok" not in body
+    assert "created" in body
 
 
 def test_slack_envelope_without_a_channel_omits_it():

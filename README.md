@@ -123,24 +123,24 @@ prints, and the id prefixes a fake response mints. The maps that ship with irimi
     irimi maps list
 
 ```
-irimi maps · 10 service(s) · 17 host(s) · 32 route(s)
+irimi maps · 10 service(s) · 17 host(s) · 47 route(s)
   api.anthropic.com        anthropic    2 routes  target: self
-  api.honeycomb.io         honeycomb    1 routes  target: self
+  api.honeycomb.io         honeycomb    2 routes  target: self
   api.openai.com           openai       4 routes  target: self
-  api.smith.langchain.com  langsmith    1 routes  target: self
+  api.smith.langchain.com  langsmith    4 routes  target: self
   api.stripe.com           stripe      10 routes  target: self
-  cloud.langfuse.com       langfuse     1 routes  target: self
+  cloud.langfuse.com       langfuse     2 routes  target: self
   connect.stripe.com       stripe      10 routes  target: self
   files.slack.com          slack       10 routes  target: self
   files.stripe.com         stripe      10 routes  target: self
   hooks.slack.com          slack       10 routes  target: self
   meter-events.stripe.com  stripe      10 routes  target: self
   slack.com                slack       10 routes  target: self
-  *.datadoghq.com          datadog      1 routes  target: self
-  *.i.posthog.com          posthog      1 routes  target: self
-  *.ingest.sentry.io       sentry       1 routes  target: self
-  *.langfuse.com           langfuse     1 routes  target: self
-  *.posthog.com            posthog      1 routes  target: self
+  *.datadoghq.com          datadog      5 routes  target: self
+  *.i.posthog.com          posthog      4 routes  target: self
+  *.ingest.sentry.io       sentry       4 routes  target: self
+  *.langfuse.com           langfuse     2 routes  target: self
+  *.posthog.com            posthog      4 routes  target: self
 ```
 
 Stripe, Slack (including `hooks.slack.com`), OpenAI, Anthropic and six telemetry backends —
@@ -266,8 +266,8 @@ Run the same command under `irimi shadow` and the refund never leaves your machi
     uv run --with stripe irimi shadow -- python examples/refund_agent/agent.py
 
 The read still goes to Stripe and returns your real test-mode charges; the POST to `/v1/refunds` is
-answered locally, so the agent prints `(no id - answered by irimi at L0)` where the refund id would
-be. That placeholder goes away once irimi mints realistic fake objects.
+answered locally with the L0 echo, so the agent prints a minted `re_...` id that no refund on
+Stripe will ever have. Re-read the charge afterwards and it carries no refund.
 
 The agent points `stripe.api_base` at the reverse door only when `IRIMI_ENGINE_ACTIVE=1`, and reads
 the port from `HTTPS_PROXY`, so `--port` works and a bare run is unaffected. Set `SLACK_BOT_TOKEN`

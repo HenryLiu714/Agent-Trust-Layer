@@ -149,11 +149,19 @@ SHAPES: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {"slack": slack_
 
 
 def fake_body(request: Request, classification: Classification) -> dict[str, Any]:
-    """The body of a locally answered write: the service's own shape when it has one."""
-    shaper = SHAPES.get(classification.service)
+    """The body of a locally answered write: the service's own shape when it has one.
+
+    A shape is only used for a route the maps actually claim. An unmapped path on a shaped
+    service gets the generic echo instead, because `ok: true` is a claim of success and we only
+    know what success looks like for a route we mapped. Answering an unmapped call that way sends
+    slack_sdk down its success branch into an uncatchable crash later (`files_upload_v2` reads
+    `upload_url = None` and dies inside urllib); the generic echo leaves it raising the
+    `SlackApiError` that callers already catch.
+    """
+    route = classification.matched[1] if classification.matched is not None else None
+    shaper = SHAPES.get(classification.service) if route is not None else None
     if shaper is not None:
         return shaper(reflect(request))
-    route = classification.matched[1] if classification.matched is not None else None
     return l0_body(request, route)
 
 

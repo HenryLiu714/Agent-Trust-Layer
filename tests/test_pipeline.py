@@ -522,18 +522,36 @@ def test_a_posthog_regional_host_classifies(tmp_path, monkeypatch):
     assert (cls.service, cls.operation, cls.kind) == ("posthog", "batch.capture", "telemetry")
 
 
-def test_an_unlisted_telemetry_path_is_telemetry_by_default_kind(tmp_path, monkeypatch):
-    cls = _shipped(tmp_path, monkeypatch, "POST", "api.datadoghq.com", "/some/unlisted/path")
-    assert (cls.service, cls.kind) == ("datadog", "telemetry")
-    assert cls.flags == ()
+def test_an_unlisted_telemetry_write_is_faked_not_forwarded(tmp_path, monkeypatch):
+    """The telemetry maps carry no `default_kind`, on purpose. These vendors serve their REST
+    control plane from the same host as their intake, and `telemetry` forwards live, so a default
+    would have sent `DELETE /api/v1/dashboard/{id}` to the real API under `irimi shadow` - and the
+    `_finish` telemetry guard would have kept it out of the trace too. Unlisted falls to the RFC
+    fallback instead, so an unsafe method is faked and flagged."""
+    cls = _shipped(tmp_path, monkeypatch, "DELETE", "api.datadoghq.com", "/api/v1/dashboard/abc")
+    assert (cls.service, cls.kind) == ("datadog", "unknown")
+    assert cls.flags == ("unclassified",)
 
 
-def test_default_kind_telemetry_beats_the_safe_method_fallback(tmp_path, monkeypatch):
-    """Deliberate: `default_kind` is checked before the RFC fallback, so an unlisted GET on a
-    telemetry host is telemetry, not a read. Both forward live; the difference is the count and
-    that telemetry is never recorded."""
-    cls = _shipped(tmp_path, monkeypatch, "GET", "api.honeycomb.io", "/1/auth")
-    assert (cls.service, cls.kind) == ("honeycomb", "telemetry")
+@pytest.mark.parametrize(
+    ("host", "path"),
+    [
+        ("api.datadoghq.com", "/api/v1/monitor"),
+        ("api.honeycomb.io", "/1/triggers/ds/tid"),
+        ("cloud.langfuse.com", "/api/public/datasets"),
+        ("api.smith.langchain.com", "/runs/abc"),
+    ],
+)
+def test_no_telemetry_control_plane_write_is_forwarded(tmp_path, monkeypatch, host, path):
+    """Every vendor whose control plane shares a host with its intake, pinned at once."""
+    cls = _shipped(tmp_path, monkeypatch, "POST", host, path)
+    assert cls.kind == "unknown"
+
+
+def test_a_listed_intake_path_is_still_telemetry(tmp_path, monkeypatch):
+    """The other half: listing the routes explicitly is what keeps real intake forwarding live."""
+    cls = _shipped(tmp_path, monkeypatch, "POST", "api.datadoghq.com", "/api/v2/logs")
+    assert (cls.service, cls.kind, cls.flags) == ("datadog", "telemetry", ())
 
 
 def test_a_telemetry_wildcard_is_not_a_reverse_door_host(tmp_path, monkeypatch):

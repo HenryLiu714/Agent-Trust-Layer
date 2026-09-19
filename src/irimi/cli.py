@@ -4,20 +4,16 @@ from typing import TYPE_CHECKING
 
 from irimi import __version__, paths
 
-if TYPE_CHECKING:  # the quoted annotation on _wait_for_child; no runtime import
+if TYPE_CHECKING:  # the quoted annotations below; no runtime import
     import subprocess
+
+    from irimi.servicemap import MapIndex
 
 SIGINT_EXIT_CODE = 130  # 128 + SIGINT, the shell convention for a Ctrl-C'd command
 
 NON_HTTP_NOTICE = (
     "Note: irimi only sees HTTP(S). Side effects that are not HTTP "
     "(database writes, files, gRPC, WebSockets) are not virtualized and happen for real."
-)
-
-# Hosts the reverse door may relay to without --allow-host. Issue #6 replaces this constant with
-# the union of hosts in the loaded service maps; until then it is stripe-python's four hosts.
-BUILTIN_REVERSE_HOSTS: frozenset[str] = frozenset(
-    {"api.stripe.com", "connect.stripe.com", "files.stripe.com", "meter-events.stripe.com"}
 )
 
 
@@ -49,14 +45,54 @@ def _add_engine_args(parser: argparse.ArgumentParser) -> None:
         type=_host_arg,
         metavar="HOST",
         help=f"also let the reverse door http://{paths.LISTEN_HOST}:<port>/<host>/<path> relay "
-        "to HOST, a bare host name (repeatable; the built-in Stripe hosts are always allowed)",
+        "to HOST, a bare host name (repeatable; every host in a loaded map is already allowed)",
     )
 
 
-def _reverse_hosts(args: argparse.Namespace) -> frozenset[str]:
-    """Built-in hosts plus every --allow-host, lower-cased and stripped."""
+def _reverse_hosts(args: argparse.Namespace, index: "MapIndex") -> frozenset[str]:
+    """Every host in a loaded service map, plus every --allow-host, lower-cased and stripped."""
     extra = frozenset(h.strip().lower() for h in args.allow_host if h.strip())
-    return BUILTIN_REVERSE_HOSTS | extra
+    return index.hosts | extra
+
+
+def _load_maps() -> "MapIndex | None":
+    """The loaded service maps, or None after printing why they were refused.
+
+    Fail closed: a map or overrides file the loader rejects must not start a proxy that would then
+    classify and answer with half a policy.
+    """
+    from irimi import servicemap
+
+    try:
+        return servicemap.load()
+    except servicemap.MapError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return None
+
+
+def cmd_maps_list(args: argparse.Namespace) -> int:
+    from irimi import servicemap
+
+    index = _load_maps()
+    if index is None:
+        return 1
+    hosts = sorted(index.hosts)
+    width = max((len(h) for h in hosts), default=0)
+    routes = sum(len(sm.routes) for sm in index.services)
+    print(
+        f"irimi maps · {len(index.services)} service(s) · {len(hosts)} host(s) · {routes} route(s)"
+    )
+    for host in hosts:
+        sm = index.by_host[host]
+        reads = " + reads" if sm.target_reads else ""
+        print(
+            f"  {host:<{width}}  {sm.service:<8}  {len(sm.routes):>3} routes  "
+            f"target: {sm.target}{reads}"
+        )
+    override = servicemap.override_path()
+    if override is not None:
+        print(f"  overrides from {override}")
+    return 0
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -98,6 +134,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
     from irimi.policy import ShadowPolicy
     from irimi.store import NullStore
 
+    index = _load_maps()
+    if index is None:
+        return 1
     p = ca.ca_paths()
     if not ca.ca_exists(p):
         print(f"error: no CA at {p.key.parent}. Run `irimi init` first.", file=sys.stderr)
@@ -109,7 +148,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         confdir=paths.mitm_dir(),
         listen_host=paths.LISTEN_HOST,
         listen_port=args.port,
-        reverse_hosts=_reverse_hosts(args),
+        reverse_hosts=_reverse_hosts(args, index),
     )
 
     def on_exchange(ex: Exchange) -> None:
@@ -153,6 +192,10 @@ def cmd_shadow(args: argparse.Namespace) -> int:
     from irimi.policy import ShadowPolicy
     from irimi.store import NullStore
 
+    index = _load_maps()
+    if index is None:
+        return 1
+
     cmd = list(args.cmd)
     if cmd and cmd[0] == "--":
         cmd = cmd[1:]
@@ -179,7 +222,7 @@ def cmd_shadow(args: argparse.Namespace) -> int:
             confdir=paths.mitm_dir(),
             listen_host=paths.LISTEN_HOST,
             listen_port=args.port,
-            reverse_hosts=_reverse_hosts(args),
+            reverse_hosts=_reverse_hosts(args, index),
         ),
         ShadowPolicy(),
         NullStore(),
@@ -287,6 +330,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="the command to run under the proxy",
     )
     shadow.set_defaults(func=cmd_shadow)
+
+    maps = subparsers.add_parser("maps", help="show the loaded service maps")
+    maps_sub = maps.add_subparsers(dest="maps_command", metavar="<subcommand>", required=True)
+    maps_list = maps_sub.add_parser(
+        "list", help="print each mapped host with its service, route count and answer target"
+    )
+    maps_list.set_defaults(func=cmd_maps_list)
     return parser
 
 

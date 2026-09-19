@@ -92,19 +92,29 @@ def test_shadow_help_has_allow_host(capsys):
     assert "--allow-host" in capsys.readouterr().out
 
 
-def test_builtin_reverse_hosts_are_the_four_stripe_hosts():
-    from irimi.cli import BUILTIN_REVERSE_HOSTS
+def _shipped_index(tmp_path, monkeypatch):
+    """The shipped maps with no overrides file in play: a real ./irimi.maps.yaml or
+    $IRIMI_HOME/maps.yaml would otherwise change the index, or refuse to load at all."""
+    from irimi import servicemap
 
-    assert BUILTIN_REVERSE_HOSTS == frozenset(
-        {"api.stripe.com", "connect.stripe.com", "files.stripe.com", "meter-events.stripe.com"}
-    )
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "ambient-home"))
+    return servicemap.load(maps_dir=servicemap.shipped_dir(), cwd=tmp_path)
 
 
-def test_reverse_hosts_adds_allow_host_lower_cased():
-    from irimi.cli import BUILTIN_REVERSE_HOSTS, _reverse_hosts
+def test_reverse_hosts_are_the_mapped_hosts(tmp_path, monkeypatch):
+    from irimi.cli import _reverse_hosts
 
+    index = _shipped_index(tmp_path, monkeypatch)
+    assert _reverse_hosts(argparse.Namespace(allow_host=[]), index) == index.hosts
+    assert {"api.stripe.com", "slack.com"} <= index.hosts
+
+
+def test_reverse_hosts_adds_allow_host_lower_cased(tmp_path, monkeypatch):
+    from irimi.cli import _reverse_hosts
+
+    index = _shipped_index(tmp_path, monkeypatch)
     args = argparse.Namespace(allow_host=[" Foo.Example ", "", "bar.example"])
-    assert _reverse_hosts(args) == BUILTIN_REVERSE_HOSTS | {"foo.example", "bar.example"}
+    assert _reverse_hosts(args, index) == index.hosts | {"foo.example", "bar.example"}
 
 
 @pytest.mark.parametrize("value", ["127.0.0.1:8443", "https://x.example", "x.example/", " "])
@@ -121,9 +131,3 @@ def test_allow_host_is_lower_cased():
     assert build_parser().parse_args(["serve", "--allow-host", " Foo.Example "]).allow_host == [
         "foo.example"
     ]
-
-
-def test_reverse_hosts_without_flag_is_builtin():
-    from irimi.cli import BUILTIN_REVERSE_HOSTS, _reverse_hosts
-
-    assert _reverse_hosts(argparse.Namespace(allow_host=[])) == BUILTIN_REVERSE_HOSTS

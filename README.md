@@ -99,10 +99,82 @@ Under `irimi shadow`, `NO_PROXY=localhost,127.0.0.1` is what keeps these request
 sent through the forward proxy.
 
 The door is loopback-only and is not an open relay. It forwards only to hosts in a loaded service
-map (today: the four Stripe hosts above) or named with `--allow-host <host>` (repeatable, on
-`serve` and `shadow`); anything else is answered `403` with a one-line explanation. The upstream
+map (`irimi maps list` prints them) or named with `--allow-host <host>` (repeatable, on `serve`
+and `shadow`); anything else is answered `403` with a one-line explanation. The upstream
 host may carry a port (`/127.0.0.1:8443/...`); the scheme is always https. Each exchange records
 which door it came through.
+
+## Service maps
+
+A service map is the YAML that tells irimi what a route *is*: which service and hosts it belongs
+to, the operation name, whether it is a read or a write, the one-line human template the summary
+prints, and the id prefixes a fake response mints. The maps that ship with irimi live in
+`src/irimi/maps/` and are contributable without touching Python:
+
+    irimi maps list
+
+```
+irimi maps · 2 service(s) · 6 host(s) · 19 route(s)
+  api.stripe.com           stripe     10 routes  target: self
+  connect.stripe.com       stripe     10 routes  target: self
+  files.slack.com          slack       9 routes  target: self
+  files.stripe.com         stripe     10 routes  target: self
+  meter-events.stripe.com  stripe     10 routes  target: self
+  slack.com                slack       9 routes  target: self
+```
+
+One route looks like this. `match.path` may carry `{name}` segments, each matching exactly one
+path segment; a literal path wins over a pattern of the same shape:
+
+```yaml
+version: 1
+service: stripe
+verbs: honest # Stripe reads are GETs, so the HTTP method carries information here
+hosts:
+  - api.stripe.com
+routes:
+  - match:
+      method: POST
+      path: /v1/refunds
+    operation: refunds.create
+    kind: write # read | write | llm | telemetry | unknown
+    human: refund {amount} on {charge}
+    ids:
+      id: re_
+    volatile:
+      - idempotency_key
+```
+
+Write `match:` in block style, as above. A YAML flow mapping cannot hold a plain scalar containing
+`{`, so `match: {method: GET, path: /v1/charges/{charge}}` is a parse error.
+
+Slack's map sets `verbs: post-only`, because its SDKs send every call as POST and the method
+therefore says nothing about what a call does. For a service with honest verbs, a route that
+declares `kind: read` on an unsafe method is a write in disguise, so the loader refuses it unless
+it says `persists: false` and carries a `comment:` explaining why nothing persists.
+
+### Answer targets
+
+Every write is answered by a **target**, and the default target is irimi itself — `self`, the
+local fake. A service or a route can name an address you control instead, and the agent receives
+whatever that address answers; the real upstream still sees nothing. Set one in `./irimi.maps.yaml`
+(or `$IRIMI_HOME/maps.yaml`), which is merged over the shipped maps:
+
+```yaml
+service: stripe
+target: http://127.0.0.1:3000 # answers the writes
+target_reads: true # optional: send this service's reads there too
+```
+
+The shipped maps never set a target, so a fresh install answers everything itself. An overrides
+file may set `target`, `target_reads` and `forward_auth` and nothing else: an override able to
+change a route's `kind` would be a way to turn a write into a read. Targets must be loopback for
+now, and `target_reads: true` without a `target:` is refused — a service irimi answered end to end
+would be a twin, not a shadow.
+
+Loading happens before the proxy starts, and a map or overrides file the loader refuses stops
+`serve` and `shadow` with the rule it broke on stderr. Forwarding to a target is not wired up yet;
+this release loads, validates and reports it.
 
 ## The example agent
 

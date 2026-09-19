@@ -1,0 +1,536 @@
+"""Service maps: the YAML that says what a route is and where its answer comes from.
+
+A map names a service, the hosts it uses, and its routes. Each route carries an operation name, a
+kind (`read` / `write` / `llm` / `telemetry` / `unknown`), a human template for the summary, the id
+prefixes the faker mints, the fields duplicate detection must ignore, and its answer target.
+
+The **answer target** (design D20) is `self` by default, meaning irimi answers the route itself
+with the local fake. A service or a route may name an `http(s)` URL instead, and `target_reads:
+true` on a service sends that service's reads to its target as well. Issue #16 does the
+forwarding; this module only loads, validates and reports.
+
+Shipped maps live in `irimi/maps/*.yaml` and never set a target. A user's overrides file
+(`./irimi.maps.yaml`, else `$IRIMI_HOME/maps.yaml`) may set targets on top of them and nothing
+else: an override able to change a route's `kind` would be a way to turn a write into a read.
+"""
+
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
+
+import yaml
+
+from irimi import paths
+from irimi.exchange import KINDS, SAFE_METHODS, Kind
+from irimi.pipeline import is_loopback
+
+SCHEMA_VERSION = 1
+SELF_TARGET = "self"
+ANY_METHOD = "*"
+
+MAPS_DIR_NAME = "maps"
+CWD_OVERRIDE_NAME = "irimi.maps.yaml"  # in the working directory, checked first
+HOME_OVERRIDE_NAME = "maps.yaml"  # in $IRIMI_HOME, the fallback
+
+VERB_STYLES = ("honest", "post-only")  # does the HTTP method carry information for this service?
+TARGETABLE_KINDS: frozenset[str] = frozenset({"write", "unknown"})
+
+SERVICE_KEYS = frozenset(
+    {"version", "service", "hosts", "verbs", "target", "target_reads", "routes"}
+)
+ROUTE_KEYS = frozenset(
+    {
+        "match",
+        "operation",
+        "kind",
+        "human",
+        "ids",
+        "volatile",
+        "persists",
+        "comment",
+        "target",
+        "forward_auth",
+    }
+)
+MATCH_KEYS = frozenset({"method", "path"})
+OVERRIDE_SERVICE_KEYS = frozenset({"service", "target", "target_reads", "routes"})
+OVERRIDE_ROUTE_KEYS = frozenset({"match", "target", "forward_auth"})
+
+
+class MapError(ValueError):
+    """A map or overrides file the loader refuses. str(exc) names the source and the rule."""
+
+
+@dataclass(frozen=True)
+class Route:
+    """One route rule. `path` is a pattern: a `{name}` segment matches exactly one path segment."""
+
+    method: str  # upper-case, or "*" for any method
+    path: str
+    operation: str
+    kind: Kind
+    human: str = ""
+    ids: dict[str, str] = field(default_factory=dict)  # response field -> minted id prefix
+    volatile: tuple[str, ...] = ()
+    persists: bool | None = None
+    comment: str = ""
+    target: str = SELF_TARGET
+    forward_auth: bool = False
+
+
+@dataclass(frozen=True)
+class ServiceMap:
+    """One service's hosts and routes, as loaded from one YAML document."""
+
+    service: str
+    hosts: frozenset[str]
+    routes: tuple[Route, ...]
+    verbs: str = "honest"
+    target: str = SELF_TARGET
+    target_reads: bool = False
+    source: str = ""  # where it came from, for error messages
+
+
+@dataclass
+class MapIndex:
+    """Every loaded service, with a host lookup. `MapIndex()` is the empty index."""
+
+    services: tuple[ServiceMap, ...] = ()
+    by_host: dict[str, ServiceMap] = field(init=False, default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.by_host = {host: sm for sm in self.services for host in sm.hosts}
+
+    @property
+    def hosts(self) -> frozenset[str]:
+        """Every host in every loaded map. This is the reverse door's allow-list."""
+        return frozenset(self.by_host)
+
+    def service_for(self, host: str) -> ServiceMap | None:
+        return self.by_host.get(host.lower())
+
+    def route_for(self, host: str, method: str, path: str) -> tuple[ServiceMap, Route] | None:
+        """The service and route for a request, or None when the host or the route is unmapped."""
+        sm = self.service_for(host)
+        if sm is None:
+            return None
+        route = match_route(sm, method, path)
+        return None if route is None else (sm, route)
+
+
+def match_route(sm: ServiceMap, method: str, path: str) -> Route | None:
+    """The route matching `method` and `path`, or None.
+
+    A literal path beats a `{name}` pattern of the same shape, so `/v1/charges/search` wins over
+    `/v1/charges/{charge}`; among equally specific routes the first in the file wins.
+    """
+    method = method.upper()
+    segments = _segments(path)
+    best: Route | None = None
+    best_holes = 0
+    for route in sm.routes:
+        if route.method != ANY_METHOD and route.method != method:
+            continue
+        holes = _match_path(route.path, segments)
+        if holes is None:
+            continue
+        if best is None or holes < best_holes:
+            best, best_holes = route, holes
+    return best
+
+
+def target_for(sm: ServiceMap, route: Route) -> str:
+    """The target that answers this route: `self`, or the URL that answers it instead.
+
+    A route's own target wins. Otherwise the service target applies to `write` and `unknown`
+    routes, and to `read` routes only when the service sets `target_reads: true`. `llm` and
+    `telemetry` are always forwarded live and are never targeted. A route cannot opt back out of
+    a service target in Phase 1.
+    """
+    if route.target != SELF_TARGET:
+        return route.target
+    if route.kind in TARGETABLE_KINDS:
+        return sm.target
+    if route.kind == "read" and sm.target_reads:
+        return sm.target
+    return SELF_TARGET
+
+
+def is_delegated(sm: ServiceMap) -> bool:
+    """True when this service has a target at all, so the summary and banner must say so (#20)."""
+    return sm.target != SELF_TARGET or any(r.target != SELF_TARGET for r in sm.routes)
+
+
+# --------------------------------------------------------------------------------------- loading
+
+
+def shipped_dir() -> Path:
+    """The directory holding the maps that ship inside the package."""
+    from importlib.resources import files
+
+    return Path(str(files("irimi").joinpath(MAPS_DIR_NAME)))
+
+
+def override_path(cwd: Path | None = None) -> Path | None:
+    """`./irimi.maps.yaml` if it exists, else `$IRIMI_HOME/maps.yaml`, else None."""
+    local = (cwd if cwd is not None else Path.cwd()) / CWD_OVERRIDE_NAME
+    if local.is_file():
+        return local
+    home = paths.irimi_home() / HOME_OVERRIDE_NAME
+    return home if home.is_file() else None
+
+
+def load(
+    allow_target_hosts: frozenset[str] = frozenset(),
+    cwd: Path | None = None,
+    maps_dir: Path | None = None,
+) -> MapIndex:
+    """Load the shipped maps, merge the user's overrides file over them, and validate the result.
+
+    Raises MapError on anything wrong, naming the file and the rule. `allow_target_hosts` is the
+    set of non-loopback hosts a target may name (issue #16's `--allow-target-host`).
+    """
+    maps = load_shipped(maps_dir)
+    override = override_path(cwd)
+    if override is not None:
+        maps = apply_overrides(maps, override)
+    for sm in maps:
+        _validate_targets(sm, allow_target_hosts)
+    return MapIndex(tuple(maps))
+
+
+def load_shipped(maps_dir: Path | None = None) -> list[ServiceMap]:
+    """Parse every `*.yaml` in the maps directory, in file-name order."""
+    directory = maps_dir if maps_dir is not None else shipped_dir()
+    maps: list[ServiceMap] = []
+    for path in sorted(p for p in directory.iterdir() if p.suffix == ".yaml"):
+        for doc in _read_documents(path):
+            maps.append(parse_service(doc, str(path)))
+    _check_unique(maps)
+    return maps
+
+
+def parse_service(doc: Any, source: str) -> ServiceMap:
+    """Validate one YAML document and build a ServiceMap. Raises MapError."""
+    if not isinstance(doc, dict):
+        raise MapError(f"{source}: a map document must be a mapping, got {type(doc).__name__}")
+    _reject_unknown_keys(doc, SERVICE_KEYS, source, "map")
+    version = doc.get("version")
+    if version != SCHEMA_VERSION:
+        raise MapError(f"{source}: `version` must be {SCHEMA_VERSION}, got {version!r}")
+    service = _require_name(doc.get("service"), f"{source}: `service`")
+    verbs = doc.get("verbs", "honest")
+    if verbs not in VERB_STYLES:
+        raise MapError(f"{source}: `verbs` must be one of {list(VERB_STYLES)}, got {verbs!r}")
+    hosts = _parse_hosts(doc.get("hosts"), source)
+    raw_routes = doc.get("routes")
+    if not isinstance(raw_routes, list) or not raw_routes:
+        raise MapError(f"{source}: `routes` must be a non-empty list")
+    sm = ServiceMap(
+        service=service,
+        hosts=hosts,
+        routes=tuple(_parse_route(r, source) for r in raw_routes),
+        verbs=verbs,
+        target=_parse_target(doc.get("target", SELF_TARGET), f"{source}: `target`"),
+        target_reads=_parse_bool(doc.get("target_reads", False), f"{source}: `target_reads`"),
+        source=source,
+    )
+    _check_route_rules(sm)
+    return sm
+
+
+def apply_overrides(maps: list[ServiceMap], path: Path) -> list[ServiceMap]:
+    """Merge the user's overrides file over the shipped maps, by service name and exact route.
+
+    An override may set `target`, `target_reads` and `forward_auth` and nothing else. Naming a
+    service or a route that does not exist is an error, not a silent no-op.
+    """
+    source = str(path)
+    by_name = {sm.service: sm for sm in maps}
+    for doc in _read_documents(path):
+        if not isinstance(doc, dict):
+            raise MapError(f"{source}: an override document must be a mapping")
+        _reject_unknown_keys(doc, OVERRIDE_SERVICE_KEYS, source, "override")
+        name = _require_name(doc.get("service"), f"{source}: `service`")
+        base = by_name.get(name)
+        if base is None:
+            raise MapError(
+                f"{source}: no shipped map for service {name!r} "
+                f"(known: {', '.join(sorted(by_name))})"
+            )
+        routes = list(base.routes)
+        for raw in doc.get("routes") or []:
+            if not isinstance(raw, dict):
+                raise MapError(f"{source}: each entry of `routes` must be a mapping")
+            _reject_unknown_keys(raw, OVERRIDE_ROUTE_KEYS, source, "override route")
+            method, route_path = _parse_match(raw.get("match"), source)
+            index = next(
+                (i for i, r in enumerate(routes) if r.method == method and r.path == route_path),
+                None,
+            )
+            if index is None:
+                raise MapError(
+                    f"{source}: override names no route in the {name!r} map: {method} {route_path}"
+                )
+            routes[index] = replace(
+                routes[index],
+                target=_parse_target(
+                    raw.get("target", routes[index].target), f"{source}: `target`"
+                ),
+                forward_auth=_parse_bool(
+                    raw.get("forward_auth", routes[index].forward_auth),
+                    f"{source}: `forward_auth`",
+                ),
+            )
+        by_name[name] = replace(
+            base,
+            routes=tuple(routes),
+            target=_parse_target(doc.get("target", base.target), f"{source}: `target`"),
+            target_reads=_parse_bool(
+                doc.get("target_reads", base.target_reads), f"{source}: `target_reads`"
+            ),
+            source=f"{base.source} + {source}",
+        )
+    return [by_name[sm.service] for sm in maps]
+
+
+# ------------------------------------------------------------------------------------ validation
+
+
+def _validate_targets(sm: ServiceMap, allow_target_hosts: frozenset[str]) -> None:
+    """The target rules that can only be checked once overrides are merged in."""
+    if sm.target_reads and sm.target == SELF_TARGET:
+        raise MapError(
+            f"{sm.source}: `target_reads: true` needs a `target:` URL — a service irimi answers "
+            "end to end would be a twin, not a shadow"
+        )
+    _check_target_host(sm.target, allow_target_hosts, f"{sm.source}: `target`")
+    for route in sm.routes:
+        where = f"{sm.source}: route {route.method} {route.path}"
+        if route.target != SELF_TARGET and route.kind not in TARGETABLE_KINDS:
+            raise MapError(
+                f"{where}: a `target:` is valid on `write` and `unknown` routes only "
+                f"(this one is `{route.kind}`); delegate reads with `target_reads:` on the service"
+            )
+        if route.forward_auth and target_for(sm, route) == SELF_TARGET:
+            raise MapError(f"{where}: `forward_auth: true` needs a target to forward to")
+        _check_target_host(route.target, allow_target_hosts, f"{where}: `target`")
+
+
+def _check_target_host(target: str, allow_target_hosts: frozenset[str], where: str) -> None:
+    """Targets must be loopback until the sandbox exists; `--allow-target-host` is the way out."""
+    if target == SELF_TARGET:
+        return
+    host = urlsplit(target).hostname or ""
+    if host == "localhost" or is_loopback(host):
+        return
+    if host in allow_target_hosts:
+        return
+    raise MapError(
+        f"{where}: target host {host!r} is not loopback. Phase 1 forwards to 127.0.0.1, ::1 or "
+        "localhost only; pass --allow-target-host to override it deliberately"
+    )
+
+
+def _check_route_rules(sm: ServiceMap) -> None:
+    """Per-route rules that need the service's own fields (`verbs`) to judge."""
+    seen: set[tuple[str, str]] = set()
+    for route in sm.routes:
+        where = f"{sm.source}: route {route.method} {route.path}"
+        key = (route.method, route.path)
+        if key in seen:
+            raise MapError(f"{where}: appears twice in the same map")
+        seen.add(key)
+        if route.persists is not None and route.kind != "read":
+            raise MapError(f"{where}: `persists` belongs on a `kind: read` route only")
+        if route.volatile and route.kind not in TARGETABLE_KINDS:
+            raise MapError(f"{where}: `volatile` belongs on a write, where duplicates are checked")
+        if (
+            sm.verbs == "honest"
+            and route.kind == "read"
+            and route.method not in SAFE_METHODS
+            and not (route.persists is False and route.comment.strip())
+        ):
+            raise MapError(
+                f"{where}: `kind: read` on an unsafe method downgrades a write. Say "
+                "`persists: false` and add a `comment:` explaining why it persists nothing"
+            )
+
+
+def _check_unique(maps: list[ServiceMap]) -> None:
+    services: dict[str, str] = {}
+    hosts: dict[str, str] = {}
+    for sm in maps:
+        if sm.service in services:
+            raise MapError(
+                f"{sm.source}: service {sm.service!r} is already defined in {services[sm.service]}"
+            )
+        services[sm.service] = sm.source
+        for host in sorted(sm.hosts):
+            if host in hosts:
+                raise MapError(f"{sm.source}: host {host!r} is already mapped by {hosts[host]}")
+            hosts[host] = sm.source
+
+
+# ----------------------------------------------------------------------------------- YAML pieces
+
+
+def _read_documents(path: Path) -> list[Any]:
+    """Every non-empty YAML document in a file. A map file has one; an overrides file may have N."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise MapError(f"{path}: cannot read: {exc}") from None
+    try:
+        docs = [d for d in yaml.safe_load_all(text) if d is not None]
+    except yaml.YAMLError as exc:
+        raise MapError(f"{path}: not valid YAML: {exc}") from None
+    if not docs:
+        raise MapError(f"{path}: file is empty")
+    return docs
+
+
+def _parse_route(raw: Any, source: str) -> Route:
+    if not isinstance(raw, dict):
+        raise MapError(f"{source}: each entry of `routes` must be a mapping")
+    _reject_unknown_keys(raw, ROUTE_KEYS, source, "route")
+    method, path = _parse_match(raw.get("match"), source)
+    where = f"{source}: route {method} {path}"
+    kind = raw.get("kind")
+    if kind not in KINDS:
+        raise MapError(f"{where}: `kind` must be one of {list(KINDS)}, got {kind!r}")
+    return Route(
+        method=method,
+        path=path,
+        operation=_require_name(raw.get("operation"), f"{where}: `operation`"),
+        kind=kind,
+        human=_parse_str(raw.get("human", ""), f"{where}: `human`"),
+        ids=_parse_ids(raw.get("ids", {}), where),
+        volatile=_parse_str_list(raw.get("volatile", []), f"{where}: `volatile`"),
+        persists=_parse_optional_bool(raw.get("persists"), f"{where}: `persists`"),
+        comment=_parse_str(raw.get("comment", ""), f"{where}: `comment`"),
+        target=_parse_target(raw.get("target", SELF_TARGET), f"{where}: `target`"),
+        forward_auth=_parse_bool(raw.get("forward_auth", False), f"{where}: `forward_auth`"),
+    )
+
+
+def _parse_match(raw: Any, source: str) -> tuple[str, str]:
+    if not isinstance(raw, dict):
+        raise MapError(f"{source}: every route needs a `match:` mapping with `method` and `path`")
+    _reject_unknown_keys(raw, MATCH_KEYS, source, "match")
+    method = _parse_str(raw.get("method", ANY_METHOD), f"{source}: `match.method`").upper()
+    if method != ANY_METHOD and not method.isalpha():
+        raise MapError(f"{source}: `match.method` must be an HTTP method or '*', got {method!r}")
+    path = _parse_str(raw.get("path", ""), f"{source}: `match.path`")
+    if not path.startswith("/"):
+        raise MapError(f"{source}: `match.path` must start with '/', got {path!r}")
+    return method, path
+
+
+def _parse_hosts(raw: Any, source: str) -> frozenset[str]:
+    if not isinstance(raw, list) or not raw:
+        raise MapError(f"{source}: `hosts` must be a non-empty list of bare host names")
+    hosts: set[str] = set()
+    for item in raw:
+        host = _parse_str(item, f"{source}: `hosts`").strip().lower()
+        if not host or "/" in host or ":" in host or host != host.strip("."):
+            raise MapError(
+                f"{source}: host {item!r} must be a bare name with no scheme, port or path"
+            )
+        if host in hosts:
+            raise MapError(f"{source}: host {host!r} is listed twice")
+        hosts.add(host)
+    return frozenset(hosts)
+
+
+def _parse_ids(raw: Any, where: str) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        raise MapError(f"{where}: `ids` must be a mapping of field name to id prefix")
+    out: dict[str, str] = {}
+    for key, value in raw.items():
+        name = _parse_str(key, f"{where}: `ids` key")
+        prefix = _parse_str(value, f"{where}: `ids.{name}`")
+        if not prefix:
+            raise MapError(f"{where}: `ids.{name}` must be a non-empty id prefix")
+        out[name] = prefix
+    return out
+
+
+def _parse_target(raw: Any, where: str) -> str:
+    """`self`, or an http(s) origin with an optional path. Query, fragment and userinfo are out."""
+    target = _parse_str(raw, where).strip()
+    if target == SELF_TARGET:
+        return target
+    parts = urlsplit(target)
+    if parts.scheme not in ("http", "https"):
+        raise MapError(
+            f"{where}: must be {SELF_TARGET!r} or an http(s) URL, got {target!r} "
+            "(e.g. http://127.0.0.1:3000/refund)"
+        )
+    if not parts.hostname:
+        raise MapError(f"{where}: {target!r} has no host")
+    if parts.query or parts.fragment or parts.username or parts.password:
+        raise MapError(
+            f"{where}: {target!r} must be a scheme, host, port and path only — no query, "
+            "fragment or credentials"
+        )
+    return target.rstrip("/") if parts.path in ("", "/") else target
+
+
+def _require_name(raw: Any, where: str) -> str:
+    name = _parse_str(raw, where).strip()
+    if not name:
+        raise MapError(f"{where} is required and must be a non-empty string")
+    return name
+
+
+def _parse_str(raw: Any, where: str) -> str:
+    if not isinstance(raw, str):
+        raise MapError(f"{where} must be a string, got {type(raw).__name__}")
+    return raw
+
+
+def _parse_str_list(raw: Any, where: str) -> tuple[str, ...]:
+    if not isinstance(raw, list):
+        raise MapError(f"{where} must be a list of strings")
+    return tuple(_require_name(item, f"{where} entry") for item in raw)
+
+
+def _parse_bool(raw: Any, where: str) -> bool:
+    if not isinstance(raw, bool):
+        raise MapError(f"{where} must be true or false, got {raw!r}")
+    return raw
+
+
+def _parse_optional_bool(raw: Any, where: str) -> bool | None:
+    return None if raw is None else _parse_bool(raw, where)
+
+
+def _reject_unknown_keys(
+    doc: dict[Any, Any], allowed: frozenset[str], source: str, what: str
+) -> None:
+    unknown = sorted(str(k) for k in doc if k not in allowed)
+    if unknown:
+        raise MapError(
+            f"{source}: unknown {what} key(s) {', '.join(unknown)} "
+            f"(allowed: {', '.join(sorted(allowed))})"
+        )
+
+
+def _segments(path: str) -> tuple[str, ...]:
+    return tuple(s for s in path.split("/") if s)
+
+
+def _match_path(pattern: str, segments: tuple[str, ...]) -> int | None:
+    """None when the pattern does not match; otherwise how many `{name}` segments it used."""
+    parts = _segments(pattern)
+    if len(parts) != len(segments):
+        return None
+    holes = 0
+    for part, segment in zip(parts, segments, strict=True):
+        if part.startswith("{") and part.endswith("}"):
+            holes += 1
+        elif part != segment:
+            return None
+    return holes

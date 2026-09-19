@@ -1,0 +1,79 @@
+# Slack's Web API. Its SDKs send every call as POST, so the HTTP method says nothing about what a
+# call does and the operation is the path's method name (`/api/chat.postMessage`). That is what
+# `verbs: post-only` means: the loader's "a read on an unsafe method is a downgraded write" rule
+# does not apply here, because there is no honest verb to downgrade from.
+#
+# hooks.slack.com (incoming webhooks) is deliberately absent: the URL is the credential there, so
+# it gets its own route rules and its own rules about targets.
+#
+# Quote any `human:` template containing `#`. An unquoted `#` preceded by a space starts a YAML
+# comment, which silently truncates the template at the channel name.
+version: 1
+service: slack
+verbs: post-only
+hosts:
+  - slack.com
+  - files.slack.com # file downloads; no routes yet, but the reverse door may reach it
+routes:
+  - match:
+      method: POST
+      path: /api/chat.postMessage
+    operation: chat.postMessage
+    kind: write
+    human: 'post to #{channel}: "{text}"'
+
+  - match:
+      method: POST
+      path: /api/reactions.add
+    operation: reactions.add
+    kind: write
+    human: "add :{name}: to a message in {channel}"
+
+  - match:
+      method: POST
+      path: /api/files.upload
+    operation: files.upload
+    kind: write
+    human: upload {filename} to {channels}
+
+  - match:
+      method: POST
+      path: /api/conversations.history
+    operation: conversations.history
+    kind: read
+    human: "read the #{channel} history"
+
+  - match:
+      method: POST
+      path: /api/conversations.replies
+    operation: conversations.replies
+    kind: read
+    human: "read a thread in #{channel}"
+
+  - match:
+      method: POST
+      path: /api/conversations.info
+    operation: conversations.info
+    kind: read
+    human: "look up #{channel}"
+
+  - match:
+      method: POST
+      path: /api/conversations.list
+    operation: conversations.list
+    kind: read
+    human: list channels
+
+  - match:
+      method: POST
+      path: /api/auth.test
+    operation: auth.test
+    kind: read
+    human: check the Slack token
+
+  - match:
+      method: POST
+      path: /api/users.info
+    operation: users.info
+    kind: read
+    human: look up user {user}

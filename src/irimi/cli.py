@@ -7,6 +7,8 @@ from irimi import __version__, paths
 if TYPE_CHECKING:  # the quoted annotations below; no runtime import
     import subprocess
 
+    from irimi.ca import CAPaths
+    from irimi.engine import EngineConfig
     from irimi.servicemap import MapIndex
 
 SIGINT_EXIT_CODE = 130  # 128 + SIGINT, the shell convention for a Ctrl-C'd command
@@ -53,6 +55,27 @@ def _reverse_hosts(args: argparse.Namespace, index: "MapIndex") -> frozenset[str
     """Every host in a loaded service map, plus every --allow-host, lower-cased and stripped."""
     extra = frozenset(h.strip().lower() for h in args.allow_host if h.strip())
     return index.hosts | extra
+
+
+def _engine_config(
+    args: argparse.Namespace, index: "MapIndex", run_id: str, ca_paths: "CAPaths"
+) -> "EngineConfig":
+    """The EngineConfig `serve` and `shadow` share.
+
+    `maps=index` is what makes the classifier use the maps: without it the engine falls back to the
+    verb rule and every mapped write on a POST-only service reads as `unknown`.
+    """
+    from irimi.engine import EngineConfig
+
+    return EngineConfig(
+        run_id=run_id,
+        ca=ca_paths,
+        confdir=paths.mitm_dir(),
+        listen_host=paths.LISTEN_HOST,
+        listen_port=args.port,
+        reverse_hosts=_reverse_hosts(args, index),
+        maps=index,
+    )
 
 
 def _load_maps() -> "MapIndex | None":
@@ -127,7 +150,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     import secrets
 
     from irimi import ca, runner
-    from irimi.engine import EngineConfig, EngineStartError
+    from irimi.engine import EngineStartError
     from irimi.engine.mitm import MitmEngine
     from irimi.exchange import Exchange
     from irimi.overlay import NoOverlay
@@ -142,14 +165,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         print(f"error: no CA at {p.key.parent}. Run `irimi init` first.", file=sys.stderr)
         return 1
     run_id = secrets.token_hex(2)
-    cfg = EngineConfig(
-        run_id=run_id,
-        ca=p,
-        confdir=paths.mitm_dir(),
-        listen_host=paths.LISTEN_HOST,
-        listen_port=args.port,
-        reverse_hosts=_reverse_hosts(args, index),
-    )
+    cfg = _engine_config(args, index, run_id, p)
 
     def on_exchange(ex: Exchange) -> None:
         print(runner.exchange_line(ex), flush=True)
@@ -185,7 +201,7 @@ def cmd_shadow(args: argparse.Namespace) -> int:
     import subprocess
 
     from irimi import ca, runner
-    from irimi.engine import EngineConfig, EngineStartError
+    from irimi.engine import EngineStartError
     from irimi.engine.mitm import MitmEngine
     from irimi.exchange import Exchange
     from irimi.overlay import NoOverlay
@@ -216,14 +232,7 @@ def cmd_shadow(args: argparse.Namespace) -> int:
         print(runner.exchange_line(ex), flush=True)
 
     engine = MitmEngine(
-        EngineConfig(
-            run_id=run_id,
-            ca=p,
-            confdir=paths.mitm_dir(),
-            listen_host=paths.LISTEN_HOST,
-            listen_port=args.port,
-            reverse_hosts=_reverse_hosts(args, index),
-        ),
+        _engine_config(args, index, run_id, p),
         ShadowPolicy(),
         NullStore(),
         NoOverlay(),

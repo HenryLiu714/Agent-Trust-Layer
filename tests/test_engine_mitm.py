@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
-from irimi import ca, paths
+from irimi import ca, paths, servicemap
 from irimi.engine import EngineConfig, EngineStartError
 from irimi.engine.mitm import MitmEngine
 from irimi.exchange import Response
@@ -61,7 +61,7 @@ def upstream():
     srv.shutdown()
 
 
-def _config(tmp_path, monkeypatch, port=0, reverse_hosts=frozenset()):
+def _config(tmp_path, monkeypatch, port=0, reverse_hosts=frozenset(), maps=None):
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
     p = ca.ca_paths()
     ca.generate_ca(p)
@@ -72,7 +72,41 @@ def _config(tmp_path, monkeypatch, port=0, reverse_hosts=frozenset()):
         listen_host="127.0.0.1",
         listen_port=port,
         reverse_hosts=reverse_hosts,
+        maps=maps if maps is not None else servicemap.MapIndex(),
     )
+
+
+# The upstream in these tests lives on 127.0.0.1, so a map claiming that host makes its two routes
+# classified ones. Hosts carry no port, so the upstream's random port does not matter.
+DEMO_MAP = """
+version: 1
+service: demo
+hosts:
+  - 127.0.0.1
+routes:
+  - match:
+      method: GET
+      path: /hello
+    operation: things.list
+    kind: read
+    human: list things
+  - match:
+      method: POST
+      path: /things
+    operation: things.create
+    kind: write
+    human: create a thing
+"""
+
+
+def _maps(tmp_path, monkeypatch, doc=DEMO_MAP):
+    """A MapIndex holding `doc` alone. $IRIMI_HOME is pointed somewhere empty first: the loader
+    merges `$IRIMI_HOME/maps.yaml` when it exists, and a developer may have a real one."""
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "maps-home"))
+    maps_dir = tmp_path / "maps"
+    maps_dir.mkdir(exist_ok=True)
+    (maps_dir / "demo.yaml").write_text(doc)
+    return servicemap.load(cwd=tmp_path, maps_dir=maps_dir)
 
 
 def _start(cfg, overlay=None, trust_upstream_ca=None):
@@ -208,6 +242,39 @@ def test_post_is_faked_l0(engine, upstream):
     assert ex.kind == "unknown"
     assert "unclassified" in ex.flags
     assert ex.validation == "unvalidated"
+
+
+def test_mapped_write_is_named_and_faked(tmp_path, monkeypatch, upstream):
+    """The maps have to reach the classifier through EngineConfig, or every mapped route would be
+    classified by its verb alone."""
+    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch))
+    eng, seen, stop = _start(cfg)
+    try:
+        status, data = _via_proxy(
+            eng.listen_port(), "POST", f"http://127.0.0.1:{upstream}/things", body=b'{"a":1}'
+        )
+    finally:
+        stop()
+    assert status == 200
+    assert json.loads(data) == {}  # the upstream's do_POST would have been a 500
+    ex = seen[0]
+    assert (ex.service, ex.operation, ex.kind) == ("demo", "things.create", "write")
+    assert ex.answered_by == "fake-L0"
+    assert ex.flags == ()
+
+
+def test_mapped_read_is_named_and_forwarded(tmp_path, monkeypatch, upstream):
+    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch))
+    eng, seen, stop = _start(cfg)
+    try:
+        status, data = _via_proxy(eng.listen_port(), "GET", f"http://127.0.0.1:{upstream}/hello")
+    finally:
+        stop()
+    assert (status, data) == (200, b"hello from upstream")
+    ex = seen[0]
+    assert (ex.service, ex.operation, ex.kind) == ("demo", "things.list", "read")
+    assert ex.answered_by == "live"
+    assert ex.flags == ()
 
 
 def test_run_header_attributes_run(engine, upstream):

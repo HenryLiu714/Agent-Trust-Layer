@@ -236,7 +236,9 @@ def test_post_is_faked_l0(engine, upstream):
         eng.listen_port(), "POST", f"http://127.0.0.1:{upstream}/things", body=b'{"a":1}'
     )
     assert status == 200
-    assert json.loads(data) == {}
+    body = json.loads(data)
+    assert body["a"] == 1  # the L0 echo reflects the request's own fields
+    assert sorted(body) == ["a", "created"]  # unmapped: nothing minted
     ex = seen[0]
     assert ex.answered_by == "fake-L0"
     assert ex.kind == "unknown"
@@ -256,11 +258,11 @@ def test_mapped_write_is_named_and_faked(tmp_path, monkeypatch, upstream):
     finally:
         stop()
     assert status == 200
-    assert json.loads(data) == {}  # the upstream's do_POST would have been a 500
+    assert json.loads(data)["a"] == 1  # the upstream's do_POST would have been a 500
     ex = seen[0]
     assert (ex.service, ex.operation, ex.kind) == ("demo", "things.create", "write")
     assert ex.answered_by == "fake-L0"
-    assert ex.flags == ()
+    assert ex.flags == ("fidelity:L0",)
 
 
 def test_mapped_read_is_named_and_forwarded(tmp_path, monkeypatch, upstream):
@@ -313,7 +315,7 @@ def test_undecodable_request_body_is_still_faked(engine, upstream):
         extra_headers={"content-encoding": "gzip"},
     )
     assert status == 200  # the upstream answers every POST with 500, so it was not reached
-    assert json.loads(data) == {}
+    assert json.loads(data)["not"] == "gzip"  # reflected from the body we could not decode
     assert [ex.answered_by for ex in seen] == ["fake-L0"]
     assert seen[0].request.body == b'{"not":"gzip"}'
 
@@ -462,7 +464,7 @@ def test_reverse_door_write_is_faked(tmp_path, monkeypatch):
     finally:
         stop()
     assert status == 200
-    assert json.loads(data) == {}
+    assert json.loads(data)["a"] == 1
     ex = seen[0]
     assert ex.door == "reverse"
     assert ex.answered_by == "fake-L0"
@@ -539,3 +541,234 @@ def test_reverse_door_request_without_host_header_gets_one(tmp_path, monkeypatch
     assert len(seen) == 1
     assert seen[0].door == "reverse"
     assert ("host", "127.0.0.1:1") in seen[0].request.headers
+
+
+def test_faked_write_reflects_a_form_body_and_is_flagged(engine, upstream):
+    """The L0 echo reaches the client through the proxy, form-encoded as stripe-python posts."""
+    eng, seen = engine
+    status, data = _via_proxy(
+        eng.listen_port(),
+        "POST",
+        f"http://127.0.0.1:{upstream}/things",
+        body=b"amount=4900&charge=ch_test",
+        extra_headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    assert status == 200
+    body = json.loads(data)
+    assert body["amount"] == 4900
+    assert body["charge"] == "ch_test"
+    assert isinstance(body["created"], int)
+    ex = seen[0]
+    assert ex.answered_by == "fake-L0"
+    assert "fidelity:L0" in ex.flags
+
+
+def test_live_read_carries_no_fidelity_flag(engine, upstream):
+    eng, seen = engine
+    _via_proxy(eng.listen_port(), "GET", f"http://127.0.0.1:{upstream}/hello")
+    assert seen[0].answered_by == "live"
+    assert seen[0].flags == ()
+
+
+# ------------------------------------------- telemetry is never stored, and SSE streams (#8/#9)
+
+
+class _RecordingStore:
+    """A TraceStore that remembers what it was handed. NullStore cannot answer this question."""
+
+    def __init__(self):
+        self.recorded = []
+
+    def record(self, exchange):
+        self.recorded.append(exchange)
+
+    def close(self):
+        return None
+
+
+def _addon(tmp_path, monkeypatch, store):
+    """An IrimiAddon with no proxy under it. `_finish` is a plain method; driving a whole engine
+    would only add a thread between the assertion and the thing asserted."""
+    from irimi.engine.mitm import IrimiAddon
+
+    seen = []
+    addon = IrimiAddon(
+        _config(tmp_path, monkeypatch),
+        ShadowPolicy(),
+        store,
+        NoOverlay(),
+        seen.append,
+        lambda port, error: None,
+    )
+    return addon, seen
+
+
+def _exchange(kind, answered_by="live"):
+    from irimi.exchange import Exchange, Request
+
+    request = Request(
+        method="POST",
+        scheme="https",
+        host="o0.ingest.sentry.io",
+        port=443,
+        path="/api/7/envelope/",
+        query="",
+        headers=(),
+        body=b"",
+    )
+    return Exchange(
+        request=request,
+        response=Response(status=200, headers=(), body=b""),
+        service="sentry",
+        operation="envelope.send",
+        kind=kind,
+        answered_by=answered_by,
+        validation="unvalidated",
+        run_id="t3st",
+    )
+
+
+def test_telemetry_is_reported_but_never_recorded(tmp_path, monkeypatch):
+    """Forwarded in every mode, counted in its own bucket, and kept out of the trace store: a
+    recording of the agent's own observability traffic would re-emit someone else's events."""
+    store = _RecordingStore()
+    addon, seen = _addon(tmp_path, monkeypatch, store)
+    addon._finish(_exchange("telemetry"))
+    assert store.recorded == []
+    assert [ex.kind for ex in seen] == ["telemetry"]
+
+
+@pytest.mark.parametrize("kind", ["read", "write", "llm", "unknown"])
+def test_every_other_kind_is_still_recorded(tmp_path, monkeypatch, kind):
+    store = _RecordingStore()
+    addon, seen = _addon(tmp_path, monkeypatch, store)
+    addon._finish(_exchange(kind))
+    assert [ex.kind for ex in store.recorded] == [kind]
+    assert [ex.kind for ex in seen] == [kind]
+
+
+@pytest.mark.parametrize(
+    ("content_type", "expected"),
+    [
+        ("text/event-stream", True),
+        ("text/event-stream; charset=utf-8", True),
+        ("Text/Event-Stream", True),
+        ("application/json", False),
+        ("", False),
+    ],
+)
+def test_is_event_stream(content_type, expected):
+    from irimi.engine.mitm import _is_event_stream
+
+    assert _is_event_stream(content_type) is expected
+
+
+STREAM_MAP = """
+version: 1
+service: llmhost
+hosts:
+  - 127.0.0.1
+routes:
+  - match:
+      method: POST
+      path: /v1/chat/completions
+    operation: chat.completions.create
+    kind: llm
+    human: chat completion
+"""
+
+SSE_FIRST = b'data: {"delta": "one"}\n\n'
+SSE_SECOND = b'data: {"delta": "two"}\n\n'
+
+# Set by the test once it has the first chunk; the upstream holds the second one until then, so a
+# buffered response cannot reach the client at all inside the client's socket timeout.
+_STREAM_GATE = threading.Event()
+
+
+class _StreamUpstream(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"  # chunked transfer encoding needs HTTP/1.1
+
+    def do_POST(self):
+        length = int(self.headers.get("content-length") or 0)
+        if length:
+            self.rfile.read(length)
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("transfer-encoding", "chunked")
+        self.end_headers()
+        self._chunk(SSE_FIRST)
+        _STREAM_GATE.wait(timeout=20)
+        self._chunk(SSE_SECOND)
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
+        # Close rather than keep the connection alive: mitmproxy pools its upstream connections,
+        # and a single-threaded HTTPServer whose handler is still waiting for a second request on
+        # that socket never returns from serve_forever, so shutdown() would block forever.
+        self.close_connection = True
+
+    def _chunk(self, payload: bytes) -> None:
+        self.wfile.write(b"%x\r\n" % len(payload) + payload + b"\r\n")
+        self.wfile.flush()
+
+    def log_message(self, *args):
+        pass
+
+
+def test_a_server_sent_event_response_reaches_the_client_in_chunks(tmp_path, monkeypatch):
+    """The whole point of the `responseheaders` hook: without `flow.response.stream = True`
+    mitmproxy buffers the body, so the first chunk would not arrive until the upstream finished.
+
+    The upstream holds the second chunk until this test has read the first, and the client's
+    socket timeout is far shorter than the upstream's wait, so buffering fails the test rather
+    than slowing it down.
+    """
+    _STREAM_GATE.clear()
+    srv = HTTPServer(("127.0.0.1", 0), _StreamUpstream)
+    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
+    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch, STREAM_MAP))
+    eng, seen, stop = _start(cfg)
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=5)
+        url = f"http://127.0.0.1:{srv.server_address[1]}/v1/chat/completions"
+        conn.request(
+            "POST",
+            url,
+            body=b"{}",
+            headers={
+                "host": f"127.0.0.1:{srv.server_address[1]}",
+                "content-type": "application/json",
+            },
+        )
+        resp = conn.getresponse()
+        assert resp.status == 200
+        assert resp.getheader("content-type") == "text/event-stream"
+        first = resp.read(len(SSE_FIRST))  # times out at 5 s if the proxy buffered the body
+        assert first == SSE_FIRST
+        _STREAM_GATE.set()
+        assert resp.read() == SSE_SECOND
+        conn.close()
+    finally:
+        _STREAM_GATE.set()
+        stop()
+        srv.shutdown()
+    assert len(seen) == 1
+    ex = seen[0]
+    assert (ex.service, ex.operation, ex.kind) == ("llmhost", "chat.completions.create", "llm")
+    assert ex.answered_by == "live"
+    assert ex.flags == ()
+    # A streamed body is never assembled, so the recorded exchange carries an empty one. That is
+    # the trade for the agent seeing tokens as they arrive.
+    assert ex.response.status == 200
+    assert ex.response.body == b""
+
+
+def test_a_json_response_is_still_buffered_and_recorded(tmp_path, monkeypatch, upstream):
+    """The hook keys on the content type, so an ordinary live read is unaffected."""
+    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch))
+    eng, seen, stop = _start(cfg)
+    try:
+        status, data = _via_proxy(eng.listen_port(), "GET", f"http://127.0.0.1:{upstream}/hello")
+    finally:
+        stop()
+    assert (status, data) == (200, b"hello from upstream")
+    assert seen[0].response.body == b"hello from upstream"

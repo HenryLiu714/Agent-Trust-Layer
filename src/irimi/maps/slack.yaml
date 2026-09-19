@@ -3,8 +3,10 @@
 # `verbs: post-only` means: the loader's "a read on an unsafe method is a downgraded write" rule
 # does not apply here, because there is no honest verb to downgrade from.
 #
-# hooks.slack.com (incoming webhooks) is deliberately absent: the URL is the credential there, so
-# it gets its own route rules and its own rules about targets.
+# hooks.slack.com (incoming webhooks) is here, under the same service name, because the URL itself
+# is the credential: `/services/{team}/{bot}/{token}` carries the secret in the path. That route is
+# always answered locally and must never be allow-listed around, which is why it is a `write` with
+# no target and a comment saying so.
 #
 # Quote any `human:` template containing `#`. An unquoted `#` preceded by a space starts a YAML
 # comment, which silently truncates the template at the channel name.
@@ -14,6 +16,7 @@ verbs: post-only
 hosts:
   - slack.com
   - files.slack.com # file downloads; no routes yet, but the reverse door may reach it
+  - hooks.slack.com # incoming webhooks; the URL is the credential
 routes:
   - match:
       method: POST
@@ -35,6 +38,16 @@ routes:
     operation: files.upload
     kind: write
     human: upload {filename} to {channels}
+
+  - match:
+      method: POST
+      path: /services/{team}/{bot}/{token}
+    operation: incoming_webhook
+    kind: write
+    human: 'post via webhook: "{text}"'
+    # The webhook URL is the credential, so this route is always answered locally. When #16 lands,
+    # a target here must be loopback and --allow-target-host must not apply to it.
+    comment: the URL is the credential; never forwarded, never allow-listed
 
   - match:
       method: POST

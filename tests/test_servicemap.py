@@ -44,15 +44,6 @@ routes:
 """
 
 
-@pytest.fixture(autouse=True)
-def no_ambient_overrides(tmp_path, monkeypatch):
-    """The loader reads `./irimi.maps.yaml` and then `$IRIMI_HOME/maps.yaml`, so a developer who
-    keeps a real overrides file would otherwise change what every test here sees. Point both at
-    empty directories; the tests that exercise override precedence set them again themselves."""
-    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "ambient-home"))
-    monkeypatch.chdir(tmp_path)
-
-
 def write_maps(tmp_path, *docs: str):
     """Write each document as its own <n>.yaml in a fresh maps directory and return it."""
     directory = tmp_path / "maps"
@@ -87,7 +78,18 @@ def refuses(tmp_path, doc: str, message: str, **kwargs):
 
 def test_shipped_maps_load():
     index = servicemap.load(cwd=None, maps_dir=servicemap.shipped_dir())
-    assert {sm.service for sm in index.services} == {"slack", "stripe"}
+    assert {sm.service for sm in index.services} == {
+        "anthropic",
+        "datadog",
+        "honeycomb",
+        "langfuse",
+        "langsmith",
+        "openai",
+        "posthog",
+        "sentry",
+        "slack",
+        "stripe",
+    }
 
 
 def test_shipped_stripe_map_is_complete():
@@ -109,12 +111,14 @@ def test_shipped_stripe_map_is_complete():
     assert refund.volatile == ("idempotency_key",)
 
 
-def test_shipped_slack_map_is_post_only_and_has_no_webhook_host():
+def test_shipped_slack_map_is_post_only_and_owns_the_webhook_host():
     index = servicemap.load(maps_dir=servicemap.shipped_dir())
     slack = index.service_for("slack.com")
     assert slack is not None
     assert slack.verbs == "post-only"
-    assert "hooks.slack.com" not in slack.hosts
+    # One service, not two: `_check_unique` forbids the host appearing in both, and a second
+    # service would split the Slack summary in two.
+    assert index.service_for("hooks.slack.com") is slack
     post = servicemap.match_route(slack, "POST", "/api/chat.postMessage")
     history = servicemap.match_route(slack, "POST", "/api/conversations.history")
     assert post is not None and post.kind == "write"
@@ -180,7 +184,13 @@ def test_shipped_maps_have_no_target_and_a_human_on_every_write():
 
 def test_shipped_maps_are_in_the_wheel_directory():
     names = sorted(p.name for p in servicemap.shipped_dir().iterdir() if p.suffix == ".yaml")
-    assert names == ["slack.yaml", "stripe.yaml"]
+    assert names == [
+        "anthropic.yaml",
+        "openai.yaml",
+        "slack.yaml",
+        "stripe.yaml",
+        "telemetry.yaml",
+    ]
 
 
 # ------------------------------------------------------------------------------------ every field
@@ -682,7 +692,7 @@ def test_cwd_override_wins_over_home(tmp_path, monkeypatch):
     home = tmp_path / "home"
     cwd = tmp_path / "cwd"
     home.mkdir()
-    cwd.mkdir()
+    cwd.mkdir(exist_ok=True)  # tests/conftest.py already made this one and chdir'd into it
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(home))
     (home / servicemap.HOME_OVERRIDE_NAME).write_text("service: demo\ntarget: http://127.0.0.1:1\n")
     (cwd / servicemap.CWD_OVERRIDE_NAME).write_text("service: demo\ntarget: http://127.0.0.1:2\n")
@@ -695,7 +705,7 @@ def test_home_override_is_the_fallback(tmp_path, monkeypatch):
     home = tmp_path / "home"
     cwd = tmp_path / "cwd"
     home.mkdir()
-    cwd.mkdir()
+    cwd.mkdir(exist_ok=True)  # tests/conftest.py already made this one and chdir'd into it
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(home))
     (home / servicemap.HOME_OVERRIDE_NAME).write_text("service: demo\ntarget: http://127.0.0.1:1\n")
     assert servicemap.override_path(cwd) == home / servicemap.HOME_OVERRIDE_NAME
@@ -719,3 +729,191 @@ def test_route_and_servicemap_defaults():
     assert (sm.verbs, sm.target, sm.target_reads) == ("honest", servicemap.SELF_TARGET, False)
     assert sm.default_kind is None
     assert servicemap.target_for(sm, route) == servicemap.SELF_TARGET
+
+
+# ------------------------------------------------- a maps directory that is missing or holds none
+
+
+def test_missing_maps_directory_is_a_named_refusal(tmp_path):
+    missing = tmp_path / "nope"
+    with pytest.raises(MapError) as exc:
+        servicemap.load_shipped(maps_dir=missing)
+    assert str(missing) in str(exc.value)
+    assert "cannot read the service maps directory" in str(exc.value)
+
+
+def test_empty_maps_directory_is_a_named_refusal(tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(MapError) as exc:
+        servicemap.load_shipped(maps_dir=empty)
+    assert str(empty) in str(exc.value)
+    assert "no service maps found" in str(exc.value)
+
+
+def test_a_directory_with_no_yaml_is_the_same_refusal(tmp_path):
+    """The rule is 'no maps parsed', not 'no files present'."""
+    directory = tmp_path / "not-maps"
+    directory.mkdir()
+    (directory / "notes.txt").write_text("not a map\n")
+    with pytest.raises(MapError) as exc:
+        servicemap.load_shipped(maps_dir=directory)
+    assert "no service maps found" in str(exc.value)
+
+
+def test_an_unreadable_maps_directory_is_a_named_refusal(tmp_path):
+    """A stripped or damaged install is a refusal too, not an OSError out of `iterdir`."""
+    import os
+
+    if os.geteuid() == 0:
+        pytest.skip("root ignores the directory mode, so the scan would succeed")
+    directory = tmp_path / "locked"
+    directory.mkdir()
+    (directory / "demo.yaml").write_text(GOOD)
+    os.chmod(directory, 0o000)
+    try:
+        try:
+            list(directory.iterdir())
+        except PermissionError:
+            pass
+        else:
+            pytest.skip("this filesystem does not honour mode 0o000 on a directory")
+        with pytest.raises(MapError) as exc:
+            servicemap.load_shipped(maps_dir=directory)
+    finally:
+        os.chmod(directory, 0o700)
+    assert str(directory) in str(exc.value)
+    assert "cannot read the service maps directory" in str(exc.value)
+
+
+@pytest.mark.parametrize("argv", [["maps", "list"], ["serve"], ["shadow", "--", "true"]])
+def test_a_missing_maps_directory_is_one_line_on_the_cli(tmp_path, monkeypatch, capsys, argv):
+    """The bug this issue exists for: a stripped install printed a traceback, not a refusal."""
+    from irimi.cli import main
+
+    missing = tmp_path / "gone"
+    monkeypatch.setattr(servicemap, "shipped_dir", lambda: missing)
+    assert main(argv) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: ")
+    assert str(missing) in err
+    assert "Traceback" not in err
+    assert err.count("\n") == 1
+
+
+# ------------------------------------------------------------------------- wildcard hosts (#9)
+
+# `*` opens a YAML alias, so every wildcard host has to be quoted or the document does not parse.
+WILDCARD = """
+version: 1
+service: wild
+hosts:
+  - "*.demo.example"
+routes:
+  - match:
+      method: POST
+      path: /ingest
+    operation: wild.ingest
+    kind: write
+    human: ingest one event
+"""
+
+EXACT_UNDER_WILDCARD = """
+version: 1
+service: exact
+hosts:
+  - one.demo.example
+routes:
+  - match:
+      method: POST
+      path: /ingest
+    operation: exact.ingest
+    kind: write
+    human: ingest one event
+"""
+
+DEEPER_WILDCARD = """
+version: 1
+service: deeper
+hosts:
+  - "*.eu.demo.example"
+routes:
+  - match:
+      method: POST
+      path: /ingest
+    operation: deeper.ingest
+    kind: write
+    human: ingest one event
+"""
+
+
+def test_a_wildcard_host_matches_one_or_more_leading_labels(tmp_path):
+    index = load(tmp_path, WILDCARD)
+    assert index.service_for("a.demo.example") is index.services[0]
+    assert index.service_for("a.b.demo.example") is index.services[0]
+    assert index.service_for("A.DEMO.EXAMPLE") is index.services[0]
+
+
+def test_a_wildcard_host_does_not_match_the_bare_domain(tmp_path):
+    """`*.demo.example` claims subdomains only; the stored suffix keeps its leading dot so that
+    `demo.example` itself, and a name merely ending in it, both miss."""
+    index = load(tmp_path, WILDCARD)
+    assert index.service_for("demo.example") is None
+    assert index.service_for("notdemo.example") is None
+    assert index.service_for("demo.example.evil.test") is None
+
+
+def test_an_exact_host_beats_a_wildcard(tmp_path):
+    index = load(tmp_path, WILDCARD, EXACT_UNDER_WILDCARD)
+    one = index.service_for("one.demo.example")
+    two = index.service_for("two.demo.example")
+    assert one is not None and one.service == "exact"
+    assert two is not None and two.service == "wild"
+
+
+def test_the_longest_wildcard_wins(tmp_path):
+    index = load(tmp_path, WILDCARD, DEEPER_WILDCARD)
+    eu = index.service_for("a.eu.demo.example")
+    us = index.service_for("a.us.demo.example")
+    assert eu is not None and eu.service == "deeper"
+    assert us is not None and us.service == "wild"
+
+
+def test_a_wildcard_host_routes_like_any_other(tmp_path):
+    index = load(tmp_path, WILDCARD)
+    found = index.route_for("a.demo.example", "POST", "/ingest")
+    assert found is not None and found[1].operation == "wild.ingest"
+
+
+@pytest.mark.parametrize(
+    "host", ["*", "*.", "*foo.demo.example", "foo.*.demo.example", "**.demo.example", "*.example"]
+)
+def test_a_malformed_wildcard_host_is_refused_by_name(tmp_path, host):
+    refuses(
+        tmp_path,
+        WILDCARD.replace('"*.demo.example"', f'"{host}"'),
+        "may use a wildcard only as a leading '*.' label",
+    )
+
+
+def test_the_same_wildcard_in_two_maps_is_a_duplicate_host(tmp_path):
+    with pytest.raises(MapError) as exc:
+        load(tmp_path, WILDCARD, WILDCARD.replace("service: wild", "service: wild2"))
+    assert "host '*.demo.example' is already mapped by" in str(exc.value)
+
+
+def test_a_wildcard_and_an_exact_host_under_it_are_not_a_duplicate(tmp_path):
+    index = load(tmp_path, WILDCARD, EXACT_UNDER_WILDCARD)
+    assert {sm.service for sm in index.services} == {"wild", "exact"}
+
+
+def test_patterns_are_not_in_the_reverse_doors_allow_list(tmp_path):
+    """A wildcard classifies through the forward door and is deliberately not an allow-list entry.
+
+    `pipeline.rewrite_reverse` compares one literal host with `host not in allowed_hosts`, so a
+    pattern in that set would never match anything. `--allow-host` is how you reach one.
+    """
+    index = load(tmp_path, WILDCARD, EXACT_UNDER_WILDCARD)
+    assert index.hosts == frozenset({"one.demo.example"})
+    assert index.patterns == ("*.demo.example",)
+    assert MapIndex().patterns == ()

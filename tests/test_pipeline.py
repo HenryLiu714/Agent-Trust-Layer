@@ -455,3 +455,124 @@ def test_annotate_door_defaults_to_forward():
 def test_annotate_records_reverse_door():
     ex = annotate(_req(), None, classify(_req()), "live", "7f3a", door="reverse")
     assert ex.door == "reverse"
+
+
+# ------------------------------------------------- the llm, telemetry and webhook maps (#8/#9/#10)
+
+
+def _shipped(tmp_path, monkeypatch, method: str, host: str, path: str) -> Classification:
+    """Classify one request against the real shipped maps."""
+    return classify(replace(_req(method), host=host, path=path), _index(tmp_path, monkeypatch))
+
+
+def test_openai_inference_routes_are_llm(tmp_path, monkeypatch):
+    cls = _shipped(tmp_path, monkeypatch, "POST", "api.openai.com", "/v1/chat/completions")
+    assert (cls.service, cls.operation, cls.kind) == ("openai", "chat.completions.create", "llm")
+    assert cls.flags == ()
+
+
+def test_openai_models_is_llm_on_a_safe_method(tmp_path, monkeypatch):
+    """`kind: llm` on a GET is legal: `_check_route_rules` only constrains `kind: read`."""
+    cls = _shipped(tmp_path, monkeypatch, "GET", "api.openai.com", "/v1/models")
+    assert (cls.operation, cls.kind) == ("models.list", "llm")
+
+
+def test_an_unlisted_openai_write_is_unknown_and_flagged(tmp_path, monkeypatch):
+    """/v1/files is deliberately unmapped: the RFC fallback makes it unknown, so it is faked."""
+    cls = _shipped(tmp_path, monkeypatch, "POST", "api.openai.com", "/v1/files")
+    assert (cls.service, cls.operation, cls.kind) == ("openai", "POST /v1/files", "unknown")
+    assert cls.flags == ("unclassified",)
+
+
+def test_an_unlisted_openai_get_falls_back_to_read(tmp_path, monkeypatch):
+    """Intended: with no `default_kind`, the RFC fallback forwards an unlisted GET live. The maps
+    set no default here because `default_kind: write` would turn harmless GETs into fake writes."""
+    cls = _shipped(tmp_path, monkeypatch, "GET", "api.openai.com", "/v1/batches")
+    assert (cls.service, cls.kind) == ("openai", "read")
+    assert cls.flags == ()
+
+
+def test_anthropic_messages_is_llm(tmp_path, monkeypatch):
+    cls = _shipped(tmp_path, monkeypatch, "POST", "api.anthropic.com", "/v1/messages")
+    assert (cls.service, cls.operation, cls.kind) == ("anthropic", "messages.create", "llm")
+
+
+def test_anthropic_count_tokens_is_its_own_route(tmp_path, monkeypatch):
+    """Different segment counts, so `/v1/messages` cannot swallow it. The operation proves which
+    route won."""
+    cls = _shipped(tmp_path, monkeypatch, "POST", "api.anthropic.com", "/v1/messages/count_tokens")
+    assert (cls.operation, cls.kind) == ("messages.count_tokens", "llm")
+
+
+def test_an_unlisted_anthropic_write_is_unknown_and_flagged(tmp_path, monkeypatch):
+    cls = _shipped(tmp_path, monkeypatch, "POST", "api.anthropic.com", "/v1/messages/batches")
+    assert cls.kind == "unknown"
+    assert cls.flags == ("unclassified",)
+
+
+def test_a_sentry_project_subdomain_classifies_through_the_wildcard(tmp_path, monkeypatch):
+    """The test issue #9 asks for: a wildcard in a shipped map really resolves a subdomain."""
+    cls = _shipped(tmp_path, monkeypatch, "POST", "o0.ingest.sentry.io", "/api/7/envelope/")
+    assert (cls.service, cls.operation, cls.kind) == ("sentry", "envelope.send", "telemetry")
+    assert cls.flags == ()
+
+
+def test_a_posthog_regional_host_classifies(tmp_path, monkeypatch):
+    cls = _shipped(tmp_path, monkeypatch, "POST", "eu.i.posthog.com", "/batch/")
+    assert (cls.service, cls.operation, cls.kind) == ("posthog", "batch.capture", "telemetry")
+
+
+def test_an_unlisted_telemetry_write_is_faked_not_forwarded(tmp_path, monkeypatch):
+    """The telemetry maps carry no `default_kind`, on purpose. These vendors serve their REST
+    control plane from the same host as their intake, and `telemetry` forwards live, so a default
+    would have sent `DELETE /api/v1/dashboard/{id}` to the real API under `irimi shadow` - and the
+    `_finish` telemetry guard would have kept it out of the trace too. Unlisted falls to the RFC
+    fallback instead, so an unsafe method is faked and flagged."""
+    cls = _shipped(tmp_path, monkeypatch, "DELETE", "api.datadoghq.com", "/api/v1/dashboard/abc")
+    assert (cls.service, cls.kind) == ("datadog", "unknown")
+    assert cls.flags == ("unclassified",)
+
+
+@pytest.mark.parametrize(
+    ("host", "path"),
+    [
+        ("api.datadoghq.com", "/api/v1/monitor"),
+        ("api.honeycomb.io", "/1/triggers/ds/tid"),
+        ("cloud.langfuse.com", "/api/public/datasets"),
+        ("api.smith.langchain.com", "/runs/abc"),
+    ],
+)
+def test_no_telemetry_control_plane_write_is_forwarded(tmp_path, monkeypatch, host, path):
+    """Every vendor whose control plane shares a host with its intake, pinned at once."""
+    cls = _shipped(tmp_path, monkeypatch, "POST", host, path)
+    assert cls.kind == "unknown"
+
+
+def test_a_listed_intake_path_is_still_telemetry(tmp_path, monkeypatch):
+    """The other half: listing the routes explicitly is what keeps real intake forwarding live."""
+    cls = _shipped(tmp_path, monkeypatch, "POST", "api.datadoghq.com", "/api/v2/logs")
+    assert (cls.service, cls.kind, cls.flags) == ("datadog", "telemetry", ())
+
+
+def test_a_telemetry_wildcard_is_not_a_reverse_door_host(tmp_path, monkeypatch):
+    """Decision: a wildcard classifies through the forward door only. `--allow-host` is the way in
+    through the reverse door, and `rewrite_reverse` refuses the host until someone passes it."""
+    index = _index(tmp_path, monkeypatch)
+    assert "*.ingest.sentry.io" not in index.hosts
+    assert "o0.ingest.sentry.io" not in index.hosts
+    with pytest.raises(ReverseDoorRefused):
+        rewrite_reverse(_door_req("/o0.ingest.sentry.io/api/7/envelope/"), index.hosts)
+
+
+def test_the_slack_webhook_is_a_named_write(tmp_path, monkeypatch):
+    cls = _shipped(tmp_path, monkeypatch, "POST", "hooks.slack.com", "/services/T000/B000/abc123")
+    assert (cls.service, cls.operation, cls.kind) == ("slack", "incoming_webhook", "write")
+    assert cls.flags == ()
+
+
+def test_a_webhook_url_of_another_shape_still_falls_back_to_unknown(tmp_path, monkeypatch):
+    """No `*` path wildcard, so a two-segment webhook path misses the route and the fallback
+    catches it: still answered locally, and flagged so the operator sees the guess."""
+    cls = _shipped(tmp_path, monkeypatch, "POST", "hooks.slack.com", "/services/T000/B000")
+    assert (cls.service, cls.kind) == ("slack", "unknown")
+    assert cls.flags == ("unclassified",)

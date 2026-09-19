@@ -33,6 +33,7 @@ class _Pending:
     run_id: str
     answered_by: AnsweredBy
     door: Door
+    flags: tuple[str, ...]  # what the policy attached to its answer, e.g. fidelity:L0
 
 
 def _headers_from_fields(fields: Sequence[tuple[bytes, bytes]]) -> Headers:
@@ -65,6 +66,10 @@ def _response_from_flow(flow: http.HTTPFlow) -> Response:
         headers=_headers_from_fields(flow.response.headers.fields),
         body=_body(flow.response),
     )
+
+
+def _is_event_stream(content_type: str) -> bool:
+    return content_type.split(";")[0].strip().lower() == "text/event-stream"
 
 
 def _to_mitm_response(r: Response) -> http.Response:
@@ -130,8 +135,8 @@ class IrimiAddon:
                 return
         cls = pipeline.classify(req, self.config.maps)
         run_id = pipeline.attribute_run(req, self.config.run_id)
-        ans = self.policy.answer(req, cls.kind)
-        flow.metadata[META_KEY] = _Pending(req, cls, run_id, ans.answered_by, door)
+        ans = self.policy.answer(req, cls)
+        flow.metadata[META_KEY] = _Pending(req, cls, run_id, ans.answered_by, door, ans.flags)
         if ans.response is not None:
             flow.response = _to_mitm_response(ans.response)
 
@@ -154,6 +159,21 @@ class IrimiAddon:
         flow.request.host_header = next(v for k, v in req.headers if k == "host")
         return req
 
+    def responseheaders(self, flow: http.HTTPFlow) -> None:
+        """Stream a server-sent-event response instead of buffering it.
+
+        mitmproxy buffers a whole response body before the `response` hook by default, which turns
+        a streamed completion into one late blob. Only a live-forwarded response can stream: one we
+        synthesized has no upstream to stream from. The `response` hook still runs for a streamed
+        flow, but `flow.response.content` is None there, so the recorded exchange carries an empty
+        body — that is the trade for the agent seeing tokens as they arrive (#8).
+        """
+        pending: _Pending | None = flow.metadata.get(META_KEY)
+        if pending is None or pending.answered_by != "live" or flow.response is None:
+            return
+        if _is_event_stream(flow.response.headers.get("content-type", "")):
+            flow.response.stream = True
+
     def response(self, flow: http.HTTPFlow) -> None:
         pending: _Pending | None = flow.metadata.pop(META_KEY, None)
         if pending is None:  # not ours (refused in request()), or already finished
@@ -168,6 +188,7 @@ class IrimiAddon:
             pending.classification,
             pending.answered_by,
             pending.run_id,
+            extra_flags=pending.flags,
             door=pending.door,
         )
         if ex.answered_by != "live":
@@ -187,13 +208,19 @@ class IrimiAddon:
             pending.classification,
             pending.answered_by,
             pending.run_id,
+            # Not pending.flags: a flow that errored was never answered, so it carries no
+            # fidelity flag. Only the upstream failure is worth saying.
             extra_flags=(UPSTREAM_ERROR_FLAG,),
             door=pending.door,
         )
         self._finish(ex)
 
     def _finish(self, ex: Exchange) -> None:
-        self.store.record(ex)
+        # Telemetry is forwarded but never stored: a trace of the agent's own observability
+        # traffic is noise, and replaying it would re-emit someone else's events (#9). It is still
+        # reported, so the per-exchange line and the run summary both count it.
+        if ex.kind != "telemetry":
+            self.store.record(ex)
         if self.on_exchange:
             self.on_exchange(ex)
 

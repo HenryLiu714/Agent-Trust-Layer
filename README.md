@@ -39,9 +39,15 @@ uv run irimi --help
 ## Try the proxy
 
 `irimi serve` runs the shadow proxy in the foreground on `127.0.0.1:4000`. Reads are forwarded to
-the real service; writes are answered locally with a placeholder `fake-L0` response and never reach
+the real service; writes are answered locally with a `fake-L0` response and never reach
 the network. Which is which comes from the service maps, and from the HTTP method for anything the
 maps do not cover. Each exchange prints as one line.
+
+A `fake-L0` answer is a `200` whose JSON body echoes the request's own fields, stamps `created`,
+and mints an id for every field the matched route names: a Stripe refund comes back with
+`id: re_...`, `balance_transaction: txn_...` and `object: refund`, so stripe-python parses it. A
+Slack call gets Slack's own `{"ok": true, "ts": "..."}` envelope instead, because its SDK refuses
+anything else.
 
     uv run irimi serve
     # in another terminal
@@ -99,11 +105,13 @@ request, credentials included, and irimi would never see it.
 Under `irimi shadow`, `NO_PROXY=localhost,127.0.0.1` is what keeps these requests from also being
 sent through the forward proxy.
 
-The door is loopback-only and is not an open relay. It forwards only to hosts in a loaded service
-map (`irimi maps list` prints them) or named with `--allow-host <host>` (repeatable, on `serve`
-and `shadow`); anything else is answered `403` with a one-line explanation. The upstream
-host may carry a port (`/127.0.0.1:8443/...`); the scheme is always https. Each exchange records
-which door it came through.
+The door is loopback-only and is not an open relay. It forwards only to the *exact* hosts in a
+loaded service map (`irimi maps list` prints them) or named with `--allow-host <host>` (repeatable,
+on `serve` and `shadow`); anything else is answered `403` with a one-line explanation. A wildcard
+host in a map (`*.ingest.sentry.io`) classifies traffic through the forward proxy but is **not** an
+allow-list entry here, because the door relays one literal host at a time — name that host with
+`--allow-host` to reach it. The upstream host may carry a port (`/127.0.0.1:8443/...`); the scheme
+is always https. Each exchange records which door it came through.
 
 ## Service maps
 
@@ -115,14 +123,34 @@ prints, and the id prefixes a fake response mints. The maps that ship with irimi
     irimi maps list
 
 ```
-irimi maps · 2 service(s) · 6 host(s) · 19 route(s)
-  api.stripe.com           stripe     10 routes  target: self
-  connect.stripe.com       stripe     10 routes  target: self
-  files.slack.com          slack       9 routes  target: self
-  files.stripe.com         stripe     10 routes  target: self
-  meter-events.stripe.com  stripe     10 routes  target: self
-  slack.com                slack       9 routes  target: self
+irimi maps · 10 service(s) · 17 host(s) · 47 route(s)
+  api.anthropic.com        anthropic    2 routes  target: self
+  api.honeycomb.io         honeycomb    2 routes  target: self
+  api.openai.com           openai       4 routes  target: self
+  api.smith.langchain.com  langsmith    4 routes  target: self
+  api.stripe.com           stripe      10 routes  target: self
+  cloud.langfuse.com       langfuse     2 routes  target: self
+  connect.stripe.com       stripe      10 routes  target: self
+  files.slack.com          slack       10 routes  target: self
+  files.stripe.com         stripe      10 routes  target: self
+  hooks.slack.com          slack       10 routes  target: self
+  meter-events.stripe.com  stripe      10 routes  target: self
+  slack.com                slack       10 routes  target: self
+  *.datadoghq.com          datadog      5 routes  target: self
+  *.i.posthog.com          posthog      4 routes  target: self
+  *.ingest.sentry.io       sentry       4 routes  target: self
+  *.langfuse.com           langfuse     2 routes  target: self
+  *.posthog.com            posthog      4 routes  target: self
 ```
+
+Stripe, Slack (including `hooks.slack.com`), OpenAI, Anthropic and six telemetry backends —
+LangSmith, Langfuse, Sentry, Datadog, Honeycomb and PostHog — ship with a map today.
+
+A host may be a **wildcard pattern**: one leading `*.` label in front of two or more labels, so
+`*.ingest.sentry.io` matches `o1234.ingest.sentry.io` and `*.posthog.com` matches `eu.posthog.com`
+and `eu.i.posthog.com` — but never the bare `posthog.com`. An exact host beats a pattern, and among
+patterns the longest suffix wins. Quote it in YAML (`- "*.posthog.com"`): a bare `*` starts a YAML
+alias and the file will not parse.
 
 One route looks like this. `match.path` may carry `{name}` segments, each matching exactly one
 path segment; a literal path wins over a pattern of the same shape:
@@ -176,7 +204,23 @@ back from a faked write.
 `default_kind:` may be `write`, `unknown` or `telemetry`. `read` is refused, because it would
 forward every route the map does not list to the real service; `llm` is refused because it is
 route-level — on an LLM host only the inference routes are `llm`, and `/v1/files` or `/v1/batches`
-are real billable writes. No shipped map sets it yet.
+are real billable writes. The six telemetry maps set `default_kind: telemetry`, so an ingest path
+they do not list is still telemetry rather than a faked write; no other shipped map sets it.
+
+### `llm` and `telemetry`
+
+`llm` is a route kind in the OpenAI and Anthropic maps: `/v1/chat/completions`, `/v1/responses`,
+`/v1/embeddings`, `/v1/models`, `/v1/messages` and `/v1/messages/count_tokens` are forwarded live
+and counted in their own bucket in the run summary. Everything else on those hosts is deliberately
+unmapped, so an unlisted `POST` — `/v1/files`, `/v1/batches`, `/v1/fine_tuning/jobs` — reaches the
+fallback, is answered locally and is flagged `unclassified`. A `text/event-stream` response is
+streamed straight through to the client rather than buffered, so a streamed completion still
+arrives token by token; the recorded exchange then carries an empty body.
+
+`telemetry` is what the observability backends are classified as. It is forwarded live in every
+mode and is never written to the trace store: a recording of the agent's own tracing traffic is
+noise, and replaying it would re-emit someone else's events. It is counted as `telemetry` in the
+summary, not as a read or a write.
 
 ### Answer targets
 
@@ -222,8 +266,8 @@ Run the same command under `irimi shadow` and the refund never leaves your machi
     uv run --with stripe irimi shadow -- python examples/refund_agent/agent.py
 
 The read still goes to Stripe and returns your real test-mode charges; the POST to `/v1/refunds` is
-answered locally, so the agent prints `(no id - answered by irimi at L0)` where the refund id would
-be. That placeholder goes away once irimi mints realistic fake objects.
+answered locally with the L0 echo, so the agent prints a minted `re_...` id that no refund on
+Stripe will ever have. Re-read the charge afterwards and it carries no refund.
 
 The agent points `stripe.api_base` at the reverse door only when `IRIMI_ENGINE_ACTIVE=1`, and reads
 the port from `HTTPS_PROXY`, so `--port` works and a bare run is unaffected. Set `SLACK_BOT_TOKEN`

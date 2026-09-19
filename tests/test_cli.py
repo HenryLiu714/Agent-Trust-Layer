@@ -117,6 +117,36 @@ def test_reverse_hosts_adds_allow_host_lower_cased(tmp_path, monkeypatch):
     assert _reverse_hosts(args, index) == index.hosts | {"foo.example", "bar.example"}
 
 
+def test_engine_config_carries_the_maps(tmp_path, monkeypatch):
+    """`serve` and `shadow` both build the engine's config here, and the classifier only sees the
+    maps because `maps=index` is part of it."""
+    from irimi.cli import _engine_config
+
+    index = _shipped_index(tmp_path, monkeypatch)
+    args = argparse.Namespace(allow_host=[], port=4321)
+    cfg = _engine_config(args, index, "t3st", ca.ca_paths())
+    assert cfg.maps is index
+    assert cfg.reverse_hosts == index.hosts
+    assert (cfg.run_id, cfg.listen_host, cfg.listen_port) == ("t3st", paths.LISTEN_HOST, 4321)
+
+
+def test_engine_config_defaults_to_no_maps(tmp_path, monkeypatch):
+    """An EngineConfig built without maps classifies by the verb rule alone. That is the default
+    the engine's own tests rely on; the CLI always passes an index."""
+    from irimi.engine import EngineConfig
+
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
+    cfg = EngineConfig(
+        run_id="t3st",
+        ca=ca.ca_paths(),
+        confdir=paths.mitm_dir(),
+        listen_host=paths.LISTEN_HOST,
+        listen_port=0,
+    )
+    assert cfg.maps.services == ()
+    assert cfg.maps.hosts == frozenset()
+
+
 @pytest.mark.parametrize("value", ["127.0.0.1:8443", "https://x.example", "x.example/", " "])
 def test_allow_host_rejects_scheme_port_or_path(value, capsys):
     with pytest.raises(SystemExit) as exc:

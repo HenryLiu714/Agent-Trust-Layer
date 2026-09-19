@@ -32,13 +32,17 @@ def _parse(**overrides) -> Request:
     return parse(**args)
 
 
-def _req(method: str = "GET", headers: tuple[tuple[str, str], ...] = ()) -> Request:
+def _req(
+    method: str = "GET",
+    headers: tuple[tuple[str, str], ...] = (),
+    path: str = "/v1/charges",
+) -> Request:
     return Request(
         method=method,
         scheme="https",
         host="api.stripe.com",
         port=443,
-        path="/v1/charges",
+        path=path,
         query="",
         headers=headers,
         body=b"",
@@ -119,6 +123,133 @@ def test_classify_other_methods_are_unknown(method):
     assert cls.flags == ("unclassified",)
     assert cls.operation == f"{method} /v1/charges"
     assert cls.service == "api.stripe.com"
+
+
+# ------------------------------------------------------------ classification against the maps
+
+DEMO_MAP = """
+version: 1
+service: demo
+hosts:
+  - demo.example
+routes:
+  - match:
+      method: POST
+      path: /v1/things
+    operation: things.create
+    kind: write
+  - match:
+      method: POST
+      path: /v1/guess
+    operation: things.guess
+    kind: unknown
+"""
+
+
+def _index(tmp_path, monkeypatch, *docs: str):
+    """A MapIndex from `docs`, or from the shipped maps when none are given.
+
+    Both override locations are pointed at empty places: the loader reads `./irimi.maps.yaml` and
+    then `$IRIMI_HOME/maps.yaml`, so a developer with a real overrides file would otherwise see a
+    different index, or a MapError.
+    """
+    from irimi import paths, servicemap
+
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "ambient-home"))
+    if not docs:
+        return servicemap.load(cwd=tmp_path, maps_dir=servicemap.shipped_dir())
+    maps_dir = tmp_path / "maps"
+    maps_dir.mkdir(exist_ok=True)
+    for i, doc in enumerate(docs):
+        (maps_dir / f"{i}.yaml").write_text(doc)
+    return servicemap.load(cwd=tmp_path, maps_dir=maps_dir)
+
+
+def test_classify_uses_the_route_rule(tmp_path, monkeypatch):
+    index = _index(tmp_path, monkeypatch)
+    cls = classify(_req("POST", path="/v1/refunds"), index)
+    assert cls.service == "stripe"  # the map's service name, not the host
+    assert cls.operation == "refunds.create"
+    assert cls.kind == "write"
+    assert cls.flags == ()
+
+
+def test_classify_matched_carries_the_service_map_and_route(tmp_path, monkeypatch):
+    index = _index(tmp_path, monkeypatch)
+    cls = classify(_req("POST", path="/v1/refunds"), index)
+    assert cls.matched == index.route_for("api.stripe.com", "POST", "/v1/refunds")
+    service_map, route = cls.matched
+    assert service_map.service == "stripe"
+    assert route.human == "refund {amount} on {charge}"
+
+
+def test_classify_matches_a_pattern_segment(tmp_path, monkeypatch):
+    cls = classify(_req(path="/v1/charges/ch_1"), _index(tmp_path, monkeypatch))
+    assert (cls.operation, cls.kind) == ("charges.retrieve", "read")
+
+
+def test_classify_reads_a_post_only_services_reads_as_reads(tmp_path, monkeypatch):
+    """The whole point of the maps: Slack sends every call as POST, so the verb rule alone would
+    call this a write and fake it."""
+    req = replace(_req("POST"), host="slack.com", path="/api/conversations.history")
+    cls = classify(req, _index(tmp_path, monkeypatch))
+    assert cls.service == "slack"
+    assert cls.operation == "conversations.history"
+    assert cls.kind == "read"
+    assert cls.flags == ()
+
+
+def test_classify_falls_back_on_a_mapped_host_with_no_route(tmp_path, monkeypatch):
+    index = _index(tmp_path, monkeypatch)
+    read = classify(_req(path="/v1/nope"), index)
+    assert (read.service, read.operation, read.kind) == ("stripe", "GET /v1/nope", "read")
+    assert read.matched is None
+    write = classify(_req("POST", path="/v1/nope"), index)
+    assert (write.service, write.operation, write.kind) == ("stripe", "POST /v1/nope", "unknown")
+    assert write.flags == ("unclassified",)
+
+
+def test_classify_unmapped_host_keeps_the_host_as_the_service(tmp_path, monkeypatch):
+    index = _index(tmp_path, monkeypatch)
+    req = replace(_req("POST"), host="unmapped.example")
+    cls = classify(req, index)
+    assert (cls.service, cls.operation, cls.kind) == (
+        "unmapped.example",
+        "POST /v1/charges",
+        "unknown",
+    )
+    assert cls.flags == ("unclassified",)
+    assert classify(replace(req, method="GET"), index).kind == "read"
+
+
+def test_classify_flags_a_declared_unknown_too(tmp_path, monkeypatch):
+    """A map that says `kind: unknown` has looked and does not know, which the agent's operator
+    needs to see for the same reason an unmapped route does."""
+    req = replace(_req("POST"), host="demo.example", path="/v1/guess")
+    cls = classify(req, _index(tmp_path, monkeypatch, DEMO_MAP))
+    assert (cls.operation, cls.kind, cls.flags) == ("things.guess", "unknown", ("unclassified",))
+
+
+def test_classify_default_kind_beats_the_verb_rule(tmp_path, monkeypatch):
+    """`default_kind` is per-service, so it also catches the GETs the verb rule would forward."""
+    index = _index(
+        tmp_path,
+        monkeypatch,
+        DEMO_MAP.replace("service: demo", "service: demo\ndefault_kind: write"),
+    )
+    for method in ("GET", "POST"):
+        cls = classify(replace(_req(method), host="demo.example", path="/v1/whatever"), index)
+        assert (cls.kind, cls.flags) == ("write", ()), method
+    # An explicit route rule still wins over the service default.
+    mapped = classify(replace(_req("POST"), host="demo.example", path="/v1/things"), index)
+    assert (mapped.operation, mapped.kind) == ("things.create", "write")
+
+
+def test_classify_with_an_empty_index_is_the_verb_rule():
+    from irimi.servicemap import MapIndex
+
+    assert classify(_req("POST"), MapIndex()).kind == "unknown"
+    assert classify(_req(), MapIndex()).kind == "read"
 
 
 def test_attribute_run_without_header_uses_default():

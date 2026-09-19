@@ -1,12 +1,13 @@
 """The Engine seam. Everything outside irimi.engine.mitm talks to this protocol only."""
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
 from irimi.ca import CAPaths
 from irimi.exchange import Exchange
+from irimi.servicemap import MapIndex
 
 OnExchange = Callable[[Exchange], None]
 
@@ -23,6 +24,7 @@ class EngineConfig:
     listen_host: str
     listen_port: int  # 0 = pick a free port
     reverse_hosts: frozenset[str] = frozenset()  # hosts the reverse door may relay to; empty = none
+    maps: MapIndex = field(default_factory=MapIndex)  # loaded service maps; empty = verb rule only
 
 
 class Engine(Protocol):

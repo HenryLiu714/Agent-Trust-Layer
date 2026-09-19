@@ -236,7 +236,9 @@ def test_post_is_faked_l0(engine, upstream):
         eng.listen_port(), "POST", f"http://127.0.0.1:{upstream}/things", body=b'{"a":1}'
     )
     assert status == 200
-    assert json.loads(data) == {}
+    body = json.loads(data)
+    assert body["a"] == 1  # the L0 echo reflects the request's own fields
+    assert sorted(body) == ["a", "created"]  # unmapped: nothing minted
     ex = seen[0]
     assert ex.answered_by == "fake-L0"
     assert ex.kind == "unknown"
@@ -256,11 +258,11 @@ def test_mapped_write_is_named_and_faked(tmp_path, monkeypatch, upstream):
     finally:
         stop()
     assert status == 200
-    assert json.loads(data) == {}  # the upstream's do_POST would have been a 500
+    assert json.loads(data)["a"] == 1  # the upstream's do_POST would have been a 500
     ex = seen[0]
     assert (ex.service, ex.operation, ex.kind) == ("demo", "things.create", "write")
     assert ex.answered_by == "fake-L0"
-    assert ex.flags == ()
+    assert ex.flags == ("fidelity:L0",)
 
 
 def test_mapped_read_is_named_and_forwarded(tmp_path, monkeypatch, upstream):
@@ -313,7 +315,7 @@ def test_undecodable_request_body_is_still_faked(engine, upstream):
         extra_headers={"content-encoding": "gzip"},
     )
     assert status == 200  # the upstream answers every POST with 500, so it was not reached
-    assert json.loads(data) == {}
+    assert json.loads(data)["not"] == "gzip"  # reflected from the body we could not decode
     assert [ex.answered_by for ex in seen] == ["fake-L0"]
     assert seen[0].request.body == b'{"not":"gzip"}'
 
@@ -462,7 +464,7 @@ def test_reverse_door_write_is_faked(tmp_path, monkeypatch):
     finally:
         stop()
     assert status == 200
-    assert json.loads(data) == {}
+    assert json.loads(data)["a"] == 1
     ex = seen[0]
     assert ex.door == "reverse"
     assert ex.answered_by == "fake-L0"

@@ -539,3 +539,80 @@ def test_reverse_door_request_without_host_header_gets_one(tmp_path, monkeypatch
     assert len(seen) == 1
     assert seen[0].door == "reverse"
     assert ("host", "127.0.0.1:1") in seen[0].request.headers
+
+
+# ------------------------------------------- telemetry is never stored, and SSE streams (#8/#9)
+
+
+class _RecordingStore:
+    """A TraceStore that remembers what it was handed. NullStore cannot answer this question."""
+
+    def __init__(self):
+        self.recorded = []
+
+    def record(self, exchange):
+        self.recorded.append(exchange)
+
+    def close(self):
+        return None
+
+
+def _addon(tmp_path, monkeypatch, store):
+    """An IrimiAddon with no proxy under it. `_finish` is a plain method; driving a whole engine
+    would only add a thread between the assertion and the thing asserted."""
+    from irimi.engine.mitm import IrimiAddon
+
+    seen = []
+    addon = IrimiAddon(
+        _config(tmp_path, monkeypatch),
+        ShadowPolicy(),
+        store,
+        NoOverlay(),
+        seen.append,
+        lambda port, error: None,
+    )
+    return addon, seen
+
+
+def _exchange(kind, answered_by="live"):
+    from irimi.exchange import Exchange, Request
+
+    request = Request(
+        method="POST",
+        scheme="https",
+        host="o0.ingest.sentry.io",
+        port=443,
+        path="/api/7/envelope/",
+        query="",
+        headers=(),
+        body=b"",
+    )
+    return Exchange(
+        request=request,
+        response=Response(status=200, headers=(), body=b""),
+        service="sentry",
+        operation="envelope.send",
+        kind=kind,
+        answered_by=answered_by,
+        validation="unvalidated",
+        run_id="t3st",
+    )
+
+
+def test_telemetry_is_reported_but_never_recorded(tmp_path, monkeypatch):
+    """Forwarded in every mode, counted in its own bucket, and kept out of the trace store: a
+    recording of the agent's own observability traffic would re-emit someone else's events."""
+    store = _RecordingStore()
+    addon, seen = _addon(tmp_path, monkeypatch, store)
+    addon._finish(_exchange("telemetry"))
+    assert store.recorded == []
+    assert [ex.kind for ex in seen] == ["telemetry"]
+
+
+@pytest.mark.parametrize("kind", ["read", "write", "llm", "unknown"])
+def test_every_other_kind_is_still_recorded(tmp_path, monkeypatch, kind):
+    store = _RecordingStore()
+    addon, seen = _addon(tmp_path, monkeypatch, store)
+    addon._finish(_exchange(kind))
+    assert [ex.kind for ex in store.recorded] == [kind]
+    assert [ex.kind for ex in seen] == [kind]

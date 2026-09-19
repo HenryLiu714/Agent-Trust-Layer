@@ -44,15 +44,6 @@ routes:
 """
 
 
-@pytest.fixture(autouse=True)
-def no_ambient_overrides(tmp_path, monkeypatch):
-    """The loader reads `./irimi.maps.yaml` and then `$IRIMI_HOME/maps.yaml`, so a developer who
-    keeps a real overrides file would otherwise change what every test here sees. Point both at
-    empty directories; the tests that exercise override precedence set them again themselves."""
-    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "ambient-home"))
-    monkeypatch.chdir(tmp_path)
-
-
 def write_maps(tmp_path, *docs: str):
     """Write each document as its own <n>.yaml in a fresh maps directory and return it."""
     directory = tmp_path / "maps"
@@ -682,7 +673,7 @@ def test_cwd_override_wins_over_home(tmp_path, monkeypatch):
     home = tmp_path / "home"
     cwd = tmp_path / "cwd"
     home.mkdir()
-    cwd.mkdir()
+    cwd.mkdir(exist_ok=True)  # tests/conftest.py already made this one and chdir'd into it
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(home))
     (home / servicemap.HOME_OVERRIDE_NAME).write_text("service: demo\ntarget: http://127.0.0.1:1\n")
     (cwd / servicemap.CWD_OVERRIDE_NAME).write_text("service: demo\ntarget: http://127.0.0.1:2\n")
@@ -695,7 +686,7 @@ def test_home_override_is_the_fallback(tmp_path, monkeypatch):
     home = tmp_path / "home"
     cwd = tmp_path / "cwd"
     home.mkdir()
-    cwd.mkdir()
+    cwd.mkdir(exist_ok=True)  # tests/conftest.py already made this one and chdir'd into it
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(home))
     (home / servicemap.HOME_OVERRIDE_NAME).write_text("service: demo\ntarget: http://127.0.0.1:1\n")
     assert servicemap.override_path(cwd) == home / servicemap.HOME_OVERRIDE_NAME

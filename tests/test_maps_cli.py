@@ -1,18 +1,10 @@
 import pytest
 
-from irimi import paths, servicemap
+from irimi import servicemap
 from irimi.cli import main
 
 BAD_OVERRIDE = "service: stripe\ntarget: http://stub.example:3000\n"
 GOOD_OVERRIDE = "service: stripe\ntarget: http://127.0.0.1:3000\n"
-
-
-@pytest.fixture(autouse=True)
-def isolated(tmp_path, monkeypatch):
-    """No overrides file and no CA unless a test makes one: $IRIMI_HOME and the cwd are fresh."""
-    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "home"))
-    (tmp_path / "cwd").mkdir()
-    monkeypatch.chdir(tmp_path / "cwd")
 
 
 def test_maps_list_prints_every_host_with_its_route_count(capsys):

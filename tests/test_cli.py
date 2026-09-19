@@ -92,37 +92,37 @@ def test_shadow_help_has_allow_host(capsys):
     assert "--allow-host" in capsys.readouterr().out
 
 
-def _shipped_index(tmp_path, monkeypatch):
+def _shipped_index():
     """The shipped maps with no overrides file in play: a real ./irimi.maps.yaml or
-    $IRIMI_HOME/maps.yaml would otherwise change the index, or refuse to load at all."""
+    $IRIMI_HOME/maps.yaml would otherwise change the index, or refuse to load at all.
+    tests/conftest.py points both at fresh empty directories, so there is nothing to isolate."""
     from irimi import servicemap
 
-    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "ambient-home"))
-    return servicemap.load(maps_dir=servicemap.shipped_dir(), cwd=tmp_path)
+    return servicemap.load(maps_dir=servicemap.shipped_dir())
 
 
-def test_reverse_hosts_are_the_mapped_hosts(tmp_path, monkeypatch):
+def test_reverse_hosts_are_the_mapped_hosts():
     from irimi.cli import _reverse_hosts
 
-    index = _shipped_index(tmp_path, monkeypatch)
+    index = _shipped_index()
     assert _reverse_hosts(argparse.Namespace(allow_host=[]), index) == index.hosts
     assert {"api.stripe.com", "slack.com"} <= index.hosts
 
 
-def test_reverse_hosts_adds_allow_host_lower_cased(tmp_path, monkeypatch):
+def test_reverse_hosts_adds_allow_host_lower_cased():
     from irimi.cli import _reverse_hosts
 
-    index = _shipped_index(tmp_path, monkeypatch)
+    index = _shipped_index()
     args = argparse.Namespace(allow_host=[" Foo.Example ", "", "bar.example"])
     assert _reverse_hosts(args, index) == index.hosts | {"foo.example", "bar.example"}
 
 
-def test_engine_config_carries_the_maps(tmp_path, monkeypatch):
+def test_engine_config_carries_the_maps():
     """`serve` and `shadow` both build the engine's config here, and the classifier only sees the
     maps because `maps=index` is part of it."""
     from irimi.cli import _engine_config
 
-    index = _shipped_index(tmp_path, monkeypatch)
+    index = _shipped_index()
     args = argparse.Namespace(allow_host=[], port=4321)
     cfg = _engine_config(args, index, "t3st", ca.ca_paths())
     assert cfg.maps is index

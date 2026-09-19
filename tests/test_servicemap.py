@@ -87,7 +87,18 @@ def refuses(tmp_path, doc: str, message: str, **kwargs):
 
 def test_shipped_maps_load():
     index = servicemap.load(cwd=None, maps_dir=servicemap.shipped_dir())
-    assert {sm.service for sm in index.services} == {"slack", "stripe"}
+    assert {sm.service for sm in index.services} == {
+        "anthropic",
+        "datadog",
+        "honeycomb",
+        "langfuse",
+        "langsmith",
+        "openai",
+        "posthog",
+        "sentry",
+        "slack",
+        "stripe",
+    }
 
 
 def test_shipped_stripe_map_is_complete():
@@ -109,12 +120,14 @@ def test_shipped_stripe_map_is_complete():
     assert refund.volatile == ("idempotency_key",)
 
 
-def test_shipped_slack_map_is_post_only_and_has_no_webhook_host():
+def test_shipped_slack_map_is_post_only_and_owns_the_webhook_host():
     index = servicemap.load(maps_dir=servicemap.shipped_dir())
     slack = index.service_for("slack.com")
     assert slack is not None
     assert slack.verbs == "post-only"
-    assert "hooks.slack.com" not in slack.hosts
+    # One service, not two: `_check_unique` forbids the host appearing in both, and a second
+    # service would split the Slack summary in two.
+    assert index.service_for("hooks.slack.com") is slack
     post = servicemap.match_route(slack, "POST", "/api/chat.postMessage")
     history = servicemap.match_route(slack, "POST", "/api/conversations.history")
     assert post is not None and post.kind == "write"
@@ -180,7 +193,13 @@ def test_shipped_maps_have_no_target_and_a_human_on_every_write():
 
 def test_shipped_maps_are_in_the_wheel_directory():
     names = sorted(p.name for p in servicemap.shipped_dir().iterdir() if p.suffix == ".yaml")
-    assert names == ["slack.yaml", "stripe.yaml"]
+    assert names == [
+        "anthropic.yaml",
+        "openai.yaml",
+        "slack.yaml",
+        "stripe.yaml",
+        "telemetry.yaml",
+    ]
 
 
 # ------------------------------------------------------------------------------------ every field

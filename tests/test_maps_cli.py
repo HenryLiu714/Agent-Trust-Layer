@@ -18,9 +18,10 @@ def isolated(tmp_path, monkeypatch):
 def test_maps_list_prints_every_host_with_its_route_count(capsys):
     assert main(["maps", "list"]) == 0
     out = capsys.readouterr().out
-    assert "irimi maps · 2 service(s) · 6 host(s) · 19 route(s)" in out
+    assert "irimi maps · 10 service(s) · 17 host(s) · 32 route(s)" in out
     assert "api.stripe.com" in out and "stripe" in out and "10 routes" in out
-    assert "slack.com" in out and "9 routes" in out
+    assert "hooks.slack.com" in out and "slack" in out and "10 routes" in out
+    assert "*.ingest.sentry.io" in out and "sentry" in out
     assert "target: self" in out
     assert "overrides from" not in out
 

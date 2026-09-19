@@ -1,0 +1,44 @@
+# OpenAI. `llm` is a route kind here, never a host default: on an LLM host only the inference
+# routes are `llm`, and everything else on api.openai.com is a real, billable write (design §4.3).
+# `default_kind: llm` is refused by the loader for exactly that reason.
+#
+# Deliberately unlisted, so the RFC fallback makes them `unknown` + `unclassified` and irimi answers
+# them locally: /v1/files, /v1/batches, /v1/fine_tuning/jobs, /v1/vector_stores, /v1/assistants.
+# Uploading a training file or starting a fine-tune costs money and leaves state behind; a POST irimi
+# has not classified is faked, not forwarded.
+#
+# `match:` is written in block style on purpose: a YAML flow mapping cannot hold a plain scalar
+# containing `{`, so `match: {method: GET, path: /v1/models/{model}}` is a parse error.
+version: 1
+service: openai
+verbs: honest # OpenAI reads are GETs, so the HTTP method carries information here
+hosts:
+  - api.openai.com
+routes:
+  - match:
+      method: POST
+      path: /v1/chat/completions
+    operation: chat.completions.create
+    kind: llm
+    human: chat completion with {model}
+
+  - match:
+      method: POST
+      path: /v1/responses
+    operation: responses.create
+    kind: llm
+    human: response with {model}
+
+  - match:
+      method: POST
+      path: /v1/embeddings
+    operation: embeddings.create
+    kind: llm
+    human: embed with {model}
+
+  - match:
+      method: GET
+      path: /v1/models
+    operation: models.list
+    kind: llm
+    human: list models

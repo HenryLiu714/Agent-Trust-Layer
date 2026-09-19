@@ -541,3 +541,30 @@ def test_reverse_door_request_without_host_header_gets_one(tmp_path, monkeypatch
     assert len(seen) == 1
     assert seen[0].door == "reverse"
     assert ("host", "127.0.0.1:1") in seen[0].request.headers
+
+
+def test_faked_write_reflects_a_form_body_and_is_flagged(engine, upstream):
+    """The L0 echo reaches the client through the proxy, form-encoded as stripe-python posts."""
+    eng, seen = engine
+    status, data = _via_proxy(
+        eng.listen_port(),
+        "POST",
+        f"http://127.0.0.1:{upstream}/things",
+        body=b"amount=4900&charge=ch_test",
+        extra_headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    assert status == 200
+    body = json.loads(data)
+    assert body["amount"] == 4900
+    assert body["charge"] == "ch_test"
+    assert isinstance(body["created"], int)
+    ex = seen[0]
+    assert ex.answered_by == "fake-L0"
+    assert "fidelity:L0" in ex.flags
+
+
+def test_live_read_carries_no_fidelity_flag(engine, upstream):
+    eng, seen = engine
+    _via_proxy(eng.listen_port(), "GET", f"http://127.0.0.1:{upstream}/hello")
+    assert seen[0].answered_by == "live"
+    assert seen[0].flags == ()

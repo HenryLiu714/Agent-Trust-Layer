@@ -39,9 +39,15 @@ uv run irimi --help
 ## Try the proxy
 
 `irimi serve` runs the shadow proxy in the foreground on `127.0.0.1:4000`. Reads are forwarded to
-the real service; writes are answered locally with a placeholder `fake-L0` response and never reach
+the real service; writes are answered locally with a `fake-L0` response and never reach
 the network. Which is which comes from the service maps, and from the HTTP method for anything the
 maps do not cover. Each exchange prints as one line.
+
+A `fake-L0` answer is a `200` whose JSON body echoes the request's own fields, stamps `created`,
+and mints an id for every field the matched route names: a Stripe refund comes back with
+`id: re_...`, `balance_transaction: txn_...` and `object: refund`, so stripe-python parses it. A
+Slack call gets Slack's own `{"ok": true, "ts": "..."}` envelope instead, because its SDK refuses
+anything else.
 
     uv run irimi serve
     # in another terminal

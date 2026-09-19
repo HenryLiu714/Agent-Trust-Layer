@@ -236,7 +236,9 @@ def test_post_is_faked_l0(engine, upstream):
         eng.listen_port(), "POST", f"http://127.0.0.1:{upstream}/things", body=b'{"a":1}'
     )
     assert status == 200
-    assert json.loads(data) == {}
+    body = json.loads(data)
+    assert body["a"] == 1  # the L0 echo reflects the request's own fields
+    assert sorted(body) == ["a", "created"]  # unmapped: nothing minted
     ex = seen[0]
     assert ex.answered_by == "fake-L0"
     assert ex.kind == "unknown"
@@ -256,11 +258,11 @@ def test_mapped_write_is_named_and_faked(tmp_path, monkeypatch, upstream):
     finally:
         stop()
     assert status == 200
-    assert json.loads(data) == {}  # the upstream's do_POST would have been a 500
+    assert json.loads(data)["a"] == 1  # the upstream's do_POST would have been a 500
     ex = seen[0]
     assert (ex.service, ex.operation, ex.kind) == ("demo", "things.create", "write")
     assert ex.answered_by == "fake-L0"
-    assert ex.flags == ()
+    assert ex.flags == ("fidelity:L0",)
 
 
 def test_mapped_read_is_named_and_forwarded(tmp_path, monkeypatch, upstream):
@@ -313,7 +315,7 @@ def test_undecodable_request_body_is_still_faked(engine, upstream):
         extra_headers={"content-encoding": "gzip"},
     )
     assert status == 200  # the upstream answers every POST with 500, so it was not reached
-    assert json.loads(data) == {}
+    assert json.loads(data)["not"] == "gzip"  # reflected from the body we could not decode
     assert [ex.answered_by for ex in seen] == ["fake-L0"]
     assert seen[0].request.body == b'{"not":"gzip"}'
 
@@ -462,7 +464,7 @@ def test_reverse_door_write_is_faked(tmp_path, monkeypatch):
     finally:
         stop()
     assert status == 200
-    assert json.loads(data) == {}
+    assert json.loads(data)["a"] == 1
     ex = seen[0]
     assert ex.door == "reverse"
     assert ex.answered_by == "fake-L0"
@@ -539,3 +541,30 @@ def test_reverse_door_request_without_host_header_gets_one(tmp_path, monkeypatch
     assert len(seen) == 1
     assert seen[0].door == "reverse"
     assert ("host", "127.0.0.1:1") in seen[0].request.headers
+
+
+def test_faked_write_reflects_a_form_body_and_is_flagged(engine, upstream):
+    """The L0 echo reaches the client through the proxy, form-encoded as stripe-python posts."""
+    eng, seen = engine
+    status, data = _via_proxy(
+        eng.listen_port(),
+        "POST",
+        f"http://127.0.0.1:{upstream}/things",
+        body=b"amount=4900&charge=ch_test",
+        extra_headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    assert status == 200
+    body = json.loads(data)
+    assert body["amount"] == 4900
+    assert body["charge"] == "ch_test"
+    assert isinstance(body["created"], int)
+    ex = seen[0]
+    assert ex.answered_by == "fake-L0"
+    assert "fidelity:L0" in ex.flags
+
+
+def test_live_read_carries_no_fidelity_flag(engine, upstream):
+    eng, seen = engine
+    _via_proxy(eng.listen_port(), "GET", f"http://127.0.0.1:{upstream}/hello")
+    assert seen[0].answered_by == "live"
+    assert seen[0].flags == ()

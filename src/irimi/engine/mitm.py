@@ -33,6 +33,7 @@ class _Pending:
     run_id: str
     answered_by: AnsweredBy
     door: Door
+    flags: tuple[str, ...]  # what the policy attached to its answer, e.g. fidelity:L0
 
 
 def _headers_from_fields(fields: Sequence[tuple[bytes, bytes]]) -> Headers:
@@ -130,8 +131,8 @@ class IrimiAddon:
                 return
         cls = pipeline.classify(req, self.config.maps)
         run_id = pipeline.attribute_run(req, self.config.run_id)
-        ans = self.policy.answer(req, cls.kind)
-        flow.metadata[META_KEY] = _Pending(req, cls, run_id, ans.answered_by, door)
+        ans = self.policy.answer(req, cls)
+        flow.metadata[META_KEY] = _Pending(req, cls, run_id, ans.answered_by, door, ans.flags)
         if ans.response is not None:
             flow.response = _to_mitm_response(ans.response)
 
@@ -168,6 +169,7 @@ class IrimiAddon:
             pending.classification,
             pending.answered_by,
             pending.run_id,
+            extra_flags=pending.flags,
             door=pending.door,
         )
         if ex.answered_by != "live":
@@ -187,6 +189,8 @@ class IrimiAddon:
             pending.classification,
             pending.answered_by,
             pending.run_id,
+            # Not pending.flags: a flow that errored was never answered, so it carries no
+            # fidelity flag. Only the upstream failure is worth saying.
             extra_flags=(UPSTREAM_ERROR_FLAG,),
             door=pending.door,
         )

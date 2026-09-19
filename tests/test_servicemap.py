@@ -710,3 +710,73 @@ def test_route_and_servicemap_defaults():
     assert (sm.verbs, sm.target, sm.target_reads) == ("honest", servicemap.SELF_TARGET, False)
     assert sm.default_kind is None
     assert servicemap.target_for(sm, route) == servicemap.SELF_TARGET
+
+
+# ------------------------------------------------- a maps directory that is missing or holds none
+
+
+def test_missing_maps_directory_is_a_named_refusal(tmp_path):
+    missing = tmp_path / "nope"
+    with pytest.raises(MapError) as exc:
+        servicemap.load_shipped(maps_dir=missing)
+    assert str(missing) in str(exc.value)
+    assert "cannot read the service maps directory" in str(exc.value)
+
+
+def test_empty_maps_directory_is_a_named_refusal(tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(MapError) as exc:
+        servicemap.load_shipped(maps_dir=empty)
+    assert str(empty) in str(exc.value)
+    assert "no service maps found" in str(exc.value)
+
+
+def test_a_directory_with_no_yaml_is_the_same_refusal(tmp_path):
+    """The rule is 'no maps parsed', not 'no files present'."""
+    directory = tmp_path / "not-maps"
+    directory.mkdir()
+    (directory / "notes.txt").write_text("not a map\n")
+    with pytest.raises(MapError) as exc:
+        servicemap.load_shipped(maps_dir=directory)
+    assert "no service maps found" in str(exc.value)
+
+
+def test_an_unreadable_maps_directory_is_a_named_refusal(tmp_path):
+    """A stripped or damaged install is a refusal too, not an OSError out of `iterdir`."""
+    import os
+
+    if os.geteuid() == 0:
+        pytest.skip("root ignores the directory mode, so the scan would succeed")
+    directory = tmp_path / "locked"
+    directory.mkdir()
+    (directory / "demo.yaml").write_text(GOOD)
+    os.chmod(directory, 0o000)
+    try:
+        try:
+            list(directory.iterdir())
+        except PermissionError:
+            pass
+        else:
+            pytest.skip("this filesystem does not honour mode 0o000 on a directory")
+        with pytest.raises(MapError) as exc:
+            servicemap.load_shipped(maps_dir=directory)
+    finally:
+        os.chmod(directory, 0o700)
+    assert str(directory) in str(exc.value)
+    assert "cannot read the service maps directory" in str(exc.value)
+
+
+@pytest.mark.parametrize("argv", [["maps", "list"], ["serve"], ["shadow", "--", "true"]])
+def test_a_missing_maps_directory_is_one_line_on_the_cli(tmp_path, monkeypatch, capsys, argv):
+    """The bug this issue exists for: a stripped install printed a traceback, not a refusal."""
+    from irimi.cli import main
+
+    missing = tmp_path / "gone"
+    monkeypatch.setattr(servicemap, "shipped_dir", lambda: missing)
+    assert main(argv) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: ")
+    assert str(missing) in err
+    assert "Traceback" not in err
+    assert err.count("\n") == 1

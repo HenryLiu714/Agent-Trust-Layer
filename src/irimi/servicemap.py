@@ -4,6 +4,13 @@ A map names a service, the hosts it uses, and its routes. Each route carries an 
 kind (`read` / `write` / `llm` / `telemetry` / `unknown`), a human template for the summary, the id
 prefixes the faker mints, the fields duplicate detection must ignore, and its answer target.
 
+A host is a bare name, or a **wildcard pattern**: one leading `*.` label followed by at least two
+more labels (`*.ingest.sentry.io`). A pattern matches one or more leading labels, so
+`*.posthog.com` matches `eu.posthog.com` and `eu.i.posthog.com` but never the bare `posthog.com`.
+An exact host always beats a pattern, and among patterns the longest suffix wins. A pattern
+classifies traffic through the forward door; it is deliberately **not** a reverse-door allow-list
+entry, because that door takes one literal host per request (see `MapIndex.hosts`).
+
 The **answer target** (design D20) is `self` by default, meaning irimi answers the route itself
 with the local fake. A service or a route may name an `http(s)` URL instead, and `target_reads:
 true` on a service sends that service's reads to its target as well. Issue #16 does the
@@ -96,21 +103,53 @@ class ServiceMap:
 
 @dataclass
 class MapIndex:
-    """Every loaded service, with a host lookup. `MapIndex()` is the empty index."""
+    """Every loaded service, with a host lookup. `MapIndex()` is the empty index.
+
+    Two lookups, because a map may claim a host either exactly or by wildcard pattern. Duplicate
+    detection does not distinguish them: `*.posthog.com` in two maps is the same "already mapped"
+    refusal as `api.stripe.com` in two maps, while `*.posthog.com` in one map and `eu.posthog.com`
+    in another is allowed, because the exact host wins and the result is unambiguous.
+    """
 
     services: tuple[ServiceMap, ...] = ()
     by_host: dict[str, ServiceMap] = field(init=False, default_factory=dict)
+    by_suffix: dict[str, ServiceMap] = field(init=False, default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.by_host = {host: sm for sm in self.services for host in sm.hosts}
+        self.by_host = {h: sm for sm in self.services for h in sm.hosts if not _is_pattern(h)}
+        # `*.posthog.com` is keyed by `.posthog.com`, so a match is a plain `str.endswith` and the
+        # leading dot is what stops it from matching the bare `posthog.com`.
+        self.by_suffix = {h[1:]: sm for sm in self.services for h in sm.hosts if _is_pattern(h)}
 
     @property
     def hosts(self) -> frozenset[str]:
-        """Every host in every loaded map. This is the reverse door's allow-list."""
+        """Every exact host in every loaded map. This is the reverse door's allow-list.
+
+        Wildcard patterns are deliberately left out. The reverse door relays one literal host per
+        request and `pipeline.rewrite_reverse` compares it with `host not in allowed_hosts`; an
+        allow-list holding `*.datadoghq.com` would either never match or have to grow a matcher
+        that quietly widens what the door relays. Reach a wildcard host through the door with an
+        explicit `--allow-host <host>`.
+        """
         return frozenset(self.by_host)
 
+    @property
+    def patterns(self) -> tuple[str, ...]:
+        """Every wildcard host spelling (`*.…`), sorted. For `irimi maps list`."""
+        return tuple(sorted("*" + suffix for suffix in self.by_suffix))
+
     def service_for(self, host: str) -> ServiceMap | None:
-        return self.by_host.get(host.lower())
+        """The service claiming `host`: exact match first, then the longest matching pattern."""
+        host = host.lower()
+        exact = self.by_host.get(host)
+        if exact is not None:
+            return exact
+        best: ServiceMap | None = None
+        best_length = 0
+        for suffix, sm in self.by_suffix.items():
+            if host.endswith(suffix) and len(suffix) > best_length:
+                best, best_length = sm, len(suffix)
+        return best
 
     def route_for(self, host: str, method: str, path: str) -> tuple[ServiceMap, Route] | None:
         """The service and route for a request, or None when the host or the route is unmapped."""
@@ -431,12 +470,21 @@ def _parse_match(raw: Any, source: str) -> tuple[str, str]:
     return method, path
 
 
+def _is_pattern(host: str) -> bool:
+    """True for a wildcard host spelling. Only `_parse_hosts` decides whether one is well formed."""
+    return host.startswith("*.")
+
+
 def _parse_hosts(raw: Any, source: str) -> frozenset[str]:
     if not isinstance(raw, list) or not raw:
         raise MapError(f"{source}: `hosts` must be a non-empty list of bare host names")
     hosts: set[str] = set()
     for item in raw:
         host = _parse_str(item, f"{source}: `hosts`").strip().lower()
+        # The wildcard rule runs first, so every bad `*` spelling gets the wildcard message
+        # rather than the generic one (`*.` would otherwise trip the trailing-dot check).
+        if "*" in host:
+            _check_pattern(host, item, source)
         if not host or "/" in host or ":" in host or host != host.strip("."):
             raise MapError(
                 f"{source}: host {item!r} must be a bare name with no scheme, port or path"
@@ -445,6 +493,21 @@ def _parse_hosts(raw: Any, source: str) -> frozenset[str]:
             raise MapError(f"{source}: host {host!r} is listed twice")
         hosts.add(host)
     return frozenset(hosts)
+
+
+def _check_pattern(host: str, item: Any, source: str) -> None:
+    """A wildcard host is exactly one leading `*.` label plus two or more labels of its own.
+
+    `*.com` is refused along with `*foo.com`, `foo.*.com` and `**.foo.com`: a single label after
+    the star claims a whole public suffix, and every other spelling is the silent-never-matches
+    shape issue #9 was opened about.
+    """
+    rest = host[2:] if _is_pattern(host) else ""
+    if not _is_pattern(host) or "*" in rest or "." not in rest or "" in rest.split("."):
+        raise MapError(
+            f"{source}: host {item!r} may use a wildcard only as a leading '*.' label in front of "
+            "two or more labels, e.g. *.ingest.sentry.io"
+        )
 
 
 def _parse_ids(raw: Any, where: str) -> dict[str, str]:

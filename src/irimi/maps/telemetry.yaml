@@ -1,0 +1,109 @@
+# The observability backends an agent's own SDKs talk to: tracing, error reporting and product
+# analytics. One file, one YAML document per vendor, because each vendor is its own service name.
+#
+# Telemetry is forwarded live in every mode and is never written to the trace store: a recording of
+# the agent's own observability traffic is noise, and replaying it would re-emit someone else's
+# events (#9). It is counted in its own bucket in the run summary, not as a read or a write.
+#
+# `default_kind: telemetry` is what makes an ingest path this file does not list telemetry rather
+# than a faked write. Each document lists one representative route anyway, because `routes` must be
+# a non-empty list and the named operation is what the summary line prints.
+#
+# Several hosts here are wildcard patterns (`*.ingest.sentry.io`), because these vendors hand every
+# project its own subdomain. A pattern classifies traffic through the forward door only: it is not
+# a reverse-door allow-list entry, so reaching one through `http://127.0.0.1:4000/<host>/...` needs
+# an explicit `--allow-host <host>`. Quote every wildcard: a bare `*` opens a YAML alias.
+version: 1
+service: langsmith
+verbs: honest
+default_kind: telemetry
+hosts:
+  - api.smith.langchain.com
+routes:
+  - match:
+      method: POST
+      path: /runs/batch
+    operation: runs.batch
+    kind: telemetry
+    human: send a batch of LangSmith runs
+
+---
+version: 1
+service: langfuse
+verbs: honest
+default_kind: telemetry
+hosts:
+  # The shared cloud host is listed exactly as well as by pattern, so the common case resolves
+  # without walking the suffixes. An exact host always beats a pattern.
+  - cloud.langfuse.com
+  - "*.langfuse.com"
+routes:
+  - match:
+      method: POST
+      path: /api/public/ingestion
+    operation: public.ingestion
+    kind: telemetry
+    human: send a batch of Langfuse events
+
+---
+version: 1
+service: sentry
+verbs: honest
+default_kind: telemetry
+hosts:
+  - "*.ingest.sentry.io"
+routes:
+  - match:
+      method: POST
+      path: /api/{project}/envelope/
+    operation: envelope.send
+    kind: telemetry
+    human: send a Sentry envelope for project {project}
+
+---
+version: 1
+service: datadog
+verbs: honest
+default_kind: telemetry
+hosts:
+  - "*.datadoghq.com"
+routes:
+  - match:
+      method: POST
+      path: /api/v2/logs
+    operation: logs.submit
+    kind: telemetry
+    human: submit logs to Datadog
+
+---
+version: 1
+service: honeycomb
+verbs: honest
+default_kind: telemetry
+hosts:
+  - api.honeycomb.io
+routes:
+  - match:
+      method: POST
+      path: /1/batch/{dataset}
+    operation: batch.send
+    kind: telemetry
+    human: send a batch of events to {dataset}
+
+---
+version: 1
+service: posthog
+verbs: honest
+default_kind: telemetry
+hosts:
+  # Both patterns are here on purpose: the regional ingest hosts sit under `*.i.posthog.com`, which
+  # is the longer suffix and therefore the one that wins.
+  - "*.posthog.com"
+  - "*.i.posthog.com"
+routes:
+  - match:
+      method: POST
+      path: /batch/
+    operation: batch.capture
+    kind: telemetry
+    human: capture a batch of PostHog events

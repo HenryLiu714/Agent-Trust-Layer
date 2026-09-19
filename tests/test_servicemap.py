@@ -78,7 +78,18 @@ def refuses(tmp_path, doc: str, message: str, **kwargs):
 
 def test_shipped_maps_load():
     index = servicemap.load(cwd=None, maps_dir=servicemap.shipped_dir())
-    assert {sm.service for sm in index.services} == {"slack", "stripe"}
+    assert {sm.service for sm in index.services} == {
+        "anthropic",
+        "datadog",
+        "honeycomb",
+        "langfuse",
+        "langsmith",
+        "openai",
+        "posthog",
+        "sentry",
+        "slack",
+        "stripe",
+    }
 
 
 def test_shipped_stripe_map_is_complete():
@@ -100,12 +111,14 @@ def test_shipped_stripe_map_is_complete():
     assert refund.volatile == ("idempotency_key",)
 
 
-def test_shipped_slack_map_is_post_only_and_has_no_webhook_host():
+def test_shipped_slack_map_is_post_only_and_owns_the_webhook_host():
     index = servicemap.load(maps_dir=servicemap.shipped_dir())
     slack = index.service_for("slack.com")
     assert slack is not None
     assert slack.verbs == "post-only"
-    assert "hooks.slack.com" not in slack.hosts
+    # One service, not two: `_check_unique` forbids the host appearing in both, and a second
+    # service would split the Slack summary in two.
+    assert index.service_for("hooks.slack.com") is slack
     post = servicemap.match_route(slack, "POST", "/api/chat.postMessage")
     history = servicemap.match_route(slack, "POST", "/api/conversations.history")
     assert post is not None and post.kind == "write"
@@ -171,7 +184,13 @@ def test_shipped_maps_have_no_target_and_a_human_on_every_write():
 
 def test_shipped_maps_are_in_the_wheel_directory():
     names = sorted(p.name for p in servicemap.shipped_dir().iterdir() if p.suffix == ".yaml")
-    assert names == ["slack.yaml", "stripe.yaml"]
+    assert names == [
+        "anthropic.yaml",
+        "openai.yaml",
+        "slack.yaml",
+        "stripe.yaml",
+        "telemetry.yaml",
+    ]
 
 
 # ------------------------------------------------------------------------------------ every field
@@ -780,3 +799,121 @@ def test_a_missing_maps_directory_is_one_line_on_the_cli(tmp_path, monkeypatch, 
     assert str(missing) in err
     assert "Traceback" not in err
     assert err.count("\n") == 1
+
+
+# ------------------------------------------------------------------------- wildcard hosts (#9)
+
+# `*` opens a YAML alias, so every wildcard host has to be quoted or the document does not parse.
+WILDCARD = """
+version: 1
+service: wild
+hosts:
+  - "*.demo.example"
+routes:
+  - match:
+      method: POST
+      path: /ingest
+    operation: wild.ingest
+    kind: write
+    human: ingest one event
+"""
+
+EXACT_UNDER_WILDCARD = """
+version: 1
+service: exact
+hosts:
+  - one.demo.example
+routes:
+  - match:
+      method: POST
+      path: /ingest
+    operation: exact.ingest
+    kind: write
+    human: ingest one event
+"""
+
+DEEPER_WILDCARD = """
+version: 1
+service: deeper
+hosts:
+  - "*.eu.demo.example"
+routes:
+  - match:
+      method: POST
+      path: /ingest
+    operation: deeper.ingest
+    kind: write
+    human: ingest one event
+"""
+
+
+def test_a_wildcard_host_matches_one_or_more_leading_labels(tmp_path):
+    index = load(tmp_path, WILDCARD)
+    assert index.service_for("a.demo.example") is index.services[0]
+    assert index.service_for("a.b.demo.example") is index.services[0]
+    assert index.service_for("A.DEMO.EXAMPLE") is index.services[0]
+
+
+def test_a_wildcard_host_does_not_match_the_bare_domain(tmp_path):
+    """`*.demo.example` claims subdomains only; the stored suffix keeps its leading dot so that
+    `demo.example` itself, and a name merely ending in it, both miss."""
+    index = load(tmp_path, WILDCARD)
+    assert index.service_for("demo.example") is None
+    assert index.service_for("notdemo.example") is None
+    assert index.service_for("demo.example.evil.test") is None
+
+
+def test_an_exact_host_beats_a_wildcard(tmp_path):
+    index = load(tmp_path, WILDCARD, EXACT_UNDER_WILDCARD)
+    one = index.service_for("one.demo.example")
+    two = index.service_for("two.demo.example")
+    assert one is not None and one.service == "exact"
+    assert two is not None and two.service == "wild"
+
+
+def test_the_longest_wildcard_wins(tmp_path):
+    index = load(tmp_path, WILDCARD, DEEPER_WILDCARD)
+    eu = index.service_for("a.eu.demo.example")
+    us = index.service_for("a.us.demo.example")
+    assert eu is not None and eu.service == "deeper"
+    assert us is not None and us.service == "wild"
+
+
+def test_a_wildcard_host_routes_like_any_other(tmp_path):
+    index = load(tmp_path, WILDCARD)
+    found = index.route_for("a.demo.example", "POST", "/ingest")
+    assert found is not None and found[1].operation == "wild.ingest"
+
+
+@pytest.mark.parametrize(
+    "host", ["*", "*.", "*foo.demo.example", "foo.*.demo.example", "**.demo.example", "*.example"]
+)
+def test_a_malformed_wildcard_host_is_refused_by_name(tmp_path, host):
+    refuses(
+        tmp_path,
+        WILDCARD.replace('"*.demo.example"', f'"{host}"'),
+        "may use a wildcard only as a leading '*.' label",
+    )
+
+
+def test_the_same_wildcard_in_two_maps_is_a_duplicate_host(tmp_path):
+    with pytest.raises(MapError) as exc:
+        load(tmp_path, WILDCARD, WILDCARD.replace("service: wild", "service: wild2"))
+    assert "host '*.demo.example' is already mapped by" in str(exc.value)
+
+
+def test_a_wildcard_and_an_exact_host_under_it_are_not_a_duplicate(tmp_path):
+    index = load(tmp_path, WILDCARD, EXACT_UNDER_WILDCARD)
+    assert {sm.service for sm in index.services} == {"wild", "exact"}
+
+
+def test_patterns_are_not_in_the_reverse_doors_allow_list(tmp_path):
+    """A wildcard classifies through the forward door and is deliberately not an allow-list entry.
+
+    `pipeline.rewrite_reverse` compares one literal host with `host not in allowed_hosts`, so a
+    pattern in that set would never match anything. `--allow-host` is how you reach one.
+    """
+    index = load(tmp_path, WILDCARD, EXACT_UNDER_WILDCARD)
+    assert index.hosts == frozenset({"one.demo.example"})
+    assert index.patterns == ("*.demo.example",)
+    assert MapIndex().patterns == ()

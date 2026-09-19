@@ -68,6 +68,10 @@ def _response_from_flow(flow: http.HTTPFlow) -> Response:
     )
 
 
+def _is_event_stream(content_type: str) -> bool:
+    return content_type.split(";")[0].strip().lower() == "text/event-stream"
+
+
 def _to_mitm_response(r: Response) -> http.Response:
     # A list of pairs keeps repeated headers (Set-Cookie); a dict would collapse them.
     fields = [(k.encode("latin-1"), v.encode("latin-1")) for k, v in r.headers]
@@ -155,6 +159,21 @@ class IrimiAddon:
         flow.request.host_header = next(v for k, v in req.headers if k == "host")
         return req
 
+    def responseheaders(self, flow: http.HTTPFlow) -> None:
+        """Stream a server-sent-event response instead of buffering it.
+
+        mitmproxy buffers a whole response body before the `response` hook by default, which turns
+        a streamed completion into one late blob. Only a live-forwarded response can stream: one we
+        synthesized has no upstream to stream from. The `response` hook still runs for a streamed
+        flow, but `flow.response.content` is None there, so the recorded exchange carries an empty
+        body — that is the trade for the agent seeing tokens as they arrive (#8).
+        """
+        pending: _Pending | None = flow.metadata.get(META_KEY)
+        if pending is None or pending.answered_by != "live" or flow.response is None:
+            return
+        if _is_event_stream(flow.response.headers.get("content-type", "")):
+            flow.response.stream = True
+
     def response(self, flow: http.HTTPFlow) -> None:
         pending: _Pending | None = flow.metadata.pop(META_KEY, None)
         if pending is None:  # not ours (refused in request()), or already finished
@@ -197,7 +216,11 @@ class IrimiAddon:
         self._finish(ex)
 
     def _finish(self, ex: Exchange) -> None:
-        self.store.record(ex)
+        # Telemetry is forwarded but never stored: a trace of the agent's own observability
+        # traffic is noise, and replaying it would re-emit someone else's events (#9). It is still
+        # reported, so the per-exchange line and the run summary both count it.
+        if ex.kind != "telemetry":
+            self.store.record(ex)
         if self.on_exchange:
             self.on_exchange(ex)
 

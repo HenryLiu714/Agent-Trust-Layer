@@ -1,0 +1,29 @@
+# Anthropic. `llm` is a route kind here, never a host default: on an LLM host only the inference
+# routes are `llm`, and everything else on api.anthropic.com is a real, billable write (design
+# §4.3). `default_kind: llm` is refused by the loader for exactly that reason.
+#
+# Deliberately unlisted, so the RFC fallback makes them `unknown` + `unclassified` and irimi answers
+# them locally: /v1/files and /v1/messages/batches. Uploading a file or starting a batch costs money
+# and leaves state behind; a POST irimi has not classified is faked, not forwarded.
+#
+# `match:` is written in block style on purpose: a YAML flow mapping cannot hold a plain scalar
+# containing `{`, so `match: {method: GET, path: /v1/models/{model}}` is a parse error.
+version: 1
+service: anthropic
+verbs: honest # Anthropic reads are GETs, so the HTTP method carries information here
+hosts:
+  - api.anthropic.com
+routes:
+  - match:
+      method: POST
+      path: /v1/messages
+    operation: messages.create
+    kind: llm
+    human: message with {model}
+
+  - match:
+      method: POST
+      path: /v1/messages/count_tokens
+    operation: messages.count_tokens
+    kind: llm
+    human: count tokens for {model}

@@ -99,17 +99,21 @@ def cmd_maps_list(args: argparse.Namespace) -> int:
     index = _load_maps()
     if index is None:
         return 1
-    hosts = sorted(index.hosts)
-    width = max((len(h) for h in hosts), default=0)
+    # Exact hosts first, then the wildcard patterns. A pattern is printed because a map whose
+    # hosts are all wildcards would otherwise not appear here at all; it is still not a
+    # reverse-door allow-list entry (see MapIndex.hosts).
+    rows = [(host, index.by_host[host]) for host in sorted(index.hosts)]
+    rows += [(pattern, index.by_suffix[pattern[1:]]) for pattern in index.patterns]
+    width = max((len(name) for name, _ in rows), default=0)
+    service_width = max((len(sm.service) for _, sm in rows), default=0)
     routes = sum(len(sm.routes) for sm in index.services)
     print(
-        f"irimi maps · {len(index.services)} service(s) · {len(hosts)} host(s) · {routes} route(s)"
+        f"irimi maps · {len(index.services)} service(s) · {len(rows)} host(s) · {routes} route(s)"
     )
-    for host in hosts:
-        sm = index.by_host[host]
+    for name, sm in rows:
         reads = " + reads" if sm.target_reads else ""
         print(
-            f"  {host:<{width}}  {sm.service:<8}  {len(sm.routes):>3} routes  "
+            f"  {name:<{width}}  {sm.service:<{service_width}}  {len(sm.routes):>3} routes  "
             f"target: {sm.target}{reads}"
         )
     override = servicemap.override_path()

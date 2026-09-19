@@ -128,7 +128,7 @@ class IrimiAddon:
                 )
                 flow.response = http.Response.make(400, b"irimi: could not rewrite request\n")
                 return
-        cls = pipeline.classify(req)
+        cls = pipeline.classify(req, self.config.maps)
         run_id = pipeline.attribute_run(req, self.config.run_id)
         ans = self.policy.answer(req, cls.kind)
         flow.metadata[META_KEY] = _Pending(req, cls, run_id, ans.answered_by, door)

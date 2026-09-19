@@ -39,8 +39,9 @@ uv run irimi --help
 ## Try the proxy
 
 `irimi serve` runs the shadow proxy in the foreground on `127.0.0.1:4000`. Reads are forwarded to
-the real service; anything that is not a safe HTTP method is answered locally with a placeholder
-`fake-L0` response and never reaches the network. Each exchange prints as one line.
+the real service; writes are answered locally with a placeholder `fake-L0` response and never reach
+the network. Which is which comes from the service maps, and from the HTTP method for anything the
+maps do not cover. Each exchange prints as one line.
 
     uv run irimi serve
     # in another terminal
@@ -152,6 +153,30 @@ Slack's map sets `verbs: post-only`, because its SDKs send every call as POST an
 therefore says nothing about what a call does. For a service with honest verbs, a route that
 declares `kind: read` on an unsafe method is a write in disguise, so the loader refuses it unless
 it says `persists: false` and carries a `comment:` explaining why nothing persists.
+
+### Classification
+
+What a request *is* comes from four rules, and the first one that answers wins:
+
+1. the route rule in a service map — `POST /v1/refunds` is a write because Stripe's map says so;
+2. the service's `default_kind:`, for the routes that map does not list;
+3. RFC 9110: `GET`, `HEAD` and `OPTIONS` are reads;
+4. `unknown`.
+
+Anything `unknown` is answered locally and flagged `unclassified`, so a route nobody has classified
+is faked rather than sent, and the line it prints says the classification was a guess. That is why a
+`POST` to a real Stripe route no shipped map lists never reaches Stripe, even though the map claims
+the host. A host no map claims at all is intercepted the same way: its reads forward live and
+everything else is faked and flagged.
+
+The order matters most where the verb lies. Slack's `conversations.history` is a `POST`, and only
+its map entry makes it a read that forwards live — without it the agent would get an empty channel
+back from a faked write.
+
+`default_kind:` may be `write`, `unknown` or `telemetry`. `read` is refused, because it would
+forward every route the map does not list to the real service; `llm` is refused because it is
+route-level — on an LLM host only the inference routes are `llm`, and `/v1/files` or `/v1/batches`
+are real billable writes. No shipped map sets it yet.
 
 ### Answer targets
 

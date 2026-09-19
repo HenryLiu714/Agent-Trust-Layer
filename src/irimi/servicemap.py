@@ -35,9 +35,10 @@ HOME_OVERRIDE_NAME = "maps.yaml"  # in $IRIMI_HOME, the fallback
 
 VERB_STYLES = ("honest", "post-only")  # does the HTTP method carry information for this service?
 TARGETABLE_KINDS: frozenset[str] = frozenset({"write", "unknown"})
+DEFAULT_KINDS: tuple[Kind, ...] = ("write", "unknown", "telemetry")  # what `default_kind` may say
 
 SERVICE_KEYS = frozenset(
-    {"version", "service", "hosts", "verbs", "target", "target_reads", "routes"}
+    {"version", "service", "hosts", "verbs", "default_kind", "target", "target_reads", "routes"}
 )
 ROUTE_KEYS = frozenset(
     {
@@ -87,6 +88,7 @@ class ServiceMap:
     hosts: frozenset[str]
     routes: tuple[Route, ...]
     verbs: str = "honest"
+    default_kind: Kind | None = None  # the kind for routes this map does not list; None = fallback
     target: str = SELF_TARGET
     target_reads: bool = False
     source: str = ""  # where it came from, for error messages
@@ -232,6 +234,7 @@ def parse_service(doc: Any, source: str) -> ServiceMap:
         hosts=hosts,
         routes=tuple(_parse_route(r, source) for r in raw_routes),
         verbs=verbs,
+        default_kind=_parse_default_kind(doc.get("default_kind"), f"{source}: `default_kind`"),
         target=_parse_target(doc.get("target", SELF_TARGET), f"{source}: `target`"),
         target_reads=_parse_bool(doc.get("target_reads", False), f"{source}: `target_reads`"),
         source=source,
@@ -455,6 +458,32 @@ def _parse_ids(raw: Any, where: str) -> dict[str, str]:
             raise MapError(f"{where}: `ids.{name}` must be a non-empty id prefix")
         out[name] = prefix
     return out
+
+
+def _parse_default_kind(raw: Any, where: str) -> Kind | None:
+    """The service-wide kind for routes the map does not list, or None to use the RFC fallback.
+
+    Only `write`, `unknown` and `telemetry` may be defaulted. `read` is refused because it would
+    forward every unlisted route on this service's hosts to the real API, which is the bypass the
+    maps exist to close; `llm` is refused because it is route-level (design §4.3: on an LLM host
+    only the inference routes are `llm` and everything else is a real, billable write).
+    """
+    if raw is None:
+        return None
+    kind = _parse_str(raw, where)
+    if kind == "read":
+        raise MapError(
+            f"{where} may not be `read`: that forwards every route this map does not list to the "
+            "real service. List the read routes instead"
+        )
+    if kind == "llm":
+        raise MapError(
+            f"{where} may not be `llm`: `llm` is a route-level kind. On an LLM host only the "
+            "inference routes are `llm`; everything else is a real write"
+        )
+    if kind not in DEFAULT_KINDS:
+        raise MapError(f"{where} must be one of {list(DEFAULT_KINDS)}, got {kind!r}")
+    return kind
 
 
 def _parse_target(raw: Any, where: str) -> str:

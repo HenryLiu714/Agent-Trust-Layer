@@ -4,6 +4,7 @@ import ipaddress
 import socket
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
 from irimi.exchange import (
     SAFE_METHODS,
@@ -15,6 +16,9 @@ from irimi.exchange import (
     Response,
     Validation,
 )
+
+if TYPE_CHECKING:  # quoted annotations only: servicemap imports this module, so no runtime import
+    from irimi.servicemap import MapIndex, Route, ServiceMap
 
 RUN_HEADER = "irimi-run"  # header names are compared case-insensitively; stored lower-case
 UNCLASSIFIED_FLAG = "unclassified"
@@ -33,6 +37,9 @@ class Classification:
     operation: str
     kind: Kind
     flags: tuple[str, ...]
+    # What MapIndex.route_for returned, so the faker (#11), the summary (#13) and the answer
+    # target (#16) do not have to look the route up a second time. None when nothing matched.
+    matched: "tuple[ServiceMap, Route] | None" = None
 
 
 def parse(
@@ -144,13 +151,35 @@ def rewrite_reverse(request: Request, allowed_hosts: frozenset[str]) -> Request:
     )
 
 
-def classify(request: Request) -> Classification:
-    """RFC 9110 fallback only (issue #7 adds map lookup in front of this):
-    safe methods are reads; everything else is unknown and flagged unclassified."""
-    operation = f"{request.method} {request.path}"
-    if request.method in SAFE_METHODS:
-        return Classification(request.host, operation, "read", ())
-    return Classification(request.host, operation, "unknown", (UNCLASSIFIED_FLAG,))
+def classify(request: Request, maps: "MapIndex | None" = None) -> Classification:
+    """What this request is, by the precedence the design fixes (§4.3, D4).
+
+    A route rule in a service map wins; then that service's `default_kind`; then the RFC 9110
+    fallback, where `GET`/`HEAD`/`OPTIONS` are reads; then `unknown`. A host no map claims keeps
+    its host name as the service and goes straight to the fallback, so it is still MITM'd: its
+    reads forward live and everything else is answered locally. `unknown` always carries the
+    `unclassified` flag, whether a map declared it or the fallback reached it.
+
+    `maps=None` means the empty index: the fallback alone. Pure function, no I/O.
+    """
+    matched = (
+        maps.route_for(request.host, request.method, request.path) if maps is not None else None
+    )
+    if matched is not None:
+        service_map, route = matched
+        service, operation, kind = service_map.service, route.operation, route.kind
+    else:
+        service_map = maps.service_for(request.host) if maps is not None else None
+        service = service_map.service if service_map is not None else request.host
+        operation = f"{request.method} {request.path}"
+        if service_map is not None and service_map.default_kind is not None:
+            kind = service_map.default_kind
+        elif request.method in SAFE_METHODS:
+            kind = "read"
+        else:
+            kind = "unknown"
+    flags = (UNCLASSIFIED_FLAG,) if kind == "unknown" else ()
+    return Classification(service, operation, kind, flags, matched)
 
 
 def attribute_run(request: Request, default_run_id: str) -> str:

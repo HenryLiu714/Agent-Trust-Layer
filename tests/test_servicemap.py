@@ -1,6 +1,7 @@
 import pytest
 
 from irimi import paths, servicemap
+from irimi.exchange import SAFE_METHODS
 from irimi.servicemap import MapError, MapIndex, Route, ServiceMap
 
 # A complete, valid one-service document. Tests mutate a copy of this to make one thing wrong.
@@ -119,6 +120,25 @@ def test_shipped_slack_map_is_post_only_and_has_no_webhook_host():
     assert post is not None and post.kind == "write"
     assert post.human == 'post to #{channel}: "{text}"'
     assert history is not None and history.kind == "read"
+
+
+def test_no_shipped_route_downgrades_a_write_to_a_read():
+    """The classification invariant: a declared write is never a read without `persists: false`.
+
+    `_check_route_rules` refuses it at load time for a service whose verbs are honest, so a
+    violation is a MapError rather than a silent downgrade; this asserts the property itself, so it
+    keeps holding if the rule ever moves. A `post-only` service is exempt by design: its SDKs POST
+    every call, so there is no honest verb to downgrade from.
+    """
+    index = servicemap.load(maps_dir=servicemap.shipped_dir())
+    honest = [sm for sm in index.services if sm.verbs == "honest"]
+    assert honest, "the shipped maps should still contain a service with honest verbs"
+    for sm in honest:
+        for route in sm.routes:
+            if route.kind == "read" and route.method not in SAFE_METHODS:
+                where = f"{sm.service} {route.operation}"
+                assert route.persists is False, where
+                assert route.comment.strip(), where
 
 
 def test_slack_read_templates_still_name_the_channel():
@@ -380,6 +400,43 @@ routes:
 """
     sm = load(tmp_path, doc).services[0]
     assert sm.routes[0].kind == "read"
+
+
+@pytest.mark.parametrize("kind", ["write", "unknown", "telemetry"])
+def test_default_kind_is_accepted_for_the_kinds_that_are_answered_locally(tmp_path, kind):
+    sm = load(tmp_path, GOOD.replace("verbs: honest", f"default_kind: {kind}")).services[0]
+    assert sm.default_kind == kind
+
+
+def test_default_kind_defaults_to_none(tmp_path):
+    assert load(tmp_path).services[0].default_kind is None
+
+
+def test_default_kind_may_not_be_read(tmp_path):
+    refuses(
+        tmp_path,
+        GOOD.replace("verbs: honest", "default_kind: read"),
+        "may not be `read`",
+    )
+
+
+def test_default_kind_may_not_be_llm(tmp_path):
+    refuses(tmp_path, GOOD.replace("verbs: honest", "default_kind: llm"), "may not be `llm`")
+
+
+def test_default_kind_must_be_a_kind(tmp_path):
+    refuses(tmp_path, GOOD.replace("verbs: honest", "default_kind: maybe"), "must be one of")
+
+
+def test_an_override_cannot_set_default_kind(tmp_path):
+    """`default_kind` decides what happens to every route the map does not list, so letting a
+    user's overrides file set it would be a way to reclassify writes."""
+    refuses(
+        tmp_path,
+        GOOD,
+        "unknown override key(s) default_kind",
+        override="service: demo\ndefault_kind: write\n",
+    )
 
 
 def test_persists_and_volatile_are_restricted_to_their_kinds(tmp_path):
@@ -660,4 +717,5 @@ def test_route_and_servicemap_defaults():
     assert (route.persists, route.comment, route.forward_auth) == (None, "", False)
     sm = ServiceMap(service="x", hosts=frozenset({"x.example"}), routes=(route,))
     assert (sm.verbs, sm.target, sm.target_reads) == ("honest", servicemap.SELF_TARGET, False)
+    assert sm.default_kind is None
     assert servicemap.target_for(sm, route) == servicemap.SELF_TARGET

@@ -538,9 +538,20 @@ def test_a_region_qualified_sentry_ingest_host_classifies(tmp_path, monkeypatch,
 
 def test_the_sentry_web_app_is_not_claimed_by_the_ingest_map(tmp_path, monkeypatch):
     """Why three ingest patterns and not one `*.sentry.io`: sentry.io is also the web app, whose
-    REST control plane would then inherit the telemetry service and be forwarded live (#25)."""
-    cls = _shipped(tmp_path, monkeypatch, "DELETE", "sentry.io", "/api/0/projects/acme/web/")
-    assert (cls.service, cls.kind) == ("sentry.io", "unknown")
+    REST control plane would then inherit the telemetry service and be forwarded live (#25).
+
+    The probe is a **subdomain**, not the bare host. A `*.x` pattern is keyed `.x` and matched
+    with `endswith`, so bare `sentry.io` misses `*.sentry.io` too - probing it is probing the one
+    host the over-broad pattern would also miss, and the test passes either way.
+    """
+    for host in ("sentry.io", "us.sentry.io", "acme.sentry.io"):
+        cls = _shipped(tmp_path, monkeypatch, "DELETE", host, "/api/0/projects/acme/web/")
+        assert (cls.service, cls.kind) == (host, "unknown"), host
+    index = _index(tmp_path, monkeypatch)
+    assert index.service_for("us.sentry.io") is None
+    # The regional ingest hosts the three patterns exist for are still claimed.
+    for host in ("o1.ingest.sentry.io", "o1.ingest.us.sentry.io", "o1.ingest.de.sentry.io"):
+        assert index.service_for(host) is not None, host
 
 
 def test_one_posthog_pattern_covers_the_regional_ingest_hosts(tmp_path, monkeypatch):

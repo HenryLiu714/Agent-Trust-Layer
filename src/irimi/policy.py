@@ -157,17 +157,31 @@ def _assign(node: dict[str, Any], segments: list[str], value: str) -> None:
     node[segments[-1]] = value
 
 
-def _to_lists(node: Any) -> Any:
+# Fields whose keys are arbitrary strings chosen by the caller, so `0`, `1`, ... are key names
+# and not array indices. `metadata[0]=zero` and `expand[0]=charge` are byte-wise the same shape on
+# the wire; the field name is the only thing that tells them apart, so it is the field name that
+# decides. Stripe, Slack and Segment all spell this field `metadata`.
+STRING_KEYED_FIELDS: frozenset[str] = frozenset({"metadata"})
+
+
+def _to_lists(node: Any, field: str = "") -> Any:
     """Depth first, a dict whose keys are exactly `0`..`n-1` becomes a list.
 
     Stripe form-encodes an array as `expand[0]=a&expand[1]=b` and the live API answers with a
     JSON array. A gap, a repeat or an out-of-range index leaves it a dict: inventing the missing
     elements would echo fields the caller never sent. The comparison is against canonical decimal
     strings, so "007" and non-ASCII digits cannot reach it - `str.isdigit()` would let both in.
+
+    A `STRING_KEYED_FIELDS` name is never promoted, at any depth: `metadata[0]=zero` is the key
+    `"0"`, which the live API answers as `{"metadata": {"0": "zero"}}`. Promoting it hands the
+    agent a list, and `refund.metadata["0"]` then raises TypeError instead of returning the value
+    the caller just sent - #27's failure class moved one step along.
     """
     if not isinstance(node, dict):
         return node
-    converted = {key: _to_lists(value) for key, value in node.items()}
+    converted = {key: _to_lists(value, key) for key, value in node.items()}
+    if field in STRING_KEYED_FIELDS:
+        return converted
     if converted and set(converted) == {str(i) for i in range(len(converted))}:
         return [converted[str(i)] for i in range(len(converted))]
     return converted
@@ -202,7 +216,7 @@ def parse_form(text: str) -> dict[str, Any]:
         _assign(node, segments, value)
     for head, values in bare.items():
         root[head] = values[0] if len(values) == 1 else values
-    return {key: _to_lists(value) for key, value in root.items()}
+    return {key: _to_lists(value, key) for key, value in root.items()}
 
 
 def reflect(request: Request) -> dict[str, Any]:

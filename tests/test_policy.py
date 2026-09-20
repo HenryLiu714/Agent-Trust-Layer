@@ -376,6 +376,13 @@ def test_a_bracket_path_deeper_than_the_cap_stays_flat():
     """Unwinding a thousand-level nest is a RecursionError inside a mitmproxy hook, and a hook
     that raises forwards the flow - which for a write means it escapes shadow mode. The cap is
     twice Stripe's deepest real key, `line_items[0][price_data][product_data][name]`."""
+    # The value, not just the mechanism: written only against the constant, this test passes
+    # with a cap of 2, which would flatten Stripe's real
+    # `line_items[0][price_data][product_data][name]` (5 segments) and ship green.
+    assert policy._MAX_FORM_DEPTH == 8
+    assert policy.parse_form("line_items[0][price_data][product_data][name]=x") == {
+        "line_items": [{"price_data": {"product_data": {"name": "x"}}}]
+    }
     deep = "a" + "[b]" * policy._MAX_FORM_DEPTH
     assert policy.parse_form(deep + "=1") == {"a": _nest(policy._MAX_FORM_DEPTH)}
     too_deep = "a" + "[b]" * (policy._MAX_FORM_DEPTH + 1)
@@ -557,3 +564,23 @@ def test_the_body_is_serialized_exactly_once(monkeypatch):
         )
     )
     assert calls == [1]
+
+
+def test_a_digit_keyed_metadata_field_stays_an_object():
+    """#27's failure class, one step along. `metadata[0]=zero` is the key "0", and the live API
+    answers `{"metadata": {"0": "zero"}}`. Promoted to a list, `refund.metadata["0"]` raises
+    TypeError instead of returning the value the caller itself just sent."""
+    assert policy.parse_form("metadata[0]=zero") == {"metadata": {"0": "zero"}}
+    assert policy.parse_form("metadata[0]=a&metadata[1]=b") == {"metadata": {"0": "a", "1": "b"}}
+    # Nested under another field, and mixed with a string key, it is the same field name.
+    assert policy.parse_form("a[metadata][0]=z") == {"a": {"metadata": {"0": "z"}}}
+    assert policy.parse_form("metadata[0]=z&metadata[k]=v") == {"metadata": {"0": "z", "k": "v"}}
+
+
+def test_a_real_array_field_is_still_promoted_to_a_list():
+    """The exemption is by field name, so the rule `metadata` opts out of still applies to
+    everything else: `expand[0]=a&expand[1]=b` is an array on the wire and a list in the echo."""
+    assert policy.parse_form("expand[0]=charge&expand[1]=customer") == {
+        "expand": ["charge", "customer"]
+    }
+    assert policy.parse_form("line_items[0][price]=p") == {"line_items": [{"price": "p"}]}

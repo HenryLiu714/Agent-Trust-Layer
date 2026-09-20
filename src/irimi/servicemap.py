@@ -189,10 +189,14 @@ def path_params(pattern: str, path: str) -> dict[str, str]:
     the path at all. It lives in this module, not in the one that uses it, because the `{name}`
     pattern language belongs to the map schema: a second parser anywhere else would drift from
     `_match_path` and bind the captures to the wrong segments.
+
+    "Does not match" is `_match_path`'s own answer, not a second opinion. Counting segments is
+    not matching: `/v1/customers/{customer}` and `/v9/charges/cus_X` have three segments each and
+    share no literal, and binding `customer` there is the drift this function exists to prevent.
     """
     parts = _segments(pattern)
     segments = _segments(path)
-    if len(parts) != len(segments):
+    if _match_path(pattern, segments) is None:
         return {}
     return {
         part[1:-1]: segment
@@ -412,6 +416,7 @@ def _check_route_rules(sm: ServiceMap) -> None:
     seen: set[tuple[str, str]] = set()
     for route in sm.routes:
         where = f"{sm.source}: route {route.method} {route.path}"
+        _check_unique_holes(route.path, where)
         key = (route.method, route.path)
         if key in seen:
             raise MapError(f"{where}: appears twice in the same map")
@@ -430,6 +435,22 @@ def _check_route_rules(sm: ServiceMap) -> None:
                 f"{where}: `kind: read` on an unsafe method downgrades a write. Say "
                 "`persists: false` and add a `comment:` explaining why it persists nothing"
             )
+
+
+def _check_unique_holes(pattern: str, where: str) -> None:
+    """A `{name}` may appear once in a pattern: `path_params` returns one entry per name.
+
+    `/a/{x}/b/{x}` would bind `x` to the last segment and drop the first silently, which is how
+    `named_id` would come to echo the wrong id. Refusing the pattern is the fail-closed answer,
+    and no shipped route repeats a name.
+    """
+    holes = [p[1:-1] for p in _segments(pattern) if p.startswith("{") and p.endswith("}")]
+    repeated = sorted({name for name in holes if holes.count(name) > 1})
+    if repeated:
+        raise MapError(
+            f"{where}: `{{{repeated[0]}}}` appears more than once in the path. A parameter name "
+            "binds one segment, so a repeat would silently drop every capture but the last"
+        )
 
 
 def _check_unique(maps: list[ServiceMap]) -> None:

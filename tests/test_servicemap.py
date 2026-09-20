@@ -917,3 +917,33 @@ def test_patterns_are_not_in_the_reverse_doors_allow_list(tmp_path):
     assert index.hosts == frozenset({"one.demo.example"})
     assert index.patterns == ("*.demo.example",)
     assert MapIndex().patterns == ()
+
+
+def test_path_params_binds_nothing_when_the_literal_segments_differ():
+    """`path_params` asks `_match_path`, which is the whole reason it lives in this module. A
+    segment count alone would bind `customer` to a path that shares no literal with the pattern
+    - the second parser its own docstring exists to prevent."""
+    assert servicemap.path_params("/v1/customers/{customer}", "/v9/charges/cus_X") == {}
+    assert servicemap.path_params("/v1/customers/{customer}", "/v1/customers/cus_X") == {
+        "customer": "cus_X"
+    }
+    assert servicemap.path_params("/v1/customers/{customer}", "/v1/customers") == {}
+
+
+def test_a_route_pattern_may_not_repeat_a_parameter_name(tmp_path):
+    """`/a/{x}/b/{x}` binds `x` once and drops the first capture silently, which is how
+    `named_id` would come to echo the wrong id."""
+    doc = """
+version: 1
+service: dup
+hosts:
+  - dup.example
+routes:
+  - match:
+      method: POST
+      path: /a/{x}/b/{x}
+    operation: dup.thing
+    kind: write
+    human: do a thing
+"""
+    refuses(tmp_path, doc, "appears more than once in the path")

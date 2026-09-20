@@ -29,7 +29,7 @@ from urllib.parse import urlsplit
 import yaml
 
 from irimi import paths
-from irimi.exchange import KINDS, SAFE_METHODS, Kind
+from irimi.exchange import KINDS, LIVE_KINDS, SAFE_METHODS, Kind
 from irimi.pipeline import is_loopback
 
 SCHEMA_VERSION = 1
@@ -42,7 +42,9 @@ HOME_OVERRIDE_NAME = "maps.yaml"  # in $IRIMI_HOME, the fallback
 
 VERB_STYLES = ("honest", "post-only")  # does the HTTP method carry information for this service?
 TARGETABLE_KINDS: frozenset[str] = frozenset({"write", "unknown"})
-DEFAULT_KINDS: tuple[Kind, ...] = ("write", "unknown", "telemetry")  # what `default_kind` may say
+# What `default_kind` may say: every kind that is *not* forwarded live. Derived, not listed, so a
+# live-forwarding kind added to LIVE_KINDS later is refused as a default the day it is added (#30).
+DEFAULT_KINDS: tuple[Kind, ...] = tuple(k for k in KINDS if k not in LIVE_KINDS)
 
 SERVICE_KEYS = frozenset(
     {"version", "service", "hosts", "verbs", "default_kind", "target", "target_reads", "routes"}
@@ -535,27 +537,39 @@ def _parse_ids(raw: Any, where: str) -> dict[str, str]:
     return out
 
 
+# Why each live-forwarding kind is refused as a service-wide default. The *rule* is LIVE_KINDS;
+# these only say why, because a generic message would not tell a map author what to write instead.
+DEFAULT_KIND_REASONS: dict[str, str] = {
+    "read": (
+        "that forwards every route this map does not list to the real service. List the read "
+        "routes instead"
+    ),
+    "llm": (
+        "`llm` is a route-level kind. On an LLM host only the inference routes are `llm`; "
+        "everything else is a real write"
+    ),
+    "telemetry": (
+        "most telemetry vendors serve their REST control plane from the same host as their "
+        "intake, so this forwards `DELETE /api/v1/dashboard/{id}` to the real service. List the "
+        "intake routes instead"
+    ),
+}
+
+
 def _parse_default_kind(raw: Any, where: str) -> Kind | None:
     """The service-wide kind for routes the map does not list, or None to use the RFC fallback.
 
-    Only `write`, `unknown` and `telemetry` may be defaulted. `read` is refused because it would
-    forward every unlisted route on this service's hosts to the real API, which is the bypass the
-    maps exist to close; `llm` is refused because it is route-level (design §4.3: on an LLM host
-    only the inference routes are `llm` and everything else is a real, billable write).
+    A default may not name a kind shadow mode forwards live (`exchange.LIVE_KINDS`): that sends
+    every route this map does not list to the real service, which is the bypass the maps exist to
+    close. `DEFAULT_KINDS` is derived from that same set rather than listed by hand, so the rule
+    covers a live kind added later; DEFAULT_KIND_REASONS only explains each one.
     """
     if raw is None:
         return None
     kind = _parse_str(raw, where)
-    if kind == "read":
-        raise MapError(
-            f"{where} may not be `read`: that forwards every route this map does not list to the "
-            "real service. List the read routes instead"
-        )
-    if kind == "llm":
-        raise MapError(
-            f"{where} may not be `llm`: `llm` is a route-level kind. On an LLM host only the "
-            "inference routes are `llm`; everything else is a real write"
-        )
+    if kind in LIVE_KINDS:
+        reason = DEFAULT_KIND_REASONS.get(kind, "irimi forwards that kind to the real service")
+        raise MapError(f"{where} may not be `{kind}`: {reason}")
     if kind not in DEFAULT_KINDS:
         raise MapError(f"{where} must be one of {list(DEFAULT_KINDS)}, got {kind!r}")
     return kind

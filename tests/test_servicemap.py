@@ -1,7 +1,7 @@
 import pytest
 
 from irimi import paths, servicemap
-from irimi.exchange import SAFE_METHODS
+from irimi.exchange import KINDS, LIVE_KINDS, SAFE_METHODS
 from irimi.servicemap import MapError, MapIndex, Route, ServiceMap
 
 # A complete, valid one-service document. Tests mutate a copy of this to make one thing wrong.
@@ -412,10 +412,17 @@ routes:
     assert sm.routes[0].kind == "read"
 
 
-@pytest.mark.parametrize("kind", ["write", "unknown", "telemetry"])
+@pytest.mark.parametrize("kind", ["write", "unknown"])
 def test_default_kind_is_accepted_for_the_kinds_that_are_answered_locally(tmp_path, kind):
     sm = load(tmp_path, GOOD.replace("verbs: honest", f"default_kind: {kind}")).services[0]
     assert sm.default_kind == kind
+
+
+def test_default_kinds_is_derived_from_the_live_set(tmp_path):
+    """The rule is `not forwarded live`, not a hand-kept list: a live kind added to LIVE_KINDS
+    later must be refused as a default the day it is added, with no second edit here (#30)."""
+    assert set(servicemap.DEFAULT_KINDS) == set(KINDS) - set(LIVE_KINDS)
+    assert set(servicemap.DEFAULT_KINDS).isdisjoint(LIVE_KINDS)
 
 
 def test_default_kind_defaults_to_none(tmp_path):
@@ -432,6 +439,25 @@ def test_default_kind_may_not_be_read(tmp_path):
 
 def test_default_kind_may_not_be_llm(tmp_path):
     refuses(tmp_path, GOOD.replace("verbs: honest", "default_kind: llm"), "may not be `llm`")
+
+
+def test_default_kind_may_not_be_telemetry(tmp_path):
+    """The bug PR #24 shipped: `telemetry` is forwarded live, and most of these vendors serve
+    their REST control plane from the same host as their intake, so a telemetry default performed
+    `DELETE /api/v1/dashboard/{id}` for real. Fixed in the map data then; refused here now."""
+    refuses(
+        tmp_path,
+        GOOD.replace("verbs: honest", "default_kind: telemetry"),
+        "may not be `telemetry`",
+    )
+
+
+@pytest.mark.parametrize("kind", LIVE_KINDS)
+def test_every_live_kind_is_refused_as_a_default_with_its_own_reason(tmp_path, kind):
+    """Each refusal explains itself: a generic message would not tell a map author what to write
+    instead. The loop is over LIVE_KINDS so a new live kind fails here until it has a reason."""
+    reason = servicemap.DEFAULT_KIND_REASONS[kind]
+    refuses(tmp_path, GOOD.replace("verbs: honest", f"default_kind: {kind}"), reason)
 
 
 def test_default_kind_must_be_a_kind(tmp_path):

@@ -201,11 +201,15 @@ The order matters most where the verb lies. Slack's `conversations.history` is a
 its map entry makes it a read that forwards live — without it the agent would get an empty channel
 back from a faked write.
 
-`default_kind:` may be `write`, `unknown` or `telemetry`. `read` is refused, because it would
-forward every route the map does not list to the real service; `llm` is refused because it is
-route-level — on an LLM host only the inference routes are `llm`, and `/v1/files` or `/v1/batches`
-are real billable writes. The six telemetry maps set `default_kind: telemetry`, so an ingest path
-they do not list is still telemetry rather than a faked write; no other shipped map sets it.
+`default_kind:` may name any kind irimi answers locally — `write` or `unknown` — and no kind it
+forwards live. `read`, `llm` and `telemetry` are all refused, each with its own reason: a `read`
+default forwards every route the map does not list to the real service; `llm` is route-level, so
+on an LLM host `/v1/files` and `/v1/batches` stay real billable writes; and a `telemetry` default
+forwards live too, which matters because most telemetry vendors serve their REST control plane
+from the same host as their intake — an early draft of the telemetry maps used one and sent
+`DELETE api.datadoghq.com/api/v1/dashboard/{id}` to the real API. The list is derived from the set
+of kinds shadow mode forwards, so a live kind added later is refused the day it is added. No
+shipped map sets `default_kind`; the telemetry maps list their intake routes one by one instead.
 
 ### `llm` and `telemetry`
 

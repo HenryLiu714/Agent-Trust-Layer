@@ -9,6 +9,10 @@ Validation = Literal["validated", "unvalidated"]
 Door = Literal["forward", "reverse"]
 
 KINDS: tuple[Kind, ...] = ("read", "write", "llm", "telemetry", "unknown")
+# The kinds shadow mode forwards to the real service instead of answering locally. It lives here,
+# beside KINDS, rather than in policy.py, because the map loader has to refuse a `default_kind`
+# that names one (#30) and servicemap must not import policy.
+LIVE_KINDS: tuple[Kind, ...] = ("read", "llm", "telemetry")
 SAFE_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
 
 Headers = tuple[tuple[str, str], ...]

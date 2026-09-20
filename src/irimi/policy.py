@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 from urllib.parse import parse_qsl
 
-from irimi.exchange import AnsweredBy, Request, Response
+from irimi.exchange import LIVE_KINDS, AnsweredBy, Request, Response
 from irimi.pipeline import Classification
 
 if TYPE_CHECKING:  # quoted annotations only, matching pipeline.py: no runtime servicemap import
@@ -40,8 +40,6 @@ FORM_CT = "application/x-www-form-urlencoded"
 # would hand back something other than what the caller sent, and 15 digits is the floor where an
 # integer still survives a JSON parser that stores numbers as doubles.
 _INTEGER = re.compile(r"0|[1-9][0-9]{0,14}")
-
-LIVE_KINDS = ("read", "llm", "telemetry")
 
 
 @dataclass(frozen=True)

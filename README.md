@@ -50,13 +50,16 @@ Slack Web API call gets Slack's own `{"ok": true, "ts": "..."}` envelope instead
 refuses anything else, and an incoming webhook gets the literal `ok` as `text/plain`, which is
 what the real one answers.
 
-Three things the echo is careful about, because an SDK has to be able to read the fields it just
+Four things the echo is careful about, because an SDK has to be able to read the fields it just
 sent. A write that **names its resource in the path** gets that id back rather than a fresh one:
 `POST /v1/customers/cus_REAL123` echoes `cus_REAL123`, because the live API does and an agent that
 logs the id or retrieves it again would otherwise be handed one for a resource that never existed.
-A **bracket-nested form field** becomes a nested object, so `metadata[order_id]=6735` comes back as
-`metadata`, with the value still a string as the live API sends it. And a **repeated key** collects
-into a list instead of keeping only the last value.
+The segment is percent-decoded first, and a value that is not shaped like an id — a PaymentIntent
+client secret, say — is not mistaken for one. A **bracket-nested form field** becomes a nested
+object, so `metadata[order_id]=6735` comes back as `metadata`. A **repeated key** collects into a
+list, spelled either way: `tags=a&tags=b` and Stripe's own `expand[]=a&expand[]=b`. And a **number
+is a number at any depth**, so `line_items[0][quantity]=2` echoes `2` exactly as `amount=4900`
+does — except under `metadata`, whose values are always strings on the live API.
 
     uv run irimi serve
     # in another terminal
@@ -159,30 +162,39 @@ prints, and the id prefixes a fake response mints. The maps that ship with irimi
     irimi maps list
 
 ```
-irimi maps · 10 service(s) · 12 host(s) · 6 pattern(s) · 47 route(s)
-  api.anthropic.com        anthropic    2 routes  target: self
-  api.honeycomb.io         honeycomb    2 routes  target: self
-  api.openai.com           openai       4 routes  target: self
-  api.smith.langchain.com  langsmith    4 routes  target: self
-  api.stripe.com           stripe      10 routes  target: self
-  cloud.langfuse.com       langfuse     2 routes  target: self
-  connect.stripe.com       stripe      10 routes  target: self
-  files.slack.com          slack       10 routes  target: self
-  files.stripe.com         stripe      10 routes  target: self
-  hooks.slack.com          slack       10 routes  target: self
-  meter-events.stripe.com  stripe      10 routes  target: self
-  slack.com                slack       10 routes  target: self
-  *.datadoghq.com          datadog      5 routes  target: self
-  *.ingest.de.sentry.io    sentry       4 routes  target: self
-  *.ingest.sentry.io       sentry       4 routes  target: self
-  *.ingest.us.sentry.io    sentry       4 routes  target: self
-  *.langfuse.com           langfuse     2 routes  target: self
-  *.posthog.com            posthog      4 routes  target: self
+irimi maps · 10 service(s) · 14 host(s) · 8 pattern(s) · 47 route(s)
+  api.anthropic.com           anthropic    2 routes  target: self
+  api.eu1.honeycomb.io        honeycomb    2 routes  target: self
+  api.honeycomb.io            honeycomb    2 routes  target: self
+  api.openai.com              openai       4 routes  target: self
+  api.smith.langchain.com     langsmith    4 routes  target: self
+  api.stripe.com              stripe      10 routes  target: self
+  cloud.langfuse.com          langfuse     2 routes  target: self
+  connect.stripe.com          stripe      10 routes  target: self
+  eu.api.smith.langchain.com  langsmith    4 routes  target: self
+  files.slack.com             slack       10 routes  target: self
+  files.stripe.com            stripe      10 routes  target: self
+  hooks.slack.com             slack       10 routes  target: self
+  meter-events.stripe.com     stripe      10 routes  target: self
+  slack.com                   slack       10 routes  target: self
+  *.datadoghq.com             datadog      5 routes  target: self
+  *.datadoghq.eu              datadog      5 routes  target: self
+  *.ddog-gov.com              datadog      5 routes  target: self
+  *.ingest.de.sentry.io       sentry       4 routes  target: self
+  *.ingest.sentry.io          sentry       4 routes  target: self
+  *.ingest.us.sentry.io       sentry       4 routes  target: self
+  *.langfuse.com              langfuse     2 routes  target: self
+  *.posthog.com               posthog      4 routes  target: self
 ```
 
 Hosts and patterns are counted separately because only the exact hosts are the reverse door's
-allow-list. Sentry is listed three times: it split ingest by region in 2024, so a DSN issued since
-then is `o<org>.ingest.us.sentry.io`, which does not end in `.ingest.sentry.io`.
+allow-list. Several vendors appear more than once because they split their intake by region, and a
+region is not always a subdomain: a Sentry DSN issued since 2024 is `o<org>.ingest.us.sentry.io`,
+which does not end in `.ingest.sentry.io`; Datadog's EU1 and US1-FED sites are the separate TLDs
+`datadoghq.eu` and `ddog-gov.com`; Honeycomb's EU instance and LangSmith's EU tenant are each their
+own host. A pattern that is accepted and then matches nothing looks exactly like a working one —
+the traffic is simply faked instead of forwarded — so the shipped regional hosts are pinned by
+test.
 
 Stripe, Slack (including `hooks.slack.com`), OpenAI, Anthropic and six telemetry backends —
 LangSmith, Langfuse, Sentry, Datadog, Honeycomb and PostHog — ship with a map today.
@@ -273,7 +285,8 @@ inference. Everything else on those hosts is deliberately unmapped, so an unlist
 `/v1/files`, `/v1/batches`, `/v1/fine_tuning/jobs` — reaches the fallback, is answered locally and
 is flagged `unclassified`. A `text/event-stream` response is streamed straight through to the
 client rather than buffered, so a streamed completion still arrives token by token; the recorded
-exchange then carries an empty body.
+exchange then carries an empty body, and nothing downstream may rewrite such a response — its
+headers are already on the wire and its body was never assembled.
 
 `telemetry` is what the observability backends are classified as. It is forwarded live in every
 mode and is never written to the trace store: a recording of the agent's own tracing traffic is
@@ -313,6 +326,17 @@ carrying a path replaces the part the route matched, which — because a route p
 matches the whole path — is all of it. The query string is always kept, and the method, body and
 content type pass through unchanged.
 
+That has a consequence worth knowing before you write a stub. A target with a path on a route with
+`{…}` segments **discards the captures**: `--target
+'api.stripe.com/v1/customers/{customer}=http://127.0.0.1:3000/cust'` sends every customer to
+`/cust`, so the stub cannot tell one request from another. If your stub needs the id, give it a
+**bare origin** — `--target 'api.stripe.com=http://127.0.0.1:3000'` — and it receives
+`/v1/customers/cus_REAL123` with the path intact.
+
+`http://` and `https://` targets are both accepted, but a `https://` target must present a
+certificate mitmproxy trusts: it verifies an upstream chain against certifi's bundle, and there is
+no option to relax that. A self-signed stub is reachable over `http://`.
+
 Five rules keep a target from becoming a way out of the machine. Each is checked when the maps
 load — so a shipped map, an overrides file and a `--target` flag are all covered by the same
 check — and again at the moment the answer is chosen, so a target that arrives some other way is
@@ -322,8 +346,13 @@ refused rather than let through:
   the maps load, naming the rule. `--allow-target-host <host>` is the deliberate way out, and it
   prints a warning saying what it allows.
 - A target naming **irimi's own listener** is refused, or the proxy would dial itself in a loop.
-- `Authorization` is **stripped** before forwarding, unless the route sets `forward_auth: true`.
-  A local stub does not need your real key.
+- **Credential headers are stripped** before forwarding, unless the route sets
+  `forward_auth: true`. A local stub does not need your real key. It is every header that carries
+  one and not only `Authorization` — `Cookie`, `x-api-key`, `DD-API-KEY` and anything else whose
+  name contains `auth`, `api-key`, `token`, `secret`, `credential`, `password` or `signature` —
+  because the list of vendor spellings is never finished, and the one it is missing is the one
+  that leaks. `forward_auth: true` keeps all of them, for a sandbox tenant or an internal
+  simulator that really does need the key.
 - A **credential-path host** — today `hooks.slack.com` — may be targeted at loopback and never
   through `--allow-target-host`, because there the URL *is* the credential. The rule is on the
   host, so it covers every path on it, not only the routes the map lists: `/services/...`,
@@ -334,10 +363,21 @@ refused rather than let through:
   be a twin, not a shadow.
 
 An **unreachable target is a `502`** flagged `target-failed`, never a silent fall back to the fake:
-that would hide a broken setup and look exactly like a working run. The body is JSON when irimi
-refuses the target itself; when the target simply is not listening, the `502` is the proxy's own
-and the exchange is what carries `target-failed`. The summary says so too, and never calls such a
-write delegated — a stub that was not running answered nothing:
+that would hide a broken setup and look exactly like a working run. The body is JSON naming irimi
+and the target —
+
+```json
+{"error": {"type": "irimi_target_failed", "message": "answer target 'http://127.0.0.1:3111/post' could not be reached: [Errno 61] Connection refused"}}
+```
+
+— so an SDK raises something that says what went wrong. A loopback target is probed before the
+request is redirected, which costs microseconds and is what makes that body possible: irimi hands
+the request to the proxy layer to forward, and once a dial fails there the error page is already
+committed. Two cases still get mitmproxy's own HTML `502` instead: a target reached through
+`--allow-target-host`, which is not probed because a remote connect would block the proxy on every
+request, and a stub that dies between the probe and the dial. The flag, the absence of a fallback
+and the summary line are the same either way. The summary never calls such a write delegated — a
+stub that was not running answered nothing:
 
       api.stripe.com  1 write intercepted (1 target unreachable)
 

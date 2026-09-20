@@ -25,7 +25,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import yaml
 
@@ -235,13 +235,20 @@ def path_params(pattern: str, path: str) -> dict[str, str]:
     "Does not match" is `_match_path`'s own answer, not a second opinion. Counting segments is
     not matching: `/v1/customers/{customer}` and `/v9/charges/cus_X` have three segments each and
     share no literal, and binding `customer` there is the drift this function exists to prevent.
+
+    A captured segment is **percent-decoded**, because the service decodes it: `cus%5FREAL123` and
+    `cus_REAL123` address the same customer, and reading the raw segment made `policy.named_id`
+    miss the id the request already named and mint a fresh one - #26 reinstated for any caller
+    that over-encodes (#33). Literal segments are still compared raw, so decoding cannot widen
+    what a route matches; it only says what the matched hole held. The two surfaces that read
+    these captures - the minted id and the summary's human template - agree because they ask here.
     """
     parts = _segments(pattern)
     segments = _segments(path)
     if _match_path(pattern, segments) is None:
         return {}
     return {
-        part[1:-1]: segment
+        part[1:-1]: unquote(segment)
         for part, segment in zip(parts, segments, strict=True)
         if part.startswith("{") and part.endswith("}")
     }

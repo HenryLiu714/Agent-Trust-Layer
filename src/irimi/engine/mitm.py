@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import socket
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -92,10 +93,77 @@ def _is_event_stream(content_type: str) -> bool:
     return content_type.split(";")[0].strip().lower() == "text/event-stream"
 
 
-def _to_mitm_response(r: Response) -> http.Response:
+def _fields(headers: Headers) -> list[tuple[bytes, bytes]]:
     # A list of pairs keeps repeated headers (Set-Cookie); a dict would collapse them.
-    fields = [(k.encode("latin-1"), v.encode("latin-1")) for k, v in r.headers]
-    return http.Response.make(r.status, r.body, fields)
+    return [(k.encode("latin-1"), v.encode("latin-1")) for k, v in headers]
+
+
+def _to_mitm_response(r: Response) -> http.Response:
+    return http.Response.make(r.status, r.body, _fields(r.headers))
+
+
+def _send(flow: http.HTTPFlow, out: Response, upstream: Response) -> None:
+    """Put `out` on the flow, without re-encoding a body nothing changed.
+
+    `http.Response.make` assigns `.content`, and mitmproxy's `set_content` re-encodes it per the
+    surviving `content-encoding` header. That is right for a body we built and wrong for one we
+    are handing back: `_body` reads `get_content(strict=False)`, which returns the RAW bytes when
+    `Content-Encoding` cannot be decoded, so rebuilding took bytes that were already compressed -
+    or were never valid gzip - and compressed them again. The agent then received different bytes
+    than the target sent, in a tool whose thesis is that it sees what the service would have sent
+    (#39).
+
+    Since #12 `respond` returns a new Response for every non-live answer, so the rebuild ran for
+    every delegated exchange; before that it never ran at all and the bug could not show. When
+    the body is the very object we read off the flow, only the headers changed - that is all
+    `respond` does - so only the headers are written back and the wire bytes are left alone.
+    """
+    assert flow.response is not None
+    if out.body is upstream.body:
+        flow.response.status_code = out.status
+        flow.response.headers = http.Headers(fields=_fields(out.headers))
+        return
+    flow.response = _to_mitm_response(out)
+
+
+# How long the probe below waits for a loopback target to accept a connection. Loopback either
+# accepts or refuses in microseconds; the timeout is only there so a stub wedged mid-accept cannot
+# stall the proxy, and it is short because this runs on the event loop.
+TARGET_PROBE_TIMEOUT_S = 0.5
+
+
+def _probe_local_target(url: str, host: str, port: int) -> None:
+    """Raise TargetUnreachable when nothing is listening on a **loopback** answer target.
+
+    #16 says an unreachable target answers `502` with a JSON body naming irimi and the target. The
+    flag, the absence of a fallback to the fake and the summary line were all right, but the body
+    was mitmproxy's own HTML error page: `_to_target` rewrites the flow and lets mitmproxy open the
+    connection - which is what keeps delegation free of a second HTTP client and keeps a streamed
+    target response streaming - and when that dial fails, mitmproxy sends its own error page from
+    inside the proxy layer. The `error` hook runs first but cannot set a response; by then it is
+    committed. There is no hook between the failed dial and the page (#38).
+
+    So the failure that actually happens - the developer's own stub is not running - is caught
+    before the flow is rewritten, and takes the existing `_target_failed` path. An SDK parses the
+    body, and stripe-python, openai and slack_sdk all raise on an HTML blob naming neither irimi
+    nor the target, which is how "my shadow run started failing" gave no hint that the stub was
+    down.
+
+    **Loopback only.** A connect to loopback costs microseconds; a connect to a host named by
+    `--allow-target-host` could block the proxy's event loop for a full timeout on every delegated
+    request, which is what `_to_target` avoids doing in the first place. A remote target that
+    cannot be dialled still gets mitmproxy's page, and the README says so. The probe is also
+    inherently best-effort: a stub that dies between the probe and the dial gets the old page too,
+    and the flag is right either way.
+    """
+    if not pipeline.is_local_target(url):
+        return
+    try:
+        socket.create_connection((host, port), timeout=TARGET_PROBE_TIMEOUT_S).close()
+    except OSError as exc:
+        raise pipeline.TargetUnreachable(
+            f"answer target {url!r} could not be reached: {exc}"
+        ) from None
 
 
 class IrimiAddon:
@@ -236,6 +304,7 @@ class IrimiAddon:
         host = (parts.hostname or "").lower()
         default_port = 443 if parts.scheme == "https" else 80
         port = parts.port or default_port
+        _probe_local_target(forward.url, host, port)
         # `parts.hostname` has already had an IPv6 literal's brackets stripped, so `::1` has to be
         # put back in them: RFC 3986 spells the authority `[::1]:3000`, and `::1:3000` is a
         # different (and unparseable) thing. Python's own handler is lenient about it; nginx and
@@ -245,7 +314,13 @@ class IrimiAddon:
         literal = f"[{host}]" if ":" in host else host
         authority = literal if port == default_port else f"{literal}:{port}"
         if not forward.forward_auth:
-            flow.request.headers.pop(pipeline.AUTH_HEADER, None)
+            # Every credential-bearing header, not just Authorization: the rule is "a local stub
+            # does not need your real key", and `Cookie`, `x-api-key` and `DD-API-KEY` are keys
+            # too (#32). `forward_auth` keeps all of them, which is what a sandbox tenant or an
+            # internal simulator opting in actually wants.
+            for name in list(flow.request.headers.keys()):
+                if pipeline.is_credential_header(name):
+                    del flow.request.headers[name]
         flow.request.scheme = parts.scheme
         flow.request.host = host
         flow.request.port = port
@@ -300,11 +375,29 @@ class IrimiAddon:
         pending: _Pending | None = flow.metadata.pop(META_KEY, None)
         if pending is None:  # not ours (refused in request()), or already finished
             return
+        # A STREAMED RESPONSE IS ALREADY ON ITS WAY OUT (#28).
+        #
+        # `responseheaders` streams any live or delegated `text/event-stream` body, `kind: read`
+        # included, and mitmproxy neither assembles such a body nor lets these headers be changed
+        # afterwards - they were sent before this hook ran. Two things follow, and both are the
+        # engine's to enforce rather than the overlay's to remember:
+        #
+        #   * the overlay must not be called. It would be handed `body == b""`, which is not what
+        #     the service sent, and whatever it returned could only be wrong.
+        #   * nothing may be written back to the flow. `NoOverlay` returns the object it was given
+        #     so the rewrite below never fired; the first overlay that returns a NEW Response
+        #     would have turned every streamed read into a buffered, empty-bodied one, presenting
+        #     as "reads through the proxy mysteriously return nothing" for streaming endpoints
+        #     only. The same trap is one `respond` change away on the delegated path (#12).
+        #
+        # The exchange is still recorded, with the empty body streaming costs it - that trade is
+        # `responseheaders`' own, and Phase 3 replay inherits it.
+        streamed = flow.response is not None and bool(flow.response.stream)
         upstream = _response_from_flow(flow)
         resp = upstream
         # The overlay stays off for a delegated read: the target owns that service's state, and
         # layering our own minted objects over it would corrupt read-after-write there (D20).
-        if pending.answered_by == "live" and pending.classification.kind == "read":
+        if not streamed and pending.answered_by == "live" and pending.classification.kind == "read":
             resp = self.overlay(self.write_log, pending.request, upstream)
         ex = pipeline.annotate(
             pending.request,
@@ -334,8 +427,8 @@ class IrimiAddon:
         ):
             self.write_log.append(ex)
         out = pipeline.respond(ex)
-        if out is not None and out is not upstream:
-            flow.response = _to_mitm_response(out)
+        if out is not None and out is not upstream and not streamed:
+            _send(flow, out, upstream)
         self._finish(ex)
 
     def error(self, flow: http.HTTPFlow) -> None:
@@ -351,7 +444,12 @@ class IrimiAddon:
         if pending.answered_by == "live":
             extra_flags = (UPSTREAM_ERROR_FLAG,)
         elif pending.answered_by == "delegated":
-            extra_flags = pending.flags + (pipeline.TARGET_FAILED_FLAG,)
+            # A target irimi refused was already flagged in `request()`, and the client going away
+            # afterwards does not make it fail twice. The flag is a fact about the exchange, not a
+            # counter (#32).
+            extra_flags = pending.flags
+            if pipeline.TARGET_FAILED_FLAG not in extra_flags:
+                extra_flags += (pipeline.TARGET_FAILED_FLAG,)
         else:
             extra_flags = pending.flags
         ex = pipeline.annotate(
@@ -412,7 +510,18 @@ class MitmEngine:
                 mode=["regular"],
             )
             # Addon-registered options are only known once the addons load.
-            opts.update_defer(onboarding=False)  # mitm.it must not be answered locally
+            opts.update_defer(
+                onboarding=False,  # mitm.it must not be answered locally
+                # `eager`, mitmproxy's default, dials the real host - sending a ClientHello
+                # carrying real SNI - before it has seen the request it would have answered or
+                # redirected. A targeted HTTPS route could then not be answered at all when the
+                # real service was unreachable, which is precisely the delegation use case: an
+                # offline, decommissioned or not-yet-built API (#32). `lazy` connects when there
+                # is something to send, so a faked or delegated request never touches the real
+                # host. The cost is mitmproxy's eager-only conveniences - upstream-cert details
+                # for the generated leaf, and ALPN mirroring - neither of which shadow mode uses.
+                connection_strategy="lazy",
+            )
             # A plain Master, not DumpMaster: DumpMaster adds ErrorCheck, which sys.exit()s on
             # a bind failure before the running hook, and dump-CLI conveniences we do not use.
             self._master = Master(opts)

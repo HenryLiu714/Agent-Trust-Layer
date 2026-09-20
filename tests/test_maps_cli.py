@@ -10,7 +10,7 @@ GOOD_OVERRIDE = "service: stripe\ntarget: http://127.0.0.1:3000\n"
 def test_maps_list_prints_every_host_with_its_route_count(capsys):
     assert main(["maps", "list"]) == 0
     out = capsys.readouterr().out
-    assert "irimi maps · 10 service(s) · 12 host(s) · 6 pattern(s) · 47 route(s)" in out
+    assert "irimi maps · 10 service(s) · 14 host(s) · 8 pattern(s) · 47 route(s)" in out
     assert "api.stripe.com" in out and "stripe" in out and "10 routes" in out
     assert "hooks.slack.com" in out and "slack" in out and "10 routes" in out
     assert "*.ingest.sentry.io" in out and "sentry" in out

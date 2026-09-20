@@ -15,8 +15,9 @@ import math
 import re
 import secrets
 import string
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 from urllib.parse import parse_qsl
@@ -48,10 +49,22 @@ FORM_CT = "application/x-www-form-urlencoded"
 
 # One bracket segment of a form field name: the `[order_id]` of `metadata[order_id]`.
 _BRACKET = re.compile(r"\[([^\[\]]*)\]")
+# What `_split_key` returns for the one empty bracket pair it understands, `expand[]`. A real
+# segment can never be this: `_BRACKET` captures what is between the brackets, so a key spelling
+# `[]` out literally arrives as the two characters and not as this marker.
+APPEND = "[]"
 # How deep a bracket path may nest before the key is kept flat instead. Stripe's deepest real key
 # is `line_items[0][price_data][product_data][name]`, four levels; a hostile body can otherwise
 # nest thousands, and unwinding one that deep is a RecursionError inside a mitmproxy hook.
 _MAX_FORM_DEPTH = 8
+
+# What an id looks like after its prefix: one run of id characters, no second `_`. Stripe, OpenAI
+# and Slack all mint `<prefix><token>`, which is what lets `named_id` tell `sub_2` from
+# `sub_sched_1` when a route captures both.
+_ID_TOKEN = re.compile(r"[A-Za-z0-9]+")
+# Stripe spells a PaymentIntent's client secret `pi_<id>_secret_<token>`, so it starts with the
+# same prefix as the id and is the one value in a path that must never be echoed back as one.
+SECRET_MARKER = "_secret"
 
 # A form value that is a canonical decimal integer of at most 15 digits is echoed as a number:
 # stripe-python posts `amount=4900` and the agent that reads `refund.amount` wants 4900 back.
@@ -192,8 +205,13 @@ def _has_non_finite(value: Any) -> bool:
 def _split_key(key: str) -> tuple[str, list[str]]:
     """`metadata[order_id]` -> `("metadata", ["order_id"])`; `a[0][b]` -> `("a", ["0", "b"])`.
 
+    `expand[]` -> `("expand", [APPEND])`: an empty bracket pair on its own is the one bracketed
+    shape with an unambiguous meaning, and it is Stripe's own documented `curl` spelling for a
+    repeated array field. It stayed flat before, so `expand[]=a&expand[]=b` echoed the literal
+    JSON key `"expand[]"` (#33).
+
     A key with no brackets, or bracketed in a shape we will not guess at - `a[b`, `a[b]c`,
-    `a[[b]]`, `a[]`, `[b]`, or more than `_MAX_FORM_DEPTH` levels - comes back with no segments
+    `a[[b]]`, `a[][b]`, `[b]`, or more than `_MAX_FORM_DEPTH` levels - comes back with no segments
     and stays flat. Echoing such a key unchanged is wrong in a small, visible way; guessing at its
     structure is wrong in an unpredictable one.
     """
@@ -202,19 +220,37 @@ def _split_key(key: str) -> tuple[str, list[str]]:
         return key, []
     tail = bracket + rest
     segments = _BRACKET.findall(tail)
-    if not segments or len(segments) > _MAX_FORM_DEPTH or "" in segments:
+    if not segments or len(segments) > _MAX_FORM_DEPTH:
         return key, []
     if "".join(f"[{s}]" for s in segments) != tail:
+        return key, []
+    if segments == [""]:
+        return head, [APPEND]
+    if "" in segments:  # `a[][b]`, `a[b][]`: an append in the middle of a path means nothing here
         return key, []
     return head, segments
 
 
-def _assign(node: dict[str, Any], segments: list[str], value: str) -> None:
-    """Walk the bracket path, creating a dict per level, and set the leaf to `value`.
+def _is_string_valued(names: Iterable[str]) -> bool:
+    """True when a value reached through these field names is one the caller chose the text of.
 
-    The value stays a string. A Stripe metadata value is always a string on the live API, so
-    coercing `metadata[order_id]=6735` to an int hands back something other than what the caller
-    sent - the same reason `_INTEGER` refuses "007" (#27).
+    `STRING_KEYED_FIELDS` names the fields whose *keys* are the caller's, and their values are the
+    caller's for the same reason: a Stripe metadata value is always a string on the live API, so
+    coercing `metadata[order_id]=6735` to an int hands back something other than what was sent
+    (#27). Anywhere else a nested value is coerced exactly like a top-level one.
+    """
+    return any(name in STRING_KEYED_FIELDS for name in names)
+
+
+def _assign(node: dict[str, Any], head: str, segments: list[str], value: str) -> None:
+    """Walk the bracket path, creating a dict per level, and set the leaf.
+
+    The leaf is coerced by `_form_value` unless some name on the way to it is a
+    `STRING_KEYED_FIELDS` one. `line_items[0][quantity]=2` echoed the string `"2"` while the same
+    number at the top level echoed `2`, so `quantity * 2` was `"22"` with no raise (#33).
+
+    An existing dict at the leaf is left alone: `a[0][b]=1&a[0]=2` and `a[0]=2&a[0][b]=1` both keep
+    the structure, which is the rule `parse_form` already applies to a bare key one level up.
     """
     for segment in segments[:-1]:
         child = node.get(segment)
@@ -222,7 +258,10 @@ def _assign(node: dict[str, Any], segments: list[str], value: str) -> None:
             child = {}
             node[segment] = child
         node = child
-    node[segments[-1]] = value
+    leaf = segments[-1]
+    if isinstance(node.get(leaf), dict):
+        return
+    node[leaf] = value if _is_string_valued((head, *segments)) else _form_value(value)
 
 
 # Fields whose keys are arbitrary strings chosen by the caller, so `0`, `1`, ... are key names
@@ -256,32 +295,47 @@ def _to_lists(node: Any, field: str = "") -> Any:
 
 
 def parse_form(text: str) -> dict[str, Any]:
-    """A form body as the object the live API would answer with (#27).
+    """A form body as the object the live API would answer with (#27, #33).
 
-    Three rules, one per bug in the flat `dict(parse_qsl(...))` this replaces. A bracket-nested
-    key becomes a nested container, so `metadata[order_id]=6735` echoes `metadata` and an SDK can
-    read it. A value inside a bracket path stays a string. A repeated bare key collects into a
-    list instead of keeping only the last value.
+    Four rules, one per bug in the flat `dict(parse_qsl(...))` this replaces. A bracket-nested key
+    becomes a nested container, so `metadata[order_id]=6735` echoes `metadata` and an SDK can read
+    it. `expand[]=a&expand[]=b` becomes the list `expand`. A repeated bare key collects into a
+    list instead of keeping only the last value. And a value is coerced by `_form_value` wherever
+    it sits, except under a `STRING_KEYED_FIELDS` name.
+
+    Structure always beats a scalar of the same name, whichever order the two arrive in, and a
+    bracket path beats an append. Those are the shapes no real caller sends, so the rule is chosen
+    to be *stable* rather than clever: `a[0][b]=1&a[0]=2` and `a[0]=2&a[0][b]=1` echo the same
+    thing, which is what stops the echo from depending on dict ordering (#33).
     """
     root: dict[str, Any] = {}
     bare: dict[str, list[Any]] = {}
+    appended: dict[str, list[Any]] = {}
     for key, value in parse_qsl(text, keep_blank_values=True):
         head, segments = _split_key(key)
         if not segments:
-            # A bracketed spelling of the same name always wins, whichever order they arrive in:
-            # `a[0]=1&a=2` and `a=2&a[0]=1` both keep the structure, because structure surviving
-            # is the whole point of this function and a bare value cannot carry any.
-            if isinstance(root.get(head), dict):
+            if isinstance(root.get(head), dict) or head in appended:
                 continue
             bare.setdefault(head, []).append(_form_value(value))
             root.setdefault(head, None)  # hold the position; the value is filled in below
+            continue
+        if segments == [APPEND]:
+            if isinstance(root.get(head), dict):
+                continue
+            bare.pop(head, None)
+            item = value if _is_string_valued((head,)) else _form_value(value)
+            appended.setdefault(head, []).append(item)
+            root.setdefault(head, None)
             continue
         node = root.get(head)
         if not isinstance(node, dict):
             node = {}
             root[head] = node
         bare.pop(head, None)
-        _assign(node, segments, value)
+        appended.pop(head, None)
+        _assign(node, head, segments, value)
+    for head, items in appended.items():
+        root[head] = items
     for head, values in bare.items():
         root[head] = values[0] if len(values) == 1 else values
     return {key: _to_lists(value, key) for key, value in root.items()}
@@ -318,12 +372,23 @@ def named_id(route: Route, path: str, prefix: str) -> str | None:
 
     The captured segment is matched by `prefix`, not by parameter name, because the two are
     spelled differently: the cancel route captures `{payment_intent}` and mints `id: pi_`, and the
-    prefix is the only thing that ties them together.
+    prefix is the only thing that ties them together. `path_params` percent-decodes the segment,
+    so an over-encoded `cus%5FREAL123` is recognised as the id it is.
+
+    A prefix can match more than one capture, and the first one is not always the right one:
+    `sub_` matches `sub_sched_1` before `sub_2`, a real Stripe pair, and it matches a
+    PaymentIntent **client secret** (`pi_ABC_secret_XYZ`) before anything else in that path. So a
+    capture shaped like an id - the prefix and then one run of id characters, which is how Stripe,
+    OpenAI and Slack all mint them - is preferred over one that merely starts with the prefix.
+    That settles both: `sub_sched_1` and the client secret each carry a second `_` and neither is
+    id-shaped. Nothing id-shaped leaves the old answer in place, minus a value carrying Stripe's
+    own `_secret` marker, which is never an id and must not be echoed back as one (#33).
     """
-    return next(
-        (value for value in path_params(route.path, path).values() if value.startswith(prefix)),
-        None,
-    )
+    values = [v for v in path_params(route.path, path).values() if v.startswith(prefix)]
+    shaped = [v for v in values if _ID_TOKEN.fullmatch(v[len(prefix) :])]
+    if shaped:
+        return shaped[0]
+    return next((v for v in values if SECRET_MARKER not in v), None)
 
 
 def l0_body(request: Request, route: Route | None) -> dict[str, Any]:
@@ -344,16 +409,45 @@ def l0_body(request: Request, route: Route | None) -> dict[str, Any]:
     return body
 
 
+# The last `ts` slack_ts handed out, as (seconds, sub-second counter). Guarded by a lock: the
+# hooks run on the proxy's event loop today, but `mint_id` is the only other minting function here
+# and it is thread-safe by construction, so this one says so too rather than resting on that.
+_last_slack_ts: tuple[int, int] = (0, 0)
+_slack_ts_lock = threading.Lock()
+
+
+def slack_ts() -> str:
+    """A Slack `ts`: seconds, a dot, and six digits. Distinct and increasing for the whole run.
+
+    Slack uses `ts` as a message's identifier and as `thread_ts`, so two messages sharing one is
+    two messages that are the same message - an agent that posts twice in a second and then
+    replies in a thread addresses whichever of them it collided with. Drawing the sub-second part
+    at random gave 181,346 distinct values in 200,000 draws (#29).
+
+    A counter rather than a wider random draw, because distinctness is only half of it: real `ts`
+    values increase with time, and code that sorts a transcript by `ts` or asks "is this reply
+    after that message" reads the same answer here as it would from Slack. The counter carries
+    into the next second if a run ever posts more than a million messages inside one.
+    """
+    global _last_slack_ts
+    with _slack_ts_lock:
+        seconds, counter = int(time.time()), 0
+        last_seconds, last_counter = _last_slack_ts
+        if seconds <= last_seconds:
+            seconds, counter = last_seconds, last_counter + 1
+        if counter > 999_999:
+            seconds, counter = seconds + 1, 0
+        _last_slack_ts = (seconds, counter)
+    return f"{seconds}.{counter:06d}"
+
+
 def slack_body(fields: dict[str, Any]) -> dict[str, Any]:
     """Slack's own envelope. slack_sdk raises SlackApiError on any body without `ok: true`.
 
     It replaces the generic body rather than extending it: a Slack response carries no `created`
     and no `object`, and an SDK that sees them would be reading fields the real API never sends.
     """
-    body: dict[str, Any] = {
-        "ok": True,
-        "ts": f"{int(time.time())}.{secrets.randbelow(1_000_000):06d}",
-    }
+    body: dict[str, Any] = {"ok": True, "ts": slack_ts()}
     if "channel" in fields:
         body["channel"] = fields["channel"]
     return body

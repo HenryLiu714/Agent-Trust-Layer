@@ -180,6 +180,25 @@ def test_target_arg_parses_a_service_and_a_route_spec():
     )
 
 
+def test_a_trailing_slash_on_the_host_is_the_service_target():
+    """`api.stripe.com/=<url>` is how a reader used to nginx `proxy_pass` spells "the whole
+    service". It was read as the route path `/`, which no map claims, so a spelling that means
+    the right thing failed with "no `write` or `unknown` route matches '/'" (#32)."""
+    from irimi.cli import _target_arg
+
+    assert _target_arg("api.stripe.com/=http://127.0.0.1:3000") == (
+        "api.stripe.com",
+        "",
+        "http://127.0.0.1:3000",
+    )
+    # And the loader takes it: the spelling has to reach the service target, not merely parse.
+    from irimi import servicemap
+
+    index = servicemap.load(targets=[_target_arg("api.stripe.com/=http://127.0.0.1:3000")])
+    stripe = index.service_for("api.stripe.com")
+    assert stripe is not None and stripe.target == "http://127.0.0.1:3000"
+
+
 @pytest.mark.parametrize(
     "value",
     [

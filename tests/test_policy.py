@@ -135,6 +135,28 @@ def test_slack_write_gets_slacks_own_envelope():
     assert "text" not in body  # the envelope replaces the echo, it does not extend it
 
 
+def test_two_slack_writes_in_the_same_second_get_different_timestamps():
+    """Slack uses `ts` as a message's identifier and as `thread_ts`, so a collision is two
+    messages that are the same message. The random six digits collided 9% of the time in 200,000
+    draws (#29); they are a counter now, so a run can post a million messages a second before one
+    repeats."""
+    seen = [policy.slack_ts() for _ in range(5_000)]
+    assert len(set(seen)) == len(seen)
+    # And increasing, because that is the other half of what a `ts` means: real ones sort by time,
+    # so code that orders a transcript by `ts` reads the same answer here as it would from Slack.
+    assert [float(ts) for ts in seen] == sorted(float(ts) for ts in seen)
+    assert all(re.fullmatch(r"\d+\.\d{6}", ts) for ts in seen)
+
+
+def test_a_slack_timestamp_still_names_the_current_second(monkeypatch):
+    """The counter must not drift off the clock: a `ts` is a real epoch time, and an SDK that
+    renders one as a date has to get today."""
+    monkeypatch.setattr(policy, "_last_slack_ts", (0, 0))
+    monkeypatch.setattr(policy.time, "time", lambda: 1_700_000_000.9)
+    assert policy.slack_ts() == "1700000000.000000"
+    assert policy.slack_ts() == "1700000000.000001"
+
+
 def test_slack_write_reads_the_json_body_slack_sdk_actually_posts():
     """slack_sdk 3.x sends `application/json;charset=utf-8`, not a form - so parse both."""
     ans = _answer(
@@ -311,10 +333,24 @@ def test_a_bracket_nested_form_field_becomes_a_nested_object():
     assert body == {"charge": "ch_test", "amount": 4900, "metadata": {"order_id": "6735"}}
 
 
-def test_a_value_inside_a_bracket_path_stays_a_string():
-    """A Stripe metadata value is always a string on the live API."""
+def test_a_metadata_value_stays_a_string_at_any_depth():
+    """A Stripe metadata value is always a string on the live API, so coercing one hands back
+    something other than what the caller sent (#27). The field name is what decides, wherever it
+    sits on the path into the value."""
     assert policy.parse_form("metadata[n]=6735")["metadata"]["n"] == "6735"
+    assert policy.parse_form("a[metadata][n]=6735")["a"]["metadata"]["n"] == "6735"
+
+
+def test_a_nested_number_is_a_number_like_the_same_number_at_the_top_level():
+    """`line_items[0][quantity]=2` echoed `"2"` while `amount=4900` echoed `4900`, so
+    `quantity * 2` was `"22"` with no raise. "Stays a string" is right for `metadata` and wrong
+    for every other numeric nested field (#33)."""
     assert policy.parse_form("n=6735")["n"] == 6735
+    body = policy.parse_form("line_items[0][quantity]=2&line_items[0][price]=price_1")
+    assert body == {"line_items": [{"quantity": 2, "price": "price_1"}]}
+    assert policy.parse_form("expand[]=2")["expand"] == [2]
+    # The same rules the top level has: not canonical, so not a number.
+    assert policy.parse_form("a[b]=007")["a"]["b"] == "007"
 
 
 def test_a_repeated_bare_key_collects_into_a_list():
@@ -328,7 +364,7 @@ def test_a_repeated_bare_key_collects_into_a_list():
     [
         ("expand[0]=a&expand[1]=b", {"expand": ["a", "b"]}),
         ("i[0][price]=p1&i[1][price]=p2", {"i": [{"price": "p1"}, {"price": "p2"}]}),
-        ("a[b][c]=1", {"a": {"b": {"c": "1"}}}),
+        ("a[b][c]=1", {"a": {"b": {"c": 1}}}),
         ("x[1]=only", {"x": {"1": "only"}}),  # a gap stays a dict; nothing is invented
         ("x[0]=a&x[2]=c", {"x": {"0": "a", "2": "c"}}),
         ("x[007]=a", {"x": {"007": "a"}}),  # not a canonical index, so not a list
@@ -344,7 +380,8 @@ def test_an_indexed_form_key_becomes_a_list_only_when_the_indices_are_complete(t
         ("a[b", {"a[b": ""}),
         ("a[b]c", {"a[b]c": ""}),
         ("a[[b]]", {"a[[b]]": ""}),
-        ("a[]=1", {"a[]": 1}),
+        ("a[][b]=1", {"a[][b]": 1}),  # an append in the middle of a path means nothing
+        ("a[b][]=1", {"a[b][]": 1}),
         ("[b]=1", {"[b]": 1}),
     ],
 )
@@ -362,11 +399,39 @@ def test_a_bracketed_key_beats_a_bare_one_in_either_order(text):
     structure surviving is what #27 is about, and a bare value cannot carry any."""
     result = policy.parse_form(text)
     assert isinstance(result["a"], list), result
-    assert "1" in result["a"]
+    assert 1 in result["a"]
+
+
+@pytest.mark.parametrize("text", ["a[0][b]=1&a[0]=2", "a[0]=2&a[0][b]=1"])
+def test_a_bracket_path_beats_a_scalar_at_the_same_leaf_in_either_order(text):
+    """The same class one level down, and the same answer: the deeper structure survives, so the
+    echo does not depend on which spelling arrived first (#33)."""
+    assert policy.parse_form(text) == {"a": [{"b": 1}]}
+
+
+@pytest.mark.parametrize("text", ["a[]=1&a[0][b]=2", "a[0][b]=2&a[]=1"])
+def test_a_bracket_path_beats_an_append_of_the_same_name_in_either_order(text):
+    assert policy.parse_form(text) == {"a": [{"b": 2}]}
+
+
+@pytest.mark.parametrize("text", ["a[]=1&a=2", "a=2&a[]=1"])
+def test_an_append_beats_a_bare_key_of_the_same_name_in_either_order(text):
+    assert policy.parse_form(text) == {"a": [1]}
+
+
+def test_an_empty_bracket_pair_is_a_list(tmp_path):
+    """`expand[]=a&expand[]=b` is Stripe's own documented curl spelling. It echoed the literal
+    JSON key `"expand[]"`, which is a field no SDK looks for (#33). One repeat or none, the shape
+    is the same: a caller writing `[]` means a list either way."""
+    assert policy.parse_form("expand[]=a&expand[]=b") == {"expand": ["a", "b"]}
+    assert policy.parse_form("expand[]=a") == {"expand": ["a"]}
+    assert policy.parse_form("charge=ch_1&expand[]=a") == {"charge": "ch_1", "expand": ["a"]}
+    # `metadata` is still the caller's to key and to spell, at this shape too.
+    assert policy.parse_form("metadata[]=6735") == {"metadata": ["6735"]}
 
 
 def _nest(depth: int):
-    node: object = "1"
+    node: object = 1
     for _ in range(depth):
         node = {"b": node}
     return node
@@ -453,6 +518,56 @@ def test_a_captured_segment_that_is_not_this_ids_prefix_is_not_used():
     assert policy.named_id(route, "/v1/widgets/wid_1/parts/prt_9", "prt_") == "prt_9"
     assert policy.named_id(route, "/v1/widgets/w1/parts/p9", "wid_") is None
     assert policy.named_id(route, "/v1/widgets", "wid_") is None
+
+
+def test_the_id_shaped_capture_wins_when_one_prefix_matches_two_segments():
+    """`sub_` matches `sub_sched_1` before `sub_2` - a real Stripe pair, and the first capture is
+    the wrong one. An id is its prefix plus one run of id characters, so the second `_` in
+    `sub_sched_1` is what rules it out (#33)."""
+    route = servicemap.Route(
+        method="POST",
+        path="/v1/subscription_schedules/{schedule}/subscriptions/{subscription}",
+        operation="subscriptions.update",
+        kind="write",
+        ids={"id": "sub_"},
+    )
+    path = "/v1/subscription_schedules/sub_sched_1/subscriptions/sub_2"
+    assert policy.named_id(route, path, "sub_") == "sub_2"
+    # And the longer prefix still finds its own segment, which the shorter one must not steal.
+    assert policy.named_id(route, path, "sub_sched_") == "sub_sched_1"
+
+
+def test_a_client_secret_is_never_echoed_back_as_the_resource_id():
+    """A PaymentIntent's client secret starts with the id's own prefix
+    (`pi_ABC_secret_XYZ`), so prefix matching alone hands it back as `id` - a credential in the
+    one field an agent is most likely to log or store (#33)."""
+    route = servicemap.Route(
+        method="POST",
+        path="/v1/payment_intents/{payment_intent}/cancel",
+        operation="payment_intents.cancel",
+        kind="write",
+        ids={"id": "pi_"},
+    )
+    assert policy.named_id(route, "/v1/payment_intents/pi_ABC_secret_XYZ/cancel", "pi_") is None
+    body = policy.l0_body(_req("POST", path="/v1/payment_intents/pi_ABC_secret_XYZ/cancel"), route)
+    assert body["id"] != "pi_ABC_secret_XYZ"
+    assert re.fullmatch(r"pi_[A-Za-z0-9]{24}", body["id"])
+    assert policy.named_id(route, "/v1/payment_intents/pi_REAL999/cancel", "pi_") == "pi_REAL999"
+
+
+def test_a_percent_encoded_id_is_still_the_id_the_request_names():
+    """`cus%5FREAL123` is the same customer as `cus_REAL123` to the service, so reading the raw
+    segment minted a fresh id and reinstated #26 for any caller that over-encodes (#33)."""
+    route = servicemap.Route(
+        method="POST",
+        path="/v1/customers/{customer}",
+        operation="customers.update",
+        kind="write",
+        ids={"id": "cus_"},
+    )
+    assert policy.named_id(route, "/v1/customers/cus%5FREAL123", "cus_") == "cus_REAL123"
+    body = json.loads(_answer(_req("POST", path="/v1/customers/cus%5FREAL123")).response.body)
+    assert body["id"] == "cus_REAL123"
 
 
 def test_every_shipped_write_route_that_names_ids_round_trips_or_mints():

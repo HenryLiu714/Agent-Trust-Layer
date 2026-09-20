@@ -185,15 +185,65 @@ def test_shipped_maps_have_no_target_and_a_human_on_every_write():
                 assert route.human, f"{sm.service} {route.operation} has no human template"
 
 
-def test_shipped_maps_are_in_the_wheel_directory():
+MAP_FILE_NAMES = [
+    "anthropic.yaml",
+    "openai.yaml",
+    "slack.yaml",
+    "stripe.yaml",
+    "telemetry.yaml",
+]
+
+
+def test_the_shipped_maps_directory_holds_every_map():
     names = sorted(p.name for p in servicemap.shipped_dir().iterdir() if p.suffix == ".yaml")
-    assert names == [
-        "anthropic.yaml",
-        "openai.yaml",
-        "slack.yaml",
-        "stripe.yaml",
-        "telemetry.yaml",
-    ]
+    assert names == MAP_FILE_NAMES
+
+
+def test_the_shipped_maps_are_inside_a_built_wheel(tmp_path):
+    """The maps are data files, and a wheel that drops them is an install that refuses to start.
+
+    This builds one and looks inside it. Reading `shipped_dir()` instead - which is what this test
+    did until #29 - reads the *source tree*, so it passes for a packaging change that ships no
+    YAML at all: hatchling's default file selection honours `.gitignore`, so one `*.yaml` line
+    there, or an `exclude` in pyproject, empties `irimi/maps/` in the wheel while the working
+    copy still looks right. That install then fails on `irimi maps list` with the named refusal
+    #21 added, which is the failure this test exists to get ahead of.
+
+    A skip here is an environment that cannot build (no `uv`, no network for the build backend),
+    not a packaging verdict: the assertion is about what is inside a wheel, so with no wheel there
+    is nothing to assert. Run with `-rs` to see it.
+    """
+    import shutil
+    import subprocess
+    import zipfile
+
+    root = Path(__file__).resolve().parents[1]
+    if not (root / "pyproject.toml").is_file():
+        pytest.skip("not running from a source checkout, so there is nothing to build")
+    uv = shutil.which("uv")
+    if uv is None:
+        pytest.skip("uv is not on PATH; this repo builds with `uv build`")
+    built = subprocess.run(
+        [uv, "build", "--wheel", "--out-dir", str(tmp_path)],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if built.returncode != 0:
+        pytest.skip(f"`uv build --wheel` failed in this environment:\n{built.stderr}")
+    wheels = sorted(tmp_path.glob("*.whl"))
+    assert len(wheels) == 1, f"expected one wheel, got {[w.name for w in wheels]}"
+    with zipfile.ZipFile(wheels[0]) as wheel:
+        packaged = sorted(
+            name.removeprefix("irimi/maps/")
+            for name in wheel.namelist()
+            if name.startswith("irimi/maps/") and name.endswith(".yaml")
+        )
+        # The entry point the maps are loaded through has to be in there too, or the refusal the
+        # missing maps would raise never gets the chance to run.
+        assert "irimi/servicemap.py" in wheel.namelist()
+    assert packaged == MAP_FILE_NAMES
 
 
 # ------------------------------------------------------------------------------------ every field
@@ -792,8 +842,34 @@ def test_a_directory_with_no_yaml_is_the_same_refusal(tmp_path):
     assert "no service maps found" in str(exc.value)
 
 
+def test_a_maps_directory_that_cannot_be_scanned_is_a_named_refusal(tmp_path, monkeypatch):
+    """The same refusal as the test below, reached without a directory mode, so it also runs as
+    root - in a root CI container the mode-based one skips and this path was then uncovered (#29).
+
+    The OSError is raised from `iterdir` itself, which is where a real unreadable directory raises
+    it: everything between there and the MapError is the code under test.
+    """
+    directory = tmp_path / "locked"
+    directory.mkdir()
+    (directory / "demo.yaml").write_text(GOOD)
+    real_iterdir = Path.iterdir
+
+    def refuse(self):
+        if os.path.samefile(self, directory):
+            raise PermissionError(13, "Permission denied")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", refuse)
+    with pytest.raises(MapError) as exc:
+        servicemap.load_shipped(maps_dir=directory)
+    assert str(directory) in str(exc.value)
+    assert "cannot read the service maps directory" in str(exc.value)
+    assert "Permission denied" in str(exc.value)
+
+
 def test_an_unreadable_maps_directory_is_a_named_refusal(tmp_path):
-    """A stripped or damaged install is a refusal too, not an OSError out of `iterdir`."""
+    """The same refusal against a real directory mode, which is the thing that actually happens
+    on a stripped install. It cannot run as root, which is why the test above exists."""
     import os
 
     if os.geteuid() == 0:
@@ -982,6 +1058,18 @@ def test_path_params_binds_nothing_when_the_literal_segments_differ():
         "customer": "cus_X"
     }
     assert servicemap.path_params("/v1/customers/{customer}", "/v1/customers") == {}
+
+
+def test_path_params_percent_decodes_a_captured_segment():
+    """The service decodes it, so we do: `cus%5FREAL123` is the same customer as `cus_REAL123`,
+    and reading the raw segment made `policy.named_id` mint a fresh id for a resource the request
+    already named (#33). Literal segments are still compared raw, so this cannot widen a match."""
+    assert servicemap.path_params("/v1/customers/{customer}", "/v1/customers/cus%5FX") == {
+        "customer": "cus_X"
+    }
+    assert servicemap.path_params("/v1/customers/{c}", "/v1/customers/a%20b") == {"c": "a b"}
+    # A literal segment spelled with an escape does not match; decoding only reads the holes.
+    assert servicemap.path_params("/v1/customers/{c}", "/v1/custom%65rs/x") == {}
 
 
 def test_a_route_pattern_may_not_repeat_a_parameter_name(tmp_path):

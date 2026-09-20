@@ -39,6 +39,11 @@ def _target_arg(value: str) -> tuple[str, str, str]:
     `api.stripe.com=http://127.0.0.1:3000` sets the service target;
     `api.stripe.com/v1/refunds=http://127.0.0.1:3000/refund` sets one route's. The URL is
     validated by the map loader, which owns every target rule.
+
+    A trailing bare slash is the service too: `api.stripe.com/=<url>` is how a reader used to
+    `proxy_pass` spells "the whole service", and it used to be taken as the route path `/`, which
+    no map claims - so a spelling that means the right thing failed with "no route matches '/'"
+    (#32).
     """
     spec, sep, url = value.partition("=")
     host, slash, path = spec.strip().partition("/")
@@ -49,7 +54,7 @@ def _target_arg(value: str) -> tuple[str, str, str]:
             "--target 'api.stripe.com/v1/refunds=http://127.0.0.1:3000/refund' "
             "(a bare host sets the whole service's target)"
         )
-    return host, f"{slash}{path}" if slash else "", url.strip()
+    return host, f"{slash}{path}" if slash and path else "", url.strip()
 
 
 def _add_engine_args(parser: argparse.ArgumentParser) -> None:

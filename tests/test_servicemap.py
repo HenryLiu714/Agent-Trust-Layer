@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+
 import pytest
 
 from irimi import paths, servicemap
@@ -943,3 +946,26 @@ def test_patterns_are_not_in_the_reverse_doors_allow_list(tmp_path):
     assert index.hosts == frozenset({"one.demo.example"})
     assert index.patterns == ("*.demo.example",)
     assert MapIndex().patterns == ()
+
+
+# ------------------------------------------------------ the conftest isolation guards itself (#29)
+
+
+def test_the_conftest_redirects_irimi_home_away_from_the_developers_own(tmp_path):
+    """Regression guard for the `$IRIMI_HOME` half of `tests/conftest.py`, which had none.
+
+    Deleting its `monkeypatch.setenv` left the suite green on a clean box and failed only for a
+    developer who followed the README and created `~/.irimi/maps.yaml`. This fails on every box:
+    the env var is gone, so the lookup below raises, and the overrides file the loader then reads
+    is the real one. Renaming the `cwd` half already fails four tests immediately (#29).
+    """
+    home = Path(os.environ[paths.IRIMI_HOME_ENV])
+    assert home != Path.home() / ".irimi"
+    assert paths.irimi_home() == home
+
+    home.mkdir(parents=True, exist_ok=True)
+    (home / servicemap.HOME_OVERRIDE_NAME).write_text(
+        "service: demo\ntarget: http://127.0.0.1:3000\n"
+    )
+    assert servicemap.override_path(cwd=tmp_path / "empty") == home / servicemap.HOME_OVERRIDE_NAME
+    assert load(tmp_path).services[0].target == "http://127.0.0.1:3000"

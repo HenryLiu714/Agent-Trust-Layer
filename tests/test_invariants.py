@@ -15,6 +15,7 @@ deliberately broken one. A test that cannot fail is the one thing an invariant f
 
 import asyncio
 import http.client
+import json
 import threading
 from collections.abc import Sequence
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -277,6 +278,37 @@ def test_the_locally_answered_write_is_stamped_and_the_live_read_is_not(
     seen, replies = _run(tmp_path, monkeypatch, maps, calls)
     assert [stamped for _, _, stamped in replies] == [None, "fake-L0"]
     assert stamping_violations(seen) == []
+
+
+def test_the_answer_a_failed_decision_gives_is_stamped_too(tmp_path, monkeypatch, upstream):
+    """The one path that never sets `_Pending`, and so never reaches `response()` - which is the
+    only place `respond` was being called from.
+
+    It answered a 502 the engine decided, recorded it as `fake-L0`, and sent it with no header at
+    all: a client using the header to tell our answer from the real service's read this one as the
+    real service's. `stamping_violations` could not see it either, because it calls `respond` on
+    the recorded Exchange and reads the header that call *would* produce - so this test asserts on
+    `stamped`, the header the client actually received.
+    """
+
+    class _BrokenPolicy:
+        name = "broken"
+
+        def answer(self, request, classification):
+            raise RuntimeError("the decision exploded")
+
+    maps = _maps(tmp_path, monkeypatch)
+
+    def calls(port):
+        return [_via_proxy(port, "POST", f"http://127.0.0.1:{upstream}/things", body=b"{}")]
+
+    seen, ((status, data, stamped),) = _run(
+        tmp_path, monkeypatch, maps, calls, policy=_BrokenPolicy()
+    )
+    assert status == 502 and json.loads(data)["error"]["type"] == "irimi_decision_failed"
+    assert (seen[0].answered_by, stamped) == ("fake-L0", "fake-L0")
+    assert stamping_violations(seen) == []
+    assert _Recorder.seen == [], "the write reached the real upstream"
 
 
 def test_a_policy_that_answers_locally_without_saying_so_is_caught(tmp_path, monkeypatch, upstream):

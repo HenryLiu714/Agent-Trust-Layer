@@ -176,23 +176,27 @@ class IrimiAddon:
             # about, and `unknown` + `unclassified` is the honest classification for it.
             logger.exception("irimi: answering locally; the decision raised")
             response = _decision_failed(f"irimi could not decide how to answer this request: {exc}")
-            flow.response = _to_mitm_response(response)
-            self._finish(
-                pipeline.annotate(
-                    req,
-                    response,
-                    pipeline.Classification(
-                        service=req.host,
-                        operation="",
-                        kind="unknown",
-                        flags=(pipeline.UNCLASSIFIED_FLAG,),
-                    ),
-                    "fake-L0",
-                    pipeline.attribute_run(req, self.config.run_id),
-                    extra_flags=(pipeline.DECISION_FAILED_FLAG,),
-                    door=door,
-                )
+            ex = pipeline.annotate(
+                req,
+                response,
+                pipeline.Classification(
+                    service=req.host,
+                    operation="",
+                    kind="unknown",
+                    flags=(pipeline.UNCLASSIFIED_FLAG,),
+                ),
+                "fake-L0",
+                pipeline.attribute_run(req, self.config.run_id),
+                extra_flags=(pipeline.DECISION_FAILED_FLAG,),
+                door=door,
             )
+            # Through `respond`, like every other answer of ours. This is the one path that never
+            # sets `_Pending`, so `response()` returns early and never runs - and it was therefore
+            # the one engine-answered response reaching the client with no `Irimi-Answered-By`,
+            # while being recorded as `fake-L0`. Invariant (a) of #12 reads the header to tell an
+            # answer of ours from the real service's, and this one said "real service".
+            flow.response = _to_mitm_response(pipeline.respond(ex) or response)
+            self._finish(ex)
             return
         response, flags, target = ans.response, ans.flags, ""
         if ans.forward_to is not None:
@@ -318,8 +322,16 @@ class IrimiAddon:
         # live. `target_reads` makes a delegated read the first non-live read, and a GET replayed
         # onto later reads is not a write by any reading - #20 owns "no overlay for a delegated
         # service" and #28 is the streaming twin of the same hazard. A failed target (502) is not
-        # a write either: nothing was performed.
-        if ex.kind not in LIVE_KINDS and ex.answered_by != "live":
+        # a write either: nothing was performed, so it is excluded by its flag. A target that
+        # could not be *dialled* never reaches here at all - `error()` handles that one and does
+        # not touch the log - but a target irimi *refused* is answered in `request()`, which does
+        # set `_Pending`, so without the flag check it landed here and the overlay would replay a
+        # write that was performed nowhere.
+        if (
+            ex.kind not in LIVE_KINDS
+            and ex.answered_by != "live"
+            and pipeline.TARGET_FAILED_FLAG not in ex.flags
+        ):
             self.write_log.append(ex)
         out = pipeline.respond(ex)
         if out is not None and out is not upstream:

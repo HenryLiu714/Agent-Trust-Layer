@@ -20,7 +20,9 @@ from irimi.exchange import Exchange, Request, Response
 #    `IrimiAddon.response` does not call the overlay for a delegated read, and `write_log` does
 #    not collect one either - a delegated `GET`, and a failed target's `502`, are not writes, and
 #    replaying them onto other services' live reads is the bug that condition was narrowed to
-#    prevent.
+#    prevent. The `502` half is excluded by its `target-failed` flag, not by never reaching the
+#    guard: a target that could not be *dialled* is handled in `error()`, but one irimi *refused*
+#    is answered in `request()` and does reach `response()`.
 #
 # 2. A STREAMED READ REACHES YOU WITH AN EMPTY BODY (issue #28).
 #    `IrimiAddon.responseheaders` streams any live `text/event-stream` response, `kind: read`

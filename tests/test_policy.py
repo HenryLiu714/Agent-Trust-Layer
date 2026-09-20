@@ -1,6 +1,7 @@
 import json
 import re
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -472,3 +473,87 @@ def test_every_shipped_write_route_that_names_ids_round_trips_or_mints():
                 assert policy.named_id(route, filled, prefix) == prefix + "SAMPLE", (
                     f"{sm.service}.{route.operation} does not echo the {name} its path names"
                 )
+
+
+# ------------------------------------- content types, literal bodies and one encode (#29)
+
+
+@pytest.mark.parametrize(
+    "ct",
+    [
+        "application/json",
+        "text/json",
+        "application/vnd.api+json",
+        "application/json-patch+json",
+    ],
+)
+def test_every_json_content_type_is_parsed(ct):
+    """Only the exact `application/json` was read before, so a `+json` body was indistinguishable
+    from a malformed one and reflected nothing."""
+    assert policy.reflect(_req(body=b'{"a": 1}', content_type=ct)) == {"a": 1}
+
+
+def test_a_slack_incoming_webhook_answers_the_literal_ok():
+    """A real incoming webhook answers the body `ok` as text/plain. The Web API envelope it got
+    instead breaks `assert resp.text == "ok"`, the common raw-requests idiom."""
+    ans = _answer(
+        _req(
+            "POST",
+            host="hooks.slack.com",
+            path="/services/T000/B000/xyz",
+            body=b'{"text": "hi"}',
+            content_type="application/json",
+        )
+    )
+    assert ans.response.body == b"ok"
+    assert dict(ans.response.headers)["content-type"] == "text/plain"
+    assert ans.answered_by == "fake-L0"
+    assert ans.flags == (policy.FIDELITY_L0_FLAG,)
+
+
+def test_the_web_api_still_gets_the_json_envelope():
+    """The literal body is keyed on `(service, operation)`, not on the host, so the rest of
+    `slack` is unaffected even though hooks.slack.com is part of the same service."""
+    ans = _answer(
+        _req(
+            "POST",
+            host="slack.com",
+            path="/api/chat.postMessage",
+            body=b"channel=C1",
+            content_type="application/x-www-form-urlencoded",
+        )
+    )
+    assert dict(ans.response.headers)["content-type"] == "application/json"
+    assert json.loads(ans.response.body)["ok"] is True
+
+
+def test_a_body_a_strict_json_parser_would_refuse_reflects_nothing():
+    """`_has_non_finite` replaced a throwaway serialization of the whole body; it must still keep
+    NaN and Infinity out, because it is what makes the single json.dumps unable to fail."""
+    for raw in [b'{"v": NaN}', b'{"v": Infinity}', b'{"v": -Infinity}', b'{"v": [1e400]}']:
+        assert policy.reflect(_req(body=raw, content_type="application/json")) == {}
+    assert policy.reflect(_req(body=b'{"v": 1.5}', content_type="application/json")) == {"v": 1.5}
+
+
+def test_the_body_is_serialized_exactly_once(monkeypatch):
+    """It used to be encoded twice - once inside reflect purely to validate it and throw away,
+    once in answer - and that second call was the only one outside the never-raise guard."""
+    calls = []
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return json.dumps(*args, **kwargs)
+
+    # Rebind the name `json` inside policy rather than mutating the shared stdlib module: the
+    # latter counts every json.dumps in the process, including ones classify or servicemap make,
+    # which turns this into a tripwire for whatever another batch adds to that path.
+    monkeypatch.setattr(policy, "json", SimpleNamespace(dumps=counting, loads=json.loads))
+    _answer(
+        _req(
+            "POST",
+            path="/v1/refunds",
+            body=b"charge=ch_test&amount=4900",
+            content_type="application/x-www-form-urlencoded",
+        )
+    )
+    assert calls == [1]

@@ -11,6 +11,7 @@ a forwarded write escapes shadow mode - so a body that cannot be parsed reflects
 
 import json
 import logging
+import math
 import re
 import secrets
 import string
@@ -30,6 +31,7 @@ FIDELITY_L0_FLAG = "fidelity:L0"
 ID_ALPHABET = string.ascii_letters + string.digits
 ID_LENGTH = 24
 JSON_CT = "application/json"
+TEXT_CT = "text/plain"
 FORM_CT = "application/x-www-form-urlencoded"
 
 # One bracket segment of a form field name: the `[order_id]` of `metadata[order_id]`.
@@ -88,6 +90,35 @@ def content_type(request: Request) -> str:
 
 def _form_value(value: str) -> Any:
     return int(value) if _INTEGER.fullmatch(value) else value
+
+
+def _is_json(ct: str) -> bool:
+    """Every content type that carries a JSON document.
+
+    RFC 6839's `+json` structured suffix covers `application/vnd.api+json` and
+    `application/json-patch+json`; `text/json` is a legacy spelling clients still send. Before
+    this, only the exact `application/json` was parsed and the rest reflected nothing, which is
+    indistinguishable from a malformed body (#29).
+    """
+    return ct == JSON_CT or ct == "text/json" or ct.endswith("+json")
+
+
+def _has_non_finite(value: Any) -> bool:
+    """True when `value` holds a float `json.dumps` would write as NaN, Infinity or -Infinity.
+
+    json.loads accepts all three and json.dumps writes them straight back out, so the echo would
+    be a body a strict JSON parser refuses. This keeps them out of the single `json.dumps` in
+    `fake_response`; the `try` in `answer` is what makes that call safe outright. It replaces a
+    throwaway serialization of the whole body, which cost a second full pass over a large one and
+    was discarded either way (#29).
+    """
+    if isinstance(value, float):
+        return not math.isfinite(value)
+    if isinstance(value, dict):
+        return any(_has_non_finite(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_has_non_finite(v) for v in value)
+    return False
 
 
 def _split_key(key: str) -> tuple[str, list[str]]:
@@ -177,19 +208,16 @@ def parse_form(text: str) -> dict[str, Any]:
 def reflect(request: Request) -> dict[str, Any]:
     """The request's own fields, as a JSON-serializable dict. Never raises.
 
-    `application/json` counts only when it decodes to an object; `application/x-www-form-urlencoded`
-    is parsed with `parse_qsl`. Any other content type, and any parse failure, reflects nothing.
+    A JSON content type counts only when the body decodes to an object;
+    `application/x-www-form-urlencoded` goes through `parse_form`. Any other content type, and
+    any parse failure, reflects nothing.
     """
     ct = content_type(request)
     try:
-        if ct == JSON_CT:
+        if _is_json(ct):
             parsed = json.loads(request.body)
-            if not isinstance(parsed, dict):
+            if not isinstance(parsed, dict) or _has_non_finite(parsed):
                 return {}
-            # json.loads accepts NaN, Infinity and 1e400, and json.dumps writes them straight
-            # back out, so the echo would be a body a strict JSON parser refuses. Checking here
-            # is also what makes the json.dumps in answer() unable to fail.
-            json.dumps(parsed, allow_nan=False)
             return parsed
         if ct == FORM_CT:
             return parse_form(request.body.decode("utf-8", "replace"))
@@ -255,6 +283,15 @@ def slack_body(fields: dict[str, Any]) -> dict[str, Any]:
 SHAPES: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {"slack": slack_body}
 
 
+# Routes whose real service does not answer with JSON at all, keyed by service and operation.
+# A Slack incoming webhook answers the literal body `ok` as `text/plain`; the Web API envelope it
+# got instead (the shape keys on the service, and hooks.slack.com is part of `slack`) breaks the
+# common raw-requests idiom `assert resp.text == "ok"` (#29).
+LITERAL_BODIES: dict[tuple[str, str], tuple[bytes, str]] = {
+    ("slack", "incoming_webhook"): (b"ok", TEXT_CT),
+}
+
+
 def fake_body(request: Request, classification: Classification) -> dict[str, Any]:
     """The body of a locally answered write: the service's own shape when it has one.
 
@@ -272,6 +309,21 @@ def fake_body(request: Request, classification: Classification) -> dict[str, Any
     return l0_body(request, route)
 
 
+def fake_response(request: Request, classification: Classification) -> tuple[bytes, str]:
+    """The encoded body and content type of a locally answered write.
+
+    The single place the body is serialized. It used to be encoded twice - once inside `reflect`
+    purely to validate it and throw it away, once here - and this call was the only one outside
+    the never-raise guard in `answer` (#29).
+    """
+    route = classification.matched[1] if classification.matched is not None else None
+    if route is not None:
+        literal = LITERAL_BODIES.get((classification.service, route.operation))
+        if literal is not None:
+            return literal
+    return json.dumps(fake_body(request, classification), allow_nan=False).encode(), JSON_CT
+
+
 class ShadowPolicy:
     """Reads, llm and telemetry go live. write and unknown are answered with the L0 echo."""
 
@@ -281,18 +333,14 @@ class ShadowPolicy:
         if classification.kind in LIVE_KINDS:
             return Answer(answered_by="live", response=None)
         try:
-            body = fake_body(request, classification)
+            body, ct = fake_response(request, classification)
         except Exception:
             # The belt to reflect()'s braces. Raising here would make mitmproxy forward the flow,
             # and a forwarded write escapes shadow mode - an empty object is far better.
             logger.exception("irimi: the L0 echo failed; answering with an empty object")
-            body = {}
+            body, ct = b"{}", JSON_CT
         return Answer(
             answered_by="fake-L0",
-            response=Response(
-                status=200,
-                headers=(("content-type", JSON_CT),),
-                body=json.dumps(body).encode(),
-            ),
+            response=Response(status=200, headers=(("content-type", ct),), body=body),
             flags=(FIDELITY_L0_FLAG,),
         )

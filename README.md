@@ -46,8 +46,17 @@ maps do not cover. Each exchange prints as one line.
 A `fake-L0` answer is a `200` whose JSON body echoes the request's own fields, stamps `created`,
 and mints an id for every field the matched route names: a Stripe refund comes back with
 `id: re_...`, `balance_transaction: txn_...` and `object: refund`, so stripe-python parses it. A
-Slack call gets Slack's own `{"ok": true, "ts": "..."}` envelope instead, because its SDK refuses
-anything else.
+Slack Web API call gets Slack's own `{"ok": true, "ts": "..."}` envelope instead, because its SDK
+refuses anything else, and an incoming webhook gets the literal `ok` as `text/plain`, which is
+what the real one answers.
+
+Three things the echo is careful about, because an SDK has to be able to read the fields it just
+sent. A write that **names its resource in the path** gets that id back rather than a fresh one:
+`POST /v1/customers/cus_REAL123` echoes `cus_REAL123`, because the live API does and an agent that
+logs the id or retrieves it again would otherwise be handed one for a resource that never existed.
+A **bracket-nested form field** becomes a nested object, so `metadata[order_id]=6735` comes back as
+`metadata`, with the value still a string as the live API sends it. And a **repeated key** collects
+into a list instead of keeping only the last value.
 
     uv run irimi serve
     # in another terminal

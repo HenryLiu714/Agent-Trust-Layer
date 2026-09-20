@@ -1,10 +1,12 @@
 import argparse
+import io
 import socket
+import sys
 from pathlib import Path
 
 import pytest
 
-from irimi import __version__, ca, paths
+from irimi import __version__, ca, cli, paths, runner, servicemap
 from irimi.cli import main
 
 
@@ -243,3 +245,99 @@ def test_the_escape_hatch_warning_says_what_it_allows():
     assert warning.startswith("WARNING:")
     assert "stub.internal" in warning
     assert "leave this machine" in warning
+
+
+# ------------------------------------------------- the startup lines reach a pipe (flushing)
+
+
+class _PipedStdout(io.StringIO):
+    """A stdout that behaves like a pipe: written text is invisible until `flush()`.
+
+    Python gives a piped stdout a block buffer, so an unflushed `print` sits in it until
+    something else forces it out. `serve` may print nothing else for minutes, so this stands in
+    for `irimi serve > log` and asserts what a reader of that log can actually see.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.flushed: list[str] = []
+        self._buffer: list[str] = []
+
+    def write(self, text):
+        self._buffer.append(text)
+        return len(text)
+
+    def flush(self):
+        self.flushed.extend(self._buffer)
+        self._buffer.clear()
+
+    def isatty(self):
+        return False
+
+    @property
+    def visible(self) -> str:
+        return "".join(self.flushed)
+
+
+def _delegated_service(target: str):
+    return servicemap.ServiceMap(
+        service="stripe", hosts=frozenset({"api.stripe.com"}), routes=(), target=target
+    )
+
+
+def _startup_args(**kwargs):
+    kwargs.setdefault("allow_target_host", [])
+    return argparse.Namespace(**kwargs)
+
+
+def _startup_on_a_pipe(monkeypatch, index, args=None):
+    out = _PipedStdout()
+    monkeypatch.setattr(sys, "stdout", out)
+    cli.print_startup(
+        "serve", args or _startup_args(), index, "7f3a", "127.0.0.1", 4000, Path("/ca.pem")
+    )
+    return out.visible
+
+
+def test_the_banner_reaches_a_piped_stdout_before_anything_else_is_printed(monkeypatch):
+    """`irimi serve | tee` showed nothing until the first exchange forced a flush, and a serve
+    nobody talks to showed nothing at all - not the port, not the CA path, not `backstop`."""
+    visible = _startup_on_a_pipe(monkeypatch, servicemap.MapIndex())
+    assert "listening on 127.0.0.1:4000" in visible
+    assert "/ca.pem" in visible
+    assert runner.BACKSTOP_NOTICE in visible
+    assert runner.NOT_VIRTUALIZED_NOTICE in visible
+
+
+def test_a_delegated_services_warning_reaches_a_piped_stdout_too(monkeypatch):
+    """The line that says the agent's requests are leaving this machine is the last one that may
+    wait for an exchange to flush it."""
+    sm = _delegated_service("http://10.0.0.9:3000")
+    visible = _startup_on_a_pipe(monkeypatch, servicemap.MapIndex((sm,)))
+    assert "delegated: stripe → http://10.0.0.9:3000 (writes)" in visible
+    assert runner.NOT_LOOPBACK_NOTICE in visible
+
+
+def test_the_escape_hatch_warning_goes_to_stderr_flushed(monkeypatch, capsys):
+    out = _PipedStdout()
+    monkeypatch.setattr(sys, "stdout", out)
+    cli.print_startup(
+        "shadow",
+        _startup_args(allow_target_host=["stub.internal"]),
+        servicemap.MapIndex(),
+        "7f3a",
+        "127.0.0.1",
+        4000,
+        Path("/ca.pem"),
+    )
+    assert "--allow-target-host stub.internal" in capsys.readouterr().err
+    assert "--allow-target-host" not in out.visible
+
+
+def test_serve_and_shadow_print_the_same_startup_lines(monkeypatch):
+    """They drifted once: `shadow` flushed and `serve` did not. One function now, so a future
+    line added for one is added for both."""
+    import inspect
+
+    source = inspect.getsource(cli)
+    assert source.count("print_startup(") == 3  # the definition plus one call each

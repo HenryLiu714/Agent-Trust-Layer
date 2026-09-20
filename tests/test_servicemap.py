@@ -917,3 +917,159 @@ def test_patterns_are_not_in_the_reverse_doors_allow_list(tmp_path):
     assert index.hosts == frozenset({"one.demo.example"})
     assert index.patterns == ("*.demo.example",)
     assert MapIndex().patterns == ()
+
+
+# ------------------------------------------------ the --target and --target-reads flags (#16)
+
+
+def _flagged(tmp_path, targets=(), target_reads=(), allow=frozenset()):
+    return servicemap.load(
+        allow_target_hosts=allow,
+        cwd=tmp_path / "cwd",
+        maps_dir=write_maps(tmp_path, GOOD),
+        targets=targets,
+        target_reads=target_reads,
+    )
+
+
+WITH_PATTERN_WRITE = (
+    GOOD
+    + """
+  - match:
+      method: POST
+      path: /v1/things/{thing}/archive
+    operation: things.archive
+    kind: write
+"""
+)
+
+
+def test_a_bare_host_target_sets_the_service_target(tmp_path):
+    index = _flagged(tmp_path, targets=[("demo.example", "", "http://127.0.0.1:3000")])
+    assert index.services[0].target == "http://127.0.0.1:3000"
+    assert all(r.target == servicemap.SELF_TARGET for r in index.services[0].routes)
+
+
+def test_a_host_and_path_target_sets_only_the_matching_targetable_routes(tmp_path):
+    index = _flagged(tmp_path, targets=[("demo.example", "/v1/things", "http://127.0.0.1:3000")])
+    targeted = [r for r in index.services[0].routes if r.target != servicemap.SELF_TARGET]
+    assert [r.kind for r in targeted] == ["write"]  # the GET of the same path is left alone
+    assert index.services[0].target == servicemap.SELF_TARGET
+
+
+@pytest.mark.parametrize("spec", ["/v1/things/{thing}/archive", "/v1/things/th_REAL1/archive"])
+def test_a_target_path_may_be_the_pattern_or_a_real_path(tmp_path, spec):
+    """The caller should not have to know how the map spells its `{…}` segment, so a concrete
+    request path names the route as well as the pattern does."""
+    index = servicemap.load(
+        cwd=tmp_path / "cwd",
+        maps_dir=write_maps(tmp_path, WITH_PATTERN_WRITE),
+        targets=[("demo.example", spec, "http://127.0.0.1:3000")],
+    )
+    targeted = [r for r in index.services[0].routes if r.target != servicemap.SELF_TARGET]
+    assert [r.operation for r in targeted] == ["things.archive"]
+
+
+def test_target_reads_marks_the_service_delegated(tmp_path):
+    index = _flagged(
+        tmp_path,
+        targets=[("demo.example", "", "http://127.0.0.1:3000")],
+        target_reads=["demo.example"],
+    )
+    assert index.services[0].target_reads is True
+    assert servicemap.is_delegated(index.services[0])
+
+
+def test_target_reads_without_a_target_is_still_refused_when_it_comes_from_a_flag(tmp_path):
+    """The load-time rule holds however the value arrived: a service irimi answers end to end
+    would be the twin the design rejects, and `--target-reads` must not be a way around it."""
+    with pytest.raises(MapError) as exc:
+        _flagged(tmp_path, target_reads=["demo.example"])
+    assert "needs a `target:` URL" in str(exc.value)
+
+
+def test_a_flag_target_is_validated_like_every_other_one(tmp_path):
+    with pytest.raises(MapError) as exc:
+        _flagged(tmp_path, targets=[("demo.example", "", "http://example.com")])
+    assert "is not loopback" in str(exc.value)
+    ok = _flagged(
+        tmp_path,
+        targets=[("demo.example", "", "http://example.com")],
+        allow=frozenset({"example.com"}),
+    )
+    assert ok.services[0].target == "http://example.com"
+
+
+@pytest.mark.parametrize(
+    ("url", "message"),
+    [
+        ("http://127.0.0.1:99999", "is not a URL irimi can parse"),
+        ("http://[::1/x", "is not a URL irimi can parse"),
+        ("http://127.0.0.1:0", "has a bad port"),
+    ],
+)
+def test_a_target_url_python_cannot_parse_is_a_named_refusal(tmp_path, url, message):
+    """`urlsplit` and its `.port` accessor both raise ValueError on input a user can type, and a
+    ValueError escaping the loader is an uncaught traceback out of `irimi serve` rather than the
+    one-line refusal every other bad target gets."""
+    with pytest.raises(MapError) as exc:
+        _flagged(tmp_path, targets=[("demo.example", "", url)])
+    assert message in str(exc.value)
+
+
+def test_a_flag_naming_an_unknown_host_or_route_is_an_error(tmp_path):
+    """A typo that quietly changed nothing would look exactly like a working delegation."""
+    with pytest.raises(MapError) as exc:
+        _flagged(tmp_path, targets=[("nope.example", "", "http://127.0.0.1:3000")])
+    assert "no loaded service map claims host" in str(exc.value)
+
+    with pytest.raises(MapError) as exc:
+        _flagged(tmp_path, targets=[("demo.example", "/nope", "http://127.0.0.1:3000")])
+    assert "no `write` or `unknown` route" in str(exc.value)
+
+    with pytest.raises(MapError) as exc:
+        _flagged(tmp_path, target_reads=["nope.example"])
+    assert "no loaded service map claims host" in str(exc.value)
+
+
+def test_a_flag_target_beats_the_overrides_file(tmp_path):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir(exist_ok=True)
+    (cwd / servicemap.CWD_OVERRIDE_NAME).write_text(
+        "service: demo\ntarget: http://127.0.0.1:1111\n"
+    )
+    index = _flagged(tmp_path, targets=[("demo.example", "", "http://127.0.0.1:2222")])
+    assert index.services[0].target == "http://127.0.0.1:2222"
+
+
+def test_a_webhook_route_may_only_be_targeted_at_loopback():
+    """A Slack incoming webhook URL is the whole credential, so `--allow-target-host` does not
+    reach it: sending one off this machine hands the secret to whoever is listening (§7)."""
+    index = servicemap.load(
+        cwd=None,
+        maps_dir=servicemap.shipped_dir(),
+        targets=[("hooks.slack.com", "", "http://127.0.0.1:3000")],
+    )
+    assert index.service_for("hooks.slack.com").target == "http://127.0.0.1:3000"
+
+    with pytest.raises(MapError) as exc:
+        servicemap.load(
+            cwd=None,
+            maps_dir=servicemap.shipped_dir(),
+            allow_target_hosts=frozenset({"stub.internal"}),
+            targets=[("hooks.slack.com", "", "http://stub.internal:3000")],
+        )
+    assert "webhook route may only be targeted at loopback" in str(exc.value)
+    assert "the credential" in str(exc.value)
+
+
+def test_the_webhook_rule_covers_the_other_host_of_the_same_service():
+    """Routes match per service, not per host: `slack.com/services/...` resolves to the same
+    `incoming_webhook` route, so targeting the service by either host hits the rule."""
+    with pytest.raises(MapError):
+        servicemap.load(
+            cwd=None,
+            maps_dir=servicemap.shipped_dir(),
+            allow_target_hosts=frozenset({"stub.internal"}),
+            targets=[("slack.com", "", "http://stub.internal:3000")],
+        )

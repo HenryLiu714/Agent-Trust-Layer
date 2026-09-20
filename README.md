@@ -237,13 +237,44 @@ target_reads: true # optional: send this service's reads there too
 
 The shipped maps never set a target, so a fresh install answers everything itself. An overrides
 file may set `target`, `target_reads` and `forward_auth` and nothing else: an override able to
-change a route's `kind` would be a way to turn a write into a read. Targets must be loopback for
-now, and `target_reads: true` without a `target:` is refused — a service irimi answered end to end
-would be a twin, not a shadow.
+change a route's `kind` would be a way to turn a write into a read.
 
-Loading happens before the proxy starts, and a map or overrides file the loader refuses stops
-`serve` and `shadow` with the rule it broke on stderr. Forwarding to a target is not wired up yet;
-this release loads, validates and reports it.
+`--target` does the same thing for one run, and beats the file:
+
+    irimi shadow --target 'api.stripe.com/v1/refunds=http://127.0.0.1:3000/refund' -- python agent.py
+
+A bare host — `--target 'api.stripe.com=http://127.0.0.1:3000'` — targets the whole service,
+including the routes its map does not list; naming a host or a path no map claims is an error, not
+a silent no-op. Add `--target-reads api.stripe.com` and that service's *reads* go to the same
+address, which makes it a **delegated service**: its target, not production, is the world the
+agent sees. A targeted exchange is stamped `delegated` rather than `fake-L0`, and records the
+address that answered it.
+
+Path semantics follow nginx `proxy_pass`. A bare origin keeps the request's own path; a target
+carrying a path replaces the part the route matched, which — because a route pattern always
+matches the whole path — is all of it. The query string is always kept, and the method, body and
+content type pass through unchanged.
+
+Five rules keep a target from becoming a way out of the machine:
+
+- A target must be **loopback** (`127.0.0.1`, `::1`, `localhost`). Anything else is refused when
+  the maps load, naming the rule. `--allow-target-host <host>` is the deliberate way out, and it
+  prints a warning saying what it allows.
+- A target naming **irimi's own listener** is refused, or the proxy would dial itself in a loop.
+- `Authorization` is **stripped** before forwarding, unless the route sets `forward_auth: true`.
+  A local stub does not need your real key.
+- A **webhook route** — Slack's `hooks.slack.com/services/...` — may be targeted at loopback and
+  never through `--allow-target-host`, because for those the URL *is* the credential.
+- `target_reads: true` without a `target:` is refused — a service irimi answered end to end would
+  be a twin, not a shadow.
+
+An **unreachable target is a `502`** flagged `target-failed`, never a silent fall back to the fake:
+that would hide a broken setup and look exactly like a working run. The body is JSON when irimi
+refuses the target itself; when the target simply is not listening, the `502` is the proxy's own
+and the exchange is what carries `target-failed`.
+
+Loading happens before the proxy starts, and a map, overrides file or `--target` the loader refuses
+stops `serve` and `shadow` with the rule it broke on stderr.
 
 ## The example agent
 

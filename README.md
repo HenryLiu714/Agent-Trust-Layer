@@ -363,10 +363,21 @@ refused rather than let through:
   be a twin, not a shadow.
 
 An **unreachable target is a `502`** flagged `target-failed`, never a silent fall back to the fake:
-that would hide a broken setup and look exactly like a working run. The body is JSON when irimi
-refuses the target itself; when the target simply is not listening, the `502` is the proxy's own
-and the exchange is what carries `target-failed`. The summary says so too, and never calls such a
-write delegated — a stub that was not running answered nothing:
+that would hide a broken setup and look exactly like a working run. The body is JSON naming irimi
+and the target —
+
+```json
+{"error": {"type": "irimi_target_failed", "message": "answer target 'http://127.0.0.1:3111/post' could not be reached: [Errno 61] Connection refused"}}
+```
+
+— so an SDK raises something that says what went wrong. A loopback target is probed before the
+request is redirected, which costs microseconds and is what makes that body possible: irimi hands
+the request to the proxy layer to forward, and once a dial fails there the error page is already
+committed. Two cases still get mitmproxy's own HTML `502` instead: a target reached through
+`--allow-target-host`, which is not probed because a remote connect would block the proxy on every
+request, and a stub that dies between the probe and the dial. The flag, the absence of a fallback
+and the summary line are the same either way. The summary never calls such a write delegated — a
+stub that was not running answered nothing:
 
       api.stripe.com  1 write intercepted (1 target unreachable)
 

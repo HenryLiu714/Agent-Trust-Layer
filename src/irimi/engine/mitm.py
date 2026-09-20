@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import socket
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -123,6 +124,46 @@ def _send(flow: http.HTTPFlow, out: Response, upstream: Response) -> None:
         flow.response.headers = http.Headers(fields=_fields(out.headers))
         return
     flow.response = _to_mitm_response(out)
+
+
+# How long the probe below waits for a loopback target to accept a connection. Loopback either
+# accepts or refuses in microseconds; the timeout is only there so a stub wedged mid-accept cannot
+# stall the proxy, and it is short because this runs on the event loop.
+TARGET_PROBE_TIMEOUT_S = 0.5
+
+
+def _probe_local_target(url: str, host: str, port: int) -> None:
+    """Raise TargetUnreachable when nothing is listening on a **loopback** answer target.
+
+    #16 says an unreachable target answers `502` with a JSON body naming irimi and the target. The
+    flag, the absence of a fallback to the fake and the summary line were all right, but the body
+    was mitmproxy's own HTML error page: `_to_target` rewrites the flow and lets mitmproxy open the
+    connection - which is what keeps delegation free of a second HTTP client and keeps a streamed
+    target response streaming - and when that dial fails, mitmproxy sends its own error page from
+    inside the proxy layer. The `error` hook runs first but cannot set a response; by then it is
+    committed. There is no hook between the failed dial and the page (#38).
+
+    So the failure that actually happens - the developer's own stub is not running - is caught
+    before the flow is rewritten, and takes the existing `_target_failed` path. An SDK parses the
+    body, and stripe-python, openai and slack_sdk all raise on an HTML blob naming neither irimi
+    nor the target, which is how "my shadow run started failing" gave no hint that the stub was
+    down.
+
+    **Loopback only.** A connect to loopback costs microseconds; a connect to a host named by
+    `--allow-target-host` could block the proxy's event loop for a full timeout on every delegated
+    request, which is what `_to_target` avoids doing in the first place. A remote target that
+    cannot be dialled still gets mitmproxy's page, and the README says so. The probe is also
+    inherently best-effort: a stub that dies between the probe and the dial gets the old page too,
+    and the flag is right either way.
+    """
+    if not pipeline.is_local_target(url):
+        return
+    try:
+        socket.create_connection((host, port), timeout=TARGET_PROBE_TIMEOUT_S).close()
+    except OSError as exc:
+        raise pipeline.TargetUnreachable(
+            f"answer target {url!r} could not be reached: {exc}"
+        ) from None
 
 
 class IrimiAddon:
@@ -263,6 +304,7 @@ class IrimiAddon:
         host = (parts.hostname or "").lower()
         default_port = 443 if parts.scheme == "https" else 80
         port = parts.port or default_port
+        _probe_local_target(forward.url, host, port)
         # `parts.hostname` has already had an IPv6 literal's brackets stripped, so `::1` has to be
         # put back in them: RFC 3986 spells the authority `[::1]:3000`, and `::1:3000` is a
         # different (and unparseable) thing. Python's own handler is lenient about it; nginx and

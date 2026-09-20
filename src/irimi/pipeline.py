@@ -75,6 +75,12 @@ class TargetRefused(ValueError):
     """An answer target irimi will not dial. str(exc) is the one-line explanation."""
 
 
+class TargetUnreachable(TargetRefused):
+    """An answer target irimi tried to reach and could not. A subclass, so every handler that
+    already answers a refusal with the `irimi_target_failed` body answers this one the same way -
+    the agent cannot act differently on the two, and the flag it earns is the same."""
+
+
 @dataclass(frozen=True)
 class Classification:
     service: str

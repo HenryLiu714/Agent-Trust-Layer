@@ -874,13 +874,25 @@ def _host_header(headers: dict) -> str:
     return next(v for k, v in headers.items() if k.lower() == "host")
 
 
+_RUNNING_TARGETS: list[HTTPServer] = []
+
+
 @pytest.fixture
 def target():
     _Target.seen = []
     srv = HTTPServer(("127.0.0.1", 0), _Target)
+    _RUNNING_TARGETS.append(srv)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     yield srv.server_address[1]
-    srv.shutdown()
+    _kill_target()
+
+
+def _kill_target() -> None:
+    """Stop the `target` fixture's stub and free its port, so the next connect is refused."""
+    while _RUNNING_TARGETS:
+        srv = _RUNNING_TARGETS.pop()
+        srv.shutdown()
+        srv.server_close()
 
 
 def _targeted(tmp_path, monkeypatch, targets=(), target_reads=()):
@@ -1129,26 +1141,58 @@ def test_a_service_target_also_covers_a_route_its_map_does_not_list(tmp_path, mo
     assert _Target.seen[0][1] == "/unlisted"
 
 
-def test_an_unreachable_target_is_a_502_flagged_target_failed(tmp_path, monkeypatch):
+def test_an_unreachable_target_is_a_502_with_the_json_body_the_issue_specifies(
+    tmp_path, monkeypatch
+):
     """Never a silent fall back to the local fake: that would hide a broken setup and look
-    exactly like a working shadow run (design D20)."""
+    exactly like a working shadow run (design D20).
+
+    And the body is JSON naming irimi and the target, not mitmproxy's HTML error page. The flag
+    was right all along; the page was not. An SDK parses the body, and stripe-python, openai and
+    slack_sdk all raise on an HTML blob that names neither irimi nor the answer target, so "my
+    shadow run started failing" gave no hint that the developer's own stub was down (#38).
+    """
     closed = socket.socket()
     closed.bind(("127.0.0.1", 0))
     dead = closed.getsockname()[1]
     closed.close()
-    maps = _targeted(
-        tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{dead}/w")]
-    )
+    target_url = f"http://127.0.0.1:{dead}/w"
+    maps = _targeted(tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", target_url)])
     eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
     try:
-        status, _ = _via_proxy(eng.listen_port(), "POST", "http://127.0.0.1/things", body=b"{}")
+        status, data = _via_proxy(eng.listen_port(), "POST", "http://127.0.0.1/things", body=b"{}")
     finally:
         stop()
     assert status == 502
+    body = json.loads(data)
+    assert body["error"]["type"] == "irimi_target_failed"
+    assert target_url in body["error"]["message"]
     (ex,) = seen
     assert ex.answered_by == "delegated"
     assert "target-failed" in ex.flags
-    assert ex.response is None
+    assert ex.target == target_url
+    assert ex.response is not None and ex.response.status == 502
+
+
+def test_a_target_that_stops_listening_mid_run_is_still_flagged(tmp_path, monkeypatch, target):
+    """The probe is best-effort by construction - a stub can die between the probe and the dial -
+    so the properties that must not depend on it are pinned separately: no fall back to the fake,
+    `target-failed` on the exchange, and a 502 to the agent. Here the stub answers the first write
+    and is gone for the second."""
+    maps = _targeted(
+        tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{target}/w")]
+    )
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
+    try:
+        first, _ = _via_proxy(eng.listen_port(), "POST", "http://127.0.0.1/things", body=b"{}")
+        _kill_target()
+        second, _ = _via_proxy(eng.listen_port(), "POST", "http://127.0.0.1/things", body=b"{}")
+    finally:
+        stop()
+    assert (first, second) == (200, 502)
+    assert [ex.answered_by for ex in seen] == ["delegated", "delegated"]
+    assert "target-failed" not in seen[0].flags
+    assert "target-failed" in seen[1].flags
 
 
 def test_a_target_naming_our_own_listener_is_refused_with_a_json_502(tmp_path, monkeypatch):

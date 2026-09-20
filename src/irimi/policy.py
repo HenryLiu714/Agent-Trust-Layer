@@ -17,14 +17,12 @@ import string
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import Any, Literal, Protocol
 from urllib.parse import parse_qsl
 
 from irimi.exchange import AnsweredBy, Request, Response
 from irimi.pipeline import Classification
-
-if TYPE_CHECKING:  # quoted annotations only, matching pipeline.py: no runtime servicemap import
-    from irimi.servicemap import Route
+from irimi.servicemap import Route, path_params
 
 logger = logging.getLogger(__name__)
 
@@ -200,18 +198,37 @@ def reflect(request: Request) -> dict[str, Any]:
     return {}
 
 
-def l0_body(request: Request, route: "Route | None") -> dict[str, Any]:
-    """The generic L0 body: reflected fields, `created`, and the route's minted ids.
+def named_id(route: Route, path: str, prefix: str) -> str | None:
+    """The id this request already names in its own path, or None when it names none.
 
-    A minted id overwrites a reflected field of the same name - what the service would have
+    A create posts to a collection (`POST /v1/refunds`) and the service mints the id. Every other
+    write addresses a resource that exists (`POST /v1/customers/cus_REAL123`,
+    `POST /v1/payment_intents/pi_REAL999/cancel`) and the live API answers with the id it was
+    given, so minting a fresh one hands the agent an id for a resource that never existed (#26).
+
+    The captured segment is matched by `prefix`, not by parameter name, because the two are
+    spelled differently: the cancel route captures `{payment_intent}` and mints `id: pi_`, and the
+    prefix is the only thing that ties them together.
+    """
+    return next(
+        (value for value in path_params(route.path, path).values() if value.startswith(prefix)),
+        None,
+    )
+
+
+def l0_body(request: Request, route: Route | None) -> dict[str, Any]:
+    """The generic L0 body: reflected fields, `created`, and the route's ids.
+
+    An id is minted only when the request does not already name one - see `named_id`. A minted id
+    still overwrites a reflected *body* field of the same name: what the service would have
     returned wins over what the caller happened to post. `object` is only added when the route
-    mints an `id`, because that is the only case where we know the echo names a resource.
+    carries an `id`, because that is the only case where we know the echo names a resource.
     """
     body = reflect(request)
     body["created"] = int(time.time())
     if route is not None and route.ids:
         for name, prefix in route.ids.items():
-            body[name] = mint_id(prefix)
+            body[name] = named_id(route, request.path, prefix) or mint_id(prefix)
         if "id" in route.ids:
             body["object"] = object_name(route.operation)
     return body

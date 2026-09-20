@@ -397,3 +397,78 @@ def test_a_hostile_form_body_still_reflects_and_never_raises():
     ans = _answer(request)
     assert ans.answered_by == "fake-L0"
     assert json.loads(ans.response.body)["id"].startswith("re_")
+
+
+# ---------------------------------------------------- the id the request already names (#26)
+
+
+@pytest.mark.parametrize(
+    ("path", "named", "operation", "object_name"),
+    [
+        ("/v1/customers/cus_REAL123", "cus_REAL123", "customers.update", "customer"),
+        (
+            "/v1/payment_intents/pi_REAL999/cancel",
+            "pi_REAL999",
+            "payment_intents.cancel",
+            "payment_intent",
+        ),
+    ],
+)
+def test_a_write_that_names_its_resource_echoes_that_id(path, named, operation, object_name):
+    """The live API answers an update or a cancel with the id it was given. Minting a fresh one
+    hands the agent an id for a resource that never existed, which it then logs or retrieves."""
+    request = _req("POST", path=path)
+    assert classify(request, SHIPPED).operation == operation
+    body = json.loads(_answer(request).response.body)
+    assert body["id"] == named
+    assert body["object"] == object_name
+
+
+def test_a_create_still_mints_every_id_it_names():
+    """A create posts to a collection, so it captures no path segment and the service mints."""
+    body = json.loads(_answer(_req("POST", path="/v1/refunds")).response.body)
+    assert re.fullmatch(r"re_[A-Za-z0-9]{24}", body["id"])
+    assert re.fullmatch(r"txn_[A-Za-z0-9]{24}", body["balance_transaction"])
+
+
+def test_a_captured_segment_that_is_not_this_ids_prefix_is_not_used():
+    """`named_id` matches on the id prefix, so an unrelated captured segment cannot become the
+    id. There is no such shipped route, so the case is built here rather than left untested."""
+    route = servicemap.Route(
+        method="POST",
+        path="/v1/widgets/{widget}/parts/{part}",
+        operation="widgets.attach",
+        kind="write",
+        ids={"id": "wid_"},
+    )
+    assert policy.named_id(route, "/v1/widgets/wid_1/parts/prt_9", "wid_") == "wid_1"
+    assert policy.named_id(route, "/v1/widgets/wid_1/parts/prt_9", "prt_") == "prt_9"
+    assert policy.named_id(route, "/v1/widgets/w1/parts/p9", "wid_") is None
+    assert policy.named_id(route, "/v1/widgets", "wid_") is None
+
+
+def test_every_shipped_write_route_that_names_ids_round_trips_or_mints():
+    """Across every shipped write route: a route with a `{…}` segment carrying an id prefix must
+    echo it, and one without must mint. This is what would have caught #26 when it shipped."""
+    for sm in SHIPPED.services:
+        for route in sm.routes:
+            for name, prefix in route.ids.items():
+                holes = [p for p in route.path.split("/") if p.startswith("{")]
+                if not holes:
+                    sample = route.path.replace("{", "").replace("}", "")
+                    assert policy.named_id(route, sample, prefix) is None, route.operation
+                    continue
+                # Only the LAST hole carries the prefix; every other one gets a segment that
+                # does not. Filling them all would make `named_id` match the first hole whatever
+                # it held, and the test would pass on a route whose id is in the wrong segment.
+                parts = route.path.split("/")
+                last = max(i for i, part in enumerate(parts) if part.startswith("{"))
+                filled = "/".join(
+                    (prefix + "SAMPLE" if i == last else "other-segment")
+                    if part.startswith("{")
+                    else part
+                    for i, part in enumerate(parts)
+                )
+                assert policy.named_id(route, filled, prefix) == prefix + "SAMPLE", (
+                    f"{sm.service}.{route.operation} does not echo the {name} its path names"
+                )

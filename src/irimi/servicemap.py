@@ -181,6 +181,26 @@ def match_route(sm: ServiceMap, method: str, path: str) -> Route | None:
     return best
 
 
+def path_params(pattern: str, path: str) -> dict[str, str]:
+    """The `{name}` segments of a route pattern bound to this request path's own segments.
+
+    `/v1/customers/{customer}` against `/v1/customers/cus_REAL123` gives
+    `{"customer": "cus_REAL123"}`. Empty when the pattern has no holes, or when it does not match
+    the path at all. It lives in this module, not in the one that uses it, because the `{name}`
+    pattern language belongs to the map schema: a second parser anywhere else would drift from
+    `_match_path` and bind the captures to the wrong segments.
+    """
+    parts = _segments(pattern)
+    segments = _segments(path)
+    if len(parts) != len(segments):
+        return {}
+    return {
+        part[1:-1]: segment
+        for part, segment in zip(parts, segments, strict=True)
+        if part.startswith("{") and part.endswith("}")
+    }
+
+
 def target_for(sm: ServiceMap, route: Route) -> str:
     """The target that answers this route: `self`, or the URL that answers it instead.
 

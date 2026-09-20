@@ -24,14 +24,19 @@ from irimi.exchange import Exchange, Request, Response
 #    guard: a target that could not be *dialled* is handled in `error()`, but one irimi *refused*
 #    is answered in `request()` and does reach `response()`.
 #
-# 2. A STREAMED READ REACHES YOU WITH AN EMPTY BODY (issue #28).
+# 2. A STREAMED READ NEVER REACHES YOU AT ALL (issue #28).
 #    `IrimiAddon.responseheaders` streams any live `text/event-stream` response, `kind: read`
 #    included, and mitmproxy never assembles the body of a streamed response. An overlay handed
-#    such a response sees `body == b""` and would rewrite a streamed read into an empty one.
-#    Check for it before rewriting anything.
+#    such a response would see `body == b""` - not what the service sent - and returning anything
+#    for it would turn a streamed read into a buffered, empty-bodied one.
 #
-# Phase 1 ships neither the overlay nor L3, so this is a note rather than a test: the Phase 2
-# issue should inherit both hazards instead of rediscovering them.
+#    This half is enforced by the engine rather than left to you to remember: `IrimiAddon.response`
+#    skips the overlay for a streamed flow, and writes nothing back to one either, because those
+#    headers went out before the hook ran. Do not build an overlay that depends on being asked
+#    about streams; build one that is correct for the bodies it is given.
+#
+# Phase 1 ships neither the overlay nor L3, so hazard 1 is a note rather than a test: the Phase 2
+# issue should inherit it instead of rediscovering it.
 
 
 class Overlay(Protocol):

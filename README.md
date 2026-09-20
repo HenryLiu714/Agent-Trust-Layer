@@ -285,7 +285,8 @@ inference. Everything else on those hosts is deliberately unmapped, so an unlist
 `/v1/files`, `/v1/batches`, `/v1/fine_tuning/jobs` — reaches the fallback, is answered locally and
 is flagged `unclassified`. A `text/event-stream` response is streamed straight through to the
 client rather than buffered, so a streamed completion still arrives token by token; the recorded
-exchange then carries an empty body.
+exchange then carries an empty body, and nothing downstream may rewrite such a response — its
+headers are already on the wire and its body was never assembled.
 
 `telemetry` is what the observability backends are classified as. It is forwarded live in every
 mode and is never written to the trace store: a recording of the agent's own tracing traffic is

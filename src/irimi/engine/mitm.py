@@ -92,10 +92,37 @@ def _is_event_stream(content_type: str) -> bool:
     return content_type.split(";")[0].strip().lower() == "text/event-stream"
 
 
-def _to_mitm_response(r: Response) -> http.Response:
+def _fields(headers: Headers) -> list[tuple[bytes, bytes]]:
     # A list of pairs keeps repeated headers (Set-Cookie); a dict would collapse them.
-    fields = [(k.encode("latin-1"), v.encode("latin-1")) for k, v in r.headers]
-    return http.Response.make(r.status, r.body, fields)
+    return [(k.encode("latin-1"), v.encode("latin-1")) for k, v in headers]
+
+
+def _to_mitm_response(r: Response) -> http.Response:
+    return http.Response.make(r.status, r.body, _fields(r.headers))
+
+
+def _send(flow: http.HTTPFlow, out: Response, upstream: Response) -> None:
+    """Put `out` on the flow, without re-encoding a body nothing changed.
+
+    `http.Response.make` assigns `.content`, and mitmproxy's `set_content` re-encodes it per the
+    surviving `content-encoding` header. That is right for a body we built and wrong for one we
+    are handing back: `_body` reads `get_content(strict=False)`, which returns the RAW bytes when
+    `Content-Encoding` cannot be decoded, so rebuilding took bytes that were already compressed -
+    or were never valid gzip - and compressed them again. The agent then received different bytes
+    than the target sent, in a tool whose thesis is that it sees what the service would have sent
+    (#39).
+
+    Since #12 `respond` returns a new Response for every non-live answer, so the rebuild ran for
+    every delegated exchange; before that it never ran at all and the bug could not show. When
+    the body is the very object we read off the flow, only the headers changed - that is all
+    `respond` does - so only the headers are written back and the wire bytes are left alone.
+    """
+    assert flow.response is not None
+    if out.body is upstream.body:
+        flow.response.status_code = out.status
+        flow.response.headers = http.Headers(fields=_fields(out.headers))
+        return
+    flow.response = _to_mitm_response(out)
 
 
 class IrimiAddon:
@@ -306,11 +333,29 @@ class IrimiAddon:
         pending: _Pending | None = flow.metadata.pop(META_KEY, None)
         if pending is None:  # not ours (refused in request()), or already finished
             return
+        # A STREAMED RESPONSE IS ALREADY ON ITS WAY OUT (#28).
+        #
+        # `responseheaders` streams any live or delegated `text/event-stream` body, `kind: read`
+        # included, and mitmproxy neither assembles such a body nor lets these headers be changed
+        # afterwards - they were sent before this hook ran. Two things follow, and both are the
+        # engine's to enforce rather than the overlay's to remember:
+        #
+        #   * the overlay must not be called. It would be handed `body == b""`, which is not what
+        #     the service sent, and whatever it returned could only be wrong.
+        #   * nothing may be written back to the flow. `NoOverlay` returns the object it was given
+        #     so the rewrite below never fired; the first overlay that returns a NEW Response
+        #     would have turned every streamed read into a buffered, empty-bodied one, presenting
+        #     as "reads through the proxy mysteriously return nothing" for streaming endpoints
+        #     only. The same trap is one `respond` change away on the delegated path (#12).
+        #
+        # The exchange is still recorded, with the empty body streaming costs it - that trade is
+        # `responseheaders`' own, and Phase 3 replay inherits it.
+        streamed = flow.response is not None and bool(flow.response.stream)
         upstream = _response_from_flow(flow)
         resp = upstream
         # The overlay stays off for a delegated read: the target owns that service's state, and
         # layering our own minted objects over it would corrupt read-after-write there (D20).
-        if pending.answered_by == "live" and pending.classification.kind == "read":
+        if not streamed and pending.answered_by == "live" and pending.classification.kind == "read":
             resp = self.overlay(self.write_log, pending.request, upstream)
         ex = pipeline.annotate(
             pending.request,
@@ -340,8 +385,8 @@ class IrimiAddon:
         ):
             self.write_log.append(ex)
         out = pipeline.respond(ex)
-        if out is not None and out is not upstream:
-            flow.response = _to_mitm_response(out)
+        if out is not None and out is not upstream and not streamed:
+            _send(flow, out, upstream)
         self._finish(ex)
 
     def error(self, flow: http.HTTPFlow) -> None:

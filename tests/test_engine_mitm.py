@@ -1,5 +1,6 @@
 import asyncio
 import datetime as dt
+import gzip
 import http.client
 import ipaddress
 import json
@@ -707,6 +708,8 @@ class _StreamUpstream(BaseHTTPRequestHandler):
         # that socket never returns from serve_forever, so shutdown() would block forever.
         self.close_connection = True
 
+    do_GET = do_POST  # the same stream for a `kind: read` route (#28)
+
     def _chunk(self, payload: bytes) -> None:
         self.wfile.write(b"%x\r\n" % len(payload) + payload + b"\r\n")
         self.wfile.flush()
@@ -763,6 +766,63 @@ def test_a_server_sent_event_response_reaches_the_client_in_chunks(tmp_path, mon
     assert ex.response.body == b""
 
 
+READ_STREAM_MAP = STREAM_MAP.replace("kind: llm", "kind: read").replace(
+    "method: POST", "method: GET"
+)
+
+
+class _RewritingOverlay:
+    """The first real overlay's shape: it returns a NEW Response rather than the one it was
+    handed. `NoOverlay` returns the same object, which is what hid #28 for a whole phase."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def __call__(self, write_log, read_request, upstream_response):
+        self.calls.append(read_request.path)
+        return Response(
+            status=200,
+            headers=(("content-type", "application/json"),),
+            body=b'{"overlaid": true}',
+        )
+
+
+def test_an_overlay_is_not_handed_a_streamed_read_and_cannot_rewrite_one(tmp_path, monkeypatch):
+    """#28: `responseheaders` streams any live `text/event-stream` response, `kind: read`
+    included, and mitmproxy never assembles a streamed body. An overlay called there would see
+    `body == b""` and return a new Response, which the addon would then assign to the flow -
+    turning a streamed read into a buffered, empty-bodied one. It presents as "reads through the
+    proxy mysteriously return nothing", and only for streaming endpoints.
+
+    Both halves are asserted, because either one alone would let the bug back in: the overlay is
+    never called, and the chunks reach the client unchanged.
+    """
+    _STREAM_GATE.clear()
+    srv = HTTPServer(("127.0.0.1", 0), _StreamUpstream)
+    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
+    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch, READ_STREAM_MAP))
+    overlay = _RewritingOverlay()
+    eng, seen, stop = _start(cfg, overlay=overlay)
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=5)
+        url = f"http://127.0.0.1:{srv.server_address[1]}/v1/chat/completions"
+        conn.request("GET", url, headers={"host": f"127.0.0.1:{srv.server_address[1]}"})
+        resp = conn.getresponse()
+        assert resp.status == 200
+        assert resp.getheader("content-type") == "text/event-stream"
+        assert resp.read(len(SSE_FIRST)) == SSE_FIRST
+        _STREAM_GATE.set()
+        assert resp.read() == SSE_SECOND
+        conn.close()
+    finally:
+        _STREAM_GATE.set()
+        stop()
+        srv.shutdown()
+    assert overlay.calls == [], "the overlay was handed a body mitmproxy never assembled"
+    (ex,) = seen
+    assert (ex.kind, ex.answered_by) == ("read", "live")
+
+
 def test_a_json_response_is_still_buffered_and_recorded(tmp_path, monkeypatch, upstream):
     """The hook keys on the content type, so an ordinary live read is unaffected."""
     cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch))
@@ -778,6 +838,10 @@ def test_a_json_response_is_still_buffered_and_recorded(tmp_path, monkeypatch, u
 # -------------------------------------------------------- answer targets through the engine (#16)
 
 
+NOT_GZIP = b"not-actually-gzip"
+REAL_GZIP = gzip.compress(b'{"from": "target"}')
+
+
 class _Target(BaseHTTPRequestHandler):
     """A developer's own stub: it records what it was asked and answers its own JSON."""
 
@@ -788,6 +852,12 @@ class _Target(BaseHTTPRequestHandler):
         _Target.seen.append((self.command, self.path, self.rfile.read(length), dict(self.headers)))
         body = json.dumps({"from": "target", "path": self.path}).encode()
         self.send_response(200)
+        if self.path.endswith("/badgzip"):  # claims gzip, is not: an undecodable body
+            body = NOT_GZIP
+            self.send_header("content-encoding", "gzip")
+        elif self.path.endswith("/gzip"):
+            body = REAL_GZIP
+            self.send_header("content-encoding", "gzip")
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(body)))
         self.end_headers()
@@ -888,6 +958,48 @@ def test_a_targeted_write_is_answered_by_the_target_not_by_the_fake(tmp_path, mo
     assert ex.answered_by == "delegated"
     assert ex.target == f"http://127.0.0.1:{target}/w"
     assert ex.kind == "write"
+
+
+@pytest.mark.parametrize(
+    ("path", "body"), [("/badgzip", NOT_GZIP), ("/gzip", REAL_GZIP)], ids=["undecodable", "gzip"]
+)
+def test_a_delegated_body_reaches_the_agent_as_the_target_sent_it(
+    tmp_path, monkeypatch, target, path, body
+):
+    """#39: the answer is stamped with a header, and stamping it used to rebuild the response.
+    `http.Response.make` assigns `.content`, which mitmproxy re-encodes per the surviving
+    `content-encoding` - so an already-compressed body was compressed again, and a body that was
+    never valid gzip came back as a valid gzip stream of itself. Either way the agent got
+    different bytes than the target sent, in a tool whose thesis is that it sees what the service
+    would have sent.
+
+    Since #12 `respond` returns a new Response for every non-live answer, so this ran for every
+    delegated exchange; the live path stayed safe only because `respond` hands back the object it
+    was given there.
+    """
+    maps = _targeted(
+        tmp_path,
+        monkeypatch,
+        targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{target}{path}")],
+    )
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=10)
+        conn.request("POST", "http://127.0.0.1/things", body=b"{}", headers={"host": "127.0.0.1"})
+        resp = conn.getresponse()
+        received, encoding, stamp = (
+            resp.read(),
+            resp.getheader("content-encoding"),
+            resp.getheader("irimi-answered-by"),
+        )
+        conn.close()
+    finally:
+        stop()
+    assert received == body  # byte for byte, not merely "decodes to the same thing"
+    assert encoding == "gzip"
+    assert stamp == "delegated"  # the header the rebuild existed to add is still there
+    (ex,) = seen
+    assert ex.answered_by == "delegated"
 
 
 def test_a_delegated_exchange_records_what_the_agent_asked_for(tmp_path, monkeypatch, target):
@@ -1290,6 +1402,51 @@ def test_the_host_header_is_set_to_the_target_not_left_as_the_service(
     finally:
         stop()
     assert _host_header(_Target.seen[0][3]) == f"127.0.0.1:{target}"
+
+
+def test_the_response_hook_writes_nothing_back_to_a_streamed_flow(tmp_path, monkeypatch):
+    """The other half of #28, at the seam rather than end to end.
+
+    A streamed response's headers were sent before this hook ran, and its body is never assembled,
+    so anything `response()` writes back is either ignored or destructive: rebuilding the flow
+    replaces a live stream with a buffered, empty-bodied response. `responseheaders` is the hook
+    that owns a streamed answer - it is where the `Irimi-Answered-By` stamp goes for exactly this
+    reason - and it is deliberately not called here, so that a stamp appearing on the flow is
+    proof that `response()` wrote to it.
+
+    Driven through the addon because no client can observe the difference: a write that lands
+    after the headers are on the wire is invisible until the day it carries a body.
+    """
+    from mitmproxy.test import tflow, tutils
+
+    from irimi.engine.mitm import META_KEY, IrimiAddon
+
+    maps = _targeted(
+        tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", "http://127.0.0.1:3999/w")]
+    )
+    addon = IrimiAddon(
+        _config(tmp_path, monkeypatch, maps=maps),
+        ShadowPolicy(),
+        NullStore(),
+        NoOverlay(),
+        lambda ex: None,
+        lambda port, error: None,
+    )
+    flow = tflow.tflow(
+        req=tutils.treq(method=b"POST", host="127.0.0.1", port=80, path=b"/things"),
+        resp=tutils.tresp(content=None, headers=((b"content-type", b"text/event-stream"),)),
+    )
+    flow.client_conn.sockname = ("127.0.0.1", 4000)
+    addon.request(flow)
+    assert flow.metadata[META_KEY].answered_by == "delegated"
+    flow.response.stream = True  # what `responseheaders` does for an event stream
+    before = (flow.response.status_code, tuple(flow.response.headers.fields), flow.response.content)
+
+    addon.response(flow)
+
+    after = (flow.response.status_code, tuple(flow.response.headers.fields), flow.response.content)
+    assert after == before
+    assert pipeline.ANSWERED_BY_HEADER not in flow.response.headers
 
 
 def test_a_streamed_target_response_is_not_buffered(tmp_path, monkeypatch):

@@ -1127,6 +1127,34 @@ def test_a_delegated_read_is_not_a_write(tmp_path, monkeypatch, target):
         stop()
 
 
+def test_a_refused_target_is_not_a_write_either(tmp_path, monkeypatch, target):
+    """A target irimi refuses is answered `502` in `request()`, which DOES set `_Pending`, so
+    unlike a target that could not be dialled it reaches `response()` and was being appended to
+    the write log - the log the Phase 2 overlay replays onto live reads.
+
+    Nothing was performed: not at the target, not at the real service, not by the fake. The
+    overlay would have handed the agent back a write irimi refused to send anywhere.
+    """
+
+    def refuse(url, port):
+        raise pipeline.TargetRefused("refusing this target")
+
+    monkeypatch.setattr(pipeline, "refuse_self_target", refuse)
+    maps = _targeted(
+        tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{target}/w")]
+    )
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
+    try:
+        addon = next(a for a in eng._master.addons.chain if isinstance(a, IrimiAddon))
+        status, data = _via_proxy(eng.listen_port(), "POST", "http://127.0.0.1/things", body=b"{}")
+    finally:
+        stop()
+    assert status == 502 and json.loads(data)["error"]["type"] == "irimi_target_failed"
+    # Still recorded - a write irimi could not answer is exactly what the trace has to show.
+    assert [ex.flags for ex in seen] == [("fidelity:delegated", "target-failed")]
+    assert addon.write_log == [], "a write performed nowhere is in the overlay's write log"
+
+
 def test_an_ipv6_target_gets_a_bracketed_host_header(tmp_path, monkeypatch):
     """`parts.hostname` strips an IPv6 literal's brackets, so the authority has to put them back:
     RFC 3986 spells it `[::1]:3000`, and `::1:3000` is a different and unparseable thing. The

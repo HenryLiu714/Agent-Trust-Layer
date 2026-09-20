@@ -70,14 +70,41 @@ passed through.
 
     uv run irimi shadow -- python agent.py
 
-Every exchange prints as one line while it runs; at the end you get a count of what was forwarded
-live and what was virtualized. The child is given `HTTP_PROXY`, `HTTPS_PROXY`,
+Every exchange prints as one line while it runs; at the end you get the run's summary:
+
+    irimi shadow · run 7f3a · 9 exchanges · 2.3s · backstop: none (Phase 4)
+
+      api.openai.com     1 llm
+      api.stripe.com     2 reads  2 writes intercepted
+      slack.com          1 write intercepted (1 delegated)
+      telemetry          2 exchanges to 2 hosts, forwarded live
+
+      ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L0)
+      ○ post to #refunds: "Refunded $49.00" → http://127.0.0.1:3111/post  unvalidated (delegated)
+
+      9 exchanges · 5 live · 1 delegated · 3 virtualized
+      These writes did not reach slack, stripe.
+      1 was delegated to http://127.0.0.1:3111/post.
+
+`live` means forwarded to the real service — reads, inference and telemetry alike; `delegated`
+means an answer target answered it; `virtualized` means irimi did. Each intercepted write gets a
+line of its own, written from its route's `human:` template with this request's own fields in it.
+Amounts are formatted from minor units using the currency **the request carried**; a body that
+names no currency keeps the number it sent, because dividing by 100 without knowing the currency
+would print `¥49.00` for a 4900-yen refund.
+
+The child is given `HTTP_PROXY`, `HTTPS_PROXY`,
 `NO_PROXY=localhost,127.0.0.1`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`,
 `NODE_EXTRA_CA_CERTS`, `NODE_USE_ENV_PROXY=1`, plus `IRIMI_ENGINE_ACTIVE=1` and `IRIMI_RUN` naming
 the run. That covers requests, httpx, urllib, curl and Node's fetch without any code change.
 
 One process tree is one run. There is no `IRIMI_MODE` variable and no config file: the subcommand
 is the only thing that chooses the mode.
+
+Every response irimi decided rather than forwarded carries `Irimi-Answered-By`, naming the answer:
+`fake-L0` for the local echo, `delegated` when an answer target answered it. A response with no
+such header came from the real service, unchanged — absence is the signal, because adding a header
+of ours to a live read would make it differ from what the service sent.
 
 **Nothing stops an agent from bypassing the proxy yet** — a client that ignores these variables, or
 ships its own CA bundle, talks to the real service. The banner says `backstop: none (Phase 4)` for
@@ -309,10 +336,38 @@ refused rather than let through:
 An **unreachable target is a `502`** flagged `target-failed`, never a silent fall back to the fake:
 that would hide a broken setup and look exactly like a working run. The body is JSON when irimi
 refuses the target itself; when the target simply is not listening, the `502` is the proxy's own
-and the exchange is what carries `target-failed`.
+and the exchange is what carries `target-failed`. The summary says so too, and never calls such a
+write delegated — a stub that was not running answered nothing:
+
+      api.stripe.com  1 write intercepted (1 target unreachable)
+
+      ○ refund $49.00 on ch_3QabcXYZ → http://127.0.0.1:3111/post  unanswered (target unreachable)
+
+      These writes did not reach stripe.
+      1 was not answered at all: http://127.0.0.1:3111/post could not be reached, and the agent
+      got a 502.
 
 Loading happens before the proxy starts, and a map, overrides file or `--target` the loader refuses
 stops `serve` and `shadow` with the rule it broke on stderr.
+
+#### What a delegated service changes
+
+The banner's promise is that hosts *not* routed through the proxy are not virtualized. A routed
+host may not be live either, so every service or route with a target gets its own banner line, and
+`irimi maps list` prints route-level targets under the host rather than only the service's:
+
+    delegated: stripe → http://127.0.0.1:3000 (reads + writes)
+    delegated: slack POST /api/chat.postMessage → http://127.0.0.1:3111 (writes)
+
+With `--allow-target-host` the line says the target is not loopback, and is red on a terminal. The
+exit summary counts a delegated exchange apart from a live one for the same reason: a delegated
+read is not a real read, and "reads are real" is what that count means to whoever reads it.
+
+Two consequences are Phase 2's and are written down in `src/irimi/overlay.py` so the issue that
+builds the overlay inherits them: a delegated service gets **no overlay**, because its target owns
+read-after-write consistency and layering irimi's minted objects over that state would corrupt it;
+and L3 preconditions for a delegated service must read from the target, or they check the write
+against a world the agent is not in.
 
 ## The example agent
 
@@ -337,6 +392,14 @@ Run the same command under `irimi shadow` and the refund never leaves your machi
 The read still goes to Stripe and returns your real test-mode charges; the POST to `/v1/refunds` is
 answered locally with the L0 echo, so the agent prints a minted `re_...` id that no refund on
 Stripe will ever have. Re-read the charge afterwards and it carries no refund.
+
+`tests/test_phase_exit.py` is that run, automated. Its first test needs no key and no network: it
+drives both doors with the wire shapes the two SDKs produce, and asserts the refund was answered by
+irimi, that the echo carries a minted `re_` id, that nothing on the other side was ever asked to do
+anything, and that the summary says so. Its second test is the live version above — it runs the
+agent itself and re-reads the charge from Stripe — and it skips unless you give it a key:
+
+    STRIPE_API_KEY=sk_test_... uv run --with stripe pytest -q -rs tests/test_phase_exit.py
 
 The agent points `stripe.api_base` at the reverse door only when `IRIMI_ENGINE_ACTIVE=1`, and reads
 the port from `HTTPS_PROXY`, so `--port` works and a bare run is unaffected. Set `SLACK_BOT_TOKEN`

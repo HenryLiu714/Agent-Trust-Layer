@@ -7,34 +7,82 @@ from irimi.runner import (
     EngineThread,
     banner_lines,
     child_env,
+    delegated_lines,
     exchange_line,
     exit_code_for,
     summary_lines,
 )
 
 
-def _exchange(method="GET", kind="read", answered_by="live", status=200, flags=()):
+def _exchange(
+    method="GET",
+    kind="read",
+    answered_by="live",
+    status=200,
+    flags=(),
+    host="api.stripe.com",
+    path="/v1/charges",
+    body=b"",
+    content_type="",
+    service="stripe",
+    target="",
+):
     req = Request(
         method=method,
         scheme="https",
-        host="api.stripe.com",
+        host=host,
         port=443,
-        path="/v1/charges",
+        path=path,
         query="",
-        headers=(),
-        body=b"",
+        headers=((("content-type", content_type),) if content_type else ()),
+        body=body,
     )
     resp = Response(status=status, headers=(), body=b"") if status is not None else None
     return Exchange(
         request=req,
         response=resp,
-        service="api.stripe.com",
-        operation=f"{method} /v1/charges",
+        service=service,
+        operation=f"{method} {path}",
         kind=kind,
         answered_by=answered_by,
         validation="unvalidated",
         run_id="7f3a",
         flags=flags,
+        target=target,
+    )
+
+
+FORM = "application/x-www-form-urlencoded"
+
+
+def _refund(
+    answered_by="fake-L0",
+    body=b"charge=ch_3QabcXYZ&amount=4900&currency=usd",
+    target="",
+    flags=(),
+    status=200,
+):
+    return _exchange(
+        method="POST",
+        kind="write",
+        answered_by=answered_by,
+        path="/v1/refunds",
+        body=body,
+        content_type=FORM,
+        target=target,
+        flags=flags,
+        status=status,
+    )
+
+
+def _unreachable(target="http://127.0.0.1:3999/refund"):
+    """A delegated write whose target could not be dialled: `IrimiAddon.error` records it with no
+    response and the `target-failed` flag, exactly as a stub that is not running produces."""
+    return _refund(
+        answered_by="delegated",
+        target=target,
+        flags=("fidelity:delegated", "target-failed"),
+        status=None,
     )
 
 
@@ -87,28 +135,20 @@ def test_exchange_line_shows_flags_and_missing_response():
     assert "[upstream-error]" in line
 
 
-def test_summary_counts():
-    exchanges = [
-        _exchange(),
-        _exchange(),
-        _exchange(method="POST", kind="unknown", answered_by="fake-L0"),
-    ]
-    lines = summary_lines("7f3a", exchanges)
-    assert "7f3a" in lines[0]
-    assert "3 exchange(s)" in lines[0]
-    assert "live:" in lines[1]
-    assert "2" in lines[1]
-    assert "read=2" in lines[1]
-    assert "virtualized:" in lines[2]
-    assert "1" in lines[2]
-    assert "unknown=1" in lines[2]
+def test_summary_header_names_the_run_the_count_the_time_and_the_backstop():
+    lines = summary_lines("7f3a", [_exchange(), _exchange()], 2.34)
+    assert lines[0] == "irimi shadow · run 7f3a · 2 exchanges · 2.3s · backstop: none (Phase 4)"
+
+
+def test_summary_header_says_one_exchange_not_one_exchanges():
+    assert "1 exchange ·" in summary_lines("7f3a", [_exchange()], 0.0)[0]
 
 
 def test_summary_empty():
-    lines = summary_lines("7f3a", [])
-    assert "0 exchange(s)" in lines[0]
-    assert lines[1].endswith("0")
-    assert lines[2].endswith("0")
+    lines = summary_lines("7f3a", [], 0.0)
+    assert "0 exchanges" in lines[0]
+    assert any("0 live · 0 delegated · 0 virtualized" in line for line in lines)
+    assert not any("did not happen" in line for line in lines)
 
 
 def test_exit_code_for():
@@ -154,3 +194,313 @@ def test_exchange_line_columns_line_up_for_the_nine_character_values():
 
 def test_exchange_line_names_a_delegated_answer():
     assert exchange_line(_exchange(answered_by="delegated")).startswith("delegated")
+
+
+def _service(**kwargs):
+    from irimi.servicemap import ServiceMap
+
+    base = {
+        "service": "stripe",
+        "hosts": frozenset({"api.stripe.com"}),
+        "routes": (),
+    }
+    base.update(kwargs)
+    return ServiceMap(**base)
+
+
+def _route(**kwargs):
+    from irimi.servicemap import Route
+
+    base = {"method": "POST", "path": "/v1/refunds", "operation": "refunds.create", "kind": "write"}
+    base.update(kwargs)
+    return Route(**base)
+
+
+def _index(*services):
+    from irimi.servicemap import MapIndex
+
+    return MapIndex(services=tuple(services))
+
+
+def test_a_service_with_no_target_adds_no_banner_line():
+    """No delegated service, no new lines: the banner a reader already knows stays as it was."""
+    assert delegated_lines(_index(_service(routes=(_route(),)))) == []
+
+
+def test_a_service_target_names_the_service_the_target_and_what_it_answers():
+    lines = delegated_lines(_index(_service(target="http://127.0.0.1:3000")))
+    assert lines == ["delegated: stripe → http://127.0.0.1:3000 (writes)"]
+
+
+def test_target_reads_says_the_reads_are_delegated_too():
+    """The banner's "reads are real" claim is exactly what `target_reads` makes false (#20)."""
+    lines = delegated_lines(_index(_service(target="http://127.0.0.1:3000", target_reads=True)))
+    assert lines == ["delegated: stripe → http://127.0.0.1:3000 (reads + writes)"]
+
+
+def test_a_route_target_is_named_even_when_the_service_itself_has_none():
+    """`irimi maps list` printed `target: self` for exactly this shape; the banner must not."""
+    sm = _service(routes=(_route(target="http://127.0.0.1:3111"), _route(path="/v1/charges")))
+    assert delegated_lines(_index(sm)) == [
+        "delegated: stripe POST /v1/refunds → http://127.0.0.1:3111 (writes)"
+    ]
+
+
+def test_a_delegated_read_route_says_reads():
+    sm = _service(routes=(_route(kind="read", target="http://127.0.0.1:3111"),))
+    assert delegated_lines(_index(sm))[0].endswith("(reads)")
+
+
+def test_a_target_that_is_not_loopback_says_so_and_is_red_only_when_asked():
+    """--allow-target-host is how a target stops being loopback, and the line has to say it."""
+    index = _index(_service(target="http://stub.example:3000"))
+    plain, notice = delegated_lines(index)
+    assert "NOT loopback" in notice
+    assert all("\033[" not in line for line in (plain, notice))
+    assert all(len(line) <= 100 for line in (plain, notice))
+    coloured = delegated_lines(index, color=True)
+    assert len(coloured) == 2
+    assert all(c.startswith("\033[31m") and c.endswith("\033[0m") for c in coloured)
+
+
+def test_a_loopback_target_is_never_painted_red():
+    (line,) = delegated_lines(_index(_service(target="http://127.0.0.1:3000")), color=True)
+    assert "\033[" not in line
+    assert "NOT loopback" not in line
+
+
+def test_delegated_lines_are_sorted_by_service():
+    index = _index(
+        _service(service="stripe", target="http://127.0.0.1:3000"),
+        _service(service="acme", hosts=frozenset({"acme.test"}), target="http://127.0.0.1:3001"),
+    )
+    assert [line.split()[1] for line in delegated_lines(index)] == ["acme", "stripe"]
+
+
+# ------------------------------------------------------------------ the exit summary (#13, #20)
+
+
+def _maps():
+    from irimi import servicemap
+
+    return servicemap.load()
+
+
+def _block(lines, needle):
+    return next(line for line in lines if needle in line)
+
+
+def test_a_host_line_separates_reads_from_intercepted_writes():
+    lines = summary_lines("7f3a", [_exchange(), _exchange(), _refund()], 0.0, _maps())
+    assert _block(lines, "api.stripe.com") == "  api.stripe.com  2 reads  1 write intercepted"
+
+
+def test_a_delegated_read_is_never_counted_as_a_live_read():
+    """The claim behind `reads are real` is what that count means to whoever reads it, and a read
+    answered by a target is not a real read (#20)."""
+    rows = [_exchange(), _exchange(answered_by="delegated", target="http://127.0.0.1:3000")]
+    line = _block(summary_lines("7f3a", rows, 0.0, _maps()), "api.stripe.com")
+    assert line == "  api.stripe.com  1 read  1 read from the target"
+
+
+def test_an_intercepted_write_that_was_delegated_says_so_in_its_host_line():
+    rows = [_refund(), _refund(answered_by="delegated", target="http://127.0.0.1:3000/refund")]
+    line = _block(summary_lines("7f3a", rows, 0.0, _maps()), "api.stripe.com")
+    assert line == "  api.stripe.com  2 writes intercepted (1 delegated)"
+
+
+def test_an_unclassified_write_is_counted_and_named():
+    rows = [_refund(), _exchange(method="DELETE", kind="unknown", answered_by="fake-L0")]
+    line = _block(summary_lines("7f3a", rows, 0.0, _maps()), "api.stripe.com")
+    assert line == "  api.stripe.com  2 writes intercepted (1 unclassified)"
+
+
+def test_llm_gets_its_own_word():
+    rows = [_exchange(kind="llm", host="api.openai.com", service="openai", method="POST")]
+    assert _block(summary_lines("7f3a", rows, 0.0, _maps()), "api.openai.com").endswith("1 llm")
+
+
+def test_every_telemetry_host_shares_one_line():
+    """A run posts to three vendors in the same breath; a line each would bury the two hosts the
+    agent's actual work is on. It says they were forwarded live, because they really were (#20)."""
+    rows = [
+        _exchange(kind="telemetry", host="api.datadoghq.com", service="datadog", method="POST"),
+        _exchange(kind="telemetry", host="api.datadoghq.com", service="datadog", method="POST"),
+        _exchange(kind="telemetry", host="o0.ingest.sentry.io", service="sentry", method="POST"),
+    ]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert _block(lines, "telemetry") == "  telemetry  3 exchanges to 2 hosts, forwarded live"
+    assert not any("api.datadoghq.com" in line for line in lines)
+
+
+def test_a_telemetry_host_still_gets_a_host_line_for_its_control_plane_writes():
+    """`kind` is per route: a DELETE on a dashboard is a write on the same host the logs go to,
+    and lumping it into the telemetry line is exactly the scope mistake #30 was filed for."""
+    rows = [
+        _exchange(kind="telemetry", host="api.datadoghq.com", service="datadog", method="POST"),
+        _exchange(
+            method="DELETE",
+            kind="unknown",
+            answered_by="fake-L0",
+            host="api.datadoghq.com",
+            service="datadog",
+            path="/api/v1/dashboard/x",
+        ),
+    ]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert "  api.datadoghq.com  1 write intercepted (1 unclassified)" in lines
+    assert "  telemetry          1 exchange to 1 host, forwarded live" in lines
+
+
+def test_a_write_is_rendered_from_the_maps_human_template():
+    lines = summary_lines("7f3a", [_refund()], 0.0, _maps())
+    assert "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L0)" in lines
+
+
+def test_an_amount_with_no_currency_in_the_request_is_left_as_it_was_sent():
+    """Dividing by 100 without knowing the currency prints ¥49.00 for a 4900-yen refund, which is
+    a wrong number rather than an unformatted one. Nothing else in a shadow run knows the
+    currency: the charge it refers to was read live and its fields are Phase 2's to carry."""
+    lines = summary_lines("7f3a", [_refund(body=b"charge=ch_9&amount=4900")], 0.0, _maps())
+    assert "  ○ refund 4900 on ch_9  unvalidated (L0)" in lines
+
+
+def test_a_zero_decimal_currency_is_not_divided():
+    lines = summary_lines(
+        "7f3a", [_refund(body=b"charge=ch_9&amount=4900&currency=jpy")], 0.0, _maps()
+    )
+    assert "  ○ refund ¥4900 on ch_9  unvalidated (L0)" in lines
+
+
+def test_a_currency_with_no_symbol_is_named():
+    lines = summary_lines(
+        "7f3a", [_refund(body=b"charge=ch_9&amount=4900&currency=sek")], 0.0, _maps()
+    )
+    assert "  ○ refund 49.00 SEK on ch_9  unvalidated (L0)" in lines
+
+
+def test_a_template_hole_the_request_does_not_fill_is_marked_not_dropped():
+    lines = summary_lines("7f3a", [_refund(body=b"amount=4900&currency=usd")], 0.0, _maps())
+    assert "  ○ refund $49.00 on ?  unvalidated (L0)" in lines
+
+
+def test_a_path_parameter_fills_a_hole_the_body_does_not():
+    rows = [
+        _exchange(
+            method="POST",
+            kind="write",
+            answered_by="fake-L0",
+            path="/v1/payment_intents/pi_REAL999/cancel",
+        )
+    ]
+    assert "  ○ cancel pi_REAL999  unvalidated (L0)" in summary_lines("7f3a", rows, 0.0, _maps())
+
+
+def test_an_unmapped_write_is_spelled_as_the_request_it_was():
+    rows = [
+        _exchange(
+            method="POST",
+            kind="unknown",
+            answered_by="fake-L0",
+            host="api.unmapped.test",
+            service="api.unmapped.test",
+            path="/do/a/thing",
+        )
+    ]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert "  ○ POST api.unmapped.test/do/a/thing  unclassified (L0)" in lines
+
+
+def test_a_delegated_write_names_the_address_that_answered_it():
+    rows = [_refund(answered_by="delegated", target="http://127.0.0.1:3000/refund")]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert (
+        "  ○ refund $49.00 on ch_3QabcXYZ → http://127.0.0.1:3000/refund  unvalidated (delegated)"
+        in lines
+    )
+
+
+def test_the_three_buckets_are_counted_on_one_line():
+    rows = [
+        _exchange(),
+        _exchange(kind="telemetry", host="api.datadoghq.com", service="datadog", method="POST"),
+        _refund(),
+        _refund(answered_by="delegated", target="http://127.0.0.1:3000/refund"),
+    ]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert "  4 exchanges · 2 live · 1 delegated · 1 virtualized" in lines
+
+
+def test_the_closing_line_is_the_plain_claim_when_nothing_was_delegated():
+    lines = summary_lines("7f3a", [_refund()], 0.0, _maps())
+    assert lines[-1] == "  These writes did not happen."
+
+
+def test_the_closing_lines_say_where_a_delegated_write_went():
+    rows = [_refund(), _refund(answered_by="delegated", target="http://127.0.0.1:3000/refund")]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert lines[-2] == "  These writes did not reach stripe."
+    assert lines[-1] == "  1 was delegated to http://127.0.0.1:3000/refund."
+
+
+def test_a_write_whose_target_was_never_reached_is_not_counted_as_delegated():
+    """The host line said `1 delegated` for a write no stub ever saw, which reads as a working
+    delegation when the developer's stub was simply not running."""
+    line = _block(summary_lines("7f3a", [_unreachable()], 0.0, _maps()), "api.stripe.com")
+    assert line == "  api.stripe.com  1 write intercepted (1 target unreachable)"
+
+
+def test_a_delegated_write_and_an_unreachable_one_are_counted_apart():
+    rows = [_refund(answered_by="delegated", target="http://127.0.0.1:3000/refund"), _unreachable()]
+    assert _block(summary_lines("7f3a", rows, 0.0, _maps()), "api.stripe.com") == (
+        "  api.stripe.com  2 writes intercepted (1 delegated, 1 target unreachable)"
+    )
+
+
+def test_an_unreachable_target_says_the_write_was_not_answered_at_all():
+    lines = summary_lines("7f3a", [_unreachable()], 0.0, _maps())
+    assert (
+        "  ○ refund $49.00 on ch_3QabcXYZ → http://127.0.0.1:3999/refund  "
+        "unanswered (target unreachable)" in lines
+    )
+
+
+def test_the_closing_lines_never_claim_an_unreachable_target_answered():
+    lines = summary_lines("7f3a", [_unreachable()], 0.0, _maps())
+    assert lines[-2] == "  These writes did not reach stripe."
+    assert lines[-1] == (
+        "  1 was not answered at all: http://127.0.0.1:3999/refund could not be reached, "
+        "and the agent got a 502."
+    )
+    assert not any("delegated to" in line for line in lines)
+
+
+def test_a_delegated_write_and_an_unreachable_one_each_get_their_own_sentence():
+    rows = [_refund(answered_by="delegated", target="http://127.0.0.1:3000/refund"), _unreachable()]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert lines[-3] == "  These writes did not reach stripe."
+    assert lines[-2] == "  1 was delegated to http://127.0.0.1:3000/refund."
+    assert lines[-1].startswith("  1 was not answered at all:")
+
+
+def test_two_unreachable_writes_read_as_were():
+    assert summary_lines("7f3a", [_unreachable()] * 2, 0.0, _maps())[-1].startswith(
+        "  2 were not answered at all:"
+    )
+
+
+def test_two_delegated_writes_read_as_were():
+    rows = [_refund(answered_by="delegated", target="http://127.0.0.1:3000/refund")] * 2
+    assert summary_lines("7f3a", rows, 0.0, _maps())[-1].startswith("  2 were delegated to")
+
+
+def test_a_run_that_only_read_claims_nothing_about_writes():
+    lines = summary_lines("7f3a", [_exchange()], 0.0, _maps())
+    assert not any("did not happen" in line or "did not reach" in line for line in lines)
+
+
+def test_the_summary_still_names_a_write_without_the_maps():
+    """`index=None` is the empty-map case, and the write still gets a line: the summary degrades
+    to the request it saw rather than dropping a write it could not name."""
+    lines = summary_lines("7f3a", [_refund()], 0.0, None)
+    assert "  ○ POST api.stripe.com/v1/refunds  unvalidated (L0)" in lines

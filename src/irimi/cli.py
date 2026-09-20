@@ -6,6 +6,7 @@ from irimi import __version__, paths
 
 if TYPE_CHECKING:  # the quoted annotations below; no runtime import
     import subprocess
+    from pathlib import Path
 
     from irimi.ca import CAPaths
     from irimi.engine import EngineConfig
@@ -175,6 +176,38 @@ def _escape_hatch_warning(args: argparse.Namespace) -> str | None:
     )
 
 
+def print_startup(
+    command: str,
+    args: argparse.Namespace,
+    index: "MapIndex",
+    run_id: str,
+    host: str,
+    port: int,
+    ca_cert: "Path",
+) -> None:
+    """Everything a run says before it starts: the escape-hatch warning, the banner, and one line
+    per delegated service. `command` is "serve" or "shadow".
+
+    Every line is flushed. Python block-buffers stdout when it is a pipe rather than a terminal,
+    and `serve` is a foreground process that may then print nothing for minutes, so
+    `irimi serve > log`, `irimi serve | tee` and any supervisor capturing the process showed none
+    of this until an exchange came along and flushed it - and a `serve` nobody talks to showed
+    nothing at all. What was withheld is the port it bound, the CA path a client needs,
+    `backstop: none`, and the red `NOT loopback` line saying the agent's requests are leaving
+    this machine. `shadow` flushed already; `serve` did not, and the two are one function now so
+    they cannot drift again.
+    """
+    from irimi import runner  # deferred like every other heavy import in this module
+
+    warning = _escape_hatch_warning(args)
+    if warning is not None:
+        print(warning, file=sys.stderr, flush=True)
+    for line in runner.banner_lines(command, run_id, host, port, ca_cert):
+        print(line, flush=True)
+    for line in runner.delegated_lines(index, color=sys.stdout.isatty()):
+        print(line, flush=True)
+
+
 def cmd_maps_list(args: argparse.Namespace) -> int:
     from irimi import servicemap
 
@@ -204,6 +237,13 @@ def cmd_maps_list(args: argparse.Namespace) -> int:
             f"  {name:<{width}}  {sm.service:<{service_width}}  {len(sm.routes):>3} routes  "
             f"target: {sm.target}{reads}"
         )
+        # The service target alone printed `target: self` for a service whose *routes* carry
+        # targets, so a partly delegated service looked untouched in the listing and contradicted
+        # the banner printed two seconds later (#20). Route targets get a line of their own under
+        # the host, because the column above is the service's answer and this is the route's.
+        for route in sm.routes:
+            if route.target != servicemap.SELF_TARGET:
+                print(f"  {'':<{width}}  route {route.method} {route.path} → {route.target}")
     override = servicemap.override_path()
     if override is not None:
         print(f"  overrides from {override}")
@@ -271,13 +311,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
         except EngineStartError:
             await asyncio.gather(task, return_exceptions=True)  # let mitmproxy finish stopping
             raise
-        warning = _escape_hatch_warning(args)
-        if warning is not None:
-            print(warning, file=sys.stderr, flush=True)
-        for line in runner.banner_lines(
-            "serve", run_id, cfg.listen_host, engine.listen_port(), p.cert
-        ):
-            print(line)
+        port = engine.listen_port()
+        assert port is not None  # wait_ready() returned, so the listener is bound
+        print_startup("serve", args, index, run_id, cfg.listen_host, port, p.cert)
         await task
 
     try:
@@ -294,6 +330,7 @@ def cmd_shadow(args: argparse.Namespace) -> int:
     import os
     import secrets
     import subprocess
+    import time
 
     from irimi import ca, runner
     from irimi.engine import EngineStartError
@@ -321,6 +358,7 @@ def cmd_shadow(args: argparse.Namespace) -> int:
 
     run_id = secrets.token_hex(2)
     exchanges: list[Exchange] = []
+    elapsed = 0.0
 
     def on_exchange(ex: Exchange) -> None:
         exchanges.append(ex)
@@ -346,11 +384,7 @@ def cmd_shadow(args: argparse.Namespace) -> int:
         return SIGINT_EXIT_CODE
 
     try:
-        warning = _escape_hatch_warning(args)
-        if warning is not None:
-            print(warning, file=sys.stderr, flush=True)
-        for line in runner.banner_lines("shadow", run_id, paths.LISTEN_HOST, handle.port(), p.cert):
-            print(line, flush=True)
+        print_startup("shadow", args, index, run_id, paths.LISTEN_HOST, handle.port(), p.cert)
         env = runner.child_env(dict(os.environ), paths.LISTEN_HOST, handle.port(), p.cert, run_id)
         try:
             proc = subprocess.Popen(cmd, env=env)
@@ -360,7 +394,11 @@ def cmd_shadow(args: argparse.Namespace) -> int:
         except OSError as exc:
             print(f"error: could not run {cmd[0]}: {exc}", file=sys.stderr)
             return 126
+        # The summary's duration is the child's, not the proxy's: what the reader wants to know is
+        # how long the agent ran. monotonic, so a clock change mid-run cannot make it negative.
+        started = time.monotonic()
         code = runner.exit_code_for(_wait_for_child(proc))
+        elapsed = time.monotonic() - started
     except KeyboardInterrupt:  # Ctrl-C outside _wait_for_child's own handling
         code = SIGINT_EXIT_CODE
     finally:
@@ -370,7 +408,7 @@ def cmd_shadow(args: argparse.Namespace) -> int:
         except KeyboardInterrupt:
             pass
 
-    for line in runner.summary_lines(run_id, exchanges):
+    for line in runner.summary_lines(run_id, exchanges, elapsed, index):
         print(line, flush=True)
     return code
 

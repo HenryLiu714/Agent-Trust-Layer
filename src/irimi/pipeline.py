@@ -23,6 +23,10 @@ if TYPE_CHECKING:  # quoted annotations only: servicemap imports this module, so
     from irimi.servicemap import MapIndex, Route, ServiceMap
 
 RUN_HEADER = "irimi-run"  # header names are compared case-insensitively; stored lower-case
+# Stamped on every response irimi decided rather than forwarded, carrying the `answered_by` value
+# itself (`fake-L0`, `delegated`). See `answered_by_header` for why a live forward gets none.
+ANSWERED_BY_HEADER = "irimi-answered-by"
+LIVE_ANSWER: AnsweredBy = "live"
 UNCLASSIFIED_FLAG = "unclassified"
 # A live-forwarding kind was refused because it did not name this method (see
 # `_refuse_live_on_an_unnamed_method`). The exchange says `unknown`, and this says why.
@@ -134,6 +138,21 @@ def is_loopback(address: str) -> bool:
         return ipaddress.ip_address(address).is_loopback
     except ValueError:
         return False
+
+
+def is_local_target(url: str) -> bool:
+    """True when this answer target names loopback. Anything unparseable is not local.
+
+    One spelling of the question, because three surfaces ask it: `policy.delegate` refuses a
+    non-loopback target on a credential-path host, and the banner and `irimi maps list` paint a
+    non-loopback target red. Three copies would drift, and the one that drifts is the one that
+    lets a credential off the machine.
+    """
+    try:
+        host = urlsplit(url).hostname or ""
+    except ValueError:
+        return False
+    return host == "localhost" or is_loopback(host)
 
 
 def rewrite_reverse(request: Request, allowed_hosts: frozenset[str]) -> Request:
@@ -314,7 +333,37 @@ def annotate(
     )
 
 
+def answered_by_header(answered_by: AnsweredBy) -> str | None:
+    """The `Irimi-Answered-By` value an answer must carry, or None when it must carry none.
+
+    The value IS `answered_by`, not a second vocabulary beside it: `fake-L0` today, `delegated`
+    since #16, `overlay` and `recorded` in later phases. One rule, so a new way of answering
+    cannot ship a response that does not say who answered it - the header is how a client, a
+    test, or a developer reading a capture tells an answer of ours from the real service's. It
+    takes the value rather than the Exchange because the engine asks before there is one: a
+    streamed answer is stamped in `responseheaders`, where only `_Pending` exists yet.
+
+    A **live forward gets no header**, deliberately. Everything on that path is the real
+    service's: adding a header of ours to it would make the response the agent sees differ from
+    the one the service sent, which is the one thing a live read must not do. Absence is the
+    signal, and it is the signal the invariant tests read.
+    """
+    return None if answered_by == LIVE_ANSWER else answered_by
+
+
 def respond(exchange: Exchange) -> Response | None:
-    """What goes back to the client. Identity for now; issue #12 adds the Irimi-Answered-By
-    header."""
-    return exchange.response
+    """What goes back to the client: the answer, stamped with who produced it (#12).
+
+    Pure: it returns the response to send and never touches the flow. The engine forwards
+    `exchange.response` unchanged when this hands back the very object it was given, which is how
+    a live forward stays byte-identical to what the service sent.
+    """
+    if exchange.response is None:
+        return None
+    stamp = answered_by_header(exchange.answered_by)
+    if stamp is None:
+        return exchange.response
+    # Any header of this name already on the response came from somewhere else - a target that
+    # echoes headers, or a service of the same name - and ours is the one that is true here.
+    kept = tuple((k, v) for k, v in exchange.response.headers if k.lower() != ANSWERED_BY_HEADER)
+    return replace(exchange.response, headers=kept + ((ANSWERED_BY_HEADER, stamp),))

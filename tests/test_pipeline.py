@@ -569,6 +569,47 @@ def test_one_posthog_pattern_covers_the_regional_ingest_hosts(tmp_path, monkeypa
         assert index.service_for(host).service == "posthog"
 
 
+@pytest.mark.parametrize(
+    ("host", "path", "operation"),
+    [
+        # Datadog's sites are three TLDs, not three subdomains: EU1 is `datadoghq.eu` and
+        # US1-FED is `ddog-gov.com`, so `*.datadoghq.com` reached neither.
+        ("http-intake.logs.datadoghq.eu", "/api/v2/logs", "logs.submit"),
+        ("api.datadoghq.eu", "/api/v2/series", "series.submit.v2"),
+        ("api.ddog-gov.com", "/api/v2/logs", "logs.submit"),
+        # A regional host that is a subdomain of an already-listed one, to prove the existing
+        # patterns were not narrowed while the new ones were added.
+        ("api.us3.datadoghq.com", "/api/v2/logs", "logs.submit"),
+        # Honeycomb's EU instance and LangSmith's EU tenant are each their own exact host.
+        ("api.eu1.honeycomb.io", "/1/batch/ds", "batch.send"),
+        ("eu.api.smith.langchain.com", "/runs/batch", "runs.batch"),
+    ],
+)
+def test_a_regional_telemetry_host_classifies(tmp_path, monkeypatch, host, path, operation):
+    """The silent-never-matches class again, one vendor set further along than #25: a host the
+    map does not claim is not an error, it is intake that gets faked instead of forwarded, and
+    nothing in the output says the map did nothing (#34)."""
+    cls = _shipped(tmp_path, monkeypatch, "POST", host, path)
+    assert (cls.operation, cls.kind, cls.flags) == (operation, "telemetry", ())
+
+
+def test_the_regional_telemetry_patterns_do_not_claim_their_vendors_web_apps(tmp_path, monkeypatch):
+    """Why exact hosts for Honeycomb and LangSmith and patterns only for Datadog: the two `.io` /
+    `.com` names are shared with a web app and a control plane, and `*.honeycomb.io` or
+    `*.smith.langchain.com` would hand those to a live-forwarded service (#25, #34).
+
+    Probed with subdomains, not bare hosts: a `*.x` pattern is keyed `.x` and matched with
+    `endswith`, so the bare host misses an over-broad pattern too and would pass either way.
+    """
+    index = _index(tmp_path, monkeypatch)
+    for host in ("ui.honeycomb.io", "www.honeycomb.io", "smith.langchain.com", "x.langchain.com"):
+        assert index.service_for(host) is None, host
+    # Datadog is a pattern per site, so its own control plane stays inside the map and is caught
+    # by the route rules instead - unlisted, so `unknown` and faked.
+    cls = _shipped(tmp_path, monkeypatch, "DELETE", "api.datadoghq.eu", "/api/v1/dashboard/abc")
+    assert (cls.service, cls.kind, cls.flags) == ("datadog", "unknown", ("unclassified",))
+
+
 def test_an_unlisted_telemetry_write_is_faked_not_forwarded(tmp_path, monkeypatch):
     """The telemetry maps carry no `default_kind`, on purpose. These vendors serve their REST
     control plane from the same host as their intake, and `telemetry` forwards live, so a default

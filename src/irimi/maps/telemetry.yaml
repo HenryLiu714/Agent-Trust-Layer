@@ -23,7 +23,11 @@ version: 1
 service: langsmith
 verbs: honest
 hosts:
+  # LangSmith's EU tenant is a *prefix* on the same name, not a subdomain of it, so the US host
+  # alone misses every EU workspace (#34). Listed exactly rather than as `*.smith.langchain.com`,
+  # which would also claim the web app.
   - api.smith.langchain.com
+  - eu.api.smith.langchain.com
 routes:
   - match:
       method: POST
@@ -130,7 +134,13 @@ version: 1
 service: datadog
 verbs: honest
 hosts:
+  # Datadog splits its sites across three TLDs, not three subdomains. US3, US5, AP1 and AP2 are
+  # subdomains of datadoghq.com and the first pattern already covers them, but EU1 is
+  # `datadoghq.eu` and the US1-FED site is `ddog-gov.com`, so a pattern on `.com` misses both
+  # entirely and their intake was faked rather than forwarded (#34).
   - "*.datadoghq.com"
+  - "*.datadoghq.eu"
+  - "*.ddog-gov.com"
 routes:
   - match:
       method: POST
@@ -172,7 +182,9 @@ version: 1
 service: honeycomb
 verbs: honest
 hosts:
+  # Honeycomb's EU instance is its own host; `api.honeycomb.io` misses it (#34).
   - api.honeycomb.io
+  - api.eu1.honeycomb.io
 routes:
   - match:
       method: POST

@@ -134,3 +134,23 @@ def test_engine_thread_stop_is_idempotent():
     assert not thread.is_alive()
     assert loop.is_closed()
     handle.stop()  # a second stop must not reach the closed loop
+
+
+def test_exchange_line_columns_line_up_for_the_nine_character_values():
+    """`telemetry` and `delegated` are nine characters. At eight, every row carrying one was
+    pushed a column right in the most-read output the tool produces (#29)."""
+    lines = [
+        exchange_line(_exchange(answered_by=answered_by, kind=kind))
+        for answered_by, kind in [
+            ("live", "read"),
+            ("live", "telemetry"),
+            ("fake-L0", "unknown"),
+            ("delegated", "write"),
+        ]
+    ]
+    starts = {line.index("GET") if "GET" in line else line.index("POST") for line in lines}
+    assert len(starts) == 1, lines
+
+
+def test_exchange_line_names_a_delegated_answer():
+    assert exchange_line(_exchange(answered_by="delegated")).startswith("delegated")

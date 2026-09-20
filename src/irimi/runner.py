@@ -69,8 +69,10 @@ def exchange_line(exchange: Exchange) -> str:
     """One line per finished exchange."""
     status = exchange.response.status if exchange.response else "-"
     flags = f"  [{', '.join(exchange.flags)}]" if exchange.flags else ""
+    # Both columns are nine wide: `telemetry` and `delegated` are nine characters, and at eight
+    # every row carrying one was pushed a column right in the most-read output the tool produces.
     return (
-        f"{exchange.answered_by:<8} {exchange.kind:<8} {exchange.request.method} "
+        f"{exchange.answered_by:<9} {exchange.kind:<9} {exchange.request.method} "
         f"{exchange.request.host}{exchange.request.path} -> {status}{flags}"
     )
 

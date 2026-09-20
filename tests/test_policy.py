@@ -1,6 +1,7 @@
 import json
 import re
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -298,3 +299,288 @@ def test_stripe_python_parses_the_faked_refund():
     assert refund.object == "refund"
     assert refund.amount == 4900
     assert refund.charge == "ch_test"
+
+
+# ------------------------------------------------- form bodies with structure in them (#27)
+
+
+def test_a_bracket_nested_form_field_becomes_a_nested_object():
+    """stripe-python posts `metadata[order_id]=6735`; the live API always answers with
+    `metadata`. Flat, `Refund.metadata` raised AttributeError - the bar policy.py sets itself."""
+    body = policy.parse_form("charge=ch_test&amount=4900&metadata[order_id]=6735")
+    assert body == {"charge": "ch_test", "amount": 4900, "metadata": {"order_id": "6735"}}
+
+
+def test_a_value_inside_a_bracket_path_stays_a_string():
+    """A Stripe metadata value is always a string on the live API."""
+    assert policy.parse_form("metadata[n]=6735")["metadata"]["n"] == "6735"
+    assert policy.parse_form("n=6735")["n"] == 6735
+
+
+def test_a_repeated_bare_key_collects_into_a_list():
+    """`requests.post(data={"tags": ["a", "b"]})` and `urlencode(doseq=True)` both send these."""
+    assert policy.parse_form("tags=a&tags=b&tags=c") == {"tags": ["a", "b", "c"]}
+    assert policy.parse_form("tags=a") == {"tags": "a"}
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("expand[0]=a&expand[1]=b", {"expand": ["a", "b"]}),
+        ("i[0][price]=p1&i[1][price]=p2", {"i": [{"price": "p1"}, {"price": "p2"}]}),
+        ("a[b][c]=1", {"a": {"b": {"c": "1"}}}),
+        ("x[1]=only", {"x": {"1": "only"}}),  # a gap stays a dict; nothing is invented
+        ("x[0]=a&x[2]=c", {"x": {"0": "a", "2": "c"}}),
+        ("x[007]=a", {"x": {"007": "a"}}),  # not a canonical index, so not a list
+    ],
+)
+def test_an_indexed_form_key_becomes_a_list_only_when_the_indices_are_complete(text, expected):
+    assert policy.parse_form(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("a[b", {"a[b": ""}),
+        ("a[b]c", {"a[b]c": ""}),
+        ("a[[b]]", {"a[[b]]": ""}),
+        ("a[]=1", {"a[]": 1}),
+        ("[b]=1", {"[b]": 1}),
+    ],
+)
+def test_a_bracket_shape_we_will_not_guess_at_stays_flat(text, expected):
+    """Echoing an odd key unchanged is wrong in a small, visible way; guessing is worse. The
+    whole dict is asserted: a membership check here would pass on an empty result too."""
+    assert policy.parse_form(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text", ["a=2&a[0]=1", "a[0]=1&a=2", "a[0]=1&a=2&a[1]=3", "a=2&a[0]=1&a=9"]
+)
+def test_a_bracketed_key_beats_a_bare_one_in_either_order(text):
+    """The same name spelled both ways is nonsense input, but it must not be order-dependent:
+    structure surviving is what #27 is about, and a bare value cannot carry any."""
+    result = policy.parse_form(text)
+    assert isinstance(result["a"], list), result
+    assert "1" in result["a"]
+
+
+def _nest(depth: int):
+    node: object = "1"
+    for _ in range(depth):
+        node = {"b": node}
+    return node
+
+
+def test_a_bracket_path_deeper_than_the_cap_stays_flat():
+    """Unwinding a thousand-level nest is a RecursionError inside a mitmproxy hook, and a hook
+    that raises forwards the flow - which for a write means it escapes shadow mode. The cap is
+    twice Stripe's deepest real key, `line_items[0][price_data][product_data][name]`."""
+    # The value, not just the mechanism: written only against the constant, this test passes
+    # with a cap of 2, which would flatten Stripe's real
+    # `line_items[0][price_data][product_data][name]` (5 segments) and ship green.
+    assert policy._MAX_FORM_DEPTH == 8
+    assert policy.parse_form("line_items[0][price_data][product_data][name]=x") == {
+        "line_items": [{"price_data": {"product_data": {"name": "x"}}}]
+    }
+    deep = "a" + "[b]" * policy._MAX_FORM_DEPTH
+    assert policy.parse_form(deep + "=1") == {"a": _nest(policy._MAX_FORM_DEPTH)}
+    too_deep = "a" + "[b]" * (policy._MAX_FORM_DEPTH + 1)
+    assert policy.parse_form(too_deep + "=1") == {too_deep: 1}  # flat, so int-coerced
+
+
+def test_parse_form_never_raises_on_hostile_input():
+    for text in ["[" * 5000, "a" + "[b]" * 2000 + "=1", "=", "&&&", "a=%%%", "a[0]=1&a=2"]:
+        assert isinstance(policy.parse_form(text), dict)
+
+
+def test_a_hostile_form_body_still_reflects_and_never_raises():
+    """The end-to-end guarantee: whatever the body, the policy answers locally."""
+    request = _req(
+        "POST",
+        path="/v1/refunds",
+        body=("a" + "[b]" * 2000 + "=1").encode(),
+        content_type="application/x-www-form-urlencoded",
+    )
+    ans = _answer(request)
+    assert ans.answered_by == "fake-L0"
+    assert json.loads(ans.response.body)["id"].startswith("re_")
+
+
+# ---------------------------------------------------- the id the request already names (#26)
+
+
+@pytest.mark.parametrize(
+    ("path", "named", "operation", "object_name"),
+    [
+        ("/v1/customers/cus_REAL123", "cus_REAL123", "customers.update", "customer"),
+        (
+            "/v1/payment_intents/pi_REAL999/cancel",
+            "pi_REAL999",
+            "payment_intents.cancel",
+            "payment_intent",
+        ),
+    ],
+)
+def test_a_write_that_names_its_resource_echoes_that_id(path, named, operation, object_name):
+    """The live API answers an update or a cancel with the id it was given. Minting a fresh one
+    hands the agent an id for a resource that never existed, which it then logs or retrieves."""
+    request = _req("POST", path=path)
+    assert classify(request, SHIPPED).operation == operation
+    body = json.loads(_answer(request).response.body)
+    assert body["id"] == named
+    assert body["object"] == object_name
+
+
+def test_a_create_still_mints_every_id_it_names():
+    """A create posts to a collection, so it captures no path segment and the service mints."""
+    body = json.loads(_answer(_req("POST", path="/v1/refunds")).response.body)
+    assert re.fullmatch(r"re_[A-Za-z0-9]{24}", body["id"])
+    assert re.fullmatch(r"txn_[A-Za-z0-9]{24}", body["balance_transaction"])
+
+
+def test_a_captured_segment_that_is_not_this_ids_prefix_is_not_used():
+    """`named_id` matches on the id prefix, so an unrelated captured segment cannot become the
+    id. There is no such shipped route, so the case is built here rather than left untested."""
+    route = servicemap.Route(
+        method="POST",
+        path="/v1/widgets/{widget}/parts/{part}",
+        operation="widgets.attach",
+        kind="write",
+        ids={"id": "wid_"},
+    )
+    assert policy.named_id(route, "/v1/widgets/wid_1/parts/prt_9", "wid_") == "wid_1"
+    assert policy.named_id(route, "/v1/widgets/wid_1/parts/prt_9", "prt_") == "prt_9"
+    assert policy.named_id(route, "/v1/widgets/w1/parts/p9", "wid_") is None
+    assert policy.named_id(route, "/v1/widgets", "wid_") is None
+
+
+def test_every_shipped_write_route_that_names_ids_round_trips_or_mints():
+    """Across every shipped write route: a route with a `{…}` segment carrying an id prefix must
+    echo it, and one without must mint. This is what would have caught #26 when it shipped."""
+    for sm in SHIPPED.services:
+        for route in sm.routes:
+            for name, prefix in route.ids.items():
+                holes = [p for p in route.path.split("/") if p.startswith("{")]
+                if not holes:
+                    sample = route.path.replace("{", "").replace("}", "")
+                    assert policy.named_id(route, sample, prefix) is None, route.operation
+                    continue
+                # Only the LAST hole carries the prefix; every other one gets a segment that
+                # does not. Filling them all would make `named_id` match the first hole whatever
+                # it held, and the test would pass on a route whose id is in the wrong segment.
+                parts = route.path.split("/")
+                last = max(i for i, part in enumerate(parts) if part.startswith("{"))
+                filled = "/".join(
+                    (prefix + "SAMPLE" if i == last else "other-segment")
+                    if part.startswith("{")
+                    else part
+                    for i, part in enumerate(parts)
+                )
+                assert policy.named_id(route, filled, prefix) == prefix + "SAMPLE", (
+                    f"{sm.service}.{route.operation} does not echo the {name} its path names"
+                )
+
+
+# ------------------------------------- content types, literal bodies and one encode (#29)
+
+
+@pytest.mark.parametrize(
+    "ct",
+    [
+        "application/json",
+        "text/json",
+        "application/vnd.api+json",
+        "application/json-patch+json",
+    ],
+)
+def test_every_json_content_type_is_parsed(ct):
+    """Only the exact `application/json` was read before, so a `+json` body was indistinguishable
+    from a malformed one and reflected nothing."""
+    assert policy.reflect(_req(body=b'{"a": 1}', content_type=ct)) == {"a": 1}
+
+
+def test_a_slack_incoming_webhook_answers_the_literal_ok():
+    """A real incoming webhook answers the body `ok` as text/plain. The Web API envelope it got
+    instead breaks `assert resp.text == "ok"`, the common raw-requests idiom."""
+    ans = _answer(
+        _req(
+            "POST",
+            host="hooks.slack.com",
+            path="/services/T000/B000/xyz",
+            body=b'{"text": "hi"}',
+            content_type="application/json",
+        )
+    )
+    assert ans.response.body == b"ok"
+    assert dict(ans.response.headers)["content-type"] == "text/plain"
+    assert ans.answered_by == "fake-L0"
+    assert ans.flags == (policy.FIDELITY_L0_FLAG,)
+
+
+def test_the_web_api_still_gets_the_json_envelope():
+    """The literal body is keyed on `(service, operation)`, not on the host, so the rest of
+    `slack` is unaffected even though hooks.slack.com is part of the same service."""
+    ans = _answer(
+        _req(
+            "POST",
+            host="slack.com",
+            path="/api/chat.postMessage",
+            body=b"channel=C1",
+            content_type="application/x-www-form-urlencoded",
+        )
+    )
+    assert dict(ans.response.headers)["content-type"] == "application/json"
+    assert json.loads(ans.response.body)["ok"] is True
+
+
+def test_a_body_a_strict_json_parser_would_refuse_reflects_nothing():
+    """`_has_non_finite` replaced a throwaway serialization of the whole body; it must still keep
+    NaN and Infinity out, because it is what makes the single json.dumps unable to fail."""
+    for raw in [b'{"v": NaN}', b'{"v": Infinity}', b'{"v": -Infinity}', b'{"v": [1e400]}']:
+        assert policy.reflect(_req(body=raw, content_type="application/json")) == {}
+    assert policy.reflect(_req(body=b'{"v": 1.5}', content_type="application/json")) == {"v": 1.5}
+
+
+def test_the_body_is_serialized_exactly_once(monkeypatch):
+    """It used to be encoded twice - once inside reflect purely to validate it and throw away,
+    once in answer - and that second call was the only one outside the never-raise guard."""
+    calls = []
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return json.dumps(*args, **kwargs)
+
+    # Rebind the name `json` inside policy rather than mutating the shared stdlib module: the
+    # latter counts every json.dumps in the process, including ones classify or servicemap make,
+    # which turns this into a tripwire for whatever another batch adds to that path.
+    monkeypatch.setattr(policy, "json", SimpleNamespace(dumps=counting, loads=json.loads))
+    _answer(
+        _req(
+            "POST",
+            path="/v1/refunds",
+            body=b"charge=ch_test&amount=4900",
+            content_type="application/x-www-form-urlencoded",
+        )
+    )
+    assert calls == [1]
+
+
+def test_a_digit_keyed_metadata_field_stays_an_object():
+    """#27's failure class, one step along. `metadata[0]=zero` is the key "0", and the live API
+    answers `{"metadata": {"0": "zero"}}`. Promoted to a list, `refund.metadata["0"]` raises
+    TypeError instead of returning the value the caller itself just sent."""
+    assert policy.parse_form("metadata[0]=zero") == {"metadata": {"0": "zero"}}
+    assert policy.parse_form("metadata[0]=a&metadata[1]=b") == {"metadata": {"0": "a", "1": "b"}}
+    # Nested under another field, and mixed with a string key, it is the same field name.
+    assert policy.parse_form("a[metadata][0]=z") == {"a": {"metadata": {"0": "z"}}}
+    assert policy.parse_form("metadata[0]=z&metadata[k]=v") == {"metadata": {"0": "z", "k": "v"}}
+
+
+def test_a_real_array_field_is_still_promoted_to_a_list():
+    """The exemption is by field name, so the rule `metadata` opts out of still applies to
+    everything else: `expand[0]=a&expand[1]=b` is an array on the wire and a list in the echo."""
+    assert policy.parse_form("expand[0]=charge&expand[1]=customer") == {
+        "expand": ["charge", "customer"]
+    }
+    assert policy.parse_form("line_items[0][price]=p") == {"line_items": [{"price": "p"}]}

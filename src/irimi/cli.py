@@ -102,13 +102,19 @@ def cmd_maps_list(args: argparse.Namespace) -> int:
     # Exact hosts first, then the wildcard patterns. A pattern is printed because a map whose
     # hosts are all wildcards would otherwise not appear here at all; it is still not a
     # reverse-door allow-list entry (see MapIndex.hosts).
-    rows = [(host, index.by_host[host]) for host in sorted(index.hosts)]
-    rows += [(pattern, index.by_suffix[pattern[1:]]) for pattern in index.patterns]
+    hosts = sorted(index.hosts)
+    patterns = index.patterns
+    rows = [(host, index.by_host[host]) for host in hosts]
+    rows += [(pattern, index.by_suffix[pattern[1:]]) for pattern in patterns]
     width = max((len(name) for name, _ in rows), default=0)
     service_width = max((len(sm.service) for _, sm in rows), default=0)
     routes = sum(len(sm.routes) for sm in index.services)
+    # Hosts and patterns are counted separately: only the exact hosts are the reverse door's
+    # allow-list, and one number covering both told an operator a pattern host was reachable
+    # through the door when it 403s (#29).
     print(
-        f"irimi maps · {len(index.services)} service(s) · {len(rows)} host(s) · {routes} route(s)"
+        f"irimi maps · {len(index.services)} service(s) · {len(hosts)} host(s) · "
+        f"{len(patterns)} pattern(s) · {routes} route(s)"
     )
     for name, sm in rows:
         reads = " + reads" if sm.target_reads else ""

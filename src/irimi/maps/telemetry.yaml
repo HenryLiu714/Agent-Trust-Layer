@@ -5,15 +5,15 @@
 # the agent's own observability traffic is noise, and replaying it would re-emit someone else's
 # events (#9). It is counted in its own bucket in the run summary, not as a read or a write.
 #
-# **No document here sets `default_kind: telemetry`, and none may.** `ShadowPolicy` forwards
+# **No document here sets `default_kind: telemetry`, and none can.** `ShadowPolicy` forwards
 # `telemetry` live exactly like `read`, so a service-wide default would forward every unlisted
-# route on these hosts to the real API - which is what `_parse_default_kind` already refuses
-# `default_kind: read` for. It is not theoretical: five of these six vendors serve their REST
-# control plane from the same host as their intake, so `DELETE api.datadoghq.com/api/v1/dashboard/
-# {id}` was performed for real under `irimi shadow`, and the `_finish` telemetry guard kept it out
-# of the trace as well. Intake paths are listed route by route instead; anything unlisted falls to
-# the RFC fallback, so an unsafe method is faked and flagged `unclassified`. Adding a vendor means
-# adding its intake routes, never a default.
+# route on these hosts to the real API - which is why the loader now refuses a `default_kind`
+# naming any kind in `exchange.LIVE_KINDS`, `telemetry` included (#30). It is not theoretical: five
+# of these six vendors serve their REST control plane from the same host as their intake, so
+# `DELETE api.datadoghq.com/api/v1/dashboard/{id}` was performed for real under `irimi shadow`, and
+# the `_finish` telemetry guard kept it out of the trace as well. Intake paths are listed route by
+# route instead; anything unlisted falls to the RFC fallback, so an unsafe method is faked and
+# flagged `unclassified`. Adding a vendor means adding its intake routes, never a default.
 #
 # Several hosts here are wildcard patterns (`*.ingest.sentry.io`), because these vendors hand every
 # project its own subdomain. A pattern classifies traffic through the forward door only: it is not
@@ -82,7 +82,13 @@ version: 1
 service: sentry
 verbs: honest
 hosts:
+  # Sentry split ingest by region in 2024. A DSN issued since then is `o<org>.ingest.us.sentry.io`,
+  # which ends in `.ingest.us.sentry.io` and not in `.ingest.sentry.io`, so the legacy pattern
+  # misses it; both regions are listed rather than widening to `*.sentry.io`, because sentry.io is
+  # also the web app, whose REST control plane would then default to telemetry (#25, #30).
   - "*.ingest.sentry.io"
+  - "*.ingest.us.sentry.io"
+  - "*.ingest.de.sentry.io"
 routes:
   - match:
       method: POST
@@ -180,10 +186,10 @@ version: 1
 service: posthog
 verbs: honest
 hosts:
-  # Both patterns are here on purpose: the regional ingest hosts sit under `*.i.posthog.com`, which
-  # is the longer suffix and therefore the one that wins.
+  # One pattern covers the regional ingest hosts too: a pattern matches one *or more* leading
+  # labels, so `*.posthog.com` already matches `eu.i.posthog.com`. A second `*.i.posthog.com`
+  # resolved to this same map and matched nothing the shorter one missed (#29).
   - "*.posthog.com"
-  - "*.i.posthog.com"
 routes:
   - match:
       method: POST

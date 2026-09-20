@@ -471,10 +471,11 @@ def test_openai_inference_routes_are_llm(tmp_path, monkeypatch):
     assert cls.flags == ()
 
 
-def test_openai_models_is_llm_on_a_safe_method(tmp_path, monkeypatch):
-    """`kind: llm` on a GET is legal: `_check_route_rules` only constrains `kind: read`."""
+def test_openai_models_listing_is_a_read_not_llm(tmp_path, monkeypatch):
+    """A models listing is not inference. `llm` also opted the path out of the read overlay,
+    which the engine gates on `kind: read`, so it could never be overlaid either (#29)."""
     cls = _shipped(tmp_path, monkeypatch, "GET", "api.openai.com", "/v1/models")
-    assert (cls.operation, cls.kind) == ("models.list", "llm")
+    assert (cls.operation, cls.kind) == ("models.list", "read")
 
 
 def test_an_unlisted_openai_write_is_unknown_and_flagged(tmp_path, monkeypatch):
@@ -520,6 +521,36 @@ def test_a_sentry_project_subdomain_classifies_through_the_wildcard(tmp_path, mo
 def test_a_posthog_regional_host_classifies(tmp_path, monkeypatch):
     cls = _shipped(tmp_path, monkeypatch, "POST", "eu.i.posthog.com", "/batch/")
     assert (cls.service, cls.operation, cls.kind) == ("posthog", "batch.capture", "telemetry")
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["o4507.ingest.us.sentry.io", "o4507.ingest.de.sentry.io", "o0.ingest.sentry.io"],
+)
+def test_a_region_qualified_sentry_ingest_host_classifies(tmp_path, monkeypatch, host):
+    """Sentry split ingest by region in 2024. `*.ingest.sentry.io` misses `…ingest.us.sentry.io`
+    entirely, so every DSN issued in roughly the last two years classified as `unknown` and the
+    summary said `unclassified` where it should have said `telemetry` (#25)."""
+    cls = _shipped(tmp_path, monkeypatch, "POST", host, "/api/4507/envelope/")
+    assert (cls.service, cls.operation, cls.kind) == ("sentry", "envelope.send", "telemetry")
+    assert cls.flags == ()
+
+
+def test_the_sentry_web_app_is_not_claimed_by_the_ingest_map(tmp_path, monkeypatch):
+    """Why three ingest patterns and not one `*.sentry.io`: sentry.io is also the web app, whose
+    REST control plane would then inherit the telemetry service and be forwarded live (#25)."""
+    cls = _shipped(tmp_path, monkeypatch, "DELETE", "sentry.io", "/api/0/projects/acme/web/")
+    assert (cls.service, cls.kind) == ("sentry.io", "unknown")
+
+
+def test_one_posthog_pattern_covers_the_regional_ingest_hosts(tmp_path, monkeypatch):
+    """`*.posthog.com` matches one *or more* leading labels, so the second `*.i.posthog.com`
+    pattern resolved to the same map and matched nothing the shorter one missed (#29)."""
+    index = _index(tmp_path, monkeypatch)
+    assert index.by_suffix.get(".i.posthog.com") is None
+    for host in ("eu.i.posthog.com", "us.i.posthog.com", "eu.posthog.com"):
+        assert index.service_for(host) is not None, host
+        assert index.service_for(host).service == "posthog"
 
 
 def test_an_unlisted_telemetry_write_is_faked_not_forwarded(tmp_path, monkeypatch):

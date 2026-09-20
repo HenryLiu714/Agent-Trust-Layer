@@ -123,7 +123,7 @@ prints, and the id prefixes a fake response mints. The maps that ship with irimi
     irimi maps list
 
 ```
-irimi maps · 10 service(s) · 17 host(s) · 47 route(s)
+irimi maps · 10 service(s) · 12 host(s) · 6 pattern(s) · 47 route(s)
   api.anthropic.com        anthropic    2 routes  target: self
   api.honeycomb.io         honeycomb    2 routes  target: self
   api.openai.com           openai       4 routes  target: self
@@ -137,11 +137,16 @@ irimi maps · 10 service(s) · 17 host(s) · 47 route(s)
   meter-events.stripe.com  stripe      10 routes  target: self
   slack.com                slack       10 routes  target: self
   *.datadoghq.com          datadog      5 routes  target: self
-  *.i.posthog.com          posthog      4 routes  target: self
+  *.ingest.de.sentry.io    sentry       4 routes  target: self
   *.ingest.sentry.io       sentry       4 routes  target: self
+  *.ingest.us.sentry.io    sentry       4 routes  target: self
   *.langfuse.com           langfuse     2 routes  target: self
   *.posthog.com            posthog      4 routes  target: self
 ```
+
+Hosts and patterns are counted separately because only the exact hosts are the reverse door's
+allow-list. Sentry is listed three times: it split ingest by region in 2024, so a DSN issued since
+then is `o<org>.ingest.us.sentry.io`, which does not end in `.ingest.sentry.io`.
 
 Stripe, Slack (including `hooks.slack.com`), OpenAI, Anthropic and six telemetry backends —
 LangSmith, Langfuse, Sentry, Datadog, Honeycomb and PostHog — ship with a map today.
@@ -214,12 +219,13 @@ shipped map sets `default_kind`; the telemetry maps list their intake routes one
 ### `llm` and `telemetry`
 
 `llm` is a route kind in the OpenAI and Anthropic maps: `/v1/chat/completions`, `/v1/responses`,
-`/v1/embeddings`, `/v1/models`, `/v1/messages` and `/v1/messages/count_tokens` are forwarded live
-and counted in their own bucket in the run summary. Everything else on those hosts is deliberately
-unmapped, so an unlisted `POST` — `/v1/files`, `/v1/batches`, `/v1/fine_tuning/jobs` — reaches the
-fallback, is answered locally and is flagged `unclassified`. A `text/event-stream` response is
-streamed straight through to the client rather than buffered, so a streamed completion still
-arrives token by token; the recorded exchange then carries an empty body.
+`/v1/embeddings`, `/v1/messages` and `/v1/messages/count_tokens` are forwarded live and counted in
+their own bucket in the run summary. `GET /v1/models` is a plain `read`: a listing is not
+inference. Everything else on those hosts is deliberately unmapped, so an unlisted `POST` —
+`/v1/files`, `/v1/batches`, `/v1/fine_tuning/jobs` — reaches the fallback, is answered locally and
+is flagged `unclassified`. A `text/event-stream` response is streamed straight through to the
+client rather than buffered, so a streamed completion still arrives token by token; the recorded
+exchange then carries an empty body.
 
 `telemetry` is what the observability backends are classified as. It is forwarded live in every
 mode and is never written to the trace store: a recording of the agent's own tracing traffic is

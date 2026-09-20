@@ -34,6 +34,13 @@ ID_LENGTH = 24
 JSON_CT = "application/json"
 FORM_CT = "application/x-www-form-urlencoded"
 
+# One bracket segment of a form field name: the `[order_id]` of `metadata[order_id]`.
+_BRACKET = re.compile(r"\[([^\[\]]*)\]")
+# How deep a bracket path may nest before the key is kept flat instead. Stripe's deepest real key
+# is `line_items[0][price_data][product_data][name]`, four levels; a hostile body can otherwise
+# nest thousands, and unwinding one that deep is a RecursionError inside a mitmproxy hook.
+_MAX_FORM_DEPTH = 8
+
 # A form value that is a canonical decimal integer of at most 15 digits is echoed as a number:
 # stripe-python posts `amount=4900` and the agent that reads `refund.amount` wants 4900 back.
 # "007" and a 20-digit account number are not canonical, so they stay strings - coercing them
@@ -85,6 +92,90 @@ def _form_value(value: str) -> Any:
     return int(value) if _INTEGER.fullmatch(value) else value
 
 
+def _split_key(key: str) -> tuple[str, list[str]]:
+    """`metadata[order_id]` -> `("metadata", ["order_id"])`; `a[0][b]` -> `("a", ["0", "b"])`.
+
+    A key with no brackets, or bracketed in a shape we will not guess at - `a[b`, `a[b]c`,
+    `a[[b]]`, `a[]`, `[b]`, or more than `_MAX_FORM_DEPTH` levels - comes back with no segments
+    and stays flat. Echoing such a key unchanged is wrong in a small, visible way; guessing at its
+    structure is wrong in an unpredictable one.
+    """
+    head, bracket, rest = key.partition("[")
+    if not bracket or not head:
+        return key, []
+    tail = bracket + rest
+    segments = _BRACKET.findall(tail)
+    if not segments or len(segments) > _MAX_FORM_DEPTH or "" in segments:
+        return key, []
+    if "".join(f"[{s}]" for s in segments) != tail:
+        return key, []
+    return head, segments
+
+
+def _assign(node: dict[str, Any], segments: list[str], value: str) -> None:
+    """Walk the bracket path, creating a dict per level, and set the leaf to `value`.
+
+    The value stays a string. A Stripe metadata value is always a string on the live API, so
+    coercing `metadata[order_id]=6735` to an int hands back something other than what the caller
+    sent - the same reason `_INTEGER` refuses "007" (#27).
+    """
+    for segment in segments[:-1]:
+        child = node.get(segment)
+        if not isinstance(child, dict):
+            child = {}
+            node[segment] = child
+        node = child
+    node[segments[-1]] = value
+
+
+def _to_lists(node: Any) -> Any:
+    """Depth first, a dict whose keys are exactly `0`..`n-1` becomes a list.
+
+    Stripe form-encodes an array as `expand[0]=a&expand[1]=b` and the live API answers with a
+    JSON array. A gap, a repeat or an out-of-range index leaves it a dict: inventing the missing
+    elements would echo fields the caller never sent. The comparison is against canonical decimal
+    strings, so "007" and non-ASCII digits cannot reach it - `str.isdigit()` would let both in.
+    """
+    if not isinstance(node, dict):
+        return node
+    converted = {key: _to_lists(value) for key, value in node.items()}
+    if converted and set(converted) == {str(i) for i in range(len(converted))}:
+        return [converted[str(i)] for i in range(len(converted))]
+    return converted
+
+
+def parse_form(text: str) -> dict[str, Any]:
+    """A form body as the object the live API would answer with (#27).
+
+    Three rules, one per bug in the flat `dict(parse_qsl(...))` this replaces. A bracket-nested
+    key becomes a nested container, so `metadata[order_id]=6735` echoes `metadata` and an SDK can
+    read it. A value inside a bracket path stays a string. A repeated bare key collects into a
+    list instead of keeping only the last value.
+    """
+    root: dict[str, Any] = {}
+    bare: dict[str, list[Any]] = {}
+    for key, value in parse_qsl(text, keep_blank_values=True):
+        head, segments = _split_key(key)
+        if not segments:
+            # A bracketed spelling of the same name always wins, whichever order they arrive in:
+            # `a[0]=1&a=2` and `a=2&a[0]=1` both keep the structure, because structure surviving
+            # is the whole point of this function and a bare value cannot carry any.
+            if isinstance(root.get(head), dict):
+                continue
+            bare.setdefault(head, []).append(_form_value(value))
+            root.setdefault(head, None)  # hold the position; the value is filled in below
+            continue
+        node = root.get(head)
+        if not isinstance(node, dict):
+            node = {}
+            root[head] = node
+        bare.pop(head, None)
+        _assign(node, segments, value)
+    for head, values in bare.items():
+        root[head] = values[0] if len(values) == 1 else values
+    return {key: _to_lists(value) for key, value in root.items()}
+
+
 def reflect(request: Request) -> dict[str, Any]:
     """The request's own fields, as a JSON-serializable dict. Never raises.
 
@@ -103,8 +194,7 @@ def reflect(request: Request) -> dict[str, Any]:
             json.dumps(parsed, allow_nan=False)
             return parsed
         if ct == FORM_CT:
-            text = request.body.decode("utf-8", "replace")
-            return {k: _form_value(v) for k, v in parse_qsl(text, keep_blank_values=True)}
+            return parse_form(request.body.decode("utf-8", "replace"))
     except Exception:  # a malformed body reflects nothing; it must never reach the caller
         return {}
     return {}

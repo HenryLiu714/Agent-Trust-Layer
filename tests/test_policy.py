@@ -298,3 +298,102 @@ def test_stripe_python_parses_the_faked_refund():
     assert refund.object == "refund"
     assert refund.amount == 4900
     assert refund.charge == "ch_test"
+
+
+# ------------------------------------------------- form bodies with structure in them (#27)
+
+
+def test_a_bracket_nested_form_field_becomes_a_nested_object():
+    """stripe-python posts `metadata[order_id]=6735`; the live API always answers with
+    `metadata`. Flat, `Refund.metadata` raised AttributeError - the bar policy.py sets itself."""
+    body = policy.parse_form("charge=ch_test&amount=4900&metadata[order_id]=6735")
+    assert body == {"charge": "ch_test", "amount": 4900, "metadata": {"order_id": "6735"}}
+
+
+def test_a_value_inside_a_bracket_path_stays_a_string():
+    """A Stripe metadata value is always a string on the live API."""
+    assert policy.parse_form("metadata[n]=6735")["metadata"]["n"] == "6735"
+    assert policy.parse_form("n=6735")["n"] == 6735
+
+
+def test_a_repeated_bare_key_collects_into_a_list():
+    """`requests.post(data={"tags": ["a", "b"]})` and `urlencode(doseq=True)` both send these."""
+    assert policy.parse_form("tags=a&tags=b&tags=c") == {"tags": ["a", "b", "c"]}
+    assert policy.parse_form("tags=a") == {"tags": "a"}
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("expand[0]=a&expand[1]=b", {"expand": ["a", "b"]}),
+        ("i[0][price]=p1&i[1][price]=p2", {"i": [{"price": "p1"}, {"price": "p2"}]}),
+        ("a[b][c]=1", {"a": {"b": {"c": "1"}}}),
+        ("x[1]=only", {"x": {"1": "only"}}),  # a gap stays a dict; nothing is invented
+        ("x[0]=a&x[2]=c", {"x": {"0": "a", "2": "c"}}),
+        ("x[007]=a", {"x": {"007": "a"}}),  # not a canonical index, so not a list
+    ],
+)
+def test_an_indexed_form_key_becomes_a_list_only_when_the_indices_are_complete(text, expected):
+    assert policy.parse_form(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("a[b", {"a[b": ""}),
+        ("a[b]c", {"a[b]c": ""}),
+        ("a[[b]]", {"a[[b]]": ""}),
+        ("a[]=1", {"a[]": 1}),
+        ("[b]=1", {"[b]": 1}),
+    ],
+)
+def test_a_bracket_shape_we_will_not_guess_at_stays_flat(text, expected):
+    """Echoing an odd key unchanged is wrong in a small, visible way; guessing is worse. The
+    whole dict is asserted: a membership check here would pass on an empty result too."""
+    assert policy.parse_form(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text", ["a=2&a[0]=1", "a[0]=1&a=2", "a[0]=1&a=2&a[1]=3", "a=2&a[0]=1&a=9"]
+)
+def test_a_bracketed_key_beats_a_bare_one_in_either_order(text):
+    """The same name spelled both ways is nonsense input, but it must not be order-dependent:
+    structure surviving is what #27 is about, and a bare value cannot carry any."""
+    result = policy.parse_form(text)
+    assert isinstance(result["a"], list), result
+    assert "1" in result["a"]
+
+
+def _nest(depth: int):
+    node: object = "1"
+    for _ in range(depth):
+        node = {"b": node}
+    return node
+
+
+def test_a_bracket_path_deeper_than_the_cap_stays_flat():
+    """Unwinding a thousand-level nest is a RecursionError inside a mitmproxy hook, and a hook
+    that raises forwards the flow - which for a write means it escapes shadow mode. The cap is
+    twice Stripe's deepest real key, `line_items[0][price_data][product_data][name]`."""
+    deep = "a" + "[b]" * policy._MAX_FORM_DEPTH
+    assert policy.parse_form(deep + "=1") == {"a": _nest(policy._MAX_FORM_DEPTH)}
+    too_deep = "a" + "[b]" * (policy._MAX_FORM_DEPTH + 1)
+    assert policy.parse_form(too_deep + "=1") == {too_deep: 1}  # flat, so int-coerced
+
+
+def test_parse_form_never_raises_on_hostile_input():
+    for text in ["[" * 5000, "a" + "[b]" * 2000 + "=1", "=", "&&&", "a=%%%", "a[0]=1&a=2"]:
+        assert isinstance(policy.parse_form(text), dict)
+
+
+def test_a_hostile_form_body_still_reflects_and_never_raises():
+    """The end-to-end guarantee: whatever the body, the policy answers locally."""
+    request = _req(
+        "POST",
+        path="/v1/refunds",
+        body=("a" + "[b]" * 2000 + "=1").encode(),
+        content_type="application/x-www-form-urlencoded",
+    )
+    ans = _answer(request)
+    assert ans.answered_by == "fake-L0"
+    assert json.loads(ans.response.body)["id"].startswith("re_")

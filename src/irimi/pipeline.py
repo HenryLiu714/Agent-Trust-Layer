@@ -136,6 +136,21 @@ def is_loopback(address: str) -> bool:
         return False
 
 
+def is_local_target(url: str) -> bool:
+    """True when this answer target names loopback. Anything unparseable is not local.
+
+    One spelling of the question, because three surfaces ask it: `policy.delegate` refuses a
+    non-loopback target on a credential-path host, and the banner and `irimi maps list` paint a
+    non-loopback target red. Three copies would drift, and the one that drifts is the one that
+    lets a credential off the machine.
+    """
+    try:
+        host = urlsplit(url).hostname or ""
+    except ValueError:
+        return False
+    return host == "localhost" or is_loopback(host)
+
+
 def rewrite_reverse(request: Request, allowed_hosts: frozenset[str]) -> Request:
     """`/<host>[:<port>]/<rest>` on the listener becomes `https://<host>[:<port>]/<rest>`.
 

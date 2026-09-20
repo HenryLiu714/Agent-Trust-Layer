@@ -19,13 +19,13 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl
 
 from irimi.exchange import LIVE_KINDS, AnsweredBy, Request, Response
 from irimi.pipeline import (
     FIDELITY_DELEGATED_FLAG,
     Classification,
-    is_loopback,
+    is_local_target,
     target_url,
 )
 from irimi.servicemap import (
@@ -120,7 +120,7 @@ def delegate(request: Request, classification: Classification) -> ForwardTo | No
     # front of us, so a target that reaches here some other way - a layer added later, a map
     # built in code, a future flag - inherits the rule instead of escaping it. On this host the
     # path IS the credential, for every path and not only the ones a map lists.
-    if request.host in CREDENTIAL_PATH_HOSTS and not _is_local(url):
+    if request.host in CREDENTIAL_PATH_HOSTS and not is_local_target(url):
         logger.error(
             "irimi: refusing to delegate %s to %s: the request path is the credential on %s, "
             "so its answer target must be loopback",
@@ -130,15 +130,6 @@ def delegate(request: Request, classification: Classification) -> ForwardTo | No
         )
         return None
     return ForwardTo(url=url, forward_auth=forward_auth)
-
-
-def _is_local(url: str) -> bool:
-    """True when this URL names loopback. Anything unparseable is not local."""
-    try:
-        host = urlsplit(url).hostname or ""
-    except Exception:
-        return False
-    return host == "localhost" or is_loopback(host)
 
 
 def mint_id(prefix: str) -> str:

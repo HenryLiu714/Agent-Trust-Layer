@@ -235,11 +235,13 @@ def test_a_delegated_read_route_says_reads():
 def test_a_target_that_is_not_loopback_says_so_and_is_red_only_when_asked():
     """--allow-target-host is how a target stops being loopback, and the line has to say it."""
     index = _index(_service(target="http://stub.example:3000"))
-    (plain,) = delegated_lines(index)
-    assert "NOT loopback" in plain
-    assert "\033[" not in plain
-    (coloured,) = delegated_lines(index, color=True)
-    assert coloured.startswith("\033[31m") and coloured.endswith("\033[0m")
+    plain, notice = delegated_lines(index)
+    assert "NOT loopback" in notice
+    assert all("\033[" not in line for line in (plain, notice))
+    assert all(len(line) <= 100 for line in (plain, notice))
+    coloured = delegated_lines(index, color=True)
+    assert len(coloured) == 2
+    assert all(c.startswith("\033[31m") and c.endswith("\033[0m") for c in coloured)
 
 
 def test_a_loopback_target_is_never_painted_red():

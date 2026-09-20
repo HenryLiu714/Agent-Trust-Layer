@@ -28,6 +28,7 @@ BACKSTOP_NOTICE = f"backstop: {BACKSTOP}"
 # A delegated service or route: the banner has to say that a *routed* host may not be live either.
 DELEGATED_PREFIX = "delegated:"
 NOT_LOOPBACK_NOTICE = "NOT loopback - these requests leave this machine"
+NOT_LOOPBACK_INDENT = " " * len(f"{DELEGATED_PREFIX} ")
 RED = "\033[31m"
 RESET = "\033[0m"
 
@@ -98,21 +99,29 @@ def delegated_lines(index: MapIndex, color: bool = False) -> list[str]:
             continue
         if sm.target != SELF_TARGET:
             scope = "reads + writes" if sm.target_reads else "writes"
-            lines.append(_delegated_line(sm.service, sm.target, scope, color))
+            lines.extend(_delegated_line(sm.service, sm.target, scope, color))
         for route in sm.routes:
             if route.target != SELF_TARGET:
                 what = f"{sm.service} {route.method} {route.path}"
                 scope = "reads" if route.kind == "read" else "writes"
-                lines.append(_delegated_line(what, route.target, scope, color))
+                lines.extend(_delegated_line(what, route.target, scope, color))
     return lines
 
 
-def _delegated_line(what: str, target: str, scope: str, color: bool) -> str:
+def _delegated_line(what: str, target: str, scope: str, color: bool) -> list[str]:
+    """The line for one delegated service or route, plus the warning line a non-loopback one owes.
+
+    The warning is its own line rather than a tail on the first: a target long enough to be worth
+    warning about is long enough that the two together wrap at 100 columns, and a wrapped warning
+    is the one a reader skims past.
+    """
     line = f"{DELEGATED_PREFIX} {what} → {target} ({scope})"
     if is_local_target(target):
-        return line
-    line = f"{line}  {NOT_LOOPBACK_NOTICE}"
-    return f"{RED}{line}{RESET}" if color else line
+        return [line]
+    notice = f"{NOT_LOOPBACK_INDENT}{NOT_LOOPBACK_NOTICE}"
+    if color:
+        return [f"{RED}{line}{RESET}", f"{RED}{notice}{RESET}"]
+    return [line, notice]
 
 
 def exchange_line(exchange: Exchange) -> str:

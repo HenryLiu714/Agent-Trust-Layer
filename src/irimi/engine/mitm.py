@@ -282,6 +282,13 @@ class IrimiAddon:
             return
         if pending.answered_by not in ("live", "delegated"):  # a synthesized answer has no upstream
             return
+        stamp = pipeline.answered_by_header(pending.answered_by)
+        if stamp is not None:
+            # `respond` stamps every other answer, but the `response` hook is too late for a
+            # streamed one: mitmproxy has already sent these headers by the time it runs, so the
+            # rebuilt response never reaches the client. Here they have not gone out yet, so a
+            # streamed delegated answer says who answered it like every other one (#12, #28).
+            flow.response.headers[pipeline.ANSWERED_BY_HEADER] = stamp
         if _is_event_stream(flow.response.headers.get("content-type", "")):
             flow.response.stream = True
 

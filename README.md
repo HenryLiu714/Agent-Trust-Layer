@@ -70,8 +70,30 @@ passed through.
 
     uv run irimi shadow -- python agent.py
 
-Every exchange prints as one line while it runs; at the end you get a count of what was forwarded
-live and what was virtualized. The child is given `HTTP_PROXY`, `HTTPS_PROXY`,
+Every exchange prints as one line while it runs; at the end you get the run's summary:
+
+    irimi shadow · run 7f3a · 9 exchanges · 2.3s · backstop: none (Phase 4)
+
+      api.openai.com     1 llm
+      api.stripe.com     2 reads  2 writes intercepted
+      slack.com          1 write intercepted (1 delegated)
+      telemetry          2 exchanges to 2 hosts, forwarded live
+
+      ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L0)
+      ○ post to #refunds: "Refunded $49.00" → http://127.0.0.1:3111/post  unvalidated (delegated)
+
+      9 exchanges · 5 live · 1 delegated · 3 virtualized
+      These writes did not reach slack, stripe.
+      1 was delegated to http://127.0.0.1:3111/post.
+
+`live` means forwarded to the real service — reads, inference and telemetry alike; `delegated`
+means an answer target answered it; `virtualized` means irimi did. Each intercepted write gets a
+line of its own, written from its route's `human:` template with this request's own fields in it.
+Amounts are formatted from minor units using the currency **the request carried**; a body that
+names no currency keeps the number it sent, because dividing by 100 without knowing the currency
+would print `¥49.00` for a 4900-yen refund.
+
+The child is given `HTTP_PROXY`, `HTTPS_PROXY`,
 `NO_PROXY=localhost,127.0.0.1`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`,
 `NODE_EXTRA_CA_CERTS`, `NODE_USE_ENV_PROXY=1`, plus `IRIMI_ENGINE_ACTIVE=1` and `IRIMI_RUN` naming
 the run. That covers requests, httpx, urllib, curl and Node's fetch without any code change.

@@ -55,7 +55,13 @@ def _exchange(
 FORM = "application/x-www-form-urlencoded"
 
 
-def _refund(answered_by="fake-L0", body=b"charge=ch_3QabcXYZ&amount=4900&currency=usd", target=""):
+def _refund(
+    answered_by="fake-L0",
+    body=b"charge=ch_3QabcXYZ&amount=4900&currency=usd",
+    target="",
+    flags=(),
+    status=200,
+):
     return _exchange(
         method="POST",
         kind="write",
@@ -64,6 +70,19 @@ def _refund(answered_by="fake-L0", body=b"charge=ch_3QabcXYZ&amount=4900&currenc
         body=body,
         content_type=FORM,
         target=target,
+        flags=flags,
+        status=status,
+    )
+
+
+def _unreachable(target="http://127.0.0.1:3999/refund"):
+    """A delegated write whose target could not be dialled: `IrimiAddon.error` records it with no
+    response and the `target-failed` flag, exactly as a stub that is not running produces."""
+    return _refund(
+        answered_by="delegated",
+        target=target,
+        flags=("fidelity:delegated", "target-failed"),
+        status=None,
     )
 
 
@@ -422,6 +441,52 @@ def test_the_closing_lines_say_where_a_delegated_write_went():
     lines = summary_lines("7f3a", rows, 0.0, _maps())
     assert lines[-2] == "  These writes did not reach stripe."
     assert lines[-1] == "  1 was delegated to http://127.0.0.1:3000/refund."
+
+
+def test_a_write_whose_target_was_never_reached_is_not_counted_as_delegated():
+    """The host line said `1 delegated` for a write no stub ever saw, which reads as a working
+    delegation when the developer's stub was simply not running."""
+    line = _block(summary_lines("7f3a", [_unreachable()], 0.0, _maps()), "api.stripe.com")
+    assert line == "  api.stripe.com  1 write intercepted (1 target unreachable)"
+
+
+def test_a_delegated_write_and_an_unreachable_one_are_counted_apart():
+    rows = [_refund(answered_by="delegated", target="http://127.0.0.1:3000/refund"), _unreachable()]
+    assert _block(summary_lines("7f3a", rows, 0.0, _maps()), "api.stripe.com") == (
+        "  api.stripe.com  2 writes intercepted (1 delegated, 1 target unreachable)"
+    )
+
+
+def test_an_unreachable_target_says_the_write_was_not_answered_at_all():
+    lines = summary_lines("7f3a", [_unreachable()], 0.0, _maps())
+    assert (
+        "  ○ refund $49.00 on ch_3QabcXYZ → http://127.0.0.1:3999/refund  "
+        "unanswered (target unreachable)" in lines
+    )
+
+
+def test_the_closing_lines_never_claim_an_unreachable_target_answered():
+    lines = summary_lines("7f3a", [_unreachable()], 0.0, _maps())
+    assert lines[-2] == "  These writes did not reach stripe."
+    assert lines[-1] == (
+        "  1 was not answered at all: http://127.0.0.1:3999/refund could not be reached, "
+        "and the agent got a 502."
+    )
+    assert not any("delegated to" in line for line in lines)
+
+
+def test_a_delegated_write_and_an_unreachable_one_each_get_their_own_sentence():
+    rows = [_refund(answered_by="delegated", target="http://127.0.0.1:3000/refund"), _unreachable()]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert lines[-3] == "  These writes did not reach stripe."
+    assert lines[-2] == "  1 was delegated to http://127.0.0.1:3000/refund."
+    assert lines[-1].startswith("  1 was not answered at all:")
+
+
+def test_two_unreachable_writes_read_as_were():
+    assert summary_lines("7f3a", [_unreachable()] * 2, 0.0, _maps())[-1].startswith(
+        "  2 were not answered at all:"
+    )
 
 
 def test_two_delegated_writes_read_as_were():

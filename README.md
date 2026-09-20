@@ -336,7 +336,16 @@ refused rather than let through:
 An **unreachable target is a `502`** flagged `target-failed`, never a silent fall back to the fake:
 that would hide a broken setup and look exactly like a working run. The body is JSON when irimi
 refuses the target itself; when the target simply is not listening, the `502` is the proxy's own
-and the exchange is what carries `target-failed`.
+and the exchange is what carries `target-failed`. The summary says so too, and never calls such a
+write delegated — a stub that was not running answered nothing:
+
+      api.stripe.com  1 write intercepted (1 target unreachable)
+
+      ○ refund $49.00 on ch_3QabcXYZ → http://127.0.0.1:3111/post  unanswered (target unreachable)
+
+      These writes did not reach stripe.
+      1 was not answered at all: http://127.0.0.1:3111/post could not be reached, and the agent
+      got a 502.
 
 Loading happens before the proxy starts, and a map, overrides file or `--target` the loader refuses
 stops `serve` and `shadow` with the rule it broke on stderr.

@@ -12,7 +12,7 @@ from pathlib import Path
 
 from irimi.engine import Engine, EngineStartError
 from irimi.exchange import Exchange
-from irimi.pipeline import is_local_target
+from irimi.pipeline import TARGET_FAILED_FLAG, is_local_target
 from irimi.policy import reflect
 from irimi.servicemap import SELF_TARGET, MapIndex, Route, is_delegated, path_params
 
@@ -143,6 +143,11 @@ INTERCEPTED_KINDS: frozenset[str] = frozenset({"write", "unknown"})
 
 WRITE_MARKER = "○"
 DID_NOT_HAPPEN = "These writes did not happen."
+# A delegated write whose target never answered. It is neither delegated nor faked: nothing
+# answered it at all, and the agent got a 502. Saying "delegated" for it would be the same
+# class of lie as counting a delegated read as live (#20) - the summary would show a write
+# safely handled by the stub when the stub was not running.
+TARGET_UNREACHABLE = "target unreachable"
 
 # Currencies with no minor unit: ¥4900 is four thousand nine hundred yen, not ¥49.00. Stripe's
 # own zero-decimal list, which is the one the amounts in these bodies are denominated in.
@@ -234,6 +239,16 @@ def _is_intercepted(exchange: Exchange) -> bool:
     return exchange.kind in INTERCEPTED_KINDS and exchange.answered_by != "live"
 
 
+def _reached_target(exchange: Exchange) -> bool:
+    """A write an answer target actually answered, as opposed to one whose target was never
+    reached. `IrimiAddon.error` flags the second `target-failed` and records no response."""
+    return exchange.answered_by == "delegated" and TARGET_FAILED_FLAG not in exchange.flags
+
+
+def _failed_target(exchange: Exchange) -> bool:
+    return TARGET_FAILED_FLAG in exchange.flags
+
+
 def _host_line(host: str, rows: Sequence[Exchange], width: int) -> str:
     """One host's counts, in the order a reader asks them: what was real, then what was not."""
     phrases: list[str] = []
@@ -252,11 +267,14 @@ def _host_line(host: str, rows: Sequence[Exchange], width: int) -> str:
     if writes:
         detail = []
         unclassified = sum(1 for ex in writes if ex.kind == "unknown")
-        delegated = sum(1 for ex in writes if ex.answered_by == "delegated")
+        delegated = sum(1 for ex in writes if _reached_target(ex))
+        unreachable = sum(1 for ex in writes if _failed_target(ex))
         if unclassified:
             detail.append(f"{unclassified} unclassified")
         if delegated:
             detail.append(f"{delegated} delegated")
+        if unreachable:
+            detail.append(f"{unreachable} {TARGET_UNREACHABLE}")
         suffix = f" ({', '.join(detail)})" if detail else ""
         phrases.append(f"{_plural(len(writes), 'write')} intercepted{suffix}")
     return f"  {host:<{width}}  {'  '.join(phrases)}".rstrip()
@@ -303,6 +321,8 @@ def _write_line(exchange: Exchange, index: MapIndex | None) -> str:
         what = f"{exchange.request.method} {exchange.request.host}{exchange.request.path}"
     if exchange.answered_by == "delegated":
         what = f"{what} → {exchange.target}"
+    if _failed_target(exchange):
+        return f"  {WRITE_MARKER} {what}  unanswered ({TARGET_UNREACHABLE})"
     label = "unclassified" if exchange.kind == "unknown" else "unvalidated"
     fidelity = "delegated" if exchange.answered_by == "delegated" else "L0"
     return f"  {WRITE_MARKER} {what}  {label} ({fidelity})"
@@ -313,19 +333,32 @@ def _closing_lines(writes: Sequence[Exchange]) -> list[str]:
 
     Nothing intercepted, nothing to claim: a run that only read gets no closing line rather than
     a sentence about writes it never saw.
+
+    A write whose target could not be reached gets its own sentence rather than joining the
+    delegated ones. `These writes did not reach stripe` stays true either way, but `1 was
+    delegated to <target>` would claim a stub answered a write no stub ever saw, and the run
+    would read as a working delegation while the developer's stub was not running at all.
     """
     if not writes:
         return []
-    delegated = [ex for ex in writes if ex.answered_by == "delegated"]
-    if not delegated:
+    delegated = [ex for ex in writes if _reached_target(ex)]
+    unreachable = [ex for ex in writes if _failed_target(ex)]
+    if not delegated and not unreachable:
         return [f"  {DID_NOT_HAPPEN}"]
     services = ", ".join(sorted({ex.service for ex in writes}))
-    targets = ", ".join(sorted({ex.target for ex in delegated}))
-    verb = "was" if len(delegated) == 1 else "were"
-    return [
-        f"  These writes did not reach {services}.",
-        f"  {len(delegated)} {verb} delegated to {targets}.",
-    ]
+    lines = [f"  These writes did not reach {services}."]
+    if delegated:
+        targets = ", ".join(sorted({ex.target for ex in delegated}))
+        verb = "was" if len(delegated) == 1 else "were"
+        lines.append(f"  {len(delegated)} {verb} delegated to {targets}.")
+    if unreachable:
+        targets = ", ".join(sorted({ex.target for ex in unreachable}))
+        verb = "was" if len(unreachable) == 1 else "were"
+        lines.append(
+            f"  {len(unreachable)} {verb} not answered at all: {targets} could not be "
+            "reached, and the agent got a 502."
+        )
+    return lines
 
 
 def summary_lines(

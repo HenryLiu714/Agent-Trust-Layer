@@ -15,6 +15,7 @@ import math
 import re
 import secrets
 import string
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -344,16 +345,45 @@ def l0_body(request: Request, route: Route | None) -> dict[str, Any]:
     return body
 
 
+# The last `ts` slack_ts handed out, as (seconds, sub-second counter). Guarded by a lock: the
+# hooks run on the proxy's event loop today, but `mint_id` is the only other minting function here
+# and it is thread-safe by construction, so this one says so too rather than resting on that.
+_last_slack_ts: tuple[int, int] = (0, 0)
+_slack_ts_lock = threading.Lock()
+
+
+def slack_ts() -> str:
+    """A Slack `ts`: seconds, a dot, and six digits. Distinct and increasing for the whole run.
+
+    Slack uses `ts` as a message's identifier and as `thread_ts`, so two messages sharing one is
+    two messages that are the same message - an agent that posts twice in a second and then
+    replies in a thread addresses whichever of them it collided with. Drawing the sub-second part
+    at random gave 181,346 distinct values in 200,000 draws (#29).
+
+    A counter rather than a wider random draw, because distinctness is only half of it: real `ts`
+    values increase with time, and code that sorts a transcript by `ts` or asks "is this reply
+    after that message" reads the same answer here as it would from Slack. The counter carries
+    into the next second if a run ever posts more than a million messages inside one.
+    """
+    global _last_slack_ts
+    with _slack_ts_lock:
+        seconds, counter = int(time.time()), 0
+        last_seconds, last_counter = _last_slack_ts
+        if seconds <= last_seconds:
+            seconds, counter = last_seconds, last_counter + 1
+        if counter > 999_999:
+            seconds, counter = seconds + 1, 0
+        _last_slack_ts = (seconds, counter)
+    return f"{seconds}.{counter:06d}"
+
+
 def slack_body(fields: dict[str, Any]) -> dict[str, Any]:
     """Slack's own envelope. slack_sdk raises SlackApiError on any body without `ok: true`.
 
     It replaces the generic body rather than extending it: a Slack response carries no `created`
     and no `object`, and an SDK that sees them would be reading fields the real API never sends.
     """
-    body: dict[str, Any] = {
-        "ok": True,
-        "ts": f"{int(time.time())}.{secrets.randbelow(1_000_000):06d}",
-    }
+    body: dict[str, Any] = {"ok": True, "ts": slack_ts()}
     if "channel" in fields:
         body["channel"] = fields["channel"]
     return body

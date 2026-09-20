@@ -135,6 +135,28 @@ def test_slack_write_gets_slacks_own_envelope():
     assert "text" not in body  # the envelope replaces the echo, it does not extend it
 
 
+def test_two_slack_writes_in_the_same_second_get_different_timestamps():
+    """Slack uses `ts` as a message's identifier and as `thread_ts`, so a collision is two
+    messages that are the same message. The random six digits collided 9% of the time in 200,000
+    draws (#29); they are a counter now, so a run can post a million messages a second before one
+    repeats."""
+    seen = [policy.slack_ts() for _ in range(5_000)]
+    assert len(set(seen)) == len(seen)
+    # And increasing, because that is the other half of what a `ts` means: real ones sort by time,
+    # so code that orders a transcript by `ts` reads the same answer here as it would from Slack.
+    assert [float(ts) for ts in seen] == sorted(float(ts) for ts in seen)
+    assert all(re.fullmatch(r"\d+\.\d{6}", ts) for ts in seen)
+
+
+def test_a_slack_timestamp_still_names_the_current_second(monkeypatch):
+    """The counter must not drift off the clock: a `ts` is a real epoch time, and an SDK that
+    renders one as a date has to get today."""
+    monkeypatch.setattr(policy, "_last_slack_ts", (0, 0))
+    monkeypatch.setattr(policy.time, "time", lambda: 1_700_000_000.9)
+    assert policy.slack_ts() == "1700000000.000000"
+    assert policy.slack_ts() == "1700000000.000001"
+
+
 def test_slack_write_reads_the_json_body_slack_sdk_actually_posts():
     """slack_sdk 3.x sends `application/json;charset=utf-8`, not a form - so parse both."""
     ans = _answer(

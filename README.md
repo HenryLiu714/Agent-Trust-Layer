@@ -384,6 +384,14 @@ The read still goes to Stripe and returns your real test-mode charges; the POST 
 answered locally with the L0 echo, so the agent prints a minted `re_...` id that no refund on
 Stripe will ever have. Re-read the charge afterwards and it carries no refund.
 
+`tests/test_phase_exit.py` is that run, automated. Its first test needs no key and no network: it
+drives both doors with the wire shapes the two SDKs produce, and asserts the refund was answered by
+irimi, that the echo carries a minted `re_` id, that nothing on the other side was ever asked to do
+anything, and that the summary says so. Its second test is the live version above — it runs the
+agent itself and re-reads the charge from Stripe — and it skips unless you give it a key:
+
+    STRIPE_API_KEY=sk_test_... uv run --with stripe pytest -q -rs tests/test_phase_exit.py
+
 The agent points `stripe.api_base` at the reverse door only when `IRIMI_ENGINE_ACTIVE=1`, and reads
 the port from `HTTPS_PROXY`, so `--port` works and a bare run is unaffected. Set `SLACK_BOT_TOKEN`
 and `SLACK_CHANNEL` (and add `--with slack_sdk`) to have it post the result to Slack as well;

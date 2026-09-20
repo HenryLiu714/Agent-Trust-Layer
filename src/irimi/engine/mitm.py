@@ -1,9 +1,11 @@
 """mitmproxy-backed Engine. The only module allowed to import mitmproxy."""
 
 import asyncio
+import json
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from mitmproxy import ctx, http
 from mitmproxy.addons import default_addons
@@ -12,9 +14,9 @@ from mitmproxy.options import Options
 
 from irimi import ca, pipeline
 from irimi.engine import EngineConfig, EngineStartError, OnExchange
-from irimi.exchange import AnsweredBy, Door, Exchange, Headers, Request, Response
+from irimi.exchange import LIVE_KINDS, AnsweredBy, Door, Exchange, Headers, Request, Response
 from irimi.overlay import Overlay
-from irimi.policy import AnswerPolicy
+from irimi.policy import AnswerPolicy, ForwardTo
 from irimi.store import TraceStore
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,24 @@ class _Pending:
     answered_by: AnsweredBy
     door: Door
     flags: tuple[str, ...]  # what the policy attached to its answer, e.g. fidelity:L0
+    target: str = ""  # the answer target this flow was pointed at; "" when irimi answered it
+
+
+def _target_failed(reason: str) -> Response:
+    """The answer when a target cannot be dialled. Never a silent fall back to the local fake,
+    which would hide a broken setup and look like a working shadow run (design D20)."""
+    body = json.dumps(
+        {"error": {"type": "irimi_target_failed", "message": reason}}, allow_nan=False
+    ).encode()
+    return Response(status=502, headers=(("content-type", "application/json"),), body=body)
+
+
+def _decision_failed(reason: str) -> Response:
+    """The answer when the classify/answer decision itself raised. See `IrimiAddon.request`."""
+    body = json.dumps(
+        {"error": {"type": "irimi_decision_failed", "message": reason}}, allow_nan=False
+    ).encode()
+    return Response(status=502, headers=(("content-type", "application/json"),), body=body)
 
 
 def _headers_from_fields(fields: Sequence[tuple[bytes, bytes]]) -> Headers:
@@ -133,12 +153,101 @@ class IrimiAddon:
                 )
                 flow.response = http.Response.make(400, b"irimi: could not rewrite request\n")
                 return
-        cls = pipeline.classify(req, self.config.maps)
-        run_id = pipeline.attribute_run(req, self.config.run_id)
-        ans = self.policy.answer(req, cls)
-        flow.metadata[META_KEY] = _Pending(req, cls, run_id, ans.answered_by, door, ans.flags)
-        if ans.response is not None:
-            flow.response = _to_mitm_response(ans.response)
+        # THE NEVER-RAISE RULE, stated once for the whole decision rather than per call site.
+        #
+        # mitmproxy forwards a flow untouched when a hook raises. Every statement between here
+        # and `flow.metadata[META_KEY] = ...` decides whether this request reaches the real
+        # service, so a raise anywhere in it sends the agent's request - a write included - to
+        # production, and `_Pending` is never set, so `response()` returns early and no Exchange
+        # is recorded either. The write is performed for real AND is invisible in the trace.
+        #
+        # So the decision fails closed as a whole: any exception answers locally with a 502 and
+        # the `decision-failed` flag, and nothing is forwarded. Individual pieces still guard
+        # themselves where they can say something more useful (`_to_target` below names the
+        # target it could not apply); this is the backstop that makes the rule hold for pieces
+        # that do not, and for every piece added later - #12, #13 and #20 all extend this path.
+        try:
+            cls = pipeline.classify(req, self.config.maps)
+            run_id = pipeline.attribute_run(req, self.config.run_id)
+            ans = self.policy.answer(req, cls)
+        except Exception as exc:
+            # Recorded, not just refused. A write that vanishes from the trace is the other half
+            # of this bug: #13's "log of every write" has to show the one irimi could not decide
+            # about, and `unknown` + `unclassified` is the honest classification for it.
+            logger.exception("irimi: answering locally; the decision raised")
+            response = _decision_failed(f"irimi could not decide how to answer this request: {exc}")
+            flow.response = _to_mitm_response(response)
+            self._finish(
+                pipeline.annotate(
+                    req,
+                    response,
+                    pipeline.Classification(
+                        service=req.host,
+                        operation="",
+                        kind="unknown",
+                        flags=(pipeline.UNCLASSIFIED_FLAG,),
+                    ),
+                    "fake-L0",
+                    pipeline.attribute_run(req, self.config.run_id),
+                    extra_flags=(pipeline.DECISION_FAILED_FLAG,),
+                    door=door,
+                )
+            )
+            return
+        response, flags, target = ans.response, ans.flags, ""
+        if ans.forward_to is not None:
+            target = ans.forward_to.url
+            try:
+                self._to_target(flow, req, ans.forward_to)
+            except pipeline.TargetRefused as exc:
+                logger.warning("irimi: %s", exc)
+                response, flags = _target_failed(str(exc)), flags + (pipeline.TARGET_FAILED_FLAG,)
+            except Exception as exc:  # never fail open: an unrewritten flow goes to the real API
+                logger.warning("irimi: refusing a target that could not be applied: %s", exc)
+                response, flags = (
+                    _target_failed(f"answer target {target!r} could not be applied: {exc}"),
+                    flags + (pipeline.TARGET_FAILED_FLAG,),
+                )
+        flow.metadata[META_KEY] = _Pending(req, cls, run_id, ans.answered_by, door, flags, target)
+        if response is not None:
+            flow.response = _to_mitm_response(response)
+
+    def _to_target(self, flow: http.HTTPFlow, req: Request, forward: ForwardTo) -> None:
+        """Point the flow at its answer target, the way `_through_reverse_door` points it upstream.
+
+        mitmproxy opens the server connection after this hook, so rewriting the flow here *is* the
+        forward: no second HTTP client, nothing blocking the proxy's event loop while a stub
+        thinks, and a streamed target response still streams. Raises TargetRefused for our own
+        listener, which would otherwise make the engine dial itself in a loop (#4's bug, #16's
+        rule).
+
+        Only the flow is rewritten. The Exchange keeps the request the **agent** made, because
+        `POST api.stripe.com/v1/refunds` is what the agent did and what the summary has to name;
+        where the answer came from is `Exchange.target`. This is the opposite of the reverse door,
+        which rewrites the recorded request too - there the rewritten host *is* what the caller
+        asked for, spelled as a path.
+        """
+        pipeline.refuse_self_target(forward.url, flow.client_conn.sockname[1])
+        parts = urlsplit(forward.url)
+        host = (parts.hostname or "").lower()
+        default_port = 443 if parts.scheme == "https" else 80
+        port = parts.port or default_port
+        # `parts.hostname` has already had an IPv6 literal's brackets stripped, so `::1` has to be
+        # put back in them: RFC 3986 spells the authority `[::1]:3000`, and `::1:3000` is a
+        # different (and unparseable) thing. Python's own handler is lenient about it; nginx and
+        # Go's net/http are not, and the README lists `::1` as a supported target. `rewrite_reverse`
+        # refuses IPv6 literals outright on the reverse door; here they are supported, so they have
+        # to be spelled correctly.
+        literal = f"[{host}]" if ":" in host else host
+        authority = literal if port == default_port else f"{literal}:{port}"
+        if not forward.forward_auth:
+            flow.request.headers.pop(pipeline.AUTH_HEADER, None)
+        flow.request.scheme = parts.scheme
+        flow.request.host = host
+        flow.request.port = port
+        path = parts.path or "/"
+        flow.request.path = f"{path}?{parts.query}" if parts.query else path
+        flow.request.host_header = authority
 
     def _through_reverse_door(self, flow: http.HTTPFlow, req: Request) -> Request:
         """Rewrite a reverse-door request to its upstream, on our Request and on the flow.
@@ -169,7 +278,9 @@ class IrimiAddon:
         body — that is the trade for the agent seeing tokens as they arrive (#8).
         """
         pending: _Pending | None = flow.metadata.get(META_KEY)
-        if pending is None or pending.answered_by != "live" or flow.response is None:
+        if pending is None or flow.response is None:
+            return
+        if pending.answered_by not in ("live", "delegated"):  # a synthesized answer has no upstream
             return
         if _is_event_stream(flow.response.headers.get("content-type", "")):
             flow.response.stream = True
@@ -180,6 +291,8 @@ class IrimiAddon:
             return
         upstream = _response_from_flow(flow)
         resp = upstream
+        # The overlay stays off for a delegated read: the target owns that service's state, and
+        # layering our own minted objects over it would corrupt read-after-write there (D20).
         if pending.answered_by == "live" and pending.classification.kind == "read":
             resp = self.overlay(self.write_log, pending.request, upstream)
         ex = pipeline.annotate(
@@ -190,8 +303,16 @@ class IrimiAddon:
             pending.run_id,
             extra_flags=pending.flags,
             door=pending.door,
+            target=pending.target,
         )
-        if ex.answered_by != "live":
+        # The write log is what the overlay replays onto live reads, so it holds *writes*:
+        # exchanges that changed state somewhere the real service does not know about.
+        # `answered_by != "live"` was an exhaustive spelling of that only while every read was
+        # live. `target_reads` makes a delegated read the first non-live read, and a GET replayed
+        # onto later reads is not a write by any reading - #20 owns "no overlay for a delegated
+        # service" and #28 is the streaming twin of the same hazard. A failed target (502) is not
+        # a write either: nothing was performed.
+        if ex.kind not in LIVE_KINDS and ex.answered_by != "live":
             self.write_log.append(ex)
         out = pipeline.respond(ex)
         if out is not None and out is not upstream:
@@ -202,16 +323,27 @@ class IrimiAddon:
         pending: _Pending | None = flow.metadata.pop(META_KEY, None)
         if pending is None:
             return
+        # What failed depends on who was going to answer. A live forward lost the real service;
+        # a delegated one could not reach its target, which must be said out loud rather than
+        # fall back to the local fake. A flow irimi answered itself never opened a connection at
+        # all, so the failure is the client going away - calling that an upstream error asserts
+        # something untrue about a write that never left the machine, and drops the fidelity flag
+        # the answer actually carried (#29).
+        if pending.answered_by == "live":
+            extra_flags = (UPSTREAM_ERROR_FLAG,)
+        elif pending.answered_by == "delegated":
+            extra_flags = pending.flags + (pipeline.TARGET_FAILED_FLAG,)
+        else:
+            extra_flags = pending.flags
         ex = pipeline.annotate(
             pending.request,
             None,
             pending.classification,
             pending.answered_by,
             pending.run_id,
-            # Not pending.flags: a flow that errored was never answered, so it carries no
-            # fidelity flag. Only the upstream failure is worth saying.
-            extra_flags=(UPSTREAM_ERROR_FLAG,),
+            extra_flags=extra_flags,
             door=pending.door,
+            target=pending.target,
         )
         self._finish(ex)
 

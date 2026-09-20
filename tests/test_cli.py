@@ -161,3 +161,85 @@ def test_allow_host_is_lower_cased():
     assert build_parser().parse_args(["serve", "--allow-host", " Foo.Example "]).allow_host == [
         "foo.example"
     ]
+
+
+def test_target_arg_parses_a_service_and_a_route_spec():
+    from irimi.cli import _target_arg
+
+    assert _target_arg("api.stripe.com=http://127.0.0.1:3000") == (
+        "api.stripe.com",
+        "",
+        "http://127.0.0.1:3000",
+    )
+    assert _target_arg("API.Stripe.com/v1/refunds=http://127.0.0.1:3000/refund") == (
+        "api.stripe.com",
+        "/v1/refunds",
+        "http://127.0.0.1:3000/refund",
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "api.stripe.com",  # no '='
+        "=http://127.0.0.1:3000",  # no host
+        "api.stripe.com=",  # no url
+        "api.stripe.com:443=http://127.0.0.1:3000",  # a port belongs in the url, not the host
+    ],
+)
+def test_a_malformed_target_flag_is_an_argparse_error(value):
+    from irimi.cli import _target_arg
+
+    with pytest.raises(argparse.ArgumentTypeError):
+        _target_arg(value)
+
+
+@pytest.mark.parametrize("command", ["serve", "shadow"])
+def test_the_target_flags_are_on_both_engine_commands(command):
+    from irimi.cli import build_parser
+
+    args = build_parser().parse_args(
+        [
+            command,
+            "--target",
+            "api.stripe.com/v1/refunds=http://127.0.0.1:3000",
+            "--target-reads",
+            "api.stripe.com",
+            "--allow-target-host",
+            "stub.internal",
+        ]
+        + (["--", "true"] if command == "shadow" else [])
+    )
+    assert args.target == [("api.stripe.com", "/v1/refunds", "http://127.0.0.1:3000")]
+    assert args.target_reads == ["api.stripe.com"]
+    assert args.allow_target_host == ["stub.internal"]
+
+
+def test_a_non_loopback_target_fails_closed_without_the_escape_hatch(capsys):
+    code = main(["serve", "--port", "0", "--target", "api.stripe.com=http://example.com"])
+    assert code == 1
+    assert "is not loopback" in capsys.readouterr().err
+
+
+def test_a_target_on_the_listeners_own_port_fails_closed(capsys):
+    code = main(["serve", "--port", "4000", "--target", "api.stripe.com=http://127.0.0.1:4000"])
+    assert code == 1
+    assert "own listener" in capsys.readouterr().err
+
+
+def test_a_target_naming_an_unmapped_host_fails_closed(capsys):
+    code = main(["serve", "--port", "0", "--target", "nope.example=http://127.0.0.1:3000"])
+    assert code == 1
+    assert "no loaded service map claims host" in capsys.readouterr().err
+
+
+def test_the_escape_hatch_warning_says_what_it_allows():
+    from irimi.cli import _escape_hatch_warning, build_parser
+
+    plain = build_parser().parse_args(["serve"])
+    assert _escape_hatch_warning(plain) is None
+    loud = build_parser().parse_args(["serve", "--allow-target-host", "stub.internal"])
+    warning = _escape_hatch_warning(loud)
+    assert warning.startswith("WARNING:")
+    assert "stub.internal" in warning
+    assert "leave this machine" in warning

@@ -54,3 +54,20 @@ def test_exchanges_from_same_args_are_equal():
 
 def test_exchange_default_door_is_forward():
     assert _exchange().door == "forward"
+
+
+def test_answered_by_names_the_three_ways_an_exchange_is_answered():
+    """`delegated` is a frozen seam value, so it lands in Phase 1 even though the summary that
+    counts it separately is #20 (design D20, issue #16)."""
+    from typing import get_args
+
+    from irimi.exchange import AnsweredBy
+
+    assert set(get_args(AnsweredBy)) == {"live", "fake-L0", "delegated"}
+
+
+def test_target_defaults_to_empty_and_records_a_delegated_address():
+    ex = _exchange()
+    assert ex.target == ""
+    ex.target = "http://127.0.0.1:3000/refund"
+    assert ex.target == "http://127.0.0.1:3000/refund"

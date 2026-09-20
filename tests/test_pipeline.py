@@ -1,4 +1,5 @@
 from dataclasses import replace
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -6,6 +7,7 @@ from irimi.exchange import Request, Response
 from irimi.pipeline import (
     Classification,
     ReverseDoorRefused,
+    TargetRefused,
     annotate,
     attribute_run,
     classify,
@@ -13,8 +15,10 @@ from irimi.pipeline import (
     is_loopback,
     is_self_host,
     parse,
+    refuse_self_target,
     respond,
     rewrite_reverse,
+    target_url,
 )
 
 
@@ -618,3 +622,93 @@ def test_a_webhook_url_of_another_shape_still_falls_back_to_unknown(tmp_path, mo
     cls = _shipped(tmp_path, monkeypatch, "POST", "hooks.slack.com", "/services/T000/B000")
     assert (cls.service, cls.kind) == ("slack", "unknown")
     assert cls.flags == ("unclassified",)
+
+
+# ------------------------------------------------------------------ answer targets (#16, D20)
+
+
+@pytest.mark.parametrize(
+    ("target", "path", "query", "matched", "expected"),
+    [
+        # A bare origin keeps the request's own path.
+        ("http://127.0.0.1:3000", "/v1/refunds", "", True, "http://127.0.0.1:3000/v1/refunds"),
+        # A target carrying a path replaces the part the route matched - which, because a route
+        # pattern always matches the whole path, is all of it.
+        ("http://127.0.0.1:3000/refund", "/v1/refunds", "", True, "http://127.0.0.1:3000/refund"),
+        # Nothing matched, so there is no matched prefix to replace and the path is appended.
+        (
+            "http://127.0.0.1:3000/stub",
+            "/v1/tax/calculations",
+            "",
+            False,
+            "http://127.0.0.1:3000/stub/v1/tax/calculations",
+        ),
+        # The query is always kept.
+        (
+            "http://127.0.0.1:3000/refund",
+            "/v1/refunds",
+            "expand=charge",
+            True,
+            "http://127.0.0.1:3000/refund?expand=charge",
+        ),
+        ("http://localhost:3000", "/a", "b=1", True, "http://localhost:3000/a?b=1"),
+    ],
+)
+def test_target_url_follows_proxy_pass_path_semantics(target, path, query, matched, expected):
+    request = replace(_req("POST"), path=path, query=query)
+    assert target_url(target, request, matched=matched) == expected
+
+
+def test_a_target_on_our_own_listener_is_refused():
+    """Targets are loopback-only, so the host cannot tell a stub from us - the port can. Dialling
+    our own listener is the self-connection loop the reverse door was fixed for in #4."""
+    with pytest.raises(TargetRefused) as exc:
+        refuse_self_target("http://127.0.0.1:4000", 4000)
+    assert "own listener" in str(exc.value)
+    for spelling in ["http://localhost:4000", "http://127.1:4000", "http://0.0.0.0:4000"]:
+        with pytest.raises(TargetRefused):
+            refuse_self_target(spelling, 4000)
+
+
+def test_a_target_on_another_port_is_allowed():
+    assert refuse_self_target("http://127.0.0.1:3000", 4000) is None
+    assert refuse_self_target("http://127.0.0.1", 4000) is None  # port 80, not ours
+
+
+def test_classify_reports_the_service_map_even_when_no_route_matched(tmp_path, monkeypatch):
+    """A service-level target has to reach the routes its own map does not list, and for those
+    `matched` is None. Without this field the policy could not tell "unmapped host" from
+    "mapped host, unlisted route" (#16)."""
+    index = _index(tmp_path, monkeypatch)
+    listed = classify(replace(_req("POST"), path="/v1/refunds"), index)
+    assert listed.matched is not None
+    assert listed.service_map is listed.matched[0]
+
+    unlisted = classify(replace(_req("POST"), path="/v1/tax/calculations"), index)
+    assert unlisted.matched is None
+    assert unlisted.service_map is not None and unlisted.service_map.service == "stripe"
+
+    unmapped = classify(replace(_req("POST"), host="nope.example", path="/x"), index)
+    assert unmapped.matched is None and unmapped.service_map is None
+
+
+def test_annotate_records_the_target():
+    ex = annotate(_req(), None, classify(_req()), "delegated", "7f3a", target="http://127.0.0.1:3")
+    assert ex.target == "http://127.0.0.1:3"
+    assert annotate(_req(), None, classify(_req()), "live", "7f3a").target == ""
+
+
+def test_a_hash_in_the_request_path_survives_the_target_url():
+    """The policy->engine seam is a URL *string*, so the engine splits it again to rewrite the
+    flow. A literal `#` in a request target is legal and means nothing there, but `urlsplit`
+    reads it as a fragment: `POST /unlisted#x?a=1` reached the target as `/unlisted` with no
+    query at all, and `Exchange.target` recorded a URL that was never sent (#16 review D-4)."""
+    req = replace(_req("POST"), path="/unlisted#x", query="a=1")
+    url = target_url("http://127.0.0.1:3000", req, matched=False)
+    parts = urlsplit(url)
+    assert parts.path == "/unlisted%23x"
+    assert parts.query == "a=1"
+    assert parts.fragment == ""
+    # A `#` in the query is the same hazard one character later.
+    req = replace(_req("POST"), path="/p", query="a=1#b")
+    assert urlsplit(target_url("http://127.0.0.1:3000", req, matched=False)).query == "a=1%23b"

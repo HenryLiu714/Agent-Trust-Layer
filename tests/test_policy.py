@@ -714,3 +714,30 @@ def test_an_unmatched_llm_or_telemetry_request_is_never_delegated():
             assert forward is not None, "target_reads is what delegates a read"
         else:
             assert forward is None, f"an unmatched {kind} request was delegated"
+
+
+def test_a_credential_path_host_is_never_delegated_off_the_machine():
+    """THE SCOPE RULE, decision half. The loader already refuses this configuration whichever
+    layer it arrived through; this asks the same question of the request and the answer actually
+    in front of `delegate`, so a target reaching it some other way is refused rather than
+    escaping. The map is built here because the loader will not produce one (#16 review D-2)."""
+    slack = next(sm for sm in servicemap.load_shipped() if sm.service == "slack")
+    assert "hooks.slack.com" in slack.hosts
+    off_machine = replace(slack, target="http://stub.internal:9000")
+    index = servicemap.MapIndex((off_machine,))
+
+    for path in ("/services/T0/B0/SECRET", "/workflows/T0/A0/SECRET/xyz", "/triggers/T0/1/abc"):
+        request = _req("POST", host="hooks.slack.com", path=path)
+        forward = policy.delegate(request, classify(request, index))
+        assert forward is None, f"{path} was delegated to {forward and forward.url}"
+
+    # The same service's other hosts are not credential-path hosts, so they still delegate.
+    request = _req("POST", host="slack.com", path="/api/chat.postMessage")
+    forward = policy.delegate(request, classify(request, index))
+    assert forward is not None and forward.url.startswith("http://stub.internal:9000")
+
+    # And a loopback target on the credential host is fine - that is the supported way to stub it.
+    local = servicemap.MapIndex((replace(slack, target="http://127.0.0.1:3000"),))
+    request = _req("POST", host="hooks.slack.com", path="/workflows/T0/A0/SECRET/xyz")
+    forward = policy.delegate(request, classify(request, local))
+    assert forward is not None and forward.url.startswith("http://127.0.0.1:3000")

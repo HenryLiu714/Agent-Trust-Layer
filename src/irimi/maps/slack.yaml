@@ -4,9 +4,11 @@
 # does not apply here, because there is no honest verb to downgrade from.
 #
 # hooks.slack.com (incoming webhooks) is here, under the same service name, because the URL itself
-# is the credential: `/services/{team}/{bot}/{token}` carries the secret in the path. That route is
-# always answered locally and must never be allow-listed around, which is why it is a `write` with
-# no target and a comment saying so.
+# is the credential: `/services/{team}/{bot}/{token}` carries the secret in the path. So do
+# `/workflows/...` and `/triggers/...`, which this map does not list - which is why the rule is
+# keyed on the HOST (`servicemap.CREDENTIAL_PATH_HOSTS`) and not on this route. Every target of
+# this service must be loopback, with no `--allow-target-host` escape; keying it on the route let
+# a service-level target delegate every unlisted path off the machine.
 #
 # Quote any `human:` template containing `#`. An unquoted `#` preceded by a space starts a YAML
 # comment, which silently truncates the template at the channel name.
@@ -45,8 +47,8 @@ routes:
     operation: incoming_webhook
     kind: write
     human: 'post via webhook: "{text}"'
-    # The webhook URL is the credential, so this route is always answered locally. When #16 lands,
-    # a target here must be loopback and --allow-target-host must not apply to it.
+    # The webhook URL is the credential. The rule that keeps it local lives on the host, not on
+    # this route: see CREDENTIAL_PATH_HOSTS. Listing the route here is what names the operation.
     comment: the URL is the credential; never forwarded, never allow-listed
 
   - match:

@@ -52,6 +52,13 @@ routes:
     operation: runs.update
     kind: telemetry
     human: update LangSmith run {run}
+    # A live-forwarded kind on a destructive verb has to say why it is safe to perform for real.
+    # This PATCH closes out a trace run the agent itself opened seconds earlier - it writes
+    # end_time and outputs onto LangSmith's own record of this run and touches nothing the agent
+    # can later read back as application state. Not forwarding it would leave every traced run
+    # open forever.
+    persists: false
+    comment: closes out the agent's own trace run; no application state
 
 ---
 version: 1

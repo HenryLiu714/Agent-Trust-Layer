@@ -387,7 +387,9 @@ def test_unsafe_method_read_needs_persists_false_and_a_comment(tmp_path):
     as_delete = base.replace(
         "      method: POST\n      path: /v1/search", "      method: DELETE\n      path: /v1/search"
     )
-    refuses(tmp_path, as_delete, "downgrades a write")  # any unsafe method, not just POST
+    # DELETE is caught one rule earlier now, by the live-kind rule that covers every live kind
+    # rather than `read` alone - a stricter refusal of the same configuration.
+    refuses(tmp_path, as_delete, "would be performed for real")
 
 
 def test_persists_false_without_a_comment_is_refused(tmp_path):
@@ -482,7 +484,7 @@ def test_persists_and_volatile_are_restricted_to_their_kinds(tmp_path):
     refuses(
         tmp_path,
         GOOD.replace("    ids:\n      id: th_\n", "    persists: true\n"),
-        "`persists` belongs on a `kind: read` route only",
+        "`persists` belongs on a route that is forwarded live",
     )
     refuses(
         tmp_path,
@@ -1124,7 +1126,7 @@ def test_a_flag_target_beats_the_overrides_file(tmp_path):
     assert index.services[0].target == "http://127.0.0.1:2222"
 
 
-def test_a_webhook_route_may_only_be_targeted_at_loopback():
+def test_a_credential_path_host_may_only_be_targeted_at_loopback():
     """A Slack incoming webhook URL is the whole credential, so `--allow-target-host` does not
     reach it: sending one off this machine hands the secret to whoever is listening (§7)."""
     index = servicemap.load(
@@ -1141,8 +1143,40 @@ def test_a_webhook_route_may_only_be_targeted_at_loopback():
             allow_target_hosts=frozenset({"stub.internal"}),
             targets=[("hooks.slack.com", "", "http://stub.internal:3000")],
         )
-    assert "webhook route may only be targeted at loopback" in str(exc.value)
-    assert "the credential" in str(exc.value)
+    assert "a target on this host may only be loopback" in str(exc.value)
+
+
+def test_a_loopback_webhook_route_does_not_license_an_off_machine_service_target():
+    """THE SCOPE RULE, host scope. The rule used to be keyed on (service, operation), so a
+    loopback target on the *listed* webhook route satisfied it while a service target sent every
+    *unlisted* path off the machine. `/workflows/...` and `/triggers/...` are real Slack webhook
+    forms whose path is the credential just as `/services/...` is (#16 review D-2)."""
+    with pytest.raises(MapError) as exc:
+        servicemap.load(
+            cwd=None,
+            maps_dir=servicemap.shipped_dir(),
+            allow_target_hosts=frozenset({"stub.internal"}),
+            targets=[
+                # The route-level rule is satisfied: this one really is loopback.
+                ("hooks.slack.com", "/services/{team}/{bot}/{token}", "http://127.0.0.1:3000"),
+                # ... and this used to delegate every path the map does not list.
+                ("slack.com", "", "http://stub.internal:9000"),
+            ],
+        )
+    assert "a target on this host may only be loopback" in str(exc.value)
+
+
+def test_the_rule_follows_the_host_through_the_overrides_file_too(tmp_path):
+    """Load time is the one place all three layers have already merged, so the shipped map, the
+    overrides file and `--target` are all covered by the same check."""
+    with pytest.raises(MapError) as exc:
+        servicemap.load(
+            cwd=None,
+            maps_dir=servicemap.shipped_dir(),
+            allow_target_hosts=frozenset({"stub.internal"}),
+            targets=[("slack.com", "/api/chat.postMessage", "http://stub.internal:9000")],
+        )
+    assert "a target on this host may only be loopback" in str(exc.value)
 
 
 def test_the_webhook_rule_covers_the_other_host_of_the_same_service():
@@ -1155,3 +1189,56 @@ def test_the_webhook_rule_covers_the_other_host_of_the_same_service():
             allow_target_hosts=frozenset({"stub.internal"}),
             targets=[("slack.com", "", "http://stub.internal:3000")],
         )
+
+
+# --------------------------------------------------- THE SCOPE RULE: live kinds and methods (#31)
+
+_ANY_METHOD_TELEMETRY = """
+version: 1
+service: probe
+hosts:
+  - probe.example
+routes:
+  - match:
+      path: /api/{v}/{thing}
+    operation: probe.anything
+    kind: telemetry
+    human: send a probe event
+"""
+
+
+def test_a_live_kind_may_not_match_every_method(tmp_path):
+    """THE SCOPE RULE, method scope. `kind` is written per route, but "forward this to the real
+    service" is a decision about a verb: a `match:` with no `method:` means `*`, and `*` includes
+    DELETE. This is #30's bug one scope down, and reachable by omission rather than by writing
+    `"*"` on purpose - every shipped route happens to carry a `method:`, which is the only reason
+    nothing shipped broken."""
+    refuses(tmp_path, _ANY_METHOD_TELEMETRY, "may not match every method")
+    # Naming the method it actually serves is all it takes.
+    named = _ANY_METHOD_TELEMETRY.replace("      path:", "      method: POST\n      path:")
+    assert load(tmp_path, named).service_for("probe.example") is not None
+
+
+@pytest.mark.parametrize("method", sorted(servicemap.DESTRUCTIVE_METHODS))
+@pytest.mark.parametrize("kind", ["read", "llm", "telemetry"])
+def test_a_live_kind_on_a_destructive_method_must_justify_itself(tmp_path, method, kind):
+    """Naming the verb is necessary but not sufficient: `DELETE api.datadoghq.com/api/v1/
+    dashboard/{id}` classified `telemetry` is performed for real. The author has to say why it
+    persists nothing, which is the same bar `kind: read` already had to clear."""
+    doc = _ANY_METHOD_TELEMETRY.replace(
+        "      path:", f"      method: {method}\n      path:"
+    ).replace("kind: telemetry", f"kind: {kind}")
+    refuses(tmp_path, doc, "would be performed for real")
+    justified = doc.replace(
+        "    human: send a probe event",
+        "    human: send a probe event\n    persists: false\n    comment: why it is safe",
+    )
+    assert load(tmp_path, justified).service_for("probe.example") is not None
+
+
+def test_post_is_still_the_honest_verb_for_inference_and_intake(tmp_path):
+    """The rule names the destructive verbs, not every RFC-unsafe one. POST is what an LLM
+    completion and a telemetry batch are, so requiring a justification for it would mean every
+    shipped `llm` and `telemetry` route carrying one."""
+    doc = _ANY_METHOD_TELEMETRY.replace("      path:", "      method: POST\n      path:")
+    assert load(tmp_path, doc).service_for("probe.example") is not None

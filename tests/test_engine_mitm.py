@@ -15,9 +15,10 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
-from irimi import ca, paths, servicemap
+from irimi import ca, paths, pipeline, servicemap
+from irimi import policy as policy_module
 from irimi.engine import EngineConfig, EngineStartError
-from irimi.engine.mitm import MitmEngine
+from irimi.engine.mitm import IrimiAddon, MitmEngine
 from irimi.exchange import Response
 from irimi.overlay import NoOverlay
 from irimi.policy import ShadowPolicy
@@ -798,6 +799,11 @@ class _Target(BaseHTTPRequestHandler):
         pass
 
 
+def _host_header(headers: dict) -> str:
+    """The Host header as sent, whatever case the client spelled it in."""
+    return next(v for k, v in headers.items() if k.lower() == "host")
+
+
 @pytest.fixture
 def target():
     _Target.seen = []
@@ -1063,3 +1069,142 @@ def test_an_untargeted_write_is_still_faked(tmp_path, monkeypatch, target):
     assert _Target.seen == []
     (ex,) = seen
     assert ex.answered_by == "fake-L0" and ex.target == ""
+
+
+def test_a_raise_in_the_decision_answers_locally_instead_of_forwarding(
+    tmp_path, monkeypatch, upstream
+):
+    """The never-raise rule, as a whole rather than per call site (COMPAT 4.10, #16 review D-3).
+
+    A hook that raises makes mitmproxy forward the flow untouched, so an exception anywhere in
+    the classify/answer decision sends the agent's write to the real service - and `_Pending` is
+    never set, so `response()` returns early and no Exchange is recorded either. The write is
+    performed for real and is invisible in the trace.
+    """
+    maps = _targeted(
+        tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", "http://127.0.0.1:9/w")]
+    )
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("the decision exploded")
+
+    monkeypatch.setattr(policy_module, "target_url", boom)
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
+    try:
+        status, data = _via_proxy(
+            eng.listen_port(), "POST", f"http://127.0.0.1:{upstream}/things", body=b"{}"
+        )
+    finally:
+        stop()
+    # The upstream's do_POST answers 500 and exists to prove it was never reached.
+    assert status == 502, "the write reached the real upstream"
+    assert json.loads(data)["error"]["type"] == "irimi_decision_failed"
+    assert len(seen) == 1, "the exchange must still be recorded"
+    assert seen[0].flags == (pipeline.UNCLASSIFIED_FLAG, pipeline.DECISION_FAILED_FLAG)
+    assert (seen[0].kind, seen[0].answered_by) == ("unknown", "fake-L0")
+
+
+def test_a_delegated_read_is_not_a_write(tmp_path, monkeypatch, target):
+    """`answered_by != "live"` was an exhaustive spelling of "is a write" only while every read
+    was live. `target_reads` makes a delegated read the first non-live read, and the write log is
+    what the overlay replays onto later reads (#20, #28)."""
+    maps = _targeted(
+        tmp_path,
+        monkeypatch,
+        targets=[("127.0.0.1", "", f"http://127.0.0.1:{target}")],
+        target_reads=["127.0.0.1"],
+    )
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
+    try:
+        addon = next(a for a in eng._master.addons.chain if isinstance(a, IrimiAddon))
+        status, _ = _via_proxy(eng.listen_port(), "GET", "http://127.0.0.1:1/hello")
+        assert status == 200
+        assert [ex.kind for ex in addon.write_log] == [], "a delegated read is in the write log"
+        # The delegated *write* on the same service still is one.
+        _via_proxy(eng.listen_port(), "POST", "http://127.0.0.1:1/things", body=b"{}")
+        assert [(ex.kind, ex.answered_by) for ex in addon.write_log] == [("write", "delegated")]
+    finally:
+        stop()
+
+
+def test_an_ipv6_target_gets_a_bracketed_host_header(tmp_path, monkeypatch):
+    """`parts.hostname` strips an IPv6 literal's brackets, so the authority has to put them back:
+    RFC 3986 spells it `[::1]:3000`, and `::1:3000` is a different and unparseable thing. The
+    README lists `::1` as a supported target and the loader accepts it."""
+
+    class _V6Server(HTTPServer):
+        address_family = socket.AF_INET6
+
+    srv = _V6Server(("::1", 0), _Target)
+    port = srv.server_address[1]
+    _Target.seen = []
+    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
+    try:
+        maps = _targeted(
+            tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://[::1]:{port}/w")]
+        )
+        eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
+        try:
+            status, _ = _via_proxy(
+                eng.listen_port(), "POST", "http://127.0.0.1:1/things", body=b"{}"
+            )
+        finally:
+            stop()
+        assert status == 200
+        assert _Target.seen, "the target was never reached"
+        host_header = _host_header(_Target.seen[0][3])
+        assert host_header == f"[::1]:{port}", host_header
+    finally:
+        srv.shutdown()
+
+
+def test_the_host_header_is_set_to_the_target_not_left_as_the_service(
+    tmp_path, monkeypatch, target
+):
+    """Deleting `flow.request.host_header = authority` passed the whole suite. A stub that routes
+    on Host - any vhost, any framework's host check - would see the real service's name."""
+    maps = _targeted(
+        tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{target}/w")]
+    )
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
+    try:
+        _via_proxy(eng.listen_port(), "POST", "http://127.0.0.1:1/things", body=b"{}")
+    finally:
+        stop()
+    assert _host_header(_Target.seen[0][3]) == f"127.0.0.1:{target}"
+
+
+def test_a_streamed_target_response_is_not_buffered(tmp_path, monkeypatch):
+    """The streaming guard names `delegated` as well as `live`; reverting it to `("live",)` passed
+    the whole suite. A delegated SSE route is the case #28 is about."""
+    _STREAM_GATE.clear()
+    srv = HTTPServer(("127.0.0.1", 0), _StreamUpstream)
+    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
+    stream_port = srv.server_address[1]
+    try:
+        maps = _targeted(
+            tmp_path,
+            monkeypatch,
+            targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{stream_port}/v1/stream")],
+        )
+        eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=5)
+            conn.request(
+                "POST",
+                "http://127.0.0.1:1/things",
+                body=b"{}",
+                headers={"host": "127.0.0.1:1", "content-type": "application/json"},
+            )
+            resp = conn.getresponse()
+            assert resp.status == 200
+            first = resp.read(len(SSE_FIRST))  # times out at 5 s if the proxy buffered the body
+            assert first == SSE_FIRST
+            _STREAM_GATE.set()
+            assert resp.read() == SSE_SECOND
+            conn.close()
+        finally:
+            _STREAM_GATE.set()
+            stop()
+    finally:
+        srv.shutdown()

@@ -1,4 +1,5 @@
 from dataclasses import replace
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -17,7 +18,6 @@ from irimi.pipeline import (
     refuse_self_target,
     respond,
     rewrite_reverse,
-    strip_auth,
     target_url,
 )
 
@@ -633,12 +633,6 @@ def test_a_target_on_another_port_is_allowed():
     assert refuse_self_target("http://127.0.0.1", 4000) is None  # port 80, not ours
 
 
-def test_strip_auth_drops_only_authorization():
-    headers = (("host", "h"), ("authorization", "Bearer sk_live"), ("content-type", "text/plain"))
-    assert strip_auth(headers) == (("host", "h"), ("content-type", "text/plain"))
-    assert strip_auth(()) == ()
-
-
 def test_classify_reports_the_service_map_even_when_no_route_matched(tmp_path, monkeypatch):
     """A service-level target has to reach the routes its own map does not list, and for those
     `matched` is None. Without this field the policy could not tell "unmapped host" from
@@ -660,3 +654,19 @@ def test_annotate_records_the_target():
     ex = annotate(_req(), None, classify(_req()), "delegated", "7f3a", target="http://127.0.0.1:3")
     assert ex.target == "http://127.0.0.1:3"
     assert annotate(_req(), None, classify(_req()), "live", "7f3a").target == ""
+
+
+def test_a_hash_in_the_request_path_survives_the_target_url():
+    """The policy->engine seam is a URL *string*, so the engine splits it again to rewrite the
+    flow. A literal `#` in a request target is legal and means nothing there, but `urlsplit`
+    reads it as a fragment: `POST /unlisted#x?a=1` reached the target as `/unlisted` with no
+    query at all, and `Exchange.target` recorded a URL that was never sent (#16 review D-4)."""
+    req = replace(_req("POST"), path="/unlisted#x", query="a=1")
+    url = target_url("http://127.0.0.1:3000", req, matched=False)
+    parts = urlsplit(url)
+    assert parts.path == "/unlisted%23x"
+    assert parts.query == "a=1"
+    assert parts.fragment == ""
+    # A `#` in the query is the same hazard one character later.
+    req = replace(_req("POST"), path="/p", query="a=1#b")
+    assert urlsplit(target_url("http://127.0.0.1:3000", req, matched=False)).query == "a=1%23b"

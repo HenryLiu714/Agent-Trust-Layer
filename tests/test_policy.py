@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import pytest
 
-from irimi import policy, servicemap
+from irimi import pipeline, policy, servicemap
 from irimi.exchange import Request, Response
 from irimi.pipeline import classify
 from irimi.policy import ShadowPolicy
@@ -393,3 +393,38 @@ def test_a_delegated_answer_carries_its_own_fidelity_flag():
     ans = _answer_with(index, _req("POST", path="/v1/refunds"))
     assert ans.flags == ("fidelity:delegated",)
     assert _answer(_req("POST", path="/v1/refunds")).flags == (policy.FIDELITY_L0_FLAG,)
+
+
+def test_an_unlisted_read_on_a_targeted_service_is_not_delegated_without_target_reads():
+    """The unmatched branch of `delegate`, which `target_for` never sees. Replacing its whole
+    condition with `elif True:` passed all 421 tests: the two tests whose docstrings claim to
+    cover it both use *listed* routes, so they exercise `target_for` and stop above the `elif`."""
+    index = _targeted_index([("api.stripe.com", "", "http://127.0.0.1:3000")])
+    ans = _answer_with(index, _req("GET", path="/v1/tax/calculations"))  # GET, and unlisted
+    assert ans.answered_by == "live"
+    assert ans.forward_to is None
+
+
+def test_an_unmatched_llm_or_telemetry_request_is_never_delegated():
+    """The other half of the same branch. A service target must not quietly start forwarding
+    inference or someone else's events just because the map does not list the route.
+
+    The classification is built here rather than loaded, because the only way a map could give an
+    *unmatched* route a live kind is a live `default_kind`, which the loader now refuses (#30).
+    """
+    sm = servicemap.load_shipped()[0]
+    sm = replace(sm, target="http://127.0.0.1:3000", target_reads=True)
+    for kind in ("llm", "telemetry", "read"):
+        cls = pipeline.Classification(
+            service=sm.service,
+            operation="",
+            kind=kind,
+            flags=(),
+            matched=None,  # unlisted: this is the `elif` branch, not `target_for`
+            service_map=sm,
+        )
+        forward = policy.delegate(_req("POST", path="/anything"), cls)
+        if kind == "read":
+            assert forward is not None, "target_reads is what delegates a read"
+        else:
+            assert forward is None, f"an unmatched {kind} request was delegated"

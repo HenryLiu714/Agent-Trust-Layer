@@ -12,7 +12,6 @@ from irimi.exchange import (
     AnsweredBy,
     Door,
     Exchange,
-    Headers,
     Kind,
     Request,
     Response,
@@ -28,8 +27,11 @@ UNCLASSIFIED_FLAG = "unclassified"
 REVERSE_SCHEME = "https"
 REVERSE_DEFAULT_PORT = 443
 
-SELF_TARGET = "self"  # the same spelling servicemap uses; restated so this module stays leaf-level
 TARGET_FAILED_FLAG = "target-failed"
+# The answer could not be decided at all - see `IrimiAddon.request`. It is not `target-failed`:
+# that one says a target was chosen and could not be reached, this one says we never got as far
+# as choosing.
+DECISION_FAILED_FLAG = "decision-failed"
 FIDELITY_DELEGATED_FLAG = "fidelity:delegated"
 AUTH_HEADER = "authorization"
 
@@ -177,6 +179,13 @@ def target_url(target: str, request: Request, matched: bool) -> str:
     route its map does not list) has nothing matched, so its own path is appended instead.
 
     The query string is always kept; method, body and headers are not this function's business.
+
+    The result is a URL *string*, which the engine splits again to rewrite the flow, so anything
+    in the request that would re-parse differently has to be escaped on the way in. A literal `#`
+    is the one that bites: `POST /unlisted#x?a=1` would come back out as path `/unlisted` with no
+    query at all, so the target would be sent a different request than the agent made and
+    `Exchange.target` would record a URL that was never used. `#` is legal in a request target
+    and means nothing there; `%23` is the same path to the target and survives the round trip.
     """
     parts = urlsplit(target)
     base = parts.path.rstrip("/")
@@ -187,7 +196,7 @@ def target_url(target: str, request: Request, matched: bool) -> str:
     else:
         path = base + request.path
     query = f"?{request.query}" if request.query else ""
-    return f"{parts.scheme}://{parts.netloc}{path}{query}"
+    return f"{parts.scheme}://{parts.netloc}{path}{query}".replace("#", "%23")
 
 
 def refuse_self_target(target: str, listen_port: int) -> None:
@@ -205,12 +214,6 @@ def refuse_self_target(target: str, listen_port: int) -> None:
             f"answer target {target!r} is irimi's own listener on port {listen_port}; "
             "point it at the address that answers the route instead"
         )
-
-
-def strip_auth(headers: Headers) -> Headers:
-    """Drop `Authorization`. A local stub does not need the real key, and forwarding it makes the
-    target an exfiltration path for a credential the agent never meant it to have (design §7)."""
-    return tuple((name, value) for name, value in headers if name != AUTH_HEADER)
 
 
 def classify(request: Request, maps: "MapIndex | None" = None) -> Classification:

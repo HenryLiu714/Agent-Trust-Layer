@@ -512,9 +512,10 @@ def _parse_hosts(raw: Any, source: str) -> frozenset[str]:
 def _check_pattern(host: str, item: Any, source: str) -> None:
     """A wildcard host is exactly one leading `*.` label plus two or more labels of its own.
 
-    `*.com` is refused along with `*foo.com`, `foo.*.com` and `**.foo.com`: a single label after
-    the star claims a whole public suffix, and every other spelling is the silent-never-matches
-    shape issue #9 was opened about.
+    The rule is label counting, not public suffixes: `*.com` is refused because one label after
+    the star is almost always a mistake, while `*.co.uk` and `*.github.io` satisfy it and would
+    each claim a whole public suffix. No shipped map uses one. `*foo.com`, `foo.*.com` and
+    `**.foo.com` are refused as the silent-never-matches shape issue #9 was opened about.
     """
     rest = host[2:] if _is_pattern(host) else ""
     if not _is_pattern(host) or "*" in rest or "." not in rest or "" in rest.split("."):

@@ -32,6 +32,25 @@ def _host_arg(value: str) -> str:
     return host
 
 
+def _target_arg(value: str) -> tuple[str, str, str]:
+    """argparse type for --target '<host>[<path>]=<url>'.
+
+    `api.stripe.com=http://127.0.0.1:3000` sets the service target;
+    `api.stripe.com/v1/refunds=http://127.0.0.1:3000/refund` sets one route's. The URL is
+    validated by the map loader, which owns every target rule.
+    """
+    spec, sep, url = value.partition("=")
+    host, slash, path = spec.strip().partition("/")
+    host = host.lower()
+    if not sep or not url.strip() or not host or ":" in host:
+        raise argparse.ArgumentTypeError(
+            f"{value!r}: use --target '<host>[<path>]=<url>', e.g. "
+            "--target 'api.stripe.com/v1/refunds=http://127.0.0.1:3000/refund' "
+            "(a bare host sets the whole service's target)"
+        )
+    return host, f"{slash}{path}" if slash else "", url.strip()
+
+
 def _add_engine_args(parser: argparse.ArgumentParser) -> None:
     """The options `serve` and `shadow` share."""
     parser.add_argument(
@@ -48,6 +67,35 @@ def _add_engine_args(parser: argparse.ArgumentParser) -> None:
         metavar="HOST",
         help=f"also let the reverse door http://{paths.LISTEN_HOST}:<port>/<host>/<path> relay "
         "to HOST, a bare host name (repeatable; every host in a loaded map is already allowed)",
+    )
+    parser.add_argument(
+        "--target",
+        action="append",
+        default=[],
+        type=_target_arg,
+        metavar="SPEC",
+        dest="target",
+        help="answer a route from an address you control instead of faking it: "
+        "'<host>[<path>]=<url>', e.g. 'api.stripe.com/v1/refunds=http://127.0.0.1:3000/refund'. "
+        "A bare host sets the whole service's target (repeatable; beats the overrides file)",
+    )
+    parser.add_argument(
+        "--target-reads",
+        action="append",
+        default=[],
+        type=_host_arg,
+        metavar="HOST",
+        help="also send this service's reads to its target, making it a delegated service - "
+        "its reads are then answered by the target, not by the real service (repeatable)",
+    )
+    parser.add_argument(
+        "--allow-target-host",
+        action="append",
+        default=[],
+        type=_host_arg,
+        metavar="HOST",
+        help="let an answer target name HOST instead of loopback. This sends the agent's "
+        "requests off this machine; targets are loopback-only without it (repeatable)",
     )
 
 
@@ -78,19 +126,53 @@ def _engine_config(
     )
 
 
-def _load_maps() -> "MapIndex | None":
+def _load_maps(args: argparse.Namespace | None = None) -> "MapIndex | None":
     """The loaded service maps, or None after printing why they were refused.
 
-    Fail closed: a map or overrides file the loader rejects must not start a proxy that would then
-    classify and answer with half a policy.
+    Fail closed: a map, overrides file or `--target` the loader rejects must not start a proxy
+    that would then classify and answer with half a policy. `args` is None for `maps list`, which
+    has no engine flags of its own.
     """
-    from irimi import servicemap
+    from irimi import pipeline, servicemap
 
     try:
-        return servicemap.load()
-    except servicemap.MapError as exc:
+        index = servicemap.load(
+            allow_target_hosts=frozenset(getattr(args, "allow_target_host", ()) or ()),
+            targets=getattr(args, "target", ()) or (),
+            target_reads=getattr(args, "target_reads", ()) or (),
+        )
+        # The loader keeps targets on loopback, where the only thing separating a stub from our
+        # own listener is the port - and dialling ourselves is a loop, not a delegation. The
+        # addon repeats this per request against the port it actually bound, which is the
+        # authoritative check; this one is here so `--port 4000` with a target on 4000 fails
+        # before anything starts rather than on the first request.
+        port = getattr(args, "port", 0) or 0
+        if port:
+            for sm in index.services:
+                for target in (sm.target, *(r.target for r in sm.routes)):
+                    if target != servicemap.SELF_TARGET:
+                        pipeline.refuse_self_target(target, port)
+        return index
+    except (servicemap.MapError, pipeline.TargetRefused) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return None
+
+
+def _escape_hatch_warning(args: argparse.Namespace) -> str | None:
+    """The one line `--allow-target-host` has to print, or None when it was not used.
+
+    Targets are loopback-only so that a delegated request cannot leave the machine; this flag is
+    the deliberate way out of that, so it says so out loud. The delegated-service banner and the
+    summary's own accounting are issue #20, not this one.
+    """
+    hosts = getattr(args, "allow_target_host", None)
+    if not hosts:
+        return None
+    return (
+        f"WARNING: --allow-target-host {', '.join(sorted(hosts))} - an answer target may now "
+        "leave this machine. Requests to a targeted route go to a host you named, which is "
+        "neither the real service nor loopback."
+    )
 
 
 def cmd_maps_list(args: argparse.Namespace) -> int:
@@ -161,7 +243,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     from irimi.policy import ShadowPolicy
     from irimi.store import NullStore
 
-    index = _load_maps()
+    index = _load_maps(args)
     if index is None:
         return 1
     p = ca.ca_paths()
@@ -183,6 +265,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
         except EngineStartError:
             await asyncio.gather(task, return_exceptions=True)  # let mitmproxy finish stopping
             raise
+        warning = _escape_hatch_warning(args)
+        if warning is not None:
+            print(warning, file=sys.stderr, flush=True)
         for line in runner.banner_lines(
             "serve", run_id, cfg.listen_host, engine.listen_port(), p.cert
         ):
@@ -212,7 +297,7 @@ def cmd_shadow(args: argparse.Namespace) -> int:
     from irimi.policy import ShadowPolicy
     from irimi.store import NullStore
 
-    index = _load_maps()
+    index = _load_maps(args)
     if index is None:
         return 1
 
@@ -255,6 +340,9 @@ def cmd_shadow(args: argparse.Namespace) -> int:
         return SIGINT_EXIT_CODE
 
     try:
+        warning = _escape_hatch_warning(args)
+        if warning is not None:
+            print(warning, file=sys.stderr, flush=True)
         for line in runner.banner_lines("shadow", run_id, paths.LISTEN_HOST, handle.port(), p.cert):
             print(line, flush=True)
         env = runner.child_env(dict(os.environ), paths.LISTEN_HOST, handle.port(), p.cert, run_id)

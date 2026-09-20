@@ -121,8 +121,9 @@ def test_child_traffic_is_recorded(home, upstream, capfd):
     assert "live" in out
     assert "read" in out
     assert "GET" in out
-    assert "1 exchange(s)" in out
-    assert "read=1" in out
+    assert "1 exchange ·" in out
+    assert "1 read" in out
+    assert "1 exchange · 1 live · 0 delegated · 0 virtualized" in out
 
 
 def test_exit_code_propagates(home):
@@ -202,7 +203,7 @@ def test_interrupt_while_waiting_exits_cleanly(home, monkeypatch, capsys):
         cli, "_wait_for_child", lambda proc: (_ for _ in ()).throw(KeyboardInterrupt)
     )
     assert main(["shadow", *_py("pass")]) == 130
-    assert "0 exchange(s)" in capsys.readouterr().out
+    assert "0 exchanges" in capsys.readouterr().out
 
 
 def test_reverse_door_refuses_unlisted_host(home, capfd):
@@ -212,7 +213,7 @@ def test_reverse_door_refuses_unlisted_host(home, capfd):
     assert (
         "403 irimi: reverse door: host 'evil.example' is not in a loaded map or --allow-host" in out
     )
-    assert "0 exchange(s)" in out
+    assert "0 exchanges" in out
 
 
 def test_reverse_door_allow_host(home, capfd):
@@ -232,7 +233,7 @@ def test_reverse_door_allow_host(home, capfd):
     assert "502" in out
     assert "127.0.0.1/x" in out
     assert "[upstream-error]" in out
-    assert "1 exchange(s)" in out
+    assert "1 exchange ·" in out
 
 
 def test_banner_names_a_delegated_service(home, tmp_path, capsys):

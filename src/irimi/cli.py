@@ -303,6 +303,7 @@ def cmd_shadow(args: argparse.Namespace) -> int:
     import os
     import secrets
     import subprocess
+    import time
 
     from irimi import ca, runner
     from irimi.engine import EngineStartError
@@ -330,6 +331,7 @@ def cmd_shadow(args: argparse.Namespace) -> int:
 
     run_id = secrets.token_hex(2)
     exchanges: list[Exchange] = []
+    elapsed = 0.0
 
     def on_exchange(ex: Exchange) -> None:
         exchanges.append(ex)
@@ -371,7 +373,11 @@ def cmd_shadow(args: argparse.Namespace) -> int:
         except OSError as exc:
             print(f"error: could not run {cmd[0]}: {exc}", file=sys.stderr)
             return 126
+        # The summary's duration is the child's, not the proxy's: what the reader wants to know is
+        # how long the agent ran. monotonic, so a clock change mid-run cannot make it negative.
+        started = time.monotonic()
         code = runner.exit_code_for(_wait_for_child(proc))
+        elapsed = time.monotonic() - started
     except KeyboardInterrupt:  # Ctrl-C outside _wait_for_child's own handling
         code = SIGINT_EXIT_CODE
     finally:
@@ -381,7 +387,7 @@ def cmd_shadow(args: argparse.Namespace) -> int:
         except KeyboardInterrupt:
             pass
 
-    for line in runner.summary_lines(run_id, exchanges):
+    for line in runner.summary_lines(run_id, exchanges, elapsed, index):
         print(line, flush=True)
     return code
 

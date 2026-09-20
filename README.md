@@ -196,6 +196,12 @@ therefore says nothing about what a call does. For a service with honest verbs, 
 declares `kind: read` on an unsafe method is a write in disguise, so the loader refuses it unless
 it says `persists: false` and carries a `comment:` explaining why nothing persists.
 
+The same bar applies to every kind irimi *forwards live* — `read`, `llm` and `telemetry` — because
+for those the method is performed on the real service. Such a route may not match every method: a
+`match:` with no `method:` means `*`, and `*` includes `DELETE`. And on `DELETE`, `PUT` or `PATCH`
+it needs the same `persists: false` plus `comment:`. `POST` is left alone: it is what an LLM
+completion and a telemetry batch are.
+
 ### Classification
 
 What a request *is* comes from four rules, and the first one that answers wins:
@@ -214,6 +220,12 @@ everything else is faked and flagged.
 The order matters most where the verb lies. Slack's `conversations.history` is a `POST`, and only
 its map entry makes it a read that forwards live — without it the agent would get an empty channel
 back from a faked write.
+
+These three rules — no live `default_kind`, no live kind on `*`, no live kind on a destructive
+verb without a reason — are one rule at three scopes: **no classification that forwards live may
+apply to a method it did not name explicitly.** Each has been a real bug here, one scope at a
+time, so the classifier also enforces it per request: a live kind reaching a method its route did
+not name is answered locally and flagged `kind-downgraded`, however it got there.
 
 `default_kind:` may name any kind irimi answers locally — `write` or `unknown` — and no kind it
 forwards live. `read`, `llm` and `telemetry` are all refused, each with its own reason: a `read`
@@ -274,7 +286,10 @@ carrying a path replaces the part the route matched, which — because a route p
 matches the whole path — is all of it. The query string is always kept, and the method, body and
 content type pass through unchanged.
 
-Five rules keep a target from becoming a way out of the machine:
+Five rules keep a target from becoming a way out of the machine. Each is checked when the maps
+load — so a shipped map, an overrides file and a `--target` flag are all covered by the same
+check — and again at the moment the answer is chosen, so a target that arrives some other way is
+refused rather than let through:
 
 - A target must be **loopback** (`127.0.0.1`, `::1`, `localhost`). Anything else is refused when
   the maps load, naming the rule. `--allow-target-host <host>` is the deliberate way out, and it
@@ -282,8 +297,12 @@ Five rules keep a target from becoming a way out of the machine:
 - A target naming **irimi's own listener** is refused, or the proxy would dial itself in a loop.
 - `Authorization` is **stripped** before forwarding, unless the route sets `forward_auth: true`.
   A local stub does not need your real key.
-- A **webhook route** — Slack's `hooks.slack.com/services/...` — may be targeted at loopback and
-  never through `--allow-target-host`, because for those the URL *is* the credential.
+- A **credential-path host** — today `hooks.slack.com` — may be targeted at loopback and never
+  through `--allow-target-host`, because there the URL *is* the credential. The rule is on the
+  host, so it covers every path on it, not only the routes the map lists: `/services/...`,
+  `/workflows/...` and `/triggers/...` are all real Slack webhook forms. In practice that means
+  no target anywhere on the `slack` service may leave the machine — a route target can answer a
+  request addressed to the webhook host, because routes are matched within a service.
 - `target_reads: true` without a `target:` is refused — a service irimi answered end to end would
   be a twin, not a shadow.
 

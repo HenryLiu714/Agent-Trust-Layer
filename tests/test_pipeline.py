@@ -5,6 +5,7 @@ import pytest
 
 from irimi.exchange import Request, Response
 from irimi.pipeline import (
+    DOWNGRADED_FLAG,
     Classification,
     ReverseDoorRefused,
     TargetRefused,
@@ -712,3 +713,39 @@ def test_a_hash_in_the_request_path_survives_the_target_url():
     # A `#` in the query is the same hazard one character later.
     req = replace(_req("POST"), path="/p", query="a=1#b")
     assert urlsplit(target_url("http://127.0.0.1:3000", req, matched=False)).query == "a=1%23b"
+
+
+def test_a_live_kind_is_downgraded_when_the_route_did_not_name_the_method():
+    """THE SCOPE RULE, decision half. The loader refuses this configuration, so nothing can reach
+    the classifier this way today - which is the point. The rule is asked of the request in front
+    of us, so a live kind arriving by a route the loader does not police is answered locally
+    instead of performed on the real service (#30, #31).
+
+    The map is built here rather than loaded, because the loader now refuses to produce one.
+    """
+    from irimi.servicemap import MapIndex, Route, ServiceMap
+
+    route = Route(
+        method="*",
+        path="/api/{v}/{thing}",
+        operation="probe.anything",
+        kind="telemetry",
+        human="send a probe event",
+    )
+    sm = ServiceMap(
+        service="probe",
+        hosts=frozenset({"probe.example"}),
+        routes=(route,),
+        source="built-in-code.yaml",
+    )
+    index = MapIndex((sm,))
+    for method in ("DELETE", "PUT", "PATCH"):
+        cls = classify(replace(_req(method), host="probe.example", path="/api/v1/dashboard"), index)
+        assert cls.kind == "unknown", f"{method} was classified live"
+        assert DOWNGRADED_FLAG in cls.flags
+    # POST is left alone: it is what a telemetry batch is, and the route still does not name it,
+    # so it is downgraded too. Naming the verb is what makes it explicit.
+    named = replace(route, method="DELETE")
+    index = MapIndex((replace(sm, routes=(named,)),))
+    cls = classify(replace(_req("DELETE"), host="probe.example", path="/api/v1/dashboard"), index)
+    assert cls.kind == "telemetry" and DOWNGRADED_FLAG not in cls.flags

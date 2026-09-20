@@ -19,11 +19,17 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, urlsplit
 
 from irimi.exchange import LIVE_KINDS, AnsweredBy, Request, Response
-from irimi.pipeline import FIDELITY_DELEGATED_FLAG, Classification, target_url
+from irimi.pipeline import (
+    FIDELITY_DELEGATED_FLAG,
+    Classification,
+    is_loopback,
+    target_url,
+)
 from irimi.servicemap import (
+    CREDENTIAL_PATH_HOSTS,
     SELF_TARGET,
     TARGETABLE_KINDS,
     Route,
@@ -107,9 +113,32 @@ def delegate(request: Request, classification: Classification) -> ForwardTo | No
         return None
     if target == SELF_TARGET:
         return None
-    return ForwardTo(
-        url=target_url(target, request, matched=route is not None), forward_auth=forward_auth
-    )
+    url = target_url(target, request, matched=route is not None)
+    # THE SCOPE RULE, decision half (servicemap.CREDENTIAL_PATH_HOSTS). The loader already
+    # refuses a non-loopback target on a service claiming one of these hosts, whichever layer it
+    # arrived through. This asks the same question of the request and the answer actually in
+    # front of us, so a target that reaches here some other way - a layer added later, a map
+    # built in code, a future flag - inherits the rule instead of escaping it. On this host the
+    # path IS the credential, for every path and not only the ones a map lists.
+    if request.host in CREDENTIAL_PATH_HOSTS and not _is_local(url):
+        logger.error(
+            "irimi: refusing to delegate %s to %s: the request path is the credential on %s, "
+            "so its answer target must be loopback",
+            request.path,
+            url,
+            request.host,
+        )
+        return None
+    return ForwardTo(url=url, forward_auth=forward_auth)
+
+
+def _is_local(url: str) -> bool:
+    """True when this URL names loopback. Anything unparseable is not local."""
+    try:
+        host = urlsplit(url).hostname or ""
+    except Exception:
+        return False
+    return host == "localhost" or is_loopback(host)
 
 
 def mint_id(prefix: str) -> str:

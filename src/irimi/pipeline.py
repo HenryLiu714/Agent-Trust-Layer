@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from irimi.exchange import (
+    LIVE_KINDS,
     SAFE_METHODS,
     AnsweredBy,
     Door,
@@ -23,6 +24,9 @@ if TYPE_CHECKING:  # quoted annotations only: servicemap imports this module, so
 
 RUN_HEADER = "irimi-run"  # header names are compared case-insensitively; stored lower-case
 UNCLASSIFIED_FLAG = "unclassified"
+# A live-forwarding kind was refused because it did not name this method (see
+# `_refuse_live_on_an_unnamed_method`). The exchange says `unknown`, and this says why.
+DOWNGRADED_FLAG = "kind-downgraded"
 
 REVERSE_SCHEME = "https"
 REVERSE_DEFAULT_PORT = 443
@@ -244,8 +248,33 @@ def classify(request: Request, maps: "MapIndex | None" = None) -> Classification
             kind = "read"
         else:
             kind = "unknown"
+    kind, downgraded = _refuse_live_on_an_unnamed_method(kind, request, matched)
     flags = (UNCLASSIFIED_FLAG,) if kind == "unknown" else ()
+    if downgraded:
+        flags += (DOWNGRADED_FLAG,)
     return Classification(service, operation, kind, flags, matched, service_map)
+
+
+def _refuse_live_on_an_unnamed_method(
+    kind: Kind, request: Request, matched: "tuple[ServiceMap, Route] | None"
+) -> tuple[Kind, bool]:
+    """THE SCOPE RULE, decision half (see `servicemap`): no classification that forwards live may
+    apply to an unsafe method it did not name explicitly.
+
+    The loader refuses a live kind on `*` and makes a destructive one justify itself, so no map
+    can reach this today. This asks the question of the request in front of us instead of of the
+    configuration, so a live kind that arrives by some route the loader does not police - a
+    `default_kind` rule that drifts again, a wildcard host, a map built in code, a layer added
+    later - is answered locally rather than performed on the real service. Downgrading to
+    `unknown` is the fail-safe direction: a write answered locally costs the agent an echo, and
+    a DELETE forwarded live cannot be undone.
+    """
+    if kind not in LIVE_KINDS or request.method in SAFE_METHODS:
+        return kind, False
+    route = matched[1] if matched is not None else None
+    if route is not None and route.method == request.method:
+        return kind, False  # the route named this verb; that is the explicit part
+    return "unknown", True
 
 
 def attribute_run(request: Request, default_run_id: str) -> str:

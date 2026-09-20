@@ -14,6 +14,11 @@ KINDS: tuple[Kind, ...] = ("read", "write", "llm", "telemetry", "unknown")
 # that names one (#30) and servicemap must not import policy.
 LIVE_KINDS: tuple[Kind, ...] = ("read", "llm", "telemetry")
 SAFE_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
+# A map route's `match.method` when it names no method: it matches every verb, including the ones
+# that delete things. It lives here, with the rest of the shared wire vocabulary, because both the
+# map loader and the classifier have to reason about "this route named no method" and a second
+# spelling of `"*"` in either of them is the drift `SAFE_METHODS` is here to avoid.
+ANY_METHOD = "*"
 
 Headers = tuple[tuple[str, str], ...]
 

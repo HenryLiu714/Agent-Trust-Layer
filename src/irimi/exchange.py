@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 Kind = Literal["read", "write", "llm", "telemetry", "unknown"]
-AnsweredBy = Literal["live", "fake-L0"]
+AnsweredBy = Literal["live", "fake-L0", "delegated"]
 Validation = Literal["validated", "unvalidated"]
 Door = Literal["forward", "reverse"]
 
@@ -52,3 +52,6 @@ class Exchange:
     run_id: str
     door: Door = "forward"  # "reverse" = came in as /<host>/<path> on the listener itself
     flags: tuple[str, ...] = field(default_factory=tuple)
+    # The address that answered a `delegated` exchange (design D20). "" for every other one:
+    # `target: self` is not an address, and a live forward went to the real service.
+    target: str = ""

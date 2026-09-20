@@ -245,7 +245,13 @@ class IrimiAddon:
         literal = f"[{host}]" if ":" in host else host
         authority = literal if port == default_port else f"{literal}:{port}"
         if not forward.forward_auth:
-            flow.request.headers.pop(pipeline.AUTH_HEADER, None)
+            # Every credential-bearing header, not just Authorization: the rule is "a local stub
+            # does not need your real key", and `Cookie`, `x-api-key` and `DD-API-KEY` are keys
+            # too (#32). `forward_auth` keeps all of them, which is what a sandbox tenant or an
+            # internal simulator opting in actually wants.
+            for name in list(flow.request.headers.keys()):
+                if pipeline.is_credential_header(name):
+                    del flow.request.headers[name]
         flow.request.scheme = parts.scheme
         flow.request.host = host
         flow.request.port = port
@@ -351,7 +357,12 @@ class IrimiAddon:
         if pending.answered_by == "live":
             extra_flags = (UPSTREAM_ERROR_FLAG,)
         elif pending.answered_by == "delegated":
-            extra_flags = pending.flags + (pipeline.TARGET_FAILED_FLAG,)
+            # A target irimi refused was already flagged in `request()`, and the client going away
+            # afterwards does not make it fail twice. The flag is a fact about the exchange, not a
+            # counter (#32).
+            extra_flags = pending.flags
+            if pipeline.TARGET_FAILED_FLAG not in extra_flags:
+                extra_flags += (pipeline.TARGET_FAILED_FLAG,)
         else:
             extra_flags = pending.flags
         ex = pipeline.annotate(
@@ -412,7 +423,18 @@ class MitmEngine:
                 mode=["regular"],
             )
             # Addon-registered options are only known once the addons load.
-            opts.update_defer(onboarding=False)  # mitm.it must not be answered locally
+            opts.update_defer(
+                onboarding=False,  # mitm.it must not be answered locally
+                # `eager`, mitmproxy's default, dials the real host - sending a ClientHello
+                # carrying real SNI - before it has seen the request it would have answered or
+                # redirected. A targeted HTTPS route could then not be answered at all when the
+                # real service was unreachable, which is precisely the delegation use case: an
+                # offline, decommissioned or not-yet-built API (#32). `lazy` connects when there
+                # is something to send, so a faked or delegated request never touches the real
+                # host. The cost is mitmproxy's eager-only conveniences - upstream-cert details
+                # for the generated leaf, and ALPN mirroring - neither of which shadow mode uses.
+                connection_strategy="lazy",
+            )
             # A plain Master, not DumpMaster: DumpMaster adds ErrorCheck, which sys.exit()s on
             # a bind failure before the running hook, and dump-CLI conveniences we do not use.
             self._master = Master(opts)

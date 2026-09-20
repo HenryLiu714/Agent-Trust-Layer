@@ -325,6 +325,17 @@ carrying a path replaces the part the route matched, which — because a route p
 matches the whole path — is all of it. The query string is always kept, and the method, body and
 content type pass through unchanged.
 
+That has a consequence worth knowing before you write a stub. A target with a path on a route with
+`{…}` segments **discards the captures**: `--target
+'api.stripe.com/v1/customers/{customer}=http://127.0.0.1:3000/cust'` sends every customer to
+`/cust`, so the stub cannot tell one request from another. If your stub needs the id, give it a
+**bare origin** — `--target 'api.stripe.com=http://127.0.0.1:3000'` — and it receives
+`/v1/customers/cus_REAL123` with the path intact.
+
+`http://` and `https://` targets are both accepted, but a `https://` target must present a
+certificate mitmproxy trusts: it verifies an upstream chain against certifi's bundle, and there is
+no option to relax that. A self-signed stub is reachable over `http://`.
+
 Five rules keep a target from becoming a way out of the machine. Each is checked when the maps
 load — so a shipped map, an overrides file and a `--target` flag are all covered by the same
 check — and again at the moment the answer is chosen, so a target that arrives some other way is
@@ -334,8 +345,13 @@ refused rather than let through:
   the maps load, naming the rule. `--allow-target-host <host>` is the deliberate way out, and it
   prints a warning saying what it allows.
 - A target naming **irimi's own listener** is refused, or the proxy would dial itself in a loop.
-- `Authorization` is **stripped** before forwarding, unless the route sets `forward_auth: true`.
-  A local stub does not need your real key.
+- **Credential headers are stripped** before forwarding, unless the route sets
+  `forward_auth: true`. A local stub does not need your real key. It is every header that carries
+  one and not only `Authorization` — `Cookie`, `x-api-key`, `DD-API-KEY` and anything else whose
+  name contains `auth`, `api-key`, `token`, `secret`, `credential`, `password` or `signature` —
+  because the list of vendor spellings is never finished, and the one it is missing is the one
+  that leaks. `forward_auth: true` keeps all of them, for a sandbox tenant or an internal
+  simulator that really does need the key.
 - A **credential-path host** — today `hooks.slack.com` — may be targeted at loopback and never
   through `--allow-target-host`, because there the URL *is* the credential. The rule is on the
   host, so it covers every path on it, not only the routes the map lists: `/services/...`,

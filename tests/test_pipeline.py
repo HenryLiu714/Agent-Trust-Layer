@@ -13,6 +13,7 @@ from irimi.pipeline import (
     attribute_run,
     classify,
     detect_door,
+    is_credential_header,
     is_loopback,
     is_self_host,
     parse,
@@ -790,3 +791,35 @@ def test_a_live_kind_is_downgraded_when_the_route_did_not_name_the_method():
     index = MapIndex((replace(sm, routes=(named,)),))
     cls = classify(replace(_req("DELETE"), host="probe.example", path="/api/v1/dashboard"), index)
     assert cls.kind == "telemetry" and DOWNGRADED_FLAG not in cls.flags
+
+
+# ------------------------------------- credential headers an answer target must not see
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Authorization",
+        "proxy-authorization",
+        "Cookie",
+        "x-api-key",
+        "DD-API-KEY",
+        "dd-application-key",
+        "X-Honeycomb-Team",
+        "x-goog-api-key",
+        "x-amz-security-token",
+        "X-Slack-Signature",
+        "x-acme-apikey",  # a vendor spelling nobody has written down yet
+    ],
+)
+def test_a_credential_header_is_recognised_whoever_spells_it(name):
+    assert is_credential_header(name)
+
+
+@pytest.mark.parametrize(
+    "name", ["content-type", "content-length", "host", "user-agent", "accept", "idempotency-key"]
+)
+def test_an_ordinary_header_is_not_a_credential(name):
+    """The rule is wide on purpose, but not so wide that a target gets a request it cannot
+    answer: everything an SDK needs to be understood has to survive."""
+    assert not is_credential_header(name)

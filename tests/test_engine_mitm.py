@@ -824,6 +824,47 @@ def _targeted(tmp_path, monkeypatch, targets=(), target_reads=()):
     )
 
 
+def _via_tls_proxy(cfg, proxy_port, host, port, method, path, body=None):
+    """A CONNECT tunnel through the proxy, trusting the irimi CA, then one request inside it."""
+    ctx = ssl.create_default_context(cafile=str(cfg.ca.cert))
+    conn = http.client.HTTPSConnection("127.0.0.1", proxy_port, context=ctx, timeout=10)
+    conn.set_tunnel(host, port)
+    try:
+        conn.request(method, path, body=body, headers={"content-type": "application/json"})
+        resp = conn.getresponse()
+        return resp.status, resp.read()
+    finally:
+        conn.close()
+
+
+def test_an_https_write_is_answered_when_the_real_host_is_not_listening(tmp_path, monkeypatch):
+    """mitmproxy's default `connection_strategy` is `eager`: it dials the real host - sending a
+    ClientHello carrying real SNI - before it has seen the request it would have answered. An
+    HTTPS route could then not be answered at all when the real service was unreachable, which is
+    exactly the case shadow mode and delegation are for: an offline, decommissioned or
+    not-yet-built API (#32). `lazy` connects only when there is something to send.
+
+    The dead port stands in for the unreachable service; nothing is ever listening on it, so a
+    pass here means no connection to it was attempted.
+    """
+    closed = socket.socket()
+    closed.bind(("127.0.0.1", 0))
+    dead = closed.getsockname()[1]
+    closed.close()
+    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch))
+    eng, seen, stop = _start(cfg)
+    try:
+        status, data = _via_tls_proxy(
+            cfg, eng.listen_port(), "127.0.0.1", dead, "POST", "/things", body=b'{"a": 1}'
+        )
+    finally:
+        stop()
+    assert status == 200
+    assert json.loads(data)["a"] == 1
+    (ex,) = seen
+    assert (ex.answered_by, ex.kind, ex.request.scheme) == ("fake-L0", "write", "https")
+
+
 def test_a_targeted_write_is_answered_by_the_target_not_by_the_fake(tmp_path, monkeypatch, target):
     """The headline of #16: the write lands on an address the developer controls, that stub's
     body is what the agent parses, and the fake never runs."""
@@ -866,11 +907,24 @@ def test_a_delegated_exchange_records_what_the_agent_asked_for(tmp_path, monkeyp
     assert ex.target.endswith("/w")
 
 
-def test_the_authorization_header_is_stripped_before_it_reaches_a_target(
+CREDENTIAL_HEADERS_SENT = {
+    "authorization": "Bearer sk_live_SECRET",
+    "cookie": "session=SECRET",
+    "x-api-key": "SECRET",
+    "dd-api-key": "SECRET",
+    "x-honeycomb-team": "SECRET",
+}
+
+
+def test_every_credential_header_is_stripped_before_it_reaches_a_target(
     tmp_path, monkeypatch, target
 ):
     """A local stub does not need the real key, and forwarding it makes the target an
-    exfiltration path for a credential the agent never meant it to have (design §7)."""
+    exfiltration path for a credential the agent never meant it to have (design §7).
+
+    Every credential header, not only `Authorization`: the rule is about keys, and `Cookie`,
+    `x-api-key` and `DD-API-KEY` are keys (#32).
+    """
     maps = _targeted(
         tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{target}/w")]
     )
@@ -881,17 +935,20 @@ def test_the_authorization_header_is_stripped_before_it_reaches_a_target(
             "POST",
             "http://127.0.0.1/things",
             body=b"{}",
-            extra_headers={"authorization": "Bearer sk_live_SECRET"},
+            extra_headers=dict(CREDENTIAL_HEADERS_SENT),
         )
     finally:
         stop()
     headers = {k.lower(): v for k, v in _Target.seen[0][3].items()}
-    assert "authorization" not in headers
+    assert [name for name in CREDENTIAL_HEADERS_SENT if name in headers] == []
+    assert "SECRET" not in "".join(headers.values())
     assert headers["content-type"] == "application/json"  # everything else passes through
 
 
-def test_forward_auth_keeps_the_authorization_header(tmp_path, monkeypatch, target):
-    """The route opting in: a sandbox tenant or an internal simulator does need the key."""
+def test_forward_auth_keeps_the_credential_headers(tmp_path, monkeypatch, target):
+    """The route opting in: a sandbox tenant or an internal simulator does need the key. It is
+    one switch for all of them - a route that wants its `Authorization` forwarded is a route
+    whose target is trusted with credentials."""
     from dataclasses import replace as _replace
 
     maps = _targeted(
@@ -910,12 +967,12 @@ def test_forward_auth_keeps_the_authorization_header(tmp_path, monkeypatch, targ
             "POST",
             "http://127.0.0.1/things",
             body=b"{}",
-            extra_headers={"authorization": "Bearer sk_live_SECRET"},
+            extra_headers=dict(CREDENTIAL_HEADERS_SENT),
         )
     finally:
         stop()
     headers = {k.lower(): v for k, v in _Target.seen[0][3].items()}
-    assert headers["authorization"] == "Bearer sk_live_SECRET"
+    assert {name: headers.get(name) for name in CREDENTIAL_HEADERS_SENT} == CREDENTIAL_HEADERS_SENT
 
 
 def test_target_reads_sends_a_read_to_the_target_instead_of_the_real_service(
@@ -1050,6 +1107,39 @@ def test_a_locally_answered_flow_that_errors_keeps_its_own_flags(tmp_path, monke
     assert ex.answered_by == "fake-L0"
     assert "fidelity:L0" in ex.flags
     assert "upstream-error" not in ex.flags
+
+
+def test_a_refused_target_is_flagged_once_even_if_the_client_then_vanishes(tmp_path, monkeypatch):
+    """`request()` already answered and flagged this one; the client going away afterwards does
+    not make the target fail a second time. The flag is a fact about the exchange, not a counter
+    (#32). Driven through the addon, like every other client-disappears case."""
+    from mitmproxy.test import tflow, tutils
+
+    from irimi.engine.mitm import IrimiAddon
+
+    listen_port = 4000
+    maps = _targeted(
+        tmp_path,
+        monkeypatch,
+        targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{listen_port}/w")],
+    )
+    seen = []
+    addon = IrimiAddon(
+        _config(tmp_path, monkeypatch, maps=maps),
+        ShadowPolicy(),
+        NullStore(),
+        NoOverlay(),
+        seen.append,
+        lambda port, error: None,
+    )
+    flow = tflow.tflow(req=tutils.treq(method=b"POST", host="127.0.0.1", port=80, path=b"/things"))
+    flow.client_conn.sockname = ("127.0.0.1", listen_port)
+    addon.request(flow)  # the target is our own listener, so it is refused and flagged here
+    addon.error(flow)
+
+    (ex,) = seen
+    assert ex.answered_by == "delegated"
+    assert ex.flags.count("target-failed") == 1
 
 
 def test_an_untargeted_write_is_still_faked(tmp_path, monkeypatch, target):

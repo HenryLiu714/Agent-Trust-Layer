@@ -42,6 +42,29 @@ TARGET_FAILED_FLAG = "target-failed"
 DECISION_FAILED_FLAG = "decision-failed"
 FIDELITY_DELEGATED_FLAG = "fidelity:delegated"
 AUTH_HEADER = "authorization"
+# Header names that carry a credential and are removed before a request reaches an answer target,
+# unless the route sets `forward_auth: true`. Stripping `Authorization` alone was narrower than
+# the rule it implements - "a local stub does not need your real key" - and left `Cookie`,
+# `x-api-key` and `DD-API-KEY` on the request (#32).
+#
+# A marker list rather than a vendor list, because the vendor list is never finished: every new
+# service brings its own spelling, and the one it is missing is the one that leaks. Over-stripping
+# costs a stub a header it probably did not want; under-stripping hands it a live key, so the rule
+# is deliberately wide and `forward_auth` is the one way to turn it off.
+CREDENTIAL_MARKERS: tuple[str, ...] = (
+    "auth",  # authorization, proxy-authorization, x-sentry-auth, x-authenticated-*
+    "api-key",  # x-api-key, dd-api-key, x-goog-api-key
+    "api_key",
+    "apikey",
+    "token",  # x-auth-token, x-amz-security-token, x-csrf-token
+    "secret",
+    "credential",
+    "password",
+    "signature",  # x-slack-signature and friends: a signature over a shared secret
+)
+# The ones no marker catches: a cookie jar is a credential, and these two vendor headers are
+# spelled with none of the words above.
+CREDENTIAL_HEADERS: frozenset[str] = frozenset({"cookie", "dd-application-key", "x-honeycomb-team"})
 
 
 class ReverseDoorRefused(ValueError):
@@ -153,6 +176,17 @@ def is_local_target(url: str) -> bool:
     except ValueError:
         return False
     return host == "localhost" or is_loopback(host)
+
+
+def is_credential_header(name: str) -> bool:
+    """True when this header's value is a credential, so a target must not be handed it.
+
+    Compared case-insensitively and by substring, so a vendor header nobody has written down yet
+    (`x-acme-api-key`) is covered the day it appears. See CREDENTIAL_MARKERS for why the rule is
+    wide rather than exact.
+    """
+    lowered = name.strip().lower()
+    return lowered in CREDENTIAL_HEADERS or any(m in lowered for m in CREDENTIAL_MARKERS)
 
 
 def rewrite_reverse(request: Request, allowed_hosts: frozenset[str]) -> Request:

@@ -7,6 +7,7 @@ from irimi.runner import (
     EngineThread,
     banner_lines,
     child_env,
+    delegated_lines,
     exchange_line,
     exit_code_for,
     summary_lines,
@@ -154,3 +155,82 @@ def test_exchange_line_columns_line_up_for_the_nine_character_values():
 
 def test_exchange_line_names_a_delegated_answer():
     assert exchange_line(_exchange(answered_by="delegated")).startswith("delegated")
+
+
+def _service(**kwargs):
+    from irimi.servicemap import ServiceMap
+
+    base = {
+        "service": "stripe",
+        "hosts": frozenset({"api.stripe.com"}),
+        "routes": (),
+    }
+    base.update(kwargs)
+    return ServiceMap(**base)
+
+
+def _route(**kwargs):
+    from irimi.servicemap import Route
+
+    base = {"method": "POST", "path": "/v1/refunds", "operation": "refunds.create", "kind": "write"}
+    base.update(kwargs)
+    return Route(**base)
+
+
+def _index(*services):
+    from irimi.servicemap import MapIndex
+
+    return MapIndex(services=tuple(services))
+
+
+def test_a_service_with_no_target_adds_no_banner_line():
+    """No delegated service, no new lines: the banner a reader already knows stays as it was."""
+    assert delegated_lines(_index(_service(routes=(_route(),)))) == []
+
+
+def test_a_service_target_names_the_service_the_target_and_what_it_answers():
+    lines = delegated_lines(_index(_service(target="http://127.0.0.1:3000")))
+    assert lines == ["delegated: stripe → http://127.0.0.1:3000 (writes)"]
+
+
+def test_target_reads_says_the_reads_are_delegated_too():
+    """The banner's "reads are real" claim is exactly what `target_reads` makes false (#20)."""
+    lines = delegated_lines(_index(_service(target="http://127.0.0.1:3000", target_reads=True)))
+    assert lines == ["delegated: stripe → http://127.0.0.1:3000 (reads + writes)"]
+
+
+def test_a_route_target_is_named_even_when_the_service_itself_has_none():
+    """`irimi maps list` printed `target: self` for exactly this shape; the banner must not."""
+    sm = _service(routes=(_route(target="http://127.0.0.1:3111"), _route(path="/v1/charges")))
+    assert delegated_lines(_index(sm)) == [
+        "delegated: stripe POST /v1/refunds → http://127.0.0.1:3111 (writes)"
+    ]
+
+
+def test_a_delegated_read_route_says_reads():
+    sm = _service(routes=(_route(kind="read", target="http://127.0.0.1:3111"),))
+    assert delegated_lines(_index(sm))[0].endswith("(reads)")
+
+
+def test_a_target_that_is_not_loopback_says_so_and_is_red_only_when_asked():
+    """--allow-target-host is how a target stops being loopback, and the line has to say it."""
+    index = _index(_service(target="http://stub.example:3000"))
+    (plain,) = delegated_lines(index)
+    assert "NOT loopback" in plain
+    assert "\033[" not in plain
+    (coloured,) = delegated_lines(index, color=True)
+    assert coloured.startswith("\033[31m") and coloured.endswith("\033[0m")
+
+
+def test_a_loopback_target_is_never_painted_red():
+    (line,) = delegated_lines(_index(_service(target="http://127.0.0.1:3000")), color=True)
+    assert "\033[" not in line
+    assert "NOT loopback" not in line
+
+
+def test_delegated_lines_are_sorted_by_service():
+    index = _index(
+        _service(service="stripe", target="http://127.0.0.1:3000"),
+        _service(service="acme", hosts=frozenset({"acme.test"}), target="http://127.0.0.1:3001"),
+    )
+    assert [line.split()[1] for line in delegated_lines(index)] == ["acme", "stripe"]

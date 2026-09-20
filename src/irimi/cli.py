@@ -204,6 +204,13 @@ def cmd_maps_list(args: argparse.Namespace) -> int:
             f"  {name:<{width}}  {sm.service:<{service_width}}  {len(sm.routes):>3} routes  "
             f"target: {sm.target}{reads}"
         )
+        # The service target alone printed `target: self` for a service whose *routes* carry
+        # targets, so a partly delegated service looked untouched in the listing and contradicted
+        # the banner printed two seconds later (#20). Route targets get a line of their own under
+        # the host, because the column above is the service's answer and this is the route's.
+        for route in sm.routes:
+            if route.target != servicemap.SELF_TARGET:
+                print(f"  {'':<{width}}  route {route.method} {route.path} → {route.target}")
     override = servicemap.override_path()
     if override is not None:
         print(f"  overrides from {override}")
@@ -278,6 +285,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
             "serve", run_id, cfg.listen_host, engine.listen_port(), p.cert
         ):
             print(line)
+        for line in runner.delegated_lines(index, color=sys.stdout.isatty()):
+            print(line)
         await task
 
     try:
@@ -350,6 +359,8 @@ def cmd_shadow(args: argparse.Namespace) -> int:
         if warning is not None:
             print(warning, file=sys.stderr, flush=True)
         for line in runner.banner_lines("shadow", run_id, paths.LISTEN_HOST, handle.port(), p.cert):
+            print(line, flush=True)
+        for line in runner.delegated_lines(index, color=sys.stdout.isatty()):
             print(line, flush=True)
         env = runner.child_env(dict(os.environ), paths.LISTEN_HOST, handle.port(), p.cert, run_id)
         try:

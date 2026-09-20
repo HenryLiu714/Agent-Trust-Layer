@@ -314,6 +314,25 @@ and the exchange is what carries `target-failed`.
 Loading happens before the proxy starts, and a map, overrides file or `--target` the loader refuses
 stops `serve` and `shadow` with the rule it broke on stderr.
 
+#### What a delegated service changes
+
+The banner's promise is that hosts *not* routed through the proxy are not virtualized. A routed
+host may not be live either, so every service or route with a target gets its own banner line, and
+`irimi maps list` prints route-level targets under the host rather than only the service's:
+
+    delegated: stripe → http://127.0.0.1:3000 (reads + writes)
+    delegated: slack POST /api/chat.postMessage → http://127.0.0.1:3111 (writes)
+
+With `--allow-target-host` the line says the target is not loopback, and is red on a terminal. The
+exit summary counts a delegated exchange apart from a live one for the same reason: a delegated
+read is not a real read, and "reads are real" is what that count means to whoever reads it.
+
+Two consequences are Phase 2's and are written down in `src/irimi/overlay.py` so the issue that
+builds the overlay inherits them: a delegated service gets **no overlay**, because its target owns
+read-after-write consistency and layering irimi's minted objects over that state would corrupt it;
+and L3 preconditions for a delegated service must read from the target, or they check the write
+against a world the agent is not in.
+
 ## The example agent
 
 `examples/refund_agent/agent.py` is the fixture the proxy is tested against: it lists charges from

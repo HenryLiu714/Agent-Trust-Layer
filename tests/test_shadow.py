@@ -233,3 +233,42 @@ def test_reverse_door_allow_host(home, capfd):
     assert "127.0.0.1/x" in out
     assert "[upstream-error]" in out
     assert "1 exchange(s)" in out
+
+
+def test_banner_names_a_delegated_service(home, tmp_path, capsys):
+    """A routed host may not be live either: nothing in the banner said so before (#20)."""
+    from irimi import servicemap
+
+    (tmp_path / "cwd" / servicemap.CWD_OVERRIDE_NAME).write_text(
+        "service: stripe\ntarget: http://127.0.0.1:3000\ntarget_reads: true\n"
+    )
+    assert main(["shadow", *_py("pass")]) == 0
+    out = capsys.readouterr().out
+    assert "delegated: stripe → http://127.0.0.1:3000 (reads + writes)" in out
+    assert "NOT virtualized" in out  # the existing banner is unchanged, not replaced
+
+
+def test_the_banner_says_when_a_target_left_the_machine(home, capsys):
+    argv = [
+        "shadow",
+        "--port",
+        "0",
+        "--target",
+        "api.stripe.com=http://stub.example:3000",
+        "--allow-target-host",
+        "stub.example",
+        "--",
+        sys.executable,
+        "-c",
+        "pass",
+    ]
+    assert main(argv) == 0
+    captured = capsys.readouterr()
+    assert "delegated: stripe → http://stub.example:3000 (writes)" in captured.out
+    assert "NOT loopback" in captured.out
+    assert "--allow-target-host" in captured.err  # the existing escape-hatch warning, unchanged
+
+
+def test_no_delegated_service_leaves_the_banner_alone(home, capsys):
+    assert main(["shadow", *_py("pass")]) == 0
+    assert "delegated:" not in capsys.readouterr().out

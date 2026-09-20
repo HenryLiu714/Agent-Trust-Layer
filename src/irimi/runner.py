@@ -11,6 +11,8 @@ from pathlib import Path
 
 from irimi.engine import Engine, EngineStartError
 from irimi.exchange import Exchange
+from irimi.pipeline import is_local_target
+from irimi.servicemap import SELF_TARGET, MapIndex, is_delegated
 
 # Exactly the variables issue #3 specifies. Nothing is added to this list without a new issue.
 NO_PROXY_VALUE = "localhost,127.0.0.1"
@@ -18,7 +20,14 @@ ENGINE_ACTIVE_ENV = "IRIMI_ENGINE_ACTIVE"
 RUN_ENV = "IRIMI_RUN"
 
 NOT_VIRTUALIZED_NOTICE = "hosts not routed through the proxy are NOT virtualized."
-BACKSTOP_NOTICE = "backstop: none (Phase 4)"
+BACKSTOP = "none (Phase 4)"
+BACKSTOP_NOTICE = f"backstop: {BACKSTOP}"
+
+# A delegated service or route: the banner has to say that a *routed* host may not be live either.
+DELEGATED_PREFIX = "delegated:"
+NOT_LOOPBACK_NOTICE = "NOT loopback - these requests leave this machine"
+RED = "\033[31m"
+RESET = "\033[0m"
 
 READY_TIMEOUT_S = 30.0
 STOP_TIMEOUT_S = 30.0
@@ -63,6 +72,45 @@ def banner_lines(command: str, run_id: str, host: str, port: int, ca_cert: Path)
         NOT_VIRTUALIZED_NOTICE,
         BACKSTOP_NOTICE,
     ]
+
+
+def delegated_lines(index: MapIndex, color: bool = False) -> list[str]:
+    """One banner line per delegated service or route: what irimi is not answering, and who is.
+
+    `NOT_VIRTUALIZED_NOTICE` tells the reader that a host which is not routed through the proxy
+    is not virtualized. Nothing said that a *routed* host may not be live either: a service or a
+    route carrying an answer target is answered by an address the developer named, so the "reads
+    are real" claim the banner rests on is false for that service (design D20, §4.4).
+
+    `servicemap.is_delegated` is the shared condition, rather than a fourth spelling of it here:
+    this banner, the exit summary and `irimi maps list` are three surfaces that must agree about
+    which services are delegated, and they agree by construction only if they ask one function.
+
+    A target that is not loopback got there through `--allow-target-host`, so it is named as
+    leaving the machine and painted red. `color` is the caller's answer to "is this a terminal";
+    captured output stays plain so a test asserts on words rather than escape codes.
+    """
+    lines: list[str] = []
+    for sm in sorted(index.services, key=lambda s: s.service):
+        if not is_delegated(sm):
+            continue
+        if sm.target != SELF_TARGET:
+            scope = "reads + writes" if sm.target_reads else "writes"
+            lines.append(_delegated_line(sm.service, sm.target, scope, color))
+        for route in sm.routes:
+            if route.target != SELF_TARGET:
+                what = f"{sm.service} {route.method} {route.path}"
+                scope = "reads" if route.kind == "read" else "writes"
+                lines.append(_delegated_line(what, route.target, scope, color))
+    return lines
+
+
+def _delegated_line(what: str, target: str, scope: str, color: bool) -> str:
+    line = f"{DELEGATED_PREFIX} {what} → {target} ({scope})"
+    if is_local_target(target):
+        return line
+    line = f"{line}  {NOT_LOOPBACK_NOTICE}"
+    return f"{RED}{line}{RESET}" if color else line
 
 
 def exchange_line(exchange: Exchange) -> str:

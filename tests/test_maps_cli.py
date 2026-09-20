@@ -54,3 +54,28 @@ def test_a_refused_map_stops_the_proxy_before_anything_else(tmp_path, capsys, co
     err = capsys.readouterr().err
     assert "is not loopback" in err
     assert "irimi init" not in err
+
+
+ROUTE_OVERRIDE = """service: slack
+routes:
+  - match:
+      method: POST
+      path: /api/chat.postMessage
+    target: http://127.0.0.1:3111
+"""
+
+
+def test_maps_list_shows_a_route_level_target(tmp_path, capsys):
+    """The listing read the *service* target, so a target set on a single route was invisible and
+    every one of Slack's three hosts printed `target: self` for a partly delegated service (#20)."""
+    (tmp_path / "cwd" / servicemap.CWD_OVERRIDE_NAME).write_text(ROUTE_OVERRIDE)
+    assert main(["maps", "list"]) == 0
+    out = capsys.readouterr().out
+    assert "route POST /api/chat.postMessage → http://127.0.0.1:3111" in out
+    # Under every host the service claims, because each of those rows says `target: self`.
+    assert out.count("route POST /api/chat.postMessage → http://127.0.0.1:3111") == 3
+
+
+def test_maps_list_adds_no_route_lines_when_no_route_is_delegated(capsys):
+    assert main(["maps", "list"]) == 0
+    assert "route " not in capsys.readouterr().out

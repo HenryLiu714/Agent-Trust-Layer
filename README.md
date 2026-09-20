@@ -50,13 +50,16 @@ Slack Web API call gets Slack's own `{"ok": true, "ts": "..."}` envelope instead
 refuses anything else, and an incoming webhook gets the literal `ok` as `text/plain`, which is
 what the real one answers.
 
-Three things the echo is careful about, because an SDK has to be able to read the fields it just
+Four things the echo is careful about, because an SDK has to be able to read the fields it just
 sent. A write that **names its resource in the path** gets that id back rather than a fresh one:
 `POST /v1/customers/cus_REAL123` echoes `cus_REAL123`, because the live API does and an agent that
 logs the id or retrieves it again would otherwise be handed one for a resource that never existed.
-A **bracket-nested form field** becomes a nested object, so `metadata[order_id]=6735` comes back as
-`metadata`, with the value still a string as the live API sends it. And a **repeated key** collects
-into a list instead of keeping only the last value.
+The segment is percent-decoded first, and a value that is not shaped like an id — a PaymentIntent
+client secret, say — is not mistaken for one. A **bracket-nested form field** becomes a nested
+object, so `metadata[order_id]=6735` comes back as `metadata`. A **repeated key** collects into a
+list, spelled either way: `tags=a&tags=b` and Stripe's own `expand[]=a&expand[]=b`. And a **number
+is a number at any depth**, so `line_items[0][quantity]=2` echoes `2` exactly as `amount=4900`
+does — except under `metadata`, whose values are always strings on the live API.
 
     uv run irimi serve
     # in another terminal

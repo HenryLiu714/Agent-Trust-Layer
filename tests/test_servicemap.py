@@ -1060,6 +1060,18 @@ def test_path_params_binds_nothing_when_the_literal_segments_differ():
     assert servicemap.path_params("/v1/customers/{customer}", "/v1/customers") == {}
 
 
+def test_path_params_percent_decodes_a_captured_segment():
+    """The service decodes it, so we do: `cus%5FREAL123` is the same customer as `cus_REAL123`,
+    and reading the raw segment made `policy.named_id` mint a fresh id for a resource the request
+    already named (#33). Literal segments are still compared raw, so this cannot widen a match."""
+    assert servicemap.path_params("/v1/customers/{customer}", "/v1/customers/cus%5FX") == {
+        "customer": "cus_X"
+    }
+    assert servicemap.path_params("/v1/customers/{c}", "/v1/customers/a%20b") == {"c": "a b"}
+    # A literal segment spelled with an escape does not match; decoding only reads the holes.
+    assert servicemap.path_params("/v1/customers/{c}", "/v1/custom%65rs/x") == {}
+
+
 def test_a_route_pattern_may_not_repeat_a_parameter_name(tmp_path):
     """`/a/{x}/b/{x}` binds `x` once and drops the first capture silently, which is how
     `named_id` would come to echo the wrong id."""

@@ -4,11 +4,15 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 Kind = Literal["read", "write", "llm", "telemetry", "unknown"]
-AnsweredBy = Literal["live", "fake-L0"]
+AnsweredBy = Literal["live", "fake-L0", "delegated"]
 Validation = Literal["validated", "unvalidated"]
 Door = Literal["forward", "reverse"]
 
 KINDS: tuple[Kind, ...] = ("read", "write", "llm", "telemetry", "unknown")
+# The kinds shadow mode forwards to the real service instead of answering locally. It lives here,
+# beside KINDS, rather than in policy.py, because the map loader has to refuse a `default_kind`
+# that names one (#30) and servicemap must not import policy.
+LIVE_KINDS: tuple[Kind, ...] = ("read", "llm", "telemetry")
 SAFE_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
 
 Headers = tuple[tuple[str, str], ...]
@@ -52,3 +56,6 @@ class Exchange:
     run_id: str
     door: Door = "forward"  # "reverse" = came in as /<host>/<path> on the listener itself
     flags: tuple[str, ...] = field(default_factory=tuple)
+    # The address that answered a `delegated` exchange (design D20). "" for every other one:
+    # `target: self` is not an address, and a live forward went to the real service.
+    target: str = ""

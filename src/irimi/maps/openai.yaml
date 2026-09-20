@@ -36,9 +36,12 @@ routes:
     kind: llm
     human: embed with {model}
 
+  # A models listing is not inference, so it is a `read`, not `llm` - this file's own header says
+  # only the inference routes are `llm`. `llm` also opted the path out of the read overlay, which
+  # the engine gates on `kind: read`, so it could never be overlaid either (#29).
   - match:
       method: GET
       path: /v1/models
     operation: models.list
-    kind: llm
+    kind: read
     human: list models

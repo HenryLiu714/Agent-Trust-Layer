@@ -21,6 +21,7 @@ Shipped maps live in `irimi/maps/*.yaml` and never set a target. A user's overri
 else: an override able to change a route's `kind` would be a way to turn a write into a read.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,7 @@ from urllib.parse import urlsplit
 import yaml
 
 from irimi import paths
-from irimi.exchange import KINDS, SAFE_METHODS, Kind
+from irimi.exchange import KINDS, LIVE_KINDS, SAFE_METHODS, Kind
 from irimi.pipeline import is_loopback
 
 SCHEMA_VERSION = 1
@@ -41,8 +42,17 @@ CWD_OVERRIDE_NAME = "irimi.maps.yaml"  # in the working directory, checked first
 HOME_OVERRIDE_NAME = "maps.yaml"  # in $IRIMI_HOME, the fallback
 
 VERB_STYLES = ("honest", "post-only")  # does the HTTP method carry information for this service?
+
+# Routes where the URL *is* the credential: a Slack incoming webhook URL is the whole secret, so
+# sending one to a host off this machine hands it to whoever is listening. These may be targeted
+# at loopback and never through `--allow-target-host` (design §7, threat 8; issue #16). Keyed by
+# service and operation, not by host, because `hooks.slack.com` and `slack.com` are one service
+# and both resolve to this route.
+WEBHOOK_ROUTES: frozenset[tuple[str, str]] = frozenset({("slack", "incoming_webhook")})
 TARGETABLE_KINDS: frozenset[str] = frozenset({"write", "unknown"})
-DEFAULT_KINDS: tuple[Kind, ...] = ("write", "unknown", "telemetry")  # what `default_kind` may say
+# What `default_kind` may say: every kind that is *not* forwarded live. Derived, not listed, so a
+# live-forwarding kind added to LIVE_KINDS later is refused as a default the day it is added (#30).
+DEFAULT_KINDS: tuple[Kind, ...] = tuple(k for k in KINDS if k not in LIVE_KINDS)
 
 SERVICE_KEYS = frozenset(
     {"version", "service", "hosts", "verbs", "default_kind", "target", "target_reads", "routes"}
@@ -181,6 +191,30 @@ def match_route(sm: ServiceMap, method: str, path: str) -> Route | None:
     return best
 
 
+def path_params(pattern: str, path: str) -> dict[str, str]:
+    """The `{name}` segments of a route pattern bound to this request path's own segments.
+
+    `/v1/customers/{customer}` against `/v1/customers/cus_REAL123` gives
+    `{"customer": "cus_REAL123"}`. Empty when the pattern has no holes, or when it does not match
+    the path at all. It lives in this module, not in the one that uses it, because the `{name}`
+    pattern language belongs to the map schema: a second parser anywhere else would drift from
+    `_match_path` and bind the captures to the wrong segments.
+
+    "Does not match" is `_match_path`'s own answer, not a second opinion. Counting segments is
+    not matching: `/v1/customers/{customer}` and `/v9/charges/cus_X` have three segments each and
+    share no literal, and binding `customer` there is the drift this function exists to prevent.
+    """
+    parts = _segments(pattern)
+    segments = _segments(path)
+    if _match_path(pattern, segments) is None:
+        return {}
+    return {
+        part[1:-1]: segment
+        for part, segment in zip(parts, segments, strict=True)
+        if part.startswith("{") and part.endswith("}")
+    }
+
+
 def target_for(sm: ServiceMap, route: Route) -> str:
     """The target that answers this route: `self`, or the URL that answers it instead.
 
@@ -226,16 +260,23 @@ def load(
     allow_target_hosts: frozenset[str] = frozenset(),
     cwd: Path | None = None,
     maps_dir: Path | None = None,
+    targets: Sequence[tuple[str, str, str]] = (),
+    target_reads: Sequence[str] = (),
 ) -> MapIndex:
-    """Load the shipped maps, merge the user's overrides file over them, and validate the result.
+    """Load the shipped maps, merge what the user says over them, and validate the result.
 
-    Raises MapError on anything wrong, naming the file and the rule. `allow_target_hosts` is the
-    set of non-loopback hosts a target may name (issue #16's `--allow-target-host`).
+    Three layers, each beating the one before it: the shipped maps, the overrides file, then the
+    `--target` / `--target-reads` flags. Validation runs last, over the merged result, so a
+    non-loopback target is refused however it arrived. Raises MapError on anything wrong, naming
+    the source and the rule. `allow_target_hosts` is the set of non-loopback hosts a target may
+    name (`--allow-target-host`).
     """
     maps = load_shipped(maps_dir)
     override = override_path(cwd)
     if override is not None:
         maps = apply_overrides(maps, override)
+    if targets or target_reads:
+        maps = apply_cli_targets(maps, targets, target_reads)
     for sm in maps:
         _validate_targets(sm, allow_target_hosts)
     return MapIndex(tuple(maps))
@@ -349,6 +390,68 @@ def apply_overrides(maps: list[ServiceMap], path: Path) -> list[ServiceMap]:
     return [by_name[sm.service] for sm in maps]
 
 
+def apply_cli_targets(
+    maps: list[ServiceMap],
+    targets: Sequence[tuple[str, str, str]],
+    target_reads: Sequence[str],
+) -> list[ServiceMap]:
+    """Apply `--target '<host>[<path>]=<url>'` and `--target-reads <host>` over the loaded maps.
+
+    A host with no path sets the **service** target. A host with a path sets it on every
+    targetable route of that service the path names - matched against the route pattern literally
+    (`/v1/customers/{customer}`) or as a concrete request path (`/v1/customers/cus_1`), so the
+    caller does not have to know how the map spells it. `read`, `llm` and `telemetry` routes are
+    skipped, because a route target is only valid on `write` and `unknown`; delegate reads with
+    `--target-reads`.
+
+    Naming a host or a path no loaded map claims is a MapError, not a silent no-op: a typo that
+    quietly changed nothing would look exactly like a working delegation.
+    """
+    index = MapIndex(tuple(maps))  # built once, before by_name starts changing underneath it
+    by_name = {sm.service: sm for sm in maps}
+    for host, route_path, url in targets:
+        claimed = index.service_for(host)
+        if claimed is None:
+            raise MapError(f"--target: no loaded service map claims host {host!r}")
+        base = by_name[claimed.service]
+        target = _parse_target(url, f"--target {host}{route_path}")
+        if not route_path:
+            by_name[base.service] = replace(base, target=target, source=_plus(base, "--target"))
+            continue
+        routes = list(base.routes)
+        hits = [
+            i
+            for i, route in enumerate(routes)
+            if route.kind in TARGETABLE_KINDS and _names_route(route, route_path)
+        ]
+        if not hits:
+            raise MapError(
+                f"--target: no `write` or `unknown` route of service {base.service!r} matches "
+                f"{route_path!r}"
+            )
+        for i in hits:
+            routes[i] = replace(routes[i], target=target)
+        by_name[base.service] = replace(base, routes=tuple(routes), source=_plus(base, "--target"))
+    for host in target_reads:
+        claimed = index.service_for(host)
+        if claimed is None:
+            raise MapError(f"--target-reads: no loaded service map claims host {host!r}")
+        base = by_name[claimed.service]
+        by_name[base.service] = replace(
+            base, target_reads=True, source=_plus(base, "--target-reads")
+        )
+    return [by_name[sm.service] for sm in maps]
+
+
+def _names_route(route: Route, spec: str) -> bool:
+    """True when `spec` names `route`: its pattern verbatim, or a path that pattern matches."""
+    return route.path == spec or _match_path(route.path, _segments(spec)) is not None
+
+
+def _plus(sm: ServiceMap, what: str) -> str:
+    return sm.source if sm.source.endswith(what) else f"{sm.source} + {what}"
+
+
 # ------------------------------------------------------------------------------------ validation
 
 
@@ -370,6 +473,8 @@ def _validate_targets(sm: ServiceMap, allow_target_hosts: frozenset[str]) -> Non
         if route.forward_auth and target_for(sm, route) == SELF_TARGET:
             raise MapError(f"{where}: `forward_auth: true` needs a target to forward to")
         _check_target_host(route.target, allow_target_hosts, f"{where}: `target`")
+        if (sm.service, route.operation) in WEBHOOK_ROUTES:
+            _require_loopback_target(target_for(sm, route), f"{where} ({route.operation})")
 
 
 def _check_target_host(target: str, allow_target_hosts: frozenset[str], where: str) -> None:
@@ -387,11 +492,25 @@ def _check_target_host(target: str, allow_target_hosts: frozenset[str], where: s
     )
 
 
+def _require_loopback_target(target: str, where: str) -> None:
+    """A webhook route's target must be loopback, with no escape hatch (see WEBHOOK_ROUTES)."""
+    if target == SELF_TARGET:
+        return
+    host = urlsplit(target).hostname or ""
+    if host == "localhost" or is_loopback(host):
+        return
+    raise MapError(
+        f"{where}: a webhook route may only be targeted at loopback. Its URL is the credential, "
+        "so --allow-target-host does not apply to it"
+    )
+
+
 def _check_route_rules(sm: ServiceMap) -> None:
     """Per-route rules that need the service's own fields (`verbs`) to judge."""
     seen: set[tuple[str, str]] = set()
     for route in sm.routes:
         where = f"{sm.source}: route {route.method} {route.path}"
+        _check_unique_holes(route.path, where)
         key = (route.method, route.path)
         if key in seen:
             raise MapError(f"{where}: appears twice in the same map")
@@ -410,6 +529,22 @@ def _check_route_rules(sm: ServiceMap) -> None:
                 f"{where}: `kind: read` on an unsafe method downgrades a write. Say "
                 "`persists: false` and add a `comment:` explaining why it persists nothing"
             )
+
+
+def _check_unique_holes(pattern: str, where: str) -> None:
+    """A `{name}` may appear once in a pattern: `path_params` returns one entry per name.
+
+    `/a/{x}/b/{x}` would bind `x` to the last segment and drop the first silently, which is how
+    `named_id` would come to echo the wrong id. Refusing the pattern is the fail-closed answer,
+    and no shipped route repeats a name.
+    """
+    holes = [p[1:-1] for p in _segments(pattern) if p.startswith("{") and p.endswith("}")]
+    repeated = sorted({name for name in holes if holes.count(name) > 1})
+    if repeated:
+        raise MapError(
+            f"{where}: `{{{repeated[0]}}}` appears more than once in the path. A parameter name "
+            "binds one segment, so a repeat would silently drop every capture but the last"
+        )
 
 
 def _check_unique(maps: list[ServiceMap]) -> None:
@@ -510,9 +645,10 @@ def _parse_hosts(raw: Any, source: str) -> frozenset[str]:
 def _check_pattern(host: str, item: Any, source: str) -> None:
     """A wildcard host is exactly one leading `*.` label plus two or more labels of its own.
 
-    `*.com` is refused along with `*foo.com`, `foo.*.com` and `**.foo.com`: a single label after
-    the star claims a whole public suffix, and every other spelling is the silent-never-matches
-    shape issue #9 was opened about.
+    The rule is label counting, not public suffixes: `*.com` is refused because one label after
+    the star is almost always a mistake, while `*.co.uk` and `*.github.io` satisfy it and would
+    each claim a whole public suffix. No shipped map uses one. `*foo.com`, `foo.*.com` and
+    `**.foo.com` are refused as the silent-never-matches shape issue #9 was opened about.
     """
     rest = host[2:] if _is_pattern(host) else ""
     if not _is_pattern(host) or "*" in rest or "." not in rest or "" in rest.split("."):
@@ -535,38 +671,63 @@ def _parse_ids(raw: Any, where: str) -> dict[str, str]:
     return out
 
 
+# Why each live-forwarding kind is refused as a service-wide default. The *rule* is LIVE_KINDS;
+# these only say why, because a generic message would not tell a map author what to write instead.
+DEFAULT_KIND_REASONS: dict[str, str] = {
+    "read": (
+        "that forwards every route this map does not list to the real service. List the read "
+        "routes instead"
+    ),
+    "llm": (
+        "`llm` is a route-level kind. On an LLM host only the inference routes are `llm`; "
+        "everything else is a real write"
+    ),
+    "telemetry": (
+        "most telemetry vendors serve their REST control plane from the same host as their "
+        "intake, so this forwards `DELETE /api/v1/dashboard/{id}` to the real service. List the "
+        "intake routes instead"
+    ),
+}
+
+
 def _parse_default_kind(raw: Any, where: str) -> Kind | None:
     """The service-wide kind for routes the map does not list, or None to use the RFC fallback.
 
-    Only `write`, `unknown` and `telemetry` may be defaulted. `read` is refused because it would
-    forward every unlisted route on this service's hosts to the real API, which is the bypass the
-    maps exist to close; `llm` is refused because it is route-level (design §4.3: on an LLM host
-    only the inference routes are `llm` and everything else is a real, billable write).
+    A default may not name a kind shadow mode forwards live (`exchange.LIVE_KINDS`): that sends
+    every route this map does not list to the real service, which is the bypass the maps exist to
+    close. `DEFAULT_KINDS` is derived from that same set rather than listed by hand, so the rule
+    covers a live kind added later; DEFAULT_KIND_REASONS only explains each one.
     """
     if raw is None:
         return None
     kind = _parse_str(raw, where)
-    if kind == "read":
-        raise MapError(
-            f"{where} may not be `read`: that forwards every route this map does not list to the "
-            "real service. List the read routes instead"
-        )
-    if kind == "llm":
-        raise MapError(
-            f"{where} may not be `llm`: `llm` is a route-level kind. On an LLM host only the "
-            "inference routes are `llm`; everything else is a real write"
-        )
+    if kind in LIVE_KINDS:
+        reason = DEFAULT_KIND_REASONS.get(kind, "irimi forwards that kind to the real service")
+        raise MapError(f"{where} may not be `{kind}`: {reason}")
     if kind not in DEFAULT_KINDS:
         raise MapError(f"{where} must be one of {list(DEFAULT_KINDS)}, got {kind!r}")
     return kind
 
 
 def _parse_target(raw: Any, where: str) -> str:
-    """`self`, or an http(s) origin with an optional path. Query, fragment and userinfo are out."""
+    """`self`, or an http(s) origin with an optional path. Query, fragment and userinfo are out.
+
+    Every target reaches this function - shipped map, overrides file and `--target` alike - so it
+    is the one place a malformed URL may turn into a MapError. Both `urlsplit` and its `.port`
+    accessor raise ValueError on input a user can type (`http://[::1/x`, `http://h:99999`), and a
+    ValueError escaping here is an uncaught traceback out of `irimi serve` instead of the one-line
+    refusal every other bad target gets.
+    """
     target = _parse_str(raw, where).strip()
     if target == SELF_TARGET:
         return target
-    parts = urlsplit(target)
+    try:
+        parts = urlsplit(target)
+        port = parts.port
+    except ValueError as exc:
+        raise MapError(f"{where}: {target!r} is not a URL irimi can parse ({exc})") from None
+    if port is not None and not 1 <= port <= 65535:
+        raise MapError(f"{where}: {target!r} has a bad port")
     if parts.scheme not in ("http", "https"):
         raise MapError(
             f"{where}: must be {SELF_TARGET!r} or an http(s) URL, got {target!r} "

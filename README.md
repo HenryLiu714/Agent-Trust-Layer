@@ -46,8 +46,17 @@ maps do not cover. Each exchange prints as one line.
 A `fake-L0` answer is a `200` whose JSON body echoes the request's own fields, stamps `created`,
 and mints an id for every field the matched route names: a Stripe refund comes back with
 `id: re_...`, `balance_transaction: txn_...` and `object: refund`, so stripe-python parses it. A
-Slack call gets Slack's own `{"ok": true, "ts": "..."}` envelope instead, because its SDK refuses
-anything else.
+Slack Web API call gets Slack's own `{"ok": true, "ts": "..."}` envelope instead, because its SDK
+refuses anything else, and an incoming webhook gets the literal `ok` as `text/plain`, which is
+what the real one answers.
+
+Three things the echo is careful about, because an SDK has to be able to read the fields it just
+sent. A write that **names its resource in the path** gets that id back rather than a fresh one:
+`POST /v1/customers/cus_REAL123` echoes `cus_REAL123`, because the live API does and an agent that
+logs the id or retrieves it again would otherwise be handed one for a resource that never existed.
+A **bracket-nested form field** becomes a nested object, so `metadata[order_id]=6735` comes back as
+`metadata`, with the value still a string as the live API sends it. And a **repeated key** collects
+into a list instead of keeping only the last value.
 
     uv run irimi serve
     # in another terminal
@@ -123,7 +132,7 @@ prints, and the id prefixes a fake response mints. The maps that ship with irimi
     irimi maps list
 
 ```
-irimi maps · 10 service(s) · 17 host(s) · 47 route(s)
+irimi maps · 10 service(s) · 12 host(s) · 6 pattern(s) · 47 route(s)
   api.anthropic.com        anthropic    2 routes  target: self
   api.honeycomb.io         honeycomb    2 routes  target: self
   api.openai.com           openai       4 routes  target: self
@@ -137,11 +146,16 @@ irimi maps · 10 service(s) · 17 host(s) · 47 route(s)
   meter-events.stripe.com  stripe      10 routes  target: self
   slack.com                slack       10 routes  target: self
   *.datadoghq.com          datadog      5 routes  target: self
-  *.i.posthog.com          posthog      4 routes  target: self
+  *.ingest.de.sentry.io    sentry       4 routes  target: self
   *.ingest.sentry.io       sentry       4 routes  target: self
+  *.ingest.us.sentry.io    sentry       4 routes  target: self
   *.langfuse.com           langfuse     2 routes  target: self
   *.posthog.com            posthog      4 routes  target: self
 ```
+
+Hosts and patterns are counted separately because only the exact hosts are the reverse door's
+allow-list. Sentry is listed three times: it split ingest by region in 2024, so a DSN issued since
+then is `o<org>.ingest.us.sentry.io`, which does not end in `.ingest.sentry.io`.
 
 Stripe, Slack (including `hooks.slack.com`), OpenAI, Anthropic and six telemetry backends —
 LangSmith, Langfuse, Sentry, Datadog, Honeycomb and PostHog — ship with a map today.
@@ -201,21 +215,26 @@ The order matters most where the verb lies. Slack's `conversations.history` is a
 its map entry makes it a read that forwards live — without it the agent would get an empty channel
 back from a faked write.
 
-`default_kind:` may be `write`, `unknown` or `telemetry`. `read` is refused, because it would
-forward every route the map does not list to the real service; `llm` is refused because it is
-route-level — on an LLM host only the inference routes are `llm`, and `/v1/files` or `/v1/batches`
-are real billable writes. The six telemetry maps set `default_kind: telemetry`, so an ingest path
-they do not list is still telemetry rather than a faked write; no other shipped map sets it.
+`default_kind:` may name any kind irimi answers locally — `write` or `unknown` — and no kind it
+forwards live. `read`, `llm` and `telemetry` are all refused, each with its own reason: a `read`
+default forwards every route the map does not list to the real service; `llm` is route-level, so
+on an LLM host `/v1/files` and `/v1/batches` stay real billable writes; and a `telemetry` default
+forwards live too, which matters because most telemetry vendors serve their REST control plane
+from the same host as their intake — an early draft of the telemetry maps used one and sent
+`DELETE api.datadoghq.com/api/v1/dashboard/{id}` to the real API. The list is derived from the set
+of kinds shadow mode forwards, so a live kind added later is refused the day it is added. No
+shipped map sets `default_kind`; the telemetry maps list their intake routes one by one instead.
 
 ### `llm` and `telemetry`
 
 `llm` is a route kind in the OpenAI and Anthropic maps: `/v1/chat/completions`, `/v1/responses`,
-`/v1/embeddings`, `/v1/models`, `/v1/messages` and `/v1/messages/count_tokens` are forwarded live
-and counted in their own bucket in the run summary. Everything else on those hosts is deliberately
-unmapped, so an unlisted `POST` — `/v1/files`, `/v1/batches`, `/v1/fine_tuning/jobs` — reaches the
-fallback, is answered locally and is flagged `unclassified`. A `text/event-stream` response is
-streamed straight through to the client rather than buffered, so a streamed completion still
-arrives token by token; the recorded exchange then carries an empty body.
+`/v1/embeddings`, `/v1/messages` and `/v1/messages/count_tokens` are forwarded live and counted in
+their own bucket in the run summary. `GET /v1/models` is a plain `read`: a listing is not
+inference. Everything else on those hosts is deliberately unmapped, so an unlisted `POST` —
+`/v1/files`, `/v1/batches`, `/v1/fine_tuning/jobs` — reaches the fallback, is answered locally and
+is flagged `unclassified`. A `text/event-stream` response is streamed straight through to the
+client rather than buffered, so a streamed completion still arrives token by token; the recorded
+exchange then carries an empty body.
 
 `telemetry` is what the observability backends are classified as. It is forwarded live in every
 mode and is never written to the trace store: a recording of the agent's own tracing traffic is
@@ -237,13 +256,44 @@ target_reads: true # optional: send this service's reads there too
 
 The shipped maps never set a target, so a fresh install answers everything itself. An overrides
 file may set `target`, `target_reads` and `forward_auth` and nothing else: an override able to
-change a route's `kind` would be a way to turn a write into a read. Targets must be loopback for
-now, and `target_reads: true` without a `target:` is refused — a service irimi answered end to end
-would be a twin, not a shadow.
+change a route's `kind` would be a way to turn a write into a read.
 
-Loading happens before the proxy starts, and a map or overrides file the loader refuses stops
-`serve` and `shadow` with the rule it broke on stderr. Forwarding to a target is not wired up yet;
-this release loads, validates and reports it.
+`--target` does the same thing for one run, and beats the file:
+
+    irimi shadow --target 'api.stripe.com/v1/refunds=http://127.0.0.1:3000/refund' -- python agent.py
+
+A bare host — `--target 'api.stripe.com=http://127.0.0.1:3000'` — targets the whole service,
+including the routes its map does not list; naming a host or a path no map claims is an error, not
+a silent no-op. Add `--target-reads api.stripe.com` and that service's *reads* go to the same
+address, which makes it a **delegated service**: its target, not production, is the world the
+agent sees. A targeted exchange is stamped `delegated` rather than `fake-L0`, and records the
+address that answered it.
+
+Path semantics follow nginx `proxy_pass`. A bare origin keeps the request's own path; a target
+carrying a path replaces the part the route matched, which — because a route pattern always
+matches the whole path — is all of it. The query string is always kept, and the method, body and
+content type pass through unchanged.
+
+Five rules keep a target from becoming a way out of the machine:
+
+- A target must be **loopback** (`127.0.0.1`, `::1`, `localhost`). Anything else is refused when
+  the maps load, naming the rule. `--allow-target-host <host>` is the deliberate way out, and it
+  prints a warning saying what it allows.
+- A target naming **irimi's own listener** is refused, or the proxy would dial itself in a loop.
+- `Authorization` is **stripped** before forwarding, unless the route sets `forward_auth: true`.
+  A local stub does not need your real key.
+- A **webhook route** — Slack's `hooks.slack.com/services/...` — may be targeted at loopback and
+  never through `--allow-target-host`, because for those the URL *is* the credential.
+- `target_reads: true` without a `target:` is refused — a service irimi answered end to end would
+  be a twin, not a shadow.
+
+An **unreachable target is a `502`** flagged `target-failed`, never a silent fall back to the fake:
+that would hide a broken setup and look exactly like a working run. The body is JSON when irimi
+refuses the target itself; when the target simply is not listening, the `502` is the proxy's own
+and the exchange is what carries `target-failed`.
+
+Loading happens before the proxy starts, and a map, overrides file or `--target` the loader refuses
+stops `serve` and `shadow` with the rule it broke on stderr.
 
 ## The example agent
 

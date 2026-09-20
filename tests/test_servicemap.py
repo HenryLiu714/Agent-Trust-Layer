@@ -1,7 +1,10 @@
+import os
+from pathlib import Path
+
 import pytest
 
 from irimi import paths, servicemap
-from irimi.exchange import SAFE_METHODS
+from irimi.exchange import KINDS, LIVE_KINDS, SAFE_METHODS
 from irimi.servicemap import MapError, MapIndex, Route, ServiceMap
 
 # A complete, valid one-service document. Tests mutate a copy of this to make one thing wrong.
@@ -412,10 +415,17 @@ routes:
     assert sm.routes[0].kind == "read"
 
 
-@pytest.mark.parametrize("kind", ["write", "unknown", "telemetry"])
+@pytest.mark.parametrize("kind", ["write", "unknown"])
 def test_default_kind_is_accepted_for_the_kinds_that_are_answered_locally(tmp_path, kind):
     sm = load(tmp_path, GOOD.replace("verbs: honest", f"default_kind: {kind}")).services[0]
     assert sm.default_kind == kind
+
+
+def test_default_kinds_is_derived_from_the_live_set(tmp_path):
+    """The rule is `not forwarded live`, not a hand-kept list: a live kind added to LIVE_KINDS
+    later must be refused as a default the day it is added, with no second edit here (#30)."""
+    assert set(servicemap.DEFAULT_KINDS) == set(KINDS) - set(LIVE_KINDS)
+    assert set(servicemap.DEFAULT_KINDS).isdisjoint(LIVE_KINDS)
 
 
 def test_default_kind_defaults_to_none(tmp_path):
@@ -432,6 +442,25 @@ def test_default_kind_may_not_be_read(tmp_path):
 
 def test_default_kind_may_not_be_llm(tmp_path):
     refuses(tmp_path, GOOD.replace("verbs: honest", "default_kind: llm"), "may not be `llm`")
+
+
+def test_default_kind_may_not_be_telemetry(tmp_path):
+    """The bug PR #24 shipped: `telemetry` is forwarded live, and most of these vendors serve
+    their REST control plane from the same host as their intake, so a telemetry default performed
+    `DELETE /api/v1/dashboard/{id}` for real. Fixed in the map data then; refused here now."""
+    refuses(
+        tmp_path,
+        GOOD.replace("verbs: honest", "default_kind: telemetry"),
+        "may not be `telemetry`",
+    )
+
+
+@pytest.mark.parametrize("kind", LIVE_KINDS)
+def test_every_live_kind_is_refused_as_a_default_with_its_own_reason(tmp_path, kind):
+    """Each refusal explains itself: a generic message would not tell a map author what to write
+    instead. The loop is over LIVE_KINDS so a new live kind fails here until it has a reason."""
+    reason = servicemap.DEFAULT_KIND_REASONS[kind]
+    refuses(tmp_path, GOOD.replace("verbs: honest", f"default_kind: {kind}"), reason)
 
 
 def test_default_kind_must_be_a_kind(tmp_path):
@@ -917,3 +946,212 @@ def test_patterns_are_not_in_the_reverse_doors_allow_list(tmp_path):
     assert index.hosts == frozenset({"one.demo.example"})
     assert index.patterns == ("*.demo.example",)
     assert MapIndex().patterns == ()
+
+
+# ------------------------------------------------------ the conftest isolation guards itself (#29)
+
+
+def test_the_conftest_redirects_irimi_home_away_from_the_developers_own(tmp_path):
+    """Regression guard for the `$IRIMI_HOME` half of `tests/conftest.py`, which had none.
+
+    Deleting its `monkeypatch.setenv` left the suite green on a clean box and failed only for a
+    developer who followed the README and created `~/.irimi/maps.yaml`. This fails on every box:
+    the env var is gone, so the lookup below raises, and the overrides file the loader then reads
+    is the real one. Renaming the `cwd` half already fails four tests immediately (#29).
+    """
+    home = Path(os.environ[paths.IRIMI_HOME_ENV])
+    assert home != Path.home() / ".irimi"
+    assert paths.irimi_home() == home
+
+    home.mkdir(parents=True, exist_ok=True)
+    (home / servicemap.HOME_OVERRIDE_NAME).write_text(
+        "service: demo\ntarget: http://127.0.0.1:3000\n"
+    )
+    assert servicemap.override_path(cwd=tmp_path / "empty") == home / servicemap.HOME_OVERRIDE_NAME
+    assert load(tmp_path).services[0].target == "http://127.0.0.1:3000"
+
+
+def test_path_params_binds_nothing_when_the_literal_segments_differ():
+    """`path_params` asks `_match_path`, which is the whole reason it lives in this module. A
+    segment count alone would bind `customer` to a path that shares no literal with the pattern
+    - the second parser its own docstring exists to prevent."""
+    assert servicemap.path_params("/v1/customers/{customer}", "/v9/charges/cus_X") == {}
+    assert servicemap.path_params("/v1/customers/{customer}", "/v1/customers/cus_X") == {
+        "customer": "cus_X"
+    }
+    assert servicemap.path_params("/v1/customers/{customer}", "/v1/customers") == {}
+
+
+def test_a_route_pattern_may_not_repeat_a_parameter_name(tmp_path):
+    """`/a/{x}/b/{x}` binds `x` once and drops the first capture silently, which is how
+    `named_id` would come to echo the wrong id."""
+    doc = """
+version: 1
+service: dup
+hosts:
+  - dup.example
+routes:
+  - match:
+      method: POST
+      path: /a/{x}/b/{x}
+    operation: dup.thing
+    kind: write
+    human: do a thing
+"""
+    refuses(tmp_path, doc, "appears more than once in the path")
+
+
+# ------------------------------------------------ the --target and --target-reads flags (#16)
+
+
+def _flagged(tmp_path, targets=(), target_reads=(), allow=frozenset()):
+    return servicemap.load(
+        allow_target_hosts=allow,
+        cwd=tmp_path / "cwd",
+        maps_dir=write_maps(tmp_path, GOOD),
+        targets=targets,
+        target_reads=target_reads,
+    )
+
+
+WITH_PATTERN_WRITE = (
+    GOOD
+    + """
+  - match:
+      method: POST
+      path: /v1/things/{thing}/archive
+    operation: things.archive
+    kind: write
+"""
+)
+
+
+def test_a_bare_host_target_sets_the_service_target(tmp_path):
+    index = _flagged(tmp_path, targets=[("demo.example", "", "http://127.0.0.1:3000")])
+    assert index.services[0].target == "http://127.0.0.1:3000"
+    assert all(r.target == servicemap.SELF_TARGET for r in index.services[0].routes)
+
+
+def test_a_host_and_path_target_sets_only_the_matching_targetable_routes(tmp_path):
+    index = _flagged(tmp_path, targets=[("demo.example", "/v1/things", "http://127.0.0.1:3000")])
+    targeted = [r for r in index.services[0].routes if r.target != servicemap.SELF_TARGET]
+    assert [r.kind for r in targeted] == ["write"]  # the GET of the same path is left alone
+    assert index.services[0].target == servicemap.SELF_TARGET
+
+
+@pytest.mark.parametrize("spec", ["/v1/things/{thing}/archive", "/v1/things/th_REAL1/archive"])
+def test_a_target_path_may_be_the_pattern_or_a_real_path(tmp_path, spec):
+    """The caller should not have to know how the map spells its `{…}` segment, so a concrete
+    request path names the route as well as the pattern does."""
+    index = servicemap.load(
+        cwd=tmp_path / "cwd",
+        maps_dir=write_maps(tmp_path, WITH_PATTERN_WRITE),
+        targets=[("demo.example", spec, "http://127.0.0.1:3000")],
+    )
+    targeted = [r for r in index.services[0].routes if r.target != servicemap.SELF_TARGET]
+    assert [r.operation for r in targeted] == ["things.archive"]
+
+
+def test_target_reads_marks_the_service_delegated(tmp_path):
+    index = _flagged(
+        tmp_path,
+        targets=[("demo.example", "", "http://127.0.0.1:3000")],
+        target_reads=["demo.example"],
+    )
+    assert index.services[0].target_reads is True
+    assert servicemap.is_delegated(index.services[0])
+
+
+def test_target_reads_without_a_target_is_still_refused_when_it_comes_from_a_flag(tmp_path):
+    """The load-time rule holds however the value arrived: a service irimi answers end to end
+    would be the twin the design rejects, and `--target-reads` must not be a way around it."""
+    with pytest.raises(MapError) as exc:
+        _flagged(tmp_path, target_reads=["demo.example"])
+    assert "needs a `target:` URL" in str(exc.value)
+
+
+def test_a_flag_target_is_validated_like_every_other_one(tmp_path):
+    with pytest.raises(MapError) as exc:
+        _flagged(tmp_path, targets=[("demo.example", "", "http://example.com")])
+    assert "is not loopback" in str(exc.value)
+    ok = _flagged(
+        tmp_path,
+        targets=[("demo.example", "", "http://example.com")],
+        allow=frozenset({"example.com"}),
+    )
+    assert ok.services[0].target == "http://example.com"
+
+
+@pytest.mark.parametrize(
+    ("url", "message"),
+    [
+        ("http://127.0.0.1:99999", "is not a URL irimi can parse"),
+        ("http://[::1/x", "is not a URL irimi can parse"),
+        ("http://127.0.0.1:0", "has a bad port"),
+    ],
+)
+def test_a_target_url_python_cannot_parse_is_a_named_refusal(tmp_path, url, message):
+    """`urlsplit` and its `.port` accessor both raise ValueError on input a user can type, and a
+    ValueError escaping the loader is an uncaught traceback out of `irimi serve` rather than the
+    one-line refusal every other bad target gets."""
+    with pytest.raises(MapError) as exc:
+        _flagged(tmp_path, targets=[("demo.example", "", url)])
+    assert message in str(exc.value)
+
+
+def test_a_flag_naming_an_unknown_host_or_route_is_an_error(tmp_path):
+    """A typo that quietly changed nothing would look exactly like a working delegation."""
+    with pytest.raises(MapError) as exc:
+        _flagged(tmp_path, targets=[("nope.example", "", "http://127.0.0.1:3000")])
+    assert "no loaded service map claims host" in str(exc.value)
+
+    with pytest.raises(MapError) as exc:
+        _flagged(tmp_path, targets=[("demo.example", "/nope", "http://127.0.0.1:3000")])
+    assert "no `write` or `unknown` route" in str(exc.value)
+
+    with pytest.raises(MapError) as exc:
+        _flagged(tmp_path, target_reads=["nope.example"])
+    assert "no loaded service map claims host" in str(exc.value)
+
+
+def test_a_flag_target_beats_the_overrides_file(tmp_path):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir(exist_ok=True)
+    (cwd / servicemap.CWD_OVERRIDE_NAME).write_text(
+        "service: demo\ntarget: http://127.0.0.1:1111\n"
+    )
+    index = _flagged(tmp_path, targets=[("demo.example", "", "http://127.0.0.1:2222")])
+    assert index.services[0].target == "http://127.0.0.1:2222"
+
+
+def test_a_webhook_route_may_only_be_targeted_at_loopback():
+    """A Slack incoming webhook URL is the whole credential, so `--allow-target-host` does not
+    reach it: sending one off this machine hands the secret to whoever is listening (§7)."""
+    index = servicemap.load(
+        cwd=None,
+        maps_dir=servicemap.shipped_dir(),
+        targets=[("hooks.slack.com", "", "http://127.0.0.1:3000")],
+    )
+    assert index.service_for("hooks.slack.com").target == "http://127.0.0.1:3000"
+
+    with pytest.raises(MapError) as exc:
+        servicemap.load(
+            cwd=None,
+            maps_dir=servicemap.shipped_dir(),
+            allow_target_hosts=frozenset({"stub.internal"}),
+            targets=[("hooks.slack.com", "", "http://stub.internal:3000")],
+        )
+    assert "webhook route may only be targeted at loopback" in str(exc.value)
+    assert "the credential" in str(exc.value)
+
+
+def test_the_webhook_rule_covers_the_other_host_of_the_same_service():
+    """Routes match per service, not per host: `slack.com/services/...` resolves to the same
+    `incoming_webhook` route, so targeting the service by either host hits the rule."""
+    with pytest.raises(MapError):
+        servicemap.load(
+            cwd=None,
+            maps_dir=servicemap.shipped_dir(),
+            allow_target_hosts=frozenset({"stub.internal"}),
+            targets=[("slack.com", "", "http://stub.internal:3000")],
+        )

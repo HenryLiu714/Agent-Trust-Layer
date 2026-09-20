@@ -21,9 +21,10 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 from urllib.parse import parse_qsl
 
 from irimi.exchange import AnsweredBy, Request, Response
-from irimi.pipeline import Classification
+from irimi.pipeline import FIDELITY_DELEGATED_FLAG, Classification, target_url
+from irimi.servicemap import SELF_TARGET, TARGETABLE_KINDS, target_for
 
-if TYPE_CHECKING:  # quoted annotations only, matching pipeline.py: no runtime servicemap import
+if TYPE_CHECKING:  # Route is only an annotation here; the names above are imported for real
     from irimi.servicemap import Route
 
 logger = logging.getLogger(__name__)
@@ -45,16 +46,60 @@ LIVE_KINDS = ("read", "llm", "telemetry")
 
 
 @dataclass(frozen=True)
+class ForwardTo:
+    """An answer target: the address that answers this request instead of irimi (design D20).
+
+    `url` is absolute and already carries the path and query the target should see. `forward_auth`
+    is the route opting in to keeping its `Authorization` header; the engine strips it otherwise.
+    """
+
+    url: str
+    forward_auth: bool = False
+
+
+@dataclass(frozen=True)
 class Answer:
     answered_by: AnsweredBy
     response: Response | None  # None means "forward live"; set means "send this, do not forward"
     flags: tuple[str, ...] = ()  # merged into the Exchange by the engine
+    # Set only on a `delegated` answer, and then `response` is None: the engine forwards there
+    # instead of to the real service, and what comes back is what the agent receives.
+    forward_to: ForwardTo | None = None
 
 
 class AnswerPolicy(Protocol):
     name: str
 
     def answer(self, request: Request, classification: Classification) -> Answer: ...
+
+
+def delegate(request: Request, classification: Classification) -> ForwardTo | None:
+    """The answer target for this request, or None when irimi answers it itself.
+
+    A matched route asks `servicemap.target_for`, which is the one place the route-over-service
+    precedence lives. A request that matched no route can still be delegated by a **service**
+    target: the map's author pointed the whole service at their stub, and answering the routes
+    their map happens not to list with our own fake would give the agent a world that is half
+    theirs and half ours. `target_reads` is what extends that to reads; `llm` and `telemetry` are
+    never delegated, which is `target_for`'s rule restated here for the unmatched case.
+    """
+    service_map = classification.service_map
+    if service_map is None:
+        return None
+    route = classification.matched[1] if classification.matched is not None else None
+    if route is not None:
+        target, forward_auth = target_for(service_map, route), route.forward_auth
+    elif classification.kind in TARGETABLE_KINDS or (
+        classification.kind == "read" and service_map.target_reads
+    ):
+        target, forward_auth = service_map.target, False
+    else:
+        return None
+    if target == SELF_TARGET:
+        return None
+    return ForwardTo(
+        url=target_url(target, request, matched=route is not None), forward_auth=forward_auth
+    )
 
 
 def mint_id(prefix: str) -> str:
@@ -171,6 +216,14 @@ class ShadowPolicy:
     name: Literal["shadow"] = "shadow"
 
     def answer(self, request: Request, classification: Classification) -> Answer:
+        forward = delegate(request, classification)
+        if forward is not None:
+            return Answer(
+                answered_by="delegated",
+                response=None,
+                flags=(FIDELITY_DELEGATED_FLAG,),
+                forward_to=forward,
+            )
         if classification.kind in LIVE_KINDS:
             return Answer(answered_by="live", response=None)
         try:

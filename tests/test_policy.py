@@ -298,3 +298,98 @@ def test_stripe_python_parses_the_faked_refund():
     assert refund.object == "refund"
     assert refund.amount == 4900
     assert refund.charge == "ch_test"
+
+
+# ------------------------------------------------------------------ answer targets (#16, D20)
+
+
+def _targeted_index(targets=(), target_reads=()):
+    maps = servicemap.apply_cli_targets(list(servicemap.load_shipped()), targets, target_reads)
+    return servicemap.MapIndex(tuple(maps))
+
+
+def _answer_with(index, request):
+    return ShadowPolicy().answer(request, classify(request, index))
+
+
+def test_a_route_target_makes_the_answer_delegated_not_faked():
+    index = _targeted_index([("api.stripe.com", "/v1/refunds", "http://127.0.0.1:3000/refund")])
+    ans = _answer_with(index, _req("POST", path="/v1/refunds"))
+    assert ans.answered_by == "delegated"
+    assert ans.response is None  # the engine forwards; the policy does no I/O
+    assert ans.forward_to == policy.ForwardTo(
+        url="http://127.0.0.1:3000/refund", forward_auth=False
+    )
+
+
+def test_self_is_the_default_target_and_is_exactly_the_old_behaviour():
+    """`target: self` is today's local fake, now named rather than assumed (D20)."""
+    ans = _answer(_req("POST", path="/v1/refunds"))
+    assert ans.answered_by == "fake-L0"
+    assert ans.forward_to is None
+
+
+def test_a_service_target_covers_writes_but_not_reads_without_target_reads():
+    index = _targeted_index([("api.stripe.com", "", "http://127.0.0.1:3000")])
+    write = _answer_with(index, _req("POST", path="/v1/refunds"))
+    assert write.answered_by == "delegated"
+    assert write.forward_to.url == "http://127.0.0.1:3000/v1/refunds"
+    read = _answer_with(index, _req("GET", path="/v1/charges"))
+    assert read.answered_by == "live" and read.forward_to is None
+
+
+def test_target_reads_delegates_the_services_reads_too():
+    index = _targeted_index(
+        [("api.stripe.com", "", "http://127.0.0.1:3000")], target_reads=["api.stripe.com"]
+    )
+    read = _answer_with(index, _req("GET", path="/v1/charges"))
+    assert read.answered_by == "delegated"
+    assert read.forward_to.url == "http://127.0.0.1:3000/v1/charges"
+
+
+def test_an_unlisted_route_on_a_targeted_service_is_delegated_too():
+    """Half the stub's world and half ours would be worse than either."""
+    index = _targeted_index([("api.stripe.com", "", "http://127.0.0.1:3000")])
+    ans = _answer_with(index, _req("POST", path="/v1/tax/calculations"))
+    assert ans.answered_by == "delegated"
+    assert ans.forward_to.url == "http://127.0.0.1:3000/v1/tax/calculations"
+
+
+def test_llm_and_telemetry_are_never_delegated():
+    """`target_for` refuses them on a matched route; `delegate` has to say the same thing for an
+    unlisted one, or a service target would quietly start forwarding inference."""
+    index = _targeted_index(
+        [("api.openai.com", "", "http://127.0.0.1:3000")], target_reads=["api.openai.com"]
+    )
+    llm = _answer_with(index, _req("POST", host="api.openai.com", path="/v1/chat/completions"))
+    assert llm.answered_by == "live" and llm.forward_to is None
+
+
+def test_delegate_returns_none_for_a_host_no_map_claims():
+    ans = _answer(_req("POST", host="nowhere.example", path="/x"))
+    assert ans.answered_by == "fake-L0" and ans.forward_to is None
+
+
+def test_forward_auth_reaches_the_engine_through_the_answer():
+    from dataclasses import replace as _replace
+
+    index = _targeted_index([("api.stripe.com", "/v1/refunds", "http://127.0.0.1:3000/r")])
+    stripe = index.service_for("api.stripe.com")
+    routes = tuple(
+        _replace(r, forward_auth=True) if r.target != servicemap.SELF_TARGET else r
+        for r in stripe.routes
+    )
+    index = servicemap.MapIndex(
+        tuple(_replace(sm, routes=routes) if sm is stripe else sm for sm in index.services)
+    )
+    ans = _answer_with(index, _req("POST", path="/v1/refunds"))
+    assert ans.forward_to.forward_auth is True
+
+
+def test_a_delegated_answer_carries_its_own_fidelity_flag():
+    """Symmetry with `fidelity:L0`: every locally decided answer says how it was produced, so a
+    delegated exchange is not the one row in the log with no fidelity at all (#16 §5)."""
+    index = _targeted_index([("api.stripe.com", "/v1/refunds", "http://127.0.0.1:3000/r")])
+    ans = _answer_with(index, _req("POST", path="/v1/refunds"))
+    assert ans.flags == ("fidelity:delegated",)
+    assert _answer(_req("POST", path="/v1/refunds")).flags == (policy.FIDELITY_L0_FLAG,)

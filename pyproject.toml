@@ -3,7 +3,7 @@ name = "irimi"
 version = "0.0.1"
 description = "Shadow mode for AI agents: reads are real, writes are virtual, and reads see the writes."
 readme = "README.md"
-requires-python = ">=3.12"  # floor for end users; development pins 3.14 via .python-version
+requires-python = ">=3.12" # floor for end users; development pins 3.14 via .python-version
 dependencies = [
     "cryptography>=42",
     "mitmproxy>=11",
@@ -14,9 +14,16 @@ dependencies = [
 irimi = "irimi.cli:main"
 
 [dependency-groups]
+# `uv sync` installs `dev` by default. `examples` is opt-in: `uv sync --group examples`.
 dev = [
+    "mypy>=1.11",
     "pytest>=8",
     "ruff>=0.6",
+    "types-pyyaml>=6",
+]
+examples = [
+    "slack-sdk>=3",
+    "stripe>=10",
 ]
 
 [build-system]
@@ -28,10 +35,28 @@ packages = ["src/irimi"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    # mitmproxy's flow filter still calls pyparsing's pre-3.0 names; nothing in irimi does.
+    "ignore:.*deprecated.*:DeprecationWarning:mitmproxy",
+    "ignore:.*deprecated.*:DeprecationWarning:pyparsing",
+    "ignore:.*deprecated.*:DeprecationWarning:ldap3",
+]
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+extend-exclude = [".claude"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP"]
+# E/F/I/UP: errors, pyflakes, import order, modern syntax. B: bugbear's likely-bug patterns.
+# C4: comprehension hygiene.
+select = ["E", "F", "I", "UP", "B", "C4"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+strict_optional = true
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_reexport = false

@@ -11,8 +11,9 @@ log of every write the agent would have made.
 
 ## Status
 
-Early. `irimi init`, `irimi serve`, `irimi shadow` and the reverse door work; the rest is being
-built in the Phase 1 issues at
+Phase 1 is complete: `irimi init`, `irimi serve`, `irimi shadow`, the reverse door, the service
+maps, the L0 echo and answer targets all work and are covered by the tests. Phase 2 - the overlay
+that makes reads see the run's own writes - is next. Work is tracked in the issues at
 https://github.com/HenryLiu714/Agent-Trust-Layer/issues.
 
 ## Requirements
@@ -35,6 +36,9 @@ This creates the venv, installs irimi in editable mode, and runs `irimi init`. T
 ```
 uv run irimi --help
 ```
+
+Contributors: see `CONTRIBUTING.md` for the dev loop and `docs/architecture.md` for the map of
+the code.
 
 ## Try the proxy
 
@@ -418,16 +422,17 @@ restricted key.
 
 Put a Stripe test-mode key in your environment, then seed one charge to refund:
 
+    uv sync --group examples          # installs the stripe and slack_sdk SDKs
     export STRIPE_API_KEY=sk_test_...
-    uv run --with stripe python examples/refund_agent/seed.py
+    uv run python examples/refund_agent/seed.py
 
 Run it bare and the refund is **real** (visible in the Stripe test dashboard):
 
-    uv run --with stripe python examples/refund_agent/agent.py
+    uv run python examples/refund_agent/agent.py
 
 Run the same command under `irimi shadow` and the refund never leaves your machine:
 
-    uv run --with stripe irimi shadow -- python examples/refund_agent/agent.py
+    uv run irimi shadow -- python examples/refund_agent/agent.py
 
 The read still goes to Stripe and returns your real test-mode charges; the POST to `/v1/refunds` is
 answered locally with the L0 echo, so the agent prints a minted `re_...` id that no refund on
@@ -439,12 +444,12 @@ irimi, that the echo carries a minted `re_` id, that nothing on the other side w
 anything, and that the summary says so. Its second test is the live version above — it runs the
 agent itself and re-reads the charge from Stripe — and it skips unless you give it a key:
 
-    STRIPE_API_KEY=sk_test_... uv run --with stripe pytest -q -rs tests/test_phase_exit.py
+    STRIPE_API_KEY=sk_test_... uv run pytest -q -rs tests/test_phase_exit.py
 
 The agent points `stripe.api_base` at the reverse door only when `IRIMI_ENGINE_ACTIVE=1`, and reads
 the port from `HTTPS_PROXY`, so `--port` works and a bare run is unaffected. Set `SLACK_BOT_TOKEN`
-and `SLACK_CHANNEL` (and add `--with slack_sdk`) to have it post the result to Slack as well;
-`slack_sdk` honors the proxy variables, so that write goes through the forward proxy.
+and `SLACK_CHANNEL` to have it post the result to Slack as well; `slack_sdk` honors the proxy
+variables, so that write goes through the forward proxy.
 
 ## Installing as a standalone tool
 
@@ -477,10 +482,10 @@ data when running an agent in shadow mode.
 
 ```
 uv sync                     # install everything, including dev tools
-uv run pytest               # tests
-uv run ruff check .         # lint
-uv run ruff format .        # format
+make check                  # lint, format check, mypy, tests - what CI runs
 ```
 
+`CONTRIBUTING.md` has the dev loop, how to add a service map and the conventions;
+`docs/architecture.md` has the module map, the request flow and the rules the tests enforce.
 Branch per issue, named `<issue-number>-<short-slug>`. Open a PR against `main` with `Closes #<n>`
-in the body. CI runs lint, format check and tests on macOS and Ubuntu.
+in the body. CI runs on macOS and Ubuntu, on Python 3.14 and 3.12.

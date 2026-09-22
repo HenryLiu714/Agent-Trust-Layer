@@ -20,5 +20,6 @@ uv run irimi init
 
 echo
 echo "Setup complete."
-echo "  Run the CLI:   uv run irimi --help"
-echo "  Run the tests: uv run pytest"
+echo "  Run the CLI:        uv run irimi --help"
+echo "  Run every check:    make check      (or: uv run pytest)"
+echo "  Try the example:    uv sync --group examples, then see CONTRIBUTING.md"

@@ -3,25 +3,11 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from irimi.exchange import Request, Response
-from irimi.pipeline import (
-    DOWNGRADED_FLAG,
-    Classification,
-    ReverseDoorRefused,
-    TargetRefused,
-    annotate,
-    attribute_run,
-    classify,
-    detect_door,
-    is_credential_header,
-    is_loopback,
-    is_self_host,
-    parse,
-    refuse_self_target,
-    respond,
-    rewrite_reverse,
-    target_url,
-)
+from irimi.delegation import TargetRefused, is_credential_header, refuse_self_target, target_url
+from irimi.exchange import DOWNGRADED_FLAG, Request, Response
+from irimi.netaddr import is_loopback, is_self_host
+from irimi.pipeline import Classification, annotate, attribute_run, classify, parse, respond
+from irimi.reverse_door import ReverseDoorRefused, detect_door, rewrite_reverse
 
 
 def _parse(**overrides) -> Request:
@@ -327,14 +313,14 @@ def test_detect_door_reverse_for_loopback_hosts(host):
 def test_detect_door_resolves_unknown_name_on_own_port(monkeypatch):
     import socket
 
-    from irimi import pipeline
+    from irimi import netaddr
 
     def fake_getaddrinfo(host, port, **kwargs):
         if host == "self.test":
             return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))]
         raise socket.gaierror("no such host")
 
-    monkeypatch.setattr(pipeline.socket, "getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr(netaddr.socket, "getaddrinfo", fake_getaddrinfo)
     assert detect_door(_door_req("/api.stripe.com/v1", host="self.test"), 4000) == "reverse"
     assert detect_door(_door_req("/api.stripe.com/v1", host="nowhere.test"), 4000) == "forward"
     # Other ports never resolve anything.

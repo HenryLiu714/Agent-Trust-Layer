@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from irimi import __version__, ca, cli, paths, runner, servicemap
+from irimi import __version__, ca, cli, paths, report, servicemap
 from irimi.cli import main
 
 
@@ -324,8 +324,8 @@ def test_the_banner_reaches_a_piped_stdout_before_anything_else_is_printed(monke
     visible = _startup_on_a_pipe(monkeypatch, servicemap.MapIndex())
     assert "listening on 127.0.0.1:4000" in visible
     assert "/ca.pem" in visible
-    assert runner.BACKSTOP_NOTICE in visible
-    assert runner.NOT_VIRTUALIZED_NOTICE in visible
+    assert report.BACKSTOP_NOTICE in visible
+    assert report.NOT_VIRTUALIZED_NOTICE in visible
 
 
 def test_a_delegated_services_warning_reaches_a_piped_stdout_too(monkeypatch):
@@ -334,7 +334,7 @@ def test_a_delegated_services_warning_reaches_a_piped_stdout_too(monkeypatch):
     sm = _delegated_service("http://10.0.0.9:3000")
     visible = _startup_on_a_pipe(monkeypatch, servicemap.MapIndex((sm,)))
     assert "delegated: stripe → http://10.0.0.9:3000 (writes)" in visible
-    assert runner.NOT_LOOPBACK_NOTICE in visible
+    assert report.NOT_LOOPBACK_NOTICE in visible
 
 
 def test_the_escape_hatch_warning_goes_to_stderr_flushed(monkeypatch, capsys):

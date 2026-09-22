@@ -1,6 +1,7 @@
 """Create one refundable test-mode charge, so `agent.py` has something to refund.
 
-    uv run --with stripe python examples/refund_agent/seed.py
+    uv sync --group examples
+    uv run python examples/refund_agent/seed.py
 
 Run it OUTSIDE `irimi shadow`: under shadow the payment would be faked and no charge would exist.
 """

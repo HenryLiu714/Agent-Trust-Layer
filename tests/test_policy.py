@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from irimi import pipeline, policy, servicemap
-from irimi.exchange import Request, Response
+from irimi import delegation, echo, pipeline, servicemap
+from irimi.exchange import FIDELITY_L0_FLAG, Request, Response
 from irimi.pipeline import classify
 from irimi.policy import ShadowPolicy
 
@@ -55,7 +55,7 @@ def test_shadow_fakes_l0(kind):
     assert isinstance(ans.response, Response)
     assert ans.response.status == 200
     assert ("content-type", "application/json") in ans.response.headers
-    assert ans.flags == (policy.FIDELITY_L0_FLAG,)
+    assert ans.flags == (FIDELITY_L0_FLAG,)
     assert isinstance(json.loads(ans.response.body), dict)
 
 
@@ -140,7 +140,7 @@ def test_two_slack_writes_in_the_same_second_get_different_timestamps():
     messages that are the same message. The random six digits collided 9% of the time in 200,000
     draws (#29); they are a counter now, so a run can post a million messages a second before one
     repeats."""
-    seen = [policy.slack_ts() for _ in range(5_000)]
+    seen = [echo.slack_ts() for _ in range(5_000)]
     assert len(set(seen)) == len(seen)
     # And increasing, because that is the other half of what a `ts` means: real ones sort by time,
     # so code that orders a transcript by `ts` reads the same answer here as it would from Slack.
@@ -151,10 +151,10 @@ def test_two_slack_writes_in_the_same_second_get_different_timestamps():
 def test_a_slack_timestamp_still_names_the_current_second(monkeypatch):
     """The counter must not drift off the clock: a `ts` is a real epoch time, and an SDK that
     renders one as a date has to get today."""
-    monkeypatch.setattr(policy, "_last_slack_ts", (0, 0))
-    monkeypatch.setattr(policy.time, "time", lambda: 1_700_000_000.9)
-    assert policy.slack_ts() == "1700000000.000000"
-    assert policy.slack_ts() == "1700000000.000001"
+    monkeypatch.setattr(echo, "_last_slack_ts", (0, 0))
+    monkeypatch.setattr(echo.time, "time", lambda: 1_700_000_000.9)
+    assert echo.slack_ts() == "1700000000.000000"
+    assert echo.slack_ts() == "1700000000.000001"
 
 
 def test_slack_write_reads_the_json_body_slack_sdk_actually_posts():
@@ -195,20 +195,20 @@ def test_a_faker_that_fails_still_answers_locally(monkeypatch):
     def boom(request, classification):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(policy, "fake_body", boom)
+    monkeypatch.setattr(echo, "fake_body", boom)
     ans = _answer(_req("POST", path="/v1/refunds"))
     assert ans.answered_by == "fake-L0"
     assert ans.response.body == b"{}"
-    assert ans.flags == (policy.FIDELITY_L0_FLAG,)
+    assert ans.flags == (FIDELITY_L0_FLAG,)
 
 
 def test_reflect_reads_a_json_object():
-    assert policy.reflect(_req(body=b'{"a": 1}', content_type="application/json")) == {"a": 1}
+    assert echo.reflect(_req(body=b'{"a": 1}', content_type="application/json")) == {"a": 1}
 
 
 def test_reflect_honours_content_type_parameters():
     req = _req(body=b'{"a": 1}', content_type="application/json; charset=utf-8")
-    assert policy.reflect(req) == {"a": 1}
+    assert echo.reflect(req) == {"a": 1}
 
 
 @pytest.mark.parametrize(
@@ -216,53 +216,53 @@ def test_reflect_honours_content_type_parameters():
     [b"[1, 2]", b'"a string"', b"null", b"7", b"{not json", b"", b"\xff\xfe\x00bad"],
 )
 def test_reflect_returns_nothing_for_a_body_that_is_not_a_json_object(body):
-    assert policy.reflect(_req(body=body, content_type="application/json")) == {}
+    assert echo.reflect(_req(body=body, content_type="application/json")) == {}
 
 
 @pytest.mark.parametrize("body", [b'{"a": NaN}', b'{"a": Infinity}', b'{"a": 1e400}'])
 def test_reflect_refuses_a_number_a_strict_json_parser_would_refuse(body):
     """json.dumps writes NaN/Infinity straight back out; the echo has to stay parseable."""
-    assert policy.reflect(_req(body=body, content_type="application/json")) == {}
+    assert echo.reflect(_req(body=body, content_type="application/json")) == {}
 
 
 def test_reflect_reads_a_form_body():
     req = _req(body=b"a=1&b=two&c=", content_type="application/x-www-form-urlencoded")
-    assert policy.reflect(req) == {"a": 1, "b": "two", "c": ""}
+    assert echo.reflect(req) == {"a": 1, "b": "two", "c": ""}
 
 
 @pytest.mark.parametrize("value", [b"007", b"0012345", b"000123456789012345678", b"1e3", b"-1"])
 def test_reflect_leaves_a_non_canonical_number_alone(value):
     req = _req(body=b"v=" + value, content_type="application/x-www-form-urlencoded")
-    assert policy.reflect(req)["v"] == value.decode()
+    assert echo.reflect(req)["v"] == value.decode()
 
 
 def test_reflect_leaves_a_slack_timestamp_alone():
     req = _req(body=b"ts=1700000000.000600", content_type="application/x-www-form-urlencoded")
-    assert policy.reflect(req)["ts"] == "1700000000.000600"
+    assert echo.reflect(req)["ts"] == "1700000000.000600"
 
 
 def test_reflect_leaves_a_number_too_wide_for_a_double_alone():
     req = _req(body=b"n=1234567890123456", content_type="application/x-www-form-urlencoded")
-    assert policy.reflect(req)["n"] == "1234567890123456"
+    assert echo.reflect(req)["n"] == "1234567890123456"
 
 
 def test_reflect_reads_a_form_body_that_is_not_utf8():
     req = _req(body=b"a=\xff\xfe", content_type="application/x-www-form-urlencoded")
-    assert isinstance(policy.reflect(req)["a"], str)
+    assert isinstance(echo.reflect(req)["a"], str)
 
 
 @pytest.mark.parametrize("ct", [None, "text/plain", "multipart/form-data; boundary=x", ""])
 def test_reflect_ignores_every_other_content_type(ct):
-    assert policy.reflect(_req(body=b'{"a": 1}', content_type=ct)) == {}
+    assert echo.reflect(_req(body=b'{"a": 1}', content_type=ct)) == {}
 
 
 def test_reflect_never_raises_on_a_big_body():
     body = json.dumps({"k": "x" * 2_000_000}).encode()
-    assert policy.reflect(_req(body=body, content_type="application/json"))["k"].startswith("x")
+    assert echo.reflect(_req(body=body, content_type="application/json"))["k"].startswith("x")
 
 
 def test_reflect_never_raises_on_a_deeply_nested_body():
-    assert policy.reflect(_req(body=b"[" * 5000, content_type="application/json")) == {}
+    assert echo.reflect(_req(body=b"[" * 5000, content_type="application/json")) == {}
 
 
 def test_an_answer_for_an_unparseable_body_is_still_json():
@@ -283,13 +283,13 @@ def test_an_answer_for_an_unparseable_body_is_still_json():
     ],
 )
 def test_object_name(operation, expected):
-    assert policy.object_name(operation) == expected
+    assert echo.object_name(operation) == expected
 
 
 def test_mint_id_shape_and_uniqueness():
-    first = policy.mint_id("re_")
+    first = echo.mint_id("re_")
     assert re.fullmatch(r"re_[A-Za-z0-9]{24}", first)
-    assert first != policy.mint_id("re_")
+    assert first != echo.mint_id("re_")
 
 
 def test_every_shipped_route_that_mints_an_id_names_a_real_object():
@@ -297,14 +297,14 @@ def test_every_shipped_route_that_mints_an_id_names_a_real_object():
     for service in SHIPPED.services:
         for route in service.routes:
             if "id" in route.ids:
-                assert policy.object_name(route.operation) not in ("", route.operation)
+                assert echo.object_name(route.operation) not in ("", route.operation)
 
 
 def test_stripe_python_parses_the_faked_refund():
     """Issue #11's done-criterion, against the real SDK.
 
-    `stripe` is not a dependency of this project, so this test is skipped in the dev venv. The
-    orchestrator runs it for real with `uv run --with stripe pytest -q -k stripe`.
+    `stripe` is not a dependency of this project, so this test is skipped in the plain dev venv.
+    `uv sync --group examples` installs it, after which `uv run pytest -q -k stripe` runs it.
     """
     stripe = pytest.importorskip("stripe")
     ans = _answer(
@@ -329,7 +329,7 @@ def test_stripe_python_parses_the_faked_refund():
 def test_a_bracket_nested_form_field_becomes_a_nested_object():
     """stripe-python posts `metadata[order_id]=6735`; the live API always answers with
     `metadata`. Flat, `Refund.metadata` raised AttributeError - the bar policy.py sets itself."""
-    body = policy.parse_form("charge=ch_test&amount=4900&metadata[order_id]=6735")
+    body = echo.parse_form("charge=ch_test&amount=4900&metadata[order_id]=6735")
     assert body == {"charge": "ch_test", "amount": 4900, "metadata": {"order_id": "6735"}}
 
 
@@ -337,26 +337,26 @@ def test_a_metadata_value_stays_a_string_at_any_depth():
     """A Stripe metadata value is always a string on the live API, so coercing one hands back
     something other than what the caller sent (#27). The field name is what decides, wherever it
     sits on the path into the value."""
-    assert policy.parse_form("metadata[n]=6735")["metadata"]["n"] == "6735"
-    assert policy.parse_form("a[metadata][n]=6735")["a"]["metadata"]["n"] == "6735"
+    assert echo.parse_form("metadata[n]=6735")["metadata"]["n"] == "6735"
+    assert echo.parse_form("a[metadata][n]=6735")["a"]["metadata"]["n"] == "6735"
 
 
 def test_a_nested_number_is_a_number_like_the_same_number_at_the_top_level():
     """`line_items[0][quantity]=2` echoed `"2"` while `amount=4900` echoed `4900`, so
     `quantity * 2` was `"22"` with no raise. "Stays a string" is right for `metadata` and wrong
     for every other numeric nested field (#33)."""
-    assert policy.parse_form("n=6735")["n"] == 6735
-    body = policy.parse_form("line_items[0][quantity]=2&line_items[0][price]=price_1")
+    assert echo.parse_form("n=6735")["n"] == 6735
+    body = echo.parse_form("line_items[0][quantity]=2&line_items[0][price]=price_1")
     assert body == {"line_items": [{"quantity": 2, "price": "price_1"}]}
-    assert policy.parse_form("expand[]=2")["expand"] == [2]
+    assert echo.parse_form("expand[]=2")["expand"] == [2]
     # The same rules the top level has: not canonical, so not a number.
-    assert policy.parse_form("a[b]=007")["a"]["b"] == "007"
+    assert echo.parse_form("a[b]=007")["a"]["b"] == "007"
 
 
 def test_a_repeated_bare_key_collects_into_a_list():
     """`requests.post(data={"tags": ["a", "b"]})` and `urlencode(doseq=True)` both send these."""
-    assert policy.parse_form("tags=a&tags=b&tags=c") == {"tags": ["a", "b", "c"]}
-    assert policy.parse_form("tags=a") == {"tags": "a"}
+    assert echo.parse_form("tags=a&tags=b&tags=c") == {"tags": ["a", "b", "c"]}
+    assert echo.parse_form("tags=a") == {"tags": "a"}
 
 
 @pytest.mark.parametrize(
@@ -371,7 +371,7 @@ def test_a_repeated_bare_key_collects_into_a_list():
     ],
 )
 def test_an_indexed_form_key_becomes_a_list_only_when_the_indices_are_complete(text, expected):
-    assert policy.parse_form(text) == expected
+    assert echo.parse_form(text) == expected
 
 
 @pytest.mark.parametrize(
@@ -388,7 +388,7 @@ def test_an_indexed_form_key_becomes_a_list_only_when_the_indices_are_complete(t
 def test_a_bracket_shape_we_will_not_guess_at_stays_flat(text, expected):
     """Echoing an odd key unchanged is wrong in a small, visible way; guessing is worse. The
     whole dict is asserted: a membership check here would pass on an empty result too."""
-    assert policy.parse_form(text) == expected
+    assert echo.parse_form(text) == expected
 
 
 @pytest.mark.parametrize(
@@ -397,7 +397,7 @@ def test_a_bracket_shape_we_will_not_guess_at_stays_flat(text, expected):
 def test_a_bracketed_key_beats_a_bare_one_in_either_order(text):
     """The same name spelled both ways is nonsense input, but it must not be order-dependent:
     structure surviving is what #27 is about, and a bare value cannot carry any."""
-    result = policy.parse_form(text)
+    result = echo.parse_form(text)
     assert isinstance(result["a"], list), result
     assert 1 in result["a"]
 
@@ -406,28 +406,28 @@ def test_a_bracketed_key_beats_a_bare_one_in_either_order(text):
 def test_a_bracket_path_beats_a_scalar_at_the_same_leaf_in_either_order(text):
     """The same class one level down, and the same answer: the deeper structure survives, so the
     echo does not depend on which spelling arrived first (#33)."""
-    assert policy.parse_form(text) == {"a": [{"b": 1}]}
+    assert echo.parse_form(text) == {"a": [{"b": 1}]}
 
 
 @pytest.mark.parametrize("text", ["a[]=1&a[0][b]=2", "a[0][b]=2&a[]=1"])
 def test_a_bracket_path_beats_an_append_of_the_same_name_in_either_order(text):
-    assert policy.parse_form(text) == {"a": [{"b": 2}]}
+    assert echo.parse_form(text) == {"a": [{"b": 2}]}
 
 
 @pytest.mark.parametrize("text", ["a[]=1&a=2", "a=2&a[]=1"])
 def test_an_append_beats_a_bare_key_of_the_same_name_in_either_order(text):
-    assert policy.parse_form(text) == {"a": [1]}
+    assert echo.parse_form(text) == {"a": [1]}
 
 
 def test_an_empty_bracket_pair_is_a_list(tmp_path):
     """`expand[]=a&expand[]=b` is Stripe's own documented curl spelling. It echoed the literal
     JSON key `"expand[]"`, which is a field no SDK looks for (#33). One repeat or none, the shape
     is the same: a caller writing `[]` means a list either way."""
-    assert policy.parse_form("expand[]=a&expand[]=b") == {"expand": ["a", "b"]}
-    assert policy.parse_form("expand[]=a") == {"expand": ["a"]}
-    assert policy.parse_form("charge=ch_1&expand[]=a") == {"charge": "ch_1", "expand": ["a"]}
+    assert echo.parse_form("expand[]=a&expand[]=b") == {"expand": ["a", "b"]}
+    assert echo.parse_form("expand[]=a") == {"expand": ["a"]}
+    assert echo.parse_form("charge=ch_1&expand[]=a") == {"charge": "ch_1", "expand": ["a"]}
     # `metadata` is still the caller's to key and to spell, at this shape too.
-    assert policy.parse_form("metadata[]=6735") == {"metadata": ["6735"]}
+    assert echo.parse_form("metadata[]=6735") == {"metadata": ["6735"]}
 
 
 def _nest(depth: int):
@@ -444,19 +444,19 @@ def test_a_bracket_path_deeper_than_the_cap_stays_flat():
     # The value, not just the mechanism: written only against the constant, this test passes
     # with a cap of 2, which would flatten Stripe's real
     # `line_items[0][price_data][product_data][name]` (5 segments) and ship green.
-    assert policy._MAX_FORM_DEPTH == 8
-    assert policy.parse_form("line_items[0][price_data][product_data][name]=x") == {
+    assert echo._MAX_FORM_DEPTH == 8
+    assert echo.parse_form("line_items[0][price_data][product_data][name]=x") == {
         "line_items": [{"price_data": {"product_data": {"name": "x"}}}]
     }
-    deep = "a" + "[b]" * policy._MAX_FORM_DEPTH
-    assert policy.parse_form(deep + "=1") == {"a": _nest(policy._MAX_FORM_DEPTH)}
-    too_deep = "a" + "[b]" * (policy._MAX_FORM_DEPTH + 1)
-    assert policy.parse_form(too_deep + "=1") == {too_deep: 1}  # flat, so int-coerced
+    deep = "a" + "[b]" * echo._MAX_FORM_DEPTH
+    assert echo.parse_form(deep + "=1") == {"a": _nest(echo._MAX_FORM_DEPTH)}
+    too_deep = "a" + "[b]" * (echo._MAX_FORM_DEPTH + 1)
+    assert echo.parse_form(too_deep + "=1") == {too_deep: 1}  # flat, so int-coerced
 
 
 def test_parse_form_never_raises_on_hostile_input():
     for text in ["[" * 5000, "a" + "[b]" * 2000 + "=1", "=", "&&&", "a=%%%", "a[0]=1&a=2"]:
-        assert isinstance(policy.parse_form(text), dict)
+        assert isinstance(echo.parse_form(text), dict)
 
 
 def test_a_hostile_form_body_still_reflects_and_never_raises():
@@ -514,10 +514,10 @@ def test_a_captured_segment_that_is_not_this_ids_prefix_is_not_used():
         kind="write",
         ids={"id": "wid_"},
     )
-    assert policy.named_id(route, "/v1/widgets/wid_1/parts/prt_9", "wid_") == "wid_1"
-    assert policy.named_id(route, "/v1/widgets/wid_1/parts/prt_9", "prt_") == "prt_9"
-    assert policy.named_id(route, "/v1/widgets/w1/parts/p9", "wid_") is None
-    assert policy.named_id(route, "/v1/widgets", "wid_") is None
+    assert echo.named_id(route, "/v1/widgets/wid_1/parts/prt_9", "wid_") == "wid_1"
+    assert echo.named_id(route, "/v1/widgets/wid_1/parts/prt_9", "prt_") == "prt_9"
+    assert echo.named_id(route, "/v1/widgets/w1/parts/p9", "wid_") is None
+    assert echo.named_id(route, "/v1/widgets", "wid_") is None
 
 
 def test_the_id_shaped_capture_wins_when_one_prefix_matches_two_segments():
@@ -532,9 +532,9 @@ def test_the_id_shaped_capture_wins_when_one_prefix_matches_two_segments():
         ids={"id": "sub_"},
     )
     path = "/v1/subscription_schedules/sub_sched_1/subscriptions/sub_2"
-    assert policy.named_id(route, path, "sub_") == "sub_2"
+    assert echo.named_id(route, path, "sub_") == "sub_2"
     # And the longer prefix still finds its own segment, which the shorter one must not steal.
-    assert policy.named_id(route, path, "sub_sched_") == "sub_sched_1"
+    assert echo.named_id(route, path, "sub_sched_") == "sub_sched_1"
 
 
 def test_a_client_secret_is_never_echoed_back_as_the_resource_id():
@@ -548,11 +548,11 @@ def test_a_client_secret_is_never_echoed_back_as_the_resource_id():
         kind="write",
         ids={"id": "pi_"},
     )
-    assert policy.named_id(route, "/v1/payment_intents/pi_ABC_secret_XYZ/cancel", "pi_") is None
-    body = policy.l0_body(_req("POST", path="/v1/payment_intents/pi_ABC_secret_XYZ/cancel"), route)
+    assert echo.named_id(route, "/v1/payment_intents/pi_ABC_secret_XYZ/cancel", "pi_") is None
+    body = echo.l0_body(_req("POST", path="/v1/payment_intents/pi_ABC_secret_XYZ/cancel"), route)
     assert body["id"] != "pi_ABC_secret_XYZ"
     assert re.fullmatch(r"pi_[A-Za-z0-9]{24}", body["id"])
-    assert policy.named_id(route, "/v1/payment_intents/pi_REAL999/cancel", "pi_") == "pi_REAL999"
+    assert echo.named_id(route, "/v1/payment_intents/pi_REAL999/cancel", "pi_") == "pi_REAL999"
 
 
 def test_a_percent_encoded_id_is_still_the_id_the_request_names():
@@ -565,7 +565,7 @@ def test_a_percent_encoded_id_is_still_the_id_the_request_names():
         kind="write",
         ids={"id": "cus_"},
     )
-    assert policy.named_id(route, "/v1/customers/cus%5FREAL123", "cus_") == "cus_REAL123"
+    assert echo.named_id(route, "/v1/customers/cus%5FREAL123", "cus_") == "cus_REAL123"
     body = json.loads(_answer(_req("POST", path="/v1/customers/cus%5FREAL123")).response.body)
     assert body["id"] == "cus_REAL123"
 
@@ -579,7 +579,7 @@ def test_every_shipped_write_route_that_names_ids_round_trips_or_mints():
                 holes = [p for p in route.path.split("/") if p.startswith("{")]
                 if not holes:
                     sample = route.path.replace("{", "").replace("}", "")
-                    assert policy.named_id(route, sample, prefix) is None, route.operation
+                    assert echo.named_id(route, sample, prefix) is None, route.operation
                     continue
                 # Only the LAST hole carries the prefix; every other one gets a segment that
                 # does not. Filling them all would make `named_id` match the first hole whatever
@@ -592,7 +592,7 @@ def test_every_shipped_write_route_that_names_ids_round_trips_or_mints():
                     else part
                     for i, part in enumerate(parts)
                 )
-                assert policy.named_id(route, filled, prefix) == prefix + "SAMPLE", (
+                assert echo.named_id(route, filled, prefix) == prefix + "SAMPLE", (
                     f"{sm.service}.{route.operation} does not echo the {name} its path names"
                 )
 
@@ -612,7 +612,7 @@ def test_every_shipped_write_route_that_names_ids_round_trips_or_mints():
 def test_every_json_content_type_is_parsed(ct):
     """Only the exact `application/json` was read before, so a `+json` body was indistinguishable
     from a malformed one and reflected nothing."""
-    assert policy.reflect(_req(body=b'{"a": 1}', content_type=ct)) == {"a": 1}
+    assert echo.reflect(_req(body=b'{"a": 1}', content_type=ct)) == {"a": 1}
 
 
 def test_a_slack_incoming_webhook_answers_the_literal_ok():
@@ -630,7 +630,7 @@ def test_a_slack_incoming_webhook_answers_the_literal_ok():
     assert ans.response.body == b"ok"
     assert dict(ans.response.headers)["content-type"] == "text/plain"
     assert ans.answered_by == "fake-L0"
-    assert ans.flags == (policy.FIDELITY_L0_FLAG,)
+    assert ans.flags == (FIDELITY_L0_FLAG,)
 
 
 def test_the_web_api_still_gets_the_json_envelope():
@@ -653,8 +653,8 @@ def test_a_body_a_strict_json_parser_would_refuse_reflects_nothing():
     """`_has_non_finite` replaced a throwaway serialization of the whole body; it must still keep
     NaN and Infinity out, because it is what makes the single json.dumps unable to fail."""
     for raw in [b'{"v": NaN}', b'{"v": Infinity}', b'{"v": -Infinity}', b'{"v": [1e400]}']:
-        assert policy.reflect(_req(body=raw, content_type="application/json")) == {}
-    assert policy.reflect(_req(body=b'{"v": 1.5}', content_type="application/json")) == {"v": 1.5}
+        assert echo.reflect(_req(body=raw, content_type="application/json")) == {}
+    assert echo.reflect(_req(body=b'{"v": 1.5}', content_type="application/json")) == {"v": 1.5}
 
 
 def test_the_body_is_serialized_exactly_once(monkeypatch):
@@ -669,7 +669,7 @@ def test_the_body_is_serialized_exactly_once(monkeypatch):
     # Rebind the name `json` inside policy rather than mutating the shared stdlib module: the
     # latter counts every json.dumps in the process, including ones classify or servicemap make,
     # which turns this into a tripwire for whatever another batch adds to that path.
-    monkeypatch.setattr(policy, "json", SimpleNamespace(dumps=counting, loads=json.loads))
+    monkeypatch.setattr(echo, "json", SimpleNamespace(dumps=counting, loads=json.loads))
     _answer(
         _req(
             "POST",
@@ -685,20 +685,20 @@ def test_a_digit_keyed_metadata_field_stays_an_object():
     """#27's failure class, one step along. `metadata[0]=zero` is the key "0", and the live API
     answers `{"metadata": {"0": "zero"}}`. Promoted to a list, `refund.metadata["0"]` raises
     TypeError instead of returning the value the caller itself just sent."""
-    assert policy.parse_form("metadata[0]=zero") == {"metadata": {"0": "zero"}}
-    assert policy.parse_form("metadata[0]=a&metadata[1]=b") == {"metadata": {"0": "a", "1": "b"}}
+    assert echo.parse_form("metadata[0]=zero") == {"metadata": {"0": "zero"}}
+    assert echo.parse_form("metadata[0]=a&metadata[1]=b") == {"metadata": {"0": "a", "1": "b"}}
     # Nested under another field, and mixed with a string key, it is the same field name.
-    assert policy.parse_form("a[metadata][0]=z") == {"a": {"metadata": {"0": "z"}}}
-    assert policy.parse_form("metadata[0]=z&metadata[k]=v") == {"metadata": {"0": "z", "k": "v"}}
+    assert echo.parse_form("a[metadata][0]=z") == {"a": {"metadata": {"0": "z"}}}
+    assert echo.parse_form("metadata[0]=z&metadata[k]=v") == {"metadata": {"0": "z", "k": "v"}}
 
 
 def test_a_real_array_field_is_still_promoted_to_a_list():
     """The exemption is by field name, so the rule `metadata` opts out of still applies to
     everything else: `expand[0]=a&expand[1]=b` is an array on the wire and a list in the echo."""
-    assert policy.parse_form("expand[0]=charge&expand[1]=customer") == {
+    assert echo.parse_form("expand[0]=charge&expand[1]=customer") == {
         "expand": ["charge", "customer"]
     }
-    assert policy.parse_form("line_items[0][price]=p") == {"line_items": [{"price": "p"}]}
+    assert echo.parse_form("line_items[0][price]=p") == {"line_items": [{"price": "p"}]}
 
 
 # ------------------------------------------------------------------ answer targets (#16, D20)
@@ -718,7 +718,7 @@ def test_a_route_target_makes_the_answer_delegated_not_faked():
     ans = _answer_with(index, _req("POST", path="/v1/refunds"))
     assert ans.answered_by == "delegated"
     assert ans.response is None  # the engine forwards; the policy does no I/O
-    assert ans.forward_to == policy.ForwardTo(
+    assert ans.forward_to == delegation.ForwardTo(
         url="http://127.0.0.1:3000/refund", forward_auth=False
     )
 
@@ -793,7 +793,7 @@ def test_a_delegated_answer_carries_its_own_fidelity_flag():
     index = _targeted_index([("api.stripe.com", "/v1/refunds", "http://127.0.0.1:3000/r")])
     ans = _answer_with(index, _req("POST", path="/v1/refunds"))
     assert ans.flags == ("fidelity:delegated",)
-    assert _answer(_req("POST", path="/v1/refunds")).flags == (policy.FIDELITY_L0_FLAG,)
+    assert _answer(_req("POST", path="/v1/refunds")).flags == (FIDELITY_L0_FLAG,)
 
 
 def test_an_unlisted_read_on_a_targeted_service_is_not_delegated_without_target_reads():
@@ -824,7 +824,7 @@ def test_an_unmatched_llm_or_telemetry_request_is_never_delegated():
             matched=None,  # unlisted: this is the `elif` branch, not `target_for`
             service_map=sm,
         )
-        forward = policy.delegate(_req("POST", path="/anything"), cls)
+        forward = delegation.delegate(_req("POST", path="/anything"), cls)
         if kind == "read":
             assert forward is not None, "target_reads is what delegates a read"
         else:
@@ -843,16 +843,16 @@ def test_a_credential_path_host_is_never_delegated_off_the_machine():
 
     for path in ("/services/T0/B0/SECRET", "/workflows/T0/A0/SECRET/xyz", "/triggers/T0/1/abc"):
         request = _req("POST", host="hooks.slack.com", path=path)
-        forward = policy.delegate(request, classify(request, index))
+        forward = delegation.delegate(request, classify(request, index))
         assert forward is None, f"{path} was delegated to {forward and forward.url}"
 
     # The same service's other hosts are not credential-path hosts, so they still delegate.
     request = _req("POST", host="slack.com", path="/api/chat.postMessage")
-    forward = policy.delegate(request, classify(request, index))
+    forward = delegation.delegate(request, classify(request, index))
     assert forward is not None and forward.url.startswith("http://stub.internal:9000")
 
     # And a loopback target on the credential host is fine - that is the supported way to stub it.
     local = servicemap.MapIndex((replace(slack, target="http://127.0.0.1:3000"),))
     request = _req("POST", host="hooks.slack.com", path="/workflows/T0/A0/SECRET/xyz")
-    forward = policy.delegate(request, classify(request, local))
+    forward = delegation.delegate(request, classify(request, local))
     assert forward is not None and forward.url.startswith("http://127.0.0.1:3000")

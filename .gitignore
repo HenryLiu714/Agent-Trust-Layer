@@ -7,14 +7,21 @@ build/
 .venv/
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
 
 # Local config and secrets
 .env
 .env.*
 !.env.example
+# A local overrides file in the repo root would be picked up by every `uv run irimi` here.
+/irimi.maps.yaml
 
 # irimi state if someone points IRIMI_HOME at the repo
 .irimi/
+
+# Claude Code: agent worktrees and per-user settings
+.claude/worktrees/
+.claude/settings.local.json
 
 # Editors and OS
 .vscode/

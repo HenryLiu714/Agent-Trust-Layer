@@ -16,11 +16,10 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
-from irimi import ca, paths, pipeline, servicemap
-from irimi import policy as policy_module
+from irimi import ca, delegation, paths, pipeline, servicemap
 from irimi.engine import EngineConfig, EngineStartError
 from irimi.engine.mitm import IrimiAddon, MitmEngine
-from irimi.exchange import Response
+from irimi.exchange import DECISION_FAILED_FLAG, UNCLASSIFIED_FLAG, Response
 from irimi.overlay import NoOverlay
 from irimi.policy import ShadowPolicy
 from irimi.store import NullStore
@@ -1334,7 +1333,7 @@ def test_a_raise_in_the_decision_answers_locally_instead_of_forwarding(
     def boom(*args, **kwargs):
         raise RuntimeError("the decision exploded")
 
-    monkeypatch.setattr(policy_module, "target_url", boom)
+    monkeypatch.setattr(delegation, "target_url", boom)
     eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
     try:
         status, data = _via_proxy(
@@ -1346,7 +1345,7 @@ def test_a_raise_in_the_decision_answers_locally_instead_of_forwarding(
     assert status == 502, "the write reached the real upstream"
     assert json.loads(data)["error"]["type"] == "irimi_decision_failed"
     assert len(seen) == 1, "the exchange must still be recorded"
-    assert seen[0].flags == (pipeline.UNCLASSIFIED_FLAG, pipeline.DECISION_FAILED_FLAG)
+    assert seen[0].flags == (UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG)
     assert (seen[0].kind, seen[0].answered_by) == ("unknown", "fake-L0")
 
 
@@ -1383,9 +1382,9 @@ def test_a_refused_target_is_not_a_write_either(tmp_path, monkeypatch, target):
     """
 
     def refuse(url, port):
-        raise pipeline.TargetRefused("refusing this target")
+        raise delegation.TargetRefused("refusing this target")
 
-    monkeypatch.setattr(pipeline, "refuse_self_target", refuse)
+    monkeypatch.setattr(delegation, "refuse_self_target", refuse)
     maps = _targeted(
         tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{target}/w")]
     )

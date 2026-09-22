@@ -13,17 +13,28 @@ from mitmproxy.addons import default_addons
 from mitmproxy.master import Master
 from mitmproxy.options import Options
 
-from irimi import ca, pipeline
+from irimi import ca, delegation, netaddr, pipeline, reverse_door
 from irimi.engine import EngineConfig, EngineStartError, OnExchange
-from irimi.exchange import LIVE_KINDS, AnsweredBy, Door, Exchange, Headers, Request, Response
+from irimi.exchange import (
+    DECISION_FAILED_FLAG,
+    LIVE_KINDS,
+    TARGET_FAILED_FLAG,
+    UNCLASSIFIED_FLAG,
+    UPSTREAM_ERROR_FLAG,
+    AnsweredBy,
+    Door,
+    Exchange,
+    Headers,
+    Request,
+    Response,
+)
 from irimi.overlay import Overlay
-from irimi.policy import AnswerPolicy, ForwardTo
+from irimi.policy import AnswerPolicy
 from irimi.store import TraceStore
 
 logger = logging.getLogger(__name__)
 
 META_KEY = "irimi"  # flow.metadata slot holding the per-flow state below
-UPSTREAM_ERROR_FLAG = "upstream-error"
 
 # Called once from the running hook with (bound port, None) or (None, why it failed).
 OnRunning = Callable[[int | None, EngineStartError | None], None]
@@ -156,12 +167,12 @@ def _probe_local_target(url: str, host: str, port: int) -> None:
     inherently best-effort: a stub that dies between the probe and the dial gets the old page too,
     and the flag is right either way.
     """
-    if not pipeline.is_local_target(url):
+    if not netaddr.is_local_target(url):
         return
     try:
         socket.create_connection((host, port), timeout=TARGET_PROBE_TIMEOUT_S).close()
     except OSError as exc:
-        raise pipeline.TargetUnreachable(
+        raise delegation.TargetUnreachable(
             f"answer target {url!r} could not be reached: {exc}"
         ) from None
 
@@ -207,11 +218,11 @@ class IrimiAddon:
             flow.response = http.Response.make(400, b"irimi: could not parse request\n")
             return
         # sockname is the socket this request arrived on, i.e. our own listener.
-        door = pipeline.detect_door(req, flow.client_conn.sockname[1])
+        door = reverse_door.detect_door(req, flow.client_conn.sockname[1])
         if door == "reverse":
             try:
                 req = self._through_reverse_door(flow, req)
-            except pipeline.ReverseDoorRefused as exc:
+            except reverse_door.ReverseDoorRefused as exc:
                 logger.warning("irimi: %s", exc)
                 flow.response = http.Response.make(403, f"irimi: {exc}\n".encode())
                 return
@@ -243,19 +254,19 @@ class IrimiAddon:
             # of this bug: #13's "log of every write" has to show the one irimi could not decide
             # about, and `unknown` + `unclassified` is the honest classification for it.
             logger.exception("irimi: answering locally; the decision raised")
-            response = _decision_failed(f"irimi could not decide how to answer this request: {exc}")
+            refusal = _decision_failed(f"irimi could not decide how to answer this request: {exc}")
             ex = pipeline.annotate(
                 req,
-                response,
+                refusal,
                 pipeline.Classification(
                     service=req.host,
                     operation="",
                     kind="unknown",
-                    flags=(pipeline.UNCLASSIFIED_FLAG,),
+                    flags=(UNCLASSIFIED_FLAG,),
                 ),
                 "fake-L0",
                 pipeline.attribute_run(req, self.config.run_id),
-                extra_flags=(pipeline.DECISION_FAILED_FLAG,),
+                extra_flags=(DECISION_FAILED_FLAG,),
                 door=door,
             )
             # Through `respond`, like every other answer of ours. This is the one path that never
@@ -263,28 +274,30 @@ class IrimiAddon:
             # the one engine-answered response reaching the client with no `Irimi-Answered-By`,
             # while being recorded as `fake-L0`. Invariant (a) of #12 reads the header to tell an
             # answer of ours from the real service's, and this one said "real service".
-            flow.response = _to_mitm_response(pipeline.respond(ex) or response)
+            flow.response = _to_mitm_response(pipeline.respond(ex) or refusal)
             self._finish(ex)
             return
-        response, flags, target = ans.response, ans.flags, ""
+        response: Response | None = ans.response
+        flags: tuple[str, ...] = ans.flags
+        target = ""
         if ans.forward_to is not None:
             target = ans.forward_to.url
             try:
                 self._to_target(flow, req, ans.forward_to)
-            except pipeline.TargetRefused as exc:
+            except delegation.TargetRefused as exc:
                 logger.warning("irimi: %s", exc)
-                response, flags = _target_failed(str(exc)), flags + (pipeline.TARGET_FAILED_FLAG,)
+                response, flags = _target_failed(str(exc)), flags + (TARGET_FAILED_FLAG,)
             except Exception as exc:  # never fail open: an unrewritten flow goes to the real API
                 logger.warning("irimi: refusing a target that could not be applied: %s", exc)
                 response, flags = (
                     _target_failed(f"answer target {target!r} could not be applied: {exc}"),
-                    flags + (pipeline.TARGET_FAILED_FLAG,),
+                    flags + (TARGET_FAILED_FLAG,),
                 )
         flow.metadata[META_KEY] = _Pending(req, cls, run_id, ans.answered_by, door, flags, target)
         if response is not None:
             flow.response = _to_mitm_response(response)
 
-    def _to_target(self, flow: http.HTTPFlow, req: Request, forward: ForwardTo) -> None:
+    def _to_target(self, flow: http.HTTPFlow, req: Request, forward: delegation.ForwardTo) -> None:
         """Point the flow at its answer target, the way `_through_reverse_door` points it upstream.
 
         mitmproxy opens the server connection after this hook, so rewriting the flow here *is* the
@@ -299,7 +312,7 @@ class IrimiAddon:
         which rewrites the recorded request too - there the rewritten host *is* what the caller
         asked for, spelled as a path.
         """
-        pipeline.refuse_self_target(forward.url, flow.client_conn.sockname[1])
+        delegation.refuse_self_target(forward.url, flow.client_conn.sockname[1])
         parts = urlsplit(forward.url)
         host = (parts.hostname or "").lower()
         default_port = 443 if parts.scheme == "https" else 80
@@ -319,7 +332,7 @@ class IrimiAddon:
             # too (#32). `forward_auth` keeps all of them, which is what a sandbox tenant or an
             # internal simulator opting in actually wants.
             for name in list(flow.request.headers.keys()):
-                if pipeline.is_credential_header(name):
+                if delegation.is_credential_header(name):
                     del flow.request.headers[name]
         flow.request.scheme = parts.scheme
         flow.request.host = host
@@ -337,9 +350,9 @@ class IrimiAddon:
         host that is not allowed.
         """
         peer = flow.client_conn.peername[0] if flow.client_conn.peername else ""
-        if not pipeline.is_loopback(peer):
-            raise pipeline.ReverseDoorRefused(f"reverse door: loopback only, refusing {peer!r}")
-        req = pipeline.rewrite_reverse(req, self.config.reverse_hosts)
+        if not netaddr.is_loopback(peer):
+            raise reverse_door.ReverseDoorRefused(f"reverse door: loopback only, refusing {peer!r}")
+        req = reverse_door.rewrite_reverse(req, self.config.reverse_hosts)
         flow.request.scheme = req.scheme
         flow.request.host = req.host
         flow.request.port = req.port
@@ -423,7 +436,7 @@ class IrimiAddon:
         if (
             ex.kind not in LIVE_KINDS
             and ex.answered_by != "live"
-            and pipeline.TARGET_FAILED_FLAG not in ex.flags
+            and TARGET_FAILED_FLAG not in ex.flags
         ):
             self.write_log.append(ex)
         out = pipeline.respond(ex)
@@ -441,6 +454,7 @@ class IrimiAddon:
         # all, so the failure is the client going away - calling that an upstream error asserts
         # something untrue about a write that never left the machine, and drops the fidelity flag
         # the answer actually carried (#29).
+        extra_flags: tuple[str, ...]
         if pending.answered_by == "live":
             extra_flags = (UPSTREAM_ERROR_FLAG,)
         elif pending.answered_by == "delegated":
@@ -448,8 +462,8 @@ class IrimiAddon:
             # afterwards does not make it fail twice. The flag is a fact about the exchange, not a
             # counter (#32).
             extra_flags = pending.flags
-            if pipeline.TARGET_FAILED_FLAG not in extra_flags:
-                extra_flags += (pipeline.TARGET_FAILED_FLAG,)
+            if TARGET_FAILED_FLAG not in extra_flags:
+                extra_flags += (TARGET_FAILED_FLAG,)
         else:
             extra_flags = pending.flags
         ex = pipeline.annotate(

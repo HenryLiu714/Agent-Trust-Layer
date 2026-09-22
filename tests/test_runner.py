@@ -3,15 +3,8 @@ import threading
 from pathlib import Path
 
 from irimi.exchange import Exchange, Request, Response
-from irimi.runner import (
-    EngineThread,
-    banner_lines,
-    child_env,
-    delegated_lines,
-    exchange_line,
-    exit_code_for,
-    summary_lines,
-)
+from irimi.report import banner_lines, delegated_lines, exchange_line, summary_lines
+from irimi.runner import EngineThread, child_env, exit_code_for
 
 
 def _exchange(

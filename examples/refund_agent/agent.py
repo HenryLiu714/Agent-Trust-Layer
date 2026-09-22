@@ -4,9 +4,10 @@ It does two things an agent does: a live read (list charges) and a consequential
 one of them). Run it bare and the refund is real; run it under `irimi shadow` and the refund is
 answered locally and never reaches Stripe.
 
-    uv run --with stripe python examples/refund_agent/seed.py        # once per test account
-    uv run --with stripe python examples/refund_agent/agent.py       # real refund
-    uv run --with stripe irimi shadow -- python examples/refund_agent/agent.py   # no refund
+    uv sync --group examples                                          # installs the SDKs
+    uv run python examples/refund_agent/seed.py                       # once per test account
+    uv run python examples/refund_agent/agent.py                      # real refund
+    uv run irimi shadow -- python examples/refund_agent/agent.py      # no refund
 
 Test mode only: it refuses any key that is not `sk_test_`. The README GIF is recorded elsewhere,
 on a live account with a restricted key.

@@ -10,8 +10,8 @@ Door = Literal["forward", "reverse"]
 
 KINDS: tuple[Kind, ...] = ("read", "write", "llm", "telemetry", "unknown")
 # The kinds shadow mode forwards to the real service instead of answering locally. It lives here,
-# beside KINDS, rather than in policy.py, because the map loader has to refuse a `default_kind`
-# that names one (#30) and servicemap must not import policy.
+# beside KINDS, rather than beside the policy, because the map loader has to refuse a
+# `default_kind` that names one (#30) and servicemap must not import policy.
 LIVE_KINDS: tuple[Kind, ...] = ("read", "llm", "telemetry")
 SAFE_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
 # A map route's `match.method` when it names no method: it matches every verb, including the ones
@@ -19,6 +19,29 @@ SAFE_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
 # map loader and the classifier have to reason about "this route named no method" and a second
 # spelling of `"*"` in either of them is the drift `SAFE_METHODS` is here to avoid.
 ANY_METHOD = "*"
+
+# ------------------------------------------------------------------------------ exchange flags
+#
+# Every value that may appear in `Exchange.flags`, so a reader of a trace has one list to check
+# against. A flag is a fact about one exchange, never a counter: the engine adds each at most once.
+
+# The classifier could not say what this request is: `kind` is `unknown`, whether a map declared
+# it or the RFC fallback reached it, and the answer is a local fake rather than a forward.
+UNCLASSIFIED_FLAG = "unclassified"
+# A live-forwarding kind was refused because its route did not name this method (THE SCOPE RULE,
+# decision half, in `pipeline.classify`). The exchange says `unknown`, and this says why.
+DOWNGRADED_FLAG = "kind-downgraded"
+# An answer target was chosen and could not be reached or applied, and the agent got a 502.
+TARGET_FAILED_FLAG = "target-failed"
+# The classify/answer decision itself raised, so the request was answered locally with a 502 (see
+# `IrimiAddon.request`). Not `target-failed`: that one says a target was chosen and could not be
+# reached; this one says we never got as far as choosing.
+DECISION_FAILED_FLAG = "decision-failed"
+# A live forward that lost the real service before it answered.
+UPSTREAM_ERROR_FLAG = "upstream-error"
+# How faithful a locally decided answer is: the L0 echo, or whatever an answer target said.
+FIDELITY_L0_FLAG = "fidelity:L0"
+FIDELITY_DELEGATED_FLAG = "fidelity:delegated"
 
 Headers = tuple[tuple[str, str], ...]
 

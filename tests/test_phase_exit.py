@@ -205,7 +205,7 @@ def test_the_refund_agent_leaves_no_refund_on_a_real_test_mode_charge(home, capf
     test mode: the POST is answered by the engine, the agent gets a real-shaped `re_` id, and a
     live re-read of the charge afterwards shows the refund never happened.
 
-        uv run --with stripe pytest -q tests/test_phase_exit.py
+        uv sync --group examples && uv run pytest -q tests/test_phase_exit.py
     """
     stripe = pytest.importorskip("stripe", reason="live phase-exit check needs the stripe SDK")
     stripe.api_key = os.environ["STRIPE_API_KEY"]
@@ -225,6 +225,6 @@ def test_the_refund_agent_leaves_no_refund_on_a_real_test_mode_charge(home, capf
     charge = stripe.Charge.retrieve(charge_id)
     assert charge.amount_refunded == 0, "a refund reached Stripe"
     assert charge.refunded is False
-    assert [r for r in stripe.Refund.list(charge=charge_id).data] == []
+    assert list(stripe.Refund.list(charge=charge_id).data) == []
     assert f"  ○ refund {amount} on {charge_id}  unvalidated (L0)" in out
     assert "  These writes did not happen." in out

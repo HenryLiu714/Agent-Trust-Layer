@@ -242,7 +242,7 @@ def test_the_shipped_maps_are_inside_a_built_wheel(tmp_path):
         )
         # The entry point the maps are loaded through has to be in there too, or the refusal the
         # missing maps would raise never gets the chance to run.
-        assert "irimi/servicemap.py" in wheel.namelist()
+        assert "irimi/servicemap/loader.py" in wheel.namelist()
     assert packaged == MAP_FILE_NAMES
 
 
@@ -899,7 +899,7 @@ def test_a_missing_maps_directory_is_one_line_on_the_cli(tmp_path, monkeypatch, 
     from irimi.cli import main
 
     missing = tmp_path / "gone"
-    monkeypatch.setattr(servicemap, "shipped_dir", lambda: missing)
+    monkeypatch.setattr(servicemap.loader, "shipped_dir", lambda: missing)
     assert main(argv) == 1
     err = capsys.readouterr().err
     assert err.startswith("error: ")

@@ -1,15 +1,18 @@
-"""The request pipeline as plain functions. No mitmproxy here; the engine calls these in order."""
+"""The request pipeline as plain functions: parse, classify, attribute, annotate, respond.
 
-import ipaddress
-import socket
+No mitmproxy here; the engine calls these in order. The two neighbours that are *not* here, each
+because it is a decision of its own: the reverse door (`irimi.reverse_door`) and answer targets
+(`irimi.delegation`).
+"""
+
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
-from urllib.parse import urlsplit
 
 from irimi.exchange import (
+    DOWNGRADED_FLAG,
     LIVE_KINDS,
     SAFE_METHODS,
+    UNCLASSIFIED_FLAG,
     AnsweredBy,
     Door,
     Exchange,
@@ -18,67 +21,13 @@ from irimi.exchange import (
     Response,
     Validation,
 )
-
-if TYPE_CHECKING:  # quoted annotations only: servicemap imports this module, so no runtime import
-    from irimi.servicemap import MapIndex, Route, ServiceMap
+from irimi.servicemap import MapIndex, Route, ServiceMap
 
 RUN_HEADER = "irimi-run"  # header names are compared case-insensitively; stored lower-case
 # Stamped on every response irimi decided rather than forwarded, carrying the `answered_by` value
 # itself (`fake-L0`, `delegated`). See `answered_by_header` for why a live forward gets none.
 ANSWERED_BY_HEADER = "irimi-answered-by"
 LIVE_ANSWER: AnsweredBy = "live"
-UNCLASSIFIED_FLAG = "unclassified"
-# A live-forwarding kind was refused because it did not name this method (see
-# `_refuse_live_on_an_unnamed_method`). The exchange says `unknown`, and this says why.
-DOWNGRADED_FLAG = "kind-downgraded"
-
-REVERSE_SCHEME = "https"
-REVERSE_DEFAULT_PORT = 443
-
-TARGET_FAILED_FLAG = "target-failed"
-# The answer could not be decided at all - see `IrimiAddon.request`. It is not `target-failed`:
-# that one says a target was chosen and could not be reached, this one says we never got as far
-# as choosing.
-DECISION_FAILED_FLAG = "decision-failed"
-FIDELITY_DELEGATED_FLAG = "fidelity:delegated"
-AUTH_HEADER = "authorization"
-# Header names that carry a credential and are removed before a request reaches an answer target,
-# unless the route sets `forward_auth: true`. Stripping `Authorization` alone was narrower than
-# the rule it implements - "a local stub does not need your real key" - and left `Cookie`,
-# `x-api-key` and `DD-API-KEY` on the request (#32).
-#
-# A marker list rather than a vendor list, because the vendor list is never finished: every new
-# service brings its own spelling, and the one it is missing is the one that leaks. Over-stripping
-# costs a stub a header it probably did not want; under-stripping hands it a live key, so the rule
-# is deliberately wide and `forward_auth` is the one way to turn it off.
-CREDENTIAL_MARKERS: tuple[str, ...] = (
-    "auth",  # authorization, proxy-authorization, x-sentry-auth, x-authenticated-*
-    "api-key",  # x-api-key, dd-api-key, x-goog-api-key
-    "api_key",
-    "apikey",
-    "token",  # x-auth-token, x-amz-security-token, x-csrf-token
-    "secret",
-    "credential",
-    "password",
-    "signature",  # x-slack-signature and friends: a signature over a shared secret
-)
-# The ones no marker catches: a cookie jar is a credential, and these two vendor headers are
-# spelled with none of the words above.
-CREDENTIAL_HEADERS: frozenset[str] = frozenset({"cookie", "dd-application-key", "x-honeycomb-team"})
-
-
-class ReverseDoorRefused(ValueError):
-    """The reverse door will not relay this request. str(exc) is the one-line explanation."""
-
-
-class TargetRefused(ValueError):
-    """An answer target irimi will not dial. str(exc) is the one-line explanation."""
-
-
-class TargetUnreachable(TargetRefused):
-    """An answer target irimi tried to reach and could not. A subclass, so every handler that
-    already answers a refusal with the `irimi_target_failed` body answers this one the same way -
-    the agent cannot act differently on the two, and the flag it earns is the same."""
 
 
 @dataclass(frozen=True)
@@ -89,11 +38,11 @@ class Classification:
     flags: tuple[str, ...]
     # What MapIndex.route_for returned, so the faker (#11), the summary (#13) and the answer
     # target (#16) do not have to look the route up a second time. None when nothing matched.
-    matched: "tuple[ServiceMap, Route] | None" = None
+    matched: tuple[ServiceMap, Route] | None = None
     # The service claiming this host, which is not the same question as `matched`: a service-level
     # `target:` delegates the routes its own map does not list too, and for those `matched` is
     # None while this is set. None when no map claims the host at all (#16).
-    service_map: "ServiceMap | None" = None
+    service_map: ServiceMap | None = None
 
 
 def parse(
@@ -120,166 +69,7 @@ def parse(
     )
 
 
-def detect_door(request: Request, listen_port: int) -> Door:
-    """A request addressed to the listener itself (`Host: 127.0.0.1:4000`, or an absolute URL
-    naming the listener under any spelling of loopback) came through the reverse door. Everything
-    else is the forward door. A name on our own port that is not a recognised literal is resolved,
-    because forwarding it would make the proxy connect to itself in a loop."""
-    if request.port != listen_port:
-        return "forward"
-    if is_self_host(request.host) or _resolves_to_self(request.host):
-        return "reverse"
-    return "forward"
-
-
-def is_self_host(host: str) -> bool:
-    """True when `host` is a literal for this machine's loopback: "localhost", any 127/8 or ::1
-    address in any spelling inet_aton accepts (127.1, 0177.0.0.1), an IPv4-mapped one
-    (::ffff:127.0.0.1), or the unspecified address (0.0.0.0, ::), which also connects locally."""
-    if host.rstrip(".") == "localhost":
-        return True
-    ip: ipaddress.IPv4Address | ipaddress.IPv6Address
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        try:
-            ip = ipaddress.IPv4Address(socket.inet_aton(host))
-        except OSError:
-            return False
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
-    return ip.is_loopback or ip.is_unspecified
-
-
-def _resolves_to_self(host: str) -> bool:
-    """DNS backstop for names such as the machine's own hostname. Only consulted for requests on
-    our own port, so the hot path never resolves anything."""
-    try:
-        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    except (OSError, UnicodeError):
-        return False
-    return any(is_self_host(info[4][0]) for info in infos)
-
-
-def is_loopback(address: str) -> bool:
-    """True for 127.0.0.0/8 and ::1. Anything unparseable is not loopback."""
-    try:
-        return ipaddress.ip_address(address).is_loopback
-    except ValueError:
-        return False
-
-
-def is_local_target(url: str) -> bool:
-    """True when this answer target names loopback. Anything unparseable is not local.
-
-    One spelling of the question, because three surfaces ask it: `policy.delegate` refuses a
-    non-loopback target on a credential-path host, and the banner and `irimi maps list` paint a
-    non-loopback target red. Three copies would drift, and the one that drifts is the one that
-    lets a credential off the machine.
-    """
-    try:
-        host = urlsplit(url).hostname or ""
-    except ValueError:
-        return False
-    return host == "localhost" or is_loopback(host)
-
-
-def is_credential_header(name: str) -> bool:
-    """True when this header's value is a credential, so a target must not be handed it.
-
-    Compared case-insensitively and by substring, so a vendor header nobody has written down yet
-    (`x-acme-api-key`) is covered the day it appears. See CREDENTIAL_MARKERS for why the rule is
-    wide rather than exact.
-    """
-    lowered = name.strip().lower()
-    return lowered in CREDENTIAL_HEADERS or any(m in lowered for m in CREDENTIAL_MARKERS)
-
-
-def rewrite_reverse(request: Request, allowed_hosts: frozenset[str]) -> Request:
-    """`/<host>[:<port>]/<rest>` on the listener becomes `https://<host>[:<port>]/<rest>`.
-
-    The scheme is always https and the port defaults to 443. The query, method, body and headers
-    are kept; the `host` header is rewritten to the upstream authority, or added if the request
-    had none. Raises ReverseDoorRefused when the first segment is missing, is an IPv6 literal, has
-    a bad port, or names a host (compared lower-case) that is not in `allowed_hosts`.
-    """
-    segment, _, rest = request.path.lstrip("/").partition("/")
-    if segment.startswith("["):
-        raise ReverseDoorRefused("reverse door: IPv6 literal upstream hosts are not supported")
-    host, _, port_text = segment.partition(":")
-    host = host.lower()
-    if not host:
-        raise ReverseDoorRefused(
-            "reverse door: path must be /<upstream-host>/<path>, e.g. /api.stripe.com/v1/charges"
-        )
-    if host not in allowed_hosts:
-        raise ReverseDoorRefused(
-            f"reverse door: host {host!r} is not in a loaded map or --allow-host"
-        )
-    try:
-        port = int(port_text) if port_text else REVERSE_DEFAULT_PORT
-    except ValueError:
-        raise ReverseDoorRefused(f"reverse door: bad port in {segment!r}") from None
-    if not 1 <= port <= 65535:
-        raise ReverseDoorRefused(f"reverse door: bad port in {segment!r}")
-    authority = host if port == REVERSE_DEFAULT_PORT else f"{host}:{port}"
-    headers = tuple((k, authority if k == "host" else v) for k, v in request.headers)
-    if not any(k == "host" for k, _ in headers):
-        headers += (("host", authority),)
-    return replace(
-        request, scheme=REVERSE_SCHEME, host=host, port=port, path="/" + rest, headers=headers
-    )
-
-
-def target_url(target: str, request: Request, matched: bool) -> str:
-    """Where a delegated request is sent, with nginx `proxy_pass` path semantics (design D20).
-
-    A **bare origin** (`http://127.0.0.1:3000`) keeps the request's own path. A target that
-    **carries a path** (`http://127.0.0.1:3000/refund`) replaces the part of the path the route
-    matched. A route pattern always matches the request's whole path - `_match_path` requires the
-    same number of segments - so for a mapped route there is no remainder and the target's path
-    is the whole new path. A request that matched no route (a service-level target covering a
-    route its map does not list) has nothing matched, so its own path is appended instead.
-
-    The query string is always kept; method, body and headers are not this function's business.
-
-    The result is a URL *string*, which the engine splits again to rewrite the flow, so anything
-    in the request that would re-parse differently has to be escaped on the way in. A literal `#`
-    is the one that bites: `POST /unlisted#x?a=1` would come back out as path `/unlisted` with no
-    query at all, so the target would be sent a different request than the agent made and
-    `Exchange.target` would record a URL that was never used. `#` is legal in a request target
-    and means nothing there; `%23` is the same path to the target and survives the round trip.
-    """
-    parts = urlsplit(target)
-    base = parts.path.rstrip("/")
-    if not base:
-        path = request.path
-    elif matched:
-        path = base
-    else:
-        path = base + request.path
-    query = f"?{request.query}" if request.query else ""
-    return f"{parts.scheme}://{parts.netloc}{path}{query}".replace("#", "%23")
-
-
-def refuse_self_target(target: str, listen_port: int) -> None:
-    """Raise TargetRefused when `target` is this listener's own address.
-
-    Targets are loopback-only, so the host alone cannot tell a stub from ourselves - the port is
-    what separates them. Forwarding to our own listener makes the proxy dial itself until it runs
-    out of ports, which is the loop `detect_door` was written for on the reverse door (#4).
-    """
-    parts = urlsplit(target)
-    port = parts.port or (443 if parts.scheme == "https" else 80)
-    host = parts.hostname or ""
-    if port == listen_port and (is_self_host(host) or _resolves_to_self(host)):
-        raise TargetRefused(
-            f"answer target {target!r} is irimi's own listener on port {listen_port}; "
-            "point it at the address that answers the route instead"
-        )
-
-
-def classify(request: Request, maps: "MapIndex | None" = None) -> Classification:
+def classify(request: Request, maps: MapIndex | None = None) -> Classification:
     """What this request is, by the precedence the design fixes (§4.3, D4).
 
     A route rule in a service map wins; then that service's `default_kind`; then the RFC 9110
@@ -295,6 +85,7 @@ def classify(request: Request, maps: "MapIndex | None" = None) -> Classification
     )
     if matched is not None:
         # route_for found it through service_for, so this costs no second lookup.
+        service_map: ServiceMap | None
         service_map, route = matched
         service, operation, kind = service_map.service, route.operation, route.kind
     else:
@@ -308,17 +99,17 @@ def classify(request: Request, maps: "MapIndex | None" = None) -> Classification
         else:
             kind = "unknown"
     kind, downgraded = _refuse_live_on_an_unnamed_method(kind, request, matched)
-    flags = (UNCLASSIFIED_FLAG,) if kind == "unknown" else ()
+    flags: tuple[str, ...] = (UNCLASSIFIED_FLAG,) if kind == "unknown" else ()
     if downgraded:
         flags += (DOWNGRADED_FLAG,)
     return Classification(service, operation, kind, flags, matched, service_map)
 
 
 def _refuse_live_on_an_unnamed_method(
-    kind: Kind, request: Request, matched: "tuple[ServiceMap, Route] | None"
+    kind: Kind, request: Request, matched: tuple[ServiceMap, Route] | None
 ) -> tuple[Kind, bool]:
-    """THE SCOPE RULE, decision half (see `servicemap`): no classification that forwards live may
-    apply to an unsafe method it did not name explicitly.
+    """THE SCOPE RULE, decision half (see `servicemap.rules`): no classification that forwards
+    live may apply to an unsafe method it did not name explicitly.
 
     The loader refuses a live kind on `*` and makes a destructive one justify itself, so no map
     can reach this today. This asks the question of the request in front of us instead of of the

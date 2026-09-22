@@ -1,5 +1,7 @@
 import argparse
+import secrets
 import sys
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from irimi import __version__, paths
@@ -9,7 +11,7 @@ if TYPE_CHECKING:  # the quoted annotations below; no runtime import
     from pathlib import Path
 
     from irimi.ca import CAPaths
-    from irimi.engine import EngineConfig
+    from irimi.engine import Engine, EngineConfig, OnExchange
     from irimi.servicemap import MapIndex
 
 SIGINT_EXIT_CODE = 130  # 128 + SIGINT, the shell convention for a Ctrl-C'd command
@@ -139,7 +141,7 @@ def _load_maps(args: argparse.Namespace | None = None) -> "MapIndex | None":
     that would then classify and answer with half a policy. `args` is None for `maps list`, which
     has no engine flags of its own.
     """
-    from irimi import pipeline, servicemap
+    from irimi import delegation, servicemap
 
     try:
         index = servicemap.load(
@@ -157,9 +159,9 @@ def _load_maps(args: argparse.Namespace | None = None) -> "MapIndex | None":
             for sm in index.services:
                 for target in (sm.target, *(r.target for r in sm.routes)):
                     if target != servicemap.SELF_TARGET:
-                        pipeline.refuse_self_target(target, port)
+                        delegation.refuse_self_target(target, port)
         return index
-    except (servicemap.MapError, pipeline.TargetRefused) as exc:
+    except (servicemap.MapError, delegation.TargetRefused) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return None
 
@@ -202,14 +204,14 @@ def print_startup(
     this machine. `shadow` flushed already; `serve` did not, and the two are one function now so
     they cannot drift again.
     """
-    from irimi import runner  # deferred like every other heavy import in this module
+    from irimi import report  # deferred like every other heavy import in this module
 
     warning = _escape_hatch_warning(args)
     if warning is not None:
         print(warning, file=sys.stderr, flush=True)
-    for line in runner.banner_lines(command, run_id, host, port, ca_cert):
+    for line in report.banner_lines(command, run_id, host, port, ca_cert):
         print(line, flush=True)
-    for line in runner.delegated_lines(index, color=sys.stdout.isatty()):
+    for line in report.delegated_lines(index, color=sys.stdout.isatty()):
         print(line, flush=True)
 
 
@@ -282,32 +284,63 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_serve(args: argparse.Namespace) -> int:
-    import asyncio
-    import secrets
+@dataclass(frozen=True)
+class _Run:
+    """Everything `serve` and `shadow` need before an engine exists."""
 
-    from irimi import ca, runner
-    from irimi.engine import EngineStartError
+    index: "MapIndex"
+    ca: "CAPaths"
+    run_id: str
+    config: "EngineConfig"
+
+
+def _prepare_run(args: argparse.Namespace) -> _Run | None:
+    """Load the maps and find the CA, or print why not and return None.
+
+    Fail closed: without both, no engine starts and no child is spawned.
+    """
+    from irimi import ca
+
+    index = _load_maps(args)
+    if index is None:
+        return None
+    p = ca.ca_paths()
+    if not ca.ca_exists(p):
+        print(f"error: no CA at {p.key.parent}. Run `irimi init` first.", file=sys.stderr)
+        return None
+    run_id = secrets.token_hex(2)
+    return _Run(index, p, run_id, _engine_config(args, index, run_id, p))
+
+
+def _build_engine(run: _Run, on_exchange: "OnExchange") -> "Engine":
+    """The composition root: the one place the concrete engine, policy, store and overlay meet.
+
+    Phase 2 swaps `NoOverlay` for the real overlay and Phase 3 swaps `NullStore` for the directory
+    store here, and nowhere else.
+    """
     from irimi.engine.mitm import MitmEngine
-    from irimi.exchange import Exchange
     from irimi.overlay import NoOverlay
     from irimi.policy import ShadowPolicy
     from irimi.store import NullStore
 
-    index = _load_maps(args)
-    if index is None:
+    return MitmEngine(run.config, ShadowPolicy(), NullStore(), NoOverlay(), on_exchange=on_exchange)
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    import asyncio
+
+    from irimi import report
+    from irimi.engine import EngineStartError
+    from irimi.exchange import Exchange
+
+    run = _prepare_run(args)
+    if run is None:
         return 1
-    p = ca.ca_paths()
-    if not ca.ca_exists(p):
-        print(f"error: no CA at {p.key.parent}. Run `irimi init` first.", file=sys.stderr)
-        return 1
-    run_id = secrets.token_hex(2)
-    cfg = _engine_config(args, index, run_id, p)
 
     def on_exchange(ex: Exchange) -> None:
-        print(runner.exchange_line(ex), flush=True)
+        print(report.exchange_line(ex), flush=True)
 
-    engine = MitmEngine(cfg, ShadowPolicy(), NullStore(), NoOverlay(), on_exchange=on_exchange)
+    engine = _build_engine(run, on_exchange)
 
     async def _main() -> None:
         task = asyncio.ensure_future(engine.run())
@@ -318,7 +351,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
             raise
         port = engine.listen_port()
         assert port is not None  # wait_ready() returned, so the listener is bound
-        print_startup("serve", args, index, run_id, cfg.listen_host, port, p.cert)
+        print_startup(
+            "serve", args, run.index, run.run_id, run.config.listen_host, port, run.ca.cert
+        )
         await task
 
     try:
@@ -333,21 +368,12 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 def cmd_shadow(args: argparse.Namespace) -> int:
     import os
-    import secrets
     import subprocess
     import time
 
-    from irimi import ca, runner
+    from irimi import report, runner
     from irimi.engine import EngineStartError
-    from irimi.engine.mitm import MitmEngine
     from irimi.exchange import Exchange
-    from irimi.overlay import NoOverlay
-    from irimi.policy import ShadowPolicy
-    from irimi.store import NullStore
-
-    index = _load_maps(args)
-    if index is None:
-        return 1
 
     cmd = list(args.cmd)
     if cmd and cmd[0] == "--":
@@ -356,26 +382,18 @@ def cmd_shadow(args: argparse.Namespace) -> int:
         print("error: nothing to run. Usage: irimi shadow -- <command> [args...]", file=sys.stderr)
         return 1
 
-    p = ca.ca_paths()
-    if not ca.ca_exists(p):
-        print(f"error: no CA at {p.key.parent}. Run `irimi init` first.", file=sys.stderr)
+    run = _prepare_run(args)
+    if run is None:
         return 1
 
-    run_id = secrets.token_hex(2)
     exchanges: list[Exchange] = []
     elapsed = 0.0
 
     def on_exchange(ex: Exchange) -> None:
         exchanges.append(ex)
-        print(runner.exchange_line(ex), flush=True)
+        print(report.exchange_line(ex), flush=True)
 
-    engine = MitmEngine(
-        _engine_config(args, index, run_id, p),
-        ShadowPolicy(),
-        NullStore(),
-        NoOverlay(),
-        on_exchange=on_exchange,
-    )
+    engine = _build_engine(run, on_exchange)
 
     try:
         handle = runner.start_engine(engine)
@@ -389,8 +407,9 @@ def cmd_shadow(args: argparse.Namespace) -> int:
         return SIGINT_EXIT_CODE
 
     try:
-        print_startup("shadow", args, index, run_id, paths.LISTEN_HOST, handle.port(), p.cert)
-        env = runner.child_env(dict(os.environ), paths.LISTEN_HOST, handle.port(), p.cert, run_id)
+        host, port = run.config.listen_host, handle.port()
+        print_startup("shadow", args, run.index, run.run_id, host, port, run.ca.cert)
+        env = runner.child_env(dict(os.environ), host, port, run.ca.cert, run.run_id)
         try:
             proc = subprocess.Popen(cmd, env=env)
         except FileNotFoundError:
@@ -413,7 +432,7 @@ def cmd_shadow(args: argparse.Namespace) -> int:
         except KeyboardInterrupt:
             pass
 
-    for line in runner.summary_lines(run_id, exchanges, elapsed, index):
+    for line in report.summary_lines(run.run_id, exchanges, elapsed, run.index):
         print(line, flush=True)
     return code
 

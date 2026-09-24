@@ -1158,3 +1158,59 @@ def test_slack_sdk_parses_the_faked_post():
     assert response["ok"] is True
     assert response["message"]["text"] == "hi"
     assert response["ts"] == response["message"]["ts"]
+
+
+# ------------------------------------------------------- the `ts` watermark (#42)
+#
+# Every test here monkeypatches `echo._last_slack_ts`, which restores it at teardown: the
+# watermark is module state for the life of the process, and a test that raised it and walked away
+# would push every later test's minted `ts` into the future.
+
+
+def test_a_minted_ts_sorts_after_a_real_one_the_run_has_seen(monkeypatch):
+    """#42's done-when. A history read going past first is what puts the faked message after the
+    real ones instead of somewhere in the middle of them."""
+    monkeypatch.setattr(echo, "_last_slack_ts", (0, 0))
+    newest = "1999999999.000500"
+    echo.observe_slack_history(
+        json.dumps({"ok": True, "messages": [{"ts": "1999999998.000000"}, {"ts": newest}]}).encode()
+    )
+    assert float(echo.slack_ts()) > float(newest)
+
+
+def test_an_older_real_ts_does_not_move_the_watermark_backwards(monkeypatch):
+    """Reading an old channel must not rewind the sequence: two messages with one `ts` are two
+    messages that are the same message, which is the whole reason `ts` is minted the way it is."""
+    monkeypatch.setattr(echo, "_last_slack_ts", (1_999_999_999, 500))
+    echo.observe_slack_history(json.dumps({"messages": [{"ts": "1000000000.000000"}]}).encode())
+    assert echo.slack_ts() == "1999999999.000501"
+
+
+def test_a_nested_ts_is_observed_wherever_it_sits(monkeypatch):
+    """`conversations.info` carries the channel's newest message under `latest`, not in a list of
+    messages. The walk does not care which shape the body is."""
+    monkeypatch.setattr(echo, "_last_slack_ts", (0, 0))
+    echo.observe_slack_history(
+        json.dumps({"channel": {"latest": {"ts": "1999999999.000001"}}}).encode()
+    )
+    assert float(echo.slack_ts()) > 1999999999.000001
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"",
+        b"not json",
+        b"[]",
+        b'{"messages": "nope"}',
+        b'{"messages": [{"ts": "not-a-ts"}]}',
+        b'{"messages": [{"ts": 1700000000}]}',
+        b'{"ts": null}',
+    ],
+)
+def test_observing_a_body_that_carries_no_timestamp_changes_nothing(monkeypatch, body):
+    """This runs inside a mitmproxy hook, where a raise forwards the flow and a forwarded write
+    escapes shadow mode. Every shape a real service - or a hostile one - can send is a no-op."""
+    monkeypatch.setattr(echo, "_last_slack_ts", (1_700_000_000, 7))
+    echo.observe_slack_history(body)
+    assert echo._last_slack_ts == (1_700_000_000, 7)

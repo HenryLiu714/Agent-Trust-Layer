@@ -360,6 +360,72 @@ def slack_ts() -> str:
     return f"{seconds}.{counter:06d}"
 
 
+# Keys whose value is a real Slack `ts`, wherever they sit in a read's body. `conversations.
+# history` and `.replies` carry one per message, `conversations.info` carries the channel's
+# `latest`, and a thread carries `thread_ts` and `latest_reply`. Anything else is left alone.
+SLACK_TS_KEYS = frozenset({"ts", "thread_ts", "latest_reply"})
+_SLACK_TS = re.compile(r"\d{1,12}\.\d{6}")
+
+# How many JSON nodes one read's body may be walked for. A Slack page is a hundred messages; this
+# is three orders of magnitude above that, and it is here so a body that is enormous or deeply
+# nested cannot stall the response hook it is walked from (#42).
+OBSERVE_BUDGET = 20_000
+
+
+def observe_slack_ts(ts: str) -> None:
+    """Raise the `ts` watermark to `ts` when it is newer than anything minted or seen so far.
+
+    A minted `ts` has to sort after every real message the run has already read, or an agent that
+    orders a transcript by `ts` - which is how a Slack transcript is ordered - finds its own
+    faked message somewhere in the middle of the real ones. `slack_ts` already mints strictly
+    above `_last_slack_ts`, so feeding the real values into that same watermark is the whole
+    mechanism; nothing else has to change and nothing has to be remembered per message (#42).
+
+    The watermark is one per run rather than one per channel. That is coarser than Slack's own
+    ordering and deliberately so: it is strictly stronger, since a `ts` above the newest message
+    seen in *any* channel is above the newest in each; it needs no record of which reads happened,
+    which irimi does not keep; and `slack_ts`'s promise of one increasing sequence survives it.
+
+    Never raises. It is reached from a mitmproxy hook, where a raise forwards the flow.
+    """
+    global _last_slack_ts
+    if not _SLACK_TS.fullmatch(ts):
+        return
+    whole, _, fraction = ts.partition(".")
+    seen = (int(whole), int(fraction))
+    with _slack_ts_lock:
+        if seen > _last_slack_ts:
+            _last_slack_ts = seen
+
+
+def observe_slack_history(body: bytes) -> None:
+    """Feed every real `ts` in a Slack read's body to the watermark. Never raises.
+
+    The read's body is the only place those values appear - irimi keeps no record of the run's
+    reads, only of its writes - so the watermark is raised as each body goes past rather than
+    looked up later. A body that carries no `ts` at all, or that is not JSON, is a no-op, which is
+    what lets the engine call this for every Slack read without knowing which ones have messages
+    in them (#42).
+    """
+    try:
+        parsed = json.loads(body)
+    except Exception:  # not JSON, or no body at all: there is nothing to observe
+        return
+    stack: list[Any] = [parsed]
+    seen = 0
+    while stack and seen < OBSERVE_BUDGET:
+        node = stack.pop()
+        seen += 1
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in SLACK_TS_KEYS and isinstance(value, str):
+                    observe_slack_ts(value)
+                elif isinstance(value, dict | list):
+                    stack.append(value)
+        elif isinstance(node, list):
+            stack.extend(item for item in node if isinstance(item, dict | list))
+
+
 def slack_body(fields: dict[str, Any]) -> dict[str, Any]:
     """Slack's own envelope. slack_sdk raises SlackApiError on any body without `ok: true`.
 

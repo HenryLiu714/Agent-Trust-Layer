@@ -32,6 +32,8 @@ class _Upstream(BaseHTTPRequestHandler):
         if self.path == "/badgzip":  # claims gzip, is not: an undecodable body
             body = b"not-gzip"
             self.send_header("content-encoding", "gzip")
+        if self.path == "/slack-history":  # a Slack read whose real `ts` the run has to see
+            body = b'{"ok": true, "messages": [{"ts": "1999999999.000500"}]}'
         self.send_header("content-type", "text/plain")
         self.send_header("content-length", str(len(body)))
         self.end_headers()
@@ -97,6 +99,22 @@ routes:
     operation: things.create
     kind: write
     human: create a thing
+"""
+
+# A map claiming the loopback upstream as `slack`, so a read through it is a Slack read. The
+# service name is what the `ts` watermark keys on, not the host or the port (#42).
+SLACK_MAP = """
+version: 1
+service: slack
+hosts:
+  - 127.0.0.1
+routes:
+  - match:
+      method: GET
+      path: /slack-history
+    operation: conversations.history
+    kind: read
+    human: read the history
 """
 
 
@@ -278,6 +296,25 @@ def test_mapped_read_is_named_and_forwarded(tmp_path, monkeypatch, upstream):
     assert (ex.service, ex.operation, ex.kind) == ("demo", "things.list", "read")
     assert ex.answered_by == "live"
     assert ex.flags == ()
+
+
+def test_a_slack_read_raises_the_ts_watermark(tmp_path, monkeypatch, upstream):
+    """#42: a minted `ts` has to sort after the real messages the run already read, and this hook
+    is the only place those values go past - the write log holds writes, not reads."""
+    from irimi import echo
+
+    monkeypatch.setattr(echo, "_last_slack_ts", (0, 0))
+    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch, doc=SLACK_MAP))
+    eng, seen, stop = _start(cfg)
+    try:
+        status, _ = _via_proxy(
+            eng.listen_port(), "GET", f"http://127.0.0.1:{upstream}/slack-history"
+        )
+    finally:
+        stop()
+    assert status == 200
+    assert (seen[0].service, seen[0].kind) == ("slack", "read")
+    assert float(echo.slack_ts()) > 1999999999.000500
 
 
 def test_run_header_attributes_run(engine, upstream):

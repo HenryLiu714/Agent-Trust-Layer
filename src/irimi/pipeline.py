@@ -25,7 +25,8 @@ from irimi.servicemap import MapIndex, Route, ServiceMap
 
 RUN_HEADER = "irimi-run"  # header names are compared case-insensitively; stored lower-case
 # Stamped on every response irimi decided rather than forwarded, carrying the `answered_by` value
-# itself (`fake-L0`, `delegated`). See `answered_by_header` for why a live forward gets none.
+# itself (`fake-L0`, `fake-L1`, `delegated`). See `answered_by_header` for why a live forward gets
+# none.
 ANSWERED_BY_HEADER = "irimi-answered-by"
 LIVE_ANSWER: AnsweredBy = "live"
 
@@ -167,12 +168,12 @@ def annotate(
 def answered_by_header(answered_by: AnsweredBy) -> str | None:
     """The `Irimi-Answered-By` value an answer must carry, or None when it must carry none.
 
-    The value IS `answered_by`, not a second vocabulary beside it: `fake-L0` today, `delegated`
-    since #16, `overlay` and `recorded` in later phases. One rule, so a new way of answering
-    cannot ship a response that does not say who answered it - the header is how a client, a
-    test, or a developer reading a capture tells an answer of ours from the real service's. It
-    takes the value rather than the Exchange because the engine asks before there is one: a
-    streamed answer is stamped in `responseheaders`, where only `_Pending` exists yet.
+    The value IS `answered_by`, not a second vocabulary beside it: `fake-L0`, `fake-L1` since #41,
+    `delegated` since #16, `overlay` and `recorded` in later phases. One rule, so a new way of
+    answering cannot ship a response that does not say who answered it - the header is how a
+    client, a test, or a developer reading a capture tells an answer of ours from the real
+    service's. It takes the value rather than the Exchange because the engine asks before there is
+    one: a streamed answer is stamped in `responseheaders`, where only `_Pending` exists yet.
 
     A **live forward gets no header**, deliberately. Everything on that path is the real
     service's: adding a header of ours to it would make the response the agent sees differ from

@@ -1,9 +1,13 @@
-"""The L0 echo (#11): the body a locally answered write gets.
+"""The body a locally answered write gets: the L0 echo (#11) and the L1 fixture (#41).
 
-The request's own fields reflected back as a JSON object, plus `created`, plus an id minted for
-every field the matched route names in `ids:`. It is the floor, not a fixture: an SDK has to be
-able to parse it and read the fields it just sent. Fixture reflection (L1) replaces this for
-mapped routes in a later phase.
+**L0** is the floor and the fallback: the request's own fields reflected back as a JSON object,
+plus `created`, plus an id minted for every field the matched route names in `ids:`. It is not a
+fixture - an SDK has to be able to parse it and read the fields it just sent, and nothing more.
+
+**L1** applies to a route whose map names a `fixture:`. It starts from that vendored response
+object (`irimi.fixture`) and writes the request's own fields over it, so the agent receives every
+field the real service would have sent and not only the ones it posted. A fixture this install
+cannot read is not an error: the answer degrades to L0 and the exchange is flagged.
 
 Nothing here may raise. An exception inside a mitmproxy hook makes the flow forward untouched, and
 a forwarded write escapes shadow mode - so a body that cannot be parsed reflects nothing instead,
@@ -18,10 +22,12 @@ import string
 import threading
 import time
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qsl
 
-from irimi.exchange import Request
+from irimi import fixture
+from irimi.exchange import FIXTURE_FAILED_FLAG, FakeLevel, Request
 from irimi.pipeline import Classification
 from irimi.servicemap import Route, path_params
 
@@ -398,8 +404,98 @@ def fake_body(request: Request, classification: Classification) -> dict[str, Any
     return l0_body(request, route)
 
 
-def fake_response(request: Request, classification: Classification) -> tuple[bytes, str]:
-    """The encoded body and content type of a locally answered write.
+# Fields of a fixture object the service owns, which the request may therefore never write over.
+# `id` is here as well as in every route's `ids:`, because a body posting `object=charge` to a
+# refund route would otherwise hand stripe-python the wrong class to build, and `created` and
+# `livemode` are facts about this answer rather than values the caller gets to choose.
+SERVICE_OWNED: frozenset[str] = frozenset({"id", "object", "created", "livemode"})
+
+# irimi performed nothing, so nothing it answers happened in live mode. Set on every fixture that
+# has the field at all, and on no fixture that does not: a `livemode` on a refund would be a field
+# the real API never sends there (#41).
+LIVEMODE = False
+
+
+def _same_json_type(current: Any, value: Any) -> bool:
+    """True when `value` may stand in for `current` in a fixture object.
+
+    stripe-mock reflects a request field when the schema says it has the field's type; there is no
+    schema here, so the fixture's own value is the type. Numbers are one type, because a form body
+    coerces `amount=4900` to an int while a fixture may hold a float. `bool` is checked first: it
+    is an `int` in Python, and `refunded=true` must not overwrite an amount.
+    """
+    if isinstance(current, bool) or isinstance(value, bool):
+        return isinstance(current, bool) and isinstance(value, bool)
+    if isinstance(current, int | float):
+        return isinstance(value, int | float)
+    return type(current) is type(value)
+
+
+def l1_body(request: Request, route: Route, obj: dict[str, Any]) -> dict[str, Any]:
+    """The L1 body: the fixture object with this request's own fields written over it.
+
+    `obj` is the caller's to mutate - `fixture.get` hands out a private deep copy - and the rules
+    are the ones stripe-mock's own generator applies, minus the OpenAPI schema it has and we do
+    not:
+
+    * a request field is reflected only when the fixture **names** it. A field the object does not
+      have is one the real service would have refused, and inventing it would hand the agent a
+      body no live response can produce. L0 keeps echoing everything, which is what makes it the
+      honest floor for a route we have no fixture for.
+    * it is reflected only when the types agree (`_same_json_type`). A fixture field holding
+      `null` names no type, so any value is accepted there: `reason`, `description` and `customer`
+      are all `null` in Stripe's own fixtures and all things a caller really does send.
+    * `SERVICE_OWNED` fields and every field the route mints an id for are the service's answer,
+      not the caller's argument, so they are set last and a posted value cannot reach them.
+
+    The id rules are L0's, unchanged: `named_id` first, so an update or a cancel echoes the id its
+    own path names (#26, #33), and a minted id only when the request named none.
+    """
+    reflected = reflect(request)
+    for name, value in reflected.items():
+        if name in SERVICE_OWNED or name in route.ids or name not in obj:
+            continue
+        if obj[name] is None or _same_json_type(obj[name], value):
+            obj[name] = value
+    obj["created"] = int(time.time())
+    if "livemode" in obj:
+        obj["livemode"] = LIVEMODE
+    for name, prefix in route.ids.items():
+        obj[name] = named_id(route, request.path, prefix) or mint_id(prefix)
+    return obj
+
+
+@dataclass(frozen=True)
+class Fake:
+    """A locally answered write: the encoded body, its content type, and how faithful it is.
+
+    `answered_by` is the value the Exchange and the `Irimi-Answered-By` header carry, so the level
+    is decided in the one place that knows which body was built and is never re-derived from the
+    route by a caller.
+    """
+
+    body: bytes
+    content_type: str
+    answered_by: FakeLevel = "fake-L0"
+    flags: tuple[str, ...] = ()
+
+
+def _fake_dict(
+    request: Request, classification: Classification, route: Route | None
+) -> tuple[dict[str, Any], FakeLevel, tuple[str, ...]]:
+    """The body as a dict, the level it was built at, and any flag that level owes the trace."""
+    if route is not None and route.fixture:
+        obj = fixture.get(classification.service, route.fixture)
+        if obj is not None:
+            return l1_body(request, route, obj), "fake-L1", ()
+        # The map promised a fixture this install cannot read. L0 is the floor and still answers
+        # the write, but the trace has to say the fidelity is not the one the map named (#41).
+        return fake_body(request, classification), "fake-L0", (FIXTURE_FAILED_FLAG,)
+    return fake_body(request, classification), "fake-L0", ()
+
+
+def fake_response(request: Request, classification: Classification) -> Fake:
+    """The body, content type and fidelity of a locally answered write.
 
     The single place the body is serialized. It used to be encoded twice - once inside `reflect`
     purely to validate it and throw it away, once here - and this call was the only one outside
@@ -409,5 +505,6 @@ def fake_response(request: Request, classification: Classification) -> tuple[byt
     if route is not None:
         literal = LITERAL_BODIES.get((classification.service, route.operation))
         if literal is not None:
-            return literal
-    return json.dumps(fake_body(request, classification), allow_nan=False).encode(), JSON_CT
+            return Fake(literal[0], literal[1])
+    body, answered_by, flags = _fake_dict(request, classification, route)
+    return Fake(json.dumps(body, allow_nan=False).encode(), JSON_CT, answered_by, flags)

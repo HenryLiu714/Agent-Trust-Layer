@@ -33,6 +33,7 @@ routes:
     operation: things.create
     kind: write
     human: create thing {name}
+    fixture: thing
     ids:
       id: th_
     volatile:
@@ -112,6 +113,7 @@ def test_shipped_stripe_map_is_complete():
     assert refund.human == "refund {amount} on {charge}"
     assert refund.ids == {"id": "re_", "balance_transaction": "txn_"}
     assert refund.volatile == ("idempotency_key",)
+    assert refund.fixture == "refund"
 
 
 def test_shipped_slack_map_is_post_only_and_owns_the_webhook_host():
@@ -192,6 +194,8 @@ MAP_FILE_NAMES = [
     "stripe.yaml",
     "telemetry.yaml",
 ]
+# The L1 response fixtures (#41), one JSON file per service that has any.
+FIXTURE_FILE_NAMES = ["stripe.json"]
 
 
 def test_the_shipped_maps_directory_holds_every_map():
@@ -199,7 +203,7 @@ def test_the_shipped_maps_directory_holds_every_map():
     assert names == MAP_FILE_NAMES
 
 
-def test_the_shipped_maps_are_inside_a_built_wheel(tmp_path):
+def test_the_shipped_maps_and_fixtures_are_inside_a_built_wheel(tmp_path):
     """The maps are data files, and a wheel that drops them is an install that refuses to start.
 
     This builds one and looks inside it. Reading `shipped_dir()` instead - which is what this test
@@ -208,6 +212,11 @@ def test_the_shipped_maps_are_inside_a_built_wheel(tmp_path):
     there, or an `exclude` in pyproject, empties `irimi/maps/` in the wheel while the working
     copy still looks right. That install then fails on `irimi maps list` with the named refusal
     #21 added, which is the failure this test exists to get ahead of.
+
+    The L1 fixtures ride along for the same reason and are checked in the same wheel, because
+    building a second one somewhere else would double the slowest test in the suite. A wheel
+    without them is subtler than one without maps: every mapped write still answers, at L0 with
+    the `fixture-failed` flag, so only the trace says anything is wrong (#41).
 
     A skip here is an environment that cannot build (no `uv`, no network for the build backend),
     not a packaging verdict: the assertion is about what is inside a wheel, so with no wheel there
@@ -243,7 +252,13 @@ def test_the_shipped_maps_are_inside_a_built_wheel(tmp_path):
         # The entry point the maps are loaded through has to be in there too, or the refusal the
         # missing maps would raise never gets the chance to run.
         assert "irimi/servicemap/loader.py" in wheel.namelist()
+        fixtures = sorted(
+            name.removeprefix("irimi/fixtures/")
+            for name in wheel.namelist()
+            if name.startswith("irimi/fixtures/") and name.endswith(".json")
+        )
     assert packaged == MAP_FILE_NAMES
+    assert fixtures == FIXTURE_FILE_NAMES
 
 
 # ------------------------------------------------------------------------------------ every field
@@ -262,6 +277,8 @@ def test_every_field_round_trips(tmp_path):
     assert retrieve.human == ""  # optional
     assert create.kind == "write"
     assert create.ids == {"id": "th_"}
+    assert create.fixture == "thing"
+    assert listing.fixture == ""  # optional, and meaningless on a live route
     assert create.volatile == ("idempotency_key",)
     assert create.persists is None
     assert create.target == servicemap.SELF_TARGET
@@ -372,6 +389,7 @@ routes:
         ("      path: /v1/things\n", "\n", "must start with"),
         ("      method: GET\n      path: /v1/things\n", "      verb: GET\n", "unknown match"),
         ("volatile:\n      - idempotency_key", "volatile: 3", "must be a list of strings"),
+        ("    fixture: thing", "    fixture: 3", "`fixture` must be a string"),
     ],
 )
 def test_schema_errors_name_the_rule(tmp_path, bad, good, message):
@@ -528,6 +546,28 @@ def test_an_override_cannot_set_default_kind(tmp_path):
         "unknown override key(s) default_kind",
         override="service: demo\ndefault_kind: write\n",
     )
+
+
+def test_a_fixture_on_a_live_route_is_refused(tmp_path):
+    """A live route is answered by the real service, so a `fixture:` on it is never read. A key
+    that reads as configured and is never consulted is #4's `--allow-host` and #9's wildcard host
+    all over again, so the loader names it instead of ignoring it (#41)."""
+    refuses(
+        tmp_path,
+        GOOD.replace("    human: list things", "    fixture: thing"),
+        "`fixture:` names the object a locally answered write starts from",
+    )
+
+
+def test_a_fixture_on_an_unknown_route_is_allowed(tmp_path):
+    """`unknown` is answered locally exactly like `write`, so it may start from a fixture too."""
+    doc = GOOD.replace(
+        "    operation: things.create\n    kind: write",
+        "    operation: things.create\n    kind: unknown",
+    )
+    index = load(tmp_path, doc)
+    create = servicemap.match_route(index.services[0], "POST", "/v1/things")
+    assert create is not None and create.fixture == "thing"
 
 
 def test_persists_and_volatile_are_restricted_to_their_kinds(tmp_path):
@@ -804,7 +844,7 @@ def test_no_override_file_is_fine(tmp_path, monkeypatch):
 
 def test_route_and_servicemap_defaults():
     route = Route(method="POST", path="/x", operation="x.create", kind="write")
-    assert (route.human, route.ids, route.volatile) == ("", {}, ())
+    assert (route.human, route.ids, route.volatile, route.fixture) == ("", {}, (), "")
     assert (route.persists, route.comment, route.forward_auth) == (None, "", False)
     sm = ServiceMap(service="x", hosts=frozenset({"x.example"}), routes=(route,))
     assert (sm.verbs, sm.target, sm.target_reads) == ("honest", servicemap.SELF_TARGET, False)

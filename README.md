@@ -12,8 +12,9 @@ log of every write the agent would have made.
 ## Status
 
 Phase 1 is complete: `irimi init`, `irimi serve`, `irimi shadow`, the reverse door, the service
-maps, the L0 echo and answer targets all work and are covered by the tests. Phase 2 - the overlay
-that makes reads see the run's own writes - is next. Work is tracked in the issues at
+maps, the L0 echo and answer targets all work and are covered by the tests. Phase 2 is under way:
+a mapped Stripe write is now answered from a vendored response object (`fake-L1`), and the
+overlay that makes reads see the run's own writes is next. Work is tracked in the issues at
 https://github.com/HenryLiu714/Agent-Trust-Layer/issues.
 
 ## Requirements
@@ -43,21 +44,41 @@ the code.
 ## Try the proxy
 
 `irimi serve` runs the shadow proxy in the foreground on `127.0.0.1:4000`. Reads are forwarded to
-the real service; writes are answered locally with a `fake-L0` response and never reach
-the network. Which is which comes from the service maps, and from the HTTP method for anything the
-maps do not cover. Each exchange prints as one line.
+the real service; writes are answered locally with a `fake-L1` or `fake-L0` response and never
+reach the network. Which is which comes from the service maps, and from the HTTP method for
+anything the maps do not cover. Each exchange prints as one line.
 
-A `fake-L0` answer is a `200` whose JSON body echoes the request's own fields, stamps `created`,
-and mints an id for every field the matched route names: a Stripe refund comes back with
-`id: re_...`, `balance_transaction: txn_...` and `object: refund`, so stripe-python parses it. A
-Slack Web API call gets Slack's own `{"ok": true, "ts": "..."}` envelope instead, because its SDK
-refuses anything else, and an incoming webhook gets the literal `ok` as `text/plain`, which is
-what the real one answers.
+A locally answered write comes back at one of two fidelities, and the `Irimi-Answered-By` header
+names which.
 
-Four things the echo is careful about, because an SDK has to be able to read the fields it just
-sent. A write that **names its resource in the path** gets that id back rather than a fresh one:
-`POST /v1/customers/cus_REAL123` echoes `cus_REAL123`, because the live API does and an agent that
-logs the id or retrieves it again would otherwise be handed one for a resource that never existed.
+A **`fake-L0`** answer is a `200` whose JSON body echoes the request's own fields, stamps
+`created`, and mints an id for every field the matched route names: a Stripe refund comes back
+with `id: re_...`, `balance_transaction: txn_...` and `object: refund`, so stripe-python parses
+it. A Slack Web API call gets Slack's own `{"ok": true, "ts": "..."}` envelope instead, because
+its SDK refuses anything else, and an incoming webhook gets the literal `ok` as `text/plain`,
+which is what the real one answers. L0 is the floor: it is what every route irimi has no fixture
+for is answered with, and it never fails.
+
+A **`fake-L1`** answer is what a route whose map names a `fixture:` gets. It starts from a whole
+response object vendored from stripe-mock (`src/irimi/fixtures/stripe.json`) and writes the
+request's own fields over it, so the agent receives the fields it never sent as well as the ones
+it did — `status`, `currency`, `destination_details` — instead of reading `None` off a body that
+does not have them and taking the wrong branch. Three Stripe writes are L1 today: `refunds.create`,
+`customers.update` and `payment_intents.cancel`.
+
+L1 follows four rules. A request field is written over the fixture only when the fixture **names**
+it and the types agree — an unknown parameter is dropped, as the live API drops it, and
+`amount=not-a-number` leaves the fixture's own value alone. A fixture field holding `null` names
+no type, so `reason`, `description` and `customer` take whatever was sent. `id`, `object`,
+`created` and `livemode` belong to the service and no request can choose them: `livemode` is
+always `false`, because nothing irimi answers happened. And an install whose fixture file is
+missing or damaged still answers the write, at L0, with the exchange flagged `fixture-failed`.
+
+Four things both fidelities are careful about, because an SDK has to be able to read the fields
+it just sent. A write that **names its resource in the path** gets that id back rather than a
+fresh one: `POST /v1/customers/cus_REAL123` echoes `cus_REAL123`, because the live API does and an
+agent that logs the id or retrieves it again would otherwise be handed one for a resource that
+never existed.
 The segment is percent-decoded first, and a value that is not shaped like an id — a PaymentIntent
 client secret, say — is not mistaken for one. A **bracket-nested form field** becomes a nested
 object, so `metadata[order_id]=6735` comes back as `metadata`. A **repeated key** collects into a
@@ -86,7 +107,7 @@ Every exchange prints as one line while it runs; at the end you get the run's su
       slack.com          1 write intercepted (1 delegated)
       telemetry          2 exchanges to 2 hosts, forwarded live
 
-      ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L0)
+      ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L1)
       ○ post to #refunds: "Refunded $49.00" → http://127.0.0.1:3111/post  unvalidated (delegated)
 
       9 exchanges · 5 live · 1 delegated · 3 virtualized
@@ -109,9 +130,10 @@ One process tree is one run. There is no `IRIMI_MODE` variable and no config fil
 is the only thing that chooses the mode.
 
 Every response irimi decided rather than forwarded carries `Irimi-Answered-By`, naming the answer:
-`fake-L0` for the local echo, `delegated` when an answer target answered it. A response with no
-such header came from the real service, unchanged — absence is the signal, because adding a header
-of ours to a live read would make it differ from what the service sent.
+`fake-L1` for a fixture answer, `fake-L0` for the local echo, `delegated` when an answer target
+answered it. A response with no such header came from the real service, unchanged — absence is the
+signal, because adding a header of ours to a live read would make it differ from what the service
+sent.
 
 **Nothing stops an agent from bypassing the proxy yet** — a client that ignores these variables, or
 ships its own CA bundle, talks to the real service. The banner says `backstop: none (Phase 4)` for
@@ -225,11 +247,15 @@ routes:
     operation: refunds.create
     kind: write # read | write | llm | telemetry | unknown
     human: refund {amount} on {charge}
+    fixture: refund # optional: the object in irimi/fixtures/stripe.json an L1 answer starts from
     ids:
       id: re_
     volatile:
       - idempotency_key
 ```
+
+A `fixture:` is valid on a `write` or `unknown` route only — a live route is answered by the real
+service, so a fixture on one would never be read, and the loader says so rather than ignoring it.
 
 Write `match:` in block style, as above. A YAML flow mapping cannot hold a plain scalar containing
 `{`, so `match: {method: GET, path: /v1/charges/{charge}}` is a parse error.
@@ -435,8 +461,9 @@ Run the same command under `irimi shadow` and the refund never leaves your machi
     uv run irimi shadow -- python examples/refund_agent/agent.py
 
 The read still goes to Stripe and returns your real test-mode charges; the POST to `/v1/refunds` is
-answered locally with the L0 echo, so the agent prints a minted `re_...` id that no refund on
-Stripe will ever have. Re-read the charge afterwards and it carries no refund.
+answered locally from the refund fixture (`fake-L1`), so the agent prints a minted `re_...` id that
+no refund on Stripe will ever have, on an object carrying every field a real refund does. Re-read
+the charge afterwards and it carries no refund.
 
 `tests/test_phase_exit.py` is that run, automated. Its first test needs no key and no network: it
 drives both doors with the wire shapes the two SDKs produce, and asserts the refund was answered by

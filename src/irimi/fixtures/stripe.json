@@ -1,0 +1,346 @@
+{
+  "_source": "stripe-mock v0.203.0 (MIT), embedded/openapi/fixtures3.json, https://github.com/stripe/stripe-mock/blob/v0.203.0/embedded/openapi/fixtures3.json - the five `resources` objects irimi's shipped Stripe routes need, verbatim.",
+  "resources": {
+    "balance_transaction": {
+      "amount": 100,
+      "available_on": 1234567890,
+      "balance_type": "payments",
+      "created": 1234567890,
+      "currency": "usd",
+      "description": "My First Test Charge (created for API docs)",
+      "exchange_rate": null,
+      "fee": 0,
+      "fee_details": [],
+      "id": "txn_1PgaxNB7WZ01zgkWEV3TLf40",
+      "net": 100,
+      "object": "balance_transaction",
+      "reporting_category": "charge",
+      "source": "ch_1PgafuB7WZ01zgkWXYmPNZs8",
+      "status": "available",
+      "type": "charge"
+    },
+    "charge": {
+      "amount": 100,
+      "amount_captured": 0,
+      "amount_refunded": 0,
+      "application": null,
+      "application_fee": null,
+      "application_fee_amount": null,
+      "balance_transaction": "txn_1PgaxNB7WZ01zgkWEV3TLf40",
+      "billing_details": {
+        "address": {
+          "city": null,
+          "country": null,
+          "line1": null,
+          "line2": null,
+          "postal_code": null,
+          "state": null
+        },
+        "email": null,
+        "name": "Jenny Rosen",
+        "phone": null,
+        "tax_id": null
+      },
+      "calculated_statement_descriptor": null,
+      "captured": false,
+      "created": 1234567890,
+      "currency": "usd",
+      "customer": null,
+      "description": "My First Test Charge (created for API docs)",
+      "disputed": false,
+      "failure_balance_transaction": null,
+      "failure_code": null,
+      "failure_message": null,
+      "fraud_details": {},
+      "id": "ch_1PgafuB7WZ01zgkWXYmPNZs8",
+      "livemode": false,
+      "metadata": {},
+      "object": "charge",
+      "on_behalf_of": null,
+      "outcome": {
+        "advice_code": null,
+        "network_advice_code": null,
+        "network_decline_code": null,
+        "network_status": null,
+        "reason": null,
+        "seller_message": null,
+        "type": "type"
+      },
+      "paid": true,
+      "payment_intent": null,
+      "payment_method": "card_1PgaftB7WZ01zgkWm3waTcFp",
+      "payment_method_details": {
+        "card": {
+          "amount_authorized": null,
+          "authorization_code": null,
+          "brand": "visa",
+          "checks": {
+            "address_line1_check": null,
+            "address_postal_code_check": null,
+            "cvc_check": "pass"
+          },
+          "country": "US",
+          "exp_month": 8,
+          "exp_year": 2030,
+          "extended_authorization": {
+            "status": "disabled"
+          },
+          "fingerprint": "AOB934RVNwzk6xtn",
+          "funding": "credit",
+          "incremental_authorization": {
+            "status": "unavailable"
+          },
+          "installments": {
+            "plan": {
+              "count": null,
+              "interval": null,
+              "type": "fixed_count"
+            }
+          },
+          "last4": "4242",
+          "mandate": null,
+          "multicapture": {
+            "status": "unavailable"
+          },
+          "network": "visa",
+          "network_token": {
+            "used": false
+          },
+          "network_transaction_id": null,
+          "overcapture": {
+            "maximum_amount_capturable": 100,
+            "status": "unavailable"
+          },
+          "regulated_status": null,
+          "three_d_secure": {
+            "authentication_flow": null,
+            "electronic_commerce_indicator": null,
+            "exemption_indicator": null,
+            "result": null,
+            "result_reason": null,
+            "transaction_id": null,
+            "version": null
+          },
+          "transaction_link_id": null,
+          "wallet": {
+            "dynamic_last4": null,
+            "type": "link"
+          }
+        },
+        "type": "card"
+      },
+      "receipt_email": null,
+      "receipt_number": null,
+      "receipt_url": "https://sangeekp-15t6ai--manage-mydev.dev.stripe.me/receipts/payment/CAcaFwoVYWNjdF8xUGdhZlRCN1daMDF6Z2tXKI_ei7UGMgZv2S_KfiY6LCJrxC7awazgQA9I88krZKw5uuCkZ5Nup2tomEtAbSpdfzjVZHO3ZYP5KFZP",
+      "refunded": false,
+      "refunds": {
+        "data": [],
+        "has_more": false,
+        "object": "list",
+        "url": "/v1/charges/ch_1PgafuB7WZ01zgkWXYmPNZs8/refunds"
+      },
+      "review": null,
+      "shipping": {},
+      "source": {
+        "allow_redisplay": null,
+        "amount": null,
+        "client_secret": "client_secret",
+        "created": 1028554472,
+        "currency": null,
+        "flow": "flow",
+        "id": "obj_123",
+        "livemode": true,
+        "metadata": null,
+        "object": "source",
+        "owner": {
+          "address": {
+            "city": null,
+            "country": null,
+            "line1": null,
+            "line2": null,
+            "postal_code": null,
+            "state": null
+          },
+          "email": null,
+          "name": null,
+          "phone": null,
+          "verified_address": {
+            "city": null,
+            "country": null,
+            "line1": null,
+            "line2": null,
+            "postal_code": null,
+            "state": null
+          },
+          "verified_email": null,
+          "verified_name": null,
+          "verified_phone": null
+        },
+        "statement_descriptor": null,
+        "status": "status",
+        "type": "ach_credit_transfer",
+        "usage": null
+      },
+      "source_transfer": null,
+      "statement_descriptor": null,
+      "statement_descriptor_suffix": null,
+      "status": "succeeded",
+      "transfer_data": {
+        "amount": null,
+        "destination": {
+          "id": "obj_123",
+          "object": "account"
+        }
+      },
+      "transfer_group": null
+    },
+    "customer": {
+      "address": {
+        "city": null,
+        "country": null,
+        "line1": null,
+        "line2": null,
+        "postal_code": null,
+        "state": null
+      },
+      "balance": 0,
+      "created": 1234567890,
+      "currency": "usd",
+      "default_source": null,
+      "delinquent": false,
+      "description": null,
+      "discount": {
+        "checkout_session": null,
+        "customer": null,
+        "customer_account": null,
+        "end": null,
+        "id": "obj_123",
+        "invoice": null,
+        "invoice_item": null,
+        "object": "discount",
+        "promotion_code": null,
+        "source": {
+          "coupon": null,
+          "type": "coupon"
+        },
+        "start": 109757538,
+        "subscription": null,
+        "subscription_item": null
+      },
+      "email": null,
+      "id": "cus_QXg1o8vcGmoR32",
+      "invoice_prefix": "7FE1103",
+      "invoice_settings": {
+        "custom_fields": null,
+        "default_payment_method": null,
+        "footer": null,
+        "rendering_options": {
+          "amount_tax_display": null,
+          "template": null
+        }
+      },
+      "livemode": false,
+      "metadata": {},
+      "name": null,
+      "next_invoice_sequence": 1,
+      "object": "customer",
+      "phone": null,
+      "preferred_locales": [],
+      "shipping": {},
+      "tax_exempt": "none",
+      "test_clock": null
+    },
+    "payment_intent": {
+      "allowed_payment_method_types": null,
+      "amount": 1099,
+      "amount_capturable": 0,
+      "amount_details": {
+        "tip": {}
+      },
+      "amount_received": 0,
+      "application": null,
+      "application_fee_amount": null,
+      "automatic_payment_methods": {
+        "enabled": true
+      },
+      "canceled_at": 1234567890,
+      "cancellation_reason": null,
+      "capture_method": "automatic",
+      "client_secret": "pi_1PgafyB7WZ01zgkWSjxsAJo3_secret_Dm43xiq1k0ywrRRjDoi8y1gkM",
+      "confirmation_method": "automatic",
+      "created": 1234567890,
+      "currency": "usd",
+      "customer": null,
+      "customer_account": null,
+      "description": null,
+      "excluded_payment_method_types": null,
+      "id": "pi_1PgafyB7WZ01zgkWSjxsAJo3",
+      "last_payment_error": {
+        "type": "idempotency_error"
+      },
+      "latest_charge": null,
+      "livemode": false,
+      "managed_payments": {
+        "enabled": true
+      },
+      "metadata": {},
+      "next_action": {
+        "type": "type"
+      },
+      "object": "payment_intent",
+      "on_behalf_of": null,
+      "payment_method": null,
+      "payment_method_configuration_details": {
+        "id": "obj_123",
+        "parent": null
+      },
+      "payment_method_options": {},
+      "payment_method_types": [
+        "card"
+      ],
+      "processing": {
+        "type": "card"
+      },
+      "receipt_email": null,
+      "review": null,
+      "setup_future_usage": null,
+      "shipping": {},
+      "source": null,
+      "statement_descriptor": null,
+      "statement_descriptor_suffix": null,
+      "status": "requires_payment_method",
+      "transfer_data": {
+        "destination": {
+          "id": "obj_123",
+          "object": "account"
+        }
+      },
+      "transfer_group": null
+    },
+    "refund": {
+      "amount": 100,
+      "balance_transaction": null,
+      "charge": "ch_1PgafuB7WZ01zgkWXYmPNZs8",
+      "created": 1234567890,
+      "currency": "usd",
+      "customer": null,
+      "customer_account": null,
+      "destination_details": {
+        "card": {
+          "type": "reversal"
+        },
+        "type": "card"
+      },
+      "id": "re_1Pgc72B7WZ01zgkWqPvrRrPE",
+      "metadata": {},
+      "object": "refund",
+      "payment_intent": null,
+      "payment_method": null,
+      "reason": null,
+      "receipt_number": null,
+      "source_transfer_reversal": null,
+      "status": "succeeded",
+      "transfer_reversal": null
+    }
+  }
+}

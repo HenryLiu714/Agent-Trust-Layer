@@ -5,8 +5,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from irimi import delegation, echo, pipeline, servicemap
-from irimi.exchange import FIDELITY_L0_FLAG, Request, Response
+from irimi import delegation, echo, fixture, pipeline, servicemap
+from irimi.exchange import (
+    FIDELITY_L0_FLAG,
+    FIDELITY_L1_FLAG,
+    FIXTURE_FAILED_FLAG,
+    Request,
+    Response,
+)
 from irimi.pipeline import classify
 from irimi.policy import ShadowPolicy
 
@@ -115,6 +121,17 @@ def test_a_minted_id_overwrites_a_reflected_field_of_the_same_name():
     assert json.loads(ans.response.body)["id"].startswith("re_")
 
 
+def test_livemode_is_overwritten_rather_than_taken_from_the_fixture():
+    """Every shipped fixture already says `false`, so the rule is only visible against one that
+    does not - and a fixture regenerated from a live-mode example would otherwise tell an agent
+    its shadow write happened on the real ledger."""
+    route = servicemap.Route(
+        method="POST", path="/v1/things", operation="things.create", kind="write", fixture="thing"
+    )
+    body = echo.l1_body(_req("POST"), route, {"object": "thing", "livemode": True})
+    assert body["livemode"] is False
+
+
 def test_slack_write_gets_slacks_own_envelope():
     ans = _answer(
         _req(
@@ -189,14 +206,24 @@ def test_slack_envelope_without_a_channel_omits_it():
     assert "channel" not in json.loads(ans.response.body)
 
 
-def test_a_faker_that_fails_still_answers_locally(monkeypatch):
-    """A raising policy makes mitmproxy forward the flow, and a forwarded write is a real write."""
+@pytest.mark.parametrize(
+    ("broken", "path"),
+    [("fake_body", "/v1/charges/ch_1/refund"), ("l1_body", "/v1/refunds")],
+)
+def test_a_faker_that_fails_still_answers_locally(monkeypatch, broken, path):
+    """A raising policy makes mitmproxy forward the flow, and a forwarded write is a real write.
 
-    def boom(request, classification):
+    Both bodies, because L1 put a second one on the path: `/v1/refunds` is a fixture route and
+    the unmapped Stripe path is an L0 one, so each parameter breaks the function its own request
+    actually reaches. Breaking only `fake_body` would leave the L1 route answering normally and
+    the test passing while proving nothing about it.
+    """
+
+    def boom(*args, **kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(echo, "fake_body", boom)
-    ans = _answer(_req("POST", path="/v1/refunds"))
+    monkeypatch.setattr(echo, broken, boom)
+    ans = _answer(_req("POST", path=path))
     assert ans.answered_by == "fake-L0"
     assert ans.response.body == b"{}"
     assert ans.flags == (FIDELITY_L0_FLAG,)
@@ -468,7 +495,7 @@ def test_a_hostile_form_body_still_reflects_and_never_raises():
         content_type="application/x-www-form-urlencoded",
     )
     ans = _answer(request)
-    assert ans.answered_by == "fake-L0"
+    assert ans.answered_by == "fake-L1"
     assert json.loads(ans.response.body)["id"].startswith("re_")
 
 
@@ -701,6 +728,201 @@ def test_a_real_array_field_is_still_promoted_to_a_list():
     assert echo.parse_form("line_items[0][price]=p") == {"line_items": [{"price": "p"}]}
 
 
+# ------------------------------------------------------- the L1 fixture answer (#41)
+
+
+@pytest.fixture
+def no_fixtures(tmp_path, monkeypatch):
+    """Point `fixture` at an empty directory, so every `fixture:` route degrades to L0."""
+    empty = tmp_path / "fixtures"
+    empty.mkdir()
+    monkeypatch.setattr(fixture, "fixtures_dir", lambda: empty)
+    fixture.clear_cache()
+    yield
+    fixture.clear_cache()
+
+
+def _refund(body: bytes = b"charge=ch_test&amount=4900"):
+    request = _req("POST", path="/v1/refunds", body=body, content_type=FORM)
+    return _answer(request)
+
+
+FORM = "application/x-www-form-urlencoded"
+
+
+def test_a_mapped_write_is_answered_at_l1_and_says_so():
+    ans = _refund()
+    assert ans.answered_by == "fake-L1"
+    assert ans.flags == (FIDELITY_L1_FLAG,)
+    assert ans.response.status == 200
+    assert ("content-type", "application/json") in ans.response.headers
+
+
+def test_the_faked_refund_is_a_whole_refund_object_not_just_what_was_posted():
+    """The point of L1. An agent branches on `status`, `currency` and `destination_details`,
+    and at L0 none of them are there at all - it reads `None` and takes the wrong branch."""
+    body = json.loads(_refund().response.body)
+    assert body.keys() == fixture.get("stripe", "refund").keys()
+    assert body["status"] == "succeeded"
+    assert body["currency"] == "usd"
+    assert body["destination_details"] == {"card": {"type": "reversal"}, "type": "card"}
+
+
+def test_the_posted_fields_still_win_over_the_fixtures_own_values():
+    body = json.loads(_refund(b"charge=ch_REAL&amount=1234&reason=fraudulent").response.body)
+    assert body["charge"] == "ch_REAL"
+    assert body["amount"] == 1234  # an int, as stripe-python's own Refund.amount is
+    # `reason` is null in the fixture, so it names no type and whatever was sent is taken.
+    assert body["reason"] == "fraudulent"
+
+
+def test_a_field_the_fixture_does_not_name_is_not_invented():
+    """The live API refuses an unknown parameter outright. Echoing it back instead would hand
+    the agent a refund object no real response can produce, which is the drift a fixture exists
+    to stop; the L0 echo keeps reflecting everything, and that is what makes it the honest floor.
+    """
+    body = json.loads(_refund(b"charge=ch_1&not_a_refund_field=surprise").response.body)
+    assert "not_a_refund_field" not in body
+    assert body["charge"] == "ch_1"
+
+
+def test_a_value_of_the_wrong_type_leaves_the_fixtures_own_in_place():
+    """`amount` is a number in every real refund. A form body can say anything, and a string
+    there is what makes `refund.amount / 100` raise inside the agent instead of here."""
+    body = json.loads(_refund(b"amount=not-a-number").response.body)
+    assert body["amount"] == fixture.get("stripe", "refund")["amount"]
+
+
+def test_the_service_owns_the_fields_that_say_what_this_object_is():
+    """`object` decides which class stripe-python builds, and `id` is what the agent logs. A
+    body posting either must not choose them, or a refund route answers a `charge`."""
+    body = json.loads(_refund(b"object=charge&id=re_MINE&created=1&livemode=true").response.body)
+    assert body["object"] == "refund"
+    assert re.fullmatch(r"re_[A-Za-z0-9]{24}", body["id"])
+    assert body["created"] != 1
+    assert "livemode" not in body  # the real refund object has none, so neither has ours
+
+
+def test_livemode_is_set_where_the_object_has_it():
+    """irimi performed nothing, so nothing it answers happened in live mode. Only where the
+    real object carries the field: inventing one on a refund would be a field Stripe never sends.
+    """
+    body = json.loads(_answer(_req("POST", path="/v1/customers/cus_REAL123")).response.body)
+    assert body["livemode"] is False
+    assert "livemode" not in json.loads(_refund().response.body)
+
+
+def test_l1_still_echoes_the_id_the_path_names_and_mints_the_rest():
+    """L0's #26 and #33 fixes are properties of the answer, not of the echo, so they hold here
+    too: an update answers with the id it was given, a create mints one."""
+    update = json.loads(_answer(_req("POST", path="/v1/customers/cus_REAL123")).response.body)
+    assert update["id"] == "cus_REAL123"
+    assert update["object"] == "customer"
+
+    cancel = json.loads(
+        _answer(_req("POST", path="/v1/payment_intents/pi_REAL999/cancel")).response.body
+    )
+    assert cancel["id"] == "pi_REAL999"
+    assert cancel["object"] == "payment_intent"
+
+    created = json.loads(_refund().response.body)
+    assert re.fullmatch(r"re_[A-Za-z0-9]{24}", created["id"])
+    assert re.fullmatch(r"txn_[A-Za-z0-9]{24}", created["balance_transaction"])
+
+
+def test_a_client_secret_is_still_never_echoed_back_as_the_id_at_l1():
+    """#33's rule, on the route that has a client secret in its own path. The fixture carries a
+    `client_secret` of its own, and the one thing that must not happen is the path's copy of it
+    becoming `id`."""
+    body = json.loads(
+        _answer(_req("POST", path="/v1/payment_intents/pi_ABC_secret_XYZ/cancel")).response.body
+    )
+    assert body["id"] != "pi_ABC_secret_XYZ"
+    assert re.fullmatch(r"pi_[A-Za-z0-9]{24}", body["id"])
+
+
+def test_metadata_keeps_its_string_keys_and_string_values_at_l1():
+    """#27 and its follow-on, pinned against L1: `metadata` is a dict in the fixture, so the
+    parsed form value replaces it wholesale and every rule `parse_form` applies survives."""
+    body = json.loads(_refund(b"metadata[order_id]=6735&metadata[0]=zero").response.body)
+    assert body["metadata"] == {"order_id": "6735", "0": "zero"}
+
+
+def test_a_hostile_body_cannot_reach_the_fixtures_own_fields():
+    body = json.loads(_refund(("a" + "[b]" * 2000 + "=1").encode()).response.body)
+    assert body["object"] == "refund"
+    assert body["status"] == "succeeded"
+
+
+def test_two_writes_do_not_share_one_fixture():
+    """The faker writes over the object it is given, so a cached object handed out twice would
+    make every later refund carry the first caller's arguments."""
+    first = json.loads(_refund(b"charge=ch_FIRST&amount=111").response.body)
+    second = json.loads(_refund(b"charge=ch_SECOND").response.body)
+    assert first["charge"] == "ch_FIRST"
+    assert second["charge"] == "ch_SECOND"
+    assert second["amount"] == fixture.get("stripe", "refund")["amount"]
+
+
+def test_a_route_whose_fixture_cannot_be_read_falls_back_to_l0_and_says_so(no_fixtures):
+    """A damaged or trimmed install must still answer the write - L0 is the floor - but the
+    trace has to say the fidelity is not the one the map promised, or the run reads as a
+    working L1 (#41)."""
+    ans = _refund()
+    assert ans.answered_by == "fake-L0"
+    assert ans.flags == (FIDELITY_L0_FLAG, FIXTURE_FAILED_FLAG)
+    body = json.loads(ans.response.body)
+    assert body["charge"] == "ch_test"  # the L0 echo, which still parses
+    assert body["id"].startswith("re_")
+    assert "status" not in body
+
+
+def test_an_unmapped_write_is_still_l0_with_no_flag():
+    """L1 is per route. A host no map claims has no fixture to start from and must not pretend."""
+    ans = _answer(_req("POST", host="example.invalid", path="/things", body=b"{}"))
+    assert ans.answered_by == "fake-L0"
+    assert ans.flags == (FIDELITY_L0_FLAG,)
+
+
+def test_every_shipped_fixture_route_names_an_object_that_ships():
+    """A `fixture:` naming an object the package does not have degrades to L0 silently but for
+    the flag, which is the `--allow-host` class of bug (#4): configured, never consulted."""
+    for sm in SHIPPED.services:
+        for route in sm.routes:
+            if route.fixture:
+                assert fixture.get(sm.service, route.fixture) is not None, (
+                    f"{sm.service} {route.method} {route.path}: no such fixture {route.fixture!r}"
+                )
+
+
+@pytest.mark.parametrize(
+    ("path", "body", "cls_name", "fixture_field"),
+    [
+        ("/v1/refunds", b"charge=ch_test&amount=4900", "Refund", "status"),
+        ("/v1/customers/cus_REAL123", b"name=Ada", "Customer", "tax_exempt"),
+        ("/v1/payment_intents/pi_REAL999/cancel", b"", "PaymentIntent", "capture_method"),
+    ],
+)
+def test_stripe_python_parses_every_faked_object_with_every_field(
+    path, body, cls_name, fixture_field
+):
+    """Issue #41's done-criterion, against the real SDK. `stripe` is not a dependency of this
+    project, so this is skipped in the plain dev venv; `uv sync --group examples` installs it."""
+    stripe = pytest.importorskip("stripe")
+    ans = _answer(_req("POST", path=path, body=body, content_type=FORM))
+    assert ans.answered_by == "fake-L1"
+    parsed = json.loads(ans.response.body)
+    obj = getattr(stripe, cls_name).construct_from(parsed, "sk_test_x")
+    assert obj.object == parsed["object"]
+    # Every field survives the SDK's own round trip, which is what "with every fixture field
+    # present" means. Through `str(obj)` - the SDK's JSON serialization - because it turns each
+    # nested object into a StripeObject of its own, so a plain `==` against the dict fails.
+    assert json.loads(str(obj)) == parsed
+    # And the one field the caller never sent is readable as an attribute, not an AttributeError,
+    # which is the whole difference from L0.
+    assert getattr(obj, fixture_field) == parsed[fixture_field]
+
+
 # ------------------------------------------------------------------ answer targets (#16, D20)
 
 
@@ -726,7 +948,7 @@ def test_a_route_target_makes_the_answer_delegated_not_faked():
 def test_self_is_the_default_target_and_is_exactly_the_old_behaviour():
     """`target: self` is today's local fake, now named rather than assumed (D20)."""
     ans = _answer(_req("POST", path="/v1/refunds"))
-    assert ans.answered_by == "fake-L0"
+    assert ans.answered_by == "fake-L1"
     assert ans.forward_to is None
 
 
@@ -793,7 +1015,7 @@ def test_a_delegated_answer_carries_its_own_fidelity_flag():
     index = _targeted_index([("api.stripe.com", "/v1/refunds", "http://127.0.0.1:3000/r")])
     ans = _answer_with(index, _req("POST", path="/v1/refunds"))
     assert ans.flags == ("fidelity:delegated",)
-    assert _answer(_req("POST", path="/v1/refunds")).flags == (FIDELITY_L0_FLAG,)
+    assert _answer(_req("POST", path="/v1/refunds")).flags == (FIDELITY_L1_FLAG,)
 
 
 def test_an_unlisted_read_on_a_targeted_service_is_not_delegated_without_target_reads():

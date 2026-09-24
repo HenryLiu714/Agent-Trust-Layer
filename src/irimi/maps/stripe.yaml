@@ -34,6 +34,9 @@ routes:
     operation: refunds.create
     kind: write
     human: refund {amount} on {charge}
+    # The vendored response object this write starts from (#41). It names an entry in
+    # `irimi/fixtures/stripe.json`; without it the write is answered with the L0 echo.
+    fixture: refund
     ids:
       id: re_
       balance_transaction: txn_
@@ -69,6 +72,7 @@ routes:
     operation: customers.update
     kind: write
     human: update customer {customer}
+    fixture: customer
     ids:
       id: cus_
 
@@ -85,6 +89,7 @@ routes:
     operation: payment_intents.cancel
     kind: write
     human: cancel {payment_intent}
+    fixture: payment_intent
     ids:
       id: pi_
 

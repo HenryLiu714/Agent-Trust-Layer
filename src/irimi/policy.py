@@ -12,7 +12,7 @@ from irimi import echo
 from irimi.delegation import ForwardTo, delegate
 from irimi.exchange import (
     FIDELITY_DELEGATED_FLAG,
-    FIDELITY_L0_FLAG,
+    FIDELITY_FLAGS,
     LIVE_KINDS,
     AnsweredBy,
     Request,
@@ -40,7 +40,12 @@ class AnswerPolicy(Protocol):
 
 
 class ShadowPolicy:
-    """Reads, llm and telemetry go live. write and unknown are answered with the L0 echo."""
+    """Reads, llm and telemetry go live. write and unknown are answered locally.
+
+    A locally answered write is the L1 fixture when its route names one and the fixture can be
+    read, and the L0 echo otherwise. `echo.fake_response` decides which and says so; the level it
+    reports is what the Exchange and the `Irimi-Answered-By` header carry.
+    """
 
     name: str = "shadow"
 
@@ -56,14 +61,19 @@ class ShadowPolicy:
         if classification.kind in LIVE_KINDS:
             return Answer(answered_by="live", response=None)
         try:
-            body, ct = echo.fake_response(request, classification)
+            fake = echo.fake_response(request, classification)
         except Exception:
-            # The belt to reflect()'s braces. Raising here would make mitmproxy forward the flow,
-            # and a forwarded write escapes shadow mode - an empty object is far better.
-            logger.exception("irimi: the L0 echo failed; answering with an empty object")
-            body, ct = b"{}", echo.JSON_CT
+            # The belt to reflect()'s braces, and now to the fixture's. Raising here would make
+            # mitmproxy forward the flow, and a forwarded write escapes shadow mode - an empty
+            # object is far better. L0 is the floor whatever failed above it.
+            logger.exception("irimi: the local answer failed; answering with an empty object")
+            fake = echo.Fake(b"{}", echo.JSON_CT)
         return Answer(
-            answered_by="fake-L0",
-            response=Response(status=200, headers=(("content-type", ct),), body=body),
-            flags=(FIDELITY_L0_FLAG,),
+            answered_by=fake.answered_by,
+            response=Response(
+                status=200,
+                headers=(("content-type", fake.content_type),),
+                body=fake.body,
+            ),
+            flags=(FIDELITY_FLAGS[fake.answered_by], *fake.flags),
         )

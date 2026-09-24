@@ -15,8 +15,9 @@ per flow. Each hook calls plain functions from the layers below it, in this orde
    `reverse_door.rewrite_reverse` points it upstream. Then `pipeline.classify` says what it is
    (`read`, `write`, `llm`, `telemetry`, `unknown`), `pipeline.attribute_run` picks the run id, and
    the `AnswerPolicy` decides: forward live, delegate to an answer target (`delegation.delegate`
-   chose it; `_to_target` rewrites the flow), or answer locally with the L0 echo (`echo`). The
-   decision is stored on the flow as `_Pending`. **Nothing in this hook may raise**: an exception
+   chose it; `_to_target` rewrites the flow), or answer it locally (`echo`: the route's L1
+   fixture when its map names one, the L0 echo otherwise). The decision is stored on the flow
+   as `_Pending`. **Nothing in this hook may raise**: an exception
    here makes mitmproxy forward the flow untouched, so the whole decision is wrapped and fails
    closed with a `502` flagged `decision-failed`.
 2. **`responseheaders`** - stamps `Irimi-Answered-By` on a live or delegated answer before the
@@ -41,11 +42,12 @@ you to place it.
 | 0 | `paths` | Where irimi keeps state (`$IRIMI_HOME`, default `~/.irimi`) and the listener defaults. |
 | 0 | `netaddr` | The one place that answers "is this address this machine?". Three safety rules depend on it agreeing with itself. |
 | 1 | `ca` | Generate the local CA and write the bundle mitmproxy mints leaf certificates from. |
+| 1 | `fixture` | The vendored response objects an L1 answer starts from. Reads `irimi/fixtures/<service>.json`, caches it, and never raises. |
 | 1 | `servicemap/` | The service maps. `model` is the dataclasses, the host index, route matching and the target precedence; `rules` is the validation (THE SCOPE RULE lives here); `loader` turns YAML, the overrides file and the `--target` flags into a `MapIndex`. |
 | 2 | `pipeline` | The pure request pipeline: parse, classify, attribute the run, annotate, respond. |
 | 2 | `reverse_door` | The `/<host>/<path>` door for SDKs that ignore proxy variables. |
 | 3 | `delegation` | Answer targets (design D20): which target answers a request, where it is sent, what it may never be, which headers it may not carry. |
-| 3 | `echo` | The L0 echo: the body a locally answered write gets. Form and JSON reflection, minted ids, Slack's envelope. |
+| 3 | `echo` | The body a locally answered write gets. L0: form and JSON reflection, minted ids, Slack's envelope. L1: the route's fixture with the request's own fields written over it. |
 | 4 | `policy` | `AnswerPolicy` and `ShadowPolicy`: the decision, and only the decision. |
 | 4 | `overlay` | The `Overlay` seam. `NoOverlay` today; Phase 2 replaces it. The module's header lists the two hazards that overlay must respect. |
 | 4 | `store` | The `TraceStore` seam. `NullStore` today; Phase 3 replaces it. |
@@ -56,6 +58,9 @@ you to place it.
 
 `src/irimi/maps/*.yaml` are the shipped service maps. They are data, contributable without
 touching Python, and `tests/test_servicemap.py` pins their contents.
+`src/irimi/fixtures/*.json` are the vendored response objects those maps' `fixture:` keys name;
+each file says in its `_source` entry where it came from, and the same test proves both
+directories are inside a built wheel.
 
 ## The seams
 
@@ -94,6 +99,9 @@ twice - once where a configuration is loaded and again at the decision it protec
   one spelling of "loopback" all of these share.
 - **Telemetry is forwarded and never stored.** A trace of the agent's own observability traffic
   is noise, and replaying it would re-emit someone else's events.
+- **L0 is the floor.** A route with no `fixture:`, and a fixture this install cannot read, are
+  both answered with the L0 echo rather than refused - the second carries `fixture-failed`, so
+  the trace never claims a fidelity the answer did not have.
 - **A delegated service gets no overlay, and a streamed response is never rewritten.** Both are
   written down at the top of `overlay.py` for Phase 2 to inherit.
 

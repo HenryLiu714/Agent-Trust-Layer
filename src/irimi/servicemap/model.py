@@ -44,6 +44,10 @@ class Route:
     kind: Kind
     human: str = ""
     ids: dict[str, str] = field(default_factory=dict)  # response field -> minted id prefix
+    # The vendored response object a locally answered write starts from (`irimi.fixture`), by
+    # name. "" means the L0 echo, which is what every route had before #41 and what a route
+    # whose fixture cannot be read falls back to.
+    fixture: str = ""
     volatile: tuple[str, ...] = ()
     persists: bool | None = None
     comment: str = ""

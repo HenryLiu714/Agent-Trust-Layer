@@ -492,6 +492,16 @@ def test_a_run_that_only_read_claims_nothing_about_writes():
     assert not any("did not happen" in line or "did not reach" in line for line in lines)
 
 
+def test_the_write_line_names_the_fidelity_the_answer_actually_had():
+    """`L0`, `L1` or `delegated`, read off `answered_by` so there is no second mapping to keep in
+    step. A summary claiming `L0` for an L1 answer is the same class of untruth as counting a
+    delegated read as live (#20, #41)."""
+    lines = summary_lines("7f3a", [_refund(answered_by="fake-L1")], 0.0, _maps())
+    assert "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L1)" in lines
+    lines = summary_lines("7f3a", [_refund()], 0.0, _maps())
+    assert "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L0)" in lines
+
+
 def test_the_summary_still_names_a_write_without_the_maps():
     """`index=None` is the empty-map case, and the write still gets a line: the summary degrades
     to the request it saw rather than dropping a write it could not name."""

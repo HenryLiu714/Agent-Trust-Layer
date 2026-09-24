@@ -98,6 +98,8 @@ def exchange_line(exchange: Exchange) -> str:
 INTERCEPTED_KINDS: frozenset[str] = frozenset({"write", "unknown"})
 
 WRITE_MARKER = "○"
+# `fake-L0` and `fake-L1` print as `L0` and `L1`; `delegated` has no prefix and prints as it is.
+FAKE_PREFIX = "fake-"
 DID_NOT_HAPPEN = "These writes did not happen."
 # A delegated write whose target never answered. It is neither delegated nor faked: nothing
 # answered it at all, and the agent got a 502. Saying "delegated" for it would be the same
@@ -280,8 +282,18 @@ def _write_line(exchange: Exchange, index: MapIndex | None) -> str:
     if _failed_target(exchange):
         return f"  {WRITE_MARKER} {what}  unanswered ({TARGET_UNREACHABLE})"
     label = "unclassified" if exchange.kind == "unknown" else "unvalidated"
-    fidelity = "delegated" if exchange.answered_by == "delegated" else "L0"
-    return f"  {WRITE_MARKER} {what}  {label} ({fidelity})"
+    return f"  {WRITE_MARKER} {what}  {label} ({_fidelity(exchange)})"
+
+
+def _fidelity(exchange: Exchange) -> str:
+    """How faithful this answer was, as the summary says it: `L0`, `L1` or `delegated`.
+
+    Derived from `answered_by` rather than branched on, so a level added to it shows up here
+    with no second place to keep in step: the summary printing `L0` for an L1 answer is the
+    same class of untruth as counting a delegated read as live (#20). Only an intercepted write
+    reaches this, so `live` never does.
+    """
+    return exchange.answered_by.removeprefix(FAKE_PREFIX)
 
 
 def _closing_lines(writes: Sequence[Exchange]) -> list[str]:

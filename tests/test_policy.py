@@ -115,6 +115,17 @@ def test_a_minted_id_overwrites_a_reflected_field_of_the_same_name():
     assert json.loads(ans.response.body)["id"].startswith("re_")
 
 
+def test_livemode_is_overwritten_rather_than_taken_from_the_fixture():
+    """Every shipped fixture already says `false`, so the rule is only visible against one that
+    does not - and a fixture regenerated from a live-mode example would otherwise tell an agent
+    its shadow write happened on the real ledger."""
+    route = servicemap.Route(
+        method="POST", path="/v1/things", operation="things.create", kind="write", fixture="thing"
+    )
+    body = echo.l1_body(_req("POST"), route, {"object": "thing", "livemode": True})
+    assert body["livemode"] is False
+
+
 def test_slack_write_gets_slacks_own_envelope():
     ans = _answer(
         _req(

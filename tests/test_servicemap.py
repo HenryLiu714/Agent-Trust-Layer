@@ -113,6 +113,7 @@ def test_shipped_stripe_map_is_complete():
     assert refund.human == "refund {amount} on {charge}"
     assert refund.ids == {"id": "re_", "balance_transaction": "txn_"}
     assert refund.volatile == ("idempotency_key",)
+    assert refund.fixture == "refund"
 
 
 def test_shipped_slack_map_is_post_only_and_owns_the_webhook_host():

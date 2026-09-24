@@ -175,22 +175,27 @@ def test_a_refund_through_the_door_is_answered_by_irimi_and_never_leaves_the_mac
     write = next(line for line in out.splitlines() if line.startswith("WRITE "))
     _, status, stamp, payload = write.split(" ", 3)
     assert status == "200"
-    assert stamp == "fake-L0"
+    assert stamp == "fake-L1"
 
-    # 3. The echo is something an SDK can read: the id it minted, the object, and the fields the
-    #    caller sent back unchanged. `stripe.Refund.create(...).id` is this assertion in the SDK.
+    # 3. The answer is something an SDK can read: the id it minted, the object, and the fields
+    #    the caller sent back unchanged. `stripe.Refund.create(...).id` is this assertion in the
+    #    SDK. Since #41 it is a whole refund object, so the fields the caller never sent - the
+    #    ones an agent branches on - are there too.
     body = json.loads(payload)
     assert body["object"] == "refund"
     assert body["id"].startswith("re_")
     assert body["balance_transaction"].startswith("txn_")
     assert body["charge"] == CHARGE_ID
     assert body["amount"] == REFUND_AMOUNT_MINOR
+    assert body["status"] == "succeeded"
+    assert body["currency"] == "usd"
+    assert "livemode" not in body  # the real refund object has no such field
 
     # 4. And it never left: nothing on the other side was ever asked to do anything.
     assert [(m, p) for m, p, _ in _Stripe.seen if m != "GET"] == []
 
     # 5. The summary says all of it, in the map's own words.
-    assert f"  ○ refund {REFUND_AMOUNT_MINOR} on {CHARGE_ID}  unvalidated (L0)" in out
+    assert f"  ○ refund {REFUND_AMOUNT_MINOR} on {CHARGE_ID}  unvalidated (L1)" in out
     assert "  These writes did not happen." in out
     assert "  api.stripe.com  1 write intercepted" in out
     assert "1 read" in out
@@ -226,5 +231,5 @@ def test_the_refund_agent_leaves_no_refund_on_a_real_test_mode_charge(home, capf
     assert charge.amount_refunded == 0, "a refund reached Stripe"
     assert charge.refunded is False
     assert list(stripe.Refund.list(charge=charge_id).data) == []
-    assert f"  ○ refund {amount} on {charge_id}  unvalidated (L0)" in out
+    assert f"  ○ refund {amount} on {charge_id}  unvalidated (L1)" in out
     assert "  These writes did not happen." in out

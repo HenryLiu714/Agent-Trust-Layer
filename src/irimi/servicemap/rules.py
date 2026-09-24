@@ -172,6 +172,15 @@ def check_route_rules(sm: ServiceMap) -> None:
             )
         if route.volatile and route.kind not in TARGETABLE_KINDS:
             raise MapError(f"{where}: `volatile` belongs on a write, where duplicates are checked")
+        if route.fixture and route.kind in LIVE_KINDS:
+            # A key that silently does nothing is the shape of #4's `--allow-host` and #9's
+            # wildcard host: it reads as configured and is never consulted. A live route is
+            # answered by the real service, so it has no body of ours to start from.
+            raise MapError(
+                f"{where}: `fixture:` names the object a locally answered write starts from, "
+                f"and a `{route.kind}` route is forwarded to the real service, so it would "
+                "never be used"
+            )
         _check_live_kind_methods(sm, route, where)
         if (
             sm.verbs == "honest"

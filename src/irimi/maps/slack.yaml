@@ -45,8 +45,9 @@ routes:
     kind: write
     human: upload {filename} to {channels}
     # No `fixture:`. Slack retired files.upload in March 2025 and slack_sdk uploads through
-    # files.getUploadURLExternal instead, so an L1 body here would fake a method nothing calls.
-    # The route stays mapped so the call is still named and still never forwarded (#42).
+    # files.getUploadURLExternal instead, so faking the `file` object here would fake a method
+    # nothing calls. The route stays mapped so the call is still named and still never forwarded,
+    # and echo.SLACK_ENVELOPES still knows the bare `{ok}` it answers with (#42).
 
   - match:
       method: POST

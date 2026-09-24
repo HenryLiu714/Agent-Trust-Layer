@@ -426,6 +426,24 @@ def observe_slack_history(body: bytes) -> None:
             stack.extend(item for item in node if isinstance(item, dict | list))
 
 
+# What a live read's body teaches the faker, keyed on service. Same convention as `SHAPES` below:
+# every service-specific fact about a body lives in this module, so the engine can hand it every
+# read it sees without naming a service of its own (#42).
+READ_OBSERVERS: dict[str, Callable[[bytes], None]] = {"slack": observe_slack_history}
+
+
+def observe_read(service: str, body: bytes) -> None:
+    """Let a service learn from a read irimi forwarded rather than answered. Never raises.
+
+    A read's body is the only place the real values a fake has to sort against appear: the write
+    log holds writes, and the trace store is write-only. So a body is observed as it goes past
+    rather than looked up later, and a service with nothing to learn is a no-op (#42).
+    """
+    observer = READ_OBSERVERS.get(service)
+    if observer is not None:
+        observer(body)
+
+
 def slack_body(fields: dict[str, Any]) -> dict[str, Any]:
     """Slack's own envelope. slack_sdk raises SlackApiError on any body without `ok: true`.
 
@@ -565,14 +583,20 @@ class SlackEnvelope:
     ts: bool = True  # mint a top-level `ts`
 
 
-# Keyed on operation. A mapped Slack write that is not in here keeps the generic `slack_body`
-# shape, which is what `files.upload` still gets: Slack retired that method in March 2025 and
-# slack_sdk uploads through `files.getUploadURLExternal` instead, so an L1 body there would fake
-# a method nothing calls. `incoming_webhook` is not here either, because LITERAL_BODIES answers
-# it before any of this runs (#42).
+# Keyed on operation: every Slack write the shipped map names, except `incoming_webhook`, which
+# LITERAL_BODIES answers before any of this runs. A mapped Slack write that is not in here - one
+# a user's own map adds - keeps the generic `slack_body` shape, which is the floor rather than
+# the shape of any particular method.
+#
+# `files.upload` is here with no payload for the same reason reactions.add is: `{ok}` is what it
+# answers, and the `ts` the generic shape added is a field that method never returned. It has no
+# `fixture:` because Slack retired it in March 2025 and slack_sdk uploads through
+# `files.getUploadURLExternal` instead, so a `file` object here would fake a method nothing
+# calls - but "no fixture" is not "no known shape" (#42).
 SLACK_ENVELOPES: dict[str, SlackEnvelope] = {
     "chat.postMessage": SlackEnvelope(payload_key="message"),
     "reactions.add": SlackEnvelope(payload_key=None, channel=False, ts=False),
+    "files.upload": SlackEnvelope(payload_key=None, channel=False, ts=False),
 }
 
 
@@ -622,7 +646,7 @@ def _fake_dict(
     if route is not None and classification.service == "slack":
         envelope = SLACK_ENVELOPES.get(route.operation)
         if envelope is not None:
-            payload = fixture.get("slack", route.fixture) if route.fixture else None
+            payload = fixture.get(classification.service, route.fixture) if route.fixture else None
             body = slack_l1_body(request, route, envelope, payload)
             if payload is not None:
                 return body, "fake-L1", ()

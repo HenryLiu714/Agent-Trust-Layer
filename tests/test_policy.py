@@ -218,6 +218,23 @@ def test_reactions_add_answers_the_bare_ok_slack_really_sends():
     assert ans.answered_by == "fake-L0"
 
 
+def test_files_upload_answers_the_bare_ok_too():
+    """Same rule as reactions.add: the generic shape's top-level `ts` is a field files.upload
+    never returned. Having no `fixture:` is not having no known shape - the `file` object is
+    left out because Slack retired the method, not because irimi does not know the envelope."""
+    ans = _answer(
+        _req(
+            "POST",
+            host="slack.com",
+            path="/api/files.upload",
+            body=b"filename=a.txt&channels=C1",
+            content_type="application/x-www-form-urlencoded",
+        )
+    )
+    assert json.loads(ans.response.body) == {"ok": True}
+    assert ans.answered_by == "fake-L0"
+
+
 @pytest.mark.parametrize(
     ("broken", "path"),
     [("fake_body", "/v1/charges/ch_1/refund"), ("l1_body", "/v1/refunds")],
@@ -1167,6 +1184,14 @@ def test_slack_sdk_parses_the_faked_post():
 # would push every later test's minted `ts` into the future.
 
 
+def _ts(value: str) -> tuple[int, int]:
+    """A `ts` as the pair it sorts by. Not a float: consecutive `ts` values are two ULPs apart at
+    Slack's magnitude, so comparing floats tests something narrower than the promise, which is
+    over the two integers."""
+    whole, _, fraction = value.partition(".")
+    return int(whole), int(fraction)
+
+
 def test_a_minted_ts_sorts_after_a_real_one_the_run_has_seen(monkeypatch):
     """#42's done-when. A history read going past first is what puts the faked message after the
     real ones instead of somewhere in the middle of them."""
@@ -1175,7 +1200,7 @@ def test_a_minted_ts_sorts_after_a_real_one_the_run_has_seen(monkeypatch):
     echo.observe_slack_history(
         json.dumps({"ok": True, "messages": [{"ts": "1999999998.000000"}, {"ts": newest}]}).encode()
     )
-    assert float(echo.slack_ts()) > float(newest)
+    assert _ts(echo.slack_ts()) > _ts(newest)
 
 
 def test_an_older_real_ts_does_not_move_the_watermark_backwards(monkeypatch):
@@ -1193,7 +1218,7 @@ def test_a_nested_ts_is_observed_wherever_it_sits(monkeypatch):
     echo.observe_slack_history(
         json.dumps({"channel": {"latest": {"ts": "1999999999.000001"}}}).encode()
     )
-    assert float(echo.slack_ts()) > 1999999999.000001
+    assert _ts(echo.slack_ts()) > (1_999_999_999, 1)
 
 
 @pytest.mark.parametrize(
@@ -1214,3 +1239,14 @@ def test_observing_a_body_that_carries_no_timestamp_changes_nothing(monkeypatch,
     monkeypatch.setattr(echo, "_last_slack_ts", (1_700_000_000, 7))
     echo.observe_slack_history(body)
     assert echo._last_slack_ts == (1_700_000_000, 7)
+
+
+def test_only_a_service_with_an_observer_learns_from_a_read(monkeypatch):
+    """The engine hands `observe_read` every read it forwards and names no service of its own.
+    Which services learn anything from a body is this module's table to hold (#42)."""
+    monkeypatch.setattr(echo, "_last_slack_ts", (0, 0))
+    body = json.dumps({"messages": [{"ts": "1999999999.000500"}]}).encode()
+    echo.observe_read("stripe", body)
+    assert echo._last_slack_ts == (0, 0)
+    echo.observe_read("slack", body)
+    assert echo._last_slack_ts == (1_999_999_999, 500)

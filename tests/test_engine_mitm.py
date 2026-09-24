@@ -314,7 +314,8 @@ def test_a_slack_read_raises_the_ts_watermark(tmp_path, monkeypatch, upstream):
         stop()
     assert status == 200
     assert (seen[0].service, seen[0].kind) == ("slack", "read")
-    assert float(echo.slack_ts()) > 1999999999.000500
+    whole, _, fraction = echo.slack_ts().partition(".")
+    assert (int(whole), int(fraction)) > (1_999_999_999, 500)
 
 
 def test_run_header_attributes_run(engine, upstream):

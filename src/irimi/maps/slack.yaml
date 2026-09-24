@@ -26,6 +26,10 @@ routes:
     operation: chat.postMessage
     kind: write
     human: 'post to #{channel}: "{text}"'
+    # The L1 payload. It nests under `message:` inside Slack's own envelope; `ok`, `channel` and
+    # `ts` stay envelope-owned, and `ts` is minted rather than taken from here (#42). See
+    # echo.SLACK_ENVELOPES.
+    fixture: message
 
   - match:
       method: POST
@@ -40,6 +44,9 @@ routes:
     operation: files.upload
     kind: write
     human: upload {filename} to {channels}
+    # No `fixture:`. Slack retired files.upload in March 2025 and slack_sdk uploads through
+    # files.getUploadURLExternal instead, so an L1 body here would fake a method nothing calls.
+    # The route stays mapped so the call is still named and still never forwarded (#42).
 
   - match:
       method: POST

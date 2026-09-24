@@ -365,6 +365,11 @@ def slack_body(fields: dict[str, Any]) -> dict[str, Any]:
 
     It replaces the generic body rather than extending it: a Slack response carries no `created`
     and no `object`, and an SDK that sees them would be reading fields the real API never sends.
+
+    Since #42 this is the fallback, not the whole story: an operation named in `SLACK_ENVELOPES`
+    is built by `slack_l1_body` instead, which knows whether that method's real answer carries a
+    top-level `ts` and `channel` at all. This shape is what a mapped Slack write with no entry
+    there still gets.
     """
     body: dict[str, Any] = {"ok": True, "ts": slack_ts()}
     if "channel" in fields:
@@ -431,6 +436,20 @@ def _same_json_type(current: Any, value: Any) -> bool:
     return type(current) is type(value)
 
 
+def _reflect_over(obj: dict[str, Any], reflected: dict[str, Any], route: Route) -> None:
+    """Write the request's own fields over a fixture object, in place. Shared by both L1 bodies.
+
+    Extracted from `l1_body` when Slack got an L1 answer of its own (#42): the reflection rules
+    are the same for both, but everything `l1_body` does after them - `created`, `livemode`, the
+    minted ids - is Stripe-shaped, and a Slack message object has none of it.
+    """
+    for name, value in reflected.items():
+        if name in SERVICE_OWNED or name in route.ids or name not in obj:
+            continue
+        if obj[name] is None or _same_json_type(obj[name], value):
+            obj[name] = value
+
+
 def l1_body(request: Request, route: Route, obj: dict[str, Any]) -> dict[str, Any]:
     """The L1 body: the fixture object with this request's own fields written over it.
 
@@ -451,18 +470,68 @@ def l1_body(request: Request, route: Route, obj: dict[str, Any]) -> dict[str, An
     The id rules are L0's, unchanged: `named_id` first, so an update or a cancel echoes the id its
     own path names (#26, #33), and a minted id only when the request named none.
     """
-    reflected = reflect(request)
-    for name, value in reflected.items():
-        if name in SERVICE_OWNED or name in route.ids or name not in obj:
-            continue
-        if obj[name] is None or _same_json_type(obj[name], value):
-            obj[name] = value
+    _reflect_over(obj, reflect(request), route)
     obj["created"] = int(time.time())
     if "livemode" in obj:
         obj["livemode"] = LIVEMODE
     for name, prefix in route.ids.items():
         obj[name] = named_id(route, request.path, prefix) or mint_id(prefix)
     return obj
+
+
+@dataclass(frozen=True)
+class SlackEnvelope:
+    """How one Slack write's answer is assembled (#42).
+
+    A Slack response is an envelope, and what sits inside it differs per method: chat.postMessage
+    answers `{ok, channel, ts, message}`, reactions.add answers `{ok}` and nothing else. So the
+    envelope is described per operation rather than built one way for the whole service -
+    `slack_body`'s single shape put a top-level `ts` and `channel` on reactions.add, which are
+    chat.postMessage's fields and ones the real API never returns there.
+
+    `ok`, `channel` and `ts` stay envelope-owned. `ts` always comes from `slack_ts` and never from
+    the fixture: it is the message's identity for the rest of the run, and a fixture's frozen one
+    would make every faked message the same message - the collision #29 already fixed once.
+    """
+
+    payload_key: str | None = None  # where the route's `fixture:` object nests, if it nests
+    channel: bool = True  # echo the posted `channel` at the top level
+    ts: bool = True  # mint a top-level `ts`
+
+
+# Keyed on operation. A mapped Slack write that is not in here keeps the generic `slack_body`
+# shape, which is what `files.upload` still gets: Slack retired that method in March 2025 and
+# slack_sdk uploads through `files.getUploadURLExternal` instead, so an L1 body there would fake
+# a method nothing calls. `incoming_webhook` is not here either, because LITERAL_BODIES answers
+# it before any of this runs (#42).
+SLACK_ENVELOPES: dict[str, SlackEnvelope] = {
+    "chat.postMessage": SlackEnvelope(payload_key="message"),
+    "reactions.add": SlackEnvelope(payload_key=None, channel=False, ts=False),
+}
+
+
+def slack_l1_body(
+    request: Request, route: Route, envelope: SlackEnvelope, obj: dict[str, Any] | None
+) -> dict[str, Any]:
+    """A Slack write's answer: the envelope, with the fixture object nested inside it (#42).
+
+    `obj` is None for an operation that has no payload and for a fixture this install cannot
+    read. Both answer the envelope alone, and that is what keeps an unreadable fixture out of
+    slack_sdk's error branch: `ok: true` is what the SDK reads to decide the call succeeded, and
+    it is the envelope's to say rather than the fixture's.
+    """
+    fields = reflect(request)
+    body: dict[str, Any] = {"ok": True}
+    if envelope.channel and "channel" in fields:
+        body["channel"] = fields["channel"]
+    if envelope.ts:
+        body["ts"] = slack_ts()
+    if envelope.payload_key is not None and obj is not None:
+        _reflect_over(obj, fields, route)
+        if "ts" in obj and "ts" in body:
+            obj["ts"] = body["ts"]
+        body[envelope.payload_key] = obj
+    return body
 
 
 @dataclass(frozen=True)
@@ -484,6 +553,22 @@ def _fake_dict(
     request: Request, classification: Classification, route: Route | None
 ) -> tuple[dict[str, Any], FakeLevel, tuple[str, ...]]:
     """The body as a dict, the level it was built at, and any flag that level owes the trace."""
+    if route is not None and classification.service == "slack":
+        envelope = SLACK_ENVELOPES.get(route.operation)
+        if envelope is not None:
+            payload = fixture.get("slack", route.fixture) if route.fixture else None
+            body = slack_l1_body(request, route, envelope, payload)
+            if payload is not None:
+                return body, "fake-L1", ()
+            if route.fixture:
+                # The map promised a fixture this install cannot read. The envelope still answers,
+                # because an SDK that sees no `ok` raises instead of reading the fields it just
+                # sent - but the trace has to say the fidelity is not the one the map named
+                # (#41, #42).
+                return body, "fake-L0", (FIXTURE_FAILED_FLAG,)
+            # An operation Slack answers with the envelope alone. There is no fixture to read and
+            # no payload to build, so L0 is the honest level even though the body is complete.
+            return body, "fake-L0", ()
     if route is not None and route.fixture:
         obj = fixture.get(classification.service, route.fixture)
         if obj is not None:

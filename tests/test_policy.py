@@ -201,9 +201,21 @@ def test_an_unlisted_slack_route_does_not_get_the_slack_envelope():
     assert "created" in body
 
 
-def test_slack_envelope_without_a_channel_omits_it():
-    ans = _answer(_req("POST", host="slack.com", path="/api/reactions.add"))
-    assert "channel" not in json.loads(ans.response.body)
+def test_reactions_add_answers_the_bare_ok_slack_really_sends():
+    """Slack answers reactions.add with `{"ok": true}` and nothing else. The `ts` and `channel`
+    the one-shape envelope used to add here are chat.postMessage's, and an agent that read the
+    `ts` of its own reaction as a message id was reading a field the real API never sent (#42)."""
+    ans = _answer(
+        _req(
+            "POST",
+            host="slack.com",
+            path="/api/reactions.add",
+            body=b"channel=C1&name=tada&timestamp=1503435956.000247",
+            content_type="application/x-www-form-urlencoded",
+        )
+    )
+    assert json.loads(ans.response.body) == {"ok": True}
+    assert ans.answered_by == "fake-L0"
 
 
 @pytest.mark.parametrize(
@@ -1078,3 +1090,71 @@ def test_a_credential_path_host_is_never_delegated_off_the_machine():
     request = _req("POST", host="hooks.slack.com", path="/workflows/T0/A0/SECRET/xyz")
     forward = delegation.delegate(request, classify(request, local))
     assert forward is not None and forward.url.startswith("http://127.0.0.1:3000")
+
+
+# ------------------------------------------------------- the L1 Slack envelope (#42)
+
+
+def _post_message(body: bytes = b'{"channel": "C1", "text": "hi"}'):
+    return _answer(
+        _req(
+            "POST",
+            host="slack.com",
+            path="/api/chat.postMessage",
+            body=body,
+            content_type="application/json",
+        )
+    )
+
+
+def test_a_faked_slack_post_nests_the_fixture_message_inside_the_envelope():
+    """slack_sdk reads `ok` to decide the call succeeded and `ts` to address the message it just
+    posted; both are the envelope's. The fixture is what sits under `message:` - the fields a real
+    response carries and the request never sent (#42)."""
+    ans = _post_message()
+    body = json.loads(ans.response.body)
+    assert ans.answered_by == "fake-L1"
+    assert (body["ok"], body["channel"]) == (True, "C1")
+    assert body["message"]["text"] == "hi"
+    assert body["message"]["type"] == "message"
+    assert body["message"]["user"] == fixture.get("slack", "message")["user"]
+    assert "text" not in body  # the payload nests; it does not leak into the envelope
+
+
+def test_the_faked_messages_ts_is_the_envelopes_and_not_the_fixtures():
+    """`ts` is the message's identity for the rest of the run, so it is minted per answer. Taking
+    the fixture's frozen one would make every faked message the same message."""
+    body = json.loads(_post_message().response.body)
+    assert body["message"]["ts"] == body["ts"]
+    assert body["ts"] != fixture.get("slack", "message")["ts"]
+
+
+def test_a_slack_post_still_answers_the_envelope_when_the_fixture_cannot_be_read(no_fixtures):
+    """A fixture this install cannot read must not cost the agent the `ok` it reads to decide the
+    call worked: it degrades to the envelope alone, flagged, the way Stripe degrades to L0."""
+    ans = _post_message()
+    body = json.loads(ans.response.body)
+    assert ans.answered_by == "fake-L0"
+    assert FIXTURE_FAILED_FLAG in ans.flags
+    assert body["ok"] is True
+    assert body["channel"] == "C1"
+    assert "message" not in body
+
+
+def test_slack_sdk_parses_the_faked_post():
+    """#42's done-when: slack_sdk has to read this body as a success rather than raise on it."""
+    slack_sdk = pytest.importorskip("slack_sdk")
+    body = json.loads(_post_message().response.body)
+    response = slack_sdk.web.slack_response.SlackResponse(
+        client=None,
+        http_verb="POST",
+        api_url="https://slack.com/api/chat.postMessage",
+        req_args={},
+        data=body,
+        headers={},
+        status_code=200,
+    )
+    response.validate()
+    assert response["ok"] is True
+    assert response["message"]["text"] == "hi"
+    assert response["ts"] == response["message"]["ts"]

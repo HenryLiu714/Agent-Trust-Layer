@@ -13,7 +13,7 @@ from mitmproxy.addons import default_addons
 from mitmproxy.master import Master
 from mitmproxy.options import Options
 
-from irimi import ca, delegation, netaddr, pipeline, reverse_door
+from irimi import ca, delegation, echo, netaddr, pipeline, reverse_door
 from irimi.engine import EngineConfig, EngineStartError, OnExchange
 from irimi.exchange import (
     DECISION_FAILED_FLAG,
@@ -408,6 +408,16 @@ class IrimiAddon:
         streamed = flow.response is not None and bool(flow.response.stream)
         upstream = _response_from_flow(flow)
         resp = upstream
+        # A read irimi forwarded is the only place the real values a later fake has to sort
+        # against appear - the write log holds writes, and the trace store is write-only - so
+        # every read's body goes past `echo.observe_read` on its way out. Which services learn
+        # anything from one is `echo`'s to know and not the engine's: a service with no observer
+        # is a no-op, and so is a body that carries nothing (#42). A streamed body is empty here,
+        # which is why the guard names it (#28). A delegated read is observed too: a per-route
+        # `target:` can pair delegated reads with locally faked writes, and the target's values
+        # are then the ones the agent sees.
+        if not streamed and pending.classification.kind == "read":
+            echo.observe_read(pending.classification.service, upstream.body)
         # The overlay stays off for a delegated read: the target owns that service's state, and
         # layering our own minted objects over it would corrupt read-after-write there (D20).
         if not streamed and pending.answered_by == "live" and pending.classification.kind == "read":

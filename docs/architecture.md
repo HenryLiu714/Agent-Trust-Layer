@@ -22,10 +22,12 @@ per flow. Each hook calls plain functions from the layers below it, in this orde
    closed with a `502` flagged `decision-failed`.
 2. **`responseheaders`** - stamps `Irimi-Answered-By` on a live or delegated answer before the
    headers go out, and turns on streaming for `text/event-stream`.
-3. **`response`** - for a live, unstreamed read, the `Overlay` gets a chance to rewrite the body
-   from the write log. `pipeline.annotate` builds the `Exchange`, writes join the write log,
-   `pipeline.respond` stamps the header, and `_finish` records it in the `TraceStore` (telemetry
-   excepted) and reports it to the CLI.
+3. **`response`** - every unstreamed read's body goes past `echo.observe_read` first, which is
+   how a service learns the real values its fakes have to sort against (Slack's `ts`); a service
+   with no observer is a no-op. Then, for a live, unstreamed read, the `Overlay` gets a chance to
+   rewrite the body from the write log. `pipeline.annotate` builds the `Exchange`, writes join
+   the write log, `pipeline.respond` stamps the header, and `_finish` records it in the
+   `TraceStore` (telemetry excepted) and reports it to the CLI.
 4. **`error`** - a lost upstream or an unreachable target is annotated with the right flag and
    recorded with no response, so a failed write is never silently dropped from the trace.
 
@@ -47,7 +49,7 @@ you to place it.
 | 2 | `pipeline` | The pure request pipeline: parse, classify, attribute the run, annotate, respond. |
 | 2 | `reverse_door` | The `/<host>/<path>` door for SDKs that ignore proxy variables. |
 | 3 | `delegation` | Answer targets (design D20): which target answers a request, where it is sent, what it may never be, which headers it may not carry. |
-| 3 | `echo` | The body a locally answered write gets. L0: form and JSON reflection, minted ids, Slack's envelope. L1: the route's fixture with the request's own fields written over it. |
+| 3 | `echo` | The body a locally answered write gets. L0: form and JSON reflection, minted ids, Slack's envelope. L1: the route's fixture with the request's own fields written over it. Also `observe_read`, the one seam where a forwarded read's body teaches the faker something (a Slack `ts` a minted one must sort after). |
 | 4 | `policy` | `AnswerPolicy` and `ShadowPolicy`: the decision, and only the decision. |
 | 4 | `overlay` | The `Overlay` seam. `NoOverlay` today; Phase 2 replaces it. The module's header lists the two hazards that overlay must respect. |
 | 4 | `store` | The `TraceStore` seam. `NullStore` today; Phase 3 replaces it. |
@@ -58,9 +60,10 @@ you to place it.
 
 `src/irimi/maps/*.yaml` are the shipped service maps. They are data, contributable without
 touching Python, and `tests/test_servicemap.py` pins their contents.
-`src/irimi/fixtures/*.json` are the vendored response objects those maps' `fixture:` keys name;
-each file says in its `_source` entry where it came from, and the same test proves both
-directories are inside a built wheel.
+`src/irimi/fixtures/*.json` are the response objects those maps' `fixture:` keys name - vendored
+from the service's own mock where one exists (Stripe), hand-written against its published docs
+where none does (Slack). Each file says which in its `_source` entry, and the same test proves
+both directories are inside a built wheel.
 
 ## The seams
 

@@ -54,25 +54,36 @@ names which.
 A **`fake-L0`** answer is a `200` whose JSON body echoes the request's own fields, stamps
 `created`, and mints an id for every field the matched route names: a Stripe refund comes back
 with `id: re_...`, `balance_transaction: txn_...` and `object: refund`, so stripe-python parses
-it. A Slack Web API call gets Slack's own `{"ok": true, "ts": "..."}` envelope instead, because
-its SDK refuses anything else, and an incoming webhook gets the literal `ok` as `text/plain`,
-which is what the real one answers. L0 is the floor: it is what every route irimi has no fixture
-for is answered with, and it never fails.
+it. A Slack Web API call gets Slack's own envelope instead, because its SDK refuses anything
+else, and each mapped Slack write gets the envelope its own method really sends: `chat.postMessage`
+answers `{"ok": true, "channel": "...", "ts": "..."}`, `reactions.add` and `files.upload` answer
+the bare `{"ok": true}` and nothing more, and a Slack write no shipped map names falls back to
+`{"ok": true, "ts": "..."}`. An incoming webhook gets the literal `ok` as `text/plain`, which is
+what the real one answers. L0 is the floor: it is what every route irimi has no fixture for is
+answered with, and it never fails.
 
 A **`fake-L1`** answer is what a route whose map names a `fixture:` gets. It starts from a whole
-response object vendored from stripe-mock (`src/irimi/fixtures/stripe.json`) and writes the
-request's own fields over it, so the agent receives the fields it never sent as well as the ones
-it did — `status`, `currency`, `destination_details` — instead of reading `None` off a body that
-does not have them and taking the wrong branch. Three Stripe writes are L1 today: `refunds.create`,
-`customers.update` and `payment_intents.cancel`.
+response object in `src/irimi/fixtures/<service>.json` — vendored from the service's own mock
+where it publishes one (Stripe, from stripe-mock), hand-written against its published docs where
+it does not (Slack) — and writes the request's own fields over it, so the agent receives the
+fields it never sent as well as the ones it did — `status`, `currency`, `destination_details` —
+instead of reading `None` off a body that does not have them and taking the wrong branch. Three
+Stripe writes are L1 today — `refunds.create`, `customers.update` and `payment_intents.cancel`,
+each answered with the object as the whole body — and so is Slack's `chat.postMessage`, whose
+fixture is the `message` object that sits *inside* the envelope: `ok`, `channel` and `ts` stay
+envelope-owned, and `ts` is minted per answer rather than taken from the fixture, because it is
+the faked message's identity for the rest of the run.
 
 L1 follows four rules. A request field is written over the fixture only when the fixture **names**
 it and the types agree — an unknown parameter is dropped, as the live API drops it, and
 `amount=not-a-number` leaves the fixture's own value alone. A fixture field holding `null` names
 no type, so `reason`, `description` and `customer` take whatever was sent. `id`, `object`,
 `created` and `livemode` belong to the service and no request can choose them: `livemode` is
-always `false`, because nothing irimi answers happened. And an install whose fixture file is
-missing or damaged still answers the write, at L0, with the exchange flagged `fixture-failed`.
+always `false`, because nothing irimi answers happened — that stamping is Stripe's shape, and a
+Slack `message` object, which carries neither field, gets none of it. And an install whose fixture
+file is missing or damaged still answers the write, at L0, with the exchange flagged
+`fixture-failed`; a Slack write degrading that way still answers the envelope, since `ok` is what
+its SDK reads to decide the call succeeded and the envelope's to say rather than the fixture's.
 
 Four things both fidelities are careful about, because an SDK has to be able to read the fields
 it just sent. A write that **names its resource in the path** gets that id back rather than a
@@ -85,6 +96,13 @@ object, so `metadata[order_id]=6735` comes back as `metadata`. A **repeated key*
 list, spelled either way: `tags=a&tags=b` and Stripe's own `expand[]=a&expand[]=b`. And a **number
 is a number at any depth**, so `line_items[0][quantity]=2` echoes `2` exactly as `amount=4900`
 does — except under `metadata`, whose values are always strings on the live API.
+
+One thing a fake learns from the reads around it. A Slack `ts` is both a message's id and its sort
+key, so a minted one has to sort after every real message the run has already read — otherwise an
+agent that orders a transcript by `ts`, which is how a Slack transcript is ordered, finds its own
+faked message somewhere in the middle of the real ones. Every Slack read irimi forwards raises a
+watermark for the run as its body goes past, and the next minted `ts` comes strictly above it.
+Reads stay real; the only thing this changes is which number a fake picks.
 
     uv run irimi serve
     # in another terminal

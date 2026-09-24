@@ -6,6 +6,7 @@ escapes shadow mode, so every bad file below has to answer "no such object" inst
 """
 
 import json
+import re
 
 import pytest
 
@@ -58,7 +59,24 @@ def test_a_shipped_object_is_the_real_shape():
 
 def test_the_fixtures_directory_holds_one_json_file_per_service():
     names = sorted(p.name for p in fixture.fixtures_dir().iterdir())
-    assert names == ["stripe.json"]
+    assert names == ["slack.json", "stripe.json"]
+
+
+def test_the_shipped_slack_fixtures_hold_the_message_object():
+    """chat.postMessage is the one Slack write with a payload of its own. `fixture:` on its route
+    names this object and the envelope nests it under `message:` (#42)."""
+    assert sorted(fixture.objects("slack")) == ["message"]
+    message = fixture.get("slack", "message")
+    assert message["type"] == "message"
+    assert re.fullmatch(r"\d+\.\d{6}", message["ts"])
+
+
+def test_the_slack_fixtures_name_where_they_came_from():
+    """Hand-written rather than vendored, which is exactly why the file has to say so: nobody can
+    re-check data against an upstream it does not name."""
+    source = fixture.source("slack")
+    assert "Hand-written" in source
+    assert "api.slack.com" in source
 
 
 # ---------------------------------------------------------------------- handing out a copy, not

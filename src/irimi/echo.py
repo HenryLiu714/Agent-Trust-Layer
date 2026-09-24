@@ -360,11 +360,100 @@ def slack_ts() -> str:
     return f"{seconds}.{counter:06d}"
 
 
+# Keys whose value is a real Slack `ts`, wherever they sit in a read's body. `conversations.
+# history` and `.replies` carry one per message, `conversations.info` carries the channel's
+# `latest`, and a thread carries `thread_ts` and `latest_reply`. Anything else is left alone.
+SLACK_TS_KEYS = frozenset({"ts", "thread_ts", "latest_reply"})
+_SLACK_TS = re.compile(r"\d{1,12}\.\d{6}")
+
+# How many JSON nodes one read's body may be walked for. A Slack page is a hundred messages; this
+# is three orders of magnitude above that, and it is here so a body that is enormous or deeply
+# nested cannot stall the response hook it is walked from (#42).
+OBSERVE_BUDGET = 20_000
+
+
+def observe_slack_ts(ts: str) -> None:
+    """Raise the `ts` watermark to `ts` when it is newer than anything minted or seen so far.
+
+    A minted `ts` has to sort after every real message the run has already read, or an agent that
+    orders a transcript by `ts` - which is how a Slack transcript is ordered - finds its own
+    faked message somewhere in the middle of the real ones. `slack_ts` already mints strictly
+    above `_last_slack_ts`, so feeding the real values into that same watermark is the whole
+    mechanism; nothing else has to change and nothing has to be remembered per message (#42).
+
+    The watermark is one per run rather than one per channel. That is coarser than Slack's own
+    ordering and deliberately so: it is strictly stronger, since a `ts` above the newest message
+    seen in *any* channel is above the newest in each; it needs no record of which reads happened,
+    which irimi does not keep; and `slack_ts`'s promise of one increasing sequence survives it.
+
+    Never raises. It is reached from a mitmproxy hook, where a raise forwards the flow.
+    """
+    global _last_slack_ts
+    if not _SLACK_TS.fullmatch(ts):
+        return
+    whole, _, fraction = ts.partition(".")
+    seen = (int(whole), int(fraction))
+    with _slack_ts_lock:
+        if seen > _last_slack_ts:
+            _last_slack_ts = seen
+
+
+def observe_slack_history(body: bytes) -> None:
+    """Feed every real `ts` in a Slack read's body to the watermark. Never raises.
+
+    The read's body is the only place those values appear - irimi keeps no record of the run's
+    reads, only of its writes - so the watermark is raised as each body goes past rather than
+    looked up later. A body that carries no `ts` at all, or that is not JSON, is a no-op, which is
+    what lets the engine call this for every Slack read without knowing which ones have messages
+    in them (#42).
+    """
+    try:
+        parsed = json.loads(body)
+    except Exception:  # not JSON, or no body at all: there is nothing to observe
+        return
+    stack: list[Any] = [parsed]
+    seen = 0
+    while stack and seen < OBSERVE_BUDGET:
+        node = stack.pop()
+        seen += 1
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in SLACK_TS_KEYS and isinstance(value, str):
+                    observe_slack_ts(value)
+                elif isinstance(value, dict | list):
+                    stack.append(value)
+        elif isinstance(node, list):
+            stack.extend(item for item in node if isinstance(item, dict | list))
+
+
+# What a live read's body teaches the faker, keyed on service. Same convention as `SHAPES` below:
+# every service-specific fact about a body lives in this module, so the engine can hand it every
+# read it sees without naming a service of its own (#42).
+READ_OBSERVERS: dict[str, Callable[[bytes], None]] = {"slack": observe_slack_history}
+
+
+def observe_read(service: str, body: bytes) -> None:
+    """Let a service learn from a read irimi forwarded rather than answered. Never raises.
+
+    A read's body is the only place the real values a fake has to sort against appear: the write
+    log holds writes, and the trace store is write-only. So a body is observed as it goes past
+    rather than looked up later, and a service with nothing to learn is a no-op (#42).
+    """
+    observer = READ_OBSERVERS.get(service)
+    if observer is not None:
+        observer(body)
+
+
 def slack_body(fields: dict[str, Any]) -> dict[str, Any]:
     """Slack's own envelope. slack_sdk raises SlackApiError on any body without `ok: true`.
 
     It replaces the generic body rather than extending it: a Slack response carries no `created`
     and no `object`, and an SDK that sees them would be reading fields the real API never sends.
+
+    Since #42 this is the fallback, not the whole story: an operation named in `SLACK_ENVELOPES`
+    is built by `slack_l1_body` instead, which knows whether that method's real answer carries a
+    top-level `ts` and `channel` at all. This shape is what a mapped Slack write with no entry
+    there still gets.
     """
     body: dict[str, Any] = {"ok": True, "ts": slack_ts()}
     if "channel" in fields:
@@ -431,6 +520,20 @@ def _same_json_type(current: Any, value: Any) -> bool:
     return type(current) is type(value)
 
 
+def _reflect_over(obj: dict[str, Any], reflected: dict[str, Any], route: Route) -> None:
+    """Write the request's own fields over a fixture object, in place. Shared by both L1 bodies.
+
+    Extracted from `l1_body` when Slack got an L1 answer of its own (#42): the reflection rules
+    are the same for both, but everything `l1_body` does after them - `created`, `livemode`, the
+    minted ids - is Stripe-shaped, and a Slack message object has none of it.
+    """
+    for name, value in reflected.items():
+        if name in SERVICE_OWNED or name in route.ids or name not in obj:
+            continue
+        if obj[name] is None or _same_json_type(obj[name], value):
+            obj[name] = value
+
+
 def l1_body(request: Request, route: Route, obj: dict[str, Any]) -> dict[str, Any]:
     """The L1 body: the fixture object with this request's own fields written over it.
 
@@ -451,18 +554,74 @@ def l1_body(request: Request, route: Route, obj: dict[str, Any]) -> dict[str, An
     The id rules are L0's, unchanged: `named_id` first, so an update or a cancel echoes the id its
     own path names (#26, #33), and a minted id only when the request named none.
     """
-    reflected = reflect(request)
-    for name, value in reflected.items():
-        if name in SERVICE_OWNED or name in route.ids or name not in obj:
-            continue
-        if obj[name] is None or _same_json_type(obj[name], value):
-            obj[name] = value
+    _reflect_over(obj, reflect(request), route)
     obj["created"] = int(time.time())
     if "livemode" in obj:
         obj["livemode"] = LIVEMODE
     for name, prefix in route.ids.items():
         obj[name] = named_id(route, request.path, prefix) or mint_id(prefix)
     return obj
+
+
+@dataclass(frozen=True)
+class SlackEnvelope:
+    """How one Slack write's answer is assembled (#42).
+
+    A Slack response is an envelope, and what sits inside it differs per method: chat.postMessage
+    answers `{ok, channel, ts, message}`, reactions.add answers `{ok}` and nothing else. So the
+    envelope is described per operation rather than built one way for the whole service -
+    `slack_body`'s single shape put a top-level `ts` and `channel` on reactions.add, which are
+    chat.postMessage's fields and ones the real API never returns there.
+
+    `ok`, `channel` and `ts` stay envelope-owned. `ts` always comes from `slack_ts` and never from
+    the fixture: it is the message's identity for the rest of the run, and a fixture's frozen one
+    would make every faked message the same message - the collision #29 already fixed once.
+    """
+
+    payload_key: str | None = None  # where the route's `fixture:` object nests, if it nests
+    channel: bool = True  # echo the posted `channel` at the top level
+    ts: bool = True  # mint a top-level `ts`
+
+
+# Keyed on operation: every Slack write the shipped map names, except `incoming_webhook`, which
+# LITERAL_BODIES answers before any of this runs. A mapped Slack write that is not in here - one
+# a user's own map adds - keeps the generic `slack_body` shape, which is the floor rather than
+# the shape of any particular method.
+#
+# `files.upload` is here with no payload for the same reason reactions.add is: `{ok}` is what it
+# answers, and the `ts` the generic shape added is a field that method never returned. It has no
+# `fixture:` because Slack retired it in March 2025 and slack_sdk uploads through
+# `files.getUploadURLExternal` instead, so a `file` object here would fake a method nothing
+# calls - but "no fixture" is not "no known shape" (#42).
+SLACK_ENVELOPES: dict[str, SlackEnvelope] = {
+    "chat.postMessage": SlackEnvelope(payload_key="message"),
+    "reactions.add": SlackEnvelope(payload_key=None, channel=False, ts=False),
+    "files.upload": SlackEnvelope(payload_key=None, channel=False, ts=False),
+}
+
+
+def slack_l1_body(
+    request: Request, route: Route, envelope: SlackEnvelope, obj: dict[str, Any] | None
+) -> dict[str, Any]:
+    """A Slack write's answer: the envelope, with the fixture object nested inside it (#42).
+
+    `obj` is None for an operation that has no payload and for a fixture this install cannot
+    read. Both answer the envelope alone, and that is what keeps an unreadable fixture out of
+    slack_sdk's error branch: `ok: true` is what the SDK reads to decide the call succeeded, and
+    it is the envelope's to say rather than the fixture's.
+    """
+    fields = reflect(request)
+    body: dict[str, Any] = {"ok": True}
+    if envelope.channel and "channel" in fields:
+        body["channel"] = fields["channel"]
+    if envelope.ts:
+        body["ts"] = slack_ts()
+    if envelope.payload_key is not None and obj is not None:
+        _reflect_over(obj, fields, route)
+        if "ts" in obj and "ts" in body:
+            obj["ts"] = body["ts"]
+        body[envelope.payload_key] = obj
+    return body
 
 
 @dataclass(frozen=True)
@@ -484,6 +643,22 @@ def _fake_dict(
     request: Request, classification: Classification, route: Route | None
 ) -> tuple[dict[str, Any], FakeLevel, tuple[str, ...]]:
     """The body as a dict, the level it was built at, and any flag that level owes the trace."""
+    if route is not None and classification.service == "slack":
+        envelope = SLACK_ENVELOPES.get(route.operation)
+        if envelope is not None:
+            payload = fixture.get(classification.service, route.fixture) if route.fixture else None
+            body = slack_l1_body(request, route, envelope, payload)
+            if payload is not None:
+                return body, "fake-L1", ()
+            if route.fixture:
+                # The map promised a fixture this install cannot read. The envelope still answers,
+                # because an SDK that sees no `ok` raises instead of reading the fields it just
+                # sent - but the trace has to say the fidelity is not the one the map named
+                # (#41, #42).
+                return body, "fake-L0", (FIXTURE_FAILED_FLAG,)
+            # An operation Slack answers with the envelope alone. There is no fixture to read and
+            # no payload to build, so L0 is the honest level even though the body is complete.
+            return body, "fake-L0", ()
     if route is not None and route.fixture:
         obj = fixture.get(classification.service, route.fixture)
         if obj is not None:

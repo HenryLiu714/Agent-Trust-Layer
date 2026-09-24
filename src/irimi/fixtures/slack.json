@@ -1,0 +1,15 @@
+{
+  "_source": "Hand-written against Slack's Web API documentation for chat.postMessage (https://api.slack.com/methods/chat.postMessage) - the `message` object that method returns, with placeholder ids. Stripe's file is a verbatim subset of a stripe-mock release; Slack publishes no fixture set to vendor, so this one names the docs instead (#42).",
+  "resources": {
+    "message": {
+      "app_id": "A00000000",
+      "blocks": [],
+      "bot_id": "B00000000",
+      "team": "T00000000",
+      "text": "Here's a message for you",
+      "ts": "1503435956.000247",
+      "type": "message",
+      "user": "U00000000"
+    }
+  }
+}

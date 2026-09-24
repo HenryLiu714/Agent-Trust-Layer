@@ -195,7 +195,7 @@ MAP_FILE_NAMES = [
     "telemetry.yaml",
 ]
 # The L1 response fixtures (#41), one JSON file per service that has any.
-FIXTURE_FILE_NAMES = ["stripe.json"]
+FIXTURE_FILE_NAMES = ["slack.json", "stripe.json"]
 
 
 def test_the_shipped_maps_directory_holds_every_map():

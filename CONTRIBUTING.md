@@ -65,12 +65,13 @@ src/irimi/
   exchange.py paths.py netaddr.py     vocabulary, state locations, "is this loopback?"
   ca.py  servicemap/                  the local CA; the service maps (model, rules, loader)
   pipeline.py  reverse_door.py        parse -> classify -> annotate -> respond; the /<host>/ door
-  delegation.py  echo.py              answer targets; the L0 echo
+  delegation.py  echo.py              answer targets; the L0 echo and the L1 fixture answer
   policy.py  overlay.py  store.py     the decision, and the two seams later phases fill
   engine/                             the Engine protocol; mitm.py is the only mitmproxy importer
   report.py  runner.py                what a run prints; the child env and engine thread
   cli.py                              argparse and the composition root
   maps/*.yaml                         the shipped service maps
+  fixtures/*.json                     the vendored response objects L1 answers start from
 tests/                                one file per module, plus the invariant and exit tests
 examples/refund_agent/                the fixture agent the proxy is tested against
 ```
@@ -85,6 +86,9 @@ Maps are YAML in `src/irimi/maps/` and need no Python. The README's "Service map
 schema; the loader refuses anything outside it by name. Things to know before you write one:
 
 - Write `match:` in block style. A flow mapping cannot hold a path containing `{`.
+- A write may name a `fixture:`, which is an object in `src/irimi/fixtures/<service>.json`.
+  Add the object there first, with its provenance in the file's `_source` entry; a `fixture:`
+  the package does not ship answers at L0 and flags the exchange rather than failing.
 - Quote a wildcard host (`"*.posthog.com"`) and any `human:` template containing `#`.
 - A live-forwarded kind (`read`, `llm`, `telemetry`) must name its methods and must justify a
   destructive one with `persists: false` and a `comment:`. A `default_kind:` may never be a live

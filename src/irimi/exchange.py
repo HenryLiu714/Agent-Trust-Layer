@@ -4,7 +4,11 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 Kind = Literal["read", "write", "llm", "telemetry", "unknown"]
-AnsweredBy = Literal["live", "fake-L0", "delegated"]
+# How faithful a locally answered write is. `fake-L0` is the floor - the request's own fields
+# reflected back - and `fake-L1` is a route whose map names a vendored response object to start
+# from (#41). A level is only ever added here: L0 stays the answer for every route without one.
+FakeLevel = Literal["fake-L0", "fake-L1"]
+AnsweredBy = Literal["live", "fake-L0", "fake-L1", "delegated"]
 Validation = Literal["validated", "unvalidated"]
 Door = Literal["forward", "reverse"]
 
@@ -39,9 +43,24 @@ TARGET_FAILED_FLAG = "target-failed"
 DECISION_FAILED_FLAG = "decision-failed"
 # A live forward that lost the real service before it answered.
 UPSTREAM_ERROR_FLAG = "upstream-error"
-# How faithful a locally decided answer is: the L0 echo, or whatever an answer target said.
+# How faithful a locally decided answer is: the L0 echo, the L1 fixture, or whatever an answer
+# target said. Exactly one of these is on every exchange irimi answered itself - `FIDELITY_FLAGS`
+# is the mapping, so a new `answered_by` value cannot ship without one.
 FIDELITY_L0_FLAG = "fidelity:L0"
+FIDELITY_L1_FLAG = "fidelity:L1"
 FIDELITY_DELEGATED_FLAG = "fidelity:delegated"
+# A route whose map names a `fixture:` was answered at L0 anyway, because this install could not
+# read the object. The answer is still safe - L0 is the floor - but it is not the fidelity the
+# map promised, and a trace that did not say so would read as a working L1 (#41).
+FIXTURE_FAILED_FLAG = "fixture-failed"
+
+# The fidelity flag each way of answering carries. One mapping rather than a branch per caller:
+# the policy reads it, and `tests/test_exchange.py` holds it exhaustive over the non-live values.
+FIDELITY_FLAGS: dict[AnsweredBy, str] = {
+    "fake-L0": FIDELITY_L0_FLAG,
+    "fake-L1": FIDELITY_L1_FLAG,
+    "delegated": FIDELITY_DELEGATED_FLAG,
+}
 
 Headers = tuple[tuple[str, str], ...]
 

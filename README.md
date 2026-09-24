@@ -45,8 +45,8 @@ the code.
 
 `irimi serve` runs the shadow proxy in the foreground on `127.0.0.1:4000`. Reads are forwarded to
 the real service; writes are answered locally with a `fake-L1` or `fake-L0` response and never
-reach the network. Which is which comes from the service maps, and from the HTTP method for anything the
-maps do not cover. Each exchange prints as one line.
+reach the network. Which is which comes from the service maps, and from the HTTP method for
+anything the maps do not cover. Each exchange prints as one line.
 
 A locally answered write comes back at one of two fidelities, and the `Irimi-Answered-By` header
 names which.
@@ -75,9 +75,10 @@ always `false`, because nothing irimi answers happened. And an install whose fix
 missing or damaged still answers the write, at L0, with the exchange flagged `fixture-failed`.
 
 Four things both fidelities are careful about, because an SDK has to be able to read the fields
-it just sent. A write that **names its resource in the path** gets that id back rather than a fresh one:
-`POST /v1/customers/cus_REAL123` echoes `cus_REAL123`, because the live API does and an agent that
-logs the id or retrieves it again would otherwise be handed one for a resource that never existed.
+it just sent. A write that **names its resource in the path** gets that id back rather than a
+fresh one: `POST /v1/customers/cus_REAL123` echoes `cus_REAL123`, because the live API does and an
+agent that logs the id or retrieves it again would otherwise be handed one for a resource that
+never existed.
 The segment is percent-decoded first, and a value that is not shaped like an id — a PaymentIntent
 client secret, say — is not mistaken for one. A **bracket-nested form field** becomes a nested
 object, so `metadata[order_id]=6735` comes back as `metadata`. A **repeated key** collects into a

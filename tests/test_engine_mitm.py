@@ -1943,6 +1943,9 @@ routes:
     ids:
       id: re_
       balance_transaction: txn_
+    fires:
+      - refund.created
+      - charge.refunded
   - match:
       method: GET
       path: /v1/refunds
@@ -2097,6 +2100,28 @@ def test_a_charge_reread_after_a_faked_refund_shows_the_refund(stripe_stub):
     assert [method for method, _ in _StripeStub.seen] == ["GET"], "a faked write reached Stripe"
 
 
+def test_a_faked_refund_records_the_webhooks_it_would_have_fired(stripe_stub):
+    """#47's done-when through the proxy, where `_Pending` and the response hook's `annotate`
+    carry it: a faked refund lists `refund.created` and `charge.refunded`, and the read after it
+    lists nothing."""
+    proxy, stub, seen = stripe_stub
+    status, _ = _via_proxy(
+        proxy,
+        "POST",
+        f"http://127.0.0.1:{stub}/v1/refunds",
+        body=b"charge=ch_REAL1&amount=100",
+        extra_headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    assert status == 200
+    status, _, _ = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_REAL1")
+    assert status == 200
+    (write,) = [ex for ex in seen if ex.request.method == "POST"]
+    (read,) = [ex for ex in seen if ex.request.method == "GET"]
+    assert write.would_fire == ("refund.created", "charge.refunded")
+    assert read.would_fire == ()
+    assert "POST" not in [method for method, _ in _StripeStub.seen], "a faked write reached Stripe"
+
+
 def test_the_refunds_list_shows_the_minted_refund_first(stripe_stub):
     proxy, stub, _ = stripe_stub
     status, data = _via_proxy(
@@ -2155,6 +2180,17 @@ def test_a_retry_with_the_same_key_is_one_refund_not_two(stripe_stub):
     assert "POST" not in [method for method, _ in _StripeStub.seen], "a faked write reached Stripe"
 
 
+def test_a_replayed_refund_records_no_webhooks(stripe_stub):
+    """The retry's events are already on the first write's own exchange; listing them again
+    would promise one refund's `refund.created` twice (#46, #47)."""
+    proxy, stub, seen = stripe_stub
+    _keyed_refund(proxy, stub, "k-1")
+    _keyed_refund(proxy, stub, "k-1")
+    refunds = [ex for ex in seen if ex.request.method == "POST"]
+    assert [ex.would_fire for ex in refunds] == [("refund.created", "charge.refunded"), ()]
+    assert [IDEMPOTENT_REPLAY_FLAG in ex.flags for ex in refunds] == [False, True]
+
+
 def test_the_same_key_with_a_different_amount_is_refused(stripe_stub):
     """A key reused for a different write is Stripe's own `idempotency_error`, and it is not a
     write: the charge still shows the first refund only (#46)."""
@@ -2169,6 +2205,18 @@ def test_the_same_key_with_a_different_amount_is_refused(stripe_stub):
 
     _, _, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_REAL1")
     assert json.loads(data)["amount_refunded"] == 100
+
+
+def test_a_reused_key_on_a_different_write_records_no_webhooks(stripe_stub):
+    """The real service would have refused the reused key, so nothing would have fired. A
+    conflict is not `precondition: rejected`, so it is pinned on its own (#46, #47)."""
+    proxy, stub, seen = stripe_stub
+    _keyed_refund(proxy, stub, "k-2")
+    _keyed_refund(proxy, stub, "k-2", amount=250)
+    first, refused = [ex for ex in seen if ex.request.method == "POST"]
+    assert first.would_fire == ("refund.created", "charge.refunded")
+    assert IDEMPOTENCY_CONFLICT_FLAG in refused.flags
+    assert refused.would_fire == ()
 
 
 def test_a_read_before_the_refund_is_untouched_and_unstamped(stripe_stub):
@@ -2569,6 +2617,22 @@ def test_a_refund_of_a_fully_refunded_charge_is_rejected_with_stripes_own_body(
     (write,) = _writes(seen)
     assert write.precondition == "rejected"
     assert write.rejection_code == "charge_already_refunded"
+
+
+def test_a_rejected_refund_records_no_webhooks(precondition_stub):
+    """L3 said the real service would have refused this refund: nothing was performed, so
+    nothing would have fired (#45, #47). A refund L3 passed goes first, so the empty list is
+    this map's `fires:` withheld and not a map that never had one."""
+    proxy, stub, seen = precondition_stub
+    status, _, _ = _refund(proxy, stub, "ch_REAL1")
+    assert status == 200
+    status, _, _ = _refund(proxy, stub, "ch_FULL1")
+    assert status == 400
+    passed, write = _writes(seen)
+    assert passed.would_fire == ("refund.created", "charge.refunded")
+    assert write.precondition == "rejected"
+    assert write.rejection_code == "charge_already_refunded"
+    assert write.would_fire == ()
 
 
 def test_a_second_refund_in_one_run_is_rejected_because_the_overlay_applied_the_first(

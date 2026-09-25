@@ -528,6 +528,9 @@ routes:
     precondition: charge_refundable
     ids:
       id: re_
+    fires:
+      - refund.created
+      - charge.refunded
   - match:
       method: GET
       path: /v1/charges/{charge}
@@ -684,6 +687,47 @@ def test_an_idempotency_conflict_is_never_in_the_write_log(tmp_path, monkeypatch
     for log in overlay.logs:
         assert len(log) == 1
         assert IDEMPOTENCY_CONFLICT_FLAG not in log[0].flags
+
+
+def test_only_a_write_that_would_have_happened_lists_its_webhooks(tmp_path, monkeypatch):
+    """`would_fire` is a claim about a write irimi accepted, and the write log is the run's own
+    record of which those are (#47). Said once, as the one-directional property: an exchange that
+    lists webhooks is one the overlay was handed as a write. The three that list nothing do so
+    for three different reasons - L3 said the service would have refused it, the service would
+    have refused the reused key, and a replay's events are already on the first write's own
+    exchange."""
+    seen, overlay, replies = _stripe_run(
+        tmp_path,
+        monkeypatch,
+        [
+            ("ch_REAL1", 100, None),  # accepted
+            ("ch_FULL1", 100, None),  # L3 rejection
+            ("ch_REAL1", 100, "k-1"),  # accepted
+            ("ch_REAL1", 100, "k-1"),  # replay
+            ("ch_REAL1", 100, "k-2"),  # accepted
+            ("ch_REAL1", 250, "k-2"),  # conflict
+        ],
+    )
+    assert replies == [200, 400, 200, 200, 200, 400, 200]
+    writes = [ex for ex in seen if ex.kind == "write"]
+    assert [ex.would_fire != () for ex in writes] == [True, False, True, False, True, False]
+    for ex in writes:
+        if ex.would_fire:
+            assert ex.would_fire == ("refund.created", "charge.refunded")
+    for ex in seen:
+        refused_or_replayed = (
+            IDEMPOTENT_REPLAY_FLAG in ex.flags
+            or IDEMPOTENCY_CONFLICT_FLAG in ex.flags
+            or ex.precondition == "rejected"
+        )
+        if refused_or_replayed or ex.kind == "read":
+            assert ex.would_fire == (), (ex.kind, ex.flags, ex.precondition)
+
+    assert overlay.logs, "the overlay was never handed the write log"
+    logged = {(ex.request.path, ex.request.body) for ex in overlay.logs[-1]}
+    for ex in writes:
+        if ex.would_fire:
+            assert (ex.request.path, ex.request.body) in logged
 
 
 def test_a_replayed_rejection_is_never_in_the_write_log(tmp_path, monkeypatch):

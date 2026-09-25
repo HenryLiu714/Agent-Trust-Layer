@@ -486,20 +486,20 @@ class IrimiAddon:
             target=pending.target,
             overlay=overlay_fidelity,
         )
-        # The write log is what the overlay replays onto live reads, so it holds *writes*:
-        # exchanges that changed state somewhere the real service does not know about.
-        # `answered_by != "live"` was an exhaustive spelling of that only while every read was
-        # live. `target_reads` makes a delegated read the first non-live read, and a GET replayed
-        # onto later reads is not a write by any reading - #20 owns "no overlay for a delegated
-        # service" and #28 is the streaming twin of the same hazard. A failed target (502) is not
-        # a write either: nothing was performed, so it is excluded by its flag. A target that
-        # could not be *dialled* never reaches here at all - `error()` handles that one and does
-        # not touch the log - but a target irimi *refused* is answered in `request()`, which does
-        # set `_Pending`, so without the flag check it landed here and the overlay would replay a
-        # write that was performed nowhere.
-        # A DELEGATED WRITE LEAVES THE LOG TOO (#43). The target performed it, or did something
-        # else with it, or nothing; irimi does not know and cannot replay what it did not author.
-        # Only writes irimi answered itself are effects it can apply to a later read.
+        # The write log is what the overlay replays onto live reads, so it holds *writes irimi
+        # itself authored*: exchanges that changed state somewhere the real service does not know
+        # about. Each clause below keeps one thing out that is not that.
+        #
+        # `kind not in LIVE_KINDS` keeps reads out. A delegated read is the one non-live read
+        # (`target_reads`), and a GET replayed onto later reads is not a write by any reading -
+        # #20 owns "no overlay for a delegated service" and #28 is the streaming twin.
+        # `answered_by not in ("live", "delegated")` keeps out what irimi did not author: a live
+        # forward, and a DELEGATED WRITE (#43) - the target performed it, or did something else
+        # with it, or nothing, and irimi cannot replay an effect it does not know.
+        # `TARGET_FAILED_FLAG` keeps out a write performed nowhere. A target that could not be
+        # *dialled* never reaches here - `error()` handles that one and does not touch the log -
+        # but a target irimi *refused* is answered in `request()`, which does set `_Pending`, so
+        # without this clause it landed here and the overlay replayed a write that never happened.
         if (
             ex.kind not in LIVE_KINDS
             and ex.answered_by not in ("live", "delegated")

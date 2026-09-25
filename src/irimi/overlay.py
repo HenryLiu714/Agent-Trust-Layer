@@ -46,8 +46,10 @@ MAX_BODY_BYTES = 2_000_000
 #    headers went out before the hook ran. Do not build an overlay that depends on being asked
 #    about streams; build one that is correct for the bodies it is given.
 #
-# Phase 1 ships neither the overlay nor L3, so hazard 1 is a note rather than a test: the Phase 2
-# issue should inherit it instead of rediscovering it.
+# Both hazards are pinned by tests now that `ServiceOverlay` exists (#43): `test_engine_mitm` holds
+# that a delegated read and a delegated write both stay out of `write_log`, and that a streamed read
+# is neither overlaid nor rewritten. They stay written out here because the next service's
+# effects table is the reader who needs them, and a test says what breaks, not why it matters.
 
 
 @dataclass(frozen=True)

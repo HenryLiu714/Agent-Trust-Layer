@@ -155,6 +155,13 @@ page one of the refunds list carries the refund. A response with no such header 
 service, unchanged — absence is the signal, because adding a header of ours to a read we did not
 change would make it differ from what the service sent.
 
+In one narrow case irimi also edits a read on its way *out*. A refund it faked has an id the real
+Stripe has never seen, so a later `GET /v1/refunds?starting_after=<that id>` would come back an
+error. irimi drops that cursor before forwarding — everything after the newest refund is the real
+list from its top — and marks the request it sent with `Irimi-Rewrote`, naming the parameter it
+removed, so the same header in your Stripe logs tells you which request was not quite the one your
+agent made. Nothing else about a read is ever changed on the way out.
+
 **Nothing stops an agent from bypassing the proxy yet** — a client that ignores these variables, or
 ships its own CA bundle, talks to the real service. The banner says `backstop: none (Phase 4)` for
 exactly this reason.

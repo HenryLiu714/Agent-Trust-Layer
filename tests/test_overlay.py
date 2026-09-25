@@ -15,7 +15,16 @@ STRIPE = ServiceMap(
         Route("POST", "/v1/refunds", "refunds.create", "write", ids={"id": "re_"}),
     ),
 )
-MAPS = MapIndex(services=(STRIPE,))
+SLACK = ServiceMap(
+    service="slack",
+    hosts=frozenset({"slack.com"}),
+    routes=(
+        Route("POST", "/api/chat.postMessage", "chat.postMessage", "write"),
+        Route("POST", "/api/conversations.history", "conversations.history", "read"),
+    ),
+    verbs="post-only",
+)
+MAPS = MapIndex(services=(STRIPE, SLACK))
 MINTED = "re_MINTED1"
 CHARGE = {
     "id": "ch_REAL1",
@@ -24,18 +33,36 @@ CHARGE = {
     "amount_refunded": 0,
     "refunded": False,
 }
+SLACK_JSON = "application/json;charset=utf-8"  # what slack_sdk sends (#44)
+HISTORY = {
+    "ok": True,
+    "messages": [{"type": "message", "ts": "1700000000.000100", "text": "real", "user": "U1"}],
+    "has_more": False,
+}
 
 
-def _read(path, query="", headers=(), host="api.stripe.com"):
+def _read(path, query="", headers=(), host="api.stripe.com", method="GET", body=b""):
     return Request(
-        method="GET",
+        method=method,
         scheme="https",
         host=host,
         port=443,
         path=path,
         query=query,
         headers=tuple(headers),
-        body=b"",
+        body=body,
+    )
+
+
+def _slack_read(params, headers=()):
+    """A `conversations.history` read as slack_sdk sends it: a POST with every parameter in the
+    JSON body, which is where the effects read them from (#44)."""
+    return _read(
+        "/api/conversations.history",
+        headers=(("content-type", SLACK_JSON), *headers),
+        host="slack.com",
+        method="POST",
+        body=json.dumps(params).encode(),
     )
 
 
@@ -73,6 +100,40 @@ def _write_exchange(headers=(), refund_id=MINTED):
         ),
         service="stripe",
         operation="refunds.create",
+        kind="write",
+        answered_by="fake-L1",
+        validation="unvalidated",
+        run_id="7f3a",
+    )
+
+
+def _slack_post_exchange(ts, channel="C0123", headers=()):
+    """A faked `chat.postMessage`, answered in `echo.SLACK_ENVELOPES`' shape (#42)."""
+    request = Request(
+        method="POST",
+        scheme="https",
+        host="slack.com",
+        port=443,
+        path="/api/chat.postMessage",
+        query="",
+        headers=(("content-type", SLACK_JSON), *headers),
+        body=json.dumps({"channel": channel, "text": "refund issued"}).encode(),
+    )
+    answer = {
+        "ok": True,
+        "channel": channel,
+        "ts": ts,
+        "message": {"type": "message", "ts": ts, "text": "refund issued", "user": "U0BOT"},
+    }
+    return Exchange(
+        request=request,
+        response=Response(
+            status=200,
+            headers=(("content-type", "application/json"),),
+            body=json.dumps(answer).encode(),
+        ),
+        service="slack",
+        operation="chat.postMessage",
         kind="write",
         answered_by="fake-L1",
         validation="unvalidated",
@@ -192,3 +253,50 @@ def test_a_rewrote_header_the_agent_sent_itself_is_not_trusted():
     upstream = _upstream({"object": "list", "has_more": False, "data": [{"id": "re_REAL1"}]})
     out = overlay(log, rewritten, upstream)
     assert json.loads(out.response.body)["data"][0]["id"] == MINTED
+
+
+# ---------------------------------------------------------------------------- Slack (#44)
+
+
+def test_a_slack_history_read_after_a_faked_post_is_rewritten():
+    upstream = _upstream(HISTORY)
+    log = [_slack_post_exchange("1800000000.000001")]
+    out = ServiceOverlay(MAPS)(log, _slack_read({"channel": "C0123"}), upstream)
+    assert out.response is not upstream
+    messages = json.loads(out.response.body)["messages"]
+    assert [m["ts"] for m in messages] == ["1800000000.000001", "1700000000.000100"]
+    assert out.fidelity == "full"
+
+
+def test_a_slack_read_with_an_empty_write_log_is_untouched():
+    upstream = _upstream(HISTORY)
+    out = ServiceOverlay(MAPS)([], _slack_read({"channel": "C0123"}), upstream)
+    assert out.response is upstream
+    assert out.fidelity is None
+
+
+def test_slack_writes_under_different_tokens_are_all_replayed():
+    """Slack has no `SCOPE_HEADERS` entry, so a run holds one Slack scope and the token a write
+    was made with does not keep it off a read made with another (#44)."""
+    upstream = _upstream(HISTORY)
+    log = [
+        _slack_post_exchange("1800000000.000001", headers=(("authorization", "Bearer xoxb-A"),)),
+        _slack_post_exchange("1800000000.000002", headers=(("authorization", "Bearer xoxb-B"),)),
+    ]
+    read = _slack_read({"channel": "C0123"}, headers=(("authorization", "Bearer xoxb-C"),))
+    out = ServiceOverlay(MAPS)(log, read, upstream)
+    messages = json.loads(out.response.body)["messages"]
+    assert [m["ts"] for m in messages] == [
+        "1800000000.000002",
+        "1800000000.000001",
+        "1700000000.000100",
+    ]
+    assert out.fidelity == "full"
+
+
+def test_rewrite_leaves_a_slack_read_as_the_same_object():
+    """Slack has no `REWRITES` entry: its cursor is opaque and server-issued, so there is nothing
+    of irimi's in it to translate (#44)."""
+    read = _slack_read({"channel": "C0123", "cursor": "dXNlcjpVMEc5V0ZYTlo="})
+    log = [_slack_post_exchange("1800000000.000001")]
+    assert ServiceOverlay(MAPS).rewrite(log, read) is read

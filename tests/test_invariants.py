@@ -8,7 +8,8 @@ hand-built list, and each one demonstrated to fail on a policy that breaks it:
   (c) `ShadowPolicy` cannot produce `validated` at all - that label is reserved for record mode;
   (d) a `delegated` exchange never reached the host the agent addressed;
   (e) a write L3 rejected never enters the write log, nor does an idempotent replay or conflict
-      (#46), and a read irimi issued is never a write.
+      (#46), a read irimi issued is never a write, and every read the overlay showed a write
+      has a printed write of its own service to sit under in the summary (#48).
 
 `stamping_violations` is the machinery for (a) and (b): it returns a list of strings rather than
 asserting, so the same function can be asserted empty for an honest run and non-empty for a
@@ -26,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 import pytest
 
-from irimi import ca, paths, pipeline, servicemap
+from irimi import ca, paths, pipeline, report, servicemap
 from irimi.engine import EngineConfig
 from irimi.engine.mitm import MitmEngine
 from irimi.exchange import (
@@ -37,7 +38,7 @@ from irimi.exchange import (
     Request,
     Response,
 )
-from irimi.overlay import NoOverlay, Overlaid
+from irimi.overlay import NoOverlay, Overlaid, ServiceOverlay
 from irimi.pipeline import ANSWERED_BY_HEADER, annotate, respond
 from irimi.policy import Answer, ShadowPolicy
 from irimi.store import NullStore
@@ -592,10 +593,11 @@ def _l3_run(tmp_path, monkeypatch):
     return seen, overlay
 
 
-def _stripe_run(tmp_path, monkeypatch, refunds):
+def _stripe_run(tmp_path, monkeypatch, refunds, *, real_overlay=False):
     """Each `(charge, amount, idempotency key or None)` in `refunds` as a refund, then a charge
     read, through an engine holding the real reader. Hands back the exchanges, the overlay that
-    watched the write log, and every status in order."""
+    watched the write log, and every status in order. With `real_overlay` the engine holds the
+    real `ServiceOverlay` instead, which applies the accepted refunds to the closing read."""
     from irimi.policy import UpstreamReader
 
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "maps-home"))
@@ -606,7 +608,7 @@ def _stripe_run(tmp_path, monkeypatch, refunds):
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _Charges)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     stripe = srv.server_address[1]
-    overlay = _LogCapturingOverlay()
+    overlay = ServiceOverlay(maps) if real_overlay else _LogCapturingOverlay()
 
     def refund(port, charge, amount, key):
         headers = {
@@ -728,6 +730,56 @@ def test_only_a_write_that_would_have_happened_lists_its_webhooks(tmp_path, monk
     for ex in writes:
         if ex.would_fire:
             assert (ex.request.path, ex.request.body) in logged
+
+
+def _owes_overlay_line(ex: Exchange) -> bool:
+    """One of the agent's own reads that irimi edited to show a write, or knows it showed only in
+    part (#48). This deliberately restates `report._shows_overlay` rather than calling it: the
+    invariant is what the summary OWES, so a `_shows_overlay` that stopped owing a line must fail
+    here instead of agreeing with itself."""
+    return (
+        ex.kind == "read"
+        and ex.issued_by == "agent"
+        and (ex.answered_by == "overlay" or ex.overlay == "partial")
+    )
+
+
+def overlay_line_violations(exchanges: Sequence[Exchange]) -> list[str]:
+    """Every one of the agent's reads the summary owes a `↳` line but files under no write, named
+    one per line. Matched by identity, not equality: a copy of a filed read is a different read."""
+    filed = [read for _, reads in report._writes_with_their_reads(exchanges) for read in reads]
+    return [
+        f"(e) {ex.answered_by} read, overlay {ex.overlay}, under no {ex.service} write: "
+        f"{ex.request.method} {ex.request.path}"
+        for ex in exchanges
+        if _owes_overlay_line(ex) and not any(read is ex for read in filed)
+    ]
+
+
+def test_every_overlaid_read_has_a_write_of_its_own_service_to_sit_under(tmp_path, monkeypatch):
+    """An overlaid read shows the agent a write that never happened, and the summary's `↳` line
+    is the only place a reader learns which of the agent's reads were shown one (#48). The report
+    files each under the latest earlier write of its own service and quietly skips one it cannot
+    place; that skip is safe only because a real run never produces such a read - the overlay
+    edits or flags a read only on the strength of a same-service write in the log, and every entry
+    there is a printed write. Held over a real run through the real overlay, with an L3 rejection
+    in it so the read's write is not the only one on the host."""
+    seen, _, replies = _stripe_run(
+        tmp_path,
+        monkeypatch,
+        [("ch_REAL1", 100, None), ("ch_FULL1", 100, None)],
+        real_overlay=True,
+    )
+    assert replies == [200, 400, 200]
+    owed = [ex for ex in seen if _owes_overlay_line(ex)]
+    assert [ex.answered_by for ex in owed] == ["overlay"], "the run showed the agent no write"
+    assert overlay_line_violations(seen) == []
+    lines = report.summary_lines("t3st", seen)
+    assert sum(line.lstrip().startswith(report.OVERLAY_MARKER) for line in lines) == len(owed)
+
+    # And the check can fail: a read before any write, and one whose service wrote nothing.
+    early, elsewhere = replace(owed[0]), replace(owed[0], service="slack")
+    assert len(overlay_line_violations([early, *seen, elsewhere])) == 2
 
 
 def test_a_replayed_rejection_is_never_in_the_write_log(tmp_path, monkeypatch):

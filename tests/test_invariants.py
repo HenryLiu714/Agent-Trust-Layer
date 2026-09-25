@@ -7,7 +7,8 @@ hand-built list, and each one demonstrated to fail on a policy that breaks it:
   (b) nothing carrying that header is stamped anything but `unvalidated`;
   (c) `ShadowPolicy` cannot produce `validated` at all - that label is reserved for record mode;
   (d) a `delegated` exchange never reached the host the agent addressed;
-  (e) a write L3 rejected never enters the write log, and a read irimi issued is never a write.
+  (e) a write L3 rejected never enters the write log, nor does an idempotent replay or conflict
+      (#46), and a read irimi issued is never a write.
 
 `stamping_violations` is the machinery for (a) and (b): it returns a list of strings rather than
 asserting, so the same function can be asserted empty for an honest run and non-empty for a
@@ -28,7 +29,14 @@ import pytest
 from irimi import ca, paths, pipeline, servicemap
 from irimi.engine import EngineConfig
 from irimi.engine.mitm import MitmEngine
-from irimi.exchange import KINDS, Exchange, Request, Response
+from irimi.exchange import (
+    IDEMPOTENCY_CONFLICT_FLAG,
+    IDEMPOTENT_REPLAY_FLAG,
+    KINDS,
+    Exchange,
+    Request,
+    Response,
+)
 from irimi.overlay import NoOverlay, Overlaid
 from irimi.pipeline import ANSWERED_BY_HEADER, annotate, respond
 from irimi.policy import Answer, ShadowPolicy
@@ -574,6 +582,17 @@ class _LogCapturingOverlay:
 def _l3_run(tmp_path, monkeypatch):
     """A refund L3 passes, one it rejects, then a read, through an engine holding the real
     reader. Hands back the exchanges and the overlay that watched the write log."""
+    seen, overlay, replies = _stripe_run(
+        tmp_path, monkeypatch, [("ch_REAL1", 100, None), ("ch_FULL1", 100, None)]
+    )
+    assert replies == [200, 400, 200]
+    return seen, overlay
+
+
+def _stripe_run(tmp_path, monkeypatch, refunds):
+    """Each `(charge, amount, idempotency key or None)` in `refunds` as a refund, then a charge
+    read, through an engine holding the real reader. Hands back the exchanges, the overlay that
+    watched the write log, and every status in order."""
     from irimi.policy import UpstreamReader
 
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "maps-home"))
@@ -586,16 +605,19 @@ def _l3_run(tmp_path, monkeypatch):
     stripe = srv.server_address[1]
     overlay = _LogCapturingOverlay()
 
-    def refund(port, charge):
+    def refund(port, charge, amount, key):
+        headers = {
+            "host": f"127.0.0.1:{stripe}",
+            "content-type": "application/x-www-form-urlencoded",
+        }
+        if key is not None:
+            headers["idempotency-key"] = key
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
         conn.request(
             "POST",
             f"http://127.0.0.1:{stripe}/v1/refunds",
-            body=f"charge={charge}&amount=100".encode(),
-            headers={
-                "host": f"127.0.0.1:{stripe}",
-                "content-type": "application/x-www-form-urlencoded",
-            },
+            body=f"charge={charge}&amount={amount}".encode(),
+            headers=headers,
         )
         resp = conn.getresponse()
         resp.read()
@@ -604,8 +626,7 @@ def _l3_run(tmp_path, monkeypatch):
 
     def calls(port):
         return [
-            refund(port, "ch_REAL1"),
-            refund(port, "ch_FULL1"),
+            *(refund(port, charge, amount, key) for charge, amount, key in refunds),
             _via_proxy(port, "GET", f"http://127.0.0.1:{stripe}/v1/charges/ch_REAL1")[0],
         ]
 
@@ -620,8 +641,7 @@ def _l3_run(tmp_path, monkeypatch):
         )
     finally:
         srv.shutdown()
-    assert replies == [200, 400, 200]
-    return seen, overlay
+    return seen, overlay, replies
 
 
 def test_a_rejected_write_is_never_in_the_write_log(tmp_path, monkeypatch):
@@ -631,6 +651,54 @@ def test_a_rejected_write_is_never_in_the_write_log(tmp_path, monkeypatch):
     refund goes first so the log is not empty for the trivial reason."""
     seen, overlay = _l3_run(tmp_path, monkeypatch)
     assert [ex.precondition for ex in seen if ex.kind == "write"] == ["passed", "rejected"]
+    assert overlay.logs, "the overlay was never handed the write log"
+    for log in overlay.logs:
+        assert [ex.precondition for ex in log] == ["passed"]
+
+
+def test_a_replayed_write_is_never_in_the_write_log_twice(tmp_path, monkeypatch):
+    """The agent's retry with the key it already sent is the same write (#46). A second entry
+    would have the overlay apply one refund twice."""
+    seen, overlay, replies = _stripe_run(
+        tmp_path, monkeypatch, [("ch_REAL1", 100, "k-1"), ("ch_REAL1", 100, "k-1")]
+    )
+    assert replies == [200, 200, 200]
+    writes = [ex for ex in seen if ex.kind == "write"]
+    assert [IDEMPOTENT_REPLAY_FLAG in ex.flags for ex in writes] == [False, True]
+    assert overlay.logs, "the overlay was never handed the write log"
+    for log in overlay.logs:
+        assert len(log) == 1
+        assert IDEMPOTENT_REPLAY_FLAG not in log[0].flags
+
+
+def test_an_idempotency_conflict_is_never_in_the_write_log(tmp_path, monkeypatch):
+    """A key reused for a different write was refused, as the real service would refuse it:
+    nothing was minted and there is no effect to replay (#46)."""
+    seen, overlay, replies = _stripe_run(
+        tmp_path, monkeypatch, [("ch_REAL1", 100, "k-2"), ("ch_REAL1", 250, "k-2")]
+    )
+    assert replies == [200, 400, 200]
+    writes = [ex for ex in seen if ex.kind == "write"]
+    assert [IDEMPOTENCY_CONFLICT_FLAG in ex.flags for ex in writes] == [False, True]
+    assert overlay.logs, "the overlay was never handed the write log"
+    for log in overlay.logs:
+        assert len(log) == 1
+        assert IDEMPOTENCY_CONFLICT_FLAG not in log[0].flags
+
+
+def test_a_replayed_rejection_is_never_in_the_write_log(tmp_path, monkeypatch):
+    """A retry of a write L3 rejected gets the same refusal back, and stays out of the log on
+    both counts: it is a rejection and it is a replay (#45, #46). A passed refund goes first so
+    the log is not empty for the trivial reason."""
+    seen, overlay, replies = _stripe_run(
+        tmp_path,
+        monkeypatch,
+        [("ch_REAL1", 100, None), ("ch_FULL1", 100, "k-3"), ("ch_FULL1", 100, "k-3")],
+    )
+    assert replies == [200, 400, 400, 200]
+    writes = [ex for ex in seen if ex.kind == "write"]
+    assert [ex.precondition for ex in writes] == ["passed", "rejected", "rejected"]
+    assert IDEMPOTENT_REPLAY_FLAG in writes[-1].flags
     assert overlay.logs, "the overlay was never handed the write log"
     for log in overlay.logs:
         assert [ex.precondition for ex in log] == ["passed"]

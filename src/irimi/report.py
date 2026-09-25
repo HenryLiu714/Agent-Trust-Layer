@@ -210,9 +210,16 @@ def _failed_target(exchange: Exchange) -> bool:
 def _host_line(host: str, rows: Sequence[Exchange], width: int) -> str:
     """One host's counts, in the order a reader asks them: what was real, then what was not."""
     phrases: list[str] = []
+    # An OVERLAID read is a real read (#43): it went to the real service and came back, and irimi
+    # then wrote the run's own faked writes into the body. Leaving it out of this count told the
+    # reader a read they really made never happened, which is the same class of untruth as #20
+    # below. It is counted here and named separately, because the body is not what Stripe sent.
     live_reads = sum(1 for ex in rows if ex.kind == "read" and ex.answered_by == "live")
-    if live_reads:
-        phrases.append(_plural(live_reads, "read"))
+    overlaid_reads = sum(1 for ex in rows if ex.kind == "read" and ex.answered_by == "overlay")
+    if live_reads or overlaid_reads:
+        phrases.append(_plural(live_reads + overlaid_reads, "read"))
+    if overlaid_reads:
+        phrases.append(f"{overlaid_reads} showing this run's writes")
     # A delegated read is NOT a real read, and `reads are real` is what that count means to
     # whoever reads it. Counting it with the live ones is the honesty bug #20 was filed for.
     target_reads = sum(1 for ex in rows if ex.kind == "read" and ex.answered_by == "delegated")
@@ -345,7 +352,12 @@ def summary_lines(
     writes still get a line, spelled as the request they were.
     """
     writes = [ex for ex in exchanges if _is_intercepted(ex)]
-    live = sum(1 for ex in exchanges if ex.answered_by == "live")
+    # An overlaid read was forwarded to the real service and answered by it; irimi edited the body
+    # afterwards to show the run's own faked writes. This line's buckets are about WHO answered,
+    # so it belongs with `live`: counting it as `virtualized` claimed irimi had answered a read
+    # the agent really made (#43). That its body was edited is said in the per-host block above,
+    # which is also where #48 gets to spell the fuller summary.
+    live = sum(1 for ex in exchanges if ex.answered_by in ("live", "overlay"))
     delegated = sum(1 for ex in exchanges if ex.answered_by == "delegated")
     virtualized = len(exchanges) - live - delegated
     lines = [

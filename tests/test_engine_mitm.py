@@ -1787,3 +1787,157 @@ def test_a_rewrote_header_the_agent_sent_is_not_forwarded_upstream(tmp_path, mon
     ((path, received),) = _Upstream.seen
     assert path == "/hello"
     assert pipeline.REWROTE_HEADER not in {k.lower() for k in received}
+
+
+# ------------------------------------------------ the Stripe overlay, end to end (#43)
+
+# A map claiming the loopback upstream as `stripe`, so the real `ServiceOverlay` applies Stripe's
+# effects table to reads through it. `fixture: refund` resolves against the shipped Stripe
+# fixtures, which are keyed by the service name and not by the host.
+STRIPE_MAP = """
+version: 1
+service: stripe
+hosts:
+  - 127.0.0.1
+routes:
+  - match:
+      method: POST
+      path: /v1/refunds
+    operation: refunds.create
+    kind: write
+    human: refund {amount} on {charge}
+    fixture: refund
+    ids:
+      id: re_
+      balance_transaction: txn_
+  - match:
+      method: GET
+      path: /v1/refunds
+    operation: refunds.list
+    kind: read
+    human: list refunds
+  - match:
+      method: GET
+      path: /v1/charges/{charge}
+    operation: charges.retrieve
+    kind: read
+    human: get charge {charge}
+"""
+
+
+class _StripeStub(BaseHTTPRequestHandler):
+    """A Stripe-shaped upstream: one real charge and an empty refunds list."""
+
+    seen: list = []  # (method, path) of every request, so a test can prove no write reached it
+
+    def do_GET(self):
+        _StripeStub.seen.append(("GET", self.path))
+        route = self.path.split("?", 1)[0]
+        if route == "/v1/charges/ch_REAL1":
+            status, document = (
+                200,
+                {
+                    "id": "ch_REAL1",
+                    "object": "charge",
+                    "amount": 4900,
+                    "amount_refunded": 0,
+                    "refunded": False,
+                    "currency": "usd",
+                },
+            )
+        elif route == "/v1/refunds":
+            status, document = 200, {"object": "list", "has_more": False, "data": []}
+        else:
+            status, document = 404, {"error": {"type": "invalid_request_error"}}
+        body = json.dumps(document).encode()
+        self.send_response(status)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):  # must never be reached under ShadowPolicy
+        _StripeStub.seen.append(("POST", self.path))
+        self.send_response(500)
+        self.send_header("content-length", "0")
+        self.end_headers()
+
+    def log_message(self, *args):  # keep pytest output clean
+        pass
+
+
+@pytest.fixture
+def stripe_stub(tmp_path, monkeypatch):
+    """The stub on a free loopback port, and an engine over STRIPE_MAP with the real overlay,
+    built the way the CLI builds it. Yields (proxy port, stub port, recorded exchanges)."""
+    from irimi.overlay import ServiceOverlay
+
+    _StripeStub.seen = []
+    srv = HTTPServer(("127.0.0.1", 0), _StripeStub)
+    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
+    maps = _maps(tmp_path, monkeypatch, doc=STRIPE_MAP)
+    eng, seen, stop = _start(
+        _config(tmp_path, monkeypatch, maps=maps), overlay=ServiceOverlay(maps)
+    )
+    yield eng.listen_port(), srv.server_address[1], seen
+    stop()
+    srv.shutdown()
+
+
+def test_a_charge_reread_after_a_faked_refund_shows_the_refund(stripe_stub):
+    proxy, stub, _ = stripe_stub
+    status, _ = _via_proxy(
+        proxy,
+        "POST",
+        f"http://127.0.0.1:{stub}/v1/refunds",
+        body=b"charge=ch_REAL1&amount=100",
+        extra_headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    assert status == 200
+    status, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_REAL1")
+    assert status == 200
+    charge = json.loads(data)
+    assert charge["amount_refunded"] == 100
+    assert charge["refunded"] is False
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert [method for method, _ in _StripeStub.seen] == ["GET"], "a faked write reached Stripe"
+
+
+def test_the_refunds_list_shows_the_minted_refund_first(stripe_stub):
+    proxy, stub, _ = stripe_stub
+    status, data = _via_proxy(
+        proxy,
+        "POST",
+        f"http://127.0.0.1:{stub}/v1/refunds",
+        body=b"charge=ch_REAL1&amount=100",
+        extra_headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    assert status == 200
+    refund_id = json.loads(data)["id"]
+    assert refund_id.startswith("re_")
+    status, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds")
+    assert status == 200
+    assert json.loads(data)["data"][0]["id"] == refund_id
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+
+
+def test_a_read_before_the_refund_is_untouched_and_unstamped(stripe_stub):
+    proxy, stub, seen = stripe_stub
+    status, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_REAL1")
+    assert status == 200
+    assert json.loads(data)["amount_refunded"] == 0
+    assert pipeline.ANSWERED_BY_HEADER not in headers
+    assert seen[-1].answered_by == "live"
+    assert seen[-1].overlay is None
+    # The same read after the refund IS overlaid, so the untouched one above was untouched
+    # because it came first, not because this engine has no overlay.
+    _via_proxy(
+        proxy,
+        "POST",
+        f"http://127.0.0.1:{stub}/v1/refunds",
+        body=b"charge=ch_REAL1&amount=100",
+        extra_headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    _, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_REAL1")
+    assert json.loads(data)["amount_refunded"] == 100
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"

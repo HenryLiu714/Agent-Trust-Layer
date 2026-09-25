@@ -52,7 +52,7 @@ you to place it.
 | 3 | `echo` | The body a locally answered write gets. L0: form and JSON reflection, minted ids, Slack's envelope. L1: the route's fixture with the request's own fields written over it. Also `observe_read`, the one seam where a forwarded read's body teaches the faker something (a Slack `ts` a minted one must sort after). |
 | 3 | `services/` | What a faked write does to a later live read, per service, as plain functions over plain data (#43). `model` is the `Write` / `Applied` / `Rewritten` vocabulary; `stripe` is the effects table. Pure: no clock, no minting, no I/O, so Phase 5 replay runs the same functions over a recording. |
 | 4 | `policy` | `AnswerPolicy` and `ShadowPolicy`: the decision, and only the decision. |
-| 4 | `overlay` | The `Overlay` seam. `NoOverlay` today; Phase 2 replaces it. The module's header lists the two hazards that overlay must respect. |
+| 4 | `overlay` | The `Overlay` seam and `ServiceOverlay`, which applies `services`' effect tables to a live read and translates a cursor naming a minted id before the read is forwarded. `NoOverlay` stays, for tests and for a mode with no overlay. The module's header lists the two hazards every overlay must respect. |
 | 4 | `store` | The `TraceStore` seam. `NullStore` today; Phase 3 replaces it. |
 | 5 | `engine` | The `Engine` protocol and `EngineConfig`. `engine/mitm.py` is the only mitmproxy-backed implementation and the only module that imports mitmproxy. |
 | 6 | `report` | Everything a run prints: banner, per-exchange line, exit summary. Pure text. |
@@ -77,7 +77,9 @@ without a proxy:
   forward live, delegate, or send this response. `ShadowPolicy` is the only one today; record and
   replay modes are new policies, not new branches.
 - **`overlay.Overlay`** - given the write log, a read request and the upstream response, return
-  the response the agent should see. Phase 2.
+  an `Overlaid`: the response the agent should see, and how much of the write log that read could
+  express. Its request side, `rewrite`, translates a read before it is forwarded. Both are pure
+  functions of their arguments, so Phase 5 replay applies them over recorded reads.
 - **`store.TraceStore`** - where finished exchanges go. Phase 3.
 
 ## Rules the code holds itself to

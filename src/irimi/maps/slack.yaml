@@ -30,6 +30,9 @@ routes:
     # `ts` stay envelope-owned, and `ts` is minted rather than taken from here (#42). See
     # echo.SLACK_ENVELOPES.
     fixture: message
+    # `conversations.info` on the channel, before the post is faked (#45). Only a channel spelled
+    # as an id is checked; see services/slack.py.
+    precondition: channel_postable
 
   - match:
       method: POST

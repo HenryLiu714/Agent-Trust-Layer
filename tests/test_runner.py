@@ -1,5 +1,6 @@
 import asyncio
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 from irimi.exchange import Exchange, Request, Response
@@ -517,6 +518,77 @@ def test_the_write_line_names_the_fidelity_the_answer_actually_had():
     assert "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L1)" in lines
     lines = summary_lines("7f3a", [_refund()], 0.0, _maps())
     assert "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L0)" in lines
+
+
+# ------------------------------------------------------ what L3 said, in Notion's own words (#45)
+
+
+def test_a_rejected_write_is_crossed_out_and_names_the_code_it_would_fail_with():
+    """A write L3 rejected is the line the baseline report exists to print: the real service would
+    have refused it. Printed as `unvalidated (L1)` it read as a write that was faked (#45)."""
+    rows = [
+        replace(
+            _refund(answered_by="fake-L1", status=400),
+            precondition="rejected",
+            rejection_code="charge_already_refunded",
+        )
+    ]
+    line = _block(summary_lines("7f3a", rows, 0.0, _maps()), "would fail")
+    assert line.startswith("  ✗ ")
+    assert line == "  ✗ refund $49.00 on ch_3QabcXYZ  would fail: charge_already_refunded"
+
+
+def test_a_passed_write_reads_l3_preconditions_passed():
+    rows = [replace(_refund(answered_by="fake-L1"), precondition="passed")]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L3 preconditions passed)" in lines
+
+
+def test_a_write_l3_could_not_evaluate_reads_l2():
+    """Faked at L1, but irimi could not find out whether the service would have taken it, so what
+    it knew was the overlay's worth of truth and no more."""
+    rows = [replace(_refund(answered_by="fake-L1"), precondition="not_evaluable")]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L2)" in lines
+
+
+def test_a_write_on_a_route_with_no_precondition_keeps_its_own_level():
+    rows = [_refund(answered_by="fake-L1")]
+    assert rows[0].precondition is None
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L1)" in lines
+
+
+def test_a_delegated_write_l3_could_not_evaluate_still_reads_delegated():
+    """`L2` is a claim about a fake irimi built, and irimi built nothing here - the target did."""
+    rows = [
+        replace(
+            _refund(answered_by="delegated", target="http://127.0.0.1:3000/refund"),
+            precondition="not_evaluable",
+        )
+    ]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert (
+        "  ○ refund $49.00 on ch_3QabcXYZ → http://127.0.0.1:3000/refund  unvalidated (delegated)"
+        in lines
+    )
+    assert not any("(L2)" in line for line in lines)
+
+
+def test_an_engine_read_is_counted_apart_from_the_agents_reads_but_still_went_live():
+    """irimi's own precondition read reached the real service, so it is an exchange and it is
+    `live`; but the agent did not make it, and `N reads` is the agent's number (#45)."""
+    rows = [
+        _exchange(),
+        replace(_exchange(path="/v1/charges/ch_3QabcXYZ"), issued_by="engine"),
+        replace(_refund(answered_by="fake-L1"), precondition="passed"),
+    ]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert _block(lines, "api.stripe.com  ") == (
+        "  api.stripe.com  1 read  1 engine read  1 write intercepted"
+    )
+    assert lines[0].startswith("irimi shadow · run 7f3a · 3 exchanges · ")
+    assert "  3 exchanges · 2 live · 0 delegated · 1 virtualized" in lines
 
 
 def test_the_summary_still_names_a_write_without_the_maps():

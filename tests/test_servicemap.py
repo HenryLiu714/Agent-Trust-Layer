@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from irimi import paths, servicemap
+from irimi import paths, servicemap, services
 from irimi.exchange import KINDS, LIVE_KINDS, SAFE_METHODS
 from irimi.servicemap import MapError, MapIndex, Route, ServiceMap
 
@@ -568,6 +568,32 @@ def test_a_fixture_on_an_unknown_route_is_allowed(tmp_path):
     index = load(tmp_path, doc)
     create = servicemap.match_route(index.services[0], "POST", "/v1/things")
     assert create is not None and create.fixture == "thing"
+
+
+def test_every_shipped_precondition_names_a_check_that_exists():
+    """`precondition:` is the opt-in and `services.PRECONDITIONS` is what it opts into. A shipped
+    name with no entry would degrade to `not_evaluable` on every write, silently - a key that reads
+    as configured and is never consulted (#45)."""
+    index = servicemap.load(cwd=None, maps_dir=servicemap.shipped_dir())
+    named = [
+        (sm.service, route.precondition)
+        for sm in index.services
+        for route in sm.routes
+        if route.precondition
+    ]
+    assert named, "no shipped route declares a precondition"
+    for key in named:
+        assert key in services.PRECONDITIONS, key
+
+
+def test_a_precondition_on_a_live_route_is_refused(tmp_path):
+    """A live route is forwarded to the real service, which checks its own preconditions, so a
+    `precondition:` on it would never run (#45)."""
+    refuses(
+        tmp_path,
+        GOOD.replace("    human: list things", "    precondition: thing_exists"),
+        "`precondition:` names the check run before a write is faked",
+    )
 
 
 def test_persists_and_volatile_are_restricted_to_their_kinds(tmp_path):

@@ -181,6 +181,14 @@ def check_route_rules(sm: ServiceMap) -> None:
                 f"and a `{route.kind}` route is forwarded to the real service, so it would "
                 "never be used"
             )
+        if route.precondition and route.kind in LIVE_KINDS:
+            # The same rule as `fixture:`, for the same reason: a live route is forwarded, so a
+            # check that runs before a write is faked would never run on it (#45).
+            raise MapError(
+                f"{where}: `precondition:` names the check run before a write is faked, and a "
+                f"`{route.kind}` route is forwarded to the real service, which checks its own "
+                "preconditions; it would never be used"
+            )
         _check_live_kind_methods(sm, route, where)
         if (
             sm.verbs == "honest"

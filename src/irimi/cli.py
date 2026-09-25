@@ -320,7 +320,7 @@ def _build_engine(run: _Run, on_exchange: "OnExchange") -> "Engine":
     """
     from irimi.engine.mitm import MitmEngine
     from irimi.overlay import ServiceOverlay
-    from irimi.policy import ShadowPolicy
+    from irimi.policy import ShadowPolicy, UpstreamReader
     from irimi.store import NullStore
 
     # The overlay is built with the same maps the engine classifies against, because it has to
@@ -328,7 +328,9 @@ def _build_engine(run: _Run, on_exchange: "OnExchange") -> "Engine":
     # that answers it (#43).
     return MitmEngine(
         run.config,
-        ShadowPolicy(),
+        # The reader is the real upstream, chosen here and nowhere else: Phase 5's replay policy
+        # gets a reader over the recording at this same line (#45).
+        ShadowPolicy(reader=UpstreamReader(), maps=run.config.maps),
         NullStore(),
         ServiceOverlay(run.config.maps),
         on_exchange=on_exchange,

@@ -32,7 +32,18 @@ from urllib.parse import parse_qsl, urlencode
 
 from irimi.exchange import Request
 from irimi.pipeline import REWROTE_HEADER
-from irimi.services.model import Applied, Read, Rewritten, Write
+from irimi.services.model import (
+    NOT_EVALUABLE,
+    Applied,
+    Check,
+    NotEvaluable,
+    Probe,
+    Proposal,
+    Read,
+    Rejection,
+    Rewritten,
+    Write,
+)
 
 SERVICE = "stripe"
 # Stripe's own default page size, and what a list read gets when it names no `limit`.
@@ -240,6 +251,10 @@ def _int(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _header(request: Request, name: str) -> str:
     return next((v for k, v in request.headers if k == name), "")
 
@@ -279,3 +294,93 @@ def _limit(params: Sequence[tuple[str, str]]) -> int:
             return DEFAULT_LIST_LIMIT
         return asked if 1 <= asked <= MAX_LIST_LIMIT else DEFAULT_LIST_LIMIT
     return DEFAULT_LIST_LIMIT
+
+
+# ------------------------------------------------------------------------ the L3 preconditions
+#
+# Whether Stripe would have accepted a refund at all, decided against the charge it names (#45).
+# The charge is the OVERLAID one: the policy fetches it live and applies this run's own faked
+# refunds to it with `_charge` before `_refund_verdict` sees it. That is the point of checking it
+# here rather than trusting the live body alone - a second refund of a charge the run already
+# refunded in full is one Stripe would refuse, and the live charge cannot know about the first,
+# because the first was never made.
+
+# Stripe sends no `code` for the amount-exceeds error - the message and `param: amount` are the
+# whole of it - so this is irimi's own label for the summary line, and it is deliberately NOT
+# written into the modeled body (#45).
+AMOUNT_TOO_LARGE = "amount_too_large"
+CHARGE_ALREADY_REFUNDED = "charge_already_refunded"
+
+
+def _refund_probe(proposal: Proposal) -> Probe | None:
+    """`GET /v1/charges/{charge}` for the charge this refund names.
+
+    A refund posted with `payment_intent` and no `charge` is not checked: resolving the intent to
+    its charge is a second read and a second modeled object, neither of which is in Phase 2's
+    table, and guessing would be worse than saying so (#45).
+    """
+    charge = proposal.posted.get("charge")
+    # Not URL-quoted: a Stripe id is `[A-Za-z0-9_]` only, and a value that is not is one the real
+    # service would refuse. One that would change the path or start a query is not probed at all.
+    if not isinstance(charge, str) or not charge or "/" in charge or "?" in charge:
+        return None
+    return Probe(operation="charges.retrieve", method="GET", path=f"/v1/charges/{charge}")
+
+
+def _refund_verdict(proposal: Proposal, document: Any) -> Rejection | NotEvaluable | None:
+    """`charge_already_refunded`, the amount-exceeds error, `NOT_EVALUABLE`, or None."""
+    if (
+        not isinstance(document, dict)
+        or document.get("object") != "charge"
+        or "amount_refunded" not in document
+    ):
+        # irimi never rejects on a body it did not understand: a false rejection is the untruth
+        # this whole path exists to prevent. Nor does it pass on one - that would claim the write
+        # was checked against a charge irimi never read. Saying so is `NOT_EVALUABLE` (#45).
+        return NOT_EVALUABLE
+    charge_id = proposal.posted.get("charge")
+    if document.get("refunded") is True:
+        return Rejection(
+            status=400,
+            code=CHARGE_ALREADY_REFUNDED,
+            body={
+                "error": {
+                    "code": CHARGE_ALREADY_REFUNDED,
+                    "doc_url": "https://stripe.com/docs/error-codes/charge-already-refunded",
+                    "message": f"Charge {charge_id} has already been refunded.",
+                    "type": "invalid_request_error",
+                }
+            },
+        )
+    amount = proposal.posted.get("amount")
+    charged, refunded = document.get("amount"), document.get("amount_refunded")
+    # Both sides of the subtraction must be the charge's own numbers. `_int` reads a missing or
+    # malformed one as 0, which would make every refund "too large" - a false rejection (#45).
+    if not (_is_int(charged) and _is_int(refunded)):
+        return NOT_EVALUABLE
+    if not _is_int(amount):
+        # A refund posting no `amount` is Stripe's "refund whatever is left", which is never over
+        # the remaining amount; one posting a malformed amount is the real service's to refuse,
+        # not irimi's to guess at. Neither is a failure to evaluate the charge (#45).
+        return None
+    remaining = _int(charged) - _int(refunded)
+    if _int(amount) > remaining:
+        # The prose is irimi's: minor-unit formatting lives in `report`, and this package stays
+        # pure and below it. The SHAPE is Stripe's - `invalid_request_error` with `param: amount` -
+        # which is what makes stripe-python raise `InvalidRequestError`.
+        currency = str(document.get("currency", "")).upper()
+        message = (
+            f"Refund amount ({amount} {currency}) is greater than unrefunded amount on charge "
+            f"({remaining} {currency})"
+        )
+        return Rejection(
+            status=400,
+            code=AMOUNT_TOO_LARGE,
+            body={
+                "error": {"message": message, "param": "amount", "type": "invalid_request_error"}
+            },
+        )
+    return None
+
+
+CHARGE_REFUNDABLE = Check(probe=_refund_probe, verdict=_refund_verdict)

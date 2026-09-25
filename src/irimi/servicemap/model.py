@@ -48,6 +48,9 @@ class Route:
     # name. "" means the L0 echo, which is what every route had before #41 and what a route
     # whose fixture cannot be read falls back to.
     fixture: str = ""
+    # The L3 check consulted before a mapped write is faked, by the name of its entry in
+    # `services.PRECONDITIONS`. "" means the write is never precondition-checked (#45).
+    precondition: str = ""
     volatile: tuple[str, ...] = ()
     persists: bool | None = None
     comment: str = ""

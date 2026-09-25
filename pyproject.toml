@@ -6,7 +6,9 @@ readme = "README.md"
 requires-python = ">=3.12" # floor for end users; development pins 3.14 via .python-version
 dependencies = [
     "cryptography>=42",
-    "mitmproxy>=11",
+    # >=12 because `IrimiAddon.request` is a coroutine hook, and only 12's addonmanager awaits one
+    # (`inspect.iscoroutinefunction` in `invoke_addon`). On 11 the decision would never run (#45).
+    "mitmproxy>=12",
     "pyyaml>=6",
 ]
 

@@ -7,7 +7,8 @@ import json
 import socket
 import ssl
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -19,9 +20,9 @@ from cryptography.x509.oid import NameOID
 from irimi import ca, delegation, paths, pipeline, servicemap
 from irimi.engine import EngineConfig, EngineStartError
 from irimi.engine.mitm import IrimiAddon, MitmEngine
-from irimi.exchange import DECISION_FAILED_FLAG, UNCLASSIFIED_FLAG, Response
+from irimi.exchange import DECISION_FAILED_FLAG, UNCLASSIFIED_FLAG, Request, Response
 from irimi.overlay import NoOverlay, Overlaid
-from irimi.policy import ShadowPolicy
+from irimi.policy import Answer, ShadowPolicy
 from irimi.store import NullStore
 
 
@@ -132,12 +133,12 @@ def _maps(tmp_path, monkeypatch, doc=DEMO_MAP):
     return servicemap.load(cwd=tmp_path, maps_dir=maps_dir)
 
 
-def _start(cfg, overlay=None, trust_upstream_ca=None):
+def _start(cfg, overlay=None, trust_upstream_ca=None, policy=None):
     """Serve `cfg` on a background loop until the returned stop() is called."""
     seen = []
     eng = MitmEngine(
         cfg,
-        policy=ShadowPolicy(),
+        policy=policy or ShadowPolicy(),
         store=NullStore(),
         overlay=overlay or NoOverlay(),
         on_exchange=seen.append,
@@ -1287,7 +1288,7 @@ def test_a_target_naming_our_own_listener_is_refused_with_a_json_502(tmp_path, m
     )
     flow = tflow.tflow(req=tutils.treq(method=b"POST", host="127.0.0.1", port=80, path=b"/things"))
     flow.client_conn.sockname = ("127.0.0.1", listen_port)
-    addon.request(flow)
+    asyncio.run(addon.request(flow))
 
     assert flow.response.status_code == 502
     assert json.loads(flow.response.content)["error"]["type"] == "irimi_target_failed"
@@ -1320,7 +1321,7 @@ def test_a_locally_answered_flow_that_errors_keeps_its_own_flags(tmp_path, monke
     )
     flow = tflow.tflow(req=tutils.treq(method=b"POST", host="127.0.0.1", port=80, path=b"/things"))
     flow.client_conn.sockname = ("127.0.0.1", 4000)
-    addon.request(flow)
+    asyncio.run(addon.request(flow))
     addon.error(flow)
 
     (ex,) = seen
@@ -1354,7 +1355,7 @@ def test_a_refused_target_is_flagged_once_even_if_the_client_then_vanishes(tmp_p
     )
     flow = tflow.tflow(req=tutils.treq(method=b"POST", host="127.0.0.1", port=80, path=b"/things"))
     flow.client_conn.sockname = ("127.0.0.1", listen_port)
-    addon.request(flow)  # the target is our own listener, so it is refused and flagged here
+    asyncio.run(addon.request(flow))  # the target is our own listener, so refused and flagged here
     addon.error(flow)
 
     (ex,) = seen
@@ -1412,6 +1413,131 @@ def test_a_raise_in_the_decision_answers_locally_instead_of_forwarding(
     assert len(seen) == 1, "the exchange must still be recorded"
     assert seen[0].flags == (UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG)
     assert (seen[0].kind, seen[0].answered_by) == ("unknown", "fake-L0")
+
+
+def _bare_addon(tmp_path, monkeypatch, policy=None, overlay=None, on_exchange=None):
+    """An IrimiAddon over DEMO_MAP, driven hook by hook with no proxy around it."""
+    from irimi.engine.mitm import IrimiAddon
+
+    return IrimiAddon(
+        _config(tmp_path, monkeypatch, maps=_targeted(tmp_path, monkeypatch)),
+        policy or ShadowPolicy(),
+        NullStore(),
+        overlay or NoOverlay(),
+        on_exchange or (lambda ex: None),
+        lambda port, error: None,
+    )
+
+
+def _bare_flow(method, path):
+    from mitmproxy.test import tflow, tutils
+
+    flow = tflow.tflow(req=tutils.treq(method=method, host="127.0.0.1", port=80, path=path))
+    flow.client_conn.sockname = ("127.0.0.1", 4000)
+    return flow
+
+
+def test_a_raise_handing_the_decision_to_a_worker_answers_locally(tmp_path, monkeypatch):
+    """The hook awaits `asyncio.to_thread` as of #45, and the hand-off can fail on its own - an
+    executor already shut down under a stopping proxy - before `_decide`'s guard is ever reached.
+    It takes the same 502 as a decision that raised: the request may be a write."""
+    from irimi.engine import mitm
+
+    seen = []
+    addon = _bare_addon(tmp_path, monkeypatch, on_exchange=seen.append)
+
+    def no_threads(*args, **kwargs):
+        raise RuntimeError("cannot schedule new futures after shutdown")
+
+    monkeypatch.setattr(mitm.asyncio, "to_thread", no_threads)
+    flow = _bare_flow(b"POST", b"/things")
+    asyncio.run(addon.request(flow))
+
+    assert flow.response.status_code == 502
+    assert json.loads(flow.response.content)["error"]["type"] == "irimi_decision_failed"
+    (ex,) = seen
+    assert ex.flags == (UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG)
+
+
+def test_a_raise_carrying_a_rewrite_onto_the_flow_answers_locally(tmp_path, monkeypatch):
+    """`_apply_rewrite` runs back on the loop, outside `_decide`'s guard (#45). Before the split
+    its lines sat under the decision's backstop; they still do, so a raise there cannot escape
+    the hook and forward a half-edited read with nothing recorded."""
+    from dataclasses import replace
+
+    class _Translating:
+        def __call__(self, write_log, read_request, upstream_response):
+            return Overlaid(upstream_response)
+
+        def rewrite(self, write_log, read_request):
+            return replace(read_request, query="translated=1")
+
+    seen = []
+    addon = _bare_addon(tmp_path, monkeypatch, overlay=_Translating(), on_exchange=seen.append)
+    write = _bare_flow(b"POST", b"/things")
+    asyncio.run(addon.request(write))
+    addon.response(write)  # a faked write joins the log here, so the read below is rewritten
+
+    def boom(flow, rewritten):
+        raise RuntimeError("the flow edit exploded")
+
+    monkeypatch.setattr(addon, "_apply_rewrite", boom)
+    read = _bare_flow(b"GET", b"/hello")
+    asyncio.run(addon.request(read))
+
+    assert read.response.status_code == 502
+    assert json.loads(read.response.content)["error"]["type"] == "irimi_decision_failed"
+    assert read.request.path == "/hello"
+    assert seen[-1].flags == (UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG)
+
+
+def test_a_raise_recording_an_engine_read_leaves_the_write_answered(tmp_path, monkeypatch):
+    """`Answer.issued` is recorded last, after the write's own answer is on the flow (#45). A store
+    or `on_exchange` that raises there escapes the hook, and mitmproxy forwards a flow only when
+    it has no response - so the write is still answered locally and still pending its record."""
+    from irimi.engine.mitm import META_KEY
+
+    probe = Request(
+        method="GET",
+        scheme="http",
+        host="127.0.0.1",
+        port=80,
+        path="/hello",
+        query="",
+        headers=(),
+        body=b"",
+    )
+    issued = pipeline.annotate(
+        probe,
+        Response(status=200, headers=(), body=b"{}"),
+        pipeline.Classification(service="demo", operation="things.list", kind="read", flags=()),
+        "live",
+        "",
+        issued_by="engine",
+    )
+
+    class _Checking:
+        name = "checking"
+
+        def answer(self, request, classification, write_log=(), run_id=""):
+            return Answer(
+                answered_by="fake-L0",
+                response=Response(status=200, headers=(), body=b"{}"),
+                precondition="passed",
+                issued=(issued,),
+            )
+
+    def refuse_engine_reads(ex):
+        if ex.issued_by == "engine":
+            raise RuntimeError("the store exploded")
+
+    addon = _bare_addon(tmp_path, monkeypatch, _Checking(), on_exchange=refuse_engine_reads)
+    flow = _bare_flow(b"POST", b"/things")
+    with pytest.raises(RuntimeError, match="the store exploded"):
+        asyncio.run(addon.request(flow))
+
+    assert flow.response is not None and flow.response.status_code == 200
+    assert flow.metadata[META_KEY].precondition == "passed"
 
 
 def test_neither_half_of_a_delegated_exchange_is_a_write(tmp_path, monkeypatch, target):
@@ -1546,7 +1672,7 @@ def test_the_response_hook_writes_nothing_back_to_a_streamed_flow(tmp_path, monk
         resp=tutils.tresp(content=None, headers=((b"content-type", b"text/event-stream"),)),
     )
     flow.client_conn.sockname = ("127.0.0.1", 4000)
-    addon.request(flow)
+    asyncio.run(addon.request(flow))
     assert flow.metadata[META_KEY].answered_by == "delegated"
     flow.response.stream = True  # what `responseheaders` does for an event stream
     before = (flow.response.status_code, tuple(flow.response.headers.fields), flow.response.content)
@@ -1934,7 +2060,7 @@ def stripe_stub(tmp_path, monkeypatch):
     from irimi.overlay import ServiceOverlay
 
     _StripeStub.seen = []
-    srv = HTTPServer(("127.0.0.1", 0), _StripeStub)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _StripeStub)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     maps = _maps(tmp_path, monkeypatch, doc=STRIPE_MAP)
     eng, seen, stop = _start(
@@ -2177,7 +2303,7 @@ def slack_stub(tmp_path, monkeypatch):
     from irimi.overlay import ServiceOverlay
 
     _SlackStub.seen = []
-    srv = HTTPServer(("127.0.0.1", 0), _SlackStub)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _SlackStub)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     maps = _maps(tmp_path, monkeypatch, doc=SLACK_OVERLAY_MAP)
     eng, seen, stop = _start(
@@ -2273,3 +2399,304 @@ def test_a_slack_read_the_effects_cannot_place_is_recorded_partial_and_left_alon
     assert pipeline.ANSWERED_BY_HEADER not in headers, "nothing of irimi's is in this body"
     assert seen[-1].answered_by == "live"
     assert seen[-1].overlay == "partial"
+
+
+# ------------------------------------------------ L3 preconditions through the engine (#45)
+
+# STRIPE_MAP with the shipped map's `precondition:` on `refunds.create`. Its own copy, so the
+# `stripe_stub` tests above keep meaning exactly what they meant and issue no probes.
+PRECONDITION_STRIPE_MAP = STRIPE_MAP.replace(
+    "    fixture: refund\n", "    fixture: refund\n    precondition: charge_refundable\n"
+)
+SLOW_S = 1.0  # how long `ch_SLOW1`'s precondition read takes to answer
+
+
+def _charge(charge_id, amount_refunded=0):
+    return {
+        "id": charge_id,
+        "object": "charge",
+        "amount": 4900,
+        "amount_refunded": amount_refunded,
+        "refunded": amount_refunded == 4900,
+        "currency": "usd",
+    }
+
+
+class _PreconditionStub(BaseHTTPRequestHandler):
+    """The real Stripe as L3 sees it: one refundable charge, one fully refunded, one slow to
+    answer and one rate-limited. A POST reaching it is a faked write that escaped."""
+
+    seen: list = []  # (method, path) of every request
+
+    def do_GET(self):
+        _PreconditionStub.seen.append(("GET", self.path))
+        route = self.path.split("?", 1)[0]
+        if route == "/v1/charges/ch_REAL1":
+            status, document = 200, _charge("ch_REAL1")
+        elif route == "/v1/charges/ch_FULL1":
+            status, document = 200, _charge("ch_FULL1", amount_refunded=4900)
+        elif route == "/v1/charges/ch_SLOW1":
+            time.sleep(SLOW_S)
+            status, document = 200, _charge("ch_SLOW1")
+        elif route == "/v1/charges/ch_BUSY1":
+            status, document = 429, {"error": {"type": "rate_limit_error"}}
+        else:
+            status, document = 404, {"error": {"type": "invalid_request_error"}}
+        body = json.dumps(document).encode()
+        self.send_response(status)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):  # must never be reached under ShadowPolicy
+        _PreconditionStub.seen.append(("POST", self.path))
+        self.send_response(500)
+        self.send_header("content-length", "0")
+        self.end_headers()
+
+    def log_message(self, *args):  # keep pytest output clean
+        pass
+
+
+@pytest.fixture
+def precondition_stub(tmp_path, monkeypatch):
+    """The stub, and an engine over PRECONDITION_STRIPE_MAP built the way the CLI builds one: the
+    real overlay and a policy holding the real reader. Yields (proxy port, stub port, exchanges)."""
+    from irimi.overlay import ServiceOverlay
+    from irimi.policy import UpstreamReader
+
+    _PreconditionStub.seen = []
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _PreconditionStub)
+    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
+    maps = _maps(tmp_path, monkeypatch, doc=PRECONDITION_STRIPE_MAP)
+    eng, seen, stop = _start(
+        _config(tmp_path, monkeypatch, maps=maps),
+        overlay=ServiceOverlay(maps),
+        policy=ShadowPolicy(reader=UpstreamReader(), maps=maps),
+    )
+    yield eng.listen_port(), srv.server_address[1], seen
+    stop()
+    srv.shutdown()
+
+
+def _refund(proxy, stub, charge, amount=100):
+    """One refund through the proxy, form-encoded as stripe-python posts it."""
+    return _read_via_proxy(
+        proxy,
+        f"http://127.0.0.1:{stub}/v1/refunds",
+        extra_headers={"content-type": "application/x-www-form-urlencoded"},
+        method="POST",
+        body=f"charge={charge}&amount={amount}".encode(),
+    )
+
+
+def _writes(seen):
+    return [ex for ex in seen if ex.kind == "write"]
+
+
+def test_a_refund_of_a_fully_refunded_charge_is_rejected_with_stripes_own_body(
+    precondition_stub,
+):
+    proxy, stub, seen = precondition_stub
+    status, headers, data = _refund(proxy, stub, "ch_FULL1")
+    assert status == 400
+    assert json.loads(data)["error"]["code"] == "charge_already_refunded"
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "fake-L1"
+    (write,) = _writes(seen)
+    assert write.precondition == "rejected"
+    assert write.rejection_code == "charge_already_refunded"
+
+
+def test_a_second_refund_in_one_run_is_rejected_because_the_overlay_applied_the_first(
+    precondition_stub,
+):
+    """#45's done-when. The real charge is untouched and refundable both times; what makes the
+    second refund one Stripe would refuse is the first, which only irimi's write log knows about."""
+    proxy, stub, seen = precondition_stub
+    first, _, data = _refund(proxy, stub, "ch_REAL1", amount=4900)
+    assert first == 200
+    assert json.loads(data)["object"] == "refund"
+    second, headers, data = _refund(proxy, stub, "ch_REAL1", amount=4900)
+    assert second == 400
+    assert json.loads(data)["error"]["code"] == "charge_already_refunded"
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "fake-L1"
+    assert [ex.precondition for ex in _writes(seen)] == ["passed", "rejected"]
+
+
+def test_a_rejected_write_never_enters_the_write_log(precondition_stub):
+    """Had the rejected refund been logged, the overlay would add it to the charge re-read below
+    and stamp the read `overlay`."""
+    proxy, stub, seen = precondition_stub
+    status, _, _ = _refund(proxy, stub, "ch_FULL1")
+    assert status == 400
+    status, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_FULL1")
+    assert status == 200
+    assert pipeline.ANSWERED_BY_HEADER not in headers
+    assert json.loads(data)["amount_refunded"] == 4900  # the stub's own
+    assert seen[-1].answered_by == "live"
+    assert seen[-1].overlay is None
+
+
+def test_the_precondition_read_is_recorded_as_issued_by_the_engine(precondition_stub):
+    proxy, stub, seen = precondition_stub
+    status, _, _ = _refund(proxy, stub, "ch_REAL1")
+    assert status == 200
+    (issued,) = [ex for ex in seen if ex.issued_by == "engine"]
+    assert (issued.kind, issued.answered_by) == ("read", "live")
+    assert (issued.request.method, issued.request.path) == ("GET", "/v1/charges/ch_REAL1")
+    assert [ex.issued_by for ex in seen if ex is not issued] == ["agent"]
+
+
+def test_a_precondition_read_that_429s_leaves_the_write_faked_at_l2(precondition_stub):
+    proxy, stub, seen = precondition_stub
+    status, headers, data = _refund(proxy, stub, "ch_BUSY1")
+    assert status == 200
+    assert json.loads(data)["object"] == "refund"
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "fake-L1"
+    (write,) = _writes(seen)
+    assert (write.answered_by, write.precondition) == ("fake-L1", "not_evaluable")
+    (issued,) = [ex for ex in seen if ex.issued_by == "engine"]
+    assert issued.response is not None and issued.response.status == 429
+
+
+def test_a_concurrent_request_is_not_delayed_by_another_requests_precondition_read(
+    precondition_stub,
+):
+    """The request hook is `async def` and the decision runs on a worker thread, so a read that
+    arrives while a write's precondition read is still in the air is served straight away. With
+    the old synchronous hook B would have waited out the whole of A's probe."""
+    proxy, stub, _ = precondition_stub
+    took: dict[str, float] = {}
+
+    def a():
+        start = time.monotonic()
+        _refund(proxy, stub, "ch_SLOW1")
+        took["a"] = time.monotonic() - start
+
+    def b():
+        start = time.monotonic()
+        _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_REAL1")
+        took["b"] = time.monotonic() - start
+
+    thread_a = threading.Thread(target=a)
+    thread_b = threading.Thread(target=b)
+    thread_a.start()
+    time.sleep(0.1)
+    thread_b.start()
+    thread_a.join(timeout=15)
+    thread_b.join(timeout=15)
+    assert took["a"] >= SLOW_S
+    assert took["b"] < SLOW_S * 0.6
+
+
+def test_the_stub_never_saw_a_post(precondition_stub):
+    proxy, stub, _ = precondition_stub
+    assert _refund(proxy, stub, "ch_REAL1")[0] == 200
+    assert _refund(proxy, stub, "ch_FULL1")[0] == 400
+    assert _PreconditionStub.seen == [
+        ("GET", "/v1/charges/ch_REAL1"),
+        ("GET", "/v1/charges/ch_FULL1"),
+    ]
+
+
+# SLACK_OVERLAY_MAP with the shipped map's `precondition:` on `chat.postMessage`, and the
+# `conversations.info` read the probe has to classify as - the policy refuses to issue anything
+# the maps do not call a read.
+SLACK_PRECONDITION_MAP = SLACK_OVERLAY_MAP.replace(
+    "    fixture: message\n", "    fixture: message\n    precondition: channel_postable\n"
+) + (
+    "  - match:\n"
+    "      method: POST\n"
+    "      path: /api/conversations.info\n"
+    "    operation: conversations.info\n"
+    "    kind: read\n"
+    "    human: look up {channel}\n"
+)
+
+
+class _SlackPreconditionStub(BaseHTTPRequestHandler):
+    """Slack as L3 sees it: `C0OK` is a healthy channel the bot is in, `C0ARCHIVED` is archived.
+    A `chat.postMessage` here is a faked post that escaped."""
+
+    seen: list = []  # (method, path) of every request
+
+    def do_POST(self):
+        _SlackPreconditionStub.seen.append(("POST", self.path))
+        posted = json.loads(self.rfile.read(int(self.headers.get("content-length", 0))) or b"{}")
+        if self.path != "/api/conversations.info":
+            self.send_response(500)
+            self.send_header("content-length", "0")
+            self.end_headers()
+            return
+        channel = posted.get("channel")
+        if channel in ("C0OK", "C0ARCHIVED"):
+            document = {
+                "ok": True,
+                "channel": {
+                    "id": channel,
+                    "is_channel": True,
+                    "is_member": True,
+                    "is_archived": channel == "C0ARCHIVED",
+                },
+            }
+        else:
+            document = {"ok": False, "error": "channel_not_found"}
+        body = json.dumps(document).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json; charset=utf-8")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):  # keep pytest output clean
+        pass
+
+
+@pytest.fixture
+def slack_precondition_stub(tmp_path, monkeypatch):
+    """`precondition_stub`'s Slack twin. Yields (proxy port, stub port, exchanges)."""
+    from irimi.overlay import ServiceOverlay
+    from irimi.policy import UpstreamReader
+
+    _SlackPreconditionStub.seen = []
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _SlackPreconditionStub)
+    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
+    maps = _maps(tmp_path, monkeypatch, doc=SLACK_PRECONDITION_MAP)
+    eng, seen, stop = _start(
+        _config(tmp_path, monkeypatch, maps=maps),
+        overlay=ServiceOverlay(maps),
+        policy=ShadowPolicy(reader=UpstreamReader(), maps=maps),
+    )
+    yield eng.listen_port(), srv.server_address[1], seen
+    stop()
+    srv.shutdown()
+
+
+def test_a_post_to_an_archived_channel_is_rejected(slack_precondition_stub):
+    """Slack's own envelope, `ok: false` at 200, which is what makes slack_sdk raise
+    `SlackApiError` - asserted on the body, since the SDK is not a test dependency."""
+    proxy, stub, seen = slack_precondition_stub
+    status, headers, data = _slack_call(
+        proxy, stub, "chat.postMessage", {"channel": "C0ARCHIVED", "text": "hi"}
+    )
+    assert status == 200
+    assert json.loads(data) == {"ok": False, "error": "is_archived"}
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "fake-L1"
+    (write,) = _writes(seen)
+    assert (write.precondition, write.rejection_code) == ("rejected", "is_archived")
+
+
+def test_a_post_to_a_healthy_channel_passes_and_the_probe_was_a_conversations_info(
+    slack_precondition_stub,
+):
+    proxy, stub, seen = slack_precondition_stub
+    status, headers, data = _slack_call(
+        proxy, stub, "chat.postMessage", {"channel": "C0OK", "text": "hi"}
+    )
+    assert status == 200
+    assert json.loads(data)["ok"] is True
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "fake-L1"
+    (write,) = _writes(seen)
+    assert write.precondition == "passed"
+    assert _SlackPreconditionStub.seen == [("POST", "/api/conversations.info")]

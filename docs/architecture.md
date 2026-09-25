@@ -49,15 +49,16 @@ you to place it.
 | 2 | `pipeline` | The pure request pipeline: parse, classify, attribute the run, annotate, respond. |
 | 2 | `reverse_door` | The `/<host>/<path>` door for SDKs that ignore proxy variables. |
 | 3 | `delegation` | Answer targets (design D20): which target answers a request, where it is sent, what it may never be, which headers it may not carry. |
-| 3 | `echo` | The body a locally answered write gets. L0: form and JSON reflection, minted ids, Slack's envelope. L1: the route's fixture with the request's own fields written over it. Also `observe_read`, the one seam where a forwarded read's body teaches the faker something (a Slack `ts` a minted one must sort after). |
-| 3 | `services/` | What a faked write does to a later live read, per service, as plain functions over plain data (#43). `model` is the `Read` / `Write` / `Applied` / `Rewritten` vocabulary; `stripe` and `slack` are the effects tables (#44). Pure: no clock, no minting, no I/O, so Phase 5 replay runs the same functions over a recording. |
-| 4 | `policy` | `AnswerPolicy` and `ShadowPolicy`: the decision, and only the decision. |
-| 4 | `overlay` | The `Overlay` seam and `ServiceOverlay`, which applies `services`' effect tables to a live read and translates a cursor naming a minted id before the read is forwarded. `NoOverlay` stays, for tests and for a mode with no overlay. The module's header lists the two hazards every overlay must respect. |
-| 4 | `store` | The `TraceStore` seam. `NullStore` today; Phase 3 replaces it. |
-| 5 | `engine` | The `Engine` protocol and `EngineConfig`. `engine/mitm.py` is the only mitmproxy-backed implementation and the only module that imports mitmproxy. |
-| 6 | `report` | Everything a run prints: banner, per-exchange line, exit summary. Pure text. |
-| 6 | `runner` | Process plumbing for `irimi shadow`: the child's environment and the engine thread. |
-| 7 | `cli` | argparse and the composition root. `_build_engine` is the one place the concrete engine, policy, store and overlay meet. |
+| 3 | `echo` | The body a locally answered write gets. L0: form and JSON reflection, minted ids, Slack's envelope. L1: the route's fixture with the request's own fields written over it. `fake_rejection` carries an L3 rejection's modeled error body at the level the route's write would have been answered at - there is no `fake-L3` (#45). Also `observe_read`, the one seam where a forwarded read's body teaches the faker something (a Slack `ts` a minted one must sort after). |
+| 3 | `services/` | What a faked write does to a later live read, per service, as plain functions over plain data (#43). `model` is the `Read` / `Write` / `Applied` / `Rewritten` vocabulary; `stripe` and `slack` are the effects tables (#44). Also the L3 preconditions (#45): `Proposal` / `Probe` / `Rejection` / `NotEvaluable` / `Check` in `model`, and `PRECONDITIONS`, the table a route's `precondition:` key names an entry in - each check says which one real read it needs and what the answer, with the run's writes applied, makes of the write. A verdict has three answers, not two: rejected, passed, and `NOT_EVALUABLE` for a document it cannot read, which is why a Slack `missing_scope` at HTTP 200 never prints as a check that passed. Pure: no clock, no minting, no I/O, so Phase 5 replay runs the same functions over a recording. |
+| 4 | `writelog` | The run's faked writes, decoded out of the trace into `services.Write`s, in the scope a read is asking about. Shared by the overlay, which applies them to a live read, and the policy, which checks a new write against them (#45). Pure. |
+| 5 | `policy` | `AnswerPolicy` and `ShadowPolicy`: the decision, and only the decision. Part of deciding a mapped write is L3 (#45): the `Reader` seam issues the precondition's one real read, `UpstreamReader` over stdlib urllib in shadow mode, and the policy returns that read, marked `issued_by: engine`, on the `Answer` for the engine to record. |
+| 5 | `overlay` | The `Overlay` seam and `ServiceOverlay`, which applies `services`' effect tables to a live read and translates a cursor naming a minted id before the read is forwarded. `NoOverlay` stays, for tests and for a mode with no overlay. The module's header lists the two hazards every overlay must respect. |
+| 5 | `store` | The `TraceStore` seam. `NullStore` today; Phase 3 replaces it. |
+| 6 | `engine` | The `Engine` protocol and `EngineConfig`. `engine/mitm.py` is the only mitmproxy-backed implementation and the only module that imports mitmproxy. |
+| 7 | `report` | Everything a run prints: banner, per-exchange line, exit summary. Pure text. |
+| 7 | `runner` | Process plumbing for `irimi shadow`: the child's environment and the engine thread. |
+| 8 | `cli` | argparse and the composition root. `_build_engine` is the one place the concrete engine, policy, store and overlay meet. |
 
 `src/irimi/maps/*.yaml` are the shipped service maps. They are data, contributable without
 touching Python, and `tests/test_servicemap.py` pins their contents.
@@ -73,9 +74,11 @@ without a proxy:
 
 - **`engine.Engine`** - run, shutdown, wait for the listener. `runner.start_engine` drives it on a
   background thread; `cli` never touches mitmproxy directly.
-- **`policy.AnswerPolicy`** - given a `Request` and its `Classification`, return an `Answer`:
-  forward live, delegate, or send this response. `ShadowPolicy` is the only one today; record and
-  replay modes are new policies, not new branches.
+- **`policy.AnswerPolicy`** - given a `Request`, its `Classification` and (defaulted, #45) the
+  run's write log and id, return an `Answer`: forward live, delegate, or send this response. It
+  stays synchronous; the engine calls it on a worker thread. `ShadowPolicy` is the only one today,
+  and takes a `policy.Reader` for the L3 precondition read; built without one it does no L3 at all
+  and records `precondition: None`. Record and replay modes are new policies, not new branches.
 - **`overlay.Overlay`** - given the write log, a read request and the upstream response, return
   an `Overlaid`: the response the agent should see, and how much of the write log that read could
   express. Its request side, `rewrite`, translates a read before it is forwarded. Both are pure
@@ -110,6 +113,16 @@ twice - once where a configuration is loaded and again at the decision it protec
   the trace never claims a fidelity the answer did not have.
 - **A delegated service gets no overlay, and a streamed response is never rewritten.** Both are
   written down at the top of `overlay.py` for Phase 2 to inherit.
+- **A write L3 rejected never enters the write log, and shadow mode is never built without a
+  reader.** The first keeps a write irimi says would have been refused from being replayed onto
+  later reads as though it had happened; the second is what stops the whole L3 path from silently
+  doing nothing in the product while every test that builds a policy bare still passes.
+  `tests/test_invariants.py` holds both against a real run (#45).
+- **A precondition says `not_evaluable` rather than guessing, in either direction.** A false
+  rejection invents a refusal the service never made; a false pass claims a check that never ran,
+  and the summary prints `L3 preconditions passed` off it. So a non-200, an unparseable body, an
+  overlay that knows it is `partial`, and a document the check itself cannot read all record
+  `not_evaluable` and fake the write at L2 (#45).
 
 ## State on disk
 

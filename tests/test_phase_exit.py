@@ -26,12 +26,13 @@ import os
 import re
 import sys
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
-from irimi import ca, paths
+from irimi import ca, paths, policy
 from irimi.cli import main
 
 AGENT_PATH = Path(__file__).resolve().parent.parent / "examples" / "refund_agent" / "agent.py"
@@ -57,23 +58,22 @@ class _Stripe(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._record()
-        payload = json.dumps(
-            {
-                "object": "list",
-                "data": [
-                    {
-                        "id": CHARGE_ID,
-                        "object": "charge",
-                        "status": "succeeded",
-                        "paid": True,
-                        "refunded": False,
-                        "amount": 4900,
-                        "amount_refunded": 0,
-                        "currency": "usd",
-                    }
-                ],
-            }
-        ).encode()
+        one = re.fullmatch(r"/v1/charges/([A-Za-z0-9_]+)", self.path.partition("?")[0])
+        charge_id = one.group(1) if one else CHARGE_ID
+        charge = {
+            "id": charge_id,
+            "object": "charge",
+            "status": "succeeded",
+            "paid": True,
+            "refunded": False,
+            "amount": 4900,
+            "amount_refunded": 0,
+            "currency": "usd",
+        }
+        # `GET /v1/charges/{id}` is the L3 precondition read irimi makes before faking the refund
+        # (#45); the bare collection is the agent's own read.
+        document = charge if one else {"object": "list", "data": [charge]}
+        payload = json.dumps(document).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(payload)))
@@ -90,10 +90,29 @@ class _Stripe(BaseHTTPRequestHandler):
         pass
 
 
+class _StandInReader(policy.UpstreamReader):
+    """`UpstreamReader` pointed at the loopback stand-in (#45).
+
+    In a real run through the door the precondition read dials `api.stripe.com`, which is correct
+    and is the whole reason Phase 2's exit test goes through the FORWARD proxy instead (Notion,
+    Phase 2 § Exit test). A test may not make a network call, so the one thing the door forces -
+    a real host on the write - is redirected here and nowhere else in the product.
+    """
+
+    port = 0
+
+    def __call__(self, request):
+        return super().__call__(
+            replace(request, scheme="http", host="127.0.0.1", port=_StandInReader.port)
+        )
+
+
 @pytest.fixture
 def stripe_stand_in():
     _Stripe.seen = []
-    srv = HTTPServer(("127.0.0.1", 0), _Stripe)
+    # Threaded: irimi's own precondition read runs on a worker thread as of #45, and a
+    # single-threaded stand-in would serialize it against the agent's traffic.
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Stripe)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     yield srv.server_address[1]
     srv.shutdown()
@@ -150,10 +169,13 @@ print("WRITE", status, stamp, refund.decode())
 
 
 def test_a_refund_through_the_door_is_answered_by_irimi_and_never_leaves_the_machine(
-    home, tmp_path, stripe_stand_in, capfd
+    home, tmp_path, stripe_stand_in, capfd, monkeypatch
 ):
     """The Phase 1 exit criterion. One run of the real CLI: a live read that reaches the world,
     a refund that does not, an echo the caller can parse, and a summary that says so."""
+    # `cli._build_engine` imports the reader inside the function, so this is what it builds.
+    monkeypatch.setattr("irimi.policy.UpstreamReader", _StandInReader)
+    _StandInReader.port = stripe_stand_in
     child = tmp_path / "child.py"
     child.write_text(
         CHILD.replace("__CHARGES_PORT__", str(stripe_stand_in))
@@ -165,8 +187,13 @@ def test_a_refund_through_the_door_is_answered_by_irimi_and_never_leaves_the_mac
     out = capfd.readouterr().out
 
     # 1. The read was real: it reached the only server there is, came back from it, and carries
-    #    no `Irimi-Answered-By` - absence is how a live forward says it was not ours (#12).
-    assert [(m, p) for m, p, _ in _Stripe.seen] == [("GET", "/v1/charges")]
+    #    no `Irimi-Answered-By` - absence is how a live forward says it was not ours (#12). The
+    #    second GET is irimi's own precondition read of the charge, made before it faked the
+    #    refund (#45) - and it reaching this stand-in is the proof it did not reach Stripe.
+    assert [(m, p) for m, p, _ in _Stripe.seen] == [
+        ("GET", "/v1/charges"),
+        ("GET", f"/v1/charges/{CHARGE_ID}"),
+    ]
     read = next(line for line in out.splitlines() if line.startswith("READ "))
     assert read.split(" ", 3)[:3] == ["READ", "200", "None"]
     assert CHARGE_ID in read
@@ -195,10 +222,22 @@ def test_a_refund_through_the_door_is_answered_by_irimi_and_never_leaves_the_mac
     assert [(m, p) for m, p, _ in _Stripe.seen if m != "GET"] == []
 
     # 5. The summary says all of it, in the map's own words.
-    assert f"  ○ refund {REFUND_AMOUNT_MINOR} on {CHARGE_ID}  unvalidated (L1)" in out
+    assert (
+        f"  ○ refund {REFUND_AMOUNT_MINOR} on {CHARGE_ID}  unvalidated (L3 preconditions passed)"
+        in out
+    )
     assert "  These writes did not happen." in out
-    assert "  api.stripe.com  1 write intercepted" in out
     assert "1 read" in out
+
+    # 6. And irimi checked with Stripe before answering (#45). The charge GET in (1) is a read
+    #    irimi issued on its own account, and it is recorded `issued_by: engine` so that it can be
+    #    counted apart from the agent's: "reads are real" means the reads the AGENT made. It did
+    #    reach the service, so the run's `live` bucket holds it beside the agent's own read. The
+    #    agent's read went to the stand-in's own address, so Stripe's line holds no read of the
+    #    agent's at all - before #45 it said `1 read` here, and that read was irimi's.
+    host = next(line for line in out.splitlines() if line.startswith("  api.stripe.com  "))
+    assert host == "  api.stripe.com  1 engine read  1 write intercepted"
+    assert "  3 exchanges · 2 live · 0 delegated · 1 virtualized" in out
 
 
 @pytest.mark.skipif(
@@ -231,5 +270,5 @@ def test_the_refund_agent_leaves_no_refund_on_a_real_test_mode_charge(home, capf
     assert charge.amount_refunded == 0, "a refund reached Stripe"
     assert charge.refunded is False
     assert list(stripe.Refund.list(charge=charge_id).data) == []
-    assert f"  ○ refund {amount} on {charge_id}  unvalidated (L1)" in out
+    assert f"  ○ refund {amount} on {charge_id}  unvalidated (L3 preconditions passed)" in out
     assert "  These writes did not happen." in out

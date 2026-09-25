@@ -675,7 +675,7 @@ examples = [
 [package.metadata]
 requires-dist = [
     { name = "cryptography", specifier = ">=42" },
-    { name = "mitmproxy", specifier = ">=11" },
+    { name = "mitmproxy", specifier = ">=12" },
     { name = "pyyaml", specifier = ">=6" },
 ]
 

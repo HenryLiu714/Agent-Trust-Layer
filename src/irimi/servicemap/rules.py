@@ -189,6 +189,24 @@ def check_route_rules(sm: ServiceMap) -> None:
                 f"`{route.kind}` route is forwarded to the real service, which checks its own "
                 "preconditions; it would never be used"
             )
+        if route.fires and route.kind in LIVE_KINDS:
+            # The same rule as `fixture:` and `precondition:`, for the same reason (#4, #47): a
+            # live route is forwarded, the real service performs the write and sends its own
+            # webhooks, so ours would never be listed. A key that reads as configured and is
+            # never consulted is the `--allow-host` class of bug.
+            raise MapError(
+                f"{where}: `fires:` names the webhooks a FAKED write would have sent, and a "
+                f"`{route.kind}` route is forwarded to the real service, which sends its own; "
+                "they would never be listed"
+            )
+        repeated_events = sorted({e for e in route.fires if route.fires.count(e) > 1})
+        if repeated_events:
+            # One write does not fire one event twice, and the baseline report prints this list
+            # verbatim - a repeat would promise two `refund.created` for one refund (#47).
+            raise MapError(
+                f"{where}: `fires:` names {repeated_events[0]!r} more than once. A write fires an "
+                "event once, and the summary prints this list as it is given"
+            )
         _check_live_kind_methods(sm, route, where)
         if (
             sm.verbs == "honest"

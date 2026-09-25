@@ -53,7 +53,7 @@ you to place it.
 | 3 | `services/` | What a faked write does to a later live read, per service, as plain functions over plain data (#43). `model` is the `Read` / `Write` / `Applied` / `Rewritten` vocabulary; `stripe` and `slack` are the effects tables (#44). Also the L3 preconditions (#45): `Proposal` / `Probe` / `Rejection` / `NotEvaluable` / `Check` in `model`, and `PRECONDITIONS`, the table a route's `precondition:` key names an entry in - each check says which one real read it needs and what the answer, with the run's writes applied, makes of the write. A verdict has three answers, not two: rejected, passed, and `NOT_EVALUABLE` for a document it cannot read, which is why a Slack `missing_scope` at HTTP 200 never prints as a check that passed. Pure: no clock, no minting, no I/O, so Phase 5 replay runs the same functions over a recording. Also `Idempotency` and the `IDEMPOTENCY` table (#46): the header a service keys a repeat on, and what it answers when that key comes back with different parameters. Slack has no entry, because it has no such mechanism. |
 | 4 | `writelog` | The run's faked writes, decoded out of the trace into `services.Write`s, in the scope a read is asking about. Shared by the overlay, which applies them to a live read, and the policy, which checks a new write against them (#45). Pure. |
 | 4 | `idempotency` | The run's answers to writes that carried an idempotency key, so an agent's retry with the same key is one write and not two (#46). A key held with different parameters is the service's own `idempotency_error`, and "the same write" is compared as the whole request - method, path, query and the posted fields the route does not call `volatile:` - because a key names one write and not one route, and `payment_intents.cancel` posts nothing at all. In memory, lock-guarded because the decision runs on a worker thread, and pure enough for Phase 5 replay to keep the same promise over a recording. |
-| 5 | `policy` | `AnswerPolicy` and `ShadowPolicy`: the decision, and only the decision. Part of deciding a mapped write is L3 (#45): the `Reader` seam issues the precondition's one real read, `UpstreamReader` over stdlib urllib in shadow mode, and the policy returns that read, marked `issued_by: engine`, on the `Answer` for the engine to record. Also the idempotency lookup (#46), which sits between the live-kind check and L3: a retry with a key this run has already answered returns the first answer and issues no precondition read, and a key reused with different parameters is answered with the service's own `idempotency_error`. |
+| 5 | `policy` | `AnswerPolicy` and `ShadowPolicy`: the decision, and only the decision. Part of deciding a mapped write is L3 (#45): the `Reader` seam issues the precondition's one real read, `UpstreamReader` over stdlib urllib in shadow mode, and the policy returns that read, marked `issued_by: engine`, on the `Answer` for the engine to record. Also the idempotency lookup (#46), which sits between the live-kind check and L3: a retry with a key this run has already answered returns the first answer and issues no precondition read, and a key reused with different parameters is answered with the service's own `idempotency_error`. The accepted local fake, the one path left after all of those, is the only `Answer` that carries its route's `fires:` as `would_fire` (#47). |
 | 5 | `overlay` | The `Overlay` seam and `ServiceOverlay`, which applies `services`' effect tables to a live read and translates a cursor naming a minted id before the read is forwarded. `NoOverlay` stays, for tests and for a mode with no overlay. The module's header lists the two hazards every overlay must respect. |
 | 5 | `store` | The `TraceStore` seam. `NullStore` today; Phase 3 replaces it. |
 | 6 | `engine` | The `Engine` protocol and `EngineConfig`. `engine/mitm.py` is the only mitmproxy-backed implementation and the only module that imports mitmproxy. |
@@ -67,6 +67,9 @@ touching Python, and `tests/test_servicemap.py` pins their contents.
 from the service's own mock where one exists (Stripe), hand-written against its published docs
 where none does (Slack). Each file says which in its `_source` entry, and the same test proves
 both directories are inside a built wheel.
+A `write` or `unknown` route may also name a `fires:` list of the webhooks the real service would
+have sent, which the exchange carries as `would_fire` for the writes irimi accepted and faked;
+nothing is delivered (#47).
 
 ## The seams
 
@@ -124,6 +127,11 @@ twice - once where a configuration is loaded and again at the decision it protec
   and the summary prints `L3 preconditions passed` off it. So a non-200, an unparseable body, an
   overlay that knows it is `partial`, and a document the check itself cannot read all record
   `not_evaluable` and fake the write at L2 (#45).
+- **Only a write that would have happened lists its webhooks.** `would_fire` is set on the one
+  path where irimi accepted and faked a write, so an L3 rejection, an idempotency conflict, a
+  replay and a delegated write all list nothing by construction, not by a second check - the same
+  set the write log holds. A replay listing its events again would promise one refund's
+  `refund.created` twice. `tests/test_invariants.py` holds it against a real run (#47).
 
 ## State on disk
 

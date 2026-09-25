@@ -51,6 +51,12 @@ class Route:
     # The L3 check consulted before a mapped write is faked, by the name of its entry in
     # `services.PRECONDITIONS`. "" means the write is never precondition-checked (#45).
     precondition: str = ""
+    # The webhook event names this write would have caused the real service to send (#47). A
+    # faked write sends none of them, so the exchange carries them as `would_fire` and the
+    # baseline report says what did not fire. Free text: unlike `precondition:` there is no table
+    # of a service's events to check a name against, so a misspelled EVENT is not catchable here -
+    # a misspelled KEY is, by `ROUTE_KEYS`. Nothing is delivered; signed delivery is design v0.3.
+    fires: tuple[str, ...] = ()
     volatile: tuple[str, ...] = ()
     persists: bool | None = None
     comment: str = ""

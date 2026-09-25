@@ -727,6 +727,16 @@ def test_annotate_records_the_target():
     assert annotate(_req(), None, classify(_req()), "live", "7f3a").target == ""
 
 
+def test_annotate_carries_would_fire_and_defaults_to_empty():
+    """The webhooks an accepted write would have sent ride the same path `precondition` and
+    `target` do (#47)."""
+    assert annotate(_req(), None, classify(_req()), "fake-L1", "7f3a").would_fire == ()
+    carried = annotate(
+        _req(), None, classify(_req()), "fake-L1", "7f3a", would_fire=("refund.created",)
+    )
+    assert carried.would_fire == ("refund.created",)
+
+
 def test_a_hash_in_the_request_path_survives_the_target_url():
     """The policy->engine seam is a URL *string*, so the engine splits it again to rewrite the
     flow. A literal `#` in a request target is legal and means nothing there, but `urlsplit`

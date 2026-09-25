@@ -1834,3 +1834,98 @@ def test_stripe_python_raises_idempotency_error_on_the_conflict_body():
     raised = _APIRequestor().specific_v1_api_error(raw, ans.response.status, raw, {}, error)
     assert isinstance(raised, stripe.IdempotencyError)
     assert raised.http_status == 400
+
+
+# ---------------------------------------------------- would-have-fired (#47)
+
+
+def test_a_faked_refund_lists_the_webhooks_it_would_have_fired():
+    """Notion's done-when for P2-07, at the decision: a faked refund lists `refund.created` and
+    `charge.refunded`, off its route's `fires:` (#47)."""
+    ans = _answer(_req("POST", path="/v1/refunds"))
+    assert ans.answered_by == "fake-L1"
+    assert ans.would_fire == ("refund.created", "charge.refunded")
+
+
+def test_a_faked_customer_update_lists_its_one_event():
+    """Each route lists its own events, not the refund's (#47)."""
+    ans = _answer(_req("POST", path="/v1/customers/cus_REAL123"))
+    assert ans.would_fire == ("customer.updated",)
+
+
+def test_a_write_on_an_unmapped_host_lists_nothing():
+    """No route, no `fires:`, so no claim about what the service would have sent. It is still an
+    accepted fake, so this is the `route is None` arm of the one line that sets it (#47)."""
+    ans = _answer(_req("POST", host="example.invalid", path="/things", body=b"{}"))
+    assert ans.answered_by == "fake-L0"
+    assert ans.would_fire == ()
+
+
+def test_a_live_read_lists_nothing():
+    """A read is forwarded and performs nothing, so there is nothing that did not fire (#47)."""
+    ans = _answer(_req())
+    assert ans.answered_by == "live"
+    assert ans.would_fire == ()
+
+
+@pytest.mark.parametrize(
+    ("reader", "outcome"),
+    [
+        (_reader(_json(200, _charge())), "passed"),
+        (_reader(_json(429, {"error": {"type": "rate_limit_error"}})), "not_evaluable"),
+        (None, None),
+    ],
+    ids=["passed", "not-evaluable", "never-asked"],
+)
+def test_every_precondition_outcome_but_rejected_lists_the_webhooks(reader, outcome):
+    """`precondition` has four states, and three of them mean irimi faked the write: it passed,
+    irimi could not find out, or nothing was asked. All three are accepted writes and list their
+    events; only `rejected` lists nothing (#45, #47)."""
+    ans = ShadowPolicy(reader=reader, maps=SHIPPED).answer(
+        _refund_request(), classify(_refund_request(), SHIPPED)
+    )
+    assert ans.precondition == outcome
+    assert ans.would_fire == ("refund.created", "charge.refunded")
+
+
+def test_a_rejected_write_lists_no_webhooks():
+    """L3 said the service would have refused this refund. Nothing was performed, so nothing
+    would have fired (#47)."""
+    policy = ShadowPolicy(reader=_reader(_json(200, _charge(refunded_so_far=4900))), maps=SHIPPED)
+    ans = _ask(policy, _refund_request())
+    assert ans.precondition == "rejected"
+    assert ans.rejection_code == "charge_already_refunded"
+    assert ans.would_fire == ()
+
+
+def test_a_replayed_write_lists_no_webhooks():
+    """A replay is the first write's own answer. Its events are already on the first write's
+    exchange; listing them again would promise `refund.created` twice for one refund (#46, #47)."""
+    policy = ShadowPolicy(reader=_reader(_json(200, _charge())), maps=SHIPPED)
+    first = _ask(policy, _refund_request())
+    second = _ask(policy, _refund_request())
+    assert first.would_fire == ("refund.created", "charge.refunded")
+    assert IDEMPOTENT_REPLAY_FLAG in second.flags
+    assert second.would_fire == ()
+
+
+def test_an_idempotency_conflict_lists_no_webhooks():
+    """The service would have refused the reused key, so nothing would have fired. A conflict is
+    not `precondition: rejected`, so a check written against that alone would let it through
+    (#46, #47)."""
+    policy = ShadowPolicy(reader=_reader(_json(200, _charge())), maps=SHIPPED)
+    _ask(policy, _refund_request(b"charge=ch_REAL&amount=100"))
+    ans = _ask(policy, _refund_request(b"charge=ch_REAL&amount=250"))
+    assert IDEMPOTENCY_CONFLICT_FLAG in ans.flags
+    assert ans.rejection_code == "idempotency_error"
+    assert ans.precondition is None
+    assert ans.would_fire == ()
+
+
+def test_a_delegated_write_lists_no_webhooks():
+    """The target performed the write, or did not; irimi built nothing and claims nothing - the
+    same reason `report._fidelity` refuses to print `L2` for one (#45, #47)."""
+    index = _targeted_index([("api.stripe.com", "/v1/refunds", "http://127.0.0.1:3000/refund")])
+    ans = _answer_with(index, _req("POST", path="/v1/refunds"))
+    assert ans.answered_by == "delegated"
+    assert ans.would_fire == ()

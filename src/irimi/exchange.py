@@ -155,3 +155,9 @@ class Exchange:
     rejection_code: str = ""
     # Who asked for this exchange: the agent, or irimi itself to decide about a write (#45).
     issued_by: IssuedBy = "agent"
+    # The webhook events this write would have caused the real service to send, off its route's
+    # `fires:` (#47). Set only for a write irimi ACCEPTED and faked: a write L3 rejected, a key
+    # reused for a different write, and a retry the idempotency store replayed all list nothing,
+    # because in the first two cases nothing would have happened and in the third the events are
+    # already on the first write's own exchange. Empty for every read. Nothing is delivered.
+    would_fire: tuple[str, ...] = field(default_factory=tuple)

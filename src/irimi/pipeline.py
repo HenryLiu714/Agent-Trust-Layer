@@ -161,6 +161,7 @@ def annotate(
     precondition: PreconditionOutcome | None = None,
     issued_by: IssuedBy = "agent",
     rejection_code: str = "",
+    would_fire: tuple[str, ...] = (),
 ) -> Exchange:
     """Build the Exchange. Anything the engine answered is unvalidated; live forwards are also
     unvalidated for now (validated is reserved for record mode, later phases). `overlay` is how
@@ -168,7 +169,8 @@ def annotate(
     not consider. `precondition` is what L3 decided about a write before it was faked, and is None
     when nothing was asked (#45). `issued_by` is `engine` for a read irimi made on its own account
     to decide about a write, and `agent` for everything the agent sent (#45). `rejection_code` is
-    the machine code of an L3 rejection, and "" for everything else (#45)."""
+    the machine code of an L3 rejection, and "" for everything else (#45). `would_fire` is the
+    webhook events an accepted write would have caused, and is empty for everything else (#47)."""
     validation: Validation = "unvalidated"
     return Exchange(
         request=request,
@@ -186,6 +188,7 @@ def annotate(
         precondition=precondition,
         rejection_code=rejection_code,
         issued_by=issued_by,
+        would_fire=would_fire,
     )
 
 

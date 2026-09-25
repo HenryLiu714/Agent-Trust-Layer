@@ -114,6 +114,7 @@ def test_shipped_stripe_map_is_complete():
     assert refund.ids == {"id": "re_", "balance_transaction": "txn_"}
     assert refund.volatile == ("idempotency_key",)
     assert refund.fixture == "refund"
+    assert refund.fires == ("refund.created", "charge.refunded")
 
 
 def test_shipped_slack_map_is_post_only_and_owns_the_webhook_host():
@@ -390,6 +391,8 @@ routes:
         ("      method: GET\n      path: /v1/things\n", "      verb: GET\n", "unknown match"),
         ("volatile:\n      - idempotency_key", "volatile: 3", "must be a list of strings"),
         ("    fixture: thing", "    fixture: 3", "`fixture` must be a string"),
+        ("    fixture: thing", "    fires: 3", "`fires` must be a list of strings"),
+        ("    fixture: thing", "    fires:\n      - 3", "`fires` entry must be a string"),
     ],
 )
 def test_schema_errors_name_the_rule(tmp_path, bad, good, message):
@@ -593,6 +596,81 @@ def test_a_precondition_on_a_live_route_is_refused(tmp_path):
         tmp_path,
         GOOD.replace("    human: list things", "    precondition: thing_exists"),
         "`precondition:` names the check run before a write is faked",
+    )
+
+
+def test_every_shipped_fires_list_is_pinned_to_the_writes_the_effects_model():
+    """`fires:` is free text with no table to check a name against, so the shipped values are
+    pinned here instead (#47). The three routes are exactly the three writes
+    `services/stripe.py` models an effect for: a route that fires an event the overlay does not
+    model is a write whose visible effect and its webhooks disagree, so a fourth route gaining
+    `fires:` breaks this test and has to be thought about rather than drifting in."""
+    index = servicemap.load(maps_dir=servicemap.shipped_dir())
+    fired = {
+        (sm.service, route.operation): route.fires
+        for sm in index.services
+        for route in sm.routes
+        if route.fires
+    }
+    assert fired == {
+        ("stripe", "refunds.create"): ("refund.created", "charge.refunded"),
+        ("stripe", "customers.update"): ("customer.updated",),
+        ("stripe", "payment_intents.cancel"): ("payment_intent.canceled",),
+    }
+
+
+def test_every_shipped_fires_route_is_a_write_irimi_answers_itself():
+    """A live route is forwarded and the real service sends its own webhooks, so `fires:` on one
+    would never be read. The loader refuses it; this holds that no shipped map has one (#47)."""
+    index = servicemap.load(maps_dir=servicemap.shipped_dir())
+    for sm in index.services:
+        for route in sm.routes:
+            if route.fires:
+                assert route.kind not in LIVE_KINDS, (sm.service, route.operation)
+
+
+def test_fires_on_a_live_route_is_refused(tmp_path):
+    """A live route is forwarded to the real service, which sends its own webhooks, so a `fires:`
+    on it would never be listed - the `--allow-host` class of key that reads as configured and is
+    never consulted (#4, #47)."""
+    refuses(
+        tmp_path,
+        GOOD.replace("    human: list things", "    fires:\n      - thing.listed"),
+        "`fires:` names the webhooks a FAKED write would have sent",
+    )
+
+
+def test_fires_on_an_unknown_route_is_allowed(tmp_path):
+    """`unknown` is answered locally exactly like `write`, so it may name its webhooks too."""
+    doc = GOOD.replace(
+        "    operation: things.create\n    kind: write",
+        "    operation: things.create\n    kind: unknown",
+    ).replace("    fixture: thing", "    fixture: thing\n    fires:\n      - thing.created")
+    index = load(tmp_path, doc)
+    create = servicemap.match_route(index.services[0], "POST", "/v1/things")
+    assert create is not None and create.fires == ("thing.created",)
+
+
+def test_a_repeated_event_name_in_fires_is_refused(tmp_path):
+    """The summary prints this list as it is given, so a repeat would promise one write's event
+    twice - the untruth the `{name}` uniqueness rule stops one scope down (#47)."""
+    refuses(
+        tmp_path,
+        GOOD.replace(
+            "    fixture: thing",
+            "    fixture: thing\n    fires:\n      - thing.created\n      - thing.created",
+        ),
+        "names 'thing.created' more than once",
+    )
+
+
+def test_a_misspelled_fires_key_is_refused(tmp_path):
+    """The done-when's "still rejects a misspelling": `ROUTE_KEYS` is a closed set, so `fired:` is
+    refused by name rather than read as configured and ignored (#47)."""
+    refuses(
+        tmp_path,
+        GOOD.replace("    fixture: thing", "    fired:\n      - thing.created"),
+        "unknown route key(s) fired",
     )
 
 
@@ -871,7 +949,7 @@ def test_no_override_file_is_fine(tmp_path, monkeypatch):
 def test_route_and_servicemap_defaults():
     route = Route(method="POST", path="/x", operation="x.create", kind="write")
     assert (route.human, route.ids, route.volatile, route.fixture) == ("", {}, (), "")
-    assert (route.persists, route.comment, route.forward_auth) == (None, "", False)
+    assert (route.fires, route.persists, route.comment, route.forward_auth) == ((), None, "", False)
     sm = ServiceMap(service="x", hosts=frozenset({"x.example"}), routes=(route,))
     assert (sm.verbs, sm.target, sm.target_reads) == ("honest", servicemap.SELF_TARGET, False)
     assert sm.default_kind is None

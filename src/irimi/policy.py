@@ -50,6 +50,12 @@ class Answer:
     # The reads this decision issued on its own account, already annotated. The engine records
     # them; they never reach the agent.
     issued: tuple[Exchange, ...] = ()
+    # The webhook events this write would have made the real service send (#47). Set on ONE path:
+    # the accepted local fake below. Delegation, live kinds, an idempotency replay, an idempotency
+    # conflict and an L3 rejection all return before it, so "only an accepted write lists its
+    # webhooks" holds by construction rather than by a second check - the same move #46 made for
+    # "a replayed write issues no precondition read".
+    would_fire: tuple[str, ...] = ()
 
 
 class AnswerPolicy(Protocol):
@@ -268,6 +274,7 @@ class ShadowPolicy:
             flags=(FIDELITY_FLAGS[fake.answered_by], *fake.flags),
             precondition=precondition,
             issued=issued,
+            would_fire=route.fires if route is not None else (),
         )
         _remember(self.idempotency, slot, answer)
         return answer

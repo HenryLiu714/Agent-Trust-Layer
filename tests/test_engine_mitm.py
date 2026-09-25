@@ -111,6 +111,8 @@ routes:
     operation: things.create
     kind: write
     human: create a thing
+    fires:
+      - thing.created
 """
 
 # A map claiming the loopback upstream as `slack`, so a read through it is a Slack read. The
@@ -1267,6 +1269,43 @@ def test_a_target_that_stops_listening_mid_run_is_still_flagged(tmp_path, monkey
     assert "target-failed" in seen[1].flags
 
 
+def test_a_faked_write_on_a_route_with_no_fixture_still_lists_its_webhooks(tmp_path, monkeypatch):
+    """`fires:` is about the write, not the answer's fidelity: DEMO_MAP's route names no
+    `fixture:`, so the fake is L0, and it was still accepted (#47)."""
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch)))
+    try:
+        status, _ = _via_proxy(eng.listen_port(), "POST", "http://127.0.0.1/things", body=b"{}")
+    finally:
+        stop()
+    assert status == 200
+    (ex,) = seen
+    assert ex.answered_by == "fake-L0"
+    assert ex.would_fire == ("thing.created",)
+
+
+def test_a_delegated_write_lists_no_webhooks_whether_or_not_its_target_answers(
+    tmp_path, monkeypatch, target
+):
+    """The target performed the write, or did something else with it, or was not there; irimi
+    built nothing and claims nothing about what the real service would have sent (#47). The
+    route names `fires:`, so the empty lists are the policy withholding it, not a map without
+    one - the test above is the same route faked."""
+    maps = _targeted(
+        tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{target}/w")]
+    )
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
+    try:
+        first, _ = _via_proxy(eng.listen_port(), "POST", "http://127.0.0.1/things", body=b"{}")
+        _kill_target()
+        second, _ = _via_proxy(eng.listen_port(), "POST", "http://127.0.0.1/things", body=b"{}")
+    finally:
+        stop()
+    assert (first, second) == (200, 502)
+    assert [ex.answered_by for ex in seen] == ["delegated", "delegated"]
+    assert "target-failed" in seen[1].flags
+    assert [ex.would_fire for ex in seen] == [(), ()]
+
+
 def test_a_target_naming_our_own_listener_is_refused_with_a_json_502(tmp_path, monkeypatch):
     """Forwarding to ourselves is the self-connection loop of #4 wearing a different hat.
 
@@ -1943,6 +1982,9 @@ routes:
     ids:
       id: re_
       balance_transaction: txn_
+    fires:
+      - refund.created
+      - charge.refunded
   - match:
       method: GET
       path: /v1/refunds
@@ -2097,6 +2139,28 @@ def test_a_charge_reread_after_a_faked_refund_shows_the_refund(stripe_stub):
     assert [method for method, _ in _StripeStub.seen] == ["GET"], "a faked write reached Stripe"
 
 
+def test_a_faked_refund_records_the_webhooks_it_would_have_fired(stripe_stub):
+    """#47's done-when through the proxy, where `_Pending` and the response hook's `annotate`
+    carry it: a faked refund lists `refund.created` and `charge.refunded`, and the read after it
+    lists nothing."""
+    proxy, stub, seen = stripe_stub
+    status, _ = _via_proxy(
+        proxy,
+        "POST",
+        f"http://127.0.0.1:{stub}/v1/refunds",
+        body=b"charge=ch_REAL1&amount=100",
+        extra_headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    assert status == 200
+    status, _, _ = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_REAL1")
+    assert status == 200
+    (write,) = [ex for ex in seen if ex.request.method == "POST"]
+    (read,) = [ex for ex in seen if ex.request.method == "GET"]
+    assert write.would_fire == ("refund.created", "charge.refunded")
+    assert read.would_fire == ()
+    assert "POST" not in [method for method, _ in _StripeStub.seen], "a faked write reached Stripe"
+
+
 def test_the_refunds_list_shows_the_minted_refund_first(stripe_stub):
     proxy, stub, _ = stripe_stub
     status, data = _via_proxy(
@@ -2155,6 +2219,17 @@ def test_a_retry_with_the_same_key_is_one_refund_not_two(stripe_stub):
     assert "POST" not in [method for method, _ in _StripeStub.seen], "a faked write reached Stripe"
 
 
+def test_a_replayed_refund_records_no_webhooks(stripe_stub):
+    """The retry's events are already on the first write's own exchange; listing them again
+    would promise one refund's `refund.created` twice (#46, #47)."""
+    proxy, stub, seen = stripe_stub
+    _keyed_refund(proxy, stub, "k-1")
+    _keyed_refund(proxy, stub, "k-1")
+    refunds = [ex for ex in seen if ex.request.method == "POST"]
+    assert [ex.would_fire for ex in refunds] == [("refund.created", "charge.refunded"), ()]
+    assert [IDEMPOTENT_REPLAY_FLAG in ex.flags for ex in refunds] == [False, True]
+
+
 def test_the_same_key_with_a_different_amount_is_refused(stripe_stub):
     """A key reused for a different write is Stripe's own `idempotency_error`, and it is not a
     write: the charge still shows the first refund only (#46)."""
@@ -2169,6 +2244,18 @@ def test_the_same_key_with_a_different_amount_is_refused(stripe_stub):
 
     _, _, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_REAL1")
     assert json.loads(data)["amount_refunded"] == 100
+
+
+def test_a_reused_key_on_a_different_write_records_no_webhooks(stripe_stub):
+    """The real service would have refused the reused key, so nothing would have fired. A
+    conflict is not `precondition: rejected`, so it is pinned on its own (#46, #47)."""
+    proxy, stub, seen = stripe_stub
+    _keyed_refund(proxy, stub, "k-2")
+    _keyed_refund(proxy, stub, "k-2", amount=250)
+    first, refused = [ex for ex in seen if ex.request.method == "POST"]
+    assert first.would_fire == ("refund.created", "charge.refunded")
+    assert IDEMPOTENCY_CONFLICT_FLAG in refused.flags
+    assert refused.would_fire == ()
 
 
 def test_a_read_before_the_refund_is_untouched_and_unstamped(stripe_stub):
@@ -2571,6 +2658,22 @@ def test_a_refund_of_a_fully_refunded_charge_is_rejected_with_stripes_own_body(
     assert write.rejection_code == "charge_already_refunded"
 
 
+def test_a_rejected_refund_records_no_webhooks(precondition_stub):
+    """L3 said the real service would have refused this refund: nothing was performed, so
+    nothing would have fired (#45, #47). A refund L3 passed goes first, so the empty list is
+    this map's `fires:` withheld and not a map that never had one."""
+    proxy, stub, seen = precondition_stub
+    status, _, _ = _refund(proxy, stub, "ch_REAL1")
+    assert status == 200
+    status, _, _ = _refund(proxy, stub, "ch_FULL1")
+    assert status == 400
+    passed, write = _writes(seen)
+    assert passed.would_fire == ("refund.created", "charge.refunded")
+    assert write.precondition == "rejected"
+    assert write.rejection_code == "charge_already_refunded"
+    assert write.would_fire == ()
+
+
 def test_a_second_refund_in_one_run_is_rejected_because_the_overlay_applied_the_first(
     precondition_stub,
 ):
@@ -2621,6 +2724,18 @@ def test_a_precondition_read_that_429s_leaves_the_write_faked_at_l2(precondition
     assert (write.answered_by, write.precondition) == ("fake-L1", "not_evaluable")
     (issued,) = [ex for ex in seen if ex.issued_by == "engine"]
     assert issued.response is not None and issued.response.status == 429
+
+
+def test_a_refund_l3_could_not_check_still_lists_its_webhooks(precondition_stub):
+    """`not_evaluable` is not `rejected`: irimi could not find out, faked the write anyway, and
+    so accepted it - its events are listed like a passed refund's. Only a refusal lists nothing
+    (#45, #47)."""
+    proxy, stub, seen = precondition_stub
+    status, _, _ = _refund(proxy, stub, "ch_BUSY1")
+    assert status == 200
+    (write,) = _writes(seen)
+    assert write.precondition == "not_evaluable"
+    assert write.would_fire == ("refund.created", "charge.refunded")
 
 
 def test_a_concurrent_request_is_not_delayed_by_another_requests_precondition_read(

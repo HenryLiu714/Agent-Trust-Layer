@@ -7,14 +7,30 @@ the same functions over a recording (use case 1).
 """
 
 from irimi.services import slack, stripe
-from irimi.services.model import Applied, QueryRewrite, Read, ReadEffects, Rewritten, Write
+from irimi.services.model import (
+    Applied,
+    Check,
+    Probe,
+    Proposal,
+    QueryRewrite,
+    Read,
+    ReadEffects,
+    Rejection,
+    Rewritten,
+    Write,
+)
 
 __all__ = [
     "Applied",
+    "Check",
     "EFFECTS",
+    "PRECONDITIONS",
+    "Probe",
+    "Proposal",
     "QueryRewrite",
     "Read",
     "ReadEffects",
+    "Rejection",
     "REWRITES",
     "Rewritten",
     "SCOPE_HEADERS",
@@ -25,6 +41,14 @@ __all__ = [
 EFFECTS: dict[str, ReadEffects] = {
     slack.SERVICE: slack.apply_read,
     stripe.SERVICE: stripe.apply_read,
+}
+# The L3 precondition a route's `precondition:` key names, by (service, name). The key is the
+# opt-in and this table is what it opts into: a name with no entry here is refused by
+# `tests/test_servicemap.py` for a shipped map, and degrades to `not_evaluable` at the decision
+# for anyone else's (#45).
+PRECONDITIONS: dict[tuple[str, str], Check] = {
+    (stripe.SERVICE, "charge_refundable"): stripe.CHARGE_REFUNDABLE,
+    (slack.SERVICE, "channel_postable"): slack.CHANNEL_POSTABLE,
 }
 # What a service translates in a read request before it is forwarded. Not every service has one.
 REWRITES: dict[str, QueryRewrite] = {stripe.SERVICE: stripe.rewrite_query}

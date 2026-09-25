@@ -64,6 +64,58 @@ class Rewritten:
     removed: str  # the `key=value` pair that was dropped, for the Irimi-Rewrote header
 
 
+@dataclass(frozen=True)
+class Proposal:
+    """A write irimi is about to fake, before it has an answer (#45).
+
+    `Write` is the same write once it is in the log, with the body irimi answered it with.
+    A precondition runs before there is one, which is why it gets its own shape rather than a
+    `Write` with an empty `answer` that every check would then have to remember not to read.
+    """
+
+    operation: str
+    posted: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class Probe:
+    """The one real read a precondition needs. The policy turns it into a request and issues it."""
+
+    operation: str  # what the map should classify it as; the policy refuses anything not a read
+    method: str
+    path: str
+    query: str = ""
+    posted: dict[str, Any] | None = None  # a JSON body for a read-like POST (Slack); None = none
+
+
+@dataclass(frozen=True)
+class Rejection:
+    """What the real service would have answered instead of performing the write.
+
+    `body` is the service's own error shape, so the SDK raises its ordinary error rather than
+    choking on something of irimi's. `code` is the machine name the summary prints; it is the
+    body's own code where the service sends one, and irimi's label where it does not - see
+    `stripe.AMOUNT_TOO_LARGE`.
+    """
+
+    status: int
+    body: dict[str, Any]
+    code: str
+
+
+@dataclass(frozen=True)
+class Check:
+    """A precondition: the read it needs, and what it makes of the answer.
+
+    `probe` returns None when this write cannot be checked at all - the policy records
+    `not_evaluable` and fakes the write at L2. `verdict` is handed the probe's document with the
+    run's own writes already applied to it, and returns a `Rejection` or None for passed.
+    """
+
+    probe: Callable[[Proposal], "Probe | None"]
+    verdict: Callable[[Proposal, Any], "Rejection | None"]
+
+
 # `(read, parsed body, the run's writes for this service) -> Applied`.
 ReadEffects = Callable[[Read, Any, Sequence[Write]], Applied]
 # `(read, the run's writes for this service) -> Rewritten | None`.

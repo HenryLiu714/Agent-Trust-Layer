@@ -1,7 +1,9 @@
 """AnswerPolicy: decides whether an exchange is forwarded live, delegated, or answered locally.
 
 The decision is all that lives here. What a local answer *contains* is `irimi.echo`; where a
-delegated one goes is `irimi.delegation`.
+delegated one goes is `irimi.delegation`. The one exception is `UpstreamReader`, the real read L3
+needs to decide about a write (#45); it lives beside the `Reader` seam it fills, and
+`cli._build_engine` is the only place in the product that builds one.
 """
 
 import json
@@ -147,6 +149,10 @@ class ShadowPolicy:
     A locally answered write is the L1 fixture when its route names one and the fixture can be
     read, and the L0 echo otherwise. `echo.fake_response` decides which and says so; the level it
     reports is what the Exchange and the `Irimi-Answered-By` header carry.
+
+    Before that, a write whose route declares a `precondition:` is checked against real state plus
+    the run's overlay (#45). A write the check rejects is answered with the service's own error
+    body, at the level `echo.fake_rejection` says, instead of the fake.
     """
 
     name: str = "shadow"

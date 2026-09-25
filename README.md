@@ -118,19 +118,25 @@ passed through.
 
 Every exchange prints as one line while it runs; at the end you get the run's summary:
 
-    irimi shadow · run 7f3a · 9 exchanges · 2.3s · backstop: none (Phase 4)
+    irimi shadow · run 7f3a · 10 exchanges · 2.3s · backstop: none (Phase 4)
 
       api.openai.com     1 llm
-      api.stripe.com     2 reads  2 writes intercepted
+      api.stripe.com     2 reads  1 engine read  2 writes intercepted
       slack.com          1 write intercepted (1 delegated)
       telemetry          2 exchanges to 2 hosts, forwarded live
 
-      ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L1)
+      ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L3 preconditions passed)
       ○ post to #refunds: "Refunded $49.00" → http://127.0.0.1:3111/post  unvalidated (delegated)
 
-      9 exchanges · 5 live · 1 delegated · 3 virtualized
+      10 exchanges · 6 live · 1 delegated · 3 virtualized
       These writes did not reach slack, stripe.
       1 was delegated to http://127.0.0.1:3111/post.
+
+An `engine read` is one irimi made itself, to check a write against the real service before faking
+it: a refund against its charge, a Slack post against its channel. It is counted apart from your
+agent's reads so that "reads are real" means the reads your agent made. The write line says what
+the check found: `L3 preconditions passed`, `L2` when irimi could not find out, or `✗ ... would
+fail: charge_already_refunded` for a write the real service would have refused.
 
 `live` means forwarded to the real service — reads, inference and telemetry alike; `delegated`
 means an answer target answered it; `virtualized` means irimi did. Each intercepted write gets a

@@ -49,10 +49,10 @@ you to place it.
 | 2 | `pipeline` | The pure request pipeline: parse, classify, attribute the run, annotate, respond. |
 | 2 | `reverse_door` | The `/<host>/<path>` door for SDKs that ignore proxy variables. |
 | 3 | `delegation` | Answer targets (design D20): which target answers a request, where it is sent, what it may never be, which headers it may not carry. |
-| 3 | `echo` | The body a locally answered write gets. L0: form and JSON reflection, minted ids, Slack's envelope. L1: the route's fixture with the request's own fields written over it. Also `observe_read`, the one seam where a forwarded read's body teaches the faker something (a Slack `ts` a minted one must sort after). |
-| 3 | `services/` | What a faked write does to a later live read, per service, as plain functions over plain data (#43). `model` is the `Read` / `Write` / `Applied` / `Rewritten` vocabulary; `stripe` and `slack` are the effects tables (#44). Pure: no clock, no minting, no I/O, so Phase 5 replay runs the same functions over a recording. |
+| 3 | `echo` | The body a locally answered write gets. L0: form and JSON reflection, minted ids, Slack's envelope. L1: the route's fixture with the request's own fields written over it. `fake_rejection` carries an L3 rejection's modeled error body at the level the route's write would have been answered at - there is no `fake-L3` (#45). Also `observe_read`, the one seam where a forwarded read's body teaches the faker something (a Slack `ts` a minted one must sort after). |
+| 3 | `services/` | What a faked write does to a later live read, per service, as plain functions over plain data (#43). `model` is the `Read` / `Write` / `Applied` / `Rewritten` vocabulary; `stripe` and `slack` are the effects tables (#44). Also the L3 preconditions (#45): `Proposal` / `Probe` / `Rejection` / `Check` in `model`, and `PRECONDITIONS`, the table a route's `precondition:` key names an entry in - each check says which one real read it needs and what the answer, with the run's writes applied, makes of the write. Pure: no clock, no minting, no I/O, so Phase 5 replay runs the same functions over a recording. |
 | 4 | `writelog` | The run's faked writes, decoded out of the trace into `services.Write`s, in the scope a read is asking about. Shared by the overlay, which applies them to a live read, and the policy, which checks a new write against them (#45). Pure. |
-| 5 | `policy` | `AnswerPolicy` and `ShadowPolicy`: the decision, and only the decision. |
+| 5 | `policy` | `AnswerPolicy` and `ShadowPolicy`: the decision, and only the decision. Part of deciding a mapped write is L3 (#45): the `Reader` seam issues the precondition's one real read, `UpstreamReader` over stdlib urllib in shadow mode, and the policy returns that read, marked `issued_by: engine`, on the `Answer` for the engine to record. |
 | 5 | `overlay` | The `Overlay` seam and `ServiceOverlay`, which applies `services`' effect tables to a live read and translates a cursor naming a minted id before the read is forwarded. `NoOverlay` stays, for tests and for a mode with no overlay. The module's header lists the two hazards every overlay must respect. |
 | 5 | `store` | The `TraceStore` seam. `NullStore` today; Phase 3 replaces it. |
 | 6 | `engine` | The `Engine` protocol and `EngineConfig`. `engine/mitm.py` is the only mitmproxy-backed implementation and the only module that imports mitmproxy. |
@@ -74,8 +74,10 @@ without a proxy:
 
 - **`engine.Engine`** - run, shutdown, wait for the listener. `runner.start_engine` drives it on a
   background thread; `cli` never touches mitmproxy directly.
-- **`policy.AnswerPolicy`** - given a `Request` and its `Classification`, return an `Answer`:
-  forward live, delegate, or send this response. `ShadowPolicy` is the only one today; record and
+- **`policy.AnswerPolicy`** - given a `Request`, its `Classification` and (defaulted, #45) the
+  run's write log and id, return an `Answer`: forward live, delegate, or send this response. It
+  stays synchronous; the engine calls it on a worker thread. `ShadowPolicy` takes a `policy.Reader`
+  for the L3 precondition read; built without one it does no L3 and records `precondition: None`. `ShadowPolicy` is the only one today; record and
   replay modes are new policies, not new branches.
 - **`overlay.Overlay`** - given the write log, a read request and the upstream response, return
   an `Overlaid`: the response the agent should see, and how much of the write log that read could

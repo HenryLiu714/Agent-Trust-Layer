@@ -98,6 +98,7 @@ def exchange_line(exchange: Exchange) -> str:
 INTERCEPTED_KINDS: frozenset[str] = frozenset({"write", "unknown"})
 
 WRITE_MARKER = "○"
+REJECTED_MARKER = "✗"
 # `fake-L0` and `fake-L1` print as `L0` and `L1`; `delegated` has no prefix and prints as it is.
 FAKE_PREFIX = "fake-"
 DID_NOT_HAPPEN = "These writes did not happen."
@@ -214,12 +215,23 @@ def _host_line(host: str, rows: Sequence[Exchange], width: int) -> str:
     # then wrote the run's own faked writes into the body. Leaving it out of this count told the
     # reader a read they really made never happened, which is the same class of untruth as #20
     # below. It is counted here and named separately, because the body is not what Stripe sent.
-    live_reads = sum(1 for ex in rows if ex.kind == "read" and ex.answered_by == "live")
+    #
+    # An engine-issued read is a real read that the AGENT did not make (#45). Counting it in
+    # `N reads` would inflate the one number this tool rests on. #48 owns the final phrasing of
+    # this block; this is the honest minimum until then.
+    live_reads = sum(
+        1
+        for ex in rows
+        if ex.kind == "read" and ex.answered_by == "live" and ex.issued_by == "agent"
+    )
     overlaid_reads = sum(1 for ex in rows if ex.kind == "read" and ex.answered_by == "overlay")
     if live_reads or overlaid_reads:
         phrases.append(_plural(live_reads + overlaid_reads, "read"))
     if overlaid_reads:
         phrases.append(f"{overlaid_reads} showing this run's writes")
+    engine_reads = sum(1 for ex in rows if ex.issued_by == "engine")
+    if engine_reads:
+        phrases.append(_plural(engine_reads, "engine read"))
     # A delegated read is NOT a real read, and `reads are real` is what that count means to
     # whoever reads it. Counting it with the live ones is the honesty bug #20 was filed for.
     target_reads = sum(1 for ex in rows if ex.kind == "read" and ex.answered_by == "delegated")
@@ -288,19 +300,36 @@ def _write_line(exchange: Exchange, index: MapIndex | None) -> str:
         what = f"{what} → {exchange.target}"
     if _failed_target(exchange):
         return f"  {WRITE_MARKER} {what}  unanswered ({TARGET_UNREACHABLE})"
+    # A write L3 rejected did not merely go unperformed - irimi is saying the real service would
+    # have refused it, which is the line the baseline report exists to print. `✗`, not `○` (#45).
+    if exchange.precondition == "rejected":
+        code = exchange.rejection_code or "rejected"
+        return f"  {REJECTED_MARKER} {what}  would fail: {code}"
     label = "unclassified" if exchange.kind == "unknown" else "unvalidated"
     return f"  {WRITE_MARKER} {what}  {label} ({_fidelity(exchange)})"
 
 
 def _fidelity(exchange: Exchange) -> str:
-    """How faithful this answer was, as the summary says it: `L0`, `L1` or `delegated`.
+    """How faithful this answer was, as the summary says it.
 
-    Derived from `answered_by` rather than branched on, so a level added to it shows up here
-    with no second place to keep in step: the summary printing `L0` for an L1 answer is the
-    same class of untruth as counting a delegated read as live (#20). Only an intercepted write
-    reaches this, so `live` never does.
+    Derived from `answered_by` and `precondition` together, in one place, so a level added to
+    either cannot print as the floor it is not (#20's rule, #45's second input). `L3` is not an
+    `answered_by` value and never will be - the header says who answered, this says how much irimi
+    knew when it did, and `L2` here means "the overlay's worth of truth, and no more": the write
+    was faked, and irimi could not find out whether the service would have taken it.
+
+    Only a locally faked answer gets the precondition spelling. A DELEGATED write reads
+    `delegated` whatever L3 said about it, because `L2` is a claim about a fake irimi built and
+    irimi built nothing here - the target did (#45).
     """
-    return exchange.answered_by.removeprefix(FAKE_PREFIX)
+    level = exchange.answered_by.removeprefix(FAKE_PREFIX)
+    if not exchange.answered_by.startswith(FAKE_PREFIX):
+        return level
+    if exchange.precondition == "passed":
+        return "L3 preconditions passed"
+    if exchange.precondition == "not_evaluable":
+        return "L2"
+    return level
 
 
 def _closing_lines(writes: Sequence[Exchange]) -> list[str]:

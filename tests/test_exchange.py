@@ -65,7 +65,13 @@ def test_answered_by_names_every_way_an_exchange_is_answered():
 
     from irimi.exchange import AnsweredBy
 
-    assert set(get_args(AnsweredBy)) == {"live", "fake-L0", "fake-L1", "delegated"}
+    assert set(get_args(AnsweredBy)) == {
+        "live",
+        "fake-L0",
+        "fake-L1",
+        "delegated",
+        "overlay",
+    }
 
 
 def test_fake_level_is_the_locally_answered_subset_of_answered_by():
@@ -89,6 +95,7 @@ def test_every_locally_decided_answer_has_a_fidelity_flag():
         FIDELITY_FLAGS,
         FIDELITY_L0_FLAG,
         FIDELITY_L1_FLAG,
+        FIDELITY_OVERLAY_FLAG,
         AnsweredBy,
     )
 
@@ -97,6 +104,7 @@ def test_every_locally_decided_answer_has_a_fidelity_flag():
         "fake-L0": FIDELITY_L0_FLAG,
         "fake-L1": FIDELITY_L1_FLAG,
         "delegated": FIDELITY_DELEGATED_FLAG,
+        "overlay": FIDELITY_OVERLAY_FLAG,
     }
 
 
@@ -105,3 +113,21 @@ def test_target_defaults_to_empty_and_records_a_delegated_address():
     assert ex.target == ""
     ex.target = "http://127.0.0.1:3000/refund"
     assert ex.target == "http://127.0.0.1:3000/refund"
+
+
+def test_overlay_is_not_a_fake_level():
+    """`FakeLevel` is what `echo.fake_response` may return, and the overlay fakes nothing: it
+    edits a real response. Keeping it out is what stops a read from being counted as a faked
+    write by anything that reads the level (#43)."""
+    from typing import get_args
+
+    from irimi.exchange import FakeLevel
+
+    assert "overlay" not in set(get_args(FakeLevel))
+
+
+def test_overlay_fidelity_is_unset_until_the_overlay_considers_an_exchange():
+    ex = _exchange()
+    assert ex.overlay is None
+    ex.overlay = "partial"
+    assert ex.overlay == "partial"

@@ -8,7 +8,16 @@ Kind = Literal["read", "write", "llm", "telemetry", "unknown"]
 # reflected back - and `fake-L1` is a route whose map names a vendored response object to start
 # from (#41). A level is only ever added here: L0 stays the answer for every route without one.
 FakeLevel = Literal["fake-L0", "fake-L1"]
-AnsweredBy = Literal["live", "fake-L0", "fake-L1", "delegated"]
+# `overlay` is a LIVE read whose body irimi changed so that it shows the run's faked writes
+# (#43). It is not a `FakeLevel`: nothing was faked, a real response was edited, and the level
+# vocabulary stays the one `echo.fake_response` can return.
+AnsweredBy = Literal["live", "fake-L0", "fake-L1", "delegated", "overlay"]
+# How much of the write log the overlay could express in the read it was given (#43). `full` is
+# the whole modeled effect. `partial` is irimi saying "this read is incomplete and I could not
+# fix it" - a page the effects table does not model, a filter it cannot read, a body it cannot
+# parse - and it is set even when the body was left alone, because a half-known world presented
+# as the whole one is the untruth the overlay exists to prevent.
+OverlayFidelity = Literal["full", "partial"]
 Validation = Literal["validated", "unvalidated"]
 Door = Literal["forward", "reverse"]
 
@@ -49,6 +58,7 @@ UPSTREAM_ERROR_FLAG = "upstream-error"
 FIDELITY_L0_FLAG = "fidelity:L0"
 FIDELITY_L1_FLAG = "fidelity:L1"
 FIDELITY_DELEGATED_FLAG = "fidelity:delegated"
+FIDELITY_OVERLAY_FLAG = "fidelity:overlay"
 # A route whose map names a `fixture:` was answered at L0 anyway, because this install could not
 # read the object. The answer is still safe - L0 is the floor - but it is not the fidelity the
 # map promised, and a trace that did not say so would read as a working L1 (#41).
@@ -60,6 +70,7 @@ FIDELITY_FLAGS: dict[AnsweredBy, str] = {
     "fake-L0": FIDELITY_L0_FLAG,
     "fake-L1": FIDELITY_L1_FLAG,
     "delegated": FIDELITY_DELEGATED_FLAG,
+    "overlay": FIDELITY_OVERLAY_FLAG,
 }
 
 Headers = tuple[tuple[str, str], ...]
@@ -106,3 +117,8 @@ class Exchange:
     # The address that answered a `delegated` exchange (design D20). "" for every other one:
     # `target: self` is not an address, and a live forward went to the real service.
     target: str = ""
+    # How much of the run's faked writes the overlay could express in this read (#43). None for
+    # every exchange the overlay did not consider - a write, a read on a service with no effects,
+    # a read taken before any write. `full` or `partial` says it did consider it, and `partial`
+    # can sit on an unchanged body: see OverlayFidelity.
+    overlay: OverlayFidelity | None = None

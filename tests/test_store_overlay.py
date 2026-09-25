@@ -41,9 +41,19 @@ def test_null_store_record_and_close_return_none():
 
 def test_no_overlay_returns_upstream_response_unchanged():
     req, resp = _req(), _resp()
-    assert NoOverlay()(write_log=[], read_request=req, upstream_response=resp) is resp
+    overlaid = NoOverlay()(write_log=[], read_request=req, upstream_response=resp)
+    assert overlaid.response is resp
+    assert overlaid.fidelity is None
 
 
 def test_no_overlay_ignores_write_log():
     req, resp = _req(), _resp()
-    assert NoOverlay()(write_log=[_exchange()], read_request=req, upstream_response=resp) is resp
+    assert (
+        NoOverlay()(write_log=[_exchange()], read_request=req, upstream_response=resp).response
+        is resp
+    )
+
+
+def test_no_overlay_rewrite_returns_the_request_unchanged():
+    req = _req()
+    assert NoOverlay().rewrite(write_log=[_exchange()], read_request=req) is req

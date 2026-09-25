@@ -17,6 +17,7 @@ from irimi.exchange import (
     Door,
     Exchange,
     Kind,
+    OverlayFidelity,
     Request,
     Response,
     Validation,
@@ -28,6 +29,14 @@ RUN_HEADER = "irimi-run"  # header names are compared case-insensitively; stored
 # itself (`fake-L0`, `fake-L1`, `delegated`). See `answered_by_header` for why a live forward gets
 # none.
 ANSWERED_BY_HEADER = "irimi-answered-by"
+# Put on a REQUEST irimi rewrote before forwarding it, naming the `key=value` query pair it
+# removed (#43). It lives beside the response stamp because both are irimi's own wire vocabulary
+# and a second spelling in `services` or `overlay` is the drift one home prevents. The only
+# rewrite today is a cursor naming a refund irimi minted, which Stripe has never heard of; the
+# header is what tells the response side that this page follows the minted refund, so the effects
+# do not prepend it a second time. Unknown *query* parameters were not an option - Stripe rejects
+# them with a 400 - and a header costs the agent nothing and shows up in any capture.
+REWROTE_HEADER = "irimi-rewrote"
 LIVE_ANSWER: AnsweredBy = "live"
 
 
@@ -146,9 +155,12 @@ def annotate(
     extra_flags: tuple[str, ...] = (),
     door: Door = "forward",
     target: str = "",
+    overlay: OverlayFidelity | None = None,
 ) -> Exchange:
     """Build the Exchange. Anything the engine answered is unvalidated; live forwards are also
-    unvalidated for now (validated is reserved for record mode, later phases)."""
+    unvalidated for now (validated is reserved for record mode, later phases). `overlay` is how
+    much of the write log the overlay expressed in this read, and is None for everything it did
+    not consider."""
     validation: Validation = "unvalidated"
     return Exchange(
         request=request,
@@ -162,6 +174,7 @@ def annotate(
         door=door,
         flags=classification.flags + extra_flags,
         target=target,
+        overlay=overlay,
     )
 
 

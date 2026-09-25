@@ -315,15 +315,24 @@ def _prepare_run(args: argparse.Namespace) -> _Run | None:
 def _build_engine(run: _Run, on_exchange: "OnExchange") -> "Engine":
     """The composition root: the one place the concrete engine, policy, store and overlay meet.
 
-    Phase 2 swaps `NoOverlay` for the real overlay and Phase 3 swaps `NullStore` for the directory
-    store here, and nowhere else.
+    Phase 2 swapped `NoOverlay` for the real overlay here in #43, and Phase 3 still swaps
+    `NullStore` for the directory store here, and nowhere else.
     """
     from irimi.engine.mitm import MitmEngine
-    from irimi.overlay import NoOverlay
+    from irimi.overlay import ServiceOverlay
     from irimi.policy import ShadowPolicy
     from irimi.store import NullStore
 
-    return MitmEngine(run.config, ShadowPolicy(), NullStore(), NoOverlay(), on_exchange=on_exchange)
+    # The overlay is built with the same maps the engine classifies against, because it has to
+    # ask the same question of a read - which service, which operation - and there is one place
+    # that answers it (#43).
+    return MitmEngine(
+        run.config,
+        ShadowPolicy(),
+        NullStore(),
+        ServiceOverlay(run.config.maps),
+        on_exchange=on_exchange,
+    )
 
 
 def cmd_serve(args: argparse.Namespace) -> int:

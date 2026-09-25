@@ -149,9 +149,18 @@ is the only thing that chooses the mode.
 
 Every response irimi decided rather than forwarded carries `Irimi-Answered-By`, naming the answer:
 `fake-L1` for a fixture answer, `fake-L0` for the local echo, `delegated` when an answer target
-answered it. A response with no such header came from the real service, unchanged — absence is the
-signal, because adding a header of ours to a live read would make it differ from what the service
-sent.
+answered it, and `overlay` for a live read whose body irimi edited so that it shows the writes the
+run faked — after a faked refund, a re-read of the charge carries the new `amount_refunded`, and
+page one of the refunds list carries the refund. A response with no such header came from the real
+service, unchanged — absence is the signal, because adding a header of ours to a read we did not
+change would make it differ from what the service sent.
+
+In one narrow case irimi also edits a read on its way *out*. A refund it faked has an id the real
+Stripe has never seen, so a later `GET /v1/refunds?starting_after=<that id>` would come back an
+error. irimi drops that cursor before forwarding — everything after the newest refund is the real
+list from its top — and marks the request it sent with `Irimi-Rewrote`, naming the parameter it
+removed, so the same header in your Stripe logs tells you which request was not quite the one your
+agent made. Nothing else about a read is ever changed on the way out.
 
 **Nothing stops an agent from bypassing the proxy yet** — a client that ignores these variables, or
 ships its own CA bundle, talks to the real service. The banner says `backstop: none (Phase 4)` for

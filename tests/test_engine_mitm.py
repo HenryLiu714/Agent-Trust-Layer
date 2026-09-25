@@ -20,13 +20,16 @@ from irimi import ca, delegation, paths, pipeline, servicemap
 from irimi.engine import EngineConfig, EngineStartError
 from irimi.engine.mitm import IrimiAddon, MitmEngine
 from irimi.exchange import DECISION_FAILED_FLAG, UNCLASSIFIED_FLAG, Response
-from irimi.overlay import NoOverlay
+from irimi.overlay import NoOverlay, Overlaid
 from irimi.policy import ShadowPolicy
 from irimi.store import NullStore
 
 
 class _Upstream(BaseHTTPRequestHandler):
+    seen: list = []  # (path, headers) of every GET, so a test can see what was forwarded
+
     def do_GET(self):
+        _Upstream.seen.append((self.path, dict(self.headers)))
         body = b"hello from upstream"
         self.send_response(200)
         if self.path == "/badgzip":  # claims gzip, is not: an undecodable body
@@ -59,6 +62,7 @@ def _serve(ssl_context=None):
 
 @pytest.fixture
 def upstream():
+    _Upstream.seen = []
     srv = _serve()
     yield srv.server_address[1]
     srv.shutdown()
@@ -369,24 +373,36 @@ def test_undecodable_upstream_body_is_still_recorded(engine, upstream):
 
 
 def test_overlay_output_reaches_the_client(tmp_path, monkeypatch, upstream):
-    def overlay(write_log, read_request, upstream_response):
-        return Response(200, (("content-type", "text/plain"),), b"OVERLAID")
+    class _Overlay:
+        def __call__(self, write_log, read_request, upstream_response):
+            return Overlaid(Response(200, (("content-type", "text/plain"),), b"OVERLAID"))
 
-    eng, seen, stop = _start(_config(tmp_path, monkeypatch), overlay=overlay)
+        def rewrite(self, write_log, read_request):
+            return read_request
+
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch), overlay=_Overlay())
     try:
+        # The overlay is asked only once there is a write to show.
+        _via_proxy(eng.listen_port(), "POST", f"http://127.0.0.1:{upstream}/things", body=b"{}")
         status, data = _via_proxy(eng.listen_port(), "GET", f"http://127.0.0.1:{upstream}/hello")
     finally:
         stop()
     assert (status, data) == (200, b"OVERLAID")
-    assert seen[0].response.body == b"OVERLAID"
+    assert seen[-1].response.body == b"OVERLAID"
 
 
 def test_repeated_headers_survive_a_local_answer(tmp_path, monkeypatch, upstream):
-    def overlay(write_log, read_request, upstream_response):
-        return Response(200, (("set-cookie", "a=1"), ("set-cookie", "b=2")), b"")
+    class _Overlay:
+        def __call__(self, write_log, read_request, upstream_response):
+            return Overlaid(Response(200, (("set-cookie", "a=1"), ("set-cookie", "b=2")), b""))
 
-    eng, seen, stop = _start(_config(tmp_path, monkeypatch), overlay=overlay)
+        def rewrite(self, write_log, read_request):
+            return read_request
+
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch), overlay=_Overlay())
     try:
+        # The overlay is asked only once there is a write to show.
+        _via_proxy(eng.listen_port(), "POST", f"http://127.0.0.1:{upstream}/things", body=b"{}")
         conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=10)
         conn.request("GET", f"http://127.0.0.1:{upstream}/hello", headers={"host": "127.0.0.1"})
         resp = conn.getresponse()
@@ -817,11 +833,16 @@ class _RewritingOverlay:
 
     def __call__(self, write_log, read_request, upstream_response):
         self.calls.append(read_request.path)
-        return Response(
-            status=200,
-            headers=(("content-type", "application/json"),),
-            body=b'{"overlaid": true}',
+        return Overlaid(
+            Response(
+                status=200,
+                headers=(("content-type", "application/json"),),
+                body=b'{"overlaid": true}',
+            )
         )
+
+    def rewrite(self, write_log, read_request):
+        return read_request
 
 
 def test_an_overlay_is_not_handed_a_streamed_read_and_cannot_rewrite_one(tmp_path, monkeypatch):
@@ -841,6 +862,12 @@ def test_an_overlay_is_not_handed_a_streamed_read_and_cannot_rewrite_one(tmp_pat
     overlay = _RewritingOverlay()
     eng, seen, stop = _start(cfg, overlay=overlay)
     try:
+        # A faked write first, so the overlay WOULD be asked about this read if it were not
+        # streamed: with an empty write log it is never asked at all, and this test would pass
+        # without the streaming guard.
+        _via_proxy(
+            eng.listen_port(), "POST", f"http://127.0.0.1:{srv.server_address[1]}/w", body=b"{}"
+        )
         conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=5)
         url = f"http://127.0.0.1:{srv.server_address[1]}/v1/chat/completions"
         conn.request("GET", url, headers={"host": f"127.0.0.1:{srv.server_address[1]}"})
@@ -856,7 +883,7 @@ def test_an_overlay_is_not_handed_a_streamed_read_and_cannot_rewrite_one(tmp_pat
         stop()
         srv.shutdown()
     assert overlay.calls == [], "the overlay was handed a body mitmproxy never assembled"
-    (ex,) = seen
+    _, ex = seen
     assert (ex.kind, ex.answered_by) == ("read", "live")
 
 
@@ -1387,7 +1414,7 @@ def test_a_raise_in_the_decision_answers_locally_instead_of_forwarding(
     assert (seen[0].kind, seen[0].answered_by) == ("unknown", "fake-L0")
 
 
-def test_a_delegated_read_is_not_a_write(tmp_path, monkeypatch, target):
+def test_neither_half_of_a_delegated_exchange_is_a_write(tmp_path, monkeypatch, target):
     """`answered_by != "live"` was an exhaustive spelling of "is a write" only while every read
     was live. `target_reads` makes a delegated read the first non-live read, and the write log is
     what the overlay replays onto later reads (#20, #28)."""
@@ -1403,9 +1430,10 @@ def test_a_delegated_read_is_not_a_write(tmp_path, monkeypatch, target):
         status, _ = _via_proxy(eng.listen_port(), "GET", "http://127.0.0.1:1/hello")
         assert status == 200
         assert [ex.kind for ex in addon.write_log] == [], "a delegated read is in the write log"
-        # The delegated *write* on the same service still is one.
+        # Nor is the delegated *write*, since #43: the target performed it, or did not, and the
+        # overlay cannot replay a write irimi did not author.
         _via_proxy(eng.listen_port(), "POST", "http://127.0.0.1:1/things", body=b"{}")
-        assert [(ex.kind, ex.answered_by) for ex in addon.write_log] == [("write", "delegated")]
+        assert addon.write_log == [], "a delegated write is in the overlay's write log"
     finally:
         stop()
 
@@ -1564,3 +1592,513 @@ def test_a_streamed_target_response_is_not_buffered(tmp_path, monkeypatch):
             stop()
     finally:
         srv.shutdown()
+
+
+# ------------------------------------------------------ the overlay through the engine (#43)
+
+
+class _OverlayDouble:
+    """An overlay whose answers a test chooses, counting how often the engine asked it."""
+
+    def __init__(self, answer=None, rewrite=None):
+        self._answer = answer or (lambda upstream: Overlaid(upstream))
+        self._rewrite = rewrite or (lambda request: request)
+        self.calls = 0
+        self.rewrites = 0
+
+    def __call__(self, write_log, read_request, upstream_response):
+        self.calls += 1
+        return self._answer(upstream_response)
+
+    def rewrite(self, write_log, read_request):
+        self.rewrites += 1
+        return self._rewrite(read_request)
+
+
+def _read_via_proxy(proxy_port, url, extra_headers=None):
+    """A GET through the proxy that returns the response headers too: the stamp is on the wire
+    only, never on the recorded exchange."""
+    conn = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=10)
+    headers = {"host": url.split("/")[2]}
+    headers.update(extra_headers or {})
+    conn.request("GET", url, headers=headers)
+    resp = conn.getresponse()
+    data = resp.read()
+    received = {k.lower(): v for k, v in resp.getheaders()}
+    conn.close()
+    return resp.status, received, data
+
+
+def _engine_with_a_write(tmp_path, monkeypatch, upstream, overlay):
+    """An engine over DEMO_MAP whose write log already holds one faked write."""
+    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch))
+    eng, seen, stop = _start(cfg, overlay=overlay)
+    try:
+        addon = next(a for a in eng._master.addons.chain if isinstance(a, IrimiAddon))
+        _via_proxy(eng.listen_port(), "POST", f"http://127.0.0.1:{upstream}/things", body=b"{}")
+        assert addon.write_log, "the engine only asks the overlay once the log holds a write"
+    except BaseException:
+        stop()
+        raise
+    return eng, seen, stop
+
+
+def _overlaid_read(tmp_path, monkeypatch, upstream, overlay):
+    """One faked write, then one live read, through an engine using `overlay`."""
+    eng, seen, stop = _engine_with_a_write(tmp_path, monkeypatch, upstream, overlay)
+    try:
+        status, headers, data = _read_via_proxy(
+            eng.listen_port(), f"http://127.0.0.1:{upstream}/hello"
+        )
+    finally:
+        stop()
+    return status, headers, data, seen[-1]
+
+
+def test_an_overlay_that_changes_a_read_stamps_it_overlay(tmp_path, monkeypatch, upstream):
+    changed = Response(200, (("content-type", "application/json"),), b'{"overlaid": true}')
+    overlay = _OverlayDouble(answer=lambda upstream: Overlaid(changed, "full"))
+    status, headers, data, ex = _overlaid_read(tmp_path, monkeypatch, upstream, overlay)
+    assert (status, data) == (200, b'{"overlaid": true}')
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert ex.answered_by == "overlay"
+    assert "fidelity:overlay" in ex.flags
+    assert ex.overlay == "full"
+
+
+def test_an_overlay_that_changes_nothing_leaves_the_read_live_and_unstamped(
+    tmp_path, monkeypatch, upstream
+):
+    overlay = _OverlayDouble(answer=lambda upstream: Overlaid(upstream))
+    status, headers, data, ex = _overlaid_read(tmp_path, monkeypatch, upstream, overlay)
+    assert overlay.calls == 1
+    assert (status, data) == (200, b"hello from upstream")
+    assert pipeline.ANSWERED_BY_HEADER not in headers
+    assert ex.answered_by == "live"
+    assert ex.overlay is None
+    assert ex.response.body == b"hello from upstream"
+
+
+def test_an_overlay_may_flag_a_read_partial_without_touching_it(tmp_path, monkeypatch, upstream):
+    overlay = _OverlayDouble(answer=lambda upstream: Overlaid(upstream, "partial"))
+    status, headers, data, ex = _overlaid_read(tmp_path, monkeypatch, upstream, overlay)
+    assert (status, data) == (200, b"hello from upstream")
+    assert pipeline.ANSWERED_BY_HEADER not in headers
+    assert ex.answered_by == "live"
+    assert ex.overlay == "partial"
+
+
+def test_an_overlay_that_raises_does_not_break_the_read(tmp_path, monkeypatch, upstream):
+    def boom(upstream):
+        raise RuntimeError("the overlay exploded")
+
+    overlay = _OverlayDouble(answer=boom)
+    status, headers, data, ex = _overlaid_read(tmp_path, monkeypatch, upstream, overlay)
+    assert overlay.calls == 1
+    assert (status, data) == (200, b"hello from upstream")
+    assert pipeline.ANSWERED_BY_HEADER not in headers
+    assert ex.answered_by == "live"
+    assert ex.overlay == "partial"
+
+
+def test_a_rewritten_read_reaches_the_upstream_translated_and_is_recorded_that_way(
+    tmp_path, monkeypatch, upstream
+):
+    from dataclasses import replace
+
+    stamp = (pipeline.REWROTE_HEADER, "starting_after=re_MINTED1")
+
+    def translate(request):
+        return replace(request, query="limit=1", headers=request.headers + (stamp,))
+
+    overlay = _OverlayDouble(rewrite=translate)
+    eng, seen, stop = _engine_with_a_write(tmp_path, monkeypatch, upstream, overlay)
+    try:
+        status, _, _ = _read_via_proxy(
+            eng.listen_port(),
+            f"http://127.0.0.1:{upstream}/hello?limit=1&starting_after=re_MINTED1",
+        )
+    finally:
+        stop()
+    assert status == 200
+    ((path, received),) = _Upstream.seen
+    assert path == "/hello?limit=1"
+    assert {k.lower(): v for k, v in received.items()}[stamp[0]] == stamp[1]
+    ex = seen[-1]
+    assert ex.request.query == "limit=1"
+    assert stamp in ex.request.headers
+
+
+def test_a_rewrite_that_raises_forwards_the_read_unchanged(tmp_path, monkeypatch, upstream):
+    def boom(request):
+        raise RuntimeError("the rewrite exploded")
+
+    overlay = _OverlayDouble(rewrite=boom)
+    eng, seen, stop = _engine_with_a_write(tmp_path, monkeypatch, upstream, overlay)
+    try:
+        status, _, data = _read_via_proxy(
+            eng.listen_port(),
+            f"http://127.0.0.1:{upstream}/hello?limit=1&starting_after=re_MINTED1",
+        )
+    finally:
+        stop()
+    assert overlay.rewrites == 1
+    assert (status, data) == (200, b"hello from upstream")
+    assert [path for path, _ in _Upstream.seen] == ["/hello?limit=1&starting_after=re_MINTED1"]
+    ex = seen[-1]
+    assert ex.answered_by == "live"
+    assert DECISION_FAILED_FLAG not in ex.flags
+
+
+def test_the_overlay_is_not_asked_about_a_read_before_any_write(tmp_path, monkeypatch, upstream):
+    overlay = _OverlayDouble()
+    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch))
+    eng, seen, stop = _start(cfg, overlay=overlay)
+    try:
+        status, _ = _via_proxy(eng.listen_port(), "GET", f"http://127.0.0.1:{upstream}/hello")
+    finally:
+        stop()
+    assert status == 200
+    assert (overlay.calls, overlay.rewrites) == (0, 0)
+    assert seen[-1].overlay is None
+
+
+def test_a_rewrote_header_the_agent_sent_is_not_forwarded_upstream(tmp_path, monkeypatch, upstream):
+    """Only irimi may tell the response side that a page follows a minted refund. The overlay
+    strips an agent's own `irimi-rewrote`, and the engine has to carry that onto the flow too, or
+    the header reaches the real service anyway (#43)."""
+    from dataclasses import replace
+
+    def strip(request):
+        kept = tuple((k, v) for k, v in request.headers if k != pipeline.REWROTE_HEADER)
+        return replace(request, headers=kept)
+
+    overlay = _OverlayDouble(rewrite=strip)
+    eng, seen, stop = _engine_with_a_write(tmp_path, monkeypatch, upstream, overlay)
+    try:
+        status, _, _ = _read_via_proxy(
+            eng.listen_port(),
+            f"http://127.0.0.1:{upstream}/hello",
+            extra_headers={pipeline.REWROTE_HEADER: "starting_after=re_FORGED"},
+        )
+    finally:
+        stop()
+    assert status == 200
+    ((path, received),) = _Upstream.seen
+    assert path == "/hello"
+    assert pipeline.REWROTE_HEADER not in {k.lower() for k in received}
+
+
+# ------------------------------------------------ the Stripe overlay, end to end (#43)
+
+# A map claiming the loopback upstream as `stripe`, so the real `ServiceOverlay` applies Stripe's
+# effects table to reads through it. `fixture: refund` resolves against the shipped Stripe
+# fixtures, which are keyed by the service name and not by the host.
+STRIPE_MAP = """
+version: 1
+service: stripe
+hosts:
+  - 127.0.0.1
+routes:
+  - match:
+      method: POST
+      path: /v1/refunds
+    operation: refunds.create
+    kind: write
+    human: refund {amount} on {charge}
+    fixture: refund
+    ids:
+      id: re_
+      balance_transaction: txn_
+  - match:
+      method: GET
+      path: /v1/refunds
+    operation: refunds.list
+    kind: read
+    human: list refunds
+  - match:
+      method: GET
+      path: /v1/charges/{charge}
+    operation: charges.retrieve
+    kind: read
+    human: get charge {charge}
+  - match:
+      method: POST
+      path: /v1/customers/{customer}
+    operation: customers.update
+    kind: write
+    human: update customer {customer}
+    fixture: customer
+    ids:
+      id: cus_
+  - match:
+      method: GET
+      path: /v1/customers/{customer}
+    operation: customers.retrieve
+    kind: read
+    human: get customer {customer}
+  - match:
+      method: POST
+      path: /v1/payment_intents/{payment_intent}/cancel
+    operation: payment_intents.cancel
+    kind: write
+    human: cancel {payment_intent}
+    fixture: payment_intent
+    ids:
+      id: pi_
+  - match:
+      method: GET
+      path: /v1/payment_intents/{payment_intent}
+    operation: payment_intents.retrieve
+    kind: read
+    human: get payment intent {payment_intent}
+"""
+
+
+class _StripeStub(BaseHTTPRequestHandler):
+    """A Stripe-shaped upstream: real state for every read the effects table models.
+
+    `/v1/refunds` answers a FULL page - `REFUNDS_PAGE_SIZE` real refunds, the same number a
+    `limit` of that size asks for - so a test can prove the minted refund pushes the oldest real
+    one off the page rather than making it longer than Stripe would.
+    """
+
+    seen: list = []  # (method, path) of every request, so a test can prove no write reached it
+    REFUNDS_PAGE_SIZE = 2
+
+    def do_GET(self):
+        _StripeStub.seen.append(("GET", self.path))
+        route = self.path.split("?", 1)[0]
+        if route == "/v1/charges/ch_REAL1":
+            status, document = (
+                200,
+                {
+                    "id": "ch_REAL1",
+                    "object": "charge",
+                    "amount": 4900,
+                    "amount_refunded": 0,
+                    "refunded": False,
+                    "currency": "usd",
+                },
+            )
+        elif route == "/v1/refunds":
+            real = [
+                {"id": f"re_REAL{n}", "object": "refund", "charge": "ch_REAL1"}
+                for n in range(1, _StripeStub.REFUNDS_PAGE_SIZE + 1)
+            ]
+            status, document = 200, {"object": "list", "has_more": False, "data": real}
+        elif route == "/v1/customers/cus_REAL1":
+            status, document = (
+                200,
+                {
+                    "id": "cus_REAL1",
+                    "object": "customer",
+                    "email": "old@example.test",
+                    "metadata": {"tier": "free"},
+                },
+            )
+        elif route == "/v1/payment_intents/pi_REAL1":
+            status, document = (
+                200,
+                {
+                    "id": "pi_REAL1",
+                    "object": "payment_intent",
+                    "status": "requires_capture",
+                    "canceled_at": None,
+                    "cancellation_reason": None,
+                },
+            )
+        else:
+            status, document = 404, {"error": {"type": "invalid_request_error"}}
+        body = json.dumps(document).encode()
+        self.send_response(status)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):  # must never be reached under ShadowPolicy
+        _StripeStub.seen.append(("POST", self.path))
+        self.send_response(500)
+        self.send_header("content-length", "0")
+        self.end_headers()
+
+    def log_message(self, *args):  # keep pytest output clean
+        pass
+
+
+@pytest.fixture
+def stripe_stub(tmp_path, monkeypatch):
+    """The stub on a free loopback port, and an engine over STRIPE_MAP with the real overlay,
+    built the way the CLI builds it. Yields (proxy port, stub port, recorded exchanges)."""
+    from irimi.overlay import ServiceOverlay
+
+    _StripeStub.seen = []
+    srv = HTTPServer(("127.0.0.1", 0), _StripeStub)
+    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
+    maps = _maps(tmp_path, monkeypatch, doc=STRIPE_MAP)
+    eng, seen, stop = _start(
+        _config(tmp_path, monkeypatch, maps=maps), overlay=ServiceOverlay(maps)
+    )
+    yield eng.listen_port(), srv.server_address[1], seen
+    stop()
+    srv.shutdown()
+
+
+def test_a_charge_reread_after_a_faked_refund_shows_the_refund(stripe_stub):
+    proxy, stub, _ = stripe_stub
+    status, _ = _via_proxy(
+        proxy,
+        "POST",
+        f"http://127.0.0.1:{stub}/v1/refunds",
+        body=b"charge=ch_REAL1&amount=100",
+        extra_headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    assert status == 200
+    status, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_REAL1")
+    assert status == 200
+    charge = json.loads(data)
+    assert charge["amount_refunded"] == 100
+    assert charge["refunded"] is False
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert [method for method, _ in _StripeStub.seen] == ["GET"], "a faked write reached Stripe"
+
+
+def test_the_refunds_list_shows_the_minted_refund_first(stripe_stub):
+    proxy, stub, _ = stripe_stub
+    status, data = _via_proxy(
+        proxy,
+        "POST",
+        f"http://127.0.0.1:{stub}/v1/refunds",
+        body=b"charge=ch_REAL1&amount=100",
+        extra_headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    assert status == 200
+    refund_id = json.loads(data)["id"]
+    assert refund_id.startswith("re_")
+    status, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds")
+    assert status == 200
+    assert json.loads(data)["data"][0]["id"] == refund_id
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+
+
+def test_a_read_before_the_refund_is_untouched_and_unstamped(stripe_stub):
+    proxy, stub, seen = stripe_stub
+    status, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_REAL1")
+    assert status == 200
+    assert json.loads(data)["amount_refunded"] == 0
+    assert pipeline.ANSWERED_BY_HEADER not in headers
+    assert seen[-1].answered_by == "live"
+    assert seen[-1].overlay is None
+    # The same read after the refund IS overlaid, so the untouched one above was untouched
+    # because it came first, not because this engine has no overlay.
+    _via_proxy(
+        proxy,
+        "POST",
+        f"http://127.0.0.1:{stub}/v1/refunds",
+        body=b"charge=ch_REAL1&amount=100",
+        extra_headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    _, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_REAL1")
+    assert json.loads(data)["amount_refunded"] == 100
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+
+
+def _fake_refund(proxy, stub, charge="ch_REAL1", amount=100):
+    """One faked refund through the proxy. Returns the minted refund id."""
+    status, data = _via_proxy(
+        proxy,
+        "POST",
+        f"http://127.0.0.1:{stub}/v1/refunds",
+        body=f"charge={charge}&amount={amount}".encode(),
+        extra_headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    assert status == 200
+    return json.loads(data)["id"]
+
+
+def test_a_full_refunds_page_drops_the_oldest_real_refund_and_says_there_is_more(stripe_stub):
+    """A page Stripe filled to the limit cannot also hold the minted refund. The page stays the
+    length the agent asked for and `has_more` becomes true, because a longer page is one no real
+    Stripe read could return (#43)."""
+    proxy, stub, seen = stripe_stub
+    refund_id = _fake_refund(proxy, stub)
+    limit = _StripeStub.REFUNDS_PAGE_SIZE
+    status, headers, data = _read_via_proxy(
+        proxy, f"http://127.0.0.1:{stub}/v1/refunds?limit={limit}"
+    )
+    assert status == 200
+    page = json.loads(data)
+    assert [item["id"] for item in page["data"]] == [refund_id, "re_REAL1"]
+    assert page["has_more"] is True
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert seen[-1].overlay == "full"
+
+
+def test_a_cursor_naming_a_minted_refund_is_dropped_before_the_read_reaches_stripe(stripe_stub):
+    """Stripe has never heard of the refund irimi minted and would answer the page with an error,
+    so the cursor is dropped and `Irimi-Rewrote` carries what was removed. The page that comes back
+    is the real list from its top, and the minted refund is NOT prepended again: it belongs on the
+    page before this one (#43)."""
+    proxy, stub, seen = stripe_stub
+    refund_id = _fake_refund(proxy, stub)
+    _StripeStub.seen.clear()
+    status, headers, data = _read_via_proxy(
+        proxy, f"http://127.0.0.1:{stub}/v1/refunds?starting_after={refund_id}"
+    )
+    assert status == 200
+    assert _StripeStub.seen == [("GET", "/v1/refunds")], "the minted cursor reached Stripe"
+    assert [item["id"] for item in json.loads(data)["data"]] == ["re_REAL1", "re_REAL2"]
+    # The body really is the one Stripe sent, so it stays unstamped; the exchange is what records
+    # that irimi translated the request, and shows the upstream what it asked.
+    assert pipeline.ANSWERED_BY_HEADER not in headers
+    ex = seen[-1]
+    assert ex.answered_by == "live"
+    assert ex.overlay == "full"
+    assert ex.request.query == ""
+    assert (pipeline.REWROTE_HEADER, f"starting_after={refund_id}") in ex.request.headers
+
+
+def test_a_customer_reread_after_a_faked_update_shows_the_posted_fields(stripe_stub):
+    proxy, stub, seen = stripe_stub
+    status, _ = _via_proxy(
+        proxy,
+        "POST",
+        f"http://127.0.0.1:{stub}/v1/customers/cus_REAL1",
+        body=b"email=new%40example.test&metadata[tier]=pro",
+        extra_headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    assert status == 200
+    status, headers, data = _read_via_proxy(
+        proxy, f"http://127.0.0.1:{stub}/v1/customers/cus_REAL1"
+    )
+    assert status == 200
+    customer = json.loads(data)
+    assert customer["email"] == "new@example.test"
+    assert customer["metadata"] == {"tier": "pro"}, "Stripe merges metadata, it does not replace it"
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert seen[-1].overlay == "full"
+    assert [method for method, _ in _StripeStub.seen] == ["GET"], "a faked write reached Stripe"
+
+
+def test_a_payment_intent_reread_after_a_faked_cancel_shows_it_canceled(stripe_stub):
+    proxy, stub, seen = stripe_stub
+    status, _ = _via_proxy(
+        proxy,
+        "POST",
+        f"http://127.0.0.1:{stub}/v1/payment_intents/pi_REAL1/cancel",
+        body=b"cancellation_reason=requested_by_customer",
+        extra_headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    assert status == 200
+    status, headers, data = _read_via_proxy(
+        proxy, f"http://127.0.0.1:{stub}/v1/payment_intents/pi_REAL1"
+    )
+    assert status == 200
+    intent = json.loads(data)
+    assert intent["status"] == "canceled"
+    assert intent["cancellation_reason"] == "requested_by_customer"
+    assert isinstance(intent["canceled_at"], int)
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert seen[-1].overlay == "full"
+    assert [method for method, _ in _StripeStub.seen] == ["GET"], "a faked write reached Stripe"

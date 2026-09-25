@@ -296,6 +296,23 @@ def test_a_delegated_read_is_never_counted_as_a_live_read():
     assert line == "  api.stripe.com  1 read  1 read from the target"
 
 
+def test_an_overlaid_read_is_a_real_read_and_says_it_shows_the_run_s_writes():
+    """The opposite of #20's bug: an overlaid read DID reach the real service, so leaving it out of
+    the read count understated the reads the agent really made. Its body is not what the service
+    sent, though, so the line says that too (#43)."""
+    rows = [_exchange(), _exchange(answered_by="overlay")]
+    line = _block(summary_lines("7f3a", rows, 0.0, _maps()), "api.stripe.com")
+    assert line == "  api.stripe.com  2 reads  1 showing this run's writes"
+
+
+def test_an_overlaid_read_is_counted_live_and_never_virtualized():
+    """`virtualized` means irimi answered instead of the service. It answered this one WITH the
+    service, so counting it there claimed a read the agent really made was fabricated (#43)."""
+    rows = [_exchange(answered_by="overlay"), _refund()]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert "  2 exchanges · 1 live · 0 delegated · 1 virtualized" in lines
+
+
 def test_an_intercepted_write_that_was_delegated_says_so_in_its_host_line():
     rows = [_refund(), _refund(answered_by="delegated", target="http://127.0.0.1:3000/refund")]
     line = _block(summary_lines("7f3a", rows, 0.0, _maps()), "api.stripe.com")

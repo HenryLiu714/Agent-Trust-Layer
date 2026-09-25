@@ -75,8 +75,18 @@ def test_pick_charge_skips_unrefundable_charges():
     assert agent.pick_charge(charges).id == "ch_good"
 
 
+def test_pick_charge_takes_a_charge_with_any_amount_left():
+    # The agent refunds whatever remains, so one minor unit left is still a charge to refund.
+    charges = [
+        _charge(id="ch_exhausted", amount_refunded=4900),
+        _charge(id="ch_one_left", amount_refunded=4899),
+    ]
+    assert agent.pick_charge(charges).id == "ch_one_left"
+
+
 def test_pick_charge_returns_none_when_nothing_is_refundable():
     assert agent.pick_charge([_charge(refunded=True)]) is None
+    assert agent.pick_charge([_charge(amount_refunded=4900)]) is None
 
 
 def test_money_formats_minor_units():

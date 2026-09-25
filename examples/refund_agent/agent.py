@@ -1,11 +1,18 @@
-"""Minimal refund agent — the Phase 1 fixture for `irimi shadow`.
+"""Minimal refund agent — the fixture for `irimi shadow`, and Phase 2's exit run.
 
-It does two things an agent does: a live read (list charges) and a consequential write (refund
-one of them). Run it bare and the refund is real; run it under `irimi shadow` and the refund is
-answered locally and never reaches Stripe.
+It does what an agent does around one consequential write: a live read (list charges), the write
+(refund one of them, in full), and then the three things an agent does after a write:
+
+1. lists the charge's refunds and looks for its own;
+2. re-reads the charge and prints `amount_refunded`;
+3. retries the same refund, and notices when it is refused.
+
+Run it bare and the refund is real, and real Stripe refuses the retry. Run it under `irimi shadow`
+and the refund is answered locally and never reaches Stripe, the two reads after it are shown the
+refund anyway, and irimi refuses the retry the way Stripe would have.
 
     uv sync --group examples                                          # installs the SDKs
-    uv run python examples/refund_agent/seed.py                       # once per test account
+    uv run python examples/refund_agent/seed.py                       # again after each bare run
     uv run python examples/refund_agent/agent.py                      # real refund
     uv run irimi shadow -- python examples/refund_agent/agent.py      # no refund
 
@@ -19,9 +26,6 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 STRIPE_HOST = "api.stripe.com"
-
-# $1.00. Small and fixed so the same seeded charge stays refundable across several real runs.
-REFUND_AMOUNT_MINOR = 100
 
 
 def door_base(env: Mapping[str, str], host: str) -> str | None:
@@ -49,9 +53,11 @@ def door_base(env: Mapping[str, str], host: str) -> str | None:
 def field(obj: Any, name: str) -> Any:
     """One attribute of a StripeObject, or None when it is absent.
 
-    A shadowed write is answered with the L0 echo, which mints the ids the route's map names, so
-    `.id` reads back. A field the echo does not carry is still missing, and plain attribute access
-    would raise AttributeError. `.get()` is not an option: StripeObject rejects it.
+    Since #41 a shadowed Stripe write is answered from a vendored response object, so the fields an
+    agent branches on are there. This stays because a route with no `fixture:` is still answered
+    with the L0 echo, which carries only the ids the route's map names, and plain attribute access
+    on a field it lacks would raise AttributeError. `.get()` is not an option: StripeObject
+    rejects it.
     """
     try:
         return getattr(obj, name)
@@ -60,14 +66,13 @@ def field(obj: Any, name: str) -> Any:
 
 
 def pick_charge(charges: Sequence[Any]) -> Any:
-    """The first charge that can still take a REFUND_AMOUNT_MINOR refund, or None."""
+    """The first succeeded, paid charge with any unrefunded amount left, or None."""
     for charge in charges:
         if (
             field(charge, "status") == "succeeded"
             and field(charge, "paid")
             and not field(charge, "refunded")
-            and (field(charge, "amount") or 0) - (field(charge, "amount_refunded") or 0)
-            >= REFUND_AMOUNT_MINOR
+            and (field(charge, "amount") or 0) - (field(charge, "amount_refunded") or 0) > 0
         ):
             return charge
     return None
@@ -79,9 +84,17 @@ def money(amount_minor: int, currency: str) -> str:
 
 
 def post_to_slack(text: str) -> None:
-    """Optional second write, so the Slack map gets exercised too. Silent unless both
-    SLACK_BOT_TOKEN and SLACK_CHANNEL are set. slack_sdk reads HTTPS_PROXY and SSL_CERT_FILE on its
-    own, so this goes through the forward proxy with no extra arguments."""
+    """Optional second write, so the Slack map gets exercised too, and the read-back an agent makes
+    after it. Silent unless both SLACK_BOT_TOKEN and SLACK_CHANNEL are set. slack_sdk reads
+    HTTPS_PROXY and SSL_CERT_FILE on its own, so this goes through the forward proxy with no extra
+    arguments.
+
+    The read-back asks `conversations.history` for the channel the POST'S OWN RESPONSE names, as an
+    agent would. Set SLACK_CHANNEL to a channel id (`C0123`) for that read to be `overlay: full`:
+    `chat.postMessage` accepts `#general` but `conversations.history` requires the id, and irimi's
+    faked post echoes back the spelling it was sent, so a post to `#general` is read back as a
+    channel irimi cannot match to it (#44).
+    """
     token = os.environ.get("SLACK_BOT_TOKEN")
     channel = os.environ.get("SLACK_CHANNEL")
     if not token or not channel:
@@ -89,12 +102,22 @@ def post_to_slack(text: str) -> None:
     from slack_sdk import WebClient
     from slack_sdk.errors import SlackApiError
 
+    client = WebClient(token=token)
     try:
-        response = WebClient(token=token).chat_postMessage(channel=channel, text=text)
+        response = client.chat_postMessage(channel=channel, text=text)
     except SlackApiError as exc:
         print(f"warning: Slack post failed: {exc}", file=sys.stderr)
         return
     print(f"slack: posted to {channel} (ts {response.get('ts')})")
+
+    posted_in = response["channel"]
+    try:
+        history = client.conversations_history(channel=posted_in, limit=10)
+    except SlackApiError as exc:
+        print(f"warning: Slack read-back failed: {exc}", file=sys.stderr)
+        return
+    seen = any(message.get("text") == text for message in history.get("messages") or [])
+    print(f"slack: history on {posted_in} {'shows' if seen else 'does not show'} {text!r}")
 
 
 def main() -> int:
@@ -138,19 +161,67 @@ def main() -> int:
         return 3
     print(f"read:  charge {charge.id} - {money(charge.amount, charge.currency)}")
 
+    # The FULL remaining amount, never a fixed slice of it. Stripe - and irimi's L3 check, which
+    # models it - refuses the retry below with `charge_already_refunded` only when the charge reads
+    # `refunded: true`, and that is true only once `amount_refunded == amount`. A partial refund
+    # leaves the charge refundable, so the retry would be ACCEPTED and there would be no refusal to
+    # notice. Refunding in full is also what makes a bare run and a shadowed one agree (#48).
+    amount = charge.amount - (field(charge, "amount_refunded") or 0)
+
     try:
-        refund = stripe.Refund.create(charge=charge.id, amount=REFUND_AMOUNT_MINOR)
+        refund = stripe.Refund.create(charge=charge.id, amount=amount)
     except stripe.StripeError as exc:
         print(f"error: could not create the refund: {exc}", file=sys.stderr)
         return 1
 
     refund_id = field(refund, "id")
     print(
-        f"write: refund {money(REFUND_AMOUNT_MINOR, charge.currency)} on {charge.id} -> "
+        f"write: refund {money(amount, charge.currency)} on {charge.id} -> "
         f"{refund_id or '(no id - answered by irimi at L0)'}"
     )
-    post_to_slack(f"refunded {money(REFUND_AMOUNT_MINOR, charge.currency)} on {charge.id}")
-    print(f"AGENT-RESULT charge={charge.id} refund={refund_id or '-'} amount={REFUND_AMOUNT_MINOR}")
+
+    # `charge` and `limit` are both parameters irimi's overlay knows how to apply, so this read is
+    # shown the refund in full rather than flagged partial (#43). A refund missing from the list is
+    # printed, not failed on: a bare run against a busy account may legitimately page it off.
+    try:
+        refunds = stripe.Refund.list(charge=charge.id, limit=10)
+    except stripe.StripeError as exc:
+        print(f"error: could not list refunds: {exc}", file=sys.stderr)
+        return 1
+    listed = refund_id is not None and any(field(r, "id") == refund_id for r in refunds.data)
+    print(f"read:  refunds on {charge.id} {'include' if listed else 'do not include'} {refund_id}")
+
+    try:
+        reread = stripe.Charge.retrieve(charge.id)
+    except stripe.StripeError as exc:
+        print(f"error: could not re-read the charge: {exc}", file=sys.stderr)
+        return 1
+    refunded = field(reread, "amount_refunded") or 0
+    print(f"read:  charge {charge.id} - {money(refunded, charge.currency)} refunded")
+
+    # The retry is a second `Refund.create`, so stripe-python sends it with a fresh
+    # Idempotency-Key and it is L3 that must refuse it, not the idempotency store replaying the
+    # first answer (#46, #48). An agent that never notices a refusal is one whose fakes are lying
+    # to it, so a retry that goes through is this agent's failure, loudly.
+    retry: str | None = None
+    try:
+        stripe.Refund.create(charge=charge.id, amount=amount)
+    except stripe.StripeError as exc:
+        retry = exc.code or "refused"
+        print(f"write: retry refused - {retry}")
+
+    post_to_slack(f"refunded {money(amount, charge.currency)} on {charge.id}")
+    print(
+        f"AGENT-RESULT charge={charge.id} refund={refund_id or '-'} amount={amount} "
+        f"listed={'yes' if listed else 'no'} refunded={refunded} retry={retry or 'none'}"
+    )
+    if retry is None:
+        print(
+            f"error: the retry of refund {money(amount, charge.currency)} on {charge.id} was "
+            "accepted; a charge refunded in full must refuse it.",
+            file=sys.stderr,
+        )
+        return 4
     return 0
 
 

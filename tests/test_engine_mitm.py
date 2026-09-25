@@ -2129,30 +2129,37 @@ routes:
     operation: conversations.history
     kind: read
     human: read the {channel} history
+
+  - match:
+      method: POST
+      path: /api/conversations.replies
+    operation: conversations.replies
+    kind: read
+    human: read a thread in {channel}
 """
 SLACK_JSON = "application/json;charset=utf-8"  # what slack_sdk sends (#44)
 REAL_SLACK_TS = "1700000000.000100"
 
 
+REAL_SLACK_MESSAGE = {"type": "message", "ts": REAL_SLACK_TS, "text": "real", "user": "U1"}
+
+
 class _SlackStub(BaseHTTPRequestHandler):
-    """A Slack-shaped upstream: one real message in whatever channel is asked about. Only the
-    history read may reach it; a `chat.postMessage` here is a faked write that escaped."""
+    """A Slack-shaped upstream: one real message, in whatever channel or thread is asked about and
+    with no replies of its own. Only the two reads may reach it; a `chat.postMessage` here is a
+    faked write that escaped."""
 
     seen: list = []  # (method, path) of every request
 
     def do_POST(self):
         _SlackStub.seen.append(("POST", self.path))
-        if self.path != "/api/conversations.history":
+        if self.path not in ("/api/conversations.history", "/api/conversations.replies"):
             self.send_response(500)
             self.send_header("content-length", "0")
             self.end_headers()
             return
         self.rfile.read(int(self.headers.get("content-length", 0)))
-        document = {
-            "ok": True,
-            "messages": [{"type": "message", "ts": REAL_SLACK_TS, "text": "real", "user": "U1"}],
-            "has_more": False,
-        }
+        document = {"ok": True, "messages": [dict(REAL_SLACK_MESSAGE)], "has_more": False}
         body = json.dumps(document).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json; charset=utf-8")
@@ -2222,3 +2229,47 @@ def test_a_slack_history_read_of_another_channel_is_forwarded_unstamped(slack_st
     assert pipeline.ANSWERED_BY_HEADER not in headers
     assert seen[-1].answered_by == "live"
     assert seen[-1].overlay is None
+
+
+def test_a_slack_replies_read_after_a_faked_reply_shows_it_at_the_tail(slack_stub):
+    """#44's done-when for the second read: the reply last, the parent's counts moved, the whole
+    page stamped `overlay` - and the post itself never reached Slack."""
+    proxy, stub, seen = slack_stub
+    status, _, data = _slack_call(
+        proxy,
+        stub,
+        "chat.postMessage",
+        {"channel": "C0123", "thread_ts": REAL_SLACK_TS, "text": "on it"},
+    )
+    assert status == 200
+    minted = json.loads(data)["ts"]
+    status, headers, data = _slack_call(
+        proxy, stub, "conversations.replies", {"channel": "C0123", "ts": REAL_SLACK_TS}
+    )
+    assert status == 200
+    messages = json.loads(data)["messages"]
+    assert [m["ts"] for m in messages] == [REAL_SLACK_TS, minted]
+    assert messages[0]["reply_count"] == 1
+    assert messages[0]["latest_reply"] == minted
+    assert messages[-1]["thread_ts"] == REAL_SLACK_TS
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert seen[-1].answered_by == "overlay"
+    assert seen[-1].overlay == "full"
+    assert _SlackStub.seen == [("POST", "/api/conversations.replies")], "a faked post reached Slack"
+
+
+def test_a_slack_read_the_effects_cannot_place_is_recorded_partial_and_left_alone(slack_stub):
+    """`chat.postMessage` takes `#general`, `conversations.history` requires the id, and irimi's own
+    echo carries the posted spelling - so the two sides cannot be matched. The body is left exactly
+    as Slack sent it and the exchange says the world irimi showed is incomplete (#44)."""
+    proxy, stub, seen = slack_stub
+    status, _, _ = _slack_call(
+        proxy, stub, "chat.postMessage", {"channel": "#general", "text": "hi"}
+    )
+    assert status == 200
+    status, headers, data = _slack_call(proxy, stub, "conversations.history", {"channel": "C0123"})
+    assert status == 200
+    assert [m["ts"] for m in json.loads(data)["messages"]] == [REAL_SLACK_TS]
+    assert pipeline.ANSWERED_BY_HEADER not in headers, "nothing of irimi's is in this body"
+    assert seen[-1].answered_by == "live"
+    assert seen[-1].overlay == "partial"

@@ -15,7 +15,9 @@ Two rules run through all of it, both inherited from `stripe.py`:
 
 * **Never invent a field the live object does not have.** A field Slack's own response omits is
   one the agent can never see in production. The one exception is `THREAD_FIELDS`, below: Slack's
-  own closed set, added to a parent whose first reply the run faked.
+  own closed set, added to a parent whose first reply the run faked. The rule is about *live*
+  objects, so it does not reach a message irimi minted itself: `_posts` completes its own copy of a
+  faked reply with the `thread_ts` the caller posted, which real Slack would have sent (#55).
 * **Say `partial` rather than half-apply.** A page the table does not model, a parameter it cannot
   read, a channel it cannot tell is the one asked about, a post whose answer carries no message to
   show: the document is left exactly as Slack sent it and the exchange records that the world irimi
@@ -44,9 +46,11 @@ SERVICE = "slack"
 HISTORY_PARAMS = frozenset(
     {"token", "channel", "cursor", "limit", "oldest", "latest", "inclusive", "include_all_metadata"}
 )
-REPLIES_PARAMS = frozenset(
-    {"token", "channel", "ts", "cursor", "limit", "oldest", "latest", "inclusive"}
-)
+# `conversations.replies` takes every argument `conversations.history` does, plus the `ts` naming
+# the thread - so it is derived rather than spelled twice, which is what #44 meant by "the same set
+# with `ts`". Slack documents `include_all_metadata` on both methods; listing it on one only made a
+# read that named it needlessly `partial`.
+REPLIES_PARAMS = HISTORY_PARAMS | {"ts"}
 # The fields Slack puts on a message once it has replies, in the order they are added. Adding them
 # to a parent that had none is the one place in this package an effect adds a field the live object
 # lacked. `stripe._customer`'s rule exists to stop a CALLER'S posted field being pasted onto a
@@ -68,8 +72,9 @@ class _Post:
     thread_ts: str | None  # None for a top-level post
     broadcast: bool
     # A shallow copy of the answer's `message`, never the write log's own dict (#44): a minted
-    # parent that has replies gets thread fields added to it. None when the answer carried no
-    # message to show - the fixture failed and the write degraded to `fake-L0` (#42).
+    # parent that has replies gets thread fields added to it, and a reply gets the `thread_ts` the
+    # caller posted. None when the answer carried no message to show - the fixture failed and the
+    # write degraded to `fake-L0` (#42).
     message: dict[str, Any] | None
 
     @property
@@ -288,6 +293,17 @@ def _posts(writes: Sequence[Write]) -> list[_Post]:
             # A reply to a thread irimi cannot name: nothing it can place, so nothing to show.
             usable = False
             thread_ts = None
+        own = dict(message) if usable and isinstance(message, dict) else None
+        if own is not None and thread_ts is not None:
+            # Every reply real Slack shows carries the thread it is in, and irimi knows the value
+            # exactly - the caller posted it. Omitting it puts a reply with no `thread_ts` on a
+            # `conversations.replies` page, which is a body production cannot produce: the untruth
+            # `THREAD_FIELDS` exists to stop, on the reply's side of the thread. Written onto this
+            # copy only, never the write log's own message. `parent_user_id` stays out: it is the
+            # parent's field, not always on the page, and not one irimi always knows. The write's
+            # OWN answer still omits `thread_ts` because the fixture never names it for
+            # `echo._reflect_over` to write over; that half is #55. Decided Sep 25, 2026 (#44).
+            own["thread_ts"] = thread_ts
         out.append(
             _Post(
                 channel=channel if isinstance(channel, str) and channel else None,
@@ -296,7 +312,7 @@ def _posts(writes: Sequence[Write]) -> list[_Post]:
                 # the text `false`, which is truthy (#44).
                 broadcast=thread_ts is not None
                 and _flag(write.posted.get("reply_broadcast")) is True,
-                message=dict(message) if usable and isinstance(message, dict) else None,
+                message=own,
             )
         )
     return out

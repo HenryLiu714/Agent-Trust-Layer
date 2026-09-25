@@ -351,6 +351,33 @@ def test_a_reply_to_another_thread_leaves_the_page_alone():
     assert out.partial is False
 
 
+def test_a_faked_reply_carries_the_thread_it_is_in():
+    """Real Slack puts `thread_ts` on every reply it shows, and irimi knows the value exactly - the
+    caller posted it. A reply without it is a body production cannot produce (#44, #55)."""
+    out = apply_read(
+        _replies(REAL_OLD),
+        _replies_page(_threaded_parent(REAL_OLD), REAL_NEW),
+        [_reply_write(REAL_OLD)],
+    )
+    assert out.document["messages"][-1]["thread_ts"] == REAL_OLD
+    assert "parent_user_id" not in out.document["messages"][-1], "not irimi's to know"
+
+
+def test_a_faked_top_level_post_gains_no_thread_ts():
+    """The other half of #55: a post that is in no thread must not claim to be in one."""
+    out = apply_read(_history(), _history_page(REAL_OLD), [_post_write()])
+    assert "thread_ts" not in out.document["messages"][0]
+
+
+def test_a_broadcast_in_history_carries_the_thread_it_is_in():
+    out = apply_read(
+        _history(),
+        _history_page(_threaded_parent(REAL_OLD)),
+        [_reply_write(REAL_OLD, reply_broadcast=True)],
+    )
+    assert out.document["messages"][0]["thread_ts"] == REAL_OLD
+
+
 def test_the_write_logs_message_is_never_mutated():
     """The answer's `message` is shared by reference with the write log (#44); a faked parent
     grows thread fields on a copy only."""
@@ -415,6 +442,17 @@ def test_an_unknown_read_parameter_is_partial():
     assert out.document == before
     assert out.partial is True
     assert out.changed is False
+
+
+def test_include_all_metadata_is_known_to_replies_too():
+    """Slack documents it on both methods; `REPLIES_PARAMS` is `HISTORY_PARAMS` plus `ts` (#44)."""
+    out = apply_read(
+        _replies(REAL_OLD, include_all_metadata=True),
+        _replies_page(_threaded_parent(REAL_OLD)),
+        [_reply_write(REAL_OLD)],
+    )
+    assert _ts_of(out.document) == [REAL_OLD, MINTED1]
+    assert out.partial is False
 
 
 def test_the_token_parameter_is_known():

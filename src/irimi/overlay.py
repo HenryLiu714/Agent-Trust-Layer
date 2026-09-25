@@ -12,7 +12,7 @@ from irimi.servicemap import MapIndex
 
 logger = logging.getLogger(__name__)
 
-# A live body this size is not a Stripe object the effects model, and parsing it on the answer
+# A live body this size is not an object any service's effects model, and parsing it on the answer
 # path would cost more than the read it is trying to improve. It is flagged, not silently passed.
 MAX_BODY_BYTES = 2_000_000
 

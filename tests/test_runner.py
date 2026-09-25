@@ -764,6 +764,32 @@ def test_an_overlaid_read_is_filed_under_its_own_services_write():
     ]
 
 
+def test_an_overlaid_read_is_never_filed_under_a_write_the_overlay_could_not_have_shown():
+    """A refused write is printed, but it never enters the write log, so no read ever saw it (#45,
+    #46). A read after a refund and its refused retry saw the REFUND; filed by position it would
+    hang under the `✗` line and tell the reader the agent was shown a refund that was refused."""
+    rows = [
+        replace(_refund(answered_by="fake-L1"), precondition="passed"),
+        replace(
+            _refund(answered_by="fake-L1", status=400),
+            precondition="rejected",
+            rejection_code="charge_already_refunded",
+        ),
+        replace(
+            _refund(answered_by="fake-L1", status=400, flags=(IDEMPOTENCY_CONFLICT_FLAG,)),
+            rejection_code="idempotency_error",
+        ),
+        replace(_exchange(path="/v1/refunds", answered_by="overlay"), overlay="full"),
+    ]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert _write_block(lines) == [
+        "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L3 preconditions passed)",
+        "    ↳ GET /v1/refunds saw it  overlay",
+        "  ✗ refund $49.00 on ch_3QabcXYZ  would fail: charge_already_refunded",
+        "  ✗ refund $49.00 on ch_3QabcXYZ  would fail: idempotency_error",
+    ]
+
+
 def test_an_engine_read_the_overlay_edited_is_never_counted_as_one_of_the_agents_reads():
     """The bracket qualifies the agent's `N reads`, so it counts the agent's reads only. An engine
     read is its own phrase; counted in both, one read would show up twice (#45, #48)."""

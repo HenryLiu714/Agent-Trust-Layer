@@ -14,6 +14,7 @@ from irimi.exchange import (
     IDEMPOTENT_REPLAY_FLAG,
     TARGET_FAILED_FLAG,
     Exchange,
+    is_authored_write,
 )
 from irimi.servicemap import SELF_TARGET, MapIndex, Route, is_delegated, path_params
 
@@ -406,24 +407,28 @@ def _writes_with_their_reads(
 ) -> list[tuple[Exchange, list[Exchange]]]:
     """Every printed write, in order, each with the overlaid reads that are about it (#48).
 
-    A read is filed under the most recent printed write of the SAME SERVICE before it - service,
-    then position, not simply "the last write". A run that refunds on Stripe and then reads Slack
-    history would otherwise file the Slack read under the Stripe refund, and the overlay only ever
-    applies a service's own writes to that service's reads.
+    A read is filed under the most recent write before it that the overlay could have shown it:
+    one of the SAME SERVICE, and one irimi authored (`is_authored_write`, the write log's own
+    rule). Not simply "the last write". A run that refunds on Stripe and then reads Slack history
+    would otherwise file the Slack read under the Stripe refund; and a refund, its refused retry
+    and then a list would file the list under the `✗` line, saying the agent was shown a refund
+    that was refused. A refused write is printed, but it never reached the write log, so no read
+    ever saw it.
 
     A read irimi issued itself is never here: `issued_by == "engine"` is a read the AGENT did not
     make, and the whole point of the line is to say which of the agent's reads saw the write (#45).
 
     Pairs rather than a dict keyed by write: `Exchange` is a mutable dataclass and so unhashable.
-    A qualifying read with no earlier write of its service is left out, and cannot happen - the
-    overlay stamps or flags a read only on the strength of a same-service write in the log, and
-    every write-log entry is a printed write.
+    A qualifying read with no such write before it is left out, and cannot happen - the overlay
+    stamps or flags a read only on the strength of a same-service write in the log, and every
+    write-log entry is a printed write. `tests/test_invariants.py` holds it over a real run.
     """
     paired: list[tuple[Exchange, list[Exchange]]] = []
     last: dict[str, int] = {}
     for ex in exchanges:
         if _is_intercepted(ex):
-            last[ex.service] = len(paired)
+            if is_authored_write(ex):
+                last[ex.service] = len(paired)
             paired.append((ex, []))
         elif _shows_overlay(ex) and ex.service in last:
             paired[last[ex.service]][1].append(ex)

@@ -9,7 +9,8 @@ hand-built list, and each one demonstrated to fail on a policy that breaks it:
   (d) a `delegated` exchange never reached the host the agent addressed;
   (e) a write L3 rejected never enters the write log, nor does an idempotent replay or conflict
       (#46), a read irimi issued is never a write, and every read the overlay showed a write
-      has a printed write of its own service to sit under in the summary (#48).
+      sits in the summary under a printed write of its own service that the overlay really
+      held (#48).
 
 `stamping_violations` is the machinery for (a) and (b): it returns a list of strings rather than
 asserting, so the same function can be asserted empty for an honest run and non-empty for a
@@ -568,18 +569,24 @@ class _Charges(BaseHTTPRequestHandler):
 
 
 class _LogCapturingOverlay:
-    """Hands every read back untouched and keeps each write log it was given. The addon's
-    `write_log` is its own; what an overlay is handed is the only view of it a test should take."""
+    """Keeps each write log it was given, and hands every read back untouched - or to `inner`, the
+    real overlay, when there is one. The addon's `write_log` is its own; what an overlay is handed
+    is the only view of it a test should take."""
 
-    def __init__(self) -> None:
+    def __init__(self, inner: ServiceOverlay | None = None) -> None:
         self.logs: list[tuple[Exchange, ...]] = []
+        self.inner = inner
 
     def __call__(self, write_log, read_request, upstream_response):
         self.logs.append(tuple(write_log))
+        if self.inner is not None:
+            return self.inner(write_log, read_request, upstream_response)
         return Overlaid(upstream_response)
 
     def rewrite(self, write_log, read_request):
         self.logs.append(tuple(write_log))
+        if self.inner is not None:
+            return self.inner.rewrite(write_log, read_request)
         return read_request
 
 
@@ -596,8 +603,8 @@ def _l3_run(tmp_path, monkeypatch):
 def _stripe_run(tmp_path, monkeypatch, refunds, *, real_overlay=False):
     """Each `(charge, amount, idempotency key or None)` in `refunds` as a refund, then a charge
     read, through an engine holding the real reader. Hands back the exchanges, the overlay that
-    watched the write log, and every status in order. With `real_overlay` the engine holds the
-    real `ServiceOverlay` instead, which applies the accepted refunds to the closing read."""
+    watched the write log, and every status in order. With `real_overlay` that overlay passes each
+    read on to the real `ServiceOverlay`, which applies the accepted refunds to the closing read."""
     from irimi.policy import UpstreamReader
 
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "maps-home"))
@@ -608,7 +615,7 @@ def _stripe_run(tmp_path, monkeypatch, refunds, *, real_overlay=False):
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _Charges)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     stripe = srv.server_address[1]
-    overlay = ServiceOverlay(maps) if real_overlay else _LogCapturingOverlay()
+    overlay = _LogCapturingOverlay(ServiceOverlay(maps) if real_overlay else None)
 
     def refund(port, charge, amount, key):
         headers = {
@@ -744,16 +751,30 @@ def _owes_overlay_line(ex: Exchange) -> bool:
     )
 
 
-def overlay_line_violations(exchanges: Sequence[Exchange]) -> list[str]:
-    """Every one of the agent's reads the summary owes a `↳` line but files under no write, named
-    one per line. Matched by identity, not equality: a copy of a filed read is a different read."""
-    filed = [read for _, reads in report._writes_with_their_reads(exchanges) for read in reads]
-    return [
-        f"(e) {ex.answered_by} read, overlay {ex.overlay}, under no {ex.service} write: "
-        f"{ex.request.method} {ex.request.path}"
-        for ex in exchanges
-        if _owes_overlay_line(ex) and not any(read is ex for read in filed)
+def overlay_line_violations(
+    exchanges: Sequence[Exchange], write_log: Sequence[Exchange]
+) -> list[str]:
+    """Every one of the agent's reads the summary owes a `↳` line but files under no write, or
+    under a write the overlay was never handed, named one per line. `write_log` is every write the
+    overlay held during the run: a read cannot have been shown a write outside it, so a `↳` under
+    one - a refused retry, say - tells the reader the agent saw what it never saw. Matched by
+    identity, not equality: a copy of a filed read is a different read."""
+    filed = [
+        (write, read)
+        for write, reads in report._writes_with_their_reads(exchanges)
+        for read in reads
     ]
+    violations = []
+    for ex in exchanges:
+        if not _owes_overlay_line(ex):
+            continue
+        what = f"{ex.answered_by} read, overlay {ex.overlay}: {ex.request.method} {ex.request.path}"
+        under = next((write for write, read in filed if read is ex), None)
+        if under is None:
+            violations.append(f"(e) {what} is under no {ex.service} write")
+        elif not any(under is logged for logged in write_log):
+            violations.append(f"(e) {what} is under a write the overlay never held")
+    return violations
 
 
 def test_every_overlaid_read_has_a_write_of_its_own_service_to_sit_under(tmp_path, monkeypatch):
@@ -762,9 +783,11 @@ def test_every_overlaid_read_has_a_write_of_its_own_service_to_sit_under(tmp_pat
     files each under the latest earlier write of its own service and quietly skips one it cannot
     place; that skip is safe only because a real run never produces such a read - the overlay
     edits or flags a read only on the strength of a same-service write in the log, and every entry
-    there is a printed write. Held over a real run through the real overlay, with an L3 rejection
-    in it so the read's write is not the only one on the host."""
-    seen, _, replies = _stripe_run(
+    there is a printed write. And each is filed under a write the overlay really held: the run's
+    L3 rejection falls between the accepted refund and the read, and a refused write is printed
+    but never logged, so a `↳` under the `✗` would say the agent saw a refund that was refused.
+    Held over a real run through the real overlay."""
+    seen, overlay, replies = _stripe_run(
         tmp_path,
         monkeypatch,
         [("ch_REAL1", 100, None), ("ch_FULL1", 100, None)],
@@ -773,13 +796,17 @@ def test_every_overlaid_read_has_a_write_of_its_own_service_to_sit_under(tmp_pat
     assert replies == [200, 400, 200]
     owed = [ex for ex in seen if _owes_overlay_line(ex)]
     assert [ex.answered_by for ex in owed] == ["overlay"], "the run showed the agent no write"
-    assert overlay_line_violations(seen) == []
+    held = [ex for log in overlay.logs for ex in log]
+    assert [ex.precondition for ex in held] == ["passed"] * len(held)
+    assert overlay_line_violations(seen, held) == []
     lines = report.summary_lines("t3st", seen)
     assert sum(line.lstrip().startswith(report.OVERLAY_MARKER) for line in lines) == len(owed)
 
-    # And the check can fail: a read before any write, and one whose service wrote nothing.
+    # And the check can fail: a read before any write, one whose service wrote nothing, and one
+    # filed under a write the overlay never held.
     early, elsewhere = replace(owed[0]), replace(owed[0], service="slack")
-    assert len(overlay_line_violations([early, *seen, elsewhere])) == 2
+    assert len(overlay_line_violations([early, *seen, elsewhere], held)) == 2
+    assert len(overlay_line_violations(seen, [])) == 1
 
 
 def test_a_replayed_rejection_is_never_in_the_write_log(tmp_path, monkeypatch):

@@ -319,8 +319,13 @@ class ShadowPolicy:
                         # invent a refusal that never would have happened (#45).
                         return "not_evaluable", issued, None
                     document = applied.document
-            rejection = check.verdict(proposal, document)
-            return ("rejected" if rejection else "passed"), issued, rejection
+            verdict = check.verdict(proposal, document)
+            if isinstance(verdict, services.NotEvaluable):
+                # The check read the document and could not tell - a Slack `missing_scope`, a
+                # charge whose own numbers will not parse. Distinct from a pass, which claims
+                # the write was checked and would have been taken (#45).
+                return "not_evaluable", issued, None
+            return ("rejected" if verdict is not None else "passed"), issued, verdict
         except Exception:
             # An exception means irimi did put the question and could not answer it, so this is
             # `not_evaluable` and never None.

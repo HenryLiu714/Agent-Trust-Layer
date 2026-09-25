@@ -33,8 +33,10 @@ from urllib.parse import parse_qsl, urlencode
 from irimi.exchange import Request
 from irimi.pipeline import REWROTE_HEADER
 from irimi.services.model import (
+    NOT_EVALUABLE,
     Applied,
     Check,
+    NotEvaluable,
     Probe,
     Proposal,
     Read,
@@ -325,17 +327,17 @@ def _refund_probe(proposal: Proposal) -> Probe | None:
     return Probe(operation="charges.retrieve", method="GET", path=f"/v1/charges/{charge}")
 
 
-def _refund_verdict(proposal: Proposal, document: Any) -> Rejection | None:
-    """`charge_already_refunded`, the amount-exceeds error, or None."""
+def _refund_verdict(proposal: Proposal, document: Any) -> Rejection | NotEvaluable | None:
+    """`charge_already_refunded`, the amount-exceeds error, `NOT_EVALUABLE`, or None."""
     if (
         not isinstance(document, dict)
         or document.get("object") != "charge"
         or "amount_refunded" not in document
     ):
         # irimi never rejects on a body it did not understand: a false rejection is the untruth
-        # this whole path exists to prevent, and incompleteness is already recorded by the read's
-        # own `partial` flag.
-        return None
+        # this whole path exists to prevent. Nor does it pass on one - that would claim the write
+        # was checked against a charge irimi never read. Saying so is `NOT_EVALUABLE` (#45).
+        return NOT_EVALUABLE
     charge_id = proposal.posted.get("charge")
     if document.get("refunded") is True:
         return Rejection(
@@ -354,7 +356,12 @@ def _refund_verdict(proposal: Proposal, document: Any) -> Rejection | None:
     charged, refunded = document.get("amount"), document.get("amount_refunded")
     # Both sides of the subtraction must be the charge's own numbers. `_int` reads a missing or
     # malformed one as 0, which would make every refund "too large" - a false rejection (#45).
-    if not (_is_int(amount) and _is_int(charged) and _is_int(refunded)):
+    if not (_is_int(charged) and _is_int(refunded)):
+        return NOT_EVALUABLE
+    if not _is_int(amount):
+        # A refund posting no `amount` is Stripe's "refund whatever is left", which is never over
+        # the remaining amount; one posting a malformed amount is the real service's to refuse,
+        # not irimi's to guess at. Neither is a failure to evaluate the charge (#45).
         return None
     remaining = _int(charged) - _int(refunded)
     if _int(amount) > remaining:

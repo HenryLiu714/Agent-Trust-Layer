@@ -8,8 +8,10 @@ the same functions over a recording (use case 1).
 
 from irimi.services import slack, stripe
 from irimi.services.model import (
+    NOT_EVALUABLE,
     Applied,
     Check,
+    NotEvaluable,
     Probe,
     Proposal,
     QueryRewrite,
@@ -24,6 +26,8 @@ __all__ = [
     "Applied",
     "Check",
     "EFFECTS",
+    "NOT_EVALUABLE",
+    "NotEvaluable",
     "PRECONDITIONS",
     "Probe",
     "Proposal",

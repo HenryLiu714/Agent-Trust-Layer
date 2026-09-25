@@ -1330,6 +1330,28 @@ def test_a_refund_of_a_fully_refunded_charge_is_answered_with_stripes_own_refusa
     assert [(r.method, r.path) for r in reader.asked] == [("GET", "/v1/charges/ch_REAL")]
 
 
+def test_stripe_python_raises_invalid_request_error_off_the_modeled_refusal():
+    """#45's done-when, against the real SDK: the modeled body is not merely Stripe-shaped, it is
+    what makes stripe-python raise the error the agent's `except` clause is already written for.
+
+    `stripe` is not a dependency of this project, so this is skipped in the plain dev venv;
+    `uv sync --group examples` installs it, the same note as
+    `test_stripe_python_parses_the_faked_refund`. The SDK's own error factory is used rather than
+    a hand-rolled mapping, so a change in how stripe-python classifies a 400 fails here.
+    """
+    pytest.importorskip("stripe")
+    import stripe
+    from stripe._api_requestor import _APIRequestor
+
+    ans = _checked(_reader(_json(200, _charge(refunded_so_far=4900))), _refund_request())
+    raw = ans.response.body.decode()
+    error = json.loads(raw)["error"]
+    raised = _APIRequestor().specific_v1_api_error(raw, ans.response.status, raw, {}, error)
+    assert isinstance(raised, stripe.InvalidRequestError)
+    assert raised.code == "charge_already_refunded"
+    assert raised.http_status == 400
+
+
 def test_a_policy_with_no_reader_does_not_do_l3_at_all():
     """Scope call 14. A bare `ShadowPolicy()` asks nothing, so it claims nothing: the refund is
     the ordinary L1 fixture and the outcome is None, not `not_evaluable`. This is the test that
@@ -1513,6 +1535,28 @@ def test_a_slack_post_to_a_channel_id_is_probed_with_conversations_info():
     assert json.loads(probe.body) == {"channel": "C0123"}
     assert dict(probe.headers)["content-type"] == "application/json; charset=utf-8"
     assert ans.issued[0].operation == "conversations.info"
+
+
+@pytest.mark.parametrize("error", ["missing_scope", "invalid_auth", "ratelimited"])
+def test_a_slack_error_irimi_cannot_read_is_not_evaluable_and_the_post_is_still_faked(error):
+    """Slack answers these at HTTP 200, so the policy's own non-200 rule never sees them. Before
+    the verdict had a third state they were recorded `passed`, and the summary then printed
+    `L3 preconditions passed` for a write irimi had not managed to check at all (#45)."""
+    reader = _reader(_json(200, {"ok": False, "error": error}))
+    ans = _checked(reader, _slack_post("C0123"))
+    assert ans.precondition == "not_evaluable"
+    assert ans.answered_by == "fake-L1", "the write is still faked at its own level"
+    assert ans.rejection_code == ""
+    assert len(reader.asked) == 1, "asked once, and not retried"
+    assert ans.issued[0].issued_by == "engine"
+
+
+def test_a_charge_the_check_could_not_read_is_not_evaluable_rather_than_passed():
+    """The Stripe half of the same rule: a 200 that is not a charge irimi can read."""
+    reader = _reader(_json(200, {"object": "list", "data": []}))
+    ans = _checked(reader, _refund_request())
+    assert ans.precondition == "not_evaluable"
+    assert ans.answered_by == "fake-L1"
 
 
 def test_a_slack_post_to_an_archived_channel_is_refused_the_way_slack_refuses_it():

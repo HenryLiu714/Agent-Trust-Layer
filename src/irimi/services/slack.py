@@ -37,7 +37,17 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from irimi.services.model import Applied, Check, Probe, Proposal, Read, Rejection, Write
+from irimi.services.model import (
+    NOT_EVALUABLE,
+    Applied,
+    Check,
+    NotEvaluable,
+    Probe,
+    Proposal,
+    Read,
+    Rejection,
+    Write,
+)
 
 SERVICE = "slack"
 # The body parameters each overlaid read understands. Anything else means irimi cannot say where the
@@ -480,26 +490,31 @@ def _post_probe(proposal: Proposal) -> Probe | None:
     )
 
 
-def _post_verdict(proposal: Proposal, document: Any) -> Rejection | None:
-    """`channel_not_found`, `is_archived`, `not_in_channel`, or None."""
+def _post_verdict(proposal: Proposal, document: Any) -> Rejection | NotEvaluable | None:
+    """`channel_not_found`, `is_archived`, `not_in_channel`, `NOT_EVALUABLE`, or None."""
     if not isinstance(document, dict):
-        return None
+        return NOT_EVALUABLE
     if document.get("ok") is False:
         if document.get("error") == "channel_not_found":
             return _rejection("channel_not_found")
-        # An error irimi does not model says nothing about whether the post would have succeeded,
-        # and inventing a rejection from it is the failure mode this check exists to avoid.
-        return None
+        # An error irimi does not model - `missing_scope`, `invalid_auth`, `ratelimited` - says
+        # nothing about whether the post would have succeeded, and inventing a rejection from it
+        # is the failure mode this check exists to avoid. It is not a pass either: #45 names a
+        # missing scope as the `not_evaluable` case, and Slack sends one at HTTP 200, so the
+        # policy's own non-200 rule can never catch it (#45).
+        return NOT_EVALUABLE
     channel = document.get("channel")
-    if isinstance(channel, dict):
-        if channel.get("is_archived") is True:
-            return _rejection("is_archived")
-        # `is_member` absent is not evidence of anything, and a DM or MPIM has no membership to be
-        # outside of - so only an explicit `false` on a channel or a private group rejects.
-        if channel.get("is_member") is False and (
-            channel.get("is_channel") is True or channel.get("is_group") is True
-        ):
-            return _rejection("not_in_channel")
+    if not isinstance(channel, dict):
+        # A success envelope with no channel object is not one this check can read either.
+        return NOT_EVALUABLE
+    if channel.get("is_archived") is True:
+        return _rejection("is_archived")
+    # `is_member` absent is not evidence of anything, and a DM or MPIM has no membership to be
+    # outside of - so only an explicit `false` on a channel or a private group rejects.
+    if channel.get("is_member") is False and (
+        channel.get("is_channel") is True or channel.get("is_group") is True
+    ):
+        return _rejection("not_in_channel")
     return None
 
 

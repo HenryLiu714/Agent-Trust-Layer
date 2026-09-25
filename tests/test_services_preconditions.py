@@ -1,14 +1,14 @@
 """The L3 checks as pure functions: the probe each write needs, and the verdict on its answer (#45).
 
-Nothing here issues a read or decides evaluability - that is the policy's. These pin what a check
-makes of a document it is handed, and in particular that it never rejects on one it did not
-understand.
+Nothing here issues a read - that is the policy's. These pin what a check makes of a document it is
+handed: it never rejects on one it did not understand, and it never passes on one either. A verdict
+has three answers, and `NOT_EVALUABLE` is the one that says irimi asked and did not find out (#45).
 """
 
 import pytest
 
 from irimi import services
-from irimi.services import Probe, Proposal, slack, stripe
+from irimi.services import NOT_EVALUABLE, Probe, Proposal, slack, stripe
 
 CHARGE_ID = "ch_3QTESTONLY000000"
 
@@ -106,10 +106,17 @@ def test_a_boolean_amount_is_not_an_amount():
     [{"amount": None}, {"amount": "4900"}, {"amount_refunded": None}],
     ids=["no-amount", "string-amount", "null-amount-refunded"],
 )
-def test_a_charge_whose_amounts_are_not_numbers_is_never_too_small(fields):
+def test_a_charge_whose_amounts_are_not_numbers_is_not_evaluable(fields):
     # Read as 0, a missing charge amount would make every refund "too large": a false rejection.
+    # Passing instead would claim a comparison irimi could not make, so it says neither (#45).
     document = _charge(**fields)
-    assert stripe.CHARGE_REFUNDABLE.verdict(_refund(amount=100), document) is None
+    assert stripe.CHARGE_REFUNDABLE.verdict(_refund(amount=100), document) is NOT_EVALUABLE
+
+
+def test_a_refund_posting_no_amount_passes_because_stripe_refunds_what_is_left():
+    """Absent `amount` is not an unreadable one: it is Stripe's "refund the remainder", which is
+    never over the remaining amount (#45)."""
+    assert stripe.CHARGE_REFUNDABLE.verdict(_refund(), _charge(amount_refunded=100)) is None
 
 
 def test_a_refund_naming_only_a_payment_intent_has_no_probe():
@@ -133,8 +140,10 @@ def test_a_charge_that_would_leave_the_path_or_is_not_an_id_has_no_probe(charge)
     ],
     ids=["not-a-charge", "no-amount-refunded", "a-list", "none"],
 )
-def test_a_document_irimi_did_not_understand_passes_rather_than_rejecting(document):
-    assert stripe.CHARGE_REFUNDABLE.verdict(_refund(amount=99999), document) is None
+def test_a_document_irimi_did_not_understand_is_neither_rejected_nor_passed(document):
+    """A false rejection is the untruth this path exists to prevent; a false pass is the other
+    half of it, because the summary prints `L3 preconditions passed` off one (#45)."""
+    assert stripe.CHARGE_REFUNDABLE.verdict(_refund(amount=99999), document) is NOT_EVALUABLE
 
 
 # ------------------------------------------------------------------------------------ slack
@@ -191,9 +200,16 @@ def test_is_member_absent_is_not_evidence_and_passes():
     assert slack.CHANNEL_POSTABLE.verdict(_post("C0123"), _info(is_channel=True)) is None
 
 
-def test_an_error_irimi_does_not_model_passes():
-    document = {"ok": False, "error": "ratelimited"}
-    assert slack.CHANNEL_POSTABLE.verdict(_post("C0123"), document) is None
+@pytest.mark.parametrize("error", ["ratelimited", "missing_scope", "invalid_auth"])
+def test_an_error_irimi_does_not_model_is_not_evaluable(error):
+    """#45 names a missing scope as the `not_evaluable` case, and Slack sends one at HTTP 200 -
+    so the policy's own non-200 rule can never catch it and the verdict must say so."""
+    document = {"ok": False, "error": error}
+    assert slack.CHANNEL_POSTABLE.verdict(_post("C0123"), document) is NOT_EVALUABLE
+
+
+def test_a_success_envelope_with_no_channel_object_is_not_evaluable():
+    assert slack.CHANNEL_POSTABLE.verdict(_post("C0123"), {"ok": True}) is NOT_EVALUABLE
 
 
 def test_a_healthy_channel_passes():

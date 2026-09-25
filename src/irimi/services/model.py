@@ -104,16 +104,32 @@ class Rejection:
 
 
 @dataclass(frozen=True)
+class NotEvaluable:
+    """A verdict's third answer: the probe came back and says nothing this check can read (#45).
+
+    `Rejection` is "the service would have refused this write"; None is "it would have taken it".
+    This is neither, and it is the state #45 names for a missing scope: irimi put the question and
+    did not find out. Recording that as passed would claim a check that never ran - the summary
+    prints `L3 preconditions passed` off it - and rejecting would invent a refusal the service
+    never made. It carries nothing, because the reason belongs in the log line, not in the trace.
+    """
+
+
+NOT_EVALUABLE = NotEvaluable()
+
+
+@dataclass(frozen=True)
 class Check:
     """A precondition: the read it needs, and what it makes of the answer.
 
     `probe` returns None when this write cannot be checked at all - the policy records
     `not_evaluable` and fakes the write at L2. `verdict` is handed the probe's document with the
-    run's own writes already applied to it, and returns a `Rejection` or None for passed.
+    run's own writes already applied to it, and returns a `Rejection`, `NOT_EVALUABLE`, or None
+    for passed.
     """
 
     probe: Callable[[Proposal], "Probe | None"]
-    verdict: Callable[[Proposal, Any], "Rejection | None"]
+    verdict: Callable[[Proposal, Any], "Rejection | NotEvaluable | None"]
 
 
 # `(read, parsed body, the run's writes for this service) -> Applied`.

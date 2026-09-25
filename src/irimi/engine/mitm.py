@@ -55,6 +55,7 @@ class _Pending:
     target: str = ""  # the answer target this flow was pointed at; "" when irimi answered it
     precondition: PreconditionOutcome | None = None  # what L3 decided before the fake (#45)
     rejection_code: str = ""  # the machine code of an L3 rejection; "" for everything else
+    would_fire: tuple[str, ...] = ()  # the webhooks an accepted write would have sent (#47)
 
 
 @dataclass(frozen=True)
@@ -360,6 +361,7 @@ class IrimiAddon:
             target,
             precondition=ans.precondition,
             rejection_code=ans.rejection_code,
+            would_fire=ans.would_fire,
         )
         if response is not None:
             flow.response = _to_mitm_response(response)
@@ -574,6 +576,7 @@ class IrimiAddon:
             overlay=overlay_fidelity,
             precondition=pending.precondition,
             rejection_code=pending.rejection_code,
+            would_fire=pending.would_fire,
         )
         # The write log is what the overlay replays onto live reads, so it holds *writes irimi
         # itself authored*: exchanges that changed state somewhere the real service does not know
@@ -661,6 +664,7 @@ class IrimiAddon:
             target=pending.target,
             precondition=pending.precondition,
             rejection_code=pending.rejection_code,
+            would_fire=pending.would_fire,
         )
         self._finish(ex)
 

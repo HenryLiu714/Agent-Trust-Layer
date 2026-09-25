@@ -309,7 +309,7 @@ def test_an_overlaid_read_is_a_real_read_and_says_it_shows_the_run_s_writes():
     sent, though, so the line says that too (#43)."""
     rows = [_exchange(), _exchange(answered_by="overlay")]
     line = _block(summary_lines("7f3a", rows, 0.0, _maps()), "api.stripe.com")
-    assert line == "  api.stripe.com  2 reads  1 showing this run's writes"
+    assert line == "  api.stripe.com  2 reads (1 showing this run's writes)"
 
 
 def test_an_overlaid_read_is_counted_live_and_never_virtualized():

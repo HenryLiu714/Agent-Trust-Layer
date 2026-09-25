@@ -238,11 +238,12 @@ def _host_line(host: str, rows: Sequence[Exchange], width: int) -> str:
     # An OVERLAID read is a real read (#43): it went to the real service and came back, and irimi
     # then wrote the run's own faked writes into the body. Leaving it out of this count told the
     # reader a read they really made never happened, which is the same class of untruth as #20
-    # below. It is counted here and named separately, because the body is not what Stripe sent.
+    # below. It is counted here and its count qualifies `N reads` in brackets, because the body is
+    # not what Stripe sent (#48).
     #
     # An engine-issued read is a real read that the AGENT did not make (#45). Counting it in
-    # `N reads` would inflate the one number this tool rests on. #48 owns the final phrasing of
-    # this block; this is the honest minimum until then.
+    # `N reads` would inflate the one number this tool rests on, so it is a different number in
+    # its own phrase, never inside the headline's brackets (#48).
     live_reads = sum(
         1
         for ex in rows
@@ -250,9 +251,10 @@ def _host_line(host: str, rows: Sequence[Exchange], width: int) -> str:
     )
     overlaid_reads = sum(1 for ex in rows if ex.kind == "read" and ex.answered_by == "overlay")
     if live_reads or overlaid_reads:
-        phrases.append(_plural(live_reads + overlaid_reads, "read"))
-    if overlaid_reads:
-        phrases.append(f"{overlaid_reads} showing this run's writes")
+        reads = _plural(live_reads + overlaid_reads, "read")
+        if overlaid_reads:
+            reads = f"{reads} ({overlaid_reads} showing this run's writes)"
+        phrases.append(reads)
     engine_reads = sum(1 for ex in rows if ex.issued_by == "engine")
     if engine_reads:
         phrases.append(_plural(engine_reads, "engine read"))

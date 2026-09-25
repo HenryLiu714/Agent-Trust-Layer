@@ -47,11 +47,24 @@ uv run python examples/refund_agent/seed.py         # once, outside shadow: seed
 uv run irimi shadow -- python examples/refund_agent/agent.py
 ```
 
-`tests/test_phase_exit.py` has a live version of that run which skips unless `STRIPE_API_KEY` is
-set. Run it by hand before closing a phase:
+`tests/test_phase_exit.py` holds three tests: two hermetic criteria, one per phase, which run on
+every `uv run pytest -q`, and one live check of that run, which skips unless `STRIPE_API_KEY` is
+set and the `examples` group is installed. Run the live check by hand before closing a phase:
 
 ```
 STRIPE_API_KEY=sk_test_... uv run pytest -q -rs tests/test_phase_exit.py
+```
+
+With `SLACK_BOT_TOKEN` and `SLACK_CHANNEL` also set, the agent posts to Slack and reads the channel
+back, and the check asserts the post is in what it read. Give `SLACK_CHANNEL` as a channel **id**
+(`C0123`), not `#general`: that is what makes the read-back `overlay: full`. `chat.postMessage`
+accepts the name but `conversations.history` wants the id, and irimi's faked post echoes back the
+spelling it was sent, so a post to `#general` is read back from a channel irimi cannot match to it
+(#44).
+
+```
+STRIPE_API_KEY=sk_test_... SLACK_BOT_TOKEN=xoxb-... SLACK_CHANNEL=C0123 \
+  uv run pytest -q -rs tests/test_phase_exit.py
 ```
 
 ## Where things are

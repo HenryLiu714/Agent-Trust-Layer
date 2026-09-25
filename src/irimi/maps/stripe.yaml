@@ -40,6 +40,11 @@ routes:
     # Checked against the real charge, with this run's own faked refunds applied to it, before
     # the refund is faked (#45). Names services.PRECONDITIONS.
     precondition: charge_refundable
+    # The webhooks Stripe would have sent had this refund been real (#47). Listed on the exchange
+    # as `would_fire` and delivered by nothing; the baseline report is what says they did not fire.
+    fires:
+      - refund.created
+      - charge.refunded
     ids:
       id: re_
       balance_transaction: txn_
@@ -76,6 +81,8 @@ routes:
     kind: write
     human: update customer {customer}
     fixture: customer
+    fires:
+      - customer.updated
     ids:
       id: cus_
 
@@ -93,6 +100,8 @@ routes:
     kind: write
     human: cancel {payment_intent}
     fixture: payment_intent
+    fires:
+      - payment_intent.canceled
     ids:
       id: pi_
 

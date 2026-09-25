@@ -27,6 +27,7 @@ from irimi.exchange import (
     Exchange,
     Headers,
     OverlayFidelity,
+    PreconditionOutcome,
     Request,
     Response,
 )
@@ -51,6 +52,8 @@ class _Pending:
     door: Door
     flags: tuple[str, ...]  # what the policy attached to its answer, e.g. fidelity:L0
     target: str = ""  # the answer target this flow was pointed at; "" when irimi answered it
+    precondition: PreconditionOutcome | None = None  # what L3 decided before the fake (#45)
+    rejection_code: str = ""  # the machine code of an L3 rejection; "" for everything else
 
 
 @dataclass(frozen=True)
@@ -346,9 +349,26 @@ class IrimiAddon:
                     _target_failed(f"answer target {target!r} could not be applied: {exc}"),
                     flags + (TARGET_FAILED_FLAG,),
                 )
-        flow.metadata[META_KEY] = _Pending(req, cls, run_id, ans.answered_by, door, flags, target)
+        flow.metadata[META_KEY] = _Pending(
+            req,
+            cls,
+            run_id,
+            ans.answered_by,
+            door,
+            flags,
+            target,
+            precondition=ans.precondition,
+            rejection_code=ans.rejection_code,
+        )
         if response is not None:
             flow.response = _to_mitm_response(response)
+        for ex in ans.issued:
+            # Recorded on the loop, like every other exchange, so the store and the per-exchange
+            # line stay single-threaded. They are reads irimi made on its own account; they never
+            # reach the agent and they are never writes. Last, once the write's own answer is on
+            # the flow: a store or `on_exchange` that raised any earlier would escape this hook
+            # with no response set, and mitmproxy would forward the write (#45).
+            self._finish(ex)
 
     def _decide(self, req: Request, writes: tuple[Exchange, ...]) -> _Decision:
         """The whole decision, on a worker thread, with no flow in sight."""
@@ -551,6 +571,8 @@ class IrimiAddon:
             door=pending.door,
             target=pending.target,
             overlay=overlay_fidelity,
+            precondition=pending.precondition,
+            rejection_code=pending.rejection_code,
         )
         # The write log is what the overlay replays onto live reads, so it holds *writes irimi
         # itself authored*: exchanges that changed state somewhere the real service does not know
@@ -566,10 +588,16 @@ class IrimiAddon:
         # *dialled* never reaches here - `error()` handles that one and does not touch the log -
         # but a target irimi *refused* is answered in `request()`, which does set `_Pending`, so
         # without this clause it landed here and the overlay replayed a write that never happened.
+        #
+        # A REJECTED WRITE IS NOT A WRITE (#45). L3 said the real service would have refused it,
+        # and the agent got that refusal. Replaying it onto later reads would show the agent a
+        # refund that neither Stripe nor irimi ever made - the overlay would apply an effect for
+        # a write that, in every world, did not happen.
         if (
             ex.kind not in LIVE_KINDS
             and ex.answered_by not in ("live", "delegated")
             and TARGET_FAILED_FLAG not in ex.flags
+            and ex.precondition != "rejected"
         ):
             self.write_log.append(ex)
         out = pipeline.respond(ex)
@@ -622,6 +650,8 @@ class IrimiAddon:
             extra_flags=extra_flags,
             door=pending.door,
             target=pending.target,
+            precondition=pending.precondition,
+            rejection_code=pending.rejection_code,
         )
         self._finish(ex)
 

@@ -1,12 +1,13 @@
 """The Phase 1 stamping invariants (#12), in one file, written to fail loudly.
 
-Four claims irimi makes about every exchange, checked against a real run rather than against a
+Five claims irimi makes about every exchange, checked against a real run rather than against a
 hand-built list, and each one demonstrated to fail on a policy that breaks it:
 
   (a) every answer the engine decided carries `Irimi-Answered-By`, and no live forward does;
   (b) nothing carrying that header is stamped anything but `unvalidated`;
   (c) `ShadowPolicy` cannot produce `validated` at all - that label is reserved for record mode;
-  (d) a `delegated` exchange never reached the host the agent addressed.
+  (d) a `delegated` exchange never reached the host the agent addressed;
+  (e) a write L3 rejected never enters the write log, and a read irimi issued is never a write.
 
 `stamping_violations` is the machinery for (a) and (b): it returns a list of strings rather than
 asserting, so the same function can be asserted empty for an honest run and non-empty for a
@@ -19,7 +20,8 @@ import http.client
 import json
 import threading
 from collections.abc import Sequence
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 import pytest
 
@@ -27,7 +29,7 @@ from irimi import ca, paths, pipeline, servicemap
 from irimi.engine import EngineConfig
 from irimi.engine.mitm import MitmEngine
 from irimi.exchange import KINDS, Exchange, Request, Response
-from irimi.overlay import NoOverlay
+from irimi.overlay import NoOverlay, Overlaid
 from irimi.pipeline import ANSWERED_BY_HEADER, annotate, respond
 from irimi.policy import Answer, ShadowPolicy
 from irimi.store import NullStore
@@ -140,7 +142,7 @@ def _maps(tmp_path, monkeypatch, targets=()):
     return servicemap.load(cwd=tmp_path, maps_dir=maps_dir, targets=targets)
 
 
-def _run(tmp_path, monkeypatch, maps, calls, policy=None):
+def _run(tmp_path, monkeypatch, maps, calls, policy=None, overlay=None):
     """Serve `maps`, let `calls(port)` reach the proxy, and hand back what the run produced."""
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
     p = ca.ca_paths()
@@ -156,7 +158,11 @@ def _run(tmp_path, monkeypatch, maps, calls, policy=None):
     )
     seen: list[Exchange] = []
     eng = MitmEngine(
-        cfg, policy or ShadowPolicy(), NullStore(), NoOverlay(), on_exchange=seen.append
+        cfg,
+        policy or ShadowPolicy(),
+        NullStore(),
+        overlay or NoOverlay(),
+        on_exchange=seen.append,
     )
     loop = asyncio.new_event_loop()
     thread = threading.Thread(target=lambda: loop.run_until_complete(eng.run()), daemon=True)
@@ -492,3 +498,159 @@ def test_shadow_mode_is_never_built_without_a_reader(tmp_path, monkeypatch):
     assert not isinstance(engine.policy.reader, NoReader)
     assert engine.policy.maps is run.config.maps
     assert engine.policy.maps is index
+
+
+# ------------------------------------------------------------------------------------- (e)
+
+# The shipped Stripe map's two routes that L3 touches, claimed on loopback: the refund that names
+# `charge_refundable`, and the charge read its precondition probe has to classify as.
+STRIPE_MAP = """
+version: 1
+service: stripe
+hosts:
+  - 127.0.0.1
+routes:
+  - match:
+      method: POST
+      path: /v1/refunds
+    operation: refunds.create
+    kind: write
+    human: refund {amount} on {charge}
+    fixture: refund
+    precondition: charge_refundable
+    ids:
+      id: re_
+  - match:
+      method: GET
+      path: /v1/charges/{charge}
+    operation: charges.retrieve
+    kind: read
+    human: get charge {charge}
+"""
+
+
+class _Charges(BaseHTTPRequestHandler):
+    """Real Stripe state for L3: `ch_REAL1` is refundable, `ch_FULL1` is fully refunded."""
+
+    def do_GET(self):
+        charge_id = self.path.rsplit("/", 1)[-1]
+        refunded = 4900 if charge_id == "ch_FULL1" else 0
+        body = json.dumps(
+            {
+                "id": charge_id,
+                "object": "charge",
+                "amount": 4900,
+                "amount_refunded": refunded,
+                "refunded": refunded == 4900,
+                "currency": "usd",
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+class _LogCapturingOverlay:
+    """Hands every read back untouched and keeps each write log it was given. The addon's
+    `write_log` is its own; what an overlay is handed is the only view of it a test should take."""
+
+    def __init__(self) -> None:
+        self.logs: list[tuple[Exchange, ...]] = []
+
+    def __call__(self, write_log, read_request, upstream_response):
+        self.logs.append(tuple(write_log))
+        return Overlaid(upstream_response)
+
+    def rewrite(self, write_log, read_request):
+        self.logs.append(tuple(write_log))
+        return read_request
+
+
+def _l3_run(tmp_path, monkeypatch):
+    """A refund L3 passes, one it rejects, then a read, through an engine holding the real
+    reader. Hands back the exchanges and the overlay that watched the write log."""
+    from irimi.policy import UpstreamReader
+
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "maps-home"))
+    maps_dir = tmp_path / "maps"
+    maps_dir.mkdir(exist_ok=True)
+    (maps_dir / "stripe.yaml").write_text(STRIPE_MAP)
+    maps = servicemap.load(cwd=tmp_path, maps_dir=maps_dir)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Charges)
+    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
+    stripe = srv.server_address[1]
+    overlay = _LogCapturingOverlay()
+
+    def refund(port, charge):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        conn.request(
+            "POST",
+            f"http://127.0.0.1:{stripe}/v1/refunds",
+            body=f"charge={charge}&amount=100".encode(),
+            headers={
+                "host": f"127.0.0.1:{stripe}",
+                "content-type": "application/x-www-form-urlencoded",
+            },
+        )
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+        return resp.status
+
+    def calls(port):
+        return [
+            refund(port, "ch_REAL1"),
+            refund(port, "ch_FULL1"),
+            _via_proxy(port, "GET", f"http://127.0.0.1:{stripe}/v1/charges/ch_REAL1")[0],
+        ]
+
+    try:
+        seen, replies = _run(
+            tmp_path,
+            monkeypatch,
+            maps,
+            calls,
+            policy=ShadowPolicy(reader=UpstreamReader(), maps=maps),
+            overlay=overlay,
+        )
+    finally:
+        srv.shutdown()
+    assert replies == [200, 400, 200]
+    return seen, overlay
+
+
+def test_a_rejected_write_is_never_in_the_write_log(tmp_path, monkeypatch):
+    """L3 said the real service would have refused it, and the agent got that refusal. In the
+    write log it would be replayed onto later reads - an effect for a write that happened in no
+    world. Pinned at the log the overlay is handed, not at one of its downstream effects; a passed
+    refund goes first so the log is not empty for the trivial reason."""
+    seen, overlay = _l3_run(tmp_path, monkeypatch)
+    assert [ex.precondition for ex in seen if ex.kind == "write"] == ["passed", "rejected"]
+    assert overlay.logs, "the overlay was never handed the write log"
+    for log in overlay.logs:
+        assert [ex.precondition for ex in log] == ["passed"]
+
+
+def engine_issued_violations(exchanges: Sequence[Exchange]) -> list[str]:
+    """Every exchange irimi issued on its own account that is not a read, named one per line.
+    A precondition read that were anything else would be irimi performing a write nobody asked
+    for, in a tool whose promise is that writes are virtual."""
+    return [
+        f"(e) engine-issued {ex.kind}: {ex.request.method} {ex.request.path}"
+        for ex in exchanges
+        if ex.issued_by == "engine" and ex.kind != "read"
+    ]
+
+
+def test_an_engine_issued_exchange_is_never_a_write(tmp_path, monkeypatch):
+    seen, _ = _l3_run(tmp_path, monkeypatch)
+    assert [ex.issued_by for ex in seen].count("engine") == 2
+    assert engine_issued_violations(seen) == []
+    # And the check can fail: an engine-issued write is caught.
+    forged = replace(_exchange("fake-L0", kind="write"), issued_by="engine")
+    assert engine_issued_violations([forged]) != []

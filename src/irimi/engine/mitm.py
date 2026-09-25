@@ -421,7 +421,7 @@ class IrimiAddon:
         # The overlay stays off for a delegated read: the target owns that service's state, and
         # layering our own minted objects over it would corrupt read-after-write there (D20).
         if not streamed and pending.answered_by == "live" and pending.classification.kind == "read":
-            resp = self.overlay(self.write_log, pending.request, upstream)
+            resp = self.overlay(self.write_log, pending.request, upstream).response
         ex = pipeline.annotate(
             pending.request,
             resp,

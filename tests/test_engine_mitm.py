@@ -20,7 +20,7 @@ from irimi import ca, delegation, paths, pipeline, servicemap
 from irimi.engine import EngineConfig, EngineStartError
 from irimi.engine.mitm import IrimiAddon, MitmEngine
 from irimi.exchange import DECISION_FAILED_FLAG, UNCLASSIFIED_FLAG, Response
-from irimi.overlay import NoOverlay
+from irimi.overlay import NoOverlay, Overlaid
 from irimi.policy import ShadowPolicy
 from irimi.store import NullStore
 
@@ -370,7 +370,7 @@ def test_undecodable_upstream_body_is_still_recorded(engine, upstream):
 
 def test_overlay_output_reaches_the_client(tmp_path, monkeypatch, upstream):
     def overlay(write_log, read_request, upstream_response):
-        return Response(200, (("content-type", "text/plain"),), b"OVERLAID")
+        return Overlaid(Response(200, (("content-type", "text/plain"),), b"OVERLAID"))
 
     eng, seen, stop = _start(_config(tmp_path, monkeypatch), overlay=overlay)
     try:
@@ -383,7 +383,7 @@ def test_overlay_output_reaches_the_client(tmp_path, monkeypatch, upstream):
 
 def test_repeated_headers_survive_a_local_answer(tmp_path, monkeypatch, upstream):
     def overlay(write_log, read_request, upstream_response):
-        return Response(200, (("set-cookie", "a=1"), ("set-cookie", "b=2")), b"")
+        return Overlaid(Response(200, (("set-cookie", "a=1"), ("set-cookie", "b=2")), b""))
 
     eng, seen, stop = _start(_config(tmp_path, monkeypatch), overlay=overlay)
     try:
@@ -817,10 +817,12 @@ class _RewritingOverlay:
 
     def __call__(self, write_log, read_request, upstream_response):
         self.calls.append(read_request.path)
-        return Response(
-            status=200,
-            headers=(("content-type", "application/json"),),
-            body=b'{"overlaid": true}',
+        return Overlaid(
+            Response(
+                status=200,
+                headers=(("content-type", "application/json"),),
+                body=b'{"overlaid": true}',
+            )
         )
 
 

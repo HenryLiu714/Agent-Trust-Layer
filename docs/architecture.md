@@ -50,7 +50,7 @@ you to place it.
 | 2 | `reverse_door` | The `/<host>/<path>` door for SDKs that ignore proxy variables. |
 | 3 | `delegation` | Answer targets (design D20): which target answers a request, where it is sent, what it may never be, which headers it may not carry. |
 | 3 | `echo` | The body a locally answered write gets. L0: form and JSON reflection, minted ids, Slack's envelope. L1: the route's fixture with the request's own fields written over it. Also `observe_read`, the one seam where a forwarded read's body teaches the faker something (a Slack `ts` a minted one must sort after). |
-| 3 | `services/` | What a faked write does to a later live read, per service, as plain functions over plain data (#43). `model` is the `Write` / `Applied` / `Rewritten` vocabulary; `stripe` is the effects table. Pure: no clock, no minting, no I/O, so Phase 5 replay runs the same functions over a recording. |
+| 3 | `services/` | What a faked write does to a later live read, per service, as plain functions over plain data (#43). `model` is the `Read` / `Write` / `Applied` / `Rewritten` vocabulary; `stripe` and `slack` are the effects tables (#44). Pure: no clock, no minting, no I/O, so Phase 5 replay runs the same functions over a recording. |
 | 4 | `policy` | `AnswerPolicy` and `ShadowPolicy`: the decision, and only the decision. |
 | 4 | `overlay` | The `Overlay` seam and `ServiceOverlay`, which applies `services`' effect tables to a live read and translates a cursor naming a minted id before the read is forwarded. `NoOverlay` stays, for tests and for a mode with no overlay. The module's header lists the two hazards every overlay must respect. |
 | 4 | `store` | The `TraceStore` seam. `NullStore` today; Phase 3 replaces it. |

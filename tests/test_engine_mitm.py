@@ -1615,13 +1615,13 @@ class _OverlayDouble:
         return self._rewrite(read_request)
 
 
-def _read_via_proxy(proxy_port, url, extra_headers=None):
-    """A GET through the proxy that returns the response headers too: the stamp is on the wire
-    only, never on the recorded exchange."""
+def _read_via_proxy(proxy_port, url, extra_headers=None, method="GET", body=None):
+    """A read through the proxy that returns the response headers too: the stamp is on the wire
+    only, never on the recorded exchange. A GET unless told otherwise: Slack reads are POSTs."""
     conn = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=10)
     headers = {"host": url.split("/")[2]}
     headers.update(extra_headers or {})
-    conn.request("GET", url, headers=headers)
+    conn.request(method, url, body=body, headers=headers)
     resp = conn.getresponse()
     data = resp.read()
     received = {k.lower(): v for k, v in resp.getheaders()}
@@ -2102,3 +2102,174 @@ def test_a_payment_intent_reread_after_a_faked_cancel_shows_it_canceled(stripe_s
     assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
     assert seen[-1].overlay == "full"
     assert [method for method, _ in _StripeStub.seen] == ["GET"], "a faked write reached Stripe"
+
+
+# ------------------------------------------------- the Slack overlay, end to end (#44)
+
+# The loopback upstream claimed as `slack`, with the shipped map's two routes that matter here.
+# `verbs: post-only` because a Slack read is a POST, as it is in `maps/slack.yaml`; `fixture:
+# message` resolves against the shipped Slack fixtures, keyed by the service name.
+SLACK_OVERLAY_MAP = """
+version: 1
+service: slack
+verbs: post-only
+hosts:
+  - 127.0.0.1
+routes:
+  - match:
+      method: POST
+      path: /api/chat.postMessage
+    operation: chat.postMessage
+    kind: write
+    human: post to {channel}
+    fixture: message
+  - match:
+      method: POST
+      path: /api/conversations.history
+    operation: conversations.history
+    kind: read
+    human: read the {channel} history
+
+  - match:
+      method: POST
+      path: /api/conversations.replies
+    operation: conversations.replies
+    kind: read
+    human: read a thread in {channel}
+"""
+SLACK_JSON = "application/json;charset=utf-8"  # what slack_sdk sends (#44)
+REAL_SLACK_TS = "1700000000.000100"
+
+
+REAL_SLACK_MESSAGE = {"type": "message", "ts": REAL_SLACK_TS, "text": "real", "user": "U1"}
+
+
+class _SlackStub(BaseHTTPRequestHandler):
+    """A Slack-shaped upstream: one real message, in whatever channel or thread is asked about and
+    with no replies of its own. Only the two reads may reach it; a `chat.postMessage` here is a
+    faked write that escaped."""
+
+    seen: list = []  # (method, path) of every request
+
+    def do_POST(self):
+        _SlackStub.seen.append(("POST", self.path))
+        if self.path not in ("/api/conversations.history", "/api/conversations.replies"):
+            self.send_response(500)
+            self.send_header("content-length", "0")
+            self.end_headers()
+            return
+        self.rfile.read(int(self.headers.get("content-length", 0)))
+        document = {"ok": True, "messages": [dict(REAL_SLACK_MESSAGE)], "has_more": False}
+        body = json.dumps(document).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json; charset=utf-8")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):  # keep pytest output clean
+        pass
+
+
+@pytest.fixture
+def slack_stub(tmp_path, monkeypatch):
+    """`stripe_stub`'s twin over SLACK_OVERLAY_MAP. Yields (proxy port, stub port, exchanges)."""
+    from irimi.overlay import ServiceOverlay
+
+    _SlackStub.seen = []
+    srv = HTTPServer(("127.0.0.1", 0), _SlackStub)
+    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
+    maps = _maps(tmp_path, monkeypatch, doc=SLACK_OVERLAY_MAP)
+    eng, seen, stop = _start(
+        _config(tmp_path, monkeypatch, maps=maps), overlay=ServiceOverlay(maps)
+    )
+    yield eng.listen_port(), srv.server_address[1], seen
+    stop()
+    srv.shutdown()
+
+
+def _slack_call(proxy, stub, method, params):
+    """One Slack Web API call through the proxy, as slack_sdk sends it: a JSON POST."""
+    return _read_via_proxy(
+        proxy,
+        f"http://127.0.0.1:{stub}/api/{method}",
+        extra_headers={"content-type": SLACK_JSON},
+        method="POST",
+        body=json.dumps(params).encode(),
+    )
+
+
+def test_a_slack_history_read_after_a_faked_post_shows_the_post_first(slack_stub):
+    proxy, stub, seen = slack_stub
+    status, _, data = _slack_call(
+        proxy, stub, "chat.postMessage", {"channel": "C0123", "text": "hi"}
+    )
+    assert status == 200
+    minted = json.loads(data)["ts"]
+    status, headers, data = _slack_call(proxy, stub, "conversations.history", {"channel": "C0123"})
+    assert status == 200
+    assert [m["ts"] for m in json.loads(data)["messages"]] == [minted, REAL_SLACK_TS]
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert seen[-1].answered_by == "overlay"
+    assert seen[-1].overlay == "full"
+    assert _SlackStub.seen == [("POST", "/api/conversations.history")], "a faked post reached Slack"
+
+
+def test_a_slack_history_read_of_another_channel_is_forwarded_unstamped(slack_stub):
+    """Two different channel ids are a definite no, not a "cannot tell": the read is left as
+    Slack sent it and is not `partial` (#44)."""
+    proxy, stub, seen = slack_stub
+    status, _, _ = _slack_call(proxy, stub, "chat.postMessage", {"channel": "C0123", "text": "hi"})
+    assert status == 200
+    # The log holds a faked write, so the overlay IS asked about the read below.
+    assert seen[-1].kind == "write" and seen[-1].answered_by.startswith("fake-")
+    status, headers, data = _slack_call(proxy, stub, "conversations.history", {"channel": "C0999"})
+    assert status == 200
+    assert [m["ts"] for m in json.loads(data)["messages"]] == [REAL_SLACK_TS]
+    assert pipeline.ANSWERED_BY_HEADER not in headers
+    assert seen[-1].answered_by == "live"
+    assert seen[-1].overlay is None
+
+
+def test_a_slack_replies_read_after_a_faked_reply_shows_it_at_the_tail(slack_stub):
+    """#44's done-when for the second read: the reply last, the parent's counts moved, the whole
+    page stamped `overlay` - and the post itself never reached Slack."""
+    proxy, stub, seen = slack_stub
+    status, _, data = _slack_call(
+        proxy,
+        stub,
+        "chat.postMessage",
+        {"channel": "C0123", "thread_ts": REAL_SLACK_TS, "text": "on it"},
+    )
+    assert status == 200
+    minted = json.loads(data)["ts"]
+    status, headers, data = _slack_call(
+        proxy, stub, "conversations.replies", {"channel": "C0123", "ts": REAL_SLACK_TS}
+    )
+    assert status == 200
+    messages = json.loads(data)["messages"]
+    assert [m["ts"] for m in messages] == [REAL_SLACK_TS, minted]
+    assert messages[0]["reply_count"] == 1
+    assert messages[0]["latest_reply"] == minted
+    assert messages[-1]["thread_ts"] == REAL_SLACK_TS
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert seen[-1].answered_by == "overlay"
+    assert seen[-1].overlay == "full"
+    assert _SlackStub.seen == [("POST", "/api/conversations.replies")], "a faked post reached Slack"
+
+
+def test_a_slack_read_the_effects_cannot_place_is_recorded_partial_and_left_alone(slack_stub):
+    """`chat.postMessage` takes `#general`, `conversations.history` requires the id, and irimi's own
+    echo carries the posted spelling - so the two sides cannot be matched. The body is left exactly
+    as Slack sent it and the exchange says the world irimi showed is incomplete (#44)."""
+    proxy, stub, seen = slack_stub
+    status, _, _ = _slack_call(
+        proxy, stub, "chat.postMessage", {"channel": "#general", "text": "hi"}
+    )
+    assert status == 200
+    status, headers, data = _slack_call(proxy, stub, "conversations.history", {"channel": "C0123"})
+    assert status == 200
+    assert [m["ts"] for m in json.loads(data)["messages"]] == [REAL_SLACK_TS]
+    assert pipeline.ANSWERED_BY_HEADER not in headers, "nothing of irimi's is in this body"
+    assert seen[-1].answered_by == "live"
+    assert seen[-1].overlay == "partial"

@@ -12,7 +12,7 @@ from irimi.servicemap import MapIndex
 
 logger = logging.getLogger(__name__)
 
-# A live body this size is not a Stripe object the effects model, and parsing it on the answer
+# A live body this size is not an object any service's effects model, and parsing it on the answer
 # path would cost more than the read it is trying to improve. It is flagged, not silently passed.
 MAX_BODY_BYTES = 2_000_000
 
@@ -144,7 +144,13 @@ class ServiceOverlay:
             # A body the overlay cannot read is a body it cannot apply the run's writes to. The
             # agent still gets exactly what the service sent; the exchange says it is incomplete.
             return Overlaid(upstream_response, "partial")
-        applied = effects(operation, read_request, document, writes)
+        # Reflected here, past the early returns, so a service with no effects table or a run
+        # with no writes for it parses nothing. `echo.reflect` never raises and reflects `{}` for
+        # a body it cannot read, so it needs no guard of its own (#44).
+        read = services.Read(
+            operation=operation, request=read_request, posted=echo.reflect(read_request)
+        )
+        applied = effects(read, document, writes)
         rewrote = any(k == pipeline.REWROTE_HEADER for k, _ in read_request.headers)
         fidelity: OverlayFidelity | None = None
         if applied.partial:
@@ -168,7 +174,11 @@ class ServiceOverlay:
         writes = self._writes(service, read_request, write_log)
         if not writes:
             return read_request
-        rewritten = rewrite(operation, read_request, writes)
+        # Past the early returns, like `_apply`'s; `echo.reflect` never raises (#44).
+        read = services.Read(
+            operation=operation, request=read_request, posted=echo.reflect(read_request)
+        )
+        rewritten = rewrite(read, writes)
         if rewritten is None:
             return read_request
         return replace(

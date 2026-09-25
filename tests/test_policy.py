@@ -1,11 +1,14 @@
 import json
 import re
+import socket
+import threading
 from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace
 
 import pytest
 
-from irimi import delegation, echo, fixture, pipeline, servicemap
+from irimi import delegation, echo, fixture, pipeline, servicemap, services, writelog
 from irimi.exchange import (
     FIDELITY_L0_FLAG,
     FIDELITY_L1_FLAG,
@@ -14,7 +17,7 @@ from irimi.exchange import (
     Response,
 )
 from irimi.pipeline import classify
-from irimi.policy import ShadowPolicy
+from irimi.policy import ShadowPolicy, UpstreamReader
 
 SHIPPED = servicemap.MapIndex(tuple(servicemap.load_shipped()))
 
@@ -1250,3 +1253,348 @@ def test_only_a_service_with_an_observer_learns_from_a_read(monkeypatch):
     assert echo._last_slack_ts == (0, 0)
     echo.observe_read("slack", body)
     assert echo._last_slack_ts == (1_999_999_999, 500)
+
+
+# ------------------------------------------------------------------- L3 preconditions (#45)
+
+
+class _Reader:
+    """A reader serving canned answers in order, and writing down every request it was asked.
+
+    An answer that is an exception is raised instead of returned, so "the reader raised" is one
+    more canned answer rather than a second helper.
+    """
+
+    def __init__(self, answers):
+        self.answers = list(answers)
+        self.asked: list[Request] = []
+
+    def __call__(self, request):
+        self.asked.append(request)
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+def _reader(*answers) -> _Reader:
+    return _Reader(answers)
+
+
+def _json(status: int, document) -> Response:
+    return Response(status, (("content-type", "application/json"),), json.dumps(document).encode())
+
+
+def _charge(ident="ch_REAL", amount=4900, refunded_so_far=0):
+    return {
+        "id": ident,
+        "object": "charge",
+        "amount": amount,
+        "amount_refunded": refunded_so_far,
+        "refunded": refunded_so_far == amount,
+        "currency": "usd",
+    }
+
+
+AGENT_HEADERS = (
+    ("authorization", "Bearer sk_test_x"),
+    ("stripe-account", "acct_1"),
+    ("stripe-version", "2024-06-20"),
+    ("idempotency-key", "idem-1"),
+    ("user-agent", "stripe-python"),
+    ("content-type", FORM),
+)
+
+
+def _refund_request(body: bytes = b"charge=ch_REAL&amount=4900") -> Request:
+    return replace(_req("POST", path="/v1/refunds", body=body), headers=AGENT_HEADERS)
+
+
+def _checked(reader, request, index=SHIPPED, write_log=()):
+    """Answer `request` the way the shadow run will: a real reader, the run's maps, its log."""
+    policy = ShadowPolicy(reader=reader, maps=index)
+    return policy.answer(request, classify(request, index), write_log, "t3st")
+
+
+def test_a_refund_of_a_fully_refunded_charge_is_answered_with_stripes_own_refusal():
+    reader = _reader(_json(200, _charge(refunded_so_far=4900)))
+    ans = _checked(reader, _refund_request())
+    assert ans.precondition == "rejected"
+    assert ans.rejection_code == "charge_already_refunded"
+    assert ans.answered_by == "fake-L1"
+    assert ans.flags == (FIDELITY_L1_FLAG,)
+    assert ans.response.status == 400
+    error = json.loads(ans.response.body)["error"]
+    assert error["code"] == "charge_already_refunded"
+    assert error["type"] == "invalid_request_error"
+    assert [(r.method, r.path) for r in reader.asked] == [("GET", "/v1/charges/ch_REAL")]
+
+
+def test_a_policy_with_no_reader_does_not_do_l3_at_all():
+    """Scope call 14. A bare `ShadowPolicy()` asks nothing, so it claims nothing: the refund is
+    the ordinary L1 fixture and the outcome is None, not `not_evaluable`. This is the test that
+    keeps every other bare construction in the suite meaning what it meant before #45."""
+    request = _refund_request()
+    ans = ShadowPolicy().answer(request, classify(request, SHIPPED))
+    assert ans.precondition is None
+    assert ans.issued == ()
+    assert ans.answered_by == "fake-L1"
+    assert ans.response.status == 200
+    assert json.loads(ans.response.body)["object"] == "refund"
+
+
+def test_asked_and_could_not_tell_is_not_the_same_as_never_asked():
+    """The two states the whole tri-state rests on, side by side: a reader that answered with a
+    body irimi cannot use is `not_evaluable`, and a policy that had no reader is None."""
+    request = _refund_request()
+    asked = _checked(_reader(_json(200, ["not", "an", "object"])), request)
+    assert asked.precondition == "not_evaluable"
+    assert asked.answered_by == "fake-L1"  # still faked, at its ordinary level
+    never = ShadowPolicy().answer(request, classify(request, SHIPPED))
+    assert never.precondition is None
+
+
+def test_a_precondition_read_that_429s_is_not_evaluable_and_is_still_recorded():
+    ans = _checked(_reader(_json(429, {"error": {"type": "rate_limit_error"}})), _refund_request())
+    assert ans.precondition == "not_evaluable"
+    assert ans.answered_by == "fake-L1"
+    (read,) = ans.issued
+    assert read.response.status == 429
+    assert read.issued_by == "engine"
+    assert (read.kind, read.answered_by, read.operation) == ("read", "live", "charges.retrieve")
+    assert read.run_id == "t3st"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        RuntimeError("the reader raised"),
+        None,
+        Response(200, (), b"<html>not json</html>"),
+        _json(200, ["not", "an", "object"]),
+        _json(404, {"error": {"type": "invalid_request_error"}}),
+        _json(500, {"error": {"type": "api_error"}}),
+        _json(503, {}),
+    ],
+    ids=["raises", "none", "not-json", "not-an-object", "404", "500", "503"],
+)
+def test_a_reader_that_cannot_tell_leaves_the_write_faked_and_not_evaluable(answer):
+    """Only a 200 carrying a JSON object is evaluable (scope call 8). Everything else is irimi
+    saying it could not find out, and the write is faked at its ordinary level regardless."""
+    ans = _checked(_reader(answer), _refund_request())
+    assert ans.precondition == "not_evaluable"
+    assert ans.answered_by == "fake-L1"
+    assert ans.response.status == 200
+    assert json.loads(ans.response.body)["object"] == "refund"
+    # The read was attempted, so it is on the record whatever came of it - with no response when
+    # the reader got none, the way `IrimiAddon.error` records a flow that never completed.
+    (read,) = ans.issued
+    assert (read.issued_by, read.kind, read.answered_by) == ("engine", "read", "live")
+    expected = answer if isinstance(answer, Response) else None
+    assert read.response == expected
+
+
+def test_the_runs_own_earlier_refund_is_what_makes_the_second_one_rejected():
+    """The issue's central claim. The real charge says `refunded: false` both times - the first
+    refund was never made - and the overlay applying it is the only thing that can turn the
+    second into the refusal Stripe would have given."""
+    request = _refund_request()
+    cls = classify(request, SHIPPED)
+    first = _checked(_reader(_json(200, _charge())), request)
+    assert first.precondition == "passed"
+    log = [pipeline.annotate(request, first.response, cls, first.answered_by, "t3st")]
+
+    reader = _reader(_json(200, _charge()))
+    second = _checked(reader, request, write_log=log)
+    assert second.precondition == "rejected"
+    assert second.rejection_code == "charge_already_refunded"
+    assert second.response.status == 400
+    # And without the log the very same live charge passes: the log is the cause, nothing else.
+    assert _checked(_reader(_json(200, _charge())), request).precondition == "passed"
+
+
+def test_an_overlay_that_knows_it_is_incomplete_makes_the_check_not_evaluable(monkeypatch):
+    """Scope call 6: a write checked against a world irimi knows is incomplete was not checked."""
+    monkeypatch.setitem(
+        services.EFFECTS, "stripe", lambda read, doc, writes: services.Applied(doc, partial=True)
+    )
+    request = _refund_request()
+    cls = classify(request, SHIPPED)
+    earlier = _checked(_reader(_json(200, _charge())), request)
+    log = [pipeline.annotate(request, earlier.response, cls, earlier.answered_by, "t3st")]
+    ans = _checked(_reader(_json(200, _charge(refunded_so_far=4900))), request, write_log=log)
+    assert ans.precondition == "not_evaluable"
+    assert ans.response.status == 200
+
+
+def test_the_probe_carries_the_writes_credentials_and_scope_and_nothing_else():
+    """Credentials and account/version scope are what make the read see the world the write
+    would have been made in. The rest of the agent's headers are not copied: an
+    `Idempotency-Key` on a GET is a request the agent never made."""
+    reader = _reader(_json(200, _charge()))
+    _checked(reader, _refund_request())
+    (probe,) = reader.asked
+    headers = dict(probe.headers)
+    assert headers["authorization"] == "Bearer sk_test_x"
+    assert headers["stripe-account"] == "acct_1"
+    assert headers["stripe-version"] == "2024-06-20"
+    assert headers["accept"] == "application/json"
+    assert "idempotency-key" not in headers
+    assert "user-agent" not in headers
+    assert "content-type" not in headers
+    assert (probe.method, probe.scheme, probe.host, probe.port) == (
+        "GET",
+        "https",
+        "api.stripe.com",
+        443,
+    )
+    assert probe.body == b""
+
+
+def test_a_route_with_no_precondition_issues_no_read():
+    reader = _reader()
+    request = replace(_req("POST", path="/v1/customers/cus_REAL123"), headers=AGENT_HEADERS)
+    ans = _checked(reader, request)
+    assert ans.precondition is None
+    assert ans.issued == ()
+    assert reader.asked == []
+
+
+def test_a_delegated_write_on_a_checked_route_is_not_evaluable_and_issues_no_read():
+    index = _targeted_index([("api.stripe.com", "/v1/refunds", "http://127.0.0.1:3000/refund")])
+    reader = _reader()
+    ans = _checked(reader, _refund_request(), index=index)
+    assert ans.answered_by == "delegated"
+    assert ans.precondition == "not_evaluable"
+    assert reader.asked == []
+
+
+def test_a_probe_the_maps_do_not_call_a_read_is_refused(monkeypatch):
+    """Scope call 9: "read operations only" is enforced by asking the maps, not by the verb."""
+    check = services.Check(
+        probe=lambda proposal: services.Probe("refunds.create", "POST", "/v1/refunds"),
+        verdict=lambda proposal, document: None,
+    )
+    monkeypatch.setitem(services.PRECONDITIONS, ("stripe", "charge_refundable"), check)
+    reader = _reader()
+    ans = _checked(reader, _refund_request())
+    assert ans.precondition == "not_evaluable"
+    assert reader.asked == []
+
+
+def _slack_post(channel: str) -> Request:
+    return _req(
+        "POST",
+        host="slack.com",
+        path="/api/chat.postMessage",
+        body=json.dumps({"channel": channel, "text": "hi"}).encode(),
+        content_type="application/json",
+    )
+
+
+@pytest.mark.parametrize("channel", ["#general", "general"])
+def test_a_slack_post_to_a_channel_name_is_not_probed(channel):
+    """Scope call 5: `conversations.info` only knows ids, so probing a name would report a
+    rejection Slack would never have made."""
+    reader = _reader()
+    ans = _checked(reader, _slack_post(channel))
+    assert ans.precondition == "not_evaluable"
+    assert ans.answered_by == "fake-L1"
+    assert reader.asked == []
+
+
+def test_a_slack_post_to_a_channel_id_is_probed_with_conversations_info():
+    healthy = {"ok": True, "channel": {"id": "C0123", "is_channel": True, "is_member": True}}
+    reader = _reader(_json(200, healthy))
+    ans = _checked(reader, _slack_post("C0123"))
+    assert ans.precondition == "passed"
+    (probe,) = reader.asked
+    assert (probe.method, probe.path) == ("POST", "/api/conversations.info")
+    assert json.loads(probe.body) == {"channel": "C0123"}
+    assert dict(probe.headers)["content-type"] == "application/json; charset=utf-8"
+    assert ans.issued[0].operation == "conversations.info"
+
+
+def test_a_slack_post_to_an_archived_channel_is_refused_the_way_slack_refuses_it():
+    reader = _reader(_json(200, {"ok": True, "channel": {"id": "C0123", "is_archived": True}}))
+    ans = _checked(reader, _slack_post("C0123"))
+    assert ans.precondition == "rejected"
+    assert ans.rejection_code == "is_archived"
+    assert ans.response.status == 200
+    assert json.loads(ans.response.body) == {"ok": False, "error": "is_archived"}
+    assert ans.answered_by == "fake-L1"
+
+
+def _classified(request: Request):
+    return request, classify(request, SHIPPED)
+
+
+def test_a_rejection_carries_the_level_the_refund_would_have_been_answered_at():
+    fake = echo.fake_rejection(*_classified(_refund_request()), {"error": {}})
+    assert (fake.answered_by, fake.flags) == ("fake-L1", ())
+    assert json.loads(fake.body) == {"error": {}}
+
+
+def test_a_rejection_of_a_write_with_no_fixture_is_honestly_l0():
+    """Scope call 10: there is no `fake-L3`, and `reactions.add` has no fixture to be L1 from."""
+    request = _req("POST", host="slack.com", path="/api/reactions.add", body=b"{}")
+    fake = echo.fake_rejection(*_classified(request), {"ok": False, "error": "x"})
+    assert (fake.answered_by, fake.flags) == ("fake-L0", ())
+
+
+def test_a_rejection_whose_fixture_will_not_load_says_so(monkeypatch):
+    monkeypatch.setattr(fixture, "get", lambda service, name: None)
+    fake = echo.fake_rejection(*_classified(_refund_request()), {"error": {}})
+    assert (fake.answered_by, fake.flags) == ("fake-L0", (FIXTURE_FAILED_FLAG,))
+
+
+# ------------------------------------------------------------------ the upstream reader (#45)
+
+
+class _Upstream(BaseHTTPRequestHandler):
+    status = 200
+    body = b'{"object": "charge"}'
+
+    def do_GET(self):
+        self.send_response(_Upstream.status)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(_Upstream.body)))
+        self.end_headers()
+        self.wfile.write(_Upstream.body)
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def upstream(monkeypatch):
+    monkeypatch.setattr(_Upstream, "status", 200)
+    srv = HTTPServer(("127.0.0.1", 0), _Upstream)
+    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
+    yield srv.server_address[1]
+    srv.shutdown()
+
+
+def _local(port: int) -> Request:
+    return Request("GET", "http", "127.0.0.1", port, "/v1/charges/ch_1", "", (), b"")
+
+
+@pytest.mark.parametrize("status", [200, 429])
+def test_the_upstream_reader_returns_what_the_service_answered(upstream, status, monkeypatch):
+    """A 429 is information the exchange records, so it comes back as a response, not as None."""
+    monkeypatch.setattr(_Upstream, "status", status)
+    response = UpstreamReader()(_local(upstream))
+    assert response.status == status
+    assert response.body == _Upstream.body
+
+
+def test_the_upstream_reader_refuses_a_body_past_the_cap(upstream, monkeypatch):
+    monkeypatch.setattr(writelog, "MAX_BODY_BYTES", len(_Upstream.body) - 1)
+    assert UpstreamReader()(_local(upstream)) is None
+
+
+def test_an_unreachable_upstream_is_none_and_not_a_raise():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    assert UpstreamReader()(_local(port)) is None

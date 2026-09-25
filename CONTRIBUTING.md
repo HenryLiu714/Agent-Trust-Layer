@@ -89,6 +89,11 @@ schema; the loader refuses anything outside it by name. Things to know before yo
 - A write may name a `fixture:`, which is an object in `src/irimi/fixtures/<service>.json`.
   Add the object there first, with its provenance in the file's `_source` entry; a `fixture:`
   the package does not ship answers at L0 and flags the exchange rather than failing.
+- A write may name a `fires:` list of the webhook event names the real service would have sent.
+  It is free text — the loader checks the key, but there is no table of a service's events to check
+  a name against — so name only events the service really sends for that call, and only on a write
+  the service's effects table in `src/irimi/services/` models, so a later read and the events agree.
+  `tests/test_servicemap.py` pins every shipped list; update it with the map.
 - Quote a wildcard host (`"*.posthog.com"`) and any `human:` template containing `#`.
 - A live-forwarded kind (`read`, `llm`, `telemetry`) must name its methods and must justify a
   destructive one with `persists: false` and a `comment:`. A `default_kind:` may never be a live

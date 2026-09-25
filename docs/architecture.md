@@ -67,6 +67,9 @@ touching Python, and `tests/test_servicemap.py` pins their contents.
 from the service's own mock where one exists (Stripe), hand-written against its published docs
 where none does (Slack). Each file says which in its `_source` entry, and the same test proves
 both directories are inside a built wheel.
+A `write` or `unknown` route may also name a `fires:` list of the webhooks the real service would
+have sent, which the exchange carries as `would_fire` for the writes irimi accepted and faked;
+nothing is delivered (#47).
 
 ## The seams
 

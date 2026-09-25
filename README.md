@@ -281,6 +281,9 @@ routes:
     kind: write # read | write | llm | telemetry | unknown
     human: refund {amount} on {charge}
     fixture: refund # optional: the object in irimi/fixtures/stripe.json an L1 answer starts from
+    fires: # optional: the webhooks this write would have caused; nothing is delivered
+      - refund.created
+      - charge.refunded
     ids:
       id: re_
     volatile:
@@ -289,6 +292,14 @@ routes:
 
 A `fixture:` is valid on a `write` or `unknown` route only — a live route is answered by the real
 service, so a fixture on one would never be read, and the loader says so rather than ignoring it.
+
+A `fires:` is valid on the same routes and for the same reason: a live route is forwarded and the
+real service sends its own webhooks, so ours would never be listed. The events land on the
+exchange as `would_fire`, and only for a write irimi accepted and answered itself. A write the
+service would have refused — by an L3 precondition or for a reused idempotency key — lists nothing,
+because nothing would have fired; so does a retry answered out of the idempotency store, whose
+events are already on the first write's exchange, and a write an answer target answered. irimi
+records these events and delivers none of them.
 
 Write `match:` in block style, as above. A YAML flow mapping cannot hold a plain scalar containing
 `{`, so `match: {method: GET, path: /v1/charges/{charge}}` is a parse error.

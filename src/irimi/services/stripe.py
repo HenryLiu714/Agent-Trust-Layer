@@ -1,11 +1,17 @@
 """Stripe's L2 effects: what a faked write does to a later live read (#43).
 
-The design's v0.1 table, and nothing beside it:
+The design's v0.1 table, by the write that causes each effect:
 
     refunds.create          a new refund object; on the charge, `amount_refunded` and `refunded`,
                             and the expanded `refunds` list; on page 1 of the refunds list
     customers.update        the posted fields, on the customer
     payment_intents.cancel  `status`, `canceled_at`, `cancellation_reason`
+
+Two reads beyond the table's letter, both so that irimi does not contradict itself (#43):
+`charges.list` gets the same charge effect as `charges.retrieve`, because the refund agent finds its
+charge in the list and a list that ignored the refund would disagree with the retrieve; and
+`refunds.retrieve` of a minted id is flagged `partial`, because the honest answer is Stripe's 404
+and this seam carries a body but no status (#52).
 
 Two rules run through all of it:
 
@@ -137,12 +143,19 @@ def _refunds_list(request: Request, document: dict[str, Any], writes: Sequence[W
         ids = [r.answer["id"] for r in minted]
         after = removed.partition("=")[2]
         older = minted[: ids.index(after)] if after in ids else []
-        if any(_passes_filters(r.answer, params) for r in older):
+        # `is not False` because a refund whose filter cannot be answered MIGHT belong on this
+        # page, and "might be missing" is exactly what `partial` says.
+        if any(_passes_filters(r.answer, params) is not False for r in older):
             return Applied(document, partial=True)
         return Applied(document)
     if any(not _known_list_param(k) for k, _ in params):
         return Applied(document, partial=True)
-    mine = [r for r in minted if _passes_filters(r.answer, params)]
+    verdicts = [(r, _passes_filters(r.answer, params)) for r in minted]
+    if any(passes is None for _, passes in verdicts):
+        # One of the run's refunds may or may not belong on this page and irimi cannot tell, so
+        # the page it shows may be missing a refund the agent itself created. Say so.
+        return Applied(document, partial=True)
+    mine = [r for r, passes in verdicts if passes]
     if not mine:
         return Applied(document)
     data = document.get("data")
@@ -163,7 +176,7 @@ def _refund_retrieve(
     """A refund irimi minted is not at Stripe, so this read is the 404 the table does not model.
 
     Answering it from the write log needs the seam to carry a status as well as a body, which is
-    a later issue. Flagging it is what keeps the gap visible instead of silent.
+    #52. Flagging it is what keeps the gap visible instead of silent.
     """
     ident = request.path.rsplit("/", 1)[-1]
     if any(r.answer["id"] == ident for r in _minted_refunds(writes)):
@@ -233,9 +246,23 @@ def _known_list_param(name: str) -> bool:
     return name in KNOWN_LIST_PARAMS or name == "expand" or name.startswith("expand[")
 
 
-def _passes_filters(refund: dict[str, Any], params: Sequence[tuple[str, str]]) -> bool:
+def _passes_filters(refund: dict[str, Any], params: Sequence[tuple[str, str]]) -> bool | None:
+    """Whether a minted refund belongs on a filtered page: True, False, or None for "cannot tell".
+
+    None is the case the fixture forces (#43). A refund posted with only `charge` is answered from
+    a fixture whose `payment_intent` is `null`, so a read filtered by `payment_intent=pi_X` cannot
+    be told from the minted object whether the refund matches - in production Stripe would have
+    filled that field in. Treating unknown as "does not match" dropped the agent's own refund off
+    a page that then claimed to be complete, which is the untruth this module's header forbids. The
+    caller turns None into `partial` instead.
+    """
     for name, value in params:
-        if name in ("charge", "payment_intent") and refund.get(name) != value:
+        if name not in ("charge", "payment_intent"):
+            continue
+        mine = refund.get(name)
+        if mine is None:
+            return None
+        if mine != value:
             return False
     return True
 

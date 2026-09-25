@@ -200,6 +200,63 @@ def test_a_refunds_page_filtered_by_charge_only_shows_a_matching_minted_refund()
     assert mine.partial is False
 
 
+def test_a_filter_the_minted_refund_cannot_answer_is_partial():
+    """The refund fixture's `payment_intent` is null, so a refund posted with only `charge` cannot
+    say whether it belongs on `?payment_intent=pi_X`. Dropping it and calling the page complete
+    hid the agent's own refund; irimi says `partial` instead (#43)."""
+    page = _refunds_page("re_REAL1")
+    before = copy.deepcopy(page)
+    out = apply_read(
+        "refunds.list",
+        _read("/v1/refunds", query="payment_intent=pi_1"),
+        page,
+        [_refund_write(payment_intent=None)],
+    )
+    assert out.partial is True
+    assert out.changed is False
+    assert out.document == before
+
+
+def test_a_filter_the_minted_refund_does_answer_is_not_partial():
+    """`partial` is for what irimi cannot tell, not for what does not match: a minted refund
+    carrying a different `payment_intent` really is absent from this page."""
+    out = apply_read(
+        "refunds.list",
+        _read("/v1/refunds", query="payment_intent=pi_OTHER"),
+        _refunds_page("re_REAL1"),
+        [_refund_write(payment_intent="pi_MINE")],
+    )
+    assert out.partial is False
+    assert out.changed is False
+
+    mine = apply_read(
+        "refunds.list",
+        _read("/v1/refunds", query="payment_intent=pi_MINE"),
+        _refunds_page("re_REAL1"),
+        [_refund_write(payment_intent="pi_MINE")],
+    )
+    assert mine.document["data"][0]["id"] == "re_MINTED1"
+    assert mine.changed is True
+    assert mine.partial is False
+
+
+def test_an_older_refund_that_might_be_behind_the_cursor_is_partial():
+    """The page after a minted refund is only fully modelled when irimi knows every older minted
+    refund is absent from it. One whose filter it cannot answer might belong here."""
+    out = apply_read(
+        "refunds.list",
+        _read(
+            "/v1/refunds",
+            query="payment_intent=pi_1",
+            headers=[("irimi-rewrote", "starting_after=re_MINTED2")],
+        ),
+        _refunds_page("re_REAL1"),
+        [_refund_write("re_MINTED1", payment_intent=None), _refund_write("re_MINTED2")],
+    )
+    assert out.partial is True
+    assert out.changed is False
+
+
 def test_ending_before_is_partial_and_unchanged():
     page = _refunds_page("re_REAL1")
     before = copy.deepcopy(page)

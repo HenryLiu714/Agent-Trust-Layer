@@ -1822,13 +1822,49 @@ routes:
     operation: charges.retrieve
     kind: read
     human: get charge {charge}
+  - match:
+      method: POST
+      path: /v1/customers/{customer}
+    operation: customers.update
+    kind: write
+    human: update customer {customer}
+    fixture: customer
+    ids:
+      id: cus_
+  - match:
+      method: GET
+      path: /v1/customers/{customer}
+    operation: customers.retrieve
+    kind: read
+    human: get customer {customer}
+  - match:
+      method: POST
+      path: /v1/payment_intents/{payment_intent}/cancel
+    operation: payment_intents.cancel
+    kind: write
+    human: cancel {payment_intent}
+    fixture: payment_intent
+    ids:
+      id: pi_
+  - match:
+      method: GET
+      path: /v1/payment_intents/{payment_intent}
+    operation: payment_intents.retrieve
+    kind: read
+    human: get payment intent {payment_intent}
 """
 
 
 class _StripeStub(BaseHTTPRequestHandler):
-    """A Stripe-shaped upstream: one real charge and an empty refunds list."""
+    """A Stripe-shaped upstream: real state for every read the effects table models.
+
+    `/v1/refunds` answers a FULL page - `REFUNDS_PAGE_SIZE` real refunds, the same number a
+    `limit` of that size asks for - so a test can prove the minted refund pushes the oldest real
+    one off the page rather than making it longer than Stripe would.
+    """
 
     seen: list = []  # (method, path) of every request, so a test can prove no write reached it
+    REFUNDS_PAGE_SIZE = 2
 
     def do_GET(self):
         _StripeStub.seen.append(("GET", self.path))
@@ -1846,7 +1882,32 @@ class _StripeStub(BaseHTTPRequestHandler):
                 },
             )
         elif route == "/v1/refunds":
-            status, document = 200, {"object": "list", "has_more": False, "data": []}
+            real = [
+                {"id": f"re_REAL{n}", "object": "refund", "charge": "ch_REAL1"}
+                for n in range(1, _StripeStub.REFUNDS_PAGE_SIZE + 1)
+            ]
+            status, document = 200, {"object": "list", "has_more": False, "data": real}
+        elif route == "/v1/customers/cus_REAL1":
+            status, document = (
+                200,
+                {
+                    "id": "cus_REAL1",
+                    "object": "customer",
+                    "email": "old@example.test",
+                    "metadata": {"tier": "free"},
+                },
+            )
+        elif route == "/v1/payment_intents/pi_REAL1":
+            status, document = (
+                200,
+                {
+                    "id": "pi_REAL1",
+                    "object": "payment_intent",
+                    "status": "requires_capture",
+                    "canceled_at": None,
+                    "cancellation_reason": None,
+                },
+            )
         else:
             status, document = 404, {"error": {"type": "invalid_request_error"}}
         body = json.dumps(document).encode()
@@ -1941,3 +2002,103 @@ def test_a_read_before_the_refund_is_untouched_and_unstamped(stripe_stub):
     _, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_REAL1")
     assert json.loads(data)["amount_refunded"] == 100
     assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+
+
+def _fake_refund(proxy, stub, charge="ch_REAL1", amount=100):
+    """One faked refund through the proxy. Returns the minted refund id."""
+    status, data = _via_proxy(
+        proxy,
+        "POST",
+        f"http://127.0.0.1:{stub}/v1/refunds",
+        body=f"charge={charge}&amount={amount}".encode(),
+        extra_headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    assert status == 200
+    return json.loads(data)["id"]
+
+
+def test_a_full_refunds_page_drops_the_oldest_real_refund_and_says_there_is_more(stripe_stub):
+    """A page Stripe filled to the limit cannot also hold the minted refund. The page stays the
+    length the agent asked for and `has_more` becomes true, because a longer page is one no real
+    Stripe read could return (#43)."""
+    proxy, stub, seen = stripe_stub
+    refund_id = _fake_refund(proxy, stub)
+    limit = _StripeStub.REFUNDS_PAGE_SIZE
+    status, headers, data = _read_via_proxy(
+        proxy, f"http://127.0.0.1:{stub}/v1/refunds?limit={limit}"
+    )
+    assert status == 200
+    page = json.loads(data)
+    assert [item["id"] for item in page["data"]] == [refund_id, "re_REAL1"]
+    assert page["has_more"] is True
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert seen[-1].overlay == "full"
+
+
+def test_a_cursor_naming_a_minted_refund_is_dropped_before_the_read_reaches_stripe(stripe_stub):
+    """Stripe has never heard of the refund irimi minted and would answer the page with an error,
+    so the cursor is dropped and `Irimi-Rewrote` carries what was removed. The page that comes back
+    is the real list from its top, and the minted refund is NOT prepended again: it belongs on the
+    page before this one (#43)."""
+    proxy, stub, seen = stripe_stub
+    refund_id = _fake_refund(proxy, stub)
+    _StripeStub.seen.clear()
+    status, headers, data = _read_via_proxy(
+        proxy, f"http://127.0.0.1:{stub}/v1/refunds?starting_after={refund_id}"
+    )
+    assert status == 200
+    assert _StripeStub.seen == [("GET", "/v1/refunds")], "the minted cursor reached Stripe"
+    assert [item["id"] for item in json.loads(data)["data"]] == ["re_REAL1", "re_REAL2"]
+    # The body really is the one Stripe sent, so it stays unstamped; the exchange is what records
+    # that irimi translated the request, and shows the upstream what it asked.
+    assert pipeline.ANSWERED_BY_HEADER not in headers
+    ex = seen[-1]
+    assert ex.answered_by == "live"
+    assert ex.overlay == "full"
+    assert ex.request.query == ""
+    assert (pipeline.REWROTE_HEADER, f"starting_after={refund_id}") in ex.request.headers
+
+
+def test_a_customer_reread_after_a_faked_update_shows_the_posted_fields(stripe_stub):
+    proxy, stub, seen = stripe_stub
+    status, _ = _via_proxy(
+        proxy,
+        "POST",
+        f"http://127.0.0.1:{stub}/v1/customers/cus_REAL1",
+        body=b"email=new%40example.test&metadata[tier]=pro",
+        extra_headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    assert status == 200
+    status, headers, data = _read_via_proxy(
+        proxy, f"http://127.0.0.1:{stub}/v1/customers/cus_REAL1"
+    )
+    assert status == 200
+    customer = json.loads(data)
+    assert customer["email"] == "new@example.test"
+    assert customer["metadata"] == {"tier": "pro"}, "Stripe merges metadata, it does not replace it"
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert seen[-1].overlay == "full"
+    assert [method for method, _ in _StripeStub.seen] == ["GET"], "a faked write reached Stripe"
+
+
+def test_a_payment_intent_reread_after_a_faked_cancel_shows_it_canceled(stripe_stub):
+    proxy, stub, seen = stripe_stub
+    status, _ = _via_proxy(
+        proxy,
+        "POST",
+        f"http://127.0.0.1:{stub}/v1/payment_intents/pi_REAL1/cancel",
+        body=b"cancellation_reason=requested_by_customer",
+        extra_headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    assert status == 200
+    status, headers, data = _read_via_proxy(
+        proxy, f"http://127.0.0.1:{stub}/v1/payment_intents/pi_REAL1"
+    )
+    assert status == 200
+    intent = json.loads(data)
+    assert intent["status"] == "canceled"
+    assert intent["cancellation_reason"] == "requested_by_customer"
+    assert isinstance(intent["canceled_at"], int)
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert seen[-1].overlay == "full"
+    assert [method for method, _ in _StripeStub.seen] == ["GET"], "a faked write reached Stripe"

@@ -676,10 +676,28 @@ def fake_response(request: Request, classification: Classification) -> Fake:
     purely to validate it and throw it away, once here - and this call was the only one outside
     the never-raise guard in `answer` (#29).
     """
-    route = classification.matched[1] if classification.matched is not None else None
+    route = _route_of(classification)
     if route is not None:
         literal = LITERAL_BODIES.get((classification.service, route.operation))
         if literal is not None:
             return Fake(literal[0], literal[1])
     body, answered_by, flags = _fake_dict(request, classification, route)
     return Fake(json.dumps(body, allow_nan=False).encode(), JSON_CT, answered_by, flags)
+
+
+def fake_rejection(request: Request, classification: Classification, body: dict[str, Any]) -> Fake:
+    """A modeled error body, carried at the level this route's write WOULD have been answered at.
+
+    There is no `fake-L3`: the header says who answered, the exchange field says what L3 decided
+    (#45). The level is not "L1 if the route names a fixture" - a Slack `reactions.add` has no
+    fixture and is honestly L0, a `chat.postMessage` whose fixture will not load is L0 with the
+    `fixture-failed` flag - so it is taken from the one place that knows, by building the body
+    this route would have had and discarding it. One dict, once, on a path that is about to make
+    a network-free answer either way.
+    """
+    _, answered_by, flags = _fake_dict(request, classification, _route_of(classification))
+    return Fake(json.dumps(body, allow_nan=False).encode(), JSON_CT, answered_by, flags)
+
+
+def _route_of(classification: Classification) -> Route | None:
+    return classification.matched[1] if classification.matched is not None else None

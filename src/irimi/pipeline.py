@@ -16,8 +16,10 @@ from irimi.exchange import (
     AnsweredBy,
     Door,
     Exchange,
+    IssuedBy,
     Kind,
     OverlayFidelity,
+    PreconditionOutcome,
     Request,
     Response,
     Validation,
@@ -156,11 +158,15 @@ def annotate(
     door: Door = "forward",
     target: str = "",
     overlay: OverlayFidelity | None = None,
+    precondition: PreconditionOutcome | None = None,
+    issued_by: IssuedBy = "agent",
 ) -> Exchange:
     """Build the Exchange. Anything the engine answered is unvalidated; live forwards are also
     unvalidated for now (validated is reserved for record mode, later phases). `overlay` is how
     much of the write log the overlay expressed in this read, and is None for everything it did
-    not consider."""
+    not consider. `precondition` is what L3 decided about a write before it was faked, and is None
+    when nothing was asked (#45). `issued_by` is `engine` for a read irimi made on its own account
+    to decide about a write, and `agent` for everything the agent sent (#45)."""
     validation: Validation = "unvalidated"
     return Exchange(
         request=request,
@@ -175,6 +181,8 @@ def annotate(
         flags=classification.flags + extra_flags,
         target=target,
         overlay=overlay,
+        precondition=precondition,
+        issued_by=issued_by,
     )
 
 

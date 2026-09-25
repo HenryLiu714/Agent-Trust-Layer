@@ -13,6 +13,7 @@ asserting, so the same function can be asserted empty for an honest run and non-
 deliberately broken one. A test that cannot fail is the one thing an invariant file must not ship.
 """
 
+import argparse
 import asyncio
 import http.client
 import json
@@ -468,3 +469,26 @@ def test_a_streamed_delegated_answer_is_stamped_too(tmp_path, monkeypatch, upstr
     assert stamped == "delegated"
     (ex,) = seen
     assert ex.answered_by == "delegated"
+
+
+# ------------------------------------------------------------------------ the L3 reader (#45)
+
+
+def test_shadow_mode_is_never_built_without_a_reader(tmp_path, monkeypatch):
+    """A policy with no reader does not do L3 and records nothing about it - by design, so bare
+    `ShadowPolicy()`s in tests keep their meaning. The hole that leaves is a shadow run silently
+    skipping L3 because the composition root forgot an argument: the `--allow-host` failure shape
+    again, configured and never consulted. So the one construction site is pinned here."""
+    from irimi import cli
+    from irimi.policy import NoReader
+
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
+    index = servicemap.MapIndex(tuple(servicemap.load_shipped()))
+    args = argparse.Namespace(allow_host=[], port=4321)
+    p = ca.ca_paths()
+    run = cli._Run(index, p, "t3st", cli._engine_config(args, index, "t3st", p))
+    engine = cli._build_engine(run, on_exchange=lambda ex: None)
+    assert isinstance(engine.policy, ShadowPolicy)
+    assert not isinstance(engine.policy.reader, NoReader)
+    assert engine.policy.maps is run.config.maps
+    assert engine.policy.maps is index

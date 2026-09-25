@@ -10,7 +10,6 @@ first one in, and the store only remembers. That is also what lets Phase 5 repla
 promise over a recording with the same code.
 """
 
-import logging
 import threading
 from dataclasses import dataclass
 from typing import Any
@@ -18,8 +17,6 @@ from typing import Any
 from irimi import echo, services
 from irimi.exchange import AnsweredBy, PreconditionOutcome, Request
 from irimi.servicemap import Route
-
-logger = logging.getLogger(__name__)
 
 # What irimi puts on a replayed answer. Stripe spells it `Idempotent-Replayed`; header names are
 # case-insensitive on the wire and every header irimi sets is written lower-case, like
@@ -66,18 +63,31 @@ def conflict(service: str, key: str) -> services.Rejection | None:
     return None if spec is None else spec.conflict(key)
 
 
-def canonical(request: Request, route: Route) -> dict[str, Any]:
-    """The write's arguments as the store compares them: the caller's own fields, minus the
-    route's `volatile:` names.
+# What two sendings of one key are compared by: the whole of the write the caller named, as
+# `(method, path, query, the posted fields that are not volatile)` (#46). The route is NOT enough
+# to tell two writes apart - `payment_intents.cancel` is one route over every `pi_`, and it posts
+# an empty body - so a key reused to cancel a different intent, or on another endpoint entirely,
+# would compare equal on its fields alone and replay the first write's object at the second
+# caller. Stripe compares the whole request and refuses a key that comes back on a different one,
+# which is what carrying the identity in here makes irimi do too.
+Canonical = tuple[str, str, str, dict[str, Any]]
 
-    `volatile:` is the map's list of fields that differ between two sendings of the same write -
-    the map already marks `idempotency_key` on `refunds.create` - and a field that always differs
-    must not make every retry look like a different request. `echo.reflect` is the one
+
+def canonical(request: Request, route: Route) -> Canonical:
+    """The write as the store compares two sendings of one key.
+
+    The fields are the caller's own minus the route's `volatile:` names - the map already marks
+    `idempotency_key` on `refunds.create` - because a field that always differs between two
+    sendings must not make every retry look like a different request. `echo.reflect` is the one
     never-raising parser for both form and JSON bodies, and it is what `writelog` and the
     preconditions read a request with, so the store compares the same view of the write they do.
+    The method, path and query are in front of it because a key names one write and not one
+    route: without them a write whose parameters are all in its path - `payment_intents.cancel`
+    posts nothing at all - is indistinguishable from every other write on the same route.
     """
     posted = echo.reflect(request)
-    return {name: value for name, value in posted.items() if name not in route.volatile}
+    fields = {name: value for name, value in posted.items() if name not in route.volatile}
+    return request.method, request.path, request.query, fields
 
 
 def key(run_id: str, service: str, scope: tuple[str, ...], idempotency_key: str) -> tuple[str, ...]:
@@ -102,9 +112,9 @@ class Store:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._entries: dict[tuple[str, ...], tuple[dict[str, Any], Stored]] = {}
+        self._entries: dict[tuple[str, ...], tuple[Canonical, Stored]] = {}
 
-    def get(self, slot: tuple[str, ...], params: dict[str, Any]) -> tuple[Stored | None, bool]:
+    def get(self, slot: tuple[str, ...], params: Canonical) -> tuple[Stored | None, bool]:
         """`(the answer to replay, whether this key is held with DIFFERENT parameters)`.
 
         The two outcomes are distinct and neither is an error: `(None, False)` is a key never seen,
@@ -120,7 +130,7 @@ class Store:
             return None, True
         return stored, False
 
-    def put(self, slot: tuple[str, ...], params: dict[str, Any], stored: Stored) -> None:
+    def put(self, slot: tuple[str, ...], params: Canonical, stored: Stored) -> None:
         """Remember the first answer to this slot. A second put for the same slot is ignored.
 
         Stripe stores the first response under a key whether it was accepted or rejected, so a

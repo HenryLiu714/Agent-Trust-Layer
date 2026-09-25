@@ -147,7 +147,7 @@ def _capped(status: int, headers: Any, body: Any) -> Response | None:
 
 def _slot(
     request: Request, classification: Classification, route: Route | None, run_id: str
-) -> tuple[tuple[str, ...], dict[str, Any], str] | None:
+) -> tuple[tuple[str, ...], idempotency.Canonical, str] | None:
     """`(slot, canonical params, the key the caller sent)` for a write the store covers, else None.
 
     Three conditions, each the literal reading of "mapped Stripe writes" (#46). The route must be
@@ -214,7 +214,7 @@ class ShadowPolicy:
         # answered is the SAME write: it gets the first answer's own bytes, issues no precondition
         # read, and appends nothing to the write log. Its own guard, because a store that failed
         # must fall through to the ordinary answer rather than 502 a perfectly fakeable write.
-        slot: tuple[tuple[str, ...], dict[str, Any], str] | None = None
+        slot: tuple[tuple[str, ...], idempotency.Canonical, str] | None = None
         try:
             slot = _slot(request, classification, route, run_id)
             if slot is not None:
@@ -456,7 +456,7 @@ def _conflict_answer(
 
 def _remember(
     store: idempotency.Store,
-    slot: tuple[tuple[str, ...], dict[str, Any], str] | None,
+    slot: tuple[tuple[str, ...], idempotency.Canonical, str] | None,
     answer: Answer,
 ) -> None:
     """Keep this answer under its key, so the agent's retry gets it back (#46).

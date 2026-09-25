@@ -1649,6 +1649,11 @@ def test_an_unreachable_upstream_is_none_and_not_a_raise():
 # ------------------------------------------------------------------ the idempotency store (#46)
 
 
+def _cancel_request(intent: str) -> Request:
+    """`payment_intents.cancel`, which carries every parameter it has in its path."""
+    return replace(_req("POST", path=f"/v1/payment_intents/{intent}/cancel"), headers=AGENT_HEADERS)
+
+
 def _ask(policy: ShadowPolicy, request: Request):
     """`_checked`, but against a policy the test holds, so two calls share one run's store."""
     return policy.answer(request, classify(request, SHIPPED), (), "t3st")
@@ -1785,6 +1790,31 @@ def test_a_store_that_raises_answers_the_write_afresh(broken):
     assert first.answered_by == second.answered_by == "fake-L1"
     assert json.loads(first.response.body)["id"] != json.loads(second.response.body)["id"]
     assert IDEMPOTENT_REPLAY_FLAG not in second.flags
+
+
+def test_a_key_reused_on_another_object_of_one_route_is_refused():
+    """A key names one write, not one route. `payment_intents.cancel` posts nothing at all, so
+    before the path was compared a key reused to cancel a second intent replayed the first
+    intent's answer and told the agent it had cancelled an object it never named (#46)."""
+    policy = ShadowPolicy()
+    first = _ask(policy, _cancel_request("pi_AAA"))
+    second = _ask(policy, _cancel_request("pi_BBB"))
+    assert json.loads(first.response.body)["id"] == "pi_AAA"
+    assert second.response.status == 400
+    assert json.loads(second.response.body)["error"]["type"] == "idempotency_error"
+    assert IDEMPOTENCY_CONFLICT_FLAG in second.flags
+    assert IDEMPOTENT_REPLAY_FLAG not in second.flags
+
+
+def test_a_key_reused_on_another_route_is_refused():
+    """The same hole across two routes: a cancel and a customer update both post an empty body,
+    so without the path the agent asking to update a customer got a payment intent back (#46)."""
+    policy = ShadowPolicy()
+    _ask(policy, _cancel_request("pi_AAA"))
+    ans = _ask(policy, replace(_req("POST", path="/v1/customers/cus_ZZZ"), headers=AGENT_HEADERS))
+    assert ans.response.status == 400
+    assert json.loads(ans.response.body)["error"]["type"] == "idempotency_error"
+    assert IDEMPOTENCY_CONFLICT_FLAG in ans.flags
 
 
 def test_stripe_python_raises_idempotency_error_on_the_conflict_body():

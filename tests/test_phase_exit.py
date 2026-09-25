@@ -27,7 +27,7 @@ import re
 import sys
 import threading
 from dataclasses import replace
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -110,7 +110,9 @@ class _StandInReader(policy.UpstreamReader):
 @pytest.fixture
 def stripe_stand_in():
     _Stripe.seen = []
-    srv = HTTPServer(("127.0.0.1", 0), _Stripe)
+    # Threaded: irimi's own precondition read runs on a worker thread as of #45, and a
+    # single-threaded stand-in would serialize it against the agent's traffic.
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Stripe)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     yield srv.server_address[1]
     srv.shutdown()

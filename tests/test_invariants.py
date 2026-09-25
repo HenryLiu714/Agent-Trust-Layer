@@ -295,7 +295,7 @@ def test_the_answer_a_failed_decision_gives_is_stamped_too(tmp_path, monkeypatch
     class _BrokenPolicy:
         name = "broken"
 
-        def answer(self, request, classification):
+        def answer(self, request, classification, write_log=(), run_id=""):
             raise RuntimeError("the decision exploded")
 
     maps = _maps(tmp_path, monkeypatch)
@@ -321,7 +321,7 @@ def test_a_policy_that_answers_locally_without_saying_so_is_caught(tmp_path, mon
     class _LiarPolicy:
         name = "liar"
 
-        def answer(self, request, classification):
+        def answer(self, request, classification, write_log=(), run_id=""):
             if classification.kind == "read":
                 return Answer(answered_by="live", response=None)
             return Answer(

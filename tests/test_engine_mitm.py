@@ -7,7 +7,7 @@ import json
 import socket
 import ssl
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -1287,7 +1287,7 @@ def test_a_target_naming_our_own_listener_is_refused_with_a_json_502(tmp_path, m
     )
     flow = tflow.tflow(req=tutils.treq(method=b"POST", host="127.0.0.1", port=80, path=b"/things"))
     flow.client_conn.sockname = ("127.0.0.1", listen_port)
-    addon.request(flow)
+    asyncio.run(addon.request(flow))
 
     assert flow.response.status_code == 502
     assert json.loads(flow.response.content)["error"]["type"] == "irimi_target_failed"
@@ -1320,7 +1320,7 @@ def test_a_locally_answered_flow_that_errors_keeps_its_own_flags(tmp_path, monke
     )
     flow = tflow.tflow(req=tutils.treq(method=b"POST", host="127.0.0.1", port=80, path=b"/things"))
     flow.client_conn.sockname = ("127.0.0.1", 4000)
-    addon.request(flow)
+    asyncio.run(addon.request(flow))
     addon.error(flow)
 
     (ex,) = seen
@@ -1354,7 +1354,7 @@ def test_a_refused_target_is_flagged_once_even_if_the_client_then_vanishes(tmp_p
     )
     flow = tflow.tflow(req=tutils.treq(method=b"POST", host="127.0.0.1", port=80, path=b"/things"))
     flow.client_conn.sockname = ("127.0.0.1", listen_port)
-    addon.request(flow)  # the target is our own listener, so it is refused and flagged here
+    asyncio.run(addon.request(flow))  # the target is our own listener, so refused and flagged here
     addon.error(flow)
 
     (ex,) = seen
@@ -1412,6 +1412,82 @@ def test_a_raise_in_the_decision_answers_locally_instead_of_forwarding(
     assert len(seen) == 1, "the exchange must still be recorded"
     assert seen[0].flags == (UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG)
     assert (seen[0].kind, seen[0].answered_by) == ("unknown", "fake-L0")
+
+
+def _bare_addon(tmp_path, monkeypatch, policy=None, overlay=None, on_exchange=None):
+    """An IrimiAddon over DEMO_MAP, driven hook by hook with no proxy around it."""
+    from irimi.engine.mitm import IrimiAddon
+
+    return IrimiAddon(
+        _config(tmp_path, monkeypatch, maps=_targeted(tmp_path, monkeypatch)),
+        policy or ShadowPolicy(),
+        NullStore(),
+        overlay or NoOverlay(),
+        on_exchange or (lambda ex: None),
+        lambda port, error: None,
+    )
+
+
+def _bare_flow(method, path):
+    from mitmproxy.test import tflow, tutils
+
+    flow = tflow.tflow(req=tutils.treq(method=method, host="127.0.0.1", port=80, path=path))
+    flow.client_conn.sockname = ("127.0.0.1", 4000)
+    return flow
+
+
+def test_a_raise_handing_the_decision_to_a_worker_answers_locally(tmp_path, monkeypatch):
+    """The hook awaits `asyncio.to_thread` as of #45, and the hand-off can fail on its own - an
+    executor already shut down under a stopping proxy - before `_decide`'s guard is ever reached.
+    It takes the same 502 as a decision that raised: the request may be a write."""
+    from irimi.engine import mitm
+
+    seen = []
+    addon = _bare_addon(tmp_path, monkeypatch, on_exchange=seen.append)
+
+    def no_threads(*args, **kwargs):
+        raise RuntimeError("cannot schedule new futures after shutdown")
+
+    monkeypatch.setattr(mitm.asyncio, "to_thread", no_threads)
+    flow = _bare_flow(b"POST", b"/things")
+    asyncio.run(addon.request(flow))
+
+    assert flow.response.status_code == 502
+    assert json.loads(flow.response.content)["error"]["type"] == "irimi_decision_failed"
+    (ex,) = seen
+    assert ex.flags == (UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG)
+
+
+def test_a_raise_carrying_a_rewrite_onto_the_flow_answers_locally(tmp_path, monkeypatch):
+    """`_apply_rewrite` runs back on the loop, outside `_decide`'s guard (#45). Before the split
+    its lines sat under the decision's backstop; they still do, so a raise there cannot escape
+    the hook and forward a half-edited read with nothing recorded."""
+    from dataclasses import replace
+
+    class _Translating:
+        def __call__(self, write_log, read_request, upstream_response):
+            return Overlaid(upstream_response)
+
+        def rewrite(self, write_log, read_request):
+            return replace(read_request, query="translated=1")
+
+    seen = []
+    addon = _bare_addon(tmp_path, monkeypatch, overlay=_Translating(), on_exchange=seen.append)
+    write = _bare_flow(b"POST", b"/things")
+    asyncio.run(addon.request(write))
+    addon.response(write)  # a faked write joins the log here, so the read below is rewritten
+
+    def boom(flow, rewritten):
+        raise RuntimeError("the flow edit exploded")
+
+    monkeypatch.setattr(addon, "_apply_rewrite", boom)
+    read = _bare_flow(b"GET", b"/hello")
+    asyncio.run(addon.request(read))
+
+    assert read.response.status_code == 502
+    assert json.loads(read.response.content)["error"]["type"] == "irimi_decision_failed"
+    assert read.request.path == "/hello"
+    assert seen[-1].flags == (UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG)
 
 
 def test_neither_half_of_a_delegated_exchange_is_a_write(tmp_path, monkeypatch, target):
@@ -1546,7 +1622,7 @@ def test_the_response_hook_writes_nothing_back_to_a_streamed_flow(tmp_path, monk
         resp=tutils.tresp(content=None, headers=((b"content-type", b"text/event-stream"),)),
     )
     flow.client_conn.sockname = ("127.0.0.1", 4000)
-    addon.request(flow)
+    asyncio.run(addon.request(flow))
     assert flow.metadata[META_KEY].answered_by == "delegated"
     flow.response.stream = True  # what `responseheaders` does for an event stream
     before = (flow.response.status_code, tuple(flow.response.headers.fields), flow.response.content)
@@ -1934,7 +2010,7 @@ def stripe_stub(tmp_path, monkeypatch):
     from irimi.overlay import ServiceOverlay
 
     _StripeStub.seen = []
-    srv = HTTPServer(("127.0.0.1", 0), _StripeStub)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _StripeStub)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     maps = _maps(tmp_path, monkeypatch, doc=STRIPE_MAP)
     eng, seen, stop = _start(
@@ -2177,7 +2253,7 @@ def slack_stub(tmp_path, monkeypatch):
     from irimi.overlay import ServiceOverlay
 
     _SlackStub.seen = []
-    srv = HTTPServer(("127.0.0.1", 0), _SlackStub)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _SlackStub)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     maps = _maps(tmp_path, monkeypatch, doc=SLACK_OVERLAY_MAP)
     eng, seen, stop = _start(

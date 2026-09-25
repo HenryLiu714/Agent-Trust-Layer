@@ -31,7 +31,7 @@ from irimi.exchange import (
     Response,
 )
 from irimi.overlay import Overlaid, Overlay
-from irimi.policy import AnswerPolicy
+from irimi.policy import Answer, AnswerPolicy
 from irimi.store import TraceStore
 
 logger = logging.getLogger(__name__)
@@ -51,6 +51,37 @@ class _Pending:
     door: Door
     flags: tuple[str, ...]  # what the policy attached to its answer, e.g. fidelity:L0
     target: str = ""  # the answer target this flow was pointed at; "" when irimi answered it
+
+
+@dataclass(frozen=True)
+class _Decision:
+    """What the worker thread decided, with nothing of mitmproxy's in it (#45).
+
+    `request` is the request as the trace should show it - rewritten, if the overlay translated a
+    cursor. `rewritten` is None when nothing was translated, and is otherwise the same object,
+    which is what tells the loop side there is a flow to edit.
+    """
+
+    request: Request
+    classification: pipeline.Classification
+    run_id: str
+    answer: Answer
+    rewritten: Request | None
+    failure: Exception | None = None
+
+
+def _failed_decision(req: Request, exc: Exception) -> _Decision:
+    """A decision that raised. Every field but `failure` is never read: the caller checks
+    `failure` first and returns, and the 502 path builds its own classification on the loop. They
+    exist because the dataclass is frozen and total."""
+    return _Decision(
+        req,
+        pipeline.Classification(service=req.host, operation="", kind="unknown", flags=()),
+        "",
+        Answer(answered_by="fake-L0", response=None),
+        None,
+        failure=exc,
+    )
 
 
 def _target_failed(reason: str) -> Response:
@@ -212,7 +243,7 @@ class IrimiAddon:
         self.on_running(None, EngineStartError(f"proxy did not start on {where}: {cause}"))
         ctx.master.shutdown()
 
-    def request(self, flow: http.HTTPFlow) -> None:
+    async def request(self, flow: http.HTTPFlow) -> None:
         try:
             req = _request_from_flow(flow)
         except Exception as exc:  # never fail open: an unparseable request is answered locally
@@ -247,18 +278,34 @@ class IrimiAddon:
         # themselves where they can say something more useful (`_to_target` below names the
         # target it could not apply); this is the backstop that makes the rule hold for pieces
         # that do not, and for every piece added later - #12, #13 and #20 all extend this path.
+        #
+        # The decision now runs on a worker thread. The hook is `async def`, which mitmproxy 12
+        # awaits, so the proxy serves every other flow while one write's L3 precondition read is
+        # in the air (#45) - the reason #38 refused to probe remote targets was that this hook
+        # was synchronous. Nothing inside `_decide` may touch `flow`: mitmproxy's flow objects
+        # belong to the event loop. The write log is snapshotted here, before the hand-off.
+        writes = tuple(self.write_log)
         try:
-            cls = pipeline.classify(req, self.config.maps)
-            run_id = pipeline.attribute_run(req, self.config.run_id)
-            ans = self.policy.answer(req, cls)
-            if ans.answered_by == "live" and cls.kind == "read" and self.write_log:
-                req = self._rewrite_read(flow, req)
-        except Exception as exc:
+            decision = await asyncio.to_thread(self._decide, req, writes)
+        except Exception as handoff:  # the hand-off itself, e.g. an executor shut down under us
+            decision = _failed_decision(req, handoff)
+        if decision.failure is None and decision.rewritten is not None:
+            # Under the decision's backstop, where these lines sat before the hand-off split them
+            # out (#45). A raise here would escape the hook and forward a half-edited read with no
+            # Exchange recorded; like any other part of the decision, it is answered locally.
+            try:
+                self._apply_rewrite(flow, decision.rewritten)
+            except Exception as exc:
+                decision = _failed_decision(req, exc)
+        if decision.failure is not None:
+            failure = decision.failure
             # Recorded, not just refused. A write that vanishes from the trace is the other half
             # of this bug: #13's "log of every write" has to show the one irimi could not decide
             # about, and `unknown` + `unclassified` is the honest classification for it.
-            logger.exception("irimi: answering locally; the decision raised")
-            refusal = _decision_failed(f"irimi could not decide how to answer this request: {exc}")
+            logger.exception("irimi: answering locally; the decision raised", exc_info=failure)
+            refusal = _decision_failed(
+                f"irimi could not decide how to answer this request: {failure}"
+            )
             ex = pipeline.annotate(
                 req,
                 refusal,
@@ -281,6 +328,8 @@ class IrimiAddon:
             flow.response = _to_mitm_response(pipeline.respond(ex) or refusal)
             self._finish(ex)
             return
+        req = decision.request
+        cls, run_id, ans = decision.classification, decision.run_id, decision.answer
         response: Response | None = ans.response
         flags: tuple[str, ...] = ans.flags
         target = ""
@@ -301,8 +350,22 @@ class IrimiAddon:
         if response is not None:
             flow.response = _to_mitm_response(response)
 
-    def _rewrite_read(self, flow: http.HTTPFlow, req: Request) -> Request:
-        """Let the overlay translate a live read before mitmproxy forwards it (#43).
+    def _decide(self, req: Request, writes: tuple[Exchange, ...]) -> _Decision:
+        """The whole decision, on a worker thread, with no flow in sight."""
+        try:
+            cls = pipeline.classify(req, self.config.maps)
+            run_id = pipeline.attribute_run(req, self.config.run_id)
+            ans = self.policy.answer(req, cls, writes, run_id)
+            rewritten = None
+            if ans.answered_by == "live" and cls.kind == "read" and writes:
+                rewritten = self._rewrite_read(req, writes)
+            return _Decision(rewritten or req, cls, run_id, ans, rewritten)
+        except Exception as exc:
+            return _failed_decision(req, exc)
+
+    def _rewrite_read(self, req: Request, writes: tuple[Exchange, ...]) -> Request | None:
+        """Let the overlay translate a live read before mitmproxy forwards it (#43). None when
+        nothing changed; the flow is edited by `_apply_rewrite`, back on the loop (#45).
 
         Guarded on its own inside the decision's never-raise guard, because the two failures want
         opposite answers: a decision that raises must be answered locally with a 502, since the
@@ -315,12 +378,16 @@ class IrimiAddon:
         what irimi asked the service is what the trace has to show.
         """
         try:
-            rewritten = self.overlay.rewrite(tuple(self.write_log), req)
+            rewritten = self.overlay.rewrite(writes, req)
         except Exception:
             logger.exception("irimi: the overlay's rewrite raised; forwarding the read unchanged")
-            return req
+            return None
         if rewritten is req:
-            return req
+            return None
+        return rewritten
+
+    def _apply_rewrite(self, flow: http.HTTPFlow, rewritten: Request) -> None:
+        """Carry what `_rewrite_read` translated onto the flow, on the event loop (#45)."""
         flow.request.path = (
             f"{rewritten.path}?{rewritten.query}" if rewritten.query else rewritten.path
         )
@@ -331,7 +398,6 @@ class IrimiAddon:
             # The overlay stripped one the agent sent: only irimi may tell the service side that a
             # page follows a minted refund, so the agent's own never reaches the real service.
             del flow.request.headers[pipeline.REWROTE_HEADER]
-        return rewritten
 
     def _to_target(self, flow: http.HTTPFlow, req: Request, forward: delegation.ForwardTo) -> None:
         """Point the flow at its answer target, the way `_through_reverse_door` points it upstream.

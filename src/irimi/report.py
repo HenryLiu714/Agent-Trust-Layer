@@ -114,6 +114,7 @@ DID_NOT_SHOW = "did not show it"
 # `fake-L0` and `fake-L1` print as `L0` and `L1`; `delegated` has no prefix and prints as it is.
 FAKE_PREFIX = "fake-"
 DID_NOT_HAPPEN = "These writes did not happen."
+WOULD_HAVE_FIRED = "Would have fired:"
 # A delegated write whose target never answered. It is neither delegated nor faked: nothing
 # answered it at all, and the agent got a 502. Saying "delegated" for it would be the same
 # class of lie as counting a delegated read as live (#20) - the summary would show a write
@@ -425,6 +426,19 @@ def _writes_with_their_reads(
     return paired
 
 
+def _would_fire(writes: Sequence[Exchange]) -> list[str]:
+    """Every webhook event the run's faked writes would have caused, each named once, in the order
+    the run first listed it.
+
+    Off `Exchange.would_fire` and never off `route.fires` (#47): `would_fire` is already empty for
+    an L3 rejection, an idempotency conflict, a replay and a delegated write, so this needs no
+    filter of its own. Re-deriving the list from the map at print time would bring all four back.
+    De-duplicated because two refunds carry two identical tuples and one refund's `refund.created`
+    must not be promised twice.
+    """
+    return list(dict.fromkeys(event for ex in writes for event in ex.would_fire))
+
+
 def _closing_lines(writes: Sequence[Exchange]) -> list[str]:
     """What did not happen, and - when something answered in irimi's place - where it went.
 
@@ -435,15 +449,21 @@ def _closing_lines(writes: Sequence[Exchange]) -> list[str]:
     delegated ones. `These writes did not reach stripe` stays true either way, but `1 was
     delegated to <target>` would claim a stub answered a write no stub ever saw, and the run
     would read as a working delegation while the developer's stub was not running at all.
+
+    The webhooks the faked writes would have fired close the first sentence in either branch
+    (#48). A run whose every write was refused names none and keeps the bare sentence: `Would
+    have fired: nothing.` would be a claim, and silence is the truth.
     """
     if not writes:
         return []
+    events = _would_fire(writes)
+    clause = f" {WOULD_HAVE_FIRED} {', '.join(events)}." if events else ""
     delegated = [ex for ex in writes if _reached_target(ex)]
     unreachable = [ex for ex in writes if _failed_target(ex)]
     if not delegated and not unreachable:
-        return [f"  {DID_NOT_HAPPEN}"]
+        return [f"  {DID_NOT_HAPPEN}{clause}"]
     services = ", ".join(sorted({ex.service for ex in writes}))
-    lines = [f"  These writes did not reach {services}."]
+    lines = [f"  These writes did not reach {services}.{clause}"]
     if delegated:
         targets = ", ".join(sorted({ex.target for ex in delegated}))
         verb = "was" if len(delegated) == 1 else "were"

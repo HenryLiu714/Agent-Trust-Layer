@@ -104,6 +104,21 @@ class Rejection:
 
 
 @dataclass(frozen=True)
+class Idempotency:
+    """How a service lets a caller say "this is the same write I already sent" (#46).
+
+    `header` is the request header the caller puts the key in, lower-case as `pipeline.parse`
+    normalizes it. `conflict` is what the service answers when that key comes back with different
+    parameters - a `Rejection` like any other, so the SDK raises its own error rather than choking
+    on something of irimi's. A service with no entry in `services.IDEMPOTENCY` has no such
+    mechanism and no store.
+    """
+
+    header: str
+    conflict: Callable[[str], Rejection]  # the key the caller reused -> the service's refusal
+
+
+@dataclass(frozen=True)
 class NotEvaluable:
     """A verdict's third answer: the probe came back and says nothing this check can read (#45).
 

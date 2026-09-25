@@ -123,10 +123,10 @@ Every exchange prints as one line while it runs; at the end you get the run's su
 
     irimi shadow · run 7f3a · 11 exchanges · 2.3s · backstop: none (Phase 4)
 
-      api.openai.com     1 llm
-      api.stripe.com     3 reads (2 showing this run's writes)  2 engine reads  2 writes intercepted
-      slack.com          1 write intercepted (1 delegated)
-      telemetry          2 exchanges to 2 hosts, forwarded live
+      api.openai.com  1 llm
+      api.stripe.com  3 reads (2 showing this run's writes)  2 engine reads  2 writes intercepted
+      slack.com       1 write intercepted (1 delegated)
+      telemetry       2 exchanges to 2 hosts, forwarded live
 
       ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L3 preconditions passed)
         ↳ GET /v1/refunds saw it  overlay

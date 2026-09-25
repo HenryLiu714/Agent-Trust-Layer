@@ -12,9 +12,12 @@ log of every write the agent would have made.
 ## Status
 
 Phase 1 is complete: `irimi init`, `irimi serve`, `irimi shadow`, the reverse door, the service
-maps, the L0 echo and answer targets all work and are covered by the tests. Phase 2 is under way:
-a mapped Stripe write is now answered from a vendored response object (`fake-L1`), and the
-overlay that makes reads see the run's own writes is next. Work is tracked in the issues at
+maps, the L0 echo and answer targets all work and are covered by the tests. Phase 2 is complete:
+mapped writes are answered from vendored response objects (`fake-L1`), the overlay makes the
+agent's later reads show the run's own writes, L3 preconditions check a write against the real
+service before faking it, the idempotency store makes a retry one write rather than two, each
+accepted write records the webhooks it would have fired, and the summary says all of it. Phase 3
+(the SDK and the trace store) is next. Work is tracked in the issues at
 https://github.com/HenryLiu714/Agent-Trust-Layer/issues.
 
 ## Requirements
@@ -118,18 +121,21 @@ passed through.
 
 Every exchange prints as one line while it runs; at the end you get the run's summary:
 
-    irimi shadow · run 7f3a · 10 exchanges · 2.3s · backstop: none (Phase 4)
+    irimi shadow · run 7f3a · 11 exchanges · 2.3s · backstop: none (Phase 4)
 
-      api.openai.com     1 llm
-      api.stripe.com     2 reads  1 engine read  2 writes intercepted
-      slack.com          1 write intercepted (1 delegated)
-      telemetry          2 exchanges to 2 hosts, forwarded live
+      api.openai.com  1 llm
+      api.stripe.com  3 reads (2 showing this run's writes)  2 engine reads  2 writes intercepted
+      slack.com       1 write intercepted (1 delegated)
+      telemetry       2 exchanges to 2 hosts, forwarded live
 
       ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L3 preconditions passed)
+        ↳ GET /v1/refunds saw it  overlay
+        ↳ GET /v1/charges/ch_3QabcXYZ saw it  overlay
+      ✗ refund $49.00 on ch_3QabcXYZ  would fail: charge_already_refunded
       ○ post to #refunds: "Refunded $49.00" → http://127.0.0.1:3111/post  unvalidated (delegated)
 
-      10 exchanges · 6 live · 1 delegated · 3 virtualized
-      These writes did not reach slack, stripe.
+      11 exchanges · 8 live · 1 delegated · 2 virtualized
+      These writes did not reach slack, stripe. Would have fired: refund.created, charge.refunded.
       1 was delegated to http://127.0.0.1:3111/post.
 
 An `engine read` is one irimi made itself, to check a write against the real service before faking
@@ -137,6 +143,18 @@ it: a refund against its charge, a Slack post against its channel. It is counted
 agent's reads so that "reads are real" means the reads your agent made. The write line says what
 the check found: `L3 preconditions passed`, `L2` when irimi could not find out, or `✗ ... would
 fail: charge_already_refunded` for a write the real service would have refused.
+
+A `↳` line under a write is one of *your agent's* later reads of the same service, and says whether
+it showed the run's own writes. `saw it  overlay` is a read irimi edited to show them, and the
+edited reads are what the `(… showing this run's writes)` bracket counts. `(partial)` means irimi
+knows the world it showed was incomplete: `saw it in part` for a read it edited anyway, and `did
+not show it  live (partial)` for one it left as the service sent it. A read irimi made itself gets
+no line.
+
+The closing `Would have fired:` names the webhooks the real service would have sent for these
+writes. None of them fired and nothing was delivered, and only a write irimi accepted lists any. A
+write it would have refused, a retry answered from the idempotency store and a delegated write list
+none, so a run whose every write was refused ends on the bare sentence.
 
 `live` means forwarded to the real service — reads, inference and telemetry alike; `delegated`
 means an answer target answered it; `virtualized` means irimi did. Each intercepted write gets a

@@ -161,3 +161,38 @@ class Exchange:
     # because in the first two cases nothing would have happened and in the third the events are
     # already on the first write's own exchange. Empty for every read. Nothing is delivered.
     would_fire: tuple[str, ...] = field(default_factory=tuple)
+
+
+def is_authored_write(exchange: Exchange) -> bool:
+    """A write irimi itself authored: it changed state somewhere the real service does not know
+    about. The engine's write log holds exactly these, and they are what the overlay replays onto
+    live reads - so they are also the only writes a later read can have been shown (#48). Each
+    clause keeps one thing out that is not that.
+
+    `kind not in LIVE_KINDS` keeps reads out. A delegated read is the one non-live read
+    (`target_reads`), and a GET replayed onto later reads is not a write by any reading - #20 owns
+    "no overlay for a delegated service" and #28 is the streaming twin. `answered_by not in
+    ("live", "delegated")` keeps out what irimi did not author: a live forward, and a DELEGATED
+    WRITE (#43) - the target performed it, or did something else with it, or nothing, and irimi
+    cannot replay an effect it does not know. `TARGET_FAILED_FLAG` keeps out a write performed
+    nowhere: a target irimi *refused* is answered in the engine's `request()` hook and recorded
+    like any other answer, and without this clause the overlay replayed a write that never
+    happened.
+
+    A REJECTED WRITE IS NOT A WRITE (#45). L3 said the real service would have refused it, and the
+    agent got that refusal. Replaying it onto later reads would show the agent a refund that
+    neither Stripe nor irimi ever made.
+
+    NEITHER HALF OF IDEMPOTENCY IS A WRITE TO REPLAY (#46). A replay is the SAME write: the store
+    answered the agent's retry with the first write's own bytes, and a second entry would have the
+    overlay decode one refund twice - a charge showing 200 refunded for a single 100 refund, and
+    page 1 of the refunds list carrying the same minted id twice. A conflict is not a write at
+    all: the real service would have refused it, nothing was minted, and there is no effect.
+    """
+    return (
+        exchange.kind not in LIVE_KINDS
+        and exchange.answered_by not in ("live", "delegated")
+        and TARGET_FAILED_FLAG not in exchange.flags
+        and exchange.precondition != "rejected"
+        and not any(flag in exchange.flags for flag in IDEMPOTENCY_FLAGS)
+    )

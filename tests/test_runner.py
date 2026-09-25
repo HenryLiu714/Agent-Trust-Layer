@@ -309,7 +309,7 @@ def test_an_overlaid_read_is_a_real_read_and_says_it_shows_the_run_s_writes():
     sent, though, so the line says that too (#43)."""
     rows = [_exchange(), _exchange(answered_by="overlay")]
     line = _block(summary_lines("7f3a", rows, 0.0, _maps()), "api.stripe.com")
-    assert line == "  api.stripe.com  2 reads  1 showing this run's writes"
+    assert line == "  api.stripe.com  2 reads (1 showing this run's writes)"
 
 
 def test_an_overlaid_read_is_counted_live_and_never_virtualized():
@@ -642,3 +642,241 @@ def test_an_idempotency_conflict_prints_as_a_write_that_would_fail():
     line = _block(lines, "would fail")
     assert line == "  ✗ refund $49.00 on ch_3QabcXYZ  would fail: idempotency_error"
     assert _block(lines, "api.stripe.com") == "  api.stripe.com  2 writes intercepted"
+
+
+# ------------------------------ the reads that saw a write, and what it would have fired (#48)
+
+
+def _write_block(lines):
+    """The write block as printed: each `○`/`✗` line, with the `↳` lines hanging under it.
+
+    Any line carrying `↳` is kept whatever its indent, so a test that expects none still sees one
+    printed at the wrong depth rather than filtering it out."""
+    return [line for line in lines if line.startswith(("  ○ ", "  ✗ ")) or "↳" in line]
+
+
+def _slack_post(answered_by="fake-L1", target=""):
+    return _exchange(
+        method="POST",
+        kind="write",
+        answered_by=answered_by,
+        host="slack.com",
+        service="slack",
+        path="/api/chat.postMessage",
+        body=b"channel=C0123&text=refunded",
+        content_type=FORM,
+        target=target,
+    )
+
+
+def _slack_history(answered_by="live"):
+    return _exchange(
+        method="POST",
+        host="slack.com",
+        service="slack",
+        path="/api/conversations.history",
+        answered_by=answered_by,
+    )
+
+
+def test_an_overlaid_read_is_listed_under_the_write_it_saw():
+    """The per-host count said a read showed this run's writes and never said which read, or which
+    write. The reader could not tell whether the agent re-read its own refund (#48)."""
+    rows = [
+        replace(_refund(answered_by="fake-L1"), precondition="passed"),
+        replace(_exchange(path="/v1/refunds", answered_by="overlay"), overlay="full"),
+    ]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert _write_block(lines) == [
+        "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L3 preconditions passed)",
+        "    ↳ GET /v1/refunds saw it  overlay",
+    ]
+
+
+def test_a_partial_overlay_hit_says_it_saw_only_part():
+    """`partial` means irimi knowingly showed the agent an incomplete world. Printing it as a plain
+    `saw it` would claim a fidelity the trace itself denies (#43)."""
+    rows = [
+        _refund(answered_by="fake-L1"),
+        replace(_exchange(path="/v1/refunds", answered_by="overlay"), overlay="partial"),
+    ]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert _write_block(lines) == [
+        "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L1)",
+        "    ↳ GET /v1/refunds saw it in part  overlay (partial)",
+    ]
+
+
+def test_a_read_irimi_knew_was_incomplete_says_so_even_though_it_answered_none_of_it():
+    """A Slack read whose channel the two sides spell differently comes back untouched and `live`,
+    yet irimi knows it did not show the post (#44). Staying silent because the body was not edited
+    would hide the one thing irimi knows about that read (#43)."""
+    rows = [_slack_post(), replace(_slack_history(), overlay="partial")]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert _write_block(lines) == [
+        '  ○ post to #C0123: "refunded"  unvalidated (L1)',
+        "    ↳ POST /api/conversations.history did not show it  live (partial)",
+    ]
+
+
+def test_a_translated_read_that_needed_no_edit_gets_no_overlay_line():
+    """`overlay: full` on a `live` read means irimi translated the request and the body needed no
+    edit. It is not an overlay hit, and a `↳` line would say the agent saw a write it did not
+    (#43)."""
+    rows = [
+        _refund(answered_by="fake-L1"),
+        replace(_exchange(path="/v1/refunds"), overlay="full"),
+    ]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert _write_block(lines) == ["  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L1)"]
+
+
+def test_an_engine_issued_read_never_gets_an_overlay_line():
+    """The `↳` line says which of the AGENT's reads saw the write. irimi's own precondition read is
+    one the agent never made, so hanging it there would credit the agent with a look it did not
+    take (#45)."""
+    rows = [
+        replace(_refund(answered_by="fake-L1"), precondition="passed"),
+        replace(_exchange(path="/v1/charges/ch_3QabcXYZ"), issued_by="engine", overlay="partial"),
+    ]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert _write_block(lines) == [
+        "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L3 preconditions passed)"
+    ]
+
+
+def test_an_overlaid_read_is_filed_under_its_own_services_write():
+    """The overlay applies only a service's own writes to that service's reads, so a read belongs
+    under the latest write of ITS service, not simply the latest write. Filed by position alone, the
+    Stripe re-read below would sit under the Slack post it never saw (#48)."""
+    rows = [
+        _refund(answered_by="fake-L1"),
+        _slack_post(),
+        replace(_slack_history(answered_by="overlay"), overlay="full"),
+        replace(_exchange(path="/v1/charges/ch_3QabcXYZ", answered_by="overlay"), overlay="full"),
+    ]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert _write_block(lines) == [
+        "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L1)",
+        "    ↳ GET /v1/charges/ch_3QabcXYZ saw it  overlay",
+        '  ○ post to #C0123: "refunded"  unvalidated (L1)',
+        "    ↳ POST /api/conversations.history saw it  overlay",
+    ]
+
+
+def test_an_overlaid_read_is_never_filed_under_a_write_the_overlay_could_not_have_shown():
+    """A refused write is printed, but it never enters the write log, so no read ever saw it (#45,
+    #46). A read after a refund and its refused retry saw the REFUND; filed by position it would
+    hang under the `✗` line and tell the reader the agent was shown a refund that was refused."""
+    rows = [
+        replace(_refund(answered_by="fake-L1"), precondition="passed"),
+        replace(
+            _refund(answered_by="fake-L1", status=400),
+            precondition="rejected",
+            rejection_code="charge_already_refunded",
+        ),
+        replace(
+            _refund(answered_by="fake-L1", status=400, flags=(IDEMPOTENCY_CONFLICT_FLAG,)),
+            rejection_code="idempotency_error",
+        ),
+        replace(_exchange(path="/v1/refunds", answered_by="overlay"), overlay="full"),
+    ]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert _write_block(lines) == [
+        "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L3 preconditions passed)",
+        "    ↳ GET /v1/refunds saw it  overlay",
+        "  ✗ refund $49.00 on ch_3QabcXYZ  would fail: charge_already_refunded",
+        "  ✗ refund $49.00 on ch_3QabcXYZ  would fail: idempotency_error",
+    ]
+
+
+def test_an_engine_read_the_overlay_edited_is_never_counted_as_one_of_the_agents_reads():
+    """The bracket qualifies the agent's `N reads`, so it counts the agent's reads only. An engine
+    read is its own phrase; counted in both, one read would show up twice (#45, #48)."""
+    rows = [
+        replace(_refund(answered_by="fake-L1"), precondition="passed"),
+        replace(
+            _exchange(path="/v1/charges/ch_3QabcXYZ", answered_by="overlay"),
+            issued_by="engine",
+            overlay="full",
+        ),
+    ]
+    line = _block(summary_lines("7f3a", rows, 0.0, _maps()), "api.stripe.com  ")
+    assert line == "  api.stripe.com  1 engine read  1 write intercepted"
+
+
+def test_the_closing_line_names_each_event_once_in_first_seen_order():
+    """Two refunds carry two identical tuples; naming `refund.created` twice would promise a webhook
+    per line rather than per event, and a sorted list would lose the order the map gives (#47)."""
+    fired = ("refund.created", "charge.refunded")
+    rows = [
+        replace(_refund(answered_by="fake-L1"), would_fire=fired),
+        replace(_refund(answered_by="fake-L1"), would_fire=fired),
+    ]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert lines[-1] == (
+        "  These writes did not happen. Would have fired: refund.created, charge.refunded."
+    )
+    assert sum("Would have fired" in line for line in lines) == 1
+
+
+def test_a_run_whose_every_write_was_refused_promises_no_webhooks():
+    """A write the real service would have refused fires nothing. `Would have fired: nothing.` would
+    be a claim; the bare sentence is the truth (#47)."""
+    rows = [
+        replace(
+            _refund(answered_by="fake-L1", status=400),
+            precondition="rejected",
+            rejection_code="charge_already_refunded",
+        )
+    ]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert lines[-1] == "  These writes did not happen."
+    assert not any("Would have fired" in line for line in lines)
+
+
+def test_a_delegated_write_lists_none_of_its_own_but_does_not_hide_the_faked_ones():
+    """A delegated write's `would_fire` is empty by construction, because what the target did is not
+    irimi's to promise. The faked write beside it still owes the reader its events (#47)."""
+    rows = [
+        replace(_refund(answered_by="fake-L1"), would_fire=("refund.created",)),
+        _slack_post(answered_by="delegated", target="http://127.0.0.1:3000/slack"),
+    ]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert lines[-2] == (
+        "  These writes did not reach slack, stripe. Would have fired: refund.created."
+    )
+    assert lines[-1] == "  1 was delegated to http://127.0.0.1:3000/slack."
+
+
+def test_a_replayed_write_neither_prints_a_line_nor_promises_its_events_twice():
+    """A replay is the same write answered with the first one's bytes: one line, and its events
+    named once, or the summary counts retries instead of intentions (#46)."""
+    fired = ("refund.created", "charge.refunded")
+    rows = [
+        replace(_refund(answered_by="fake-L1", flags=("fidelity:L1",)), would_fire=fired),
+        _refund(answered_by="fake-L1", flags=("fidelity:L1", IDEMPOTENT_REPLAY_FLAG)),
+    ]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert _write_block(lines) == ["  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L1)"]
+    assert lines[-1] == (
+        "  These writes did not happen. Would have fired: refund.created, charge.refunded."
+    )
+
+
+def test_a_write_l3_could_not_check_still_promises_its_events():
+    """`not_evaluable` means irimi could not find out whether the service would have taken the
+    write, not that it would have refused it. The write was faked, so its events are still owed
+    (#47)."""
+    rows = [
+        replace(
+            _refund(answered_by="fake-L1"),
+            precondition="not_evaluable",
+            would_fire=("refund.created", "charge.refunded"),
+        )
+    ]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert _write_block(lines) == ["  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L2)"]
+    assert lines[-1] == (
+        "  These writes did not happen. Would have fired: refund.created, charge.refunded."
+    )

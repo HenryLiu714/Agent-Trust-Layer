@@ -18,8 +18,6 @@ from irimi.engine import EngineConfig, EngineStartError, OnExchange
 from irimi.exchange import (
     DECISION_FAILED_FLAG,
     FIDELITY_FLAGS,
-    IDEMPOTENCY_FLAGS,
-    LIVE_KINDS,
     TARGET_FAILED_FLAG,
     UNCLASSIFIED_FLAG,
     UPSTREAM_ERROR_FLAG,
@@ -31,6 +29,7 @@ from irimi.exchange import (
     PreconditionOutcome,
     Request,
     Response,
+    is_authored_write,
 )
 from irimi.overlay import Overlaid, Overlay
 from irimi.policy import Answer, AnswerPolicy
@@ -578,39 +577,11 @@ class IrimiAddon:
             rejection_code=pending.rejection_code,
             would_fire=pending.would_fire,
         )
-        # The write log is what the overlay replays onto live reads, so it holds *writes irimi
-        # itself authored*: exchanges that changed state somewhere the real service does not know
-        # about. Each clause below keeps one thing out that is not that.
-        #
-        # `kind not in LIVE_KINDS` keeps reads out. A delegated read is the one non-live read
-        # (`target_reads`), and a GET replayed onto later reads is not a write by any reading -
-        # #20 owns "no overlay for a delegated service" and #28 is the streaming twin.
-        # `answered_by not in ("live", "delegated")` keeps out what irimi did not author: a live
-        # forward, and a DELEGATED WRITE (#43) - the target performed it, or did something else
-        # with it, or nothing, and irimi cannot replay an effect it does not know.
-        # `TARGET_FAILED_FLAG` keeps out a write performed nowhere. A target that could not be
-        # *dialled* never reaches here - `error()` handles that one and does not touch the log -
-        # but a target irimi *refused* is answered in `request()`, which does set `_Pending`, so
-        # without this clause it landed here and the overlay replayed a write that never happened.
-        #
-        # A REJECTED WRITE IS NOT A WRITE (#45). L3 said the real service would have refused it,
-        # and the agent got that refusal. Replaying it onto later reads would show the agent a
-        # refund that neither Stripe nor irimi ever made - the overlay would apply an effect for
-        # a write that, in every world, did not happen.
-        #
-        # NEITHER HALF OF IDEMPOTENCY IS A WRITE TO REPLAY (#46). A replay is the SAME write: the
-        # store answered the agent's retry with the first write's own bytes, and a second entry
-        # here would have `overlay._writes` decode one refund twice - `stripe._charge` summing
-        # `amount` over both, so a charge shows 200 refunded for a single 100 refund, and page 1
-        # of the refunds list carries the same minted id twice. A conflict is not a write at all:
-        # the real service would have refused it, nothing was minted, and there is no effect.
-        if (
-            ex.kind not in LIVE_KINDS
-            and ex.answered_by not in ("live", "delegated")
-            and TARGET_FAILED_FLAG not in ex.flags
-            and ex.precondition != "rejected"
-            and not any(flag in ex.flags for flag in IDEMPOTENCY_FLAGS)
-        ):
+        # The write log is what the overlay replays onto live reads. `is_authored_write` is the
+        # one statement of what may enter it, because the summary files a read under a write by
+        # the same rule (#48). A target that could not be *dialled* never reaches here: `error()`
+        # handles that one and does not touch the log.
+        if is_authored_write(ex):
             self.write_log.append(ex)
         out = pipeline.respond(ex)
         if out is not None and out is not upstream and not streamed:

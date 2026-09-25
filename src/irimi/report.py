@@ -14,6 +14,7 @@ from irimi.exchange import (
     IDEMPOTENT_REPLAY_FLAG,
     TARGET_FAILED_FLAG,
     Exchange,
+    is_authored_write,
 )
 from irimi.servicemap import SELF_TARGET, MapIndex, Route, is_delegated, path_params
 
@@ -104,9 +105,17 @@ INTERCEPTED_KINDS: frozenset[str] = frozenset({"write", "unknown"})
 
 WRITE_MARKER = "○"
 REJECTED_MARKER = "✗"
+# One of the agent's own reads that irimi either edited to show this run's writes, or knows it
+# could not fully show them (#48). It hangs under the write it is about, so a reader sees the
+# write and the reads that then saw it as one thing.
+OVERLAY_MARKER = "↳"
+SAW_IT = "saw it"
+SAW_PART = "saw it in part"
+DID_NOT_SHOW = "did not show it"
 # `fake-L0` and `fake-L1` print as `L0` and `L1`; `delegated` has no prefix and prints as it is.
 FAKE_PREFIX = "fake-"
 DID_NOT_HAPPEN = "These writes did not happen."
+WOULD_HAVE_FIRED = "Would have fired:"
 # A delegated write whose target never answered. It is neither delegated nor faked: nothing
 # answered it at all, and the agent got a 502. Saying "delegated" for it would be the same
 # class of lie as counting a delegated read as live (#20) - the summary would show a write
@@ -231,21 +240,27 @@ def _host_line(host: str, rows: Sequence[Exchange], width: int) -> str:
     # An OVERLAID read is a real read (#43): it went to the real service and came back, and irimi
     # then wrote the run's own faked writes into the body. Leaving it out of this count told the
     # reader a read they really made never happened, which is the same class of untruth as #20
-    # below. It is counted here and named separately, because the body is not what Stripe sent.
+    # below. It is counted here and its count qualifies `N reads` in brackets, because the body is
+    # not what the service sent (#48).
     #
     # An engine-issued read is a real read that the AGENT did not make (#45). Counting it in
-    # `N reads` would inflate the one number this tool rests on. #48 owns the final phrasing of
-    # this block; this is the honest minimum until then.
+    # `N reads` would inflate the one number this tool rests on, so it is a different number in
+    # its own phrase, never inside the headline's brackets (#48).
     live_reads = sum(
         1
         for ex in rows
         if ex.kind == "read" and ex.answered_by == "live" and ex.issued_by == "agent"
     )
-    overlaid_reads = sum(1 for ex in rows if ex.kind == "read" and ex.answered_by == "overlay")
+    overlaid_reads = sum(
+        1
+        for ex in rows
+        if ex.kind == "read" and ex.answered_by == "overlay" and ex.issued_by == "agent"
+    )
     if live_reads or overlaid_reads:
-        phrases.append(_plural(live_reads + overlaid_reads, "read"))
-    if overlaid_reads:
-        phrases.append(f"{overlaid_reads} showing this run's writes")
+        reads = _plural(live_reads + overlaid_reads, "read")
+        if overlaid_reads:
+            reads = f"{reads} ({overlaid_reads} showing this run's writes)"
+        phrases.append(reads)
     engine_reads = sum(1 for ex in rows if ex.issued_by == "engine")
     if engine_reads:
         phrases.append(_plural(engine_reads, "engine read"))
@@ -351,6 +366,88 @@ def _fidelity(exchange: Exchange) -> str:
     return level
 
 
+def _shows_overlay(exchange: Exchange) -> bool:
+    """One of the agent's own reads the summary owes a `↳` line (#48).
+
+    Edited to show the run's writes, or known to be incomplete - not merely `overlay: full`, which
+    a read irimi only translated also carries while staying `live` and untouched (#43). Never a
+    read irimi issued itself: the line says which of the AGENT's reads saw the write (#45).
+    """
+    return (
+        exchange.kind == "read"
+        and exchange.issued_by == "agent"
+        and (exchange.answered_by == "overlay" or exchange.overlay == "partial")
+    )
+
+
+def _overlay_lines(reads: Sequence[Exchange]) -> list[str]:
+    """The `↳` lines under one write: which of the agent's reads were shown it, and how fully.
+
+    Three cases, because `overlay` and `answered_by` say different things (#43). `answered_by ==
+    "overlay"` means irimi edited the body; `overlay == "partial"` means irimi knows the world it
+    showed was incomplete, and it can sit on a body irimi never touched - a Slack read whose
+    channel the two sides spell differently (#44). A read irimi merely TRANSLATED, live and
+    `overlay: full`, is not an overlay hit and gets no line at all.
+    """
+    lines: list[str] = []
+    for ex in reads:
+        what = f"{ex.request.method} {ex.request.path}"
+        if ex.answered_by == "overlay" and ex.overlay != "partial":
+            verb, column = SAW_IT, "overlay"
+        elif ex.answered_by == "overlay":
+            verb, column = SAW_PART, "overlay (partial)"
+        else:
+            verb, column = DID_NOT_SHOW, "live (partial)"
+        lines.append(f"    {OVERLAY_MARKER} {what} {verb}  {column}")
+    return lines
+
+
+def _writes_with_their_reads(
+    exchanges: Sequence[Exchange],
+) -> list[tuple[Exchange, list[Exchange]]]:
+    """Every printed write, in order, each with the overlaid reads that are about it (#48).
+
+    A read is filed under the most recent write before it that the overlay could have shown it:
+    one of the SAME SERVICE, and one irimi authored (`is_authored_write`, the write log's own
+    rule). Not simply "the last write". A run that refunds on Stripe and then reads Slack history
+    would otherwise file the Slack read under the Stripe refund; and a refund, its refused retry
+    and then a list would file the list under the `✗` line, saying the agent was shown a refund
+    that was refused. A refused write is printed, but it never reached the write log, so no read
+    ever saw it.
+
+    A read irimi issued itself is never here: `issued_by == "engine"` is a read the AGENT did not
+    make, and the whole point of the line is to say which of the agent's reads saw the write (#45).
+
+    Pairs rather than a dict keyed by write: `Exchange` is a mutable dataclass and so unhashable.
+    A qualifying read with no such write before it is left out, and cannot happen - the overlay
+    stamps or flags a read only on the strength of a same-service write in the log, and every
+    write-log entry is a printed write. `tests/test_invariants.py` holds it over a real run.
+    """
+    paired: list[tuple[Exchange, list[Exchange]]] = []
+    last: dict[str, int] = {}
+    for ex in exchanges:
+        if _is_intercepted(ex):
+            if is_authored_write(ex):
+                last[ex.service] = len(paired)
+            paired.append((ex, []))
+        elif _shows_overlay(ex) and ex.service in last:
+            paired[last[ex.service]][1].append(ex)
+    return paired
+
+
+def _would_fire(writes: Sequence[Exchange]) -> list[str]:
+    """Every webhook event the run's faked writes would have caused, each named once, in the order
+    the run first listed it.
+
+    Off `Exchange.would_fire` and never off `route.fires` (#47): `would_fire` is already empty for
+    an L3 rejection, an idempotency conflict, a replay and a delegated write, so this needs no
+    filter of its own. Re-deriving the list from the map at print time would bring all four back.
+    De-duplicated because two refunds carry two identical tuples and one refund's `refund.created`
+    must not be promised twice.
+    """
+    return list(dict.fromkeys(event for ex in writes for event in ex.would_fire))
+
+
 def _closing_lines(writes: Sequence[Exchange]) -> list[str]:
     """What did not happen, and - when something answered in irimi's place - where it went.
 
@@ -361,15 +458,21 @@ def _closing_lines(writes: Sequence[Exchange]) -> list[str]:
     delegated ones. `These writes did not reach stripe` stays true either way, but `1 was
     delegated to <target>` would claim a stub answered a write no stub ever saw, and the run
     would read as a working delegation while the developer's stub was not running at all.
+
+    The webhooks the faked writes would have fired close the first sentence in either branch
+    (#48). A run whose every write was refused names none and keeps the bare sentence: `Would
+    have fired: nothing.` would be a claim, and silence is the truth.
     """
     if not writes:
         return []
+    events = _would_fire(writes)
+    clause = f" {WOULD_HAVE_FIRED} {', '.join(events)}." if events else ""
     delegated = [ex for ex in writes if _reached_target(ex)]
     unreachable = [ex for ex in writes if _failed_target(ex)]
     if not delegated and not unreachable:
-        return [f"  {DID_NOT_HAPPEN}"]
+        return [f"  {DID_NOT_HAPPEN}{clause}"]
     services = ", ".join(sorted({ex.service for ex in writes}))
-    lines = [f"  These writes did not reach {services}."]
+    lines = [f"  These writes did not reach {services}.{clause}"]
     if delegated:
         targets = ", ".join(sorted({ex.target for ex in delegated}))
         verb = "was" if len(delegated) == 1 else "were"
@@ -399,12 +502,13 @@ def summary_lines(
     `index` is the loaded maps, used only to find each write's `human:` template. Without it the
     writes still get a line, spelled as the request they were.
     """
-    writes = [ex for ex in exchanges if _is_intercepted(ex)]
+    paired = _writes_with_their_reads(exchanges)
+    writes = [write for write, _ in paired]
     # An overlaid read was forwarded to the real service and answered by it; irimi edited the body
     # afterwards to show the run's own faked writes. This line's buckets are about WHO answered,
     # so it belongs with `live`: counting it as `virtualized` claimed irimi had answered a read
     # the agent really made (#43). That its body was edited is said in the per-host block above,
-    # which is also where #48 gets to spell the fuller summary.
+    # and which write it saw is said by its `↳` line under that write (#48).
     live = sum(1 for ex in exchanges if ex.answered_by in ("live", "overlay"))
     delegated = sum(1 for ex in exchanges if ex.answered_by == "delegated")
     virtualized = len(exchanges) - live - delegated
@@ -415,7 +519,10 @@ def summary_lines(
     host_lines = _host_lines(exchanges)
     if host_lines:
         lines += ["", *host_lines]
-    write_lines = [_write_line(ex, index) for ex in writes]
+    write_lines: list[str] = []
+    for write, reads in paired:
+        write_lines.append(_write_line(write, index))
+        write_lines += _overlay_lines(reads)
     if write_lines:
         lines += ["", *write_lines]
     # The three buckets #20 asks for, on one line: `live` means forwarded to the real service -

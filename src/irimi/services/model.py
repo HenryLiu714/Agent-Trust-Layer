@@ -28,6 +28,22 @@ class Write:
 
 
 @dataclass(frozen=True)
+class Read:
+    """One live read the effects are asked about, decoded the way `Write` is (#44).
+
+    `posted` is the read request's own body, as `echo.reflect` read it. Stripe's reads are GETs
+    that carry their parameters in the query string and post nothing, so theirs is `{}`; Slack's
+    are POSTs that carry every parameter in the body, and the effects should not each have to
+    know which. Reflecting it here rather than in `slack.py` is what keeps the one never-raising
+    parser the only one: `echo` is in this package's own layer and cannot be imported from it.
+    """
+
+    operation: str
+    request: Request
+    posted: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class Applied:
     """What an effect table did to one read's document.
 
@@ -48,7 +64,7 @@ class Rewritten:
     removed: str  # the `key=value` pair that was dropped, for the Irimi-Rewrote header
 
 
-# `(operation, read request, parsed body, the run's writes for this service) -> Applied`.
-ReadEffects = Callable[[str, Request, Any, Sequence[Write]], Applied]
-# `(operation, read request, the run's writes for this service) -> Rewritten | None`.
-QueryRewrite = Callable[[str, Request, Sequence[Write]], "Rewritten | None"]
+# `(read, parsed body, the run's writes for this service) -> Applied`.
+ReadEffects = Callable[[Read, Any, Sequence[Write]], Applied]
+# `(read, the run's writes for this service) -> Rewritten | None`.
+QueryRewrite = Callable[[Read, Sequence[Write]], "Rewritten | None"]

@@ -32,7 +32,7 @@ from urllib.parse import parse_qsl, urlencode
 
 from irimi.exchange import Request
 from irimi.pipeline import REWROTE_HEADER
-from irimi.services.model import Applied, Rewritten, Write
+from irimi.services.model import Applied, Read, Rewritten, Write
 
 SERVICE = "stripe"
 # Stripe's own default page size, and what a list read gets when it names no `limit`.
@@ -48,8 +48,10 @@ KNOWN_LIST_PARAMS = frozenset({"limit", "charge", "payment_intent"})
 CURSOR_PARAMS = frozenset({"starting_after", "ending_before"})
 
 
-def apply_read(operation: str, request: Request, document: Any, writes: Sequence[Write]) -> Applied:
+def apply_read(read: Read, document: Any, writes: Sequence[Write]) -> Applied:
     """The run's faked Stripe writes, applied to one live read's parsed body."""
+    # `read.posted` is ignored, not forgotten: a Stripe read is a GET and posts nothing (#44).
+    operation = read.operation
     if not isinstance(document, dict):
         return Applied(document)
     if operation == "charges.retrieve":
@@ -57,9 +59,9 @@ def apply_read(operation: str, request: Request, document: Any, writes: Sequence
     if operation == "charges.list":
         return _charges_list(document, writes)
     if operation == "refunds.list":
-        return _refunds_list(request, document, writes)
+        return _refunds_list(read.request, document, writes)
     if operation == "refunds.retrieve":
-        return _refund_retrieve(request, document, writes)
+        return _refund_retrieve(read.request, document, writes)
     if operation == "customers.retrieve":
         return _customer(document, writes)
     if operation == "payment_intents.retrieve":
@@ -67,7 +69,7 @@ def apply_read(operation: str, request: Request, document: Any, writes: Sequence
     return Applied(document)
 
 
-def rewrite_query(operation: str, request: Request, writes: Sequence[Write]) -> Rewritten | None:
+def rewrite_query(read: Read, writes: Sequence[Write]) -> Rewritten | None:
     """Translate a cursor naming a refund irimi minted, before the read is forwarded.
 
     Stripe has never heard of that id and answers the page with an error. The minted refund is
@@ -76,10 +78,10 @@ def rewrite_query(operation: str, request: Request, writes: Sequence[Write]) -> 
     substituted, and `Rewritten.removed` names it so the response side knows this page follows
     the minted refund (see `_refunds_list`).
     """
-    if operation != "refunds.list":
+    if read.operation != "refunds.list":
         return None
     minted = {w.answer["id"] for w in _minted_refunds(writes)}
-    params = parse_qsl(request.query, keep_blank_values=True)
+    params = parse_qsl(read.request.query, keep_blank_values=True)
     dropped = [(k, v) for k, v in params if k == "starting_after" and v in minted]
     if not dropped:
         return None

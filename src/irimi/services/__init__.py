@@ -7,12 +7,13 @@ the same functions over a recording (use case 1).
 """
 
 from irimi.services import stripe
-from irimi.services.model import Applied, QueryRewrite, ReadEffects, Rewritten, Write
+from irimi.services.model import Applied, QueryRewrite, Read, ReadEffects, Rewritten, Write
 
 __all__ = [
     "Applied",
     "EFFECTS",
     "QueryRewrite",
+    "Read",
     "ReadEffects",
     "REWRITES",
     "Rewritten",

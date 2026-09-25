@@ -17,6 +17,7 @@ from irimi.exchange import (
     Door,
     Exchange,
     Kind,
+    OverlayFidelity,
     Request,
     Response,
     Validation,
@@ -154,9 +155,12 @@ def annotate(
     extra_flags: tuple[str, ...] = (),
     door: Door = "forward",
     target: str = "",
+    overlay: OverlayFidelity | None = None,
 ) -> Exchange:
     """Build the Exchange. Anything the engine answered is unvalidated; live forwards are also
-    unvalidated for now (validated is reserved for record mode, later phases)."""
+    unvalidated for now (validated is reserved for record mode, later phases). `overlay` is how
+    much of the write log the overlay expressed in this read, and is None for everything it did
+    not consider."""
     validation: Validation = "unvalidated"
     return Exchange(
         request=request,
@@ -170,6 +174,7 @@ def annotate(
         door=door,
         flags=classification.flags + extra_flags,
         target=target,
+        overlay=overlay,
     )
 
 

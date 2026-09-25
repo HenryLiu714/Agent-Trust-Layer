@@ -26,7 +26,10 @@ from irimi.store import NullStore
 
 
 class _Upstream(BaseHTTPRequestHandler):
+    seen: list = []  # (path, headers) of every GET, so a test can see what was forwarded
+
     def do_GET(self):
+        _Upstream.seen.append((self.path, dict(self.headers)))
         body = b"hello from upstream"
         self.send_response(200)
         if self.path == "/badgzip":  # claims gzip, is not: an undecodable body
@@ -59,6 +62,7 @@ def _serve(ssl_context=None):
 
 @pytest.fixture
 def upstream():
+    _Upstream.seen = []
     srv = _serve()
     yield srv.server_address[1]
     srv.shutdown()
@@ -369,24 +373,36 @@ def test_undecodable_upstream_body_is_still_recorded(engine, upstream):
 
 
 def test_overlay_output_reaches_the_client(tmp_path, monkeypatch, upstream):
-    def overlay(write_log, read_request, upstream_response):
-        return Overlaid(Response(200, (("content-type", "text/plain"),), b"OVERLAID"))
+    class _Overlay:
+        def __call__(self, write_log, read_request, upstream_response):
+            return Overlaid(Response(200, (("content-type", "text/plain"),), b"OVERLAID"))
 
-    eng, seen, stop = _start(_config(tmp_path, monkeypatch), overlay=overlay)
+        def rewrite(self, write_log, read_request):
+            return read_request
+
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch), overlay=_Overlay())
     try:
+        # The overlay is asked only once there is a write to show.
+        _via_proxy(eng.listen_port(), "POST", f"http://127.0.0.1:{upstream}/things", body=b"{}")
         status, data = _via_proxy(eng.listen_port(), "GET", f"http://127.0.0.1:{upstream}/hello")
     finally:
         stop()
     assert (status, data) == (200, b"OVERLAID")
-    assert seen[0].response.body == b"OVERLAID"
+    assert seen[-1].response.body == b"OVERLAID"
 
 
 def test_repeated_headers_survive_a_local_answer(tmp_path, monkeypatch, upstream):
-    def overlay(write_log, read_request, upstream_response):
-        return Overlaid(Response(200, (("set-cookie", "a=1"), ("set-cookie", "b=2")), b""))
+    class _Overlay:
+        def __call__(self, write_log, read_request, upstream_response):
+            return Overlaid(Response(200, (("set-cookie", "a=1"), ("set-cookie", "b=2")), b""))
 
-    eng, seen, stop = _start(_config(tmp_path, monkeypatch), overlay=overlay)
+        def rewrite(self, write_log, read_request):
+            return read_request
+
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch), overlay=_Overlay())
     try:
+        # The overlay is asked only once there is a write to show.
+        _via_proxy(eng.listen_port(), "POST", f"http://127.0.0.1:{upstream}/things", body=b"{}")
         conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=10)
         conn.request("GET", f"http://127.0.0.1:{upstream}/hello", headers={"host": "127.0.0.1"})
         resp = conn.getresponse()
@@ -825,6 +841,9 @@ class _RewritingOverlay:
             )
         )
 
+    def rewrite(self, write_log, read_request):
+        return read_request
+
 
 def test_an_overlay_is_not_handed_a_streamed_read_and_cannot_rewrite_one(tmp_path, monkeypatch):
     """#28: `responseheaders` streams any live `text/event-stream` response, `kind: read`
@@ -843,6 +862,12 @@ def test_an_overlay_is_not_handed_a_streamed_read_and_cannot_rewrite_one(tmp_pat
     overlay = _RewritingOverlay()
     eng, seen, stop = _start(cfg, overlay=overlay)
     try:
+        # A faked write first, so the overlay WOULD be asked about this read if it were not
+        # streamed: with an empty write log it is never asked at all, and this test would pass
+        # without the streaming guard.
+        _via_proxy(
+            eng.listen_port(), "POST", f"http://127.0.0.1:{srv.server_address[1]}/w", body=b"{}"
+        )
         conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=5)
         url = f"http://127.0.0.1:{srv.server_address[1]}/v1/chat/completions"
         conn.request("GET", url, headers={"host": f"127.0.0.1:{srv.server_address[1]}"})
@@ -858,7 +883,7 @@ def test_an_overlay_is_not_handed_a_streamed_read_and_cannot_rewrite_one(tmp_pat
         stop()
         srv.shutdown()
     assert overlay.calls == [], "the overlay was handed a body mitmproxy never assembled"
-    (ex,) = seen
+    _, ex = seen
     assert (ex.kind, ex.answered_by) == ("read", "live")
 
 
@@ -1389,7 +1414,7 @@ def test_a_raise_in_the_decision_answers_locally_instead_of_forwarding(
     assert (seen[0].kind, seen[0].answered_by) == ("unknown", "fake-L0")
 
 
-def test_a_delegated_read_is_not_a_write(tmp_path, monkeypatch, target):
+def test_neither_half_of_a_delegated_exchange_is_a_write(tmp_path, monkeypatch, target):
     """`answered_by != "live"` was an exhaustive spelling of "is a write" only while every read
     was live. `target_reads` makes a delegated read the first non-live read, and the write log is
     what the overlay replays onto later reads (#20, #28)."""
@@ -1405,9 +1430,10 @@ def test_a_delegated_read_is_not_a_write(tmp_path, monkeypatch, target):
         status, _ = _via_proxy(eng.listen_port(), "GET", "http://127.0.0.1:1/hello")
         assert status == 200
         assert [ex.kind for ex in addon.write_log] == [], "a delegated read is in the write log"
-        # The delegated *write* on the same service still is one.
+        # Nor is the delegated *write*, since #43: the target performed it, or did not, and the
+        # overlay cannot replay a write irimi did not author.
         _via_proxy(eng.listen_port(), "POST", "http://127.0.0.1:1/things", body=b"{}")
-        assert [(ex.kind, ex.answered_by) for ex in addon.write_log] == [("write", "delegated")]
+        assert addon.write_log == [], "a delegated write is in the overlay's write log"
     finally:
         stop()
 
@@ -1566,3 +1592,198 @@ def test_a_streamed_target_response_is_not_buffered(tmp_path, monkeypatch):
             stop()
     finally:
         srv.shutdown()
+
+
+# ------------------------------------------------------ the overlay through the engine (#43)
+
+
+class _OverlayDouble:
+    """An overlay whose answers a test chooses, counting how often the engine asked it."""
+
+    def __init__(self, answer=None, rewrite=None):
+        self._answer = answer or (lambda upstream: Overlaid(upstream))
+        self._rewrite = rewrite or (lambda request: request)
+        self.calls = 0
+        self.rewrites = 0
+
+    def __call__(self, write_log, read_request, upstream_response):
+        self.calls += 1
+        return self._answer(upstream_response)
+
+    def rewrite(self, write_log, read_request):
+        self.rewrites += 1
+        return self._rewrite(read_request)
+
+
+def _read_via_proxy(proxy_port, url, extra_headers=None):
+    """A GET through the proxy that returns the response headers too: the stamp is on the wire
+    only, never on the recorded exchange."""
+    conn = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=10)
+    headers = {"host": url.split("/")[2]}
+    headers.update(extra_headers or {})
+    conn.request("GET", url, headers=headers)
+    resp = conn.getresponse()
+    data = resp.read()
+    received = {k.lower(): v for k, v in resp.getheaders()}
+    conn.close()
+    return resp.status, received, data
+
+
+def _engine_with_a_write(tmp_path, monkeypatch, upstream, overlay):
+    """An engine over DEMO_MAP whose write log already holds one faked write."""
+    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch))
+    eng, seen, stop = _start(cfg, overlay=overlay)
+    try:
+        addon = next(a for a in eng._master.addons.chain if isinstance(a, IrimiAddon))
+        _via_proxy(eng.listen_port(), "POST", f"http://127.0.0.1:{upstream}/things", body=b"{}")
+        assert addon.write_log, "the engine only asks the overlay once the log holds a write"
+    except BaseException:
+        stop()
+        raise
+    return eng, seen, stop
+
+
+def _overlaid_read(tmp_path, monkeypatch, upstream, overlay):
+    """One faked write, then one live read, through an engine using `overlay`."""
+    eng, seen, stop = _engine_with_a_write(tmp_path, monkeypatch, upstream, overlay)
+    try:
+        status, headers, data = _read_via_proxy(
+            eng.listen_port(), f"http://127.0.0.1:{upstream}/hello"
+        )
+    finally:
+        stop()
+    return status, headers, data, seen[-1]
+
+
+def test_an_overlay_that_changes_a_read_stamps_it_overlay(tmp_path, monkeypatch, upstream):
+    changed = Response(200, (("content-type", "application/json"),), b'{"overlaid": true}')
+    overlay = _OverlayDouble(answer=lambda upstream: Overlaid(changed, "full"))
+    status, headers, data, ex = _overlaid_read(tmp_path, monkeypatch, upstream, overlay)
+    assert (status, data) == (200, b'{"overlaid": true}')
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert ex.answered_by == "overlay"
+    assert "fidelity:overlay" in ex.flags
+    assert ex.overlay == "full"
+
+
+def test_an_overlay_that_changes_nothing_leaves_the_read_live_and_unstamped(
+    tmp_path, monkeypatch, upstream
+):
+    overlay = _OverlayDouble(answer=lambda upstream: Overlaid(upstream))
+    status, headers, data, ex = _overlaid_read(tmp_path, monkeypatch, upstream, overlay)
+    assert overlay.calls == 1
+    assert (status, data) == (200, b"hello from upstream")
+    assert pipeline.ANSWERED_BY_HEADER not in headers
+    assert ex.answered_by == "live"
+    assert ex.overlay is None
+    assert ex.response.body == b"hello from upstream"
+
+
+def test_an_overlay_may_flag_a_read_partial_without_touching_it(tmp_path, monkeypatch, upstream):
+    overlay = _OverlayDouble(answer=lambda upstream: Overlaid(upstream, "partial"))
+    status, headers, data, ex = _overlaid_read(tmp_path, monkeypatch, upstream, overlay)
+    assert (status, data) == (200, b"hello from upstream")
+    assert pipeline.ANSWERED_BY_HEADER not in headers
+    assert ex.answered_by == "live"
+    assert ex.overlay == "partial"
+
+
+def test_an_overlay_that_raises_does_not_break_the_read(tmp_path, monkeypatch, upstream):
+    def boom(upstream):
+        raise RuntimeError("the overlay exploded")
+
+    overlay = _OverlayDouble(answer=boom)
+    status, headers, data, ex = _overlaid_read(tmp_path, monkeypatch, upstream, overlay)
+    assert overlay.calls == 1
+    assert (status, data) == (200, b"hello from upstream")
+    assert pipeline.ANSWERED_BY_HEADER not in headers
+    assert ex.answered_by == "live"
+    assert ex.overlay == "partial"
+
+
+def test_a_rewritten_read_reaches_the_upstream_translated_and_is_recorded_that_way(
+    tmp_path, monkeypatch, upstream
+):
+    from dataclasses import replace
+
+    stamp = (pipeline.REWROTE_HEADER, "starting_after=re_MINTED1")
+
+    def translate(request):
+        return replace(request, query="limit=1", headers=request.headers + (stamp,))
+
+    overlay = _OverlayDouble(rewrite=translate)
+    eng, seen, stop = _engine_with_a_write(tmp_path, monkeypatch, upstream, overlay)
+    try:
+        status, _, _ = _read_via_proxy(
+            eng.listen_port(),
+            f"http://127.0.0.1:{upstream}/hello?limit=1&starting_after=re_MINTED1",
+        )
+    finally:
+        stop()
+    assert status == 200
+    ((path, received),) = _Upstream.seen
+    assert path == "/hello?limit=1"
+    assert {k.lower(): v for k, v in received.items()}[stamp[0]] == stamp[1]
+    ex = seen[-1]
+    assert ex.request.query == "limit=1"
+    assert stamp in ex.request.headers
+
+
+def test_a_rewrite_that_raises_forwards_the_read_unchanged(tmp_path, monkeypatch, upstream):
+    def boom(request):
+        raise RuntimeError("the rewrite exploded")
+
+    overlay = _OverlayDouble(rewrite=boom)
+    eng, seen, stop = _engine_with_a_write(tmp_path, monkeypatch, upstream, overlay)
+    try:
+        status, _, data = _read_via_proxy(
+            eng.listen_port(),
+            f"http://127.0.0.1:{upstream}/hello?limit=1&starting_after=re_MINTED1",
+        )
+    finally:
+        stop()
+    assert overlay.rewrites == 1
+    assert (status, data) == (200, b"hello from upstream")
+    assert [path for path, _ in _Upstream.seen] == ["/hello?limit=1&starting_after=re_MINTED1"]
+    ex = seen[-1]
+    assert ex.answered_by == "live"
+    assert DECISION_FAILED_FLAG not in ex.flags
+
+
+def test_the_overlay_is_not_asked_about_a_read_before_any_write(tmp_path, monkeypatch, upstream):
+    overlay = _OverlayDouble()
+    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch))
+    eng, seen, stop = _start(cfg, overlay=overlay)
+    try:
+        status, _ = _via_proxy(eng.listen_port(), "GET", f"http://127.0.0.1:{upstream}/hello")
+    finally:
+        stop()
+    assert status == 200
+    assert (overlay.calls, overlay.rewrites) == (0, 0)
+    assert seen[-1].overlay is None
+
+
+def test_a_rewrote_header_the_agent_sent_is_not_forwarded_upstream(tmp_path, monkeypatch, upstream):
+    """Only irimi may tell the response side that a page follows a minted refund. The overlay
+    strips an agent's own `irimi-rewrote`, and the engine has to carry that onto the flow too, or
+    the header reaches the real service anyway (#43)."""
+    from dataclasses import replace
+
+    def strip(request):
+        kept = tuple((k, v) for k, v in request.headers if k != pipeline.REWROTE_HEADER)
+        return replace(request, headers=kept)
+
+    overlay = _OverlayDouble(rewrite=strip)
+    eng, seen, stop = _engine_with_a_write(tmp_path, monkeypatch, upstream, overlay)
+    try:
+        status, _, _ = _read_via_proxy(
+            eng.listen_port(),
+            f"http://127.0.0.1:{upstream}/hello",
+            extra_headers={pipeline.REWROTE_HEADER: "starting_after=re_FORGED"},
+        )
+    finally:
+        stop()
+    assert status == 200
+    ((path, received),) = _Upstream.seen
+    assert path == "/hello"
+    assert pipeline.REWROTE_HEADER not in {k.lower() for k in received}

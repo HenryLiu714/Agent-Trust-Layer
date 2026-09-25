@@ -17,6 +17,7 @@ from irimi import ca, delegation, echo, netaddr, pipeline, reverse_door
 from irimi.engine import EngineConfig, EngineStartError, OnExchange
 from irimi.exchange import (
     DECISION_FAILED_FLAG,
+    FIDELITY_FLAGS,
     LIVE_KINDS,
     TARGET_FAILED_FLAG,
     UNCLASSIFIED_FLAG,
@@ -25,10 +26,11 @@ from irimi.exchange import (
     Door,
     Exchange,
     Headers,
+    OverlayFidelity,
     Request,
     Response,
 )
-from irimi.overlay import Overlay
+from irimi.overlay import Overlaid, Overlay
 from irimi.policy import AnswerPolicy
 from irimi.store import TraceStore
 
@@ -249,6 +251,8 @@ class IrimiAddon:
             cls = pipeline.classify(req, self.config.maps)
             run_id = pipeline.attribute_run(req, self.config.run_id)
             ans = self.policy.answer(req, cls)
+            if ans.answered_by == "live" and cls.kind == "read" and self.write_log:
+                req = self._rewrite_read(flow, req)
         except Exception as exc:
             # Recorded, not just refused. A write that vanishes from the trace is the other half
             # of this bug: #13's "log of every write" has to show the one irimi could not decide
@@ -296,6 +300,38 @@ class IrimiAddon:
         flow.metadata[META_KEY] = _Pending(req, cls, run_id, ans.answered_by, door, flags, target)
         if response is not None:
             flow.response = _to_mitm_response(response)
+
+    def _rewrite_read(self, flow: http.HTTPFlow, req: Request) -> Request:
+        """Let the overlay translate a live read before mitmproxy forwards it (#43).
+
+        Guarded on its own inside the decision's never-raise guard, because the two failures want
+        opposite answers: a decision that raises must be answered locally with a 502, since the
+        thing it could not decide about may be a write, while a rewrite that fails must forward
+        the read unchanged - nothing is performed by letting a read through, and 502-ing it would
+        break a run over a cosmetic translation.
+
+        Only the query and the `Irimi-Rewrote` header are carried onto the flow, because those
+        are the only things a rewrite may change. The Exchange records the rewritten request:
+        what irimi asked the service is what the trace has to show.
+        """
+        try:
+            rewritten = self.overlay.rewrite(tuple(self.write_log), req)
+        except Exception:
+            logger.exception("irimi: the overlay's rewrite raised; forwarding the read unchanged")
+            return req
+        if rewritten is req:
+            return req
+        flow.request.path = (
+            f"{rewritten.path}?{rewritten.query}" if rewritten.query else rewritten.path
+        )
+        stamp = next((v for k, v in rewritten.headers if k == pipeline.REWROTE_HEADER), None)
+        if stamp is not None:
+            flow.request.headers[pipeline.REWROTE_HEADER] = stamp
+        elif pipeline.REWROTE_HEADER in flow.request.headers:
+            # The overlay stripped one the agent sent: only irimi may tell the service side that a
+            # page follows a minted refund, so the agent's own never reaches the real service.
+            del flow.request.headers[pipeline.REWROTE_HEADER]
+        return rewritten
 
     def _to_target(self, flow: http.HTTPFlow, req: Request, forward: delegation.ForwardTo) -> None:
         """Point the flow at its answer target, the way `_through_reverse_door` points it upstream.
@@ -420,17 +456,35 @@ class IrimiAddon:
             echo.observe_read(pending.classification.service, upstream.body)
         # The overlay stays off for a delegated read: the target owns that service's state, and
         # layering our own minted objects over it would corrupt read-after-write there (D20).
-        if not streamed and pending.answered_by == "live" and pending.classification.kind == "read":
-            resp = self.overlay(self.write_log, pending.request, upstream).response
+        answered_by = pending.answered_by
+        flags = pending.flags
+        overlay_fidelity: OverlayFidelity | None = None
+        # Only once there is a write to show: with an empty log there is nothing to apply, and the
+        # request side asks the overlay under the same condition.
+        if (
+            not streamed
+            and pending.answered_by == "live"
+            and pending.classification.kind == "read"
+            and self.write_log
+        ):
+            overlaid = self._overlaid(pending.request, upstream)
+            resp, overlay_fidelity = overlaid.response, overlaid.fidelity
+            if resp is not upstream:
+                # The bytes are no longer the service's, so the answer has to say whose they are:
+                # invariant (a) of #12 reads the header to tell an answer of ours from a live
+                # forward, and a changed body with no header says "the real service sent this".
+                answered_by = "overlay"
+                flags += (FIDELITY_FLAGS["overlay"],)
         ex = pipeline.annotate(
             pending.request,
             resp,
             pending.classification,
-            pending.answered_by,
+            answered_by,
             pending.run_id,
-            extra_flags=pending.flags,
+            extra_flags=flags,
             door=pending.door,
             target=pending.target,
+            overlay=overlay_fidelity,
         )
         # The write log is what the overlay replays onto live reads, so it holds *writes*:
         # exchanges that changed state somewhere the real service does not know about.
@@ -443,9 +497,12 @@ class IrimiAddon:
         # not touch the log - but a target irimi *refused* is answered in `request()`, which does
         # set `_Pending`, so without the flag check it landed here and the overlay would replay a
         # write that was performed nowhere.
+        # A DELEGATED WRITE LEAVES THE LOG TOO (#43). The target performed it, or did something
+        # else with it, or nothing; irimi does not know and cannot replay what it did not author.
+        # Only writes irimi answered itself are effects it can apply to a later read.
         if (
             ex.kind not in LIVE_KINDS
-            and ex.answered_by != "live"
+            and ex.answered_by not in ("live", "delegated")
             and TARGET_FAILED_FLAG not in ex.flags
         ):
             self.write_log.append(ex)
@@ -453,6 +510,20 @@ class IrimiAddon:
         if out is not None and out is not upstream and not streamed:
             _send(flow, out, upstream)
         self._finish(ex)
+
+    def _overlaid(self, request: Request, upstream: Response) -> Overlaid:
+        """The overlay's answer for one live read, or the upstream one if it failed.
+
+        `ServiceOverlay` guards itself, and this guards the call: THE NEVER-RAISE RULE is the
+        addon's, and an overlay swapped in later - a test double, a replay overlay - does not
+        inherit the other one's care. A raise here would escape the `response` hook, where
+        mitmproxy has already committed the flow.
+        """
+        try:
+            return self.overlay(tuple(self.write_log), request, upstream)
+        except Exception:
+            logger.exception("irimi: the overlay raised; the agent gets the upstream read")
+            return Overlaid(upstream, "partial")
 
     def error(self, flow: http.HTTPFlow) -> None:
         pending: _Pending | None = flow.metadata.pop(META_KEY, None)

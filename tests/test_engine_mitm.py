@@ -17,7 +17,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
-from irimi import ca, delegation, idempotency, paths, pipeline, servicemap
+from irimi import ca, delegation, idempotency, paths, pipeline, report, servicemap
 from irimi.engine import EngineConfig, EngineStartError
 from irimi.engine.mitm import IrimiAddon, MitmEngine
 from irimi.exchange import (
@@ -1993,6 +1993,12 @@ routes:
     human: list refunds
   - match:
       method: GET
+      path: /v1/charges
+    operation: charges.list
+    kind: read
+    human: list charges
+  - match:
+      method: GET
       path: /v1/charges/{charge}
     operation: charges.retrieve
     kind: read
@@ -2569,6 +2575,8 @@ def _charge(charge_id, amount_refunded=0):
         "amount_refunded": amount_refunded,
         "refunded": amount_refunded == 4900,
         "currency": "usd",
+        "status": "succeeded",
+        "paid": True,
     }
 
 
@@ -2590,6 +2598,13 @@ class _PreconditionStub(BaseHTTPRequestHandler):
             status, document = 200, _charge("ch_SLOW1")
         elif route == "/v1/charges/ch_BUSY1":
             status, document = 429, {"error": {"type": "rate_limit_error"}}
+        elif route == "/v1/charges":
+            status, document = (
+                200,
+                {"object": "list", "has_more": False, "data": [_charge("ch_REAL1")]},
+            )
+        elif route == "/v1/refunds":
+            status, document = 200, {"object": "list", "has_more": False, "data": []}
         else:
             status, document = 404, {"error": {"type": "invalid_request_error"}}
         body = json.dumps(document).encode()
@@ -2776,6 +2791,52 @@ def test_the_stub_never_saw_a_post(precondition_stub):
         ("GET", "/v1/charges/ch_REAL1"),
         ("GET", "/v1/charges/ch_FULL1"),
     ]
+
+
+def _refund_then_list_summary(proxy, stub, seen, tmp_path, monkeypatch):
+    """A full refund of `ch_REAL1` and then the agent's own refunds list, through the proxy, and
+    the summary that run prints.
+
+    The index is built again by the same `_maps` call `precondition_stub` made, so the write line
+    is the map's `human:` sentence and not the bare request. The fixture does not yield its index
+    because nine tests unpack it and only these two print a summary (#48)."""
+    status, _, _ = _refund(proxy, stub, "ch_REAL1", amount=4900)
+    assert status == 200
+    status, headers, _ = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds")
+    assert status == 200
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    maps = _maps(tmp_path, monkeypatch, doc=PRECONDITION_STRIPE_MAP)
+    return report.summary_lines("t3st", seen, 1.0, maps)
+
+
+def test_an_overlaid_read_is_listed_under_the_write_it_saw_through_the_proxy(
+    precondition_stub, tmp_path, monkeypatch
+):
+    """The `↳` line off a real run (#48): the refunds list the overlay edited to show the refund
+    sits directly under that refund, and is the only `↳` line. The precondition read L3 issued
+    between them is counted as an engine read and never in `N reads` (#45); it is live and
+    unedited, so it owes no line either way."""
+    proxy, stub, seen = precondition_stub
+    lines = _refund_then_list_summary(proxy, stub, seen, tmp_path, monkeypatch)
+    write = lines.index("  ○ refund 4900 on ch_REAL1  unvalidated (L3 preconditions passed)")
+    assert lines[write + 1] == "    ↳ GET /v1/refunds saw it  overlay"
+    assert [line for line in lines if "↳" in line] == [lines[write + 1]]
+    assert lines[2] == (
+        "  127.0.0.1  1 read (1 showing this run's writes)  1 engine read  1 write intercepted"
+    )
+
+
+def test_the_closing_line_names_the_webhooks_a_real_refund_would_have_sent(
+    precondition_stub, tmp_path, monkeypatch
+):
+    """The closing clause off a real run (#48): the events are the ones the engine put on the
+    accepted refund's `Exchange.would_fire`, named once each in the map's order (#47)."""
+    proxy, stub, seen = precondition_stub
+    lines = _refund_then_list_summary(proxy, stub, seen, tmp_path, monkeypatch)
+    assert [ex.would_fire for ex in _writes(seen)] == [("refund.created", "charge.refunded")]
+    assert lines[-1] == (
+        "  These writes did not happen. Would have fired: refund.created, charge.refunded."
+    )
 
 
 # SLACK_OVERLAY_MAP with the shipped map's `precondition:` on `chat.postMessage`, and the

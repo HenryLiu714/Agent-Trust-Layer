@@ -15,11 +15,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from irimi import echo, pipeline, services, writelog
+from irimi import echo, idempotency, pipeline, services, writelog
 from irimi.delegation import ForwardTo, delegate
 from irimi.exchange import (
     FIDELITY_DELEGATED_FLAG,
     FIDELITY_FLAGS,
+    IDEMPOTENCY_CONFLICT_FLAG,
+    IDEMPOTENT_REPLAY_FLAG,
     LIVE_KINDS,
     AnsweredBy,
     Exchange,
@@ -143,6 +145,27 @@ def _capped(status: int, headers: Any, body: Any) -> Response | None:
     return Response(status=status, headers=tuple(headers), body=data)
 
 
+def _slot(
+    request: Request, classification: Classification, route: Route | None, run_id: str
+) -> tuple[tuple[str, ...], idempotency.Canonical, str] | None:
+    """`(slot, canonical params, the key the caller sent)` for a write the store covers, else None.
+
+    Three conditions, each the literal reading of "mapped Stripe writes" (#46). The route must be
+    matched, because `volatile:` is what makes two sendings comparable and an unmapped POST has
+    none. The kind must be `write`, so a route THE SCOPE RULE downgraded to `unknown` is answered
+    the way an unclassified request is and not out of a store. And the service must be one that
+    HAS an idempotency mechanism, which is `key_of` returning something.
+    """
+    if route is None or classification.kind != "write":
+        return None
+    service = classification.service
+    key = idempotency.key_of(service, request)
+    if not key:
+        return None
+    scope = writelog.scope(service, request)
+    return idempotency.key(run_id, service, scope, key), idempotency.canonical(request, route), key
+
+
 class ShadowPolicy:
     """Reads, llm and telemetry go live. write and unknown are answered locally.
 
@@ -160,6 +183,9 @@ class ShadowPolicy:
     def __init__(self, reader: Reader | None = None, maps: MapIndex | None = None) -> None:
         self.reader: Reader = reader if reader is not None else NoReader()
         self.maps = maps if maps is not None else MapIndex()
+        # Per-instance, never a class attribute: one store per run, and two policies in one test
+        # process must not answer each other's keys (#46).
+        self.idempotency = idempotency.Store()
 
     def answer(
         self,
@@ -184,6 +210,24 @@ class ShadowPolicy:
             )
         if classification.kind in LIVE_KINDS:
             return Answer(answered_by="live", response=None)
+        # Before L3, and before anything is minted (#46). A retry with a key this run has already
+        # answered is the SAME write: it gets the first answer's own bytes, issues no precondition
+        # read, and appends nothing to the write log. Its own guard, because a store that failed
+        # must fall through to the ordinary answer rather than 502 a perfectly fakeable write.
+        slot: tuple[tuple[str, ...], idempotency.Canonical, str] | None = None
+        try:
+            slot = _slot(request, classification, route, run_id)
+            if slot is not None:
+                stored, conflicted = self.idempotency.get(slot[0], slot[1])
+                if conflicted:
+                    refusal = idempotency.conflict(classification.service, slot[2])
+                    if refusal is not None:
+                        return _conflict_answer(request, classification, refusal)
+                elif stored is not None:
+                    return _replayed_answer(stored)
+        except Exception:
+            logger.exception("irimi: the idempotency store failed; answering this write afresh")
+            slot = None
         precondition: PreconditionOutcome | None = None
         issued: tuple[Exchange, ...] = ()
         if route is not None and route.precondition:
@@ -192,7 +236,7 @@ class ShadowPolicy:
             )
             if rejection is not None:
                 fake = echo.fake_rejection(request, classification, rejection.body)
-                return Answer(
+                answer = Answer(
                     answered_by=fake.answered_by,
                     response=Response(
                         status=rejection.status,
@@ -204,6 +248,8 @@ class ShadowPolicy:
                     rejection_code=rejection.code,
                     issued=issued,
                 )
+                _remember(self.idempotency, slot, answer)
+                return answer
         try:
             fake = echo.fake_response(request, classification)
         except Exception:
@@ -212,7 +258,7 @@ class ShadowPolicy:
             # object is far better. L0 is the floor whatever failed above it.
             logger.exception("irimi: the local answer failed; answering with an empty object")
             fake = echo.Fake(b"{}", echo.JSON_CT)
-        return Answer(
+        answer = Answer(
             answered_by=fake.answered_by,
             response=Response(
                 status=200,
@@ -223,6 +269,8 @@ class ShadowPolicy:
             precondition=precondition,
             issued=issued,
         )
+        _remember(self.idempotency, slot, answer)
+        return answer
 
     def _precondition(
         self,
@@ -357,3 +405,85 @@ def _probe_request(request: Request, service: str, probe: services.Probe) -> Req
         headers=tuple(headers),
         body=body,
     )
+
+
+def _replayed_answer(stored: idempotency.Stored) -> Answer:
+    """The first answer to this key, again (#46).
+
+    Every field is the stored one. `answered_by` in particular is not re-derived: a fixture that
+    has become unreadable since the first call would make the replay `fake-L0` over an original
+    stamped `fake-L1`, and the trace would disagree with itself about one write. `issued` is `()`
+    because a replay makes no precondition read - the write was checked once, when it was made.
+    """
+    return Answer(
+        answered_by=stored.answered_by,
+        response=Response(
+            status=stored.status,
+            headers=(
+                ("content-type", stored.content_type),
+                (idempotency.REPLAYED_HEADER, idempotency.REPLAYED_VALUE),
+            ),
+            body=stored.body,
+        ),
+        flags=(*stored.flags, IDEMPOTENT_REPLAY_FLAG),
+        precondition=stored.precondition,
+        rejection_code=stored.rejection_code,
+    )
+
+
+def _conflict_answer(
+    request: Request, classification: Classification, refusal: services.Rejection
+) -> Answer:
+    """The service's own `idempotency_error`: this key was used for a different write (#46).
+
+    NOT `precondition: rejected` - `precondition` says what L3 decided, and L3 was never asked.
+    `rejection_code` is still set, because the summary's `would fail:` line is about what the
+    real service would have answered, and this is one of those. The body is carried at the level
+    this route's write would have been faked at, the way `fake_rejection` carries an L3 one.
+    """
+    fake = echo.fake_rejection(request, classification, refusal.body)
+    return Answer(
+        answered_by=fake.answered_by,
+        response=Response(
+            status=refusal.status,
+            headers=(("content-type", fake.content_type),),
+            body=fake.body,
+        ),
+        flags=(FIDELITY_FLAGS[fake.answered_by], *fake.flags, IDEMPOTENCY_CONFLICT_FLAG),
+        rejection_code=refusal.code,
+    )
+
+
+def _remember(
+    store: idempotency.Store,
+    slot: tuple[tuple[str, ...], idempotency.Canonical, str] | None,
+    answer: Answer,
+) -> None:
+    """Keep this answer under its key, so the agent's retry gets it back (#46).
+
+    Stripe stores the first response under a key whether it was accepted or REJECTED, so this is
+    called on both of `answer`'s local paths. Guarded like the lookup: a store that cannot
+    remember costs the next retry its replay, and nothing else - raising here would forward a
+    write that has already been answered.
+    """
+    if slot is None or answer.response is None:
+        return
+    try:
+        content_type = next(
+            (v for k, v in answer.response.headers if k.lower() == "content-type"), echo.JSON_CT
+        )
+        store.put(
+            slot[0],
+            slot[1],
+            idempotency.Stored(
+                status=answer.response.status,
+                body=answer.response.body,
+                content_type=content_type,
+                answered_by=answer.answered_by,
+                flags=answer.flags,
+                precondition=answer.precondition,
+                rejection_code=answer.rejection_code,
+            ),
+        )
+    except Exception:
+        logger.exception("irimi: this write's answer could not be stored for a retry")

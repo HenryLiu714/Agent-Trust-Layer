@@ -17,10 +17,17 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
-from irimi import ca, delegation, paths, pipeline, servicemap
+from irimi import ca, delegation, idempotency, paths, pipeline, servicemap
 from irimi.engine import EngineConfig, EngineStartError
 from irimi.engine.mitm import IrimiAddon, MitmEngine
-from irimi.exchange import DECISION_FAILED_FLAG, UNCLASSIFIED_FLAG, Request, Response
+from irimi.exchange import (
+    DECISION_FAILED_FLAG,
+    IDEMPOTENCY_CONFLICT_FLAG,
+    IDEMPOTENT_REPLAY_FLAG,
+    UNCLASSIFIED_FLAG,
+    Request,
+    Response,
+)
 from irimi.overlay import NoOverlay, Overlaid
 from irimi.policy import Answer, ShadowPolicy
 from irimi.store import NullStore
@@ -2106,6 +2113,62 @@ def test_the_refunds_list_shows_the_minted_refund_first(stripe_stub):
     assert status == 200
     assert json.loads(data)["data"][0]["id"] == refund_id
     assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+
+
+def _keyed_refund(proxy, stub, key, amount=100):
+    """One refund through the proxy carrying `Idempotency-Key`, as stripe-python sends every POST.
+    Returns (status, response headers, body)."""
+    return _read_via_proxy(
+        proxy,
+        f"http://127.0.0.1:{stub}/v1/refunds",
+        extra_headers={
+            "content-type": "application/x-www-form-urlencoded",
+            "idempotency-key": key,
+        },
+        method="POST",
+        body=f"charge=ch_REAL1&amount={amount}".encode(),
+    )
+
+
+def test_a_retry_with_the_same_key_is_one_refund_not_two(stripe_stub):
+    """The bug #46 exists for: a retry with the key it already sent got a second minted id, the
+    engine logged it as a second write, and the overlay applied one 100 refund as 200. The retry
+    now gets the first answer's own bytes and never reaches the write log."""
+    proxy, stub, seen = stripe_stub
+    status, first_headers, first = _keyed_refund(proxy, stub, "k-1")
+    assert status == 200
+    status, second_headers, second = _keyed_refund(proxy, stub, "k-1")
+    assert status == 200
+    assert second == first
+    stamp = pipeline.ANSWERED_BY_HEADER
+    assert second_headers[stamp] == first_headers[stamp]
+    assert idempotency.REPLAYED_HEADER not in first_headers
+    assert second_headers[idempotency.REPLAYED_HEADER] == idempotency.REPLAYED_VALUE
+    refunds = [ex for ex in seen if ex.request.method == "POST"]
+    assert [IDEMPOTENT_REPLAY_FLAG in ex.flags for ex in refunds] == [False, True]
+
+    _, _, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_REAL1")
+    assert json.loads(data)["amount_refunded"] == 100
+    _, _, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds")
+    minted = [r["id"] for r in json.loads(data)["data"] if not r["id"].startswith("re_REAL")]
+    assert minted == [json.loads(first)["id"]]
+    assert "POST" not in [method for method, _ in _StripeStub.seen], "a faked write reached Stripe"
+
+
+def test_the_same_key_with_a_different_amount_is_refused(stripe_stub):
+    """A key reused for a different write is Stripe's own `idempotency_error`, and it is not a
+    write: the charge still shows the first refund only (#46)."""
+    proxy, stub, seen = stripe_stub
+    status, _, _ = _keyed_refund(proxy, stub, "k-2")
+    assert status == 200
+    status, _, data = _keyed_refund(proxy, stub, "k-2", amount=250)
+    assert status == 400
+    assert json.loads(data)["error"]["type"] == "idempotency_error"
+    refused = [ex for ex in seen if ex.request.method == "POST"][-1]
+    assert IDEMPOTENCY_CONFLICT_FLAG in refused.flags
+
+    _, _, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_REAL1")
+    assert json.loads(data)["amount_refunded"] == 100
 
 
 def test_a_read_before_the_refund_is_untouched_and_unstamped(stripe_stub):

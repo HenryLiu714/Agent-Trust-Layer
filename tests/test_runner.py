@@ -3,7 +3,13 @@ import threading
 from dataclasses import replace
 from pathlib import Path
 
-from irimi.exchange import Exchange, Request, Response
+from irimi.exchange import (
+    IDEMPOTENCY_CONFLICT_FLAG,
+    IDEMPOTENT_REPLAY_FLAG,
+    Exchange,
+    Request,
+    Response,
+)
 from irimi.report import banner_lines, delegated_lines, exchange_line, summary_lines
 from irimi.runner import EngineThread, child_env, exit_code_for
 
@@ -596,3 +602,43 @@ def test_the_summary_still_names_a_write_without_the_maps():
     to the request it saw rather than dropping a write it could not name."""
     lines = summary_lines("7f3a", [_refund()], 0.0, None)
     assert "  ○ POST api.stripe.com/v1/refunds  unvalidated (L0)" in lines
+
+
+# ------------------------------------------------------------------- idempotency keys (#46)
+
+
+def test_a_replayed_write_is_counted_once():
+    """The agent retried with the key it already sent and got the first answer back: the same
+    write, so one line and one intercepted write, or "nine would have been rejected" counts
+    retries instead of intentions (#46). The exchange itself is still counted and virtualized."""
+    rows = [
+        _refund(answered_by="fake-L1", flags=("fidelity:L1",)),
+        _refund(answered_by="fake-L1", flags=("fidelity:L1", IDEMPOTENT_REPLAY_FLAG)),
+    ]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert [line for line in lines if line.startswith("  ○ ")] == [
+        "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L1)"
+    ]
+    assert _block(lines, "api.stripe.com") == "  api.stripe.com  1 write intercepted"
+    assert "  2 exchanges · 0 live · 0 delegated · 2 virtualized" in lines
+
+
+def test_an_idempotency_conflict_prints_as_a_write_that_would_fail():
+    """A key reused for a different write is a write the real service would have refused. L3 was
+    never asked, so it is not `precondition: rejected`, and it still gets the `✗` line (#46)."""
+    rows = [
+        _refund(answered_by="fake-L1"),
+        replace(
+            _refund(
+                answered_by="fake-L1",
+                status=400,
+                flags=("fidelity:L1", IDEMPOTENCY_CONFLICT_FLAG),
+            ),
+            rejection_code="idempotency_error",
+        ),
+    ]
+    assert rows[1].precondition is None
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    line = _block(lines, "would fail")
+    assert line == "  ✗ refund $49.00 on ch_3QabcXYZ  would fail: idempotency_error"
+    assert _block(lines, "api.stripe.com") == "  api.stripe.com  2 writes intercepted"

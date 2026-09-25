@@ -18,6 +18,7 @@ from irimi.engine import EngineConfig, EngineStartError, OnExchange
 from irimi.exchange import (
     DECISION_FAILED_FLAG,
     FIDELITY_FLAGS,
+    IDEMPOTENCY_FLAGS,
     LIVE_KINDS,
     TARGET_FAILED_FLAG,
     UNCLASSIFIED_FLAG,
@@ -593,11 +594,19 @@ class IrimiAddon:
         # and the agent got that refusal. Replaying it onto later reads would show the agent a
         # refund that neither Stripe nor irimi ever made - the overlay would apply an effect for
         # a write that, in every world, did not happen.
+        #
+        # NEITHER HALF OF IDEMPOTENCY IS A WRITE TO REPLAY (#46). A replay is the SAME write: the
+        # store answered the agent's retry with the first write's own bytes, and a second entry
+        # here would have `overlay._writes` decode one refund twice - `stripe._charge` summing
+        # `amount` over both, so a charge shows 200 refunded for a single 100 refund, and page 1
+        # of the refunds list carries the same minted id twice. A conflict is not a write at all:
+        # the real service would have refused it, nothing was minted, and there is no effect.
         if (
             ex.kind not in LIVE_KINDS
             and ex.answered_by not in ("live", "delegated")
             and TARGET_FAILED_FLAG not in ex.flags
             and ex.precondition != "rejected"
+            and not any(flag in ex.flags for flag in IDEMPOTENCY_FLAGS)
         ):
             self.write_log.append(ex)
         out = pipeline.respond(ex)

@@ -9,7 +9,12 @@ from pathlib import Path
 
 from irimi import netaddr
 from irimi.echo import reflect
-from irimi.exchange import TARGET_FAILED_FLAG, Exchange
+from irimi.exchange import (
+    IDEMPOTENCY_CONFLICT_FLAG,
+    IDEMPOTENT_REPLAY_FLAG,
+    TARGET_FAILED_FLAG,
+    Exchange,
+)
 from irimi.servicemap import SELF_TARGET, MapIndex, Route, is_delegated, path_params
 
 NOT_VIRTUALIZED_NOTICE = "hosts not routed through the proxy are NOT virtualized."
@@ -194,8 +199,20 @@ def render_human(template: str, exchange: Exchange, route: Route | None) -> str:
 
 
 def _is_intercepted(exchange: Exchange) -> bool:
-    """A write this run answered instead of performing - locally, or at an answer target."""
-    return exchange.kind in INTERCEPTED_KINDS and exchange.answered_by != "live"
+    """A write this run answered instead of performing - locally, or at an answer target.
+
+    A REPLAYED write is not one of them (#46). The agent retried with a key it had already used,
+    the store answered with the first write's own bytes, and it is the same write: counting it
+    again would make "nine would have been rejected" count retries instead of intentions. It is
+    still in the trace and still carries `idempotent-replay` on its own line. A CONFLICT stays,
+    because it is a different write the real service would have refused - which is exactly the
+    line the baseline report exists to print.
+    """
+    return (
+        exchange.kind in INTERCEPTED_KINDS
+        and exchange.answered_by != "live"
+        and IDEMPOTENT_REPLAY_FLAG not in exchange.flags
+    )
 
 
 def _reached_target(exchange: Exchange) -> bool:
@@ -300,9 +317,11 @@ def _write_line(exchange: Exchange, index: MapIndex | None) -> str:
         what = f"{what} → {exchange.target}"
     if _failed_target(exchange):
         return f"  {WRITE_MARKER} {what}  unanswered ({TARGET_UNREACHABLE})"
-    # A write L3 rejected did not merely go unperformed - irimi is saying the real service would
-    # have refused it, which is the line the baseline report exists to print. `✗`, not `○` (#45).
-    if exchange.precondition == "rejected":
+    # A write the real service would have refused, and irimi is saying so: L3 checked it against
+    # real state (#45), or this run had already used its idempotency key for a different write
+    # (#46). It did not merely go unperformed, and this is the line the baseline report exists to
+    # print. `✗`, not `○`, and the code is the one the agent's SDK raised on.
+    if exchange.precondition == "rejected" or IDEMPOTENCY_CONFLICT_FLAG in exchange.flags:
         code = exchange.rejection_code or "rejected"
         return f"  {REJECTED_MARKER} {what}  would fail: {code}"
     label = "unclassified" if exchange.kind == "unknown" else "unvalidated"

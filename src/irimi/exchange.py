@@ -74,6 +74,19 @@ FIDELITY_OVERLAY_FLAG = "fidelity:overlay"
 # read the object. The answer is still safe - L0 is the floor - but it is not the fidelity the
 # map promised, and a trace that did not say so would read as a working L1 (#41).
 FIXTURE_FAILED_FLAG = "fixture-failed"
+# This write carried an idempotency key the run had already answered, with the same canonical
+# parameters, so the agent got the FIRST answer's own bytes back (#46). The write is in the trace
+# and this says why it is not a second write: it is not in the write log, and the summary counts
+# the write once.
+IDEMPOTENT_REPLAY_FLAG = "idempotent-replay"
+# The same key came back with DIFFERENT parameters, so the write was answered with the service's
+# own `idempotency_error` instead of being faked (#46). Nothing was performed and nothing was
+# minted, so it is not in the write log either - but it IS a distinct write the real service would
+# have refused, and the summary prints it as one.
+IDEMPOTENCY_CONFLICT_FLAG = "idempotency-conflict"
+# The two together: neither is a write the overlay may replay onto a later read. One tuple rather
+# than two clauses at each of the places that has to keep them out.
+IDEMPOTENCY_FLAGS: tuple[str, ...] = (IDEMPOTENT_REPLAY_FLAG, IDEMPOTENCY_CONFLICT_FLAG)
 
 # The fidelity flag each way of answering carries. One mapping rather than a branch per caller:
 # the policy reads it, and `tests/test_exchange.py` holds it exhaustive over the non-live values.

@@ -11,6 +11,7 @@ from irimi.services.model import (
     NOT_EVALUABLE,
     Applied,
     Check,
+    Idempotency,
     NotEvaluable,
     Probe,
     Proposal,
@@ -26,6 +27,8 @@ __all__ = [
     "Applied",
     "Check",
     "EFFECTS",
+    "IDEMPOTENCY",
+    "Idempotency",
     "NOT_EVALUABLE",
     "NotEvaluable",
     "PRECONDITIONS",
@@ -65,3 +68,7 @@ REWRITES: dict[str, QueryRewrite] = {stripe.SERVICE: stripe.rewrite_query}
 # the header is already on each write's own request, and it is only ever compared, never stored
 # (#44).
 SCOPE_HEADERS: dict[str, tuple[str, ...]] = {stripe.SERVICE: ("stripe-account", "stripe-version")}
+# How each service spells "this is the same write as before", by service name (#46). Slack has no
+# entry and no store: it ships no idempotency mechanism, and `chat.postMessage` sent twice really
+# is two messages. A service absent here skips the store entirely rather than getting a default.
+IDEMPOTENCY: dict[str, Idempotency] = {stripe.SERVICE: stripe.IDEMPOTENCY}

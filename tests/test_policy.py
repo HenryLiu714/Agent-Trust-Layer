@@ -13,6 +13,8 @@ from irimi.exchange import (
     FIDELITY_L0_FLAG,
     FIDELITY_L1_FLAG,
     FIXTURE_FAILED_FLAG,
+    IDEMPOTENCY_CONFLICT_FLAG,
+    IDEMPOTENT_REPLAY_FLAG,
     Request,
     Response,
 )
@@ -1642,3 +1644,193 @@ def test_an_unreachable_upstream_is_none_and_not_a_raise():
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     assert UpstreamReader()(_local(port)) is None
+
+
+# ------------------------------------------------------------------ the idempotency store (#46)
+
+
+def _cancel_request(intent: str) -> Request:
+    """`payment_intents.cancel`, which carries every parameter it has in its path."""
+    return replace(_req("POST", path=f"/v1/payment_intents/{intent}/cancel"), headers=AGENT_HEADERS)
+
+
+def _ask(policy: ShadowPolicy, request: Request):
+    """`_checked`, but against a policy the test holds, so two calls share one run's store."""
+    return policy.answer(request, classify(request, SHIPPED), (), "t3st")
+
+
+def test_the_same_key_and_params_replay_the_first_answer():
+    policy = ShadowPolicy(reader=_reader(_json(200, _charge())), maps=SHIPPED)
+    first = _ask(policy, _refund_request())
+    second = _ask(policy, _refund_request())
+    assert second.response.body == first.response.body
+    assert second.response.status == first.response.status == 200
+    assert second.answered_by == first.answered_by == "fake-L1"
+    assert ("idempotent-replayed", "true") in second.response.headers
+    assert ("idempotent-replayed", "true") not in first.response.headers
+
+
+def test_a_replay_carries_the_replay_flag_and_the_original_fidelity_flag():
+    policy = ShadowPolicy(reader=_reader(_json(200, _charge())), maps=SHIPPED)
+    first = _ask(policy, _refund_request())
+    second = _ask(policy, _refund_request())
+    assert first.flags == (FIDELITY_L1_FLAG,)
+    assert second.flags == (FIDELITY_L1_FLAG, IDEMPOTENT_REPLAY_FLAG)
+
+
+def test_a_replay_issues_no_precondition_read():
+    """The write was checked once, when it was made. A second read would be a real request made
+    on the agent's behalf for a write the agent only made once."""
+    reader = _reader(_json(200, _charge()))
+    policy = ShadowPolicy(reader=reader, maps=SHIPPED)
+    first = _ask(policy, _refund_request())
+    second = _ask(policy, _refund_request())
+    assert len(reader.asked) == 1
+    assert len(first.issued) == 1
+    assert second.issued == ()
+    assert second.precondition == first.precondition == "passed"
+
+
+def test_the_same_key_with_a_different_amount_is_an_idempotency_error():
+    reader = _reader(_json(200, _charge()))
+    policy = ShadowPolicy(reader=reader, maps=SHIPPED)
+    _ask(policy, _refund_request(b"charge=ch_REAL&amount=100"))
+    ans = _ask(policy, _refund_request(b"charge=ch_REAL&amount=250"))
+    assert ans.response.status == 400
+    error = json.loads(ans.response.body)["error"]
+    assert error["type"] == "idempotency_error"
+    assert "idem-1" in error["message"]
+    assert IDEMPOTENCY_CONFLICT_FLAG in ans.flags
+    assert IDEMPOTENT_REPLAY_FLAG not in ans.flags
+    assert ans.rejection_code == "idempotency_error"
+    # L3 was never asked, so it decided nothing: a conflict is not `precondition: rejected`.
+    assert ans.precondition is None
+    assert ans.issued == ()
+    assert len(reader.asked) == 1
+
+
+def test_a_replayed_rejection_is_the_same_rejection():
+    """Stripe keeps the first response under a key whether it was accepted or refused, so a
+    retry of a refused write is refused again - with the same body, and without asking again."""
+    reader = _reader(_json(200, _charge(refunded_so_far=4900)))
+    policy = ShadowPolicy(reader=reader, maps=SHIPPED)
+    first = _ask(policy, _refund_request())
+    second = _ask(policy, _refund_request())
+    assert first.precondition == "rejected"
+    assert second.response.body == first.response.body
+    assert second.response.status == first.response.status == 400
+    assert second.precondition == "rejected"
+    assert second.rejection_code == first.rejection_code == "charge_already_refunded"
+    assert second.flags == (*first.flags, IDEMPOTENT_REPLAY_FLAG)
+    assert len(reader.asked) == 1
+
+
+def test_a_write_that_sent_no_key_is_never_replayed():
+    policy = ShadowPolicy()
+    body = b"charge=ch_REAL&amount=4900"
+    request = _req("POST", path="/v1/refunds", body=body, content_type=FORM)
+    first = _ask(policy, request)
+    second = _ask(policy, request)
+    assert json.loads(first.response.body)["id"] != json.loads(second.response.body)["id"]
+    assert IDEMPOTENT_REPLAY_FLAG not in first.flags
+    assert IDEMPOTENT_REPLAY_FLAG not in second.flags
+
+
+def test_a_slack_write_is_never_replayed():
+    """Slack has no idempotency mechanism, so `services.IDEMPOTENCY` has no entry for it: a
+    `chat.postMessage` sent twice really is two messages, whatever headers it carries."""
+    policy = ShadowPolicy()
+    post = _slack_post("C0123")
+    request = replace(post, headers=(*post.headers, ("idempotency-key", "idem-1")))
+    first = _ask(policy, request)
+    second = _ask(policy, request)
+    assert json.loads(first.response.body)["ts"] != json.loads(second.response.body)["ts"]
+    assert IDEMPOTENT_REPLAY_FLAG not in second.flags
+    assert IDEMPOTENCY_CONFLICT_FLAG not in second.flags
+
+
+def test_a_key_is_scoped_to_the_stripe_account():
+    policy = ShadowPolicy()
+    first = _ask(policy, _refund_request())
+    other = tuple(
+        (k, "acct_2" if k == "stripe-account" else v) for k, v in _refund_request().headers
+    )
+    second = _ask(policy, replace(_refund_request(), headers=other))
+    assert json.loads(first.response.body)["id"] != json.loads(second.response.body)["id"]
+    assert second.response.status == 200
+    assert IDEMPOTENT_REPLAY_FLAG not in second.flags
+    assert IDEMPOTENCY_CONFLICT_FLAG not in second.flags
+
+
+class _BrokenStore:
+    """A store whose lookup or whose remembering raises, so each guard is reached on its own."""
+
+    def __init__(self, broken: str):
+        self.broken = broken
+
+    def get(self, slot, params):
+        if self.broken == "get":
+            raise RuntimeError("the store is broken")
+        return None, False
+
+    def put(self, slot, params, stored):
+        if self.broken == "put":
+            raise RuntimeError("the store is broken")
+
+
+@pytest.mark.parametrize("broken", ["get", "put"])
+def test_a_store_that_raises_answers_the_write_afresh(broken):
+    """Nothing on the answer path may raise: a raised hook forwards the flow, and a forwarded
+    write escapes shadow mode. A broken store costs the retry its replay and nothing else."""
+    policy = ShadowPolicy()
+    policy.idempotency = _BrokenStore(broken)  # type: ignore[assignment]
+    first = _ask(policy, _refund_request())
+    second = _ask(policy, _refund_request())
+    assert first.response.status == second.response.status == 200
+    assert first.answered_by == second.answered_by == "fake-L1"
+    assert json.loads(first.response.body)["id"] != json.loads(second.response.body)["id"]
+    assert IDEMPOTENT_REPLAY_FLAG not in second.flags
+
+
+def test_a_key_reused_on_another_object_of_one_route_is_refused():
+    """A key names one write, not one route. `payment_intents.cancel` posts nothing at all, so
+    before the path was compared a key reused to cancel a second intent replayed the first
+    intent's answer and told the agent it had cancelled an object it never named (#46)."""
+    policy = ShadowPolicy()
+    first = _ask(policy, _cancel_request("pi_AAA"))
+    second = _ask(policy, _cancel_request("pi_BBB"))
+    assert json.loads(first.response.body)["id"] == "pi_AAA"
+    assert second.response.status == 400
+    assert json.loads(second.response.body)["error"]["type"] == "idempotency_error"
+    assert IDEMPOTENCY_CONFLICT_FLAG in second.flags
+    assert IDEMPOTENT_REPLAY_FLAG not in second.flags
+
+
+def test_a_key_reused_on_another_route_is_refused():
+    """The same hole across two routes: a cancel and a customer update both post an empty body,
+    so without the path the agent asking to update a customer got a payment intent back (#46)."""
+    policy = ShadowPolicy()
+    _ask(policy, _cancel_request("pi_AAA"))
+    ans = _ask(policy, replace(_req("POST", path="/v1/customers/cus_ZZZ"), headers=AGENT_HEADERS))
+    assert ans.response.status == 400
+    assert json.loads(ans.response.body)["error"]["type"] == "idempotency_error"
+    assert IDEMPOTENCY_CONFLICT_FLAG in ans.flags
+
+
+def test_stripe_python_raises_idempotency_error_on_the_conflict_body():
+    """The conflict body is what makes stripe-python raise `IdempotencyError`, the class an
+    agent's `except` clause names. Stripe's body carries no `code` for it - the SDK branches on
+    `type` - so the class is what is asserted and not `code`. Skipped without `stripe`, like
+    `test_stripe_python_raises_invalid_request_error_off_the_modeled_refusal`."""
+    pytest.importorskip("stripe")
+    import stripe
+    from stripe._api_requestor import _APIRequestor
+
+    policy = ShadowPolicy()
+    _ask(policy, _refund_request(b"charge=ch_REAL&amount=100"))
+    ans = _ask(policy, _refund_request(b"charge=ch_REAL&amount=250"))
+    raw = ans.response.body.decode()
+    error = json.loads(raw)["error"]
+    raised = _APIRequestor().specific_v1_api_error(raw, ans.response.status, raw, {}, error)
+    assert isinstance(raised, stripe.IdempotencyError)
+    assert raised.http_status == 400

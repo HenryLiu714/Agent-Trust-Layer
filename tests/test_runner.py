@@ -764,6 +764,21 @@ def test_an_overlaid_read_is_filed_under_its_own_services_write():
     ]
 
 
+def test_an_engine_read_the_overlay_edited_is_never_counted_as_one_of_the_agents_reads():
+    """The bracket qualifies the agent's `N reads`, so it counts the agent's reads only. An engine
+    read is its own phrase; counted in both, one read would show up twice (#45, #48)."""
+    rows = [
+        replace(_refund(answered_by="fake-L1"), precondition="passed"),
+        replace(
+            _exchange(path="/v1/charges/ch_3QabcXYZ", answered_by="overlay"),
+            issued_by="engine",
+            overlay="full",
+        ),
+    ]
+    line = _block(summary_lines("7f3a", rows, 0.0, _maps()), "api.stripe.com  ")
+    assert line == "  api.stripe.com  1 engine read  1 write intercepted"
+
+
 def test_the_closing_line_names_each_event_once_in_first_seen_order():
     """Two refunds carry two identical tuples; naming `refund.created` twice would promise a webhook
     per line rather than per event, and a sorted list would lose the order the map gives (#47)."""

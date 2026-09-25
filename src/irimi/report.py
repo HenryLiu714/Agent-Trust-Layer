@@ -240,7 +240,7 @@ def _host_line(host: str, rows: Sequence[Exchange], width: int) -> str:
     # then wrote the run's own faked writes into the body. Leaving it out of this count told the
     # reader a read they really made never happened, which is the same class of untruth as #20
     # below. It is counted here and its count qualifies `N reads` in brackets, because the body is
-    # not what Stripe sent (#48).
+    # not what the service sent (#48).
     #
     # An engine-issued read is a real read that the AGENT did not make (#45). Counting it in
     # `N reads` would inflate the one number this tool rests on, so it is a different number in
@@ -250,7 +250,11 @@ def _host_line(host: str, rows: Sequence[Exchange], width: int) -> str:
         for ex in rows
         if ex.kind == "read" and ex.answered_by == "live" and ex.issued_by == "agent"
     )
-    overlaid_reads = sum(1 for ex in rows if ex.kind == "read" and ex.answered_by == "overlay")
+    overlaid_reads = sum(
+        1
+        for ex in rows
+        if ex.kind == "read" and ex.answered_by == "overlay" and ex.issued_by == "agent"
+    )
     if live_reads or overlaid_reads:
         reads = _plural(live_reads + overlaid_reads, "read")
         if overlaid_reads:

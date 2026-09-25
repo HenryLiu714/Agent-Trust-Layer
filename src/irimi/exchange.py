@@ -18,6 +18,17 @@ AnsweredBy = Literal["live", "fake-L0", "fake-L1", "delegated", "overlay"]
 # parse - and it is set even when the body was left alone, because a half-known world presented
 # as the whole one is the untruth the overlay exists to prevent.
 OverlayFidelity = Literal["full", "partial"]
+# What L3 said about a write before irimi faked it (#45). `passed` and `rejected` are the check's
+# two real answers; `not_evaluable` is irimi saying it could not find out - a 429, a network
+# failure, a body it could not parse, a world the overlay knows is incomplete - and it degrades the
+# write to L2 and is shown rather than hidden. None is the fourth state and the commonest: this
+# route declares no `precondition:`, or the policy has no reader, so nothing was asked. Same shape
+# as `Exchange.overlay` (#43).
+PreconditionOutcome = Literal["passed", "rejected", "not_evaluable"]
+# Who asked for this exchange. `engine` is a read irimi issued on its own account to decide about
+# a write - a precondition read - and it is counted apart from the agent's own so that "reads are
+# real" keeps meaning "the reads your agent made are real" (#45).
+IssuedBy = Literal["agent", "engine"]
 Validation = Literal["validated", "unvalidated"]
 Door = Literal["forward", "reverse"]
 
@@ -122,3 +133,12 @@ class Exchange:
     # a read taken before any write. `full` or `partial` says it did consider it, and `partial`
     # can sit on an unchanged body: see OverlayFidelity.
     overlay: OverlayFidelity | None = None
+    # What L3 decided about this write before it was faked (#45). None when nothing was asked -
+    # a read, a route with no `precondition:` - see PreconditionOutcome.
+    precondition: PreconditionOutcome | None = None
+    # The machine code of an L3 rejection, for the summary line (#45). "" for everything else,
+    # including a rejection's own modeled body when the service sends no code of its own - see
+    # `services.Rejection`.
+    rejection_code: str = ""
+    # Who asked for this exchange: the agent, or irimi itself to decide about a write (#45).
+    issued_by: IssuedBy = "agent"

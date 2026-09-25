@@ -4,17 +4,13 @@ import json
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from typing import Any, Protocol
+from typing import Protocol
 
-from irimi import echo, pipeline, services
+from irimi import echo, pipeline, services, writelog
 from irimi.exchange import Exchange, OverlayFidelity, Request, Response
 from irimi.servicemap import MapIndex
 
 logger = logging.getLogger(__name__)
-
-# A live body this size is not an object any service's effects model, and parsing it on the answer
-# path would cost more than the read it is trying to improve. It is flagged, not silently passed.
-MAX_BODY_BYTES = 2_000_000
 
 # ------------------------------------------------ TWO THINGS THE FIRST REAL OVERLAY MUST KNOW
 #
@@ -136,10 +132,10 @@ class ServiceOverlay:
         effects = services.EFFECTS.get(service)
         if effects is None:
             return Overlaid(upstream_response)
-        writes = self._writes(service, read_request, write_log)
+        writes = writelog.decode(service, read_request, write_log)
         if not writes:
             return Overlaid(upstream_response)
-        document = _json_object(upstream_response.body)
+        document = writelog.json_object(upstream_response.body)
         if document is None:
             # A body the overlay cannot read is a body it cannot apply the run's writes to. The
             # agent still gets exactly what the service sent; the exchange says it is incomplete.
@@ -171,7 +167,7 @@ class ServiceOverlay:
         rewrite = services.REWRITES.get(service)
         if rewrite is None:
             return read_request
-        writes = self._writes(service, read_request, write_log)
+        writes = writelog.decode(service, read_request, write_log)
         if not writes:
             return read_request
         # Past the early returns, like `_apply`'s; `echo.reflect` never raises (#44).
@@ -190,47 +186,3 @@ class ServiceOverlay:
     def _route(self, request: Request) -> tuple[str, str]:
         classification = pipeline.classify(request, self.maps)
         return classification.service, classification.operation
-
-    def _writes(
-        self, service: str, read_request: Request, write_log: Sequence[Exchange]
-    ) -> list[services.Write]:
-        """This service's faked writes, in the scope the read is asking about.
-
-        A write made against another connected account or another API version says nothing about
-        this read, so it is left out. The scope is taken from each write's OWN request headers,
-        because that is the world it was made in.
-        """
-        scope = _scope(service, read_request)
-        out: list[services.Write] = []
-        for exchange in write_log:
-            if exchange.service != service or exchange.response is None:
-                continue
-            if _scope(service, exchange.request) != scope:
-                continue
-            answer = _json_object(exchange.response.body)
-            if answer is None:
-                continue
-            out.append(
-                services.Write(
-                    operation=exchange.operation,
-                    posted=echo.reflect(exchange.request),
-                    answer=answer,
-                )
-            )
-        return out
-
-
-def _scope(service: str, request: Request) -> tuple[str, ...]:
-    names = services.SCOPE_HEADERS.get(service, ())
-    return tuple(next((v for k, v in request.headers if k == name), "") for name in names)
-
-
-def _json_object(body: bytes) -> dict[str, Any] | None:
-    """`body` as a JSON object, or None when it is not one this overlay should touch."""
-    if not body or len(body) > MAX_BODY_BYTES:
-        return None
-    try:
-        parsed = json.loads(body)
-    except Exception:
-        return None
-    return parsed if isinstance(parsed, dict) else None

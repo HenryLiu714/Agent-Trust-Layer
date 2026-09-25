@@ -47,9 +47,9 @@ uv run python examples/refund_agent/seed.py         # once, outside shadow: seed
 uv run irimi shadow -- python examples/refund_agent/agent.py
 ```
 
-`tests/test_phase_exit.py` holds three tests: two hermetic criteria, one per phase, which run on
-every `uv run pytest -q`, and one live check of that run, which skips unless `STRIPE_API_KEY` is
-set and the `examples` group is installed. Run the live check by hand before closing a phase:
+`tests/test_phase_exit.py` holds a hermetic criterion per phase, and Phase 2's twin through the
+real `irimi shadow`, all of which run on every `uv run pytest -q`; and one live check of that run,
+which skips unless `STRIPE_API_KEY` is set and the `examples` group is installed. Run the live check by hand before closing a phase:
 
 ```
 STRIPE_API_KEY=sk_test_... uv run pytest -q -rs tests/test_phase_exit.py

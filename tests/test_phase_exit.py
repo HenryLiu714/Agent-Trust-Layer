@@ -17,8 +17,10 @@ difference between a criterion and the live check is the whole argument:
   Stripe, and asserts the answers, the exchanges and the summary block line by line. It does not
   go through the reverse door on purpose: the door rewrites the host to `api.stripe.com`, so
   irimi's own L3 precondition read would dial the real Stripe (Notion, Phase 2 § Exit test). The
-  Phase 1 test answers that by swapping in `_StandInReader`; this one needs no stand-in at all,
-  and so exercises the reader `cli._build_engine` really builds.
+  Phase 1 test answers that by swapping in `_StandInReader`; this one needs no stand-in at all.
+  `test_the_same_five_calls_under_irimi_shadow_print_the_phase_2_summary` is its twin through the
+  real CLI: the same calls from a child of `irimi shadow`, proving the engine the criterion builds
+  is the one `cli._build_engine` builds, and that the block it prints on exit is the one pinned.
 
 * `test_the_refund_agent_leaves_no_refund_on_a_real_test_mode_charge` is the live version both
   phases describe. It runs `examples/refund_agent/agent.py` itself against Stripe test mode and
@@ -264,6 +266,21 @@ def test_a_refund_through_the_door_is_answered_by_irimi_and_never_leaves_the_mac
 # The loopback Stripe's one refundable charge: 4900, nothing refunded (`tests.test_engine_mitm`).
 PHASE2_CHARGE = "ch_REAL1"
 PHASE2_AMOUNT = 4900
+# The Phase 2 summary under its header line, as the criterion and its CLI twin both assert it: the
+# overlaid reads hang under the refund they saw, and the engine's reads are counted but kept out
+# of the agent's `N reads` (#45, #48). Notion's target block, with the amount as the write sent it.
+PHASE2_SUMMARY = [
+    "",
+    "  127.0.0.1  3 reads (2 showing this run's writes)  2 engine reads  2 writes intercepted",
+    "",
+    f"  ○ refund {PHASE2_AMOUNT} on {PHASE2_CHARGE}  unvalidated (L3 preconditions passed)",
+    "    ↳ GET /v1/refunds saw it  overlay",
+    f"    ↳ GET /v1/charges/{PHASE2_CHARGE} saw it  overlay",
+    f"  ✗ refund {PHASE2_AMOUNT} on {PHASE2_CHARGE}  would fail: charge_already_refunded",
+    "",
+    "  7 exchanges · 5 live · 0 delegated · 2 virtualized",
+    "  These writes did not happen. Would have fired: refund.created, charge.refunded.",
+]
 
 
 @pytest.fixture
@@ -376,22 +393,86 @@ def test_the_refund_agents_four_calls_through_the_forward_proxy_are_answered_sha
     # Nothing on the other side was ever asked to do anything.
     assert [m for m, _ in _PreconditionStub.seen if m != "GET"] == []
 
-    # The summary, line by line. The overlaid reads hang under the refund they saw; the engine's
-    # reads are counted but kept out of the agent's `N reads` (#45, #48).
+    # The summary, line by line.
     run_id = seen[0].run_id
     assert report.summary_lines(run_id, seen, 1.0, maps) == [
         f"irimi shadow · run {run_id} · 7 exchanges · 1.0s · backstop: none (Phase 4)",
-        "",
-        "  127.0.0.1  3 reads (2 showing this run's writes)  2 engine reads  2 writes intercepted",
-        "",
-        f"  ○ refund {PHASE2_AMOUNT} on {PHASE2_CHARGE}  unvalidated (L3 preconditions passed)",
-        "    ↳ GET /v1/refunds saw it  overlay",
-        f"    ↳ GET /v1/charges/{PHASE2_CHARGE} saw it  overlay",
-        f"  ✗ refund {PHASE2_AMOUNT} on {PHASE2_CHARGE}  would fail: charge_already_refunded",
-        "",
-        "  7 exchanges · 5 live · 0 delegated · 2 virtualized",
-        "  These writes did not happen. Would have fired: refund.created, charge.refunded.",
+        *PHASE2_SUMMARY,
     ]
+
+
+# Placeholders rather than `str.format`, as in CHILD. The same five calls as the criterion above,
+# spelled as a child process sends them through `HTTP_PROXY`: an absolute URL to the proxy.
+PHASE2_CHILD = """
+import http.client, os, urllib.parse, uuid
+
+proxy = urllib.parse.urlparse(os.environ["HTTP_PROXY"])
+base = "http://127.0.0.1:__STUB_PORT__"
+
+
+def call(method, path, body=None):
+    conn = http.client.HTTPConnection(proxy.hostname, proxy.port, timeout=10)
+    headers = {"host": "127.0.0.1:__STUB_PORT__"}
+    if body is not None:
+        headers["content-type"] = "application/x-www-form-urlencoded"
+        headers["idempotency-key"] = str(uuid.uuid4())
+    conn.request(method, base + path, body=body, headers=headers)
+    resp = conn.getresponse()
+    resp.read()
+    print("CALL", method, path, resp.status, resp.getheader("Irimi-Answered-By"))
+    conn.close()
+
+
+refund = "charge=__CHARGE__&amount=__AMOUNT__"
+call("GET", "/v1/charges")
+call("POST", "/v1/refunds", refund)
+call("GET", "/v1/refunds?charge=__CHARGE__&limit=10")
+call("GET", "/v1/charges/__CHARGE__")
+call("POST", "/v1/refunds", refund)
+"""
+
+
+def test_the_same_five_calls_under_irimi_shadow_print_the_phase_2_summary(
+    home, tmp_path, capfd, monkeypatch
+):
+    """The criterion's twin through the real CLI (#48). The criterion builds its engine the way
+    `cli._build_engine` builds one; this proves that is the engine `irimi shadow` really builds -
+    the real overlay, a policy holding the real reader - and that the block it prints on exit is
+    the one the criterion pins. Nothing is swapped but where the shipped maps are read from: a
+    directory holding the loopback Stripe's map, so the stub's host is the `stripe` service. The
+    child uses the forward proxy explicitly, because `irimi shadow` exempts loopback from it
+    through `NO_PROXY` and the stub is on loopback."""
+    _PreconditionStub.seen = []
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _PreconditionStub)
+    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
+    maps_dir = tmp_path / "shipped"
+    maps_dir.mkdir()
+    (maps_dir / "stripe.yaml").write_text(PRECONDITION_STRIPE_MAP)
+    monkeypatch.setattr("irimi.servicemap.loader.shipped_dir", lambda: maps_dir)
+    child = tmp_path / "child.py"
+    child.write_text(
+        PHASE2_CHILD.replace("__STUB_PORT__", str(srv.server_address[1]))
+        .replace("__CHARGE__", PHASE2_CHARGE)
+        .replace("__AMOUNT__", str(PHASE2_AMOUNT))
+    )
+    try:
+        assert main(["shadow", "--port", "0", "--", sys.executable, str(child)]) == 0
+    finally:
+        srv.shutdown()
+    lines = capfd.readouterr().out.splitlines()
+
+    assert [line for line in lines if line.startswith("CALL ")] == [
+        "CALL GET /v1/charges 200 None",
+        "CALL POST /v1/refunds 200 fake-L1",
+        f"CALL GET /v1/refunds?charge={PHASE2_CHARGE}&limit=10 200 overlay",
+        f"CALL GET /v1/charges/{PHASE2_CHARGE} 200 overlay",
+        "CALL POST /v1/refunds 400 fake-L1",
+    ]
+    assert [m for m, _ in _PreconditionStub.seen if m != "GET"] == []
+    # The banner opens `irimi shadow · run ...` too; the summary's header is the one with a count.
+    header = next(i for i, line in enumerate(lines) if " · 7 exchanges · " in line)
+    assert lines[header].startswith("irimi shadow · run ")
+    assert lines[header + 1 : header + 1 + len(PHASE2_SUMMARY)] == PHASE2_SUMMARY
 
 
 @pytest.mark.skipif(

@@ -948,14 +948,8 @@ def test_no_override_file_is_fine(tmp_path, monkeypatch):
 
 def test_route_and_servicemap_defaults():
     route = Route(method="POST", path="/x", operation="x.create", kind="write")
-    assert (route.human, route.ids, route.volatile, route.fixture, route.fires) == (
-        "",
-        {},
-        (),
-        "",
-        (),
-    )
-    assert (route.persists, route.comment, route.forward_auth) == (None, "", False)
+    assert (route.human, route.ids, route.volatile, route.fixture) == ("", {}, (), "")
+    assert (route.fires, route.persists, route.comment, route.forward_auth) == ((), None, "", False)
     sm = ServiceMap(service="x", hosts=frozenset({"x.example"}), routes=(route,))
     assert (sm.verbs, sm.target, sm.target_reads) == ("honest", servicemap.SELF_TARGET, False)
     assert sm.default_kind is None

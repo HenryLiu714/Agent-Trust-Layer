@@ -111,6 +111,8 @@ routes:
     operation: things.create
     kind: write
     human: create a thing
+    fires:
+      - thing.created
 """
 
 # A map claiming the loopback upstream as `slack`, so a read through it is a Slack read. The
@@ -1265,6 +1267,43 @@ def test_a_target_that_stops_listening_mid_run_is_still_flagged(tmp_path, monkey
     assert [ex.answered_by for ex in seen] == ["delegated", "delegated"]
     assert "target-failed" not in seen[0].flags
     assert "target-failed" in seen[1].flags
+
+
+def test_a_faked_write_on_a_route_with_no_fixture_still_lists_its_webhooks(tmp_path, monkeypatch):
+    """`fires:` is about the write, not the answer's fidelity: DEMO_MAP's route names no
+    `fixture:`, so the fake is L0, and it was still accepted (#47)."""
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch)))
+    try:
+        status, _ = _via_proxy(eng.listen_port(), "POST", "http://127.0.0.1/things", body=b"{}")
+    finally:
+        stop()
+    assert status == 200
+    (ex,) = seen
+    assert ex.answered_by == "fake-L0"
+    assert ex.would_fire == ("thing.created",)
+
+
+def test_a_delegated_write_lists_no_webhooks_whether_or_not_its_target_answers(
+    tmp_path, monkeypatch, target
+):
+    """The target performed the write, or did something else with it, or was not there; irimi
+    built nothing and claims nothing about what the real service would have sent (#47). The
+    route names `fires:`, so the empty lists are the policy withholding it, not a map without
+    one - the test above is the same route faked."""
+    maps = _targeted(
+        tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{target}/w")]
+    )
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
+    try:
+        first, _ = _via_proxy(eng.listen_port(), "POST", "http://127.0.0.1/things", body=b"{}")
+        _kill_target()
+        second, _ = _via_proxy(eng.listen_port(), "POST", "http://127.0.0.1/things", body=b"{}")
+    finally:
+        stop()
+    assert (first, second) == (200, 502)
+    assert [ex.answered_by for ex in seen] == ["delegated", "delegated"]
+    assert "target-failed" in seen[1].flags
+    assert [ex.would_fire for ex in seen] == [(), ()]
 
 
 def test_a_target_naming_our_own_listener_is_refused_with_a_json_502(tmp_path, monkeypatch):
@@ -2685,6 +2724,18 @@ def test_a_precondition_read_that_429s_leaves_the_write_faked_at_l2(precondition
     assert (write.answered_by, write.precondition) == ("fake-L1", "not_evaluable")
     (issued,) = [ex for ex in seen if ex.issued_by == "engine"]
     assert issued.response is not None and issued.response.status == 429
+
+
+def test_a_refund_l3_could_not_check_still_lists_its_webhooks(precondition_stub):
+    """`not_evaluable` is not `rejected`: irimi could not find out, faked the write anyway, and
+    so accepted it - its events are listed like a passed refund's. Only a refusal lists nothing
+    (#45, #47)."""
+    proxy, stub, seen = precondition_stub
+    status, _, _ = _refund(proxy, stub, "ch_BUSY1")
+    assert status == 200
+    (write,) = _writes(seen)
+    assert write.precondition == "not_evaluable"
+    assert write.would_fire == ("refund.created", "charge.refunded")
 
 
 def test_a_concurrent_request_is_not_delayed_by_another_requests_precondition_read(

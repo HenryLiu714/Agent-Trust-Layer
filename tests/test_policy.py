@@ -1868,6 +1868,26 @@ def test_a_live_read_lists_nothing():
     assert ans.would_fire == ()
 
 
+@pytest.mark.parametrize(
+    ("reader", "outcome"),
+    [
+        (_reader(_json(200, _charge())), "passed"),
+        (_reader(_json(429, {"error": {"type": "rate_limit_error"}})), "not_evaluable"),
+        (None, None),
+    ],
+    ids=["passed", "not-evaluable", "never-asked"],
+)
+def test_every_precondition_outcome_but_rejected_lists_the_webhooks(reader, outcome):
+    """`precondition` has four states, and three of them mean irimi faked the write: it passed,
+    irimi could not find out, or nothing was asked. All three are accepted writes and list their
+    events; only `rejected` lists nothing (#45, #47)."""
+    ans = ShadowPolicy(reader=reader, maps=SHIPPED).answer(
+        _refund_request(), classify(_refund_request(), SHIPPED)
+    )
+    assert ans.precondition == outcome
+    assert ans.would_fire == ("refund.created", "charge.refunded")
+
+
 def test_a_rejected_write_lists_no_webhooks():
     """L3 said the service would have refused this refund. Nothing was performed, so nothing
     would have fired (#47)."""

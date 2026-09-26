@@ -2,6 +2,8 @@
 
 import copy
 
+import pytest
+
 from irimi.exchange import Request
 from irimi.services.model import Read, Rewritten, Write
 from irimi.services.stripe import apply_read, rewrite_query
@@ -376,6 +378,27 @@ def test_a_minted_refund_is_answered_over_whatever_stripe_said():
     out = apply_read(_asked("refunds.retrieve", "/v1/refunds/re_MINTED1"), other, [write])
     assert (out.status, out.changed) == (200, True)
     assert out.document == write.answer
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        {"type": "invalid_request_error", "code": "rate_limit"},
+        {"type": "authentication_error", "message": "Invalid API Key provided"},
+        {"type": "api_error", "message": "Something went wrong on Stripe's end."},
+    ],
+)
+def test_a_minted_refund_read_that_stripe_refused_for_another_reason_is_not_answered(error):
+    """Whatever Stripe said about the OBJECT - but a 429, a 401 or a 5xx is about the caller or
+    Stripe itself, and production would have sent it for the real refund too. Answering 200 over
+    it would turn an error into a success, so the body stands and the read is `partial`, the
+    pre-#52 answer (#52)."""
+    body = {"error": error}
+    out = apply_read(_asked("refunds.retrieve", "/v1/refunds/re_MINTED1"), body, [_refund_write()])
+    assert out.document == body
+    assert out.status is None
+    assert out.changed is False
+    assert out.partial is True
 
 
 def test_retrieving_a_real_refund_is_untouched():

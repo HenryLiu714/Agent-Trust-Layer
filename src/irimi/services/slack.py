@@ -118,12 +118,15 @@ def apply_read(read: Read, document: Any, writes: Sequence[Write]) -> Applied:
         # difference is the services' wire shapes and not irimi's truth about a minted object.
         #
         # Every OTHER error body is still left exactly as Slack sent it: half-turning an error into
-        # a success is the untruth this module's header forbids. It is `partial` when the run holds
-        # a post this read would have shown - including a minted thread `_minted_thread` declined,
-        # which is the honest answer for a page irimi cannot build.
-        minted = _minted_thread(read, posts)
-        if minted is not None:
-            return minted
+        # a success is the untruth this module's header forbids. That includes a `ratelimited` or
+        # `invalid_auth` on a minted thread's read, which production would have sent for the real
+        # thread too. It is `partial` when the run holds a post this read would have shown -
+        # including a minted thread `_minted_thread` declined, which is the honest answer for a
+        # page irimi cannot build.
+        if document.get("error") == "thread_not_found":
+            minted = _minted_thread(read, posts)
+            if minted is not None:
+                return minted
         return Applied(document, partial=any(_would_apply(read, post) for post in posts))
     if read.operation == "conversations.history":
         return _history(read, document, posts)
@@ -236,7 +239,8 @@ def _minted_thread(read: Read, posts: Sequence[_Post]) -> Applied | None:
     """The thread of a parent irimi minted, built from the run's own posts (#52).
 
     Built rather than edited, because there is no live body to preserve: Slack answered
-    `thread_not_found`, and every message in this thread is one irimi minted. Slack's shape for it
+    `thread_not_found` - the caller asks only then - and every message in this thread is one irimi
+    minted. Slack's shape for it
     is the parent first, then the replies oldest-first, `has_more: false` - and a thread of this
     run's own posts has exactly one page. `_threads` then moves the parent's own thread fields, so
     a reader sees `reply_count` beside the replies it is counting, which is the whole reason
@@ -247,8 +251,8 @@ def _minted_thread(read: Read, posts: Sequence[_Post]) -> Applied | None:
     cannot read, a parameter that asks for only PART of the thread (`PAGE_SHAPING_PARAMS`, since
     this builds the whole of it), a `ts` this run did not mint as a THREAD PARENT, a REPLY whose
     answer carried no message to show (the fixture failed and the write degraded to `fake-L0`),
-    and any message
-    whose channel `_in_channel` will not answer a definite True for. That last one is stricter
+    and any message whose channel `_in_channel` will not answer a definite True for. That last one
+    is stricter
     than the editing path's `is not False`: leaving a post off a page is one kind of incomplete,
     and building a whole page for a channel irimi cannot match is another kind of wrong.
 

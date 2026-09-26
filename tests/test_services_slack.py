@@ -516,6 +516,22 @@ def test_replies_of_a_thread_this_run_did_not_mint_is_left_alone():
     assert out.status is None
 
 
+@pytest.mark.parametrize("code", ["ratelimited", "invalid_auth", "missing_scope"])
+def test_a_minted_thread_read_that_slack_refused_for_another_reason_is_not_answered(code):
+    """Only `thread_not_found` is Slack saying it never saw the thread. A rate limit or a bad token
+    on the same read is Slack's answer about the caller, which production would have sent for the
+    real thread too, so building the page over it would turn an error into a success. The error
+    stands, `partial` because the run holds posts this read would have shown (#52)."""
+    error = {"ok": False, "error": code}
+    out = apply_read(
+        _replies(MINTED1), dict(error), [_post_write(ts=MINTED1), _reply_write(MINTED1, ts=MINTED2)]
+    )
+    assert out.document == error
+    assert out.changed is False
+    assert out.partial is True
+    assert out.status is None
+
+
 @pytest.mark.parametrize(
     "shaping",
     [

@@ -11,8 +11,8 @@ Two reads beyond the table's letter, both so that irimi does not contradict itse
 `charges.list` gets the same charge effect as `charges.retrieve`, because the refund agent finds its
 charge in the list and a list that ignored the refund would disagree with the retrieve; and
 `refunds.retrieve` of a minted id is answered from the write log with the object irimi minted, over
-whatever Stripe said - the one read where the seam replaces a STATUS as well as a body, because
-Stripe has never heard of that id and answers `404` (#52).
+whatever Stripe said about it - the one read where the seam replaces a STATUS as well as a body,
+because Stripe has never heard of that id and answers `404` (#52).
 
 Two rules run through all of it:
 
@@ -198,8 +198,13 @@ def _refund_retrieve(
     irimi answered the write with, which is what the agent was told exists: nothing is invented,
     and none of the live body survives because there is no live object behind it.
 
-    Whatever Stripe answered, not only a 404: a 24-character random id colliding with a real refund
-    is not a scenario, and the object the agent asked for is the one irimi minted.
+    Whatever Stripe said ABOUT THE OBJECT, not only a 404: a 24-character random id colliding with a
+    real refund is not a scenario, and the object the agent asked for is the one irimi minted. But
+    not over an error about anything else. A 401, a 429 or a 5xx on the same read is Stripe's answer
+    about the credentials or itself, which production would have sent for the real refund too, and
+    answering 200 over it is the error-into-success untruth this module's header forbids. So an
+    `error` body whose code is not `resource_missing` keeps the pre-#52 answer: left as sent,
+    flagged `partial`.
 
     A shallow copy, never the write log's own dict - the overlay serializes what it is handed and a
     later effect must not find this one mutated. `slack._posts` copies for the same reason.
@@ -211,6 +216,11 @@ def _refund_retrieve(
     mine = next((r for r in _minted_refunds(writes) if r.answer["id"] == ident), None)
     if mine is None:
         return Applied(document)
+    error = document.get("error")
+    if error is not None and not (
+        isinstance(error, dict) and error.get("code") == "resource_missing"
+    ):
+        return Applied(document, partial=True)
     return Applied(dict(mine.answer), changed=True, status=200)
 
 

@@ -18,7 +18,7 @@ Two rules run through all of it:
 
 * **Never invent a field the live object does not have.** A field Stripe's own response omits is
   one the agent can never see in production, and putting one there hands it a body no live read
-  can produce. This is `echo._reflect_over`'s rule, applied to reads.
+  can produce. This is `echo.reflect_over`'s rule, applied to reads.
 * **Say `partial` rather than half-apply.** A page the table does not model, a filter it cannot
   read, a cursor page whose real contents depend on where the minted refund landed: the document is
   left exactly as Stripe sent it and the exchange records that the world irimi showed is
@@ -229,7 +229,7 @@ def _customer(customer: dict[str, Any], writes: Sequence[Write]) -> Applied:
         if write.operation != "customers.update" or write.answer.get("id") != customer.get("id"):
             continue
         for name, value in write.posted.items():
-            # `name not in customer` is `echo._reflect_over`'s rule: a field the live object does
+            # `name not in customer` is `echo.reflect_over`'s rule: a field the live object does
             # not have is one the real service would not have returned. It also keeps `expand[0]`
             # and friends out, without a second list of parameter names to maintain.
             if name in SERVICE_OWNED or name not in customer:

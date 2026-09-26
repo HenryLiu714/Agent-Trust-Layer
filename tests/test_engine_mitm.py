@@ -318,8 +318,9 @@ def test_a_slack_read_raises_the_ts_watermark(tmp_path, monkeypatch, upstream):
     """#42: a minted `ts` has to sort after the real messages the run already read, and this hook
     is the only place those values go past - the write log holds writes, not reads."""
     from irimi import echo
+    from irimi.echo import slack as echo_slack
 
-    monkeypatch.setattr(echo, "_last_slack_ts", (0, 0))
+    monkeypatch.setattr(echo_slack, "_last_slack_ts", (0, 0))
     cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch, doc=SLACK_MAP))
     eng, seen, stop = _start(cfg)
     try:

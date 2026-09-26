@@ -452,9 +452,9 @@ def _in_channel(mine: str | None, asked: Any) -> bool | None:
 
     None is the case irimi forces on itself. `chat.postMessage` accepts `#general` while
     `conversations.history` requires `C0123`, and real Slack answers the post with the channel id
-    while `echo.slack_l1_body` echoes the posted value verbatim - so the mismatch is irimi's own,
-    and silently leaving the agent's own message off a page that then claims to be complete is the
-    untruth this module's header forbids. The caller turns None into `partial` instead (#44).
+    while `echo.slack.slack_l1_body` echoes the posted value verbatim - so the mismatch is irimi's
+    own, and silently leaving the agent's own message off a page that then claims to be complete is
+    the untruth this module's header forbids. The caller turns None into `partial` instead (#44).
     """
     if not isinstance(asked, str) or not asked or mine is None:
         return None
@@ -553,8 +553,8 @@ def _merged(known: list[Any], users: Sequence[Any]) -> list[Any]:
 # models changes whether a channel exists, is archived or has the bot in it.
 #
 # Every rejection body is envelope-shaped, not fixture-shaped: they never go through
-# `echo.slack_l1_body`, which always answers `ok: true`, and slack_sdk raises `SlackApiError` off
-# `ok: false`.
+# `echo.slack.slack_l1_body`, which always answers `ok: true`, and slack_sdk raises
+# `SlackApiError` off `ok: false`.
 
 
 def _post_probe(proposal: Proposal) -> Probe | None:

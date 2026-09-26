@@ -2170,6 +2170,7 @@ class _StripeStub(BaseHTTPRequestHandler):
     """
 
     seen: list = []  # (method, path) of every request, so a test can prove no write reached it
+    rate_limited = False  # every `GET /v1/refunds/{id}` answers 429 while set
     REFUNDS_PAGE_SIZE = 2
 
     def do_GET(self):
@@ -2214,8 +2215,18 @@ class _StripeStub(BaseHTTPRequestHandler):
                     "cancellation_reason": None,
                 },
             )
+        elif route.startswith("/v1/refunds/") and _StripeStub.rate_limited:
+            status, document = (
+                429,
+                {"error": {"type": "invalid_request_error", "code": "rate_limit"}},
+            )
         else:
-            status, document = 404, {"error": {"type": "invalid_request_error"}}
+            # Stripe's own shape for an id it has never heard of. The code is what tells a minted
+            # object's read apart from a rate limit or a bad key on the same read (#52).
+            status, document = (
+                404,
+                {"error": {"type": "invalid_request_error", "code": "resource_missing"}},
+            )
         body = json.dumps(document).encode()
         self.send_response(status)
         self.send_header("content-type", "application/json")
@@ -2240,6 +2251,7 @@ def stripe_stub(tmp_path, monkeypatch):
     from irimi.overlay import ServiceOverlay
 
     _StripeStub.seen = []
+    _StripeStub.rate_limited = False
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _StripeStub)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     maps = _maps(tmp_path, monkeypatch, doc=STRIPE_MAP)
@@ -2611,6 +2623,32 @@ def test_a_read_of_a_refund_stripe_really_does_not_have_keeps_its_404(stripe_stu
     assert ex.overlay is None
 
 
+def test_a_rate_limited_read_of_a_minted_refund_keeps_its_429(stripe_stub):
+    """Only Stripe's `resource_missing` is answered. A 429 on the same read is Stripe's answer
+    about the caller, which production would have sent for the real refund too, so the agent
+    gets it as sent and the exchange says the world irimi showed is incomplete (#52)."""
+    proxy, stub, seen = stripe_stub
+    minted = _fake_refund(proxy, stub)
+    _StripeStub.rate_limited = True
+    status, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds/{minted}")
+    assert status == 429
+    assert json.loads(data)["error"]["code"] == "rate_limit"
+    assert pipeline.ANSWERED_BY_HEADER not in headers
+    ex = seen[-1]
+    assert (ex.answered_by, ex.overlay) == ("live", "partial")
+
+
+def test_a_minted_refund_read_by_id_is_listed_under_its_refund(stripe_stub, tmp_path, monkeypatch):
+    """The summary line #52 changes, off a real run: before it the read hung under the refund as
+    `did not show it  live (partial)`, and now it is a read that saw it (#48, #52)."""
+    proxy, stub, seen = stripe_stub
+    minted = _fake_refund(proxy, stub)
+    assert _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds/{minted}")[0] == 200
+    lines = report.summary_lines("t3st", seen, 1.0, _maps(tmp_path, monkeypatch, doc=STRIPE_MAP))
+    write = next(i for i, line in enumerate(lines) if line.startswith("  ○ refund 100 on ch_REAL1"))
+    assert lines[write + 1] == f"    ↳ GET /v1/refunds/{minted} saw it  overlay"
+
+
 # ------------------------------------------------- the Slack overlay, end to end (#44)
 
 # The loopback upstream claimed as `slack`, with the shipped map's two routes that matter here.
@@ -2789,6 +2827,27 @@ def test_a_slack_read_the_effects_cannot_place_is_recorded_partial_and_left_alon
     assert pipeline.ANSWERED_BY_HEADER not in headers, "nothing of irimi's is in this body"
     assert seen[-1].answered_by == "live"
     assert seen[-1].overlay == "partial"
+
+
+def test_a_faked_post_answers_with_its_thread_or_with_no_thread_key_through_the_proxy(slack_stub):
+    """#55's done-when off the real proxy: a threaded post's own answer names the thread it was
+    posted in, and a top-level post's answer has no `thread_ts` key at all - not a `null` one,
+    which real Slack never sends. Neither reached Slack."""
+    proxy, stub, _ = slack_stub
+    status, _, data = _slack_call(
+        proxy,
+        stub,
+        "chat.postMessage",
+        {"channel": "C0123", "thread_ts": REAL_SLACK_TS, "text": "on it"},
+    )
+    assert status == 200
+    assert json.loads(data)["message"]["thread_ts"] == REAL_SLACK_TS
+    status, _, data = _slack_call(
+        proxy, stub, "chat.postMessage", {"channel": "C0123", "text": "hi"}
+    )
+    assert status == 200
+    assert "thread_ts" not in json.loads(data)["message"]
+    assert _SlackStub.seen == [], "a faked post reached Slack"
 
 
 def test_a_slack_replies_read_of_a_minted_thread_is_answered_not_thread_not_found(slack_stub):
@@ -3116,7 +3175,9 @@ def test_a_faked_refund_carries_the_currency_its_precondition_read_found(precond
     assert write.currency == "usd"
 
 
-def test_a_write_whose_precondition_read_never_answered_carries_no_currency(precondition_stub):
+def test_a_write_whose_precondition_read_never_answered_carries_no_currency(
+    precondition_stub, tmp_path, monkeypatch
+):
     """`ch_BUSY1` 429s, so no document was read and there is nothing to denominate the amount
     with. The write is still faked at L2 and its line still prints raw minor units (#60)."""
     proxy, stub, seen = precondition_stub
@@ -3125,6 +3186,9 @@ def test_a_write_whose_precondition_read_never_answered_carries_no_currency(prec
     (write,) = _writes(seen)
     assert write.precondition == "not_evaluable"
     assert write.currency == ""
+    maps = _maps(tmp_path, monkeypatch, doc=PRECONDITION_STRIPE_MAP)
+    lines = report.summary_lines("t3st", seen, 1.0, maps)
+    assert any(line.startswith("  ○ refund 100 on ch_BUSY1  ") for line in lines), lines
 
 
 # SLACK_OVERLAY_MAP with the shipped map's `precondition:` on `chat.postMessage`, and the

@@ -337,20 +337,45 @@ def test_expand_is_a_known_list_filter():
 # ------------------------------------------------------------------------- a single refund
 
 
-def test_retrieving_a_minted_refund_is_partial():
+def test_retrieving_a_minted_refund_is_answered_from_the_write_log():
+    """#52's Stripe half. Stripe has never heard of the id and answers `404 resource_missing`; the
+    agent asked for an object irimi told it exists, so the answer is that object, at 200. This is
+    the one read where the effects replace a STATUS as well as a body."""
     error = {
         "error": {
-            "type": "invalid_request_error",
             "code": "resource_missing",
+            "type": "invalid_request_error",
             "message": "No such refund: 're_MINTED1'",
             "param": "id",
         }
     }
-    before = copy.deepcopy(error)
-    out = apply_read(_asked("refunds.retrieve", "/v1/refunds/re_MINTED1"), error, [_refund_write()])
-    assert out.partial is True
-    assert out.changed is False
-    assert out.document == before
+    write = _refund_write()
+    out = apply_read(_asked("refunds.retrieve", "/v1/refunds/re_MINTED1"), error, [write])
+    assert out.status == 200
+    assert out.changed is True
+    assert out.partial is False
+    assert out.document == write.answer
+    # A copy, so a later effect cannot find the write log's own object edited by the serializer's
+    # caller. The values are equal and the objects are not.
+    assert out.document is not write.answer
+    # And the copy is what a caller may edit: the log's refund, and the next read of it, keep the
+    # values irimi answered the write with.
+    before = copy.deepcopy(write.answer)
+    out.document["amount"] = 0
+    out.document["status"] = "failed"
+    assert write.answer == before
+    again = apply_read(_asked("refunds.retrieve", "/v1/refunds/re_MINTED1"), {}, [write])
+    assert again.document == before
+
+
+def test_a_minted_refund_is_answered_over_whatever_stripe_said():
+    """Not only over a 404: a 24-character random id colliding with a real refund is not a
+    scenario, and the object the agent asked for is the one irimi minted (#52)."""
+    write = _refund_write()
+    other = {"id": "re_MINTED1", "object": "refund", "amount": 1, "charge": "ch_SOMEONE_ELSE"}
+    out = apply_read(_asked("refunds.retrieve", "/v1/refunds/re_MINTED1"), other, [write])
+    assert (out.status, out.changed) == (200, True)
+    assert out.document == write.answer
 
 
 def test_retrieving_a_real_refund_is_untouched():
@@ -360,6 +385,7 @@ def test_retrieving_a_real_refund_is_untouched():
     assert out.partial is False
     assert out.changed is False
     assert out.document == before
+    assert out.status is None  # the service's own status stands (#52)
 
 
 # ------------------------------------------------------------------------------ the customer

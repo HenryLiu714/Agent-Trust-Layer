@@ -10,8 +10,9 @@ The design's v0.1 table, by the write that causes each effect:
 Two reads beyond the table's letter, both so that irimi does not contradict itself (#43):
 `charges.list` gets the same charge effect as `charges.retrieve`, because the refund agent finds its
 charge in the list and a list that ignored the refund would disagree with the retrieve; and
-`refunds.retrieve` of a minted id is flagged `partial`, because the honest answer is Stripe's 404
-and this seam carries a body but no status (#52).
+`refunds.retrieve` of a minted id is answered from the write log with the object irimi minted, over
+whatever Stripe said - the one read where the seam replaces a STATUS as well as a body, because
+Stripe has never heard of that id and answers `404` (#52).
 
 Two rules run through all of it:
 
@@ -19,8 +20,10 @@ Two rules run through all of it:
   one the agent can never see in production, and putting one there hands it a body no live read
   can produce. This is `echo._reflect_over`'s rule, applied to reads.
 * **Say `partial` rather than half-apply.** A page the table does not model, a filter it cannot
-  read, a refund it minted being fetched by id: the document is left exactly as Stripe sent it
-  and the exchange records that the world irimi showed is incomplete.
+  read, a cursor page whose real contents depend on where the minted refund landed: the document is
+  left exactly as Stripe sent it and the exchange records that the world irimi showed is
+  incomplete. Answering a read outright is the opposite move and needs the opposite justification -
+  see `_refund_retrieve`, where there is no live object to be incomplete about (#52).
 
 Pure functions over plain data: no clock, no minting, no I/O, no module state. Phase 5 replay
 runs these same functions over a recording.
@@ -187,15 +190,28 @@ def _refunds_list(request: Request, document: dict[str, Any], writes: Sequence[W
 def _refund_retrieve(
     request: Request, document: dict[str, Any], writes: Sequence[Write]
 ) -> Applied:
-    """A refund irimi minted is not at Stripe, so this read is the 404 the table does not model.
+    """A refund irimi minted, answered from the write log rather than left as Stripe's 404 (#52).
 
-    Answering it from the write log needs the seam to carry a status as well as a body, which is
-    #52. Flagging it is what keeps the gap visible instead of silent.
+    Stripe has never heard of that id and answers `404` with `resource_missing`, so this is the one
+    read where the honest answer needs a STATUS as well as a body - `Applied.status` is how the
+    effects say so, and #52 is where that was decided. The object handed back is the very one
+    irimi answered the write with, which is what the agent was told exists: nothing is invented,
+    and none of the live body survives because there is no live object behind it.
+
+    Whatever Stripe answered, not only a 404: a 24-character random id colliding with a real refund
+    is not a scenario, and the object the agent asked for is the one irimi minted.
+
+    A shallow copy, never the write log's own dict - the overlay serializes what it is handed and a
+    later effect must not find this one mutated. `slack._posts` copies for the same reason.
+
+    A read of a refund irimi did NOT mint is untouched, 404 and all: that one is Stripe's own
+    answer about Stripe's own state, and the agent should see it.
     """
     ident = request.path.rsplit("/", 1)[-1]
-    if any(r.answer["id"] == ident for r in _minted_refunds(writes)):
-        return Applied(document, partial=True)
-    return Applied(document)
+    mine = next((r for r in _minted_refunds(writes) if r.answer["id"] == ident), None)
+    if mine is None:
+        return Applied(document)
+    return Applied(dict(mine.answer), changed=True, status=200)
 
 
 def _customer(customer: dict[str, Any], writes: Sequence[Write]) -> Applied:

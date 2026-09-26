@@ -49,11 +49,21 @@ class Applied:
 
     `changed` and `partial` are independent: a page the table cannot model is `partial` with
     nothing changed, and that is a fact the trace has to carry rather than a body edit.
+
+    `status` is None for every effect that edits a live body - the service's own status stands, and
+    a live read's status staying the service's is most of what makes it a live read. It is an int
+    for the one case where the service could not have answered the read at all: a read of an object
+    THIS RUN MINTED, which the service has never heard of and refuses, with a status that is as
+    much of that refusal as the body (#52). `stripe._refund_retrieve` is the case - Stripe's `404
+    resource_missing` for a refund irimi faked - and `slack._minted_thread` is its twin needing no
+    status at all, because Slack sends `thread_not_found` at HTTP 200. An effect that sets `status`
+    sets `changed` too: the body and the status are one answer.
     """
 
     document: Any
     changed: bool = False
     partial: bool = False
+    status: int | None = None
 
 
 @dataclass(frozen=True)

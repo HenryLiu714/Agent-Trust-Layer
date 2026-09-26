@@ -56,6 +56,12 @@ class Overlaid:
     engine tells an untouched read - live, unstamped, byte-identical to what the service sent -
     from one it must stamp `overlay`. `fidelity` is independent of that: a page the effects
     cannot model is `partial` with the body left alone, and the exchange has to say so.
+
+    The response carries a status as well as a body, and since #52 an effect may replace it - for
+    one case only, a read of an object this run minted, which the service answers with an error
+    because it has never heard of the id. `services.Applied.status` is how an effect says so, and
+    `IrimiAddon.response` stamps `overlay` off the same identity check either way, so a status of
+    irimi's is never handed back as the service's.
     """
 
     response: Response
@@ -158,10 +164,28 @@ class ServiceOverlay:
         elif applied.changed or rewrote:
             # A translated cursor is an effect too, even when the page itself needed no edit.
             fidelity = "full"
-        if not applied.changed:
+        # A STATUS IS PART OF AN ANSWER, AND ONE CASE LETS AN EFFECT REPLACE IT (#52).
+        #
+        # A read of an object this run MINTED is one the service could not have answered: it has
+        # never heard of the id, so it refuses, and for Stripe the refusal is a `404` whose status
+        # carries as much of it as the body. Handing the agent that 404 for a refund irimi told it
+        # exists is the contradiction #52 was filed for, and the body alone cannot fix it. Every
+        # other effect leaves `status` None and the service's own status stands, which is what
+        # keeps a live read's status the service's in every case but the one it could not answer.
+        #
+        # Both halves of the condition, so a status-only answer goes down the rebuild branch
+        # rather than being silently dropped - identity is how the engine tells an untouched read
+        # from one to stamp, and a changed status on the very object it was handed would be stamped
+        # nowhere.
+        status = upstream_response.status if applied.status is None else applied.status
+        if not applied.changed and status == upstream_response.status:
             return Overlaid(upstream_response, fidelity)
         return Overlaid(
-            replace(upstream_response, body=json.dumps(applied.document, allow_nan=False).encode()),
+            replace(
+                upstream_response,
+                status=status,
+                body=json.dumps(applied.document, allow_nan=False).encode(),
+            ),
             fidelity,
         )
 

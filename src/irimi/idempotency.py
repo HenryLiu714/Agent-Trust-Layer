@@ -33,7 +33,10 @@ class Stored:
     call answered at `fake-L1`, and the trace would disagree with itself about one write. `flags`
     carries `fixture-failed` for the same reason, and `precondition` / `rejection_code` carry an
     L3 rejection so a replayed one still prints as a rejection and still stays out of the write
-    log. There is no `issued`: a replay makes no precondition read, which is the point.
+    log. `currency` rides along for the same reason: it is what the write's own L3 read found on
+    the object it named, and a replay that re-derived it (or dropped it) would have the trace
+    disagree with itself about what one write was denominated in (#60). There is no `issued`: a
+    replay makes no precondition read, which is the point.
     """
 
     status: int
@@ -43,6 +46,7 @@ class Stored:
     flags: tuple[str, ...]
     precondition: PreconditionOutcome | None
     rejection_code: str
+    currency: str
 
 
 def key_of(service: str, request: Request) -> str:

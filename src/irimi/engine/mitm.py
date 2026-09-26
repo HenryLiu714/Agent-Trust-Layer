@@ -55,6 +55,7 @@ class _Pending:
     precondition: PreconditionOutcome | None = None  # what L3 decided before the fake (#45)
     rejection_code: str = ""  # the machine code of an L3 rejection; "" for everything else
     would_fire: tuple[str, ...] = ()  # the webhooks an accepted write would have sent (#47)
+    currency: str = ""  # the currency this write's L3 read found, for the summary's amount (#60)
 
 
 @dataclass(frozen=True)
@@ -373,6 +374,7 @@ class IrimiAddon:
             precondition=ans.precondition,
             rejection_code=ans.rejection_code,
             would_fire=ans.would_fire,
+            currency=ans.currency,
         )
         if response is not None:
             flow.response = _to_mitm_response(response)
@@ -622,6 +624,7 @@ class IrimiAddon:
             precondition=pending.precondition,
             rejection_code=pending.rejection_code,
             would_fire=pending.would_fire,
+            currency=pending.currency,
         )
         # The write log is what the overlay replays onto live reads. `is_authored_write` is the
         # one statement of what may enter it, because the summary files a read under a write by
@@ -682,6 +685,7 @@ class IrimiAddon:
             precondition=pending.precondition,
             rejection_code=pending.rejection_code,
             would_fire=pending.would_fire,
+            currency=pending.currency,
         )
         self._finish(ex)
 

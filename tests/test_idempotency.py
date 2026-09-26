@@ -49,6 +49,7 @@ def _stored(body: bytes = b'{"id": "re_MINTED1"}') -> Stored:
         flags=("fidelity:L1",),
         precondition="passed",
         rejection_code="",
+        currency="usd",
     )
 
 

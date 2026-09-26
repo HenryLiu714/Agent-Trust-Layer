@@ -64,7 +64,7 @@ class Classification:
 
     @property
     def route(self) -> Route | None:
-        """The matched route alone, or None when nothing matched. `matched[1]`, spelled once."""
+        """The matched route alone, or None when nothing matched."""
         return None if self.matched is None else self.matched[1]
 
 

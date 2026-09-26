@@ -132,7 +132,7 @@ def _irimi_error(error_type: str, reason: str) -> Response:
 
 
 def _point_flow(
-    flow: http.HTTPFlow, scheme: str, host: str, port: int, path: str, host_header: str | None
+    flow: http.HTTPFlow, scheme: str, host: str, port: int, path: str, host_header: str
 ) -> None:
     """Send this flow to `scheme://host:port/path` instead. mitmproxy opens the server connection
     after the request hook, so rewriting the flow there IS the forward. The Host header is set
@@ -360,7 +360,9 @@ class IrimiAddon:
     def _answer_failed_decision(
         self, flow: http.HTTPFlow, req: Request, door: Door, failure: Exception
     ) -> None:
-        """The request hook's answer when the decision raised. Inside the hook: it never raises."""
+        """The request hook's answer when the decision raised: a 502 flagged `decision-failed`,
+        stamped and recorded. The response is on the flow before `_finish` runs, so a store that
+        raises there escapes the hook with the refusal already set, never with the flow bare."""
         # Recorded, not just refused. A write that vanishes from the trace is the other half
         # of this bug: #13's "log of every write" has to show the one irimi could not decide
         # about, and `unknown` + `unclassified` is the honest classification for it.
@@ -387,7 +389,11 @@ class IrimiAddon:
         self._finish(ex)
 
     def _act_on(self, flow: http.HTTPFlow, decision: _Decision, door: Door) -> None:
-        """The request hook's last part: carry out a decision that did not raise, never raising."""
+        """The request hook's last part: carry out a decision that did not raise.
+
+        Every step that could leave the flow bare is guarded. The one thing that may still raise is
+        recording the engine's own reads (`_finish` for `ans.issued`), which is why it runs last,
+        once the write's own answer is on the flow (#45)."""
         req = decision.request
         cls, run_id, ans = decision.classification, decision.run_id, decision.answer
         response: Response | None = ans.response
@@ -561,7 +567,10 @@ class IrimiAddon:
         if not netaddr.is_loopback(peer):
             raise reverse_door.ReverseDoorRefused(f"reverse door: loopback only, refusing {peer!r}")
         req = reverse_door.rewrite_reverse(req, self.config.reverse_hosts)
-        _point_flow(flow, req.scheme, req.host, req.port, req.path_and_query, req.header("host"))
+        host_header = req.header("host")
+        if host_header is None:  # `rewrite_reverse` always sets one; never forward without it
+            raise ValueError("reverse door: the rewritten request carries no Host header")
+        _point_flow(flow, req.scheme, req.host, req.port, req.path_and_query, host_header)
         return req
 
     def responseheaders(self, flow: http.HTTPFlow) -> None:

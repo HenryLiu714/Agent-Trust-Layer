@@ -52,7 +52,6 @@ from irimi.servicemap import Route
 
 __all__ = [
     "ENVELOPED",
-    "JSON_CT",
     "LITERAL_BODIES",
     "LIVEMODE",
     "READ_OBSERVERS",
@@ -110,7 +109,7 @@ SHAPES: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {slack.SERVICE: 
 # got instead (the shape keys on the service, and hooks.slack.com is part of `slack`) breaks the
 # common raw-requests idiom `assert resp.text == "ok"` (#29).
 LITERAL_BODIES: dict[tuple[str, str], tuple[bytes, str]] = {
-    ("slack", "incoming_webhook"): (b"ok", TEXT_CT),
+    (slack.SERVICE, "incoming_webhook"): (b"ok", TEXT_CT),
 }
 
 
@@ -155,8 +154,8 @@ class Fake:
 def _fake_dict(request: Request, classification: Classification, route: Route | None) -> Built:
     """The body as a dict, the level it was built at, and any flag that level owes the trace."""
     if route is not None:
-        envelope = ENVELOPED.get(classification.service)
-        built = envelope(request, route) if envelope is not None else None
+        build = ENVELOPED.get(classification.service)
+        built = build(request, route) if build is not None else None
         if built is not None:
             return built
     if route is not None and route.fixture:

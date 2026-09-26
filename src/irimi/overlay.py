@@ -162,28 +162,16 @@ class ServiceOverlay:
         if applied.partial:
             fidelity = "partial"
         elif applied.changed or rewrote or applied.status is not None:
-            # A translated cursor is an effect too, even when the page itself needed no edit.
-            #
-            # So is a status the effect replaced (#52). Decision 2 of #52 says an effect that sets
-            # a status also sets `changed`, so no effect here can reach this clause by itself - but
-            # that is a convention, and the exchange it would produce is an inconsistent one:
-            # `answered_by: overlay` with `overlay: None`, which `report._shows_overlay` prints a
-            # `saw it  overlay` line for off a fidelity the trace says was never considered. Held
-            # by construction rather than by convention, the way every other rule here is.
+            # A translated cursor is an effect too, even when the page itself needed no edit. So is
+            # a replaced status (#52): the effects that set one also set `changed` today, but an
+            # exchange stamped `overlay` with `overlay: None` would print a `saw it  overlay` line
+            # off a fidelity the trace says was never considered, so it is held here by
+            # construction rather than by that convention.
             fidelity = "full"
-        # A STATUS IS PART OF AN ANSWER, AND ONE CASE LETS AN EFFECT REPLACE IT (#52).
-        #
-        # A read of an object this run MINTED is one the service could not have answered: it has
-        # never heard of the id, so it refuses, and for Stripe the refusal is a `404` whose status
-        # carries as much of it as the body. Handing the agent that 404 for a refund irimi told it
-        # exists is the contradiction #52 was filed for, and the body alone cannot fix it. Every
-        # other effect leaves `status` None and the service's own status stands, which is what
-        # keeps a live read's status the service's in every case but the one it could not answer.
-        #
-        # Both halves of the condition, so a status-only answer goes down the rebuild branch
-        # rather than being silently dropped - identity is how the engine tells an untouched read
-        # from one to stamp, and a changed status on the very object it was handed would be stamped
-        # nowhere.
+        # An effect may replace the status only for a read of an object this run minted, which the
+        # service refused because it never heard of the id (`Applied.status`, #52). Both halves of
+        # the test, so a status-only answer is rebuilt rather than dropped: identity is how the
+        # engine tells an untouched read from one to stamp.
         status = upstream_response.status if applied.status is None else applied.status
         if not applied.changed and status == upstream_response.status:
             return Overlaid(upstream_response, fidelity)

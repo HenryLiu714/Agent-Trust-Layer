@@ -139,8 +139,10 @@ twice - once where a configuration is loaded and again at the decision it protec
   the one read the real service could not have answered: it has never heard of the id, so it
   refuses, and handing the agent that refusal for an object irimi told it exists is the
   contradiction the overlay exists to prevent. The read still goes out and still counts as a real
-  read; the overlay replaces the body and, for Stripe's 404, the status. Every other effect leaves
-  the status the service's. The alternative - answering such a read locally, off the write log,
+  read; the overlay replaces the body and, for Stripe's 404, the status. Only over the service's own
+  not-found (`resource_missing`, `thread_not_found`): a rate limit or a bad key on the same read is
+  left as sent and `partial`, because production would have sent it for the real object too. Every
+  other effect leaves the status the service's. The alternative - answering such a read locally, off the write log,
   the way a faked write is - was weighed and refused, because it makes a read irimi never forwards
   (#52).
 - **Only a write that would have happened lists its webhooks.** `would_fire` is set on the one

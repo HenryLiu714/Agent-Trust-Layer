@@ -389,13 +389,8 @@ class ShadowPolicy:
                         # invent a refusal that never would have happened (#45).
                         return "not_evaluable", issued, None, ""
                     document = applied.document
-            # The one fact this read carries besides its verdict: the currency the write's amounts
-            # are denominated in, so the summary can print `refund $49.00` for a write that named
-            # none (#60). Off the document the verdict sees - 200, parsed, with the run's own
-            # writes applied - and asked of the check, because which key holds it is service
-            # knowledge. Read BEFORE the verdict so a `NOT_EVALUABLE` one keeps it: irimi did read
-            # the charge, and what a write is denominated in is a different question from whether
-            # irimi could tell the service would have taken it.
+            # Off the same document the verdict sees, and before it, so a `NOT_EVALUABLE` verdict
+            # still carries it - see the docstring (#60).
             currency = check.currency(document) if check.currency is not None else ""
             verdict = check.verdict(proposal, document)
             if isinstance(verdict, services.NotEvaluable):

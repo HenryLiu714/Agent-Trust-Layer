@@ -269,8 +269,8 @@ def test_a_refund_through_the_door_is_answered_by_irimi_and_never_leaves_the_mac
 PHASE2_CHARGE = "ch_REAL1"
 PHASE2_AMOUNT = 4900
 # The amount as a person reads it, since #60: the refund names no currency and irimi's own
-# precondition read of `ch_REAL1` found `usd` on the charge. Notion's target block asked for
-# `$49.00` from the start; #48 printed `4900` because the currency had nowhere to travel.
+# precondition read of `ch_REAL1` found `usd` on the charge. #48 printed `4900`, because the
+# currency had nowhere to travel, and Notion's target block said so until #60 restored `$49.00`.
 PHASE2_MONEY = report.money(PHASE2_AMOUNT, "usd")
 # The Phase 2 summary under its header line, as the criterion and its CLI twin both assert it: the
 # overlaid reads hang under the refund they saw, and the engine's reads are counted but kept out

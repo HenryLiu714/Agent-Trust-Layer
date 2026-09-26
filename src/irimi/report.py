@@ -179,11 +179,7 @@ def _is_amount(name: str) -> bool:
 
 
 def _field_value(name: str, value: object, currency: object) -> str:
-    """One template field, rendered. Amounts are minor units; everything else is what was sent.
-
-    `currency` is whatever `render_human` resolved - the request's, or the L3 read's (#60) - and
-    the guard below is what makes "" mean "print it as it was sent".
-    """
+    """One template field, rendered. Amounts are minor units; everything else is what was sent."""
     if _is_amount(name) and isinstance(value, int) and isinstance(currency, str) and currency:
         return money(value, currency)
     return str(value)
@@ -206,11 +202,8 @@ def render_human(template: str, exchange: Exchange, route: Route | None) -> str:
     if route is not None:
         fields.update(path_params(route.path, exchange.request.path))
     fields.update(reflect(exchange.request))
-    # The request first, because it is what the caller actually said. Then the currency irimi read
-    # off the object this write names, before faking it - the L3 precondition read (#60). A write
-    # that named none and had no such read still has "" here and still prints minor units, which
-    # is the whole of `money`'s rule. `or` and not `setdefault`: a body that sent `currency=` sent
-    # nothing, and a field that is not a non-empty string is not a currency.
+    # `or` and not `setdefault`: a body that sent `currency=` sent nothing, and falls back to the
+    # L3 read's currency like a body that sent no key at all (#60).
     currency = fields.get("currency") or exchange.currency
 
     def one(match: re.Match[str]) -> str:

@@ -161,8 +161,15 @@ class ServiceOverlay:
         fidelity: OverlayFidelity | None = None
         if applied.partial:
             fidelity = "partial"
-        elif applied.changed or rewrote:
+        elif applied.changed or rewrote or applied.status is not None:
             # A translated cursor is an effect too, even when the page itself needed no edit.
+            #
+            # So is a status the effect replaced (#52). Decision 2 of #52 says an effect that sets
+            # a status also sets `changed`, so no effect here can reach this clause by itself - but
+            # that is a convention, and the exchange it would produce is an inconsistent one:
+            # `answered_by: overlay` with `overlay: None`, which `report._shows_overlay` prints a
+            # `saw it  overlay` line for off a fidelity the trace says was never considered. Held
+            # by construction rather than by convention, the way every other rule here is.
             fidelity = "full"
         # A STATUS IS PART OF AN ANSWER, AND ONE CASE LETS AN EFFECT REPLACE IT (#52).
         #

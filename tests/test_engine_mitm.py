@@ -1931,6 +1931,9 @@ def test_the_overlay_is_not_asked_about_a_read_before_any_write(tmp_path, monkey
     finally:
         stop()
     assert status == 200
+    # The gate #53 deliberately did NOT widen: the header is stripped by the engine instead, so
+    # the overlay still sees no read until the write log holds a write (Notion, § Architecture
+    # changes).
     assert (overlay.calls, overlay.rewrites) == (0, 0)
     assert seen[-1].overlay is None
 
@@ -1938,7 +1941,12 @@ def test_the_overlay_is_not_asked_about_a_read_before_any_write(tmp_path, monkey
 def test_a_rewrote_header_the_agent_sent_is_not_forwarded_upstream(tmp_path, monkeypatch, upstream):
     """Only irimi may tell the response side that a page follows a minted refund. The overlay
     strips an agent's own `irimi-rewrote`, and the engine has to carry that onto the flow too, or
-    the header reaches the real service anyway (#43)."""
+    the header reaches the real service anyway (#43).
+
+    Since #53 the engine strips it in `request()` before the overlay is asked, so this now holds
+    even for an overlay whose `rewrite` strips nothing. It stays as the non-empty-log twin of
+    `test_a_rewrote_header_the_agent_sent_is_stripped_before_the_runs_first_write`.
+    """
     from dataclasses import replace
 
     def strip(request):
@@ -1959,6 +1967,113 @@ def test_a_rewrote_header_the_agent_sent_is_not_forwarded_upstream(tmp_path, mon
     ((path, received),) = _Upstream.seen
     assert path == "/hello"
     assert pipeline.REWROTE_HEADER not in {k.lower() for k in received}
+
+
+def test_a_rewrote_header_the_agent_sent_is_stripped_before_the_runs_first_write(
+    tmp_path, monkeypatch, upstream
+):
+    """#53. The engine's rewrite path is closed until the write log holds a write, so the overlay's
+    own strip could not run - and irimi's vocabulary reached the real service on a read irimi did
+    not touch. The engine strips it in `request()` now, whatever the log holds.
+
+    `_start` with no overlay gives `NoOverlay`, whose `rewrite` returns the request it was handed,
+    so nothing but the engine could have removed the header here.
+    """
+    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch))
+    eng, seen, stop = _start(cfg)
+    try:
+        addon = next(a for a in eng._master.addons.chain if isinstance(a, IrimiAddon))
+        status, _, _ = _read_via_proxy(
+            eng.listen_port(),
+            f"http://127.0.0.1:{upstream}/hello",
+            extra_headers={pipeline.REWROTE_HEADER: "starting_after=re_FORGED"},
+        )
+        assert addon.write_log == [], "this test is about the empty-log path"
+    finally:
+        stop()
+    assert status == 200
+    ((path, received),) = _Upstream.seen
+    assert path == "/hello"
+    assert pipeline.REWROTE_HEADER not in {k.lower() for k in received}
+
+
+def test_a_rewrote_header_the_agent_sent_is_kept_out_of_the_recorded_request(
+    tmp_path, monkeypatch, upstream
+):
+    """The Exchange records what irimi asked the service. It did not ask with this header, and the
+    response side reads the recorded request - `ServiceOverlay._apply` looks for `Irimi-Rewrote`
+    there - so leaving it on would let a forgery be believed by a later hook (#53)."""
+    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch))
+    eng, seen, stop = _start(cfg)
+    try:
+        _read_via_proxy(
+            eng.listen_port(),
+            f"http://127.0.0.1:{upstream}/hello",
+            extra_headers={pipeline.REWROTE_HEADER: "starting_after=re_FORGED"},
+        )
+    finally:
+        stop()
+    assert [k for k, _ in seen[-1].request.headers if k == pipeline.REWROTE_HEADER] == []
+
+
+def test_only_irimis_own_rewrote_header_reaches_the_upstream(tmp_path, monkeypatch, upstream):
+    """The forgery is gone and irimi's own is there, exactly once. Two headers of one name would
+    make `stripe._refunds_list` read whichever mitmproxy happened to hand it first (#53)."""
+    from dataclasses import replace
+
+    stamp = (pipeline.REWROTE_HEADER, "starting_after=re_MINTED1")
+
+    def translate(request):
+        assert all(k != pipeline.REWROTE_HEADER for k, _ in request.headers), (
+            "the engine strips the agent's before the overlay is asked"
+        )
+        return replace(request, query="limit=1", headers=request.headers + (stamp,))
+
+    overlay = _OverlayDouble(rewrite=translate)
+    eng, seen, stop = _engine_with_a_write(tmp_path, monkeypatch, upstream, overlay)
+    try:
+        status, _, _ = _read_via_proxy(
+            eng.listen_port(),
+            f"http://127.0.0.1:{upstream}/hello?limit=1&starting_after=re_MINTED1",
+            extra_headers={pipeline.REWROTE_HEADER: "starting_after=re_FORGED"},
+        )
+    finally:
+        stop()
+    assert status == 200
+    ((path, received),) = _Upstream.seen
+    assert path == "/hello?limit=1"
+    present = [v for k, v in received.items() if k.lower() == pipeline.REWROTE_HEADER]
+    assert present == [stamp[1]]
+    # "Exactly once" is checked on the recorded request: `_Upstream` keeps a dict, which
+    # collapses a repeated header name, and the recorded pairs do not (#53).
+    assert [v for k, v in seen[-1].request.headers if k == pipeline.REWROTE_HEADER] == [stamp[1]]
+
+
+def test_a_write_carrying_a_rewrote_header_is_still_faked_and_records_none(
+    tmp_path, monkeypatch, upstream
+):
+    """A write is answered locally, so the header never leaves the machine either way - but it must
+    not survive on the recorded request, where a trace reader would read it as irimi's (#53)."""
+    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch))
+    eng, seen, stop = _start(cfg)
+    try:
+        status, headers, _ = _read_via_proxy(
+            eng.listen_port(),
+            f"http://127.0.0.1:{upstream}/things",
+            extra_headers={
+                pipeline.REWROTE_HEADER: "starting_after=re_FORGED",
+                "content-type": "application/json",
+            },
+            method="POST",
+            body=b"{}",
+        )
+    finally:
+        stop()
+    assert status == 200
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "fake-L0"
+    ex = seen[-1]
+    assert ex.kind == "write"
+    assert [k for k, _ in ex.request.headers if k == pipeline.REWROTE_HEADER] == []
 
 
 # ------------------------------------------------ the Stripe overlay, end to end (#43)

@@ -1586,7 +1586,7 @@ def test_a_raise_recording_an_engine_read_leaves_the_write_answered(tmp_path, mo
         asyncio.run(addon.request(flow))
 
     assert flow.response is not None and flow.response.status_code == 200
-    assert flow.metadata[META_KEY].precondition == "passed"
+    assert flow.metadata[META_KEY].answer.precondition == "passed"
 
 
 def test_neither_half_of_a_delegated_exchange_is_a_write(tmp_path, monkeypatch, target):

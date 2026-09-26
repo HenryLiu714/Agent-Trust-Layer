@@ -19,14 +19,12 @@ from irimi.exchange import (
     DECISION_FAILED_FLAG,
     FIDELITY_FLAGS,
     TARGET_FAILED_FLAG,
-    UNCLASSIFIED_FLAG,
     UPSTREAM_ERROR_FLAG,
     AnsweredBy,
     Door,
     Exchange,
     Headers,
     OverlayFidelity,
-    PreconditionOutcome,
     Request,
     Response,
     is_authored_write,
@@ -46,17 +44,48 @@ OnRunning = Callable[[int | None, EngineStartError | None], None]
 
 @dataclass(frozen=True)
 class _Pending:
+    """What `request()` decided about a flow, for the hooks that finish it. `flags` is the
+    answer's own plus `target-failed` when its target was refused; everything else L3, the
+    webhooks and the currency said is read off `answer` (#45, #47, #60)."""
+
     request: Request
     classification: pipeline.Classification
     run_id: str
-    answered_by: AnsweredBy
     door: Door
-    flags: tuple[str, ...]  # what the policy attached to its answer, e.g. fidelity:L0
+    answer: Answer
+    flags: tuple[str, ...]
     target: str = ""  # the answer target this flow was pointed at; "" when irimi answered it
-    precondition: PreconditionOutcome | None = None  # what L3 decided before the fake (#45)
-    rejection_code: str = ""  # the machine code of an L3 rejection; "" for everything else
-    would_fire: tuple[str, ...] = ()  # the webhooks an accepted write would have sent (#47)
-    currency: str = ""  # the currency this write's L3 read found, for the summary's amount (#60)
+
+    @property
+    def answered_by(self) -> AnsweredBy:
+        return self.answer.answered_by
+
+
+def _exchange(
+    pending: _Pending,
+    response: Response | None,
+    answered_by: AnsweredBy,
+    flags: tuple[str, ...],
+    overlay: OverlayFidelity | None = None,
+) -> Exchange:
+    """The Exchange for a flow `request()` decided about, carrying its answer's L3 outcome,
+    rejection code, webhooks and currency (#45, #47, #60)."""
+    answer = pending.answer
+    return pipeline.annotate(
+        pending.request,
+        response,
+        pending.classification,
+        answered_by,
+        pending.run_id,
+        extra_flags=flags,
+        door=pending.door,
+        target=pending.target,
+        overlay=overlay,
+        precondition=answer.precondition,
+        rejection_code=answer.rejection_code,
+        would_fire=answer.would_fire,
+        currency=answer.currency,
+    )
 
 
 @dataclass(frozen=True)
@@ -82,7 +111,7 @@ def _failed_decision(req: Request, exc: Exception) -> _Decision:
     exist because the dataclass is frozen and total."""
     return _Decision(
         req,
-        pipeline.Classification(service=req.host, operation="", kind="unknown", flags=()),
+        pipeline.unclassified(req),
         "",
         Answer(answered_by="fake-L0", response=None),
         None,
@@ -90,21 +119,29 @@ def _failed_decision(req: Request, exc: Exception) -> _Decision:
     )
 
 
-def _target_failed(reason: str) -> Response:
-    """The answer when a target cannot be dialled. Never a silent fall back to the local fake,
-    which would hide a broken setup and look like a working shadow run (design D20)."""
-    body = json.dumps(
-        {"error": {"type": "irimi_target_failed", "message": reason}}, allow_nan=False
-    ).encode()
+def _irimi_error(error_type: str, reason: str) -> Response:
+    """A 502 of irimi's own, JSON an SDK can parse, naming irimi and the reason.
+
+    `irimi_target_failed` is the answer when a target cannot be dialled. Never a silent fall back
+    to the local fake, which would hide a broken setup and look like a working shadow run (design
+    D20). `irimi_decision_failed` is the answer when the classify/answer decision itself raised.
+    See `IrimiAddon.request`.
+    """
+    body = json.dumps({"error": {"type": error_type, "message": reason}}, allow_nan=False).encode()
     return Response(status=502, headers=(("content-type", "application/json"),), body=body)
 
 
-def _decision_failed(reason: str) -> Response:
-    """The answer when the classify/answer decision itself raised. See `IrimiAddon.request`."""
-    body = json.dumps(
-        {"error": {"type": "irimi_decision_failed", "message": reason}}, allow_nan=False
-    ).encode()
-    return Response(status=502, headers=(("content-type", "application/json"),), body=body)
+def _point_flow(
+    flow: http.HTTPFlow, scheme: str, host: str, port: int, path: str, host_header: str | None
+) -> None:
+    """Send this flow to `scheme://host:port/path` instead. mitmproxy opens the server connection
+    after the request hook, so rewriting the flow there IS the forward. The Host header is set
+    explicitly: the host/port setters only rewrite one that already exists."""
+    flow.request.scheme = scheme
+    flow.request.host = host
+    flow.request.port = port
+    flow.request.path = path
+    flow.request.host_header = host_header
 
 
 def _headers_from_fields(fields: Sequence[tuple[bytes, bytes]]) -> Headers:
@@ -194,10 +231,10 @@ def _probe_local_target(url: str, host: str, port: int) -> None:
     committed. There is no hook between the failed dial and the page (#38).
 
     So the failure that actually happens - the developer's own stub is not running - is caught
-    before the flow is rewritten, and takes the existing `_target_failed` path. An SDK parses the
-    body, and stripe-python, openai and slack_sdk all raise on an HTML blob naming neither irimi
-    nor the target, which is how "my shadow run started failing" gave no hint that the stub was
-    down.
+    before the flow is rewritten, and takes the existing `irimi_target_failed` path. An SDK parses
+    the body, and stripe-python, openai and slack_sdk all raise on an HTML blob naming neither
+    irimi nor the target, which is how "my shadow run started failing" gave no hint that the stub
+    was down.
 
     **Loopback only.** A connect to loopback costs microseconds; a connect to a host named by
     `--allow-target-host` could block the proxy's event loop for a full timeout on every delegated
@@ -316,36 +353,41 @@ class IrimiAddon:
             except Exception as exc:
                 decision = _failed_decision(req, exc)
         if decision.failure is not None:
-            failure = decision.failure
-            # Recorded, not just refused. A write that vanishes from the trace is the other half
-            # of this bug: #13's "log of every write" has to show the one irimi could not decide
-            # about, and `unknown` + `unclassified` is the honest classification for it.
-            logger.exception("irimi: answering locally; the decision raised", exc_info=failure)
-            refusal = _decision_failed(
-                f"irimi could not decide how to answer this request: {failure}"
-            )
-            ex = pipeline.annotate(
-                req,
-                refusal,
-                pipeline.Classification(
-                    service=req.host,
-                    operation="",
-                    kind="unknown",
-                    flags=(UNCLASSIFIED_FLAG,),
-                ),
-                "fake-L0",
-                pipeline.attribute_run(req, self.config.run_id),
-                extra_flags=(DECISION_FAILED_FLAG,),
-                door=door,
-            )
-            # Through `respond`, like every other answer of ours. This is the one path that never
-            # sets `_Pending`, so `response()` returns early and never runs - and it was therefore
-            # the one engine-answered response reaching the client with no `Irimi-Answered-By`,
-            # while being recorded as `fake-L0`. Invariant (a) of #12 reads the header to tell an
-            # answer of ours from the real service's, and this one said "real service".
-            flow.response = _to_mitm_response(pipeline.respond(ex) or refusal)
-            self._finish(ex)
+            self._answer_failed_decision(flow, req, door, decision.failure)
             return
+        self._act_on(flow, decision, door)
+
+    def _answer_failed_decision(
+        self, flow: http.HTTPFlow, req: Request, door: Door, failure: Exception
+    ) -> None:
+        """The request hook's answer when the decision raised. Inside the hook: it never raises."""
+        # Recorded, not just refused. A write that vanishes from the trace is the other half
+        # of this bug: #13's "log of every write" has to show the one irimi could not decide
+        # about, and `unknown` + `unclassified` is the honest classification for it.
+        logger.exception("irimi: answering locally; the decision raised", exc_info=failure)
+        refusal = _irimi_error(
+            "irimi_decision_failed",
+            f"irimi could not decide how to answer this request: {failure}",
+        )
+        ex = pipeline.annotate(
+            req,
+            refusal,
+            pipeline.unclassified(req),
+            "fake-L0",
+            pipeline.attribute_run(req, self.config.run_id),
+            extra_flags=(DECISION_FAILED_FLAG,),
+            door=door,
+        )
+        # Through `respond`, like every other answer of ours. This is the one path that never
+        # sets `_Pending`, so `response()` returns early and never runs - and it was therefore
+        # the one engine-answered response reaching the client with no `Irimi-Answered-By`,
+        # while being recorded as `fake-L0`. Invariant (a) of #12 reads the header to tell an
+        # answer of ours from the real service's, and this one said "real service".
+        flow.response = _to_mitm_response(pipeline.respond(ex) or refusal)
+        self._finish(ex)
+
+    def _act_on(self, flow: http.HTTPFlow, decision: _Decision, door: Door) -> None:
+        """The request hook's last part: carry out a decision that did not raise, never raising."""
         req = decision.request
         cls, run_id, ans = decision.classification, decision.run_id, decision.answer
         response: Response | None = ans.response
@@ -357,26 +399,20 @@ class IrimiAddon:
                 self._to_target(flow, req, ans.forward_to)
             except delegation.TargetRefused as exc:
                 logger.warning("irimi: %s", exc)
-                response, flags = _target_failed(str(exc)), flags + (TARGET_FAILED_FLAG,)
+                response, flags = (
+                    _irimi_error("irimi_target_failed", str(exc)),
+                    flags + (TARGET_FAILED_FLAG,),
+                )
             except Exception as exc:  # never fail open: an unrewritten flow goes to the real API
                 logger.warning("irimi: refusing a target that could not be applied: %s", exc)
                 response, flags = (
-                    _target_failed(f"answer target {target!r} could not be applied: {exc}"),
+                    _irimi_error(
+                        "irimi_target_failed",
+                        f"answer target {target!r} could not be applied: {exc}",
+                    ),
                     flags + (TARGET_FAILED_FLAG,),
                 )
-        flow.metadata[META_KEY] = _Pending(
-            req,
-            cls,
-            run_id,
-            ans.answered_by,
-            door,
-            flags,
-            target,
-            precondition=ans.precondition,
-            rejection_code=ans.rejection_code,
-            would_fire=ans.would_fire,
-            currency=ans.currency,
-        )
+        flow.metadata[META_KEY] = _Pending(req, cls, run_id, door, ans, flags, target)
         if response is not None:
             flow.response = _to_mitm_response(response)
         for ex in ans.issued:
@@ -504,30 +540,28 @@ class IrimiAddon:
             for name in list(flow.request.headers.keys()):
                 if delegation.is_credential_header(name):
                     del flow.request.headers[name]
-        flow.request.scheme = parts.scheme
-        flow.request.host = host
-        flow.request.port = port
         path = parts.path or "/"
-        flow.request.path = f"{path}?{parts.query}" if parts.query else path
-        flow.request.host_header = authority
+        _point_flow(
+            flow,
+            parts.scheme,
+            host,
+            port,
+            f"{path}?{parts.query}" if parts.query else path,
+            authority,
+        )
 
     def _through_reverse_door(self, flow: http.HTTPFlow, req: Request) -> Request:
         """Rewrite a reverse-door request to its upstream, on our Request and on the flow.
 
         mitmproxy opens the server connection after this hook, so changing the flow's target here
-        is enough to forward there. The Host header is set explicitly: the host/port setters only
-        rewrite one that already exists. Raises ReverseDoorRefused for a non-loopback client or a
-        host that is not allowed.
+        is enough to forward there. Raises ReverseDoorRefused for a non-loopback client or a host
+        that is not allowed.
         """
         peer = flow.client_conn.peername[0] if flow.client_conn.peername else ""
         if not netaddr.is_loopback(peer):
             raise reverse_door.ReverseDoorRefused(f"reverse door: loopback only, refusing {peer!r}")
         req = reverse_door.rewrite_reverse(req, self.config.reverse_hosts)
-        flow.request.scheme = req.scheme
-        flow.request.host = req.host
-        flow.request.port = req.port
-        flow.request.path = req.path_and_query
-        flow.request.host_header = req.header("host")
+        _point_flow(flow, req.scheme, req.host, req.port, req.path_and_query, req.header("host"))
         return req
 
     def responseheaders(self, flow: http.HTTPFlow) -> None:
@@ -609,21 +643,7 @@ class IrimiAddon:
                 # forward, and a changed body with no header says "the real service sent this".
                 answered_by = "overlay"
                 flags += (FIDELITY_FLAGS["overlay"],)
-        ex = pipeline.annotate(
-            pending.request,
-            resp,
-            pending.classification,
-            answered_by,
-            pending.run_id,
-            extra_flags=flags,
-            door=pending.door,
-            target=pending.target,
-            overlay=overlay_fidelity,
-            precondition=pending.precondition,
-            rejection_code=pending.rejection_code,
-            would_fire=pending.would_fire,
-            currency=pending.currency,
-        )
+        ex = _exchange(pending, resp, answered_by, flags, overlay_fidelity)
         # The write log is what the overlay replays onto live reads. `is_authored_write` is the
         # one statement of what may enter it, because the summary files a read under a write by
         # the same rule (#48). A target that could not be *dialled* never reaches here: `error()`
@@ -671,20 +691,7 @@ class IrimiAddon:
                 extra_flags += (TARGET_FAILED_FLAG,)
         else:
             extra_flags = pending.flags
-        ex = pipeline.annotate(
-            pending.request,
-            None,
-            pending.classification,
-            pending.answered_by,
-            pending.run_id,
-            extra_flags=extra_flags,
-            door=pending.door,
-            target=pending.target,
-            precondition=pending.precondition,
-            rejection_code=pending.rejection_code,
-            would_fire=pending.would_fire,
-            currency=pending.currency,
-        )
+        ex = _exchange(pending, None, pending.answered_by, extra_flags)
         self._finish(ex)
 
     def _finish(self, ex: Exchange) -> None:

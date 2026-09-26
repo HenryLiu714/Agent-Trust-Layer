@@ -20,7 +20,8 @@ from irimi.exchange import (
     Response,
 )
 from irimi.pipeline import classify
-from irimi.policy import ShadowPolicy, UpstreamReader
+from irimi.policy import ShadowPolicy
+from irimi.reader import UpstreamReader
 
 SHIPPED = servicemap.MapIndex(tuple(servicemap.load_shipped()))
 

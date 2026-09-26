@@ -2953,7 +2953,7 @@ def precondition_stub(tmp_path, monkeypatch):
     """The stub, and an engine over PRECONDITION_STRIPE_MAP built the way the CLI builds one: the
     real overlay and a policy holding the real reader. Yields (proxy port, stub port, exchanges)."""
     from irimi.overlay import ServiceOverlay
-    from irimi.policy import UpstreamReader
+    from irimi.reader import UpstreamReader
 
     _PreconditionStub.seen = []
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _PreconditionStub)
@@ -3249,7 +3249,7 @@ class _SlackPreconditionStub(BaseHTTPRequestHandler):
 def slack_precondition_stub(tmp_path, monkeypatch):
     """`precondition_stub`'s Slack twin. Yields (proxy port, stub port, exchanges)."""
     from irimi.overlay import ServiceOverlay
-    from irimi.policy import UpstreamReader
+    from irimi.reader import UpstreamReader
 
     _SlackPreconditionStub.seen = []
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _SlackPreconditionStub)

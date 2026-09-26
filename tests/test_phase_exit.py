@@ -46,7 +46,7 @@ from pathlib import Path
 
 import pytest
 
-from irimi import ca, paths, pipeline, policy, report
+from irimi import ca, paths, pipeline, policy, reader, report
 from irimi.cli import main
 from irimi.overlay import ServiceOverlay
 from tests.test_engine_mitm import (
@@ -113,7 +113,7 @@ class _Stripe(BaseHTTPRequestHandler):
         pass
 
 
-class _StandInReader(policy.UpstreamReader):
+class _StandInReader(reader.UpstreamReader):
     """`UpstreamReader` pointed at the loopback stand-in (#45).
 
     In a real run through the door the precondition read dials `api.stripe.com`, which is correct
@@ -197,7 +197,7 @@ def test_a_refund_through_the_door_is_answered_by_irimi_and_never_leaves_the_mac
     """The Phase 1 exit criterion. One run of the real CLI: a live read that reaches the world,
     a refund that does not, an echo the caller can parse, and a summary that says so."""
     # `cli._build_engine` imports the reader inside the function, so this is what it builds.
-    monkeypatch.setattr("irimi.policy.UpstreamReader", _StandInReader)
+    monkeypatch.setattr("irimi.reader.UpstreamReader", _StandInReader)
     _StandInReader.port = stripe_stand_in
     child = tmp_path / "child.py"
     child.write_text(
@@ -302,7 +302,7 @@ def phase2_stub(tmp_path, monkeypatch):
     eng, seen, stop = _start(
         _config(tmp_path, monkeypatch, maps=maps),
         overlay=ServiceOverlay(maps),
-        policy=policy.ShadowPolicy(reader=policy.UpstreamReader(), maps=maps),
+        policy=policy.ShadowPolicy(reader=reader.UpstreamReader(), maps=maps),
     )
     yield eng.listen_port(), srv.server_address[1], seen, maps
     stop()

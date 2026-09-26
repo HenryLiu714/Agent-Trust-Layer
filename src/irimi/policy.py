@@ -1,16 +1,11 @@
 """AnswerPolicy: decides whether an exchange is forwarded live, delegated, or answered locally.
 
 The decision is all that lives here. What a local answer *contains* is `irimi.echo`; where a
-delegated one goes is `irimi.delegation`. The one exception is `UpstreamReader`, the real read L3
-needs to decide about a write (#45); it lives beside the `Reader` seam it fills, and
-`cli._build_engine` is the only place in the product that builds one.
+delegated one goes is `irimi.delegation`; the read L3 issues goes through `irimi.reader`.
 """
 
 import json
 import logging
-import ssl
-import urllib.error
-import urllib.request
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -30,6 +25,7 @@ from irimi.exchange import (
     Response,
 )
 from irimi.pipeline import Classification
+from irimi.reader import NoReader, Reader
 from irimi.servicemap import MapIndex, Route
 
 logger = logging.getLogger(__name__)
@@ -64,6 +60,18 @@ class Answer:
     currency: str = ""
 
 
+@dataclass(frozen=True)
+class _Checked:
+    """What L3 made of one write (#45): the outcome, the read it issued, the rejection when the
+    service would have refused it, and the currency that read found (#60). The default is "nothing
+    was asked" - a route with no `precondition:`, or a policy with no reader."""
+
+    outcome: PreconditionOutcome | None = None
+    issued: tuple[Exchange, ...] = ()
+    rejection: services.Rejection | None = None
+    currency: str = ""
+
+
 class AnswerPolicy(Protocol):
     name: str
 
@@ -74,108 +82,6 @@ class AnswerPolicy(Protocol):
         write_log: Sequence[Exchange] = (),
         run_id: str = "",
     ) -> Answer: ...
-
-
-# How long the engine waits for its own precondition read. The request hook runs the decision on a
-# worker thread as of #45, so this delays one write's answer and nothing else - but a write whose
-# answer never comes is a hung agent, so it is bounded, once, with no retry: a retried precondition
-# read is a second real request made on the agent's behalf that the agent did not make.
-PRECONDITION_TIMEOUT_S = 5.0
-
-
-class Reader(Protocol):
-    """One real read, issued by the engine rather than by the agent (#45).
-
-    Returning None, or raising, means `not_evaluable`: irimi could not find out, says so on the
-    exchange, and falls back to the L2 answer. Shadow mode's reader dials the real upstream;
-    Phase 5's replay policy gets one over the recording, which is why this is a seam and not a
-    call inside the engine.
-    """
-
-    def __call__(self, request: Request) -> Response | None: ...
-
-
-class NoReader:
-    """The default: a policy that does not do L3 at all.
-
-    Distinct from a reader that tried and could not tell. A precondition on a policy holding this
-    is recorded `precondition: None` - the same state as a route that declares no check - because
-    nothing was asked, and `not_evaluable` is reserved for a question irimi put and could not get
-    an answer to. Shadow mode never holds one: `cli._build_engine` wires `UpstreamReader`, and
-    `tests/test_invariants.py` pins that it does.
-    """
-
-    def __call__(self, request: Request) -> Response | None:
-        return None
-
-
-class UpstreamReader:
-    """`Reader` over the real service, on stdlib urllib - no new dependency, no proxy.
-
-    It dials `request.host:request.port` exactly as the classifier saw them, so a test map
-    claiming a loopback stub is dialled at the stub and the real Stripe is never touched. It does
-    not go through irimi's own listener: the agent's request has already been rewritten to its
-    upstream by the time the policy sees it.
-    """
-
-    def __call__(self, request: Request) -> Response | None:
-        req = urllib.request.Request(
-            request.url,
-            data=request.body or None,
-            headers={k: v for k, v in request.headers if k not in ("host", "content-length")},
-            method=request.method,
-        )
-        try:
-            # A context on an `http://` URL is accepted and ignored, so there is no scheme branch.
-            with urllib.request.urlopen(
-                req, timeout=PRECONDITION_TIMEOUT_S, context=ssl.create_default_context()
-            ) as resp:
-                return _capped(resp.status, resp.headers.items(), resp)
-        except urllib.error.HTTPError as err:
-            # A 429 or a 404 is information, not a failure to read: the exchange records it before
-            # the policy calls it `not_evaluable` (#45).
-            with err:
-                return _capped(err.code, err.headers.items(), err)
-        except Exception as exc:
-            # Not `logger.exception`: an unreachable upstream is a normal outcome here, not a bug.
-            logger.warning("irimi: the precondition read of %s failed: %s", request.url, exc)
-            return None
-
-
-def _capped(status: int, headers: Any, body: Any) -> Response | None:
-    """The response, or None when its body is past `bodies.MAX_BODY_BYTES`.
-
-    Read with a cap rather than whole, so a huge body cannot be pulled into memory on the answer
-    path only to be refused by `bodies.json_object` afterwards (#45).
-    """
-    data = body.read(bodies.MAX_BODY_BYTES + 1)
-    if len(data) > bodies.MAX_BODY_BYTES:
-        logger.warning(
-            "irimi: a precondition read answered more than %d bytes", bodies.MAX_BODY_BYTES
-        )
-        return None
-    return Response(status=status, headers=tuple(headers), body=data)
-
-
-def _slot(
-    request: Request, classification: Classification, route: Route | None, run_id: str
-) -> tuple[tuple[str, ...], idempotency.Canonical, str] | None:
-    """`(slot, canonical params, the key the caller sent)` for a write the store covers, else None.
-
-    Three conditions, each the literal reading of "mapped Stripe writes" (#46). The route must be
-    matched, because `volatile:` is what makes two sendings comparable and an unmapped POST has
-    none. The kind must be `write`, so a route THE SCOPE RULE downgraded to `unknown` is answered
-    the way an unclassified request is and not out of a store. And the service must be one that
-    HAS an idempotency mechanism, which is `key_of` returning something.
-    """
-    if route is None or classification.kind != "write":
-        return None
-    service = classification.service
-    key = idempotency.key_of(service, request)
-    if not key:
-        return None
-    scope = services.scope_of(service, request)
-    return idempotency.key(run_id, service, scope, key), idempotency.canonical(request, route), key
 
 
 class ShadowPolicy:
@@ -209,58 +115,24 @@ class ShadowPolicy:
         route = classification.route
         forward = delegate(request, classification)
         if forward is not None:
-            # A delegated write is one irimi did not author and cannot check, and nothing in Phase
-            # 2 reads from a target (#45). A policy with no reader asked nothing, delegated or not.
-            declared = route is not None and bool(route.precondition)
-            asked = declared and not isinstance(self.reader, NoReader)
-            return Answer(
-                answered_by="delegated",
-                response=None,
-                flags=(FIDELITY_DELEGATED_FLAG,),
-                forward_to=forward,
-                precondition="not_evaluable" if asked else None,
-            )
+            return self._delegated(route, forward)
         if classification.kind in LIVE_KINDS:
             return Answer(answered_by="live", response=None)
-        # Before L3, and before anything is minted (#46). A retry with a key this run has already
-        # answered is the SAME write: it gets the first answer's own bytes, issues no precondition
-        # read, and appends nothing to the write log. Its own guard, because a store that failed
-        # must fall through to the ordinary answer rather than 502 a perfectly fakeable write.
-        slot: tuple[tuple[str, ...], idempotency.Canonical, str] | None = None
-        try:
-            slot = _slot(request, classification, route, run_id)
-            if slot is not None:
-                stored, conflicted = self.idempotency.get(slot[0], slot[1])
-                if conflicted:
-                    refusal = idempotency.conflict(classification.service, slot[2])
-                    if refusal is not None:
-                        return _conflict_answer(request, classification, refusal)
-                elif stored is not None:
-                    return _replayed_answer(stored)
-        except Exception:
-            logger.exception("irimi: the idempotency store failed; answering this write afresh")
-            slot = None
-        precondition: PreconditionOutcome | None = None
-        issued: tuple[Exchange, ...] = ()
-        currency = ""  # the L3 read's, for the summary's amount; "" when no read happened (#60)
+        slot, known = self._recall(request, classification, run_id)
+        if known is not None:
+            return known
+        checked = _Checked()
         if route is not None and route.precondition:
-            precondition, issued, rejection, currency = self._precondition(
-                request, classification, route, write_log, run_id
-            )
-            if rejection is not None:
-                fake = echo.fake_rejection(request, classification, rejection.body)
-                answer = Answer(
-                    answered_by=fake.answered_by,
-                    response=Response(
-                        status=rejection.status,
-                        headers=(("content-type", fake.content_type),),
-                        body=fake.body,
-                    ),
-                    flags=(FIDELITY_FLAGS[fake.answered_by], *fake.flags),
+            checked = self._precondition(request, classification, route, write_log, run_id)
+            if checked.rejection is not None:
+                fake = echo.fake_rejection(request, classification, checked.rejection.body)
+                answer = _local(
+                    fake,
+                    checked.rejection.status,
                     precondition="rejected",
-                    rejection_code=rejection.code,
-                    issued=issued,
-                    currency=currency,
+                    rejection_code=checked.rejection.code,
+                    issued=checked.issued,
+                    currency=checked.currency,
                 )
                 _remember(self.idempotency, slot, answer)
                 return answer
@@ -272,21 +144,55 @@ class ShadowPolicy:
             # object is far better. L0 is the floor whatever failed above it.
             logger.exception("irimi: the local answer failed; answering with an empty object")
             fake = echo.Fake(b"{}", bodies.JSON_CT)
-        answer = Answer(
-            answered_by=fake.answered_by,
-            response=Response(
-                status=200,
-                headers=(("content-type", fake.content_type),),
-                body=fake.body,
-            ),
-            flags=(FIDELITY_FLAGS[fake.answered_by], *fake.flags),
-            precondition=precondition,
-            issued=issued,
+        answer = _local(
+            fake,
+            200,
+            precondition=checked.outcome,
+            issued=checked.issued,
             would_fire=route.fires if route is not None else (),
-            currency=currency,
+            currency=checked.currency,
         )
         _remember(self.idempotency, slot, answer)
         return answer
+
+    def _delegated(self, route: Route | None, forward: ForwardTo) -> Answer:
+        """A delegated write is one irimi did not author and cannot check, and nothing in Phase 2
+        reads from a target (#45). A policy with no reader asked nothing, delegated or not."""
+        declared = route is not None and bool(route.precondition)
+        asked = declared and not isinstance(self.reader, NoReader)
+        return Answer(
+            answered_by="delegated",
+            response=None,
+            flags=(FIDELITY_DELEGATED_FLAG,),
+            forward_to=forward,
+            precondition="not_evaluable" if asked else None,
+        )
+
+    def _recall(
+        self, request: Request, classification: Classification, run_id: str
+    ) -> tuple[idempotency.Slot | None, Answer | None]:
+        """`(the slot this write occupies, the answer the run already gave it)` (#46).
+
+        Before L3, and before anything is minted. A retry with a key this run has already answered
+        is the SAME write: it gets the first answer's own bytes, issues no precondition read, and
+        appends nothing to the write log. Its own guard, because a store that failed must fall
+        through to the ordinary answer rather than 502 a perfectly fakeable write.
+        """
+        slot: idempotency.Slot | None = None
+        try:
+            slot = idempotency.slot_for(request, classification, run_id)
+            if slot is not None:
+                stored, conflicted = self.idempotency.get(slot.key, slot.params)
+                if conflicted:
+                    refusal = idempotency.conflict(classification.service, slot.sent)
+                    if refusal is not None:
+                        return slot, _conflict_answer(request, classification, refusal)
+                elif stored is not None:
+                    return slot, _replayed_answer(stored)
+        except Exception:
+            logger.exception("irimi: the idempotency store failed; answering this write afresh")
+            slot = None
+        return slot, None
 
     def _precondition(
         self,
@@ -295,7 +201,7 @@ class ShadowPolicy:
         route: Route,
         write_log: Sequence[Exchange],
         run_id: str,
-    ) -> tuple[PreconditionOutcome | None, tuple[Exchange, ...], services.Rejection | None, str]:
+    ) -> _Checked:
         """Check the write against real state plus this run's overlay, before faking it (#45).
 
         Its own guard, not the one `answer` already has: that one degrades a *faker* failure to
@@ -303,7 +209,7 @@ class ShadowPolicy:
         write is still faked at its ordinary level, and the exchange says the check did not happen.
         Collapsing them would answer a perfectly fakeable write with `{}`.
 
-        The fourth member is the currency (#60): the code the check read off the same document the
+        `currency` is the currency (#60): the code the check read off the same document the
         verdict saw, or "" from every path that never got a document. A `NOT_EVALUABLE` verdict
         keeps it - irimi did read the charge, it just could not decide whether the write would
         have been taken, and what a write is denominated in is a different question from whether
@@ -313,7 +219,7 @@ class ShadowPolicy:
         # of a route with no `precondition:`, and not `not_evaluable`, which is for a question
         # irimi put and could not get an answer to (#45).
         if isinstance(self.reader, NoReader):
-            return None, (), None, ""
+            return _Checked()
         issued: tuple[Exchange, ...] = ()
         try:
             service = classification.service
@@ -324,11 +230,11 @@ class ShadowPolicy:
                 logger.warning(
                     "irimi: no precondition named %r for %s", route.precondition, service
                 )
-                return "not_evaluable", issued, None, ""
+                return _Checked("not_evaluable", issued)
             proposal = services.Proposal(classification.operation, bodies.reflect(request))
             probe = check.probe(proposal)
             if probe is None:
-                return "not_evaluable", issued, None, ""
+                return _Checked("not_evaluable", issued)
             probe_request = _probe_request(request, service, probe)
             # "Read operations only, never a read-like POST", in the one form that can be enforced:
             # ask the maps, which are what says a Slack `conversations.info` POST is a read, and
@@ -340,7 +246,7 @@ class ShadowPolicy:
                     probe.operation,
                     probe_cls.kind,
                 )
-                return "not_evaluable", issued, None, ""
+                return _Checked("not_evaluable", issued)
             try:
                 response = self.reader(probe_request)
             except Exception as exc:
@@ -356,17 +262,17 @@ class ShadowPolicy:
                 ),
             )
             if response is None:
-                return "not_evaluable", issued, None, ""
+                return _Checked("not_evaluable", issued)
             # Only a 200 is evaluable. A 429, a 404 or a 5xx says nothing about the write (#45).
             if response.status != 200:
-                return "not_evaluable", issued, None, ""
+                return _Checked("not_evaluable", issued)
             # The reader's body never passes the engine's `response` hook, so this is the only
             # place Slack's `ts` watermark can learn from the one read that exists to make the
             # fake honest (#42).
             echo.observe_read(service, response.body)
             document: Any = bodies.json_object(response.body)
             if document is None:
-                return "not_evaluable", issued, None, ""
+                return _Checked("not_evaluable", issued)
             found = writelog.scoped_writes(services.EFFECTS, service, probe_request, write_log)
             if found is not None:
                 effects, writes = found
@@ -383,7 +289,7 @@ class ShadowPolicy:
                     # checked against a world known to be incomplete was not checked. Passing
                     # it could bless a write production would refuse; rejecting it could
                     # invent a refusal that never would have happened (#45).
-                    return "not_evaluable", issued, None, ""
+                    return _Checked("not_evaluable", issued)
                 document = applied.document
             # Off the same document the verdict sees, and before it, so a `NOT_EVALUABLE` verdict
             # still carries it - see the docstring (#60).
@@ -393,13 +299,15 @@ class ShadowPolicy:
                 # The check read the document and could not tell - a Slack `missing_scope`, a
                 # charge whose own numbers will not parse. Distinct from a pass, which claims
                 # the write was checked and would have been taken (#45).
-                return "not_evaluable", issued, None, currency
-            return ("rejected" if verdict is not None else "passed"), issued, verdict, currency
+                return _Checked("not_evaluable", issued, currency=currency)
+            return _Checked(
+                "rejected" if verdict is not None else "passed", issued, verdict, currency
+            )
         except Exception:
             # An exception means irimi did put the question and could not answer it, so this is
             # `not_evaluable` and never None.
             logger.exception("irimi: the precondition check failed; faking the write at L2")
-            return "not_evaluable", issued, None, ""
+            return _Checked("not_evaluable", issued)
 
 
 def _probe_request(request: Request, service: str, probe: services.Probe) -> Request:
@@ -425,6 +333,33 @@ def _probe_request(request: Request, service: str, probe: services.Probe) -> Req
         query=probe.query,
         headers=tuple(headers),
         body=body,
+    )
+
+
+def _local(
+    fake: echo.Fake,
+    status: int,
+    extra_flags: tuple[str, ...] = (),
+    *,
+    precondition: PreconditionOutcome | None = None,
+    rejection_code: str = "",
+    issued: tuple[Exchange, ...] = (),
+    would_fire: tuple[str, ...] = (),
+    currency: str = "",
+) -> Answer:
+    """An answer irimi built itself, from the body `echo` built: the fake's level is the answer's,
+    and its fidelity flag comes first, then the fake's own flags, then the caller's."""
+    return Answer(
+        answered_by=fake.answered_by,
+        response=Response(
+            status=status, headers=(("content-type", fake.content_type),), body=fake.body
+        ),
+        flags=(FIDELITY_FLAGS[fake.answered_by], *fake.flags, *extra_flags),
+        precondition=precondition,
+        rejection_code=rejection_code,
+        issued=issued,
+        would_fire=would_fire,
+        currency=currency,
     )
 
 
@@ -466,23 +401,10 @@ def _conflict_answer(
     this route's write would have been faked at, the way `fake_rejection` carries an L3 one.
     """
     fake = echo.fake_rejection(request, classification, refusal.body)
-    return Answer(
-        answered_by=fake.answered_by,
-        response=Response(
-            status=refusal.status,
-            headers=(("content-type", fake.content_type),),
-            body=fake.body,
-        ),
-        flags=(FIDELITY_FLAGS[fake.answered_by], *fake.flags, IDEMPOTENCY_CONFLICT_FLAG),
-        rejection_code=refusal.code,
-    )
+    return _local(fake, refusal.status, (IDEMPOTENCY_CONFLICT_FLAG,), rejection_code=refusal.code)
 
 
-def _remember(
-    store: idempotency.Store,
-    slot: tuple[tuple[str, ...], idempotency.Canonical, str] | None,
-    answer: Answer,
-) -> None:
+def _remember(store: idempotency.Store, slot: idempotency.Slot | None, answer: Answer) -> None:
     """Keep this answer under its key, so the agent's retry gets it back (#46).
 
     Stripe stores the first response under a key whether it was accepted or REJECTED, so this is
@@ -495,8 +417,8 @@ def _remember(
     try:
         content_type = answer.response.header("content-type") or bodies.JSON_CT
         store.put(
-            slot[0],
-            slot[1],
+            slot.key,
+            slot.params,
             idempotency.Stored(
                 status=answer.response.status,
                 body=answer.response.body,

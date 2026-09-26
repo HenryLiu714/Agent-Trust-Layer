@@ -16,6 +16,7 @@ from typing import Any
 
 from irimi import bodies, services
 from irimi.exchange import AnsweredBy, PreconditionOutcome, Request
+from irimi.pipeline import Classification
 from irimi.servicemap import Route
 
 # What irimi puts on a replayed answer. Stripe spells it `Idempotent-Replayed`; header names are
@@ -104,6 +105,37 @@ def key(run_id: str, service: str, scope: tuple[str, ...], idempotency_key: str)
     caller's own sequence.
     """
     return (run_id, service, *scope, idempotency_key)
+
+
+@dataclass(frozen=True)
+class Slot:
+    """Where one write sits in the store (`key`), what two sendings of it are compared by
+    (`canonical`), and the idempotency key exactly as the caller sent it, for the service's own
+    conflict body (#46)."""
+
+    key: tuple[str, ...]
+    params: Canonical
+    sent: str
+
+
+def slot_for(request: Request, classification: Classification, run_id: str) -> Slot | None:
+    """`(slot, canonical params, the key the caller sent)` for a write the store covers, else None.
+
+    Three conditions, each the literal reading of "mapped Stripe writes" (#46). The route must be
+    matched, because `volatile:` is what makes two sendings comparable and an unmapped POST has
+    none. The kind must be `write`, so a route THE SCOPE RULE downgraded to `unknown` is answered
+    the way an unclassified request is and not out of a store. And the service must be one that
+    HAS an idempotency mechanism, which is `key_of` returning something.
+    """
+    route = classification.route
+    if route is None or classification.kind != "write":
+        return None
+    service = classification.service
+    sent = key_of(service, request)
+    if not sent:
+        return None
+    scope = services.scope_of(service, request)
+    return Slot(key(run_id, service, scope, sent), canonical(request, route), sent)
 
 
 class Store:

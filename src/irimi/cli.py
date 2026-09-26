@@ -320,7 +320,8 @@ def _build_engine(run: _Run, on_exchange: "OnExchange") -> "Engine":
     """
     from irimi.engine.mitm import MitmEngine
     from irimi.overlay import ServiceOverlay
-    from irimi.policy import ShadowPolicy, UpstreamReader
+    from irimi.policy import ShadowPolicy
+    from irimi.reader import UpstreamReader
     from irimi.store import NullStore
 
     # The overlay is built with the same maps the engine classifies against, because it has to

@@ -2112,6 +2112,12 @@ routes:
     human: list refunds
   - match:
       method: GET
+      path: /v1/refunds/{refund}
+    operation: refunds.retrieve
+    kind: read
+    human: get refund {refund}
+  - match:
+      method: GET
       path: /v1/charges
     operation: charges.list
     kind: read
@@ -2568,6 +2574,43 @@ def test_a_payment_intent_reread_after_a_faked_cancel_shows_it_canceled(stripe_s
     assert [method for method, _ in _StripeStub.seen] == ["GET"], "a faked write reached Stripe"
 
 
+def test_a_reread_of_a_minted_refund_by_id_is_answered_not_404d(stripe_stub):
+    """#52's done-when, end to end through the real proxy. Stripe 404s an id it has never heard
+    of; the agent stored that id because irimi told it the refund exists, and irimi answers with
+    the object it minted, at 200, stamped `overlay`. The read still reached Stripe - that is what
+    makes it a real read the summary counts."""
+    proxy, stub, seen = stripe_stub
+    # `_fake_refund` returns the minted id and asserts its own 200.
+    minted = _fake_refund(proxy, stub)
+
+    status, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds/{minted}")
+    assert status == 200
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert json.loads(data)["id"] == minted
+    ex = seen[-1]
+    assert (ex.kind, ex.answered_by, ex.overlay, ex.issued_by) == (
+        "read",
+        "overlay",
+        "full",
+        "agent",
+    )
+    # The read reached Stripe and the refund did not: it is still a real read (#52).
+    assert _StripeStub.seen == [("GET", f"/v1/refunds/{minted}")], "a faked write reached Stripe"
+
+
+def test_a_read_of_a_refund_stripe_really_does_not_have_keeps_its_404(stripe_stub):
+    """The status moves for a minted object and for nothing else. An id neither Stripe nor irimi
+    has is Stripe's own 404, unstamped and unflagged (#52)."""
+    proxy, stub, seen = stripe_stub
+    assert _fake_refund(proxy, stub).startswith("re_")
+    status, headers, _ = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds/re_NOTHING")
+    assert status == 404
+    assert pipeline.ANSWERED_BY_HEADER not in headers
+    ex = seen[-1]
+    assert ex.answered_by == "live"
+    assert ex.overlay is None
+
+
 # ------------------------------------------------- the Slack overlay, end to end (#44)
 
 # The loopback upstream claimed as `slack`, with the shipped map's two routes that matter here.
@@ -2611,7 +2654,10 @@ REAL_SLACK_MESSAGE = {"type": "message", "ts": REAL_SLACK_TS, "text": "real", "u
 class _SlackStub(BaseHTTPRequestHandler):
     """A Slack-shaped upstream: one real message, in whatever channel or thread is asked about and
     with no replies of its own. Only the two reads may reach it; a `chat.postMessage` here is a
-    faked write that escaped."""
+    faked write that escaped.
+
+    A `conversations.replies` for any other thread than `REAL_SLACK_TS` is `thread_not_found` at
+    HTTP 200, which is how a read of a thread irimi minted arrives here (#52)."""
 
     seen: list = []  # (method, path) of every request
 
@@ -2622,8 +2668,14 @@ class _SlackStub(BaseHTTPRequestHandler):
             self.send_header("content-length", "0")
             self.end_headers()
             return
-        self.rfile.read(int(self.headers.get("content-length", 0)))
-        document = {"ok": True, "messages": [dict(REAL_SLACK_MESSAGE)], "has_more": False}
+        raw = self.rfile.read(int(self.headers.get("content-length", 0)))
+        posted = json.loads(raw or b"{}")
+        if self.path == "/api/conversations.replies" and posted.get("ts") != REAL_SLACK_TS:
+            # A thread Slack has never seen: `thread_not_found`, at HTTP 200, which is what a read
+            # of a thread irimi MINTED really gets from Slack (#52).
+            document = {"ok": False, "error": "thread_not_found"}
+        else:
+            document = {"ok": True, "messages": [dict(REAL_SLACK_MESSAGE)], "has_more": False}
         body = json.dumps(document).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json; charset=utf-8")
@@ -2737,6 +2789,36 @@ def test_a_slack_read_the_effects_cannot_place_is_recorded_partial_and_left_alon
     assert pipeline.ANSWERED_BY_HEADER not in headers, "nothing of irimi's is in this body"
     assert seen[-1].answered_by == "live"
     assert seen[-1].overlay == "partial"
+
+
+def test_a_slack_replies_read_of_a_minted_thread_is_answered_not_thread_not_found(slack_stub):
+    """#52's Slack done-when, end to end. The agent posts, then reads the thread its own post
+    started - which Slack has never heard of and refuses at HTTP 200. irimi answers with the
+    thread from its write log, and the post still never reached Slack."""
+    proxy, stub, seen = slack_stub
+    status, _, data = _slack_call(
+        proxy, stub, "chat.postMessage", {"channel": "C0123", "text": "refunded"}
+    )
+    assert status == 200
+    minted = json.loads(data)["ts"]
+    status, headers, data = _slack_call(
+        proxy, stub, "conversations.replies", {"channel": "C0123", "ts": minted}
+    )
+    assert status == 200
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    document = json.loads(data)
+    assert document["ok"] is True
+    assert [m["ts"] for m in document["messages"]] == [minted]
+    assert document["messages"][0]["text"] == "refunded"
+    ex = seen[-1]
+    assert (ex.kind, ex.answered_by, ex.overlay, ex.issued_by) == (
+        "read",
+        "overlay",
+        "full",
+        "agent",
+    )
+    # The read reached Slack and the post did not: it is still a real read (#52).
+    assert _SlackStub.seen == [("POST", "/api/conversations.replies")], "a faked post reached Slack"
 
 
 # ------------------------------------------------ L3 preconditions through the engine (#45)

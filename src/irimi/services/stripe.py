@@ -362,6 +362,21 @@ def _refund_probe(proposal: Proposal) -> Probe | None:
     return Probe(operation="charges.retrieve", method="GET", path=f"/v1/charges/{charge}")
 
 
+def _charge_currency(document: Any) -> str:
+    """The currency a charge is denominated in, or "" when this body does not name one (#60).
+
+    The document is the L3 precondition read's - `GET /v1/charges/{id}`, issued on the agent's own
+    credentials - so this is a code irimi really read off real state and never a default. Anything
+    that is not a non-empty string is "": `report.money` formats only when it has a currency, and
+    a wrong symbol is worse than an unformatted amount. No coercion and no `str()`, for the same
+    reason `_refund_verdict` refuses to subtract numbers it cannot read.
+    """
+    if not isinstance(document, dict):
+        return ""
+    currency = document.get("currency")
+    return currency.strip() if isinstance(currency, str) else ""
+
+
 def _refund_verdict(proposal: Proposal, document: Any) -> Rejection | NotEvaluable | None:
     """`charge_already_refunded`, the amount-exceeds error, `NOT_EVALUABLE`, or None."""
     if (
@@ -403,7 +418,9 @@ def _refund_verdict(proposal: Proposal, document: Any) -> Rejection | NotEvaluab
         # The prose is irimi's: minor-unit formatting lives in `report`, and this package stays
         # pure and below it. The SHAPE is Stripe's - `invalid_request_error` with `param: amount` -
         # which is what makes stripe-python raise `InvalidRequestError`.
-        currency = str(document.get("currency", "")).upper()
+        # The same reading of the charge's currency the exchange carries, so the prose in this
+        # body and the summary's `$49.00` can never disagree about one charge (#60).
+        currency = _charge_currency(document).upper()
         message = (
             f"Refund amount ({amount} {currency}) is greater than unrefunded amount on charge "
             f"({remaining} {currency})"
@@ -418,4 +435,4 @@ def _refund_verdict(proposal: Proposal, document: Any) -> Rejection | NotEvaluab
     return None
 
 
-CHARGE_REFUNDABLE = Check(probe=_refund_probe, verdict=_refund_verdict)
+CHARGE_REFUNDABLE = Check(probe=_refund_probe, verdict=_refund_verdict, currency=_charge_currency)

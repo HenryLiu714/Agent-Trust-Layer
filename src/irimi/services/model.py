@@ -141,10 +141,22 @@ class Check:
     `not_evaluable` and fakes the write at L2. `verdict` is handed the probe's document with the
     run's own writes already applied to it, and returns a `Rejection`, `NOT_EVALUABLE`, or None
     for passed.
+
+    `currency` is the one fact this read carries that is not a verdict (#60): the currency the
+    write's amounts are denominated in, read off the same document, so the summary can print
+    `refund $49.00` for a `Refund.create(charge=, amount=)` that names no currency of its own. It
+    returns "" for a document that does not name one, and a check with no such fact to offer
+    leaves it None.
+
+    It is asked of the check rather than read by the policy because which key holds the currency
+    is service knowledge: a `document.get("currency")` in `policy` would be a guess made on every
+    service's behalf, and Slack's `conversations.info` has no such key and never will. Same reason
+    `probe` and `verdict` live here and not there.
     """
 
     probe: Callable[[Proposal], "Probe | None"]
     verdict: Callable[[Proposal, Any], "Rejection | NotEvaluable | None"]
+    currency: Callable[[Any], str] | None = None
 
 
 # `(read, parsed body, the run's writes for this service) -> Applied`.

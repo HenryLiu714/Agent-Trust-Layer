@@ -1461,6 +1461,57 @@ def test_a_precondition_read_that_429s_is_not_evaluable_and_is_still_recorded():
     assert read.run_id == "t3st"
 
 
+def test_a_passed_check_carries_the_charges_currency_onto_the_answer():
+    """#60's first half. `Refund.create(charge=, amount=)` names no currency; the charge irimi read
+    to decide about it does, and that is the only honest source there is."""
+    ans = _checked(_reader(_json(200, _charge())), _refund_request())
+    assert ans.precondition == "passed"
+    assert ans.currency == "usd"
+
+
+def test_a_rejected_check_carries_it_too():
+    """`report._write_line` renders the map's `human:` sentence before it branches on the
+    rejection, so the `✗` line prints an amount as well and needs the same currency (#60)."""
+    ans = _checked(_reader(_json(200, _charge(refunded_so_far=4900))), _refund_request())
+    assert ans.precondition == "rejected"
+    assert ans.currency == "usd"
+
+
+def test_a_policy_with_no_reader_offers_no_currency():
+    """Never asked, so nothing claimed - the same rule `precondition: None` follows (#60)."""
+    request = _refund_request()
+    ans = ShadowPolicy().answer(request, classify(request, SHIPPED))
+    assert ans.currency == ""
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        _json(429, {"error": {"type": "rate_limit_error"}}),
+        _json(404, {"error": {"type": "invalid_request_error"}}),
+        Response(200, (), b"<html>not json</html>"),
+        None,
+    ],
+)
+def test_a_read_that_never_produced_a_document_offers_no_currency(answer):
+    """#60's own rule: the currency comes from a document irimi actually read. None of these is
+    one, so the amount still prints as the write sent it."""
+    ans = _checked(_reader(answer), _refund_request())
+    assert ans.precondition == "not_evaluable"
+    assert ans.currency == ""
+
+
+def test_a_verdict_that_could_not_tell_still_knows_what_the_charge_is_in():
+    """The one place this branch is narrower than #60's open-question bullet, and deliberately: the
+    charge WAS read and parsed, so the currency is known. Whether irimi could decide the service
+    would have taken the write is a different question from what the write is denominated in."""
+    charge = _charge()
+    charge["amount_refunded"] = "not a number"  # `_refund_verdict` -> NOT_EVALUABLE
+    ans = _checked(_reader(_json(200, charge)), _refund_request())
+    assert ans.precondition == "not_evaluable"
+    assert ans.currency == "usd"
+
+
 @pytest.mark.parametrize(
     "answer",
     [
@@ -1761,6 +1812,9 @@ def test_a_replay_issues_no_precondition_read():
     assert len(first.issued) == 1
     assert second.issued == ()
     assert second.precondition == first.precondition == "passed"
+    # The stored answer's currency comes back too, so the replayed exchange and the first one agree
+    # about what that single write was denominated in (#60).
+    assert second.currency == first.currency == "usd"
 
 
 def test_the_same_key_with_a_different_amount_is_an_idempotency_error():

@@ -146,6 +146,36 @@ def test_a_document_irimi_did_not_understand_is_neither_rejected_nor_passed(docu
     assert stripe.CHARGE_REFUNDABLE.verdict(_refund(amount=99999), document) is NOT_EVALUABLE
 
 
+def test_a_charge_names_the_currency_its_refund_is_denominated_in():
+    """#60. The one fact this read carries that is not a verdict: the summary formats `4900` as
+    `$49.00` only from a currency irimi really read, and the charge is where it read it."""
+    assert stripe.CHARGE_REFUNDABLE.currency is not None
+    assert stripe.CHARGE_REFUNDABLE.currency(_charge()) == "usd"
+    assert stripe.CHARGE_REFUNDABLE.currency(_charge(currency=" jpy ")) == "jpy"
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"id": CHARGE_ID, "object": "charge", "amount": 4900},  # no currency at all
+        {"id": CHARGE_ID, "object": "charge", "currency": 4900},  # not a string
+        {"id": CHARGE_ID, "object": "charge", "currency": ""},  # empty
+        ["not", "an", "object"],
+        None,
+    ],
+)
+def test_a_charge_that_names_no_currency_offers_none(document):
+    """No coercion: a currency irimi is not sure of is no currency, and the amount then prints as
+    the write sent it. A wrong symbol is worse than an unformatted number (`report.money`)."""
+    assert stripe.CHARGE_REFUNDABLE.currency(document) == ""
+
+
+def test_a_slack_post_has_no_currency_to_offer():
+    """`conversations.info` has no such key, and a post has no amount. The field is None rather
+    than a function returning "", so the policy asks nothing of a check that has nothing (#60)."""
+    assert slack.CHANNEL_POSTABLE.currency is None
+
+
 # ------------------------------------------------------------------------------------ slack
 
 

@@ -3023,6 +3023,28 @@ def test_the_closing_line_names_the_webhooks_a_real_refund_would_have_sent(
     )
 
 
+def test_a_faked_refund_carries_the_currency_its_precondition_read_found(precondition_stub):
+    """#60 end to end through the real proxy: the charge the stub answers is in `usd`, the refund
+    posts no currency, and the exchange carries the code across so the summary can format it."""
+    proxy, stub, seen = precondition_stub
+    status, _, _ = _refund(proxy, stub, "ch_REAL1")
+    assert status == 200
+    (write,) = _writes(seen)
+    assert write.precondition == "passed"
+    assert write.currency == "usd"
+
+
+def test_a_write_whose_precondition_read_never_answered_carries_no_currency(precondition_stub):
+    """`ch_BUSY1` 429s, so no document was read and there is nothing to denominate the amount
+    with. The write is still faked at L2 and its line still prints raw minor units (#60)."""
+    proxy, stub, seen = precondition_stub
+    status, _, _ = _refund(proxy, stub, "ch_BUSY1")
+    assert status == 200
+    (write,) = _writes(seen)
+    assert write.precondition == "not_evaluable"
+    assert write.currency == ""
+
+
 # SLACK_OVERLAY_MAP with the shipped map's `precondition:` on `chat.postMessage`, and the
 # `conversations.info` read the probe has to classify as - the policy refuses to issue anything
 # the maps do not call a read.

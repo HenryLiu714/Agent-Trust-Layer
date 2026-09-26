@@ -66,6 +66,13 @@ HISTORY_PARAMS = frozenset(
 # with `ts`". Slack documents `include_all_metadata` on both methods; listing it on one only made a
 # read that named it needlessly `partial`.
 REPLIES_PARAMS = HISTORY_PARAMS | {"ts"}
+# The `conversations.replies` parameters that decide WHICH of a thread's messages a page holds.
+# `_minted_thread` builds a whole page rather than editing one, and it builds the thread entire -
+# so a read naming any of these is one it must decline, or it would answer `limit=1` with four
+# messages, and `latest=<a real ts>` with replies Slack would have left out. The editing paths need
+# no such set: they ask `_belongs` and `_in_window` per message, the same question one at a time
+# (#52).
+PAGE_SHAPING_PARAMS = frozenset({"oldest", "latest", "inclusive", "limit", "cursor"})
 # The fields Slack puts on a message once it has replies, in the order they are added. Adding them
 # to a parent that had none is the one place in this package an effect adds a field the live object
 # lacked. `stripe._customer`'s rule exists to stop a CALLER'S posted field being pasted onto a
@@ -237,8 +244,10 @@ def _minted_thread(read: Read, posts: Sequence[_Post]) -> Applied | None:
 
     None - and the caller's `partial` - for every way the page cannot be built honestly: a read
     that is not `conversations.replies`, a `ts` that is not a string, a parameter the effects
-    cannot read, a `ts` this run did not mint as a THREAD PARENT, a REPLY whose answer carried no
-    message to show (the fixture failed and the write degraded to `fake-L0`), and any message
+    cannot read, a parameter that asks for only PART of the thread (`PAGE_SHAPING_PARAMS`, since
+    this builds the whole of it), a `ts` this run did not mint as a THREAD PARENT, a REPLY whose
+    answer carried no message to show (the fixture failed and the write degraded to `fake-L0`),
+    and any message
     whose channel `_in_channel` will not answer a definite True for. That last one is stricter
     than the editing path's `is not False`: leaving a post off a page is one kind of incomplete,
     and building a whole page for a channel irimi cannot match is another kind of wrong.
@@ -257,6 +266,12 @@ def _minted_thread(read: Read, posts: Sequence[_Post]) -> Applied | None:
     if not isinstance(thread, str):
         return None
     if any(name not in REPLIES_PARAMS for name in posted):
+        return None
+    if any(name in PAGE_SHAPING_PARAMS for name in posted):
+        # A window, a limit or a cursor asks for SOME of the thread, and this function only knows
+        # how to answer with all of it. Building the whole thread anyway would hand the agent a
+        # page Slack would never have sent - the half-apply this module's header forbids, in its
+        # most visible form (#52).
         return None
     channel = posted.get("channel")
     parent = next((p for p in posts if p.thread_ts is None and p.ts == thread), None)

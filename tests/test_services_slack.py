@@ -516,6 +516,34 @@ def test_replies_of_a_thread_this_run_did_not_mint_is_left_alone():
     assert out.status is None
 
 
+@pytest.mark.parametrize(
+    "shaping",
+    [
+        {"limit": 2},
+        {"latest": REAL_NEW},
+        {"oldest": REAL_OLD},
+        {"cursor": "c1"},
+        {"inclusive": True},
+    ],
+)
+def test_a_minted_thread_read_that_asks_for_part_of_it_stays_partial(shaping):
+    """`_minted_thread` builds the WHOLE thread, so a read asking for a window, a limit or a page of
+    it is one it must decline: answering `limit=1` with the whole thread, or `latest=<a real ts>`
+    with replies Slack would have left out, is the half-apply this module's header forbids in its
+    most visible form. The error stands and the read says the world irimi showed is incomplete
+    (#52)."""
+    error = {"ok": False, "error": "thread_not_found"}
+    out = apply_read(
+        _replies(MINTED1, **shaping),
+        dict(error),
+        [_post_write(ts=MINTED1), _reply_write(MINTED1, ts=MINTED2)],
+    )
+    assert out.document == error
+    assert out.changed is False
+    assert out.partial is True
+    assert out.status is None
+
+
 def test_a_minted_parent_read_with_an_unreadable_parameter_stays_partial():
     """A parameter the effects cannot read means irimi cannot say what this page should hold, so
     the page is not built and the error stands - today's answer, kept for the cases #52 does not

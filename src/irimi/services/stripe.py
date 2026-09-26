@@ -18,7 +18,7 @@ Two rules run through all of it:
 
 * **Never invent a field the live object does not have.** A field Stripe's own response omits is
   one the agent can never see in production, and putting one there hands it a body no live read
-  can produce. This is `echo._reflect_over`'s rule, applied to reads.
+  can produce. This is `echo.reflect_over`'s rule, applied to reads.
 * **Say `partial` rather than half-apply.** A page the table does not model, a filter it cannot
   read, a cursor page whose real contents depend on where the minted refund landed: the document is
   left exactly as Stripe sent it and the exchange records that the world irimi showed is
@@ -33,6 +33,7 @@ from collections.abc import Sequence
 from typing import Any
 from urllib.parse import parse_qsl, urlencode
 
+from irimi.bodies import SERVICE_OWNED, is_int
 from irimi.exchange import Request
 from irimi.pipeline import REWROTE_HEADER
 from irimi.services.model import (
@@ -53,9 +54,6 @@ SERVICE = "stripe"
 # Stripe's own default page size, and what a list read gets when it names no `limit`.
 DEFAULT_LIST_LIMIT = 10
 MAX_LIST_LIMIT = 100
-# Fields of a live object that are the service's answer and never a caller's argument. The same
-# set `echo.SERVICE_OWNED` keeps for the write side; a customer update may not move any of them.
-SERVICE_OWNED = frozenset({"id", "object", "created", "livemode"})
 # The `GET /v1/refunds` parameters the effects understand. Anything else means irimi cannot say
 # where the minted refund belongs on this page, and the read is `partial`. `expand` arrives as
 # `expand[0]`, so it is matched by prefix.
@@ -150,7 +148,7 @@ def _refunds_list(request: Request, document: dict[str, Any], writes: Sequence[W
         # Some page other than the first, and which real items it holds depends on where the
         # minted refund landed. The v0.1 table models page 1 only.
         return Applied(document, partial=True)
-    removed = _header(request, REWROTE_HEADER)
+    removed = request.header(REWROTE_HEADER) or ""
     if removed.startswith("starting_after="):
         # `rewrite_query` removed a cursor naming a refund irimi minted, so this IS the page that
         # follows it: the minted refund belongs on the page before this one, and prepending it
@@ -231,7 +229,7 @@ def _customer(customer: dict[str, Any], writes: Sequence[Write]) -> Applied:
         if write.operation != "customers.update" or write.answer.get("id") != customer.get("id"):
             continue
         for name, value in write.posted.items():
-            # `name not in customer` is `echo._reflect_over`'s rule: a field the live object does
+            # `name not in customer` is `echo.reflect_over`'s rule: a field the live object does
             # not have is one the real service would not have returned. It also keeps `expand[0]`
             # and friends out, without a second list of parameter names to maintain.
             if name in SERVICE_OWNED or name not in customer:
@@ -275,15 +273,7 @@ def _minted_refunds(writes: Sequence[Write]) -> list[Write]:
 
 def _int(value: Any) -> int:
     """`value` as a whole number of minor units, or 0. `bool` is an `int` and is not one here."""
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
-
-
-def _is_int(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
-
-
-def _header(request: Request, name: str) -> str:
-    return next((v for k, v in request.headers if k == name), "")
+    return value if is_int(value) else 0
 
 
 def _known_list_param(name: str) -> bool:
@@ -432,9 +422,9 @@ def _refund_verdict(proposal: Proposal, document: Any) -> Rejection | NotEvaluab
     charged, refunded = document.get("amount"), document.get("amount_refunded")
     # Both sides of the subtraction must be the charge's own numbers. `_int` reads a missing or
     # malformed one as 0, which would make every refund "too large" - a false rejection (#45).
-    if not (_is_int(charged) and _is_int(refunded)):
+    if not (is_int(charged) and is_int(refunded)):
         return NOT_EVALUABLE
-    if not _is_int(amount):
+    if not is_int(amount):
         # A refund posting no `amount` is Stripe's "refund whatever is left", which is never over
         # the remaining amount; one posting a malformed amount is the real service's to refuse,
         # not irimi's to guess at. Neither is a failure to evaluate the charge (#45).

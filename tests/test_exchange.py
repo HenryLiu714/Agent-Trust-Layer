@@ -1,4 +1,6 @@
-from irimi.exchange import Exchange, Request, Response
+from dataclasses import replace
+
+from irimi.exchange import Exchange, Request, Response, media_type
 
 
 def _req(scheme: str = "https", port: int = 443, query: str = "") -> Request:
@@ -29,6 +31,29 @@ def test_url_query_appended_only_when_non_empty():
 
 def test_url_http_default_port_omitted():
     assert _req(scheme="http", port=80).url == "http://api.stripe.com/v1/charges"
+
+
+def test_header_is_found_case_insensitively_and_first_wins():
+    r = replace(_req(), headers=(("Content-Type", "a"), ("content-type", "b")))
+    assert r.header("content-type") == "a"
+    assert r.header("x-absent") is None
+
+
+def test_without_header_strips_every_copy_and_is_the_same_object_when_absent():
+    r = replace(_req(), headers=(("irimi-rewrote", "x"), ("a", "1"), ("Irimi-Rewrote", "y")))
+    assert r.without_header("irimi-rewrote").headers == (("a", "1"),)
+    plain = _req()
+    assert plain.without_header("irimi-rewrote") is plain
+
+
+def test_path_and_query():
+    assert _req(query="limit=1").path_and_query == "/v1/charges?limit=1"
+    assert _req().path_and_query == "/v1/charges"
+
+
+def test_media_type_drops_parameters_and_case():
+    assert media_type("Application/JSON; charset=utf-8") == "application/json"
+    assert media_type("") == ""
 
 
 def _exchange() -> Exchange:

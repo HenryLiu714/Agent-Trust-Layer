@@ -6,6 +6,7 @@ package knows about mitmproxy, exchanges, flows or maps, which is what lets Phas
 the same functions over a recording (use case 1).
 """
 
+from irimi.exchange import Request
 from irimi.services import slack, stripe
 from irimi.services.model import (
     NOT_EVALUABLE,
@@ -42,6 +43,7 @@ __all__ = [
     "Rewritten",
     "SCOPE_HEADERS",
     "Write",
+    "scope_of",
 ]
 
 # What a service's faked writes do to its live reads, by service name (a map's `service:`).
@@ -68,6 +70,15 @@ REWRITES: dict[str, QueryRewrite] = {stripe.SERVICE: stripe.rewrite_query}
 # the header is already on each write's own request, and it is only ever compared, never stored
 # (#44).
 SCOPE_HEADERS: dict[str, tuple[str, ...]] = {stripe.SERVICE: ("stripe-account", "stripe-version")}
+
+
+def scope_of(service: str, request: Request) -> tuple[str, ...]:
+    """The values of the headers that scope `service`'s state on this request (`SCOPE_HEADERS`),
+    "" for each one it does not carry. Two requests in different scopes say nothing about each
+    other: the write log, the idempotency store and the precondition read all compare this."""
+    return tuple(request.header(name) or "" for name in SCOPE_HEADERS.get(service, ()))
+
+
 # How each service spells "this is the same write as before", by service name (#46). Slack has no
 # entry and no store: it ships no idempotency mechanism, and `chat.postMessage` sent twice really
 # is two messages. A service absent here skips the store entirely rather than getting a default.

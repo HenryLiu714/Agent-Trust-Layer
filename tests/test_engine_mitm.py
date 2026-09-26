@@ -318,8 +318,9 @@ def test_a_slack_read_raises_the_ts_watermark(tmp_path, monkeypatch, upstream):
     """#42: a minted `ts` has to sort after the real messages the run already read, and this hook
     is the only place those values go past - the write log holds writes, not reads."""
     from irimi import echo
+    from irimi.echo import slack as echo_slack
 
-    monkeypatch.setattr(echo, "_last_slack_ts", (0, 0))
+    monkeypatch.setattr(echo_slack, "_last_slack_ts", (0, 0))
     cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch, doc=SLACK_MAP))
     eng, seen, stop = _start(cfg)
     try:
@@ -1585,7 +1586,7 @@ def test_a_raise_recording_an_engine_read_leaves_the_write_answered(tmp_path, mo
         asyncio.run(addon.request(flow))
 
     assert flow.response is not None and flow.response.status_code == 200
-    assert flow.metadata[META_KEY].precondition == "passed"
+    assert flow.metadata[META_KEY].answer.precondition == "passed"
 
 
 def test_neither_half_of_a_delegated_exchange_is_a_write(tmp_path, monkeypatch, target):
@@ -2952,7 +2953,7 @@ def precondition_stub(tmp_path, monkeypatch):
     """The stub, and an engine over PRECONDITION_STRIPE_MAP built the way the CLI builds one: the
     real overlay and a policy holding the real reader. Yields (proxy port, stub port, exchanges)."""
     from irimi.overlay import ServiceOverlay
-    from irimi.policy import UpstreamReader
+    from irimi.reader import UpstreamReader
 
     _PreconditionStub.seen = []
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _PreconditionStub)
@@ -3248,7 +3249,7 @@ class _SlackPreconditionStub(BaseHTTPRequestHandler):
 def slack_precondition_stub(tmp_path, monkeypatch):
     """`precondition_stub`'s Slack twin. Yields (proxy port, stub port, exchanges)."""
     from irimi.overlay import ServiceOverlay
-    from irimi.policy import UpstreamReader
+    from irimi.reader import UpstreamReader
 
     _SlackPreconditionStub.seen = []
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _SlackPreconditionStub)

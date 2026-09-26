@@ -76,9 +76,11 @@ The short version:
 ```
 src/irimi/
   exchange.py paths.py netaddr.py     vocabulary, state locations, "is this loopback?"
-  ca.py  servicemap/                  the local CA; the service maps (model, rules, loader)
+  ca.py  servicemap/  bodies.py       the local CA; the service maps; the never-raising body parser
   pipeline.py  reverse_door.py        parse -> classify -> annotate -> respond; the /<host>/ door
-  delegation.py  echo.py              answer targets; the L0 echo and the L1 fixture answer
+  delegation.py                       answer targets
+  echo/                               the L0 echo and L1 fixture body; Slack's envelopes
+  reader.py                           the one real read L3 issues
   policy.py  overlay.py  store.py     the decision, and the two seams later phases fill
   engine/                             the Engine protocol; mitm.py is the only mitmproxy importer
   report.py  runner.py                what a run prints; the child env and engine thread

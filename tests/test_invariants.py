@@ -496,7 +496,7 @@ def test_shadow_mode_is_never_built_without_a_reader(tmp_path, monkeypatch):
     skipping L3 because the composition root forgot an argument: the `--allow-host` failure shape
     again, configured and never consulted. So the one construction site is pinned here."""
     from irimi import cli
-    from irimi.policy import NoReader
+    from irimi.reader import NoReader
 
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
     index = servicemap.MapIndex(tuple(servicemap.load_shipped()))
@@ -605,7 +605,7 @@ def _stripe_run(tmp_path, monkeypatch, refunds, *, real_overlay=False):
     read, through an engine holding the real reader. Hands back the exchanges, the overlay that
     watched the write log, and every status in order. With `real_overlay` that overlay passes each
     read on to the real `ServiceOverlay`, which applies the accepted refunds to the closing read."""
-    from irimi.policy import UpstreamReader
+    from irimi.reader import UpstreamReader
 
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "maps-home"))
     maps_dir = tmp_path / "maps"

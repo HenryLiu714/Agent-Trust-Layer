@@ -15,6 +15,7 @@ from irimi.servicemap.model import (
     MapError,
     Route,
     ServiceMap,
+    is_hole,
     path_segments,
     target_for,
 )
@@ -227,7 +228,7 @@ def _check_unique_holes(pattern: str, where: str) -> None:
     `named_id` would come to echo the wrong id. Refusing the pattern is the fail-closed answer,
     and no shipped route repeats a name.
     """
-    holes = [p[1:-1] for p in path_segments(pattern) if p.startswith("{") and p.endswith("}")]
+    holes = [p[1:-1] for p in path_segments(pattern) if is_hole(p)]
     repeated = sorted({name for name in holes if holes.count(name) > 1})
     if repeated:
         raise MapError(

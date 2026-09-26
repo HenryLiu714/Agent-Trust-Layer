@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from irimi import netaddr
-from irimi.echo import reflect
+from irimi.bodies import reflect
 from irimi.exchange import (
     IDEMPOTENCY_CONFLICT_FLAG,
     IDEMPOTENT_REPLAY_FLAG,

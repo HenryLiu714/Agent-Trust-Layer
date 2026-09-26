@@ -14,8 +14,9 @@ import threading
 from dataclasses import dataclass
 from typing import Any
 
-from irimi import echo, services
+from irimi import bodies, services
 from irimi.exchange import AnsweredBy, PreconditionOutcome, Request
+from irimi.pipeline import Classification
 from irimi.servicemap import Route
 
 # What irimi puts on a replayed answer. Stripe spells it `Idempotent-Replayed`; header names are
@@ -58,7 +59,7 @@ def key_of(service: str, request: Request) -> str:
     spec = services.IDEMPOTENCY.get(service)
     if spec is None:
         return ""
-    return next((v for k, v in request.headers if k == spec.header), "")
+    return request.header(spec.header) or ""
 
 
 def conflict(service: str, key: str) -> services.Rejection | None:
@@ -82,14 +83,14 @@ def canonical(request: Request, route: Route) -> Canonical:
 
     The fields are the caller's own minus the route's `volatile:` names - the map already marks
     `idempotency_key` on `refunds.create` - because a field that always differs between two
-    sendings must not make every retry look like a different request. `echo.reflect` is the one
+    sendings must not make every retry look like a different request. `bodies.reflect` is the one
     never-raising parser for both form and JSON bodies, and it is what `writelog` and the
     preconditions read a request with, so the store compares the same view of the write they do.
     The method, path and query are in front of it because a key names one write and not one
     route: without them a write whose parameters are all in its path - `payment_intents.cancel`
     posts nothing at all - is indistinguishable from every other write on the same route.
     """
-    posted = echo.reflect(request)
+    posted = bodies.reflect(request)
     fields = {name: value for name, value in posted.items() if name not in route.volatile}
     return request.method, request.path, request.query, fields
 
@@ -97,13 +98,44 @@ def canonical(request: Request, route: Route) -> Canonical:
 def key(run_id: str, service: str, scope: tuple[str, ...], idempotency_key: str) -> tuple[str, ...]:
     """The slot one write occupies.
 
-    Scoped like the overlay - the service, then `writelog.scope`'s `(Stripe-Account,
+    Scoped like the overlay - the service, then `services.scope_of`'s `(Stripe-Account,
     Stripe-Version)`, which is what `scope` carries - because a key reused against another
     connected account or another API version is another write. `run_id` leads, because Phase 3's
     `shadow --serve` puts many runs in one process and a key is only promised unique within one
     caller's own sequence.
     """
     return (run_id, service, *scope, idempotency_key)
+
+
+@dataclass(frozen=True)
+class Slot:
+    """Where one write sits in the store (`key`), what two sendings of it are compared by
+    (`canonical`), and the idempotency key exactly as the caller sent it, for the service's own
+    conflict body (#46)."""
+
+    key: tuple[str, ...]
+    params: Canonical
+    sent: str
+
+
+def slot_for(request: Request, classification: Classification, run_id: str) -> Slot | None:
+    """The `Slot` a write the store covers occupies, else None.
+
+    Three conditions, each the literal reading of "mapped Stripe writes" (#46). The route must be
+    matched, because `volatile:` is what makes two sendings comparable and an unmapped POST has
+    none. The kind must be `write`, so a route THE SCOPE RULE downgraded to `unknown` is answered
+    the way an unclassified request is and not out of a store. And the service must be one that
+    HAS an idempotency mechanism, which is `key_of` returning something.
+    """
+    route = classification.route
+    if route is None or classification.kind != "write":
+        return None
+    service = classification.service
+    sent = key_of(service, request)
+    if not sent:
+        return None
+    scope = services.scope_of(service, request)
+    return Slot(key(run_id, service, scope, sent), canonical(request, route), sent)
 
 
 class Store:

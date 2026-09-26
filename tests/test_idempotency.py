@@ -121,7 +121,7 @@ def test_canonical_tells_two_routes_with_the_same_empty_body_apart():
 
 
 def test_canonical_tells_two_sendings_apart_by_their_query():
-    """A parameter a caller put in the query is still a parameter. `echo.reflect` reads the body
+    """A parameter a caller put in the query is still a parameter. `bodies.reflect` reads the body
     only, so the query rides in the identity beside the path (#46)."""
     route = Route(method="POST", path="/v1/refunds", operation="refunds.create", kind="write")
     plain = idempotency.canonical(_request(), route)

@@ -2,7 +2,7 @@
 
 import json
 
-from irimi import writelog
+from irimi import bodies, writelog
 from irimi.exchange import Exchange, Request, Response
 
 ANSWER = {
@@ -71,7 +71,22 @@ def test_a_write_with_no_response_or_a_body_that_is_not_a_json_object_is_skipped
     assert writelog.decode("stripe", _read(), log) == []
 
 
+def test_scoped_writes_is_none_without_a_table_entry_or_a_write():
+    table = {"stripe": "entry"}
+    assert writelog.scoped_writes(table, "slack", _read(), [_write()]) is None
+    assert writelog.scoped_writes(table, "stripe", _read(), []) is None
+
+
+def test_scoped_writes_returns_the_entry_and_the_decoded_writes():
+    ex = _write()
+    writes = writelog.decode("stripe", _read(), [ex])
+    assert writelog.scoped_writes({"stripe": "entry"}, "stripe", _read(), [ex]) == (
+        "entry",
+        writes,
+    )
+
+
 def test_a_body_over_the_size_cap_is_not_a_json_object():
-    padded = json.dumps({"description": "x" * writelog.MAX_BODY_BYTES}).encode()
-    assert writelog.json_object(padded) is None
-    assert writelog.json_object(b'{"ok": true}') == {"ok": True}
+    padded = json.dumps({"description": "x" * bodies.MAX_BODY_BYTES}).encode()
+    assert bodies.json_object(padded) is None
+    assert bodies.json_object(b'{"ok": true}') == {"ok": True}

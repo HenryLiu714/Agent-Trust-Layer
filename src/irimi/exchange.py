@@ -1,6 +1,6 @@
 """Engine-independent record of one HTTP exchange (design doc §2)."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 Kind = Literal["read", "write", "llm", "telemetry", "unknown"]
@@ -100,6 +100,34 @@ FIDELITY_FLAGS: dict[AnsweredBy, str] = {
 Headers = tuple[tuple[str, str], ...]
 
 
+def header_value(headers: Headers, name: str) -> str | None:
+    """The first value of the header `name`, or None when there is none.
+
+    Names are compared case-insensitively: a `Request`'s are already lower-case
+    (`pipeline.parse`), a `Response`'s are as the service or the target sent them. `name` is
+    given lower-case, as every header name irimi spells is. One spelling of the lookup, because
+    eight call sites had each grown a `next(...)` of their own.
+    """
+    for key, value in headers:
+        if key.lower() == name:
+            return value
+    return None
+
+
+def without_header(headers: Headers, name: str) -> Headers:
+    """`headers` minus every header called `name` (compared as `header_value` compares)."""
+    return tuple((k, v) for k, v in headers if k.lower() != name)
+
+
+def media_type(content_type: str) -> str:
+    """A Content-Type value without its parameters, lower-cased.
+
+    `Application/JSON; charset=utf-8` is `application/json`. The engine asks it of a response
+    to decide whether to stream it, and the faker of a request to decide how to parse it.
+    """
+    return content_type.partition(";")[0].strip().lower()
+
+
 @dataclass(frozen=True)
 class Request:
     method: str  # upper-case
@@ -115,8 +143,22 @@ class Request:
     def url(self) -> str:
         default = 443 if self.scheme == "https" else 80
         netloc = self.host if self.port == default else f"{self.host}:{self.port}"
-        q = f"?{self.query}" if self.query else ""
-        return f"{self.scheme}://{netloc}{self.path}{q}"
+        return f"{self.scheme}://{netloc}{self.path_and_query}"
+
+    @property
+    def path_and_query(self) -> str:
+        """The request target as a flow spells it: the path, then `?query` when there is one."""
+        return f"{self.path}?{self.query}" if self.query else self.path
+
+    def header(self, name: str) -> str | None:
+        """See `header_value`."""
+        return header_value(self.headers, name)
+
+    def without_header(self, name: str) -> "Request":
+        """This request minus every `name` header. The SAME object when it carried none, so a
+        caller's identity check keeps meaning "nothing changed"."""
+        kept = without_header(self.headers, name)
+        return self if len(kept) == len(self.headers) else replace(self, headers=kept)
 
 
 @dataclass(frozen=True)
@@ -124,6 +166,16 @@ class Response:
     status: int
     headers: Headers
     body: bytes
+
+    def header(self, name: str) -> str | None:
+        """See `header_value`."""
+        return header_value(self.headers, name)
+
+    def without_header(self, name: str) -> "Response":
+        """This response minus every `name` header. The SAME object when it carried none, so a
+        caller's identity check keeps meaning "nothing changed"."""
+        kept = without_header(self.headers, name)
+        return self if len(kept) == len(self.headers) else replace(self, headers=kept)
 
 
 @dataclass

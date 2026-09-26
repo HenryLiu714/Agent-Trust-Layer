@@ -2,10 +2,10 @@
 
 import json
 
+from irimi.bodies import MAX_BODY_BYTES
 from irimi.exchange import Exchange, Request, Response
 from irimi.overlay import ServiceOverlay
 from irimi.servicemap import MapIndex, Route, ServiceMap
-from irimi.writelog import MAX_BODY_BYTES
 
 STRIPE = ServiceMap(
     service="stripe",
@@ -112,7 +112,7 @@ def _write_exchange(headers=(), refund_id=MINTED):
 
 
 def _slack_post_exchange(ts, channel="C0123", headers=(), thread_ts=None):
-    """A faked `chat.postMessage`, answered in `echo.SLACK_ENVELOPES`' shape (#42)."""
+    """A faked `chat.postMessage`, answered in `echo.slack.SLACK_ENVELOPES`' shape (#42)."""
     posted = {"channel": channel, "text": "refund issued"}
     if thread_ts is not None:
         posted["thread_ts"] = thread_ts

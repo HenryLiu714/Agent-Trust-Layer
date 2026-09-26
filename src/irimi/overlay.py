@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Protocol
 
-from irimi import echo, pipeline, services, writelog
+from irimi import bodies, pipeline, services, writelog
 from irimi.exchange import Exchange, OverlayFidelity, Request, Response
 from irimi.servicemap import MapIndex
 
@@ -121,12 +121,9 @@ class ServiceOverlay:
         # one only runs on the rewrite path and that path is closed until the log holds a write.
         # Both stay: this is the guard for a caller that is not the engine - `tests/test_overlay.py`
         # today, Phase 5's replay over recorded reads later.
-        kept = tuple((k, v) for k, v in read_request.headers if k != pipeline.REWROTE_HEADER)
         # The same object when there was nothing to strip, so the engine's `is` check still
         # means "nothing to do".
-        stripped = (
-            read_request if kept == read_request.headers else replace(read_request, headers=kept)
-        )
+        stripped = read_request.without_header(pipeline.REWROTE_HEADER)
         try:
             return self._rewrite(write_log, stripped)
         except Exception:
@@ -139,25 +136,20 @@ class ServiceOverlay:
         self, write_log: Sequence[Exchange], read_request: Request, upstream_response: Response
     ) -> Overlaid:
         service, operation = self._route(read_request)
-        effects = services.EFFECTS.get(service)
-        if effects is None:
+        found = writelog.scoped_writes(services.EFFECTS, service, read_request, write_log)
+        if found is None:
             return Overlaid(upstream_response)
-        writes = writelog.decode(service, read_request, write_log)
-        if not writes:
-            return Overlaid(upstream_response)
-        document = writelog.json_object(upstream_response.body)
+        effects, writes = found
+        document = bodies.json_object(upstream_response.body)
         if document is None:
             # A body the overlay cannot read is a body it cannot apply the run's writes to. The
             # agent still gets exactly what the service sent; the exchange says it is incomplete.
             return Overlaid(upstream_response, "partial")
         # Reflected here, past the early returns, so a service with no effects table or a run
-        # with no writes for it parses nothing. `echo.reflect` never raises and reflects `{}` for
+        # with no writes for it parses nothing. `bodies.reflect` never raises and reflects `{}` for
         # a body it cannot read, so it needs no guard of its own (#44).
-        read = services.Read(
-            operation=operation, request=read_request, posted=echo.reflect(read_request)
-        )
-        applied = effects(read, document, writes)
-        rewrote = any(k == pipeline.REWROTE_HEADER for k, _ in read_request.headers)
+        applied = effects(writelog.read_of(operation, read_request), document, writes)
+        rewrote = read_request.header(pipeline.REWROTE_HEADER) is not None
         fidelity: OverlayFidelity | None = None
         if applied.partial:
             fidelity = "partial"
@@ -187,17 +179,12 @@ class ServiceOverlay:
     def _rewrite(self, write_log: Sequence[Exchange], read_request: Request) -> Request:
         """`read_request` arrives with no `irimi-rewrote` of its own: `rewrite` stripped it."""
         service, operation = self._route(read_request)
-        rewrite = services.REWRITES.get(service)
-        if rewrite is None:
+        found = writelog.scoped_writes(services.REWRITES, service, read_request, write_log)
+        if found is None:
             return read_request
-        writes = writelog.decode(service, read_request, write_log)
-        if not writes:
-            return read_request
-        # Past the early returns, like `_apply`'s; `echo.reflect` never raises (#44).
-        read = services.Read(
-            operation=operation, request=read_request, posted=echo.reflect(read_request)
-        )
-        rewritten = rewrite(read, writes)
+        rewrite, writes = found
+        # Past the early returns, like `_apply`'s; `bodies.reflect` never raises (#44).
+        rewritten = rewrite(writelog.read_of(operation, read_request), writes)
         if rewritten is None:
             return read_request
         return replace(

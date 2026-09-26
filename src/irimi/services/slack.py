@@ -42,6 +42,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from irimi.bodies import is_int
 from irimi.services.model import (
     NOT_EVALUABLE,
     Applied,
@@ -335,7 +336,7 @@ def _thread_fields(parent: dict[str, Any], replies: Sequence[_Post]) -> bool | N
         # Only the fields Slack already sent: the exception in `THREAD_FIELDS` is for a parent with
         # no thread at all, not a licence to fill in what a threaded one left out (#44).
         count = parent["reply_count"]
-        if not _is_int(count):
+        if not is_int(count):
             return None
         values = {"reply_count": count + len(replies)}
         if "latest_reply" in parent:
@@ -351,7 +352,7 @@ def _thread_fields(parent: dict[str, Any], replies: Sequence[_Post]) -> bool | N
             # Slack caps `reply_users` while `reply_users_count` is the true distinct count, so the
             # count is bumped by the users newly added rather than recomputed, and a replier already
             # past the cap is counted twice. Without `reply_users` there is no telling who is new.
-            if not _is_int(parent["reply_users_count"]) or added is None:
+            if not is_int(parent["reply_users_count"]) or added is None:
                 return None
             values["reply_users_count"] = parent["reply_users_count"] + added
     else:
@@ -451,9 +452,9 @@ def _in_channel(mine: str | None, asked: Any) -> bool | None:
 
     None is the case irimi forces on itself. `chat.postMessage` accepts `#general` while
     `conversations.history` requires `C0123`, and real Slack answers the post with the channel id
-    while `echo.slack_l1_body` echoes the posted value verbatim - so the mismatch is irimi's own,
-    and silently leaving the agent's own message off a page that then claims to be complete is the
-    untruth this module's header forbids. The caller turns None into `partial` instead (#44).
+    while `echo.slack.slack_l1_body` echoes the posted value verbatim - so the mismatch is irimi's
+    own, and silently leaving the agent's own message off a page that then claims to be complete is
+    the untruth this module's header forbids. The caller turns None into `partial` instead (#44).
     """
     if not isinstance(asked, str) or not asked or mine is None:
         return None
@@ -544,10 +545,6 @@ def _merged(known: list[Any], users: Sequence[Any]) -> list[Any]:
     return merged
 
 
-def _is_int(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
-
-
 # ------------------------------------------------------------------------ the L3 preconditions
 #
 # Whether Slack would have accepted a `chat.postMessage` at all, decided by `conversations.info`
@@ -556,8 +553,8 @@ def _is_int(value: Any) -> bool:
 # models changes whether a channel exists, is archived or has the bot in it.
 #
 # Every rejection body is envelope-shaped, not fixture-shaped: they never go through
-# `echo.slack_l1_body`, which always answers `ok: true`, and slack_sdk raises `SlackApiError` off
-# `ok: false`.
+# `echo.slack.slack_l1_body`, which always answers `ok: true`, and slack_sdk raises
+# `SlackApiError` off `ok: false`.
 
 
 def _post_probe(proposal: Proposal) -> Probe | None:

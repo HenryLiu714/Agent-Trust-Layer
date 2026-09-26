@@ -17,7 +17,7 @@ class Write:
     """One faked write from the run's write log, decoded for the effects.
 
     `operation` is the map's own name for it (`refunds.create`). `posted` is the caller's own
-    fields, as `echo.reflect` read them off the request. `answer` is the object irimi answered
+    fields, as `bodies.reflect` read them off the request. `answer` is the object irimi answered
     with - already carrying the minted ids, `created`, and every fixture field the caller never
     sent - which is why no effect ever mints anything of its own.
     """
@@ -31,11 +31,11 @@ class Write:
 class Read:
     """One live read the effects are asked about, decoded the way `Write` is (#44).
 
-    `posted` is the read request's own body, as `echo.reflect` read it. Stripe's reads are GETs
+    `posted` is the read request's own body, as `bodies.reflect` read it. Stripe's reads are GETs
     that carry their parameters in the query string and post nothing, so theirs is `{}`; Slack's
     are POSTs that carry every parameter in the body, and the effects should not each have to
-    know which. Reflecting it here rather than in `slack.py` is what keeps the one never-raising
-    parser the only one: `echo` is in this package's own layer and cannot be imported from it.
+    know which. The caller reflects it once, with `bodies.reflect`, so no effect parses a body of
+    its own.
     """
 
     operation: str

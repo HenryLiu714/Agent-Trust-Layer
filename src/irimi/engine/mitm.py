@@ -269,16 +269,12 @@ class IrimiAddon:
                 )
                 flow.response = http.Response.make(400, b"irimi: could not rewrite request\n")
                 return
-        # IRIMI'S OWN WIRE VOCABULARY IS NEVER THE AGENT'S (#53).
-        #
-        # Before the decision, and whatever the write log holds: the rewrite path is where the
-        # overlay strips a forged `Irimi-Rewrote`, and the engine only enters it for a live read
-        # once the log holds a write, so until then the agent's own reached the real service.
-        # After the reverse door, so `req` is the request as it will be forwarded and recorded.
+        # IRIMI'S OWN WIRE VOCABULARY IS NEVER THE AGENT'S (#53). Before the decision and whatever
+        # the write log holds - `_strip_agent_rewrote` says why not on the rewrite path. After
+        # the reverse door, so `req` is the request as it will be forwarded and recorded.
         #
         # Guarded, like everything else in this hook: a raise here would forward the flow
-        # untouched - a write included - and a header that could not be stripped is only the
-        # behaviour this branch replaced.
+        # untouched - a write included - and a header left on is only what happened before #53.
         try:
             req = self._strip_agent_rewrote(flow, req)
         except Exception as exc:
@@ -435,6 +431,8 @@ class IrimiAddon:
         elif pipeline.REWROTE_HEADER in flow.request.headers:
             # The overlay stripped one the agent sent: only irimi may tell the service side that a
             # page follows a minted refund, so the agent's own never reaches the real service.
+            # `request()` strips it before the decision since #53, so this only runs if that
+            # strip raised.
             del flow.request.headers[pipeline.REWROTE_HEADER]
 
     def _strip_agent_rewrote(self, flow: http.HTTPFlow, req: Request) -> Request:

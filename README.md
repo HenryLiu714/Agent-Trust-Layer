@@ -184,7 +184,8 @@ Stripe has never seen, so a later `GET /v1/refunds?starting_after=<that id>` wou
 error. irimi drops that cursor before forwarding — everything after the newest refund is the real
 list from its top — and marks the request it sent with `Irimi-Rewrote`, naming the parameter it
 removed, so the same header in your Stripe logs tells you which request was not quite the one your
-agent made. Nothing else about a read is ever changed on the way out.
+agent made. That header is only ever irimi's: one your agent sent itself is dropped from every
+request, read or write. Nothing else about a read is ever changed on the way out.
 
 **Nothing stops an agent from bypassing the proxy yet** — a client that ignores these variables, or
 ships its own CA bundle, talks to the real service. The banner says `backstop: none (Phase 4)` for

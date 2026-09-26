@@ -536,6 +536,30 @@ def test_a_body_that_is_not_an_object_is_unchanged():
     assert out.partial is False
 
 
+def test_an_answer_that_already_carries_its_thread_ts_inserts_the_same_reply():
+    """Since #55 a faked reply's own answer names the thread, so `_posts`' completion of its copy
+    writes the value it already holds. The inserted message must be the same either way, or the
+    two halves of #44/#55 would disagree about one reply.
+
+    `_reply_write` builds the pre-#55 answer (`thread_ts` in `posted` only); this builds the
+    post-#55 one and asserts the page comes out identical.
+    """
+    without = _reply_write(REAL_OLD)
+    with_it = _reply_write(REAL_OLD)
+    with_it.answer["message"]["thread_ts"] = REAL_OLD
+
+    pages = []
+    for write in (without, with_it):
+        out = apply_read(
+            _replies(REAL_OLD), _replies_page(_threaded_parent(REAL_OLD), REAL_NEW), [write]
+        )
+        assert out.changed is True
+        assert out.partial is False
+        pages.append(out.document)
+    assert pages[0] == pages[1]
+    assert pages[0]["messages"][-1]["thread_ts"] == REAL_OLD
+
+
 # ----------------------------------------------------------------------------- slack_sdk
 
 

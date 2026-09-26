@@ -195,6 +195,78 @@ def test_slack_write_reads_the_json_body_slack_sdk_actually_posts():
     assert body["channel"] == "C1"
 
 
+def test_a_threaded_post_answers_with_the_thread_it_was_posted_in():
+    """#55's first done-when. Real Slack puts `thread_ts` on the returned `message` for a reply,
+    and irimi knows the value exactly - the caller posted it. Before #55 the fixture did not name
+    the field, so `echo._reflect_over` had nothing to write over and the answer omitted it."""
+    ans = _answer(
+        _req(
+            "POST",
+            host="slack.com",
+            path="/api/chat.postMessage",
+            body=b'{"channel": "C1", "thread_ts": "1700000000.000100", "text": "on it"}',
+            content_type="application/json;charset=utf-8",
+        )
+    )
+    body = json.loads(ans.response.body)
+    assert ans.answered_by == "fake-L1"
+    assert body["message"]["thread_ts"] == "1700000000.000100"
+    # The envelope's own fields are unchanged: `ts` is minted and is the reply's identity, not the
+    # thread's, so the two must differ (#42).
+    assert body["message"]["ts"] == body["ts"] != body["message"]["thread_ts"]
+
+
+def test_a_top_level_post_answers_with_no_thread_ts_key_at_all():
+    """#55's second done-when, and the reason it is not a one-line fixture edit: the fixture holds
+    `thread_ts` as `null` so a posted value can land on it, and `_reflect_over` reflects over a
+    `null`. Shipping the placeholder would send `thread_ts: null`, which real Slack never sends."""
+    ans = _answer(
+        _req(
+            "POST",
+            host="slack.com",
+            path="/api/chat.postMessage",
+            body=b"channel=C1&text=hi",
+            content_type="application/x-www-form-urlencoded",
+        )
+    )
+    body = json.loads(ans.response.body)
+    assert ans.answered_by == "fake-L1"
+    assert "thread_ts" not in body["message"]
+
+
+def test_slack_sdk_parses_a_threaded_and_a_top_level_faked_post():
+    """#55's third done-when. The SDK is what an agent actually reads the field through, and a
+    `None` where it expects a string is the failure a fixture-only fix would have shipped."""
+    slack_sdk = pytest.importorskip("slack_sdk")
+
+    def answer(body: bytes) -> dict:
+        ans = _answer(
+            _req(
+                "POST",
+                host="slack.com",
+                path="/api/chat.postMessage",
+                body=body,
+                content_type="application/json;charset=utf-8",
+            )
+        )
+        response = slack_sdk.web.slack_response.SlackResponse(
+            client=None,
+            http_verb="POST",
+            api_url="https://slack.com/api/chat.postMessage",
+            req_args={},
+            data=json.loads(ans.response.body),
+            headers={},
+            status_code=200,
+        )
+        response.validate()
+        return response["message"]
+
+    reply = answer(b'{"channel": "C1", "thread_ts": "1700000000.000100", "text": "on it"}')
+    top = answer(b'{"channel": "C1", "text": "hi"}')
+    assert reply["thread_ts"] == "1700000000.000100"
+    assert "thread_ts" not in top
+
+
 def test_an_unlisted_slack_route_does_not_get_the_slack_envelope():
     """`ok: true` is a claim of success, and we only know what success looks like for a route the
     maps claim. Answering an unmapped call with the envelope sends slack_sdk down its success

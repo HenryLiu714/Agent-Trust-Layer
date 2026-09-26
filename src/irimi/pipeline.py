@@ -38,6 +38,12 @@ ANSWERED_BY_HEADER = "irimi-answered-by"
 # header is what tells the response side that this page follows the minted refund, so the effects
 # do not prepend it a second time. Unknown *query* parameters were not an option - Stripe rejects
 # them with a 400 - and a header costs the agent nothing and shows up in any capture.
+#
+# ONLY IRIMI EVER SETS IT. One on the agent's own request is a forgery: the response side reads it
+# to decide a page already follows a minted refund, so an agent that sent one could suppress its
+# own refund from that page. `IrimiAddon.request` strips it off every incoming flow and off the
+# Request the trace records, before the decision and whatever the write log holds, and
+# `ServiceOverlay.rewrite` strips it again for callers that do not come through the engine (#53).
 REWROTE_HEADER = "irimi-rewrote"
 LIVE_ANSWER: AnsweredBy = "live"
 

@@ -5,7 +5,7 @@ import json
 import logging
 import socket
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from urllib.parse import urlsplit
 
 from mitmproxy import ctx, http
@@ -269,6 +269,18 @@ class IrimiAddon:
                 )
                 flow.response = http.Response.make(400, b"irimi: could not rewrite request\n")
                 return
+        # IRIMI'S OWN WIRE VOCABULARY IS NEVER THE AGENT'S (#53). Before the decision and whatever
+        # the write log holds - `_strip_agent_rewrote` says why not on the rewrite path. After
+        # the reverse door, so `req` is the request as it will be forwarded and recorded.
+        #
+        # Guarded, like everything else in this hook: a raise here would forward the flow
+        # untouched - a write included - and a header left on is only what happened before #53.
+        try:
+            req = self._strip_agent_rewrote(flow, req)
+        except Exception as exc:
+            logger.warning(
+                "irimi: could not strip an agent-sent %s: %s", pipeline.REWROTE_HEADER, exc
+            )
         # THE NEVER-RAISE RULE, stated once for the whole decision rather than per call site.
         #
         # mitmproxy forwards a flow untouched when a hook raises. Every statement between here
@@ -419,7 +431,41 @@ class IrimiAddon:
         elif pipeline.REWROTE_HEADER in flow.request.headers:
             # The overlay stripped one the agent sent: only irimi may tell the service side that a
             # page follows a minted refund, so the agent's own never reaches the real service.
+            # `request()` strips it before the decision since #53, so this only runs if that
+            # strip raised.
             del flow.request.headers[pipeline.REWROTE_HEADER]
+
+    def _strip_agent_rewrote(self, flow: http.HTTPFlow, req: Request) -> Request:
+        """Take an agent-sent `Irimi-Rewrote` off the flow and off the recorded request (#53).
+
+        `Irimi-Rewrote` is irimi's own vocabulary: irimi puts it on a read it translated, naming
+        the query pair it dropped, and `stripe._refunds_list` reads it on the way back to know
+        this page already follows a minted refund (#43). One the AGENT sent is a forgery that
+        would suppress the agent's own minted refund from a list page.
+
+        `ServiceOverlay.rewrite` strips one too, and that guard stays - the overlay is called
+        directly by `tests/test_overlay.py` and will be called by Phase 5's replay, neither of
+        which comes through here. But the engine only enters the rewrite path once the write log
+        holds a write, so that strip could not run before the run's first faked write, and the
+        forged header was forwarded to the real service intact. Two more holes closed by moving
+        it here: an `llm` or `telemetry` kind is forwarded live and never went near the rewrite
+        path at all, and the snapshot `request()` takes can be empty while a concurrent write
+        lands before this read's `response` hook - `response()` tests `self.write_log`, the live
+        list, so `_overlaid` does run and `ServiceOverlay._apply` reads the forged header off the
+        recorded request.
+
+        Both sides, because they answer different questions: `flow.request.headers` is what
+        mitmproxy forwards to the service, and the returned `Request` is what the trace records -
+        a trace showing a header irimi did not set is its own small untruth. `del` on a
+        mitmproxy `Headers` removes every instance of the name, which is what a forged repeat
+        would need. The same object back when there was nothing to strip, so the common path
+        allocates nothing and `_rewrite_read`'s identity check keeps meaning "nothing to do".
+        """
+        if pipeline.REWROTE_HEADER not in flow.request.headers:
+            return req
+        del flow.request.headers[pipeline.REWROTE_HEADER]
+        kept = tuple((k, v) for k, v in req.headers if k != pipeline.REWROTE_HEADER)
+        return replace(req, headers=kept)
 
     def _to_target(self, flow: http.HTTPFlow, req: Request, forward: delegation.ForwardTo) -> None:
         """Point the flow at its answer target, the way `_through_reverse_door` points it upstream.

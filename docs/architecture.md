@@ -12,7 +12,9 @@ per flow. Each hook calls plain functions from the layers below it, in this orde
 
 1. **`request`** - `pipeline.parse` normalises the wire request. `reverse_door.detect_door`
    decides whether it came in as `/<host>/<path>` on the listener itself, and if so
-   `reverse_door.rewrite_reverse` points it upstream. Then `pipeline.classify` says what it is
+   `reverse_door.rewrite_reverse` points it upstream. Any `Irimi-Rewrote` the agent itself sent
+   is stripped here, off the flow and off the recorded request: that header is irimi's own
+   vocabulary, and the response side believes it (#53). Then `pipeline.classify` says what it is
    (`read`, `write`, `llm`, `telemetry`, `unknown`), `pipeline.attribute_run` picks the run id, and
    the `AnswerPolicy` decides: forward live, delegate to an answer target (`delegation.delegate`
    chose it; `_to_target` rewrites the flow), or answer it locally (`echo`: the route's L1
@@ -106,6 +108,12 @@ twice - once where a configuration is loaded and again at the decision it protec
   a live forward carries none, because absence is how a client tells the real service's response
   from ours. `tests/test_invariants.py` checks this against a real run and against policies
   built to break it.
+- **Irimi's own wire vocabulary is never the agent's.** `Irimi-Rewrote` names the query pair irimi
+  dropped from a read it translated, and the response side reads it to decide a page already
+  follows a minted refund - so an agent-sent one could suppress the agent's own refund from that
+  page. It is stripped in the `request` hook, before the decision and whatever the write log
+  holds, and again in `ServiceOverlay.rewrite` for callers that do not come through the engine
+  (#53).
 - **Targets stay on the machine.** A target must be loopback unless `--allow-target-host` says
   otherwise; a credential-path host (`hooks.slack.com`) has no such escape; irimi's own listener
   is never a target; credential headers are stripped unless the route opts in. `netaddr` is the

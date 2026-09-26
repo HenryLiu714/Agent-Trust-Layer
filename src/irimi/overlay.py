@@ -111,6 +111,10 @@ class ServiceOverlay:
         # the one that is true here. Same rule as `pipeline.respond`'s. It is stripped before the
         # guard, so no path - a rewrite, an early return, a raise - hands `_apply` and
         # `stripe._refunds_list` a header the agent sent to suppress the minted refund (#43).
+        # Since #53 the engine strips it too, off every flow and before the decision, because this
+        # one only runs on the rewrite path and that path is closed until the log holds a write.
+        # Both stay: this is the guard for a caller that is not the engine - `tests/test_overlay.py`
+        # today, Phase 5's replay over recorded reads later.
         kept = tuple((k, v) for k, v in read_request.headers if k != pipeline.REWROTE_HEADER)
         # The same object when there was nothing to strip, so the engine's `is` check still
         # means "nothing to do".

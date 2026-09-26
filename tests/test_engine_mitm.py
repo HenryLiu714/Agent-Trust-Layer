@@ -34,10 +34,12 @@ from irimi.store import NullStore
 
 
 class _Upstream(BaseHTTPRequestHandler):
-    seen: list = []  # (path, headers) of every GET, so a test can see what was forwarded
+    # (path, header pairs) of every GET, so a test can see what was forwarded. Pairs, not a dict:
+    # a dict keeps one of a repeated name, and "exactly once on the wire" is a claim (#53).
+    seen: list = []
 
     def do_GET(self):
-        _Upstream.seen.append((self.path, dict(self.headers)))
+        _Upstream.seen.append((self.path, self.headers.items()))
         body = b"hello from upstream"
         self.send_response(200)
         if self.path == "/badgzip":  # claims gzip, is not: an undecodable body
@@ -1895,7 +1897,7 @@ def test_a_rewritten_read_reaches_the_upstream_translated_and_is_recorded_that_w
     assert status == 200
     ((path, received),) = _Upstream.seen
     assert path == "/hello?limit=1"
-    assert {k.lower(): v for k, v in received.items()}[stamp[0]] == stamp[1]
+    assert {k.lower(): v for k, v in received}[stamp[0]] == stamp[1]
     ex = seen[-1]
     assert ex.request.query == "limit=1"
     assert stamp in ex.request.headers
@@ -1931,6 +1933,9 @@ def test_the_overlay_is_not_asked_about_a_read_before_any_write(tmp_path, monkey
     finally:
         stop()
     assert status == 200
+    # The gate #53 deliberately did NOT widen: the header is stripped by the engine instead, so
+    # the overlay still sees no read until the write log holds a write (Notion, § Architecture
+    # changes).
     assert (overlay.calls, overlay.rewrites) == (0, 0)
     assert seen[-1].overlay is None
 
@@ -1938,7 +1943,12 @@ def test_the_overlay_is_not_asked_about_a_read_before_any_write(tmp_path, monkey
 def test_a_rewrote_header_the_agent_sent_is_not_forwarded_upstream(tmp_path, monkeypatch, upstream):
     """Only irimi may tell the response side that a page follows a minted refund. The overlay
     strips an agent's own `irimi-rewrote`, and the engine has to carry that onto the flow too, or
-    the header reaches the real service anyway (#43)."""
+    the header reaches the real service anyway (#43).
+
+    Since #53 the engine strips it in `request()` before the overlay is asked, so this now holds
+    even for an overlay whose `rewrite` strips nothing. It stays as the non-empty-log twin of
+    `test_a_rewrote_header_the_agent_sent_is_stripped_before_the_runs_first_write`.
+    """
     from dataclasses import replace
 
     def strip(request):
@@ -1958,7 +1968,116 @@ def test_a_rewrote_header_the_agent_sent_is_not_forwarded_upstream(tmp_path, mon
     assert status == 200
     ((path, received),) = _Upstream.seen
     assert path == "/hello"
-    assert pipeline.REWROTE_HEADER not in {k.lower() for k in received}
+    assert pipeline.REWROTE_HEADER not in {k.lower() for k, _ in received}
+
+
+def test_a_rewrote_header_the_agent_sent_is_stripped_before_the_runs_first_write(
+    tmp_path, monkeypatch, upstream
+):
+    """#53. The engine's rewrite path is closed until the write log holds a write, so the overlay's
+    own strip could not run - and irimi's vocabulary reached the real service on a read irimi did
+    not touch. The engine strips it in `request()` now, whatever the log holds.
+
+    `_start` with no overlay gives `NoOverlay`, whose `rewrite` returns the request it was handed,
+    so nothing but the engine could have removed the header here. Sent twice, in two spellings:
+    a forged repeat has to lose every instance, not the first.
+    """
+    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch))
+    eng, seen, stop = _start(cfg)
+    try:
+        addon = next(a for a in eng._master.addons.chain if isinstance(a, IrimiAddon))
+        status, _, _ = _read_via_proxy(
+            eng.listen_port(),
+            f"http://127.0.0.1:{upstream}/hello",
+            extra_headers={
+                pipeline.REWROTE_HEADER: "starting_after=re_FORGED",
+                "Irimi-Rewrote": "starting_after=re_FORGED2",
+            },
+        )
+        assert addon.write_log == [], "this test is about the empty-log path"
+    finally:
+        stop()
+    assert status == 200
+    ((path, received),) = _Upstream.seen
+    assert path == "/hello"
+    assert pipeline.REWROTE_HEADER not in {k.lower() for k, _ in received}
+
+
+def test_a_rewrote_header_the_agent_sent_is_kept_out_of_the_recorded_request(
+    tmp_path, monkeypatch, upstream
+):
+    """The Exchange records what irimi asked the service. It did not ask with this header, and the
+    response side reads the recorded request - `ServiceOverlay._apply` looks for `Irimi-Rewrote`
+    there - so leaving it on would let a forgery be believed by a later hook (#53)."""
+    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch))
+    eng, seen, stop = _start(cfg)
+    try:
+        _read_via_proxy(
+            eng.listen_port(),
+            f"http://127.0.0.1:{upstream}/hello",
+            extra_headers={pipeline.REWROTE_HEADER: "starting_after=re_FORGED"},
+        )
+    finally:
+        stop()
+    assert [k for k, _ in seen[-1].request.headers if k == pipeline.REWROTE_HEADER] == []
+
+
+def test_only_irimis_own_rewrote_header_reaches_the_upstream(tmp_path, monkeypatch, upstream):
+    """The forgery is gone and irimi's own is there, exactly once. Two headers of one name would
+    make `stripe._refunds_list` read whichever mitmproxy happened to hand it first (#53)."""
+    from dataclasses import replace
+
+    stamp = (pipeline.REWROTE_HEADER, "starting_after=re_MINTED1")
+
+    def translate(request):
+        assert all(k != pipeline.REWROTE_HEADER for k, _ in request.headers), (
+            "the engine strips the agent's before the overlay is asked"
+        )
+        return replace(request, query="limit=1", headers=request.headers + (stamp,))
+
+    overlay = _OverlayDouble(rewrite=translate)
+    eng, seen, stop = _engine_with_a_write(tmp_path, monkeypatch, upstream, overlay)
+    try:
+        status, _, _ = _read_via_proxy(
+            eng.listen_port(),
+            f"http://127.0.0.1:{upstream}/hello?limit=1&starting_after=re_MINTED1",
+            extra_headers={pipeline.REWROTE_HEADER: "starting_after=re_FORGED"},
+        )
+    finally:
+        stop()
+    assert status == 200
+    ((path, received),) = _Upstream.seen
+    assert path == "/hello?limit=1"
+    present = [v for k, v in received if k.lower() == pipeline.REWROTE_HEADER]
+    assert present == [stamp[1]]
+    assert [v for k, v in seen[-1].request.headers if k == pipeline.REWROTE_HEADER] == [stamp[1]]
+
+
+def test_a_write_carrying_a_rewrote_header_is_still_faked_and_records_none(
+    tmp_path, monkeypatch, upstream
+):
+    """A write is answered locally, so the header never leaves the machine either way - but it must
+    not survive on the recorded request, where a trace reader would read it as irimi's (#53)."""
+    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch))
+    eng, seen, stop = _start(cfg)
+    try:
+        status, headers, _ = _read_via_proxy(
+            eng.listen_port(),
+            f"http://127.0.0.1:{upstream}/things",
+            extra_headers={
+                pipeline.REWROTE_HEADER: "starting_after=re_FORGED",
+                "content-type": "application/json",
+            },
+            method="POST",
+            body=b"{}",
+        )
+    finally:
+        stop()
+    assert status == 200
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "fake-L0"
+    ex = seen[-1]
+    assert ex.kind == "write"
+    assert [k for k, _ in ex.request.headers if k == pipeline.REWROTE_HEADER] == []
 
 
 # ------------------------------------------------ the Stripe overlay, end to end (#43)
@@ -2182,6 +2301,69 @@ def test_the_refunds_list_shows_the_minted_refund_first(stripe_stub):
     status, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds")
     assert status == 200
     assert json.loads(data)["data"][0]["id"] == refund_id
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+
+
+class _HeldRefundsStub(_StripeStub):
+    """`_StripeStub`, except a refunds list is held at the upstream until the test lets it go, so
+    a write can land while the read is in flight."""
+
+    arrived = threading.Event()
+    release = threading.Event()
+
+    def do_GET(self):
+        if self.path.split("?", 1)[0] == "/v1/refunds":
+            _HeldRefundsStub.arrived.set()
+            _HeldRefundsStub.release.wait(10)
+        super().do_GET()
+
+
+def test_a_forged_rewrote_header_cannot_hide_a_refund_that_lands_mid_read(tmp_path, monkeypatch):
+    """The race #53 closed, which was a real forgery and not only noise. `request()` snapshots
+    the write log, empty here, so the read is never rewritten; the refund then lands before the
+    read's `response()`, which tests the live log and overlays the page. The overlay read the
+    agent's forged `Irimi-Rewrote: starting_after=...` off the recorded request, took the page
+    for the one after a minted refund, and left the refund off it."""
+    from irimi.overlay import ServiceOverlay
+
+    _StripeStub.seen = []
+    _HeldRefundsStub.arrived.clear()
+    _HeldRefundsStub.release.clear()
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _HeldRefundsStub)
+    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
+    stub = srv.server_address[1]
+    maps = _maps(tmp_path, monkeypatch, doc=STRIPE_MAP)
+    eng, _, stop = _start(_config(tmp_path, monkeypatch, maps=maps), overlay=ServiceOverlay(maps))
+    read: dict = {}
+
+    def list_refunds():
+        read["result"] = _read_via_proxy(
+            eng.listen_port(),
+            f"http://127.0.0.1:{stub}/v1/refunds",
+            extra_headers={pipeline.REWROTE_HEADER: "starting_after=re_FORGED"},
+        )
+
+    reader = threading.Thread(target=list_refunds)
+    try:
+        reader.start()
+        assert _HeldRefundsStub.arrived.wait(10), "the read never reached the upstream"
+        status, data = _via_proxy(
+            eng.listen_port(),
+            "POST",
+            f"http://127.0.0.1:{stub}/v1/refunds",
+            body=b"charge=ch_REAL1&amount=100",
+            extra_headers={"content-type": "application/x-www-form-urlencoded"},
+        )
+        assert status == 200
+        _HeldRefundsStub.release.set()
+        reader.join(10)
+    finally:
+        _HeldRefundsStub.release.set()
+        stop()
+        srv.shutdown()
+    status, headers, page = read["result"]
+    assert status == 200
+    assert json.loads(page)["data"][0]["id"] == json.loads(data)["id"]
     assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
 
 

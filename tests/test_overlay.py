@@ -2,10 +2,10 @@
 
 import json
 
+from irimi.bodies import MAX_BODY_BYTES
 from irimi.exchange import Exchange, Request, Response
 from irimi.overlay import ServiceOverlay
 from irimi.servicemap import MapIndex, Route, ServiceMap
-from irimi.writelog import MAX_BODY_BYTES
 
 STRIPE = ServiceMap(
     service="stripe",

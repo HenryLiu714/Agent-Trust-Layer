@@ -33,6 +33,7 @@ from collections.abc import Sequence
 from typing import Any
 from urllib.parse import parse_qsl, urlencode
 
+from irimi.bodies import SERVICE_OWNED, is_int
 from irimi.exchange import Request
 from irimi.pipeline import REWROTE_HEADER
 from irimi.services.model import (
@@ -53,9 +54,6 @@ SERVICE = "stripe"
 # Stripe's own default page size, and what a list read gets when it names no `limit`.
 DEFAULT_LIST_LIMIT = 10
 MAX_LIST_LIMIT = 100
-# Fields of a live object that are the service's answer and never a caller's argument. The same
-# set `echo.SERVICE_OWNED` keeps for the write side; a customer update may not move any of them.
-SERVICE_OWNED = frozenset({"id", "object", "created", "livemode"})
 # The `GET /v1/refunds` parameters the effects understand. Anything else means irimi cannot say
 # where the minted refund belongs on this page, and the read is `partial`. `expand` arrives as
 # `expand[0]`, so it is matched by prefix.
@@ -275,11 +273,7 @@ def _minted_refunds(writes: Sequence[Write]) -> list[Write]:
 
 def _int(value: Any) -> int:
     """`value` as a whole number of minor units, or 0. `bool` is an `int` and is not one here."""
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
-
-
-def _is_int(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
+    return value if is_int(value) else 0
 
 
 def _known_list_param(name: str) -> bool:
@@ -428,9 +422,9 @@ def _refund_verdict(proposal: Proposal, document: Any) -> Rejection | NotEvaluab
     charged, refunded = document.get("amount"), document.get("amount_refunded")
     # Both sides of the subtraction must be the charge's own numbers. `_int` reads a missing or
     # malformed one as 0, which would make every refund "too large" - a false rejection (#45).
-    if not (_is_int(charged) and _is_int(refunded)):
+    if not (is_int(charged) and is_int(refunded)):
         return NOT_EVALUABLE
-    if not _is_int(amount):
+    if not is_int(amount):
         # A refund posting no `amount` is Stripe's "refund whatever is left", which is never over
         # the remaining amount; one posting a malformed amount is the real service's to refuse,
         # not irimi's to guess at. Neither is a failure to evaluate the charge (#45).

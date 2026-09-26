@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Protocol
 
-from irimi import echo, pipeline, services, writelog
+from irimi import bodies, pipeline, services, writelog
 from irimi.exchange import Exchange, OverlayFidelity, Request, Response
 from irimi.servicemap import MapIndex
 
@@ -142,16 +142,16 @@ class ServiceOverlay:
         writes = writelog.decode(service, read_request, write_log)
         if not writes:
             return Overlaid(upstream_response)
-        document = writelog.json_object(upstream_response.body)
+        document = bodies.json_object(upstream_response.body)
         if document is None:
             # A body the overlay cannot read is a body it cannot apply the run's writes to. The
             # agent still gets exactly what the service sent; the exchange says it is incomplete.
             return Overlaid(upstream_response, "partial")
         # Reflected here, past the early returns, so a service with no effects table or a run
-        # with no writes for it parses nothing. `echo.reflect` never raises and reflects `{}` for
+        # with no writes for it parses nothing. `bodies.reflect` never raises and reflects `{}` for
         # a body it cannot read, so it needs no guard of its own (#44).
         read = services.Read(
-            operation=operation, request=read_request, posted=echo.reflect(read_request)
+            operation=operation, request=read_request, posted=bodies.reflect(read_request)
         )
         applied = effects(read, document, writes)
         rewrote = read_request.header(pipeline.REWROTE_HEADER) is not None
@@ -190,9 +190,9 @@ class ServiceOverlay:
         writes = writelog.decode(service, read_request, write_log)
         if not writes:
             return read_request
-        # Past the early returns, like `_apply`'s; `echo.reflect` never raises (#44).
+        # Past the early returns, like `_apply`'s; `bodies.reflect` never raises (#44).
         read = services.Read(
-            operation=operation, request=read_request, posted=echo.reflect(read_request)
+            operation=operation, request=read_request, posted=bodies.reflect(read_request)
         )
         rewritten = rewrite(read, writes)
         if rewritten is None:

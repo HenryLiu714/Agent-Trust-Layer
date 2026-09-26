@@ -2,7 +2,7 @@
 
 import json
 
-from irimi import writelog
+from irimi import bodies, writelog
 from irimi.exchange import Exchange, Request, Response
 
 ANSWER = {
@@ -72,6 +72,6 @@ def test_a_write_with_no_response_or_a_body_that_is_not_a_json_object_is_skipped
 
 
 def test_a_body_over_the_size_cap_is_not_a_json_object():
-    padded = json.dumps({"description": "x" * writelog.MAX_BODY_BYTES}).encode()
-    assert writelog.json_object(padded) is None
-    assert writelog.json_object(b'{"ok": true}') == {"ok": True}
+    padded = json.dumps({"description": "x" * bodies.MAX_BODY_BYTES}).encode()
+    assert bodies.json_object(padded) is None
+    assert bodies.json_object(b'{"ok": true}') == {"ok": True}

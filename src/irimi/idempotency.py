@@ -14,7 +14,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any
 
-from irimi import echo, services
+from irimi import bodies, services
 from irimi.exchange import AnsweredBy, PreconditionOutcome, Request
 from irimi.servicemap import Route
 
@@ -82,14 +82,14 @@ def canonical(request: Request, route: Route) -> Canonical:
 
     The fields are the caller's own minus the route's `volatile:` names - the map already marks
     `idempotency_key` on `refunds.create` - because a field that always differs between two
-    sendings must not make every retry look like a different request. `echo.reflect` is the one
+    sendings must not make every retry look like a different request. `bodies.reflect` is the one
     never-raising parser for both form and JSON bodies, and it is what `writelog` and the
     preconditions read a request with, so the store compares the same view of the write they do.
     The method, path and query are in front of it because a key names one write and not one
     route: without them a write whose parameters are all in its path - `payment_intents.cancel`
     posts nothing at all - is indistinguishable from every other write on the same route.
     """
-    posted = echo.reflect(request)
+    posted = bodies.reflect(request)
     fields = {name: value for name, value in posted.items() if name not in route.volatile}
     return request.method, request.path, request.query, fields
 

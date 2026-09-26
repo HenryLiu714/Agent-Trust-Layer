@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from irimi import echo, idempotency, pipeline, services, writelog
+from irimi import bodies, echo, idempotency, pipeline, services, writelog
 from irimi.delegation import ForwardTo, delegate
 from irimi.exchange import (
     FIDELITY_DELEGATED_FLAG,
@@ -143,15 +143,15 @@ class UpstreamReader:
 
 
 def _capped(status: int, headers: Any, body: Any) -> Response | None:
-    """The response, or None when its body is past `writelog.MAX_BODY_BYTES`.
+    """The response, or None when its body is past `bodies.MAX_BODY_BYTES`.
 
     Read with a cap rather than whole, so a huge body cannot be pulled into memory on the answer
-    path only to be refused by `writelog.json_object` afterwards (#45).
+    path only to be refused by `bodies.json_object` afterwards (#45).
     """
-    data = body.read(writelog.MAX_BODY_BYTES + 1)
-    if len(data) > writelog.MAX_BODY_BYTES:
+    data = body.read(bodies.MAX_BODY_BYTES + 1)
+    if len(data) > bodies.MAX_BODY_BYTES:
         logger.warning(
-            "irimi: a precondition read answered more than %d bytes", writelog.MAX_BODY_BYTES
+            "irimi: a precondition read answered more than %d bytes", bodies.MAX_BODY_BYTES
         )
         return None
     return Response(status=status, headers=tuple(headers), body=data)
@@ -271,7 +271,7 @@ class ShadowPolicy:
             # mitmproxy forward the flow, and a forwarded write escapes shadow mode - an empty
             # object is far better. L0 is the floor whatever failed above it.
             logger.exception("irimi: the local answer failed; answering with an empty object")
-            fake = echo.Fake(b"{}", echo.JSON_CT)
+            fake = echo.Fake(b"{}", bodies.JSON_CT)
         answer = Answer(
             answered_by=fake.answered_by,
             response=Response(
@@ -325,7 +325,7 @@ class ShadowPolicy:
                     "irimi: no precondition named %r for %s", route.precondition, service
                 )
                 return "not_evaluable", issued, None, ""
-            proposal = services.Proposal(classification.operation, echo.reflect(request))
+            proposal = services.Proposal(classification.operation, bodies.reflect(request))
             probe = check.probe(proposal)
             if probe is None:
                 return "not_evaluable", issued, None, ""
@@ -364,7 +364,7 @@ class ShadowPolicy:
             # place Slack's `ts` watermark can learn from the one read that exists to make the
             # fake honest (#42).
             echo.observe_read(service, response.body)
-            document: Any = writelog.json_object(response.body)
+            document: Any = bodies.json_object(response.body)
             if document is None:
                 return "not_evaluable", issued, None, ""
             effects = services.EFFECTS.get(service)
@@ -374,7 +374,7 @@ class ShadowPolicy:
                     read = services.Read(
                         operation=probe_cls.operation,
                         request=probe_request,
-                        posted=echo.reflect(probe_request),
+                        posted=bodies.reflect(probe_request),
                     )
                     # The same effects the overlay applies to a live read, so the check sees the
                     # world the agent would see. For Slack's `conversations.info` they hand the
@@ -497,7 +497,7 @@ def _remember(
     if slot is None or answer.response is None:
         return
     try:
-        content_type = answer.response.header("content-type") or echo.JSON_CT
+        content_type = answer.response.header("content-type") or bodies.JSON_CT
         store.put(
             slot[0],
             slot[1],

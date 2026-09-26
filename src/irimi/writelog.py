@@ -7,16 +7,10 @@ not import each other. It is its own job in any case - turning `Exchange`es into
 recording with the same function.
 """
 
-import json
 from collections.abc import Sequence
-from typing import Any
 
-from irimi import echo, services
+from irimi import bodies, services
 from irimi.exchange import Exchange, Request
-
-# A live body this size is not an object any service's effects model, and parsing it on the answer
-# path would cost more than the read or the check it is trying to improve.
-MAX_BODY_BYTES = 2_000_000
 
 
 def decode(service: str, request: Request, write_log: Sequence[Exchange]) -> list[services.Write]:
@@ -33,13 +27,13 @@ def decode(service: str, request: Request, write_log: Sequence[Exchange]) -> lis
             continue
         if scope(service, exchange.request) != wanted:
             continue
-        answer = json_object(exchange.response.body)
+        answer = bodies.json_object(exchange.response.body)
         if answer is None:
             continue
         out.append(
             services.Write(
                 operation=exchange.operation,
-                posted=echo.reflect(exchange.request),
+                posted=bodies.reflect(exchange.request),
                 answer=answer,
             )
         )
@@ -49,14 +43,3 @@ def decode(service: str, request: Request, write_log: Sequence[Exchange]) -> lis
 def scope(service: str, request: Request) -> tuple[str, ...]:
     names = services.SCOPE_HEADERS.get(service, ())
     return tuple(request.header(name) or "" for name in names)
-
-
-def json_object(body: bytes) -> dict[str, Any] | None:
-    """`body` as a JSON object, or None when it is not one irimi should decode."""
-    if not body or len(body) > MAX_BODY_BYTES:
-        return None
-    try:
-        parsed = json.loads(body)
-    except Exception:
-        return None
-    return parsed if isinstance(parsed, dict) else None

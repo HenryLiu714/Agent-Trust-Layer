@@ -3000,7 +3000,9 @@ def test_an_overlaid_read_is_listed_under_the_write_it_saw_through_the_proxy(
     unedited, so it owes no line either way."""
     proxy, stub, seen = precondition_stub
     lines = _refund_then_list_summary(proxy, stub, seen, tmp_path, monkeypatch)
-    write = lines.index("  ○ refund 4900 on ch_REAL1  unvalidated (L3 preconditions passed)")
+    # `$49.00` and not `4900` since #60: the write names no currency, and irimi's own precondition
+    # read of `ch_REAL1` found `usd` on the charge.
+    write = lines.index("  ○ refund $49.00 on ch_REAL1  unvalidated (L3 preconditions passed)")
     assert lines[write + 1] == "    ↳ GET /v1/refunds saw it  overlay"
     assert [line for line in lines if "↳" in line] == [lines[write + 1]]
     assert lines[2] == (

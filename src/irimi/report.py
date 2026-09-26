@@ -160,11 +160,13 @@ def _plural(count: int, word: str) -> str:
 def money(minor_units: int, currency: str) -> str:
     """Minor units as the amount a person reads: `money(4900, "usd")` -> `$49.00`.
 
-    The currency comes from the request, because nothing else in a shadow run knows it: the
-    charge it refers to was read live and we do not carry its fields across exchanges (that is
-    the overlay's job, Phase 2). A body that names no currency therefore gets no formatting at
-    all - see `_field_value`. Dividing by 100 without knowing the currency would print ¥49.00
-    for a 4900-yen refund, which is a wrong number rather than an unformatted one.
+    The currency comes from the request first, and from `Exchange.currency` second - the code the
+    write's L3 precondition read found on the object it named, put there by the policy and never
+    by a default (#60). Those are the only two sources: a write with no such read, or one whose
+    read named no currency, gets no formatting at all (see `_field_value` and `render_human`).
+    Dividing by 100 without knowing the currency would print ¥49.00 for a 4900-yen refund, which
+    is a wrong number rather than an unformatted one, and that is why the fallback is a document
+    irimi really read and not the first currency it can find.
     """
     code = currency.lower()
     figure = f"{minor_units}" if code in ZERO_DECIMAL_CURRENCIES else f"{minor_units / 100:.2f}"
@@ -177,7 +179,11 @@ def _is_amount(name: str) -> bool:
 
 
 def _field_value(name: str, value: object, currency: object) -> str:
-    """One template field, rendered. Amounts are minor units; everything else is what was sent."""
+    """One template field, rendered. Amounts are minor units; everything else is what was sent.
+
+    `currency` is whatever `render_human` resolved - the request's, or the L3 read's (#60) - and
+    the guard below is what makes "" mean "print it as it was sent".
+    """
     if _is_amount(name) and isinstance(value, int) and isinstance(currency, str) and currency:
         return money(value, currency)
     return str(value)
@@ -191,12 +197,21 @@ def render_human(template: str, exchange: Exchange, route: Route | None) -> str:
     the one parser that already knows Stripe's bracketed form encoding. A hole with no field
     renders `?` rather than disappearing: a summary that silently drops what it could not read
     would claim to describe a write it did not fully understand.
+
+    The currency is the one field that may come from outside the request: a write whose L3
+    precondition read named one carries it on the exchange, and it fills in for a request that
+    named none (#60). The request still wins when it named one.
     """
     fields: dict[str, object] = {}
     if route is not None:
         fields.update(path_params(route.path, exchange.request.path))
     fields.update(reflect(exchange.request))
-    currency = fields.get("currency")
+    # The request first, because it is what the caller actually said. Then the currency irimi read
+    # off the object this write names, before faking it - the L3 precondition read (#60). A write
+    # that named none and had no such read still has "" here and still prints minor units, which
+    # is the whole of `money`'s rule. `or` and not `setdefault`: a body that sent `currency=` sent
+    # nothing, and a field that is not a non-empty string is not a currency.
+    currency = fields.get("currency") or exchange.currency
 
     def one(match: re.Match[str]) -> str:
         name = match.group(1)

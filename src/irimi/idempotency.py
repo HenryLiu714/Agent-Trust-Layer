@@ -119,7 +119,7 @@ class Slot:
 
 
 def slot_for(request: Request, classification: Classification, run_id: str) -> Slot | None:
-    """`(slot, canonical params, the key the caller sent)` for a write the store covers, else None.
+    """The `Slot` a write the store covers occupies, else None.
 
     Three conditions, each the literal reading of "mapped Stripe writes" (#46). The route must be
     matched, because `volatile:` is what makes two sendings comparable and an unmapped POST has

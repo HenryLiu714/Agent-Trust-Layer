@@ -70,8 +70,8 @@ def test_the_shipped_slack_fixtures_hold_the_message_object():
     assert message["type"] == "message"
     assert re.fullmatch(r"\d+\.\d{6}", message["ts"])
     # A null placeholder, not a value: the field is here so a threaded post's own `thread_ts` can
-    # be reflected onto it, and `echo.SlackEnvelope.optional` drops it again when none was posted
-    # (#55). A non-null value here would ship a thread the caller never named.
+    # be reflected onto it, and `echo.slack.SlackEnvelope.optional` drops it again when none was
+    # posted (#55). A non-null value here would ship a thread the caller never named.
     assert message["thread_ts"] is None
 
 

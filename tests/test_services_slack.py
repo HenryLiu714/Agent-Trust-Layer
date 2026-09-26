@@ -22,8 +22,8 @@ def _message(ts, text="hi", user=BOT):
 
 
 def _post_write(channel="C0123", ts=MINTED1, text="hi", **posted):
-    """A `chat.postMessage` as `echo.slack_l1_body` answers it: the envelope echoes the posted
-    channel verbatim, and `message.ts` is the envelope's minted `ts`."""
+    """A `chat.postMessage` as `echo.slack.slack_l1_body` answers it: the envelope echoes the
+    posted channel verbatim, and `message.ts` is the envelope's minted `ts`."""
     return Write(
         operation="chat.postMessage",
         posted={"channel": channel, "text": text, **posted},

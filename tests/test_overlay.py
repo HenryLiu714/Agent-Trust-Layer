@@ -112,7 +112,7 @@ def _write_exchange(headers=(), refund_id=MINTED):
 
 
 def _slack_post_exchange(ts, channel="C0123", headers=(), thread_ts=None):
-    """A faked `chat.postMessage`, answered in `echo.SLACK_ENVELOPES`' shape (#42)."""
+    """A faked `chat.postMessage`, answered in `echo.slack.SLACK_ENVELOPES`' shape (#42)."""
     posted = {"channel": channel, "text": "refund issued"}
     if thread_ts is not None:
         posted["thread_ts"] = thread_ts

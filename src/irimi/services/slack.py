@@ -17,7 +17,9 @@ Two rules run through all of it, both inherited from `stripe.py`:
   one the agent can never see in production. The one exception is `THREAD_FIELDS`, below: Slack's
   own closed set, added to a parent whose first reply the run faked. The rule is about *live*
   objects, so it does not reach a message irimi minted itself: `_posts` completes its own copy of a
-  faked reply with the `thread_ts` the caller posted, which real Slack would have sent (#55).
+  faked reply with the `thread_ts` the caller posted, which real Slack would have sent. Since #55
+  the shipped fixture names the field and the write's own answer already carries it, so that is
+  normally a no-op - it stays for a map whose own fixture does not name it.
 * **Say `partial` rather than half-apply.** A page the table does not model, a parameter it cannot
   read, a channel it cannot tell is the one asked about, a post whose answer carries no message to
   show: the document is left exactly as Slack sent it and the exchange records that the world irimi
@@ -310,9 +312,12 @@ def _posts(writes: Sequence[Write]) -> list[_Post]:
             # `conversations.replies` page, which is a body production cannot produce: the untruth
             # `THREAD_FIELDS` exists to stop, on the reply's side of the thread. Written onto this
             # copy only, never the write log's own message. `parent_user_id` stays out: it is the
-            # parent's field, not always on the page, and not one irimi always knows. The write's
-            # OWN answer still omits `thread_ts` because the fixture never names it for
-            # `echo._reflect_over` to write over; that half is #55. Decided Sep 25, 2026 (#44).
+            # parent's field, not always on the page, and not one irimi always knows. Decided
+            # Sep 25, 2026 (#44). Since #55 the shipped fixture names `thread_ts` and the write's
+            # own answer carries it, so for that fixture this assignment writes the value it
+            # already holds; it stays because a map naming a fixture whose `message` lacks the
+            # field would otherwise put a reply with no thread on a replies page, which is the
+            # body production cannot produce that `THREAD_FIELDS` exists to stop.
             own["thread_ts"] = thread_ts
         out.append(
             _Post(

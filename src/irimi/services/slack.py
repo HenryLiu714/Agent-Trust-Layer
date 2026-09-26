@@ -23,7 +23,10 @@ Two rules run through all of it, both inherited from `stripe.py`:
 * **Say `partial` rather than half-apply.** A page the table does not model, a parameter it cannot
   read, a channel it cannot tell is the one asked about, a post whose answer carries no message to
   show: the document is left exactly as Slack sent it and the exchange records that the world irimi
-  showed is incomplete.
+  showed is incomplete. The one place a body is replaced outright rather than edited is
+  `_minted_thread`: a `conversations.replies` of a thread irimi minted has no live body to be
+  incomplete about, and Slack's `thread_not_found` is about a thread only irimi's write log holds
+  (#52).
 
 Slack's reads are POSTs, so every parameter comes from `read.posted` - the read's own body, which
 the overlay reflected - and never from the query string. A form body delivers `oldest=0` as an int
@@ -100,10 +103,20 @@ def apply_read(read: Read, document: Any, writes: Sequence[Write]) -> Applied:
         return Applied(document)
     posts = _posts(writes)
     if document.get("ok") is not True:
-        # Never edit an error: half-turning it into a success is the untruth this module's header
-        # forbids. It is `partial` when the run holds a post this read would have shown. That
-        # includes `conversations.replies` of a thread irimi minted, which Slack answers
-        # `thread_not_found` at HTTP 200; answering it from the write log is #52.
+        # A `conversations.replies` naming a thread whose parent irimi MINTED is a read of an
+        # object Slack has never heard of, so `thread_not_found` is not news about the world - it
+        # is Slack answering about a thread that exists only in irimi's write log. That one is
+        # answered from the log, by the same rule as `stripe._refund_retrieve` (#52). Slack sends
+        # its error at HTTP 200, so no status moves here; Stripe's is a 404 and one does. That
+        # difference is the services' wire shapes and not irimi's truth about a minted object.
+        #
+        # Every OTHER error body is still left exactly as Slack sent it: half-turning an error into
+        # a success is the untruth this module's header forbids. It is `partial` when the run holds
+        # a post this read would have shown - including a minted thread `_minted_thread` declined,
+        # which is the honest answer for a page irimi cannot build.
+        minted = _minted_thread(read, posts)
+        if minted is not None:
+            return minted
         return Applied(document, partial=any(_would_apply(read, post) for post in posts))
     if read.operation == "conversations.history":
         return _history(read, document, posts)
@@ -210,6 +223,58 @@ def _replies(read: Read, document: dict[str, Any], posts: Sequence[_Post]) -> Ap
             document["messages"] = messages + [p.message for p in sorted(tail, key=_order)]
             changed = True
     return Applied(document, changed=changed, partial=partial)
+
+
+def _minted_thread(read: Read, posts: Sequence[_Post]) -> Applied | None:
+    """The thread of a parent irimi minted, built from the run's own posts (#52).
+
+    Built rather than edited, because there is no live body to preserve: Slack answered
+    `thread_not_found`, and every message in this thread is one irimi minted. Slack's shape for it
+    is the parent first, then the replies oldest-first, `has_more: false` - and a thread of this
+    run's own posts has exactly one page. `_threads` then moves the parent's own thread fields, so
+    a reader sees `reply_count` beside the replies it is counting, which is the whole reason
+    `THREAD_FIELDS` may add fields at all.
+
+    None - and the caller's `partial` - for every way the page cannot be built honestly: a read
+    that is not `conversations.replies`, a `ts` that is not a string, a parameter the effects
+    cannot read, a `ts` this run did not mint as a THREAD PARENT, a REPLY whose answer carried no
+    message to show (the fixture failed and the write degraded to `fake-L0`), and any message
+    whose channel `_in_channel` will not answer a definite True for. That last one is stricter
+    than the editing path's `is not False`: leaving a post off a page is one kind of incomplete,
+    and building a whole page for a channel irimi cannot match is another kind of wrong.
+
+    The `parent.message is None` guard below cannot fire today, and is kept for narrowing and for
+    safety: `_Post.ts` is read off the message, so a PARENT whose answer carried none has
+    `ts is None` and never matches the thread being asked about. Such a post is invisible to
+    `_would_apply` too, so that read is left unflagged rather than `partial` - a pre-existing gap
+    whose root is `_posts` ignoring the envelope's own minted `ts`, filed as #64 rather than
+    widened into this issue.
+    """
+    if read.operation != "conversations.replies":
+        return None
+    posted = read.posted
+    thread = posted.get("ts")
+    if not isinstance(thread, str):
+        return None
+    if any(name not in REPLIES_PARAMS for name in posted):
+        return None
+    channel = posted.get("channel")
+    parent = next((p for p in posts if p.thread_ts is None and p.ts == thread), None)
+    if parent is None or parent.message is None:
+        return None
+    if _in_channel(parent.channel, channel) is not True:
+        return None
+    replies = [p for p in posts if p.thread_ts == thread]
+    if any(p.message is None or _in_channel(p.channel, channel) is not True for p in replies):
+        return None
+    messages: list[Any] = [
+        dict(parent.message),
+        *(p.message for p in sorted(replies, key=_order)),
+    ]
+    _, unsure = _threads(messages, posts, channel)
+    return Applied(
+        {"ok": True, "messages": messages, "has_more": False}, changed=True, partial=unsure
+    )
 
 
 def _threads(messages: list[Any], posts: Sequence[_Post], channel: Any) -> tuple[bool, bool]:

@@ -49,11 +49,21 @@ class Applied:
 
     `changed` and `partial` are independent: a page the table cannot model is `partial` with
     nothing changed, and that is a fact the trace has to carry rather than a body edit.
+
+    `status` is None for every effect that edits a live body - the service's own status stands, and
+    a live read's status staying the service's is most of what makes it a live read. It is an int
+    for the one case where the service could not have answered the read at all: a read of an object
+    THIS RUN MINTED, which the service has never heard of and refuses, with a status that is as
+    much of that refusal as the body (#52). `stripe._refund_retrieve` is the case - Stripe's `404
+    resource_missing` for a refund irimi faked - and `slack._minted_thread` is its twin needing no
+    status at all, because Slack sends `thread_not_found` at HTTP 200. An effect that sets `status`
+    sets `changed` too: the body and the status are one answer.
     """
 
     document: Any
     changed: bool = False
     partial: bool = False
+    status: int | None = None
 
 
 @dataclass(frozen=True)
@@ -141,10 +151,22 @@ class Check:
     `not_evaluable` and fakes the write at L2. `verdict` is handed the probe's document with the
     run's own writes already applied to it, and returns a `Rejection`, `NOT_EVALUABLE`, or None
     for passed.
+
+    `currency` is the one fact this read carries that is not a verdict (#60): the currency the
+    write's amounts are denominated in, read off the same document, so the summary can print
+    `refund $49.00` for a `Refund.create(charge=, amount=)` that names no currency of its own. It
+    returns "" for a document that does not name one, and a check with no such fact to offer
+    leaves it None.
+
+    It is asked of the check rather than read by the policy because which key holds the currency
+    is service knowledge: a `document.get("currency")` in `policy` would be a guess made on every
+    service's behalf, and Slack's `conversations.info` has no such key and never will. Same reason
+    `probe` and `verdict` live here and not there.
     """
 
     probe: Callable[[Proposal], "Probe | None"]
     verdict: Callable[[Proposal, Any], "Rejection | NotEvaluable | None"]
+    currency: Callable[[Any], str] | None = None
 
 
 # `(read, parsed body, the run's writes for this service) -> Applied`.

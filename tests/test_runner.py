@@ -376,10 +376,42 @@ def test_a_write_is_rendered_from_the_maps_human_template():
 
 def test_an_amount_with_no_currency_in_the_request_is_left_as_it_was_sent():
     """Dividing by 100 without knowing the currency prints ¥49.00 for a 4900-yen refund, which is
-    a wrong number rather than an unformatted one. Nothing else in a shadow run knows the
-    currency: the charge it refers to was read live and its fields are Phase 2's to carry."""
+    a wrong number rather than an unformatted one.
+
+    Since #60 a write MAY be denominated by the L3 precondition read that checked it - the charge's
+    own `currency`, carried across on the exchange. This write had no such read, so nothing knows
+    what it is in, and this is the test that keeps that rule holding."""
     lines = summary_lines("7f3a", [_refund(body=b"charge=ch_9&amount=4900")], 0.0, _maps())
     assert "  ○ refund 4900 on ch_9  unvalidated (L0)" in lines
+
+
+def test_an_amount_is_denominated_by_the_currency_the_l3_read_found():
+    """#60's done-when. The write names no currency; the charge irimi read before faking it does,
+    and the exchange carries it across."""
+    write = replace(_refund(body=b"charge=ch_9&amount=4900"), currency="usd")
+    lines = summary_lines("7f3a", [write], 0.0, _maps())
+    assert "  ○ refund $49.00 on ch_9  unvalidated (L0)" in lines
+
+
+def test_the_requests_own_currency_still_wins_over_the_one_the_read_found():
+    """The request is what the caller actually said. A charge in usd and a refund posted in jpy is
+    the caller's business to be wrong about, not irimi's to correct (#60)."""
+    write = replace(_refund(body=b"charge=ch_9&amount=4900&currency=jpy"), currency="usd")
+    lines = summary_lines("7f3a", [write], 0.0, _maps())
+    assert "  ○ refund ¥4900 on ch_9  unvalidated (L0)" in lines
+
+
+def test_a_rejected_write_is_denominated_the_same_way():
+    """`_write_line` renders the sentence before it branches on the rejection, so the `✗` line
+    carries an amount too and must read the same as the `○` one (#60)."""
+    write = replace(
+        _refund(body=b"charge=ch_9&amount=4900"),
+        currency="usd",
+        precondition="rejected",
+        rejection_code="charge_already_refunded",
+    )
+    lines = summary_lines("7f3a", [write], 0.0, _maps())
+    assert "  ✗ refund $49.00 on ch_9  would fail: charge_already_refunded" in lines
 
 
 def test_a_zero_decimal_currency_is_not_divided():

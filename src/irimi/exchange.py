@@ -161,6 +161,12 @@ class Exchange:
     # because in the first two cases nothing would have happened and in the third the events are
     # already on the first write's own exchange. Empty for every read. Nothing is delivered.
     would_fire: tuple[str, ...] = field(default_factory=tuple)
+    # The currency this write's amounts are denominated in, read off the document irimi itself
+    # read before faking it: the L3 precondition read (#60). "" when no such read happened, or
+    # when its document named none. The summary uses it only when the request named no currency,
+    # as `stripe.Refund.create(charge=, amount=)` does not. Never a default and never a guess -
+    # see `services.Check.currency`.
+    currency: str = ""
 
 
 def is_authored_write(exchange: Exchange) -> bool:

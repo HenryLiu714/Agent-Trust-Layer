@@ -576,11 +576,23 @@ class SlackEnvelope:
     `ok`, `channel` and `ts` stay envelope-owned. `ts` always comes from `slack_ts` and never from
     the fixture: it is the message's identity for the rest of the run, and a fixture's frozen one
     would make every faked message the same message - the collision #29 already fixed once.
+
+    `optional` names payload fields the fixture holds as `null` ONLY so a posted value can be
+    reflected onto them, and which are dropped again when the caller posted nothing (#55).
+    `_reflect_over` writes over a `null` placeholder for any value - that is what a `null` in a
+    fixture means (#41) - so without this a field the fixture names ships as `null` for every
+    caller that did not fill it in, and real Slack sends no key at all. It is per envelope and
+    not a rule of `_reflect_over`'s, because Stripe's own fixtures hold `reason`, `description`
+    and `customer` as `null` and real Stripe really does send those as `null`: dropping them
+    would take fields off a refund that production sends.
     """
 
     payload_key: str | None = None  # where the route's `fixture:` object nests, if it nests
     channel: bool = True  # echo the posted `channel` at the top level
     ts: bool = True  # mint a top-level `ts`
+    # Payload fields present in the fixture only to receive a posted value; dropped when the
+    # caller posted none, because real Slack omits the key rather than sending `null` (#55).
+    optional: frozenset[str] = frozenset()
 
 
 # Keyed on operation: every Slack write the shipped map names, except `incoming_webhook`, which
@@ -594,7 +606,10 @@ class SlackEnvelope:
 # `files.getUploadURLExternal` instead, so a `file` object here would fake a method nothing
 # calls - but "no fixture" is not "no known shape" (#42).
 SLACK_ENVELOPES: dict[str, SlackEnvelope] = {
-    "chat.postMessage": SlackEnvelope(payload_key="message"),
+    # `thread_ts` is optional rather than always-present: real Slack puts it on the returned
+    # `message` for a threaded reply and sends no such key for a top-level post, and irimi knows
+    # which this is - the caller posted it (#55).
+    "chat.postMessage": SlackEnvelope(payload_key="message", optional=frozenset({"thread_ts"})),
     "reactions.add": SlackEnvelope(payload_key=None, channel=False, ts=False),
     "files.upload": SlackEnvelope(payload_key=None, channel=False, ts=False),
 }
@@ -609,6 +624,10 @@ def slack_l1_body(
     read. Both answer the envelope alone, and that is what keeps an unreadable fixture out of
     slack_sdk's error branch: `ok: true` is what the SDK reads to decide the call succeeded, and
     it is the envelope's to say rather than the fixture's.
+
+    `envelope.optional` is applied after the reflection: a field the fixture names only so a
+    posted value can land on it is dropped again when none did, so a top-level post's answer has
+    no `thread_ts` key rather than a `null` one (#55).
     """
     fields = reflect(request)
     body: dict[str, Any] = {"ok": True}
@@ -618,6 +637,12 @@ def slack_l1_body(
         body["ts"] = slack_ts()
     if envelope.payload_key is not None and obj is not None:
         _reflect_over(obj, fields, route)
+        for name in envelope.optional:
+            # Still at its `null` placeholder, so the caller posted nothing for it - and real
+            # Slack sends no key at all in that case, never `null`. `get` because "absent" and
+            # "present and None" are the same answer here (#55).
+            if obj.get(name) is None:
+                obj.pop(name, None)
         if "ts" in obj and "ts" in body:
             obj["ts"] = body["ts"]
         body[envelope.payload_key] = obj

@@ -474,18 +474,135 @@ def test_an_error_body_is_never_edited_and_partial_only_when_a_post_applies():
     assert other.partial is False
 
 
-def test_replies_of_a_minted_parent_is_partial_and_unchanged():
-    """Slack answers `thread_not_found` at HTTP 200 for a thread it never saw. Answering it from
-    the write log needs a status as well as a body, which is #52."""
+def test_replies_of_a_minted_parent_is_answered_from_the_write_log():
+    """#52's Slack half. Slack answers `thread_not_found` at HTTP 200 for a thread it never saw -
+    and this thread is one irimi minted, parent and reply both. The page is built rather than
+    edited, because there is no live body to preserve, and no status moves: Slack's error is
+    already a 200, which is the evidence #52 weighed."""
+    parent = _post_write(ts=MINTED1)
+    reply = _reply_write(MINTED1, ts=MINTED2)
+    out = apply_read(_replies(MINTED1), {"ok": False, "error": "thread_not_found"}, [parent, reply])
+    assert out.status is None
+    assert out.changed is True
+    assert out.partial is False
+    assert out.document["ok"] is True
+    assert out.document["has_more"] is False
+    assert _ts_of(out.document) == [MINTED1, MINTED2]
+    # The parent carries the thread fields its own reply gives it, which is what makes a replies
+    # page one production could produce (#44's THREAD_FIELDS rule).
+    head = out.document["messages"][0]
+    assert head["thread_ts"] == MINTED1
+    assert head["reply_count"] == 1
+    assert head["latest_reply"] == MINTED2
+
+
+def test_a_minted_parent_with_no_replies_answers_the_message_alone():
+    """Real Slack answers `conversations.replies` on an un-replied message with that message and
+    nothing else. A minted one is no different (#52)."""
+    parent = _post_write(ts=MINTED1)
+    out = apply_read(_replies(MINTED1), {"ok": False, "error": "thread_not_found"}, [parent])
+    assert out.changed is True
+    assert out.partial is False
+    assert _ts_of(out.document) == [MINTED1]
+
+
+def test_replies_of_a_thread_this_run_did_not_mint_is_left_alone():
+    """`thread_not_found` for a thread irimi has nothing to do with is Slack's own answer about
+    Slack's own state. Untouched, and `partial` only on `_would_apply`'s existing rule (#52)."""
+    error = {"ok": False, "error": "thread_not_found"}
+    out = apply_read(_replies(REAL_OLD), dict(error), [_post_write(ts=MINTED1)])
+    assert out.document == error
+    assert out.changed is False
+    assert out.status is None
+
+
+@pytest.mark.parametrize("code", ["ratelimited", "invalid_auth", "missing_scope"])
+def test_a_minted_thread_read_that_slack_refused_for_another_reason_is_not_answered(code):
+    """Only `thread_not_found` is Slack saying it never saw the thread. A rate limit or a bad token
+    on the same read is Slack's answer about the caller, which production would have sent for the
+    real thread too, so building the page over it would turn an error into a success. The error
+    stands, `partial` because the run holds posts this read would have shown (#52)."""
+    error = {"ok": False, "error": code}
+    out = apply_read(
+        _replies(MINTED1), dict(error), [_post_write(ts=MINTED1), _reply_write(MINTED1, ts=MINTED2)]
+    )
+    assert out.document == error
+    assert out.changed is False
+    assert out.partial is True
+    assert out.status is None
+
+
+@pytest.mark.parametrize(
+    "shaping",
+    [
+        {"limit": 2},
+        {"latest": REAL_NEW},
+        {"oldest": REAL_OLD},
+        {"cursor": "c1"},
+        {"inclusive": True},
+    ],
+)
+def test_a_minted_thread_read_that_asks_for_part_of_it_stays_partial(shaping):
+    """`_minted_thread` builds the WHOLE thread, so a read asking for a window, a limit or a page of
+    it is one it must decline: answering `limit=1` with the whole thread, or `latest=<a real ts>`
+    with replies Slack would have left out, is the half-apply this module's header forbids in its
+    most visible form. The error stands and the read says the world irimi showed is incomplete
+    (#52)."""
     error = {"ok": False, "error": "thread_not_found"}
     out = apply_read(
-        _replies(MINTED1),
+        _replies(MINTED1, **shaping),
         dict(error),
         [_post_write(ts=MINTED1), _reply_write(MINTED1, ts=MINTED2)],
     )
     assert out.document == error
     assert out.changed is False
     assert out.partial is True
+    assert out.status is None
+
+
+def test_a_minted_parent_read_with_an_unreadable_parameter_stays_partial():
+    """A parameter the effects cannot read means irimi cannot say what this page should hold, so
+    the page is not built and the error stands - today's answer, kept for the cases #52 does not
+    close (#44's `REPLIES_PARAMS` rule)."""
+    error = {"ok": False, "error": "thread_not_found"}
+    out = apply_read(_replies(MINTED1, oddity="x"), dict(error), [_post_write(ts=MINTED1)])
+    assert out.document == error
+    assert out.changed is False
+    assert out.partial is True
+
+
+def test_a_minted_parent_in_a_channel_the_read_spells_differently_stays_partial():
+    """`chat.postMessage` takes `#general` and `conversations.replies` requires the id, so irimi
+    cannot tell these are the same channel. Leaving a post off a page is one kind of incomplete;
+    building a whole page for a channel irimi cannot match is another kind of wrong, so this one
+    needs a definite match and does not get one (#44, #52)."""
+    error = {"ok": False, "error": "thread_not_found"}
+    out = apply_read(_replies(MINTED1), dict(error), [_post_write(channel="#general", ts=MINTED1)])
+    assert out.document == error
+    assert out.changed is False
+    assert out.partial is True
+
+
+def test_a_minted_thread_whose_reply_has_no_message_to_show_stays_partial():
+    """The fixture failed and that reply degraded to `fake-L0` (#42): the run put a message in this
+    thread and the overlay has nothing to show for it, so the page cannot be built honestly and
+    Slack's own error stands (#52).
+
+    The PARENT's own message cannot be missing here and still reach this point - see
+    `_minted_thread`'s docstring and #64.
+    """
+    error = {"ok": False, "error": "thread_not_found"}
+    parent = _post_write(ts=MINTED1)
+    mute = Write(
+        operation="chat.postMessage",
+        posted={"channel": "C0123", "text": "a reply", "thread_ts": MINTED1},
+        answer={"ok": True, "channel": "C0123", "ts": MINTED2},
+    )
+    out = apply_read(_replies(MINTED1), dict(error), [parent, mute])
+    assert out.document == error
+    assert out.changed is False
+    assert out.partial is True
+    assert out.status is None
 
 
 def test_a_post_whose_answer_has_no_message_is_partial_and_unchanged():
@@ -536,6 +653,30 @@ def test_a_body_that_is_not_an_object_is_unchanged():
     assert out.partial is False
 
 
+def test_an_answer_that_already_carries_its_thread_ts_inserts_the_same_reply():
+    """Since #55 a faked reply's own answer names the thread, so `_posts`' completion of its copy
+    writes the value it already holds. The inserted message must be the same either way, or the
+    two halves of #44/#55 would disagree about one reply.
+
+    `_reply_write` builds the pre-#55 answer (`thread_ts` in `posted` only); this builds the
+    post-#55 one and asserts the page comes out identical.
+    """
+    without = _reply_write(REAL_OLD)
+    with_it = _reply_write(REAL_OLD)
+    with_it.answer["message"]["thread_ts"] = REAL_OLD
+
+    pages = []
+    for write in (without, with_it):
+        out = apply_read(
+            _replies(REAL_OLD), _replies_page(_threaded_parent(REAL_OLD), REAL_NEW), [write]
+        )
+        assert out.changed is True
+        assert out.partial is False
+        pages.append(out.document)
+    assert pages[0] == pages[1]
+    assert pages[0]["messages"][-1]["thread_ts"] == REAL_OLD
+
+
 # ----------------------------------------------------------------------------- slack_sdk
 
 
@@ -574,3 +715,17 @@ def test_slack_sdk_reads_the_faked_reply_back_out_of_replies():
     assert response["messages"][-1]["text"] == "a reply"
     assert response["messages"][-1]["ts"] == MINTED1
     assert response["messages"][0]["reply_count"] == 2
+
+
+def test_slack_sdk_reads_a_minted_thread_back_out_of_replies():
+    """#52's Slack done-when against the real SDK: `ok: true` is what the SDK reads to decide the
+    call succeeded, and a built page has to satisfy `validate()` like any other."""
+    slack_sdk = pytest.importorskip("slack_sdk")
+    out = apply_read(
+        _replies(MINTED1),
+        {"ok": False, "error": "thread_not_found"},
+        [_post_write(ts=MINTED1, text="refund issued"), _reply_write(MINTED1, ts=MINTED2)],
+    )
+    response = _sdk_response(slack_sdk, "conversations.replies", out.document)
+    assert response["messages"][0]["text"] == "refund issued"
+    assert response["messages"][-1]["ts"] == MINTED2

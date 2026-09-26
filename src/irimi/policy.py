@@ -56,6 +56,12 @@ class Answer:
     # webhooks" holds by construction rather than by a second check - the same move #46 made for
     # "a replayed write issues no precondition read".
     would_fire: tuple[str, ...] = ()
+    # The currency this write's L3 precondition read found on the object the write names (#60).
+    # "" when there was no such read, or when its document named none. Set on the two paths that
+    # HAD a document to read - the accepted fake and the L3 rejection - because both print an
+    # amount: `report._write_line` renders the map's `human:` sentence before it branches on the
+    # rejection, so the `✗` line carries the amount too.
+    currency: str = ""
 
 
 class AnswerPolicy(Protocol):
@@ -236,8 +242,9 @@ class ShadowPolicy:
             slot = None
         precondition: PreconditionOutcome | None = None
         issued: tuple[Exchange, ...] = ()
+        currency = ""  # the L3 read's, for the summary's amount; "" when no read happened (#60)
         if route is not None and route.precondition:
-            precondition, issued, rejection = self._precondition(
+            precondition, issued, rejection, currency = self._precondition(
                 request, classification, route, write_log, run_id
             )
             if rejection is not None:
@@ -253,6 +260,7 @@ class ShadowPolicy:
                     precondition="rejected",
                     rejection_code=rejection.code,
                     issued=issued,
+                    currency=currency,
                 )
                 _remember(self.idempotency, slot, answer)
                 return answer
@@ -275,6 +283,7 @@ class ShadowPolicy:
             precondition=precondition,
             issued=issued,
             would_fire=route.fires if route is not None else (),
+            currency=currency,
         )
         _remember(self.idempotency, slot, answer)
         return answer
@@ -286,19 +295,25 @@ class ShadowPolicy:
         route: Route,
         write_log: Sequence[Exchange],
         run_id: str,
-    ) -> tuple[PreconditionOutcome | None, tuple[Exchange, ...], services.Rejection | None]:
+    ) -> tuple[PreconditionOutcome | None, tuple[Exchange, ...], services.Rejection | None, str]:
         """Check the write against real state plus this run's overlay, before faking it (#45).
 
         Its own guard, not the one `answer` already has: that one degrades a *faker* failure to
         the L0 echo, and a precondition that could not be evaluated is a different thing - the
         write is still faked at its ordinary level, and the exchange says the check did not happen.
         Collapsing them would answer a perfectly fakeable write with `{}`.
+
+        The fourth member is the currency (#60): the code the check read off the same document the
+        verdict saw, or "" from every path that never got a document. A `NOT_EVALUABLE` verdict
+        keeps it - irimi did read the charge, it just could not decide whether the write would
+        have been taken, and what a write is denominated in is a different question from whether
+        it could be checked.
         """
         # This policy does not do L3. Nothing was asked, so nothing is claimed: `None`, the state
         # of a route with no `precondition:`, and not `not_evaluable`, which is for a question
         # irimi put and could not get an answer to (#45).
         if isinstance(self.reader, NoReader):
-            return None, (), None
+            return None, (), None, ""
         issued: tuple[Exchange, ...] = ()
         try:
             service = classification.service
@@ -309,11 +324,11 @@ class ShadowPolicy:
                 logger.warning(
                     "irimi: no precondition named %r for %s", route.precondition, service
                 )
-                return "not_evaluable", issued, None
+                return "not_evaluable", issued, None, ""
             proposal = services.Proposal(classification.operation, echo.reflect(request))
             probe = check.probe(proposal)
             if probe is None:
-                return "not_evaluable", issued, None
+                return "not_evaluable", issued, None, ""
             probe_request = _probe_request(request, service, probe)
             # "Read operations only, never a read-like POST", in the one form that can be enforced:
             # ask the maps, which are what says a Slack `conversations.info` POST is a read, and
@@ -325,7 +340,7 @@ class ShadowPolicy:
                     probe.operation,
                     probe_cls.kind,
                 )
-                return "not_evaluable", issued, None
+                return "not_evaluable", issued, None, ""
             try:
                 response = self.reader(probe_request)
             except Exception as exc:
@@ -341,17 +356,17 @@ class ShadowPolicy:
                 ),
             )
             if response is None:
-                return "not_evaluable", issued, None
+                return "not_evaluable", issued, None, ""
             # Only a 200 is evaluable. A 429, a 404 or a 5xx says nothing about the write (#45).
             if response.status != 200:
-                return "not_evaluable", issued, None
+                return "not_evaluable", issued, None, ""
             # The reader's body never passes the engine's `response` hook, so this is the only
             # place Slack's `ts` watermark can learn from the one read that exists to make the
             # fake honest (#42).
             echo.observe_read(service, response.body)
             document: Any = writelog.json_object(response.body)
             if document is None:
-                return "not_evaluable", issued, None
+                return "not_evaluable", issued, None, ""
             effects = services.EFFECTS.get(service)
             if effects is not None:
                 writes = writelog.decode(service, probe_request, write_log)
@@ -372,20 +387,23 @@ class ShadowPolicy:
                         # checked against a world known to be incomplete was not checked. Passing
                         # it could bless a write production would refuse; rejecting it could
                         # invent a refusal that never would have happened (#45).
-                        return "not_evaluable", issued, None
+                        return "not_evaluable", issued, None, ""
                     document = applied.document
+            # Off the same document the verdict sees, and before it, so a `NOT_EVALUABLE` verdict
+            # still carries it - see the docstring (#60).
+            currency = check.currency(document) if check.currency is not None else ""
             verdict = check.verdict(proposal, document)
             if isinstance(verdict, services.NotEvaluable):
                 # The check read the document and could not tell - a Slack `missing_scope`, a
                 # charge whose own numbers will not parse. Distinct from a pass, which claims
                 # the write was checked and would have been taken (#45).
-                return "not_evaluable", issued, None
-            return ("rejected" if verdict is not None else "passed"), issued, verdict
+                return "not_evaluable", issued, None, currency
+            return ("rejected" if verdict is not None else "passed"), issued, verdict, currency
         except Exception:
             # An exception means irimi did put the question and could not answer it, so this is
             # `not_evaluable` and never None.
             logger.exception("irimi: the precondition check failed; faking the write at L2")
-            return "not_evaluable", issued, None
+            return "not_evaluable", issued, None, ""
 
 
 def _probe_request(request: Request, service: str, probe: services.Probe) -> Request:
@@ -421,6 +439,8 @@ def _replayed_answer(stored: idempotency.Stored) -> Answer:
     has become unreadable since the first call would make the replay `fake-L0` over an original
     stamped `fake-L1`, and the trace would disagree with itself about one write. `issued` is `()`
     because a replay makes no precondition read - the write was checked once, when it was made.
+    `currency` is the stored one too, so a replayed refund's exchange and the first one's agree
+    about what that single write was denominated in (#60).
     """
     return Answer(
         answered_by=stored.answered_by,
@@ -435,6 +455,7 @@ def _replayed_answer(stored: idempotency.Stored) -> Answer:
         flags=(*stored.flags, IDEMPOTENT_REPLAY_FLAG),
         precondition=stored.precondition,
         rejection_code=stored.rejection_code,
+        currency=stored.currency,
     )
 
 
@@ -490,6 +511,7 @@ def _remember(
                 flags=answer.flags,
                 precondition=answer.precondition,
                 rejection_code=answer.rejection_code,
+                currency=answer.currency,
             ),
         )
     except Exception:

@@ -1,5 +1,5 @@
 {
-  "_source": "Hand-written against Slack's Web API documentation for chat.postMessage (https://api.slack.com/methods/chat.postMessage) - the `message` object that method returns, with placeholder ids. Stripe's file is a verbatim subset of a stripe-mock release; Slack publishes no fixture set to vendor, so this one names the docs instead (#42).",
+  "_source": "Hand-written against Slack's Web API documentation for chat.postMessage (https://api.slack.com/methods/chat.postMessage) - the `message` object that method returns, with placeholder ids. Stripe's file is a verbatim subset of a stripe-mock release; Slack publishes no fixture set to vendor, so this one names the docs instead (#42). The message's `thread_ts` is a null placeholder rather than a value: the field exists so a threaded post's own `thread_ts` can be reflected onto it, and `echo.SlackEnvelope.optional` drops it again when the caller posted no thread, because real Slack sends the key only on a reply (#55).",
   "resources": {
     "message": {
       "app_id": "A00000000",
@@ -7,6 +7,7 @@
       "bot_id": "B00000000",
       "team": "T00000000",
       "text": "Here's a message for you",
+      "thread_ts": null,
       "ts": "1503435956.000247",
       "type": "message",
       "user": "U00000000"

@@ -211,9 +211,14 @@ def main() -> int:
         print(f"write: retry refused - {retry}")
 
     post_to_slack(f"refunded {money(amount, charge.currency)} on {charge.id}")
+    # `currency` is here so the live exit test can build the summary's `$49.00` without parsing
+    # prose: since #60 irimi prints the amount formatted, from the charge its own L3 read saw, and
+    # the test has to know which code that was. It is NOT a `currency=` on `Refund.create` - that
+    # one is still refused, being unverified against real Stripe for a charge refund (#48, #60).
     print(
         f"AGENT-RESULT charge={charge.id} refund={refund_id or '-'} amount={amount} "
-        f"listed={'yes' if listed else 'no'} refunded={refunded} retry={retry or 'none'}"
+        f"currency={charge.currency} listed={'yes' if listed else 'no'} "
+        f"refunded={refunded} retry={retry or 'none'}"
     )
     if retry is None:
         print(

@@ -245,9 +245,11 @@ def test_a_refund_through_the_door_is_answered_by_irimi_and_never_leaves_the_mac
     assert [(m, p) for m, p, _ in _Stripe.seen if m != "GET"] == []
 
     # 5. The summary says all of it, in the map's own words.
+    # `$1.00`, not `100`: the child posts no currency, and `_Stripe`'s charge is in `usd`, which
+    # irimi's own precondition read of it carried onto the write's exchange (#60).
     assert (
-        f"  ○ refund {REFUND_AMOUNT_MINOR} on {CHARGE_ID}  unvalidated (L3 preconditions passed)"
-        in out
+        f"  ○ refund {report.money(REFUND_AMOUNT_MINOR, 'usd')} on {CHARGE_ID}  "
+        "unvalidated (L3 preconditions passed)" in out
     )
     assert "  These writes did not happen." in out
     assert "1 read" in out
@@ -266,17 +268,21 @@ def test_a_refund_through_the_door_is_answered_by_irimi_and_never_leaves_the_mac
 # The loopback Stripe's one refundable charge: 4900, nothing refunded (`tests.test_engine_mitm`).
 PHASE2_CHARGE = "ch_REAL1"
 PHASE2_AMOUNT = 4900
+# The amount as a person reads it, since #60: the refund names no currency and irimi's own
+# precondition read of `ch_REAL1` found `usd` on the charge. #48 printed `4900`, because the
+# currency had nowhere to travel, and Notion's target block said so until #60 restored `$49.00`.
+PHASE2_MONEY = report.money(PHASE2_AMOUNT, "usd")
 # The Phase 2 summary under its header line, as the criterion and its CLI twin both assert it: the
 # overlaid reads hang under the refund they saw, and the engine's reads are counted but kept out
-# of the agent's `N reads` (#45, #48). Notion's target block, with the amount as the write sent it.
+# of the agent's `N reads` (#45, #48). Notion's target block, character for character.
 PHASE2_SUMMARY = [
     "",
     "  127.0.0.1  3 reads (2 showing this run's writes)  2 engine reads  2 writes intercepted",
     "",
-    f"  ○ refund {PHASE2_AMOUNT} on {PHASE2_CHARGE}  unvalidated (L3 preconditions passed)",
+    f"  ○ refund {PHASE2_MONEY} on {PHASE2_CHARGE}  unvalidated (L3 preconditions passed)",
     "    ↳ GET /v1/refunds saw it  overlay",
     f"    ↳ GET /v1/charges/{PHASE2_CHARGE} saw it  overlay",
-    f"  ✗ refund {PHASE2_AMOUNT} on {PHASE2_CHARGE}  would fail: charge_already_refunded",
+    f"  ✗ refund {PHASE2_MONEY} on {PHASE2_CHARGE}  would fail: charge_already_refunded",
     "",
     "  7 exchanges · 5 live · 0 delegated · 2 virtualized",
     "  These writes did not happen. Would have fired: refund.created, charge.refunded.",
@@ -507,8 +513,20 @@ def test_the_refund_agent_leaves_no_refund_on_a_real_test_mode_charge(home, capf
     line = next((row for row in out.splitlines() if row.startswith("AGENT-RESULT ")), None)
     assert line is not None, out
     result = dict(pair.split("=", 1) for pair in line.split()[1:])
-    assert set(result) == {"charge", "refund", "amount", "listed", "refunded", "retry"}, line
+    assert set(result) == {
+        "charge",
+        "refund",
+        "amount",
+        "currency",
+        "listed",
+        "refunded",
+        "retry",
+    }, line
     charge_id, amount = result["charge"], int(result["amount"])
+    # The agent prints the charge's currency since #60, because irimi now formats the amount in the
+    # summary from the code its own precondition read found on that charge - so the expected line
+    # cannot be built from the amount alone.
+    money = report.money(amount, result["currency"])
     assert result["refund"].startswith("re_"), "the agent did not get a parseable refund id"
     # What the agent saw: its refund in the list and the charge refunded in full, both overlaid,
     # and the retry refused by L3 because of a refund that exists only in irimi's write log.
@@ -529,13 +547,11 @@ def test_the_refund_agent_leaves_no_refund_on_a_real_test_mode_charge(home, capf
         "  api.stripe.com  3 reads (2 showing this run's writes)  2 engine reads  "
         "2 writes intercepted"
     ) in lines
-    write = lines.index(
-        f"  ○ refund {amount} on {charge_id}  unvalidated (L3 preconditions passed)"
-    )
+    write = lines.index(f"  ○ refund {money} on {charge_id}  unvalidated (L3 preconditions passed)")
     assert lines[write + 1 : write + 4] == [
         "    ↳ GET /v1/refunds saw it  overlay",
         f"    ↳ GET /v1/charges/{charge_id} saw it  overlay",
-        f"  ✗ refund {amount} on {charge_id}  would fail: charge_already_refunded",
+        f"  ✗ refund {money} on {charge_id}  would fail: charge_already_refunded",
     ]
     assert (
         "  These writes did not happen. Would have fired: refund.created, charge.refunded."

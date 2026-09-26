@@ -13,6 +13,7 @@ STRIPE = ServiceMap(
     routes=(
         Route("GET", "/v1/charges/{charge}", "charges.retrieve", "read"),
         Route("GET", "/v1/refunds", "refunds.list", "read"),
+        Route("GET", "/v1/refunds/{refund}", "refunds.retrieve", "read"),
         Route("POST", "/v1/refunds", "refunds.create", "write", ids={"id": "re_"}),
     ),
 )
@@ -335,3 +336,53 @@ def test_a_slack_read_the_effects_do_not_model_is_untouched():
     out = ServiceOverlay(MAPS)([_slack_post_exchange("1800000000.000001")], read, upstream)
     assert out.response is upstream
     assert out.fidelity is None
+
+
+def test_a_read_of_a_minted_refund_comes_back_as_that_refund_at_200():
+    """#52 through the seam: the effects answer the read and the overlay carries the status onto
+    the response, so the agent gets the object irimi told it exists rather than Stripe's 404."""
+    overlay = ServiceOverlay(MAPS)
+    upstream = Response(
+        status=404,
+        headers=(("content-type", "application/json"),),
+        body=json.dumps({"error": {"code": "resource_missing"}}).encode(),
+    )
+    out = overlay([_write_exchange()], _read(f"/v1/refunds/{MINTED}"), upstream)
+    assert out.response is not upstream
+    assert out.response.status == 200
+    assert out.fidelity == "full"
+    assert json.loads(out.response.body)["id"] == MINTED
+
+
+def test_a_read_of_a_refund_this_run_did_not_mint_keeps_stripes_own_404():
+    """The status only moves for an object irimi minted. Stripe's own 404 about Stripe's own state
+    reaches the agent byte-identical and unstamped (#52)."""
+    overlay = ServiceOverlay(MAPS)
+    upstream = Response(
+        status=404,
+        headers=(("content-type", "application/json"),),
+        body=json.dumps({"error": {"code": "resource_missing"}}).encode(),
+    )
+    out = overlay([_write_exchange()], _read("/v1/refunds/re_SOMEONE_ELSE"), upstream)
+    assert out.response is upstream
+    assert out.response.status == 404
+    assert out.fidelity is None
+
+
+def test_a_slack_replies_read_of_a_minted_thread_comes_back_as_the_thread():
+    """The Slack twin, which needs no status: Slack answers `thread_not_found` at 200 (#52)."""
+    overlay = ServiceOverlay(MAPS)
+    ts = "1800000000.000001"
+    upstream = _upstream({"ok": False, "error": "thread_not_found"})
+    log = [_slack_post_exchange(ts)]
+    out = overlay(
+        log,
+        _slack_read({"channel": "C0123", "ts": ts}, operation="conversations.replies"),
+        upstream,
+    )
+    assert out.response is not upstream
+    assert out.response.status == 200
+    assert out.fidelity == "full"
+    document = json.loads(out.response.body)
+    assert document["ok"] is True
+    assert [m["ts"] for m in document["messages"]] == [ts]

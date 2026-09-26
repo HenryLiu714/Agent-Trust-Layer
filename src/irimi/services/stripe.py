@@ -10,8 +10,9 @@ The design's v0.1 table, by the write that causes each effect:
 Two reads beyond the table's letter, both so that irimi does not contradict itself (#43):
 `charges.list` gets the same charge effect as `charges.retrieve`, because the refund agent finds its
 charge in the list and a list that ignored the refund would disagree with the retrieve; and
-`refunds.retrieve` of a minted id is flagged `partial`, because the honest answer is Stripe's 404
-and this seam carries a body but no status (#52).
+`refunds.retrieve` of a minted id is answered from the write log with the object irimi minted, over
+whatever Stripe said about it - the one read where the seam replaces a STATUS as well as a body,
+because Stripe has never heard of that id and answers `404` (#52).
 
 Two rules run through all of it:
 
@@ -19,8 +20,10 @@ Two rules run through all of it:
   one the agent can never see in production, and putting one there hands it a body no live read
   can produce. This is `echo._reflect_over`'s rule, applied to reads.
 * **Say `partial` rather than half-apply.** A page the table does not model, a filter it cannot
-  read, a refund it minted being fetched by id: the document is left exactly as Stripe sent it
-  and the exchange records that the world irimi showed is incomplete.
+  read, a cursor page whose real contents depend on where the minted refund landed: the document is
+  left exactly as Stripe sent it and the exchange records that the world irimi showed is
+  incomplete. Answering a read outright is the opposite move and needs the opposite justification -
+  see `_refund_retrieve`, where there is no live object to be incomplete about (#52).
 
 Pure functions over plain data: no clock, no minting, no I/O, no module state. Phase 5 replay
 runs these same functions over a recording.
@@ -187,15 +190,38 @@ def _refunds_list(request: Request, document: dict[str, Any], writes: Sequence[W
 def _refund_retrieve(
     request: Request, document: dict[str, Any], writes: Sequence[Write]
 ) -> Applied:
-    """A refund irimi minted is not at Stripe, so this read is the 404 the table does not model.
+    """A refund irimi minted, answered from the write log rather than left as Stripe's 404 (#52).
 
-    Answering it from the write log needs the seam to carry a status as well as a body, which is
-    #52. Flagging it is what keeps the gap visible instead of silent.
+    Stripe has never heard of that id and answers `404` with `resource_missing`, so this is the one
+    read where the honest answer needs a STATUS as well as a body - `Applied.status` is how the
+    effects say so, and #52 is where that was decided. The object handed back is the very one
+    irimi answered the write with, which is what the agent was told exists: nothing is invented,
+    and none of the live body survives because there is no live object behind it.
+
+    Whatever Stripe said ABOUT THE OBJECT, not only a 404: a 24-character random id colliding with a
+    real refund is not a scenario, and the object the agent asked for is the one irimi minted. But
+    not over an error about anything else. A 401, a 429 or a 5xx on the same read is Stripe's answer
+    about the credentials or itself, which production would have sent for the real refund too, and
+    answering 200 over it is the error-into-success untruth this module's header forbids. So an
+    `error` body whose code is not `resource_missing` keeps the pre-#52 answer: left as sent,
+    flagged `partial`.
+
+    A shallow copy, never the write log's own dict - the overlay serializes what it is handed and a
+    later effect must not find this one mutated. `slack._posts` copies for the same reason.
+
+    A read of a refund irimi did NOT mint is untouched, 404 and all: that one is Stripe's own
+    answer about Stripe's own state, and the agent should see it.
     """
     ident = request.path.rsplit("/", 1)[-1]
-    if any(r.answer["id"] == ident for r in _minted_refunds(writes)):
+    mine = next((r for r in _minted_refunds(writes) if r.answer["id"] == ident), None)
+    if mine is None:
+        return Applied(document)
+    error = document.get("error")
+    if error is not None and not (
+        isinstance(error, dict) and error.get("code") == "resource_missing"
+    ):
         return Applied(document, partial=True)
-    return Applied(document)
+    return Applied(dict(mine.answer), changed=True, status=200)
 
 
 def _customer(customer: dict[str, Any], writes: Sequence[Write]) -> Applied:
@@ -362,6 +388,21 @@ def _refund_probe(proposal: Proposal) -> Probe | None:
     return Probe(operation="charges.retrieve", method="GET", path=f"/v1/charges/{charge}")
 
 
+def _charge_currency(document: Any) -> str:
+    """The currency a charge is denominated in, or "" when this body does not name one (#60).
+
+    The document is the L3 precondition read's - `GET /v1/charges/{id}`, issued on the agent's own
+    credentials - so this is a code irimi really read off real state and never a default. Anything
+    that is not a non-empty string is "": `report.money` formats only when it has a currency, and
+    a wrong symbol is worse than an unformatted amount. No coercion and no `str()`, for the same
+    reason `_refund_verdict` refuses to subtract numbers it cannot read.
+    """
+    if not isinstance(document, dict):
+        return ""
+    currency = document.get("currency")
+    return currency.strip() if isinstance(currency, str) else ""
+
+
 def _refund_verdict(proposal: Proposal, document: Any) -> Rejection | NotEvaluable | None:
     """`charge_already_refunded`, the amount-exceeds error, `NOT_EVALUABLE`, or None."""
     if (
@@ -403,7 +444,9 @@ def _refund_verdict(proposal: Proposal, document: Any) -> Rejection | NotEvaluab
         # The prose is irimi's: minor-unit formatting lives in `report`, and this package stays
         # pure and below it. The SHAPE is Stripe's - `invalid_request_error` with `param: amount` -
         # which is what makes stripe-python raise `InvalidRequestError`.
-        currency = str(document.get("currency", "")).upper()
+        # The same reading of the charge's currency the exchange carries, so the prose in this
+        # body and the summary's `$49.00` can never disagree about one charge (#60).
+        currency = _charge_currency(document).upper()
         message = (
             f"Refund amount ({amount} {currency}) is greater than unrefunded amount on charge "
             f"({remaining} {currency})"
@@ -418,4 +461,4 @@ def _refund_verdict(proposal: Proposal, document: Any) -> Rejection | NotEvaluab
     return None
 
 
-CHARGE_REFUNDABLE = Check(probe=_refund_probe, verdict=_refund_verdict)
+CHARGE_REFUNDABLE = Check(probe=_refund_probe, verdict=_refund_verdict, currency=_charge_currency)

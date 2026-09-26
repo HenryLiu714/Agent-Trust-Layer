@@ -195,6 +195,78 @@ def test_slack_write_reads_the_json_body_slack_sdk_actually_posts():
     assert body["channel"] == "C1"
 
 
+def test_a_threaded_post_answers_with_the_thread_it_was_posted_in():
+    """#55's first done-when. Real Slack puts `thread_ts` on the returned `message` for a reply,
+    and irimi knows the value exactly - the caller posted it. Before #55 the fixture did not name
+    the field, so `echo._reflect_over` had nothing to write over and the answer omitted it."""
+    ans = _answer(
+        _req(
+            "POST",
+            host="slack.com",
+            path="/api/chat.postMessage",
+            body=b'{"channel": "C1", "thread_ts": "1700000000.000100", "text": "on it"}',
+            content_type="application/json;charset=utf-8",
+        )
+    )
+    body = json.loads(ans.response.body)
+    assert ans.answered_by == "fake-L1"
+    assert body["message"]["thread_ts"] == "1700000000.000100"
+    # The envelope's own fields are unchanged: `ts` is minted and is the reply's identity, not the
+    # thread's, so the two must differ (#42).
+    assert body["message"]["ts"] == body["ts"] != body["message"]["thread_ts"]
+
+
+def test_a_top_level_post_answers_with_no_thread_ts_key_at_all():
+    """#55's second done-when, and the reason it is not a one-line fixture edit: the fixture holds
+    `thread_ts` as `null` so a posted value can land on it, and `_reflect_over` reflects over a
+    `null`. Shipping the placeholder would send `thread_ts: null`, which real Slack never sends."""
+    ans = _answer(
+        _req(
+            "POST",
+            host="slack.com",
+            path="/api/chat.postMessage",
+            body=b"channel=C1&text=hi",
+            content_type="application/x-www-form-urlencoded",
+        )
+    )
+    body = json.loads(ans.response.body)
+    assert ans.answered_by == "fake-L1"
+    assert "thread_ts" not in body["message"]
+
+
+def test_slack_sdk_parses_a_threaded_and_a_top_level_faked_post():
+    """#55's third done-when. The SDK is what an agent actually reads the field through, and a
+    `None` where it expects a string is the failure a fixture-only fix would have shipped."""
+    slack_sdk = pytest.importorskip("slack_sdk")
+
+    def answer(body: bytes) -> dict:
+        ans = _answer(
+            _req(
+                "POST",
+                host="slack.com",
+                path="/api/chat.postMessage",
+                body=body,
+                content_type="application/json;charset=utf-8",
+            )
+        )
+        response = slack_sdk.web.slack_response.SlackResponse(
+            client=None,
+            http_verb="POST",
+            api_url="https://slack.com/api/chat.postMessage",
+            req_args={},
+            data=json.loads(ans.response.body),
+            headers={},
+            status_code=200,
+        )
+        response.validate()
+        return response["message"]
+
+    reply = answer(b'{"channel": "C1", "thread_ts": "1700000000.000100", "text": "on it"}')
+    top = answer(b'{"channel": "C1", "text": "hi"}')
+    assert reply["thread_ts"] == "1700000000.000100"
+    assert "thread_ts" not in top
+
+
 def test_an_unlisted_slack_route_does_not_get_the_slack_envelope():
     """`ok: true` is a claim of success, and we only know what success looks like for a route the
     maps claim. Answering an unmapped call with the envelope sends slack_sdk down its success
@@ -1389,6 +1461,57 @@ def test_a_precondition_read_that_429s_is_not_evaluable_and_is_still_recorded():
     assert read.run_id == "t3st"
 
 
+def test_a_passed_check_carries_the_charges_currency_onto_the_answer():
+    """#60's first half. `Refund.create(charge=, amount=)` names no currency; the charge irimi read
+    to decide about it does, and that is the only honest source there is."""
+    ans = _checked(_reader(_json(200, _charge())), _refund_request())
+    assert ans.precondition == "passed"
+    assert ans.currency == "usd"
+
+
+def test_a_rejected_check_carries_it_too():
+    """`report._write_line` renders the map's `human:` sentence before it branches on the
+    rejection, so the `✗` line prints an amount as well and needs the same currency (#60)."""
+    ans = _checked(_reader(_json(200, _charge(refunded_so_far=4900))), _refund_request())
+    assert ans.precondition == "rejected"
+    assert ans.currency == "usd"
+
+
+def test_a_policy_with_no_reader_offers_no_currency():
+    """Never asked, so nothing claimed - the same rule `precondition: None` follows (#60)."""
+    request = _refund_request()
+    ans = ShadowPolicy().answer(request, classify(request, SHIPPED))
+    assert ans.currency == ""
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        _json(429, {"error": {"type": "rate_limit_error"}}),
+        _json(404, {"error": {"type": "invalid_request_error"}}),
+        Response(200, (), b"<html>not json</html>"),
+        None,
+    ],
+)
+def test_a_read_that_never_produced_a_document_offers_no_currency(answer):
+    """#60's own rule: the currency comes from a document irimi actually read. None of these is
+    one, so the amount still prints as the write sent it."""
+    ans = _checked(_reader(answer), _refund_request())
+    assert ans.precondition == "not_evaluable"
+    assert ans.currency == ""
+
+
+def test_a_verdict_that_could_not_tell_still_knows_what_the_charge_is_in():
+    """The one place this branch is narrower than #60's open-question bullet, and deliberately: the
+    charge WAS read and parsed, so the currency is known. Whether irimi could decide the service
+    would have taken the write is a different question from what the write is denominated in."""
+    charge = _charge()
+    charge["amount_refunded"] = "not a number"  # `_refund_verdict` -> NOT_EVALUABLE
+    ans = _checked(_reader(_json(200, charge)), _refund_request())
+    assert ans.precondition == "not_evaluable"
+    assert ans.currency == "usd"
+
+
 @pytest.mark.parametrize(
     "answer",
     [
@@ -1689,6 +1812,9 @@ def test_a_replay_issues_no_precondition_read():
     assert len(first.issued) == 1
     assert second.issued == ()
     assert second.precondition == first.precondition == "passed"
+    # The stored answer's currency comes back too, so the replayed exchange and the first one agree
+    # about what that single write was denominated in (#60).
+    assert second.currency == first.currency == "usd"
 
 
 def test_the_same_key_with_a_different_amount_is_an_idempotency_error():

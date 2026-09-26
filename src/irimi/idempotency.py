@@ -97,7 +97,7 @@ def canonical(request: Request, route: Route) -> Canonical:
 def key(run_id: str, service: str, scope: tuple[str, ...], idempotency_key: str) -> tuple[str, ...]:
     """The slot one write occupies.
 
-    Scoped like the overlay - the service, then `writelog.scope`'s `(Stripe-Account,
+    Scoped like the overlay - the service, then `services.scope_of`'s `(Stripe-Account,
     Stripe-Version)`, which is what `scope` carries - because a key reused against another
     connected account or another API version is another write. `run_id` leads, because Phase 3's
     `shadow --serve` puts many runs in one process and a key is only promised unique within one

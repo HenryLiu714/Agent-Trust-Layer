@@ -174,7 +174,7 @@ def _slot(
     key = idempotency.key_of(service, request)
     if not key:
         return None
-    scope = writelog.scope(service, request)
+    scope = services.scope_of(service, request)
     return idempotency.key(run_id, service, scope, key), idempotency.canonical(request, route), key
 
 
@@ -367,28 +367,24 @@ class ShadowPolicy:
             document: Any = bodies.json_object(response.body)
             if document is None:
                 return "not_evaluable", issued, None, ""
-            effects = services.EFFECTS.get(service)
-            if effects is not None:
-                writes = writelog.decode(service, probe_request, write_log)
-                if writes:
-                    read = services.Read(
-                        operation=probe_cls.operation,
-                        request=probe_request,
-                        posted=bodies.reflect(probe_request),
-                    )
-                    # The same effects the overlay applies to a live read, so the check sees the
-                    # world the agent would see. For Slack's `conversations.info` they hand the
-                    # document back untouched, and that is right rather than a gap: no write irimi
-                    # models changes whether a channel exists, is archived or has the bot in it.
-                    # One path for both services is one place to read and one shape to replay.
-                    applied = effects(read, document, writes)
-                    if applied.partial:
-                        # The overlay is saying the world it can show is incomplete, and a write
-                        # checked against a world known to be incomplete was not checked. Passing
-                        # it could bless a write production would refuse; rejecting it could
-                        # invent a refusal that never would have happened (#45).
-                        return "not_evaluable", issued, None, ""
-                    document = applied.document
+            found = writelog.scoped_writes(services.EFFECTS, service, probe_request, write_log)
+            if found is not None:
+                effects, writes = found
+                # The same effects the overlay applies to a live read, so the check sees the
+                # world the agent would see. For Slack's `conversations.info` they hand the
+                # document back untouched, and that is right rather than a gap: no write irimi
+                # models changes whether a channel exists, is archived or has the bot in it.
+                # One path for both services is one place to read and one shape to replay.
+                applied = effects(
+                    writelog.read_of(probe_cls.operation, probe_request), document, writes
+                )
+                if applied.partial:
+                    # The overlay is saying the world it can show is incomplete, and a write
+                    # checked against a world known to be incomplete was not checked. Passing
+                    # it could bless a write production would refuse; rejecting it could
+                    # invent a refusal that never would have happened (#45).
+                    return "not_evaluable", issued, None, ""
+                document = applied.document
             # Off the same document the verdict sees, and before it, so a `NOT_EVALUABLE` verdict
             # still carries it - see the docstring (#60).
             currency = check.currency(document) if check.currency is not None else ""

@@ -5,7 +5,7 @@ import json
 import logging
 import socket
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from mitmproxy import ctx, http
@@ -30,6 +30,7 @@ from irimi.exchange import (
     Request,
     Response,
     is_authored_write,
+    media_type,
 )
 from irimi.overlay import Overlaid, Overlay
 from irimi.policy import Answer, AnswerPolicy
@@ -139,7 +140,7 @@ def _response_from_flow(flow: http.HTTPFlow) -> Response:
 
 
 def _is_event_stream(content_type: str) -> bool:
-    return content_type.split(";")[0].strip().lower() == "text/event-stream"
+    return media_type(content_type) == "text/event-stream"
 
 
 def _fields(headers: Headers) -> list[tuple[bytes, bytes]]:
@@ -424,10 +425,8 @@ class IrimiAddon:
 
     def _apply_rewrite(self, flow: http.HTTPFlow, rewritten: Request) -> None:
         """Carry what `_rewrite_read` translated onto the flow, on the event loop (#45)."""
-        flow.request.path = (
-            f"{rewritten.path}?{rewritten.query}" if rewritten.query else rewritten.path
-        )
-        stamp = next((v for k, v in rewritten.headers if k == pipeline.REWROTE_HEADER), None)
+        flow.request.path = rewritten.path_and_query
+        stamp = rewritten.header(pipeline.REWROTE_HEADER)
         if stamp is not None:
             flow.request.headers[pipeline.REWROTE_HEADER] = stamp
         elif pipeline.REWROTE_HEADER in flow.request.headers:
@@ -466,8 +465,7 @@ class IrimiAddon:
         if pipeline.REWROTE_HEADER not in flow.request.headers:
             return req
         del flow.request.headers[pipeline.REWROTE_HEADER]
-        kept = tuple((k, v) for k, v in req.headers if k != pipeline.REWROTE_HEADER)
-        return replace(req, headers=kept)
+        return req.without_header(pipeline.REWROTE_HEADER)
 
     def _to_target(self, flow: http.HTTPFlow, req: Request, forward: delegation.ForwardTo) -> None:
         """Point the flow at its answer target, the way `_through_reverse_door` points it upstream.
@@ -528,8 +526,8 @@ class IrimiAddon:
         flow.request.scheme = req.scheme
         flow.request.host = req.host
         flow.request.port = req.port
-        flow.request.path = f"{req.path}?{req.query}" if req.query else req.path
-        flow.request.host_header = next(v for k, v in req.headers if k == "host")
+        flow.request.path = req.path_and_query
+        flow.request.host_header = req.header("host")
         return req
 
     def responseheaders(self, flow: http.HTTPFlow) -> None:

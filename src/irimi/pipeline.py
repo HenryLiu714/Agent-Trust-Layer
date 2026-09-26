@@ -62,6 +62,11 @@ class Classification:
     # None while this is set. None when no map claims the host at all (#16).
     service_map: ServiceMap | None = None
 
+    @property
+    def route(self) -> Route | None:
+        """The matched route alone, or None when nothing matched. `matched[1]`, spelled once."""
+        return None if self.matched is None else self.matched[1]
+
 
 def parse(
     method: str,
@@ -143,6 +148,14 @@ def _refuse_live_on_an_unnamed_method(
     if route is not None and route.method == request.method:
         return kind, False  # the route named this verb; that is the explicit part
     return "unknown", True
+
+
+def unclassified(request: Request) -> Classification:
+    """How a request irimi could not decide about is recorded: `unknown` under its own host,
+    flagged `unclassified`. The engine's answer when the decision itself raised."""
+    return Classification(
+        service=request.host, operation="", kind="unknown", flags=(UNCLASSIFIED_FLAG,)
+    )
 
 
 def attribute_run(request: Request, default_run_id: str) -> str:
@@ -234,5 +247,5 @@ def respond(exchange: Exchange) -> Response | None:
         return exchange.response
     # Any header of this name already on the response came from somewhere else - a target that
     # echoes headers, or a service of the same name - and ours is the one that is true here.
-    kept = tuple((k, v) for k, v in exchange.response.headers if k.lower() != ANSWERED_BY_HEADER)
-    return replace(exchange.response, headers=kept + ((ANSWERED_BY_HEADER, stamp),))
+    kept = exchange.response.without_header(ANSWERED_BY_HEADER)
+    return replace(kept, headers=kept.headers + ((ANSWERED_BY_HEADER, stamp),))

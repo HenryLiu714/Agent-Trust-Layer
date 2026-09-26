@@ -185,7 +185,7 @@ def path_params(pattern: str, path: str) -> dict[str, str]:
     return {
         part[1:-1]: unquote(segment)
         for part, segment in zip(parts, segments, strict=True)
-        if part.startswith("{") and part.endswith("}")
+        if is_hole(part)
     }
 
 
@@ -216,6 +216,11 @@ def is_pattern(host: str) -> bool:
     return host.startswith("*.")
 
 
+def is_hole(part: str) -> bool:
+    """True for a `{name}` segment of a route pattern. The pattern language's one spelling."""
+    return part.startswith("{") and part.endswith("}")
+
+
 def path_segments(path: str) -> tuple[str, ...]:
     return tuple(s for s in path.split("/") if s)
 
@@ -227,7 +232,7 @@ def match_path(pattern: str, segments: tuple[str, ...]) -> int | None:
         return None
     holes = 0
     for part, segment in zip(parts, segments, strict=True):
-        if part.startswith("{") and part.endswith("}"):
+        if is_hole(part):
             holes += 1
         elif part != segment:
             return None

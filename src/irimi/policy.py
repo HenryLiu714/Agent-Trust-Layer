@@ -206,7 +206,7 @@ class ShadowPolicy:
         write_log: Sequence[Exchange] = (),
         run_id: str = "",
     ) -> Answer:
-        route = classification.matched[1] if classification.matched is not None else None
+        route = classification.route
         forward = delegate(request, classification)
         if forward is not None:
             # A delegated write is one irimi did not author and cannot check, and nothing in Phase
@@ -497,9 +497,7 @@ def _remember(
     if slot is None or answer.response is None:
         return
     try:
-        content_type = next(
-            (v for k, v in answer.response.headers if k.lower() == "content-type"), echo.JSON_CT
-        )
+        content_type = answer.response.header("content-type") or echo.JSON_CT
         store.put(
             slot[0],
             slot[1],

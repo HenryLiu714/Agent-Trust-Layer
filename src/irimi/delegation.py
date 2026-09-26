@@ -136,7 +136,7 @@ def delegate(request: Request, classification: Classification) -> ForwardTo | No
     service_map = classification.service_map
     if service_map is None:
         return None
-    route = classification.matched[1] if classification.matched is not None else None
+    route = classification.route
     if route is not None:
         target, forward_auth = target_for(service_map, route), route.forward_auth
     elif classification.kind in TARGETABLE_KINDS or (

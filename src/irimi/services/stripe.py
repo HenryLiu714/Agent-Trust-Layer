@@ -150,7 +150,7 @@ def _refunds_list(request: Request, document: dict[str, Any], writes: Sequence[W
         # Some page other than the first, and which real items it holds depends on where the
         # minted refund landed. The v0.1 table models page 1 only.
         return Applied(document, partial=True)
-    removed = _header(request, REWROTE_HEADER)
+    removed = request.header(REWROTE_HEADER) or ""
     if removed.startswith("starting_after="):
         # `rewrite_query` removed a cursor naming a refund irimi minted, so this IS the page that
         # follows it: the minted refund belongs on the page before this one, and prepending it
@@ -280,10 +280,6 @@ def _int(value: Any) -> int:
 
 def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
-
-
-def _header(request: Request, name: str) -> str:
-    return next((v for k, v in request.headers if k == name), "")
 
 
 def _known_list_param(name: str) -> bool:

@@ -27,7 +27,7 @@ from typing import Any
 from urllib.parse import parse_qsl
 
 from irimi import fixture
-from irimi.exchange import FIXTURE_FAILED_FLAG, FakeLevel, Request
+from irimi.exchange import FIXTURE_FAILED_FLAG, FakeLevel, Request, media_type
 from irimi.pipeline import Classification
 from irimi.servicemap import Route, path_params
 
@@ -82,10 +82,7 @@ def object_name(operation: str) -> str:
 
 def content_type(request: Request) -> str:
     """The request's content type without parameters, lower-cased. "" when there is none."""
-    for name, value in request.headers:  # pipeline.parse already lower-cased the names
-        if name == "content-type":
-            return value.partition(";")[0].strip().lower()
-    return ""
+    return media_type(request.header("content-type") or "")
 
 
 def _form_value(value: str) -> Any:
@@ -486,7 +483,7 @@ def fake_body(request: Request, classification: Classification) -> dict[str, Any
     `upload_url = None` and dies inside urllib); the generic echo leaves it raising the
     `SlackApiError` that callers already catch.
     """
-    route = classification.matched[1] if classification.matched is not None else None
+    route = classification.route
     shaper = SHAPES.get(classification.service) if route is not None else None
     if shaper is not None:
         return shaper(reflect(request))
@@ -701,7 +698,7 @@ def fake_response(request: Request, classification: Classification) -> Fake:
     purely to validate it and throw it away, once here - and this call was the only one outside
     the never-raise guard in `answer` (#29).
     """
-    route = _route_of(classification)
+    route = classification.route
     if route is not None:
         literal = LITERAL_BODIES.get((classification.service, route.operation))
         if literal is not None:
@@ -720,9 +717,5 @@ def fake_rejection(request: Request, classification: Classification, body: dict[
     this route would have had and discarding it. One dict, once, on a path that is about to make
     a network-free answer either way.
     """
-    _, answered_by, flags = _fake_dict(request, classification, _route_of(classification))
+    _, answered_by, flags = _fake_dict(request, classification, classification.route)
     return Fake(json.dumps(body, allow_nan=False).encode(), JSON_CT, answered_by, flags)
-
-
-def _route_of(classification: Classification) -> Route | None:
-    return classification.matched[1] if classification.matched is not None else None

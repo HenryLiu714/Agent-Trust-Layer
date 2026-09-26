@@ -121,12 +121,9 @@ class ServiceOverlay:
         # one only runs on the rewrite path and that path is closed until the log holds a write.
         # Both stay: this is the guard for a caller that is not the engine - `tests/test_overlay.py`
         # today, Phase 5's replay over recorded reads later.
-        kept = tuple((k, v) for k, v in read_request.headers if k != pipeline.REWROTE_HEADER)
         # The same object when there was nothing to strip, so the engine's `is` check still
         # means "nothing to do".
-        stripped = (
-            read_request if kept == read_request.headers else replace(read_request, headers=kept)
-        )
+        stripped = read_request.without_header(pipeline.REWROTE_HEADER)
         try:
             return self._rewrite(write_log, stripped)
         except Exception:
@@ -157,7 +154,7 @@ class ServiceOverlay:
             operation=operation, request=read_request, posted=echo.reflect(read_request)
         )
         applied = effects(read, document, writes)
-        rewrote = any(k == pipeline.REWROTE_HEADER for k, _ in read_request.headers)
+        rewrote = read_request.header(pipeline.REWROTE_HEADER) is not None
         fidelity: OverlayFidelity | None = None
         if applied.partial:
             fidelity = "partial"

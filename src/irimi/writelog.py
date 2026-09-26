@@ -48,7 +48,7 @@ def decode(service: str, request: Request, write_log: Sequence[Exchange]) -> lis
 
 def scope(service: str, request: Request) -> tuple[str, ...]:
     names = services.SCOPE_HEADERS.get(service, ())
-    return tuple(next((v for k, v in request.headers if k == name), "") for name in names)
+    return tuple(request.header(name) or "" for name in names)
 
 
 def json_object(body: bytes) -> dict[str, Any] | None:

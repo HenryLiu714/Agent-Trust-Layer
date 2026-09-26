@@ -58,7 +58,7 @@ def key_of(service: str, request: Request) -> str:
     spec = services.IDEMPOTENCY.get(service)
     if spec is None:
         return ""
-    return next((v for k, v in request.headers if k == spec.header), "")
+    return request.header(spec.header) or ""
 
 
 def conflict(service: str, key: str) -> services.Rejection | None:

@@ -6,7 +6,15 @@ import pytest
 from irimi.delegation import TargetRefused, is_credential_header, refuse_self_target, target_url
 from irimi.exchange import DOWNGRADED_FLAG, Request, Response
 from irimi.netaddr import is_loopback, is_self_host
-from irimi.pipeline import Classification, annotate, attribute_run, classify, parse, respond
+from irimi.pipeline import (
+    Classification,
+    annotate,
+    attribute_run,
+    classify,
+    parse,
+    respond,
+    unclassified,
+)
 from irimi.reverse_door import ReverseDoorRefused, detect_door, rewrite_reverse
 
 
@@ -173,6 +181,23 @@ def test_classify_matched_carries_the_service_map_and_route(tmp_path, monkeypatc
     service_map, route = cls.matched
     assert service_map.service == "stripe"
     assert route.human == "refund {amount} on {charge}"
+
+
+def test_classification_route_is_the_matched_route_or_none(tmp_path, monkeypatch):
+    unmatched = Classification(service="x", operation="", kind="unknown", flags=(), matched=None)
+    assert unmatched.route is None
+    cls = classify(_req("POST", path="/v1/refunds"), _index(tmp_path, monkeypatch))
+    assert cls.matched is not None
+    assert cls.route is cls.matched[1]
+
+
+def test_unclassified_is_unknown_under_its_own_host():
+    req = _req("POST")
+    cls = unclassified(req)
+    assert cls.service == req.host
+    assert cls.operation == ""
+    assert cls.kind == "unknown"
+    assert cls.flags == ("unclassified",)
 
 
 def test_classify_matches_a_pattern_segment(tmp_path, monkeypatch):

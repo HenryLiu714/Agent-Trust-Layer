@@ -144,6 +144,17 @@ def _point_flow(
     flow.request.host_header = host_header
 
 
+def _strip_header(flow: http.HTTPFlow, req: Request, name: str) -> Request:
+    """Take every `name` header off the flow and off the recorded request: irimi's own wire
+    vocabulary reaches neither the service nor the trace (#53, #67). `del` on mitmproxy's
+    `Headers` removes every instance, in any spelling. The same `req` back when there was none,
+    so the common path allocates nothing."""
+    if name not in flow.request.headers:
+        return req
+    del flow.request.headers[name]
+    return req.without_header(name)
+
+
 def _headers_from_fields(fields: Sequence[tuple[bytes, bytes]]) -> Headers:
     return tuple((k.decode("latin-1"), v.decode("latin-1")) for k, v in fields)
 
@@ -320,6 +331,18 @@ class IrimiAddon:
             logger.warning(
                 "irimi: could not strip an agent-sent %s: %s", pipeline.REWROTE_HEADER, exc
             )
+        # IRIMI-RUN STOPS HERE (#67). It names the run this request belongs to, which only irimi
+        # asks, so it is read first and then taken off the flow and the recorded request -
+        # `Exchange.run_id` holds the value. Left on, every live forward, answer target and L3
+        # read would carry the agent's run id to the service, and after #75 the SDK sets it on
+        # every request a run makes. Guarded like the strip above: if it raises, the run is still
+        # attributed and a header left on is only what happened before #67.
+        run_id = self.config.run_id
+        try:
+            run_id = pipeline.attribute_run(req, run_id)
+            req = _strip_header(flow, req, pipeline.RUN_HEADER)
+        except Exception as exc:
+            logger.warning("irimi: could not strip %s: %s", pipeline.RUN_HEADER, exc)
         # THE NEVER-RAISE RULE, stated once for the whole decision rather than per call site.
         #
         # mitmproxy forwards a flow untouched when a hook raises. Every statement between here
@@ -341,7 +364,7 @@ class IrimiAddon:
         # belong to the event loop. The write log is snapshotted here, before the hand-off.
         writes = tuple(self.write_log)
         try:
-            decision = await asyncio.to_thread(self._decide, req, writes)
+            decision = await asyncio.to_thread(self._decide, req, writes, run_id)
         except Exception as handoff:  # the hand-off itself, e.g. an executor shut down under us
             decision = _failed_decision(req, handoff)
         if decision.failure is None and decision.rewritten is not None:
@@ -353,12 +376,12 @@ class IrimiAddon:
             except Exception as exc:
                 decision = _failed_decision(req, exc)
         if decision.failure is not None:
-            self._answer_failed_decision(flow, req, door, decision.failure)
+            self._answer_failed_decision(flow, req, door, run_id, decision.failure)
             return
         self._act_on(flow, decision, door)
 
     def _answer_failed_decision(
-        self, flow: http.HTTPFlow, req: Request, door: Door, failure: Exception
+        self, flow: http.HTTPFlow, req: Request, door: Door, run_id: str, failure: Exception
     ) -> None:
         """The request hook's answer when the decision raised: a 502 flagged `decision-failed`,
         stamped and recorded. The response is on the flow before `_finish` runs, so a store that
@@ -376,7 +399,7 @@ class IrimiAddon:
             refusal,
             pipeline.unclassified(req),
             "fake-L0",
-            pipeline.attribute_run(req, self.config.run_id),
+            run_id,
             extra_flags=(DECISION_FAILED_FLAG,),
             door=door,
         )
@@ -429,11 +452,11 @@ class IrimiAddon:
             # with no response set, and mitmproxy would forward the write (#45).
             self._finish(ex)
 
-    def _decide(self, req: Request, writes: tuple[Exchange, ...]) -> _Decision:
-        """The whole decision, on a worker thread, with no flow in sight."""
+    def _decide(self, req: Request, writes: tuple[Exchange, ...], run_id: str) -> _Decision:
+        """The whole decision, on a worker thread, with no flow in sight. `run_id` is read by
+        `request()` before it strips `Irimi-Run`, since `req` no longer carries it (#67)."""
         try:
             cls = pipeline.classify(req, self.config.maps)
-            run_id = pipeline.attribute_run(req, self.config.run_id)
             ans = self.policy.answer(req, cls, writes, run_id)
             rewritten = None
             if ans.answered_by == "live" and cls.kind == "read" and writes:
@@ -504,10 +527,7 @@ class IrimiAddon:
         would need. The same object back when there was nothing to strip, so the common path
         allocates nothing and `_rewrite_read`'s identity check keeps meaning "nothing to do".
         """
-        if pipeline.REWROTE_HEADER not in flow.request.headers:
-            return req
-        del flow.request.headers[pipeline.REWROTE_HEADER]
-        return req.without_header(pipeline.REWROTE_HEADER)
+        return _strip_header(flow, req, pipeline.REWROTE_HEADER)
 
     def _to_target(self, flow: http.HTTPFlow, req: Request, forward: delegation.ForwardTo) -> None:
         """Point the flow at its answer target, the way `_through_reverse_door` points it upstream.

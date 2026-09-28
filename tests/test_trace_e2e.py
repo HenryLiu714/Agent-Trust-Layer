@@ -18,7 +18,7 @@ import time
 
 import pytest
 
-from irimi import runner, trace
+from irimi import redact, runner, trace
 from irimi.cli import main
 from irimi.exchange import Exchange
 from tests import test_engine_mitm, test_phase_exit
@@ -267,16 +267,7 @@ def test_the_phase_1_run_through_the_reverse_door_survives_the_trace_format(
     through the reverse door answered from the SHIPPED Stripe map's fixture after an L3 read of
     the charge. Every exchange decodes equal and is timed, the refund's `door: reverse` included,
     and the engine's read sits inside the refund's span."""
-    monkeypatch.setattr("irimi.reader.UpstreamReader", _StandInReader)
-    _StandInReader.port = stripe_stand_in
-    child = tmp_path / "child.py"
-    child.write_text(
-        CHILD.replace("__CHARGES_PORT__", str(stripe_stand_in))
-        .replace("__CHARGE__", CHARGE_ID)
-        .replace("__AMOUNT__", str(REFUND_AMOUNT_MINOR))
-    )
-    assert main(["shadow", "--port", "0", "--", sys.executable, str(child)]) == 0
-    assert [m for m, _, _ in _Stripe.seen if m != "GET"] == []
+    _run_phase1_under_shadow(tmp_path, monkeypatch, stripe_stand_in)
 
     read, check, refund = _decoded(events_store())
     assert [(ex.door, ex.issued_by, ex.kind) for ex in (read, check, refund)] == [
@@ -293,3 +284,53 @@ def test_the_phase_1_run_through_the_reverse_door_survives_the_trace_format(
     for ex in (read, check, refund):
         assert 0 < ex.started_at <= ex.ended_at
     assert refund.started_at < check.started_at <= check.ended_at <= refund.ended_at
+
+
+def _run_phase1_under_shadow(tmp_path, monkeypatch, stripe_port: int) -> None:
+    """The Phase 1 criterion's child (`tests.test_phase_exit.CHILD`) under the real `irimi shadow`,
+    against the loopback Stripe, which never hears a write. Its calls carry
+    `authorization: Bearer sk_test_notreal`."""
+    monkeypatch.setattr("irimi.reader.UpstreamReader", _StandInReader)
+    _StandInReader.port = stripe_port
+    child = tmp_path / "child.py"
+    child.write_text(
+        CHILD.replace("__CHARGES_PORT__", str(stripe_port))
+        .replace("__CHARGE__", CHARGE_ID)
+        .replace("__AMOUNT__", str(REFUND_AMOUNT_MINOR))
+    )
+    assert main(["shadow", "--port", "0", "--", sys.executable, str(child)]) == 0
+    assert [m for m, _, _ in _Stripe.seen if m != "GET"] == []
+
+
+def test_the_phase_1_run_redacted_for_disk_carries_no_credential_and_changes_nothing_else(
+    home, tmp_path, monkeypatch, stripe_stand_in, events_store
+):
+    """#69 over what a real `irimi shadow` run hands its store. Each exchange, redacted under this
+    install's key the way #70's writer will and then encoded, holds no `sk_test_` anywhere - lines
+    or blobs - and one placeholder for the one bearer token wherever it was sent, the engine's own
+    L3 read included. Nothing else changes: put each request's headers back and the redacted copy
+    equals what the engine recorded, bodies byte for byte."""
+    _run_phase1_under_shadow(tmp_path, monkeypatch, stripe_stand_in)
+    received = events_store().received
+    key = redact.load_key(home)
+    stored = [redact.redact_exchange(ex, key) for ex in received]
+
+    blobs: dict[str, bytes] = {}
+
+    def put_body(body: bytes) -> trace.BodyRef:
+        ref = trace.body_ref(body)
+        blobs[ref.sha256] = body
+        return ref
+
+    lines = [json.dumps(trace.exchange_to_json(ex, put_body)) for ex in stored]
+    assert all("sk_test_" not in line for line in lines)
+    assert all(b"sk_test_" not in blob for blob in blobs.values())
+    bearer = redact.placeholder(key, "Bearer sk_test_notreal")
+    sent = [ex.request.header("authorization") for ex in stored]
+    assert set(sent) == {bearer}, sent
+    for live, disk in zip(received, stored, strict=True):
+        restored = dataclasses.replace(
+            disk, request=dataclasses.replace(disk.request, headers=live.request.headers)
+        )
+        assert restored == live
+    assert received[0].request.header("authorization") == "Bearer sk_test_notreal"

@@ -24,8 +24,51 @@ the first column of each field table below is exactly the keys its encoder write
   exchange names it with a body ref. An empty body stores nothing, and its ref is `null`.
 - `unattributed/events.jsonl` holds every kind of event, tool calls included (#76), not only
   exchanges. It has no `run.json`: see Versioning for the version its lines are read under.
-- Everything is redacted before it reaches disk (#69). A credential in the example below
-  appears as a `<redacted:…>` placeholder for that reason.
+- Everything is redacted before it reaches disk (#69): see Redaction. A credential in the example
+  below appears as a `<redacted:…>` placeholder for that reason.
+
+## Redaction
+
+The store writes `redact.redact_exchange(exchange, key)`, never the exchange the engine answered
+with, and passes a trigger's args and a tool call's args and result through `redact.redact_json`.
+Redaction is always on; there is no switch and no per-repo rule in Phase 3.
+
+- **A placeholder** is `<redacted:` + the first 16 hex digits of HMAC-SHA256(key, value) + `>`.
+  The key is `$IRIMI_HOME/redact.key`, 32 random bytes created 0600 on first use, so one secret
+  is always one placeholder on one install, and a replay matches a secret against its own
+  placeholder.
+- **Headers.** A credential header's whole value is replaced (`redact.is_credential_header`, the
+  rule an answer target's request is stripped by), and so is `Set-Cookie` on a response.
+- **Secret keys.** A query parameter, a form field (the last bracket segment, so `card[token]`)
+  or a JSON object key at any depth named `api_key`, `apikey`, `secret`, `client_secret`,
+  `password`, `access_token`, `refresh_token`, `id_token` or `token` - compared whole and
+  case-insensitively, so `max_tokens` is not one - has its value replaced. A value that is not a
+  string is replaced by the placeholder of its JSON with sorted keys. `null` and `""` hide nothing
+  and are left as they are.
+- **Secret shapes.** Stripe, Slack, GitHub, AWS, Anthropic and OpenAI key shapes
+  (`redact.SECRET_PATTERNS`) are replaced wherever they appear: header values, the path, the query
+  string and a form body (names and values), JSON strings and keys, and a UTF-8 body that is
+  neither JSON nor a form (SSE included). A shape glued to a preceding letter or digit
+  (`task_test_runner`) is part of a word and is left alone.
+- **Credential-path hosts.** On `hooks.slack.com` the path is the secret, so the whole path is
+  replaced, in the request and in a delegated exchange's `target`.
+- **Bytes are kept when nothing matched.** A body is re-serialized only when a rule changed it: a
+  JSON body compactly, with `ensure_ascii=False`, a form body pair by pair.
+- **Failure is closed.** A part that cannot be redacted is stored as `<redaction-failed>` (a path as
+  `/<redaction-failed>`), and the exchange gains the flag `redaction-failed`. That includes a
+  JSON body the walk cannot see whole: an object with a repeated key, or JSON `json.loads`
+  refuses for a reason other than not being JSON.
+
+Known limitations:
+
+- **A body that is not valid UTF-8 is stored unscanned.** A credential inside a binary body
+  reaches disk as it was sent.
+- **A text body is scanned for shapes only.** In an SSE stream or any other body that is neither
+  JSON nor a form, a secret key's value (`data: {"token": "…"}`) is replaced only if it also has a
+  secret shape.
+- **The key is per install.** A secret recorded on a production box and on a CI runner gets two
+  different placeholders, so recordings from two machines do not match each other's redacted
+  values. Whether recordings move between machines is a Phase 6 decision (push and pull).
 
 ## Records
 

@@ -126,6 +126,10 @@ twice - once where a configuration is loaded and again at the decision it protec
   otherwise; a credential-path host (`hooks.slack.com`) has no such escape; irimi's own listener
   is never a target; credential headers are stripped unless the route opts in. `netaddr` is the
   one spelling of "loopback" all of these share.
+- **Nothing reaches disk unredacted, and the live flow is never redacted.** The store redacts its
+  own copy of each exchange with `redact.redact_exchange`; the engine and the agent's answer never
+  see a placeholder. A part that cannot be redacted is stored as `<redaction-failed>`, never as it
+  was (#69).
 - **Telemetry is forwarded and never stored.** A trace of the agent's own observability traffic
   is noise, and replaying it would re-emit someone else's events.
 - **L0 is the floor.** A route with no `fixture:`, and a fixture this install cannot read, are
@@ -166,6 +170,7 @@ $IRIMI_HOME/            default ~/.irimi
   ca/ca.key             the local CA's private key (0600)
   ca/ca.pem             the CA certificate the child process is told to trust
   mitm/mitmproxy-ca.pem key + cert, the bundle mitmproxy mints leaf certificates from
+  redact.key            the redaction HMAC key (0600), created on first use (#69)
   maps.yaml             optional: the user's overrides file (targets only)
 ./irimi.maps.yaml       optional: a per-project overrides file; wins over the one above
 ```

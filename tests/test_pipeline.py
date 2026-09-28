@@ -292,6 +292,13 @@ def test_attribute_run_accepts_the_longest_valid_run_id():
     assert attribute_run(_req(headers=(("irimi-run", "a" * 64),)), "dflt") == "a" * 64
 
 
+def test_annotate_carries_the_callers_timestamps():
+    cls = Classification("api.stripe.com", "GET /v1/charges", "read", ())
+    ex = annotate(_req(), None, cls, "live", "7f3a", started_at=1.5, ended_at=2.25)
+    assert (ex.started_at, ex.ended_at) == (1.5, 2.25)
+    assert annotate(_req(), None, cls, "live", "7f3a").started_at == 0.0
+
+
 @pytest.mark.parametrize("answered_by", ["live", "fake-L0"])
 def test_annotate_copies_fields(answered_by):
     req = _req()

@@ -185,6 +185,8 @@ def annotate(
     rejection_code: str = "",
     would_fire: tuple[str, ...] = (),
     currency: str = "",
+    started_at: float = 0.0,
+    ended_at: float = 0.0,
 ) -> Exchange:
     """Build the Exchange. Anything the engine answered is unvalidated; live forwards are also
     unvalidated for now (validated is reserved for record mode, later phases). `overlay` is how
@@ -195,7 +197,9 @@ def annotate(
     the machine code of an L3 rejection, and "" for everything else (#45). `would_fire` is the
     webhook events an accepted write would have caused, and is empty for everything else (#47).
     `currency` is the currency the write's L3 precondition read found on the object it named, for
-    the summary's amount, and is "" whenever no such read happened (#60)."""
+    the summary's amount, and is "" whenever no such read happened (#60). `started_at` and
+    `ended_at` are the wall-clock seconds the exchange began and ended, which the caller reads
+    because only it knows when that was (#68)."""
     validation: Validation = "unvalidated"
     return Exchange(
         request=request,
@@ -215,6 +219,8 @@ def annotate(
         issued_by=issued_by,
         would_fire=would_fire,
         currency=currency,
+        started_at=started_at,
+        ended_at=ended_at,
     )
 
 

@@ -3,11 +3,13 @@ import datetime as dt
 import gzip
 import http.client
 import ipaddress
+import itertools
 import json
 import socket
 import ssl
 import threading
 import time
+import types
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 
@@ -833,6 +835,43 @@ def test_a_server_sent_event_response_reaches_the_client_in_chunks(tmp_path, mon
     assert ex.response.body == b""
 
 
+def test_a_streamed_response_ends_when_its_stream_does_not_when_its_headers_leave(
+    tmp_path, monkeypatch
+):
+    """A streamed exchange is finished by the `response` hook, which mitmproxy runs once the
+    last chunk has gone - so its `ended_at` covers the whole stream the agent waited on, and not
+    only the headers `responseheaders` let through early (#8, #68)."""
+    _STREAM_GATE.clear()
+    srv = HTTPServer(("127.0.0.1", 0), _StreamUpstream)
+    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
+    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch, STREAM_MAP))
+    eng, seen, stop = _start(cfg)
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=5)
+        authority = f"127.0.0.1:{srv.server_address[1]}"
+        conn.request(
+            "POST",
+            f"http://{authority}/v1/chat/completions",
+            body=b"{}",
+            headers={"host": authority, "content-type": "application/json"},
+        )
+        resp = conn.getresponse()
+        assert resp.read(len(SSE_FIRST)) == SSE_FIRST
+        first_chunk_at = time.time()
+        time.sleep(0.05)  # a gap the exchange's span has to cover if it covers the stream
+        released_at = time.time()
+        _STREAM_GATE.set()
+        assert resp.read() == SSE_SECOND
+        conn.close()
+    finally:
+        _STREAM_GATE.set()
+        stop()
+        srv.shutdown()
+    (ex,) = seen
+    assert ex.response is not None and ex.response.body == b""  # streamed, so never assembled
+    assert 0 < ex.started_at <= first_chunk_at < released_at <= ex.ended_at
+
+
 READ_STREAM_MAP = STREAM_MAP.replace("kind: llm", "kind: read").replace(
     "method: POST", "method: GET"
 )
@@ -1490,7 +1529,9 @@ def _bare_flow(method, path):
 def test_a_raise_handing_the_decision_to_a_worker_answers_locally(tmp_path, monkeypatch):
     """The hook awaits `asyncio.to_thread` as of #45, and the hand-off can fail on its own - an
     executor already shut down under a stopping proxy - before `_decide`'s guard is ever reached.
-    It takes the same 502 as a decision that raised: the request may be a write."""
+    It takes the same 502 as a decision that raised: the request may be a write. It is timed like
+    any other exchange, from the request hook's first line to the answer (#68): the engine's clock
+    is a counter here, so an `ended_at` the 502 path forgot would read 100.0, not 101.0."""
     from irimi.engine import mitm
 
     seen = []
@@ -1500,6 +1541,8 @@ def test_a_raise_handing_the_decision_to_a_worker_answers_locally(tmp_path, monk
         raise RuntimeError("cannot schedule new futures after shutdown")
 
     monkeypatch.setattr(mitm.asyncio, "to_thread", no_threads)
+    clock = itertools.count(100)
+    monkeypatch.setattr(mitm, "time", types.SimpleNamespace(time=lambda: float(next(clock))))
     flow = _bare_flow(b"POST", b"/things")
     asyncio.run(addon.request(flow))
 
@@ -1507,6 +1550,7 @@ def test_a_raise_handing_the_decision_to_a_worker_answers_locally(tmp_path, monk
     assert json.loads(flow.response.content)["error"]["type"] == "irimi_decision_failed"
     (ex,) = seen
     assert ex.flags == (UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG)
+    assert (ex.started_at, ex.ended_at) == (100.0, 101.0)
 
 
 def test_a_raise_carrying_a_rewrite_onto_the_flow_answers_locally(tmp_path, monkeypatch):
@@ -3438,3 +3482,56 @@ def test_every_other_header_is_forwarded_untouched(engine, upstream):
     ((_, received),) = _Upstream.seen
     assert [v for k, v in received if k.lower() == "traceparent"] == [traceparent]
     assert ("traceparent", traceparent) in seen[0].request.headers
+
+
+# ------------------------------------ a run id names a directory; every exchange is timed (#68)
+
+
+def test_an_invalid_run_header_is_stripped_and_the_exchange_keeps_the_engines_run(engine, upstream):
+    """`../x` would name a directory outside the trace store (#70), so it is no run id: the
+    exchange keeps the engine's own. It is still stripped, like any other value (#67)."""
+    eng, seen = engine
+    status, _ = _via_proxy(
+        eng.listen_port(),
+        "GET",
+        f"http://127.0.0.1:{upstream}/hello",
+        extra_headers={"Irimi-Run": "../x"},
+    )
+    assert status == 200
+    ((_, received),) = _Upstream.seen
+    assert not _carries_run_header(received), "an invalid run id reached the upstream"
+    (ex,) = seen
+    assert ex.run_id == "t3st"
+    assert not _carries_run_header(ex.request.headers)
+
+
+def test_a_live_read_a_faked_write_and_a_lost_upstream_are_each_timed(engine, upstream):
+    """Each exchange starts when the request hook parses it and ends in the hook that finishes
+    it: `response` for the first two, `error` for the third."""
+    eng, seen = engine
+    before = time.time()
+    _via_proxy(eng.listen_port(), "GET", f"http://127.0.0.1:{upstream}/hello")
+    _via_proxy(eng.listen_port(), "POST", f"http://127.0.0.1:{upstream}/things", body=b"{}")
+    _via_proxy(eng.listen_port(), "GET", "http://127.0.0.1:1/x")
+    after = time.time()
+    read, write, lost = seen
+    assert (read.answered_by, write.answered_by) == ("live", "fake-L0")
+    assert "upstream-error" in lost.flags
+    for ex in seen:
+        assert 0 < before <= ex.started_at <= ex.ended_at <= after
+    assert read.ended_at <= write.started_at <= write.ended_at <= lost.started_at
+
+
+def test_the_precondition_read_is_timed_by_its_own_reader_call_inside_the_write(
+    precondition_stub,
+):
+    """An engine-issued read spans its `Reader` call, not the write's hook (#68): it starts after
+    the write it checks, ends before it, and lasts as long as `ch_SLOW1`'s stub takes. It is also
+    recorded first - `seq` will be completion order - while the write started first."""
+    proxy, stub, seen = precondition_stub
+    status, _, _ = _refund(proxy, stub, "ch_SLOW1")
+    assert status == 200
+    issued, write = seen
+    assert (issued.issued_by, write.issued_by) == ("engine", "agent")
+    assert write.started_at <= issued.started_at <= issued.ended_at <= write.ended_at
+    assert issued.ended_at - issued.started_at >= SLOW_S * 0.9

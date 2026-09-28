@@ -18,7 +18,7 @@ MITM_ALLOWED = {SRC / "engine" / "mitm.py"}
 
 LAYERS: list[set[str]] = [
     {"exchange", "paths", "netaddr"},
-    {"ca", "servicemap", "fixture", "bodies"},
+    {"ca", "servicemap", "fixture", "bodies", "trace"},
     {"pipeline", "reverse_door"},
     {"delegation", "echo", "services"},
     {"writelog", "idempotency", "reader"},

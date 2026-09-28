@@ -6,6 +6,7 @@ delegated one goes is `irimi.delegation`; the read L3 issues goes through `irimi
 
 import json
 import logging
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -247,18 +248,29 @@ class ShadowPolicy:
                     probe_cls.kind,
                 )
                 return _Checked("not_evaluable", issued)
+            # The read's own span, not the write's: the engine records it as an exchange of its
+            # own, and its timestamps are the `Reader` call's (#68).
+            started_at = time.time()
             try:
                 response = self.reader(probe_request)
             except Exception as exc:
                 # The `Reader` contract: raising is the same answer as None.
                 logger.warning("irimi: the precondition read %s raised: %s", probe.operation, exc)
                 response = None
+            ended_at = time.time()
             # Recorded before any verdict, and with no response when the reader got none, so a
             # network failure, a 429 and a body irimi cannot use all leave a trace of the read
             # irimi attempted on the agent's behalf (#45).
             issued = (
                 pipeline.annotate(
-                    probe_request, response, probe_cls, "live", run_id, issued_by="engine"
+                    probe_request,
+                    response,
+                    probe_cls,
+                    "live",
+                    run_id,
+                    issued_by="engine",
+                    started_at=started_at,
+                    ended_at=ended_at,
                 ),
             )
             if response is None:

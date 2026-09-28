@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import socket
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -46,7 +47,8 @@ OnRunning = Callable[[int | None, EngineStartError | None], None]
 class _Pending:
     """What `request()` decided about a flow, for the hooks that finish it. `flags` is the
     answer's own plus `target-failed` when its target was refused; everything else L3, the
-    webhooks and the currency said is read off `answer` (#45, #47, #60)."""
+    webhooks and the currency said is read off `answer` (#45, #47, #60). `started_at` is when
+    `request()` first parsed the flow (#68)."""
 
     request: Request
     classification: pipeline.Classification
@@ -54,6 +56,7 @@ class _Pending:
     door: Door
     answer: Answer
     flags: tuple[str, ...]
+    started_at: float
     target: str = ""  # the answer target this flow was pointed at; "" when irimi answered it
 
     @property
@@ -69,7 +72,11 @@ def _exchange(
     overlay: OverlayFidelity | None = None,
 ) -> Exchange:
     """The Exchange for a flow `request()` decided about, carrying its answer's L3 outcome,
-    rejection code, webhooks and currency (#45, #47, #60)."""
+    rejection code, webhooks and currency (#45, #47, #60).
+
+    It ends now: every caller is the hook that finishes the flow, and builds it just before
+    `_finish` (#68). Stamped here and not in `_finish`, which also records the engine's own reads,
+    whose `ended_at` is their `Reader` call's, and whose write-log copy must be the same object."""
     answer = pending.answer
     return pipeline.annotate(
         pending.request,
@@ -85,6 +92,8 @@ def _exchange(
         rejection_code=answer.rejection_code,
         would_fire=answer.would_fire,
         currency=answer.currency,
+        started_at=pending.started_at,
+        ended_at=time.time(),
     )
 
 
@@ -298,6 +307,9 @@ class IrimiAddon:
         ctx.master.shutdown()
 
     async def request(self, flow: http.HTTPFlow) -> None:
+        # When this exchange began, for the trace (#68). Read before anything else the hook does,
+        # the reverse door and the decision included, so the span is the whole of irimi's part.
+        started_at = time.time()
         try:
             req = _request_from_flow(flow)
         except Exception as exc:  # never fail open: an unparseable request is answered locally
@@ -376,12 +388,18 @@ class IrimiAddon:
             except Exception as exc:
                 decision = _failed_decision(req, exc)
         if decision.failure is not None:
-            self._answer_failed_decision(flow, req, door, run_id, decision.failure)
+            self._answer_failed_decision(flow, req, door, run_id, started_at, decision.failure)
             return
-        self._act_on(flow, decision, door)
+        self._act_on(flow, decision, door, started_at)
 
     def _answer_failed_decision(
-        self, flow: http.HTTPFlow, req: Request, door: Door, run_id: str, failure: Exception
+        self,
+        flow: http.HTTPFlow,
+        req: Request,
+        door: Door,
+        run_id: str,
+        started_at: float,
+        failure: Exception,
     ) -> None:
         """The request hook's answer when the decision raised: a 502 flagged `decision-failed`,
         stamped and recorded. The response is on the flow before `_finish` runs, so a store that
@@ -402,6 +420,8 @@ class IrimiAddon:
             run_id,
             extra_flags=(DECISION_FAILED_FLAG,),
             door=door,
+            started_at=started_at,
+            ended_at=time.time(),
         )
         # Through `respond`, like every other answer of ours. This is the one path that never
         # sets `_Pending`, so `response()` returns early and never runs - and it was therefore
@@ -411,7 +431,9 @@ class IrimiAddon:
         flow.response = _to_mitm_response(pipeline.respond(ex) or refusal)
         self._finish(ex)
 
-    def _act_on(self, flow: http.HTTPFlow, decision: _Decision, door: Door) -> None:
+    def _act_on(
+        self, flow: http.HTTPFlow, decision: _Decision, door: Door, started_at: float
+    ) -> None:
         """The request hook's last part: carry out a decision that did not raise.
 
         Every step that could leave the flow bare is guarded. The one thing that may still raise is
@@ -441,7 +463,7 @@ class IrimiAddon:
                     ),
                     flags + (TARGET_FAILED_FLAG,),
                 )
-        flow.metadata[META_KEY] = _Pending(req, cls, run_id, door, ans, flags, target)
+        flow.metadata[META_KEY] = _Pending(req, cls, run_id, door, ans, flags, started_at, target)
         if response is not None:
             flow.response = _to_mitm_response(response)
         for ex in ans.issued:

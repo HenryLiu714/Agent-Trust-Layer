@@ -11,15 +11,20 @@ each record with a non-default value in every field and asks for it back. A fiel
 them without codec support fails that test, which is what keeps a Phase 3 recording readable by
 Phase 5: a stored run gets no second chance to repeat an L3 read.
 
-Decoders raise `TraceFormatError` and nothing else on a malformed record, refuse a
-`schema_version` newer than this module's, and ignore keys they do not know.
+Decoders raise `TraceFormatError` and nothing else on a malformed record - one that is not a JSON
+object, lacks a field, or holds a value of the wrong type, outside its vocabulary or not finite -
+refuse a `schema_version` newer than this module's or below 1, and ignore keys they do not know.
+The one exception they do not wrap is the caller's own: `exchange_from_json` and `event_from_json`
+hand every body ref to `get_body`, and whatever it raises - a blob missing from the store - reaches
+the caller unchanged.
 """
 
 import hashlib
+import math
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Literal, get_args
+from typing import Any, Literal, assert_never, get_args
 
 from irimi.exchange import (
     AnsweredBy,
@@ -35,9 +40,15 @@ from irimi.exchange import (
     Validation,
 )
 
-# One integer for the whole format: `run.json` carries it, and a run's events are read under it.
-# A decoder refuses a newer one and ignores fields it does not know, so adding an optional field
-# is not a version bump and changing the meaning of one is.
+# One integer for the whole format (#68). `run.json` carries it and a run's events are read under
+# it; `unattributed/events.jsonl`, which has no `run.json`, is read under this one. A decoder
+# refuses a newer version and ignores keys it does not know. Every field v1 shipped with in #68 is
+# required. A field added later within v1 must decode as its dataclass default when absent, so a
+# recording made before it existed still reads, and whoever adds it - #71's `stream_chunks` first -
+# adds that decoder path. A new value in a closed vocabulary (`kind`, `answered_by`, `mode`,
+# `attribution`: every field read with `_one_of`) IS a bump, because an older reader refuses a value
+# it does not know; `flags` is open, and a reader accepts a flag it does not know. Changing what a
+# field means is a bump too. `docs/trace-format.md`, "Versioning", is the rule in full.
 SCHEMA_VERSION = 1
 
 # The run id of an exchange no run claimed: `irimi serve` with no `Irimi-Run` header (#77).
@@ -45,14 +56,16 @@ UNATTRIBUTED = "unattributed"
 
 # A run id becomes a directory name in the store (#70), so this pattern is the path-traversal
 # guard: no `/`, no `.` - so no `..` - no space, nothing empty, nothing unbounded.
-# `pipeline.attribute_run` treats an `Irimi-Run` value it refuses as absent.
+# `pipeline.attribute_run` treats an `Irimi-Run` value it refuses as absent. Test a value with
+# `is_valid_run_id`, which uses `fullmatch`, never with `RUN_ID_PATTERN.match`: `$` also matches
+# before a trailing newline, so `.match` accepts `"run\n"` - a name no directory should have.
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 # A body is stored as `blobs/<sha256>` (#70), so a `BodyRef` read back from disk is checked
 # against this before a store can join it onto a path.
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
-# The longest `ErrorInfo.message` kept: a run's error is a label, not a log.
+# The longest `ErrorInfo.message` kept: a run's error is a label, not a log (#68).
 MAX_ERROR_MESSAGE = 1000
 
 type JSONValue = None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
@@ -82,9 +95,16 @@ class ErrorInfo:
 
     @classmethod
     def from_exception(cls, exc: BaseException) -> "ErrorInfo":
-        """The one spelling of "what went wrong" a run or a tool call records."""
+        """The one spelling of "what went wrong" a run or a tool call records.
+
+        Never raises on an exception whose `__str__` does: the SDK (#74, #76) calls this while an
+        agent's own exception is in flight, and recording it must not replace it with another."""
         kind = type(exc)
-        return cls(f"{kind.__module__}.{kind.__qualname__}", str(exc)[:MAX_ERROR_MESSAGE])
+        try:
+            message = str(exc)
+        except Exception:
+            message = f"<unprintable {kind.__qualname__}>"
+        return cls(f"{kind.__module__}.{kind.__qualname__}", message[:MAX_ERROR_MESSAGE])
 
 
 @dataclass(frozen=True)
@@ -239,7 +259,9 @@ def event_to_json(seq: int, event: Event, put_body: PutBody) -> dict[str, Any]:
         return head | {"type": "exchange"} | exchange_to_json(event, put_body)
     if isinstance(event, ToolCall):
         return head | {"type": "tool_call"} | tool_call_to_json(event)
-    return head | {"type": "telemetry"} | telemetry_to_json(event)
+    if isinstance(event, TelemetrySeen):
+        return head | {"type": "telemetry"} | telemetry_to_json(event)
+    assert_never(event)
 
 
 def _trigger_to_json(trigger: Trigger) -> dict[str, Any]:
@@ -277,7 +299,7 @@ def _response_to_json(response: Response, put_body: PutBody) -> dict[str, Any]:
 
 
 def _headers_to_json(headers: Headers) -> list[list[str]]:
-    # Pairs, not an object: order and repeats (`set-cookie`) are part of what was sent.
+    # Pairs, not an object: order and repeats (`set-cookie`) are part of what was sent (#68).
     return [[name, value] for name, value in headers]
 
 
@@ -297,6 +319,8 @@ def run_from_json(d: Mapping[str, Any]) -> RunRecord:
         raise TraceFormatError(
             f"schema_version {version} is newer than this irimi reads ({SCHEMA_VERSION})"
         )
+    if version < 1:
+        raise TraceFormatError(f"schema_version {version} names no version; the first is 1")
     trigger = _optional(d, "trigger", _object)
     return RunRecord(
         schema_version=version,
@@ -366,12 +390,14 @@ def exchange_from_json(d: Mapping[str, Any], get_body: GetBody) -> Exchange:
 def event_from_json(d: Mapping[str, Any], get_body: GetBody) -> tuple[int, Event]:
     """One `events.jsonl` line back: its `seq` and its record."""
     seq = _int(d, "seq")
-    kind = _one_of(d, "type", EventType)
+    kind: EventType = _one_of(d, "type", EventType)
     if kind == "exchange":
         return seq, exchange_from_json(d, get_body)
     if kind == "tool_call":
         return seq, tool_call_from_json(d)
-    return seq, telemetry_from_json(d)
+    if kind == "telemetry":
+        return seq, telemetry_from_json(d)
+    assert_never(kind)
 
 
 def _trigger_from_json(d: Mapping[str, Any]) -> Trigger:
@@ -435,11 +461,15 @@ def _body_from_json(d: Mapping[str, Any], key: str, get_body: GetBody) -> bytes:
     return get_body(BodyRef(sha256, _int(ref, "size"), _bool(ref, "truncated")))
 
 
-# One reader per JSON type. Each raises TraceFormatError, never KeyError or TypeError, so a store
-# reading a damaged line has one exception to catch (#70).
+# One reader per JSON type. Each raises TraceFormatError, never KeyError, TypeError or
+# OverflowError, so a store reading a damaged line has one exception to catch (#70).
 
 
 def _present(d: Mapping[str, Any], key: str) -> Any:
+    # Every reader comes through here, so a line that parsed as `null`, `5` or `[]` is refused
+    # here rather than by a TypeError from `in` (#68).
+    if not isinstance(d, Mapping):
+        raise TraceFormatError(f"{key!r} must be read from an object, not {type(d).__name__}")
     if key not in d:
         raise TraceFormatError(f"missing required field {key!r}")
     return d[key]
@@ -467,11 +497,20 @@ def _int(d: Mapping[str, Any], key: str) -> int:
 
 
 def _float(d: Mapping[str, Any], key: str) -> float:
-    # JSON has one number type, and `json.dumps(0.0)` is `0.0` but a hand-written `0` is not.
+    # JSON has one number type, and `json.dumps(0.0)` is `0.0` but a hand-written `0` is not, so an
+    # integer is read as a float (#68). Not a non-finite one: `json.loads` reads `NaN` and
+    # `Infinity` by default, and a record holding one could not be written back with
+    # `allow_nan=False`. An integer too large for a float is refused, not an OverflowError.
     value = _present(d, key)
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise TraceFormatError(f"{key!r} is {value!r}, not a number")
-    return float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        raise TraceFormatError(f"{key!r} is an integer too large to be a timestamp") from None
+    if not math.isfinite(number):
+        raise TraceFormatError(f"{key!r} is {value!r}, not a finite number")
+    return number
 
 
 def _bool(d: Mapping[str, Any], key: str) -> bool:

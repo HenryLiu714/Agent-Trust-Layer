@@ -3,8 +3,9 @@
 This is the reference for what irimi writes about a run, and the contract between the phase that
 records runs (Phase 3) and every phase that reads them: the Phase 4 report prints a stored run,
 and Phase 5 replays one. The shape and its JSON codec live in `src/irimi/trace.py`, which does no
-I/O. The store (#70) writes the files described here. `tests/test_trace.py` decodes the example at
-the end of this page with those codecs, so the page and the code cannot drift apart.
+I/O. The store (#70) writes the files described here. `tests/test_trace.py` holds this page to the
+code: the example at the end decodes with those codecs and re-encodes to itself, key for key, and
+the first column of each field table below is exactly the keys its encoder writes, in order.
 
 ## Layout on disk
 
@@ -13,7 +14,7 @@ the end of this page with those codecs, so the page and the code cannot drift ap
   blobs/<sha256-hex>            a redacted body, written once
   runs/<run_id>/run.json        the RunRecord (trace.run_to_json), rewritten atomically
   runs/<run_id>/events.jsonl    one event per line, in seq order
-  unattributed/events.jsonl     exchanges whose run_id is trace.UNATTRIBUTED or invalid
+  unattributed/events.jsonl     events whose run_id is trace.UNATTRIBUTED or invalid
 ```
 
 - A **run id** is also a directory name, so it must match `^[A-Za-z0-9_-]{1,64}$`
@@ -21,12 +22,16 @@ the end of this page with those codecs, so the page and the code cannot drift ap
   match is treated as absent, and the exchange falls back to the engine's own run id.
 - A **body** is stored once, as `blobs/<sha256 of its bytes>`, and never inline in a record. An
   exchange names it with a body ref. An empty body stores nothing, and its ref is `null`.
+- `unattributed/events.jsonl` holds every kind of event, tool calls included (#76), not only
+  exchanges. It has no `run.json`: see Versioning for the version its lines are read under.
 - Everything is redacted before it reaches disk (#69). A credential in the example below
   appears as a `<redacted:…>` placeholder for that reason.
 
 ## Records
 
-Every timestamp is wall-clock seconds since the epoch (`time.time()`), as a JSON number.
+Every timestamp is wall-clock seconds since the epoch (`time.time()`), as a finite JSON number.
+An exchange's `started_at` and `ended_at` are `0.0` only on an exchange built with no clock to read
+(a test, or a caller with none); never on one the engine recorded.
 
 ### `run.json`: the run record (`trace.RunRecord`)
 
@@ -74,13 +79,13 @@ names:
 | --- | --- | --- |
 | `run_id` | string | The run it belongs to. |
 | `service` | string | The service its map names, or its host when no map claims it. |
-| `operation` | string | The route's operation (`refunds.create`), or `METHOD /path` when no route matched. |
+| `operation` | string | The route's operation (`refunds.create`), or `METHOD /path` when no route matched. `""` when the classify/answer decision itself failed, flagged `decision-failed` (`pipeline.unclassified`). |
 | `kind` | `read`, `write`, `llm`, `telemetry`, `unknown` | What the classifier said it is. |
 | `answered_by` | `live`, `fake-L0`, `fake-L1`, `delegated`, `overlay` | Who produced the response the agent got. |
 | `validation` | `validated`, `unvalidated` | Always `unvalidated` in Phase 3. |
 | `door` | `forward`, `reverse` | Which door it came in by. |
 | `issued_by` | `agent`, `engine` | `engine` is a read irimi made on its own account, the L3 precondition read. |
-| `target` | string | The address of the answer target that answered a `delegated` exchange. `""` otherwise. |
+| `target` | string | The address of the answer target a `delegated` exchange was pointed at: the one that answered it, or the one that could not be reached or applied, flagged `target-failed`. `""` otherwise. |
 | `flags` | list of strings | Facts about this exchange, each from the list in `exchange.py`. |
 | `overlay` | `full`, `partial` or `null` | How much of the run's faked writes the overlay could show in this read. `null` when it did not consider it. |
 | `precondition` | `passed`, `rejected`, `not_evaluable` or `null` | What L3 said about this write before it was faked. `null` when nothing was asked. |
@@ -101,6 +106,9 @@ A **request** is `method`, `scheme`, `host`, `port` (integer), `path`, `query` (
 - `body` is a **body ref**, `{"sha256": string, "size": integer, "truncated": boolean}`, or `null`
   for an empty body. `sha256` names the file under `blobs/` and is 64 lower-case hex digits.
   `size` is the stored length. `truncated` says the stored bytes are only the start of the body.
+- The decoder hands the whole ref to the store's `get_body`, but a decoded `Exchange` carries only
+  the bytes it returns: `size` and `truncated` do not survive decoding. The store that truncates a
+  body (#70) must therefore also say so in the exchange's `flags`, and declaring that flag is #70's.
 
 **A `tool_call`** (`trace.ToolCall`) is a tool call the proxy cannot see, reported by the SDK.
 
@@ -114,7 +122,8 @@ A **request** is `method`, `scheme`, `host`, `port` (integer), `path`, `query` (
 | `args` | any JSON | What it was called with. |
 | `result` | any JSON | What it returned. `null` when it raised. |
 | `error` | error or `null` | What it raised. |
-| `started_at`, `ended_at` | number | The call's span. |
+| `started_at` | number | When the call began. |
+| `ended_at` | number | When it returned or raised. |
 
 **A `telemetry`** event (`trace.TelemetrySeen`) records only that one telemetry exchange happened:
 `run_id`, `host` and `started_at`. Telemetry is forwarded, and its requests and responses are never
@@ -130,16 +139,34 @@ starts first and finishes last, so its precondition read is `seq` 1 and the refu
 
 ## Versioning
 
-`schema_version` is one integer for the whole format, carried by `run.json`. A run's events are
-read under their run's version.
+`schema_version` is one integer for the whole format, `trace.SCHEMA_VERSION`, carried by
+`run.json`. Event lines carry none.
 
-- A decoder refuses a `schema_version` greater than its own (`trace.SCHEMA_VERSION`) with
+- A run's `events.jsonl` is read under its `run.json`'s version. A writer never appends events to
+  a run whose `run.json` carries a `schema_version` other than its own.
+- `unattributed/events.jsonl` has no `run.json`, and is read under the reader's own
+  `trace.SCHEMA_VERSION`.
+- A decoder refuses a `schema_version` greater than its own, or less than 1, with
   `trace.TraceFormatError`.
-- A decoder ignores a field it does not know. Adding a field is therefore not a version bump,
-  but changing what an existing field means is.
-- Every field this page lists is required. A record missing one, a value of the wrong type, or a
-  value outside a field's vocabulary is a `TraceFormatError` too, and no decoder raises anything
-  else.
+- A decoder ignores a field it does not know, in any record or nested object.
+- **Every field version 1 shipped with is required**: every field on this page as #68 wrote it.
+- **A field added later within version 1 is optional on decode.** When it is absent the decoder
+  gives the field's dataclass default, so a recording made before the field existed still reads.
+  Whoever adds the field adds that decoder path and its test, and marks the field on this page with
+  the issue that added it; #71's `stream_chunks` is the first. Such a field must be one an older
+  reader, which ignores it, still reads correctly without. Adding it is not a version bump.
+- **These are version bumps:** removing or renaming a field, changing its type or what it means,
+  and adding a value to a closed vocabulary: `mode`, `attribution`, `outcome`, `kind`, `ran`,
+  `answered_by`, `validation`, `door`, `issued_by`, `overlay`, `precondition`, and an event's
+  `type`. An older reader refuses a vocabulary value it does not know, rather than reading a new
+  mode as an old one.
+- `flags` is open: a reader accepts a flag it does not know. `would_fire` is open too, since its
+  values are event names from a service map.
+- A record that is not a JSON object, lacks a required field, or holds a value of the wrong type,
+  outside a closed vocabulary or not finite is a `TraceFormatError`. No decoder raises anything
+  else on a malformed record, with one exception: `trace.exchange_from_json` and
+  `trace.event_from_json` hand every body ref to the caller's `get_body`, and whatever that raises
+  (a blob missing from the caller's store, say) reaches the caller unchanged.
 
 ## Example
 

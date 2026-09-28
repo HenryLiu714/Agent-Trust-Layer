@@ -13,33 +13,14 @@ from urllib.parse import urlsplit
 from irimi import netaddr
 from irimi.exchange import Request
 from irimi.pipeline import Classification
+
+# The credential-header rule is stated once, in `redact` (#69): a target may not be handed a
+# credential header, and disk may not be handed one either. The `as` form re-exports it, because
+# the engine asks `delegation.is_credential_header` which headers a target is not handed.
+from irimi.redact import is_credential_header as is_credential_header
 from irimi.servicemap import CREDENTIAL_PATH_HOSTS, SELF_TARGET, TARGETABLE_KINDS, target_for
 
 logger = logging.getLogger(__name__)
-
-# Header names that carry a credential and are removed before a request reaches an answer target,
-# unless the route sets `forward_auth: true`. Stripping `Authorization` alone was narrower than
-# the rule it implements - "a local stub does not need your real key" - and left `Cookie`,
-# `x-api-key` and `DD-API-KEY` on the request (#32).
-#
-# A marker list rather than a vendor list, because the vendor list is never finished: every new
-# service brings its own spelling, and the one it is missing is the one that leaks. Over-stripping
-# costs a stub a header it probably did not want; under-stripping hands it a live key, so the rule
-# is deliberately wide and `forward_auth` is the one way to turn it off.
-CREDENTIAL_MARKERS: tuple[str, ...] = (
-    "auth",  # authorization, proxy-authorization, x-sentry-auth, x-authenticated-*
-    "api-key",  # x-api-key, dd-api-key, x-goog-api-key
-    "api_key",
-    "apikey",
-    "token",  # x-auth-token, x-amz-security-token, x-csrf-token
-    "secret",
-    "credential",
-    "password",
-    "signature",  # x-slack-signature and friends: a signature over a shared secret
-)
-# The ones no marker catches: a cookie jar is a credential, and these two vendor headers are
-# spelled with none of the words above.
-CREDENTIAL_HEADERS: frozenset[str] = frozenset({"cookie", "dd-application-key", "x-honeycomb-team"})
 
 
 class TargetRefused(ValueError):
@@ -62,17 +43,6 @@ class ForwardTo:
 
     url: str
     forward_auth: bool = False
-
-
-def is_credential_header(name: str) -> bool:
-    """True when this header's value is a credential, so a target must not be handed it.
-
-    Compared case-insensitively and by substring, so a vendor header nobody has written down yet
-    (`x-acme-api-key`) is covered the day it appears. See CREDENTIAL_MARKERS for why the rule is
-    wide rather than exact.
-    """
-    lowered = name.strip().lower()
-    return lowered in CREDENTIAL_HEADERS or any(m in lowered for m in CREDENTIAL_MARKERS)
 
 
 def target_url(target: str, request: Request, matched: bool) -> str:

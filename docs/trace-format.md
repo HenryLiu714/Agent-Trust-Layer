@@ -24,8 +24,70 @@ the first column of each field table below is exactly the keys its encoder write
   exchange names it with a body ref. An empty body stores nothing, and its ref is `null`.
 - `unattributed/events.jsonl` holds every kind of event, tool calls included (#76), not only
   exchanges. It has no `run.json`: see Versioning for the version its lines are read under.
-- Everything is redacted before it reaches disk (#69). A credential in the example below
-  appears as a `<redacted:…>` placeholder for that reason.
+- Everything is redacted before it reaches disk (#69): see Redaction. A credential in the example
+  below appears as a `<redacted:…>` placeholder for that reason.
+
+## Redaction
+
+The store writes `redact.redact_exchange(exchange, key)`, never the exchange the engine answered
+with, and passes a trigger's args and a tool call's args and result through `redact.redact_json`.
+Redaction is always on; there is no switch and no per-repo rule in Phase 3.
+
+- **A placeholder** is `<redacted:` + the first 16 hex digits of HMAC-SHA256(key, value) + `>`.
+  The key is `$IRIMI_HOME/redact.key`, 32 random bytes created 0600 on first use (in a home
+  created 0700 if it is missing), so one secret is always one placeholder on one install, and a
+  replay matches a secret against its own placeholder. A symlink to the key is followed, so two
+  installs can be given one key (a mounted secret). A `redact.key` that does not lead to a regular
+  file of 32 bytes - a directory, a dangling symlink, a short file - is refused, never replaced.
+- **Headers.** A credential header's whole value is replaced (`redact.is_credential_header`, the
+  rule an answer target's request is stripped by), and so is `Set-Cookie` on a response. A value
+  that is an absolute `http(s)` URL (`Location`, `Referer`) is redacted as a URL: its query and
+  fragment as a query string, its path by its own host's rules.
+- **Secret keys.** A query parameter, a form field (each by its last non-empty bracket segment,
+  so `card[token]` and `token[]`) or a JSON object key at any depth named `api_key`, `apikey`,
+  `secret`, `client_secret`, `password`, `access_token`, `refresh_token`, `id_token` or `token` -
+  compared whole and case-insensitively, so `max_tokens` is not one - has its value replaced. A
+  value that is not a string is replaced by the placeholder of its JSON with sorted keys. `null`
+  and `""` hide nothing and are left as they are.
+- **Secret shapes.** Stripe, Slack, GitHub, AWS, Anthropic and OpenAI key shapes
+  (`redact.SECRET_PATTERNS`) are replaced wherever they appear: header names and values, the
+  path, the query string and a form body (names and values), JSON strings and keys, every line of
+  a text body (SSE included), `target` and `operation`. A shape glued to a preceding letter or
+  digit (`task_test_runner`) is part of a word and is left alone, unless that letter or digit ends
+  an escape - `\n`, `\t`, `\r`, `\b`, `\f`, `\uXXXX` or `%XX` - which is how text stored raw
+  spells a separator (`key:\nsk_live_…`, `/Bearer%20sk_live_…`).
+- **Credential-path hosts.** On `hooks.slack.com` (compared without a root dot, so
+  `hooks.slack.com.` too) the path is the secret, so the whole path is replaced: in the request,
+  in a delegated exchange's `target`, in a header URL that points there, and in the `operation`
+  of a request no route matched, which is named `METHOD /path`. Any other place the exchange
+  carries that path - a body, binary or not, or a header value, the path as sent or as the shape
+  rule left it - has it replaced too: irimi's own 502 for an unreachable answer target names the
+  target's URL. A path of `/` alone is left alone there.
+- **How a body is read.** A body that is one JSON document (after a byte-order mark, which is kept)
+  is walked as JSON, whatever its content type claims, a form's included. Otherwise a form content
+  type is read as a form. Otherwise the body is read line by line, a line ending at CRLF, LF or a
+  lone CR as an SSE line does: a line that is one JSON document (NDJSON), or an SSE `data:` field
+  whose value is one, is walked as JSON, and every other line is scanned for shapes.
+- **Bytes are kept when nothing matched.** A body is re-serialized only when a rule changed it: a
+  JSON document compactly, with `ensure_ascii=False` (a JSON line alone, its `data:` prefix and
+  line ending kept), a form body pair by pair.
+- **Failure is closed.** A part that cannot be redacted is stored as `<redaction-failed>` (a path as
+  `/<redaction-failed>`), and the exchange gains the flag `redaction-failed`. That includes a
+  JSON body or JSON line the walk cannot see whole: an object with a repeated key, or JSON
+  `json.loads` refuses for a reason other than not being JSON. `redact_json` returns
+  `<redaction-failed>` for a value that is not JSON, such as a tuple.
+
+Known limitations:
+
+- **A body that is not valid UTF-8 is stored unscanned.** A credential inside a binary body
+  reaches disk as it was sent.
+- **JSON that is not a whole document on one line is scanned for shapes only.** A secret key's
+  value is replaced only if it also has a secret shape when its JSON spans several lines of a
+  body that is not one document (a multi-line SSE `data:` field, a truncated document), or is
+  carried inside a JSON string (a streamed tool call's `partial_json`).
+- **The key is per install.** A secret recorded on a production box and on a CI runner gets two
+  different placeholders, so recordings from two machines do not match each other's redacted
+  values. Whether recordings move between machines is a Phase 6 decision (push and pull).
 
 ## Records
 

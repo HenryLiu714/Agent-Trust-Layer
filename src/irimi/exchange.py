@@ -87,6 +87,10 @@ IDEMPOTENCY_CONFLICT_FLAG = "idempotency-conflict"
 # The two together: neither is a write the overlay may replay onto a later read. One tuple rather
 # than two clauses at each of the places that has to keep them out.
 IDEMPOTENCY_FLAGS: tuple[str, ...] = (IDEMPOTENT_REPLAY_FLAG, IDEMPOTENCY_CONFLICT_FLAG)
+# Some part of this exchange could not be redacted, so the stored copy holds `<redaction-failed>`
+# in its place (#69). Set only on the copy `redact.redact_exchange` makes for disk, never on the
+# exchange the engine answered with: the live flow is never redacted.
+REDACTION_FAILED_FLAG = "redaction-failed"
 
 # The fidelity flag each way of answering carries. One mapping rather than a branch per caller:
 # the policy reads it, and `tests/test_exchange.py` holds it exhaustive over the non-live values.

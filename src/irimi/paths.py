@@ -4,6 +4,7 @@ from pathlib import Path
 IRIMI_HOME_ENV = "IRIMI_HOME"
 CA_KEY_NAME = "ca.key"
 CA_CERT_NAME = "ca.pem"
+REDACT_KEY_NAME = "redact.key"  # the redaction HMAC key (0600), created on first use (#69)
 
 
 def irimi_home() -> Path:

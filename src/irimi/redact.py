@@ -16,7 +16,8 @@ one (`delegation`, #32) and disk may not be handed one either.
 
 FAILURE IS CLOSED. A value that cannot be redacted is stored as `<redaction-failed>`, never as it
 was, and the exchange gains `REDACTION_FAILED_FLAG`. `redact_exchange` and `redact_json` never
-raise. Layer 2: it imports `exchange`, `paths`, `bodies`, `servicemap` and `trace`.
+raise. Layer 2: it imports `exchange`, `paths`, `ca` (its file modes), `bodies`, `servicemap`
+and `trace`.
 """
 
 import hmac
@@ -25,6 +26,7 @@ import logging
 import os
 import re
 import secrets
+import stat
 from collections.abc import Callable
 from dataclasses import replace
 from functools import partial
@@ -33,6 +35,7 @@ from urllib.parse import quote_plus, unquote_plus, urlsplit
 
 from irimi import paths
 from irimi.bodies import FORM_CT
+from irimi.ca import DIR_MODE, KEY_MODE
 from irimi.exchange import (
     REDACTION_FAILED_FLAG,
     Exchange,
@@ -73,7 +76,6 @@ CREDENTIAL_HEADERS: frozenset[str] = frozenset({"cookie", "dd-application-key", 
 
 # The key is 32 random bytes, the HMAC-SHA256 block's worth of secret.
 KEY_BYTES = 32
-KEY_MODE = 0o600
 
 # What a value that could not be redacted is stored as (#69, rule 7). Never the original.
 REDACTION_FAILED = "<redaction-failed>"
@@ -114,7 +116,25 @@ SECRET_PATTERNS: tuple[str, ...] = (
 # digit: without that, `task_test_runner` stored as `ta<redacted:…>` and any slug holding `risk-`
 # followed by 20 more characters lost its tail. A real key follows a space, a quote, `=`, `/`, `_`
 # or the start of the value, and still matches.
-_SECRET_SHAPE = re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(SECRET_PATTERNS) + ")")
+#
+# Unless that letter or digit ends an escape. Text stored raw spells a separator as one: a JSON
+# string inside an SSE line as `\n` or `\u0020`, a path, a header or a form field's name as `%20`,
+# `%3D` or `%2F`. Each ends in a letter or a digit, so `key:\nsk_live_…` and
+# `/Bearer%20sk_live_…` were stored whole (#69).
+_BOUNDARY = r"(?:(?<![A-Za-z0-9])|(?<=\\[bfnrt])|(?<=\\u[0-9A-Fa-f]{4})|(?<=%[0-9A-Fa-f]{2}))"
+_SECRET_SHAPE = re.compile(_BOUNDARY + "(?:" + "|".join(SECRET_PATTERNS) + ")")
+
+# A header value that is an absolute URL: `Location` hands an OAuth token back in its query or
+# fragment, and `Referer` repeats a page's, with no shape either would be caught by (#69).
+_ABSOLUTE_URL = re.compile(r"\s*https?://", re.IGNORECASE)
+
+# An SSE field whose value may be one JSON document (#69).
+_SSE_DATA = "data:"
+
+# A line of a text body with its ending: CRLF, LF or a lone CR, the three SSE ends a line at. Split
+# at LF alone, a CR-only stream was one line that was not JSON, and kept `data: {"token": …}`'s
+# token (#69). A JSON string holds neither CR nor LF raw, so no JSON line is split by this.
+_LINE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
 
 # What `quote_plus` leaves alone in a redacted query or form value, so the placeholder stays
 # readable on disk, as it is everywhere else.
@@ -148,11 +168,27 @@ def load_key(home: Path) -> bytes:
 
     Raises RedactKeyError when the file is there and is not 32 bytes: a key irimi did not write
     would give every secret a placeholder no earlier recording shares, and silently replacing it
-    would do the same to every recording already on disk.
+    would do the same to every recording already on disk. So is a path that does not lead to a
+    regular file - a directory, a dangling symlink - rather than a bare OSError (#69).
+
+    A symlink to a regular file is followed: a key shared between machines is mounted that way (a
+    Kubernetes Secret volume is a tree of symlinks), and refusing it would leave the partner no
+    way to give two installs one key. A missing home is created with `ca.DIR_MODE`, as the
+    directory that holds the CA's key is; an existing one keeps its mode, since it holds more than
+    the key and the key's own KEY_MODE is what protects it.
     """
     path = home / paths.REDACT_KEY_NAME
-    if not path.exists():
+    if not os.path.lexists(path):
         _create_key(path)
+    try:
+        regular = stat.S_ISREG(path.stat().st_mode)
+    except FileNotFoundError:
+        regular = False
+    if not regular:
+        raise RedactKeyError(
+            f"{path} is not a regular file (a directory or a dangling symlink); replace it with "
+            "the key file, or remove it to create a new key"
+        )
     key = path.read_bytes()
     if len(key) != KEY_BYTES:
         raise RedactKeyError(
@@ -169,8 +205,11 @@ def _create_key(path: Path) -> None:
     hard-linked to `path`. `os.link` never replaces an existing file, so the first process to link
     wins, and `path` never exists half-written: a process that loses the race reads the winner's
     whole key, where creating `path` directly could hand it an empty file.
+
+    There is no fallback for a filesystem without hard links: the OSError is raised. `os.rename`
+    replaces, so a loser would overwrite a key the winner had already hashed with.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(mode=DIR_MODE, parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{secrets.token_hex(8)}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, KEY_MODE)
     try:
@@ -190,25 +229,40 @@ def _create_key(path: Path) -> None:
 def redact_exchange(exchange: Exchange, key: bytes) -> Exchange:
     """A new Exchange, safe to write to disk. Never raises; `exchange` is not changed.
 
-    The request's path, query, headers and body, the response's headers and body, and the answer
-    target are redacted. Every other field is copied with `dataclasses.replace`, so a field added
-    to Exchange later survives without a change here. A part that could not be redacted is stored
-    as REDACTION_FAILED and the copy gains REDACTION_FAILED_FLAG.
+    The request's path, query, headers and body, the response's headers and body, the answer
+    target and the operation are redacted. Every other field is copied with `dataclasses.replace`,
+    so a field added to Exchange later survives without a change here. A part that could not be
+    redacted is stored as REDACTION_FAILED and the copy gains REDACTION_FAILED_FLAG.
     """
     guard = _Guard()
-    request = _redact_request(exchange.request, key, guard)
+    secret_path = _secret_path(exchange.request)
+    request = _redact_request(exchange.request, key, guard, secret_path)
     response = exchange.response
     if response is not None:
-        response = _redact_response(response, key, guard)
+        response = _redact_response(response, key, guard, secret_path)
+    # A bare-origin target keeps the request's path (`delegation.target_url`), so it is redacted
+    # by the request's host's rules: a webhook's secret path would otherwise reach disk here.
     target = guard(
         "the answer target",
         REDACTION_FAILED,
-        partial(_redact_target, exchange.target, exchange.request.host, key),
+        partial(_redact_url, exchange.target, exchange.request.host, key),
+    )
+    operation = guard(
+        "the operation",
+        REDACTION_FAILED,
+        partial(_redact_operation, exchange.operation, exchange.request, request.path, key),
     )
     flags = exchange.flags
     if guard.failed and REDACTION_FAILED_FLAG not in flags:
         flags = (*flags, REDACTION_FAILED_FLAG)
-    return replace(exchange, request=request, response=response, target=target, flags=flags)
+    return replace(
+        exchange,
+        request=request,
+        response=response,
+        target=target,
+        operation=operation,
+        flags=flags,
+    )
 
 
 def redact_json(value: JSONValue, key: bytes) -> JSONValue:
@@ -239,7 +293,9 @@ class _Guard:
             return fallback
 
 
-def _redact_request(request: Request, key: bytes, guard: _Guard) -> Request:
+def _redact_request(
+    request: Request, key: bytes, guard: _Guard, secret_path: str | None
+) -> Request:
     return replace(
         request,
         path=guard(
@@ -248,23 +304,26 @@ def _redact_request(request: Request, key: bytes, guard: _Guard) -> Request:
             partial(_redact_path, request.host, request.path, key),
         ),
         query=guard("the query", REDACTION_FAILED, partial(_redact_urlencoded, request.query, key)),
-        headers=_redact_headers(request.headers, key, guard, is_response=False),
+        headers=_redact_headers(request.headers, key, guard, secret_path, is_response=False),
         body=guard(
             "the request body",
             REDACTION_FAILED.encode(),
-            partial(_redact_body, request.body, _content_type(request.headers), key),
+            partial(_redact_body, request.body, _content_type(request.headers), key, secret_path),
         ),
     )
 
 
-def _redact_response(response: Response, key: bytes, guard: _Guard) -> Response:
+def _redact_response(
+    response: Response, key: bytes, guard: _Guard, secret_path: str | None
+) -> Response:
+    ct = _content_type(response.headers)
     return replace(
         response,
-        headers=_redact_headers(response.headers, key, guard, is_response=True),
+        headers=_redact_headers(response.headers, key, guard, secret_path, is_response=True),
         body=guard(
             "the response body",
             REDACTION_FAILED.encode(),
-            partial(_redact_body, response.body, _content_type(response.headers), key),
+            partial(_redact_body, response.body, ct, key, secret_path),
         ),
     )
 
@@ -273,46 +332,108 @@ def _content_type(headers: Headers) -> str:
     return media_type(header_value(headers, "content-type") or "")
 
 
-def _redact_headers(headers: Headers, key: bytes, guard: _Guard, is_response: bool) -> Headers:
+def _redact_headers(
+    headers: Headers, key: bytes, guard: _Guard, secret_path: str | None, *, is_response: bool
+) -> Headers:
+    """Each value by `_redact_header`, and each name scanned for shapes, because a name is text
+    the store writes too (#69)."""
     what = "a response header" if is_response else "a request header"
     return tuple(
-        (name, guard(what, REDACTION_FAILED, partial(_redact_header, name, v, key, is_response)))
+        (
+            guard(f"{what}'s name", REDACTION_FAILED, partial(_redact_text, name, key)),
+            guard(
+                what,
+                REDACTION_FAILED,
+                partial(_redact_header, name, v, key, is_response, secret_path),
+            ),
+        )
         for name, v in headers
     )
 
 
-def _redact_header(name: str, value: str, key: bytes, is_response: bool) -> str:
-    """A credential header's whole value is hidden; `Set-Cookie` is one on a response only."""
+def _redact_header(
+    name: str, value: str, key: bytes, is_response: bool, secret_path: str | None
+) -> str:
+    """A credential header's whole value is hidden; `Set-Cookie` is one on a response only. A
+    value that is an absolute URL is redacted as one, by its own host's rules."""
     if is_credential_header(name) or (is_response and name.strip().lower() == "set-cookie"):
         return _hide(value, key)
-    return _redact_text(value, key)
+    if _ABSOLUTE_URL.match(value):
+        value = _redact_url(value, None, key)
+    else:
+        value = _redact_text(value, key)
+    for spelling, hidden in _secret_path_swaps(secret_path, key):
+        if spelling in value:
+            value = value.replace(spelling, hidden)
+    return value
+
+
+def _is_credential_path_host(host: str) -> bool:
+    """Compared without a root dot: `hooks.slack.com.` is the same host (#69)."""
+    return host.lower().rstrip(".") in CREDENTIAL_PATH_HOSTS
+
+
+def _secret_path(request: Request) -> str | None:
+    """A credential-path host's path, which is a secret wherever else the exchange carries it too:
+    irimi's own 502 for an unreachable answer target names the target's URL, and a bare-origin
+    target's URL ends in this path (#69). None on any other host, and for `/`, which is every
+    URL's path and hides nothing."""
+    if _is_credential_path_host(request.host) and request.path.strip("/"):
+        return request.path
+    return None
+
+
+def _hidden_path(path: str, key: bytes) -> str:
+    return "/" + placeholder(key, path)
+
+
+def _secret_path_swaps(secret_path: str | None, key: bytes) -> list[tuple[str, str]]:
+    """Each spelling of `secret_path` a header or a body can hold once the other rules have run,
+    and what it is stored as. The shape rule runs first, so a path holding `xoxb-…` is carried as
+    that rule left it, and replacing the path as sent alone kept its team and bot ids (#69)."""
+    if secret_path is None:
+        return []
+    hidden = _hidden_path(secret_path, key)
+    return [
+        (spelling, hidden)
+        for spelling in dict.fromkeys((secret_path, _redact_text(secret_path, key)))
+    ]
 
 
 def _redact_path(host: str, path: str, key: bytes) -> str:
     """On a credential-path host (`hooks.slack.com`) the path IS the secret, so all of it goes."""
-    if host in CREDENTIAL_PATH_HOSTS:
-        return "/" + placeholder(key, path)
+    if _is_credential_path_host(host):
+        return _hidden_path(path, key)
     return _redact_text(path, key)
 
 
-def _redact_target(target: str, host: str, key: bytes) -> str:
-    """An answer target's URL under the request's rules. A bare-origin target keeps the request's
-    path (`delegation.target_url`), so a webhook's secret path would otherwise reach disk here."""
-    if not target:
-        return target
-    parts = urlsplit(target)
+def _redact_operation(operation: str, sent: Request, stored_path: str, key: bytes) -> str:
+    """A request no route matched is named `METHOD /path` (`pipeline.classify`), so its operation
+    is the stored path's: slack.yaml lists no route for `hooks.slack.com/workflows/...` (#69). A
+    route's own name is scanned for shapes like any other text."""
+    if operation == f"{sent.method} {sent.path}":
+        return f"{sent.method} {stored_path}"
+    return _redact_text(operation, key)
+
+
+def _redact_url(url: str, path_host: str | None, key: bytes) -> str:
+    """A URL's path by `path_host`'s rules (the URL's own host when None), its query and its
+    fragment pair by pair, then the whole of it for shapes. `url` itself when nothing matched."""
+    parts = urlsplit(url)
+    host = (parts.hostname or "") if path_host is None else path_host
     path = _redact_path(host, parts.path, key) if parts.path else parts.path
-    redacted = parts._replace(path=path, query=_redact_urlencoded(parts.query, key)).geturl()
-    return _redact_text(redacted, key)
+    query = _redact_urlencoded(parts.query, key)
+    fragment = _redact_urlencoded(parts.fragment, key)
+    if path is not parts.path or query is not parts.query or fragment is not parts.fragment:
+        url = parts._replace(path=path, query=query, fragment=fragment).geturl()
+    return _redact_text(url, key)
 
 
 def _redact_urlencoded(text: str, key: bytes) -> str:
     """A query string or a form body, pair by pair, then scanned whole for secret shapes. A pair
     nothing matched keeps its bytes, and `text` itself comes back when nothing matched at all.
 
-    The whole-text scan is what catches a shape in a field's NAME, and in a body that only claims
-    to be a form: `{"key": "sk_live_…"}` sent as one splits into a single pair whose name is the
-    whole document and whose value is empty.
+    The whole-text scan is what catches a shape in a field's NAME.
     """
     pairs = text.split("&")
     redacted = [_redact_pair(pair, key) for pair in pairs]
@@ -334,23 +455,29 @@ def _redact_pair(pair: str, key: bytes) -> str:
 
 
 def _last_segment(name: str) -> str:
-    """`card[token]` -> `token`; `a[b][c]` -> `c`; `token` -> `token`."""
-    return name.rstrip("]").rpartition("[")[2]
+    """`card[token]` -> `token`; `a[b][c]` -> `c`; `token` -> `token`. An empty `[]` is a list's
+    and names nothing, so `token[]` -> `token` (#69)."""
+    segments = [segment for segment in name.replace("]", "").split("[") if segment]
+    return segments[-1] if segments else ""
 
 
-def _redact_body(body: bytes, content_type: str, key: bytes) -> bytes:
+def _redact_body(body: bytes, content_type: str, key: bytes, secret_path: str | None) -> bytes:
     """`body` itself unless a rule changed something, so a body with nothing to hide is stored
-    byte for byte: its key order, its whitespace, its escapes.
+    byte for byte: its key order, its whitespace, its escapes. `secret_path` is replaced wherever
+    it appears, even in a body that is not UTF-8.
+    """
+    stored = _redact_body_text(body, content_type, key)
+    for spelling, hidden in _secret_path_swaps(secret_path, key):
+        raw = spelling.encode()
+        if raw in stored:
+            stored = stored.replace(raw, hidden.encode())
+    return stored
 
-    A body that is not UTF-8 is stored unscanned - a known limitation, in
-    `docs/trace-format.md`. A form body is read as a form because its content type says so; any
-    other body that parses as JSON is walked as JSON, whatever its content type claims; the rest
-    is scanned as text, which is what an SSE stream is.
 
-    Only a body that is not JSON at all is scanned as text. JSON that `json.loads` refuses for any
-    other reason (an integer past its digit limit) raises to the guard and fails closed, because
-    a text scan would miss a secret key's value. So does an object with a repeated key: `loads`
-    keeps the last value, and `{"token": "…", "token": null}` would come back byte for byte.
+def _redact_body_text(body: bytes, content_type: str, key: bytes) -> bytes:
+    """A body by the rules that read it. One that is not UTF-8 is stored unscanned - a known
+    limitation, in `docs/trace-format.md`. A leading byte-order mark is set aside and put back,
+    because `json.loads` refuses one as not JSON (#69).
     """
     if not body:
         return body
@@ -358,18 +485,64 @@ def _redact_body(body: bytes, content_type: str, key: bytes) -> bytes:
         text = body.decode("utf-8")
     except UnicodeDecodeError:
         return body
+    bom = "\ufeff" if text.startswith("\ufeff") else ""
+    document = text[len(bom) :]
+    redacted = _redact_document(document, content_type, key)
+    return body if redacted is document else (bom + redacted).encode()
+
+
+def _redact_document(text: str, content_type: str, key: bytes) -> str:
+    """A body's text: walked as JSON when it is one JSON document, whatever its content type
+    claims - `{"password": "…"}` read as a form is one pair whose name is the whole document, so
+    no secret key is ever seen (#69). Otherwise a form when its content type says so, and
+    otherwise line by line (`_redact_line`).
+
+    JSON that `json.loads` refuses for a reason other than not being JSON (an integer past its
+    digit limit) raises to the guard and fails closed, because a text scan would miss a secret
+    key's value. So does an object with a repeated key: `loads` keeps the last value, and
+    `{"token": "…", "token": null}` would come back byte for byte.
+    """
+    walked = _redact_json_text(text, key)
+    if walked is not None:
+        return walked
     if content_type == FORM_CT:
-        redacted = _redact_urlencoded(text, key)
-        return body if redacted is text else redacted.encode()
+        return _redact_urlencoded(text, key)
+    lines = _LINE.findall(text)
+    redacted = [_redact_line(line, key) for line in lines]
+    if all(new is old for new, old in zip(redacted, lines, strict=True)):
+        return text
+    return "".join(redacted)
+
+
+def _redact_line(line: str, key: bytes) -> str:
+    """One line of a body that is not one JSON document. A line that is one (NDJSON), or an SSE
+    `data:` field whose value is one, is walked as JSON; a text scan alone kept `data: {"token":
+    "…"}`'s token (#69). Any other line is scanned for shapes.
+    """
+    content = line.rstrip("\r\n")
+    field = _SSE_DATA if content.startswith(_SSE_DATA) else ""
+    value = content[len(field) :]
+    document = value.lstrip()
+    if document.startswith(("{", "[")):
+        walked = _redact_json_text(document, key)
+        if walked is document:
+            return line
+        if walked is not None:
+            return field + value[: len(value) - len(document)] + walked + line[len(content) :]
+    return _redact_text(line, key)
+
+
+def _redact_json_text(text: str, key: bytes) -> str | None:
+    """`text` walked as one JSON document: `text` itself when nothing in it matched, compact JSON
+    when something did, and None when it is not JSON at all."""
     try:
         document = json.loads(text, object_pairs_hook=_unique_members)
     except json.JSONDecodeError:
-        redacted = _redact_text(text, key)
-        return body if redacted is text else redacted.encode()
+        return None
     walked = _redact_json(document, key)
     if walked is document:
-        return body
-    return json.dumps(walked, separators=(",", ":"), ensure_ascii=False).encode()
+        return text
+    return json.dumps(walked, separators=(",", ":"), ensure_ascii=False)
 
 
 def _unique_members(pairs: list[tuple[str, JSONValue]]) -> dict[str, JSONValue]:
@@ -382,7 +555,8 @@ def _unique_members(pairs: list[tuple[str, JSONValue]]) -> dict[str, JSONValue]:
 
 
 def _redact_json(value: JSONValue, key: bytes) -> JSONValue:
-    """`value` itself when nothing in it matched, else a copy; the identity is the signal."""
+    """`value` itself when nothing in it matched, else a copy; the identity is the signal. Raises
+    TypeError on a value that is not JSON."""
     if isinstance(value, str):
         return _redact_text(value, key)
     if isinstance(value, list):
@@ -395,7 +569,11 @@ def _redact_json(value: JSONValue, key: bytes) -> JSONValue:
         if all(nk is k and nv is v for (nk, nv), (k, v) in zip(pairs, value.items(), strict=True)):
             return value
         return dict(pairs)
-    return value
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    # Not JSON, so nothing here can say what it holds: a tuple's secret would still reach disk,
+    # since `json.dumps` writes a tuple as an array (#69).
+    raise TypeError(f"{type(value).__name__} is not JSON")
 
 
 def _redact_member(name: str, value: JSONValue, key: bytes) -> JSONValue:

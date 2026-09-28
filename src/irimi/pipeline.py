@@ -163,9 +163,10 @@ def attribute_run(request: Request, default_run_id: str) -> str:
     """The run this exchange belongs to: the Irimi-Run header if the client sent a valid one,
     else the engine's own run id. A value `trace.is_valid_run_id` refuses - blank, `../x`, a
     space, 65 characters - is treated as absent, because a run id becomes a directory name in the
-    trace store (#68). The header is stripped whatever its value (#67)."""
+    trace store (#68). The header is stripped whatever its value (#67). Its name is compared as
+    `header_value` compares, so a `Request` built outside `parse` is attributed the same way."""
     for name, value in request.headers:
-        if name == RUN_HEADER and is_valid_run_id(value.strip()):
+        if name.lower() == RUN_HEADER and is_valid_run_id(value.strip()):
             return value.strip()
     return default_run_id
 
@@ -199,7 +200,8 @@ def annotate(
     `currency` is the currency the write's L3 precondition read found on the object it named, for
     the summary's amount, and is "" whenever no such read happened (#60). `started_at` and
     `ended_at` are the wall-clock seconds the exchange began and ended, which the caller reads
-    because only it knows when that was (#68)."""
+    because only it knows when that was (#68). `ended_at` is never before `started_at`: the wall
+    clock can step back mid-exchange, and a stored run's reader subtracts the two."""
     validation: Validation = "unvalidated"
     return Exchange(
         request=request,
@@ -220,7 +222,7 @@ def annotate(
         would_fire=would_fire,
         currency=currency,
         started_at=started_at,
-        ended_at=ended_at,
+        ended_at=max(ended_at, started_at),
     )
 
 

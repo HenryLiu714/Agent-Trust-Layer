@@ -299,6 +299,18 @@ def test_annotate_carries_the_callers_timestamps():
     assert annotate(_req(), None, cls, "live", "7f3a").started_at == 0.0
 
 
+def test_annotate_never_ends_an_exchange_before_it_started():
+    """The wall clock can step back mid-exchange; a stored run's reader subtracts the two (#68)."""
+    cls = Classification("api.stripe.com", "GET /v1/charges", "read", ())
+    ex = annotate(_req(), None, cls, "live", "7f3a", started_at=2.25, ended_at=1.5)
+    assert (ex.started_at, ex.ended_at) == (2.25, 2.25)
+
+
+def test_attribute_run_compares_the_header_name_case_insensitively():
+    """As `header_value` does: a `Request` built outside `parse` keeps its spelling (#68)."""
+    assert attribute_run(_req(headers=(("Irimi-Run", "run_A-1"),)), "dflt") == "run_A-1"
+
+
 @pytest.mark.parametrize("answered_by", ["live", "fake-L0"])
 def test_annotate_copies_fields(answered_by):
     req = _req()

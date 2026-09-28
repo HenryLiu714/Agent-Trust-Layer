@@ -219,6 +219,12 @@ class Exchange:
     # as `stripe.Refund.create(charge=, amount=)` does not. Never a default and never a guess -
     # see `services.Check.currency`.
     currency: str = ""
+    # When this exchange began and ended, in wall-clock `time.time()` seconds (#68). An agent's
+    # exchange starts when the request hook first parses the flow and ends when the hook that
+    # finishes it builds this record; an engine-issued read spans its `Reader` call. 0.0 only for
+    # an Exchange built outside the engine - a test, or a caller that has no clock to read.
+    started_at: float = 0.0
+    ended_at: float = 0.0
 
 
 def is_authored_write(exchange: Exchange) -> bool:

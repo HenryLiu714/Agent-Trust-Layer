@@ -25,6 +25,7 @@ from irimi.exchange import (
     Validation,
 )
 from irimi.servicemap import MapIndex, Route, ServiceMap
+from irimi.trace import is_valid_run_id
 
 RUN_HEADER = "irimi-run"  # header names are compared case-insensitively; stored lower-case
 # Stamped on every response irimi decided rather than forwarded, carrying the `answered_by` value
@@ -159,10 +160,12 @@ def unclassified(request: Request) -> Classification:
 
 
 def attribute_run(request: Request, default_run_id: str) -> str:
-    """The run this exchange belongs to: the Irimi-Run header if the client sent one, else the
-    engine's own run id."""
+    """The run this exchange belongs to: the Irimi-Run header if the client sent a valid one,
+    else the engine's own run id. A value `trace.is_valid_run_id` refuses - blank, `../x`, a
+    space, 65 characters - is treated as absent, because a run id becomes a directory name in the
+    trace store (#68). The header is stripped whatever its value (#67)."""
     for name, value in request.headers:
-        if name == RUN_HEADER and value.strip():
+        if name == RUN_HEADER and is_valid_run_id(value.strip()):
             return value.strip()
     return default_run_id
 

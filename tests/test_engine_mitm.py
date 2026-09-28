@@ -3438,3 +3438,24 @@ def test_every_other_header_is_forwarded_untouched(engine, upstream):
     ((_, received),) = _Upstream.seen
     assert [v for k, v in received if k.lower() == "traceparent"] == [traceparent]
     assert ("traceparent", traceparent) in seen[0].request.headers
+
+
+# ------------------------------------ a run id names a directory; every exchange is timed (#68)
+
+
+def test_an_invalid_run_header_is_stripped_and_the_exchange_keeps_the_engines_run(engine, upstream):
+    """`../x` would name a directory outside the trace store (#70), so it is no run id: the
+    exchange keeps the engine's own. It is still stripped, like any other value (#67)."""
+    eng, seen = engine
+    status, _ = _via_proxy(
+        eng.listen_port(),
+        "GET",
+        f"http://127.0.0.1:{upstream}/hello",
+        extra_headers={"Irimi-Run": "../x"},
+    )
+    assert status == 200
+    ((_, received),) = _Upstream.seen
+    assert not _carries_run_header(received), "an invalid run id reached the upstream"
+    (ex,) = seen
+    assert ex.run_id == "t3st"
+    assert not _carries_run_header(ex.request.headers)

@@ -281,6 +281,17 @@ def test_attribute_run_blank_header_uses_default():
     assert attribute_run(_req(headers=(("irimi-run", "   "),)), "dflt") == "dflt"
 
 
+@pytest.mark.parametrize("value", ["../x", "", "a" * 65, "a b"])
+def test_attribute_run_treats_an_invalid_run_id_as_absent(value):
+    """A run id becomes a directory name in the trace store, so one `trace.is_valid_run_id`
+    refuses never names a run (#68)."""
+    assert attribute_run(_req(headers=(("irimi-run", value),)), "dflt") == "dflt"
+
+
+def test_attribute_run_accepts_the_longest_valid_run_id():
+    assert attribute_run(_req(headers=(("irimi-run", "a" * 64),)), "dflt") == "a" * 64
+
+
 @pytest.mark.parametrize("answered_by", ["live", "fake-L0"])
 def test_annotate_copies_fields(answered_by):
     req = _req()

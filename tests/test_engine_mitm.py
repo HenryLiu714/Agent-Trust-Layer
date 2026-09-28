@@ -195,12 +195,13 @@ def _via_proxy(proxy_port, method, url, body=None, extra_headers=None):
     return resp.status, data
 
 
-def _reverse(proxy_port, method, path, body=None, host_name="127.0.0.1"):
+def _reverse(proxy_port, method, path, body=None, host_name="127.0.0.1", extra_headers=None):
     """Talk to the reverse door: an origin-form request addressed to the listener itself."""
     conn = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=10)
     headers = {"host": f"{host_name}:{proxy_port}"}
     if body is not None:
         headers["content-type"] = "application/json"
+    headers.update(extra_headers or {})
     conn.request(method, path, body=body, headers=headers)
     resp = conn.getresponse()
     data = resp.read()
@@ -2909,9 +2910,11 @@ class _PreconditionStub(BaseHTTPRequestHandler):
     answer and one rate-limited. A POST reaching it is a faked write that escaped."""
 
     seen: list = []  # (method, path) of every request
+    heard: list = []  # the header pairs of every GET, so a test can see what irimi sent (#67)
 
     def do_GET(self):
         _PreconditionStub.seen.append(("GET", self.path))
+        _PreconditionStub.heard.append(self.headers.items())
         route = self.path.split("?", 1)[0]
         if route == "/v1/charges/ch_REAL1":
             status, document = 200, _charge("ch_REAL1")
@@ -2956,6 +2959,7 @@ def precondition_stub(tmp_path, monkeypatch):
     from irimi.reader import UpstreamReader
 
     _PreconditionStub.seen = []
+    _PreconditionStub.heard = []
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _PreconditionStub)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     maps = _maps(tmp_path, monkeypatch, doc=PRECONDITION_STRIPE_MAP)
@@ -3292,3 +3296,145 @@ def test_a_post_to_a_healthy_channel_passes_and_the_probe_was_a_conversations_in
     (write,) = _writes(seen)
     assert write.precondition == "passed"
     assert _SlackPreconditionStub.seen == [("POST", "/api/conversations.info")]
+
+
+# ------------------------------------------------ Irimi-Run stops at irimi (#67)
+
+# Sent twice, in two spellings: a repeat has to lose every instance, not the first.
+RUN_HEADERS = {"Irimi-Run": "abc", "irimi-run": "abc"}
+
+
+def _carries_run_header(headers) -> bool:
+    return pipeline.RUN_HEADER in {k.lower() for k, _ in headers}
+
+
+def test_a_live_read_is_attributed_and_its_run_header_is_not_forwarded(engine, upstream):
+    eng, seen = engine
+    status, _ = _via_proxy(
+        eng.listen_port(), "GET", f"http://127.0.0.1:{upstream}/hello", extra_headers=RUN_HEADERS
+    )
+    assert status == 200
+    ((path, received),) = _Upstream.seen
+    assert path == "/hello"
+    assert not _carries_run_header(received), "the run id reached the upstream"
+    (ex,) = seen
+    assert ex.run_id == "abc"
+    assert not _carries_run_header(ex.request.headers), "Exchange.run_id already holds it"
+
+
+def test_a_reverse_door_read_is_attributed_and_its_run_header_is_not_forwarded(
+    tmp_path, monkeypatch
+):
+    cfg = _config(tmp_path, monkeypatch, reverse_hosts=frozenset({"127.0.0.1"}))
+    _Upstream.seen = []
+    srv = _serve_tls(_leaf_cert_for_loopback(cfg.ca, tmp_path / "leaf.pem"))
+    up = srv.server_address[1]
+    eng, seen, stop = _start(cfg, trust_upstream_ca=cfg.ca.cert)
+    try:
+        status, _ = _reverse(
+            eng.listen_port(), "GET", f"/127.0.0.1:{up}/hello", extra_headers=RUN_HEADERS
+        )
+    finally:
+        stop()
+        srv.shutdown()
+    assert status == 200
+    ((path, received),) = _Upstream.seen
+    assert path == "/hello"
+    assert not _carries_run_header(received), "the run id reached the upstream"
+    (ex,) = seen
+    assert (ex.door, ex.run_id) == ("reverse", "abc")
+    assert not _carries_run_header(ex.request.headers)
+
+
+def test_a_delegated_write_is_attributed_and_its_target_never_sees_the_run_header(
+    tmp_path, monkeypatch, target
+):
+    maps = _targeted(
+        tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{target}/w")]
+    )
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
+    try:
+        status, _ = _via_proxy(
+            eng.listen_port(),
+            "POST",
+            "http://127.0.0.1/things",
+            body=b"{}",
+            extra_headers=RUN_HEADERS,
+        )
+    finally:
+        stop()
+    assert status == 200
+    ((method, path, _, received),) = _Target.seen
+    assert (method, path) == ("POST", "/w")
+    assert not _carries_run_header(received.items()), "the run id reached the answer target"
+    (ex,) = seen
+    assert (ex.answered_by, ex.run_id) == ("delegated", "abc")
+    assert not _carries_run_header(ex.request.headers)
+
+
+def test_the_precondition_read_never_carries_the_run_header_and_both_exchanges_are_attributed(
+    precondition_stub,
+):
+    proxy, stub, seen = precondition_stub
+    status, _, _ = _read_via_proxy(
+        proxy,
+        f"http://127.0.0.1:{stub}/v1/refunds",
+        extra_headers={"content-type": "application/x-www-form-urlencoded", **RUN_HEADERS},
+        method="POST",
+        body=b"charge=ch_REAL1&amount=100",
+    )
+    assert status == 200
+    assert _PreconditionStub.seen == [("GET", "/v1/charges/ch_REAL1")]
+    (received,) = _PreconditionStub.heard
+    assert not _carries_run_header(received), "the run id reached the service on irimi's own read"
+    (issued,) = [ex for ex in seen if ex.issued_by == "engine"]
+    (write,) = _writes(seen)
+    assert (write.precondition, write.run_id, issued.run_id) == ("passed", "abc", "abc")
+    assert not _carries_run_header(write.request.headers)
+
+
+def test_a_failed_decision_is_attributed_from_the_run_header_it_stripped(
+    tmp_path, monkeypatch, upstream
+):
+    """The 502 path attributes the run itself, from the value `request()` read before it stripped
+    the header - the request it is handed no longer carries one."""
+    maps = _targeted(
+        tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", "http://127.0.0.1:9/w")]
+    )
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("the decision exploded")
+
+    monkeypatch.setattr(delegation, "target_url", boom)
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
+    try:
+        status, _ = _via_proxy(
+            eng.listen_port(),
+            "POST",
+            f"http://127.0.0.1:{upstream}/things",
+            body=b"{}",
+            extra_headers=RUN_HEADERS,
+        )
+    finally:
+        stop()
+    assert status == 502
+    (ex,) = seen
+    assert DECISION_FAILED_FLAG in ex.flags
+    assert ex.run_id == "abc"
+    assert not _carries_run_header(ex.request.headers)
+
+
+def test_every_other_header_is_forwarded_untouched(engine, upstream):
+    """Only irimi's own header is stripped: a W3C trace context the agent propagates reaches the
+    service exactly as sent."""
+    eng, seen = engine
+    traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+    _via_proxy(
+        eng.listen_port(),
+        "GET",
+        f"http://127.0.0.1:{upstream}/hello",
+        extra_headers={"traceparent": traceparent, **RUN_HEADERS},
+    )
+    ((_, received),) = _Upstream.seen
+    assert [v for k, v in received if k.lower() == "traceparent"] == [traceparent]
+    assert ("traceparent", traceparent) in seen[0].request.headers

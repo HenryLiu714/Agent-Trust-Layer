@@ -14,8 +14,9 @@ per flow. Each hook calls plain functions from the layers below it, in this orde
    decides whether it came in as `/<host>/<path>` on the listener itself, and if so
    `reverse_door.rewrite_reverse` points it upstream. Any `Irimi-Rewrote` the agent itself sent
    is stripped here, off the flow and off the recorded request: that header is irimi's own
-   vocabulary, and the response side believes it (#53). Then `pipeline.classify` says what it is
-   (`read`, `write`, `llm`, `telemetry`, `unknown`), `pipeline.attribute_run` picks the run id, and
+   vocabulary, and the response side believes it (#53). `pipeline.attribute_run` picks the run id
+   from `Irimi-Run`, which is then stripped the same way, so it never leaves irimi (#67). Then
+   `pipeline.classify` says what it is (`read`, `write`, `llm`, `telemetry`, `unknown`), and
    the `AnswerPolicy` decides: forward live, delegate to an answer target (`delegation.delegate`
    chose it; `_to_target` rewrites the flow), or answer it locally (`echo`: the route's L1
    fixture when its map names one, the L0 echo otherwise). The decision is stored on the flow
@@ -115,7 +116,10 @@ twice - once where a configuration is loaded and again at the decision it protec
   follows a minted refund - so an agent-sent one could suppress the agent's own refund from that
   page. It is stripped in the `request` hook, before the decision and whatever the write log
   holds, and again in `ServiceOverlay.rewrite` for callers that do not come through the engine
-  (#53).
+  (#53). `Irimi-Run` names the run a request belongs to; the `request` hook reads it and then
+  strips it from the flow and the recorded request, so no live forward, answer target or L3
+  read carries the agent's run id to a service, and `Exchange.run_id` is the one place it is
+  kept (#67).
 - **Targets stay on the machine.** A target must be loopback unless `--allow-target-host` says
   otherwise; a credential-path host (`hooks.slack.com`) has no such escape; irimi's own listener
   is never a target; credential headers are stripped unless the route opts in. `netaddr` is the

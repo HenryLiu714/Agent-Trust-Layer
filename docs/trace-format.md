@@ -92,7 +92,7 @@ names:
 | `rejection_code` | string | The service's code for an L3 rejection. `""` otherwise. |
 | `would_fire` | list of strings | The webhooks an accepted, faked write would have made the service send. |
 | `currency` | string | The currency the write's L3 read found. `""` when there was no such read. |
-| `started_at` | number | When irimi first parsed the request. An engine-issued read starts when irimi dialled it. |
+| `started_at` | number | When irimi first parsed the request. An engine-issued read spans its `Reader` call. |
 | `ended_at` | number | When irimi finished the exchange. `started_at <= ended_at`. |
 | `request` | request | What was asked, as irimi forwarded and recorded it. |
 | `response` | response or `null` | What came back. `null` when nothing did: a lost upstream, an unreachable target. |

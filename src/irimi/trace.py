@@ -347,8 +347,8 @@ def tool_call_from_json(d: Mapping[str, Any]) -> ToolCall:
         name=_str(d, "name"),
         kind=_one_of(d, "kind", ToolKind),
         ran=_one_of(d, "ran", Ran),
-        args=_present(d, "args"),
-        result=_present(d, "result"),
+        args=_json(d, "args"),
+        result=_json(d, "result"),
         error=_error_from_json(d, "error"),
         started_at=_float(d, "started_at"),
         ended_at=_float(d, "ended_at"),
@@ -404,7 +404,7 @@ def _trigger_from_json(d: Mapping[str, Any]) -> Trigger:
     return Trigger(
         name=_str(d, "name"),
         entrypoint=_optional(d, "entrypoint", _str),
-        args=_present(d, "args"),
+        args=_json(d, "args"),
         replayable=_bool(d, "replayable"),
     )
 
@@ -511,6 +511,22 @@ def _float(d: Mapping[str, Any], key: str) -> float:
     if not math.isfinite(number):
         raise TraceFormatError(f"{key!r} is {value!r}, not a finite number")
     return number
+
+
+def _json(d: Mapping[str, Any], key: str) -> JSONValue:
+    """A free JSON value (`args`, `result`), refused when a float anywhere in it is not finite:
+    `json.loads` reads `NaN`, and a record holding one could not be written back (#68)."""
+    value = _present(d, key)
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, float) and not math.isfinite(item):
+            raise TraceFormatError(f"{key!r} holds {item!r}, not a finite number")
+        if isinstance(item, list):
+            stack.extend(item)
+        elif isinstance(item, dict):
+            stack.extend(item.values())
+    return value
 
 
 def _bool(d: Mapping[str, Any], key: str) -> bool:

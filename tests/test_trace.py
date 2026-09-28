@@ -416,6 +416,20 @@ def test_a_timestamp_that_is_not_a_finite_float_is_a_trace_format_error(number):
         trace.exchange_from_json(encoded, blobs.get)
 
 
+@pytest.mark.parametrize("number", ["NaN", "Infinity", "-Infinity"])
+def test_free_json_holding_a_number_that_is_not_finite_is_a_trace_format_error(number):
+    """`args` and `result` hold any JSON, but not what `json.loads` alone would let in: a record
+    holding `NaN` could not be written back with `allow_nan=False` (#68)."""
+    nested = json.loads(f'{{"a": [1, {{"b": {number}}}]}}')
+    call = trace.tool_call_to_json(_filled(ToolCall))
+    for key in ("args", "result"):
+        with pytest.raises(TraceFormatError, match=key):
+            trace.tool_call_from_json(call | {key: nested})
+    trigger = trace.run_to_json(_run_record())["trigger"] | {"args": nested}
+    with pytest.raises(TraceFormatError, match="args"):
+        trace.run_from_json(_encoded_run() | {"trigger": trigger})
+
+
 @pytest.mark.parametrize(
     ("key", "value"),
     [

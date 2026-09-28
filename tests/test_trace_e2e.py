@@ -9,18 +9,39 @@ an `events.jsonl` line and back with every Phase 2 field intact and every span i
 which does to every exchange exactly what P3-04 (#70) will do: `trace.event_to_json` with a
 content-addressed blob dict, `json.dumps(..., allow_nan=False)`, and back through `json.loads` and
 `trace.event_from_json`. Nothing else in the composition changes.
+
+The last part does the same for #69's redaction, which #70's writer thread will run on each
+exchange before it encodes it: real traffic through the real `irimi shadow`, both doors, against
+loopback stand-ins, and then exactly what that writer will do - `redact.redact_exchange` under this
+install's key, then `_EventsStore`'s encoding - with every assertion made on the encoded lines
+and blobs.
 """
 
+import base64
 import dataclasses
 import json
+import shutil
+import socket
 import sys
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
 from irimi import redact, runner, trace
+from irimi.bodies import FORM_CT
 from irimi.cli import main
-from irimi.exchange import Exchange
+from irimi.exchange import (
+    FIDELITY_L0_FLAG,
+    TARGET_FAILED_FLAG,
+    UNCLASSIFIED_FLAG,
+    Exchange,
+    Headers,
+    header_value,
+    media_type,
+)
+from irimi.servicemap import loader
 from tests import test_engine_mitm, test_phase_exit
 from tests.test_engine_mitm import (
     _carries_run_header,
@@ -60,7 +81,13 @@ class _EventsStore:
         self.blobs: dict[str, bytes] = {}
         self.errors: list[Exception] = []
         self.closed = False
-        _EventsStore.built.append(self)
+
+    @classmethod
+    def for_the_run(cls) -> "_EventsStore":
+        """What `cli._build_engine` calls in place of `NullStore()`: a store the test can find."""
+        store = cls()
+        cls.built.append(store)
+        return store
 
     def record(self, exchange: Exchange) -> None:
         self.received.append(exchange)
@@ -92,7 +119,7 @@ class _EventsStore:
 def events_store(monkeypatch):
     """Returns a function giving the one store the run built, once it has been closed."""
     _EventsStore.built = []
-    monkeypatch.setattr("irimi.store.NullStore", _EventsStore)
+    monkeypatch.setattr("irimi.store.NullStore", _EventsStore.for_the_run)
 
     def the_store() -> _EventsStore:
         (store,) = _EventsStore.built
@@ -308,29 +335,573 @@ def test_the_phase_1_run_redacted_for_disk_carries_no_credential_and_changes_not
     """#69 over what a real `irimi shadow` run hands its store. Each exchange, redacted under this
     install's key the way #70's writer will and then encoded, holds no `sk_test_` anywhere - lines
     or blobs - and one placeholder for the one bearer token wherever it was sent, the engine's own
-    L3 read included. Nothing else changes: put each request's headers back and the redacted copy
-    equals what the engine recorded, bodies byte for byte."""
+    L3 read included. Nothing else changes: swap the token for its placeholder in what the engine
+    recorded and it equals the redacted copy, bodies byte for byte."""
     _run_phase1_under_shadow(tmp_path, monkeypatch, stripe_stand_in)
     received = events_store().received
     key = redact.load_key(home)
-    stored = [redact.redact_exchange(ex, key) for ex in received]
+    bearer = "Bearer sk_test_notreal"
+    disk = _assert_stored_as(received, key, _placeholders(key, bearer))
+    assert all("sk_test_" not in line for line in disk.lines)
+    assert all(b"sk_test_" not in blob for blob in disk.blobs.values())
+    sent = [ex.request.header("authorization") for ex in disk.received]
+    assert set(sent) == {redact.placeholder(key, bearer)}, sent
+    assert received[0].request.header("authorization") == bearer
 
-    blobs: dict[str, bytes] = {}
 
-    def put_body(body: bytes) -> trace.BodyRef:
-        ref = trace.body_ref(body)
-        blobs[ref.sha256] = body
-        return ref
+# ------------------------------------------------------------ redaction over real traffic (#69)
+#
+# Each rule of #69 that real traffic exercises, through the real `irimi shadow`: the child below
+# makes the calls a test hands it, through the forward proxy or the reverse door, and prints what
+# it was answered. The engine's recorded exchanges are then redacted and encoded as #70's writer
+# will do it (`_redacted_for_disk`), and `_assert_stored_as` holds the two promises: no secret is
+# in any line or blob, and swapping each secret for its placeholder in what the engine recorded
+# gives exactly what was stored - so one secret has one placeholder everywhere it went, and every
+# other byte survives. Every upstream is loopback: the stand-in below, or nothing at all.
 
-    lines = [json.dumps(trace.exchange_to_json(ex, put_body)) for ex in stored]
-    assert all("sk_test_" not in line for line in lines)
-    assert all(b"sk_test_" not in blob for blob in blobs.values())
-    bearer = redact.placeholder(key, "Bearer sk_test_notreal")
-    sent = [ex.request.header("authorization") for ex in stored]
-    assert set(sent) == {bearer}, sent
-    for live, disk in zip(received, stored, strict=True):
-        restored = dataclasses.replace(
-            disk, request=dataclasses.replace(disk.request, headers=live.request.headers)
+
+def _redacted_for_disk(received: list[Exchange], key: bytes) -> _EventsStore:
+    """What #70's writer will put on disk from `received`: each exchange through
+    `redact.redact_exchange` under `key`, then encoded as `_EventsStore` encodes it. Every line
+    decodes back equal to the redacted exchange it came from."""
+    disk = _EventsStore()
+    for ex in received:
+        disk.record(redact.redact_exchange(ex, key))
+    assert disk.errors == []
+    _decoded(disk)
+    return disk
+
+
+def _placeholders(key: bytes, *secrets: str) -> dict[str, str]:
+    """Each secret and the placeholder it must be stored as."""
+    return {secret: redact.placeholder(key, secret) for secret in secrets}
+
+
+def _with_placeholders(ex: Exchange, hidden: dict[str, str]) -> Exchange:
+    """`ex` with each secret in `hidden` swapped for its stand-in in every part `redact` reads: the
+    request's path, query, headers and body, the response's headers and body, the answer target
+    and the operation. Longest secret first, so a header value holding a shorter secret is swapped
+    whole.
+
+    A body is swapped byte for byte, then held to #69's rule 5: a JSON body a rule changed is
+    re-serialized compact, and every other body - a form, a stream, bytes that are not UTF-8 -
+    keeps its bytes."""
+    order = sorted(hidden, key=len, reverse=True)
+
+    def text(value: str) -> str:
+        for secret in order:
+            value = value.replace(secret, hidden[secret])
+        return value
+
+    def body(value: bytes, pairs: Headers) -> bytes:
+        swapped = value
+        for secret in order:
+            swapped = swapped.replace(secret.encode(), hidden[secret].encode())
+        if swapped == value or media_type(header_value(pairs, "content-type") or "") == FORM_CT:
+            return swapped
+        try:
+            document = json.loads(swapped)
+        except ValueError:
+            return swapped
+        return json.dumps(document, separators=(",", ":"), ensure_ascii=False).encode()
+
+    def headers(pairs: Headers) -> Headers:
+        return tuple((name, text(value)) for name, value in pairs)
+
+    request = dataclasses.replace(
+        ex.request,
+        path=text(ex.request.path),
+        query=text(ex.request.query),
+        headers=headers(ex.request.headers),
+        body=body(ex.request.body, ex.request.headers),
+    )
+    response = ex.response
+    if response is not None:
+        response = dataclasses.replace(
+            response,
+            headers=headers(response.headers),
+            body=body(response.body, response.headers),
         )
-        assert restored == live
-    assert received[0].request.header("authorization") == "Bearer sk_test_notreal"
+    return dataclasses.replace(
+        ex,
+        request=request,
+        response=response,
+        target=text(ex.target),
+        operation=text(ex.operation),
+    )
+
+
+def _assert_stored_as(received: list[Exchange], key: bytes, hidden: dict[str, str]) -> _EventsStore:
+    """#69's two promises over one run's exchanges, on what #70 will write: no secret in `hidden`
+    is in any line or blob, and each stored exchange is the recorded one with exactly those secrets
+    swapped for their placeholders - every field compared, bodies byte for byte."""
+    disk = _redacted_for_disk(received, key)
+    for secret in hidden:
+        assert [line for line in disk.lines if secret in line] == [], secret
+        assert [blob for blob in disk.blobs.values() if secret.encode() in blob] == [], secret
+    for live, stored in zip(received, disk.received, strict=True):
+        assert stored == _with_placeholders(live, hidden)
+    return disk
+
+
+# The stand-in's own secrets and answers. Each is a value no rule would touch unless it is one.
+WEBHOOK_TOKEN = "xq9WebhookPathSecret24"  # a real one is 24 alphanumerics, no credential shape
+WEBHOOK_PATH = f"/services/T0REDACT/B0REDACT/{WEBHOOK_TOKEN}"
+WEBHOOK_BODY = b'{"text":"deploy finished"}'
+QUERY_API_KEY = "qs-secret-api-key-4f2"  # a secret by its name only, like CARD_TOKEN
+CARD_TOKEN = "tok_redact_e2e"
+STRIPE_BEARER = "Bearer sk_test_RedactE2e"
+STRIPE_FORM = f"card[token]={CARD_TOKEN}&amount=100".encode()
+LLM_API_KEY = "sk-ant-api03-RedactE2eHeaderKey"
+NESTED_KEY = "sk_live_NestedThreeDeep"
+LLM_TOKEN = "plain-session-token"  # under the whole key `token`, beside `max_tokens`
+LLM_BODY = json.dumps(
+    {
+        "model": "standin-1",
+        "max_tokens": 1024,
+        "metadata": {"agent": {"env": {"key": NESTED_KEY}}},
+        "token": LLM_TOKEN,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+).encode()
+# The model echoes the key back, so one secret is stored in both a request and a response.
+LLM_ANSWER = json.dumps(
+    {
+        "id": "msg_1",
+        "content": [{"type": "text", "text": f"your key is {NESTED_KEY}"}],
+        "usage": {"input_tokens": 3, "output_tokens": 5},
+    }
+).encode()
+SSE_PLAIN_KEY = "sk_live_StreamedPlain"
+SSE_ESCAPED_KEY = "sk_live_AfterAnEscape"
+# The second event's key follows a JSON `\n` escape: a backslash and an `n`, as the wire has it.
+SSE_BODY = (
+    b'data: {"text":"key: ' + SSE_PLAIN_KEY.encode() + b'"}\n\n'
+    b'data: {"text":"key:\\n' + SSE_ESCAPED_KEY.encode() + b'"}\n\n'
+)
+SESSION_COOKIE = "session=cookie-secret-77; Path=/; HttpOnly"
+BINARY_BODY = b"\x89PNG\r\n\x1a\n\xff\xfe\x00 not UTF-8, stored as it came"
+
+# The stand-in's host, claimed as a service so its routes classify: an LLM that answers JSON or a
+# stream, and a read that sets a cookie over a binary body. Added beside the shipped maps, which
+# the Slack webhook and the Stripe write need.
+STANDIN_MAP = """
+version: 1
+service: standin
+hosts:
+  - 127.0.0.1
+routes:
+  - match:
+      method: POST
+      path: /v1/messages
+    operation: messages.create
+    kind: llm
+    human: ask the model
+  - match:
+      method: POST
+      path: /v1/stream
+    operation: messages.stream
+    kind: llm
+    human: stream the model
+  - match:
+      method: GET
+      path: /v1/session
+    operation: session.get
+    kind: read
+    human: read the session
+"""
+
+
+class _RedactStandIn(BaseHTTPRequestHandler):
+    """Everything on the other side of the proxy in the redaction runs, and the webhook's answer
+    target. It records every request as it arrived, which is how a test sees that the live request
+    was never redacted."""
+
+    seen: list[tuple[str, str, Headers, bytes]] = []
+
+    def _answer(self, content_type: str, body: bytes, extra: Headers = ()) -> None:
+        length = int(self.headers.get("content-length") or 0)
+        sent = self.rfile.read(length) if length else b""
+        _RedactStandIn.seen.append((self.command, self.path, tuple(self.headers.items()), sent))
+        self.send_response(200)
+        self.send_header("content-type", content_type)
+        for name, value in extra:
+            self.send_header(name, value)
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        self._answer("application/octet-stream", BINARY_BODY, (("set-cookie", SESSION_COOKIE),))
+
+    def do_POST(self):
+        if self.path == "/v1/messages":
+            self._answer("application/json", LLM_ANSWER)
+        elif self.path == "/v1/stream":
+            self._answer("text/event-stream", SSE_BODY)
+        else:  # the webhook's target, answering as Slack does
+            self._answer("text/html", b"ok")
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def redact_stand_in():
+    _RedactStandIn.seen = []
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _RedactStandIn)
+    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
+    yield srv.server_address[1]
+    srv.shutdown()
+
+
+@dataclasses.dataclass(frozen=True)
+class _Call:
+    """One request for CALLS_CHILD to make. `host` "" is the reverse door: the listener's own
+    authority, which only the child knows."""
+
+    method: str
+    target: str
+    headers: Headers = ()
+    body: bytes | None = None
+    host: str = ""
+
+
+@dataclasses.dataclass(frozen=True)
+class _Answer:
+    """What the agent was answered, as it read it off the wire."""
+
+    status: int
+    headers: Headers
+    body: bytes
+
+    def header(self, name: str) -> str | None:
+        return header_value(self.headers, name)
+
+
+# Makes the calls in the JSON file it is handed, in order, each through the listener, and writes
+# what came back to the second file. A file and not stdout: irimi prints each exchange's line to
+# the same stdout as it finishes, and a streamed one finishes as the child reads it, so the two
+# interleave. `putheader` rather than a dict, as in RUN_HEADER_CHILD, so what the test lists is
+# exactly what is sent.
+CALLS_CHILD = """
+import base64, http.client, json, os, sys, urllib.parse
+
+proxy = urllib.parse.urlparse(os.environ["HTTP_PROXY"])
+with open(sys.argv[1]) as f:
+    calls = json.load(f)
+answers = []
+for call in calls:
+    body = None if call["body"] is None else base64.b64decode(call["body"])
+    conn = http.client.HTTPConnection(proxy.hostname, proxy.port, timeout=10)
+    conn.putrequest(call["method"], call["target"], skip_host=True, skip_accept_encoding=True)
+    conn.putheader("host", call["host"] or "127.0.0.1:%d" % proxy.port)
+    for name, value in call["headers"]:
+        conn.putheader(name, value)
+    if body is not None:
+        conn.putheader("content-length", str(len(body)))
+    conn.endheaders(body)
+    resp = conn.getresponse()
+    data = base64.b64encode(resp.read()).decode()
+    answers.append({"status": resp.status, "headers": resp.getheaders(), "body": data})
+    conn.close()
+with open(sys.argv[2], "w") as f:
+    json.dump(answers, f)
+"""
+
+
+def _run_calls_under_shadow(
+    tmp_path, monkeypatch, stand_in: int, calls: list[_Call], *flags: str
+) -> list[_Answer]:
+    """`calls` from a child of the real `irimi shadow`, over the shipped maps plus STANDIN_MAP, and
+    what the child was answered for each. `flags` go before the `--`. The engine's own L3 reader
+    is pointed at the stand-in, so nothing here can dial a real host even by mistake."""
+    maps_dir = tmp_path / "shipped"
+    shutil.copytree(loader.shipped_dir(), maps_dir)
+    (maps_dir / "standin.yaml").write_text(STANDIN_MAP)
+    monkeypatch.setattr("irimi.servicemap.loader.shipped_dir", lambda: maps_dir)
+    monkeypatch.setattr("irimi.reader.UpstreamReader", _StandInReader)
+    _StandInReader.port = stand_in
+    spec = [
+        {
+            "method": c.method,
+            "target": c.target,
+            "host": c.host,
+            "headers": [list(pair) for pair in c.headers],
+            "body": None if c.body is None else base64.b64encode(c.body).decode(),
+        }
+        for c in calls
+    ]
+    (tmp_path / "calls.json").write_text(json.dumps(spec))
+    child = tmp_path / "child.py"
+    child.write_text(CALLS_CHILD)
+    answers = tmp_path / "answers.json"
+    argv = [*flags, "--", sys.executable, str(child), str(tmp_path / "calls.json"), str(answers)]
+    assert main(["shadow", "--port", "0", *argv]) == 0
+    got = json.loads(answers.read_text())
+    assert len(got) == len(calls)
+    return [
+        _Answer(g["status"], tuple(map(tuple, g["headers"])), base64.b64decode(g["body"]))
+        for g in got
+    ]
+
+
+def _webhook_call() -> _Call:
+    """An incoming-webhook post through the reverse door, as slack_sdk's WebhookClient makes it
+    once its URL is the door's."""
+    return _Call(
+        "POST",
+        "/hooks.slack.com" + WEBHOOK_PATH,
+        (("content-type", "application/json"),),
+        WEBHOOK_BODY,
+    )
+
+
+def test_a_delegated_slack_webhook_stores_its_secret_path_as_one_placeholder_in_path_and_target(
+    home, tmp_path, monkeypatch, redact_stand_in, events_store
+):
+    """#69's credential-path rule over a real delegated write. A `hooks.slack.com/services/T/B/
+    <secret>` post through the reverse door, its service pointed at a bare-origin loopback target,
+    reaches that target on its own path (`delegation.target_url`), so the secret is in both the
+    request path and `Exchange.target`. On disk both hold the one placeholder of the whole path and
+    the target keeps its origin; the target heard, and the agent was answered, unredacted."""
+    origin = f"http://127.0.0.1:{redact_stand_in}"
+    (answer,) = _run_calls_under_shadow(
+        tmp_path,
+        monkeypatch,
+        redact_stand_in,
+        [_webhook_call()],
+        "--target",
+        f"hooks.slack.com={origin}",
+    )
+    assert (answer.status, answer.body, answer.header("irimi-answered-by")) == (
+        200,
+        b"ok",
+        "delegated",
+    )
+    assert [(m, p, b) for m, p, _, b in _RedactStandIn.seen] == [
+        ("POST", WEBHOOK_PATH, WEBHOOK_BODY)
+    ]
+    (ex,) = events_store().received
+    assert (ex.door, ex.request.host, ex.request.path, ex.answered_by, ex.target) == (
+        "reverse",
+        "hooks.slack.com",
+        WEBHOOK_PATH,
+        "delegated",
+        origin + WEBHOOK_PATH,
+    )
+
+    key = redact.load_key(home)
+    hidden = "/" + redact.placeholder(key, WEBHOOK_PATH)
+    disk = _assert_stored_as([ex], key, {WEBHOOK_PATH: hidden})
+    (stored,) = disk.received
+    assert (stored.request.path, stored.target) == (hidden, origin + hidden)
+    assert [line for line in disk.lines if WEBHOOK_TOKEN in line] == []
+
+
+def test_an_unreachable_webhook_target_leaves_its_secret_path_nowhere_on_disk(
+    home, tmp_path, monkeypatch, redact_stand_in, events_store
+):
+    """#69 over #16's failure answer. When a webhook's loopback target is not listening, irimi
+    answers a 502 whose JSON names the target, and a bare-origin target's URL carries the secret
+    path. The agent is told (its answer is never redacted), and the copy for disk holds the path
+    nowhere: not the request, not `Exchange.target`, not the 502's body."""
+    closed = socket.socket()
+    closed.bind(("127.0.0.1", 0))
+    dead = closed.getsockname()[1]
+    closed.close()
+    origin = f"http://127.0.0.1:{dead}"
+    (answer,) = _run_calls_under_shadow(
+        tmp_path,
+        monkeypatch,
+        redact_stand_in,
+        [_webhook_call()],
+        "--target",
+        f"hooks.slack.com={origin}",
+    )
+    assert (answer.status, answer.header("irimi-answered-by")) == (502, "delegated")
+    assert WEBHOOK_PATH.encode() in answer.body
+    (ex,) = events_store().received
+    assert TARGET_FAILED_FLAG in ex.flags and ex.target == origin + WEBHOOK_PATH
+
+    key = redact.load_key(home)
+    disk = _redacted_for_disk([ex], key)
+    hidden = "/" + redact.placeholder(key, WEBHOOK_PATH)
+    (stored,) = disk.received
+    assert (stored.request.path, stored.target) == (hidden, origin + hidden)
+    assert [line for line in disk.lines if WEBHOOK_TOKEN in line] == []
+    assert [blob for blob in disk.blobs.values() if WEBHOOK_TOKEN.encode() in blob] == []
+    # The 502 still names its target, as the one placeholder the path and the target hold.
+    assert ex.response is not None and stored.response is not None
+    told = json.loads(ex.response.body)["error"]["message"]
+    assert json.loads(stored.response.body)["error"]["message"] == told.replace(
+        WEBHOOK_PATH, hidden
+    )
+
+
+def test_a_stripe_form_write_through_the_door_stores_its_card_token_and_query_key_as_placeholders(
+    home, tmp_path, monkeypatch, redact_stand_in, events_store
+):
+    """#69's secret-key rule over a real faked write. A Stripe form post through the reverse door
+    with `card[token]=…&amount=100` and `?api_key=…` stores the token (by its last bracket
+    segment) and the query key (by its name) as placeholders, and the bearer header as one;
+    `amount=100` and every other byte survive. `/v1/payment_methods` is a route the shipped map
+    does not list, so irimi answers with the L0 echo, which reflects the token back as JSON
+    (`{"card": {"token": …}}`): the one token is one placeholder in the form and in the answer.
+    The agent's own answer is irimi's, unredacted."""
+    (answer,) = _run_calls_under_shadow(
+        tmp_path,
+        monkeypatch,
+        redact_stand_in,
+        [
+            _Call(
+                "POST",
+                f"/api.stripe.com/v1/payment_methods?api_key={QUERY_API_KEY}",
+                (("authorization", STRIPE_BEARER), ("content-type", FORM_CT)),
+                STRIPE_FORM,
+            )
+        ],
+    )
+    assert (answer.status, answer.header("irimi-answered-by")) == (200, "fake-L0")
+    assert json.loads(answer.body)["card"] == {"token": CARD_TOKEN}
+    assert _RedactStandIn.seen == []  # a write is never forwarded, and it read nothing first
+    (ex,) = events_store().received
+    assert (ex.door, ex.request.host, ex.kind, ex.answered_by, ex.flags, ex.request.body) == (
+        "reverse",
+        "api.stripe.com",
+        "unknown",
+        "fake-L0",
+        (UNCLASSIFIED_FLAG, FIDELITY_L0_FLAG),
+        STRIPE_FORM,
+    )
+
+    key = redact.load_key(home)
+    disk = _assert_stored_as(
+        [ex], key, _placeholders(key, STRIPE_BEARER, QUERY_API_KEY, CARD_TOKEN)
+    )
+    (stored,) = disk.received
+    token = redact.placeholder(key, CARD_TOKEN)
+    assert stored.request.body == f"card[token]={token}&amount=100".encode()
+    assert stored.request.query == f"api_key={redact.placeholder(key, QUERY_API_KEY)}"
+    assert stored.request.header("authorization") == redact.placeholder(key, STRIPE_BEARER)
+    assert stored.response is not None
+    assert json.loads(stored.response.body)["card"] == {"token": token}
+    assert json.loads(stored.response.body)["amount"] == 100
+
+
+def test_an_llm_request_stores_a_nested_live_key_and_a_token_key_as_placeholders_not_max_tokens(
+    home, tmp_path, monkeypatch, redact_stand_in, events_store
+):
+    """#69's JSON rules over a real live LLM call through the forward proxy. An `sk_live_` key three
+    objects deep and a whole `token` key are placeholders on disk, `max_tokens` is not, and the
+    `x-api-key` header is one placeholder. The model's answer echoes the nested key, and it is
+    stored as the same placeholder as the request's. The stand-in heard, and the agent was
+    answered, unredacted - a live forward carries no `Irimi-Answered-By`."""
+    authority = f"127.0.0.1:{redact_stand_in}"
+    (answer,) = _run_calls_under_shadow(
+        tmp_path,
+        monkeypatch,
+        redact_stand_in,
+        [
+            _Call(
+                "POST",
+                f"http://{authority}/v1/messages",
+                (("x-api-key", LLM_API_KEY), ("content-type", "application/json")),
+                LLM_BODY,
+                authority,
+            )
+        ],
+    )
+    assert (answer.status, answer.body, answer.header("irimi-answered-by")) == (
+        200,
+        LLM_ANSWER,
+        None,
+    )
+    ((method, path, heard, sent),) = _RedactStandIn.seen
+    assert (method, path, sent, header_value(heard, "x-api-key")) == (
+        "POST",
+        "/v1/messages",
+        LLM_BODY,
+        LLM_API_KEY,
+    )
+    (ex,) = events_store().received
+    assert (ex.kind, ex.answered_by, ex.request.body) == ("llm", "live", LLM_BODY)
+
+    key = redact.load_key(home)
+    disk = _assert_stored_as([ex], key, _placeholders(key, LLM_API_KEY, NESTED_KEY, LLM_TOKEN))
+    (stored,) = disk.received
+    assert json.loads(stored.request.body)["max_tokens"] == 1024
+    nested = redact.placeholder(key, NESTED_KEY)
+    assert json.loads(stored.request.body)["metadata"] == {"agent": {"env": {"key": nested}}}
+    assert stored.response is not None and nested.encode() in stored.response.body
+
+
+def test_a_streamed_sse_answer_puts_no_live_key_on_disk_and_would_not_if_it_were_assembled(
+    home, tmp_path, monkeypatch, redact_stand_in, events_store
+):
+    """#69's text rule over a real `text/event-stream` answer. The agent reads the whole stream
+    unredacted, both keys included. The engine streams it and records its body empty (#28's
+    trade), so nothing of it reaches disk today - and the stream the agent read, stored in its
+    place as #70 would store an assembled one, holds each key as its placeholder: the second key
+    too, which follows a JSON `\\n` escape inside the data line."""
+    authority = f"127.0.0.1:{redact_stand_in}"
+    (answer,) = _run_calls_under_shadow(
+        tmp_path,
+        monkeypatch,
+        redact_stand_in,
+        [
+            _Call(
+                "POST",
+                f"http://{authority}/v1/stream",
+                (("content-type", "application/json"),),
+                b"{}",
+                authority,
+            )
+        ],
+    )
+    assert (answer.status, answer.body, answer.header("irimi-answered-by")) == (
+        200,
+        SSE_BODY,
+        None,
+    )
+    (ex,) = events_store().received
+    assert (ex.kind, ex.answered_by) == ("llm", "live")
+    assert ex.response is not None and ex.response.body == b""  # streamed, so never assembled
+
+    key = redact.load_key(home)
+    hidden = _placeholders(key, SSE_PLAIN_KEY, SSE_ESCAPED_KEY)
+    _assert_stored_as([ex], key, hidden)
+    assembled = dataclasses.replace(ex, response=dataclasses.replace(ex.response, body=answer.body))
+    _assert_stored_as([assembled], key, hidden)
+
+
+def test_a_live_reads_set_cookie_is_stored_as_a_placeholder_and_its_binary_body_unchanged(
+    home, tmp_path, monkeypatch, redact_stand_in, events_store
+):
+    """#69's response-header rule and its binary limitation over a real live read. The response's
+    `Set-Cookie` is one placeholder on disk; its body is not UTF-8, so it is stored unscanned and
+    byte for byte. The agent got the cookie and the body as the stand-in sent them."""
+    authority = f"127.0.0.1:{redact_stand_in}"
+    (answer,) = _run_calls_under_shadow(
+        tmp_path,
+        monkeypatch,
+        redact_stand_in,
+        [_Call("GET", f"http://{authority}/v1/session", host=authority)],
+    )
+    assert (answer.status, answer.body, answer.header("set-cookie")) == (
+        200,
+        BINARY_BODY,
+        SESSION_COOKIE,
+    )
+    assert answer.header("irimi-answered-by") is None
+    assert [(m, p) for m, p, _, _ in _RedactStandIn.seen] == [("GET", "/v1/session")]
+    (ex,) = events_store().received
+    assert (ex.kind, ex.answered_by) == ("read", "live")
+
+    key = redact.load_key(home)
+    disk = _assert_stored_as([ex], key, _placeholders(key, SESSION_COOKIE))
+    (stored,) = disk.received
+    assert stored.response is not None
+    assert stored.response.header("set-cookie") == redact.placeholder(key, SESSION_COOKIE)
+    assert stored.response.body == BINARY_BODY
+    assert disk.blobs[trace.body_ref(BINARY_BODY).sha256] == BINARY_BODY

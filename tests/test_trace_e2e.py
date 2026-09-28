@@ -12,12 +12,9 @@ content-addressed blob dict, `json.dumps(..., allow_nan=False)`, and back throug
 """
 
 import dataclasses
-import http.client
 import json
 import sys
-import threading
 import time
-from http.server import HTTPServer, ThreadingHTTPServer
 
 import pytest
 
@@ -25,18 +22,8 @@ from irimi import runner, trace
 from irimi.cli import main
 from irimi.exchange import Exchange
 from tests import test_engine_mitm, test_phase_exit
-from tests.test_engine_mitm import _STREAM_GATE as STREAM_GATE
 from tests.test_engine_mitm import (
-    PRECONDITION_STRIPE_MAP,
-    SSE_FIRST,
-    SSE_SECOND,
-    STREAM_MAP,
     _carries_run_header,
-    _config,
-    _maps,
-    _PreconditionStub,
-    _start,
-    _StreamUpstream,
     _Upstream,
 )
 from tests.test_phase_exit import (
@@ -44,9 +31,8 @@ from tests.test_phase_exit import (
     CHILD,
     PHASE2_AMOUNT,
     PHASE2_CHARGE,
-    PHASE2_CHILD,
-    PHASE2_SUMMARY,
     REFUND_AMOUNT_MINOR,
+    _run_phase2_under_shadow,
     _StandInReader,
     _Stripe,
 )
@@ -126,41 +112,14 @@ def _decoded(store: _EventsStore) -> list[Exchange]:
     return decoded
 
 
-def _run_phase2_under_shadow(tmp_path, monkeypatch) -> None:
-    """`test_the_same_five_calls_under_irimi_shadow_print_the_phase_2_summary`'s run: the refund
-    agent's five calls from a child of the real CLI, against the loopback Stripe."""
-    _PreconditionStub.seen = []
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), _PreconditionStub)
-    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
-    maps_dir = tmp_path / "shipped"
-    maps_dir.mkdir()
-    (maps_dir / "stripe.yaml").write_text(PRECONDITION_STRIPE_MAP)
-    monkeypatch.setattr("irimi.servicemap.loader.shipped_dir", lambda: maps_dir)
-    child = tmp_path / "child.py"
-    child.write_text(
-        PHASE2_CHILD.replace("__STUB_PORT__", str(srv.server_address[1]))
-        .replace("__CHARGE__", PHASE2_CHARGE)
-        .replace("__AMOUNT__", str(PHASE2_AMOUNT))
-    )
-    try:
-        assert main(["shadow", "--port", "0", "--", sys.executable, str(child)]) == 0
-    finally:
-        srv.shutdown()
-    assert [m for m, _ in _PreconditionStub.seen if m != "GET"] == []
-
-
 def test_the_phase_2_run_under_irimi_shadow_survives_the_trace_format_event_for_event(
-    home, tmp_path, capfd, monkeypatch, events_store
+    home, tmp_path, monkeypatch, events_store
 ):
     """#68's round trip through the real composition. Every exchange `irimi shadow` hands its
     store over the Phase 2 scenario - the agent's five calls and the engine's two L3 reads -
     encodes to an `events.jsonl` line and decodes back equal, and the six fields Phase 2 added each
-    arrive with the value the live summary prints from. Swapping the store changes nothing the run
-    prints: the summary is still Phase 2's, line for line."""
+    arrive with the value the live summary prints from."""
     _run_phase2_under_shadow(tmp_path, monkeypatch)
-    lines = capfd.readouterr().out.splitlines()
-    header = next(i for i, line in enumerate(lines) if " · 7 exchanges · " in line)
-    assert lines[header + 1 : header + 1 + len(PHASE2_SUMMARY)] == PHASE2_SUMMARY
 
     store = events_store()
     decoded = _decoded(store)
@@ -302,7 +261,7 @@ def test_an_invalid_run_header_from_a_shadowed_child_names_no_run_and_reaches_no
 
 
 def test_the_phase_1_run_through_the_reverse_door_survives_the_trace_format(
-    home, tmp_path, capfd, monkeypatch, stripe_stand_in, events_store
+    home, tmp_path, monkeypatch, stripe_stand_in, events_store
 ):
     """The Phase 1 criterion's run (#13), stored: a read through the forward proxy, and a refund
     through the reverse door answered from the SHIPPED Stripe map's fixture after an L3 read of
@@ -334,40 +293,3 @@ def test_the_phase_1_run_through_the_reverse_door_survives_the_trace_format(
     for ex in (read, check, refund):
         assert 0 < ex.started_at <= ex.ended_at
     assert refund.started_at < check.started_at <= check.ended_at <= refund.ended_at
-
-
-def test_a_streamed_response_ends_when_its_stream_does_not_when_its_headers_leave(
-    tmp_path, monkeypatch
-):
-    """A streamed exchange is finished by the `response` hook, which mitmproxy runs once the
-    last chunk has gone - so its `ended_at` covers the whole stream the agent waited on, and not
-    only the headers `responseheaders` let through early (#8, #68)."""
-    STREAM_GATE.clear()
-    srv = HTTPServer(("127.0.0.1", 0), _StreamUpstream)
-    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
-    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch, STREAM_MAP))
-    eng, seen, stop = _start(cfg)
-    try:
-        conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=5)
-        authority = f"127.0.0.1:{srv.server_address[1]}"
-        conn.request(
-            "POST",
-            f"http://{authority}/v1/chat/completions",
-            body=b"{}",
-            headers={"host": authority, "content-type": "application/json"},
-        )
-        resp = conn.getresponse()
-        assert resp.read(len(SSE_FIRST)) == SSE_FIRST
-        first_chunk_at = time.time()
-        time.sleep(0.05)  # a gap the exchange's span has to cover if it covers the stream
-        released_at = time.time()
-        STREAM_GATE.set()
-        assert resp.read() == SSE_SECOND
-        conn.close()
-    finally:
-        STREAM_GATE.set()
-        stop()
-        srv.shutdown()
-    (ex,) = seen
-    assert ex.response is not None and ex.response.body == b""  # streamed, so never assembled
-    assert 0 < ex.started_at <= first_chunk_at < released_at <= ex.ended_at

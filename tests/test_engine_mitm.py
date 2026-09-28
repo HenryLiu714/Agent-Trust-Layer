@@ -3,11 +3,13 @@ import datetime as dt
 import gzip
 import http.client
 import ipaddress
+import itertools
 import json
 import socket
 import ssl
 import threading
 import time
+import types
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 
@@ -833,6 +835,43 @@ def test_a_server_sent_event_response_reaches_the_client_in_chunks(tmp_path, mon
     assert ex.response.body == b""
 
 
+def test_a_streamed_response_ends_when_its_stream_does_not_when_its_headers_leave(
+    tmp_path, monkeypatch
+):
+    """A streamed exchange is finished by the `response` hook, which mitmproxy runs once the
+    last chunk has gone - so its `ended_at` covers the whole stream the agent waited on, and not
+    only the headers `responseheaders` let through early (#8, #68)."""
+    _STREAM_GATE.clear()
+    srv = HTTPServer(("127.0.0.1", 0), _StreamUpstream)
+    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
+    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch, STREAM_MAP))
+    eng, seen, stop = _start(cfg)
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=5)
+        authority = f"127.0.0.1:{srv.server_address[1]}"
+        conn.request(
+            "POST",
+            f"http://{authority}/v1/chat/completions",
+            body=b"{}",
+            headers={"host": authority, "content-type": "application/json"},
+        )
+        resp = conn.getresponse()
+        assert resp.read(len(SSE_FIRST)) == SSE_FIRST
+        first_chunk_at = time.time()
+        time.sleep(0.05)  # a gap the exchange's span has to cover if it covers the stream
+        released_at = time.time()
+        _STREAM_GATE.set()
+        assert resp.read() == SSE_SECOND
+        conn.close()
+    finally:
+        _STREAM_GATE.set()
+        stop()
+        srv.shutdown()
+    (ex,) = seen
+    assert ex.response is not None and ex.response.body == b""  # streamed, so never assembled
+    assert 0 < ex.started_at <= first_chunk_at < released_at <= ex.ended_at
+
+
 READ_STREAM_MAP = STREAM_MAP.replace("kind: llm", "kind: read").replace(
     "method: POST", "method: GET"
 )
@@ -1490,7 +1529,9 @@ def _bare_flow(method, path):
 def test_a_raise_handing_the_decision_to_a_worker_answers_locally(tmp_path, monkeypatch):
     """The hook awaits `asyncio.to_thread` as of #45, and the hand-off can fail on its own - an
     executor already shut down under a stopping proxy - before `_decide`'s guard is ever reached.
-    It takes the same 502 as a decision that raised: the request may be a write."""
+    It takes the same 502 as a decision that raised: the request may be a write. It is timed like
+    any other exchange, from the request hook's first line to the answer (#68): the engine's clock
+    is a counter here, so an `ended_at` the 502 path forgot would read 100.0, not 101.0."""
     from irimi.engine import mitm
 
     seen = []
@@ -1500,6 +1541,8 @@ def test_a_raise_handing_the_decision_to_a_worker_answers_locally(tmp_path, monk
         raise RuntimeError("cannot schedule new futures after shutdown")
 
     monkeypatch.setattr(mitm.asyncio, "to_thread", no_threads)
+    clock = itertools.count(100)
+    monkeypatch.setattr(mitm, "time", types.SimpleNamespace(time=lambda: float(next(clock))))
     flow = _bare_flow(b"POST", b"/things")
     asyncio.run(addon.request(flow))
 
@@ -1507,6 +1550,7 @@ def test_a_raise_handing_the_decision_to_a_worker_answers_locally(tmp_path, monk
     assert json.loads(flow.response.content)["error"]["type"] == "irimi_decision_failed"
     (ex,) = seen
     assert ex.flags == (UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG)
+    assert (ex.started_at, ex.ended_at) == (100.0, 101.0)
 
 
 def test_a_raise_carrying_a_rewrite_onto_the_flow_answers_locally(tmp_path, monkeypatch):
@@ -3476,24 +3520,6 @@ def test_a_live_read_a_faked_write_and_a_lost_upstream_are_each_timed(engine, up
     for ex in seen:
         assert 0 < before <= ex.started_at <= ex.ended_at <= after
     assert read.ended_at <= write.started_at <= write.ended_at <= lost.started_at
-
-
-def test_a_failed_decision_is_timed_too(tmp_path, monkeypatch):
-    from irimi.engine import mitm
-
-    seen = []
-    addon = _bare_addon(tmp_path, monkeypatch, on_exchange=seen.append)
-
-    def no_threads(*args, **kwargs):
-        raise RuntimeError("cannot schedule new futures after shutdown")
-
-    monkeypatch.setattr(mitm.asyncio, "to_thread", no_threads)
-    before = time.time()
-    asyncio.run(addon.request(_bare_flow(b"POST", b"/things")))
-    after = time.time()
-    (ex,) = seen
-    assert DECISION_FAILED_FLAG in ex.flags
-    assert before <= ex.started_at <= ex.ended_at <= after
 
 
 def test_the_precondition_read_is_timed_by_its_own_reader_call_inside_the_write(

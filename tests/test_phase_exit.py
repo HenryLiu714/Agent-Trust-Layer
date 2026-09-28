@@ -438,16 +438,10 @@ call("POST", "/v1/refunds", refund)
 """
 
 
-def test_the_same_five_calls_under_irimi_shadow_print_the_phase_2_summary(
-    home, tmp_path, capfd, monkeypatch
-):
-    """The criterion's twin through the real CLI (#48). The criterion builds its engine the way
-    `cli._build_engine` builds one; this proves that is the engine `irimi shadow` really builds -
-    the real overlay, a policy holding the real reader - and that the block it prints on exit is
-    the one the criterion pins. Nothing is swapped but where the shipped maps are read from: a
-    directory holding the loopback Stripe's map, so the stub's host is the `stripe` service. The
-    child uses the forward proxy explicitly, because `irimi shadow` exempts loopback from it
-    through `NO_PROXY` and the stub is on loopback."""
+def _run_phase2_under_shadow(tmp_path, monkeypatch) -> None:
+    """The refund agent's five calls from a child of the real `irimi shadow`, against the loopback
+    Stripe, which never hears a write. Shared with `tests/test_trace_e2e.py`, which runs it with
+    the store swapped (#68)."""
     _PreconditionStub.seen = []
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _PreconditionStub)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
@@ -465,6 +459,20 @@ def test_the_same_five_calls_under_irimi_shadow_print_the_phase_2_summary(
         assert main(["shadow", "--port", "0", "--", sys.executable, str(child)]) == 0
     finally:
         srv.shutdown()
+    assert [m for m, _ in _PreconditionStub.seen if m != "GET"] == []
+
+
+def test_the_same_five_calls_under_irimi_shadow_print_the_phase_2_summary(
+    home, tmp_path, capfd, monkeypatch
+):
+    """The criterion's twin through the real CLI (#48). The criterion builds its engine the way
+    `cli._build_engine` builds one; this proves that is the engine `irimi shadow` really builds -
+    the real overlay, a policy holding the real reader - and that the block it prints on exit is
+    the one the criterion pins. Nothing is swapped but where the shipped maps are read from: a
+    directory holding the loopback Stripe's map, so the stub's host is the `stripe` service. The
+    child uses the forward proxy explicitly, because `irimi shadow` exempts loopback from it
+    through `NO_PROXY` and the stub is on loopback."""
+    _run_phase2_under_shadow(tmp_path, monkeypatch)
     lines = capfd.readouterr().out.splitlines()
 
     assert [line for line in lines if line.startswith("CALL ")] == [
@@ -474,7 +482,6 @@ def test_the_same_five_calls_under_irimi_shadow_print_the_phase_2_summary(
         f"CALL GET /v1/charges/{PHASE2_CHARGE} 200 overlay",
         "CALL POST /v1/refunds 400 fake-L1",
     ]
-    assert [m for m, _ in _PreconditionStub.seen if m != "GET"] == []
     # The banner opens `irimi shadow · run ...` too; the summary's header is the one with a count.
     header = next(i for i, line in enumerate(lines) if " · 7 exchanges · " in line)
     assert lines[header].startswith("irimi shadow · run ")

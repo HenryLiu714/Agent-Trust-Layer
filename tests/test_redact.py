@@ -348,6 +348,23 @@ def test_a_parser_that_raises_stores_neither_body_and_flags_the_exchange(monkeyp
     assert again.flags.count(REDACTION_FAILED_FLAG) == 1
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"token": "tok_one", "token": null}',
+        b'{"a": [{"password": "hunter2", "password": ""}]}',
+        b'{"token": "tok_two", "n": ' + b"1" * 5000 + b"}",
+    ],
+    ids=["a-repeated-key", "a-repeated-key-deeper", "an-integer-past-the-digit-limit"],
+)
+def test_json_the_walk_cannot_see_whole_fails_closed_rather_than_scanned_as_text(body):
+    """`json.loads` keeps a repeated key's last value, and refuses a long integer with a plain
+    ValueError: a walk of the one, or a text scan of the other, would store the secret as sent."""
+    stored = redact_exchange(_exchange(_request(headers=(JSON,), body=body)), KEY)
+    assert stored.request.body == FAILED_BODY
+    assert stored.flags == (REDACTION_FAILED_FLAG,)
+
+
 def test_a_body_too_deep_to_redact_fails_closed_and_the_log_names_no_value(caplog):
     """Python 3.12's `json.loads` raises RecursionError on this body and 3.14's parses it, so the
     walk raises instead. Either way the body is not stored."""

@@ -346,6 +346,11 @@ def _redact_body(body: bytes, content_type: str, key: bytes) -> bytes:
     `docs/trace-format.md`. A form body is read as a form because its content type says so; any
     other body that parses as JSON is walked as JSON, whatever its content type claims; the rest
     is scanned as text, which is what an SSE stream is.
+
+    Only a body that is not JSON at all is scanned as text. JSON that `json.loads` refuses for any
+    other reason (an integer past its digit limit) raises to the guard and fails closed, because
+    a text scan would miss a secret key's value. So does an object with a repeated key: `loads`
+    keeps the last value, and `{"token": "…", "token": null}` would come back byte for byte.
     """
     if not body:
         return body
@@ -357,14 +362,23 @@ def _redact_body(body: bytes, content_type: str, key: bytes) -> bytes:
         redacted = _redact_urlencoded(text, key)
         return body if redacted is text else redacted.encode()
     try:
-        document = json.loads(text)
-    except ValueError:
+        document = json.loads(text, object_pairs_hook=_unique_members)
+    except json.JSONDecodeError:
         redacted = _redact_text(text, key)
         return body if redacted is text else redacted.encode()
     walked = _redact_json(document, key)
     if walked is document:
         return body
     return json.dumps(walked, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def _unique_members(pairs: list[tuple[str, JSONValue]]) -> dict[str, JSONValue]:
+    """A JSON object's members as a dict, refusing a repeated key, whose earlier values the walk
+    would never see (#69)."""
+    members = dict(pairs)
+    if len(members) != len(pairs):
+        raise ValueError("a JSON object repeats a key")
+    return members
 
 
 def _redact_json(value: JSONValue, key: bytes) -> JSONValue:

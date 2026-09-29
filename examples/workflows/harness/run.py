@@ -37,9 +37,11 @@ from pathlib import Path
 from typing import Any
 
 from examples.workflows.harness.internet import FakeInternet, Req
-from examples.workflows.harness.services import World
-from irimi import ca, paths, runner, trace
+from examples.workflows.harness.services import CLIENT_SECRET_CANARY, World
+from irimi import ca, paths, report, runner, trace
+from irimi import store as irimi_store
 from irimi.cli import main as irimi_main
+from irimi.exchange import Exchange
 from irimi.servicemap import loader
 from irimi.store import StoreReader
 
@@ -57,6 +59,10 @@ CANARIES = {
     "OPENAI_API_KEY": "sk-CANARYopenai000000000000000000000",
     "SLACK_WEBHOOK_PATH": "/services/T0CANARY/B0CANARY/CANARYwebhookpath000000",
 }
+# And every credential a fake service hands back in a response body. A live read's response is
+# stored, so one found on disk is a leak on the response side, which the canaries above, all sent
+# by the agent, never reach (#70). Not given to the agent: it is the service's to hand out.
+SERVED_CANARIES = {"STRIPE_CLIENT_SECRET": CLIENT_SECRET_CANARY}
 MODES = ("bare", "shadow")
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy")
 # The only variables an agent inherits from the harness's own environment. Everything else it is
@@ -107,6 +113,11 @@ class Result:
     state: Path  # the agent's own files (WORKFLOW_STATE)
     cwd: Path  # the working directory of irimi (shadow) and of the agent
     tmp: Path  # TMPDIR, and `tempfile`'s directory in this process during a shadow run
+    # Every exchange irimi printed a line for, as it printed them (shadow only): the live
+    # exchanges its `on_exchange` saw, which what the store kept is compared against (#70).
+    reported: list[Exchange] = field(default_factory=list)
+    # Every exchange the engine handed its trace store, in the order it did (shadow only).
+    handed: list[Exchange] = field(default_factory=list)
 
     def events(self, event: str, *, with_time: bool = True) -> list[dict[str, Any]]:
         """Every `event` the agent logged, in order. `with_time=False` drops each one's
@@ -222,6 +233,8 @@ def run(workflow: Workflow, scenario_name: str, mode: str, workdir: Path) -> Res
     internet = FakeInternet(world.services())
     internet.start()
     irimi_out: list[str] = []
+    reported: list[Exchange] = []
+    handed: list[Exchange] = []
     try:
         for host, action, match, times in scenario.faults:
             internet.inject(host, action, match, times)
@@ -231,12 +244,26 @@ def run(workflow: Workflow, scenario_name: str, mode: str, workdir: Path) -> Res
         if mode == "bare":
             code = _run_bare(cmd, env, cwd, internet)
         else:
-            code, irimi_out = _run_shadow(cmd, env, cwd, tmp, internet, scenario, workdir)
+            with _watching_the_store(reported, handed):
+                code, irimi_out = _run_shadow(cmd, env, cwd, tmp, internet, scenario, workdir)
     finally:
         internet.stop()
     obs = [json.loads(line) for line in obs_path.read_text().splitlines() if line.strip()]
     return Result(
-        workflow, scenario_name, mode, code, obs, irimi_out, world, internet, home, state, cwd, tmp
+        workflow,
+        scenario_name,
+        mode,
+        code,
+        obs,
+        irimi_out,
+        world,
+        internet,
+        home,
+        state,
+        cwd,
+        tmp,
+        reported,
+        handed,
     )
 
 
@@ -318,6 +345,33 @@ def _environ(env: dict[str, str]) -> Iterator[None]:
     finally:
         os.environ.clear()
         os.environ.update(saved)
+
+
+@contextlib.contextmanager
+def _watching_the_store(reported: list[Exchange], handed: list[Exchange]) -> Iterator[None]:
+    """`irimi shadow` unchanged, but each exchange it prints a line for is appended to `reported`,
+    and each one its engine hands the trace store to `handed`. `cli` imports `DirectoryStore` when
+    it opens the store and calls `report.exchange_line` from its `on_exchange`, so swapping the two
+    modules' names is enough, as `tests/test_trace_e2e.py` does (#70)."""
+    real = irimi_store.DirectoryStore
+    line = report.exchange_line
+
+    def printing(ex: Exchange) -> str:
+        reported.append(ex)
+        return line(ex)
+
+    class Handed(real):
+        def record(self, exchange: Exchange) -> None:
+            handed.append(exchange)
+            super().record(exchange)
+
+    irimi_store.DirectoryStore = Handed
+    report.exchange_line = printing
+    try:
+        yield
+    finally:
+        irimi_store.DirectoryStore = real
+        report.exchange_line = line
 
 
 @contextlib.contextmanager
@@ -416,7 +470,7 @@ def _live_answers_not_served(result: Result) -> list[str]:
 
 
 def _canaries_under(root: Path) -> list[str]:
-    needles = {name: value.encode() for name, value in CANARIES.items()}
+    needles = {name: value.encode() for name, value in {**CANARIES, **SERVED_CANARIES}.items()}
     found = []
     for path in root.rglob("*"):
         if path.is_file():

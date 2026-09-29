@@ -32,6 +32,11 @@ def test_an_escape_writes_for_real_and_irimi_never_sees_it(run_workflow, escape)
     assert "did not happen" not in summary
     # The agent got the real service's answer, unstamped: it cannot tell it escaped.
     assert [c["answered_by"] for c in shadow.calls()] == [None]
+    # Nor can a stored run (#70): it is the process run, ended `ok`, with no event at all.
+    reader = shadow.stored()
+    [run] = reader.list_runs()
+    assert (run.attribution, run.outcome) == ("process", "ok")
+    assert shadow.stored_events() == []
     # The escape is a leak in both modes alike: shadow changed nothing about it.
     bare = run_workflow(W, escape, "bare")
     assert [(r.method, r.host, r.path) for r in bare.internet.writes()] == [ESCAPES[escape]]

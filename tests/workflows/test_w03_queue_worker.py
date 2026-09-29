@@ -52,11 +52,15 @@ def charge_named(ex: Exchange) -> str:
     return parse_qs(ex.request.body.decode())["charge"][0]
 
 
-def test_eight_messages_are_eight_stored_runs_each_holding_only_its_own_charge(run_workflow):
+@pytest.mark.parametrize("scenario", ["threads_8", "asyncio_8"])
+def test_eight_messages_are_eight_stored_runs_each_holding_only_its_own_charge(
+    run_workflow, scenario
+):
     """Until #74 lands, the SDK stand-in's own `Irimi-Run` label on each message's calls is all
     irimi knows of a run, so each message is a `header` run: created by its first event, with no
-    trigger and no outcome (#70). The process run holds none of them."""
-    shadow = run_workflow(W, "threads_8", "shadow")
+    trigger and no outcome (#70). The process run holds none of them. Each run holds its read,
+    its refund and irimi's L3 read of the charge, whichever thread or task made them."""
+    shadow = run_workflow(W, scenario, "shadow")
     reader = shadow.stored()
     records = reader.list_runs()
     assert sorted(r.attribution for r in records) == ["header"] * 8 + ["process"]
@@ -67,6 +71,7 @@ def test_eight_messages_are_eight_stored_runs_each_holding_only_its_own_charge(r
         events = reader.load_run(record.run_id).events
         assert all(isinstance(e, Exchange) for e in events)
         assert len({charge_named(e) for e in events if isinstance(e, Exchange)}) == 1, events
+        assert len(events) == 3, events
     (process,) = [r for r in records if r.attribution == "process"]
     assert reader.load_run(process.run_id).events == []
 

@@ -52,6 +52,18 @@ def charge(
     }
 
 
+# The secret half of every PaymentIntent's `client_secret`, and a harness canary. Stripe hands the
+# client secret back on every retrieve made with a secret key, and it lets whoever holds it confirm
+# the payment, so a live read of an intent stores a credential in a response body: the store must
+# keep only its placeholder (#69, #70).
+CLIENT_SECRET_CANARY = "CANARYclientsecret000000000000"
+
+
+def client_secret(pi_id: str) -> str:
+    """The `client_secret` the fake Stripe gives the intent `pi_id`, spelled as Stripe spells it."""
+    return f"{pi_id}_secret_{CLIENT_SECRET_CANARY}"
+
+
 def _stripe_error(status: int, code: str, message: str, param: str | None = None) -> Resp:
     error: dict[str, Any] = {"type": "invalid_request_error", "code": code, "message": message}
     if param:
@@ -94,14 +106,23 @@ class FakeStripe:
             "amount": amount,
             "currency": "usd",
             "status": "requires_capture",
+            "client_secret": client_secret(pi_id),
             **fields,
         }
 
-    def add_dispute(self, dispute_id: str, charge_id: str, amount: int, reason: str) -> None:
+    def add_dispute(
+        self,
+        dispute_id: str,
+        charge_id: str,
+        amount: int,
+        reason: str,
+        payment_intent: str | None = None,
+    ) -> None:
         self.disputes[dispute_id] = {
             "id": dispute_id,
             "object": "dispute",
             "charge": charge_id,
+            "payment_intent": payment_intent,
             "amount": amount,
             "currency": "usd",
             "reason": reason,

@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-from irimi import redact, runner, trace
+from irimi import redact, report, runner, trace
 from irimi.bodies import FORM_CT
 from irimi.cli import main
 from irimi.exchange import (
@@ -122,13 +122,25 @@ class _Disk:
 @pytest.fixture
 def stored(home, monkeypatch):
     """Returns a function giving the store the run opened, read back after `main` returned. The
-    store dropped nothing and has nothing left to write."""
+    store dropped nothing and has nothing left to write, and it was handed exactly the exchanges
+    `irimi shadow`'s `on_exchange` printed, in the same order: the live exchanges #70's
+    done-when compares a stored run against."""
     _SpyStore.built = []
     monkeypatch.setattr("irimi.store.DirectoryStore", _SpyStore)
+    printed: list[Exchange] = []
+    line = report.exchange_line
+
+    def printing(ex: Exchange) -> str:
+        printed.append(ex)
+        return line(ex)
+
+    monkeypatch.setattr("irimi.report.exchange_line", printing)
 
     def the_disk() -> _Disk:
         (store,) = _SpyStore.built
         assert (store.stats().queued, store.stats().dropped) == (0, 0)
+        assert len(store.received) == len(printed)
+        assert all(a is b for a, b in zip(store.received, printed, strict=True))
         return _Disk(store.layout.root, redact.load_key(home), store.received)
 
     return the_disk

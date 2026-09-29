@@ -8,6 +8,7 @@ import json
 
 from examples.workflows.w07_streaming_assistant.scenarios import ANSWER, CHANNEL, SECRET
 from irimi import trace
+from irimi.exchange import Exchange
 from irimi.trace import TelemetrySeen
 
 W = "w07_streaming_assistant"
@@ -44,6 +45,22 @@ def test_a_telemetry_post_is_stored_as_having_happened_and_its_body_is_not(run_w
     assert [e.host for e in seen] == ["api.smith.langchain.com"]
     blobs = shadow.home / "store" / "blobs"
     assert trace.body_ref(sent.body).sha256 not in {p.name for p in blobs.iterdir()}
+
+
+def test_a_streamed_answer_is_stored_with_its_request_and_no_body_until_71(run_workflow):
+    """The engine streams an SSE answer through and never assembles it (#28), so the store keeps
+    the exchange - its request body, status and headers - with the answer's body empty, until #71
+    records streamed bodies. The embeddings answer, which is not streamed, is stored whole."""
+    shadow = run_workflow(W, "normal", "shadow")
+    stored = {e.request.path: e for e in shadow.stored_events() if isinstance(e, Exchange)}
+    assert sorted(stored) == ["/v1/chat/completions", "/v1/embeddings", "/v1/messages"]
+    for path in ("/v1/chat/completions", "/v1/messages"):
+        response = stored[path].response
+        assert response is not None and (response.status, response.body) == (200, b"")
+        assert (response.header("content-type") or "").startswith("text/event-stream")
+        assert json.loads(stored[path].request.body)["stream"] is True
+    embeddings = stored["/v1/embeddings"].response
+    assert embeddings is not None and json.loads(embeddings.body)["data"]
 
 
 def test_a_secret_inside_a_stream_reaches_the_caller_intact_and_never_disk(run_workflow):
@@ -99,6 +116,14 @@ def test_an_upstream_reset_mid_stream_reaches_the_agent_as_a_clean_end(run_workf
     ]
     assert shadow.exchange_lines() == LLM_LINES[:2]
     assert shadow.result()["caller_events"] == ["start", "error"]
+    # LOOKS WRONG: and it is stored that way (#70): a 200 with no flag, as a whole stream is.
+    [stream] = [
+        e
+        for e in shadow.stored_events()
+        if isinstance(e, Exchange) and e.request.host == "api.anthropic.com"
+    ]
+    assert stream.response is not None
+    assert (stream.response.status, stream.response.body, stream.flags) == (200, b"", ())
 
 
 def test_a_reset_before_the_stream_opens_reaches_the_agent_as_an_unstamped_502(run_workflow):

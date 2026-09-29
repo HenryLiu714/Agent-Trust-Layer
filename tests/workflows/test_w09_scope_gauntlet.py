@@ -8,7 +8,8 @@ import pytest
 from examples.workflows.w09_scope_gauntlet.agent import BIG_CHARGE
 from examples.workflows.w09_scope_gauntlet.scenarios import BIG_DESCRIPTION_BYTES, WORKFLOW
 from irimi.bodies import MAX_BODY_BYTES
-from irimi.exchange import Exchange
+from irimi.exchange import BODY_TRUNCATED_FLAG, Exchange
+from irimi.store import MAX_STORED_BODY
 
 W = "w09_scope_gauntlet"
 
@@ -91,6 +92,17 @@ def test_gzip_chunked_and_oversized_bodies_are_still_faked(run_workflow):
     # irimi read the refund amount out of the gzip body and out of the chunked one.
     assert "refund $3.00 on ch_GAUNTLET" in summary
     assert "refund $4.00 on ch_GAUNTLET" in summary
+    # The 3 MB update and irimi's 3 MB fake of the customer are under MAX_STORED_BODY, so both
+    # are stored whole, as blobs, and not flagged cut (#70).
+    [update] = [
+        e
+        for e in shadow.stored_events()
+        if isinstance(e, Exchange) and e.request.path.startswith("/v1/customers/")
+    ]
+    assert update.response is not None
+    assert 3_000_000 < len(update.request.body) < MAX_STORED_BODY
+    assert 3_000_000 < len(update.response.body) < MAX_STORED_BODY
+    assert BODY_TRUNCATED_FLAG not in update.flags
 
 
 def test_a_read_past_the_body_limit_leaves_the_check_and_the_overlay_unable_to_say(run_workflow):

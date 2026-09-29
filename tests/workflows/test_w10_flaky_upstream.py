@@ -7,6 +7,7 @@ A failed L3 read is irimi's alone, and only its summary shows it. The agent is
 `examples/workflows/w10_flaky_upstream/agent.py`.
 """
 
+from irimi.exchange import UPSTREAM_ERROR_FLAG, Exchange
 from irimi.trace import ErrorInfo
 
 W = "w10_flaky_upstream"
@@ -63,6 +64,8 @@ def test_a_read_the_agent_abandoned_is_recorded_as_an_upstream_error(run_workflo
         "/v1/charges",
         "/v1/charges/ch_PAYOUT1",
     ]
+    # LOOKS WRONG: stored as printed (#70), the upstream's fault.
+    assert unanswered(shadow) == [("/v1/charges", (UPSTREAM_ERROR_FLAG,))]
 
 
 def test_a_reset_on_a_read_reaches_the_agent_as_an_unstamped_502(run_workflow):
@@ -83,6 +86,17 @@ def test_a_reset_on_a_read_reaches_the_agent_as_an_unstamped_502(run_workflow):
         "live      read      GET api.stripe.com/v1/charges -> 200",
     ]
     assert REFUND_LINE in shadow.summary()
+    # Stored as printed (#70): an exchange with no response reads back as one.
+    assert unanswered(shadow) == [("/v1/charges", (UPSTREAM_ERROR_FLAG,))]
+
+
+def unanswered(result) -> list[tuple[str, tuple[str, ...]]]:
+    """`(path, flags)` of each stored exchange with no response."""
+    return [
+        (e.request.path, e.flags)
+        for e in result.stored_events()
+        if isinstance(e, Exchange) and e.response is None
+    ]
 
 
 def test_a_failed_precondition_read_degrades_the_check_and_the_agent_never_knows(run_workflow):
@@ -165,7 +179,7 @@ def test_an_agent_killed_after_its_write_leaves_a_run_with_no_end(run_workflow):
     shadow = run_workflow(W, "sigterm_mid_run", "shadow")
     # 143 is 128 + SIGTERM, the shell's spelling, in both modes.
     assert (bare.exit_code, shadow.exit_code) == (143, 143)
-    # The run started and never ended: what #74 stores as an incomplete run (`outcome: None`).
+    # The run started and never ended: an incomplete run (`outcome: None`), as stored below.
     assert len(shadow.events("run.start")) == 1
     assert shadow.events("run.end") == []
     assert shadow.calls("refund")[0]["answered_by"] == "fake-L1"
@@ -179,6 +193,17 @@ def test_an_agent_killed_after_its_write_leaves_a_run_with_no_end(run_workflow):
     assert not any(word in line.lower() for line in summary for word in ("143", "kill", "signal"))
     # The stored process run ends with the child's code, which is how the kill is visible (#70).
     assert process_run(shadow) == ("error", 143, ErrorInfo("exit", "exited 143"))
+    # The agent's own run is the `header` run its first call made, and it reads back whole,
+    # the faked refund included, with no end: incomplete, as a killed run is (#70).
+    reader = shadow.stored()
+    [run] = [r for r in reader.list_runs() if r.attribution == "header"]
+    assert (run.run_id, run.outcome, run.ended_at) == (shadow.one("run.start")["run"], None, None)
+    stored = [e for e in reader.load_run(run.run_id).events if isinstance(e, Exchange)]
+    assert [(e.request.method, e.request.path, e.answered_by) for e in stored][-1] == (
+        "POST",
+        "/v1/refunds",
+        "fake-L1",
+    )
 
 
 def process_run(result) -> tuple[object, object, object]:

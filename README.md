@@ -376,9 +376,13 @@ irimi maps list                   print each mapped host, its service, route cou
 
 `serve` and `shadow` take `--port`, `--store DIR`, `--allow-host HOST`, `--target SPEC`,
 `--target-reads HOST` and `--allow-target-host HOST`; the last four repeat. Every run is recorded,
-redacted, under `--store` (default `$IRIMI_HOME/store`). `serve` prints one line per exchange and
-no summary. A map, overrides file or `--target` the loader refuses stops `serve` and `shadow` before
-the proxy starts, with the rule it broke on stderr. `IRIMI_HOME` moves irimi's state (see
+redacted, under `--store` (default `$IRIMI_HOME/store`). `shadow` stores its command as one
+`process` run with the command's exit code, and the agent's version when `IRIMI_AGENT_VERSION` is
+set. `serve` starts no run of its own: an exchange is stored under the run its `Irimi-Run` names, or
+else under the id `serve` printed, and the store is closed on Ctrl-C but not yet on SIGTERM (#77).
+`serve` prints one line per exchange and no summary. A map, overrides file or `--target` the loader
+refuses stops `serve` and `shadow` before the proxy starts, with the rule it broke on stderr, and so
+does a redaction key or `--store` irimi cannot use. `IRIMI_HOME` moves irimi's state (see
 `.env.example`).
 
 To install irimi as a standalone tool instead of using the venv, run `uv tool install .` or
@@ -416,7 +420,7 @@ Where each feature is exercised end to end:
 | Slack: minted threads, names versus ids, `missing_scope`, archived channels, webhooks | W4 `w04_slack_ops_bot` |
 | Would-have-fired webhooks, a signed inbound webhook | W5 `w05_dispute_responder` |
 | SSE streaming, resets mid-stream, telemetry stored as a count | W7 `w07_streaming_assistant` |
-| The trace store: one process run per scenario, header runs, redaction on disk | every workflow (`tests/workflows/test_stored_runs.py`), W2, W3 |
+| The trace store: one process run per scenario, header runs, redaction on disk | every workflow (`tests/workflows/test_stored_runs.py`), W2, W3; a credential in a live response, W5 |
 | Unmapped internal services, a map the loader refuses, `Irimi-Run` across a hop | W8 `w08_orchestrator` |
 | Upstream failures: 429, 500, timeouts, resets, a failed L3 read, a killed run | W10 `w10_flaky_upstream` |
 | What irimi cannot see: clients that bypass the proxy, loopback services | W11 `w11_leaky_agent` |

@@ -5,6 +5,8 @@ The events are in `examples/workflows/w04_slack_ops_bot/agent.py`. Its calls car
 """
 
 from examples.workflows.harness.run import CANARIES
+from irimi import redact
+from irimi.exchange import Exchange
 
 W = "w04_slack_ops_bot"
 WEBHOOK_PATH = CANARIES["SLACK_WEBHOOK_PATH"]
@@ -66,6 +68,15 @@ def test_the_incoming_webhooks_secret_path_is_printed_until_87_lands(run_workflo
         f"fake-L0   write     POST hooks.slack.com{WEBHOOK_PATH} -> 200  [fidelity:L0]"
         in shadow.exchange_lines()
     )
+    # The store already hides it (#69, #70): the whole path is one placeholder, and invariant 4
+    # finds the canary in no file under irimi's home.
+    [hook] = [
+        e
+        for e in shadow.stored_events()
+        if isinstance(e, Exchange) and e.request.host.startswith("hooks.")
+    ]
+    placeholder = redact.placeholder(redact.load_key(shadow.home), WEBHOOK_PATH)
+    assert (hook.request.path, hook.answered_by) == ("/" + placeholder, "fake-L0")
 
 
 def test_the_overlay_line_hangs_under_the_webhook_post_it_cannot_have_seen(run_workflow):

@@ -3,6 +3,12 @@
 The labels and events are in `examples/workflows/w05_dispute_responder/agent.py`.
 """
 
+import json
+
+from examples.workflows.harness.services import client_secret
+from irimi import redact
+from irimi.exchange import Exchange
+
 W = "w05_dispute_responder"
 
 
@@ -13,6 +19,7 @@ def actions(result):
 READS = [
     ("dispute", 200, None),
     ("charge", 200, None),
+    ("payment_intent", 200, None),
     ("customer", 200, None),
     ("llm", 200, None),
 ]
@@ -34,6 +41,27 @@ def test_a_large_dispute_is_tagged_alerted_and_fought_without_a_refund(run_workf
     summary = shadow.summary()
     assert "  ○ update customer cus_DISPUTER  unvalidated (L1)" in summary
     assert "  These writes did not happen. Would have fired: customer.updated." in summary
+
+
+def test_the_intents_client_secret_reaches_the_agent_and_only_its_placeholder_reaches_disk(
+    run_workflow,
+):
+    """Reads are real, so the agent is handed the payment intent's real `client_secret`. The store
+    keeps that live read's response with the secret swapped for its placeholder and nothing else
+    changed (#69, #70), and invariant 4 finds the canary in no file under irimi's home. The one
+    corpus response that carries a credential: every other canary is one the agent sends."""
+    shadow = run_workflow(W, "over_threshold", "shadow")
+    path = "/v1/payment_intents/pi_BIG"
+    [live] = [ex for ex in shadow.reported if ex.request.path == path]
+    assert live.answered_by == "live" and live.response is not None
+    sent = json.loads(live.response.body)
+    assert sent["client_secret"] == client_secret("pi_BIG")
+    [stored] = [
+        e for e in shadow.stored_events() if isinstance(e, Exchange) and e.request.path == path
+    ]
+    assert stored.response is not None
+    hidden = redact.placeholder(redact.load_key(shadow.home), client_secret("pi_BIG"))
+    assert json.loads(stored.response.body) == {**sent, "client_secret": hidden}
 
 
 def test_a_small_dispute_is_refunded_and_the_refund_would_have_fired_two_events(run_workflow):
@@ -68,7 +96,7 @@ def test_the_refunds_own_charge_refunded_event_is_a_second_run_with_no_calls(run
         ]
         assert [a["outcome"] for a in result.result()["answers"]] == ["refund", "noted"]
         # Everything the agent called, it called while handling the dispute.
-        assert len(result.calls()) == 7
+        assert len(result.calls()) == 8
     shadow = run_workflow(W, "cascade", "shadow")
     runs = shadow.events("run.start")
     assert [r["name"] for r in runs] == ["on_event", "on_event"]

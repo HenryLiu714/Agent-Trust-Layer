@@ -17,8 +17,13 @@ def _world(world: World) -> None:
     world.stripe.add_customer(CUSTOMER)
     world.stripe.add_charge("ch_BIG", 5000, customer=CUSTOMER)
     world.stripe.add_charge("ch_SMALL", 1500, customer=CUSTOMER)
-    world.stripe.add_dispute(BIG, "ch_BIG", 5000, "product_not_received")
-    world.stripe.add_dispute(SMALL, "ch_SMALL", 1500, "fraudulent")
+    # Each charge's intent, as Stripe returns it: with its `client_secret` (#70).
+    for intent, amount, order in (("pi_BIG", 5000, "1042"), ("pi_SMALL", 1500, "1043")):
+        world.stripe.add_payment_intent(
+            intent, amount, status="succeeded", description=f"Order #{order}: headphones"
+        )
+    world.stripe.add_dispute(BIG, "ch_BIG", 5000, "product_not_received", "pi_BIG")
+    world.stripe.add_dispute(SMALL, "ch_SMALL", 1500, "fraudulent", "pi_SMALL")
     world.slack.add_channel(DISPUTES_CHANNEL, "disputes")
     world.llm.script = _evidence
 

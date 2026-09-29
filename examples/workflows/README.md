@@ -19,7 +19,7 @@ uv run pytest -q tests/workflows                                     # the whole
 | W2 | `w02_nightly_reconcile` | scheduled `sdk.run` | pagination, a cursor naming a minted id (#53), 40 writes in one run, a non-replayable trigger |
 | W3 | `w03_queue_worker` | queue, threads and asyncio | run attribution under concurrency (#74, #75), several HTTP clients, two runs sharing one engine's write log |
 | W4 | `w04_slack_ops_bot` | Slack Events API | Slack fidelity: minted threads (#52), names vs ids (#44), `missing_scope`, an archived channel, an L0 `reactions.add`, duplicate delivery, the webhook path (#87) |
-| W5 | `w05_dispute_responder` | signed Stripe webhook | bytes trigger args, `would_fire` (#47), an event the agent's own write would fire |
+| W5 | `w05_dispute_responder` | signed Stripe webhook | bytes trigger args, `would_fire` (#47), an event the agent's own write would fire, a live read whose response carries a credential (a payment intent's `client_secret`) stored redacted (#70) |
 | W6 | `w06_crm_db_agent` | CLI | tools the proxy cannot see (#76, #83): database and file writes, stand-ins, decoration-time errors |
 | W7 | `w07_streaming_assistant` | streaming HTTP endpoint | SSE through the proxy (#71), a caller that disconnects, an upstream reset mid-stream and before the stream opens, a LangSmith trace stored only as having happened (#70) |
 | W8 | `w08_orchestrator` | nested triggers + an internal service | nested runs, unmapped internal hosts, `Irimi-Run` across a hop (#67) |
@@ -50,7 +50,9 @@ so it keeps its real module name; `scenarios.py` seeds the fake services per sce
   ran) to a JSON-lines file. The tests assert on that as well as on irimi's output, through
   `Result` (`harness/run.py`): `calls()`, `answered()`, `by_label()`, `tools()`, `events()`,
   `exchange_lines()` and `summary()` for what irimi printed, and `stored()` and `stored_events()`
-  for what it recorded in its trace store under the run's `IRIMI_HOME` (#70).
+  for what it recorded in its trace store under the run's `IRIMI_HOME` (#70). `reported` holds the
+  exchanges irimi printed a line for and `handed` those its engine gave the store, so a test can
+  compare what was kept with what happened.
 - **The agent kit** (`agentkit.py`) is what every agent shares, all stdlib: its HTTP client and
   the Stripe, Slack and Anthropic calls on it, the observation log, its SQLite files, and, for an
   agent that serves (W1, W4, W5, W7), `serve()`, and `deliver()` (W1, W4, W5), which sends an inbound call to the
@@ -73,12 +75,17 @@ so it keeps its real module name; `scenarios.py` seeds the fake services per sce
 3. No write tool's real function ran under shadow.
 4. No canary credential reached disk where irimi writes: its home, its working directory, TMPDIR.
    The trace store is under its home (#70), so this is the redaction test across the corpus: a
-   credential shape `redact` misses is fixed in `redact`, not in the canary.
+   credential shape `redact` misses is fixed in `redact`, not in the canary. `CANARIES` are the
+   credentials the agent is given and sends; `SERVED_CANARIES` are those a fake service hands
+   back in a response body (W5's payment intent), which a live read stores.
 5. The agent exited the same way under shadow as bare, unless the scenario is marked `diverges`.
 
 `tests/workflows/test_stored_runs.py` holds every scenario to what the store keeps (#70): a run
-that started irimi stores exactly one process run, with the agent's argv and exit, and every
-exchange irimi printed is stored exactly once.
+that started irimi stores exactly one process run, with the agent's argv and exit; every exchange
+irimi printed is stored exactly once, equal field by field to itself redacted, and telemetry only
+as having happened; every other run is a `header` run its first event created (until #74); every
+store directory is 0700, every file 0600, and no `events.jsonl` ends in a half-written line; and a
+bare run stores nothing. A streamed answer is stored with an empty body until #71.
 
 A new workflow package is found by its name, `wNN_<name>`, and is held to all five rules without
 any registry edit. A last test checks that the corpus gives rules 1 to 4 something to catch: a rule

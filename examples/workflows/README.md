@@ -38,7 +38,8 @@ so it keeps its real module name; `scenarios.py` seeds the fake services per sce
   and a workflow's own `*.internal` services. The agents call the real host names, so irimi
   classifies them with its real, shipped maps. Only name resolution is faked, in the process that
   runs irimi. A name the fake internet does not serve fails to resolve, and so does any IP
-  address but loopback, so no harness run can reach the real internet. An agent inherits only
+  address but loopback or `0.0.0.0`. The one gap: asyncio skips the resolver for an IP literal,
+  so a map that sent irimi to a public IP would not be stopped; no workflow uses one. An agent inherits only
   `PATH`, `HOME`, the locale and a few like them from your shell; everything else it is given.
 - **The fake services** (`harness/services.py`) are stateful. A bare run really refunds, and a
   second refund of the same charge is really refused. The scripted LLM answers from a per-scenario
@@ -51,7 +52,7 @@ so it keeps its real module name; `scenarios.py` seeds the fake services per sce
   `exchange_lines()` and `summary()` for what irimi printed.
 - **The agent kit** (`agentkit.py`) is what every agent shares, all stdlib: its HTTP client and
   the Stripe, Slack and Anthropic calls on it, the observation log, its SQLite files, and, for an
-  agent that serves (W1, W4, W5, W7), `serve()` and `deliver()`, which send an inbound call to the
+  agent that serves (W1, W4, W5, W7), `serve()`, and `deliver()` (W1, W4, W5), which sends an inbound call to the
   agent's own loopback server through no proxy, because inbound traffic is not its egress.
 - **The SDK stand-in** (`sdk.py`). The agents use the SDK API from #74 and #76 (`@sdk.trigger`,
   `sdk.run`, `@sdk.tool(kind=..., shadow=...)`). Until `irimi.sdk` exists, `sdk.py` implements its
@@ -73,8 +74,8 @@ so it keeps its real module name; `scenarios.py` seeds the fake services per sce
 5. The agent exited the same way under shadow as bare, unless the scenario is marked `diverges`.
 
 A new workflow package is found by its name, `wNN_<name>`, and is held to all five rules without
-any registry edit. A last test checks that the corpus gives each rule something to catch: a rule
-that nothing could break passes by default.
+any registry edit. A last test checks that the corpus gives rules 1 to 4 something to catch: a rule
+that nothing could break passes by default. Rule 5 compares two real exits in every scenario.
 
 ## Adding a workflow
 
@@ -83,5 +84,5 @@ that nothing could break passes by default.
 2. In `agent.py`, call `agentkit.start()` first, label each call a test keys on (`label=`), and
    log a final `result`. A call made with another client logs itself with `agentkit.obs_http()`.
 3. Add `tests/workflows/test_wNN_<name>.py`, pinning what irimi actually does in each scenario. A
-   behaviour that looks wrong is pinned under a `LOOKS WRONG:` comment naming the issue, not
-   worked around.
+   behaviour that looks wrong is pinned under a `LOOKS WRONG:` comment (naming its issue once one
+   is filed), not worked around.

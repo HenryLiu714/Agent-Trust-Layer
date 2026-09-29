@@ -98,11 +98,11 @@ def test_one_failing_message_fails_only_its_own_run(run_workflow):
 
 
 def test_a_second_run_sees_the_first_runs_faked_refund(run_workflow):
-    """The write log is the engine's, not the run's: run 2's read of the charge is overlaid with
-    run 1's faked refund, and L3 then refuses run 2's refund against it. That is what production
-    would have done (the bare run agrees), but it means two runs in one engine are not isolated.
-    Serve mode (#77) and the Phase 3 exit ("two concurrent requests don't mix") have to decide
-    whether that is the intended world; this pins today's answer."""
+    """LOOKS WRONG: the write log is the engine's, not the run's: run 2's read of the charge is
+    overlaid with run 1's faked refund, and L3 then refuses run 2's refund against it. That is what
+    production would have done (the bare run agrees), but it means two runs in one engine are not
+    isolated. Serve mode (#77) and the Phase 3 exit ("two concurrent requests don't mix") have to
+    decide whether that is the intended world; this pins today's answer."""
     shadow = run_workflow(W, "shared_charge", "shadow")
     bare = run_workflow(W, "shared_charge", "bare")
     saw = [e["amount_refunded"] for e in shadow.events("saw")]

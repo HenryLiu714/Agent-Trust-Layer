@@ -28,7 +28,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked
-      - run: uv run python --version
+      - run: uv run python -c "import sys; v = '%d.%d' % sys.version_info[:2]; assert v == '${{ matrix.python }}', v"
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy

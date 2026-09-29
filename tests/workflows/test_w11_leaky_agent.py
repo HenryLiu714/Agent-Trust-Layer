@@ -1,8 +1,8 @@
 """W11 `leaky_agent`: each escape's write really lands, and irimi never sees it.
 
-Every escape assertion here pins today's limit. When Phase 4's readiness checks land, each flips
-from "irimi printed nothing" to "irimi flagged it", and the test says which check flagged which
-escape.
+LOOKS WRONG: every escape assertion here pins today's limit. When Phase 4's readiness checks land,
+each flips from "irimi printed nothing" to "irimi flagged it", and the test says which check flagged
+which escape.
 """
 
 import pytest

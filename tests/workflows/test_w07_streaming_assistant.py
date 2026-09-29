@@ -87,8 +87,8 @@ def test_a_reset_before_the_stream_opens_reaches_the_agent_as_an_unstamped_502(r
     shadow = run_workflow(W, "reset_before_stream", "shadow")
     assert bare.exit_code == shadow.exit_code == 4
     assert bare.result()["error"] == "anthropic_stream: ConnectionResetError"
-    # Under shadow the proxy answers the reset with a 502 of its own, unstamped: the agent sees an
-    # HTTP status where bare it saw no answer (as in W10's `reset_on_read`).
+    # LOOKS WRONG: under shadow the proxy answers the reset with a 502 of its own, unstamped: the
+    # agent sees an HTTP status where bare it saw no answer (as in W10's `reset_on_read`).
     assert shadow.result()["error"] == "anthropic_stream: HTTP 502"
     [stream] = shadow.calls("anthropic_stream")
     assert (stream["status"], stream["answered_by"]) == (502, None)

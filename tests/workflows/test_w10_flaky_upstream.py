@@ -47,10 +47,10 @@ def test_a_read_the_agent_abandoned_is_recorded_as_an_upstream_error(run_workflo
         "TimeoutError",
         200,
     ]
-    # The upstream never failed: it answered late, after the AGENT gave up and hung up. irimi
-    # records the abandoned exchange with no response and flags it `upstream-error`, which reads
-    # as the service's fault. Which of the two reads prints first is a race between irimi noticing
-    # the hang-up and the retry's answer, so their order is not pinned.
+    # LOOKS WRONG: the upstream never failed: it answered late, after the AGENT gave up and hung up.
+    # irimi records the abandoned exchange with no response and flags it `upstream-error`, which
+    # reads as the service's fault. Which of the two reads prints first is a race between irimi
+    # noticing the hang-up and the retry's answer, so their order is not pinned.
     assert sorted(shadow.exchange_lines()[:2]) == [
         "live      read      GET api.stripe.com/v1/charges -> -  [upstream-error]",
         "live      read      GET api.stripe.com/v1/charges -> 200",
@@ -68,9 +68,9 @@ def test_a_reset_on_a_read_reaches_the_agent_as_an_unstamped_502(run_workflow):
     shadow = run_workflow(W, "reset_on_read", "shadow")
     assert statuses(bare, "list_charges") == ["ConnectionResetError", 200]
     assert retries(bare) == [("list_charges", "NetworkError")]
-    # Under shadow the proxy answers the reset itself, as an HTTP 502 with no Irimi-Answered-By:
-    # the agent sees a status where bare it saw no answer at all. This agent retries both, so it
-    # ends the same way; an agent that retries only one of them would not.
+    # LOOKS WRONG: under shadow the proxy answers the reset itself, as an HTTP 502 with no
+    # Irimi-Answered-By: the agent sees a status where bare it saw no answer at all. This agent
+    # retries both, so it ends the same way; an agent that retries only one of them would not.
     assert [(c.get("status"), c.get("answered_by")) for c in shadow.calls("list_charges")] == [
         (502, None),
         (200, None),
@@ -96,8 +96,8 @@ def test_a_failed_precondition_read_degrades_the_check_and_the_agent_never_knows
     assert "live      read      GET api.stripe.com/v1/charges/ch_PAYOUT1 -> 500" in (
         shadow.exchange_lines()
     )
-    # The check could not be made, so the refund is faked at L2, and with no currency the L3 read
-    # would have supplied, its amount prints in minor units.
+    # The check could not be made, so the refund is faked at L2. LOOKS WRONG: with no currency
+    # the L3 read would have supplied, its amount prints in minor units.
     refunds = [line for line in shadow.summary() if "○ refund" in line]
     assert refunds == ["  ○ refund 500 on ch_PAYOUT1  unvalidated (L2)"]
 

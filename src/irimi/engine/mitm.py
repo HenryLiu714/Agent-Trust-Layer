@@ -746,11 +746,10 @@ class IrimiAddon:
         self._finish(ex)
 
     def _finish(self, ex: Exchange) -> None:
-        # Telemetry is forwarded but never stored: a trace of the agent's own observability
-        # traffic is noise, and replaying it would re-emit someone else's events (#9). It is still
-        # reported, so the per-exchange line and the run summary both count it.
-        if ex.kind != "telemetry":
-            self.store.record(ex)
+        # Every exchange goes to the store, telemetry included: the store keeps only that a
+        # telemetry exchange happened and to which host, never its request or response, so a
+        # stored run's summary can count it (#9, #70).
+        self.store.record(ex)
         if self.on_exchange:
             self.on_exchange(ex)
 

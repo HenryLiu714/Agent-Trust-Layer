@@ -9,12 +9,17 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from irimi import __version__
 from irimi.engine import Engine, EngineStartError
+from irimi.store import TraceStore
+from irimi.trace import SCHEMA_VERSION, ErrorInfo, JSONValue, RunRecord, Trigger
 
 # Exactly the variables issue #3 specifies. Nothing is added to this list without a new issue.
 NO_PROXY_VALUE = "localhost,127.0.0.1"
 ENGINE_ACTIVE_ENV = "IRIMI_ENGINE_ACTIVE"
 RUN_ENV = "IRIMI_RUN"
+# The agent's own version, if its deployment names one; the process run records it (#70).
+AGENT_VERSION_ENV = "IRIMI_AGENT_VERSION"
 
 READY_TIMEOUT_S = 30.0
 STOP_TIMEOUT_S = 30.0
@@ -55,6 +60,38 @@ def child_env(
 def exit_code_for(returncode: int) -> int:
     """Shell convention: a child killed by signal N exits 128 + N (Popen reports -N)."""
     return 128 - returncode if returncode < 0 else returncode
+
+
+def process_run(
+    run_id: str, cmd: list[str], agent_version: str | None, started_at: float
+) -> RunRecord:
+    """The record `irimi shadow` stores for its child before spawning it (#70): one process tree
+    is one run, and its trigger is the command line, which a replay can run again."""
+    argv: list[JSONValue] = list(cmd)
+    return RunRecord(
+        schema_version=SCHEMA_VERSION,
+        run_id=run_id,
+        mode="shadow",
+        attribution="process",
+        trigger=Trigger(name=cmd[0], entrypoint=None, args={"argv": argv}, replayable=True),
+        agent_version=agent_version,
+        engine_version=__version__,
+        sdk_version=None,
+        started_at=started_at,
+        ended_at=None,
+        outcome=None,
+        error=None,
+        exit_code=None,
+    )
+
+
+def end_process_run(store: TraceStore, run_id: str, code: int, ended_at: float) -> None:
+    """Close the process run with the child's exit code: `ok` for 0, `error` for anything else,
+    a signal included (#70)."""
+    if code == 0:
+        store.end_run(run_id, ended_at, "ok", exit_code=code)
+    else:
+        store.end_run(run_id, ended_at, "error", ErrorInfo("exit", f"exited {code}"), code)
 
 
 @dataclass

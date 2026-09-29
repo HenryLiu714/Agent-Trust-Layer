@@ -1,20 +1,18 @@
-"""Trace format v1 end to end: what `irimi shadow` records, encoded the way the trace store will.
+"""Trace format v1 end to end: what `irimi shadow` stores, read back off disk (#68, #69, #70).
 
-The unit tests in `tests/test_trace.py` prove the codecs round-trip an Exchange built by hand, and
-the engine tests prove a real engine stamps its exchanges. Neither proves the claim #68 is for: a
-run of the real CLI, over the Phase 2 scenario, hands its store exchanges that survive the trip to
-an `events.jsonl` line and back with every Phase 2 field intact and every span in order.
+The unit tests in `tests/test_trace.py` and `tests/test_store.py` prove the codecs and the store
+over exchanges built by hand, and the engine tests prove a real engine stamps its exchanges. None
+of them proves the claim #70 is for: a run of the real CLI, over the Phase 2 scenario, leaves a run
+on disk whose exchanges read back as exactly what the engine handed its store - redacted, with
+every Phase 2 field intact and every span in order.
 
-`cli._build_engine` imports `NullStore` when it runs, so each test here swaps in `_EventsStore`,
-which does to every exchange exactly what P3-04 (#70) will do: `trace.event_to_json` with a
-content-addressed blob dict, `json.dumps(..., allow_nan=False)`, and back through `json.loads` and
-`trace.event_from_json`. Nothing else in the composition changes.
+`cli._open_store` imports `DirectoryStore` when it runs, so each test here swaps in `_SpyStore`:
+the real store, unchanged, which also remembers each exchange the engine handed it. Every
+assertion is made on what `StoreReader` reads back and on the files under the store's root.
 
-The last part does the same for #69's redaction, which #70's writer thread will run on each
-exchange before it encodes it: real traffic through the real `irimi shadow`, both doors, against
-loopback stand-ins, and then exactly what that writer will do - `redact.redact_exchange` under this
-install's key, then `_EventsStore`'s encoding - with every assertion made on the encoded lines
-and blobs.
+The last part holds #69's redaction to the same standard: real traffic through the real
+`irimi shadow`, both doors, against loopback stand-ins, with every assertion made on the stored
+lines and blobs.
 """
 
 import base64
@@ -26,6 +24,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -42,6 +41,7 @@ from irimi.exchange import (
     media_type,
 )
 from irimi.servicemap import loader
+from irimi.store import DirectoryStore, StoredRun, StoreReader
 from tests import test_engine_mitm, test_phase_exit
 from tests.test_engine_mitm import (
     _carries_run_header,
@@ -68,88 +68,111 @@ upstream = test_engine_mitm.upstream
 PHASE2_FIELDS = ("precondition", "rejection_code", "overlay", "issued_by", "would_fire", "currency")
 
 
-class _EventsStore:
-    """A `TraceStore` that writes what #70 will write, in memory. `seq` is assigned as each finished
-    exchange arrives, which is the ordering rule: completion order (#68). An encoding failure is
-    kept rather than raised, because a store that raises inside a hook is a different bug."""
+class _SpyStore(DirectoryStore):
+    """The store `irimi shadow` opens, unchanged, remembering each exchange the engine handed it,
+    in the order it did: the live exchanges a stored one is compared against."""
 
-    built: list["_EventsStore"] = []
+    built: list["_SpyStore"] = []
 
-    def __init__(self) -> None:
+    def __init__(self, root: Path, key: bytes) -> None:
+        super().__init__(root, key)
         self.received: list[Exchange] = []
-        self.lines: list[str] = []
-        self.blobs: dict[str, bytes] = {}
-        self.errors: list[Exception] = []
-        self.closed = False
-
-    @classmethod
-    def for_the_run(cls) -> "_EventsStore":
-        """What `cli._build_engine` calls in place of `NullStore()`: a store the test can find."""
-        store = cls()
-        cls.built.append(store)
-        return store
+        _SpyStore.built.append(self)
 
     def record(self, exchange: Exchange) -> None:
         self.received.append(exchange)
-        seq = len(self.received)  # from 1, as #70's writer counts
-        try:
-            line = trace.event_to_json(seq, exchange, self._put_body)
-            self.lines.append(json.dumps(line, allow_nan=False))
-        except Exception as exc:
-            self.errors.append(exc)
+        super().record(exchange)
 
-    def close(self) -> None:
-        self.closed = True
 
-    def _put_body(self, body: bytes) -> trace.BodyRef:
-        ref = trace.body_ref(body)
-        self.blobs[ref.sha256] = body
-        return ref
+@dataclasses.dataclass(frozen=True)
+class _Disk:
+    """A store's root, read back once the run that wrote it has returned."""
 
-    def _get_body(self, ref: trace.BodyRef) -> bytes:
-        body = self.blobs[ref.sha256]
-        assert (len(body), ref.truncated) == (ref.size, False)
-        return body
+    root: Path
+    key: bytes
+    received: list[Exchange]  # what the engine handed the store, in order
 
-    def events(self) -> list[tuple[int, trace.Event]]:
-        return [trace.event_from_json(json.loads(line), self._get_body) for line in self.lines]
+    @property
+    def reader(self) -> StoreReader:
+        return StoreReader(self.root)
+
+    def process_run(self) -> StoredRun:
+        """The one run `irimi shadow` started for its child."""
+        (record,) = [r for r in self.reader.list_runs() if r.attribution == "process"]
+        return self.reader.load_run(record.run_id)
+
+    def exchanges(self) -> list[Exchange]:
+        """Every stored exchange: run by run, each in `seq` order, then the unattributed ones."""
+        ids = [r.run_id for r in self.reader.list_runs()] + [trace.UNATTRIBUTED]
+        runs = [self.reader.load_run(run_id) for run_id in ids]
+        return [event for run in runs for event in run.events if isinstance(event, Exchange)]
+
+    def lines(self, run_id: str) -> list[str]:
+        return (self.root / "runs" / run_id / "events.jsonl").read_text().splitlines()
+
+    def blobs(self) -> dict[str, bytes]:
+        blobs = self.root / "blobs"
+        return {path.name: path.read_bytes() for path in blobs.iterdir()} if blobs.is_dir() else {}
+
+    def files_holding(self, needle: bytes) -> list[Path]:
+        """Every file under the root whose bytes hold `needle`: lines, blobs and run records."""
+        return [p for p in self.root.rglob("*") if p.is_file() and needle in p.read_bytes()]
 
 
 @pytest.fixture
-def events_store(monkeypatch):
-    """Returns a function giving the one store the run built, once it has been closed."""
-    _EventsStore.built = []
-    monkeypatch.setattr("irimi.store.NullStore", _EventsStore.for_the_run)
+def stored(home, monkeypatch):
+    """Returns a function giving the store the run opened, read back after `main` returned. The
+    store dropped nothing and has nothing left to write."""
+    _SpyStore.built = []
+    monkeypatch.setattr("irimi.store.DirectoryStore", _SpyStore)
 
-    def the_store() -> _EventsStore:
-        (store,) = _EventsStore.built
-        assert store.closed
-        assert store.errors == []
-        return store
+    def the_disk() -> _Disk:
+        (store,) = _SpyStore.built
+        assert (store.stats().queued, store.stats().dropped) == (0, 0)
+        return _Disk(store.layout.root, redact.load_key(home), store.received)
 
-    return the_store
+    return the_disk
 
 
-def _decoded(store: _EventsStore) -> list[Exchange]:
-    """Every line back, in `seq` order, each equal to the exchange the engine handed the store."""
-    events = store.events()
-    assert [seq for seq, _ in events] == list(range(1, len(store.received) + 1))
-    decoded = [event for _, event in events if isinstance(event, Exchange)]
-    assert decoded == store.received
+def _assert_same(stored: Exchange, expected: Exchange) -> None:
+    """Field by field over `dataclasses.fields(Exchange)`, so a failure names the field."""
+    for field in dataclasses.fields(Exchange):
+        assert getattr(stored, field.name) == getattr(expected, field.name), field.name
+
+
+def _decoded(disk: _Disk) -> list[Exchange]:
+    """The process run's exchanges read back off disk, in `seq` order: each is the exchange the
+    engine handed the store, redacted (#69), and `seq` runs 1..n with no gap."""
+    run = disk.process_run()
+    seqs = [json.loads(line)["seq"] for line in disk.lines(run.record.run_id)]
+    assert seqs == list(range(1, len(disk.received) + 1))
+    decoded = [event for event in run.events if isinstance(event, Exchange)]
+    for stored, live in zip(decoded, disk.received, strict=True):
+        _assert_same(stored, redact.redact_exchange(live, disk.key))
     return decoded
 
 
 def test_the_phase_2_run_under_irimi_shadow_survives_the_trace_format_event_for_event(
-    home, tmp_path, monkeypatch, events_store
+    home, tmp_path, monkeypatch, stored
 ):
-    """#68's round trip through the real composition. Every exchange `irimi shadow` hands its
-    store over the Phase 2 scenario - the agent's five calls and the engine's two L3 reads -
-    encodes to an `events.jsonl` line and decodes back equal, and the six fields Phase 2 added each
-    arrive with the value the live summary prints from."""
-    _run_phase2_under_shadow(tmp_path, monkeypatch)
+    """#70's end-to-end test, and #68's round trip through the real composition. The Phase 2
+    scenario run with `--store` leaves one run directory: the process run, with its argv and
+    `outcome: ok`. Every exchange `irimi shadow` handed its store - the agent's five calls and the
+    engine's two L3 reads - reads back off disk equal to itself redacted, and the six fields Phase
+    2 added each arrive with the value the live summary prints from."""
+    root = tmp_path / "trace"
+    _run_phase2_under_shadow(tmp_path, monkeypatch, "--store", str(root))
 
-    store = events_store()
-    decoded = _decoded(store)
+    disk = stored()
+    assert disk.root == root
+    run = disk.process_run()
+    assert [path.name for path in (root / "runs").iterdir()] == [run.record.run_id]
+    assert run.record.attribution == "process"
+    assert run.record.trigger is not None
+    assert run.record.trigger.args == {"argv": [sys.executable, str(tmp_path / "child.py")]}
+    assert (run.record.outcome, run.record.exit_code, run.record.error) == ("ok", 0, None)
+    assert run.record.dropped_events == 0
+    decoded = _decoded(disk)
     shape = [(ex.issued_by, ex.request.method, ex.request.path, ex.answered_by) for ex in decoded]
     assert shape == [
         ("agent", "GET", "/v1/charges", "live"),
@@ -178,23 +201,25 @@ def test_the_phase_2_run_under_irimi_shadow_survives_the_trace_format_event_for_
     # Bodies never go inline: the refund's form body is a ref in the line and a blob beside it,
     # and the retry posted the same bytes, so both lines name one blob.
     posted = f"charge={PHASE2_CHARGE}&amount={PHASE2_AMOUNT}".encode()
-    assert not any(posted.decode() in line for line in store.lines)
-    assert store.blobs[trace.body_ref(posted).sha256] == posted
-    refund_line, retry_line = (json.loads(store.lines[i]) for i in (2, 6))
+    lines = disk.lines(run.record.run_id)
+    assert not any(posted.decode() in line for line in lines)
+    assert disk.blobs()[trace.body_ref(posted).sha256] == posted
+    refund_line, retry_line = (json.loads(lines[i]) for i in (2, 6))
     assert refund_line["request"]["body"] == retry_line["request"]["body"]
 
 
 def test_every_exchange_the_phase_2_run_stores_is_timed_and_seq_is_completion_order(
-    home, tmp_path, monkeypatch, events_store
+    home, tmp_path, monkeypatch, stored
 ):
-    """#68's timestamps, read back off the decoded lines. Every exchange spans `0 < started_at <=
-    ended_at` inside the run; each engine-issued L3 read spans its `Reader` call, inside the write
-    it checked; and `seq` is completion order, so the read is stored before its write while the
-    write started first - `started_at` is what recovers start order."""
+    """#68's timestamps, read back off disk. Every exchange spans `0 < started_at <= ended_at`
+    inside the run; each engine-issued L3 read spans its `Reader` call, inside the write it
+    checked; and `seq` is completion order, so the read is stored before its write while the write
+    started first - `started_at` is what recovers start order. The run itself spans them all."""
     before = time.time()
     _run_phase2_under_shadow(tmp_path, monkeypatch)
     after = time.time()
-    decoded = _decoded(events_store())
+    disk = stored()
+    decoded = _decoded(disk)
 
     for ex in decoded:
         assert 0 < before <= ex.started_at <= ex.ended_at <= after, ex.request.path
@@ -205,6 +230,10 @@ def test_every_exchange_the_phase_2_run_stores_is_timed_and_seq_is_completion_or
     assert ended == sorted(ended)
     by_start = sorted(decoded, key=lambda ex: ex.started_at)
     assert by_start == [read, refund, check, refunds, charge, retry, recheck]
+    record = disk.process_run().record
+    assert record.started_at is not None and record.ended_at is not None
+    assert before <= record.started_at <= read.started_at
+    assert retry.ended_at <= record.ended_at <= after
 
 
 # Each call names itself in its query, so the recorded exchange can be matched to what it sent.
@@ -247,14 +276,15 @@ call("POST", "write", [("Irimi-Run", "../x")])
 
 
 def test_an_invalid_run_header_from_a_shadowed_child_names_no_run_and_reaches_no_service(
-    home, tmp_path, capfd, upstream, events_store
+    home, tmp_path, capfd, upstream, stored
 ):
     """#68's path-traversal guard through the real CLI, with #67's strip beside it. A run id
     becomes a directory in the trace store, so a value `trace.is_valid_run_id` refuses - `../x`,
     65 characters, a space - is no run id and the exchange keeps the engine's own, read or faked
     write alike. A valid one names its run in any spelling of the header name, trimmed, and a
     repeated header's first valid value wins. Whatever the value, no service ever sees the header
-    and no stored request carries it."""
+    and no stored request carries it. On disk, each valid id is a `header` run of its own (#70),
+    and nothing is created outside the store's root."""
     child = tmp_path / "child.py"
     child.write_text(
         RUN_HEADER_CHILD.replace("__PORT__", str(upstream)).replace("__RUN_ENV__", runner.RUN_ENV)
@@ -269,7 +299,12 @@ def test_an_invalid_run_header_from_a_shadowed_child_names_no_run_and_reaches_no
     assert len(_Upstream.seen) == 7  # the seven GETs; the POST was faked and never left
     for path, received in _Upstream.seen:
         assert not _carries_run_header(received), f"{path} reached the service carrying Irimi-Run"
-    decoded = _decoded(events_store())
+    disk = stored()
+    decoded = disk.exchanges()
+    assert sorted(decoded, key=lambda ex: ex.request.query) == sorted(
+        (redact.redact_exchange(ex, disk.key) for ex in disk.received),
+        key=lambda ex: ex.request.query,
+    )
     by_case = {ex.request.query.removeprefix("case="): ex for ex in decoded}
     assert {case: ex.run_id for case, ex in by_case.items()} == {
         "dotdot": engine_run,
@@ -285,10 +320,20 @@ def test_an_invalid_run_header_from_a_shadowed_child_names_no_run_and_reaches_no
     for ex in decoded:
         assert not _carries_run_header(ex.request.headers)
         assert 0 < ex.started_at <= ex.ended_at
+    runs = {r.run_id: r.attribution for r in disk.reader.list_runs()}
+    assert runs == {
+        engine_run: "process",
+        "run_A-1": "header",
+        "run_B": "header",
+        "run_C": "header",
+        "run_D": "header",
+    }
+    assert {p.name for p in disk.root.iterdir()} <= {"blobs", "runs", "unattributed"}
+    assert not (disk.root / "x").exists() and not (disk.root.parent / "x").exists()
 
 
 def test_the_phase_1_run_through_the_reverse_door_survives_the_trace_format(
-    home, tmp_path, monkeypatch, stripe_stand_in, events_store
+    home, tmp_path, monkeypatch, stripe_stand_in, stored
 ):
     """The Phase 1 criterion's run (#13), stored: a read through the forward proxy, and a refund
     through the reverse door answered from the SHIPPED Stripe map's fixture after an L3 read of
@@ -296,7 +341,7 @@ def test_the_phase_1_run_through_the_reverse_door_survives_the_trace_format(
     and the engine's read sits inside the refund's span."""
     _run_phase1_under_shadow(tmp_path, monkeypatch, stripe_stand_in)
 
-    read, check, refund = _decoded(events_store())
+    read, check, refund = _decoded(stored())
     assert [(ex.door, ex.issued_by, ex.kind) for ex in (read, check, refund)] == [
         ("forward", "agent", "read"),
         ("forward", "engine", "read"),
@@ -330,46 +375,43 @@ def _run_phase1_under_shadow(tmp_path, monkeypatch, stripe_port: int) -> None:
 
 
 def test_the_phase_1_run_redacted_for_disk_carries_no_credential_and_changes_nothing_else(
-    home, tmp_path, monkeypatch, stripe_stand_in, events_store
+    home, tmp_path, monkeypatch, stripe_stand_in, stored
 ):
-    """#69 over what a real `irimi shadow` run hands its store. Each exchange, redacted under this
-    install's key the way #70's writer will and then encoded, holds no `sk_test_` anywhere - lines
-    or blobs - and one placeholder for the one bearer token wherever it was sent, the engine's own
-    L3 read included. Nothing else changes: swap the token for its placeholder in what the engine
-    recorded and it equals the redacted copy, bodies byte for byte."""
+    """#69 over what a real `irimi shadow` run stored (#70). No file under the store's root holds
+    `sk_test_` - no line, no blob, no run record - and the one bearer token is one placeholder
+    wherever it was sent, the engine's own L3 read included. Nothing else changes: swap the token
+    for its placeholder in what the engine recorded and it equals what was stored, bodies byte
+    for byte."""
     _run_phase1_under_shadow(tmp_path, monkeypatch, stripe_stand_in)
-    received = events_store().received
-    key = redact.load_key(home)
+    disk = stored()
     bearer = "Bearer sk_test_notreal"
-    disk = _assert_stored_as(received, key, _placeholders(key, bearer))
-    assert all("sk_test_" not in line for line in disk.lines)
-    assert all(b"sk_test_" not in blob for blob in disk.blobs.values())
-    sent = [ex.request.header("authorization") for ex in disk.received]
-    assert set(sent) == {redact.placeholder(key, bearer)}, sent
-    assert received[0].request.header("authorization") == bearer
+    written = _assert_stored_as(disk, _placeholders(disk.key, bearer))
+    assert disk.files_holding(b"sk_test_") == []
+    sent = [ex.request.header("authorization") for ex in written]
+    assert set(sent) == {redact.placeholder(disk.key, bearer)}, sent
+    assert disk.received[0].request.header("authorization") == bearer
 
 
 # ------------------------------------------------------------ redaction over real traffic (#69)
 #
 # Each rule of #69 that real traffic exercises, through the real `irimi shadow`: the child below
 # makes the calls a test hands it, through the forward proxy or the reverse door, and prints what
-# it was answered. The engine's recorded exchanges are then redacted and encoded as #70's writer
-# will do it (`_redacted_for_disk`), and `_assert_stored_as` holds the two promises: no secret is
-# in any line or blob, and swapping each secret for its placeholder in what the engine recorded
-# gives exactly what was stored - so one secret has one placeholder everywhere it went, and every
-# other byte survives. Every upstream is loopback: the stand-in below, or nothing at all.
+# it was answered. The store's writer redacts each exchange before it writes it (#70), and
+# `_assert_stored_as` holds the two promises over the files it wrote: no secret is in any of
+# them, and swapping each secret for its placeholder in what the engine recorded gives exactly
+# what was stored - so one secret has one placeholder everywhere it went, and every other byte
+# survives. Every upstream is loopback: the stand-in below, or nothing at all.
 
 
-def _redacted_for_disk(received: list[Exchange], key: bytes) -> _EventsStore:
-    """What #70's writer will put on disk from `received`: each exchange through
-    `redact.redact_exchange` under `key`, then encoded as `_EventsStore` encodes it. Every line
-    decodes back equal to the redacted exchange it came from."""
-    disk = _EventsStore()
-    for ex in received:
-        disk.record(redact.redact_exchange(ex, key))
-    assert disk.errors == []
-    _decoded(disk)
-    return disk
+def _through_a_store(root: Path, key: bytes, exchanges: list[Exchange]) -> _Disk:
+    """`exchanges` recorded into a DirectoryStore of their own under `root`, and read back: for
+    an exchange no run produced, such as a stream assembled after the fact."""
+    store = DirectoryStore(root, key)
+    for ex in exchanges:
+        store.record(ex)
+    store.close()
+    assert store.stats().dropped == 0
+    return _Disk(root, key, exchanges)
 
 
 def _placeholders(key: bytes, *secrets: str) -> dict[str, str]:
@@ -431,17 +473,17 @@ def _with_placeholders(ex: Exchange, hidden: dict[str, str]) -> Exchange:
     )
 
 
-def _assert_stored_as(received: list[Exchange], key: bytes, hidden: dict[str, str]) -> _EventsStore:
-    """#69's two promises over one run's exchanges, on what #70 will write: no secret in `hidden`
-    is in any line or blob, and each stored exchange is the recorded one with exactly those secrets
-    swapped for their placeholders - every field compared, bodies byte for byte."""
-    disk = _redacted_for_disk(received, key)
+def _assert_stored_as(disk: _Disk, hidden: dict[str, str]) -> list[Exchange]:
+    """#69's two promises over what the store wrote (#70): no secret in `hidden` is in any file
+    under its root, and each stored exchange is the one the engine handed the store with exactly
+    those secrets swapped for their placeholders - every field compared, bodies byte for byte.
+    Returns the stored exchanges."""
     for secret in hidden:
-        assert [line for line in disk.lines if secret in line] == [], secret
-        assert [blob for blob in disk.blobs.values() if secret.encode() in blob] == [], secret
-    for live, stored in zip(received, disk.received, strict=True):
-        assert stored == _with_placeholders(live, hidden)
-    return disk
+        assert disk.files_holding(secret.encode()) == [], secret
+    written = disk.exchanges()
+    for live, stored in zip(disk.received, written, strict=True):
+        _assert_same(stored, _with_placeholders(live, hidden))
+    return written
 
 
 # The stand-in's own secrets and answers. Each is a value no rule would touch unless it is one.
@@ -658,7 +700,7 @@ def _webhook_call() -> _Call:
 
 
 def test_a_delegated_slack_webhook_stores_its_secret_path_as_one_placeholder_in_path_and_target(
-    home, tmp_path, monkeypatch, redact_stand_in, events_store
+    home, tmp_path, monkeypatch, redact_stand_in, stored
 ):
     """#69's credential-path rule over a real delegated write. A `hooks.slack.com/services/T/B/
     <secret>` post through the reverse door, its service pointed at a bare-origin loopback target,
@@ -682,7 +724,8 @@ def test_a_delegated_slack_webhook_stores_its_secret_path_as_one_placeholder_in_
     assert [(m, p, b) for m, p, _, b in _RedactStandIn.seen] == [
         ("POST", WEBHOOK_PATH, WEBHOOK_BODY)
     ]
-    (ex,) = events_store().received
+    disk = stored()
+    (ex,) = disk.received
     assert (ex.door, ex.request.host, ex.request.path, ex.answered_by, ex.target) == (
         "reverse",
         "hooks.slack.com",
@@ -691,16 +734,14 @@ def test_a_delegated_slack_webhook_stores_its_secret_path_as_one_placeholder_in_
         origin + WEBHOOK_PATH,
     )
 
-    key = redact.load_key(home)
-    hidden = "/" + redact.placeholder(key, WEBHOOK_PATH)
-    disk = _assert_stored_as([ex], key, {WEBHOOK_PATH: hidden})
-    (stored,) = disk.received
-    assert (stored.request.path, stored.target) == (hidden, origin + hidden)
-    assert [line for line in disk.lines if WEBHOOK_TOKEN in line] == []
+    hidden = "/" + redact.placeholder(disk.key, WEBHOOK_PATH)
+    (written,) = _assert_stored_as(disk, {WEBHOOK_PATH: hidden})
+    assert (written.request.path, written.target) == (hidden, origin + hidden)
+    assert disk.files_holding(WEBHOOK_TOKEN.encode()) == []
 
 
 def test_an_unreachable_webhook_target_leaves_its_secret_path_nowhere_on_disk(
-    home, tmp_path, monkeypatch, redact_stand_in, events_store
+    home, tmp_path, monkeypatch, redact_stand_in, stored
 ):
     """#69 over #16's failure answer. When a webhook's loopback target is not listening, irimi
     answers a 502 whose JSON names the target, and a bare-origin target's URL carries the secret
@@ -721,26 +762,25 @@ def test_an_unreachable_webhook_target_leaves_its_secret_path_nowhere_on_disk(
     )
     assert (answer.status, answer.header("irimi-answered-by")) == (502, "delegated")
     assert WEBHOOK_PATH.encode() in answer.body
-    (ex,) = events_store().received
+    disk = stored()
+    (ex,) = disk.received
     assert TARGET_FAILED_FLAG in ex.flags and ex.target == origin + WEBHOOK_PATH
 
-    key = redact.load_key(home)
-    disk = _redacted_for_disk([ex], key)
-    hidden = "/" + redact.placeholder(key, WEBHOOK_PATH)
-    (stored,) = disk.received
-    assert (stored.request.path, stored.target) == (hidden, origin + hidden)
-    assert [line for line in disk.lines if WEBHOOK_TOKEN in line] == []
-    assert [blob for blob in disk.blobs.values() if WEBHOOK_TOKEN.encode() in blob] == []
+    hidden = "/" + redact.placeholder(disk.key, WEBHOOK_PATH)
+    (written,) = disk.exchanges()
+    _assert_same(written, redact.redact_exchange(ex, disk.key))
+    assert (written.request.path, written.target) == (hidden, origin + hidden)
+    assert disk.files_holding(WEBHOOK_TOKEN.encode()) == []
     # The 502 still names its target, as the one placeholder the path and the target hold.
-    assert ex.response is not None and stored.response is not None
+    assert ex.response is not None and written.response is not None
     told = json.loads(ex.response.body)["error"]["message"]
-    assert json.loads(stored.response.body)["error"]["message"] == told.replace(
+    assert json.loads(written.response.body)["error"]["message"] == told.replace(
         WEBHOOK_PATH, hidden
     )
 
 
 def test_a_stripe_form_write_through_the_door_stores_its_card_token_and_query_key_as_placeholders(
-    home, tmp_path, monkeypatch, redact_stand_in, events_store
+    home, tmp_path, monkeypatch, redact_stand_in, stored
 ):
     """#69's secret-key rule over a real faked write. A Stripe form post through the reverse door
     with `card[token]=…&amount=100` and `?api_key=…` stores the token (by its last bracket
@@ -765,7 +805,8 @@ def test_a_stripe_form_write_through_the_door_stores_its_card_token_and_query_ke
     assert (answer.status, answer.header("irimi-answered-by")) == (200, "fake-L0")
     assert json.loads(answer.body)["card"] == {"token": CARD_TOKEN}
     assert _RedactStandIn.seen == []  # a write is never forwarded, and it read nothing first
-    (ex,) = events_store().received
+    disk = stored()
+    (ex,) = disk.received
     assert (ex.door, ex.request.host, ex.kind, ex.answered_by, ex.flags, ex.request.body) == (
         "reverse",
         "api.stripe.com",
@@ -775,22 +816,21 @@ def test_a_stripe_form_write_through_the_door_stores_its_card_token_and_query_ke
         STRIPE_FORM,
     )
 
-    key = redact.load_key(home)
-    disk = _assert_stored_as(
-        [ex], key, _placeholders(key, STRIPE_BEARER, QUERY_API_KEY, CARD_TOKEN)
+    key = disk.key
+    (written,) = _assert_stored_as(
+        disk, _placeholders(key, STRIPE_BEARER, QUERY_API_KEY, CARD_TOKEN)
     )
-    (stored,) = disk.received
     token = redact.placeholder(key, CARD_TOKEN)
-    assert stored.request.body == f"card[token]={token}&amount=100".encode()
-    assert stored.request.query == f"api_key={redact.placeholder(key, QUERY_API_KEY)}"
-    assert stored.request.header("authorization") == redact.placeholder(key, STRIPE_BEARER)
-    assert stored.response is not None
-    assert json.loads(stored.response.body)["card"] == {"token": token}
-    assert json.loads(stored.response.body)["amount"] == 100
+    assert written.request.body == f"card[token]={token}&amount=100".encode()
+    assert written.request.query == f"api_key={redact.placeholder(key, QUERY_API_KEY)}"
+    assert written.request.header("authorization") == redact.placeholder(key, STRIPE_BEARER)
+    assert written.response is not None
+    assert json.loads(written.response.body)["card"] == {"token": token}
+    assert json.loads(written.response.body)["amount"] == 100
 
 
 def test_an_llm_request_stores_a_nested_live_key_and_a_token_key_as_placeholders_not_max_tokens(
-    home, tmp_path, monkeypatch, redact_stand_in, events_store
+    home, tmp_path, monkeypatch, redact_stand_in, stored
 ):
     """#69's JSON rules over a real live LLM call through the forward proxy. An `sk_live_` key three
     objects deep and a whole `token` key are placeholders on disk, `max_tokens` is not, and the
@@ -824,26 +864,27 @@ def test_an_llm_request_stores_a_nested_live_key_and_a_token_key_as_placeholders
         LLM_BODY,
         LLM_API_KEY,
     )
-    (ex,) = events_store().received
+    disk = stored()
+    (ex,) = disk.received
     assert (ex.kind, ex.answered_by, ex.request.body) == ("llm", "live", LLM_BODY)
 
-    key = redact.load_key(home)
-    disk = _assert_stored_as([ex], key, _placeholders(key, LLM_API_KEY, NESTED_KEY, LLM_TOKEN))
-    (stored,) = disk.received
-    assert json.loads(stored.request.body)["max_tokens"] == 1024
+    key = disk.key
+    hidden = _placeholders(key, LLM_API_KEY, NESTED_KEY, LLM_TOKEN)
+    (written,) = _assert_stored_as(disk, hidden)
+    assert json.loads(written.request.body)["max_tokens"] == 1024
     nested = redact.placeholder(key, NESTED_KEY)
-    assert json.loads(stored.request.body)["metadata"] == {"agent": {"env": {"key": nested}}}
-    assert stored.response is not None and nested.encode() in stored.response.body
+    assert json.loads(written.request.body)["metadata"] == {"agent": {"env": {"key": nested}}}
+    assert written.response is not None and nested.encode() in written.response.body
 
 
 def test_a_streamed_sse_answer_puts_no_live_key_on_disk_and_would_not_if_it_were_assembled(
-    home, tmp_path, monkeypatch, redact_stand_in, events_store
+    home, tmp_path, monkeypatch, redact_stand_in, stored
 ):
     """#69's text rule over a real `text/event-stream` answer. The agent reads the whole stream
     unredacted, both keys included. The engine streams it and records its body empty (#28's
-    trade), so nothing of it reaches disk today - and the stream the agent read, stored in its
-    place as #70 would store an assembled one, holds each key as its placeholder: the second key
-    too, which follows a JSON `\\n` escape inside the data line."""
+    trade), so nothing of it reaches disk today - and the stream the agent read, recorded into a
+    store of its own as #71 will record an assembled one, holds each key as its placeholder: the
+    second key too, which follows a JSON `\\n` escape inside the data line."""
     authority = f"127.0.0.1:{redact_stand_in}"
     (answer,) = _run_calls_under_shadow(
         tmp_path,
@@ -864,19 +905,19 @@ def test_a_streamed_sse_answer_puts_no_live_key_on_disk_and_would_not_if_it_were
         SSE_BODY,
         None,
     )
-    (ex,) = events_store().received
+    disk = stored()
+    (ex,) = disk.received
     assert (ex.kind, ex.answered_by) == ("llm", "live")
     assert ex.response is not None and ex.response.body == b""  # streamed, so never assembled
 
-    key = redact.load_key(home)
-    hidden = _placeholders(key, SSE_PLAIN_KEY, SSE_ESCAPED_KEY)
-    _assert_stored_as([ex], key, hidden)
+    hidden = _placeholders(disk.key, SSE_PLAIN_KEY, SSE_ESCAPED_KEY)
+    _assert_stored_as(disk, hidden)
     assembled = dataclasses.replace(ex, response=dataclasses.replace(ex.response, body=answer.body))
-    _assert_stored_as([assembled], key, hidden)
+    _assert_stored_as(_through_a_store(tmp_path / "assembled", disk.key, [assembled]), hidden)
 
 
 def test_a_live_reads_set_cookie_is_stored_as_a_placeholder_and_its_binary_body_unchanged(
-    home, tmp_path, monkeypatch, redact_stand_in, events_store
+    home, tmp_path, monkeypatch, redact_stand_in, stored
 ):
     """#69's response-header rule and its binary limitation over a real live read. The response's
     `Set-Cookie` is one placeholder on disk; its body is not UTF-8, so it is stored unscanned and
@@ -895,13 +936,12 @@ def test_a_live_reads_set_cookie_is_stored_as_a_placeholder_and_its_binary_body_
     )
     assert answer.header("irimi-answered-by") is None
     assert [(m, p) for m, p, _, _ in _RedactStandIn.seen] == [("GET", "/v1/session")]
-    (ex,) = events_store().received
+    disk = stored()
+    (ex,) = disk.received
     assert (ex.kind, ex.answered_by) == ("read", "live")
 
-    key = redact.load_key(home)
-    disk = _assert_stored_as([ex], key, _placeholders(key, SESSION_COOKIE))
-    (stored,) = disk.received
-    assert stored.response is not None
-    assert stored.response.header("set-cookie") == redact.placeholder(key, SESSION_COOKIE)
-    assert stored.response.body == BINARY_BODY
-    assert disk.blobs[trace.body_ref(BINARY_BODY).sha256] == BINARY_BODY
+    (written,) = _assert_stored_as(disk, _placeholders(disk.key, SESSION_COOKIE))
+    assert written.response is not None
+    assert written.response.header("set-cookie") == redact.placeholder(disk.key, SESSION_COOKIE)
+    assert written.response.body == BINARY_BODY
+    assert disk.blobs()[trace.body_ref(BINARY_BODY).sha256] == BINARY_BODY

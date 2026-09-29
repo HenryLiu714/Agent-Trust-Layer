@@ -641,7 +641,7 @@ def test_live_read_carries_no_fidelity_flag(engine, upstream):
     assert seen[0].flags == ()
 
 
-# ------------------------------------------- telemetry is never stored, and SSE streams (#8/#9)
+# ---------------------------------- telemetry is stored as a count only, and SSE streams (#8/#9)
 
 
 class _RecordingStore:
@@ -699,14 +699,31 @@ def _exchange(kind, answered_by="live"):
     )
 
 
-def test_telemetry_is_reported_but_never_recorded(tmp_path, monkeypatch):
-    """Forwarded in every mode, counted in its own bucket, and kept out of the trace store: a
-    recording of the agent's own observability traffic would re-emit someone else's events."""
-    store = _RecordingStore()
+def test_telemetry_is_reported_and_stored_only_as_having_happened(tmp_path, monkeypatch):
+    """Forwarded in every mode, counted in its own bucket, and stored only as having happened
+    (#70): one `TelemetrySeen` line with its host and time, so a stored run's summary can count
+    it, and never its request or response - a recording of the agent's own observability traffic
+    would re-emit someone else's events on replay. So no blob is written for its body."""
+    from dataclasses import replace
+
+    from irimi import redact
+    from irimi.store import DirectoryStore, StoreReader
+    from irimi.trace import TelemetrySeen
+
+    store = DirectoryStore(tmp_path / "store", redact.load_key(tmp_path))
     addon, seen = _addon(tmp_path, monkeypatch, store)
-    addon._finish(_exchange("telemetry"))
-    assert store.recorded == []
+    envelope = _exchange("telemetry")
+    envelope = replace(envelope, request=replace(envelope.request, body=b"an envelope"))
+    envelope = replace(envelope, started_at=1.5, ended_at=2.0)
+    addon._finish(envelope)
+    store.close()
     assert [ex.kind for ex in seen] == ["telemetry"]
+    stored = StoreReader(tmp_path / "store").load_run("t3st")
+    assert stored.events == [
+        TelemetrySeen(run_id="t3st", host="o0.ingest.sentry.io", started_at=1.5)
+    ]
+    assert stored.record.attribution == "header"
+    assert not (tmp_path / "store" / "blobs").exists()
 
 
 @pytest.mark.parametrize("kind", ["read", "write", "llm", "unknown"])

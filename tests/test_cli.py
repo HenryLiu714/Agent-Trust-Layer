@@ -134,17 +134,20 @@ def test_engine_config_carries_the_maps():
 
 def test_the_composition_root_builds_the_service_overlay_over_the_run_s_maps():
     """The overlay classifies a read against the same maps the engine does (#43): a second index
-    would let the two disagree about which service a read belongs to."""
+    would let the two disagree about which service a read belongs to. The engine records into the
+    store `_prepare_run` opened, the one `irimi shadow` starts and ends its run in (#70)."""
     from irimi.overlay import ServiceOverlay
+    from irimi.store import NullStore
 
     index = _shipped_index()
     args = argparse.Namespace(allow_host=[], port=4321)
     p = ca.ca_paths()
-    run = cli._Run(index, p, "t3st", cli._engine_config(args, index, "t3st", p))
+    run = cli._Run(index, p, "t3st", cli._engine_config(args, index, "t3st", p), NullStore())
     engine = cli._build_engine(run, on_exchange=lambda ex: None)
     assert isinstance(engine.overlay, ServiceOverlay)
     assert engine.overlay.maps is run.config.maps
     assert engine.overlay.maps is index
+    assert engine.store is run.store
 
 
 def test_engine_config_defaults_to_no_maps(tmp_path, monkeypatch):

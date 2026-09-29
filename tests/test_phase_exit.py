@@ -438,10 +438,10 @@ call("POST", "/v1/refunds", refund)
 """
 
 
-def _run_phase2_under_shadow(tmp_path, monkeypatch) -> None:
+def _run_phase2_under_shadow(tmp_path, monkeypatch, *flags: str) -> None:
     """The refund agent's five calls from a child of the real `irimi shadow`, against the loopback
-    Stripe, which never hears a write. Shared with `tests/test_trace_e2e.py`, which runs it with
-    the store swapped (#68)."""
+    Stripe, which never hears a write. `flags` go before the `--`. Shared with
+    `tests/test_trace_e2e.py`, which reads back what the run stored (#68, #70)."""
     _PreconditionStub.seen = []
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _PreconditionStub)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
@@ -456,7 +456,7 @@ def _run_phase2_under_shadow(tmp_path, monkeypatch) -> None:
         .replace("__AMOUNT__", str(PHASE2_AMOUNT))
     )
     try:
-        assert main(["shadow", "--port", "0", "--", sys.executable, str(child)]) == 0
+        assert main(["shadow", "--port", "0", *flags, "--", sys.executable, str(child)]) == 0
     finally:
         srv.shutdown()
     assert [m for m, _ in _PreconditionStub.seen if m != "GET"] == []

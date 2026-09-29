@@ -65,7 +65,7 @@ def test_child_receives_proxy_env(home, capsys):
 
     assert env["IRIMI_ENGINE_ACTIVE"] == "1"
     run_id = env["IRIMI_RUN"]
-    assert len(run_id) == 4
+    assert len(run_id) == 16  # a directory name in the store, unique across months of runs (#70)
     assert all(c in "0123456789abcdef" for c in run_id)
     assert env["NO_PROXY"] == "localhost,127.0.0.1"
     assert env["HTTPS_PROXY"].startswith("http://127.0.0.1:")
@@ -273,3 +273,26 @@ def test_the_banner_says_when_a_target_left_the_machine(home, capsys):
 def test_no_delegated_service_leaves_the_banner_alone(home, capsys):
     assert main(["shadow", *_py("pass")]) == 0
     assert "delegated:" not in capsys.readouterr().out
+
+
+def test_a_redaction_key_irimi_did_not_write_stops_shadow_with_one_line(home, capsys):
+    """A run that could not redact what it stores must not start (#69, #70): one `error:` line,
+    exit 1, no traceback, and the child never runs."""
+    (home / paths.REDACT_KEY_NAME).write_bytes(b"short")
+    marker = home / "ran"
+    assert main(["shadow", *_py(f"open({str(marker)!r}, 'w')")]) == 1
+    err = capsys.readouterr().err.strip().splitlines()
+    assert len(err) == 1 and err[0].startswith("error: ") and "32" in err[0]
+    assert not marker.exists()
+
+
+def test_a_store_that_cannot_be_written_stops_shadow_with_one_line(home, tmp_path, capsys):
+    """A store that would drop every event behind one warning must not start a run that looks
+    recorded (#70)."""
+    not_a_dir = tmp_path / "a-file"
+    not_a_dir.write_text("")
+    marker = home / "ran"
+    assert main(["shadow", "--store", str(not_a_dir), *_py(f"open({str(marker)!r}, 'w')")]) == 1
+    err = capsys.readouterr().err.strip().splitlines()
+    assert len(err) == 1 and err[0].startswith("error: ")
+    assert not marker.exists()

@@ -12,12 +12,13 @@ and handles each `app_mention` as one run (`@sdk.trigger on_mention`):
 A mention that says "incident" first opens a top-level incident message and replies under THAT
 message's `ts`, so the read-back asks about a thread this run minted (#52).
 
-The server delivers its own events over loopback with a proxy-less opener: an inbound webhook is not
-the agent's egress, and irimi must never see it. Each delivery is signed as Slack signs it and the
+The agent delivers its own events over loopback, through no proxy: an inbound webhook is not the
+agent's egress, and irimi must never see it. Each delivery is signed as Slack signs it and the
 handler verifies it. Slack retries a slow delivery with `X-Slack-Retry-Num`; the bot dedupes on
 `event_id`, so a retry is acknowledged and not handled twice.
 
-    python -m examples.workflows.w04_slack_ops_bot.agent <scenario>
+    python -m examples.workflows.launch \\
+        examples.workflows.w04_slack_ops_bot.agent <scenario>
 """
 
 from __future__ import annotations
@@ -29,9 +30,6 @@ import os
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from examples.workflows import agentkit, sdk
@@ -74,7 +72,7 @@ def on_mention(event: dict[str, Any]) -> None:
         "files.upload", channels=channel, filename="status.csv", content="svc,ok\napi,1\n"
     )
     hook = agentkit.base("slack_hooks") + agentkit.key("SLACK_WEBHOOK_PATH")
-    agentkit.http("POST", hook, json_body={"text": f"ops bot answered {name}"}, label="webhook")
+    agentkit.http("POST", hook, json_body={"text": f"ops bot answered {name}"})
     if not posted.get("ok"):
         return
     # Read back where Slack said the reply went, as an agent would.
@@ -91,21 +89,12 @@ def on_mention(event: dict[str, Any]) -> None:
 
 
 def _ask_llm(text: str, author: str, thread_len: int) -> str:
-    body = {
-        "model": "claude-sonnet-5",
-        "max_tokens": 256,
-        "system": "You are the ops bot. Answer in one sentence.",
-        "messages": [{"role": "user", "content": f"{author} ({thread_len} in thread): {text}"}],
-    }
-    headers = {"x-api-key": agentkit.key("ANTHROPIC_API_KEY"), "anthropic-version": "2023-06-01"}
-    resp = agentkit.http(
-        "POST",
-        agentkit.base("anthropic") + "/v1/messages",
-        json_body=body,
-        headers=headers,
-        label="llm",
+    message = agentkit.anthropic(
+        "You are the ops bot. Answer in one sentence.",
+        [{"role": "user", "content": f"{author} ({thread_len} in thread): {text}"}],
+        max_tokens=256,
     )
-    return agentkit.text_of(resp.json() or {}) or "(no answer)"
+    return agentkit.text_of(message) or "(no answer)"
 
 
 def _check(what: str, doc: dict[str, Any]) -> None:
@@ -114,15 +103,15 @@ def _check(what: str, doc: dict[str, Any]) -> None:
         _failures.append(f"{what}: {doc.get('error')}")
 
 
-class Events(BaseHTTPRequestHandler):
+class _Events(agentkit.Handler):
     def do_POST(self) -> None:
         raw = self.rfile.read(int(self.headers.get("content-length") or 0))
         if self.path != "/slack/events" or not _verified(raw, self.headers):
-            self._answer(401, {"error": "bad signature"})
+            self.reply(401, {"error": "bad signature"})
             return
         payload = json.loads(raw)
         if payload.get("type") == "url_verification":
-            self._answer(200, {"challenge": payload["challenge"]})
+            self.reply(200, {"challenge": payload["challenge"]})
             return
         with _seen_lock:
             duplicate = payload["event_id"] in _seen_events
@@ -134,19 +123,15 @@ class Events(BaseHTTPRequestHandler):
             duplicate=duplicate,
         )
         if not duplicate and payload["event"]["type"] == "app_mention":
-            on_mention(payload["event"])
-        self._answer(200, {"ok": True})
-
-    def _answer(self, status: int, doc: dict[str, Any]) -> None:
-        body = json.dumps(doc).encode()
-        self.send_response(status)
-        self.send_header("content-type", "application/json")
-        self.send_header("content-length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, format: str, *args: Any) -> None:
-        pass
+            try:
+                on_mention(payload["event"])
+            except Exception as exc:
+                # A handler that raised answers 500, as a web framework would, and fails the
+                # run's exit code. Left to escape, it would drop the connection with no answer.
+                _failures.append(f"on_mention: {type(exc).__name__}: {exc}")
+                self.reply(500, {"ok": False})
+                return
+        self.reply(200, {"ok": True})
 
 
 def _signature(raw: bytes, ts: str) -> str:
@@ -162,23 +147,14 @@ def _verified(raw: bytes, headers: Any) -> bool:
 
 
 def _deliver(port: int, payload: dict[str, Any], retry: int | None = None) -> dict[str, Any]:
-    """Send one event to our own server, signed, the way Slack would: not through any proxy."""
+    """Send one event to our own server, signed the way Slack signs it."""
     raw = json.dumps(payload).encode()
     ts = str(int(time.time()))
-    headers = {
-        "Content-Type": "application/json",
-        "X-Slack-Request-Timestamp": ts,
-        "X-Slack-Signature": _signature(raw, ts),
-    }
+    headers = {"X-Slack-Request-Timestamp": ts, "X-Slack-Signature": _signature(raw, ts)}
     if retry is not None:
         headers["X-Slack-Retry-Num"] = str(retry)
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    req = urllib.request.Request(f"http://127.0.0.1:{port}/slack/events", raw, headers)
-    try:
-        with opener.open(req, timeout=30) as resp:
-            return {"status": resp.status, **json.loads(resp.read())}
-    except urllib.error.HTTPError as err:
-        return {"status": err.code}
+    resp = agentkit.deliver(port, "/slack/events", raw, headers)
+    return {"status": resp.status, **resp.json()} if resp.ok else {"status": resp.status}
 
 
 def mention(event_id: str, channel: str, text: str) -> dict[str, Any]:
@@ -212,10 +188,8 @@ def main(argv: list[str]) -> int:
     if len(argv) != 1 or argv[0] not in SCENARIOS:
         print(f"usage: agent.py {{{','.join(SCENARIOS)}}}", file=sys.stderr)
         return 2
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Events)
-    threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01), daemon=True).start()
-    answers = [_deliver(server.server_address[1], p, retry) for p, retry in SCENARIOS[argv[0]]]
-    server.shutdown()
+    with agentkit.serve(_Events) as port:
+        answers = [_deliver(port, payload, retry) for payload, retry in SCENARIOS[argv[0]]]
     agentkit.obs("result", scenario=argv[0], answers=answers, failures=_failures)
     return 1 if _failures else 0
 

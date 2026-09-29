@@ -11,7 +11,8 @@
 Upstream streams are read a few bytes at a time on purpose, so every SSE event is split across
 reads and the parser has to reassemble it (`sse_events`).
 
-    python -m examples.workflows.w07_streaming_assistant.agent <question> {read_all,hang_up}
+    python -m examples.workflows.launch \\
+        examples.workflows.w07_streaming_assistant.agent <question> {read_all,hang_up}
 
 The agent delivers the question to itself over loopback. `hang_up` makes that caller reset the
 connection after the first event, the way a closed browser tab does. Exit codes: 0 answered,
@@ -29,13 +30,12 @@ import threading
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import urlsplit
 
 from examples.workflows import agentkit, sdk
 
 READ_SIZE = 7  # deliberately small: every event straddles several reads
+ANSWERED_BY = "Irimi-Answered-By"
 EXIT = {"ok": 0, "client_gone": 3, "upstream_broke": 4}
 POST_SUMMARY = {
     "type": "function",
@@ -71,26 +71,27 @@ def sse_events(chunks: Iterator[bytes]) -> Iterator[tuple[str | None, str]]:
 def stream_post(
     url: str, body: dict[str, Any], headers: dict[str, str], label: str
 ) -> Iterator[bytes]:
-    """POST and yield the response body as it arrives. A read that fails mid-body is logged as a
-    `stream_error` and raised as `UpstreamBroke`."""
+    """POST and yield the response body as it arrives. A stream that never opens (an error status,
+    or no answer at all) or fails mid-body is logged and raised as `UpstreamBroke`, so the caller
+    is told and the run ends as a broken upstream rather than a crash in the handler thread."""
     request = urllib.request.Request(
         url,
         data=json.dumps(body).encode(),
         method="POST",
         headers={**headers, "Content-Type": "application/json"},
     )
-    parts = urlsplit(url)
-    where = f"{parts.hostname}{parts.path}"
-    raw = urllib.request.urlopen(request, timeout=agentkit.timeout())
-    agentkit.obs(
-        "http",
-        method="POST",
-        url=where,
-        label=label,
-        status=raw.status,
-        answered_by=raw.headers.get("Irimi-Answered-By"),
-        run=sdk.current_run_id(),
-    )
+    try:
+        raw = urllib.request.urlopen(request, timeout=agentkit.timeout())
+    except urllib.error.HTTPError as err:
+        err.close()
+        answered_by = err.headers.get(ANSWERED_BY)
+        agentkit.obs_http("POST", url, label, status=err.code, answered_by=answered_by)
+        raise UpstreamBroke(f"{label}: HTTP {err.code}") from err
+    except (OSError, http.client.HTTPException) as exc:
+        agentkit.obs_http("POST", url, label, error=type(exc).__name__)
+        raise UpstreamBroke(f"{label}: {type(exc).__name__}") from exc
+    answered_by = raw.headers.get(ANSWERED_BY)
+    agentkit.obs_http("POST", url, label, status=raw.status, answered_by=answered_by)
     with raw:
         while True:
             try:
@@ -181,7 +182,7 @@ def chat(question: str, send: Callable[[str, dict[str, Any]], None]) -> dict[str
     return {"answer": answer, "dims": dims, "decision": decision, "posted": posted}
 
 
-class _Chat(BaseHTTPRequestHandler):
+class _Chat(agentkit.Handler):
     protocol_version = "HTTP/1.0"
     outcome: dict[str, Any] = {}
     finished = threading.Event()
@@ -212,9 +213,6 @@ class _Chat(BaseHTTPRequestHandler):
                 pass
         finally:
             _Chat.finished.set()
-
-    def log_message(self, format: str, *args: Any) -> None:
-        pass
 
 
 def call_self(port: int, question: str, hang_up: bool) -> list[tuple[str | None, str]]:
@@ -257,19 +255,14 @@ def main(argv: list[str]) -> int:
         print("usage: agent.py <question> {read_all,hang_up}", file=sys.stderr)
         return 2
     question, how = argv
-    from examples.workflows.w07_streaming_assistant import agent as importable
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), importable._Chat)
-    threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01), daemon=True).start()
-    try:
-        events = call_self(server.server_address[1], question, how == "hang_up")
-        importable._Chat.finished.wait(60)
-    except (OSError, urllib.error.URLError) as exc:
-        events = [("caller_error", type(exc).__name__)]
-    finally:
-        server.shutdown()
+    with agentkit.serve(_Chat) as port:
+        try:
+            events = call_self(port, question, how == "hang_up")
+            _Chat.finished.wait(60)
+        except OSError as exc:  # URLError is an OSError
+            events = [("caller_error", type(exc).__name__)]
     received = "".join(json.loads(d)["text"] for n, d in events if n == "delta")
-    outcome = importable._Chat.outcome
+    outcome = _Chat.outcome
     agentkit.obs(
         "result",
         caller_events=[n for n, _ in events],

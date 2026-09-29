@@ -2,10 +2,11 @@
 
 A workflow's agent calls the real host names (`api.stripe.com`, `slack.com`, `api.anthropic.com`),
 so irimi classifies them with its real, shipped maps. Only the address those names resolve to is
-fake, and it is fake in exactly one place: `FakeInternet.resolving()` patches `socket.getaddrinfo`
-in the process that runs irimi, so mitmproxy's upstream connection and irimi's own L3 read both
-land here. Any name the fake internet does not serve fails to resolve, so a harness run can never
-reach the real internet.
+fake, and it is fake in exactly one place: `FakeInternet.resolving()` patches the resolver in the
+process that runs irimi, so mitmproxy's upstream connection and irimi's own L3 read both land here.
+It patches all three of the socket module's name lookups (`getaddrinfo`, `gethostbyname`,
+`gethostbyname_ex`) under one rule, so no path in that process resolves a real name. Any name the
+fake internet does not serve fails to resolve, so a harness run can never reach the real internet.
 
 The agent itself never resolves these names:
 
@@ -15,6 +16,10 @@ The agent itself never resolves these names:
 
 Every request is recorded in `log` before it is answered. A write that reaches `log` under shadow
 is a write that escaped, and that is the first universal invariant (`run.check_invariants`).
+
+What the name patch cannot stop: a client that dials an IP literal need not ask the resolver
+(asyncio short-cuts literals), so it is refused here only when it does ask. Nothing in a workflow
+dials a public IP; a scenario that needs one needs a guard of its own.
 """
 
 from __future__ import annotations
@@ -37,6 +42,9 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # How long a `stall` fault holds a request before answering. Agents under test use a shorter
 # client timeout, so a stall reads to them as a timeout.
 STALL_S = 2.0
+# The listen backlog. socketserver's default of 5 drops connections from W3's concurrent runs on
+# macOS, where a dropped SYN is retried a second later and reads as a flaky timeout.
+BACKLOG = 128
 
 
 @dataclass(frozen=True)
@@ -139,8 +147,7 @@ class FakeInternet:
         class Handler(_Handler):
             owner = internet
 
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self._server.daemon_threads = True
+        self._server = _Server(("127.0.0.1", 0), Handler)
         server = self._server
         threading.Thread(
             target=lambda: server.serve_forever(poll_interval=0.01), daemon=True
@@ -166,22 +173,45 @@ class FakeInternet:
     def resolving(self) -> Iterator[None]:
         """Resolve every host this fake internet serves to loopback, and refuse every other name,
         for the duration of the block and in this process only."""
-        real = socket.getaddrinfo
+        # One rule for every lookup, so no path through the socket module resolves a real name
+        # (#89): `localhost` and a loopback or unspecified literal go to the real resolver, which
+        # answers them without DNS; a served name is loopback; everything else, a public IP
+        # literal included, is refused.
+        real_getaddrinfo = socket.getaddrinfo
+        real_gethostbyname = socket.gethostbyname
+        real_gethostbyname_ex = socket.gethostbyname_ex
         served = frozenset(self.services)
 
-        def fake(host: Any, port: Any, *args: Any, **kwargs: Any) -> Any:
+        def route(host: Any) -> bool:
+            """True to pass `host` to the real resolver, False to answer loopback; raises for a
+            name the fake internet does not serve."""
             name = host.decode() if isinstance(host, bytes) else host
-            if name is None or _is_local(name):
-                return real(host, port, *args, **kwargs)
+            if not isinstance(name, str) or _is_loopback(name):
+                return True  # None, or a type the real function refuses itself
             if name.lower().rstrip(".") in served:
-                return real("127.0.0.1", port, *args, **kwargs)
+                return False
             raise socket.gaierror(socket.EAI_NONAME, f"{name} is not on the fake internet")
 
-        socket.getaddrinfo = fake
+        def getaddrinfo(host: Any, port: Any, *args: Any, **kwargs: Any) -> Any:
+            if route(host):
+                return real_getaddrinfo(host, port, *args, **kwargs)
+            return real_getaddrinfo("127.0.0.1", port, *args, **kwargs)
+
+        def gethostbyname(host: Any) -> Any:
+            return real_gethostbyname(host) if route(host) else "127.0.0.1"
+
+        def gethostbyname_ex(host: Any) -> Any:
+            return real_gethostbyname_ex(host) if route(host) else (host, [], ["127.0.0.1"])
+
+        socket.getaddrinfo = getaddrinfo
+        socket.gethostbyname = gethostbyname
+        socket.gethostbyname_ex = gethostbyname_ex
         try:
             yield
         finally:
-            socket.getaddrinfo = real
+            socket.getaddrinfo = real_getaddrinfo
+            socket.gethostbyname = real_gethostbyname
+            socket.gethostbyname_ex = real_gethostbyname_ex
 
     # -- what happened ---------------------------------------------------------------------
 
@@ -199,10 +229,15 @@ class FakeInternet:
             return [r for r in self.log if host is None or r.host == host]
 
     def writes(self) -> list[Req]:
-        """Every request the service it reached counts as a write."""
+        """Every request the service it reached counts as a write. A request for a host no fake
+        serves counts as one unless its method is safe: an unknown write is still a write."""
         with self._lock:
             log = list(self.log)
-        return [r for r in log if r.host in self.services and self.services[r.host].is_write(r)]
+        return [r for r in log if self._is_write(r)]
+
+    def _is_write(self, req: Req) -> bool:
+        service = self.services.get(req.host)
+        return req.method not in SAFE_METHODS if service is None else service.is_write(req)
 
     # -- serving ---------------------------------------------------------------------------
 
@@ -240,14 +275,21 @@ class FakeInternet:
         return resp, action
 
 
-def _is_local(name: str) -> bool:
+def _is_loopback(name: str) -> bool:
+    """`localhost`, or a loopback or unspecified address: what irimi binds and dials locally. Any
+    other IP literal is refused like any unserved name, so a public address never resolves."""
     if name.lower() == "localhost":
         return True
     try:
-        ipaddress.ip_address(name.split("%", 1)[0])
+        ip = ipaddress.ip_address(name.split("%", 1)[0])
     except ValueError:
         return False
-    return True
+    return ip.is_loopback or ip.is_unspecified
+
+
+class _Server(ThreadingHTTPServer):
+    daemon_threads = True
+    request_queue_size = BACKLOG
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -268,7 +310,13 @@ class _Handler(BaseHTTPRequestHandler):
         return self.rfile.read(length) if length else b""
 
     def _serve(self) -> None:
-        body = self._read_body()
+        # A request whose body cannot be read is still recorded, without the body: a write that
+        # reached a fake service with a broken body still reached it.
+        try:
+            body = self._read_body()
+        except (OSError, ValueError):
+            body = b""
+            self.close_connection = True
         target = self.path
         via_proxy = target.startswith(("http://", "https://"))
         if via_proxy:

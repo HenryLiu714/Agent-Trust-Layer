@@ -12,7 +12,8 @@ A helpdesk POSTs a ticket to `/tickets`. `handle_ticket` is the trigger: it runs
 The system prompt is picked by `PROMPT` (a named variant), so editing the prompt changes what the
 scripted model does: this is the agent use case 1's replay diverges on (#84, #85).
 
-    python -m examples.workflows.w01_ticket_triage.agent <ticket_id> <charge> <customer> <message>
+    python -m examples.workflows.launch \\
+        examples.workflows.w01_ticket_triage.agent <ticket_id> <charge> <customer> <message>
 
 The agent serves `/tickets` on loopback and delivers the one ticket to itself, as a helpdesk
 would. It exits 0 when the ticket was handled and 1 when the handler failed.
@@ -22,23 +23,20 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import sys
-import threading
-import urllib.error
-import urllib.request
 from dataclasses import asdict, dataclass
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from examples.workflows import agentkit, sdk
 
 MAX_TURNS = 6
+DB_NAME = "helpdesk.sqlite3"
 PROMPTS = {
     "full": "You are a refund agent. Refund the full remaining amount of a disputed charge.",
     "half": "You are a refund agent. Refund half of the remaining amount of a disputed charge.",
     "too_large": "You are a refund agent. Refund double the charge amount as goodwill.",
     "double": "You are a refund agent. Refund in full, then refund again to be sure.",
+    "retry": "You are a refund agent. Refund in full, and send the refund twice in case one drops.",
     "runaway": "You are a refund agent. Keep checking the charge until it changes.",
 }
 TOOLS = [
@@ -57,16 +55,19 @@ class Ticket:
     message: str
 
 
-def _db() -> sqlite3.Connection:
-    conn = sqlite3.connect(agentkit.state_dir() / "helpdesk.sqlite3")
-    conn.execute("CREATE TABLE IF NOT EXISTS customers (id TEXT PRIMARY KEY, name TEXT, tier TEXT)")
-    conn.execute("CREATE TABLE IF NOT EXISTS replies (ticket_id TEXT, body TEXT)")
-    return conn
+def seed(customer: str) -> None:
+    """The helpdesk database as the agent finds it. Setup, not a tool: it happens in both modes."""
+    with agentkit.sqlite(DB_NAME) as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS customers (id TEXT PRIMARY KEY, name TEXT, tier TEXT)"
+        )
+        conn.execute("CREATE TABLE IF NOT EXISTS replies (ticket_id TEXT, body TEXT)")
+        conn.execute("INSERT OR IGNORE INTO customers VALUES (?, ?, ?)", (customer, "Ada", "gold"))
 
 
 @sdk.tool(kind="read")
 def lookup_customer(customer: str) -> dict[str, Any]:
-    with _db() as conn:
+    with agentkit.sqlite(DB_NAME) as conn:
         row = conn.execute(
             "SELECT id, name, tier FROM customers WHERE id = ?", (customer,)
         ).fetchone()
@@ -79,7 +80,7 @@ def _reply_stand_in(ticket_id: str, body: str) -> dict[str, Any]:
 
 @sdk.tool(kind="write", shadow=_reply_stand_in)
 def send_reply(ticket_id: str, body: str) -> dict[str, Any]:
-    with _db() as conn:
+    with agentkit.sqlite(DB_NAME) as conn:
         conn.execute("INSERT INTO replies VALUES (?, ?)", (ticket_id, body))
     return {"sent": True}
 
@@ -95,14 +96,23 @@ def run_tool(ticket: Ticket, turn: int, name: str, args: dict[str, Any]) -> str:
     if name == "lookup_customer":
         return _tool_result(name, body=lookup_customer(args["customer"]))
     if name == "issue_refund":
-        headers = {}
-        if os.environ.get("IDEMPOTENCY", "on") == "on":
-            headers["Idempotency-Key"] = f"{ticket.ticket_id}-turn{turn}"
+        # One key per turn: a call the model repeats within a turn is the same refund, sent again,
+        # and Stripe (or irimi's idempotency store, #46) answers it once. A refund asked for in a
+        # later turn is a new request with a new key.
+        headers = {"Idempotency-Key": f"{ticket.ticket_id}-turn{turn}"}
         form = {"charge": args["charge"], "amount": str(args["amount"])}
         resp = agentkit.stripe(
             "POST", "/v1/refunds", form, headers=headers, label=f"issue_refund#{turn}"
         )
-        return _tool_result(name, status=resp.status, body=resp.json())
+        body = resp.json()
+        agentkit.obs(
+            "refund",
+            turn=turn,
+            status=resp.status,
+            id=body.get("id") if isinstance(body, dict) else None,
+            replayed=resp.headers.get("idempotent-replayed"),
+        )
+        return _tool_result(name, status=resp.status, body=body)
     if name == "send_reply":
         return _tool_result(name, body=send_reply(ticket.ticket_id, args["body"]))
     return _tool_result(name, error="unknown tool")
@@ -116,7 +126,7 @@ def handle_ticket(ticket: Ticket) -> dict[str, Any]:
     ]
     refunds: list[int] = []
     for turn in range(1, MAX_TURNS + 1):
-        reply = agentkit.anthropic(system, messages, tools=TOOLS)
+        reply = agentkit.anthropic(system, messages, tools=TOOLS, label=f"llm#{turn}")
         messages.append({"role": "assistant", "content": reply["content"]})
         if reply["stop_reason"] != "tool_use":
             return {"turns": turn, "refund_statuses": refunds, "final": agentkit.text_of(reply)}
@@ -132,7 +142,7 @@ def handle_ticket(ticket: Ticket) -> dict[str, Any]:
     raise RuntimeError(f"ticket {ticket.ticket_id}: no answer after {MAX_TURNS} turns")
 
 
-class _Helpdesk(BaseHTTPRequestHandler):
+class _Helpdesk(agentkit.Handler):
     def do_POST(self) -> None:
         body = json.loads(self.rfile.read(int(self.headers["content-length"])))
         ticket = Ticket(
@@ -146,15 +156,7 @@ class _Helpdesk(BaseHTTPRequestHandler):
             status, payload = 200, {"ok": True, **outcome}
         except Exception as exc:
             status, payload = 500, {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-        data = json.dumps(payload).encode()
-        self.send_response(status)
-        self.send_header("content-type", "application/json")
-        self.send_header("content-length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    def log_message(self, format: str, *args: Any) -> None:
-        pass
+        self.reply(status, payload)
 
 
 def main(argv: list[str]) -> int:
@@ -163,30 +165,14 @@ def main(argv: list[str]) -> int:
         print("usage: agent.py <ticket_id> <charge> <customer> <message>", file=sys.stderr)
         return 2
     ticket_id, charge, customer, message = argv
-    with _db() as conn:
-        conn.execute("INSERT OR IGNORE INTO customers VALUES (?, ?, ?)", (customer, "Ada", "gold"))
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _Helpdesk)
-    threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01), daemon=True).start()
-    # A Zendesk-shaped webhook, delivered straight to the handler: inbound, so never proxied.
+    seed(customer)
+    # A Zendesk-shaped webhook, delivered to our own handler.
     event = {
         "ticket": {"id": ticket_id, "charge": charge, "description": message},
         "requester": customer,
     }
-    request = urllib.request.Request(
-        f"http://127.0.0.1:{server.server_address[1]}/tickets",
-        data=json.dumps(event).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    try:
-        with opener.open(request, timeout=60) as resp:
-            answer = json.loads(resp.read())
-    except urllib.error.HTTPError as err:
-        answer = json.loads(err.read())
-    finally:
-        server.shutdown()
+    with agentkit.serve(_Helpdesk) as port:
+        answer = agentkit.deliver(port, "/tickets", json.dumps(event).encode()).json()
     agentkit.obs("result", **answer)
     return 0 if answer["ok"] else 1
 

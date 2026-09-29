@@ -102,6 +102,12 @@ WORKFLOW = Workflow(
             ),
             doc="Anthropic resets after the first event of its stream",
         ),
+        "reset_before_stream": Scenario(
+            (QUESTION, "read_all"),
+            setup=_world,
+            faults=(("api.anthropic.com", "reset", lambda req: req.path == "/v1/messages", 1),),
+            doc="Anthropic resets before its stream opens",
+        ),
         "tool_call_across_deltas": Scenario(
             ("Please post a summary of refunds", "read_all"),
             setup=_splitting,

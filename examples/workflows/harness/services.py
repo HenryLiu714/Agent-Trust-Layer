@@ -17,7 +17,7 @@ import re
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from examples.workflows.harness.internet import SAFE_METHODS, Req, Resp, json_error
@@ -129,7 +129,9 @@ class FakeStripe:
                             "Keys for idempotent requests can only be used with the same "
                             "parameters they were first used with.",
                         )
-                    return held[1]
+                    # Stripe marks a replay so a client can tell it from a second write.
+                    first = held[1]
+                    return replace(first, headers={**first.headers, "idempotent-replayed": "true"})
                 resp = self._route(req)
                 self.idempotency[key] = (fingerprint, resp)
                 return resp
@@ -253,7 +255,19 @@ class FakeStripe:
 
 # -- Slack ----------------------------------------------------------------------------------------
 
-SLACK_WRITES = frozenset({"/api/chat.postMessage", "/api/reactions.add", "/api/files.upload"})
+# The Web API methods the fake treats as reads. Every other method is a write, including one the
+# fake does not implement (`chat.delete`, `chat.update`): a Slack call is always a POST, so only a
+# named read can be told apart, and an unnamed method that escaped must trip invariant 1.
+SLACK_READS = frozenset(
+    {
+        "/api/auth.test",
+        "/api/conversations.history",
+        "/api/conversations.info",
+        "/api/conversations.list",
+        "/api/conversations.replies",
+        "/api/users.info",
+    }
+)
 
 
 class FakeSlack:
@@ -291,7 +305,9 @@ class FakeSlack:
         self.users[user_id] = {"id": user_id, "name": name, "real_name": name.title(), **fields}
 
     def is_write(self, req: Req) -> bool:
-        return req.path in SLACK_WRITES or req.host == "hooks.slack.com"
+        if req.host == "files.slack.com":  # file downloads: an ordinary HTTP host
+            return req.method not in SAFE_METHODS
+        return req.host == "hooks.slack.com" or req.path not in SLACK_READS
 
     def handle(self, req: Req) -> Resp:
         with self._lock:

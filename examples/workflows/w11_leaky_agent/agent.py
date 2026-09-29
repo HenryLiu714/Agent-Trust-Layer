@@ -5,7 +5,8 @@
 code ends up off that route. Under shadow every escape's write really lands on the fake service.
 These are the cases Phase 4's readiness checks exist to flag.
 
-    python -m examples.workflows.w11_leaky_agent.agent <escape>
+    python -m examples.workflows.launch \\
+        examples.workflows.w11_leaky_agent.agent <escape>
 
 Safety: no escape ever resolves a real host name. A client that bypasses the proxy resolves the
 name itself, so this agent resolves the fake internet's names to 127.0.0.1 (`_local_dns`) and
@@ -25,7 +26,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from typing import Any
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlencode
 
 from examples.workflows import agentkit
 
@@ -35,7 +36,8 @@ SERVED = frozenset({"api.stripe.com", "slack.com"})
 
 
 def port() -> int:
-    return int(os.environ["WORKFLOW_INTERNET_PORT"])
+    """The fake internet's port, which a raw socket dials by number."""
+    return int(os.environ[agentkit.PORT_ENV])
 
 
 @contextlib.contextmanager
@@ -69,16 +71,8 @@ def _send(opener: urllib.request.OpenerDirector, label: str, url: str, **kw: Any
             raw.read()
     except urllib.error.HTTPError as err:
         status, headers = err.code, err.headers
-    parts = urlsplit(url)
-    agentkit.obs(
-        "http",
-        method=request.get_method(),
-        url=f"{parts.hostname}{parts.path}",
-        label=label,
-        status=status,
-        answered_by=headers.get("Irimi-Answered-By"),
-        run=None,
-    )
+    answered_by = headers.get("Irimi-Answered-By")
+    agentkit.obs_http(request.get_method(), url, label, status=status, answered_by=answered_by)
     return status
 
 
@@ -140,16 +134,12 @@ def raw_socket() -> None:
         reply = b""
         while chunk := sock.recv(65536):
             reply += chunk
-    status = int(reply.split(b" ", 2)[1])
-    agentkit.obs(
-        "http",
-        method="POST",
-        url="slack.com/api/chat.postMessage",
-        label="post",
-        status=status,
-        answered_by=None,
-        run=None,
-    )
+    head_lines = reply.split(b"\r\n\r\n", 1)[0].decode("latin-1").split("\r\n")
+    status = int(head_lines[0].split(" ", 2)[1])
+    fields = dict(line.split(":", 1) for line in head_lines[1:] if ":" in line)
+    answered_by = {k.strip().lower(): v.strip() for k, v in fields.items()}.get("irimi-answered-by")
+    url = f"http://slack.com:{port()}/api/chat.postMessage"
+    agentkit.obs_http("POST", url, "post", status=status, answered_by=answered_by)
 
 
 def loopback_service() -> None:
@@ -157,7 +147,7 @@ def loopback_service() -> None:
     `NO_PROXY=localhost,127.0.0.1`, so the default configuration sends this straight to it."""
     agentkit.http(
         "POST",
-        f"http://127.0.0.1:{port()}/queue/jobs",
+        agentkit.internal("127.0.0.1") + "/queue/jobs",
         json_body={"job": "refund", "charge": CHARGE},
         label="enqueue",
     )

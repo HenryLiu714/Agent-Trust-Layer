@@ -3,10 +3,12 @@
 `sync_payouts` reads recent charges, asks the model which one to refund, refunds it, and tells
 Slack. Every call retries on a 429, a 5xx or no answer at all, with a short backoff, and a write
 carries an Idempotency-Key so its retry is the same write. The scenarios break one thing each: a
-rate-limited read, a server error, a stalled read, a reset on the write, a model that answers
-prose, an agent that raises or is killed after its write, and a write retried with no key.
+rate-limited read, a server error, a stalled read, a reset on a read and on the write, irimi's own
+L3 read failing, a model that answers prose, an agent that raises or is killed after its write,
+and a write retried with no key.
 
-    python -m examples.workflows.w10_flaky_upstream.agent \\
+    python -m examples.workflows.launch \\
+        examples.workflows.w10_flaky_upstream.agent \\
         [--no-key] [--raise-after-write] [--sigterm-after-write]
 
 What it is for: a shadow run is only as good as the failures it shows. A failed READ reaches the
@@ -19,7 +21,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import signal
 import sys
 import time
@@ -52,7 +53,8 @@ def retrying(label: str, call: Callable[[], Response]) -> Response:
             if resp.status not in RETRY_STATUSES:
                 return resp
             agentkit.obs("retry", label=label, attempt=attempt, reason=resp.status)
-        time.sleep(BACKOFF_S * attempt)
+        if attempt < ATTEMPTS:
+            time.sleep(BACKOFF_S * attempt)
     raise RuntimeError(f"{label}: gave up after {ATTEMPTS} attempts")
 
 
@@ -101,16 +103,6 @@ def sync_payouts(use_key: bool, raise_after_write: bool, sigterm_after_write: bo
         text=f"refunded {decision['amount']} on {form['charge']}",
     )
     return str(refund_id)
-
-
-def script(call: Any) -> Any:
-    """The scripted model for every scenario but `malformed_llm`: refund 5.00 on the first
-    charge the prompt names."""
-    from examples.workflows.harness.services import LlmTurn
-
-    found = re.search(r"ch_[A-Za-z0-9]+", call.last_user_text())
-    decision = {"refund": found.group(0) if found else None, "amount": 500, "note": "duplicate"}
-    return LlmTurn(text=json.dumps(decision))
 
 
 def main(argv: list[str]) -> int:

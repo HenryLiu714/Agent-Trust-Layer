@@ -10,13 +10,13 @@ of its own, which must join the parent run rather than start one (#74):
 The orchestrator then reserves the stock (`POST /reservations`, a write) unless it could not price
 it. The internal service is the point: irimi has no map for it unless the scenario adds one.
 
-    python -m examples.workflows.w08_orchestrator.agent [--runs N] [--parent-header]
+    python -m examples.workflows.launch \\
+        examples.workflows.w08_orchestrator.agent [--runs N] [--parent-header]
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from typing import Any
 
@@ -25,15 +25,6 @@ from examples.workflows.agentkit import http
 
 SUBAGENT_HOST = "subagent.internal"
 BUDGET_MINOR = 10_000
-
-
-def subagent_base() -> str:
-    """The internal service's base URL: `SUBAGENT_API_BASE`, or its name on the fake internet's
-    port (`WORKFLOW_INTERNET_PORT`), which is where the harness serves it."""
-    explicit = os.environ.get("SUBAGENT_API_BASE")
-    if explicit:
-        return explicit
-    return f"http://{SUBAGENT_HOST}:{os.environ.get('WORKFLOW_INTERNET_PORT', '80')}"
 
 
 def _headers(parent_header: bool) -> dict[str, str]:
@@ -46,15 +37,15 @@ def _headers(parent_header: bool) -> dict[str, str]:
 
 @sdk.trigger(name="inventory_agent")
 def inventory_agent(parent_header: bool) -> dict[str, Any]:
-    stock = http(
-        "GET", subagent_base() + "/inventory", headers=_headers(parent_header), label="inventory"
-    ).json()
+    service = agentkit.internal(SUBAGENT_HOST)
+    headers = _headers(parent_header)
+    stock = http("GET", service + "/inventory", headers=headers, label="inventory").json()
     items = [i for i in (stock or {}).get("items", []) if i.get("qty", 0) > 0]
     quote = http(
         "POST",
-        subagent_base() + "/quote",
+        service + "/quote",
         json_body={"skus": [i["sku"] for i in items]},
-        headers=_headers(parent_header),
+        headers=headers,
         label="quote",
     ).json()
     agentkit.obs("quote", doc=quote)
@@ -82,7 +73,7 @@ def plan_quarter_close(parent_header: bool = False) -> dict[str, Any]:
     else:
         resp = http(
             "POST",
-            subagent_base() + "/reservations",
+            agentkit.internal(SUBAGENT_HOST) + "/reservations",
             json_body={"skus": [i["sku"] for i in stock["items"]], "total": total},
             headers=_headers(parent_header),
             label="reserve",

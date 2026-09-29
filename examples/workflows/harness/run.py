@@ -26,8 +26,11 @@ import os
 import pkgutil
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
+import tempfile
+from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,6 +38,9 @@ from typing import Any
 
 from examples.workflows.harness.internet import FakeInternet, Req
 from examples.workflows.harness.services import World
+from irimi import ca, runner
+from irimi.cli import main as irimi_main
+from irimi.servicemap import loader
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 WORKFLOWS_DIR = REPO_ROOT / "examples" / "workflows"
@@ -52,6 +58,11 @@ CANARIES = {
 }
 MODES = ("bare", "shadow")
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy")
+# The only variables an agent inherits from the harness's own environment. Everything else it is
+# given by name, so a developer's shell cannot change a run: an exported `IRIMI_ENGINE_ACTIVE=1`
+# would turn a bare run's write tools into stand-ins, and an exported `PROMPT` or
+# `SLACK_POST_CHANNEL` would change what an agent sends.
+INHERITED_ENV = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "TZ", "SYSTEMROOT")
 
 
 @dataclass(frozen=True)
@@ -91,25 +102,69 @@ class Result:
     irimi: list[str]  # every line irimi printed (shadow only)
     world: World
     internet: FakeInternet
-    home: Path
-    state: Path
+    home: Path  # IRIMI_HOME
+    state: Path  # the agent's own files (WORKFLOW_STATE)
+    cwd: Path  # the working directory of irimi (shadow) and of the agent
+    tmp: Path  # TMPDIR, and `tempfile`'s directory in this process during a shadow run
 
-    def events(self, event: str) -> list[dict[str, Any]]:
-        return [o for o in self.obs if o["event"] == event]
+    def events(self, event: str, *, with_time: bool = True) -> list[dict[str, Any]]:
+        """Every `event` the agent logged, in order. `with_time=False` drops each one's
+        timestamp, so events from two runs compare equal when only their time differs."""
+        found = [o for o in self.obs if o["event"] == event]
+        return found if with_time else [{k: v for k, v in o.items() if k != "t"} for o in found]
+
+    def one(self, event: str) -> dict[str, Any]:
+        """The one `event` the agent logged. Raises if it logged none, or more than one."""
+        found = self.events(event)
+        if len(found) != 1:
+            raise AssertionError(f"expected one {event!r} event, got {len(found)}: {found}")
+        return found[0]
+
+    def result(self, *, with_time: bool = True) -> dict[str, Any] | None:
+        """The agent's final `result` event, if it logged one."""
+        found = self.events("result", with_time=with_time)
+        return found[-1] if found else None
 
     def calls(self, label: str | None = None) -> list[dict[str, Any]]:
+        """The agent's HTTP calls (`http` events), in order: all of them, or those with `label`."""
         return [o for o in self.events("http") if label is None or o.get("label") == label]
 
-    def answered(self) -> list[tuple[str, str, Any, Any]]:
-        """`(method, host+path, status, Irimi-Answered-By)` per call the agent made, in order."""
+    def answered(self) -> list[tuple[str, Any, Any]]:
+        """`(label, status, Irimi-Answered-By)` per call, in order. An unlabelled call is named by
+        its host and path; a call with no answer has status None."""
         return [
-            (c["method"], c["url"], c.get("status"), c.get("answered_by")) for c in self.calls()
+            (c.get("label") or c["url"], c.get("status"), c.get("answered_by"))
+            for c in self.calls()
         ]
 
-    def result(self) -> dict[str, Any] | None:
-        """The agent's final `result` event, if it logged one."""
-        found = self.events("result")
-        return found[-1] if found else None
+    def by_label(self) -> dict[str, tuple[Any, Any]]:
+        """`{label: (status, Irimi-Answered-By)}`, one entry per call. Raises if a call has no
+        label or shares one, because then the dict could not hold every call."""
+        found: dict[str, tuple[Any, Any]] = {}
+        for c in self.calls():
+            if not c.get("label") or c["label"] in found:
+                raise AssertionError(f"{c['method']} {c['url']}: no label of its own")
+            found[c["label"]] = (c.get("status"), c.get("answered_by"))
+        return found
+
+    def by_run(self) -> dict[str | None, list[str | None]]:
+        """`{run id: [label, ...]}` over the calls, each run's in order; None holds the calls
+        that belonged to no run."""
+        found: dict[str | None, list[str | None]] = {}
+        for c in self.calls():
+            found.setdefault(c.get("run"), []).append(c.get("label"))
+        return found
+
+    def tools(self, kind: str | None = None) -> list[tuple[str, str]]:
+        """`(tool name, which body ran)` per `@sdk.tool` call, in order: all, or one `kind`'s."""
+        return [
+            (t["name"], t["ran"]) for t in self.events("tool") if kind is None or t["kind"] == kind
+        ]
+
+    def query(self, db: str, sql: str) -> list[tuple[Any, ...]]:
+        """Rows from the agent's own SQLite file `db`, in its state directory."""
+        with contextlib.closing(sqlite3.connect(self.state / db)) as conn:
+            return conn.execute(sql).fetchall()
 
     def exchange_lines(self) -> list[str]:
         """irimi's per-exchange lines: `<answered_by> <kind> <METHOD> <host><path> -> <status>`."""
@@ -142,8 +197,8 @@ def run(workflow: Workflow, scenario_name: str, mode: str, workdir: Path) -> Res
         raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
     scenario = workflow.scenarios[scenario_name]
     workdir.mkdir(parents=True, exist_ok=True)
-    home, state, cwd = workdir / "home", workdir / "state", workdir / "cwd"
-    for d in (home, state, cwd):
+    home, state, cwd, tmp = (workdir / d for d in ("home", "state", "cwd", "tmp"))
+    for d in (home, state, cwd, tmp):
         d.mkdir(exist_ok=True)
     obs_path = workdir / "obs.jsonl"
     obs_path.write_text("")
@@ -153,38 +208,29 @@ def run(workflow: Workflow, scenario_name: str, mode: str, workdir: Path) -> Res
         scenario.setup(world)
     internet = FakeInternet(world.services())
     internet.start()
-    for host, action, match, times in scenario.faults:
-        internet.inject(host, action, match, times)
-
-    env = _agent_env(internet, state, obs_path, home)
-    env.update(scenario.env)
-    cmd = [sys.executable, "-m", "examples.workflows.launch", workflow.module, *scenario.argv]
     irimi_out: list[str] = []
     try:
+        for host, action, match, times in scenario.faults:
+            internet.inject(host, action, match, times)
+        env = _agent_env(internet, state, obs_path, home, tmp)
+        env.update(scenario.env)
+        cmd = [sys.executable, "-m", "examples.workflows.launch", workflow.module, *scenario.argv]
         if mode == "bare":
-            env.update(
-                {
-                    "HTTP_PROXY": f"http://127.0.0.1:{internet.port}",
-                    "http_proxy": f"http://127.0.0.1:{internet.port}",
-                    "NO_PROXY": "127.0.0.1,localhost",
-                    "no_proxy": "127.0.0.1,localhost",
-                }
-            )
-            returncode = subprocess.run(cmd, env=env, cwd=cwd, timeout=180, check=False).returncode
-            # The shell's spelling of a signal, as `irimi shadow` reports its child's exit.
-            code = 128 - returncode if returncode < 0 else returncode
+            code = _run_bare(cmd, env, cwd, internet)
         else:
-            code, irimi_out = _run_shadow(cmd, env, cwd, home, internet, scenario, workdir)
+            code, irimi_out = _run_shadow(cmd, env, cwd, tmp, internet, scenario, workdir)
     finally:
         internet.stop()
     obs = [json.loads(line) for line in obs_path.read_text().splitlines() if line.strip()]
-    return Result(workflow, scenario_name, mode, code, obs, irimi_out, world, internet, home, state)
+    return Result(
+        workflow, scenario_name, mode, code, obs, irimi_out, world, internet, home, state, cwd, tmp
+    )
 
 
-def _agent_env(internet: FakeInternet, state: Path, obs_path: Path, home: Path) -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if k not in PROXY_VARS}
-    env.pop("NO_PROXY", None)
-    env.pop("no_proxy", None)
+def _agent_env(
+    internet: FakeInternet, state: Path, obs_path: Path, home: Path, tmp: Path
+) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if k in INHERITED_ENV or k.startswith("LC_")}
     env.update(CANARIES)
     env.update(
         {
@@ -197,34 +243,54 @@ def _agent_env(internet: FakeInternet, state: Path, obs_path: Path, home: Path) 
             "WORKFLOW_STATE": str(state),
             "WORKFLOW_OBS": str(obs_path),
             "WORKFLOW_HTTP_TIMEOUT": "5",
-            "PYTHONPATH": os.pathsep.join([str(REPO_ROOT), env.get("PYTHONPATH", "")]).rstrip(
-                os.pathsep
-            ),
+            "PYTHONPATH": str(REPO_ROOT),
             "PYTHONUNBUFFERED": "1",
             "IRIMI_HOME": str(home),
+            "TMPDIR": str(tmp),
         }
     )
     return env
+
+
+def _run_bare(cmd: list[str], env: dict[str, str], cwd: Path, internet: FakeInternet) -> int:
+    """The agent as a plain subprocess. Every proxy variable names the fake internet, so a client
+    that honours any of them never dials a real address: an `https://` URL gets the fake's refusal
+    of `CONNECT`, not a real TLS connection."""
+    proxy = f"http://127.0.0.1:{internet.port}"
+    env = {**env, **dict.fromkeys(PROXY_VARS, proxy)}
+    env["NO_PROXY"] = env["no_proxy"] = runner.NO_PROXY_VALUE  # as `irimi shadow` sets it
+    returncode = subprocess.run(cmd, env=env, cwd=cwd, timeout=180, check=False).returncode
+    return runner.exit_code_for(returncode)
 
 
 def _run_shadow(
     cmd: list[str],
     env: dict[str, str],
     cwd: Path,
-    home: Path,
+    tmp: Path,
     internet: FakeInternet,
     scenario: Scenario,
     workdir: Path,
 ) -> tuple[int, list[str]]:
-    from irimi import ca
-    from irimi.cli import main
-    from irimi.servicemap import loader
+    """`irimi shadow -- <agent>` in this process, as a user would run it from `cwd`.
 
+    irimi's L3 read is urllib in this process. With no proxy variable set, urllib on macOS falls
+    back to the system's proxy settings, which would carry the read (and its canary credential)
+    past the fake names to a real proxy. `no_proxy=*` keeps it direct. irimi overwrites both
+    spellings for its child, so the agent still sees exactly irimi's `NO_PROXY`.
+    """
     buf = io.StringIO()
-    with _environ(env), _chdir(cwd), _maps(scenario, workdir, loader), internet.resolving():
+    harness_env = {**env, "NO_PROXY": "*", "no_proxy": "*"}
+    with (
+        _environ(harness_env),
+        contextlib.chdir(cwd),
+        _tempdir(tmp),
+        _maps(scenario, workdir),
+        internet.resolving(),
+    ):
         ca.generate_ca(ca.ca_paths())
         with contextlib.redirect_stdout(buf):
-            code = main(["shadow", "--port", "0", "--", *cmd])
+            code = irimi_main(["shadow", "--port", "0", "--", *cmd])
     return code, buf.getvalue().splitlines()
 
 
@@ -241,17 +307,18 @@ def _environ(env: dict[str, str]) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def _chdir(path: Path) -> Iterator[None]:
-    saved = Path.cwd()
-    os.chdir(path)
+def _tempdir(path: Path) -> Iterator[None]:
+    """`tempfile`'s directory in this process: it reads TMPDIR once and caches it."""
+    saved = tempfile.tempdir
+    tempfile.tempdir = str(path)
     try:
         yield
     finally:
-        os.chdir(saved)
+        tempfile.tempdir = saved
 
 
 @contextlib.contextmanager
-def _maps(scenario: Scenario, workdir: Path, loader: Any) -> Iterator[None]:
+def _maps(scenario: Scenario, workdir: Path) -> Iterator[None]:
     """The shipped maps, plus the scenario's own, read from a directory of this run's."""
     if not scenario.extra_maps:
         yield
@@ -275,9 +342,16 @@ def _maps(scenario: Scenario, workdir: Path, loader: Any) -> Iterator[None]:
 
 def check_invariants(shadow: Result, bare: Result | None = None) -> list[str]:
     """What every shadow run owes, whatever the workflow. Returns the broken ones, worded."""
-    assert shadow.mode == "shadow"
+    if shadow.mode != "shadow":
+        raise ValueError(f"check_invariants takes a shadow run, not a {shadow.mode} one")
     scenario = shadow.workflow.scenarios[shadow.scenario]
     problems = []
+    # Invariant 1 watches the fake internet, so it holds only if irimi's upstream IS the fake
+    # internet. A live answer the agent saw that no fake served came from somewhere else, and a
+    # write sent there would pass invariant 1 unseen.
+    unserved = _live_answers_not_served(shadow)
+    if unserved:
+        problems.append(f"1. the agent saw live answers no fake service gave: {unserved}")
     writes = shadow.internet.writes()
     if not scenario.leaks and writes:
         problems.append(
@@ -297,14 +371,34 @@ def check_invariants(shadow: Result, bare: Result | None = None) -> list[str]:
     ]
     if real_writes:
         problems.append(f"3. a write tool ran for real: {real_writes}")
-    leaked = _canaries_under(shadow.home)
+    leaked = [
+        found for root in (shadow.home, shadow.cwd, shadow.tmp) for found in _canaries_under(root)
+    ]
     if leaked:
-        problems.append(f"4. a canary reached disk under irimi's home: {leaked}")
+        problems.append(f"4. a canary reached disk where irimi writes: {leaked}")
     if bare is not None and not scenario.diverges and bare.exit_code != shadow.exit_code:
         problems.append(
             f"5. the agent exited {shadow.exit_code} under shadow but {bare.exit_code} bare"
         )
     return problems
+
+
+def _live_answers_not_served(result: Result) -> list[str]:
+    """Each call the agent saw answered live (no `Irimi-Answered-By`) by a host the fake internet
+    serves, and that the fake internet has no matching request for."""
+    received = Counter((r.method, f"{r.host}{r.path}") for r in result.internet.requests())
+    missing = []
+    for call in result.calls():
+        host = str(call["url"]).split("/", 1)[0]
+        live = call.get("status") is not None and call.get("answered_by") is None
+        if not live or host not in result.internet.services:
+            continue
+        key = (call["method"], call["url"])
+        if received[key]:
+            received[key] -= 1
+        else:
+            missing.append(f"{call['method']} {call['url']}")
+    return missing
 
 
 def _canaries_under(root: Path) -> list[str]:
@@ -313,7 +407,5 @@ def _canaries_under(root: Path) -> list[str]:
     for path in root.rglob("*"):
         if path.is_file():
             data = path.read_bytes()
-            found += [
-                f"{name} in {path.relative_to(root)}" for name, v in needles.items() if v in data
-            ]
+            found += [f"{name} in {path}" for name, v in needles.items() if v in data]
     return found

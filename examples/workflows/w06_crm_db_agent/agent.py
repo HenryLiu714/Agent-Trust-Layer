@@ -5,7 +5,8 @@ mock_database_write() to be called using the same parameters during mock runs". 
 and filesystem write here is an `@sdk.tool(kind="write", shadow=...)`, so under `irimi shadow` the
 stand-in runs and the real body never does. Reads are `@sdk.tool(kind="read")` and run for real.
 
-    python -m examples.workflows.w06_crm_db_agent.agent <scenario> [segment]
+    python -m examples.workflows.launch \\
+        examples.workflows.w06_crm_db_agent.agent <scenario> [segment]
 
 Seeding the CRM on first run is setup, not a tool: it happens in both modes, before the trigger.
 Tools carry explicit, short names (`crm.find_accounts`), the way a developer would name the
@@ -26,6 +27,7 @@ from typing import Any
 from examples.workflows import agentkit, sdk
 
 DB_NAME = "crm.sqlite3"
+SCENARIOS = ("enrich", "read_after_write", "unlabeled_write", "tool_raises", "decoration_errors")
 STALE_BEFORE = "2025-06-01"
 SEED = [
     ("acc_1", "Acme", "smb", "2026-01-01", 0, None),
@@ -34,14 +36,10 @@ SEED = [
 ]
 
 
-def db() -> sqlite3.Connection:
-    return sqlite3.connect(agentkit.state_dir() / DB_NAME)
-
-
 def seed() -> None:
     if (agentkit.state_dir() / DB_NAME).exists():
         return
-    with db() as conn:
+    with agentkit.sqlite(DB_NAME) as conn:
         conn.execute(
             "CREATE TABLE accounts (id TEXT PRIMARY KEY, name TEXT, segment TEXT,"
             " last_seen TEXT, score INTEGER, industry TEXT)"
@@ -54,7 +52,7 @@ def seed() -> None:
 
 @sdk.tool(kind="read", name="crm.find_accounts")
 def find_accounts(segment: str) -> list[dict[str, Any]]:
-    with db() as conn:
+    with agentkit.sqlite(DB_NAME) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute("SELECT * FROM accounts WHERE segment = ? ORDER BY id", (segment,))
         return [dict(r) for r in rows]
@@ -63,8 +61,8 @@ def find_accounts(segment: str) -> list[dict[str, Any]]:
 @sdk.tool(kind="read", name="crm.fetch_enrichment")
 def fetch_enrichment(account_id: str) -> dict[str, Any]:
     """A read tool that makes an HTTP call inside it: recorded as an ordinary exchange (#76)."""
-    enrich = agentkit.base("stripe").replace("api.stripe.com", "enrich.internal")
-    resp = agentkit.http("GET", f"{enrich}/v1/companies/{account_id}", label="enrichment")
+    url = agentkit.internal("enrich.internal") + f"/v1/companies/{account_id}"
+    resp = agentkit.http("GET", url, label="enrichment")
     return resp.json() or {}
 
 
@@ -97,7 +95,7 @@ def _upsert_stand_in(account: dict[str, Any]) -> dict[str, Any]:
 
 @sdk.tool(kind="write", shadow=_upsert_stand_in, name="crm.upsert_account")
 def upsert_account(account: dict[str, Any]) -> dict[str, Any]:
-    with db() as conn:
+    with agentkit.sqlite(DB_NAME) as conn:
         conn.execute(
             "INSERT OR REPLACE INTO accounts VALUES (:id, :name, :segment, :last_seen, :score,"
             " :industry)",
@@ -112,7 +110,7 @@ def _delete_stand_in(cutoff: str) -> int:
 
 @sdk.tool(kind="write", shadow=_delete_stand_in, name="crm.delete_stale")
 def delete_stale(cutoff: str) -> int:
-    with db() as conn:
+    with agentkit.sqlite(DB_NAME) as conn:
         return conn.execute("DELETE FROM accounts WHERE last_seen < ?", (cutoff,)).rowcount
 
 
@@ -123,7 +121,7 @@ def _bulk_stand_in(scores: dict[str, int]) -> int:
 @sdk.tool(kind="write", shadow=_bulk_stand_in, name="crm.bulk_update")
 def bulk_update(scores: dict[str, int]) -> int:
     """One transaction: all rows or none."""
-    with db() as conn:
+    with agentkit.sqlite(DB_NAME) as conn:
         conn.executemany(
             "UPDATE accounts SET score = ? WHERE id = ?", [(s, i) for i, s in scores.items()]
         )
@@ -159,7 +157,7 @@ async def notify_owner(account_id: str, message: str) -> dict[str, Any]:
 
 def _touch_last_seen(account_id: str) -> None:
     """A write with no label. irimi cannot see it, so it happens under shadow too."""
-    with db() as conn:
+    with agentkit.sqlite(DB_NAME) as conn:
         conn.execute("UPDATE accounts SET last_seen = '2026-09-28' WHERE id = ?", (account_id,))
 
 
@@ -188,6 +186,8 @@ def enrich_accounts(scenario: str, segment: str) -> dict[str, Any]:
         return {}
     connect_with(f"postgres://crm:{agentkit.key('STRIPE_API_KEY')}@db.internal/crm")
     accounts = find_accounts(segment)
+    if not accounts:
+        return {"accounts": 0}
     scores = {}
     for account in accounts:
         extra = fetch_enrichment(account["id"])
@@ -221,11 +221,14 @@ def decoration_errors() -> list[str]:
     def gen(x: int) -> Any:
         yield x
 
+    not_callable: Any = "mock_database_write"
     mistakes = {
         "write_without_shadow": lambda: sdk.tool(kind="write")(real),
         "read_with_shadow": lambda: sdk.tool(kind="read", shadow=real)(real),
         "bad_kind": lambda: sdk.tool(kind="delete", shadow=real)(real),
+        "stand_in_not_callable": lambda: sdk.tool(kind="write", shadow=not_callable)(real),
         "sync_stand_in_for_async": lambda: sdk.tool(kind="write", shadow=real)(real_async),
+        "async_stand_in_for_sync": lambda: sdk.tool(kind="write", shadow=real_async)(real),
         "generator": lambda: sdk.tool(kind="read")(gen),
     }
     raised = []
@@ -240,7 +243,10 @@ def decoration_errors() -> list[str]:
 
 def main(argv: list[str]) -> int:
     agentkit.start()
-    scenario = argv[0] if argv else "enrich"
+    if not 1 <= len(argv) <= 2 or argv[0] not in SCENARIOS:
+        print(f"usage: agent.py {{{','.join(SCENARIOS)}}} [segment]", file=sys.stderr)
+        return 2
+    scenario = argv[0]
     segment = argv[1] if len(argv) > 1 else "smb"
     seed()
     if scenario == "decoration_errors":

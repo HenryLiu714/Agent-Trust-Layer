@@ -60,7 +60,7 @@ def test_irimis_own_no_proxy_default_exempts_a_loopback_sidecar(run_workflow):
 def test_the_control_through_the_proxy_is_faked_and_the_ledger_is_untouched(run_workflow):
     shadow = run_workflow(W, "proxied", "shadow")
     assert shadow.internet.writes() == []
-    assert [(c["status"], c["answered_by"]) for c in shadow.calls()] == [(200, "fake-L1")]
+    assert shadow.answered() == [("refund", 200, "fake-L1")]
     assert shadow.world.stripe.charges[CHARGE]["amount_refunded"] == 0
     assert "fake-L1   write     POST api.stripe.com/v1/refunds -> 200  [fidelity:L1]" in (
         shadow.exchange_lines()

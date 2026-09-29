@@ -5,8 +5,6 @@ and from the state directory itself: the SQLite CRM and the files the write tool
 irimi does not see tool calls yet; the assertions on its output flip when #76 records them.
 """
 
-import sqlite3
-
 from examples.workflows.w06_crm_db_agent.agent import DB_NAME, SEED
 
 W = "w06_crm_db_agent"
@@ -21,23 +19,16 @@ WRITE_TOOLS = [
 
 
 def rows(result):
-    with sqlite3.connect(result.state / DB_NAME) as conn:
-        return conn.execute("SELECT * FROM accounts ORDER BY id").fetchall()
+    return result.query(DB_NAME, "SELECT * FROM accounts ORDER BY id")
 
 
 def files(result):
     return sorted(str(p.relative_to(result.state)) for p in result.state.rglob("*") if p.is_file())
 
 
-def tools(result, kind=None):
-    return [
-        (t["name"], t["ran"]) for t in result.events("tool") if kind is None or t["kind"] == kind
-    ]
-
-
 def test_under_shadow_every_write_tool_runs_its_stand_in_and_the_crm_is_as_seeded(run_workflow):
     shadow = run_workflow(W, "enrich", "shadow")
-    assert tools(shadow, "write") == [(name, "shadow") for name in WRITE_TOOLS]
+    assert shadow.tools("write") == [(name, "shadow") for name in WRITE_TOOLS]
     assert rows(shadow) == SEED
     assert files(shadow) == ["crm.sqlite3"]
     # The stand-ins' answers are what the agent reported, not the real bodies'.
@@ -48,7 +39,7 @@ def test_under_shadow_every_write_tool_runs_its_stand_in_and_the_crm_is_as_seede
 
 def test_bare_the_same_calls_really_change_the_crm_and_write_files(run_workflow):
     bare = run_workflow(W, "enrich", "bare")
-    assert tools(bare, "write") == [(name, "real") for name in WRITE_TOOLS]
+    assert bare.tools("write") == [(name, "real") for name in WRITE_TOOLS]
     assert rows(bare) == [
         ("acc_1", "Acme", "smb", "2026-01-01", 87, "manufacturing"),
         ("acc_3", "Initech", "enterprise", "2026-06-01", 0, None),
@@ -60,8 +51,8 @@ def test_bare_the_same_calls_really_change_the_crm_and_write_files(run_workflow)
 def test_read_tools_run_for_real_in_both_modes_and_the_call_sequence_is_the_same(run_workflow):
     bare = run_workflow(W, "enrich", "bare")
     shadow = run_workflow(W, "enrich", "shadow")
-    assert [n for n, _ in tools(bare)] == [n for n, _ in tools(shadow)]
-    assert {ran for _, ran in tools(shadow, "read")} == {"real"}
+    assert [n for n, _ in bare.tools()] == [n for n, _ in shadow.tools()]
+    assert {ran for _, ran in shadow.tools("read")} == {"real"}
     # Decimal and datetime came back from the read tool as themselves: not JSON, not revivable
     # once recorded, so a replay (#83) must run `score_account` for real.
     assert {tuple(e["types"]) for e in shadow.events("scored")} == {("Decimal", "datetime")}
@@ -116,7 +107,9 @@ def test_each_decoration_time_mistake_raises_type_error(run_workflow):
         "write_without_shadow",
         "read_with_shadow",
         "bad_kind",
+        "stand_in_not_callable",
         "sync_stand_in_for_async",
+        "async_stand_in_for_sync",
         "generator",
     ]
     assert (

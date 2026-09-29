@@ -15,10 +15,11 @@ On `charge.dispute.created` it:
 On `charge.refunded` it does nothing: a refund it issued comes back to it as an event, and an
 idempotent consumer notes it and stops. Every event id is handled once, however often it arrives.
 
-The server delivers its own events over loopback with a proxy-less opener: an inbound webhook is
-not the agent's egress, and irimi must never see it.
+The agent delivers its own events over loopback, through no proxy: an inbound webhook is not the
+agent's egress, and irimi must never see it.
 
-    python -m examples.workflows.w05_dispute_responder.agent <scenario>
+    python -m examples.workflows.launch \\
+        examples.workflows.w05_dispute_responder.agent <scenario>
 """
 
 from __future__ import annotations
@@ -29,9 +30,6 @@ import json
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from examples.workflows import agentkit, sdk
@@ -40,6 +38,7 @@ DISPUTES_CHANNEL = "C0DISPUTES"
 REFUND_UNDER = 2000  # minor units: disputes under $20 are refunded, not fought
 BIG = "dp_BIG"
 SMALL = "dp_SMALL"
+SCENARIOS = ("over_threshold", "under_threshold", "cascade", "bad_signature", "replayed_event")
 
 _handled: set[str] = set()
 _lock = threading.Lock()
@@ -98,40 +97,32 @@ def _respond(dispute_id: str) -> str:
 
 
 def _draft_evidence(dispute: dict[str, Any], customer: dict[str, Any]) -> str:
-    body = {
-        "model": "claude-sonnet-5",
-        "max_tokens": 512,
-        "system": "Draft dispute evidence for a card network. Two sentences.",
-        "messages": [
-            {"role": "user", "content": f"reason={dispute['reason']} customer={customer['email']}"}
-        ],
-    }
-    headers = {"x-api-key": agentkit.key("ANTHROPIC_API_KEY"), "anthropic-version": "2023-06-01"}
-    url = agentkit.base("anthropic") + "/v1/messages"
-    resp = agentkit.http("POST", url, json_body=body, headers=headers, label="llm")
-    return agentkit.text_of(resp.json() or {})
+    message = agentkit.anthropic(
+        "Draft dispute evidence for a card network. Two sentences.",
+        [{"role": "user", "content": f"reason={dispute['reason']} customer={customer['email']}"}],
+        max_tokens=512,
+        label="llm",
+    )
+    return agentkit.text_of(message)
 
 
-class Webhook(BaseHTTPRequestHandler):
+class _Webhook(agentkit.Handler):
     def do_POST(self) -> None:
         raw = self.rfile.read(int(self.headers.get("content-length") or 0))
         signature = self.headers.get("Stripe-Signature") or ""
         if self.path != "/stripe/webhook" or not _verified(raw, signature):
             agentkit.obs("rejected", reason="bad signature")
-            self._answer(400, {"error": "bad signature"})
+            self.reply(400, {"error": "bad signature"})
             return
-        self._answer(200, {"received": True, "outcome": on_event(raw, signature)})
-
-    def _answer(self, status: int, doc: dict[str, Any]) -> None:
-        body = json.dumps(doc).encode()
-        self.send_response(status)
-        self.send_header("content-type", "application/json")
-        self.send_header("content-length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, format: str, *args: Any) -> None:
-        pass
+        try:
+            outcome = on_event(raw, signature)
+        except Exception as exc:
+            # A handler that raised answers 500, which Stripe retries and `main` counts as a
+            # failure. Left to escape, it would drop the connection with no answer.
+            agentkit.obs("handler_failed", error=f"{type(exc).__name__}: {exc}")
+            self.reply(500, {"received": False})
+            return
+        self.reply(200, {"received": True, "outcome": outcome})
 
 
 def _sign(raw: bytes, secret: str, t: int) -> str:
@@ -149,17 +140,11 @@ def _verified(raw: bytes, header: str) -> bool:
 
 
 def _deliver(port: int, event: dict[str, Any], secret: str | None = None) -> dict[str, Any]:
-    """POST one event to our own server, signed as Stripe signs it, not through any proxy."""
+    """POST one event to our own server, signed the way Stripe signs it."""
     raw = json.dumps(event).encode()
     signature = _sign(raw, secret or agentkit.key("STRIPE_WEBHOOK_SECRET"), int(time.time()))
-    headers = {"Content-Type": "application/json", "Stripe-Signature": signature}
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    req = urllib.request.Request(f"http://127.0.0.1:{port}/stripe/webhook", raw, headers)
-    try:
-        with opener.open(req, timeout=30) as resp:
-            return {"status": resp.status, **json.loads(resp.read())}
-    except urllib.error.HTTPError as err:
-        return {"status": err.code}
+    resp = agentkit.deliver(port, "/stripe/webhook", raw, {"Stripe-Signature": signature})
+    return {"status": resp.status, **resp.json()} if resp.ok else {"status": resp.status}
 
 
 def dispute_created(dispute_id: str) -> dict[str, Any]:
@@ -181,27 +166,25 @@ def charge_refunded(refund: dict[str, Any]) -> dict[str, Any]:
 
 def main(argv: list[str]) -> int:
     agentkit.start()
-    scenarios = ("over_threshold", "under_threshold", "cascade", "bad_signature", "replayed_event")
-    if len(argv) != 1 or argv[0] not in scenarios:
-        print(f"usage: agent.py {{{','.join(scenarios)}}}", file=sys.stderr)
+    if len(argv) != 1 or argv[0] not in SCENARIOS:
+        print(f"usage: agent.py {{{','.join(SCENARIOS)}}}", file=sys.stderr)
         return 2
     scenario = argv[0]
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Webhook)
-    threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01), daemon=True).start()
-    port = server.server_address[1]
     dispute = BIG if scenario == "over_threshold" else SMALL
     secret = "whsec_not_the_real_one" if scenario == "bad_signature" else None
-    answers = [_deliver(port, dispute_created(dispute), secret)]
-    if scenario == "replayed_event":
-        answers.append(_deliver(port, dispute_created(dispute)))
-    if scenario == "cascade":
-        # In production Stripe would now send `charge.refunded` for the refund. Under shadow the
-        # refund never happened, so that event never comes: this delivers the one it would have
-        # been, built from irimi's answer, to prove the consumer would not loop on it.
-        answers += [_deliver(port, charge_refunded(r)) for r in _refunds]
-    server.shutdown()
+    with agentkit.serve(_Webhook) as port:
+        answers = [_deliver(port, dispute_created(dispute), secret)]
+        if scenario == "replayed_event":
+            answers.append(_deliver(port, dispute_created(dispute)))
+        if scenario == "cascade":
+            # In production Stripe would now send `charge.refunded` for the refund. Under shadow
+            # the refund never happened, so that event never comes: this delivers the one it
+            # would have been, built from irimi's answer, to prove the consumer would not loop.
+            answers += [_deliver(port, charge_refunded(r)) for r in _refunds]
     agentkit.obs("result", scenario=scenario, answers=answers)
-    return 0 if all(a["status"] == 200 for a in answers) or scenario == "bad_signature" else 1
+    # A forged event must be refused; every other delivery must be accepted.
+    expected = 400 if scenario == "bad_signature" else 200
+    return 0 if all(a["status"] == expected for a in answers) else 1
 
 
 if __name__ == "__main__":

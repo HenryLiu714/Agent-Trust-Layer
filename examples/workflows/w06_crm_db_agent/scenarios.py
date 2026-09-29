@@ -46,7 +46,7 @@ WORKFLOW = Workflow(
         ),
         "decoration_errors": Scenario(
             ("decoration_errors",),
-            doc="#76's five decoration-time TypeErrors, raised before any call",
+            doc="each of #76's decoration-time TypeErrors, raised before any call",
         ),
     },
 )

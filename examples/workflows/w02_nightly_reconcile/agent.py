@@ -5,7 +5,8 @@ local SQLite ledger, and for each mismatch tags the Stripe customer (`metadata[r
 marks the ledger row reconciled. It ends with one Slack summary. This is use case 0 at volume: the
 baseline report has to say what forty writes in one run would have done.
 
-    python -m examples.workflows.w02_nightly_reconcile.agent --date 2026-09-27 \\
+    python -m examples.workflows.launch \\
+        examples.workflows.w02_nightly_reconcile.agent --date 2026-09-27 \\
         [--charges 45] [--mismatches 40] [--datetime-trigger] [--twice] [--refund-then-page]
 
 The ledger is seeded by the agent itself before the run starts (`seed_ledger`), standing in for the
@@ -17,9 +18,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import sqlite3
 import sys
-from pathlib import Path
 from typing import Any
 
 from examples.workflows import agentkit, sdk
@@ -27,6 +26,7 @@ from examples.workflows.agentkit import stripe
 
 CHANNEL = "C0RECON"
 PAGE = 10
+LEDGER = "ledger.db"
 
 
 def charge_id(i: int) -> str:
@@ -37,13 +37,9 @@ def customer_id(i: int) -> str:
     return f"cus_N{i:03d}"
 
 
-def ledger_path() -> Path:
-    return agentkit.state_dir() / "ledger.db"
-
-
 def seed_ledger(charges: int, mismatches: int) -> None:
     """The ledger as the job finds it. Not part of the run: setup, like a restored backup."""
-    with sqlite3.connect(ledger_path()) as db:
+    with agentkit.sqlite(LEDGER) as db:
         db.execute(
             "CREATE TABLE IF NOT EXISTS ledger "
             "(charge TEXT PRIMARY KEY, amount INTEGER, reconciled_on TEXT)"
@@ -56,7 +52,7 @@ def seed_ledger(charges: int, mismatches: int) -> None:
 
 @sdk.tool(kind="read")
 def load_ledger() -> dict[str, int]:
-    with sqlite3.connect(ledger_path()) as db:
+    with agentkit.sqlite(LEDGER) as db:
         return dict(db.execute("SELECT charge, amount FROM ledger").fetchall())
 
 
@@ -66,7 +62,7 @@ def _mark_stand_in(charge: str, date: str) -> dict[str, Any]:
 
 @sdk.tool(kind="write", shadow=_mark_stand_in)
 def mark_reconciled(charge: str, date: str) -> dict[str, Any]:
-    with sqlite3.connect(ledger_path()) as db:
+    with agentkit.sqlite(LEDGER) as db:
         db.execute("UPDATE ledger SET reconciled_on = ? WHERE charge = ?", (date, charge))
     return {"stood_in": False, "charge": charge, "date": date}
 
@@ -77,7 +73,12 @@ def all_charges() -> list[dict[str, Any]]:
     after: str | None = None
     while True:
         query = f"?limit={PAGE}" + (f"&starting_after={after}" if after else "")
-        page = stripe("GET", "/v1/charges" + query, label="list_charges").json() or {}
+        resp = stripe("GET", "/v1/charges" + query, label="list_charges")
+        page = resp.json()
+        # A page that failed is not an empty page: reconciling a partial list would call every
+        # charge after it clean. Fail the run instead.
+        if not resp.ok or not isinstance(page, dict):
+            raise RuntimeError(f"listing charges after {after}: HTTP {resp.status}")
         data = page.get("data") or []
         out += data
         if not page.get("has_more") or not data:
@@ -89,12 +90,15 @@ def reconcile(date: str) -> int:
     ledger = load_ledger()
     mismatched = [c for c in all_charges() if ledger.get(c["id"]) != c["amount"]]
     for c in mismatched:
-        stripe(
+        tagged = stripe(
             "POST",
             f"/v1/customers/{c['customer']}",
             {"metadata[reconciled]": date, "metadata[charge]": c["id"]},
             label="tag_customer",
         )
+        # The ledger says reconciled only once Stripe says tagged.
+        if not tagged.ok:
+            raise RuntimeError(f"tagging {c['customer']} for {c['id']}: HTTP {tagged.status}")
         mark_reconciled(c["id"], date)
     agentkit.obs("reconciled", date=date, mismatches=len(mismatched))
     return len(mismatched)

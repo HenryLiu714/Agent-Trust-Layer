@@ -5,7 +5,7 @@ the run's state directory, seeded by the agent before the run; only `mark_reconc
 tool) changes it.
 """
 
-import sqlite3
+from examples.workflows.w02_nightly_reconcile.agent import LEDGER
 
 W = "w02_nightly_reconcile"
 AGENT = "examples.workflows.w02_nightly_reconcile.agent"
@@ -13,19 +13,16 @@ CUSTOMER_UPDATE = "fake-L1   write     POST api.stripe.com/v1/customers/"
 
 
 def reconciled_rows(result):
-    query = "SELECT count(*) FROM ledger WHERE reconciled_on IS NOT NULL"
-    with sqlite3.connect(result.state / "ledger.db") as db:
-        return db.execute(query).fetchone()[0]
-
-
-def tools(result, kind):
-    return [(t["name"], t["ran"]) for t in result.events("tool") if t["kind"] == kind]
+    [(count,)] = result.query(LEDGER, "SELECT count(*) FROM ledger WHERE reconciled_on IS NOT NULL")
+    return count
 
 
 def test_a_clean_night_pages_everything_and_posts_one_summary(run_workflow):
     shadow = run_workflow(W, "clean", "shadow")
     assert len(shadow.calls("list_charges")) == 2  # twelve charges, pages of ten
-    assert shadow.result()["total"] == 0
+    assert shadow.result(with_time=False) == {"event": "result", "total": 0, "slack_ok": True}
+    # LOOKS WRONG (#61): the human template writes `#{channel}` over a channel id, so an id
+    # prints as `#C0RECON`, a channel name no one has.
     assert (
         '  ○ post to #C0RECON: "reconciled 0 for 2026-09-27"  unvalidated (L3 preconditions passed)'
         in shadow.summary()
@@ -35,7 +32,7 @@ def test_a_clean_night_pages_everything_and_posts_one_summary(run_workflow):
     assert [t["run"] for t in shadow.events("tool")] == [run_id]
     # #76's default tool name is the real module's, because the harness launches every agent
     # through `examples.workflows.launch` rather than as `__main__`.
-    assert tools(shadow, "read") == [(f"{AGENT}.load_ledger", "real")]
+    assert shadow.tools("read") == [(f"{AGENT}.load_ledger", "real")]
 
 
 def test_forty_mismatches_are_forty_faked_writes_and_the_ledger_is_untouched(run_workflow):
@@ -51,8 +48,8 @@ def test_forty_mismatches_are_forty_faked_writes_and_the_ledger_is_untouched(run
     # Forty writes fire one event name, listed once.
     assert summary[-1] == "  These writes did not happen. Would have fired: customer.updated."
     # The write tool ran its stand-in forty times under shadow, and for real forty times bare.
-    assert tools(shadow, "write") == [(f"{AGENT}.mark_reconciled", "shadow")] * 40
-    assert tools(bare, "write") == [(f"{AGENT}.mark_reconciled", "real")] * 40
+    assert shadow.tools("write") == [(f"{AGENT}.mark_reconciled", "shadow")] * 40
+    assert bare.tools("write") == [(f"{AGENT}.mark_reconciled", "real")] * 40
     assert reconciled_rows(shadow) == 0
     assert reconciled_rows(bare) == 40
     assert len(bare.internet.writes()) == 41  # forty customers and the Slack post
@@ -93,7 +90,14 @@ def test_paging_from_a_minted_refund_is_translated_and_finds_the_real_one(run_wo
     # exactly as it does bare.
     assert seen["first"] == [seen["minted"]]
     assert seen["after"] == bare.events("refunds")[0]["after"] == ["re_PRIOR000"]
-    assert [c["answered_by"] for c in shadow.calls()[1:4]] == ["fake-L1", "overlay", None]
+    assert [
+        (c["label"], c["answered_by"]) for c in shadow.calls() if c["label"] != "list_charges"
+    ] == [
+        ("refund", "fake-L1"),
+        ("list_refunds", "overlay"),
+        ("page_refunds", None),
+        (None, "fake-L1"),
+    ]
     # irimi dropped the cursor naming its own refund before forwarding (#53): Stripe never heard
     # the minted id.
     refund_reads = [r.query for r in shadow.internet.requests() if r.path == "/v1/refunds"]

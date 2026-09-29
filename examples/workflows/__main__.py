@@ -14,8 +14,9 @@ import argparse
 import sys
 import tempfile
 from pathlib import Path
+from typing import TextIO
 
-from examples.workflows.harness.run import MODES, check_invariants, run, workflows
+from examples.workflows.harness.run import MODES, Workflow, check_invariants, run, workflows
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -26,14 +27,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     catalog = workflows()
     if args.workflow is None:
-        for name, wf in catalog.items():
-            print(f"{name}  {wf.summary}")
-            for scenario, spec in wf.scenarios.items():
-                print(f"    {scenario:<24} {spec.doc}")
+        for wf in catalog.values():
+            _list(wf, sys.stdout)
         return 0
     wf = catalog.get(args.workflow)
-    if wf is None or args.scenario not in wf.scenarios:
-        print("error: unknown workflow or scenario; run with no arguments to list them")
+    if wf is None:
+        print(f"error: no workflow {args.workflow!r}. Workflows:", file=sys.stderr)
+        print("\n".join(f"  {name}" for name in catalog), file=sys.stderr)
+        return 2
+    if args.scenario not in wf.scenarios:
+        wanted = "name a scenario" if args.scenario is None else f"no scenario {args.scenario!r}"
+        print(f"error: {wanted} of {wf.name}:", file=sys.stderr)
+        _list(wf, sys.stderr)
         return 2
     modes = MODES if args.mode == "both" else (args.mode,)
     results = {}
@@ -42,8 +47,10 @@ def main(argv: list[str] | None = None) -> int:
             result = run(wf, args.scenario, mode, Path(tmp) / mode)
             results[mode] = result
             print(f"\n=== {mode}: agent exited {result.exit_code}")
-            for method, url, status, answered_by in result.answered():
-                print(f"  {method:<7} {url:<60} {status}  {answered_by or '(live)'}")
+            for call in result.calls():
+                status = call.get("status", call.get("error"))
+                answered_by = call.get("answered_by") or "(live)"
+                print(f"  {call['method']:<7} {call['url']:<60} {status}  {answered_by}")
             if result.irimi:
                 print("  --- irimi")
                 print("\n".join(f"  {line}" for line in result.irimi))
@@ -53,11 +60,17 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {req.method} {req.host}{req.path}")
     if "shadow" in results:
         problems = check_invariants(results["shadow"], results.get("bare"))
-        print("\ninvariants: " + ("all hold" if not problems else ""))
+        print(f"\ninvariants: {f'{len(problems)} broken' if problems else 'all hold'}")
         for problem in problems:
             print(f"  BROKEN {problem}")
         return 1 if problems else 0
     return 0
+
+
+def _list(wf: Workflow, out: TextIO) -> None:
+    print(f"{wf.name}  {wf.summary}", file=out)
+    for scenario, spec in wf.scenarios.items():
+        print(f"    {scenario:<24} {spec.doc}", file=out)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,9 @@
 """W10 `flaky_upstream`: which failures a shadow run shows, and which it cannot.
 
-A failed READ is forwarded, so it fails under shadow exactly as it fails bare, and the agent's
-retry runs. A failed WRITE never happens under shadow, because the write never leaves irimi: the
-agent's retry path for it is exercised only bare. The agent is
+A failed READ is forwarded, so it fails under shadow too and the agent's retry runs, though not
+always in the same shape: a reset arrives as the proxy's 502. A failed WRITE never happens under
+shadow, because the write never leaves irimi: the agent's retry path for it is exercised only bare.
+A failed L3 read is irimi's alone, and only its summary shows it. The agent is
 `examples/workflows/w10_flaky_upstream/agent.py`.
 """
 
@@ -48,16 +49,57 @@ def test_a_read_the_agent_abandoned_is_recorded_as_an_upstream_error(run_workflo
     ]
     # The upstream never failed: it answered late, after the AGENT gave up and hung up. irimi
     # records the abandoned exchange with no response and flags it `upstream-error`, which reads
-    # as the service's fault.
-    assert shadow.exchange_lines()[0] == (
-        "live      read      GET api.stripe.com/v1/charges -> -  [upstream-error]"
-    )
+    # as the service's fault. Which of the two reads prints first is a race between irimi noticing
+    # the hang-up and the retry's answer, so their order is not pinned.
+    assert sorted(shadow.exchange_lines()[:2]) == [
+        "live      read      GET api.stripe.com/v1/charges -> -  [upstream-error]",
+        "live      read      GET api.stripe.com/v1/charges -> 200",
+    ]
     # Two agent reads and the refund's L3 read: the stall was not retried by irimi itself.
     assert [r.path for r in shadow.internet.requests("api.stripe.com")] == [
         "/v1/charges",
         "/v1/charges",
         "/v1/charges/ch_PAYOUT1",
     ]
+
+
+def test_a_reset_on_a_read_reaches_the_agent_as_an_unstamped_502(run_workflow):
+    bare = run_workflow(W, "reset_on_read", "bare")
+    shadow = run_workflow(W, "reset_on_read", "shadow")
+    assert statuses(bare, "list_charges") == ["ConnectionResetError", 200]
+    assert retries(bare) == [("list_charges", "NetworkError")]
+    # Under shadow the proxy answers the reset itself, as an HTTP 502 with no Irimi-Answered-By:
+    # the agent sees a status where bare it saw no answer at all. This agent retries both, so it
+    # ends the same way; an agent that retries only one of them would not.
+    assert [(c.get("status"), c.get("answered_by")) for c in shadow.calls("list_charges")] == [
+        (502, None),
+        (200, None),
+    ]
+    assert retries(shadow) == [("list_charges", 502)]
+    assert sorted(shadow.exchange_lines()[:2]) == [
+        "live      read      GET api.stripe.com/v1/charges -> -  [upstream-error]",
+        "live      read      GET api.stripe.com/v1/charges -> 200",
+    ]
+    assert REFUND_LINE in shadow.summary()
+
+
+def test_a_failed_precondition_read_degrades_the_check_and_the_agent_never_knows(run_workflow):
+    bare = run_workflow(W, "precondition_read_fails", "bare")
+    shadow = run_workflow(W, "precondition_read_fails", "shadow")
+    # The agent never reads the charge itself; only irimi's L3 check does.
+    assert [r.path for r in bare.internet.requests("api.stripe.com")] == [
+        "/v1/charges",
+        "/v1/refunds",
+    ]
+    assert statuses(shadow, "refund") == statuses(bare, "refund") == [200]
+    assert retries(shadow) == []
+    assert "live      read      GET api.stripe.com/v1/charges/ch_PAYOUT1 -> 500" in (
+        shadow.exchange_lines()
+    )
+    # The check could not be made, so the refund is faked at L2, and with no currency the L3 read
+    # would have supplied, its amount prints in minor units.
+    refunds = [line for line in shadow.summary() if "○ refund" in line]
+    assert refunds == ["  ○ refund 500 on ch_PAYOUT1  unvalidated (L2)"]
 
 
 def test_a_reset_on_the_write_is_retried_bare_and_never_happens_under_shadow(run_workflow):
@@ -109,8 +151,8 @@ def test_an_agent_that_raises_after_its_write_still_shows_the_write(run_workflow
     assert (end["outcome"], end["error"]) == ("error", "RuntimeError")
     summary = shadow.summary()
     assert REFUND_LINE in summary
-    # The summary does not say the agent failed: nothing in it tells this run from one that
-    # finished.
+    # LOOKS WRONG: the summary does not say the agent failed. Nothing in it tells this run from
+    # one that finished.
     assert not any("error" in line.lower() or "exit" in line for line in summary)
 
 
@@ -124,6 +166,10 @@ def test_an_agent_killed_after_its_write_leaves_a_run_with_no_end(run_workflow):
     assert shadow.events("run.end") == []
     assert shadow.calls("refund")[0]["answered_by"] == "fake-L1"
     assert REFUND_LINE in shadow.summary()
-    assert shadow.summary()[-1] == (
+    # LOOKS WRONG: as after a raise, the summary ends as a finished run's does, with no word that
+    # the agent was killed.
+    summary = shadow.summary()
+    assert summary[-1] == (
         "  These writes did not happen. Would have fired: refund.created, charge.refunded."
     )
+    assert not any(word in line.lower() for line in summary for word in ("143", "kill", "signal"))

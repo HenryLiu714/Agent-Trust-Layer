@@ -1,34 +1,24 @@
 """W4 `slack_ops_bot`: a Slack Events API bot, pinned per scenario.
 
-The labels and events are in `examples/workflows/w04_slack_ops_bot/agent.py`.
+The events are in `examples/workflows/w04_slack_ops_bot/agent.py`. Its calls carry no labels, so
+`Result.answered()` names each by host and path.
 """
 
 from examples.workflows.harness.run import CANARIES
 
 W = "w04_slack_ops_bot"
 WEBHOOK_PATH = CANARIES["SLACK_WEBHOOK_PATH"]
-
-
-def answered(result):
-    """`(slack method or host+path, Irimi-Answered-By)` per call, in order."""
-    return [(c["url"].removeprefix("slack.com/api/"), c["answered_by"]) for c in result.calls()]
-
-
-def one(result, event):
-    found = result.events(event)
-    assert len(found) == 1, f"{event}: {found}"
-    return found[0]
-
+API = "slack.com/api/"
 
 MENTION_SHADOW = [
-    ("conversations.replies", None),
-    ("users.info", None),
-    ("api.anthropic.com/v1/messages", None),
-    ("chat.postMessage", "fake-L1"),
-    ("reactions.add", "fake-L0"),
-    ("files.upload", "fake-L0"),
-    (f"hooks.slack.com{WEBHOOK_PATH}", "fake-L0"),
-    ("conversations.replies", "overlay"),
+    (f"{API}conversations.replies", 200, None),
+    (f"{API}users.info", 200, None),
+    ("api.anthropic.com/v1/messages", 200, None),
+    (f"{API}chat.postMessage", 200, "fake-L1"),
+    (f"{API}reactions.add", 200, "fake-L0"),
+    (f"{API}files.upload", 200, "fake-L0"),
+    (f"hooks.slack.com{WEBHOOK_PATH}", 200, "fake-L0"),
+    (f"{API}conversations.replies", 200, "overlay"),
 ]
 
 
@@ -42,11 +32,11 @@ def test_url_verification_answers_the_challenge_and_calls_nothing(run_workflow):
 
 def test_a_mention_is_one_run_and_its_reply_is_read_back_through_the_overlay(run_workflow):
     shadow = run_workflow(W, "mention_in_thread", "shadow")
-    assert answered(shadow) == MENTION_SHADOW
-    assert one(shadow, "readback")["sees_reply"] is True
+    assert shadow.answered() == MENTION_SHADOW
+    assert shadow.one("readback")["sees_reply"] is True
     # One trigger, one run, and every call the run made carried its id (stripped by irimi).
     assert [e["name"] for e in shadow.events("run.start")] == ["on_mention"]
-    run_id = one(shadow, "run.start")["run"]
+    run_id = shadow.one("run.start")["run"]
     assert {c["run"] for c in shadow.calls()} == {run_id}
     # L3 probed the channel before faking the post (#45).
     lines = shadow.exchange_lines()
@@ -57,7 +47,9 @@ def test_a_mention_is_one_run_and_its_reply_is_read_back_through_the_overlay(run
     )
     # The bare run sees the same thing, from the real (fake) Slack.
     bare = run_workflow(W, "mention_in_thread", "bare")
-    assert one(bare, "readback")["sees_reply"] is True
+    assert bare.one("readback")["sees_reply"] is True
+    # The L0 `reactions.add` fake answers the one key Slack answers.
+    assert shadow.one("reacted")["keys"] == bare.one("reacted")["keys"] == ["ok"]
     assert [r.path for r in bare.internet.writes()] == [
         "/api/chat.postMessage",
         "/api/reactions.add",
@@ -80,7 +72,7 @@ def test_the_overlay_line_hangs_under_the_webhook_post_it_cannot_have_seen(run_w
     shadow = run_workflow(W, "mention_in_thread", "shadow")
     summary = shadow.summary()
     webhook = summary.index('  ○ post via webhook: "ops bot answered alice"  unvalidated (L0)')
-    # Looks wrong: the read-back saw the chat.postMessage reply, but its ↳ line hangs under the
+    # LOOKS WRONG: the read-back saw the chat.postMessage reply, but its ↳ line hangs under the
     # incoming-webhook post, because hooks.slack.com is the same `slack` service and the webhook
     # was the run's most recent authored Slack write. No read can ever show a webhook post.
     assert summary[webhook + 1] == "    ↳ POST /api/conversations.replies saw it  overlay"
@@ -88,19 +80,19 @@ def test_the_overlay_line_hangs_under_the_webhook_post_it_cannot_have_seen(run_w
 
 def test_a_reply_under_the_runs_own_minted_thread_is_answered_from_the_write_log(run_workflow):
     shadow = run_workflow(W, "own_thread", "shadow")
-    assert answered(shadow)[3:5] == [
-        ("chat.postMessage", "fake-L1"),
-        ("chat.postMessage", "fake-L1"),
+    assert shadow.answered()[3:5] == [
+        (f"{API}chat.postMessage", 200, "fake-L1"),
+        (f"{API}chat.postMessage", 200, "fake-L1"),
     ]
     # The thread's parent exists only in irimi's write log: real Slack says `thread_not_found`,
     # and irimi answers the read from the write log instead (#52).
-    readback = one(shadow, "readback")
+    readback = shadow.one("readback")
     assert (readback["ok"], readback["sees_reply"], readback["messages"]) == (True, True, 2)
-    assert answered(shadow)[-1] == ("conversations.replies", "overlay")
+    assert shadow.answered()[-1] == (f"{API}conversations.replies", 200, "overlay")
     stub_saw = [r for r in shadow.internet.requests() if r.path == "/api/conversations.replies"]
     assert len(stub_saw) == 2  # the live read before, and the forwarded read-back irimi replaced
     bare = run_workflow(W, "own_thread", "bare")
-    assert (one(bare, "readback")["sees_reply"], one(bare, "readback")["messages"]) == (True, 2)
+    assert (bare.one("readback")["sees_reply"], bare.one("readback")["messages"]) == (True, 2)
 
 
 def test_a_post_to_a_channel_name_is_unprobed_and_its_read_back_misses(run_workflow):
@@ -108,10 +100,10 @@ def test_a_post_to_a_channel_name_is_unprobed_and_its_read_back_misses(run_workf
     bare = run_workflow(W, "channel_by_name", "bare")
     # Real Slack answers a post to `#ops` with the channel's id; irimi's fake echoes the name back
     # (#44), so the agent's read-back names a channel Slack does not know.
-    assert one(bare, "post_reply")["channel"] == "C0OPS"
-    assert one(shadow, "post_reply")["channel"] == "#ops"
-    assert one(bare, "readback")["sees_reply"] is True
-    readback = one(shadow, "readback")
+    assert bare.one("post_reply")["channel"] == "C0OPS"
+    assert shadow.one("post_reply")["channel"] == "#ops"
+    assert bare.one("readback")["sees_reply"] is True
+    readback = shadow.one("readback")
     assert (readback["ok"], readback["error"], readback["sees_reply"]) == (
         False,
         "channel_not_found",
@@ -130,9 +122,9 @@ def test_a_missing_scope_is_refused_by_slack_but_faked_as_passed_by_shadow(run_w
     bare = run_workflow(W, "missing_scope", "bare")
     shadow = run_workflow(W, "missing_scope", "shadow")
     assert (bare.exit_code, shadow.exit_code) == (1, 0)
-    assert one(bare, "post_reply")["error"] == "missing_scope"
-    assert one(shadow, "post_reply")["ok"] is True
-    # Looks wrong: L3's probe is `conversations.info`, which a token without `chat:write` can
+    assert bare.one("post_reply")["error"] == "missing_scope"
+    assert shadow.one("post_reply")["ok"] is True
+    # LOOKS WRONG: L3's probe is `conversations.info`, which a token without `chat:write` can
     # still call, so the check passes and the summary claims "L3 preconditions passed" for a post
     # Slack would have refused. L3 cannot see scopes; `not_evaluable` would be the honest answer.
     assert (
@@ -145,7 +137,7 @@ def test_an_archived_channel_is_refused_the_same_way_bare_and_under_shadow(run_w
     bare = run_workflow(W, "archived_channel", "bare")
     shadow = run_workflow(W, "archived_channel", "shadow")
     assert bare.exit_code == shadow.exit_code == 1
-    assert one(bare, "post_reply")["error"] == one(shadow, "post_reply")["error"] == "is_archived"
+    assert bare.one("post_reply")["error"] == shadow.one("post_reply")["error"] == "is_archived"
     assert '  ✗ post to #C0OLDOPS: "Payouts are on schedule."  would fail: is_archived' in (
         shadow.summary()
     )

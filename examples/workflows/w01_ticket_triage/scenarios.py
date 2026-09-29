@@ -56,7 +56,9 @@ def triage_script(call: LlmCall) -> LlmTurn:
     wanted = 2 if "refund again" in call.system else 1
     refunds = [r for r in results if r["tool"] == "issue_refund"]
     if len(refunds) < wanted:
-        return LlmTurn(tool_calls=(("issue_refund", {"charge": charge["id"], "amount": amount}),))
+        refund = ("issue_refund", {"charge": charge["id"], "amount": amount})
+        # "send the refund twice": the same call twice in one turn, as a model repeats itself.
+        return LlmTurn(tool_calls=(refund, refund) if "twice" in call.system else (refund,))
     if not any(r["tool"] == "send_reply" for r in results):
         statuses = ", ".join(str(r["status"]) for r in refunds)
         body = f"Refund of {amount} requested (statuses: {statuses})."
@@ -83,6 +85,9 @@ WORKFLOW = Workflow(
         "half_refund": _scenario("half", "the prompt edit: refund half instead"),
         "too_large": _scenario("too_large", "the model asks for twice the charge"),
         "double_refund": _scenario("double", "the model refunds twice with different keys"),
+        "retried_refund": _scenario(
+            "retry", "the model sends one refund twice in a turn, same key: one write (#46)"
+        ),
         "runaway_loop": _scenario("runaway", "the model never stops; the agent gives up at turn 6"),
     },
 )

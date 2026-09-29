@@ -10,7 +10,8 @@ to label a run's requests whichever client makes them (#75):
 Every call is labelled `read:<charge>` or `refund:<charge>`, so a test can check that run R's
 calls name only R's own charge.
 
-    python -m examples.workflows.w03_queue_worker.agent <scenario>
+    python -m examples.workflows.launch \\
+        examples.workflows.w03_queue_worker.agent <scenario>
 """
 
 from __future__ import annotations
@@ -62,14 +63,16 @@ def _via_http_client(method: str, url: str, body: bytes | None, headers: dict[st
 async def _via_asyncio(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Any:
     host, port, target = _target(url)
     parts = urlsplit(url)
-    reader, writer = await asyncio.open_connection(host, port)
-    lines = [f"{method} {target} HTTP/1.1", f"Host: {parts.netloc}", "Connection: close"]
-    lines += [f"{k}: {v}" for k, v in headers.items()]
-    lines.append(f"Content-Length: {len(body or b'')}")
-    writer.write(("\r\n".join(lines) + "\r\n\r\n").encode() + (body or b""))
-    await writer.drain()
-    raw = await asyncio.wait_for(reader.read(), agentkit.timeout())
-    writer.close()
+    reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), agentkit.timeout())
+    try:
+        lines = [f"{method} {target} HTTP/1.1", f"Host: {parts.netloc}", "Connection: close"]
+        lines += [f"{k}: {v}" for k, v in headers.items()]
+        lines.append(f"Content-Length: {len(body or b'')}")
+        writer.write(("\r\n".join(lines) + "\r\n\r\n").encode() + (body or b""))
+        await writer.drain()
+        raw = await asyncio.wait_for(reader.read(), agentkit.timeout())
+    finally:
+        writer.close()
     head = raw.split(b"\r\n\r\n", 1)[0].decode("latin-1").split("\r\n")
     status = int(head[0].split()[1])
     found = {k.strip().lower(): v.strip() for k, _, v in (h.partition(":") for h in head[1:])}
@@ -115,17 +118,7 @@ def call(index: int, method: str, path: str, form: dict[str, Any] | None, label:
         status, answered_by = asyncio.run(_via_asyncio(method, url, body, headers))
     else:
         status, answered_by = _via_requests(method, url, body, headers)
-    parts = urlsplit(url)
-    agentkit.obs(
-        "http",
-        method=method,
-        url=f"{parts.hostname}{parts.path}",
-        label=label,
-        status=status,
-        answered_by=answered_by,
-        run=run_id,
-        client=client,
-    )
+    agentkit.obs_http(method, url, label, status=status, answered_by=answered_by, client=client)
     return None
 
 
@@ -182,29 +175,36 @@ async def handle_async(message: dict[str, Any]) -> None:
 
 def consume(messages: list[dict[str, Any]], how: str) -> tuple[int, int]:
     """Process every message; one failure does not stop the queue. Returns (ok, failed)."""
-    failed = 0
 
-    def safe(message: dict[str, Any]) -> None:
-        nonlocal failed
+    def safe(message: dict[str, Any]) -> bool:
+        # Each worker returns its own verdict; a shared counter bumped from four threads would
+        # race.
         try:
             handle(message)
         except ValueError as exc:
-            failed += 1
             agentkit.obs("message.failed", charge=message["charge"], error=str(exc))
+            return False
+        return True
 
     if how == "threads":
         with ThreadPoolExecutor(4) as pool:
-            list(pool.map(safe, messages))
+            done = list(pool.map(safe, messages))
     elif how == "asyncio":
 
-        async def all_of() -> None:
-            await asyncio.gather(*(handle_async(m) for m in messages))
+        async def all_of() -> list[Any]:
+            runs = (handle_async(m) for m in messages)
+            return await asyncio.gather(*runs, return_exceptions=True)
 
-        asyncio.run(all_of())
+        done = []
+        for message, outcome in zip(messages, asyncio.run(all_of()), strict=True):
+            if isinstance(outcome, BaseException) and not isinstance(outcome, ValueError):
+                raise outcome
+            if isinstance(outcome, ValueError):
+                agentkit.obs("message.failed", charge=message["charge"], error=str(outcome))
+            done.append(outcome is None)
     else:
-        for message in messages:
-            safe(message)
-    return len(messages) - failed, failed
+        done = [safe(message) for message in messages]
+    return done.count(True), done.count(False)
 
 
 SCENARIOS: dict[str, tuple[int, str, dict[str, Any]]] = {

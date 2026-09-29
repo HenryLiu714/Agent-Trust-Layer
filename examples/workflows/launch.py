@@ -13,6 +13,10 @@ import sys
 
 
 def main() -> int:
+    if len(sys.argv) < 2:
+        usage = "usage: python -m examples.workflows.launch <agent module> [args...]"
+        print(usage, file=sys.stderr)
+        return 2
     module = importlib.import_module(sys.argv[1])
     return int(module.main(sys.argv[2:]))
 

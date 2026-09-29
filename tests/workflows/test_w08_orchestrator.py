@@ -3,18 +3,18 @@
 The labels are the calls in `examples/workflows/w08_orchestrator/agent.py`.
 """
 
+import pytest
+import yaml
+
+from examples.workflows.w08_orchestrator.scenarios import SUBAGENT_MAP, UNJUSTIFIED_MAP
+from irimi.servicemap.loader import MapError, parse_service
+
 W = "w08_orchestrator"
 HOST = "subagent.internal"
 
 
-def answered(result):
-    return {c["label"]: (c["status"], c["answered_by"]) for c in result.calls()}
-
-
 def decision(result):
-    found = result.events("decision")
-    assert len(found) == 1
-    return {k: v for k, v in found[0].items() if k not in ("event", "t")}
+    return {k: v for k, v in result.one("decision").items() if k not in ("event", "t")}
 
 
 def test_an_unmapped_services_post_read_is_faked_and_the_agent_takes_another_branch(run_workflow):
@@ -24,7 +24,7 @@ def test_an_unmapped_services_post_read_is_faked_and_the_agent_takes_another_bra
     different path from production, and nothing in irimi's output says so beyond `unclassified`."""
     shadow = run_workflow(W, "no_map", "shadow")
     bare = run_workflow(W, "no_map", "bare")
-    assert answered(shadow) == {
+    assert shadow.by_label() == {
         "inventory": (200, None),
         "quote": (200, "fake-L0"),
         "charges": (200, None),
@@ -47,7 +47,7 @@ def test_an_unmapped_services_post_read_is_faked_and_the_agent_takes_another_bra
 
 def test_a_map_naming_the_post_read_forwards_it_and_fakes_the_reservation(run_workflow):
     shadow = run_workflow(W, "with_map", "shadow")
-    assert answered(shadow) == {
+    assert shadow.by_label() == {
         "inventory": (200, None),
         "quote": (200, None),
         "charges": (200, None),
@@ -72,6 +72,11 @@ def test_a_post_read_without_persists_false_is_refused_and_nothing_runs(run_work
     """THE SCOPE RULE at load time: in an `honest` map, `kind: read` on POST forwards an unsafe
     method, so the route must say `persists: false` and why. Without it irimi refuses the map,
     starts no proxy and runs no agent (it prints the refusal on stderr)."""
+    # The refusal is THE SCOPE RULE's, and not some other fault in the map: the same map with the
+    # justification loads.
+    parse_service(yaml.safe_load(SUBAGENT_MAP), "subagent.yaml")
+    with pytest.raises(MapError, match="unsafe method downgrades a write.*persists: false"):
+        parse_service(yaml.safe_load(UNJUSTIFIED_MAP), "subagent.yaml")
     shadow = run_workflow(W, "map_refused", "shadow")
     assert shadow.exit_code == 1
     assert shadow.obs == []
@@ -103,9 +108,8 @@ def test_every_sub_agent_call_joins_its_parents_run(run_workflow):
     assert [e["name"] for e in starts] == ["plan_quarter_close", "plan_quarter_close"]
     runs = {e["run"] for e in starts}
     assert len(runs) == 2
-    per_run: dict[str, list[str]] = {run: [] for run in runs}
-    for call in shadow.calls():
-        per_run[call["run"]].append(call["label"])
+    per_run = shadow.by_run()
+    assert set(per_run) == runs
     for labels in per_run.values():
         assert sorted(labels) == ["charges", "inventory", "quote", "reserve"]
     assert {e["outcome"] for e in shadow.events("run.end")} == {"ok"}

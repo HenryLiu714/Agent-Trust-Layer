@@ -17,12 +17,18 @@ jobs:
         # 3.14 is what .python-version pins for development; 3.12 is the floor pyproject promises.
         python: ["3.14", "3.12"]
     runs-on: ${{ matrix.os }}
+    # Every uv command has to see the matrix version. `--python` on `uv sync` alone is not enough:
+    # the next `uv run` follows .python-version and rebuilds the venv on 3.14, so the 3.12 legs
+    # silently tested 3.14 (found while verifying #89).
+    env:
+      UV_PYTHON: ${{ matrix.python }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - run: uv sync --locked --python ${{ matrix.python }}
+      - run: uv sync --locked
+      - run: uv run python --version
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy

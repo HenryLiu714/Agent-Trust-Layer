@@ -7,7 +7,9 @@ Python 3.12+, managed with `uv`. See `docs/architecture.md` for the module map a
 ## Commands
 
 - `make check` runs everything CI runs: `ruff check`, `ruff format --check`, `mypy`, `pytest`.
-- `uv run pytest -q` for the tests alone (about ten seconds, no network, no keys).
+- `uv run pytest -q` for the tests alone (under a minute, no network, no keys).
+- `uv run pytest -q tests/workflows` for the sample-workflow corpus alone; see
+  `examples/workflows/README.md`.
 - `uv run irimi --help` for the CLI.
 
 ## Rules that tests enforce

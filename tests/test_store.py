@@ -6,6 +6,7 @@ files under the root say, so a test here breaks only when what reaches disk chan
 """
 
 import dataclasses
+import errno
 import json
 import math
 import os
@@ -70,6 +71,21 @@ def _record(run_id: str, started_at: float | None = 10.0, args=None) -> RunRecor
 
 def _tool_call(run_id: str, args) -> ToolCall:
     return ToolCall("t1", run_id, "db.write", "write", "shadow", args, None, None, 1.0, 2.0)
+
+
+class _StoreOs:
+    """The `os` module as `irimi.store` sees it, with the functions a test sets replaced. Patching
+    `os` itself would change it for every thread in the process, pytest's own included."""
+
+    def __getattr__(self, name: str):
+        return getattr(os, name)
+
+
+@pytest.fixture
+def store_os(monkeypatch) -> _StoreOs:
+    proxy = _StoreOs()
+    monkeypatch.setattr(store, "os", proxy)
+    return proxy
 
 
 def _drain(s: DirectoryStore, written: int) -> None:
@@ -156,6 +172,35 @@ def test_a_tool_calls_args_and_result_are_redacted_and_share_the_runs_seq(root, 
     }
 
 
+def test_an_error_message_and_a_trigger_name_are_redacted_before_they_reach_disk(root, key):
+    """`ErrorInfo.from_exception` keeps `str(exc)`, and an exception's message may quote the key
+    it refused; a trigger's name is the argv[0] its args repeat (#69)."""
+    s = DirectoryStore(root, key)
+    s.start_run(dataclasses.replace(_record("r1"), trigger=Trigger(SECRET, None, None, True)))
+    call = _tool_call("r1", None)
+    s.record_tool_call(dataclasses.replace(call, error=ErrorInfo("x.Err", f"refused {SECRET}")))
+    s.end_run("r1", 3.0, "error", ErrorInfo("x.Err", f"Invalid API key: {SECRET}"), exit_code=1)
+    s.close()
+    run = StoreReader(root).load_run("r1")
+    hidden = redact.placeholder(key, SECRET)
+    assert run.record.trigger is not None and run.record.trigger.name == hidden
+    assert run.record.error == ErrorInfo("x.Err", f"Invalid API key: {hidden}")
+    (stored,) = run.events
+    assert isinstance(stored, ToolCall)
+    assert stored.error == ErrorInfo("x.Err", f"refused {hidden}")
+    assert not any(SECRET.encode() in p.read_bytes() for p in root.rglob("*") if p.is_file())
+
+
+def test_a_run_json_says_the_version_its_lines_are_written_in(root, key):
+    """A caller's record claiming another version would put this writer's lines under a run.json
+    no reader of this version reads (docs/trace-format.md, "Versioning")."""
+    s = DirectoryStore(root, key)
+    s.start_run(dataclasses.replace(_record("r1"), schema_version=trace.SCHEMA_VERSION + 1))
+    s.record(_exchange("r1"))
+    s.close()
+    assert StoreReader(root).load_run("r1").record.schema_version == trace.SCHEMA_VERSION
+
+
 def test_telemetry_is_stored_as_a_host_and_a_time_and_no_body(root, key):
     s = DirectoryStore(root, key)
     s.record(_exchange("r1", body=b"an envelope", answer=b"ok", kind="telemetry"))
@@ -238,13 +283,16 @@ def test_an_invalid_run_id_lands_in_unattributed_flagged_and_names_no_directory(
     assert (none.run_id, none.flags) == (trace.UNATTRIBUTED, ())
 
 
-def test_an_invalid_run_id_never_starts_a_run(root, key):
+def test_an_invalid_run_id_never_starts_or_ends_a_run_or_makes_a_directory(root, key):
     s = DirectoryStore(root, key)
     s.start_run(_record("../x"))
     s.start_run(_record(trace.UNATTRIBUTED))
+    s.end_run("../y", 3.0, "ok")
+    s.end_run(trace.UNATTRIBUTED, 3.0, "ok")
     s.close()
-    assert s.stats().dropped == 2
-    assert not root.exists() or not (root / "runs").exists()
+    assert s.stats().dropped == 4
+    # Not `unattributed/` either: nothing was stored there, and the drops have no run.json.
+    assert os.listdir(root) == []
 
 
 def test_two_run_ids_that_differ_only_in_case_never_share_a_directory(root, key):
@@ -329,6 +377,92 @@ def test_a_restarted_store_resumes_seq_after_truncating_a_half_line(root, key):
     assert _paths(StoreReader(root).load_run("r1")) == ["/a", "/b", "/c"]
 
 
+def test_a_damaged_last_seq_does_not_stop_a_restarted_store_writing_the_run(root, key):
+    """`{"seq": 1e400}` parses as infinity, which `int()` refuses with an OverflowError: resuming
+    skips that line as unreadable rather than drop every later event of the run."""
+    first = DirectoryStore(root, key)
+    first.record(_exchange("r1", "/a"))
+    first.close()
+    with open(root / "runs/r1/events.jsonl", "a") as f:
+        f.write('{"seq": true}\n{"seq": 1e400}\n')
+    second = DirectoryStore(root, key)
+    second.record(_exchange("r1", "/b"))
+    second.close()
+    assert second.stats().dropped == 0
+    last = (root / "runs/r1/events.jsonl").read_text().splitlines()[-1]
+    assert (json.loads(last)["seq"], json.loads(last)["request"]["path"]) == (2, "/b")
+
+
+def test_resuming_from_the_tail_truncates_a_half_line_at_its_offset_in_the_file(
+    root, key, monkeypatch
+):
+    """The tail holds the last whole line and a crash's half line after it: the cut is made at the
+    tail's offset plus the end of that line, not at an offset counted from the tail's start."""
+    first = DirectoryStore(root, key)
+    for n in range(3):
+        first.record(_exchange("r1", f"/n{n}"))
+    first.close()
+    path = root / "runs/r1/events.jsonl"
+    whole = path.read_bytes()
+    last = whole.splitlines(keepends=True)[-1]
+    with open(path, "ab") as f:
+        f.write(b'{"seq": 4, "ty')
+    monkeypatch.setattr(store, "RESUME_TAIL", len(last) + 30)
+    second = DirectoryStore(root, key)
+    second.record(_exchange("r1", "/n3"))
+    second.close()
+    lines = [json.loads(line) for line in path.open()]
+    assert [line["seq"] for line in lines] == [1, 2, 3, 4]
+    assert path.read_bytes().startswith(whole)
+
+
+def test_a_run_json_is_on_disk_whole_before_it_is_renamed_into_place(root, key, store_os):
+    """A run.json a crash left empty would read as no version at all, and a restarted store never
+    appends to a run whose version it cannot read: so it is synced before it replaces the last."""
+    synced: set[int] = set()  # inodes
+    renamed: list[bool] = []  # per run.json rename: was the file synced first?
+    store_os.fsync = lambda fd: (synced.add(os.fstat(fd).st_ino), os.fsync(fd))[1]
+
+    def replace(src, dst) -> None:
+        if Path(dst).name == store.RUN_FILE:
+            renamed.append(os.stat(src).st_ino in synced)
+        os.replace(src, dst)
+
+    store_os.replace = replace
+    s = DirectoryStore(root, key)
+    s.start_run(_record("r1"))
+    s.record(_exchange("h1"))  # a header run's run.json
+    s.end_run("r1", 3.0, "ok", exit_code=0)
+    s.close()
+    assert renamed == [True, True, True]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a file of mode 000")
+def test_a_run_json_that_cannot_be_read_for_now_does_not_refuse_the_run_for_good(root, key):
+    """Too many open files, say: that event is dropped, and the next one is written. Only a
+    run.json that holds another version, or no version at all, closes its run to this writer."""
+    first = DirectoryStore(root, key)
+    first.start_run(_record("r1"))
+    first.close()
+    run_json = root / "runs/r1/run.json"
+    run_json.chmod(0)
+    s = DirectoryStore(root, key)
+    s.record(_exchange("r1", "/lost"))
+    deadline = time.monotonic() + 10
+    while s.stats().dropped < 1:
+        assert time.monotonic() < deadline, s.stats()
+        time.sleep(0.005)
+    run_json.chmod(0o600)
+    s.record(_exchange("r1", "/kept"))
+    s.close()
+    run = StoreReader(root).load_run("r1")
+    assert (_paths(run), run.record.attribution, run.record.dropped_events) == (
+        ["/kept"],
+        "process",
+        1,
+    )
+
+
 def test_a_run_of_a_newer_schema_version_is_never_appended_to(root, key):
     (root / "runs/old").mkdir(parents=True)
     newer = trace.run_to_json(_record("old")) | {"schema_version": trace.SCHEMA_VERSION + 1}
@@ -363,11 +497,11 @@ def test_a_failed_blob_write_drops_that_event_and_the_next_one_is_written(root, 
     real = store._write_atomically
     failed = []
 
-    def once(path: Path, data: bytes) -> None:
+    def once(path: Path, data: bytes, **kwargs) -> None:
         if path.parent.name == store.BLOBS_DIR and not failed:
             failed.append(path)
             raise OSError("disk full")
-        real(path, data)
+        real(path, data, **kwargs)
 
     monkeypatch.setattr(store, "_write_atomically", once)
     s = DirectoryStore(root, key)
@@ -378,6 +512,57 @@ def test_a_failed_blob_write_drops_that_event_and_the_next_one_is_written(root, 
     run = StoreReader(root).load_run("r1")
     assert _paths(run) == ["/kept"]
     assert run.record.dropped_events == 1
+
+
+def test_a_run_id_that_is_not_a_string_is_a_drop_and_the_writer_goes_on(root, key, monkeypatch):
+    """The writer counts a failure under the event's run id. One that cannot be a dict key raised
+    in that error path and ended the writer thread, silently losing every later event."""
+    monkeypatch.setattr(store, "CLOSE_TIMEOUT_S", 2.0)
+    s = DirectoryStore(root, key)
+    s.record(dataclasses.replace(_exchange("r1"), run_id=["not", "a", "string"]))  # type: ignore[arg-type]
+    s.record(_exchange("r1", "/after"))
+    s.close()
+    assert s.stats().dropped == 1
+    assert _paths(StoreReader(root).load_run("r1")) == ["/after"]
+
+
+def test_a_call_with_the_wrong_type_is_a_drop_not_a_raise(root, key):
+    """Every public method is a mitmproxy hook's callee or the SDK's, and a raised hook forwards
+    the flow (CLAUDE.md): even a caller breaking the types gets a counted drop, not an exception."""
+    s = DirectoryStore(root, key)
+    s.record(None)  # type: ignore[arg-type]
+    s.record_tool_call(None)  # type: ignore[arg-type]
+    s.start_run(None)  # type: ignore[arg-type]
+    s.record(_exchange("r1", "/after"))
+    s.close()
+    assert s.stats().dropped == 3
+    assert _paths(StoreReader(root).load_run("r1")) == ["/after"]
+
+
+def test_a_failed_write_never_cuts_off_a_line_another_process_appended(root, key, store_os):
+    """`unattributed/` is shared by every process on a root. A `write` that raised wrote nothing,
+    so there is nothing of this line to cut, and truncating the file to its size before the write
+    would cut off a line another process appended in between."""
+    other = _exchange(trace.UNATTRIBUTED, "/other-process")
+    line = json.dumps(trace.event_to_json(1, other, lambda body: None)) + "\n"
+    raced: list[int] = []
+
+    def write(fd, data):
+        if not raced:
+            raced.append(fd)
+            with open(root / "unattributed/events.jsonl", "a") as f:  # the other process
+                f.write(line)
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return os.write(fd, data)
+
+    store_os.write = write
+    s = DirectoryStore(root, key)
+    s.record(_exchange(trace.UNATTRIBUTED, "/lost"))
+    s.record(_exchange(trace.UNATTRIBUTED, "/kept"))
+    s.close()
+    assert raced and s.stats().dropped == 1
+    events = StoreReader(root).load_run(trace.UNATTRIBUTED).events
+    assert _paths_of(events) == ["/other-process", "/kept"]
 
 
 def test_a_value_json_cannot_hold_is_a_drop_not_a_line_that_is_not_json(root, key):
@@ -438,9 +623,63 @@ def test_close_gives_up_on_a_stuck_writer_and_counts_what_it_left(root, key, mon
     started = time.monotonic()
     s.close()
     assert time.monotonic() - started < 2
-    assert s.stats().dropped >= 2
-    assert StoreReader(root).load_run("r1").record.dropped_events >= 2
+    assert s.stats().dropped == 2
+    assert StoreReader(root).load_run("r1").record.dropped_events == 2
     release.set()
+    # The write in flight still lands; wait for it, so no later test's patched `os` meets it.
+    deadline = time.monotonic() + 10
+    while s.stats().written < 1:
+        assert time.monotonic() < deadline, s.stats()
+        time.sleep(0.005)
+
+
+def test_an_abandoned_writer_stops_once_its_write_in_flight_lands(root, key, monkeypatch):
+    """`close()` drained the queue, the sentinel included, when it gave up on the writer. The
+    writer's idle wake-up must see that and end, not poll an empty queue for the process's life."""
+    monkeypatch.setattr(store, "CLOSE_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(store, "SYNC_IDLE_S", 0.01)
+    release = threading.Event()
+    real = DirectoryStore._handle
+
+    def stuck(self, item):
+        release.wait(10)
+        real(self, item)
+
+    monkeypatch.setattr(DirectoryStore, "_handle", stuck)
+    s = DirectoryStore(root, key)
+    s.record(_exchange("r1", "/stuck"))
+    s.close()
+    release.set()
+    s._thread.join(5)
+    assert not s._thread.is_alive()
+    assert s.stats().written == 1
+
+
+def test_a_second_close_waits_for_the_writer_as_the_first_does(root, key, monkeypatch):
+    """The engine and `irimi shadow` both close the store; whichever returns second must still
+    find the files whole, so a second close does not return while the first is waiting."""
+    taken, release = threading.Event(), threading.Event()
+    real = DirectoryStore._handle
+
+    def paused(self, item):
+        taken.set()
+        release.wait(10)
+        real(self, item)
+
+    monkeypatch.setattr(DirectoryStore, "_handle", paused)
+    s = DirectoryStore(root, key)
+    s.record(_exchange("r1", "/slow"))
+    assert taken.wait(5)
+    first = threading.Thread(target=s.close)
+    first.start()
+    deadline = time.monotonic() + 10
+    while not s._closed:  # the first close has begun
+        assert time.monotonic() < deadline
+        time.sleep(0.001)
+    threading.Timer(0.2, release.set).start()
+    s.close()
+    assert _paths(StoreReader(root).load_run("r1")) == ["/slow"]
+    first.join()
 
 
 def test_close_is_idempotent_and_an_event_after_it_is_dropped_not_raised(root, key):
@@ -481,16 +720,50 @@ def test_the_queue_is_bounded_in_body_bytes_too(root, key, monkeypatch):
     assert run.record.dropped_events == 1
 
 
-def test_the_writer_fsyncs_in_batches_before_close(root, key, monkeypatch):
-    synced: list[int] = []
-    real = os.fsync
+def test_the_writer_fsyncs_in_batches_before_close(root, key, monkeypatch, store_os):
+    synced: set[int] = set()  # inodes
     monkeypatch.setattr(store, "SYNC_EVERY", 3)
-    monkeypatch.setattr(store.os, "fsync", lambda fd: (synced.append(fd), real(fd))[1])
+    monkeypatch.setattr(store, "SYNC_IDLE_S", 60.0)  # only the batch syncs before close
+    store_os.fsync = lambda fd: (synced.add(os.fstat(fd).st_ino), os.fsync(fd))[1]
     s = DirectoryStore(root, key)
-    for n in range(4):  # run.json, events.jsonl and a blob each: past 3 on the first event
+    for n in range(4):  # events.jsonl and a blob each: past 3 on the second event
         s.record(_exchange("r1", f"/n{n}", answer=f"body {n}".encode()))
     _drain(s, 4)
-    assert synced, "nothing was fsynced before close"
+    events = root / "runs/r1/events.jsonl"
+    assert events.stat().st_ino in synced, "events.jsonl was not fsynced before close"
+    s.close()
+
+
+def test_one_long_run_is_fsynced_every_sync_every_writes_not_only_when_it_ends(
+    root, key, monkeypatch, store_os
+):
+    """Counted in distinct files, one run appending to its one events.jsonl never reached a batch,
+    and a week-long run was synced only when it ended."""
+    synced: set[int] = set()  # inodes
+    monkeypatch.setattr(store, "SYNC_EVERY", 3)
+    monkeypatch.setattr(store, "SYNC_IDLE_S", 60.0)
+    store_os.fsync = lambda fd: (synced.add(os.fstat(fd).st_ino), os.fsync(fd))[1]
+    s = DirectoryStore(root, key)
+    for n in range(4):
+        s.record(_exchange("r1", f"/n{n}"))
+    _drain(s, 4)
+    assert (root / "runs/r1/events.jsonl").stat().st_ino in synced
+    s.close()
+
+
+def test_an_idle_writer_fsyncs_what_it_wrote(root, key, monkeypatch, store_os):
+    """A `serve` that goes quiet does not leave its last lines unsynced until the next event."""
+    synced: set[int] = set()  # inodes
+    monkeypatch.setattr(store, "SYNC_IDLE_S", 0.01)
+    store_os.fsync = lambda fd: (synced.add(os.fstat(fd).st_ino), os.fsync(fd))[1]
+    s = DirectoryStore(root, key)
+    s.record(_exchange("r1"))
+    _drain(s, 1)
+    events = (root / "runs/r1/events.jsonl").stat().st_ino
+    deadline = time.monotonic() + 10
+    while events not in synced:
+        assert time.monotonic() < deadline, "the idle writer never synced events.jsonl"
+        time.sleep(0.005)
     s.close()
 
 
@@ -541,23 +814,24 @@ def test_resuming_a_long_run_reads_only_its_tail(root, key, monkeypatch):
     assert [line["seq"] for line in lines] == [1, 2, 3, 4]
 
 
-def test_a_line_the_disk_refused_half_way_is_cut_off_and_the_run_still_reads(
-    root, key, monkeypatch
-):
-    real = os.write
+def test_a_line_the_disk_refused_half_way_is_cut_off_and_the_run_still_reads(root, key, store_os):
     failed = []
 
     def half(fd, data):
-        if not failed and len(data) > 40:
+        # What a full disk does: a short write, then ENOSPC on the next one. A `write` that
+        # raises has written nothing.
+        if len(data) > 40 and not failed:
             failed.append(fd)
-            real(fd, bytes(data[:40]))
-            raise OSError(28, "No space left on device")
-        return real(fd, data)
+            return os.write(fd, bytes(data[:40]))
+        if failed == [fd]:
+            failed.append(fd)
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return os.write(fd, data)
 
     s = DirectoryStore(root, key)
     s.record(_exchange("r1", "/a"))
     _drain(s, 1)
-    monkeypatch.setattr(store.os, "write", half)
+    store_os.write = half
     s.record(_exchange("r1", "/lost"))
     s.record(_exchange("r1", "/b"))
     s.close()
@@ -596,10 +870,10 @@ def test_an_ended_run_is_forgotten_and_a_late_event_reopens_it_from_disk(root, k
     once, and to the drop before the end, never counting that one twice."""
     real = store._write_atomically
 
-    def refuse_late_blob(path: Path, data: bytes) -> None:
+    def refuse_late_blob(path: Path, data: bytes, **kwargs) -> None:
         if data in (b"early body", b"late body"):
             raise OSError("disk full")
-        real(path, data)
+        real(path, data, **kwargs)
 
     monkeypatch.setattr(store, "_write_atomically", refuse_late_blob)
     s = DirectoryStore(root, key)
@@ -670,6 +944,33 @@ def test_a_run_json_that_is_not_utf8_is_skipped_by_list_runs_not_raised(root, ke
     assert [r.run_id for r in StoreReader(root).list_runs()] == ["good"]
     with pytest.raises(TraceFormatError):
         StoreReader(root).load_run("bad")
+
+
+def test_list_runs_skips_a_run_json_that_names_another_run(root, key):
+    """`load_run` answers only the exact id its run.json names, so `list_runs` never lists a run
+    that `load_run` would call not found."""
+    s = DirectoryStore(root, key)
+    s.start_run(_record("r1"))
+    s.close()
+    (root / "runs/copy").mkdir()
+    (root / "runs/copy/run.json").write_bytes((root / "runs/r1/run.json").read_bytes())
+    assert [r.run_id for r in StoreReader(root).list_runs()] == ["r1"]
+
+
+def test_json_nested_past_the_parsers_depth_is_damage_not_a_recursion_error(root, key):
+    s = DirectoryStore(root, key)
+    s.start_run(_record("good"))
+    s.record(_exchange("deep", "/a"))
+    s.record(_exchange("deep", "/b"))
+    s.close()
+    deep = "[" * 1_000_000 + "]" * 1_000_000
+    (root / "runs/good/events.jsonl").write_text(deep + "\n" + deep + "\n")
+    (root / "runs/deep/run.json").write_text(deep)
+    reader = StoreReader(root)
+    assert [r.run_id for r in reader.list_runs()] == ["good"]
+    for run_id in ("good", "deep"):
+        with pytest.raises(TraceFormatError):
+            reader.load_run(run_id)
 
 
 def test_a_missing_blob_is_a_trace_format_error(root, key):

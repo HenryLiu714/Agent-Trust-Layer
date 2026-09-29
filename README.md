@@ -423,10 +423,10 @@ Where each feature is exercised end to end:
 | Runs under concurrency, tool calls the proxy cannot see | W3, W6 `w06_crm_db_agent` (through a stand-in, below) |
 
 Answer targets, overrides, the telemetry maps beyond W7's one LangSmith trace, and the CLI's own
-flags are not in the corpus; they
-are covered by the engine and CLI tests in `tests/`. Every new feature is driven through the real
-`irimi shadow` in the workflows its issue names, by extending their scenarios and pins, and a fix
-that flips a `LOOKS WRONG:` pin updates it in the same PR (`CONTRIBUTING.md`).
+flags are not in the corpus; they are covered by the engine and CLI tests in `tests/`. Every new
+feature is driven through the real `irimi shadow` in the workflows its issue names, by extending
+their scenarios and pins, and a fix that flips a `LOOKS WRONG:` pin updates it in the same PR
+(`CONTRIBUTING.md`).
 
 The agents already use the SDK API that Phase 3 will build (`@sdk.trigger`, `sdk.run`,
 `@sdk.tool`). Until `irimi.sdk` exists, `examples/workflows/sdk.py` stands in for it, so W3's run

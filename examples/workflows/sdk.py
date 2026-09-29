@@ -4,9 +4,17 @@ Agents write `from examples.workflows import sdk` where a real agent would write
 `from irimi import sdk`, and use the API #74 and #76 specify: `@sdk.trigger`, `sdk.run()`,
 `sdk.current_run_id()`, `sdk.propagate()`, `sdk.active()` and `@sdk.tool(kind=..., shadow=...)`.
 
-- **When `irimi.sdk` exists**, this module re-exports it. `tool` still wraps the real function and
-  its stand-in so each logs which of them ran (`agentkit.obs("tool", ...)`), because that is the
-  harness's proof that no write tool ran for real under shadow.
+- **When `irimi.sdk` exists**, this module re-exports it, name by name: each name `irimi.sdk` has
+  is the real one, and each it does not have yet is the stand-in's. #74 ships `trigger` and `run`
+  before #76 ships `tool`, and an agent that uses `@sdk.tool` must still import in that window.
+  Names this module does not define (`sdk.instrument`, `sdk.replay`, `ReplayResult`, ...) are
+  forwarded to `irimi.sdk` by the module `__getattr__`.
+  Three real names are still wrapped, for the observation log the corpus pins:
+  - `tool` wraps the real function and its stand-in so each logs which of them ran
+    (`agentkit.obs("tool", ...)`), because that is the harness's proof that no write tool ran for
+    real under shadow. The real `tool` does its own decoration-time checks on what the agent wrote.
+  - `trigger` and `run` log `run.start` and `run.end` from inside the real run, with the real
+    run id, so the pins on them hold in both modes.
 - **Until then**, it implements the same API with no control endpoint and no recording:
   - a context-variable run id that nested triggers join;
   - `agentkit.http` labelling each request with `Irimi-Run` (which irimi strips, #67);
@@ -24,40 +32,74 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import functools
+import importlib
 import inspect
 import os
 import secrets
 from collections.abc import Callable, Iterator
+from types import ModuleType
 from typing import Any, TypeVar
 
 from examples.workflows import agentkit
 
 F = TypeVar("F", bound=Callable[..., Any])
 
-try:  # pragma: no cover - which branch runs depends on whether #74 has landed
-    from irimi import sdk as _real  # type: ignore[attr-defined]
-except ImportError:
-    _real = None
+
+def _load_real() -> ModuleType | None:
+    """`irimi.sdk`, or None when it does not exist yet. Only its absence falls back: an
+    ImportError raised inside a broken `irimi.sdk` (or a dependency it lacks) propagates, so the
+    corpus never silently tests the stand-in in place of an SDK that fails to import."""
+    try:
+        return importlib.import_module("irimi.sdk")
+    except ModuleNotFoundError as exc:
+        if exc.name in ("irimi", "irimi.sdk"):
+            return None
+        raise
+
+
+_real = _load_real()
+
+
+def _from_real(name: str) -> Any:
+    """`irimi.sdk.<name>`, or None when the real SDK does not have it (yet)."""
+    return getattr(_real, name, None) if _real is not None else None
+
+
+def __getattr__(name: str) -> Any:
+    """Forward a public name this module does not define to `irimi.sdk`, so an agent can use a
+    later issue's API (`sdk.replay`, #84) without an edit here."""
+    if not name.startswith("_") and _real is not None and hasattr(_real, name):
+        return getattr(_real, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 ENGINE_ACTIVE_ENV = "IRIMI_ENGINE_ACTIVE"
 _run_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("irimi_run", default=None)
+# Under the real SDK: the real run whose `run.start` this module has logged, so a nested trigger,
+# which joins that run, logs nothing.
+_logged_run_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "irimi_logged_run", default=None
+)
 
 
 def active() -> bool:
-    if _real is not None:
-        return bool(_real.active())
+    real = _from_real("active")
+    if real is not None:
+        return bool(real())
     return os.environ.get(ENGINE_ACTIVE_ENV) == "1"
 
 
 def current_run_id() -> str | None:
-    if _real is not None:
-        return _real.current_run_id()  # type: ignore[no-any-return]
+    real = _from_real("current_run_id")
+    if real is not None:
+        return real()  # type: ignore[no-any-return]
     return _run_id.get()
 
 
 def propagate(fn: Callable[..., Any]) -> Callable[..., Any]:
-    if _real is not None:
-        return _real.propagate(fn)  # type: ignore[no-any-return]
+    real = _from_real("propagate")
+    if real is not None:
+        return real(fn)  # type: ignore[no-any-return]
     ctx = contextvars.copy_context()
 
     @functools.wraps(fn)
@@ -68,13 +110,9 @@ def propagate(fn: Callable[..., Any]) -> Callable[..., Any]:
 
 
 @contextlib.contextmanager
-def _entered(name: str) -> Iterator[None]:
-    """A run while the fallback is in use. A nested entry joins the current run."""
-    if not active() or _run_id.get() is not None:
-        yield
-        return
-    run_id = secrets.token_hex(8)
-    token = _run_id.set(run_id)
+def _logged_run(name: str, run_id: str) -> Iterator[None]:
+    """Log `run.start`, then `run.end` with how the block ended. The one place both modes log a
+    run, so the corpus's pins on these events mean the same thing in each."""
     agentkit.obs("run.start", name=name, run=run_id)
     try:
         yield
@@ -83,33 +121,73 @@ def _entered(name: str) -> Iterator[None]:
         raise
     else:
         agentkit.obs("run.end", name=name, run=run_id, outcome="ok")
+
+
+@contextlib.contextmanager
+def _entered(name: str) -> Iterator[None]:
+    """A run while the fallback is in use. A nested entry joins the current run."""
+    if not active() or _run_id.get() is not None:
+        yield
+        return
+    run_id = secrets.token_hex(8)
+    token = _run_id.set(run_id)
+    try:
+        with _logged_run(name, run_id):
+            yield
     finally:
         _run_id.reset(token)
 
 
-def trigger(fn: Callable[..., Any] | None = None, *, name: str | None = None) -> Any:
-    if _real is not None:
-        return _real.trigger(fn, name=name) if fn is not None else _real.trigger(name=name)
+@contextlib.contextmanager
+def _observed(name: str) -> Iterator[None]:
+    """Entered inside a real trigger or `run`: log the real run it started. The real SDK decides
+    whether there is a run (inactive: none) and whether this entry joined an outer one (the same
+    id this module already logged), so this only reads its id."""
+    run_id = current_run_id()
+    if run_id is None or run_id == _logged_run_id.get():
+        yield
+        return
+    token = _logged_run_id.set(run_id)
+    try:
+        with _logged_run(name, run_id):
+            yield
+    finally:
+        _logged_run_id.reset(token)
 
-    def decorate(f: Callable[..., Any]) -> Callable[..., Any]:
-        if inspect.isgeneratorfunction(f) or inspect.isasyncgenfunction(f):
-            raise TypeError(f"@sdk.trigger cannot wrap a generator: {f.__qualname__}")
-        run_name = name or f.__qualname__
-        if inspect.iscoroutinefunction(f):
 
-            @functools.wraps(f)
-            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                with _entered(run_name):
-                    return await f(*args, **kwargs)
-
-            return async_wrapper
+def _around(f: Callable[..., Any], enter: Callable[[], Any]) -> Callable[..., Any]:
+    """`f` inside the context manager `enter()` makes, keeping `f`'s signature (which #74 binds
+    the captured args against) and its sync/async nature."""
+    if inspect.iscoroutinefunction(f):
 
         @functools.wraps(f)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            with _entered(run_name):
-                return f(*args, **kwargs)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            with enter():
+                return await f(*args, **kwargs)
 
-        return wrapper
+        return async_wrapper
+
+    @functools.wraps(f)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        with enter():
+            return f(*args, **kwargs)
+
+    return wrapper
+
+
+def trigger(fn: Callable[..., Any] | None = None, *, name: str | None = None) -> Any:
+    real = _from_real("trigger")
+
+    def decorate(f: Callable[..., Any]) -> Callable[..., Any]:
+        is_generator = inspect.isgeneratorfunction(f) or inspect.isasyncgenfunction(f)
+        run_name = name or f.__qualname__
+        if real is not None:
+            # A generator goes to the real decorator as it is, for its own TypeError (#74).
+            inner = f if is_generator else _around(f, lambda: _observed(run_name))
+            return real(inner) if name is None else real(name=name)(inner)  # type: ignore[no-any-return]
+        if is_generator:
+            raise TypeError(f"@sdk.trigger cannot wrap a generator: {f.__qualname__}")
+        return _around(f, lambda: _entered(run_name))
 
     return decorate(fn) if fn is not None else decorate
 
@@ -118,37 +196,48 @@ class run:  # noqa: N801 - the SDK's spelling
     """`with sdk.run(trigger=..., name=...)` and `async with` alike."""
 
     def __init__(self, trigger: Any = None, name: str = "run") -> None:
-        self._inner: Any = _real.run(trigger=trigger, name=name) if _real is not None else None
+        real = _from_real("run")
+        self._inner: Any = real(trigger=trigger, name=name) if real is not None else None
         self._name = name
         self._cm: Any = None
 
     def __enter__(self) -> run:
         if self._inner is not None:
             self._inner.__enter__()
+            self._cm = _observed(self._name)
         else:
             self._cm = _entered(self._name)
-            self._cm.__enter__()
+        self._cm.__enter__()
         return self
 
     def __exit__(self, *exc: Any) -> Any:
-        target = self._inner if self._inner is not None else self._cm
-        return target.__exit__(*exc)
+        # The log's `run.end` first, while the real run is still current.
+        suppressed = self._cm.__exit__(*exc)
+        if self._inner is not None:
+            return self._inner.__exit__(*exc)
+        return suppressed
 
     async def __aenter__(self) -> run:
         if self._inner is not None:
             await self._inner.__aenter__()
+            self._cm = _observed(self._name)
+            self._cm.__enter__()
             return self
         return self.__enter__()
 
     async def __aexit__(self, *exc: Any) -> Any:
         if self._inner is not None:
+            self._cm.__exit__(*exc)
             return await self._inner.__aexit__(*exc)
         return self.__exit__(*exc)
 
 
 def _logged(fn: Callable[..., Any], tool_name: str, kind: str, ran: str) -> Callable[..., Any]:
     """`fn`, logging that it ran. Keeps `fn`'s signature and its sync/async nature, which #76
-    checks and binds against."""
+    checks and binds against. What #76 refuses (a stand-in that is not callable, a generator) is
+    returned as it is, so the real `tool`'s check sees what the agent wrote."""
+    if not callable(fn) or inspect.isgeneratorfunction(fn) or inspect.isasyncgenfunction(fn):
+        return fn
     if inspect.iscoroutinefunction(fn):
 
         @functools.wraps(fn)
@@ -167,13 +256,18 @@ def _logged(fn: Callable[..., Any], tool_name: str, kind: str, ran: str) -> Call
 
 
 def tool(*, kind: str, shadow: Callable[..., Any] | None = None, name: str | None = None) -> Any:
+    real = _from_real("tool")
+
     def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
         tool_name = name or f"{fn.__module__}.{fn.__qualname__}"
-        _check_tool(fn, kind, shadow)
+        if real is None:
+            _check_tool(fn, kind, shadow)
         real_fn = _logged(fn, tool_name, kind, "real")
         stand_in = _logged(shadow, tool_name, kind, "shadow") if shadow is not None else None
-        if _real is not None:
-            return _real.tool(kind=kind, shadow=stand_in, name=tool_name)(real_fn)  # type: ignore[no-any-return]
+        if real is not None:
+            # The real decorator's own decoration-time checks decide (#76); this one does not
+            # pre-empt them, so W6's `decoration_errors` tests the SDK that ships.
+            return real(kind=kind, shadow=stand_in, name=tool_name)(real_fn)  # type: ignore[no-any-return]
         if inspect.iscoroutinefunction(fn):
 
             @functools.wraps(fn)

@@ -7,7 +7,9 @@ Python 3.12+, managed with `uv`. See `docs/architecture.md` for the module map a
 ## Commands
 
 - `make check` runs everything CI runs: `ruff check`, `ruff format --check`, `mypy`, `pytest`.
-- `uv run pytest -q` for the tests alone (about ten seconds, no network, no keys).
+- `uv run pytest -q` for the tests alone (under a minute, no network, no keys).
+- `uv run pytest -q tests/workflows` for the sample-workflow corpus alone; see
+  `examples/workflows/README.md`.
 - `uv run irimi --help` for the CLI.
 
 ## Rules that tests enforce
@@ -27,3 +29,7 @@ Python 3.12+, managed with `uv`. See `docs/architecture.md` for the module map a
 - Branch per issue, `<issue-number>-<short-slug>`; PRs against `main` with `Closes #<n>`.
 - Shipped maps in `src/irimi/maps/` never set a `target:`.
 - Comments state the rule and name the issue that motivated it.
+- Every feature is tested end to end on the sample workflows, not only in unit tests: drive it
+  through the real `irimi shadow` in each workflow its issue names, by extending that workflow's
+  scenarios and pins rather than writing a new agent, and keep the five invariants holding. A fix
+  that flips a `LOOKS WRONG:` pin updates the pin and drops the marker in the same PR (#89).

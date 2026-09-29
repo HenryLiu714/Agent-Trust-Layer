@@ -134,17 +134,20 @@ def test_engine_config_carries_the_maps():
 
 def test_the_composition_root_builds_the_service_overlay_over_the_run_s_maps():
     """The overlay classifies a read against the same maps the engine does (#43): a second index
-    would let the two disagree about which service a read belongs to."""
+    would let the two disagree about which service a read belongs to. The engine records into the
+    store `_prepare_run` opened, the one `irimi shadow` starts and ends its run in (#70)."""
     from irimi.overlay import ServiceOverlay
+    from irimi.store import NullStore
 
     index = _shipped_index()
     args = argparse.Namespace(allow_host=[], port=4321)
     p = ca.ca_paths()
-    run = cli._Run(index, p, "t3st", cli._engine_config(args, index, "t3st", p))
+    run = cli._Run(index, p, "t3st", cli._engine_config(args, index, "t3st", p), NullStore())
     engine = cli._build_engine(run, on_exchange=lambda ex: None)
     assert isinstance(engine.overlay, ServiceOverlay)
     assert engine.overlay.maps is run.config.maps
     assert engine.overlay.maps is index
+    assert engine.store is run.store
 
 
 def test_engine_config_defaults_to_no_maps(tmp_path, monkeypatch):
@@ -375,3 +378,207 @@ def test_serve_and_shadow_print_the_same_startup_lines(monkeypatch):
 
     source = inspect.getsource(cli)
     assert source.count("print_startup(") == 3  # the definition plus one call each
+
+
+# ------------------------------------------------- the trace store under serve and shadow (#70)
+
+
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
+    ca.generate_ca(ca.ca_paths())
+    return tmp_path
+
+
+def _child(source: str = "pass") -> list[str]:
+    return ["--port", "0", "--", sys.executable, "-c", source]
+
+
+def _spy_on_the_store(monkeypatch, close=None):
+    """Swap the class `_open_store` builds for a real `DirectoryStore` that remembers each
+    `close()` and the thread it came from, and may do `close(store)` after the real one."""
+    import threading
+
+    from irimi.store import DirectoryStore
+
+    class _Spy(DirectoryStore):
+        closed: list[str] = []
+
+        def close(self):
+            super().close()
+            _Spy.closed.append(threading.current_thread().name)
+            if close is not None:
+                close(self)
+
+    monkeypatch.setattr("irimi.store.DirectoryStore", _Spy)
+    return _Spy
+
+
+@pytest.mark.parametrize("command", ["serve", "shadow"])
+@pytest.mark.parametrize(
+    "key", ["short", "directory", "dangling"], ids=["wrong-size", "directory", "dangling"]
+)
+def test_a_redaction_key_that_cannot_be_used_stops_the_run_with_one_line(
+    home, capsys, command, key
+):
+    """A run that could not redact what it stores must not start (#69, #70), in `serve` as in
+    `shadow`: one `error:` line, exit 1, no traceback, and no store on disk."""
+    path = home / paths.REDACT_KEY_NAME
+    if key == "short":
+        path.write_bytes(b"short")
+    elif key == "directory":
+        path.mkdir()
+    else:
+        path.symlink_to(home / "nowhere")
+    argv = [command, "--port", "0"] + (
+        ["--", sys.executable, "-c", "pass"] if command == "shadow" else []
+    )
+    assert main(argv) == 1
+    err = capsys.readouterr().err.strip().splitlines()
+    assert len(err) == 1 and err[0].startswith("error: ") and str(path) in err[0]
+    assert not (home / "store").exists()
+
+
+@pytest.mark.parametrize("command", ["serve", "shadow"])
+def test_a_store_that_cannot_be_written_stops_the_run_with_one_line(home, capsys, command):
+    """A store that would drop every event behind one warning must not start a run that looks
+    recorded (#70), in `serve` as in `shadow`: a file, and - unless root, whom no mode stops - a
+    read-only directory and one that cannot be created under it."""
+    import os
+
+    stores = [home / "ca" / "ca.pem"]
+    if os.geteuid() != 0:
+        read_only = home / "read-only"
+        read_only.mkdir(mode=0o500)
+        stores += [read_only, read_only / "below"]
+    for store in stores:
+        argv = [command, "--port", "0", "--store", str(store)]
+        if command == "shadow":
+            argv += ["--", sys.executable, "-c", "pass"]
+        assert main(argv) == 1
+        err = capsys.readouterr().err.strip().splitlines()
+        assert len(err) == 1 and err[0].startswith("error: "), err
+
+
+def test_shadow_stores_its_process_run_with_the_agent_and_engine_versions(home, monkeypatch):
+    """The process run's record (#70): its argv, which a replay runs again, the agent's version
+    from `IRIMI_AGENT_VERSION`, this irimi's version, and how the child exited."""
+    from irimi import runner
+    from irimi.store import StoreReader
+    from irimi.trace import ErrorInfo
+
+    monkeypatch.setenv(runner.AGENT_VERSION_ENV, "agent-2.0.1")
+    assert main(["shadow", *_child("raise SystemExit(3)")]) == 3
+    (record,) = StoreReader(home / "store").list_runs()
+    assert (record.attribution, record.mode) == ("process", "shadow")
+    assert record.trigger is not None
+    assert record.trigger.args == {"argv": [sys.executable, "-c", "raise SystemExit(3)"]}
+    assert (record.agent_version, record.engine_version, record.sdk_version) == (
+        "agent-2.0.1",
+        __version__,
+        None,
+    )
+    assert (record.outcome, record.exit_code, record.error) == (
+        "error",
+        3,
+        ErrorInfo("exit", "exited 3"),
+    )
+    assert record.started_at is not None and record.ended_at is not None
+    assert record.started_at <= record.ended_at
+    assert len(record.run_id) == 16
+
+
+def test_shadow_closes_the_store_when_the_proxy_never_starts(home, monkeypatch, capsys):
+    """`cli` opened the store, so `cli` closes it on every path out (#70), and not only when an
+    engine thread got far enough to close it for it: one that never started, or outlived
+    `handle.stop()`, did not."""
+    from irimi import runner
+    from irimi.engine import EngineStartError
+
+    spy = _spy_on_the_store(monkeypatch)
+
+    def refuse(engine, timeout=runner.READY_TIMEOUT_S):
+        raise EngineStartError("proxy did not start on 127.0.0.1:0: refused by the test")
+
+    monkeypatch.setattr(runner, "start_engine", refuse)
+    assert main(["shadow", *_child()]) == 1
+    assert "refused by the test" in capsys.readouterr().err
+    assert spy.closed != []
+    assert list((home / "store").iterdir()) == []  # no run began, so none is on disk
+
+
+def test_a_ctrl_c_while_the_store_closes_still_prints_the_summary(home, monkeypatch, capsys):
+    """The impatient second Ctrl-C of `handle.stop()` can land in the store's close as well, which
+    waits up to `store.CLOSE_TIMEOUT_S` for the writer. It must not cost the summary or the
+    child's exit code (#70)."""
+    import threading
+
+    def interrupt(store):
+        if threading.current_thread() is threading.main_thread():
+            raise KeyboardInterrupt
+
+    _spy_on_the_store(monkeypatch, close=interrupt)
+    try:
+        code = main(["shadow", *_child()])
+    except KeyboardInterrupt:  # caught here, or it would stop the whole pytest session
+        pytest.fail("a Ctrl-C in the store's close escaped `irimi shadow`")
+    assert code == 0
+    assert "0 exchanges · 0 live" in capsys.readouterr().out
+
+
+def test_serve_records_under_the_store_it_was_given(home, monkeypatch):
+    """`--store` on `serve` is where its exchanges go, not `$IRIMI_HOME/store` (#70). `serve`
+    starts no process run (#77 owns serve mode), so its exchanges make a `header` run, and the
+    store is closed when `serve` stops."""
+    import asyncio
+    import threading
+    import urllib.request
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from irimi.store import StoreReader
+
+    class _Hello(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("content-length", "5")
+            self.end_headers()
+            self.wfile.write(b"hello")
+
+        def log_message(self, *args):
+            pass
+
+    upstream = HTTPServer(("127.0.0.1", 0), _Hello)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    engines = []
+    build = cli._build_engine
+    monkeypatch.setattr(
+        cli, "_build_engine", lambda run, cb: engines.append(build(run, cb)) or engines[-1]
+    )
+    got = []
+
+    def drive(port):
+        proxy = urllib.request.ProxyHandler({"http": f"http://127.0.0.1:{port}"})
+        url = f"http://127.0.0.1:{upstream.server_address[1]}/hello"
+        try:
+            got.append(urllib.request.build_opener(proxy).open(url, timeout=10).read())
+        finally:  # stop `serve` whatever happened, or the test would wait on it forever
+            loop.call_soon_threadsafe(engines[0].shutdown)
+
+    def startup(mode, args, index, run_id, host, port, cert):
+        nonlocal loop
+        loop = asyncio.get_running_loop()
+        threading.Thread(target=drive, args=(port,), daemon=True).start()
+
+    loop = None
+    monkeypatch.setattr(cli, "print_startup", startup)
+    elsewhere = home / "elsewhere"
+    try:
+        assert main(["serve", "--port", "0", "--store", str(elsewhere)]) == 0
+    finally:
+        upstream.shutdown()
+    assert got == [b"hello"]
+    assert not (home / "store").exists()
+    (record,) = StoreReader(elsewhere).list_runs()
+    assert record.attribution == "header" and record.outcome is None
+    stored = StoreReader(elsewhere).load_run(record.run_id)
+    assert [(ex.request.path, ex.response.body) for ex in stored.events] == [("/hello", b"hello")]

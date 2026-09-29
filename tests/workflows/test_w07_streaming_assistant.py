@@ -4,9 +4,15 @@ The agent forwards Anthropic's text deltas to its own caller as they arrive, and
 OpenAI tool call from its deltas. Streams are read seven bytes at a time, so every event is split.
 """
 
+import json
+
 from examples.workflows.w07_streaming_assistant.scenarios import ANSWER, CHANNEL, SECRET
+from irimi import trace
+from irimi.exchange import Exchange
+from irimi.trace import TelemetrySeen
 
 W = "w07_streaming_assistant"
+TRACE_LINE = "live      telemetry POST api.smith.langchain.com/runs -> 202"
 LLM_LINES = [
     "live      llm       POST api.openai.com/v1/embeddings -> 200",
     "live      llm       POST api.anthropic.com/v1/messages -> 200",
@@ -22,16 +28,46 @@ def test_both_streams_pass_through_irimi_whole_and_unchanged(run_workflow):
     assert result["outcome"] == "ok"
     assert result["caller_text"] == result["answer"] == ANSWER
     assert result["caller_events"][0] == "start" and result["caller_events"][-1] == "done"
-    # Every model call is forwarded live, streamed or not, and none is stamped.
-    assert shadow.exchange_lines() == LLM_LINES
-    assert [c["answered_by"] for c in shadow.calls()] == [None, None, None]
+    # Every model call is forwarded live, streamed or not, and none is stamped; so is the trace.
+    assert shadow.exchange_lines() == [*LLM_LINES, TRACE_LINE]
+    assert [c["answered_by"] for c in shadow.calls()] == [None, None, None, None]
+
+
+def test_a_telemetry_post_is_stored_as_having_happened_and_its_body_is_not(run_workflow):
+    """Telemetry is forwarded and its requests and responses are never stored (#70): the trace
+    POST is one `TelemetrySeen` line, host and time, and no blob holds its body."""
+    shadow = run_workflow(W, "normal", "shadow")
+    [trace_call] = shadow.calls("trace")
+    assert (trace_call["status"], trace_call["answered_by"]) == (202, None)
+    [sent] = shadow.internet.requests("api.smith.langchain.com")
+    assert json.loads(sent.body)["inputs"] == {"question": "How do refunds work?"}
+    seen = [e for e in shadow.stored_events() if isinstance(e, TelemetrySeen)]
+    assert [e.host for e in seen] == ["api.smith.langchain.com"]
+    blobs = shadow.home / "store" / "blobs"
+    assert trace.body_ref(sent.body).sha256 not in {p.name for p in blobs.iterdir()}
+
+
+def test_a_streamed_answer_is_stored_with_its_request_and_no_body_until_71(run_workflow):
+    """The engine streams an SSE answer through and never assembles it (#28), so the store keeps
+    the exchange - its request body, status and headers - with the answer's body empty, until #71
+    records streamed bodies. The embeddings answer, which is not streamed, is stored whole."""
+    shadow = run_workflow(W, "normal", "shadow")
+    stored = {e.request.path: e for e in shadow.stored_events() if isinstance(e, Exchange)}
+    assert sorted(stored) == ["/v1/chat/completions", "/v1/embeddings", "/v1/messages"]
+    for path in ("/v1/chat/completions", "/v1/messages"):
+        response = stored[path].response
+        assert response is not None and (response.status, response.body) == (200, b"")
+        assert (response.header("content-type") or "").startswith("text/event-stream")
+        assert json.loads(stored[path].request.body)["stream"] is True
+    embeddings = stored["/v1/embeddings"].response
+    assert embeddings is not None and json.loads(embeddings.body)["data"]
 
 
 def test_a_secret_inside_a_stream_reaches_the_caller_intact_and_never_disk(run_workflow):
-    """Redaction is for disk only (#69): the live stream is never rewritten. The store is still
-    `NullStore`, so nothing is on disk to find today; once #70 and #71 record SSE bodies, this is
-    the scenario that proves the secret is redacted there. The secret is not one of the harness's
-    canaries, so invariant 4 does not look for it: this test does."""
+    """Redaction is for disk only (#69): the live stream is never rewritten. The store keeps a
+    streamed body empty (#28), so nothing of the stream is on disk to find today; once #71
+    records SSE bodies, this is the scenario that proves the secret is redacted there. The secret
+    is not one of the harness's canaries, so invariant 4 does not look for it: this test does."""
     shadow = run_workflow(W, "secret_in_stream", "shadow")
     assert SECRET in shadow.result()["caller_text"]
     assert shadow.exchange_lines() == LLM_LINES
@@ -80,6 +116,14 @@ def test_an_upstream_reset_mid_stream_reaches_the_agent_as_a_clean_end(run_workf
     ]
     assert shadow.exchange_lines() == LLM_LINES[:2]
     assert shadow.result()["caller_events"] == ["start", "error"]
+    # LOOKS WRONG: and it is stored that way (#70): a 200 with no flag, as a whole stream is.
+    [stream] = [
+        e
+        for e in shadow.stored_events()
+        if isinstance(e, Exchange) and e.request.host == "api.anthropic.com"
+    ]
+    assert stream.response is not None
+    assert (stream.response.status, stream.response.body, stream.flags) == (200, b"", ())
 
 
 def test_a_reset_before_the_stream_opens_reaches_the_agent_as_an_unstamped_502(run_workflow):

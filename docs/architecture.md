@@ -29,8 +29,9 @@ per flow. Each hook calls plain functions from the layers below it, in this orde
    how a service learns the real values its fakes have to sort against (Slack's `ts`); a service
    with no observer is a no-op. Then, for a live, unstreamed read, the `Overlay` gets a chance to
    rewrite the body from the write log. `pipeline.annotate` builds the `Exchange`, writes join
-   the write log, `pipeline.respond` stamps the header, and `_finish` records it in the
-   `TraceStore` (telemetry excepted) and reports it to the CLI.
+   the write log, `pipeline.respond` stamps the header, and `_finish` hands it to the
+   `TraceStore` - which keeps a telemetry exchange only as a count (#70) - and reports it to the
+   CLI.
 4. **`error`** - a lost upstream or an unreachable target is annotated with the right flag and
    recorded with no response, so a failed write is never silently dropped from the trace.
 
@@ -62,11 +63,11 @@ you to place it.
 | 4 | `reader` | `Reader`, `NoReader`, `UpstreamReader`: the one real read L3 issues, and shadow mode's reader over stdlib urllib (#45). |
 | 5 | `policy` | `AnswerPolicy` and `ShadowPolicy`: the decision, and only the decision. Part of deciding a mapped write is L3 (#45): the precondition's one real read goes through `reader.Reader`, and the policy returns that read, marked `issued_by: engine`, on the `Answer` for the engine to record. Also the idempotency lookup (#46), which sits between the live-kind check and L3 and finds a write's slot with `idempotency.slot_for`: a retry with a key this run has already answered returns the first answer and issues no precondition read, and a key reused with different parameters is answered with the service's own `idempotency_error`. The accepted local fake, the one path left after all of those, is the only `Answer` that carries its route's `fires:` as `would_fire` (#47). |
 | 5 | `overlay` | The `Overlay` seam and `ServiceOverlay`, which applies `services`' effect tables to a live read and translates a cursor naming a minted id before the read is forwarded. `NoOverlay` stays, for tests and for a mode with no overlay. The module's header lists the two hazards every overlay must respect. It may also replace a response's STATUS, which only a read of a minted object ever asks for: Stripe answers `GET /v1/refunds/{minted}` with a 404 and Slack answers a minted thread with `thread_not_found` at 200, and both are answered from the write log instead (#52). |
-| 5 | `store` | The `TraceStore` seam. `NullStore` today; Phase 3 replaces it. |
+| 5 | `store` | The trace store (#70). `TraceStore` is the seam: `start_run`, `record`, `record_tool_call`, `end_run`, `close`, none of which may raise. `DirectoryStore` writes the layout in `docs/trace-format.md`: each public method only enqueues onto a bounded queue and returns, and one daemon writer thread redacts (`redact`), hashes and writes, so a hook never blocks on disk. A full queue or a failed write drops the event and counts it on the store (`stats()`) and on its run (`dropped_events`). The queue is bounded in items and in body bytes, a body too big to redact is never queued, and a run's state is forgotten when it ends, so a `serve` running for weeks stays bounded. Everything it writes is `0700`/`0600`. A run id the store cannot use as a directory - one `trace.is_valid_run_id` refuses, or one differing only in case from a run already on a case-insensitive filesystem - is stored in `unattributed/` and flagged `bad-run-id`. `StoreReader` reads it back. `NullStore` keeps nothing. |
 | 6 | `engine` | The `Engine` protocol and `EngineConfig`. `engine/mitm.py` is the only mitmproxy-backed implementation and the only module that imports mitmproxy. |
 | 7 | `report` | Everything a run prints: banner, per-exchange line, exit summary. Pure text. A write line's fidelity is derived from `answered_by` and `precondition` together in one place (`_fidelity`), so `L3 preconditions passed`, `L2` and `✗ ... would fail: <code>` cannot drift apart (#45), and a replayed write is not printed or counted a second time (#46). Each of the agent's own reads that the overlay edited or flagged `partial` hangs as a `↳` line under the most recent write of its own service that the overlay could have shown it - `exchange.is_authored_write`, the write log's own rule, so a refused write is printed but never has a read under it - read off `Exchange.overlay` and not `answered_by` alone (#43, #48): `saw it  overlay` for a body irimi edited, `saw it in part  overlay (partial)` for one it edited knowing the world it showed was incomplete, and `did not show it  live (partial)` for one it left untouched knowing the same. A read irimi only translated stays `live` with `overlay: full` and gets no line. The closing `Would have fired:` clause is built from `Exchange.would_fire`, never from `route.fires`, so a rejected, conflicting, replayed or delegated write lists nothing (#47). In the per-host block an engine-issued read is its own phrase and stays out of the headline `N reads` and its `(M showing this run's writes)` bracket, which mean the reads the agent made (#45, #48). An amount is formatted from the request's own currency first and from `Exchange.currency` second - the code the write's L3 read found - and from nothing else, so an amount irimi cannot denominate prints as it was sent (#60). |
-| 7 | `runner` | Process plumbing for `irimi shadow`: the child's environment and the engine thread. |
-| 8 | `cli` | argparse and the composition root. `_build_engine` is the one place the concrete engine, policy, store and overlay meet. |
+| 7 | `runner` | Process plumbing for `irimi shadow`: the child's environment, the engine thread, and the process run's record (`process_run`, `end_process_run`, #70). |
+| 8 | `cli` | argparse and the composition root. `_prepare_run` opens the trace store under `--store` with this install's redaction key, and `_build_engine` is the one place the concrete engine, policy, store and overlay meet. |
 
 `src/irimi/maps/*.yaml` are the shipped service maps. They are data, contributable without
 touching Python, and `tests/test_servicemap.py` pins their contents.
@@ -94,7 +95,11 @@ without a proxy:
   an `Overlaid`: the response the agent should see, and how much of the write log that read could
   express. Its request side, `rewrite`, translates a read before it is forwarded. Both are pure
   functions of their arguments, so Phase 5 replay applies them over recorded reads.
-- **`store.TraceStore`** - where finished exchanges go. Phase 3.
+- **`store.TraceStore`** - where a run's record, its exchanges and its tool calls go (#70).
+  `irimi shadow` starts its process run before spawning the child and ends it with the child's
+  exit code; an exchange whose run has no start creates a `header` run. No method may raise or
+  block: `record` is called from mitmproxy's hooks. `DirectoryStore` is the only real store, and
+  Phase 5's replay reads what it wrote with `StoreReader`.
 
 ## Rules the code holds itself to
 
@@ -130,8 +135,14 @@ twice - once where a configuration is loaded and again at the decision it protec
   own copy of each exchange with `redact.redact_exchange`; the engine and the agent's answer never
   see a placeholder. A part that cannot be redacted is stored as `<redaction-failed>`, never as it
   was (#69).
-- **Telemetry is forwarded and never stored.** A trace of the agent's own observability traffic
-  is noise, and replaying it would re-emit someone else's events.
+- **A recording failure never affects traffic** (design §5.2). No `TraceStore` method may raise
+  or block: `DirectoryStore` only enqueues, and drops and counts what it cannot write. `_finish`
+  guards the call anyway, so a store that breaks the contract costs the exchange its record, never
+  the hook, the terminal line or the summary (#70).
+- **Telemetry is forwarded and its requests and responses are never stored.** One line per
+  exchange records only that it happened and to which host, so a stored run's summary can count
+  it. A trace of the agent's own observability traffic is noise, and replaying it would re-emit
+  someone else's events (#70).
 - **L0 is the floor.** A route with no `fixture:`, and a fixture this install cannot read, are
   both answered with the L0 echo rather than refused - the second carries `fixture-failed`, so
   the trace never claims a fidelity the answer did not have.
@@ -171,9 +182,14 @@ $IRIMI_HOME/            default ~/.irimi
   ca/ca.pem             the CA certificate the child process is told to trust
   mitm/mitmproxy-ca.pem key + cert, the bundle mitmproxy mints leaf certificates from
   redact.key            the redaction HMAC key (0600), created on first use (#69)
+  store/                the trace store, unless --store names another (#70):
+    blobs/<sha256>        a redacted body, written once
+    runs/<run_id>/        run.json and events.jsonl, one directory per run
+    unattributed/         events.jsonl for events no usable run id claimed
   maps.yaml             optional: the user's overrides file (targets only)
 ./irimi.maps.yaml       optional: a per-project overrides file; wins over the one above
 ```
 
 No config file chooses the mode. `irimi serve` and `irimi shadow` are the mode; one process tree
-is one run; the child learns the run id from `IRIMI_RUN`.
+is one run, stored as the `process` run; the child learns the run id, 16 hex characters, from
+`IRIMI_RUN`.

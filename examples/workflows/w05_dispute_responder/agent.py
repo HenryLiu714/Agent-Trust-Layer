@@ -6,8 +6,9 @@ argument, as they are in any webhook handler that verifies before it parses.
 
 On `charge.dispute.created` it:
 
-1. reads the dispute (`/v1/disputes/{id}`, a route the Stripe map does not name), the charge, and
-   the customer;
+1. reads the dispute (`/v1/disputes/{id}`, a route the Stripe map does not name), the charge, the
+   payment intent, whose description names the order and which Stripe returns with its
+   `client_secret`, a credential, and the customer;
 2. asks the model to draft evidence;
 3. tags the customer (`POST /v1/customers/{id}` metadata) and alerts `#disputes` on Slack;
 4. refunds the charge in full when the dispute is under $20, because fighting it costs more.
@@ -62,9 +63,12 @@ def on_event(raw: bytes, signature: str) -> str:
 def _respond(dispute_id: str) -> str:
     dispute = agentkit.stripe("GET", f"/v1/disputes/{dispute_id}", label="dispute").json()
     charge = agentkit.stripe("GET", f"/v1/charges/{dispute['charge']}", label="charge").json()
+    intent = agentkit.stripe(
+        "GET", f"/v1/payment_intents/{dispute['payment_intent']}", label="payment_intent"
+    ).json()
     customer_id = charge["customer"]
     customer = agentkit.stripe("GET", f"/v1/customers/{customer_id}", label="customer").json()
-    evidence = _draft_evidence(dispute, customer)
+    evidence = _draft_evidence(dispute, intent, customer)
     agentkit.stripe(
         "POST",
         f"/v1/customers/{customer_id}",
@@ -96,10 +100,15 @@ def _respond(dispute_id: str) -> str:
     return action
 
 
-def _draft_evidence(dispute: dict[str, Any], customer: dict[str, Any]) -> str:
+def _draft_evidence(
+    dispute: dict[str, Any], intent: dict[str, Any], customer: dict[str, Any]
+) -> str:
+    facts = (
+        f"reason={dispute['reason']} order={intent.get('description')} customer={customer['email']}"
+    )
     message = agentkit.anthropic(
         "Draft dispute evidence for a card network. Two sentences.",
-        [{"role": "user", "content": f"reason={dispute['reason']} customer={customer['email']}"}],
+        [{"role": "user", "content": facts}],
         max_tokens=512,
         label="llm",
     )

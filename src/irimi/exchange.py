@@ -91,6 +91,15 @@ IDEMPOTENCY_FLAGS: tuple[str, ...] = (IDEMPOTENT_REPLAY_FLAG, IDEMPOTENCY_CONFLI
 # in its place (#69). Set only on the copy `redact.redact_exchange` makes for disk, never on the
 # exchange the engine answered with: the live flow is never redacted.
 REDACTION_FAILED_FLAG = "redaction-failed"
+# The trace store kept only the first `store.MAX_STORED_BODY` bytes of this exchange's request or
+# response body (#70). A decoded Exchange carries a body's bytes and not its ref's `truncated`, so
+# without this flag a stored run could not tell a cut body from a whole one. Set only on the copy
+# the store writes, never on the exchange the engine answered with.
+BODY_TRUNCATED_FLAG = "body-truncated"
+# The trace store could not use this exchange's run id as a directory name, so it is stored in
+# `unattributed/` (#70): an id `trace.is_valid_run_id` refuses, or one that differs only in case
+# from a run already on a case-insensitive filesystem. Set only on the copy the store writes.
+BAD_RUN_ID_FLAG = "bad-run-id"
 
 # The fidelity flag each way of answering carries. One mapping rather than a branch per caller:
 # the policy reads it, and `tests/test_exchange.py` holds it exhaustive over the non-live values.

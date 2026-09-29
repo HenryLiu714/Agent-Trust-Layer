@@ -7,6 +7,7 @@ import pytest
 import yaml
 
 from examples.workflows.w08_orchestrator.scenarios import SUBAGENT_MAP, UNJUSTIFIED_MAP
+from irimi.exchange import Exchange
 from irimi.servicemap.loader import MapError, parse_service
 
 W = "w08_orchestrator"
@@ -81,6 +82,9 @@ def test_a_post_read_without_persists_false_is_refused_and_nothing_runs(run_work
     assert shadow.exit_code == 1
     assert shadow.obs == []
     assert shadow.internet.requests() == []
+    # Refused before the store is opened (#70): no run, no store, not even a redaction key. The
+    # CA is the harness's own, made before irimi starts.
+    assert sorted(path.name for path in shadow.home.iterdir()) == ["ca"]
     assert run_workflow(W, "map_refused", "bare").exit_code == 0
 
 
@@ -114,3 +118,24 @@ def test_every_sub_agent_call_joins_its_parents_run(run_workflow):
         assert sorted(labels) == ["charges", "inventory", "quote", "reserve"]
     assert {e["outcome"] for e in shadow.events("run.end")} == {"ok"}
     assert shadow.result()["reserved"] == 2
+    # Stored the same way (#70): each orchestrator run is a `header` run holding its own four
+    # calls, the sub-agents' included, and the process run holds none of them.
+    reader = shadow.stored()
+    records = {r.run_id: r.attribution for r in reader.list_runs()}
+    assert sorted(records.values()) == ["header", "header", "process"]
+    assert {run_id for run_id, a in records.items() if a == "header"} == runs
+    for run_id, attribution in records.items():
+        paths = [
+            (e.request.method, e.request.host, e.request.path)
+            for e in reader.load_run(run_id).events
+            if isinstance(e, Exchange)
+        ]
+        if attribution == "process":
+            assert paths == []
+            continue
+        assert sorted(paths) == [
+            ("GET", "api.stripe.com", "/v1/charges"),
+            ("GET", HOST, "/inventory"),
+            ("POST", HOST, "/quote"),
+            ("POST", HOST, "/reservations"),
+        ]

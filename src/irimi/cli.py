@@ -2,17 +2,18 @@ import argparse
 import secrets
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from irimi import __version__, paths
 
 if TYPE_CHECKING:  # the quoted annotations below; no runtime import
     import subprocess
-    from pathlib import Path
 
     from irimi.ca import CAPaths
     from irimi.engine import Engine, EngineConfig, OnExchange
     from irimi.servicemap import MapIndex
+    from irimi.store import TraceStore
 
 SIGINT_EXIT_CODE = 130  # 128 + SIGINT, the shell convention for a Ctrl-C'd command
 
@@ -104,6 +105,13 @@ def _add_engine_args(parser: argparse.ArgumentParser) -> None:
         metavar="HOST",
         help="let an answer target name HOST instead of loopback. This sends the agent's "
         "requests off this machine; targets are loopback-only without it (repeatable)",
+    )
+    parser.add_argument(
+        "--store",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="where to record runs, redacted (default: $IRIMI_HOME/store)",
     )
 
 
@@ -292,12 +300,14 @@ class _Run:
     ca: "CAPaths"
     run_id: str
     config: "EngineConfig"
+    store: "TraceStore"
 
 
 def _prepare_run(args: argparse.Namespace) -> _Run | None:
-    """Load the maps and find the CA, or print why not and return None.
+    """Load the maps, find the CA and open the trace store, or print why not and return None.
 
-    Fail closed: without both, no engine starts and no child is spawned.
+    Fail closed: without all three, no engine starts and no child is spawned. The store is opened
+    last, so a run refused for its maps or its CA leaves nothing on disk.
     """
     from irimi import ca
 
@@ -308,21 +318,39 @@ def _prepare_run(args: argparse.Namespace) -> _Run | None:
     if not ca.ca_exists(p):
         print(f"error: no CA at {p.key.parent}. Run `irimi init` first.", file=sys.stderr)
         return None
-    run_id = secrets.token_hex(2)
-    return _Run(index, p, run_id, _engine_config(args, index, run_id, p))
+    store = _open_store(args)
+    if store is None:
+        return None
+    # 16 hex characters: the run id is a directory name in the store, and must not collide with
+    # another run's across months of them (#70).
+    run_id = secrets.token_hex(8)
+    return _Run(index, p, run_id, _engine_config(args, index, run_id, p), store)
+
+
+def _open_store(args: argparse.Namespace) -> "TraceStore | None":
+    """The trace store under `--store`, default `$IRIMI_HOME/store`, or None after printing why
+    this install's redaction key or the store's directory cannot be used (#69, #70). A run that
+    could not redact what it stores, or would drop every event unseen, must not start."""
+    from irimi import redact
+    from irimi.store import DirectoryStore
+
+    try:
+        return DirectoryStore(args.store or paths.store_dir(), redact.load_key(paths.irimi_home()))
+    except (redact.RedactKeyError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return None
 
 
 def _build_engine(run: _Run, on_exchange: "OnExchange") -> "Engine":
     """The composition root: the one place the concrete engine, policy, store and overlay meet.
 
-    Phase 2 swapped `NoOverlay` for the real overlay here in #43, and Phase 3 still swaps
-    `NullStore` for the directory store here, and nowhere else.
+    Phase 2 swapped `NoOverlay` for the real overlay here in #43, and Phase 3 swapped `NullStore`
+    for the directory store `_prepare_run` opens (#70).
     """
     from irimi.engine.mitm import MitmEngine
     from irimi.overlay import ServiceOverlay
     from irimi.policy import ShadowPolicy
     from irimi.reader import UpstreamReader
-    from irimi.store import NullStore
 
     # The overlay is built with the same maps the engine classifies against, because it has to
     # ask the same question of a read - which service, which operation - and there is one place
@@ -332,7 +360,7 @@ def _build_engine(run: _Run, on_exchange: "OnExchange") -> "Engine":
         # The reader is the real upstream, chosen here and nowhere else: Phase 5's replay policy
         # gets a reader over the recording at this same line (#45).
         ShadowPolicy(reader=UpstreamReader(), maps=run.config.maps),
-        NullStore(),
+        run.store,
         ServiceOverlay(run.config.maps),
         on_exchange=on_exchange,
     )
@@ -375,6 +403,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
     except (RuntimeError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    finally:
+        _close_store(run.store)
     return 0
 
 
@@ -413,23 +443,34 @@ def cmd_shadow(args: argparse.Namespace) -> int:
         # A timeout from the ready future carries no message of its own.
         reason = str(exc) or f"proxy did not start within {runner.READY_TIMEOUT_S:.0f}s"
         print(f"error: {reason}", file=sys.stderr)
+        _close_store(run.store)
         return 1  # fail closed: the child is never spawned without the proxy
     except KeyboardInterrupt:
         print("error: interrupted before the proxy was ready.", file=sys.stderr)
+        _close_store(run.store)
         return SIGINT_EXIT_CODE
 
+    started_run = False
+    code = SIGINT_EXIT_CODE
     try:
         host, port = run.config.listen_host, handle.port()
         print_startup("shadow", args, run.index, run.run_id, host, port, run.ca.cert)
         env = runner.child_env(dict(os.environ), host, port, run.ca.cert, run.run_id)
+        # The process run is stored before the child exists, so every exchange it makes lands in
+        # a run that already has its record (#70).
+        agent_version = os.environ.get(runner.AGENT_VERSION_ENV)
+        run.store.start_run(runner.process_run(run.run_id, cmd, agent_version, time.time()))
+        started_run = True
         try:
             proc = subprocess.Popen(cmd, env=env)
         except FileNotFoundError:
             print(f"error: command not found: {cmd[0]}", file=sys.stderr)
-            return 127
+            code = 127
+            return code
         except OSError as exc:
             print(f"error: could not run {cmd[0]}: {exc}", file=sys.stderr)
-            return 126
+            code = 126
+            return code
         # The summary's duration is the child's, not the proxy's: what the reader wants to know is
         # how long the agent ran. monotonic, so a clock change mid-run cannot make it negative.
         started = time.monotonic()
@@ -438,15 +479,34 @@ def cmd_shadow(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:  # Ctrl-C outside _wait_for_child's own handling
         code = SIGINT_EXIT_CODE
     finally:
+        # The run ends before the engine stops, because stopping the engine closes the store.
+        # An exchange that finishes after this line is still recorded: a late event is not an
+        # error (#70).
+        if started_run:
+            runner.end_process_run(run.store, run.run_id, code, time.time())
         # An impatient second Ctrl-C lands here, while the engine thread is being joined.
         try:
             handle.stop()
         except KeyboardInterrupt:
             pass
+        _close_store(run.store)
 
     for line in report.summary_lines(run.run_id, exchanges, elapsed, run.index):
         print(line, flush=True)
     return code
+
+
+def _close_store(store: "TraceStore") -> None:
+    """Close the store `_prepare_run` opened, on every path out of `serve` and `shadow` (#70).
+
+    The engine closes it too, when it stops. This does not rely on that: an engine that never
+    started, or whose thread outlived `handle.stop()`, has not, and a second close waits out the
+    first. An impatient Ctrl-C here, as in `handle.stop()`, may cut the writer's last seconds
+    short, and never costs the summary."""
+    try:
+        store.close()
+    except KeyboardInterrupt:
+        pass
 
 
 def _wait_for_child(proc: "subprocess.Popen[bytes]") -> int:

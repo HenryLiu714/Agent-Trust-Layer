@@ -28,3 +28,11 @@ DEFAULT_PORT = 4000
 def mitm_dir() -> Path:
     """mitmproxy's confdir: holds the key+cert bundle mitmproxy mints leaf certs from."""
     return irimi_home() / MITM_DIR_NAME
+
+
+STORE_DIR_NAME = "store"
+
+
+def store_dir() -> Path:
+    """Where `irimi serve` and `irimi shadow` keep the trace store unless `--store` says (#70)."""
+    return irimi_home() / STORE_DIR_NAME

@@ -25,9 +25,10 @@ What works today, all of it covered by tests that need no network and no keys:
   SDKs that ignore proxy variables.
 - Eleven sample agent workflows run end to end, bare and under `irimi shadow`, on every test run.
 
-What does not exist yet: the SDK (`irimi.sdk`), the on-disk trace store, `irimi shadow --serve`,
-replay and `irimi compare`. The trace format and redaction that the store will use are written and
-tested but nothing writes to disk yet. See [Roadmap](#roadmap).
+Every `serve` and `shadow` run is recorded, redacted, in the trace store under `$IRIMI_HOME/store`
+([`docs/trace-format.md`](docs/trace-format.md)); no command reads it back yet (#72). What does not
+exist yet: the SDK (`irimi.sdk`), `irimi shadow --serve`, replay and `irimi compare`. See
+[Roadmap](#roadmap).
 
 ## Quickstart
 
@@ -303,8 +304,9 @@ routes:
   token counting) are forwarded live and counted in their own bucket. Everything else on those
   hosts is unmapped on purpose, so `/v1/files` or `/v1/batches` is faked, not sent. A
   `text/event-stream` response is streamed through token by token and never rewritten.
-- `telemetry` is forwarded live in every mode and is never handed to the trace store: a recording
-  of the agent's own tracing is noise, and replaying it would re-emit someone else's events.
+- `telemetry` is forwarded live in every mode. The trace store keeps only that it happened and to
+  which host, never its request or response: a recording of the agent's own tracing is noise, and
+  replaying it would re-emit someone else's events.
 - `default_kind:` may be `write` or `unknown` only. No shipped map sets it.
 
 `CONTRIBUTING.md` has the checklist for adding a map.
@@ -372,10 +374,15 @@ irimi shadow [options] -- CMD     run CMD with its HTTP(S) traffic in shadow mod
 irimi maps list                   print each mapped host, its service, route count and target
 ```
 
-`serve` and `shadow` take `--port`, `--allow-host HOST`, `--target SPEC`, `--target-reads HOST`
-and `--allow-target-host HOST`; all but `--port` repeat. `serve` prints one line per exchange and
-no summary. A map, overrides file or `--target` the loader refuses stops `serve` and `shadow` before
-the proxy starts, with the rule it broke on stderr. `IRIMI_HOME` moves irimi's state (see
+`serve` and `shadow` take `--port`, `--store DIR`, `--allow-host HOST`, `--target SPEC`,
+`--target-reads HOST` and `--allow-target-host HOST`; the last four repeat. Every run is recorded,
+redacted, under `--store` (default `$IRIMI_HOME/store`). `shadow` stores its command as one
+`process` run with the command's exit code, and the agent's version when `IRIMI_AGENT_VERSION` is
+set. `serve` starts no run of its own: an exchange is stored under the run its `Irimi-Run` names, or
+else under the id `serve` printed, and the store is closed on Ctrl-C but not yet on SIGTERM (#77).
+`serve` prints one line per exchange and no summary. A map, overrides file or `--target` the loader
+refuses stops `serve` and `shadow` before the proxy starts, with the rule it broke on stderr, and so
+does a redaction key or `--store` irimi cannot use. `IRIMI_HOME` moves irimi's state (see
 `.env.example`).
 
 To install irimi as a standalone tool instead of using the venv, run `uv tool install .` or
@@ -412,16 +419,18 @@ Where each feature is exercised end to end:
 | The overlay: paging past a minted refund, reads that see a write | W2 `w02_nightly_reconcile`, W3 `w03_queue_worker` |
 | Slack: minted threads, names versus ids, `missing_scope`, archived channels, webhooks | W4 `w04_slack_ops_bot` |
 | Would-have-fired webhooks, a signed inbound webhook | W5 `w05_dispute_responder` |
-| SSE streaming, resets mid-stream | W7 `w07_streaming_assistant` |
+| SSE streaming, resets mid-stream, telemetry stored as a count | W7 `w07_streaming_assistant` |
+| The trace store: one process run per scenario, header runs, redaction on disk | every workflow (`tests/workflows/test_stored_runs.py`), W2, W3; a credential in a live response, W5 |
 | Unmapped internal services, a map the loader refuses, `Irimi-Run` across a hop | W8 `w08_orchestrator` |
 | Upstream failures: 429, 500, timeouts, resets, a failed L3 read, a killed run | W10 `w10_flaky_upstream` |
 | What irimi cannot see: clients that bypass the proxy, loopback services | W11 `w11_leaky_agent` |
 | Runs under concurrency, tool calls the proxy cannot see | W3, W6 `w06_crm_db_agent` (through a stand-in, below) |
 
-Answer targets, overrides, the telemetry maps and the CLI's own flags are not in the corpus; they
-are covered by the engine and CLI tests in `tests/`. Every new feature is driven through the real
-`irimi shadow` in the workflows its issue names, by extending their scenarios and pins, and a fix
-that flips a `LOOKS WRONG:` pin updates it in the same PR (`CONTRIBUTING.md`).
+Answer targets, overrides, the telemetry maps beyond W7's one LangSmith trace, and the CLI's own
+flags are not in the corpus; they are covered by the engine and CLI tests in `tests/`. Every new
+feature is driven through the real `irimi shadow` in the workflows its issue names, by extending
+their scenarios and pins, and a fix that flips a `LOOKS WRONG:` pin updates it in the same PR
+(`CONTRIBUTING.md`).
 
 The agents already use the SDK API that Phase 3 will build (`@sdk.trigger`, `sdk.run`,
 `@sdk.tool`). Until `irimi.sdk` exists, `examples/workflows/sdk.py` stands in for it, so W3's run
@@ -460,12 +469,13 @@ by phase.
   #55, #60).
 - **Phase 3, first chunk.** `Irimi-Run` is stripped before a request leaves irimi (#67). Trace
   format v1 and exchange timestamps (#68, [`docs/trace-format.md`](docs/trace-format.md)).
-  Redaction before anything reaches disk (#69). The sample workflows (#89).
+  Redaction before anything reaches disk (#69). The sample workflows (#89). The trace store on
+  disk (#70).
 
 **Next: the rest of Phase 3, the run**
 
-- The trace store on disk (#70), recorded SSE bodies (#71), `irimi runs list` / `runs show` and a
-  summary from a stored run (#72).
+- Recorded SSE bodies (#71), `irimi runs list` / `runs show` and a summary from a stored run
+  (#72).
 - The SDK: a control endpoint (#73), `@sdk.trigger` and `sdk.run()` with run identity in a context
   variable (#74), `Irimi-Run` on every request a run makes (#75), and `@sdk.tool` for calls the
   proxy cannot see (#76).

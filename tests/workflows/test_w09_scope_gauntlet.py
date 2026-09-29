@@ -8,6 +8,8 @@ import pytest
 from examples.workflows.w09_scope_gauntlet.agent import BIG_CHARGE
 from examples.workflows.w09_scope_gauntlet.scenarios import BIG_DESCRIPTION_BYTES, WORKFLOW
 from irimi.bodies import MAX_BODY_BYTES
+from irimi.exchange import BODY_TRUNCATED_FLAG, Exchange
+from irimi.store import MAX_STORED_BODY
 
 W = "w09_scope_gauntlet"
 
@@ -90,6 +92,17 @@ def test_gzip_chunked_and_oversized_bodies_are_still_faked(run_workflow):
     # irimi read the refund amount out of the gzip body and out of the chunked one.
     assert "refund $3.00 on ch_GAUNTLET" in summary
     assert "refund $4.00 on ch_GAUNTLET" in summary
+    # The 3 MB update and irimi's 3 MB fake of the customer are under MAX_STORED_BODY, so both
+    # are stored whole, as blobs, and not flagged cut (#70).
+    [update] = [
+        e
+        for e in shadow.stored_events()
+        if isinstance(e, Exchange) and e.request.path.startswith("/v1/customers/")
+    ]
+    assert update.response is not None
+    assert 3_000_000 < len(update.request.body) < MAX_STORED_BODY
+    assert 3_000_000 < len(update.response.body) < MAX_STORED_BODY
+    assert BODY_TRUNCATED_FLAG not in update.flags
 
 
 def test_a_read_past_the_body_limit_leaves_the_check_and_the_overlay_unable_to_say(run_workflow):
@@ -113,6 +126,18 @@ def test_a_read_past_the_body_limit_leaves_the_check_and_the_overlay_unable_to_s
     summary = shadow.summary()
     assert f"  ○ refund 700 on {BIG_CHARGE}  unvalidated (L2)" in summary
     assert f"    ↳ GET /v1/charges/{BIG_CHARGE} did not show it  live (partial)" in summary
+    # LOOKS WRONG: stored the same way (#70) - an engine read with no response and no flag, so a
+    # stored run cannot tell "too big" apart from "no answer" either.
+    assert engine_reads(shadow) == [(None, ())]
+
+
+def engine_reads(result) -> list[tuple[object, tuple[str, ...]]]:
+    """`(response, flags)` of each engine-issued read the store holds."""
+    return [
+        (e.response, e.flags)
+        for e in result.stored_events()
+        if isinstance(e, Exchange) and e.issued_by == "engine"
+    ]
 
 
 def test_the_big_charge_is_past_irimis_body_limit():
@@ -169,6 +194,7 @@ def test_every_spelling_of_the_proxys_own_address_is_the_reverse_door(run_workfl
     assert shadow.exchange_lines() == [read, write] * 3
     refunds = [line for line in shadow.summary() if "○" in line]
     assert refunds == ["  ○ refund 600 on ch_GAUNTLET  unvalidated (L2)"] * 3
+    assert engine_reads(shadow) == [(None, ())] * 3  # stored as `big_reads` stores its one (#70)
 
 
 def test_an_unmapped_hosts_posts_are_faked_even_when_they_are_reads(run_workflow):

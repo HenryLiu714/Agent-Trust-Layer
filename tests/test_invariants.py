@@ -497,12 +497,13 @@ def test_shadow_mode_is_never_built_without_a_reader(tmp_path, monkeypatch):
     again, configured and never consulted. So the one construction site is pinned here."""
     from irimi import cli
     from irimi.reader import NoReader
+    from irimi.store import NullStore
 
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
     index = servicemap.MapIndex(tuple(servicemap.load_shipped()))
     args = argparse.Namespace(allow_host=[], port=4321)
     p = ca.ca_paths()
-    run = cli._Run(index, p, "t3st", cli._engine_config(args, index, "t3st", p))
+    run = cli._Run(index, p, "t3st", cli._engine_config(args, index, "t3st", p), NullStore())
     engine = cli._build_engine(run, on_exchange=lambda ex: None)
     assert isinstance(engine.policy, ShadowPolicy)
     assert not isinstance(engine.policy.reader, NoReader)

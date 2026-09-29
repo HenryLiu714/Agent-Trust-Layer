@@ -7,7 +7,13 @@ from typing import Any
 
 from examples.workflows.harness.internet import Resp
 from examples.workflows.harness.run import Scenario, Workflow
-from examples.workflows.harness.services import LlmCall, LlmTurn, ScriptedLLM, World
+from examples.workflows.harness.services import (
+    LlmCall,
+    LlmTurn,
+    ScriptedLLM,
+    World,
+    fake_langsmith,
+)
 
 CHANNEL = "C0CHAT"
 # Shaped like a live Stripe key, so the redaction rules (#69) would recognise it on disk.
@@ -71,6 +77,11 @@ def _world(world: World) -> None:
     world.llm.script = chat_script
 
 
+def _traced(world: World) -> None:
+    _world(world)
+    world.extra.append(fake_langsmith())
+
+
 def _splitting(world: World) -> None:
     world.llm = SplittingLLM(summarize_script)
     world.slack.add_channel(CHANNEL, "payments-team")
@@ -83,7 +94,12 @@ WORKFLOW = Workflow(
     summary="A chat endpoint streaming back to its caller: an embeddings call, an Anthropic SSE "
     "stream, an OpenAI SSE stream whose tool call becomes a Slack post.",
     scenarios={
-        "normal": Scenario((QUESTION, "read_all"), setup=_world, doc="two streams, no post"),
+        "normal": Scenario(
+            (QUESTION, "read_all"),
+            env={"LANGSMITH_TRACING": "true"},
+            setup=_traced,
+            doc="two streams, no post, and one LangSmith trace: telemetry (#70)",
+        ),
         "secret_in_stream": Scenario(
             ("What is the test key?", "read_all"),
             setup=_world,

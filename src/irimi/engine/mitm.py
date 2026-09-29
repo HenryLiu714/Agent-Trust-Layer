@@ -402,8 +402,9 @@ class IrimiAddon:
         failure: Exception,
     ) -> None:
         """The request hook's answer when the decision raised: a 502 flagged `decision-failed`,
-        stamped and recorded. The response is on the flow before `_finish` runs, so a store that
-        raises there escapes the hook with the refusal already set, never with the flow bare."""
+        stamped and recorded. The response is on the flow before `_finish` runs, so an
+        `on_exchange` that raises there escapes the hook with the refusal already set, never with
+        the flow bare."""
         # Recorded, not just refused. A write that vanishes from the trace is the other half
         # of this bug: #13's "log of every write" has to show the one irimi could not decide
         # about, and `unknown` + `unclassified` is the honest classification for it.
@@ -437,8 +438,8 @@ class IrimiAddon:
         """The request hook's last part: carry out a decision that did not raise.
 
         Every step that could leave the flow bare is guarded. The one thing that may still raise is
-        recording the engine's own reads (`_finish` for `ans.issued`), which is why it runs last,
-        once the write's own answer is on the flow (#45)."""
+        reporting the engine's own reads (`_finish` for `ans.issued`, whose `on_exchange` is not
+        guarded), which is why it runs last, once the write's own answer is on the flow (#45)."""
         req = decision.request
         cls, run_id, ans = decision.classification, decision.run_id, decision.answer
         response: Response | None = ans.response
@@ -470,8 +471,8 @@ class IrimiAddon:
             # Recorded on the loop, like every other exchange, so the store and the per-exchange
             # line stay single-threaded. They are reads irimi made on its own account; they never
             # reach the agent and they are never writes. Last, once the write's own answer is on
-            # the flow: a store or `on_exchange` that raised any earlier would escape this hook
-            # with no response set, and mitmproxy would forward the write (#45).
+            # the flow: an `on_exchange` that raised any earlier would escape this hook with no
+            # response set, and mitmproxy would forward the write (#45).
             self._finish(ex)
 
     def _decide(self, req: Request, writes: tuple[Exchange, ...], run_id: str) -> _Decision:
@@ -749,7 +750,20 @@ class IrimiAddon:
         # Every exchange goes to the store, telemetry included: the store keeps only that a
         # telemetry exchange happened and to which host, never its request or response, so a
         # stored run's summary can count it (#9, #70).
-        self.store.record(ex)
+        #
+        # A RECORDING FAILURE NEVER AFFECTS TRAFFIC (design §5.2, #70). `TraceStore.record` may
+        # not raise, and this guards the call anyway, as `_overlaid` guards the overlay: a store
+        # swapped in later does not inherit `DirectoryStore`'s care, and a raise here would escape
+        # the hook and take the terminal line and the summary's count of this exchange with it.
+        # It logs the exception's type only, as the store logs its own failures: a broken store
+        # fails on every exchange, and a message may quote the value it choked on (#69).
+        try:
+            self.store.record(ex)
+        except Exception as exc:
+            logger.warning(
+                "irimi: the trace store raised %s; the exchange is not stored", type(exc).__name__
+            )
+            logger.debug("irimi: the trace store's traceback", exc_info=True)
         if self.on_exchange:
             self.on_exchange(ex)
 

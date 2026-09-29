@@ -503,9 +503,9 @@ def summary_lines(
 ) -> list[str]:
     """The exit summary (#13): what ran, what was real, what irimi answered, and what that means.
 
-    Built from the exchanges the engine reported, never from the TraceStore: the store keeps a
-    telemetry exchange only as a `TelemetrySeen` count (#70), and a summary from a stored run is
-    #72's.
+    Built from the exchanges the engine reported, never from the TraceStore: the store holds
+    redacted copies, written behind a queue that may drop one, and a telemetry exchange only as a
+    `TelemetrySeen` (#70). A summary from a stored run is #72's.
 
     `index` is the loaded maps, used only to find each write's `human:` template. Without it the
     writes still get a line, spelled as the request they were.

@@ -135,6 +135,10 @@ twice - once where a configuration is loaded and again at the decision it protec
   own copy of each exchange with `redact.redact_exchange`; the engine and the agent's answer never
   see a placeholder. A part that cannot be redacted is stored as `<redaction-failed>`, never as it
   was (#69).
+- **A recording failure never affects traffic** (design §5.2). No `TraceStore` method may raise
+  or block: `DirectoryStore` only enqueues, and drops and counts what it cannot write. `_finish`
+  guards the call anyway, so a store that breaks the contract costs the exchange its record, never
+  the hook, the terminal line or the summary (#70).
 - **Telemetry is forwarded and its requests and responses are never stored.** One line per
   exchange records only that it happened and to which host, so a stored run's summary can count
   it. A trace of the agent's own observability traffic is noise, and replaying it would re-emit

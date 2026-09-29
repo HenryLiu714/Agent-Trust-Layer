@@ -726,6 +726,26 @@ def test_telemetry_is_reported_and_stored_only_as_having_happened(tmp_path, monk
     assert not (tmp_path / "store" / "blobs").exists()
 
 
+def test_a_store_that_raises_neither_escapes_the_hook_nor_hides_the_exchange(
+    tmp_path, monkeypatch, caplog
+):
+    """A recording failure never affects traffic (#70). `TraceStore.record` may not raise, and
+    `_finish` guards it anyway: a store that broke the contract escaped every hook that finishes
+    a flow, and took the terminal line and the summary's count of the exchange with it."""
+
+    class _Raising(_RecordingStore):
+        def record(self, exchange):
+            raise RuntimeError("the store exploded")
+
+    addon, seen = _addon(tmp_path, monkeypatch, _Raising())
+    with caplog.at_level("WARNING", logger="irimi.engine.mitm"):
+        addon._finish(_exchange("write", answered_by="fake-L0"))
+    assert [ex.kind for ex in seen] == ["write"]
+    # The type, never the message: a message may quote the value the store choked on (#69).
+    assert "the trace store raised RuntimeError" in caplog.text
+    assert "exploded" not in caplog.text
+
+
 @pytest.mark.parametrize("kind", ["read", "write", "llm", "unknown"])
 def test_every_other_kind_is_still_recorded(tmp_path, monkeypatch, kind):
     store = _RecordingStore()

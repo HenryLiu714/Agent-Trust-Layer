@@ -403,6 +403,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
     except (RuntimeError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    finally:
+        _close_store(run.store)
     return 0
 
 
@@ -441,9 +443,11 @@ def cmd_shadow(args: argparse.Namespace) -> int:
         # A timeout from the ready future carries no message of its own.
         reason = str(exc) or f"proxy did not start within {runner.READY_TIMEOUT_S:.0f}s"
         print(f"error: {reason}", file=sys.stderr)
+        _close_store(run.store)
         return 1  # fail closed: the child is never spawned without the proxy
     except KeyboardInterrupt:
         print("error: interrupted before the proxy was ready.", file=sys.stderr)
+        _close_store(run.store)
         return SIGINT_EXIT_CODE
 
     started_run = False
@@ -485,11 +489,24 @@ def cmd_shadow(args: argparse.Namespace) -> int:
             handle.stop()
         except KeyboardInterrupt:
             pass
-        run.store.close()  # the engine closed it already; this waits out a slow engine's close
+        _close_store(run.store)
 
     for line in report.summary_lines(run.run_id, exchanges, elapsed, run.index):
         print(line, flush=True)
     return code
+
+
+def _close_store(store: "TraceStore") -> None:
+    """Close the store `_prepare_run` opened, on every path out of `serve` and `shadow` (#70).
+
+    The engine closes it too, when it stops. This does not rely on that: an engine that never
+    started, or whose thread outlived `handle.stop()`, has not, and a second close waits out the
+    first. An impatient Ctrl-C here, as in `handle.stop()`, may cut the writer's last seconds
+    short, and never costs the summary."""
+    try:
+        store.close()
+    except KeyboardInterrupt:
+        pass
 
 
 def _wait_for_child(proc: "subprocess.Popen[bytes]") -> int:

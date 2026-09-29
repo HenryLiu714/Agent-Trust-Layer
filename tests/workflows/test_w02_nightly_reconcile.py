@@ -58,8 +58,8 @@ def test_forty_mismatches_are_forty_faked_writes_and_the_ledger_is_untouched(run
 def test_a_datetime_trigger_is_only_logged_today(run_workflow):
     shadow = run_workflow(W, "datetime_trigger", "shadow")
     [trigger] = shadow.events("trigger")
-    # Under #74 this value captures as `{"__irimi_repr__": ...}` and the run is not replayable
-    # (#84 then asks for `--args`). Today the fallback SDK records no trigger at all.
+    # Under #74 this value captures as `{"__irimi_repr__": ...}`. `sdk.run` records no entrypoint,
+    # so #84 replays it only with `--call` or `-- CMD`. Today the fallback SDK records no trigger.
     assert trigger["type"] == "datetime"
     assert trigger["value"].startswith("datetime.datetime(2026, 9, 27, 2, 0")
     assert [c["url"] for c in shadow.calls("tag_customer")] == [

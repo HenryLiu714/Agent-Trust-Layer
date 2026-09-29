@@ -64,8 +64,8 @@ def test_a_thread_started_without_propagate_loses_its_run(run_workflow):
     runs = [e["run"] for e in shadow.events("run.start")]
     assert len(runs) == 2
     # Each read belongs to its message's run; each refund, made in a thread started without
-    # `sdk.propagate`, belongs to none. It was still faked. With #75 it lands in `unattributed/`,
-    # which is what this scenario is for.
+    # `sdk.propagate`, belongs to none. It was still faked. With #75 it falls back to the process
+    # run (`unattributed` only in serve mode, #77), which is what this scenario is for.
     assert sorted((c["label"], c["run"], c["answered_by"]) for c in shadow.calls()) == sorted(
         [("read:ch_Q0", runs[0], None), ("read:ch_Q1", runs[1], None)]
         + [(f"refund:ch_Q{i}", None, "fake-L1") for i in (0, 1)]

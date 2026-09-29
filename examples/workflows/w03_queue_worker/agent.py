@@ -156,7 +156,8 @@ def handle(message: dict[str, Any]) -> None:
             pool.submit(sdk.propagate(refund), message).result()
     elif how == "bare_thread":
         # No `sdk.propagate`: the thread starts with an empty context, so the refund belongs to
-        # no run. Once #75 exists this is the request that lands in `unattributed/`.
+        # no run. Once #75 exists it falls back to the engine's own run: the process run under
+        # `irimi shadow -- <cmd>`, and `unattributed` only in serve mode (#77).
         worker = threading.Thread(target=refund, args=(message,))
         worker.start()
         worker.join()

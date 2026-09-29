@@ -110,8 +110,8 @@ def test_a_post_to_a_channel_name_is_unprobed_and_its_read_back_misses(run_workf
         False,
     )
     # A name is not probed by L3 (#45), so the post is L2, not "L3 preconditions passed".
-    # LOOKS WRONG (#61): the doubled `##` is the human template's `#{channel}` over a name that
-    # already has one.
+    # LOOKS WRONG (no issue yet; #61 covers ids only): the doubled `##` is the human template's
+    # `#{channel}` over a name that already has one.
     lines = shadow.exchange_lines()
     assert "live      read      POST slack.com/api/conversations.info -> 200" not in lines
     summary = shadow.summary()

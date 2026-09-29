@@ -86,6 +86,11 @@ uv run pytest -q tests/workflows
 When a change alters what irimi answers, a workflow test pins the old answer and fails. Update the
 pin in the same PR, and say in the PR why the new answer is right.
 
+Every feature is tested on the corpus end to end, as well as in unit tests. Each open issue's
+`Since #89 landed` section names the workflows its feature has to run through and the pins it
+extends or flips. Extend an existing workflow with a scenario before writing a new agent. A pin
+under `LOOKS WRONG:` is a known bug: the PR that fixes it updates the pin and removes the marker.
+
 ## Where things are
 
 `docs/architecture.md` is the map: each module's job, the layer it sits in, how one request moves

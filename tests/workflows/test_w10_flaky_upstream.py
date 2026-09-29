@@ -1,0 +1,129 @@
+"""W10 `flaky_upstream`: which failures a shadow run shows, and which it cannot.
+
+A failed READ is forwarded, so it fails under shadow exactly as it fails bare, and the agent's
+retry runs. A failed WRITE never happens under shadow, because the write never leaves irimi: the
+agent's retry path for it is exercised only bare. The agent is
+`examples/workflows/w10_flaky_upstream/agent.py`.
+"""
+
+W = "w10_flaky_upstream"
+REFUND_LINE = "  ○ refund $5.00 on ch_PAYOUT1  unvalidated (L3 preconditions passed)"
+
+
+def statuses(result, label):
+    return [c.get("status", c.get("error")) for c in result.calls(label)]
+
+
+def retries(result):
+    return [(r["label"], r["reason"]) for r in result.events("retry")]
+
+
+def test_a_rate_limited_read_fails_under_shadow_too_and_is_retried(run_workflow):
+    for mode in ("bare", "shadow"):
+        result = run_workflow(W, "rate_limited", mode)
+        assert statuses(result, "list_charges") == [429, 200]
+        assert retries(result) == [("list_charges", 429)]
+    lines = run_workflow(W, "rate_limited", "shadow").exchange_lines()
+    assert lines[:2] == [
+        "live      read      GET api.stripe.com/v1/charges -> 429",
+        "live      read      GET api.stripe.com/v1/charges -> 200",
+    ]
+
+
+def test_a_server_error_on_a_read_is_forwarded_and_retried(run_workflow):
+    for mode in ("bare", "shadow"):
+        result = run_workflow(W, "server_error_read", mode)
+        assert statuses(result, "list_charges") == [500, 200]
+    shadow = run_workflow(W, "server_error_read", "shadow")
+    assert shadow.exchange_lines()[0] == "live      read      GET api.stripe.com/v1/charges -> 500"
+    assert REFUND_LINE in shadow.summary()
+
+
+def test_a_read_the_agent_abandoned_is_recorded_as_an_upstream_error(run_workflow):
+    shadow = run_workflow(W, "read_timeout", "shadow")
+    assert statuses(shadow, "list_charges") == ["TimeoutError", 200]
+    assert statuses(run_workflow(W, "read_timeout", "bare"), "list_charges") == [
+        "TimeoutError",
+        200,
+    ]
+    # The upstream never failed: it answered late, after the AGENT gave up and hung up. irimi
+    # records the abandoned exchange with no response and flags it `upstream-error`, which reads
+    # as the service's fault.
+    assert shadow.exchange_lines()[0] == (
+        "live      read      GET api.stripe.com/v1/charges -> -  [upstream-error]"
+    )
+    # Two agent reads and the refund's L3 read: the stall was not retried by irimi itself.
+    assert [r.path for r in shadow.internet.requests("api.stripe.com")] == [
+        "/v1/charges",
+        "/v1/charges",
+        "/v1/charges/ch_PAYOUT1",
+    ]
+
+
+def test_a_reset_on_the_write_is_retried_bare_and_never_happens_under_shadow(run_workflow):
+    bare = run_workflow(W, "reset_on_write", "bare")
+    shadow = run_workflow(W, "reset_on_write", "shadow")
+    assert statuses(bare, "refund") == ["ConnectionResetError", 200]
+    assert retries(bare) == [("refund", "NetworkError")]
+    # Under shadow the refund is answered by irimi and never reaches the service that resets it,
+    # so the agent's retry path is not exercised. A shadow run cannot show it.
+    assert statuses(shadow, "refund") == [200]
+    assert retries(shadow) == []
+    # Bare, the key made the retry one refund.
+    assert len(bare.world.stripe.refunds) == 1
+    assert shadow.world.stripe.refunds == []
+
+
+def test_a_keyless_write_retried_after_a_500_is_two_posts_bare_and_one_fake_under_shadow(
+    run_workflow,
+):
+    bare = run_workflow(W, "retry_without_key", "bare")
+    shadow = run_workflow(W, "retry_without_key", "shadow")
+    refund_posts = [r for r in bare.internet.writes() if r.path == "/v1/refunds"]
+    assert len(refund_posts) == 2
+    assert all("idempotency-key" not in r.headers for r in refund_posts)
+    assert statuses(bare, "refund") == [500, 200]
+    assert len(bare.world.stripe.refunds) == 1  # the 500 was answered before Stripe acted
+    # Shadow: the 500 cannot happen, the write is faked once, and the summary shows one refund.
+    assert statuses(shadow, "refund") == [200]
+    assert [line for line in shadow.summary() if "○ refund" in line] == [REFUND_LINE]
+
+
+def test_a_model_that_answers_prose_leads_to_no_write_but_the_status_post(run_workflow):
+    shadow = run_workflow(W, "malformed_llm", "shadow")
+    assert [e["text"][:5] for e in shadow.events("llm_fallback")] == ["Sure!"]
+    assert shadow.calls("refund") == []
+    assert (
+        "live      llm       POST api.anthropic.com/v1/messages -> 200" in shadow.exchange_lines()
+    )
+    assert [line for line in shadow.summary() if "○" in line] == [
+        '  ○ post to #C0PAYOUT: "payout sync: no action"  unvalidated (L3 preconditions passed)'
+    ]
+    assert len(shadow.world.llm.calls) == 1
+
+
+def test_an_agent_that_raises_after_its_write_still_shows_the_write(run_workflow):
+    shadow = run_workflow(W, "raise_after_write", "shadow")
+    assert shadow.exit_code == run_workflow(W, "raise_after_write", "bare").exit_code == 1
+    [end] = shadow.events("run.end")
+    assert (end["outcome"], end["error"]) == ("error", "RuntimeError")
+    summary = shadow.summary()
+    assert REFUND_LINE in summary
+    # The summary does not say the agent failed: nothing in it tells this run from one that
+    # finished.
+    assert not any("error" in line.lower() or "exit" in line for line in summary)
+
+
+def test_an_agent_killed_after_its_write_leaves_a_run_with_no_end(run_workflow):
+    bare = run_workflow(W, "sigterm_mid_run", "bare")
+    shadow = run_workflow(W, "sigterm_mid_run", "shadow")
+    # 143 is 128 + SIGTERM, the shell's spelling, in both modes.
+    assert (bare.exit_code, shadow.exit_code) == (143, 143)
+    # The run started and never ended: what #74 stores as an incomplete run (`outcome: None`).
+    assert len(shadow.events("run.start")) == 1
+    assert shadow.events("run.end") == []
+    assert shadow.calls("refund")[0]["answered_by"] == "fake-L1"
+    assert REFUND_LINE in shadow.summary()
+    assert shadow.summary()[-1] == (
+        "  These writes did not happen. Would have fired: refund.created, charge.refunded."
+    )

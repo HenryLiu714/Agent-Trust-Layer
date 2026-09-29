@@ -24,6 +24,31 @@ the first column of each field table below is exactly the keys its encoder write
   exchange names it with a body ref. An empty body stores nothing, and its ref is `null`.
 - `unattributed/events.jsonl` holds every kind of event, tool calls included (#76), not only
   exchanges. It has no `run.json`: see Versioning for the version its lines are read under.
+- **A run id the store cannot use as a directory goes to `unattributed/`**, and an exchange among
+  those events gains the flag `bad-run-id` (`exchange.BAD_RUN_ID_FLAG`). That is an id
+  `trace.is_valid_run_id` refuses - the store checks again rather than trust its caller - and an
+  id that differs only in case from a run directory already there: `Run1` and `run1` are both
+  valid, and on a case-insensitive filesystem (macOS APFS by default) they would be one directory.
+  The first to reach the store keeps it, so two runs are never merged into one directory. An event
+  whose run id is `unattributed` itself goes there unflagged.
+- The first event of a run id that has no `run.json` creates one, with `attribution: "header"` and
+  every optional field `null`.
+- `events.jsonl` is appended one whole line at a time, each in one `write` on an `O_APPEND`
+  descriptor, and fsynced in batches and when the store closes. A line the disk refused half-way is
+  cut off again at once. A final line cut off by a crash is skipped on read, and a store that finds
+  one when it resumes the run - `irimi serve` restarted - truncates it away before it appends, and
+  resumes `seq` after the last line it can read. A blob a crash tore is rewritten by the next event
+  that needs it.
+- One process writes a given run. Several may share a root: run directories never collide, and a
+  blob is the same bytes whoever writes it. `unattributed/events.jsonl` is the one file they share,
+  and there each writer numbers its own lines, so a `seq` may repeat across processes.
+- Everything under the root is private to its owner: directories `0700`, files `0600`. Redaction
+  hides credentials, not the customers, amounts and messages around them.
+- A body over 8 MiB (`store.MAX_STORED_BODY`) is redacted whole, then cut: its first 8 MiB are
+  stored, its ref says `truncated: true`, and its exchange carries `body-truncated`. A body over
+  64 MiB (`store.MAX_REDACTED_BODY`) is not stored at all: its exchange is stored with that body
+  empty and carries `body-truncated`. So a stored body is always a prefix of the one sent - an empty
+  one when it was too big to redact - and `body-truncated` says when it is not the whole.
 - Everything is redacted before it reaches disk (#69): see Redaction. A credential in the example
   below appears as a `<redacted:…>` placeholder for that reason.
 
@@ -169,8 +194,8 @@ A **request** is `method`, `scheme`, `host`, `port` (integer), `path`, `query` (
   for an empty body. `sha256` names the file under `blobs/` and is 64 lower-case hex digits.
   `size` is the stored length. `truncated` says the stored bytes are only the start of the body.
 - The decoder hands the whole ref to the store's `get_body`, but a decoded `Exchange` carries only
-  the bytes it returns: `size` and `truncated` do not survive decoding. The store that truncates a
-  body (#70) must therefore also say so in the exchange's `flags`, and declaring that flag is #70's.
+  the bytes it returns: `size` and `truncated` do not survive decoding. So the store that cuts a
+  body also flags its exchange `body-truncated` (`exchange.BODY_TRUNCATED_FLAG`, #70).
 
 **A `tool_call`** (`trace.ToolCall`) is a tool call the proxy cannot see, reported by the SDK.
 

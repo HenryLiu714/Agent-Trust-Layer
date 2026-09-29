@@ -21,7 +21,7 @@ uv run pytest -q tests/workflows                                     # the whole
 | W4 | `w04_slack_ops_bot` | Slack Events API | Slack fidelity: minted threads (#52), names vs ids (#44), `missing_scope`, an archived channel, an L0 `reactions.add`, duplicate delivery, the webhook path (#87) |
 | W5 | `w05_dispute_responder` | signed Stripe webhook | bytes trigger args, `would_fire` (#47), an event the agent's own write would fire |
 | W6 | `w06_crm_db_agent` | CLI | tools the proxy cannot see (#76, #83): database and file writes, stand-ins, decoration-time errors |
-| W7 | `w07_streaming_assistant` | streaming HTTP endpoint | SSE through the proxy (#71), a caller that disconnects, an upstream reset mid-stream and before the stream opens |
+| W7 | `w07_streaming_assistant` | streaming HTTP endpoint | SSE through the proxy (#71), a caller that disconnects, an upstream reset mid-stream and before the stream opens, a LangSmith trace stored only as having happened (#70) |
 | W8 | `w08_orchestrator` | nested triggers + an internal service | nested runs, unmapped internal hosts, `Irimi-Run` across a hop (#67) |
 | W9 | `w09_scope_gauntlet` | none (plain script) | THE SCOPE RULE, the L0 floor, idempotency (#46), odd bodies, reads past the body limit, forged irimi headers, the reverse door |
 | W10 | `w10_flaky_upstream` | CLI | retries, timeouts, resets on a read and a write, irimi's own L3 read failing, a run that raises or is killed after a write |
@@ -48,8 +48,9 @@ so it keeps its real module name; `scenarios.py` seeds the fake services per sce
   on the fake services. The shadow run goes through `irimi shadow`, and nothing may land.
 - **The observation log.** Each agent logs what it saw (status, `Irimi-Answered-By`, which tool
   ran) to a JSON-lines file. The tests assert on that as well as on irimi's output, through
-  `Result` (`harness/run.py`): `calls()`, `answered()`, `by_label()`, `tools()`, `events()`, and
-  `exchange_lines()` and `summary()` for what irimi printed.
+  `Result` (`harness/run.py`): `calls()`, `answered()`, `by_label()`, `tools()`, `events()`,
+  `exchange_lines()` and `summary()` for what irimi printed, and `stored()` and `stored_events()`
+  for what it recorded in its trace store under the run's `IRIMI_HOME` (#70).
 - **The agent kit** (`agentkit.py`) is what every agent shares, all stdlib: its HTTP client and
   the Stripe, Slack and Anthropic calls on it, the observation log, its SQLite files, and, for an
   agent that serves (W1, W4, W5, W7), `serve()`, and `deliver()` (W1, W4, W5), which sends an inbound call to the
@@ -71,7 +72,13 @@ so it keeps its real module name; `scenarios.py` seeds the fake services per sce
 2. No request that reached a fake service carried `Irimi-Run`.
 3. No write tool's real function ran under shadow.
 4. No canary credential reached disk where irimi writes: its home, its working directory, TMPDIR.
+   The trace store is under its home (#70), so this is the redaction test across the corpus: a
+   credential shape `redact` misses is fixed in `redact`, not in the canary.
 5. The agent exited the same way under shadow as bare, unless the scenario is marked `diverges`.
+
+`tests/workflows/test_stored_runs.py` holds every scenario to what the store keeps (#70): a run
+that started irimi stores exactly one process run, with the agent's argv and exit, and every
+exchange irimi printed is stored exactly once.
 
 A new workflow package is found by its name, `wNN_<name>`, and is held to all five rules without
 any registry edit. A last test checks that the corpus gives rules 1 to 4 something to catch: a rule

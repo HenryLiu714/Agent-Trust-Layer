@@ -38,9 +38,10 @@ from typing import Any
 
 from examples.workflows.harness.internet import FakeInternet, Req
 from examples.workflows.harness.services import World
-from irimi import ca, runner
+from irimi import ca, paths, runner, trace
 from irimi.cli import main as irimi_main
 from irimi.servicemap import loader
+from irimi.store import StoreReader
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 WORKFLOWS_DIR = REPO_ROOT / "examples" / "workflows"
@@ -170,6 +171,18 @@ class Result:
         """irimi's per-exchange lines: `<answered_by> <kind> <METHOD> <host><path> -> <status>`."""
         return [line for line in self.irimi if " -> " in line and not line.startswith(" ")]
 
+    def stored(self) -> StoreReader:
+        """The trace store this run wrote: `irimi shadow`'s default, `$IRIMI_HOME/store` (#70),
+        which is `home / "store"` because the harness gives every run a home of its own."""
+        return StoreReader(self.home / paths.STORE_DIR_NAME)
+
+    def stored_events(self) -> list[trace.Event]:
+        """Every event the store holds: run by run, each in `seq` order, then the unattributed
+        ones. Empty when irimi stopped before it opened a store."""
+        reader = self.stored()
+        ids = [record.run_id for record in reader.list_runs()] + [trace.UNATTRIBUTED]
+        return [event for run_id in ids for event in reader.load_run(run_id).events]
+
     def summary(self) -> list[str]:
         """irimi's closing block, from its `N exchanges` header on."""
         for i, line in enumerate(self.irimi):
@@ -239,6 +252,7 @@ def _agent_env(
             "SLACK_HOOKS_API_BASE": internet.base("hooks.slack.com"),
             "ANTHROPIC_API_BASE": internet.base("api.anthropic.com"),
             "OPENAI_API_BASE": internet.base("api.openai.com"),
+            "LANGSMITH_API_BASE": internet.base("api.smith.langchain.com"),
             "WORKFLOW_INTERNET_PORT": str(internet.port),
             "WORKFLOW_STATE": str(state),
             "WORKFLOW_OBS": str(obs_path),

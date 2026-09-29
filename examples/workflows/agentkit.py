@@ -67,6 +67,7 @@ def base(service: str) -> str:
         "slack_hooks": "https://hooks.slack.com",
         "anthropic": "https://api.anthropic.com",
         "openai": "https://api.openai.com",
+        "langsmith": "https://api.smith.langchain.com",
     }
     return os.environ.get(f"{service.upper()}_API_BASE") or defaults[service]
 

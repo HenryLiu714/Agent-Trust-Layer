@@ -8,6 +8,7 @@ import pytest
 from examples.workflows.w09_scope_gauntlet.agent import BIG_CHARGE
 from examples.workflows.w09_scope_gauntlet.scenarios import BIG_DESCRIPTION_BYTES, WORKFLOW
 from irimi.bodies import MAX_BODY_BYTES
+from irimi.exchange import Exchange
 
 W = "w09_scope_gauntlet"
 
@@ -113,6 +114,18 @@ def test_a_read_past_the_body_limit_leaves_the_check_and_the_overlay_unable_to_s
     summary = shadow.summary()
     assert f"  ○ refund 700 on {BIG_CHARGE}  unvalidated (L2)" in summary
     assert f"    ↳ GET /v1/charges/{BIG_CHARGE} did not show it  live (partial)" in summary
+    # LOOKS WRONG: stored the same way (#70) - an engine read with no response and no flag, so a
+    # stored run cannot tell "too big" apart from "no answer" either.
+    assert engine_reads(shadow) == [(None, ())]
+
+
+def engine_reads(result) -> list[tuple[object, tuple[str, ...]]]:
+    """`(response, flags)` of each engine-issued read the store holds."""
+    return [
+        (e.response, e.flags)
+        for e in result.stored_events()
+        if isinstance(e, Exchange) and e.issued_by == "engine"
+    ]
 
 
 def test_the_big_charge_is_past_irimis_body_limit():
@@ -169,6 +182,7 @@ def test_every_spelling_of_the_proxys_own_address_is_the_reverse_door(run_workfl
     assert shadow.exchange_lines() == [read, write] * 3
     refunds = [line for line in shadow.summary() if "○" in line]
     assert refunds == ["  ○ refund 600 on ch_GAUNTLET  unvalidated (L2)"] * 3
+    assert engine_reads(shadow) == [(None, ())] * 3  # stored as `big_reads` stores its one (#70)
 
 
 def test_an_unmapped_hosts_posts_are_faked_even_when_they_are_reads(run_workflow):

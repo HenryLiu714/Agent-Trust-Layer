@@ -7,6 +7,8 @@ A failed L3 read is irimi's alone, and only its summary shows it. The agent is
 `examples/workflows/w10_flaky_upstream/agent.py`.
 """
 
+from irimi.trace import ErrorInfo
+
 W = "w10_flaky_upstream"
 REFUND_LINE = "  ○ refund $5.00 on ch_PAYOUT1  unvalidated (L3 preconditions passed)"
 
@@ -154,6 +156,8 @@ def test_an_agent_that_raises_after_its_write_still_shows_the_write(run_workflow
     # LOOKS WRONG: the summary does not say the agent failed. Nothing in it tells this run from
     # one that finished.
     assert not any("error" in line.lower() or "exit" in line for line in summary)
+    # The stored run does say so (#70); the summary above still does not.
+    assert process_run(shadow) == ("error", 1, ErrorInfo("exit", "exited 1"))
 
 
 def test_an_agent_killed_after_its_write_leaves_a_run_with_no_end(run_workflow):
@@ -173,3 +177,11 @@ def test_an_agent_killed_after_its_write_leaves_a_run_with_no_end(run_workflow):
         "  These writes did not happen. Would have fired: refund.created, charge.refunded."
     )
     assert not any(word in line.lower() for line in summary for word in ("143", "kill", "signal"))
+    # The stored process run ends with the child's code, which is how the kill is visible (#70).
+    assert process_run(shadow) == ("error", 143, ErrorInfo("exit", "exited 143"))
+
+
+def process_run(result) -> tuple[object, object, object]:
+    """`(outcome, exit_code, error)` of the process run `irimi shadow` stored."""
+    (run,) = [r for r in result.stored().list_runs() if r.attribution == "process"]
+    return run.outcome, run.exit_code, run.error

@@ -6,8 +6,11 @@ shadow run. Order between runs is never asserted: the pool and the event loop in
 
 import importlib.util
 from collections import Counter
+from urllib.parse import parse_qs
 
 import pytest
+
+from irimi.exchange import Exchange
 
 W = "w03_queue_worker"
 REFUND_LINE = "fake-L1   write     POST api.stripe.com/v1/refunds -> 200  [fidelity:L1]"
@@ -39,6 +42,33 @@ def test_eight_concurrent_runs_never_mix(run_workflow, scenario):
     assert shadow.result()["ok"] == 8
     # Bare, the same eight refunds really land.
     assert len(run_workflow(W, scenario, "bare").internet.writes()) == 8
+
+
+def charge_named(ex: Exchange) -> str:
+    """The charge a stored exchange is about: a charge read names it in its path, a refund in its
+    form body."""
+    if ex.request.path.startswith("/v1/charges/"):
+        return ex.request.path.rsplit("/", 1)[1]
+    return parse_qs(ex.request.body.decode())["charge"][0]
+
+
+def test_eight_messages_are_eight_stored_runs_each_holding_only_its_own_charge(run_workflow):
+    """Until #74 lands, the SDK stand-in's own `Irimi-Run` label on each message's calls is all
+    irimi knows of a run, so each message is a `header` run: created by its first event, with no
+    trigger and no outcome (#70). The process run holds none of them."""
+    shadow = run_workflow(W, "threads_8", "shadow")
+    reader = shadow.stored()
+    records = reader.list_runs()
+    assert sorted(r.attribution for r in records) == ["header"] * 8 + ["process"]
+    headers = [r for r in records if r.attribution == "header"]
+    assert {r.run_id for r in headers} == set(shadow.by_run())
+    for record in headers:
+        assert (record.trigger, record.outcome) == (None, None)
+        events = reader.load_run(record.run_id).events
+        assert all(isinstance(e, Exchange) for e in events)
+        assert len({charge_named(e) for e in events if isinstance(e, Exchange)}) == 1, events
+    (process,) = [r for r in records if r.attribution == "process"]
+    assert reader.load_run(process.run_id).events == []
 
 
 def test_every_client_went_through_the_proxy(run_workflow):

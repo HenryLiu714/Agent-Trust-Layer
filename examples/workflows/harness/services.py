@@ -687,6 +687,17 @@ class JsonService:
         return json_error(404, error=f"no route {req.method} {req.path}")
 
 
+def fake_langsmith() -> JsonService:
+    """LangSmith's run intake, which W7 posts one trace to (#70). A telemetry POST is not a write:
+    irimi forwards telemetry live, so a fake that counted this one as a write would fail
+    invariant 1 on a request irimi was right to send."""
+    return JsonService(
+        ("api.smith.langchain.com",),
+        {("POST", "/runs"): lambda req, state: Resp(202, {"status": "accepted"})},
+        is_write=lambda req: False,
+    )
+
+
 @dataclass
 class World:
     """Every fake a scenario can seed, before the fake internet starts."""

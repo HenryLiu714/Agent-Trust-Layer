@@ -7,6 +7,8 @@
    arrive;
 3. OpenAI chat completions with `stream: true`, which may answer with a `post_summary` tool call,
    assembled from its deltas. That tool call becomes a Slack post: the one write.
+4. With `LANGSMITH_TRACING=true`, one trace of the chat POSTed to LangSmith: telemetry, which
+   irimi forwards and stores only as having happened (#70).
 
 Upstream streams are read a few bytes at a time on purpose, so every SSE event is split across
 reads and the parser has to reassemble it (`sse_events`).
@@ -23,6 +25,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import socket
 import struct
 import sys
@@ -178,6 +181,13 @@ def chat(question: str, send: Callable[[str, dict[str, Any]], None]) -> dict[str
             args = json.loads(call["arguments"])
             doc = agentkit.slack("chat.postMessage", channel=args["channel"], text=args["text"])
             posted = {"ok": doc.get("ok"), "channel": doc.get("channel"), "text": args["text"]}
+    if os.environ.get("LANGSMITH_TRACING") == "true":
+        agentkit.http(
+            "POST",
+            agentkit.base("langsmith") + "/runs",
+            json_body={"name": "chat", "run_type": "chain", "inputs": {"question": question}},
+            label="trace",
+        )
     send("done", {"posted": posted is not None})
     return {"answer": answer, "dims": dims, "decision": decision, "posted": posted}
 

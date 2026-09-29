@@ -6,6 +6,7 @@ tool) changes it.
 """
 
 from examples.workflows.w02_nightly_reconcile.agent import LEDGER
+from irimi.exchange import Exchange
 
 W = "w02_nightly_reconcile"
 AGENT = "examples.workflows.w02_nightly_reconcile.agent"
@@ -53,6 +54,15 @@ def test_forty_mismatches_are_forty_faked_writes_and_the_ledger_is_untouched(run
     assert reconciled_rows(shadow) == 0
     assert reconciled_rows(bare) == 40
     assert len(bare.internet.writes()) == 41  # forty customers and the Slack post
+
+
+def test_forty_mismatches_store_all_47_exchanges_and_drop_none(run_workflow):
+    """The busiest run in the corpus, stored whole (#70): every exchange irimi reported is on
+    disk, and no run records a dropped event."""
+    shadow = run_workflow(W, "forty_mismatches", "shadow")
+    stored = [e for e in shadow.stored_events() if isinstance(e, Exchange)]
+    assert len(stored) == len(shadow.exchange_lines()) == 47
+    assert [r.dropped_events for r in shadow.stored().list_runs()] == [0, 0]
 
 
 def test_a_datetime_trigger_is_only_logged_today(run_workflow):

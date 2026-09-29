@@ -81,6 +81,9 @@ def test_a_post_read_without_persists_false_is_refused_and_nothing_runs(run_work
     assert shadow.exit_code == 1
     assert shadow.obs == []
     assert shadow.internet.requests() == []
+    # Refused before the store is opened (#70): no run, no store, not even a redaction key. The
+    # CA is the harness's own, made before irimi starts.
+    assert sorted(path.name for path in shadow.home.iterdir()) == ["ca"]
     assert run_workflow(W, "map_refused", "bare").exit_code == 0
 
 

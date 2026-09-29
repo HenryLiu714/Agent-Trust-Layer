@@ -5,6 +5,7 @@
 2. No request that reached a fake service carried `Irimi-Run`.
 3. No write tool's real function ran under shadow.
 4. No canary credential reached disk where irimi writes: its home, its working directory, TMPDIR.
+   The trace store is under its home (#70), so this is the redaction test across the corpus.
 5. The agent exited under shadow as it did bare, unless the scenario is marked `diverges`.
 
 A new workflow is picked up by name (`harness.run.workflows`), so it is held to these without an
@@ -61,8 +62,18 @@ def test_the_corpus_gives_every_invariant_something_to_catch(run_workflow):
         if any(v in r.headers.values() for r in s.internet.requests() for v in CANARIES.values())
     ]
     seen_escape = [s.scenario for _, s in runs if s.internet.writes()]
+    stored_placeholder = [
+        s.scenario
+        for _, s in runs
+        if any(
+            b"<redacted:" in path.read_bytes()
+            for path in (s.home / "store").rglob("*")
+            if path.is_file()
+        )
+    ]
     assert held_back, "invariant 1: no shadow run held back a write its bare run made"
     assert labelled_live, "invariant 2: no labelled call was forwarded live under shadow"
     assert stood_in, "invariant 3: no write tool ran for real bare and as a stand-in shadow"
     assert handled_canary, "invariant 4: no canary credential passed through irimi"
     assert seen_escape, "invariant 1: no `leaks` scenario's escape reached a fake service"
+    assert stored_placeholder, "invariant 4: no shadow run stored a credential it had redacted"

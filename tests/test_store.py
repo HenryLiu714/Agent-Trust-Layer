@@ -264,6 +264,45 @@ def test_a_body_is_redacted_whole_before_it_is_cut(root, key, monkeypatch):
     assert not any(b"sk_live_" in p.read_bytes() for p in root.rglob("*") if p.is_file())
 
 
+def _streamed(answer: bytes, chunks: tuple[int, ...]) -> Exchange:
+    return dataclasses.replace(_exchange("r1", answer=answer), stream_chunks=chunks)
+
+
+def test_a_streamed_body_is_stored_with_its_chunk_lengths(root, key):
+    s = DirectoryStore(root, key)
+    s.record(_streamed(b"aaaa" + b"bbbbbb", (4, 6)))
+    s.close()
+    (ex,) = StoreReader(root).load_run("r1").events
+    assert isinstance(ex, Exchange) and ex.response is not None
+    assert (ex.response.body, ex.stream_chunks) == (b"aaaabbbbbb", (4, 6))
+
+
+def test_a_streamed_body_cut_at_the_maximum_keeps_the_chunks_of_what_is_stored(
+    root, key, monkeypatch
+):
+    """`_put_body` keeps the first MAX_STORED_BODY bytes, and the chunk lengths are cut at the
+    same byte, so they still split the stored body (#71)."""
+    monkeypatch.setattr(store, "MAX_STORED_BODY", 20)
+    s = DirectoryStore(root, key)
+    s.record(_streamed(b"a" * 8 + b"b" * 8 + b"c" * 14, (8, 8, 14)))
+    s.close()
+    (ex,) = StoreReader(root).load_run("r1").events
+    assert isinstance(ex, Exchange) and ex.response is not None
+    assert (ex.response.body, ex.stream_chunks) == (b"a" * 8 + b"b" * 8 + b"c" * 4, (8, 8, 4))
+    assert BODY_TRUNCATED_FLAG in ex.flags
+
+
+def test_a_streamed_body_too_big_to_redact_is_stored_with_no_chunks(root, key, monkeypatch):
+    monkeypatch.setattr(store, "MAX_REDACTED_BODY", 10)
+    s = DirectoryStore(root, key)
+    s.record(_streamed(b"x" * 11, (5, 6)))
+    s.close()
+    (ex,) = StoreReader(root).load_run("r1").events
+    assert isinstance(ex, Exchange) and ex.response is not None
+    assert (ex.response.body, ex.stream_chunks) == (b"", ())
+    assert BODY_TRUNCATED_FLAG in ex.flags
+
+
 # ---------------------------------------------------------------------------------- the run ids
 
 

@@ -15,7 +15,8 @@ NOTHING REACHES DISK UNREDACTED (#69). The writer thread runs `redact.redact_exc
 exchange, and `redact.redact_json` on every trigger's name and args, every tool call's args and
 result, and every error's message, before it hashes or writes anything. A body is redacted whole
 and only then cut at MAX_STORED_BODY, so a secret straddling the cut is never stored as half a
-secret.
+secret. A streamed body's `stream_chunks` are cut with it, so they still split what is stored
+(#71).
 
 A RUN ID NAMES A DIRECTORY ONLY WHEN THIS STORE CAN USE IT AS ONE. `trace.is_valid_run_id` is the
 path-traversal guard, and it is checked again here rather than trusted (#68). A valid id can still
@@ -62,7 +63,7 @@ from typing import Any, Protocol
 
 from irimi import __version__, redact, trace
 from irimi.ca import DIR_MODE, KEY_MODE
-from irimi.exchange import BAD_RUN_ID_FLAG, BODY_TRUNCATED_FLAG, Exchange
+from irimi.exchange import BAD_RUN_ID_FLAG, BODY_TRUNCATED_FLAG, Exchange, clip_chunks
 from irimi.trace import (
     SCHEMA_VERSION,
     UNATTRIBUTED,
@@ -538,7 +539,10 @@ class DirectoryStore:
             flags.append(BODY_TRUNCATED_FLAG)
         if bad_run_id and event.run_id != UNATTRIBUTED:
             flags.append(BAD_RUN_ID_FLAG)
-        return replace(ex, flags=tuple(dict.fromkeys(flags)))
+        # `_put_body` keeps the first MAX_STORED_BODY bytes, so a streamed body's chunks are cut
+        # there too, and still split the body that is stored (#71).
+        chunks = clip_chunks(ex.stream_chunks, MAX_STORED_BODY)
+        return replace(ex, flags=tuple(dict.fromkeys(flags)), stream_chunks=chunks)
 
     def _put_body(self, body: bytes) -> BodyRef:
         data = body[:MAX_STORED_BODY]
@@ -673,12 +677,16 @@ def _as_queued(exchange: Exchange) -> Exchange | TelemetrySeen:
     request, response = exchange.request, exchange.response
     if len(request.body) > MAX_REDACTED_BODY:
         request = replace(request, body=b"")
+    stream_chunks = exchange.stream_chunks
     if response is not None and len(response.body) > MAX_REDACTED_BODY:
         response = replace(response, body=b"")
+        stream_chunks = ()  # an empty body has nothing to split (#71)
     if request is exchange.request and response is exchange.response:
         return exchange
     flags = tuple(dict.fromkeys((*exchange.flags, BODY_TRUNCATED_FLAG)))
-    return replace(exchange, request=request, response=response, flags=flags)
+    return replace(
+        exchange, request=request, response=response, flags=flags, stream_chunks=stream_chunks
+    )
 
 
 def _fsync(path: Path) -> None:

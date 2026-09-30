@@ -514,6 +514,97 @@ def test_redact_exchange_returns_a_new_exchange_and_copies_every_other_field():
     assert stored.flags == original.flags
 
 
+# ------------------------------------------------------------------------------ streamed bodies
+
+SSE = ("content-type", "text/event-stream")
+QUIET = b'data: {"text":"hi"}\n'
+LOUD = b'data: {"key":"sk_live_abc123"}\n'
+LOUD_STORED = b'data: {"key":"' + _ph("sk_live_abc123").encode() + b'"}\n'
+LAST = b'data: {"text":"bye"}\n'
+
+
+def _stream(body: bytes, chunks: tuple[int, ...]) -> Exchange:
+    """`redact_exchange`'s copy of a live read whose body streamed as `chunks` (#71)."""
+    assert sum(chunks) == len(body)
+    response = Response(status=200, headers=(SSE,), body=body)
+    return redact_exchange(_exchange(response=response, stream_chunks=chunks), KEY)
+
+
+def test_a_streamed_body_s_chunks_are_recomputed_over_the_redacted_body_line_by_line():
+    """A boundary in a line redaction left alone keeps its place, and one inside a line it
+    changed moves to that line's end: a JSON `data:` line is re-serialized whole (#71)."""
+    sent = QUIET + b"\n" + LOUD + b"\n" + LAST
+    chunks = (10, len(QUIET) - 10 + 1 + 15, len(LOUD) - 15 + 1 + 5, len(LAST) - 5)
+    stored = _stream(sent, chunks)
+    assert stored.response is not None
+    assert stored.response.body == QUIET + b"\n" + LOUD_STORED + b"\n" + LAST
+    assert stored.stream_chunks == (
+        10,
+        len(QUIET) - 10 + 1 + len(LOUD_STORED),
+        1 + 5,
+        len(LAST) - 5,
+    )
+
+
+def test_a_secret_split_across_two_chunks_is_redacted_whole():
+    """The joined body is redacted, never chunk by chunk: a key cut in two by a chunk boundary is
+    one secret on one line, and neither half reaches disk (#71)."""
+    cut = LOUD.index(b"abc123")
+    stored = _stream(LOUD, (cut, len(LOUD) - cut))
+    assert stored.response is not None
+    assert stored.response.body == LOUD_STORED
+    assert b"sk_live" not in stored.response.body
+    assert stored.stream_chunks == (len(LOUD_STORED),)
+
+
+def test_two_boundaries_that_land_at_the_end_of_one_changed_line_make_one_chunk():
+    sent = LOUD + LAST
+    stored = _stream(sent, (5, 10, len(LOUD) - 15 + 3, len(LAST) - 3))
+    assert stored.stream_chunks == (len(LOUD_STORED), 3, len(LAST) - 3)
+
+
+def test_a_stream_redaction_left_alone_keeps_its_chunks():
+    sent = QUIET + b"\n" + LAST
+    chunks = (7, len(sent) - 7 - 2, 2)
+    assert _stream(sent, chunks).stream_chunks == chunks
+
+
+def test_a_stream_whose_lines_do_not_pair_up_after_redaction_is_one_chunk():
+    """A body that is one JSON document is re-serialized compactly, which can join its lines, so
+    no boundary can be carried over: the stored body is one chunk."""
+    sent = b'{\n  "key": "sk_live_abc123"\n}\n'
+    stored = _stream(sent, (4, len(sent) - 4))
+    assert stored.response is not None
+    assert stored.response.body == b'{"key":"' + _ph("sk_live_abc123").encode() + b'"}'
+    assert stored.stream_chunks == (len(stored.response.body),)
+
+
+def test_a_stream_that_could_not_be_redacted_is_one_chunk(monkeypatch):
+    def boom(*args, **kwargs):
+        raise ValueError("parser broke")
+
+    monkeypatch.setattr(redact, "_redact_document", boom)
+    stored = _stream(LOUD + LAST, (4, len(LOUD) + len(LAST) - 4))
+    assert stored.response is not None and stored.response.body == FAILED_BODY
+    assert stored.stream_chunks == (len(FAILED_BODY),)
+    assert REDACTION_FAILED_FLAG in stored.flags
+
+
+def test_every_split_of_a_stream_still_splits_its_redacted_body():
+    """Whatever chunks the wire cut a stream into, the stored ones are positive and add up to the
+    stored body, and a boundary before the changed line keeps its offset."""
+    sent = QUIET + LOUD + b"\r\n" + LAST
+    for first in range(1, len(sent)):
+        for second in range(first + 1, len(sent)):
+            chunks = (first, second - first, len(sent) - second)
+            stored = _stream(sent, chunks)
+            assert stored.response is not None
+            assert sum(stored.stream_chunks) == len(stored.response.body), chunks
+            assert all(length > 0 for length in stored.stream_chunks), chunks
+            if first < len(QUIET):
+                assert stored.stream_chunks[0] == first, chunks
+
+
 # ------------------------------------------------------------------------------ rule 7: fail closed
 
 

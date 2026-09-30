@@ -5,8 +5,16 @@ OpenAI tool call from its deltas. Streams are read seven bytes at a time, so eve
 """
 
 import json
+from itertools import accumulate
 
-from examples.workflows.w07_streaming_assistant.scenarios import ANSWER, CHANNEL, SECRET
+from examples.workflows.w07_streaming_assistant.scenarios import (
+    ANSWER,
+    CHANNEL,
+    LONG_ANSWER,
+    SECRET,
+    pair_answer,
+    pair_decision,
+)
 from irimi import redact, trace
 from irimi.exchange import STREAM_TRUNCATED_FLAG, UPSTREAM_ERROR_FLAG, Exchange
 from irimi.trace import TelemetrySeen
@@ -42,6 +50,24 @@ def data_lines(body: bytes) -> list[dict]:
         for line in body.decode().splitlines()
         if line.startswith("data: {")
     ]
+
+
+def text_deltas(body: bytes) -> str:
+    """The text an Anthropic stream's `text_delta` events carry, joined."""
+    return "".join(
+        d["delta"]["text"] for d in data_lines(body) if d["type"] == "content_block_delta"
+    )
+
+
+def boundaries(chunks: tuple[int, ...]) -> list[int]:
+    """The offsets in a streamed body where one recorded chunk ends and the next begins."""
+    return list(accumulate(chunks))[:-1]
+
+
+def line_around(body: bytes, needle: bytes) -> tuple[int, int]:
+    """The start of the line of `body` that holds `needle`, and the end of it, past its LF."""
+    at = body.index(needle)
+    return body.rindex(b"\n", 0, at) + 1, body.index(b"\n", at) + 1
 
 
 def test_both_streams_pass_through_irimi_whole_and_unchanged(run_workflow):
@@ -233,3 +259,95 @@ def test_a_tool_call_streamed_in_pieces_becomes_one_faked_slack_post(run_workflo
     pieces = [call[0]["function"]["arguments"] for call in calls if call]
     arguments = json.dumps({"channel": CHANNEL, "text": text})
     assert pieces == ["", *(arguments[i : i + 5] for i in range(0, len(arguments), 5))]
+
+
+def test_a_secret_a_write_ends_inside_is_redacted_in_the_joined_stream(run_workflow):
+    """#71 with chunk boundaries that fall mid-line. The fake writes a 16 KB Anthropic stream in
+    pieces that each end inside a `data:` line, one of them inside the secret, which is whole on
+    its line. Redaction reads the stream joined (#69), so the secret reaches disk as its
+    placeholder, never as two halves. The chunk lengths are recomputed over the redacted body
+    line by line: a boundary in a line redaction left alone keeps its place, and the one that
+    fell inside the secret's line, which redaction re-serialized, moves to that line's end."""
+    bare = run_workflow(W, "secret_split_across_writes", "bare")
+    shadow = run_workflow(W, "secret_split_across_writes", "shadow")
+    assert bare.exit_code == shadow.exit_code == 0
+    assert shadow.result(with_time=False) == bare.result(with_time=False)
+    assert shadow.result()["caller_text"] == shadow.result()["answer"] == LONG_ANSWER
+    assert shadow.exchange_lines() == LLM_LINES
+    # What the engine copied, before redaction: the stream as sent, and a chunk boundary inside
+    # the secret. Chunked framing hands the proxy each write as its own chunk at least.
+    [sent] = [e for e in shadow.handed if e.request.path == "/v1/messages"]
+    assert sent.response is not None
+    sent_body, sent_cuts = sent.response.body, boundaries(sent.stream_chunks)
+    assert text_deltas(sent_body) == LONG_ANSWER
+    assert len(sent_body) > 16_000 and sum(sent.stream_chunks) == len(sent_body)
+    at = sent_body.index(SECRET.encode())
+    assert any(at < cut < at + len(SECRET) for cut in sent_cuts)
+    # What the store holds.
+    stored = stored_exchanges(shadow)["/v1/messages"]
+    assert stored.response is not None and stored.flags == ()
+    body = stored.response.body
+    hidden = redact.placeholder(redact.load_key(shadow.home), SECRET)
+    assert SECRET.encode() not in body
+    assert text_deltas(body) == LONG_ANSWER.replace(SECRET, hidden)
+    assert body.endswith(MESSAGE_STOP)
+    assert sum(stored.stream_chunks) == len(body)
+    sent_start, sent_end = line_around(sent_body, SECRET.encode())
+    start, end = line_around(body, hidden.encode())
+    assert start == sent_start  # redaction changed that one line and no other
+    moved = len(body) - len(sent_body)
+    assert boundaries(stored.stream_chunks) == [
+        *(cut for cut in sent_cuts if cut <= sent_start),
+        end,
+        *(cut + moved for cut in sent_cuts if cut >= sent_end),
+    ]
+    written = [
+        path
+        for root in (shadow.home, shadow.cwd, shadow.tmp)
+        for path in root.rglob("*")
+        if path.is_file() and SECRET.encode() in path.read_bytes()
+    ]
+    assert written == []
+
+
+def test_two_streams_at_once_are_each_stored_against_their_own_request(run_workflow):
+    """#71 under concurrency. Two callers ask at once, and the fake LLM answers neither of a
+    provider's two calls until both have arrived, so irimi copies two Anthropic streams, then two
+    OpenAI streams, at the same time. Each chat's answers name its caller, so a chunk copied into
+    the other flow's recording would show: each stored stream is whole, and is the answer to the
+    request it is stored with."""
+    bare = run_workflow(W, "two_callers", "bare")
+    shadow = run_workflow(W, "two_callers", "shadow")
+    assert bare.exit_code == shadow.exit_code == 0
+    assert shadow.result(with_time=False) == bare.result(with_time=False)
+    for n, caller in enumerate(shadow.result()["callers"], start=1):
+        assert caller["question"] == f"How do refunds work? (caller {n})"
+        assert caller["caller_text"] == caller["answer"] == pair_answer(str(n))
+        assert caller["decision"] == pair_decision(str(n))
+        assert caller["caller_events"][0] == "start" and caller["caller_events"][-1] == "done"
+    assert sorted(shadow.exchange_lines()) == sorted(LLM_LINES * 2)
+    stored = [e for e in shadow.stored_events() if isinstance(e, Exchange)]
+    ends = {"/v1/messages": MESSAGE_STOP, "/v1/chat/completions": b"data: [DONE]\n\n"}
+    for path, end in ends.items():
+        streams = [e for e in stored if e.request.path == path]
+        assert len(streams) == 2
+        assert max(e.started_at for e in streams) < min(e.ended_at for e in streams)
+        callers = []
+        for ex in streams:
+            assert ex.response is not None and ex.flags == ()
+            assert ex.response.body.endswith(end)
+            assert len(ex.stream_chunks) > 1
+            assert sum(ex.stream_chunks) == len(ex.response.body)
+            asked = json.loads(ex.request.body)["messages"][-1]["content"]
+            caller = "1" if "caller 1" in asked else "2"
+            callers.append(caller)
+            if path == "/v1/messages":
+                assert text_deltas(ex.response.body) == pair_answer(caller)
+            else:
+                assert asked == pair_answer(caller)
+                content = [
+                    d["choices"][0]["delta"].get("content") or ""
+                    for d in data_lines(ex.response.body)
+                ]
+                assert "".join(content) == pair_decision(caller)
+        assert sorted(callers) == ["1", "2"]

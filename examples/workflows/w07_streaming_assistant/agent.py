@@ -14,11 +14,13 @@ Upstream streams are read a few bytes at a time on purpose, so every SSE event i
 reads and the parser has to reassemble it (`sse_events`).
 
     python -m examples.workflows.launch \\
-        examples.workflows.w07_streaming_assistant.agent <question> {read_all,hang_up}
+        examples.workflows.w07_streaming_assistant.agent <question> {read_all,hang_up,two_callers}
 
 The agent delivers the question to itself over loopback. `hang_up` makes that caller reset the
-connection after the first event, the way a closed browser tab does. Exit codes: 0 answered,
-3 the caller went away, 4 an upstream stream broke.
+connection after the first event, the way a closed browser tab does. `two_callers` has two callers
+ask at once, as `<question> (caller 1)` and `<question> (caller 2)`, so two chats stream through
+the proxy side by side (#71). Exit codes: 0 answered, 3 the caller went away, 4 an upstream stream
+broke.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ from examples.workflows import agentkit, sdk
 READ_SIZE = 7  # deliberately small: every event straddles several reads
 ANSWERED_BY = "Irimi-Answered-By"
 EXIT = {"ok": 0, "client_gone": 3, "upstream_broke": 4}
+MODES = ("read_all", "hang_up", "two_callers")
 POST_SUMMARY = {
     "type": "function",
     "function": {"name": "post_summary", "parameters": {"type": "object"}},
@@ -194,8 +197,8 @@ def chat(question: str, send: Callable[[str, dict[str, Any]], None]) -> dict[str
 
 class _Chat(agentkit.Handler):
     protocol_version = "HTTP/1.0"
-    outcome: dict[str, Any] = {}
-    finished = threading.Event()
+    outcomes: dict[str, dict[str, Any]] = {}  # by question
+    finished = threading.Semaphore(0)  # released once per chat answered
 
     def do_POST(self) -> None:
         question = json.loads(self.rfile.read(int(self.headers["content-length"])))["question"]
@@ -212,17 +215,17 @@ class _Chat(agentkit.Handler):
 
         try:
             send("start", {})
-            _Chat.outcome = {"outcome": "ok", **chat(question, send)}
+            _Chat.outcomes[question] = {"outcome": "ok", **chat(question, send)}
         except ClientGone as exc:
-            _Chat.outcome = {"outcome": "client_gone", "error": str(exc)}
+            _Chat.outcomes[question] = {"outcome": "client_gone", "error": str(exc)}
         except UpstreamBroke as exc:
-            _Chat.outcome = {"outcome": "upstream_broke", "error": str(exc)}
+            _Chat.outcomes[question] = {"outcome": "upstream_broke", "error": str(exc)}
             try:
                 send("error", {"error": str(exc)})
             except ClientGone:
                 pass
         finally:
-            _Chat.finished.set()
+            _Chat.finished.release()
 
 
 def call_self(port: int, question: str, hang_up: bool) -> list[tuple[str | None, str]]:
@@ -259,27 +262,47 @@ def _hang_up_after_first_event(port: int, question: str) -> list[tuple[str | Non
     return list(sse_events(iter([buf.split(b"\r\n\r\n", 1)[-1]])))
 
 
+def _ask(port: int, question: str, hang_up: bool) -> dict[str, Any]:
+    """One caller's chat: what the caller received, and how the agent's handler ended it."""
+    try:
+        events = call_self(port, question, hang_up)
+        _Chat.finished.acquire(timeout=60)
+    except OSError as exc:  # URLError is an OSError
+        events = [("caller_error", type(exc).__name__)]
+    received = "".join(json.loads(d)["text"] for n, d in events if n == "delta")
+    return {
+        "caller_events": [n for n, _ in events],
+        "caller_text": received,
+        **_Chat.outcomes.get(question, {}),
+    }
+
+
 def main(argv: list[str]) -> int:
     agentkit.start()
-    if len(argv) != 2 or argv[1] not in ("read_all", "hang_up"):
-        print("usage: agent.py <question> {read_all,hang_up}", file=sys.stderr)
+    if len(argv) != 2 or argv[1] not in MODES:
+        print(f"usage: agent.py <question> {{{','.join(MODES)}}}", file=sys.stderr)
         return 2
     question, how = argv
     with agentkit.serve(_Chat) as port:
-        try:
-            events = call_self(port, question, how == "hang_up")
-            _Chat.finished.wait(60)
-        except OSError as exc:  # URLError is an OSError
-            events = [("caller_error", type(exc).__name__)]
-    received = "".join(json.loads(d)["text"] for n, d in events if n == "delta")
-    outcome = _Chat.outcome
-    agentkit.obs(
-        "result",
-        caller_events=[n for n, _ in events],
-        caller_text=received,
-        **outcome,
-    )
-    return EXIT.get(outcome.get("outcome", ""), 1)
+        if how != "two_callers":
+            outcome = _ask(port, question, how == "hang_up")
+            agentkit.obs("result", **outcome)
+            return EXIT.get(outcome.get("outcome", ""), 1)
+        questions = [f"{question} (caller {i})" for i in (1, 2)]
+        callers: dict[str, dict[str, Any]] = {}
+        threads = [
+            threading.Thread(target=lambda q=q: callers.update({q: _ask(port, q, False)}))
+            for q in questions
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(90)
+    answered = [{"question": q, **callers.get(q, {})} for q in questions]
+    ends = [c.get("outcome", "") for c in answered]
+    end = "ok" if ends == ["ok", "ok"] else next(e for e in ends if e != "ok")
+    agentkit.obs("result", outcome=end, callers=answered)
+    return EXIT.get(end, 1)
 
 
 if __name__ == "__main__":

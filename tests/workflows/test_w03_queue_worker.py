@@ -147,3 +147,27 @@ def test_a_second_run_sees_the_first_runs_faked_refund(run_workflow):
     assert [c["status"] for c in shadow.calls() if c["method"] == "POST"] == [200, 400]
     assert len({c["run"] for c in shadow.calls()}) == 2
     assert "  ✗ refund $30.00 on ch_QSHARED  would fail: amount_too_large" in shadow.summary()
+
+
+@pytest.mark.parametrize("scenario", ["threads_8", "asyncio_8"])
+def test_runs_list_prints_one_line_per_message_and_one_for_the_process(run_workflow, scenario):
+    """`irimi runs list` over the store: each message's `header` run, incomplete until #74 gives
+    it an end, holding its read, irimi's L3 read and its faked refund; and the process run,
+    which holds none of them (#72)."""
+    shadow = run_workflow(W, scenario, "shadow")
+    code, out, err = shadow.runs("list")
+    assert (code, err) == (0, [])
+    fields = [line.split("  ") for line in out]
+    assert len(fields) == 9
+    headers = sorted(f[0] for f in fields if f[4] == "header")
+    assert headers == sorted(shadow.by_run())
+    for f in fields:
+        if f[4] == "header":
+            assert f[1:4] + f[5:] == ["-", "-", "incomplete", "-", "3 exchanges", "1 writes"]
+        else:
+            assert (f[0], f[3], f[4], f[6:]) == (
+                shadow.process_run_id(),
+                "ok",
+                "process",
+                ["0 exchanges", "0 writes"],
+            )

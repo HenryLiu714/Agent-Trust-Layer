@@ -201,6 +201,27 @@ class Result:
                 return self.irimi[i:]
         return []
 
+    def process_run_id(self) -> str:
+        """The id of the one run `irimi shadow` stored for the agent's process (#70)."""
+        (run,) = [r for r in self.stored().list_runs() if r.attribution == "process"]
+        return run.run_id
+
+    def runs(self, *argv: str) -> tuple[int, list[str], list[str]]:
+        """`irimi runs <argv>` over this run's store, as its user would type it afterwards: the
+        same `$IRIMI_HOME`, working directory and maps (#72). Returns the exit code and what it
+        printed to stdout and to stderr, line by line."""
+        out, err = io.StringIO(), io.StringIO()
+        scenario = self.workflow.scenarios[self.scenario]
+        with (
+            _environ({**os.environ, paths.IRIMI_HOME_ENV: str(self.home)}),
+            contextlib.chdir(self.cwd),
+            _maps(scenario, self.home.parent),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            code = irimi_main(["runs", *argv])
+        return code, out.getvalue().splitlines(), err.getvalue().splitlines()
+
 
 def workflows() -> dict[str, Workflow]:
     """Every workflow package under `examples/workflows/`, found by name so a new one needs no

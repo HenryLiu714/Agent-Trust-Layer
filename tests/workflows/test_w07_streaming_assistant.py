@@ -95,6 +95,30 @@ def test_a_telemetry_post_is_stored_as_having_happened_and_its_body_is_not(run_w
     assert [e.host for e in seen] == ["api.smith.langchain.com"]
     blobs = shadow.home / "store" / "blobs"
     assert trace.body_ref(sent.body).sha256 not in {p.name for p in blobs.iterdir()}
+    # The run it landed in, the chat's `header` run with its embeddings call, prints it as an
+    # event and counts it in its stored summary: telemetry in a stored summary, which no other
+    # corpus run exercises (#72). The streams are in the process run, since `stream_post` sends
+    # no `Irimi-Run` (#75).
+    reader = shadow.stored()
+    [holder] = [
+        r.run_id
+        for r in reader.list_runs()
+        if any(isinstance(e, TelemetrySeen) for e in reader.load_run(r.run_id).events)
+    ]
+    code, out, err = shadow.runs("show", holder)
+    assert (code, err) == (0, [])
+    assert out[7:] == [
+        "",
+        "live      llm       POST api.openai.com/v1/embeddings -> 200",
+        "telemetry api.smith.langchain.com",
+        "",
+        f"irimi shadow · run {holder} · 2 exchanges · 0.0s · backstop: none (Phase 4)",
+        "",
+        "  api.openai.com  1 llm",
+        "  telemetry       1 exchange to 1 host, forwarded live",
+        "",
+        "  2 exchanges · 2 live · 0 delegated · 0 virtualized",
+    ]
 
 
 def test_a_streamed_answer_is_stored_as_the_chunks_the_agent_was_sent(run_workflow):

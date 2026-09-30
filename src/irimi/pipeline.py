@@ -188,6 +188,7 @@ def annotate(
     currency: str = "",
     started_at: float = 0.0,
     ended_at: float = 0.0,
+    stream_chunks: tuple[int, ...] = (),
 ) -> Exchange:
     """Build the Exchange. Anything the engine answered is unvalidated; live forwards are also
     unvalidated for now (validated is reserved for record mode, later phases). `overlay` is how
@@ -201,7 +202,9 @@ def annotate(
     the summary's amount, and is "" whenever no such read happened (#60). `started_at` and
     `ended_at` are the wall-clock seconds the exchange began and ended, which the caller reads
     because only it knows when that was (#68). `ended_at` is never before `started_at`: the wall
-    clock can step back mid-exchange, and a stored run's reader subtracts the two."""
+    clock can step back mid-exchange, and a stored run's reader subtracts the two.
+    `stream_chunks` is the length of each chunk of a streamed response's recorded body, and is
+    empty for a response that did not stream (#71)."""
     validation: Validation = "unvalidated"
     return Exchange(
         request=request,
@@ -223,6 +226,7 @@ def annotate(
         currency=currency,
         started_at=started_at,
         ended_at=max(ended_at, started_at),
+        stream_chunks=stream_chunks,
     )
 
 

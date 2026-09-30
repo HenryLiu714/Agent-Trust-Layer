@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from mitmproxy import ctx, http
 from mitmproxy.addons import default_addons
 from mitmproxy.master import Master
+from mitmproxy.net import encoding
 from mitmproxy.options import Options
 
 from irimi import ca, delegation, echo, netaddr, pipeline, reverse_door
@@ -19,6 +20,7 @@ from irimi.engine import EngineConfig, EngineStartError, OnExchange
 from irimi.exchange import (
     DECISION_FAILED_FLAG,
     FIDELITY_FLAGS,
+    STREAM_TRUNCATED_FLAG,
     TARGET_FAILED_FLAG,
     UPSTREAM_ERROR_FLAG,
     AnsweredBy,
@@ -28,16 +30,18 @@ from irimi.exchange import (
     OverlayFidelity,
     Request,
     Response,
+    clip_chunks,
     is_authored_write,
     media_type,
 )
 from irimi.overlay import Overlaid, Overlay
 from irimi.policy import Answer, AnswerPolicy
-from irimi.store import TraceStore
+from irimi.store import MAX_STORED_BODY, TraceStore
 
 logger = logging.getLogger(__name__)
 
 META_KEY = "irimi"  # flow.metadata slot holding the per-flow state below
+STREAM_KEY = "irimi-stream"  # flow.metadata slot holding a streamed response's `_StreamTee` (#71)
 
 # Called once from the running hook with (bound port, None) or (None, why it failed).
 OnRunning = Callable[[int | None, EngineStartError | None], None]
@@ -70,9 +74,10 @@ def _exchange(
     answered_by: AnsweredBy,
     flags: tuple[str, ...],
     overlay: OverlayFidelity | None = None,
+    stream_chunks: tuple[int, ...] = (),
 ) -> Exchange:
     """The Exchange for a flow `request()` decided about, carrying its answer's L3 outcome,
-    rejection code, webhooks and currency (#45, #47, #60).
+    rejection code, webhooks and currency (#45, #47, #60), and a streamed body's chunks (#71).
 
     It ends now: every caller is the hook that finishes the flow, and builds it just before
     `_finish` (#68). Stamped here and not in `_finish`, which also records the engine's own reads,
@@ -94,7 +99,97 @@ def _exchange(
         currency=answer.currency,
         started_at=pending.started_at,
         ended_at=time.time(),
+        stream_chunks=stream_chunks,
     )
+
+
+class _StreamTee:
+    """`flow.response.stream` for a streamed response: hands each chunk on unchanged, and keeps a
+    copy of it for the trace (#71).
+
+    mitmproxy calls it with each chunk as it arrives and once more with `b""` at the end of the
+    message, and sends the client whatever it returns. So THE CHUNK IS RETURNED WHATEVER HAPPENS
+    HERE: the copy is best-effort, and the agent's stream is not. mitmproxy does not guard the
+    call, so a raise would break the agent's stream, not just the recording.
+
+    The copy stops at MAX_STORED_BODY, the most the store keeps of any body: later chunks still
+    reach the client and are not kept. It also stops for good the first time copying raises.
+    Either way `truncated` is set, and the exchange is flagged STREAM_TRUNCATED_FLAG.
+    """
+
+    def __init__(self) -> None:
+        self.chunks: list[bytes] = []
+        self._size = 0
+        self.truncated = False
+
+    def __call__(self, chunk: bytes) -> bytes:
+        try:
+            self._capture(chunk)
+        except Exception:
+            self.truncated = True
+        return chunk
+
+    def _capture(self, chunk: bytes) -> None:
+        if self.truncated or not chunk:
+            return
+        room = MAX_STORED_BODY - self._size
+        if len(chunk) > room:
+            self.truncated = True
+            chunk = chunk[:room]
+        if chunk:
+            self.chunks.append(chunk)
+            self._size += len(chunk)
+
+
+def _recorded_stream(
+    flow: http.HTTPFlow, tee: _StreamTee, *, whole: bool
+) -> tuple[Response, tuple[int, ...], bool]:
+    """A streamed response as the trace records it: the flow's status and headers, the body `tee`
+    kept, the length of each chunk, and whether that body is short of the whole stream (#71).
+    `whole` is False when the stream ended in the `error` hook. Nothing is written to the flow,
+    and nothing here raises.
+
+    A BODY THAT IS NOT THE WHOLE STREAM IS KEPT UP TO ITS LAST COMPLETE LINE. The copy stops at an
+    arbitrary byte - the cap, the last read before a reset - and a cut inside a UTF-8 character
+    makes the whole body undecodable, which redaction stores unscanned (#69): every key in it
+    would reach disk. A cut inside a line would also store half of a secret on it. Redaction reads
+    a stream line by line, so a body of whole lines is one it can read.
+
+    A `Content-Encoding` is decoded, as `_body` decodes a buffered body, so that redaction reads
+    text rather than gzip; decoded bytes do not split where the wire's chunks did, so such a body
+    is one chunk. One that cannot be decoded - a cut `br` stream, an encoding mitmproxy does not
+    know - is recorded empty and flagged, never as the compressed bytes redaction cannot read."""
+    assert flow.response is not None
+    body = b"".join(tee.chunks)
+    chunks = tuple(len(chunk) for chunk in tee.chunks)
+    cut = tee.truncated or not whole
+    content_encoding = flow.response.headers.get("content-encoding", "")
+    if content_encoding and body:
+        decoded = _decoded(body, content_encoding)
+        if decoded is None:
+            body, chunks, cut = b"", (), True
+        elif decoded != body:
+            body, chunks = decoded, ((len(decoded),) if decoded else ())
+    if cut:
+        body = _complete_lines(body)
+        chunks = clip_chunks(chunks, len(body))
+    headers = _headers_from_fields(flow.response.headers.fields)
+    return Response(status=flow.response.status_code, headers=headers, body=body), chunks, cut
+
+
+def _decoded(body: bytes, content_encoding: str) -> bytes | None:
+    """`body` decoded per `content_encoding`, or None when it cannot be. `get_content(strict=
+    False)` lets mitmproxy's TypeError through, and hands back the raw bytes on a ValueError."""
+    try:
+        decoded = encoding.decode(body, content_encoding)
+    except Exception:
+        return None
+    return decoded if isinstance(decoded, bytes) else None
+
+
+def _complete_lines(body: bytes) -> bytes:
+    """`body` up to the end of its last line: CRLF, LF or a lone CR, as SSE ends one (#71)."""
+    return body[: max(body.rfind(b"\n"), body.rfind(b"\r")) + 1]
 
 
 @dataclass(frozen=True)
@@ -621,9 +716,9 @@ class IrimiAddon:
 
         mitmproxy buffers a whole response body before the `response` hook by default, which turns
         a streamed completion into one late blob. Only a live-forwarded response can stream: one we
-        synthesized has no upstream to stream from. The `response` hook still runs for a streamed
-        flow, but `flow.response.content` is None there, so the recorded exchange carries an empty
-        body — that is the trade for the agent seeing tokens as they arrive (#8).
+        synthesized has no upstream to stream from. mitmproxy never assembles a streamed body, so
+        `flow.response.stream` is a `_StreamTee`: each chunk goes to the agent as it arrives, and a
+        copy of it goes to the trace (#8, #71).
         """
         pending: _Pending | None = flow.metadata.get(META_KEY)
         if pending is None or flow.response is None:
@@ -638,7 +733,9 @@ class IrimiAddon:
             # streamed delegated answer says who answered it like every other one (#12, #28).
             flow.response.headers[pipeline.ANSWERED_BY_HEADER] = stamp
         if _is_event_stream(flow.response.headers.get("content-type", "")):
-            flow.response.stream = True
+            tee = _StreamTee()
+            flow.metadata[STREAM_KEY] = tee
+            flow.response.stream = tee
 
     def response(self, flow: http.HTTPFlow) -> None:
         pending: _Pending | None = flow.metadata.pop(META_KEY, None)
@@ -651,33 +748,40 @@ class IrimiAddon:
         # afterwards - they were sent before this hook ran. Two things follow, and both are the
         # engine's to enforce rather than the overlay's to remember:
         #
-        #   * the overlay must not be called. It would be handed `body == b""`, which is not what
-        #     the service sent, and whatever it returned could only be wrong.
+        #   * the overlay must not be called. Whatever it returned could not reach the agent,
+        #     whose chunks have already gone, so the trace would record an answer nobody got.
         #   * nothing may be written back to the flow. `NoOverlay` returns the object it was given
         #     so the rewrite below never fired; the first overlay that returns a NEW Response
-        #     would have turned every streamed read into a buffered, empty-bodied one, presenting
-        #     as "reads through the proxy mysteriously return nothing" for streaming endpoints
-        #     only. The same trap is one `respond` change away on the delegated path (#12).
+        #     would have turned every streamed read into a buffered one, presenting as "reads
+        #     through the proxy mysteriously return nothing" for streaming endpoints only. The
+        #     same trap is one `respond` change away on the delegated path (#12).
         #
-        # The exchange is still recorded, with the empty body streaming costs it - that trade is
-        # `responseheaders`' own, and Phase 3 replay inherits it.
+        # Both hold on the response having streamed, never on its body being empty: since #71 the
+        # recorded body is the chunks `_StreamTee` kept, and it is not empty.
         streamed = flow.response is not None and bool(flow.response.stream)
-        upstream = _response_from_flow(flow)
+        stream_chunks: tuple[int, ...] = ()
+        flags = pending.flags
+        tee = flow.metadata.pop(STREAM_KEY, None)
+        if streamed and isinstance(tee, _StreamTee):
+            upstream, stream_chunks, cut = _recorded_stream(flow, tee, whole=True)
+            if cut:
+                flags += (STREAM_TRUNCATED_FLAG,)
+        else:
+            upstream = _response_from_flow(flow)
         resp = upstream
         # A read irimi forwarded is the only place the real values a later fake has to sort
         # against appear - the write log holds writes, and the trace store is write-only - so
         # every read's body goes past `echo.observe_read` on its way out. Which services learn
         # anything from one is `echo`'s to know and not the engine's: a service with no observer
-        # is a no-op, and so is a body that carries nothing (#42). A streamed body is empty here,
-        # which is why the guard names it (#28). A delegated read is observed too: a per-route
-        # `target:` can pair delegated reads with locally faked writes, and the target's values
-        # are then the ones the agent sees.
+        # is a no-op, and so is a body that carries nothing (#42). A streamed body is not a
+        # document an observer can read, and may be cut short, so the guard names it (#28, #71).
+        # A delegated read is observed too: a per-route `target:` can pair delegated reads with
+        # locally faked writes, and the target's values are then the ones the agent sees.
         if not streamed and pending.classification.kind == "read":
             echo.observe_read(pending.classification.service, upstream.body)
         # The overlay stays off for a delegated read: the target owns that service's state, and
         # layering our own minted objects over it would corrupt read-after-write there (D20).
         answered_by = pending.answered_by
-        flags = pending.flags
         overlay_fidelity: OverlayFidelity | None = None
         # Only once there is a write to show: with an empty log there is nothing to apply, and the
         # request side asks the overlay under the same condition.
@@ -695,7 +799,7 @@ class IrimiAddon:
                 # forward, and a changed body with no header says "the real service sent this".
                 answered_by = "overlay"
                 flags += (FIDELITY_FLAGS["overlay"],)
-        ex = _exchange(pending, resp, answered_by, flags, overlay_fidelity)
+        ex = _exchange(pending, resp, answered_by, flags, overlay_fidelity, stream_chunks)
         # The write log is what the overlay replays onto live reads. `is_authored_write` is the
         # one statement of what may enter it, because the summary files a read under a write by
         # the same rule (#48). A target that could not be *dialled* never reaches here: `error()`
@@ -743,7 +847,16 @@ class IrimiAddon:
                 extra_flags += (TARGET_FAILED_FLAG,)
         else:
             extra_flags = pending.flags
-        ex = _exchange(pending, None, pending.answered_by, extra_flags)
+        # A stream that ended in an error - an upstream reset, an agent that hung up - had its
+        # headers and some chunks reach the agent already. The recording keeps what `_StreamTee`
+        # copied and says it is not the whole stream, rather than dropping the response (#71).
+        response: Response | None = None
+        stream_chunks: tuple[int, ...] = ()
+        tee = flow.metadata.pop(STREAM_KEY, None)
+        if flow.response is not None and isinstance(tee, _StreamTee):
+            response, stream_chunks, _ = _recorded_stream(flow, tee, whole=False)
+            extra_flags += (STREAM_TRUNCATED_FLAG,)
+        ex = _exchange(pending, response, pending.answered_by, extra_flags, None, stream_chunks)
         self._finish(ex)
 
     def _finish(self, ex: Exchange) -> None:

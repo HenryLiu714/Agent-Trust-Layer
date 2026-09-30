@@ -253,6 +253,27 @@ so `seq` is completion order. `started_at` recovers start order.
 A write that waits on its own precondition read shows both. In the example below, the refund
 starts first and finishes last, so its precondition read is `seq` 1 and the refund is `seq` 2.
 
+## Reading a run back
+
+`irimi runs list` prints one line per stored run, newest first, and `irimi runs show RUN_ID` prints
+one run: its record, every event in `seq` order, and its summary (#72). That summary is
+`report.stored_summary_lines`, the same code that prints the live one, fed the run's exchanges and
+one host per `TelemetrySeen`, each counted as forwarded live because telemetry always is. It equals
+the block `irimi shadow` printed on exit except in three places:
+
+- **The elapsed seconds.** The live summary times the child; a stored one is the run's
+  `ended_at - started_at`, or `0.0` when either is `null`.
+- **A field redaction replaced.** A write line's `human:` template renders the stored request, so
+  a field whose value was a secret prints as its placeholder.
+- **A write no route matched on a credential-path host.** Its line spells out the request, and
+  the stored path is a placeholder (`hooks.slack.com`'s webhook path, say).
+
+The live summary covers every exchange the proxy saw while the command ran, whatever run each one
+named; a stored run holds only its own events. The two are the same block when the agent sends no
+`Irimi-Run`, because then every exchange is in the process run. An agent that labels its runs
+leaves most of its exchanges in those runs, each its own line in `runs list`, and its process run
+holds only the requests that carried no label.
+
 ## Versioning
 
 `schema_version` is one integer for the whole format, `trace.SCHEMA_VERSION`, carried by

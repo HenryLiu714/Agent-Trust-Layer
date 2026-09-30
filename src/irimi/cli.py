@@ -16,6 +16,7 @@ if TYPE_CHECKING:  # the quoted annotations below; no runtime import
     from irimi.store import TraceStore
 
 SIGINT_EXIT_CODE = 130  # 128 + SIGINT, the shell convention for a Ctrl-C'd command
+DEFAULT_RUNS_LIMIT = 20  # `irimi runs list` without --limit (#72)
 
 NON_HTTP_NOTICE = (
     "Note: irimi only sees HTTP(S). Side effects that are not HTTP "
@@ -106,13 +107,28 @@ def _add_engine_args(parser: argparse.ArgumentParser) -> None:
         help="let an answer target name HOST instead of loopback. This sends the agent's "
         "requests off this machine; targets are loopback-only without it (repeatable)",
     )
+    _add_store_arg(parser, "where to record runs, redacted")
+
+
+def _add_store_arg(parser: argparse.ArgumentParser, what: str = "the trace store to read") -> None:
     parser.add_argument(
         "--store",
         type=Path,
         default=None,
         metavar="DIR",
-        help="where to record runs, redacted (default: $IRIMI_HOME/store)",
+        help=f"{what} (default: $IRIMI_HOME/store)",
     )
+
+
+def _positive_int(value: str) -> int:
+    """argparse type for --limit: a whole number of runs, at least one."""
+    try:
+        number = int(value)
+    except ValueError:
+        number = 0
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"{value!r}: give a whole number of runs, at least 1")
+    return number
 
 
 def _reverse_hosts(args: argparse.Namespace, index: "MapIndex") -> frozenset[str]:
@@ -496,6 +512,73 @@ def cmd_shadow(args: argparse.Namespace) -> int:
     return code
 
 
+def _store_root(args: argparse.Namespace) -> Path:
+    return args.store or paths.store_dir()
+
+
+def cmd_runs_list(args: argparse.Namespace) -> int:
+    """`irimi runs list`: one line per stored run, newest first (#72)."""
+    from irimi import report
+    from irimi.store import StoreReader
+    from irimi.trace import TraceFormatError
+
+    root = _store_root(args)
+    reader = StoreReader(root)
+    try:
+        records = reader.list_runs()[: args.limit]
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if not records:
+        print(f"no runs in {root}")
+        return 0
+    for record in records:
+        # One damaged run is named and counted as `?`, never allowed to hide the others: the
+        # store's own rule for `list_runs` (#70).
+        try:
+            events = reader.load_run(record.run_id).events
+        except (TraceFormatError, OSError, KeyError) as exc:
+            print(f"warning: run {record.run_id} could not be read: {exc}", file=sys.stderr)
+            events = None
+        print(report.run_list_line(record, events))
+    return 0
+
+
+def cmd_runs_show(args: argparse.Namespace) -> int:
+    """`irimi runs show RUN_ID`: a stored run's header, every event, and its summary (#72)."""
+    from irimi import report
+    from irimi.store import RunNotFound, StoreReader
+    from irimi.trace import TraceFormatError
+
+    root = _store_root(args)
+    try:
+        run = StoreReader(root).load_run(args.run_id)
+    except RunNotFound:
+        print(f"error: no run {args.run_id} in {root}", file=sys.stderr)
+        return 1
+    except (TraceFormatError, OSError) as exc:
+        print(f"error: run {args.run_id} could not be read: {exc}", file=sys.stderr)
+        return 1
+    for line in report.run_show_lines(run, _maps_for_show()):
+        print(line)
+    return 0
+
+
+def _maps_for_show() -> "MapIndex | None":
+    """The maps `runs show` renders write lines with, loaded as `serve` and `shadow` load them.
+
+    Only the `human:` templates are read from them, so maps that do not load cost the reader
+    those sentences and nothing else: the writes print as the requests they were (#72). Unlike
+    `serve` and `shadow`, which must not start with half a policy, this carries on."""
+    from irimi import servicemap
+
+    try:
+        return servicemap.load()
+    except servicemap.MapError:
+        print("warning: maps did not load; writes are shown as requests", file=sys.stderr)
+        return None
+
+
 def _close_store(store: "TraceStore") -> None:
     """Close the store `_prepare_run` opened, on every path out of `serve` and `shadow` (#70).
 
@@ -578,6 +661,25 @@ def build_parser() -> argparse.ArgumentParser:
         "list", help="print each mapped host with its service, route count and answer target"
     )
     maps_list.set_defaults(func=cmd_maps_list)
+
+    runs = subparsers.add_parser("runs", help="read back the runs in the trace store")
+    runs_sub = runs.add_subparsers(dest="runs_command", metavar="<subcommand>", required=True)
+    runs_list = runs_sub.add_parser("list", help="print one line per stored run, newest first")
+    _add_store_arg(runs_list)
+    runs_list.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=DEFAULT_RUNS_LIMIT,
+        metavar="N",
+        help=f"print at most N runs (default {DEFAULT_RUNS_LIMIT})",
+    )
+    runs_list.set_defaults(func=cmd_runs_list)
+    runs_show = runs_sub.add_parser(
+        "show", help="print a stored run's header, every event and its summary"
+    )
+    runs_show.add_argument("run_id", metavar="RUN_ID", help="the run's exact id, or unattributed")
+    _add_store_arg(runs_show)
+    runs_show.set_defaults(func=cmd_runs_show)
     return parser
 
 

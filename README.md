@@ -26,9 +26,9 @@ What works today, all of it covered by tests that need no network and no keys:
 - Eleven sample agent workflows run end to end, bare and under `irimi shadow`, on every test run.
 
 Every `serve` and `shadow` run is recorded, redacted, in the trace store under `$IRIMI_HOME/store`
-([`docs/trace-format.md`](docs/trace-format.md)); no command reads it back yet (#72). What does not
-exist yet: the SDK (`irimi.sdk`), `irimi shadow --serve`, replay and `irimi compare`. See
-[Roadmap](#roadmap).
+([`docs/trace-format.md`](docs/trace-format.md)), and `irimi runs list` / `runs show` read it
+back. What does not exist yet: the SDK (`irimi.sdk`), `irimi shadow --serve`, replay and
+`irimi compare`. See [Roadmap](#roadmap).
 
 ## Quickstart
 
@@ -372,6 +372,8 @@ irimi init [--force]              generate the local CA under $IRIMI_HOME/ca
 irimi serve [options]             run the shadow proxy in the foreground on 127.0.0.1:4000
 irimi shadow [options] -- CMD     run CMD with its HTTP(S) traffic in shadow mode, then summarize
 irimi maps list                   print each mapped host, its service, route count and target
+irimi runs list [--limit N]       print one line per stored run, newest first (default 20)
+irimi runs show RUN_ID            print a stored run: its record, every event, its summary
 ```
 
 `serve` and `shadow` take `--port`, `--store DIR`, `--allow-host HOST`, `--target SPEC`,
@@ -384,6 +386,12 @@ else under the id `serve` printed, and the store is closed on Ctrl-C but not yet
 refuses stops `serve` and `shadow` before the proxy starts, with the rule it broke on stderr, and so
 does a redaction key or `--store` irimi cannot use. `IRIMI_HOME` moves irimi's state (see
 `.env.example`).
+
+`runs list` and `runs show` take `--store DIR` too. `runs list` prints each run's id, start,
+duration, status (`ok`, `error`, or `incomplete` for one that never ended), attribution, trigger,
+and its exchange and write counts. `runs show` prints the summary `irimi shadow` printed for the
+run, from what was stored; `runs show unattributed` shows the exchanges no run claimed. See
+[Reading a run back](docs/trace-format.md#reading-a-run-back) for where the two summaries differ.
 
 To install irimi as a standalone tool instead of using the venv, run `uv tool install .` or
 `pipx install .` from the repo root.
@@ -470,11 +478,11 @@ by phase.
 - **Phase 3, first chunk.** `Irimi-Run` is stripped before a request leaves irimi (#67). Trace
   format v1 and exchange timestamps (#68, [`docs/trace-format.md`](docs/trace-format.md)).
   Redaction before anything reaches disk (#69). The sample workflows (#89). The trace store on
-  disk (#70). Streamed SSE bodies recorded chunk by chunk (#71).
+  disk (#70). Streamed SSE bodies recorded chunk by chunk (#71). `irimi runs list` / `runs show`
+  and a summary from a stored run (#72).
 
 **Next: the rest of Phase 3, the run**
 
-- `irimi runs list` / `runs show` and a summary from a stored run (#72).
 - The SDK: a control endpoint (#73), `@sdk.trigger` and `sdk.run()` with run identity in a context
   variable (#74), `Irimi-Run` on every request a run makes (#75), and `@sdk.tool` for calls the
   proxy cannot see (#76).

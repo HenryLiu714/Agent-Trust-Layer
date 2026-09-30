@@ -10,6 +10,7 @@ import hmac
 import json
 import logging
 import os
+import random
 import stat
 import subprocess
 import sys
@@ -512,6 +513,206 @@ def test_redact_exchange_returns_a_new_exchange_and_copies_every_other_field():
             assert getattr(stored, field.name) == getattr(original, field.name), field.name
     assert (stored.started_at, stored.ended_at) == (original.started_at, original.ended_at)
     assert stored.flags == original.flags
+
+
+# ------------------------------------------------------------------------------ streamed bodies
+
+SSE = ("content-type", "text/event-stream")
+QUIET = b'data: {"text":"hi"}\n'
+LOUD = b'data: {"key":"sk_live_abc123"}\n'
+LOUD_STORED = b'data: {"key":"' + _ph("sk_live_abc123").encode() + b'"}\n'
+LAST = b'data: {"text":"bye"}\n'
+
+
+def _stream(body: bytes, chunks: tuple[int, ...]) -> Exchange:
+    """`redact_exchange`'s copy of a live read whose body streamed as `chunks` (#71)."""
+    assert sum(chunks) == len(body)
+    response = Response(status=200, headers=(SSE,), body=body)
+    return redact_exchange(_exchange(response=response, stream_chunks=chunks), KEY)
+
+
+def test_a_streamed_body_s_chunks_are_recomputed_over_the_redacted_body_line_by_line():
+    """A boundary in a line redaction left alone keeps its place, and one inside a line it
+    changed moves to that line's end: a JSON `data:` line is re-serialized whole (#71)."""
+    sent = QUIET + b"\n" + LOUD + b"\n" + LAST
+    chunks = (10, len(QUIET) - 10 + 1 + 15, len(LOUD) - 15 + 1 + 5, len(LAST) - 5)
+    stored = _stream(sent, chunks)
+    assert stored.response is not None
+    assert stored.response.body == QUIET + b"\n" + LOUD_STORED + b"\n" + LAST
+    assert stored.stream_chunks == (
+        10,
+        len(QUIET) - 10 + 1 + len(LOUD_STORED),
+        1 + 5,
+        len(LAST) - 5,
+    )
+
+
+def test_a_secret_split_across_two_chunks_is_redacted_whole():
+    """The joined body is redacted, never chunk by chunk: a key cut in two by a chunk boundary is
+    one secret on one line, and neither half reaches disk (#71)."""
+    cut = LOUD.index(b"abc123")
+    stored = _stream(LOUD, (cut, len(LOUD) - cut))
+    assert stored.response is not None
+    assert stored.response.body == LOUD_STORED
+    assert b"sk_live" not in stored.response.body
+    assert stored.stream_chunks == (len(LOUD_STORED),)
+
+
+def test_two_boundaries_that_land_at_the_end_of_one_changed_line_make_one_chunk():
+    sent = LOUD + LAST
+    stored = _stream(sent, (5, 10, len(LOUD) - 15 + 3, len(LAST) - 3))
+    assert stored.stream_chunks == (len(LOUD_STORED), 3, len(LAST) - 3)
+
+
+def test_a_stream_redaction_left_alone_keeps_its_chunks():
+    sent = QUIET + b"\n" + LAST
+    chunks = (7, len(sent) - 7 - 2, 2)
+    assert _stream(sent, chunks).stream_chunks == chunks
+
+
+def test_a_stream_whose_lines_do_not_pair_up_after_redaction_is_one_chunk():
+    """A body that is one JSON document is re-serialized compactly, which can join its lines, so
+    no boundary can be carried over: the stored body is one chunk."""
+    sent = b'{\n  "key": "sk_live_abc123"\n}\n'
+    stored = _stream(sent, (4, len(sent) - 4))
+    assert stored.response is not None
+    assert stored.response.body == b'{"key":"' + _ph("sk_live_abc123").encode() + b'"}'
+    assert stored.stream_chunks == (len(stored.response.body),)
+
+
+def test_a_stream_that_could_not_be_redacted_is_one_chunk(monkeypatch):
+    def boom(*args, **kwargs):
+        raise ValueError("parser broke")
+
+    monkeypatch.setattr(redact, "_redact_document", boom)
+    stored = _stream(LOUD + LAST, (4, len(LOUD) + len(LAST) - 4))
+    assert stored.response is not None and stored.response.body == FAILED_BODY
+    assert stored.stream_chunks == (len(FAILED_BODY),)
+    assert REDACTION_FAILED_FLAG in stored.flags
+
+
+def test_every_split_of_a_stream_still_splits_its_redacted_body():
+    """Whatever chunks the wire cut a stream into, the stored ones are positive and add up to the
+    stored body, and a boundary before the changed line keeps its offset."""
+    sent = QUIET + LOUD + b"\r\n" + LAST
+    for first in range(1, len(sent)):
+        for second in range(first + 1, len(sent)):
+            chunks = (first, second - first, len(sent) - second)
+            stored = _stream(sent, chunks)
+            assert stored.response is not None
+            assert sum(stored.stream_chunks) == len(stored.response.body), chunks
+            assert all(length > 0 for length in stored.stream_chunks), chunks
+            if first < len(QUIET):
+                assert stored.stream_chunks[0] == first, chunks
+
+
+def test_a_boundary_between_a_carriage_return_and_its_line_feed_stays_in_that_line():
+    """CRLF is one line end, so a boundary between its CR and LF is inside the line: kept there
+    when redaction left the line alone, moved past the LF when it changed it (#71)."""
+    quiet, loud, loud_stored = (line.replace(b"\n", b"\r\n") for line in (QUIET, LOUD, LOUD_STORED))
+    sent = quiet + loud + LAST
+    chunks = (len(quiet) - 1, len(loud), len(LAST) + 1)  # after each CR, before its LF
+    assert _stream(sent, chunks).stream_chunks == (
+        len(quiet) - 1,
+        1 + len(loud_stored),
+        len(LAST),
+    )
+
+
+def test_rechunk_never_raises_and_still_splits_the_stored_body():
+    """Chunks that do not add up to the body - no engine hands redaction those - are still no
+    reason to raise on the writer thread: the stored body is one chunk (#71)."""
+    assert redact._rechunk(QUIET + LOUD, QUIET + LOUD_STORED, (1, 999, 5)) == (
+        len(QUIET + LOUD_STORED),
+    )
+    assert redact._rechunk(LOUD, LOUD_STORED, (0, -4, len(LOUD) + 4)) == (len(LOUD_STORED),)
+    assert redact._rechunk(LOUD, b"", (len(LOUD),)) == ()
+
+
+# Every secret shape redaction knows, each a line of its own among lines nothing changes.
+_STREAM_SECRETS = (
+    "sk_live_abc123",
+    "sk_test_Q9",
+    "rk_live_zz9",
+    "whsec_abc",
+    "xoxb-123-abc",
+    "xapp-1-A0-xyz",
+    "ghp_" + "a" * 36,
+    "github_pat_11AA_bb",
+    "AKIA" + "ABCDEFGHIJKLMNOP",
+    "sk-ant-api03-xy_z",
+    "sk-proj-" + "q" * 22,
+)
+# Characters several bytes long, so a boundary can fall inside one, and characters `str.splitlines`
+# ends a line at and SSE does not: a remap that split the text and the bytes differently would
+# pair the wrong lines.
+_ODD = ("é", "日本", "\U0001f600", " ", " ", "\x85", "\x0b", "\x0c", "\x1c")
+
+
+def _random_stream(rng) -> bytes:
+    lines = []
+    for _ in range(rng.randrange(1, 7)):
+        secret, odd = rng.choice(_STREAM_SECRETS), rng.choice(_ODD)
+        line = rng.choice(
+            (
+                f'data: {{"text":"{odd} {secret}"}}',  # JSON a shape changes
+                f'data: {{"token":"{odd}"}}',  # JSON its key changes
+                f'data: {{"text":"key:\\n{secret}"}}',  # a shape after a JSON escape
+                f"data: {odd} {secret} as text",  # text a shape changes
+                f'data: {{"text":"{odd} quiet"}}',  # nothing changes
+                f"event: {odd}",
+                "",
+            )
+        )
+        lines.append(line + rng.choice(("\n", "\r", "\r\n")))
+    text = "".join(lines)
+    return (text.rstrip("\r\n") if rng.random() < 0.3 else text).encode()
+
+
+def test_any_split_of_any_stream_is_carried_over_to_its_redacted_body():
+    """#71's rule, restated boundary by boundary over seeded random streams cut at random bytes -
+    inside a secret, inside a character, between a CR and its LF, one byte from either end: the
+    stored chunks are positive and add up to the stored body, a boundary in a line redaction left
+    alone keeps its offset in it, one in a line it changed moves to that line's end, and there is
+    no other boundary."""
+    rng = random.Random(71)
+    for _ in range(1000):
+        sent = _random_stream(rng)
+        if not sent:  # a stream that sent no body has no chunks to carry over
+            continue
+        cuts = sorted(rng.sample(range(1, len(sent)), min(len(sent) - 1, rng.randrange(6))))
+        chunks = tuple(b - a for a, b in zip([0, *cuts], [*cuts, len(sent)], strict=True))
+        stored = _stream(sent, chunks)
+        assert stored.response is not None
+        body, got = stored.response.body, stored.stream_chunks
+        case = (sent, chunks, body, got)
+        assert all(length > 0 for length in got) and sum(got) == len(body), case
+        assert not any(secret.encode() in body for secret in _STREAM_SECRETS), case
+        old, new = sent.splitlines(keepends=True), body.splitlines(keepends=True)
+        assert len(old) == len(new), case
+        old_starts = [sum(map(len, old[:i])) for i in range(len(old))]
+        new_starts = [sum(map(len, new[:i])) for i in range(len(new))]
+        expected = set()
+        for boundary in (sum(chunks[: i + 1]) for i in range(len(chunks) - 1)):
+            i = max(i for i, start in enumerate(old_starts) if start < boundary)
+            if old[i] == new[i]:
+                expected.add(new_starts[i] + boundary - old_starts[i])
+            else:
+                expected.add(new_starts[i] + len(new[i]))
+        expected.discard(len(body))
+        assert {sum(got[: i + 1]) for i in range(len(got) - 1)} == expected, case
+
+
+def test_a_streamed_body_redaction_leaves_alone_keeps_its_chunks_whatever_its_content_type():
+    """`_rechunk` follows the body, not the content type: a stream redaction does not change keeps
+    the chunks it came in, and one it does is carried over by the same rule."""
+    for content_type in ("text/event-stream", "application/x-ndjson", "text/plain"):
+        response = Response(status=200, headers=(("content-type", content_type),), body=QUIET)
+        ex = _exchange(response=response, stream_chunks=(3, len(QUIET) - 3))
+        assert redact_exchange(ex, KEY).stream_chunks == (3, len(QUIET) - 3)
+        loud = Response(status=200, headers=(("content-type", content_type),), body=LOUD + LAST)
+        ex = _exchange(response=loud, stream_chunks=(3, len(LOUD) + len(LAST) - 3))
+        assert redact_exchange(ex, KEY).stream_chunks == (len(LOUD_STORED), len(LAST))
 
 
 # ------------------------------------------------------------------------------ rule 7: fail closed

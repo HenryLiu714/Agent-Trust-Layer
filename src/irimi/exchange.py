@@ -100,6 +100,12 @@ BODY_TRUNCATED_FLAG = "body-truncated"
 # `unattributed/` (#70): an id `trace.is_valid_run_id` refuses, or one that differs only in case
 # from a run already on a case-insensitive filesystem. Set only on the copy the store writes.
 BAD_RUN_ID_FLAG = "bad-run-id"
+# The recorded body of this streamed response is not the whole stream (#71): the engine stopped
+# copying it at `store.MAX_STORED_BODY`, its copy raised, the stream ended in an error - an
+# upstream reset, an agent that hung up - before its last chunk, or its `Content-Encoding` could
+# not be decoded. The agent got every chunk that arrived either way; this is a fact about the
+# recording only.
+STREAM_TRUNCATED_FLAG = "stream-truncated"
 
 # The fidelity flag each way of answering carries. One mapping rather than a branch per caller:
 # the policy reads it, and `tests/test_exchange.py` holds it exhaustive over the non-live values.
@@ -238,6 +244,29 @@ class Exchange:
     # an Exchange built outside the engine - a test, or a caller that has no clock to read.
     started_at: float = 0.0
     ended_at: float = 0.0
+    # The byte length of each chunk of a streamed response, in arrival order (#71). They sum to
+    # `len(response.body)`, so they split the recorded body back into the chunks the agent was
+    # sent, and none is 0. Empty for a response that did not stream - and for a stream that sent
+    # no body at all, which has nothing to split.
+    stream_chunks: tuple[int, ...] = field(default_factory=tuple)
+
+
+def clip_chunks(chunks: tuple[int, ...], size: int) -> tuple[int, ...]:
+    """The chunk lengths of the first `size` bytes of a body `chunks` splits: the chunks that fit
+    whole, then what fits of the next one. `chunks` itself when they already fit (#71).
+
+    For whoever keeps only the start of a streamed body - the store's cut at MAX_STORED_BODY - so
+    that `stream_chunks` still sums to the body it describes."""
+    if sum(chunks) <= size:
+        return chunks
+    kept: list[int] = []
+    room = size
+    for length in chunks:
+        if room <= 0:
+            break
+        kept.append(min(length, room))
+        room -= length
+    return tuple(kept)
 
 
 def is_authored_write(exchange: Exchange) -> bool:

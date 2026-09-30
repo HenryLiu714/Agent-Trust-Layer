@@ -42,6 +42,8 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # How long a `stall` fault holds a request before answering. Agents under test use a shorter
 # client timeout, so a stall reads to them as a timeout.
 STALL_S = 2.0
+# How long `reset-stream` waits between its first chunk and the reset (#71).
+RESET_AFTER_CHUNK_S = 0.5
 # The listen backlog. socketserver's default of 5 drops connections from W3's concurrent runs on
 # macOS, where a dropped SYN is retried a second later and reads as a flaky timeout.
 BACKLOG = 128
@@ -92,7 +94,8 @@ class Resp:
     status: int = 200
     body: Any = None
     headers: dict[str, str] = field(default_factory=dict)
-    # A streamed answer: each chunk is written and flushed on its own, `chunk_delay` apart.
+    # A streamed answer: each chunk is written and flushed on its own, `chunk_delay` apart, framed
+    # with chunked transfer encoding as a real LLM API frames one (#71).
     chunks: list[bytes] | None = None
     chunk_delay: float = 0.0
 
@@ -294,7 +297,9 @@ class _Server(ThreadingHTTPServer):
 
 class _Handler(BaseHTTPRequestHandler):
     owner: FakeInternet
-    protocol_version = "HTTP/1.0"  # a streamed body ends when the connection closes
+    # One request per connection. A streamed answer switches its own response to HTTP/1.1 for
+    # chunked framing (`_write`), and still closes after it.
+    protocol_version = "HTTP/1.0"
 
     def _read_body(self) -> bytes:
         if "chunked" in (self.headers.get("transfer-encoding") or "").lower():
@@ -346,19 +351,30 @@ class _Handler(BaseHTTPRequestHandler):
     def _write(self, resp: Resp, reset_after_first_chunk: bool) -> None:
         headers = dict(resp.headers)
         if resp.chunks is not None:
+            # Chunked, as OpenAI and Anthropic send a stream, and not ended by closing the
+            # connection: only a framed body lets a proxy tell a reset from the end (#71).
+            self.protocol_version = "HTTP/1.1"
+            self.close_connection = True
             headers.setdefault("content-type", "text/event-stream")
+            headers["transfer-encoding"] = "chunked"
+            headers["connection"] = "close"  # as the close below does; never reuse it
             self.send_response(resp.status)
             for name, value in headers.items():
                 self.send_header(name, value)
             self.end_headers()
             for i, chunk in enumerate(resp.chunks):
-                self.wfile.write(chunk)
+                self.wfile.write(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
                 self.wfile.flush()
                 if reset_after_first_chunk and i == 0:
+                    # A reset overtakes bytes its peer has not read yet and takes them with it,
+                    # so the chunk is given time to be read first: the fault is "the first chunk,
+                    # then a reset", and a proxy must see both (#71).
+                    time.sleep(RESET_AFTER_CHUNK_S)
                     self._reset()
                     return
                 if resp.chunk_delay:
                     time.sleep(resp.chunk_delay)
+            self.wfile.write(b"0\r\n\r\n")
             return
         if isinstance(resp.body, (dict, list)):
             payload = json.dumps(resp.body).encode()

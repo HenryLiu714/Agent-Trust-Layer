@@ -5,10 +5,18 @@ OpenAI tool call from its deltas. Streams are read seven bytes at a time, so eve
 """
 
 import json
+from itertools import accumulate
 
-from examples.workflows.w07_streaming_assistant.scenarios import ANSWER, CHANNEL, SECRET
-from irimi import trace
-from irimi.exchange import Exchange
+from examples.workflows.w07_streaming_assistant.scenarios import (
+    ANSWER,
+    CHANNEL,
+    LONG_ANSWER,
+    SECRET,
+    pair_answer,
+    pair_decision,
+)
+from irimi import redact, trace
+from irimi.exchange import STREAM_TRUNCATED_FLAG, UPSTREAM_ERROR_FLAG, Exchange
 from irimi.trace import TelemetrySeen
 
 W = "w07_streaming_assistant"
@@ -18,6 +26,48 @@ LLM_LINES = [
     "live      llm       POST api.anthropic.com/v1/messages -> 200",
     "live      llm       POST api.openai.com/v1/chat/completions -> 200",
 ]
+# A stream that broke after irimi had sent the agent its headers: stored with what arrived (#71).
+BROKEN_STREAM_LINE = (
+    "live      llm       POST api.anthropic.com/v1/messages -> 200"
+    "  [upstream-error, stream-truncated]"
+)
+MESSAGE_START = b"event: message_start\n"
+MESSAGE_STOP = b'event: message_stop\ndata: {"type": "message_stop"}\n\n'
+
+
+def stored_exchanges(result) -> dict[str, Exchange]:
+    """The run's stored exchanges by request path; W7 makes each call at most once."""
+    exchanges = [e for e in result.stored_events() if isinstance(e, Exchange)]
+    by_path = {e.request.path: e for e in exchanges}
+    assert len(by_path) == len(exchanges)
+    return by_path
+
+
+def data_lines(body: bytes) -> list[dict]:
+    """Each SSE `data:` line of a stored stream that holds a JSON document, parsed."""
+    return [
+        json.loads(line[len("data: ") :])
+        for line in body.decode().splitlines()
+        if line.startswith("data: {")
+    ]
+
+
+def text_deltas(body: bytes) -> str:
+    """The text an Anthropic stream's `text_delta` events carry, joined."""
+    return "".join(
+        d["delta"]["text"] for d in data_lines(body) if d["type"] == "content_block_delta"
+    )
+
+
+def boundaries(chunks: tuple[int, ...]) -> list[int]:
+    """The offsets in a streamed body where one recorded chunk ends and the next begins."""
+    return list(accumulate(chunks))[:-1]
+
+
+def line_around(body: bytes, needle: bytes) -> tuple[int, int]:
+    """The start of the line of `body` that holds `needle`, and the end of it, past its LF."""
+    at = body.index(needle)
+    return body.rindex(b"\n", 0, at) + 1, body.index(b"\n", at) + 1
 
 
 def test_both_streams_pass_through_irimi_whole_and_unchanged(run_workflow):
@@ -47,27 +97,41 @@ def test_a_telemetry_post_is_stored_as_having_happened_and_its_body_is_not(run_w
     assert trace.body_ref(sent.body).sha256 not in {p.name for p in blobs.iterdir()}
 
 
-def test_a_streamed_answer_is_stored_with_its_request_and_no_body_until_71(run_workflow):
-    """The engine streams an SSE answer through and never assembles it (#28), so the store keeps
-    the exchange - its request body, status and headers - with the answer's body empty, until #71
-    records streamed bodies. The embeddings answer, which is not streamed, is stored whole."""
+def test_a_streamed_answer_is_stored_as_the_chunks_the_agent_was_sent(run_workflow):
+    """#71: the engine streams an SSE answer through and stores what it sent, joined, with the
+    length of each chunk. Both streams are stored whole, to their last event, and the Anthropic
+    text deltas on disk are the answer the agent assembled. The fake writes one event per chunk,
+    5 ms apart, and TCP may coalesce writes, so more than one chunk is pinned and not a count. The
+    embeddings answer is not streamed, and has no chunks."""
     shadow = run_workflow(W, "normal", "shadow")
-    stored = {e.request.path: e for e in shadow.stored_events() if isinstance(e, Exchange)}
+    stored = stored_exchanges(shadow)
     assert sorted(stored) == ["/v1/chat/completions", "/v1/embeddings", "/v1/messages"]
-    for path in ("/v1/chat/completions", "/v1/messages"):
-        response = stored[path].response
-        assert response is not None and (response.status, response.body) == (200, b"")
-        assert (response.header("content-type") or "").startswith("text/event-stream")
-        assert json.loads(stored[path].request.body)["stream"] is True
-    embeddings = stored["/v1/embeddings"].response
-    assert embeddings is not None and json.loads(embeddings.body)["data"]
+    ends = {"/v1/messages": MESSAGE_STOP, "/v1/chat/completions": b"data: [DONE]\n\n"}
+    for path, end in ends.items():
+        ex = stored[path]
+        assert ex.response is not None and ex.response.status == 200
+        assert (ex.response.header("content-type") or "").startswith("text/event-stream")
+        assert json.loads(ex.request.body)["stream"] is True
+        assert ex.response.body.endswith(end)
+        assert len(ex.stream_chunks) > 1
+        assert sum(ex.stream_chunks) == len(ex.response.body)
+        assert ex.flags == ()
+    anthropic = stored["/v1/messages"].response
+    assert anthropic is not None
+    deltas = [
+        d["delta"]["text"] for d in data_lines(anthropic.body) if d["type"] == "content_block_delta"
+    ]
+    assert "".join(deltas) == shadow.result()["answer"] == ANSWER
+    embeddings = stored["/v1/embeddings"]
+    assert embeddings.response is not None and json.loads(embeddings.response.body)["data"]
+    assert embeddings.stream_chunks == ()
 
 
 def test_a_secret_inside_a_stream_reaches_the_caller_intact_and_never_disk(run_workflow):
-    """Redaction is for disk only (#69): the live stream is never rewritten. The store keeps a
-    streamed body empty (#28), so nothing of the stream is on disk to find today; once #71
-    records SSE bodies, this is the scenario that proves the secret is redacted there. The secret
-    is not one of the harness's canaries, so invariant 4 does not look for it: this test does."""
+    """Redaction is for disk only (#69): the live stream is never rewritten, and the stored one
+    (#71) holds the secret nowhere whole. The agent passes Anthropic's answer on to OpenAI, so the
+    secret is whole in that request body, and stored there as its placeholder. The secret is not
+    one of the harness's canaries, so invariant 4 does not look for it: this test does."""
     shadow = run_workflow(W, "secret_in_stream", "shadow")
     assert SECRET in shadow.result()["caller_text"]
     assert shadow.exchange_lines() == LLM_LINES
@@ -78,6 +142,25 @@ def test_a_secret_inside_a_stream_reaches_the_caller_intact_and_never_disk(run_w
         if path.is_file() and SECRET.encode() in path.read_bytes()
     ]
     assert written == []
+    stored = stored_exchanges(shadow)
+    hidden = redact.placeholder(redact.load_key(shadow.home), SECRET).encode()
+    assert hidden in stored["/v1/chat/completions"].request.body
+
+
+def test_a_secret_a_stream_sends_in_pieces_reaches_disk_in_pieces(run_workflow):
+    """The fake sends Anthropic's text 12 characters per `text_delta` event, and redaction reads
+    a stream line by line (#69), so the secret is never whole on any line it reads."""
+    shadow = run_workflow(W, "secret_in_stream", "shadow")
+    anthropic = stored_exchanges(shadow)["/v1/messages"].response
+    assert anthropic is not None
+    deltas = [
+        d["delta"]["text"] for d in data_lines(anthropic.body) if d["type"] == "content_block_delta"
+    ]
+    assert "".join(deltas) == f"The test key is {SECRET}. Keep it out of logs."
+    # LOOKS WRONG: every piece of the secret is on disk as it was sent, so the stored stream
+    # holds the whole secret for anyone who joins its deltas. Redacting over reassembled deltas
+    # is #92's, not #71's.
+    assert [d for d in deltas if d[:4] in ("CANA", " is ")] == [" is sk_live_", "CANARYstream"]
 
 
 def test_a_caller_that_hangs_up_ends_the_run_in_error(run_workflow):
@@ -93,37 +176,41 @@ def test_a_caller_that_hangs_up_ends_the_run_in_error(run_workflow):
     # OpenAI anything.
     assert [c["label"] for c in shadow.calls()] == ["embed", "anthropic_stream"]
     # LOOKS WRONG: the upstream answered fine; it was the AGENT that closed the stream. irimi
-    # records the abandoned stream as an upstream failure with no response.
-    assert shadow.exchange_lines() == [
-        LLM_LINES[0],
-        "live      llm       POST api.anthropic.com/v1/messages -> -  [upstream-error]",
-    ]
+    # records the abandoned stream as an upstream failure (#93).
+    assert shadow.exchange_lines() == [LLM_LINES[0], BROKEN_STREAM_LINE]
+    # The stream the agent abandoned is stored with what irimi had copied of it by then, and
+    # says it is not the whole stream (#71): it opens with `message_start` and never ends.
+    stream = stored_exchanges(shadow)["/v1/messages"]
+    assert stream.flags == (UPSTREAM_ERROR_FLAG, STREAM_TRUNCATED_FLAG)
+    assert stream.response is not None and stream.response.status == 200
+    assert stream.response.body.startswith(MESSAGE_START)
+    assert not stream.response.body.endswith(MESSAGE_STOP)
+    assert sum(stream.stream_chunks) == len(stream.response.body)
 
 
-def test_an_upstream_reset_mid_stream_reaches_the_agent_as_a_clean_end(run_workflow):
+def test_an_upstream_reset_mid_stream_is_stored_as_a_broken_stream(run_workflow):
+    """The fake frames its streams as real LLM APIs do, chunked, so a reset mid-stream is a body
+    that never finished, and not an end of body (#71). The agent sees its stream break, and irimi
+    stores the one event that arrived, flagged as not the whole stream."""
     bare = run_workflow(W, "upstream_reset", "bare")
     shadow = run_workflow(W, "upstream_reset", "shadow")
     assert bare.exit_code == shadow.exit_code == 4
-    # Bare, the reset reaches the agent as a reset.
+    # Bare, the reset reaches the agent as a reset. Under shadow it reaches it as a chunked body
+    # that stopped short: irimi's own connection to the agent was not reset.
     assert bare.events("stream_error", with_time=False) == [
         {"event": "stream_error", "label": "anthropic_stream", "error": "ConnectionResetError"}
     ]
-    # LOOKS WRONG: under shadow the same reset arrives as a clean end of body, so only the missing
-    # `message_stop` tells the agent anything broke, and irimi records a whole 200 with no flag.
-    # A stored stream (#71) would look complete.
     assert shadow.events("stream_error", with_time=False) == [
-        {"event": "stream_error", "label": "anthropic_stream", "error": "truncated"}
+        {"event": "stream_error", "label": "anthropic_stream", "error": "IncompleteRead"}
     ]
-    assert shadow.exchange_lines() == LLM_LINES[:2]
+    assert shadow.exchange_lines() == [LLM_LINES[0], BROKEN_STREAM_LINE]
     assert shadow.result()["caller_events"] == ["start", "error"]
-    # LOOKS WRONG: and it is stored that way (#70): a 200 with no flag, as a whole stream is.
-    [stream] = [
-        e
-        for e in shadow.stored_events()
-        if isinstance(e, Exchange) and e.request.host == "api.anthropic.com"
-    ]
-    assert stream.response is not None
-    assert (stream.response.status, stream.response.body, stream.flags) == (200, b"", ())
+    stream = stored_exchanges(shadow)["/v1/messages"]
+    assert stream.flags == (UPSTREAM_ERROR_FLAG, STREAM_TRUNCATED_FLAG)
+    assert stream.response is not None and stream.response.status == 200
+    assert stream.response.body.startswith(MESSAGE_START)
+    assert data_lines(stream.response.body)[0]["type"] == "message_start"
+    assert stream.stream_chunks == (len(stream.response.body),)
 
 
 def test_a_reset_before_the_stream_opens_reaches_the_agent_as_an_unstamped_502(run_workflow):
@@ -142,6 +229,10 @@ def test_a_reset_before_the_stream_opens_reaches_the_agent_as_an_unstamped_502(r
     ]
     for result in (bare, shadow):
         assert result.result()["caller_events"] == ["start", "error"]
+    # No stream ever opened, so nothing is stored as one (#71).
+    stored = stored_exchanges(shadow)
+    assert stored["/v1/messages"].response is None
+    assert [e.stream_chunks for e in stored.values()] == [(), ()]
 
 
 def test_a_tool_call_streamed_in_pieces_becomes_one_faked_slack_post(run_workflow):
@@ -160,3 +251,103 @@ def test_a_tool_call_streamed_in_pieces_becomes_one_faked_slack_post(run_workflo
     assert f'  ○ post to #{CHANNEL}: "{text}"  unvalidated (L3 preconditions passed)' in (
         shadow.summary()
     )
+    # The stored OpenAI stream holds every 5-character argument delta `SplittingLLM` sent, in
+    # order: the tool call is recorded as it streamed, not as the agent assembled it (#71).
+    openai = stored_exchanges(shadow)["/v1/chat/completions"].response
+    assert openai is not None
+    calls = [d["choices"][0]["delta"].get("tool_calls") for d in data_lines(openai.body)]
+    pieces = [call[0]["function"]["arguments"] for call in calls if call]
+    arguments = json.dumps({"channel": CHANNEL, "text": text})
+    assert pieces == ["", *(arguments[i : i + 5] for i in range(0, len(arguments), 5))]
+
+
+def test_a_secret_a_write_ends_inside_is_redacted_in_the_joined_stream(run_workflow):
+    """#71 with chunk boundaries that fall mid-line. The fake writes a 16 KB Anthropic stream in
+    pieces that each end inside a `data:` line, one of them inside the secret, which is whole on
+    its line. Redaction reads the stream joined (#69), so the secret reaches disk as its
+    placeholder, never as two halves. The chunk lengths are recomputed over the redacted body
+    line by line: a boundary in a line redaction left alone keeps its place, and the one that
+    fell inside the secret's line, which redaction re-serialized, moves to that line's end."""
+    bare = run_workflow(W, "secret_split_across_writes", "bare")
+    shadow = run_workflow(W, "secret_split_across_writes", "shadow")
+    assert bare.exit_code == shadow.exit_code == 0
+    assert shadow.result(with_time=False) == bare.result(with_time=False)
+    assert shadow.result()["caller_text"] == shadow.result()["answer"] == LONG_ANSWER
+    assert shadow.exchange_lines() == LLM_LINES
+    # What the engine copied, before redaction: the stream as sent, and a chunk boundary inside
+    # the secret. Chunked framing hands the proxy each write as its own chunk at least.
+    [sent] = [e for e in shadow.handed if e.request.path == "/v1/messages"]
+    assert sent.response is not None
+    sent_body, sent_cuts = sent.response.body, boundaries(sent.stream_chunks)
+    assert text_deltas(sent_body) == LONG_ANSWER
+    assert len(sent_body) > 16_000 and sum(sent.stream_chunks) == len(sent_body)
+    at = sent_body.index(SECRET.encode())
+    assert any(at < cut < at + len(SECRET) for cut in sent_cuts)
+    # What the store holds.
+    stored = stored_exchanges(shadow)["/v1/messages"]
+    assert stored.response is not None and stored.flags == ()
+    body = stored.response.body
+    hidden = redact.placeholder(redact.load_key(shadow.home), SECRET)
+    assert SECRET.encode() not in body
+    assert text_deltas(body) == LONG_ANSWER.replace(SECRET, hidden)
+    assert body.endswith(MESSAGE_STOP)
+    assert sum(stored.stream_chunks) == len(body)
+    sent_start, sent_end = line_around(sent_body, SECRET.encode())
+    start, end = line_around(body, hidden.encode())
+    assert start == sent_start  # redaction changed that one line and no other
+    moved = len(body) - len(sent_body)
+    assert boundaries(stored.stream_chunks) == [
+        *(cut for cut in sent_cuts if cut <= sent_start),
+        end,
+        *(cut + moved for cut in sent_cuts if cut >= sent_end),
+    ]
+    written = [
+        path
+        for root in (shadow.home, shadow.cwd, shadow.tmp)
+        for path in root.rglob("*")
+        if path.is_file() and SECRET.encode() in path.read_bytes()
+    ]
+    assert written == []
+
+
+def test_two_streams_at_once_are_each_stored_against_their_own_request(run_workflow):
+    """#71 under concurrency. Two callers ask at once, and the fake LLM answers neither of a
+    provider's two calls until both have arrived, so irimi copies two Anthropic streams, then two
+    OpenAI streams, at the same time. Each chat's answers name its caller, so a chunk copied into
+    the other flow's recording would show: each stored stream is whole, and is the answer to the
+    request it is stored with."""
+    bare = run_workflow(W, "two_callers", "bare")
+    shadow = run_workflow(W, "two_callers", "shadow")
+    assert bare.exit_code == shadow.exit_code == 0
+    assert shadow.result(with_time=False) == bare.result(with_time=False)
+    for n, caller in enumerate(shadow.result()["callers"], start=1):
+        assert caller["question"] == f"How do refunds work? (caller {n})"
+        assert caller["caller_text"] == caller["answer"] == pair_answer(str(n))
+        assert caller["decision"] == pair_decision(str(n))
+        assert caller["caller_events"][0] == "start" and caller["caller_events"][-1] == "done"
+    assert sorted(shadow.exchange_lines()) == sorted(LLM_LINES * 2)
+    stored = [e for e in shadow.stored_events() if isinstance(e, Exchange)]
+    ends = {"/v1/messages": MESSAGE_STOP, "/v1/chat/completions": b"data: [DONE]\n\n"}
+    for path, end in ends.items():
+        streams = [e for e in stored if e.request.path == path]
+        assert len(streams) == 2
+        assert max(e.started_at for e in streams) < min(e.ended_at for e in streams)
+        callers = []
+        for ex in streams:
+            assert ex.response is not None and ex.flags == ()
+            assert ex.response.body.endswith(end)
+            assert len(ex.stream_chunks) > 1
+            assert sum(ex.stream_chunks) == len(ex.response.body)
+            asked = json.loads(ex.request.body)["messages"][-1]["content"]
+            caller = "1" if "caller 1" in asked else "2"
+            callers.append(caller)
+            if path == "/v1/messages":
+                assert text_deltas(ex.response.body) == pair_answer(caller)
+            else:
+                assert asked == pair_answer(caller)
+                content = [
+                    d["choices"][0]["delta"].get("content") or ""
+                    for d in data_lines(ex.response.body)
+                ]
+                assert "".join(content) == pair_decision(caller)
+        assert sorted(callers) == ["1", "2"]

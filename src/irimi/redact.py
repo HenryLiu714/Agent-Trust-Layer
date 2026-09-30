@@ -30,6 +30,7 @@ import stat
 from collections.abc import Callable
 from dataclasses import replace
 from functools import partial
+from itertools import pairwise
 from pathlib import Path
 from urllib.parse import quote_plus, unquote_plus, urlsplit
 
@@ -136,6 +137,19 @@ _SSE_DATA = "data:"
 # token (#69). A JSON string holds neither CR nor LF raw, so no JSON line is split by this.
 _LINE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
 
+# `_LINE` over bytes, for `_rechunk`: a chunk length counts bytes, and a line of text does not.
+# Built from `_LINE` so the two cannot disagree on where a line ends, and they split alike: in
+# UTF-8, CR and LF are never a byte of a longer character (#71).
+_BYTE_LINE = re.compile(_LINE.pattern.encode())
+
+
+def complete_lines(body: bytes) -> bytes:
+    """`body` up to the end of its last line, where `_LINE` ends one: CRLF, LF or a lone CR. What
+    the engine keeps of a stream that is not whole, so that every line of it is one redaction can
+    read (#71). Never raises."""
+    return body[: max(body.rfind(b"\n"), body.rfind(b"\r")) + 1]
+
+
 # What `quote_plus` leaves alone in a redacted query or form value, so the placeholder stays
 # readable on disk, as it is everywhere else.
 _PLACEHOLDER_SAFE = "<>:"
@@ -233,13 +247,19 @@ def redact_exchange(exchange: Exchange, key: bytes) -> Exchange:
     target and the operation are redacted. Every other field is copied with `dataclasses.replace`,
     so a field added to Exchange later survives without a change here. A part that could not be
     redacted is stored as REDACTION_FAILED and the copy gains REDACTION_FAILED_FLAG.
+
+    `stream_chunks` is the one field that follows the body: a placeholder is not as long as its
+    secret, so the chunk lengths are recomputed over the redacted body (`_rechunk`, #71).
     """
     guard = _Guard()
     secret_path = _secret_path(exchange.request)
     request = _redact_request(exchange.request, key, guard, secret_path)
     response = exchange.response
+    stream_chunks = exchange.stream_chunks
     if response is not None:
         response = _redact_response(response, key, guard, secret_path)
+        if stream_chunks and exchange.response is not None:
+            stream_chunks = _rechunk(exchange.response.body, response.body, stream_chunks)
     # A bare-origin target keeps the request's path (`delegation.target_url`), so it is redacted
     # by the request's host's rules: a webhook's secret path would otherwise reach disk here.
     target = guard(
@@ -262,6 +282,7 @@ def redact_exchange(exchange: Exchange, key: bytes) -> Exchange:
         target=target,
         operation=operation,
         flags=flags,
+        stream_chunks=stream_chunks,
     )
 
 
@@ -326,6 +347,43 @@ def _redact_response(
             partial(_redact_body, response.body, ct, key, secret_path),
         ),
     )
+
+
+def _rechunk(sent: bytes, stored: bytes, chunks: tuple[int, ...]) -> tuple[int, ...]:
+    """The chunk lengths of `stored`, the redacted copy of the streamed body `sent` that `chunks`
+    split. Always a split of `stored`: positive lengths summing to `len(stored)`. Never raises.
+
+    Redaction reads a stream line by line (`_redact_line`) and never adds or removes a line, so the
+    two bodies are compared line for line. A chunk boundary in a line redaction left alone keeps
+    its place in that line. One inside a line it changed moves to the end of that line: a JSON
+    `data:` line is re-serialized whole, so no offset inside it maps to the new one. Two boundaries
+    that land together make one chunk. When the lines do not pair up - the body was one JSON
+    document, or could not be redacted at all - the stored body is one chunk.
+    """
+    if stored == sent:
+        return chunks
+    if not stored:
+        return ()
+    try:
+        old, new = _BYTE_LINE.findall(sent), _BYTE_LINE.findall(stored)
+        if len(old) != len(new):
+            return (len(stored),)
+        cuts: set[int] = set()
+        line, old_start, new_start, boundary = 0, 0, 0, 0
+        for length in chunks[:-1]:
+            boundary += length
+            while old_start + len(old[line]) < boundary:
+                old_start += len(old[line])
+                new_start += len(new[line])
+                line += 1
+            if old[line] == new[line]:
+                cuts.add(new_start + boundary - old_start)
+            else:
+                cuts.add(new_start + len(new[line]))
+        edges = [0, *sorted(cut for cut in cuts if 0 < cut < len(stored)), len(stored)]
+        return tuple(b - a for a, b in pairwise(edges))
+    except Exception:
+        return (len(stored),)
 
 
 def _content_type(headers: Headers) -> str:

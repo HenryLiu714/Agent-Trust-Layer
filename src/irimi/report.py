@@ -234,7 +234,8 @@ def _is_intercepted(exchange: Exchange) -> bool:
 
 def _reached_target(exchange: Exchange) -> bool:
     """A write an answer target actually answered, as opposed to one whose target was never
-    reached. `IrimiAddon.error` flags the second `target-failed` and records no response."""
+    reached. `IrimiAddon.error` flags the second `target-failed`, and records no response unless
+    the target had begun a streamed answer (#71)."""
     return exchange.answered_by == "delegated" and TARGET_FAILED_FLAG not in exchange.flags
 
 

@@ -23,7 +23,9 @@ import socket
 import sys
 import threading
 import time
+from bisect import bisect_left
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from itertools import accumulate, pairwise
 from pathlib import Path
 
 import pytest
@@ -415,17 +417,6 @@ def test_the_phase_1_run_redacted_for_disk_carries_no_credential_and_changes_not
 # survives. Every upstream is loopback: the stand-in below, or nothing at all.
 
 
-def _through_a_store(root: Path, key: bytes, exchanges: list[Exchange]) -> _Disk:
-    """`exchanges` recorded into a DirectoryStore of their own under `root`, and read back: for
-    an exchange no run produced, such as a stream assembled after the fact."""
-    store = DirectoryStore(root, key)
-    for ex in exchanges:
-        store.record(ex)
-    store.close()
-    assert store.stats().dropped == 0
-    return _Disk(root, key, exchanges)
-
-
 def _placeholders(key: bytes, *secrets: str) -> dict[str, str]:
     """Each secret and the placeholder it must be stored as."""
     return {secret: redact.placeholder(key, secret) for secret in secrets}
@@ -439,7 +430,7 @@ def _with_placeholders(ex: Exchange, hidden: dict[str, str]) -> Exchange:
 
     A body is swapped byte for byte, then held to #69's rule 5: a JSON body a rule changed is
     re-serialized compact, and every other body - a form, a stream, bytes that are not UTF-8 -
-    keeps its bytes."""
+    keeps its bytes. A streamed body's chunks then follow it (`_chunks_after`, #71)."""
     order = sorted(hidden, key=len, reverse=True)
 
     def text(value: str) -> str:
@@ -476,13 +467,37 @@ def _with_placeholders(ex: Exchange, hidden: dict[str, str]) -> Exchange:
             headers=headers(response.headers),
             body=body(response.body, response.headers),
         )
+    stream_chunks = ex.stream_chunks
+    if response is not None and ex.response is not None and stream_chunks:
+        stream_chunks = _chunks_after(ex.response.body, response.body, stream_chunks)
     return dataclasses.replace(
         ex,
         request=request,
         response=response,
         target=text(ex.target),
         operation=text(ex.operation),
+        stream_chunks=stream_chunks,
     )
+
+
+def _chunks_after(sent: bytes, stored: bytes, chunks: tuple[int, ...]) -> tuple[int, ...]:
+    """#71's rule for a stream's chunks once its body is redacted, stated apart from `redact`'s
+    own: the two bodies pair up line for line; a boundary in an unchanged line keeps its place in
+    it, one in a changed line moves to that line's end, and boundaries that meet make one chunk."""
+    if sent == stored:
+        return chunks
+    old, new = sent.splitlines(keepends=True), stored.splitlines(keepends=True)
+    assert len(old) == len(new), "a stream the corpus redacts keeps its lines"
+    old_ends, new_ends = list(accumulate(map(len, old))), list(accumulate(map(len, new)))
+    cuts = set()
+    for boundary in accumulate(chunks[:-1]):
+        i = bisect_left(old_ends, boundary)
+        if old[i] == new[i]:
+            cuts.add(new_ends[i] - len(new[i]) + boundary - (old_ends[i] - len(old[i])))
+        else:
+            cuts.add(new_ends[i])
+    edges = [0, *sorted(cut for cut in cuts if 0 < cut < len(stored)), len(stored)]
+    return tuple(b - a for a, b in pairwise(edges))
 
 
 def _assert_stored_as(disk: _Disk, hidden: dict[str, str]) -> list[Exchange]:
@@ -533,6 +548,16 @@ SSE_BODY = (
     b'data: {"text":"key: ' + SSE_PLAIN_KEY.encode() + b'"}\n\n'
     b'data: {"text":"key:\\n' + SSE_ESCAPED_KEY.encode() + b'"}\n\n'
 )
+# Where the stand-in cuts SSE_BODY into chunks (#71): inside the first key, at the end of the blank
+# line after it, and inside the second key. So a stored boundary moves to the end of a line
+# redaction changed, and one in a line it left alone keeps its place.
+SSE_CUTS = (
+    SSE_BODY.index(b"StreamedPlain"),
+    SSE_BODY.index(b"\n\n") + 2,
+    SSE_BODY.index(b"AfterAnEscape"),
+)
+# How long the stand-in waits between chunks, so the proxy reads each one on its own.
+SSE_CHUNK_GAP_S = 0.05
 SESSION_COOKIE = "session=cookie-secret-77; Path=/; HttpOnly"
 BINARY_BODY = b"\x89PNG\r\n\x1a\n\xff\xfe\x00 not UTF-8, stored as it came"
 
@@ -573,7 +598,10 @@ class _RedactStandIn(BaseHTTPRequestHandler):
 
     seen: list[tuple[str, str, Headers, bytes]] = []
 
-    def _answer(self, content_type: str, body: bytes, extra: Headers = ()) -> None:
+    def _answer(
+        self, content_type: str, body: bytes, extra: Headers = (), cuts: tuple[int, ...] = ()
+    ) -> None:
+        """Answer `body`, written in pieces cut at `cuts`, SSE_CHUNK_GAP_S apart."""
         length = int(self.headers.get("content-length") or 0)
         sent = self.rfile.read(length) if length else b""
         _RedactStandIn.seen.append((self.command, self.path, tuple(self.headers.items()), sent))
@@ -583,7 +611,11 @@ class _RedactStandIn(BaseHTTPRequestHandler):
             self.send_header(name, value)
         self.send_header("content-length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        for start, end in pairwise((0, *cuts, len(body))):
+            if start:
+                time.sleep(SSE_CHUNK_GAP_S)
+            self.wfile.write(body[start:end])
 
     def do_GET(self):
         self._answer("application/octet-stream", BINARY_BODY, (("set-cookie", SESSION_COOKIE),))
@@ -592,7 +624,7 @@ class _RedactStandIn(BaseHTTPRequestHandler):
         if self.path == "/v1/messages":
             self._answer("application/json", LLM_ANSWER)
         elif self.path == "/v1/stream":
-            self._answer("text/event-stream", SSE_BODY)
+            self._answer("text/event-stream", SSE_BODY, cuts=SSE_CUTS)
         else:  # the webhook's target, answering as Slack does
             self._answer("text/html", b"ok")
 
@@ -889,14 +921,13 @@ def test_an_llm_request_stores_a_nested_live_key_and_a_token_key_as_placeholders
     assert written.response is not None and nested.encode() in written.response.body
 
 
-def test_a_streamed_sse_answer_puts_no_live_key_on_disk_and_would_not_if_it_were_assembled(
+def test_a_streamed_sse_answer_is_stored_whole_with_each_live_key_as_its_placeholder(
     home, tmp_path, monkeypatch, redact_stand_in, stored
 ):
-    """#69's text rule over a real `text/event-stream` answer. The agent reads the whole stream
-    unredacted, both keys included. The engine streams it and records its body empty (#28's
-    trade), so nothing of it reaches disk today - and the stream the agent read, recorded into a
-    store of its own as #71 will record an assembled one, holds each key as its placeholder: the
-    second key too, which follows a JSON `\\n` escape inside the data line."""
+    """#69's text rule over a real `text/event-stream` answer, recorded by #71. The agent reads
+    the whole stream unredacted, both keys included. The engine streams it through and records
+    the chunks it sent, and the run's own store holds that body with each key as its placeholder:
+    the second key too, which follows a JSON `\\n` escape inside the data line."""
     authority = f"127.0.0.1:{redact_stand_in}"
     (answer,) = _run_calls_under_shadow(
         tmp_path,
@@ -919,13 +950,17 @@ def test_a_streamed_sse_answer_puts_no_live_key_on_disk_and_would_not_if_it_were
     )
     disk = stored()
     (ex,) = disk.received
-    assert (ex.kind, ex.answered_by) == ("llm", "live")
-    assert ex.response is not None and ex.response.body == b""  # streamed, so never assembled
+    assert (ex.kind, ex.answered_by, ex.flags) == ("llm", "live", ())
+    assert ex.response is not None and ex.response.body == SSE_BODY
+    # The proxy may read two of the stand-in's pieces as one; more than one chunk is what it pins.
+    assert len(ex.stream_chunks) > 1 and sum(ex.stream_chunks) == len(SSE_BODY)
 
     hidden = _placeholders(disk.key, SSE_PLAIN_KEY, SSE_ESCAPED_KEY)
-    _assert_stored_as(disk, hidden)
-    assembled = dataclasses.replace(ex, response=dataclasses.replace(ex.response, body=answer.body))
-    _assert_stored_as(_through_a_store(tmp_path / "assembled", disk.key, [assembled]), hidden)
+    (written,) = _assert_stored_as(disk, hidden)
+    assert written.response is not None
+    assert sum(written.stream_chunks) == len(written.response.body)
+    for secret in hidden.values():
+        assert secret.encode() in written.response.body
 
 
 def test_a_live_reads_set_cookie_is_stored_as_a_placeholder_and_its_binary_body_unchanged(

@@ -1,6 +1,6 @@
 from dataclasses import replace
 
-from irimi.exchange import Exchange, Request, Response, media_type
+from irimi.exchange import Exchange, Request, Response, clip_chunks, media_type
 
 
 def _req(scheme: str = "https", port: int = 443, query: str = "") -> Request:
@@ -156,3 +156,23 @@ def test_overlay_fidelity_is_unset_until_the_overlay_considers_an_exchange():
     assert ex.overlay is None
     ex.overlay = "partial"
     assert ex.overlay == "partial"
+
+
+def test_stream_chunks_are_empty_unless_a_response_streamed():
+    assert _exchange().stream_chunks == ()
+
+
+def test_clip_chunks_keeps_the_chunks_of_a_body_s_first_bytes():
+    """The store cuts a body at MAX_STORED_BODY; its chunks are cut at the same byte (#71)."""
+    assert clip_chunks((3, 4, 5), 12) == (3, 4, 5)
+    assert clip_chunks((3, 4, 5), 20) == (3, 4, 5)
+    assert clip_chunks((3, 4, 5), 7) == (3, 4)
+    assert clip_chunks((3, 4, 5), 9) == (3, 4, 2)
+    assert clip_chunks((3, 4, 5), 1) == (1,)
+    assert clip_chunks((3, 4, 5), 0) == ()
+    assert clip_chunks((), 0) == ()
+
+
+def test_clip_chunks_is_the_same_tuple_when_nothing_is_cut():
+    chunks = (3, 4, 5)
+    assert clip_chunks(chunks, 12) is chunks

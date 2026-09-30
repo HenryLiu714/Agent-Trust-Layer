@@ -249,6 +249,7 @@ def exchange_to_json(ex: Exchange, put_body: PutBody) -> dict[str, Any]:
         "ended_at": ex.ended_at,
         "request": _request_to_json(ex.request, put_body),
         "response": None if ex.response is None else _response_to_json(ex.response, put_body),
+        "stream_chunks": list(ex.stream_chunks),
     }
 
 
@@ -384,6 +385,7 @@ def exchange_from_json(d: Mapping[str, Any], get_body: GetBody) -> Exchange:
         currency=_str(d, "currency"),
         started_at=_float(d, "started_at"),
         ended_at=_float(d, "ended_at"),
+        stream_chunks=_chunk_lengths(d, "stream_chunks"),
     )
 
 
@@ -547,6 +549,21 @@ def _strings(d: Mapping[str, Any], key: str) -> tuple[str, ...]:
     value = _present(d, key)
     if not (isinstance(value, list) and all(isinstance(v, str) for v in value)):
         raise TraceFormatError(f"{key!r} is {value!r}, not a list of strings")
+    return tuple(value)
+
+
+def _chunk_lengths(d: Mapping[str, Any], key: str) -> tuple[int, ...]:
+    """A streamed response's chunk lengths (#71), the first field added within v1: absent in a
+    recording made before it existed, and read then as its default, `()`. Present, it is a list of
+    positive integers."""
+    if key not in d:
+        return ()
+    value = _present(d, key)
+    if not (
+        isinstance(value, list)
+        and all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in value)
+    ):
+        raise TraceFormatError(f"{key!r} is {value!r}, not a list of positive integers")
     return tuple(value)
 
 

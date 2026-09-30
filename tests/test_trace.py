@@ -342,10 +342,15 @@ def _key_paths(d, path=()):
             yield from _key_paths(value, (*path, key))
 
 
+# Fields added within v1 after #68 shipped it. Each decodes as its default when absent, and has a
+# test of its own below.
+_ADDED_WITHIN_V1 = {("exchange", ("stream_chunks",))}  # #71
+
 _REQUIRED = [
     (name, path)
     for name in ("run", "exchange", "tool_call", "telemetry")
     for path in _key_paths(_decodable(name)[0])
+    if (name, path) not in _ADDED_WITHIN_V1
 ] + [(f"{event} line", (key,)) for event in _EVENTS for key in ("seq", "type")]
 
 
@@ -365,6 +370,23 @@ def test_a_missing_required_field_is_a_trace_format_error(name, path):
     del holder[key]
     with pytest.raises(TraceFormatError, match=re.escape(f"missing required field {key!r}")):
         decode(d)
+
+
+def test_an_exchange_written_before_stream_chunks_existed_reads_as_one_that_did_not_stream():
+    """#71 added `stream_chunks` within v1, so a recording made before it has no such key, and
+    reads as the field's default: a response that did not stream."""
+    blobs = _Blobs()
+    d = trace.exchange_to_json(_filled(Exchange), blobs.put)
+    del d["stream_chunks"]
+    assert trace.exchange_from_json(d, blobs.get).stream_chunks == ()
+
+
+@pytest.mark.parametrize("value", [None, "12", [1.5], [True], [0], [-3], [4, "5"]])
+def test_stream_chunks_that_are_not_positive_integers_are_refused(value):
+    blobs = _Blobs()
+    d = trace.exchange_to_json(_filled(Exchange), blobs.put) | {"stream_chunks": value}
+    with pytest.raises(TraceFormatError, match="stream_chunks"):
+        trace.exchange_from_json(d, blobs.get)
 
 
 def _never(ref):

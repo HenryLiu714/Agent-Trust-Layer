@@ -137,7 +137,7 @@ Known limitations:
   carried inside a JSON string (a streamed tool call's `partial_json`).
 - **A secret a stream sends in pieces is stored in pieces.** Each SSE event is its own line, so a
   secret whose characters arrive across several `text_delta` events is never whole on any line
-  redaction reads, and each piece reaches disk as it was sent.
+  redaction reads, and each piece reaches disk as it was sent (#92).
 - **The key is per install.** A secret recorded on a production box and on a CI runner gets two
   different placeholders, so recordings from two machines do not match each other's redacted
   values. Whether recordings move between machines is a Phase 6 decision (push and pull).

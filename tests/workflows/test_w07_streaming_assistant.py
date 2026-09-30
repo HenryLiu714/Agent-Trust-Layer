@@ -159,7 +159,7 @@ def test_a_secret_a_stream_sends_in_pieces_reaches_disk_in_pieces(run_workflow):
     assert "".join(deltas) == f"The test key is {SECRET}. Keep it out of logs."
     # LOOKS WRONG: every piece of the secret is on disk as it was sent, so the stored stream
     # holds the whole secret for anyone who joins its deltas. Redacting over reassembled deltas
-    # is not #71's.
+    # is #92's, not #71's.
     assert [d for d in deltas if d[:4] in ("CANA", " is ")] == [" is sk_live_", "CANARYstream"]
 
 
@@ -176,7 +176,7 @@ def test_a_caller_that_hangs_up_ends_the_run_in_error(run_workflow):
     # OpenAI anything.
     assert [c["label"] for c in shadow.calls()] == ["embed", "anthropic_stream"]
     # LOOKS WRONG: the upstream answered fine; it was the AGENT that closed the stream. irimi
-    # records the abandoned stream as an upstream failure.
+    # records the abandoned stream as an upstream failure (#93).
     assert shadow.exchange_lines() == [LLM_LINES[0], BROKEN_STREAM_LINE]
     # The stream the agent abandoned is stored with what irimi had copied of it by then, and
     # says it is not the whole stream (#71): it opens with `message_start` and never ends.

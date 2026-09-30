@@ -381,7 +381,28 @@ def test_an_exchange_written_before_stream_chunks_existed_reads_as_one_that_did_
     assert trace.exchange_from_json(d, blobs.get).stream_chunks == ()
 
 
-@pytest.mark.parametrize("value", [None, "12", [1.5], [True], [0], [-3], [4, "5"]])
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "12",
+        12,
+        {"0": 12},
+        [1.5],
+        [4.0],
+        [True],
+        [0],
+        [-3],
+        [4, "5"],
+        [4, None],
+        [[4]],
+        # Past `sys.get_int_max_str_digits()`, where `repr` raises ValueError: the message must not
+        # quote the value, or the decoder raises something other than TraceFormatError (#68).
+        pytest.param([-(10**5000)], id="a-negative-past-the-digit-limit"),
+        pytest.param([10**5000, 0], id="a-zero-after-a-length-past-the-digit-limit"),
+        pytest.param(10**5000, id="an-integer-past-the-digit-limit"),
+    ],
+)
 def test_stream_chunks_that_are_not_positive_integers_are_refused(value):
     blobs = _Blobs()
     d = trace.exchange_to_json(_filled(Exchange), blobs.put) | {"stream_chunks": value}

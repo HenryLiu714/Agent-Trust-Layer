@@ -555,15 +555,18 @@ def _strings(d: Mapping[str, Any], key: str) -> tuple[str, ...]:
 def _chunk_lengths(d: Mapping[str, Any], key: str) -> tuple[int, ...]:
     """A streamed response's chunk lengths (#71), the first field added within v1: absent in a
     recording made before it existed, and read then as its default, `()`. Present, it is a list of
-    positive integers."""
+    positive integers.
+
+    A refused value is named by its type and place, never quoted: `repr` of an integer past
+    `sys.get_int_max_str_digits()` raises ValueError, and a decoder raises only TraceFormatError."""
     if key not in d:
         return ()
     value = _present(d, key)
-    if not (
-        isinstance(value, list)
-        and all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in value)
-    ):
-        raise TraceFormatError(f"{key!r} is {value!r}, not a list of positive integers")
+    if not isinstance(value, list):
+        raise TraceFormatError(f"{key!r} is a {type(value).__name__}, not a list")
+    for index, length in enumerate(value):
+        if isinstance(length, bool) or not isinstance(length, int) or length <= 0:
+            raise TraceFormatError(f"{key!r}[{index}] is not a positive integer")
     return tuple(value)
 
 

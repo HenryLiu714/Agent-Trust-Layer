@@ -548,6 +548,16 @@ SSE_BODY = (
     b'data: {"text":"key: ' + SSE_PLAIN_KEY.encode() + b'"}\n\n'
     b'data: {"text":"key:\\n' + SSE_ESCAPED_KEY.encode() + b'"}\n\n'
 )
+# Where the stand-in cuts SSE_BODY into chunks (#71): inside the first key, at the end of the blank
+# line after it, and inside the second key. So a stored boundary moves to the end of a line
+# redaction changed, and one in a line it left alone keeps its place.
+SSE_CUTS = (
+    SSE_BODY.index(b"StreamedPlain"),
+    SSE_BODY.index(b"\n\n") + 2,
+    SSE_BODY.index(b"AfterAnEscape"),
+)
+# How long the stand-in waits between chunks, so the proxy reads each one on its own.
+SSE_CHUNK_GAP_S = 0.05
 SESSION_COOKIE = "session=cookie-secret-77; Path=/; HttpOnly"
 BINARY_BODY = b"\x89PNG\r\n\x1a\n\xff\xfe\x00 not UTF-8, stored as it came"
 
@@ -588,7 +598,10 @@ class _RedactStandIn(BaseHTTPRequestHandler):
 
     seen: list[tuple[str, str, Headers, bytes]] = []
 
-    def _answer(self, content_type: str, body: bytes, extra: Headers = ()) -> None:
+    def _answer(
+        self, content_type: str, body: bytes, extra: Headers = (), cuts: tuple[int, ...] = ()
+    ) -> None:
+        """Answer `body`, written in pieces cut at `cuts`, SSE_CHUNK_GAP_S apart."""
         length = int(self.headers.get("content-length") or 0)
         sent = self.rfile.read(length) if length else b""
         _RedactStandIn.seen.append((self.command, self.path, tuple(self.headers.items()), sent))
@@ -598,7 +611,11 @@ class _RedactStandIn(BaseHTTPRequestHandler):
             self.send_header(name, value)
         self.send_header("content-length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        for start, end in pairwise((0, *cuts, len(body))):
+            if start:
+                time.sleep(SSE_CHUNK_GAP_S)
+            self.wfile.write(body[start:end])
 
     def do_GET(self):
         self._answer("application/octet-stream", BINARY_BODY, (("set-cookie", SESSION_COOKIE),))
@@ -607,7 +624,7 @@ class _RedactStandIn(BaseHTTPRequestHandler):
         if self.path == "/v1/messages":
             self._answer("application/json", LLM_ANSWER)
         elif self.path == "/v1/stream":
-            self._answer("text/event-stream", SSE_BODY)
+            self._answer("text/event-stream", SSE_BODY, cuts=SSE_CUTS)
         else:  # the webhook's target, answering as Slack does
             self._answer("text/html", b"ok")
 
@@ -935,7 +952,8 @@ def test_a_streamed_sse_answer_is_stored_whole_with_each_live_key_as_its_placeho
     (ex,) = disk.received
     assert (ex.kind, ex.answered_by, ex.flags) == ("llm", "live", ())
     assert ex.response is not None and ex.response.body == SSE_BODY
-    assert ex.stream_chunks and sum(ex.stream_chunks) == len(SSE_BODY)
+    # The proxy may read two of the stand-in's pieces as one; more than one chunk is what it pins.
+    assert len(ex.stream_chunks) > 1 and sum(ex.stream_chunks) == len(SSE_BODY)
 
     hidden = _placeholders(disk.key, SSE_PLAIN_KEY, SSE_ESCAPED_KEY)
     (written,) = _assert_stored_as(disk, hidden)

@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from irimi import redact, store, trace
+from irimi import exchange, redact, store, trace
 from irimi.exchange import BAD_RUN_ID_FLAG, BODY_TRUNCATED_FLAG, Exchange, Request, Response
 from irimi.store import DirectoryStore, NullStore, RunNotFound, StoreReader
 from irimi.trace import ErrorInfo, RunRecord, TelemetrySeen, ToolCall, TraceFormatError, Trigger
@@ -289,6 +289,49 @@ def test_a_streamed_body_cut_at_the_maximum_keeps_the_chunks_of_what_is_stored(
     (ex,) = StoreReader(root).load_run("r1").events
     assert isinstance(ex, Exchange) and ex.response is not None
     assert (ex.response.body, ex.stream_chunks) == (b"a" * 8 + b"b" * 8 + b"c" * 4, (8, 8, 4))
+    assert BODY_TRUNCATED_FLAG in ex.flags
+
+
+def test_a_stream_redaction_grows_past_the_maximum_is_a_prefix_of_its_redacted_whole(
+    root, key, monkeypatch
+):
+    """The engine keeps at most MAX_STORED_BODY bytes of a stream, but a placeholder can be longer
+    than its secret, so the redacted body can pass the cap again. It is cut like any body: a
+    prefix of the redacted whole, never half a secret, its chunks cut with it, and both flags -
+    the stream was not whole, and neither is the stored body (#71)."""
+    secret = "sk_live_A"  # far shorter than its placeholder
+    line = b'data: {"text":"' + secret.encode() + b'"}\n'
+    redacted_line = line.replace(secret.encode(), redact.placeholder(key, secret).encode())
+    sent = line * 10
+    cap = 6 * len(redacted_line) + len(b'data: {"text":"<redac')  # inside the 7th placeholder
+    assert len(sent) <= cap < len(redacted_line) * 10
+    monkeypatch.setattr(store, "MAX_STORED_BODY", cap)
+    streamed = dataclasses.replace(
+        _streamed(sent, (len(line),) * 10), flags=(exchange.STREAM_TRUNCATED_FLAG,)
+    )
+    s = DirectoryStore(root, key)
+    s.record(streamed)
+    s.close()
+    (ex,) = StoreReader(root).load_run("r1").events
+    assert isinstance(ex, Exchange) and ex.response is not None
+    assert ex.response.body == (redacted_line * 10)[:cap]
+    assert ex.stream_chunks == (len(redacted_line),) * 6 + (cap - 6 * len(redacted_line),)
+    assert set(ex.flags) == {exchange.STREAM_TRUNCATED_FLAG, BODY_TRUNCATED_FLAG}
+    assert not any(b"sk_live_" in p.read_bytes() for p in root.rglob("*") if p.is_file())
+
+
+def test_a_request_body_too_big_to_redact_leaves_the_streamed_response_s_chunks(
+    root, key, monkeypatch
+):
+    monkeypatch.setattr(store, "MAX_REDACTED_BODY", 10)
+    s = DirectoryStore(root, key)
+    streamed = _streamed(b"aaaa" + b"bbbbbb", (4, 6))
+    big = dataclasses.replace(streamed.request, body=b"x" * 11)
+    s.record(dataclasses.replace(streamed, request=big))
+    s.close()
+    (ex,) = StoreReader(root).load_run("r1").events
+    assert isinstance(ex, Exchange) and ex.response is not None
+    assert (ex.request.body, ex.response.body, ex.stream_chunks) == (b"", b"aaaabbbbbb", (4, 6))
     assert BODY_TRUNCATED_FLAG in ex.flags
 
 

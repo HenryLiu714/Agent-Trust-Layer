@@ -53,7 +53,8 @@ the first column of each field table below is exactly the keys its encoder write
   64 MiB (`store.MAX_REDACTED_BODY`) is not stored at all: its exchange is stored with that body
   empty and carries `body-truncated`. So a stored body is always a prefix of the whole body after
   redaction, never half a secret - an empty one when it was too big to redact - and
-  `body-truncated` says when it is not the whole.
+  `body-truncated` says when it is not the whole. A streamed body's `stream_chunks` are cut with
+  it, so they still split the body that is stored.
 - **A streamed response** (`text/event-stream`) is recorded as the chunks the agent was sent,
   joined, with each chunk's length in `stream_chunks` (#71). The engine keeps at most 8 MiB of a
   stream: the agent still gets every chunk after that, and the exchange carries `stream-truncated`
@@ -61,8 +62,9 @@ the first column of each field table below is exactly the keys its encoder write
   an upstream reset, an agent that hung up - and then its response holds what arrived before it.
   **A stream that is not whole is recorded up to its last complete line**, so a cut never leaves
   half a character (which would make the body unreadable to redaction) or half a secret. A stream
-  sent with a `Content-Encoding` is recorded decoded, as a buffered body is, and as one chunk; one
-  that cannot be decoded is recorded empty and flagged `stream-truncated`, never compressed.
+  sent with a `Content-Encoding` is recorded decoded, as a buffered body is, and as one chunk
+  (`identity` changes no byte, and keeps its chunks); one that cannot be decoded is recorded
+  empty and flagged `stream-truncated`, never compressed.
   An upstream that ends its stream by closing the connection, with no chunked framing or length,
   cannot be told apart from one that reset it: such a stream is recorded whole and unflagged.
 - Everything is redacted before it reaches disk (#69): see Redaction. A credential in the example
@@ -209,7 +211,7 @@ names:
 | `ended_at` | number | When irimi finished the exchange. `started_at <= ended_at`. |
 | `request` | request | What was asked, as irimi forwarded and recorded it. |
 | `response` | response or `null` | What came back. `null` when nothing did: an upstream lost before its headers, an unreachable target. |
-| `stream_chunks` | list of integers | Added in #71. The byte length of each chunk of a streamed response, in arrival order: they sum to the stored response body's length, and none is 0. `[]` for a response that did not stream. Absent in a recording made before #71, and read then as `[]`. |
+| `stream_chunks` | list of integers | Added in #71. The byte length of each chunk of a streamed response, in arrival order: they sum to the stored response body's length, and none is 0. `[]` for a response that did not stream, and for a stored body that is empty: there is nothing to split. Absent in a recording made before #71, and read then as `[]`. |
 
 A **request** is `method`, `scheme`, `host`, `port` (integer), `path`, `query` (without the `?`),
 `headers` and `body`. A **response** is `status` (integer), `headers` and `body`.

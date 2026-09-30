@@ -138,7 +138,17 @@ _SSE_DATA = "data:"
 _LINE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
 
 # `_LINE` over bytes, for `_rechunk`: a chunk length counts bytes, and a line of text does not.
-_BYTE_LINE = re.compile(rb"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
+# Built from `_LINE` so the two cannot disagree on where a line ends, and they split alike: in
+# UTF-8, CR and LF are never a byte of a longer character (#71).
+_BYTE_LINE = re.compile(_LINE.pattern.encode())
+
+
+def complete_lines(body: bytes) -> bytes:
+    """`body` up to the end of its last line, where `_LINE` ends one: CRLF, LF or a lone CR. What
+    the engine keeps of a stream that is not whole, so that every line of it is one redaction can
+    read (#71). Never raises."""
+    return body[: max(body.rfind(b"\n"), body.rfind(b"\r")) + 1]
+
 
 # What `quote_plus` leaves alone in a redacted query or form value, so the placeholder stays
 # readable on disk, as it is everywhere else.

@@ -15,7 +15,7 @@ from mitmproxy.master import Master
 from mitmproxy.net import encoding
 from mitmproxy.options import Options
 
-from irimi import ca, delegation, echo, netaddr, pipeline, reverse_door
+from irimi import ca, delegation, echo, netaddr, pipeline, redact, reverse_door
 from irimi.engine import EngineConfig, EngineStartError, OnExchange
 from irimi.exchange import (
     DECISION_FAILED_FLAG,
@@ -171,25 +171,23 @@ def _recorded_stream(
         elif decoded != body:
             body, chunks = decoded, ((len(decoded),) if decoded else ())
     if cut:
-        body = _complete_lines(body)
+        body = redact.complete_lines(body)
         chunks = clip_chunks(chunks, len(body))
     headers = _headers_from_fields(flow.response.headers.fields)
     return Response(status=flow.response.status_code, headers=headers, body=body), chunks, cut
 
 
 def _decoded(body: bytes, content_encoding: str) -> bytes | None:
-    """`body` decoded per `content_encoding`, or None when it cannot be. `get_content(strict=
-    False)` lets mitmproxy's TypeError through, and hands back the raw bytes on a ValueError."""
+    """`body` decoded per `content_encoding`, or None when it cannot be. DECODING NEVER RAISES:
+    every body the hooks record is decoded here, because a raise out of a hook drops the exchange
+    or forwards the flow. mitmproxy's `get_content(strict=False)` is not enough - it lets the
+    TypeError of an encoding it has no codec for through (`rot13`) - and a byte-to-text codec
+    (`utf-8`) is not a decoding either (#71)."""
     try:
         decoded = encoding.decode(body, content_encoding)
     except Exception:
         return None
     return decoded if isinstance(decoded, bytes) else None
-
-
-def _complete_lines(body: bytes) -> bytes:
-    """`body` up to the end of its last line: CRLF, LF or a lone CR, as SSE ends one (#71)."""
-    return body[: max(body.rfind(b"\n"), body.rfind(b"\r")) + 1]
 
 
 @dataclass(frozen=True)
@@ -264,10 +262,15 @@ def _headers_from_fields(fields: Sequence[tuple[bytes, bytes]]) -> Headers:
 
 
 def _body(message: http.Message) -> bytes:
-    # strict=False hands back the raw bytes when Content-Encoding cannot be decoded. The
-    # strict accessor raises, and an exception in a hook makes mitmproxy forward the flow
-    # untouched, which for a write means it escapes shadow mode.
-    return message.get_content(strict=False) or b""
+    # A buffered body is recorded as it came when its Content-Encoding cannot be decoded: an
+    # exception in a hook makes mitmproxy forward the flow untouched, which for a write means it
+    # escapes shadow mode, and one in `response` drops the exchange from the trace (#71).
+    raw = message.raw_content or b""
+    content_encoding = message.headers.get("content-encoding", "")
+    if not raw or not content_encoding:
+        return raw
+    decoded = _decoded(raw, content_encoding)
+    return raw if decoded is None else decoded
 
 
 def _request_from_flow(flow: http.HTTPFlow) -> Request:
@@ -301,7 +304,17 @@ def _fields(headers: Headers) -> list[tuple[bytes, bytes]]:
 
 
 def _to_mitm_response(r: Response) -> http.Response:
-    return http.Response.make(r.status, r.body, _fields(r.headers))
+    # ENCODING NEVER RAISES. `make` re-encodes the body per its `content-encoding`, and mitmproxy
+    # drops an encoding it cannot apply when that is a ValueError but lets the TypeError of a text
+    # codec through (`rot13`, `utf-8`). An overlay keeps the upstream's headers, and since `_body`
+    # records such a body raw rather than raising, a rebuilt read got here and raised out of the
+    # `response` hook. The body goes out as it is, without the encoding, as mitmproxy's own
+    # fallback sends it (#71).
+    try:
+        return http.Response.make(r.status, r.body, _fields(r.headers))
+    except TypeError:
+        fields = [(k, v) for k, v in _fields(r.headers) if k.lower() != b"content-encoding"]
+        return http.Response.make(r.status, r.body, fields)
 
 
 def _send(flow: http.HTTPFlow, out: Response, upstream: Response) -> None:
@@ -309,11 +322,10 @@ def _send(flow: http.HTTPFlow, out: Response, upstream: Response) -> None:
 
     `http.Response.make` assigns `.content`, and mitmproxy's `set_content` re-encodes it per the
     surviving `content-encoding` header. That is right for a body we built and wrong for one we
-    are handing back: `_body` reads `get_content(strict=False)`, which returns the RAW bytes when
-    `Content-Encoding` cannot be decoded, so rebuilding took bytes that were already compressed -
-    or were never valid gzip - and compressed them again. The agent then received different bytes
-    than the target sent, in a tool whose thesis is that it sees what the service would have sent
-    (#39).
+    are handing back: `_body` returns the RAW bytes when `Content-Encoding` cannot be decoded, so
+    rebuilding took bytes that were already compressed - or were never valid gzip - and compressed
+    them again. The agent then received different bytes than the target sent, in a tool whose
+    thesis is that it sees what the service would have sent (#39).
 
     Since #12 `respond` returns a new Response for every non-live answer, so the rebuild ran for
     every delegated exchange; before that it never ran at all and the bug could not show. When
@@ -756,8 +768,8 @@ class IrimiAddon:
         #     through the proxy mysteriously return nothing" for streaming endpoints only. The
         #     same trap is one `respond` change away on the delegated path (#12).
         #
-        # Both hold on the response having streamed, never on its body being empty: since #71 the
-        # recorded body is the chunks `_StreamTee` kept, and it is not empty.
+        # Both hold on the response having streamed, never on its body being empty: since #71 a
+        # streamed body is recorded from the chunks `_StreamTee` kept.
         streamed = flow.response is not None and bool(flow.response.stream)
         stream_chunks: tuple[int, ...] = ()
         flags = pending.flags

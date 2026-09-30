@@ -19,6 +19,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
+from mitmproxy.net import encoding
 
 from irimi import ca, delegation, echo, idempotency, paths, pipeline, redact, report, servicemap
 from irimi.engine import EngineConfig, EngineStartError, mitm
@@ -51,6 +52,10 @@ class _Upstream(BaseHTTPRequestHandler):
         if self.path == "/badgzip":  # claims gzip, is not: an undecodable body
             body = b"not-gzip"
             self.send_header("content-encoding", "gzip")
+        if self.path.startswith("/encoded/"):  # claims the encoding its path names, is plain
+            content_encoding = self.path.removeprefix("/encoded/")
+            body = b"not-" + content_encoding.encode()
+            self.send_header("content-encoding", content_encoding)
         if self.path == "/slack-history":  # a Slack read whose real `ts` the run has to see
             body = b'{"ok": true, "messages": [{"ts": "1999999999.000500"}]}'
         self.send_header("content-type", "text/plain")
@@ -367,7 +372,9 @@ def test_bundle_written_from_irimi_ca(engine, upstream):
     assert ca.ca_paths().cert.read_bytes() in bundle.read_bytes()
 
 
-def test_undecodable_request_body_is_still_faked(engine, upstream):
+# `rot13` is an encoding mitmproxy raises TypeError for rather than ValueError (#71).
+@pytest.mark.parametrize("content_encoding", ["gzip", "rot13"])
+def test_undecodable_request_body_is_still_faked(engine, upstream, content_encoding):
     # A strict body decode raising inside the hook would make mitmproxy forward the write.
     eng, seen = engine
     status, data = _via_proxy(
@@ -375,7 +382,7 @@ def test_undecodable_request_body_is_still_faked(engine, upstream):
         "POST",
         f"http://127.0.0.1:{upstream}/things",
         body=b'{"not":"gzip"}',
-        extra_headers={"content-encoding": "gzip"},
+        extra_headers={"content-encoding": content_encoding},
     )
     assert status == 200  # the upstream answers every POST with 500, so it was not reached
     assert json.loads(data)["not"] == "gzip"  # reflected from the body we could not decode
@@ -390,6 +397,23 @@ def test_undecodable_upstream_body_is_still_recorded(engine, upstream):
     assert len(seen) == 1
     assert seen[0].answered_by == "live"
     assert seen[0].response.body == b"not-gzip"
+
+
+@pytest.mark.parametrize("content_encoding", ["rot13", "utf-8"])
+def test_an_upstream_body_in_an_encoding_that_is_not_a_decoding_is_still_recorded(
+    engine, upstream, content_encoding
+):
+    """mitmproxy raises TypeError, not ValueError, for a text codec it cannot run on bytes
+    (`rot13`), and `get_content(strict=False)` let it through: out of the `response` hook, that
+    dropped the exchange from the trace. A byte-to-text codec (`utf-8`) decodes to a str, which is
+    no body at all. Either way the body is recorded as it came, as an undecodable one is (#71)."""
+    eng, seen = engine
+    url = f"http://127.0.0.1:{upstream}/encoded/{content_encoding}"
+    status, data = _via_proxy(eng.listen_port(), "GET", url)
+    assert (status, data) == (200, b"not-" + content_encoding.encode())
+    (ex,) = seen
+    assert (ex.answered_by, ex.flags) == ("live", ())
+    assert ex.response is not None and ex.response.body == data
 
 
 def test_overlay_output_reaches_the_client(tmp_path, monkeypatch, upstream):
@@ -409,6 +433,34 @@ def test_overlay_output_reaches_the_client(tmp_path, monkeypatch, upstream):
         stop()
     assert (status, data) == (200, b"OVERLAID")
     assert seen[-1].response.body == b"OVERLAID"
+
+
+@pytest.mark.parametrize("content_encoding", ["rot13", "utf-8"])
+def test_an_overlaid_read_in_an_encoding_mitmproxy_cannot_apply_still_reaches_the_client(
+    tmp_path, monkeypatch, upstream, content_encoding
+):
+    """The overlay keeps the upstream's headers, and mitmproxy re-encodes a rebuilt body per its
+    `content-encoding`: for a text codec that raised TypeError out of the `response` hook, and the
+    exchange was never recorded. The body goes out as the overlay built it (#71)."""
+
+    class _Overlay:
+        def __call__(self, write_log, read_request, upstream_response):
+            body = upstream_response.body + b"-OVERLAID"
+            return Overlaid(Response(200, upstream_response.headers, body))
+
+        def rewrite(self, write_log, read_request):
+            return read_request
+
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch), overlay=_Overlay())
+    url = f"http://127.0.0.1:{upstream}/encoded/{content_encoding}"
+    try:
+        _via_proxy(eng.listen_port(), "POST", f"http://127.0.0.1:{upstream}/things", body=b"{}")
+        status, data = _via_proxy(eng.listen_port(), "GET", url)
+    finally:
+        stop()
+    assert (status, data) == (200, b"not-" + content_encoding.encode() + b"-OVERLAID")
+    assert len(seen) == 2 and seen[-1].response is not None
+    assert (seen[-1].answered_by, seen[-1].response.body) == ("overlay", data)
 
 
 def test_repeated_headers_survive_a_local_answer(tmp_path, monkeypatch, upstream):
@@ -1362,15 +1414,59 @@ def test_a_stream_that_ended_in_an_error_keeps_lines_a_lone_carriage_return_ends
     assert (response.body, chunks, cut) == (b"data: one\r\r", (11,), True)
 
 
-@pytest.mark.parametrize("content_encoding", ["rot13", "br", "gzip"])
+@pytest.mark.parametrize("content_encoding", ["rot13", "br", "gzip", "utf-8", "gzip, br"])
 def test_a_stream_that_cannot_be_decoded_is_recorded_empty_and_flagged(content_encoding):
     """Never as its compressed bytes, which redaction cannot read. mitmproxy raises TypeError for
-    an encoding it does not know, which `get_content(strict=False)` does not catch (#71)."""
+    an encoding it does not know, which `get_content(strict=False)` does not catch, decodes
+    `utf-8` to a str, and has no decoder for two encodings stacked (#71)."""
     tee = mitm._StreamTee()
     tee(b"not compressed at all\n")
     flow = _streamed_flow((b"content-encoding", content_encoding.encode()))
     response, chunks, cut = mitm._recorded_stream(flow, tee, whole=True)
     assert (response.body, chunks, cut) == (b"", (), True)
+
+
+@pytest.mark.parametrize("content_encoding", ["gzip", "GZIP", "deflate", "br", "zstd"])
+def test_a_whole_stream_in_every_encoding_mitmproxy_decodes_is_recorded_decoded(content_encoding):
+    """Split anywhere on the wire, it is one chunk once decoded (#71)."""
+    plain = b"".join(THREE_CHUNKS)
+    packed = encoding.encode(plain, content_encoding.lower())
+    tee = mitm._StreamTee()
+    tee(packed[:5])
+    tee(packed[5:])
+    flow = _streamed_flow((b"content-encoding", content_encoding.encode()))
+    response, chunks, cut = mitm._recorded_stream(flow, tee, whole=True)
+    assert (response.body, chunks, cut) == (plain, (len(plain),), False)
+
+
+def test_an_identity_encoded_stream_keeps_its_chunks():
+    tee = mitm._StreamTee()
+    tee(THREE_CHUNKS[0])
+    tee(THREE_CHUNKS[1])
+    flow = _streamed_flow((b"content-encoding", b"identity"))
+    response, chunks, cut = mitm._recorded_stream(flow, tee, whole=True)
+    assert response.body == THREE_CHUNKS[0] + THREE_CHUNKS[1]
+    assert (chunks, cut) == ((len(THREE_CHUNKS[0]), len(THREE_CHUNKS[1])), False)
+
+
+@pytest.mark.parametrize("content_encoding", ["gzip", "deflate", "br", "zstd"])
+def test_a_compressed_stream_cut_short_is_recorded_as_whole_decoded_lines_or_empty(
+    content_encoding,
+):
+    """Decision 6's cut stream. `gzip` decodes what arrived, which is kept up to its last complete
+    line; `br` and `deflate` refuse a cut body and `zstd` decodes it to nothing, so it is recorded
+    empty. Never the compressed bytes, and never half a line (#71)."""
+    plain = b"".join(THREE_CHUNKS) * 200
+    packed = encoding.encode(plain, content_encoding)
+    tee = mitm._StreamTee()
+    tee(packed[: len(packed) // 2])
+    flow = _streamed_flow((b"content-encoding", content_encoding.encode()))
+    response, chunks, cut = mitm._recorded_stream(flow, tee, whole=False)
+    assert cut
+    assert plain.startswith(response.body)
+    assert bool(response.body) is (content_encoding == "gzip")
+    assert response.body[-1:] in (b"", b"\n")
+    assert sum(chunks) == len(response.body) and 0 not in chunks
 
 
 def test_the_tee_hands_every_chunk_back_unchanged_and_keeps_a_copy():
@@ -2232,6 +2328,51 @@ def test_the_response_hook_writes_nothing_back_to_a_streamed_flow(tmp_path, monk
     assert pipeline.ANSWERED_BY_HEADER not in flow.response.headers
 
 
+def test_the_response_hook_records_a_streamed_flow_from_its_tee_and_writes_nothing_back(
+    tmp_path, monkeypatch
+):
+    """#28's seam test above, with the stream going through a real `_StreamTee` as
+    `responseheaders` sets one up: the flow is still left exactly as it was, and the exchange is
+    recorded from the tee's copy (#71)."""
+    from mitmproxy.test import tflow, tutils
+
+    from irimi.engine.mitm import META_KEY, STREAM_KEY, IrimiAddon
+
+    maps = _targeted(
+        tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", "http://127.0.0.1:3999/w")]
+    )
+    seen: list[Exchange] = []
+    addon = IrimiAddon(
+        _config(tmp_path, monkeypatch, maps=maps),
+        ShadowPolicy(),
+        NullStore(),
+        NoOverlay(),
+        seen.append,
+        lambda port, error: None,
+    )
+    flow = tflow.tflow(
+        req=tutils.treq(method=b"POST", host="127.0.0.1", port=80, path=b"/things"),
+        resp=tutils.tresp(content=None, headers=((b"content-type", b"text/event-stream"),)),
+    )
+    flow.client_conn.sockname = ("127.0.0.1", 4000)
+    asyncio.run(addon.request(flow))
+    assert flow.metadata[META_KEY].answered_by == "delegated"
+    # What `responseheaders` does for an event stream, and a chunk through it (#71).
+    tee = mitm._StreamTee()
+    flow.metadata[STREAM_KEY] = flow.response.stream = tee
+    tee(SSE_FIRST)
+    before = (flow.response.status_code, tuple(flow.response.headers.fields), flow.response.content)
+
+    addon.response(flow)
+
+    after = (flow.response.status_code, tuple(flow.response.headers.fields), flow.response.content)
+    assert after == before
+    assert pipeline.ANSWERED_BY_HEADER not in flow.response.headers
+    assert flow.response.stream is tee and STREAM_KEY not in flow.metadata
+    (ex,) = seen
+    assert ex.response is not None and ex.response.body == SSE_FIRST
+
+
 def test_a_streamed_target_response_is_not_buffered(tmp_path, monkeypatch):
     """The streaming guard names `delegated` as well as `live`; reverting it to `("live",)` passed
     the whole suite. A delegated SSE route is the case #28 is about."""
@@ -2256,6 +2397,8 @@ def test_a_streamed_target_response_is_not_buffered(tmp_path, monkeypatch):
             )
             resp = conn.getresponse()
             assert resp.status == 200
+            stamp = pipeline.answered_by_header("delegated")
+            assert resp.getheader(pipeline.ANSWERED_BY_HEADER) == stamp
             first = resp.read(len(SSE_FIRST))  # times out at 5 s if the proxy buffered the body
             assert first == SSE_FIRST
             _STREAM_GATE.set()
@@ -2266,6 +2409,11 @@ def test_a_streamed_target_response_is_not_buffered(tmp_path, monkeypatch):
             stop()
     finally:
         srv.shutdown()
+    # A delegated stream is recorded as a live one is: the target's chunks, joined (#71).
+    (ex,) = seen
+    assert (ex.answered_by, ex.target) == ("delegated", f"http://127.0.0.1:{stream_port}/v1/stream")
+    assert ex.response is not None and ex.response.body == SSE_FIRST + SSE_SECOND
+    assert ex.stream_chunks == (len(SSE_FIRST), len(SSE_SECOND))
 
 
 # ------------------------------------------------------ the overlay through the engine (#43)

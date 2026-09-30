@@ -470,12 +470,11 @@ by phase.
 - **Phase 3, first chunk.** `Irimi-Run` is stripped before a request leaves irimi (#67). Trace
   format v1 and exchange timestamps (#68, [`docs/trace-format.md`](docs/trace-format.md)).
   Redaction before anything reaches disk (#69). The sample workflows (#89). The trace store on
-  disk (#70).
+  disk (#70). Streamed SSE bodies recorded chunk by chunk (#71).
 
 **Next: the rest of Phase 3, the run**
 
-- Recorded SSE bodies (#71), `irimi runs list` / `runs show` and a summary from a stored run
-  (#72).
+- `irimi runs list` / `runs show` and a summary from a stored run (#72).
 - The SDK: a control endpoint (#73), `@sdk.trigger` and `sdk.run()` with run identity in a context
   variable (#74), `Irimi-Run` on every request a run makes (#75), and `@sdk.tool` for calls the
   proxy cannot see (#76).

@@ -85,7 +85,7 @@ that started irimi stores exactly one process run, with the agent's argv and exi
 irimi printed is stored exactly once, equal field by field to itself redacted, and telemetry only
 as having happened; every other run is a `header` run its first event created (until #74); every
 store directory is 0700, every file 0600, and no `events.jsonl` ends in a half-written line; and a
-bare run stores nothing. A streamed answer is stored with an empty body until #71.
+bare run stores nothing. A streamed answer is stored as the chunks the agent was sent (#71).
 
 A new workflow package is found by its name, `wNN_<name>`, and is held to all five rules without
 any registry edit. A last test checks that the corpus gives rules 1 to 4 something to catch: a rule

@@ -24,7 +24,8 @@ per flow. Each hook calls plain functions from the layers below it, in this orde
    here makes mitmproxy forward the flow untouched, so the whole decision is wrapped and fails
    closed with a `502` flagged `decision-failed`.
 2. **`responseheaders`** - stamps `Irimi-Answered-By` on a live or delegated answer before the
-   headers go out, and turns on streaming for `text/event-stream`.
+   headers go out, and streams a `text/event-stream` answer through a `_StreamTee`, which hands
+   each chunk on unchanged and keeps a copy for the trace (#71).
 3. **`response`** - every unstreamed read's body goes past `echo.observe_read` first, which is
    how a service learns the real values its fakes have to sort against (Slack's `ts`); a service
    with no observer is a no-op. Then, for a live, unstreamed read, the `Overlay` gets a chance to
@@ -33,7 +34,9 @@ per flow. Each hook calls plain functions from the layers below it, in this orde
    `TraceStore` - which keeps a telemetry exchange only as a count (#70) - and reports it to the
    CLI.
 4. **`error`** - a lost upstream or an unreachable target is annotated with the right flag and
-   recorded with no response, so a failed write is never silently dropped from the trace.
+   recorded with no response, so a failed write is never silently dropped from the trace. A
+   stream that fails after its headers went out keeps the complete lines its `_StreamTee` copied,
+   flagged `stream-truncated` (#71).
 
 ## Layers
 
@@ -44,7 +47,7 @@ you to place it.
 
 | Layer | Modules | Responsibility |
 | --- | --- | --- |
-| 0 | `exchange` | The wire vocabulary: `Request`, `Response`, `Exchange`, the kinds, the `answered_by` values and every flag, and `is_authored_write`, the one statement of which writes enter the engine's write log - the summary files an overlaid read by the same rule (#48). It also carries `currency`, the code the write's L3 precondition read found on the object it names, which is the only thing besides the request that may denominate an amount in the summary (#60). It also holds the helpers every layer reads a message with: `header_value` / `Request.header`, `without_header`, `Request.path_and_query`, `media_type`. An exchange's `started_at` and `ended_at` are wall-clock seconds, read by the engine: the request hook's first parse to the hook that finishes the flow, or an engine-issued read's `Reader` call, and never ending before they start (#68). |
+| 0 | `exchange` | The wire vocabulary: `Request`, `Response`, `Exchange`, the kinds, the `answered_by` values and every flag, and `is_authored_write`, the one statement of which writes enter the engine's write log - the summary files an overlaid read by the same rule (#48). It also carries `currency`, the code the write's L3 precondition read found on the object it names, which is the only thing besides the request that may denominate an amount in the summary (#60). It also holds the helpers every layer reads a message with: `header_value` / `Request.header`, `without_header`, `Request.path_and_query`, `media_type`. An exchange's `started_at` and `ended_at` are wall-clock seconds, read by the engine: the request hook's first parse to the hook that finishes the flow, or an engine-issued read's `Reader` call, and never ending before they start (#68). A streamed response's `stream_chunks` split its recorded body into the chunks the agent was sent, and `clip_chunks` cuts them where a body is cut (#71). |
 | 0 | `paths` | Where irimi keeps state (`$IRIMI_HOME`, default `~/.irimi`) and the listener defaults. |
 | 0 | `netaddr` | The one place that answers "is this address this machine?". Three safety rules depend on it agreeing with itself. |
 | 1 | `ca` | Generate the local CA and write the bundle mitmproxy mints leaf certificates from. |

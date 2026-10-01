@@ -17,7 +17,6 @@ calls name only R's own charge.
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -40,7 +39,7 @@ def charge_id(i: int) -> str:
 def _target(url: str) -> tuple[str, int, str]:
     """Where to connect and what to put on the request line: the proxy and the absolute URL when
     one is configured, as every proxied client does; the host and the path otherwise."""
-    proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+    proxy = agentkit.proxy()
     parts = urlsplit(proxy or url)
     if proxy:
         return parts.hostname or "127.0.0.1", parts.port or 80, url

@@ -15,7 +15,8 @@ from mitmproxy.master import Master
 from mitmproxy.net import encoding
 from mitmproxy.options import Options
 
-from irimi import ca, delegation, echo, netaddr, pipeline, redact, reverse_door
+from irimi import ca, control, delegation, echo, netaddr, pipeline, redact, reverse_door
+from irimi.control import ControlEndpoint, OnToolCall
 from irimi.engine import EngineConfig, EngineStartError, OnExchange
 from irimi.exchange import (
     DECISION_FAILED_FLAG,
@@ -391,6 +392,7 @@ class IrimiAddon:
         overlay: Overlay,
         on_exchange: OnExchange | None,
         on_running: OnRunning,
+        on_tool_call: OnToolCall | None = None,
     ) -> None:
         self.config = config
         self.policy = policy
@@ -398,6 +400,9 @@ class IrimiAddon:
         self.overlay = overlay
         self.on_exchange = on_exchange
         self.on_running = on_running
+        self.control = ControlEndpoint(
+            store, serve=config.serve, process_run=config.run_id, on_tool_call=on_tool_call
+        )
         self.write_log: list[Exchange] = []
 
     def running(self) -> None:
@@ -425,6 +430,13 @@ class IrimiAddon:
             return
         # sockname is the socket this request arrived on, i.e. our own listener.
         door = reverse_door.detect_door(req, flow.client_conn.sockname[1])
+        # THE CONTROL ENDPOINT (#73) is answered here and returns, before the reverse door, which
+        # would read `_irimi` as an upstream host and refuse it, and before `Irimi-Run` is read: a
+        # control request names its run in its path. It is never forwarded, never decided and
+        # never recorded as an exchange.
+        if control.is_control_request(req, door):
+            self._answer_control(flow, req)
+            return
         if door == "reverse":
             try:
                 req = self._through_reverse_door(flow, req)
@@ -498,6 +510,30 @@ class IrimiAddon:
             self._answer_failed_decision(flow, req, door, run_id, started_at, decision.failure)
             return
         self._act_on(flow, decision, door, started_at)
+
+    def _answer_control(self, flow: http.HTTPFlow, req: Request) -> None:
+        """Answer a control request. `ControlEndpoint.answer` never raises; this guards turning
+        its answer into mitmproxy's anyway, because a control request that escaped this hook would
+        be forwarded to the listener it was addressed to - irimi itself (#73)."""
+        # A RESPONSE TO HEAD CARRIES NO CONTENT (RFC 9110 9.3.2), and mitmproxy sends whatever the
+        # response holds: `HEAD /_irimi/health`'s 405 JSON was read as the start of the next
+        # response on the connection. Nor a Content-Length, which a HEAD answer may only send when
+        # it is what a GET would get (8.6), and a HEAD's 405 is not that (#73).
+        head = req.method == "HEAD"
+        try:
+            response = _to_mitm_response(self.control.answer(req))
+            if head:
+                response.raw_content = b""
+                response.headers.pop("content-length", None)
+        except Exception:
+            logger.exception("irimi: could not send the control endpoint's answer")
+            error = control.INTERNAL_ERROR
+            response = http.Response.make(
+                error.status, b"" if head else error.body, _fields(error.headers)
+            )
+            if head:
+                response.headers.pop("content-length", None)
+        flow.response = response
 
     def _answer_failed_decision(
         self,
@@ -901,12 +937,14 @@ class MitmEngine:
         store: TraceStore,
         overlay: Overlay,
         on_exchange: OnExchange | None = None,
+        on_tool_call: OnToolCall | None = None,
     ) -> None:
         self.config = config
         self.policy = policy
         self.store = store
         self.overlay = overlay
         self.on_exchange = on_exchange
+        self.on_tool_call = on_tool_call
         self._ready = asyncio.Event()  # binds to the serving loop on first use (Python >= 3.10)
         self._start_error: EngineStartError | None = None
         self._stopped = False
@@ -953,6 +991,7 @@ class MitmEngine:
                     self.overlay,
                     self.on_exchange,
                     self._on_running,
+                    self.on_tool_call,
                 )
             )
             if self._stopped:  # shutdown() was called before we got here

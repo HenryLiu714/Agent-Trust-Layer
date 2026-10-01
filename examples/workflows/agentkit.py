@@ -39,14 +39,32 @@ PORT_ENV = "WORKFLOW_INTERNET_PORT"
 # An agent that hangs would hang the test that runs it, because `irimi shadow` waits for its
 # child. SIGALRM's default action ends the process, so a stuck agent dies instead.
 WATCHDOG_S = 90
+# Where `irimi shadow` tells its child the control endpoint is (`irimi.paths.CONTROL_ENV`, #73),
+# spelled here because an agent is an ordinary program that does not import irimi.
+CONTROL_ENV = "IRIMI_CONTROL"
+# The process run's id (`irimi.paths.RUN_ENV`), spelled here for the same reason (#73).
+RUN_ENV = "IRIMI_RUN"
 
 _obs_lock = threading.Lock()
 
 
 def start() -> None:
-    """Call first in every agent's `main()`."""
+    """Call first in every agent's `main()`. Logs the proxy and the control endpoint (#73) the
+    agent was given, so the harness can hold every run to what `irimi shadow` sets, and every bare
+    run to having neither from irimi."""
     if hasattr(signal, "SIGALRM"):
         signal.alarm(WATCHDOG_S)
+    obs(
+        "start",
+        proxy=proxy(),
+        control=os.environ.get(CONTROL_ENV),
+    )
+
+
+def proxy() -> str | None:
+    """The HTTP proxy the agent was given, as urllib reads it: `irimi shadow`'s listener, the fake
+    internet in a bare run, or None."""
+    return os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
 
 
 def obs(event: str, **data: Any) -> None:

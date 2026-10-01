@@ -99,6 +99,8 @@ def test_child_env_sets_proxy_and_ca():
     assert env["NODE_USE_ENV_PROXY"] == "1"
     assert env["IRIMI_ENGINE_ACTIVE"] == "1"
     assert env["IRIMI_RUN"] == "7f3a"
+    # The control endpoint on the same listener, with no trailing slash (#73).
+    assert env["IRIMI_CONTROL"] == "http://127.0.0.1:4000/_irimi"
 
 
 def test_child_env_preserves_base_and_does_not_mutate():

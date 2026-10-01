@@ -107,6 +107,14 @@ BAD_RUN_ID_FLAG = "bad-run-id"
 # recording only.
 STREAM_TRUNCATED_FLAG = "stream-truncated"
 
+# The control endpoint (#73): a request addressed to irimi's own listener whose path starts here is
+# the SDK reporting a run's start, end or tool calls, and is answered by `irimi.control`. It is
+# never forwarded and never an `Exchange`.
+CONTROL_PREFIX = "/_irimi/"
+# The `Irimi-Answered-By` value every control answer carries. Not an `AnsweredBy`: that vocabulary
+# is the trace's, and a control request never appears in a trace.
+CONTROL_ANSWER = "control"
+
 # The fidelity flag each way of answering carries. One mapping rather than a branch per caller:
 # the policy reads it, and `tests/test_exchange.py` holds it exhaustive over the non-live values.
 FIDELITY_FLAGS: dict[AnsweredBy, str] = {

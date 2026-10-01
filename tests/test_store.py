@@ -18,7 +18,7 @@ import pytest
 
 from irimi import exchange, redact, store, trace
 from irimi.exchange import BAD_RUN_ID_FLAG, BODY_TRUNCATED_FLAG, Exchange, Request, Response
-from irimi.store import DirectoryStore, NullStore, RunNotFound, StoreReader
+from irimi.store import DirectoryStore, NullStore, RunNotFound, StoreReader, StoreStats
 from irimi.trace import ErrorInfo, RunRecord, TelemetrySeen, ToolCall, TraceFormatError, Trigger
 
 SECRET = "sk_live_StoreUnitSecret"
@@ -112,6 +112,8 @@ def test_null_store_takes_every_call_and_keeps_nothing():
     s.record(_exchange("r1"))
     s.record_tool_call(_tool_call("r1", None))
     s.end_run("r1", 3.0, "ok", exit_code=0)
+    # The health endpoint reads these, so a store that keeps nothing reports nothing (#73).
+    assert s.stats() == StoreStats(queued=0, written=0, dropped=0)
     s.close()
 
 

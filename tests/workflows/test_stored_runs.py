@@ -15,14 +15,21 @@ import sys
 
 import pytest
 
+import irimi
 from examples.workflows.harness.run import CANARIES, Result, workflows
 from irimi import paths, redact, report, trace
 from irimi.exchange import Exchange
 from irimi.store import StoredRun
-from irimi.trace import TelemetrySeen
+from irimi.trace import TelemetrySeen, ToolCall
 
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
 IDS = [f"{n}:{s}" for n, s in CASES]
+# The scenarios that post runs to the control endpoint (#73), so store `sdk` runs. Until #74
+# gives the SDK workflows a real SDK, only W9 does it, by hand.
+SDK_RUN_SCENARIOS = {
+    ("w09_scope_gauntlet", "control_runs"),
+    ("w09_scope_gauntlet", "control_hazards"),
+}
 
 
 def started(result: Result) -> bool:
@@ -93,22 +100,31 @@ def test_every_stored_event_is_the_exchange_irimi_handed_its_store_redacted(
     exchanges irimi printed, the same objects in the same order. Run by run, in `seq` order, each
     stored event is one of them: an exchange equal to itself after `redact.redact_exchange`,
     compared over every field of `Exchange`, and telemetry reduced to its host and time. No
-    corpus run names an id the store refuses, so nothing is unattributed."""
+    corpus run names an id the store refuses, so nothing is unattributed.
+
+    A tool call the control endpoint handed the store (#73) is in its run's order among them,
+    stored with its args, result and error message redacted (#70)."""
     shadow = run_workflow(name, scenario, "shadow")
     assert len(shadow.handed) == len(shadow.reported) == len(shadow.exchange_lines())
     assert all(a is b for a, b in zip(shadow.handed, shadow.reported, strict=True))
+    exchanges = [e for e in shadow.handed_events if isinstance(e, Exchange)]
+    assert len(exchanges) == len(shadow.handed)
+    assert all(a is b for a, b in zip(exchanges, shadow.handed, strict=True))
     if not started(shadow):
         return
     key = redact.load_key(shadow.home)
     reader = shadow.stored()
     runs = [r.run_id for r in reader.list_runs()]
     expected: dict[str, list[trace.Event]] = {run_id: [] for run_id in runs}
-    for ex in shadow.reported:
-        expected[ex.run_id].append(
-            TelemetrySeen(ex.run_id, ex.request.host, ex.started_at)
-            if ex.kind == "telemetry"
-            else redact.redact_exchange(ex, key)
-        )
+    for event in shadow.handed_events:
+        if isinstance(event, ToolCall):
+            expected[event.run_id].append(redacted_tool_call(event, key))
+        elif event.kind == "telemetry":
+            expected[event.run_id].append(
+                TelemetrySeen(event.run_id, event.request.host, event.started_at)
+            )
+        else:
+            expected[event.run_id].append(redact.redact_exchange(event, key))
     assert reader.load_run(trace.UNATTRIBUTED).events == []
     for run_id in runs:
         stored = reader.load_run(run_id).events
@@ -117,6 +133,21 @@ def test_every_stored_event_is_the_exchange_irimi_handed_its_store_redacted(
             assert type(got) is type(want), run_id
             for f in dataclasses.fields(want):
                 assert getattr(got, f.name) == getattr(want, f.name), (run_id, f.name)
+
+
+def redacted_tool_call(call: ToolCall, key: bytes) -> ToolCall:
+    """`call` as the store keeps it: its args, its result and its error's message redacted (#70)."""
+    error = call.error
+    if error is not None:
+        message = redact.redact_json(error.message, key)
+        assert isinstance(message, str)
+        error = dataclasses.replace(error, message=message)
+    return dataclasses.replace(
+        call,
+        args=redact.redact_json(call.args, key),
+        result=redact.redact_json(call.result, key),
+        error=error,
+    )
 
 
 @pytest.mark.parametrize(("name", "scenario"), CASES, ids=IDS)
@@ -144,13 +175,22 @@ def test_every_run_but_the_process_run_is_a_header_run_its_first_event_made(
     """Until #74 lands, a run the SDK stand-in labels with `Irimi-Run` is known to irimi only by
     its events: its record is the one the first of them created, `attribution: "header"`, with no
     trigger and no end (#70), and it holds at least that event. It started when that event did, so
-    `irimi runs list` sorts it among the runs that started rather than after all of them (#72)."""
+    `irimi runs list` sorts it among the runs that started rather than after all of them (#72).
+
+    In a scenario that posts its runs' starts to the control endpoint (#73), every run is one the
+    SDK started instead: `attribution: "sdk"`, with the trigger, SDK version and start it posted,
+    the engine's version, and no exit code, which is the process run's alone. W9 pins each one."""
     shadow = run_workflow(name, scenario, "shadow")
     if not started(shadow):
         return
     reader = shadow.stored()
     for record in reader.list_runs():
-        if record.attribution == "process":
+        if record.run_id == shadow.process_run_id():
+            continue
+        if (name, scenario) in SDK_RUN_SCENARIOS:
+            assert (record.attribution, record.mode, record.exit_code) == ("sdk", "shadow", None)
+            assert record.engine_version == irimi.__version__
+            assert None not in (record.trigger, record.sdk_version, record.started_at)
             continue
         assert record.attribution == "header"
         assert (record.trigger, record.ended_at) == (None, None)
@@ -171,9 +211,10 @@ def test_a_bare_run_stores_nothing(run_workflow, name, scenario):
 
 
 # The workflows whose every exchange lands in the process run: plain scripts that send no
-# `Irimi-Run`, so the process run's stored summary is the one `irimi shadow` printed (#72).
+# `Irimi-Run`, so the process run's stored summary is the one `irimi shadow` printed (#72). W9's
+# control scenarios are the exception: they label their reads with the runs they post (#73).
 UNLABELLED = ("w09_scope_gauntlet", "w11_leaky_agent")
-UNLABELLED_CASES = [(n, s) for n, s in CASES if n in UNLABELLED]
+UNLABELLED_CASES = [(n, s) for n, s in CASES if n in UNLABELLED and (n, s) not in SDK_RUN_SCENARIOS]
 ELAPSED = re.compile(r" · \d+\.\ds · ")
 
 

@@ -65,7 +65,8 @@ def _legacy(world: World) -> None:
 WORKFLOW = Workflow(
     name="w09_scope_gauntlet",
     summary="Every classification edge from a plain script: THE SCOPE RULE, the L0 floor, "
-    "idempotency, unreadable bodies, forged irimi headers, the reverse door, unmapped hosts.",
+    "idempotency, unreadable bodies, forged irimi headers, the reverse door, unmapped hosts, "
+    "and the control endpoint (#73).",
     scenarios={
         "verbs": Scenario(
             ("verbs",),
@@ -82,6 +83,18 @@ WORKFLOW = Workflow(
             ("self_addressed",),
             setup=_stripe,
             doc="a refund to the proxy's own address as 127.0.0.1, 127.1 and 0.0.0.0",
+        ),
+        "control_runs": Scenario(
+            ("control_runs",),
+            setup=_stripe,
+            doc="the SDK's job by hand over the control endpoint: runs started, given tool calls "
+            "and labelled reads, and ended; two at once; one in error; every refusal (#73)",
+        ),
+        "control_hazards": Scenario(
+            ("control_hazards",),
+            setup=_stripe,
+            doc="a start re-posted after its run ended; a start, a tool call and an end posted "
+            "for the process run's own id",
         ),
         "unmapped_hosts": Scenario(
             ("unmapped_hosts",), setup=_internal, doc="GraphQL and Slack's unrouted method"

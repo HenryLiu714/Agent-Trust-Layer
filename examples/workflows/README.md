@@ -23,7 +23,7 @@ uv run pytest -q tests/workflows                                     # the whole
 | W6 | `w06_crm_db_agent` | CLI | tools the proxy cannot see (#76, #83): database and file writes, stand-ins, decoration-time errors |
 | W7 | `w07_streaming_assistant` | streaming HTTP endpoint | SSE through the proxy, recorded chunk by chunk (#71): two streams at once, chunks that end mid-line and mid-secret; a caller that disconnects, an upstream reset mid-stream and before the stream opens, a LangSmith trace stored only as having happened (#70) |
 | W8 | `w08_orchestrator` | nested triggers + an internal service | nested runs, unmapped internal hosts, `Irimi-Run` across a hop (#67) |
-| W9 | `w09_scope_gauntlet` | none (plain script) | THE SCOPE RULE, the L0 floor, idempotency (#46), odd bodies, reads past the body limit, forged irimi headers, the reverse door, the control endpoint (#73) |
+| W9 | `w09_scope_gauntlet` | none (plain script) | THE SCOPE RULE, the L0 floor, idempotency (#46), odd bodies, reads past the body limit, forged irimi headers, the reverse door, the control endpoint (#73): runs started, given tool calls and ended over it by hand, two at once, and every refusal |
 | W10 | `w10_flaky_upstream` | CLI | retries, timeouts, resets on a read and a write, irimi's own L3 read failing, a run that raises or is killed after a write |
 | W11 | `w11_leaky_agent` | CLI | what irimi cannot see: clients that ignore the proxy, loopback services (Phase 4 readiness) |
 
@@ -85,18 +85,38 @@ so it keeps its real module name; `scenarios.py` seeds the fake services per sce
 `tests/workflows/test_stored_runs.py` holds every scenario to what the store keeps (#70): a run
 that started irimi stores exactly one process run, with the agent's argv and exit; every exchange
 irimi printed is stored exactly once, equal field by field to itself redacted, and telemetry only
-as having happened; every other run is a `header` run its first event created (until #74); every
+as having happened, in its run's order among the tool calls the control endpoint passed on;
+every other run is a `header` run its first event created (until #74), or, in W9's control
+scenarios, an `sdk` run the control endpoint started (#73); every
 store directory is 0700, every file 0600, and no `events.jsonl` ends in a half-written line; and a
 bare run stores nothing. A streamed answer is stored as the chunks the agent was sent (#71). For
-W9 and W11, which send no `Irimi-Run`, `irimi runs show <process run>` ends in the summary
+W9 (but for its control scenarios) and W11, which send no `Irimi-Run`, `irimi runs show <process
+run>` ends in the summary
 `irimi shadow` printed, but for the elapsed seconds; for every workflow, the summary over all of
 a process's stored runs together is that block (#72).
 
 `tests/workflows/test_control_endpoint.py` holds every scenario to the control endpoint's two
-promises (#73): no exchange line names `/_irimi/`, and `IRIMI_CONTROL` reaches every agent under
-shadow, naming the listener its proxy does, and no bare agent. `agentkit.start()` logs both
-variables, which is what that check reads. W9's `self_addressed` is the scenario that calls the
-endpoint, at each of its three spellings of the listener.
+promises (#73): no control request is an exchange, printed, handed to the store or stored, and
+`IRIMI_CONTROL` reaches every agent under shadow, naming the listener its proxy does, and no bare
+agent. `agentkit.start()` logs both variables, which is what that check reads; every shadow run
+starts its agent as often as its bare run does, but for W8 `map_refused`, where irimi refuses to
+start. Three W9 scenarios call the endpoint:
+
+- `self_addressed`: its health check and a path no route names, at each of the three spellings of
+  the listener.
+- `control_runs`: the SDK's job by hand, until #74 ships one. Runs are started, given two tool
+  calls with a Stripe read labelled `Irimi-Run: <id>` between them, and ended: one posted direct
+  (`127.0.0.1`), one through the proxy to itself (`127.1`), two at once from threads kept in
+  lockstep, and one ended in error with a message past the 1000 characters a trace keeps. Then
+  every refusal (405, 404, 400 for `../x`, `unattributed`, `NaN`, a missing field and a tool
+  call naming its run, 413), and the health check before and after. The tests pin what is stored:
+  `attribution: sdk`, the posted trigger, the tool calls in order with the read between them, the
+  outcome, and `irimi runs list` no longer saying `incomplete`. Bare, the agent has no
+  `IRIMI_CONTROL` and posts to the same URL shape at its proxy, the fake internet, which answers
+  502, so it exits as it does under shadow.
+- `control_hazards`: posts the SDK must never make. A start re-posted after its run ended is
+  accepted and reopens the run (pinned `LOOKS WRONG`); a start or an end for the process run's own
+  id (`IRIMI_RUN`) is refused 400, while a tool call posted to it is stored in it.
 
 A new workflow package is found by its name, `wNN_<name>`, and is held to all five rules without
 any registry edit. A last test checks that the corpus gives rules 1 to 4 something to catch: a rule

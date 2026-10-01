@@ -44,6 +44,7 @@ from irimi.cli import main as irimi_main
 from irimi.exchange import Exchange
 from irimi.servicemap import MapIndex, loader
 from irimi.store import StoreReader
+from irimi.trace import ToolCall
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 WORKFLOWS_DIR = REPO_ROOT / "examples" / "workflows"
@@ -118,6 +119,9 @@ class Result:
     reported: list[Exchange] = field(default_factory=list)
     # Every exchange the engine handed its trace store, in the order it did (shadow only).
     handed: list[Exchange] = field(default_factory=list)
+    # Every exchange and every tool call the engine handed its trace store, in the order it did
+    # (shadow only): `handed` with the tool calls the control endpoint passed on (#73) among them.
+    handed_events: list[Exchange | ToolCall] = field(default_factory=list)
 
     def events(self, event: str, *, with_time: bool = True) -> list[dict[str, Any]]:
         """Every `event` the agent logged, in order. `with_time=False` drops each one's
@@ -271,6 +275,7 @@ def run(workflow: Workflow, scenario_name: str, mode: str, workdir: Path) -> Res
     irimi_out: list[str] = []
     reported: list[Exchange] = []
     handed: list[Exchange] = []
+    handed_events: list[Exchange | ToolCall] = []
     try:
         for host, action, match, times in scenario.faults:
             internet.inject(host, action, match, times)
@@ -280,7 +285,7 @@ def run(workflow: Workflow, scenario_name: str, mode: str, workdir: Path) -> Res
         if mode == "bare":
             code = _run_bare(cmd, env, cwd, internet)
         else:
-            with _watching_the_store(reported, handed):
+            with _watching_the_store(reported, handed, handed_events):
                 code, irimi_out = _run_shadow(cmd, env, cwd, tmp, internet, scenario, workdir)
     finally:
         internet.stop()
@@ -300,6 +305,7 @@ def run(workflow: Workflow, scenario_name: str, mode: str, workdir: Path) -> Res
         tmp,
         reported,
         handed,
+        handed_events,
     )
 
 
@@ -384,11 +390,14 @@ def _environ(env: dict[str, str]) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def _watching_the_store(reported: list[Exchange], handed: list[Exchange]) -> Iterator[None]:
+def _watching_the_store(
+    reported: list[Exchange], handed: list[Exchange], handed_events: list[Exchange | ToolCall]
+) -> Iterator[None]:
     """`irimi shadow` unchanged, but each exchange it prints a line for is appended to `reported`,
-    and each one its engine hands the trace store to `handed`. `cli` imports `DirectoryStore` when
-    it opens the store and calls `report.exchange_line` from its `on_exchange`, so swapping the two
-    modules' names is enough, as `tests/test_trace_e2e.py` does (#70)."""
+    and each one its engine hands the trace store to `handed`, and to `handed_events` with each
+    tool call the control endpoint hands it (#73). `cli` imports `DirectoryStore` when it opens the
+    store and calls `report.exchange_line` from its `on_exchange`, so swapping the two modules'
+    names is enough, as `tests/test_trace_e2e.py` does (#70)."""
     real = irimi_store.DirectoryStore
     line = report.exchange_line
 
@@ -399,7 +408,12 @@ def _watching_the_store(reported: list[Exchange], handed: list[Exchange]) -> Ite
     class Handed(real):
         def record(self, exchange: Exchange) -> None:
             handed.append(exchange)
+            handed_events.append(exchange)
             super().record(exchange)
+
+        def record_tool_call(self, call: ToolCall) -> None:
+            handed_events.append(call)
+            super().record_tool_call(call)
 
     irimi_store.DirectoryStore = Handed
     report.exchange_line = printing

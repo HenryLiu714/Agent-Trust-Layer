@@ -3,13 +3,29 @@
 The labels are the calls in `examples/workflows/w09_scope_gauntlet/agent.py`.
 """
 
+import dataclasses
+import json
+import re
+import sys
+
 import pytest
 
-from examples.workflows.w09_scope_gauntlet.agent import BIG_CHARGE
+import irimi
+from examples.workflows.w09_scope_gauntlet.agent import (
+    AGENT_VERSION,
+    BIG_CHARGE,
+    CHARGE,
+    CUSTOMER,
+    ENTRYPOINT,
+    LONG_MESSAGE_CHARS,
+    OVERSIZED_BODY_BYTES,
+)
 from examples.workflows.w09_scope_gauntlet.scenarios import BIG_DESCRIPTION_BYTES, WORKFLOW
+from irimi import control, paths, report, trace
 from irimi.bodies import MAX_BODY_BYTES
 from irimi.exchange import BODY_TRUNCATED_FLAG, Exchange
 from irimi.store import MAX_STORED_BODY
+from irimi.trace import MAX_ERROR_MESSAGE, ErrorInfo, RunRecord, ToolCall, Trigger
 
 W = "w09_scope_gauntlet"
 
@@ -217,6 +233,358 @@ def test_the_control_endpoint_answers_at_every_spelling_and_is_never_an_exchange
         **{f"nope_{s}": (502, None) for s in spellings},
     }
     assert bare.exit_code == shadow.exit_code == 0
+
+
+# -- the control endpoint, called as the SDK will call it (#73) -----------------------------------
+#
+# `control_runs` and `control_hazards` do the SDK's job by hand, before #74 ships an SDK: what
+# `irimi shadow` stores for a run reported over the control endpoint, and what each refusal answers.
+
+# The runs `control_runs` posts in full: run id, the tag its labels start with, the path its one
+# labelled read GETs.
+CONTROL_RUNS = {
+    "ctl-direct": ("direct", f"/v1/charges/{CHARGE}"),
+    "ctl-proxied": ("proxied", f"/v1/charges/{CHARGE}"),
+    "ctl-thread-1": ("thread_1", f"/v1/charges/{CHARGE}"),
+    "ctl-thread-2": ("thread_2", f"/v1/customers/{CUSTOMER}"),
+}
+STEPS = ("start", "tool_1", "read", "tool_2", "end")
+REFUSALS = {
+    "refuse_get": (405, "/_irimi/runs/ctl-refused-get/start takes POST, not GET"),
+    "refuse_route": (404, "no control route '/_irimi/runs/ctl-refused-route/nope'"),
+    "refuse_dotdot": (400, "'../x' cannot name a run"),
+    "refuse_unattributed": (400, "'unattributed' cannot name a run"),
+    "refuse_nan": (400, "the body is not JSON: NaN is not a finite number"),
+    "refuse_missing": (400, "missing required field 'trigger'"),
+    "refuse_run_id": (400, "'run_id' comes from the path, not the body"),
+    "refuse_big": (
+        413,
+        f"the body is {OVERSIZED_BODY_BYTES + 11} bytes, over the "
+        f"{control.MAX_CONTROL_BODY} allowed",
+    ),
+}
+ELAPSED = re.compile(r" · \d+\.\ds · ")
+
+
+def posted(result, label: str) -> dict:
+    """The body the agent posted to the control endpoint under `label`."""
+    [event] = [e for e in result.events("posted") if e["label"] == label]
+    return event["body"]
+
+
+def sdk_record(result, run_id: str, start: str, end: str | None) -> RunRecord:
+    """The record a run started by the post labelled `start` and ended by the one labelled `end`
+    is stored as: every field the SDK may say, as it said it, and the rest irimi's."""
+    began = posted(result, start)
+    ended = posted(result, end) if end else {"ended_at": None, "outcome": None, "error": None}
+    trigger = began["trigger"]
+    error = ended["error"]
+    return RunRecord(
+        schema_version=trace.SCHEMA_VERSION,
+        run_id=run_id,
+        mode="shadow",
+        attribution="sdk",
+        trigger=Trigger(
+            trigger["name"], trigger["entrypoint"], trigger["args"], trigger["replayable"]
+        ),
+        agent_version=began["agent_version"],
+        engine_version=irimi.__version__,
+        sdk_version=began["sdk_version"],
+        started_at=began["started_at"],
+        ended_at=ended["ended_at"],
+        outcome=ended["outcome"],
+        error=None if error is None else ErrorInfo(error["type"], error["message"]),
+        exit_code=None,
+    )
+
+
+def stored_tool_call(result, run_id: str, label: str) -> ToolCall:
+    """The tool call posted under `label`, as the store is to hold it: its run id from the path."""
+    body = posted(result, label)
+    error = body["error"]
+    return ToolCall(
+        tool_call_id=body["tool_call_id"],
+        run_id=run_id,
+        name=body["name"],
+        kind=body["kind"],
+        ran=body["ran"],
+        args=body["args"],
+        result=body["result"],
+        error=None if error is None else ErrorInfo(error["type"], error["message"]),
+        started_at=body["started_at"],
+        ended_at=body["ended_at"],
+    )
+
+
+def read_line(path: str) -> str:
+    return f"live      read      GET api.stripe.com{path} -> 200"
+
+
+def listed(result) -> list[list[str]]:
+    """`irimi runs list`, each line's fields, its start time and duration masked (#72)."""
+    code, out, err = result.runs("list")
+    assert (code, err) == (0, [])
+    return sorted([f[0], "<started>", "<elapsed>", *f[3:]] for f in (o.split("  ") for o in out))
+
+
+def shown(result, run_id: str) -> list[str]:
+    """`irimi runs show <run_id>`, its elapsed seconds masked (#72)."""
+    code, out, err = result.runs("show", run_id)
+    assert (code, err) == (0, [])
+    return [ELAPSED.sub(" · <elapsed> · ", line) for line in out]
+
+
+def test_the_sdks_posts_are_answered_by_irimi_and_its_reads_go_live(run_workflow):
+    """Every control post is answered `control`, a refusal with its documented status; every read
+    labelled `Irimi-Run` is forwarded live. Bare, there is no irimi and no `IRIMI_CONTROL`: the
+    agent posts to the same URL shape at its proxy, the fake internet, which serves no such host,
+    and exits as it does under shadow."""
+    shadow = run_workflow(W, "control_runs", "shadow")
+    bare = run_workflow(W, "control_runs", "bare")
+    posts = [f"{tag}_{step}" for tag, _ in CONTROL_RUNS.values() for step in STEPS]
+    reads = [label for label in posts if label.endswith("_read")]
+    errors = ["error_start", "error_tool", "error_end"]
+    controls = [label for label in posts if label not in reads] + errors
+    assert shadow.by_label() == {
+        "health_before": (200, "control"),
+        **dict.fromkeys(controls, (204, "control")),
+        **dict.fromkeys(reads, (200, None)),
+        **{label: (status, "control") for label, (status, _) in REFUSALS.items()},
+        "health_after": (200, "control"),
+    }
+    assert bare.by_label() == {
+        **dict.fromkeys(["health_before", *controls, *REFUSALS], (502, None)),
+        **dict.fromkeys(reads, (200, None)),
+        "health_after": (502, None),
+    }
+    assert bare.exit_code == shadow.exit_code == 0
+    assert [e["given"] for e in shadow.events("control_base")] == [True]
+    assert [e["given"] for e in bare.events("control_base")] == [False]
+    # irimi printed a line for each labelled read and for nothing it answered itself, and the fake
+    # internet saw those reads and nothing else, none of them carrying the label.
+    assert sorted(shadow.exchange_lines()) == sorted(
+        read_line(path) for _, path in CONTROL_RUNS.values()
+    )
+    assert sorted((r.method, r.path) for r in shadow.internet.requests()) == sorted(
+        ("GET", path) for _, path in CONTROL_RUNS.values()
+    )
+    assert [r for r in shadow.internet.requests() if "irimi-run" in r.headers] == []
+
+
+def test_a_run_posted_over_the_control_endpoint_is_stored_as_an_sdk_run(run_workflow):
+    """#73's headline, through the real `irimi shadow`: each run is stored `attribution: "sdk"`
+    with the trigger, versions and times it posted and `outcome: ok`, and holds its two tool calls
+    with its labelled read between them - whether it posted direct (`ctl-direct`) or through the
+    proxy to itself (`ctl-proxied`). `irimi runs show` prints it so."""
+    shadow = run_workflow(W, "control_runs", "shadow")
+    reader = shadow.stored()
+    for run_id, (tag, path) in CONTROL_RUNS.items():
+        stored = reader.load_run(run_id)
+        assert stored.record == sdk_record(shadow, run_id, f"{tag}_start", f"{tag}_end")
+        before, read, after = stored.events
+        assert before == stored_tool_call(shadow, run_id, f"{tag}_tool_1")
+        assert after == stored_tool_call(shadow, run_id, f"{tag}_tool_2")
+        assert isinstance(read, Exchange)
+        assert (read.run_id, report.exchange_line(read)) == (run_id, read_line(path))
+        # In time as well as in `seq`: the run's start, its first tool call, the read, its second
+        # tool call and its end, each clock read after the last.
+        times = [stored.record.started_at, before.ended_at, read.started_at, read.ended_at]
+        times += [after.started_at, stored.record.ended_at]
+        assert times == sorted(times)
+        assert shown(shadow, run_id) == [
+            f"run: {run_id}",
+            "attribution: sdk",
+            f"trigger: {run_id}",
+            f"entrypoint: {ENTRYPOINT}:{run_id}",
+            f'args: {{"run":"{run_id}"}}',
+            f"agent version: {AGENT_VERSION}",
+            "outcome: ok",
+            "",
+            "real      read      tool look_up -> ok",
+            read_line(path),
+            "real      read      tool summarise -> ok",
+            "",
+            f"irimi shadow · run {run_id} · 1 exchange · <elapsed> · backstop: none (Phase 4)",
+            "",
+            "  api.stripe.com  1 read",
+            "",
+            "  1 exchange · 1 live · 0 delegated · 0 virtualized",
+        ]
+
+
+def test_two_runs_posted_at_once_do_not_mix(run_workflow):
+    """The Phase 3 exit test, "two concurrent requests don't mix", on the control endpoint. Two
+    threads in lockstep: both start, both post a tool call, both read, both post another, both end,
+    so each step of one run is between steps of the other on the wire and in the store's queue.
+    Each run still holds only its own: its own tool calls, and the read it labelled, which the
+    two runs make of different objects."""
+    shadow = run_workflow(W, "control_runs", "shadow")
+    threads = [label for label in (c["label"] for c in shadow.calls()) if "thread" in label]
+    assert [label.split("_", 2)[2] for label in threads] == [s for s in STEPS for _ in (1, 2)]
+    handed = [e.run_id for e in shadow.handed_events if e.run_id.startswith("ctl-thread-")]
+    assert sorted(handed[:2]) == sorted(handed[2:4]) == sorted(handed[4:])
+    assert sorted(handed[:2]) == ["ctl-thread-1", "ctl-thread-2"]
+    reader = shadow.stored()
+    for run_id in ("ctl-thread-1", "ctl-thread-2"):
+        tag, path = CONTROL_RUNS[run_id]
+        assert [e.run_id for e in reader.load_run(run_id).events] == [run_id] * 3
+        assert shown(shadow, run_id)[8:11] == [
+            "real      read      tool look_up -> ok",
+            read_line(path),
+            "real      read      tool summarise -> ok",
+        ]
+
+
+def test_a_run_that_ends_in_error_keeps_its_error_cut_to_what_a_trace_keeps(run_workflow):
+    """A run posts a tool call that raised and an end in error, each message past the 1000
+    characters `ErrorInfo` promises (#68): both are stored, cut to that length, not refused."""
+    shadow = run_workflow(W, "control_runs", "shadow")
+    stored = shadow.stored().load_run("ctl-error")
+    tool = stored_tool_call(shadow, "ctl-error", "error_tool")
+    run_message = posted(shadow, "error_end")["error"]["message"]
+    tool_message = tool.error.message
+    assert (len(run_message), len(tool_message)) == (LONG_MESSAGE_CHARS + 4, LONG_MESSAGE_CHARS + 5)
+    cut = ErrorInfo("builtins.RuntimeError", run_message[:MAX_ERROR_MESSAGE])
+    assert stored.record == dataclasses.replace(
+        sdk_record(shadow, "ctl-error", "error_start", "error_end"), error=cut
+    )
+    assert stored.events == [
+        dataclasses.replace(
+            tool, error=ErrorInfo("builtins.ValueError", tool_message[:MAX_ERROR_MESSAGE])
+        )
+    ]
+    assert shown(shadow, "ctl-error") == [
+        "run: ctl-error",
+        "attribution: sdk",
+        "trigger: ctl-error",
+        f"entrypoint: {ENTRYPOINT}:ctl-error",
+        'args: {"run":"ctl-error"}',
+        f"agent version: {AGENT_VERSION}",
+        "outcome: error",
+        f"error: builtins.RuntimeError: run {'y' * (MAX_ERROR_MESSAGE - 4)}",
+        "",
+        "real      read      tool charge_card -> raised builtins.ValueError",
+        "",
+        "irimi shadow · run ctl-error · 0 exchanges · <elapsed> · backstop: none (Phase 4)",
+        "",
+        "  0 exchanges · 0 live · 0 delegated · 0 virtualized",
+    ]
+
+
+def test_each_refusal_answers_its_status_and_line_and_makes_no_run(run_workflow):
+    """Every refusal #73 documents, through the real proxy: the wrong method (405), no such route
+    (404), a run id the store cannot use (400 for `../x` and for `unattributed`), `NaN`, a missing
+    field, a tool call naming its own run (400) and a body past 2 MiB (413). Each names its own
+    run, and none of them is a directory, or an unattributed event, afterwards."""
+    shadow = run_workflow(W, "control_runs", "shadow")
+    assert {e["label"]: e["body"] for e in shadow.events("refusal")} == {
+        label: {"error": line} for label, (_, line) in REFUSALS.items()
+    }
+    root = shadow.home / paths.STORE_DIR_NAME
+    assert sorted(p.name for p in root.iterdir()) == ["blobs", "runs"]
+    assert sorted(p.name for p in (root / "runs").iterdir()) == sorted(
+        [shadow.process_run_id(), *CONTROL_RUNS, "ctl-error"]
+    )
+    assert shadow.stored().load_run(trace.UNATTRIBUTED).events == []
+
+
+def test_health_reports_the_engine_and_what_the_store_wrote(run_workflow):
+    """`GET /_irimi/health` before the first run and after the last, each once the store had
+    nothing queued: the engine's version, `serve: false` (no `--serve` until #77), and the store's
+    counters, `written` grown from nothing to every event line the runs hold."""
+    shadow = run_workflow(W, "control_runs", "shadow")
+    before, after = (e["body"] for e in shadow.events("health"))
+    health = {"engine_version": irimi.__version__, "serve": False}
+    assert before == {**health, "store": {"queued": 0, "written": 0, "dropped": 0}}
+    assert after == {**health, "store": {"queued": 0, "written": 13, "dropped": 0}}
+    assert len(shadow.stored_events()) == 13
+
+
+def test_a_run_ended_over_the_control_endpoint_no_longer_lists_as_incomplete(run_workflow):
+    """#72 listed every run but the process run `incomplete`, because nothing could end one. Each
+    run here posted its end, so `irimi runs list` says how it ended. A tool call counts as no
+    exchange."""
+    shadow = run_workflow(W, "control_runs", "shadow")
+    process = shadow.process_run_id()
+    argv0 = shadow.stored().load_run(process).record.trigger.name
+    assert listed(shadow) == sorted(
+        [
+            *(
+                [run_id, "<started>", "<elapsed>", "ok", "sdk", run_id, "1 exchanges", "0 writes"]
+                for run_id in CONTROL_RUNS
+            ),
+            ["ctl-error", "<started>", "<elapsed>", "error", "sdk", "ctl-error"]
+            + ["0 exchanges", "0 writes"],
+            [process, "<started>", "<elapsed>", "ok", "process", argv0, "0 exchanges", "0 writes"],
+        ]
+    )
+
+
+def test_a_start_re_posted_after_its_end_reopens_the_run(run_workflow):
+    """The SDK must never re-post a start. Made anyway, it is accepted with a 204."""
+    shadow = run_workflow(W, "control_hazards", "shadow")
+    assert shadow.by_label() == {
+        "restarted_start": (204, "control"),
+        "restarted_read": (200, None),
+        "restarted_end": (204, "control"),
+        "restarted_again": (204, "control"),
+        "process_start": (400, "control"),
+        "process_tool": (204, "control"),
+        "process_end": (400, "control"),
+    }
+    stored = shadow.stored().load_run("ctl-restarted")
+    # LOOKS WRONG: the second start replaces the ended run's record whole, so its end, its outcome
+    # and its first trigger are gone and the run lists as `incomplete` again, though its read is
+    # kept. A start for a run that has already started could be refused instead, as a start for
+    # the process run is.
+    assert stored.record == sdk_record(shadow, "ctl-restarted", "restarted_again", None)
+    assert [report.event_line(e) for e in stored.events] == [read_line(f"/v1/charges/{CHARGE}")]
+    [line] = [f for f in listed(shadow) if f[0] == "ctl-restarted"]
+    assert line[3:] == ["incomplete", "sdk", "ctl-restarted again", "1 exchanges", "0 writes"]
+
+
+def test_the_process_runs_start_and_end_are_irimis_and_only_its_tool_calls_are_taken(
+    run_workflow,
+):
+    """`IRIMI_RUN` names the run irimi starts and ends for the agent's process. A start or an end
+    posted for it is refused, so its record stays irimi's: `process`, the agent's argv and its
+    exit. A tool call posted to it is taken, and the process run holds it."""
+    shadow = run_workflow(W, "control_hazards", "shadow")
+    process = shadow.process_run_id()
+    assert [e["id"] for e in shadow.events("process_run")] == [process]
+    refused = {"error": f"{process!r} is the process run, which irimi starts and ends"}
+    assert {e["label"]: e["body"] for e in shadow.events("answer")} == {
+        "process_start": refused,
+        "process_tool": None,
+        "process_end": refused,
+    }
+    stored = shadow.stored().load_run(process)
+    assert stored.events == [stored_tool_call(shadow, process, "process_tool")]
+    assert shown(shadow, process) == [
+        f"run: {process}",
+        "attribution: process",
+        f"trigger: {sys.executable}",
+        "entrypoint: -",
+        f'args: {{"argv":{json.dumps(argv(shadow), separators=(",", ":"))}}}',
+        "agent version: -",
+        "outcome: ok",
+        "exit code: 0",
+        "",
+        "real      read      tool look_up -> ok",
+        "",
+        f"irimi shadow · run {process} · 0 exchanges · <elapsed> · backstop: none (Phase 4)",
+        "",
+        "  0 exchanges · 0 live · 0 delegated · 0 virtualized",
+    ]
+    # Bare, there is no process run: the agent posts for a stand-in id, to the fake internet.
+    bare = run_workflow(W, "control_hazards", "bare")
+    assert [e["id"] for e in bare.events("process_run")] == ["no-process-run"]
+
+
+def argv(result) -> list[str]:
+    """The argv the harness started the agent with: the process run's trigger args (#70)."""
+    workflow = WORKFLOW.scenarios[result.scenario]
+    return [sys.executable, "-m", "examples.workflows.launch", WORKFLOW.module, *workflow.argv]
 
 
 def test_an_unmapped_hosts_posts_are_faked_even_when_they_are_reads(run_workflow):

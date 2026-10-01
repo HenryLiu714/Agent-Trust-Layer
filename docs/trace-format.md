@@ -158,7 +158,7 @@ An exchange's `started_at` and `ended_at` are `0.0` only on an exchange built wi
 | `schema_version` | integer | The format version this run was written in. `1` here. |
 | `run_id` | string | The run's id; also its directory name. |
 | `mode` | `"shadow"` | The only mode in Phase 3. `record` and `replay` come later. |
-| `attribution` | `"process"`, `"sdk"`, `"header"` | How the run came to exist. `process` is the `irimi shadow -- <cmd>` run. `sdk` is a run the SDK started around a trigger. `header` is a run id that arrived on exchanges with no start event. |
+| `attribution` | `"process"`, `"sdk"`, `"header"` | How the run came to exist. `process` is the `irimi shadow -- <cmd>` run. `sdk` is a run the SDK started around a trigger, by posting its start to the control endpoint (#73). `header` is a run id that arrived on exchanges with no start event. |
 | `trigger` | trigger or `null` | What started the run. `null` for a `header` run. |
 | `agent_version` | string or `null` | The agent's own version, from `IRIMI_AGENT_VERSION`. |
 | `engine_version` | string | The irimi that recorded the run. |

@@ -180,10 +180,16 @@ And a refund the real service would have refused, from `w01_ticket_triage double
 
 `irimi shadow` gives the command `HTTP_PROXY`, `HTTPS_PROXY` (and their lowercase forms),
 `NO_PROXY=localhost,127.0.0.1`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`,
-`NODE_EXTRA_CA_CERTS`, `NODE_USE_ENV_PROXY=1`, `IRIMI_ENGINE_ACTIVE=1` and `IRIMI_RUN`. That covers
-requests, httpx, urllib, curl and Node's fetch with no code change. The command's exit code is
-passed through. One process tree is one run; the subcommand is the only thing that chooses the
-mode.
+`NODE_EXTRA_CA_CERTS`, `NODE_USE_ENV_PROXY=1`, `IRIMI_ENGINE_ACTIVE=1`, `IRIMI_RUN` and
+`IRIMI_CONTROL`. That covers requests, httpx, urllib, curl and Node's fetch with no code change.
+The command's exit code is passed through. One process tree is one run; the subcommand is the only
+thing that chooses the mode.
+
+`IRIMI_CONTROL` is `http://127.0.0.1:<port>/_irimi`, irimi's control endpoint on the same listener.
+The SDK posts a run's start, its end and the tool calls the proxy cannot see there
+(`POST /_irimi/runs/<run_id>/start`, `/tool-calls`, `/end`), and `GET /_irimi/health` reports the
+engine's version and the trace store's counters. Every answer carries
+`Irimi-Answered-By: control`, and a control request is never forwarded or recorded as an exchange.
 
 The CA variables replace the child's trust store rather than adding to it. A TLS connection that
 skips the proxy (anything on `localhost` or `127.0.0.1`) will fail to verify; point such a client at
@@ -479,13 +485,13 @@ by phase.
   format v1 and exchange timestamps (#68, [`docs/trace-format.md`](docs/trace-format.md)).
   Redaction before anything reaches disk (#69). The sample workflows (#89). The trace store on
   disk (#70). Streamed SSE bodies recorded chunk by chunk (#71). `irimi runs list` / `runs show`
-  and a summary from a stored run (#72).
+  and a summary from a stored run (#72). The control endpoint, `/_irimi/` (#73).
 
 **Next: the rest of Phase 3, the run**
 
-- The SDK: a control endpoint (#73), `@sdk.trigger` and `sdk.run()` with run identity in a context
-  variable (#74), `Irimi-Run` on every request a run makes (#75), and `@sdk.tool` for calls the
-  proxy cannot see (#76).
+- The SDK: `@sdk.trigger` and `sdk.run()` with run identity in a context variable (#74),
+  `Irimi-Run` on every request a run makes (#75), and `@sdk.tool` for calls the proxy cannot see
+  (#76).
 - `irimi shadow --serve` with per-run summaries (#77), a server agent example and the Phase 3 exit
   test (#78), `irimi compare` (#79), Slack channel names in the summary (#61).
 - Replay: answer a run from its recording (#82), read and write tools in replay (#83),

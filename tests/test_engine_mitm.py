@@ -155,7 +155,7 @@ def _maps(tmp_path, monkeypatch, doc=DEMO_MAP):
     return servicemap.load(cwd=tmp_path, maps_dir=maps_dir)
 
 
-def _start(cfg, overlay=None, trust_upstream_ca=None, policy=None, store=None):
+def _start(cfg, overlay=None, trust_upstream_ca=None, policy=None, store=None, on_tool_call=None):
     """Serve `cfg` on a background loop until the returned stop() is called."""
     seen = []
     eng = MitmEngine(
@@ -164,6 +164,7 @@ def _start(cfg, overlay=None, trust_upstream_ca=None, policy=None, store=None):
         store=store or NullStore(),
         overlay=overlay or NoOverlay(),
         on_exchange=seen.append,
+        on_tool_call=on_tool_call,
     )
     loop = asyncio.new_event_loop()
     t = threading.Thread(target=lambda: loop.run_until_complete(eng.run()), daemon=True)

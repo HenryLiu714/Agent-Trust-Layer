@@ -34,10 +34,9 @@ from typing import Any, NoReturn
 from irimi import __version__, trace
 from irimi.exchange import CONTROL_ANSWER, CONTROL_PREFIX, Door, Headers, Request, Response
 from irimi.pipeline import ANSWERED_BY_HEADER
-from irimi.store import TraceStore, names_a_run_dir
+from irimi.store import TraceStore, header_record, names_a_run_dir
 from irimi.trace import (
     MAX_ERROR_MESSAGE,
-    SCHEMA_VERSION,
     ErrorInfo,
     RunRecord,
     ToolCall,
@@ -47,11 +46,15 @@ from irimi.trace import (
 logger = logging.getLogger(__name__)
 
 # The largest body a control request may post. A trigger's arguments and a tool call's result are
-# JSON the SDK captured; a body past this is answered 413 and never parsed.
+# JSON the SDK captured; a body past this is answered 413 and never parsed (#73).
 MAX_CONTROL_BODY = 2 * 1024 * 1024
 # The longest line a refusal's body says. A decoder's message quotes the value it refused, and a
-# 2 MiB string must not come back as a 2 MiB error.
+# 2 MiB string must not come back as a 2 MiB error (#73).
 MAX_REFUSAL = 200
+# The refusal of a body nested deeper than Python reads it, or than a decoder can quote a value
+# back: a 400 like any other malformed body, never a 500 logged as irimi's failure (#73). Which of
+# the two refuses depends on the Python: 3.14's `json.loads` reads deeper than 3.12's.
+TOO_DEEP = "the body nests too deeply to read"
 
 HEALTH_ROUTE = "health"
 RUNS_ROUTE = "runs"
@@ -62,7 +65,7 @@ RUN_ACTIONS = (START_ACTION, TOOL_CALLS_ACTION, END_ACTION)
 
 # The `RunRecord` fields each run route takes from the posted body. Every one must be present, and
 # only `agent_version` and `error` may be null. The rest of the record is irimi's to say, so a
-# posted `attribution` or `engine_version` is never read.
+# posted `attribution` or `engine_version` is never read (#73).
 START_FIELDS = ("trigger", "agent_version", "sdk_version", "started_at")
 START_REQUIRED = ("trigger", "sdk_version", "started_at")  # `agent_version` may be null
 END_FIELDS = ("ended_at", "outcome", "error")  # `error` may be null
@@ -104,7 +107,7 @@ def _error_response(status: int, message: str, headers: Headers = ()) -> Respons
 
 NO_CONTENT = Response(204, (_STAMP,), b"")
 # The answer to a control request that failed for a reason it did not cause. The engine sends the
-# same bytes if building the answer itself raised.
+# same bytes if building the answer itself raised (#73).
 INTERNAL_ERROR = _error_response(500, "internal")
 
 
@@ -112,10 +115,18 @@ class ControlEndpoint:
     """Answers control requests against one trace store. Built once per engine."""
 
     def __init__(
-        self, store: TraceStore, *, serve: bool, on_tool_call: OnToolCall | None = None
+        self,
+        store: TraceStore,
+        *,
+        serve: bool,
+        process_run: str | None = None,
+        on_tool_call: OnToolCall | None = None,
     ) -> None:
         self.store = store
         self.serve = serve
+        # The run irimi itself starts and ends (`EngineConfig.run_id`): the SDK may post tool
+        # calls to it, never its start or its end (#73).
+        self.process_run = process_run
         self.on_tool_call = on_tool_call
 
     def answer(self, request: Request) -> Response:
@@ -148,8 +159,13 @@ class ControlEndpoint:
             # The store would only count such an event as a drop, or file it in `unattributed/`:
             # the agent is told instead, and no directory is made (#70).
             raise _Refused(400, f"{run_id!r} cannot name a run")
-        posted = _posted(request)
         action = segments[-1]
+        if run_id == self.process_run and action != TOOL_CALLS_ACTION:
+            # THE PROCESS RUN'S RECORD IS IRIMI'S, as `attribution` and `engine_version` are: a
+            # start would replace its argv trigger with an `sdk` record, and an end would close it
+            # before `irimi shadow` records the child's exit (#73).
+            raise _Refused(400, f"{run_id!r} is the process run, which irimi starts and ends")
+        posted = _posted(request)
         if action == START_ACTION:
             self._start(run_id, posted)
         elif action == TOOL_CALLS_ACTION:
@@ -175,16 +191,13 @@ class ControlEndpoint:
     def _tool_call(self, run_id: str, posted: Mapping[str, Any]) -> None:
         if "run_id" in posted:
             raise _Refused(400, "'run_id' comes from the path, not the body")
-        try:
-            call = trace.tool_call_from_json({**posted, "run_id": run_id})
-        except TraceFormatError as exc:
-            raise _Refused(400, str(exc)) from None
+        call = _decoded(trace.tool_call_from_json, {**posted, "run_id": run_id})
         call = dataclasses.replace(call, error=_label(call.error))
         self.store.record_tool_call(call)
         if self.on_tool_call is None:
             return
         # The call is stored whatever the callback does: a live summary that breaks costs the
-        # summary its line, never the run its record.
+        # summary its line, never the run its record (#73).
         try:
             self.on_tool_call(call)
         except Exception:
@@ -215,7 +228,9 @@ def _posted(request: Request) -> Mapping[str, Any]:
         )
     try:
         posted = json.loads(request.body, parse_constant=_refuse_constant)
-    except (ValueError, RecursionError) as exc:  # UnicodeDecodeError is a ValueError
+    except RecursionError:
+        raise _Refused(400, TOO_DEEP) from None
+    except ValueError as exc:  # UnicodeDecodeError is a ValueError
         raise _Refused(400, f"the body is not JSON: {exc}") from None
     if not isinstance(posted, dict):
         raise _Refused(400, f"the body is a JSON {type(posted).__name__}, not an object")
@@ -231,6 +246,18 @@ def _label(error: ErrorInfo | None) -> ErrorInfo | None:
     return dataclasses.replace(error, message=error.message[:MAX_ERROR_MESSAGE])
 
 
+def _decoded[T](decode: Callable[[Mapping[str, Any]], T], doc: Mapping[str, Any]) -> T:
+    """`doc` read by one of the trace decoders, its refusal a 400. A decoder raises only
+    TraceFormatError (#68), except that quoting a value nested deeper than `repr` goes raises
+    RecursionError: the agent's malformed body all the same, so a 400 too, never a 500 (#73)."""
+    try:
+        return decode(doc)
+    except TraceFormatError as exc:
+        raise _Refused(400, str(exc)) from None
+    except RecursionError:
+        raise _Refused(400, TOO_DEEP) from None
+
+
 def _refuse_constant(name: str) -> NoReturn:
     raise ValueError(f"{name} is not a finite number")
 
@@ -244,28 +271,11 @@ def _sdk_run(run_id: str, posted: Mapping[str, Any], fields: tuple[str, ...]) ->
     decoder of the record they belong to, so a posted value is held to exactly the rules a stored
     one is - a finite timestamp, an `outcome` from its vocabulary, a trigger with all its keys.
 
-    Every other field is irimi's and comes from the encoder, never from `posted`. A field in
-    `fields` that `posted` lacks is left out, so the decoder names it missing."""
-    base = trace.run_to_json(
-        RunRecord(
-            schema_version=SCHEMA_VERSION,
-            run_id=run_id,
-            mode="shadow",
-            attribution="sdk",
-            trigger=None,
-            agent_version=None,
-            engine_version=__version__,
-            sdk_version=None,
-            started_at=None,
-            ended_at=None,
-            outcome=None,
-            error=None,
-            exit_code=None,
-        )
-    )
+    Every other field is irimi's and comes from the encoder, never from `posted`: the record the
+    store gives a run it knows only by its id, every optional field None, attributed to the SDK
+    (one spelling of that record, not two, #73). A field in `fields` that `posted` lacks is left
+    out, so the decoder names it missing."""
+    base = trace.run_to_json(dataclasses.replace(header_record(run_id), attribution="sdk"))
     doc = {key: value for key, value in base.items() if key not in fields}
     doc.update({key: posted[key] for key in fields if key in posted})
-    try:
-        return trace.run_from_json(doc)
-    except TraceFormatError as exc:
-        raise _Refused(400, str(exc)) from None
+    return _decoded(trace.run_from_json, doc)

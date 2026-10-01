@@ -7,6 +7,7 @@ import dataclasses
 import http.client
 import json
 import logging
+import socket
 import time
 
 import pytest
@@ -22,6 +23,8 @@ from tests.test_engine_mitm import _config, _start, _via_proxy
 upstream = test_engine_mitm.upstream  # bound here so pytest finds the fixture
 
 RUN = "sdkrun01"
+# The engine's own run, `EngineConfig.run_id` in `test_engine_mitm._config`.
+PROCESS_RUN = "t3st"
 TRIGGER = {
     "name": "handle_ticket",
     "entrypoint": "agent:handle_ticket",
@@ -71,12 +74,12 @@ class _Engine:
     def root(self):
         return self.store.layout.root
 
-    def call(self, method: str, path: str, body: bytes | dict | None = None, *, host=None):
+    def call(self, method: str, path: str, body: bytes | dict | None = None):
         """One origin-form request to the listener itself, as the SDK makes it when `IRIMI_CONTROL`
         is on NO_PROXY. Returns `(status, headers, body)`, the header names lower-cased."""
         data = json.dumps(body).encode() if isinstance(body, dict) else body
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
-        conn.request(method, path, body=data, headers={"host": host or f"127.0.0.1:{self.port}"})
+        conn.request(method, path, body=data, headers={"host": f"127.0.0.1:{self.port}"})
         resp = conn.getresponse()
         raw = resp.read()
         conn.close()
@@ -293,6 +296,20 @@ REFUSALS = [
         400,
         "'unattributed' cannot name a run",
     ),
+    (
+        "POST",
+        f"/_irimi/runs/{PROCESS_RUN}/start",
+        _start_body(1.0),
+        400,
+        f"'{PROCESS_RUN}' is the process run, which irimi starts and ends",
+    ),
+    (
+        "POST",
+        f"/_irimi/runs/{PROCESS_RUN}/end",
+        _end_body(2.0),
+        400,
+        f"'{PROCESS_RUN}' is the process run, which irimi starts and ends",
+    ),
 ]
 
 
@@ -314,6 +331,15 @@ def test_a_refused_control_request_answers_its_status_and_names_what_was_wrong(
     assert reader.list_runs() == []
     assert not (engine.root / "runs").exists() and not (engine.root / "unattributed").exists()
     assert engine.seen == [] and engine.tool_calls == []
+
+
+def test_a_tool_call_may_name_the_process_run(engine):
+    """Only the process run's start and end are irimi's: a tool call made outside any SDK run
+    belongs to the process run, as an exchange with no `Irimi-Run` does (#73)."""
+    _ok(engine.call("POST", f"/_irimi/runs/{PROCESS_RUN}/tool-calls", _tool_call(time.time())))
+    [call] = engine.finish().load_run(PROCESS_RUN).events
+    assert (call.run_id, call.name) == (PROCESS_RUN, "db.write")
+    assert engine.tool_calls == [call]
 
 
 def test_a_control_request_through_the_forward_proxy_is_answered_the_same(engine):
@@ -467,3 +493,62 @@ def test_a_refusal_quotes_at_most_a_line_of_what_it_refused(engine):
     error = json.loads(raw)["error"]
     assert status == 400 and error.startswith("'started_at' is 'sss")
     assert len(error) == MAX_REFUSAL
+
+
+def test_a_head_request_gets_its_405_without_a_body_and_the_connection_stays_usable(engine):
+    """A response to HEAD carries no content (RFC 9110), and mitmproxy sends whatever a response
+    holds: a 405 that kept its JSON would be read as the start of the connection's next response,
+    so `HEAD /_irimi/health` broke every later request on that connection (#73).
+
+    Over a raw socket, both requests in one write: `http.client` passes or fails this by when the
+    stray bytes arrive."""
+    host = f"127.0.0.1:{engine.port}"
+    sent = "".join(f"{m} /_irimi/health HTTP/1.1\r\nhost: {host}\r\n\r\n" for m in ("HEAD", "GET"))
+    with socket.create_connection(("127.0.0.1", engine.port), timeout=10) as sock:
+        sock.sendall(sent.encode())
+        received = b""
+        while not received.endswith(b"}"):  # the GET's JSON is the last thing on the wire
+            chunk = sock.recv(65536)
+            assert chunk, f"the connection closed after {received!r}"
+            received += chunk
+    head, get = received.split(b"\r\n\r\n", 1)
+    assert head.startswith(b"HTTP/1.1 405 ")
+    assert b"\r\nirimi-answered-by: control\r\n" in head and b"\r\nallow: GET\r\n" in head
+    # The next byte after the 405's head is the GET's answer, not the 405's JSON.
+    assert get.startswith(b"HTTP/1.1 200 ")
+    assert json.loads(get.split(b"\r\n\r\n", 1)[1])["engine_version"] == __version__
+
+
+_DEEP = 100_000  # deeper than a decoder can quote a value back, within what `json.loads` reads
+
+
+def _nested(doc: dict, field: str) -> bytes:
+    """`doc` with `field` a list nested _DEEP times, where a string is expected."""
+    deep = "[" * _DEEP + "]" * _DEEP
+    return (
+        json.dumps({**doc, field: None}).replace(f'"{field}": null', f'"{field}": {deep}').encode()
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        (_START, b"[" * 1_000_000 + b"]" * 1_000_000),
+        (_START, _nested(_start_body(1.0), "sdk_version")),
+        (f"/_irimi/runs/{RUN}/tool-calls", _nested(_tool_call(1.0), "name")),
+    ],
+    ids=["the-body", "a-start-field", "a-tool-call-field"],
+)
+def test_a_body_nested_too_deeply_to_read_is_a_400_never_a_500(engine, caplog, path, body):
+    """A mistyped field is a 400 however it is mistyped. A decoder's refusal quotes the value it
+    refused, and quoting a list nested deeper than `repr` goes raised RecursionError: a 500, logged
+    as irimi's failure, for what is the agent's (#73). `json.loads` itself reads deeper on Python
+    3.14 than on 3.12, so the same body is refused by the parse on one and by a decoder on the
+    other, and both say the same line."""
+    with caplog.at_level(logging.ERROR, logger="irimi.control"):
+        status, headers, raw = engine.call("POST", path, body)
+    assert (status, json.loads(raw)) == (400, {"error": "the body nests too deeply to read"})
+    assert STAMP in headers
+    assert [r for r in caplog.records if r.name == "irimi.control"] == []
+    engine.finish()
+    assert not (engine.root / "runs").exists() and engine.tool_calls == []

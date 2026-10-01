@@ -400,7 +400,9 @@ class IrimiAddon:
         self.overlay = overlay
         self.on_exchange = on_exchange
         self.on_running = on_running
-        self.control = ControlEndpoint(store, serve=config.serve, on_tool_call=on_tool_call)
+        self.control = ControlEndpoint(
+            store, serve=config.serve, process_run=config.run_id, on_tool_call=on_tool_call
+        )
         self.write_log: list[Exchange] = []
 
     def running(self) -> None:
@@ -514,11 +516,18 @@ class IrimiAddon:
         its answer into mitmproxy's anyway, because a control request that escaped this hook would
         be forwarded to the listener it was addressed to - irimi itself (#73)."""
         try:
-            flow.response = _to_mitm_response(self.control.answer(req))
+            response = _to_mitm_response(self.control.answer(req))
         except Exception:
             logger.exception("irimi: could not send the control endpoint's answer")
             error = control.INTERNAL_ERROR
-            flow.response = http.Response.make(error.status, error.body, _fields(error.headers))
+            response = http.Response.make(error.status, error.body, _fields(error.headers))
+        # A RESPONSE TO HEAD CARRIES NO CONTENT (RFC 9110 9.3.2), and mitmproxy sends whatever the
+        # response holds: `HEAD /_irimi/health`'s 405 JSON was read as the start of the next
+        # response on the connection. The headers, Content-Length included, still say what the
+        # same request as a GET would get (#73).
+        if req.method == "HEAD":
+            response.raw_content = b""
+        flow.response = response
 
     def _answer_failed_decision(
         self,

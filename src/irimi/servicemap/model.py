@@ -136,6 +136,23 @@ class MapIndex:
         route = match_route(sm, method, path)
         return None if route is None else (sm, route)
 
+    def route_named(self, host: str, method: str, operation: str) -> Route | None:
+        """The one route of `host`'s service that `method` reaches and that names `operation`, or
+        None when no route does or several do.
+
+        For a request whose path cannot be matched again: a stored one on a credential-path host,
+        whose path is a redaction placeholder, while its `operation` is the route's own (#72)."""
+        sm = self.service_for(host)
+        if sm is None:
+            return None
+        method = method.upper()
+        named = [
+            route
+            for route in sm.routes
+            if route.operation == operation and route.method in (ANY_METHOD, method)
+        ]
+        return named[0] if len(named) == 1 else None
+
 
 def match_route(sm: ServiceMap, method: str, path: str) -> Route | None:
     """The route matching `method` and `path`, or None.

@@ -142,7 +142,8 @@ def test_every_run_but_the_process_run_is_a_header_run_its_first_event_made(
 ):
     """Until #74 lands, a run the SDK stand-in labels with `Irimi-Run` is known to irimi only by
     its events: its record is the one the first of them created, `attribution: "header"`, with no
-    trigger, no start and no end (#70), and it holds at least that event."""
+    trigger and no end (#70), and it holds at least that event. It started when that event did, so
+    `irimi runs list` sorts it among the runs that started rather than after all of them (#72)."""
     shadow = run_workflow(name, scenario, "shadow")
     if not started(shadow):
         return
@@ -151,9 +152,11 @@ def test_every_run_but_the_process_run_is_a_header_run_its_first_event_made(
         if record.attribution == "process":
             continue
         assert record.attribution == "header"
-        assert (record.trigger, record.started_at, record.ended_at) == (None, None, None)
+        assert (record.trigger, record.ended_at) == (None, None)
         assert (record.outcome, record.exit_code, record.error) == (None, None, None)
-        assert reader.load_run(record.run_id).events != []
+        events = reader.load_run(record.run_id).events
+        assert events != []
+        assert record.started_at == events[0].started_at > 0
 
 
 @pytest.mark.parametrize(("name", "scenario"), CASES, ids=IDS)
@@ -200,3 +203,4 @@ def test_an_unlabelled_agent_s_process_run_prints_the_summary_irimi_shadow_print
     code, out, err = shadow.runs("show", shadow.process_run_id())
     assert (code, err) == (0, [])
     assert no_elapsed(out[-len(live) :]) == no_elapsed(live)
+

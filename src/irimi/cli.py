@@ -519,7 +519,7 @@ def _store_root(args: argparse.Namespace) -> Path:
 def cmd_runs_list(args: argparse.Namespace) -> int:
     """`irimi runs list`: one line per stored run, newest first (#72)."""
     from irimi import report
-    from irimi.store import StoreReader
+    from irimi.store import RunNotFound, StoreReader
     from irimi.trace import TraceFormatError
 
     root = _store_root(args)
@@ -535,9 +535,11 @@ def cmd_runs_list(args: argparse.Namespace) -> int:
     for record in records:
         # One damaged run is named and counted as `?`, never allowed to hide the others: the
         # store's own rule for `list_runs` (#70).
+        # Counted, never read: no body is loaded, or a few runs of LLM streams cost hundreds of
+        # MB to print two numbers each (#72).
         try:
-            events = reader.load_run(record.run_id).events
-        except (TraceFormatError, OSError, KeyError) as exc:
+            events = reader.load_run(record.run_id, bodies=False).events
+        except (TraceFormatError, OSError, RunNotFound) as exc:
             print(f"warning: run {record.run_id} could not be read: {exc}", file=sys.stderr)
             events = None
         print(report.run_list_line(record, events))

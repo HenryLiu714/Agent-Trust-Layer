@@ -7,15 +7,17 @@ CLI printed on exit, line for line, but for the elapsed seconds. The rest pin th
 exact output over stores built by `irimi shadow` and by hand.
 """
 
+import dataclasses
 import json
 import re
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
 from irimi import redact, report, servicemap, trace
-from irimi.cli import main
+from irimi.cli import DEFAULT_RUNS_LIMIT, main
 from irimi.exchange import Exchange, Request, Response
 from irimi.store import DirectoryStore, StoreReader
 from irimi.trace import ErrorInfo, RunRecord, ToolCall, Trigger
@@ -237,6 +239,71 @@ def test_runs_list_names_a_damaged_run_and_still_lists_the_others(home, capfd):
     assert err.startswith("warning: run handbuilt could not be read: blob ")
 
 
+def _ended_run(run_id: str, started_at: float, **changes) -> RunRecord:
+    record = RunRecord(
+        schema_version=trace.SCHEMA_VERSION,
+        run_id=run_id,
+        mode="shadow",
+        attribution="process",
+        trigger=None,
+        agent_version=None,
+        engine_version="0.0.0",
+        sdk_version=None,
+        started_at=started_at,
+        ended_at=started_at + 1.0,
+        outcome="ok",
+        error=None,
+        exit_code=0,
+    )
+    return dataclasses.replace(record, **changes)
+
+
+def test_runs_list_shows_a_labelled_run_newer_than_the_limit_s_worth_of_process_runs(home, capfd):
+    """A `header` run once had no start, so it sorted after every run that had one and the
+    default `runs list` hid it behind twenty older process runs (#72)."""
+    s = DirectoryStore(home / "store", redact.load_key(home))
+    for i in range(DEFAULT_RUNS_LIMIT + 1):
+        s.start_run(_ended_run(f"proc{i:02d}", HAND_BUILT_AT + i))
+    labelled_at = HAND_BUILT_AT + 100
+    s.record(dataclasses.replace(_refund("labelled"), started_at=labelled_at))
+    s.close()
+    assert main(["runs", "list"]) == 0
+    lines = capfd.readouterr().out.splitlines()
+    assert len(lines) == DEFAULT_RUNS_LIMIT
+    assert lines[0] == (
+        f"labelled  {_local(labelled_at)}  -  incomplete  header  -  1 exchanges  1 writes"
+    )
+
+
+def test_runs_list_reads_no_body_to_count_a_run_s_events(home, capfd, monkeypatch):
+    """Counting needs each event's kind and answer, never its body: a few runs of LLM streams were
+    hundreds of MB read to print two numbers (#72)."""
+    _hand_built_incomplete_run(home / "store", redact.load_key(home))
+    real_read_bytes = Path.read_bytes
+
+    def no_blob_reads(path):
+        assert "blobs" not in path.parts, f"runs list read a blob: {path}"
+        return real_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", no_blob_reads)
+    assert main(["runs", "list"]) == 0
+    assert capfd.readouterr().out.endswith("2 exchanges  1 writes\n")
+
+
+def test_runs_list_never_prints_a_negative_duration(home, capfd):
+    """The wall clock can step back between a run's start and its end (#72). Nor does the summary
+    `runs show` ends in, which times the run the same way."""
+    s = DirectoryStore(home / "store", redact.load_key(home))
+    s.start_run(_ended_run("stepped", HAND_BUILT_AT, ended_at=HAND_BUILT_AT - 10))
+    s.close()
+    assert main(["runs", "list"]) == 0
+    assert capfd.readouterr().out.split("  ")[2] == "0.0s"
+    assert main(["runs", "show", "stepped"]) == 0
+    assert "irimi shadow · run stepped · 0 exchanges · 0.0s · backstop: none (Phase 4)" in (
+        capfd.readouterr().out.splitlines()
+    )
+
+
 # ------------------------------------------------------------------------------ runs show
 
 HANDBUILT_EVENTS = [
@@ -366,3 +433,35 @@ def test_tool_call_line_is_in_the_exchange_line_s_columns():
     assert report.tool_call_line(call) == "shadow    write     tool db.mark_refunded -> ok"
     real = ToolCall("t", "r", "crm.lookup", "read", "real", {}, {}, None, 1.0, 2.0)
     assert report.tool_call_line(real) == "real      read      tool crm.lookup -> ok"
+
+
+def test_runs_show_prints_a_stored_message_s_control_characters_escaped(home, capfd):
+    """A stored error is the agent's own `str(exc)`. Printed raw, a newline broke the header's one
+    `key: value` per line and an escape sequence was obeyed by the terminal (#72). Every header
+    field the agent wrote is escaped, a C1 control (`\\x9b`, an 8-bit CSI) as well, which JSON
+    leaves raw in `args`."""
+    s = DirectoryStore(home / "store", redact.load_key(home))
+    s.start_run(
+        _ended_run(
+            "raised",
+            HAND_BUILT_AT,
+            trigger=Trigger("job\x1b[2J", "jobs:run\r", {"note": "\x9b2J"}, True),
+            agent_version="1.0\x07",
+            outcome="error",
+            error=ErrorInfo("ValueError", "line one\nline two \x1b[31mred\x1b[0m é"),
+            exit_code=1,
+        )
+    )
+    s.close()
+    assert main(["runs", "show", "raised"]) == 0
+    lines = capfd.readouterr().out.splitlines()
+    assert lines[2] == "trigger: job\\x1b[2J"
+    assert lines[3:6] == [
+        "entrypoint: jobs:run\\r",
+        'args: {"note":"\\x9b2J"}',
+        "agent version: 1.0\\x07",
+    ]
+    assert lines[7] == "error: ValueError: line one\\nline two \\x1b[31mred\\x1b[0m é"
+    assert lines[8] == "exit code: 1"
+    assert main(["runs", "list"]) == 0
+    assert "  job\\x1b[2J  " in capfd.readouterr().out

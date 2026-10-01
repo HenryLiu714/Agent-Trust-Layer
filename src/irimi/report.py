@@ -8,6 +8,7 @@ import re
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import assert_never
 
 from irimi import netaddr
 from irimi.bodies import reflect
@@ -335,14 +336,25 @@ def _host_lines(exchanges: Sequence[Exchange], telemetry: Sequence[str]) -> list
     return lines
 
 
+def _route_of(exchange: Exchange, index: MapIndex | None) -> Route | None:
+    """The route a write was classified under, for its `human:` template.
+
+    Its path is matched, as the live classification matched it. A stored write on a
+    credential-path host has a redaction placeholder for a path, which matches no route, so the
+    route is then found by the `operation` the exchange recorded: a webhook post prints `post via
+    webhook: "..."` from the store as it did live (#72)."""
+    if index is None:
+        return None
+    request = exchange.request
+    matched = index.route_for(request.host, request.method, request.path)
+    if matched is not None:
+        return matched[1]
+    return index.route_named(request.host, request.method, exchange.operation)
+
+
 def _write_line(exchange: Exchange, index: MapIndex | None) -> str:
     """One intercepted write, as the map's own sentence plus what irimi did with it."""
-    matched = (
-        index.route_for(exchange.request.host, exchange.request.method, exchange.request.path)
-        if index is not None
-        else None
-    )
-    route = matched[1] if matched is not None else None
+    route = _route_of(exchange, index)
     if route is not None and route.human:
         what = render_human(route.human, exchange, route)
     else:
@@ -533,16 +545,14 @@ def stored_summary_lines(run: StoredRun, index: MapIndex | None) -> list[str]:
     where the live summary timed the child; a run with no start or no end has `0.0`.
 
     Where a stored line may still differ from the live one: redaction replaced a field a `human:`
-    template renders, or the path of a request no route matched on a credential-path host, which
-    the write line spells out (docs/trace-format.md, "Reading a run back").
+    template renders, the path of a request no route matched on a credential-path host, which the
+    write line spells out, or an event the store dropped (docs/trace-format.md, "Reading a run
+    back").
     """
     exchanges = [event for event in run.events if isinstance(event, Exchange)]
     telemetry = [event.host for event in run.events if isinstance(event, TelemetrySeen)]
-    record = run.record
-    elapsed = 0.0
-    if record.started_at is not None and record.ended_at is not None:
-        elapsed = record.ended_at - record.started_at
-    return _summary(record.run_id, exchanges, telemetry, elapsed, index)
+    elapsed = run_elapsed(run.record)
+    return _summary(run.record.run_id, exchanges, telemetry, elapsed or 0.0, index)
 
 
 def _summary(
@@ -597,6 +607,23 @@ def _summary(
 # `irimi runs show`'s `args:` line: enough to recognise a trigger by, not a dump of it (#72).
 MAX_ARGS_SHOWN = 500
 NOT_SET = "-"
+# A C0 or C1 control character, DEL included. A stored run's text is the agent's own - an error
+# message is `str(exc)` - and printed raw, a newline breaks `runs show`'s one `key: value` per line
+# and an escape sequence is obeyed by the terminal reading it (#72).
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def _printable(text: str) -> str:
+    """`text` on one line, each control character spelled as its Python escape (`\\n`, `\\x1b`)."""
+    return _CONTROL.sub(lambda m: repr(m.group())[1:-1], text)
+
+
+def run_elapsed(record: RunRecord) -> float | None:
+    """How long a stored run took, or None for one with no start or no end. Never negative: the
+    wall clock can step back between the two, as `pipeline.annotate` knows for an exchange (#72)."""
+    if record.started_at is None or record.ended_at is None:
+        return None
+    return max(0.0, record.ended_at - record.started_at)
 
 
 def run_status(record: RunRecord) -> str:
@@ -607,14 +634,14 @@ def run_status(record: RunRecord) -> str:
 
 def run_list_line(record: RunRecord, events: Sequence[Event] | None) -> str:
     """One `irimi runs list` line (#72). `events` is None for a run whose events could not be
-    read, which then shows `?` for both counts rather than zero."""
+    read, which then shows `?` for both counts rather than zero. Only each event's kind and how it
+    was answered are read, so a caller may pass events loaded without their bodies."""
     started = NOT_SET
     if record.started_at is not None:
         started = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(record.started_at))
-    duration = NOT_SET
-    if record.started_at is not None and record.ended_at is not None:
-        duration = f"{record.ended_at - record.started_at:.1f}s"
-    trigger = record.trigger.name if record.trigger is not None else NOT_SET
+    elapsed = run_elapsed(record)
+    duration = NOT_SET if elapsed is None else f"{elapsed:.1f}s"
+    trigger = _printable(record.trigger.name) if record.trigger is not None else NOT_SET
     if events is None:
         exchanges = writes = "?"
     else:
@@ -639,6 +666,7 @@ def run_list_line(record: RunRecord, events: Sequence[Event] | None) -> str:
 def run_header_lines(record: RunRecord) -> list[str]:
     """`irimi runs show`'s header block: one `key: value` per line (#72)."""
     trigger = record.trigger
+    entrypoint = (trigger.entrypoint if trigger is not None else None) or NOT_SET
     args = NOT_SET
     if trigger is not None:
         args = json.dumps(trigger.args, separators=(",", ":"), ensure_ascii=False)
@@ -647,14 +675,14 @@ def run_header_lines(record: RunRecord) -> list[str]:
     lines = [
         f"run: {record.run_id}",
         f"attribution: {record.attribution}",
-        f"trigger: {trigger.name if trigger is not None else NOT_SET}",
-        f"entrypoint: {(trigger.entrypoint if trigger is not None else None) or NOT_SET}",
-        f"args: {args}",
-        f"agent version: {record.agent_version or NOT_SET}",
+        f"trigger: {_printable(trigger.name) if trigger is not None else NOT_SET}",
+        f"entrypoint: {_printable(entrypoint)}",
+        f"args: {_printable(args)}",
+        f"agent version: {_printable(record.agent_version or NOT_SET)}",
         f"outcome: {run_status(record)}",
     ]
     if record.error is not None:
-        lines.append(f"error: {record.error.type}: {record.error.message}")
+        lines.append(f"error: {_printable(record.error.type)}: {_printable(record.error.message)}")
     if record.exit_code is not None:
         lines.append(f"exit code: {record.exit_code}")
     if record.dropped_events:
@@ -665,11 +693,15 @@ def run_header_lines(record: RunRecord) -> list[str]:
 def event_line(event: Event) -> str:
     """One stored event, as `irimi runs show` prints it: an exchange and a tool call in the
     columns the terminal printed them in, and telemetry as the host it went to (#72)."""
-    if isinstance(event, Exchange):
-        return exchange_line(event)
-    if isinstance(event, ToolCall):
-        return tool_call_line(event)
-    return f"telemetry {event.host}"
+    match event:
+        case Exchange():
+            return exchange_line(event)
+        case ToolCall():
+            return tool_call_line(event)
+        case TelemetrySeen():
+            return f"telemetry {event.host}"
+        case _:
+            assert_never(event)
 
 
 def run_show_lines(run: StoredRun, index: MapIndex | None) -> list[str]:

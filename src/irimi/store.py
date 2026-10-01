@@ -169,10 +169,15 @@ class StoreStats:
     dropped: int  # events dropped, for any reason, since the store was built
 
 
-def header_record(run_id: str) -> RunRecord:
+def header_record(run_id: str, started_at: float | None = None) -> RunRecord:
     """The record of a run id that arrived on an event with no start: `attribution: "header"`,
     every optional field None. The writer creates it on the first event of a run with no
-    `run.json`, and `StoreReader` gives it to `unattributed/`, which has none (#70)."""
+    `run.json`, and `StoreReader` gives it to `unattributed/`, which has none (#70).
+
+    The writer passes that first event's `started_at`, the earliest moment the run is known by.
+    Without it a header run sorted after every run that has a start, so `irimi runs list` hid an
+    agent's labelled runs behind its process runs as soon as there were more of those than its
+    `--limit` (#72)."""
     return RunRecord(
         schema_version=SCHEMA_VERSION,
         run_id=run_id,
@@ -182,7 +187,7 @@ def header_record(run_id: str) -> RunRecord:
         agent_version=None,
         engine_version=__version__,
         sdk_version=None,
-        started_at=None,
+        started_at=started_at,
         ended_at=None,
         outcome=None,
         error=None,
@@ -508,7 +513,8 @@ class DirectoryStore:
         if not run.writable:
             raise ValueError(f"run {event.run_id!r} is another schema version")
         if run.dir is not None and run.record is None:
-            self._write_record(run, header_record(event.run_id))
+            # `0.0` is an event built with no clock: no start at all (docs/trace-format.md, #72).
+            self._write_record(run, header_record(event.run_id, event.started_at or None))
         stored = self._for_disk(event, bad_run_id=run.dir is None)
         line = json.dumps(
             trace.event_to_json(run.next_seq, stored, self._put_body), allow_nan=False
@@ -830,7 +836,7 @@ class RunNotFound(KeyError):
 @dataclass(frozen=True)
 class StoredRun:
     record: RunRecord
-    events: list[Event]  # in `seq` order, bodies loaded from blobs/
+    events: list[Event]  # in `seq` order, bodies loaded from blobs/, or empty: see `load_run`
 
 
 class StoreReader:
@@ -866,13 +872,19 @@ class StoreReader:
             key=lambda r: (r.started_at is None, -(r.started_at or 0.0), r.run_id),
         )
 
-    def load_run(self, run_id: str) -> StoredRun:
+    def load_run(self, run_id: str, *, bodies: bool = True) -> StoredRun:
         """One run, its events in `seq` order. `UNATTRIBUTED` gives the unattributed events under
         `header_record`. Raises RunNotFound for an id with no run, and TraceFormatError for a
-        damaged run: an unparseable line other than a crash's truncated last one, a missing blob."""
+        damaged run: an unparseable line other than a crash's truncated last one, a missing blob.
+
+        `bodies=False` leaves every body empty and reads no blob, though each is still checked to
+        exist at its size, so a missing or resized blob is damage either way. It is for a caller
+        that counts events and never reads a body: `irimi runs list` read every body of every run
+        it listed, hundreds of MB for a few runs of LLM streams, to print two numbers (#72)."""
+        get_body = self._get_body if bodies else self._check_body
         if run_id == UNATTRIBUTED:
             events = self.layout.unattributed_events
-            return StoredRun(header_record(UNATTRIBUTED), self._events(events))
+            return StoredRun(header_record(UNATTRIBUTED), self._events(events, get_body))
         if not trace.is_valid_run_id(run_id):
             raise RunNotFound(run_id)
         directory = self.layout.run_dir(run_id)
@@ -882,7 +894,7 @@ class StoreReader:
         # On a case-insensitive filesystem `run1` opens `Run1/`: that is another run, not this one.
         if record.run_id != run_id:
             raise RunNotFound(run_id)
-        return StoredRun(record, self._events(directory / EVENTS_FILE))
+        return StoredRun(record, self._events(directory / EVENTS_FILE, get_body))
 
     def _record(self, directory: Path) -> RunRecord:
         try:
@@ -890,8 +902,8 @@ class StoreReader:
         except OSError as exc:
             raise TraceFormatError(f"{directory / RUN_FILE}: {exc}") from exc
 
-    def _events(self, path: Path) -> list[Event]:
-        numbered = [trace.event_from_json(d, self._get_body) for d in _lines(path)]
+    def _events(self, path: Path, get_body: trace.GetBody) -> list[Event]:
+        numbered = [trace.event_from_json(d, get_body) for d in _lines(path)]
         return [event for _, event in sorted(numbered, key=lambda pair: pair[0])]
 
     def _get_body(self, ref: BodyRef) -> bytes:
@@ -902,6 +914,16 @@ class StoreReader:
         if len(data) != ref.size:
             raise TraceFormatError(f"blob {ref.sha256} holds {len(data)} bytes, not {ref.size}")
         return data
+
+    def _check_body(self, ref: BodyRef) -> bytes:
+        """`_get_body`'s checks without reading the blob: it exists, at the size its ref says."""
+        try:
+            size = self.layout.blob(ref.sha256).stat().st_size
+        except OSError as exc:
+            raise TraceFormatError(f"blob {ref.sha256} is missing: {exc}") from exc
+        if size != ref.size:
+            raise TraceFormatError(f"blob {ref.sha256} holds {size} bytes, not {ref.size}")
+        return b""
 
 
 def _lines(path: Path) -> Iterator[Any]:

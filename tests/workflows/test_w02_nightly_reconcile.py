@@ -63,6 +63,15 @@ def test_forty_mismatches_store_all_47_exchanges_and_drop_none(run_workflow):
     stored = [e for e in shadow.stored_events() if isinstance(e, Exchange)]
     assert len(stored) == len(shadow.exchange_lines()) == 47
     assert [r.dropped_events for r in shadow.stored().list_runs()] == [0, 0]
+    # `irimi runs list` counts them in the run that holds them, and its writes are the summary's
+    # `41 virtualized`: forty customer updates and the Slack post (#72).
+    code, out, err = shadow.runs("list")
+    assert (code, err) == (0, [])
+    assert sorted(line.split("  ", 6)[6] for line in out) == [
+        "0 exchanges  0 writes",
+        "47 exchanges  41 writes",
+    ]
+    assert "  47 exchanges · 6 live · 0 delegated · 41 virtualized" in shadow.summary()
 
 
 def test_a_datetime_trigger_is_only_logged_today(run_workflow):

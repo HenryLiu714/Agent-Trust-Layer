@@ -3,9 +3,12 @@
 Pure text: every function here returns lines and touches nothing. `cli` prints them.
 """
 
+import json
 import re
+import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import assert_never
 
 from irimi import netaddr
 from irimi.bodies import reflect
@@ -17,6 +20,8 @@ from irimi.exchange import (
     is_authored_write,
 )
 from irimi.servicemap import SELF_TARGET, MapIndex, Route, is_delegated, path_params
+from irimi.store import StoredRun
+from irimi.trace import Event, RunRecord, TelemetrySeen, ToolCall
 
 NOT_VIRTUALIZED_NOTICE = "hosts not routed through the proxy are NOT virtualized."
 BACKSTOP = "none (Phase 4)"
@@ -96,6 +101,12 @@ def exchange_line(exchange: Exchange) -> str:
         f"{exchange.answered_by:<9} {exchange.kind:<9} {exchange.request.method} "
         f"{exchange.request.host}{exchange.request.path} -> {status}{flags}"
     )
+
+
+def tool_call_line(call: ToolCall) -> str:
+    """One line per tool call the SDK reported (#76), in `exchange_line`'s columns (#72)."""
+    outcome = f"raised {call.error.type}" if call.error is not None else "ok"
+    return f"{call.ran:<9} {call.kind:<9} tool {call.name} -> {outcome}"
 
 
 # The kinds a shadow run answers instead of forwarding, so they are the writes the summary owes
@@ -298,26 +309,26 @@ def _host_line(host: str, rows: Sequence[Exchange], width: int) -> str:
     return f"  {host:<{width}}  {'  '.join(phrases)}".rstrip()
 
 
-def _host_lines(exchanges: Sequence[Exchange]) -> list[str]:
+def _host_lines(exchanges: Sequence[Exchange], telemetry: Sequence[str]) -> list[str]:
     """One line per host, plus one line for all telemetry hosts together.
 
     Telemetry gets a single line however many vendors it reached: a run posts to Datadog, Sentry
     and PostHog in the same breath and a line each would bury the two hosts the agent's work is
     actually on. It also says where they went, because they went there for real (#20).
+
+    `telemetry` is one host per telemetry exchange, and `exchanges` holds none: the store keeps a
+    telemetry exchange only as a `TelemetrySeen` with its host, so a host is all this line may
+    count if a stored run is to print it (#72).
     """
     by_host: dict[str, list[Exchange]] = {}
-    telemetry: list[Exchange] = []
     for ex in exchanges:
-        if ex.kind == "telemetry":
-            telemetry.append(ex)
-            continue
         by_host.setdefault(ex.request.host, []).append(ex)
     hosts = sorted(by_host)
     width = max((len(h) for h in hosts), default=0)
     width = max(width, len("telemetry")) if telemetry else width
     lines = [_host_line(host, by_host[host], width) for host in hosts]
     if telemetry:
-        vendors = len({ex.request.host for ex in telemetry})
+        vendors = len(set(telemetry))
         lines.append(
             f"  {'telemetry':<{width}}  {_plural(len(telemetry), 'exchange')} "
             f"to {_plural(vendors, 'host')}, forwarded live"
@@ -325,14 +336,25 @@ def _host_lines(exchanges: Sequence[Exchange]) -> list[str]:
     return lines
 
 
+def _route_of(exchange: Exchange, index: MapIndex | None) -> Route | None:
+    """The route a write was classified under, for its `human:` template.
+
+    Its path is matched, as the live classification matched it. A stored write on a
+    credential-path host has a redaction placeholder for a path, which matches no route, so the
+    route is then found by the `operation` the exchange recorded: a webhook post prints `post via
+    webhook: "..."` from the store as it did live (#72)."""
+    if index is None:
+        return None
+    request = exchange.request
+    matched = index.route_for(request.host, request.method, request.path)
+    if matched is not None:
+        return matched[1]
+    return index.route_named(request.host, request.method, exchange.operation)
+
+
 def _write_line(exchange: Exchange, index: MapIndex | None) -> str:
     """One intercepted write, as the map's own sentence plus what irimi did with it."""
-    matched = (
-        index.route_for(exchange.request.host, exchange.request.method, exchange.request.path)
-        if index is not None
-        else None
-    )
-    route = matched[1] if matched is not None else None
+    route = _route_of(exchange, index)
     if route is not None and route.human:
         what = render_human(route.human, exchange, route)
     else:
@@ -504,28 +526,60 @@ def summary_lines(
 ) -> list[str]:
     """The exit summary (#13): what ran, what was real, what irimi answered, and what that means.
 
-    Built from the exchanges the engine reported, never from the TraceStore: the store holds
-    redacted copies, written behind a queue that may drop one, and a telemetry exchange only as a
-    `TelemetrySeen` (#70). A summary from a stored run is #72's.
+    Built from the exchanges the engine reported. `stored_summary_lines` prints the same block from
+    a stored run, and both are `_summary`, so the two cannot drift (#72).
 
     `index` is the loaded maps, used only to find each write's `human:` template. Without it the
     writes still get a line, spelled as the request they were.
     """
+    telemetry = [ex.request.host for ex in exchanges if ex.kind == "telemetry"]
+    rest = [ex for ex in exchanges if ex.kind != "telemetry"]
+    return _summary(run_id, rest, telemetry, elapsed_s, index)
+
+
+def stored_summary_lines(run: StoredRun, index: MapIndex | None) -> list[str]:
+    """The exit summary of a stored run: the lines `summary_lines` printed live for it (#72).
+
+    A `TelemetrySeen` stands for a telemetry exchange, which is always forwarded live: the policy
+    never answers or delegates one. The elapsed seconds are the run's own, `ended_at - started_at`,
+    where the live summary timed the child; a run with no start or no end has `0.0`.
+
+    Where a stored line may still differ from the live one: redaction replaced a field a `human:`
+    template renders, the path of a request no route matched on a credential-path host, which the
+    write line spells out, or an event the store dropped (docs/trace-format.md, "Reading a run
+    back").
+    """
+    exchanges = [event for event in run.events if isinstance(event, Exchange)]
+    telemetry = [event.host for event in run.events if isinstance(event, TelemetrySeen)]
+    elapsed = run_elapsed(run.record)
+    return _summary(run.record.run_id, exchanges, telemetry, elapsed or 0.0, index)
+
+
+def _summary(
+    run_id: str,
+    exchanges: Sequence[Exchange],
+    telemetry: Sequence[str],
+    elapsed_s: float,
+    index: MapIndex | None,
+) -> list[str]:
+    """The one implementation of the summary. `exchanges` holds no telemetry; `telemetry` is one
+    host per telemetry exchange, each of them forwarded live (#72)."""
     paired = _writes_with_their_reads(exchanges)
     writes = [write for write, _ in paired]
+    total = len(exchanges) + len(telemetry)
     # An overlaid read was forwarded to the real service and answered by it; irimi edited the body
     # afterwards to show the run's own faked writes. This line's buckets are about WHO answered,
     # so it belongs with `live`: counting it as `virtualized` claimed irimi had answered a read
     # the agent really made (#43). That its body was edited is said in the per-host block above,
     # and which write it saw is said by its `↳` line under that write (#48).
-    live = sum(1 for ex in exchanges if ex.answered_by in ("live", "overlay"))
+    live = len(telemetry) + sum(1 for ex in exchanges if ex.answered_by in ("live", "overlay"))
     delegated = sum(1 for ex in exchanges if ex.answered_by == "delegated")
-    virtualized = len(exchanges) - live - delegated
+    virtualized = total - live - delegated
     lines = [
-        f"irimi shadow · run {run_id} · {_plural(len(exchanges), 'exchange')} · "
+        f"irimi shadow · run {run_id} · {_plural(total, 'exchange')} · "
         f"{elapsed_s:.1f}s · backstop: {BACKSTOP}"
     ]
-    host_lines = _host_lines(exchanges)
+    host_lines = _host_lines(exchanges, telemetry)
     if host_lines:
         lines += ["", *host_lines]
     write_lines: list[str] = []
@@ -541,8 +595,120 @@ def summary_lines(
     # two existed.
     lines += [
         "",
-        f"  {_plural(len(exchanges), 'exchange')} · {live} live · "
+        f"  {_plural(total, 'exchange')} · {live} live · "
         f"{delegated} delegated · {virtualized} virtualized",
     ]
     lines += _closing_lines(writes)
     return lines
+
+
+# ---------------------------------------------------------------------------------- stored runs
+
+# `irimi runs show`'s `args:` line: enough to recognise a trigger by, not a dump of it (#72).
+MAX_ARGS_SHOWN = 500
+NOT_SET = "-"
+# A C0 or C1 control character, DEL included. A stored run's text is the agent's own - an error
+# message is `str(exc)` - and printed raw, a newline breaks `runs show`'s one `key: value` per line
+# and an escape sequence is obeyed by the terminal reading it (#72).
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def _printable(text: str) -> str:
+    """`text` on one line, each control character spelled as its Python escape (`\\n`, `\\x1b`)."""
+    return _CONTROL.sub(lambda m: repr(m.group())[1:-1], text)
+
+
+def run_elapsed(record: RunRecord) -> float | None:
+    """How long a stored run took, or None for one with no start or no end. Never negative: the
+    wall clock can step back between the two, as `pipeline.annotate` knows for an exchange (#72)."""
+    if record.started_at is None or record.ended_at is None:
+        return None
+    return max(0.0, record.ended_at - record.started_at)
+
+
+def run_status(record: RunRecord) -> str:
+    """`ok` or `error` for a run that ended, and `incomplete` for one that has not, or never will:
+    a crashed irimi, or a run known only by its events (`attribution: "header"`) (#72)."""
+    return record.outcome if record.outcome is not None else "incomplete"
+
+
+def run_list_line(record: RunRecord, events: Sequence[Event] | None) -> str:
+    """One `irimi runs list` line (#72). `events` is None for a run whose events could not be
+    read, which then shows `?` for both counts rather than zero. Only each event's kind and how it
+    was answered are read, so a caller may pass events loaded without their bodies."""
+    started = NOT_SET
+    if record.started_at is not None:
+        started = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(record.started_at))
+    elapsed = run_elapsed(record)
+    duration = NOT_SET if elapsed is None else f"{elapsed:.1f}s"
+    trigger = _printable(record.trigger.name) if record.trigger is not None else NOT_SET
+    if events is None:
+        exchanges = writes = "?"
+    else:
+        # Telemetry counts, as it does in the summary's `N exchanges`; a tool call does not.
+        seen = [event for event in events if not isinstance(event, ToolCall)]
+        exchanges = str(len(seen))
+        writes = str(sum(1 for ev in seen if isinstance(ev, Exchange) and is_authored_write(ev)))
+    return "  ".join(
+        [
+            record.run_id,
+            started,
+            duration,
+            run_status(record),
+            record.attribution,
+            trigger,
+            f"{exchanges} exchanges",
+            f"{writes} writes",
+        ]
+    )
+
+
+def run_header_lines(record: RunRecord) -> list[str]:
+    """`irimi runs show`'s header block: one `key: value` per line (#72)."""
+    trigger = record.trigger
+    entrypoint = (trigger.entrypoint if trigger is not None else None) or NOT_SET
+    args = NOT_SET
+    if trigger is not None:
+        args = json.dumps(trigger.args, separators=(",", ":"), ensure_ascii=False)
+        if len(args) > MAX_ARGS_SHOWN:
+            args = args[:MAX_ARGS_SHOWN] + "…"
+    lines = [
+        f"run: {record.run_id}",
+        f"attribution: {record.attribution}",
+        f"trigger: {_printable(trigger.name) if trigger is not None else NOT_SET}",
+        f"entrypoint: {_printable(entrypoint)}",
+        f"args: {_printable(args)}",
+        f"agent version: {_printable(record.agent_version or NOT_SET)}",
+        f"outcome: {run_status(record)}",
+    ]
+    if record.error is not None:
+        lines.append(f"error: {_printable(record.error.type)}: {_printable(record.error.message)}")
+    if record.exit_code is not None:
+        lines.append(f"exit code: {record.exit_code}")
+    if record.dropped_events:
+        lines.append(f"dropped events: {record.dropped_events}")
+    return lines
+
+
+def event_line(event: Event) -> str:
+    """One stored event, as `irimi runs show` prints it: an exchange and a tool call in the
+    columns the terminal printed them in, and telemetry as the host it went to (#72)."""
+    match event:
+        case Exchange():
+            return exchange_line(event)
+        case ToolCall():
+            return tool_call_line(event)
+        case TelemetrySeen():
+            return f"telemetry {event.host}"
+        case _:
+            assert_never(event)
+
+
+def run_show_lines(run: StoredRun, index: MapIndex | None) -> list[str]:
+    """Everything `irimi runs show` prints: the header block, every event in `seq` order, and the
+    run's summary, a blank line between each (#72)."""
+    events = [event_line(event) for event in run.events]
+    lines = run_header_lines(run.record)
+    if events:
+        lines += ["", *events]
+    return [*lines, "", *stored_summary_lines(run, index)]

@@ -143,8 +143,69 @@ def test_the_first_event_of_a_run_with_no_start_creates_a_header_run(root, key):
     s.record(_exchange("r2"))
     s.close()
     record = StoreReader(root).load_run("r2").record
-    assert record == store.header_record("r2")
+    # Started when its first event did, so it sorts among the runs that have a start (#72).
+    assert record == store.header_record("r2", started_at=1.0)
     assert (record.attribution, record.trigger, record.outcome) == ("header", None, None)
+
+
+def test_a_header_run_started_by_an_event_with_no_clock_has_no_start(root, key):
+    s = DirectoryStore(root, key)
+    s.record(dataclasses.replace(_exchange("r2"), started_at=0.0, ended_at=0.0))
+    s.close()
+    assert StoreReader(root).load_run("r2").record == store.header_record("r2")
+
+
+def test_a_header_run_sorts_by_its_first_event_among_runs_that_started(root, key):
+    """A header run once had no start and sorted after every run that had one, so `irimi runs
+    list` hid an agent's labelled runs behind as many process runs as its limit (#72)."""
+    s = DirectoryStore(root, key)
+    for i in range(3):
+        s.start_run(_record(f"p{i}", started_at=10.0 + i))
+    s.record(dataclasses.replace(_exchange("labelled"), started_at=11.5, ended_at=11.6))
+    s.close()
+    assert [r.run_id for r in StoreReader(root).list_runs()] == ["p2", "labelled", "p1", "p0"]
+
+
+def test_load_run_without_bodies_reads_no_blob_and_still_finds_a_missing_one(
+    root, key, monkeypatch
+):
+    """`irimi runs list` counts events and reads no body (#72): `bodies=False` opens no blob, but a
+    missing or resized one is still damage."""
+    s = DirectoryStore(root, key)
+    s.start_run(_record("r1"))
+    s.record(_exchange("r1", answer=b"a body only a blob holds"))
+    s.close()
+    reader = StoreReader(root)
+    loaded = reader.load_run("r1").events[0]
+    assert isinstance(loaded, Exchange) and loaded.response is not None and loaded.response.body
+
+    real_read_bytes = Path.read_bytes
+
+    def no_blob_reads(path):
+        assert "blobs" not in path.parts, f"read a blob: {path}"
+        return real_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", no_blob_reads)
+    (bare,) = reader.load_run("r1", bodies=False).events
+    assert isinstance(bare, Exchange) and bare.response is not None
+    assert (bare.request.body, bare.response.body) == (b"", b"")
+    assert (
+        dataclasses.replace(
+            loaded,
+            request=dataclasses.replace(loaded.request, body=b""),
+            response=dataclasses.replace(loaded.response, body=b""),
+        )
+        == bare
+    )
+
+    monkeypatch.undo()
+    blob = next(p for p in (root / "blobs").rglob("*") if p.is_file())
+    blob.write_bytes(blob.read_bytes() + b"x")
+    with pytest.raises(TraceFormatError, match="bytes, not"):
+        reader.load_run("r1", bodies=False)
+    blob.unlink()
+    with pytest.raises(TraceFormatError, match="missing"):
+        reader.load_run("r1", bodies=False)
 
 
 def test_a_late_event_after_the_run_ended_is_still_appended(root, key):
@@ -980,9 +1041,16 @@ def test_list_runs_is_newest_first_with_unstarted_runs_last(root, key):
     s = DirectoryStore(root, key)
     s.start_run(_record("old", started_at=1.0))
     s.start_run(_record("new", started_at=2.0))
-    s.record(_exchange("headless"))
+    s.start_run(_record("unstarted", started_at=None))
+    # A header run whose first event had no clock has no start either (#72).
+    s.record(dataclasses.replace(_exchange("headless"), started_at=0.0, ended_at=0.0))
     s.close()
-    assert [r.run_id for r in StoreReader(root).list_runs()] == ["new", "old", "headless"]
+    assert [r.run_id for r in StoreReader(root).list_runs()] == [
+        "new",
+        "old",
+        "headless",
+        "unstarted",
+    ]
 
 
 def test_an_unknown_or_invalid_run_id_is_run_not_found(root, key):

@@ -31,8 +31,11 @@ the first column of each field table below is exactly the keys its encoder write
   valid, and on a case-insensitive filesystem (macOS APFS by default) they would be one directory.
   The first to reach the store keeps it, so two runs are never merged into one directory. An event
   whose run id is `unattributed` itself goes there unflagged.
-- The first event of a run id that has no `run.json` creates one, with `attribution: "header"` and
-  every optional field `null`.
+- The first event of a run id that has no `run.json` creates one, with `attribution: "header"`,
+  `started_at` that event's own, and every other optional field `null`. An event built with no
+  clock (`started_at` `0.0`) leaves it `null` too. With no start, a header run sorted after every
+  run that had one, and `irimi runs list` hid an agent's labelled runs behind its process runs
+  (#72).
 - `events.jsonl` is appended one whole line at a time, each in one `write` on an `O_APPEND`
   descriptor. Nothing is fsynced per line: the blobs and `events.jsonl` files a writer touched are
   fsynced once it has made 1000 writes (`store.SYNC_EVERY`) since the last sync, whenever its queue
@@ -160,7 +163,7 @@ An exchange's `started_at` and `ended_at` are `0.0` only on an exchange built wi
 | `agent_version` | string or `null` | The agent's own version, from `IRIMI_AGENT_VERSION`. |
 | `engine_version` | string | The irimi that recorded the run. |
 | `sdk_version` | string or `null` | The SDK that started the run. `null` for a run it did not start. |
-| `started_at` | number or `null` | When the run started. |
+| `started_at` | number or `null` | When the run started. For a `header` run, when the event that created it started. |
 | `ended_at` | number or `null` | When the run ended. |
 | `outcome` | `"ok"`, `"error"` or `null` | `null` means the run is incomplete: it never ended, or irimi stopped first. |
 | `error` | error or `null` | Why the run failed, when `outcome` is `"error"`. |
@@ -252,6 +255,39 @@ so `seq` is completion order. `started_at` recovers start order.
 
 A write that waits on its own precondition read shows both. In the example below, the refund
 starts first and finishes last, so its precondition read is `seq` 1 and the refund is `seq` 2.
+
+## Reading a run back
+
+`irimi runs list` prints one line per stored run, newest first, and `irimi runs show RUN_ID` prints
+one run: its record, every event in `seq` order, and its summary (#72). That summary is
+`report.stored_summary_lines`, the same code that prints the live one, fed the run's exchanges and
+one host per `TelemetrySeen`, each counted as forwarded live because telemetry always is. It equals
+the block `irimi shadow` printed on exit except in four places:
+
+- **The elapsed seconds.** The live summary times the child; a stored one is the run's
+  `ended_at - started_at`, never negative, or `0.0` when either is `null`.
+- **A field redaction replaced.** A write line's `human:` template renders the stored request, so
+  a field whose value was a secret prints as its placeholder.
+- **A write no route matched on a credential-path host.** Its line spells out the request, and
+  the stored path is a placeholder (`hooks.slack.com`'s webhook path, say). A write a route *did*
+  match there prints the map's sentence as it did live: its path matches no route once stored,
+  so the route is found by the `operation` the exchange recorded (`MapIndex.route_named`).
+- **An event the store dropped.** It is in the live summary and not in the stored one; the run's
+  `dropped_events` says how many, and `runs show` prints it. The unattributed events are not a
+  run and have no `run.json` to count their drops in.
+
+`runs show` prints a stored record's text with each control character escaped (`\n`, `\x1b`): an
+error is the agent's own `str(exc)`, and printed raw it could break a line or drive the terminal.
+`runs list` counts each run's exchanges and writes from its events loaded without their bodies
+(`StoreReader.load_run(run_id, bodies=False)`), which still checks every blob exists at its size.
+
+The live summary covers every exchange the proxy saw while the command ran, whatever run each one
+named; a stored run holds only its own events. The two are the same block when the agent sends no
+`Irimi-Run`, because then every exchange is in the process run. An agent that labels its runs
+leaves most of its exchanges in those runs, each its own line in `runs list`, and its process run
+holds only the requests that carried no label. All of a process's runs together, the unattributed
+events included and put back in the order they ended, print the block `irimi shadow` printed; the
+sample workflows hold every scenario to that (`tests/workflows/test_stored_runs.py`).
 
 ## Versioning
 

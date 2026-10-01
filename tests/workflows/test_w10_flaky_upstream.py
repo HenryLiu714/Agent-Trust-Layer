@@ -22,6 +22,22 @@ def retries(result):
     return [(r["label"], r["reason"]) for r in result.events("retry")]
 
 
+def listed_status(result) -> str:
+    """The process run's status column in `irimi runs list` (#72)."""
+    code, out, err = result.runs("list")
+    assert (code, err) == (0, [])
+    [line] = [line for line in out if line.startswith(result.process_run_id() + "  ")]
+    return line.split("  ")[3]
+
+
+def shown_outcome(result) -> list[str]:
+    """The process run's `outcome:` line in `irimi runs show`, and the header lines after it."""
+    code, out, err = result.runs("show", result.process_run_id())
+    assert (code, err) == (0, [])
+    start = out.index(next(line for line in out if line.startswith("outcome: ")))
+    return out[start : out.index("", start)]
+
+
 def test_a_rate_limited_read_fails_under_shadow_too_and_is_retried(run_workflow):
     for mode in ("bare", "shadow"):
         result = run_workflow(W, "rate_limited", mode)
@@ -172,6 +188,10 @@ def test_an_agent_that_raises_after_its_write_still_shows_the_write(run_workflow
     assert not any("error" in line.lower() or "exit" in line for line in summary)
     # The stored run does say so (#70); the summary above still does not.
     assert process_run(shadow) == ("error", 1, ErrorInfo("exit", "exited 1"))
+    # `irimi runs list` and `runs show` print it where the summary cannot (#72). The summary pin
+    # above stays: a stored run's summary is the live one, and the live one says nothing.
+    assert listed_status(shadow) == "error"
+    assert shown_outcome(shadow) == ["outcome: error", "error: exit: exited 1", "exit code: 1"]
 
 
 def test_an_agent_killed_after_its_write_leaves_a_run_with_no_end(run_workflow):
@@ -193,6 +213,8 @@ def test_an_agent_killed_after_its_write_leaves_a_run_with_no_end(run_workflow):
     assert not any(word in line.lower() for line in summary for word in ("143", "kill", "signal"))
     # The stored process run ends with the child's code, which is how the kill is visible (#70).
     assert process_run(shadow) == ("error", 143, ErrorInfo("exit", "exited 143"))
+    assert listed_status(shadow) == "error"
+    assert shown_outcome(shadow) == ["outcome: error", "error: exit: exited 143", "exit code: 143"]
     # The agent's own run is the `header` run its first call made, and it reads back whole,
     # the faked refund included, with no end: incomplete, as a killed run is (#70).
     reader = shadow.stored()

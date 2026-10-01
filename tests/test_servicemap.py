@@ -299,6 +299,21 @@ def test_index_lookups(tmp_path):
     assert found is not None and found[1].operation == "things.list"
 
 
+def test_a_route_is_found_by_its_operation_when_its_path_cannot_be_matched(tmp_path):
+    """A stored request on a credential-path host has a placeholder for a path, and its write line
+    finds the route by the operation it recorded instead (#72). Only one route may answer: two that
+    name the operation for this method are no answer, and so is a method the route does not take."""
+    index = load(tmp_path)
+    found = index.route_named("DEMO.EXAMPLE", "post", "things.create")
+    assert found is not None and found.path == "/v1/things"
+    assert index.route_named("demo.example", "GET", "things.create") is None
+    assert index.route_named("demo.example", "POST", "things.nope") is None
+    assert index.route_named("nope.example", "POST", "things.create") is None
+    twice = GOOD.replace("operation: things.retrieve", "operation: things.list")
+    (tmp_path / "twice").mkdir()
+    assert load(tmp_path / "twice", twice).route_named("demo.example", "GET", "things.list") is None
+
+
 def test_empty_index_is_usable():
     assert MapIndex().hosts == frozenset()
     assert MapIndex().service_for("anything") is None

@@ -9,6 +9,7 @@ half-written line; and a bare run, with no irimi, stores nothing.
 """
 
 import dataclasses
+import re
 import stat
 import sys
 
@@ -17,6 +18,7 @@ import pytest
 from examples.workflows.harness.run import CANARIES, Result, workflows
 from irimi import paths, redact, report, trace
 from irimi.exchange import Exchange
+from irimi.store import StoredRun
 from irimi.trace import TelemetrySeen
 
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
@@ -141,7 +143,8 @@ def test_every_run_but_the_process_run_is_a_header_run_its_first_event_made(
 ):
     """Until #74 lands, a run the SDK stand-in labels with `Irimi-Run` is known to irimi only by
     its events: its record is the one the first of them created, `attribution: "header"`, with no
-    trigger, no start and no end (#70), and it holds at least that event."""
+    trigger and no end (#70), and it holds at least that event. It started when that event did, so
+    `irimi runs list` sorts it among the runs that started rather than after all of them (#72)."""
     shadow = run_workflow(name, scenario, "shadow")
     if not started(shadow):
         return
@@ -150,9 +153,11 @@ def test_every_run_but_the_process_run_is_a_header_run_its_first_event_made(
         if record.attribution == "process":
             continue
         assert record.attribution == "header"
-        assert (record.trigger, record.started_at, record.ended_at) == (None, None, None)
+        assert (record.trigger, record.ended_at) == (None, None)
         assert (record.outcome, record.exit_code, record.error) == (None, None, None)
-        assert reader.load_run(record.run_id).events != []
+        events = reader.load_run(record.run_id).events
+        assert events != []
+        assert record.started_at == events[0].started_at > 0
 
 
 @pytest.mark.parametrize(("name", "scenario"), CASES, ids=IDS)
@@ -163,3 +168,66 @@ def test_a_bare_run_stores_nothing(run_workflow, name, scenario):
     assert bare.handed == bare.reported == []
     assert not (bare.home / paths.STORE_DIR_NAME).exists()
     assert not (bare.home / paths.REDACT_KEY_NAME).exists()
+
+
+# The workflows whose every exchange lands in the process run: plain scripts that send no
+# `Irimi-Run`, so the process run's stored summary is the one `irimi shadow` printed (#72).
+UNLABELLED = ("w09_scope_gauntlet", "w11_leaky_agent")
+UNLABELLED_CASES = [(n, s) for n, s in CASES if n in UNLABELLED]
+ELAPSED = re.compile(r" · \d+\.\ds · ")
+
+
+def no_elapsed(lines: list[str]) -> list[str]:
+    """The live summary times the child and a stored one its run record: the one field that may
+    differ (#72)."""
+    return [ELAPSED.sub(" · <elapsed> · ", line) for line in lines]
+
+
+@pytest.mark.parametrize(
+    ("name", "scenario"), UNLABELLED_CASES, ids=[f"{n}:{s}" for n, s in UNLABELLED_CASES]
+)
+def test_an_unlabelled_agent_s_process_run_prints_the_summary_irimi_shadow_printed(
+    run_workflow, name, scenario
+):
+    """#72's invariant on the corpus, through the real CLI: `irimi runs show <process run>` ends in
+    the block `irimi shadow` printed on exit, line for line but for the elapsed seconds. W9 covers
+    L0 and L1 fakes, idempotent replays and conflicts, unreadable bodies and an engine read with no
+    response; W11 a `0 exchanges` run whose every write escaped.
+
+    For an agent that labels its runs the live summary is still the process's, every exchange the
+    proxy saw whatever run it named, while each stored run holds its own: the two agree only
+    here, where the process run is the only run (docs/trace-format.md, "Reading a run back")."""
+    shadow = run_workflow(name, scenario, "shadow")
+    live = shadow.summary()
+    assert live, "irimi printed no summary"
+    assert [r.attribution for r in shadow.stored().list_runs()] == ["process"]
+    code, out, err = shadow.runs("show", shadow.process_run_id())
+    assert (code, err) == (0, [])
+    assert no_elapsed(out[-len(live) :]) == no_elapsed(live)
+
+
+@pytest.mark.parametrize(("name", "scenario"), CASES, ids=IDS)
+def test_every_run_the_process_stored_prints_the_summary_irimi_shadow_printed(
+    run_workflow, name, scenario
+):
+    """#72's invariant for an agent that labels its runs. The live summary is the process's: every
+    exchange the proxy saw, whatever run each named. Its runs together hold the same events, so a
+    summary over all of them, the unattributed ones included, is the block `irimi shadow` printed,
+    line for line but for the elapsed seconds.
+
+    The events are put back in the order the engine reported them, the order they ended in, since
+    a read hangs under the write before it. W4's webhook post is the case this caught: its stored
+    path is a placeholder that no route matches, and its line lost its `human:` sentence until the
+    route was found by its stored operation instead."""
+    shadow = run_workflow(name, scenario, "shadow")
+    live = shadow.summary()
+    if not live:
+        return
+    reader = shadow.stored()
+    ids = [record.run_id for record in reader.list_runs()] + [trace.UNATTRIBUTED]
+    events = [event for run_id in ids for event in reader.load_run(run_id).events]
+    exchanges = sorted((e for e in events if isinstance(e, Exchange)), key=lambda e: e.ended_at)
+    telemetry = [e for e in events if isinstance(e, TelemetrySeen)]
+    process = reader.load_run(shadow.process_run_id()).record
+    union = StoredRun(process, [*exchanges, *telemetry])
+    assert no_elapsed(report.stored_summary_lines(union, shadow.maps())) == no_elapsed(live)

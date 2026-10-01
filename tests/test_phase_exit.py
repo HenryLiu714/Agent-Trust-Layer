@@ -438,20 +438,24 @@ call("POST", "/v1/refunds", refund)
 """
 
 
-def _run_phase2_under_shadow(tmp_path, monkeypatch, *flags: str) -> None:
+def _run_phase2_under_shadow(
+    tmp_path, monkeypatch, *flags: str, stripe_map: str = PRECONDITION_STRIPE_MAP, calls: str = ""
+) -> None:
     """The refund agent's five calls from a child of the real `irimi shadow`, against the loopback
-    Stripe, which never hears a write. `flags` go before the `--`. Shared with
-    `tests/test_trace_e2e.py`, which reads back what the run stored (#68, #70)."""
+    Stripe, which never hears a write. `flags` go before the `--`, and `calls` are more of the
+    child's own `call(...)` lines after the five. Shared with `tests/test_trace_e2e.py` and
+    `tests/test_runs.py`, which read back what the run stored (#68, #70, #72)."""
     _PreconditionStub.seen = []
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _PreconditionStub)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     maps_dir = tmp_path / "shipped"
     maps_dir.mkdir()
-    (maps_dir / "stripe.yaml").write_text(PRECONDITION_STRIPE_MAP)
+    (maps_dir / "stripe.yaml").write_text(stripe_map)
     monkeypatch.setattr("irimi.servicemap.loader.shipped_dir", lambda: maps_dir)
     child = tmp_path / "child.py"
     child.write_text(
-        PHASE2_CHILD.replace("__STUB_PORT__", str(srv.server_address[1]))
+        (PHASE2_CHILD + calls)
+        .replace("__STUB_PORT__", str(srv.server_address[1]))
         .replace("__CHARGE__", PHASE2_CHARGE)
         .replace("__AMOUNT__", str(PHASE2_AMOUNT))
     )

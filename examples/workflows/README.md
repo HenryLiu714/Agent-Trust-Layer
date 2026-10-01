@@ -23,7 +23,7 @@ uv run pytest -q tests/workflows                                     # the whole
 | W6 | `w06_crm_db_agent` | CLI | tools the proxy cannot see (#76, #83): database and file writes, stand-ins, decoration-time errors |
 | W7 | `w07_streaming_assistant` | streaming HTTP endpoint | SSE through the proxy, recorded chunk by chunk (#71): two streams at once, chunks that end mid-line and mid-secret; a caller that disconnects, an upstream reset mid-stream and before the stream opens, a LangSmith trace stored only as having happened (#70) |
 | W8 | `w08_orchestrator` | nested triggers + an internal service | nested runs, unmapped internal hosts, `Irimi-Run` across a hop (#67) |
-| W9 | `w09_scope_gauntlet` | none (plain script) | THE SCOPE RULE, the L0 floor, idempotency (#46), odd bodies, reads past the body limit, forged irimi headers, the reverse door |
+| W9 | `w09_scope_gauntlet` | none (plain script) | THE SCOPE RULE, the L0 floor, idempotency (#46), odd bodies, reads past the body limit, forged irimi headers, the reverse door, the control endpoint (#73) |
 | W10 | `w10_flaky_upstream` | CLI | retries, timeouts, resets on a read and a write, irimi's own L3 read failing, a run that raises or is killed after a write |
 | W11 | `w11_leaky_agent` | CLI | what irimi cannot see: clients that ignore the proxy, loopback services (Phase 4 readiness) |
 
@@ -92,6 +92,12 @@ W9 and W11, which send no `Irimi-Run`, `irimi runs show <process run>` ends in t
 `irimi shadow` printed, but for the elapsed seconds; for every workflow, the summary over all of
 a process's stored runs together is that block (#72).
 
+`tests/workflows/test_control_endpoint.py` holds every scenario to the control endpoint's two
+promises (#73): no exchange line names `/_irimi/`, and `IRIMI_CONTROL` reaches every agent under
+shadow, naming the listener its proxy does, and no bare agent. `agentkit.start()` logs both
+variables, which is what that check reads. W9's `self_addressed` is the scenario that calls the
+endpoint, at each of its three spellings of the listener.
+
 A new workflow package is found by its name, `wNN_<name>`, and is held to all five rules without
 any registry edit. A last test checks that the corpus gives rules 1 to 4 something to catch: a rule
 that nothing could break passes by default. Rule 5 compares two real exits in every scenario.
@@ -100,7 +106,8 @@ that nothing could break passes by default. Rule 5 compares two real exits in ev
 
 1. Create `examples/workflows/wNN_<name>/` with `__init__.py`, `agent.py` and `scenarios.py`
    (defining `WORKFLOW`). Copy W9 for the shape.
-2. In `agent.py`, call `agentkit.start()` first, label each call a test keys on (`label=`), and
+2. In `agent.py`, call `agentkit.start()` first (it logs the proxy and `IRIMI_CONTROL` the agent
+   was given), label each call a test keys on (`label=`), and
    log a final `result`. A call made with another client logs itself with `agentkit.obs_http()`.
 3. Add `tests/workflows/test_wNN_<name>.py`, pinning what irimi actually does in each scenario. A
    behaviour that looks wrong is pinned under a `LOOKS WRONG:` comment (naming its issue once one

@@ -180,7 +180,7 @@ def test_every_spelling_of_the_proxys_own_address_is_the_reverse_door(run_workfl
     proxy to itself) all name irimi's listener, so each refund is taken through the reverse door
     and faked. Missing a spelling would forward the request to the proxy itself, or past it."""
     shadow = run_workflow(W, "self_addressed", "shadow")
-    assert shadow.by_label() == {
+    assert {k: v for k, v in shadow.by_label().items() if k.startswith("door_")} == {
         "door_127.0.0.1": (200, "fake-L1"),
         "door_127.1": (200, "fake-L1"),
         "door_0.0.0.0": (200, "fake-L1"),
@@ -195,6 +195,28 @@ def test_every_spelling_of_the_proxys_own_address_is_the_reverse_door(run_workfl
     refunds = [line for line in shadow.summary() if "○" in line]
     assert refunds == ["  ○ refund 600 on ch_GAUNTLET  unvalidated (L2)"] * 3
     assert engine_reads(shadow) == [(None, ())] * 3  # stored as `big_reads` stores its one (#70)
+
+
+def test_the_control_endpoint_answers_at_every_spelling_and_is_never_an_exchange(run_workflow):
+    """The same three spellings reach irimi's control endpoint (#73), direct and through the proxy
+    to itself: health answers 200 and a path no route names 404, both stamped `control`. Neither
+    is forwarded, decided or recorded, so the exchange lines above are the refunds' alone."""
+    shadow = run_workflow(W, "self_addressed", "shadow")
+    spellings = ("127.0.0.1", "127.1", "0.0.0.0")
+    assert {k: v for k, v in shadow.by_label().items() if not k.startswith("door_")} == {
+        **{f"health_{s}": (200, "control") for s in spellings},
+        **{f"nope_{s}": (404, "control") for s in spellings},
+    }
+    assert not [line for line in shadow.exchange_lines() if "/_irimi/" in line]
+    assert shadow.internet.requests() == []
+    # Bare, there is no irimi: the same calls reach the fake internet's port, which serves no such
+    # host, and the agent carries on to the same exit code.
+    bare = run_workflow(W, "self_addressed", "bare")
+    assert {k: v for k, v in bare.by_label().items() if not k.startswith("door_")} == {
+        **{f"health_{s}": (502, None) for s in spellings},
+        **{f"nope_{s}": (502, None) for s in spellings},
+    }
+    assert bare.exit_code == shadow.exit_code == 0
 
 
 def test_an_unmapped_hosts_posts_are_faked_even_when_they_are_reads(run_workflow):

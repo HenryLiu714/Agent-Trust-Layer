@@ -130,18 +130,24 @@ def headers() -> None:
 def self_addressed() -> None:
     """A refund sent to the proxy's own address, under three spellings of this machine: the
     reverse door (`/<host>/<path>`). Whatever the spelling, it must be recognised as addressed to
-    irimi, and never forwarded to itself or anywhere else."""
+    irimi, and never forwarded to itself or anywhere else.
+
+    At each spelling it also calls the control endpoint (#73): its health check, and a path under
+    `/_irimi/` that names no route. Both are answered by irimi and are never an exchange."""
     proxy = urlsplit(os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy") or "")
     auth = {"Authorization": f"Bearer {agentkit.key('STRIPE_API_KEY')}"}
     stripe_authority = urlsplit(base("stripe")).netloc
     for spelling in ("127.0.0.1", "127.1", "0.0.0.0"):
+        listener = f"http://{spelling}:{proxy.port}"
         http(
             "POST",
-            f"http://{spelling}:{proxy.port}/{stripe_authority}/v1/refunds",
+            f"{listener}/{stripe_authority}/v1/refunds",
             form={"charge": CHARGE, "amount": "600"},
             headers=auth,
             label=f"door_{spelling}",
         )
+        http("GET", f"{listener}/_irimi/health", label=f"health_{spelling}")
+        http("GET", f"{listener}/_irimi/nope", label=f"nope_{spelling}")
 
 
 def unmapped_hosts() -> None:

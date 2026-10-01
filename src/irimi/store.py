@@ -113,6 +113,16 @@ RUN_FILE = "run.json"
 EVENTS_FILE = "events.jsonl"
 
 
+@dataclass(frozen=True)
+class StoreStats:
+    """What `TraceStore.stats()` reports; the control endpoint's `GET /_irimi/health` answers
+    with it (#73)."""
+
+    queued: int  # items waiting for the writer
+    written: int  # event lines written
+    dropped: int  # events dropped, for any reason, since the store was built
+
+
 class TraceStore(Protocol):
     """Where a run's record, exchanges and tool calls go. No method may raise (see module doc)."""
 
@@ -130,6 +140,8 @@ class TraceStore(Protocol):
         error: ErrorInfo | None = None,
         exit_code: int | None = None,
     ) -> None: ...
+
+    def stats(self) -> StoreStats: ...
 
     def close(self) -> None: ...
 
@@ -156,17 +168,11 @@ class NullStore:
     ) -> None:
         return None
 
+    def stats(self) -> StoreStats:
+        return StoreStats(queued=0, written=0, dropped=0)
+
     def close(self) -> None:
         return None
-
-
-@dataclass(frozen=True)
-class StoreStats:
-    """What `DirectoryStore.stats()` reports; P3-07 (#73)'s health endpoint reads it."""
-
-    queued: int  # items waiting for the writer
-    written: int  # event lines written
-    dropped: int  # events dropped, for any reason, since the store was built
 
 
 def header_record(run_id: str, started_at: float | None = None) -> RunRecord:
@@ -377,7 +383,7 @@ class DirectoryStore:
         # A run id that can name no directory is counted under `unattributed`, which has no
         # run.json to write it to: a stream of distinct bad ids must not grow the counter, and one
         # that is not even a string must not raise here, in the writer's own error path (#70).
-        key = run_id if _names_a_run_dir(run_id) else UNATTRIBUTED
+        key = run_id if names_a_run_dir(run_id) else UNATTRIBUTED
         with self._lock:
             self._dropped += 1
             self._run_drops[key] += 1
@@ -475,7 +481,7 @@ class DirectoryStore:
         """The writer's state for a run directory a start or an end may write. Raises ValueError -
         a drop - for an id that names no directory, before anything is opened for it, so neither
         creates one, `unattributed/` included (#70)."""
-        if not _names_a_run_dir(run_id):
+        if not names_a_run_dir(run_id):
             raise ValueError("this run id names no run directory")
         run = self._run(run_id)
         if run.dir is None or not run.writable:
@@ -568,7 +574,7 @@ class DirectoryStore:
             # A line holding it would be one no reader decodes, damaging `unattributed/` for good
             # (#70).
             raise TypeError("a run id is a string")
-        if not _names_a_run_dir(run_id):
+        if not names_a_run_dir(run_id):
             # Not remembered under its own id: a stream of distinct bad ids must not grow the map.
             return self._unattributed()
         known = self._runs.get(run_id)
@@ -737,10 +743,13 @@ def _mkdirs(path: Path) -> None:
             pass  # another process made it first
 
 
-def _names_a_run_dir(run_id: object) -> bool:
+def names_a_run_dir(run_id: object) -> bool:
     """True when `run_id` may be a directory under `runs/`: `trace.is_valid_run_id`, the
     path-traversal guard, checked again rather than trusted (#68), and not `unattributed`, which is
-    the name of "no run". Anything else is stored in `unattributed/` and never opens a path."""
+    the name of "no run". Anything else is stored in `unattributed/` and never opens a path.
+
+    Public because the control endpoint refuses, with a 400, the run ids this store would only
+    count as a drop: the agent is told, rather than its run silently going missing (#73)."""
     return isinstance(run_id, str) and run_id != UNATTRIBUTED and trace.is_valid_run_id(run_id)
 
 

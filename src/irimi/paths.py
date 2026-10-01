@@ -6,6 +6,14 @@ CA_KEY_NAME = "ca.key"
 CA_CERT_NAME = "ca.pem"
 REDACT_KEY_NAME = "redact.key"  # the redaction HMAC key (0600), created on first use (#69)
 
+# What `irimi shadow` tells its child (`runner.child_env`), declared here, in layer 0, so the SDK
+# can import the names it reads (#73). `IRIMI_ENGINE_ACTIVE=1` says a proxy is in front of the
+# process, `IRIMI_RUN` names the process run (#70), and `IRIMI_CONTROL` is the base URL of the
+# control endpoint, `http://<host>:<port>/_irimi`, where the SDK reports what the wire cannot show.
+ENGINE_ACTIVE_ENV = "IRIMI_ENGINE_ACTIVE"
+RUN_ENV = "IRIMI_RUN"
+CONTROL_ENV = "IRIMI_CONTROL"
+
 
 def irimi_home() -> Path:
     """Root directory for irimi state. $IRIMI_HOME if set, else ~/.irimi."""

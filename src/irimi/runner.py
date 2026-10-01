@@ -11,13 +11,15 @@ from pathlib import Path
 
 from irimi import __version__
 from irimi.engine import Engine, EngineStartError
+from irimi.exchange import CONTROL_PREFIX
+from irimi.paths import CONTROL_ENV, ENGINE_ACTIVE_ENV, RUN_ENV
 from irimi.store import TraceStore
 from irimi.trace import SCHEMA_VERSION, ErrorInfo, JSONValue, RunRecord, Trigger
 
-# Exactly the variables issue #3 specifies. Nothing is added to this list without a new issue.
+# The variables issue #3 specifies, plus `IRIMI_CONTROL` from #73. Nothing is added to this list
+# without a new issue. The `IRIMI_*` names are declared in `paths`, where the SDK can import them,
+# and imported above, so `runner.RUN_ENV` still names them.
 NO_PROXY_VALUE = "localhost,127.0.0.1"
-ENGINE_ACTIVE_ENV = "IRIMI_ENGINE_ACTIVE"
-RUN_ENV = "IRIMI_RUN"
 # The agent's own version, if its deployment names one; the process run records it (#70).
 AGENT_VERSION_ENV = "IRIMI_AGENT_VERSION"
 
@@ -52,6 +54,9 @@ def child_env(
             "NODE_USE_ENV_PROXY": "1",
             ENGINE_ACTIVE_ENV: "1",
             RUN_ENV: run_id,
+            # The control endpoint on this same listener (#73), with no trailing slash, so the
+            # SDK appends `/runs/<id>/start` and friends.
+            CONTROL_ENV: proxy + CONTROL_PREFIX.rstrip("/"),
         }
     )
     return env

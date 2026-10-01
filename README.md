@@ -190,6 +190,8 @@ The SDK posts a run's start, its end and the tool calls the proxy cannot see the
 (`POST /_irimi/runs/<run_id>/start`, `/tool-calls`, `/end`), and `GET /_irimi/health` reports the
 engine's version and the trace store's counters. Every answer carries
 `Irimi-Answered-By: control`, and a control request is never forwarded or recorded as an exchange.
+The process run (`IRIMI_RUN`) is irimi's: the SDK may post tool calls to it, but a start or an end
+for it is refused.
 
 The CA variables replace the child's trust store rather than adding to it. A TLS connection that
 skips the proxy (anything on `localhost` or `127.0.0.1`) will fail to verify; point such a client at
@@ -439,6 +441,7 @@ Where each feature is exercised end to end:
 | Upstream failures: 429, 500, timeouts, resets, a failed L3 read, a killed run | W10 `w10_flaky_upstream` |
 | What irimi cannot see: clients that bypass the proxy, loopback services | W11 `w11_leaky_agent` |
 | Runs under concurrency, tool calls the proxy cannot see | W3, W6 `w06_crm_db_agent` (through a stand-in, below) |
+| The control endpoint: runs started, given tool calls and ended over `/_irimi/`, health, every refusal | W9 `w09_scope_gauntlet`; every workflow (`tests/workflows/test_control_endpoint.py`) |
 
 Answer targets, overrides, the telemetry maps beyond W7's one LangSmith trace, and the CLI's own
 flags are not in the corpus; they are covered by the engine and CLI tests in `tests/`. Every new

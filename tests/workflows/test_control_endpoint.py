@@ -11,7 +11,8 @@ from examples.workflows.harness.run import workflows
 from irimi.exchange import CONTROL_PREFIX, Exchange
 
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
-# The scenarios whose shadow run starts no agent: irimi refused to start (W8 `map_refused`).
+# The scenarios whose shadow run starts no agent: irimi refused to start (W8 `map_refused`). Every
+# other one starts its agent as often as the bare run does, so a lost agent fails (#73).
 NO_AGENT_UNDER_SHADOW = {("w08_orchestrator", "map_refused")}
 
 

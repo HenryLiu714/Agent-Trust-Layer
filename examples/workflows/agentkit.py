@@ -42,6 +42,8 @@ WATCHDOG_S = 90
 # Where `irimi shadow` tells its child the control endpoint is (`irimi.paths.CONTROL_ENV`, #73),
 # spelled here because an agent is an ordinary program that does not import irimi.
 CONTROL_ENV = "IRIMI_CONTROL"
+# The process run's id (`irimi.paths.RUN_ENV`), spelled here for the same reason (#73).
+RUN_ENV = "IRIMI_RUN"
 
 _obs_lock = threading.Lock()
 
@@ -54,9 +56,15 @@ def start() -> None:
         signal.alarm(WATCHDOG_S)
     obs(
         "start",
-        proxy=os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy"),
+        proxy=proxy(),
         control=os.environ.get(CONTROL_ENV),
     )
+
+
+def proxy() -> str | None:
+    """The HTTP proxy the agent was given, as urllib reads it: `irimi shadow`'s listener, the fake
+    internet in a bare run, or None."""
+    return os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
 
 
 def obs(event: str, **data: Any) -> None:

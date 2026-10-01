@@ -142,7 +142,7 @@ def self_addressed() -> None:
 
     At each spelling it also calls the control endpoint (#73): its health check, and a path under
     `/_irimi/` that names no route. Both are answered by irimi and are never an exchange."""
-    proxy = urlsplit(os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy") or "")
+    proxy = urlsplit(agentkit.proxy() or "")
     auth = {"Authorization": f"Bearer {agentkit.key('STRIPE_API_KEY')}"}
     stripe_authority = urlsplit(base("stripe")).netloc
     for spelling in ("127.0.0.1", "127.1", "0.0.0.0"):
@@ -241,7 +241,7 @@ def control_hazards() -> None:
     _end(control, "ctl-restarted", "restarted_end")
     _start(control, "ctl-restarted", "restarted_again", name="ctl-restarted again")
     # Bare, there is no process run; the calls are made to the same URL shape all the same.
-    process_run = os.environ.get("IRIMI_RUN") or "no-process-run"
+    process_run = os.environ.get(agentkit.RUN_ENV) or "no-process-run"
     agentkit.obs("process_run", id=process_run)
     for label, resp in [
         ("process_start", _start(control, process_run, "process_start", name="takeover")),
@@ -259,9 +259,8 @@ def _control_base() -> str:
     the same URL shape at its proxy's address, which is the fake internet: every call is made in
     both modes and the agent exits the same way."""
     given = os.environ.get(agentkit.CONTROL_ENV)
-    proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy") or ""
     agentkit.obs("control_base", given=given is not None)
-    return given or proxy.rstrip("/") + "/_irimi"
+    return given or (agentkit.proxy() or "").rstrip("/") + "/_irimi"
 
 
 def _through_proxy(control: str) -> str:
@@ -407,6 +406,8 @@ def _settle(control: str) -> None:
         if doc["store"]["queued"] == 0:
             return
         time.sleep(0.01)
+    # Logged, so a slow writer reads as itself rather than as a health pin's wrong count (#73).
+    agentkit.obs("settle_timeout")
 
 
 def unmapped_hosts() -> None:
@@ -432,7 +433,7 @@ def get_that_writes() -> None:
 
 def _chunked_post(url: str, pieces: list[bytes], headers: dict[str, str]) -> None:
     """A chunked request body, which urllib cannot send: http.client, through the proxy by hand."""
-    proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+    proxy = agentkit.proxy()
     assert proxy, "the gauntlet always runs behind a proxy"
     p = urlsplit(proxy)
     conn = HTTPConnection(p.hostname or "127.0.0.1", p.port, timeout=agentkit.timeout())

@@ -386,8 +386,8 @@ def test_a_run_posted_over_the_control_endpoint_is_stored_as_an_sdk_run(run_work
         assert after == stored_tool_call(shadow, run_id, f"{tag}_tool_2")
         assert isinstance(read, Exchange)
         assert (read.run_id, report.exchange_line(read)) == (run_id, read_line(path))
-        # In time as well as in `seq`: the run's start, its first tool call, the read, its second
-        # tool call and its end, each clock read after the last.
+        # In time as well as in `seq` (#73): the run's start, its first tool call, the read, its
+        # second tool call and its end, each clock read after the last.
         times = [stored.record.started_at, before.ended_at, read.started_at, read.ended_at]
         times += [after.started_at, stored.record.ended_at]
         assert times == sorted(times)
@@ -523,6 +523,10 @@ def test_a_run_ended_over_the_control_endpoint_no_longer_lists_as_incomplete(run
 def test_a_start_re_posted_after_its_end_reopens_the_run(run_workflow):
     """The SDK must never re-post a start. Made anyway, it is accepted with a 204."""
     shadow = run_workflow(W, "control_hazards", "shadow")
+    # LOOKS WRONG (#97): the second start is accepted, and replaces the ended run's record
+    # whole, so its end, its outcome and its first trigger are gone and the run lists as
+    # `incomplete` again, though its read is kept. A start for a run that has already ended could
+    # be refused instead, as a start for the process run is.
     assert shadow.by_label() == {
         "restarted_start": (204, "control"),
         "restarted_read": (200, None),
@@ -533,10 +537,6 @@ def test_a_start_re_posted_after_its_end_reopens_the_run(run_workflow):
         "process_end": (400, "control"),
     }
     stored = shadow.stored().load_run("ctl-restarted")
-    # LOOKS WRONG: the second start replaces the ended run's record whole, so its end, its outcome
-    # and its first trigger are gone and the run lists as `incomplete` again, though its read is
-    # kept. A start for a run that has already started could be refused instead, as a start for
-    # the process run is.
     assert stored.record == sdk_record(shadow, "ctl-restarted", "restarted_again", None)
     assert [report.event_line(e) for e in stored.events] == [read_line(f"/v1/charges/{CHARGE}")]
     [line] = [f for f in listed(shadow) if f[0] == "ctl-restarted"]
@@ -552,7 +552,7 @@ def test_the_process_runs_start_and_end_are_irimis_and_only_its_tool_calls_are_t
     shadow = run_workflow(W, "control_hazards", "shadow")
     process = shadow.process_run_id()
     assert [e["id"] for e in shadow.events("process_run")] == [process]
-    refused = {"error": f"{process!r} is the process run, which irimi starts and ends"}
+    refused = {"error": f"{process!r} is irimi's own run, which the SDK may not start or end"}
     assert {e["label"]: e["body"] for e in shadow.events("answer")} == {
         "process_start": refused,
         "process_tool": None,

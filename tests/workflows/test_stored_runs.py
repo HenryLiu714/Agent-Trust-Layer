@@ -18,6 +18,7 @@ import pytest
 from examples.workflows.harness.run import CANARIES, Result, workflows
 from irimi import paths, redact, report, trace
 from irimi.exchange import Exchange
+from irimi.store import StoredRun
 from irimi.trace import TelemetrySeen
 
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
@@ -204,3 +205,29 @@ def test_an_unlabelled_agent_s_process_run_prints_the_summary_irimi_shadow_print
     assert (code, err) == (0, [])
     assert no_elapsed(out[-len(live) :]) == no_elapsed(live)
 
+
+@pytest.mark.parametrize(("name", "scenario"), CASES, ids=IDS)
+def test_every_run_the_process_stored_prints_the_summary_irimi_shadow_printed(
+    run_workflow, name, scenario
+):
+    """#72's invariant for an agent that labels its runs. The live summary is the process's: every
+    exchange the proxy saw, whatever run each named. Its runs together hold the same events, so a
+    summary over all of them, the unattributed ones included, is the block `irimi shadow` printed,
+    line for line but for the elapsed seconds.
+
+    The events are put back in the order the engine reported them, the order they ended in, since
+    a read hangs under the write before it. W4's webhook post is the case this caught: its stored
+    path is a placeholder that no route matches, and its line lost its `human:` sentence until the
+    route was found by its stored operation instead."""
+    shadow = run_workflow(name, scenario, "shadow")
+    live = shadow.summary()
+    if not live:
+        return
+    reader = shadow.stored()
+    ids = [record.run_id for record in reader.list_runs()] + [trace.UNATTRIBUTED]
+    events = [event for run_id in ids for event in reader.load_run(run_id).events]
+    exchanges = sorted((e for e in events if isinstance(e, Exchange)), key=lambda e: e.ended_at)
+    telemetry = [e for e in events if isinstance(e, TelemetrySeen)]
+    process = reader.load_run(shadow.process_run_id()).record
+    union = StoredRun(process, [*exchanges, *telemetry])
+    assert no_elapsed(report.stored_summary_lines(union, shadow.maps())) == no_elapsed(live)

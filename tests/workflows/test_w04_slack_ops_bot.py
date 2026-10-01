@@ -79,6 +79,22 @@ def test_the_incoming_webhooks_secret_path_is_printed_until_87_lands(run_workflo
     assert (hook.request.path, hook.answered_by) == ("/" + placeholder, "fake-L0")
 
 
+def test_runs_show_prints_the_webhook_post_as_the_maps_sentence_from_its_stored_run(run_workflow):
+    """The stored webhook path is a placeholder no route matches, so `irimi runs show` found the
+    route by the operation the exchange recorded (#72). Its event line spells the placeholder, as
+    stored, and its summary line is the map's sentence, as `irimi shadow` printed it."""
+    shadow = run_workflow(W, "mention_in_thread", "shadow")
+    (run_id,) = [r.run_id for r in shadow.stored().list_runs() if r.attribution == "header"]
+    code, out, err = shadow.runs("show", run_id)
+    assert (code, err) == (0, [])
+    placeholder = redact.placeholder(redact.load_key(shadow.home), WEBHOOK_PATH)
+    assert f"fake-L0   write     POST hooks.slack.com/{placeholder} -> 200  [fidelity:L0]" in out
+    sentence = '  ○ post via webhook: "ops bot answered alice"  unvalidated (L0)'
+    assert sentence in shadow.summary()
+    assert sentence in out
+    assert not any(line.startswith("  ○ POST hooks.slack.com") for line in out)
+
+
 def test_the_overlay_line_hangs_under_the_webhook_post_it_cannot_have_seen(run_workflow):
     shadow = run_workflow(W, "mention_in_thread", "shadow")
     summary = shadow.summary()

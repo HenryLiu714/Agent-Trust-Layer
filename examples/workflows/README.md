@@ -51,7 +51,8 @@ so it keeps its real module name; `scenarios.py` seeds the fake services per sce
   `Result` (`harness/run.py`): `calls()`, `answered()`, `by_label()`, `tools()`, `events()`,
   `exchange_lines()` and `summary()` for what irimi printed, and `stored()` and `stored_events()`
   for what it recorded in its trace store under the run's `IRIMI_HOME` (#70), with
-  `process_run_id()` and `runs(...)`, which runs `irimi runs list` or `runs show` over it (#72).
+  `process_run_id()`, `runs(...)`, which runs `irimi runs list` or `runs show` over it, and
+  `maps()`, the maps `runs show` renders writes with (#72).
   `reported` holds the exchanges irimi printed a line for and `handed` those its engine gave the
   store, so a test can compare what was kept with what happened.
 - **The agent kit** (`agentkit.py`) is what every agent shares, all stdlib: its HTTP client and
@@ -88,7 +89,8 @@ as having happened; every other run is a `header` run its first event created (u
 store directory is 0700, every file 0600, and no `events.jsonl` ends in a half-written line; and a
 bare run stores nothing. A streamed answer is stored as the chunks the agent was sent (#71). For
 W9 and W11, which send no `Irimi-Run`, `irimi runs show <process run>` ends in the summary
-`irimi shadow` printed, but for the elapsed seconds (#72).
+`irimi shadow` printed, but for the elapsed seconds; for every workflow, the summary over all of
+a process's stored runs together is that block (#72).
 
 A new workflow package is found by its name, `wNN_<name>`, and is held to all five rules without
 any registry edit. A last test checks that the corpus gives rules 1 to 4 something to catch: a rule

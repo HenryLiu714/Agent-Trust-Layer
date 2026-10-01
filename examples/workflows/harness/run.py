@@ -38,11 +38,11 @@ from typing import Any
 
 from examples.workflows.harness.internet import FakeInternet, Req
 from examples.workflows.harness.services import CLIENT_SECRET_CANARY, World
-from irimi import ca, paths, report, runner, trace
+from irimi import ca, paths, report, runner, servicemap, trace
 from irimi import store as irimi_store
 from irimi.cli import main as irimi_main
 from irimi.exchange import Exchange
-from irimi.servicemap import loader
+from irimi.servicemap import MapIndex, loader
 from irimi.store import StoreReader
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -221,6 +221,21 @@ class Result:
         ):
             code = irimi_main(["runs", *argv])
         return code, out.getvalue().splitlines(), err.getvalue().splitlines()
+
+    def maps(self) -> MapIndex | None:
+        """The maps `irimi runs show` renders this run's writes with: shipped plus the scenario's
+        own, loaded from the run's working directory and `$IRIMI_HOME`, as `runs()` loads them.
+        None when they do not load, as `runs show` then carries on without them (#72)."""
+        scenario = self.workflow.scenarios[self.scenario]
+        with (
+            _environ({**os.environ, paths.IRIMI_HOME_ENV: str(self.home)}),
+            contextlib.chdir(self.cwd),
+            _maps(scenario, self.home.parent),
+        ):
+            try:
+                return servicemap.load()
+            except servicemap.MapError:
+                return None
 
 
 def workflows() -> dict[str, Workflow]:

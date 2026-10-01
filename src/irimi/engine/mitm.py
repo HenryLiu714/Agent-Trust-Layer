@@ -515,18 +515,24 @@ class IrimiAddon:
         """Answer a control request. `ControlEndpoint.answer` never raises; this guards turning
         its answer into mitmproxy's anyway, because a control request that escaped this hook would
         be forwarded to the listener it was addressed to - irimi itself (#73)."""
+        # A RESPONSE TO HEAD CARRIES NO CONTENT (RFC 9110 9.3.2), and mitmproxy sends whatever the
+        # response holds: `HEAD /_irimi/health`'s 405 JSON was read as the start of the next
+        # response on the connection. Nor a Content-Length, which a HEAD answer may only send when
+        # it is what a GET would get (8.6), and a HEAD's 405 is not that (#73).
+        head = req.method == "HEAD"
         try:
             response = _to_mitm_response(self.control.answer(req))
+            if head:
+                response.raw_content = b""
+                response.headers.pop("content-length", None)
         except Exception:
             logger.exception("irimi: could not send the control endpoint's answer")
             error = control.INTERNAL_ERROR
-            response = http.Response.make(error.status, error.body, _fields(error.headers))
-        # A RESPONSE TO HEAD CARRIES NO CONTENT (RFC 9110 9.3.2), and mitmproxy sends whatever the
-        # response holds: `HEAD /_irimi/health`'s 405 JSON was read as the start of the next
-        # response on the connection. The headers, Content-Length included, still say what the
-        # same request as a GET would get (#73).
-        if req.method == "HEAD":
-            response.raw_content = b""
+            response = http.Response.make(
+                error.status, b"" if head else error.body, _fields(error.headers)
+            )
+            if head:
+                response.headers.pop("content-length", None)
         flow.response = response
 
     def _answer_failed_decision(

@@ -55,6 +55,8 @@ MAX_REFUSAL = 200
 # back: a 400 like any other malformed body, never a 500 logged as irimi's failure (#73). Which of
 # the two refuses depends on the Python: 3.14's `json.loads` reads deeper than 3.12's.
 TOO_DEEP = "the body nests too deeply to read"
+# The refusal of a start or an end for irimi's own run, `EngineConfig.run_id` (#73).
+OWN_RUN = "is irimi's own run, which the SDK may not start or end"
 
 HEALTH_ROUTE = "health"
 RUNS_ROUTE = "runs"
@@ -124,8 +126,8 @@ class ControlEndpoint:
     ) -> None:
         self.store = store
         self.serve = serve
-        # The run irimi itself starts and ends (`EngineConfig.run_id`): the SDK may post tool
-        # calls to it, never its start or its end (#73).
+        # irimi's own run (`EngineConfig.run_id`), the process run under `irimi shadow`: the SDK
+        # may post tool calls to it, never its start or its end (#73).
         self.process_run = process_run
         self.on_tool_call = on_tool_call
 
@@ -161,10 +163,10 @@ class ControlEndpoint:
             raise _Refused(400, f"{run_id!r} cannot name a run")
         action = segments[-1]
         if run_id == self.process_run and action != TOOL_CALLS_ACTION:
-            # THE PROCESS RUN'S RECORD IS IRIMI'S, as `attribution` and `engine_version` are: a
-            # start would replace its argv trigger with an `sdk` record, and an end would close it
-            # before `irimi shadow` records the child's exit (#73).
-            raise _Refused(400, f"{run_id!r} is the process run, which irimi starts and ends")
+            # IRIMI'S OWN RUN IS IRIMI'S TO RECORD, as `attribution` and `engine_version` are. Under
+            # `irimi shadow` it is the process run: a start would replace its argv trigger with an
+            # `sdk` record, and an end would close it before the child's exit is recorded (#73).
+            raise _Refused(400, f"{run_id!r} {OWN_RUN}")
         posted = _posted(request)
         if action == START_ACTION:
             self._start(run_id, posted)

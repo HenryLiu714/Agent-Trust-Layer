@@ -25,6 +25,7 @@ upstream = test_engine_mitm.upstream  # bound here so pytest finds the fixture
 RUN = "sdkrun01"
 # The engine's own run, `EngineConfig.run_id` in `test_engine_mitm._config`.
 PROCESS_RUN = "t3st"
+OWN_RUN = "is irimi's own run, which the SDK may not start or end"
 TRIGGER = {
     "name": "handle_ticket",
     "entrypoint": "agent:handle_ticket",
@@ -301,14 +302,21 @@ REFUSALS = [
         f"/_irimi/runs/{PROCESS_RUN}/start",
         _start_body(1.0),
         400,
-        f"'{PROCESS_RUN}' is the process run, which irimi starts and ends",
+        f"'{PROCESS_RUN}' {OWN_RUN}",
+    ),
+    (
+        "POST",
+        f"/_irimi/runs/{PROCESS_RUN}/start",
+        b"not json",
+        400,
+        f"'{PROCESS_RUN}' {OWN_RUN}",
     ),
     (
         "POST",
         f"/_irimi/runs/{PROCESS_RUN}/end",
         _end_body(2.0),
         400,
-        f"'{PROCESS_RUN}' is the process run, which irimi starts and ends",
+        f"'{PROCESS_RUN}' {OWN_RUN}",
     ),
 ]
 
@@ -513,13 +521,16 @@ def test_a_head_request_gets_its_405_without_a_body_and_the_connection_stays_usa
             received += chunk
     head, get = received.split(b"\r\n\r\n", 1)
     assert head.startswith(b"HTTP/1.1 405 ")
-    assert b"\r\nirimi-answered-by: control\r\n" in head and b"\r\nallow: GET\r\n" in head
+    assert b"\r\nirimi-answered-by: control\r\n" in head and b"\r\nallow: GET" in head
+    # Nor a Content-Length: a HEAD answer may send one only if it is what a GET would get.
+    assert b"content-length" not in head.lower()
     # The next byte after the 405's head is the GET's answer, not the 405's JSON.
     assert get.startswith(b"HTTP/1.1 200 ")
     assert json.loads(get.split(b"\r\n\r\n", 1)[1])["engine_version"] == __version__
 
 
-_DEEP = 100_000  # deeper than a decoder can quote a value back, within what `json.loads` reads
+# Deeper than a decoder can quote a value back, within what `json.loads` reads (#73).
+_DEEP = 100_000
 
 
 def _nested(doc: dict, field: str) -> bytes:

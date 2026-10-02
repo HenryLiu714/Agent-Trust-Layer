@@ -76,11 +76,11 @@ def __getattr__(name: str) -> Any:
 
 ENGINE_ACTIVE_ENV = "IRIMI_ENGINE_ACTIVE"
 _run_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("irimi_run", default=None)
-# Under the real SDK: the real run whose `run.start` this module has logged, so a nested trigger,
-# which joins that run, logs nothing.
-_logged_run_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "irimi_logged_run", default=None
-)
+# Under the real SDK: the real runs whose `run.start` this module has logged and whose `run.end`
+# it has not, so a nested trigger, which joins one, logs nothing. A set of ids rather than a context
+# variable, because a run handed to a coroutine (#74) is logged as ended from the task that awaits
+# it, not the context that logged its start.
+_logged_runs: set[str] = set()
 
 
 def active() -> bool:
@@ -145,15 +145,15 @@ def _observed(name: str) -> Iterator[None]:
     whether there is a run (inactive: none) and whether this entry joined an outer one (the same
     id this module already logged), so this only reads its id."""
     run_id = current_run_id()
-    if run_id is None or run_id == _logged_run_id.get():
+    if run_id is None or run_id in _logged_runs:
         yield
         return
-    token = _logged_run_id.set(run_id)
+    _logged_runs.add(run_id)
     try:
         with _logged_run(name, run_id):
             yield
     finally:
-        _logged_run_id.reset(token)
+        _logged_runs.discard(run_id)
 
 
 def _around(f: Callable[..., Any], enter: Callable[[], Any]) -> Callable[..., Any]:
@@ -170,16 +170,32 @@ def _around(f: Callable[..., Any], enter: Callable[[], Any]) -> Callable[..., An
 
     @functools.wraps(f)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        with enter():
-            return f(*args, **kwargs)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(enter())
+            result = f(*args, **kwargs)
+            if _real is not None and inspect.iscoroutine(result):
+                # The real trigger hands its run to the coroutine and ends it when the coroutine
+                # ends (#74), so the logged run goes with it: `run.end` is the coroutine's outcome.
+                return _carried(stack.pop_all(), result)
+            return result
 
     return wrapper
+
+
+async def _carried(observed: contextlib.ExitStack, coroutine: Any) -> Any:
+    """`coroutine`, awaited inside the observation a sync trigger opened before it returned it."""
+    with observed:
+        return await coroutine
 
 
 def trigger(fn: Callable[..., Any] | None = None, *, name: str | None = None) -> Any:
     real = _from_real("trigger")
 
     def decorate(f: Callable[..., Any]) -> Callable[..., Any]:
+        if isinstance(f, staticmethod | classmethod):
+            # The function inside is the trigger and the descriptor stays one, as the real
+            # trigger keeps it (#74): this module's wrapper cannot call a descriptor.
+            return type(f)(decorate(f.__func__))
         is_generator = inspect.isgeneratorfunction(f) or inspect.isasyncgenfunction(f)
         run_name = f.__qualname__ if name is None else name
         if real is not None:

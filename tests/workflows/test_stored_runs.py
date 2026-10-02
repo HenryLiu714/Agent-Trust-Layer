@@ -17,6 +17,7 @@ import pytest
 
 import irimi
 from examples.workflows.harness.run import CANARIES, Result, workflows
+from examples.workflows.w10_flaky_upstream.scenarios import CONTROL_DOWN
 from irimi import paths, redact, report, trace
 from irimi.exchange import Exchange
 from irimi.store import StoredRun
@@ -32,9 +33,24 @@ BY_HAND_SCENARIOS = {
     ("w09_scope_gauntlet", "control_runs"),
     ("w09_scope_gauntlet", "control_hazards"),
 }
+# W10's scenarios that take the control endpoint away, so the SDK's posts fail (#74): irimi knows
+# each run only by its labelled requests, as the `header` run the first of them made.
+RECORD_LOST = {("w10_flaky_upstream", s) for s in CONTROL_DOWN}
 # The scenarios whose runs, but the process run, are all ones the SDK started (#74): every
-# scenario of every workflow that uses the SDK, and W9's by hand.
-SDK_RUN_SCENARIOS = {(n, s) for n, s in CASES if n not in UNLABELLED} | BY_HAND_SCENARIOS
+# scenario of every workflow that uses the SDK, but those whose SDK cannot reach irimi, and W9's
+# by hand.
+SDK_RUN_SCENARIOS = {
+    (n, s) for n, s in CASES if n not in UNLABELLED and (n, s) not in RECORD_LOST
+} | BY_HAND_SCENARIOS
+# The scenarios of SDK workflows whose agent starts no run at all: nothing triggers one (W4's
+# handshake, W6's decoration errors), or the trigger is never called (W5's forged signature).
+NO_RUN_SCENARIOS = {
+    ("w04_slack_ops_bot", "url_verification"),
+    ("w05_dispute_responder", "bad_signature"),
+    ("w06_crm_db_agent", "decoration_errors"),
+}
+# A run id the SDK mints: 16 lower-case hex characters (#74).
+RUN_ID = re.compile(r"[0-9a-f]{16}")
 
 
 def started(result: Result) -> bool:
@@ -182,8 +198,8 @@ def test_every_run_but_the_process_run_is_one_the_sdk_started(run_workflow, name
 
     A `header` run is still what a run id known only by its events becomes: its record is the one
     the first of them created, with no trigger and no end (#70), and it started when that event
-    did, so `irimi runs list` sorts it among the runs that started (#72). No corpus scenario makes
-    one any more; the branch below keeps the rule for a workflow that does."""
+    did, so `irimi runs list` sorts it among the runs that started (#72). W10's `CONTROL_DOWN`
+    makes one: its SDK cannot post the run's start, but its requests still name the run."""
     shadow = run_workflow(name, scenario, "shadow")
     if not started(shadow):
         return
@@ -213,7 +229,9 @@ def test_every_run_the_agent_logged_is_stored_with_the_outcome_it_logged(
     run is stored that the agent did not log, but W9's by hand. Each `run.end` is that run's
     outcome, its error stored under the exception's `module.qualname` where the log has the class
     name alone. A run the agent logged no end for - W10 `sigterm_mid_run`, killed - is stored with
-    no outcome: incomplete."""
+    no outcome: incomplete. A run whose SDK could not reach irimi (`RECORD_LOST`) is the `header`
+    run its requests made. Every scenario of an SDK workflow logs a run, but `NO_RUN_SCENARIOS`, so
+    this check is never met by a scenario that silently stopped starting them."""
     shadow = run_workflow(name, scenario, "shadow")
     if not started(shadow):
         assert shadow.events("run.start") == []
@@ -222,6 +240,15 @@ def test_every_run_the_agent_logged_is_stored_with_the_outcome_it_logged(
     logged = {e["run"]: e["name"] for e in shadow.events("run.start")}
     if (name, scenario) in BY_HAND_SCENARIOS:
         assert logged == {}
+        return
+    if name not in UNLABELLED:
+        assert bool(logged) is ((name, scenario) not in NO_RUN_SCENARIOS), logged
+    # Minted lower-case: an id that differed from another only in case would be filed in
+    # `unattributed/` on a case-insensitive filesystem (#73).
+    assert all(RUN_ID.fullmatch(run_id) for run_id in logged), logged
+    if (name, scenario) in RECORD_LOST:
+        headers = {r.run_id for r in shadow.stored().list_runs() if r.attribution == "header"}
+        assert (stored, headers) == ({}, set(logged))
         return
     assert {run_id: r.trigger.name for run_id, r in stored.items() if r.trigger} == logged
     ends = {e["run"]: e for e in shadow.events("run.end")}

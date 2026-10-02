@@ -2,13 +2,14 @@
 
 Every workflow that uses the SDK posts each run's start and end to it (#74), and W9 calls it by
 hand. These hold all of them: a control request is never an exchange, `IRIMI_CONTROL` reaches
-every agent `irimi shadow` starts and no bare one, and a bare agent, with no irimi, starts no run
-and calls no control endpoint.
+every agent `irimi shadow` starts and no bare one, a bare agent, with no irimi, starts no run
+and calls no control endpoint, and the SDK warns only where W10 takes the endpoint away.
 """
 
 import pytest
 
 from examples.workflows.harness.run import workflows
+from examples.workflows.w10_flaky_upstream.scenarios import CONTROL_DOWN
 from irimi.exchange import CONTROL_PREFIX, Exchange
 
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
@@ -67,3 +68,18 @@ def test_a_bare_agent_starts_no_run_and_calls_no_control_endpoint(run_workflow, 
     if (name, scenario) in BY_HAND:
         return
     assert [r.path for r in bare.internet.requests() if CONTROL_PREFIX in r.path] == []
+
+
+@pytest.mark.parametrize(("name", "scenario"), CASES, ids=[f"{n}:{s}" for n, s in CASES])
+def test_the_sdk_warns_only_where_its_control_endpoint_is_taken_away(run_workflow, name, scenario):
+    """A post that fails is the SDK's one WARNING on `irimi.sdk`, once per process per kind of
+    failure, and never an exception (#74); `agentkit.start()` logs each irimi log record. Every
+    post in the corpus is accepted, so no run warns, but those of W10's `CONTROL_DOWN`, whose
+    start and end both fail and warn once between them. A bare agent's SDK is inert: no warning."""
+    assert run_workflow(name, scenario, "bare").events("log") == []
+    shadow = run_workflow(name, scenario, "shadow")
+    logged = [(e["logger"], e["level"]) for e in shadow.events("log")]
+    if name == "w10_flaky_upstream" and scenario in CONTROL_DOWN:
+        assert logged == [("irimi.sdk", "WARNING")]
+    else:
+        assert logged == []

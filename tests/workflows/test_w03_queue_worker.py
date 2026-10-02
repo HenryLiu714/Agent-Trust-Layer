@@ -6,12 +6,14 @@ shadow run. Order between runs is never asserted: the pool and the event loop in
 
 import importlib.util
 import re
+import sys
 from collections import Counter
 from urllib.parse import parse_qs
 
 import pytest
 
 import irimi
+from examples.workflows.w03_queue_worker.scenarios import AGENT_VERSION
 from irimi.exchange import Exchange
 from irimi.trace import ErrorInfo
 
@@ -52,10 +54,12 @@ def test_eight_concurrent_runs_never_mix(run_workflow, scenario):
 
 
 def charge_named(ex: Exchange) -> str:
-    """The charge a stored exchange is about: a charge read names it in its path, a refund in its
-    form body."""
+    """The charge a stored exchange is about: a charge read names it in its path, an audit's
+    refund list in its query, a refund in its form body."""
     if ex.request.path.startswith("/v1/charges/"):
         return ex.request.path.rsplit("/", 1)[1]
+    if ex.request.query:
+        return parse_qs(ex.request.query)["charge"][0]
     return parse_qs(ex.request.body.decode())["charge"][0]
 
 
@@ -107,6 +111,13 @@ def test_every_client_went_through_the_proxy(run_workflow):
     assert posts == {(client, "fake-L1") for client in clients}
 
 
+# A free-threaded 3.14 build starts a thread in a copy of its creator's context
+# (`sys.flags.thread_inherit_context`), so there the bare thread keeps the run and this scenario's
+# premise does not hold; `tests/test_sdk.py` pins that build's behaviour (#74).
+@pytest.mark.skipif(
+    bool(getattr(sys.flags, "thread_inherit_context", 0)),
+    reason="threads inherit their creator's context on this build",
+)
 def test_a_thread_started_without_propagate_loses_its_run(run_workflow):
     shadow = run_workflow(W, "unpropagated_thread", "shadow")
     runs = [e["run"] for e in shadow.events("run.start")]
@@ -209,3 +220,133 @@ def test_runs_list_prints_one_line_per_message_and_one_for_the_process(run_workf
                 "process",
                 ["0 exchanges", "0 writes"],
             )
+
+
+# -- each way the SDK marks a run (#74) -----------------------------------------------------------
+
+
+def stored_by_charge(shadow, args_of):
+    """`{charge: stored run}` over the `sdk` runs, keyed by the charge `args_of(trigger args)`
+    names, after checking that each run's exchanges are about that charge and no other."""
+    reader = shadow.stored()
+    found = {}
+    for record in shadow.sdk_runs():
+        assert record.trigger is not None
+        charge = args_of(record.trigger.args)["charge"]
+        events = reader.load_run(record.run_id).events
+        assert {charge_named(e) for e in events if isinstance(e, Exchange)} == {charge}, events
+        found[charge] = record
+    return found
+
+
+def test_each_async_with_sdk_run_block_is_one_run_with_its_message_as_the_trigger(run_workflow):
+    """Each message is a block, `async with sdk.run(trigger=message, name="message")`, four at
+    once under `asyncio.gather` (#74). Each is one `sdk` run named `message`, with no entrypoint,
+    because no function names it, and the message itself as its args, replayable. The block that
+    raised ends in error with its ValueError and holds only its read; the queue carries on. Bare,
+    no run is started and the other three refunds land."""
+    shadow = run_workflow(W, "async_run", "shadow")
+    bare = run_workflow(W, "async_run", "bare")
+    runs = shadow.by_run()
+    assert None not in runs and len(runs) == 4
+    found = stored_by_charge(shadow, lambda args: args)
+    assert sorted(found) == [f"ch_Q{i}" for i in range(4)]
+    assert {r.run_id for r in found.values()} == set(runs)
+    for charge, record in found.items():
+        assert record.trigger is not None
+        assert (record.trigger.name, record.trigger.entrypoint) == ("message", None)
+        assert record.trigger.replayable
+        assert record.outcome == ("error" if charge == "ch_Q2" else "ok")
+    assert found["ch_Q0"].trigger.args == {"charge": "ch_Q0", "amount": 100, "index": 0}
+    poison = found["ch_Q2"]
+    assert poison.error == ErrorInfo("builtins.ValueError", "cannot refund ch_Q2: poison message")
+    assert runs[poison.run_id] == ["read:ch_Q2"]
+    assert shadow.exchange_lines().count(REFUND_LINE) == 3
+    for result in (shadow, bare):
+        assert (result.result()["ok"], result.result()["failed"]) == (3, 1)
+    assert len(bare.internet.writes()) == 3
+
+
+def test_a_run_cancelled_at_shutdown_ends_in_error_with_its_cancellation(run_workflow):
+    """The worker shuts down with one message in flight and cancels its task. Cancellation is a
+    BaseException, not an Exception, and the SDK still ends the run (#74): `error`, under
+    `asyncio.exceptions.CancelledError`, holding the read it made before it stuck, and no refund.
+    The other two runs end `ok`, and the worker exits 0 in both modes."""
+    shadow = run_workflow(W, "cancelled_on_shutdown", "shadow")
+    bare = run_workflow(W, "cancelled_on_shutdown", "bare")
+    assert shadow.exit_code == bare.exit_code == 0
+    for result in (shadow, bare):
+        failed = [(e["charge"], e["error"]) for e in result.events("message.failed")]
+        assert failed == [("ch_Q1", "CancelledError")]
+    logged = sorted((e["outcome"], e.get("error")) for e in shadow.events("run.end"))
+    assert logged == [("error", "CancelledError"), ("ok", None), ("ok", None)]
+    found = stored_by_charge(shadow, lambda args: args["message"])
+    assert {c: r.outcome for c, r in found.items()} == {
+        "ch_Q0": "ok",
+        "ch_Q1": "error",
+        "ch_Q2": "ok",
+    }
+    cancelled = found["ch_Q1"]
+    assert cancelled.error == ErrorInfo("asyncio.exceptions.CancelledError", "")
+    assert shadow.by_run()[cancelled.run_id] == ["read:ch_Q1"]
+    assert shadow.exchange_lines().count(REFUND_LINE) == 2
+
+
+def test_a_trigger_on_a_method_names_its_class_and_leaves_self_out_of_the_args(run_workflow):
+    """`Worker.handle` and `Worker.handle_async` are triggers on methods (#74). The entrypoint
+    names the class, `module:Worker.handle`, which replay (#84) can import; `self` is left out of
+    the args, so the run stays replayable. An unnamed trigger is named by its `__qualname__`, a
+    named one by its name. Every run records the version the deployment named, as the process run
+    does (#70)."""
+    shadow = run_workflow(W, "worker_methods", "shadow")
+    found = stored_by_charge(shadow, lambda args: args["message"])
+    sync = ("Worker.handle", f"{AGENT}:Worker.handle")
+    async_ = ("worker.handle_async", f"{AGENT}:Worker.handle_async")
+    assert {c: (r.trigger.name, r.trigger.entrypoint) for c, r in found.items() if r.trigger} == {
+        "ch_Q0": sync,
+        "ch_Q1": async_,
+        "ch_Q2": sync,
+        "ch_Q3": async_,
+    }
+    for record in found.values():
+        assert record.trigger is not None and record.trigger.replayable
+        assert set(record.trigger.args) == {"message"}
+        assert (record.outcome, record.agent_version) == ("ok", AGENT_VERSION)
+    [process] = [r for r in shadow.stored().list_runs() if r.attribution == "process"]
+    assert process.agent_version == AGENT_VERSION
+    assert shadow.exchange_lines().count(REFUND_LINE) == 4
+
+
+def test_a_sync_trigger_that_returns_a_coroutine_hands_the_run_to_it(run_workflow):
+    """`enqueue` is sync and returns a coroutine its caller's loop awaits, four at once under
+    `asyncio.gather`. Its body runs only when the coroutine does, so the SDK hands the run over
+    (#74): every call the coroutine makes carries its run, the `audit` trigger it calls joins that
+    run rather than starting one, and the run ends with the coroutine's outcome. So the poison
+    message's run, which raised inside the coroutine after the sync call had returned, is stored
+    `error`, holding its read alone; each other run is `ok`, holding its read, its audit, its
+    refund and irimi's L3 read of its own charge."""
+    shadow = run_workflow(W, "coroutine_handoff", "shadow")
+    runs = shadow.by_run()
+    assert None not in runs, "a call with no run: the run ended before the coroutine ran"
+    assert len(runs) == 4
+    assert [e["name"] for e in shadow.events("run.start")] == ["enqueue"] * 4
+    found = stored_by_charge(shadow, lambda args: args["message"])
+    assert sorted(found) == [f"ch_Q{i}" for i in range(4)]
+    for charge, record in found.items():
+        labels = runs[record.run_id]
+        assert own_charge_only(labels), labels
+        assert record.trigger is not None
+        assert (record.trigger.name, record.trigger.entrypoint) == ("enqueue", f"{AGENT}:enqueue")
+        events = shadow.stored().load_run(record.run_id).events
+        if charge == "ch_Q2":
+            assert [label.split(":")[0] for label in labels] == ["read"]
+            assert (record.outcome, record.error) == (
+                "error",
+                ErrorInfo("builtins.ValueError", "cannot refund ch_Q2: poison message"),
+            )
+            assert len(events) == 1
+        else:
+            assert sorted(label.split(":")[0] for label in labels) == ["audit", "read", "refund"]
+            assert (record.outcome, record.error) == ("ok", None)
+            assert len(events) == 4
+    assert shadow.exchange_lines().count(REFUND_LINE) == 3

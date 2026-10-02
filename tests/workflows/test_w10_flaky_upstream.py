@@ -7,11 +7,22 @@ A failed L3 read is irimi's alone, and only its summary shows it. The agent is
 `examples/workflows/w10_flaky_upstream/agent.py`.
 """
 
+import pytest
+
+from examples.workflows.w10_flaky_upstream.scenarios import CONTROL_DOWN
 from irimi.exchange import UPSTREAM_ERROR_FLAG, Exchange
 from irimi.trace import ErrorInfo
 
 W = "w10_flaky_upstream"
 REFUND_LINE = "  ○ refund $5.00 on ch_PAYOUT1  unvalidated (L3 preconditions passed)"
+# What the agent saw when nothing failed: the list and the model live, the refund and the Slack
+# post faked. A run whose SDK cannot reach irimi must see exactly this (#74).
+ANSWERED = [
+    ("list_charges", 200, None),
+    ("api.anthropic.com/v1/messages", 200, None),
+    ("refund", 200, "fake-L1"),
+    ("slack.com/api/chat.postMessage", 200, "fake-L1"),
+]
 
 
 def statuses(result, label):
@@ -238,3 +249,63 @@ def process_run(result) -> tuple[object, object, object]:
     """`(outcome, exit_code, error)` of the process run `irimi shadow` stored."""
     (run,) = [r for r in result.stored().list_runs() if r.attribution == "process"]
     return run.outcome, run.exit_code, run.error
+
+
+def test_an_agent_interrupted_after_its_write_ends_its_run_in_keyboard_interrupt(run_workflow):
+    """Ctrl-C mid-run: Python raises KeyboardInterrupt, a BaseException, not an Exception. The SDK
+    posts the run's end as it propagates (#74), so unlike after SIGTERM the run is complete:
+    `error`, under `builtins.KeyboardInterrupt`, with the faked refund in it. The interrupt still
+    ends the agent, 130 (128 + SIGINT) in both modes."""
+    bare = run_workflow(W, "sigint_mid_run", "bare")
+    shadow = run_workflow(W, "sigint_mid_run", "shadow")
+    assert (bare.exit_code, shadow.exit_code) == (130, 130)
+    [end] = shadow.events("run.end")
+    assert (end["outcome"], end["error"]) == ("error", "KeyboardInterrupt")
+    [run] = shadow.sdk_runs()
+    assert (run.run_id, run.outcome) == (end["run"], "error")
+    assert run.error == ErrorInfo("builtins.KeyboardInterrupt", "")
+    stored = [e for e in shadow.stored().load_run(run.run_id).events if isinstance(e, Exchange)]
+    assert [(e.request.method, e.request.path, e.answered_by) for e in stored][-1] == (
+        "POST",
+        "/v1/refunds",
+        "fake-L1",
+    )
+    assert process_run(shadow) == ("error", 130, ErrorInfo("exit", "exited 130"))
+    assert bare.events("run.end") == []
+
+
+# The kind of failure each `CONTROL_DOWN` scenario's one warning names, as the SDK logs it.
+CONTROL_KIND = {
+    "control_unset": "(unset: IRIMI_CONTROL is not set)",
+    "control_unreachable": "(unreachable: ",
+    "control_refused": "(rejected: HTTP 404: ",
+}
+
+
+@pytest.mark.parametrize("scenario", CONTROL_DOWN)
+def test_an_sdk_that_cannot_reach_irimi_warns_once_and_changes_nothing(run_workflow, scenario):
+    """The SDK never raises into the agent (#74). With its control endpoint unset, gone, or
+    refusing every post, the run goes on: its id is current, logged and on every request, and the
+    agent makes the calls it makes with the SDK working and exits 0, as it does bare. The SDK
+    logs one WARNING on `irimi.sdk`, though both the start and the end failed: once per kind of
+    failure. irimi never hears of the run, so the store holds only the `header` run its labelled
+    requests made, with no trigger and no end (#70)."""
+    bare = run_workflow(W, scenario, "bare")
+    shadow = run_workflow(W, scenario, "shadow")
+    assert shadow.exit_code == bare.exit_code == 0
+    [start] = shadow.events("run.start")
+    [end] = shadow.events("run.end")
+    assert (end["run"], end["outcome"]) == (start["run"], "ok")
+    assert {c["run"] for c in shadow.calls()} == {start["run"]}
+    assert shadow.answered() == ANSWERED
+    assert REFUND_LINE in shadow.summary()
+    [warning] = shadow.events("log")
+    assert (warning["logger"], warning["level"]) == ("irimi.sdk", "WARNING")
+    assert start["run"] in warning["message"]
+    # For the reason the scenario took the endpoint away, the kind `client.ControlClient` names.
+    assert CONTROL_KIND[scenario] in warning["message"]
+    assert bare.events("log") == bare.events("run.start") == []
+    records = shadow.stored().list_runs()
+    assert sorted(r.attribution for r in records) == ["header", "process"]
+    [header] = [r for r in records if r.attribution == "header"]
+    assert (header.run_id, header.trigger, header.outcome) == (start["run"], None, None)

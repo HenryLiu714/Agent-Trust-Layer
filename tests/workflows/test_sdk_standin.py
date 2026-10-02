@@ -367,6 +367,38 @@ def test_a_generator_trigger_is_refused_by_the_real_sdk(load_sdk):
         sdk.trigger(gen)
 
 
+@pytest.mark.parametrize("real", [True, False], ids=["real", "absent"])
+def test_a_trigger_above_a_static_or_class_method_keeps_it_one(load_sdk, obs, monkeypatch, real):
+    """`irimi.sdk`'s trigger keeps a `staticmethod` or `classmethod` one above which it is written
+    (#74). The stand-in's own wrapper, put between, must too: it called the descriptor itself, so
+    a class method was not callable, and a static method made a plain function would be bound and
+    given the instance as an argument."""
+    fake = fake_sdk(active=True)
+    sdk = load_sdk(fake if real else None)
+    monkeypatch.setenv(sdk.ENGINE_ACTIVE_ENV, "1")
+
+    class Handlers:
+        @sdk.trigger
+        @staticmethod
+        def static(charge: str) -> tuple[str, str | None]:
+            return charge, sdk.current_run_id()
+
+        @sdk.trigger(name="by_class")
+        @classmethod
+        def by_class(cls, charge: str) -> tuple[str, str | None]:
+            return f"{cls.__name__}:{charge}", sdk.current_run_id()
+
+    calls = [(owner.static("ch_1"), owner.by_class("ch_2")) for owner in (Handlers, Handlers())]
+    results = [result for pair in calls for result in pair]
+    assert [value for value, _ in results] == ["ch_1", "Handlers:ch_2"] * 2
+    ids = [run_id for _, run_id in results]
+    assert None not in ids and len(set(ids)) == 4
+    static = Handlers.static.__qualname__
+    assert [e["name"] for e in obs("run.start")] == [static, "by_class"] * 2
+    if real:
+        assert ids == fake.minted
+
+
 # -- (c) the real tool's decoration-time checks decide -------------------------------------------
 
 

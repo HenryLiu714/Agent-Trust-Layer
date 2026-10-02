@@ -17,6 +17,7 @@ import pytest
 
 import irimi
 from examples.workflows.harness.run import CANARIES, Result, workflows
+from examples.workflows.w10_flaky_upstream.scenarios import CONTROL_DOWN
 from irimi import paths, redact, report, trace
 from irimi.exchange import Exchange
 from irimi.store import StoredRun
@@ -24,12 +25,32 @@ from irimi.trace import TelemetrySeen, ToolCall
 
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
 IDS = [f"{n}:{s}" for n, s in CASES]
-# The scenarios that post runs to the control endpoint (#73), so store `sdk` runs. Until #74
-# gives the SDK workflows a real SDK, only W9 does it, by hand.
-SDK_RUN_SCENARIOS = {
+# The workflows whose agents are plain scripts, with no `@sdk.trigger` and no `sdk.run`: they send
+# no `Irimi-Run`, so every exchange they make lands in the process run.
+UNLABELLED = ("w09_scope_gauntlet", "w11_leaky_agent")
+# W9's scenarios that do the SDK's job by hand, posting runs to the control endpoint (#73).
+BY_HAND_SCENARIOS = {
     ("w09_scope_gauntlet", "control_runs"),
     ("w09_scope_gauntlet", "control_hazards"),
 }
+# W10's scenarios that take the control endpoint away, so the SDK's posts fail (#74): irimi knows
+# each run only by its labelled requests, as the `header` run the first of them made.
+RECORD_LOST = {("w10_flaky_upstream", s) for s in CONTROL_DOWN}
+# The scenarios whose runs, but the process run, are all ones the SDK started (#74): every
+# scenario of every workflow that uses the SDK, but those whose SDK cannot reach irimi, and W9's
+# by hand.
+SDK_RUN_SCENARIOS = {
+    (n, s) for n, s in CASES if n not in UNLABELLED and (n, s) not in RECORD_LOST
+} | BY_HAND_SCENARIOS
+# The scenarios of SDK workflows whose agent starts no run at all: nothing triggers one (W4's
+# handshake, W6's decoration errors), or the trigger is never called (W5's forged signature).
+NO_RUN_SCENARIOS = {
+    ("w04_slack_ops_bot", "url_verification"),
+    ("w05_dispute_responder", "bad_signature"),
+    ("w06_crm_db_agent", "decoration_errors"),
+}
+# A run id the SDK mints: 16 lower-case hex characters (#74).
+RUN_ID = re.compile(r"[0-9a-f]{16}")
 
 
 def started(result: Result) -> bool:
@@ -169,17 +190,16 @@ def test_every_store_is_private_and_holds_no_half_written_line(run_workflow, nam
 
 
 @pytest.mark.parametrize(("name", "scenario"), CASES, ids=IDS)
-def test_every_run_but_the_process_run_is_a_header_run_its_first_event_made(
-    run_workflow, name, scenario
-):
-    """Until #74 lands, a run the SDK stand-in labels with `Irimi-Run` is known to irimi only by
-    its events: its record is the one the first of them created, `attribution: "header"`, with no
-    trigger and no end (#70), and it holds at least that event. It started when that event did, so
-    `irimi runs list` sorts it among the runs that started rather than after all of them (#72).
+def test_every_run_but_the_process_run_is_one_the_sdk_started(run_workflow, name, scenario):
+    """Every SDK workflow's runs are ones the SDK started (#74), and so are W9's by hand (#73):
+    `attribution: "sdk"`, with the trigger, SDK version and start it posted, the engine's version,
+    and no exit code, which is the process run's alone. None is a `header` run, which would mean
+    an exchange named a run whose start never reached irimi.
 
-    In a scenario that posts its runs' starts to the control endpoint (#73), every run is one the
-    SDK started instead: `attribution: "sdk"`, with the trigger, SDK version and start it posted,
-    the engine's version, and no exit code, which is the process run's alone. W9 pins each one."""
+    A `header` run is still what a run id known only by its events becomes: its record is the one
+    the first of them created, with no trigger and no end (#70), and it started when that event
+    did, so `irimi runs list` sorts it among the runs that started (#72). W10's `CONTROL_DOWN`
+    makes one: its SDK cannot post the run's start, but its requests still name the run."""
     shadow = run_workflow(name, scenario, "shadow")
     if not started(shadow):
         return
@@ -201,6 +221,53 @@ def test_every_run_but_the_process_run_is_a_header_run_its_first_event_made(
 
 
 @pytest.mark.parametrize(("name", "scenario"), CASES, ids=IDS)
+def test_every_run_the_agent_logged_is_stored_with_the_outcome_it_logged(
+    run_workflow, name, scenario
+):
+    """The SDK end to end (#74): the runs the agent saw are the runs irimi stored. Each `run.start`
+    the corpus logged, with the real run id, is one `sdk` run with that trigger name, and no `sdk`
+    run is stored that the agent did not log, but W9's by hand. Each `run.end` is that run's
+    outcome, its error stored under the exception's `module.qualname` where the log has the class
+    name alone. A run the agent logged no end for - W10 `sigterm_mid_run`, killed - is stored with
+    no outcome: incomplete. A run whose SDK could not reach irimi (`RECORD_LOST`) is the `header`
+    run its requests made. Every scenario of an SDK workflow logs a run, but `NO_RUN_SCENARIOS`, so
+    this check is never met by a scenario that silently stopped starting them."""
+    shadow = run_workflow(name, scenario, "shadow")
+    if not started(shadow):
+        assert shadow.events("run.start") == []
+        return
+    stored = {r.run_id: r for r in shadow.sdk_runs()}
+    logged = {e["run"]: e["name"] for e in shadow.events("run.start")}
+    if (name, scenario) in BY_HAND_SCENARIOS:
+        assert logged == {}
+        return
+    if name not in UNLABELLED:
+        assert bool(logged) is ((name, scenario) not in NO_RUN_SCENARIOS), logged
+    # Minted lower-case: an id that differed from another only in case would be filed in
+    # `unattributed/` on a case-insensitive filesystem (#73).
+    assert all(RUN_ID.fullmatch(run_id) for run_id in logged), logged
+    if (name, scenario) in RECORD_LOST:
+        headers = {r.run_id for r in shadow.stored().list_runs() if r.attribution == "header"}
+        assert (stored, headers) == ({}, set(logged))
+        return
+    assert {run_id: r.trigger.name for run_id, r in stored.items() if r.trigger} == logged
+    ends = {e["run"]: e for e in shadow.events("run.end")}
+    for run_id, record in stored.items():
+        end = ends.get(run_id)
+        if end is None:
+            assert (record.outcome, record.ended_at, record.error) == (None, None, None)
+            continue
+        assert record.outcome == end["outcome"]
+        assert record.ended_at is not None and record.started_at is not None
+        assert record.ended_at >= record.started_at
+        if end["outcome"] == "ok":
+            assert record.error is None
+        else:
+            assert record.error is not None
+            assert record.error.type.rsplit(".", 1)[-1] == end["error"]
+
+
+@pytest.mark.parametrize(("name", "scenario"), CASES, ids=IDS)
 def test_a_bare_run_stores_nothing(run_workflow, name, scenario):
     """No irimi, no store: the bare baseline leaves its `IRIMI_HOME` without a store or a
     redaction key, whatever the agent's SDK stand-in does."""
@@ -210,10 +277,9 @@ def test_a_bare_run_stores_nothing(run_workflow, name, scenario):
     assert not (bare.home / paths.REDACT_KEY_NAME).exists()
 
 
-# The workflows whose every exchange lands in the process run: plain scripts that send no
-# `Irimi-Run`, so the process run's stored summary is the one `irimi shadow` printed (#72). W9's
-# control scenarios are the exception: they label their reads with the runs they post (#73).
-UNLABELLED = ("w09_scope_gauntlet", "w11_leaky_agent")
+# The `UNLABELLED` workflows' every exchange lands in the process run, so the process run's stored
+# summary is the one `irimi shadow` printed (#72). W9's control scenarios are the exception: they
+# label their reads with the runs they post (#73).
 UNLABELLED_CASES = [(n, s) for n, s in CASES if n in UNLABELLED and (n, s) not in SDK_RUN_SCENARIOS]
 ELAPSED = re.compile(r" · \d+\.\ds · ")
 

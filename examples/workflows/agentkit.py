@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import signal
 import sqlite3
@@ -44,6 +45,9 @@ WATCHDOG_S = 90
 CONTROL_ENV = "IRIMI_CONTROL"
 # The process run's id (`irimi.paths.RUN_ENV`), spelled here for the same reason (#73).
 RUN_ENV = "IRIMI_RUN"
+# The logger irimi's SDK speaks on (`irimi.sdk` is its child), spelled here for the same reason. A
+# WARNING there is the SDK's only sign that a run's record was lost (#74).
+IRIMI_LOGGER = "irimi"
 
 _obs_lock = threading.Lock()
 
@@ -51,14 +55,28 @@ _obs_lock = threading.Lock()
 def start() -> None:
     """Call first in every agent's `main()`. Logs the proxy and the control endpoint (#73) the
     agent was given, so the harness can hold every run to what `irimi shadow` sets, and every bare
-    run to having neither from irimi."""
+    run to having neither from irimi. From here on, each record an irimi logger emits is a `log`
+    event too (#74)."""
     if hasattr(signal, "SIGALRM"):
         signal.alarm(WATCHDOG_S)
+    logging.getLogger(IRIMI_LOGGER).addHandler(_LogToObs())
     obs(
         "start",
         proxy=proxy(),
         control=os.environ.get(CONTROL_ENV),
     )
+
+
+class _LogToObs(logging.Handler):
+    """Each record an irimi logger emits in the agent, as a `log` event. The SDK never raises
+    into the agent: a control endpoint it cannot reach is one WARNING on `irimi.sdk` (#74), and
+    this is how the harness sees it, and sees that no other run logs one."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            obs("log", logger=record.name, level=record.levelname, message=record.getMessage())
+        except Exception:
+            self.handleError(record)
 
 
 def proxy() -> str | None:

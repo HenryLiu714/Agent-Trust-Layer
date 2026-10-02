@@ -237,8 +237,9 @@ def test_the_control_endpoint_answers_at_every_spelling_and_is_never_an_exchange
 
 # -- the control endpoint, called as the SDK will call it (#73) -----------------------------------
 #
-# `control_runs` and `control_hazards` do the SDK's job by hand, before #74 ships an SDK: what
-# `irimi shadow` stores for a run reported over the control endpoint, and what each refusal answers.
+# `control_runs` and `control_hazards` do the SDK's job by hand, with posts the test controls
+# exactly: what `irimi shadow` stores for a run reported over the control endpoint, and what each
+# refusal answers. The SDK's own posts (#74) are pinned by every other workflow.
 
 # The runs `control_runs` posts in full: run id, the tag its labels start with, the path its one
 # labelled read GETs.

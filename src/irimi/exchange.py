@@ -114,6 +114,19 @@ CONTROL_PREFIX = "/_irimi/"
 # The `Irimi-Answered-By` value every control answer carries. Not an `AnsweredBy`: that vocabulary
 # is the trace's, and a control request never appears in a trace.
 CONTROL_ANSWER = "control"
+# The control endpoint's run routes under CONTROL_PREFIX: `runs/{run_id}/{action}` (#73). Here
+# rather than in `control`, so the SDK, which posts to them from layer 2, spells them the way the
+# endpoint reads them (#74).
+RUNS_ROUTE = "runs"
+START_ACTION = "start"
+TOOL_CALLS_ACTION = "tool-calls"
+END_ACTION = "end"
+RUN_ACTIONS = (START_ACTION, TOOL_CALLS_ACTION, END_ACTION)
+# The header that names the run a request belongs to. irimi reads it and strips it (#67); the SDK
+# puts it on every request a run makes (#75). Here, in layer 0, rather than in `pipeline`, so the
+# SDK, which sits beside `pipeline` and may not import it, spells it the same way (#74). Header
+# names are compared case-insensitively, and irimi stores them lower-case.
+RUN_HEADER = "irimi-run"
 
 # The fidelity flag each way of answering carries. One mapping rather than a branch per caller:
 # the policy reads it, and `tests/test_exchange.py` holds it exhaustive over the non-live values.

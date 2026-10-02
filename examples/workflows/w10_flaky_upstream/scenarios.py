@@ -9,10 +9,13 @@ from collections.abc import Callable
 from examples.workflows.harness.internet import Req
 from examples.workflows.harness.run import Scenario, Workflow
 from examples.workflows.harness.services import LlmCall, LlmTurn, World
-from examples.workflows.w10_flaky_upstream.agent import CHANNEL
+from examples.workflows.w10_flaky_upstream.agent import CHANNEL, CONTROL_FAULTS
 
 CHARGE = "ch_PAYOUT1"
 STRIPE = "api.stripe.com"
+# The scenarios that take irimi's control endpoint away from the agent, one per fault (#74): the
+# SDK's posts fail, so its run is stored only as the `header` run its labelled requests make.
+CONTROL_DOWN = tuple(f"control_{how}" for how in CONTROL_FAULTS)
 
 
 def _script(call: LlmCall) -> LlmTurn:
@@ -98,6 +101,26 @@ WORKFLOW = Workflow(
             ("--sigterm-after-write",),
             setup=_seed(),
             doc="the agent is killed with SIGTERM after its refund",
+        ),
+        "sigint_mid_run": Scenario(
+            ("--sigint-after-write",),
+            setup=_seed(),
+            doc="Ctrl-C after the refund: a KeyboardInterrupt ends the run in error (#74)",
+        ),
+        "control_unset": Scenario(
+            ("--control", "unset"),
+            setup=_seed(),
+            doc="IRIMI_CONTROL dropped before the run: the SDK warns once, the agent is unchanged",
+        ),
+        "control_unreachable": Scenario(
+            ("--control", "unreachable"),
+            setup=_seed(),
+            doc="the control endpoint is gone: the SDK warns once, the agent is unchanged",
+        ),
+        "control_refused": Scenario(
+            ("--control", "refused"),
+            setup=_seed(),
+            doc="the control endpoint answers 404: the SDK warns once, the agent is unchanged",
         ),
     },
 )

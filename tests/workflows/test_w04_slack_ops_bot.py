@@ -84,7 +84,7 @@ def test_runs_show_prints_the_webhook_post_as_the_maps_sentence_from_its_stored_
     route by the operation the exchange recorded (#72). Its event line spells the placeholder, as
     stored, and its summary line is the map's sentence, as `irimi shadow` printed it."""
     shadow = run_workflow(W, "mention_in_thread", "shadow")
-    (run_id,) = [r.run_id for r in shadow.stored().list_runs() if r.attribution == "header"]
+    (run_id,) = [r.run_id for r in shadow.sdk_runs()]
     code, out, err = shadow.runs("show", run_id)
     assert (code, err) == (0, [])
     placeholder = redact.placeholder(redact.load_key(shadow.home), WEBHOOK_PATH)

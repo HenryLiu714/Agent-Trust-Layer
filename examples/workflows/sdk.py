@@ -4,9 +4,10 @@ Agents write `from examples.workflows import sdk` where a real agent would write
 `from irimi import sdk`, and use the API #74 and #76 specify: `@sdk.trigger`, `sdk.run()`,
 `sdk.current_run_id()`, `sdk.propagate()`, `sdk.active()` and `@sdk.tool(kind=..., shadow=...)`.
 
-- **When `irimi.sdk` exists**, this module re-exports it, name by name: each name `irimi.sdk` has
-  is the real one, and each it does not have yet is the stand-in's. #74 ships `trigger` and `run`
-  before #76 ships `tool`, and an agent that uses `@sdk.tool` must still import in that window.
+- **When `irimi.sdk` exists**, as it has since #74, this module re-exports it, name by name: each
+  name `irimi.sdk` has is the real one, and each it does not have yet is the stand-in's. #74
+  shipped `trigger`, `run`, `current_run_id`, `propagate` and `active`; until #76 ships `tool`,
+  `tool` is the stand-in's, so an agent that uses `@sdk.tool` still imports.
   Names this module does not define (`sdk.instrument`, `sdk.replay`, `ReplayResult`, ...) are
   forwarded to `irimi.sdk` by the module `__getattr__`.
   Three real names are still wrapped, for the observation log the corpus pins:
@@ -180,7 +181,7 @@ def trigger(fn: Callable[..., Any] | None = None, *, name: str | None = None) ->
 
     def decorate(f: Callable[..., Any]) -> Callable[..., Any]:
         is_generator = inspect.isgeneratorfunction(f) or inspect.isasyncgenfunction(f)
-        run_name = name or f.__qualname__
+        run_name = f.__qualname__ if name is None else name
         if real is not None:
             # A generator goes to the real decorator as it is, for its own TypeError (#74).
             inner = f if is_generator else _around(f, lambda: _observed(run_name))

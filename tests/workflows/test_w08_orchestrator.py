@@ -118,12 +118,16 @@ def test_every_sub_agent_call_joins_its_parents_run(run_workflow):
         assert sorted(labels) == ["charges", "inventory", "quote", "reserve"]
     assert {e["outcome"] for e in shadow.events("run.end")} == {"ok"}
     assert shadow.result()["reserved"] == 2
-    # Stored the same way (#70): each orchestrator run is a `header` run holding its own four
-    # calls, the sub-agents' included, and the process run holds none of them.
+    # Stored the same way (#70, #74): two runs the SDK started, not four, each holding its own
+    # four calls, the sub-agents' included, and the process run holds none of them.
     reader = shadow.stored()
     records = {r.run_id: r.attribution for r in reader.list_runs()}
-    assert sorted(records.values()) == ["header", "header", "process"]
-    assert {run_id for run_id, a in records.items() if a == "header"} == runs
+    assert sorted(records.values()) == ["process", "sdk", "sdk"]
+    assert {run_id for run_id, a in records.items() if a == "sdk"} == runs
+    entrypoint = "examples.workflows.w08_orchestrator.agent:plan_quarter_close"
+    assert {(r.trigger.name, r.trigger.entrypoint) for r in shadow.sdk_runs() if r.trigger} == {
+        ("plan_quarter_close", entrypoint)
+    }
     for run_id, attribution in records.items():
         paths = [
             (e.request.method, e.request.host, e.request.path)

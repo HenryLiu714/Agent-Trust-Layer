@@ -1,8 +1,9 @@
 """The control endpoint (#73) across every scenario of every sample workflow.
 
-Today only W9 calls the endpoint (`self_addressed`). Once the SDK (#74) posts a run's start and
-end, every SDK workflow does, and these hold all of them: a control request is never an exchange,
-and `IRIMI_CONTROL` reaches every agent `irimi shadow` starts and no bare one.
+Every workflow that uses the SDK posts each run's start and end to it (#74), and W9 calls it by
+hand. These hold all of them: a control request is never an exchange, `IRIMI_CONTROL` reaches
+every agent `irimi shadow` starts and no bare one, and a bare agent, with no irimi, starts no run
+and calls no control endpoint.
 """
 
 import pytest
@@ -45,3 +46,24 @@ def test_irimi_control_reaches_every_shadow_agent_and_no_bare_one(run_workflow, 
         assert start["control"] == start["proxy"] + CONTROL_PREFIX.rstrip("/")
     for start in bare.events("start"):
         assert start["control"] is None
+
+
+# W9's scenarios that call a control endpoint by hand. Bare, they call it at the fake internet,
+# which answers 502, so that the agent exits as it does under shadow (#73).
+BY_HAND = {
+    ("w09_scope_gauntlet", "self_addressed"),
+    ("w09_scope_gauntlet", "control_runs"),
+    ("w09_scope_gauntlet", "control_hazards"),
+}
+
+
+@pytest.mark.parametrize(("name", "scenario"), CASES, ids=[f"{n}:{s}" for n, s in CASES])
+def test_a_bare_agent_starts_no_run_and_calls_no_control_endpoint(run_workflow, name, scenario):
+    """Without irimi the SDK is inert (#74): `IRIMI_ENGINE_ACTIVE` is unset, so no trigger and no
+    `sdk.run` starts a run, and nothing is posted anywhere. Nothing reached the fake internet,
+    which is where a post that ignored NO_PROXY or the missing `IRIMI_CONTROL` would land."""
+    bare = run_workflow(name, scenario, "bare")
+    assert bare.events("run.start") == bare.events("run.end") == []
+    if (name, scenario) in BY_HAND:
+        return
+    assert [r.path for r in bare.internet.requests() if CONTROL_PREFIX in r.path] == []

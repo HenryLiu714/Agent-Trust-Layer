@@ -181,6 +181,11 @@ def test_an_agent_that_raises_after_its_write_still_shows_the_write(run_workflow
     assert shadow.exit_code == run_workflow(W, "raise_after_write", "bare").exit_code == 1
     [end] = shadow.events("run.end")
     assert (end["outcome"], end["error"]) == ("error", "RuntimeError")
+    # Stored under the exception's full name (#74), the refund id it names included.
+    [run] = shadow.sdk_runs()
+    assert run.outcome == "error" and run.error is not None
+    assert run.error.type == "builtins.RuntimeError"
+    assert run.error.message.startswith("ledger export failed after refund re_")
     summary = shadow.summary()
     assert REFUND_LINE in summary
     # LOOKS WRONG: the summary does not say the agent failed. Nothing in it tells this run from
@@ -215,10 +220,11 @@ def test_an_agent_killed_after_its_write_leaves_a_run_with_no_end(run_workflow):
     assert process_run(shadow) == ("error", 143, ErrorInfo("exit", "exited 143"))
     assert listed_status(shadow) == "error"
     assert shown_outcome(shadow) == ["outcome: error", "error: exit: exited 143", "exit code: 143"]
-    # The agent's own run is the `header` run its first call made, and it reads back whole,
-    # the faked refund included, with no end: incomplete, as a killed run is (#70).
+    # The agent's own run is the one the SDK started (#74), and it reads back whole, the faked
+    # refund included, with no end: the default SIGTERM handler raises nothing, so the SDK never
+    # posted one, and the run is incomplete, as a killed run is (#70).
     reader = shadow.stored()
-    [run] = [r for r in reader.list_runs() if r.attribution == "header"]
+    [run] = shadow.sdk_runs()
     assert (run.run_id, run.outcome, run.ended_at) == (shadow.one("run.start")["run"], None, None)
     stored = [e for e in reader.load_run(run.run_id).events if isinstance(e, Exchange)]
     assert [(e.request.method, e.request.path, e.answered_by) for e in stored][-1] == (

@@ -46,7 +46,7 @@ class ControlClient:
 
     def __init__(self) -> None:
         # No ProxyHandler entries: urllib's default opener reads HTTP_PROXY, this one never does.
-        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirects())
         self._warned: set[Failure] = set()
         self._lock = threading.Lock()
 
@@ -62,7 +62,9 @@ class ControlClient:
     def _send(
         self, run_id: str, action: Action, doc: Mapping[str, Any]
     ) -> tuple[Failure, str] | None:
-        base = os.environ.get(paths.CONTROL_ENV)
+        # irimi sets the variable with no trailing slash (#73), but a deployment that sets it by
+        # hand (#77) may type one, which would make every route `//runs/...`, a 404.
+        base = os.environ.get(paths.CONTROL_ENV, "").rstrip("/")
         if not base:
             return "unset", f"{paths.CONTROL_ENV} is not set"
         request = urllib.request.Request(
@@ -74,7 +76,7 @@ class ControlClient:
         try:
             with self._opener.open(request, timeout=TIMEOUT_S) as response:
                 response.read()
-        except urllib.error.HTTPError as exc:  # an answer outside 2xx
+        except urllib.error.HTTPError as exc:  # an answer outside 2xx, a redirect included
             with exc:
                 said = exc.read(MAX_DETAIL).decode("utf-8", "replace")
             return "rejected", f"HTTP {exc.code}: {said}"
@@ -101,3 +103,13 @@ class ControlClient:
             kind,
             detail,
         )
+
+
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """Never follows a redirect, so a 3xx is refused as an HTTPError like any answer outside 2xx.
+    irimi's endpoint never sends one: it comes from something else on that port, and urllib would
+    have followed a 301, 302 or 303 as a GET to wherever it pointed, outside the proxy, and called
+    the run recorded when that answered (#74)."""
+
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None

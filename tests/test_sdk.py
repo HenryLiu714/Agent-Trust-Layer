@@ -12,7 +12,9 @@ import contextvars
 import dataclasses
 import enum
 import functools
+import gc
 import http.server
+import inspect
 import logging
 import socket
 import subprocess
@@ -376,6 +378,102 @@ def test_a_trigger_cancelled_while_its_start_is_posted_leaves_no_run_current(mon
         assert asyncio.run(main()) == (True, None)
 
 
+def test_an_interruption_while_the_end_is_posted_still_leaves_no_run_current(monkeypatch):
+    """A KeyboardInterrupt (sync) or a cancellation (async) that arrives while the end is posted
+    propagates, as it would from any other line, with the agent's own exception as its
+    `__context__`. Either way the run is left: the context variable is always reset."""
+    monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
+    boom = ValueError("x")
+
+    class InterruptedEnd:
+        def post(self, run_id: str, action: str, doc: Any) -> None:
+            if action == "end":
+                raise KeyboardInterrupt
+
+    monkeypatch.setattr(runs, "reporter", InterruptedEnd())
+
+    @sdk.trigger
+    def fails() -> None:
+        raise boom
+
+    with pytest.raises(KeyboardInterrupt) as caught:
+        fails()
+    assert caught.value.__context__ is boom and sdk.current_run_id() is None
+
+    posting = threading.Event()
+    release = threading.Event()
+
+    class SlowEnd:
+        def post(self, run_id: str, action: str, doc: Any) -> None:
+            if action == "end":
+                posting.set()
+                release.wait(5)
+
+    monkeypatch.setattr(runs, "reporter", SlowEnd())
+
+    @sdk.trigger
+    async def fails_async() -> None:
+        raise boom
+
+    async def main() -> tuple[BaseException | None, str | None]:
+        async def caller() -> tuple[BaseException | None, str | None]:
+            try:
+                await fails_async()
+            except BaseException as exc:  # noqa: BLE001 - what the agent's caller would see
+                return exc.__context__, sdk.current_run_id()
+            return None, sdk.current_run_id()
+
+        task = asyncio.create_task(caller())
+        await asyncio.to_thread(posting.wait, 5)
+        task.cancel()
+        try:
+            return await task
+        finally:
+            release.set()
+
+    assert asyncio.run(main()) == (boom, None)
+
+
+def test_an_async_trigger_closed_mid_run_ends_its_run_and_raises_nothing(monkeypatch):
+    """A coroutine closed rather than awaited - by hand, or a pending task the garbage collector
+    reclaims - is closed with GeneratorExit, during which nothing may be awaited: an await there
+    is "coroutine ignored GeneratorExit", raised into whoever closed it. So the end is posted
+    inline, and the run left even from the collector's context, which is not the one that entered
+    it. Neither the closer nor `sys.unraisablehook` sees an error of the SDK's."""
+    monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
+    log: list[str] = []
+    monkeypatch.setattr(runs, "reporter", _Posts(log))
+    unraisable: list[BaseException | None] = []
+    monkeypatch.setattr(sys, "unraisablehook", lambda u: unraisable.append(u.exc_value))
+
+    @sdk.trigger
+    async def waits() -> None:
+        log.append("body")
+        await asyncio.get_running_loop().create_future()  # nothing ever resolves it
+
+    async def by_hand() -> None:
+        coroutine = waits()
+        blocked = coroutine.send(None)
+        while "body" not in log:  # the start is posted in a worker thread, which may be done first
+            while not blocked.done():
+                await asyncio.sleep(0.01)
+            blocked = coroutine.send(None)
+        coroutine.close()  # suspended in the body
+
+    async def collected() -> None:
+        task = asyncio.create_task(waits())
+        while log.count("body") < 2:
+            await asyncio.sleep(0.01)
+        del task
+        gc.collect()
+
+    asyncio.run(by_hand())
+    assert log == ["start", "body", "end"] and sdk.current_run_id() is None
+    asyncio.run(collected())
+    assert log[3:] == ["start", "body", "end"]
+    assert unraisable == []
+
+
 # -- nesting and concurrency ---------------------------------------------------------------------
 
 
@@ -524,12 +622,27 @@ def test_an_exit_in_a_context_that_only_inherited_an_entry_leaves_it_to_its_make
     assert (run.run_id, run.outcome) == (run_id, "ok")
 
 
+def test_a_stray_exit_after_the_block_has_ended_ends_nothing_and_does_not_raise(irimi):
+    """The same stray exit as above, made after the block's own: the entry it inherited has been
+    taken off by its maker, whose token is spent. Resetting a spent token is a RuntimeError, which
+    reached the agent, where one not yet spent is a ValueError, which did not (#74)."""
+    with JOB:
+        run_id = sdk.current_run_id()
+        stray = sdk.propagate(JOB.__exit__)
+    with ThreadPoolExecutor(1) as pool:
+        pool.submit(stray, None, None, None).result()
+    assert sdk.current_run_id() is None
+    [run] = irimi.sdk_runs()
+    assert (run.run_id, run.outcome) == (run_id, "ok")
+
+
 def test_instrument_is_called_once_per_new_run_and_never_for_a_joined_one(irimi, monkeypatch):
     calls: list[str | None] = []
     monkeypatch.setattr(runs, "instrument", lambda: calls.append(sdk.current_run_id()))
     outer_id, _ = outer()
-    asyncio.run(handle_async("ch_9"))
-    assert len(calls) == 2 and calls[0] == outer_id
+    async_id = asyncio.run(handle_async("ch_9"))
+    # Inside the run it starts, posted inline or from a worker thread alike.
+    assert calls == [outer_id, async_id]
 
 
 def test_a_start_interrupted_while_posted_leaves_no_run_current(irimi, monkeypatch):
@@ -583,6 +696,20 @@ def test_an_async_trigger_driven_with_no_asyncio_loop_posts_inline(irimi):
     assert run_id is not None and (run.run_id, run.outcome) == (run_id, "ok")
 
 
+def test_an_async_trigger_whose_loop_takes_no_more_threads_posts_inline(irimi):
+    """A loop whose default executor has been shut down - at the end of `asyncio.run`, or once
+    the interpreter is exiting - refuses `asyncio.to_thread` with RuntimeError, which reached the
+    agent. The posts are made inline instead (#74)."""
+
+    async def late() -> str | None:
+        await asyncio.get_running_loop().shutdown_default_executor()
+        return await handle_async("ch_1")
+
+    run_id = asyncio.run(late())
+    [run] = irimi.sdk_runs()
+    assert run_id is not None and (run.run_id, run.outcome) == (run_id, "ok")
+
+
 def plain_decorator(fn: Any) -> Any:
     """A decorator that does not mark its wrapper as a coroutine function, as many do not."""
 
@@ -605,6 +732,159 @@ def test_an_async_function_behind_a_plain_decorator_runs_inside_its_run(irimi):
     [run] = irimi.sdk_runs()
     assert run_id is not None and (run.run_id, run.outcome) == (run_id, "ok")
     assert run.trigger is not None and run.trigger.args == {"charge": "ch_1"}
+    # The wrapper keeps the nature of what it wraps: the plain decorator's is a sync function.
+    assert not inspect.iscoroutinefunction(wrapped_handler)
+
+
+def runs_to_completion(fn: Any) -> Any:
+    """A decorator that gives an async function a sync entrypoint, driving it to completion."""
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        return asyncio.run(fn(*args, **kwargs))
+
+    return wrapper
+
+
+@sdk.trigger
+@runs_to_completion
+async def synchronous_handler(charge: str) -> tuple[str, str | None]:
+    await asyncio.sleep(0)
+    return charge, sdk.current_run_id()
+
+
+@pytest.mark.parametrize("active", [False, True])
+def test_a_sync_entrypoint_to_an_async_function_still_returns_its_value(irimi, monkeypatch, active):
+    """`functools.wraps` makes the wrapper look async to `inspect.unwrap`, but it returns the
+    value, not a coroutine. Wrapped as async, a call returned an unawaited coroutine and the body
+    never ran - in production too, with the SDK inactive (#74)."""
+    if not active:
+        monkeypatch.delenv(paths.ENGINE_ACTIVE_ENV)
+    charge, run_id = synchronous_handler("ch_1")
+    assert charge == "ch_1" and (run_id is not None) is active
+    found = irimi.sdk_runs()
+    assert [(r.run_id, r.outcome) for r in found] == ([(run_id, "ok")] if active else [])
+
+
+async def _settle(charge: str) -> str | None:
+    await asyncio.sleep(0)
+    if charge == "bad":
+        raise _BOOM
+    return sdk.current_run_id()
+
+
+_BOOM = ValueError("bad charge")
+
+
+@sdk.trigger
+def settle(charge: str) -> Any:
+    return _settle(charge)  # a sync function that hands back a coroutine for its caller to await
+
+
+def test_a_sync_trigger_that_returns_a_coroutine_keeps_its_run_until_the_coroutine_ends(irimi):
+    """The body is in the coroutine, so the run lasts until it is awaited to its end, in whatever
+    task awaits it, and its outcome is the coroutine's. Before, the run ended when the coroutine
+    was made, and the body ran outside every run (#74)."""
+    log: list[str] = []
+    inner = runs.reporter
+
+    class Order:
+        def post(self, run_id: str, action: str, doc: Any) -> None:
+            log.append(action)
+            inner.post(run_id, action, doc)
+
+    runs.reporter = Order()  # restored by the fixture's monkeypatch
+
+    async def main() -> tuple[str | None, str | None]:
+        made = settle("ch_1")
+        assert log == ["start"] and sdk.current_run_id() is None  # its body has not run yet
+        ran_in = await asyncio.create_task(made)
+        with pytest.raises(ValueError) as caught:
+            await settle("bad")
+        assert caught.value is _BOOM
+        return ran_in, sdk.current_run_id()
+
+    ran_in, after = asyncio.run(main())
+    assert ran_in is not None and after is None and log == ["start", "end", "start", "end"]
+    found = {r.run_id: r for r in irimi.sdk_runs()}
+    assert found[ran_in].outcome == "ok"
+    [failed] = [r for r in found.values() if r.run_id != ran_in]
+    assert (failed.outcome, failed.error) == (
+        "error",
+        ErrorInfo("builtins.ValueError", "bad charge"),
+    )
+
+
+class Handlers:
+    @sdk.trigger
+    @staticmethod
+    def static_above(charge: str) -> str | None:
+        return sdk.current_run_id()
+
+    @staticmethod
+    @sdk.trigger
+    def static_below(charge: str) -> str | None:
+        return sdk.current_run_id()
+
+    @sdk.trigger
+    @classmethod
+    def class_above(cls, charge: str) -> str | None:
+        return sdk.current_run_id()
+
+    @classmethod
+    @sdk.trigger
+    def class_below(cls, charge: str) -> str | None:
+        return sdk.current_run_id()
+
+
+def test_a_static_or_class_method_stays_one_in_either_decorator_order(irimi):
+    """Above `@staticmethod`, the trigger used to return a plain function, which Python binds:
+    called on an instance, the static method was given the instance as its first argument, even
+    with the SDK inactive. Above `@classmethod`, it was refused as a name passed positionally."""
+    ids = [
+        call("ch_1")
+        for handlers in (Handlers, Handlers())
+        for call in (
+            handlers.static_above,
+            handlers.static_below,
+            handlers.class_above,
+            handlers.class_below,
+        )
+    ]
+    assert None not in ids and len(set(ids)) == 8
+    found = sorted((r.trigger.entrypoint, r.trigger.args) for r in irimi.sdk_runs() if r.trigger)
+    assert found == sorted(
+        (f"{HERE}:Handlers.{name}", {"charge": "ch_1"})
+        for name in ("static_above", "static_below", "class_above", "class_below")
+        for _ in range(2)
+    )
+
+
+class Handler:
+    def __call__(self, charge: str) -> None: ...
+
+
+@pytest.mark.parametrize(
+    "target",
+    [functools.partial(echo, 1), Handler(), Desk],
+    ids=["partial", "callable instance", "class"],
+)
+def test_what_has_no_importable_function_to_name_is_refused_at_decoration(target):
+    """A trigger records `module:qualname`, which replay (#84) imports. A partial or an instance
+    has none (decorating one used to raise AttributeError), and a class decorated would be
+    replaced by a function, so `isinstance` against it would break in production too."""
+    with pytest.raises(TypeError, match="function or a method"):
+        sdk.trigger(target)
+
+
+def test_a_function_defined_with_no_module_is_refused_by_its_name():
+    """A function `exec` defines in a namespace with no `__name__` has `__module__` None, so no
+    `module:qualname` to import. It is refused as the others are, but by its name: the refusal
+    said it was "not function", which reads as a contradiction (#74)."""
+    namespace: dict[str, Any] = {}
+    exec("def on_message(body): ...", namespace)
+    with pytest.raises(TypeError, match="on_message, which names no module"):
+        sdk.trigger(namespace["on_message"])
 
 
 def test_a_name_that_is_not_a_string_is_refused_at_decoration_or_kept_as_a_label(irimi):
@@ -640,16 +920,19 @@ def test_a_trigger_annotated_with_a_type_checking_only_import_still_binds_by_nam
 
 class _Recorder(http.server.BaseHTTPRequestHandler):
     """Records the target of every request it gets - absolute-form when it was sent to it as a
-    proxy - and answers `status` after `delay` seconds."""
+    proxy - and answers `status` after `delay` seconds, pointing at `location` when it is set."""
 
     hits: list[str]
     status = 500
     delay = 0.0
+    location = ""
 
     def do_POST(self) -> None:  # noqa: N802 - the stdlib's spelling
         self.hits.append(self.path)
         time.sleep(self.delay)
         self.send_response(self.status)
+        if self.location:
+            self.send_header("location", self.location)
         self.send_header("content-length", "0")
         self.end_headers()
 
@@ -660,10 +943,13 @@ class _Recorder(http.server.BaseHTTPRequestHandler):
 
 
 @contextlib.contextmanager
-def _recorder(status: int = 500, delay: float = 0.0) -> Iterator[tuple[int, list[str]]]:
+def _recorder(
+    status: int = 500, delay: float = 0.0, location: str = ""
+) -> Iterator[tuple[int, list[str]]]:
     """A server on a loopback port that records what reaches it: `(port, hits)`."""
     hits: list[str] = []
-    handler = type("Handler", (_Recorder,), {"hits": hits, "status": status, "delay": delay})
+    fields = {"hits": hits, "status": status, "delay": delay, "location": location}
+    handler = type("Handler", (_Recorder,), fields)
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}).start()
     try:
@@ -695,8 +981,11 @@ def test_an_inactive_sdk_calls_straight_through(tripwire, monkeypatch, value):
     assert asyncio.run(echo_async(sentinel)) is sentinel
     assert handle(7) is None and asyncio.run(handle_async("ch_1")) is None
     assert outer() == (None, None)
+    outside = len(contextvars.copy_context())
     with JOB, JOB:  # nested in itself, inactive: nothing to join and nothing to refuse
         assert sdk.current_run_id() is None
+        # Not even the object's own record of its entries: the issue's "set no context variable".
+        assert len(contextvars.copy_context()) == outside
     assert not sdk.active()
     assert tripwire == [] and calls == []
 
@@ -743,6 +1032,31 @@ def test_a_refused_post_is_one_warning_quoting_irimis_answer(irimi, monkeypatch,
     assert irimi.sdk_runs() == []
 
 
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_a_redirect_is_a_refused_post_never_followed(monkeypatch, warnings, status):
+    """irimi's endpoint never redirects, so a redirect is an answer from something else. urllib
+    followed a 301, 302 or 303 as a GET to wherever it pointed, outside the proxy, and called the
+    run recorded when that answered 200; it is refused like any answer outside 2xx (#74)."""
+    with _recorder(status=200) as (elsewhere, landed):
+        with _recorder(status=status, location=f"http://127.0.0.1:{elsewhere}/x") as (port, hits):
+            monkeypatch.setenv(paths.CONTROL_ENV, f"http://127.0.0.1:{port}/_irimi")
+            client.ControlClient().post("r1", "start", {})
+    assert len(hits) == 1 and landed == []
+    [warning] = warnings()
+    assert f"rejected: HTTP {status}" in warning.getMessage()
+
+
+def test_irimi_control_with_a_trailing_slash_names_the_same_endpoint(irimi, monkeypatch, warnings):
+    """irimi sets `IRIMI_CONTROL` with no trailing slash (#73), but serve mode (#77) has the agent's
+    deployment set it by hand. One typed with a slash posted to `/_irimi//runs/...`, a 404, and
+    every run was lost."""
+    monkeypatch.setenv(paths.CONTROL_ENV, f"http://127.0.0.1:{irimi.port}/_irimi/")
+    run_id = handle(1)
+    assert warnings() == []
+    [run] = irimi.sdk_runs()
+    assert (run.run_id, run.outcome) == (run_id, "ok")
+
+
 def test_a_control_endpoint_that_never_answers_times_out(monkeypatch, warnings):
     silent = socket.socket()
     silent.bind(("127.0.0.1", 0))
@@ -785,8 +1099,6 @@ def test_a_generator_function_is_refused_at_decoration():
 
 
 def test_a_trigger_keeps_its_functions_name_signature_and_nature():
-    import inspect
-
     assert handle.__name__ == "handle" and handle.__wrapped__.__qualname__ == "handle"  # type: ignore[attr-defined]
     assert list(inspect.signature(handle).parameters) == ["ticket_id", "note"]
     assert inspect.iscoroutinefunction(handle_async)

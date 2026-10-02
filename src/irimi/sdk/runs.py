@@ -14,14 +14,20 @@ Entering it:
 
 An entry interrupted while its start is posted (a KeyboardInterrupt, a cancelled task) never ran
 its body: it leaves the run at once and posts no end, and if the start arrived the run is stored
-incomplete.
+incomplete. One interrupted while its end is posted propagates the interruption, with the body's
+own exception as its `__context__`, as any other line would, and still leaves the run.
+
+A sync entry whose function returned a coroutine hands the run to it (`hand_off`): the run leaves
+the caller's context unended, and the task that awaits the coroutine makes it current again and
+ends it when the coroutine ends. Its start was posted inline, as every sync entry's is, even on an
+event loop's thread: until the function returned, nothing said its body was not already running.
 
 INACTIVE MEANS INERT. While `active()` is false - production, with no irimi in front - an entry
 does nothing at all: it sets no context variable, captures nothing, makes no network call and
 patches nothing. That is what makes the SDK safe to leave in production code.
 
 POSTS ARE SYNCHRONOUS, so the start reaches irimi before the run's first request and the end after
-its last: `with` posts inline, and `async with` in a worker thread (`asyncio.to_thread`), so the
+its last: `with` posts inline, and `async with` in a worker thread (`_off_the_loop`), so the
 event loop keeps serving other tasks meanwhile. A post never raises (`client.ControlClient`); a
 run whose posts failed goes on, current and labelled, and irimi only lacks its record.
 
@@ -35,8 +41,8 @@ import logging
 import os
 import secrets
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Coroutine
+from dataclasses import dataclass, replace
 from types import TracebackType
 from typing import Any
 
@@ -131,11 +137,39 @@ class RunScope:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
+        if isinstance(exc, GeneratorExit):
+            # The coroutine is being closed, not awaited: a pending task garbage-collected, or a
+            # `.close()` by hand. Nothing may be awaited now - Python would raise "coroutine
+            # ignored GeneratorExit" into whoever closed it - so the end is posted inline (#74).
+            self.__exit__(exc_type, exc, tb)
+            return
         try:
             if self._opened is not None:
                 await _off_the_loop(_report_end, self._opened, exc)
         finally:
             self._close()
+
+    def hand_off[T](self, coroutine: Coroutine[Any, Any, T]) -> Coroutine[Any, Any, T]:
+        """The run this entry opened, handed to `coroutine`: called inside a sync `with`, by a sync
+        function that returned a coroutine instead of running its body. The run leaves this
+        context now, with no end, and is current again in whatever task awaits the coroutine that
+        is returned, which ends it as `async with` would, with the coroutine's outcome (#74).
+        `coroutine` itself when this entry opened no run: inactive, or joined."""
+        opened = self._opened
+        if opened is None:
+            return coroutine
+        self._close()  # so the `with` this is called in ends nothing on its way out
+        return self._carry(opened, coroutine)
+
+    async def _carry[T](self, opened: _Opened, coroutine: Coroutine[Any, Any, T]) -> T:
+        self._opened = replace(opened, token=context.enter(opened.run_id))
+        try:
+            result = await coroutine
+        except BaseException as exc:
+            await self.__aexit__(type(exc), exc, exc.__traceback__)
+            raise
+        await self.__aexit__(None, None, None)
+        return result
 
     def _open(self) -> _Opened | None:
         """Steps 1 and 2 but the post: decide, and when this entry starts a run, capture its
@@ -158,20 +192,36 @@ class RunScope:
 
     def _close(self) -> None:
         opened, self._opened = self._opened, None
-        if opened is not None:
+        if opened is None:
+            return
+        try:
             context.leave(opened.token)
+        except ValueError:
+            # Closed from another context than the one that entered it - a coroutine the garbage
+            # collector closes runs in whatever context collected it. The entering context is
+            # abandoned with the coroutine, so there is nothing to make current again there (#74).
+            pass
 
 
 async def _off_the_loop(fn: Callable[..., None], *args: Any) -> None:
     """`fn(*args)` in a worker thread, so the event loop goes on serving other tasks while it
-    waits. Inline when no asyncio loop is running - a coroutine driven by trio, or by hand - where
-    `asyncio.to_thread` would raise into the agent."""
+    waits. Inline wherever `asyncio.to_thread` would raise into the agent: when no asyncio loop is
+    running - a coroutine driven by trio, or by hand - and when the loop's executor takes no more
+    work, shut down at the end of `asyncio.run` or as the interpreter exits (#74).
+
+    This is `asyncio.to_thread` spelled out, so that a refusal to start the thread, which raises
+    before the future exists, is told apart from the wait."""
     try:
-        asyncio.get_running_loop()
+        loop = asyncio.get_running_loop()
     except RuntimeError:
         fn(*args)
         return
-    await asyncio.to_thread(fn, *args)
+    try:
+        waiting = loop.run_in_executor(None, contextvars.copy_context().run, fn, *args)
+    except RuntimeError:
+        fn(*args)
+        return
+    await waiting
 
 
 def _report_start(opened: _Opened) -> None:

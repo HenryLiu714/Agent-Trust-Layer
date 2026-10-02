@@ -409,17 +409,24 @@ itself always propagates, unchanged. `sdk.current_run_id()` is the current run's
   reports each run to `IRIMI_CONTROL` directly, never through the proxy. If it cannot, it logs
   one warning per kind of failure on the `irimi.sdk` logger and the agent carries on.
 - **Threads and tasks.** The run's id lives in a context variable. `asyncio` tasks and
-  `asyncio.to_thread` inherit the run; `threading.Thread` and `ThreadPoolExecutor.submit` do not,
-  unless the callable goes through `sdk.propagate`: `executor.submit(sdk.propagate(work))`. (A
-  free-threaded 3.14 build starts threads in a copy of their creator's context by default, so
-  there they do inherit it.)
+  `asyncio.to_thread` inherit the run; `threading.Thread`, `ThreadPoolExecutor.submit` and
+  `loop.run_in_executor` do not, unless the callable goes through `sdk.propagate`:
+  `executor.submit(sdk.propagate(work))`. (A free-threaded 3.14 build starts a thread in a copy of
+  its creator's context by default, so there a bare thread does inherit the run. A pool's worker
+  thread, though, keeps the context it was started in, and runs later work in the run that started
+  it, not the one that submitted it: use `sdk.propagate` there too.)
+- **What a trigger wraps.** A function, an `async def`, or a method, `staticmethod` and
+  `classmethod` included. A function that is not `async def` but returns a coroutine (a decorator
+  that does not mark itself async, or `return handle_async(x)`) keeps its run until the coroutine
+  has been awaited to its end.
 - **Nesting.** A trigger called inside a run joins it: one run, not two. So does a `sdk.run`
   block. One `sdk.run(...)` object may be entered again - nested in itself, from several threads
   or tasks at once, or as a module-level constant - and each entry is a run of its own unless it
   is nested in one.
 - **Names.** A trigger's name is a string: `@sdk.trigger(name="refund")`. A name passed
-  positionally, or one that is not a string, is a `TypeError` when the module loads. Names are
-  cut to 1000 characters.
+  positionally, or one that is not a string, is a `TypeError` when the module loads, and so is a
+  trigger on a generator function, a class, a `functools.partial` or an object with `__call__`.
+  Names are cut to 1000 characters.
 - **Start the agent by module name.** `python -m my_agent` and `python my_agent.py` run it as
   `__main__`, so its entrypoint is recorded as `__main__:handle_ticket`, which replay (#84) cannot
   import. Import the module by its name and call it, as the sample workflows'

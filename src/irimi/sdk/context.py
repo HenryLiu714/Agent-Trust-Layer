@@ -26,9 +26,10 @@ def enter(run_id: str) -> contextvars.Token[str | None]:
 
 
 def leave(token: contextvars.Token[str | None]) -> None:
-    """Make current again what was current before `enter` returned `token`. Always called in the
-    context `enter` was: a `RunScope` is entered and left by one call or one block, and `sdk.run`
-    leaves only the entries it made in the context it is leaving (`api.run`)."""
+    """Make current again what was current before `enter` returned `token`. Called in the context
+    `enter` was: a `RunScope` is entered and left by one call or one block, and `sdk.run` leaves
+    only the entries it made in the context it is leaving (`api.run`). The one exception is a
+    coroutine closed by the garbage collector, whose ValueError `RunScope._close` absorbs."""
     _RUN_ID.reset(token)
 
 

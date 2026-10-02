@@ -59,10 +59,12 @@ so it keeps its real module name; `scenarios.py` seeds the fake services per sce
   the Stripe, Slack and Anthropic calls on it, the observation log, its SQLite files, and, for an
   agent that serves (W1, W4, W5, W7), `serve()`, and `deliver()` (W1, W4, W5), which sends an inbound call to the
   agent's own loopback server through no proxy, because inbound traffic is not its egress.
-- **The SDK stand-in** (`sdk.py`). The agents use the SDK API from #74 and #76 (`@sdk.trigger`,
-  `sdk.run`, `@sdk.tool(kind=..., shadow=...)`). Until `irimi.sdk` exists, `sdk.py` implements its
-  call-time rules itself, so an active write tool already runs its stand-in and never the real
-  function. Once `irimi.sdk` lands, `sdk.py` re-exports it.
+- **The SDK** (`sdk.py`). The agents use the SDK API from #74 and #76 (`@sdk.trigger`,
+  `sdk.run`, `@sdk.tool(kind=..., shadow=...)`). `sdk.py` re-exports `irimi.sdk` name by name, so
+  `trigger` and `run` are the real ones (#74): they post each run's start and end to irimi, and
+  are wrapped only so the agent's log still gets `run.start` and `run.end` with the real run id.
+  Until `irimi.sdk` has `tool` (#76), `sdk.py` implements its call-time rules itself, so an active
+  write tool already runs its stand-in and never the real function.
 
 ## The universal invariants
 
@@ -86,10 +88,11 @@ so it keeps its real module name; `scenarios.py` seeds the fake services per sce
 that started irimi stores exactly one process run, with the agent's argv and exit; every exchange
 irimi printed is stored exactly once, equal field by field to itself redacted, and telemetry only
 as having happened, in its run's order among the tool calls the control endpoint passed on;
-every other run is a `header` run its first event created (until #74), or, in W9's control
-scenarios, an `sdk` run the control endpoint started (#73); every
-store directory is 0700, every file 0600, and no `events.jsonl` ends in a half-written line; and a
-bare run stores nothing. A streamed answer is stored as the chunks the agent was sent (#71). For
+every other run is an `sdk` run: one the SDK started (#74), or, in W9's control scenarios, one W9
+posted by hand (#73); every run the agent logged (`run.start`, `run.end`) is stored, with the
+trigger name and outcome it logged and its error under the exception's `module.qualname`, and a
+run killed before its end is stored with none; every store directory is 0700, every file 0600, and
+no `events.jsonl` ends in a half-written line; and a bare run stores nothing. A streamed answer is stored as the chunks the agent was sent (#71). For
 W9 (but for its control scenarios) and W11, which send no `Irimi-Run`, `irimi runs show <process
 run>` ends in the summary
 `irimi shadow` printed, but for the elapsed seconds; for every workflow, the summary over all of
@@ -100,15 +103,17 @@ promises (#73): no control request is an exchange, printed, handed to the store 
 `IRIMI_CONTROL` reaches every agent under shadow, naming the listener its proxy does, and no bare
 agent. `agentkit.start()` logs both variables, which is what that check reads; every shadow run
 starts its agent as often as its bare run does, but for W8 `map_refused`, where irimi refuses to
-start. Three W9 scenarios call the endpoint:
+start. And a bare agent, with no irimi, starts no run and calls no control endpoint (#74). Every
+SDK workflow posts its runs' starts and ends to the endpoint, and three W9 scenarios call it by
+hand:
 
 - `self_addressed`: its health check and a path no route names, at each of the three spellings of
   the listener.
-- `control_runs`: the SDK's job by hand, until #74 ships one. Runs are started, given two tool
-  calls with a Stripe read labelled `Irimi-Run: <id>` between them, and ended: one posted direct
-  (`127.0.0.1`), one through the proxy to itself (`127.1`), two at once from threads kept in
-  lockstep, and one ended in error with a message past the 1000 characters a trace keeps. Then
-  every refusal (405, 404, 400 for `../x`, `unattributed`, `NaN`, a missing field and a tool
+- `control_runs`: the SDK's job by hand, with posts the test controls exactly. Runs are started,
+  given two tool calls with a Stripe read labelled `Irimi-Run: <id>` between them, and ended: one
+  posted direct (`127.0.0.1`), one through the proxy to itself (`127.1`), two at once from threads
+  kept in lockstep, and one ended in error with a message past the 1000 characters a trace keeps.
+  Then every refusal (405, 404, 400 for `../x`, `unattributed`, `NaN`, a missing field and a tool
   call naming its run, 413), and the health check before and after. The tests pin what is stored:
   `attribution: sdk`, the posted trigger, the tool calls in order with the read between them, the
   outcome, and `irimi runs list` no longer saying `incomplete`. Bare, the agent has no

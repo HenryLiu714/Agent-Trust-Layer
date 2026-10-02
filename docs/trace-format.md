@@ -176,11 +176,54 @@ A **trigger** (`trace.Trigger`):
 | --- | --- | --- |
 | `name` | string | The display name. |
 | `entrypoint` | string or `null` | `module:qualname` of the wrapped function. `null` for a context-manager run and for the process run. |
-| `args` | any JSON | The captured arguments. How a value that is not JSON gets captured is #74's. |
+| `args` | any JSON | The captured arguments: see [Captured arguments](#captured-arguments). |
 | `replayable` | boolean | Whether `args` captured everything needed to call `entrypoint` again. |
 
 An **error** (`trace.ErrorInfo`) is `{"type": string, "message": string}`. `type` is the
 exception's `module.qualname`, and `message` is at most 1000 characters.
+
+### Captured arguments
+
+An `sdk` run's `trigger.args` are what the SDK captured (#74, `irimi.sdk.capture`). For
+`@sdk.trigger` they are the call's arguments bound to the function's parameters,
+`{"param": value}`: a first parameter named `self` or `cls` is left out, and defaults are not
+applied. A call that does not bind is captured as `{"args": [...], "kwargs": {...}}` and is not
+replayable. For `sdk.run(trigger=value)` they are `value`. Each value is captured by the first row
+that matches it, and `replayable` is true only when every part of it was captured by a replayable
+row:
+
+| Value | Captured as | Replayable |
+| --- | --- | --- |
+| `None`, `bool`, `int`, `str`, finite `float` | itself | yes |
+| non-finite `float` | `{"__irimi_repr__": "nan"}` (or `"inf"`, `"-inf"`) | no |
+| `list`, `tuple` | a JSON list: a tuple becomes a list | when every item is |
+| `dict` whose every key is a `str` | a JSON object | when every value is |
+| `dict` with any other key | `{"__irimi_repr__": repr(v)[:1000]}` | no |
+| dataclass instance | `{"__irimi_type__": "module:qualname", "value": <its init=True fields, captured>}` | when every field is, and its class can be imported |
+| object with a callable `model_dump` (pydantic v2) | `{"__irimi_type__": "module:qualname", "value": <v.model_dump(mode="json"), captured>}` | the same |
+| `bytes` | `{"__irimi_bytes__": <base64>}` | yes |
+| anything else | `{"__irimi_repr__": repr(v)[:1000]}`, or `"<unrepresentable {type}>"` in place of the repr when `repr` raises | no |
+
+- **Types match exactly.** An `IntEnum`, a namedtuple, an `OrderedDict` or a `bytearray` is
+  "anything else", because replay (#84) would rebuild the base type rather than the value the
+  trigger was given. An `int` too long to write as JSON is `"<unrepresentable int>"`.
+- **The markers are reserved.** A `dict` holding `__irimi_repr__`, `__irimi_type__`,
+  `__irimi_bytes__` or `__irimi_truncated__` as a key of its own is captured by its repr, so a
+  marker in `args` was always written by capture.
+- **Importable classes only.** A dataclass or model defined inside a function (`<locals>` in its
+  qualname), or in `__main__`, which is another module in the process that replays it, cannot be
+  imported to rebuild it, so it is not replayable.
+- **Depth.** A value inside more than 32 containers is `{"__irimi_repr__": "<too deep>"}`, not
+  replayable. For `@sdk.trigger`, depth counts from each parameter's value, so a parameter may
+  nest as deep as a value given to `sdk.run(trigger=...)`.
+- **Size.** Captured args that would be more than 1 MiB of JSON are replaced, whole, by
+  `{"__irimi_truncated__": true, "bytes": n}`, not replayable. Capture counts as it goes and stops
+  as soon as it passes the limit, so for a value that holds one object many times over `n` is the
+  count when it stopped, already past 1 MiB, rather than the full size.
+- **Never raises.** A `repr` or a `model_dump` that raises captures that one value as its
+  `__irimi_repr__`, never the agent's error.
+- **Redacted on disk.** The store redacts `args` like any JSON it keeps (see
+  [Redaction](#redaction)), so a replay gets placeholders where secrets were.
 
 ### `events.jsonl`: one event per line
 

@@ -373,6 +373,61 @@ target is a `502` flagged `target-failed`, never a silent fall back to the fake:
 
 and the summary says `unanswered (target unreachable)` on the write's line.
 
+## Attributing runs with the SDK
+
+`irimi shadow -- <cmd>` treats one process as one run. An agent that serves - a webhook handler,
+a queue worker - handles many requests in one process, often at once, and the proxy alone sees
+one interleaved stream. The SDK, `irimi.sdk`, marks in the agent's own code where each run starts
+and ends:
+
+```python
+from irimi import sdk
+
+
+@sdk.trigger  # or @sdk.trigger(name="refund")
+def handle_ticket(ticket: Ticket) -> None: ...
+
+
+@sdk.trigger  # async def works the same way
+async def on_event(raw: bytes, signature: str) -> None: ...
+
+
+with sdk.run(trigger={"date": "2026-09-29"}, name="nightly"):  # or `async with`
+    ...
+```
+
+Each call of a trigger, and each `sdk.run` block, is one run. irimi stores it with
+`attribution: sdk`, the function's `module:qualname` as its entrypoint (none for `sdk.run`), the
+call's arguments captured as JSON
+([Captured arguments](docs/trace-format.md#captured-arguments)), `IRIMI_AGENT_VERSION` if it is
+set, and how the run ended: `ok`, or `error` with the exception's type and message. The exception
+itself always propagates, unchanged. `sdk.current_run_id()` is the current run's id.
+
+- **When it is active.** Only while `IRIMI_ENGINE_ACTIVE=1`, which `irimi shadow` sets for its
+  child (`sdk.active()`). Otherwise a trigger or `sdk.run` calls straight through: no run id, no
+  network call, no patching, so the SDK is safe to leave in production code. When active, it
+  reports each run to `IRIMI_CONTROL` directly, never through the proxy. If it cannot, it logs
+  one warning per kind of failure on the `irimi.sdk` logger and the agent carries on.
+- **Threads and tasks.** The run's id lives in a context variable. `asyncio` tasks and
+  `asyncio.to_thread` inherit the run; `threading.Thread` and `ThreadPoolExecutor.submit` do not,
+  unless the callable goes through `sdk.propagate`: `executor.submit(sdk.propagate(work))`. (A
+  free-threaded 3.14 build starts threads in a copy of their creator's context by default, so
+  there they do inherit it.)
+- **Nesting.** A trigger called inside a run joins it: one run, not two. So does a `sdk.run`
+  block. One `sdk.run(...)` object may be entered again - nested in itself, from several threads
+  or tasks at once, or as a module-level constant - and each entry is a run of its own unless it
+  is nested in one.
+- **Names.** A trigger's name is a string: `@sdk.trigger(name="refund")`. A name passed
+  positionally, or one that is not a string, is a `TypeError` when the module loads. Names are
+  cut to 1000 characters.
+- **Start the agent by module name.** `python -m my_agent` and `python my_agent.py` run it as
+  `__main__`, so its entrypoint is recorded as `__main__:handle_ticket`, which replay (#84) cannot
+  import. Import the module by its name and call it, as the sample workflows'
+  `examples/workflows/launch.py` does.
+
+Until #75, a request carries the run's id only if the agent sets `Irimi-Run` itself, to
+`sdk.current_run_id()`; one that does not lands in the process run.
+
 ## CLI
 
 ```
@@ -436,11 +491,12 @@ Where each feature is exercised end to end:
 | Slack: minted threads, names versus ids, `missing_scope`, archived channels, webhooks | W4 `w04_slack_ops_bot` |
 | Would-have-fired webhooks, a signed inbound webhook | W5 `w05_dispute_responder` |
 | SSE streaming, resets mid-stream, telemetry stored as a count | W7 `w07_streaming_assistant` |
-| The trace store: one process run per scenario, header runs, redaction on disk | every workflow (`tests/workflows/test_stored_runs.py`), W2, W3; a credential in a live response, W5 |
+| The trace store: one process run per scenario, one `sdk` run per trigger, redaction on disk | every workflow (`tests/workflows/test_stored_runs.py`), W2, W3; a credential in a live response, W5 |
+| The SDK: triggers and `sdk.run`, nesting, threads and asyncio, errors, captured args | W1, W2, W3, W5, W7, W8, W10; every workflow (`tests/workflows/test_stored_runs.py`) |
 | Unmapped internal services, a map the loader refuses, `Irimi-Run` across a hop | W8 `w08_orchestrator` |
 | Upstream failures: 429, 500, timeouts, resets, a failed L3 read, a killed run | W10 `w10_flaky_upstream` |
 | What irimi cannot see: clients that bypass the proxy, loopback services | W11 `w11_leaky_agent` |
-| Runs under concurrency, tool calls the proxy cannot see | W3, W6 `w06_crm_db_agent` (through a stand-in, below) |
+| Tool calls the proxy cannot see | W6 `w06_crm_db_agent` (through a stand-in, below) |
 | The control endpoint: runs started, given tool calls and ended over `/_irimi/`, health, every refusal | W9 `w09_scope_gauntlet`; every workflow (`tests/workflows/test_control_endpoint.py`) |
 
 Answer targets, overrides, the telemetry maps beyond W7's one LangSmith trace, and the CLI's own
@@ -449,9 +505,10 @@ feature is driven through the real `irimi shadow` in the workflows its issue nam
 their scenarios and pins, and a fix that flips a `LOOKS WRONG:` pin updates it in the same PR
 (`CONTRIBUTING.md`).
 
-The agents already use the SDK API that Phase 3 will build (`@sdk.trigger`, `sdk.run`,
-`@sdk.tool`). Until `irimi.sdk` exists, `examples/workflows/sdk.py` stands in for it, so W3's run
-attribution and W6's tool stand-ins test the stand-in's rules, not irimi's.
+The agents use the SDK API (`@sdk.trigger`, `sdk.run`, `@sdk.tool`) through
+`examples/workflows/sdk.py`, which re-exports `irimi.sdk`. Its triggers and runs are irimi's own
+(#74). Until `irimi.sdk` has `@sdk.tool` (#76), `sdk.py` stands in for it, so W6's tool stand-ins
+test the stand-in's rules, not irimi's.
 
 ## The refund agent
 
@@ -488,13 +545,13 @@ by phase.
   format v1 and exchange timestamps (#68, [`docs/trace-format.md`](docs/trace-format.md)).
   Redaction before anything reaches disk (#69). The sample workflows (#89). The trace store on
   disk (#70). Streamed SSE bodies recorded chunk by chunk (#71). `irimi runs list` / `runs show`
-  and a summary from a stored run (#72). The control endpoint, `/_irimi/` (#73).
+  and a summary from a stored run (#72). The control endpoint, `/_irimi/` (#73). The SDK:
+  `@sdk.trigger` and `sdk.run()` with run identity in a context variable (#74).
 
 **Next: the rest of Phase 3, the run**
 
-- The SDK: `@sdk.trigger` and `sdk.run()` with run identity in a context variable (#74),
-  `Irimi-Run` on every request a run makes (#75), and `@sdk.tool` for calls the proxy cannot see
-  (#76).
+- The rest of the SDK: `Irimi-Run` on every request a run makes (#75), and `@sdk.tool` for
+  calls the proxy cannot see (#76).
 - `irimi shadow --serve` with per-run summaries (#77), a server agent example and the Phase 3 exit
   test (#78), `irimi compare` (#79), Slack channel names in the summary (#61).
 - Replay: answer a run from its recording (#82), read and write tools in replay (#83),

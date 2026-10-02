@@ -20,6 +20,7 @@ from collections.abc import Mapping
 from typing import Any, Literal, Protocol
 
 from irimi import paths
+from irimi.exchange import RUNS_ROUTE
 from irimi.sdk.capture import serialized
 
 LOGGER_NAME = "irimi.sdk"
@@ -29,7 +30,8 @@ TIMEOUT_S = 2.0
 # The most of a refusal's body a warning quotes. The endpoint's own are shorter (#73).
 MAX_DETAIL = 200
 
-# The run routes the SDK posts to. #76 adds `tool-calls`.
+# The run actions the SDK posts, a subset of the endpoint's `exchange.RUN_ACTIONS`. #76 adds
+# `tool-calls`.
 Action = Literal["start", "end"]
 # The kinds of failure a warning is logged once for.
 Failure = Literal["unset", "rejected", "timeout", "unreachable", "failed"]
@@ -68,7 +70,7 @@ class ControlClient:
         if not base:
             return "unset", f"{paths.CONTROL_ENV} is not set"
         request = urllib.request.Request(
-            f"{base}/runs/{run_id}/{action}",
+            f"{base}/{RUNS_ROUTE}/{run_id}/{action}",
             data=serialized(dict(doc)),
             method="POST",
             headers={"Content-Type": "application/json"},

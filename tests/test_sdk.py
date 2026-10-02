@@ -21,13 +21,14 @@ import subprocess
 import sys
 import threading
 import time
+import typing
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import pytest
 
-from irimi import __version__, paths, redact, sdk
+from irimi import __version__, exchange, paths, redact, sdk
 from irimi.exchange import Exchange
 from irimi.sdk import capture, client, runs
 from irimi.store import DirectoryStore, StoreReader
@@ -1055,6 +1056,13 @@ def test_irimi_control_with_a_trailing_slash_names_the_same_endpoint(irimi, monk
     assert warnings() == []
     [run] = irimi.sdk_runs()
     assert (run.run_id, run.outcome) == (run_id, "ok")
+
+
+def test_every_action_the_sdk_posts_is_one_the_control_endpoint_answers():
+    """The SDK and the endpoint spell a run route from the same names (`exchange.RUNS_ROUTE`,
+    `exchange.RUN_ACTIONS`), so an action the SDK posts can never be one the endpoint 404s
+    (#73, #74)."""
+    assert set(typing.get_args(client.Action)) <= set(exchange.RUN_ACTIONS)
 
 
 def test_a_control_endpoint_that_never_answers_times_out(monkeypatch, warnings):

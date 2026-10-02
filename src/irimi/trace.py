@@ -114,7 +114,7 @@ class Trigger:
     name: str  # the display name
     # `module:qualname` of the wrapped function; None for a context-manager run and the process run.
     entrypoint: str | None
-    args: JSONValue  # the captured arguments; how a non-JSON value is captured is #74's
+    args: JSONValue  # the captured arguments: `irimi.sdk.capture`'s table (#74)
     replayable: bool
 
 
@@ -194,14 +194,14 @@ def run_to_json(record: RunRecord) -> dict[str, Any]:
         "run_id": record.run_id,
         "mode": record.mode,
         "attribution": record.attribution,
-        "trigger": None if record.trigger is None else _trigger_to_json(record.trigger),
+        "trigger": None if record.trigger is None else trigger_to_json(record.trigger),
         "agent_version": record.agent_version,
         "engine_version": record.engine_version,
         "sdk_version": record.sdk_version,
         "started_at": record.started_at,
         "ended_at": record.ended_at,
         "outcome": record.outcome,
-        "error": _error_to_json(record.error),
+        "error": error_to_json(record.error),
         "exit_code": record.exit_code,
         "dropped_events": record.dropped_events,
     }
@@ -216,7 +216,7 @@ def tool_call_to_json(call: ToolCall) -> dict[str, Any]:
         "ran": call.ran,
         "args": call.args,
         "result": call.result,
-        "error": _error_to_json(call.error),
+        "error": error_to_json(call.error),
         "started_at": call.started_at,
         "ended_at": call.ended_at,
     }
@@ -265,7 +265,10 @@ def event_to_json(seq: int, event: Event, put_body: PutBody) -> dict[str, Any]:
     assert_never(event)
 
 
-def _trigger_to_json(trigger: Trigger) -> dict[str, Any]:
+def trigger_to_json(trigger: Trigger) -> dict[str, Any]:
+    """`trigger` as `run.json` holds it, and as the SDK posts it in a run's start (#74): one
+    encoding for the file and the wire, so the endpoint reads a posted trigger with the decoder a
+    stored one is read with."""
     return {
         "name": trigger.name,
         "entrypoint": trigger.entrypoint,
@@ -274,7 +277,8 @@ def _trigger_to_json(trigger: Trigger) -> dict[str, Any]:
     }
 
 
-def _error_to_json(error: ErrorInfo | None) -> dict[str, Any] | None:
+def error_to_json(error: ErrorInfo | None) -> dict[str, Any] | None:
+    """`error` as a run or a tool call holds it, and as the SDK posts it in a run's end (#74)."""
     return None if error is None else {"type": error.type, "message": error.message}
 
 

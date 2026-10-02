@@ -18,10 +18,9 @@ from irimi.trace import SCHEMA_VERSION, ErrorInfo, JSONValue, RunRecord, Trigger
 
 # The variables issue #3 specifies, plus `IRIMI_CONTROL` from #73. Nothing is added to this list
 # without a new issue. The `IRIMI_*` names are declared in `paths`, where the SDK can import them,
-# and imported above, so `runner.RUN_ENV` still names them.
+# and imported above, so `runner.RUN_ENV` still names them. `IRIMI_AGENT_VERSION` is there too
+# (`paths.AGENT_VERSION_ENV`): the process run records it (#70) and the SDK's runs do (#74).
 NO_PROXY_VALUE = "localhost,127.0.0.1"
-# The agent's own version, if its deployment names one; the process run records it (#70).
-AGENT_VERSION_ENV = "IRIMI_AGENT_VERSION"
 
 READY_TIMEOUT_S = 30.0
 STOP_TIMEOUT_S = 30.0

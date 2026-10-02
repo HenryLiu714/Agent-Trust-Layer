@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from irimi.exchange import (
     DOWNGRADED_FLAG,
     LIVE_KINDS,
+    RUN_HEADER,
     SAFE_METHODS,
     UNCLASSIFIED_FLAG,
     AnsweredBy,
@@ -27,7 +28,8 @@ from irimi.exchange import (
 from irimi.servicemap import MapIndex, Route, ServiceMap
 from irimi.trace import is_valid_run_id
 
-RUN_HEADER = "irimi-run"  # header names are compared case-insensitively; stored lower-case
+# `RUN_HEADER` is imported from `exchange` above, where the SDK can import it too (#74), so
+# `pipeline.RUN_HEADER` still names it for the engine's strip.
 # Stamped on every response irimi decided rather than forwarded, carrying the `answered_by` value
 # itself (`fake-L0`, `fake-L1`, `delegated`). See `answered_by_header` for why a live forward gets
 # none.

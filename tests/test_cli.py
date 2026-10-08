@@ -463,11 +463,10 @@ def test_a_store_that_cannot_be_written_stops_the_run_with_one_line(home, capsys
 def test_shadow_stores_its_process_run_with_the_agent_and_engine_versions(home, monkeypatch):
     """The process run's record (#70): its argv, which a replay runs again, the agent's version
     from `IRIMI_AGENT_VERSION`, this irimi's version, and how the child exited."""
-    from irimi import runner
     from irimi.store import StoreReader
     from irimi.trace import ErrorInfo
 
-    monkeypatch.setenv(runner.AGENT_VERSION_ENV, "agent-2.0.1")
+    monkeypatch.setenv(paths.AGENT_VERSION_ENV, "agent-2.0.1")
     assert main(["shadow", *_child("raise SystemExit(3)")]) == 3
     (record,) = StoreReader(home / "store").list_runs()
     assert (record.attribution, record.mode) == ("process", "shadow")

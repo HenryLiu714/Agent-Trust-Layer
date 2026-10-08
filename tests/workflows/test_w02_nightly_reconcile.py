@@ -74,13 +74,19 @@ def test_forty_mismatches_store_all_47_exchanges_and_drop_none(run_workflow):
     assert "  47 exchanges · 6 live · 0 delegated · 41 virtualized" in shadow.summary()
 
 
-def test_a_datetime_trigger_is_only_logged_today(run_workflow):
+def test_a_datetime_trigger_is_stored_by_its_repr_and_cannot_be_replayed(run_workflow):
     shadow = run_workflow(W, "datetime_trigger", "shadow")
     [trigger] = shadow.events("trigger")
-    # Under #74 this value captures as `{"__irimi_repr__": ...}`. `sdk.run` records no entrypoint,
-    # so #84 replays it only with `--call` or `-- CMD`. Today the fallback SDK records no trigger.
     assert trigger["type"] == "datetime"
     assert trigger["value"].startswith("datetime.datetime(2026, 9, 27, 2, 0")
+    # A `datetime` is not JSON, so #74 captures it as its repr and the run is not replayable.
+    # `sdk.run` records no entrypoint, so #84 replays it only with `--call` or `-- CMD`.
+    [run] = shadow.sdk_runs()
+    assert run.trigger is not None
+    assert (run.trigger.name, run.trigger.entrypoint) == ("nightly-reconcile", None)
+    when = "datetime.datetime(2026, 9, 27, 2, 0, tzinfo=datetime.timezone.utc)"
+    assert run.trigger.args == {"date": {"__irimi_repr__": when}}
+    assert not run.trigger.replayable
     assert [c["url"] for c in shadow.calls("tag_customer")] == [
         "api.stripe.com/v1/customers/cus_N001",
         "api.stripe.com/v1/customers/cus_N000",

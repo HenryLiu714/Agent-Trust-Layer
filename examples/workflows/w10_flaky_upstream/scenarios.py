@@ -6,7 +6,7 @@ import json
 import re
 from collections.abc import Callable
 
-from examples.workflows.harness.internet import Req
+from examples.workflows.harness.internet import Req, gzip_bomb
 from examples.workflows.harness.run import Scenario, Workflow
 from examples.workflows.harness.services import LlmCall, LlmTurn, World
 from examples.workflows.w10_flaky_upstream.agent import CHANNEL
@@ -31,6 +31,13 @@ def _seed(llm: Callable[[LlmCall], LlmTurn] = _script) -> Callable[[World], None
         world.llm.script = llm
 
     return setup
+
+
+def _seed_with_a_bomb(world: World) -> None:
+    """`_seed()`, with the bomb built now: built on the first request it answers, it took longer
+    than the agent's read timeout."""
+    gzip_bomb()
+    _seed()(world)
 
 
 def _prose(call: LlmCall) -> LlmTurn:
@@ -71,6 +78,12 @@ WORKFLOW = Workflow(
             setup=_seed(),
             faults=((STRIPE, "reset", _list, 1),),
             doc="the read's connection resets before any answer, and is retried",
+        ),
+        "gzip_bomb_read": Scenario(
+            setup=_seed_with_a_bomb,
+            faults=((STRIPE, "gzip-bomb", _list, 1),),
+            doc="the read is answered with 1 MiB of gzip that decodes to 1 GiB: the agent gets "
+            "the bytes it was sent, and irimi records the start of them (#94)",
         ),
         "precondition_read_fails": Scenario(
             setup=_seed(),

@@ -32,6 +32,7 @@ import socket
 import struct
 import threading
 import time
+import zlib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -47,6 +48,24 @@ RESET_AFTER_CHUNK_S = 0.5
 # The listen backlog. socketserver's default of 5 drops connections from W3's concurrent runs on
 # macOS, where a dropped SYN is retried a second later and reads as a flaky timeout.
 BACKLOG = 128
+# What the `gzip-bomb` fault decodes to: a GiB of 16-byte lines, far past the most irimi decodes of
+# any body (#94). Short lines compress about 500 to 1, and cost redaction little per byte; a GiB
+# of bare newlines compresses twice as well, and costs redaction seven times as much. Built once,
+# the first time it is asked for.
+BOMB_DECODED_BYTES = 1024 * 1024 * 1024
+BOMB_LINE = b" " * 15 + b"\n"
+_bomb: bytes | None = None
+
+
+def gzip_bomb() -> bytes:
+    """About 2 MiB of gzip that decodes to BOMB_DECODED_BYTES of BOMB_LINE."""
+    global _bomb
+    if _bomb is None:
+        deflater = zlib.compressobj(9, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+        block = BOMB_LINE * (1024 * 1024 // len(BOMB_LINE))
+        steps = BOMB_DECODED_BYTES // len(block)
+        _bomb = b"".join([deflater.compress(block) for _ in range(steps)] + [deflater.flush()])
+    return _bomb
 
 
 @dataclass(frozen=True)
@@ -118,7 +137,8 @@ class Fault:
 
     `429`, `500` and `garbage` answer at once; `stall` answers late; `reset` resets the connection
     before any response; `reset-stream` lets the service answer, sends the headers and the first
-    chunk, and then resets. A faulted request is still recorded in `log`.
+    chunk, and then resets. `gzip-bomb` answers 200 with `gzip_bomb()`, gzip-encoded though the
+    client never asked for gzip. A faulted request is still recorded in `log`.
     """
 
     host: str
@@ -266,6 +286,9 @@ class FakeInternet:
             ), None
         if action == "reset":
             return None, "reset"
+        if action == "gzip-bomb":
+            headers = {"content-type": "application/json", "content-encoding": "gzip"}
+            return Resp(200, gzip_bomb(), headers), None
         if action == "stall":
             time.sleep(STALL_S)
         service = self.services.get(req.host)

@@ -41,6 +41,12 @@ per flow. Each hook calls plain functions from the layers below it, in this orde
    stream that fails after its headers went out keeps the complete lines its `_StreamTee` copied,
    flagged `stream-truncated` (#71).
 
+Every body a hook records is decoded by `_decoded`, which never raises and never decodes past
+`MAX_DECODED_BODY` (#94): each codec runs incrementally and stops at the cap, so a small
+compressed bomb costs a hook at most twice the cap in memory. A body cut there is recorded as its
+first `store.MAX_STORED_BODY` bytes of whole lines and flagged, and its read is never overlaid,
+so the agent gets the service's bytes unchanged.
+
 ## Layers
 
 Every module lives in exactly one layer and may import only from layers above it in this table

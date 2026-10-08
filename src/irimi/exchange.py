@@ -91,10 +91,12 @@ IDEMPOTENCY_FLAGS: tuple[str, ...] = (IDEMPOTENT_REPLAY_FLAG, IDEMPOTENCY_CONFLI
 # in its place (#69). Set only on the copy `redact.redact_exchange` makes for disk, never on the
 # exchange the engine answered with: the live flow is never redacted.
 REDACTION_FAILED_FLAG = "redaction-failed"
-# The trace store kept only the first `store.MAX_STORED_BODY` bytes of this exchange's request or
-# response body (#70). A decoded Exchange carries a body's bytes and not its ref's `truncated`, so
-# without this flag a stored run could not tell a cut body from a whole one. Set only on the copy
-# the store writes, never on the exchange the engine answered with.
+# This exchange's recorded request or response body is not all of it. The trace store kept only
+# its first `store.MAX_STORED_BODY` bytes (#70): a decoded Exchange carries a body's bytes and not
+# its ref's `truncated`, so without this flag a stored run could not tell a cut body from a whole
+# one. Or the engine decoded its `Content-Encoding` only up to `mitm.MAX_DECODED_BODY`, and kept
+# that much up to its last complete line (#94); the agent and the service got the body unchanged.
+# The store sets it on the copy it writes, and the engine on the exchange it reports.
 BODY_TRUNCATED_FLAG = "body-truncated"
 # The trace store could not use this exchange's run id as a directory name, so it is stored in
 # `unattributed/` (#70): an id `trace.is_valid_run_id` refuses, or one that differs only in case
@@ -103,8 +105,8 @@ BAD_RUN_ID_FLAG = "bad-run-id"
 # The recorded body of this streamed response is not the whole stream (#71): the engine stopped
 # copying it at `store.MAX_STORED_BODY`, its copy raised, the stream ended in an error - an
 # upstream reset, an agent that hung up - before its last chunk, or its `Content-Encoding` could
-# not be decoded. The agent got every chunk that arrived either way; this is a fact about the
-# recording only.
+# not be decoded, or decoded past `mitm.MAX_DECODED_BODY` (#94). The agent got every chunk that
+# arrived either way; this is a fact about the recording only.
 STREAM_TRUNCATED_FLAG = "stream-truncated"
 
 # The control endpoint (#73): a request addressed to irimi's own listener whose path starts here is

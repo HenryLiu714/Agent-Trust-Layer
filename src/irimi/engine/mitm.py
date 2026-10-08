@@ -1,24 +1,28 @@
 """mitmproxy-backed Engine. The only module allowed to import mitmproxy."""
 
 import asyncio
+import io
 import json
 import logging
 import socket
 import time
+import zlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
+import brotli  # type: ignore[import-untyped]  # ships no stubs
+import zstandard
 from mitmproxy import ctx, http
 from mitmproxy.addons import default_addons
 from mitmproxy.master import Master
-from mitmproxy.net import encoding
 from mitmproxy.options import Options
 
 from irimi import ca, control, delegation, echo, netaddr, pipeline, redact, reverse_door
 from irimi.control import ControlEndpoint, OnToolCall
 from irimi.engine import EngineConfig, EngineStartError, OnExchange
 from irimi.exchange import (
+    BODY_TRUNCATED_FLAG,
     DECISION_FAILED_FLAG,
     FIDELITY_FLAGS,
     STREAM_TRUNCATED_FLAG,
@@ -37,12 +41,14 @@ from irimi.exchange import (
 )
 from irimi.overlay import Overlaid, Overlay
 from irimi.policy import Answer, AnswerPolicy
-from irimi.store import MAX_STORED_BODY, TraceStore
+from irimi.store import MAX_REDACTED_BODY, MAX_STORED_BODY, TraceStore
 
 logger = logging.getLogger(__name__)
 
 META_KEY = "irimi"  # flow.metadata slot holding the per-flow state below
 STREAM_KEY = "irimi-stream"  # flow.metadata slot holding a streamed response's `_StreamTee` (#71)
+# flow.metadata slot set when the request's body was decoded only up to MAX_DECODED_BODY (#94).
+REQUEST_CUT_KEY = "irimi-request-cut"
 
 # Called once from the running hook with (bound port, None) or (None, why it failed).
 OnRunning = Callable[[int | None, EngineStartError | None], None]
@@ -158,8 +164,9 @@ def _recorded_stream(
 
     A `Content-Encoding` is decoded, as `_body` decodes a buffered body, so that redaction reads
     text rather than gzip; decoded bytes do not split where the wire's chunks did, so such a body
-    is one chunk. One that cannot be decoded - a cut `br` stream, an encoding mitmproxy does not
-    know - is recorded empty and flagged, never as the compressed bytes redaction cannot read."""
+    is one chunk. One that cannot be decoded - a cut `br` stream, an encoding irimi does not
+    decode - is recorded empty and flagged, never as the compressed bytes redaction cannot read.
+    One that decodes past MAX_DECODED_BODY keeps what was decoded and is flagged too (#94)."""
     assert flow.response is not None
     body = b"".join(tee.chunks)
     chunks = tuple(len(chunk) for chunk in tee.chunks)
@@ -169,8 +176,11 @@ def _recorded_stream(
         decoded = _decoded(body, content_encoding)
         if decoded is None:
             body, chunks, cut = b"", (), True
-        elif decoded != body:
-            body, chunks = decoded, ((len(decoded),) if decoded else ())
+        elif decoded.cut:
+            body = _recorded_cut(decoded.body)
+            chunks, cut = ((len(body),) if body else ()), True
+        elif decoded.body != body:
+            body, chunks = decoded.body, ((len(decoded.body),) if decoded.body else ())
     if cut:
         body = redact.complete_lines(body)
         chunks = clip_chunks(chunks, len(body))
@@ -178,17 +188,131 @@ def _recorded_stream(
     return Response(status=flow.response.status_code, headers=headers, body=body), chunks, cut
 
 
-def _decoded(body: bytes, content_encoding: str) -> bytes | None:
-    """`body` decoded per `content_encoding`, or None when it cannot be. DECODING NEVER RAISES:
-    every body the hooks record is decoded here, because a raise out of a hook drops the exchange
-    or forwards the flow. mitmproxy's `get_content(strict=False)` is not enough - it lets the
-    TypeError of an encoding it has no codec for through (`rot13`) - and a byte-to-text codec
-    (`utf-8`) is not a decoding either (#71)."""
+# THE MOST A BODY IS DECODED TO (#94). A few KB of gzip, br or zstd can decode to gigabytes, and a
+# hook that decoded it whole would stall every flow behind it and could exhaust memory. A body
+# decodes up to this many bytes and no further, and the exchange is flagged: `body-truncated`, or
+# `stream-truncated` for a stream. It is the store's own bound, because past it the store keeps no
+# body at all (`store._as_queued`).
+MAX_DECODED_BODY = MAX_REDACTED_BODY
+
+# What a body's identity encodings decode to: the bytes as they came, which are already in memory
+# and are no bigger for being "decoded".
+_IDENTITY_ENCODINGS = frozenset({"identity", "none"})
+
+
+def _recorded_cut(decoded: bytes) -> bytes:
+    """What the trace records of a body decoded only up to MAX_DECODED_BODY: its first
+    MAX_STORED_BODY bytes, kept to their last complete line (#94).
+
+    No more than the store keeps of any body, because a cut body is the start of a document and
+    nothing reads it as one: past that, it only costs the store's writer time to redact what it
+    throws away - 64 MiB of short lines is half a minute, longer than the store waits to close.
+    Whole lines, as a stream that is not whole is kept (`_recorded_stream`): the cut lands on an
+    arbitrary byte, and a body cut inside a UTF-8 character is one redaction stores unscanned, so
+    every key in it would reach disk (#69). Never raises."""
+    return redact.complete_lines(decoded[:MAX_STORED_BODY])
+
+
+@dataclass(frozen=True)
+class _Decoded:
+    body: bytes
+    cut: bool  # decoding stopped at MAX_DECODED_BODY: `body` is the start of it, not all of it
+
+
+def _decoded(body: bytes, content_encoding: str) -> _Decoded | None:
+    """`body` decoded per `content_encoding` up to MAX_DECODED_BODY, or None when it cannot be.
+
+    DECODING NEVER RAISES: every body the hooks record is decoded here, because a raise out of a
+    hook drops the exchange or forwards the flow (#71). Nor is it ever unbounded: each codec runs
+    incrementally, stops at the cap and asks for one byte more to learn whether it was cut. So the
+    hook holds at most twice the cap, while a codec assembles its output into one bytes object,
+    and never what a few KB of a bomb would have decoded to (#94). A cut body is then recorded as
+    `_recorded_cut` keeps it. `tests/test_bounded_decoding.py` measures both.
+
+    The encodings are mitmproxy's own: gzip, deflate (and its raw form), br, zstd and the
+    identities, each as lenient as mitmproxy's decoder of it. Any other name is not decoded.
+    mitmproxy's fallback ran it through Python's codecs, where `bz2` and `zlib` are unbounded
+    decompressions of their own and `utf-8` is not a decoding at all (#71)."""
+    name = content_encoding.lower()
+    if name in _IDENTITY_ENCODINGS:
+        return _Decoded(body, False)
+    decode = _DECODERS.get(name)
+    if decode is None:
+        return None
     try:
-        decoded = encoding.decode(body, content_encoding)
+        decoded, cut = decode(body, MAX_DECODED_BODY)
     except Exception:
         return None
-    return decoded if isinstance(decoded, bytes) else None
+    return _Decoded(decoded, cut)
+
+
+def _inflate(body: bytes, limit: int, wbits: int, *, whole: bool) -> tuple[bytes, bool]:
+    """At most `limit` bytes of a zlib-family stream, and whether there was more. `whole` refuses
+    a stream that ends early, as `zlib.decompress` does; without it the bytes that did arrive are
+    kept, as mitmproxy's gzip decoder keeps them."""
+    inflater = zlib.decompressobj(wbits)
+    out = inflater.decompress(body, limit)
+    if len(out) == limit and not inflater.eof:
+        return out, bool(inflater.decompress(inflater.unconsumed_tail, 1))
+    # Every input byte was consumed below the limit, so what is left inside is a short tail.
+    out += inflater.flush()
+    if whole and not inflater.eof:
+        raise zlib.error("incomplete or truncated stream")
+    return out[:limit], len(out) > limit
+
+
+def _gzip(body: bytes, limit: int) -> tuple[bytes, bool]:
+    return _inflate(body, limit, 32 + zlib.MAX_WBITS, whole=False)  # gzip or zlib, detected
+
+
+def _deflate(body: bytes, limit: int) -> tuple[bytes, bool]:
+    """With a zlib header, as RFC 9110 says, or without one, as some servers send it."""
+    try:
+        return _inflate(body, limit, zlib.MAX_WBITS, whole=True)
+    except zlib.error:
+        return _inflate(body, limit, -zlib.MAX_WBITS, whole=True)
+
+
+# brotli's `output_buffer_limit` stops its buffer growing once it reaches the limit, by however
+# much the last block took it past: a quarter again at 64 MiB. Asked for this much at a time, it
+# is never more than this past.
+_BROTLI_STEP = 1024 * 1024
+
+
+def _brotli(body: bytes, limit: int) -> tuple[bytes, bool]:
+    """Refuses a stream that ends early, as `brotli.decompress` does. The input goes in on the
+    first call, and every later one passes nothing and takes more out (brotli 1.2's contract)."""
+    decompressor = brotli.Decompressor()
+    parts: list[bytes] = []
+    size = 0
+    data = body
+    while size <= limit and not decompressor.is_finished():
+        part: bytes = decompressor.process(data, output_buffer_limit=_BROTLI_STEP)
+        data = b""
+        if not part:
+            break
+        parts.append(part)
+        size += len(part)
+    if not decompressor.is_finished() and size <= limit:
+        raise brotli.error("incomplete or truncated stream")
+    out = b"".join(parts)
+    del parts  # the joined copy is all that is kept: never the parts and both copies at once
+    return out[:limit], len(out) > limit
+
+
+def _zstd(body: bytes, limit: int) -> tuple[bytes, bool]:
+    reader = zstandard.ZstdDecompressor().stream_reader(io.BytesIO(body), read_across_frames=True)
+    out: bytes = reader.read(limit)  # fills to `limit` unless the frames end first
+    return out, len(out) == limit and bool(reader.read(1))
+
+
+_DECODERS: dict[str, Callable[[bytes, int], tuple[bytes, bool]]] = {
+    "gzip": _gzip,
+    "deflate": _deflate,
+    "deflateraw": _deflate,
+    "br": _brotli,
+    "zstd": _zstd,
+}
 
 
 @dataclass(frozen=True)
@@ -220,6 +344,12 @@ def _failed_decision(req: Request, exc: Exception) -> _Decision:
         None,
         failure=exc,
     )
+
+
+def _request_cut_flags(flow: http.HTTPFlow) -> tuple[str, ...]:
+    """`body-truncated` when the request hook decoded this flow's request body only up to the cap,
+    so the exchange it becomes says its recorded request is not all of it (#94)."""
+    return (BODY_TRUNCATED_FLAG,) if flow.metadata.get(REQUEST_CUT_KEY) else ()
 
 
 def _irimi_error(error_type: str, reason: str) -> Response:
@@ -262,37 +392,51 @@ def _headers_from_fields(fields: Sequence[tuple[bytes, bytes]]) -> Headers:
     return tuple((k.decode("latin-1"), v.decode("latin-1")) for k, v in fields)
 
 
-def _body(message: http.Message) -> bytes:
-    # A buffered body is recorded as it came when its Content-Encoding cannot be decoded: an
-    # exception in a hook makes mitmproxy forward the flow untouched, which for a write means it
-    # escapes shadow mode, and one in `response` drops the exchange from the trace (#71).
+def _body(message: http.Message) -> _Decoded:
+    """A buffered body as the trace records it, and whether its decoding stopped at the cap.
+
+    A body is recorded as it came when its Content-Encoding cannot be decoded: an exception in a
+    hook makes mitmproxy forward the flow untouched, which for a write means it escapes shadow
+    mode, and one in `response` drops the exchange from the trace (#71).
+
+    A body decoded only up to MAX_DECODED_BODY is recorded as `_recorded_cut` keeps it (#94)."""
     raw = message.raw_content or b""
     content_encoding = message.headers.get("content-encoding", "")
     if not raw or not content_encoding:
-        return raw
+        return _Decoded(raw, False)
     decoded = _decoded(raw, content_encoding)
-    return raw if decoded is None else decoded
+    if decoded is None:
+        return _Decoded(raw, False)
+    if decoded.cut:
+        return _Decoded(_recorded_cut(decoded.body), True)
+    return decoded
 
 
-def _request_from_flow(flow: http.HTTPFlow) -> Request:
-    return pipeline.parse(
+def _request_from_flow(flow: http.HTTPFlow) -> tuple[Request, bool]:
+    """The flow's request, and whether its body's decoding stopped at the cap (#94)."""
+    body = _body(flow.request)
+    request = pipeline.parse(
         flow.request.method,
         flow.request.scheme,
         flow.request.host,
         flow.request.port,
         flow.request.path,
         _headers_from_fields(flow.request.headers.fields),
-        _body(flow.request),
+        body.body,
     )
+    return request, body.cut
 
 
-def _response_from_flow(flow: http.HTTPFlow) -> Response:
+def _response_from_flow(flow: http.HTTPFlow) -> tuple[Response, bool]:
+    """The flow's response, and whether its body's decoding stopped at the cap (#94)."""
     assert flow.response is not None
-    return Response(
+    body = _body(flow.response)
+    response = Response(
         status=flow.response.status_code,
         headers=_headers_from_fields(flow.response.headers.fields),
-        body=_body(flow.response),
+        body=body.body,
     )
+    return response, body.cut
 
 
 def _is_event_stream(content_type: str) -> bool:
@@ -423,11 +567,13 @@ class IrimiAddon:
         # the reverse door and the decision included, so the span is the whole of irimi's part.
         started_at = time.time()
         try:
-            req = _request_from_flow(flow)
+            req, cut = _request_from_flow(flow)
         except Exception as exc:  # never fail open: an unparseable request is answered locally
             logger.warning("irimi: refusing request that could not be parsed: %s", exc)
             flow.response = http.Response.make(400, b"irimi: could not parse request\n")
             return
+        if cut:  # the exchange this flow becomes says its request body is not all there (#94)
+            flow.metadata[REQUEST_CUT_KEY] = True
         # sockname is the socket this request arrived on, i.e. our own listener.
         door = reverse_door.detect_door(req, flow.client_conn.sockname[1])
         # THE CONTROL ENDPOINT (#73) is answered here and returns, before the reverse door, which
@@ -562,7 +708,7 @@ class IrimiAddon:
             pipeline.unclassified(req),
             "fake-L0",
             run_id,
-            extra_flags=(DECISION_FAILED_FLAG,),
+            extra_flags=(DECISION_FAILED_FLAG, *_request_cut_flags(flow)),
             door=door,
             started_at=started_at,
             ended_at=time.time(),
@@ -586,7 +732,7 @@ class IrimiAddon:
         req = decision.request
         cls, run_id, ans = decision.classification, decision.run_id, decision.answer
         response: Response | None = ans.response
-        flags: tuple[str, ...] = ans.flags
+        flags: tuple[str, ...] = ans.flags + _request_cut_flags(flow)
         target = ""
         if ans.forward_to is not None:
             target = ans.forward_to.url
@@ -810,12 +956,18 @@ class IrimiAddon:
         stream_chunks: tuple[int, ...] = ()
         flags = pending.flags
         tee = flow.metadata.pop(STREAM_KEY, None)
+        # A body decoded only up to the cap is the start of a document, never the document (#94):
+        # nothing reads it as one. The overlay and the read observers are skipped below, so the
+        # agent gets the service's bytes untouched, and only the recording is short.
+        cut = False
         if streamed and isinstance(tee, _StreamTee):
             upstream, stream_chunks, cut = _recorded_stream(flow, tee, whole=True)
             if cut:
                 flags += (STREAM_TRUNCATED_FLAG,)
         else:
-            upstream = _response_from_flow(flow)
+            upstream, cut = _response_from_flow(flow)
+            if cut:
+                flags += (BODY_TRUNCATED_FLAG,)
         resp = upstream
         # A read irimi forwarded is the only place the real values a later fake has to sort
         # against appear - the write log holds writes, and the trace store is write-only - so
@@ -825,7 +977,7 @@ class IrimiAddon:
         # document an observer can read, and may be cut short, so the guard names it (#28, #71).
         # A delegated read is observed too: a per-route `target:` can pair delegated reads with
         # locally faked writes, and the target's values are then the ones the agent sees.
-        if not streamed and pending.classification.kind == "read":
+        if not streamed and not cut and pending.classification.kind == "read":
             echo.observe_read(pending.classification.service, upstream.body)
         # The overlay stays off for a delegated read: the target owns that service's state, and
         # layering our own minted objects over it would corrupt read-after-write there (D20).
@@ -835,6 +987,7 @@ class IrimiAddon:
         # request side asks the overlay under the same condition.
         if (
             not streamed
+            and not cut
             and pending.answered_by == "live"
             and pending.classification.kind == "read"
             and self.write_log

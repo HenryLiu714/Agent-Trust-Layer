@@ -226,7 +226,9 @@ def test_an_agent_killed_after_its_write_leaves_a_run_with_no_end(run_workflow):
     assert summary[-1] == (
         "  These writes did not happen. Would have fired: refund.created, charge.refunded."
     )
-    assert not any(word in line.lower() for line in summary for word in ("143", "kill", "signal"))
+    # The header names the process run, 16 random hex characters, which can spell `143` by chance.
+    said = [line.replace(shadow.process_run_id(), "<run>").lower() for line in summary]
+    assert not any(word in line for line in said for word in ("143", "kill", "signal"))
     # The stored process run ends with the child's code, which is how the kill is visible (#70).
     assert process_run(shadow) == ("error", 143, ErrorInfo("exit", "exited 143"))
     assert listed_status(shadow) == "error"

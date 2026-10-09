@@ -8,7 +8,12 @@ moves through them, and which rules the tests hold the layout to.
 ## One request, end to end
 
 Everything happens inside `IrimiAddon` (`src/irimi/engine/mitm.py`), which mitmproxy calls once
-per flow. Each hook calls plain functions from the layers below it, in this order:
+per flow. Each hook calls plain functions from the layers below it, in this order. Nothing
+through the listener skips them: mitmproxy's raw TCP relay is off (`rawtcp=False`), so a tunnel
+whose first bytes mitmproxy would not call HTTP (a method like `M-SEARCH`, or a first segment of
+under three bytes) is parsed as HTTP and decided like any request, bytes that are not HTTP fail
+there, and a connection a live `101` upgraded to anything but a WebSocket is closed. None of them
+is relayed, and none leaves a record (#75).
 
 1. **`request`** - `pipeline.parse` normalises the wire request. `reverse_door.detect_door`
    decides whether it is addressed to the listener itself. If it is, and its path starts with

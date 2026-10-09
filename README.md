@@ -234,7 +234,9 @@ host in a map is not an allow-list entry here. The scheme upstream is always htt
   to the real service. The banner says `backstop: none (Phase 4)` for this reason, and
   `w11_leaky_agent` pins each known escape.
 - **HTTP(S) only.** Database writes, files on disk, gRPC and WebSocket traffic are not virtualized
-  and happen for real. Point database URLs at scratch data.
+  and happen for real. Point database URLs at scratch data. Bytes sent through the proxy that are
+  not HTTP, and a connection upgraded to anything but a WebSocket, are refused, never relayed, and
+  leave no record (#75).
 
 ## Service maps
 
@@ -440,20 +442,22 @@ HTTP clients' classes so each request a run sends **to irimi** carries the run's
 context variable as the request is sent. irimi strips the header before anything leaves it.
 
 - **Covered.** Every client built on `http.client`: `urllib.request`, `requests` and `urllib3`,
-  stripe-python, slack_sdk. And `httpx`, sync and async, when it is installed: the OpenAI and
-  Anthropic SDKs.
-- **Not covered**: `aiohttp`, `pycurl`, gRPC, WebSockets, a client that writes HTTP on its own
-  socket, and any subprocess the agent starts. A run's request through one of them carries no
-  run unless the agent sets `Irimi-Run: <sdk.current_run_id()>` itself, as the sample workflows'
-  raw asyncio client does (W3).
+  stripe-python's sync client, slack_sdk's `WebClient`. And `httpx`, sync and async, when it is
+  installed: the OpenAI and Anthropic SDKs, and stripe-python's async client.
+- **Not covered**: `aiohttp` (slack_sdk's `AsyncWebClient` among them), `pycurl`, gRPC,
+  WebSockets, a client that writes HTTP on its own socket, and any subprocess the agent starts. A
+  run's request through one of them carries no run unless the agent sets
+  `Irimi-Run: <sdk.current_run_id()>` itself, as the sample workflows' raw asyncio client does
+  (W3).
 - **The fallback.** A request with no `Irimi-Run` belongs to the engine's own run: the process run
   under `irimi shadow -- <cmd>`, and `unattributed` under serve mode (#77).
 - **Only through irimi.** irimi can strip only what passes through it, so a request is labelled
   only when its connection goes to irimi's listener: the host and port `IRIMI_CONTROL` or a proxy
-  variable (`HTTP_PROXY`, `HTTPS_PROXY`, either case) names, as spelled there. That covers the
-  proxy, a CONNECT tunnel through it, and the reverse door at `http://127.0.0.1:4000/...`. A
-  `NO_PROXY` host, a client built with no proxy or a sidecar on loopback gets no header, so a
-  run's id never reaches a service irimi does not stand in front of.
+  variable (`HTTP_PROXY`, `HTTPS_PROXY`, either case) names, as spelled there: `localhost` is not
+  `127.0.0.1`. That covers the proxy, a CONNECT tunnel through it, and the reverse door at
+  `http://127.0.0.1:4000/...`. A `NO_PROXY` host, a client built with no proxy or a sidecar on
+  loopback gets no header, and neither does the next hop of a redirect away from irimi, so a run's
+  id never reaches a service irimi does not stand in front of.
 - **When.** The patches are on classes, not instances, so a client created before the first run
   is covered too. They are made on the first run's entry, never on import and never while the SDK
   is inactive; `sdk.instrument()` makes them at startup instead, and is safe to call again.

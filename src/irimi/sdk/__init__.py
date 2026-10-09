@@ -23,8 +23,7 @@ Imports only the stdlib and irimi's lowest layers, never mitmproxy, so it can sh
 """
 
 from irimi.sdk.api import run, trigger
-from irimi.sdk.context import current_run_id, propagate
+from irimi.sdk.context import active, current_run_id, propagate
 from irimi.sdk.instrumentation import instrument
-from irimi.sdk.runs import active
 
 __all__ = ["active", "current_run_id", "instrument", "propagate", "run", "trigger"]

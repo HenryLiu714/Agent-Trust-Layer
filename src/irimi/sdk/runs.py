@@ -65,12 +65,6 @@ reporter: Reporter = ControlClient()
 _instrument_failed = False
 
 
-def active() -> bool:
-    """True when irimi is in front of this process: `IRIMI_ENGINE_ACTIVE` is `1`, as `irimi
-    shadow` sets it for its child (#73). Read at each call, never cached."""
-    return os.environ.get(paths.ENGINE_ACTIVE_ENV) == "1"
-
-
 def new_run_id() -> str:
     """A fresh run id: 16 lower-case hex characters. It passes `trace.is_valid_run_id`, and being
     lower-case it never differs only in case from another, which a case-insensitive filesystem
@@ -176,7 +170,7 @@ class RunScope:
         trigger, make it current and build its start. None when the SDK is inactive or this entry
         joins a run. Captured before the id is current, so nothing past this point can leave the
         id set without `_close` to undo it."""
-        if not active() or context.current_run_id() is not None:
+        if not context.active() or context.current_run_id() is not None:
             return None
         args, replayable = self._capture()
         trigger = trace.Trigger(self._name, self._entrypoint, args, replayable)

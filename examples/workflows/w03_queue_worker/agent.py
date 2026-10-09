@@ -4,8 +4,12 @@ Each message names a charge. `handle(message)` is the trigger: it reads the char
 part of it. The two calls go through a client chosen by the message's index, because the SDK has
 to label a run's requests whichever client makes them (#75):
 
-    0  urllib (`agentkit.http`)          2  a raw asyncio HTTP/1.1 client through the proxy
-    1  `http.client` through the proxy   3  `requests`, when it is installed
+    0  urllib (`agentkit.http`)          3  `requests`
+    1  `http.client` through the proxy   4  `httpx.Client`
+    2  a raw asyncio HTTP/1.1 client     5  `httpx.AsyncClient`, in an event loop of its own
+
+The SDK patches the clients `http.client` underlies, and httpx's (#75). The raw asyncio client is
+one it does not cover, like `aiohttp`: it labels its requests itself, with `sdk.current_run_id()`.
 
 Every call is labelled `read:<charge>` or `refund:<charge>`, so a test can check that run R's
 calls name only R's own charge.
@@ -28,16 +32,19 @@ from http.client import HTTPConnection
 from typing import Any
 from urllib.parse import urlencode, urlsplit
 
+import httpx
+import requests
+
 from examples.workflows import agentkit, sdk
 
-CLIENTS = ("urllib", "http.client", "asyncio", "requests")
+CLIENTS = ("urllib", "http.client", "asyncio", "requests", "httpx", "httpx-async")
 
 
 def charge_id(i: int) -> str:
     return f"ch_Q{i}"
 
 
-# -- the four clients -----------------------------------------------------------------------------
+# -- the six clients ------------------------------------------------------------------------------
 
 
 def _target(url: str) -> tuple[str, int, str]:
@@ -83,27 +90,29 @@ async def _via_asyncio(method: str, url: str, body: bytes | None, headers: dict[
 
 
 def _via_requests(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Any:
-    import requests  # only in the `examples` group; the caller checks it is importable
-
     resp = requests.request(method, url, data=body, headers=headers, timeout=agentkit.timeout())
     return resp.status_code, resp.headers.get("Irimi-Answered-By")
 
 
-def _has_requests() -> bool:
-    try:
-        import requests  # noqa: F401
-    except ImportError:
-        return False
-    return True
+def _via_httpx(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Any:
+    with httpx.Client(timeout=agentkit.timeout()) as client:
+        resp = client.request(method, url, content=body, headers=headers)
+    return resp.status_code, resp.headers.get("Irimi-Answered-By")
+
+
+async def _via_httpx_async(
+    method: str, url: str, body: bytes | None, headers: dict[str, str]
+) -> Any:
+    async with httpx.AsyncClient(timeout=agentkit.timeout()) as client:
+        resp = await client.request(method, url, content=body, headers=headers)
+    return resp.status_code, resp.headers.get("Irimi-Answered-By")
 
 
 def call(index: int, method: str, path: str, form: dict[str, Any] | None, label: str) -> Any:
     """One Stripe call through message `index`'s client, logged like `agentkit.http` logs.
     Returns the answer's JSON for the urllib client, None for the others."""
     client = CLIENTS[index % len(CLIENTS)]
-    if client == "requests" and not _has_requests():
-        client = "requests-unavailable"
-    if client in ("urllib", "requests-unavailable"):
+    if client == "urllib":
         return agentkit.stripe(method, path, form, label=label).json()
     url = agentkit.base("stripe") + path
     headers = {"Authorization": f"Bearer {agentkit.key('STRIPE_API_KEY')}"}
@@ -112,15 +121,19 @@ def call(index: int, method: str, path: str, form: dict[str, Any] | None, label:
         body = urlencode(form).encode()
         headers["Content-Type"] = "application/x-www-form-urlencoded"
     run_id = sdk.current_run_id()
-    if run_id is not None:
-        # Only agentkit's urllib client labels a run's requests today; #75 patches the rest.
+    if run_id is not None and (client == "asyncio" or not sdk.labels_requests()):
+        # The SDK labels every other client's requests (#75); this one it cannot see.
         headers["Irimi-Run"] = run_id
     if client == "http.client":
         status, answered_by = _via_http_client(method, url, body, headers)
     elif client == "asyncio":
         status, answered_by = asyncio.run(_via_asyncio(method, url, body, headers))
-    else:
+    elif client == "requests":
         status, answered_by = _via_requests(method, url, body, headers)
+    elif client == "httpx":
+        status, answered_by = _via_httpx(method, url, body, headers)
+    else:
+        status, answered_by = asyncio.run(_via_httpx_async(method, url, body, headers))
     agentkit.obs_http(method, url, label, status=status, answered_by=answered_by, client=client)
     return None
 
@@ -159,8 +172,8 @@ def handle(message: dict[str, Any]) -> None:
             pool.submit(sdk.propagate(refund), message).result()
     elif how == "bare_thread":
         # No `sdk.propagate`: the thread starts with an empty context, so the refund belongs to
-        # no run. Once #75 exists it falls back to the engine's own run: the process run under
-        # `irimi shadow -- <cmd>`, and `unattributed` only in serve mode (#77).
+        # no run, and carries no `Irimi-Run` (#75). It falls back to the engine's own run: the
+        # process run under `irimi shadow -- <cmd>`, and `unattributed` only in serve mode (#77).
         worker = threading.Thread(target=refund, args=(message,))
         worker.start()
         worker.join()
@@ -327,8 +340,9 @@ SHARED_CHARGE = "ch_QSHARED"  # 4900; two runs each refund 3000 of it
 def messages_for(scenario: str) -> list[dict[str, Any]]:
     count, _, extra = SCENARIOS[scenario]
     if scenario == "shared_charge":
-        # Indexes 0 and 4: both through urllib, so both reads' bodies are logged (`saw`).
-        return [{"charge": SHARED_CHARGE, "amount": 3000, "index": i} for i in (0, 4)]
+        # Indexes 0 and len(CLIENTS): both through urllib, so both reads' bodies are logged (`saw`).
+        indexes = (0, len(CLIENTS))
+        return [{"charge": SHARED_CHARGE, "amount": 3000, "index": i} for i in indexes]
     out = [{"charge": charge_id(i), "amount": 100 + i, "index": i, **extra} for i in range(count)]
     if scenario in POISON:
         out[POISON[scenario]]["poison"] = True

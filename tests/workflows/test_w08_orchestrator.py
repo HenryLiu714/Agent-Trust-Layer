@@ -101,8 +101,21 @@ def test_irimi_strips_its_run_header_at_the_hop_and_only_the_agents_own_header_s
     for req in forwarded:
         assert "irimi-run" not in req.headers
         assert req.headers["x-parent-run"] == run_id
-    # The agent did send Irimi-Run on every call of the run: agentkit labels them.
+    # And yet each call reached irimi labelled: the SDK put `Irimi-Run` on it (#75), so irimi
+    # stored every one in the run: the two reads it forwarded to the internal service, and the
+    # reservation it faked.
     assert {c["run"] for c in shadow.calls()} == {run_id}
+    stored = [
+        (e.request.host, e.request.path)
+        for e in shadow.stored().load_run(run_id).events
+        if isinstance(e, Exchange)
+    ]
+    assert [path for host, path in stored if host == HOST] == [
+        "/inventory",
+        "/quote",
+        "/reservations",
+    ]
+    assert shadow.stored().load_run(shadow.process_run_id()).events == []
 
 
 def test_every_sub_agent_call_joins_its_parents_run(run_workflow):

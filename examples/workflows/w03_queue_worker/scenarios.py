@@ -20,7 +20,7 @@ def _charges(world: World) -> None:
 WORKFLOW = Workflow(
     name="w03_queue_worker",
     summary="A queue consumer, one @sdk.trigger run per message, over threads and asyncio and "
-    "four HTTP clients: runs must not mix, and a thread without propagate loses its run.",
+    "six HTTP clients: runs must not mix, and a thread without propagate loses its run.",
     scenarios={
         "threads_8": Scenario(
             ("threads_8",),

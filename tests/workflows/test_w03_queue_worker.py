@@ -1,10 +1,9 @@
-"""W3 `queue_worker`: one run per message, over threads, asyncio and four HTTP clients.
+"""W3 `queue_worker`: one run per message, over threads, asyncio and six HTTP clients.
 
 Runs exist only under shadow (the SDK is inactive in a bare run), so every per-run check reads the
 shadow run. Order between runs is never asserted: the pool and the event loop interleave freely.
 """
 
-import importlib.util
 import re
 import sys
 from collections import Counter
@@ -13,6 +12,7 @@ from urllib.parse import parse_qs
 import pytest
 
 import irimi
+from examples.workflows.w03_queue_worker.agent import CLIENTS
 from examples.workflows.w03_queue_worker.scenarios import AGENT_VERSION
 from irimi.exchange import Exchange
 from irimi.trace import ErrorInfo
@@ -96,12 +96,7 @@ def test_eight_messages_are_eight_stored_runs_each_holding_only_its_own_charge(
 def test_every_client_went_through_the_proxy(run_workflow):
     shadow = run_workflow(W, "threads_8", "shadow")
     clients = {c.get("client", "urllib") for c in shadow.calls()}
-    # `requests` is only installed with the `examples` group; without it message 3 falls back to
-    # urllib. The agent runs in this interpreter's environment, so the two agree.
-    with_requests = importlib.util.find_spec("requests") is not None
-    assert clients == {"urllib", "http.client", "asyncio"} | (
-        {"requests"} if with_requests else set()
-    )
+    assert clients == set(CLIENTS)
     # Every one of them was answered by irimi on the write: none bypassed it.
     posts = {
         (c.get("client", "urllib"), c["answered_by"])

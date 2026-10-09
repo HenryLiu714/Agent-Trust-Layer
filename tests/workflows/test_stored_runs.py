@@ -12,6 +12,7 @@ import dataclasses
 import re
 import stat
 import sys
+from collections import Counter
 
 import pytest
 
@@ -266,6 +267,39 @@ def test_every_run_the_agent_logged_is_stored_with_the_outcome_it_logged(
         else:
             assert record.error is not None
             assert record.error.type.rsplit(".", 1)[-1] == end["error"]
+
+
+@pytest.mark.parametrize(("name", "scenario"), CASES, ids=IDS)
+def test_every_request_a_run_sent_through_irimi_is_stored_in_that_run(run_workflow, name, scenario):
+    """#75 end to end: the SDK labels each request a run sends to irimi with the run's id, read
+    as the request is sent, so irimi stores it in that run, whichever client, thread, task or
+    pooled connection sent it. Each call the agent logged inside a run (its `run`, the context's
+    id when it was made) is one of that run's stored exchanges, by method and host, or its
+    telemetry, by host: a run also holds irimi's own L3 reads, so this is containment, not
+    equality. A call that belonged to no run is not checked here (W3 `unpropagated_thread` pins
+    where it lands), nor a `leaks` scenario, whose call went around irimi on purpose (W11)."""
+    shadow = run_workflow(name, scenario, "shadow")
+    if not started(shadow) or shadow.workflow.scenarios[scenario].leaks:
+        return
+    reader = shadow.stored()
+    stored = {r.run_id for r in reader.list_runs()}
+    made: dict[str, Counter] = {}
+    for call in shadow.calls():
+        if call.get("run") is None:
+            continue
+        host = str(call["url"]).split("/", 1)[0]
+        made.setdefault(call["run"], Counter())[(call["method"], host)] += 1
+    for run_id, calls in made.items():
+        assert run_id in stored, run_id
+        events = reader.load_run(run_id).events
+        held = Counter(
+            (e.request.method, e.request.host) for e in events if isinstance(e, Exchange)
+        )
+        # Telemetry is stored only as having happened, by host (#70).
+        seen = Counter(e.host for e in events if isinstance(e, TelemetrySeen))
+        missing = calls - held
+        missing -= Counter({(m, h): seen[h] for m, h in missing})
+        assert not missing, (run_id, missing)
 
 
 @pytest.mark.parametrize(("name", "scenario"), CASES, ids=IDS)

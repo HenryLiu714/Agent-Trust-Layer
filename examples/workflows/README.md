@@ -17,15 +17,15 @@ uv run pytest -q tests/workflows                                     # the whole
 |---|---|---|---|
 | W1 | `w01_ticket_triage` | support-ticket webhook | a multi-turn LLM tool loop; L3 on the model's refunds (one too large, one refused because the overlay shows the first); one refund sent twice under one key (#46); replay divergence mid-conversation (#82-#85) |
 | W2 | `w02_nightly_reconcile` | scheduled `sdk.run` | pagination, a cursor naming a minted id (#53), 40 writes in one run, a non-replayable trigger |
-| W3 | `w03_queue_worker` | queue, threads and asyncio | run attribution under concurrency (#74, #75), six HTTP clients the SDK labels (urllib, `http.client`, `requests`, `httpx` sync and async) or that labels itself (a raw asyncio client, #75), two runs sharing one engine's write log; each way the SDK marks a run: triggers on functions, on a worker's methods and on a sync function that returns a coroutine, `async with sdk.run`, and a run cancelled at shutdown (#74) |
+| W3 | `w03_queue_worker` | queue, threads and asyncio | run attribution under concurrency (#74, #75), six HTTP clients the SDK labels (urllib, `http.client`, `requests`, `httpx` sync and async) or that labels itself (a raw asyncio client, #75), eight runs sharing two one-connection pools (#75), two runs sharing one engine's write log; each way the SDK marks a run: triggers on functions, on a worker's methods and on a sync function that returns a coroutine, `async with sdk.run`, and a run cancelled at shutdown (#74); a Task a sync trigger returns, whose calls land in its ended run (#75, pinned `LOOKS WRONG`) |
 | W4 | `w04_slack_ops_bot` | Slack Events API | Slack fidelity: minted threads (#52), names vs ids (#44), `missing_scope`, an archived channel, an L0 `reactions.add`, duplicate delivery, the webhook path (#87) |
 | W5 | `w05_dispute_responder` | signed Stripe webhook | bytes trigger args, `would_fire` (#47), an event the agent's own write would fire, a live read whose response carries a credential (a payment intent's `client_secret`) stored redacted (#70) |
 | W6 | `w06_crm_db_agent` | CLI | tools the proxy cannot see (#76, #83): database and file writes, stand-ins, decoration-time errors |
-| W7 | `w07_streaming_assistant` | streaming HTTP endpoint | SSE through the proxy, recorded chunk by chunk (#71): two streams at once, chunks that end mid-line and mid-secret; a caller that disconnects, an upstream reset mid-stream and before the stream opens, a LangSmith trace stored only as having happened (#70); every stream stored in the chat's run, labelled by the SDK (#75) |
+| W7 | `w07_streaming_assistant` | streaming HTTP endpoint | SSE through the proxy, recorded chunk by chunk (#71): two streams at once, chunks that end mid-line and mid-secret; a caller that disconnects, an upstream reset mid-stream and before the stream opens, a LangSmith trace stored only as having happened (#70); every stream stored in the chat's run, labelled by the SDK, read with urllib or with httpx as the model SDKs read them, and two chats' streams each in its own run (#75) |
 | W8 | `w08_orchestrator` | nested triggers + an internal service | nested runs, unmapped internal hosts, `Irimi-Run` across a hop: labelled by the SDK, stripped by irimi (#67, #75) |
 | W9 | `w09_scope_gauntlet` | none (plain script) | THE SCOPE RULE, the L0 floor, idempotency (#46), odd bodies, reads past the body limit, forged irimi headers, the reverse door, the control endpoint (#73): runs started, given tool calls and ended over it by hand, two at once, and every refusal |
 | W10 | `w10_flaky_upstream` | CLI | retries, timeouts, resets on a read and a write, irimi's own L3 read failing, a run that raises, is interrupted (Ctrl-C) or is killed after a write, and an SDK whose control endpoint is unset, gone or refusing (#74) |
-| W11 | `w11_leaky_agent` | CLI | what irimi cannot see: clients that ignore the proxy, loopback services (Phase 4 readiness); each escape an `sdk.run` whose escaped request carries no `Irimi-Run` (#75) |
+| W11 | `w11_leaky_agent` | CLI | what irimi cannot see: clients that ignore the proxy, loopback services (Phase 4 readiness); each escape an `sdk.run` whose escaped request carries no `Irimi-Run`, and a read whose redirects lead it off irimi's route, labelled on each hop through irimi and on no other (#75) |
 
 Each workflow is a package: `agent.py` is the agent, started through `examples.workflows.launch`
 so it keeps its real module name; `scenarios.py` seeds the fake services per scenario;
@@ -65,8 +65,9 @@ so it keeps its real module name; `scenarios.py` seeds the fake services per sce
   are wrapped only so the agent's log still gets `run.start` and `run.end` with the real run id.
   Until `irimi.sdk` has `tool` (#76), `sdk.py` implements its call-time rules itself, so an active
   write tool already runs its stand-in and never the real function. The corpus labels no request
-  with `Irimi-Run` itself while `irimi.sdk` has `instrument` (`sdk.labels_requests()`): the SDK
-  does it (#75), so a scenario that pins a run's requests fails without the SDK's patch. W3's raw
+  with `Irimi-Run` itself whenever the real `irimi.sdk` imports (`sdk.labels_requests()`), only
+  in the stand-in: the SDK does it (#75), so a scenario that pins a run's requests fails without
+  the SDK's patch. W3's raw
   asyncio client is the one exception, a client the SDK does not cover.
 
 ## The universal invariants
@@ -96,8 +97,9 @@ posted by hand (#73), but where the SDK cannot reach irimi (W10's `control_*`), 
 the `header` run its labelled requests made; every run the agent logged (`run.start`, `run.end`)
 is stored, with the trigger name and outcome it logged and its error under the exception's
 `module.qualname`, a run killed before its end is stored with none, and every SDK workflow's
-scenario logs one but those that start no run; every store directory is 0700, every file 0600,
-and no `events.jsonl` ends in a half-written line; and a bare run stores nothing. A streamed answer is stored as the chunks the agent was sent (#71). For
+scenario logs one but those that start no run; every call the agent made inside a run, through
+irimi, is stored in that run, by the `Irimi-Run` the SDK put on it (#75); every store directory
+is 0700, every file 0600, and no `events.jsonl` ends in a half-written line; and a bare run stores nothing. A streamed answer is stored as the chunks the agent was sent (#71). For
 W9 (but for its control scenarios), which sends no `Irimi-Run`, `irimi runs show <process
 run>` ends in the summary
 `irimi shadow` printed, but for the elapsed seconds; for every workflow, the summary over all of

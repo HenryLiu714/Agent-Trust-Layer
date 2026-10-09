@@ -159,6 +159,31 @@ def test_a_streamed_answer_is_stored_as_the_chunks_the_agent_was_sent(run_workfl
     assert embeddings.stream_chunks == ()
 
 
+def test_streams_read_with_httpx_are_stored_whole_in_the_chats_run(run_workflow):
+    """The Anthropic and OpenAI SDKs stream with httpx, which the SDK labels at its transport and
+    unlabels as soon as the transport returns, while the stream is still being read (#75). The
+    agent sees what it sees with urllib, both streams are stored whole and in the chat's run, as
+    the chunks it was sent (#71), and no upstream saw `Irimi-Run` (universal invariant 2)."""
+    bare = run_workflow(W, "httpx_streams", "bare")
+    shadow = run_workflow(W, "httpx_streams", "shadow")
+    assert shadow.result(with_time=False) == bare.result(with_time=False)
+    assert shadow.result()["caller_text"] == shadow.result()["answer"] == ANSWER
+    assert shadow.exchange_lines() == LLM_LINES
+    stored = stored_exchanges(shadow)
+    [chat] = shadow.sdk_runs()
+    assert {ex.run_id for ex in stored.values()} == {chat.run_id}
+    assert shadow.stored().load_run(shadow.process_run_id()).events == []
+    ends = {"/v1/messages": MESSAGE_STOP, "/v1/chat/completions": b"data: [DONE]\n\n"}
+    for path, end in ends.items():
+        ex = stored[path]
+        assert ex.response is not None and ex.response.body.endswith(end)
+        assert len(ex.stream_chunks) > 1 and sum(ex.stream_chunks) == len(ex.response.body)
+        assert ex.flags == ()
+    anthropic = stored["/v1/messages"].response
+    assert anthropic is not None and text_deltas(anthropic.body) == ANSWER
+    assert [r for r in shadow.internet.requests() if "irimi-run" in r.headers] == []
+
+
 def test_a_secret_inside_a_stream_reaches_the_caller_intact_and_never_disk(run_workflow):
     """Redaction is for disk only (#69): the live stream is never rewritten, and the stored one
     (#71) holds the secret nowhere whole. The agent passes Anthropic's answer on to OpenAI, so the
@@ -389,6 +414,24 @@ def test_two_streams_at_once_are_each_stored_against_their_own_request(run_workf
                 ]
                 assert "".join(content) == pair_decision(caller)
         assert sorted(callers) == ["1", "2"]
+    # Two concurrent requests do not mix (Phase 3's exit): each chat is a run of its own, and
+    # every call it made, both streams included, is stored in it and in no other, by the
+    # `Irimi-Run` the SDK put on each as it was sent (#75), though the two chats' streams were in
+    # the air together.
+    runs = {r.trigger.args["question"][-2]: r.run_id for r in shadow.sdk_runs() if r.trigger}
+    assert sorted(runs) == ["1", "2"]
+    for caller, run_id in runs.items():
+        held = [e for e in shadow.stored().load_run(run_id).events if isinstance(e, Exchange)]
+        assert sorted(e.request.path for e in held) == sorted([*ends, "/v1/embeddings"])
+        for ex in held:
+            if ex.request.path == "/v1/chat/completions":
+                assert json.loads(ex.request.body)["messages"][-1]["content"] == pair_answer(caller)
+            else:
+                asked = json.loads(ex.request.body)
+                question = asked["input"] if "input" in asked else asked["messages"][-1]["content"]
+                assert question == f"How do refunds work? (caller {caller})"
+    process = shadow.stored().load_run(shadow.process_run_id()).events
+    assert process == []
 
 
 def test_the_callers_send_function_is_stored_by_its_repr_and_cannot_be_replayed(run_workflow):

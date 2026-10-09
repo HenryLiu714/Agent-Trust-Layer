@@ -10,9 +10,9 @@ Agents write `from examples.workflows import sdk` where a real agent would write
   `tool` is the stand-in's, so an agent that uses `@sdk.tool` still imports.
   Names this module does not define (`sdk.instrument`, `sdk.replay`, `ReplayResult`, ...) are
   forwarded to `irimi.sdk` by the module `__getattr__`.
-  Once `irimi.sdk` has `instrument` (#75), it labels every request a run sends through irimi, so
-  the corpus labels none itself (`labels_requests`): a run's requests are labelled by the SDK that
-  ships, or not at all.
+  Every `irimi.sdk` has `instrument`, a no-op from #74 until #75 filled it in, so the corpus
+  labels no request itself whenever the real SDK imports (`labels_requests`): a run's requests
+  are labelled by the SDK that ships, or not at all.
   Three real names are still wrapped, for the observation log the corpus pins:
   - `tool` wraps the real function and its stand-in so each logs which of them ran
     (`agentkit.obs("tool", ...)`), because that is the harness's proof that no write tool ran for
@@ -22,7 +22,7 @@ Agents write `from examples.workflows import sdk` where a real agent would write
 - **Until then**, it implements the same API with no control endpoint and no recording:
   - a context-variable run id that nested triggers join;
   - `agentkit.http`, and W3's clients, labelling each request with `Irimi-Run` (which irimi
-    strips, #67), until the real SDK labels them (#75);
+    strips, #67), as the real SDK does since #75;
   - #76's call-time table, so an active write tool runs its stand-in and never the real function.
 
   It raises #76's decoration-time `TypeError`s too, so an agent that is wrong today is wrong in
@@ -95,9 +95,10 @@ def active() -> bool:
 
 
 def labels_requests() -> bool:
-    """True when the real SDK puts `Irimi-Run` on a run's requests: it has `instrument` (#75).
-    Until then `agentkit.http` and W3's `call` label them by hand; after, they must not, or the
-    corpus would pass with or without the SDK's patch."""
+    """True when the real `irimi.sdk` imports, False when only the stand-in is here. Every real
+    SDK has `instrument`: #74 exported it as a no-op, and #75 made it put `Irimi-Run` on a run's
+    requests. So `agentkit.http` and W3's `call` label by hand only with no real SDK at all; with
+    one, they must not, or the corpus would pass with or without the SDK's patch."""
     return _from_real("instrument") is not None
 
 

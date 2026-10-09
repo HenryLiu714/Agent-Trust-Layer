@@ -72,5 +72,15 @@ WORKFLOW = Workflow(
                 " joins, and it ends with the coroutine's outcome (one message raises)"
             ),
         ),
+        "one_pool_8": Scenario(
+            ("one_pool_8",),
+            setup=_charges,
+            doc="8 messages on 4 threads, every call through one of two shared 1-connection pools",
+        ),
+        "task_outlives_trigger": Scenario(
+            ("task_outlives_trigger",),
+            setup=_charges,
+            doc="a sync trigger returns a Task: its run ends first, and the task's calls follow",
+        ),
     },
 )

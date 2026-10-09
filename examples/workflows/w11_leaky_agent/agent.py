@@ -9,6 +9,13 @@ Each escape runs inside `sdk.run`, so under shadow it is a run whose requests th
 only those that go through irimi (#75): a run's id must never ride out on an escape, where nothing
 would strip it. Universal invariant 2 checks that no fake service ever saw `Irimi-Run`.
 
+`redirected` writes nothing. It is a read that each client the SDK labels (urllib, `requests`,
+`httpx` sync and async) follows through two redirects: the first stays on a host irimi proxies, the
+second leads to the loopback sidecar, which irimi's own `NO_PROXY` sends direct. Each hop is
+labelled or not by where its own connection goes, so the last one goes out unlabelled (#75). But
+for `requests`, which keeps the first request's proxy across redirects whatever `NO_PROXY` says:
+its last hop goes through irimi after all, labelled, and is stripped there.
+
     python -m examples.workflows.launch \\
         examples.workflows.w11_leaky_agent.agent <escape>
 
@@ -19,6 +26,7 @@ refuses every other name. A raw socket and a loopback sidecar dial 127.0.0.1 dir
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import ipaddress
 import json
@@ -32,11 +40,17 @@ from collections.abc import Iterator
 from typing import Any
 from urllib.parse import urlencode
 
+import httpx
+import requests
+
 from examples.workflows import agentkit, sdk
 
 CHARGE = "ch_LEAKY"
 CHANNEL = "C0LEAKY"
 SERVED = frozenset({"api.stripe.com", "slack.com"})
+# The export service `redirected` reads through, reached through the proxy like any named host.
+FILES_HOST = "files.internal"
+REDIRECT_CLIENTS = ("urllib", "requests", "httpx", "httpx-async")
 
 
 def port() -> int:
@@ -157,12 +171,45 @@ def loopback_service() -> None:
     )
 
 
+def redirected() -> None:
+    """The same read by each client the SDK labels, following both redirects: the export
+    service's, through irimi, then the hop to the sidecar on loopback, direct (through irimi for
+    `requests`)."""
+    sidecar = agentkit.internal("127.0.0.1") + "/queue/stats"
+    url = agentkit.internal(FILES_HOST) + "/export?" + urlencode({"next": sidecar})
+    for client in REDIRECT_CLIENTS:
+        if client == "urllib":
+            resp = agentkit.http("GET", url, label=f"export:{client}")
+            agentkit.obs("landed", client=client, doc=resp.json())
+            continue
+        if client == "requests":
+            got: Any = requests.get(url, timeout=agentkit.timeout())
+            status = got.status_code
+        elif client == "httpx":
+            with httpx.Client(timeout=agentkit.timeout(), follow_redirects=True) as c:
+                got = c.get(url)
+            status = got.status_code
+        else:
+            got = asyncio.run(_httpx_async_get(url))
+            status = got.status_code
+        doc, hops = got.json(), len(got.history)
+        answered_by = got.headers.get("Irimi-Answered-By")
+        agentkit.obs_http("GET", url, f"export:{client}", status=status, answered_by=answered_by)
+        agentkit.obs("landed", client=client, doc=doc, redirects=hops)
+
+
+async def _httpx_async_get(url: str) -> httpx.Response:
+    async with httpx.AsyncClient(timeout=agentkit.timeout(), follow_redirects=True) as c:
+        return await c.get(url)
+
+
 ESCAPES = {
     "proxied": proxied,
     "proxyless_client": proxyless_client,
     "no_proxy_star": no_proxy_star,
     "raw_socket": raw_socket,
     "loopback_service": loopback_service,
+    "redirected": redirected,
 }
 
 

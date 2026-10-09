@@ -9,6 +9,7 @@ new test file inherits it instead of rediscovering the problem.
 import pytest
 
 from irimi import paths
+from irimi.sdk import instrumentation
 
 
 @pytest.fixture(autouse=True)
@@ -18,3 +19,11 @@ def no_ambient_irimi(tmp_path, monkeypatch):
     cwd = tmp_path / "cwd"
     cwd.mkdir()
     monkeypatch.chdir(cwd)
+
+
+@pytest.fixture(autouse=True)
+def no_instrumentation_left_behind():
+    """Every patch a test's runs made to the HTTP clients is undone after it (#75): `instrument()`
+    patches classes for the life of the process, which here is the whole suite."""
+    yield
+    instrumentation._uninstall()

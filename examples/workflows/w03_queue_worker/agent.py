@@ -4,8 +4,16 @@ Each message names a charge. `handle(message)` is the trigger: it reads the char
 part of it. The two calls go through a client chosen by the message's index, because the SDK has
 to label a run's requests whichever client makes them (#75):
 
-    0  urllib (`agentkit.http`)          2  a raw asyncio HTTP/1.1 client through the proxy
-    1  `http.client` through the proxy   3  `requests`, when it is installed
+    0  urllib (`agentkit.http`)          3  `requests`
+    1  `http.client` through the proxy   4  `httpx.Client`
+    2  a raw asyncio HTTP/1.1 client     5  `httpx.AsyncClient`, in an event loop of its own
+
+The SDK patches the clients `http.client` underlies, and httpx's (#75). The raw asyncio client is
+one it does not cover, like `aiohttp`: it labels its requests itself, with `sdk.current_run_id()`.
+
+`one_pool_8` sends every run's calls through one of two shared pools that hold one connection
+each, a `requests.Session` and an `httpx.Client` (`POOLED`), so runs share a connection to the
+proxy and only their `Irimi-Run` tells them apart, never the connection (D8, #75).
 
 Every call is labelled `read:<charge>` or `refund:<charge>`, so a test can check that run R's
 calls name only R's own charge.
@@ -20,6 +28,7 @@ a `Worker`'s methods, and `async with sdk.run(...)` around a block.
 from __future__ import annotations
 
 import asyncio
+import socket
 import sys
 import threading
 from collections.abc import Coroutine
@@ -28,16 +37,21 @@ from http.client import HTTPConnection
 from typing import Any
 from urllib.parse import urlencode, urlsplit
 
+import httpx
+import requests
+
 from examples.workflows import agentkit, sdk
 
-CLIENTS = ("urllib", "http.client", "asyncio", "requests")
+CLIENTS = ("urllib", "http.client", "asyncio", "requests", "httpx", "httpx-async")
+# The shared clients `one_pool_8` alternates between, each with a pool of one connection.
+POOLED = ("requests-pooled", "httpx-pooled")
 
 
 def charge_id(i: int) -> str:
     return f"ch_Q{i}"
 
 
-# -- the four clients -----------------------------------------------------------------------------
+# -- the six clients ------------------------------------------------------------------------------
 
 
 def _target(url: str) -> tuple[str, int, str]:
@@ -83,27 +97,91 @@ async def _via_asyncio(method: str, url: str, body: bytes | None, headers: dict[
 
 
 def _via_requests(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Any:
-    import requests  # only in the `examples` group; the caller checks it is importable
-
     resp = requests.request(method, url, data=body, headers=headers, timeout=agentkit.timeout())
     return resp.status_code, resp.headers.get("Irimi-Answered-By")
 
 
-def _has_requests() -> bool:
+def _via_httpx(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Any:
+    with httpx.Client(timeout=agentkit.timeout()) as client:
+        resp = client.request(method, url, content=body, headers=headers)
+    return resp.status_code, resp.headers.get("Irimi-Answered-By")
+
+
+async def _via_httpx_async(
+    method: str, url: str, body: bytes | None, headers: dict[str, str]
+) -> Any:
+    async with httpx.AsyncClient(timeout=agentkit.timeout()) as client:
+        resp = await client.request(method, url, content=body, headers=headers)
+    return resp.status_code, resp.headers.get("Irimi-Answered-By")
+
+
+_pools: dict[str, Any] = {}
+_pools_lock = threading.Lock()
+# Each new connection a pooled client opens, by client: set per thread around a pooled call.
+_opened: dict[str, int] = {}
+_pooled_call = threading.local()
+
+
+def _pool(client: str) -> Any:
+    """`client`'s one shared instance, made on first use, with room for one connection."""
+    with _pools_lock:
+        if client not in _pools:
+            if client == "requests-pooled":
+                session = requests.Session()
+                adapter = requests.adapters.HTTPAdapter(
+                    pool_connections=1, pool_maxsize=1, pool_block=True
+                )
+                session.mount("http://", adapter)
+                session.mount("https://", adapter)
+                _pools[client] = session
+            else:
+                limits = httpx.Limits(max_connections=1, max_keepalive_connections=1)
+                _pools[client] = httpx.Client(timeout=agentkit.timeout(), limits=limits)
+        return _pools[client]
+
+
+def _count_connections() -> None:
+    """Count each connection a pooled call opens, so `one_pool_8` can show its runs shared one."""
+    connect = socket.socket.connect
+
+    def counting(self: socket.socket, address: Any) -> None:
+        client = getattr(_pooled_call, "client", None)
+        if client is not None:
+            with _pools_lock:
+                _opened[client] = _opened.get(client, 0) + 1
+        connect(self, address)
+
+    socket.socket.connect = counting  # type: ignore[method-assign]
+
+
+def _via_pool(
+    client: str, method: str, url: str, body: bytes | None, headers: dict[str, str]
+) -> Any:
+    _pooled_call.client = client
     try:
-        import requests  # noqa: F401
-    except ImportError:
-        return False
-    return True
+        if client == "requests-pooled":
+            resp = _pool(client).request(
+                method, url, data=body, headers=headers, timeout=agentkit.timeout()
+            )
+            return resp.status_code, resp.headers.get("Irimi-Answered-By")
+        resp = _pool(client).request(method, url, content=body, headers=headers)
+        return resp.status_code, resp.headers.get("Irimi-Answered-By")
+    finally:
+        _pooled_call.client = None
 
 
-def call(index: int, method: str, path: str, form: dict[str, Any] | None, label: str) -> Any:
-    """One Stripe call through message `index`'s client, logged like `agentkit.http` logs.
+def call(
+    index: int,
+    method: str,
+    path: str,
+    form: dict[str, Any] | None,
+    label: str,
+    client: str | None = None,
+) -> Any:
+    """One Stripe call through `client`, or message `index`'s, logged like `agentkit.http` logs.
     Returns the answer's JSON for the urllib client, None for the others."""
-    client = CLIENTS[index % len(CLIENTS)]
-    if client == "requests" and not _has_requests():
-        client = "requests-unavailable"
-    if client in ("urllib", "requests-unavailable"):
+    client = client or CLIENTS[index % len(CLIENTS)]
+    if client == "urllib":
         return agentkit.stripe(method, path, form, label=label).json()
     url = agentkit.base("stripe") + path
     headers = {"Authorization": f"Bearer {agentkit.key('STRIPE_API_KEY')}"}
@@ -112,15 +190,21 @@ def call(index: int, method: str, path: str, form: dict[str, Any] | None, label:
         body = urlencode(form).encode()
         headers["Content-Type"] = "application/x-www-form-urlencoded"
     run_id = sdk.current_run_id()
-    if run_id is not None:
-        # Only agentkit's urllib client labels a run's requests today; #75 patches the rest.
+    if run_id is not None and (client == "asyncio" or not sdk.labels_requests()):
+        # The SDK labels every other client's requests (#75); this one it cannot see.
         headers["Irimi-Run"] = run_id
     if client == "http.client":
         status, answered_by = _via_http_client(method, url, body, headers)
     elif client == "asyncio":
         status, answered_by = asyncio.run(_via_asyncio(method, url, body, headers))
-    else:
+    elif client == "requests":
         status, answered_by = _via_requests(method, url, body, headers)
+    elif client == "httpx":
+        status, answered_by = _via_httpx(method, url, body, headers)
+    elif client in POOLED:
+        status, answered_by = _via_pool(client, method, url, body, headers)
+    else:
+        status, answered_by = asyncio.run(_via_httpx_async(method, url, body, headers))
     agentkit.obs_http(method, url, label, status=status, answered_by=answered_by, client=client)
     return None
 
@@ -130,7 +214,8 @@ def call(index: int, method: str, path: str, form: dict[str, Any] | None, label:
 
 def read(message: dict[str, Any]) -> None:
     charge = message["charge"]
-    doc = call(message["index"], "GET", f"/v1/charges/{charge}", None, f"read:{charge}")
+    path = f"/v1/charges/{charge}"
+    doc = call(message["index"], "GET", path, None, f"read:{charge}", message.get("client"))
     if isinstance(doc, dict):
         agentkit.obs("saw", charge=charge, amount_refunded=doc.get("amount_refunded"))
 
@@ -138,7 +223,7 @@ def read(message: dict[str, Any]) -> None:
 def refund(message: dict[str, Any]) -> None:
     charge = message["charge"]
     form = {"charge": charge, "amount": str(message["amount"])}
-    call(message["index"], "POST", "/v1/refunds", form, f"refund:{charge}")
+    call(message["index"], "POST", "/v1/refunds", form, f"refund:{charge}", message.get("client"))
 
 
 @sdk.trigger(name="audit")
@@ -159,8 +244,8 @@ def handle(message: dict[str, Any]) -> None:
             pool.submit(sdk.propagate(refund), message).result()
     elif how == "bare_thread":
         # No `sdk.propagate`: the thread starts with an empty context, so the refund belongs to
-        # no run. Once #75 exists it falls back to the engine's own run: the process run under
-        # `irimi shadow -- <cmd>`, and `unattributed` only in serve mode (#77).
+        # no run, and carries no `Irimi-Run` (#75). It falls back to the engine's own run: the
+        # process run under `irimi shadow -- <cmd>`, and `unattributed` only in serve mode (#77).
         worker = threading.Thread(target=refund, args=(message,))
         worker.start()
         worker.join()
@@ -223,6 +308,20 @@ async def _process(message: dict[str, Any]) -> None:
     await asyncio.to_thread(refund, message)
 
 
+@sdk.trigger(name="schedule")
+def schedule(message: dict[str, Any]) -> asyncio.Task[None]:
+    """A sync handler that starts its work as a task on the running loop and returns the task,
+    not a coroutine. The SDK hands a run over only to a coroutine (#74), so this run ends when
+    `schedule` returns, before the task has run a step; the task was created inside the run, so
+    its context still holds the run's id, and the SDK labels its requests with it (#75)."""
+    return asyncio.get_running_loop().create_task(_process_later(message))
+
+
+async def _process_later(message: dict[str, Any]) -> None:
+    await asyncio.to_thread(read, message)
+    await asyncio.to_thread(refund, message)
+
+
 async def handle_in_block(message: dict[str, Any]) -> None:
     """One message as a block that is one run, `async with sdk.run(...)`, with the message as its
     trigger (#74): no function names it, so the run has no entrypoint."""
@@ -278,8 +377,13 @@ def consume(messages: list[dict[str, Any]], how: str) -> tuple[int, int]:
     if how == "threads":
         with ThreadPoolExecutor(4) as pool:
             done = list(pool.map(safe, messages))
-    elif how in ("asyncio", "async_run", "handoff"):
-        handler = {"asyncio": handle_async, "async_run": handle_in_block, "handoff": enqueue}[how]
+    elif how in ("asyncio", "async_run", "handoff", "task"):
+        handler = {
+            "asyncio": handle_async,
+            "async_run": handle_in_block,
+            "handoff": enqueue,
+            "task": schedule,
+        }[how]
 
         async def all_of() -> list[Any]:
             runs = (handler(m) for m in messages)
@@ -288,6 +392,11 @@ def consume(messages: list[dict[str, Any]], how: str) -> tuple[int, int]:
         done = tally(messages, asyncio.run(all_of()))
     elif how == "shutdown":
         done = tally(messages, asyncio.run(shut_down(messages)))
+    elif how == "pooled":
+        _count_connections()
+        with ThreadPoolExecutor(4) as pool:
+            done = list(pool.map(safe, messages))
+        agentkit.obs("pool", opened=_opened)
     elif how == "worker":
         # Even messages through the sync method, odd ones through the async one.
         worker = Worker("refunds")
@@ -314,6 +423,8 @@ SCENARIOS: dict[str, tuple[int, str, dict[str, Any]]] = {
     "cancelled_on_shutdown": (3, "shutdown", {}),
     "worker_methods": (4, "worker", {}),
     "coroutine_handoff": (4, "handoff", {}),
+    "one_pool_8": (8, "pooled", {}),
+    "task_outlives_trigger": (2, "task", {}),
 }
 POISON = {
     "one_message_fails": 2,
@@ -327,9 +438,13 @@ SHARED_CHARGE = "ch_QSHARED"  # 4900; two runs each refund 3000 of it
 def messages_for(scenario: str) -> list[dict[str, Any]]:
     count, _, extra = SCENARIOS[scenario]
     if scenario == "shared_charge":
-        # Indexes 0 and 4: both through urllib, so both reads' bodies are logged (`saw`).
-        return [{"charge": SHARED_CHARGE, "amount": 3000, "index": i} for i in (0, 4)]
+        # Indexes 0 and len(CLIENTS): both through urllib, so both reads' bodies are logged (`saw`).
+        indexes = (0, len(CLIENTS))
+        return [{"charge": SHARED_CHARGE, "amount": 3000, "index": i} for i in indexes]
     out = [{"charge": charge_id(i), "amount": 100 + i, "index": i, **extra} for i in range(count)]
+    if scenario == "one_pool_8":
+        for message in out:
+            message["client"] = POOLED[message["index"] % len(POOLED)]
     if scenario in POISON:
         out[POISON[scenario]]["poison"] = True
     if scenario in STUCK:

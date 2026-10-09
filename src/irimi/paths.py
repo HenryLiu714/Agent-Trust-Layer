@@ -13,6 +13,10 @@ REDACT_KEY_NAME = "redact.key"  # the redaction HMAC key (0600), created on firs
 ENGINE_ACTIVE_ENV = "IRIMI_ENGINE_ACTIVE"
 RUN_ENV = "IRIMI_RUN"
 CONTROL_ENV = "IRIMI_CONTROL"
+# The proxy variables `irimi shadow` points at its own listener, in both spellings, since clients
+# disagree on which they read. Declared once, here, because the SDK reads these same names to tell
+# a connection to irimi from one that bypasses it (#75).
+PROXY_ENVS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
 # The agent's own version, if its deployment names one. `irimi shadow` records it on the process
 # run (#70) and the SDK on each run it starts (#74), so both read this one name.
 AGENT_VERSION_ENV = "IRIMI_AGENT_VERSION"

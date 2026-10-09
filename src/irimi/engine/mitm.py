@@ -978,6 +978,15 @@ class MitmEngine:
                 # host. The cost is mitmproxy's eager-only conveniences - upstream-cert details
                 # for the generated leaf, and ALPN mirroring - neither of which shadow mode uses.
                 connection_strategy="lazy",
+                # Raw TCP relays bytes past every hook. mitmproxy picks it for a plain CONNECT
+                # tunnel whose first bytes do not look like HTTP to it: a method that does not
+                # start with three letters (`M-SEARCH`), or any request whose first segment holds
+                # fewer than three bytes. And it picks it after a live `101` to anything but a
+                # WebSocket. Each is a write irimi never sees, reaching the real service with the
+                # `Irimi-Run` the SDK put on it for irimi to strip (#75). Off, the tunnel is parsed
+                # as HTTP, bytes that are not HTTP fail there, and the upgraded connection is
+                # closed: never forwarded.
+                rawtcp=False,
             )
             # A plain Master, not DumpMaster: DumpMaster adds ErrorCheck, which sys.exit()s on
             # a bind failure before the running hook, and dump-CLI conveniences we do not use.

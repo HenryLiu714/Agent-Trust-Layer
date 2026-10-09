@@ -18,8 +18,10 @@ irimi = "irimi.cli:main"
 [dependency-groups]
 # `uv sync` installs `dev` by default. `examples` is opt-in: `uv sync --group examples`.
 dev = [
+    "httpx>=0.28.1",
     "mypy>=1.11",
     "pytest>=8",
+    "requests>=2.34.2",
     "ruff>=0.6",
     "types-pyyaml>=6",
 ]

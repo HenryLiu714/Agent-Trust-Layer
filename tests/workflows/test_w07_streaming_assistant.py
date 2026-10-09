@@ -96,10 +96,10 @@ def test_a_telemetry_post_is_stored_as_having_happened_and_its_body_is_not(run_w
     assert [e.host for e in seen] == ["api.smith.langchain.com"]
     blobs = shadow.home / "store" / "blobs"
     assert trace.body_ref(sent.body).sha256 not in {p.name for p in blobs.iterdir()}
-    # The run it landed in, the chat's `sdk` run with its embeddings call, prints it as an
+    # The run it landed in, the chat's `sdk` run with its three model calls, prints it as an
     # event and counts it in its stored summary: telemetry in a stored summary, which no other
-    # corpus run exercises (#72). The streams are in the process run, since `stream_post` sends
-    # no `Irimi-Run` (#75).
+    # corpus run exercises (#72). The streams are in it too: `stream_post` is plain urllib, which
+    # the SDK labels (#75).
     reader = shadow.stored()
     [holder] = [
         r.run_id
@@ -112,14 +112,17 @@ def test_a_telemetry_post_is_stored_as_having_happened_and_its_body_is_not(run_w
     assert [re.sub(r" · \d+\.\ds · ", " · <elapsed> · ", line) for line in out[7:]] == [
         "",
         "live      llm       POST api.openai.com/v1/embeddings -> 200",
+        "live      llm       POST api.anthropic.com/v1/messages -> 200",
+        "live      llm       POST api.openai.com/v1/chat/completions -> 200",
         "telemetry api.smith.langchain.com",
         "",
-        f"irimi shadow · run {holder} · 2 exchanges · <elapsed> · backstop: none (Phase 4)",
+        f"irimi shadow · run {holder} · 4 exchanges · <elapsed> · backstop: none (Phase 4)",
         "",
-        "  api.openai.com  1 llm",
-        "  telemetry       1 exchange to 1 host, forwarded live",
+        "  api.anthropic.com  1 llm",
+        "  api.openai.com     2 llm",
+        "  telemetry          1 exchange to 1 host, forwarded live",
         "",
-        "  2 exchanges · 2 live · 0 delegated · 0 virtualized",
+        "  4 exchanges · 4 live · 0 delegated · 0 virtualized",
     ]
 
 
@@ -132,6 +135,9 @@ def test_a_streamed_answer_is_stored_as_the_chunks_the_agent_was_sent(run_workfl
     shadow = run_workflow(W, "normal", "shadow")
     stored = stored_exchanges(shadow)
     assert sorted(stored) == ["/v1/chat/completions", "/v1/embeddings", "/v1/messages"]
+    # All three in the chat's run, the streams too: urllib is labelled by the SDK (#75).
+    [chat] = shadow.sdk_runs()
+    assert {ex.run_id for ex in stored.values()} == {chat.run_id}
     ends = {"/v1/messages": MESSAGE_STOP, "/v1/chat/completions": b"data: [DONE]\n\n"}
     for path, end in ends.items():
         ex = stored[path]
@@ -151,6 +157,31 @@ def test_a_streamed_answer_is_stored_as_the_chunks_the_agent_was_sent(run_workfl
     embeddings = stored["/v1/embeddings"]
     assert embeddings.response is not None and json.loads(embeddings.response.body)["data"]
     assert embeddings.stream_chunks == ()
+
+
+def test_streams_read_with_httpx_are_stored_whole_in_the_chats_run(run_workflow):
+    """The Anthropic and OpenAI SDKs stream with httpx, which the SDK labels at its transport and
+    unlabels as soon as the transport returns, while the stream is still being read (#75). The
+    agent sees what it sees with urllib, both streams are stored whole and in the chat's run, as
+    the chunks it was sent (#71), and no upstream saw `Irimi-Run` (universal invariant 2)."""
+    bare = run_workflow(W, "httpx_streams", "bare")
+    shadow = run_workflow(W, "httpx_streams", "shadow")
+    assert shadow.result(with_time=False) == bare.result(with_time=False)
+    assert shadow.result()["caller_text"] == shadow.result()["answer"] == ANSWER
+    assert shadow.exchange_lines() == LLM_LINES
+    stored = stored_exchanges(shadow)
+    [chat] = shadow.sdk_runs()
+    assert {ex.run_id for ex in stored.values()} == {chat.run_id}
+    assert shadow.stored().load_run(shadow.process_run_id()).events == []
+    ends = {"/v1/messages": MESSAGE_STOP, "/v1/chat/completions": b"data: [DONE]\n\n"}
+    for path, end in ends.items():
+        ex = stored[path]
+        assert ex.response is not None and ex.response.body.endswith(end)
+        assert len(ex.stream_chunks) > 1 and sum(ex.stream_chunks) == len(ex.response.body)
+        assert ex.flags == ()
+    anthropic = stored["/v1/messages"].response
+    assert anthropic is not None and text_deltas(anthropic.body) == ANSWER
+    assert [r for r in shadow.internet.requests() if "irimi-run" in r.headers] == []
 
 
 def test_a_secret_inside_a_stream_reaches_the_caller_intact_and_never_disk(run_workflow):
@@ -383,6 +414,24 @@ def test_two_streams_at_once_are_each_stored_against_their_own_request(run_workf
                 ]
                 assert "".join(content) == pair_decision(caller)
         assert sorted(callers) == ["1", "2"]
+    # Two concurrent requests do not mix (Phase 3's exit): each chat is a run of its own, and
+    # every call it made, both streams included, is stored in it and in no other, by the
+    # `Irimi-Run` the SDK put on each as it was sent (#75), though the two chats' streams were in
+    # the air together.
+    runs = {r.trigger.args["question"][-2]: r.run_id for r in shadow.sdk_runs() if r.trigger}
+    assert sorted(runs) == ["1", "2"]
+    for caller, run_id in runs.items():
+        held = [e for e in shadow.stored().load_run(run_id).events if isinstance(e, Exchange)]
+        assert sorted(e.request.path for e in held) == sorted([*ends, "/v1/embeddings"])
+        for ex in held:
+            if ex.request.path == "/v1/chat/completions":
+                assert json.loads(ex.request.body)["messages"][-1]["content"] == pair_answer(caller)
+            else:
+                asked = json.loads(ex.request.body)
+                question = asked["input"] if "input" in asked else asked["messages"][-1]["content"]
+                assert question == f"How do refunds work? (caller {caller})"
+    process = shadow.stored().load_run(shadow.process_run_id()).events
+    assert process == []
 
 
 def test_the_callers_send_function_is_stored_by_its_repr_and_cannot_be_replayed(run_workflow):

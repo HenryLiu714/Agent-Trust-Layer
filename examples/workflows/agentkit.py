@@ -188,7 +188,7 @@ def http(
         data = urlencode(form).encode()
         sent.setdefault("Content-Type", "application/x-www-form-urlencoded")
     run_id = _current_run_id()
-    if run_id is not None:
+    if run_id is not None and not _sdk_labels_requests():
         sent.setdefault("Irimi-Run", run_id)
     request = urllib.request.Request(url, data=data, method=method, headers=sent)
     try:
@@ -238,6 +238,12 @@ def _current_run_id() -> str | None:
     from examples.workflows import sdk
 
     return sdk.current_run_id()
+
+
+def _sdk_labels_requests() -> bool:
+    from examples.workflows import sdk
+
+    return sdk.labels_requests()
 
 
 # -- the services every workflow talks to --------------------------------------------------------

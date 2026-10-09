@@ -12,6 +12,7 @@ import dataclasses
 import re
 import stat
 import sys
+from collections import Counter
 
 import pytest
 
@@ -26,8 +27,9 @@ from irimi.trace import TelemetrySeen, ToolCall
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
 IDS = [f"{n}:{s}" for n, s in CASES]
 # The workflows whose agents are plain scripts, with no `@sdk.trigger` and no `sdk.run`: they send
-# no `Irimi-Run`, so every exchange they make lands in the process run.
-UNLABELLED = ("w09_scope_gauntlet", "w11_leaky_agent")
+# no `Irimi-Run`, so every exchange they make lands in the process run. W11 was one until each of
+# its escapes became an `sdk.run` (#75).
+UNLABELLED = ("w09_scope_gauntlet",)
 # W9's scenarios that do the SDK's job by hand, posting runs to the control endpoint (#73).
 BY_HAND_SCENARIOS = {
     ("w09_scope_gauntlet", "control_runs"),
@@ -268,6 +270,39 @@ def test_every_run_the_agent_logged_is_stored_with_the_outcome_it_logged(
 
 
 @pytest.mark.parametrize(("name", "scenario"), CASES, ids=IDS)
+def test_every_request_a_run_sent_through_irimi_is_stored_in_that_run(run_workflow, name, scenario):
+    """#75 end to end: the SDK labels each request a run sends to irimi with the run's id, read
+    as the request is sent, so irimi stores it in that run, whichever client, thread, task or
+    pooled connection sent it. Each call the agent logged inside a run (its `run`, the context's
+    id when it was made) is one of that run's stored exchanges, by method and host, or its
+    telemetry, by host: a run also holds irimi's own L3 reads, so this is containment, not
+    equality. A call that belonged to no run is not checked here (W3 `unpropagated_thread` pins
+    where it lands), nor a `leaks` scenario, whose call went around irimi on purpose (W11)."""
+    shadow = run_workflow(name, scenario, "shadow")
+    if not started(shadow) or shadow.workflow.scenarios[scenario].leaks:
+        return
+    reader = shadow.stored()
+    stored = {r.run_id for r in reader.list_runs()}
+    made: dict[str, Counter] = {}
+    for call in shadow.calls():
+        if call.get("run") is None:
+            continue
+        host = str(call["url"]).split("/", 1)[0]
+        made.setdefault(call["run"], Counter())[(call["method"], host)] += 1
+    for run_id, calls in made.items():
+        assert run_id in stored, run_id
+        events = reader.load_run(run_id).events
+        held = Counter(
+            (e.request.method, e.request.host) for e in events if isinstance(e, Exchange)
+        )
+        # Telemetry is stored only as having happened, by host (#70).
+        seen = Counter(e.host for e in events if isinstance(e, TelemetrySeen))
+        missing = calls - held
+        missing -= Counter({(m, h): seen[h] for m, h in missing})
+        assert not missing, (run_id, missing)
+
+
+@pytest.mark.parametrize(("name", "scenario"), CASES, ids=IDS)
 def test_a_bare_run_stores_nothing(run_workflow, name, scenario):
     """No irimi, no store: the bare baseline leaves its `IRIMI_HOME` without a store or a
     redaction key, whatever the agent's SDK stand-in does."""
@@ -299,7 +334,7 @@ def test_an_unlabelled_agent_s_process_run_prints_the_summary_irimi_shadow_print
     """#72's invariant on the corpus, through the real CLI: `irimi runs show <process run>` ends in
     the block `irimi shadow` printed on exit, line for line but for the elapsed seconds. W9 covers
     L0 and L1 fakes, idempotent replays and conflicts, unreadable bodies and an engine read with no
-    response; W11 a `0 exchanges` run whose every write escaped.
+    response.
 
     For an agent that labels its runs the live summary is still the process's, every exchange the
     proxy saw whatever run it named, while each stored run holds its own: the two agree only

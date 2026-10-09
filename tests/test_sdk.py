@@ -261,7 +261,7 @@ def test_the_sdk_never_posts_through_the_agents_proxy(irimi, monkeypatch):
     SDK's opener has no proxies at all. The client is built after the variables are set, as the
     SDK's is in an agent `irimi shadow` started: urllib reads them when an opener is built."""
     with _recorder() as (port, hits):
-        for name in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
+        for name in paths.PROXY_ENVS:
             monkeypatch.setenv(name, f"http://127.0.0.1:{port}")
         for name in ("NO_PROXY", "no_proxy"):
             monkeypatch.delenv(name, raising=False)

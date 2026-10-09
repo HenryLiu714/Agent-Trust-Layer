@@ -20,7 +20,7 @@ def _charges(world: World) -> None:
 WORKFLOW = Workflow(
     name="w03_queue_worker",
     summary="A queue consumer, one @sdk.trigger run per message, over threads and asyncio and "
-    "four HTTP clients: runs must not mix, and a thread without propagate loses its run.",
+    "six HTTP clients: runs must not mix, and a thread without propagate loses its run.",
     scenarios={
         "threads_8": Scenario(
             ("threads_8",),
@@ -71,6 +71,16 @@ WORKFLOW = Workflow(
                 "a sync trigger returns a coroutine: the run goes with it, a nested trigger in it"
                 " joins, and it ends with the coroutine's outcome (one message raises)"
             ),
+        ),
+        "one_pool_8": Scenario(
+            ("one_pool_8",),
+            setup=_charges,
+            doc="8 messages on 4 threads, every call through one of two shared 1-connection pools",
+        ),
+        "task_outlives_trigger": Scenario(
+            ("task_outlives_trigger",),
+            setup=_charges,
+            doc="a sync trigger returns a Task: its run ends first, and the task's calls follow",
         ),
     },
 )

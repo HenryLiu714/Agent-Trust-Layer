@@ -234,7 +234,9 @@ host in a map is not an allow-list entry here. The scheme upstream is always htt
   to the real service. The banner says `backstop: none (Phase 4)` for this reason, and
   `w11_leaky_agent` pins each known escape.
 - **HTTP(S) only.** Database writes, files on disk, gRPC and WebSocket traffic are not virtualized
-  and happen for real. Point database URLs at scratch data.
+  and happen for real. Point database URLs at scratch data. Bytes sent through the proxy that are
+  not HTTP, and a connection upgraded to anything but a WebSocket, are refused, never relayed, and
+  leave no record (#75).
 
 ## Service maps
 
@@ -432,8 +434,38 @@ itself always propagates, unchanged. `sdk.current_run_id()` is the current run's
   import. Import the module by its name and call it, as the sample workflows'
   `examples/workflows/launch.py` does.
 
-Until #75, a request carries the run's id only if the agent sets `Irimi-Run` itself, to
-`sdk.current_run_id()`; one that does not lands in the process run.
+### Every request a run makes through irimi carries its run
+
+The proxy attributes a request to a run by its `Irimi-Run` header, never by connection or timing,
+which fail under connection pools and concurrency. On the first run it starts, the SDK patches the
+HTTP clients' classes so each request a run sends **to irimi** carries the run's id, read from the
+context variable as the request is sent. irimi strips the header before anything leaves it.
+
+- **Covered.** Every client built on `http.client`: `urllib.request`, `requests` and `urllib3`,
+  stripe-python's sync client, slack_sdk's `WebClient`. And `httpx`, sync and async, when it is
+  installed: the OpenAI and Anthropic SDKs, and stripe-python's async client.
+- **Not covered**: `aiohttp` (slack_sdk's `AsyncWebClient` among them), `pycurl`, gRPC,
+  WebSockets, a client that writes HTTP on its own socket, and any subprocess the agent starts. A
+  run's request through one of them carries no run unless the agent sets
+  `Irimi-Run: <sdk.current_run_id()>` itself, as the sample workflows' raw asyncio client does
+  (W3).
+- **The fallback.** A request with no `Irimi-Run` belongs to the engine's own run: the process run
+  under `irimi shadow -- <cmd>`, and `unattributed` under serve mode (#77).
+- **Only through irimi.** irimi can strip only what passes through it, so a request is labelled
+  only when its connection goes to irimi's listener: the host and port `IRIMI_CONTROL` or a proxy
+  variable (`HTTP_PROXY`, `HTTPS_PROXY`, either case) names, as spelled there: `localhost` is not
+  `127.0.0.1`. That covers the proxy, a CONNECT tunnel through it, and the reverse door at
+  `http://127.0.0.1:4000/...`. A `NO_PROXY` host, a client built with no proxy or a sidecar on
+  loopback gets no header, and neither does the next hop of a redirect away from irimi, so a run's
+  id never reaches a service irimi does not stand in front of.
+- **When.** The patches are on classes, not instances, so a client created before the first run
+  is covered too. They are made on the first run's entry, never on import and never while the SDK
+  is inactive; `sdk.instrument()` makes them at startup instead, and is safe to call again.
+- **A request that names its own run.** An `http.client` request gets the SDK's header ahead of
+  the agent's, and irimi takes the first. An httpx request that already has one keeps it.
+- **A task outliving its run.** A sync trigger that returns an `asyncio.Task` or a `Future`, not
+  a coroutine, ends its run when it returns, but a task it created inside the run keeps the run's
+  id. That task's requests are labelled with the ended run and stored in it, after its end.
 
 ## CLI
 
@@ -553,12 +585,12 @@ by phase.
   Redaction before anything reaches disk (#69). The sample workflows (#89). The trace store on
   disk (#70). Streamed SSE bodies recorded chunk by chunk (#71). `irimi runs list` / `runs show`
   and a summary from a stored run (#72). The control endpoint, `/_irimi/` (#73). The SDK:
-  `@sdk.trigger` and `sdk.run()` with run identity in a context variable (#74).
+  `@sdk.trigger` and `sdk.run()` with run identity in a context variable (#74), and
+  `Irimi-Run` on every request a run makes through irimi (#75).
 
 **Next: the rest of Phase 3, the run**
 
-- The rest of the SDK: `Irimi-Run` on every request a run makes (#75), and `@sdk.tool` for
-  calls the proxy cannot see (#76).
+- The rest of the SDK: `@sdk.tool` for calls the proxy cannot see (#76).
 - `irimi shadow --serve` with per-run summaries (#77), a server agent example and the Phase 3 exit
   test (#78), `irimi compare` (#79), Slack channel names in the summary (#61).
 - Replay: answer a run from its recording (#82), read and write tools in replay (#83),

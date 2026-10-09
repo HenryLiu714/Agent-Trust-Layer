@@ -1,10 +1,9 @@
-"""W3 `queue_worker`: one run per message, over threads, asyncio and four HTTP clients.
+"""W3 `queue_worker`: one run per message, over threads, asyncio and six HTTP clients.
 
 Runs exist only under shadow (the SDK is inactive in a bare run), so every per-run check reads the
 shadow run. Order between runs is never asserted: the pool and the event loop interleave freely.
 """
 
-import importlib.util
 import re
 import sys
 from collections import Counter
@@ -13,6 +12,7 @@ from urllib.parse import parse_qs
 import pytest
 
 import irimi
+from examples.workflows.w03_queue_worker.agent import CLIENTS, POOLED
 from examples.workflows.w03_queue_worker.scenarios import AGENT_VERSION
 from irimi.exchange import Exchange
 from irimi.trace import ErrorInfo
@@ -96,12 +96,7 @@ def test_eight_messages_are_eight_stored_runs_each_holding_only_its_own_charge(
 def test_every_client_went_through_the_proxy(run_workflow):
     shadow = run_workflow(W, "threads_8", "shadow")
     clients = {c.get("client", "urllib") for c in shadow.calls()}
-    # `requests` is only installed with the `examples` group; without it message 3 falls back to
-    # urllib. The agent runs in this interpreter's environment, so the two agree.
-    with_requests = importlib.util.find_spec("requests") is not None
-    assert clients == {"urllib", "http.client", "asyncio"} | (
-        {"requests"} if with_requests else set()
-    )
+    assert clients == set(CLIENTS)
     # Every one of them was answered by irimi on the write: none bypassed it.
     posts = {
         (c.get("client", "urllib"), c["answered_by"])
@@ -123,8 +118,9 @@ def test_a_thread_started_without_propagate_loses_its_run(run_workflow):
     runs = [e["run"] for e in shadow.events("run.start")]
     assert len(runs) == 2
     # Each read belongs to its message's run; each refund, made in a thread started without
-    # `sdk.propagate`, belongs to none. It was still faked. With #75 it falls back to the process
-    # run (`unattributed` only in serve mode, #77), which is what this scenario is for.
+    # `sdk.propagate`, belongs to none. It was still faked, and carried no `Irimi-Run`, so it falls
+    # back to the engine's own run (#75): the process run under `irimi shadow -- <cmd>`, and
+    # `unattributed` only in serve mode (#77). That fallback is what this scenario is for.
     assert sorted((c["label"], c["run"], c["answered_by"]) for c in shadow.calls()) == sorted(
         [("read:ch_Q0", runs[0], None), ("read:ch_Q1", runs[1], None)]
         + [(f"refund:ch_Q{i}", None, "fake-L1") for i in (0, 1)]
@@ -350,3 +346,64 @@ def test_a_sync_trigger_that_returns_a_coroutine_hands_the_run_to_it(run_workflo
             assert (record.outcome, record.error) == ("ok", None)
             assert len(events) == 4
     assert shadow.exchange_lines().count(REFUND_LINE) == 3
+
+
+# -- runs that share a connection, and a task that outlives its run (#75) -------------------------
+
+
+def test_runs_that_share_one_pooled_connection_never_mix(run_workflow):
+    """Two concurrent requests don't mix (Phase 3's exit), on one connection. Eight runs on four
+    threads send every call through one of two shared pools, a `requests.Session` and an
+    `httpx.Client`, each holding a single connection to irimi. A faked refund leaves its
+    connection open and is its run's last call, so the next call on that pool, another run's,
+    goes out on the same connection: fewer connections were opened than calls made. irimi still
+    stores each run's read, refund and L3 read in that run and no other, because it attributes by
+    the `Irimi-Run` the SDK put on each request (#75), never by connection (D8)."""
+    shadow = run_workflow(W, "one_pool_8", "shadow")
+    assert {c["client"] for c in shadow.calls()} == set(POOLED)
+    per_client = Counter(c["client"] for c in shadow.calls())
+    assert per_client == dict.fromkeys(POOLED, 8)
+    [opened] = [e["opened"] for e in shadow.events("pool")]
+    assert set(opened) == set(POOLED)
+    for client in POOLED:
+        assert 1 <= opened[client] < per_client[client], opened
+    found = stored_by_charge(shadow, lambda args: args["message"])
+    assert sorted(found) == [f"ch_Q{i}" for i in range(8)]
+    reader = shadow.stored()
+    for record in found.values():
+        assert record.outcome == "ok"
+        assert len(reader.load_run(record.run_id).events) == 3
+    assert reader.load_run(shadow.process_run_id()).events == []
+    assert shadow.exchange_lines().count(REFUND_LINE) == 8
+    assert len(run_workflow(W, "one_pool_8", "bare").internet.writes()) == 8
+
+
+def test_a_task_a_sync_trigger_returns_files_its_calls_in_the_run_that_already_ended(run_workflow):
+    """`schedule` is sync and returns an `asyncio.Task`, not a coroutine, so the SDK does not hand
+    the run over (#74): the run ends `ok` as `schedule` returns, before the task has run a step.
+    The task was created inside the run, so its context still holds the run's id, and the SDK
+    labels its read and refund with it (#75, decision 10).
+
+    LOOKS WRONG: every one of the task's exchanges is stored in a run that had already ended,
+    after its `ended_at`, and the run reads back `ok` though its work had not started. #75 accepted
+    it (its plan's decision 10, with a follow-up issue to file): either `hand_off` covers
+    awaitables, or the task's calls belong to no run. This pins today's answer."""
+    shadow = run_workflow(W, "task_outlives_trigger", "shadow")
+    ends = {e["run"]: e["t"] for e in shadow.events("run.end")}
+    assert len(ends) == 2 and set(ends) == set(shadow.by_run())
+    for call in shadow.calls():
+        assert call["t"] > ends[call["run"]], call
+    found = stored_by_charge(shadow, lambda args: args["message"])
+    assert sorted(found) == ["ch_Q0", "ch_Q1"]
+    reader = shadow.stored()
+    for record in found.values():
+        assert record.outcome == "ok" and record.ended_at is not None
+        events = reader.load_run(record.run_id).events
+        assert sorted((e.request.method, e.request.path) for e in events) == [
+            ("GET", f"/v1/charges/{record.trigger.args['message']['charge']}"),
+            ("GET", f"/v1/charges/{record.trigger.args['message']['charge']}"),
+            ("POST", "/v1/refunds"),
+        ]
+        assert min(e.started_at for e in events) > record.ended_at
+    assert reader.load_run(shadow.process_run_id()).events == []
+    assert shadow.exchange_lines().count(REFUND_LINE) == 2

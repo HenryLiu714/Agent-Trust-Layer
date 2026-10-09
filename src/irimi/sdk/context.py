@@ -9,9 +9,19 @@ Nothing else in the SDK holds a run id; `runs.RunScope` is the only code that se
 
 import contextvars
 import functools
+import os
 from collections.abc import Callable
 
+from irimi import paths
+
 _RUN_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar("irimi_run_id", default=None)
+
+
+def active() -> bool:
+    """True when irimi is in front of this process: `IRIMI_ENGINE_ACTIVE` is `1`, as `irimi
+    shadow` sets it for its child (#73). Read at each call, never cached. Here rather than in
+    `runs`, so `instrumentation`, which `runs` imports, reads the same rule (#75)."""
+    return os.environ.get(paths.ENGINE_ACTIVE_ENV) == "1"
 
 
 def current_run_id() -> str | None:

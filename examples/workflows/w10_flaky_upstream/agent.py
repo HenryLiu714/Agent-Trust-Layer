@@ -125,7 +125,10 @@ def sync_payouts(
         time.sleep(5)  # never reached: SIGTERM's default action ends the process
     if sigint_after_write:
         # An operator presses Ctrl-C mid-run. Python raises KeyboardInterrupt, a BaseException,
-        # which the SDK records as the run's error and re-raises (#74).
+        # which the SDK records as the run's error and re-raises (#74). Python's own handler is put
+        # back first: a shell starts a background job with SIGINT ignored, and Python then installs
+        # none, so the signal would do nothing and the run would end `ok`.
+        signal.signal(signal.SIGINT, signal.default_int_handler)
         os.kill(os.getpid(), signal.SIGINT)
         time.sleep(5)  # interrupted: the KeyboardInterrupt is raised by now
     agentkit.slack(

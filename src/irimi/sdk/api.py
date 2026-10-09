@@ -10,7 +10,8 @@ from types import TracebackType
 from typing import Any, overload
 
 from irimi.sdk.capture import capture, capture_call
-from irimi.sdk.runs import RunScope, active
+from irimi.sdk.context import active
+from irimi.sdk.runs import RunScope
 
 
 @overload

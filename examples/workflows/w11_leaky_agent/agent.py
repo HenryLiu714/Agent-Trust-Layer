@@ -5,6 +5,10 @@
 code ends up off that route. Under shadow every escape's write really lands on the fake service.
 These are the cases Phase 4's readiness checks exist to flag.
 
+Each escape runs inside `sdk.run`, so under shadow it is a run whose requests the SDK labels, but
+only those that go through irimi (#75): a run's id must never ride out on an escape, where nothing
+would strip it. Universal invariant 2 checks that no fake service ever saw `Irimi-Run`.
+
     python -m examples.workflows.launch \\
         examples.workflows.w11_leaky_agent.agent <escape>
 
@@ -28,7 +32,7 @@ from collections.abc import Iterator
 from typing import Any
 from urllib.parse import urlencode
 
-from examples.workflows import agentkit
+from examples.workflows import agentkit, sdk
 
 CHARGE = "ch_LEAKY"
 CHANNEL = "C0LEAKY"
@@ -170,7 +174,8 @@ def main(argv: list[str]) -> int:
     if len(argv) != 1 or argv[0] not in ESCAPES:
         print(f"usage: agent.py {{{','.join(ESCAPES)}}}", file=sys.stderr)
         return 2
-    ESCAPES[argv[0]]()
+    with sdk.run(trigger={"escape": argv[0]}, name="escape"):
+        ESCAPES[argv[0]]()
     agentkit.obs("result", escape=argv[0])
     return 0
 

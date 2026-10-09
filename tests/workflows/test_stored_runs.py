@@ -26,8 +26,9 @@ from irimi.trace import TelemetrySeen, ToolCall
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
 IDS = [f"{n}:{s}" for n, s in CASES]
 # The workflows whose agents are plain scripts, with no `@sdk.trigger` and no `sdk.run`: they send
-# no `Irimi-Run`, so every exchange they make lands in the process run.
-UNLABELLED = ("w09_scope_gauntlet", "w11_leaky_agent")
+# no `Irimi-Run`, so every exchange they make lands in the process run. W11 was one until each of
+# its escapes became an `sdk.run` (#75).
+UNLABELLED = ("w09_scope_gauntlet",)
 # W9's scenarios that do the SDK's job by hand, posting runs to the control endpoint (#73).
 BY_HAND_SCENARIOS = {
     ("w09_scope_gauntlet", "control_runs"),
@@ -299,7 +300,7 @@ def test_an_unlabelled_agent_s_process_run_prints_the_summary_irimi_shadow_print
     """#72's invariant on the corpus, through the real CLI: `irimi runs show <process run>` ends in
     the block `irimi shadow` printed on exit, line for line but for the elapsed seconds. W9 covers
     L0 and L1 fakes, idempotent replays and conflicts, unreadable bodies and an engine read with no
-    response; W11 a `0 exchanges` run whose every write escaped.
+    response.
 
     For an agent that labels its runs the live summary is still the process's, every exchange the
     proxy saw whatever run it named, while each stored run holds its own: the two agree only

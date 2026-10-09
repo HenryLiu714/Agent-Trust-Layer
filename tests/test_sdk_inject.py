@@ -12,6 +12,7 @@ import contextlib
 import dataclasses
 import http.client
 import http.server
+import socket
 import ssl
 import threading
 import urllib.request
@@ -334,6 +335,28 @@ def test_a_connect_tunnel_through_irimi_is_labelled_inside_the_tunnel(tls):
     assert not _upstream_saw_the_header()
 
 
+@pytest.mark.parametrize("method", ["GET", "M-SEARCH"])
+def test_a_plain_tunnel_through_irimi_is_labelled_and_never_relayed_raw(irimi, upstream, method):
+    """Plain HTTP in a CONNECT tunnel is labelled like any request on irimi's connection, and
+    irimi reads it whatever its method: one mitmproxy would not call HTTP (`M-SEARCH`) would
+    otherwise be relayed as raw bytes, its `Irimi-Run` and all, straight to the upstream (#75)."""
+
+    @sdk.trigger
+    def tunnelled() -> str | None:
+        conn = http.client.HTTPConnection("127.0.0.1", irimi.port, timeout=10)
+        conn.set_tunnel("127.0.0.1", upstream)
+        try:
+            conn.request(method, "/hello")
+            conn.getresponse().read()
+        finally:
+            conn.close()
+        return sdk.current_run_id()
+
+    run_id = tunnelled()
+    assert [(ex.request.method, ex.run_id) for ex in irimi.seen] == [(method, run_id)]
+    assert not _upstream_saw_the_header()
+
+
 @pytest.mark.parametrize("name", ["httpx", "httpx-async"])
 def test_httpx_takes_the_header_off_once_sent(irimi, upstream, name):
     """httpx builds a redirect from the request it sent, headers and all, and the next hop may
@@ -460,3 +483,261 @@ def test_the_sdks_own_control_posts_carry_no_run_header(monkeypatch):
     ]
     assert hasattr(http.client.HTTPConnection.putrequest, "__wrapped__")
     assert all(RUN_HEADER not in names for _, names in _ControlStandIn.heard)
+
+
+# -- edges: racing first calls, proxy spellings, HTTPS, an own header, redirects ----------------
+
+
+def test_instrument_returns_only_once_every_patch_is_in_place(monkeypatch):
+    """A run that starts while another run's `instrument()` is still patching must not go on with
+    the patches half made: its own call waits for the first, rather than returning as soon as the
+    first has begun (#75). Here the first call is held between its first patch and the rest, as
+    importing httpx would hold it."""
+    monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
+    holding, release = threading.Event(), threading.Event()
+    patch = instrumentation._patch
+
+    def held_patch(owner: type, name: str, wrap: Callable[[Any], Any]) -> None:
+        if owner is httpx.HTTPTransport:
+            holding.set()
+            release.wait(timeout=10)
+        patch(owner, name, wrap)
+
+    monkeypatch.setattr(instrumentation, "_patch", held_patch)
+    seen_by_second: list[bool] = []
+
+    def second() -> None:
+        sdk.instrument()
+        seen_by_second.append(all(hasattr(m, "__wrapped__") for m in _patched_methods()))
+
+    first_call = threading.Thread(target=sdk.instrument)
+    first_call.start()
+    assert holding.wait(timeout=10)
+    second_call = threading.Thread(target=second)
+    second_call.start()
+    second_call.join(timeout=0.2)
+    release.set()
+    first_call.join(timeout=10)
+    second_call.join(timeout=10)
+    assert seen_by_second == [True]
+
+
+def test_instrument_called_while_it_patches_returns_rather_than_waiting_on_itself(monkeypatch):
+    """Patching imports httpx, and an import hook may start a run on the same thread, which calls
+    `instrument()` again while the first call holds its lock. That call returns at once: it neither
+    deadlocks the agent nor patches a second time (#75)."""
+    monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
+    patch = instrumentation._patch
+
+    def reentering_patch(owner: type, name: str, wrap: Callable[[Any], Any]) -> None:
+        if owner is httpx.HTTPTransport:
+            sdk.instrument()  # as an import hook that starts a run would
+        patch(owner, name, wrap)
+
+    monkeypatch.setattr(instrumentation, "_patch", reentering_patch)
+    first_call = threading.Thread(target=sdk.instrument, daemon=True)
+    first_call.start()
+    first_call.join(timeout=10)
+    deadlocked = first_call.is_alive()
+    if deadlocked:  # free it, so the suite's own `_uninstall` can take the lock
+        instrumentation._lock.release()
+        first_call.join(timeout=10)
+    assert not deadlocked
+    for method in _patched_methods():
+        assert hasattr(method, "__wrapped__")
+        assert not hasattr(method.__wrapped__, "__wrapped__")
+
+
+def test_a_proxy_variable_spelled_without_a_scheme_names_irimi(irimi, upstream, monkeypatch):
+    """urllib, requests and httpx all read `HTTP_PROXY=127.0.0.1:4000` as an http proxy, so a
+    deployment that sets it by hand that way still sends through irimi, and is labelled (#75)."""
+    monkeypatch.delenv(paths.CONTROL_ENV)
+    monkeypatch.setenv("HTTP_PROXY", irimi.proxy.removeprefix("http://"))
+    run_id = fetch("requests", irimi.proxy, f"http://127.0.0.1:{upstream}/hello")
+    assert [ex.run_id for ex in irimi.seen] == [run_id]
+
+
+def _get_https(name: str, proxy: str, url: str, ca_cert: Path) -> bytes:
+    """One GET of an https `url` through `proxy` with the client `name`: a CONNECT tunnel through
+    irimi, with TLS inside it to irimi's leaf, which `ca_cert` signed. Its body."""
+    context = ssl.create_default_context(cafile=str(ca_cert))
+    if name == "urllib":
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"https": proxy}),
+            urllib.request.HTTPSHandler(context=context),
+        )
+        with opener.open(url, timeout=10) as resp:
+            return bytes(resp.read())
+    if name == "requests":
+        session = requests.Session()
+        session.trust_env = False
+        return session.get(url, proxies={"https": proxy}, verify=str(ca_cert), timeout=10).content
+    if name == "httpx":
+        with httpx.Client(proxy=proxy, verify=context, trust_env=False) as c:
+            return c.get(url).content
+    if name == "httpx-async":
+
+        async def get() -> bytes:
+            async with httpx.AsyncClient(proxy=proxy, verify=context, trust_env=False) as c:
+                return (await c.get(url)).content
+
+        return asyncio.run(get())
+    raise ValueError(name)
+
+
+@pytest.mark.parametrize("name", ["urllib", "requests", "httpx", "httpx-async"])
+def test_https_through_irimi_is_labelled_inside_the_tunnel(tls, name):
+    """Every covered client sends HTTPS through the proxy as a CONNECT tunnel, and each decides by
+    the connection it tunnels through, which is irimi's: `requests`' urllib3 connects to the proxy
+    and tunnels from there, and httpx's transport has the proxy's address (#75)."""
+    running, up, ca_cert = tls
+
+    @sdk.trigger
+    def tunnelled() -> str | None:
+        assert _get_https(name, running.proxy, f"https://127.0.0.1:{up}/hello", ca_cert) == (
+            b"hello from upstream"
+        )
+        return sdk.current_run_id()
+
+    run_id = tunnelled()
+    assert [ex.run_id for ex in running.seen] == [run_id]
+    assert [path for path, _ in _Upstream.seen] == ["/hello"]
+    assert not _upstream_saw_the_header()
+
+
+def test_an_http_client_request_that_names_its_own_run_is_the_sdks_first(irimi, upstream):
+    """`http.client` gets the SDK's header right after the request line, ahead of any the agent
+    set, and irimi takes the first: the run is the trigger's, as the README says (#75)."""
+
+    @sdk.trigger
+    def own() -> str | None:
+        status = _get(
+            "http.client",
+            irimi.proxy,
+            f"http://127.0.0.1:{upstream}/hello",
+            headers={"Irimi-Run": "agents-own"},
+        )
+        assert status == 200
+        return sdk.current_run_id()
+
+    run_id = own()
+    assert [ex.run_id for ex in irimi.seen] == [run_id]
+    assert not _upstream_saw_the_header()
+
+
+REDIRECT_MAP = """
+version: 1
+service: demo
+hosts:
+  - 127.0.0.1
+routes:
+  - match:
+      method: GET
+      path: /redirect
+    operation: things.moved
+    kind: read
+    human: a thing that moved
+"""
+
+
+class _Redirecting(http.server.BaseHTTPRequestHandler):
+    """`/redirect` answers 302 to `to`; anything else is a landing, whose headers it records."""
+
+    to = ""
+    landed: list[list[str]] = []
+
+    def do_GET(self) -> None:
+        if self.path == "/redirect":
+            self.send_response(302)
+            self.send_header("location", _Redirecting.to)
+            self.send_header("content-length", "0")
+        else:
+            _Redirecting.landed.append([k.lower() for k in self.headers])
+            self.send_response(200)
+            self.send_header("content-length", "0")
+        self.end_headers()
+
+    def log_message(self, *args: Any) -> None:
+        pass
+
+
+@pytest.mark.parametrize("name", ["urllib", "requests", "httpx", "httpx-async"])
+def test_a_redirect_away_from_irimi_is_not_labelled(tmp_path, monkeypatch, name):
+    """A read through irimi answers 302 to a host the client reaches directly. The first hop went
+    through irimi and was labelled; the second does not, and is not: each hop is decided by the
+    connection that sends it, so the run's id never follows a redirect out of irimi (#75)."""
+    _Redirecting.landed = []
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Redirecting)
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}).start()
+    port = server.server_address[1]
+    # `localhost` is the same server under a name the clients below do not proxy.
+    _Redirecting.to = f"http://localhost:{port}/landed"
+    url = f"http://127.0.0.1:{port}/redirect"
+    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch, doc=REDIRECT_MAP))
+    try:
+        with _running(cfg, tmp_path, monkeypatch) as running:
+            proxy = running.proxy
+
+            @sdk.trigger
+            def follow() -> str | None:
+                if name == "urllib":
+                    monkeypatch.setenv("no_proxy", "localhost")
+                    opener = urllib.request.build_opener(
+                        urllib.request.ProxyHandler({"http": proxy})
+                    )
+                    with opener.open(url, timeout=10) as resp:
+                        resp.read()
+                elif name == "requests":
+                    session = requests.Session()
+                    session.trust_env = False
+                    session.get(url, proxies={"http://127.0.0.1": proxy}, timeout=10)
+                elif name == "httpx":
+                    mounts = {"http://127.0.0.1": httpx.HTTPTransport(proxy=proxy)}
+                    with httpx.Client(mounts=mounts, trust_env=False) as c:
+                        c.get(url, follow_redirects=True)
+                else:
+
+                    async def get() -> None:
+                        mounts = {"http://127.0.0.1": httpx.AsyncHTTPTransport(proxy=proxy)}
+                        async with httpx.AsyncClient(mounts=mounts, trust_env=False) as c:
+                            await c.get(url, follow_redirects=True)
+
+                    asyncio.run(get())
+                return sdk.current_run_id()
+
+            run_id = follow()
+            assert [(ex.request.path, ex.run_id) for ex in running.seen] == [("/redirect", run_id)]
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert len(_Redirecting.landed) == 1
+    assert RUN_HEADER.lower() not in _Redirecting.landed[0]
+
+
+@pytest.mark.parametrize("name", ["httpx", "httpx-async"])
+def test_httpx_takes_the_header_off_when_sending_fails_and_the_failure_is_the_agents(
+    irimi, monkeypatch, name
+):
+    """A send to irimi's listener that fails raises to the agent exactly what httpx raised, and
+    the request it may retry or reuse is left with no header (#75). The proxy here is a port
+    nothing listens on, which the proxy variable names as irimi's."""
+    dead = socket.socket()
+    dead.bind(("127.0.0.1", 0))
+    proxy = f"http://127.0.0.1:{dead.getsockname()[1]}"
+    dead.close()
+    monkeypatch.setenv("HTTP_PROXY", proxy)
+    request = httpx.Request("GET", "http://127.0.0.1:9/hello")
+
+    @sdk.trigger
+    def send() -> None:
+        with httpx.Client(proxy=proxy, trust_env=False) as c:
+            c.send(request)
+
+    @sdk.trigger
+    async def send_async() -> None:
+        async with httpx.AsyncClient(proxy=proxy, trust_env=False) as c:
+            await c.send(request)
+
+    with pytest.raises(httpx.ConnectError):
+        send() if name == "httpx" else asyncio.run(send_async())
+    assert RUN_HEADER not in request.headers

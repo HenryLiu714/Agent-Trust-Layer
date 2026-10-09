@@ -6,9 +6,11 @@ concurrency (D8). So `instrument()` patches the HTTP clients' classes, once per 
 the header from the context variable (`context.current_run_id`), read as each request is sent:
 
 - `http.client.HTTPConnection.putrequest`, which `urllib.request`, `requests`/`urllib3`,
-  stripe-python and slack_sdk all build their requests through. `HTTPSConnection` inherits it.
+  stripe-python's sync client and slack_sdk's `WebClient` all build their requests through.
+  `HTTPSConnection` inherits it.
 - `httpx.HTTPTransport.handle_request` and `httpx.AsyncHTTPTransport.handle_async_request`, when
-  httpx is installed: the OpenAI and Anthropic SDKs.
+  httpx is installed: the OpenAI and Anthropic SDKs, and stripe-python's async client. aiohttp,
+  which slack_sdk's `AsyncWebClient` is built on, is not covered.
 
 ONLY ON A CONNECTION TO IRIMI. irimi strips the header from everything it forwards (#67), but it
 can strip only what passes through it. A request whose connection goes anywhere but irimi's own
@@ -45,9 +47,9 @@ from irimi.sdk.context import active, current_run_id
 
 # The port a URL with none names, by scheme.
 DEFAULT_PORTS = {"http": 80, "https": 443}
-# The variables that name irimi's listener: the control endpoint's, and the proxy's, both spellings,
-# as `runner.child_env` sets them.
-LISTENER_ENVS = (paths.CONTROL_ENV, "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
+# The variables that name irimi's listener: the control endpoint's, and the proxy's, which
+# `runner.child_env` sets from the same `paths.PROXY_ENVS` (#75).
+LISTENER_ENVS = (paths.CONTROL_ENV, *paths.PROXY_ENVS)
 
 # Set while the SDK sends its own posts to the control endpoint: they name their run in their
 # path, and carry no `Irimi-Run` (#73, #75).
@@ -55,33 +57,44 @@ _UNLABELLED: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "irimi_unlabelled", default=False
 )
 
-_lock = threading.Lock()
-# Set, under `_lock`, before the first patch is made, so a patch that raises is never retried
-# and nothing is ever wrapped twice.
+# Reentrant, because patching imports httpx, and an import hook may start a run on the thread that
+# holds it: that call returns at once (`_patching`) rather than wait on itself forever (#75).
+_lock = threading.RLock()
+# Set, under `_lock`, once every patch is in place, so a call that finds it set never sends a run's
+# request ahead of them (#75); and set even when a patch raised, so that patch is never retried and
+# nothing is ever wrapped twice.
 _installed = False
+# Set, under `_lock`, while the first call patches, so a call made inside it never patches again.
+_patching = False
 # What `instrument` replaced, as (class, attribute, original), so `_uninstall` can put it back.
 _patched: list[tuple[type, str, Any]] = []
 
 
 def instrument() -> None:
     """Make this process's HTTP clients label each request a run sends to irimi with the run's
-    id. Idempotent and thread-safe: the first call patches, every later one returns at once. Does
+    id. Idempotent and thread-safe: the first call patches, and every other returns once the
+    patches are in place, at once after that (and at once when the patching itself makes it). Does
     nothing while the SDK is inactive. The SDK calls it on the first run it starts; it stays public
     for code that wants to call it at startup."""
-    global _installed
+    global _installed, _patching
     if _installed or not active():
         return
     with _lock:
-        if _installed:
+        if _installed or _patching:
             return
-        _installed = True
-        _patch(http.client.HTTPConnection, "putrequest", _labelling_putrequest)
-        if importlib.util.find_spec("httpx") is not None:
-            httpx = importlib.import_module("httpx")
-            _patch(httpx.HTTPTransport, "handle_request", _labelling_handle_request)
-            _patch(
-                httpx.AsyncHTTPTransport, "handle_async_request", _labelling_handle_async_request
-            )
+        _patching = True
+        try:
+            _patch(http.client.HTTPConnection, "putrequest", _labelling_putrequest)
+            if importlib.util.find_spec("httpx") is not None:
+                httpx = importlib.import_module("httpx")
+                _patch(httpx.HTTPTransport, "handle_request", _labelling_handle_request)
+                _patch(
+                    httpx.AsyncHTTPTransport,
+                    "handle_async_request",
+                    _labelling_handle_async_request,
+                )
+        finally:
+            _installed, _patching = True, False
 
 
 @contextlib.contextmanager
@@ -116,6 +129,10 @@ def _listeners(urls: tuple[str, ...]) -> frozenset[tuple[str, int]]:
     out. Cached by the variables' values, which are read at each request."""
     found = set()
     for url in urls:
+        # A proxy spelled with no scheme, `127.0.0.1:4000`, is an http proxy to urllib, requests
+        # and httpx alike, so it names irimi as surely as one spelled in full (#75).
+        if url and "://" not in url:
+            url = f"http://{url}"
         try:
             parts = urlsplit(url)
             port = parts.port or DEFAULT_PORTS.get(parts.scheme)
@@ -135,12 +152,12 @@ def _patch(owner: type, name: str, wrap: Callable[[Any], Any]) -> None:
 def _uninstall() -> None:
     """Put back every method `instrument` replaced, so the next call patches afresh. For tests:
     an agent has no reason to call it."""
-    global _installed
+    global _installed, _patching
     with _lock:
         while _patched:
             owner, name, original = _patched.pop()
             setattr(owner, name, original)
-        _installed = False
+        _installed = _patching = False
 
 
 def _labelling_putrequest(original: Callable[..., None]) -> Callable[..., None]:
@@ -148,7 +165,7 @@ def _labelling_putrequest(original: Callable[..., None]) -> Callable[..., None]:
     def putrequest(self: http.client.HTTPConnection, *args: Any, **kwargs: Any) -> None:
         original(self, *args, **kwargs)
         # `host` and `port` are where the connection goes: the proxy's when there is one, a
-        # CONNECT tunnel's included, and the origin's otherwise.
+        # CONNECT tunnel's included, and the origin's otherwise (#75).
         run_id = run_id_for(self.host, self.port)
         if run_id is not None:
             self.putheader(RUN_HEADER, run_id)
@@ -173,19 +190,28 @@ def _httpx_run_id(transport: Any, request: Any) -> str | None:
         return None
 
 
+@contextlib.contextmanager
+def _labelled(transport: Any, request: Any) -> Iterator[None]:
+    """`request` carries its run's id while inside, if `_httpx_run_id` gives it one. Both httpx
+    transports send inside it, so the sync and async paths share one rule."""
+    run_id = _httpx_run_id(transport, request)
+    if run_id is None:
+        yield
+        return
+    request.headers[RUN_HEADER] = run_id
+    try:
+        yield
+    finally:
+        # Off again once sent: httpx builds a redirect from this request's headers, and the next
+        # hop may not go through irimi. Each hop is labelled by its own transport (#75).
+        del request.headers[RUN_HEADER]
+
+
 def _labelling_handle_request(original: Callable[..., Any]) -> Callable[..., Any]:
     @functools.wraps(original)
     def handle_request(self: Any, request: Any) -> Any:
-        run_id = _httpx_run_id(self, request)
-        if run_id is None:
+        with _labelled(self, request):
             return original(self, request)
-        request.headers[RUN_HEADER] = run_id
-        try:
-            return original(self, request)
-        finally:
-            # Off again once sent: httpx builds a redirect from this request's headers, and the
-            # next hop may not go through irimi. Each hop is labelled by its own transport.
-            del request.headers[RUN_HEADER]
 
     return handle_request
 
@@ -193,13 +219,7 @@ def _labelling_handle_request(original: Callable[..., Any]) -> Callable[..., Any
 def _labelling_handle_async_request(original: Callable[..., Any]) -> Callable[..., Any]:
     @functools.wraps(original)
     async def handle_async_request(self: Any, request: Any) -> Any:
-        run_id = _httpx_run_id(self, request)
-        if run_id is None:
+        with _labelled(self, request):
             return await original(self, request)
-        request.headers[RUN_HEADER] = run_id
-        try:
-            return await original(self, request)
-        finally:
-            del request.headers[RUN_HEADER]
 
     return handle_async_request

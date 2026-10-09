@@ -12,14 +12,15 @@ from pathlib import Path
 from irimi import __version__
 from irimi.engine import Engine, EngineStartError
 from irimi.exchange import CONTROL_PREFIX
-from irimi.paths import CONTROL_ENV, ENGINE_ACTIVE_ENV, RUN_ENV
+from irimi.paths import CONTROL_ENV, ENGINE_ACTIVE_ENV, PROXY_ENVS, RUN_ENV
 from irimi.store import TraceStore
 from irimi.trace import SCHEMA_VERSION, ErrorInfo, JSONValue, RunRecord, Trigger
 
 # The variables issue #3 specifies, plus `IRIMI_CONTROL` from #73. Nothing is added to this list
 # without a new issue. The `IRIMI_*` names are declared in `paths`, where the SDK can import them,
 # and imported above, so `runner.RUN_ENV` still names them. `IRIMI_AGENT_VERSION` is there too
-# (`paths.AGENT_VERSION_ENV`): the process run records it (#70) and the SDK's runs do (#74).
+# (`paths.AGENT_VERSION_ENV`): the process run records it (#70) and the SDK's runs do (#74). So
+# are the four proxy variables (`paths.PROXY_ENVS`), which the SDK reads to find irimi (#75).
 NO_PROXY_VALUE = "localhost,127.0.0.1"
 
 READY_TIMEOUT_S = 30.0
@@ -40,10 +41,8 @@ def child_env(
     env = dict(base)
     env.update(
         {
-            "HTTP_PROXY": proxy,
-            "HTTPS_PROXY": proxy,
-            "http_proxy": proxy,
-            "https_proxy": proxy,
+            # The SDK labels a run's requests only on a connection to what these name (#75).
+            **dict.fromkeys(PROXY_ENVS, proxy),
             "NO_PROXY": NO_PROXY_VALUE,
             "no_proxy": NO_PROXY_VALUE,
             "SSL_CERT_FILE": cert,

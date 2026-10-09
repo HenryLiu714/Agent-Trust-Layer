@@ -96,10 +96,10 @@ def test_a_telemetry_post_is_stored_as_having_happened_and_its_body_is_not(run_w
     assert [e.host for e in seen] == ["api.smith.langchain.com"]
     blobs = shadow.home / "store" / "blobs"
     assert trace.body_ref(sent.body).sha256 not in {p.name for p in blobs.iterdir()}
-    # The run it landed in, the chat's `sdk` run with its embeddings call, prints it as an
+    # The run it landed in, the chat's `sdk` run with its three model calls, prints it as an
     # event and counts it in its stored summary: telemetry in a stored summary, which no other
-    # corpus run exercises (#72). The streams are in the process run, since `stream_post` sends
-    # no `Irimi-Run` (#75).
+    # corpus run exercises (#72). The streams are in it too: `stream_post` is plain urllib, which
+    # the SDK labels (#75).
     reader = shadow.stored()
     [holder] = [
         r.run_id
@@ -112,14 +112,17 @@ def test_a_telemetry_post_is_stored_as_having_happened_and_its_body_is_not(run_w
     assert [re.sub(r" · \d+\.\ds · ", " · <elapsed> · ", line) for line in out[7:]] == [
         "",
         "live      llm       POST api.openai.com/v1/embeddings -> 200",
+        "live      llm       POST api.anthropic.com/v1/messages -> 200",
+        "live      llm       POST api.openai.com/v1/chat/completions -> 200",
         "telemetry api.smith.langchain.com",
         "",
-        f"irimi shadow · run {holder} · 2 exchanges · <elapsed> · backstop: none (Phase 4)",
+        f"irimi shadow · run {holder} · 4 exchanges · <elapsed> · backstop: none (Phase 4)",
         "",
-        "  api.openai.com  1 llm",
-        "  telemetry       1 exchange to 1 host, forwarded live",
+        "  api.anthropic.com  1 llm",
+        "  api.openai.com     2 llm",
+        "  telemetry          1 exchange to 1 host, forwarded live",
         "",
-        "  2 exchanges · 2 live · 0 delegated · 0 virtualized",
+        "  4 exchanges · 4 live · 0 delegated · 0 virtualized",
     ]
 
 
@@ -132,6 +135,9 @@ def test_a_streamed_answer_is_stored_as_the_chunks_the_agent_was_sent(run_workfl
     shadow = run_workflow(W, "normal", "shadow")
     stored = stored_exchanges(shadow)
     assert sorted(stored) == ["/v1/chat/completions", "/v1/embeddings", "/v1/messages"]
+    # All three in the chat's run, the streams too: urllib is labelled by the SDK (#75).
+    [chat] = shadow.sdk_runs()
+    assert {ex.run_id for ex in stored.values()} == {chat.run_id}
     ends = {"/v1/messages": MESSAGE_STOP, "/v1/chat/completions": b"data: [DONE]\n\n"}
     for path, end in ends.items():
         ex = stored[path]

@@ -22,6 +22,7 @@ from typing import Any, Literal, Protocol
 from irimi import paths
 from irimi.exchange import RUNS_ROUTE
 from irimi.sdk.capture import serialized
+from irimi.sdk.instrumentation import unlabelled
 
 LOGGER_NAME = "irimi.sdk"
 logger = logging.getLogger(LOGGER_NAME)
@@ -76,7 +77,8 @@ class ControlClient:
             headers={"Content-Type": "application/json"},
         )
         try:
-            with self._opener.open(request, timeout=TIMEOUT_S) as response:
+            # To irimi's own listener, which `instrument()` labels: the route names the run (#75).
+            with unlabelled(), self._opener.open(request, timeout=TIMEOUT_S) as response:
                 response.read()
         except urllib.error.HTTPError as exc:  # an answer outside 2xx, a redirect included
             with exc:

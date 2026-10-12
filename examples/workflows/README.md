@@ -49,8 +49,9 @@ so it keeps its real module name; `scenarios.py` seeds the fake services per sce
 - **The observation log.** Each agent logs what it saw (status, `Irimi-Answered-By`, which tool
   ran) to a JSON-lines file. The tests assert on that as well as on irimi's output, through
   `Result` (`harness/run.py`): `calls()`, `answered()`, `by_label()`, `tools()`, `events()`,
-  `exchange_lines()` and `summary()` for what irimi printed, and `stored()` and `stored_events()`
-  for what it recorded in its trace store under the run's `IRIMI_HOME` (#70), with
+  `exchange_lines()`, `tool_call_lines()` (#76) and `summary()` for what irimi printed, and
+  `stored()` and `stored_events()` for what it recorded in its trace store under the run's
+  `IRIMI_HOME` (#70), with
   `process_run_id()`, `runs(...)`, which runs `irimi runs list` or `runs show` over it, and
   `maps()`, the maps `runs show` renders writes with (#72).
   `reported` holds the exchanges irimi printed a line for and `handed` those its engine gave the
@@ -63,8 +64,8 @@ so it keeps its real module name; `scenarios.py` seeds the fake services per sce
   `sdk.run`, `@sdk.tool(kind=..., shadow=...)`). `sdk.py` re-exports `irimi.sdk` name by name, so
   `trigger` and `run` are the real ones (#74): they post each run's start and end to irimi, and
   are wrapped only so the agent's log still gets `run.start` and `run.end` with the real run id.
-  Until `irimi.sdk` has `tool` (#76), `sdk.py` implements its call-time rules itself, so an active
-  write tool already runs its stand-in and never the real function. The corpus labels no request
+  Since #76 `tool` is irimi's own too; `sdk.py` still has the call-time rules for a checkout with
+  no `irimi.sdk`, so an active write tool there runs its stand-in and never the real function. The corpus labels no request
   with `Irimi-Run` itself whenever the real `irimi.sdk` imports (`sdk.labels_requests()`), only
   in the stand-in: the SDK does it (#75), so a scenario that pins a run's requests fails without
   the SDK's patch. W3's raw

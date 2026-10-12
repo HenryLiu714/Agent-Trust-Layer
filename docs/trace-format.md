@@ -277,12 +277,12 @@ A **request** is `method`, `scheme`, `host`, `port` (integer), `path`, `query` (
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `tool_call_id` | string | Its id, unique in the run. |
-| `run_id` | string | The run it belongs to. |
-| `name` | string | The tool's name. |
+| `run_id` | string | The run it belongs to: the run it was made in, else the process run (`IRIMI_RUN`), else `unattributed`. |
+| `name` | string | The tool's name: `@sdk.tool(name=...)`, or the function's `module.qualname` (#76). |
 | `kind` | `read`, `write` | What the tool does. |
 | `ran` | `real`, `shadow` | `real` ran the function; `shadow` ran its shadow stand-in. |
-| `args` | any JSON | What it was called with. |
-| `result` | any JSON | What it returned. `null` when it raised. |
+| `args` | any JSON | What it was called with, bound against the real function's signature and captured as a trigger's are ([Captured arguments](#captured-arguments)). |
+| `result` | any JSON | What it returned, captured the same way. `null` when it raised. A result that would take `args` and `result` together past 1 MiB is `{"__irimi_truncated__": true, "bytes": n}`. |
 | `error` | error or `null` | What it raised. |
 | `started_at` | number | When the call began. |
 | `ended_at` | number | When it returned or raised. |
@@ -303,8 +303,9 @@ starts first and finishes last, so its precondition read is `seq` 1 and the refu
 
 `irimi runs list` prints one line per stored run, newest first, and `irimi runs show RUN_ID` prints
 one run: its record, every event in `seq` order, and its summary (#72). That summary is
-`report.stored_summary_lines`, the same code that prints the live one, fed the run's exchanges and
-one host per `TelemetrySeen`, each counted as forwarded live because telemetry always is. It equals
+`report.stored_summary_lines`, the same code that prints the live one, fed the run's exchanges,
+one host per `TelemetrySeen`, each counted as forwarded live because telemetry always is, and its
+tool calls, each write whose stand-in ran printed as a line after the writes (#76). It equals
 the block `irimi shadow` printed on exit except in four places:
 
 - **The elapsed seconds.** The live summary times the child; a stored one is the run's

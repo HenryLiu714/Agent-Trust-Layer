@@ -74,9 +74,11 @@ the first column of each field table below is exactly the keys its encoder write
   zstd can decode to gigabytes, so each codec stops there. A body cut there, buffered or streamed,
   is recorded as its first 8 MiB, kept to their last complete line, and its exchange carries
   `body-truncated`, or `stream-truncated` for a stream. The agent and the service still get every
-  byte they were sent, and the overlay never edits such a read. Only gzip, deflate, br, zstd and
-  `identity` are decoded; a body in any other `Content-Encoding` is recorded as it came, and a
-  stream in one is recorded empty and flagged, as above.
+  byte they were sent, and the overlay never edits such a read. A write is never answered from
+  the start of its request body: one whose body was cut is answered with irimi's own `502` and
+  recorded as an undecidable request, flagged `decision-failed` and `body-truncated`. Only gzip,
+  deflate, br, zstd and `identity` are decoded; a body in any other `Content-Encoding` is recorded
+  as it came, and a stream in one is recorded empty and flagged, as above.
 - Everything is redacted before it reaches disk (#69): see Redaction. A credential in the example
   below appears as a `<redacted:…>` placeholder for that reason.
 

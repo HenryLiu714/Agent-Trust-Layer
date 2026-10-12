@@ -25,6 +25,7 @@ from irimi.exchange import (
     BODY_TRUNCATED_FLAG,
     DECISION_FAILED_FLAG,
     FIDELITY_FLAGS,
+    LIVE_KINDS,
     STREAM_TRUNCATED_FLAG,
     TARGET_FAILED_FLAG,
     UPSTREAM_ERROR_FLAG,
@@ -355,6 +356,10 @@ def _failed_decision(req: Request, exc: Exception) -> _Decision:
     )
 
 
+class RequestBodyCut(Exception):
+    """A write whose body decoded past MAX_DECODED_BODY, which `_decide` refuses to answer (#94)."""
+
+
 def _request_cut_flags(flow: http.HTTPFlow) -> tuple[str, ...]:
     """`body-truncated` when the request hook decoded this flow's request body only up to the cap,
     so the exchange it becomes says its recorded request is not all of it (#94)."""
@@ -650,7 +655,7 @@ class IrimiAddon:
         # belong to the event loop. The write log is snapshotted here, before the hand-off.
         writes = tuple(self.write_log)
         try:
-            decision = await asyncio.to_thread(self._decide, req, writes, run_id)
+            decision = await asyncio.to_thread(self._decide, req, writes, run_id, cut)
         except Exception as handoff:  # the hand-off itself, e.g. an executor shut down under us
             decision = _failed_decision(req, handoff)
         if decision.failure is None and decision.rewritten is not None:
@@ -707,7 +712,10 @@ class IrimiAddon:
         # Recorded, not just refused. A write that vanishes from the trace is the other half
         # of this bug: #13's "log of every write" has to show the one irimi could not decide
         # about, and `unknown` + `unclassified` is the honest classification for it.
-        logger.exception("irimi: answering locally; the decision raised", exc_info=failure)
+        if isinstance(failure, RequestBodyCut):  # the agent's body, not irimi's failure (#94)
+            logger.warning("irimi: answering locally; the request %s", failure)
+        else:
+            logger.exception("irimi: answering locally; the decision raised", exc_info=failure)
         refusal = _irimi_error(
             "irimi_decision_failed",
             f"irimi could not decide how to answer this request: {failure}",
@@ -774,11 +782,28 @@ class IrimiAddon:
             # response set, and mitmproxy would forward the write (#45).
             self._finish(ex)
 
-    def _decide(self, req: Request, writes: tuple[Exchange, ...], run_id: str) -> _Decision:
+    def _decide(
+        self, req: Request, writes: tuple[Exchange, ...], run_id: str, cut: bool = False
+    ) -> _Decision:
         """The whole decision, on a worker thread, with no flow in sight. `run_id` is read by
-        `request()` before it strips `Irimi-Run`, since `req` no longer carries it (#67)."""
+        `request()` before it strips `Irimi-Run`, since `req` no longer carries it (#67). `cut` is
+        whether `req.body` is only the start of what the request's body decodes to (#94)."""
         try:
             cls = pipeline.classify(req, self.config.maps)
+            # IRIMI NEVER ANSWERS A WRITE FROM PART OF ITS BODY (#94). A body that decodes past
+            # MAX_DECODED_BODY reaches the decision as the start of it, or less. The policy would
+            # fake the write from that - its echo, its idempotency key's body hash, its L3
+            # precondition, and the effect the overlay later shows - and tell the agent a write it
+            # never sent succeeded. So the write fails closed, as a decision that raised does:
+            # answered locally, flagged, never forwarded. A delegated write is refused too, though
+            # its target would get every byte, because irimi cannot record what it was. Classifying
+            # reads no body, so the kind is still the agent's; a live kind is forwarded with the
+            # agent's own bytes, which no hook edits.
+            if cut and cls.kind not in LIVE_KINDS:
+                raise RequestBodyCut(
+                    f"its body decodes past the {MAX_DECODED_BODY} bytes irimi decodes, and "
+                    "irimi does not answer a write from the start of one"
+                )
             ans = self.policy.answer(req, cls, writes, run_id)
             rewritten = None
             if ans.answered_by == "live" and cls.kind == "read" and writes:
@@ -976,7 +1001,8 @@ class IrimiAddon:
                 flags += (STREAM_TRUNCATED_FLAG,)
         else:
             upstream, cut = _response_from_flow(flow)
-            if cut:
+            # Once, though the request may have been cut too: a flag is a fact, not a count.
+            if cut and BODY_TRUNCATED_FLAG not in flags:
                 flags += (BODY_TRUNCATED_FLAG,)
         resp = upstream
         # A read irimi forwarded is the only place the real values a later fake has to sort
@@ -1048,7 +1074,9 @@ class IrimiAddon:
         # the answer actually carried (#29).
         extra_flags: tuple[str, ...]
         if pending.answered_by == "live":
-            extra_flags = (UPSTREAM_ERROR_FLAG,)
+            # A cut request is a fact about the exchange whoever failed (#94). A live answer has
+            # no other flag of its own.
+            extra_flags = (*_request_cut_flags(flow), UPSTREAM_ERROR_FLAG)
         elif pending.answered_by == "delegated":
             # A target irimi refused was already flagged in `request()`, and the client going away
             # afterwards does not make it fail twice. The flag is a fact about the exchange, not a

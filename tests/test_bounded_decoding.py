@@ -8,13 +8,15 @@ service still get every byte they were sent.
 
 The first part holds each codec to the cap with a small one. The second decodes real bombs at the
 real cap, measuring what the hook holds. The last drives one through the engine on every path that
-decodes: a buffered read, a stream, a faked write's request, and the control endpoint.
+decodes: a buffered read, a stream, a write's request, a live request, and the control endpoint.
 """
 
 import bz2
 import gzip
+import http.client
 import json
 import os
+import socket
 import threading
 import tracemalloc
 import zlib
@@ -29,7 +31,15 @@ from mitmproxy.test import tutils
 from irimi import control
 from irimi.control import MAX_CONTROL_BODY, ControlEndpoint
 from irimi.engine import mitm
-from irimi.exchange import BODY_TRUNCATED_FLAG, STREAM_TRUNCATED_FLAG, Request, Response
+from irimi.exchange import (
+    BODY_TRUNCATED_FLAG,
+    DECISION_FAILED_FLAG,
+    STREAM_TRUNCATED_FLAG,
+    UNCLASSIFIED_FLAG,
+    UPSTREAM_ERROR_FLAG,
+    Request,
+    Response,
+)
 from irimi.overlay import Overlaid
 from irimi.store import MAX_STORED_BODY, NullStore
 from tests.test_engine_mitm import (
@@ -40,6 +50,7 @@ from tests.test_engine_mitm import (
     _reverse,
     _start,
     _stream_server,
+    _streamed_flow,
     _via_proxy,
 )
 
@@ -295,27 +306,131 @@ def test_a_streamed_bomb_reaches_the_agent_whole_and_is_recorded_cut(
     assert ex.stream_chunks == (MAX_STORED_BODY,)
 
 
-def test_a_faked_write_whose_request_is_a_bomb_is_still_faked_and_flagged(
+@pytest.mark.parametrize("content_encoding", ["gzip", "zstd"])
+def test_a_compressed_stream_the_tee_cut_is_recorded_as_the_whole_lines_it_decodes_to(
+    monkeypatch, content_encoding
+):
+    """The tee caps its copy of the ENCODED stream, so what it kept is a compressed stream that
+    ends early. It decodes as far as it goes, under the cap here, and is kept to its last complete
+    line as one chunk, flagged once as not the whole stream (#71, #94)."""
+    plain = b"".join(b"data: %d\n" % i for i in range(200_000))
+    packed = encoding.encode(plain, content_encoding)
+    monkeypatch.setattr(mitm, "MAX_STORED_BODY", len(packed) // 2)
+    tee = mitm._StreamTee()
+    tee(packed)
+    assert tee.truncated
+    flow = _streamed_flow((b"content-encoding", content_encoding.encode()))
+    response, chunks, cut = mitm._recorded_stream(flow, tee, whole=True)
+    assert cut
+    assert len(response.body) > len(plain) // 4
+    assert plain.startswith(response.body) and response.body.endswith(b"\n")
+    assert chunks == (len(response.body),)
+
+
+def test_a_write_whose_request_is_a_bomb_is_refused_never_faked_from_part_of_it(
     tmp_path, monkeypatch, bomb_upstream, gigabyte_gzip
 ):
-    """The request hook decodes the body it decides on. Capped, the write is still answered
-    locally - the upstream answers every POST with 500, so it was never reached - and its exchange
-    says the request it records is not all of it."""
-    eng, seen, stop = _start(_config(tmp_path, monkeypatch))
+    """IRIMI NEVER ANSWERS A WRITE FROM PART OF ITS BODY (#94). The request hook decodes the body
+    it decides on only up to the cap, and the policy would fake the write from that start - its
+    echo, its idempotency key's body hash, its precondition - and tell the agent a write it never
+    sent succeeded. It is refused as an undecidable request is: locally, with irimi's own 502,
+    flagged, and never forwarded - the upstream answers every POST with 500."""
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch)))
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=10)
+        url = f"http://127.0.0.1:{bomb_upstream}/things"
+        headers = {"host": url.split("/")[2], "content-encoding": "gzip"}
+        conn.request("POST", url, body=gigabyte_gzip, headers=headers)
+        resp = conn.getresponse()
+        status, answered_by, data = resp.status, resp.getheader("irimi-answered-by"), resp.read()
+        conn.close()
+    finally:
+        stop()
+    assert (status, answered_by) == (502, "fake-L0")
+    error = json.loads(data)["error"]
+    assert error["type"] == "irimi_decision_failed"
+    assert f"past the {CAP} bytes irimi decodes" in error["message"]
+    (ex,) = seen
+    assert (ex.answered_by, ex.flags) == (
+        "fake-L0",
+        (UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG, BODY_TRUNCATED_FLAG),
+    )
+    _assert_recorded_cut(ex.request.body)
+
+
+class _EchoBombUpstream(BaseHTTPRequestHandler):
+    """Keeps every POST body it is sent, and answers it with `bomb`, gzip-encoded."""
+
+    bomb = b""
+    bodies: list[bytes] = []
+
+    def do_POST(self):
+        _EchoBombUpstream.bodies.append(self.rfile.read(int(self.headers["content-length"])))
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-encoding", "gzip")
+        self.send_header("content-length", str(len(self.bomb)))
+        self.end_headers()
+        self.wfile.write(self.bomb)
+
+    def log_message(self, *args):
+        pass
+
+
+def test_a_live_request_that_is_a_bomb_is_forwarded_as_the_agent_sent_it(
+    tmp_path, monkeypatch, gigabyte_gzip
+):
+    """A live kind is classified without its body, and forwarded with the agent's own bytes, not
+    the start of them irimi decoded. Its answer is a bomb too: the exchange is cut on both sides,
+    and says so once (#94)."""
+    _EchoBombUpstream.bomb, _EchoBombUpstream.bodies = gigabyte_gzip, []
+    srv = HTTPServer(("127.0.0.1", 0), _EchoBombUpstream)
+    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
+    maps = _maps(tmp_path, monkeypatch, STREAM_MAP)
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
+    try:
+        status, data = _via_proxy(
+            eng.listen_port(),
+            "POST",
+            f"http://127.0.0.1:{srv.server_address[1]}/v1/chat/completions",
+            body=gigabyte_gzip,
+            extra_headers={"content-encoding": "gzip"},
+        )
+    finally:
+        stop()
+        srv.shutdown()
+    assert (status, data == gigabyte_gzip) == (200, True)
+    assert _EchoBombUpstream.bodies == [gigabyte_gzip]
+    (ex,) = seen
+    assert (ex.kind, ex.answered_by, ex.flags) == ("llm", "live", (BODY_TRUNCATED_FLAG,))
+    assert ex.response is not None
+    _assert_recorded_cut(ex.request.body)
+    _assert_recorded_cut(ex.response.body)
+
+
+def test_a_live_request_that_is_a_bomb_says_so_when_its_upstream_fails_too(
+    tmp_path, monkeypatch, gigabyte_gzip
+):
+    """The `error` hook builds a live forward's flags afresh, and kept only `upstream-error`: the
+    request it records is still cut (#94)."""
+    with socket.socket() as sock:  # a port nothing listens on
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    maps = _maps(tmp_path, monkeypatch, STREAM_MAP)
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
     try:
         status, _ = _via_proxy(
             eng.listen_port(),
             "POST",
-            f"http://127.0.0.1:{bomb_upstream}/things",
+            f"http://127.0.0.1:{port}/v1/chat/completions",
             body=gigabyte_gzip,
-            extra_headers={"content-encoding": "gzip", "content-type": "text/plain"},
+            extra_headers={"content-encoding": "gzip"},
         )
     finally:
         stop()
-    assert status == 200
+    assert status == 502
     (ex,) = seen
-    assert ex.answered_by == "fake-L0"
-    assert BODY_TRUNCATED_FLAG in ex.flags
+    assert (ex.answered_by, ex.flags) == ("live", (BODY_TRUNCATED_FLAG, UPSTREAM_ERROR_FLAG))
     _assert_recorded_cut(ex.request.body)
 
 

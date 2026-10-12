@@ -4,10 +4,12 @@ The agent forwards Anthropic's text deltas to its own caller as they arrive, and
 OpenAI tool call from its deltas. Streams are read seven bytes at a time, so every event is split.
 """
 
+import hashlib
 import json
 import re
 from itertools import accumulate
 
+from examples.workflows.harness.internet import BOMB_LINE
 from examples.workflows.w07_streaming_assistant.scenarios import (
     ANSWER,
     CHANNEL,
@@ -17,7 +19,9 @@ from examples.workflows.w07_streaming_assistant.scenarios import (
     pair_decision,
 )
 from irimi import redact, trace
+from irimi.engine.mitm import MAX_DECODED_BODY
 from irimi.exchange import STREAM_TRUNCATED_FLAG, UPSTREAM_ERROR_FLAG, Exchange
+from irimi.store import MAX_STORED_BODY
 from irimi.trace import ErrorInfo, TelemetrySeen
 
 W = "w07_streaming_assistant"
@@ -447,3 +451,80 @@ def test_the_callers_send_function_is_stored_by_its_repr_and_cannot_be_replayed(
     send = args["send"]
     assert isinstance(send, dict) and set(send) == {"__irimi_repr__"}
     assert str(send["__irimi_repr__"]).startswith("<function ")
+
+
+def test_a_gzip_bomb_streams_to_the_agent_whole_and_is_recorded_cut(run_workflow):
+    """#94 on a stream. Anthropic's answer comes gzip-encoded, 2 MiB written 64 KB at a time that
+    decode to its events with a GiB of padding before `message_stop`. The agent decodes the start
+    as it reads, forwards its text to its caller, and stops decoding at 1 MiB: it reads every byte
+    and ends the chat as a stream that never stopped, bare and under shadow alike. irimi passes
+    every chunk on as it came, decodes only up to its cap, and records the stream as the store's
+    share of its decoded lines, one chunk, flagged `stream-truncated` once, and stored as recorded:
+    the store drops nothing, and the secret in its text never reaches disk whole."""
+    bare = run_workflow(W, "gzip_bomb_stream", "bare")
+    shadow = run_workflow(W, "gzip_bomb_stream", "shadow")
+    assert bare.exit_code == shadow.exit_code == 4
+    assert shadow.result(with_time=False) == bare.result(with_time=False)
+    result = shadow.result()
+    said = f"The test key is {SECRET}. Keep it out of logs."
+    assert (result["outcome"], result["error"]) == (
+        "upstream_broke",
+        "anthropic_stream: ended without message_stop",
+    )
+    assert result["caller_text"] == said
+    assert result["caller_events"][0] == "start" and result["caller_events"][-1] == "error"
+    # The agent read every byte the service wrote, the service's own, in both modes.
+    for run in (bare, shadow):
+        [sent] = run.world.llm.sent
+        assert run.events("stream_encoded", with_time=False) == [
+            {
+                "event": "stream_encoded",
+                "label": "anthropic_stream",
+                "encoding": "gzip",
+                "bytes": len(sent),
+                "sha256": hashlib.sha256(sent).hexdigest(),
+                "decoded": 1024 * 1024,
+            }
+        ]
+    assert bare.world.llm.sent == shadow.world.llm.sent
+    assert [c["answered_by"] for c in shadow.calls("anthropic_stream")] == [None]
+    assert shadow.exchange_lines() == [
+        LLM_LINES[0],
+        "live      llm       POST api.anthropic.com/v1/messages -> 200  [stream-truncated]",
+    ]
+    # Recorded as the start of what it decodes to, to its last whole line, as one chunk.
+    [head] = shadow.world.llm.heads
+    lines = MAX_STORED_BODY // len(BOMB_LINE) + 1
+    recorded = redact.complete_lines((head + BOMB_LINE * lines)[:MAX_STORED_BODY])
+    [handed] = [e for e in shadow.handed if e.request.path == "/v1/messages"]
+    assert handed.response is not None and handed.response.body == recorded
+    assert (handed.flags, handed.stream_chunks) == ((STREAM_TRUNCATED_FLAG,), (len(recorded),))
+    # Stored in the chat's run, flagged once.
+    stream = stored_exchanges(shadow)["/v1/messages"]
+    [chat] = shadow.sdk_runs()
+    assert stream.run_id == chat.run_id
+    assert stream.flags == (STREAM_TRUNCATED_FLAG,)
+    assert stream.response is not None and stream.response.body.startswith(MESSAGE_START)
+    # Its text as it streamed, in 12-character deltas: the secret is never whole on any line
+    # redaction reads, as in `secret_in_stream` (#92).
+    assert text_deltas(stream.response.body) == said
+    assert stream.response.body == recorded
+    assert stream.stream_chunks == (len(stream.response.body),)
+    assert [r.dropped_events for r in shadow.stored().list_runs()] == [0, 0]
+    written = [
+        path
+        for root in (shadow.home, shadow.cwd, shadow.tmp)
+        for path in root.rglob("*")
+        if path.is_file() and SECRET.encode() in path.read_bytes()
+    ]
+    assert written == []
+
+
+def test_a_streamed_gzip_bomb_costs_irimi_its_cap_in_memory_not_what_it_decodes_to(traced_run):
+    """#94's bound on a stream: the tee keeps the 2 MiB that came, and decoding them stops at the
+    cap, so the GiB they decode to never costs the process irimi runs in more than twice the cap
+    and a margin."""
+    result, peak = traced_run(W, "gzip_bomb_stream")
+    assert result.exit_code == 4
+    assert "[stream-truncated]" in result.exchange_lines()[-1]
+    assert peak < 2 * MAX_DECODED_BODY + 64 * 1024 * 1024

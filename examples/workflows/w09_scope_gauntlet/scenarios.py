@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from examples.workflows.harness.internet import Req, Resp
+from examples.workflows import agentkit
+from examples.workflows.harness.internet import PADDED_BYTES, PADDED_LINE, Req, Resp
 from examples.workflows.harness.run import Scenario, Workflow
 from examples.workflows.harness.services import JsonService, World
 from examples.workflows.w09_scope_gauntlet.agent import BIG_CHARGE, CHARGE, CUSTOMER, INTENT
@@ -21,6 +22,17 @@ def _stripe(world: World) -> None:
 def _big(world: World) -> None:
     _stripe(world)
     world.stripe.add_charge(BIG_CHARGE, 10_000, description="x" * BIG_DESCRIPTION_BYTES)
+
+
+def _bombs(world: World) -> None:
+    """`_stripe`, with `gzip-padded`'s padding built before the agent starts, not inside the
+    request it answers (#94)."""
+    agentkit.gzip_bomb(b"", PADDED_LINE, PADDED_BYTES)
+    _stripe(world)
+
+
+def _refunds_read(req: Req) -> bool:
+    return req.method == "GET" and req.path == "/v1/refunds"
 
 
 def _internal(world: World) -> None:
@@ -95,6 +107,13 @@ WORKFLOW = Workflow(
             setup=_stripe,
             doc="a start re-posted after its run ended; a start, a tool call and an end posted "
             "for the process run's own id",
+        ),
+        "bombs": Scenario(
+            ("bombs",),
+            setup=_bombs,
+            faults=(("api.stripe.com", "gzip-padded", _refunds_read, 1),),
+            doc="bodies that decode past irimi's cap (#94): a refund, a model call forwarded live, "
+            "a read-back after a refund, and run starts posted to the control endpoint",
         ),
         "unmapped_hosts": Scenario(
             ("unmapped_hosts",), setup=_internal, doc="GraphQL and Slack's unrouted method"

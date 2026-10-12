@@ -55,6 +55,7 @@ BY_HAND = {
     ("w09_scope_gauntlet", "self_addressed"),
     ("w09_scope_gauntlet", "control_runs"),
     ("w09_scope_gauntlet", "control_hazards"),
+    ("w09_scope_gauntlet", "bombs"),
 }
 
 

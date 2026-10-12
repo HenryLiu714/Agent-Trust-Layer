@@ -139,10 +139,14 @@ class ControlEndpoint:
         self.process_run = process_run
         self.on_tool_call = on_tool_call
 
-    def answer(self, request: Request) -> Response:
-        """The response to one control request. Never raises (see the module doc)."""
+    def answer(self, request: Request, *, whole_body: bool = True) -> Response:
+        """The response to one control request. Never raises (see the module doc).
+
+        `whole_body` is False when the request's `Content-Encoding` decoded past the engine's own
+        cap (#94): `request.body` is then not the body, and says nothing of its size. Such a body
+        is past MAX_CONTROL_BODY, so it is refused 413 unread, whatever `request.body` holds."""
         try:
-            return self._answer(request)
+            return self._answer(request, whole_body)
         except _Refused as refused:
             return _error_response(refused.status, refused.message, refused.headers)
         except Exception:
@@ -151,7 +155,7 @@ class ControlEndpoint:
             )
             return INTERNAL_ERROR
 
-    def _answer(self, request: Request) -> Response:
+    def _answer(self, request: Request, whole_body: bool) -> Response:
         """Route, then check in this order: the method (405), the run id (400), the body's size
         (413), its JSON (400) and its fields (400). Only then is the store called."""
         route = request.path.removeprefix(CONTROL_PREFIX)
@@ -175,7 +179,7 @@ class ControlEndpoint:
             # `irimi shadow` it is the process run: a start would replace its argv trigger with an
             # `sdk` record, and an end would close it before the child's exit is recorded (#73).
             raise _Refused(400, f"{run_id!r} {OWN_RUN}")
-        posted = _posted(request)
+        posted = _posted(request, whole_body)
         if action == START_ACTION:
             self._start(run_id, posted)
         elif action == TOOL_CALLS_ACTION:
@@ -229,9 +233,11 @@ def _require_method(request: Request, method: str) -> None:
         )
 
 
-def _posted(request: Request) -> Mapping[str, Any]:
+def _posted(request: Request, whole_body: bool) -> Mapping[str, Any]:
     """The body as a JSON object. `NaN` and `Infinity` are refused, as the trace decoders refuse
     a non-finite timestamp and the store writes with `allow_nan=False` (#68, #70)."""
+    if not whole_body:
+        raise _Refused(413, f"the body decodes past the {MAX_CONTROL_BODY} bytes allowed")
     if len(request.body) > MAX_CONTROL_BODY:
         raise _Refused(
             413, f"the body is {len(request.body)} bytes, over the {MAX_CONTROL_BODY} allowed"

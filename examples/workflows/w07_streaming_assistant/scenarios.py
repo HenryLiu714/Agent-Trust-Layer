@@ -6,7 +6,8 @@ import json
 import threading
 from typing import Any
 
-from examples.workflows.harness.internet import Resp
+from examples.workflows import agentkit
+from examples.workflows.harness.internet import BOMB_DECODED_BYTES, BOMB_LINE, Resp
 from examples.workflows.harness.run import Scenario, Workflow
 from examples.workflows.harness.services import (
     LlmCall,
@@ -28,6 +29,8 @@ _RULES = " ".join(f"Rule {i}: a refund goes back to the card it came from." for 
 LONG_ANSWER = f"{_RULES[:8000]} The test key is {SECRET}. {_RULES[8000:]}"
 # How many characters of text each `text_delta` of that answer carries.
 LONG_DELTA = 256
+# How many bytes of a gzip stream `BombingLLM` writes at a time.
+BOMB_CHUNK = 64 * 1024
 
 
 def chat_script(call: LlmCall) -> LlmTurn:
@@ -178,6 +181,33 @@ class LockstepLLM(ScriptedLLM):
         return super()._openai(body)
 
 
+class BombingLLM(ScriptedLLM):
+    """Streams Anthropic's answer gzip-encoded, though the agent never asked for an encoding, with
+    a GiB of `BOMB_LINE` between its last `text_delta` and the events that end it (#94): 2 MiB on
+    the wire that decode to a GiB, written BOMB_CHUNK at a time. Each padding line is an SSE field
+    no client knows, which an SSE parser skips. `heads` holds what each stream decodes to before
+    its padding, and `sent` the bytes it wrote."""
+
+    def __init__(self, script: Any) -> None:
+        super().__init__(script)
+        self.heads: list[bytes] = []
+        self.sent: list[bytes] = []
+
+    def _anthropic(self, body: dict[str, Any]) -> Resp:
+        resp = super()._anthropic(body)
+        if resp.chunks is None:
+            return resp
+        ends = [i for i, chunk in enumerate(resp.chunks) if b'"text_delta"' in chunk][-1] + 1
+        head, tail = b"".join(resp.chunks[:ends]), b"".join(resp.chunks[ends:])
+        sent = agentkit.gzip_bomb(head, BOMB_LINE, BOMB_DECODED_BYTES, tail)
+        self.heads.append(head)
+        self.sent.append(sent)
+        resp.chunks = [sent[i : i + BOMB_CHUNK] for i in range(0, len(sent), BOMB_CHUNK)]
+        resp.headers["content-encoding"] = "gzip"
+        resp.chunk_delay = 0.0
+        return resp
+
+
 def _world(world: World) -> None:
     world.llm.script = chat_script
 
@@ -198,6 +228,13 @@ def _mid_line(world: World) -> None:
 
 def _lockstep(world: World) -> None:
     world.llm = LockstepLLM(pair_script)
+
+
+def _bombing(world: World) -> None:
+    """`BombingLLM`, its padding built now: built on the request it answers, it would take longer
+    than the agent's read timeout."""
+    agentkit.gzip_bomb(b"", BOMB_LINE, BOMB_DECODED_BYTES)
+    world.llm = BombingLLM(chat_script)
 
 
 QUESTION = "How do refunds work?"
@@ -252,6 +289,12 @@ WORKFLOW = Workflow(
             ("What is the test key?", "read_all"),
             setup=_mid_line,
             doc="a 16 KB stream written in pieces that end mid-line, one of them mid-secret",
+        ),
+        "gzip_bomb_stream": Scenario(
+            ("What is the test key?", "read_all"),
+            setup=_bombing,
+            doc="Anthropic's stream comes gzip-encoded, a GiB of padding before its end: the agent "
+            "decodes its start and gives up, irimi records the start of it (#94)",
         ),
         "two_callers": Scenario(
             (QUESTION, "two_callers"),

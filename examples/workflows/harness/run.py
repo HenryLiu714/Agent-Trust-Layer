@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from examples.workflows.harness.internet import FakeInternet, Req
+from examples.workflows.harness.internet import BOMB_SECRET, FakeInternet, Req
 from examples.workflows.harness.services import CLIENT_SECRET_CANARY, World
 from irimi import ca, paths, report, runner, servicemap, trace
 from irimi import store as irimi_store
@@ -62,8 +62,10 @@ CANARIES = {
 }
 # And every credential a fake service hands back in a response body. A live read's response is
 # stored, so one found on disk is a leak on the response side, which the canaries above, all sent
-# by the agent, never reach (#70). Not given to the agent: it is the service's to hand out.
-SERVED_CANARIES = {"STRIPE_CLIENT_SECRET": CLIENT_SECRET_CANARY}
+# by the agent, never reach (#70). Not given to the agent: it is the service's to hand out. A
+# bomb's first line holds one, so the start of a body cut at irimi's decoding cap is held to it
+# too (#94).
+SERVED_CANARIES = {"STRIPE_CLIENT_SECRET": CLIENT_SECRET_CANARY, "BOMB_SECRET": BOMB_SECRET}
 MODES = ("bare", "shadow")
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy")
 # The only variables an agent inherits from the harness's own environment. Everything else it is

@@ -70,6 +70,19 @@ the first column of each field table below is exactly the keys its encoder write
   empty and flagged `stream-truncated`, never compressed.
   An upstream that ends its stream by closing the connection, with no chunked framing or length,
   cannot be told apart from one that reset it: such a stream is recorded whole and unflagged.
+- **A body is decoded only up to 64 MiB** (`mitm.MAX_DECODED_BODY`, #94). A few KB of gzip, br or
+  zstd can decode to gigabytes, so each codec stops there. A body cut there is never redacted
+  whole, so it is recorded empty, as a body over 64 MiB always is, and its exchange carries
+  `body-truncated`: the start of a JSON document is not JSON, and redaction would read it line by
+  line. A stream cut there is recorded as its first 8 MiB, kept to their last complete line, as
+  any stream that is not whole is, and carries `stream-truncated`. Whatever irimi forwards still
+  carries every byte it was sent, and the overlay never edits such a read: one the run has a write
+  for is `overlay: "partial"`, as a body the overlay cannot parse is. A write is never
+  answered from part of its request body: one whose body was cut is answered with irimi's own
+  `502` and recorded as an undecidable request, flagged `decision-failed` and `body-truncated`;
+  the control endpoint refuses one `413`. Only gzip, deflate (and `deflateraw`), br, zstd and the
+  identities (`identity`, `none`) are decoded; a body in any other `Content-Encoding` is recorded
+  as it came, and a stream in one is recorded empty and flagged, as above.
 - Everything is redacted before it reaches disk (#69): see Redaction. A credential in the example
   below appears as a `<redacted:…>` placeholder for that reason.
 

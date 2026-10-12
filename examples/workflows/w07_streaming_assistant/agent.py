@@ -11,7 +11,8 @@
    irimi forwards and stores only as having happened (#70).
 
 Upstream streams are read a few bytes at a time on purpose, so every SSE event is split across
-reads and the parser has to reassemble it (`sse_events`). They are read with urllib, or, with
+reads and the parser has to reassemble it (`sse_events`). One that comes compressed is decoded as
+it is read, but only so far (`decoded`, #94). They are read with urllib, or, with
 `W7_STREAM_CLIENT=httpx`, with `httpx.Client.stream`, as the Anthropic and OpenAI SDKs read theirs:
 the SDK labels each at httpx's transport, and takes the label off again while the stream is still
 open (#75).
@@ -28,6 +29,7 @@ broke.
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import os
@@ -37,6 +39,7 @@ import sys
 import threading
 import urllib.error
 import urllib.request
+import zlib
 from collections.abc import Callable, Iterator
 from typing import Any
 
@@ -45,6 +48,12 @@ import httpx
 from examples.workflows import agentkit, sdk
 
 READ_SIZE = 7  # deliberately small: every event straddles several reads
+# A stream that comes compressed is read this much at a time, and decoded only up to
+# DECODED_LIMIT, as a careful client decodes one: past that the agent reads the rest without
+# decoding it, so a few MiB that decode to a GiB cost it nothing, and the run ends as an upstream
+# that broke (#94).
+ENCODED_READ_SIZE = 64 * 1024
+DECODED_LIMIT = 1024 * 1024
 ANSWERED_BY = "Irimi-Answered-By"
 EXIT = {"ok": 0, "client_gone": 3, "upstream_broke": 4}
 MODES = ("read_all", "hang_up", "two_callers")
@@ -108,16 +117,53 @@ def stream_post(
         raise UpstreamBroke(f"{label}: {type(exc).__name__}") from exc
     answered_by = raw.headers.get(ANSWERED_BY)
     agentkit.obs_http("POST", url, label, status=raw.status, answered_by=answered_by)
+    encoding = raw.headers.get("Content-Encoding")
+    size = ENCODED_READ_SIZE if encoding else READ_SIZE
     with raw:
-        while True:
+
+        def reads() -> Iterator[bytes]:
+            while True:
+                try:
+                    chunk = raw.read(size)
+                except (OSError, http.client.HTTPException) as exc:
+                    agentkit.obs("stream_error", label=label, error=type(exc).__name__)
+                    raise UpstreamBroke(f"{label}: {type(exc).__name__}") from exc
+                if not chunk:
+                    return
+                yield chunk
+
+        yield from (decoded(reads(), encoding, label) if encoding else reads())
+
+
+def decoded(chunks: Iterator[bytes], encoding: str, label: str) -> Iterator[bytes]:
+    """`chunks` of a gzip stream, decoded up to DECODED_LIMIT bytes and no further; every chunk is
+    still read. Once they end, logs `stream_encoded`: how many bytes came, their SHA-256, and how
+    many it decoded, so a test can hold the bytes the agent got to the ones the service sent."""
+    if encoding.lower() != "gzip":
+        agentkit.obs("stream_error", label=label, error=f"encoding {encoding}")
+        raise UpstreamBroke(f"{label}: cannot decode {encoding}")
+    inflater = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    digest, size, room = hashlib.sha256(), 0, DECODED_LIMIT
+    for chunk in chunks:
+        digest.update(chunk)
+        size += len(chunk)
+        if room > 0:
             try:
-                chunk = raw.read(READ_SIZE)
-            except (OSError, http.client.HTTPException) as exc:
-                agentkit.obs("stream_error", label=label, error=type(exc).__name__)
-                raise UpstreamBroke(f"{label}: {type(exc).__name__}") from exc
-            if not chunk:
-                return
-            yield chunk
+                out = inflater.decompress(inflater.unconsumed_tail + chunk, room)
+            except zlib.error as exc:
+                agentkit.obs("stream_error", label=label, error="zlib.error")
+                raise UpstreamBroke(f"{label}: {exc}") from exc
+            room -= len(out)
+            if out:
+                yield out
+    agentkit.obs(
+        "stream_encoded",
+        label=label,
+        encoding=encoding,
+        bytes=size,
+        sha256=digest.hexdigest(),
+        decoded=DECODED_LIMIT - room,
+    )
 
 
 def _stream_post_httpx(
@@ -135,7 +181,11 @@ def _stream_post_httpx(
             agentkit.obs_http("POST", url, label, status=resp.status_code, answered_by=answered_by)
             if resp.status_code >= 400:
                 raise UpstreamBroke(f"{label}: HTTP {resp.status_code}")
-            yield from resp.iter_raw(READ_SIZE)
+            encoding = resp.headers.get("Content-Encoding")
+            if encoding:
+                yield from decoded(resp.iter_raw(ENCODED_READ_SIZE), encoding, label)
+            else:
+                yield from resp.iter_raw(READ_SIZE)
     except httpx.TransportError as exc:
         if opened:
             agentkit.obs("stream_error", label=label, error=type(exc).__name__)

@@ -63,9 +63,9 @@ _warn_lock = threading.Lock()
 _record_failed = False
 
 
-def tool(
+def tool[F: Callable[..., Any]](
     *, kind: trace.ToolKind, shadow: Callable[..., Any] | None = None, name: str | None = None
-) -> Callable[[Callable[..., Any]], Any]:
+) -> Callable[[F], F]:
     """Label the decorated function as a tool the proxy cannot see (see the module doc).
 
     `kind` is `"read"` or `"write"`. A write names `shadow`, the stand-in that runs in its place
@@ -79,9 +79,10 @@ def tool(
     expect. The stand-in of a plain method is called as the method is, with the instance first.
 
     Refused at decoration time, with TypeError: a `kind` that is neither; a write with no stand-in;
-    a read with one; a stand-in that is not callable, is a generator function, or is sync where
-    the function is `async def` or the reverse; a generator or async-generator function; what has
-    no importable `module.qualname` (`api.entrypoint`); and a `name` that is not a string."""
+    a read with one; a stand-in that is not callable, is a generator function, is the function
+    itself, or is sync where the function is `async def` or the reverse; a generator or
+    async-generator function; what has no importable `module.qualname` (`api.entrypoint`); and a
+    `name` that is not a string. A `staticmethod` stand-in is its function."""
     if kind not in KINDS:
         raise TypeError(f"@sdk.tool(kind=...) must be 'read' or 'write', not {kind!r}")
     if name is not None and not isinstance(name, str):
@@ -96,6 +97,11 @@ def tool(
             "@sdk.tool(kind='read') takes no shadow=: a read runs for real, and a stand-in would "
             "hide it"
         )
+    if isinstance(shadow, staticmethod):
+        # A stand-in written as a static method in its tool's class body is callable, but
+        # `inspect` sees neither its nature nor a generator through it: it is judged, and called,
+        # as the function inside it (#76).
+        shadow = shadow.__func__
     if shadow is not None and not callable(shadow):
         raise TypeError(f"@sdk.tool(shadow=...) must be callable, not {shadow!r}")
     if shadow is not None and (
@@ -114,6 +120,12 @@ def tool(
             raise TypeError(
                 f"@sdk.tool cannot wrap the generator function {fn.__qualname__}: a call is "
                 "recorded when it returns, before a generator's body has run"
+            )
+        if shadow is fn:
+            # Read as "the function to shadow", `shadow=` would run the write for real (#76).
+            raise TypeError(
+                f"@sdk.tool: the stand-in for {fn.__qualname__} is the function itself: shadow= "
+                "names the function that runs in its place under irimi"
             )
         is_async = inspect.iscoroutinefunction(fn)
         if shadow is not None and _is_async(shadow) != is_async:

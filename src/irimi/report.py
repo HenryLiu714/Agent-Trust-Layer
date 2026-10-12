@@ -107,15 +107,20 @@ def tool_call_line(call: ToolCall) -> str:
     """One line per tool call the SDK reported (#76), in `exchange_line`'s columns (#72). Its name
     and error type are whatever was posted to the control endpoint, so each control character is
     escaped, as `runs show` escapes a run's text (#72): one call is one line."""
-    outcome = f"raised {_printable(call.error.type)}" if call.error is not None else "ok"
+    outcome = _tool_outcome(call, "ok")
     return f"{call.ran:<9} {call.kind:<9} tool {_printable(call.name)} -> {outcome}"
 
 
 def tool_write_line(call: ToolCall) -> str:
     """The summary's line for a write tool whose stand-in ran in its place (#76): the real
     function did not run, so it is a write that did not happen, and it takes the write marker."""
-    outcome = f"raised {_printable(call.error.type)}" if call.error is not None else "ran"
+    outcome = _tool_outcome(call, "ran")
     return f"  {WRITE_MARKER} tool {_printable(call.name)}  shadow stand-in {outcome}"
+
+
+def _tool_outcome(call: ToolCall, returned: str) -> str:
+    """`returned`, or `raised <type>` with the type escaped as `tool_call_line` says (#76)."""
+    return returned if call.error is None else f"raised {_printable(call.error.type)}"
 
 
 # The kinds a shadow run answers instead of forwarding, so they are the writes the summary owes
@@ -488,7 +493,7 @@ def _would_fire(writes: Sequence[Exchange]) -> list[str]:
     return list(dict.fromkeys(event for ex in writes for event in ex.would_fire))
 
 
-def _closing_lines(writes: Sequence[Exchange], tool_writes: Sequence[ToolCall] = ()) -> list[str]:
+def _closing_lines(writes: Sequence[Exchange], tool_writes: Sequence[ToolCall]) -> list[str]:
     """What did not happen, and - when something answered in irimi's place - where it went.
 
     Nothing intercepted, nothing to claim: a run that only read gets no closing line rather than
@@ -576,7 +581,7 @@ def _summary(
     telemetry: Sequence[str],
     elapsed_s: float,
     index: MapIndex | None,
-    tool_calls: Sequence[ToolCall] = (),
+    tool_calls: Sequence[ToolCall],
 ) -> list[str]:
     """The one implementation of the summary. `exchanges` holds no telemetry; `telemetry` is one
     host per telemetry exchange, each of them forwarded live (#72). A tool call is not an exchange

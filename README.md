@@ -242,9 +242,8 @@ host in a map is not an allow-list entry here. The scheme upstream is always htt
 - **HTTP(S) only.** Database writes, files on disk, gRPC and WebSocket traffic are not virtualized
   and happen for real, unless the agent labels the function that makes them with `@sdk.tool`
   ([Tools the proxy cannot see](#tools-the-proxy-cannot-see)). Point database URLs at scratch
-  data. Bytes sent through the proxy that are
-  not HTTP, and a connection upgraded to anything but a WebSocket, are refused, never relayed, and
-  leave no record (#75).
+  data. Bytes sent through the proxy that are not HTTP, and a connection upgraded to anything but
+  a WebSocket, are refused, never relayed, and leave no record (#75).
 
 ## Service maps
 
@@ -510,9 +509,10 @@ def find_accounts(segment: str) -> list[Account]: ...
 
 - **Mistakes fail when the module loads**, with `TypeError`, never at the call: a `kind` that is
   not `"read"` or `"write"`, a write with no `shadow=`, a read with one, a stand-in that is not
-  callable or is a generator, a stand-in that is sync where the function is `async def` or the
-  reverse, a generator function, and what `@sdk.trigger` also refuses (a class, a
-  `functools.partial`, a name that is not a string). Nothing unnamed runs for real under irimi.
+  callable, is a generator or is the function itself, a stand-in that is sync where the function
+  is `async def` or the reverse, a generator function, and what `@sdk.trigger` also refuses (a
+  class, a `functools.partial`, a name that is not a string). Nothing unnamed runs for real under
+  irimi. A `staticmethod` stand-in in the tool's own class body is taken as its function.
 - **What is recorded.** Each call is stored in the run it was made in, or, with no run, in the
   process run `irimi shadow` names (`IRIMI_RUN`), or under serve mode in `unattributed`. It holds
   the tool's name, its kind, which body ran, its arguments bound against the real function's

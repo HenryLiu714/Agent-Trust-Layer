@@ -56,3 +56,13 @@ def test_init_refuses_symlinked_key(tmp_path, monkeypatch, capsys):
     assert main(["init", "--force"]) == 1
     assert "could not write CA" in capsys.readouterr().err
     assert victim.read_bytes() == b"do not touch"
+
+
+def test_the_non_http_notice_names_the_way_to_label_a_non_http_write(tmp_path, monkeypatch, capsys):
+    """Since #76 a non-HTTP side effect happens for real only when its function is unlabelled:
+    `irimi init` must not say every one does."""
+    _setup(tmp_path, monkeypatch)
+    assert main(["init"]) == 0
+    out = capsys.readouterr().out
+    assert "unless" in NON_HTTP_NOTICE and "@sdk.tool" in NON_HTTP_NOTICE
+    assert NON_HTTP_NOTICE in out

@@ -15,11 +15,11 @@ import re
 import sys
 import threading
 from collections.abc import Callable
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 
-from irimi import ca, paths, report, sdk, servicemap, trace
+from irimi import ca, exchange, paths, report, sdk, servicemap, trace
 from irimi.cli import main
 from irimi.sdk import capture, client, runs, tools
 from irimi.store import StoreReader
@@ -488,6 +488,54 @@ def test_a_record_that_cannot_be_built_costs_the_agent_nothing(posted, monkeypat
     assert len(warnings()) == 1
 
 
+def test_a_stand_in_that_is_the_function_itself_is_refused_when_the_agent_loads(posted):
+    """`shadow=` names what runs IN PLACE of the write. Naming the write itself - reading `shadow`
+    as "the function to shadow" - would run the real write under irimi, so it is refused, as every
+    other way of leaving a write unnamed is (#76)."""
+
+    def database_write(order: int) -> None:
+        raise _RealWriteRan("the real write ran")
+
+    with pytest.raises(TypeError, match="is the function itself"):
+        sdk.tool(kind="write", shadow=database_write)(database_write)
+    with pytest.raises(TypeError, match="is the function itself"):
+        sdk.tool(kind="write", shadow=database_write)(staticmethod(database_write))
+    assert posted.posts == []
+
+
+class _Repository:
+    """Stand-ins written as static methods in the class body of the tools they stand in for."""
+
+    @staticmethod
+    def _save_stand_in(row: int) -> str:
+        return f"stood in for {row}"
+
+    @staticmethod
+    async def _save_async_stand_in(row: int) -> str:
+        return f"stood in async for {row}"
+
+    @sdk.tool(kind="write", shadow=_save_stand_in, name="repo.save")
+    @staticmethod
+    def save(row: int) -> str:
+        raise _RealWriteRan("the real write ran")
+
+    @sdk.tool(kind="write", shadow=_save_async_stand_in, name="repo.save_async")
+    @staticmethod
+    async def save_async(row: int) -> str:
+        raise _RealWriteRan("the real write ran")
+
+
+def test_a_static_method_stand_in_is_judged_and_called_as_its_function(posted):
+    """A `staticmethod` in a class body is callable, but `inspect` sees neither its nature nor a
+    generator through it: an async one was refused as sync, and a generator one slipped through
+    (#76)."""
+    assert _Repository.save(1) == "stood in for 1"
+    assert asyncio.run(_Repository.save_async(2)) == "stood in async for 2"
+    assert [doc["name"] for _, _, doc in posted.posts] == ["repo.save", "repo.save_async"]
+    with pytest.raises(TypeError, match="cannot be the generator function"):
+        sdk.tool(kind="write", shadow=staticmethod(_gen))(_sync)
+
+
 def test_an_object_with_an_async_call_is_an_async_stand_in(posted):
     class _Mock:
         async def __call__(self, order: int) -> str:
@@ -646,13 +694,16 @@ def test_the_posted_tool_call_is_valid_json_the_endpoint_reads(posted):
         return float("nan")
 
     assert nan() != nan()
+    assert len(posted.posts) == 2
     for _, _, doc in posted.posts:
         json.loads(capture.serialized(doc))
         assert doc["result"] == {capture.REPR_KEY: "nan"}
 
 
-def test_the_client_posts_tool_calls_as_a_run_action():
-    assert "tool-calls" in client.Action.__args__  # type: ignore[attr-defined]
+def test_the_client_posts_exactly_the_endpoints_run_actions():
+    """`client.Action` is a `Literal`, which cannot be built from `exchange.RUN_ACTIONS`: this is
+    what keeps the two one list (#76 added `tool-calls` to both)."""
+    assert get_args(client.Action) == exchange.RUN_ACTIONS
 
 
 def test_a_tool_name_is_cut_to_the_run_name_limit(posted):

@@ -21,7 +21,7 @@ from collections.abc import Mapping
 from typing import Any, Literal, Protocol
 
 from irimi import paths
-from irimi.exchange import RUNS_ROUTE
+from irimi.exchange import RUNS_ROUTE, TOOL_CALLS_ACTION
 from irimi.sdk.capture import serialized
 from irimi.sdk.instrumentation import unlabelled
 
@@ -103,7 +103,7 @@ class ControlClient:
         logger.warning(
             "irimi could not record %s of run %s (%s: %s). The run goes on, its requests "
             "still labelled; further failures of this kind are not logged.",
-            "a tool call" if action == "tool-calls" else f"the {action}",
+            "a tool call" if action == TOOL_CALLS_ACTION else f"the {action}",
             run_id,
             kind,
             detail,

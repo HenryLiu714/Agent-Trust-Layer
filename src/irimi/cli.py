@@ -19,9 +19,12 @@ if TYPE_CHECKING:  # the quoted annotations below; no runtime import
 SIGINT_EXIT_CODE = 130  # 128 + SIGINT, the shell convention for a Ctrl-C'd command
 DEFAULT_RUNS_LIMIT = 20  # `irimi runs list` without --limit (#72)
 
+# Since #76 a non-HTTP write the agent labels with `@sdk.tool` runs only its stand-in under irimi,
+# so the notice says the rest happen for real, not that all of them do.
 NON_HTTP_NOTICE = (
     "Note: irimi only sees HTTP(S). Side effects that are not HTTP "
-    "(database writes, files, gRPC, WebSockets) are not virtualized and happen for real."
+    "(database writes, files, gRPC, WebSockets) are not virtualized and happen for real, "
+    "unless the agent labels the function that makes them with @sdk.tool."
 )
 
 

@@ -44,7 +44,7 @@ from irimi.cli import main as irimi_main
 from irimi.exchange import Exchange
 from irimi.servicemap import MapIndex, loader
 from irimi.store import StoreReader
-from irimi.trace import ToolCall
+from irimi.trace import RunRecord, ToolCall
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 WORKFLOWS_DIR = REPO_ROOT / "examples" / "workflows"
@@ -204,6 +204,10 @@ class Result:
             if line.startswith("irimi shadow · run ") and re.search(r" · \d+ exchanges? · ", line):
                 return self.irimi[i:]
         return []
+
+    def sdk_runs(self) -> list[RunRecord]:
+        """The runs the SDK started (#74), as stored: `attribution: "sdk"`, newest first."""
+        return [r for r in self.stored().list_runs() if r.attribution == "sdk"]
 
     def process_run_id(self) -> str:
         """The id of the one run `irimi shadow` stored for the agent's process (#70)."""

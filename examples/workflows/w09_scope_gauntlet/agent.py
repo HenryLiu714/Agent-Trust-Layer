@@ -4,7 +4,7 @@ This is not an agent that does a job. It is the fastest check that irimi's safet
 the wire: THE SCOPE RULE, the L0 floor, idempotency, bodies irimi cannot read whole, irimi's own
 headers arriving from the agent, and requests addressed to the proxy itself. Under `irimi shadow`
 the run is attributed `process`, but for the runs the control groups start over the control
-endpoint (#73), doing by hand what the SDK (#74) will.
+endpoint (#73), doing by hand what the SDK (#74) does for the other workflows.
 
     python -m examples.workflows.launch \\
         examples.workflows.w09_scope_gauntlet.agent <group>
@@ -160,9 +160,10 @@ def self_addressed() -> None:
 
 # -- the control endpoint, called as the SDK will call it (#73) ------------------------------------
 #
-# Until #74 ships an SDK that posts a run's start, its tool calls and its end, these groups do its
-# job by hand, so `irimi shadow` itself is shown storing an `sdk` run: its trigger, its tool calls
-# in order with the exchange labelled `Irimi-Run: <id>` between them, and its outcome.
+# These groups do the SDK's job by hand (#74 posts a run's start and end; #76 its tool calls), so
+# `irimi shadow` itself is shown storing an `sdk` run from posts the test controls exactly: its
+# trigger, its tool calls in order with the exchange labelled `Irimi-Run: <id>` between them, and
+# its outcome, and every refusal the SDK itself never provokes.
 
 # The trigger's entrypoint each run posts: this module, by the name `launch` keeps for it.
 ENTRYPOINT = "examples.workflows.w09_scope_gauntlet.agent"

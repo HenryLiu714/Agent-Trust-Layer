@@ -4,11 +4,15 @@ Agents write `from examples.workflows import sdk` where a real agent would write
 `from irimi import sdk`, and use the API #74 and #76 specify: `@sdk.trigger`, `sdk.run()`,
 `sdk.current_run_id()`, `sdk.propagate()`, `sdk.active()` and `@sdk.tool(kind=..., shadow=...)`.
 
-- **When `irimi.sdk` exists**, this module re-exports it, name by name: each name `irimi.sdk` has
-  is the real one, and each it does not have yet is the stand-in's. #74 ships `trigger` and `run`
-  before #76 ships `tool`, and an agent that uses `@sdk.tool` must still import in that window.
+- **When `irimi.sdk` exists**, as it has since #74, this module re-exports it, name by name: each
+  name `irimi.sdk` has is the real one, and each it does not have yet is the stand-in's. #74
+  shipped `trigger`, `run`, `current_run_id`, `propagate` and `active`; until #76 ships `tool`,
+  `tool` is the stand-in's, so an agent that uses `@sdk.tool` still imports.
   Names this module does not define (`sdk.instrument`, `sdk.replay`, `ReplayResult`, ...) are
   forwarded to `irimi.sdk` by the module `__getattr__`.
+  Every `irimi.sdk` has `instrument`, a no-op from #74 until #75 filled it in, so the corpus
+  labels no request itself whenever the real SDK imports (`labels_requests`): a run's requests
+  are labelled by the SDK that ships, or not at all.
   Three real names are still wrapped, for the observation log the corpus pins:
   - `tool` wraps the real function and its stand-in so each logs which of them ran
     (`agentkit.obs("tool", ...)`), because that is the harness's proof that no write tool ran for
@@ -17,7 +21,8 @@ Agents write `from examples.workflows import sdk` where a real agent would write
     run id, so the pins on them hold in both modes.
 - **Until then**, it implements the same API with no control endpoint and no recording:
   - a context-variable run id that nested triggers join;
-  - `agentkit.http` labelling each request with `Irimi-Run` (which irimi strips, #67);
+  - `agentkit.http`, and W3's clients, labelling each request with `Irimi-Run` (which irimi
+    strips, #67), as the real SDK does since #75;
   - #76's call-time table, so an active write tool runs its stand-in and never the real function.
 
   It raises #76's decoration-time `TypeError`s too, so an agent that is wrong today is wrong in
@@ -75,11 +80,11 @@ def __getattr__(name: str) -> Any:
 
 ENGINE_ACTIVE_ENV = "IRIMI_ENGINE_ACTIVE"
 _run_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("irimi_run", default=None)
-# Under the real SDK: the real run whose `run.start` this module has logged, so a nested trigger,
-# which joins that run, logs nothing.
-_logged_run_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "irimi_logged_run", default=None
-)
+# Under the real SDK: the real runs whose `run.start` this module has logged and whose `run.end`
+# it has not, so a nested trigger, which joins one, logs nothing. A set of ids rather than a context
+# variable, because a run handed to a coroutine (#74) is logged as ended from the task that awaits
+# it, not the context that logged its start.
+_logged_runs: set[str] = set()
 
 
 def active() -> bool:
@@ -87,6 +92,14 @@ def active() -> bool:
     if real is not None:
         return bool(real())
     return os.environ.get(ENGINE_ACTIVE_ENV) == "1"
+
+
+def labels_requests() -> bool:
+    """True when the real `irimi.sdk` imports, False when only the stand-in is here. Every real
+    SDK has `instrument`: #74 exported it as a no-op, and #75 made it put `Irimi-Run` on a run's
+    requests. So `agentkit.http` and W3's `call` label by hand only with no real SDK at all; with
+    one, they must not, or the corpus would pass with or without the SDK's patch."""
+    return _from_real("instrument") is not None
 
 
 def current_run_id() -> str | None:
@@ -144,15 +157,15 @@ def _observed(name: str) -> Iterator[None]:
     whether there is a run (inactive: none) and whether this entry joined an outer one (the same
     id this module already logged), so this only reads its id."""
     run_id = current_run_id()
-    if run_id is None or run_id == _logged_run_id.get():
+    if run_id is None or run_id in _logged_runs:
         yield
         return
-    token = _logged_run_id.set(run_id)
+    _logged_runs.add(run_id)
     try:
         with _logged_run(name, run_id):
             yield
     finally:
-        _logged_run_id.reset(token)
+        _logged_runs.discard(run_id)
 
 
 def _around(f: Callable[..., Any], enter: Callable[[], Any]) -> Callable[..., Any]:
@@ -169,18 +182,34 @@ def _around(f: Callable[..., Any], enter: Callable[[], Any]) -> Callable[..., An
 
     @functools.wraps(f)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        with enter():
-            return f(*args, **kwargs)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(enter())
+            result = f(*args, **kwargs)
+            if _real is not None and inspect.iscoroutine(result):
+                # The real trigger hands its run to the coroutine and ends it when the coroutine
+                # ends (#74), so the logged run goes with it: `run.end` is the coroutine's outcome.
+                return _carried(stack.pop_all(), result)
+            return result
 
     return wrapper
+
+
+async def _carried(observed: contextlib.ExitStack, coroutine: Any) -> Any:
+    """`coroutine`, awaited inside the observation a sync trigger opened before it returned it."""
+    with observed:
+        return await coroutine
 
 
 def trigger(fn: Callable[..., Any] | None = None, *, name: str | None = None) -> Any:
     real = _from_real("trigger")
 
     def decorate(f: Callable[..., Any]) -> Callable[..., Any]:
+        if isinstance(f, staticmethod | classmethod):
+            # The function inside is the trigger and the descriptor stays one, as the real
+            # trigger keeps it (#74): this module's wrapper cannot call a descriptor.
+            return type(f)(decorate(f.__func__))
         is_generator = inspect.isgeneratorfunction(f) or inspect.isasyncgenfunction(f)
-        run_name = name or f.__qualname__
+        run_name = f.__qualname__ if name is None else name
         if real is not None:
             # A generator goes to the real decorator as it is, for its own TypeError (#74).
             inner = f if is_generator else _around(f, lambda: _observed(run_name))

@@ -11,7 +11,10 @@
    irimi forwards and stores only as having happened (#70).
 
 Upstream streams are read a few bytes at a time on purpose, so every SSE event is split across
-reads and the parser has to reassemble it (`sse_events`).
+reads and the parser has to reassemble it (`sse_events`). They are read with urllib, or, with
+`W7_STREAM_CLIENT=httpx`, with `httpx.Client.stream`, as the Anthropic and OpenAI SDKs read theirs:
+the SDK labels each at httpx's transport, and takes the label off again while the stream is still
+open (#75).
 
     python -m examples.workflows.launch \\
         examples.workflows.w07_streaming_assistant.agent <question> {read_all,hang_up,two_callers}
@@ -37,12 +40,16 @@ import urllib.request
 from collections.abc import Callable, Iterator
 from typing import Any
 
+import httpx
+
 from examples.workflows import agentkit, sdk
 
 READ_SIZE = 7  # deliberately small: every event straddles several reads
 ANSWERED_BY = "Irimi-Answered-By"
 EXIT = {"ok": 0, "client_gone": 3, "upstream_broke": 4}
 MODES = ("read_all", "hang_up", "two_callers")
+# `httpx` streams the model calls with httpx instead of urllib (#75).
+STREAM_CLIENT_ENV = "W7_STREAM_CLIENT"
 POST_SUMMARY = {
     "type": "function",
     "function": {"name": "post_summary", "parameters": {"type": "object"}},
@@ -80,6 +87,9 @@ def stream_post(
     """POST and yield the response body as it arrives. A stream that never opens (an error status,
     or no answer at all) or fails mid-body is logged and raised as `UpstreamBroke`, so the caller
     is told and the run ends as a broken upstream rather than a crash in the handler thread."""
+    if os.environ.get(STREAM_CLIENT_ENV) == "httpx":
+        yield from _stream_post_httpx(url, body, headers, label)
+        return
     request = urllib.request.Request(
         url,
         data=json.dumps(body).encode(),
@@ -108,6 +118,30 @@ def stream_post(
             if not chunk:
                 return
             yield chunk
+
+
+def _stream_post_httpx(
+    url: str, body: dict[str, Any], headers: dict[str, str], label: str
+) -> Iterator[bytes]:
+    """`stream_post` with `httpx.Client.stream`, logged and raised the same way."""
+    opened = False
+    try:
+        with (
+            httpx.Client(timeout=agentkit.timeout()) as client,
+            client.stream("POST", url, json=body, headers=headers) as resp,
+        ):
+            opened = True
+            answered_by = resp.headers.get(ANSWERED_BY)
+            agentkit.obs_http("POST", url, label, status=resp.status_code, answered_by=answered_by)
+            if resp.status_code >= 400:
+                raise UpstreamBroke(f"{label}: HTTP {resp.status_code}")
+            yield from resp.iter_raw(READ_SIZE)
+    except httpx.TransportError as exc:
+        if opened:
+            agentkit.obs("stream_error", label=label, error=type(exc).__name__)
+        else:
+            agentkit.obs_http("POST", url, label, error=type(exc).__name__)
+        raise UpstreamBroke(f"{label}: {type(exc).__name__}") from exc
 
 
 def anthropic_stream(question: str, send: Callable[[str, dict[str, Any]], None]) -> str:

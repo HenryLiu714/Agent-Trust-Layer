@@ -4,6 +4,7 @@ The labels are the calls in `examples/workflows/w01_ticket_triage/agent.py`; `#N
 """
 
 from examples.workflows.w01_ticket_triage.agent import DB_NAME
+from irimi.trace import ErrorInfo, Trigger
 
 W = "w01_ticket_triage"
 AGENT = "examples.workflows.w01_ticket_triage.agent"
@@ -111,3 +112,29 @@ def test_a_model_that_never_stops_is_cut_off_at_max_turns_in_both_modes(run_work
         ("error", "RuntimeError")
     ]
     assert replies(shadow) == replies(bare) == []
+    # Stored under the exception's full name (#74); the log above has its short one.
+    [run] = shadow.sdk_runs()
+    assert (run.outcome, run.error) == (
+        "error",
+        ErrorInfo("builtins.RuntimeError", "ticket T-1001: no answer after 6 turns"),
+    )
+
+
+def test_the_ticket_is_stored_as_the_runs_trigger_by_its_dataclass(run_workflow):
+    """#74's capture of a dataclass argument: the `Ticket` is stored as its class, by the module
+    name `launch` keeps for the agent, and its fields, so replay (#84) can rebuild it."""
+    shadow = run_workflow(W, "full_refund", "shadow")
+    [run] = shadow.sdk_runs()
+    ticket = {
+        "ticket_id": "T-1001",
+        "charge": "ch_TICKET1",
+        "customer": "cus_TICKET1",
+        "message": "I was charged twice for the same order",
+    }
+    assert run.trigger == Trigger(
+        "handle_ticket",
+        f"{AGENT}:handle_ticket",
+        {"ticket": {"__irimi_type__": f"{AGENT}:Ticket", "value": ticket}},
+        True,
+    )
+    assert (run.outcome, run.run_id) == ("ok", shadow.one("run.start")["run"])

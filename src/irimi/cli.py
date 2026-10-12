@@ -474,7 +474,7 @@ def cmd_shadow(args: argparse.Namespace) -> int:
         env = runner.child_env(dict(os.environ), host, port, run.ca.cert, run.run_id)
         # The process run is stored before the child exists, so every exchange it makes lands in
         # a run that already has its record (#70).
-        agent_version = os.environ.get(runner.AGENT_VERSION_ENV)
+        agent_version = os.environ.get(paths.AGENT_VERSION_ENV)
         run.store.start_run(runner.process_run(run.run_id, cmd, agent_version, time.time()))
         started_run = True
         try:

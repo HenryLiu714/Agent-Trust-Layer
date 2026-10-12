@@ -6,6 +6,7 @@ irimi does not see tool calls yet; the assertions on its output flip when #76 re
 """
 
 from examples.workflows.w06_crm_db_agent.agent import DB_NAME, SEED
+from irimi.trace import ErrorInfo
 
 W = "w06_crm_db_agent"
 WRITE_TOOLS = [
@@ -97,6 +98,9 @@ def test_a_raising_read_tool_ends_the_run_in_error_under_shadow(run_workflow):
         assert [e["key"] for e in result.events("lookup_failed")] == ["'acc_1'"]
     ends = shadow.events("run.end")
     assert [(e["outcome"], e["error"]) for e in ends] == [("error", "KeyError")]
+    # Stored under the exception's full name (#74).
+    [run] = shadow.sdk_runs()
+    assert (run.outcome, run.error) == ("error", ErrorInfo("builtins.KeyError", "'acc_missing'"))
     # Bare, the SDK is inactive: no run is opened at all.
     assert bare.events("run.start") == []
 

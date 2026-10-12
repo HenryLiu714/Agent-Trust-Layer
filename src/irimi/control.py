@@ -32,7 +32,18 @@ from collections.abc import Callable, Mapping
 from typing import Any, NoReturn
 
 from irimi import __version__, trace
-from irimi.exchange import CONTROL_ANSWER, CONTROL_PREFIX, Door, Headers, Request, Response
+from irimi.exchange import (
+    CONTROL_ANSWER,
+    CONTROL_PREFIX,
+    RUN_ACTIONS,
+    RUNS_ROUTE,
+    START_ACTION,
+    TOOL_CALLS_ACTION,
+    Door,
+    Headers,
+    Request,
+    Response,
+)
 from irimi.pipeline import ANSWERED_BY_HEADER
 from irimi.store import TraceStore, header_record, names_a_run_dir
 from irimi.trace import (
@@ -59,11 +70,8 @@ TOO_DEEP = "the body nests too deeply to read"
 OWN_RUN = "is irimi's own run, which the SDK may not start or end"
 
 HEALTH_ROUTE = "health"
-RUNS_ROUTE = "runs"
-START_ACTION = "start"
-TOOL_CALLS_ACTION = "tool-calls"
-END_ACTION = "end"
-RUN_ACTIONS = (START_ACTION, TOOL_CALLS_ACTION, END_ACTION)
+# The run routes (`RUNS_ROUTE`, `RUN_ACTIONS`) are imported from `exchange`, where the SDK reads
+# them too (#74).
 
 # The `RunRecord` fields each run route takes from the posted body. Every one must be present, and
 # only `agent_version` and `error` may be null. The rest of the record is irimi's to say, so a

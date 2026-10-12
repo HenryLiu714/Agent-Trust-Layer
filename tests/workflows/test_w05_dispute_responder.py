@@ -3,6 +3,7 @@
 The labels and events are in `examples/workflows/w05_dispute_responder/agent.py`.
 """
 
+import base64
 import json
 
 from examples.workflows.harness.services import client_secret
@@ -136,3 +137,18 @@ def test_a_replayed_event_id_is_handled_once(run_workflow):
     assert [line.split()[0] for line in shadow.exchange_lines() if " write " in line] == [
         "fake-L1"
     ] * 3
+
+
+def test_the_raw_webhook_body_is_stored_as_the_triggers_bytes_and_is_replayable(run_workflow):
+    """#74's capture of `bytes`: `on_event(raw, signature)` stores the body it verified as
+    `__irimi_bytes__`, which replay (#84) can hand back byte for byte."""
+    shadow = run_workflow(W, "over_threshold", "shadow")
+    [run] = shadow.sdk_runs()
+    assert run.trigger is not None and run.trigger.replayable
+    assert run.trigger.entrypoint == "examples.workflows.w05_dispute_responder.agent:on_event"
+    args = run.trigger.args
+    assert isinstance(args, dict) and set(args) == {"raw", "signature"}
+    raw = args["raw"]
+    assert isinstance(raw, dict) and set(raw) == {"__irimi_bytes__"}
+    event = json.loads(base64.b64decode(str(raw["__irimi_bytes__"])))
+    assert (event["id"], event["type"]) == ("evt_dp_BIG", "charge.dispute.created")

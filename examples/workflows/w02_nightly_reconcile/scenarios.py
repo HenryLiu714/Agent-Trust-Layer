@@ -55,7 +55,7 @@ WORKFLOW = Workflow(
         "datetime_trigger": Scenario(
             ("--charges", "12", "--mismatches", "2", "--datetime-trigger"),
             setup=_seed(12),
-            doc="the trigger is a datetime, which #74 will capture as non-replayable",
+            doc="the trigger is a datetime, which #74 captures as non-replayable",
         ),
         "same_date_twice": Scenario(
             ("--charges", "12", "--mismatches", "3", "--twice"),

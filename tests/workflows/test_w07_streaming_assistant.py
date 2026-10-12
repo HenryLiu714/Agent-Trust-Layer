@@ -5,6 +5,7 @@ OpenAI tool call from its deltas. Streams are read seven bytes at a time, so eve
 """
 
 import json
+import re
 from itertools import accumulate
 
 from examples.workflows.w07_streaming_assistant.scenarios import (
@@ -17,7 +18,7 @@ from examples.workflows.w07_streaming_assistant.scenarios import (
 )
 from irimi import redact, trace
 from irimi.exchange import STREAM_TRUNCATED_FLAG, UPSTREAM_ERROR_FLAG, Exchange
-from irimi.trace import TelemetrySeen
+from irimi.trace import ErrorInfo, TelemetrySeen
 
 W = "w07_streaming_assistant"
 TRACE_LINE = "live      telemetry POST api.smith.langchain.com/runs -> 202"
@@ -95,10 +96,10 @@ def test_a_telemetry_post_is_stored_as_having_happened_and_its_body_is_not(run_w
     assert [e.host for e in seen] == ["api.smith.langchain.com"]
     blobs = shadow.home / "store" / "blobs"
     assert trace.body_ref(sent.body).sha256 not in {p.name for p in blobs.iterdir()}
-    # The run it landed in, the chat's `header` run with its embeddings call, prints it as an
+    # The run it landed in, the chat's `sdk` run with its three model calls, prints it as an
     # event and counts it in its stored summary: telemetry in a stored summary, which no other
-    # corpus run exercises (#72). The streams are in the process run, since `stream_post` sends
-    # no `Irimi-Run` (#75).
+    # corpus run exercises (#72). The streams are in it too: `stream_post` is plain urllib, which
+    # the SDK labels (#75).
     reader = shadow.stored()
     [holder] = [
         r.run_id
@@ -107,17 +108,21 @@ def test_a_telemetry_post_is_stored_as_having_happened_and_its_body_is_not(run_w
     ]
     code, out, err = shadow.runs("show", holder)
     assert (code, err) == (0, [])
-    assert out[7:] == [
+    # The run has a start and an end now (#74), so its elapsed time is real: normalised here.
+    assert [re.sub(r" · \d+\.\ds · ", " · <elapsed> · ", line) for line in out[7:]] == [
         "",
         "live      llm       POST api.openai.com/v1/embeddings -> 200",
+        "live      llm       POST api.anthropic.com/v1/messages -> 200",
+        "live      llm       POST api.openai.com/v1/chat/completions -> 200",
         "telemetry api.smith.langchain.com",
         "",
-        f"irimi shadow · run {holder} · 2 exchanges · 0.0s · backstop: none (Phase 4)",
+        f"irimi shadow · run {holder} · 4 exchanges · <elapsed> · backstop: none (Phase 4)",
         "",
-        "  api.openai.com  1 llm",
-        "  telemetry       1 exchange to 1 host, forwarded live",
+        "  api.anthropic.com  1 llm",
+        "  api.openai.com     2 llm",
+        "  telemetry          1 exchange to 1 host, forwarded live",
         "",
-        "  2 exchanges · 2 live · 0 delegated · 0 virtualized",
+        "  4 exchanges · 4 live · 0 delegated · 0 virtualized",
     ]
 
 
@@ -130,6 +135,9 @@ def test_a_streamed_answer_is_stored_as_the_chunks_the_agent_was_sent(run_workfl
     shadow = run_workflow(W, "normal", "shadow")
     stored = stored_exchanges(shadow)
     assert sorted(stored) == ["/v1/chat/completions", "/v1/embeddings", "/v1/messages"]
+    # All three in the chat's run, the streams too: urllib is labelled by the SDK (#75).
+    [chat] = shadow.sdk_runs()
+    assert {ex.run_id for ex in stored.values()} == {chat.run_id}
     ends = {"/v1/messages": MESSAGE_STOP, "/v1/chat/completions": b"data: [DONE]\n\n"}
     for path, end in ends.items():
         ex = stored[path]
@@ -149,6 +157,31 @@ def test_a_streamed_answer_is_stored_as_the_chunks_the_agent_was_sent(run_workfl
     embeddings = stored["/v1/embeddings"]
     assert embeddings.response is not None and json.loads(embeddings.response.body)["data"]
     assert embeddings.stream_chunks == ()
+
+
+def test_streams_read_with_httpx_are_stored_whole_in_the_chats_run(run_workflow):
+    """The Anthropic and OpenAI SDKs stream with httpx, which the SDK labels at its transport and
+    unlabels as soon as the transport returns, while the stream is still being read (#75). The
+    agent sees what it sees with urllib, both streams are stored whole and in the chat's run, as
+    the chunks it was sent (#71), and no upstream saw `Irimi-Run` (universal invariant 2)."""
+    bare = run_workflow(W, "httpx_streams", "bare")
+    shadow = run_workflow(W, "httpx_streams", "shadow")
+    assert shadow.result(with_time=False) == bare.result(with_time=False)
+    assert shadow.result()["caller_text"] == shadow.result()["answer"] == ANSWER
+    assert shadow.exchange_lines() == LLM_LINES
+    stored = stored_exchanges(shadow)
+    [chat] = shadow.sdk_runs()
+    assert {ex.run_id for ex in stored.values()} == {chat.run_id}
+    assert shadow.stored().load_run(shadow.process_run_id()).events == []
+    ends = {"/v1/messages": MESSAGE_STOP, "/v1/chat/completions": b"data: [DONE]\n\n"}
+    for path, end in ends.items():
+        ex = stored[path]
+        assert ex.response is not None and ex.response.body.endswith(end)
+        assert len(ex.stream_chunks) > 1 and sum(ex.stream_chunks) == len(ex.response.body)
+        assert ex.flags == ()
+    anthropic = stored["/v1/messages"].response
+    assert anthropic is not None and text_deltas(anthropic.body) == ANSWER
+    assert [r for r in shadow.internet.requests() if "irimi-run" in r.headers] == []
 
 
 def test_a_secret_inside_a_stream_reaches_the_caller_intact_and_never_disk(run_workflow):
@@ -196,6 +229,12 @@ def test_a_caller_that_hangs_up_ends_the_run_in_error(run_workflow):
     assert [(e["outcome"], e["error"]) for e in shadow.events("run.end")] == [
         ("error", "ClientGone")
     ]
+    # Stored under the exception's full name (#74): an agent's own class, by its module.
+    [run] = shadow.sdk_runs()
+    assert (run.outcome, run.error) == (
+        "error",
+        ErrorInfo("examples.workflows.w07_streaming_assistant.agent.ClientGone", "BrokenPipeError"),
+    )
     # The agent stopped reading Anthropic's stream when its own caller left, and never asked
     # OpenAI anything.
     assert [c["label"] for c in shadow.calls()] == ["embed", "anthropic_stream"]
@@ -375,3 +414,36 @@ def test_two_streams_at_once_are_each_stored_against_their_own_request(run_workf
                 ]
                 assert "".join(content) == pair_decision(caller)
         assert sorted(callers) == ["1", "2"]
+    # Two concurrent requests do not mix (Phase 3's exit): each chat is a run of its own, and
+    # every call it made, both streams included, is stored in it and in no other, by the
+    # `Irimi-Run` the SDK put on each as it was sent (#75), though the two chats' streams were in
+    # the air together.
+    runs = {r.trigger.args["question"][-2]: r.run_id for r in shadow.sdk_runs() if r.trigger}
+    assert sorted(runs) == ["1", "2"]
+    for caller, run_id in runs.items():
+        held = [e for e in shadow.stored().load_run(run_id).events if isinstance(e, Exchange)]
+        assert sorted(e.request.path for e in held) == sorted([*ends, "/v1/embeddings"])
+        for ex in held:
+            if ex.request.path == "/v1/chat/completions":
+                assert json.loads(ex.request.body)["messages"][-1]["content"] == pair_answer(caller)
+            else:
+                asked = json.loads(ex.request.body)
+                question = asked["input"] if "input" in asked else asked["messages"][-1]["content"]
+                assert question == f"How do refunds work? (caller {caller})"
+    process = shadow.stored().load_run(shadow.process_run_id()).events
+    assert process == []
+
+
+def test_the_callers_send_function_is_stored_by_its_repr_and_cannot_be_replayed(run_workflow):
+    """#74's capture of a value that is not data: `chat(question, send)` is the ordinary shape of
+    a streaming handler, and `send` is a closure over the caller's connection. It is stored as
+    its repr and makes the run not replayable; the question is stored as itself."""
+    shadow = run_workflow(W, "normal", "shadow")
+    [run] = shadow.sdk_runs()
+    assert run.trigger is not None and not run.trigger.replayable
+    assert run.trigger.entrypoint == "examples.workflows.w07_streaming_assistant.agent:chat"
+    args = run.trigger.args
+    assert isinstance(args, dict) and args["question"] == "How do refunds work?"
+    send = args["send"]
+    assert isinstance(send, dict) and set(send) == {"__irimi_repr__"}
+    assert str(send["__irimi_repr__"]).startswith("<function ")

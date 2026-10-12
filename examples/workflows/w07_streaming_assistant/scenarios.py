@@ -213,6 +213,12 @@ WORKFLOW = Workflow(
             setup=_traced,
             doc="two streams, no post, and one LangSmith trace: telemetry (#70)",
         ),
+        "httpx_streams": Scenario(
+            (QUESTION, "read_all"),
+            env={"W7_STREAM_CLIENT": "httpx"},
+            setup=_world,
+            doc="both streams read with httpx, as the model SDKs read them: labelled by the SDK",
+        ),
         "secret_in_stream": Scenario(
             ("What is the test key?", "read_all"),
             setup=_world,

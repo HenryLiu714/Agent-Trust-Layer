@@ -9,7 +9,11 @@ dependencies = [
     # >=12 because `IrimiAddon.request` is a coroutine hook, and only 12's addonmanager awaits one
     # (`inspect.iscoroutinefunction` in `invoke_addon`). On 11 the decision would never run (#45).
     "mitmproxy>=12",
+    # Imported directly to decode a body incrementally, up to a cap (#94). mitmproxy depends on both;
+    # >=1.2 because only 1.2's `Decompressor.process` takes `output_buffer_limit`.
+    "brotli>=1.2",
     "pyyaml>=6",
+    "zstandard>=0.25",
 ]
 
 [project.scripts]

@@ -4,6 +4,7 @@ The labels are the calls in `examples/workflows/w09_scope_gauntlet/agent.py`.
 """
 
 import dataclasses
+import hashlib
 import json
 import re
 import sys
@@ -164,10 +165,13 @@ def test_the_big_charge_is_past_irimis_body_limit():
 @pytest.mark.parametrize("scenario", sorted(WORKFLOW.scenarios))
 def test_no_decision_ever_fails(run_workflow, scenario):
     """The never-raise hook: a decision that raised would answer 502 `decision-failed`. No edge
-    in the gauntlet may reach that path, and every agent call got an HTTP answer."""
+    in the gauntlet may reach that path, and every agent call got an HTTP answer. But one: a write
+    whose body decodes past irimi's cap is refused on that path by design (#94), and says why."""
     shadow = run_workflow(W, scenario, "shadow")
     assert shadow.exchange_lines()
-    assert not [line for line in shadow.exchange_lines() if "decision-failed" in line]
+    failed = [line for line in shadow.exchange_lines() if "decision-failed" in line]
+    assert [line for line in failed if not line.endswith("decision-failed, body-truncated]")] == []
+    assert len(failed) == (scenario == "bombs")
     assert all(isinstance(c.get("status"), int) for c in shadow.calls())
 
 
@@ -621,3 +625,154 @@ def test_a_get_that_writes_escapes_and_the_scenario_says_so(run_workflow):
     assert (
         "live      read      GET legacy.internal/api/delete_user -> 200" in shadow.exchange_lines()
     )
+
+
+# -- bodies that decode past irimi's cap (#94) ---------------------------------------------------
+#
+# `bombs` sends gzip bodies of a few hundred KB that decode to 128 MiB, past the most irimi decodes
+# of any body, and reads one back that decodes as far. irimi records each with no body, flags it
+# `body-truncated`, and answers nothing from the start of it: a write is refused, a live call is
+# forwarded with the agent's own bytes, a read is never overlaid, and the control endpoint refuses
+# each run start 413 unread.
+
+BOMB_LINES = [
+    "fake-L0   unknown   POST api.stripe.com/v1/refunds -> 502"
+    "  [unclassified, decision-failed, body-truncated]",
+    "live      llm       POST api.anthropic.com/v1/messages -> 413  [body-truncated]",
+    f"live      read      GET api.stripe.com/v1/charges/{CHARGE} -> 200",
+    "fake-L1   write     POST api.stripe.com/v1/refunds -> 200  [fidelity:L1]",
+    "live      read      GET api.stripe.com/v1/refunds -> 200  [body-truncated]",
+]
+CONTROL_BOMBS = ("control_bomb_lines", "control_bomb_after_a_line", "control_bomb_one_line")
+
+
+def sent(result, label: str) -> dict:
+    """What the agent logged of the body it sent under `label`: its length and SHA-256."""
+    [event] = [e for e in result.events("sent", with_time=False) if e["label"] == label]
+    return event
+
+
+def digest(body: bytes) -> tuple[int, str]:
+    return len(body), hashlib.sha256(body).hexdigest()
+
+
+def stored_bomb(result, method: str, path: str) -> Exchange:
+    """The one exchange stored for `method path` that is flagged as not all there."""
+    [ex] = [
+        e
+        for e in result.stored_events()
+        if isinstance(e, Exchange) and (e.request.method, e.request.path) == (method, path)
+        if BODY_TRUNCATED_FLAG in e.flags
+    ]
+    return ex
+
+
+def test_bodies_that_decode_past_the_cap_are_answered_by_irimi_or_the_service(run_workflow):
+    """What each `bombs` call got. Bare, the fake services refuse the two bodies they cannot
+    decode, 413, and the control posts reach the fake internet, 502. Under shadow, the refund is
+    irimi's own 502, the model call the service's own 413, and each control post irimi's 413."""
+    bare = run_workflow(W, "bombs", "bare")
+    shadow = run_workflow(W, "bombs", "shadow")
+    assert bare.by_label() == {
+        "refund_gzip_bomb": (413, None),
+        "llm_gzip_bomb": (413, None),
+        "refund_plain": (200, None),
+        "refunds_padded": (200, None),
+        **dict.fromkeys(CONTROL_BOMBS, (502, None)),
+        "health_after": (502, None),
+    }
+    assert shadow.by_label() == {
+        "refund_gzip_bomb": (502, "fake-L0"),
+        "llm_gzip_bomb": (413, None),
+        "refund_plain": (200, "fake-L1"),
+        "refunds_padded": (200, None),
+        **dict.fromkeys(CONTROL_BOMBS, (413, "control")),
+        "health_after": (200, "control"),
+    }
+    assert shadow.exchange_lines() == BOMB_LINES
+    assert bare.exit_code == shadow.exit_code == 0
+
+
+def test_a_write_whose_body_decodes_past_the_cap_is_refused_and_never_leaves(run_workflow):
+    """A refund whose form decodes to 128 MiB. irimi cannot answer it from the start of its body -
+    a form is one line, so the start it keeps is nothing at all - and fails closed, as a decision
+    that raised does: its own 502, stamped, recorded `unknown` and flagged. The service never sees
+    it, and nothing it would have fired is claimed for it."""
+    shadow = run_workflow(W, "bombs", "shadow")
+    posted = [(r.method, r.path) for r in shadow.internet.requests() if r.method == "POST"]
+    assert posted == [("POST", "/v1/messages")]
+    ex = stored_bomb(shadow, "POST", "/v1/refunds")
+    assert ex.answered_by == "fake-L0"
+    assert ex.flags == ("unclassified", "decision-failed", BODY_TRUNCATED_FLAG)
+    assert ex.request.body == b""
+    assert ex.response is not None and ex.response.status == 502
+    assert json.loads(ex.response.body)["error"]["type"] == "irimi_decision_failed"
+    # LOOKS WRONG: the summary lists the refused refund among the writes that "did not happen",
+    # as it lists any write whose decision failed, with no word that irimi refused it or why: the
+    # agent was told 502, not that its refund was faked.
+    summary = shadow.summary()
+    assert [line for line in summary if line.startswith("  ○")] == [
+        "  ○ refund ? on ?  unclassified (L0)",
+        f"  ○ refund $9.00 on {CHARGE}  unvalidated (L3 preconditions passed)",
+    ]
+    assert summary[-1] == (
+        "  These writes did not happen. Would have fired: refund.created, charge.refunded."
+    )
+
+
+def test_a_live_call_whose_body_decodes_past_the_cap_reaches_the_service_byte_for_byte(
+    run_workflow,
+):
+    """A model call is forwarded live whatever its body: the service gets the agent's own bytes,
+    still gzip, and answers 413 to them as it does bare. irimi records the request with no body,
+    flagged once, as the store records any body past what it redacts."""
+    bare = run_workflow(W, "bombs", "bare")
+    shadow = run_workflow(W, "bombs", "shadow")
+    posted = sent(shadow, "llm_gzip_bomb")
+    assert posted == sent(bare, "llm_gzip_bomb")
+    for result in (bare, shadow):
+        [req] = result.internet.requests("api.anthropic.com")
+        assert req.headers["content-encoding"] == "gzip"
+        assert digest(req.body) == (posted["bytes"], posted["sha256"])
+    ex = stored_bomb(shadow, "POST", "/v1/messages")
+    assert (ex.answered_by, ex.flags, ex.request.body) == ("live", (BODY_TRUNCATED_FLAG,), b"")
+    assert ex.request.header("content-encoding") == "gzip"
+    assert ex.response is not None and ex.response.status == 413
+
+
+def test_a_read_back_that_decodes_past_the_cap_is_never_overlaid(run_workflow):
+    """After a faked refund, the charge's refunds are read back, and the service answers its list
+    followed by 128 MiB of blanks, gzip-encoded. The overlay would add the faked refund to that
+    list, but irimi never decoded the whole of it: the agent gets the service's bytes, unstamped,
+    and the read is recorded with no body, flagged, and `partial`, so the summary says it did not
+    show the refund, as it says of a read too big to parse."""
+    bare = run_workflow(W, "bombs", "bare")
+    shadow = run_workflow(W, "bombs", "shadow")
+    for result in (bare, shadow):
+        [padded] = result.internet.padded
+        [received] = result.events("received", with_time=False)
+        assert (received["bytes"], received["sha256"]) == digest(padded)
+        assert received["encoding"] == "gzip"
+    assert [c["answered_by"] for c in shadow.calls("refunds_padded")] == [None]
+    ex = stored_bomb(shadow, "GET", "/v1/refunds")
+    assert (ex.answered_by, ex.flags, ex.overlay) == ("live", (BODY_TRUNCATED_FLAG,), "partial")
+    assert ex.response is not None and ex.response.body == b""
+    summary = shadow.summary()
+    refund = summary.index(f"  ○ refund $9.00 on {CHARGE}  unvalidated (L3 preconditions passed)")
+    assert summary[refund + 1] == "    ↳ GET /v1/refunds did not show it  live (partial)"
+
+
+def test_a_run_start_that_decodes_past_the_cap_is_refused_413_unread(run_workflow):
+    """Three run starts, each valid JSON followed by 128 MiB of blanks: in lines, after a line of
+    its own with no line after it, and on the same line. A body past the control endpoint's 2 MiB
+    is refused 413 (#73), and a cut one is past it whatever its start holds (#94): no start makes a
+    run, and the store wrote only the exchanges."""
+    shadow = run_workflow(W, "bombs", "shadow")
+    allowed = control.MAX_CONTROL_BODY
+    assert {e["label"]: e["body"] for e in shadow.events("refusal")} == dict.fromkeys(
+        CONTROL_BOMBS, {"error": f"the body decodes past the {allowed} bytes allowed"}
+    )
+    root = shadow.home / paths.STORE_DIR_NAME
+    assert sorted(p.name for p in (root / "runs").iterdir()) == [shadow.process_run_id()]
+    [health] = shadow.events("health")
+    assert health["body"]["store"] == {"queued": 0, "written": len(BOMB_LINES), "dropped": 0}

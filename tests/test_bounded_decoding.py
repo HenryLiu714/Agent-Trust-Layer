@@ -13,6 +13,7 @@ decodes: a buffered read, a stream, a faked write's request, and the control end
 
 import bz2
 import gzip
+import json
 import os
 import threading
 import tracemalloc
@@ -25,10 +26,12 @@ import zstandard
 from mitmproxy.net import encoding
 from mitmproxy.test import tutils
 
+from irimi import control
+from irimi.control import MAX_CONTROL_BODY, ControlEndpoint
 from irimi.engine import mitm
-from irimi.exchange import BODY_TRUNCATED_FLAG, STREAM_TRUNCATED_FLAG, Response
+from irimi.exchange import BODY_TRUNCATED_FLAG, STREAM_TRUNCATED_FLAG, Request, Response
 from irimi.overlay import Overlaid
-from irimi.store import MAX_STORED_BODY
+from irimi.store import MAX_STORED_BODY, NullStore
 from tests.test_engine_mitm import (
     STREAM_MAP,
     _config,
@@ -335,8 +338,58 @@ def test_a_control_request_bomb_is_refused_without_decoding_it_whole(
     finally:
         stop()
     assert status == 413, data
-    assert f"the body is {MAX_STORED_BODY} bytes".encode() in data
+    assert json.loads(data) == {
+        "error": f"the body decodes past the {MAX_CONTROL_BODY} bytes allowed"
+    }
     assert seen == []
+
+
+def _one_line_bomb() -> bytes:
+    """About 100 KiB of gzip that decodes to an open brace and 100 MiB of spaces: no line end."""
+    deflater = zlib.compressobj(9, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+    spaces = b" " * MIB
+    return b"".join(
+        [deflater.compress(b"{")]
+        + [deflater.compress(spaces) for _ in range(100)]
+        + [deflater.flush()]
+    )
+
+
+def test_a_control_request_bomb_of_one_line_is_refused_as_too_large_not_as_bad_json(
+    tmp_path, monkeypatch
+):
+    """A cut body is kept to its last complete line, and one long line is none: the endpoint saw
+    an empty body and answered 400 for JSON it was never sent. A cut body is past 2 MiB whatever
+    its start holds, so it is 413 (#94)."""
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch))
+    try:
+        status, data = _reverse(
+            eng.listen_port(),
+            "POST",
+            "/_irimi/runs/r1/start",
+            body=_one_line_bomb(),
+            extra_headers={"content-encoding": "gzip", "connection": "close"},
+        )
+    finally:
+        stop()
+    assert status == 413, data
+    assert seen == []
+
+
+def test_the_control_endpoint_refuses_a_body_that_is_not_whole_whatever_it_holds():
+    """Even valid JSON, under 2 MiB: it is the start of a body that decoded past the cap (#94)."""
+    body = json.dumps({"ended_at": 1.0, "outcome": "ok", "error": None}).encode()
+    request = Request("POST", "http", "127.0.0.1", 1, "/_irimi/runs/r1/end", "", (), body)
+    endpoint = ControlEndpoint(NullStore(), serve=False)
+    assert endpoint.answer(request).status == 204
+    refused = endpoint.answer(request, whole_body=False)
+    assert refused.status == 413
+    assert refused.header("irimi-answered-by") == "control"
+
+
+def test_a_cut_body_is_always_past_the_control_endpoint_s_limit():
+    """Why a cut control body is refused as too large without reading it (#94)."""
+    assert mitm.MAX_DECODED_BODY > control.MAX_CONTROL_BODY
 
 
 def test_the_bomb_fixtures_decode_past_the_cap(bombs):

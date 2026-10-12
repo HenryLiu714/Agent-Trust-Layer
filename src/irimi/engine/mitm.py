@@ -590,7 +590,7 @@ class IrimiAddon:
         # control request names its run in its path. It is never forwarded, never decided and
         # never recorded as an exchange.
         if control.is_control_request(req, door):
-            self._answer_control(flow, req)
+            self._answer_control(flow, req, whole_body=not cut)
             return
         if door == "reverse":
             try:
@@ -666,17 +666,18 @@ class IrimiAddon:
             return
         self._act_on(flow, decision, door, started_at)
 
-    def _answer_control(self, flow: http.HTTPFlow, req: Request) -> None:
+    def _answer_control(self, flow: http.HTTPFlow, req: Request, *, whole_body: bool) -> None:
         """Answer a control request. `ControlEndpoint.answer` never raises; this guards turning
         its answer into mitmproxy's anyway, because a control request that escaped this hook would
-        be forwarded to the listener it was addressed to - irimi itself (#73)."""
+        be forwarded to the listener it was addressed to - irimi itself (#73). `whole_body` is
+        False when `req.body` is only the start of what the request's body decodes to (#94)."""
         # A RESPONSE TO HEAD CARRIES NO CONTENT (RFC 9110 9.3.2), and mitmproxy sends whatever the
         # response holds: `HEAD /_irimi/health`'s 405 JSON was read as the start of the next
         # response on the connection. Nor a Content-Length, which a HEAD answer may only send when
         # it is what a GET would get (8.6), and a HEAD's 405 is not that (#73).
         head = req.method == "HEAD"
         try:
-            response = _to_mitm_response(self.control.answer(req))
+            response = _to_mitm_response(self.control.answer(req, whole_body=whole_body))
             if head:
                 response.raw_content = b""
                 response.headers.pop("content-length", None)

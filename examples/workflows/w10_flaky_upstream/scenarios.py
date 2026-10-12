@@ -92,7 +92,7 @@ WORKFLOW = Workflow(
             setup=_seed_with_a_bomb("gzip"),
             faults=((STRIPE, "gzip-bomb", _list, 1),),
             doc="the read is answered with 2 MiB of gzip that decodes to 1 GiB: the agent gets "
-            "the bytes it was sent, and irimi records the start of them (#94)",
+            "the bytes it was sent, and irimi records the read empty, flagged (#94)",
         ),
         "br_bomb_read": Scenario(
             setup=_seed_with_a_bomb("br"),

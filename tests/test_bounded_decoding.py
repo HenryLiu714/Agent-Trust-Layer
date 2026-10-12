@@ -535,7 +535,6 @@ def test_a_live_request_that_is_a_bomb_is_forwarded_as_the_agent_sent_it(
     (ex,) = seen
     assert (ex.kind, ex.answered_by, ex.flags) == ("llm", "live", (BODY_TRUNCATED_FLAG,))
     assert ex.response is not None
-    assert ex.response is not None
     assert (ex.request.body, ex.response.body) == (b"", b"")
 
 
@@ -604,9 +603,8 @@ def _one_line_bomb() -> bytes:
 def test_a_control_request_bomb_of_one_line_is_refused_as_too_large_not_as_bad_json(
     tmp_path, monkeypatch
 ):
-    """A cut body is kept to its last complete line, and one long line is none: the endpoint saw
-    an empty body and answered 400 for JSON it was never sent. A cut body is past 2 MiB whatever
-    its start holds, so it is 413 (#94)."""
+    """A cut body reaches the endpoint empty, and an empty body is not JSON: it answered 400 for
+    JSON it was never sent. A cut body is past 2 MiB whatever its start holds, so 413 (#94)."""
     eng, seen, stop = _start(_config(tmp_path, monkeypatch))
     try:
         status, data = _reverse(

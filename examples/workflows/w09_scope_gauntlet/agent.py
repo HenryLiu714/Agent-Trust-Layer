@@ -16,6 +16,7 @@ tests key their expectations on.
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import math
 import os
@@ -287,7 +288,11 @@ def _run_by_hand(
 
 
 def _start(control: str, run_id: str, label: str, *, name: str | None = None) -> Response:
-    doc = {
+    return _post(control, run_id, "start", _start_doc(run_id, name), label)
+
+
+def _start_doc(run_id: str, name: str | None = None) -> dict[str, Any]:
+    return {
         "trigger": {
             "name": name or run_id,
             "entrypoint": f"{ENTRYPOINT}:{run_id}",
@@ -298,7 +303,6 @@ def _start(control: str, run_id: str, label: str, *, name: str | None = None) ->
         "sdk_version": SDK_VERSION,
         "started_at": time.time(),
     }
-    return _post(control, run_id, "start", doc, label)
 
 
 def _tool_call(
@@ -411,6 +415,86 @@ def _settle(control: str) -> None:
     agentkit.obs("settle_timeout")
 
 
+# What each body `bombs` sends decodes to, past irimi's decoding cap (`mitm.MAX_DECODED_BODY`,
+# 64 MiB) and the fake internet's (`internet.MAX_REQUEST_DECODED`): a few hundred KB of gzip each.
+BOMB_PADDING_BYTES = 128 * 1024 * 1024
+# The padding `bombs` puts after a body's own text: lines of blanks, which JSON reads as whitespace,
+# and one line of blanks or of `x` that never ends, which leaves irimi no whole line to keep.
+BLANK_LINE = b" " * 15 + b"\n"
+
+
+def bombs() -> None:
+    """Bodies that decode to far more than they weigh (#94), sent and read back.
+
+    A refund whose form decodes to 128 MiB, which has no line break in it; a model call forwarded
+    live, its JSON followed by 128 MiB of blank lines; a refund and then the charge's refunds read
+    back, answered with the service's own list followed by 128 MiB of blanks (`gzip-padded`), which
+    the overlay would edit; and three run starts posted to the control endpoint, each a valid start
+    followed by 128 MiB of blanks: in lines, on its own line with no line after it, and on the
+    same line. Each one sent and each one read is logged with its length and SHA-256."""
+    auth = {"Authorization": f"Bearer {agentkit.key('STRIPE_API_KEY')}"}
+    form = urlencode({"charge": CHARGE, "amount": "800"}).encode() + b"&metadata[note]="
+    _send_bomb(
+        "refund_gzip_bomb",
+        base("stripe") + "/v1/refunds",
+        agentkit.gzip_bomb(form, b"x", BOMB_PADDING_BYTES),
+        {**auth, "Content-Type": "application/x-www-form-urlencoded"},
+    )
+    message = {
+        "model": "claude-sonnet-5",
+        "max_tokens": 16,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    _send_bomb(
+        "llm_gzip_bomb",
+        base("anthropic") + "/v1/messages",
+        agentkit.gzip_bomb(json.dumps(message).encode() + b"\n", BLANK_LINE, BOMB_PADDING_BYTES),
+        {
+            "x-api-key": agentkit.key("ANTHROPIC_API_KEY"),
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        },
+    )
+    stripe("POST", "/v1/refunds", {"charge": CHARGE, "amount": "900"}, label="refund_plain")
+    read = stripe("GET", f"/v1/refunds?charge={CHARGE}", label="refunds_padded")
+    _log_bytes("received", "refunds_padded", read.body, read.headers.get("content-encoding"))
+    control = _control_base()
+    for label, run_id, after, line in (
+        ("control_bomb_lines", "ctl-bomb-lines", b"\n", BLANK_LINE),
+        ("control_bomb_after_a_line", "ctl-bomb-after-a-line", b"\n", b" "),
+        ("control_bomb_one_line", "ctl-bomb-one-line", b"", b" "),
+    ):
+        doc = _start_doc(run_id)
+        agentkit.obs("posted", label=label, run=run_id, action="start", body=doc)
+        body = agentkit.gzip_bomb(json.dumps(doc).encode() + after, line, BOMB_PADDING_BYTES)
+        resp = _send_bomb(
+            label,
+            f"{control}/runs/{run_id}/start",
+            body,
+            {"Content-Type": "application/json"},
+        )
+        agentkit.obs("refusal", label=label, body=resp.json())
+    _health(control, "health_after")
+
+
+def _send_bomb(label: str, url: str, body: bytes, headers: dict[str, str]) -> Response:
+    """POST `body` gzip-encoded, and log what was sent."""
+    _log_bytes("sent", label, body, "gzip")
+    return http(
+        "POST", url, body=body, headers={**headers, "Content-Encoding": "gzip"}, label=label
+    )
+
+
+def _log_bytes(event: str, label: str, body: bytes, encoding: str | None) -> None:
+    agentkit.obs(
+        event,
+        label=label,
+        bytes=len(body),
+        sha256=hashlib.sha256(body).hexdigest(),
+        encoding=encoding,
+    )
+
+
 def unmapped_hosts() -> None:
     """Hosts no map claims, and a mapped POST-only host's unrouted method."""
     gql = agentkit.internal("graphql.internal")
@@ -456,6 +540,7 @@ GROUPS = {
     "self_addressed": self_addressed,
     "control_runs": control_runs,
     "control_hazards": control_hazards,
+    "bombs": bombs,
     "unmapped_hosts": unmapped_hosts,
     "get_that_writes": get_that_writes,
 }

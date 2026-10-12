@@ -4,7 +4,7 @@ The labels are the calls in `examples/workflows/w01_ticket_triage/agent.py`; `#N
 """
 
 from examples.workflows.w01_ticket_triage.agent import DB_NAME
-from irimi.trace import ErrorInfo, Trigger
+from irimi.trace import ErrorInfo, ToolCall, Trigger
 
 W = "w01_ticket_triage"
 AGENT = "examples.workflows.w01_ticket_triage.agent"
@@ -34,9 +34,19 @@ def test_a_full_refund_walks_the_same_loop_as_bare_and_neither_write_happens(run
     ]
     assert replies(bare) == [("T-1001", "Refund of 4900 requested (statuses: 200).")]
     assert replies(shadow) == []
-    assert "  ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)" in (
-        shadow.summary()
-    )
+    summary = shadow.summary()
+    refund = "  ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)"
+    # The tool write's line follows the HTTP write's (#76).
+    reply = f"  ○ tool {AGENT}.send_reply  shadow stand-in ran"
+    assert summary[summary.index(refund) : summary.index(refund) + 2] == [refund, reply]
+    # irimi recorded both calls in the run, under the default name: the function's own
+    # `module.qualname`, the real module's because the harness launches through `launch.py`.
+    [run] = shadow.sdk_runs()
+    stored = shadow.stored().load_run(run.run_id).events
+    assert [(e.name, e.kind, e.ran) for e in stored if isinstance(e, ToolCall)] == [
+        (f"{AGENT}.lookup_customer", "read", "real"),
+        (f"{AGENT}.send_reply", "write", "shadow"),
+    ]
     # One run, attributed by the SDK stand-in, ended ok.
     assert [e["outcome"] for e in shadow.events("run.end")] == ["ok"]
 

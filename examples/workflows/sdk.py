@@ -6,8 +6,7 @@ Agents write `from examples.workflows import sdk` where a real agent would write
 
 - **When `irimi.sdk` exists**, as it has since #74, this module re-exports it, name by name: each
   name `irimi.sdk` has is the real one, and each it does not have yet is the stand-in's. #74
-  shipped `trigger`, `run`, `current_run_id`, `propagate` and `active`; until #76 ships `tool`,
-  `tool` is the stand-in's, so an agent that uses `@sdk.tool` still imports.
+  shipped `trigger`, `run`, `current_run_id`, `propagate` and `active`, and #76 shipped `tool`.
   Names this module does not define (`sdk.instrument`, `sdk.replay`, `ReplayResult`, ...) are
   forwarded to `irimi.sdk` by the module `__getattr__`.
   Every `irimi.sdk` has `instrument`, a no-op from #74 until #75 filled it in, so the corpus
@@ -288,7 +287,8 @@ def tool(*, kind: str, shadow: Callable[..., Any] | None = None, name: str | Non
     real = _from_real("tool")
 
     def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
-        tool_name = name or f"{fn.__module__}.{fn.__qualname__}"
+        # The real SDK's default, and its test: `name=""` is a name (#76).
+        tool_name = f"{fn.__module__}.{fn.__qualname__}" if name is None else name
         if real is None:
             _check_tool(fn, kind, shadow)
         real_fn = _logged(fn, tool_name, kind, "real")

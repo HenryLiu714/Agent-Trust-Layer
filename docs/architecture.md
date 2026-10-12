@@ -48,9 +48,10 @@ is relayed, and none leaves a record (#75).
 
 Every body a hook records is decoded by `_decoded`, which never raises and never decodes past
 `MAX_DECODED_BODY` (#94): each codec runs incrementally and stops at the cap, so a small
-compressed bomb costs a hook at most twice the cap in memory. A body cut there is recorded as its
-first `store.MAX_STORED_BODY` bytes of whole lines and flagged, and its read is never overlaid,
-so the agent gets the service's bytes unchanged. Nothing is answered from the start of a body: a
+compressed bomb costs a hook at most twice the cap in memory. A body cut there is never decoded or
+redacted whole, so it is recorded empty and flagged, as the store records any body past the same
+bound; a stream keeps its first `store.MAX_STORED_BODY` bytes of whole lines, as any stream that
+is not whole does. Such a read is never overlaid, so the agent gets the service's bytes unchanged. Nothing is answered from the start of a body: a
 write whose request body was cut fails closed like a decision that raised (`502`,
 `decision-failed`, `body-truncated`), a live kind is forwarded with the agent's own bytes, and the
 control endpoint refuses a cut body `413`.

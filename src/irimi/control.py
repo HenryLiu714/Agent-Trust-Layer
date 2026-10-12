@@ -142,10 +142,9 @@ class ControlEndpoint:
     def answer(self, request: Request, *, whole_body: bool = True) -> Response:
         """The response to one control request. Never raises (see the module doc).
 
-        `whole_body` is False when the engine decoded the request's `Content-Encoding` only up to
-        its own cap (#94): `request.body` is then the start of the body, cut to whole lines, and
-        says nothing of its size. Such a body is past MAX_CONTROL_BODY, so it is refused 413
-        whatever the start of it holds - one long line of it is no lines at all, and was a 400."""
+        `whole_body` is False when the request's `Content-Encoding` decoded past the engine's own
+        cap (#94): `request.body` is then not the body, and says nothing of its size. Such a body
+        is past MAX_CONTROL_BODY, so it is refused 413 unread, whatever `request.body` holds."""
         try:
             return self._answer(request, whole_body)
         except _Refused as refused:

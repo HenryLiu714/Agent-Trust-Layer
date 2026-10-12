@@ -94,9 +94,10 @@ REDACTION_FAILED_FLAG = "redaction-failed"
 # This exchange's recorded request or response body is not all of it. The trace store kept only
 # its first `store.MAX_STORED_BODY` bytes (#70): a decoded Exchange carries a body's bytes and not
 # its ref's `truncated`, so without this flag a stored run could not tell a cut body from a whole
-# one. Or the engine decoded its `Content-Encoding` only up to `mitm.MAX_DECODED_BODY`, and kept
-# that much up to its last complete line (#94); the agent and the service got the body unchanged.
-# The store sets it on the copy it writes, and the engine on the exchange it reports.
+# one. Or the body decodes past `mitm.MAX_DECODED_BODY`, the store's `MAX_REDACTED_BODY`, so it
+# was never decoded whole and is recorded empty, as the store records any body past that (#94).
+# Whatever irimi forwarded of such a body, it forwarded unchanged. The store sets it on the copy it
+# writes, and the engine on the exchange it reports.
 BODY_TRUNCATED_FLAG = "body-truncated"
 # The trace store could not use this exchange's run id as a directory name, so it is stored in
 # `unattributed/` (#70): an id `trace.is_valid_run_id` refuses, or one that differs only in case

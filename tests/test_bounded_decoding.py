@@ -2,9 +2,9 @@
 
 irimi records bodies decoded, so that redaction reads text and not gzip. A few KB of gzip, br or
 zstd can decode to gigabytes, and a hook that decoded it whole stalled every flow behind it and
-could exhaust memory. Each codec now runs incrementally and stops at `mitm.MAX_DECODED_BODY`: what
-was decoded is kept to its last complete line and the exchange is flagged, while the agent and the
-service still get every byte they were sent.
+could exhaust memory. Each codec now runs incrementally and stops at `mitm.MAX_DECODED_BODY`. A
+body cut there is recorded empty, a stream as its start in whole lines, and the exchange is
+flagged, while whatever irimi forwards still carries every byte it was sent.
 
 The first part holds each codec to the cap with a small one. The second decodes real bombs at the
 real cap, measuring what the hook holds. The last drives one through the engine on every path that
@@ -37,11 +37,12 @@ from irimi.exchange import (
     STREAM_TRUNCATED_FLAG,
     UNCLASSIFIED_FLAG,
     UPSTREAM_ERROR_FLAG,
+    Exchange,
     Request,
     Response,
 )
 from irimi.overlay import Overlaid
-from irimi.store import MAX_STORED_BODY, NullStore
+from irimi.store import MAX_STORED_BODY, DirectoryStore, NullStore, StoreReader
 from tests.test_engine_mitm import (
     STREAM_MAP,
     _config,
@@ -95,13 +96,22 @@ def test_a_body_at_or_under_the_cap_decodes_whole(cap_of_10_lines, content_encod
     assert (decoded.body, decoded.cut) == (plain, False)
 
 
-def test_a_cut_buffered_body_is_kept_to_its_last_complete_line(cap_of_10_lines):
-    """The cap lands inside a line here, and inside a UTF-8 character: a body cut there is one
-    redaction cannot read, so it is stored unscanned (#69). What is kept ends at a line end."""
-    plain = b"ok\n" + "é".encode() * (20 * len(LINE))
+def test_a_cut_buffered_body_is_recorded_empty(cap_of_10_lines):
+    """Never redacted whole, so never stored in part: the start of a document is not one."""
     response = tutils.tresp(content=None, headers=((b"content-encoding", b"gzip"),))
-    response.raw_content = gzip.compress(plain)
-    assert mitm._body(response) == mitm._Decoded(b"ok\n", True)
+    response.raw_content = gzip.compress(LINE * 11)
+    assert mitm._body(response) == mitm._Decoded(b"", True)
+
+
+def test_a_cut_stream_is_kept_to_its_last_complete_line(cap_of_10_lines):
+    """The cap lands inside a line here, and inside a UTF-8 character: a body cut there is one
+    redaction cannot read, so it is stored unscanned (#69). What is kept ends at a line end, as
+    one chunk, flagged."""
+    tee = mitm._StreamTee()
+    tee(gzip.compress(b"ok\n" + "é".encode() * (20 * len(LINE))))
+    flow = _streamed_flow((b"content-encoding", b"gzip"))
+    response, chunks, cut = mitm._recorded_stream(flow, tee, whole=True)
+    assert (response.body, chunks, cut) == (b"ok\n", (3,), True)
 
 
 @pytest.mark.parametrize(
@@ -197,7 +207,7 @@ def bombs(gigabyte_gzip) -> dict[str, bytes]:
 def test_a_bomb_never_holds_more_than_twice_the_cap(bombs, content_encoding):
     """What the hook holds decoding a bomb: never more than twice the cap, and not the gigabyte.
     A codec's output is assembled once - zlib's own output buffer, brotli's steps - and zstd
-    reads into one buffer of the cap's size. What is recorded is the store's share of it."""
+    reads one byte past the cap. What is recorded of it is nothing."""
     message = tutils.tresp(
         content=None, headers=((b"content-encoding", content_encoding.encode()),)
     )
@@ -208,9 +218,7 @@ def test_a_bomb_never_holds_more_than_twice_the_cap(bombs, content_encoding):
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
-    assert body.cut
-    # Recorded as the store would keep it: its first MAX_STORED_BODY bytes, all whole lines.
-    assert (len(body.body), body.body[-1:]) == (MAX_STORED_BODY, b"\n")
+    assert body == mitm._Decoded(b"", True)
     assert peak < 2 * CAP + 4 * MIB, peak
 
 
@@ -248,17 +256,12 @@ def bomb_upstream(gigabyte_gzip):
     srv.shutdown()
 
 
-def _assert_recorded_cut(body: bytes) -> None:
-    """A cut body is recorded as its first MAX_STORED_BODY bytes, which are whole lines here."""
-    assert body == BOMB_LINE * (MAX_STORED_BODY // len(BOMB_LINE))
-
-
-def test_a_buffered_read_bomb_reaches_the_agent_whole_and_is_recorded_cut(
+def test_a_buffered_read_bomb_reaches_the_agent_whole_and_is_recorded_empty(
     tmp_path, monkeypatch, bomb_upstream, gigabyte_gzip
 ):
-    """The agent gets the service's bytes, every one, and the overlay is never asked: a body cut
-    at the cap is the start of a document, and an overlay that edited it would send the agent half
-    a document as the whole (#94). The recording is the cap's worth of whole lines, flagged."""
+    """The agent gets the service's bytes, every one, and the overlay is never asked: irimi has
+    only the start of the document, and an overlay that edited it would send the agent half a
+    document as the whole (#94). The recording is empty, flagged."""
     asked = []
 
     class _Overlay:
@@ -281,8 +284,50 @@ def test_a_buffered_read_bomb_reaches_the_agent_whole_and_is_recorded_cut(
     assert asked == []
     read = seen[-1]
     assert (read.answered_by, read.flags) == ("live", (BODY_TRUNCATED_FLAG,))
-    assert read.response is not None
-    _assert_recorded_cut(read.response.body)
+    assert read.response is not None and read.response.body == b""
+
+
+# A secret no shape gives away, under a key that names it: only a walk of the JSON document finds
+# it, and the start of a document is not one.
+SECRET = b"hunter2-but-longer"
+
+
+def _pretty_document_bomb() -> bytes:
+    """gzip of a pretty-printed JSON document, its secret on its second line, that decodes past
+    the cap: the shape of an export a real API answers, not of an attack."""
+    deflater = zlib.compressobj(6, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+    head = b'{\n  "password": "' + SECRET + b'",\n  "rows": [\n'
+    rows = b'    "row",\n' * (MIB // 12)
+    return b"".join(
+        [deflater.compress(head)]
+        + [deflater.compress(rows) for _ in range(CAP // len(rows) + 2)]
+        + [deflater.flush()]
+    )
+
+
+def test_a_document_that_decodes_past_the_cap_is_stored_empty_never_in_part(
+    tmp_path, monkeypatch, bomb_upstream
+):
+    """A STORED BODY IS ALWAYS A PREFIX OF THE REDACTED WHOLE (#70). A body past the cap is never
+    decoded whole, so never redacted whole, and the start of a JSON document is not JSON:
+    redaction reads it line by line, where `"password": "..."` is a line no shape matches. So it
+    is recorded empty and flagged, as the store records any body past MAX_REDACTED_BODY (#94)."""
+    _BombUpstream.bomb = _pretty_document_bomb()
+    store = DirectoryStore(tmp_path / "store", bytes(32))
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch), store=store)
+    try:
+        status, data = _via_proxy(eng.listen_port(), "GET", f"http://127.0.0.1:{bomb_upstream}/x")
+    finally:
+        stop()
+    assert (status, data == _BombUpstream.bomb) == (200, True)
+    (ex,) = seen
+    assert ex.response is not None
+    assert (ex.response.body, ex.flags) == (b"", (BODY_TRUNCATED_FLAG,))
+    (stored,) = StoreReader(tmp_path / "store").load_run("t3st").events
+    assert isinstance(stored, Exchange) and stored.response is not None
+    assert (stored.response.body, stored.flags) == (b"", (BODY_TRUNCATED_FLAG,))
+    on_disk = [f.read_bytes() for f in (tmp_path / "store").rglob("*") if f.is_file()]
+    assert not any(SECRET in data for data in on_disk)
 
 
 def test_a_streamed_bomb_reaches_the_agent_whole_and_is_recorded_cut(
@@ -302,7 +347,8 @@ def test_a_streamed_bomb_reaches_the_agent_whole_and_is_recorded_cut(
     (ex,) = seen
     assert (ex.kind, ex.answered_by, ex.flags) == ("llm", "live", (STREAM_TRUNCATED_FLAG,))
     assert ex.response is not None
-    _assert_recorded_cut(ex.response.body)
+    # A stream keeps its start, in whole lines, as much of it as the store keeps of any body.
+    assert ex.response.body == BOMB_LINE * (MAX_STORED_BODY // len(BOMB_LINE))
     assert ex.stream_chunks == (MAX_STORED_BODY,)
 
 
@@ -355,7 +401,7 @@ def test_a_write_whose_request_is_a_bomb_is_refused_never_faked_from_part_of_it(
         "fake-L0",
         (UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG, BODY_TRUNCATED_FLAG),
     )
-    _assert_recorded_cut(ex.request.body)
+    assert ex.request.body == b""
 
 
 class _EchoBombUpstream(BaseHTTPRequestHandler):
@@ -381,8 +427,8 @@ def test_a_live_request_that_is_a_bomb_is_forwarded_as_the_agent_sent_it(
     tmp_path, monkeypatch, gigabyte_gzip
 ):
     """A live kind is classified without its body, and forwarded with the agent's own bytes, not
-    the start of them irimi decoded. Its answer is a bomb too: the exchange is cut on both sides,
-    and says so once (#94)."""
+    what irimi decoded of them. Its answer is a bomb too: the exchange is cut on both sides, and
+    says so once (#94)."""
     _EchoBombUpstream.bomb, _EchoBombUpstream.bodies = gigabyte_gzip, []
     srv = HTTPServer(("127.0.0.1", 0), _EchoBombUpstream)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
@@ -404,8 +450,8 @@ def test_a_live_request_that_is_a_bomb_is_forwarded_as_the_agent_sent_it(
     (ex,) = seen
     assert (ex.kind, ex.answered_by, ex.flags) == ("llm", "live", (BODY_TRUNCATED_FLAG,))
     assert ex.response is not None
-    _assert_recorded_cut(ex.request.body)
-    _assert_recorded_cut(ex.response.body)
+    assert ex.response is not None
+    assert (ex.request.body, ex.response.body) == (b"", b"")
 
 
 def test_a_live_request_that_is_a_bomb_says_so_when_its_upstream_fails_too(
@@ -431,7 +477,7 @@ def test_a_live_request_that_is_a_bomb_says_so_when_its_upstream_fails_too(
     assert status == 502
     (ex,) = seen
     assert (ex.answered_by, ex.flags) == ("live", (BODY_TRUNCATED_FLAG, UPSTREAM_ERROR_FLAG))
-    _assert_recorded_cut(ex.request.body)
+    assert ex.request.body == b""
 
 
 def test_a_control_request_bomb_is_refused_without_decoding_it_whole(
@@ -492,7 +538,8 @@ def test_a_control_request_bomb_of_one_line_is_refused_as_too_large_not_as_bad_j
 
 
 def test_the_control_endpoint_refuses_a_body_that_is_not_whole_whatever_it_holds():
-    """Even valid JSON, under 2 MiB: it is the start of a body that decoded past the cap (#94)."""
+    """Whatever `request.body` holds, even valid JSON under 2 MiB: the engine says it is not the
+    body, which decoded past the cap (#94)."""
     body = json.dumps({"ended_at": 1.0, "outcome": "ok", "error": None}).encode()
     request = Request("POST", "http", "127.0.0.1", 1, "/_irimi/runs/r1/end", "", (), body)
     endpoint = ControlEndpoint(NullStore(), serve=False)

@@ -167,7 +167,8 @@ def _recorded_stream(
     text rather than gzip; decoded bytes do not split where the wire's chunks did, so such a body
     is one chunk. One that cannot be decoded - a cut `br` stream, an encoding irimi does not
     decode - is recorded empty and flagged, never as the compressed bytes redaction cannot read.
-    One that decodes past MAX_DECODED_BODY keeps what was decoded and is flagged too (#94)."""
+    One that decodes past MAX_DECODED_BODY keeps the start of what was decoded, and is flagged
+    too (#94)."""
     assert flow.response is not None
     body = b"".join(tee.chunks)
     chunks = tuple(len(chunk) for chunk in tee.chunks)
@@ -178,8 +179,12 @@ def _recorded_stream(
         if decoded is None:
             body, chunks, cut = b"", (), True
         elif decoded.cut:
-            body = _recorded_cut(decoded.body)
-            chunks, cut = ((len(body),) if body else ()), True
+            # Kept, below, to its last complete line, as any stream that is not whole is: a stream
+            # is redacted line by line, so the start of one is redacted as the whole would be. No
+            # more of it than the store keeps: past that, the writer only redacts what it throws
+            # away - 64 MiB of short lines is half a minute, longer than the store waits to close.
+            body, cut = decoded.body[:MAX_STORED_BODY], True
+            chunks = (len(body),)
         elif decoded.body != body:
             body, chunks = decoded.body, ((len(decoded.body),) if decoded.body else ())
     if cut:
@@ -201,19 +206,6 @@ MAX_DECODED_BODY = MAX_REDACTED_BODY
 _IDENTITY_ENCODINGS = frozenset({"identity", "none"})
 
 
-def _recorded_cut(decoded: bytes) -> bytes:
-    """What the trace records of a body decoded only up to MAX_DECODED_BODY: its first
-    MAX_STORED_BODY bytes, kept to their last complete line (#94).
-
-    No more than the store keeps of any body, because a cut body is the start of a document and
-    nothing reads it as one: past that, it only costs the store's writer time to redact what it
-    throws away - 64 MiB of short lines is half a minute, longer than the store waits to close.
-    Whole lines, as a stream that is not whole is kept (`_recorded_stream`): the cut lands on an
-    arbitrary byte, and a body cut inside a UTF-8 character is one redaction stores unscanned, so
-    every key in it would reach disk (#69). Never raises."""
-    return redact.complete_lines(decoded[:MAX_STORED_BODY])
-
-
 @dataclass(frozen=True)
 class _Decoded:
     body: bytes
@@ -227,8 +219,8 @@ def _decoded(body: bytes, content_encoding: str) -> _Decoded | None:
     hook drops the exchange or forwards the flow (#71). Nor is it ever unbounded: each codec runs
     incrementally, stops at the cap and asks for one byte more to learn whether it was cut. So the
     hook holds at most twice the cap, while a codec assembles its output into one bytes object,
-    and never what a few KB of a bomb would have decoded to (#94). A cut body is then recorded as
-    `_recorded_cut` keeps it. `tests/test_bounded_decoding.py` measures both.
+    and never what a few KB of a bomb would have decoded to (#94). `_body` and `_recorded_stream`
+    say what of a cut body is recorded. `tests/test_bounded_decoding.py` measures the bound.
 
     The encodings are mitmproxy's own: gzip, deflate (and its raw form), br, zstd and the
     identities, each as lenient as mitmproxy's decoder of it. Any other name is not decoded.
@@ -413,7 +405,12 @@ def _body(message: http.Message) -> _Decoded:
     hook makes mitmproxy forward the flow untouched, which for a write means it escapes shadow
     mode, and one in `response` drops the exchange from the trace (#71).
 
-    A body decoded only up to MAX_DECODED_BODY is recorded as `_recorded_cut` keeps it (#94)."""
+    A BODY THAT DECODES PAST MAX_DECODED_BODY IS RECORDED EMPTY (#94), as the store records any
+    body past `store.MAX_REDACTED_BODY`, the same bound. A stored body is a prefix of the whole
+    body redacted, never the start of one redacted on its own: the start of a JSON document is
+    not JSON, redaction reads it line by line, and `"password": "..."` is a line no shape gives
+    away. A stream is kept to its lines instead (`_recorded_stream`), because it is redacted by
+    line whole or not."""
     raw = message.raw_content or b""
     content_encoding = message.headers.get("content-encoding", "")
     if not raw or not content_encoding:
@@ -422,7 +419,7 @@ def _body(message: http.Message) -> _Decoded:
     if decoded is None:
         return _Decoded(raw, False)
     if decoded.cut:
-        return _Decoded(_recorded_cut(decoded.body), True)
+        return _Decoded(b"", True)
     return decoded
 
 
@@ -675,7 +672,7 @@ class IrimiAddon:
         """Answer a control request. `ControlEndpoint.answer` never raises; this guards turning
         its answer into mitmproxy's anyway, because a control request that escaped this hook would
         be forwarded to the listener it was addressed to - irimi itself (#73). `whole_body` is
-        False when `req.body` is only the start of what the request's body decodes to (#94)."""
+        False when the request's body decoded past the cap, so `req.body` is not it (#94)."""
         # A RESPONSE TO HEAD CARRIES NO CONTENT (RFC 9110 9.3.2), and mitmproxy sends whatever the
         # response holds: `HEAD /_irimi/health`'s 405 JSON was read as the start of the next
         # response on the connection. Nor a Content-Length, which a HEAD answer may only send when
@@ -787,12 +784,12 @@ class IrimiAddon:
     ) -> _Decision:
         """The whole decision, on a worker thread, with no flow in sight. `run_id` is read by
         `request()` before it strips `Irimi-Run`, since `req` no longer carries it (#67). `cut` is
-        whether `req.body` is only the start of what the request's body decodes to (#94)."""
+        whether the request's body decoded past the cap, so `req.body` is not it (#94)."""
         try:
             cls = pipeline.classify(req, self.config.maps)
             # IRIMI NEVER ANSWERS A WRITE FROM PART OF ITS BODY (#94). A body that decodes past
-            # MAX_DECODED_BODY reaches the decision as the start of it, or less. The policy would
-            # fake the write from that - its echo, its idempotency key's body hash, its L3
+            # MAX_DECODED_BODY reaches the decision empty, as it is recorded. The policy would fake
+            # the write from that - its echo, its idempotency key's body hash, its L3
             # precondition, and the effect the overlay later shows - and tell the agent a write it
             # never sent succeeded. So the write fails closed, as a decision that raised does:
             # answered locally, flagged, never forwarded. A delegated write is refused too, though
@@ -802,7 +799,7 @@ class IrimiAddon:
             if cut and cls.kind not in LIVE_KINDS:
                 raise RequestBodyCut(
                     f"its body decodes past the {MAX_DECODED_BODY} bytes irimi decodes, and "
-                    "irimi does not answer a write from the start of one"
+                    "irimi does not answer a write it cannot read whole"
                 )
             ans = self.policy.answer(req, cls, writes, run_id)
             rewritten = None
@@ -991,7 +988,7 @@ class IrimiAddon:
         stream_chunks: tuple[int, ...] = ()
         flags = pending.flags
         tee = flow.metadata.pop(STREAM_KEY, None)
-        # A body decoded only up to the cap is the start of a document, never the document (#94):
+        # A body that decodes past the cap is recorded empty, never as the document (#94), so
         # nothing reads it as one. The overlay and the read observers are skipped below, so the
         # agent gets the service's bytes untouched, and only the recording is short.
         cut = False

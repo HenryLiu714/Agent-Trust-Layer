@@ -14,15 +14,18 @@ the AGENT saw (a status, an `Irimi-Answered-By`, a branch it took) and not only 
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import logging
 import os
 import signal
 import sqlite3
+import struct
 import threading
 import time
 import urllib.error
 import urllib.request
+import zlib
 from collections.abc import Iterator
 from dataclasses import dataclass
 from http.client import HTTPException
@@ -328,6 +331,53 @@ def serve(handler: type[BaseHTTPRequestHandler]) -> Iterator[int]:
     finally:
         server.shutdown()
         server.server_close()
+
+
+def gzip_bomb(head: bytes, line: bytes, size: int, tail: bytes = b"") -> bytes:
+    """gzip of `head`, then `size` bytes of `line` over and over, then `tail`: a body a few hundred
+    KB long that decodes to as much as `size` says (#94). An agent sends one as a request body; the
+    fake internet answers with one.
+
+    The padding is compressed once per `(line, size)` and spliced between `head` and `tail`: each
+    of the three is a run of raw deflate blocks ending on a byte boundary, none refers back past
+    its own start, and only `tail`'s last block is final. So a second bomb with the same padding
+    costs a CRC over it, not another compression (#94: building one inside a request took longer
+    than the agent's read timeout). `size` is a whole number of `_bomb_block(line)`s."""
+    block = _bomb_block(line)
+    if size % len(block):
+        raise ValueError(f"size must be a multiple of {len(block)}")
+    crc = zlib.crc32(head)
+    for _ in range(size // len(block)):
+        crc = zlib.crc32(block, crc)
+    crc = zlib.crc32(tail, crc)
+    first = zlib.compressobj(9, zlib.DEFLATED, -zlib.MAX_WBITS)
+    last = zlib.compressobj(9, zlib.DEFLATED, -zlib.MAX_WBITS)
+    # The gzip member header: no name, no mtime, no flags (RFC 1952), and its trailer.
+    header = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff"
+    trailer = struct.pack("<II", crc, (len(head) + size + len(tail)) & 0xFFFFFFFF)
+    return b"".join(
+        [
+            header,
+            first.compress(head) + first.flush(zlib.Z_SYNC_FLUSH),
+            _bomb_padding(line, size),
+            last.compress(tail) + last.flush(),
+            trailer,
+        ]
+    )
+
+
+def _bomb_block(line: bytes) -> bytes:
+    """About a MiB of `line`, whole lines, the unit a bomb's padding is built of."""
+    return line * max(1, (1024 * 1024) // len(line))
+
+
+@functools.cache
+def _bomb_padding(line: bytes, size: int) -> bytes:
+    """`size` bytes of `line` as raw deflate blocks, none of them final, ending byte-aligned."""
+    block = _bomb_block(line)
+    deflater = zlib.compressobj(9, zlib.DEFLATED, -zlib.MAX_WBITS)
+    parts = [deflater.compress(block) for _ in range(size // len(block))]
+    return b"".join([*parts, deflater.flush(zlib.Z_SYNC_FLUSH)])
 
 
 def deliver(port: int, path: str, body: bytes, headers: dict[str, str] | None = None) -> Response:

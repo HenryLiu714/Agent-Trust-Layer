@@ -20,6 +20,7 @@ leaves irimi, so the agent's retry path for it is never exercised. The scenarios
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import signal
@@ -104,6 +105,14 @@ def sync_payouts(
         lambda: stripe(
             "GET", "/v1/charges?limit=5", label="list_charges", timeout_s=READ_TIMEOUT_S
         ),
+    )
+    # What the read answered, as it came: the agent never asks for an encoding and decodes none,
+    # so a bomb's bytes are what it holds, and they must be the service's under shadow too (#94).
+    agentkit.obs(
+        "listed",
+        bytes=len(charges.body),
+        sha256=hashlib.sha256(charges.body).hexdigest(),
+        encoding=charges.headers.get("content-encoding"),
     )
     decision = decide((charges.json() or {}).get("data") or [])
     if decision is None:

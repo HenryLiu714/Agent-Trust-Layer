@@ -24,7 +24,7 @@ uv run pytest -q tests/workflows                                     # the whole
 | W7 | `w07_streaming_assistant` | streaming HTTP endpoint | SSE through the proxy, recorded chunk by chunk (#71): two streams at once, chunks that end mid-line and mid-secret; a caller that disconnects, an upstream reset mid-stream and before the stream opens, a LangSmith trace stored only as having happened (#70); every stream stored in the chat's run, labelled by the SDK, read with urllib or with httpx as the model SDKs read them, and two chats' streams each in its own run (#75) |
 | W8 | `w08_orchestrator` | nested triggers + an internal service | nested runs, unmapped internal hosts, `Irimi-Run` across a hop: labelled by the SDK, stripped by irimi (#67, #75) |
 | W9 | `w09_scope_gauntlet` | none (plain script) | THE SCOPE RULE, the L0 floor, idempotency (#46), odd bodies, reads past the body limit, forged irimi headers, the reverse door, the control endpoint (#73): runs started, given tool calls and ended over it by hand, two at once, and every refusal |
-| W10 | `w10_flaky_upstream` | CLI | retries, timeouts, resets on a read and a write, irimi's own L3 read failing, a run that raises, is interrupted (Ctrl-C) or is killed after a write, an SDK whose control endpoint is unset, gone or refusing (#74), and a read answered with a gzip bomb (#94) |
+| W10 | `w10_flaky_upstream` | CLI | retries, timeouts, resets on a read and a write, irimi's own L3 read failing, a run that raises, is interrupted (Ctrl-C) or is killed after a write, an SDK whose control endpoint is unset, gone or refusing (#74), and a read answered with a bomb in gzip, br or zstd that decodes to a GiB, held to irimi's memory bound (#94) |
 | W11 | `w11_leaky_agent` | CLI | what irimi cannot see: clients that ignore the proxy, loopback services (Phase 4 readiness); each escape an `sdk.run` whose escaped request carries no `Irimi-Run`, and a read whose redirects lead it off irimi's route, labelled on each hop through irimi and on no other (#75) |
 
 Each workflow is a package: `agent.py` is the agent, started through `examples.workflows.launch`
@@ -52,7 +52,15 @@ so it keeps its real module name; `scenarios.py` seeds the fake services per sce
   `exchange_lines()` and `summary()` for what irimi printed, and `stored()` and `stored_events()`
   for what it recorded in its trace store under the run's `IRIMI_HOME` (#70), with
   `process_run_id()`, `runs(...)`, which runs `irimi runs list` or `runs show` over it, and
-  `maps()`, the maps `runs show` renders writes with (#72).
+  `maps()`, the maps `runs show` renders writes with (#72). The `traced_run` fixture runs a
+  shadow run once more under `tracemalloc`, for the most memory irimi's process held (#94).
+- **Bombs** (#94). `agentkit.gzip_bomb()` builds a gzip body of a few hundred KB that decodes to
+  as much as it is asked, splicing one compressed padding between a head and a tail, so a second
+  bomb costs a CRC rather than a compression; the fake internet's `gzip-bomb`, `br-bomb` and
+  `zstd-bomb` faults answer with a GiB, and `gzip-padded` with the service's own answer padded.
+  A fake service decodes a gzip request body only so far (`MAX_REQUEST_DECODED`) and refuses one
+  past it 413. Each is built in the scenario's `setup`: built inside the request it answers, it
+  took longer than the agent's timeout.
   `reported` holds the exchanges irimi printed a line for and `handed` those its engine gave the
   store, so a test can compare what was kept with what happened.
 - **The agent kit** (`agentkit.py`) is what every agent shares, all stdlib: its HTTP client and
@@ -85,7 +93,8 @@ so it keeps its real module name; `scenarios.py` seeds the fake services per sce
    The trace store is under its home (#70), so this is the redaction test across the corpus: a
    credential shape `redact` misses is fixed in `redact`, not in the canary. `CANARIES` are the
    credentials the agent is given and sends; `SERVED_CANARIES` are those a fake service hands
-   back in a response body (W5's payment intent), which a live read stores.
+   back in a response body (W5's payment intent, and the first lines of W10's bombs, #94), which a
+   live read stores.
 5. The agent exited the same way under shadow as bare, unless the scenario is marked `diverges`.
 
 `tests/workflows/test_stored_runs.py` holds every scenario to what the store keeps (#70): a run

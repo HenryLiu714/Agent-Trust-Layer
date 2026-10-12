@@ -7,15 +7,20 @@ A failed L3 read is irimi's alone, and only its summary shows it. The agent is
 `examples/workflows/w10_flaky_upstream/agent.py`.
 """
 
+import hashlib
+
 import pytest
 
-from examples.workflows.harness.internet import BOMB_LINE
-from examples.workflows.w10_flaky_upstream.scenarios import CONTROL_DOWN
+from examples.workflows.harness.internet import bomb
+from examples.workflows.w10_flaky_upstream.scenarios import BOMBED, CONTROL_DOWN
+from irimi.engine.mitm import MAX_DECODED_BODY
 from irimi.exchange import BODY_TRUNCATED_FLAG, UPSTREAM_ERROR_FLAG, Exchange
-from irimi.store import MAX_STORED_BODY
 from irimi.trace import ErrorInfo
 
 W = "w10_flaky_upstream"
+# What a shadow run holds besides a body it decodes: its exchanges, its store's queue, the fake
+# internet's answers. Measured at 2 to 45 MiB on top of twice the cap (#94).
+MEMORY_MARGIN = 64 * 1024 * 1024
 REFUND_LINE = "  ○ refund $5.00 on ch_PAYOUT1  unvalidated (L3 preconditions passed)"
 # What the agent saw when nothing failed: the list and the model live, the refund and the Slack
 # post faked. A run whose SDK cannot reach irimi must see exactly this (#74).
@@ -315,30 +320,58 @@ def test_an_sdk_that_cannot_reach_irimi_warns_once_and_changes_nothing(run_workf
     assert (header.run_id, header.trigger, header.outcome) == (start["run"], None, None)
 
 
-def test_a_gzip_bomb_on_the_read_reaches_the_agent_whole_and_is_recorded_cut(run_workflow):
-    """The read is answered with about 1 MiB of gzip that decodes to 1 GiB, which the agent never
-    asked for and cannot read. irimi decodes it only up to its cap (#94): the agent gets every byte
-    it was sent, so it does what it does bare - finds no charges and posts that there was nothing
-    to do - and the read is recorded as the cap's worth of its decoded lines, flagged."""
-    bare = run_workflow(W, "gzip_bomb_read", "bare")
-    shadow = run_workflow(W, "gzip_bomb_read", "shadow")
+@pytest.mark.parametrize("scenario", sorted(BOMBED))
+def test_a_bomb_on_the_read_reaches_the_agent_whole_and_is_recorded_empty(run_workflow, scenario):
+    """The read is answered with a body that decodes to 1 GiB, in gzip (2 MiB), br or zstd (a few
+    KB to 100 KB), which the agent never asked for and cannot read. irimi decodes it only up to its
+    cap (#94): the agent gets every byte it was sent, the bomb's own, so it does what it does bare
+    - finds no charges and posts that there was nothing to do. The read is recorded and stored
+    empty, flagged `body-truncated` once: the start of a document is not one redaction can read,
+    and this one's credential, on a line of its own, never reaches disk (universal invariant 4)."""
+    encoding = BOMBED[scenario]
+    sent = bomb(encoding)
+    bare = run_workflow(W, scenario, "bare")
+    shadow = run_workflow(W, scenario, "shadow")
     for result in (bare, shadow):
         assert result.exit_code == 0
         assert statuses(result, "list_charges") == [200]
         assert result.result(with_time=False) == {"event": "result", "outcome": "no action"}
+        assert result.events("listed", with_time=False) == [
+            {
+                "event": "listed",
+                "bytes": len(sent),
+                "sha256": hashlib.sha256(sent).hexdigest(),
+                "encoding": encoding,
+            }
+        ]
+    assert [c["answered_by"] for c in shadow.calls("list_charges")] == [None]
     assert shadow.exchange_lines()[0] == (
         "live      read      GET api.stripe.com/v1/charges -> 200  [body-truncated]"
     )
-    # Recorded as the start of what it decodes to - the store's share of it, all whole lines -
-    # and stored as it was recorded, flagged once.
-    recorded = BOMB_LINE * (MAX_STORED_BODY // len(BOMB_LINE))
     [read] = [e for e in shadow.reported if e.request.path == "/v1/charges"]
-    assert read.response is not None and read.response.body == recorded
+    assert read.response is not None and (read.response.body, read.flags) == (
+        b"",
+        (BODY_TRUNCATED_FLAG,),
+    )
     [stored] = [
         e
         for e in shadow.stored_events()
         if isinstance(e, Exchange) and e.request.path == "/v1/charges"
     ]
-    assert stored.flags == (BODY_TRUNCATED_FLAG,)
-    assert stored.response is not None and stored.response.body == recorded
+    assert stored.response is not None and (stored.response.body, stored.flags) == (
+        b"",
+        (BODY_TRUNCATED_FLAG,),
+    )
+    assert stored.response.header("content-encoding") == encoding
     assert [r.dropped_events for r in shadow.stored().list_runs()] == [0, 0]
+
+
+@pytest.mark.parametrize("scenario", sorted(BOMBED))
+def test_a_bomb_costs_irimi_its_cap_in_memory_not_what_it_decodes_to(traced_run, scenario):
+    """#94's bound, through the real `irimi shadow`: a body that decodes to a GiB costs the process
+    irimi runs in no more than twice the cap it decodes to - a codec assembles its output once and
+    copies it once - and a margin for everything else a run holds, never the GiB."""
+    result, peak = traced_run(W, scenario)
+    assert result.exit_code == 0
+    assert "[body-truncated]" in result.exchange_lines()[0]
+    assert peak < 2 * MAX_DECODED_BODY + MEMORY_MARGIN

@@ -25,7 +25,7 @@ dials a public IP; a scenario that needs one needs a guard of its own.
 from __future__ import annotations
 
 import contextlib
-import gzip
+import functools
 import ipaddress
 import json
 import socket
@@ -39,6 +39,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Protocol
 from urllib.parse import parse_qsl, urlsplit
 
+import brotli  # type: ignore[import-untyped]  # ships no stubs
+import zstandard
+
+from examples.workflows import agentkit
+
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # How long a `stall` fault holds a request before answering. Agents under test use a shorter
 # client timeout, so a stall reads to them as a timeout.
@@ -48,24 +53,49 @@ RESET_AFTER_CHUNK_S = 0.5
 # The listen backlog. socketserver's default of 5 drops connections from W3's concurrent runs on
 # macOS, where a dropped SYN is retried a second later and reads as a flaky timeout.
 BACKLOG = 128
-# What the `gzip-bomb` fault decodes to: a GiB of 16-byte lines, far past the most irimi decodes of
-# any body (#94). Short lines compress about 500 to 1, and cost redaction little per byte; a GiB
-# of bare newlines compresses twice as well, and costs redaction seven times as much. Built once,
-# the first time it is asked for.
+# What a bomb fault decodes to (#94): `BOMB_HEAD`, then a GiB of 16-byte lines, far past the most
+# irimi decodes of any body, the same in every codec. Short lines compress about 500 to 1 and cost
+# redaction little per byte; a GiB of bare newlines compresses twice as well, and costs redaction
+# seven times as much. Each is built once, the first time it is asked for, so a scenario builds
+# its own in `setup`: built on the request it answers, it took longer than the agent's timeout.
 BOMB_DECODED_BYTES = 1024 * 1024 * 1024
 BOMB_LINE = b" " * 15 + b"\n"
-_bomb: bytes | None = None
+# A served credential, a canary like `services.CLIENT_SECRET_CANARY` (`run.SERVED_CANARIES`): a
+# body irimi decodes only in part is still recorded, and must reach disk redacted or not at all.
+BOMB_SECRET = "CANARYbombsecret00000000000000"
+# How every bomb a fault answers with starts: a JSON document, its credential on a line of its
+# own. Redaction reads the start of a document line by line, as it is not JSON, and no shape gives
+# that line away: only its key says it is a secret (#69, #94).
+BOMB_HEAD = b'{\n  "object": "export",\n  "client_secret": "' + BOMB_SECRET.encode() + b'",\n'
+# What `gzip-padded` puts after the service's own answer: 128 MiB of blanks, no line break, so
+# the decoded body is the answer and whitespace, which JSON reads as nothing (#94).
+PADDED_LINE = b" "
+PADDED_BYTES = 128 * 1024 * 1024
+# The answers a bomb fault gives, by its action: the `Content-Encoding` each is sent in.
+BOMB_ENCODINGS = {"gzip-bomb": "gzip", "br-bomb": "br", "zstd-bomb": "zstd"}
+# The most a fake service decodes of a gzip request body: one that decodes past it is refused 413
+# by the fake internet, as a server refuses a body too large, and reads as empty. So an agent's
+# own bomb (#94) never costs the harness more than this, bare or forwarded live.
+MAX_REQUEST_DECODED = 16 * 1024 * 1024
 
 
-def gzip_bomb() -> bytes:
-    """About 2 MiB of gzip that decodes to BOMB_DECODED_BYTES of BOMB_LINE."""
-    global _bomb
-    if _bomb is None:
-        deflater = zlib.compressobj(9, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
-        block = BOMB_LINE * (1024 * 1024 // len(BOMB_LINE))
-        steps = BOMB_DECODED_BYTES // len(block)
-        _bomb = b"".join([deflater.compress(block) for _ in range(steps)] + [deflater.flush()])
-    return _bomb
+@functools.cache
+def bomb(encoding: str) -> bytes:
+    """`BOMB_HEAD` and `BOMB_DECODED_BYTES` of `BOMB_LINE`, in `encoding`: 2 MiB of gzip, or a
+    few hundred KB of br or zstd. Built once per encoding."""
+    if encoding == "gzip":
+        return agentkit.gzip_bomb(BOMB_HEAD, BOMB_LINE, BOMB_DECODED_BYTES)
+    block = BOMB_LINE * (1024 * 1024 // len(BOMB_LINE))
+    blocks = BOMB_DECODED_BYTES // len(block)
+    if encoding == "br":
+        compressor = brotli.Compressor(quality=5)
+        parts = [compressor.process(BOMB_HEAD)] + [compressor.process(block) for _ in range(blocks)]
+        return b"".join([*parts, compressor.finish()])
+    if encoding == "zstd":
+        zstd = zstandard.ZstdCompressor(level=3).compressobj()
+        parts = [zstd.compress(BOMB_HEAD)] + [zstd.compress(block) for _ in range(blocks)]
+        return b"".join([*parts, zstd.flush()])
+    raise ValueError(f"no bomb in {encoding!r}")
 
 
 @dataclass(frozen=True)
@@ -80,14 +110,27 @@ class Req:
     body: bytes  # as sent, before any content-encoding is undone
     via_proxy: bool  # arrived in absolute form, i.e. from a bare run through HTTP_PROXY
 
+    @functools.cached_property
+    def decoded(self) -> bytes | None:
+        """The body with its gzip undone, up to MAX_REQUEST_DECODED; None when it decodes past
+        that (#94). A gzip body that does not decode is empty, as it always read."""
+        if self.headers.get("content-encoding") != "gzip":
+            return self.body
+        inflater = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        try:
+            out = inflater.decompress(self.body, MAX_REQUEST_DECODED)
+            if inflater.unconsumed_tail and inflater.decompress(inflater.unconsumed_tail, 1):
+                return None
+            return out + inflater.flush() if inflater.eof else b""
+        except zlib.error:
+            return b""
+
+    def too_big(self) -> bool:
+        """The body decodes past MAX_REQUEST_DECODED: the fake internet refuses it 413."""
+        return self.decoded is None
+
     def text(self) -> str:
-        raw = self.body
-        if self.headers.get("content-encoding") == "gzip":
-            try:
-                raw = gzip.decompress(raw)
-            except OSError:
-                return ""
-        return raw.decode("utf-8", "replace")
+        return (self.decoded or b"").decode("utf-8", "replace")
 
     def json(self) -> Any:
         try:
@@ -137,8 +180,10 @@ class Fault:
 
     `429`, `500` and `garbage` answer at once; `stall` answers late; `reset` resets the connection
     before any response; `reset-stream` lets the service answer, sends the headers and the first
-    chunk, and then resets. `gzip-bomb` answers 200 with `gzip_bomb()`, gzip-encoded though the
-    client never asked for gzip. A faulted request is still recorded in `log`.
+    chunk, and then resets. `gzip-bomb`, `br-bomb` and `zstd-bomb` answer 200 with `bomb()` in
+    that encoding, though the client never asked for one (#94); `gzip-padded` lets the service
+    answer, and sends its JSON gzip-encoded, on a line of its own followed by `PADDED_BYTES` of
+    blanks, which JSON reads as whitespace. A faulted request is still recorded in `log`.
     """
 
     host: str
@@ -158,6 +203,8 @@ class FakeInternet:
             for host in service.hosts:
                 self.services[host.lower()] = service
         self.log: list[Req] = []
+        # Every body a `gzip-padded` fault sent, as it went on the wire (#94).
+        self.padded: list[bytes] = []
         self.faults: list[Fault] = []
         self._lock = threading.Lock()
         self._server: ThreadingHTTPServer | None = None
@@ -286,18 +333,32 @@ class FakeInternet:
             ), None
         if action == "reset":
             return None, "reset"
-        if action == "gzip-bomb":
-            headers = {"content-type": "application/json", "content-encoding": "gzip"}
-            return Resp(200, gzip_bomb(), headers), None
+        if action in BOMB_ENCODINGS:
+            encoding = BOMB_ENCODINGS[action]
+            headers = {"content-type": "application/json", "content-encoding": encoding}
+            return Resp(200, bomb(encoding), headers), None
         if action == "stall":
             time.sleep(STALL_S)
         service = self.services.get(req.host)
         if service is None:
             return json_error(502, error=f"{req.host} is not on the fake internet"), None
+        if req.too_big():
+            return json_error(413, error={"type": "request_too_large"}), None
         try:
             resp = service.handle(req)
         except Exception as exc:  # a bug in a fake must read as a failure, not hang the agent
             return json_error(500, error=f"fake {req.host} raised {exc!r}"), None
+        if action == "gzip-padded":
+            answer = json.dumps(resp.body).encode() + b"\n"
+            sent = agentkit.gzip_bomb(answer, PADDED_LINE, PADDED_BYTES)
+            with self._lock:
+                self.padded.append(sent)
+            headers = {
+                **resp.headers,
+                "content-type": "application/json",
+                "content-encoding": "gzip",
+            }
+            return Resp(resp.status, sent, headers), None
         return resp, action
 
 

@@ -780,7 +780,7 @@ class IrimiAddon:
             self._finish(ex)
 
     def _decide(
-        self, req: Request, writes: tuple[Exchange, ...], run_id: str, cut: bool = False
+        self, req: Request, writes: tuple[Exchange, ...], run_id: str, cut: bool
     ) -> _Decision:
         """The whole decision, on a worker thread, with no flow in sight. `run_id` is read by
         `request()` before it strips `Irimi-Run`, since `req` no longer carries it (#67). `cut` is

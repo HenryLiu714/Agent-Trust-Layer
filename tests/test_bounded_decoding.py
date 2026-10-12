@@ -467,6 +467,47 @@ class _EchoBombUpstream(BaseHTTPRequestHandler):
         pass
 
 
+@pytest.mark.parametrize(
+    ("path", "delegated"), [("/things", True), ("/unrouted", False)], ids=["delegated", "unknown"]
+)
+def test_a_bomb_is_refused_on_every_path_a_write_takes(
+    tmp_path, monkeypatch, gigabyte_gzip, path, delegated
+):
+    """Not only a faked write: a write its map hands to an answer target, whose target would get
+    every byte but whose exchange irimi could not record, and a request no route names, which is
+    answered as a presumed write. Each is refused with irimi's own 502, never forwarded, and a
+    retry with the same body is refused again rather than replayed from any slot (#94)."""
+    _EchoBombUpstream.bomb, _EchoBombUpstream.bodies = b"{}", []
+    srv = HTTPServer(("127.0.0.1", 0), _EchoBombUpstream)
+    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
+    port = srv.server_address[1]
+    targets = [("127.0.0.1", path, f"http://127.0.0.1:{port}/w")] if delegated else []
+    maps = _targeted(tmp_path, monkeypatch, targets=targets)
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
+    answers = []
+    try:
+        for _ in range(2):
+            conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=10)
+            headers = {
+                "host": f"127.0.0.1:{port}",
+                "content-encoding": "gzip",
+                "idempotency-key": "same-key",
+            }
+            conn.request("POST", f"http://127.0.0.1:{port}{path}", gigabyte_gzip, headers)
+            resp = conn.getresponse()
+            answers.append((resp.status, resp.getheader("irimi-answered-by")))
+            resp.read()
+            conn.close()
+    finally:
+        stop()
+        srv.shutdown()
+    assert answers == [(502, "fake-L0")] * 2
+    assert _EchoBombUpstream.bodies == []
+    assert [(ex.answered_by, ex.kind, ex.target, ex.flags) for ex in seen] == [
+        ("fake-L0", "unknown", "", (UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG, BODY_TRUNCATED_FLAG))
+    ] * 2
+
+
 def test_a_live_request_that_is_a_bomb_is_forwarded_as_the_agent_sent_it(
     tmp_path, monkeypatch, gigabyte_gzip
 ):

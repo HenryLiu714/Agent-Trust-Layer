@@ -258,18 +258,23 @@ def bomb_upstream(gigabyte_gzip):
     srv.shutdown()
 
 
+@pytest.mark.parametrize(
+    ("said", "recorded"), [(None, None), ("full", "partial"), ("partial", "partial")]
+)
 def test_a_buffered_read_bomb_reaches_the_agent_whole_and_is_recorded_empty(
-    tmp_path, monkeypatch, bomb_upstream, gigabyte_gzip
+    tmp_path, monkeypatch, bomb_upstream, gigabyte_gzip, said, recorded
 ):
-    """The agent gets the service's bytes, every one, and the overlay is never asked: irimi has
-    only the start of the document, and an overlay that edited it would send the agent half a
-    document as the whole (#94). The recording is empty, flagged."""
-    asked = []
+    """The agent gets the service's bytes, every one, whatever the overlay returns: irimi has only
+    the start of the document, and an overlay that edited it would send the agent half a document
+    as the whole (#94). The overlay is shown the empty body irimi records, so a read the run has a
+    write for is `partial`, as a body it cannot parse is, and the summary says the read did not
+    show the write. The recording is empty, flagged."""
+    shown = []
 
     class _Overlay:
         def __call__(self, write_log, read_request, upstream_response):
-            asked.append(read_request.path)
-            return Overlaid(Response(200, (), b"OVERLAID"))
+            shown.append(upstream_response.body)
+            return Overlaid(Response(200, (), b"OVERLAID"), said)
 
         def rewrite(self, write_log, read_request):
             return read_request
@@ -279,13 +284,21 @@ def test_a_buffered_read_bomb_reaches_the_agent_whole_and_is_recorded_empty(
     try:
         # A write first, or the overlay is never asked at all.
         _via_proxy(eng.listen_port(), "POST", f"{base}/things", body=b"{}")
-        status, data = _via_proxy(eng.listen_port(), "GET", f"{base}/bomb")
+        conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=10)
+        conn.request("GET", f"{base}/bomb", headers={"host": base.split("/")[2]})
+        resp = conn.getresponse()
+        status, answered_by, data = resp.status, resp.getheader("irimi-answered-by"), resp.read()
+        conn.close()
     finally:
         stop()
-    assert (status, data == gigabyte_gzip) == (200, True)
-    assert asked == []
+    assert (status, answered_by, data == gigabyte_gzip) == (200, None, True)
+    assert shown == [b""]
     read = seen[-1]
-    assert (read.answered_by, read.flags) == ("live", (BODY_TRUNCATED_FLAG,))
+    assert (read.answered_by, read.flags, read.overlay) == (
+        "live",
+        (BODY_TRUNCATED_FLAG,),
+        recorded,
+    )
     assert read.response is not None and read.response.body == b""
 
 

@@ -76,7 +76,8 @@ the first column of each field table below is exactly the keys its encoder write
   `body-truncated`: the start of a JSON document is not JSON, and redaction would read it line by
   line. A stream cut there is recorded as its first 8 MiB, kept to their last complete line, as
   any stream that is not whole is, and carries `stream-truncated`. Whatever irimi forwards still
-  carries every byte it was sent, and the overlay never edits such a read. A write is never
+  carries every byte it was sent, and the overlay never edits such a read: one the run has a write
+  for is `overlay: "partial"`, as a body the overlay cannot parse is. A write is never
   answered from part of its request body: one whose body was cut is answered with irimi's own
   `502` and recorded as an undecidable request, flagged `decision-failed` and `body-truncated`;
   the control endpoint refuses one `413`. Only gzip,

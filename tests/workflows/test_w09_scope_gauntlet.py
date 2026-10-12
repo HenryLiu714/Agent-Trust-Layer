@@ -735,7 +735,8 @@ def test_a_read_back_that_decodes_past_the_cap_is_never_overlaid(run_workflow):
     """After a faked refund, the charge's refunds are read back, and the service answers its list
     followed by 128 MiB of blanks, gzip-encoded. The overlay would add the faked refund to that
     list, but irimi never decoded the whole of it: the agent gets the service's bytes, unstamped,
-    and the read is recorded with no body, flagged."""
+    and the read is recorded with no body, flagged, and `partial`, so the summary says it did not
+    show the refund, as it says of a read too big to parse."""
     bare = run_workflow(W, "bombs", "bare")
     shadow = run_workflow(W, "bombs", "shadow")
     for result in (bare, shadow):
@@ -743,9 +744,13 @@ def test_a_read_back_that_decodes_past_the_cap_is_never_overlaid(run_workflow):
         [received] = result.events("received", with_time=False)
         assert (received["bytes"], received["sha256"]) == digest(padded)
         assert received["encoding"] == "gzip"
+    assert [c["answered_by"] for c in shadow.calls("refunds_padded")] == [None]
     ex = stored_bomb(shadow, "GET", "/v1/refunds")
-    assert (ex.answered_by, ex.flags) == ("live", (BODY_TRUNCATED_FLAG,))
+    assert (ex.answered_by, ex.flags, ex.overlay) == ("live", (BODY_TRUNCATED_FLAG,), "partial")
     assert ex.response is not None and ex.response.body == b""
+    summary = shadow.summary()
+    refund = summary.index(f"  ○ refund $9.00 on {CHARGE}  unvalidated (L3 preconditions passed)")
+    assert summary[refund + 1] == "    ↳ GET /v1/refunds did not show it  live (partial)"
 
 
 def test_a_run_start_that_decodes_past_the_cap_is_refused_413_unread(run_workflow):

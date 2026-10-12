@@ -989,8 +989,9 @@ class IrimiAddon:
         flags = pending.flags
         tee = flow.metadata.pop(STREAM_KEY, None)
         # A body that decodes past the cap is recorded empty, never as the document (#94), so
-        # nothing reads it as one. The overlay and the read observers are skipped below, so the
-        # agent gets the service's bytes untouched, and only the recording is short.
+        # nothing reads it as one. The read observers are skipped below and nothing the overlay
+        # returns is sent, so the agent gets the service's bytes untouched, and only the recording
+        # is short.
         cut = False
         if streamed and isinstance(tee, _StreamTee):
             upstream, stream_chunks, cut = _recorded_stream(flow, tee, whole=True)
@@ -1020,13 +1021,21 @@ class IrimiAddon:
         # request side asks the overlay under the same condition.
         if (
             not streamed
-            and not cut
             and pending.answered_by == "live"
             and pending.classification.kind == "read"
             and self.write_log
         ):
             overlaid = self._overlaid(pending.request, upstream)
-            resp, overlay_fidelity = overlaid.response, overlaid.fidelity
+            if cut:
+                # A READ CUT AT THE CAP IS NEVER OVERLAID, AND SAYS WHAT IT COULD NOT SHOW (#94).
+                # The overlay is shown what irimi recorded, an empty body, and says `partial` when
+                # the run has a write it would have shown in this read, as it says of any body it
+                # cannot parse (`ServiceOverlay._apply`). Whatever response it returns is not sent:
+                # the agent gets the service's bytes, and the summary says the read did not show
+                # the write, as it says of a read too big to parse, rather than nothing at all.
+                overlay_fidelity = None if overlaid.fidelity is None else "partial"
+            else:
+                resp, overlay_fidelity = overlaid.response, overlaid.fidelity
             if resp is not upstream:
                 # The bytes are no longer the service's, so the answer has to say whose they are:
                 # invariant (a) of #12 reads the header to tell an answer of ours from a live

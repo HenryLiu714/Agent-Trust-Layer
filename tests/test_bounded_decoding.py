@@ -34,6 +34,7 @@ from irimi.engine import mitm
 from irimi.exchange import (
     BODY_TRUNCATED_FLAG,
     DECISION_FAILED_FLAG,
+    FIDELITY_DELEGATED_FLAG,
     STREAM_TRUNCATED_FLAG,
     UNCLASSIFIED_FLAG,
     UPSTREAM_ERROR_FLAG,
@@ -52,6 +53,7 @@ from tests.test_engine_mitm import (
     _start,
     _stream_server,
     _streamed_flow,
+    _targeted,
     _via_proxy,
 )
 
@@ -285,6 +287,35 @@ def test_a_buffered_read_bomb_reaches_the_agent_whole_and_is_recorded_empty(
     read = seen[-1]
     assert (read.answered_by, read.flags) == ("live", (BODY_TRUNCATED_FLAG,))
     assert read.response is not None and read.response.body == b""
+
+
+def test_a_delegated_read_bomb_reaches_the_agent_whole_stamped_and_recorded_empty(
+    tmp_path, monkeypatch, bomb_upstream, gigabyte_gzip
+):
+    """A delegated answer is rebuilt to stamp `Irimi-Answered-By`. Only its headers are written
+    back, so the agent gets every byte the target sent, never the empty body irimi records (#94)."""
+    maps = _targeted(
+        tmp_path,
+        monkeypatch,
+        targets=[("127.0.0.1", "", f"http://127.0.0.1:{bomb_upstream}")],
+        target_reads=["127.0.0.1"],
+    )
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=10)
+        conn.request("GET", "http://127.0.0.1:9/hello", headers={"host": "127.0.0.1:9"})
+        resp = conn.getresponse()
+        status, answered_by, data = resp.status, resp.getheader("irimi-answered-by"), resp.read()
+        conn.close()
+    finally:
+        stop()
+    assert (status, answered_by, data == gigabyte_gzip) == (200, "delegated", True)
+    (ex,) = seen
+    assert (ex.answered_by, ex.flags) == (
+        "delegated",
+        (FIDELITY_DELEGATED_FLAG, BODY_TRUNCATED_FLAG),
+    )
+    assert ex.response is not None and ex.response.body == b""
 
 
 # A secret no shape gives away, under a key that names it: only a walk of the JSON document finds

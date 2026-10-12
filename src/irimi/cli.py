@@ -11,6 +11,7 @@ if TYPE_CHECKING:  # the quoted annotations below; no runtime import
     import subprocess
 
     from irimi.ca import CAPaths
+    from irimi.control import OnToolCall
     from irimi.engine import Engine, EngineConfig, OnExchange
     from irimi.servicemap import MapIndex
     from irimi.store import TraceStore
@@ -357,7 +358,9 @@ def _open_store(args: argparse.Namespace) -> "TraceStore | None":
         return None
 
 
-def _build_engine(run: _Run, on_exchange: "OnExchange") -> "Engine":
+def _build_engine(
+    run: _Run, on_exchange: "OnExchange", on_tool_call: "OnToolCall | None" = None
+) -> "Engine":
     """The composition root: the one place the concrete engine, policy, store and overlay meet.
 
     Phase 2 swapped `NoOverlay` for the real overlay here in #43, and Phase 3 swapped `NullStore`
@@ -379,6 +382,7 @@ def _build_engine(run: _Run, on_exchange: "OnExchange") -> "Engine":
         run.store,
         ServiceOverlay(run.config.maps),
         on_exchange=on_exchange,
+        on_tool_call=on_tool_call,
     )
 
 
@@ -388,6 +392,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     from irimi import report
     from irimi.engine import EngineStartError
     from irimi.exchange import Exchange
+    from irimi.trace import ToolCall
 
     run = _prepare_run(args)
     if run is None:
@@ -396,7 +401,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
     def on_exchange(ex: Exchange) -> None:
         print(report.exchange_line(ex), flush=True)
 
-    engine = _build_engine(run, on_exchange)
+    def on_tool_call(call: ToolCall) -> None:
+        print(report.tool_call_line(call), flush=True)
+
+    engine = _build_engine(run, on_exchange, on_tool_call)
 
     async def _main() -> None:
         task = asyncio.ensure_future(engine.run())
@@ -432,6 +440,7 @@ def cmd_shadow(args: argparse.Namespace) -> int:
     from irimi import report, runner
     from irimi.engine import EngineStartError
     from irimi.exchange import Exchange
+    from irimi.trace import ToolCall
 
     cmd = list(args.cmd)
     if cmd and cmd[0] == "--":
@@ -445,13 +454,21 @@ def cmd_shadow(args: argparse.Namespace) -> int:
         return 1
 
     exchanges: list[Exchange] = []
+    tool_calls: list[ToolCall] = []
     elapsed = 0.0
 
     def on_exchange(ex: Exchange) -> None:
         exchanges.append(ex)
         print(report.exchange_line(ex), flush=True)
 
-    engine = _build_engine(run, on_exchange)
+    def on_tool_call(call: ToolCall) -> None:
+        # On the proxy's event loop, after the store took the call (#73): it only appends and
+        # prints. The line names the tool and what it raised, never its args or result, which
+        # are stored redacted and would be printed raw here.
+        tool_calls.append(call)
+        print(report.tool_call_line(call), flush=True)
+
+    engine = _build_engine(run, on_exchange, on_tool_call)
 
     try:
         handle = runner.start_engine(engine)
@@ -507,7 +524,7 @@ def cmd_shadow(args: argparse.Namespace) -> int:
             pass
         _close_store(run.store)
 
-    for line in report.summary_lines(run.run_id, exchanges, elapsed, run.index):
+    for line in report.summary_lines(run.run_id, exchanges, elapsed, run.index, tool_calls):
         print(line, flush=True)
     return code
 

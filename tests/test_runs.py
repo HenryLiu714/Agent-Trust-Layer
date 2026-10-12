@@ -321,6 +321,7 @@ def _handbuilt_summary(write: str) -> list[str]:
         "  telemetry       1 exchange to 1 host, forwarded live",
         "",
         f"  ○ {write}  unvalidated (L0)",
+        "  ○ tool db.mark_refunded  shadow stand-in raised db.Locked",
         "",
         "  2 exchanges · 1 live · 0 delegated · 1 virtualized",
         "  These writes did not happen.",
@@ -425,7 +426,35 @@ def test_runs_show_still_prints_with_a_warning_when_the_maps_do_not_load(home, c
     assert main(["runs", "show", "handbuilt"]) == 0
     out, err = capfd.readouterr()
     assert err == "warning: maps did not load; writes are shown as requests\n"
-    assert out.splitlines()[-9:] == _handbuilt_summary("POST api.stripe.com/v1/refunds")
+    assert out.splitlines()[-10:] == _handbuilt_summary("POST api.stripe.com/v1/refunds")
+
+
+def test_a_tool_call_line_escapes_the_control_characters_it_was_posted_with():
+    """A name and an error type are whatever reached the control endpoint (#76): one call is one
+    line, and an escape sequence is shown, never obeyed (#72)."""
+    name = "evil\x1b[2J\nshadow    write     tool x"
+    call = ToolCall("t", "r", name, "write", "shadow", {}, None, ErrorInfo("a\nb", "m"), 1.0, 2.0)
+    escaped = "evil\\x1b[2J\\nshadow    write     tool x"
+    assert report.tool_call_line(call) == f"shadow    write     tool {escaped} -> raised a\\nb"
+    assert report.tool_write_line(call) == f"  ○ tool {escaped}  shadow stand-in raised a\\nb"
+
+
+def test_a_run_whose_only_writes_are_tool_writes_still_says_they_did_not_happen():
+    """A write tool whose stand-in ran did not happen, as a faked HTTP write did not (#76); a read
+    tool, which ran for real, gets no line and no closing sentence."""
+    write = ToolCall("t", "r", "db.write", "write", "shadow", {}, 1, None, 1.0, 2.0)
+    read = ToolCall("u", "r", "db.read", "read", "real", {}, 1, None, 1.0, 2.0)
+    assert report.summary_lines("r", [], tool_calls=[read, write]) == [
+        "irimi shadow · run r · 0 exchanges · 0.0s · backstop: none (Phase 4)",
+        "",
+        "  ○ tool db.write  shadow stand-in ran",
+        "",
+        "  0 exchanges · 0 live · 0 delegated · 0 virtualized",
+        "  These writes did not happen.",
+    ]
+    assert report.summary_lines("r", [], tool_calls=[read])[-1] == (
+        "  0 exchanges · 0 live · 0 delegated · 0 virtualized"
+    )
 
 
 def test_tool_call_line_is_in_the_exchange_line_s_columns():

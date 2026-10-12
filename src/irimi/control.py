@@ -8,7 +8,8 @@ own files would need a disk the agent's container shares with irimi's, and could
 against an exchange only by comparing two processes' clocks.
 
     POST /_irimi/runs/{run_id}/start        204   the run's record, attribution `sdk`
-    POST /_irimi/runs/{run_id}/tool-calls   204   one tool call, its run id from the path
+    POST /_irimi/runs/{run_id}/tool-calls   204   one tool call, its run id from the path;
+                                                  `unattributed` for one made in no run (#76)
     POST /_irimi/runs/{run_id}/end          204   the run's end
     GET  /_irimi/health                     200   engine version, serve mode, store counters
 
@@ -48,6 +49,7 @@ from irimi.pipeline import ANSWERED_BY_HEADER
 from irimi.store import TraceStore, header_record, names_a_run_dir
 from irimi.trace import (
     MAX_ERROR_MESSAGE,
+    UNATTRIBUTED,
     ErrorInfo,
     RunRecord,
     ToolCall,
@@ -165,11 +167,14 @@ class ControlEndpoint:
             raise _Refused(404, f"no control route {request.path!r}")
         _require_method(request, "POST")
         run_id = "/".join(segments[1:-1])
-        if not names_a_run_dir(run_id):
+        action = segments[-1]
+        # A tool call made outside every run, by an agent with no process run (`serve`, #77), is
+        # filed under no run, as an exchange that names none is (#76).
+        unattributed = run_id == UNATTRIBUTED and action == TOOL_CALLS_ACTION
+        if not names_a_run_dir(run_id) and not unattributed:
             # The store would only count such an event as a drop, or file it in `unattributed/`:
             # the agent is told instead, and no directory is made (#70).
             raise _Refused(400, f"{run_id!r} cannot name a run")
-        action = segments[-1]
         if run_id == self.process_run and action != TOOL_CALLS_ACTION:
             # IRIMI'S OWN RUN IS IRIMI'S TO RECORD, as `attribution` and `engine_version` are. Under
             # `irimi shadow` it is the process run: a start would replace its argv trigger with an

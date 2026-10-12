@@ -1,4 +1,5 @@
-"""How the SDK reaches irimi: one POST to the control endpoint per run start and end (#74).
+"""How the SDK reaches irimi: one POST to the control endpoint per run start, run end (#74) and
+tool call (#76).
 
 `ControlClient.post` sends a JSON body to `{IRIMI_CONTROL}/runs/{run_id}/{action}`, the route the
 control endpoint answers (#73), with stdlib urllib and NEVER THROUGH A PROXY: the endpoint is
@@ -31,15 +32,15 @@ TIMEOUT_S = 2.0
 # The most of a refusal's body a warning quotes. The endpoint's own are shorter (#73).
 MAX_DETAIL = 200
 
-# The run actions the SDK posts, a subset of the endpoint's `exchange.RUN_ACTIONS`. #76 adds
-# `tool-calls`.
-Action = Literal["start", "end"]
+# The run actions the SDK posts: the endpoint's `exchange.RUN_ACTIONS`.
+Action = Literal["start", "tool-calls", "end"]
 # The kinds of failure a warning is logged once for.
 Failure = Literal["unset", "rejected", "timeout", "unreachable", "failed"]
 
 
 class Reporter(Protocol):
-    """Where a run's start and end are sent. `ControlClient` is the one the SDK uses."""
+    """Where a run's start, its end and its tool calls are sent. `ControlClient` is the one the
+    SDK uses."""
 
     def post(self, run_id: str, action: Action, doc: Mapping[str, Any]) -> None: ...
 
@@ -100,9 +101,9 @@ class ControlClient:
                 return
             self._warned.add(kind)
         logger.warning(
-            "irimi could not record the %s of run %s (%s: %s). The run goes on, its requests "
+            "irimi could not record %s of run %s (%s: %s). The run goes on, its requests "
             "still labelled; further failures of this kind are not logged.",
-            action,
+            "a tool call" if action == "tool-calls" else f"the {action}",
             run_id,
             kind,
             detail,

@@ -104,9 +104,18 @@ def exchange_line(exchange: Exchange) -> str:
 
 
 def tool_call_line(call: ToolCall) -> str:
-    """One line per tool call the SDK reported (#76), in `exchange_line`'s columns (#72)."""
-    outcome = f"raised {call.error.type}" if call.error is not None else "ok"
-    return f"{call.ran:<9} {call.kind:<9} tool {call.name} -> {outcome}"
+    """One line per tool call the SDK reported (#76), in `exchange_line`'s columns (#72). Its name
+    and error type are whatever was posted to the control endpoint, so each control character is
+    escaped, as `runs show` escapes a run's text (#72): one call is one line."""
+    outcome = f"raised {_printable(call.error.type)}" if call.error is not None else "ok"
+    return f"{call.ran:<9} {call.kind:<9} tool {_printable(call.name)} -> {outcome}"
+
+
+def tool_write_line(call: ToolCall) -> str:
+    """The summary's line for a write tool whose stand-in ran in its place (#76): the real
+    function did not run, so it is a write that did not happen, and it takes the write marker."""
+    outcome = f"raised {_printable(call.error.type)}" if call.error is not None else "ran"
+    return f"  {WRITE_MARKER} tool {_printable(call.name)}  shadow stand-in {outcome}"
 
 
 # The kinds a shadow run answers instead of forwarding, so they are the writes the summary owes
@@ -479,7 +488,7 @@ def _would_fire(writes: Sequence[Exchange]) -> list[str]:
     return list(dict.fromkeys(event for ex in writes for event in ex.would_fire))
 
 
-def _closing_lines(writes: Sequence[Exchange]) -> list[str]:
+def _closing_lines(writes: Sequence[Exchange], tool_writes: Sequence[ToolCall] = ()) -> list[str]:
     """What did not happen, and - when something answered in irimi's place - where it went.
 
     Nothing intercepted, nothing to claim: a run that only read gets no closing line rather than
@@ -493,9 +502,12 @@ def _closing_lines(writes: Sequence[Exchange]) -> list[str]:
     The webhooks the faked writes would have fired close the first sentence in either branch
     (#48). A run whose every write was refused names none and keeps the bare sentence: `Would
     have fired: nothing.` would be a claim, and silence is the truth.
+
+    A write tool whose stand-in ran did not happen either (#76): a run whose only writes are tool
+    writes closes with the bare sentence, and one with HTTP writes too says what it says of those.
     """
     if not writes:
-        return []
+        return [f"  {DID_NOT_HAPPEN}"] if tool_writes else []
     events = _would_fire(writes)
     clause = f" {WOULD_HAVE_FIRED} {', '.join(events)}." if events else ""
     delegated = [ex for ex in writes if _reached_target(ex)]
@@ -523,18 +535,20 @@ def summary_lines(
     exchanges: Sequence[Exchange],
     elapsed_s: float = 0.0,
     index: MapIndex | None = None,
+    tool_calls: Sequence[ToolCall] = (),
 ) -> list[str]:
     """The exit summary (#13): what ran, what was real, what irimi answered, and what that means.
 
-    Built from the exchanges the engine reported. `stored_summary_lines` prints the same block from
-    a stored run, and both are `_summary`, so the two cannot drift (#72).
+    Built from the exchanges the engine reported and the tool calls the control endpoint passed
+    on (#76), each in the order it arrived. `stored_summary_lines` prints the same block from a
+    stored run, and both are `_summary`, so the two cannot drift (#72).
 
     `index` is the loaded maps, used only to find each write's `human:` template. Without it the
     writes still get a line, spelled as the request they were.
     """
     telemetry = [ex.request.host for ex in exchanges if ex.kind == "telemetry"]
     rest = [ex for ex in exchanges if ex.kind != "telemetry"]
-    return _summary(run_id, rest, telemetry, elapsed_s, index)
+    return _summary(run_id, rest, telemetry, elapsed_s, index, tool_calls)
 
 
 def stored_summary_lines(run: StoredRun, index: MapIndex | None) -> list[str]:
@@ -551,8 +565,9 @@ def stored_summary_lines(run: StoredRun, index: MapIndex | None) -> list[str]:
     """
     exchanges = [event for event in run.events if isinstance(event, Exchange)]
     telemetry = [event.host for event in run.events if isinstance(event, TelemetrySeen)]
+    tool_calls = [event for event in run.events if isinstance(event, ToolCall)]
     elapsed = run_elapsed(run.record)
-    return _summary(run.record.run_id, exchanges, telemetry, elapsed or 0.0, index)
+    return _summary(run.record.run_id, exchanges, telemetry, elapsed or 0.0, index, tool_calls)
 
 
 def _summary(
@@ -561,9 +576,12 @@ def _summary(
     telemetry: Sequence[str],
     elapsed_s: float,
     index: MapIndex | None,
+    tool_calls: Sequence[ToolCall] = (),
 ) -> list[str]:
     """The one implementation of the summary. `exchanges` holds no telemetry; `telemetry` is one
-    host per telemetry exchange, each of them forwarded live (#72)."""
+    host per telemetry exchange, each of them forwarded live (#72). A tool call is not an exchange
+    and is in no count: each write tool whose stand-in ran gets a line after the HTTP writes, and a
+    read tool, which ran for real, gets none (#76)."""
     paired = _writes_with_their_reads(exchanges)
     writes = [write for write, _ in paired]
     total = len(exchanges) + len(telemetry)
@@ -586,6 +604,10 @@ def _summary(
     for write, reads in paired:
         write_lines.append(_write_line(write, index))
         write_lines += _overlay_lines(reads)
+    # Only a stand-in's call: the SDK runs a write tool's real function only while it is inactive,
+    # and then records nothing, so no write tool call it posts ran for real.
+    stood_in = [call for call in tool_calls if call.kind == "write" and call.ran == "shadow"]
+    write_lines += [tool_write_line(call) for call in stood_in]
     if write_lines:
         lines += ["", *write_lines]
     # The three buckets #20 asks for, on one line: `live` means forwarded to the real service -
@@ -598,7 +620,7 @@ def _summary(
         f"  {_plural(total, 'exchange')} · {live} live · "
         f"{delegated} delegated · {virtualized} virtualized",
     ]
-    lines += _closing_lines(writes)
+    lines += _closing_lines(writes, stood_in)
     return lines
 
 

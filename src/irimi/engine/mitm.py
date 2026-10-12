@@ -239,6 +239,8 @@ def _decoded(body: bytes, content_encoding: str) -> _Decoded | None:
     decode = _DECODERS.get(name)
     if decode is None:
         return None
+    if not body:  # nothing, as mitmproxy's decoders say, though brotli's would refuse it
+        return _Decoded(body, False)
     try:
         decoded, cut = decode(body, MAX_DECODED_BODY)
     except Exception:
@@ -252,9 +254,11 @@ def _inflate(body: bytes, limit: int, wbits: int, *, whole: bool) -> tuple[bytes
     kept, as mitmproxy's gzip decoder keeps them."""
     inflater = zlib.decompressobj(wbits)
     out = inflater.decompress(body, limit)
-    if len(out) == limit and not inflater.eof:
-        return out, bool(inflater.decompress(inflater.unconsumed_tail, 1))
-    # Every input byte was consumed below the limit, so what is left inside is a short tail.
+    if len(out) == limit and not inflater.eof and inflater.decompress(inflater.unconsumed_tail, 1):
+        return out, True
+    # Every input byte was consumed below the limit, or at it with nothing more to decode, so what
+    # is left inside is a short tail. A stream that ends right at the limit is still refused here
+    # when it is not whole, as one that ends anywhere else is.
     out += inflater.flush()
     if whole and not inflater.eof:
         raise zlib.error("incomplete or truncated stream")
@@ -295,15 +299,20 @@ def _brotli(body: bytes, limit: int) -> tuple[bytes, bool]:
         size += len(part)
     if not decompressor.is_finished() and size <= limit:
         raise brotli.error("incomplete or truncated stream")
-    out = b"".join(parts)
-    del parts  # the joined copy is all that is kept: never the parts and both copies at once
-    return out[:limit], len(out) > limit
+    if size > limit:  # cut the last part, not the joined whole: a third copy of the cap (#94)
+        parts[-1] = parts[-1][: len(parts[-1]) - (size - limit)]
+    return b"".join(parts), size > limit
 
 
 def _zstd(body: bytes, limit: int) -> tuple[bytes, bool]:
+    """One read of a byte past `limit`, which fills unless the frames end first. Not `limit` and
+    then one more: a second read comes back empty when the first stopped inside a block of a
+    stream that is cut short, and a body cut at the cap was called whole (#94)."""
     reader = zstandard.ZstdDecompressor().stream_reader(io.BytesIO(body), read_across_frames=True)
-    out: bytes = reader.read(limit)  # fills to `limit` unless the frames end first
-    return out, len(out) == limit and bool(reader.read(1))
+    out: bytes = reader.read(limit + 1)
+    if len(out) > limit:
+        return out[:limit], True
+    return out, False
 
 
 _DECODERS: dict[str, Callable[[bytes, int], tuple[bytes, bool]]] = {

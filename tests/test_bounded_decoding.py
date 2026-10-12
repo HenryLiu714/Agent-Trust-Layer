@@ -13,6 +13,7 @@ decodes: a buffered read, a stream, a faked write's request, and the control end
 
 import bz2
 import gzip
+import os
 import threading
 import tracemalloc
 import zlib
@@ -24,7 +25,6 @@ import zstandard
 from mitmproxy.net import encoding
 from mitmproxy.test import tutils
 
-from examples.workflows.harness.internet import BOMB_LINE, gzip_bomb
 from irimi.engine import mitm
 from irimi.exchange import BODY_TRUNCATED_FLAG, STREAM_TRUNCATED_FLAG, Response
 from irimi.overlay import Overlaid
@@ -103,6 +103,32 @@ def test_an_encoding_irimi_does_not_decode_is_not_run_through_python_s_codecs(
     assert mitm._decoded(packed, content_encoding) is None
 
 
+@pytest.mark.parametrize("content_encoding", ENCODINGS)
+def test_an_empty_body_decodes_to_nothing_in_every_encoding(content_encoding):
+    """As mitmproxy's decoders say. brotli's own refuses an empty stream as one that ends early."""
+    assert mitm._decoded(b"", content_encoding) == mitm._Decoded(b"", False)
+
+
+@pytest.mark.parametrize("cut_by", [1, 3, 600])
+def test_a_zstd_stream_that_ends_early_is_still_cut_at_the_cap(cap_of_10_lines, cut_by):
+    """Incompressible bytes are a raw block, which zstd hands out as it arrives even when the
+    stream ends early, as mitmproxy's decoder keeps them. Read to the cap and then once more, the
+    second read came back empty and a body cut at the cap was called whole (#94)."""
+    plain = os.urandom(20 * len(LINE))
+    decoded = mitm._decoded(encoding.encode(plain, "zstd")[:-cut_by], "zstd")
+    assert decoded is not None
+    assert (decoded.body, decoded.cut) == (plain[:cap_of_10_lines], True)
+
+
+def test_a_deflate_stream_that_ends_early_is_refused_even_right_at_the_cap(cap_of_10_lines):
+    """`deflate` refuses a stream that ends early, as `zlib.decompress` does: at the cap, as
+    anywhere else. Its last four bytes are the checksum, so all of the body is there (#94)."""
+    plain = LINE * 10
+    assert len(plain) == cap_of_10_lines
+    assert mitm._decoded(zlib.compress(plain)[:-2], "deflate") is None
+    assert mitm._decoded(zlib.compress(plain), "deflate") == mitm._Decoded(plain, False)
+
+
 # --------------------------------------------------------------------- real bombs at the real cap
 
 
@@ -128,11 +154,17 @@ def _zstd_bomb(n_bytes: int) -> bytes:
     )
 
 
+# The line #94's bomb decodes to, a GiB of it. Short lines compress about 500 to 1.
+BOMB_LINE = b" " * 15 + b"\n"
+
+
 @pytest.fixture(scope="module")
 def gigabyte_gzip() -> bytes:
-    """About 2 MiB of gzip that decodes to 1 GiB: the W10 `gzip_bomb_read` fault's, built once
-    per session for both."""
-    return gzip_bomb()
+    """About 2 MiB of gzip that decodes to 1 GiB of BOMB_LINE, as #94 asks: built here rather than
+    taken from the sample workflows' harness, whose bombs are theirs to change."""
+    deflater = zlib.compressobj(9, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+    block = BOMB_LINE * (MIB // len(BOMB_LINE))
+    return b"".join([deflater.compress(block) for _ in range(1024)] + [deflater.flush()])
 
 
 @pytest.fixture(scope="module")

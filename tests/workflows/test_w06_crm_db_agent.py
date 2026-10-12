@@ -9,7 +9,7 @@ call to the run it was made in (#76).
 from examples.workflows.harness.run import CANARIES
 from examples.workflows.w06_crm_db_agent.agent import DB_NAME, SEED
 from irimi.sdk.capture import REPR_KEY
-from irimi.trace import ErrorInfo, ToolCall
+from irimi.trace import UNATTRIBUTED, ErrorInfo, ToolCall
 
 W = "w06_crm_db_agent"
 WRITE_TOOLS = [
@@ -212,8 +212,190 @@ def test_each_decoration_time_mistake_raises_type_error(run_workflow):
         "sync_stand_in_for_async",
         "async_stand_in_for_sync",
         "generator",
+        "generator_stand_in",
+        "stand_in_is_the_function",
     ]
     assert (
         run_workflow(W, "decoration_errors", "bare").result()["raised"]
         == (shadow.result()["raised"])
     )
+
+
+def test_a_write_stand_in_that_raises_hands_the_agent_its_own_exception_and_a_retry_runs(
+    run_workflow,
+):
+    """`merge_accounts` first names an account that does not exist. Its stand-in validates as the
+    real merge does and raises; the SDK records the call with its error and re-raises the very
+    object the stand-in raised, so the agent catches it and retries with the right account (#76).
+    Both calls are recorded and printed, the first with what it raised; the summary says the
+    stand-in raised, and the run, which caught it, ends `ok`."""
+    shadow = run_workflow(W, "merge_retry", "shadow")
+    bare = run_workflow(W, "merge_retry", "bare")
+    for result in (shadow, bare):
+        failed = [(e["error"], e["same_object"]) for e in result.events("merge_failed")]
+        assert failed == [("no such account: acc_9", True)]
+    assert shadow.tools() == [("crm.merge_accounts", "shadow")] * 2
+    assert bare.tools() == [("crm.merge_accounts", "real")] * 2
+    assert rows(shadow) == SEED
+    assert [row[0] for row in rows(bare)] == ["acc_1", "acc_3"]
+    assert shadow.result()["merged"] == {"kept": "acc_1", "merged": "acc_2", "stood_in": True}
+    assert bare.result()["merged"] == {"kept": "acc_1", "merged": "acc_2"}
+    [run] = shadow.sdk_runs()
+    assert run.outcome == "ok"
+    # Args are bound against the real `merge_accounts(keep, drop)`, not the stand-in's `*ids`.
+    assert [(c.run_id, c.args, c.result, c.error) for c in tool_calls(shadow)] == [
+        (
+            run.run_id,
+            {"keep": "acc_1", "drop": "acc_9"},
+            None,
+            ErrorInfo("builtins.LookupError", "no such account: acc_9"),
+        ),
+        (
+            run.run_id,
+            {"keep": "acc_1", "drop": "acc_2"},
+            {"kept": "acc_1", "merged": "acc_2", "stood_in": True},
+            None,
+        ),
+    ]
+    assert shadow.tool_call_lines() == [
+        "shadow    write     tool crm.merge_accounts -> raised builtins.LookupError",
+        "shadow    write     tool crm.merge_accounts -> ok",
+    ]
+    assert shadow.summary()[1:] == [
+        "",
+        "  ○ tool crm.merge_accounts  shadow stand-in raised builtins.LookupError",
+        "  ○ tool crm.merge_accounts  shadow stand-in ran",
+        "",
+        "  0 exchanges · 0 live · 0 delegated · 0 virtualized",
+        "  These writes did not happen.",
+    ]
+
+
+def test_a_tool_called_outside_every_run_lands_in_the_process_run(run_workflow):
+    """Housekeeping before the trigger: `delete_stale` and `find_accounts` are called in no run,
+    so under `irimi shadow -- <cmd>` each is recorded in the process run that `IRIMI_RUN` names,
+    and printed like any other (#76). The trigger's own calls are its run's. Nothing is left
+    `unattributed`."""
+    shadow = run_workflow(W, "outside_run", "shadow")
+    bare = run_workflow(W, "outside_run", "bare")
+    [run] = shadow.sdk_runs()
+    process = shadow.process_run_id()
+    assert [(t["name"], t["ran"], t["run"]) for t in shadow.events("tool")] == [
+        ("crm.delete_stale", "shadow", None),
+        ("crm.find_accounts", "real", None),
+        ("crm.find_accounts", "real", run.run_id),
+        ("crm.upsert_account", "shadow", run.run_id),
+    ]
+    reader = shadow.stored()
+
+    def held(run_id):
+        return [(c.name, c.ran, c.args) for c in reader.load_run(run_id).events]
+
+    assert held(process) == [
+        ("crm.delete_stale", "shadow", {"cutoff": "2025-06-01"}),
+        ("crm.find_accounts", "real", {"segment": "smb"}),
+    ]
+    assert [(name, ran) for name, ran, _ in held(run.run_id)] == [
+        ("crm.find_accounts", "real"),
+        ("crm.upsert_account", "shadow"),
+    ]
+    assert reader.load_run(UNATTRIBUTED).events == []
+    assert shadow.tool_call_lines() == [
+        "shadow    write     tool crm.delete_stale -> ok",
+        "real      read      tool crm.find_accounts -> ok",
+        "real      read      tool crm.find_accounts -> ok",
+        "shadow    write     tool crm.upsert_account -> ok",
+    ]
+    assert [line for line in shadow.summary() if "○ tool" in line] == [
+        "  ○ tool crm.delete_stale  shadow stand-in ran",
+        "  ○ tool crm.upsert_account  shadow stand-in ran",
+    ]
+    # The read after the stood-in delete still sees the stale account: no tool overlay, as in
+    # `read_after_write`. Bare, it was really deleted.
+    assert [(e["stale"], e["smb"]) for e in shadow.events("housekeeping")] == [(0, 2)]
+    assert [(e["stale"], e["smb"]) for e in bare.events("housekeeping")] == [(1, 1)]
+    assert rows(shadow) == SEED
+    assert rows(bare) == [
+        ("acc_1", "Acme", "smb", "2026-01-01", 50, None),
+        ("acc_3", "Initech", "enterprise", "2026-06-01", 0, None),
+    ]
+
+
+def test_http_made_inside_a_write_stand_in_is_an_ordinary_exchange_of_the_run(run_workflow):
+    """`sync_industry`'s stand-in checks the account upstream before saying what it would have
+    written. Its request is the run's like any other: labelled by the SDK, forwarded, printed and
+    stored in the run, before the tool call, which is posted once the stand-in returned, with no
+    link between them (#76). Bare, the real body writes the row and makes no request at all."""
+    shadow = run_workflow(W, "stand_in_http", "shadow")
+    bare = run_workflow(W, "stand_in_http", "bare")
+    [run] = shadow.sdk_runs()
+    assert [(c["label"], c["status"], c["answered_by"], c["run"]) for c in shadow.calls()] == [
+        ("stand_in_check", 200, None, run.run_id)
+    ]
+    assert shadow.exchange_lines() == [
+        "live      read      GET enrich.internal/v1/companies/acc_1 -> 200"
+    ]
+    assert shadow.tool_call_lines() == ["shadow    write     tool crm.sync_industry -> ok"]
+    events = shadow.stored().load_run(run.run_id).events
+    assert [type(e).__name__ for e in events] == ["Exchange", "ToolCall"]
+    assert events[0].request.path == "/v1/companies/acc_1"
+    assert events[1].result == {
+        "stood_in": True,
+        "industry": "aerospace",
+        "upstream": "manufacturing",
+    }
+    assert "  ○ tool crm.sync_industry  shadow stand-in ran" in shadow.summary()
+    assert rows(shadow) == SEED
+    assert bare.calls() == []
+    assert rows(bare)[0] == ("acc_1", "Acme", "smb", "2026-01-01", 0, "aerospace")
+
+
+def test_a_sync_tool_that_returns_a_coroutine_is_recorded_when_the_coroutine_ends(run_workflow):
+    """`schedule_followup` is sync and returns its work as a coroutine; its stand-in does the same.
+    The call ends when the coroutine does (#76), so the read tool the coroutine awaits is stored
+    before it, though the agent called it after, and the stored result is what the coroutine
+    returned, not the coroutine. `lookup_owner` is an async read tool, awaited in the run's event
+    loop. Last, `Outbox.send_reminder`, an async static method whose stand-in is a static method
+    in the same class body: judged as the async function inside it, so accepted, and run in the
+    write's place (#76)."""
+    shadow = run_workflow(W, "async_tools", "shadow")
+    bare = run_workflow(W, "async_tools", "bare")
+    assert shadow.tools() == [
+        ("crm.lookup_owner", "real"),
+        ("crm.schedule_followup", "shadow"),
+        ("crm.lookup_owner", "real"),
+        ("crm.send_reminder", "shadow"),
+    ]
+    [run] = shadow.sdk_runs()
+    first, inner, schedule, remind = shadow.stored().load_run(run.run_id).events
+    assert [(c.name, c.ran) for c in (first, inner, schedule, remind)] == [
+        ("crm.lookup_owner", "real"),
+        ("crm.lookup_owner", "real"),
+        ("crm.schedule_followup", "shadow"),
+        ("crm.send_reminder", "shadow"),
+    ]
+    assert schedule.args == {"account_id": "acc_1", "days": 7}
+    owner = "owner@acme.example"
+    assert schedule.result == {"stood_in": True, "owner": owner, "in_days": 7}
+    assert inner.result == first.result == {"id": "acc_1", "owner": owner}
+    assert schedule.started_at <= inner.started_at <= inner.ended_at <= schedule.ended_at
+    assert (remind.args, remind.result) == (
+        {"account_id": "acc_1", "owner": owner},
+        {"stood_in": True, "to": owner},
+    )
+    assert shadow.tool_call_lines() == [
+        "real      read      tool crm.lookup_owner -> ok",
+        "real      read      tool crm.lookup_owner -> ok",
+        "shadow    write     tool crm.schedule_followup -> ok",
+        "shadow    write     tool crm.send_reminder -> ok",
+    ]
+    assert [line for line in shadow.summary() if "○ tool" in line] == [
+        "  ○ tool crm.schedule_followup  shadow stand-in ran",
+        "  ○ tool crm.send_reminder  shadow stand-in ran",
+    ]
+    assert shadow.result()["scheduled"] == {"stood_in": True, "owner": owner, "in_days": 7}
+    assert shadow.result()["reminded"] == {"stood_in": True, "to": owner}
+    assert files(shadow) == ["crm.sqlite3"]
+    assert bare.result()["scheduled"] == {"scheduled": "acc_1", "owner": owner, "in_days": 7}
+    assert bare.result()["reminded"] == {"sent": "acc_1", "to": owner}
+    assert files(bare) == ["crm.sqlite3", "followups.jsonl", "outbox.jsonl"]

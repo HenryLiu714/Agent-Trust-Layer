@@ -12,10 +12,10 @@ from urllib.parse import parse_qs
 import pytest
 
 import irimi
-from examples.workflows.w03_queue_worker.agent import CLIENTS, POOLED
+from examples.workflows.w03_queue_worker.agent import CLIENTS, LEDGER, POOLED
 from examples.workflows.w03_queue_worker.scenarios import AGENT_VERSION
 from irimi.exchange import Exchange
-from irimi.trace import ErrorInfo
+from irimi.trace import UNATTRIBUTED, ErrorInfo, ToolCall
 
 W = "w03_queue_worker"
 AGENT = "examples.workflows.w03_queue_worker.agent"
@@ -407,3 +407,151 @@ def test_a_task_a_sync_trigger_returns_files_its_calls_in_the_run_that_already_e
         assert min(e.started_at for e in events) > record.ended_at
     assert reader.load_run(shadow.process_run_id()).events == []
     assert shadow.exchange_lines().count(REFUND_LINE) == 2
+
+
+# -- the worker's ledger tools: tool calls under concurrency (#76) --------------------------------
+
+
+def stored_tool_calls(shadow, run_id):
+    return [e for e in shadow.stored().load_run(run_id).events if isinstance(e, ToolCall)]
+
+
+def amount_of(charge: str) -> int:
+    return 100 + int(charge.removeprefix("ch_Q"))
+
+
+def test_tool_calls_from_four_threads_each_land_in_their_own_run(run_workflow):
+    """`threads_8` with the ledger: each message's read tool runs on its pool thread, and its write
+    tool in the refund thread `sdk.propagate` handed the run to. Eight runs on four threads, and
+    each holds its own two calls, for its own charge, and no other run's: none lost, none mixed,
+    none left to the process run (#76). Bare, the eight refunds really reach the ledger."""
+    shadow = run_workflow(W, "ledger_threads_8", "shadow")
+    bare = run_workflow(W, "ledger_threads_8", "bare")
+    found = stored_by_charge(shadow, lambda args: args["message"])
+    assert sorted(found) == [f"ch_Q{i}" for i in range(8)]
+    for charge, record in found.items():
+        calls = stored_tool_calls(shadow, record.run_id)
+        assert [(c.name, c.ran, c.args, c.result) for c in calls] == [
+            (f"{AGENT}.ledger_balance", "real", {"charge": charge}, 0),
+            (
+                f"{AGENT}.record_refund",
+                "shadow",
+                {"charge": charge, "amount": amount_of(charge)},
+                {"recorded": False, "charge": charge},
+            ),
+        ]
+    assert stored_tool_calls(shadow, shadow.process_run_id()) == []
+    assert Counter(shadow.tool_call_lines()) == {
+        f"real      read      tool {AGENT}.ledger_balance -> ok": 8,
+        f"shadow    write     tool {AGENT}.record_refund -> ok": 8,
+    }
+    tool_lines = [line for line in shadow.summary() if "○ tool" in line]
+    assert tool_lines == [f"  ○ tool {AGENT}.record_refund  shadow stand-in ran"] * 8
+    assert shadow.query(LEDGER, "SELECT * FROM refunds") == []
+    assert sorted(bare.query(LEDGER, "SELECT * FROM refunds")) == [
+        (f"ch_Q{i}", 100 + i) for i in range(8)
+    ]
+
+
+def test_async_tool_calls_from_eight_tasks_each_land_in_their_task_s_run(run_workflow):
+    """`asyncio_8` with the ledger: an async read, an async write and a sync read that returns a
+    coroutine, awaited in each message's own task, eight at once on one event loop, every one
+    yielding to the others mid-call. Each run holds its three calls in the order its task made
+    them (#76). The coroutine read's call is recorded with the list the coroutine returned: the
+    ledger as the stood-in write left it, empty, where bare it holds the refund (no tool
+    overlay, as W6's `read_after_write` pins)."""
+    shadow = run_workflow(W, "ledger_asyncio_8", "shadow")
+    bare = run_workflow(W, "ledger_asyncio_8", "bare")
+    found = stored_by_charge(shadow, lambda args: args["message"])
+    assert sorted(found) == [f"ch_Q{i}" for i in range(8)]
+    for charge, record in found.items():
+        assert record.outcome == "ok"
+        calls = stored_tool_calls(shadow, record.run_id)
+        assert [(c.name, c.ran, c.args, c.result) for c in calls] == [
+            (f"{AGENT}.ledger_balance_async", "real", {"charge": charge}, 0),
+            (
+                f"{AGENT}.record_refund_async",
+                "shadow",
+                {"charge": charge, "amount": amount_of(charge)},
+                {"recorded": False, "charge": charge},
+            ),
+            (f"{AGENT}.ledger_history", "real", {"charge": charge}, []),
+        ]
+    assert stored_tool_calls(shadow, shadow.process_run_id()) == []
+    assert len(shadow.tool_call_lines()) == 24
+    for result, history in ((shadow, lambda charge: []), (bare, lambda c: [amount_of(c)])):
+        assert {e["charge"]: e["history"] for e in result.events("ledger")} == {
+            f"ch_Q{i}": history(f"ch_Q{i}") for i in range(8)
+        }
+
+
+@pytest.mark.skipif(
+    bool(getattr(sys.flags, "thread_inherit_context", 0)),
+    reason="threads inherit their creator's context on this build",
+)
+def test_a_tool_called_in_a_thread_that_lost_its_run_lands_in_the_process_run(run_workflow):
+    """`unpropagated_thread` with the ledger: the write tool is called in the refund thread,
+    started without `sdk.propagate`, so it is in no run, as that thread's request is (#75). Its
+    call is recorded in the process run `IRIMI_RUN` names, still stood in, and the read tool,
+    called on the trigger's own thread, in the message's run (#76)."""
+    shadow = run_workflow(W, "ledger_unpropagated", "shadow")
+    runs = {e["run"]: e for e in shadow.events("run.start")}
+    assert len(runs) == 2
+    found = stored_by_charge(shadow, lambda args: args["message"])
+    for charge, record in found.items():
+        calls = stored_tool_calls(shadow, record.run_id)
+        assert [(c.name, c.args) for c in calls] == [
+            (f"{AGENT}.ledger_balance", {"charge": charge})
+        ]
+    process = stored_tool_calls(shadow, shadow.process_run_id())
+    assert sorted((c.name, c.ran, c.args["charge"]) for c in process) == [
+        (f"{AGENT}.record_refund", "shadow", "ch_Q0"),
+        (f"{AGENT}.record_refund", "shadow", "ch_Q1"),
+    ]
+    assert [t["run"] for t in shadow.events("tool") if t["kind"] == "write"] == [None, None]
+    assert shadow.stored().load_run(UNATTRIBUTED).events == []
+
+
+def test_tools_on_a_worker_s_methods_keep_their_receiver_and_leave_it_out_of_the_args(
+    run_workflow,
+):
+    """The ledger as the `Worker`'s own methods (#76): `fee`, a static method, `journal`, a class
+    method, each with `@sdk.tool` written above the descriptor, and `ack`, a plain method. Each is
+    named by its `module.qualname`, `Worker.` included; the receiver is left out of the stored
+    args, as a trigger's is (#74); and each stand-in is called as its method is, the class
+    method's with the class and the plain method's with the worker, which their results show."""
+    shadow = run_workflow(W, "ledger_worker", "shadow")
+    bare = run_workflow(W, "ledger_worker", "bare")
+    found = stored_by_charge(shadow, lambda args: args["message"])
+    assert sorted(found) == [f"ch_Q{i}" for i in range(4)]
+    for charge, record in found.items():
+        amount = amount_of(charge)
+        fee = amount // 10
+        message = record.trigger.args["message"]
+        calls = stored_tool_calls(shadow, record.run_id)
+        assert [(c.name, c.kind, c.ran, c.args, c.result) for c in calls] == [
+            (f"{AGENT}.Worker.fee", "read", "real", {"amount": amount}, fee),
+            (
+                f"{AGENT}.Worker.journal",
+                "write",
+                "shadow",
+                {"charge": charge, "net": amount - fee},
+                {"journaled": False, "by": "Worker"},
+            ),
+            (
+                f"{AGENT}.Worker.ack",
+                "write",
+                "shadow",
+                {"message": message},
+                {"acked": False, "queue": "refunds"},
+            ),
+        ]
+    assert [line for line in shadow.summary() if "○ tool" in line] == [
+        f"  ○ tool {AGENT}.Worker.journal  shadow stand-in ran",
+        f"  ○ tool {AGENT}.Worker.ack  shadow stand-in ran",
+    ] * 4
+    assert shadow.query(LEDGER, "SELECT * FROM acks") == []
+    assert [(e["journal"], e["ack"]) for e in bare.events("ledger")] == [
+        ({"journaled": True, "by": "Worker"}, {"acked": True, "queue": "refunds"})
+    ] * 4
+    assert len(bare.query(LEDGER, "SELECT * FROM acks")) == 4

@@ -119,5 +119,12 @@ WORKFLOW = Workflow(
             extra_maps={"subagent.yaml": SUBAGENT_MAP},
             doc="two orchestrator runs: each sub-agent call joins its own parent's run",
         ),
+        "nested_tools": Scenario(
+            ("--runs", "2", "--record"),
+            setup=_world,
+            extra_maps={"subagent.yaml": SUBAGENT_MAP},
+            doc="nested_runs with tools: the sub-agent's read tool and the orchestrator's write "
+            "tool each land in their own parent's run (#76)",
+        ),
     },
 )

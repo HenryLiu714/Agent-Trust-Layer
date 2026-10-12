@@ -28,7 +28,7 @@ def test_a_clean_night_pages_everything_and_posts_one_summary(run_workflow):
         '  ○ post to #C0RECON: "reconciled 0 for 2026-09-27"  unvalidated (L3 preconditions passed)'
         in shadow.summary()
     )
-    # The fallback SDK's run wrapped the whole job, and the read tool ran for real inside it.
+    # The SDK's run wrapped the whole job, and the read tool ran for real inside it.
     run_id = shadow.events("run.start")[0]["run"]
     assert [t["run"] for t in shadow.events("tool")] == [run_id]
     # #76's default tool name is the real module's, because the harness launches every agent

@@ -536,6 +536,7 @@ def test_a_start_re_posted_after_its_end_reopens_the_run(run_workflow):
         "process_start": (400, "control"),
         "process_tool": (204, "control"),
         "process_end": (400, "control"),
+        "unattributed_tool": (204, "control"),
     }
     stored = shadow.stored().load_run("ctl-restarted")
     assert stored.record == sdk_record(shadow, "ctl-restarted", "restarted_again", None)
@@ -558,6 +559,7 @@ def test_the_process_runs_start_and_end_are_irimis_and_only_its_tool_calls_are_t
         "process_start": refused,
         "process_tool": None,
         "process_end": refused,
+        "unattributed_tool": None,
     }
     stored = shadow.stored().load_run(process)
     assert stored.events == [stored_tool_call(shadow, process, "process_tool")]
@@ -577,6 +579,13 @@ def test_the_process_runs_start_and_end_are_irimis_and_only_its_tool_calls_are_t
         "",
         "  0 exchanges · 0 live · 0 delegated · 0 virtualized",
     ]
+    # A tool call posted for no run at all, as the SDK posts one where there is no process run
+    # (`irimi serve`, #77), is taken too, and filed in `unattributed/`: the one post that may name
+    # it, where a start or an end is refused (`control_runs`, #76).
+    unattributed = shadow.stored().load_run(trace.UNATTRIBUTED).events
+    assert unattributed == [stored_tool_call(shadow, trace.UNATTRIBUTED, "unattributed_tool")]
+    # Printed like the process run's: one line each, the same text, so counted, not looked for.
+    assert shadow.tool_call_lines() == ["real      read      tool look_up -> ok"] * 2
     # Bare, there is no process run: the agent posts for a stand-in id, to the fake internet.
     bare = run_workflow(W, "control_hazards", "bare")
     assert [e["id"] for e in bare.events("process_run")] == ["no-process-run"]

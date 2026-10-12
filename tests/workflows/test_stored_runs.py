@@ -360,7 +360,10 @@ def test_every_run_the_process_stored_prints_the_summary_irimi_shadow_printed(
     The events are put back in the order the engine reported them, the order they ended in, since
     a read hangs under the write before it. W4's webhook post is the case this caught: its stored
     path is a placeholder that no route matches, and its line lost its `human:` sentence until the
-    route was found by its stored operation instead."""
+    route was found by its stored operation instead.
+
+    The tool calls too, each a line under the writes when its stand-in ran (#76): W1's reply, W2's
+    forty ledger marks and W6's six database and file writes."""
     shadow = run_workflow(name, scenario, "shadow")
     live = shadow.summary()
     if not live:
@@ -370,6 +373,7 @@ def test_every_run_the_process_stored_prints_the_summary_irimi_shadow_printed(
     events = [event for run_id in ids for event in reader.load_run(run_id).events]
     exchanges = sorted((e for e in events if isinstance(e, Exchange)), key=lambda e: e.ended_at)
     telemetry = [e for e in events if isinstance(e, TelemetrySeen)]
+    tool_calls = sorted((e for e in events if isinstance(e, ToolCall)), key=lambda e: e.ended_at)
     process = reader.load_run(shadow.process_run_id()).record
-    union = StoredRun(process, [*exchanges, *telemetry])
+    union = StoredRun(process, [*exchanges, *telemetry, *tool_calls])
     assert no_elapsed(report.stored_summary_lines(union, shadow.maps())) == no_elapsed(live)

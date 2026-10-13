@@ -394,3 +394,89 @@ def test_sigterm_before_the_command_starts_runs_nothing(home, monkeypatch, capsy
     assert "terminated before the command started" in capsys.readouterr().err
     assert not (home / "SHOULD_NOT_EXIST").exists()
     assert StoreReader(home / "store").list_runs() == []
+
+
+def test_sigterm_while_the_command_starts_is_passed_to_it_once_it_exists(home, monkeypatch):
+    """A SIGTERM that lands after the command was started but before irimi holds it, when there is
+    no command to pass it to, is held and passed on as the command is adopted (#77): the command
+    ends at once, and the run is stored with its 143."""
+    import signal
+    import subprocess
+    import time
+
+    from irimi.store import StoreReader
+
+    real = subprocess.Popen
+
+    def started_then_terminated(*args, **kwargs):
+        proc = real(*args, **kwargs)
+        signal.raise_signal(signal.SIGTERM)
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", started_then_terminated)
+    started = time.monotonic()
+    assert main(["shadow", *_py("import time; time.sleep(60)")]) == 143
+    assert time.monotonic() - started < 30
+    [record] = StoreReader(home / "store").list_runs()
+    assert (record.outcome, record.exit_code) == ("error", 143)
+
+
+def test_sigterm_after_the_command_exited_signals_no_pid(home, monkeypatch):
+    """Once the command has been reaped its pid may be another process's, so a SIGTERM that comes
+    while irimi ends the run and closes the store is passed to no one (#77): the run keeps the
+    command's own exit, and irimi closes the store and exits with it."""
+    import os
+    import signal
+
+    from irimi import runner
+    from irimi.store import StoreReader
+
+    killed: list[tuple[int, int]] = []
+    real_kill, real_end = os.kill, runner.end_process_run
+
+    def kill(pid, signum):
+        killed.append((pid, signum))
+        real_kill(pid, signum)
+
+    def terminated_while_ending(*args, **kwargs):
+        signal.raise_signal(signal.SIGTERM)
+        return real_end(*args, **kwargs)
+
+    monkeypatch.setattr(os, "kill", kill)
+    monkeypatch.setattr(runner, "end_process_run", terminated_while_ending)
+    assert main(["shadow", *_py("pass")]) == 0
+    assert killed == []
+    [record] = StoreReader(home / "store").list_runs()
+    assert (record.outcome, record.exit_code) == ("ok", 0)
+
+
+def test_an_ignored_sigterm_stays_ignored_and_a_thread_installs_nothing(home, monkeypatch):
+    """`irimi shadow` started with SIGTERM ignored leaves it ignored, as serve does, and one run off
+    the main thread, where Python allows no handler, installs none and still runs its command
+    (#77)."""
+    import signal
+
+    from irimi import cli
+
+    during: list[object] = []
+    prepare = cli._prepare_run
+
+    def seen(*args, **kwargs):
+        during.append(signal.getsignal(signal.SIGTERM))
+        return prepare(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "_prepare_run", seen)
+    saved = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    try:
+        assert main(["shadow", *_py("pass")]) == 0
+        assert signal.getsignal(signal.SIGTERM) is signal.SIG_IGN
+    finally:
+        signal.signal(signal.SIGTERM, saved)
+    assert during == [signal.SIG_IGN]
+
+    codes: list[int] = []
+    thread = threading.Thread(target=lambda: codes.append(main(["shadow", *_py("exit(3)")])))
+    thread.start()
+    thread.join(60)
+    assert codes == [3]
+    assert during[1] is saved

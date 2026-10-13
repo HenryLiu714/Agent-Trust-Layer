@@ -126,6 +126,14 @@ def test_every_workflow_has_scenarios_and_a_summary():
         assert all(s.doc for s in wf.scenarios.values()), f"{name}: every scenario needs a doc"
 
 
+def test_every_scenario_runs_under_serve_too():
+    """Serve is how irimi runs beside an agent it did not launch, so every scenario is held to the
+    checks above under it as well (#77). A scenario whose `serve_flags` became None would drop out
+    of every serve check here silently: none may, until one needs irimi to be its agent's parent
+    and says why."""
+    assert serve_cases() == CASES
+
+
 @pytest.mark.parametrize("mode", ["shadow", "serve"])
 def test_the_corpus_gives_every_invariant_something_to_catch(run_workflow, mode):
     """An invariant nothing exercises passes by default. Each needs at least one scenario whose

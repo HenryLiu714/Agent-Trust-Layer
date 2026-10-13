@@ -420,7 +420,9 @@ def test_a_bomb_on_the_read_reaches_the_agent_whole_and_is_recorded_empty(
         (BODY_TRUNCATED_FLAG,),
     )
     assert stored.response.header("content-encoding") == encoding
-    assert {r.dropped_events for r in shadow.stored().list_runs()} == {0}
+    # The run and, under `irimi shadow`, the process run; serve mode has none (#77).
+    runs = 2 if mode == "shadow" else 1
+    assert [r.dropped_events for r in shadow.stored().list_runs()] == [0] * runs
 
 
 @pytest.mark.parametrize("scenario", sorted(BOMBED))

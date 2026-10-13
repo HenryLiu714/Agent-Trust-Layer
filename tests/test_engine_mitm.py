@@ -2312,9 +2312,14 @@ def test_a_refused_target_is_not_a_write_either(tmp_path, monkeypatch, target):
 
     Nothing was performed: not at the target, not at the real service, not by the fake. The
     overlay would have handed the agent back a write irimi refused to send anywhere.
+
+    It is asked with the port and the address the connection reached irimi at, which is irimi's
+    own listener too (#77).
     """
+    asked = []
 
     def refuse(url, port, local_address=""):
+        asked.append((url, port, local_address))
         raise delegation.TargetRefused("refusing this target")
 
     monkeypatch.setattr(delegation, "refuse_self_target", refuse)
@@ -2328,6 +2333,7 @@ def test_a_refused_target_is_not_a_write_either(tmp_path, monkeypatch, target):
     finally:
         stop()
     assert status == 502 and json.loads(data)["error"]["type"] == "irimi_target_failed"
+    assert asked == [(f"http://127.0.0.1:{target}/w", eng.listen_port(), "127.0.0.1")]
     # Still recorded - a write irimi could not answer is exactly what the trace has to show.
     assert [ex.flags for ex in seen] == [("fidelity:delegated", "target-failed")]
     assert addon.write_log == [], "a write performed nowhere is in the overlay's write log"

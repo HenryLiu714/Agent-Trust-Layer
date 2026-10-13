@@ -528,7 +528,9 @@ def test_a_gzip_bomb_streams_to_the_agent_whole_and_is_recorded_cut(run_workflow
     assert text_deltas(stream.response.body) == said
     assert stream.response.body == recorded
     assert stream.stream_chunks == (len(stream.response.body),)
-    assert {r.dropped_events for r in shadow.stored().list_runs()} == {0}
+    # The run and, under `irimi shadow`, the process run; serve mode has none (#77).
+    runs = 2 if mode == "shadow" else 1
+    assert [r.dropped_events for r in shadow.stored().list_runs()] == [0] * runs
     written = [
         path
         for root in (shadow.home, shadow.cwd, shadow.tmp)

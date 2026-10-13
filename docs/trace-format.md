@@ -15,6 +15,7 @@ the first column of each field table below is exactly the keys its encoder write
   runs/<run_id>/run.json        the RunRecord (trace.run_to_json), rewritten atomically
   runs/<run_id>/events.jsonl    one event per line, in seq order
   unattributed/events.jsonl     events whose run_id is trace.UNATTRIBUTED or unusable (below)
+  serve.lock                    empty; a serve holds an exclusive flock on it while it runs
 ```
 
 - A **run id** is also a directory name, so it must match `^[A-Za-z0-9_-]{1,64}$`
@@ -48,7 +49,11 @@ the first column of each field table below is exactly the keys its encoder write
   read. A blob a crash tore is rewritten by the next event that needs it.
 - One process writes a given run. Several may share a root: run directories never collide, and a
   blob is the same bytes whoever writes it. `unattributed/events.jsonl` is the one file they share,
-  and there each writer numbers its own lines, so a `seq` may repeat across processes.
+  and there each writer numbers its own lines, so a `seq` may repeat across processes. A serve is
+  what fills that file, every request no run names, so a root has at most one: it holds an
+  exclusive `flock` on `serve.lock` while it runs, a second serve on the root refuses to start, and
+  the kernel releases the lock when the process exits, however it exits (#77). `irimi shadow`
+  takes no lock.
 - Everything under the root is private to its owner: directories `0700`, files `0600`. Redaction
   hides credentials, not the customers, amounts and messages around them.
 - A body over 8 MiB (`store.MAX_STORED_BODY`) is redacted whole, then cut: its first 8 MiB are

@@ -6,7 +6,7 @@ their tests run on every `uv run pytest -q`.
 
 ```
 uv run python -m examples.workflows                                  # list workflows and scenarios
-uv run python -m examples.workflows w09_scope_gauntlet verbs         # run one scenario, both modes
+uv run python -m examples.workflows w09_scope_gauntlet verbs         # one scenario, every mode
 uv run python -m examples.workflows w01_ticket_triage full_refund --mode shadow
 uv run pytest -q tests/workflows                                     # the whole corpus
 ```
@@ -17,7 +17,7 @@ uv run pytest -q tests/workflows                                     # the whole
 |---|---|---|---|
 | W1 | `w01_ticket_triage` | support-ticket webhook | a multi-turn LLM tool loop; L3 on the model's refunds (one too large, one refused because the overlay shows the first); one refund sent twice under one key (#46); replay divergence mid-conversation (#82-#85) |
 | W2 | `w02_nightly_reconcile` | scheduled `sdk.run` | pagination, a cursor naming a minted id (#53), 40 writes in one run, a non-replayable trigger |
-| W3 | `w03_queue_worker` | queue, threads and asyncio | run attribution under concurrency (#74, #75), six HTTP clients the SDK labels (urllib, `http.client`, `requests`, `httpx` sync and async) or that labels itself (a raw asyncio client, #75), eight runs sharing two one-connection pools (#75), two runs sharing one engine's write log; each way the SDK marks a run: triggers on functions, on a worker's methods and on a sync function that returns a coroutine, `async with sdk.run`, and a run cancelled at shutdown (#74); a Task a sync trigger returns, whose calls land in its ended run (#75, pinned `LOOKS WRONG`); the worker's own ledger as `@sdk.tool`s, called from four threads, from eight tasks and from a thread that lost its run, and as a worker's static, class and plain methods, each call in its own run (#76) |
+| W3 | `w03_queue_worker` | queue, threads and asyncio | run attribution under concurrency (#74, #75), six HTTP clients the SDK labels (urllib, `http.client`, `requests`, `httpx` sync and async) or that labels itself (a raw asyncio client, #75), eight runs sharing two one-connection pools (#75), two runs sharing one engine's write log, as decided in #77, whose second run's summary calls the first run's faked refund its own (pinned `LOOKS WRONG`); eight runs and a lost run under `irimi shadow --serve`, each run's summary printed as it ends and the lost run's refunds `unattributed` (#77); each way the SDK marks a run: triggers on functions, on a worker's methods and on a sync function that returns a coroutine, `async with sdk.run`, and a run cancelled at shutdown (#74); a Task a sync trigger returns, whose calls land in its ended run (#75, pinned `LOOKS WRONG`); the worker's own ledger as `@sdk.tool`s, called from four threads, from eight tasks and from a thread that lost its run, and as a worker's static, class and plain methods, each call in its own run (#76) |
 | W4 | `w04_slack_ops_bot` | Slack Events API | Slack fidelity: minted threads (#52), names vs ids (#44), `missing_scope`, an archived channel, an L0 `reactions.add`, duplicate delivery, the webhook path (#87) |
 | W5 | `w05_dispute_responder` | signed Stripe webhook | bytes trigger args, `would_fire` (#47), an event the agent's own write would fire, a live read whose response carries a credential (a payment intent's `client_secret`) stored redacted (#70) |
 | W6 | `w06_crm_db_agent` | CLI | tools the proxy cannot see (#76, #83): database and file writes, stand-ins, decoration-time errors; a stand-in that raises, re-raised as the same object, and a retry; tools called in no run, filed in the process run; HTTP made inside a stand-in; an async read, a sync write that returns a coroutine, and an async static method whose stand-in is a static method beside it |
@@ -46,6 +46,14 @@ so it keeps its real module name; `scenarios.py` seeds the fake services per sce
   function of the prompt, so a changed prompt changes the answer deterministically.
 - **Bare vs shadow.** Each scenario runs twice. The bare run is the baseline, and its writes land
   on the fake services. The shadow run goes through `irimi shadow`, and nothing may land.
+- **Serve** (#77). A scenario with `serve_flags` runs a third time, under `irimi shadow --serve`
+  with those flags: irimi in the harness's process on a thread of its own, where the fake internet
+  resolves, and the agent beside it as its own process, given the README's serve-mode variables
+  and no `IRIMI_RUN`, so a request no SDK run names is `unattributed`. irimi is stopped by its
+  `stop` event, not a signal, when the agent exits. W3's `threads_8`, `asyncio_8`,
+  `unpropagated_thread` and `shared_charge`, W4's `duplicate_delivery`, W5's `cascade`, W6's
+  `outside_run`, W8's `run_header_across_hop` and W9's `self_addressed`, with irimi bound to
+  `0.0.0.0`, run this way. `Result.run_blocks()` is each run's printed summary by run id.
 - **The observation log.** Each agent logs what it saw (status, `Irimi-Answered-By`, which tool
   ran) to a JSON-lines file. The tests assert on that as well as on irimi's output, through
   `Result` (`harness/run.py`): `calls()`, `answered()`, `by_label()`, `tools()`, `events()`,
@@ -85,7 +93,9 @@ so it keeps its real module name; `scenarios.py` seeds the fake services per sce
 
 ## The universal invariants
 
-`tests/workflows/test_invariants.py` holds every scenario of every workflow to five rules:
+`tests/workflows/test_invariants.py` holds every scenario of every workflow to five rules, and
+every serve run to the same five (#77), and to printing one `--- run <id> ---` block per run it
+ended, equal to that run's stored summary:
 
 1. No write reached a fake service under shadow. A scenario marked `leaks` inverts this rule,
    because it exists to show an escape. Every live answer the agent saw must have come from a

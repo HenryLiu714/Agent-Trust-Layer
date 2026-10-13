@@ -50,6 +50,9 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 STALL_S = 2.0
 # How long `reset-stream` waits between its first chunk and the reset (#71).
 RESET_AFTER_CHUNK_S = 0.5
+# The longest a held stream (`Resp.hold`) waits before it ends anyway, so a scenario whose release
+# never comes fails on what the agent saw rather than hanging the corpus.
+HOLD_TIMEOUT_S = 30.0
 # The listen backlog. socketserver's default of 5 drops connections from W3's concurrent runs on
 # macOS, where a dropped SYN is retried a second later and reads as a flaky timeout.
 BACKLOG = 128
@@ -160,6 +163,10 @@ class Resp:
     # with chunked transfer encoding as a real LLM API frames one (#71).
     chunks: list[bytes] | None = None
     chunk_delay: float = 0.0
+    # A stream whose last chunk waits for this to be set, up to HOLD_TIMEOUT_S: the service
+    # decides when the stream ends, not the clock, so a scenario can end it after something the
+    # agent does (W7 `hand_off`, #77).
+    hold: threading.Event | None = None
 
 
 class Service(Protocol):
@@ -447,6 +454,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self.send_header(name, value)
             self.end_headers()
             for i, chunk in enumerate(resp.chunks):
+                if resp.hold is not None and i == len(resp.chunks) - 1:
+                    resp.hold.wait(HOLD_TIMEOUT_S)
                 self.wfile.write(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
                 self.wfile.flush()
                 if reset_after_first_chunk and i == 0:

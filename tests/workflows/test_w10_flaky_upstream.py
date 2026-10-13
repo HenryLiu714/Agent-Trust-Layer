@@ -18,6 +18,8 @@ from irimi.exchange import BODY_TRUNCATED_FLAG, UPSTREAM_ERROR_FLAG, Exchange
 from irimi.trace import ErrorInfo
 
 W = "w10_flaky_upstream"
+# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi (#77).
+MODES = ("shadow", "serve")
 # What a shadow run holds besides a body it decodes: its exchanges, its store's queue, the fake
 # internet's answers. Measured at 2 to 45 MiB on top of twice the cap (#94).
 MEMORY_MARGIN = 64 * 1024 * 1024
@@ -40,11 +42,12 @@ def retries(result):
     return [(r["label"], r["reason"]) for r in result.events("retry")]
 
 
-def listed_status(result) -> str:
-    """The process run's status column in `irimi runs list` (#72)."""
+def listed_status(result, run_id: str | None = None) -> str:
+    """A run's status column in `irimi runs list` (#72): the process run's, or `run_id`'s."""
     code, out, err = result.runs("list")
     assert (code, err) == (0, [])
-    [line] = [line for line in out if line.startswith(result.process_run_id() + "  ")]
+    run_id = run_id or result.process_run_id()
+    [line] = [line for line in out if line.startswith(run_id + "  ")]
     return line.split("  ")[3]
 
 
@@ -57,28 +60,32 @@ def shown_outcome(result) -> list[str]:
 
 
 def test_a_rate_limited_read_fails_under_shadow_too_and_is_retried(run_workflow):
-    for mode in ("bare", "shadow"):
+    for mode in ("bare", *MODES):
         result = run_workflow(W, "rate_limited", mode)
         assert statuses(result, "list_charges") == [429, 200]
         assert retries(result) == [("list_charges", 429)]
-    lines = run_workflow(W, "rate_limited", "shadow").exchange_lines()
-    assert lines[:2] == [
-        "live      read      GET api.stripe.com/v1/charges -> 429",
-        "live      read      GET api.stripe.com/v1/charges -> 200",
-    ]
+    for mode in MODES:
+        lines = run_workflow(W, "rate_limited", mode).exchange_lines()
+        assert lines[:2] == [
+            "live      read      GET api.stripe.com/v1/charges -> 429",
+            "live      read      GET api.stripe.com/v1/charges -> 200",
+        ]
 
 
 def test_a_server_error_on_a_read_is_forwarded_and_retried(run_workflow):
-    for mode in ("bare", "shadow"):
+    for mode in ("bare", *MODES):
         result = run_workflow(W, "server_error_read", mode)
         assert statuses(result, "list_charges") == [500, 200]
-    shadow = run_workflow(W, "server_error_read", "shadow")
-    assert shadow.exchange_lines()[0] == "live      read      GET api.stripe.com/v1/charges -> 500"
-    assert REFUND_LINE in shadow.summary()
+    for mode in MODES:
+        shadow = run_workflow(W, "server_error_read", mode)
+        lines = shadow.exchange_lines()
+        assert lines[0] == "live      read      GET api.stripe.com/v1/charges -> 500"
+        assert REFUND_LINE in shadow.summaries()
 
 
-def test_a_read_the_agent_abandoned_is_recorded_as_an_upstream_error(run_workflow):
-    shadow = run_workflow(W, "read_timeout", "shadow")
+@pytest.mark.parametrize("mode", MODES)
+def test_a_read_the_agent_abandoned_is_recorded_as_an_upstream_error(run_workflow, mode):
+    shadow = run_workflow(W, "read_timeout", mode)
     assert statuses(shadow, "list_charges") == ["TimeoutError", 200]
     assert statuses(run_workflow(W, "read_timeout", "bare"), "list_charges") == [
         "TimeoutError",
@@ -102,9 +109,10 @@ def test_a_read_the_agent_abandoned_is_recorded_as_an_upstream_error(run_workflo
     assert unanswered(shadow) == [("/v1/charges", (UPSTREAM_ERROR_FLAG,))]
 
 
-def test_a_reset_on_a_read_reaches_the_agent_as_an_unstamped_502(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_a_reset_on_a_read_reaches_the_agent_as_an_unstamped_502(run_workflow, mode):
     bare = run_workflow(W, "reset_on_read", "bare")
-    shadow = run_workflow(W, "reset_on_read", "shadow")
+    shadow = run_workflow(W, "reset_on_read", mode)
     assert statuses(bare, "list_charges") == ["ConnectionResetError", 200]
     assert retries(bare) == [("list_charges", "NetworkError")]
     # LOOKS WRONG: under shadow the proxy answers the reset itself, as an HTTP 502 with no
@@ -119,7 +127,7 @@ def test_a_reset_on_a_read_reaches_the_agent_as_an_unstamped_502(run_workflow):
         "live      read      GET api.stripe.com/v1/charges -> -  [upstream-error]",
         "live      read      GET api.stripe.com/v1/charges -> 200",
     ]
-    assert REFUND_LINE in shadow.summary()
+    assert REFUND_LINE in shadow.summaries()
     # Stored as printed (#70): an exchange with no response reads back as one.
     assert unanswered(shadow) == [("/v1/charges", (UPSTREAM_ERROR_FLAG,))]
 
@@ -133,9 +141,12 @@ def unanswered(result) -> list[tuple[str, tuple[str, ...]]]:
     ]
 
 
-def test_a_failed_precondition_read_degrades_the_check_and_the_agent_never_knows(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_a_failed_precondition_read_degrades_the_check_and_the_agent_never_knows(
+    run_workflow, mode
+):
     bare = run_workflow(W, "precondition_read_fails", "bare")
-    shadow = run_workflow(W, "precondition_read_fails", "shadow")
+    shadow = run_workflow(W, "precondition_read_fails", mode)
     # The agent never reads the charge itself; only irimi's L3 check does.
     assert [r.path for r in bare.internet.requests("api.stripe.com")] == [
         "/v1/charges",
@@ -148,13 +159,14 @@ def test_a_failed_precondition_read_degrades_the_check_and_the_agent_never_knows
     )
     # The check could not be made, so the refund is faked at L2. LOOKS WRONG: with no currency
     # the L3 read would have supplied, its amount prints in minor units.
-    refunds = [line for line in shadow.summary() if "○ refund" in line]
+    refunds = [line for line in shadow.summaries() if "○ refund" in line]
     assert refunds == ["  ○ refund 500 on ch_PAYOUT1  unvalidated (L2)"]
 
 
-def test_a_reset_on_the_write_is_retried_bare_and_never_happens_under_shadow(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_a_reset_on_the_write_is_retried_bare_and_never_happens_under_shadow(run_workflow, mode):
     bare = run_workflow(W, "reset_on_write", "bare")
-    shadow = run_workflow(W, "reset_on_write", "shadow")
+    shadow = run_workflow(W, "reset_on_write", mode)
     assert statuses(bare, "refund") == ["ConnectionResetError", 200]
     assert retries(bare) == [("refund", "NetworkError")]
     # Under shadow the refund is answered by irimi and never reaches the service that resets it,
@@ -166,11 +178,13 @@ def test_a_reset_on_the_write_is_retried_bare_and_never_happens_under_shadow(run
     assert shadow.world.stripe.refunds == []
 
 
+@pytest.mark.parametrize("mode", MODES)
 def test_a_keyless_write_retried_after_a_500_is_two_posts_bare_and_one_fake_under_shadow(
     run_workflow,
+    mode,
 ):
     bare = run_workflow(W, "retry_without_key", "bare")
-    shadow = run_workflow(W, "retry_without_key", "shadow")
+    shadow = run_workflow(W, "retry_without_key", mode)
     refund_posts = [r for r in bare.internet.writes() if r.path == "/v1/refunds"]
     assert len(refund_posts) == 2
     assert all("idempotency-key" not in r.headers for r in refund_posts)
@@ -178,24 +192,26 @@ def test_a_keyless_write_retried_after_a_500_is_two_posts_bare_and_one_fake_unde
     assert len(bare.world.stripe.refunds) == 1  # the 500 was answered before Stripe acted
     # Shadow: the 500 cannot happen, the write is faked once, and the summary shows one refund.
     assert statuses(shadow, "refund") == [200]
-    assert [line for line in shadow.summary() if "○ refund" in line] == [REFUND_LINE]
+    assert [line for line in shadow.summaries() if "○ refund" in line] == [REFUND_LINE]
 
 
-def test_a_model_that_answers_prose_leads_to_no_write_but_the_status_post(run_workflow):
-    shadow = run_workflow(W, "malformed_llm", "shadow")
+@pytest.mark.parametrize("mode", MODES)
+def test_a_model_that_answers_prose_leads_to_no_write_but_the_status_post(run_workflow, mode):
+    shadow = run_workflow(W, "malformed_llm", mode)
     assert [e["text"][:5] for e in shadow.events("llm_fallback")] == ["Sure!"]
     assert shadow.calls("refund") == []
     assert (
         "live      llm       POST api.anthropic.com/v1/messages -> 200" in shadow.exchange_lines()
     )
-    assert [line for line in shadow.summary() if "○" in line] == [
+    assert [line for line in shadow.summaries() if "○" in line] == [
         '  ○ post to #C0PAYOUT: "payout sync: no action"  unvalidated (L3 preconditions passed)'
     ]
     assert len(shadow.world.llm.calls) == 1
 
 
-def test_an_agent_that_raises_after_its_write_still_shows_the_write(run_workflow):
-    shadow = run_workflow(W, "raise_after_write", "shadow")
+@pytest.mark.parametrize("mode", MODES)
+def test_an_agent_that_raises_after_its_write_still_shows_the_write(run_workflow, mode):
+    shadow = run_workflow(W, "raise_after_write", mode)
     assert shadow.exit_code == run_workflow(W, "raise_after_write", "bare").exit_code == 1
     [end] = shadow.events("run.end")
     assert (end["outcome"], end["error"]) == ("error", "RuntimeError")
@@ -204,11 +220,16 @@ def test_an_agent_that_raises_after_its_write_still_shows_the_write(run_workflow
     assert run.outcome == "error" and run.error is not None
     assert run.error.type == "builtins.RuntimeError"
     assert run.error.message.startswith("ledger export failed after refund re_")
-    summary = shadow.summary()
+    summary = shadow.summaries()
     assert REFUND_LINE in summary
     # LOOKS WRONG: the summary does not say the agent failed. Nothing in it tells this run from
     # one that finished.
     assert not any("error" in line.lower() or "exit" in line for line in summary)
+    if mode == "serve":
+        # Serve mode's block for the run is its stored summary (#77), which says no more: the
+        # run's own status is in `irimi runs list`, as the SDK ended it.
+        assert listed_status(shadow, run.run_id) == "error"
+        return
     # The stored run does say so (#70); the summary above still does not.
     assert process_run(shadow) == ("error", 1, ErrorInfo("exit", "exited 1"))
     # `irimi runs list` and `runs show` print it where the summary cannot (#72). The summary pin
@@ -217,24 +238,28 @@ def test_an_agent_that_raises_after_its_write_still_shows_the_write(run_workflow
     assert shown_outcome(shadow) == ["outcome: error", "error: exit: exited 1", "exit code: 1"]
 
 
-def test_an_agent_killed_after_its_write_leaves_a_run_with_no_end(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_an_agent_killed_after_its_write_leaves_a_run_with_no_end(run_workflow, mode):
     bare = run_workflow(W, "sigterm_mid_run", "bare")
-    shadow = run_workflow(W, "sigterm_mid_run", "shadow")
+    shadow = run_workflow(W, "sigterm_mid_run", mode)
     # 143 is 128 + SIGTERM, the shell's spelling, in both modes.
     assert (bare.exit_code, shadow.exit_code) == (143, 143)
     # The run started and never ended: an incomplete run (`outcome: None`), as stored below.
     assert len(shadow.events("run.start")) == 1
     assert shadow.events("run.end") == []
     assert shadow.calls("refund")[0]["answered_by"] == "fake-L1"
-    assert REFUND_LINE in shadow.summary()
+    if mode == "serve":
+        _killed_under_serve(shadow)
+        return
+    assert REFUND_LINE in shadow.summaries()
     # LOOKS WRONG: as after a raise, the summary ends as a finished run's does, with no word that
     # the agent was killed.
-    summary = shadow.summary()
+    summary = shadow.summaries()
     assert summary[-1] == (
         "  These writes did not happen. Would have fired: refund.created, charge.refunded."
     )
     # The header names the process run, 16 random hex characters, which can spell `143` by chance.
-    said = [line.replace(shadow.process_run_id(), "<run>").lower() for line in summary]
+    said = [line.replace(shadow.engine_run_id(), "<run>").lower() for line in summary]
     assert not any(word in line for line in said for word in ("143", "kill", "signal"))
     # The stored process run ends with the child's code, which is how the kill is visible (#70).
     assert process_run(shadow) == ("error", 143, ErrorInfo("exit", "exited 143"))
@@ -254,19 +279,38 @@ def test_an_agent_killed_after_its_write_leaves_a_run_with_no_end(run_workflow):
     )
 
 
+def _killed_under_serve(serve) -> None:
+    """Serve mode prints a run's summary when the SDK ends it (#77), and a killed agent's SDK never
+    does: no block is printed, and the run is stored `incomplete`, its faked refund in it.
+
+    LOOKS WRONG: so nothing serve prints summarizes the refund. Its exchange line went by as it
+    happened, and `irimi runs show` has it, but a shadow week's output never counts a write made
+    in a run that did not end, where `irimi shadow -- <cmd>` counted it in the process's block.
+    Telling such a run from one still going is #107's."""
+    [run] = serve.sdk_runs()
+    assert (run.run_id, run.outcome, run.ended_at) == (serve.one("run.start")["run"], None, None)
+    assert serve.run_blocks() == {} and REFUND_LINE not in serve.summaries()
+    assert listed_status(serve, run.run_id) == "incomplete"
+    code, out, err = serve.runs("show", run.run_id)
+    assert (code, err) == (0, []) and REFUND_LINE in out
+
+
 def process_run(result) -> tuple[object, object, object]:
     """`(outcome, exit_code, error)` of the process run `irimi shadow` stored."""
     (run,) = [r for r in result.stored().list_runs() if r.attribution == "process"]
     return run.outcome, run.exit_code, run.error
 
 
-def test_an_agent_interrupted_after_its_write_ends_its_run_in_keyboard_interrupt(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_an_agent_interrupted_after_its_write_ends_its_run_in_keyboard_interrupt(
+    run_workflow, mode
+):
     """Ctrl-C mid-run: Python raises KeyboardInterrupt, a BaseException, not an Exception. The SDK
     posts the run's end as it propagates (#74), so unlike after SIGTERM the run is complete:
     `error`, under `builtins.KeyboardInterrupt`, with the faked refund in it. The interrupt still
     ends the agent, 130 (128 + SIGINT) in both modes."""
     bare = run_workflow(W, "sigint_mid_run", "bare")
-    shadow = run_workflow(W, "sigint_mid_run", "shadow")
+    shadow = run_workflow(W, "sigint_mid_run", mode)
     assert (bare.exit_code, shadow.exit_code) == (130, 130)
     [end] = shadow.events("run.end")
     assert (end["outcome"], end["error"]) == ("error", "KeyboardInterrupt")
@@ -279,8 +323,12 @@ def test_an_agent_interrupted_after_its_write_ends_its_run_in_keyboard_interrupt
         "/v1/refunds",
         "fake-L1",
     )
-    assert process_run(shadow) == ("error", 130, ErrorInfo("exit", "exited 130"))
     assert bare.events("run.end") == []
+    if mode == "serve":
+        # The SDK ended the run, so serve printed its block, the faked refund in it (#77).
+        assert REFUND_LINE in shadow.run_blocks()[run.run_id]
+        return
+    assert process_run(shadow) == ("error", 130, ErrorInfo("exit", "exited 130"))
 
 
 # The kind of failure each `CONTROL_DOWN` scenario's one warning names, as the SDK logs it.
@@ -292,7 +340,10 @@ CONTROL_KIND = {
 
 
 @pytest.mark.parametrize("scenario", CONTROL_DOWN)
-def test_an_sdk_that_cannot_reach_irimi_warns_once_and_changes_nothing(run_workflow, scenario):
+@pytest.mark.parametrize("mode", MODES)
+def test_an_sdk_that_cannot_reach_irimi_warns_once_and_changes_nothing(
+    run_workflow, mode, scenario
+):
     """The SDK never raises into the agent (#74). With its control endpoint unset, gone, or
     refusing every post, the run goes on: its id is current, logged and on every request, and the
     agent makes the calls it makes with the SDK working and exits 0, as it does bare. The SDK
@@ -300,14 +351,16 @@ def test_an_sdk_that_cannot_reach_irimi_warns_once_and_changes_nothing(run_workf
     failure. irimi never hears of the run, so the store holds only the `header` run its labelled
     requests made, with no trigger and no end (#70)."""
     bare = run_workflow(W, scenario, "bare")
-    shadow = run_workflow(W, scenario, "shadow")
+    shadow = run_workflow(W, scenario, mode)
     assert shadow.exit_code == bare.exit_code == 0
     [start] = shadow.events("run.start")
     [end] = shadow.events("run.end")
     assert (end["run"], end["outcome"]) == (start["run"], "ok")
     assert {c["run"] for c in shadow.calls()} == {start["run"]}
     assert shadow.answered() == ANSWERED
-    assert REFUND_LINE in shadow.summary()
+    # Under serve mode (#77) the run's end never reached irimi, so no block is printed for it, and
+    # LOOKS WRONG (#107): nothing serve prints summarizes its refund, as `_killed_under_serve`.
+    assert (REFUND_LINE in shadow.summaries()) is (mode == "shadow")
     [warning] = shadow.events("log")
     assert (warning["logger"], warning["level"]) == ("irimi.sdk", "WARNING")
     assert start["run"] in warning["message"]
@@ -315,13 +368,17 @@ def test_an_sdk_that_cannot_reach_irimi_warns_once_and_changes_nothing(run_workf
     assert CONTROL_KIND[scenario] in warning["message"]
     assert bare.events("log") == bare.events("run.start") == []
     records = shadow.stored().list_runs()
-    assert sorted(r.attribution for r in records) == ["header", "process"]
+    process = ["process"] if mode == "shadow" else []
+    assert sorted(r.attribution for r in records) == ["header", *process]
     [header] = [r for r in records if r.attribution == "header"]
     assert (header.run_id, header.trigger, header.outcome) == (start["run"], None, None)
 
 
 @pytest.mark.parametrize("scenario", sorted(BOMBED))
-def test_a_bomb_on_the_read_reaches_the_agent_whole_and_is_recorded_empty(run_workflow, scenario):
+@pytest.mark.parametrize("mode", MODES)
+def test_a_bomb_on_the_read_reaches_the_agent_whole_and_is_recorded_empty(
+    run_workflow, mode, scenario
+):
     """The read is answered with a body that decodes to 1 GiB, in gzip (2 MiB), br or zstd (a few
     KB to 100 KB), which the agent never asked for and cannot read. irimi decodes it only up to its
     cap (#94): the agent gets every byte it was sent, the bomb's own, so it does what it does bare
@@ -331,7 +388,7 @@ def test_a_bomb_on_the_read_reaches_the_agent_whole_and_is_recorded_empty(run_wo
     encoding = BOMBED[scenario]
     sent = bomb(encoding)
     bare = run_workflow(W, scenario, "bare")
-    shadow = run_workflow(W, scenario, "shadow")
+    shadow = run_workflow(W, scenario, mode)
     for result in (bare, shadow):
         assert result.exit_code == 0
         assert statuses(result, "list_charges") == [200]
@@ -363,7 +420,9 @@ def test_a_bomb_on_the_read_reaches_the_agent_whole_and_is_recorded_empty(run_wo
         (BODY_TRUNCATED_FLAG,),
     )
     assert stored.response.header("content-encoding") == encoding
-    assert [r.dropped_events for r in shadow.stored().list_runs()] == [0, 0]
+    # The run and, under `irimi shadow`, the process run; serve mode has none (#77).
+    runs = 2 if mode == "shadow" else 1
+    assert [r.dropped_events for r in shadow.stored().list_runs()] == [0] * runs
 
 
 @pytest.mark.parametrize("scenario", sorted(BOMBED))

@@ -1,6 +1,9 @@
 import argparse
+import contextlib
 import secrets
 import sys
+import threading
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -13,10 +16,13 @@ if TYPE_CHECKING:  # the quoted annotations below; no runtime import
     from irimi.ca import CAPaths
     from irimi.control import OnToolCall
     from irimi.engine import Engine, EngineConfig, OnExchange
+    from irimi.exchange import Exchange
     from irimi.servicemap import MapIndex
-    from irimi.store import TraceStore
+    from irimi.store import ServeLock, TraceStore
+    from irimi.trace import ToolCall
 
 SIGINT_EXIT_CODE = 130  # 128 + SIGINT, the shell convention for a Ctrl-C'd command
+SIGTERM_EXIT_CODE = 143  # 128 + SIGTERM: `irimi shadow` terminated before its command started
 DEFAULT_RUNS_LIMIT = 20  # `irimi runs list` without --limit (#72)
 
 # Since #76 a non-HTTP write the agent labels with `@sdk.tool` runs only its stand-in under irimi,
@@ -71,7 +77,15 @@ def _add_engine_args(parser: argparse.ArgumentParser) -> None:
         "--port",
         type=int,
         default=paths.DEFAULT_PORT,
-        help=f"port on {paths.LISTEN_HOST} (default {paths.DEFAULT_PORT})",
+        help=f"port to listen on (default {paths.DEFAULT_PORT})",
+    )
+    parser.add_argument(
+        "--listen-host",
+        default=paths.LISTEN_HOST,
+        metavar="HOST",
+        help=f"address to listen on (default {paths.LISTEN_HOST}). Anything but loopback lets "
+        "every machine that reaches the port send traffic through irimi and call its control "
+        "endpoint; the reverse door stays loopback-only",
     )
     parser.add_argument(
         "--allow-host",
@@ -142,7 +156,12 @@ def _reverse_hosts(args: argparse.Namespace, index: "MapIndex") -> frozenset[str
 
 
 def _engine_config(
-    args: argparse.Namespace, index: "MapIndex", run_id: str, ca_paths: "CAPaths"
+    args: argparse.Namespace,
+    index: "MapIndex",
+    run_id: str,
+    ca_paths: "CAPaths",
+    *,
+    serve: bool = False,
 ) -> "EngineConfig":
     """The EngineConfig `serve` and `shadow` share.
 
@@ -155,10 +174,11 @@ def _engine_config(
         run_id=run_id,
         ca=ca_paths,
         confdir=paths.mitm_dir(),
-        listen_host=paths.LISTEN_HOST,
+        listen_host=args.listen_host,
         listen_port=args.port,
         reverse_hosts=_reverse_hosts(args, index),
         maps=index,
+        serve=serve,
     )
 
 
@@ -181,13 +201,15 @@ def _load_maps(args: argparse.Namespace | None = None) -> "MapIndex | None":
         # own listener is the port - and dialling ourselves is a loop, not a delegation. The
         # addon repeats this per request against the port it actually bound, which is the
         # authoritative check; this one is here so `--port 4000` with a target on 4000 fails
-        # before anything starts rather than on the first request.
+        # before anything starts rather than on the first request. A `--listen-host` address is
+        # the listener too (#77).
         port = getattr(args, "port", 0) or 0
+        listen_host = getattr(args, "listen_host", "") or ""
         if port:
             for sm in index.services:
                 for target in (sm.target, *(r.target for r in sm.routes)):
                     if target != servicemap.SELF_TARGET:
-                        delegation.refuse_self_target(target, port)
+                        delegation.refuse_self_target(target, port, listen_host)
         return index
     except (servicemap.MapError, delegation.TargetRefused) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -215,13 +237,13 @@ def print_startup(
     command: str,
     args: argparse.Namespace,
     index: "MapIndex",
-    run_id: str,
+    run_id: str | None,
     host: str,
     port: int,
     ca_cert: "Path",
 ) -> None:
     """Everything a run says before it starts: the escape-hatch warning, the banner, and one line
-    per delegated service. `command` is "serve" or "shadow".
+    per delegated service. `command` is "shadow" or "shadow --serve", whose `run_id` is None.
 
     Every line is flushed. Python block-buffers stdout when it is a pipe rather than a terminal,
     and `serve` is a foreground process that may then print nothing for minutes, so
@@ -321,15 +343,28 @@ class _Run:
     run_id: str
     config: "EngineConfig"
     store: "TraceStore"
+    # The store's `serve.lock`, held, in serve mode only (#77).
+    lock: "ServeLock | None" = None
 
 
-def _prepare_run(args: argparse.Namespace) -> _Run | None:
+# What serve mode calls when a run's end is on disk: the maps the run was decided with, and its id.
+_OnRunEnded = Callable[["MapIndex", str], None]
+
+
+def _prepare_run(
+    args: argparse.Namespace, *, serve: bool = False, on_run_ended: _OnRunEnded | None = None
+) -> _Run | None:
     """Load the maps, find the CA and open the trace store, or print why not and return None.
 
     Fail closed: without all three, no engine starts and no child is spawned. The store is opened
     last, so a run refused for its maps or its CA leaves nothing on disk.
+
+    In serve mode (#77) the engine's own run is `trace.UNATTRIBUTED`, so a request no `Irimi-Run`
+    names is stored there and builds no run, and the store's `serve.lock` is taken as soon as the
+    store is open: a second serve on one root is refused before its engine starts, and writes
+    nothing.
     """
-    from irimi import ca
+    from irimi import ca, trace
 
     index = _load_maps(args)
     if index is None:
@@ -338,16 +373,24 @@ def _prepare_run(args: argparse.Namespace) -> _Run | None:
     if not ca.ca_exists(p):
         print(f"error: no CA at {p.key.parent}. Run `irimi init` first.", file=sys.stderr)
         return None
-    store = _open_store(args)
+    ended = None if on_run_ended is None else (lambda run_id: on_run_ended(index, run_id))
+    store = _open_store(args, ended)
     if store is None:
+        return None
+    lock = _hold_serve_lock(args) if serve else None
+    if serve and lock is None:
+        _close_store(store)
         return None
     # 16 hex characters: the run id is a directory name in the store, and must not collide with
     # another run's across months of them (#70).
-    run_id = secrets.token_hex(8)
-    return _Run(index, p, run_id, _engine_config(args, index, run_id, p), store)
+    run_id = trace.UNATTRIBUTED if serve else secrets.token_hex(8)
+    config = _engine_config(args, index, run_id, p, serve=serve)
+    return _Run(index, p, run_id, config, store, lock)
 
 
-def _open_store(args: argparse.Namespace) -> "TraceStore | None":
+def _open_store(
+    args: argparse.Namespace, on_run_ended: Callable[[str], None] | None = None
+) -> "TraceStore | None":
     """The trace store under `--store`, default `$IRIMI_HOME/store`, or None after printing why
     this install's redaction key or the store's directory cannot be used (#69, #70). A run that
     could not redact what it stores, or would drop every event unseen, must not start."""
@@ -355,8 +398,21 @@ def _open_store(args: argparse.Namespace) -> "TraceStore | None":
     from irimi.store import DirectoryStore
 
     try:
-        return DirectoryStore(args.store or paths.store_dir(), redact.load_key(paths.irimi_home()))
+        key = redact.load_key(paths.irimi_home())
+        return DirectoryStore(_store_root(args), key, on_run_ended)
     except (redact.RedactKeyError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return None
+
+
+def _hold_serve_lock(args: argparse.Namespace) -> "ServeLock | None":
+    """The store's `serve.lock`, held, or None after printing why not: another serve writes this
+    store, or the lock file cannot be opened (#77)."""
+    from irimi.store import ServeLock
+
+    try:
+        return ServeLock.hold(_store_root(args))
+    except OSError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return None
 
@@ -389,53 +445,257 @@ def _build_engine(
     )
 
 
-def cmd_serve(args: argparse.Namespace) -> int:
-    import asyncio
+# The signals that stop a serve (#77): Ctrl-C, and what a container runtime or supervisor sends.
+SERVE_STOP_SIGNALS = ("SIGINT", "SIGTERM")
+# How often serve's main thread looks for a signal or a stop (#77). A handler only records the
+# signal, and the main thread acts on it within this long.
+SERVE_POLL_S = 0.1
 
-    from irimi import report
+
+def cmd_serve(args: argparse.Namespace, stop: threading.Event | None = None) -> int:
+    """`irimi shadow --serve`, and `irimi serve`, its alias: the engine as a sidecar, with no child
+    process, until SIGINT or SIGTERM, or until `stop` is set (#77).
+
+    Runs are named by their requests: each SDK run's `Irimi-Run`, and `unattributed` for a request
+    that names none. Each exchange and tool call prints its line as it happens, and each run its
+    summary once its end is on disk, under a `--- run <id> ---` line, built from the store as
+    `irimi runs show` builds it. Nothing is kept per exchange here.
+
+    Both signals stop the engine and close the store, which writes what is queued for up to
+    `store.CLOSE_TIMEOUT_S`, release the store's `serve.lock`, and exit 0. A run still open stays
+    incomplete: no end is written for it. A run whose end was queued before the signal still
+    prints its summary as the store drains; nothing else is printed.
+
+    `stop` is the way out that needs no signal, for a caller that runs serve on a thread of its
+    own: the sample-workflow harness, whose fake internet resolves names only in its own process.
+    The signal handlers are installed only on the main thread, where Python allows them, and first
+    of all, before even serve's imports, so no signal finds serve without them.
+    """
+    with _stopping_on_signals() as signalled:
+        return _serve(args, stop or threading.Event(), signalled)
+
+
+class _ServeOutput:
+    """Everything serve prints while it serves (#77): a line per exchange and per tool call as
+    each happens, from the engine's thread, and each run's summary once its end is on disk, from
+    the store's writer thread. One lock covers every line, so two runs' summaries never
+    interleave, nor does an exchange's line split one."""
+
+    def __init__(self, store_root: Path) -> None:
+        self.store_root = store_root
+        self._printing = threading.Lock()
+
+    def say(self, lines: list[str], *, err: bool = False) -> None:
+        with self._printing:
+            for line in lines:
+                print(line, file=sys.stderr if err else sys.stdout, flush=True)
+
+    def exchange(self, ex: "Exchange") -> None:
+        from irimi import report
+
+        self.say([report.exchange_line(ex)])
+
+    def tool_call(self, call: "ToolCall") -> None:
+        """The tool's name and what it raised, never its args or result, which are stored
+        redacted and would print raw here (#76)."""
+        from irimi import report
+
+        self.say([report.tool_call_line(call)])
+
+    def run_ended(self, index: "MapIndex", run_id: str) -> None:
+        """The run's summary, read back from the store as `irimi runs show` reads it, under
+        `--- run <id> ---`. Called on the store's writer thread after it wrote the run's end, so
+        the run is whole on disk. A run that cannot be read back is one warning naming the
+        exception's type only, as the store logs its own: a message may quote what it read."""
+        from irimi import report
+        from irimi.store import RunNotFound, StoreReader
+        from irimi.trace import TraceFormatError
+
+        try:
+            stored = StoreReader(self.store_root).load_run(run_id)
+        except (TraceFormatError, OSError, RunNotFound) as exc:
+            warning = (
+                f"warning: run {run_id} ended but could not be read back: {type(exc).__name__}"
+            )
+            self.say([warning], err=True)
+            return
+        self.say([f"--- run {run_id} ---", *report.stored_summary_lines(stored, index)])
+
+
+def _serve(args: argparse.Namespace, stop: threading.Event, signalled: list[int]) -> int:
+    """`cmd_serve` inside its signal handlers: the engine's life, start to stop, with
+    `_ServeOutput` saying what happened. `signalled` holds each signal that arrived."""
+    from irimi import runner
     from irimi.engine import EngineStartError
-    from irimi.exchange import Exchange
-    from irimi.trace import ToolCall
 
-    run = _prepare_run(args)
+    output = _ServeOutput(_store_root(args))
+    died = threading.Event()
+    run = _prepare_run(args, serve=True, on_run_ended=output.run_ended)
     if run is None:
         return 1
-
-    def on_exchange(ex: Exchange) -> None:
-        print(report.exchange_line(ex), flush=True)
-
-    def on_tool_call(call: ToolCall) -> None:
-        print(report.tool_call_line(call), flush=True)
-
-    engine = _build_engine(run, on_exchange, on_tool_call)
-
-    async def _main() -> None:
-        task = asyncio.ensure_future(engine.run())
-        try:
-            await engine.wait_ready()
-        except EngineStartError:
-            await asyncio.gather(task, return_exceptions=True)  # let mitmproxy finish stopping
-            raise
-        port = engine.listen_port()
-        assert port is not None  # wait_ready() returned, so the listener is bound
-        print_startup(
-            "serve", args, run.index, run.run_id, run.config.listen_host, port, run.ca.cert
-        )
-        await task
-
+    # The store is closed and its lock released on every way out from here, so a signal never
+    # cuts serve short half-way through either.
     try:
-        asyncio.run(_main())
-    except KeyboardInterrupt:
-        pass
-    except (RuntimeError, OSError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+        engine = _build_engine(run, output.exchange, output.tool_call)
+        if signalled:  # stopped before it served: no engine to start, no banner to print
+            return 0
+        try:
+            handle = runner.start_engine(engine)
+        except (EngineStartError, TimeoutError) as exc:
+            # A timeout from the ready future carries no message of its own.
+            reason = str(exc) or f"proxy did not start within {runner.READY_TIMEOUT_S:.0f}s"
+            print(f"error: {reason}", file=sys.stderr)
+            return 1
+        try:
+            if not signalled:  # a banner for a proxy already stopping would say it serves
+                host, port = run.config.listen_host, handle.port()
+                print_startup("shadow --serve", args, run.index, None, host, port, run.ca.cert)
+            threading.Thread(
+                target=_watch_engine, args=(handle.thread, stop, died), daemon=True
+            ).start()
+            while not signalled and not stop.wait(SERVE_POLL_S):
+                pass
+        finally:
+            stop.set()  # before the engine stops, so `_watch_engine` sees serve stopping it
+            handle.stop()
     finally:
         _close_store(run.store)
+        if run.lock is not None:
+            run.lock.release()
+    if died.is_set():
+        print("error: the proxy stopped on its own", file=sys.stderr)
+        return 1
     return 0
 
 
-def cmd_shadow(args: argparse.Namespace) -> int:
+def _watch_engine(thread: threading.Thread, stop: threading.Event, died: threading.Event) -> None:
+    """Stop serve when the engine's thread ends, and say whether it ended first. An engine that
+    stops on its own ends serve as a failure: a sidecar whose proxy is gone must not look alive
+    to its supervisor (#77)."""
+    thread.join()
+    if not stop.is_set():
+        died.set()
+    stop.set()
+
+
+@contextlib.contextmanager
+def _stopping_on_signals() -> Iterator[list[int]]:
+    """For the length of the block, SIGINT and SIGTERM append their number to the list it yields
+    and do nothing else: no KeyboardInterrupt to unwind through the engine thread's join, and a
+    second signal while the store closes is ignored rather than cutting its last writes short. A
+    container runtime sends SIGTERM and waits, which is what serve exists for (#77).
+
+    A handler takes no lock. It runs on the main thread between two bytecodes, which may be
+    inside `Event.wait` holding the event's own lock, so a handler calling `Event.set` there
+    waits on itself forever: the list is the whole of its work, and the main thread polls it.
+    Off the main thread, where Python refuses a handler, nothing is installed.
+
+    A signal ignored when serve started stays ignored: `irimi serve &` from a script inherits an
+    ignored SIGINT, and a Ctrl-C meant for the script must not stop it. Once a signal has arrived,
+    serve is stopping, so on the way out the signals are ignored rather than given back: a second
+    one during the interpreter's exit would otherwise end it with the default action. With none,
+    the handlers found are put back."""
+    import signal
+
+    signalled: list[int] = []
+    if threading.current_thread() is not threading.main_thread():
+        yield signalled
+        return
+    previous = {}
+    for name in SERVE_STOP_SIGNALS:
+        signum = getattr(signal, name)
+        if signal.getsignal(signum) is signal.SIG_IGN:
+            continue
+        previous[signum] = signal.signal(signum, lambda got, _frame: signalled.append(got))
+    try:
+        yield signalled
+    finally:
+        for signum, handler in previous.items():
+            # None: the handler was not installed from Python, which `signal` cannot put back.
+            restored = signal.SIG_DFL if handler is None else handler
+            signal.signal(signum, signal.SIG_IGN if signalled else restored)
+
+
+def cmd_shadow(args: argparse.Namespace, stop: threading.Event | None = None) -> int:
+    cmd = list(args.cmd)
+    if cmd and cmd[0] == "--":
+        cmd = cmd[1:]
+    if args.serve:
+        # Serve mode launches nothing, so a command with it is a mistake in the invocation, and is
+        # answered as argparse answers one: usage and exit 2 (#77). `stop` is serve's (#77).
+        if cmd:
+            args.parser.error("--serve runs no command: drop the `-- <command>`, or the --serve")
+        return cmd_serve(args, stop)
+    if not cmd:
+        print("error: nothing to run. Usage: irimi shadow -- <command> [args...]", file=sys.stderr)
+        return 1
+    with _passing_sigterm_to_child() as child:
+        return _shadow(args, cmd, child)
+
+
+class _Child:
+    """The command `irimi shadow` runs, as SIGTERM to irimi sees it (#77).
+
+    A supervisor or a container runtime stops `irimi shadow` with SIGTERM, which reaches irimi
+    alone, not its command. Its default action ended irimi at once, with the command still running
+    and its proxy gone, the run never ended and the store never closed (#70's note). So SIGTERM is
+    passed to the command instead, and the command's exit ends the run as any exit does. One that
+    arrives before the command exists is held, and the command is then never started.
+
+    The handler takes no lock, as serve's does not: `os.kill` and two attribute reads. A command
+    already reaped has its `returncode` and is never signalled, so a recycled pid is never hit."""
+
+    def __init__(self) -> None:
+        self.terminated = False
+        self._proc: subprocess.Popen[bytes] | None = None
+
+    def on_sigterm(self, signum: int, _frame: object) -> None:
+        self.terminated = True
+        self._pass_on(signum)
+
+    def adopt(self, proc: "subprocess.Popen[bytes]") -> None:
+        """`proc` is the command now. A SIGTERM that came while it was being started, when there
+        was no command to pass it to, is passed to it here."""
+        import signal
+
+        self._proc = proc
+        if self.terminated:
+            self._pass_on(signal.SIGTERM)
+
+    def _pass_on(self, signum: int) -> None:
+        import os
+
+        proc = self._proc
+        if proc is not None and proc.returncode is None:
+            with contextlib.suppress(OSError):
+                os.kill(proc.pid, signum)
+
+
+@contextlib.contextmanager
+def _passing_sigterm_to_child() -> Iterator[_Child]:
+    """For the length of the block, SIGTERM is `_Child.on_sigterm` (#77), on the main thread only,
+    where Python allows a handler; a SIGTERM ignored when `irimi shadow` started stays ignored, as
+    under serve. The handler found is put back on the way out. SIGINT is untouched: Ctrl-C reaches
+    the whole foreground process group, the command included, and `_wait_for_child` handles it."""
+    import signal
+
+    child = _Child()
+    if (
+        threading.current_thread() is not threading.main_thread()
+        or signal.getsignal(signal.SIGTERM) is signal.SIG_IGN
+    ):
+        yield child
+        return
+    previous = signal.signal(signal.SIGTERM, child.on_sigterm)
+    try:
+        yield child
+    finally:
+        # None: the handler was not installed from Python, which `signal` cannot put back.
+        signal.signal(signal.SIGTERM, signal.SIG_DFL if previous is None else previous)
+
+
+def _shadow(args: argparse.Namespace, cmd: list[str], child: _Child) -> int:
+    """`irimi shadow -- <cmd>` inside its SIGTERM handler: the run, start to summary."""
     import os
     import subprocess
     import time
@@ -444,13 +704,6 @@ def cmd_shadow(args: argparse.Namespace) -> int:
     from irimi.engine import EngineStartError
     from irimi.exchange import Exchange
     from irimi.trace import ToolCall
-
-    cmd = list(args.cmd)
-    if cmd and cmd[0] == "--":
-        cmd = cmd[1:]
-    if not cmd:
-        print("error: nothing to run. Usage: irimi shadow -- <command> [args...]", file=sys.stderr)
-        return 1
 
     run = _prepare_run(args)
     if run is None:
@@ -492,6 +745,10 @@ def cmd_shadow(args: argparse.Namespace) -> int:
         host, port = run.config.listen_host, handle.port()
         print_startup("shadow", args, run.index, run.run_id, host, port, run.ca.cert)
         env = runner.child_env(dict(os.environ), host, port, run.ca.cert, run.run_id)
+        if child.terminated:  # SIGTERM while irimi started: the command is never run (#77)
+            print("error: terminated before the command started.", file=sys.stderr)
+            code = SIGTERM_EXIT_CODE
+            return code
         # The process run is stored before the child exists, so every exchange it makes lands in
         # a run that already has its record (#70).
         agent_version = os.environ.get(paths.AGENT_VERSION_ENV)
@@ -499,6 +756,7 @@ def cmd_shadow(args: argparse.Namespace) -> int:
         started_run = True
         try:
             proc = subprocess.Popen(cmd, env=env)
+            child.adopt(proc)
         except FileNotFoundError:
             print(f"error: command not found: {cmd[0]}", file=sys.stderr)
             code = 127
@@ -661,7 +919,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init.set_defaults(func=cmd_init)
 
-    serve = subparsers.add_parser("serve", help="run the shadow proxy in the foreground (dev)")
+    # `irimi serve` is `irimi shadow --serve` under a shorter name: the same function, flags and
+    # banner (#77).
+    serve = subparsers.add_parser(
+        "serve",
+        help="the same as `irimi shadow --serve`: run the proxy with no command, until SIGINT or "
+        "SIGTERM",
+    )
     _add_engine_args(serve)
     serve.set_defaults(func=cmd_serve)
 
@@ -670,12 +934,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_engine_args(shadow)
     shadow.add_argument(
+        "--serve",
+        action="store_true",
+        help="run no command: serve until SIGINT or SIGTERM, as a sidecar to an agent pointed "
+        "at irimi with HTTPS_PROXY, and print each run's summary as the SDK ends it",
+    )
+    shadow.add_argument(
         "cmd",
         nargs=argparse.REMAINDER,
         metavar="-- <command> [args...]",
         help="the command to run under the proxy",
     )
-    shadow.set_defaults(func=cmd_shadow)
+    shadow.set_defaults(func=cmd_shadow, parser=shadow)
 
     maps = subparsers.add_parser("maps", help="show the loaded service maps")
     maps_sub = maps.add_subparsers(dest="maps_command", metavar="<subcommand>", required=True)

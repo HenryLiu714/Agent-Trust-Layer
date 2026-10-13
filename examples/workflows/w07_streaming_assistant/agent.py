@@ -18,19 +18,23 @@ the SDK labels each at httpx's transport, and takes the label off again while th
 open (#75).
 
     python -m examples.workflows.launch \\
-        examples.workflows.w07_streaming_assistant.agent <question> {read_all,hang_up,two_callers}
+        examples.workflows.w07_streaming_assistant.agent <question> \\
+        {read_all,hang_up,two_callers,hand_off}
 
 The agent delivers the question to itself over loopback. `hang_up` makes that caller reset the
 connection after the first event, the way a closed browser tab does. `two_callers` has two callers
 ask at once, as `<question> (caller 1)` and `<question> (caller 2)`, so two chats stream through
-the proxy side by side (#71). Exit codes: 0 answered, 3 the caller went away, 4 an upstream stream
-broke.
+the proxy side by side (#71). `hand_off` has the trigger open Anthropic's stream and return it, as
+a handler returns a streaming response its framework reads after the handler has returned: the run
+ends while its stream is still open, and the handler then lists the models and forwards the rest
+of the stream (#77). Exit codes: 0 answered, 3 the caller went away, 4 an upstream stream broke.
 """
 
 from __future__ import annotations
 
 import hashlib
 import http.client
+import itertools
 import json
 import os
 import socket
@@ -56,7 +60,7 @@ ENCODED_READ_SIZE = 64 * 1024
 DECODED_LIMIT = 1024 * 1024
 ANSWERED_BY = "Irimi-Answered-By"
 EXIT = {"ok": 0, "client_gone": 3, "upstream_broke": 4}
-MODES = ("read_all", "hang_up", "two_callers")
+MODES = ("read_all", "hang_up", "two_callers", "hand_off")
 # `httpx` streams the model calls with httpx instead of urllib (#75).
 STREAM_CLIENT_ENV = "W7_STREAM_CLIENT"
 POST_SUMMARY = {
@@ -194,7 +198,8 @@ def _stream_post_httpx(
         raise UpstreamBroke(f"{label}: {type(exc).__name__}") from exc
 
 
-def anthropic_stream(question: str, send: Callable[[str, dict[str, Any]], None]) -> str:
+def anthropic_events(question: str) -> Iterator[tuple[str | None, str]]:
+    """Anthropic's answer to `question`, streamed, as server-sent events."""
     body = {
         "model": "claude-sonnet-5",
         "max_tokens": 512,
@@ -202,10 +207,23 @@ def anthropic_stream(question: str, send: Callable[[str, dict[str, Any]], None])
         "system": "You are a helpful payments assistant.",
         "messages": [{"role": "user", "content": question}],
     }
-    headers = {"x-api-key": agentkit.key("ANTHROPIC_API_KEY"), "anthropic-version": "2023-06-01"}
     url = agentkit.base("anthropic") + "/v1/messages"
+    return sse_events(stream_post(url, body, anthropic_headers(), "anthropic_stream"))
+
+
+def anthropic_headers() -> dict[str, str]:
+    return {"x-api-key": agentkit.key("ANTHROPIC_API_KEY"), "anthropic-version": "2023-06-01"}
+
+
+def anthropic_stream(
+    question: str,
+    send: Callable[[str, dict[str, Any]], None],
+    events: Iterator[tuple[str | None, str]] | None = None,
+) -> str:
+    """The text of Anthropic's streamed answer, each delta forwarded to the caller as it arrives:
+    from `events` when the stream is already open (`hand_off`), or from a stream opened here."""
     text, stopped = "", False
-    for name, data in sse_events(stream_post(url, body, headers, "anthropic_stream")):
+    for name, data in events if events is not None else anthropic_events(question):
         event = json.loads(data)
         if name == "content_block_delta" and event["delta"]["type"] == "text_delta":
             text += event["delta"]["text"]
@@ -279,10 +297,35 @@ def chat(question: str, send: Callable[[str, dict[str, Any]], None]) -> dict[str
     return {"answer": answer, "dims": dims, "decision": decision, "posted": posted}
 
 
+# `hand_off` (#77): the trigger only opens the stream, sending its request inside the run, and
+# returns it; the run ends as it returns, with the stream still open.
+@sdk.trigger
+def open_chat(question: str) -> Iterator[tuple[str | None, str]]:
+    events = anthropic_events(question)
+    first = next(events)  # the request goes out, labelled with this run, and its first event back
+    return itertools.chain([first], events)
+
+
+def handed_off(question: str, send: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+    """`hand_off`'s handler: the stream its trigger returned, read after the run has ended. It
+    lists the models first, in no run, and that is what lets the fake service end the stream."""
+    events = open_chat(question)
+    agentkit.http(
+        "GET",
+        agentkit.base("anthropic") + "/v1/models",
+        headers=anthropic_headers(),
+        label="models",
+    )
+    answer = anthropic_stream(question, send, events)
+    send("done", {"posted": False})
+    return {"answer": answer, "posted": None}
+
+
 class _Chat(agentkit.Handler):
     protocol_version = "HTTP/1.0"
     outcomes: dict[str, dict[str, Any]] = {}  # by question
     finished = threading.Semaphore(0)  # released once per chat answered
+    hand_off = False  # answer with `handed_off`, not the `chat` trigger
 
     def do_POST(self) -> None:
         question = json.loads(self.rfile.read(int(self.headers["content-length"])))["question"]
@@ -299,7 +342,8 @@ class _Chat(agentkit.Handler):
 
         try:
             send("start", {})
-            _Chat.outcomes[question] = {"outcome": "ok", **chat(question, send)}
+            answer = handed_off if _Chat.hand_off else chat
+            _Chat.outcomes[question] = {"outcome": "ok", **answer(question, send)}
         except ClientGone as exc:
             _Chat.outcomes[question] = {"outcome": "client_gone", "error": str(exc)}
         except UpstreamBroke as exc:
@@ -367,6 +411,7 @@ def main(argv: list[str]) -> int:
         print(f"usage: agent.py <question> {{{','.join(MODES)}}}", file=sys.stderr)
         return 2
     question, how = argv
+    _Chat.hand_off = how == "hand_off"
     with agentkit.serve(_Chat) as port:
         if how != "two_callers":
             outcome = _ask(port, question, how == "hang_up")

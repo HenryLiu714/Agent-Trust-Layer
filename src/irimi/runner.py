@@ -9,7 +9,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from irimi import __version__
+from irimi import __version__, netaddr
 from irimi.engine import Engine, EngineStartError
 from irimi.exchange import CONTROL_PREFIX
 from irimi.paths import CONTROL_ENV, ENGINE_ACTIVE_ENV, PROXY_ENVS, RUN_ENV
@@ -34,9 +34,10 @@ def child_env(
     """`base` plus the proxy and CA variables. `base` is never mutated.
 
     `ca_cert` must be the CA certificate (`~/.irimi/ca/ca.pem`), never the mitmproxy bundle,
-    which also contains the private key.
+    which also contains the private key. An IPv6 listen host is bracketed, as a URL spells it
+    (#77).
     """
-    proxy = f"http://{host}:{port}"
+    proxy = f"http://{netaddr.authority(host, port)}"
     cert = str(ca_cert)
     env = dict(base)
     env.update(

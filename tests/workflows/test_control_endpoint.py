@@ -8,11 +8,14 @@ and calls no control endpoint, and the SDK warns only where W10 takes the endpoi
 
 import pytest
 
-from examples.workflows.harness.run import workflows
+from examples.workflows.harness.run import serve_cases, workflows
 from examples.workflows.w10_flaky_upstream.scenarios import CONTROL_DOWN
 from irimi.exchange import CONTROL_PREFIX, Exchange
 
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
+# Every scenario under `irimi shadow -- <cmd>`, and every one that runs under serve mode (#77).
+MODE_CASES = [(n, s, "shadow") for n, s in CASES] + [(n, s, "serve") for n, s in serve_cases()]
+MODE_IDS = [f"{n}:{s}:{m}" for n, s, m in MODE_CASES]
 # The scenarios whose shadow run starts no agent: irimi refused to start (W8 `map_refused`). Every
 # other one starts its agent as often as the bare run does, so a lost agent fails (#73).
 NO_AGENT_UNDER_SHADOW = {("w08_orchestrator", "map_refused")}
@@ -20,25 +23,29 @@ NO_AGENT_UNDER_SHADOW = {("w08_orchestrator", "map_refused")}
 REAL_WRITE_WARNING = "HTTPS_PROXY is set but IRIMI_ENGINE_ACTIVE is not"
 
 
-@pytest.mark.parametrize(("name", "scenario"), CASES, ids=[f"{n}:{s}" for n, s in CASES])
-def test_no_control_request_is_ever_an_exchange(run_workflow, name, scenario):
+@pytest.mark.parametrize(("name", "scenario", "mode"), MODE_CASES, ids=MODE_IDS)
+def test_no_control_request_is_ever_an_exchange(run_workflow, name, scenario, mode):
     """Not printed, not handed to the store, not stored: W9's control scenarios post dozens."""
-    shadow = run_workflow(name, scenario, "shadow")
+    shadow = run_workflow(name, scenario, mode)
     assert not [line for line in shadow.exchange_lines() if CONTROL_PREFIX in line]
     assert not [ex for ex in shadow.handed if ex.request.path.startswith(CONTROL_PREFIX)]
     stored = [e for e in shadow.stored_events() if isinstance(e, Exchange)]
     assert not [ex for ex in stored if ex.request.path.startswith(CONTROL_PREFIX)]
 
 
-@pytest.mark.parametrize(("name", "scenario"), CASES, ids=[f"{n}:{s}" for n, s in CASES])
-def test_irimi_control_reaches_every_shadow_agent_and_no_bare_one(run_workflow, name, scenario):
+@pytest.mark.parametrize(("name", "scenario", "mode"), MODE_CASES, ids=MODE_IDS)
+def test_irimi_control_reaches_every_shadow_agent_and_no_bare_one(
+    run_workflow, name, scenario, mode
+):
     """Through `runner.child_env`: the endpoint on the listener the agent's proxy names. A bare
-    agent's environment is `INHERITED_ENV` and the scenario's own, so it has none.
+    agent's environment is `INHERITED_ENV` and the scenario's own, so it has none. Under serve
+    mode the agent is not irimi's child, and is given both as the README's serve-mode guide says
+    (#77), with the same result.
 
     `agentkit.start()` logs both, first thing in every agent. A bare run always starts its agent,
     and a shadow run starts it as often, but for the scenarios where irimi refused to start
     (`NO_AGENT_UNDER_SHADOW`): there the agent logged nothing at all."""
-    shadow = run_workflow(name, scenario, "shadow")
+    shadow = run_workflow(name, scenario, mode)
     bare = run_workflow(name, scenario, "bare")
     assert bare.events("start")
     if (name, scenario) in NO_AGENT_UNDER_SHADOW:
@@ -73,15 +80,18 @@ def test_a_bare_agent_starts_no_run_and_calls_no_control_endpoint(run_workflow, 
     assert [r.path for r in bare.internet.requests() if CONTROL_PREFIX in r.path] == []
 
 
-@pytest.mark.parametrize(("name", "scenario"), CASES, ids=[f"{n}:{s}" for n, s in CASES])
-def test_the_sdk_warns_only_where_its_control_endpoint_is_taken_away(run_workflow, name, scenario):
+@pytest.mark.parametrize(("name", "scenario", "mode"), MODE_CASES, ids=MODE_IDS)
+def test_the_sdk_warns_only_where_its_control_endpoint_is_taken_away(
+    run_workflow, name, scenario, mode
+):
     """A post that fails is the SDK's one WARNING on `irimi.sdk`, once per process per kind of
     failure, and never an exception (#74); `agentkit.start()` logs each irimi log record. Every
     post in the corpus is accepted, so no run warns, but those of W10's `CONTROL_DOWN`, whose
     start and end both fail and warn once between them.
 
     A bare agent's SDK is inert, and warns of one thing only: a write tool that ran for real while
-    a proxy variable was set, as every bare run's is, once per process however many ran (#76)."""
+    a proxy variable was set, as every bare run's is, once per process however many ran (#76).
+    Under serve mode the same posts go to the endpoint the agent was given (#77)."""
     bare = run_workflow(name, scenario, "bare")
     warned = [(e["logger"], e["level"], e["message"]) for e in bare.events("log")]
     real_writes = [tool for tool, ran in bare.tools("write") if ran == "real"]
@@ -90,7 +100,7 @@ def test_the_sdk_warns_only_where_its_control_endpoint_is_taken_away(run_workflo
         assert warned == [("irimi.sdk", "WARNING", message)]
     else:
         assert warned == []
-    shadow = run_workflow(name, scenario, "shadow")
+    shadow = run_workflow(name, scenario, mode)
     logged = [(e["logger"], e["level"]) for e in shadow.events("log")]
     if name == "w10_flaky_upstream" and scenario in CONTROL_DOWN:
         assert logged == [("irimi.sdk", "WARNING")]

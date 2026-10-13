@@ -6,11 +6,15 @@ The labels and events are in `examples/workflows/w05_dispute_responder/agent.py`
 import base64
 import json
 
+import pytest
+
 from examples.workflows.harness.services import client_secret
-from irimi import redact
+from irimi import redact, report
 from irimi.exchange import Exchange
 
 W = "w05_dispute_responder"
+# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi (#77).
+MODES = ("shadow", "serve")
 
 
 def actions(result):
@@ -26,8 +30,9 @@ READS = [
 ]
 
 
-def test_a_large_dispute_is_tagged_alerted_and_fought_without_a_refund(run_workflow):
-    shadow = run_workflow(W, "over_threshold", "shadow")
+@pytest.mark.parametrize("mode", MODES)
+def test_a_large_dispute_is_tagged_alerted_and_fought_without_a_refund(run_workflow, mode):
+    shadow = run_workflow(W, "over_threshold", mode)
     assert shadow.answered() == [
         *READS,
         ("tag_customer", 200, "fake-L1"),
@@ -39,19 +44,21 @@ def test_a_large_dispute_is_tagged_alerted_and_fought_without_a_refund(run_workf
     assert "live      read      GET api.stripe.com/v1/disputes/dp_BIG -> 200" in (
         shadow.exchange_lines()
     )
-    summary = shadow.summary()
+    summary = shadow.summaries()
     assert "  ○ update customer cus_DISPUTER  unvalidated (L1)" in summary
     assert "  These writes did not happen. Would have fired: customer.updated." in summary
 
 
+@pytest.mark.parametrize("mode", MODES)
 def test_the_intents_client_secret_reaches_the_agent_and_only_its_placeholder_reaches_disk(
     run_workflow,
+    mode,
 ):
     """Reads are real, so the agent is handed the payment intent's real `client_secret`. The store
     keeps that live read's response with the secret swapped for its placeholder and nothing else
     changed (#69, #70), and invariant 4 finds the canary in no file under irimi's home. The one
     corpus response that carries a credential: every other canary is one the agent sends."""
-    shadow = run_workflow(W, "over_threshold", "shadow")
+    shadow = run_workflow(W, "over_threshold", mode)
     path = "/v1/payment_intents/pi_BIG"
     [live] = [ex for ex in shadow.reported if ex.request.path == path]
     assert live.answered_by == "live" and live.response is not None
@@ -65,8 +72,9 @@ def test_the_intents_client_secret_reaches_the_agent_and_only_its_placeholder_re
     assert json.loads(stored.response.body) == {**sent, "client_secret": hidden}
 
 
-def test_a_small_dispute_is_refunded_and_the_refund_would_have_fired_two_events(run_workflow):
-    shadow = run_workflow(W, "under_threshold", "shadow")
+@pytest.mark.parametrize("mode", MODES)
+def test_a_small_dispute_is_refunded_and_the_refund_would_have_fired_two_events(run_workflow, mode):
+    shadow = run_workflow(W, "under_threshold", mode)
     bare = run_workflow(W, "under_threshold", "bare")
     assert shadow.answered()[-1] == ("refund", 200, "fake-L1")
     assert actions(shadow) == actions(bare) == [("charge.dispute.created", "refund")]
@@ -75,7 +83,7 @@ def test_a_small_dispute_is_refunded_and_the_refund_would_have_fired_two_events(
         "/api/chat.postMessage",
         "/v1/refunds",
     ]
-    summary = shadow.summary()
+    summary = shadow.summaries()
     assert (
         "  These writes did not happen. Would have fired: customer.updated, refund.created, "
         "charge.refunded." in summary
@@ -89,7 +97,7 @@ def test_a_small_dispute_is_refunded_and_the_refund_would_have_fired_two_events(
 
 
 def test_the_refunds_own_charge_refunded_event_is_a_second_run_with_no_calls(run_workflow):
-    for mode in ("bare", "shadow"):
+    for mode in ("bare", "shadow", "serve"):
         result = run_workflow(W, "cascade", mode)
         assert actions(result) == [
             ("charge.dispute.created", "refund"),
@@ -113,8 +121,35 @@ def test_the_refunds_own_charge_refunded_event_is_a_second_run_with_no_calls(run
     )
 
 
+def test_under_serve_the_cascade_is_two_runs_and_two_summaries_the_second_empty(run_workflow):
+    """Under `irimi shadow --serve` (#77) each delivery is its own run, printed when it ends: the
+    dispute's run with its three faked writes and what they would have fired, and the fed-back
+    `charge.refunded`'s run with no calls at all."""
+    serve = run_workflow(W, "cascade", "serve")
+    first, second = (r["run"] for r in serve.events("run.start"))
+    assert {c["run"] for c in serve.calls()} == {first}
+    blocks = serve.run_blocks()
+    assert set(blocks) == {first, second}
+    assert blocks[first][-1] == (
+        "  These writes did not happen. Would have fired: customer.updated, refund.created, "
+        "charge.refunded."
+    )
+    assert len([line for line in blocks[first] if line.startswith("  ○ ")]) == 3
+    assert blocks[second] == [
+        f"irimi shadow · run {second} · 0 exchanges · {_elapsed(serve, second)} · "
+        "backstop: none (Phase 4)",
+        "",
+        "  0 exchanges · 0 live · 0 delegated · 0 virtualized",
+    ]
+
+
+def _elapsed(result, run_id):
+    [record] = [r for r in result.stored().list_runs() if r.run_id == run_id]
+    return f"{report.run_elapsed(record) or 0.0:.1f}s"
+
+
 def test_a_forged_signature_is_refused_before_any_call(run_workflow):
-    for mode in ("bare", "shadow"):
+    for mode in ("bare", "shadow", "serve"):
         result = run_workflow(W, "bad_signature", mode)
         assert result.result()["answers"] == [{"status": 400}]
         assert [e["reason"] for e in result.events("rejected")] == ["bad signature"]
@@ -124,7 +159,7 @@ def test_a_forged_signature_is_refused_before_any_call(run_workflow):
 
 
 def test_a_replayed_event_id_is_handled_once(run_workflow):
-    for mode in ("bare", "shadow"):
+    for mode in ("bare", "shadow", "serve"):
         result = run_workflow(W, "replayed_event", mode)
         assert actions(result) == [
             ("charge.dispute.created", "refund"),
@@ -133,16 +168,17 @@ def test_a_replayed_event_id_is_handled_once(run_workflow):
         assert len([c for c in result.calls() if c["label"] == "refund"]) == 1
     bare = run_workflow(W, "replayed_event", "bare")
     assert len(bare.internet.writes()) == 3
-    shadow = run_workflow(W, "replayed_event", "shadow")
-    assert [line.split()[0] for line in shadow.exchange_lines() if " write " in line] == [
-        "fake-L1"
-    ] * 3
+    for mode in MODES:
+        shadow = run_workflow(W, "replayed_event", mode)
+        writes = [line.split()[0] for line in shadow.exchange_lines() if " write " in line]
+        assert writes == ["fake-L1"] * 3
 
 
-def test_the_raw_webhook_body_is_stored_as_the_triggers_bytes_and_is_replayable(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_the_raw_webhook_body_is_stored_as_the_triggers_bytes_and_is_replayable(run_workflow, mode):
     """#74's capture of `bytes`: `on_event(raw, signature)` stores the body it verified as
     `__irimi_bytes__`, which replay (#84) can hand back byte for byte."""
-    shadow = run_workflow(W, "over_threshold", "shadow")
+    shadow = run_workflow(W, "over_threshold", mode)
     [run] = shadow.sdk_runs()
     assert run.trigger is not None and run.trigger.replayable
     assert run.trigger.entrypoint == "examples.workflows.w05_dispute_responder.agent:on_event"

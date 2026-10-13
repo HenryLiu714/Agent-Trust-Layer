@@ -94,7 +94,9 @@ WORKFLOW = Workflow(
         "self_addressed": Scenario(
             ("self_addressed",),
             setup=_stripe,
-            doc="a refund to the proxy's own address as 127.0.0.1, 127.1 and 0.0.0.0",
+            doc="a refund to the proxy's own address as 127.0.0.1, 127.1 and 0.0.0.0; in serve "
+            "mode with irimi bound to 0.0.0.0",
+            serve_flags=("--listen-host", "0.0.0.0"),
         ),
         "control_runs": Scenario(
             ("control_runs",),

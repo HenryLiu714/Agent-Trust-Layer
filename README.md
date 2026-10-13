@@ -16,20 +16,22 @@ for real, and see what it would have done before anything happens.
 What works today, all of it covered by tests that need no network and no keys:
 
 - `irimi shadow -- <command>` runs a command with its HTTP(S) traffic in shadow mode and prints a
-  summary; `irimi serve` runs the same proxy on its own.
+  summary; `irimi shadow --serve` runs the same proxy as a sidecar to an agent it does not launch,
+  and prints each run's summary as the run ends ([Serve mode](#serve-mode)).
 - Service maps for Stripe, Slack, OpenAI, Anthropic and six telemetry backends decide what each
   request is.
 - Writes are answered locally at four levels of fidelity (L0 to L3, below): an echo, a full
   response object, reads that show the write, and a check against the real service's state.
 - Idempotency keys, would-have-fired webhooks, answer targets you control, and the reverse door for
   SDKs that ignore proxy variables.
-- Eleven sample agent workflows run end to end, bare and under `irimi shadow`, on every test run.
+- Eleven sample agent workflows run end to end, bare and under `irimi shadow`, on every test run,
+  and nine of their scenarios under `irimi shadow --serve` too.
 
 Every `serve` and `shadow` run is recorded, redacted, in the trace store under `$IRIMI_HOME/store`
 ([`docs/trace-format.md`](docs/trace-format.md)), and `irimi runs list` / `runs show` read it
 back. The SDK, `irimi.sdk`, marks where an agent's runs start and end and labels the tools the
 proxy cannot see ([Attributing runs with the SDK](#attributing-runs-with-the-sdk)). What does not
-exist yet: `irimi shadow --serve`, replay and `irimi compare`. See [Roadmap](#roadmap).
+exist yet: replay and `irimi compare`. See [Roadmap](#roadmap).
 
 ## Quickstart
 
@@ -189,7 +191,9 @@ And a refund the real service would have refused, from `w01_ticket_triage double
 `NODE_EXTRA_CA_CERTS`, `NODE_USE_ENV_PROXY=1`, `IRIMI_ENGINE_ACTIVE=1`, `IRIMI_RUN` and
 `IRIMI_CONTROL`. That covers requests, httpx, urllib, curl and Node's fetch with no code change.
 The command's exit code is passed through. One process tree is one run; the subcommand is the only
-thing that chooses the mode.
+thing that chooses the mode. SIGTERM to `irimi shadow`, as a supervisor or a container runtime
+sends it, is passed to the command, and the command's exit then ends the run as any exit does:
+the run is stored with its code, what is queued is written, and the summary is printed (#77).
 
 `IRIMI_CONTROL` is `http://127.0.0.1:<port>/_irimi`, irimi's control endpoint on the same listener.
 The SDK posts a run's start, its end and the tool calls the proxy cannot see there
@@ -216,10 +220,12 @@ stripe.connect_api_base = "http://127.0.0.1:4000/connect.stripe.com"
 stripe.meter_events_api_base = "http://127.0.0.1:4000/meter-events.stripe.com"
 ```
 
-Write `127.0.0.1`, not `localhost`: irimi listens on IPv4 loopback only, and on macOS `localhost`
-resolves to `::1` first. The door is not an open relay. It forwards only to the exact hosts in a
-loaded map (`irimi maps list`) or named with `--allow-host`; anything else gets a `403`. A wildcard
-host in a map is not an allow-list entry here. The scheme upstream is always https.
+Write `127.0.0.1`, not `localhost`: irimi listens on IPv4 loopback unless `--listen-host` says
+otherwise, and on macOS `localhost` resolves to `::1` first. The door answers only a client on
+loopback, whatever address irimi listens on, and is not an open relay. It forwards only to the
+exact hosts in a loaded map (`irimi maps list`) or named with `--allow-host`; anything else gets a
+`403`. A wildcard host in a map is not an allow-list entry here. The scheme upstream is always
+https.
 
 ### Safety model
 
@@ -538,27 +544,95 @@ def find_accounts(segment: str) -> list[Account]: ...
 - **No tool overlay.** A read tool after a stood-in write sees the world as it was: nothing
   shows it the write that did not happen, as the overlay does for HTTP.
 
+## Serve mode
+
+`irimi shadow -- <cmd>` launches the agent and ends the run when it exits. A production agent is a
+server or a worker that irimi does not launch and that never exits. Serve mode runs irimi on its
+own, as a sidecar, until it is stopped:
+
+```
+irimi shadow --serve --listen-host 0.0.0.0 --port 4000 --store /data/irimi
+```
+
+`irimi serve` is the same command under a shorter name. With a command after `--`, `--serve` is a
+usage error.
+
+**The agent's container needs four settings**, naming irimi exactly as the agent reaches it
+(`http://irimi:4000` in compose, not an address the agent never dials), because the SDK labels a
+request only on a connection to a listener these name, as spelled:
+
+| Variables | Value | Why |
+| --- | --- | --- |
+| `HTTPS_PROXY`, `HTTP_PROXY`, `https_proxy`, `http_proxy` | `http://irimi:4000` | every request goes through irimi; curl ignores upper-case `HTTP_PROXY` |
+| `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` | irimi's `ca.pem` | so the agent trusts irimi's certificates |
+| `IRIMI_ENGINE_ACTIVE` | `1` | the SDK is inert without it, and write tools run for real |
+| `IRIMI_CONTROL` | `http://irimi:4000/_irimi` | where the SDK posts each run's start, tool calls and end |
+
+Leave `IRIMI_RUN` unset. Copy `ca.pem` from irimi's `$IRIMI_HOME/ca/`, never the `mitm/` bundle,
+which holds the key. `NO_PROXY` names only what must not go through irimi, such as the agent's
+own sidecars on loopback, and never a service the agent writes to: what bypasses irimi is not
+shadowed. Nothing that is not HTTP goes through the proxy: a database or another protocol
+tunnelled through it fails closed (#75). Publish irimi's port unchanged (`4000:4000`): irimi knows
+a request is addressed to itself by its own port, so one remapped on the way in would be
+forwarded to irimi again.
+
+**A sidecar in the same pod or network namespace** reaches irimi on `127.0.0.1` and needs no wider
+bind. It also keeps the reverse door, which only a loopback client may use: from another
+container, an SDK that ignores the proxy variables, such as stripe-python, cannot be shadowed
+([The reverse door](#the-reverse-door)).
+
+- **Runs come from the SDK.** No process run exists. Each run is a `@sdk.trigger` call or an
+  `sdk.run` block, and its requests are stored in it by their `Irimi-Run`
+  ([Attributing runs with the SDK](#attributing-runs-with-the-sdk)). A request no run names, and a
+  tool called in no run, is stored in `unattributed/` and builds no run: `irimi runs show
+  unattributed` lists them. An agent without the SDK, or whose posts never reach irimi, has no
+  runs, only `unattributed`. A post that fails is a WARNING on the agent's own `irimi.sdk` logger,
+  not in irimi's output; the run is then stored as `header` and lists as `incomplete`.
+- **What it prints.** The banner, then one line per exchange and per tool call as each happens,
+  and each run's summary when the SDK ends the run, under `--- run <id> ---`: the same summary
+  `irimi runs show <id>` prints, built from the store once the run's end is on disk. A streamed
+  answer is recorded when its stream closes. One the agent reads to its end is in its run's
+  summary; one the agent leaves open after its run has ended is stored in the run, but is missing
+  from the summary already printed.
+- **One faked world.** What one run faked, a later run sees: the write log is irimi's, not the
+  run's, as production has one Stripe. A refund an earlier run already made is answered as Stripe
+  would answer it, `charge_already_refunded` or `amount_too_large`, and its summary says so.
+- **What it holds.** Nothing per exchange for printing. It does hold that write log, every write
+  it faked, for as long as it runs, and every run that has not ended, one whose end never reached
+  irimi included. Both grow over a long serve.
+- **Binding.** irimi listens on `127.0.0.1` unless `--listen-host` says otherwise. Any other
+  address, `0.0.0.0` and `::` included, prints a banner line: `listening on 0.0.0.0: any machine
+  that can reach this port can send traffic through irimi and call its control endpoint`. The
+  control endpoint has no authentication, so bind wider only on a network that holds the agent and
+  nothing else. The reverse door stays loopback-only. A request addressed to irimi by a name or an
+  address it was reached at (`http://irimi:4000/...`) is irimi's own, never forwarded to itself.
+- **Stopping.** SIGINT and SIGTERM stop the proxy, write what is queued for up to 10 seconds, and
+  exit 0. A run whose end arrived before the signal still prints its summary; a run still open
+  is left `incomplete`. A proxy that stops by itself exits 1.
+- **One serve per store.** A serve holds `serve.lock` in its `--store` while it runs, and a
+  second serve on the same store exits 1 at once. A supervisor's restart retries until the old
+  process has exited.
+
 ## CLI
 
 ```
 irimi init [--force]              generate the local CA under $IRIMI_HOME/ca
-irimi serve [options]             run the shadow proxy in the foreground on 127.0.0.1:4000
+irimi shadow [options] --serve    run the shadow proxy as a sidecar until SIGINT or SIGTERM
+irimi serve [options]             the same as `irimi shadow --serve`
 irimi shadow [options] -- CMD     run CMD with its HTTP(S) traffic in shadow mode, then summarize
 irimi maps list                   print each mapped host, its service, route count and target
 irimi runs list [--limit N]       print one line per stored run, newest first (default 20)
 irimi runs show RUN_ID            print a stored run: its record, every event, its summary
 ```
 
-`serve` and `shadow` take `--port`, `--store DIR`, `--allow-host HOST`, `--target SPEC`,
-`--target-reads HOST` and `--allow-target-host HOST`; the last four repeat. Every run is recorded,
-redacted, under `--store` (default `$IRIMI_HOME/store`). `shadow` stores its command as one
-`process` run with the command's exit code, and the agent's version when `IRIMI_AGENT_VERSION` is
-set. `serve` starts no run of its own: an exchange is stored under the run its `Irimi-Run` names, or
-else under the id `serve` printed, and the store is closed on Ctrl-C but not yet on SIGTERM (#77).
-`serve` prints one line per exchange and no summary. A map, overrides file or `--target` the loader
-refuses stops `serve` and `shadow` before the proxy starts, with the rule it broke on stderr, and so
-does a redaction key or `--store` irimi cannot use. `IRIMI_HOME` moves irimi's state (see
-`.env.example`).
+`serve` and `shadow` take `--port`, `--listen-host HOST`, `--store DIR`, `--allow-host HOST`,
+`--target SPEC`, `--target-reads HOST` and `--allow-target-host HOST`; the last four repeat. Every
+run is recorded, redacted, under `--store` (default `$IRIMI_HOME/store`). `shadow` stores its
+command as one `process` run with the command's exit code, and the agent's version when
+`IRIMI_AGENT_VERSION` is set. Serve mode starts no run of its own ([Serve mode](#serve-mode)). A
+map, overrides file or `--target` the loader refuses stops `serve` and `shadow` before the proxy
+starts, with the rule it broke on stderr, and so does a redaction key or `--store` irimi cannot
+use. `IRIMI_HOME` moves irimi's state (see `.env.example`).
 
 `runs list` and `runs show` take `--store DIR` too. `runs list` prints each run's id, start,
 duration, status (`ok`, `error`, or `incomplete` for one that never ended), attribution, trigger,
@@ -575,8 +649,9 @@ To install irimi as a standalone tool instead of using the venv, run `uv tool in
 that runs every scenario bare and under `irimi shadow` against a fake internet. The agents call the
 real host names, so irimi classifies them with its shipped maps; only name resolution is faked.
 The bare run is the baseline, and its writes really land on stateful fake services. The shadow run
-goes through `irimi shadow`, and nothing may land. `examples/workflows/README.md` explains the
-harness and how to add a workflow.
+goes through `irimi shadow`, and nothing may land. Nine scenarios run a third time under
+`irimi shadow --serve`, with the agent beside irimi rather than its child.
+`examples/workflows/README.md` explains the harness and how to add a workflow.
 
 ```
 uv run python -m examples.workflows                                 # list workflows and scenarios
@@ -657,12 +732,12 @@ by phase.
   and a summary from a stored run (#72). The control endpoint, `/_irimi/` (#73). The SDK:
   `@sdk.trigger` and `sdk.run()` with run identity in a context variable (#74),
   `Irimi-Run` on every request a run makes through irimi (#75), and `@sdk.tool` for calls the
-  proxy cannot see (#76).
+  proxy cannot see (#76). `irimi shadow --serve` with per-run summaries (#77).
 
 **Next: the rest of Phase 3, the run**
 
-- `irimi shadow --serve` with per-run summaries (#77), a server agent example and the Phase 3 exit
-  test (#78), `irimi compare` (#79), Slack channel names in the summary (#61).
+- A server agent example and the Phase 3 exit test (#78), `irimi compare` (#79), Slack channel
+  names in the summary (#61).
 - Replay: answer a run from its recording (#82), read and write tools in replay (#83),
   `irimi replay` and `sdk.replay()` (#84), and record, edit a prompt, replay and diff end to end
   (#85).

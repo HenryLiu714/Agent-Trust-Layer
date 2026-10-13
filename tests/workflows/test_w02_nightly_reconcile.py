@@ -5,10 +5,14 @@ the run's state directory, seeded by the agent before the run; only `mark_reconc
 tool) changes it.
 """
 
+import pytest
+
 from examples.workflows.w02_nightly_reconcile.agent import LEDGER
 from irimi.exchange import Exchange
 
 W = "w02_nightly_reconcile"
+# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi (#77).
+MODES = ("shadow", "serve")
 AGENT = "examples.workflows.w02_nightly_reconcile.agent"
 CUSTOMER_UPDATE = "fake-L1   write     POST api.stripe.com/v1/customers/"
 
@@ -18,15 +22,16 @@ def reconciled_rows(result):
     return count
 
 
-def test_a_clean_night_pages_everything_and_posts_one_summary(run_workflow):
-    shadow = run_workflow(W, "clean", "shadow")
+@pytest.mark.parametrize("mode", MODES)
+def test_a_clean_night_pages_everything_and_posts_one_summary(run_workflow, mode):
+    shadow = run_workflow(W, "clean", mode)
     assert len(shadow.calls("list_charges")) == 2  # twelve charges, pages of ten
     assert shadow.result(with_time=False) == {"event": "result", "total": 0, "slack_ok": True}
     # LOOKS WRONG (#61): the human template writes `#{channel}` over a channel id, so an id
     # prints as `#C0RECON`, a channel name no one has.
     assert (
         '  ○ post to #C0RECON: "reconciled 0 for 2026-09-27"  unvalidated (L3 preconditions passed)'
-        in shadow.summary()
+        in shadow.summaries()
     )
     # The SDK's run wrapped the whole job, and the read tool ran for real inside it.
     run_id = shadow.events("run.start")[0]["run"]
@@ -36,13 +41,14 @@ def test_a_clean_night_pages_everything_and_posts_one_summary(run_workflow):
     assert shadow.tools("read") == [(f"{AGENT}.load_ledger", "real")]
 
 
-def test_forty_mismatches_are_forty_faked_writes_and_the_ledger_is_untouched(run_workflow):
-    shadow = run_workflow(W, "forty_mismatches", "shadow")
+@pytest.mark.parametrize("mode", MODES)
+def test_forty_mismatches_are_forty_faked_writes_and_the_ledger_is_untouched(run_workflow, mode):
+    shadow = run_workflow(W, "forty_mismatches", mode)
     bare = run_workflow(W, "forty_mismatches", "bare")
     assert len(shadow.calls("list_charges")) == 5
     assert [c["answered_by"] for c in shadow.calls("tag_customer")] == ["fake-L1"] * 40
     assert sum(line.startswith(CUSTOMER_UPDATE) for line in shadow.exchange_lines()) == 40
-    summary = shadow.summary()
+    summary = shadow.summaries()
     assert "  api.stripe.com  5 reads  40 writes intercepted" in summary
     assert sum("○ update customer cus_N0" in line for line in summary) == 40
     assert "  47 exchanges · 6 live · 0 delegated · 41 virtualized" in summary
@@ -67,26 +73,27 @@ def test_forty_mismatches_are_forty_faked_writes_and_the_ledger_is_untouched(run
     assert len(bare.internet.writes()) == 41  # forty customers and the Slack post
 
 
-def test_forty_mismatches_store_all_47_exchanges_and_drop_none(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_forty_mismatches_store_all_47_exchanges_and_drop_none(run_workflow, mode):
     """The busiest run in the corpus, stored whole (#70): every exchange irimi reported is on
-    disk, and no run records a dropped event."""
-    shadow = run_workflow(W, "forty_mismatches", "shadow")
+    disk, and no run records a dropped event. Under serve mode (#77) the run is the only one,
+    with no process run beside it, and its block is printed from the store at its end."""
+    shadow = run_workflow(W, "forty_mismatches", mode)
     stored = [e for e in shadow.stored_events() if isinstance(e, Exchange)]
     assert len(stored) == len(shadow.exchange_lines()) == 47
-    assert [r.dropped_events for r in shadow.stored().list_runs()] == [0, 0]
+    process = ["0 exchanges  0 writes"] if mode == "shadow" else []
+    assert [r.dropped_events for r in shadow.stored().list_runs()] == [0] * (len(process) + 1)
     # `irimi runs list` counts them in the run that holds them, and its writes are the summary's
     # `41 virtualized`: forty customer updates and the Slack post (#72).
     code, out, err = shadow.runs("list")
     assert (code, err) == (0, [])
-    assert sorted(line.split("  ", 6)[6] for line in out) == [
-        "0 exchanges  0 writes",
-        "47 exchanges  41 writes",
-    ]
-    assert "  47 exchanges · 6 live · 0 delegated · 41 virtualized" in shadow.summary()
+    assert sorted(line.split("  ", 6)[6] for line in out) == [*process, "47 exchanges  41 writes"]
+    assert "  47 exchanges · 6 live · 0 delegated · 41 virtualized" in shadow.summaries()
 
 
-def test_a_datetime_trigger_is_stored_by_its_repr_and_cannot_be_replayed(run_workflow):
-    shadow = run_workflow(W, "datetime_trigger", "shadow")
+@pytest.mark.parametrize("mode", MODES)
+def test_a_datetime_trigger_is_stored_by_its_repr_and_cannot_be_replayed(run_workflow, mode):
+    shadow = run_workflow(W, "datetime_trigger", mode)
     [trigger] = shadow.events("trigger")
     assert trigger["type"] == "datetime"
     assert trigger["value"].startswith("datetime.datetime(2026, 9, 27, 2, 0")
@@ -104,12 +111,13 @@ def test_a_datetime_trigger_is_stored_by_its_repr_and_cannot_be_replayed(run_wor
     ]
 
 
-def test_the_same_date_twice_is_six_writes_in_both_modes(run_workflow):
-    shadow = run_workflow(W, "same_date_twice", "shadow")
+@pytest.mark.parametrize("mode", MODES)
+def test_the_same_date_twice_is_six_writes_in_both_modes(run_workflow, mode):
+    shadow = run_workflow(W, "same_date_twice", mode)
     bare = run_workflow(W, "same_date_twice", "bare")
     # Nothing in the run stops the repeat, so the report shows each customer update twice: the
     # duplicate a Phase 4 report must flag. Bare, the same six reach Stripe.
-    lines = [line for line in shadow.summary() if "○ update customer" in line]
+    lines = [line for line in shadow.summaries() if "○ update customer" in line]
     assert lines == [f"  ○ update customer cus_N00{i}  unvalidated (L1)" for i in (2, 1, 0)] * 2
     assert [r.path for r in bare.internet.writes() if r.host == "api.stripe.com"] == [
         f"/v1/customers/cus_N00{i}" for i in (2, 1, 0)
@@ -117,8 +125,9 @@ def test_the_same_date_twice_is_six_writes_in_both_modes(run_workflow):
     assert shadow.result()["total"] == bare.result()["total"] == 6
 
 
-def test_paging_from_a_minted_refund_is_translated_and_finds_the_real_one(run_workflow):
-    shadow = run_workflow(W, "refund_then_page", "shadow")
+@pytest.mark.parametrize("mode", MODES)
+def test_paging_from_a_minted_refund_is_translated_and_finds_the_real_one(run_workflow, mode):
+    shadow = run_workflow(W, "refund_then_page", mode)
     bare = run_workflow(W, "refund_then_page", "bare")
     [seen] = shadow.events("refunds")
     assert seen["minted"].startswith("re_") and seen["minted"] != "re_PRIOR000"
@@ -138,7 +147,7 @@ def test_paging_from_a_minted_refund_is_translated_and_finds_the_real_one(run_wo
     # the minted id.
     refund_reads = [r.query for r in shadow.internet.requests() if r.path == "/v1/refunds"]
     assert refund_reads == [{"charge": "ch_N000", "limit": "1"}] * 2
-    summary = shadow.summary()
+    summary = shadow.summaries()
     i = summary.index("  ○ refund $1.00 on ch_N000  unvalidated (L3 preconditions passed)")
     assert summary[i + 1] == "    ↳ GET /v1/refunds saw it  overlay"
     # The translated page is `live` with no line of its own.

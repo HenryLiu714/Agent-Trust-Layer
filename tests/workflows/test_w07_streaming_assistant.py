@@ -9,6 +9,8 @@ import json
 import re
 from itertools import accumulate
 
+import pytest
+
 from examples.workflows.harness.internet import BOMB_LINE
 from examples.workflows.w07_streaming_assistant.scenarios import (
     ANSWER,
@@ -25,6 +27,8 @@ from irimi.store import MAX_STORED_BODY
 from irimi.trace import ErrorInfo, TelemetrySeen
 
 W = "w07_streaming_assistant"
+# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi (#77).
+MODES = ("shadow", "serve")
 TRACE_LINE = "live      telemetry POST api.smith.langchain.com/runs -> 202"
 LLM_LINES = [
     "live      llm       POST api.openai.com/v1/embeddings -> 200",
@@ -75,9 +79,10 @@ def line_around(body: bytes, needle: bytes) -> tuple[int, int]:
     return body.rindex(b"\n", 0, at) + 1, body.index(b"\n", at) + 1
 
 
-def test_both_streams_pass_through_irimi_whole_and_unchanged(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_both_streams_pass_through_irimi_whole_and_unchanged(run_workflow, mode):
     bare = run_workflow(W, "normal", "bare")
-    shadow = run_workflow(W, "normal", "shadow")
+    shadow = run_workflow(W, "normal", mode)
     assert shadow.result(with_time=False) == bare.result(with_time=False)
     result = shadow.result()
     assert result["outcome"] == "ok"
@@ -88,10 +93,11 @@ def test_both_streams_pass_through_irimi_whole_and_unchanged(run_workflow):
     assert [c["answered_by"] for c in shadow.calls()] == [None, None, None, None]
 
 
-def test_a_telemetry_post_is_stored_as_having_happened_and_its_body_is_not(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_a_telemetry_post_is_stored_as_having_happened_and_its_body_is_not(run_workflow, mode):
     """Telemetry is forwarded and its requests and responses are never stored (#70): the trace
     POST is one `TelemetrySeen` line, host and time, and no blob holds its body."""
-    shadow = run_workflow(W, "normal", "shadow")
+    shadow = run_workflow(W, "normal", mode)
     [trace_call] = shadow.calls("trace")
     assert (trace_call["status"], trace_call["answered_by"]) == (202, None)
     [sent] = shadow.internet.requests("api.smith.langchain.com")
@@ -130,13 +136,14 @@ def test_a_telemetry_post_is_stored_as_having_happened_and_its_body_is_not(run_w
     ]
 
 
-def test_a_streamed_answer_is_stored_as_the_chunks_the_agent_was_sent(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_a_streamed_answer_is_stored_as_the_chunks_the_agent_was_sent(run_workflow, mode):
     """#71: the engine streams an SSE answer through and stores what it sent, joined, with the
     length of each chunk. Both streams are stored whole, to their last event, and the Anthropic
     text deltas on disk are the answer the agent assembled. The fake writes one event per chunk,
     5 ms apart, and TCP may coalesce writes, so more than one chunk is pinned and not a count. The
     embeddings answer is not streamed, and has no chunks."""
-    shadow = run_workflow(W, "normal", "shadow")
+    shadow = run_workflow(W, "normal", mode)
     stored = stored_exchanges(shadow)
     assert sorted(stored) == ["/v1/chat/completions", "/v1/embeddings", "/v1/messages"]
     # All three in the chat's run, the streams too: urllib is labelled by the SDK (#75).
@@ -163,20 +170,21 @@ def test_a_streamed_answer_is_stored_as_the_chunks_the_agent_was_sent(run_workfl
     assert embeddings.stream_chunks == ()
 
 
-def test_streams_read_with_httpx_are_stored_whole_in_the_chats_run(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_streams_read_with_httpx_are_stored_whole_in_the_chats_run(run_workflow, mode):
     """The Anthropic and OpenAI SDKs stream with httpx, which the SDK labels at its transport and
     unlabels as soon as the transport returns, while the stream is still being read (#75). The
     agent sees what it sees with urllib, both streams are stored whole and in the chat's run, as
     the chunks it was sent (#71), and no upstream saw `Irimi-Run` (universal invariant 2)."""
     bare = run_workflow(W, "httpx_streams", "bare")
-    shadow = run_workflow(W, "httpx_streams", "shadow")
+    shadow = run_workflow(W, "httpx_streams", mode)
     assert shadow.result(with_time=False) == bare.result(with_time=False)
     assert shadow.result()["caller_text"] == shadow.result()["answer"] == ANSWER
     assert shadow.exchange_lines() == LLM_LINES
     stored = stored_exchanges(shadow)
     [chat] = shadow.sdk_runs()
     assert {ex.run_id for ex in stored.values()} == {chat.run_id}
-    assert shadow.stored().load_run(shadow.process_run_id()).events == []
+    assert shadow.stored().load_run(shadow.engine_run_id()).events == []
     ends = {"/v1/messages": MESSAGE_STOP, "/v1/chat/completions": b"data: [DONE]\n\n"}
     for path, end in ends.items():
         ex = stored[path]
@@ -188,12 +196,13 @@ def test_streams_read_with_httpx_are_stored_whole_in_the_chats_run(run_workflow)
     assert [r for r in shadow.internet.requests() if "irimi-run" in r.headers] == []
 
 
-def test_a_secret_inside_a_stream_reaches_the_caller_intact_and_never_disk(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_a_secret_inside_a_stream_reaches_the_caller_intact_and_never_disk(run_workflow, mode):
     """Redaction is for disk only (#69): the live stream is never rewritten, and the stored one
     (#71) holds the secret nowhere whole. The agent passes Anthropic's answer on to OpenAI, so the
     secret is whole in that request body, and stored there as its placeholder. The secret is not
     one of the harness's canaries, so invariant 4 does not look for it: this test does."""
-    shadow = run_workflow(W, "secret_in_stream", "shadow")
+    shadow = run_workflow(W, "secret_in_stream", mode)
     assert SECRET in shadow.result()["caller_text"]
     assert shadow.exchange_lines() == LLM_LINES
     written = [
@@ -208,10 +217,11 @@ def test_a_secret_inside_a_stream_reaches_the_caller_intact_and_never_disk(run_w
     assert hidden in stored["/v1/chat/completions"].request.body
 
 
-def test_a_secret_a_stream_sends_in_pieces_reaches_disk_in_pieces(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_a_secret_a_stream_sends_in_pieces_reaches_disk_in_pieces(run_workflow, mode):
     """The fake sends Anthropic's text 12 characters per `text_delta` event, and redaction reads
     a stream line by line (#69), so the secret is never whole on any line it reads."""
-    shadow = run_workflow(W, "secret_in_stream", "shadow")
+    shadow = run_workflow(W, "secret_in_stream", mode)
     anthropic = stored_exchanges(shadow)["/v1/messages"].response
     assert anthropic is not None
     deltas = [
@@ -224,9 +234,10 @@ def test_a_secret_a_stream_sends_in_pieces_reaches_disk_in_pieces(run_workflow):
     assert [d for d in deltas if d[:4] in ("CANA", " is ")] == [" is sk_live_", "CANARYstream"]
 
 
-def test_a_caller_that_hangs_up_ends_the_run_in_error(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_a_caller_that_hangs_up_ends_the_run_in_error(run_workflow, mode):
     bare = run_workflow(W, "caller_disconnects", "bare")
-    shadow = run_workflow(W, "caller_disconnects", "shadow")
+    shadow = run_workflow(W, "caller_disconnects", mode)
     assert bare.exit_code == shadow.exit_code == 3
     assert shadow.result()["caller_events"] == ["start"]
     assert shadow.result()["outcome"] == "client_gone"
@@ -255,12 +266,13 @@ def test_a_caller_that_hangs_up_ends_the_run_in_error(run_workflow):
     assert sum(stream.stream_chunks) == len(stream.response.body)
 
 
-def test_an_upstream_reset_mid_stream_is_stored_as_a_broken_stream(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_an_upstream_reset_mid_stream_is_stored_as_a_broken_stream(run_workflow, mode):
     """The fake frames its streams as real LLM APIs do, chunked, so a reset mid-stream is a body
     that never finished, and not an end of body (#71). The agent sees its stream break, and irimi
     stores the one event that arrived, flagged as not the whole stream."""
     bare = run_workflow(W, "upstream_reset", "bare")
-    shadow = run_workflow(W, "upstream_reset", "shadow")
+    shadow = run_workflow(W, "upstream_reset", mode)
     assert bare.exit_code == shadow.exit_code == 4
     # Bare, the reset reaches the agent as a reset. Under shadow it reaches it as a chunked body
     # that stopped short: irimi's own connection to the agent was not reset.
@@ -280,9 +292,10 @@ def test_an_upstream_reset_mid_stream_is_stored_as_a_broken_stream(run_workflow)
     assert stream.stream_chunks == (len(stream.response.body),)
 
 
-def test_a_reset_before_the_stream_opens_reaches_the_agent_as_an_unstamped_502(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_a_reset_before_the_stream_opens_reaches_the_agent_as_an_unstamped_502(run_workflow, mode):
     bare = run_workflow(W, "reset_before_stream", "bare")
-    shadow = run_workflow(W, "reset_before_stream", "shadow")
+    shadow = run_workflow(W, "reset_before_stream", mode)
     assert bare.exit_code == shadow.exit_code == 4
     assert bare.result()["error"] == "anthropic_stream: ConnectionResetError"
     # LOOKS WRONG: under shadow the proxy answers the reset with a 502 of its own, unstamped: the
@@ -302,9 +315,10 @@ def test_a_reset_before_the_stream_opens_reaches_the_agent_as_an_unstamped_502(r
     assert [e.stream_chunks for e in stored.values()] == [(), ()]
 
 
-def test_a_tool_call_streamed_in_pieces_becomes_one_faked_slack_post(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_a_tool_call_streamed_in_pieces_becomes_one_faked_slack_post(run_workflow, mode):
     bare = run_workflow(W, "tool_call_across_deltas", "bare")
-    shadow = run_workflow(W, "tool_call_across_deltas", "shadow")
+    shadow = run_workflow(W, "tool_call_across_deltas", mode)
     text = "Summary: refunds go back to the card within 5-10 days."
     posted = {"ok": True, "channel": CHANNEL, "text": text}
     assert bare.result()["posted"] == shadow.result()["posted"] == posted
@@ -316,7 +330,7 @@ def test_a_tool_call_streamed_in_pieces_becomes_one_faked_slack_post(run_workflo
         "fake-L1   write     POST slack.com/api/chat.postMessage -> 200  [fidelity:L1]",
     ]
     assert f'  ○ post to #{CHANNEL}: "{text}"  unvalidated (L3 preconditions passed)' in (
-        shadow.summary()
+        shadow.summaries()
     )
     # The stored OpenAI stream holds every 5-character argument delta `SplittingLLM` sent, in
     # order: the tool call is recorded as it streamed, not as the agent assembled it (#71).
@@ -328,7 +342,8 @@ def test_a_tool_call_streamed_in_pieces_becomes_one_faked_slack_post(run_workflo
     assert pieces == ["", *(arguments[i : i + 5] for i in range(0, len(arguments), 5))]
 
 
-def test_a_secret_a_write_ends_inside_is_redacted_in_the_joined_stream(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_a_secret_a_write_ends_inside_is_redacted_in_the_joined_stream(run_workflow, mode):
     """#71 with chunk boundaries that fall mid-line. The fake writes a 16 KB Anthropic stream in
     pieces that each end inside a `data:` line, one of them inside the secret, which is whole on
     its line. Redaction reads the stream joined (#69), so the secret reaches disk as its
@@ -336,7 +351,7 @@ def test_a_secret_a_write_ends_inside_is_redacted_in_the_joined_stream(run_workf
     line by line: a boundary in a line redaction left alone keeps its place, and the one that
     fell inside the secret's line, which redaction re-serialized, moves to that line's end."""
     bare = run_workflow(W, "secret_split_across_writes", "bare")
-    shadow = run_workflow(W, "secret_split_across_writes", "shadow")
+    shadow = run_workflow(W, "secret_split_across_writes", mode)
     assert bare.exit_code == shadow.exit_code == 0
     assert shadow.result(with_time=False) == bare.result(with_time=False)
     assert shadow.result()["caller_text"] == shadow.result()["answer"] == LONG_ANSWER
@@ -377,14 +392,15 @@ def test_a_secret_a_write_ends_inside_is_redacted_in_the_joined_stream(run_workf
     assert written == []
 
 
-def test_two_streams_at_once_are_each_stored_against_their_own_request(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_two_streams_at_once_are_each_stored_against_their_own_request(run_workflow, mode):
     """#71 under concurrency. Two callers ask at once, and the fake LLM answers neither of a
     provider's two calls until both have arrived, so irimi copies two Anthropic streams, then two
     OpenAI streams, at the same time. Each chat's answers name its caller, so a chunk copied into
     the other flow's recording would show: each stored stream is whole, and is the answer to the
     request it is stored with."""
     bare = run_workflow(W, "two_callers", "bare")
-    shadow = run_workflow(W, "two_callers", "shadow")
+    shadow = run_workflow(W, "two_callers", mode)
     assert bare.exit_code == shadow.exit_code == 0
     assert shadow.result(with_time=False) == bare.result(with_time=False)
     for n, caller in enumerate(shadow.result()["callers"], start=1):
@@ -434,15 +450,16 @@ def test_two_streams_at_once_are_each_stored_against_their_own_request(run_workf
                 asked = json.loads(ex.request.body)
                 question = asked["input"] if "input" in asked else asked["messages"][-1]["content"]
                 assert question == f"How do refunds work? (caller {caller})"
-    process = shadow.stored().load_run(shadow.process_run_id()).events
+    process = shadow.stored().load_run(shadow.engine_run_id()).events
     assert process == []
 
 
-def test_the_callers_send_function_is_stored_by_its_repr_and_cannot_be_replayed(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_the_callers_send_function_is_stored_by_its_repr_and_cannot_be_replayed(run_workflow, mode):
     """#74's capture of a value that is not data: `chat(question, send)` is the ordinary shape of
     a streaming handler, and `send` is a closure over the caller's connection. It is stored as
     its repr and makes the run not replayable; the question is stored as itself."""
-    shadow = run_workflow(W, "normal", "shadow")
+    shadow = run_workflow(W, "normal", mode)
     [run] = shadow.sdk_runs()
     assert run.trigger is not None and not run.trigger.replayable
     assert run.trigger.entrypoint == "examples.workflows.w07_streaming_assistant.agent:chat"
@@ -453,7 +470,8 @@ def test_the_callers_send_function_is_stored_by_its_repr_and_cannot_be_replayed(
     assert str(send["__irimi_repr__"]).startswith("<function ")
 
 
-def test_a_gzip_bomb_streams_to_the_agent_whole_and_is_recorded_cut(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_a_gzip_bomb_streams_to_the_agent_whole_and_is_recorded_cut(run_workflow, mode):
     """#94 on a stream. Anthropic's answer comes gzip-encoded, 2 MiB written 64 KB at a time that
     decode to its events with a GiB of padding before `message_stop`. The agent decodes the start
     as it reads, forwards its text to its caller, and stops decoding at 1 MiB: it reads every byte
@@ -462,7 +480,7 @@ def test_a_gzip_bomb_streams_to_the_agent_whole_and_is_recorded_cut(run_workflow
     share of its decoded lines, one chunk, flagged `stream-truncated` once, and stored as recorded:
     the store drops nothing, and the secret in its text never reaches disk whole."""
     bare = run_workflow(W, "gzip_bomb_stream", "bare")
-    shadow = run_workflow(W, "gzip_bomb_stream", "shadow")
+    shadow = run_workflow(W, "gzip_bomb_stream", mode)
     assert bare.exit_code == shadow.exit_code == 4
     assert shadow.result(with_time=False) == bare.result(with_time=False)
     result = shadow.result()
@@ -510,7 +528,9 @@ def test_a_gzip_bomb_streams_to_the_agent_whole_and_is_recorded_cut(run_workflow
     assert text_deltas(stream.response.body) == said
     assert stream.response.body == recorded
     assert stream.stream_chunks == (len(stream.response.body),)
-    assert [r.dropped_events for r in shadow.stored().list_runs()] == [0, 0]
+    # The run and, under `irimi shadow`, the process run; serve mode has none (#77).
+    runs = 2 if mode == "shadow" else 1
+    assert [r.dropped_events for r in shadow.stored().list_runs()] == [0] * runs
     written = [
         path
         for root in (shadow.home, shadow.cwd, shadow.tmp)
@@ -528,3 +548,44 @@ def test_a_streamed_gzip_bomb_costs_irimi_its_cap_in_memory_not_what_it_decodes_
     assert result.exit_code == 4
     assert "[stream-truncated]" in result.exchange_lines()[-1]
     assert peak < 2 * MAX_DECODED_BODY + 64 * 1024 * 1024
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_stream_its_trigger_hands_off_is_stored_in_its_run_after_the_run_ended(
+    run_workflow, mode
+):
+    """`hand_off`: the trigger opens Anthropic's stream and returns it, as a handler returns a
+    streaming response its framework reads later. The request went out inside the run, so the
+    SDK labelled it and irimi stores the stream in the run (#75); the run ended as the trigger
+    returned, and the stream only after, once the agent had listed the models in no run, which
+    the fake service waits for. So the stream is recorded after its run's end, as W3
+    `task_outlives_trigger`'s calls are, whatever the scheduler does.
+
+    LOOKS WRONG (#77, the issue's "Since #70"): under serve mode the run's block is printed as
+    soon as its end is on disk, before the stream is: it says the run made no exchange at all,
+    while the stored run, and `irimi runs show`, hold the stream."""
+    bare = run_workflow(W, "hand_off", "bare")
+    shadow = run_workflow(W, "hand_off", mode)
+    assert shadow.exit_code == bare.exit_code == 0
+    assert shadow.result(with_time=False) == bare.result(with_time=False)
+    assert shadow.result()["caller_events"][-1] == "done"
+    [start] = shadow.events("run.start")
+    assert [(c["label"], c["run"]) for c in shadow.calls()] == [
+        ("anthropic_stream", start["run"]),
+        ("models", None),
+    ]
+    [run] = shadow.sdk_runs()
+    assert (run.run_id, run.outcome) == (start["run"], "ok")
+    stored = stored_exchanges(shadow)
+    stream, models = stored["/v1/messages"], stored["/v1/models"]
+    assert stream.response is not None and stream.response.body.endswith(MESSAGE_STOP)
+    assert stream.run_id == run.run_id and models.run_id == shadow.engine_run_id()
+    assert run.ended_at is not None and stream.started_at < run.ended_at < stream.ended_at
+    if mode == "shadow":
+        return
+    assert shadow.run_blocks()[run.run_id][-1] == (
+        "  0 exchanges · 0 live · 0 delegated · 0 virtualized"
+    )
+    code, out, err = shadow.runs("show", run.run_id)
+    assert (code, err) == (0, [])
+    assert out[-1] == "  1 exchange · 1 live · 0 delegated · 0 virtualized"

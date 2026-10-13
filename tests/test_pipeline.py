@@ -382,6 +382,30 @@ def test_detect_door_resolves_unknown_name_on_own_port(monkeypatch):
     assert detect_door(_door_req("/x", host="self.test", port=4001), 4000) == "forward"
 
 
+def test_detect_door_takes_the_address_the_connection_arrived_on_as_this_machine(monkeypatch):
+    """Bound wider than loopback, the listener is also the address it was reached at (#77). That
+    address on irimi's port, in either spelling a dual-stack socket reports, is the reverse door;
+    so is a name that resolves to it, as `irimi` does from another container. Another address,
+    another port, or no local address at all is still the forward door."""
+    import socket
+
+    from irimi import netaddr
+
+    def fake_getaddrinfo(host, port, **kwargs):
+        if host == "irimi":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("172.18.0.3", 0))]
+        raise socket.gaierror("no such host")
+
+    monkeypatch.setattr(netaddr.socket, "getaddrinfo", fake_getaddrinfo)
+    for host in ("172.18.0.3", "irimi"):
+        req = _door_req("/api.stripe.com/v1", host=host)
+        assert detect_door(req, 4000, "172.18.0.3") == "reverse", host
+        assert detect_door(req, 4000, "::ffff:172.18.0.3") == "reverse", host
+        assert detect_door(req, 4000) == "forward", host
+        assert detect_door(req, 4000, "172.18.0.4") == "forward", host
+        assert detect_door(_door_req("/x", host=host, port=4001), 4000, "172.18.0.3") == "forward"
+
+
 def test_is_self_host():
     for host in ["localhost", "127.0.0.1", "127.255.0.1", "127.1", "::1", "::ffff:127.0.0.1"]:
         assert is_self_host(host), host
@@ -757,6 +781,28 @@ def test_a_target_on_our_own_listener_is_refused():
 def test_a_target_on_another_port_is_allowed():
     assert refuse_self_target("http://127.0.0.1:3000", 4000) is None
     assert refuse_self_target("http://127.0.0.1", 4000) is None  # port 80, not ours
+
+
+def test_a_target_naming_the_address_irimi_was_reached_at_is_refused(monkeypatch):
+    """Bound wider than loopback, irimi is also the address a connection reached it at, and a
+    name resolving to it, as `detect_door` says of a request (#77). A target there, which only
+    `--allow-target-host` lets off loopback, is irimi's own listener too: refused as one, never
+    dialled to be refused again by the reverse door."""
+    import socket
+
+    real = socket.getaddrinfo
+
+    def resolving(host, *args, **kwargs):
+        return real("10.0.0.5" if host == "irimi.test" else host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolving)
+    for target in ["http://10.0.0.5:4000", "http://irimi.test:4000/w"]:
+        for local in ["10.0.0.5", "::ffff:10.0.0.5"]:
+            with pytest.raises(TargetRefused, match="own listener"):
+                refuse_self_target(target, 4000, local)
+        assert refuse_self_target(target, 4000) is None  # reached on loopback: another machine's
+        assert refuse_self_target(target, 4000, "10.0.0.6") is None
+    assert refuse_self_target("http://10.0.0.5:3000", 4000, "10.0.0.5") is None
 
 
 def test_classify_reports_the_service_map_even_when_no_route_matched(tmp_path, monkeypatch):

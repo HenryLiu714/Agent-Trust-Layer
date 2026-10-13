@@ -25,14 +25,17 @@ from examples.workflows.w09_scope_gauntlet.scenarios import BIG_DESCRIPTION_BYTE
 from irimi import control, paths, report, trace
 from irimi.bodies import MAX_BODY_BYTES
 from irimi.exchange import BODY_TRUNCATED_FLAG, Exchange
-from irimi.store import MAX_STORED_BODY
+from irimi.store import MAX_STORED_BODY, SERVE_LOCK_FILE
 from irimi.trace import MAX_ERROR_MESSAGE, ErrorInfo, RunRecord, ToolCall, Trigger
 
 W = "w09_scope_gauntlet"
+# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi (#77).
+MODES = ("shadow", "serve")
 
 
-def test_the_scope_rule_fakes_every_method_no_route_names(run_workflow):
-    shadow = run_workflow(W, "verbs", "shadow")
+@pytest.mark.parametrize("mode", MODES)
+def test_the_scope_rule_fakes_every_method_no_route_names(run_workflow, mode):
+    shadow = run_workflow(W, "verbs", mode)
     assert shadow.by_label() == {
         "get_charge": (200, None),
         "head_charges": (200, None),
@@ -57,7 +60,7 @@ def test_the_scope_rule_fakes_every_method_no_route_names(run_workflow):
         )
     # The L0 floor: a mapped write whose route ships no `fixture:` is still a write, and faked.
     assert "fake-L0   write     POST slack.com/api/reactions.add -> 200  [fidelity:L0]" in lines
-    assert "  ○ add :eyes: to a message in C0GAUNT  unvalidated (L0)" in shadow.summary()
+    assert "  ○ add :eyes: to a message in C0GAUNT  unvalidated (L0)" in summary_of(shadow)
     # Bare, the same calls really reach Stripe; the fake refuses the ones it does not know.
     bare = run_workflow(W, "verbs", "bare")
     assert [(r.method, r.path) for r in bare.internet.writes()] == [
@@ -70,8 +73,9 @@ def test_the_scope_rule_fakes_every_method_no_route_names(run_workflow):
     ]
 
 
-def test_one_idempotency_key_is_one_write_and_a_reused_key_is_stripes_own_error(run_workflow):
-    shadow = run_workflow(W, "idempotency", "shadow")
+@pytest.mark.parametrize("mode", MODES)
+def test_one_idempotency_key_is_one_write_and_a_reused_key_is_stripes_own_error(run_workflow, mode):
+    shadow = run_workflow(W, "idempotency", mode)
     bare = run_workflow(W, "idempotency", "bare")
     # The agent sees the same statuses either way: irimi's idempotency is Stripe's.
     assert [s for s, _ in shadow.by_label().values()] == [s for s, _ in bare.by_label().values()]
@@ -93,19 +97,20 @@ def test_one_idempotency_key_is_one_write_and_a_reused_key_is_stripes_own_error(
     engine_reads = [r for r in shadow.internet.requests() if r.path == "/v1/charges/ch_GAUNTLET"]
     assert len(engine_reads) == 3
     # The summary counts the two keyless refunds as two writes: the duplicate Phase 4 must flag.
-    summary = "\n".join(shadow.summary())
+    summary = "\n".join(summary_of(shadow))
     assert summary.count("refund $0.50 on ch_GAUNTLET") == 2
     assert "✗ refund 200 on ch_GAUNTLET  would fail: idempotency_error" in summary
 
 
-def test_gzip_chunked_and_oversized_bodies_are_still_faked(run_workflow):
-    shadow = run_workflow(W, "bodies", "shadow")
+@pytest.mark.parametrize("mode", MODES)
+def test_gzip_chunked_and_oversized_bodies_are_still_faked(run_workflow, mode):
+    shadow = run_workflow(W, "bodies", mode)
     assert shadow.by_label() == {
         "refund_gzip": (200, "fake-L1"),
         "refund_chunked": (200, "fake-L1"),
         "customer_3mb": (200, "fake-L1"),
     }
-    summary = "\n".join(shadow.summary())
+    summary = "\n".join(summary_of(shadow))
     # irimi read the refund amount out of the gzip body and out of the chunked one.
     assert "refund $3.00 on ch_GAUNTLET" in summary
     assert "refund $4.00 on ch_GAUNTLET" in summary
@@ -122,13 +127,16 @@ def test_gzip_chunked_and_oversized_bodies_are_still_faked(run_workflow):
     assert BODY_TRUNCATED_FLAG not in update.flags
 
 
-def test_a_read_past_the_body_limit_leaves_the_check_and_the_overlay_unable_to_say(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_a_read_past_the_body_limit_leaves_the_check_and_the_overlay_unable_to_say(
+    run_workflow, mode
+):
     """A charge too big to parse (`MAX_BODY_BYTES`): irimi cannot check the refund against it (L2)
     or show the refund in it when the agent reads it back, and the summary says both."""
     bare = run_workflow(W, "big_reads", "bare")
     [charge_read] = [r for r in bare.internet.requests() if r.method == "GET"]
     assert charge_read.path == f"/v1/charges/{BIG_CHARGE}"
-    shadow = run_workflow(W, "big_reads", "shadow")
+    shadow = run_workflow(W, "big_reads", mode)
     assert shadow.by_label() == {"refund_big": (200, "fake-L1"), "get_big": (200, None)}
     # Bare, the read-back shows the refund; under shadow the overlay could not add it.
     assert [e["amount_refunded"] for e in bare.events("big_charge")] == [700]
@@ -140,12 +148,23 @@ def test_a_read_past_the_body_limit_leaves_the_check_and_the_overlay_unable_to_s
         "fake-L1   write     POST api.stripe.com/v1/refunds -> 200  [fidelity:L1]",
         f"live      read      GET api.stripe.com/v1/charges/{BIG_CHARGE} -> 200",
     ]
-    summary = shadow.summary()
+    summary = summary_of(shadow)
     assert f"  ○ refund 700 on {BIG_CHARGE}  unvalidated (L2)" in summary
     assert f"    ↳ GET /v1/charges/{BIG_CHARGE} did not show it  live (partial)" in summary
     # LOOKS WRONG: stored the same way (#70) - an engine read with no response and no flag, so a
     # stored run cannot tell "too big" apart from "no answer" either.
     assert engine_reads(shadow) == [(None, ())]
+
+
+def summary_of(result) -> list[str]:
+    """What irimi said of the script's writes: `irimi shadow`'s closing block, or under serve mode
+    (#77), where a plain script names no run, so every request is `unattributed` and no run's
+    block is printed, the summary `irimi runs show unattributed` ends in."""
+    if result.mode == "shadow":
+        return result.summary()
+    code, out, err = result.runs("show", trace.UNATTRIBUTED)
+    assert (code, err) == (0, [])
+    return out[out.index("") + 1 :]
 
 
 def engine_reads(result) -> list[tuple[object, tuple[str, ...]]]:
@@ -162,12 +181,13 @@ def test_the_big_charge_is_past_irimis_body_limit():
     assert BIG_DESCRIPTION_BYTES > MAX_BODY_BYTES
 
 
+@pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("scenario", sorted(WORKFLOW.scenarios))
-def test_no_decision_ever_fails(run_workflow, scenario):
+def test_no_decision_ever_fails(run_workflow, scenario, mode):
     """The never-raise hook: a decision that raised would answer 502 `decision-failed`. No edge
     in the gauntlet may reach that path, and every agent call got an HTTP answer. But one: a write
     whose body decodes past irimi's cap is refused on that path by design (#94), and says why."""
-    shadow = run_workflow(W, scenario, "shadow")
+    shadow = run_workflow(W, scenario, mode)
     assert shadow.exchange_lines()
     failed = [line for line in shadow.exchange_lines() if "decision-failed" in line]
     assert [line for line in failed if not line.endswith("decision-failed, body-truncated]")] == []
@@ -175,7 +195,8 @@ def test_no_decision_ever_fails(run_workflow, scenario):
     assert all(isinstance(c.get("status"), int) for c in shadow.calls())
 
 
-def test_irimis_own_headers_sent_by_the_agent_never_leave(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_irimis_own_headers_sent_by_the_agent_never_leave(run_workflow, mode):
     # Bare, the agent's forged headers reach the service: the agent really sends them.
     bare = run_workflow(W, "headers", "bare")
     assert [
@@ -184,7 +205,7 @@ def test_irimis_own_headers_sent_by_the_agent_never_leave(run_workflow):
         ["irimi-rewrote"],
         ["irimi-run"],
     ]
-    shadow = run_workflow(W, "headers", "shadow")
+    shadow = run_workflow(W, "headers", mode)
     assert shadow.by_label() == {"forged_rewrote": (200, None), "bad_run_id": (200, None)}
     assert [r.path for r in shadow.internet.requests()] == [
         "/v1/refunds",
@@ -195,11 +216,18 @@ def test_irimis_own_headers_sent_by_the_agent_never_leave(run_workflow):
         assert "irimi-run" not in req.headers
 
 
-def test_every_spelling_of_the_proxys_own_address_is_the_reverse_door(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_every_spelling_of_the_proxys_own_address_is_the_reverse_door(run_workflow, mode):
     """`127.0.0.1` (sent direct, as irimi's NO_PROXY says), `127.1` and `0.0.0.0` (sent through the
     proxy to itself) all name irimi's listener, so each refund is taken through the reverse door
-    and faked. Missing a spelling would forward the request to the proxy itself, or past it."""
-    shadow = run_workflow(W, "self_addressed", "shadow")
+    and faked. Missing a spelling would forward the request to the proxy itself, or past it.
+
+    Serve mode binds irimi to 0.0.0.0 here (#77), so the listener is every address of this
+    machine: the same three spellings still find it, the agent still reaches it from loopback, so
+    the reverse door's peer check lets it through, and nothing reaches the fake internet. This
+    machine's own non-loopback address is not a spelling the fake resolver allows, so that case
+    is `tests/test_serve.py`'s."""
+    shadow = run_workflow(W, "self_addressed", mode)
     assert {k: v for k, v in shadow.by_label().items() if k.startswith("door_")} == {
         "door_127.0.0.1": (200, "fake-L1"),
         "door_127.1": (200, "fake-L1"),
@@ -212,16 +240,27 @@ def test_every_spelling_of_the_proxys_own_address_is_the_reverse_door(run_workfl
     read = "live      read      GET api.stripe.com/v1/charges/ch_GAUNTLET -> -"
     write = "fake-L1   write     POST api.stripe.com/v1/refunds -> 200  [fidelity:L1]"
     assert shadow.exchange_lines() == [read, write] * 3
-    refunds = [line for line in shadow.summary() if "○" in line]
-    assert refunds == ["  ○ refund 600 on ch_GAUNTLET  unvalidated (L2)"] * 3
     assert engine_reads(shadow) == [(None, ())] * 3  # stored as `big_reads` stores its one (#70)
+    if mode == "shadow":
+        refunds = [line for line in shadow.summary() if "○" in line]
+        assert refunds == ["  ○ refund 600 on ch_GAUNTLET  unvalidated (L2)"] * 3
+        return
+    # A plain script starts no run, so under serve every refund is `unattributed` and no run's
+    # summary prints. The bind wider than loopback is in the banner, once.
+    assert shadow.stored().list_runs() == [] and shadow.run_blocks() == {}
+    assert [line for line in shadow.irimi if line.startswith("listening on 0.0.0.0: ")] == [
+        f"listening on 0.0.0.0: {report.WIDE_BIND_NOTICE}"
+    ]
 
 
-def test_the_control_endpoint_answers_at_every_spelling_and_is_never_an_exchange(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_the_control_endpoint_answers_at_every_spelling_and_is_never_an_exchange(
+    run_workflow, mode
+):
     """The same three spellings reach irimi's control endpoint (#73), direct and through the proxy
     to itself: health answers 200 and a path no route names 404, both stamped `control`. Neither
     is forwarded, decided or recorded, so the exchange lines above are the refunds' alone."""
-    shadow = run_workflow(W, "self_addressed", "shadow")
+    shadow = run_workflow(W, "self_addressed", mode)
     spellings = ("127.0.0.1", "127.1", "0.0.0.0")
     assert {k: v for k, v in shadow.by_label().items() if not k.startswith("door_")} == {
         **{f"health_{s}": (200, "control") for s in spellings},
@@ -339,12 +378,13 @@ def shown(result, run_id: str) -> list[str]:
     return [ELAPSED.sub(" · <elapsed> · ", line) for line in out]
 
 
-def test_the_sdks_posts_are_answered_by_irimi_and_its_reads_go_live(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_the_sdks_posts_are_answered_by_irimi_and_its_reads_go_live(run_workflow, mode):
     """Every control post is answered `control`, a refusal with its documented status; every read
     labelled `Irimi-Run` is forwarded live. Bare, there is no irimi and no `IRIMI_CONTROL`: the
     agent posts to the same URL shape at its proxy, the fake internet, which serves no such host,
     and exits as it does under shadow."""
-    shadow = run_workflow(W, "control_runs", "shadow")
+    shadow = run_workflow(W, "control_runs", mode)
     bare = run_workflow(W, "control_runs", "bare")
     posts = [f"{tag}_{step}" for tag, _ in CONTROL_RUNS.values() for step in STEPS]
     reads = [label for label in posts if label.endswith("_read")]
@@ -376,12 +416,13 @@ def test_the_sdks_posts_are_answered_by_irimi_and_its_reads_go_live(run_workflow
     assert [r for r in shadow.internet.requests() if "irimi-run" in r.headers] == []
 
 
-def test_a_run_posted_over_the_control_endpoint_is_stored_as_an_sdk_run(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_a_run_posted_over_the_control_endpoint_is_stored_as_an_sdk_run(run_workflow, mode):
     """#73's headline, through the real `irimi shadow`: each run is stored `attribution: "sdk"`
     with the trigger, versions and times it posted and `outcome: ok`, and holds its two tool calls
     with its labelled read between them - whether it posted direct (`ctl-direct`) or through the
     proxy to itself (`ctl-proxied`). `irimi runs show` prints it so."""
-    shadow = run_workflow(W, "control_runs", "shadow")
+    shadow = run_workflow(W, "control_runs", mode)
     reader = shadow.stored()
     for run_id, (tag, path) in CONTROL_RUNS.items():
         stored = reader.load_run(run_id)
@@ -417,13 +458,14 @@ def test_a_run_posted_over_the_control_endpoint_is_stored_as_an_sdk_run(run_work
         ]
 
 
-def test_two_runs_posted_at_once_do_not_mix(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_two_runs_posted_at_once_do_not_mix(run_workflow, mode):
     """The Phase 3 exit test, "two concurrent requests don't mix", on the control endpoint. Two
     threads in lockstep: both start, both post a tool call, both read, both post another, both end,
     so each step of one run is between steps of the other on the wire and in the store's queue.
     Each run still holds only its own: its own tool calls, and the read it labelled, which the
     two runs make of different objects."""
-    shadow = run_workflow(W, "control_runs", "shadow")
+    shadow = run_workflow(W, "control_runs", mode)
     threads = [label for label in (c["label"] for c in shadow.calls()) if "thread" in label]
     assert [label.split("_", 2)[2] for label in threads] == [s for s in STEPS for _ in (1, 2)]
     handed = [e.run_id for e in shadow.handed_events if e.run_id.startswith("ctl-thread-")]
@@ -440,10 +482,11 @@ def test_two_runs_posted_at_once_do_not_mix(run_workflow):
         ]
 
 
-def test_a_run_that_ends_in_error_keeps_its_error_cut_to_what_a_trace_keeps(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_a_run_that_ends_in_error_keeps_its_error_cut_to_what_a_trace_keeps(run_workflow, mode):
     """A run posts a tool call that raised and an end in error, each message past the 1000
     characters `ErrorInfo` promises (#68): both are stored, cut to that length, not refused."""
-    shadow = run_workflow(W, "control_runs", "shadow")
+    shadow = run_workflow(W, "control_runs", mode)
     stored = shadow.stored().load_run("ctl-error")
     tool = stored_tool_call(shadow, "ctl-error", "error_tool")
     run_message = posted(shadow, "error_end")["error"]["message"]
@@ -476,58 +519,77 @@ def test_a_run_that_ends_in_error_keeps_its_error_cut_to_what_a_trace_keeps(run_
     ]
 
 
-def test_each_refusal_answers_its_status_and_line_and_makes_no_run(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_each_refusal_answers_its_status_and_line_and_makes_no_run(run_workflow, mode):
     """Every refusal #73 documents, through the real proxy: the wrong method (405), no such route
     (404), a run id the store cannot use (400 for `../x` and for `unattributed`), `NaN`, a missing
     field, a tool call naming its own run (400) and a body past 2 MiB (413). Each names its own
-    run, and none of them is a directory, or an unattributed event, afterwards."""
-    shadow = run_workflow(W, "control_runs", "shadow")
+    run, and none of them is a directory, or an unattributed event, afterwards. Under serve mode
+    (#77) the store also holds the serve's `serve.lock`, and no process run."""
+    shadow = run_workflow(W, "control_runs", mode)
     assert {e["label"]: e["body"] for e in shadow.events("refusal")} == {
         label: {"error": line} for label, (_, line) in REFUSALS.items()
     }
     root = shadow.home / paths.STORE_DIR_NAME
-    assert sorted(p.name for p in root.iterdir()) == ["blobs", "runs"]
+    lock = [SERVE_LOCK_FILE] if mode == "serve" else []
+    assert sorted(p.name for p in root.iterdir()) == ["blobs", "runs", *lock]
+    process = [shadow.process_run_id()] if mode == "shadow" else []
     assert sorted(p.name for p in (root / "runs").iterdir()) == sorted(
-        [shadow.process_run_id(), *CONTROL_RUNS, "ctl-error"]
+        [*process, *CONTROL_RUNS, "ctl-error"]
     )
     assert shadow.stored().load_run(trace.UNATTRIBUTED).events == []
 
 
-def test_health_reports_the_engine_and_what_the_store_wrote(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_health_reports_the_engine_and_what_the_store_wrote(run_workflow, mode):
     """`GET /_irimi/health` before the first run and after the last, each once the store had
-    nothing queued: the engine's version, `serve: false` (no `--serve` until #77), and the store's
-    counters, `written` grown from nothing to every event line the runs hold."""
-    shadow = run_workflow(W, "control_runs", "shadow")
+    nothing queued: the engine's version, whether it serves (`true` only under `--serve`, #77),
+    and the store's counters, `written` grown from nothing to every event line the runs hold."""
+    shadow = run_workflow(W, "control_runs", mode)
     before, after = (e["body"] for e in shadow.events("health"))
-    health = {"engine_version": irimi.__version__, "serve": False}
+    health = {"engine_version": irimi.__version__, "serve": mode == "serve"}
     assert before == {**health, "store": {"queued": 0, "written": 0, "dropped": 0}}
     assert after == {**health, "store": {"queued": 0, "written": 13, "dropped": 0}}
     assert len(shadow.stored_events()) == 13
 
 
-def test_a_run_ended_over_the_control_endpoint_no_longer_lists_as_incomplete(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_a_run_ended_over_the_control_endpoint_no_longer_lists_as_incomplete(run_workflow, mode):
     """#72 listed every run but the process run `incomplete`, because nothing could end one. Each
     run here posted its end, so `irimi runs list` says how it ended. A tool call counts as no
-    exchange."""
-    shadow = run_workflow(W, "control_runs", "shadow")
+    exchange. Under serve mode (#77) there is no process run to list, and each run printed its
+    block when its end was taken, the same block `irimi runs show` ends in."""
+    shadow = run_workflow(W, "control_runs", mode)
+    ran = [
+        *(
+            [run_id, "<started>", "<elapsed>", "ok", "sdk", run_id, "1 exchanges", "0 writes"]
+            for run_id in CONTROL_RUNS
+        ),
+        ["ctl-error", "<started>", "<elapsed>", "error", "sdk", "ctl-error"]
+        + ["0 exchanges", "0 writes"],
+    ]
+    if mode == "serve":
+        assert listed(shadow) == sorted(ran)
+        blocks = shadow.run_blocks()
+        assert sorted(blocks) == sorted([*CONTROL_RUNS, "ctl-error"])
+        for run_id, block in blocks.items():
+            masked = [ELAPSED.sub(" · <elapsed> · ", line) for line in block]
+            assert shown(shadow, run_id)[-len(block) :] == masked
+        return
     process = shadow.process_run_id()
     argv0 = shadow.stored().load_run(process).record.trigger.name
     assert listed(shadow) == sorted(
         [
-            *(
-                [run_id, "<started>", "<elapsed>", "ok", "sdk", run_id, "1 exchanges", "0 writes"]
-                for run_id in CONTROL_RUNS
-            ),
-            ["ctl-error", "<started>", "<elapsed>", "error", "sdk", "ctl-error"]
-            + ["0 exchanges", "0 writes"],
+            *ran,
             [process, "<started>", "<elapsed>", "ok", "process", argv0, "0 exchanges", "0 writes"],
         ]
     )
 
 
-def test_a_start_re_posted_after_its_end_reopens_the_run(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_a_start_re_posted_after_its_end_reopens_the_run(run_workflow, mode):
     """The SDK must never re-post a start. Made anyway, it is accepted with a 204."""
-    shadow = run_workflow(W, "control_hazards", "shadow")
+    shadow = run_workflow(W, "control_hazards", mode)
     # LOOKS WRONG (#97): the second start is accepted, and replaces the ended run's record
     # whole, so its end, its outcome and its first trigger are gone and the run lists as
     # `incomplete` again, though its read is kept. A start for a run that has already ended could
@@ -595,14 +657,56 @@ def test_the_process_runs_start_and_end_are_irimis_and_only_its_tool_calls_are_t
     assert [e["id"] for e in bare.events("process_run")] == ["no-process-run"]
 
 
+def test_under_serve_irimis_own_run_is_unattributed_and_only_its_tool_calls_are_taken(
+    run_workflow,
+):
+    """Serve mode starts no process run and gives the agent no `IRIMI_RUN`, so irimi's own run is
+    `unattributed` (#77), and the hazard's posts name it. A start and an end for it are refused
+    400 by the run-id check, before the own-run check is reached (#73), and the two tool calls
+    posted to it are taken and filed there, as the SDK files a tool call made in no run (#76).
+
+    The run started again after its end (#97) printed its block when its first end was taken: one
+    read, ended. LOOKS WRONG (#97): the store now holds the reopened run, `incomplete`, whose
+    record no longer says it ended, so the block and `irimi runs show` disagree."""
+    serve = run_workflow(W, "control_hazards", "serve")
+    assert [e["id"] for e in serve.events("process_run")] == [trace.UNATTRIBUTED]
+    refused = {"error": f"{trace.UNATTRIBUTED!r} cannot name a run"}
+    assert {e["label"]: e["body"] for e in serve.events("answer")} == {
+        "process_start": refused,
+        "process_tool": None,
+        "process_end": refused,
+        "unattributed_tool": None,
+    }
+    unattributed = serve.stored().load_run(trace.UNATTRIBUTED).events
+    assert unattributed == [
+        stored_tool_call(serve, trace.UNATTRIBUTED, "process_tool"),
+        stored_tool_call(serve, trace.UNATTRIBUTED, "unattributed_tool"),
+    ]
+    assert [r.run_id for r in serve.stored().list_runs()] == ["ctl-restarted"]
+    assert [line for line in serve.irimi if line.startswith("--- run ")] == [
+        "--- run ctl-restarted ---"
+    ]
+    [block] = serve.run_blocks().values()
+    assert [ELAPSED.sub(" · <elapsed> · ", line) for line in block] == [
+        "irimi shadow · run ctl-restarted · 1 exchange · <elapsed> · backstop: none (Phase 4)",
+        "",
+        "  api.stripe.com  1 read",
+        "",
+        "  1 exchange · 1 live · 0 delegated · 0 virtualized",
+    ]
+    [line] = [f for f in listed(serve) if f[0] == "ctl-restarted"]
+    assert line[3] == "incomplete"
+
+
 def argv(result) -> list[str]:
     """The argv the harness started the agent with: the process run's trigger args (#70)."""
     workflow = WORKFLOW.scenarios[result.scenario]
     return [sys.executable, "-m", "examples.workflows.launch", WORKFLOW.module, *workflow.argv]
 
 
-def test_an_unmapped_hosts_posts_are_faked_even_when_they_are_reads(run_workflow):
-    shadow = run_workflow(W, "unmapped_hosts", "shadow")
+@pytest.mark.parametrize("mode", MODES)
+def test_an_unmapped_hosts_posts_are_faked_even_when_they_are_reads(run_workflow, mode):
+    shadow = run_workflow(W, "unmapped_hosts", mode)
     assert shadow.by_label() == {
         # A GraphQL query is a read, but irimi cannot tell it from a mutation: both are faked.
         "graphql_query": (200, "fake-L0"),
@@ -617,8 +721,9 @@ def test_an_unmapped_hosts_posts_are_faked_even_when_they_are_reads(run_workflow
     assert [r.path for r in shadow.internet.requests()] == ["/health"]
 
 
-def test_a_get_that_writes_escapes_and_the_scenario_says_so(run_workflow):
-    shadow = run_workflow(W, "get_that_writes", "shadow")
+@pytest.mark.parametrize("mode", MODES)
+def test_a_get_that_writes_escapes_and_the_scenario_says_so(run_workflow, mode):
+    shadow = run_workflow(W, "get_that_writes", mode)
     assert [(r.method, r.host, r.path) for r in shadow.internet.writes()] == [
         ("GET", "legacy.internal", "/api/delete_user")
     ]
@@ -667,12 +772,13 @@ def stored_bomb(result, method: str, path: str) -> Exchange:
     return ex
 
 
-def test_bodies_that_decode_past_the_cap_are_answered_by_irimi_or_the_service(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_bodies_that_decode_past_the_cap_are_answered_by_irimi_or_the_service(run_workflow, mode):
     """What each `bombs` call got. Bare, the fake services refuse the two bodies they cannot
     decode, 413, and the control posts reach the fake internet, 502. Under shadow, the refund is
     irimi's own 502, the model call the service's own 413, and each control post irimi's 413."""
     bare = run_workflow(W, "bombs", "bare")
-    shadow = run_workflow(W, "bombs", "shadow")
+    shadow = run_workflow(W, "bombs", mode)
     assert bare.by_label() == {
         "refund_gzip_bomb": (413, None),
         "llm_gzip_bomb": (413, None),
@@ -693,12 +799,13 @@ def test_bodies_that_decode_past_the_cap_are_answered_by_irimi_or_the_service(ru
     assert bare.exit_code == shadow.exit_code == 0
 
 
-def test_a_write_whose_body_decodes_past_the_cap_is_refused_and_never_leaves(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_a_write_whose_body_decodes_past_the_cap_is_refused_and_never_leaves(run_workflow, mode):
     """A refund whose form decodes to 128 MiB. irimi cannot answer it from the start of its body -
     a form is one line, so the start it keeps is nothing at all - and fails closed, as a decision
     that raised does: its own 502, stamped, recorded `unknown` and flagged. The service never sees
     it, and nothing it would have fired is claimed for it."""
-    shadow = run_workflow(W, "bombs", "shadow")
+    shadow = run_workflow(W, "bombs", mode)
     posted = [(r.method, r.path) for r in shadow.internet.requests() if r.method == "POST"]
     assert posted == [("POST", "/v1/messages")]
     ex = stored_bomb(shadow, "POST", "/v1/refunds")
@@ -710,7 +817,7 @@ def test_a_write_whose_body_decodes_past_the_cap_is_refused_and_never_leaves(run
     # LOOKS WRONG: the summary lists the refused refund among the writes that "did not happen",
     # as it lists any write whose decision failed, with no word that irimi refused it or why: the
     # agent was told 502, not that its refund was faked.
-    summary = shadow.summary()
+    summary = summary_of(shadow)
     assert [line for line in summary if line.startswith("  ○")] == [
         "  ○ refund ? on ?  unclassified (L0)",
         f"  ○ refund $9.00 on {CHARGE}  unvalidated (L3 preconditions passed)",
@@ -720,14 +827,16 @@ def test_a_write_whose_body_decodes_past_the_cap_is_refused_and_never_leaves(run
     )
 
 
+@pytest.mark.parametrize("mode", MODES)
 def test_a_live_call_whose_body_decodes_past_the_cap_reaches_the_service_byte_for_byte(
     run_workflow,
+    mode,
 ):
     """A model call is forwarded live whatever its body: the service gets the agent's own bytes,
     still gzip, and answers 413 to them as it does bare. irimi records the request with no body,
     flagged once, as the store records any body past what it redacts."""
     bare = run_workflow(W, "bombs", "bare")
-    shadow = run_workflow(W, "bombs", "shadow")
+    shadow = run_workflow(W, "bombs", mode)
     posted = sent(shadow, "llm_gzip_bomb")
     assert posted == sent(bare, "llm_gzip_bomb")
     for result in (bare, shadow):
@@ -740,14 +849,15 @@ def test_a_live_call_whose_body_decodes_past_the_cap_reaches_the_service_byte_fo
     assert ex.response is not None and ex.response.status == 413
 
 
-def test_a_read_back_that_decodes_past_the_cap_is_never_overlaid(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_a_read_back_that_decodes_past_the_cap_is_never_overlaid(run_workflow, mode):
     """After a faked refund, the charge's refunds are read back, and the service answers its list
     followed by 128 MiB of blanks, gzip-encoded. The overlay would add the faked refund to that
     list, but irimi never decoded the whole of it: the agent gets the service's bytes, unstamped,
     and the read is recorded with no body, flagged, and `partial`, so the summary says it did not
     show the refund, as it says of a read too big to parse."""
     bare = run_workflow(W, "bombs", "bare")
-    shadow = run_workflow(W, "bombs", "shadow")
+    shadow = run_workflow(W, "bombs", mode)
     for result in (bare, shadow):
         [padded] = result.internet.padded
         [received] = result.events("received", with_time=False)
@@ -757,22 +867,25 @@ def test_a_read_back_that_decodes_past_the_cap_is_never_overlaid(run_workflow):
     ex = stored_bomb(shadow, "GET", "/v1/refunds")
     assert (ex.answered_by, ex.flags, ex.overlay) == ("live", (BODY_TRUNCATED_FLAG,), "partial")
     assert ex.response is not None and ex.response.body == b""
-    summary = shadow.summary()
+    summary = summary_of(shadow)
     refund = summary.index(f"  ○ refund $9.00 on {CHARGE}  unvalidated (L3 preconditions passed)")
     assert summary[refund + 1] == "    ↳ GET /v1/refunds did not show it  live (partial)"
 
 
-def test_a_run_start_that_decodes_past_the_cap_is_refused_413_unread(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_a_run_start_that_decodes_past_the_cap_is_refused_413_unread(run_workflow, mode):
     """Three run starts, each valid JSON followed by 128 MiB of blanks: in lines, after a line of
     its own with no line after it, and on the same line. A body past the control endpoint's 2 MiB
     is refused 413 (#73), and a cut one is past it whatever its start holds (#94): no start makes a
     run, and the store wrote only the exchanges."""
-    shadow = run_workflow(W, "bombs", "shadow")
+    shadow = run_workflow(W, "bombs", mode)
     allowed = control.MAX_CONTROL_BODY
     assert {e["label"]: e["body"] for e in shadow.events("refusal")} == dict.fromkeys(
         CONTROL_BOMBS, {"error": f"the body decodes past the {allowed} bytes allowed"}
     )
     root = shadow.home / paths.STORE_DIR_NAME
-    assert sorted(p.name for p in (root / "runs").iterdir()) == [shadow.process_run_id()]
+    # No run but the process run, which serve mode does not have (#77).
+    process = [shadow.process_run_id()] if mode == "shadow" else []
+    assert sorted(p.name for p in (root / "runs").glob("*")) == process
     [health] = shadow.events("health")
     assert health["body"]["store"] == {"queued": 0, "written": len(BOMB_LINES), "dropped": 0}

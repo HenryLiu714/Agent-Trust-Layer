@@ -591,8 +591,9 @@ container, an SDK that ignores the proxy variables, such as stripe-python, canno
 - **What it prints.** The banner, then one line per exchange and per tool call as each happens,
   and each run's summary when the SDK ends the run, under `--- run <id> ---`: the same summary
   `irimi runs show <id>` prints, built from the store once the run's end is on disk. A streamed
-  answer is recorded when its last chunk has gone out, which can be after the agent ended its
-  run: that exchange is stored in the run, but is missing from the summary already printed.
+  answer is recorded when its stream closes. One the agent reads to its end is in its run's
+  summary; one the agent leaves open after its run has ended is stored in the run, but is missing
+  from the summary already printed.
 - **One faked world.** What one run faked, a later run sees: the write log is irimi's, not the
   run's, as production has one Stripe. A refund an earlier run already made is answered as Stripe
   would answer it, `charge_already_refunded` or `amount_too_large`, and its summary says so.

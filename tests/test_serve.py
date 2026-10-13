@@ -440,6 +440,27 @@ def test_serve_with_a_command_is_a_usage_error(home, monkeypatch, capsys):
     assert not (home / "store").exists()
 
 
+def test_serve_with_a_command_exits_2_from_the_command_line(home):
+    """The done-when's own spelling, as a shell runs it: `irimi shadow --serve -- echo hi` exits 2
+    with argparse's usage, and starts and stores nothing (#77)."""
+    import os
+    import subprocess
+    import sys
+
+    env = {**os.environ, paths.IRIMI_HOME_ENV: str(home)}
+    done = subprocess.run(
+        [sys.executable, "-m", "irimi.cli", "shadow", "--serve", "--", "echo", "hi"],
+        cwd=home,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert done.returncode == 2
+    assert done.stderr.startswith("usage: irimi shadow") and done.stdout == ""
+    assert not (home / "store").exists()
+
+
 def test_a_second_serve_on_one_store_is_refused_before_it_starts(home, capsys):
     """Two serves on one root would share `unattributed/events.jsonl`, repeating each other's
     `seq` and cutting each other's lines as a crash's (#70). The second is refused with one line
@@ -772,6 +793,34 @@ def test_serve_and_its_alias_print_one_banner_and_stop_cleanly_on_a_signal(home,
     assert "Traceback" not in err
 
 
+def test_a_wide_bind_says_so_in_the_banner(home):
+    """`--listen-host 0.0.0.0` adds the banner line saying who can now reach irimi, as a real
+    serve prints it (#77); the loopback default does not, which the test above pins."""
+    import re
+
+    from irimi import report
+
+    served = _Served(home, "serve", "--listen-host", "0.0.0.0")
+    try:
+        served.wait_for(lambda lines: len(lines) >= 4)
+        banner = served.lines[:4]
+        match = re.search(r" · listening on 0\.0\.0\.0:(\d+) · ", banner[0])
+        assert match, banner
+        port = int(match.group(1))
+        assert banner == report.banner_lines(
+            "shadow --serve", None, "0.0.0.0", port, ca.ca_paths().cert
+        )
+        assert banner[3] == (
+            "listening on 0.0.0.0: any machine that can reach this port can send traffic through "
+            "irimi and call its control endpoint"
+        )
+        code, lines, err = served.stop()
+    finally:
+        served.kill()
+    assert code == 0, err
+    assert lines == banner
+
+
 AGENT = """
 import os, sys, urllib.request
 from irimi import sdk
@@ -811,9 +860,6 @@ def test_a_served_sdk_agent_gets_one_summary_block_per_run_it_ends(home, tmp_pat
     `unattributed/`, which builds no run; and after SIGTERM, which exits 0, the run the agent never
     ended loads as `incomplete`. The health answer says serve mode."""
     import json
-    import os
-    import subprocess
-    import sys
     import threading
     import urllib.request
     from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -847,25 +893,8 @@ def test_a_served_sdk_agent_gets_one_summary_block_per_run_it_ends(home, tmp_pat
         direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with direct.open(f"{listener}/_irimi/health", timeout=10) as health:
             assert json.load(health)["serve"] is True
-        agent = tmp_path_factory.mktemp("agent") / "agent.py"
-        agent.write_text(AGENT)
-        env = {k: v for k, v in os.environ.items() if not k.lower().endswith("_proxy")}
-        env.pop("STRIPE_API_KEY", None)
-        env.update(
-            {
-                "HTTP_PROXY": listener,
-                "HTTPS_PROXY": listener,
-                "SSL_CERT_FILE": str(ca.ca_paths().cert),
-                "REQUESTS_CA_BUNDLE": str(ca.ca_paths().cert),
-                paths.ENGINE_ACTIVE_ENV: "1",
-                paths.CONTROL_ENV: f"{listener}/_irimi",
-            }
-        )
         up = f"http://127.0.0.1:{upstream.server_address[1]}"
-        done = subprocess.run(
-            [sys.executable, str(agent), up], env=env, capture_output=True, text=True, timeout=60
-        )
-        assert done.returncode == 0, done.stderr
+        _run_agent(tmp_path_factory, AGENT, listener, up)
         # Each block is printed when its run's end is on disk, while serve runs on: both are out
         # before serve is told to stop.
         served.wait_for(lambda lines: sum(line.startswith("--- run ") for line in lines) == 2)
@@ -882,13 +911,7 @@ def test_a_served_sdk_agent_gets_one_summary_block_per_run_it_ends(home, tmp_pat
     assert all(r.attribution == "sdk" for r in records.values())
     assert report.run_status(records[open_run]) == "incomplete"
 
-    starts = [i for i, line in enumerate(lines) if line.startswith("--- run ")]
-    assert sorted(lines[i] for i in starts) == [f"--- run {run_id} ---" for run_id in ended]
-    maps = servicemap.load()
-    for at, end in zip(starts, [*starts[1:], len(lines)], strict=True):
-        run_id = lines[at].removeprefix("--- run ").removesuffix(" ---")
-        block = [line for line in lines[at + 1 : end] if not _is_stream_line(line)]
-        assert block == report.stored_summary_lines(reader.load_run(run_id), maps)
+    assert sorted(_blocks(lines, reader)) == ended
     # The read in no run is stored as no run's: in `unattributed/`, never as a run of its own.
     [bare] = reader.load_run(UNATTRIBUTED).events
     assert bare.request.path == "/bare"
@@ -902,7 +925,126 @@ def test_a_served_sdk_agent_gets_one_summary_block_per_run_it_ends(home, tmp_pat
     ]
 
 
-def _is_stream_line(line: str) -> bool:
-    """One exchange's line, which serve prints as it happens: `<answered_by> <kind> <METHOD> ...`.
-    A summary's lines are either indented, blank, or its `irimi shadow · run` header."""
-    return " -> " in line and not line.startswith((" ", "irimi "))
+def _run_agent(tmp_path_factory, source: str, listener: str, *argv: str) -> None:
+    """`source` as an agent of its own, in its own process, pointed at the serve on `listener` by
+    the variables the README's "Serve mode" names, and nothing else of the test's proxies."""
+    import os
+    import subprocess
+    import sys
+
+    agent = tmp_path_factory.mktemp("agent") / "agent.py"
+    agent.write_text(source)
+    env = {k: v for k, v in os.environ.items() if not k.lower().endswith("_proxy")}
+    env.pop("STRIPE_API_KEY", None)
+    env.update(
+        {
+            "HTTP_PROXY": listener,
+            "HTTPS_PROXY": listener,
+            "SSL_CERT_FILE": str(ca.ca_paths().cert),
+            "REQUESTS_CA_BUNDLE": str(ca.ca_paths().cert),
+            paths.ENGINE_ACTIVE_ENV: "1",
+            paths.CONTROL_ENV: f"{listener}/_irimi",
+        }
+    )
+    done = subprocess.run(
+        [sys.executable, str(agent), *argv], env=env, capture_output=True, text=True, timeout=120
+    )
+    assert done.returncode == 0, done.stderr
+    assert "irimi.sdk" not in done.stderr, done.stderr  # every post reached irimi
+
+
+def _blocks(lines: list[str], reader) -> list[str]:
+    """The run ids of the `--- run <id> ---` blocks in `lines`, each checked to be followed at once
+    by `stored_summary_lines` for that run, as the store holds it now: printed under one lock, a
+    block is never split by another line (#77)."""
+    from irimi import report
+
+    maps = servicemap.load()
+    ids = []
+    for at, line in enumerate(lines):
+        if not line.startswith("--- run "):
+            continue
+        run_id = line.removeprefix("--- run ").removesuffix(" ---")
+        expected = report.stored_summary_lines(reader.load_run(run_id), maps)
+        assert lines[at + 1 : at + 1 + len(expected)] == expected, run_id
+        ids.append(run_id)
+    return ids
+
+
+STREAMING_AGENT = """
+import http.client, os, sys, urllib.parse
+from irimi import sdk
+
+UP = sys.argv[1]
+PROXY = urllib.parse.urlsplit(os.environ["HTTP_PROXY"])
+
+
+@sdk.trigger
+def handle(n):
+    conn = http.client.HTTPConnection(PROXY.hostname, PROXY.port, timeout=10)
+    try:
+        conn.request("GET", f"{UP}/stream/{n}")
+        conn.getresponse().read()
+    finally:
+        conn.close()
+
+
+for n in range(10):
+    handle(n)
+"""
+
+
+def test_a_stream_read_to_its_end_is_in_its_runs_block(home, tmp_path_factory):
+    """A streamed answer is recorded once its last chunk has gone through irimi, and the run's
+    block is printed when the SDK's end is on disk (#71, #77). For a stream the agent reads to its
+    end, the record comes first: mitmproxy sends the agent the stream's end only after the
+    `response` hook has queued the exchange, and the agent posts its run's end after that. So the
+    block of each run holds its stream. (A stream the agent leaves open past its run's end is
+    recorded when it closes, after the block: the README says so.)"""
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from irimi.store import StoreReader
+
+    class _Events(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("transfer-encoding", "chunked")
+            self.end_headers()
+            for i in range(3):
+                event = f"data: {i}\n\n".encode()
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(event), event))
+                self.wfile.flush()
+                time.sleep(0.01)
+            self.wfile.write(b"0\r\n\r\n")
+
+        def log_message(self, *args):
+            pass
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), _Events)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    served = _Served(home, "serve")
+    try:
+        listener = f"http://127.0.0.1:{_port_of(served.banner())}"
+        _run_agent(
+            tmp_path_factory,
+            STREAMING_AGENT,
+            listener,
+            f"http://127.0.0.1:{upstream.server_address[1]}",
+        )
+        served.wait_for(lambda lines: sum(line.startswith("--- run ") for line in lines) == 10)
+        code, lines, err = served.stop()
+    finally:
+        served.kill()
+        upstream.shutdown()
+    assert code == 0, err
+    reader = StoreReader(home / "store")
+    ended = _blocks(lines, reader)
+    assert len(ended) == 10
+    for run_id in ended:
+        [stream] = reader.load_run(run_id).events
+        assert stream.stream_chunks, run_id

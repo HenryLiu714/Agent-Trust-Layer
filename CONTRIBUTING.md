@@ -33,7 +33,7 @@ make fmt          # uv run ruff format . && uv run ruff check --fix .
 make typecheck    # uv run mypy
 ```
 
-The suite runs in under a minute and needs no network and no keys: the engine tests start a
+The suite runs in about three minutes and needs no network and no keys: the engine tests start a
 real mitmproxy on a random loopback port against local HTTP servers. `tests/conftest.py` points
 `IRIMI_HOME` and the working directory at empty temporary directories, so your own overrides file
 and CA are never in play.
@@ -72,10 +72,11 @@ STRIPE_API_KEY=sk_test_... SLACK_BOT_TOKEN=xoxb-... SLACK_CHANNEL=C0123 \
 `examples/workflows/` holds eleven small agents, each built to exercise one part of irimi: a
 multi-turn LLM tool loop, a nightly batch job, a concurrent queue worker, Slack and Stripe webhook
 handlers, database writes behind `@sdk.tool`, SSE streaming, internal services, failure paths,
-and agents that get around the proxy. A harness runs each scenario bare and under `irimi shadow`
-against a fake internet that answers for the real host names, so irimi's shipped maps decide
-every call. `tests/workflows/` holds every scenario to five universal invariants and pins what
-irimi does in each one. `examples/workflows/README.md` explains the harness.
+and agents that get around the proxy. A harness runs each scenario bare, under `irimi shadow` and
+under `irimi shadow --serve` (#77), against a fake internet that answers for the real host
+names, so irimi's shipped maps decide every call. `tests/workflows/` holds every scenario to
+five universal invariants and pins what irimi does in each one. `examples/workflows/README.md`
+explains the harness.
 
 ```
 uv run python -m examples.workflows                              # list workflows and scenarios

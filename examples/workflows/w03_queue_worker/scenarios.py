@@ -26,19 +26,14 @@ WORKFLOW = Workflow(
             ("threads_8",),
             setup=_charges,
             doc="8 messages on a 4-thread pool; each refund runs in a propagated thread",
-            serve_flags=(),
         ),
         "asyncio_8": Scenario(
-            ("asyncio_8",),
-            setup=_charges,
-            doc="8 async triggers under asyncio.gather",
-            serve_flags=(),
+            ("asyncio_8",), setup=_charges, doc="8 async triggers under asyncio.gather"
         ),
         "unpropagated_thread": Scenario(
             ("unpropagated_thread",),
             setup=_charges,
             doc="the refund runs in a thread started without sdk.propagate: it has no run",
-            serve_flags=(),
         ),
         "nested_trigger": Scenario(
             ("nested_trigger",), setup=_charges, doc="a trigger called inside a run joins it"
@@ -52,7 +47,6 @@ WORKFLOW = Workflow(
             ("shared_charge",),
             setup=_charges,
             doc="two runs refund one charge: the second run's reads see the first run's fake",
-            serve_flags=(),
         ),
         "async_run": Scenario(
             ("async_run",),

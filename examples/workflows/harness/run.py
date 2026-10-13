@@ -15,8 +15,9 @@ and says whether anything about it is expected to differ from a bare run.
 - **serve**: `irimi shadow --serve` runs in THIS process too, on a thread of its own, because the
   fake internet resolves names only here; the agent runs beside it as its own process, pointed at
   it by the variables the README's "Serve mode" names, and irimi is stopped, by its `stop` event
-  rather than a signal, when the agent exits (#77). A scenario runs this way only when it says so
-  (`Scenario.serve_flags`).
+  rather than a signal, when the agent exits (#77). Every scenario runs this way, with its own
+  `Scenario.serve_flags`. A serve that refuses to start (a map it will not load) starts no agent,
+  as `irimi shadow` starts none.
 
 A later mode, such as `replay`, is a new branch here and not a new harness.
 """
@@ -79,6 +80,11 @@ MODES = ("bare", "shadow", "serve")
 RUN_BLOCK = re.compile(r"--- run (\S+) ---")
 # How long a serve-mode run waits for irimi's banner, and then for irimi to stop.
 SERVE_TIMEOUT_S = 60
+# What the name of a thread the fake internet answers a request on ends in: the one kind of
+# thread a serve run may leave behind it.
+FAKE_HANDLER = "(process_request_thread)"
+# How long the threads a serve started have to end once it has returned.
+THREAD_EXIT_S = 5.0
 # A tool call's line in irimi's stream (`report.tool_call_line`, #76). Its first column is `ran`,
 # which no `answered_by` an exchange line starts with ever is.
 TOOL_LINE = re.compile(r"(real|shadow) +(read|write) +tool .* -> ")
@@ -104,8 +110,10 @@ class Scenario:
     # The scenario exists to show a write irimi cannot stop; universal invariant 1 is inverted.
     leaks: bool = False
     doc: str = ""
-    # Run it under `irimi shadow --serve` too, with these irimi flags (#77). None: shadow only.
-    serve_flags: tuple[str, ...] | None = None
+    # The irimi flags it runs with under `irimi shadow --serve` (#77). Every scenario runs there
+    # too, since serve is how irimi runs beside an agent it did not launch; None would keep one to
+    # bare and shadow, for a scenario that needs irimi to be the agent's parent.
+    serve_flags: tuple[str, ...] | None = ()
 
 
 @dataclass(frozen=True)
@@ -244,6 +252,18 @@ class Result:
             else:
                 current = None
         return blocks
+
+    def engine_run_id(self) -> str:
+        """The run a request no `Irimi-Run` names is stored in: the process run under
+        `irimi shadow -- <cmd>`, and `unattributed` under serve mode, which has none (#75, #77)."""
+        return trace.UNATTRIBUTED if self.mode == "serve" else self.process_run_id()
+
+    def summaries(self) -> list[str]:
+        """Every summary line irimi printed: `irimi shadow`'s closing block, or under serve mode
+        each run's block in the order the runs ended, separators left out (#77)."""
+        if self.mode != "serve":
+            return self.summary()
+        return [line for block in self.run_blocks().values() for line in block]
 
     def summary(self) -> list[str]:
         """irimi's closing block, from its `N exchanges` header on."""
@@ -484,6 +504,7 @@ def _run_serve(
     codes: list[int] = []
     assert scenario.serve_flags is not None
     args = build_parser().parse_args(["shadow", "--serve", "--port", "0", *scenario.serve_flags])
+    before = set(threading.enumerate())
     with _as_irimi(env, cwd, tmp, internet, scenario, workdir), contextlib.redirect_stdout(buf):
         serving = threading.Thread(
             target=lambda: codes.append(args.func(args, stop)), name="irimi-serve"
@@ -491,6 +512,14 @@ def _run_serve(
         serving.start()
         try:
             port = _served_port(buf, serving)
+            if port is None:
+                # Refused before it listened, as `irimi shadow` refuses before it starts its
+                # child: no agent is started beside a proxy that is not there, and serve's own
+                # exit is the run's (W8 `map_refused`).
+                serving.join(timeout=SERVE_TIMEOUT_S)
+                if serving.is_alive() or codes in ([], [0]):
+                    raise AssertionError(f"irimi shadow --serve printed no banner: {codes}")
+                return codes[0], buf.getvalue().splitlines()
             agent_env = _serve_env(env, port, ca.ca_paths().cert)
             done = subprocess.run(cmd, env=agent_env, cwd=cwd, timeout=180, check=False)
             code = runner.exit_code_for(done.returncode)
@@ -499,18 +528,31 @@ def _run_serve(
             serving.join(timeout=SERVE_TIMEOUT_S)
     if serving.is_alive() or codes != [0]:
         raise AssertionError(f"irimi shadow --serve did not stop cleanly: {codes}")
+    # Stopped means stopped: the engine's thread joined and the store closed, its writer thread
+    # with it, by the time serve returned (#77). A thread of the engine's event loop's executor,
+    # told to shut down as the loop closed, may take a moment to see it, so each is given that
+    # long to end; the fake internet's own handlers may still be finishing an answer.
+    started = [t for t in threading.enumerate() if t not in before and FAKE_HANDLER not in t.name]
+    deadline = time.monotonic() + THREAD_EXIT_S
+    for thread in started:
+        thread.join(max(0.0, deadline - time.monotonic()))
+    left = [t.name for t in started if t.is_alive()]
+    if left:
+        raise AssertionError(f"irimi shadow --serve left threads running: {left}")
     return code, buf.getvalue().splitlines()
 
 
-def _served_port(buf: io.StringIO, serving: threading.Thread) -> int:
-    """The port in serve's banner, once it has printed it."""
+def _served_port(buf: io.StringIO, serving: threading.Thread) -> int | None:
+    """The port in serve's banner, once it has printed it, or None if serve ended without one."""
     deadline = time.monotonic() + SERVE_TIMEOUT_S
     while time.monotonic() < deadline:
+        # Alive is read first, so a serve that printed its banner and then ended is not missed.
+        alive = serving.is_alive()
         match = re.search(r" · listening on \S+:(\d+) · ", buf.getvalue())
         if match:
             return int(match.group(1))
-        if not serving.is_alive():
-            break
+        if not alive:
+            return None
         time.sleep(0.01)
     raise AssertionError(f"irimi shadow --serve printed no banner: {buf.getvalue()!r}")
 

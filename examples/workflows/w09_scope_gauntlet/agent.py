@@ -230,10 +230,10 @@ def control_runs() -> None:
 def control_hazards() -> None:
     """Posts the SDK must never make, made, so what irimi does with each is pinned: a start
     re-posted for a run that has ended, and a start and an end for the process run's own id,
-    `IRIMI_RUN`, which irimi starts and ends itself. Between those two, a tool call posted to the
-    process run, which may hold one. Last, a tool call posted to `unattributed`, as the SDK posts
-    one made in no run by an agent with no process run (`irimi serve`, #77): the one post that
-    may name it (#76)."""
+    `IRIMI_RUN`, which irimi starts and ends itself, or under serve mode for `unattributed`, its
+    own run (#77). Between those two, a tool call posted to that run, which may hold one. Last, a
+    tool call posted to `unattributed`, as the SDK posts one made in no run by an agent with no
+    process run (`irimi serve`, #77): the one post that may name it (#76)."""
     control = _control_base()
     _start(control, "ctl-restarted", "restarted_start")
     stripe(
@@ -244,8 +244,12 @@ def control_hazards() -> None:
     )
     _end(control, "ctl-restarted", "restarted_end")
     _start(control, "ctl-restarted", "restarted_again", name="ctl-restarted again")
-    # Bare, there is no process run; the calls are made to the same URL shape all the same.
-    process_run = os.environ.get(agentkit.RUN_ENV) or "no-process-run"
+    # irimi's own run: the process run `IRIMI_RUN` names under `irimi shadow -- <cmd>`, and
+    # `unattributed` under serve mode, which gives the agent `IRIMI_CONTROL` and no `IRIMI_RUN`
+    # (#77). Bare, there is neither; the calls are made to the same URL shape all the same.
+    process_run = os.environ.get(agentkit.RUN_ENV) or (
+        "unattributed" if os.environ.get(agentkit.CONTROL_ENV) else "no-process-run"
+    )
     agentkit.obs("process_run", id=process_run)
     for label, resp in [
         ("process_start", _start(control, process_run, "process_start", name="takeover")),

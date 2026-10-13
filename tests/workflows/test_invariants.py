@@ -12,10 +12,12 @@
 A new workflow is picked up by name (`harness.run.workflows`), so it is held to these without an
 edit here.
 
-A scenario that runs under `irimi shadow --serve` too (`Scenario.serve_flags`, #77) is held to the
-same five there, and to what serve mode owes each run it ended: one `--- run <id> ---` block, equal
-to that run's stored summary.
+Every scenario runs under `irimi shadow --serve` too (`Scenario.serve_flags`, #77), and is held
+to the same five there, and to what serve mode owes each run whose end it took: one
+`--- run <id> ---` block, equal to that run's stored summary.
 """
+
+import re
 
 import pytest
 
@@ -23,14 +25,31 @@ from examples.workflows.harness.run import (
     CANARIES,
     RUN_BLOCK,
     SERVED_CANARIES,
+    Result,
     check_invariants,
     serve_cases,
     workflows,
 )
-from irimi import report
+from examples.workflows.w10_flaky_upstream.scenarios import CONTROL_DOWN
+from irimi import report, trace
+from irimi.store import StoredRun
 
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
 SERVE_CASES = serve_cases()
+# The scenarios whose runs hold events recorded after their end (#77). Serve prints a run's block
+# as soon as its end is on disk, so an event stored after that is in the run and not in its block.
+# LOOKS WRONG: W3 `task_outlives_trigger`'s task makes its calls after its run has ended (#75),
+# and W7 `hand_off`'s stream, sent inside its run, ends after it (the issue's "Since #70": a
+# streamed exchange is recorded after its last chunk). Each block says less than its run holds.
+LATE_EVENTS = {
+    ("w03_queue_worker", "task_outlives_trigger"),
+    ("w07_streaming_assistant", "hand_off"),
+}
+# W9's run started again after its end (#97): its block is the run as it was when it ended, and
+# the stored run is the reopened one. `test_w09_scope_gauntlet.py` pins that block.
+REOPENED = {("w09_scope_gauntlet", "control_hazards")}
+# A control post that ends a run, as W9 makes one by hand: `<listener>/_irimi/runs/<id>/end`.
+END_POST = re.compile(r"/_irimi/runs/([^/]+)/end$")
 
 
 @pytest.mark.parametrize(("name", "scenario"), CASES, ids=[f"{n}:{s}" for n, s in CASES])
@@ -54,18 +73,48 @@ def test_every_serve_run_keeps_the_universal_invariants(run_workflow, name, scen
 )
 def test_every_run_a_serve_ended_prints_its_stored_summary_once(run_workflow, name, scenario):
     """Serve mode prints a run's summary when its end is on disk, read back from the store (#77):
-    one `--- run <id> ---` block per run the agent ended, none for a run it did not, and each
+    one `--- run <id> ---` block per end irimi took, none for a run that did not end (W10
+    `sigterm_mid_run`, killed) or whose end never reached it (W10's `CONTROL_DOWN`), and each
     equal to `stored_summary_lines` for its run. It starts no process run, so none is stored."""
     serve = run_workflow(name, scenario, "serve")
     reader = serve.stored()
     records = reader.list_runs()
     assert "process" not in {r.attribution for r in records}
-    ended = sorted(r.run_id for r in records if r.outcome is not None)
-    assert ended == sorted(e["run"] for e in serve.events("run.end"))
-    assert sorted(m[1] for line in serve.irimi if (m := RUN_BLOCK.fullmatch(line))) == ended
+    printed = [m[1] for line in serve.irimi if (m := RUN_BLOCK.fullmatch(line))]
+    assert sorted(printed) == sorted(ends_taken(serve))
+    assert {r.run_id for r in records if r.outcome is not None} <= set(printed)
     maps = serve.maps()
     for run_id, block in serve.run_blocks().items():
-        assert block == report.stored_summary_lines(reader.load_run(run_id), maps), run_id
+        stored = reader.load_run(run_id)
+        if (name, scenario) in REOPENED:
+            continue
+        if (name, scenario) not in LATE_EVENTS:
+            assert block == report.stored_summary_lines(stored, maps), run_id
+            continue
+        # LOOKS WRONG (`LATE_EVENTS`): the block is the run as it stood at its end, every event
+        # that ended by then and none after; the run itself holds more.
+        ended = stored.record.ended_at
+        assert ended is not None
+        before = [e for e in stored.events if _ended_at(e) <= ended]
+        assert len(before) < len(stored.events), run_id
+        assert block == report.stored_summary_lines(StoredRun(stored.record, before), maps)
+
+
+def ends_taken(result: Result) -> list[str]:
+    """Every run whose end irimi took, once per end: each the SDK ended (`run.end`), but where W10
+    takes the control endpoint away, and each W9 ended by hand, its post answered 204."""
+    if result.workflow.name == "w10_flaky_upstream" and result.scenario in CONTROL_DOWN:
+        return []
+    by_hand = [
+        match.group(1)
+        for call in result.calls()
+        if call.get("status") == 204 and (match := END_POST.search(str(call["url"])))
+    ]
+    return [e["run"] for e in result.events("run.end")] + by_hand
+
+
+def _ended_at(event: trace.Event) -> float:
+    return event.started_at if isinstance(event, trace.TelemetrySeen) else event.ended_at
 
 
 def test_every_workflow_has_scenarios_and_a_summary():
@@ -77,14 +126,16 @@ def test_every_workflow_has_scenarios_and_a_summary():
         assert all(s.doc for s in wf.scenarios.values()), f"{name}: every scenario needs a doc"
 
 
-def test_the_corpus_gives_every_invariant_something_to_catch(run_workflow):
+@pytest.mark.parametrize("mode", ["shadow", "serve"])
+def test_the_corpus_gives_every_invariant_something_to_catch(run_workflow, mode):
     """An invariant nothing exercises passes by default. Each needs at least one scenario whose
-    shadow run could have broken it: a write irimi held back, an `Irimi-Run` label irimi had to
-    strip, a write tool irimi's SDK had to stand in for, a credential irimi handled - sent by the
-    agent, and handed back by a live read - and an escape the fake services did see."""
+    shadow run, and whose serve run (#77), could have broken it: a write irimi held back, an
+    `Irimi-Run` label irimi had to strip, a write tool irimi's SDK had to stand in for, a
+    credential irimi handled - sent by the agent, and handed back by a live read - and an escape
+    the fake services did see."""
     runs = [
-        (run_workflow(name, scenario, "bare"), run_workflow(name, scenario, "shadow"))
-        for name, scenario in CASES
+        (run_workflow(name, scenario, "bare"), run_workflow(name, scenario, mode))
+        for name, scenario in (CASES if mode == "shadow" else SERVE_CASES)
     ]
     held_back = [s.scenario for b, s in runs if b.internet.writes() and not s.internet.writes()]
     labelled_live = [

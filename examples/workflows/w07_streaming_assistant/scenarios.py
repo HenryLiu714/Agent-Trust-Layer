@@ -7,7 +7,7 @@ import threading
 from typing import Any
 
 from examples.workflows import agentkit
-from examples.workflows.harness.internet import BOMB_DECODED_BYTES, BOMB_LINE, Resp
+from examples.workflows.harness.internet import BOMB_DECODED_BYTES, BOMB_LINE, Req, Resp
 from examples.workflows.harness.run import Scenario, Workflow
 from examples.workflows.harness.services import (
     LlmCall,
@@ -208,8 +208,37 @@ class BombingLLM(ScriptedLLM):
         return resp
 
 
+class HeldStreamLLM(ScriptedLLM):
+    """Holds the last chunk of Anthropic's stream until the agent lists the models, which `hand_off`
+    does only once its trigger has returned and its run has ended. So the stream is still open
+    when the run ends, and irimi records it after the run's end, whatever the scheduler does
+    (#77): the case the issue's "Since #70" names, a streamed exchange recorded after its run's
+    SDK end."""
+
+    MODELS = {"data": [{"type": "model", "id": "claude-sonnet-5"}], "has_more": False}
+
+    def __init__(self, script: Any) -> None:
+        super().__init__(script)
+        self.listed = threading.Event()
+
+    def handle(self, req: Req) -> Resp:
+        if req.host == "api.anthropic.com" and (req.method, req.path) == ("GET", "/v1/models"):
+            self.listed.set()
+            return Resp(200, self.MODELS)
+        return super().handle(req)
+
+    def _anthropic(self, body: dict[str, Any]) -> Resp:
+        resp = super()._anthropic(body)
+        resp.hold = self.listed
+        return resp
+
+
 def _world(world: World) -> None:
     world.llm.script = chat_script
+
+
+def _held(world: World) -> None:
+    world.llm = HeldStreamLLM(chat_script)
 
 
 def _traced(world: World) -> None:
@@ -300,6 +329,12 @@ WORKFLOW = Workflow(
             (QUESTION, "two_callers"),
             setup=_lockstep,
             doc="two callers at once: two chats' streams through the proxy side by side",
+        ),
+        "hand_off": Scenario(
+            (QUESTION, "hand_off"),
+            setup=_held,
+            doc="the trigger returns Anthropic's stream still open, as a handler returns a "
+            "streaming response: the run ends first, and the stream is recorded after it (#77)",
         ),
     },
 )

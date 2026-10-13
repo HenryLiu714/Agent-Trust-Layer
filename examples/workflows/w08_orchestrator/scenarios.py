@@ -112,7 +112,6 @@ WORKFLOW = Workflow(
             setup=_world,
             extra_maps={"subagent.yaml": SUBAGENT_MAP},
             doc="Irimi-Run is stripped at the hop; only the agent's own header carries the run",
-            serve_flags=(),
         ),
         "nested_runs": Scenario(
             ("--runs", "2"),

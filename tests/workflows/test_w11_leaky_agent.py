@@ -14,6 +14,8 @@ from examples.workflows.w11_leaky_agent.agent import CHANNEL, CHARGE
 from irimi.exchange import Exchange
 
 W = "w11_leaky_agent"
+# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi (#77).
+MODES = ("shadow", "serve")
 NOTHING_SEEN = "0 exchanges · 0 live · 0 delegated · 0 virtualized"
 
 ESCAPES = {
@@ -25,13 +27,14 @@ ESCAPES = {
 
 
 @pytest.mark.parametrize("escape", sorted(ESCAPES))
-def test_an_escape_writes_for_real_and_irimi_never_sees_it(run_workflow, escape):
-    shadow = run_workflow(W, escape, "shadow")
+@pytest.mark.parametrize("mode", MODES)
+def test_an_escape_writes_for_real_and_irimi_never_sees_it(run_workflow, mode, escape):
+    shadow = run_workflow(W, escape, mode)
     assert shadow.exit_code == 0
     assert [(r.method, r.host, r.path) for r in shadow.internet.writes()] == [ESCAPES[escape]]
     # No exchange line, and a summary that counts nothing and claims no write did not happen.
     assert shadow.exchange_lines() == []
-    summary = "\n".join(shadow.summary())
+    summary = "\n".join(shadow.summaries())
     assert NOTHING_SEEN in summary
     assert "did not happen" not in summary
     # The agent got the real service's answer, unstamped: it cannot tell it escaped.
@@ -42,7 +45,7 @@ def test_an_escape_writes_for_real_and_irimi_never_sees_it(run_workflow, escape)
     # (#75).
     reader = shadow.stored()
     runs = {r.attribution: r for r in reader.list_runs()}
-    assert sorted(runs) == ["process", "sdk"]
+    assert sorted(runs) == (["process", "sdk"] if mode == "shadow" else ["sdk"])
     assert {r.outcome for r in runs.values()} == {"ok"}
     trigger = runs["sdk"].trigger
     assert trigger is not None and (trigger.name, trigger.args) == ("escape", {"escape": escape})
@@ -53,28 +56,32 @@ def test_an_escape_writes_for_real_and_irimi_never_sees_it(run_workflow, escape)
     assert [(r.method, r.host, r.path) for r in bare.internet.writes()] == [ESCAPES[escape]]
 
 
-def test_the_escaped_refund_really_changed_the_ledger(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_the_escaped_refund_really_changed_the_ledger(run_workflow, mode):
     for escape in ("proxyless_client", "no_proxy_star"):
-        stripe = run_workflow(W, escape, "shadow").world.stripe
+        stripe = run_workflow(W, escape, mode).world.stripe
         assert stripe.charges[CHARGE]["amount_refunded"] == 500
         assert [r["charge"] for r in stripe.refunds] == [CHARGE]
 
 
-def test_the_raw_socket_post_is_in_the_channel(run_workflow):
-    slack = run_workflow(W, "raw_socket", "shadow").world.slack
+@pytest.mark.parametrize("mode", MODES)
+def test_the_raw_socket_post_is_in_the_channel(run_workflow, mode):
+    slack = run_workflow(W, "raw_socket", mode).world.slack
     assert [m["text"] for m in slack.messages[CHANNEL]] == ["posted around irimi"]
 
 
-def test_irimis_own_no_proxy_default_exempts_a_loopback_sidecar(run_workflow):
-    shadow = run_workflow(W, "loopback_service", "shadow")
+@pytest.mark.parametrize("mode", MODES)
+def test_irimis_own_no_proxy_default_exempts_a_loopback_sidecar(run_workflow, mode):
+    shadow = run_workflow(W, "loopback_service", mode)
     [sidecar] = [s for s in shadow.world.extra if s.hosts == ("127.0.0.1",)]
     assert sidecar.state["jobs"] == [{"job": "refund", "charge": CHARGE}]
     # It went straight there: not through any proxy, irimi's or the harness's.
     assert [r.via_proxy for r in shadow.internet.requests()] == [False]
 
 
-def test_the_control_through_the_proxy_is_faked_and_the_ledger_is_untouched(run_workflow):
-    shadow = run_workflow(W, "proxied", "shadow")
+@pytest.mark.parametrize("mode", MODES)
+def test_the_control_through_the_proxy_is_faked_and_the_ledger_is_untouched(run_workflow, mode):
+    shadow = run_workflow(W, "proxied", mode)
     # Through irimi, the refund is labelled with its run and stored there with irimi's L3 read of
     # the charge it names, and the process run holds nothing (#75).
     [run] = shadow.sdk_runs()
@@ -85,7 +92,7 @@ def test_the_control_through_the_proxy_is_faked_and_the_ledger_is_untouched(run_
         ("GET", f"/v1/charges/{CHARGE}"),
         ("POST", "/v1/refunds"),
     ]
-    assert shadow.stored().load_run(shadow.process_run_id()).events == []
+    assert shadow.stored().load_run(shadow.engine_run_id()).events == []
     assert shadow.internet.writes() == []
     assert shadow.answered() == [("refund", 200, "fake-L1")]
     assert shadow.world.stripe.charges[CHARGE]["amount_refunded"] == 0
@@ -93,12 +100,14 @@ def test_the_control_through_the_proxy_is_faked_and_the_ledger_is_untouched(run_
         shadow.exchange_lines()
     )
     assert "○ refund $5.00 on ch_LEAKY  unvalidated (L3 preconditions passed)" in "\n".join(
-        shadow.summary()
+        shadow.summaries()
     )
 
 
+@pytest.mark.parametrize("mode", MODES)
 def test_a_redirect_off_irimis_route_is_labelled_on_each_hop_through_irimi_and_on_no_other(
     run_workflow,
+    mode,
 ):
     """`redirected`: urllib, `requests`, httpx and async httpx each read an export that redirects
     twice, inside one `sdk.run`: to `/export/v2` on the same host, through irimi, then to the
@@ -112,7 +121,7 @@ def test_a_redirect_off_irimis_route_is_labelled_on_each_hop_through_irimi_and_o
     redirects whatever `NO_PROXY` says, so its hop to the sidecar goes through irimi too, labelled,
     and is stored in the run, stripped. That is `requests`' behaviour, pinned so a change in it
     shows; irimi does the right thing either way."""
-    shadow = run_workflow(W, "redirected", "shadow")
+    shadow = run_workflow(W, "redirected", mode)
     bare = run_workflow(W, "redirected", "bare")
     assert shadow.exit_code == bare.exit_code == 0
     for result in (shadow, bare):
@@ -139,18 +148,19 @@ def test_a_redirect_off_irimis_route_is_labelled_on_each_hop_through_irimi_and_o
     ]
     hops = [("files.internal", "/export", 302), ("files.internal", "/export/v2", 302)]
     assert stored == hops * 2 + [("127.0.0.1", "/queue/stats", 200)] + hops * 2
-    assert shadow.stored().load_run(shadow.process_run_id()).events == []
+    assert shadow.stored().load_run(shadow.engine_run_id()).events == []
     # Bare, the same twelve requests: each client's three hops.
     assert len(bare.internet.requests()) == len(shadow.internet.requests()) == 12
 
 
-def test_a_sidecar_write_made_by_a_write_tool_is_stood_in_and_the_escape_closed(run_workflow):
+@pytest.mark.parametrize("mode", MODES)
+def test_a_sidecar_write_made_by_a_write_tool_is_stood_in_and_the_escape_closed(run_workflow, mode):
     """`loopback_service`'s write, made by `enqueue_job`, an `@sdk.tool(kind="write")` (#76). The
     proxy still cannot see it, and does not need to: the SDK runs the stand-in in its place, so
     the sidecar receives nothing under shadow, a witness that does not rest on the agent's own log
     (universal invariant 3), while bare it receives the job. irimi prints and stores the call in
     the escape's run, and the summary says the write did not happen."""
-    shadow = run_workflow(W, "labelled_sidecar", "shadow")
+    shadow = run_workflow(W, "labelled_sidecar", mode)
     bare = run_workflow(W, "labelled_sidecar", "bare")
     tool = "examples.workflows.w11_leaky_agent.agent.enqueue_job"
     assert shadow.internet.requests() == []
@@ -169,7 +179,7 @@ def test_a_sidecar_write_made_by_a_write_tool_is_stood_in_and_the_escape_closed(
         {"job": {"job": "refund", "charge": CHARGE}},
     )
     assert shadow.tool_call_lines() == [f"shadow    write     tool {tool} -> ok"]
-    summary = shadow.summary()
+    summary = shadow.summaries()
     assert summary[-4:] == [
         f"  ○ tool {tool}  shadow stand-in ran",
         "",

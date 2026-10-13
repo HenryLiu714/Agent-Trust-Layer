@@ -1,8 +1,8 @@
 # Sample agent workflows
 
 Eleven small agents, each built to exercise one part of irimi, and a harness that runs any of
-them bare or under `irimi shadow` against a fake internet. They need no keys and no network, and
-their tests run on every `uv run pytest -q`.
+them bare, under `irimi shadow`, or beside `irimi shadow --serve` against a fake internet. They
+need no keys and no network, and their tests run on every `uv run pytest -q`.
 
 ```
 uv run python -m examples.workflows                                  # list workflows and scenarios
@@ -17,14 +17,14 @@ uv run pytest -q tests/workflows                                     # the whole
 |---|---|---|---|
 | W1 | `w01_ticket_triage` | support-ticket webhook | a multi-turn LLM tool loop; L3 on the model's refunds (one too large, one refused because the overlay shows the first); one refund sent twice under one key (#46); replay divergence mid-conversation (#82-#85) |
 | W2 | `w02_nightly_reconcile` | scheduled `sdk.run` | pagination, a cursor naming a minted id (#53), 40 writes in one run, a non-replayable trigger |
-| W3 | `w03_queue_worker` | queue, threads and asyncio | run attribution under concurrency (#74, #75), six HTTP clients the SDK labels (urllib, `http.client`, `requests`, `httpx` sync and async) or that labels itself (a raw asyncio client, #75), eight runs sharing two one-connection pools (#75), two runs sharing one engine's write log, as decided in #77, whose second run's summary calls the first run's faked refund its own (pinned `LOOKS WRONG`); eight runs and a lost run under `irimi shadow --serve`, each run's summary printed as it ends and the lost run's refunds `unattributed` (#77); each way the SDK marks a run: triggers on functions, on a worker's methods and on a sync function that returns a coroutine, `async with sdk.run`, and a run cancelled at shutdown (#74); a Task a sync trigger returns, whose calls land in its ended run (#75, pinned `LOOKS WRONG`); the worker's own ledger as `@sdk.tool`s, called from four threads, from eight tasks and from a thread that lost its run, and as a worker's static, class and plain methods, each call in its own run (#76) |
+| W3 | `w03_queue_worker` | queue, threads and asyncio | run attribution under concurrency (#74, #75), six HTTP clients the SDK labels (urllib, `http.client`, `requests`, `httpx` sync and async) or that labels itself (a raw asyncio client, #75), eight runs sharing two one-connection pools (#75), two runs sharing one engine's write log, as decided in #77, whose second run's summary calls the first run's faked refund its own (pinned `LOOKS WRONG`); under `irimi shadow --serve`, each run's summary printed as it ends and holding its own events alone, eight at once, and a lost run's refunds and tool calls `unattributed` (#77); each way the SDK marks a run: triggers on functions, on a worker's methods and on a sync function that returns a coroutine, `async with sdk.run`, and a run cancelled at shutdown (#74); a Task a sync trigger returns, whose calls land in its ended run (#75, pinned `LOOKS WRONG`) and are missing from the summary serve printed at its end (#77, pinned `LOOKS WRONG`); the worker's own ledger as `@sdk.tool`s, called from four threads, from eight tasks and from a thread that lost its run, and as a worker's static, class and plain methods, each call in its own run (#76) |
 | W4 | `w04_slack_ops_bot` | Slack Events API | Slack fidelity: minted threads (#52), names vs ids (#44), `missing_scope`, an archived channel, an L0 `reactions.add`, duplicate delivery, the webhook path (#87) |
 | W5 | `w05_dispute_responder` | signed Stripe webhook | bytes trigger args, `would_fire` (#47), an event the agent's own write would fire, a live read whose response carries a credential (a payment intent's `client_secret`) stored redacted (#70) |
 | W6 | `w06_crm_db_agent` | CLI | tools the proxy cannot see (#76, #83): database and file writes, stand-ins, decoration-time errors; a stand-in that raises, re-raised as the same object, and a retry; tools called in no run, filed in the process run; HTTP made inside a stand-in; an async read, a sync write that returns a coroutine, and an async static method whose stand-in is a static method beside it |
-| W7 | `w07_streaming_assistant` | streaming HTTP endpoint | SSE through the proxy, recorded chunk by chunk (#71): two streams at once, chunks that end mid-line and mid-secret; a caller that disconnects, an upstream reset mid-stream and before the stream opens, a LangSmith trace stored only as having happened (#70); every stream stored in the chat's run, labelled by the SDK, read with urllib or with httpx as the model SDKs read them, and two chats' streams each in its own run (#75); a stream that comes gzip-encoded and decodes to a GiB, which the agent decodes only so far and irimi records up to its cap (#94) |
-| W8 | `w08_orchestrator` | nested triggers + an internal service | nested runs, unmapped internal hosts, `Irimi-Run` across a hop: labelled by the SDK, stripped by irimi (#67, #75); a tool called in a nested trigger, filed in its parent's run (#76) |
-| W9 | `w09_scope_gauntlet` | none (plain script) | THE SCOPE RULE, the L0 floor, idempotency (#46), odd bodies, reads past the body limit, forged irimi headers, the reverse door, the control endpoint (#73): runs started, given tool calls and ended over it by hand, two at once, every refusal, and a tool call made in no run, filed in `unattributed` (#76); bodies that decode past irimi's cap (#94): a write refused, a model call forwarded byte for byte, a read-back never overlaid and said not to show the write it follows, run starts refused 413 |
-| W10 | `w10_flaky_upstream` | CLI | retries, timeouts, resets on a read and a write, irimi's own L3 read failing, a run that raises, is interrupted (Ctrl-C) or is killed after a write, an SDK whose control endpoint is unset, gone or refusing (#74), and a read answered with a bomb in gzip, br or zstd that decodes to a GiB, held to irimi's memory bound (#94) |
+| W7 | `w07_streaming_assistant` | streaming HTTP endpoint | SSE through the proxy, recorded chunk by chunk (#71): two streams at once, chunks that end mid-line and mid-secret; a caller that disconnects, an upstream reset mid-stream and before the stream opens, a LangSmith trace stored only as having happened (#70); every stream stored in the chat's run, labelled by the SDK, read with urllib or with httpx as the model SDKs read them, and two chats' streams each in its own run (#75); a stream that comes gzip-encoded and decodes to a GiB, which the agent decodes only so far and irimi records up to its cap (#94); a stream its trigger returns still open, as a handler returns a streaming response, recorded after its run's end and so missing from the summary serve printed at that end (#77, pinned `LOOKS WRONG`) |
+| W8 | `w08_orchestrator` | nested triggers + an internal service | nested runs, unmapped internal hosts, `Irimi-Run` across a hop: labelled by the SDK, stripped by irimi (#67, #75); a tool called in a nested trigger, filed in its parent's run (#76); under serve, the two nested runs' summaries each naming its own reservation, and a map irimi refuses ending serve before it listens (#77) |
+| W9 | `w09_scope_gauntlet` | none (plain script) | THE SCOPE RULE, the L0 floor, idempotency (#46), odd bodies, reads past the body limit, forged irimi headers, the reverse door, the control endpoint (#73): runs started, given tool calls and ended over it by hand, two at once, every refusal, and a tool call made in no run, filed in `unattributed` (#76); bodies that decode past irimi's cap (#94): a write refused, a model call forwarded byte for byte, a read-back never overlaid and said not to show the write it follows, run starts refused 413; under serve, every spelling of the listener bound to `0.0.0.0`, and the script's every request `unattributed` (#77) |
+| W10 | `w10_flaky_upstream` | CLI | retries, timeouts, resets on a read and a write, irimi's own L3 read failing, a run that raises, is interrupted (Ctrl-C) or is killed after a write, an SDK whose control endpoint is unset, gone or refusing (#74), and a read answered with a bomb in gzip, br or zstd that decodes to a GiB, held to irimi's memory bound (#94); under serve, a run killed or whose end never reached irimi printing no summary, its refund in none (#77, pinned `LOOKS WRONG`) |
 | W11 | `w11_leaky_agent` | CLI | what irimi cannot see: clients that ignore the proxy, loopback services (Phase 4 readiness); each escape an `sdk.run` whose escaped request carries no `Irimi-Run`, and a read whose redirects lead it off irimi's route, labelled on each hop through irimi and on no other (#75); the sidecar's write made by a write tool, the one escape an agent can close itself (#76) |
 
 Each workflow is a package: `agent.py` is the agent, started through `examples.workflows.launch`
@@ -46,14 +46,20 @@ so it keeps its real module name; `scenarios.py` seeds the fake services per sce
   function of the prompt, so a changed prompt changes the answer deterministically.
 - **Bare vs shadow.** Each scenario runs twice. The bare run is the baseline, and its writes land
   on the fake services. The shadow run goes through `irimi shadow`, and nothing may land.
-- **Serve** (#77). A scenario with `serve_flags` runs a third time, under `irimi shadow --serve`
-  with those flags: irimi in the harness's process on a thread of its own, where the fake internet
-  resolves, and the agent beside it as its own process, given the README's serve-mode variables
-  and no `IRIMI_RUN`, so a request no SDK run names is `unattributed`. irimi is stopped by its
-  `stop` event, not a signal, when the agent exits. W3's `threads_8`, `asyncio_8`,
-  `unpropagated_thread` and `shared_charge`, W4's `duplicate_delivery`, W5's `cascade`, W6's
-  `outside_run`, W8's `run_header_across_hop` and W9's `self_addressed`, with irimi bound to
-  `0.0.0.0`, run this way. `Result.run_blocks()` is each run's printed summary by run id.
+- **Serve** (#77). Every scenario runs a third time, under `irimi shadow --serve` with its
+  `serve_flags` (none but W9 `self_addressed`'s `--listen-host 0.0.0.0`): irimi in the harness's
+  process on a thread of its own, where the fake internet resolves, and the agent beside it as its
+  own process, given the README's serve-mode variables and no `IRIMI_RUN`, so a request or a tool
+  call no SDK run names is `unattributed`. irimi is stopped by its `stop` event, not a signal,
+  when the agent exits, and must then have left no thread of its own running: its engine stopped
+  and its store closed. A serve that refuses to start (W8 `map_refused`) starts no agent, as
+  `irimi shadow` starts none. Serve applies to every workflow, the plain script W9 included, whose
+  every request is then `unattributed` (`irimi runs show unattributed` ends in its summary), and
+  W9 `control_hazards` posts for serve's own run, `unattributed`, where it has no `IRIMI_RUN`.
+  `Result.run_blocks()` is each run's printed summary by run id; `Result.summaries()` is every
+  summary line irimi printed in either mode, and `Result.engine_run_id()` the run a request no run
+  names lands in: the process run under shadow, `unattributed` under serve. Each workflow's tests
+  run under `irimi shadow` and serve alike (`MODES`), and pin where the two differ.
 - **The observation log.** Each agent logs what it saw (status, `Irimi-Answered-By`, which tool
   ran) to a JSON-lines file. The tests assert on that as well as on irimi's output, through
   `Result` (`harness/run.py`): `calls()`, `answered()`, `by_label()`, `tools()`, `events()`,
@@ -94,8 +100,11 @@ so it keeps its real module name; `scenarios.py` seeds the fake services per sce
 ## The universal invariants
 
 `tests/workflows/test_invariants.py` holds every scenario of every workflow to five rules, and
-every serve run to the same five (#77), and to printing one `--- run <id> ---` block per run it
-ended, equal to that run's stored summary:
+every serve run to the same five (#77), and to printing one `--- run <id> ---` block per end it
+took, none for a run that did not end (W10 `sigterm_mid_run`) or whose end never reached it (W10's
+`control_*`), each equal to that run's stored summary. But two, pinned `LOOKS WRONG`: W3
+`task_outlives_trigger` and W7 `hand_off` store events in a run after its end, and their blocks,
+printed at the end, hold every event that ended by then and none after.
 
 1. No write reached a fake service under shadow. A scenario marked `leaks` inverts this rule,
    because it exists to show an escape. Every live answer the agent saw must have come from a
@@ -131,7 +140,10 @@ in a half-written line; and a bare run stores nothing. A streamed answer is stor
 the agent was sent (#71). For W9 (but for its control scenarios), which sends no `Irimi-Run`,
 `irimi runs show <process run>` ends in the summary `irimi shadow` printed, but for the elapsed
 seconds; for every workflow, the summary over all of a process's stored runs together is that
-block, its tool writes' lines included (#72, #76).
+block, its tool writes' lines included (#72, #76). Under serve mode (#77) the same checks hold
+but for the process run, which serve does not have: what no run names is `unattributed`; and serve
+prints no closing block, so the summary over all of its runs and `unattributed/` together is the
+summary of what it reported as it happened.
 
 `tests/workflows/test_control_endpoint.py` holds every scenario to the control endpoint's two
 promises (#73): no control request is an exchange, printed, handed to the store or stored, and
@@ -160,7 +172,10 @@ hand:
   accepted and reopens the run (pinned `LOOKS WRONG`); a start or an end for the process run's own
   id (`IRIMI_RUN`) is refused 400, while a tool call posted to it is stored in it; and a tool call
   posted to `unattributed`, as the SDK posts one made in no run where there is no process run
-  (`irimi serve`, #77), is taken and filed there, the one post that may name it (#76).
+  (`irimi serve`, #77), is taken and filed there, the one post that may name it (#76). Under serve
+  mode, irimi's own run is `unattributed`, so the start and the end are refused as naming no run,
+  and the reopened run's block, printed at its first end, no longer matches what the store holds
+  (pinned `LOOKS WRONG`, #97).
 
 A new workflow package is found by its name, `wNN_<name>`, and is held to all five rules without
 any registry edit. A last test checks that the corpus gives rules 1 to 4 something to catch: a rule

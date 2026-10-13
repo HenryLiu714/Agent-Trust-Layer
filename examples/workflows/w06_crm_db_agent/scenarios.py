@@ -57,7 +57,6 @@ WORKFLOW = Workflow(
             ("outside_run",),
             doc="tools called before the trigger, in no run: recorded in the process run "
             "(IRIMI_RUN), the trigger's own in its run; in serve mode, `unattributed`",
-            serve_flags=(),
         ),
         "stand_in_http": Scenario(
             ("stand_in_http",),

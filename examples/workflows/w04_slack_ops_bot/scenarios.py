@@ -77,6 +77,7 @@ WORKFLOW = Workflow(
             ("duplicate_delivery",),
             setup=_workspace,
             doc="the same event twice (X-Slack-Retry-Num: 1): one reply, not two",
+            serve_flags=(),
         ),
     },
 )

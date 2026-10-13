@@ -12,8 +12,13 @@ and says whether anything about it is expected to differ from a bare run.
 - **shadow**: `irimi shadow -- <agent>` runs in THIS process through `irimi.cli.main`, with the
   fake internet resolving its hosts, so irimi's real shipped maps, policy and overlay decide every
   call. Its writes must not land anywhere.
+- **serve**: `irimi shadow --serve` runs in THIS process too, on a thread of its own, because the
+  fake internet resolves names only here; the agent runs beside it as its own process, pointed at
+  it by the variables the README's "Serve mode" names, and irimi is stopped, by its `stop` event
+  rather than a signal, when the agent exits (#77). A scenario runs this way only when it says so
+  (`Scenario.serve_flags`).
 
-A Phase 3 mode, such as `serve` or `replay`, is a new branch here and not a new harness.
+A later mode, such as `replay`, is a new branch here and not a new harness.
 """
 
 from __future__ import annotations
@@ -30,6 +35,8 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -40,6 +47,7 @@ from examples.workflows.harness.internet import BOMB_SECRET, FakeInternet, Req
 from examples.workflows.harness.services import CLIENT_SECRET_CANARY, World
 from irimi import ca, paths, report, runner, servicemap, trace
 from irimi import store as irimi_store
+from irimi.cli import build_parser
 from irimi.cli import main as irimi_main
 from irimi.exchange import Exchange
 from irimi.servicemap import MapIndex, loader
@@ -66,7 +74,11 @@ CANARIES = {
 # bomb's first line holds one, so the start of a body cut at irimi's decoding cap is held to it
 # too (#94).
 SERVED_CANARIES = {"STRIPE_CLIENT_SECRET": CLIENT_SECRET_CANARY, "BOMB_SECRET": BOMB_SECRET}
-MODES = ("bare", "shadow")
+MODES = ("bare", "shadow", "serve")
+# The line irimi's serve mode prints above each run's summary when the SDK ends the run (#77).
+RUN_BLOCK = re.compile(r"--- run (\S+) ---")
+# How long a serve-mode run waits for irimi's banner, and then for irimi to stop.
+SERVE_TIMEOUT_S = 60
 # A tool call's line in irimi's stream (`report.tool_call_line`, #76). Its first column is `ran`,
 # which no `answered_by` an exchange line starts with ever is.
 TOOL_LINE = re.compile(r"(real|shadow) +(read|write) +tool .* -> ")
@@ -92,6 +104,8 @@ class Scenario:
     # The scenario exists to show a write irimi cannot stop; universal invariant 1 is inverted.
     leaks: bool = False
     doc: str = ""
+    # Run it under `irimi shadow --serve` too, with these irimi flags (#77). None: shadow only.
+    serve_flags: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -112,7 +126,7 @@ class Result:
     mode: str
     exit_code: int
     obs: list[dict[str, Any]]
-    irimi: list[str]  # every line irimi printed (shadow only)
+    irimi: list[str]  # every line irimi printed (shadow and serve)
     world: World
     internet: FakeInternet
     home: Path  # IRIMI_HOME
@@ -213,6 +227,24 @@ class Result:
         ids = [record.run_id for record in reader.list_runs()] + [trace.UNATTRIBUTED]
         return [event for run_id in ids for event in reader.load_run(run_id).events]
 
+    def run_blocks(self) -> dict[str, list[str]]:
+        """Serve mode's summaries, by run id: the lines under each `--- run <id> ---`, which serve
+        prints under one lock, so a block ends at the first line that is no summary's: a stream
+        line, or the next block (#77)."""
+        blocks: dict[str, list[str]] = {}
+        current: list[str] | None = None
+        for line in self.irimi:
+            match = RUN_BLOCK.fullmatch(line)
+            if match:
+                current = blocks.setdefault(match.group(1), [])
+                continue
+            in_summary = line == "" or line.startswith("  ") or line.startswith("irimi shadow · ")
+            if current is not None and in_summary:
+                current.append(line)
+            else:
+                current = None
+        return blocks
+
     def summary(self) -> list[str]:
         """irimi's closing block, from its `N exchanges` header on."""
         for i, line in enumerate(self.irimi):
@@ -275,6 +307,18 @@ def workflows() -> dict[str, Workflow]:
     return dict(sorted(found.items()))
 
 
+def serve_cases() -> list[tuple[str, str]]:
+    """`(workflow, scenario)` for every scenario that runs under `irimi shadow --serve` too: the
+    ones whose `serve_flags` are set (#77). The one statement of that set, for every test that
+    holds serve runs to something."""
+    return [
+        (name, scenario)
+        for name, wf in workflows().items()
+        for scenario, spec in wf.scenarios.items()
+        if spec.serve_flags is not None
+    ]
+
+
 def run(workflow: Workflow, scenario_name: str, mode: str, workdir: Path) -> Result:
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
@@ -303,9 +347,14 @@ def run(workflow: Workflow, scenario_name: str, mode: str, workdir: Path) -> Res
         cmd = [sys.executable, "-m", "examples.workflows.launch", workflow.module, *scenario.argv]
         if mode == "bare":
             code = _run_bare(cmd, env, cwd, internet)
-        else:
+        elif mode == "shadow":
             with _watching_the_store(reported, handed, handed_events):
                 code, irimi_out = _run_shadow(cmd, env, cwd, tmp, internet, scenario, workdir)
+        else:
+            if scenario.serve_flags is None:
+                raise ValueError(f"{workflow.name}:{scenario_name} does not run in serve mode")
+            with _watching_the_store(reported, handed, handed_events):
+                code, irimi_out = _run_serve(cmd, env, cwd, tmp, internet, scenario, workdir)
     finally:
         internet.stop()
     obs = [json.loads(line) for line in obs_path.read_text().splitlines() if line.strip()]
@@ -374,14 +423,32 @@ def _run_shadow(
     scenario: Scenario,
     workdir: Path,
 ) -> tuple[int, list[str]]:
-    """`irimi shadow -- <agent>` in this process, as a user would run it from `cwd`.
+    """`irimi shadow -- <agent>` in this process, as a user would run it from `cwd`."""
+    buf = io.StringIO()
+    with _as_irimi(env, cwd, tmp, internet, scenario, workdir), contextlib.redirect_stdout(buf):
+        code = irimi_main(["shadow", "--port", "0", "--", *cmd])
+    return code, buf.getvalue().splitlines()
+
+
+@contextlib.contextmanager
+def _as_irimi(
+    env: dict[str, str],
+    cwd: Path,
+    tmp: Path,
+    internet: FakeInternet,
+    scenario: Scenario,
+    workdir: Path,
+) -> Iterator[None]:
+    """This process made the one irimi runs in, for `irimi shadow` and `irimi shadow --serve`
+    alike (#77): the agent's environment, `cwd`, TMPDIR, the scenario's maps, the fake resolver,
+    and a CA under the run's `IRIMI_HOME`.
 
     irimi's L3 read is urllib in this process. With no proxy variable set, urllib on macOS falls
     back to the system's proxy settings, which would carry the read (and its canary credential)
     past the fake names to a real proxy. `no_proxy=*` keeps it direct. irimi overwrites both
-    spellings for its child, so the agent still sees exactly irimi's `NO_PROXY`.
+    spellings for its child, and serve's agent is given its own, so the agent still sees exactly
+    irimi's `NO_PROXY`.
     """
-    buf = io.StringIO()
     harness_env = {**env, "NO_PROXY": "*", "no_proxy": "*"}
     with (
         _environ(harness_env),
@@ -391,9 +458,77 @@ def _run_shadow(
         internet.resolving(),
     ):
         ca.generate_ca(ca.ca_paths())
-        with contextlib.redirect_stdout(buf):
-            code = irimi_main(["shadow", "--port", "0", "--", *cmd])
+        yield
+
+
+def _run_serve(
+    cmd: list[str],
+    env: dict[str, str],
+    cwd: Path,
+    tmp: Path,
+    internet: FakeInternet,
+    scenario: Scenario,
+    workdir: Path,
+) -> tuple[int, list[str]]:
+    """`irimi shadow --serve` in this process, as `_run_shadow` runs `irimi shadow`, on a thread of
+    its own; the agent beside it as its own process; and irimi stopped when the agent exits (#77).
+
+    The command is parsed by irimi's own parser and run by the function `irimi shadow --serve`
+    runs, with the `stop` event in place of SIGTERM, which would reach this whole test process.
+    The agent is given exactly the variables an agent container is (README, "Serve mode"): the
+    proxy, the CA, `IRIMI_ENGINE_ACTIVE` and `IRIMI_CONTROL`, and never `IRIMI_RUN`, so a
+    request no SDK run names is `unattributed`.
+    """
+    buf = io.StringIO()
+    stop = threading.Event()
+    codes: list[int] = []
+    assert scenario.serve_flags is not None
+    args = build_parser().parse_args(["shadow", "--serve", "--port", "0", *scenario.serve_flags])
+    with _as_irimi(env, cwd, tmp, internet, scenario, workdir), contextlib.redirect_stdout(buf):
+        serving = threading.Thread(
+            target=lambda: codes.append(args.func(args, stop)), name="irimi-serve"
+        )
+        serving.start()
+        try:
+            port = _served_port(buf, serving)
+            agent_env = _serve_env(env, port, ca.ca_paths().cert)
+            done = subprocess.run(cmd, env=agent_env, cwd=cwd, timeout=180, check=False)
+            code = runner.exit_code_for(done.returncode)
+        finally:
+            stop.set()
+            serving.join(timeout=SERVE_TIMEOUT_S)
+    if serving.is_alive() or codes != [0]:
+        raise AssertionError(f"irimi shadow --serve did not stop cleanly: {codes}")
     return code, buf.getvalue().splitlines()
+
+
+def _served_port(buf: io.StringIO, serving: threading.Thread) -> int:
+    """The port in serve's banner, once it has printed it."""
+    deadline = time.monotonic() + SERVE_TIMEOUT_S
+    while time.monotonic() < deadline:
+        match = re.search(r" · listening on \S+:(\d+) · ", buf.getvalue())
+        if match:
+            return int(match.group(1))
+        if not serving.is_alive():
+            break
+        time.sleep(0.01)
+    raise AssertionError(f"irimi shadow --serve printed no banner: {buf.getvalue()!r}")
+
+
+def _serve_env(env: dict[str, str], port: int, cert: Path) -> dict[str, str]:
+    """The agent's environment beside a serve: the README's serve-mode variables, naming irimi as
+    the agent connects to it, here loopback (#77)."""
+    listener = f"http://127.0.0.1:{port}"
+    return {
+        **env,
+        **dict.fromkeys(paths.PROXY_ENVS, listener),
+        "NO_PROXY": runner.NO_PROXY_VALUE,
+        "no_proxy": runner.NO_PROXY_VALUE,
+        "SSL_CERT_FILE": str(cert),
+        "REQUESTS_CA_BUNDLE": str(cert),
+        paths.ENGINE_ACTIVE_ENV: "1",
+        paths.CONTROL_ENV: f"{listener}/_irimi",
+    }
 
 
 @contextlib.contextmanager
@@ -478,9 +613,10 @@ def _maps(scenario: Scenario, workdir: Path) -> Iterator[None]:
 
 
 def check_invariants(shadow: Result, bare: Result | None = None) -> list[str]:
-    """What every shadow run owes, whatever the workflow. Returns the broken ones, worded."""
-    if shadow.mode != "shadow":
-        raise ValueError(f"check_invariants takes a shadow run, not a {shadow.mode} one")
+    """What every shadow run owes, whatever the workflow, and every serve run (#77). Returns the
+    broken ones, worded. Invariant 5 compares exit codes with `bare`, when it is given."""
+    if shadow.mode not in ("shadow", "serve"):
+        raise ValueError(f"check_invariants takes a shadow or serve run, not a {shadow.mode} one")
     scenario = shadow.workflow.scenarios[shadow.scenario]
     problems = []
     # Invariant 1 watches the fake internet, so it holds only if irimi's upstream IS the fake

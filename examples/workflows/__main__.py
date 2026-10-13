@@ -3,6 +3,9 @@
     uv run python -m examples.workflows                               # list workflows and scenarios
     uv run python -m examples.workflows w09_scope_gauntlet verbs      # bare, then shadow
     uv run python -m examples.workflows w09_scope_gauntlet verbs --mode shadow
+    uv run python -m examples.workflows w03_queue_worker threads_8 --mode serve
+
+`both` runs bare and shadow, and serve too for a scenario that runs there (#77).
 
 Prints what the agent saw per call, what irimi printed, what reached the fake services, and the
 universal invariants. Needs no keys and no network: every host is served by the fake internet.
@@ -40,7 +43,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {wanted} of {wf.name}:", file=sys.stderr)
         _list(wf, sys.stderr)
         return 2
-    modes = MODES if args.mode == "both" else (args.mode,)
+    spec = wf.scenarios[args.scenario]
+    if args.mode == "both":
+        modes = tuple(m for m in MODES if m != "serve" or spec.serve_flags is not None)
+    elif args.mode == "serve" and spec.serve_flags is None:
+        print(f"error: {wf.name} {args.scenario} does not run in serve mode", file=sys.stderr)
+        return 2
+    else:
+        modes = (args.mode,)
     results = {}
     with tempfile.TemporaryDirectory(prefix="irimi-workflow-") as tmp:
         for mode in modes:
@@ -58,13 +68,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  --- writes that reached the fake services: {len(writes)}")
             for req in writes:
                 print(f"  {req.method} {req.host}{req.path}")
-    if "shadow" in results:
-        problems = check_invariants(results["shadow"], results.get("bare"))
-        print(f"\ninvariants: {f'{len(problems)} broken' if problems else 'all hold'}")
+    broken = False
+    for mode in ("shadow", "serve"):
+        if mode not in results:
+            continue
+        problems = check_invariants(results[mode], results.get("bare"))
+        print(f"\ninvariants ({mode}): {f'{len(problems)} broken' if problems else 'all hold'}")
         for problem in problems:
             print(f"  BROKEN {problem}")
-        return 1 if problems else 0
-    return 0
+        broken = broken or bool(problems)
+    return 1 if broken else 0
 
 
 def _list(wf: Workflow, out: TextIO) -> None:

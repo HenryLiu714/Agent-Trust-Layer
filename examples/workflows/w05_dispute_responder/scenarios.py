@@ -33,7 +33,10 @@ WORKFLOW = Workflow(
     summary="A signed Stripe webhook consumer: raw bytes as the trigger, reads on an unmapped "
     "route, customer tagging, a Slack alert, a small-dispute refund and its would-be webhook.",
     scenarios={
-        name: Scenario((name,), setup=_world, doc=doc)
+        # `cascade` runs under serve mode too: two deliveries, two runs, from one process (#77).
+        name: Scenario(
+            (name,), setup=_world, doc=doc, serve_flags=() if name == "cascade" else None
+        )
         for name, doc in {
             "over_threshold": "a $50 dispute: tag, alert, fight; no refund",
             "under_threshold": "a $15 dispute: tag, alert, refund; the refund would have fired "

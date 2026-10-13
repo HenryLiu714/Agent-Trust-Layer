@@ -191,7 +191,9 @@ And a refund the real service would have refused, from `w01_ticket_triage double
 `NODE_EXTRA_CA_CERTS`, `NODE_USE_ENV_PROXY=1`, `IRIMI_ENGINE_ACTIVE=1`, `IRIMI_RUN` and
 `IRIMI_CONTROL`. That covers requests, httpx, urllib, curl and Node's fetch with no code change.
 The command's exit code is passed through. One process tree is one run; the subcommand is the only
-thing that chooses the mode.
+thing that chooses the mode. SIGTERM to `irimi shadow`, as a supervisor or a container runtime
+sends it, is passed to the command, and the command's exit then ends the run as any exit does:
+the run is stored with its code, what is queued is written, and the summary is printed (#77).
 
 `IRIMI_CONTROL` is `http://127.0.0.1:<port>/_irimi`, irimi's control endpoint on the same listener.
 The SDK posts a run's start, its end and the tool calls the proxy cannot see there

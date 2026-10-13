@@ -296,3 +296,101 @@ def test_a_store_that_cannot_be_written_stops_shadow_with_one_line(home, tmp_pat
     err = capsys.readouterr().err.strip().splitlines()
     assert len(err) == 1 and err[0].startswith("error: ")
     assert not marker.exists()
+
+
+def test_sigterm_stops_the_command_ends_the_run_and_closes_the_store(home, upstream):
+    """SIGTERM is how a supervisor or a container runtime stops `irimi shadow`. It is passed to
+    the command, whose exit then ends the run as any exit does: the run is stored ended with the
+    command's code, what was queued is written before irimi exits, the summary is printed, and
+    irimi exits with the command's code, 143 for a command SIGTERM ended. Before, the default
+    action ended irimi at once, the command lived on with its proxy gone, the run stayed
+    incomplete and the store was never closed (#70's note, #77)."""
+    import os
+    import signal
+    import subprocess
+    import time
+
+    from irimi.store import StoreReader
+
+    ready = home / "child.pid"
+    src = (
+        "import http.client, os, time, urllib.parse;"
+        "u = urllib.parse.urlparse(os.environ['HTTPS_PROXY']);"
+        "c = http.client.HTTPConnection(u.hostname, u.port, timeout=10);"
+        f"c.request('GET', 'http://127.0.0.1:{upstream}/hello', "
+        f"headers={{'host': '127.0.0.1:{upstream}'}});"
+        "c.getresponse().read();"
+        f"open({str(ready)!r} + '.tmp', 'w').write(str(os.getpid()));"
+        f"os.replace({str(ready)!r} + '.tmp', {str(ready)!r});"
+        "time.sleep(60)"
+    )
+    env = {**os.environ, paths.IRIMI_HOME_ENV: str(home)}
+    env.pop("STRIPE_API_KEY", None)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "irimi.cli", "shadow", *_py(src)],
+        cwd=home,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while not ready.exists():
+            assert proc.poll() is None, proc.communicate()
+            assert time.monotonic() < deadline, "the command never started"
+            time.sleep(0.02)
+        child = int(ready.read_text())
+        started = time.monotonic()
+        proc.send_signal(signal.SIGTERM)
+        out, err = proc.communicate(timeout=60)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    # Passed on at once, not after `_wait_for_child`'s grace: the command was told, not waited out.
+    assert time.monotonic() - started < 5
+    assert proc.returncode == 143, err
+    with pytest.raises(ProcessLookupError):
+        os.kill(child, 0)
+    [record] = StoreReader(home / "store").list_runs()
+    assert (record.outcome, record.exit_code) == ("error", 143)
+    [event] = StoreReader(home / "store").load_run(record.run_id).events
+    assert event.request.path == "/hello"
+    assert "1 exchange ·" in out
+    assert "Traceback" not in err
+
+
+def test_sigterm_before_the_command_starts_runs_nothing(home, monkeypatch, capsys):
+    """A SIGTERM that arrives while irimi loads its maps or binds is held until the command would
+    start, and the command then never does: no run is stored, the store is closed and irimi exits
+    143 (#77)."""
+    import signal
+
+    from irimi import cli
+    from irimi.store import StoreReader
+
+    monkeypatch.chdir(home)  # so SHOULD_NOT_EXIST would land here, not in the repo
+    prepare = cli._prepare_run
+
+    def terminated_while_preparing(*args, **kwargs):
+        run = prepare(*args, **kwargs)
+        signal.raise_signal(signal.SIGTERM)
+        return run
+
+    monkeypatch.setattr(cli, "_prepare_run", terminated_while_preparing)
+    outside: list[int] = []
+
+    def record(signum, frame):
+        outside.append(signum)
+
+    saved = signal.signal(signal.SIGTERM, record)
+    try:
+        assert main(["shadow", *_py("open('SHOULD_NOT_EXIST','w')")]) == 143
+        after = signal.getsignal(signal.SIGTERM)
+    finally:
+        signal.signal(signal.SIGTERM, saved)
+    assert outside == [] and after is record  # irimi's handler, gone again once it returned
+    assert "terminated before the command started" in capsys.readouterr().err
+    assert not (home / "SHOULD_NOT_EXIST").exists()
+    assert StoreReader(home / "store").list_runs() == []

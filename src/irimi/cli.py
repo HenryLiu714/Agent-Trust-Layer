@@ -22,6 +22,7 @@ if TYPE_CHECKING:  # the quoted annotations below; no runtime import
     from irimi.trace import ToolCall
 
 SIGINT_EXIT_CODE = 130  # 128 + SIGINT, the shell convention for a Ctrl-C'd command
+SIGTERM_EXIT_CODE = 143  # 128 + SIGTERM: `irimi shadow` terminated before its command started
 DEFAULT_RUNS_LIMIT = 20  # `irimi runs list` without --limit (#72)
 
 # Since #76 a non-HTTP write the agent labels with `@sdk.tool` runs only its stand-in under irimi,
@@ -616,15 +617,6 @@ def _stopping_on_signals() -> Iterator[list[int]]:
 
 
 def cmd_shadow(args: argparse.Namespace, stop: threading.Event | None = None) -> int:
-    import os
-    import subprocess
-    import time
-
-    from irimi import report, runner
-    from irimi.engine import EngineStartError
-    from irimi.exchange import Exchange
-    from irimi.trace import ToolCall
-
     cmd = list(args.cmd)
     if cmd and cmd[0] == "--":
         cmd = cmd[1:]
@@ -637,6 +629,81 @@ def cmd_shadow(args: argparse.Namespace, stop: threading.Event | None = None) ->
     if not cmd:
         print("error: nothing to run. Usage: irimi shadow -- <command> [args...]", file=sys.stderr)
         return 1
+    with _passing_sigterm_to_child() as child:
+        return _shadow(args, cmd, child)
+
+
+class _Child:
+    """The command `irimi shadow` runs, as SIGTERM to irimi sees it (#77).
+
+    A supervisor or a container runtime stops `irimi shadow` with SIGTERM, which reaches irimi
+    alone, not its command. Its default action ended irimi at once, with the command still running
+    and its proxy gone, the run never ended and the store never closed (#70's note). So SIGTERM is
+    passed to the command instead, and the command's exit ends the run as any exit does. One that
+    arrives before the command exists is held, and the command is then never started.
+
+    The handler takes no lock, as serve's does not: `os.kill` and two attribute reads. A command
+    already reaped has its `returncode` and is never signalled, so a recycled pid is never hit."""
+
+    def __init__(self) -> None:
+        self.terminated = False
+        self._proc: subprocess.Popen[bytes] | None = None
+
+    def on_sigterm(self, signum: int, _frame: object) -> None:
+        self.terminated = True
+        self._pass_on(signum)
+
+    def adopt(self, proc: "subprocess.Popen[bytes]") -> None:
+        """`proc` is the command now. A SIGTERM that came while it was being started, when there
+        was no command to pass it to, is passed to it here."""
+        import signal
+
+        self._proc = proc
+        if self.terminated:
+            self._pass_on(signal.SIGTERM)
+
+    def _pass_on(self, signum: int) -> None:
+        import os
+
+        proc = self._proc
+        if proc is not None and proc.returncode is None:
+            with contextlib.suppress(OSError):
+                os.kill(proc.pid, signum)
+
+
+@contextlib.contextmanager
+def _passing_sigterm_to_child() -> Iterator[_Child]:
+    """For the length of the block, SIGTERM is `_Child.on_sigterm` (#77), on the main thread only,
+    where Python allows a handler; a SIGTERM ignored when `irimi shadow` started stays ignored, as
+    under serve. The handler found is put back on the way out. SIGINT is untouched: Ctrl-C reaches
+    the whole foreground process group, the command included, and `_wait_for_child` handles it."""
+    import signal
+
+    child = _Child()
+    if (
+        threading.current_thread() is not threading.main_thread()
+        or signal.getsignal(signal.SIGTERM) is signal.SIG_IGN
+    ):
+        yield child
+        return
+    previous = signal.signal(signal.SIGTERM, child.on_sigterm)
+    try:
+        yield child
+    finally:
+        # None: the handler was not installed from Python, which `signal` cannot put back.
+        signal.signal(signal.SIGTERM, signal.SIG_DFL if previous is None else previous)
+
+
+def _shadow(args: argparse.Namespace, cmd: list[str], child: _Child) -> int:
+    """`irimi shadow -- <cmd>` inside its SIGTERM handler: the run, start to summary."""
+    import os
+    import subprocess
+    import time
+
+    from irimi import report, runner
+    from irimi.engine import EngineStartError
+    from irimi.exchange import Exchange
+    from irimi.trace import ToolCall
 
     run = _prepare_run(args)
     if run is None:
@@ -678,6 +745,10 @@ def cmd_shadow(args: argparse.Namespace, stop: threading.Event | None = None) ->
         host, port = run.config.listen_host, handle.port()
         print_startup("shadow", args, run.index, run.run_id, host, port, run.ca.cert)
         env = runner.child_env(dict(os.environ), host, port, run.ca.cert, run.run_id)
+        if child.terminated:  # SIGTERM while irimi started: the command is never run (#77)
+            print("error: terminated before the command started.", file=sys.stderr)
+            code = SIGTERM_EXIT_CODE
+            return code
         # The process run is stored before the child exists, so every exchange it makes lands in
         # a run that already has its record (#70).
         agent_version = os.environ.get(paths.AGENT_VERSION_ENV)
@@ -685,6 +756,7 @@ def cmd_shadow(args: argparse.Namespace, stop: threading.Event | None = None) ->
         started_run = True
         try:
             proc = subprocess.Popen(cmd, env=env)
+            child.adopt(proc)
         except FileNotFoundError:
             print(f"error: command not found: {cmd[0]}", file=sys.stderr)
             code = 127

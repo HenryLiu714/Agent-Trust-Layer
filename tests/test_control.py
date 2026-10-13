@@ -350,6 +350,20 @@ def test_a_tool_call_may_name_the_process_run(engine):
     assert engine.tool_calls == [call]
 
 
+def test_a_tool_call_made_in_no_run_is_taken_unattributed_but_not_a_start(engine):
+    """`irimi serve` gives its agent no process run (#77), so a tool call made outside every SDK
+    run names none: it is filed in `unattributed/`, as an exchange with no `Irimi-Run` is there.
+    A start or an end for `unattributed` is still refused (#76)."""
+    _ok(engine.call("POST", "/_irimi/runs/unattributed/tool-calls", _tool_call(time.time())))
+    status, _, body = engine.call("POST", "/_irimi/runs/unattributed/start", _start_body(1.0))
+    assert (status, json.loads(body)) == (400, {"error": "'unattributed' cannot name a run"})
+    reader = engine.finish()
+    [call] = reader.load_run("unattributed").events
+    assert (call.run_id, call.name) == ("unattributed", "db.write")
+    assert engine.tool_calls == [call]
+    assert reader.list_runs() == []
+
+
 def test_a_control_request_through_the_forward_proxy_is_answered_the_same(engine):
     """An absolute-form URL naming the listener - an SDK whose `IRIMI_CONTROL` is not on NO_PROXY
     - reaches the endpoint, never the reverse door's 403 or the listener itself."""

@@ -77,6 +77,30 @@ WORKFLOW = Workflow(
             setup=_charges,
             doc="8 messages on 4 threads, every call through one of two shared 1-connection pools",
         ),
+        "ledger_threads_8": Scenario(
+            ("ledger_threads_8",),
+            setup=_charges,
+            doc="threads_8 with the ledger tools: each message's read tool on its pool thread and "
+            "its write tool in the propagated refund thread, all landing in its own run (#76)",
+        ),
+        "ledger_asyncio_8": Scenario(
+            ("ledger_asyncio_8",),
+            setup=_charges,
+            doc="asyncio_8 with the ledger tools: an async read, an async write and a sync read "
+            "that returns a coroutine, in eight tasks at once, each call in its task's run (#76)",
+        ),
+        "ledger_unpropagated": Scenario(
+            ("ledger_unpropagated",),
+            setup=_charges,
+            doc="the ledger write made in a thread started without sdk.propagate: it has no run, "
+            "so it lands in the process run (#76)",
+        ),
+        "ledger_worker": Scenario(
+            ("ledger_worker",),
+            setup=_charges,
+            doc="the worker's ledger tools as its methods: a static read, a class-method write and "
+            "a plain-method write, each stand-in called as its method is (#76)",
+        ),
         "task_outlives_trigger": Scenario(
             ("task_outlives_trigger",),
             setup=_charges,

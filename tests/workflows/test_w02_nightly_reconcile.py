@@ -28,7 +28,7 @@ def test_a_clean_night_pages_everything_and_posts_one_summary(run_workflow):
         '  ○ post to #C0RECON: "reconciled 0 for 2026-09-27"  unvalidated (L3 preconditions passed)'
         in shadow.summary()
     )
-    # The fallback SDK's run wrapped the whole job, and the read tool ran for real inside it.
+    # The SDK's run wrapped the whole job, and the read tool ran for real inside it.
     run_id = shadow.events("run.start")[0]["run"]
     assert [t["run"] for t in shadow.events("tool")] == [run_id]
     # #76's default tool name is the real module's, because the harness launches every agent
@@ -48,6 +48,17 @@ def test_forty_mismatches_are_forty_faked_writes_and_the_ledger_is_untouched(run
     assert "  47 exchanges · 6 live · 0 delegated · 41 virtualized" in summary
     # Forty writes fire one event name, listed once.
     assert summary[-1] == "  These writes did not happen. Would have fired: customer.updated."
+    # And forty ledger marks, one line each after the forty updates, as the HTTP writes are each
+    # a line however many there are (#76).
+    tool_lines = [line for line in summary if line.startswith("  ○ tool ")]
+    assert tool_lines == [f"  ○ tool {AGENT}.mark_reconciled  shadow stand-in ran"] * 40
+    assert summary.index(tool_lines[0]) > max(
+        i for i, line in enumerate(summary) if "○ update customer" in line
+    )
+    assert (
+        shadow.tool_call_lines().count(f"shadow    write     tool {AGENT}.mark_reconciled -> ok")
+        == 40
+    )
     # The write tool ran its stand-in forty times under shadow, and for real forty times bare.
     assert shadow.tools("write") == [(f"{AGENT}.mark_reconciled", "shadow")] * 40
     assert bare.tools("write") == [(f"{AGENT}.mark_reconciled", "real")] * 40

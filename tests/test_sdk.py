@@ -1120,6 +1120,7 @@ def test_the_public_api_is_the_issues():
         "instrument",
         "propagate",
         "run",
+        "tool",
         "trigger",
     ]
     assert sdk.instrument() is None

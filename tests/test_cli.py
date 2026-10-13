@@ -525,6 +525,31 @@ def test_a_ctrl_c_while_the_store_closes_still_prints_the_summary(home, monkeypa
     assert "0 exchanges · 0 live" in capsys.readouterr().out
 
 
+def test_serve_prints_a_line_for_each_tool_call(home, monkeypatch, capsys):
+    """`serve` wires the control endpoint's tool calls to its stream, as it does exchanges (#76).
+    The engine here refuses to start, so only the wiring is under test."""
+    from irimi.trace import ToolCall
+
+    wired = []
+
+    class _Refuses:
+        async def run(self) -> None:
+            pass
+
+        async def wait_ready(self) -> None:
+            raise RuntimeError("not started")
+
+    def build(run, on_exchange, on_tool_call):
+        wired.append(on_tool_call)
+        return _Refuses()
+
+    monkeypatch.setattr(cli, "_build_engine", build)
+    assert main(["serve", "--port", "0"]) == 1
+    [on_tool_call] = wired
+    on_tool_call(ToolCall("t", "r", "db.write", "write", "shadow", {}, None, None, 1.0, 2.0))
+    assert "shadow    write     tool db.write -> ok" in capsys.readouterr().out.splitlines()
+
+
 def test_serve_records_under_the_store_it_was_given(home, monkeypatch):
     """`--store` on `serve` is where its exchanges go, not `$IRIMI_HOME/store` (#70). `serve`
     starts no process run (#77 owns serve mode), so its exchanges make a `header` run, and the
@@ -551,7 +576,9 @@ def test_serve_records_under_the_store_it_was_given(home, monkeypatch):
     engines = []
     build = cli._build_engine
     monkeypatch.setattr(
-        cli, "_build_engine", lambda run, cb: engines.append(build(run, cb)) or engines[-1]
+        cli,
+        "_build_engine",
+        lambda run, cb, on_tool_call: engines.append(build(run, cb, on_tool_call)) or engines[-1],
     )
     got = []
 

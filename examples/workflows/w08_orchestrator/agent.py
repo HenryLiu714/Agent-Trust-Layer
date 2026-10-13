@@ -10,6 +10,10 @@ of its own, which must join the parent run rather than start one (#74):
 The orchestrator then reserves the stock (`POST /reservations`, a write) unless it could not price
 it. The internal service is the point: irimi has no map for it unless the scenario adds one.
 
+With `--record`, the sub-agent reads its reorder policy and the orchestrator records its decision
+in the planning file, each an `@sdk.tool` (#76): a tool called inside a nested trigger is a call of
+the run that trigger joined, the parent's.
+
     python -m examples.workflows.launch \\
         examples.workflows.w08_orchestrator.agent [--runs N] [--parent-header]
 """
@@ -17,6 +21,7 @@ it. The internal service is the point: irimi has no map for it unless the scenar
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from typing import Any
 
@@ -25,6 +30,28 @@ from examples.workflows.agentkit import http
 
 SUBAGENT_HOST = "subagent.internal"
 BUDGET_MINOR = 10_000
+PLAN_FILE = "decisions.jsonl"
+# Set by `--record`: the sub-agent and the orchestrator call their tools (#76).
+RECORD = False
+
+
+@sdk.tool(kind="read")
+def load_reorder_policy() -> dict[str, Any]:
+    """What the sub-agent reads before it plans: the decisions recorded so far, which the bare
+    run's real `record_decision` adds to and the shadow run's stand-in never does."""
+    path = agentkit.state_dir() / PLAN_FILE
+    return {"decisions_so_far": len(path.read_text().splitlines()) if path.exists() else 0}
+
+
+def _record_stand_in(decision: dict[str, Any]) -> dict[str, Any]:
+    return {"recorded": False}
+
+
+@sdk.tool(kind="write", shadow=_record_stand_in)
+def record_decision(decision: dict[str, Any]) -> dict[str, Any]:
+    with (agentkit.state_dir() / PLAN_FILE).open("a") as fh:
+        fh.write(json.dumps(decision) + "\n")
+    return {"recorded": True}
 
 
 def _headers(parent_header: bool) -> dict[str, str]:
@@ -40,6 +67,8 @@ def inventory_agent(parent_header: bool) -> dict[str, Any]:
     service = agentkit.internal(SUBAGENT_HOST)
     headers = _headers(parent_header)
     stock = http("GET", service + "/inventory", headers=headers, label="inventory").json()
+    if RECORD:
+        agentkit.obs("policy", **load_reorder_policy())
     items = [i for i in (stock or {}).get("items", []) if i.get("qty", 0) > 0]
     quote = http(
         "POST",
@@ -86,6 +115,8 @@ def plan_quarter_close(parent_header: bool = False) -> dict[str, Any]:
             "reservation": doc.get("id"),
         }
     agentkit.obs("decision", **decision)
+    if RECORD:
+        agentkit.obs("recorded", **record_decision(decision))
     return decision
 
 
@@ -94,7 +125,10 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="w08_orchestrator")
     parser.add_argument("--runs", type=int, default=1)
     parser.add_argument("--parent-header", action="store_true")
+    parser.add_argument("--record", action="store_true")
     args = parser.parse_args(argv)
+    global RECORD
+    RECORD = args.record
     decisions = [plan_quarter_close(args.parent_header) for _ in range(args.runs)]
     agentkit.obs("result", runs=args.runs, reserved=sum(d["reserved"] for d in decisions))
     return 0

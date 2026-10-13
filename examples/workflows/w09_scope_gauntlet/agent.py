@@ -231,7 +231,9 @@ def control_hazards() -> None:
     """Posts the SDK must never make, made, so what irimi does with each is pinned: a start
     re-posted for a run that has ended, and a start and an end for the process run's own id,
     `IRIMI_RUN`, which irimi starts and ends itself. Between those two, a tool call posted to the
-    process run, which may hold one."""
+    process run, which may hold one. Last, a tool call posted to `unattributed`, as the SDK posts
+    one made in no run by an agent with no process run (`irimi serve`, #77): the one post that
+    may name it (#76)."""
     control = _control_base()
     _start(control, "ctl-restarted", "restarted_start")
     stripe(
@@ -252,6 +254,10 @@ def control_hazards() -> None:
             _tool_call(control, process_run, "look_up", "process_tool", result={"run": "process"}),
         ),
         ("process_end", _end(control, process_run, "process_end")),
+        (
+            "unattributed_tool",
+            _tool_call(control, "unattributed", "look_up", "unattributed_tool", result=None),
+        ),
     ]:
         agentkit.obs("answer", label=label, body=resp.json())
 

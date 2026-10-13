@@ -16,6 +16,8 @@ CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf
 # The scenarios whose shadow run starts no agent: irimi refused to start (W8 `map_refused`). Every
 # other one starts its agent as often as the bare run does, so a lost agent fails (#73).
 NO_AGENT_UNDER_SHADOW = {("w08_orchestrator", "map_refused")}
+# How the SDK's one warning for a write tool that ran for real ends (#76).
+REAL_WRITE_WARNING = "HTTPS_PROXY is set but IRIMI_ENGINE_ACTIVE is not"
 
 
 @pytest.mark.parametrize(("name", "scenario"), CASES, ids=[f"{n}:{s}" for n, s in CASES])
@@ -76,8 +78,18 @@ def test_the_sdk_warns_only_where_its_control_endpoint_is_taken_away(run_workflo
     """A post that fails is the SDK's one WARNING on `irimi.sdk`, once per process per kind of
     failure, and never an exception (#74); `agentkit.start()` logs each irimi log record. Every
     post in the corpus is accepted, so no run warns, but those of W10's `CONTROL_DOWN`, whose
-    start and end both fail and warn once between them. A bare agent's SDK is inert: no warning."""
-    assert run_workflow(name, scenario, "bare").events("log") == []
+    start and end both fail and warn once between them.
+
+    A bare agent's SDK is inert, and warns of one thing only: a write tool that ran for real while
+    a proxy variable was set, as every bare run's is, once per process however many ran (#76)."""
+    bare = run_workflow(name, scenario, "bare")
+    warned = [(e["logger"], e["level"], e["message"]) for e in bare.events("log")]
+    real_writes = [tool for tool, ran in bare.tools("write") if ran == "real"]
+    if real_writes:
+        message = f"irimi: write tool {real_writes[0]} ran for real: {REAL_WRITE_WARNING}"
+        assert warned == [("irimi.sdk", "WARNING", message)]
+    else:
+        assert warned == []
     shadow = run_workflow(name, scenario, "shadow")
     logged = [(e["logger"], e["level"]) for e in shadow.events("log")]
     if name == "w10_flaky_upstream" and scenario in CONTROL_DOWN:

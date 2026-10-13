@@ -27,7 +27,7 @@ does nothing at all: it sets no context variable, captures nothing, makes no net
 patches nothing. That is what makes the SDK safe to leave in production code.
 
 POSTS ARE SYNCHRONOUS, so the start reaches irimi before the run's first request and the end after
-its last: `with` posts inline, and `async with` in a worker thread (`_off_the_loop`), so the
+its last: `with` posts inline, and `async with` in a worker thread (`off_the_loop`), so the
 event loop keeps serving other tasks meanwhile. A post never raises (`client.ControlClient`); a
 run whose posts failed goes on, current and labelled, and irimi only lacks its record.
 
@@ -118,7 +118,7 @@ class RunScope:
         if opened is None:
             return
         try:
-            await _off_the_loop(_report_start, opened)
+            await off_the_loop(_report_start, opened)
         except BaseException:
             # Cancelled while the start was posted: `async with` will not call `__aexit__`. The
             # post finishes in its thread.
@@ -139,7 +139,7 @@ class RunScope:
             return
         try:
             if self._opened is not None:
-                await _off_the_loop(_report_end, self._opened, exc)
+                await off_the_loop(_report_end, self._opened, exc)
         finally:
             self._close()
 
@@ -197,7 +197,7 @@ class RunScope:
             pass
 
 
-async def _off_the_loop(fn: Callable[..., None], *args: Any) -> None:
+async def off_the_loop(fn: Callable[..., None], *args: Any) -> None:
     """`fn(*args)` in a worker thread, so the event loop goes on serving other tasks while it
     waits. Inline wherever `asyncio.to_thread` would raise into the agent: when no asyncio loop is
     running - a coroutine driven by trio, or by hand - and when the loop's executor takes no more

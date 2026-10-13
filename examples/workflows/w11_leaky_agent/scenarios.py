@@ -5,7 +5,8 @@ irimi prints no exchange line for it, and its summary does not count it. That is
 limit today ("hosts not routed through the proxy are NOT virtualized"). When Phase 4's readiness
 checks land, each escape's assertion flips from "irimi never saw it" to "irimi flagged it".
 `redirected` writes nothing: a read whose redirects lead it off the proxied route, where irimi
-never sees its last hop (#75).
+never sees its last hop (#75). `labelled_sidecar` is `loopback_service`'s write made by a write
+tool, whose stand-in runs under shadow: the one escape the agent can close itself (#76).
 """
 
 from __future__ import annotations
@@ -84,6 +85,12 @@ WORKFLOW = Workflow(
             setup=_services,
             leaks=True,
             doc="a loopback sidecar is exempt by irimi's own NO_PROXY default",
+        ),
+        "labelled_sidecar": Scenario(
+            ("labelled_sidecar",),
+            setup=_services,
+            doc="the same sidecar write as a write tool: its stand-in runs, the escape is closed "
+            "(#76)",
         ),
     },
 )

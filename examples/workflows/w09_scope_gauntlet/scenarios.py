@@ -106,7 +106,7 @@ WORKFLOW = Workflow(
             ("control_hazards",),
             setup=_stripe,
             doc="a start re-posted after its run ended; a start, a tool call and an end posted "
-            "for the process run's own id",
+            "for the process run's own id; a tool call posted for no run (#76)",
         ),
         "bombs": Scenario(
             ("bombs",),

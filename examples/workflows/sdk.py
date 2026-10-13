@@ -6,8 +6,7 @@ Agents write `from examples.workflows import sdk` where a real agent would write
 
 - **When `irimi.sdk` exists**, as it has since #74, this module re-exports it, name by name: each
   name `irimi.sdk` has is the real one, and each it does not have yet is the stand-in's. #74
-  shipped `trigger`, `run`, `current_run_id`, `propagate` and `active`; until #76 ships `tool`,
-  `tool` is the stand-in's, so an agent that uses `@sdk.tool` still imports.
+  shipped `trigger`, `run`, `current_run_id`, `propagate` and `active`, and #76 shipped `tool`.
   Names this module does not define (`sdk.instrument`, `sdk.replay`, `ReplayResult`, ...) are
   forwarded to `irimi.sdk` by the module `__getattr__`.
   Every `irimi.sdk` has `instrument`, a no-op from #74 until #75 filled it in, so the corpus
@@ -16,7 +15,11 @@ Agents write `from examples.workflows import sdk` where a real agent would write
   Three real names are still wrapped, for the observation log the corpus pins:
   - `tool` wraps the real function and its stand-in so each logs which of them ran
     (`agentkit.obs("tool", ...)`), because that is the harness's proof that no write tool ran for
-    real under shadow. The real `tool` does its own decoration-time checks on what the agent wrote.
+    real under shadow. The real `tool` does its own decoration-time checks on what the agent wrote,
+    and is given it as written: a `staticmethod` or `classmethod`, the function's or the
+    stand-in's, stays one, the logging wrapper inside it; a stand-in that is the function itself
+    stays the function's own wrapper; and the agent's own `name`, so the name irimi stores is the
+    real default.
   - `trigger` and `run` log `run.start` and `run.end` from inside the real run, with the real
     run id, so the pins on them hold in both modes.
 - **Until then**, it implements the same API with no control endpoint and no recording:
@@ -267,7 +270,7 @@ def _logged(fn: Callable[..., Any], tool_name: str, kind: str, ran: str) -> Call
     returned as it is, so the real `tool`'s check sees what the agent wrote."""
     if not callable(fn) or inspect.isgeneratorfunction(fn) or inspect.isasyncgenfunction(fn):
         return fn
-    if inspect.iscoroutinefunction(fn):
+    if _is_async(fn):
 
         @functools.wraps(fn)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -284,19 +287,40 @@ def _logged(fn: Callable[..., Any], tool_name: str, kind: str, ran: str) -> Call
     return wrapper
 
 
+def _is_async(f: Callable[..., Any]) -> bool:
+    """`f` is called to get a coroutine: an `async def`, or an object whose `__call__` is one. The
+    real `tool`'s test of a stand-in's nature (#76), so the logging wrapper keeps the nature the
+    real `tool` would have seen."""
+    if inspect.iscoroutinefunction(f):
+        return True
+    return not inspect.isroutine(f) and inspect.iscoroutinefunction(type(f).__call__)
+
+
 def tool(*, kind: str, shadow: Callable[..., Any] | None = None, name: str | None = None) -> Any:
     real = _from_real("tool")
 
-    def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
-        tool_name = name or f"{fn.__module__}.{fn.__qualname__}"
+    def decorate(fn: Callable[..., Any]) -> Any:
+        # A `staticmethod` or `classmethod` stays one, as the real `tool` keeps it (#76): this
+        # module's logging wrapper goes around the function inside, never around the descriptor,
+        # which it could not call with the receiver the descriptor supplies.
+        descriptor = type(fn) if isinstance(fn, staticmethod | classmethod) else None
+        if descriptor is not None and real is None:
+            return descriptor(decorate(fn.__func__))
+        inner = fn.__func__ if descriptor is not None else fn
+        # The real SDK's default, and its test: `name=""` is a name (#76).
+        tool_name = f"{inner.__module__}.{inner.__qualname__}" if name is None else name
         if real is None:
             _check_tool(fn, kind, shadow)
-        real_fn = _logged(fn, tool_name, kind, "real")
-        stand_in = _logged(shadow, tool_name, kind, "shadow") if shadow is not None else None
+        real_fn = _logged(inner, tool_name, kind, "real")
+        stand_in = _logged_stand_in(shadow, inner, real_fn, tool_name, kind)
         if real is not None:
             # The real decorator's own decoration-time checks decide (#76); this one does not
-            # pre-empt them, so W6's `decoration_errors` tests the SDK that ships.
-            return real(kind=kind, shadow=stand_in, name=tool_name)(real_fn)  # type: ignore[no-any-return]
+            # pre-empt them, so W6's `decoration_errors` tests the SDK that ships. It is given
+            # what the agent wrote: the descriptor, and the agent's own `name`, None included, so
+            # the name irimi stores is the real SDK's default and the log's is this module's, and
+            # the corpus holds the two equal (`test_stored_runs.py`).
+            wrapped = real_fn if descriptor is None else descriptor(real_fn)
+            return real(kind=kind, shadow=stand_in, name=name)(wrapped)
         if inspect.iscoroutinefunction(fn):
 
             @functools.wraps(fn)
@@ -320,6 +344,22 @@ def tool(*, kind: str, shadow: Callable[..., Any] | None = None, name: str | Non
     return decorate
 
 
+def _logged_stand_in(
+    shadow: Any, fn: Callable[..., Any], logged_fn: Callable[..., Any], tool_name: str, kind: str
+) -> Any:
+    """`shadow`, logging that it ran, in the shape the agent wrote it, so the real `tool`'s checks
+    judge what they would without this module (#76): a `staticmethod` stays one, the logging
+    wrapper inside it, and a stand-in that is the function itself is the very wrapper `fn` got,
+    which the real `tool` refuses as itself. Two wrappers of one function would let the real write
+    run under irimi, logged as its stand-in."""
+    if shadow is None:
+        return None
+    static = isinstance(shadow, staticmethod)
+    inner = shadow.__func__ if static else shadow
+    logged = logged_fn if inner is fn else _logged(inner, tool_name, kind, "shadow")
+    return staticmethod(logged) if static else logged
+
+
 def _check_tool(fn: Callable[..., Any], kind: str, shadow: Callable[..., Any] | None) -> None:
     """#76's decoration-time rules: nothing unnamed runs live, and the error comes at load time."""
     if kind not in ("read", "write"):
@@ -328,10 +368,16 @@ def _check_tool(fn: Callable[..., Any], kind: str, shadow: Callable[..., Any] | 
         raise TypeError(f"@sdk.tool(kind='write') on {fn.__qualname__} must name a shadow stand-in")
     if kind == "read" and shadow is not None:
         raise TypeError(f"@sdk.tool(kind='read') on {fn.__qualname__} cannot have a stand-in")
+    if isinstance(shadow, staticmethod):
+        shadow = shadow.__func__  # judged as the function inside, as the real `tool` judges it
     if shadow is not None:
         if not callable(shadow):
             raise TypeError(f"the stand-in for {fn.__qualname__} is not callable")
-        if inspect.iscoroutinefunction(shadow) != inspect.iscoroutinefunction(fn):
+        if shadow is fn:
+            raise TypeError(f"the stand-in for {fn.__qualname__} is the function itself")
+        if inspect.isgeneratorfunction(shadow) or inspect.isasyncgenfunction(shadow):
+            raise TypeError(f"the stand-in for {fn.__qualname__} is a generator function")
+        if _is_async(shadow) != inspect.iscoroutinefunction(fn):
             raise TypeError(f"the stand-in for {fn.__qualname__} must be sync or async as it is")
     if inspect.isgeneratorfunction(fn) or inspect.isasyncgenfunction(fn):
         raise TypeError(f"@sdk.tool cannot wrap a generator: {fn.__qualname__}")

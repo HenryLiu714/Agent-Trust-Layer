@@ -139,6 +139,10 @@ def fake_sdk(*, active: bool = True, with_tool: bool = False, **extra: Any) -> t
                     raise TypeError(f"{REAL_TYPE_ERROR}: shadow for {kind}")
                 if shadow is not None and not callable(shadow):
                     raise TypeError(f"{REAL_TYPE_ERROR}: shadow not callable")
+                if shadow is fn:
+                    raise TypeError(f"{REAL_TYPE_ERROR}: shadow is the function")
+                if inspect.isgeneratorfunction(shadow):
+                    raise TypeError(f"{REAL_TYPE_ERROR}: a generator shadow")
                 if shadow is not None and (
                     inspect.iscoroutinefunction(shadow) != inspect.iscoroutinefunction(fn)
                 ):
@@ -399,6 +403,108 @@ def test_a_trigger_above_a_static_or_class_method_keeps_it_one(load_sdk, obs, mo
         assert ids == fake.minted
 
 
+@pytest.mark.parametrize("real", [True, False], ids=["real", "absent"])
+def test_a_tool_above_a_static_or_class_method_keeps_it_one(load_sdk, obs, monkeypatch, real):
+    """`irimi.sdk`'s tool keeps a `staticmethod` or `classmethod` it is written above (#76). The
+    stand-in's logging wrapper goes inside the descriptor, so a static method is not handed the
+    instance, a class method's stand-in is handed the class, and the real tool is given the
+    descriptor itself, with the agent's own `name` (None), so the name it records is its own
+    default and equals the one this module logs. W3's `ledger_worker` runs it end to end."""
+    import irimi.sdk as real_sdk  # noqa: PLC0415
+    from irimi.sdk import runs  # noqa: PLC0415
+
+    posted: list[tuple[str, str, str]] = []
+
+    class Collect:
+        def post(self, run_id: str, action: str, doc: dict[str, Any]) -> None:
+            posted.append((action, doc["name"], doc["ran"]))
+
+    monkeypatch.setattr(runs, "reporter", Collect())
+    sdk = load_sdk(real_sdk if real else None)
+    monkeypatch.setenv(sdk.ENGINE_ACTIVE_ENV, "1")
+
+    def journal_stand_in(cls: type, charge: str) -> str:
+        return f"stood in for {cls.__name__}:{charge}"
+
+    class Ledger:
+        @sdk.tool(kind="read")
+        @staticmethod
+        def fee(amount: int) -> int:
+            return amount // 10
+
+        @sdk.tool(kind="write", shadow=journal_stand_in)
+        @classmethod
+        def journal(cls, charge: str) -> str:
+            raise AssertionError("the real write ran")
+
+    assert isinstance(Ledger.__dict__["fee"], staticmethod)
+    assert isinstance(Ledger.__dict__["journal"], classmethod)
+    for owner in (Ledger, Ledger()):
+        assert owner.fee(100) == 10
+        assert owner.journal("ch_1") == "stood in for Ledger:ch_1"
+    logged = [(e["name"], e["ran"]) for e in obs("tool")]
+    names = [f"{__name__}.{Ledger.__qualname__}.{fn}" for fn in ("fee", "journal")]
+    assert logged == [(names[0], "real"), (names[1], "shadow")] * 2
+    assert posted == ([("tool-calls", name, ran) for name, ran in logged] if real else [])
+
+
+@pytest.mark.parametrize("real", [True, False], ids=["real", "absent"])
+def test_a_stand_in_reaches_the_real_tool_as_the_agent_wrote_it(load_sdk, obs, monkeypatch, real):
+    """The real `tool` judges a `staticmethod` stand-in by the function inside, and refuses a
+    stand-in that is the function itself (#76). This module's logging wrapper must not hide
+    either: wrapped as a plain callable, an async static stand-in, or an object whose `__call__`
+    is async, read as sync and was refused, a generator one passed, and the function and its
+    stand-in became two wrappers, so the real write ran under irimi, logged as the stand-in. The
+    fallback judges them as the real `tool` does."""
+    import irimi.sdk as real_sdk  # noqa: PLC0415
+    from irimi.sdk import runs  # noqa: PLC0415
+
+    monkeypatch.setattr(runs, "reporter", types.SimpleNamespace(post=lambda *a: None))
+    sdk = load_sdk(real_sdk if real else None)
+    monkeypatch.setenv(sdk.ENGINE_ACTIVE_ENV, "1")
+
+    class Repository:
+        @staticmethod
+        async def _save_stand_in(row: int) -> str:
+            return f"stood in for {row}"
+
+        @sdk.tool(kind="write", shadow=_save_stand_in, name="repo.save")
+        @staticmethod
+        async def save(row: int) -> str:
+            raise AssertionError("the real write ran")
+
+    class Mailer:
+        """A stand-in object whose `__call__` is async, which the real `tool` takes as async."""
+
+        async def __call__(self, row: int) -> str:
+            return f"mailed {row}"
+
+    @sdk.tool(kind="write", shadow=Mailer(), name="repo.mail")
+    async def mail(row: int) -> str:
+        raise AssertionError("the real write ran")
+
+    assert asyncio.run(Repository.save(1)) == "stood in for 1"
+    assert asyncio.run(mail(2)) == "mailed 2"
+    assert [(e["name"], e["ran"]) for e in obs("tool")] == [
+        ("repo.save", "shadow"),
+        ("repo.mail", "shadow"),
+    ]
+
+    def write(row: int) -> str:
+        raise AssertionError("the real write ran")
+
+    def generator(row: int) -> Any:
+        yield row
+
+    with pytest.raises(TypeError):
+        sdk.tool(kind="write", shadow=write)(write)
+    with pytest.raises(TypeError):
+        sdk.tool(kind="write", shadow=staticmethod(write))(staticmethod(write))
+    for stand_in in (generator, staticmethod(generator)):
+        with pytest.raises(TypeError):
+            sdk.tool(kind="write", shadow=stand_in)(write)
+
+
 # -- (c) the real tool's decoration-time checks decide -------------------------------------------
 
 
@@ -410,9 +516,9 @@ def test_w6_decoration_errors_are_the_real_tools_own(load_sdk, fresh_import, obs
 
     raised = w6.decoration_errors()
 
-    assert len(raised) == 7
+    assert len(raised) == 9
     messages = [e["message"] for e in obs("decoration_error")]
-    assert len(messages) == 7 and all(m.startswith(REAL_TYPE_ERROR) for m in messages), messages
+    assert len(messages) == 9 and all(m.startswith(REAL_TYPE_ERROR) for m in messages), messages
     # What #76 checks reached the real decorator as the agent wrote it.
     seen = {(kind, shadow if not callable(shadow) else "fn", fn.__name__) for _, kind, shadow, fn
             in fake.decorated}  # fmt: skip

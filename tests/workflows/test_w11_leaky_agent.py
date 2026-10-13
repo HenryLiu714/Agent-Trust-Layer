@@ -3,6 +3,9 @@
 LOOKS WRONG: every escape assertion here pins today's limit. When Phase 4's readiness checks land,
 each flips from "irimi printed nothing" to "irimi flagged it", and the test says which check flagged
 which escape.
+
+`labelled_sidecar` is not one: the sidecar's write made by an `@sdk.tool` write, which closes the
+escape today (#76).
 """
 
 import pytest
@@ -139,3 +142,37 @@ def test_a_redirect_off_irimis_route_is_labelled_on_each_hop_through_irimi_and_o
     assert shadow.stored().load_run(shadow.process_run_id()).events == []
     # Bare, the same twelve requests: each client's three hops.
     assert len(bare.internet.requests()) == len(shadow.internet.requests()) == 12
+
+
+def test_a_sidecar_write_made_by_a_write_tool_is_stood_in_and_the_escape_closed(run_workflow):
+    """`loopback_service`'s write, made by `enqueue_job`, an `@sdk.tool(kind="write")` (#76). The
+    proxy still cannot see it, and does not need to: the SDK runs the stand-in in its place, so
+    the sidecar receives nothing under shadow, a witness that does not rest on the agent's own log
+    (universal invariant 3), while bare it receives the job. irimi prints and stores the call in
+    the escape's run, and the summary says the write did not happen."""
+    shadow = run_workflow(W, "labelled_sidecar", "shadow")
+    bare = run_workflow(W, "labelled_sidecar", "bare")
+    tool = "examples.workflows.w11_leaky_agent.agent.enqueue_job"
+    assert shadow.internet.requests() == []
+    assert [(r.method, r.host, r.path) for r in bare.internet.writes()] == [
+        ("POST", "127.0.0.1", "/queue/jobs")
+    ]
+    assert (shadow.tools(), bare.tools()) == ([(tool, "shadow")], [(tool, "real")])
+    assert shadow.calls() == []
+    assert [e["doc"] for e in shadow.events("queued")] == [{"queued": None, "stood_in": True}]
+    assert [e["doc"] for e in bare.events("queued")] == [{"queued": 1}]
+    [run] = shadow.sdk_runs()
+    [call] = shadow.stored().load_run(run.run_id).events
+    assert (call.name, call.ran, call.args) == (
+        tool,
+        "shadow",
+        {"job": {"job": "refund", "charge": CHARGE}},
+    )
+    assert shadow.tool_call_lines() == [f"shadow    write     tool {tool} -> ok"]
+    summary = shadow.summary()
+    assert summary[-4:] == [
+        f"  ○ tool {tool}  shadow stand-in ran",
+        "",
+        f"  {NOTHING_SEEN}",
+        "  These writes did not happen.",
+    ]

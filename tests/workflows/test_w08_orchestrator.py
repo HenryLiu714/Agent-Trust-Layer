@@ -9,8 +9,10 @@ import yaml
 from examples.workflows.w08_orchestrator.scenarios import SUBAGENT_MAP, UNJUSTIFIED_MAP
 from irimi.exchange import Exchange
 from irimi.servicemap.loader import MapError, parse_service
+from irimi.trace import ToolCall
 
 W = "w08_orchestrator"
+AGENT = "examples.workflows.w08_orchestrator.agent"
 HOST = "subagent.internal"
 
 
@@ -156,3 +158,41 @@ def test_every_sub_agent_call_joins_its_parents_run(run_workflow):
             ("POST", HOST, "/quote"),
             ("POST", HOST, "/reservations"),
         ]
+
+
+def test_a_tool_called_in_a_nested_trigger_is_a_call_of_its_parent_s_run(run_workflow):
+    """`nested_runs` with tools (#76): `inventory_agent`, a nested trigger that joins its parent's
+    run, reads the planning file with a read tool, and the orchestrator records its decision with
+    a write tool. Two orchestrator runs, and each holds its own two calls, the sub-agent's
+    included: the run a nested trigger joined is the one its tools' calls are filed in. Bare, the
+    second run's read sees the first run's recorded decision; under shadow, whose stand-in wrote
+    nothing, it does not."""
+    shadow = run_workflow(W, "nested_tools", "shadow")
+    bare = run_workflow(W, "nested_tools", "bare")
+    starts = shadow.events("run.start")
+    assert [e["name"] for e in starts] == ["plan_quarter_close", "plan_quarter_close"]
+    runs = [e["run"] for e in starts]
+    assert [(t["name"].rsplit(".", 1)[1], t["ran"], t["run"]) for t in shadow.events("tool")] == [
+        ("load_reorder_policy", "real", runs[0]),
+        ("record_decision", "shadow", runs[0]),
+        ("load_reorder_policy", "real", runs[1]),
+        ("record_decision", "shadow", runs[1]),
+    ]
+    reader = shadow.stored()
+    decisions = [
+        {k: v for k, v in e.items() if k not in ("event", "t")} for e in shadow.events("decision")
+    ]
+    for run_id, decision in zip(runs, decisions, strict=True):
+        calls = [e for e in reader.load_run(run_id).events if isinstance(e, ToolCall)]
+        assert [(c.name, c.ran, c.args, c.result) for c in calls] == [
+            (f"{AGENT}.load_reorder_policy", "real", {}, {"decisions_so_far": 0}),
+            (f"{AGENT}.record_decision", "shadow", {"decision": decision}, {"recorded": False}),
+        ]
+    assert reader.load_run(shadow.process_run_id()).events == []
+    assert [line for line in shadow.summary() if "○ tool" in line] == [
+        f"  ○ tool {AGENT}.record_decision  shadow stand-in ran"
+    ] * 2
+    assert [e["decisions_so_far"] for e in shadow.events("policy")] == [0, 0]
+    assert [e["decisions_so_far"] for e in bare.events("policy")] == [0, 1]
+    assert not (shadow.state / "decisions.jsonl").exists()
+    assert len((bare.state / "decisions.jsonl").read_text().splitlines()) == 2

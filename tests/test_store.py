@@ -865,6 +865,33 @@ def test_the_queue_is_bounded_in_body_bytes_too(root, key, monkeypatch):
     assert run.record.dropped_events == 1
 
 
+def test_a_tool_calls_args_and_result_count_against_the_byte_budget(root, key, monkeypatch):
+    """The control endpoint takes a tool call of up to 2 MiB, and 10,000 of them would be 20 GiB
+    waiting (#76): its args and result as JSON count as body bytes do."""
+    monkeypatch.setattr(store, "MAX_QUEUED_BYTES", 100)
+    taken, release = threading.Event(), threading.Event()
+    real = DirectoryStore._handle
+
+    def paused(self, item):
+        taken.set()
+        release.wait(10)
+        real(self, item)
+
+    monkeypatch.setattr(DirectoryStore, "_handle", paused)
+    s = DirectoryStore(root, key)
+    s.record(_exchange("r1", "/held"))  # the writer holds it, so the queue is empty again
+    assert taken.wait(5)
+    s.record_tool_call(_tool_call("r1", {"x": "y" * 40}))  # `[{"x": "y..."}, null]`: 57 bytes
+    s.record_tool_call(_tool_call("r1", {"x": "z" * 40}))  # 57 + 57 > 100
+    s.record(_exchange("r1", "/no-body"))
+    assert s.stats().dropped == 1
+    release.set()
+    s.close()
+    run = StoreReader(root).load_run("r1")
+    assert [e.args for e in run.events if isinstance(e, ToolCall)] == [{"x": "y" * 40}]
+    assert run.record.dropped_events == 1
+
+
 def test_the_writer_fsyncs_in_batches_before_close(root, key, monkeypatch, store_os):
     synced: set[int] = set()  # inodes
     monkeypatch.setattr(store, "SYNC_EVERY", 3)

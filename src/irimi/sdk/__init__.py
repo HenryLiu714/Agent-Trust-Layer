@@ -14,6 +14,12 @@ calls. The SDK marks each run in the agent's own code:
 It reports each run's start (with what triggered it) and its end to irimi's control endpoint, and
 keeps the run's id in a context variable that #75 puts on every request the run makes.
 
+A tool the proxy cannot see, because it is not HTTP, is labelled read or write; a write names the
+stand-in that runs in its place under irimi, and each call is recorded in its run (#76):
+
+    @sdk.tool(kind="write", shadow=mock_database_write)
+    def database_write(row: Row) -> None: ...
+
 THE SDK IS INERT WITHOUT IRIMI. It is active only while `IRIMI_ENGINE_ACTIVE=1`, which `irimi
 shadow` sets for its child; otherwise a trigger or a run calls straight through, so the SDK is
 safe to leave in production code. And it NEVER RAISES INTO THE AGENT: a control endpoint it
@@ -25,5 +31,6 @@ Imports only the stdlib and irimi's lowest layers, never mitmproxy, so it can sh
 from irimi.sdk.api import run, trigger
 from irimi.sdk.context import active, current_run_id, propagate
 from irimi.sdk.instrumentation import instrument
+from irimi.sdk.tools import tool
 
-__all__ = ["active", "current_run_id", "instrument", "propagate", "run", "trigger"]
+__all__ = ["active", "current_run_id", "instrument", "propagate", "run", "tool", "trigger"]

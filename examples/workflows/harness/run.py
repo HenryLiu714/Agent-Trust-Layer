@@ -67,6 +67,9 @@ CANARIES = {
 # too (#94).
 SERVED_CANARIES = {"STRIPE_CLIENT_SECRET": CLIENT_SECRET_CANARY, "BOMB_SECRET": BOMB_SECRET}
 MODES = ("bare", "shadow")
+# A tool call's line in irimi's stream (`report.tool_call_line`, #76). Its first column is `ran`,
+# which no `answered_by` an exchange line starts with ever is.
+TOOL_LINE = re.compile(r"(real|shadow) +(read|write) +tool .* -> ")
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy")
 # The only variables an agent inherits from the harness's own environment. Everything else it is
 # given by name, so a developer's shell cannot change a run: an exported `IRIMI_ENGINE_ACTIVE=1`
@@ -185,8 +188,18 @@ class Result:
             return conn.execute(sql).fetchall()
 
     def exchange_lines(self) -> list[str]:
-        """irimi's per-exchange lines: `<answered_by> <kind> <METHOD> <host><path> -> <status>`."""
-        return [line for line in self.irimi if " -> " in line and not line.startswith(" ")]
+        """irimi's per-exchange lines: `<answered_by> <kind> <METHOD> <host><path> -> <status>`.
+        A tool call's line is in the same stream and the same columns, and is not one (#76)."""
+        return [
+            line
+            for line in self.irimi
+            if " -> " in line and not line.startswith(" ") and not TOOL_LINE.match(line)
+        ]
+
+    def tool_call_lines(self) -> list[str]:
+        """irimi's per-tool-call lines, in the stream with the exchanges' (#76):
+        `<ran> <kind> tool <name> -> ok` or `-> raised <type>`."""
+        return [line for line in self.irimi if TOOL_LINE.match(line)]
 
     def stored(self) -> StoreReader:
         """The trace store this run wrote: `irimi shadow`'s default, `$IRIMI_HOME/store` (#70),

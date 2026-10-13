@@ -123,7 +123,8 @@ def test_every_stored_event_is_the_exchange_irimi_handed_its_store_redacted(
     exchanges irimi printed, the same objects in the same order. Run by run, in `seq` order, each
     stored event is one of them: an exchange equal to itself after `redact.redact_exchange`,
     compared over every field of `Exchange`, and telemetry reduced to its host and time. No
-    corpus run names an id the store refuses, so nothing is unattributed.
+    corpus run names an id the store refuses, so nothing is unattributed but the tool call W9's
+    `control_hazards` posts there by hand (#76).
 
     A tool call the control endpoint handed the store (#73) is in its run's order among them,
     stored with its args, result and error message redacted (#70)."""
@@ -137,7 +138,7 @@ def test_every_stored_event_is_the_exchange_irimi_handed_its_store_redacted(
         return
     key = redact.load_key(shadow.home)
     reader = shadow.stored()
-    runs = [r.run_id for r in reader.list_runs()]
+    runs = [r.run_id for r in reader.list_runs()] + [trace.UNATTRIBUTED]
     expected: dict[str, list[trace.Event]] = {run_id: [] for run_id in runs}
     for event in shadow.handed_events:
         if isinstance(event, ToolCall):
@@ -148,7 +149,8 @@ def test_every_stored_event_is_the_exchange_irimi_handed_its_store_redacted(
             )
         else:
             expected[event.run_id].append(redact.redact_exchange(event, key))
-    assert reader.load_run(trace.UNATTRIBUTED).events == []
+    if (name, scenario) != ("w09_scope_gauntlet", "control_hazards"):
+        assert expected[trace.UNATTRIBUTED] == []
     for run_id in runs:
         stored = reader.load_run(run_id).events
         assert len(stored) == len(expected[run_id]), run_id
@@ -303,6 +305,42 @@ def test_every_request_a_run_sent_through_irimi_is_stored_in_that_run(run_workfl
 
 
 @pytest.mark.parametrize(("name", "scenario"), CASES, ids=IDS)
+def test_every_tool_call_the_agent_made_is_stored_in_its_run_and_printed_once(
+    run_workflow, name, scenario
+):
+    """`@sdk.tool` end to end (#76): what irimi recorded is what the agent did. The corpus's `sdk`
+    wraps each tool's real function and stand-in to log which ran, in which run (`tool` events),
+    and that log is the witness the store is checked against: under shadow, each run holds exactly
+    the calls the agent logged in it, by name, kind and which body ran, a call made in no run held
+    by the process run (`IRIMI_RUN`); none is lost, duplicated, mixed between runs or left
+    unattributed, whatever thread or task made it. Compared as counts per run, not in order: a
+    call is stored when it ends and logged when its body starts, so a tool awaited inside another's
+    coroutine (W6 `async_tools`) is logged second and stored first. irimi printed one line per
+    stored call, and none for anything else.
+
+    W9's control scenarios post tool calls by hand, not through a tool, so only the lines are
+    checked there. Bare, the SDK is inert: every tool ran its real function, irimi printed nothing
+    and stored nothing (`test_a_bare_run_stores_nothing`)."""
+    bare = run_workflow(name, scenario, "bare")
+    assert bare.tool_call_lines() == []
+    assert {ran for _, ran in bare.tools()} <= {"real"}
+    shadow = run_workflow(name, scenario, "shadow")
+    stored = [e for e in shadow.stored_events() if isinstance(e, ToolCall)]
+    assert sorted(shadow.tool_call_lines()) == sorted(report.tool_call_line(c) for c in stored)
+    if (name, scenario) in BY_HAND_SCENARIOS:
+        return
+    if not started(shadow):
+        assert shadow.tools() == []
+        return
+    process = shadow.process_run_id()
+    logged = Counter(
+        (t["run"] or process, t["name"], t["kind"], t["ran"]) for t in shadow.events("tool")
+    )
+    held = Counter((c.run_id, c.name, c.kind, c.ran) for c in stored)
+    assert held == logged
+
+
+@pytest.mark.parametrize(("name", "scenario"), CASES, ids=IDS)
 def test_a_bare_run_stores_nothing(run_workflow, name, scenario):
     """No irimi, no store: the bare baseline leaves its `IRIMI_HOME` without a store or a
     redaction key, whatever the agent's SDK stand-in does."""
@@ -360,7 +398,10 @@ def test_every_run_the_process_stored_prints_the_summary_irimi_shadow_printed(
     The events are put back in the order the engine reported them, the order they ended in, since
     a read hangs under the write before it. W4's webhook post is the case this caught: its stored
     path is a placeholder that no route matches, and its line lost its `human:` sentence until the
-    route was found by its stored operation instead."""
+    route was found by its stored operation instead.
+
+    The tool calls too, each a line under the writes when its stand-in ran (#76): W1's reply, W2's
+    forty ledger marks and W6's six database and file writes."""
     shadow = run_workflow(name, scenario, "shadow")
     live = shadow.summary()
     if not live:
@@ -370,6 +411,7 @@ def test_every_run_the_process_stored_prints_the_summary_irimi_shadow_printed(
     events = [event for run_id in ids for event in reader.load_run(run_id).events]
     exchanges = sorted((e for e in events if isinstance(e, Exchange)), key=lambda e: e.ended_at)
     telemetry = [e for e in events if isinstance(e, TelemetrySeen)]
+    tool_calls = sorted((e for e in events if isinstance(e, ToolCall)), key=lambda e: e.ended_at)
     process = reader.load_run(shadow.process_run_id()).record
-    union = StoredRun(process, [*exchanges, *telemetry])
+    union = StoredRun(process, [*exchanges, *telemetry, *tool_calls])
     assert no_elapsed(report.stored_summary_lines(union, shadow.maps())) == no_elapsed(live)

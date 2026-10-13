@@ -8,6 +8,11 @@ stand-in runs and the real body never does. Reads are `@sdk.tool(kind="read")` a
     python -m examples.workflows.launch \\
         examples.workflows.w06_crm_db_agent.agent <scenario> [segment]
 
+Beyond `enrich`, each scenario puts one case of #76 through the real `irimi shadow`: a write's
+stand-in that raises and a retry (`merge_retry`), tools called in no run (`outside_run`), HTTP made
+inside a write's stand-in (`stand_in_http`), and an async read, a sync write that returns a
+coroutine and an async static method whose stand-in is a static method too (`async_tools`).
+
 Seeding the CRM on first run is setup, not a tool: it happens in both modes, before the trigger.
 Tools carry explicit, short names (`crm.find_accounts`), the way a developer would name the
 tools a report lists; the other workflows show the default, `module.qualname`.
@@ -27,7 +32,17 @@ from typing import Any
 from examples.workflows import agentkit, sdk
 
 DB_NAME = "crm.sqlite3"
-SCENARIOS = ("enrich", "read_after_write", "unlabeled_write", "tool_raises", "decoration_errors")
+SCENARIOS = (
+    "enrich",
+    "read_after_write",
+    "unlabeled_write",
+    "tool_raises",
+    "decoration_errors",
+    "merge_retry",
+    "outside_run",
+    "stand_in_http",
+    "async_tools",
+)
 STALE_BEFORE = "2025-06-01"
 SEED = [
     ("acc_1", "Acme", "smb", "2026-01-01", 0, None),
@@ -84,6 +99,15 @@ def score_account(account: dict[str, Any]) -> dict[str, Any]:
 @sdk.tool(kind="read", name="crm.flaky_lookup")
 def flaky_lookup(account_id: str) -> dict[str, Any]:
     raise KeyError(account_id)
+
+
+@sdk.tool(kind="read", name="crm.lookup_owner")
+async def lookup_owner(account_id: str) -> dict[str, Any]:
+    """An async read tool, awaited in the run's event loop (#76)."""
+    with agentkit.sqlite(DB_NAME) as conn:
+        row = conn.execute("SELECT name FROM accounts WHERE id = ?", (account_id,)).fetchone()
+    await asyncio.sleep(0)
+    return {"id": account_id, "owner": f"owner@{row[0].lower()}.example" if row else None}
 
 
 # -- write tools: the stand-in runs under shadow, never the real body -----------------------------
@@ -155,6 +179,98 @@ async def notify_owner(account_id: str, message: str) -> dict[str, Any]:
     return {"queued": account_id}
 
 
+# Every exception a merge body raised, in order: the agent checks that what it caught is the very
+# object the body raised, which the SDK re-raises after recording it (#76).
+RAISED: list[BaseException] = []
+
+
+def _missing(*ids: str) -> list[str]:
+    """Which of `ids` the CRM does not hold. A read, so a stand-in may make it too."""
+    with agentkit.sqlite(DB_NAME) as conn:
+        marks = ", ".join("?" * len(ids))
+        found = {r[0] for r in conn.execute(f"SELECT id FROM accounts WHERE id IN ({marks})", ids)}
+    return sorted(set(ids) - found)
+
+
+def _raise_missing(missing: list[str]) -> None:
+    exc = LookupError(f"no such account: {', '.join(missing)}")
+    RAISED.append(exc)
+    raise exc
+
+
+def _merge_stand_in(*ids: str) -> dict[str, Any]:
+    """Validates as the real merge does, against the real CRM, and changes nothing. Its parameters
+    are not the real function's: irimi records the args bound against the real one (#76)."""
+    keep, drop = ids
+    if missing := _missing(keep, drop):
+        _raise_missing(missing)
+    return {"kept": keep, "merged": drop, "stood_in": True}
+
+
+@sdk.tool(kind="write", shadow=_merge_stand_in, name="crm.merge_accounts")
+def merge_accounts(keep: str, drop: str) -> dict[str, Any]:
+    if missing := _missing(keep, drop):
+        _raise_missing(missing)
+    with agentkit.sqlite(DB_NAME) as conn:
+        conn.execute("DELETE FROM accounts WHERE id = ?", (drop,))
+    return {"kept": keep, "merged": drop}
+
+
+def _sync_industry_stand_in(account_id: str, industry: str) -> dict[str, Any]:
+    """Checks the account upstream before saying what it would have written: HTTP made inside a
+    write's stand-in is an ordinary exchange of the run (#76)."""
+    url = agentkit.internal("enrich.internal") + f"/v1/companies/{account_id}"
+    upstream = (agentkit.http("GET", url, label="stand_in_check").json() or {}).get("industry")
+    return {"stood_in": True, "industry": industry, "upstream": upstream}
+
+
+@sdk.tool(kind="write", shadow=_sync_industry_stand_in, name="crm.sync_industry")
+def sync_industry(account_id: str, industry: str) -> dict[str, Any]:
+    with agentkit.sqlite(DB_NAME) as conn:
+        conn.execute("UPDATE accounts SET industry = ? WHERE id = ?", (industry, account_id))
+    return {"synced": account_id, "industry": industry}
+
+
+async def _followup(account_id: str, days: int, path: str | None) -> dict[str, Any]:
+    owner = (await lookup_owner(account_id))["owner"]
+    if path is None:
+        return {"stood_in": True, "owner": owner, "in_days": days}
+    with (agentkit.state_dir() / path).open("a") as fh:
+        fh.write(json.dumps({"account": account_id, "owner": owner, "in_days": days}) + "\n")
+    return {"scheduled": account_id, "owner": owner, "in_days": days}
+
+
+def _schedule_stand_in(account_id: str, days: int) -> Any:
+    return _followup(account_id, days, None)
+
+
+@sdk.tool(kind="write", shadow=_schedule_stand_in, name="crm.schedule_followup")
+def schedule_followup(account_id: str, days: int) -> Any:
+    """A sync write that returns its work as a coroutine, as a plain decorator over an `async def`
+    does. Its body has not run when it returns, so the call ends when the coroutine does (#76): the
+    read tool the coroutine awaits is recorded first."""
+    return _followup(account_id, days, "followups.jsonl")
+
+
+class Outbox:
+    """Tools as a class's static methods, written as a developer groups them, the stand-in beside
+    the tool in the class body (#76): a `staticmethod` stand-in is judged, and called, as the
+    function inside it, so an async one stands in for an async tool."""
+
+    @staticmethod
+    async def _send_stand_in(account_id: str, owner: str) -> dict[str, Any]:
+        await asyncio.sleep(0)
+        return {"stood_in": True, "to": owner}
+
+    @sdk.tool(kind="write", shadow=_send_stand_in, name="crm.send_reminder")
+    @staticmethod
+    async def send_reminder(account_id: str, owner: str) -> dict[str, Any]:
+        await asyncio.sleep(0)
+        with (agentkit.state_dir() / "outbox.jsonl").open("a") as fh:
+            fh.write(json.dumps({"account": account_id, "to": owner}) + "\n")
+        return {"sent": account_id, "to": owner}
+
+
 def _touch_last_seen(account_id: str) -> None:
     """A write with no label. irimi cannot see it, so it happens under shadow too."""
     with agentkit.sqlite(DB_NAME) as conn:
@@ -176,6 +292,24 @@ def enrich_accounts(scenario: str, segment: str) -> dict[str, Any]:
     if scenario == "unlabeled_write":
         _touch_last_seen("acc_1")
         return {"touched": "acc_1"}
+    if scenario == "merge_retry":
+        # The first merge names an account that does not exist; the agent catches what the tool
+        # raised, the same object its body raised, and retries with the right one (#76).
+        for keep, drop in (("acc_1", "acc_9"), ("acc_1", "acc_2")):
+            try:
+                merged = merge_accounts(keep, drop)
+            except LookupError as exc:
+                agentkit.obs("merge_failed", error=str(exc), same_object=exc is RAISED[-1])
+                continue
+            return {"merged": merged}
+        return {"merged": None}
+    if scenario == "outside_run":
+        account = find_accounts(segment)[0]
+        return {"upserted": upsert_account({**account, "score": 50})}
+    if scenario == "stand_in_http":
+        return {"synced": sync_industry("acc_1", "aerospace")}
+    if scenario == "async_tools":
+        return asyncio.run(_follow_up_on("acc_1"))
     if scenario == "tool_raises":
         try:
             flaky_lookup("acc_1")
@@ -209,6 +343,13 @@ def enrich_accounts(scenario: str, segment: str) -> dict[str, Any]:
     }
 
 
+async def _follow_up_on(account_id: str) -> dict[str, Any]:
+    owner = await lookup_owner(account_id)
+    scheduled = await schedule_followup(account_id, 7)
+    reminded = await Outbox.send_reminder(account_id, owner["owner"])
+    return {"owner": owner["owner"], "scheduled": scheduled, "reminded": reminded}
+
+
 def decoration_errors() -> list[str]:
     """Each of #76's decoration-time mistakes, which must raise TypeError before any call."""
 
@@ -230,6 +371,10 @@ def decoration_errors() -> list[str]:
         "sync_stand_in_for_async": lambda: sdk.tool(kind="write", shadow=real)(real_async),
         "async_stand_in_for_sync": lambda: sdk.tool(kind="write", shadow=real_async)(real),
         "generator": lambda: sdk.tool(kind="read")(gen),
+        # A stand-in that is a generator, or the function itself (#76): the second would run the
+        # real write under irimi.
+        "generator_stand_in": lambda: sdk.tool(kind="write", shadow=gen)(real),
+        "stand_in_is_the_function": lambda: sdk.tool(kind="write", shadow=real)(real),
     }
     raised = []
     for case, attempt in mistakes.items():
@@ -252,6 +397,12 @@ def main(argv: list[str]) -> int:
     if scenario == "decoration_errors":
         agentkit.obs("result", raised=decoration_errors())
         return 0
+    if scenario == "outside_run":
+        # Housekeeping before the trigger, in no run: under `irimi shadow` each call is recorded in
+        # the process run `IRIMI_RUN` names (#76).
+        agentkit.obs(
+            "housekeeping", stale=delete_stale(STALE_BEFORE), smb=len(find_accounts("smb"))
+        )
     try:
         outcome = enrich_accounts(scenario, segment)
     except KeyError as exc:

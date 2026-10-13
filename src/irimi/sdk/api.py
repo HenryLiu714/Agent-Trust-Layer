@@ -36,7 +36,7 @@ def trigger(fn: Callable[..., Any] | None = None, *, name: str | None = None) ->
 
     Refused at decoration time, with TypeError, so the mistake shows when the agent loads rather
     than as a lost run: a generator or async-generator function, whose call returns before its
-    body has run; what has no importable `module:qualname` to record (`_entrypoint`); a `name`
+    body has run; what has no importable `module:qualname` to record (`entrypoint`); a `name`
     that is not a string; and a name passed positionally."""
     if fn is not None and not callable(fn) and not isinstance(fn, staticmethod | classmethod):
         raise TypeError(f"@sdk.trigger takes its name as name=, not {fn!r}")
@@ -49,7 +49,7 @@ def trigger(fn: Callable[..., Any] | None = None, *, name: str | None = None) ->
             # returned as a plain function would be bound, and given the instance as its first
             # argument, with the SDK inactive too (#74).
             return type(f)(decorate(f.__func__))
-        entrypoint = _entrypoint(f)
+        entry = entrypoint(f)
         if inspect.isgeneratorfunction(f) or inspect.isasyncgenfunction(f):
             raise TypeError(
                 f"@sdk.trigger cannot wrap the generator function {f.__qualname__}: a run ends "
@@ -61,7 +61,7 @@ def trigger(fn: Callable[..., Any] | None = None, *, name: str | None = None) ->
 
             @functools.wraps(f)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                async with RunScope(run_name, entrypoint, lambda: capture_call(f, args, kwargs)):
+                async with RunScope(run_name, entry, lambda: capture_call(f, args, kwargs)):
                     result = f(*args, **kwargs)
                     return await result if inspect.isawaitable(result) else result
 
@@ -69,7 +69,7 @@ def trigger(fn: Callable[..., Any] | None = None, *, name: str | None = None) ->
 
         @functools.wraps(f)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            scope = RunScope(run_name, entrypoint, lambda: capture_call(f, args, kwargs))
+            scope = RunScope(run_name, entry, lambda: capture_call(f, args, kwargs))
             with scope:
                 result = f(*args, **kwargs)
                 return scope.hand_off(result) if inspect.iscoroutine(result) else result
@@ -79,11 +79,12 @@ def trigger(fn: Callable[..., Any] | None = None, *, name: str | None = None) ->
     return decorate if fn is None else decorate(fn)
 
 
-def _entrypoint(f: Callable[..., Any]) -> str:
+def entrypoint(f: Callable[..., Any], decorator: str = "@sdk.trigger") -> str:
     """`f`'s `module:qualname`, which replay (#84) imports it by. Refused with TypeError for what
     has none: a `functools.partial` or an instance with `__call__`, a function `exec` defined with
     no `__name__` in its namespace, and a class, which decorated would be replaced by a function,
-    so that `isinstance` against it broke even in production."""
+    so that `isinstance` against it broke even in production. `decorator` names the one refusing:
+    `@sdk.tool` refuses the same things, for its default name (#76)."""
     module = getattr(f, "__module__", None)
     qualname = getattr(f, "__qualname__", None)
     if isinstance(f, type) or not isinstance(module, str) or not isinstance(qualname, str):
@@ -94,8 +95,7 @@ def _entrypoint(f: Callable[..., Any]) -> str:
         else:
             what = type(f).__qualname__
         raise TypeError(
-            f"@sdk.trigger wraps a function or a method, not {what}: decorate the function that "
-            "handles the run"
+            f"{decorator} wraps a function or a method, not {what}: decorate the function itself"
         )
     return f"{module}:{qualname}"
 

@@ -48,5 +48,26 @@ WORKFLOW = Workflow(
             ("decoration_errors",),
             doc="each of #76's decoration-time TypeErrors, raised before any call",
         ),
+        "merge_retry": Scenario(
+            ("merge_retry",),
+            doc="a write's stand-in raises and the agent, holding the very exception it raised, "
+            "retries: both calls recorded, the first with its error",
+        ),
+        "outside_run": Scenario(
+            ("outside_run",),
+            doc="tools called before the trigger, in no run: recorded in the process run "
+            "(IRIMI_RUN), the trigger's own in its run",
+        ),
+        "stand_in_http": Scenario(
+            ("stand_in_http",),
+            setup=_enrichment,
+            doc="a write's stand-in makes an HTTP read: an ordinary exchange of the run, labelled",
+        ),
+        "async_tools": Scenario(
+            ("async_tools",),
+            doc="an async read, and a sync write that returns a coroutine: its call ends, and is "
+            "recorded, when the coroutine does, after the read tool it awaits; then an async "
+            "static method whose stand-in is a static method in the same class body",
+        ),
     },
 )

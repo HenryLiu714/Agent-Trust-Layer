@@ -27,8 +27,9 @@ What works today, all of it covered by tests that need no network and no keys:
 
 Every `serve` and `shadow` run is recorded, redacted, in the trace store under `$IRIMI_HOME/store`
 ([`docs/trace-format.md`](docs/trace-format.md)), and `irimi runs list` / `runs show` read it
-back. What does not exist yet: the SDK (`irimi.sdk`), `irimi shadow --serve`, replay and
-`irimi compare`. See [Roadmap](#roadmap).
+back. The SDK, `irimi.sdk`, marks where an agent's runs start and end and labels the tools the
+proxy cannot see ([Attributing runs with the SDK](#attributing-runs-with-the-sdk)). What does not
+exist yet: `irimi shadow --serve`, replay and `irimi compare`. See [Roadmap](#roadmap).
 
 ## Quickstart
 
@@ -175,6 +176,11 @@ And a refund the real service would have refused, from `w01_ticket_triage double
   for a 4900-yen refund.
 - `Would have fired:` lists webhooks for accepted writes only. A refused write, an idempotent retry
   and a delegated write list none.
+- A write tool the SDK ran as its stand-in gets a line after the HTTP writes:
+  `○ tool db.mark_refunded  shadow stand-in ran`, or `raised <type>`, and it did not happen
+  either: a run whose only writes are tool writes still closes with `These writes did not happen.`
+  A read tool gets no line, and neither is counted as an exchange
+  ([Tools the proxy cannot see](#tools-the-proxy-cannot-see)).
 
 ### The child process
 
@@ -234,9 +240,10 @@ host in a map is not an allow-list entry here. The scheme upstream is always htt
   to the real service. The banner says `backstop: none (Phase 4)` for this reason, and
   `w11_leaky_agent` pins each known escape.
 - **HTTP(S) only.** Database writes, files on disk, gRPC and WebSocket traffic are not virtualized
-  and happen for real. Point database URLs at scratch data. Bytes sent through the proxy that are
-  not HTTP, and a connection upgraded to anything but a WebSocket, are refused, never relayed, and
-  leave no record (#75).
+  and happen for real, unless the agent labels the function that makes them with `@sdk.tool`
+  ([Tools the proxy cannot see](#tools-the-proxy-cannot-see)). Point database URLs at scratch
+  data. Bytes sent through the proxy that are not HTTP, and a connection upgraded to anything but
+  a WebSocket, are refused, never relayed, and leave no record (#75).
 
 ## Service maps
 
@@ -467,6 +474,70 @@ context variable as the request is sent. irimi strips the header before anything
   a coroutine, ends its run when it returns, but a task it created inside the run keeps the run's
   id. That task's requests are labelled with the ended run and stored in it, after its end.
 
+### Tools the proxy cannot see
+
+The proxy sees only HTTP. A database write, a file written to disk or a call into another library
+happens for real under `irimi shadow` unless the agent labels it. `@sdk.tool` labels a function
+as a read or a write. A write names its stand-in: the function irimi runs in its place, with the
+same arguments, while irimi is in front.
+
+```python
+from irimi import sdk
+
+
+def mock_database_write(account: Account) -> dict:
+    return {"id": account.id, "stood_in": True}
+
+
+@sdk.tool(kind="write", shadow=mock_database_write)  # name= defaults to "module.qualname"
+def database_write(account: Account) -> dict:
+    with db.transaction() as tx:
+        tx.upsert(account)
+    return {"id": account.id}
+
+
+@sdk.tool(kind="read")  # a read runs for real, and takes no stand-in
+def find_accounts(segment: str) -> list[Account]: ...
+```
+
+| `sdk.active()` | kind | What runs | What irimi records |
+| --- | --- | --- | --- |
+| false | read | the real function | nothing |
+| false | write | the real function | nothing; one warning, below |
+| true | read | the real function | a tool call, `ran: real` |
+| true | write | **only the stand-in**: the real function never runs | a tool call, `ran: shadow` |
+
+- **Mistakes fail when the module loads**, with `TypeError`, never at the call: a `kind` that is
+  not `"read"` or `"write"`, a write with no `shadow=`, a read with one, a stand-in that is not
+  callable, is a generator or is the function itself, a stand-in that is sync where the function
+  is `async def` or the reverse, a generator function, and what `@sdk.trigger` also refuses (a
+  class, a `functools.partial`, a name that is not a string). Nothing unnamed runs for real under
+  irimi. A `staticmethod` stand-in in the tool's own class body is taken as its function.
+- **What is recorded.** Each call is stored in the run it was made in, or, with no run, in the
+  process run `irimi shadow` names (`IRIMI_RUN`), or under serve mode in `unattributed`. It holds
+  the tool's name, its kind, which body ran, its arguments bound against the real function's
+  signature and its result, both captured as a trigger's are
+  ([Captured arguments](docs/trace-format.md#captured-arguments)) and redacted on disk, and what it
+  raised, if anything. A result that would take the call's args and result together past 1 MiB is
+  stored as `{"__irimi_truncated__": true, "bytes": n}`.
+- **Where it shows.** `irimi shadow` prints a line per call among the exchange lines
+  (`shadow    write     tool db.write -> ok`), and the summary a line per write whose stand-in ran
+  ([The summary](#the-summary)). `irimi runs show` prints both from the store.
+- **An exception propagates unchanged**, the same object, from the function or the stand-in, and
+  the call is recorded with what it raised. A failed post to irimi is a warning on the `irimi.sdk`
+  logger, as a run's is, never an exception.
+- **The warning.** A write tool that runs for real while `HTTPS_PROXY` or `https_proxy` is set
+  but `IRIMI_ENGINE_ACTIVE` is not was probably meant to run under irimi, so the SDK logs one
+  WARNING per process: `irimi: write tool <name> ran for real: HTTPS_PROXY is set but
+  IRIMI_ENGINE_ACTIVE is not`.
+- **What it wraps**, as `@sdk.trigger` does: a function, an `async def`, a method, `staticmethod`
+  and `classmethod` in either decorator order. A method's stand-in is called as the method is,
+  with the instance first. A function that is not `async def` but returns a coroutine is recorded
+  when the coroutine ends.
+- **HTTP inside a tool** is recorded as the run's own exchanges, with no link to the tool call.
+- **No tool overlay.** A read tool after a stood-in write sees the world as it was: nothing
+  shows it the write that did not happen, as the overlay does for HTTP.
+
 ## CLI
 
 ```
@@ -535,7 +606,7 @@ Where each feature is exercised end to end:
 | Unmapped internal services, a map the loader refuses, `Irimi-Run` across a hop | W8 `w08_orchestrator` |
 | Upstream failures: 429, 500, timeouts, resets, a failed L3 read, a killed run | W10 `w10_flaky_upstream` |
 | What irimi cannot see: clients that bypass the proxy, loopback services | W11 `w11_leaky_agent` |
-| Tool calls the proxy cannot see | W6 `w06_crm_db_agent` (through a stand-in, below) |
+| Tool calls the proxy cannot see: `@sdk.tool` stand-ins, recorded, printed and redacted | W6 `w06_crm_db_agent`, W1, W2 |
 | The control endpoint: runs started, given tool calls and ended over `/_irimi/`, health, every refusal | W9 `w09_scope_gauntlet`; every workflow (`tests/workflows/test_control_endpoint.py`) |
 
 Answer targets, overrides, the telemetry maps beyond W7's one LangSmith trace, and the CLI's own
@@ -545,9 +616,8 @@ their scenarios and pins, and a fix that flips a `LOOKS WRONG:` pin updates it i
 (`CONTRIBUTING.md`).
 
 The agents use the SDK API (`@sdk.trigger`, `sdk.run`, `@sdk.tool`) through
-`examples/workflows/sdk.py`, which re-exports `irimi.sdk`. Its triggers and runs are irimi's own
-(#74). Until `irimi.sdk` has `@sdk.tool` (#76), `sdk.py` stands in for it, so W6's tool stand-ins
-test the stand-in's rules, not irimi's.
+`examples/workflows/sdk.py`, which re-exports `irimi.sdk`. Its triggers, runs (#74) and tools
+(#76) are irimi's own; `sdk.py` only wraps them to log which function ran, for the invariants.
 
 ## The refund agent
 
@@ -585,12 +655,12 @@ by phase.
   Redaction before anything reaches disk (#69). The sample workflows (#89). The trace store on
   disk (#70). Streamed SSE bodies recorded chunk by chunk (#71). `irimi runs list` / `runs show`
   and a summary from a stored run (#72). The control endpoint, `/_irimi/` (#73). The SDK:
-  `@sdk.trigger` and `sdk.run()` with run identity in a context variable (#74), and
-  `Irimi-Run` on every request a run makes through irimi (#75).
+  `@sdk.trigger` and `sdk.run()` with run identity in a context variable (#74),
+  `Irimi-Run` on every request a run makes through irimi (#75), and `@sdk.tool` for calls the
+  proxy cannot see (#76).
 
 **Next: the rest of Phase 3, the run**
 
-- The rest of the SDK: `@sdk.tool` for calls the proxy cannot see (#76).
 - `irimi shadow --serve` with per-run summaries (#77), a server agent example and the Phase 3 exit
   test (#78), `irimi compare` (#79), Slack channel names in the summary (#61).
 - Replay: answer a run from its recording (#82), read and write tools in replay (#83),

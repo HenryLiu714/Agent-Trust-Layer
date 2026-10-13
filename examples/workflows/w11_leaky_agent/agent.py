@@ -9,6 +9,9 @@ Each escape runs inside `sdk.run`, so under shadow it is a run whose requests th
 only those that go through irimi (#75): a run's id must never ride out on an escape, where nothing
 would strip it. Universal invariant 2 checks that no fake service ever saw `Irimi-Run`.
 
+`labelled_sidecar` writes to the loopback sidecar through an `@sdk.tool(kind="write")`, so under
+shadow its stand-in runs and nothing escapes (#76).
+
 `redirected` writes nothing. It is a read that each client the SDK labels (urllib, `requests`,
 `httpx` sync and async) follows through two redirects: the first stays on a host irimi proxies, the
 second leads to the loopback sidecar, which irimi's own `NO_PROXY` sends direct. Each hop is
@@ -171,6 +174,26 @@ def loopback_service() -> None:
     )
 
 
+def _enqueue_stand_in(job: dict[str, Any]) -> dict[str, Any]:
+    return {"queued": None, "stood_in": True}
+
+
+@sdk.tool(kind="write", shadow=_enqueue_stand_in)
+def enqueue_job(job: dict[str, Any]) -> dict[str, Any]:
+    """`loopback_service`'s write, labelled as one."""
+    resp = agentkit.http(
+        "POST", agentkit.internal("127.0.0.1") + "/queue/jobs", json_body=job, label="enqueue"
+    )
+    return resp.json() or {}
+
+
+def labelled_sidecar() -> None:
+    """The loopback sidecar's write, made by a write tool (#76). The proxy still cannot see it,
+    but irimi's SDK runs the tool's stand-in in its place, so the escape is closed: the sidecar
+    sees nothing under shadow. The one escape here an agent can close itself today."""
+    agentkit.obs("queued", doc=enqueue_job({"job": "refund", "charge": CHARGE}))
+
+
 def redirected() -> None:
     """The same read by each client the SDK labels, following both redirects: the export
     service's, through irimi, then the hop to the sidecar on loopback, direct (through irimi for
@@ -209,6 +232,7 @@ ESCAPES = {
     "no_proxy_star": no_proxy_star,
     "raw_socket": raw_socket,
     "loopback_service": loopback_service,
+    "labelled_sidecar": labelled_sidecar,
     "redirected": redirected,
 }
 

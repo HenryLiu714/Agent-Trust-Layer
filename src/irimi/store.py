@@ -35,12 +35,12 @@ different run directories, and a blob is written once whatever its writer. What 
 processes never interleave inside a line. Each writer numbers its own lines, so that file may repeat
 a `seq` across processes; a run's own file never does.
 
-A LONG `irimi serve` STAYS BOUNDED. The queue is capped in items and in body bytes, and a body
-over MAX_REDACTED_BODY is dropped before it is queued, so the writer never redacts hundreds of MB
-while holding the GIL the proxy needs. A telemetry exchange is reduced to its `TelemetrySeen` on
-the caller's side, for the same reason. The files a writer touched are fsynced in batches, a run's
-state is forgotten once it ends (a late event reopens it from disk), and resuming a run reads only
-the tail of its file.
+A LONG `irimi serve` STAYS BOUNDED. The queue is capped in items and in bytes - an exchange's
+bodies and a tool call's args and result (#76) - and a body over MAX_REDACTED_BODY is dropped
+before it is queued, so the writer never redacts hundreds of MB while holding the GIL the proxy
+needs. A telemetry exchange is reduced to its `TelemetrySeen` on the caller's side, for the same
+reason. The files a writer touched are fsynced in batches, a run's state is forgotten once it ends
+(a late event reopens it from disk), and resuming a run reads only the tail of its file.
 
 A FAILED WRITE LEAVES NO DAMAGE BEHIND. A line the disk refused half-way is truncated off again, a
 blob whose size is wrong - torn by a crash before any fsync - is rewritten by the next event that
@@ -85,8 +85,9 @@ MAX_STORED_BODY = 8 * 1024 * 1024
 # How many items may wait for the writer. A full queue drops the event rather than block a hook.
 QUEUE_SIZE = 10_000
 # How many body bytes may wait for the writer, whatever the item count: 10,000 exchanges of 8 MiB
-# each would otherwise hold 80 GiB. An item that would pass it is dropped, unless the queue holds
-# no bodies at all, so one large exchange still reaches an idle writer.
+# each would otherwise hold 80 GiB. A tool call's args and result count as body bytes (#76). An
+# item that would pass it is dropped, unless the queue holds no bodies at all, so one large
+# exchange still reaches an idle writer.
 MAX_QUEUED_BYTES = 256 * 1024 * 1024
 # The writer fsyncs the files it has written once it has made this many writes (lines and blobs)
 # since the last sync, whenever the queue has been idle for SYNC_IDLE_S, and on close. Counting
@@ -255,6 +256,8 @@ class _EndRun:
 @dataclass(frozen=True)
 class _Record:
     event: Exchange | ToolCall | TelemetrySeen
+    # A tool call's args and result as JSON, in bytes, measured once as it is queued (#76).
+    json_bytes: int = 0
 
 
 _CLOSE = object()  # the sentinel `close()` enqueues last
@@ -319,7 +322,12 @@ class DirectoryStore:
         self._put(_Record(event))
 
     def record_tool_call(self, call: ToolCall) -> None:
-        self._put(_Record(call))
+        try:
+            size = len(json.dumps([call.args, call.result]))
+        except Exception as exc:
+            self._drop(_item_run_id(_Record(call)), f"it could not be queued: {type(exc).__name__}")
+            return
+        self._put(_Record(call, size))
 
     def end_run(
         self,
@@ -713,10 +721,13 @@ def _fsync(path: Path) -> None:
 
 
 def _item_bytes(item: _Item) -> int:
-    """The body bytes `item` holds while it waits: an exchange's two bodies, nothing else."""
+    """The bytes `item` holds while it waits: an exchange's two bodies, and a tool call's args and
+    result, which the control endpoint takes up to `control.MAX_CONTROL_BODY` of (#76)."""
     if isinstance(item, _Record) and isinstance(item.event, Exchange):
         response = item.event.response
         return len(item.event.request.body) + (0 if response is None else len(response.body))
+    if isinstance(item, _Record):
+        return item.json_bytes
     return 0
 
 

@@ -21,6 +21,11 @@ calls name only R's own charge.
 A run is marked each way the SDK offers (#74): `@sdk.trigger` on a function, sync or async, and on
 a `Worker`'s methods, and `async with sdk.run(...)` around a block.
 
+The `ledger_*` scenarios keep the worker's own SQLite ledger of refunds with `@sdk.tool`s (#76):
+reads that run for real, a write whose stand-in runs under shadow, sync and async, called from
+four threads at once, from eight asyncio tasks at once and from a thread that lost its run, and,
+on the `Worker`, a plain method, a static method and a class method.
+
     python -m examples.workflows.launch \\
         examples.workflows.w03_queue_worker.agent <scenario>
 """
@@ -209,6 +214,76 @@ def call(
     return None
 
 
+# -- the ledger: the worker's own record of its refunds, as tools the proxy cannot see (#76) -------
+
+LEDGER = "ledger.sqlite3"
+
+
+def seed_ledger() -> None:
+    """Setup, not a tool: it happens in both modes, before any message."""
+    with agentkit.sqlite(LEDGER) as db:
+        db.execute("CREATE TABLE IF NOT EXISTS refunds (charge TEXT, amount INTEGER)")
+        db.execute("CREATE TABLE IF NOT EXISTS acks (charge TEXT, queue TEXT)")
+
+
+def _refunded(charge: str) -> int:
+    with agentkit.sqlite(LEDGER) as db:
+        row = db.execute("SELECT COALESCE(SUM(amount), 0) FROM refunds WHERE charge = ?", (charge,))
+        return int(row.fetchone()[0])
+
+
+@sdk.tool(kind="read")
+def ledger_balance(charge: str) -> int:
+    return _refunded(charge)
+
+
+@sdk.tool(kind="read")
+async def ledger_balance_async(charge: str) -> int:
+    await asyncio.sleep(0)  # lets the other messages' tasks run in between
+    return _refunded(charge)
+
+
+@sdk.tool(kind="read")
+def ledger_history(charge: str) -> Coroutine[Any, Any, list[int]]:
+    """A sync read that returns a coroutine: its call ends, and is recorded with what the
+    coroutine returned, when the coroutine does (#76)."""
+    return _history(charge)
+
+
+async def _history(charge: str) -> list[int]:
+    await asyncio.sleep(0)
+    with agentkit.sqlite(LEDGER) as db:
+        rows = db.execute("SELECT amount FROM refunds WHERE charge = ? ORDER BY amount", (charge,))
+        return [int(r[0]) for r in rows]
+
+
+def _insert_refund(charge: str, amount: int) -> None:
+    with agentkit.sqlite(LEDGER) as db:
+        db.execute("INSERT INTO refunds VALUES (?, ?)", (charge, amount))
+
+
+def _record_stand_in(charge: str, amount: int) -> dict[str, Any]:
+    return {"recorded": False, "charge": charge}
+
+
+@sdk.tool(kind="write", shadow=_record_stand_in)
+def record_refund(charge: str, amount: int) -> dict[str, Any]:
+    _insert_refund(charge, amount)
+    return {"recorded": True, "charge": charge}
+
+
+async def _record_async_stand_in(charge: str, amount: int) -> dict[str, Any]:
+    await asyncio.sleep(0)
+    return {"recorded": False, "charge": charge}
+
+
+@sdk.tool(kind="write", shadow=_record_async_stand_in)
+async def record_refund_async(charge: str, amount: int) -> dict[str, Any]:
+    await asyncio.sleep(0)
+    _insert_refund(charge, amount)
+    return {"recorded": True, "charge": charge}
+
+
 # -- the worker -----------------------------------------------------------------------------------
 
 
@@ -224,6 +299,10 @@ def refund(message: dict[str, Any]) -> None:
     charge = message["charge"]
     form = {"charge": charge, "amount": str(message["amount"])}
     call(message["index"], "POST", "/v1/refunds", form, f"refund:{charge}", message.get("client"))
+    if message.get("ledger") == "sync":
+        # In whatever thread the refund ran in: a propagated one keeps the run, a bare one has
+        # none, and its call lands in the process run (#76).
+        agentkit.obs("ledger", charge=charge, recorded=record_refund(charge, message["amount"]))
 
 
 @sdk.trigger(name="audit")
@@ -236,6 +315,8 @@ def audit(message: dict[str, Any]) -> None:
 @sdk.trigger(name="handle")
 def handle(message: dict[str, Any]) -> None:
     read(message)
+    if message.get("ledger") == "sync":
+        agentkit.obs("ledger", charge=message["charge"], before=ledger_balance(message["charge"]))
     if message.get("poison"):
         raise ValueError(f"cannot refund {message['charge']}: poison message")
     how = message.get("refund_in", "inline")
@@ -270,6 +351,23 @@ async def handle_async(message: dict[str, Any]) -> None:
         _in_flight.set()
         await asyncio.Event().wait()
     await asyncio.to_thread(refund, message)
+    if message.get("ledger") == "async":
+        # Each in the message's own task, eight at once (#76).
+        charge = message["charge"]
+        before = await ledger_balance_async(charge)
+        recorded = await record_refund_async(charge, message["amount"])
+        history = await ledger_history(charge)
+        agentkit.obs("ledger", charge=charge, before=before, recorded=recorded, history=history)
+
+
+def _journal_stand_in(cls: type, charge: str, net: int) -> dict[str, Any]:
+    """A class method's stand-in is called as the class method is: with the class first (#76)."""
+    return {"journaled": False, "by": cls.__name__}
+
+
+def _ack_stand_in(worker: Worker, message: dict[str, Any]) -> dict[str, Any]:
+    """A method's stand-in is called as the method is: with the instance first (#76)."""
+    return {"acked": False, "queue": worker.queue}
 
 
 class Worker:
@@ -284,11 +382,41 @@ class Worker:
     def handle(self, message: dict[str, Any]) -> None:
         read(message)
         refund(message)
+        self.book(message)
 
     @sdk.trigger(name="worker.handle_async")
     async def handle_async(self, message: dict[str, Any]) -> None:
         await asyncio.to_thread(read, message)
         await asyncio.to_thread(refund, message)
+        self.book(message)
+
+    def book(self, message: dict[str, Any]) -> None:
+        """The worker's ledger tools, as its methods (#76): a static fee, a class-wide journal
+        entry and an ack on this worker's queue."""
+        if message.get("ledger") != "worker":
+            return
+        charge, amount = message["charge"], message["amount"]
+        fee = self.fee(amount)
+        journal = Worker.journal(charge, amount - fee)
+        ack = self.ack(message)
+        agentkit.obs("ledger", charge=charge, fee=fee, journal=journal, ack=ack)
+
+    @sdk.tool(kind="read")
+    @staticmethod
+    def fee(amount: int) -> int:
+        return amount // 10
+
+    @sdk.tool(kind="write", shadow=_journal_stand_in)
+    @classmethod
+    def journal(cls, charge: str, net: int) -> dict[str, Any]:
+        _insert_refund(charge, net)
+        return {"journaled": True, "by": cls.__name__}
+
+    @sdk.tool(kind="write", shadow=_ack_stand_in)
+    def ack(self, message: dict[str, Any]) -> dict[str, Any]:
+        with agentkit.sqlite(LEDGER) as db:
+            db.execute("INSERT INTO acks VALUES (?, ?)", (message["charge"], self.queue))
+        return {"acked": True, "queue": self.queue}
 
 
 @sdk.trigger(name="enqueue")
@@ -425,6 +553,11 @@ SCENARIOS: dict[str, tuple[int, str, dict[str, Any]]] = {
     "coroutine_handoff": (4, "handoff", {}),
     "one_pool_8": (8, "pooled", {}),
     "task_outlives_trigger": (2, "task", {}),
+    # The worker's ledger tools (#76), in each place a run's identity has to follow them.
+    "ledger_threads_8": (8, "threads", {"refund_in": "propagated_thread", "ledger": "sync"}),
+    "ledger_asyncio_8": (8, "asyncio", {"ledger": "async"}),
+    "ledger_unpropagated": (2, "serial", {"refund_in": "bare_thread", "ledger": "sync"}),
+    "ledger_worker": (4, "worker", {"ledger": "worker"}),
 }
 POISON = {
     "one_message_fails": 2,
@@ -457,6 +590,8 @@ def main(argv: list[str]) -> int:
     if len(argv) != 1 or argv[0] not in SCENARIOS:
         print(f"usage: agent.py {{{','.join(SCENARIOS)}}}", file=sys.stderr)
         return 2
+    if argv[0].startswith("ledger_"):
+        seed_ledger()
     ok, failed = consume(messages_for(argv[0]), SCENARIOS[argv[0]][1])
     agentkit.obs("result", scenario=argv[0], ok=ok, failed=failed)
     return 0

@@ -26,6 +26,14 @@ from irimi.trace import Event, RunRecord, TelemetrySeen, ToolCall
 NOT_VIRTUALIZED_NOTICE = "hosts not routed through the proxy are NOT virtualized."
 BACKSTOP = "none (Phase 4)"
 BACKSTOP_NOTICE = f"backstop: {BACKSTOP}"
+# Where the banner names the run, under serve mode, which has no run of its own: each run is the
+# SDK's, named on its requests, and a request no run names is `unattributed` (#77).
+SERVE_RUNS = "run: per request (SDK), unattributed otherwise"
+# The line a listener bound wider than loopback adds to the banner (#77).
+WIDE_BIND_NOTICE = (
+    "any machine that can reach this port can send traffic through irimi and call its control "
+    "endpoint"
+)
 
 # A delegated service or route: the banner has to say that a *routed* host may not be live either.
 DELEGATED_PREFIX = "delegated:"
@@ -35,13 +43,25 @@ RED = "\033[31m"
 RESET = "\033[0m"
 
 
-def banner_lines(command: str, run_id: str, host: str, port: int, ca_cert: Path) -> list[str]:
-    """The three startup lines. `command` is "shadow" or "serve"."""
-    return [
-        f"irimi {command} · run {run_id} · listening on {host}:{port} · ca {ca_cert}",
+def banner_lines(
+    command: str, run_id: str | None, host: str, port: int, ca_cert: Path
+) -> list[str]:
+    """The startup lines. `command` is "shadow" or "shadow --serve"; `run_id` is None in serve
+    mode, which names its runs per request (#77).
+
+    A listener that is not loopback adds a line saying so: every machine that reaches the port can
+    send its traffic through irimi and post runs to the control endpoint, which is not a boundary
+    (#73). `0.0.0.0` and `::` are not loopback. The reverse door stays loopback-only whatever the
+    bind (#77)."""
+    run = SERVE_RUNS if run_id is None else f"run {run_id}"
+    lines = [
+        f"irimi {command} · {run} · listening on {netaddr.authority(host, port)} · ca {ca_cert}",
         NOT_VIRTUALIZED_NOTICE,
         BACKSTOP_NOTICE,
     ]
+    if not netaddr.is_loopback(host):
+        lines.append(f"listening on {host}: {WIDE_BIND_NOTICE}")
+    return lines
 
 
 def delegated_lines(index: MapIndex, color: bool = False) -> list[str]:

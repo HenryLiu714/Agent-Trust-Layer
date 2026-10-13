@@ -33,7 +33,9 @@ ONE PROCESS WRITES A RUN; SEVERAL MAY SHARE A ROOT. Two `irimi shadow`s on the d
 different run directories, and a blob is written once whatever its writer. What they can share is
 `unattributed/events.jsonl`, so each line goes out as one `write` on an O_APPEND descriptor and two
 processes never interleave inside a line. Each writer numbers its own lines, so that file may repeat
-a `seq` across processes; a run's own file never does.
+a `seq` across processes; a run's own file never does. A `serve` is the writer that fills that file,
+so a root has at most one: it holds `serve.lock` while it runs (`ServeLock`), and a second one on
+the same root refuses to start (#77).
 
 A LONG `irimi serve` STAYS BOUNDED. The queue is capped in items and in bytes - an exchange's
 bodies and a tool call's args and result (#76) - and a body over MAX_REDACTED_BODY is dropped
@@ -48,6 +50,7 @@ needs it rather than trusted because it exists, and a run.json is synced before 
 place, so a crash never leaves one empty.
 """
 
+import fcntl
 import json
 import logging
 import os
@@ -56,7 +59,7 @@ import secrets
 import threading
 import time
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -112,6 +115,11 @@ BLOBS_DIR = "blobs"
 RUNS_DIR = "runs"
 RUN_FILE = "run.json"
 EVENTS_FILE = "events.jsonl"
+# The file a `serve` holds an exclusive lock on for as long as it runs (#77).
+SERVE_LOCK_FILE = "serve.lock"
+
+# Called by the writer thread with a run's id once it has written that run's end (#77).
+OnRunEnded = Callable[[str], None]
 
 
 @dataclass(frozen=True)
@@ -226,6 +234,7 @@ class StoreLayout:
         self.blobs = root / BLOBS_DIR
         self.runs = root / RUNS_DIR
         self.unattributed_events = root / UNATTRIBUTED / EVENTS_FILE
+        self.serve_lock = root / SERVE_LOCK_FILE
 
     def run_dir(self, run_id: str) -> Path:
         """The directory of `run_id`, which the caller has checked with `trace.is_valid_run_id`."""
@@ -283,14 +292,20 @@ class _Run:
 class DirectoryStore:
     """A TraceStore writing the layout `docs/trace-format.md` describes under `root`."""
 
-    def __init__(self, root: Path, key: bytes) -> None:
+    def __init__(self, root: Path, key: bytes, on_run_ended: OnRunEnded | None = None) -> None:
         """Raises OSError when `root` cannot be made a writable directory: a store that would
-        silently drop every event must not start a run (the one place this class raises)."""
+        silently drop every event must not start a run (the one place this class raises).
+
+        `on_run_ended` is called on the writer thread with a run's id once that run's end is
+        written, so every event queued before the end is already on disk: `serve` prints the
+        run's summary from it (#77). What it raises is logged and swallowed. It runs before the
+        writer takes its next item, so a slow one holds the queue back."""
         _mkdirs(root)
         if not root.is_dir() or not os.access(root, os.W_OK | os.X_OK):
             raise PermissionError(f"the trace store {root} is not a writable directory")
         self.layout = StoreLayout(root)
         self._key = key
+        self._on_run_ended = on_run_ended
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=QUEUE_SIZE)
         self._lock = threading.Lock()  # guards everything below it and `_closed`
         self._closed = False
@@ -484,6 +499,14 @@ class DirectoryStore:
             ),
         )
         self._forget(end.run_id, run)
+        if self._on_run_ended is not None:
+            try:
+                self._on_run_ended(end.run_id)
+            except Exception as exc:
+                # The run is stored whatever its caller did with the news. The type only, as
+                # every failure here is logged: a message may quote what it choked on (#69).
+                logger.warning("irimi: the end-of-run callback raised %s", type(exc).__name__)
+                logger.debug("irimi: the end-of-run callback's traceback", exc_info=True)
 
     def _run_dir(self, run_id: str) -> _Run:
         """The writer's state for a run directory a start or an end may write. Raises ValueError -
@@ -752,6 +775,46 @@ def _mkdirs(path: Path) -> None:
             directory.mkdir(mode=DIR_MODE)
         except FileExistsError:
             pass  # another process made it first
+
+
+class StoreLocked(OSError):
+    """Another process holds this store's `serve.lock`: another `serve` writes it (#77)."""
+
+
+class ServeLock:
+    """A root's `serve.lock`, held exclusively by this process until `release()` (#77).
+
+    `unattributed/events.jsonl` is where a serve files every request no run claims. Two serves
+    appending to it would repeat each other's `seq`, and one resuming it would cut off the other's
+    line mid-write as a crash's half line. So a root has one serve: a second one is refused at
+    once, never made to wait, and a supervisor restarting serve retries until the old process has
+    exited. The lock is the kernel's: it is released when the process exits, however it exits, so
+    a crashed serve never leaves the root locked."""
+
+    def __init__(self, fd: int) -> None:
+        self._fd: int | None = fd
+
+    @classmethod
+    def hold(cls, root: Path) -> "ServeLock":
+        """Take `root`'s `serve.lock`. Raises StoreLocked when another process holds it, and
+        OSError when the file cannot be opened."""
+        _mkdirs(root)
+        fd = os.open(StoreLayout(root).serve_lock, os.O_RDWR | os.O_CREAT, FILE_MODE)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            raise StoreLocked(f"another irimi serve is writing the trace store {root}") from None
+        except BaseException:
+            os.close(fd)
+            raise
+        return cls(fd)
+
+    def release(self) -> None:
+        """Let go of the lock: closing the descriptor releases it. Idempotent."""
+        fd, self._fd = self._fd, None
+        if fd is not None:
+            os.close(fd)
 
 
 def names_a_run_dir(run_id: object) -> bool:

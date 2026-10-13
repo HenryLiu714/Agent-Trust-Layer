@@ -17,7 +17,7 @@ from collections import Counter
 import pytest
 
 import irimi
-from examples.workflows.harness.run import CANARIES, Result, workflows
+from examples.workflows.harness.run import CANARIES, Result, serve_cases, workflows
 from examples.workflows.w10_flaky_upstream.scenarios import CONTROL_DOWN
 from irimi import paths, redact, report, trace
 from irimi.exchange import Exchange
@@ -415,3 +415,42 @@ def test_every_run_the_process_stored_prints_the_summary_irimi_shadow_printed(
     process = reader.load_run(shadow.process_run_id()).record
     union = StoredRun(process, [*exchanges, *telemetry, *tool_calls])
     assert no_elapsed(report.stored_summary_lines(union, shadow.maps())) == no_elapsed(live)
+
+
+# -- serve mode (#77) ------------------------------------------------------------------------------
+
+SERVE_CASES = serve_cases()
+SERVE_IDS = [f"{n}:{s}" for n, s in SERVE_CASES]
+
+
+@pytest.mark.parametrize(("name", "scenario"), SERVE_CASES, ids=SERVE_IDS)
+def test_every_exchange_and_tool_call_a_serve_reported_is_stored_once_in_its_run(
+    run_workflow, name, scenario
+):
+    """Under `irimi shadow --serve` (#77) what irimi printed as it happened is what it stored:
+    each exchange line and each tool-call line once, and each event in the run that named it, or
+    in `unattributed/` when none did. No process run holds the rest. A tool call is held where the
+    agent logged it, a call made in no run in `unattributed/`, since there is no `IRIMI_RUN`."""
+    serve = run_workflow(name, scenario, "serve")
+    reader = serve.stored()
+    ids = [record.run_id for record in reader.list_runs()] + [trace.UNATTRIBUTED]
+    events = {run_id: reader.load_run(run_id).events for run_id in ids}
+    flat = [event for run_events in events.values() for event in run_events]
+    stored = [report.exchange_line(e) for e in flat if isinstance(e, Exchange)]
+    assert sorted(stored) == sorted(line for line in reported(serve) if not is_telemetry(line))
+    assert all(e.run_id == run_id for run_id, run_events in events.items() for e in run_events)
+    calls = [e for e in flat if isinstance(e, ToolCall)]
+    assert sorted(serve.tool_call_lines()) == sorted(report.tool_call_line(c) for c in calls)
+    logged = Counter(
+        (t["run"] or trace.UNATTRIBUTED, t["name"], t["kind"], t["ran"])
+        for t in serve.events("tool")
+    )
+    assert Counter((c.run_id, c.name, c.kind, c.ran) for c in calls) == logged
+    labelled = Counter((c["run"], c["method"]) for c in serve.calls() if c.get("run"))
+    held = Counter(
+        (run_id, e.request.method)
+        for run_id, run_events in events.items()
+        for e in run_events
+        if isinstance(e, Exchange) and e.issued_by == "agent"
+    )
+    assert not labelled - held

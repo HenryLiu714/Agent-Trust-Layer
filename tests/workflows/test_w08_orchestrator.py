@@ -9,7 +9,7 @@ import yaml
 from examples.workflows.w08_orchestrator.scenarios import SUBAGENT_MAP, UNJUSTIFIED_MAP
 from irimi.exchange import Exchange
 from irimi.servicemap.loader import MapError, parse_service
-from irimi.trace import ToolCall
+from irimi.trace import UNATTRIBUTED, ToolCall
 
 W = "w08_orchestrator"
 AGENT = "examples.workflows.w08_orchestrator.agent"
@@ -90,13 +90,15 @@ def test_a_post_read_without_persists_false_is_refused_and_nothing_runs(run_work
     assert run_workflow(W, "map_refused", "bare").exit_code == 0
 
 
+@pytest.mark.parametrize("mode", ["shadow", "serve"])
 def test_irimi_strips_its_run_header_at_the_hop_and_only_the_agents_own_header_survives(
-    run_workflow,
+    run_workflow, mode
 ):
     """Attribution across a service hop is an open design question: irimi strips `Irimi-Run`
     from everything it forwards (#67), so the internal service cannot tell which run called it
-    unless the agent carries the id itself. This pins both halves."""
-    shadow = run_workflow(W, "run_header_across_hop", "shadow")
+    unless the agent carries the id itself. This pins both halves, under `irimi shadow -- <cmd>`
+    and under serve mode (#77), where the internal service is the callee a sidecar sits beside."""
+    shadow = run_workflow(W, "run_header_across_hop", mode)
     run_id = shadow.events("run.start")[0]["run"]
     forwarded = shadow.internet.requests(HOST)
     assert [r.path for r in forwarded] == ["/inventory", "/quote"]
@@ -117,7 +119,14 @@ def test_irimi_strips_its_run_header_at_the_hop_and_only_the_agents_own_header_s
         "/quote",
         "/reservations",
     ]
-    assert shadow.stored().load_run(shadow.process_run_id()).events == []
+    if mode == "shadow":
+        assert shadow.stored().load_run(shadow.process_run_id()).events == []
+        return
+    # Serve mode has no process run, and nothing the agent sent is left unattributed: every call
+    # was its run's, and the run's summary names the reservation it faked.
+    assert [r.run_id for r in shadow.stored().list_runs()] == [run_id]
+    assert shadow.stored().load_run(UNATTRIBUTED).events == []
+    assert f"  ○ POST {HOST}/reservations  unvalidated (L0)" in shadow.run_blocks()[run_id]
 
 
 def test_every_sub_agent_call_joins_its_parents_run(run_workflow):

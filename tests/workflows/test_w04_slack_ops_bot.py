@@ -174,7 +174,7 @@ def test_an_archived_channel_is_refused_the_same_way_bare_and_under_shadow(run_w
 
 
 def test_a_retried_delivery_is_acknowledged_and_handled_once(run_workflow):
-    for mode in ("bare", "shadow"):
+    for mode in ("bare", "shadow", "serve"):
         result = run_workflow(W, "duplicate_delivery", mode)
         deliveries = [(d["retry"], d["duplicate"]) for d in result.events("delivery")]
         assert deliveries == [(None, False), ("1", True)]
@@ -183,3 +183,12 @@ def test_a_retried_delivery_is_acknowledged_and_handled_once(run_workflow):
         assert len(posts) == 1
     shadow = run_workflow(W, "duplicate_delivery", "shadow")
     assert len(shadow.events("run.start")) == 1
+    # Under serve mode (#77) the two deliveries are one run, stored and summarized once: the
+    # retry is acknowledged before a trigger is called, so it starts none.
+    serve = run_workflow(W, "duplicate_delivery", "serve")
+    [run] = serve.events("run.start")
+    assert [r.run_id for r in serve.stored().list_runs()] == [run["run"]]
+    [block] = serve.run_blocks().values()
+    assert [line for line in block if "○ post to" in line] == [
+        '  ○ post to #C0OPS: "Payouts are on schedule."  unvalidated (L3 preconditions passed)'
+    ]

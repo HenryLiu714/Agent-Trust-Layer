@@ -89,7 +89,7 @@ def test_a_small_dispute_is_refunded_and_the_refund_would_have_fired_two_events(
 
 
 def test_the_refunds_own_charge_refunded_event_is_a_second_run_with_no_calls(run_workflow):
-    for mode in ("bare", "shadow"):
+    for mode in ("bare", "shadow", "serve"):
         result = run_workflow(W, "cascade", mode)
         assert actions(result) == [
             ("charge.dispute.created", "refund"),
@@ -111,6 +111,35 @@ def test_the_refunds_own_charge_refunded_event_is_a_second_run_with_no_calls(run
         "  These writes did not happen. Would have fired: customer.updated, refund.created, "
         "charge.refunded."
     )
+
+
+def test_under_serve_the_cascade_is_two_runs_and_two_summaries_the_second_empty(run_workflow):
+    """Under `irimi shadow --serve` (#77) each delivery is its own run, printed when it ends: the
+    dispute's run with its three faked writes and what they would have fired, and the fed-back
+    `charge.refunded`'s run with no calls at all."""
+    serve = run_workflow(W, "cascade", "serve")
+    first, second = (r["run"] for r in serve.events("run.start"))
+    assert {c["run"] for c in serve.calls()} == {first}
+    blocks = serve.run_blocks()
+    assert set(blocks) == {first, second}
+    assert blocks[first][-1] == (
+        "  These writes did not happen. Would have fired: customer.updated, refund.created, "
+        "charge.refunded."
+    )
+    assert len([line for line in blocks[first] if line.startswith("  ○ ")]) == 3
+    assert blocks[second] == [
+        f"irimi shadow · run {second} · 0 exchanges · {_elapsed(serve, second)} · "
+        "backstop: none (Phase 4)",
+        "",
+        "  0 exchanges · 0 live · 0 delegated · 0 virtualized",
+    ]
+
+
+def _elapsed(result, run_id):
+    from irimi import report
+
+    [record] = [r for r in result.stored().list_runs() if r.run_id == run_id]
+    return f"{report.run_elapsed(record) or 0.0:.1f}s"
 
 
 def test_a_forged_signature_is_refused_before_any_call(run_workflow):

@@ -271,6 +271,29 @@ def test_a_write_stand_in_that_raises_hands_the_agent_its_own_exception_and_a_re
     ]
 
 
+def test_under_serve_a_tool_called_outside_every_run_is_unattributed(run_workflow):
+    """Serve mode has no process run (#77): the housekeeping tools called in no run post to
+    `runs/unattributed/tool-calls`, which the control endpoint takes for tool calls only (#76),
+    and land in `unattributed/`. The trigger's own calls are its run's, and only its stood-in
+    write is in its summary."""
+    serve = run_workflow(W, "outside_run", "serve")
+    [run] = serve.sdk_runs()
+    reader = serve.stored()
+    assert [(c.name, c.ran, c.args) for c in reader.load_run(UNATTRIBUTED).events] == [
+        ("crm.delete_stale", "shadow", {"cutoff": "2025-06-01"}),
+        ("crm.find_accounts", "real", {"segment": "smb"}),
+    ]
+    assert [(c.name, c.ran) for c in reader.load_run(run.run_id).events] == [
+        ("crm.find_accounts", "real"),
+        ("crm.upsert_account", "shadow"),
+    ]
+    assert [line for line in serve.run_blocks()[run.run_id] if "○ tool" in line] == [
+        "  ○ tool crm.upsert_account  shadow stand-in ran"
+    ]
+    assert len(serve.tool_call_lines()) == 4
+    assert rows(serve) == SEED
+
+
 def test_a_tool_called_outside_every_run_lands_in_the_process_run(run_workflow):
     """Housekeeping before the trigger: `delete_stale` and `find_accounts` are called in no run,
     so under `irimi shadow -- <cmd>` each is recorded in the process run that `IRIMI_RUN` names,

@@ -11,13 +11,26 @@
 
 A new workflow is picked up by name (`harness.run.workflows`), so it is held to these without an
 edit here.
+
+A scenario that runs under `irimi shadow --serve` too (`Scenario.serve_flags`, #77) is held to the
+same five there, and to what serve mode owes each run it ended: one `--- run <id> ---` block, equal
+to that run's stored summary.
 """
 
 import pytest
 
-from examples.workflows.harness.run import CANARIES, SERVED_CANARIES, check_invariants, workflows
+from examples.workflows.harness.run import (
+    CANARIES,
+    RUN_BLOCK,
+    SERVED_CANARIES,
+    check_invariants,
+    serve_cases,
+    workflows,
+)
+from irimi import report
 
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
+SERVE_CASES = serve_cases()
 
 
 @pytest.mark.parametrize(("name", "scenario"), CASES, ids=[f"{n}:{s}" for n, s in CASES])
@@ -25,6 +38,34 @@ def test_every_shadow_run_keeps_the_universal_invariants(run_workflow, name, sce
     bare = run_workflow(name, scenario, "bare")
     shadow = run_workflow(name, scenario, "shadow")
     assert check_invariants(shadow, bare) == []
+
+
+@pytest.mark.parametrize(
+    ("name", "scenario"), SERVE_CASES, ids=[f"{n}:{s}" for n, s in SERVE_CASES]
+)
+def test_every_serve_run_keeps_the_universal_invariants(run_workflow, name, scenario):
+    bare = run_workflow(name, scenario, "bare")
+    serve = run_workflow(name, scenario, "serve")
+    assert check_invariants(serve, bare) == []
+
+
+@pytest.mark.parametrize(
+    ("name", "scenario"), SERVE_CASES, ids=[f"{n}:{s}" for n, s in SERVE_CASES]
+)
+def test_every_run_a_serve_ended_prints_its_stored_summary_once(run_workflow, name, scenario):
+    """Serve mode prints a run's summary when its end is on disk, read back from the store (#77):
+    one `--- run <id> ---` block per run the agent ended, none for a run it did not, and each
+    equal to `stored_summary_lines` for its run. It starts no process run, so none is stored."""
+    serve = run_workflow(name, scenario, "serve")
+    reader = serve.stored()
+    records = reader.list_runs()
+    assert "process" not in {r.attribution for r in records}
+    ended = sorted(r.run_id for r in records if r.outcome is not None)
+    assert ended == sorted(e["run"] for e in serve.events("run.end"))
+    assert sorted(m[1] for line in serve.irimi if (m := RUN_BLOCK.fullmatch(line))) == ended
+    maps = serve.maps()
+    for run_id, block in serve.run_blocks().items():
+        assert block == report.stored_summary_lines(reader.load_run(run_id), maps), run_id
 
 
 def test_every_workflow_has_scenarios_and_a_summary():

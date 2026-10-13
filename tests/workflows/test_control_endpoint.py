@@ -8,7 +8,7 @@ and calls no control endpoint, and the SDK warns only where W10 takes the endpoi
 
 import pytest
 
-from examples.workflows.harness.run import workflows
+from examples.workflows.harness.run import serve_cases, workflows
 from examples.workflows.w10_flaky_upstream.scenarios import CONTROL_DOWN
 from irimi.exchange import CONTROL_PREFIX, Exchange
 
@@ -96,3 +96,26 @@ def test_the_sdk_warns_only_where_its_control_endpoint_is_taken_away(run_workflo
         assert logged == [("irimi.sdk", "WARNING")]
     else:
         assert logged == []
+
+
+SERVE_CASES = serve_cases()
+
+
+@pytest.mark.parametrize(
+    ("name", "scenario"), SERVE_CASES, ids=[f"{n}:{s}" for n, s in SERVE_CASES]
+)
+def test_a_served_agent_is_given_the_control_endpoint_and_irimi_records_none_of_it(
+    run_workflow, name, scenario
+):
+    """Under serve mode (#77) the agent is not irimi's child: it is given `IRIMI_CONTROL` on the
+    listener its proxy names, as the README's serve-mode guide says. Every post the SDK made was
+    accepted, so it warned of nothing, and none was printed, handed to the store or stored as an
+    exchange."""
+    serve = run_workflow(name, scenario, "serve")
+    [start] = serve.events("start")
+    assert start["control"] == start["proxy"] + CONTROL_PREFIX.rstrip("/")
+    assert serve.events("log") == []
+    assert not [line for line in serve.exchange_lines() if CONTROL_PREFIX in line]
+    assert not [ex for ex in serve.handed if ex.request.path.startswith(CONTROL_PREFIX)]
+    stored = [e for e in serve.stored_events() if isinstance(e, Exchange)]
+    assert not [ex for ex in stored if ex.request.path.startswith(CONTROL_PREFIX)]

@@ -34,6 +34,26 @@ def ends(result):
 
 
 @pytest.mark.parametrize("scenario", ["threads_8", "asyncio_8"])
+def test_eight_concurrent_runs_print_eight_summaries_under_serve(run_workflow, scenario):
+    """Under `irimi shadow --serve` (#77) the same eight messages are eight runs, and each run's
+    summary is printed when the SDK ends it: eight `--- run <id> ---` blocks, one per run, each
+    holding its own refund and no other run's. The universal checks hold each block to its stored
+    summary (`test_invariants.py`). No process run exists to hold anything."""
+    serve = run_workflow(W, scenario, "serve")
+    runs = serve.by_run()
+    assert None not in runs and len(runs) == 8
+    blocks = serve.run_blocks()
+    assert set(blocks) == set(runs)
+    for run_id, block in blocks.items():
+        [refund] = [line for line in block if "○ refund" in line]
+        [read] = [c["label"] for c in serve.calls() if c["run"] == run_id and c["method"] == "GET"]
+        assert refund.startswith("  ○ refund $") and read.split(":")[1] in refund, (block, read)
+    assert [r.attribution for r in serve.stored().list_runs()] == ["sdk"] * 8
+    assert serve.exchange_lines().count(REFUND_LINE) == 8
+    assert serve.result()["ok"] == 8
+
+
+@pytest.mark.parametrize("scenario", ["threads_8", "asyncio_8"])
 def test_eight_concurrent_runs_never_mix(run_workflow, scenario):
     shadow = run_workflow(W, scenario, "shadow")
     runs = shadow.by_run()
@@ -138,6 +158,30 @@ def test_a_thread_started_without_propagate_loses_its_run(run_workflow):
     assert sorted(charge_named(e) for e in refunds) == ["ch_Q0", "ch_Q1"]
 
 
+@pytest.mark.skipif(
+    bool(getattr(sys.flags, "thread_inherit_context", 0)),
+    reason="threads inherit their creator's context on this build",
+)
+def test_a_thread_that_lost_its_run_is_unattributed_under_serve(run_workflow):
+    """Serve mode has no process run to fall back on: a request no run labels is `unattributed`
+    (#77). The two refunds made in threads started without `sdk.propagate` land there, with the
+    L3 reads irimi made for them, and build no run; each message's run holds its read alone."""
+    serve = run_workflow(W, "unpropagated_thread", "serve")
+    runs = [e["run"] for e in serve.events("run.start")]
+    reader = serve.stored()
+    assert sorted(r.run_id for r in reader.list_runs()) == sorted(runs)
+    for run_id in runs:
+        [read] = reader.load_run(run_id).events
+        assert isinstance(read, Exchange) and read.request.method == "GET"
+    unattributed = [e for e in reader.load_run(UNATTRIBUTED).events if isinstance(e, Exchange)]
+    refunds = [e for e in unattributed if e.request.method == "POST"]
+    assert sorted(charge_named(e) for e in refunds) == ["ch_Q0", "ch_Q1"]
+    assert all(e.run_id == UNATTRIBUTED and e.answered_by == "fake-L1" for e in refunds)
+    assert len(unattributed) == 4  # each refund and irimi's L3 read of its charge
+    # Neither refund is in any run's summary: no run holds it.
+    assert not [line for block in serve.run_blocks().values() for line in block if "○" in line]
+
+
 def test_a_nested_trigger_joins_the_run_it_is_called_in(run_workflow):
     shadow = run_workflow(W, "nested_trigger", "shadow")
     runs = shadow.by_run()
@@ -173,13 +217,16 @@ def test_one_failing_message_fails_only_its_own_run(run_workflow):
     assert shadow.exchange_lines().count(REFUND_LINE) == 3
 
 
-def test_a_second_run_sees_the_first_runs_faked_refund(run_workflow):
-    """LOOKS WRONG: the write log is the engine's, not the run's: run 2's read of the charge is
-    overlaid with run 1's faked refund, and L3 then refuses run 2's refund against it. That is what
-    production would have done (the bare run agrees), but it means two runs in one engine are not
-    isolated. Serve mode (#77) and the Phase 3 exit ("two concurrent requests don't mix") have to
-    decide whether that is the intended world; this pins today's answer."""
-    shadow = run_workflow(W, "shared_charge", "shadow")
+@pytest.mark.parametrize("mode", ["shadow", "serve"])
+def test_a_second_run_sees_the_first_runs_faked_refund(run_workflow, mode):
+    """The write log is the engine's, not the run's, by decision (#77): run 2's read of the charge
+    is overlaid with run 1's faked refund, and L3 then refuses run 2's refund against it. That is
+    what production would have done, since production has one Stripe, and the bare run agrees. The
+    shadow week's report counts exactly this: a refund an earlier run already made would have
+    been rejected, or was a duplicate (design §5.9). Two runs' attribution never mixes - each
+    exchange is stored in its own run - but what one faked, the other sees, under
+    `irimi shadow -- <cmd>` and under serve mode alike."""
+    shadow = run_workflow(W, "shared_charge", mode)
     bare = run_workflow(W, "shared_charge", "bare")
     saw = [e["amount_refunded"] for e in shadow.events("saw")]
     assert saw == [0, 3000] == [e["amount_refunded"] for e in bare.events("saw")]
@@ -187,7 +234,29 @@ def test_a_second_run_sees_the_first_runs_faked_refund(run_workflow):
     assert reads == [None, "overlay"]
     assert [c["status"] for c in shadow.calls() if c["method"] == "POST"] == [200, 400]
     assert len({c["run"] for c in shadow.calls()}) == 2
-    assert "  ✗ refund $30.00 on ch_QSHARED  would fail: amount_too_large" in shadow.summary()
+    refused = "  ✗ refund $30.00 on ch_QSHARED  would fail: amount_too_large"
+    if mode == "shadow":
+        assert refused in shadow.summary()
+        return
+    # Serve mode prints each run's own summary: the refund faked in the first, refused in the
+    # second, each under its own run.
+    first, second = (e["run"] for e in shadow.events("run.start"))
+    blocks = shadow.run_blocks()
+    assert "  ○ refund $30.00 on ch_QSHARED  unvalidated (L3 preconditions passed)" in blocks[first]
+    assert refused in blocks[second] and refused not in blocks[first]
+
+
+def test_a_second_runs_summary_says_the_first_runs_write_is_its_own(run_workflow):
+    """LOOKS WRONG: the second run's summary says its read was `showing this run's writes`, but
+    the write the overlay showed it is the first run's: the write log is the engine's (#77), and
+    the host line's wording predates runs. `irimi runs show` prints the same from the store under
+    `irimi shadow -- <cmd>`; serve mode prints it for every run, unasked."""
+    serve = run_workflow(W, "shared_charge", "serve")
+    second = serve.events("run.start")[1]["run"]
+    assert (
+        "  api.stripe.com  1 read (1 showing this run's writes)  1 engine read  1 write "
+        "intercepted" in serve.run_blocks()[second]
+    )
 
 
 @pytest.mark.parametrize("scenario", ["threads_8", "asyncio_8"])

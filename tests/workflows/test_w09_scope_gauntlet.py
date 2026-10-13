@@ -195,11 +195,18 @@ def test_irimis_own_headers_sent_by_the_agent_never_leave(run_workflow):
         assert "irimi-run" not in req.headers
 
 
-def test_every_spelling_of_the_proxys_own_address_is_the_reverse_door(run_workflow):
+@pytest.mark.parametrize("mode", ["shadow", "serve"])
+def test_every_spelling_of_the_proxys_own_address_is_the_reverse_door(run_workflow, mode):
     """`127.0.0.1` (sent direct, as irimi's NO_PROXY says), `127.1` and `0.0.0.0` (sent through the
     proxy to itself) all name irimi's listener, so each refund is taken through the reverse door
-    and faked. Missing a spelling would forward the request to the proxy itself, or past it."""
-    shadow = run_workflow(W, "self_addressed", "shadow")
+    and faked. Missing a spelling would forward the request to the proxy itself, or past it.
+
+    Serve mode binds irimi to 0.0.0.0 here (#77), so the listener is every address of this
+    machine: the same three spellings still find it, the agent still reaches it from loopback, so
+    the reverse door's peer check lets it through, and nothing reaches the fake internet. This
+    machine's own non-loopback address is not a spelling the fake resolver allows, so that case
+    is `tests/test_serve.py`'s."""
+    shadow = run_workflow(W, "self_addressed", mode)
     assert {k: v for k, v in shadow.by_label().items() if k.startswith("door_")} == {
         "door_127.0.0.1": (200, "fake-L1"),
         "door_127.1": (200, "fake-L1"),
@@ -212,9 +219,17 @@ def test_every_spelling_of_the_proxys_own_address_is_the_reverse_door(run_workfl
     read = "live      read      GET api.stripe.com/v1/charges/ch_GAUNTLET -> -"
     write = "fake-L1   write     POST api.stripe.com/v1/refunds -> 200  [fidelity:L1]"
     assert shadow.exchange_lines() == [read, write] * 3
-    refunds = [line for line in shadow.summary() if "○" in line]
-    assert refunds == ["  ○ refund 600 on ch_GAUNTLET  unvalidated (L2)"] * 3
     assert engine_reads(shadow) == [(None, ())] * 3  # stored as `big_reads` stores its one (#70)
+    if mode == "shadow":
+        refunds = [line for line in shadow.summary() if "○" in line]
+        assert refunds == ["  ○ refund 600 on ch_GAUNTLET  unvalidated (L2)"] * 3
+        return
+    # A plain script starts no run, so under serve every refund is `unattributed` and no run's
+    # summary prints. The bind wider than loopback is in the banner, once.
+    assert shadow.stored().list_runs() == [] and shadow.run_blocks() == {}
+    assert [line for line in shadow.irimi if line.startswith("listening on 0.0.0.0: ")] == [
+        f"listening on 0.0.0.0: {report.WIDE_BIND_NOTICE}"
+    ]
 
 
 def test_the_control_endpoint_answers_at_every_spelling_and_is_never_an_exchange(run_workflow):

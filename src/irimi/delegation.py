@@ -76,17 +76,24 @@ def target_url(target: str, request: Request, matched: bool) -> str:
     return f"{parts.scheme}://{parts.netloc}{path}{query}".replace("#", "%23")
 
 
-def refuse_self_target(target: str, listen_port: int) -> None:
+def refuse_self_target(target: str, listen_port: int, local_address: str = "") -> None:
     """Raise TargetRefused when `target` is this listener's own address.
 
     Targets are loopback-only, so the host alone cannot tell a stub from ourselves - the port is
     what separates them. Forwarding to our own listener makes the proxy dial itself until it runs
     out of ports, which is the loop `detect_door` was written for on the reverse door (#4).
+
+    `local_address` is the address the request's connection reached irimi at. Bound wider than
+    loopback, irimi is that address too, so a target `--allow-target-host` lets name it, or a
+    name resolving to it, is our own listener by the rule `detect_door` applies to a request
+    (#77): refused here, rather than dialled and refused again by the reverse door.
     """
     parts = urlsplit(target)
     port = parts.port or (443 if parts.scheme == "https" else 80)
     host = parts.hostname or ""
-    if port == listen_port and (netaddr.is_self_host(host) or netaddr.resolves_to_self(host)):
+    if port == listen_port and (
+        netaddr.is_self_host(host) or netaddr.resolves_to_self(host, local_address)
+    ):
         raise TargetRefused(
             f"answer target {target!r} is irimi's own listener on port {listen_port}; "
             "point it at the address that answers the route instead"

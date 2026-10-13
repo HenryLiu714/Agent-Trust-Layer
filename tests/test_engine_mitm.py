@@ -2314,7 +2314,7 @@ def test_a_refused_target_is_not_a_write_either(tmp_path, monkeypatch, target):
     overlay would have handed the agent back a write irimi refused to send anywhere.
     """
 
-    def refuse(url, port):
+    def refuse(url, port, local_address=""):
         raise delegation.TargetRefused("refusing this target")
 
     monkeypatch.setattr(delegation, "refuse_self_target", refuse)

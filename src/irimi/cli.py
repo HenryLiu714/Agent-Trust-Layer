@@ -200,13 +200,15 @@ def _load_maps(args: argparse.Namespace | None = None) -> "MapIndex | None":
         # own listener is the port - and dialling ourselves is a loop, not a delegation. The
         # addon repeats this per request against the port it actually bound, which is the
         # authoritative check; this one is here so `--port 4000` with a target on 4000 fails
-        # before anything starts rather than on the first request.
+        # before anything starts rather than on the first request. A `--listen-host` address is
+        # the listener too (#77).
         port = getattr(args, "port", 0) or 0
+        listen_host = getattr(args, "listen_host", "") or ""
         if port:
             for sm in index.services:
                 for target in (sm.target, *(r.target for r in sm.routes)):
                     if target != servicemap.SELF_TARGET:
-                        delegation.refuse_self_target(target, port)
+                        delegation.refuse_self_target(target, port, listen_host)
         return index
     except (servicemap.MapError, delegation.TargetRefused) as exc:
         print(f"error: {exc}", file=sys.stderr)

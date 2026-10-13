@@ -152,6 +152,74 @@ def test_a_request_naming_the_address_irimi_was_reached_at_is_never_forwarded_to
     assert calls == [(address, port)]
 
 
+TARGETED_MAP = """
+version: 1
+service: demo
+hosts:
+  - api.demo.test
+routes:
+  - match:
+      method: POST
+      path: /things
+    operation: things.create
+    kind: write
+    human: create a thing
+"""
+
+
+def test_an_answer_target_naming_the_address_irimi_was_reached_at_is_never_dialled(
+    tmp_path, monkeypatch
+):
+    """An answer target is irimi's own listener at the address a connection reached it at, as a
+    request is (#77): with `--listen-host 0.0.0.0` and `--allow-target-host` naming this machine's
+    own address, a write the target would answer is refused by irimi as its own listener, with
+    `irimi_target_failed`, and no second connection to the listener is opened. Before, the target
+    was dialled and the reverse door refused the looped request, as from a peer not on loopback."""
+    import json
+    import os
+
+    address = _own_address()
+    if address is None:
+        assert not os.environ.get("CI"), "a CI runner with no route has no address to test"
+        pytest.skip("this machine has no route, so no non-loopback address")
+    with socket.socket() as probe:  # a free port, so the target can name it before the bind
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    maps_dir = tmp_path / "maps"
+    maps_dir.mkdir()
+    (maps_dir / "demo.yaml").write_text(TARGETED_MAP)
+    maps = servicemap.load(
+        allow_target_hosts=frozenset({address}),
+        cwd=tmp_path,
+        maps_dir=maps_dir,
+        targets=[("api.demo.test", "/things", f"http://{address}:{port}/w")],
+    )
+    cfg = dataclasses.replace(
+        _config(tmp_path, monkeypatch, listen_host="0.0.0.0"), listen_port=port, maps=maps
+    )
+    calls = _counting_requests(monkeypatch)
+    engine = MitmEngine(cfg, ShadowPolicy(maps=maps), NullStore(), NoOverlay())
+    from irimi import runner
+
+    handle = runner.start_engine(engine)
+    try:
+        import http.client
+
+        conn = http.client.HTTPConnection(address, port, timeout=10)
+        try:
+            conn.request("POST", "http://api.demo.test/things", body=b"{}")
+            resp = conn.getresponse()
+            status, body = resp.status, resp.read()
+        finally:
+            conn.close()
+    finally:
+        handle.stop()
+    assert status == 502
+    error = json.loads(body)["error"]
+    assert error["type"] == "irimi_target_failed" and "own listener" in error["message"]
+    assert calls == [(address, port)]
+
+
 def test_a_door_that_cannot_be_told_is_refused_never_forwarded(tmp_path, monkeypatch):
     """Telling the doors apart now parses the address a connection arrived on and may resolve a
     name (#77). If that raises, the hook would forward the flow, and the request it was asking

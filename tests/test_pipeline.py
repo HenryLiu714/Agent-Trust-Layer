@@ -783,6 +783,28 @@ def test_a_target_on_another_port_is_allowed():
     assert refuse_self_target("http://127.0.0.1", 4000) is None  # port 80, not ours
 
 
+def test_a_target_naming_the_address_irimi_was_reached_at_is_refused(monkeypatch):
+    """Bound wider than loopback, irimi is also the address a connection reached it at, and a
+    name resolving to it, as `detect_door` says of a request (#77). A target there, which only
+    `--allow-target-host` lets off loopback, is irimi's own listener too: refused as one, never
+    dialled to be refused again by the reverse door."""
+    import socket
+
+    real = socket.getaddrinfo
+
+    def resolving(host, *args, **kwargs):
+        return real("10.0.0.5" if host == "irimi.test" else host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolving)
+    for target in ["http://10.0.0.5:4000", "http://irimi.test:4000/w"]:
+        for local in ["10.0.0.5", "::ffff:10.0.0.5"]:
+            with pytest.raises(TargetRefused, match="own listener"):
+                refuse_self_target(target, 4000, local)
+        assert refuse_self_target(target, 4000) is None  # reached on loopback: another machine's
+        assert refuse_self_target(target, 4000, "10.0.0.6") is None
+    assert refuse_self_target("http://10.0.0.5:3000", 4000, "10.0.0.5") is None
+
+
 def test_classify_reports_the_service_map_even_when_no_route_matched(tmp_path, monkeypatch):
     """A service-level target has to reach the routes its own map does not list, and for those
     `matched` is None. Without this field the policy could not tell "unmapped host" from

@@ -271,6 +271,26 @@ def test_a_target_on_the_listeners_own_port_fails_closed(capsys):
     assert "own listener" in capsys.readouterr().err
 
 
+def test_a_target_on_the_listen_host_fails_closed(capsys):
+    """`--listen-host` is the listener's address too, so a target the escape hatch lets name it,
+    on irimi's own port, is refused before anything starts (#77)."""
+    code = main(
+        [
+            "serve",
+            "--port",
+            "4000",
+            "--listen-host",
+            "10.0.0.5",
+            "--allow-target-host",
+            "10.0.0.5",
+            "--target",
+            "api.stripe.com=http://10.0.0.5:4000",
+        ]
+    )
+    assert code == 1
+    assert "own listener" in capsys.readouterr().err
+
+
 def test_a_target_naming_an_unmapped_host_fails_closed(capsys):
     code = main(["serve", "--port", "0", "--target", "nope.example=http://127.0.0.1:3000"])
     assert code == 1

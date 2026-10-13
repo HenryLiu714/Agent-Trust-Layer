@@ -897,7 +897,9 @@ class IrimiAddon:
         which rewrites the recorded request too - there the rewritten host *is* what the caller
         asked for, spelled as a path.
         """
-        delegation.refuse_self_target(forward.url, flow.client_conn.sockname[1])
+        # The address the connection arrived on too, as `detect_door` reads it (#77).
+        local_address, local_port = flow.client_conn.sockname[:2]
+        delegation.refuse_self_target(forward.url, local_port, str(local_address))
         parts = urlsplit(forward.url)
         host = (parts.hostname or "").lower()
         default_port = 443 if parts.scheme == "https" else 80

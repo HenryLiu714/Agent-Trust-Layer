@@ -121,15 +121,20 @@ def test_reverse_hosts_adds_allow_host_lower_cased():
 
 def test_engine_config_carries_the_maps():
     """`serve` and `shadow` both build the engine's config here, and the classifier only sees the
-    maps because `maps=index` is part of it."""
-    from irimi.cli import _engine_config
+    maps because `maps=index` is part of it. The bind is `--listen-host`'s, and `serve` is set only
+    for serve mode, whose health answer says so (#73, #77)."""
+    from irimi.cli import _engine_config, build_parser
 
     index = _shipped_index()
-    args = argparse.Namespace(allow_host=[], port=4321)
+    args = argparse.Namespace(allow_host=[], port=4321, listen_host="0.0.0.0")
     cfg = _engine_config(args, index, "t3st", ca.ca_paths())
     assert cfg.maps is index
     assert cfg.reverse_hosts == index.hosts
-    assert (cfg.run_id, cfg.listen_host, cfg.listen_port) == ("t3st", paths.LISTEN_HOST, 4321)
+    assert (cfg.run_id, cfg.listen_host, cfg.listen_port) == ("t3st", "0.0.0.0", 4321)
+    assert cfg.serve is False
+    assert _engine_config(args, index, "t3st", ca.ca_paths(), serve=True).serve is True
+    for command in (["serve"], ["shadow", "--", "true"]):
+        assert build_parser().parse_args(command).listen_host == paths.LISTEN_HOST
 
 
 def test_the_composition_root_builds_the_service_overlay_over_the_run_s_maps():
@@ -140,7 +145,7 @@ def test_the_composition_root_builds_the_service_overlay_over_the_run_s_maps():
     from irimi.store import NullStore
 
     index = _shipped_index()
-    args = argparse.Namespace(allow_host=[], port=4321)
+    args = argparse.Namespace(allow_host=[], port=4321, listen_host=paths.LISTEN_HOST)
     p = ca.ca_paths()
     run = cli._Run(index, p, "t3st", cli._engine_config(args, index, "t3st", p), NullStore())
     engine = cli._build_engine(run, on_exchange=lambda ex: None)
@@ -528,6 +533,7 @@ def test_a_ctrl_c_while_the_store_closes_still_prints_the_summary(home, monkeypa
 def test_serve_prints_a_line_for_each_tool_call(home, monkeypatch, capsys):
     """`serve` wires the control endpoint's tool calls to its stream, as it does exchanges (#76).
     The engine here refuses to start, so only the wiring is under test."""
+    from irimi.engine import EngineStartError
     from irimi.trace import ToolCall
 
     wired = []
@@ -537,7 +543,10 @@ def test_serve_prints_a_line_for_each_tool_call(home, monkeypatch, capsys):
             pass
 
         async def wait_ready(self) -> None:
-            raise RuntimeError("not started")
+            raise EngineStartError("not started")
+
+        def shutdown(self) -> None:
+            pass
 
     def build(run, on_exchange, on_tool_call):
         wired.append(on_tool_call)
@@ -551,15 +560,16 @@ def test_serve_prints_a_line_for_each_tool_call(home, monkeypatch, capsys):
 
 
 def test_serve_records_under_the_store_it_was_given(home, monkeypatch):
-    """`--store` on `serve` is where its exchanges go, not `$IRIMI_HOME/store` (#70). `serve`
-    starts no process run (#77 owns serve mode), so its exchanges make a `header` run, and the
-    store is closed when `serve` stops."""
-    import asyncio
+    """`--store` on `serve` is where its exchanges go, not `$IRIMI_HOME/store` (#70). Serve mode
+    starts no process run, so an exchange that names no run is stored in `unattributed/` and
+    builds none (#77), and the store is closed when serve stops. Stopped by its `stop` event, as
+    the sample-workflow harness stops it, rather than by a signal to the test process."""
     import threading
     import urllib.request
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
     from irimi.store import StoreReader
+    from irimi.trace import UNATTRIBUTED
 
     class _Hello(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -573,13 +583,7 @@ def test_serve_records_under_the_store_it_was_given(home, monkeypatch):
 
     upstream = HTTPServer(("127.0.0.1", 0), _Hello)
     threading.Thread(target=upstream.serve_forever, daemon=True).start()
-    engines = []
-    build = cli._build_engine
-    monkeypatch.setattr(
-        cli,
-        "_build_engine",
-        lambda run, cb, on_tool_call: engines.append(build(run, cb, on_tool_call)) or engines[-1],
-    )
+    stop = threading.Event()
     got = []
 
     def drive(port):
@@ -587,24 +591,23 @@ def test_serve_records_under_the_store_it_was_given(home, monkeypatch):
         url = f"http://127.0.0.1:{upstream.server_address[1]}/hello"
         try:
             got.append(urllib.request.build_opener(proxy).open(url, timeout=10).read())
-        finally:  # stop `serve` whatever happened, or the test would wait on it forever
-            loop.call_soon_threadsafe(engines[0].shutdown)
+        finally:  # stop serve whatever happened, or the test would wait on it forever
+            stop.set()
 
     def startup(mode, args, index, run_id, host, port, cert):
-        nonlocal loop
-        loop = asyncio.get_running_loop()
         threading.Thread(target=drive, args=(port,), daemon=True).start()
 
-    loop = None
     monkeypatch.setattr(cli, "print_startup", startup)
     elsewhere = home / "elsewhere"
+    args = cli.build_parser().parse_args(
+        ["shadow", "--serve", "--port", "0", "--store", str(elsewhere)]
+    )
     try:
-        assert main(["serve", "--port", "0", "--store", str(elsewhere)]) == 0
+        assert args.func(args, stop) == 0
     finally:
         upstream.shutdown()
     assert got == [b"hello"]
     assert not (home / "store").exists()
-    (record,) = StoreReader(elsewhere).list_runs()
-    assert record.attribution == "header" and record.outcome is None
-    stored = StoreReader(elsewhere).load_run(record.run_id)
+    assert StoreReader(elsewhere).list_runs() == []
+    stored = StoreReader(elsewhere).load_run(UNATTRIBUTED)
     assert [(ex.request.path, ex.response.body) for ex in stored.events] == [("/hello", b"hello")]

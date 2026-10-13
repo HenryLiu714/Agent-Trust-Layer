@@ -76,8 +76,8 @@ class _SpyStore(DirectoryStore):
 
     built: list["_SpyStore"] = []
 
-    def __init__(self, root: Path, key: bytes) -> None:
-        super().__init__(root, key)
+    def __init__(self, root: Path, key: bytes, on_run_ended=None) -> None:
+        super().__init__(root, key, on_run_ended)
         self.received: list[Exchange] = []
         _SpyStore.built.append(self)
 

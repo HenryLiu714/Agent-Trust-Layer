@@ -2,7 +2,8 @@
 
 For SDKs that ship their own CA bundle or ignore the proxy variables (stripe-python is the
 canonical case). The door is loopback-only and relays to an allow-list of exact hosts. The engine
-enforces the loopback half (`IrimiAddon._through_reverse_door`); these functions decide the rest.
+enforces the loopback half (`IrimiAddon._through_reverse_door`) whatever address the listener is
+bound to (#77); these functions decide the rest.
 """
 
 from dataclasses import replace
@@ -18,14 +19,18 @@ class ReverseDoorRefused(ValueError):
     """The reverse door will not relay this request. str(exc) is the one-line explanation."""
 
 
-def detect_door(request: Request, listen_port: int) -> Door:
+def detect_door(request: Request, listen_port: int, local_address: str = "") -> Door:
     """A request addressed to the listener itself (`Host: 127.0.0.1:4000`, or an absolute URL
     naming the listener under any spelling of loopback) came through the reverse door. Everything
     else is the forward door. A name on our own port that is not a recognised literal is resolved,
-    because forwarding it would make the proxy connect to itself in a loop."""
+    because forwarding it would make the proxy connect to itself in a loop.
+
+    `local_address` is the address the connection arrived on. A listener bound wider than loopback
+    is also this machine at that address, which an agent in another container reaches by name
+    (`http://irimi:4000/...`): a host that is it, or resolves to it, is the listener too (#77)."""
     if request.port != listen_port:
         return "forward"
-    if netaddr.is_self_host(request.host) or netaddr.resolves_to_self(request.host):
+    if netaddr.is_self_host(request.host) or netaddr.resolves_to_self(request.host, local_address):
         return "reverse"
     return "forward"
 

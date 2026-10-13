@@ -585,8 +585,17 @@ class IrimiAddon:
             return
         if cut:  # the exchange this flow becomes says its request body is not all there (#94)
             flow.metadata[REQUEST_CUT_KEY] = True
-        # sockname is the socket this request arrived on, i.e. our own listener.
-        door = reverse_door.detect_door(req, flow.client_conn.sockname[1])
+        # sockname is the socket this request arrived on, i.e. our own listener: its port, and the
+        # address it was reached at, which is this machine too when the bind is wider than
+        # loopback (#77). Guarded like the rewrite below: a raise here would forward the flow, and
+        # a request this check exists for is one addressed to irimi itself.
+        try:
+            local_address, local_port = flow.client_conn.sockname[:2]
+            door = reverse_door.detect_door(req, local_port, str(local_address))
+        except Exception as exc:  # never fail open: a request whose door is unknown may be ours
+            logger.warning("irimi: refusing request whose door could not be told: %s", exc)
+            flow.response = http.Response.make(400, b"irimi: could not route request\n")
+            return
         # THE CONTROL ENDPOINT (#73) is answered here and returns, before the reverse door, which
         # would read `_irimi` as an upstream host and refuse it, and before `Irimi-Run` is read: a
         # control request names its run in its path. It is never forwarded, never decided and

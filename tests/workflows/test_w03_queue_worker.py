@@ -12,6 +12,7 @@ from urllib.parse import parse_qs
 import pytest
 
 import irimi
+from examples.workflows.harness.run import check_invariants
 from examples.workflows.w03_queue_worker.agent import CLIENTS, LEDGER, POOLED
 from examples.workflows.w03_queue_worker.scenarios import AGENT_VERSION
 from irimi.exchange import Exchange
@@ -123,6 +124,76 @@ def test_concurrent_runs_each_store_exactly_their_own_events(run_workflow, scena
         for charge, record in found.items():
             named = {c for line in blocks[record.run_id] for c in re.findall(r"ch_Q\d", line)}
             assert named == {charge}, blocks[record.run_id]
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("scenario", CONCURRENT)
+def test_phase_3_exit_holds_for_eight_concurrent_runs(run_workflow, scenario, mode):
+    """Phase 3's exit (#78), "a server-style agent produces attributed runs with their triggers,
+    and two concurrent requests don't mix", as `tests/test_phase3_exit.py` asserts it for two
+    requests, held here for eight over W3's six clients, over two shared one-connection pools,
+    and with tools. Exactly eight runs, all `sdk` and `ok`, plus the process run under
+    `irimi shadow -- <cmd>` and nothing more under serve (#77); each run's trigger args name its
+    own charge, and its exchanges and tool calls name that charge alone;
+    `unattributed/` holds nothing; `irimi runs list` prints one line per run; each write tool was
+    stood in, and the ledger it would have written holds no row; and the routing is proved from
+    the store (#78's "Since #67"): the fake Stripe answered exactly the charge reads irimi stored
+    as live, so none went past it. Under serve, each run's block holds its own refund (and its own
+    stood-in tool write) alone. Invariants 1 to 5 hold."""
+    result = run_workflow(W, scenario, mode)
+    bare = run_workflow(W, scenario, "bare")
+    reader = result.stored()
+    records = reader.list_runs()
+    process = ["process"] if mode == "shadow" else []
+    assert sorted(r.attribution for r in records) == [*process, *["sdk"] * 8]
+    runs = [r for r in records if r.attribution == "sdk"]
+    assert {(r.outcome, r.error) for r in runs} == {("ok", None)}
+    # What no run names is filed here: without the SDK's labels (#75), every request is.
+    assert reader.load_run(UNATTRIBUTED).events == []
+    ledger = scenario.startswith("ledger_")
+    charges = {}
+    for record in runs:
+        assert record.trigger is not None
+        charge = record.trigger.args["message"]["charge"]
+        charges[charge] = record.run_id
+        events = reader.load_run(record.run_id).events
+        assert {charge_named(e) for e in events if isinstance(e, Exchange)} == {charge}, events
+        calls = [e for e in events if isinstance(e, ToolCall)]
+        assert {c.args["charge"] for c in calls} == ({charge} if ledger else set()), calls
+        writes = [(c.kind, c.ran) for c in calls if c.kind == "write"]
+        assert writes == ([("write", "shadow")] if ledger else []), calls
+    assert sorted(charges) == [f"ch_Q{i}" for i in range(8)]
+    code, out, err = result.runs("list")
+    assert (code, len(out), err) == (0, 8 + len(process), [])
+    assert sorted(line.split("  ", 1)[0] for line in out if "  sdk  " in line) == sorted(
+        charges.values()
+    )
+    # Invariant 3, as #78 states it for its SQLite file: what the write tool would have written
+    # does not exist. Bare, the same eight rows really land; a scenario with no tools has no ledger.
+    if ledger:
+        assert result.query(LEDGER, "SELECT * FROM refunds") == []
+        assert len(bare.query(LEDGER, "SELECT * FROM refunds")) == 8
+    else:
+        assert not (result.state / LEDGER).exists()
+    charge_reads = Counter(
+        r.path for r in result.internet.requests("api.stripe.com") if r.method == "GET"
+    )
+    stored_reads = Counter(
+        e.request.path
+        for run_id in charges.values()
+        for e in reader.load_run(run_id).events
+        if isinstance(e, Exchange) and e.answered_by == "live" and e.request.method == "GET"
+    )
+    assert charge_reads == stored_reads == {f"/v1/charges/{c}": 2 for c in charges}
+    if mode == "serve":
+        blocks = result.run_blocks()
+        assert set(blocks) == set(charges.values())
+        for charge, run_id in charges.items():
+            [refund] = [line for line in blocks[run_id] if "○ refund" in line]
+            assert refund.endswith(f" on {charge}  unvalidated (L3 preconditions passed)"), refund
+            tools = [line for line in blocks[run_id] if "○ tool" in line]
+            assert len(tools) == (1 if ledger else 0), blocks[run_id]
+    assert check_invariants(result, bare) == []
 
 
 def charge_named(ex: Exchange) -> str:
@@ -280,9 +351,10 @@ def test_a_second_run_sees_the_first_runs_faked_refund(run_workflow, mode):
     is overlaid with run 1's faked refund, and L3 then refuses run 2's refund against it. That is
     what production would have done, since production has one Stripe, and the bare run agrees. The
     shadow week's report counts exactly this: a refund an earlier run already made would have
-    been rejected, or was a duplicate (design §5.9). Two runs' attribution never mixes - each
-    exchange is stored in its own run - but what one faked, the other sees, under
-    `irimi shadow -- <cmd>` and under serve mode alike."""
+    been rejected, or was a duplicate (design §5.9). "Two concurrent requests don't mix", Phase 3's
+    exit (#78), means attribution: each exchange and tool call is stored in the run that named it.
+    What one run faked, the other still sees, under `irimi shadow -- <cmd>` and under serve mode
+    alike."""
     shadow = run_workflow(W, "shared_charge", mode)
     bare = run_workflow(W, "shared_charge", "bare")
     saw = [e["amount_refunded"] for e in shadow.events("saw")]
@@ -306,8 +378,8 @@ def test_a_second_run_sees_the_first_runs_faked_refund(run_workflow, mode):
 def test_a_second_runs_summary_says_the_first_runs_write_is_its_own(run_workflow):
     """LOOKS WRONG: the second run's summary says its read was `showing this run's writes`, but
     the write the overlay showed it is the first run's: the write log is the engine's (#77), and
-    the host line's wording predates runs. `irimi runs show` prints the same from the store under
-    `irimi shadow -- <cmd>`; serve mode prints it for every run, unasked."""
+    the host line's wording predates runs (#129). `irimi runs show` prints the same from the store
+    under `irimi shadow -- <cmd>`; serve mode prints it for every run, unasked."""
     serve = run_workflow(W, "shared_charge", "serve")
     second = serve.events("run.start")[1]["run"]
     assert (
@@ -527,8 +599,8 @@ def test_a_task_a_sync_trigger_returns_files_its_calls_in_the_run_that_already_e
 
     LOOKS WRONG: every one of the task's exchanges is stored in a run that had already ended,
     after its `ended_at`, and the run reads back `ok` though its work had not started. #75 accepted
-    it (its plan's decision 10, with a follow-up issue to file): either `hand_off` covers
-    awaitables, or the task's calls belong to no run. This pins today's answer."""
+    it (its plan's decision 10), and #111 is the follow-up: either `hand_off` covers awaitables, or
+    the task's calls belong to no run. This pins today's answer."""
     shadow = run_workflow(W, "task_outlives_trigger", mode)
     ends = {e["run"]: e["t"] for e in shadow.events("run.end")}
     assert len(ends) == 2 and set(ends) == set(shadow.by_run())
@@ -552,7 +624,7 @@ def test_a_task_a_sync_trigger_returns_files_its_calls_in_the_run_that_already_e
         # Serve mode prints each run's block once its end is on disk (#77), which is before the
         # task has run a step. LOOKS WRONG: so each block says the run made no call at all, and
         # its refund is in no block, though the stored run holds it (`test_invariants.py`'s
-        # `LATE_EVENTS`).
+        # `LATE_EVENTS`, #125).
         for record in found.values():
             assert shadow.run_blocks()[record.run_id][-1] == (
                 "  0 exchanges · 0 live · 0 delegated · 0 virtualized"

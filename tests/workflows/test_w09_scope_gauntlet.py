@@ -306,6 +306,8 @@ REFUSALS = {
         f"the body is {OVERSIZED_BODY_BYTES + 11} bytes, over the "
         f"{control.MAX_CONTROL_BODY} allowed",
     ),
+    # Named by its type, never quoted: the same line on every Python (#100, #123).
+    "refuse_deep": (400, "'name' is a list, not a string"),
 }
 ELAPSED = re.compile(r" · \d+\.\ds · ")
 
@@ -523,9 +525,10 @@ def test_a_run_that_ends_in_error_keeps_its_error_cut_to_what_a_trace_keeps(run_
 def test_each_refusal_answers_its_status_and_line_and_makes_no_run(run_workflow, mode):
     """Every refusal #73 documents, through the real proxy: the wrong method (405), no such route
     (404), a run id the store cannot use (400 for `../x` and for `unattributed`), `NaN`, a missing
-    field, a tool call naming its own run (400) and a body past 2 MiB (413). Each names its own
-    run, and none of them is a directory, or an unattributed event, afterwards. Under serve mode
-    (#77) the store also holds the serve's `serve.lock`, and no process run."""
+    field, a tool call naming its own run, a field nested 5,000 deep, named by its type (#100)
+    (400), and a body past 2 MiB (413). Each names its own run, and none of them is a directory,
+    or an unattributed event, afterwards. Under serve mode (#77) the store also holds the serve's
+    `serve.lock`, and no process run."""
     shadow = run_workflow(W, "control_runs", mode)
     assert {e["label"]: e["body"] for e in shadow.events("refusal")} == {
         label: {"error": line} for label, (_, line) in REFUSALS.items()

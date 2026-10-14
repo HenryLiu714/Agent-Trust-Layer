@@ -61,13 +61,14 @@ logger = logging.getLogger(__name__)
 # The largest body a control request may post. A trigger's arguments and a tool call's result are
 # JSON the SDK captured; a body past this is answered 413 and never parsed (#73).
 MAX_CONTROL_BODY = 2 * 1024 * 1024
-# The longest line a refusal's body says. A refusal may quote a string the agent sent (a word
-# outside a vocabulary, the path), and a 2 MiB string must not come back as a 2 MiB error (#73).
+# The longest line a refusal's body says. A refusal may quote what the agent sent - the path, a run
+# id - and a long one must not come back as a long error (#73). A decoder cuts the string it quotes
+# itself, at `trace.MAX_QUOTED` (#100).
 MAX_REFUSAL = 200
 # The refusal of a body nested deeper than `json.loads` reads it: a 400 like any other malformed
-# body, never a 500 logged as irimi's failure (#73). 3.14's `json.loads` reads deeper than 3.12's,
-# and a field nested deeper than 3.12 reads but within what 3.14 does is refused by its decoder,
-# which names the field's type (#100).
+# body, never a 500 logged as irimi's failure (#73). How deep that is depends on the Python and
+# the parsing thread's stack, about 10,000 on 3.12 and further on 3.14, so a field nested between
+# the two is TOO_DEEP on 3.12 and on 3.14 its decoder's refusal, which names its type (#100).
 TOO_DEEP = "the body nests too deeply to read"
 # The refusal of a start or an end for irimi's own run, `EngineConfig.run_id` (#73).
 OWN_RUN = "is irimi's own run, which the SDK may not start or end"
@@ -255,7 +256,7 @@ def _posted(request: Request, whole_body: bool) -> Mapping[str, Any]:
     except ValueError as exc:  # UnicodeDecodeError is a ValueError
         raise _Refused(400, f"the body is not JSON: {exc}") from None
     if not isinstance(posted, dict):
-        raise _Refused(400, f"the body is a JSON {type(posted).__name__}, not an object")
+        raise _Refused(400, f"the body is {trace.json_type(posted)}, not an object")
     return posted
 
 

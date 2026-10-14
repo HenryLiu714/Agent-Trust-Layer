@@ -654,6 +654,10 @@ def _summary(
 # `irimi runs show`'s `args:` line: enough to recognise a trigger by, not a dump of it (#72).
 MAX_ARGS_SHOWN = 500
 NOT_SET = "-"
+# The `args:` of a trigger nested deeper than `json.dumps` writes. Python 3.14's `json.loads` reads
+# a `run.json` some levels deeper than its `json.dumps` writes back, so a damaged one read fine and
+# then raised RecursionError out of `runs show` (#100).
+ARGS_TOO_DEEP = "(nested too deeply to show)"
 # A C0 or C1 control character, DEL included. A stored run's text is the agent's own - an error
 # message is `str(exc)` - and printed raw, a newline breaks `runs show`'s one `key: value` per line
 # and an escape sequence is obeyed by the terminal reading it (#72).
@@ -716,7 +720,10 @@ def run_header_lines(record: RunRecord) -> list[str]:
     entrypoint = (trigger.entrypoint if trigger is not None else None) or NOT_SET
     args = NOT_SET
     if trigger is not None:
-        args = json.dumps(trigger.args, separators=(",", ":"), ensure_ascii=False)
+        try:
+            args = json.dumps(trigger.args, separators=(",", ":"), ensure_ascii=False)
+        except RecursionError:
+            args = ARGS_TOO_DEEP
         if len(args) > MAX_ARGS_SHOWN:
             args = args[:MAX_ARGS_SHOWN] + "…"
     lines = [

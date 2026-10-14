@@ -174,6 +174,9 @@ SDK_VERSION = "by-hand"
 LONG_MESSAGE_CHARS = 1500
 # Past `irimi.control.MAX_CONTROL_BODY` (2 MiB), the most a control request may post.
 OVERSIZED_BODY_BYTES = 2 * 1024 * 1024 + 1
+# How deep `refuse_deep` nests a tool call's name: deeper than `repr` went on some Pythons, and
+# read by every Python's `json.loads`, so its decoder names it by type on all of them (#100, #123).
+DEEP_FIELD_LEVELS = 5_000
 # How long `_settle` waits for irimi's store to write what is queued.
 SETTLE_S = 5.0
 
@@ -375,6 +378,8 @@ def _refusals(control: str) -> None:
         "ended_at": time.time(),
     }
     big = b'{"pad": "' + b"x" * OVERSIZED_BODY_BYTES + b'"}'
+    nested = "[" * DEEP_FIELD_LEVELS + "]" * DEEP_FIELD_LEVELS
+    deep = json.dumps({**tool, "name": None}).replace('"name": null', f'"name": {nested}').encode()
     refusals: list[tuple[str, str, str, dict[str, Any] | None, bytes | None]] = [
         ("refuse_get", "GET", "/runs/ctl-refused-get/start", None, None),
         ("refuse_route", "POST", "/runs/ctl-refused-route/nope", ended, None),
@@ -390,6 +395,7 @@ def _refusals(control: str) -> None:
             None,
         ),
         ("refuse_big", "POST", "/runs/ctl-refused-big/start", None, big),
+        ("refuse_deep", "POST", "/runs/ctl-refused-deep/tool-calls", None, deep),
     ]
     for label, method, route, doc, body in refusals:
         headers = {"Content-Type": "application/json"} if body is not None else None

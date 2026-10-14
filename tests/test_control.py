@@ -12,11 +12,11 @@ import time
 
 import pytest
 
-from irimi import __version__, redact
+from irimi import __version__, redact, trace
 from irimi.control import MAX_CONTROL_BODY, MAX_REFUSAL, TOO_DEEP, ControlEndpoint
 from irimi.exchange import Exchange, Request
 from irimi.store import DirectoryStore, NullStore, StoreReader
-from irimi.trace import MAX_ERROR_MESSAGE, ErrorInfo, ToolCall, Trigger
+from irimi.trace import MAX_ERROR_MESSAGE, MAX_QUOTED, ErrorInfo, ToolCall, Trigger
 from tests import test_engine_mitm
 from tests.test_engine_mitm import _config, _start, _via_proxy
 
@@ -247,7 +247,8 @@ REFUSALS = [
         _NOT_JSON + "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
     ),
     ("POST", _START, b'{"started_at": NaN}', 400, _NOT_JSON + "NaN is not a finite number"),
-    ("POST", _START, b"[]", 400, "the body is a JSON list, not an object"),
+    ("POST", _START, b"[]", 400, "the body is a list, not an object"),
+    ("POST", _START, b"null", 400, "the body is null, not an object"),
     (
         "POST",
         _START,
@@ -449,6 +450,26 @@ def test_the_endpoint_answers_500_itself_when_its_store_raises():
     assert response.header("irimi-answered-by") == "control"
 
 
+def test_a_decoder_that_raises_anything_but_its_refusal_is_irimi_s_500_never_too_deep(
+    monkeypatch, caplog
+):
+    """A decoder raises only TraceFormatError, however deep the value it refuses (#100), so one
+    that raised RecursionError would be irimi's own bug: a 500 logged with its traceback, never
+    TOO_DEEP blaming the agent for a body `json.loads` read, as `_decoded` answered before #100."""
+
+    def broken(doc):
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(trace, "run_from_json", broken)
+    body = json.dumps(_start_body(1.0)).encode()
+    request = Request("POST", "http", "127.0.0.1", 4000, _START, "", (), body)
+    with caplog.at_level(logging.ERROR, logger="irimi.control"):
+        response = ControlEndpoint(NullStore(), serve=False).answer(request)
+    assert (response.status, json.loads(response.body)) == (500, {"error": "internal"})
+    [logged] = [r for r in caplog.records if r.name == "irimi.control"]
+    assert logged.exc_info is not None and logged.exc_info[0] is RecursionError
+
+
 def test_an_on_tool_call_that_raises_costs_the_callback_not_the_record(
     tmp_path, monkeypatch, caplog
 ):
@@ -509,13 +530,19 @@ def test_a_posted_error_message_is_cut_to_the_length_a_trace_keeps(engine):
 
 
 def test_a_refusal_quotes_at_most_a_line_of_what_it_refused(engine):
-    """A word outside a vocabulary is quoted back; a 1 MB one comes back as one line. A value of
-    the wrong type is named by its type, never quoted (#100)."""
+    """A word outside a vocabulary is quoted back, a 1 MB one cut by its decoder at MAX_QUOTED
+    characters (#100). A refusal that quotes the path is cut at MAX_REFUSAL (#73). A value of the
+    wrong type is named by its type, never quoted (#100)."""
     body = {**_tool_call(1.0), "kind": "s" * 1_000_000}
     status, _, raw = engine.call("POST", f"/_irimi/runs/{RUN}/tool-calls", body)
+    word = "s" * MAX_QUOTED
+    assert (status, json.loads(raw)) == (
+        400,
+        {"error": f"'kind' is '{word}'…, not one of ('read', 'write')"},
+    )
+    status, _, raw = engine.call("POST", f"/_irimi/runs/{'x' * 5_000}/start", _start_body(1.0))
     error = json.loads(raw)["error"]
-    assert status == 400 and error.startswith("'kind' is 'sss")
-    assert len(error) == MAX_REFUSAL
+    assert status == 400 and error == "'" + "x" * (MAX_REFUSAL - 1)
     status, _, raw = engine.call("POST", _START, {**_start_body(1.0), "started_at": "s" * 1_000})
     assert (status, json.loads(raw)) == (400, {"error": "'started_at' is a string, not a number"})
 

@@ -14,9 +14,10 @@ Phase 5: a stored run gets no second chance to repeat an L3 read.
 Decoders raise `TraceFormatError` and nothing else on a malformed record - one that is not a JSON
 object, lacks a field, or holds a value of the wrong type, outside its vocabulary or not finite -
 refuse a `schema_version` newer than this module's or below 1, and ignore keys they do not know.
-A value of the wrong type is named by its JSON type and never quoted (`_json_type`), so a decoder
-cannot raise while it explains itself (#100); what a message does quote, a string outside a
-vocabulary or a float that is not finite, cannot recurse.
+A value of the wrong type is named by its JSON type and never quoted (`json_type`), so a decoder
+cannot raise while it explains itself (#100). What a message does quote cannot recurse: a float
+that is not finite, or a string - a word outside a vocabulary, a `sha256` that is no digest - cut
+to MAX_QUOTED characters, so a damaged line's megabyte string is never a megabyte message.
 The one exception they do not wrap is the caller's own: `exchange_from_json` and `event_from_json`
 hand every body ref to `get_body`, and whatever it raises - a blob missing from the store - reaches
 the caller unchanged.
@@ -70,6 +71,11 @@ SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 # The longest `ErrorInfo.message` kept: a run's error is a label, not a log (#68).
 MAX_ERROR_MESSAGE = 1000
+
+# The most of a string a decoder's message quotes (`_quoted`). The message is read by a person, on
+# `irimi runs show`'s stderr, in `list_runs`'s warning or as a control refusal, and a damaged
+# line's 5 MB `kind` must not come back as a 5 MB line (#100).
+MAX_QUOTED = 64
 
 type JSONValue = None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
 
@@ -449,7 +455,7 @@ def _response_from_json(d: Mapping[str, Any], get_body: GetBody) -> Response:
 def _headers_from_json(d: Mapping[str, Any], key: str) -> Headers:
     pairs = _present(d, key)
     if not isinstance(pairs, list):
-        raise TraceFormatError(f"{key!r} is {_json_type(pairs)}, not a list of [name, value] pairs")
+        raise TraceFormatError(f"{key!r} is {json_type(pairs)}, not a list of [name, value] pairs")
     out: list[tuple[str, str]] = []
     for index, pair in enumerate(pairs):
         if not (
@@ -466,7 +472,7 @@ def _body_from_json(d: Mapping[str, Any], key: str, get_body: GetBody) -> bytes:
         return b""
     sha256 = _str(ref, "sha256")
     if SHA256_PATTERN.fullmatch(sha256) is None:
-        raise TraceFormatError(f"{sha256!r} is not a sha256 digest")
+        raise TraceFormatError(f"{_quoted(sha256)} is not a sha256 digest")
     return get_body(BodyRef(sha256, _int(ref, "size"), _bool(ref, "truncated")))
 
 
@@ -475,12 +481,13 @@ def _body_from_json(d: Mapping[str, Any], key: str, get_body: GetBody) -> bytes:
 # (#70), and the control endpoint answers every malformed body with a 400 (#73).
 
 
-def _json_type(value: Any) -> str:
-    """What a refused value is, by its JSON type, for the refusal's message. Never the value
-    itself: `repr` of a list nested 100,000 deep raises RecursionError, which Python 3.14's
-    `json.loads` reads and 3.12's refuses, and of an integer past `sys.get_int_max_str_digits()`
-    ValueError. A decoder that quoted its value raised something other than TraceFormatError, on
-    some Pythons and some stacks only (#100, #123)."""
+def json_type(value: Any) -> str:
+    """What a refused value is, by its JSON type, for a refusal's message: each decoder's, and the
+    control endpoint's for a body that is no object. Never the value itself: `repr` of a list
+    nested 100,000 deep raises RecursionError, which Python 3.14's `json.loads` reads and 3.12's
+    refuses, and of an integer past `sys.get_int_max_str_digits()` ValueError. A decoder that
+    quoted its value raised something other than TraceFormatError, on some Pythons and some stacks
+    only (#100, #123)."""
     if value is None:
         return "null"
     if isinstance(value, bool):
@@ -498,11 +505,19 @@ def _json_type(value: Any) -> str:
     return f"a {type(value).__name__}"
 
 
+def _quoted(text: str) -> str:
+    """A string a refusal quotes, as its `repr`, so a control character is spelled and never
+    printed, and cut after MAX_QUOTED characters with a `…` saying so (#100)."""
+    if len(text) <= MAX_QUOTED:
+        return repr(text)
+    return f"{text[:MAX_QUOTED]!r}…"
+
+
 def _present(d: Mapping[str, Any], key: str) -> Any:
     # Every reader comes through here, so a line that parsed as `null`, `5` or `[]` is refused
     # here rather than by a TypeError from `in` (#68).
     if not isinstance(d, Mapping):
-        raise TraceFormatError(f"{key!r} must be read from an object, not {type(d).__name__}")
+        raise TraceFormatError(f"{key!r} must be read from an object, not {json_type(d)}")
     if key not in d:
         raise TraceFormatError(f"missing required field {key!r}")
     return d[key]
@@ -518,14 +533,14 @@ def _optional[T](
 def _str(d: Mapping[str, Any], key: str) -> str:
     value = _present(d, key)
     if not isinstance(value, str):
-        raise TraceFormatError(f"{key!r} is {_json_type(value)}, not a string")
+        raise TraceFormatError(f"{key!r} is {json_type(value)}, not a string")
     return value
 
 
 def _int(d: Mapping[str, Any], key: str) -> int:
     value = _present(d, key)
     if isinstance(value, bool) or not isinstance(value, int):
-        raise TraceFormatError(f"{key!r} is {_json_type(value)}, not an integer")
+        raise TraceFormatError(f"{key!r} is {json_type(value)}, not an integer")
     return value
 
 
@@ -536,7 +551,7 @@ def _float(d: Mapping[str, Any], key: str) -> float:
     # `allow_nan=False`. An integer too large for a float is refused, not an OverflowError.
     value = _present(d, key)
     if isinstance(value, bool) or not isinstance(value, int | float):
-        raise TraceFormatError(f"{key!r} is {_json_type(value)}, not a number")
+        raise TraceFormatError(f"{key!r} is {json_type(value)}, not a number")
     try:
         number = float(value)
     except OverflowError:
@@ -565,24 +580,24 @@ def _json(d: Mapping[str, Any], key: str) -> JSONValue:
 def _bool(d: Mapping[str, Any], key: str) -> bool:
     value = _present(d, key)
     if not isinstance(value, bool):
-        raise TraceFormatError(f"{key!r} is {_json_type(value)}, not a boolean")
+        raise TraceFormatError(f"{key!r} is {json_type(value)}, not a boolean")
     return value
 
 
 def _object(d: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     value = _present(d, key)
     if not isinstance(value, dict):
-        raise TraceFormatError(f"{key!r} is {_json_type(value)}, not an object")
+        raise TraceFormatError(f"{key!r} is {json_type(value)}, not an object")
     return value
 
 
 def _strings(d: Mapping[str, Any], key: str) -> tuple[str, ...]:
     value = _present(d, key)
     if not isinstance(value, list):
-        raise TraceFormatError(f"{key!r} is {_json_type(value)}, not a list of strings")
+        raise TraceFormatError(f"{key!r} is {json_type(value)}, not a list of strings")
     for index, item in enumerate(value):
         if not isinstance(item, str):
-            raise TraceFormatError(f"{key!r}[{index}] is {_json_type(item)}, not a string")
+            raise TraceFormatError(f"{key!r}[{index}] is {json_type(item)}, not a string")
     return tuple(value)
 
 
@@ -594,7 +609,7 @@ def _chunk_lengths(d: Mapping[str, Any], key: str) -> tuple[int, ...]:
         return ()
     value = _present(d, key)
     if not isinstance(value, list):
-        raise TraceFormatError(f"{key!r} is {_json_type(value)}, not a list")
+        raise TraceFormatError(f"{key!r} is {json_type(value)}, not a list")
     for index, length in enumerate(value):
         if isinstance(length, bool) or not isinstance(length, int) or length <= 0:
             raise TraceFormatError(f"{key!r}[{index}] is not a positive integer")
@@ -606,5 +621,5 @@ def _one_of(d: Mapping[str, Any], key: str, vocabulary: Any) -> Any:
     and not a new mode silently read as an old one."""
     value = _str(d, key)
     if value not in get_args(vocabulary):
-        raise TraceFormatError(f"{key!r} is {value!r}, not one of {get_args(vocabulary)}")
+        raise TraceFormatError(f"{key!r} is {_quoted(value)}, not one of {get_args(vocabulary)}")
     return value

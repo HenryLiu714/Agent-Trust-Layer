@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from irimi import trace
-from irimi.exchange import Exchange, Request, Response
+from irimi.exchange import Exchange, Kind, Request, Response
 from irimi.trace import (
     SCHEMA_VERSION,
     BodyRef,
@@ -421,6 +421,99 @@ def test_a_value_nested_too_deep_to_quote_is_refused_by_its_type(name, path):
     assert "[[" not in str(refused.value)
 
 
+def _nested_object(depth):
+    """An object nested `depth` deep, built without recursion."""
+    value = {}
+    for _ in range(depth):
+        value = {"a": value}
+    return value
+
+
+_FREE = [(name, path) for name, path in _REQUIRED if path[-1] in _FREE_JSON]
+
+
+@pytest.mark.parametrize("nested", [_nested_list, _nested_object], ids=["a-list", "an-object"])
+@pytest.mark.parametrize(
+    ("name", "path"), _FREE, ids=[f"{name}:{'.'.join(path)}" for name, path in _FREE]
+)
+def test_a_free_json_field_nested_too_deep_to_quote_is_read_back_whole(name, path, nested):
+    """`args` and `result` hold any JSON, so a deep one is no refusal: it is read back as it was,
+    by a walk for non-finite numbers that does not recurse, on 3.12 and 3.14 alike (#100)."""
+    d, decode = _decodable(name)
+    *parents, key = path
+    holder = d
+    for parent in parents:
+        holder = holder[parent]
+    holder[key] = value = nested(_DEEP)
+    record = decode(d)
+    for field in path:
+        record = getattr(record, field)
+    assert record is value
+
+
+@pytest.mark.parametrize(
+    ("value", "named"),
+    [
+        (None, "null"),
+        (True, "a boolean"),
+        (0, "an integer"),
+        (10**5000, "an integer"),
+        (0.5, "a number"),
+        ("", "a string"),
+        ([], "a list"),
+        ({}, "an object"),
+        ((), "a tuple"),
+    ],
+    ids=[
+        "null",
+        "boolean",
+        "integer",
+        "integer-past-the-digit-limit",
+        "number",
+        "string",
+        "list",
+        "object",
+        "not-json",
+    ],
+)
+def test_a_refused_value_is_named_by_its_json_type(value, named):
+    """The one spelling of what a refused value is, for the decoders and the control endpoint
+    alike: never the value itself (#100). A boolean is not an integer, though Python's is."""
+    assert trace.json_type(value) == named
+
+
+@pytest.mark.parametrize(
+    ("length", "quoted"),
+    [
+        (trace.MAX_QUOTED, f"'{'z' * trace.MAX_QUOTED}'"),
+        (trace.MAX_QUOTED + 1, f"'{'z' * trace.MAX_QUOTED}'…"),
+        (5_000_000, f"'{'z' * trace.MAX_QUOTED}'…"),
+    ],
+    ids=["max-quoted", "one-past", "5-mb"],
+)
+def test_a_string_a_refusal_quotes_is_cut_to_max_quoted_characters(length, quoted):
+    """A word outside a vocabulary and a `sha256` that is no digest are quoted back, cut, so a
+    damaged line's 5 MB string is never a 5 MB message on `runs show`'s stderr (#100)."""
+    blobs = _Blobs()
+    d = trace.exchange_to_json(_filled(Exchange), blobs.put) | {"kind": "z" * length}
+    with pytest.raises(TraceFormatError) as refused:
+        trace.exchange_from_json(d, blobs.get)
+    assert str(refused.value) == f"'kind' is {quoted}, not one of {typing.get_args(Kind)}"
+    d = trace.exchange_to_json(_filled(Exchange), blobs.put)
+    d["request"]["body"]["sha256"] = "z" * length
+    with pytest.raises(TraceFormatError) as refused:
+        trace.exchange_from_json(d, blobs.get)
+    assert str(refused.value) == f"{quoted} is not a sha256 digest"
+
+
+def test_a_quoted_string_spells_its_control_characters():
+    """`repr`, so a damaged line's escape sequence is shown on `runs show`'s stderr, never obeyed
+    by the terminal (#72)."""
+    with pytest.raises(TraceFormatError) as refused:
+        trace.run_from_json(_encoded_run() | {"mode": "\x1b[2J\n"})
+    assert str(refused.value) == "'mode' is '\\x1b[2J\\n', not one of ('shadow',)"
+
+
 def test_an_exchange_written_before_stream_chunks_existed_reads_as_one_that_did_not_stream():
     """#71 added `stream_chunks` within v1, so a recording made before it has no such key, and
     reads as the field's default: a response that did not stream."""
@@ -470,6 +563,13 @@ _DECODERS = {
     "exchange_from_json": lambda d: trace.exchange_from_json(d, _never),
     "event_from_json": lambda d: trace.event_from_json(d, _never),
 }
+
+
+@pytest.mark.parametrize("decoder", list(_DECODERS))
+def test_a_line_that_is_a_list_nested_too_deep_to_quote_is_named_a_list(decoder):
+    """A line `json.loads` reads as a deep list, which 3.14's does, is named by its type (#100)."""
+    with pytest.raises(TraceFormatError, match="must be read from an object, not a list$"):
+        _DECODERS[decoder](_nested_list(_DEEP))
 
 
 def test_every_public_decoder_is_in_the_not_an_object_test():

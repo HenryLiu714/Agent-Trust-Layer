@@ -494,3 +494,91 @@ def test_runs_show_prints_a_stored_message_s_control_characters_escaped(home, ca
     assert lines[8] == "exit code: 1"
     assert main(["runs", "list"]) == 0
     assert "  job\\x1b[2J  " in capfd.readouterr().out
+
+
+def test_runs_show_prints_a_lone_surrogate_escaped_and_never_raises(home, capfd):
+    """A lone surrogate is what `os.fsdecode` makes of a filename that is not UTF-8, and JSON
+    carries it as `\\udcff`. Printed raw, it raised UnicodeEncodeError out of `irimi runs show`
+    and `runs list`: a stored run must print, whatever the agent stored (#72, #100)."""
+    s = DirectoryStore(home / "store", redact.load_key(home))
+    s.start_run(
+        _ended_run(
+            "surrogate",
+            HAND_BUILT_AT,
+            trigger=Trigger("job\udcff", "jobs:run", {"path": "/tmp/\udcff.csv"}, True),
+            outcome="error",
+            error=ErrorInfo("OSError", "no such file: /tmp/\udcff.csv"),
+            exit_code=1,
+        )
+    )
+    s.close()
+    assert main(["runs", "show", "surrogate"]) == 0
+    lines = capfd.readouterr().out.splitlines()
+    assert lines[2] == "trigger: job\\udcff"
+    assert lines[4] == 'args: {"path":"/tmp/\\udcff.csv"}'
+    assert lines[7] == "error: OSError: no such file: /tmp/\\udcff.csv"
+    assert main(["runs", "list"]) == 0
+    assert "  job\\udcff  " in capfd.readouterr().out
+
+
+# ------------------------------------------------------------------- a value nested too deep
+#
+# A line nested this deep is read by every Python's `json.loads` (3.12's stops near 10,000), so its
+# refusal is the decoder's everywhere. 3.14's reads one 100,000 deep too, which 3.12's refuses as
+# the parse's damage, and there a decoder that quoted the value with `repr` raised RecursionError
+# out of `irimi runs show` as a traceback: `StoreReader` had no guard of its own (#100).
+_READ_EVERYWHERE = 5_000
+_READ_ON_3_14 = 100_000
+
+
+@pytest.mark.parametrize("depth", [_READ_EVERYWHERE, _READ_ON_3_14])
+def test_runs_show_and_list_name_an_event_nested_too_deep_to_quote_as_damage(home, capfd, depth):
+    """Damage like any other: `runs show` names it and exits 1, and `runs list` still lists the
+    run, its counts `?`. Never the value itself, and never a traceback (#100)."""
+    _hand_built_incomplete_run(home / "store", redact.load_key(home))
+    events = home / "store" / "runs" / "handbuilt" / "events.jsonl"
+    stored = events.read_text()
+    deep = "[" * depth + "]" * depth
+    events.write_text(stored.replace('"name": "db.mark_refunded"', f'"name": {deep}'))
+    assert events.read_text() != stored
+    assert main(["runs", "show", "handbuilt"]) == 1
+    out, err = capfd.readouterr()
+    refused = "error: run handbuilt could not be read: "
+    assert out == "" and err.startswith(refused) and err.count("\n") == 1 and "[[" not in err
+    if depth == _READ_EVERYWHERE:
+        assert err == refused + "'name' is a list, not a string\n"
+    assert main(["runs", "list"]) == 0
+    out, err = capfd.readouterr()
+    assert out == (
+        f"handbuilt  {_local(HAND_BUILT_AT)}  -  incomplete  sdk  refund_ticket  "
+        "? exchanges  ? writes\n"
+    )
+    assert err.startswith("warning: run handbuilt could not be read: ") and "[[" not in err
+
+
+def test_runs_show_names_a_run_json_nested_too_deep_to_quote_as_damage(home, capfd):
+    """A run.json is read by the same decoders, and `list_runs` skips one it cannot read (#70)."""
+    _hand_built_incomplete_run(home / "store", redact.load_key(home))
+    run_json = home / "store" / "runs" / "handbuilt" / "run.json"
+    deep = "[" * _READ_EVERYWHERE + "]" * _READ_EVERYWHERE
+    stored = run_json.read_text()
+    run_json.write_text(stored.replace('"sdk_version": "0.0.0"', f'"sdk_version": {deep}'))
+    assert run_json.read_text() != stored
+    assert main(["runs", "show", "handbuilt"]) == 1
+    assert capfd.readouterr() == (
+        "",
+        "error: run handbuilt could not be read: 'sdk_version' is a list, not a string\n",
+    )
+    assert main(["runs", "list"]) == 0
+    assert capfd.readouterr().out == f"no runs in {home / 'store'}\n"
+
+
+def test_runs_show_says_a_trigger_s_args_nest_too_deeply_to_show_and_never_raises():
+    """Python 3.14's `json.loads` reads a run.json some levels deeper than its `json.dumps` writes
+    back, so a damaged one read fine and then raised RecursionError out of `runs show` (#100).
+    Built in Python a million deep, past what either Python writes, so the same on both."""
+    args: list = []
+    for _ in range(1_000_000):
+        args = [args]
+    record = _ended_run("deep", HAND_BUILT_AT, trigger=Trigger("job", None, args, False))
+    assert report.run_header_lines(record)[4] == f"args: {report.ARGS_TOO_DEEP}"

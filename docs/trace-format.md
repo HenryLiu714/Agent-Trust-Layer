@@ -380,7 +380,11 @@ sample workflows hold every scenario to that (`tests/workflows/test_stored_runs.
   outside a closed vocabulary or not finite is a `TraceFormatError`. No decoder raises anything
   else on a malformed record, with one exception: `trace.exchange_from_json` and
   `trace.event_from_json` hand every body ref to the caller's `get_body`, and whatever that raises
-  (a blob missing from the caller's store, say) reaches the caller unchanged.
+  (a blob missing from the caller's store, say) reaches the caller unchanged. However deep or
+  large the refused value, the refusal is still a `TraceFormatError`: its message names a value
+  of the wrong type by its JSON type and never quotes it, and quotes at most the first
+  `trace.MAX_QUOTED` characters of a string (#100). The message is for a person to read, and its
+  wording is not part of this format.
 
 ## Example
 

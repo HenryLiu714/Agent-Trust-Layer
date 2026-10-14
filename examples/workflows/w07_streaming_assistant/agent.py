@@ -70,7 +70,12 @@ POST_SUMMARY = {
 
 
 class ClientGone(Exception):
-    """Our own caller hung up mid-answer."""
+    """Our own caller hung up mid-answer. Its message is the same on every OS, and the OS error
+    is its `__cause__`: writing to a caller that has gone is EPIPE on macOS and ECONNRESET on
+    Linux, and the stored run error names this message (#123)."""
+
+
+HUNG_UP = "caller hung up"
 
 
 class UpstreamBroke(Exception):
@@ -338,14 +343,19 @@ class _Chat(agentkit.Handler):
                 self.wfile.write(f"event: {event}\ndata: {json.dumps(data)}\n\n".encode())
                 self.wfile.flush()
             except OSError as exc:
-                raise ClientGone(type(exc).__name__) from exc
+                raise ClientGone(HUNG_UP) from exc
 
         try:
             send("start", {})
             answer = handed_off if _Chat.hand_off else chat
             _Chat.outcomes[question] = {"outcome": "ok", **answer(question, send)}
         except ClientGone as exc:
-            _Chat.outcomes[question] = {"outcome": "client_gone", "error": str(exc)}
+            _Chat.outcomes[question] = {
+                "outcome": "client_gone",
+                "error": str(exc),
+                # Whichever OS error this OS raised, it is kept as the cause (#123).
+                "caused_by_os_error": isinstance(exc.__cause__, OSError),
+            }
         except UpstreamBroke as exc:
             _Chat.outcomes[question] = {"outcome": "upstream_broke", "error": str(exc)}
             try:

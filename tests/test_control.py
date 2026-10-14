@@ -12,11 +12,11 @@ import time
 
 import pytest
 
-from irimi import __version__, redact
-from irimi.control import MAX_CONTROL_BODY, MAX_REFUSAL, ControlEndpoint
+from irimi import __version__, redact, trace
+from irimi.control import MAX_CONTROL_BODY, MAX_REFUSAL, TOO_DEEP, ControlEndpoint
 from irimi.exchange import Exchange, Request
 from irimi.store import DirectoryStore, NullStore, StoreReader
-from irimi.trace import MAX_ERROR_MESSAGE, ErrorInfo, ToolCall, Trigger
+from irimi.trace import MAX_ERROR_MESSAGE, MAX_QUOTED, ErrorInfo, ToolCall, Trigger
 from tests import test_engine_mitm
 from tests.test_engine_mitm import _config, _start, _via_proxy
 
@@ -247,7 +247,8 @@ REFUSALS = [
         _NOT_JSON + "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
     ),
     ("POST", _START, b'{"started_at": NaN}', 400, _NOT_JSON + "NaN is not a finite number"),
-    ("POST", _START, b"[]", 400, "the body is a JSON list, not an object"),
+    ("POST", _START, b"[]", 400, "the body is a list, not an object"),
+    ("POST", _START, b"null", 400, "the body is null, not an object"),
     (
         "POST",
         _START,
@@ -267,7 +268,7 @@ REFUSALS = [
         _START,
         {**_start_body(1.0), "started_at": "soon"},
         400,
-        "'started_at' is 'soon', not a number",
+        "'started_at' is a string, not a number",
     ),
     (
         "POST",
@@ -449,6 +450,26 @@ def test_the_endpoint_answers_500_itself_when_its_store_raises():
     assert response.header("irimi-answered-by") == "control"
 
 
+def test_a_decoder_that_raises_anything_but_its_refusal_is_irimi_s_500_never_too_deep(
+    monkeypatch, caplog
+):
+    """A decoder raises only TraceFormatError, however deep the value it refuses (#100), so one
+    that raised RecursionError would be irimi's own bug: a 500 logged with its traceback, never
+    TOO_DEEP blaming the agent for a body `json.loads` read, as `_decoded` answered before #100."""
+
+    def broken(doc):
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(trace, "run_from_json", broken)
+    body = json.dumps(_start_body(1.0)).encode()
+    request = Request("POST", "http", "127.0.0.1", 4000, _START, "", (), body)
+    with caplog.at_level(logging.ERROR, logger="irimi.control"):
+        response = ControlEndpoint(NullStore(), serve=False).answer(request)
+    assert (response.status, json.loads(response.body)) == (500, {"error": "internal"})
+    [logged] = [r for r in caplog.records if r.name == "irimi.control"]
+    assert logged.exc_info is not None and logged.exc_info[0] is RecursionError
+
+
 def test_an_on_tool_call_that_raises_costs_the_callback_not_the_record(
     tmp_path, monkeypatch, caplog
 ):
@@ -509,12 +530,21 @@ def test_a_posted_error_message_is_cut_to_the_length_a_trace_keeps(engine):
 
 
 def test_a_refusal_quotes_at_most_a_line_of_what_it_refused(engine):
-    """A decoder's message quotes the value it refused; a 2 MB string comes back as one line."""
-    body = {**_start_body(1.0), "started_at": "s" * 1_000_000}
-    status, _, raw = engine.call("POST", _START, body)
+    """A word outside a vocabulary is quoted back, a 1 MB one cut by its decoder at MAX_QUOTED
+    characters (#100). A refusal that quotes the path is cut at MAX_REFUSAL (#73). A value of the
+    wrong type is named by its type, never quoted (#100)."""
+    body = {**_tool_call(1.0), "kind": "s" * 1_000_000}
+    status, _, raw = engine.call("POST", f"/_irimi/runs/{RUN}/tool-calls", body)
+    word = "s" * MAX_QUOTED
+    assert (status, json.loads(raw)) == (
+        400,
+        {"error": f"'kind' is '{word}'…, not one of ('read', 'write')"},
+    )
+    status, _, raw = engine.call("POST", f"/_irimi/runs/{'x' * 5_000}/start", _start_body(1.0))
     error = json.loads(raw)["error"]
-    assert status == 400 and error.startswith("'started_at' is 'sss")
-    assert len(error) == MAX_REFUSAL
+    assert status == 400 and error == "'" + "x" * (MAX_REFUSAL - 1)
+    status, _, raw = engine.call("POST", _START, {**_start_body(1.0), "started_at": "s" * 1_000})
+    assert (status, json.loads(raw)) == (400, {"error": "'started_at' is a string, not a number"})
 
 
 def test_a_head_request_gets_its_405_without_a_body_and_the_connection_stays_usable(engine):
@@ -543,8 +573,10 @@ def test_a_head_request_gets_its_405_without_a_body_and_the_connection_stays_usa
     assert json.loads(get.split(b"\r\n\r\n", 1)[1])["engine_version"] == __version__
 
 
-# Deeper than a decoder can quote a value back, within what `json.loads` reads (#73).
-_DEEP = 100_000
+# A field nested this deep is read by every Python's `json.loads` on any thread (3.12's stops near
+# 10,000), so its refusal is the decoder's on every platform (#123). A decoder fed one 100,000 deep
+# is `tests/test_trace.py`'s.
+_DEEP = 5_000
 
 
 def _nested(doc: dict, field: str) -> bytes:
@@ -556,23 +588,29 @@ def _nested(doc: dict, field: str) -> bytes:
 
 
 @pytest.mark.parametrize(
-    ("path", "body"),
+    ("path", "body", "expected"),
     [
-        (_START, b"[" * 1_000_000 + b"]" * 1_000_000),
-        (_START, _nested(_start_body(1.0), "sdk_version")),
-        (f"/_irimi/runs/{RUN}/tool-calls", _nested(_tool_call(1.0), "name")),
+        (_START, b"[" * 1_000_000 + b"]" * 1_000_000, TOO_DEEP),
+        (_START, _nested(_start_body(1.0), "sdk_version"), "'sdk_version' is a list, not a string"),
+        (
+            f"/_irimi/runs/{RUN}/tool-calls",
+            _nested(_tool_call(1.0), "name"),
+            "'name' is a list, not a string",
+        ),
     ],
     ids=["the-body", "a-start-field", "a-tool-call-field"],
 )
-def test_a_body_nested_too_deeply_to_read_is_a_400_never_a_500(engine, caplog, path, body):
-    """A mistyped field is a 400 however it is mistyped. A decoder's refusal quotes the value it
-    refused, and quoting a list nested deeper than `repr` goes raised RecursionError: a 500, logged
-    as irimi's failure, for what is the agent's (#73). `json.loads` itself reads deeper on Python
-    3.14 than on 3.12, so the same body is refused by the parse on one and by a decoder on the
-    other, and both say the same line."""
+def test_a_body_nested_too_deeply_to_read_is_a_400_never_a_500(
+    engine, caplog, path, body, expected
+):
+    """A mistyped field is a 400 however it is mistyped, never a 500 logged as irimi's failure
+    for what is the agent's (#73). A body `json.loads` cannot read, a million deep, is TOO_DEEP on
+    every Python. A deeply nested field is refused by its decoder, which names the field's type
+    and never quotes it: quoting it with `repr` raised RecursionError on some Pythons and stacks
+    and not others, so the same body was answered differently on CI's runners (#100, #123)."""
     with caplog.at_level(logging.ERROR, logger="irimi.control"):
         status, headers, raw = engine.call("POST", path, body)
-    assert (status, json.loads(raw)) == (400, {"error": "the body nests too deeply to read"})
+    assert (status, json.loads(raw)) == (400, {"error": expected})
     assert STAMP in headers
     assert [r for r in caplog.records if r.name == "irimi.control"] == []
     engine.finish()

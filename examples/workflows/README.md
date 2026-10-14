@@ -15,8 +15,8 @@ uv run pytest -q tests/workflows                                     # the whole
 
 | | Workflow | Trigger | What it is the regression test for |
 |---|---|---|---|
-| W1 | `w01_ticket_triage` | support-ticket webhook | a multi-turn LLM tool loop; L3 on the model's refunds (one too large, one refused because the overlay shows the first); one refund sent twice under one key (#46); replay divergence mid-conversation (#82-#85) |
-| W2 | `w02_nightly_reconcile` | scheduled `sdk.run` | pagination, a cursor naming a minted id (#53), 40 writes in one run, a non-replayable trigger |
+| W1 | `w01_ticket_triage` | support-ticket webhook | a multi-turn LLM tool loop; L3 on the model's refunds (one too large, one refused because the overlay shows the first); one refund sent twice under one key (#46); `irimi compare` of each prompt's run against the full refund's, both recorded into one store (#79); replay divergence mid-conversation (#82-#85) |
+| W2 | `w02_nightly_reconcile` | scheduled `sdk.run` | pagination, a cursor naming a minted id (#53), 40 writes in one run, a non-replayable trigger; `irimi compare` of a clean night against forty mismatches, eighty writes apart (#79) |
 | W3 | `w03_queue_worker` | queue, threads and asyncio | run attribution under concurrency (#74, #75), six HTTP clients the SDK labels (urllib, `http.client`, `requests`, `httpx` sync and async) or that labels itself (a raw asyncio client, #75), eight runs sharing two one-connection pools (#75), two runs sharing one engine's write log, as decided in #77, whose second run's summary calls the first run's faked refund its own (pinned `LOOKS WRONG`, #129); under `irimi shadow --serve`, each run's summary printed as it ends and holding its own events alone, eight at once, and a lost run's refunds and tool calls `unattributed` (#77); Phase 3's exit (#78) over the five concurrent scenarios, under shadow and serve: eight `sdk` runs ended `ok`, each run's trigger, exchanges and tool calls naming its own charge alone, nothing `unattributed`, `irimi runs list` one line per run, every write tool stood in and its ledger row unwritten, every charge read the fake answered stored as live; each way the SDK marks a run: triggers on functions, on a worker's methods and on a sync function that returns a coroutine, `async with sdk.run`, and a run cancelled at shutdown (#74); a Task a sync trigger returns, whose calls land in its ended run (#75, pinned `LOOKS WRONG`, #111) and are missing from the summary serve printed at its end (#77, pinned `LOOKS WRONG`, #125); the worker's own ledger as `@sdk.tool`s, called from four threads, from eight tasks and from a thread that lost its run, and as a worker's static, class and plain methods, each call in its own run (#76) |
 | W4 | `w04_slack_ops_bot` | Slack Events API | Slack fidelity: minted threads (#52), names vs ids (#44), `missing_scope`, an archived channel, an L0 `reactions.add`, duplicate delivery, the webhook path (#87) |
 | W5 | `w05_dispute_responder` | signed Stripe webhook | bytes trigger args, `would_fire` (#47), an event the agent's own write would fire, a live read whose response carries a credential (a payment intent's `client_secret`) stored redacted (#70) |
@@ -67,7 +67,10 @@ so it keeps its real module name; `scenarios.py` seeds the fake services per sce
   `stored()` and `stored_events()` for what it recorded in its trace store under the run's
   `IRIMI_HOME` (#70), with
   `process_run_id()`, `runs(...)`, which runs `irimi runs list` or `runs show` over it, and
-  `maps()`, the maps `runs show` renders writes with (#72). The `traced_run` fixture runs a
+  `maps()`, the maps `runs show` renders writes with (#72). `run(..., store=)` records into a
+  store runs share, `command(...)` runs any `irimi` command as `runs(...)` does, and `compare(a,
+  b)` runs `irimi compare` over two runs that share a store; the `shared_store_run` fixture
+  records each scenario of a workflow into one store, once (#79). The `traced_run` fixture runs a
   shadow run once more under `tracemalloc`, for the most memory irimi's process held (#94).
 - **Bombs** (#94). `agentkit.gzip_bomb()` builds a gzip body of a few hundred KB that decodes to
   as much as it is asked, splicing one compressed padding between a head and a tail, so a second

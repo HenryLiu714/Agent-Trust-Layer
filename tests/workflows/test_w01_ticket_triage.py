@@ -5,6 +5,7 @@ The labels are the calls in `examples/workflows/w01_ticket_triage/agent.py`; `#N
 
 import pytest
 
+from examples.workflows.harness.run import check_invariants, compare
 from examples.workflows.w01_ticket_triage.agent import DB_NAME
 from irimi.trace import ErrorInfo, ToolCall, Trigger
 
@@ -159,3 +160,88 @@ def test_the_ticket_is_stored_as_the_runs_trigger_by_its_dataclass(run_workflow,
         True,
     )
     assert (run.outcome, run.run_id) == ("ok", shadow.one("run.start")["run"])
+
+
+# ---------------------------------------------------------------------- irimi compare (#79)
+
+TRIAGE = f"handle_ticket  {AGENT}:handle_ticket  agent -"
+FULL = "○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)"
+REPLY = f"○ tool {AGENT}.send_reply  shadow stand-in ran"
+# Whose summary printed a compared line: run A's for `=`, `-` and `~ A`, run B's for `+` and `B`.
+PRINTED_BY = {"  = ": 0, "  - ": 0, "  ~ A ": 0, "  + ": 1, "    B ": 1}
+COMPARED = {
+    # The prompt edit: the same loop, and the one argument it moved.
+    "half_refund": (
+        1,
+        [
+            f"  ~ A {FULL}",
+            "    B ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)",
+            f"  = {REPLY}",
+            "",
+            "  1 same · 1 changed · 0 only in A · 0 only in B",
+        ],
+    ),
+    "too_large": (
+        1,
+        [
+            f"  ~ A {FULL}",
+            "    B ✗ refund $98.00 on ch_TICKET1  would fail: amount_too_large",
+            f"  = {REPLY}",
+            "",
+            "  1 same · 1 changed · 0 only in A · 0 only in B",
+        ],
+    ),
+    # The second refund is the one B added: L3 refused it, and an attempted write is a write.
+    "double_refund": (
+        1,
+        [
+            f"  = {FULL}",
+            "  + ✗ refund $49.00 on ch_TICKET1  would fail: charge_already_refunded",
+            f"  = {REPLY}",
+            "",
+            "  2 same · 0 changed · 0 only in A · 1 only in B",
+        ],
+    ),
+    # The repeated send is the same write, answered by the idempotency store (#46): two runs, and
+    # nothing between them to show.
+    "retried_refund": (
+        0,
+        [f"  = {FULL}", f"  = {REPLY}", "", "  2 same · 0 changed · 0 only in A · 0 only in B"],
+    ),
+    "runaway_loop": (
+        1,
+        [f"  - {FULL}", f"  - {REPLY}", "", "  0 same · 0 changed · 2 only in A · 0 only in B"],
+    ),
+}
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("scenario", COMPARED)
+def test_irimi_compare_shows_each_prompt_s_writes_against_the_full_refund_s(
+    shared_store_run, scenario, mode
+):
+    """Two runs the real irimi recorded into one store, the same agent and ticket under two
+    prompts: A under `irimi shadow`, B under shadow or serve. Every line compared is the line
+    each run's own summary printed."""
+    full = shared_store_run(W, "full_refund")
+    other = shared_store_run(W, scenario, mode)
+    assert check_invariants(other) == []
+    code, out, err = compare(full, other)
+    a, b = (result.one("run.start")["run"] for result in (full, other))
+    assert a != b
+    assert {a, b} <= {record.run_id for record in other.stored().list_runs()}
+    assert err == []
+    assert (code, out) == (
+        COMPARED[scenario][0],
+        [
+            f"irimi compare · {a} vs {b} · a comparison, not a verdict: nothing was replayed",
+            f"  A  {TRIAGE}",
+            f"  B  {TRIAGE}",
+            "",
+            *COMPARED[scenario][1],
+        ],
+    )
+    for line in out[4:-2]:
+        prefix = next(p for p in PRINTED_BY if line.startswith(p))
+        printed = (full, other)[PRINTED_BY[prefix]].summaries()
+        assert f"  {line.removeprefix(prefix)}" in printed, line

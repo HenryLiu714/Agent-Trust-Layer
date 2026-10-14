@@ -287,9 +287,14 @@ def _encoded_run():
     return trace.run_to_json(_run_record())
 
 
-def test_a_newer_schema_version_is_refused():
-    d = _encoded_run() | {"schema_version": SCHEMA_VERSION + 1}
-    with pytest.raises(TraceFormatError, match=f"schema_version {SCHEMA_VERSION + 1}"):
+@pytest.mark.parametrize(
+    "version", [SCHEMA_VERSION + 1, 10**5000], ids=["the-next", "past-the-digit-limit"]
+)
+def test_a_newer_schema_version_is_refused(version):
+    """Refused without quoting the version: `str` of one past `sys.get_int_max_str_digits()`
+    raises ValueError, and a decoder raises only TraceFormatError (#100)."""
+    d = _encoded_run() | {"schema_version": version}
+    with pytest.raises(TraceFormatError, match="schema_version is newer than this irimi reads"):
         trace.run_from_json(d)
 
 
@@ -303,9 +308,9 @@ def test_an_unknown_extra_field_is_ignored():
     assert trace.exchange_from_json(line, blobs.get) == ex
 
 
-@pytest.mark.parametrize("version", [0, -1])
+@pytest.mark.parametrize("version", [0, -1, pytest.param(-(10**5000), id="past-the-digit-limit")])
 def test_a_schema_version_below_the_first_is_refused(version):
-    with pytest.raises(TraceFormatError, match=f"schema_version {version}"):
+    with pytest.raises(TraceFormatError, match="schema_version is below 1"):
         trace.run_from_json(_encoded_run() | {"schema_version": version})
 
 
@@ -370,6 +375,50 @@ def test_a_missing_required_field_is_a_trace_format_error(name, path):
     del holder[key]
     with pytest.raises(TraceFormatError, match=re.escape(f"missing required field {key!r}")):
         decode(d)
+
+
+def _nested_list(depth):
+    """A list nested `depth` deep, built without recursion."""
+    value = []
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+# Deeper than `repr` goes on any Python or stack irimi runs on, and within what 3.14's `json.loads`
+# reads, so what an agent may post to the control endpoint (#73, #100).
+_DEEP = 100_000
+# A field that holds a list is refused at its first item, by its place.
+_FIRST_ITEM_REFUSED = {
+    "flags": "'flags'[0] is a list, not a string",
+    "would_fire": "'would_fire'[0] is a list, not a string",
+    "headers": "'headers'[0] is not a [name, value] pair of strings",
+    "stream_chunks": "'stream_chunks'[0] is not a positive integer",
+}
+_TYPED = [(name, path) for name, path in _REQUIRED if path[-1] not in _FREE_JSON] + [
+    ("exchange", ("stream_chunks",))
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "path"), _TYPED, ids=[f"{name}:{'.'.join(path)}" for name, path in _TYPED]
+)
+def test_a_value_nested_too_deep_to_quote_is_refused_by_its_type(name, path):
+    """A decoder fed a 100,000-deep list in any field but a free JSON one raises TraceFormatError,
+    on 3.12 and 3.14 alike, and names what it found rather than quoting it. Quoting it with `repr`
+    raised RecursionError on some Pythons and stacks and not others, so the control endpoint's
+    answer to the same body differed between CI's runners (#100, #123)."""
+    d, decode = _decodable(name)
+    *parents, key = path
+    holder = d
+    for parent in parents:
+        holder = holder[parent]
+    holder[key] = _nested_list(_DEEP)
+    with pytest.raises(TraceFormatError) as refused:
+        decode(d)
+    expected = _FIRST_ITEM_REFUSED.get(key, f"{key!r} is a list, not ")
+    assert str(refused.value).startswith(expected)
+    assert "[[" not in str(refused.value)
 
 
 def test_an_exchange_written_before_stream_chunks_existed_reads_as_one_that_did_not_stream():

@@ -14,6 +14,9 @@ Phase 5: a stored run gets no second chance to repeat an L3 read.
 Decoders raise `TraceFormatError` and nothing else on a malformed record - one that is not a JSON
 object, lacks a field, or holds a value of the wrong type, outside its vocabulary or not finite -
 refuse a `schema_version` newer than this module's or below 1, and ignore keys they do not know.
+A value of the wrong type is named by its JSON type and never quoted (`_json_type`), so a decoder
+cannot raise while it explains itself (#100); what a message does quote, a string outside a
+vocabulary or a float that is not finite, cannot recurse.
 The one exception they do not wrap is the caller's own: `exchange_from_json` and `event_from_json`
 hand every body ref to `get_body`, and whatever it raises - a blob missing from the store - reaches
 the caller unchanged.
@@ -320,12 +323,12 @@ def _body_to_json(body: bytes, put_body: PutBody) -> dict[str, Any] | None:
 
 def run_from_json(d: Mapping[str, Any]) -> RunRecord:
     version = _int(d, "schema_version")
+    # The version is not quoted: `str` of an integer past `sys.get_int_max_str_digits()` raises
+    # ValueError, and a decoder raises only TraceFormatError (#100).
     if version > SCHEMA_VERSION:
-        raise TraceFormatError(
-            f"schema_version {version} is newer than this irimi reads ({SCHEMA_VERSION})"
-        )
+        raise TraceFormatError(f"schema_version is newer than this irimi reads ({SCHEMA_VERSION})")
     if version < 1:
-        raise TraceFormatError(f"schema_version {version} names no version; the first is 1")
+        raise TraceFormatError("schema_version is below 1, the first version")
     trigger = _optional(d, "trigger", _object)
     return RunRecord(
         schema_version=version,
@@ -446,13 +449,13 @@ def _response_from_json(d: Mapping[str, Any], get_body: GetBody) -> Response:
 def _headers_from_json(d: Mapping[str, Any], key: str) -> Headers:
     pairs = _present(d, key)
     if not isinstance(pairs, list):
-        raise TraceFormatError(f"{key!r} is not a list of [name, value] pairs")
+        raise TraceFormatError(f"{key!r} is {_json_type(pairs)}, not a list of [name, value] pairs")
     out: list[tuple[str, str]] = []
-    for pair in pairs:
+    for index, pair in enumerate(pairs):
         if not (
             isinstance(pair, list) and len(pair) == 2 and all(isinstance(p, str) for p in pair)
         ):
-            raise TraceFormatError(f"{key!r} holds {pair!r}, which is not a [name, value] pair")
+            raise TraceFormatError(f"{key!r}[{index}] is not a [name, value] pair of strings")
         out.append((pair[0], pair[1]))
     return tuple(out)
 
@@ -467,8 +470,32 @@ def _body_from_json(d: Mapping[str, Any], key: str, get_body: GetBody) -> bytes:
     return get_body(BodyRef(sha256, _int(ref, "size"), _bool(ref, "truncated")))
 
 
-# One reader per JSON type. Each raises TraceFormatError, never KeyError, TypeError or
-# OverflowError, so a store reading a damaged line has one exception to catch (#70).
+# One reader per JSON type. Each raises TraceFormatError, never KeyError, TypeError,
+# OverflowError or RecursionError, so a store reading a damaged line has one exception to catch
+# (#70), and the control endpoint answers every malformed body with a 400 (#73).
+
+
+def _json_type(value: Any) -> str:
+    """What a refused value is, by its JSON type, for the refusal's message. Never the value
+    itself: `repr` of a list nested 100,000 deep raises RecursionError, which Python 3.14's
+    `json.loads` reads and 3.12's refuses, and of an integer past `sys.get_int_max_str_digits()`
+    ValueError. A decoder that quoted its value raised something other than TraceFormatError, on
+    some Pythons and some stacks only (#100, #123)."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, int):
+        return "an integer"
+    if isinstance(value, float):
+        return "a number"
+    if isinstance(value, str):
+        return "a string"
+    if isinstance(value, list):
+        return "a list"
+    if isinstance(value, Mapping):
+        return "an object"
+    return f"a {type(value).__name__}"
 
 
 def _present(d: Mapping[str, Any], key: str) -> Any:
@@ -491,14 +518,14 @@ def _optional[T](
 def _str(d: Mapping[str, Any], key: str) -> str:
     value = _present(d, key)
     if not isinstance(value, str):
-        raise TraceFormatError(f"{key!r} is {value!r}, not a string")
+        raise TraceFormatError(f"{key!r} is {_json_type(value)}, not a string")
     return value
 
 
 def _int(d: Mapping[str, Any], key: str) -> int:
     value = _present(d, key)
     if isinstance(value, bool) or not isinstance(value, int):
-        raise TraceFormatError(f"{key!r} is {value!r}, not an integer")
+        raise TraceFormatError(f"{key!r} is {_json_type(value)}, not an integer")
     return value
 
 
@@ -509,7 +536,7 @@ def _float(d: Mapping[str, Any], key: str) -> float:
     # `allow_nan=False`. An integer too large for a float is refused, not an OverflowError.
     value = _present(d, key)
     if isinstance(value, bool) or not isinstance(value, int | float):
-        raise TraceFormatError(f"{key!r} is {value!r}, not a number")
+        raise TraceFormatError(f"{key!r} is {_json_type(value)}, not a number")
     try:
         number = float(value)
     except OverflowError:
@@ -538,36 +565,36 @@ def _json(d: Mapping[str, Any], key: str) -> JSONValue:
 def _bool(d: Mapping[str, Any], key: str) -> bool:
     value = _present(d, key)
     if not isinstance(value, bool):
-        raise TraceFormatError(f"{key!r} is {value!r}, not a boolean")
+        raise TraceFormatError(f"{key!r} is {_json_type(value)}, not a boolean")
     return value
 
 
 def _object(d: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     value = _present(d, key)
     if not isinstance(value, dict):
-        raise TraceFormatError(f"{key!r} is {value!r}, not an object")
+        raise TraceFormatError(f"{key!r} is {_json_type(value)}, not an object")
     return value
 
 
 def _strings(d: Mapping[str, Any], key: str) -> tuple[str, ...]:
     value = _present(d, key)
-    if not (isinstance(value, list) and all(isinstance(v, str) for v in value)):
-        raise TraceFormatError(f"{key!r} is {value!r}, not a list of strings")
+    if not isinstance(value, list):
+        raise TraceFormatError(f"{key!r} is {_json_type(value)}, not a list of strings")
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            raise TraceFormatError(f"{key!r}[{index}] is {_json_type(item)}, not a string")
     return tuple(value)
 
 
 def _chunk_lengths(d: Mapping[str, Any], key: str) -> tuple[int, ...]:
     """A streamed response's chunk lengths (#71), the first field added within v1: absent in a
     recording made before it existed, and read then as its default, `()`. Present, it is a list of
-    positive integers.
-
-    A refused value is named by its type and place, never quoted: `repr` of an integer past
-    `sys.get_int_max_str_digits()` raises ValueError, and a decoder raises only TraceFormatError."""
+    positive integers."""
     if key not in d:
         return ()
     value = _present(d, key)
     if not isinstance(value, list):
-        raise TraceFormatError(f"{key!r} is a {type(value).__name__}, not a list")
+        raise TraceFormatError(f"{key!r} is {_json_type(value)}, not a list")
     for index, length in enumerate(value):
         if isinstance(length, bool) or not isinstance(length, int) or length <= 0:
             raise TraceFormatError(f"{key!r}[{index}] is not a positive integer")

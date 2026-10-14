@@ -380,7 +380,9 @@ sample workflows hold every scenario to that (`tests/workflows/test_stored_runs.
   outside a closed vocabulary or not finite is a `TraceFormatError`. No decoder raises anything
   else on a malformed record, with one exception: `trace.exchange_from_json` and
   `trace.event_from_json` hand every body ref to the caller's `get_body`, and whatever that raises
-  (a blob missing from the caller's store, say) reaches the caller unchanged.
+  (a blob missing from the caller's store, say) reaches the caller unchanged. The message names
+  a value of the wrong type by its JSON type (`'sdk_version' is a list, not a string`) and never
+  quotes it, so a value nested too deep to print is refused like any other (#100).
 
 ## Example
 

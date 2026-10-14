@@ -61,12 +61,13 @@ logger = logging.getLogger(__name__)
 # The largest body a control request may post. A trigger's arguments and a tool call's result are
 # JSON the SDK captured; a body past this is answered 413 and never parsed (#73).
 MAX_CONTROL_BODY = 2 * 1024 * 1024
-# The longest line a refusal's body says. A decoder's message quotes the value it refused, and a
-# 2 MiB string must not come back as a 2 MiB error (#73).
+# The longest line a refusal's body says. A refusal may quote a string the agent sent (a word
+# outside a vocabulary, the path), and a 2 MiB string must not come back as a 2 MiB error (#73).
 MAX_REFUSAL = 200
-# The refusal of a body nested deeper than Python reads it, or than a decoder can quote a value
-# back: a 400 like any other malformed body, never a 500 logged as irimi's failure (#73). Which of
-# the two refuses depends on the Python: 3.14's `json.loads` reads deeper than 3.12's.
+# The refusal of a body nested deeper than `json.loads` reads it: a 400 like any other malformed
+# body, never a 500 logged as irimi's failure (#73). 3.14's `json.loads` reads deeper than 3.12's,
+# and a field nested deeper than 3.12 reads but within what 3.14 does is refused by its decoder,
+# which names the field's type (#100).
 TOO_DEEP = "the body nests too deeply to read"
 # The refusal of a start or an end for irimi's own run, `EngineConfig.run_id` (#73).
 OWN_RUN = "is irimi's own run, which the SDK may not start or end"
@@ -269,14 +270,12 @@ def _label(error: ErrorInfo | None) -> ErrorInfo | None:
 
 def _decoded[T](decode: Callable[[Mapping[str, Any]], T], doc: Mapping[str, Any]) -> T:
     """`doc` read by one of the trace decoders, its refusal a 400. A decoder raises only
-    TraceFormatError (#68), except that quoting a value nested deeper than `repr` goes raises
-    RecursionError: the agent's malformed body all the same, so a 400 too, never a 500 (#73)."""
+    TraceFormatError (#68), however deep the value it refuses: it names the value's type and never
+    quotes it (#100)."""
     try:
         return decode(doc)
     except TraceFormatError as exc:
         raise _Refused(400, str(exc)) from None
-    except RecursionError:
-        raise _Refused(400, TOO_DEEP) from None
 
 
 def _refuse_constant(name: str) -> NoReturn:

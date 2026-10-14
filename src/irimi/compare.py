@@ -25,6 +25,7 @@ over the same lines, so there is one alignment.
 
 import difflib
 import json
+import unicodedata
 from collections.abc import Callable, Hashable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Literal
@@ -76,8 +77,37 @@ class Action:
     @property
     def escaped(self) -> str:
         """`text` with each backslash escaped too, so a newline prints as `\\n` and a typed one as
-        `\\\\n`: printed for a pair whose texts are alike though its sentences are not (#79)."""
-        return report.printable(self.sentence.replace("\\", "\\\\"))
+        `\\\\n`, and each character that prints as nothing or as a space spelled as its escape:
+        printed for a pair whose texts are alike though its sentences are not (#79)."""
+        escaped = report.printable(self.sentence.replace("\\", "\\\\"))
+        return "".join(_spelled(char) for char in escaped)
+
+    @property
+    def seen(self) -> str:
+        """`text` as a reader sees it: each character that prints as nothing dropped, and each that
+        prints as a space a space (#79)."""
+        return "".join(_seen(char) for char in self.text)
+
+
+# The Unicode categories that print as nothing or as a space: format characters (a zero-width
+# space, a right-to-left override), separators, private-use and unassigned code points. Two posts
+# that differ only by one print alike, and `report.printable` leaves them as they are (#79).
+_UNSEEN = frozenset({"Cf", "Zs", "Zl", "Zp", "Co", "Cn"})
+
+
+def _spelled(char: str) -> str:
+    """`char`, or its `\\u`/`\\U` escape when a reader cannot see it; an ASCII space stays."""
+    if char == " " or unicodedata.category(char) not in _UNSEEN:
+        return char
+    code = ord(char)
+    return f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}"
+
+
+def _seen(char: str) -> str:
+    category = unicodedata.category(char)
+    if category not in _UNSEEN:
+        return char
+    return " " if category.startswith("Z") else ""
 
 
 @dataclass(frozen=True)
@@ -218,12 +248,13 @@ def _row_lines(row: Row) -> list[str]:
 
     Escaping leaves a backslash as it is, so a Slack post holding a newline and one holding a
     typed `\\n` print one line, and a `~` over two identical lines tells its reader nothing (#79).
-    A pair whose sentences differ but print alike prints both with each backslash escaped first:
-    the newline as `\\n`, the typed one as `\\\\n`."""
+    A pair whose sentences differ but print alike to a reader prints both with each backslash
+    escaped first, the newline as `\\n` and the typed one as `\\\\n`, and each character a reader
+    cannot see spelled as its escape: a zero-width space, a no-break space."""
     marker = MARKERS[row.mark]
     if row.mark in ("changed", "cut") and row.a is not None and row.b is not None:
         a, b = row.a.text, row.b.text
-        if a == b and row.a.sentence != row.b.sentence:
+        if row.a.seen == row.b.seen and row.a.sentence != row.b.sentence:
             a, b = row.a.escaped, row.b.escaped
         return [f"  {marker} A {a}", f"    B {b}"]
     action = row.a if row.a is not None else row.b

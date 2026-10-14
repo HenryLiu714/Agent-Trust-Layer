@@ -655,7 +655,9 @@ irimi compare · 42e7ad03a867410b vs 5cf7f4695f22ce95 · a comparison, not a ver
   character in them is escaped for printing, so a post holding a newline and one holding a typed
   `\n` are `~`, though the summary prints the two alike. Such a pair, whose two lines would read
   the same, prints both with each backslash escaped too: the newline as `\n`, the typed one as
-  `\\n`. Every other row prints the summary's own line.
+  `\\n`. A character that prints as nothing or as a space (a zero-width space, a no-break space,
+  a right-to-left override) is spelled as its escape there too, `\u200b`. Every other row prints
+  the summary's own line.
 - **A cut body is `?`.** A pair either of whose writes was stored with a body cut short
   (`body-truncated`, the request's or the response's) is `?`, not compared, whatever its lines
   say, and never `=`: a body cut, or dropped for its size, renders one line for different

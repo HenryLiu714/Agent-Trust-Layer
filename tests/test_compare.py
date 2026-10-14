@@ -405,6 +405,25 @@ def test_a_run_with_no_trigger_or_version_is_labelled_with_dashes(home, capfd):
     ]
 
 
+def test_a_label_escapes_the_entrypoint_and_the_agent_version_too(home, capfd):
+    """Each is the agent's own text, as the trigger's name is, so each is escaped as `runs show`
+    escapes it (#72): one side is one line, and a terminal obeys no escape sequence in it (#79)."""
+    trigger = Trigger("t", "mod:f\x1b[2J", {"n": 1}, False)
+    _store(
+        home,
+        {
+            "a": (_record("a", trigger=trigger, agent_version="1.0\nB  forged"), []),
+            "b": (_record("b", trigger=trigger, agent_version="\ud800"), []),
+        },
+    )
+    assert main(["compare", "a", "b"]) == 0
+    assert capfd.readouterr().out.splitlines()[1:4] == [
+        "  A  t  mod:f\\x1b[2J  agent 1.0\\nB  forged",
+        "  B  t  mod:f\\x1b[2J  agent \\ud800",
+        "",
+    ]
+
+
 @pytest.mark.parametrize("missing", ["a", "b"])
 def test_an_unknown_run_exits_2_with_the_documented_message(home, capfd, missing):
     present = "b" if missing == "a" else "a"
@@ -587,3 +606,51 @@ def test_align_keeps_every_action_once_in_its_order_and_a_run_is_the_same_as_its
         assert [(row.mark, row.a, row.b) for row in compare.align(a, a)] == [
             ("cut" if x.cut else "same", x, x) for x in a
         ]
+
+
+def test_a_cut_pair_whose_lines_print_alike_though_they_differ_is_told_apart_too():
+    """A `?` pair prints both its lines as a `~` pair does: when the two print alike though they
+    differ, a newline against a typed `\\n`, each backslash is escaped too, or the reader sees one
+    line twice and cannot tell what irimi did not compare (#79)."""
+    cut = dataclasses.replace(_post("line1\nline2"), flags=(BODY_TRUNCATED_FLAG,))
+    pair = compare.compare_runs(_run([cut]), _run([_post("line1\\nline2")]), servicemap.load())
+    assert pair.lines()[:2] == [
+        '  ? A ○ post to #C1: "line1\\nline2"  unvalidated (L1)',
+        '    B ○ post to #C1: "line1\\\\nline2"  unvalidated (L1)',
+    ]
+
+
+def test_a_run_of_hundreds_of_one_write_is_lined_up_write_by_write():
+    """`difflib`'s junk heuristic, on by default, takes out of matching any item more than 1% of a
+    sequence of 200 or more. Two runs that each made 250 identical stand-ins after a first write
+    that differs then matched nothing: every stand-in printed `-` and again `+`. Lined up with it
+    off, the first writes are one `-` and one `+`, and each stand-in is `=` (#79)."""
+    many = [_tool() for _ in range(250)]
+    comparison = compare.compare_runs(_run([_post("hi"), *many]), _run([_refund(), *many]), None)
+    assert comparison.lines() == [
+        "  - ○ POST slack.com/api/chat.postMessage  unvalidated (L1)",
+        "  + ○ POST api.stripe.com/v1/refunds  unvalidated (L3 preconditions passed)",
+        *[f"  = {TOOL}"] * 250,
+        "",
+        "  250 same · 0 changed · 1 only in A · 1 only in B",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "spelled_a", "spelled_b"),
+    [
+        ("pay​out", "payout", "pay\\u200bout", "payout"),
+        ("on schedule", "on schedule", "on\\u00a0schedule", "on schedule"),
+        ("‮abc", "abc", "\\u202eabc", "abc"),
+        ("a\U000e0001b", "ab", "a\\U000e0001b", "ab"),
+    ],
+)
+def test_a_pair_that_differs_by_a_character_no_one_can_see_spells_it(a, b, spelled_a, spelled_b):
+    """`report.printable` escapes control characters, not a zero-width space, a no-break space or
+    a right-to-left override, so two posts that differ only by one printed two identical lines
+    under `~`. A pair whose lines print alike spells each such character as its escape (#79)."""
+    pair = compare.compare_runs(_run([_post(a)]), _run([_post(b)]), servicemap.load())
+    assert pair.lines()[:2] == [
+        f'  ~ A ○ post to #C1: "{spelled_a}"  unvalidated (L1)',
+        f'    B ○ post to #C1: "{spelled_b}"  unvalidated (L1)',
+    ]

@@ -4,9 +4,10 @@
    every live answer the agent saw came from a fake service, so that is where a write would land.
 2. No request that reached a fake service carried `Irimi-Run`.
 3. No write tool's real function ran under shadow.
-4. No canary credential reached disk where irimi writes: its home, its working directory, TMPDIR.
-   The trace store is under its home (#70), so this is the redaction test across the corpus, of
-   what the agent sends (`CANARIES`) and of what a live read hands back (`SERVED_CANARIES`).
+4. No canary credential reached disk where irimi writes: its home, its working directory, TMPDIR,
+   and a store it was given outside its home (#79). The trace store is under its home (#70), so
+   this is the redaction test across the corpus, of what the agent sends (`CANARIES`) and of what
+   a live read hands back (`SERVED_CANARIES`).
 5. The agent exited under shadow as it did bare, unless the scenario is marked `diverges`.
 
 A new workflow is picked up by name (`harness.run.workflows`), so it is held to these without an
@@ -17,8 +18,10 @@ to the same five there, and to what serve mode owes each run whose end it took: 
 `--- run <id> ---` block, equal to that run's stored summary.
 """
 
+import ast
 import dataclasses
 import re
+from pathlib import Path
 
 import pytest
 
@@ -35,6 +38,7 @@ from examples.workflows.w10_flaky_upstream.scenarios import CONTROL_DOWN
 from irimi import report, trace
 from irimi.store import StoredRun
 
+TESTS = Path(__file__).parent
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
 SERVE_CASES = serve_cases()
 # The scenarios whose runs hold events recorded after their end (#77). Serve prints a run's block
@@ -125,6 +129,26 @@ def test_every_workflow_has_scenarios_and_a_summary():
         assert wf.name == name
         assert wf.summary and wf.scenarios
         assert all(s.doc for s in wf.scenarios.values()), f"{name}: every scenario needs a doc"
+
+
+def test_a_scenario_whose_doc_says_looks_wrong_has_a_looks_wrong_pin():
+    """A fix that flips a `LOOKS WRONG` pin drops the marker in the same PR (#89), the scenario's
+    doc included: W9 `cut_refund`'s still said compare called its cut refund the same, pinned
+    `LOOKS WRONG`, after #79 made that pair `?` and no pin said so. Each scenario whose doc says
+    `LOOKS WRONG` is named in a test of its workflow whose docstring says it too."""
+    stale = []
+    for name, wf in workflows().items():
+        module = ast.parse((TESTS / f"test_{name}.py").read_text())
+        pins = [
+            doc
+            for node in ast.walk(module)
+            if isinstance(node, ast.FunctionDef)
+            and "LOOKS WRONG" in (doc := ast.get_docstring(node) or "")
+        ]
+        for scenario, s in wf.scenarios.items():
+            if "LOOKS WRONG" in s.doc and not any(f"`{scenario}`" in doc for doc in pins):
+                stale.append(f"{name}:{scenario}")
+    assert stale == []
 
 
 def test_every_scenario_runs_under_serve_too():

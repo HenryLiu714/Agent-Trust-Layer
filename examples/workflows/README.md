@@ -120,7 +120,8 @@ printed at the end, hold every event that ended by then and none after.
    unsafe method on a host no fake serves.
 2. No request that reached a fake service carried `Irimi-Run`.
 3. No write tool's real function ran under shadow.
-4. No canary credential reached disk where irimi writes: its home, its working directory, TMPDIR.
+4. No canary credential reached disk where irimi writes: its home, its working directory, TMPDIR,
+   and a store it was given outside its home (#79).
    The trace store is under its home (#70), so this is the redaction test across the corpus: a
    credential shape `redact` misses is fixed in `redact`, not in the canary. `CANARIES` are the
    credentials the agent is given and sends; `SERVED_CANARIES` are those a fake service hands

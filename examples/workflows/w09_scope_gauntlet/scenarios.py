@@ -121,7 +121,8 @@ WORKFLOW = Workflow(
             ("cut_refund",),
             setup=_stripe,
             doc="bombs's two refunds alone, the cut one for another amount: irimi stores no body "
-            "for it, and `irimi compare` calls it the same as bombs's (#79, pinned LOOKS WRONG)",
+            "for it, so both print alike, and `irimi compare` will not call the two the same, a "
+            "`?` row (#79)",
         ),
         "cut_update": Scenario(
             ("cut_update",),

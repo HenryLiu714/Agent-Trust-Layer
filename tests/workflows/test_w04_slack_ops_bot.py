@@ -305,3 +305,27 @@ def test_irimi_compare_tells_a_newline_from_a_typed_backslash_n(shared_store_run
         "  3 same · 1 changed · 0 only in A · 0 only in B",
     ]
     assert rows_not_shown(typed, a, b, out) == []
+
+
+def test_rows_not_shown_finds_a_row_no_summary_printed_and_a_pair_not_told_apart(
+    shared_store_run,
+):
+    """The harness's check that each compared row is a line its own run's summary printed, held
+    to catching something: over the newline against the typed backslash-n, it passes compare's
+    own output, and finds a row added, a row from the wrong side, and a pair whose escaped lines
+    are not the two posts the summaries printed (#79)."""
+    newline = shared_store_run(W, "two_line_answer")
+    typed = shared_store_run(W, "typed_escape_answer")
+    a, b = (result.one("run.start")["run"] for result in (newline, typed))
+    code, out, err = compare(newline, typed)
+    assert rows_not_shown(typed, a, b, out) == []
+    pair = out.index(next(row for row in out if row.startswith("  ~ A ")))
+    added = '  + ○ post to #C0OPS: "Payouts are late."  unvalidated (L3 preconditions passed)'
+    assert rows_not_shown(typed, a, b, [*out[:-2], added, *out[-2:]]) == [added]
+    # B's line printed as a row only A made.
+    only_a = f"  - {out[pair + 1].removeprefix('    B ')}"
+    assert rows_not_shown(typed, a, b, [*out[:-2], only_a, *out[-2:]]) == [only_a]
+    # The pair's lines told apart from each other, but not as the two posts the summaries printed.
+    forged = [out[pair].replace("\\nNext", "\\\\\\\\nNext"), out[pair + 1]]
+    tampered = [*out[:pair], *forged, *out[pair + 2 :]]
+    assert rows_not_shown(typed, a, b, tampered) == forged

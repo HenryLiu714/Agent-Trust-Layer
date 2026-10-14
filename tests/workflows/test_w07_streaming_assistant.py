@@ -243,6 +243,7 @@ def test_a_caller_that_hangs_up_ends_the_run_in_error(run_workflow, mode):
     assert shadow.result()["caller_events"] == ["start"]
     assert shadow.result()["outcome"] == "client_gone"
     assert shadow.result()["error"] == HUNG_UP
+    assert shadow.result()["caused_by_os_error"] is True
     assert [(e["outcome"], e["error"]) for e in shadow.events("run.end")] == [
         ("error", "ClientGone")
     ]

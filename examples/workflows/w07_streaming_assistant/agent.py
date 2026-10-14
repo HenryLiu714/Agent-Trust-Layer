@@ -350,7 +350,12 @@ class _Chat(agentkit.Handler):
             answer = handed_off if _Chat.hand_off else chat
             _Chat.outcomes[question] = {"outcome": "ok", **answer(question, send)}
         except ClientGone as exc:
-            _Chat.outcomes[question] = {"outcome": "client_gone", "error": str(exc)}
+            _Chat.outcomes[question] = {
+                "outcome": "client_gone",
+                "error": str(exc),
+                # Whichever OS error this OS raised, it is kept as the cause (#123).
+                "caused_by_os_error": isinstance(exc.__cause__, OSError),
+            }
         except UpstreamBroke as exc:
             _Chat.outcomes[question] = {"outcome": "upstream_broke", "error": str(exc)}
             try:

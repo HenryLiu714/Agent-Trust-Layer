@@ -6,7 +6,8 @@ The labels are the calls in `examples/workflows/w08_orchestrator/agent.py`.
 import pytest
 import yaml
 
-from examples.workflows.w08_orchestrator.scenarios import SUBAGENT_MAP, UNJUSTIFIED_MAP
+from examples.workflows.harness.run import check_invariants, compare, rows_not_shown
+from examples.workflows.w08_orchestrator.scenarios import DOWN_TARGET, SUBAGENT_MAP, UNJUSTIFIED_MAP
 from irimi.exchange import Exchange
 from irimi.servicemap.loader import MapError, parse_service
 from irimi.trace import UNATTRIBUTED, ToolCall
@@ -227,3 +228,114 @@ def test_a_tool_called_in_a_nested_trigger_is_a_call_of_its_parent_s_run(run_wor
     assert [e["decisions_so_far"] for e in bare.events("policy")] == [0, 1]
     assert not (shadow.state / "decisions.jsonl").exists()
     assert len((bare.state / "decisions.jsonl").read_text().splitlines()) == 2
+
+
+# ---------------------------------------------------------------------- irimi compare (#79)
+
+NOT_A_VERDICT = "a comparison, not a verdict: nothing was replayed"
+PLAN = f"plan_quarter_close  {AGENT}:plan_quarter_close  agent -"
+RESERVATION = f"○ POST {HOST}/reservations  unvalidated (L0)"
+# What each nested scenario's two orchestrator runs both wrote: the reservation, made by the
+# orchestrator or, with `--nested-reserve`, by `reservation_agent`, a nested trigger; and with
+# `--record` the decision's write tool. The sub-agent's read tool is no write.
+NESTED = {
+    "nested_runs": [RESERVATION],
+    "nested_tools": [RESERVATION, f"○ tool {AGENT}.record_decision  shadow stand-in ran"],
+    "nested_write": [RESERVATION],
+}
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("scenario", NESTED)
+def test_irimi_compare_of_two_orchestrator_runs_holds_their_nested_triggers_writes(
+    run_workflow, scenario, mode
+):
+    """A nested trigger joins its parent's run and starts none (#74), so there is no inner run to
+    compare: what a sub-agent wrote is its parent's write (`nested_write`), as a tool it called is
+    (#76). The two orchestrator runs, given the same args, are the same, write for write, and
+    neither shows the other's: each holds its own reservation and no more (#79). The engine's own
+    run holds none of them."""
+    shadow = run_workflow(W, scenario, mode)
+    a, b = (e["run"] for e in shadow.events("run.start"))
+    rows = [f"  = {text}" for text in NESTED[scenario]]
+    code, out, err = shadow.compare_runs(a, b)
+    assert (code, err) == (0, [])
+    assert out == [
+        f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+        f"  A  {PLAN}",
+        f"  B  {PLAN}",
+        "",
+        *rows,
+        "",
+        f"  {len(rows)} same · 0 changed · 0 only in A · 0 only in B",
+    ]
+    assert rows_not_shown(shadow, a, b, out) == []
+    code, out, err = shadow.compare_runs(a, shadow.engine_run_id())
+    assert (code, err) == (1, [])
+    assert out[-1] == f"  0 same · 0 changed · {len(rows)} only in A · 0 only in B"
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_irimi_compare_shows_what_a_map_changed_about_the_runs_writes(shared_store_run, mode):
+    """`with_map` names the internal service's `POST /quote` a read and forwards it, so the
+    orchestrator prices the basket and reserves it; `no_map` fakes the quote at L0, and the agent,
+    given no price, reserves nothing. Recorded into one store, B under shadow or serve, the map is
+    the whole difference: A's reservation against B's faked quote, two writes on one host by
+    different routes, so not a pair (#79)."""
+    mapped = shared_store_run(W, "with_map")
+    unmapped = shared_store_run(W, "no_map", mode)
+    assert check_invariants(unmapped) == []
+    code, out, err = compare(mapped, unmapped)
+    a, b = (result.one("run.start")["run"] for result in (mapped, unmapped))
+    assert (code, err) == (1, [])
+    assert out == [
+        f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+        f"  A  {PLAN}",
+        f"  B  {PLAN}",
+        "",
+        f"  - {RESERVATION}",
+        f"  + ○ POST {HOST}/quote  unclassified (L0)",
+        "",
+        "  0 same · 0 changed · 1 only in A · 1 only in B",
+    ]
+    assert rows_not_shown(unmapped, a, b, out) == []
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_reservation_whose_answer_target_is_down_is_answered_502_and_compared_as_printed(
+    shared_store_run, run_workflow, mode
+):
+    """`target_down` delegates the reservation to an answer target nothing listens on (#16): irimi
+    cannot reach it, the agent gets a 502 marked `delegated`, and the summary says the write went
+    unanswered. Bare, the service reserves. Recorded into one store with `with_map`, B under
+    shadow or serve, compare pairs the two reservations and shows the unanswered one as its
+    summary printed it: a write whose target failed is still a write the agent attempted, which
+    the issue's own set of actions would have dropped (#79, decision 1)."""
+    bare = run_workflow(W, "target_down", "bare")
+    down = run_workflow(W, "target_down", mode)
+    assert bare.by_label()["reserve"] == (200, None)
+    assert down.by_label()["reserve"] == (502, "delegated")
+    assert decision(down) == {
+        "reserved": False,
+        "reason": "http_502",
+        "total": 2000,
+        "reservation": None,
+    }
+    mapped = shared_store_run(W, "with_map")
+    unreached = shared_store_run(W, "target_down", mode)
+    assert check_invariants(unreached) == []
+    code, out, err = compare(mapped, unreached)
+    a, b = (result.one("run.start")["run"] for result in (mapped, unreached))
+    assert (code, err) == (1, [])
+    assert out == [
+        f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+        f"  A  {PLAN}",
+        f"  B  {PLAN}",
+        "",
+        f"  ~ A {RESERVATION}",
+        f"    B ○ POST {HOST}/reservations → {DOWN_TARGET}/reservations  unanswered (target "
+        "unreachable)",
+        "",
+        "  0 same · 1 changed · 0 only in A · 0 only in B",
+    ]
+    assert rows_not_shown(unreached, a, b, out) == []

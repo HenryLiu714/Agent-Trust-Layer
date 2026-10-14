@@ -8,6 +8,7 @@ import json
 
 import pytest
 
+from examples.workflows.harness.run import check_invariants, compare, rows_not_shown
 from examples.workflows.harness.services import client_secret
 from irimi import redact, report
 from irimi.exchange import Exchange
@@ -188,3 +189,50 @@ def test_the_raw_webhook_body_is_stored_as_the_triggers_bytes_and_is_replayable(
     assert isinstance(raw, dict) and set(raw) == {"__irimi_bytes__"}
     event = json.loads(base64.b64decode(str(raw["__irimi_bytes__"])))
     assert (event["id"], event["type"]) == ("evt_dp_BIG", "charge.dispute.created")
+
+
+# ---------------------------------------------------------------------- irimi compare (#79)
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_irimi_compare_cannot_tell_two_refunds_of_the_rest_of_a_charge_apart(
+    shared_store_run, run_workflow, mode
+):
+    """`under_threshold` and `partly_refunded` deliver the same dispute event, and the agent
+    refunds what is left of `ch_SMALL`: all 1500 of it, or the 1000 left after an earlier refund
+    of 500, as the bare runs' refunds show. Recorded into one store, B under shadow or serve.
+
+    LOOKS WRONG (the finding pinned above, #79's "Since #89 landed"): a refund with no `amount`
+    prints `refund ? on ch_SMALL`, so compare calls the two refunds the same and exits 0, though
+    irimi's own L3 read of each charge knew how much was left."""
+    full = shared_store_run(W, "under_threshold")
+    rest = shared_store_run(W, "partly_refunded", mode)
+    assert check_invariants(rest) == []
+    assert [
+        [e["amount"] for e in run_workflow(W, scenario, "bare").events("refund")]
+        for scenario in ("under_threshold", "partly_refunded")
+    ] == [[1500], [1000]]
+    code, out, err = compare(full, rest)
+    a, b = (result.one("run.start")["run"] for result in (full, rest))
+    on_event = "on_event  examples.workflows.w05_dispute_responder.agent:on_event  agent -"
+    # The same event's bytes, and a signature that names the second it was signed in: the args
+    # differ only when the two deliveries were signed in different seconds.
+    triggers = [rest.stored().load_run(run_id).record.trigger for run_id in (a, b)]
+    args = [trigger.args for trigger in triggers if trigger is not None]
+    assert [arg["raw"] for arg in args if isinstance(arg, dict)] == [args[0]["raw"]] * 2
+    differ = ["  (the triggers' args differ)"] if args[0] != args[1] else []
+    assert (code, err) == (0, [])
+    assert out == [
+        f"irimi compare · {a} vs {b} · a comparison, not a verdict: nothing was replayed",
+        f"  A  {on_event}",
+        f"  B  {on_event}",
+        *differ,
+        "",
+        "  = ○ update customer cus_DISPUTER  unvalidated (L1)",
+        '  = ○ post to #C0DISPUTES: "dispute dp_SMALL on ch_SMALL (1500): refund"  unvalidated '
+        "(L3 preconditions passed)",
+        "  = ○ refund ? on ch_SMALL  unvalidated (L3 preconditions passed)",
+        "",
+        "  3 same · 0 changed · 0 only in A · 0 only in B",
+    ]
+    assert rows_not_shown(rest, a, b, out) == []

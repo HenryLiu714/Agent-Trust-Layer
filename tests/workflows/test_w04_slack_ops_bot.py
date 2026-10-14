@@ -6,7 +6,7 @@ The events are in `examples/workflows/w04_slack_ops_bot/agent.py`. Its calls car
 
 import pytest
 
-from examples.workflows.harness.run import CANARIES
+from examples.workflows.harness.run import CANARIES, check_invariants, compare, rows_not_shown
 from irimi import redact
 from irimi.exchange import Exchange
 
@@ -208,3 +208,100 @@ def test_a_retried_delivery_is_acknowledged_and_handled_once(run_workflow):
     assert [line for line in block if "○ post to" in line] == [
         '  ○ post to #C0OPS: "Payouts are on schedule."  unvalidated (L3 preconditions passed)'
     ]
+
+
+# ---------------------------------------------------------------------- irimi compare (#79)
+
+ON_MENTION = "on_mention  examples.workflows.w04_slack_ops_bot.agent:on_mention  agent -"
+ANSWER_POST = 'post to #C0OPS: "Payouts are on schedule."  unvalidated (L3 preconditions passed)'
+WEBHOOK_POST = '○ post via webhook: "ops bot answered alice"  unvalidated (L0)'
+AGAINST_A_PLAIN_MENTION = {
+    # Slack would refuse the bot's post for a missing scope, which L3 cannot see (#45): the run
+    # is faked as if it posted, so it compares the same, exit 0.
+    "missing_scope": (
+        0,
+        [],
+        [
+            f"  = ○ {ANSWER_POST}",
+            "  = ○ add :eyes: to a message in C0OPS  unvalidated (L0)",
+            "  = ○ upload status.csv to C0OPS  unvalidated (L0)",
+            f"  = {WEBHOOK_POST}",
+        ],
+    ),
+    # The same mention in an archived channel: L3 says the post would fail, and the reaction and
+    # the upload go to the other channel. The webhook's post is the same.
+    "archived_channel": (
+        1,
+        ["  (the triggers' args differ)"],
+        [
+            f"  ~ A ○ {ANSWER_POST}",
+            '    B ✗ post to #C0OLDOPS: "Payouts are on schedule."  would fail: is_archived',
+            "  ~ A ○ add :eyes: to a message in C0OPS  unvalidated (L0)",
+            "    B ○ add :eyes: to a message in C0OLDOPS  unvalidated (L0)",
+            "  ~ A ○ upload status.csv to C0OPS  unvalidated (L0)",
+            "    B ○ upload status.csv to C0OLDOPS  unvalidated (L0)",
+            f"  = {WEBHOOK_POST}",
+        ],
+    ),
+}
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("scenario", AGAINST_A_PLAIN_MENTION)
+def test_irimi_compare_shows_what_l3_saw_of_slack_s_refusals(shared_store_run, scenario, mode):
+    """`mention_in_thread` against a mention Slack would refuse, recorded into one store, B under
+    shadow or serve (#79): a refusal L3 checks is a `~` whose B line carries `✗`, and one it
+    cannot see is no difference at all."""
+    code, differ, rows = AGAINST_A_PLAIN_MENTION[scenario]
+    plain = shared_store_run(W, "mention_in_thread")
+    refused = shared_store_run(W, scenario, mode)
+    assert check_invariants(refused) == []
+    out = compare(plain, refused)
+    a, b = (result.one("run.start")["run"] for result in (plain, refused))
+    totals = [sum(row.startswith(p) for row in rows) for p in ("  = ", "  ~ ")]
+    assert out == (
+        code,
+        [
+            f"irimi compare · {a} vs {b} · a comparison, not a verdict: nothing was replayed",
+            f"  A  {ON_MENTION}",
+            f"  B  {ON_MENTION}",
+            *differ,
+            "",
+            *rows,
+            "",
+            "  {} same · {} changed · 0 only in A · 0 only in B".format(*totals),
+        ],
+        [],
+    )
+    assert rows_not_shown(refused, a, b, out[1]) == []
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_irimi_compare_tells_a_newline_from_a_typed_backslash_n(shared_store_run, mode):
+    """`two_line_answer` posts an answer holding a newline, and `typed_escape_answer` one holding
+    a backslash and an `n`. irimi prints each escaped, so the summary's line does not break
+    (#72), and the two print alike; compare compares what was posted, so the pair is changed, and
+    prints a pair whose lines print alike with each backslash escaped too, so its two lines say
+    how the posts differ: the newline as `\\n`, the typed one as `\\\\n` (#79). Recorded into one
+    store, B under shadow or serve."""
+    newline = shared_store_run(W, "two_line_answer")
+    typed = shared_store_run(W, "typed_escape_answer", mode)
+    assert check_invariants(typed) == []
+    code, out, err = compare(newline, typed)
+    a, b = (result.one("run.start")["run"] for result in (newline, typed))
+    l3 = "unvalidated (L3 preconditions passed)"
+    assert (code, err) == (1, [])
+    assert out == [
+        f"irimi compare · {a} vs {b} · a comparison, not a verdict: nothing was replayed",
+        f"  A  {ON_MENTION}",
+        f"  B  {ON_MENTION}",
+        "",
+        f'  ~ A ○ post to #C0OPS: "Payouts are on schedule.\\nNext run at 09:00."  {l3}',
+        f'    B ○ post to #C0OPS: "Payouts are on schedule.\\\\nNext run at 09:00."  {l3}',
+        "  = ○ add :eyes: to a message in C0OPS  unvalidated (L0)",
+        "  = ○ upload status.csv to C0OPS  unvalidated (L0)",
+        f"  = {WEBHOOK_POST}",
+        "",
+        "  3 same · 1 changed · 0 only in A · 0 only in B",
+    ]
+    assert rows_not_shown(typed, a, b, out) == []

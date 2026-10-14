@@ -13,10 +13,10 @@ def _evidence(call: LlmCall) -> LlmTurn:
     return LlmTurn(text="The customer received the goods. Delivery was confirmed on file.")
 
 
-def _world(world: World) -> None:
+def _world(world: World, small_refunded: int = 0) -> None:
     world.stripe.add_customer(CUSTOMER)
     world.stripe.add_charge("ch_BIG", 5000, customer=CUSTOMER)
-    world.stripe.add_charge("ch_SMALL", 1500, customer=CUSTOMER)
+    world.stripe.add_charge("ch_SMALL", 1500, customer=CUSTOMER, amount_refunded=small_refunded)
     # Each charge's intent, as Stripe returns it: with its `client_secret` (#70).
     for intent, amount, order in (("pi_BIG", 5000, "1042"), ("pi_SMALL", 1500, "1043")):
         world.stripe.add_payment_intent(
@@ -26,6 +26,11 @@ def _world(world: World) -> None:
     world.stripe.add_dispute(SMALL, "ch_SMALL", 1500, "fraudulent", "pi_SMALL")
     world.slack.add_channel(DISPUTES_CHANNEL, "disputes")
     world.llm.script = _evidence
+
+
+def _partly_refunded(world: World) -> None:
+    """`_world` with 500 of `ch_SMALL` refunded already, so refunding the rest refunds 1000."""
+    _world(world, small_refunded=500)
 
 
 WORKFLOW = Workflow(
@@ -42,5 +47,13 @@ WORKFLOW = Workflow(
             "bad_signature": "a forged signature: 400 and no outbound calls at all",
             "replayed_event": "the same event id twice: one set of writes",
         }.items()
+    }
+    | {
+        "partly_refunded": Scenario(
+            ("under_threshold",),
+            setup=_partly_refunded,
+            doc="under_threshold with 500 of the charge refunded before: the same event, and a "
+            "refund of the 1000 left, which `irimi compare` cannot tell from 1500 (#79)",
+        )
     },
 )

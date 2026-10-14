@@ -493,6 +493,35 @@ def bombs() -> None:
     _health(control, "health_after")
 
 
+def cut_refund() -> None:
+    """`bombs`'s two refunds alone, the cut one for 700 where `bombs`'s is for 800: a write whose
+    body irimi could not keep (#94), made differently from `bombs`'s, which `irimi compare` lines
+    up with it (#79)."""
+    _cut_write("/v1/refunds", {"charge": CHARGE, "amount": "700"})
+
+
+def cut_update() -> None:
+    """`cut_refund` with the cut write an update of the customer: a different write than `bombs`'s
+    on the same host, its body cut the same way (#79)."""
+    _cut_write(f"/v1/customers/{CUSTOMER}", {"name": "Gauntlet Ltd"})
+
+
+def _cut_write(path: str, fields: dict[str, str]) -> None:
+    """A Stripe write whose form decodes to 128 MiB with no line break in it, as `bombs`'s refund
+    does, and then `bombs`'s plain refund."""
+    form = urlencode(fields).encode() + b"&metadata[note]="
+    _send_bomb(
+        "cut_write",
+        base("stripe") + path,
+        agentkit.gzip_bomb(form, b"x", BOMB_PADDING_BYTES),
+        {
+            "Authorization": f"Bearer {agentkit.key('STRIPE_API_KEY')}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+    )
+    stripe("POST", "/v1/refunds", {"charge": CHARGE, "amount": "900"}, label="refund_plain")
+
+
 def _send_bomb(label: str, url: str, body: bytes, headers: dict[str, str]) -> Response:
     """POST `body` gzip-encoded, and log what was sent."""
     _log_bytes("sent", label, body, "gzip")
@@ -557,6 +586,8 @@ GROUPS = {
     "control_runs": control_runs,
     "control_hazards": control_hazards,
     "bombs": bombs,
+    "cut_refund": cut_refund,
+    "cut_update": cut_update,
     "unmapped_hosts": unmapped_hosts,
     "get_that_writes": get_that_writes,
 }

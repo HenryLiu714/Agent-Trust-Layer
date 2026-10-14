@@ -9,9 +9,13 @@ stand-in runs and the real body never does. Reads are `@sdk.tool(kind="read")` a
         examples.workflows.w06_crm_db_agent.agent <scenario> [segment]
 
 Beyond `enrich`, each scenario puts one case of #76 through the real `irimi shadow`: a write's
-stand-in that raises and a retry (`merge_retry`), tools called in no run (`outside_run`), HTTP made
-inside a write's stand-in (`stand_in_http`), and an async read, a sync write that returns a
-coroutine and an async static method whose stand-in is a static method too (`async_tools`).
+stand-in that raises and a retry (`merge_retry`), and the same merge right the first time
+(`merge_once`), which `irimi compare` holds the retry against (#79); tools called in no run
+(`outside_run`); HTTP made inside a write's stand-in (`stand_in_http`); and an async read, a sync
+write that returns a coroutine and an async static method whose stand-in is a static method too
+(`async_tools`); and two writes at once, the one that started first ending last
+(`overlapping_writes`), which a run stores, and `irimi compare` lines up, in the order they ended
+(#79).
 
 Seeding the CRM on first run is setup, not a tool: it happens in both modes, before the trigger.
 Tools carry explicit, short names (`crm.find_accounts`), the way a developer would name the
@@ -39,9 +43,11 @@ SCENARIOS = (
     "tool_raises",
     "decoration_errors",
     "merge_retry",
+    "merge_once",
     "outside_run",
     "stand_in_http",
     "async_tools",
+    "overlapping_writes",
 )
 STALE_BEFORE = "2025-06-01"
 SEED = [
@@ -179,6 +185,54 @@ async def notify_owner(account_id: str, message: str) -> dict[str, Any]:
     return {"queued": account_id}
 
 
+# `overlapping_writes`' two events: the archive has started, and the flag has ended (#79).
+_STARTED: asyncio.Event | None = None
+_RELEASE: asyncio.Event | None = None
+
+
+async def _wait_for_the_flag() -> None:
+    """The archive's body, real or stood in, says it started and waits until the flag has ended."""
+    assert _STARTED is not None and _RELEASE is not None
+    _STARTED.set()
+    await _RELEASE.wait()
+
+
+async def _archive_stand_in(account_id: str) -> dict[str, Any]:
+    await _wait_for_the_flag()
+    return {"archived": False, "stood_in": True}
+
+
+@sdk.tool(kind="write", shadow=_archive_stand_in, name="crm.archive_account")
+async def archive_account(account_id: str) -> dict[str, Any]:
+    await _wait_for_the_flag()
+    with agentkit.sqlite(DB_NAME) as conn:
+        conn.execute("UPDATE accounts SET segment = 'archived' WHERE id = ?", (account_id,))
+    return {"archived": True}
+
+
+async def _flag_stand_in(account_id: str) -> dict[str, Any]:
+    return {"flagged": False, "stood_in": True}
+
+
+@sdk.tool(kind="write", shadow=_flag_stand_in, name="crm.flag_account")
+async def flag_account(account_id: str) -> dict[str, Any]:
+    with agentkit.sqlite(DB_NAME) as conn:
+        conn.execute("UPDATE accounts SET score = -1 WHERE id = ?", (account_id,))
+    return {"flagged": True}
+
+
+async def _overlapping(account_id: str) -> dict[str, Any]:
+    """Two writes at once: the archive starts first and ends only once the flag has ended, its
+    call recorded, so the two end in the other order from the one they started in (#79)."""
+    global _STARTED, _RELEASE
+    _STARTED, _RELEASE = asyncio.Event(), asyncio.Event()
+    archive = asyncio.ensure_future(archive_account(account_id))
+    await _STARTED.wait()
+    flagged = await flag_account(account_id)
+    _RELEASE.set()
+    return {"flagged": flagged, "archived": await archive}
+
+
 # Every exception a merge body raised, in order: the agent checks that what it caught is the very
 # object the body raised, which the SDK re-raises after recording it (#76).
 RAISED: list[BaseException] = []
@@ -303,6 +357,10 @@ def enrich_accounts(scenario: str, segment: str) -> dict[str, Any]:
                 continue
             return {"merged": merged}
         return {"merged": None}
+    if scenario == "merge_once":
+        # `merge_retry`'s second merge, made right the first time: the run `irimi compare` holds
+        # the retry against (#79).
+        return {"merged": merge_accounts("acc_1", "acc_2")}
     if scenario == "outside_run":
         account = find_accounts(segment)[0]
         return {"upserted": upsert_account({**account, "score": 50})}
@@ -310,6 +368,8 @@ def enrich_accounts(scenario: str, segment: str) -> dict[str, Any]:
         return {"synced": sync_industry("acc_1", "aerospace")}
     if scenario == "async_tools":
         return asyncio.run(_follow_up_on("acc_1"))
+    if scenario == "overlapping_writes":
+        return asyncio.run(_overlapping("acc_1"))
     if scenario == "tool_raises":
         try:
             flaky_lookup("acc_1")

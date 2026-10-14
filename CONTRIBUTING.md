@@ -33,7 +33,7 @@ make fmt          # uv run ruff format . && uv run ruff check --fix .
 make typecheck    # uv run mypy
 ```
 
-The suite runs in about three minutes and needs no network and no keys: the engine tests start a
+The suite runs in about four minutes and needs no network and no keys: the engine tests start a
 real mitmproxy on a random loopback port against local HTTP servers. `tests/conftest.py` points
 `IRIMI_HOME` and the working directory at empty temporary directories, so your own overrides file
 and CA are never in play.

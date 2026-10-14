@@ -8,7 +8,7 @@ call to the run it was made in (#76).
 
 import pytest
 
-from examples.workflows.harness.run import CANARIES
+from examples.workflows.harness.run import CANARIES, check_invariants, compare, rows_not_shown
 from examples.workflows.w06_crm_db_agent.agent import DB_NAME, SEED
 from irimi.sdk.capture import REPR_KEY
 from irimi.trace import UNATTRIBUTED, ErrorInfo, ToolCall
@@ -450,3 +450,70 @@ def test_a_sync_tool_that_returns_a_coroutine_is_recorded_when_the_coroutine_end
     assert bare.result()["scheduled"] == {"scheduled": "acc_1", "owner": owner, "in_days": 7}
     assert bare.result()["reminded"] == {"sent": "acc_1", "to": owner}
     assert files(bare) == ["crm.sqlite3", "followups.jsonl", "outbox.jsonl"]
+
+
+# ---------------------------------------------------------------------- irimi compare (#79)
+
+ENRICH = "enrich_accounts  examples.workflows.w06_crm_db_agent.agent:enrich_accounts  agent -"
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_irimi_compare_shows_the_retry_s_failed_merge_as_the_one_it_added(shared_store_run, mode):
+    """`merge_once` makes the merge right the first time; `merge_retry` makes it after a first
+    call whose stand-in raised (#76), each recorded into one store, B under shadow or serve.
+    Compared, the call both made, the stand-in that ran, is the same, and the one that raised is
+    the one B added: the same tool, so lining the two up by name alone would have paired the merge
+    that ran with the one that raised and called it changed (#79's two passes)."""
+    once = shared_store_run(W, "merge_once")
+    retry = shared_store_run(W, "merge_retry", mode)
+    assert check_invariants(retry) == []
+    code, out, err = compare(once, retry)
+    a, b = (result.one("run.start")["run"] for result in (once, retry))
+    assert (code, err) == (1, [])
+    assert out == [
+        f"irimi compare · {a} vs {b} · a comparison, not a verdict: nothing was replayed",
+        f"  A  {ENRICH}",
+        f"  B  {ENRICH}",
+        "  (the triggers' args differ)",
+        "",
+        "  + ○ tool crm.merge_accounts  shadow stand-in raised builtins.LookupError",
+        "  = ○ tool crm.merge_accounts  shadow stand-in ran",
+        "",
+        "  1 same · 0 changed · 0 only in A · 1 only in B",
+    ]
+    assert rows_not_shown(retry, a, b, out) == []
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_two_writes_at_once_are_compared_in_the_order_they_ended(run_workflow, mode):
+    """`overlapping_writes`: the archive starts first and ends only after the flag has ended, so
+    the run stores the flag first (`seq` is the order calls ended, #68). The summary prints the
+    two in that order, and so does `irimi compare`, which lines writes up in `seq` order and not
+    in the order they started (#79, decision 12)."""
+    shadow = run_workflow(W, "overlapping_writes", mode)
+    bare = run_workflow(W, "overlapping_writes", "bare")
+    assert bare.result()["flagged"] == {"flagged": True}
+    assert bare.result()["archived"] == {"archived": True}
+    flag, archive = tool_calls(shadow)
+    assert (flag.name, archive.name) == ("crm.flag_account", "crm.archive_account")
+    assert archive.started_at < flag.started_at <= flag.ended_at <= archive.ended_at
+    [run] = shadow.sdk_runs()
+    rows = [
+        "  = ○ tool crm.flag_account  shadow stand-in ran",
+        "  = ○ tool crm.archive_account  shadow stand-in ran",
+    ]
+    assert shadow.compare_runs(run.run_id, run.run_id) == (
+        0,
+        [
+            f"irimi compare · {run.run_id} vs {run.run_id} · a comparison, not a verdict: "
+            "nothing was replayed",
+            f"  A  {ENRICH}",
+            f"  B  {ENRICH}",
+            "",
+            *rows,
+            "",
+            "  2 same · 0 changed · 0 only in A · 0 only in B",
+        ],
+        [],
+    )
+    assert [line for line in shadow.summaries() if "○ tool" in line] == [f"  {r[4:]}" for r in rows]

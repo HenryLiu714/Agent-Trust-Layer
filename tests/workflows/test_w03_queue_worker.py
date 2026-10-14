@@ -12,7 +12,7 @@ from urllib.parse import parse_qs
 import pytest
 
 import irimi
-from examples.workflows.harness.run import check_invariants
+from examples.workflows.harness.run import check_invariants, rows_not_shown
 from examples.workflows.w03_queue_worker.agent import CLIENTS, LEDGER, POOLED
 from examples.workflows.w03_queue_worker.scenarios import AGENT_VERSION
 from irimi.exchange import Exchange
@@ -789,3 +789,175 @@ def test_tools_on_a_worker_s_methods_keep_their_receiver_and_leave_it_out_of_the
         ({"journaled": True, "by": "Worker"}, {"acked": True, "queue": "refunds"})
     ] * 4
     assert len(bare.query(LEDGER, "SELECT * FROM acks")) == 4
+
+
+# ---------------------------------------------------------------------- irimi compare (#79)
+
+NOT_A_VERDICT = "a comparison, not a verdict: nothing was replayed"
+ARGS_DIFFER = "  (the triggers' args differ)"
+# The trigger each scenario's runs below are started by, and the ledger write tool each refund's
+# run stands in, if any.
+TRIGGER_OF = {
+    "threads_8": "handle",
+    "asyncio_8": "handle_async",
+    "one_pool_8": "handle",
+    "ledger_threads_8": "handle",
+    "ledger_asyncio_8": "handle_async",
+}
+LEDGER_WRITE = {"ledger_threads_8": "record_refund", "ledger_asyncio_8": "record_refund_async"}
+
+
+def refund_text(i: int) -> str:
+    """Message `i`'s refund of `100 + i` cents, as the summary prints it without its indent."""
+    return f"○ refund $1.{i:02d} on ch_Q{i}  unvalidated (L3 preconditions passed)"
+
+
+def run_of(result, index: int) -> str:
+    """The stored run whose trigger was message `index`."""
+    (run_id,) = [
+        r.run_id
+        for r in result.sdk_runs()
+        if r.trigger is not None and r.trigger.args["message"]["index"] == index
+    ]
+    return run_id
+
+
+def label(trigger: str, version: str = "-", entrypoint: str | None = None) -> str:
+    return f"{trigger}  {AGENT}:{entrypoint or trigger}  agent {version}"
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("scenario", CONCURRENT)
+def test_irimi_compare_of_two_concurrent_runs_shows_each_run_s_own_writes_alone(
+    run_workflow, scenario, mode
+):
+    """Phase 3's exit through `irimi compare` (#79): the eight runs one process made at once,
+    recorded into its one store, each compared with message 0's. Each pair is one refund changed,
+    its charge and amount the run's own, and the ledger's write tool the same: a run that held
+    another's refund or tool call would show a row more, and one that lost its own a row less."""
+    shadow = run_workflow(W, scenario, mode)
+    a = run_of(shadow, 0)
+    trigger = TRIGGER_OF[scenario]
+    tool = LEDGER_WRITE.get(scenario)
+    same = [f"  = ○ tool {AGENT}.{tool}  shadow stand-in ran"] if tool else []
+    for i in range(1, 8):
+        b = run_of(shadow, i)
+        code, out, err = shadow.compare_runs(a, b)
+        assert (code, err) == (1, [])
+        assert out == [
+            f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+            f"  A  {label(trigger)}",
+            f"  B  {label(trigger)}",
+            ARGS_DIFFER,
+            "",
+            f"  ~ A {refund_text(0)}",
+            f"    B {refund_text(i)}",
+            *same,
+            "",
+            f"  {len(same)} same · 1 changed · 0 only in A · 0 only in B",
+        ]
+        assert rows_not_shown(shadow, a, b, out) == []
+
+
+# Pairs of runs one process made, by message index, A over B: the trigger each was started by, its
+# agent version, and the rows compare prints between them.
+PAIRS = {
+    # Message 2 raises before its refund, and its run ends in error: the refund is message 0's.
+    "one_message_fails": (
+        (0, 2),
+        (label("handle"), label("handle")),
+        [f"  - {refund_text(0)}"],
+    ),
+    # Message 1 is still in flight at shutdown, and its run is cancelled before its refund.
+    "cancelled_on_shutdown": (
+        (0, 1),
+        (label("handle_async"), label("handle_async")),
+        [f"  - {refund_text(0)}"],
+    ),
+    # Two runs refund one charge in turn. The second is refused because the engine's one write
+    # log shows it the first's faked refund (#77's decision; its summary calls that refund its
+    # own, pinned LOOKS WRONG under #129). Each stored run holds its own refund alone, so the
+    # compare is right where that summary is not.
+    "shared_charge": (
+        (0, len(CLIENTS)),
+        (label("handle"), label("handle")),
+        [
+            "  ~ A ○ refund $30.00 on ch_QSHARED  unvalidated (L3 preconditions passed)",
+            "    B ✗ refund $30.00 on ch_QSHARED  would fail: amount_too_large",
+        ],
+    ),
+    # A sync method and an async one, under the worker's version: the triggers differ, and so
+    # does nothing but the refund.
+    "worker_methods": (
+        (0, 1),
+        (
+            label("Worker.handle", AGENT_VERSION),
+            label("worker.handle_async", AGENT_VERSION, "Worker.handle_async"),
+        ),
+        [f"  ~ A {refund_text(0)}", f"    B {refund_text(1)}"],
+    ),
+    # The task each trigger returns makes its calls after its run has ended, and they are stored
+    # in that run (#75, pinned LOOKS WRONG under #111): compare reads the store, so it shows the
+    # refunds that serve's block, printed at the run's end, left out (#77, #125).
+    "task_outlives_trigger": (
+        (0, 1),
+        (label("schedule"), label("schedule")),
+        [f"  ~ A {refund_text(0)}", f"    B {refund_text(1)}"],
+    ),
+}
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("scenario", PAIRS)
+def test_irimi_compare_of_two_runs_one_process_made(run_workflow, scenario, mode):
+    """#79 over runs that failed, were cancelled, refused or outlived: each stored run is compared
+    as it was stored, ended or not, with every compared line one its own summary printed."""
+    (i, j), (label_a, label_b), rows = PAIRS[scenario]
+    shadow = run_workflow(W, scenario, mode)
+    a, b = run_of(shadow, i), run_of(shadow, j)
+    code, out, err = shadow.compare_runs(a, b)
+    changed = sum(row.startswith("  ~ ") for row in rows)
+    only_a = sum(row.startswith("  - ") for row in rows)
+    assert (code, err) == (1, [])
+    assert out == [
+        f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+        f"  A  {label_a}",
+        f"  B  {label_b}",
+        ARGS_DIFFER,
+        "",
+        *rows,
+        "",
+        f"  0 same · {changed} changed · {only_a} only in A · 0 only in B",
+    ]
+    assert rows_not_shown(shadow, a, b, out) == []
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("scenario", ["unpropagated_thread", "ledger_unpropagated"])
+def test_irimi_compare_finds_a_lost_run_s_writes_in_the_engine_s_run(run_workflow, scenario, mode):
+    """A refund made in a thread started without `sdk.propagate` belongs to no run (#75), and its
+    ledger write too (#76): each lands in the engine's own run, the process run under
+    `irimi shadow -- <cmd>` and `unattributed` under serve (#77). Compared with that run, message
+    0's run made no write, and the engine's run made both messages' in the order they ended."""
+    shadow = run_workflow(W, scenario, mode)
+    a, engine = run_of(shadow, 0), shadow.engine_run_id()
+    code, out, err = shadow.compare_runs(a, engine)
+    tool = [f"  + ○ tool {AGENT}.record_refund  shadow stand-in ran"]
+    added = [
+        line
+        for i in range(2)
+        for line in [f"  + {refund_text(i)}", *(tool if scenario.startswith("ledger") else [])]
+    ]
+    engine_label = "-  -  agent -" if mode == "serve" else f"{sys.executable}  -  agent -"
+    assert (code, err) == (1, [])
+    assert out == [
+        f"irimi compare · {a} vs {engine} · {NOT_A_VERDICT}",
+        f"  A  {label('handle')}",
+        f"  B  {engine_label}",
+        ARGS_DIFFER,
+        "",
+        *added,
+        "",
+        f"  0 same · 0 changed · 0 only in A · {len(added)} only in B",
+    ]
+    assert rows_not_shown(shadow, a, engine, out) == []

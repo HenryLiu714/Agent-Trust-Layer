@@ -12,6 +12,7 @@ import sys
 import pytest
 
 import irimi
+from examples.workflows.harness.run import check_invariants, rows_not_shown
 from examples.workflows.w09_scope_gauntlet.agent import (
     AGENT_VERSION,
     BIG_CHARGE,
@@ -181,17 +182,22 @@ def test_the_big_charge_is_past_irimis_body_limit():
     assert BIG_DESCRIPTION_BYTES > MAX_BODY_BYTES
 
 
+# The scenarios that send one write whose body decodes past irimi's cap (#94, #79).
+CUT_WRITES = ("bombs", "cut_refund", "cut_update")
+
+
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("scenario", sorted(WORKFLOW.scenarios))
 def test_no_decision_ever_fails(run_workflow, scenario, mode):
     """The never-raise hook: a decision that raised would answer 502 `decision-failed`. No edge
     in the gauntlet may reach that path, and every agent call got an HTTP answer. But one: a write
-    whose body decodes past irimi's cap is refused on that path by design (#94), and says why."""
+    whose body decodes past irimi's cap is refused on that path by design (#94), and says why,
+    once in each scenario that sends one (`CUT_WRITES`)."""
     shadow = run_workflow(W, scenario, mode)
     assert shadow.exchange_lines()
     failed = [line for line in shadow.exchange_lines() if "decision-failed" in line]
     assert [line for line in failed if not line.endswith("decision-failed, body-truncated]")] == []
-    assert len(failed) == (scenario == "bombs")
+    assert len(failed) == (scenario in CUT_WRITES)
     assert all(isinstance(c.get("status"), int) for c in shadow.calls())
 
 
@@ -892,3 +898,120 @@ def test_a_run_start_that_decodes_past_the_cap_is_refused_413_unread(run_workflo
     assert sorted(p.name for p in (root / "runs").glob("*")) == process
     [health] = shadow.events("health")
     assert health["body"]["store"] == {"queued": 0, "written": len(BOMB_LINES), "dropped": 0}
+
+
+# ---------------------------------------------------------------------- irimi compare (#79)
+#
+# W9 is a plain script: under `irimi shadow` its every write is its process run's, and under serve
+# mode `unattributed`'s (#77). Every serve run recorded into a store files its writes in the same
+# `unattributed`, so each pin below records into a store of its own, which one serve run at most
+# records into: A under shadow, and B under shadow (its process run) or serve (`unattributed`).
+
+NOT_A_VERDICT = "a comparison, not a verdict: nothing was replayed"
+PLAIN_REFUND = "○ refund $9.00 on ch_GAUNTLET  unvalidated (L3 preconditions passed)"
+CUT_REFUND = "○ refund ? on ?  unclassified (L0)"
+
+
+def recorded_pair(shared_store_run, a: str, b: str, mode: str, store: str):
+    """`a` under shadow and `b` under `mode`, into the store `store` names, and the run each wrote
+    into: the process run, or under serve `unattributed`."""
+    one = shared_store_run(W, a, "shadow", store)
+    other = shared_store_run(W, b, mode, store)
+    assert check_invariants(other) == []
+    return one, one.process_run_id(), other, other.engine_run_id()
+
+
+def side(result) -> str:
+    """How compare's header names the run `result` wrote into."""
+    return "-  -  agent -" if result.mode == "serve" else f"{sys.executable}  -  agent -"
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_irimi_compare_will_not_compare_two_writes_whose_bodies_were_cut(shared_store_run, mode):
+    """`cut_refund` and `cut_update` each send one Stripe write whose body irimi could not keep
+    (#94), a refund and a customer update, and then the same plain refund. irimi could not decide
+    either cut write, so it keys both by host alone, and they pair: texts that differ while a body
+    was cut are a `?` row, not a change, and the totals say how many it did not compare (#79)."""
+    one, a, other, b = recorded_pair(shared_store_run, "cut_refund", "cut_update", mode, "cut")
+    code, out, err = other.compare_runs(a, b)
+    assert (code, err) == (1, [])
+    assert out == [
+        f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+        f"  A  {side(one)}",
+        f"  B  {side(other)}",
+        "  (the triggers' args differ)",
+        "",
+        f"  ? A {CUT_REFUND}",
+        "    B ○ update customer cus_GAUNTLET  unclassified (L0)",
+        f"  = {PLAIN_REFUND}",
+        "",
+        "  1 same · 0 changed · 0 only in A · 0 only in B · 1 not compared (a body was cut when "
+        "stored)",
+    ]
+    assert rows_not_shown(other, a, b, out) == []
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_irimi_compare_will_not_call_two_cut_refunds_of_different_amounts_the_same(
+    shared_store_run, mode
+):
+    """`bombs` refunds 800 and `cut_refund` 700, each in a body irimi could not keep (#94), so
+    neither stored body says how much, and both print `refund ? on ?`. A text rendered from no
+    body is the same for every refund, and compared by it the pair was `=`, exit 0, as if the runs
+    made the same writes: a pair either side of which was cut is `?` whatever its texts, and the
+    run exits 1 (#79)."""
+    one, a, other, b = recorded_pair(shared_store_run, "bombs", "cut_refund", mode, "cut-equal")
+    code, out, err = other.compare_runs(a, b)
+    assert (code, err) == (1, [])
+    assert out == [
+        f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+        f"  A  {side(one)}",
+        f"  B  {side(other)}",
+        "  (the triggers' args differ)",
+        "",
+        f"  ? A {CUT_REFUND}",
+        f"    B {CUT_REFUND}",
+        f"  = {PLAIN_REFUND}",
+        "",
+        "  1 same · 0 changed · 0 only in A · 0 only in B · 1 not compared (a body was cut when "
+        "stored)",
+    ]
+    assert rows_not_shown(other, a, b, out) == []
+    # The two refunds the agents sent were not the same: their bodies' hashes differ.
+    sent = [
+        e["sha256"]
+        for result, label in ((one, "refund_gzip_bomb"), (other, "cut_write"))
+        for e in result.events("sent")
+        if e["label"] == label
+    ]
+    assert len(sent) == len(set(sent)) == 2
+
+
+def test_irimi_compare_of_one_key_used_three_times_under_shadow_against_serve(shared_store_run):
+    """`idempotency` under shadow, its process run, against itself under serve, `unattributed`
+    (#77): the first refund, the same key reused for a different amount, which irimi says would
+    fail (#46), and two keyless refunds, each the same. The second use of the key, the same refund
+    again, is the idempotency store's answer to the first and no write (#79)."""
+    one, a, other, b = recorded_pair(
+        shared_store_run, "idempotency", "idempotency", "serve", "idem"
+    )
+    assert b == trace.UNATTRIBUTED
+    code, out, err = other.compare_runs(a, b)
+    rows = [
+        "○ refund $1.00 on ch_GAUNTLET  unvalidated (L3 preconditions passed)",
+        "✗ refund 200 on ch_GAUNTLET  would fail: idempotency_error",
+        "○ refund $0.50 on ch_GAUNTLET  unvalidated (L3 preconditions passed)",
+        "○ refund $0.50 on ch_GAUNTLET  unvalidated (L3 preconditions passed)",
+    ]
+    assert (code, err) == (0, [])
+    assert out == [
+        f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+        f"  A  {side(one)}",
+        f"  B  {side(other)}",
+        "  (the triggers' args differ)",
+        "",
+        *[f"  = {row}" for row in rows],
+        "",
+        "  4 same · 0 changed · 0 only in A · 0 only in B",
+    ]
+    assert rows_not_shown(other, a, b, out) == []

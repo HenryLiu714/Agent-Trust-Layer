@@ -21,10 +21,10 @@ from collections import Counter
 import pytest
 
 import irimi
-from examples.workflows.harness.run import CANARIES, Result, serve_cases, workflows
+from examples.workflows.harness.run import CANARIES, TOOL_WRITE, Result, serve_cases, workflows
 from examples.workflows.w10_flaky_upstream.scenarios import CONTROL_DOWN
 from irimi import paths, redact, report, trace
-from irimi.exchange import Exchange
+from irimi.exchange import BODY_TRUNCATED_FLAG, Exchange
 from irimi.store import SERVE_LOCK_FILE, StoredRun, header_record
 from irimi.trace import TelemetrySeen, ToolCall
 
@@ -498,3 +498,108 @@ def test_all_of_a_serves_runs_together_are_what_it_reported_live(run_workflow, n
     handed_calls = [e for e in serve.handed_events if isinstance(e, ToolCall)]
     live = report.summary_lines(trace.UNATTRIBUTED, serve.reported, 0.0, maps, handed_calls)
     assert report.stored_summary_lines(union, maps) == live
+
+
+# -- irimi compare (#79) ---------------------------------------------------------------------------
+
+NOT_A_VERDICT = "a comparison, not a verdict: nothing was replayed"
+
+
+@pytest.mark.parametrize(("name", "scenario", "mode"), MODE_CASES, ids=MODE_IDS)
+def test_irimi_compare_of_every_stored_run_with_itself_is_its_summary_s_writes(
+    run_workflow, name, scenario, mode
+):
+    """#79 over the whole corpus, through the real CLI: `irimi compare <r> <r>`, for every run the
+    store holds and `unattributed`, prints its header, one row for each write line `irimi runs
+    show <r>`'s summary printed, and the totals, or the totals alone for a run that wrote nothing.
+    Each side is named as `runs show` names the run.
+
+    Each row is `=`, but for a write whose body was cut when stored (W9 `bombs`, #94): irimi never
+    calls a cut write the same, not even as itself, so it is a `?` pair whose two lines are its
+    summary line, the totals count it as not compared, and the run exits 1. Every other run exits
+    0. The summary prints a run's HTTP writes and then its tool writes, each in `seq` order;
+    compare prints the two interleaved in `seq` order. So each kind is compared in order, and the
+    totals count both. Under serve mode (#77) `unattributed` holds what no run named."""
+    shadow = run_workflow(name, scenario, mode)
+    if not started(shadow):
+        return
+    reader = shadow.stored()
+    ids = [record.run_id for record in reader.list_runs()] + [trace.UNATTRIBUTED]
+    for run_id in ids:
+        label, writes = shadow.shown_writes(run_id)
+        # Whether each HTTP write the summary printed, in `seq` order, was stored cut.
+        cut = [
+            BODY_TRUNCATED_FLAG in e.flags
+            for e in reader.load_run(run_id, bodies=False).events
+            if isinstance(e, Exchange) and report.is_intercepted(e)
+        ]
+        code, out, err = shadow.compare_runs(run_id, run_id)
+        assert (code, err) == (1 if any(cut) else 0, []), run_id
+        assert out[:4] == [
+            f"irimi compare · {run_id} vs {run_id} · {NOT_A_VERDICT}",
+            f"  A  {label}",
+            f"  B  {label}",
+            "",
+        ]
+        totals = f"  {len(writes) - sum(cut)} same · 0 changed · 0 only in A · 0 only in B"
+        if any(cut):
+            totals += f" · {sum(cut)} not compared (a body was cut when stored)"
+        if not writes:
+            assert out[4:] == [totals], run_id
+            continue
+        assert out[-2:] == ["", totals], run_id
+        rows = out[4:-2]
+        # Each row as (its mark, its line): a `?` pair's B line must be its A line.
+        compared: list[tuple[str, str]] = []
+        while rows:
+            if rows[0].startswith("  ? A "):
+                assert rows[1] == f"    B {rows[0][6:]}", rows[:2]
+                compared.append(("?", rows[0][6:]))
+                rows = rows[2:]
+            else:
+                assert rows[0].startswith("  = "), rows[0]
+                compared.append(("=", rows[0][4:]))
+                rows = rows[1:]
+        http = [w for w in writes if not TOOL_WRITE.match(w)]
+        assert len(http) == len(cut), (run_id, http, cut)
+        assert [row for row in compared if not TOOL_WRITE.match(row[1])] == [
+            ("?" if c else "=", w) for w, c in zip(http, cut, strict=True)
+        ], run_id
+        assert [row for row in compared if TOOL_WRITE.match(row[1])] == [
+            ("=", w) for w in writes if TOOL_WRITE.match(w)
+        ], run_id
+
+
+@pytest.mark.parametrize("mode", ["shadow", "serve"])
+def test_the_corpus_gives_irimi_compare_s_universal_check_something_to_catch(run_workflow, mode):
+    """The check above passes by default over runs that wrote nothing. Across the corpus it must
+    meet, in each mode: a write irimi answered, one it says would fail, a write tool stood in, a
+    write whose body was cut when stored, a run whose HTTP and tool writes interleave in `seq`
+    order (so compare's order is not the summary's), and under serve mode (#77), where what no run
+    names is `unattributed`, `unattributed` holding a write."""
+    seen: Counter[str] = Counter()
+    for name, scenario in CASES:
+        result = run_workflow(name, scenario, mode)
+        if not started(result):
+            continue
+        reader = result.stored()
+        ids = [record.run_id for record in reader.list_runs()] + [trace.UNATTRIBUTED]
+        for run_id in ids:
+            events = reader.load_run(run_id, bodies=False).events
+            actions = [
+                e
+                for e in events
+                if (isinstance(e, Exchange) and report.is_intercepted(e))
+                or (isinstance(e, ToolCall) and report.is_stood_in(e))
+            ]
+            writes = [e for e in actions if isinstance(e, Exchange)]
+            kinds = [isinstance(e, ToolCall) for e in actions]
+            seen["answered"] += any(e.precondition != "rejected" for e in writes)
+            seen["would fail"] += any(e.precondition == "rejected" for e in writes)
+            seen["stood in"] += any(kinds)
+            seen["cut"] += any(BODY_TRUNCATED_FLAG in e.flags for e in writes)
+            seen["interleaved"] += kinds != sorted(kinds)
+            seen["unattributed"] += run_id == trace.UNATTRIBUTED and bool(actions)
+    expected = ["answered", "would fail", "stood in", "cut", "interleaved"]
+    expected += ["unattributed"] if mode == "serve" else []
+    assert [kind for kind in expected if not seen[kind]] == []

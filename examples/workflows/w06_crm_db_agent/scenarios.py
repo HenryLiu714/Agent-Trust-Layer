@@ -53,6 +53,11 @@ WORKFLOW = Workflow(
             doc="a write's stand-in raises and the agent, holding the very exception it raised, "
             "retries: both calls recorded, the first with its error",
         ),
+        "merge_once": Scenario(
+            ("merge_once",),
+            doc="merge_retry's merge made right the first time: one call, its stand-in run, which "
+            "`irimi compare` holds the retry against (#79)",
+        ),
         "outside_run": Scenario(
             ("outside_run",),
             doc="tools called before the trigger, in no run: recorded in the process run "
@@ -62,6 +67,11 @@ WORKFLOW = Workflow(
             ("stand_in_http",),
             setup=_enrichment,
             doc="a write's stand-in makes an HTTP read: an ordinary exchange of the run, labelled",
+        ),
+        "overlapping_writes": Scenario(
+            ("overlapping_writes",),
+            doc="two async writes at once, the archive started first and ended last: stored, "
+            "summarised and compared in the order they ended (#79)",
         ),
         "async_tools": Scenario(
             ("async_tools",),

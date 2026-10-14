@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from examples.workflows.harness.run import Scenario, Workflow
 from examples.workflows.harness.services import LlmCall, LlmTurn, World
 from examples.workflows.w04_slack_ops_bot.agent import (
@@ -31,6 +33,21 @@ def _workspace(world: World) -> None:
             channel, MENTION_TS, "<@U0BOT> are payouts on schedule?", ALICE, thread_ts=THREAD_TS
         )
     world.llm.script = _script
+
+
+# Two answers that print alike: one holds a newline, the other a backslash and an `n` (#79).
+TWO_LINES = "Payouts are on schedule.\nNext run at 09:00."
+TYPED_ESCAPE = "Payouts are on schedule.\\nNext run at 09:00."
+
+
+def _answering(text: str) -> Callable[[World], None]:
+    """`_workspace` with a model that answers `text` to every mention."""
+
+    def setup(world: World) -> None:
+        _workspace(world)
+        world.llm.script = lambda call: LlmTurn(text=text)
+
+    return setup
 
 
 def _no_chat_write(world: World) -> None:
@@ -72,6 +89,18 @@ WORKFLOW = Workflow(
             ("archived_channel",),
             setup=_workspace,
             doc="an archived channel: L3's is_archived agrees with Slack's own refusal",
+        ),
+        "two_line_answer": Scenario(
+            ("mention_in_thread",),
+            setup=_answering(TWO_LINES),
+            doc="mention_in_thread with a two-line answer: the post's newline, escaped wherever "
+            "irimi prints it (#72, #79)",
+        ),
+        "typed_escape_answer": Scenario(
+            ("mention_in_thread",),
+            setup=_answering(TYPED_ESCAPE),
+            doc="mention_in_thread with an answer holding a typed backslash-n, which prints as "
+            "two_line_answer's newline does, and is not the same post (#79)",
         ),
         "duplicate_delivery": Scenario(
             ("duplicate_delivery",),

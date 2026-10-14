@@ -10,6 +10,7 @@ escape today (#76).
 
 import pytest
 
+from examples.workflows.harness.run import check_invariants, compare, rows_not_shown
 from examples.workflows.w11_leaky_agent.agent import CHANNEL, CHARGE
 from irimi.exchange import Exchange
 
@@ -185,4 +186,68 @@ def test_a_sidecar_write_made_by_a_write_tool_is_stood_in_and_the_escape_closed(
         "",
         f"  {NOTHING_SEEN}",
         "  These writes did not happen.",
+    ]
+
+
+# ---------------------------------------------------------------------- irimi compare (#79)
+
+NOT_A_VERDICT = "a comparison, not a verdict: nothing was replayed"
+# Each escape is an `sdk.run` named `escape`, with no function to name its entrypoint (#75).
+ESCAPE = "escape  -  agent -"
+FAKED_REFUND = f"○ refund $5.00 on {CHARGE}  unvalidated (L3 preconditions passed)"
+
+
+def compared(shared_store_run, a: str, b: str, mode: str) -> tuple[str, str, list[str]]:
+    """`a` under shadow and `b` under `mode`, recorded into one store, and `irimi compare` over
+    their runs: the two run ids and what it printed, after checking that it exited 1, the runs
+    differing, wrote nothing to stderr, and showed each run's own lines alone."""
+    one = shared_store_run(W, a)
+    other = shared_store_run(W, b, mode)
+    assert check_invariants(other) == []
+    code, out, err = compare(one, other)
+    ids = [result.one("run.start")["run"] for result in (one, other)]
+    assert (code, err) == (1, [])
+    assert rows_not_shown(other, *ids, out) == []
+    return ids[0], ids[1], out
+
+
+@pytest.mark.parametrize("escape", sorted(ESCAPES))
+@pytest.mark.parametrize("mode", MODES)
+def test_irimi_compare_cannot_show_a_write_that_escaped(shared_store_run, escape, mode):
+    """`proxied` refunds through irimi, which fakes it; each escape makes its write around irimi,
+    and it lands (#79 over W11). Recorded into one store, the escape under shadow or serve: an
+    escaped write never reached irimi, so it is not in the store, and compare shows the escape as
+    a run that wrote nothing.
+
+    LOOKS WRONG (this module's): a run that refunded for real compares as one that did not refund.
+    Phase 4's readiness checks are to flag the escape; compare can only show what irimi stored."""
+    a, b, out = compared(shared_store_run, "proxied", escape, mode)
+    assert out == [
+        f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+        f"  A  {ESCAPE}",
+        f"  B  {ESCAPE}",
+        "  (the triggers' args differ)",
+        "",
+        f"  - {FAKED_REFUND}",
+        "",
+        "  0 same · 0 changed · 1 only in A · 0 only in B",
+    ]
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_irimi_compare_shows_the_sidecar_write_a_write_tool_closed(shared_store_run, mode):
+    """`loopback_service` posts its job to the sidecar around irimi, and `labelled_sidecar` posts
+    the same job through a write tool, whose stand-in runs instead (#76). Recorded into one store,
+    the second under shadow or serve: the escape shows nothing, and the closed escape is the one
+    write, a write only B made (#79)."""
+    a, b, out = compared(shared_store_run, "loopback_service", "labelled_sidecar", mode)
+    assert out == [
+        f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+        f"  A  {ESCAPE}",
+        f"  B  {ESCAPE}",
+        "  (the triggers' args differ)",
+        "",
+        "  + ○ tool examples.workflows.w11_leaky_agent.agent.enqueue_job  shadow stand-in ran",
+        "",
+        "  0 same · 0 changed · 0 only in A · 1 only in B",
     ]

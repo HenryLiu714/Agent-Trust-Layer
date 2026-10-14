@@ -78,6 +78,8 @@ SERVED_CANARIES = {"STRIPE_CLIENT_SECRET": CLIENT_SECRET_CANARY, "BOMB_SECRET": 
 MODES = ("bare", "shadow", "serve")
 # The line irimi's serve mode prints above each run's summary when the SDK ends the run (#77).
 RUN_BLOCK = re.compile(r"--- run (\S+) ---")
+# The run `irimi shadow`'s banner names, its process run (#70).
+BANNER_RUN = re.compile(r"irimi shadow · run (\S+) · ")
 # How long a serve-mode run waits for irimi's banner, and then for irimi to stop.
 SERVE_TIMEOUT_S = 60
 # What the name of a thread the fake internet answers a request on ends in: the one kind of
@@ -88,6 +90,11 @@ THREAD_EXIT_S = 5.0
 # A tool call's line in irimi's stream (`report.tool_call_line`, #76). Its first column is `ran`,
 # which no `answered_by` an exchange line starts with ever is.
 TOOL_LINE = re.compile(r"(real|shadow) +(read|write) +tool .* -> ")
+# A write tool's line in a summary, without its indent (`report.tool_write_line`, #76). The summary
+# prints these after the HTTP writes, and `irimi compare` among them, in `seq` order (#79).
+TOOL_WRITE = re.compile(rf"{report.WRITE_MARKER} tool \S+  shadow stand-in ")
+# How a summary's write line starts, a write irimi answered or one it says would fail (#45).
+WRITE_LINE_PREFIXES = (f"  {report.WRITE_MARKER} ", f"  {report.REJECTED_MARKER} ")
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy")
 # The only variables an agent inherits from the harness's own environment. Everything else it is
 # given by name, so a developer's shell cannot change a run: an exported `IRIMI_ENGINE_ACTIVE=1`
@@ -284,9 +291,16 @@ class Result:
         return [r for r in self.stored().list_runs() if r.attribution == "sdk"]
 
     def process_run_id(self) -> str:
-        """The id of the one run `irimi shadow` stored for the agent's process (#70)."""
-        (run,) = [r for r in self.stored().list_runs() if r.attribution == "process"]
-        return run.run_id
+        """The id of the one run `irimi shadow` stored for the agent's process (#70). A store runs
+        share holds one process run per `irimi shadow` (#79): this one's is the run its banner
+        named."""
+        runs = [r.run_id for r in self.stored().list_runs() if r.attribution == "process"]
+        if self.store is None:
+            (run_id,) = runs
+            return run_id
+        (run_id,) = [m[1] for line in self.irimi if (m := BANNER_RUN.match(line))][:1]
+        assert run_id in runs, (run_id, runs)
+        return run_id
 
     def runs(self, *argv: str) -> tuple[int, list[str], list[str]]:
         """`irimi runs <argv>` over this run's store, as its user would type it afterwards: the
@@ -308,6 +322,26 @@ class Result:
         ):
             code = irimi_main(list(argv))
         return code, out.getvalue().splitlines(), err.getvalue().splitlines()
+
+    def compare_runs(self, run_a: str, run_b: str) -> tuple[int, list[str], list[str]]:
+        """`irimi compare <run_a> <run_b>` over the store this run recorded into, named with
+        `--store` as its user would name it (#79): any two runs it holds, `unattributed` too."""
+        return self.command("compare", run_a, run_b, "--store", str(self.store_root()))
+
+    def shown_writes(self, run_id: str) -> tuple[str, list[str]]:
+        """What `irimi runs show <run_id>` prints of a stored run that `irimi compare` prints too
+        (#79): the run in one line, its trigger, entrypoint and agent version as compare's header
+        names a side, and its summary's write lines without their indent, in the order printed,
+        `↳` lines left out. Raises unless `runs show` exits 0."""
+        code, out, err = self.runs("show", run_id, "--store", str(self.store_root()))
+        assert (code, err) == (0, []), (run_id, code, err)
+        fields = dict(line.split(": ", 1) for line in out[: out.index("")])
+        label = f"{fields['trigger']}  {fields['entrypoint']}  agent {fields['agent version']}"
+        start = next(
+            i for i, line in enumerate(out) if line.startswith(f"irimi shadow · run {run_id} · ")
+        )
+        writes = [line[2:] for line in out[start:] if line.startswith(WRITE_LINE_PREFIXES)]
+        return label, writes
 
     def maps(self) -> MapIndex | None:
         """The maps `irimi runs show` renders this run's writes with: shipped plus the scenario's
@@ -421,7 +455,48 @@ def compare(a: Result, b: Result) -> tuple[int, list[str], list[str]]:
     """`irimi compare` over the SDK run each of `a` and `b` started, as `b`'s user would type it,
     naming the store both recorded into: `run`'s `store`, given to both (#79)."""
     ids = [result.one("run.start")["run"] for result in (a, b)]
-    return b.command("compare", *ids, "--store", str(b.store_root()))
+    return b.compare_runs(*ids)
+
+
+# Whose summary printed each kind of `irimi compare` row (#79): A's for a write both made the same
+# (B's too), for one only A made, and for a pair's A line; B's for one only B made and for a pair's
+# B line, which a `~` or a `?` prints under its A line.
+ROW_SIDES = {"  = ": "AB", "  - ": "A", "  ~ A ": "A", "  ? A ": "A", "  + ": "B", "    B ": "B"}
+
+
+# How a `~` or `?` pair's A row starts, and its B row under it (#79).
+PAIR_A_PREFIXES = ("  ~ A ", "  ? A ")
+PAIR_B_PREFIX = "    B "
+
+
+def rows_not_shown(result: Result, run_a: str, run_b: str, out: list[str]) -> list[str]:
+    """Every row of `irimi compare <run_a> <run_b>`'s output `out` that is not a write line the
+    summary of its run printed (`irimi runs show`, #72), or that no row kind starts (#79). Empty
+    when compare showed each run's own writes and nothing else, but for the one exception compare
+    makes: a pair it told apart (`_told_apart`)."""
+    shown = {"A": result.shown_writes(run_a)[1], "B": result.shown_writes(run_b)[1]}
+    rows = out[out.index("") + 1 : -2] if out[-2:-1] == [""] else []
+    missing = []
+    for i, row in enumerate(rows):
+        prefix = next((p for p in ROW_SIDES if row.startswith(p)), None)
+        if prefix is not None and all(row[len(prefix) :] in shown[s] for s in ROW_SIDES[prefix]):
+            continue
+        pair = rows[i : i + 2] if row.startswith(PAIR_A_PREFIXES) else rows[max(i - 1, 0) : i + 1]
+        if not (len(pair) == 2 and _told_apart(pair[0], pair[1], shown)):
+            missing.append(row)
+    return missing
+
+
+def _told_apart(a_row: str, b_row: str, shown: dict[str, list[str]]) -> bool:
+    """Whether `a_row` over `b_row` is a `~` or `?` pair whose writes the two summaries print as
+    one line, which `irimi compare` prints with each backslash escaped too so the two differ
+    (#79): the rows differ, and with each doubled backslash made one again, both are that line,
+    and each run's summary printed it."""
+    if not (a_row.startswith(PAIR_A_PREFIXES) and b_row.startswith(PAIR_B_PREFIX)):
+        return False
+    a, b = a_row[len(PAIR_A_PREFIXES[0]) :], b_row[len(PAIR_B_PREFIX) :]
+    line = a.replace("\\\\", "\\")
+    return a != b and b.replace("\\\\", "\\") == line and line in shown["A"] and line in shown["B"]
 
 
 def _agent_env(

@@ -1,0 +1,9 @@
+# The only Docker build here is examples/server_agent's (#78), and it needs only these. Without
+# this file every build would send .venv and .claude/worktrees to the daemon.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!src
+!examples/server_agent
+**/__pycache__

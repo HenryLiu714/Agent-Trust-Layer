@@ -52,12 +52,27 @@ PASS: two concurrent refunds were two ok runs in irimi, and neither reached Stri
 Between those lines it prints irimi's own output: one line per exchange and tool call, and one
 `--- run <id> ---` block per run, each naming its own charge.
 
+To drive it yourself instead, from this directory, with `STRIPE_API_KEY` exported and a test-mode
+charge id of your own (`uv run --group examples python examples/refund_agent/seed.py` from the repo
+root makes one):
+
+```
+docker compose up --build --detach --wait
+curl -X POST http://127.0.0.1:8080/refund -d '{"charge": "ch_...", "reason": "requested_by_customer"}'
+docker compose exec irimi irimi runs list
+```
+
+`docker compose logs irimi` shows the run's summary, and `docker compose down -v` removes both
+containers and irimi's store.
+
 ## How the containers are wired
 
 - `irimi` runs `irimi init`, copies **only** `ca.pem` into the `ca-public` volume, and serves with
   `--listen-host 0.0.0.0`. Its `irimi-home` volume, which holds the CA key, the `mitm/` bundle and
   the trace store, is mounted on `irimi` alone. Its port is not published: the control endpoint
-  has no authentication.
+  has no authentication. To reach irimi from the host, publish its port unchanged (`4000:4000`):
+  irimi knows a request is its own by the port it arrived on, and one remapped would be forwarded
+  back to irimi (#126).
 - `agent` mounts `ca-public` read-only and carries the README's "Serve mode" variables:
   `HTTPS_PROXY` and `HTTP_PROXY`, in both cases, naming `http://irimi:4000`, `SSL_CERT_FILE` and
   `REQUESTS_CA_BUNDLE` naming `/ca/ca.pem`, `IRIMI_ENGINE_ACTIVE=1` and

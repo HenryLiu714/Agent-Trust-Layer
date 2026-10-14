@@ -30,16 +30,25 @@ cleanup() {
   rm -rf "$out"
 }
 trap cleanup EXIT
+# Ctrl-C or a kill is a failure too: exit non-zero, so the trap prints the logs before tearing down.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 echo "--- seeding two test-mode charges"
 charges=()
 for _ in 1 2; do
   line="$(cd "$root" && uv run --group examples python examples/refund_agent/seed.py)"
   echo "$line"
-  charges+=("$(echo "$line" | awk '{print $3}')")
+  charge="$(echo "$line" | awk '{print $3}')"
+  case "$charge" in
+    ch_*) charges+=("$charge") ;;
+    *) echo "error: seed.py printed no charge id" >&2; exit 1 ;;
+  esac
 done
 
 echo "--- starting irimi and the agent"
+# An earlier run killed before its trap could tear down would leave its runs in irimi's store.
+"${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
 # The barrier holds each refund after its charge read until both have arrived: two runs at once.
 IRIMI_EXAMPLE_BARRIER=2 "${compose[@]}" up --build --detach --wait
 
@@ -73,10 +82,14 @@ echo "$runs"
 echo "--- irimi's output"
 logs="$("${compose[@]}" logs --no-log-prefix irimi)"
 echo "$logs"
-# One block per run, each with its faked refund and its stood-in tool.
+# One block per run, each with its faked refund and its stood-in tool, and each charge's refund
+# in one block only: two requests at once that did not mix.
 [ "$(echo "$logs" | grep -c '^--- run ')" = 2 ]
 [ "$(echo "$logs" | grep -c '^  ○ refund ')" = 2 ]
 [ "$(echo "$logs" | grep -c '^  ○ tool db.mark_refunded  shadow stand-in ran$')" = 2 ]
+for charge in "${charges[@]}"; do
+  [ "$(echo "$logs" | grep -c "^  ○ refund ? on $charge  ")" = 1 ]
+done
 
 echo "--- Stripe holds no refund for either charge"
 (cd "$root" && uv run --group examples python - "${charges[@]}") <<'PY'

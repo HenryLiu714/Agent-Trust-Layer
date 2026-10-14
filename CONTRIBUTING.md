@@ -55,14 +55,6 @@ which skips unless `STRIPE_API_KEY` is set and the `examples` group is installed
 STRIPE_API_KEY=sk_test_... uv run pytest -q -rs tests/test_phase_exit.py
 ```
 
-Phase 3's exit for a server agent has a hermetic half, `tests/test_phase3_exit.py`, which runs on
-every `uv run pytest -q`, and a container half, which needs Docker and a test-mode key and is run
-by hand (`examples/server_agent/README.md`):
-
-```
-STRIPE_API_KEY=sk_test_... examples/server_agent/check.sh
-```
-
 With `SLACK_BOT_TOKEN` and `SLACK_CHANNEL` also set, the agent posts to Slack and reads the channel
 back, and the check asserts the post is in what it read. Give `SLACK_CHANNEL` as a channel **id**
 (`C0123`), not `#general`: that is what makes the read-back `overlay: full`. `chat.postMessage`
@@ -73,6 +65,16 @@ spelling it was sent, so a post to `#general` is read back from a channel irimi 
 ```
 STRIPE_API_KEY=sk_test_... SLACK_BOT_TOKEN=xoxb-... SLACK_CHANNEL=C0123 \
   uv run pytest -q -rs tests/test_phase_exit.py
+```
+
+Phase 3's exit for a server agent has a hermetic half, `tests/test_phase3_exit.py`, which runs on
+every `uv run pytest -q`, and a container half, which needs Docker with compose, `uv` and a
+test-mode key, and is run by hand before closing the phase (`examples/server_agent/README.md`).
+It seeds two charges, builds both images, refunds both charges at once through the agent under
+irimi, checks that irimi stored two ok runs and that Stripe holds no refund, and tears down:
+
+```
+STRIPE_API_KEY=sk_test_... examples/server_agent/check.sh
 ```
 
 ## Sample workflows

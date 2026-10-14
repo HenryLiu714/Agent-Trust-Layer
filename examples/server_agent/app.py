@@ -20,7 +20,7 @@ the reverse door it would need instead is loopback-only, so another container ca
     PORT=8080 STRIPE_API_KEY=sk_test_... python -m examples.server_agent
 
 Start it by module name, as above, never as `python app.py`: run as `__main__`, its trigger's
-entrypoint would be `__main__:handle_refund`, which replay (#84) cannot import.
+entrypoint would be `__main__:handle_refund`, which replay (#84) cannot import, so it refuses to.
 
 Environment: `PORT` (default 8080; 0 picks a free one), `HOST` (default 127.0.0.1; a container
 needs 0.0.0.0), `STRIPE_API_KEY`, `STRIPE_API_BASE` (default https://api.stripe.com; the exit test
@@ -94,6 +94,9 @@ def handle_refund(charge: str, reason: str) -> str:
 
 
 class _Handler(BaseHTTPRequestHandler):
+    # A client that names more body than it sends is cut off, not waited on forever (#78).
+    timeout = 30.0
+
     def do_GET(self) -> None:
         if self.path == "/healthz":
             self._reply(200, {"ok": True})
@@ -105,10 +108,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._reply(404, {"error": f"no route {self.path}"})
             return
         try:
-            body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)))
+            # A negative length would read to the end of a connection the client holds open (#78).
+            length = int(self.headers.get("content-length") or 0)
+            if length < 0:
+                raise ValueError(f"content-length {length}")
+            body = json.loads(self.rfile.read(length))
             charge, reason = body["charge"], body["reason"]
-            if not (isinstance(charge, str) and isinstance(reason, str)):
-                raise TypeError("charge and reason must be strings")
+            if not (isinstance(charge, str) and charge and isinstance(reason, str)):
+                raise TypeError("charge must be a non-empty string, and reason a string")
         except (ValueError, KeyError, TypeError) as exc:
             self._reply(400, {"error": f"expected {{'charge': ..., 'reason': ...}}: {exc}"})
             return
@@ -142,3 +149,9 @@ def main() -> int:
     finally:
         server.server_close()
     return 0
+
+
+if __name__ == "__main__":
+    # Run as a script, every run's entrypoint would be `__main__:handle_refund`, which replay (#84)
+    # cannot import: refuse, and say how to start it (#74).
+    raise SystemExit("start the server agent by module name: python -m examples.server_agent")

@@ -17,6 +17,7 @@ to the same five there, and to what serve mode owes each run whose end it took: 
 `--- run <id> ---` block, equal to that run's stored summary.
 """
 
+import dataclasses
 import re
 
 import pytest
@@ -190,3 +191,17 @@ def test_the_corpus_gives_every_invariant_something_to_catch(run_workflow, mode)
     assert served_canary, "invariant 4: no live read handed back a canary credential"
     assert seen_escape, "invariant 1: no `leaks` scenario's escape reached a fake service"
     assert stored_placeholder, "invariant 4: no shadow run stored a credential it had redacted"
+
+
+def test_invariant_4_reads_a_store_a_run_was_given_outside_its_home(shared_store_run, tmp_path):
+    """A run recorded into a store runs share keeps it outside its own home (#79): a canary on
+    disk there is still on disk where irimi writes."""
+    shadow = shared_store_run("w01_ticket_triage", "full_refund")
+    assert not shadow.store_root().is_relative_to(shadow.home)
+    assert check_invariants(shadow) == []
+    name, value = next(iter(CANARIES.items()))
+    (tmp_path / "events.jsonl").write_text(value)
+    leaked = check_invariants(dataclasses.replace(shadow, store=tmp_path))
+    assert leaked == [
+        f"4. a canary reached disk where irimi writes: ['{name} in {tmp_path / 'events.jsonl'}']"
+    ]

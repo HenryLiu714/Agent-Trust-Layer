@@ -4,17 +4,23 @@
 `test_invariants.py` and each workflow's own `test_wNN_*.py` share one run, so adding a test costs
 nothing and adding a scenario costs two agent runs (bare and shadow).
 
+`shared_store_run(name, scenario, mode)` runs a scenario under `irimi shadow` (or serve) into the
+one store its workflow's runs share, once per session, so `irimi compare` can read any two (#79).
+
 `traced_run(name, scenario)` runs a scenario's shadow run once more, uncached, and returns it with
 the most memory Python held at once while it ran (#94).
 """
 
 import tracemalloc
+from pathlib import Path
 
 import pytest
 
 from examples.workflows.harness.run import Result, run, workflows
 
 _CACHE: dict[tuple[str, str, str], Result] = {}
+_SHARED: dict[tuple[str, str, str], Result] = {}
+_STORES: dict[str, Path] = {}
 
 
 @pytest.fixture
@@ -25,6 +31,22 @@ def run_workflow(tmp_path_factory):
             workdir = tmp_path_factory.mktemp(f"{name}-{scenario}-{mode}")
             _CACHE[key] = run(workflows()[name], scenario, mode, workdir)
         return _CACHE[key]
+
+    return get
+
+
+@pytest.fixture
+def shared_store_run(tmp_path_factory):
+    """Not `run_workflow`'s cached run: that one recorded into a store of its own."""
+
+    def get(name: str, scenario: str, mode: str = "shadow") -> Result:
+        if name not in _STORES:
+            _STORES[name] = tmp_path_factory.mktemp(f"{name}-store")
+        key = (name, scenario, mode)
+        if key not in _SHARED:
+            workdir = tmp_path_factory.mktemp(f"{name}-{scenario}-{mode}-shared")
+            _SHARED[key] = run(workflows()[name], scenario, mode, workdir, _STORES[name])
+        return _SHARED[key]
 
     return get
 

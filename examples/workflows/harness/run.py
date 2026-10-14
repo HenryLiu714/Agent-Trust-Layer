@@ -149,6 +149,9 @@ class Result:
     # Every exchange and every tool call the engine handed its trace store, in the order it did
     # (shadow only): `handed` with the tool calls the control endpoint passed on (#73) among them.
     handed_events: list[Exchange | ToolCall] = field(default_factory=list)
+    # The store `run` was told to record into, which other runs may share (#79); None for irimi's
+    # default, `$IRIMI_HOME/store`, the run's own.
+    store: Path | None = None
 
     def events(self, event: str, *, with_time: bool = True) -> list[dict[str, Any]]:
         """Every `event` the agent logged, in order. `with_time=False` drops each one's
@@ -224,9 +227,13 @@ class Result:
         return [line for line in self.irimi if TOOL_LINE.match(line)]
 
     def stored(self) -> StoreReader:
-        """The trace store this run wrote: `irimi shadow`'s default, `$IRIMI_HOME/store` (#70),
-        which is `home / "store"` because the harness gives every run a home of its own."""
-        return StoreReader(self.home / paths.STORE_DIR_NAME)
+        """The trace store this run wrote: the `store` it was given (#79), or else `irimi
+        shadow`'s default, `$IRIMI_HOME/store` (#70), which is `home / "store"` because the
+        harness gives every run a home of its own. A store runs share holds all of their runs."""
+        return StoreReader(self.store_root())
+
+    def store_root(self) -> Path:
+        return self.store if self.store is not None else self.home / paths.STORE_DIR_NAME
 
     def stored_events(self) -> list[trace.Event]:
         """Every event the store holds: run by run, each in `seq` order, then the unattributed
@@ -285,6 +292,11 @@ class Result:
         """`irimi runs <argv>` over this run's store, as its user would type it afterwards: the
         same `$IRIMI_HOME`, working directory and maps (#72). Returns the exit code and what it
         printed to stdout and to stderr, line by line."""
+        return self.command("runs", *argv)
+
+    def command(self, *argv: str) -> tuple[int, list[str], list[str]]:
+        """`irimi <argv>` as `runs` runs it (#79). A store the run was given is not added: name it
+        with `--store`, as its user would."""
         out, err = io.StringIO(), io.StringIO()
         scenario = self.workflow.scenarios[self.scenario]
         with (
@@ -294,7 +306,7 @@ class Result:
             contextlib.redirect_stdout(out),
             contextlib.redirect_stderr(err),
         ):
-            code = irimi_main(["runs", *argv])
+            code = irimi_main(list(argv))
         return code, out.getvalue().splitlines(), err.getvalue().splitlines()
 
     def maps(self) -> MapIndex | None:
@@ -339,7 +351,11 @@ def serve_cases() -> list[tuple[str, str]]:
     ]
 
 
-def run(workflow: Workflow, scenario_name: str, mode: str, workdir: Path) -> Result:
+def run(
+    workflow: Workflow, scenario_name: str, mode: str, workdir: Path, store: Path | None = None
+) -> Result:
+    """One scenario in one mode. `store` is passed to irimi as `--store`, so two runs can record
+    into one store and be compared (#79); without it irimi records into the run's own home."""
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
     scenario = workflow.scenarios[scenario_name]
@@ -365,16 +381,19 @@ def run(workflow: Workflow, scenario_name: str, mode: str, workdir: Path) -> Res
         env = _agent_env(internet, state, obs_path, home, tmp)
         env.update(scenario.env)
         cmd = [sys.executable, "-m", "examples.workflows.launch", workflow.module, *scenario.argv]
+        flags = ("--store", str(store)) if store is not None else ()
         if mode == "bare":
             code = _run_bare(cmd, env, cwd, internet)
         elif mode == "shadow":
             with _watching_the_store(reported, handed, handed_events):
-                code, irimi_out = _run_shadow(cmd, env, cwd, tmp, internet, scenario, workdir)
+                code, irimi_out = _run_shadow(
+                    cmd, env, cwd, tmp, internet, scenario, workdir, flags
+                )
         else:
             if scenario.serve_flags is None:
                 raise ValueError(f"{workflow.name}:{scenario_name} does not run in serve mode")
             with _watching_the_store(reported, handed, handed_events):
-                code, irimi_out = _run_serve(cmd, env, cwd, tmp, internet, scenario, workdir)
+                code, irimi_out = _run_serve(cmd, env, cwd, tmp, internet, scenario, workdir, flags)
     finally:
         internet.stop()
     obs = [json.loads(line) for line in obs_path.read_text().splitlines() if line.strip()]
@@ -394,7 +413,15 @@ def run(workflow: Workflow, scenario_name: str, mode: str, workdir: Path) -> Res
         reported,
         handed,
         handed_events,
+        store,
     )
+
+
+def compare(a: Result, b: Result) -> tuple[int, list[str], list[str]]:
+    """`irimi compare` over the SDK run each of `a` and `b` started, as `b`'s user would type it,
+    naming the store both recorded into: `run`'s `store`, given to both (#79)."""
+    ids = [result.one("run.start")["run"] for result in (a, b)]
+    return b.command("compare", *ids, "--store", str(b.store_root()))
 
 
 def _agent_env(
@@ -442,11 +469,13 @@ def _run_shadow(
     internet: FakeInternet,
     scenario: Scenario,
     workdir: Path,
+    flags: tuple[str, ...] = (),
 ) -> tuple[int, list[str]]:
-    """`irimi shadow -- <agent>` in this process, as a user would run it from `cwd`."""
+    """`irimi shadow -- <agent>` in this process, as a user would run it from `cwd`, with
+    `flags` before the `--`."""
     buf = io.StringIO()
     with _as_irimi(env, cwd, tmp, internet, scenario, workdir), contextlib.redirect_stdout(buf):
-        code = irimi_main(["shadow", "--port", "0", "--", *cmd])
+        code = irimi_main(["shadow", "--port", "0", *flags, "--", *cmd])
     return code, buf.getvalue().splitlines()
 
 
@@ -489,6 +518,7 @@ def _run_serve(
     internet: FakeInternet,
     scenario: Scenario,
     workdir: Path,
+    flags: tuple[str, ...] = (),
 ) -> tuple[int, list[str]]:
     """`irimi shadow --serve` in this process, as `_run_shadow` runs `irimi shadow`, on a thread of
     its own; the agent beside it as its own process; and irimi stopped when the agent exits (#77).
@@ -503,7 +533,8 @@ def _run_serve(
     stop = threading.Event()
     codes: list[int] = []
     assert scenario.serve_flags is not None
-    args = build_parser().parse_args(["shadow", "--serve", "--port", "0", *scenario.serve_flags])
+    argv = ["shadow", "--serve", "--port", "0", *flags, *scenario.serve_flags]
+    args = build_parser().parse_args(argv)
     before = set(threading.enumerate())
     with _as_irimi(env, cwd, tmp, internet, scenario, workdir), contextlib.redirect_stdout(buf):
         serving = threading.Thread(
@@ -686,9 +717,10 @@ def check_invariants(shadow: Result, bare: Result | None = None) -> list[str]:
     ]
     if real_writes:
         problems.append(f"3. a write tool ran for real: {real_writes}")
-    leaked = [
-        found for root in (shadow.home, shadow.cwd, shadow.tmp) for found in _canaries_under(root)
-    ]
+    roots = [shadow.home, shadow.cwd, shadow.tmp]
+    if not shadow.store_root().is_relative_to(shadow.home):
+        roots.append(shadow.store_root())  # a store the run was given, outside its home (#79)
+    leaked = [found for root in roots for found in _canaries_under(root)]
     if leaked:
         problems.append(f"4. a canary reached disk where irimi writes: {leaked}")
     if bare is not None and not scenario.diverges and bare.exit_code != shadow.exit_code:

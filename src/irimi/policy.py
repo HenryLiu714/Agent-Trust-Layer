@@ -56,8 +56,8 @@ class Answer:
     # The currency this write's L3 precondition read found on the object the write names (#60).
     # "" when there was no such read, or when its document named none. Set on the two paths that
     # HAD a document to read - the accepted fake and the L3 rejection - because both print an
-    # amount: `report._write_line` renders the map's `human:` sentence before it branches on the
-    # rejection, so the `✗` line carries the amount too.
+    # amount: `report.write_sentence` renders the map's `human:` sentence before it branches on
+    # the rejection, so the `✗` line carries the amount too.
     currency: str = ""
 
 

@@ -404,8 +404,8 @@ def test_the_requests_own_currency_still_wins_over_the_one_the_read_found():
 
 
 def test_a_rejected_write_is_denominated_the_same_way():
-    """`_write_line` renders the sentence before it branches on the rejection, so the `✗` line
-    carries an amount too and must read the same as the `○` one (#60)."""
+    """`report.write_sentence` renders the sentence before it branches on the rejection, so the
+    `✗` line carries an amount too and must read the same as the `○` one (#60)."""
     write = replace(
         _refund(body=b"charge=ch_9&amount=4900"),
         currency="usd",

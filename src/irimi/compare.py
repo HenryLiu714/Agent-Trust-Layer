@@ -2,8 +2,11 @@
 
 A run's actions are the writes it attempted, in `seq` order: each exchange its summary prints a
 write line for (`report.is_intercepted`) and each write tool whose stand-in ran
-(`report.is_stood_in`). An action's text is that summary line, so a comparison and the two
-summaries cannot disagree about what either run did.
+(`report.is_stood_in`). An action is that summary line, so a comparison and the two summaries
+cannot disagree about what either run did. Two actions are the same by the line before it is
+escaped for printing, since escaping prints a newline and a typed `\n` alike; a pair that differs
+only so prints both its lines with each backslash escaped too, the one place a comparison does not
+print the summary's line (`_row_lines`).
 
 The two runs' actions are lined up in two passes. The first lines up the actions that are the
 same, key and text, so they anchor the rest. The second lines up what lies between them by what
@@ -11,6 +14,9 @@ each action is: an exchange by its service and operation, a tool call by its nam
 different amount is then one write changed, not one removed and another added; and a run that adds
 a second, refused refund after the first shows that one added, where lining up by key alone would
 pair the first refund with the refused one and show the first as added.
+
+An action whose body was cut when stored is never the same as another, whatever its text: the
+first pass anchors none, and the second pairs it by key into a `cut` row, `?` (#79, #94).
 
 Pure, like `report`: `compare_runs` returns a `Comparison` and prints nothing. `irimi compare`
 prints `header_lines` over the comparison's lines, and `irimi replay` (#84) prints its own header
@@ -40,9 +46,11 @@ EXCHANGE_KEY = "exchange"
 TOOL_KEY = "tool"
 NOT_A_VERDICT = "a comparison, not a verdict: nothing was replayed"
 ARGS_DIFFER = "(the triggers' args differ)"
-# A pair whose texts differ when either side is flagged `body-truncated` (#70, #94): its text may
-# have been rendered from part of a request, so the difference may be the cut, not the run. The
-# flag does not say which body was cut, so a cut response counts too.
+# A pair either side of which is flagged `body-truncated` (#70, #94), whatever its two texts: a
+# text rendered from part of a request, or from none (#94 stores an over-cap body empty), says
+# nothing of what the cut part held, so two cut refunds of different amounts print alike and a
+# pair irimi could not read is never called the same (#79). The flag does not say which body was
+# cut, so a cut response counts too.
 CUT_NOTE = "a body was cut when stored"
 
 Mark = Literal["same", "changed", "cut", "only_a", "only_b"]
@@ -54,8 +62,22 @@ class Action:
     """One write a run attempted, as `irimi compare` lines it up and compares it."""
 
     key: tuple[str, ...]  # (EXCHANGE_KEY, service, operation), or (TOOL_KEY, the tool's name)
-    text: str  # the summary's line for it, without the indent
+    # The summary's line for it, without the indent and before it is escaped. Two actions are the
+    # same by this and not by `text`: escaping leaves a backslash as it is, so a Slack post holding
+    # a newline and one holding a typed `\n` printed alike and compared `=` (#79).
+    sentence: str
     cut: bool = False  # its exchange is flagged `body-truncated`
+
+    @property
+    def text(self) -> str:
+        """The summary's line for it, without the indent, as the summary prints it (#72)."""
+        return report.printable(self.sentence)
+
+    @property
+    def escaped(self) -> str:
+        """`text` with each backslash escaped too, so a newline prints as `\\n` and a typed one as
+        `\\\\n`: printed for a pair whose texts are alike though its sentences are not (#79)."""
+        return report.printable(self.sentence.replace("\\", "\\\\"))
 
 
 @dataclass(frozen=True)
@@ -95,7 +117,7 @@ class Comparison:
 
 
 def actions(run: StoredRun, index: MapIndex | None) -> list[Action]:
-    """The writes `run` attempted, in `seq` order, each with its summary line's text. Reads, LLM
+    """The writes `run` attempted, in `seq` order, each with its summary line. Reads, LLM
     calls, telemetry and read tools are not actions, and neither is a retry the idempotency store
     answered as the write it repeats (#46)."""
     out: list[Action] = []
@@ -103,9 +125,9 @@ def actions(run: StoredRun, index: MapIndex | None) -> list[Action]:
         if isinstance(event, Exchange) and report.is_intercepted(event):
             cut = BODY_TRUNCATED_FLAG in event.flags
             key = (EXCHANGE_KEY, event.service, event.operation)
-            out.append(Action(key, report.write_text(event, index), cut))
+            out.append(Action(key, report.write_sentence(event, index), cut))
         elif isinstance(event, ToolCall) and report.is_stood_in(event):
-            out.append(Action((TOOL_KEY, event.name), report.tool_write_text(event)))
+            out.append(Action((TOOL_KEY, event.name), report.tool_write_sentence(event)))
     return out
 
 
@@ -113,12 +135,18 @@ def align(a: Sequence[Action], b: Sequence[Action]) -> tuple[Row, ...]:
     """`a` and `b` lined up, every action in exactly one row: the same actions first, by key and
     text, then what lies between them by key alone."""
     rows: list[Row] = []
-    for tag, x, y in _opcodes(a, b, lambda action: (action.key, action.text)):
+    for tag, x, y in _opcodes(a, b, _anchor):
         if tag == "equal":
             rows += [Row("same", one, other) for one, other in zip(x, y, strict=True)]
         else:
             rows += _by_key(x, y)
     return tuple(rows)
+
+
+def _anchor(action: Action) -> Hashable:
+    """What the first pass lines `action` up by. A cut action's is a new object, equal to nothing,
+    so it anchors nothing as the same and the second pass pairs it by key as `cut` (#79, #94)."""
+    return object() if action.cut else (action.key, action.sentence)
 
 
 def _by_key(a: Sequence[Action], b: Sequence[Action]) -> list[Row]:
@@ -145,9 +173,10 @@ def _opcodes(
 
 
 def _pair(x: Action, y: Action) -> Row:
-    if x.text == y.text:
-        return Row("same", x, y)
-    return Row("cut" if x.cut or y.cut else "changed", x, y)
+    """Two actions of one key: `cut` when either was cut, whatever their texts (#79, #94)."""
+    if x.cut or y.cut:
+        return Row("cut", x, y)
+    return Row("same" if x.sentence == y.sentence else "changed", x, y)
 
 
 def compare_runs(a: StoredRun, b: StoredRun, index: MapIndex | None) -> Comparison:
@@ -185,10 +214,18 @@ def _canonical(record: RunRecord) -> str:
 
 
 def _row_lines(row: Row) -> list[str]:
-    """A pair that differs prints both sides, A over B; every other row prints its one action."""
+    """A pair that differs prints both sides, A over B; every other row prints its one action.
+
+    Escaping leaves a backslash as it is, so a Slack post holding a newline and one holding a
+    typed `\\n` print one line, and a `~` over two identical lines tells its reader nothing (#79).
+    A pair whose sentences differ but print alike prints both with each backslash escaped first:
+    the newline as `\\n`, the typed one as `\\\\n`."""
     marker = MARKERS[row.mark]
     if row.mark in ("changed", "cut") and row.a is not None and row.b is not None:
-        return [f"  {marker} A {row.a.text}", f"    B {row.b.text}"]
+        a, b = row.a.text, row.b.text
+        if a == b and row.a.sentence != row.b.sentence:
+            a, b = row.a.escaped, row.b.escaped
+        return [f"  {marker} A {a}", f"    B {b}"]
     action = row.a if row.a is not None else row.b
     assert action is not None, row
     return [f"  {marker} {action.text}"]

@@ -839,7 +839,7 @@ def cmd_runs_show(args: argparse.Namespace) -> int:
     except (TraceFormatError, OSError) as exc:
         print(f"error: run {args.run_id} could not be read: {exc}", file=sys.stderr)
         return 1
-    for line in report.run_show_lines(run, _maps_for_show()):
+    for line in report.run_show_lines(run, _maps_for_stored_runs()):
         print(line)
     return 0
 
@@ -865,14 +865,15 @@ def cmd_compare(args: argparse.Namespace) -> int:
             print(f"error: run {run_id} could not be read: {exc}", file=sys.stderr)
             return compare.TROUBLE
     a, b = runs
-    comparison = compare.compare_runs(a, b, _maps_for_show())
+    comparison = compare.compare_runs(a, b, _maps_for_stored_runs())
     for line in [*compare.header_lines(a.record, b.record), "", *comparison.lines()]:
         print(line)
     return comparison.exit_code
 
 
-def _maps_for_show() -> "MapIndex | None":
-    """The maps `runs show` renders write lines with, loaded as `serve` and `shadow` load them.
+def _maps_for_stored_runs() -> "MapIndex | None":
+    """The maps `runs show` and `compare` render a stored run's write lines with, loaded as
+    `serve` and `shadow` load them (#72, #79).
 
     Only the `human:` templates are read from them, so maps that do not load cost the reader
     those sentences and nothing else: the writes print as the requests they were (#72). Unlike

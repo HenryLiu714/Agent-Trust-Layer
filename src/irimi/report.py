@@ -128,7 +128,7 @@ def tool_call_line(call: ToolCall) -> str:
     and error type are whatever was posted to the control endpoint, so each control character is
     escaped, as `runs show` escapes a run's text (#72): one call is one line."""
     outcome = _tool_outcome(call, "ok")
-    return f"{call.ran:<9} {call.kind:<9} tool {_printable(call.name)} -> {outcome}"
+    return printable(f"{call.ran:<9} {call.kind:<9} tool {call.name} -> {outcome}")
 
 
 def is_stood_in(call: ToolCall) -> bool:
@@ -139,21 +139,21 @@ def is_stood_in(call: ToolCall) -> bool:
 
 
 def tool_write_line(call: ToolCall) -> str:
-    """The summary's line for a write tool whose stand-in ran in its place (#76)."""
-    return f"  {tool_write_text(call)}"
+    """The summary's line for a write tool whose stand-in ran in its place (#76), escaped as
+    `tool_call_line` is."""
+    return f"  {printable(tool_write_sentence(call))}"
 
 
-def tool_write_text(call: ToolCall) -> str:
-    """`tool_write_line` without the summary's indent, which `irimi compare` prints too (#79):
-    the real function did not run, so it is a write that did not happen, and it takes the write
-    marker."""
-    outcome = _tool_outcome(call, "ran")
-    return f"{WRITE_MARKER} tool {_printable(call.name)}  shadow stand-in {outcome}"
+def tool_write_sentence(call: ToolCall) -> str:
+    """`tool_write_line` without the summary's indent and before it is escaped, which `irimi
+    compare` decides two tool calls are the same by (#79): the real function did not run, so it is
+    a write that did not happen, and it takes the write marker."""
+    return f"{WRITE_MARKER} tool {call.name}  shadow stand-in {_tool_outcome(call, 'ran')}"
 
 
 def _tool_outcome(call: ToolCall, returned: str) -> str:
-    """`returned`, or `raised <type>` with the type escaped as `tool_call_line` says (#76)."""
-    return returned if call.error is None else f"raised {_printable(call.error.type)}"
+    """`returned`, or `raised <type>`, before either line escapes it (#76)."""
+    return returned if call.error is None else f"raised {call.error.type}"
 
 
 # The kinds a shadow run answers instead of forwarding, so they are the writes the summary owes
@@ -401,19 +401,16 @@ def _route_of(exchange: Exchange, index: MapIndex | None) -> Route | None:
 
 
 def _write_line(exchange: Exchange, index: MapIndex | None) -> str:
-    """One intercepted write's summary line."""
-    return f"  {write_text(exchange, index)}"
+    """One intercepted write's summary line. Escaped as `runs show` escapes a run's text (#72): a
+    template's fields are the agent's own, a newline in a Slack post split the line, and a lone
+    surrogate made printing it raise (#79)."""
+    return f"  {printable(write_sentence(exchange, index))}"
 
 
-def write_text(exchange: Exchange, index: MapIndex | None) -> str:
-    """One intercepted write's summary line without the indent, which `irimi compare` prints too
-    (#79). Escaped as `runs show` escapes a run's text (#72): a template's fields are the agent's
-    own, a newline in a Slack post split the line, and a lone surrogate made printing it raise."""
-    return _printable(_write_sentence(exchange, index))
-
-
-def _write_sentence(exchange: Exchange, index: MapIndex | None) -> str:
-    """One intercepted write, as the map's own sentence plus what irimi did with it."""
+def write_sentence(exchange: Exchange, index: MapIndex | None) -> str:
+    """One intercepted write, as the map's own sentence plus what irimi did with it: its summary
+    line without the indent and before it is escaped, which `irimi compare` decides two writes are
+    the same by (#79)."""
     route = _route_of(exchange, index)
     if route is not None and route.human:
         what = render_human(route.human, exchange, route)
@@ -690,9 +687,10 @@ ARGS_TOO_DEEP = "(nested too deeply to show)"
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\ud800-\udfff]")
 
 
-def _printable(text: str) -> str:
+def printable(text: str) -> str:
     """`text` on one line, each control character and lone surrogate spelled as its Python escape
-    (`\\n`, `\\x1b`, `\\udcff`)."""
+    (`\\n`, `\\x1b`, `\\udcff`). For printing only, never for comparing: a backslash is left as it
+    is, so a newline and a typed `\\n` print alike (#79)."""
     return _CONTROL.sub(lambda m: repr(m.group())[1:-1], text)
 
 
@@ -719,7 +717,7 @@ def run_list_line(record: RunRecord, events: Sequence[Event] | None) -> str:
         started = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(record.started_at))
     elapsed = run_elapsed(record)
     duration = NOT_SET if elapsed is None else f"{elapsed:.1f}s"
-    trigger = _printable(record.trigger.name) if record.trigger is not None else NOT_SET
+    trigger = printable(record.trigger.name) if record.trigger is not None else NOT_SET
     if events is None:
         exchanges = writes = "?"
     else:
@@ -749,7 +747,7 @@ def run_label(record: RunRecord) -> str:
     name = trigger.name if trigger is not None else NOT_SET
     entrypoint = (trigger.entrypoint if trigger is not None else None) or NOT_SET
     version = record.agent_version or NOT_SET
-    return f"{_printable(name)}  {_printable(entrypoint)}  agent {_printable(version)}"
+    return f"{printable(name)}  {printable(entrypoint)}  agent {printable(version)}"
 
 
 def run_header_lines(record: RunRecord) -> list[str]:
@@ -767,14 +765,14 @@ def run_header_lines(record: RunRecord) -> list[str]:
     lines = [
         f"run: {record.run_id}",
         f"attribution: {record.attribution}",
-        f"trigger: {_printable(trigger.name) if trigger is not None else NOT_SET}",
-        f"entrypoint: {_printable(entrypoint)}",
-        f"args: {_printable(args)}",
-        f"agent version: {_printable(record.agent_version or NOT_SET)}",
+        f"trigger: {printable(trigger.name) if trigger is not None else NOT_SET}",
+        f"entrypoint: {printable(entrypoint)}",
+        f"args: {printable(args)}",
+        f"agent version: {printable(record.agent_version or NOT_SET)}",
         f"outcome: {run_status(record)}",
     ]
     if record.error is not None:
-        lines.append(f"error: {_printable(record.error.type)}: {_printable(record.error.message)}")
+        lines.append(f"error: {printable(record.error.type)}: {printable(record.error.message)}")
     if record.exit_code is not None:
         lines.append(f"exit code: {record.exit_code}")
     if record.dropped_events:

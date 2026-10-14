@@ -651,9 +651,19 @@ irimi compare · 42e7ad03a867410b vs 5cf7f4695f22ce95 · a comparison, not a ver
 - **How the writes line up.** Writes that read the same in both runs line up first. What lies
   between them lines up by what each write is, its service and operation or its tool's name, and
   a pair that reads differently is `~`: a refund of another amount is one write changed. A write
-  only one run made is `-` (only in A) or `+` (only in B).
-- **Exit code.** As `diff(1)`'s: 0 when every write is `=`, 1 when any is not, and 2 when a run is
-  not in the store or cannot be read. Both runs must be in one store, `--store DIR` or the default.
+  only one run made is `-` (only in A) or `+` (only in B). Lines are compared before a control
+  character in them is escaped for printing, so a post holding a newline and one holding a typed
+  `\n` are `~`, though the summary prints the two alike. Such a pair, whose two lines would read
+  the same, prints both with each backslash escaped too: the newline as `\n`, the typed one as
+  `\\n`. Every other row prints the summary's own line.
+- **A cut body is `?`.** A pair either of whose writes was stored with a body cut short
+  (`body-truncated`, the request's or the response's) is `?`, not compared, whatever its lines
+  say, and never `=`: a body cut, or dropped for its size, renders one line for different
+  requests, so two cut refunds of different amounts both print `refund ? on ?`. That holds for a
+  run compared with itself too. The totals count `?` rows as not compared.
+- **Exit code.** As `diff(1)`'s: 0 when every write is `=`, 1 when any is not, `?` included, and
+  2 when a run is not in the store or cannot be read. A run compared with itself exits 0 unless
+  a write in it was cut. Both runs must be in one store, `--store DIR` or the default.
 - **It is not replay.** Both runs happened, each against the world as it was then, so a
   difference can come from the world changing between them (a live read answered differently) or
   from the model sampling another answer, not only from the agent's code. Replay, which re-runs a
@@ -661,11 +671,11 @@ irimi compare · 42e7ad03a867410b vs 5cf7f4695f22ce95 · a comparison, not a ver
 - **What it cannot see.** A write is compared by its summary line, so two writes whose lines read
   the same are `=` even when something the line does not print differed: a refund that names no
   amount prints `refund ? on ch_…` in both (#135), and a write tool's arguments are not compared.
-  Two writes whose lines differ while either was stored with a body cut short (`body-truncated`,
-  the request's or the response's) are `?`, not compared, and never `=`. Two writes made at once
-  can finish in either order, so a run that made the same two writes in the other order shows one
-  of them as `-` and again as `+`. Stored values are redacted with this install's key, so a secret
-  compares equal only between two runs one install recorded.
+  A write whose body was cut is never compared (`?` above), even when only its response was cut
+  and its line is whole, since the flag does not say which. Two writes made at once can finish in
+  either order, so a run that made the same two writes in the other order shows one of them as `-`
+  and again as `+`. Stored values are redacted with this install's key, so a secret compares equal
+  only between two runs one install recorded.
 
 ## CLI
 

@@ -1,0 +1,19 @@
+# The only Docker build here is examples/server_agent's (#78), and it needs only these. Without
+# this file every build would send .venv and .claude/worktrees to the daemon.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!src
+!examples/server_agent
+# Nothing secret or local inside what is let in either: a CA or key, an env file, irimi's state
+# (`$IRIMI_HOME` pointed into the tree), the SQLite file the app writes when run bare, caches.
+**/*.pem
+**/*.key
+**/.env
+**/.env.*
+**/.irimi
+**/*.sqlite3
+**/__pycache__
+**/*.py[cod]
+**/.DS_Store

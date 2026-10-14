@@ -67,6 +67,16 @@ STRIPE_API_KEY=sk_test_... SLACK_BOT_TOKEN=xoxb-... SLACK_CHANNEL=C0123 \
   uv run pytest -q -rs tests/test_phase_exit.py
 ```
 
+Phase 3's exit for a server agent has a hermetic half, `tests/test_phase3_exit.py`, which runs on
+every `uv run pytest -q`, and a container half, which needs Docker with compose, `uv` and a
+test-mode key, and is run by hand before closing the phase (`examples/server_agent/README.md`).
+It seeds two charges, builds both images, refunds both charges at once through the agent under
+irimi, checks that irimi stored two ok runs and that Stripe holds no refund, and tears down:
+
+```
+STRIPE_API_KEY=sk_test_... examples/server_agent/check.sh
+```
+
 ## Sample workflows
 
 `examples/workflows/` holds eleven small agents, each built to exercise one part of irimi: a
@@ -114,6 +124,7 @@ src/irimi/
   fixtures/*.json                     the vendored response objects L1 answers start from
 tests/                                one file per module, plus the invariant and exit tests
 examples/refund_agent/                the fixture agent the proxy is tested against
+examples/server_agent/                a server agent beside `irimi shadow --serve`, in containers
 examples/workflows/                   the sample workflows and the harness that runs them
 tests/workflows/                      the workflows' invariants and per-workflow pins
 ```

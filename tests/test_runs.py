@@ -496,6 +496,31 @@ def test_runs_show_prints_a_stored_message_s_control_characters_escaped(home, ca
     assert "  job\\x1b[2J  " in capfd.readouterr().out
 
 
+def test_runs_show_prints_a_lone_surrogate_escaped_and_never_raises(home, capfd):
+    """A lone surrogate is what `os.fsdecode` makes of a filename that is not UTF-8, and JSON
+    carries it as `\\udcff`. Printed raw, it raised UnicodeEncodeError out of `irimi runs show`
+    and `runs list`: a stored run must print, whatever the agent stored (#72, #100)."""
+    s = DirectoryStore(home / "store", redact.load_key(home))
+    s.start_run(
+        _ended_run(
+            "surrogate",
+            HAND_BUILT_AT,
+            trigger=Trigger("job\udcff", "jobs:run", {"path": "/tmp/\udcff.csv"}, True),
+            outcome="error",
+            error=ErrorInfo("OSError", "no such file: /tmp/\udcff.csv"),
+            exit_code=1,
+        )
+    )
+    s.close()
+    assert main(["runs", "show", "surrogate"]) == 0
+    lines = capfd.readouterr().out.splitlines()
+    assert lines[2] == "trigger: job\\udcff"
+    assert lines[4] == 'args: {"path":"/tmp/\\udcff.csv"}'
+    assert lines[7] == "error: OSError: no such file: /tmp/\\udcff.csv"
+    assert main(["runs", "list"]) == 0
+    assert "  job\\udcff  " in capfd.readouterr().out
+
+
 # ------------------------------------------------------------------- a value nested too deep
 #
 # A line nested this deep is read by every Python's `json.loads` (3.12's stops near 10,000), so its

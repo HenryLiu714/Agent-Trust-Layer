@@ -660,12 +660,15 @@ NOT_SET = "-"
 ARGS_TOO_DEEP = "(nested too deeply to show)"
 # A C0 or C1 control character, DEL included. A stored run's text is the agent's own - an error
 # message is `str(exc)` - and printed raw, a newline breaks `runs show`'s one `key: value` per line
-# and an escape sequence is obeyed by the terminal reading it (#72).
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# and an escape sequence is obeyed by the terminal reading it (#72). A lone surrogate too
+# (`os.fsdecode` of a filename that is not UTF-8): a UTF-8 terminal cannot encode it, and printed
+# raw it raised UnicodeEncodeError out of `runs show` (#100's rule that a stored run prints).
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\ud800-\udfff]")
 
 
 def _printable(text: str) -> str:
-    """`text` on one line, each control character spelled as its Python escape (`\\n`, `\\x1b`)."""
+    """`text` on one line, each control character and lone surrogate spelled as its Python escape
+    (`\\n`, `\\x1b`, `\\udcff`)."""
     return _CONTROL.sub(lambda m: repr(m.group())[1:-1], text)
 
 

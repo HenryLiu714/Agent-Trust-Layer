@@ -131,11 +131,24 @@ def tool_call_line(call: ToolCall) -> str:
     return f"{call.ran:<9} {call.kind:<9} tool {_printable(call.name)} -> {outcome}"
 
 
+def is_stood_in(call: ToolCall) -> bool:
+    """A write tool whose stand-in ran in its place, which the summary owes a line (#76). Only a
+    stand-in's call: the SDK runs a write tool's real function only while it is inactive, and
+    then records nothing, so no write tool call it posts ran for real."""
+    return call.kind == "write" and call.ran == "shadow"
+
+
 def tool_write_line(call: ToolCall) -> str:
-    """The summary's line for a write tool whose stand-in ran in its place (#76): the real
-    function did not run, so it is a write that did not happen, and it takes the write marker."""
+    """The summary's line for a write tool whose stand-in ran in its place (#76)."""
+    return f"  {tool_write_text(call)}"
+
+
+def tool_write_text(call: ToolCall) -> str:
+    """`tool_write_line` without the summary's indent, which `irimi compare` prints too (#79):
+    the real function did not run, so it is a write that did not happen, and it takes the write
+    marker."""
     outcome = _tool_outcome(call, "ran")
-    return f"  {WRITE_MARKER} tool {_printable(call.name)}  shadow stand-in {outcome}"
+    return f"{WRITE_MARKER} tool {_printable(call.name)}  shadow stand-in {outcome}"
 
 
 def _tool_outcome(call: ToolCall, returned: str) -> str:
@@ -260,8 +273,9 @@ def render_human(template: str, exchange: Exchange, route: Route | None) -> str:
     return _FIELD.sub(one, template)
 
 
-def _is_intercepted(exchange: Exchange) -> bool:
-    """A write this run answered instead of performing - locally, or at an answer target.
+def is_intercepted(exchange: Exchange) -> bool:
+    """A write this run answered instead of performing - locally, or at an answer target: the
+    writes the summary prints a line for, and the ones `irimi compare` compares (#79).
 
     A REPLAYED write is not one of them (#46). The agent retried with a key it had already used,
     the store answered with the first write's own bytes, and it is the same write: counting it
@@ -326,7 +340,7 @@ def _host_line(host: str, rows: Sequence[Exchange], width: int) -> str:
     llm = sum(1 for ex in rows if ex.kind == "llm")
     if llm:
         phrases.append(f"{llm} llm")
-    writes = [ex for ex in rows if _is_intercepted(ex)]
+    writes = [ex for ex in rows if is_intercepted(ex)]
     if writes:
         detail = []
         unclassified = sum(1 for ex in writes if ex.kind == "unknown")
@@ -387,6 +401,18 @@ def _route_of(exchange: Exchange, index: MapIndex | None) -> Route | None:
 
 
 def _write_line(exchange: Exchange, index: MapIndex | None) -> str:
+    """One intercepted write's summary line."""
+    return f"  {write_text(exchange, index)}"
+
+
+def write_text(exchange: Exchange, index: MapIndex | None) -> str:
+    """One intercepted write's summary line without the indent, which `irimi compare` prints too
+    (#79). Escaped as `runs show` escapes a run's text (#72): a template's fields are the agent's
+    own, a newline in a Slack post split the line, and a lone surrogate made printing it raise."""
+    return _printable(_write_sentence(exchange, index))
+
+
+def _write_sentence(exchange: Exchange, index: MapIndex | None) -> str:
     """One intercepted write, as the map's own sentence plus what irimi did with it."""
     route = _route_of(exchange, index)
     if route is not None and route.human:
@@ -396,16 +422,16 @@ def _write_line(exchange: Exchange, index: MapIndex | None) -> str:
     if exchange.answered_by == "delegated":
         what = f"{what} → {exchange.target}"
     if _failed_target(exchange):
-        return f"  {WRITE_MARKER} {what}  unanswered ({TARGET_UNREACHABLE})"
+        return f"{WRITE_MARKER} {what}  unanswered ({TARGET_UNREACHABLE})"
     # A write the real service would have refused, and irimi is saying so: L3 checked it against
     # real state (#45), or this run had already used its idempotency key for a different write
     # (#46). It did not merely go unperformed, and this is the line the baseline report exists to
     # print. `✗`, not `○`, and the code is the one the agent's SDK raised on.
     if exchange.precondition == "rejected" or IDEMPOTENCY_CONFLICT_FLAG in exchange.flags:
         code = exchange.rejection_code or "rejected"
-        return f"  {REJECTED_MARKER} {what}  would fail: {code}"
+        return f"{REJECTED_MARKER} {what}  would fail: {code}"
     label = "unclassified" if exchange.kind == "unknown" else "unvalidated"
-    return f"  {WRITE_MARKER} {what}  {label} ({_fidelity(exchange)})"
+    return f"{WRITE_MARKER} {what}  {label} ({_fidelity(exchange)})"
 
 
 def _fidelity(exchange: Exchange) -> str:
@@ -491,7 +517,7 @@ def _writes_with_their_reads(
     paired: list[tuple[Exchange, list[Exchange]]] = []
     last: dict[str, int] = {}
     for ex in exchanges:
-        if _is_intercepted(ex):
+        if is_intercepted(ex):
             if is_authored_write(ex):
                 last[ex.service] = len(paired)
             paired.append((ex, []))
@@ -629,9 +655,7 @@ def _summary(
     for write, reads in paired:
         write_lines.append(_write_line(write, index))
         write_lines += _overlay_lines(reads)
-    # Only a stand-in's call: the SDK runs a write tool's real function only while it is inactive,
-    # and then records nothing, so no write tool call it posts ran for real.
-    stood_in = [call for call in tool_calls if call.kind == "write" and call.ran == "shadow"]
+    stood_in = [call for call in tool_calls if is_stood_in(call)]
     write_lines += [tool_write_line(call) for call in stood_in]
     if write_lines:
         lines += ["", *write_lines]
@@ -715,6 +739,17 @@ def run_list_line(record: RunRecord, events: Sequence[Event] | None) -> str:
             f"{writes} writes",
         ]
     )
+
+
+def run_label(record: RunRecord) -> str:
+    """A stored run in one line, as `irimi compare` names each side (#79): its trigger's name and
+    entrypoint, and the agent version it reported, `-` for each one it has not, escaped as
+    `runs show` escapes them (#72)."""
+    trigger = record.trigger
+    name = trigger.name if trigger is not None else NOT_SET
+    entrypoint = (trigger.entrypoint if trigger is not None else None) or NOT_SET
+    version = record.agent_version or NOT_SET
+    return f"{_printable(name)}  {_printable(entrypoint)}  agent {_printable(version)}"
 
 
 def run_header_lines(record: RunRecord) -> list[str]:

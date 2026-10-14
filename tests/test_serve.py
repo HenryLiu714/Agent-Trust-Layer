@@ -708,9 +708,10 @@ def _wait_for(condition, timeout: float = 30.0) -> None:
 class _Served:
     """`irimi <argv>` as its own process, on a free port, with this test's `$IRIMI_HOME`. Its
     stdout is read line by line on a thread, so a test waits for a line with a deadline rather
-    than blocking on a pipe, and its stderr goes to a file."""
+    than blocking on a pipe, and its stderr goes to a file. `launcher` is what Python runs irimi
+    as: its own module, or a `-c` bootstrap that calls `irimi.cli.main` (#78)."""
 
-    def __init__(self, home, *argv: str) -> None:
+    def __init__(self, home, *argv: str, launcher: tuple[str, ...] = ("-m", "irimi.cli")) -> None:
         import os
         import subprocess
         import sys
@@ -721,7 +722,7 @@ class _Served:
         self.err = home / "irimi.err"
         with open(self.err, "w") as err:
             self.proc = subprocess.Popen(
-                [sys.executable, "-m", "irimi.cli", *argv, "--port", "0"],
+                [sys.executable, *launcher, *argv, "--port", "0"],
                 cwd=home,
                 env=env,
                 stdout=subprocess.PIPE,

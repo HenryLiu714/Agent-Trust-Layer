@@ -70,9 +70,14 @@ done
 
 echo "--- irimi runs list"
 runs=""
-for _ in $(seq 1 50); do  # each run is listed once its end is on disk
+logs=""
+# Each run is listed once its end is on disk, and its block printed just after, line by line, from
+# the store's writer thread: wait for both blocks' last line too, or the counts below race it (#78).
+for _ in $(seq 1 50); do
   runs="$("${compose[@]}" exec -T irimi irimi runs list)"
-  [ "$(echo "$runs" | grep -c '  ok  sdk  handle_refund  ')" = 2 ] && break
+  logs="$("${compose[@]}" logs --no-log-prefix irimi)"
+  [ "$(echo "$runs" | grep -c '  ok  sdk  handle_refund  ')" = 2 ] &&
+    [ "$(echo "$logs" | grep -c '^  These writes did not happen\.')" = 2 ] && break
   sleep 0.2
 done
 echo "$runs"
@@ -80,7 +85,6 @@ echo "$runs"
 [ "$(echo "$runs" | grep -c .)" = 2 ]
 
 echo "--- irimi's output"
-logs="$("${compose[@]}" logs --no-log-prefix irimi)"
 echo "$logs"
 # One block per run, each with its faked refund and its stood-in tool, and each charge's refund
 # in one block only: two requests at once that did not mix.

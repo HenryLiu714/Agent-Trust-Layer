@@ -35,7 +35,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
 
 import pytest
 
@@ -72,19 +72,23 @@ sys.exit(cli.main(sys.argv[2:]))
 
 class _HeardStripe(_Stripe):
     """The Phase 2 exit test's loopback Stripe, which answers any charge as refundable and records
-    every request, also keeping each request's header names, so a leaked `Irimi-Run` shows. Two
-    charges it answers with an error instead, as Stripe answers one it never heard of and one it
-    fails on."""
+    every request, also keeping each request's header names, so a leaked `Irimi-Run` shows. Three
+    charges it answers with an error instead, as Stripe answers ones it never heard of (404) and
+    one it fails on (500). `FAILING` names each as the agent is given it, and each is matched by
+    the path segment the agent sent, so a charge holding `/` and `?` fails only when the agent
+    quoted it into its one segment: unquoted, it names another Stripe path, which answers 200
+    (#78)."""
 
     heard: list[list[str]] = []
-    FAILING = {"ch_MISSING": 404, "ch_DOWN": 500}
+    FAILING = {"ch_MISSING": 404, "ch_DOWN": 500, "ch_ODD/../refunds?x=1": 404}
 
     def _record(self) -> bytes:
         _HeardStripe.heard.append([name.lower() for name in self.headers])
         return super()._record()
 
     def do_GET(self):
-        status = self.FAILING.get(self.path.removeprefix("/v1/charges/"))
+        by_segment = {quote(charge, safe=""): status for charge, status in self.FAILING.items()}
+        status = by_segment.get(self.path.removeprefix("/v1/charges/"))
         if status is None:
             return super().do_GET()
         self._record()
@@ -344,8 +348,9 @@ def test_a_refund_stripe_refuses_is_a_502_and_a_run_ended_in_error_and_a_bad_bod
 ):
     """The agent answers every request, never hangs one, and its runs say what went wrong (#78): a
     charge Stripe has never heard of (404) or fails on (500) is answered 502 with the error, and
-    its run ends `error` holding only its read; a body that is not `{"charge", "reason"}` is
-    answered 400 before any run starts, and an unknown route 404."""
+    its run ends `error` holding only its read, which names the charge as one quoted path segment
+    whatever it holds; a body that is not `{"charge", "reason"}` is answered 400 before any run
+    starts, and an unknown route 404."""
     failing = _HeardStripe.FAILING
     bad = {
         "not JSON": b"refund ch_A",
@@ -393,7 +398,7 @@ def test_a_refund_stripe_refuses_is_a_502_and_a_run_ended_in_error_and_a_bad_bod
         assert isinstance(read, Exchange) and read.response is not None
         assert (read.issued_by, read.request.path, read.response.status) == (
             "agent",
-            f"/v1/charges/{charge}",
+            f"/v1/charges/{quote(charge, safe='')}",
             failing[charge],
         )
     assert reader.load_run(UNATTRIBUTED).events == []

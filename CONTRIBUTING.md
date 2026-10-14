@@ -119,6 +119,7 @@ src/irimi/
   policy.py  overlay.py  store.py     the decision, and the two seams later phases fill
   engine/                             the Engine protocol; mitm.py is the only mitmproxy importer
   report.py  runner.py                what a run prints; the child env and engine thread
+  compare.py                          two stored runs' writes side by side
   cli.py                              argparse and the composition root
   maps/*.yaml                         the shipped service maps
   fixtures/*.json                     the vendored response objects L1 answers start from

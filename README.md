@@ -31,9 +31,11 @@ What works today, all of it covered by tests that need no network and no keys:
 
 Every `serve` and `shadow` run is recorded, redacted, in the trace store under `$IRIMI_HOME/store`
 ([`docs/trace-format.md`](docs/trace-format.md)), and `irimi runs list` / `runs show` read it
-back. The SDK, `irimi.sdk`, marks where an agent's runs start and end and labels the tools the
-proxy cannot see ([Attributing runs with the SDK](#attributing-runs-with-the-sdk)). What does not
-exist yet: replay and `irimi compare`. See [Roadmap](#roadmap).
+back, and `irimi compare` puts two stored runs' writes side by side
+([Comparing two runs](#comparing-two-runs)). The SDK, `irimi.sdk`, marks where an agent's runs
+start and end and labels the tools the proxy cannot see
+([Attributing runs with the SDK](#attributing-runs-with-the-sdk)). What does not exist yet:
+replay. See [Roadmap](#roadmap).
 
 ## Quickstart
 
@@ -622,6 +624,49 @@ two refunds at once against Stripe test mode and checks that irimi stored two ru
 holds no refund. `tests/test_phase3_exit.py` runs the same two requests hermetically on every test
 run.
 
+## Comparing two runs
+
+`irimi compare RUN_A RUN_B` prints the writes two stored runs attempted, side by side, and no
+verdict. Run the same trigger under two versions of an agent, each under `irimi shadow`, and
+compare the two runs `irimi runs list` names:
+
+```
+irimi compare · 42e7ad03a867410b vs 5cf7f4695f22ce95 · a comparison, not a verdict: nothing was replayed
+  A  handle_ticket  agent:handle_ticket  agent 1.4.0
+  B  handle_ticket  agent:handle_ticket  agent 1.5.0
+
+  ~ A ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)
+    B ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)
+  = ○ tool agent.send_reply  shadow stand-in ran
+
+  1 same · 1 changed · 0 only in A · 0 only in B
+```
+
+- **What it compares.** Each run's writes, in the order irimi recorded them finishing: every
+  write line its summary prints, faked, refused (`✗`) or delegated, and every write tool whose
+  stand-in ran.
+  Reads, LLM calls, telemetry and read tools are not compared. A retry the idempotency store
+  answered as the write it repeats is that write, once. A header line says when the two triggers
+  were given different arguments.
+- **How the writes line up.** Writes that read the same in both runs line up first. What lies
+  between them lines up by what each write is, its service and operation or its tool's name, and
+  a pair that reads differently is `~`: a refund of another amount is one write changed. A write
+  only one run made is `-` (only in A) or `+` (only in B).
+- **Exit code.** As `diff(1)`'s: 0 when every write is `=`, 1 when any is not, and 2 when a run is
+  not in the store or cannot be read. Both runs must be in one store, `--store DIR` or the default.
+- **It is not replay.** Both runs happened, each against the world as it was then, so a
+  difference can come from the world changing between them (a live read answered differently) or
+  from the model sampling another answer, not only from the agent's code. Replay, which re-runs a
+  stored run's trigger against its own recording, comes next ([Roadmap](#roadmap)).
+- **What it cannot see.** A write is compared by its summary line, so two writes whose lines read
+  the same are `=` even when something the line does not print differed: a refund that names no
+  amount prints `refund ? on ch_…` in both (#135), and a write tool's arguments are not compared.
+  Two writes whose lines differ while either was stored with a body cut short (`body-truncated`,
+  the request's or the response's) are `?`, not compared, and never `=`. Two writes made at once
+  can finish in either order, so a run that made the same two writes in the other order shows one
+  of them as `-` and again as `+`. Stored values are redacted with this install's key, so a secret
+  compares equal only between two runs one install recorded.
+
 ## CLI
 
 ```
@@ -632,6 +677,7 @@ irimi shadow [options] -- CMD     run CMD with its HTTP(S) traffic in shadow mod
 irimi maps list                   print each mapped host, its service, route count and target
 irimi runs list [--limit N]       print one line per stored run, newest first (default 20)
 irimi runs show RUN_ID            print a stored run: its record, every event, its summary
+irimi compare RUN_A RUN_B         print two stored runs' writes side by side, no verdict
 ```
 
 `serve` and `shadow` take `--port`, `--listen-host HOST`, `--store DIR`, `--allow-host HOST`,
@@ -643,10 +689,10 @@ map, overrides file or `--target` the loader refuses stops `serve` and `shadow` 
 starts, with the rule it broke on stderr, and so does a redaction key or `--store` irimi cannot
 use. `IRIMI_HOME` moves irimi's state (see `.env.example`).
 
-`runs list` and `runs show` take `--store DIR` too. `runs list` prints each run's id, start,
-duration, status (`ok`, `error`, or `incomplete` for one that never ended), attribution, trigger,
-and its exchange and write counts. `runs show` prints the summary `irimi shadow` printed for the
-run, from what was stored; `runs show unattributed` shows the exchanges no run claimed. See
+`runs list`, `runs show` and `compare` take `--store DIR` too. `runs list` prints each run's id,
+start, duration, status (`ok`, `error`, or `incomplete` for one that never ended), attribution,
+trigger, and its exchange and write counts. `runs show` prints the summary `irimi shadow` printed
+for the run, from what was stored; `runs show unattributed` shows the exchanges no run claimed. See
 [Reading a run back](docs/trace-format.md#reading-a-run-back) for where the two summaries differ.
 
 To install irimi as a standalone tool instead of using the venv, run `uv tool install .` or
@@ -742,11 +788,12 @@ by phase.
   `@sdk.trigger` and `sdk.run()` with run identity in a context variable (#74),
   `Irimi-Run` on every request a run makes through irimi (#75), and `@sdk.tool` for calls the
   proxy cannot see (#76). `irimi shadow --serve` with per-run summaries (#77). A server agent
-  beside it in containers, and the Phase 3 exit test for use case 0 (#78).
+  beside it in containers, and the Phase 3 exit test for use case 0 (#78). `irimi compare`, two
+  stored runs' writes side by side (#79).
 
 **Next: the rest of Phase 3, the run**
 
-- `irimi compare` (#79), Slack channel names in the summary (#61).
+- Slack channel names in the summary (#61).
 - Replay: answer a run from its recording (#82), read and write tools in replay (#83),
   `irimi replay` and `sdk.replay()` (#84), and record, edit a prompt, replay and diff end to end
   (#85).

@@ -752,7 +752,7 @@ triggers.
 ```
 uv sync            # install everything, including the dev tools
 make check         # what CI runs: ruff check, ruff format --check, mypy, pytest
-uv run pytest -q   # the tests alone: under a minute, no network, no keys
+uv run pytest -q   # the tests alone: about three minutes, no network, no keys
 ```
 
 [`CONTRIBUTING.md`](CONTRIBUTING.md) has the dev loop, how to add a service map, and the

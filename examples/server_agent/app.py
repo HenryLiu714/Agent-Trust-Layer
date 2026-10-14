@@ -32,6 +32,7 @@ after its charge read until two are there, so the two runs are open at once.
 import contextlib
 import json
 import os
+import socketserver
 import sqlite3
 import threading
 import urllib.parse
@@ -138,9 +139,21 @@ class _Handler(BaseHTTPRequestHandler):
         pass
 
 
+class _Server(ThreadingHTTPServer):
+    """`ThreadingHTTPServer` without the reverse DNS lookup of its own address that
+    `HTTPServer.server_bind` makes (`socket.getfqdn`) for a `server_name` nothing here reads.
+    It is the one step of start-up that waits on something outside the process, and a slow
+    resolver (a macOS CI runner's) can hold a fresh app there past its deadline (#78)."""
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name, self.server_port = str(host), int(port)
+
+
 def main() -> int:
     host = os.environ.get("HOST", "127.0.0.1")
-    server = ThreadingHTTPServer((host, int(os.environ.get("PORT", "8080"))), _Handler)
+    server = _Server((host, int(os.environ.get("PORT", "8080"))), _Handler)
     print(f"listening on {host}:{server.server_address[1]}", flush=True)
     try:
         server.serve_forever()

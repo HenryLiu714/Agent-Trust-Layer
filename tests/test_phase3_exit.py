@@ -27,6 +27,7 @@ import contextlib
 import http.client
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -140,7 +141,9 @@ def _agent_env(listener: str, stub_port: int, db: Path, *, barrier: bool) -> dic
             "STRIPE_API_BASE": f"http://127.0.0.1:{stub_port}",
             "STRIPE_API_KEY": "sk_test_hermetic",
             "REFUND_DB": str(db),
+            "HOST": "127.0.0.1",  # never a `HOST` the runner exported
             "PORT": "0",
+            "PYTHONFAULTHANDLER": "1",  # a stuck app dumps its stacks on SIGABRT
             **({BARRIER_ENV: "2"} if barrier else {}),
         }
     )
@@ -179,7 +182,15 @@ def _agent_beside_serve(home: Path, stub_port: int, *, barrier: bool):
         assert out is not None
         said: list[str] = []
         threading.Thread(target=lambda: said.append(out.readline()), daemon=True).start()
-        _wait_for(lambda: bool(said))
+        try:
+            _wait_for(lambda: bool(said))
+        except AssertionError:
+            # Say where a silent app is stuck: faulthandler dumps every thread's stack to its
+            # stderr on SIGABRT (#78, a macOS CI runner once held it past the deadline).
+            agent.send_signal(signal.SIGABRT)
+            agent.wait(timeout=10)
+            stuck = (home / "app.err").read_text()
+            raise AssertionError(f"the app said nothing in 30 s; its stacks:\n{stuck}") from None
         assert said[0].startswith("listening on 127.0.0.1:"), (home / "app.err").read_text()
         yield served, int(said[0].rsplit(":", 1)[1])
     finally:

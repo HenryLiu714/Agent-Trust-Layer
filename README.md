@@ -24,8 +24,10 @@ What works today, all of it covered by tests that need no network and no keys:
   response object, reads that show the write, and a check against the real service's state.
 - Idempotency keys, would-have-fired webhooks, answer targets you control, and the reverse door for
   SDKs that ignore proxy variables.
-- Eleven sample agent workflows run end to end, bare and under `irimi shadow`, on every test run,
-  and nine of their scenarios under `irimi shadow --serve` too.
+- Eleven sample agent workflows run end to end, bare, under `irimi shadow` and under
+  `irimi shadow --serve`, on every test run.
+- A server agent beside `irimi shadow --serve`, two concurrent requests to it stored as two runs
+  that never mix: Phase 3's exit for a production agent ([Serve mode](#serve-mode)).
 
 Every `serve` and `shadow` run is recorded, redacted, in the trace store under `$IRIMI_HOME/store`
 ([`docs/trace-format.md`](docs/trace-format.md)), and `irimi runs list` / `runs show` read it
@@ -613,6 +615,13 @@ container, an SDK that ignores the proxy variables, such as stripe-python, canno
   second serve on the same store exits 1 at once. A supervisor's restart retries until the old
   process has exited.
 
+**A worked example** is [`examples/server_agent/`](examples/server_agent/README.md): a refund agent
+on `ThreadingHTTPServer`, each request one `@sdk.trigger` run with a write tool and a faked refund,
+and a `compose.yaml` that runs it and irimi in two containers wired as above. Its `check.sh` sends
+two refunds at once against Stripe test mode and checks that irimi stored two runs and Stripe
+holds no refund. `tests/test_phase3_exit.py` runs the same two requests hermetically on every test
+run.
+
 ## CLI
 
 ```
@@ -732,12 +741,12 @@ by phase.
   and a summary from a stored run (#72). The control endpoint, `/_irimi/` (#73). The SDK:
   `@sdk.trigger` and `sdk.run()` with run identity in a context variable (#74),
   `Irimi-Run` on every request a run makes through irimi (#75), and `@sdk.tool` for calls the
-  proxy cannot see (#76). `irimi shadow --serve` with per-run summaries (#77).
+  proxy cannot see (#76). `irimi shadow --serve` with per-run summaries (#77). A server agent
+  beside it in containers, and the Phase 3 exit test for use case 0 (#78).
 
 **Next: the rest of Phase 3, the run**
 
-- A server agent example and the Phase 3 exit test (#78), `irimi compare` (#79), Slack channel
-  names in the summary (#61).
+- `irimi compare` (#79), Slack channel names in the summary (#61).
 - Replay: answer a run from its recording (#82), read and write tools in replay (#83),
   `irimi replay` and `sdk.replay()` (#84), and record, edit a prompt, replay and diff end to end
   (#85).

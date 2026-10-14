@@ -12,6 +12,7 @@ from itertools import accumulate
 import pytest
 
 from examples.workflows.harness.internet import BOMB_LINE
+from examples.workflows.w07_streaming_assistant.agent import HUNG_UP
 from examples.workflows.w07_streaming_assistant.scenarios import (
     ANSWER,
     CHANNEL,
@@ -241,14 +242,16 @@ def test_a_caller_that_hangs_up_ends_the_run_in_error(run_workflow, mode):
     assert bare.exit_code == shadow.exit_code == 3
     assert shadow.result()["caller_events"] == ["start"]
     assert shadow.result()["outcome"] == "client_gone"
+    assert shadow.result()["error"] == HUNG_UP
     assert [(e["outcome"], e["error"]) for e in shadow.events("run.end")] == [
         ("error", "ClientGone")
     ]
-    # Stored under the exception's full name (#74): an agent's own class, by its module.
+    # Stored under the exception's full name (#74): an agent's own class, by its module. Its
+    # message is the agent's own, the same on macOS (EPIPE) and Linux (ECONNRESET) (#123).
     [run] = shadow.sdk_runs()
     assert (run.outcome, run.error) == (
         "error",
-        ErrorInfo("examples.workflows.w07_streaming_assistant.agent.ClientGone", "BrokenPipeError"),
+        ErrorInfo("examples.workflows.w07_streaming_assistant.agent.ClientGone", HUNG_UP),
     )
     # The agent stopped reading Anthropic's stream when its own caller left, and never asked
     # OpenAI anything.

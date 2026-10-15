@@ -202,6 +202,53 @@ def test_a_replay_never_writes_into_the_run_it_replays(root, key):
     assert s.stats().dropped == 2
 
 
+def test_a_replay_writes_only_the_runs_it_makes(root, key):
+    """An agent that names its runs itself names every recorded run again, not only the one
+    replayed: W9 `control_runs` posts five by name, and a replay of one appended to the other four
+    and rewrote each record as the replay's (#82). A replay's store writes only the runs it made:
+    every run already stored is kept byte for byte, and what the replay said of it is filed in
+    `unattributed/`, flagged, its start and end dropped. A run it starts, or makes from a header,
+    is its own, and stays its own after it ends: a late event is still appended. A store that is
+    no replay's resumes an existing run as it always has."""
+    s = DirectoryStore(root, key)
+    for run_id in ("replayed", "sibling"):
+        s.start_run(dataclasses.replace(_record(run_id), attribution="sdk"))
+        s.record(_exchange(run_id, "/recorded"))
+        s.end_run(run_id, 20.0, "ok")
+    s.close()
+    recorded = {p.name: p.read_bytes() for p in (root / "runs" / "sibling").iterdir()}
+    s = DirectoryStore(root, key, replay_of="replayed")
+    s.start_run(dataclasses.replace(_record("sibling"), attribution="sdk"))
+    s.record(_exchange("sibling", "/replayed"))
+    s.end_run("sibling", 30.0, "ok")
+    s.start_run(dataclasses.replace(_record("fresh"), attribution="sdk"))
+    s.record(_exchange("fresh", "/replayed"))
+    s.end_run("fresh", 30.0, "ok")
+    s.record(_exchange("fresh", "/late"))
+    s.record(_exchange("labelled", "/replayed"))
+    s.close()
+    assert {p.name: p.read_bytes() for p in (root / "runs" / "sibling").iterdir()} == recorded
+    (stray,) = StoreReader(root).load_run(trace.UNATTRIBUTED).events
+    assert isinstance(stray, Exchange)
+    assert (stray.run_id, stray.request.path, BAD_RUN_ID_FLAG in stray.flags) == (
+        "sibling",
+        "/replayed",
+        True,
+    )
+    assert s.stats().dropped == 2
+    reader = StoreReader(root)
+    for run_id, paths in (("fresh", ["/replayed", "/late"]), ("labelled", ["/replayed"])):
+        run = reader.load_run(run_id)
+        assert (run.record.mode, run.record.replay_of) == ("replay", "replayed")
+        assert [e.request.path for e in run.events if isinstance(e, Exchange)] == paths
+    s = DirectoryStore(root, key)
+    s.record(_exchange("sibling", "/resumed"))
+    s.close()
+    resumed = StoreReader(root).load_run("sibling")
+    assert [e.request.path for e in resumed.events] == ["/recorded", "/resumed"]
+    assert (resumed.record.mode, resumed.record.replay_of) == ("shadow", None)
+
+
 def test_a_header_run_started_by_an_event_with_no_clock_has_no_start(root, key):
     s = DirectoryStore(root, key)
     s.record(dataclasses.replace(_exchange("r2"), started_at=0.0, ended_at=0.0))

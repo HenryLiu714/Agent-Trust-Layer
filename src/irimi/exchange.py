@@ -325,6 +325,12 @@ def is_authored_write(exchange: Exchange) -> bool:
     like any other answer, and without this clause the overlay replayed a write that never
     happened.
 
+    A WRITE IRIMI COULD NOT DECIDE ABOUT IS NOT A WRITE (#94, #82). `DECISION_FAILED_FLAG` is the
+    engine's own 502 for a request whose decision raised, or whose body decoded past the cap: no
+    policy was asked, nothing was faked, and the engine records it without ever offering it to the
+    write log. Counted here, a replay of that run waited for a recorded write no replay can make,
+    and diverged at the next read.
+
     A REJECTED WRITE IS NOT A WRITE (#45). L3 said the real service would have refused it, and the
     agent got that refusal. Replaying it onto later reads would show the agent a refund that
     neither Stripe nor irimi ever made.
@@ -339,6 +345,7 @@ def is_authored_write(exchange: Exchange) -> bool:
         exchange.kind not in LIVE_KINDS
         and exchange.answered_by not in ("live", "delegated")
         and TARGET_FAILED_FLAG not in exchange.flags
+        and DECISION_FAILED_FLAG not in exchange.flags
         and exchange.precondition != "rejected"
         and not any(flag in exchange.flags for flag in IDEMPOTENCY_FLAGS)
     )

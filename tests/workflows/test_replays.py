@@ -43,7 +43,6 @@ from irimi.exchange import (
     FROM_RECORDING_FLAG,
     LIVE_KINDS,
     REPLAY_MISS_FLAG,
-    UPSTREAM_ERROR_FLAG,
 )
 from irimi.runner import NO_PROXY_VALUE
 
@@ -102,29 +101,6 @@ REACHES_THE_INTERNET: dict[tuple[str, str], str] = {
     (W11, "raw_socket"): _ESCAPE,
     (W11, "loopback_service"): _ESCAPE,
     (W11, "redirected"): "each hop's query names the fake internet's port, new in every run",
-}
-# LOOKS WRONG: a miss forwarded live whose upstream then fails - a reset, a timeout, a caller that
-# hangs up - is recorded with `upstream-error` and without `replay-miss`: `IrimiAddon.error` builds
-# a live exchange's flags afresh, dropping the answer's own, which a live answer had none of before
-# #82. Rule 3 is broken for exactly those exchanges in these scenarios.
-LOSES_THE_MISS_FLAG = {
-    (W7, "caller_disconnects"),
-    (W7, "upstream_reset"),
-    (W7, "reset_before_stream"),
-    (W7, "two_callers"),
-    (W10, "read_timeout"),
-    (W10, "reset_on_read"),
-}
-# Rule 7's exception: a scenario whose replay misses though nothing it missed reached the
-# internet. LOOKS WRONG: the recording counts the write irimi refused for its cut body
-# (`decision-failed`) among the writes that entered the write log (`is_authored_write`), though the
-# engine's failed-decision path never logged it, and the replay never consumes it, since no policy
-# is asked about it: so the refund checked after it misses, and the replay diverges
-# (`test_w09_scope_gauntlet.py`).
-_CUT_DIVERGES = "LOOKS WRONG: a write refused for its cut body diverges the replay"
-MISSES_UNSEEN: dict[tuple[str, str], str] = {
-    (W9, "cut_refund"): _CUT_DIVERGES,
-    (W9, "cut_update"): _CUT_DIVERGES,
 }
 # Rule 3's exception: a write whose body decoded past irimi's cap is refused by the engine before
 # any policy is asked (#94), in a replay as when it was recorded, so no replay flag is due.
@@ -216,7 +192,7 @@ def unaccounted(replay: Result, leaks: bool) -> list[str]:
         for ex in replay.reported
         if ex.answered_by in ("live", "overlay")
         and ex.kind in LIVE_KINDS
-        and (ex.kind == "telemetry" or {REPLAY_MISS_FLAG, UPSTREAM_ERROR_FLAG} & set(ex.flags))
+        and (ex.kind == "telemetry" or REPLAY_MISS_FLAG in ex.flags)
     )
     around = set(NO_PROXY_VALUE.split(","))
     left = []
@@ -257,8 +233,6 @@ def test_every_run_of_every_scenario_replays_from_its_recording(
             lost = [
                 x for x in lost if DECISION_FAILED_FLAG not in x or BODY_TRUNCATED_FLAG not in x
             ]
-        if case in LOSES_THE_MISS_FLAG:
-            lost = [x for x in lost if not x.startswith("live ") or UPSTREAM_ERROR_FLAG not in x]
         assert lost == [], r.run_id
         # 4. Every answer irimi decided reached the agent stamped as irimi recorded it.
         assert stamp_problems(replay) == Counter(), r.run_id
@@ -279,34 +253,23 @@ def test_every_run_of_every_scenario_replays_from_its_recording(
             assert replay.internet.requests() == [], r.run_id
             # 7. And a recording its replay could answer whole is answered whole: nothing misses.
             missed = [line(ex) for ex in replay.reported if REPLAY_MISS_FLAG in ex.flags]
-            if case not in MISSES_UNSEEN:
-                assert missed == [], r.run_id
+            assert missed == [], r.run_id
     # Each exception is still needed.
     if case in REACHES_THE_INTERNET:
         assert any(r.replay.internet.requests() for r in replays)
-    if case in LOSES_THE_MISS_FLAG:
-        assert any(
-            UPSTREAM_ERROR_FLAG in ex.flags and REPLAY_MISS_FLAG not in ex.flags
-            for r in replays
-            for ex in r.replay.reported
-        )
     if case in CUT_BEFORE_THE_POLICY:
         assert any(flag_problems(r.replay) for r in replays)
     if case in COMPARE_DIFFERS:
         assert any(r.compared and " · 1 changed · " in r.compared[1][-1] for r in replays)
-    if case in MISSES_UNSEEN:
-        assert any(REPLAY_MISS_FLAG in ex.flags for r in replays for ex in r.replay.reported)
 
 
 def test_the_tables_name_only_scenarios_that_exist():
     named = (
         set(REACHES_THE_INTERNET)
-        | LOSES_THE_MISS_FLAG
         | CUT_BEFORE_THE_POLICY
         | set(EXIT_DIFFERS)
         | COMPARE_DIFFERS
         | NAMES_ITS_OWN_RUNS
         | NOTHING_RECORDED
-        | set(MISSES_UNSEEN)
     )
     assert named <= set(CASES)

@@ -11,6 +11,7 @@ import asyncio
 import dataclasses
 import http.client
 import json
+import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -23,6 +24,7 @@ from irimi.exchange import (
     DECISION_FAILED_FLAG,
     FROM_RECORDING_FLAG,
     REPLAY_MISS_FLAG,
+    UPSTREAM_ERROR_FLAG,
     Request,
     Response,
 )
@@ -107,6 +109,10 @@ class _Stripe(BaseHTTPRequestHandler):
 
     def do_GET(self):
         _Stripe.seen.append(("GET", self.path))
+        if self.path == "/v1/charges/ch_RESET":  # hangs up without an answer: an upstream error
+            self.close_connection = True
+            self.connection.shutdown(socket.SHUT_RDWR)
+            return
         if self.path == "/v1/charges/ch_REAL1":
             status, document = _Stripe.charge_status, CHARGE
         elif self.path.split("?", 1)[0] == "/v1/refunds":
@@ -514,6 +520,24 @@ def test_after_a_write_misses_a_recorded_read_goes_live_and_shows_the_new_write(
     assert (read.answered_by, REPLAY_MISS_FLAG in read.flags) == ("overlay", True)
     assert json.loads(replies[0][2])["amount_refunded"] == 250
     assert _Stripe.seen == [("GET", "/v1/charges/ch_REAL1")]
+
+
+def test_a_miss_whose_upstream_then_fails_still_says_it_missed(home, maps, stubs):
+    """A read whose recorded upstream failed holds no answer to serve, so the replay misses and
+    forwards it, and the stub hangs up again. The exchange keeps the policy's `replay-miss` beside
+    the engine's `upstream-error`, as one whose upstream answered keeps it: the answer's own flags
+    are kept on every path (#82). Under shadow mode a live answer has none, and gets only its
+    `upstream-error`."""
+    stripe, _ = stubs
+    url = f"http://127.0.0.1:{stripe}/v1/charges/ch_RESET"
+    events = _record(home, maps, lambda s: s.call("GET", url))
+    (recorded,) = events
+    assert (recorded.answered_by, recorded.flags) == ("live", (UPSTREAM_ERROR_FLAG,))
+    session = _replay(home, maps, events, lambda s: s.call("GET", url))
+    (read,) = session.seen
+    assert (read.answered_by, read.response) == ("live", None)
+    assert read.flags == (REPLAY_MISS_FLAG, UPSTREAM_ERROR_FLAG)
+    assert _Stripe.seen == [("GET", "/v1/charges/ch_RESET")]
 
 
 def test_a_matcher_that_raises_decides_a_miss_and_still_never_forwards_a_write(

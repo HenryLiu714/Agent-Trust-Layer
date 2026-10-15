@@ -553,14 +553,16 @@ def test_a_read_the_service_refused_replays_its_refusal_and_the_retry(replayed, 
 def test_a_read_whose_recording_lost_its_upstream_fails_again_live(replayed, scenario):
     """The recorded read got no answer (`upstream-error`), which a replay cannot serve: it misses,
     goes to the fake Stripe, whose fault fails it again, and the agent's retry takes the recorded
-    200 in its place.
-
-    LOOKS WRONG: that miss is recorded without `replay-miss`. `IrimiAddon.error` builds a live
-    exchange's flags afresh, dropping the answer's own (#82, `test_replays.py`)."""
+    200 in its place. The miss says so beside its `upstream-error`: the answer's own flags are kept
+    whoever failed (#82)."""
     recorded, replay = replayed(W, scenario)
     [lost] = [ex for ex in recorded.reported if UPSTREAM_ERROR_FLAG in ex.flags]
     first, retry = [ex for ex in replay.reported if ex.request.path == "/v1/charges"]
-    assert (first.answered_by, first.response, first.flags) == ("live", None, lost.flags)
+    assert (first.answered_by, first.response, first.flags) == (
+        "live",
+        None,
+        ("replay-miss", UPSTREAM_ERROR_FLAG),
+    )
     assert lost.flags == (UPSTREAM_ERROR_FLAG,)
     assert (retry.answered_by, retry.flags) == (
         "recording",

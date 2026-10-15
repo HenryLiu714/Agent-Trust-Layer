@@ -754,30 +754,25 @@ def test_a_replay_answers_the_get_that_writes_from_its_recording_so_it_writes_no
 
 
 @pytest.mark.parametrize("scenario", ["cut_refund", "cut_update"])
-def test_a_replay_refuses_a_cut_write_again_and_then_diverges(replayed, scenario):
+def test_a_replay_refuses_a_cut_write_again_and_answers_the_rest_from_its_recording(
+    replayed, scenario
+):
     """A write whose body decoded past irimi's cap was refused, never decided (#94), and a replay
     refuses it again the same way: the engine answers it 502 before any policy is asked, so it
-    carries neither replay flag, and nothing reaches the fake Stripe. `irimi compare` of the
-    recording and its replay calls the pair `?` and exits 1.
-
-    LOOKS WRONG: the recording counts that refusal among its writes (`is_authored_write`), though
-    the engine never put it in the write log and the replay never consumes it, so the $9 refund
-    after it, which L3 checked, is a miss: the replay diverges, and checks it again, against the
-    recording's own read of the charge. An unchanged replay of a whole recording should not."""
+    carries neither replay flag, and nothing reaches the fake Stripe. That refusal was never a
+    write - the engine never put it in the write log (`is_authored_write`) - so the $9 refund after
+    it, which L3 checked, is answered from the recording, check and all, and the replay never
+    diverges (#82). `irimi compare` of the recording and its replay calls the cut pair `?` and
+    exits 1."""
     recorded, replay = replayed(W, scenario)
-    cut, check, refund = replay.reported
+    cut, refund = replay.reported
     assert (cut.kind, cut.response.status, cut.flags) == (
         "unknown",
         502,
         ("unclassified", "decision-failed", "body-truncated"),
     )
     assert replay.internet.requests() == []
-    assert (check.issued_by, check.answered_by, check.flags) == (
-        "engine",
-        "recording",
-        ("fidelity:recording", "from-recording"),
-    )
-    assert (refund.precondition, refund.flags) == ("passed", ("fidelity:L1", "replay-miss"))
+    assert (refund.precondition, refund.flags) == ("passed", ("fidelity:L1", "from-recording"))
     code, out, err = replay.compare_runs(recorded.process_run_id(), replay.process_run_id())
     assert (code, err) == (1, [])
     assert out[-1] == (
@@ -802,31 +797,38 @@ def test_a_replay_never_writes_into_the_run_it_replays(replayed):
     stored = _files(recorded.store_root() / RUNS_DIR / "ctl-direct")
     assert stored and _files(replay.store_root() / RUNS_DIR / "ctl-direct") == stored
     assert recorded.stored().load_run(trace.UNATTRIBUTED).events == []
-    filed = replay.stored().load_run(trace.UNATTRIBUTED).events
-    assert [(type(e).__name__, e.run_id) for e in filed] == [
-        ("ToolCall", "ctl-direct"),
-        ("Exchange", "ctl-direct"),
-        ("ToolCall", "ctl-direct"),
+    filed = [
+        e for e in replay.stored().load_run(trace.UNATTRIBUTED).events if e.run_id == "ctl-direct"
     ]
+    assert [type(e).__name__ for e in filed] == ["ToolCall", "Exchange", "ToolCall"]
     [read] = [e for e in filed if isinstance(e, Exchange)]
     assert (read.answered_by, read.request.path) == ("recording", f"/v1/charges/{CHARGE}")
     assert read.flags == ("fidelity:recording", "from-recording", "bad-run-id")
     assert replay.by_label()["direct_read"] == (200, "recording")
 
 
-def test_a_replay_rewrites_every_other_recorded_run_its_agent_names_again(replayed):
-    """LOOKS WRONG: only the run a replay answers from is kept from it. `control_runs` posts its
-    other three runs by name too, and the replay reopens each recorded one in the shared store -
-    as W9 `control_hazards` reopens a run it ended (#97) - appends its own events to the
-    recording's and rewrites its record as the replay's: `mode: replay`, `replay_of: ctl-direct`.
-    A later replay of `ctl-proxied` reads the two runs merged."""
+def test_a_replay_writes_no_other_recorded_run_its_agent_names_again(replayed):
+    """`control_runs` posts its other four runs by name too, each a recorded run in the shared
+    store. A replay writes only the runs it makes (#82): every recorded run's files are byte for
+    byte what was recorded, the replay's own run is the one run that names what it replays, and
+    what it said of each recorded run is filed in `unattributed`, its exchanges flagged
+    `bad-run-id`."""
     recorded, replay = replayed(W, "control_runs", run_id="ctl-direct")
-    for run_id in ("ctl-proxied", "ctl-thread-1", "ctl-thread-2", "ctl-error"):
-        before, after = recorded.stored().load_run(run_id), replay.stored().load_run(run_id)
-        assert (before.record.mode, before.record.replay_of) == ("shadow", None)
-        assert (after.record.mode, after.record.replay_of) == ("replay", "ctl-direct")
-        assert after.events[: len(before.events)] == before.events
-        assert len(after.events) == 2 * len(before.events)
+    runs = recorded.store_root() / RUNS_DIR
+    for directory in runs.iterdir():
+        assert _files(replay.store_root() / RUNS_DIR / directory.name) == _files(directory)
+    assert [r.run_id for r in replay.stored().list_runs() if r.replay_of is not None] == [
+        replay.process_run_id()
+    ]
+    filed = replay.stored().load_run(trace.UNATTRIBUTED).events
+    assert sorted({e.run_id for e in filed}) == [
+        "ctl-direct",
+        "ctl-error",
+        "ctl-proxied",
+        "ctl-thread-1",
+        "ctl-thread-2",
+    ]
+    assert all("bad-run-id" in e.flags for e in filed if isinstance(e, Exchange))
 
 
 # -- bodies that decode past irimi's cap (#94) ---------------------------------------------------

@@ -630,6 +630,30 @@ def test_a_recorded_write_that_was_refused_is_not_one_a_later_read_shows():
     assert _answer(policy, _req()).answered_by == "recording"
 
 
+def test_a_recorded_write_irimi_could_not_decide_about_is_not_one_a_later_read_shows():
+    """A write whose body decoded past the cap was refused with irimi's own 502 before any policy
+    was asked (#94), and the engine never put it in the write log. A replay refuses it the same
+    way, so no policy is asked about it then either: counted among the recorded writes, it was
+    never made, and the read after it missed and diverged an unchanged replay (#82)."""
+    refusal = Response(
+        502, (("content-type", JSON),), b'{"error": {"type": "irimi_decision_failed"}}'
+    )
+    refused = _stored(
+        replace(_refund(), body=b""),
+        refusal,
+        kind="unknown",
+        answered_by="fake-L0",
+        flags=(UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG, BODY_TRUNCATED_FLAG),
+    )
+    policy = ReplayPolicy(_recording(refused, _stored(_req())), SHIPPED)
+    answer = _answer(policy, _req())
+    assert (answer.answered_by, answer.flags) == (
+        "recording",
+        (FIDELITY_RECORDING_FLAG, FROM_RECORDING_FLAG),
+    )
+    assert not policy.recording.diverged
+
+
 # ------------------------------------------------------- what a recorded answer was made from
 
 

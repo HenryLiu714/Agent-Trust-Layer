@@ -23,8 +23,9 @@ path-traversal guard, and it is checked again here rather than trusted (#68). A 
 collide: `Run1` and `run1` are both valid, and on a case-insensitive filesystem (macOS APFS by
 default) they are one directory. The first to reach the store keeps it; an event for the other is
 stored in `unattributed/` like an invalid id, and an exchange among them is flagged
-`exchange.BAD_RUN_ID_FLAG`. So is an event of a replay's that names the run it replays (#82). Two
-runs are never merged into one directory.
+`exchange.BAD_RUN_ID_FLAG`. So is an event of a replay's that names a run the replay did not make -
+the run it replays, or any other already stored (#82). Two runs are never merged into one
+directory.
 
 WHAT IS STORED IS STILL PRIVATE. Redaction hides credentials, not the business data around them -
 customers, amounts, messages - so every directory the store creates is 0700 and every file 0600, as
@@ -316,8 +317,8 @@ class DirectoryStore:
         writer takes its next item, so a slow one holds the queue back.
 
         `replay_of` is the stored run the engine writing here answers from, if it is a replay: each
-        run this store starts or makes from a header is that replay's, and the run it replays is
-        never written to (#82)."""
+        run this store starts or makes from a header is that replay's, and it writes no run it did
+        not make, the run it replays included (`_not_this_replays`, #82)."""
         _mkdirs(root)
         if not root.is_dir() or not os.access(root, os.W_OK | os.X_OK):
             raise PermissionError(f"the trace store {root} is not a writable directory")
@@ -334,6 +335,9 @@ class DirectoryStore:
         # By the run id the event named, or `unattributed` for one that names no run directory.
         self._run_drops: Counter[str] = Counter()
         self._runs: dict[str, _Run] = {}  # writer thread only
+        # Writer thread only: the runs a replay's store made, the only ones it writes (#82). Kept
+        # past a run's end, so a late event reopens it; empty for a store that is no replay's.
+        self._made: set[str] = set()
         self._touched: set[Path] = set()  # writer thread only: files not yet fsynced
         self._unsynced = 0  # writer thread only: writes into them since the last sync
         self._abandoned = threading.Event()  # set when `close()` gave up waiting on the writer
@@ -635,17 +639,34 @@ class DirectoryStore:
         known = self._runs.get(run_id)
         if known is not None:
             return known
-        # A REPLAY NEVER WRITES INTO THE RUN IT REPLAYS (#82). An agent that names its runs itself
-        # - an `Irimi-Run` label, a run id its SDK reuses - names the recorded run again, and its
-        # directory is another run's, as a clash's is: appending merged two runs in one directory
-        # and rewrote the recording every later replay of it reads.
-        if self._clashes(run_id) or run_id == self._replay_of:
+        if self._clashes(run_id) or self._not_this_replays(run_id):
             run = self._unattributed()
         else:
+            if self._replay_of is not None:
+                # Before `_open`, which makes the directory: one that raises after making it has
+                # still made a run of this replay's, which the next event may write.
+                self._made.add(run_id)
             directory = self.layout.run_dir(run_id)
             run = self._open(directory / EVENTS_FILE, directory)
         self._runs[run_id] = run
         return run
+
+    def _not_this_replays(self, run_id: str) -> bool:
+        """True when this store is a replay's and `run_id` names a run it did not make.
+
+        A REPLAY WRITES ONLY THE RUNS IT MAKES (#82). An agent that names its runs itself - an
+        `Irimi-Run` label, a run id its SDK reuses, a start it posts by hand - names the recorded
+        runs again: the one replayed, and every other the recorded process held. Each directory is
+        another run's, as a clash's is, and appending to one merged two runs in it and rewrote its
+        record as the replay's, so a later replay of it read both. So a run directory this store
+        did not make - recorded, or another process's - is never written by a replay, whether or
+        not it is the run replayed; nor is the run replayed, wherever it is stored. A store that is
+        no replay's resumes an existing run as it always has (`_open`)."""
+        if self._replay_of is None:
+            return False
+        if run_id == self._replay_of:
+            return True
+        return run_id not in self._made and self.layout.run_dir(run_id).exists()
 
     def _unattributed(self) -> _Run:
         run = self._runs.get(UNATTRIBUTED)

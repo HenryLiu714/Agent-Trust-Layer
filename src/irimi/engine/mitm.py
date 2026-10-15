@@ -1118,9 +1118,10 @@ class IrimiAddon:
         # the answer actually carried (#29).
         extra_flags: tuple[str, ...]
         if pending.answered_by == "live":
-            # A cut request is a fact about the exchange whoever failed (#94). A live answer has
-            # no other flag of its own.
-            extra_flags = (*_request_cut_flags(flow), UPSTREAM_ERROR_FLAG)
+            # THE ANSWER'S OWN FLAGS ARE KEPT ON EVERY PATH, A LIVE ONE'S TOO (#82). They are the
+            # policy's and the cut request's (`_act_on`): a replay's miss forwarded live says
+            # `replay-miss` whether its upstream then answered or failed, as `response` keeps it.
+            extra_flags = (*pending.flags, UPSTREAM_ERROR_FLAG)
         elif pending.answered_by == "delegated":
             # A target irimi refused was already flagged in `request()`, and the client going away
             # afterwards does not make it fail twice. The flag is a fact about the exchange, not a

@@ -24,7 +24,12 @@ from examples.workflows.w07_streaming_assistant.scenarios import (
 )
 from irimi import redact, trace
 from irimi.engine.mitm import MAX_DECODED_BODY
-from irimi.exchange import STREAM_TRUNCATED_FLAG, UPSTREAM_ERROR_FLAG, Exchange
+from irimi.exchange import (
+    REPLAY_MISS_FLAG,
+    STREAM_TRUNCATED_FLAG,
+    UPSTREAM_ERROR_FLAG,
+    Exchange,
+)
 from irimi.store import MAX_STORED_BODY
 from irimi.trace import ErrorInfo, TelemetrySeen
 
@@ -697,13 +702,13 @@ def test_a_secret_stored_redacted_replays_as_its_placeholder(replayed):
 
 
 # What the replay's Anthropic stream is flagged when its recording was cut: each is a miss, sent to
-# the fake again, whose fault cuts it again. LOOKS WRONG: one that fails upstream again loses its
-# `replay-miss`, because `IrimiAddon.error` builds a live exchange's flags afresh.
+# the fake again, whose fault cuts it again. One that fails upstream again keeps its `replay-miss`
+# beside the engine's `upstream-error`: the answer's own flags are kept on every path (#82).
 CUT_STREAMS = {
-    "caller_disconnects": (UPSTREAM_ERROR_FLAG, STREAM_TRUNCATED_FLAG),
-    "upstream_reset": (UPSTREAM_ERROR_FLAG, STREAM_TRUNCATED_FLAG),
-    "reset_before_stream": (UPSTREAM_ERROR_FLAG,),
-    "gzip_bomb_stream": ("replay-miss", STREAM_TRUNCATED_FLAG),
+    "caller_disconnects": (REPLAY_MISS_FLAG, UPSTREAM_ERROR_FLAG, STREAM_TRUNCATED_FLAG),
+    "upstream_reset": (REPLAY_MISS_FLAG, UPSTREAM_ERROR_FLAG, STREAM_TRUNCATED_FLAG),
+    "reset_before_stream": (REPLAY_MISS_FLAG, UPSTREAM_ERROR_FLAG),
+    "gzip_bomb_stream": (REPLAY_MISS_FLAG, STREAM_TRUNCATED_FLAG),
 }
 
 
@@ -747,8 +752,8 @@ def test_replaying_one_of_two_lockstep_chats_leaves_the_other_waiting(run_workfl
             for ex in replay.reported
             if ex.request.path == "/v1/messages" and (ex.answered_by == "live")
         ]
-        # LOOKS WRONG: no `replay-miss`, as above.
-        assert (left.response, left.flags) == (None, (UPSTREAM_ERROR_FLAG,))
+        # A miss whose upstream failed, and says both, as above.
+        assert (left.response, left.flags) == (None, (REPLAY_MISS_FLAG, UPSTREAM_ERROR_FLAG))
         assert [r.path for r in replay.internet.requests()] == ["/v1/embeddings", "/v1/messages"]
         assert replay.internet.writes() == []
 

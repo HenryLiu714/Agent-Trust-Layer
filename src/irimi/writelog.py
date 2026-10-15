@@ -3,7 +3,7 @@
 `overlay` had this to itself until L3: a precondition checks a write against real state *plus the
 run's overlay*, so `policy` needs the same decoding, and the two live in the same layer and may
 not import each other. It is its own job in any case - turning `Exchange`es into
-`services.Write`s is neither deciding nor overlaying - and it is pure, so Phase 5 replay decodes a
+`services.Write`s is neither deciding nor overlaying - and it is pure, so replay (#82) decodes a
 recording with the same function.
 """
 

@@ -7,7 +7,7 @@ the store's writer thread calls `redact_exchange` and `redact_json`, the engine 
 
 Redaction is always on and keyed: a secret becomes `<redacted:` + 16 hex digits of an HMAC-SHA256
 under this install's key + `>`, so the same secret always becomes the same placeholder and a
-Phase 5 replay can still match a request against its recording. The key is per install
+replay (#82) can still match a request against its recording. The key is per install
 (`$IRIMI_HOME/redact.key`), so two machines give one secret two placeholders; whether recordings
 move between machines is a Phase 6 decision (push/pull), and `docs/trace-format.md` says so.
 

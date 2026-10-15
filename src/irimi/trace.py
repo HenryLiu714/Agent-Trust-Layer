@@ -8,8 +8,8 @@ hands the exchange codec two callables for the bodies, which never go inline.
 THE ROUND TRIP IS THE CONTRACT. Every field of `Exchange`, `RunRecord`, `ToolCall` and
 `TelemetrySeen` is spelled out in its encoder and its decoder, and `tests/test_trace.py` builds
 each record with a non-default value in every field and asks for it back. A field added to any of
-them without codec support fails that test, which is what keeps a Phase 3 recording readable by
-Phase 5: a stored run gets no second chance to repeat an L3 read.
+them without codec support fails that test, which is what keeps a recording readable by a replay
+(#82): a stored run gets no second chance to repeat an L3 read.
 
 Decoders raise `TraceFormatError` and nothing else on a malformed record - one that is not a JSON
 object, lacks a field, or holds a value of the wrong type, outside its vocabulary or not finite -

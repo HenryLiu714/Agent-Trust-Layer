@@ -6,7 +6,7 @@ POST, so an agent that retries a refund would otherwise get two different minted
 overlay would apply the refund twice - a charge showing 200 refunded for a single 100 refund.
 
 Pure and in-memory. Nothing here decides anything: `policy` looks the answer up and puts the
-first one in, and the store only remembers. That is also what lets Phase 5 replay keep the same
+first one in, and the store only remembers. That is also what lets replay (#82) keep the same
 promise over a recording with the same code.
 """
 

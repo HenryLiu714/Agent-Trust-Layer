@@ -25,7 +25,7 @@ Two rules run through all of it:
   incomplete. Answering a read outright is the opposite move and needs the opposite justification -
   see `_refund_retrieve`, where there is no live object to be incomplete about (#52).
 
-Pure functions over plain data: no clock, no minting, no I/O, no module state. Phase 5 replay
+Pure functions over plain data: no clock, no minting, no I/O, no module state. replay (#82)
 runs these same functions over a recording.
 """
 

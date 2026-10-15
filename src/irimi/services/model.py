@@ -1,6 +1,6 @@
 """What a per-service effect table is handed and what it hands back (#43).
 
-Plain data, so the effects stay pure functions the Phase 5 replay engine can run over a
+Plain data, so the effects stay pure functions the replay engine (#82) can run over a
 recording (use case 1). The `Exchange` is deliberately absent: an effect is a function of the
 fields a write carried and the object irimi answered it with, not of the trace.
 """

@@ -2,7 +2,7 @@
 
 One module per service holding what a faked write does to a later read, as plain functions over
 plain data. The overlay decodes the write log and looks the service up here; nothing in this
-package knows about mitmproxy, exchanges, flows or maps, which is what lets Phase 5 replay run
+package knows about mitmproxy, exchanges, flows or maps, which is what lets replay (#82) run
 the same functions over a recording (use case 1).
 """
 

@@ -9,10 +9,15 @@ no minting. It reads `StoredRun.events` (it may not import `store`, which sits a
 WHAT "THE SAME REQUEST" IS. Two requests match when their keys do, and the key is built to be
 equal across two runs of one agent while the agent asks for the same thing:
 
-- no headers, so an `Idempotency-Key`, a `User-Agent`, a credential or a port never decides a match;
+- no headers, so an `Idempotency-Key`, a `User-Agent`, a credential or a port never decides a match,
+  but the ones that say whose state a request is about (`services.scope_of`): a Connect read of
+  `ch_1` in one account is not a read of `ch_1` in another;
 - the body as `bodies.reflect` reads it, less the route's `volatile:` fields, as canonical JSON, so
   form encoding, key order and a re-spelled number (`1.10` is `1.1`) do not either;
 - an llm call's body less the fields that say who asked and how, not what (`LLM_VOLATILE`);
+- a write's standing with the run's idempotency store: a retry of a key the run has answered, a
+  key reused for another write, or neither, which the service answers three different ways
+  whatever the bodies say (#46);
 - and the live request is redacted with the store's key first, because the recording was: a
   secret in a body matches its own placeholder in the recording (#69).
 
@@ -21,10 +26,10 @@ run that recorded two is a miss. The engine's own precondition reads are kept ap
 served to the agent, and the agent's reads are never used for one (#82, "Decided").
 
 THE REPLAY'S STATE IS HERE, AND ONLY HERE: which recorded exchanges have answered, and whether
-the replay has diverged - made a write the recording could not answer, or reached a recorded read
-that shows a recorded write the replay has not made - after which the recorded reads show a world
-that is no longer the replay's. One replay is one run against one engine, whose write log is the
-engine's, so both are the engine's too.
+the replay has diverged - made a write the recording could not answer, or reached a recorded answer
+made from a world holding a recorded write the replay has not made - after which a recorded answer
+made from the world (`_shows_the_world`) is never served again. One replay is one run against one
+engine, whose write log is the engine's, so both are the engine's too.
 """
 
 import hashlib
@@ -35,12 +40,13 @@ from dataclasses import dataclass
 from typing import Any, get_args
 from urllib.parse import parse_qsl
 
-from irimi import bodies, pipeline, redact
+from irimi import bodies, pipeline, redact, services
 from irimi.exchange import (
     BODY_TRUNCATED_FLAG,
     DECISION_FAILED_FLAG,
     FIDELITY_RECORDING_FLAG,
     FROM_RECORDING_FLAG,
+    IDEMPOTENCY_FLAGS,
     LIVE_KINDS,
     REDACTION_FAILED_FLAG,
     REPLAY_MISS_FLAG,
@@ -61,6 +67,9 @@ from irimi.trace import Event
 
 # What a match key is: a tuple of strings and tuples of strings, comparable and hashable.
 _Key = tuple[Any, ...]
+# Where a recorded exchange waits to be taken: its key, whether it is an llm call that asked to
+# stream (`_stream_bucket`), and the idempotency flag its answer carried (`_held`).
+_Bucket = tuple[_Key, bool, str]
 
 # The top-level fields of an llm call's body that say who asked and how the answer travels, never
 # what was asked (#82). `stream` is not in the key, but whether an llm call asks to stream is beside
@@ -117,6 +126,28 @@ def _json_body(request: Request) -> dict[str, Any] | None:
     return document if isinstance(document, dict) else None
 
 
+def _held(exchange: Exchange) -> str:
+    """The idempotency flag a recorded answer carried: `idempotent-replay` when it was the run's
+    first answer to its key again, `idempotency-conflict` when the key had come back on another
+    write, and "" for an answer to a key the run had not answered, or no key (#46).
+
+    It is beside the key because the service answers those three differently whatever the body
+    says, and the key leaves the idempotency key out: a retry must not take the recorded answer to
+    a second, distinct write (and enter the write log as one), a fresh write must not take a
+    recorded retry's (and stay out of it), and a key reused for another write is refused (#82)."""
+    return next((flag for flag in IDEMPOTENCY_FLAGS if flag in exchange.flags), "")
+
+
+def _shows_the_world(exchange: Exchange) -> bool:
+    """Whether a recorded answer was made from the world the recorded run's writes had made: a
+    read, which shows them, or a write L3 checked against them (#45), whose verdict a refund the
+    replay has not made, or one the recording never held, would change. A replay serves one only
+    while that world is the replay's too (`Recording.take`)."""
+    return exchange.kind == "read" or (
+        exchange.kind not in LIVE_KINDS and exchange.precondition is not None
+    )
+
+
 def _streamed(exchange: Exchange) -> bool:
     """Whether a recorded exchange's answer streamed (#71): it has chunks, or it is an event stream
     that sent no body at all, which records no chunks like a response that did not stream."""
@@ -135,8 +166,11 @@ def _servable(exchange: Exchange) -> bool:
     The response must also be one the engine can send. irimi's own writer stores only headers it
     read as latin-1, but a run from elsewhere - edited by hand, pulled from a bucket, written by
     another version - may hold any text, and a header that does not encode raises in the request
-    hook, which forwards the flow (#82). And a `text/event-stream` 200 recorded with no body and no
-    chunks is a stream recorded before #71 kept streamed bodies, not an empty answer."""
+    hook, which forwards the flow (#82). Its status must be a final one HTTP defines, 200 to 599:
+    a 1xx is never a whole answer, and a 101 switched the recorded connection to a protocol a
+    replay cannot carry on. And
+    a `text/event-stream` 200 recorded with no body and no chunks is a stream recorded before #71
+    kept streamed bodies, not an empty answer."""
     response = exchange.response
     if response is None or exchange.answered_by == "delegated":
         return False
@@ -144,7 +178,7 @@ def _servable(exchange: Exchange) -> bool:
         return False
     if any(flag in UNSERVABLE_FLAGS for flag in exchange.flags):
         return False
-    if not 100 <= response.status <= 999:
+    if not 200 <= response.status <= 599:
         return False
     try:
         for name, value in response.headers:
@@ -159,17 +193,24 @@ def _match_key(request: Request, kind: Kind, maps: MapIndex) -> _Key:
     """The key of a request AS STORED: already redacted. The recorded side calls this on a stored
     request, and `_live_key` on a live one after redacting it, so both sides are keyed alike.
 
-    An llm call whose body is a JSON object (`_json_body`) is keyed by its host, its path and that
-    object less `LLM_VOLATILE` and every `cache_control`, as canonical JSON. Everything else is
-    keyed by its method, host, path, sorted query pairs and body, the body as `bodies.reflect`
+    Every request is keyed by its kind, method, host, path, sorted query pairs and the headers
+    that scope its service's state (`services.scope_of`, which the write log, the idempotency
+    store and L3 compare too): a query can say what an llm call asks as much as a read's
+    (`?alt=sse`, `?api-version=`), and a `Stripe-Account` says whose objects a request names (#82).
+    An llm call whose body is a JSON object (`_json_body`) adds that object less `LLM_VOLATILE` and
+    every `cache_control`, as canonical JSON. Everything else adds its body as `bodies.reflect`
     reads it minus the `volatile:` fields of the route this stored request classifies to; a body
     `reflect` cannot read is keyed by its sha256. The kind leads, so a read never matches a
     write."""
+    classification = pipeline.classify(request, maps)
+    query = tuple(sorted(parse_qsl(request.query, keep_blank_values=True)))
+    scope = services.scope_of(classification.service, request)
+    head = (kind, request.method, request.host, request.path, query, scope)
     if kind == "llm":
         document = _json_body(request)
         if document is not None:
-            return (kind, request.host, request.path, _canonical(_without_llm_volatile(document)))
-    route = pipeline.classify(request, maps).route
+            return (*head, _canonical(_without_llm_volatile(document)))
+    route = classification.route
     volatile = route.volatile if route is not None else ()
     posted = bodies.reflect(request)
     if posted:
@@ -178,8 +219,7 @@ def _match_key(request: Request, kind: Kind, maps: MapIndex) -> _Key:
         body = "sha256:" + hashlib.sha256(request.body).hexdigest()
     else:
         body = ""
-    query = tuple(sorted(parse_qsl(request.query, keep_blank_values=True)))
-    return (kind, request.method, request.host, request.path, query, body)
+    return (*head, body)
 
 
 def _live_key(request: Request, kind: Kind, maps: MapIndex, redaction_key: bytes) -> _Key:
@@ -236,7 +276,7 @@ class Recording:
 
     def __init__(
         self,
-        agent: dict[tuple[_Key, bool], list[_Entry]],
+        agent: dict[_Bucket, list[_Entry]],
         engine: dict[_Key, Exchange],
         maps: MapIndex,
         redaction_key: bytes,
@@ -268,7 +308,7 @@ class Recording:
         next one still meets its own. Telemetry is never stored as an exchange (#70), and a tool
         call is #83's. The engine's precondition reads are kept by key, the first that can be served
         of each, or else the first."""
-        agent: dict[tuple[_Key, bool], list[_Entry]] = {}
+        agent: dict[_Bucket, list[_Entry]] = {}
         engine: dict[_Key, Exchange] = {}
         position = 0
         for event in events:
@@ -283,31 +323,41 @@ class Recording:
                 if held is None or (_servable(event) and not _servable(held)):
                     engine[found] = event
             else:
-                bucket = (found, _stream_bucket(event.request, event.kind))
+                bucket = (found, _stream_bucket(event.request, event.kind), _held(event))
                 agent.setdefault(bucket, []).append(_Entry(event, position))
                 position += 1
         return cls(agent, engine, maps, redaction_key)
 
-    def take(self, request: Request, kind: Kind) -> Exchange | None:
-        """The recorded exchange that answers this live request, or None for a miss.
+    def take(self, request: Request, kind: Kind, held: str = "") -> Exchange | None:
+        """The recorded exchange that answers this live request, or None for a miss. `held` is the
+        idempotency flag the run's own answer to this request would carry (`_held`), which the
+        caller reads off the run's idempotency store; "" for anything that is not a write.
 
-        It is the first recorded exchange of the same kind, key and stream bucket that has not
-        answered yet, and it never answers again. When that one cannot be served (`_servable`), or
-        is an llm call's stream and this call does not ask for a stream, the request is a miss all
-        the same: the recorded run had no answer this one can be given.
+        It is the first recorded exchange of the same kind, key, stream bucket and `held` that has
+        not answered yet, and it never answers again. When that one cannot be served
+        (`_servable`), or is an llm call's stream and this call does not ask for a stream, the
+        request is a miss all the same: the recorded run had no answer this one can be given.
 
-        A READ RECORDED AFTER A WRITE THE REPLAY HAS NOT MADE IS A MISS, AND THE REPLAY DIVERGES. It
-        shows that write - a refund in `amount_refunded`, a post in a thread - and the run being
-        replayed made no such write, as when a prompt edit stops the agent refunding. Its reads
-        from then on go live, as after a write that missed."""
+        AN ANSWER MADE FROM A WORLD THE REPLAY IS NOT IN IS A MISS, AND THE REPLAY DIVERGES
+        (`_shows_the_world`): a read, or a write L3 checked, recorded after a recorded write the
+        replay has not made, or reached once the replay has diverged. It shows that write - a
+        refund in `amount_refunded`, a post in a thread - or was refused because of it, and the run
+        being replayed made no such write, as when a prompt edit stops the agent refunding; or the
+        replay made a write the recorded run did not. It is not consumed, and from then on reads go
+        live and checked writes are checked again, against the recording's own reads and the
+        replay's write log. The check and the take are one step under the lock, so a write that
+        diverges on another thread cannot slip between them."""
         asks = _stream_bucket(request, kind)
-        wanted = (_live_key(request, kind, self._maps, self._redaction_key), asks)
+        wanted = (_live_key(request, kind, self._maps, self._redaction_key), asks, held)
         with self._lock:
             for entry in self._agent.get(wanted, ()):
                 if not entry.consumed:
-                    if kind == "read" and any(
-                        not write.consumed and write.position < entry.position
-                        for write in self._writes
+                    if _shows_the_world(entry.exchange) and (
+                        self._diverged
+                        or any(
+                            not write.consumed and write.position < entry.position
+                            for write in self._writes
+                        )
                     ):
                         self._diverged = True
                         return None

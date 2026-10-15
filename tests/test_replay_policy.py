@@ -380,11 +380,11 @@ def test_a_replayed_write_carries_only_its_answers_flags():
         request,
         REFUND_ANSWER,
         answered_by="fake-L0",
-        flags=("fidelity:L0", IDEMPOTENT_REPLAY_FLAG, "some-later-flag"),
+        flags=("fidelity:L0", FIXTURE_FAILED_FLAG, "some-later-flag"),
     )
     assert UNCLASSIFIED_FLAG in recorded.flags
     answer = _answer(ReplayPolicy(_recording(recorded), SHIPPED), request)
-    assert answer.flags == ("fidelity:L0", IDEMPOTENT_REPLAY_FLAG, FROM_RECORDING_FLAG)
+    assert answer.flags == ("fidelity:L0", FIXTURE_FAILED_FLAG, FROM_RECORDING_FLAG)
 
 
 def test_a_rejected_write_is_rejected_again():
@@ -521,8 +521,11 @@ def test_a_recorded_header_the_engine_cannot_send_is_a_miss():
     assert recording.take(_req(), "read") is not None
 
 
-def test_a_recorded_status_no_response_can_carry_is_a_miss():
-    assert _recording(_stored(_req(), replace(OK, status=42))).take(_req(), "read") is None
+@pytest.mark.parametrize("status", [42, 100, 101, 600, 999])
+def test_a_recorded_status_no_response_can_carry_is_a_miss(status):
+    """A 1xx is never a final answer, and a 101 switched the recorded connection to a protocol a
+    replay cannot carry on; past 599 is no status HTTP defines (#82)."""
+    assert _recording(_stored(_req(), replace(OK, status=status))).take(_req(), "read") is None
 
 
 def test_an_empty_event_stream_200_recorded_before_streams_were_kept_is_a_miss():
@@ -625,3 +628,170 @@ def test_a_recorded_write_that_was_refused_is_not_one_a_later_read_shows():
     refused = _recorded_refund(precondition="rejected")
     policy = ReplayPolicy(_recording(refused, _stored(_req())), SHIPPED)
     assert _answer(policy, _req()).answered_by == "recording"
+
+
+# ------------------------------------------------------- what a recorded answer was made from
+
+
+def _keyed_refund(amount, key, charge="ch_1"):
+    """A refund whose only idempotency key is the header, as stripe-python sends it."""
+    body = f"charge={charge}&amount={amount}".encode()
+    return _req("POST", path="/v1/refunds", body=body, ct=FORM, headers=(("idempotency-key", key),))
+
+
+def _recorded_keyed(amount, key, answer=REFUND_ANSWER, **fields):
+    defaults = {"answered_by": "fake-L1", "flags": (FIDELITY_L1_FLAG,)}
+    return _stored(_keyed_refund(amount, key), answer, **(defaults | fields))
+
+
+CHARGE = Response(
+    200,
+    (("content-type", JSON),),
+    json.dumps(
+        {
+            "id": "ch_1",
+            "object": "charge",
+            "amount": 4900,
+            "amount_refunded": 0,
+            "refunded": False,
+            "currency": "usd",
+        }
+    ).encode(),
+)
+TOO_LARGE = Response(400, (("content-type", JSON),), b'{"error": {"code": "amount_too_large"}}')
+
+
+def test_a_retry_never_takes_the_answer_to_a_second_distinct_write():
+    """The recorded run made two refunds; this one retries its first. Stripe answers the retry
+    with the first refund again, so the recorded second refund - another minted id, a second entry
+    in the write log - is not its answer (#46, #82)."""
+    second = replace(REFUND_ANSWER, body=b'{"id": "re_RECORDED2", "amount": 100}')
+    recording = _recording(_recorded_keyed(100, "k1"), _recorded_keyed(100, "k2", second))
+    policy = ReplayPolicy(recording, SHIPPED)
+    assert _answer(policy, _keyed_refund(100, "k1")).response.body == REFUND_ANSWER.body
+    retry = _answer(policy, _keyed_refund(100, "k1"))
+    assert retry.response.body == REFUND_ANSWER.body
+    assert retry.flags == (FIDELITY_L1_FLAG, IDEMPOTENT_REPLAY_FLAG, REPLAY_MISS_FLAG)
+
+
+def test_a_fresh_write_never_takes_a_recorded_retry():
+    """The recorded run retried its refund; this one makes a second refund with a new key. Stripe
+    makes a second refund, so the recorded retry - the first refund's bytes, kept out of the write
+    log - is not its answer (#46, #82)."""
+    retried = _recorded_keyed(100, "k1", flags=(FIDELITY_L1_FLAG, IDEMPOTENT_REPLAY_FLAG))
+    policy = ReplayPolicy(_recording(_recorded_keyed(100, "k1"), retried), SHIPPED)
+    assert FROM_RECORDING_FLAG in _answer(policy, _keyed_refund(100, "k1")).flags
+    fresh = _answer(policy, _keyed_refund(100, "k2"))
+    assert fresh.flags == (FIDELITY_L1_FLAG, REPLAY_MISS_FLAG)
+    assert fresh.response.body != REFUND_ANSWER.body
+
+
+def test_a_recorded_retry_answers_the_same_retry():
+    """The other half: a retry the recorded run made too is answered from the recording, as the
+    retry it was."""
+    retried = _recorded_keyed(100, "k1", flags=(FIDELITY_L1_FLAG, IDEMPOTENT_REPLAY_FLAG))
+    policy = ReplayPolicy(_recording(_recorded_keyed(100, "k1"), retried), SHIPPED)
+    _answer(policy, _keyed_refund(100, "k1"))
+    retry = _answer(policy, _keyed_refund(100, "k1"))
+    assert retry.flags == (FIDELITY_L1_FLAG, IDEMPOTENT_REPLAY_FLAG, FROM_RECORDING_FLAG)
+    assert not policy.recording.diverged
+
+
+def test_a_key_reused_for_another_write_is_refused_whatever_the_recording_holds():
+    """The recording holds a refund of 100. This run sent a refund of 250 under key `k`, then the
+    refund of 100 under the same key, which Stripe refuses with `idempotency_error` (#46)."""
+    policy = ReplayPolicy(_recording(_recorded_keyed(100, "k-recorded")), SHIPPED)
+    assert REPLAY_MISS_FLAG in _answer(policy, _keyed_refund(250, "k")).flags
+    reused = _answer(policy, _keyed_refund(100, "k"))
+    assert (reused.response.status, reused.flags[-2:]) == (
+        400,
+        (IDEMPOTENCY_CONFLICT_FLAG, REPLAY_MISS_FLAG),
+    )
+
+
+def test_a_checked_write_recorded_after_a_write_the_replay_has_not_made_is_checked_again():
+    """The recorded run refunded 1000 of a 4900 charge, so its refund of 4900 was refused. This
+    run never refunded the 1000, and against the recording's own read of the charge its 4900 is
+    taken (#45, #82)."""
+    engine = _stored(_req(), CHARGE, issued_by="engine")
+    first = _recorded_keyed(1000, "a", precondition="passed")
+    refused = _recorded_keyed(
+        4900, "b", TOO_LARGE, precondition="rejected", rejection_code="amount_too_large"
+    )
+    policy = ReplayPolicy(_recording(engine, first, refused), SHIPPED)
+    answer = _answer(policy, _keyed_refund(4900, "b"))
+    assert (answer.response.status, answer.precondition) == (200, "passed")
+    assert answer.flags[-1] == REPLAY_MISS_FLAG
+    assert policy.recording.diverged
+
+
+def test_a_checked_write_after_the_replay_diverged_is_checked_again():
+    """This run refunded 2000 first, which the recorded run never did, so the recorded refund of
+    4900 passed against a charge this run has already refunded part of. Checked again, against the
+    recording's read of the charge and this run's write log, it is refused (#45, #82)."""
+    engine = _stored(_req(), CHARGE, issued_by="engine")
+    recorded = _recorded_keyed(4900, "a", precondition="passed")
+    policy = ReplayPolicy(_recording(engine, recorded), SHIPPED)
+    new = _keyed_refund(2000, "x")
+    cls = classify(new, SHIPPED)
+    made = policy.answer(new, cls, (), "rep")
+    assert made.flags[-1] == REPLAY_MISS_FLAG
+    logged = Exchange(
+        request=new,
+        response=made.response,
+        service=cls.service,
+        operation=cls.operation,
+        kind=cls.kind,
+        answered_by=made.answered_by,
+        validation="unvalidated",
+        run_id="rep",
+        flags=made.flags,
+        precondition=made.precondition,
+    )
+    answer = _answer(policy, _keyed_refund(4900, "a"), write_log=(logged,))
+    assert (answer.response.status, answer.precondition) == (400, "rejected")
+    assert answer.flags[-1] == REPLAY_MISS_FLAG
+
+
+def test_an_unchecked_write_is_answered_from_the_recording_after_the_replay_diverged():
+    """A write no `precondition:` checked was not made from the world: its recorded answer is
+    still the one, and its minted ids the recorded ones."""
+    unchecked = _req("POST", path="/v1/customers/cus_1", body=b"email=a%40b.c", ct=FORM)
+    assert not classify(unchecked, SHIPPED).route.precondition
+    recorded = _stored(unchecked, REFUND_ANSWER, answered_by="fake-L0", flags=("fidelity:L0",))
+    policy = ReplayPolicy(_recording(recorded), SHIPPED)
+    _answer(policy, _keyed_refund(2000, "x"))
+    assert policy.recording.diverged
+    assert FROM_RECORDING_FLAG in _answer(policy, unchecked).flags
+
+
+def test_the_recording_never_hands_out_a_read_once_the_replay_has_diverged():
+    """Divergence and the take are one step under the recording's lock: a read whose policy saw
+    the replay undiverged cannot be served after a write on another thread diverged it."""
+    recording = _recording(_stored(_req()))
+    recording.diverge()
+    assert recording.take(_req(), "read") is None
+
+
+def test_an_llm_call_whose_query_differs_is_a_miss():
+    """A query can say what an llm call asks (`?alt=sse`, `?api-version=`) as much as a read's."""
+    recording = _recording(_stored(_llm()))
+    asked = replace(_llm(), query="alt=sse")
+    assert recording.take(asked, "llm") is None
+    assert recording.take(_llm(), "llm") is not None
+
+
+def test_a_request_in_another_account_is_another_request():
+    """`Stripe-Account` says whose `ch_1` a read names and whose charge a refund refunds, as the
+    write log, the idempotency store and L3 already compare it (`services.scope_of`). Any other
+    header still decides nothing."""
+    in_a = (("stripe-account", "acct_A"),)
+    read_a = _stored(_req(headers=in_a), replace(OK, body=b'{"a": 1}'))
+    refund_a = _stored(replace(_refund(), headers=_refund().headers + in_a), REFUND_ANSWER)
+    recording = _recording(read_a, refund_a)
+    in_b = (("stripe-account", "acct_B"),)
+    assert recording.take(_req(headers=in_b), "read") is None
+    assert recording.take(replace(_refund(), headers=_refund().headers + in_b), "write") is None
+    taken = recording.take(_req(headers=(*in_a, ("user-agent", "x"))), "read")
+    assert taken is not None and taken.response.body == b'{"a": 1}'
+    assert recording.take(replace(_refund(), headers=_refund().headers + in_a), "write")

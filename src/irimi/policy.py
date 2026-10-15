@@ -180,6 +180,22 @@ class ShadowPolicy:
             return
         _remember(self.idempotency, slot, answer)
 
+    def idempotency_flag(
+        self, request: Request, classification: Classification, run_id: str
+    ) -> str:
+        """The idempotency flag this policy's answer to this write would carry (#46):
+        `idempotent-replay` when the run has answered its key with the same parameters,
+        `idempotency-conflict` when with others, and "" when it has not, or there is no key. A
+        replay takes a recorded write only from one that carried the same (#82): the service
+        answers a retry, a reused key and a fresh write three ways whatever their bodies say. Never
+        raises: `_recall` is guarded."""
+        _, known = self._recall(request, classification, run_id)
+        if known is None:
+            return ""
+        if IDEMPOTENCY_CONFLICT_FLAG in known.flags:
+            return IDEMPOTENCY_CONFLICT_FLAG
+        return IDEMPOTENT_REPLAY_FLAG
+
     def _delegated(self, route: Route | None, forward: ForwardTo) -> Answer:
         """A delegated write is one irimi did not author and cannot check, and nothing in Phase 2
         reads from a target (#45). A policy with no reader asked nothing, delegated or not."""
@@ -369,9 +385,13 @@ class ReplayPolicy:
     | request | in the recording (`from-recording`) | not in it (`replay-miss`) |
     | --- | --- | --- |
     | llm; read before the replay diverged | the recorded response | live |
-    | read, after the replay diverged | not looked up | live, with the overlay |
+    | read, after the replay diverged | never taken | live, with the overlay |
     | write, unknown | the recorded ANSWER, at its recorded level | faked; the replay diverges |
     | telemetry, delegated | not looked up, no flag | as in shadow mode |
+
+    A write is looked up with its standing in the run's idempotency store
+    (`ShadowPolicy.idempotency_flag`), and one L3 checked is taken only while the replay has not
+    diverged, as a read is (`Recording.take`).
 
     AN ANSWER FROM THE RECORDING IS WHAT IT WAS. It keeps the recorded `answered_by` and the
     recorded read's overlay fidelity: a write is the same fake irimi built in the recorded run,
@@ -385,10 +405,11 @@ class ReplayPolicy:
     ONCE A WRITE HAS MISSED, THE REPLAY HAS DIVERGED (`Recording.diverge`), AND READS GO LIVE. A
     recorded read after that point shows the recorded write and not the new one, so from then on
     every read is answered as shadow mode answers it: live, with the overlay applying every write
-    in the write log, recorded and new alike. An llm call that misses changes nothing about the
-    world irimi shows, so it does not end serving reads. The engine translates a read before it
-    asks (#43), as it translated the one it recorded, and a recorded read is not overlaid again: a
-    matched write's effect is already in those bytes.
+    in the write log, recorded and new alike. A write L3 checked is checked again, for the same
+    reason. An llm call that misses changes nothing about the world irimi shows, so it does not end
+    serving reads. The engine translates a read before it asks (#43), as it translated the one it
+    recorded, and a recorded read is not overlaid again: a matched write's effect is already in
+    those bytes.
 
     Everything it cannot answer goes to the `ShadowPolicy` it holds, whose reader is the recording
     (`RecordingReader`): a replay never checks a precondition against live state.
@@ -432,9 +453,12 @@ class ReplayPolicy:
     ) -> Answer | None:
         """The recorded answer to this request, or None when the recording has none to give."""
         kind = classification.kind
-        if kind == "read" and self.recording.diverged:
-            return None
-        recorded = self.recording.take(request, kind)
+        held = (
+            ""
+            if kind in LIVE_KINDS
+            else self.shadow.idempotency_flag(request, classification, run_id)
+        )
+        recorded = self.recording.take(request, kind, held)
         if recorded is None or recorded.response is None:
             return None
         answered_by: AnsweredBy = (

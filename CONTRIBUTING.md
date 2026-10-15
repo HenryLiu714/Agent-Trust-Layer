@@ -116,7 +116,8 @@ src/irimi/
   delegation.py                       answer targets
   echo/                               the L0 echo and L1 fixture body; Slack's envelopes
   reader.py                           the one real read L3 issues
-  policy.py  overlay.py  store.py     the decision, and the two seams later phases fill
+  recording.py                        a stored run as a replay answers from it
+  policy.py  overlay.py  store.py     the decision (shadow and replay), and the two seams beside it
   engine/                             the Engine protocol; mitm.py is the only mitmproxy importer
   report.py  runner.py                what a run prints; the child env and engine thread
   compare.py                          two stored runs' writes side by side

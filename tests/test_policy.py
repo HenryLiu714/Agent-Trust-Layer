@@ -1472,7 +1472,7 @@ def test_a_passed_check_carries_the_charges_currency_onto_the_answer():
 
 
 def test_a_rejected_check_carries_it_too():
-    """`report._write_line` renders the map's `human:` sentence before it branches on the
+    """`report.write_sentence` renders the map's `human:` sentence before it branches on the
     rejection, so the `✗` line prints an amount as well and needs the same currency (#60)."""
     ans = _checked(_reader(_json(200, _charge(refunded_so_far=4900))), _refund_request())
     assert ans.precondition == "rejected"

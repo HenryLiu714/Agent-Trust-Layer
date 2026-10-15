@@ -4,9 +4,10 @@
    every live answer the agent saw came from a fake service, so that is where a write would land.
 2. No request that reached a fake service carried `Irimi-Run`.
 3. No write tool's real function ran under shadow.
-4. No canary credential reached disk where irimi writes: its home, its working directory, TMPDIR.
-   The trace store is under its home (#70), so this is the redaction test across the corpus, of
-   what the agent sends (`CANARIES`) and of what a live read hands back (`SERVED_CANARIES`).
+4. No canary credential reached disk where irimi writes: its home, its working directory, TMPDIR,
+   and a store it was given outside its home (#79). The trace store is under its home (#70), so
+   this is the redaction test across the corpus, of what the agent sends (`CANARIES`) and of what
+   a live read hands back (`SERVED_CANARIES`).
 5. The agent exited under shadow as it did bare, unless the scenario is marked `diverges`.
 
 A new workflow is picked up by name (`harness.run.workflows`), so it is held to these without an
@@ -17,7 +18,10 @@ to the same five there, and to what serve mode owes each run whose end it took: 
 `--- run <id> ---` block, equal to that run's stored summary.
 """
 
+import ast
+import dataclasses
 import re
+from pathlib import Path
 
 import pytest
 
@@ -34,6 +38,7 @@ from examples.workflows.w10_flaky_upstream.scenarios import CONTROL_DOWN
 from irimi import report, trace
 from irimi.store import StoredRun
 
+TESTS = Path(__file__).parent
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
 SERVE_CASES = serve_cases()
 # The scenarios whose runs hold events recorded after their end (#77). Serve prints a run's block
@@ -126,6 +131,26 @@ def test_every_workflow_has_scenarios_and_a_summary():
         assert all(s.doc for s in wf.scenarios.values()), f"{name}: every scenario needs a doc"
 
 
+def test_a_scenario_whose_doc_says_looks_wrong_has_a_looks_wrong_pin():
+    """A fix that flips a `LOOKS WRONG` pin drops the marker in the same PR (#89), the scenario's
+    doc included: W9 `cut_refund`'s still said compare called its cut refund the same, pinned
+    `LOOKS WRONG`, after #79 made that pair `?` and no pin said so. Each scenario whose doc says
+    `LOOKS WRONG` is named in a test of its workflow whose docstring says it too."""
+    stale = []
+    for name, wf in workflows().items():
+        module = ast.parse((TESTS / f"test_{name}.py").read_text())
+        pins = [
+            doc
+            for node in ast.walk(module)
+            if isinstance(node, ast.FunctionDef)
+            and "LOOKS WRONG" in (doc := ast.get_docstring(node) or "")
+        ]
+        for scenario, s in wf.scenarios.items():
+            if "LOOKS WRONG" in s.doc and not any(f"`{scenario}`" in doc for doc in pins):
+                stale.append(f"{name}:{scenario}")
+    assert stale == []
+
+
 def test_every_scenario_runs_under_serve_too():
     """Serve is how irimi runs beside an agent it did not launch, so every scenario is held to the
     checks above under it as well (#77). A scenario whose `serve_flags` became None would drop out
@@ -190,3 +215,17 @@ def test_the_corpus_gives_every_invariant_something_to_catch(run_workflow, mode)
     assert served_canary, "invariant 4: no live read handed back a canary credential"
     assert seen_escape, "invariant 1: no `leaks` scenario's escape reached a fake service"
     assert stored_placeholder, "invariant 4: no shadow run stored a credential it had redacted"
+
+
+def test_invariant_4_reads_a_store_a_run_was_given_outside_its_home(shared_store_run, tmp_path):
+    """A run recorded into a store runs share keeps it outside its own home (#79): a canary on
+    disk there is still on disk where irimi writes."""
+    shadow = shared_store_run("w01_ticket_triage", "full_refund")
+    assert not shadow.store_root().is_relative_to(shadow.home)
+    assert check_invariants(shadow) == []
+    name, value = next(iter(CANARIES.items()))
+    (tmp_path / "events.jsonl").write_text(value)
+    leaked = check_invariants(dataclasses.replace(shadow, store=tmp_path))
+    assert leaked == [
+        f"4. a canary reached disk where irimi writes: ['{name} in {tmp_path / 'events.jsonl'}']"
+    ]

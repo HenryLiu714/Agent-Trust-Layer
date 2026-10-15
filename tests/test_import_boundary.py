@@ -26,6 +26,7 @@ LAYERS: list[set[str]] = [
     {"control"},
     {"engine"},
     {"report", "runner"},
+    {"compare"},
     {"cli"},
 ]
 LAYER_OF = {name: depth for depth, layer in enumerate(LAYERS) for name in layer}

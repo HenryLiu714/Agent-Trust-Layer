@@ -117,6 +117,19 @@ WORKFLOW = Workflow(
             doc="bodies that decode past irimi's cap (#94): a refund, a model call forwarded live, "
             "a read-back after a refund, and run starts posted to the control endpoint",
         ),
+        "cut_refund": Scenario(
+            ("cut_refund",),
+            setup=_stripe,
+            doc="bombs's two refunds alone, the cut one for another amount: irimi stores no body "
+            "for it, so both print alike, and `irimi compare` will not call the two the same, a "
+            "`?` row (#79)",
+        ),
+        "cut_update": Scenario(
+            ("cut_update",),
+            setup=_stripe,
+            doc="cut_refund with the cut write a customer update: `irimi compare` will not compare "
+            "it with the cut refund, a `?` row (#79)",
+        ),
         "unmapped_hosts": Scenario(
             ("unmapped_hosts",), setup=_internal, doc="GraphQL and Slack's unrouted method"
         ),

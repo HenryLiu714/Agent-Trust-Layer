@@ -33,7 +33,7 @@ make fmt          # uv run ruff format . && uv run ruff check --fix .
 make typecheck    # uv run mypy
 ```
 
-The suite runs in about three minutes and needs no network and no keys: the engine tests start a
+The suite runs in about four minutes and needs no network and no keys: the engine tests start a
 real mitmproxy on a random loopback port against local HTTP servers. `tests/conftest.py` points
 `IRIMI_HOME` and the working directory at empty temporary directories, so your own overrides file
 and CA are never in play.
@@ -119,6 +119,7 @@ src/irimi/
   policy.py  overlay.py  store.py     the decision, and the two seams later phases fill
   engine/                             the Engine protocol; mitm.py is the only mitmproxy importer
   report.py  runner.py                what a run prints; the child env and engine thread
+  compare.py                          two stored runs' writes side by side
   cli.py                              argparse and the composition root
   maps/*.yaml                         the shipped service maps
   fixtures/*.json                     the vendored response objects L1 answers start from

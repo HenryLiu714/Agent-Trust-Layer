@@ -839,13 +839,41 @@ def cmd_runs_show(args: argparse.Namespace) -> int:
     except (TraceFormatError, OSError) as exc:
         print(f"error: run {args.run_id} could not be read: {exc}", file=sys.stderr)
         return 1
-    for line in report.run_show_lines(run, _maps_for_show()):
+    for line in report.run_show_lines(run, _maps_for_stored_runs()):
         print(line)
     return 0
 
 
-def _maps_for_show() -> "MapIndex | None":
-    """The maps `runs show` renders write lines with, loaded as `serve` and `shadow` load them.
+def cmd_compare(args: argparse.Namespace) -> int:
+    """`irimi compare RUN_A RUN_B`: two stored runs' writes side by side, and no verdict (#79).
+    Exits as diff(1) does: 0 when every write is the same, 1 when any is not, 2 when a run cannot
+    be read."""
+    from irimi import compare
+    from irimi.store import RunNotFound, StoreReader
+    from irimi.trace import TraceFormatError
+
+    root = _store_root(args)
+    reader = StoreReader(root)
+    runs = []
+    for run_id in (args.run_a, args.run_b):
+        try:
+            runs.append(reader.load_run(run_id))
+        except RunNotFound:
+            print(f"error: no run {run_id} in {root}", file=sys.stderr)
+            return compare.TROUBLE
+        except (TraceFormatError, OSError) as exc:
+            print(f"error: run {run_id} could not be read: {exc}", file=sys.stderr)
+            return compare.TROUBLE
+    a, b = runs
+    comparison = compare.compare_runs(a, b, _maps_for_stored_runs())
+    for line in [*compare.header_lines(a.record, b.record), "", *comparison.lines()]:
+        print(line)
+    return comparison.exit_code
+
+
+def _maps_for_stored_runs() -> "MapIndex | None":
+    """The maps `runs show` and `compare` render a stored run's write lines with, loaded as
+    `serve` and `shadow` load them (#72, #79).
 
     Only the `human:` templates are read from them, so maps that do not load cost the reader
     those sentences and nothing else: the writes print as the requests they were (#72). Unlike
@@ -972,6 +1000,19 @@ def build_parser() -> argparse.ArgumentParser:
     runs_show.add_argument("run_id", metavar="RUN_ID", help="the run's exact id, or unattributed")
     _add_store_arg(runs_show)
     runs_show.set_defaults(func=cmd_runs_show)
+
+    compare_runs = subparsers.add_parser(
+        "compare",
+        help="print two stored runs' writes side by side: a comparison, not a verdict",
+    )
+    compare_runs.add_argument(
+        "run_a", metavar="RUN_A", help="the first run's exact id, or unattributed"
+    )
+    compare_runs.add_argument(
+        "run_b", metavar="RUN_B", help="the second run's exact id, or unattributed"
+    )
+    _add_store_arg(compare_runs)
+    compare_runs.set_defaults(func=cmd_compare)
     return parser
 
 

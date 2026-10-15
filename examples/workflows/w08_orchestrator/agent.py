@@ -12,10 +12,13 @@ it. The internal service is the point: irimi has no map for it unless the scenar
 
 With `--record`, the sub-agent reads its reorder policy and the orchestrator records its decision
 in the planning file, each an `@sdk.tool` (#76): a tool called inside a nested trigger is a call of
-the run that trigger joined, the parent's.
+the run that trigger joined, the parent's. With `--nested-reserve`, a third sub-agent,
+`reservation_agent()`, makes the reservation: a write made inside a nested trigger, which is the
+parent run's own write, as `irimi compare` shows it (#79).
 
     python -m examples.workflows.launch \\
-        examples.workflows.w08_orchestrator.agent [--runs N] [--parent-header]
+        examples.workflows.w08_orchestrator.agent [--runs N] [--parent-header] [--record]
+        [--nested-reserve]
 """
 
 from __future__ import annotations
@@ -33,6 +36,8 @@ BUDGET_MINOR = 10_000
 PLAN_FILE = "decisions.jsonl"
 # Set by `--record`: the sub-agent and the orchestrator call their tools (#76).
 RECORD = False
+# Set by `--nested-reserve`: the reservation is made by `reservation_agent`, a nested trigger (#79).
+NESTED_RESERVE = False
 
 
 @sdk.tool(kind="read")
@@ -88,6 +93,22 @@ def finance_agent() -> int:
     return sum(c.get("amount", 0) - c.get("amount_refunded", 0) for c in doc.get("data", []))
 
 
+def reserve(items: list[dict[str, Any]], total: int, parent_header: bool) -> agentkit.Response:
+    """Hold the priced stock: the one write the orchestrator makes."""
+    return http(
+        "POST",
+        agentkit.internal(SUBAGENT_HOST) + "/reservations",
+        json_body={"skus": [i["sku"] for i in items], "total": total},
+        headers=_headers(parent_header),
+        label="reserve",
+    )
+
+
+# `reserve` as a sub-agent of its own: a nested trigger joins the run it is called in (#74), so its
+# write is its parent's, and starts no run that `irimi compare` could name (#79).
+reservation_agent = sdk.trigger(name="reservation_agent")(reserve)
+
+
 @sdk.trigger(name="plan_quarter_close")
 def plan_quarter_close(parent_header: bool = False) -> dict[str, Any]:
     stock = inventory_agent(parent_header)
@@ -100,12 +121,8 @@ def plan_quarter_close(parent_header: bool = False) -> dict[str, Any]:
     elif total > revenue + BUDGET_MINOR:
         decision = {"reserved": False, "reason": "over_budget", "total": total}
     else:
-        resp = http(
-            "POST",
-            agentkit.internal(SUBAGENT_HOST) + "/reservations",
-            json_body={"skus": [i["sku"] for i in stock["items"]], "total": total},
-            headers=_headers(parent_header),
-            label="reserve",
+        resp = (reservation_agent if NESTED_RESERVE else reserve)(
+            stock["items"], total, parent_header
         )
         doc = resp.json() or {}
         decision = {
@@ -126,9 +143,11 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--runs", type=int, default=1)
     parser.add_argument("--parent-header", action="store_true")
     parser.add_argument("--record", action="store_true")
+    parser.add_argument("--nested-reserve", action="store_true")
     args = parser.parse_args(argv)
-    global RECORD
+    global RECORD, NESTED_RESERVE
     RECORD = args.record
+    NESTED_RESERVE = args.nested_reserve
     decisions = [plan_quarter_close(args.parent_header) for _ in range(args.runs)]
     agentkit.obs("result", runs=args.runs, reserved=sum(d["reserved"] for d in decisions))
     return 0

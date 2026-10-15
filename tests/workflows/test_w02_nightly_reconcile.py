@@ -7,7 +7,8 @@ tool) changes it.
 
 import pytest
 
-from examples.workflows.w02_nightly_reconcile.agent import LEDGER
+from examples.workflows.harness.run import check_invariants, compare
+from examples.workflows.w02_nightly_reconcile.agent import LEDGER, customer_id
 from irimi.exchange import Exchange
 
 W = "w02_nightly_reconcile"
@@ -152,3 +153,37 @@ def test_paging_from_a_minted_refund_is_translated_and_finds_the_real_one(run_wo
     assert summary[i + 1] == "    ↳ GET /v1/refunds saw it  overlay"
     # The translated page is `live` with no line of its own.
     assert "live      read      GET api.stripe.com/v1/refunds -> 200" in shadow.exchange_lines()
+
+
+def test_irimi_compare_shows_a_clean_night_and_forty_mismatches_eighty_writes_apart(
+    shared_store_run,
+):
+    """#79 at volume: forty customer updates and forty write tools only B made, each in the order
+    B made it, and the one Slack post both made, changed by its count."""
+    clean = shared_store_run(W, "clean")
+    forty = shared_store_run(W, "forty_mismatches")
+    assert check_invariants(forty) == []
+    code, out, err = compare(clean, forty)
+    a, b = (result.one("run.start")["run"] for result in (clean, forty))
+    reconciled = "○ tool examples.workflows.w02_nightly_reconcile.agent.mark_reconciled"
+    added = [
+        line
+        for i in reversed(range(40))
+        for line in (
+            f"  + ○ update customer {customer_id(i)}  unvalidated (L1)",
+            f"  + {reconciled}  shadow stand-in ran",
+        )
+    ]
+    post = 'post to #C0RECON: "reconciled {} for 2026-09-27"  unvalidated (L3 preconditions passed)'
+    assert (code, err) == (1, [])
+    assert out == [
+        f"irimi compare · {a} vs {b} · a comparison, not a verdict: nothing was replayed",
+        "  A  nightly-reconcile  -  agent -",
+        "  B  nightly-reconcile  -  agent -",
+        "",
+        *added,
+        f"  ~ A ○ {post.format(0)}",
+        f"    B ○ {post.format(40)}",
+        "",
+        "  0 same · 1 changed · 0 only in A · 80 only in B",
+    ]

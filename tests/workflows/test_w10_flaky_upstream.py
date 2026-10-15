@@ -12,6 +12,7 @@ import hashlib
 import pytest
 
 from examples.workflows.harness.internet import bomb
+from examples.workflows.harness.run import check_invariants, compare, rows_not_shown
 from examples.workflows.w10_flaky_upstream.scenarios import BOMBED, CONTROL_DOWN
 from irimi.engine.mitm import MAX_DECODED_BODY
 from irimi.exchange import BODY_TRUNCATED_FLAG, UPSTREAM_ERROR_FLAG, Exchange
@@ -434,3 +435,81 @@ def test_a_bomb_costs_irimi_its_cap_in_memory_not_what_it_decodes_to(traced_run,
     assert result.exit_code == 0
     assert "[body-truncated]" in result.exchange_lines()[0]
     assert peak < 2 * MAX_DECODED_BODY + MEMORY_MARGIN
+
+
+# ---------------------------------------------------------------------- irimi compare (#79)
+
+NOT_A_VERDICT = "a comparison, not a verdict: nothing was replayed"
+SYNC = "sync_payouts  examples.workflows.w10_flaky_upstream.agent:sync_payouts  agent -"
+REFUND = REFUND_LINE.removeprefix("  ")
+POSTED = '○ post to #C0PAYOUT: "refunded 500 on ch_PAYOUT1"  unvalidated (L3 preconditions passed)'
+NO_ACTION = '○ post to #C0PAYOUT: "payout sync: no action"  unvalidated (L3 preconditions passed)'
+WROTE_BOTH = [f"  = {REFUND}", f"  = {POSTED}"]
+# Each scenario's run against `rate_limited`'s, both recorded into one store: the exit code,
+# whether the triggers' args differ, and the rows. `rate_limited` retried its read and then
+# refunded and posted, as every run here would have with nothing failing.
+AGAINST_A_RETRIED_READ = {
+    # A read that failed and was retried, however it failed, is no write: nothing to show.
+    "server_error_read": (0, False, WROTE_BOTH),
+    "reset_on_read": (0, False, WROTE_BOTH),
+    # A write that failed bare never fails under shadow, and one without a key is still one
+    # write: nothing to show either (`retry_without_key`'s trigger was told to send no key).
+    "reset_on_write": (0, False, WROTE_BOTH),
+    "retry_without_key": (0, True, WROTE_BOTH),
+    # irimi's own L3 read failed, so it could not check the refund, nor price it: the refund
+    # changed by its fidelity, not by anything the agent did differently (#79's README: a
+    # difference can come from the world between two runs).
+    "precondition_read_fails": (
+        1,
+        False,
+        [f"  ~ A {REFUND}", "    B ○ refund 500 on ch_PAYOUT1  unvalidated (L2)", f"  = {POSTED}"],
+    ),
+    # The model answered prose, and the agent posted that it did nothing: the refund is gone, and
+    # the post is the same post, changed.
+    "malformed_llm": (1, False, [f"  - {REFUND}", f"  ~ A {POSTED}", f"    B {NO_ACTION}"]),
+    # The read was a bomb the agent could not parse (#94): no charge to refund.
+    "gzip_bomb_read": (1, False, [f"  - {REFUND}", f"  ~ A {POSTED}", f"    B {NO_ACTION}"]),
+    # The agent raised, was interrupted or was killed after its refund: the post it never made.
+    "raise_after_write": (1, True, [f"  = {REFUND}", f"  - {POSTED}"]),
+    "sigint_mid_run": (1, True, [f"  = {REFUND}", f"  - {POSTED}"]),
+    # Killed, its run never ended: an incomplete run compares as what it stored.
+    "sigterm_mid_run": (1, True, [f"  = {REFUND}", f"  - {POSTED}"]),
+    # The SDK could not reach irimi, so the run is the `header` run its requests made, with no
+    # trigger and so no args: the same writes.
+    "control_unset": (0, True, WROTE_BOTH),
+}
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("scenario", AGAINST_A_RETRIED_READ)
+def test_irimi_compare_shows_what_each_failure_changed_about_the_runs_writes(
+    shared_store_run, scenario, mode
+):
+    """W10's failures against a run whose only trouble was a retried read (#79), recorded into
+    one store, `rate_limited` under shadow and each other under shadow or serve: a failed read or
+    a failed write is nothing compare can show, and a crash, a kill, a model that answered prose
+    and irimi's own failed check are each the rows below. Every row is a line its own run's
+    summary printed."""
+    code, args_differ, rows = AGAINST_A_RETRIED_READ[scenario]
+    retried = shared_store_run(W, "rate_limited")
+    other = shared_store_run(W, scenario, mode)
+    assert check_invariants(other) == []
+    out = compare(retried, other)
+    a, b = (result.one("run.start")["run"] for result in (retried, other))
+    header_b = "-  -  agent -" if scenario in CONTROL_DOWN else SYNC
+    totals = [sum(row.startswith(p) for row in rows) for p in ("  = ", "  ~ ", "  - ", "  + ")]
+    assert out == (
+        code,
+        [
+            f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+            f"  A  {SYNC}",
+            f"  B  {header_b}",
+            *(["  (the triggers' args differ)"] if args_differ else []),
+            "",
+            *rows,
+            "",
+            "  {} same · {} changed · {} only in A · {} only in B".format(*totals),
+        ],
+        [],
+    )
+    assert rows_not_shown(other, a, b, out[1]) == []

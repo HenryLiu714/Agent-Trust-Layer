@@ -46,6 +46,16 @@ routes:
       id: rsv_
 """
 
+# A loopback answer target nothing listens on: the discard port, which no test machine serves.
+DOWN_TARGET = "http://127.0.0.1:9"
+# The same map with the reservation delegated to `DOWN_TARGET`: irimi cannot reach it, answers the
+# agent 502 itself and says the write went unanswered (#16), a write `irimi compare` compares as
+# its summary prints it (#79).
+TARGET_DOWN_MAP = SUBAGENT_MAP.replace(
+    "    operation: reservations.create\n",
+    f"    operation: reservations.create\n    target: {DOWN_TARGET}\n",
+)
+
 # The same map without `persists: false`. The loader refuses a live kind on POST unless the route
 # says it persists nothing, so irimi does not start and the agent never runs: fail closed.
 UNJUSTIFIED_MAP = SUBAGENT_MAP.replace("    persists: false\n", "")
@@ -125,6 +135,20 @@ WORKFLOW = Workflow(
             extra_maps={"subagent.yaml": SUBAGENT_MAP},
             doc="nested_runs with tools: the sub-agent's read tool and the orchestrator's write "
             "tool each land in their own parent's run (#76)",
+        ),
+        "target_down": Scenario(
+            (),
+            setup=_world,
+            extra_maps={"subagent.yaml": TARGET_DOWN_MAP},
+            doc="with_map with the reservation delegated to an answer target nothing listens on: "
+            "irimi answers 502 and the write goes unanswered (#16, #79)",
+        ),
+        "nested_write": Scenario(
+            ("--runs", "2", "--nested-reserve"),
+            setup=_world,
+            extra_maps={"subagent.yaml": SUBAGENT_MAP},
+            doc="nested_runs with the reservation made by a nested trigger: its write is its "
+            "parent run's, as `irimi compare` shows it (#79)",
         ),
     },
 )

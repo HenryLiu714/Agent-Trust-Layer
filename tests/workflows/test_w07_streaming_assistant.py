@@ -12,6 +12,7 @@ from itertools import accumulate
 import pytest
 
 from examples.workflows.harness.internet import BOMB_LINE
+from examples.workflows.harness.run import check_invariants, compare, rows_not_shown
 from examples.workflows.w07_streaming_assistant.agent import HUNG_UP
 from examples.workflows.w07_streaming_assistant.scenarios import (
     ANSWER,
@@ -593,3 +594,61 @@ def test_a_stream_its_trigger_hands_off_is_stored_in_its_run_after_the_run_ended
     code, out, err = shadow.runs("show", run.run_id)
     assert (code, err) == (0, [])
     assert out[-1] == "  1 exchange · 1 live · 0 delegated · 0 virtualized"
+
+
+# ---------------------------------------------------------------------- irimi compare (#79)
+
+NOT_A_VERDICT = "a comparison, not a verdict: nothing was replayed"
+CHAT = "chat  examples.workflows.w07_streaming_assistant.agent:chat  agent -"
+# The trigger's args hold the handler's `send` callable, stored as its repr, address and all
+# (#74), so no two chats' args are ever the same.
+ARGS_DIFFER = "  (the triggers' args differ)"
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_irimi_compare_of_two_chats_streamed_at_once_shows_no_write(run_workflow, mode):
+    """Two chats at once, each its own run with three model calls, two of them streamed (#71,
+    #75): a model call is not a write, however it arrives, so compare prints the totals alone
+    and exits 0 (#79)."""
+    shadow = run_workflow(W, "two_callers", mode)
+    a, b = (e["run"] for e in shadow.events("run.start"))
+    assert shadow.compare_runs(a, b) == (
+        0,
+        [
+            f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+            f"  A  {CHAT}",
+            f"  B  {CHAT}",
+            ARGS_DIFFER,
+            "",
+            "  0 same · 0 changed · 0 only in A · 0 only in B",
+        ],
+        [],
+    )
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_irimi_compare_shows_the_post_a_streamed_tool_call_made_and_nothing_else(
+    shared_store_run, mode
+):
+    """`normal` and `tool_call_across_deltas` stream the same three model calls, and in the second
+    the OpenAI stream's tool call, sent in pieces, becomes a Slack post (#71). Recorded into one
+    store, B under shadow or serve: the post is the one row, a write only B made, and the streams
+    and `normal`'s LangSmith trace are none (#79)."""
+    normal = shared_store_run(W, "normal")
+    posted = shared_store_run(W, "tool_call_across_deltas", mode)
+    assert check_invariants(posted) == []
+    code, out, err = compare(normal, posted)
+    a, b = (result.one("run.start")["run"] for result in (normal, posted))
+    assert (code, err) == (1, [])
+    assert out == [
+        f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+        f"  A  {CHAT}",
+        f"  B  {CHAT}",
+        ARGS_DIFFER,
+        "",
+        f'  + ○ post to #{CHANNEL}: "Summary: refunds go back to the card within 5-10 days."  '
+        "unvalidated (L3 preconditions passed)",
+        "",
+        "  0 same · 0 changed · 0 only in A · 1 only in B",
+    ]
+    assert rows_not_shown(posted, a, b, out) == []

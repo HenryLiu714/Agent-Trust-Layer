@@ -23,7 +23,8 @@ path-traversal guard, and it is checked again here rather than trusted (#68). A 
 collide: `Run1` and `run1` are both valid, and on a case-insensitive filesystem (macOS APFS by
 default) they are one directory. The first to reach the store keeps it; an event for the other is
 stored in `unattributed/` like an invalid id, and an exchange among them is flagged
-`exchange.BAD_RUN_ID_FLAG`. Two runs are never merged into one directory.
+`exchange.BAD_RUN_ID_FLAG`. So is an event of a replay's that names the run it replays (#82). Two
+runs are never merged into one directory.
 
 WHAT IS STORED IS STILL PRIVATE. Redaction hides credentials, not the business data around them -
 customers, amounts, messages - so every directory the store creates is 0700 and every file 0600, as
@@ -315,7 +316,8 @@ class DirectoryStore:
         writer takes its next item, so a slow one holds the queue back.
 
         `replay_of` is the stored run the engine writing here answers from, if it is a replay: each
-        run this store starts or makes from a header is that replay's (#82)."""
+        run this store starts or makes from a header is that replay's, and the run it replays is
+        never written to (#82)."""
         _mkdirs(root)
         if not root.is_dir() or not os.access(root, os.W_OK | os.X_OK):
             raise PermissionError(f"the trace store {root} is not a writable directory")
@@ -633,7 +635,11 @@ class DirectoryStore:
         known = self._runs.get(run_id)
         if known is not None:
             return known
-        if self._clashes(run_id):
+        # A REPLAY NEVER WRITES INTO THE RUN IT REPLAYS (#82). An agent that names its runs itself
+        # - an `Irimi-Run` label, a run id its SDK reuses - names the recorded run again, and its
+        # directory is another run's, as a clash's is: appending merged two runs in one directory
+        # and rewrote the recording every later replay of it reads.
+        if self._clashes(run_id) or run_id == self._replay_of:
             run = self._unattributed()
         else:
             directory = self.layout.run_dir(run_id)

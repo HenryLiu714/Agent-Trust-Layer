@@ -779,6 +779,7 @@ class IrimiAddon:
                     flags + (TARGET_FAILED_FLAG,),
                 )
         built: http.Response | None = None
+        refused: Exception | None = None
         if response is not None:
             # Guarded, because the answer may not be irimi's own: a replay answers with a response
             # read off disk (#82), whose headers mitmproxy may refuse to encode. A raise here would
@@ -786,17 +787,23 @@ class IrimiAddon:
             try:
                 built = _to_mitm_response(response)
             except Exception as exc:
-                self._answer_failed_decision(flow, req, door, run_id, started_at, exc)
-                return
-        flow.metadata[META_KEY] = _Pending(req, cls, run_id, door, ans, flags, started_at, target)
-        if built is not None:
-            flow.response = built
+                refused = exc
+        if refused is not None:
+            self._answer_failed_decision(flow, req, door, run_id, started_at, refused)
+        else:
+            flow.metadata[META_KEY] = _Pending(
+                req, cls, run_id, door, ans, flags, started_at, target
+            )
+            if built is not None:
+                flow.response = built
         for ex in ans.issued:
             # Recorded on the loop, like every other exchange, so the store and the per-exchange
             # line stay single-threaded. They are reads irimi made on its own account; they never
             # reach the agent and they are never writes. Last, once the write's own answer is on
             # the flow: an `on_exchange` that raised any earlier would escape this hook with no
-            # response set, and mitmproxy would forward the write (#45).
+            # response set, and mitmproxy would forward the write (#45). Recorded too when that
+            # answer could not be sent: the read was made, and a trace without it hides a request
+            # irimi sent on the agent's behalf (#82; #86 is that gap for a decision that raised).
             self._finish(ex)
 
     def _decide(

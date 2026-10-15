@@ -581,6 +581,44 @@ def test_an_answer_the_engine_cannot_send_fails_closed_and_forwards_nothing(home
     assert _Stripe.seen == []
 
 
+def test_the_reads_an_answer_issued_are_recorded_when_it_cannot_be_sent(home, maps, stubs):
+    """The decision returned, so the precondition read it made is in hand: an answer the engine
+    then cannot send is refused, and that read is still recorded after the refusal, as every read
+    irimi made on the agent's behalf is (#45, #82; #86 is the decision that raises instead)."""
+    stripe, _ = stubs
+    url = f"http://127.0.0.1:{stripe}/v1/charges/ch_REAL1"
+    probe = Request("GET", "http", "127.0.0.1", stripe, "/v1/charges/ch_REAL1", "", (), b"")
+    read = pipeline.annotate(
+        probe,
+        Response(200, (), b"{}"),
+        pipeline.classify(probe, maps),
+        "live",
+        "rep",
+        issued_by="engine",
+    )
+
+    class _Unsendable:
+        name = "unsendable"
+
+        def answer(self, request, classification, write_log=(), run_id=""):
+            body = Response(200, (("x-note", "€"),), b"{}")
+            return Answer(
+                answered_by="fake-L0", response=body, flags=("fidelity:L0",), issued=(read,)
+            )
+
+    session = _Session(home, maps, _Unsendable(), "rep")
+    try:
+        status, _, _ = _refund(session, stripe, 100)
+    finally:
+        session.stop()
+    assert status == 502
+    refusal, issued = session.seen
+    assert DECISION_FAILED_FLAG in refusal.flags
+    assert (issued.issued_by, issued.request.url) == ("engine", url)
+    events = StoreReader(home / "store").load_run("rep").events
+    assert [e.issued_by for e in events] == ["agent", "engine"]
+
+
 def test_a_read_the_overlay_translates_is_recorded_translated_whoever_answers_it(home, maps, stubs):
     """A page whose cursor names the refund the run minted is translated before it is forwarded
     (#43), and recorded so. The engine translates a read before the policy decides (#82), so a
@@ -706,3 +744,39 @@ def test_a_read_recorded_after_a_write_the_replay_did_not_make_goes_live(home, m
     assert (read.answered_by, read.flags) == ("live", (REPLAY_MISS_FLAG,))
     assert json.loads(replies[0][2])["amount_refunded"] == 0
     assert _Stripe.seen == [("GET", "/v1/charges/ch_REAL1")]
+
+
+def test_an_unchanged_replay_compares_the_same_as_its_recording(home, maps, stubs):
+    """What `irimi compare` and #84's diff rest on: a replay that changes nothing prints every
+    write, and the `↳` line under it, as its recording printed them, so every compared row is `=`
+    (#79, #82). The run reads the charge, refunds it, reads it again through the overlay and pages
+    the refunds after the one it minted; the replay answers all of it from the recording."""
+    from irimi import compare, report
+
+    stripe, llm = stubs
+    url, body = _message(llm)
+
+    def script(session):
+        session.call("POST", url, body)
+        _charge(session, stripe)
+        _, _, data = _refund(session, stripe, 100)
+        _charge(session, stripe)
+        minted = json.loads(data)["id"]
+        session.call("GET", f"http://127.0.0.1:{stripe}/v1/refunds?starting_after={minted}")
+
+    events = _record(home, maps, script)
+    session = _replay(home, maps, events, script)
+    assert all(FROM_RECORDING_FLAG in ex.flags for ex in session.seen)
+    assert (_Stripe.seen, _Llm.seen) == ([], [])
+    reader = StoreReader(home / "store")
+    recorded, replayed = reader.load_run("rec"), reader.load_run("rep")
+    comparison = compare.compare_runs(recorded, replayed, maps)
+    assert [row.mark for row in comparison.rows] == ["same"]
+    assert comparison.exit_code == compare.SAME
+
+    def writes(run):
+        lines = report.stored_summary_lines(run, maps)
+        return [line for line in lines if line.lstrip()[:1] in ("○", "✗", "↳")]
+
+    assert writes(replayed) == writes(recorded)
+    assert any("↳" in line for line in writes(recorded))

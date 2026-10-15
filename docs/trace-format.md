@@ -30,8 +30,10 @@ the first column of each field table below is exactly the keys its encoder write
   `trace.is_valid_run_id` refuses - the store checks again rather than trust its caller - and an
   id that differs only in case from a run directory already there: `Run1` and `run1` are both
   valid, and on a case-insensitive filesystem (macOS APFS by default) they would be one directory.
-  The first to reach the store keeps it, so two runs are never merged into one directory. An event
-  whose run id is `unattributed` itself goes there unflagged.
+  The first to reach the store keeps it, so two runs are never merged into one directory. So is
+  the run a replay replays, to the replay's store: an agent that names its runs itself names it
+  again, and the recording is never written to (#82). An event whose run id is `unattributed`
+  itself goes there unflagged.
 - The first event of a run id that has no `run.json` creates one, with `attribution: "header"`,
   `started_at` that event's own, and every other optional field `null`. An event built with no
   clock (`started_at` `0.0`) leaves it `null` too. With no start, a header run sorted after every

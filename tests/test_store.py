@@ -178,6 +178,30 @@ def test_a_header_run_a_replay_makes_is_that_replay_s(root, key):
     assert record == store.header_record("r2", started_at=1.0, replay_of="rec1")
 
 
+def test_a_replay_never_writes_into_the_run_it_replays(root, key):
+    """An agent that names its runs itself - an `Irimi-Run` label, a run id its SDK reuses - names
+    the recorded run again when it is replayed. Appending to that run merged two runs in one
+    directory, and rewrote its run.json as a replay of itself: the recording changed under every
+    later replay of it. The replay's events go to `unattributed/`, flagged, as a run id that names
+    a directory another run holds does, and its start and end are dropped (#82)."""
+    s = DirectoryStore(root, key)
+    s.start_run(dataclasses.replace(_record("nightly"), attribution="sdk"))
+    s.record(_exchange("nightly", "/recorded"))
+    s.end_run("nightly", 20.0, "ok")
+    s.close()
+    recorded = {p.name: p.read_bytes() for p in (root / "runs" / "nightly").iterdir()}
+    s = DirectoryStore(root, key, replay_of="nightly")
+    s.start_run(dataclasses.replace(_record("nightly"), attribution="sdk"))
+    s.record(_exchange("nightly", "/replayed"))
+    s.end_run("nightly", 30.0, "ok")
+    s.close()
+    assert {p.name: p.read_bytes() for p in (root / "runs" / "nightly").iterdir()} == recorded
+    (stray,) = StoreReader(root).load_run(trace.UNATTRIBUTED).events
+    assert isinstance(stray, Exchange)
+    assert (stray.request.path, BAD_RUN_ID_FLAG in stray.flags) == ("/replayed", True)
+    assert s.stats().dropped == 2
+
+
 def test_a_header_run_started_by_an_event_with_no_clock_has_no_start(root, key):
     s = DirectoryStore(root, key)
     s.record(dataclasses.replace(_exchange("r2"), started_at=0.0, ended_at=0.0))

@@ -204,6 +204,61 @@ def test_a_replay_of_a_run_the_store_does_not_hold_starts_nothing(tmp_path, monk
     assert not (tmp_path / "store").exists()
 
 
+@pytest.mark.parametrize("damage", ["events", "run.json", "newer", "blob"])
+def test_a_replay_of_a_damaged_run_starts_nothing(tmp_path, monkeypatch, capsys, damage):
+    """A recording `StoreReader` cannot read - a line that does not parse, a run.json that does
+    not, a newer schema version, a missing blob - refuses the replay as `runs show` refuses the
+    run, with no traceback, no command and no run of its own in the store (#82)."""
+    import json
+    from dataclasses import replace
+
+    from irimi import redact
+    from irimi.exchange import Exchange, Request, Response
+    from irimi.store import DirectoryStore
+
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    ca.generate_ca(ca.ca_paths())
+    store = tmp_path / "store"
+    recorded = DirectoryStore(store, redact.load_key(tmp_path))
+    recorded.record(
+        Exchange(
+            request=Request("GET", "https", "api.stripe.com", 443, "/v1/charges/ch_1", "", (), b""),
+            response=Response(200, (), b"{}"),
+            service="stripe",
+            operation="charges.retrieve",
+            kind="read",
+            answered_by="live",
+            validation="unvalidated",
+            run_id="rec1",
+        )
+    )
+    recorded.close()
+    run = store / "runs" / "rec1"
+    if damage == "events":
+        (run / "events.jsonl").write_text("{\n" + (run / "events.jsonl").read_text())
+    elif damage == "run.json":
+        (run / "run.json").write_text("{")
+    elif damage == "newer":
+        record = json.loads((run / "run.json").read_text())
+        (run / "run.json").write_text(json.dumps(record | {"schema_version": 3}))
+    else:
+        for blob in (store / "blobs").iterdir():
+            blob.unlink()
+    real = cli._engine_config
+    monkeypatch.setattr(
+        cli, "_engine_config", lambda *a, **kw: replace(real(*a, **kw), replay_of="rec1")
+    )
+    marker = tmp_path / "ran"
+    command = [sys.executable, "-c", f"open({str(marker)!r}, 'w')"]
+    assert main(["shadow", "--port", "0", "--", *command]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: run rec1 could not be read: ")
+    assert err.count("\n") == 1
+    assert not marker.exists()
+    assert [p.name for p in (store / "runs").iterdir()] == ["rec1"]
+
+
 def test_serve_mode_refuses_to_replay(tmp_path, monkeypatch, capsys):
     """A replay is one run against one engine, whose write log and recording are the engine's;
     serve mode is many runs at once. Refused before the store is opened (#82)."""

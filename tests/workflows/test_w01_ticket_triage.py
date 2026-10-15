@@ -3,6 +3,7 @@
 The labels are the calls in `examples/workflows/w01_ticket_triage/agent.py`; `#N` is the turn.
 """
 
+import json
 import re
 import shutil
 
@@ -427,3 +428,150 @@ def test_a_retried_refund_replays_as_the_two_refunds_it_recorded(replayed):
     ]
     assert replay.internet.requests() == []
     assert replay.result(with_time=False) == recorded.result(with_time=False)
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_verified_refund_reads_the_charge_again_and_the_overlay_shows_the_refund(
+    run_workflow, mode
+):
+    """`verify` refunds, then reads the charge again before it replies. Bare, the second read
+    shows the real refund; under irimi, the overlay's edit of the live read shows the faked one."""
+    bare = run_workflow(W, "verified_refund", "bare")
+    shadow = run_workflow(W, "verified_refund", mode)
+    assert shadow.result(with_time=False) == bare.result(with_time=False)
+    assert shadow.answered() == [
+        ("llm#1", 200, None),
+        ("get_charge#1", 200, None),
+        ("llm#2", 200, None),
+        (REFUND, 200, "fake-L1"),
+        ("llm#3", 200, None),
+        ("get_charge#3", 200, "overlay"),
+        ("llm#4", 200, None),
+        ("llm#5", 200, None),
+    ]
+    [again] = [ex for ex in shadow.reported if ex.answered_by == "overlay"]
+    assert json.loads(again.response.body)["amount_refunded"] == 4900
+
+
+def _metadata(result) -> set[str]:
+    return {
+        json.loads(ex.request.body)["metadata"]["user_id"]
+        for ex in result.reported
+        if ex.kind == "llm"
+    }
+
+
+def test_a_verified_refund_replayed_unchanged_serves_the_overlaid_read_as_recorded(replayed):
+    """Every model call says who asked in its `metadata`, new in each process, and is answered from
+    the recording all the same: `metadata` says who asked, not what. The read the overlay edited is
+    served as it was recorded, `overlay` and `from-recording`, refund and all, and nothing reaches
+    the fake internet."""
+    recorded, replay = replayed(W, "verified_refund")
+    assert len(_metadata(recorded)) == len(_metadata(replay)) == 1
+    assert _metadata(recorded) != _metadata(replay)
+    assert replay.answered() == [
+        ("llm#1", 200, "recording"),
+        ("get_charge#1", 200, "recording"),
+        ("llm#2", 200, "recording"),
+        (REFUND, 200, "fake-L1"),
+        ("llm#3", 200, "recording"),
+        ("get_charge#3", 200, "overlay"),
+        ("llm#4", 200, "recording"),
+        ("llm#5", 200, "recording"),
+    ]
+    [again] = [ex for ex in replay.reported if ex.answered_by == "overlay"]
+    [recorded_again] = [ex for ex in recorded.reported if ex.answered_by == "overlay"]
+    assert again.flags == ("fidelity:overlay", "from-recording")
+    assert again.response.body == recorded_again.response.body
+    assert replay.internet.requests() == []
+
+
+def test_a_replay_that_makes_no_refund_reads_live_where_its_recording_shows_one(replayed):
+    """Decision 20 end to end. `verify_only` refunds nothing and reads the charge twice. The first
+    read is the recording's: nothing was written before it. The second meets the recorded read the
+    overlay edited to show the refund this replay never made, so it misses, the replay diverges,
+    and the read goes live: the agent sees nothing refunded, and says so in its reply. Its model
+    calls miss too (the prompt changed), and the refund is in the recording alone."""
+    recorded, replay = replayed(W, "verified_refund", {"PROMPT": "verify_only"})
+    assert replay.answered() == [
+        ("llm#1", 200, None),
+        ("get_charge#1", 200, "recording"),
+        ("llm#2", 200, None),
+        ("get_charge#2", 200, None),
+        ("llm#3", 200, None),
+        ("llm#4", 200, None),
+    ]
+    first, second = [ex for ex in replay.reported if ex.request.path == "/v1/charges/ch_TICKET1"]
+    assert first.flags == ("fidelity:recording", "from-recording")
+    assert (second.answered_by, second.flags) == ("live", ("replay-miss",))
+    assert json.loads(second.response.body)["amount_refunded"] == 0
+    assert [(r.method, r.path) for r in replay.internet.requests("api.stripe.com")] == [
+        ("GET", "/v1/charges/ch_TICKET1")
+    ]
+    assert replay.internet.writes() == []
+    run_id = replay.one("run.start")["run"]
+    [reply] = [
+        e
+        for e in replay.stored().load_run(run_id).events
+        if isinstance(e, ToolCall) and e.name.endswith(".send_reply")
+    ]
+    assert reply.args["body"] == "No refund issued; 0 already refunded."
+    code, out, err = replay.compare_runs(recorded.one("run.start")["run"], run_id)
+    assert (code, out[4:], err) == (
+        1,
+        [f"  - {FULL}", f"  = {REPLY}", "", "  1 same · 0 changed · 1 only in A · 0 only in B"],
+        [],
+    )
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_checked_charge_reads_the_charge_twice_and_writes_nothing(run_workflow, mode):
+    """`verify_only` refunds nothing: two live reads of the charge, and a reply saying so."""
+    bare = run_workflow(W, "checked_charge", "bare")
+    shadow = run_workflow(W, "checked_charge", mode)
+    assert shadow.result(with_time=False) == bare.result(with_time=False)
+    assert shadow.answered() == [
+        ("llm#1", 200, None),
+        ("get_charge#1", 200, None),
+        ("llm#2", 200, None),
+        ("get_charge#2", 200, None),
+        ("llm#3", 200, None),
+        ("llm#4", 200, None),
+    ]
+    assert bare.internet.writes() == shadow.internet.writes() == []
+
+
+def test_a_replay_that_adds_a_refund_reads_live_after_it_and_sees_it(replayed):
+    """The other direction of a changed agent: `checked_charge` recorded no write, and its replay
+    with `PROMPT=verify` refunds. The refund misses and is faked; the recording made no read of the
+    charge to check it against, and a replay never checks against live state, so it is
+    `not_evaluable`, L2. The replay diverges: its second read, which the recording holds, shows a
+    world without the refund, so it goes live, and the overlay shows the refund in it."""
+    recorded, replay = replayed(W, "checked_charge", {"PROMPT": "verify"})
+    assert replay.answered() == [
+        ("llm#1", 200, None),
+        ("get_charge#1", 200, "recording"),
+        ("llm#2", 200, None),
+        (REFUND, 200, "fake-L1"),
+        ("llm#3", 200, None),
+        ("get_charge#3", 200, "overlay"),
+        ("llm#4", 200, None),
+        ("llm#5", 200, None),
+    ]
+    [refund] = [ex for ex in replay.reported if ex.kind == "write"]
+    assert (refund.precondition, refund.flags) == ("not_evaluable", ("fidelity:L1", "replay-miss"))
+    [check] = [ex for ex in replay.reported if ex.issued_by == "engine"]
+    assert (check.answered_by, check.response, check.flags) == (
+        "recording",
+        None,
+        ("fidelity:recording", "replay-miss"),
+    )
+    # No read named a currency, so the amount is printed as sent (#60).
+    assert "  ○ refund 4900 on ch_TICKET1  unvalidated (L2)" in replay.summaries()
+    again = [ex for ex in replay.reported if ex.request.path == "/v1/charges/ch_TICKET1"][-1]
+    assert again.flags == ("replay-miss", "fidelity:overlay")
+    assert json.loads(again.response.body)["amount_refunded"] == 4900
+    assert [(r.method, r.path) for r in replay.internet.requests("api.stripe.com")] == [
+        ("GET", "/v1/charges/ch_TICKET1")
+    ]
+    assert replay.internet.writes() == []

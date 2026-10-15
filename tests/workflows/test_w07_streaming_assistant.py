@@ -694,3 +694,94 @@ def test_a_secret_stored_redacted_replays_as_its_placeholder(replayed):
     assert replay.result()["caller_text"] == LONG_ANSWER.replace(SECRET, hidden)
     assert replay.exchange_lines() == RECORDED_LINES
     assert replay.internet.requests() == []
+
+
+# What the replay's Anthropic stream is flagged when its recording was cut: each is a miss, sent to
+# the fake again, whose fault cuts it again. LOOKS WRONG: one that fails upstream again loses its
+# `replay-miss`, because `IrimiAddon.error` builds a live exchange's flags afresh.
+CUT_STREAMS = {
+    "caller_disconnects": (UPSTREAM_ERROR_FLAG, STREAM_TRUNCATED_FLAG),
+    "upstream_reset": (UPSTREAM_ERROR_FLAG, STREAM_TRUNCATED_FLAG),
+    "reset_before_stream": (UPSTREAM_ERROR_FLAG,),
+    "gzip_bomb_stream": ("replay-miss", STREAM_TRUNCATED_FLAG),
+}
+
+
+@pytest.mark.parametrize("scenario", CUT_STREAMS)
+def test_a_stream_recorded_cut_is_never_served_and_goes_to_the_model_again(replayed, scenario):
+    """A recorded stream that is not the whole stream - a caller that hung up, an upstream reset,
+    a stream cut at irimi's cap - is not an answer a replay hands back (#71): it is a miss, and the
+    stream goes to the fake Anthropic again, while the embedding before it is the recording's."""
+    recorded, replay = replayed(W, scenario)
+    [cut] = [ex for ex in recorded.reported if ex.request.path == "/v1/messages"]
+    assert {STREAM_TRUNCATED_FLAG, UPSTREAM_ERROR_FLAG} & set(cut.flags)
+    [stream] = [ex for ex in replay.reported if ex.request.path == "/v1/messages"]
+    assert (stream.answered_by, stream.flags) == ("live", CUT_STREAMS[scenario])
+    assert [ex.answered_by for ex in replay.reported if ex.request.path == "/v1/embeddings"] == [
+        "recording"
+    ]
+    assert [(r.method, r.host, r.path) for r in replay.internet.requests()] == [
+        ("POST", "api.anthropic.com", "/v1/messages")
+    ]
+    assert replay.exit_code == recorded.exit_code
+
+
+def test_replaying_one_of_two_lockstep_chats_leaves_the_other_waiting(run_workflow, replayed):
+    """`two_callers` streams two chats in lockstep, each chunk held for the other's. Replaying
+    either chat answers its whole stream from the recording; the other chat misses everything,
+    and its live stream waits for a partner that never comes, until the fake gives up. So a replay
+    of one run exits 4 where its recording exited 0, and no write is forwarded either way."""
+    recorded = run_workflow(W, "two_callers", "shadow")
+    for source in recorded.sdk_runs():
+        _, replay = replayed(W, "two_callers", run_id=source.run_id)
+        assert (recorded.exit_code, replay.exit_code) == (0, 4)
+        answered = [ex for ex in replay.reported if "from-recording" in ex.flags]
+        assert sorted(ex.request.path for ex in answered) == [
+            "/v1/chat/completions",
+            "/v1/embeddings",
+            "/v1/messages",
+        ]
+        assert {ex.run_id for ex in answered} != {source.run_id}
+        [left] = [
+            ex
+            for ex in replay.reported
+            if ex.request.path == "/v1/messages" and (ex.answered_by == "live")
+        ]
+        # LOOKS WRONG: no `replay-miss`, as above.
+        assert (left.response, left.flags) == (None, (UPSTREAM_ERROR_FLAG,))
+        assert [r.path for r in replay.internet.requests()] == ["/v1/embeddings", "/v1/messages"]
+        assert replay.internet.writes() == []
+
+
+ENCODED = ("encoding", "bytes", "sha256")
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_gzip_encoded_stream_reaches_the_agent_as_sent_and_is_stored_decoded(run_workflow, mode):
+    """Anthropic's stream comes gzip-encoded and whole. The agent gets the bytes the fake sent and
+    decodes them itself, bare and under irimi alike; irimi stores the stream decoded, whole, with
+    the `content-encoding` it came under (#71)."""
+    bare = run_workflow(W, "gzip_stream", "bare")
+    shadow = run_workflow(W, "gzip_stream", mode)
+    assert shadow.result(with_time=False) == bare.result(with_time=False)
+    [sent] = bare.events("stream_encoded")
+    [got] = shadow.events("stream_encoded")
+    assert {k: got[k] for k in ENCODED} == {k: sent[k] for k in ENCODED}
+    assert sent["encoding"] == "gzip"
+    [stream] = [ex for ex in shadow.reported if ex.request.path == "/v1/messages"]
+    assert stream.response.header("content-encoding") == "gzip"
+    assert stream.response.body.startswith(b"event: message_start")
+    assert stream.flags == ()
+
+
+def test_a_gzip_encoded_stream_replays_decoded_without_its_encoding(replayed):
+    """The recording holds the stream decoded under its recorded `content-encoding: gzip`. A
+    replay serves the decoded bytes and drops the header, so the agent reads plain text, decodes
+    nothing (no `stream_encoded`), and answers its caller as it did; sent under the recorded
+    header, the agent would have gunzipped plain text and failed."""
+    recorded, replay = replayed(W, "gzip_stream")
+    assert recorded.events("stream_encoded") and replay.events("stream_encoded") == []
+    assert replay.events("stream_error") == []
+    assert replay.result(with_time=False) == recorded.result(with_time=False)
+    assert [c["answered_by"] for c in replay.calls("anthropic_stream")] == ["recording"]
+    assert replay.internet.requests() == []

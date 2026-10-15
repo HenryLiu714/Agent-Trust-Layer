@@ -530,3 +530,62 @@ def test_a_refund_whose_precondition_read_failed_replays_as_unvalidated(replayed
     assert [ex for ex in replay.reported if ex.issued_by == "engine"] == []
     assert replay.internet.requests() == []
     assert "  ○ refund 500 on ch_PAYOUT1  unvalidated (L2)" in replay.summaries()
+
+
+@pytest.mark.parametrize(
+    ("scenario", "status"), [("rate_limited", 429), ("server_error_read", 500)]
+)
+def test_a_read_the_service_refused_replays_its_refusal_and_the_retry(replayed, scenario, status):
+    """The service's 429 or 500 is an answer like any other: the recording hands it back, and the
+    agent's retry gets the recorded 200, so it retries just as it did, and nothing reaches the fake
+    Stripe, whose fault is armed again for the replay."""
+    recorded, replay = replayed(W, scenario)
+    assert [(c["status"], c["answered_by"]) for c in replay.calls("list_charges")] == [
+        (status, "recording"),
+        (200, "recording"),
+    ]
+    assert replay.events("retry", with_time=False) == recorded.events("retry", with_time=False)
+    assert replay.result(with_time=False) == recorded.result(with_time=False)
+    assert replay.internet.requests() == []
+
+
+@pytest.mark.parametrize("scenario", ["reset_on_read", "read_timeout"])
+def test_a_read_whose_recording_lost_its_upstream_fails_again_live(replayed, scenario):
+    """The recorded read got no answer (`upstream-error`), which a replay cannot serve: it misses,
+    goes to the fake Stripe, whose fault fails it again, and the agent's retry takes the recorded
+    200 in its place.
+
+    LOOKS WRONG: that miss is recorded without `replay-miss`. `IrimiAddon.error` builds a live
+    exchange's flags afresh, dropping the answer's own (#82, `test_replays.py`)."""
+    recorded, replay = replayed(W, scenario)
+    [lost] = [ex for ex in recorded.reported if UPSTREAM_ERROR_FLAG in ex.flags]
+    first, retry = [ex for ex in replay.reported if ex.request.path == "/v1/charges"]
+    assert (first.answered_by, first.response, first.flags) == ("live", None, lost.flags)
+    assert lost.flags == (UPSTREAM_ERROR_FLAG,)
+    assert (retry.answered_by, retry.flags) == (
+        "recording",
+        ("fidelity:recording", "from-recording"),
+    )
+    assert [(r.method, r.path) for r in replay.internet.requests()] == [("GET", "/v1/charges")]
+    assert replay.result(with_time=False) == recorded.result(with_time=False)
+
+
+@pytest.mark.parametrize("scenario", ["raise_after_write", "sigterm_mid_run", "sigint_mid_run"])
+def test_a_run_that_died_after_its_write_replays_to_the_same_end(replayed, scenario):
+    """The refund is answered from the recording, minted id and all, so the agent dies just as it
+    did - raising with the recorded refund's id, killed, or interrupted - and its replayed run is
+    stored ending as the recorded one did, or not at all."""
+    recorded, replay = replayed(W, scenario)
+    assert replay.exit_code == recorded.exit_code != 0
+    [refund] = [ex for ex in replay.reported if ex.request.path == "/v1/refunds"]
+    [recorded_refund] = [ex for ex in recorded.reported if ex.request.path == "/v1/refunds"]
+    assert refund.flags == ("fidelity:L1", "from-recording")
+    assert refund.response.body == recorded_refund.response.body
+    (source,) = recorded.sdk_runs()
+    (mine,) = [
+        r
+        for r in replay.stored().list_runs()
+        if r.replay_of == source.run_id and (r.attribution == "sdk")
+    ]
+    assert (mine.outcome, mine.error) == (source.outcome, source.error)
+    assert replay.internet.requests() == []

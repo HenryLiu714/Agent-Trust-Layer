@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import threading
 from typing import Any
@@ -29,6 +30,8 @@ _RULES = " ".join(f"Rule {i}: a refund goes back to the card it came from." for 
 LONG_ANSWER = f"{_RULES[:8000]} The test key is {SECRET}. {_RULES[8000:]}"
 # How many characters of text each `text_delta` of that answer carries.
 LONG_DELTA = 256
+# How many bytes of a gzip stream `GzipLLM` writes at a time: several writes for one short stream.
+GZIP_CHUNK = 64
 # How many bytes of a gzip stream `BombingLLM` writes at a time.
 BOMB_CHUNK = 64 * 1024
 
@@ -208,6 +211,22 @@ class BombingLLM(ScriptedLLM):
         return resp
 
 
+class GzipLLM(ScriptedLLM):
+    """Streams Anthropic's answer gzip-encoded, whole, as a service does that compresses what it
+    sends: irimi records the stream decoded and keeps its `content-encoding` header (#71), so a
+    replay that served those bytes under that header would hand the agent plain text it was told
+    to gunzip (#82). Written `GZIP_CHUNK` bytes at a time."""
+
+    def _anthropic(self, body: dict[str, Any]) -> Resp:
+        resp = super()._anthropic(body)
+        if resp.chunks is None:
+            return resp
+        sent = gzip.compress(b"".join(resp.chunks), mtime=0)
+        resp.chunks = [sent[i : i + GZIP_CHUNK] for i in range(0, len(sent), GZIP_CHUNK)]
+        resp.headers["content-encoding"] = "gzip"
+        return resp
+
+
 class HeldStreamLLM(ScriptedLLM):
     """Holds the last chunk of Anthropic's stream until the agent lists the models, which `hand_off`
     does only once its trigger has returned and its run has ended. So the stream is still open
@@ -257,6 +276,10 @@ def _mid_line(world: World) -> None:
 
 def _lockstep(world: World) -> None:
     world.llm = LockstepLLM(pair_script)
+
+
+def _gzipped(world: World) -> None:
+    world.llm = GzipLLM(chat_script)
 
 
 def _bombing(world: World) -> None:
@@ -324,6 +347,12 @@ WORKFLOW = Workflow(
             setup=_bombing,
             doc="Anthropic's stream comes gzip-encoded, a GiB of padding before its end: the agent "
             "decodes its start and gives up, irimi records the start of it (#94)",
+        ),
+        "gzip_stream": Scenario(
+            (QUESTION, "read_all"),
+            setup=_gzipped,
+            doc="Anthropic's stream comes gzip-encoded and whole: the agent decodes it, irimi "
+            "records it decoded (#71), and a replay serves it decoded, without the encoding (#82)",
         ),
         "two_callers": Scenario(
             (QUESTION, "two_callers"),

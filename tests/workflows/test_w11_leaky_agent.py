@@ -251,3 +251,26 @@ def test_irimi_compare_shows_the_sidecar_write_a_write_tool_closed(shared_store_
         "",
         "  0 same · 0 changed · 0 only in A · 1 only in B",
     ]
+
+
+# ------------------------------------------------------------------------------- replay (#82)
+
+
+@pytest.mark.parametrize(
+    "scenario", ["proxyless_client", "no_proxy_star", "raw_socket", "loopback_service"]
+)
+def test_an_escape_escapes_its_replay_too(replayed, scenario):
+    """An escaped write never passed irimi, so its recording holds nothing of it, and a replay has
+    nothing to answer it from: it lands on the fake service again, exactly as it landed when it was
+    recorded. A replay is no more a backstop than shadow mode is (Phase 4)."""
+    recorded, replay = replayed(W, scenario)
+    escaped = [(r.method, r.host, r.path) for r in recorded.internet.writes()]
+    assert escaped
+    assert [(r.method, r.host, r.path) for r in replay.internet.writes()] == escaped
+    seen = {(ex.request.method, ex.request.host, ex.request.path) for ex in replay.reported}
+    assert not seen & set(escaped)
+    assert not {
+        (ex.request.method, ex.request.host, ex.request.path)
+        for ex in recorded.stored_events()
+        if isinstance(ex, Exchange)
+    } & set(escaped)

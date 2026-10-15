@@ -339,3 +339,44 @@ def test_a_reservation_whose_answer_target_is_down_is_answered_502_and_compared_
         "  0 same · 1 changed · 0 only in A · 0 only in B",
     ]
     assert rows_not_shown(unreached, a, b, out) == []
+
+
+# ------------------------------------------------------------------------------- replay (#82)
+
+
+@pytest.mark.parametrize("scenario", ["nested_runs", "nested_write"])
+def test_replaying_the_second_of_two_identical_runs_answers_the_first(
+    run_workflow, replayed, scenario
+):
+    """LOOKS WRONG: the two orchestrator runs make the same requests, and a replay answers every
+    run of the process from the one run's recording. Replaying the second, the first run takes
+    every recorded answer, the nested trigger's read and the reservation included, and the second
+    run, the one replayed, misses each and forwards its reads live. No write is forwarded, and
+    `irimi compare` cannot tell: the reservation is the same write either way."""
+    recorded = run_workflow(W, scenario, "shadow")
+    _, second = sorted(recorded.sdk_runs(), key=lambda r: r.started_at or 0.0)
+    _, replay = replayed(W, scenario, run_id=second.run_id)
+    starts = [e["run"] for e in replay.events("run.start") if e["name"] == "plan_quarter_close"]
+    assert len(starts) == 2
+    marks = {
+        run: {("from-recording" in ex.flags, "replay-miss" in ex.flags) for ex in exchanges}
+        for run in starts
+        if (exchanges := [ex for ex in replay.reported if ex.run_id == run])
+    }
+    assert marks == {starts[0]: {(True, False)}, starts[1]: {(False, True)}}
+    assert [answered for _, _, answered in replay.answered()] == [
+        "recording",
+        "recording",
+        "recording",
+        "fake-L0",
+        None,
+        None,
+        None,
+        "fake-L0",
+    ]
+    assert [(r.method, r.host) for r in replay.internet.requests()] == [
+        ("GET", HOST),
+        ("POST", HOST),
+        ("GET", "api.stripe.com"),
+    ]
+    assert replay.internet.writes() == []

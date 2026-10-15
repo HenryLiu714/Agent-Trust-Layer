@@ -45,7 +45,8 @@ def triage_script(call: LlmCall) -> LlmTurn:
                 ("lookup_customer", {"customer": ticket["customer"]}),
             ),
         )
-    charge = charges[-1]
+    # The first read decides the refund; a second, which `verify` asks for, only confirms it.
+    charge = charges[0]
     left = charge["amount"] - charge["amount_refunded"]
     if "half" in call.system:
         amount = left // 2
@@ -53,15 +54,19 @@ def triage_script(call: LlmCall) -> LlmTurn:
         amount = charge["amount"] * 2
     else:
         amount = left
-    wanted = 2 if "refund again" in call.system else 1
+    wanted = 0 if "Do not refund" in call.system else 2 if "refund again" in call.system else 1
     refunds = [r for r in results if r["tool"] == "issue_refund"]
     if len(refunds) < wanted:
         refund = ("issue_refund", {"charge": charge["id"], "amount": amount})
         # "send the refund twice": the same call twice in one turn, as a model repeats itself.
         return LlmTurn(tool_calls=(refund, refund) if "twice" in call.system else (refund,))
+    if "check the charge again" in call.system and len(charges) < 2:
+        return LlmTurn(tool_calls=(("get_charge", {"charge": charge["id"]}),))
     if not any(r["tool"] == "send_reply" for r in results):
         statuses = ", ".join(str(r["status"]) for r in refunds)
         body = f"Refund of {amount} requested (statuses: {statuses})."
+        if not wanted:
+            body = f"No refund issued; {charges[-1]['amount_refunded']} already refunded."
         return LlmTurn(tool_calls=(("send_reply", {"body": body}),))
     return LlmTurn(text="Ticket resolved.")
 
@@ -89,5 +94,16 @@ WORKFLOW = Workflow(
             "retry", "the model sends one refund twice in a turn, same key: one write (#46)"
         ),
         "runaway_loop": _scenario("runaway", "the model never stops; the agent gives up at turn 6"),
+        "verified_refund": _scenario(
+            "verify",
+            "refund the whole charge, then read the charge again, which the overlay answers with "
+            "the refund in it (#43); replayed with `PROMPT=verify_only`, which refunds nothing, "
+            "that recorded read shows a refund the replay never made (#82)",
+        ),
+        "checked_charge": _scenario(
+            "verify_only",
+            "refund nothing and read the charge twice; replayed with `PROMPT=verify`, which "
+            "refunds, the second read is the recording's no longer: it goes live, overlaid (#82)",
+        ),
     },
 )

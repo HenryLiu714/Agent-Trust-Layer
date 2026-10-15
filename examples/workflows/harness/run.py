@@ -444,6 +444,52 @@ def replayed_run_id(recorded: Result) -> str:
     return runs[0] if runs else process
 
 
+def replay_targets(recorded: Result) -> list[str]:
+    """Every run a replay of `recorded` can answer from (#82), in the order they started: each run
+    its irimi stored besides the process run - an SDK run, a run W9 posted by hand, a `header` run -
+    exchanges or none, or the process run alone when there is none (W9's scripts). A process that
+    held several runs (W3, W5's cascade, W8) is replayed once per run, each answering that run
+    alone, as the issue's "Replay which run?" says. Read before anything replays into its store."""
+    process = recorded.process_run_id()
+    runs = [r for r in recorded.stored().list_runs() if r.run_id != process]
+    runs.sort(key=lambda r: (r.started_at is None, r.started_at or 0.0, r.run_id))
+    return [r.run_id for r in runs] or [process]
+
+
+def counterpart(recorded: Result, replayed: Result, run_id: str) -> str | None:
+    """The run of `replayed` that stands for `recorded`'s run `run_id` (#82): the process run for
+    the process run, and otherwise, among the runs the replay started (those its store holds and
+    `recorded`'s does not), the one with the same attribution and trigger, or failing that the one
+    that started in the same place among the runs sharing its attribution and trigger name - the
+    trigger's args may name an id a miss minted afresh. None when the replay started no such run,
+    as when its agent names its runs itself and named the recorded ones again (W9's control
+    scenarios)."""
+    if run_id == recorded.process_run_id():
+        return replayed.process_run_id()
+    before = {r.run_id: r for r in recorded.stored().list_runs()}
+    after = [r for r in replayed.stored().list_runs() if r.run_id not in before]
+    after = [r for r in after if r.attribution != "process"]
+    wanted = before[run_id]
+    same = [r for r in after if (r.attribution, r.trigger) == (wanted.attribution, wanted.trigger)]
+    if len(same) == 1 and sum(r.trigger == wanted.trigger for r in before.values()) == 1:
+        return same[0].run_id
+
+    def named(record: RunRecord) -> tuple[str, str | None, str | None]:
+        trigger = record.trigger
+        return (
+            record.attribution,
+            *(trigger and (trigger.name, trigger.entrypoint) or (None, None)),
+        )
+
+    def by_start(records: list[RunRecord]) -> list[str]:
+        records = sorted(records, key=lambda r: (r.started_at or 0.0, r.run_id))
+        return [r.run_id for r in records if named(r) == named(wanted)]
+
+    mine, theirs = by_start(list(before.values())), by_start(after)
+    place = mine.index(run_id)
+    return theirs[place] if place < len(theirs) else None
+
+
 def _execute(
     workflow: Workflow,
     scenario_name: str,

@@ -26,7 +26,7 @@ from examples.workflows.w09_scope_gauntlet.scenarios import BIG_DESCRIPTION_BYTE
 from irimi import control, paths, report, trace
 from irimi.bodies import MAX_BODY_BYTES
 from irimi.exchange import BODY_TRUNCATED_FLAG, Exchange
-from irimi.store import MAX_STORED_BODY, SERVE_LOCK_FILE
+from irimi.store import MAX_STORED_BODY, RUNS_DIR, SERVE_LOCK_FILE
 from irimi.trace import MAX_ERROR_MESSAGE, ErrorInfo, RunRecord, ToolCall, Trigger
 
 W = "w09_scope_gauntlet"
@@ -751,6 +751,82 @@ def test_a_replay_answers_the_get_that_writes_from_its_recording_so_it_writes_no
         "recording read      GET legacy.internal/api/delete_user -> 200"
         "  [fidelity:recording, from-recording]" in replay.exchange_lines()
     )
+
+
+@pytest.mark.parametrize("scenario", ["cut_refund", "cut_update"])
+def test_a_replay_refuses_a_cut_write_again_and_then_diverges(replayed, scenario):
+    """A write whose body decoded past irimi's cap was refused, never decided (#94), and a replay
+    refuses it again the same way: the engine answers it 502 before any policy is asked, so it
+    carries neither replay flag, and nothing reaches the fake Stripe. `irimi compare` of the
+    recording and its replay calls the pair `?` and exits 1.
+
+    LOOKS WRONG: the recording counts that refusal among its writes (`is_authored_write`), though
+    the engine never put it in the write log and the replay never consumes it, so the $9 refund
+    after it, which L3 checked, is a miss: the replay diverges, and checks it again, against the
+    recording's own read of the charge. An unchanged replay of a whole recording should not."""
+    recorded, replay = replayed(W, scenario)
+    cut, check, refund = replay.reported
+    assert (cut.kind, cut.response.status, cut.flags) == (
+        "unknown",
+        502,
+        ("unclassified", "decision-failed", "body-truncated"),
+    )
+    assert replay.internet.requests() == []
+    assert (check.issued_by, check.answered_by, check.flags) == (
+        "engine",
+        "recording",
+        ("fidelity:recording", "from-recording"),
+    )
+    assert (refund.precondition, refund.flags) == ("passed", ("fidelity:L1", "replay-miss"))
+    code, out, err = replay.compare_runs(recorded.process_run_id(), replay.process_run_id())
+    assert (code, err) == (1, [])
+    assert out[-1] == (
+        "  1 same · 0 changed · 0 only in A · 0 only in B · 1 not compared (a body was cut when "
+        "stored)"
+    )
+
+
+def _files(root) -> dict[str, bytes]:
+    return {
+        str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()
+    }
+
+
+def test_a_replay_never_writes_into_the_run_it_replays(replayed):
+    """`control_runs` names its runs itself, so its replay posts `ctl-direct` again: its start,
+    its tool calls, its end, and a read labelled `Irimi-Run: ctl-direct`. A replay never writes
+    into the run it answers from (#82): that run's files are byte for byte what was recorded, and
+    what the replay said of it is filed in `unattributed`, its exchange flagged `bad-run-id` - and
+    still answered from the recording."""
+    recorded, replay = replayed(W, "control_runs", run_id="ctl-direct")
+    stored = _files(recorded.store_root() / RUNS_DIR / "ctl-direct")
+    assert stored and _files(replay.store_root() / RUNS_DIR / "ctl-direct") == stored
+    assert recorded.stored().load_run(trace.UNATTRIBUTED).events == []
+    filed = replay.stored().load_run(trace.UNATTRIBUTED).events
+    assert [(type(e).__name__, e.run_id) for e in filed] == [
+        ("ToolCall", "ctl-direct"),
+        ("Exchange", "ctl-direct"),
+        ("ToolCall", "ctl-direct"),
+    ]
+    [read] = [e for e in filed if isinstance(e, Exchange)]
+    assert (read.answered_by, read.request.path) == ("recording", f"/v1/charges/{CHARGE}")
+    assert read.flags == ("fidelity:recording", "from-recording", "bad-run-id")
+    assert replay.by_label()["direct_read"] == (200, "recording")
+
+
+def test_a_replay_rewrites_every_other_recorded_run_its_agent_names_again(replayed):
+    """LOOKS WRONG: only the run a replay answers from is kept from it. `control_runs` posts its
+    other three runs by name too, and the replay reopens each recorded one in the shared store -
+    as W9 `control_hazards` reopens a run it ended (#97) - appends its own events to the
+    recording's and rewrites its record as the replay's: `mode: replay`, `replay_of: ctl-direct`.
+    A later replay of `ctl-proxied` reads the two runs merged."""
+    recorded, replay = replayed(W, "control_runs", run_id="ctl-direct")
+    for run_id in ("ctl-proxied", "ctl-thread-1", "ctl-thread-2", "ctl-error"):
+        before, after = recorded.stored().load_run(run_id), replay.stored().load_run(run_id)
+        assert (before.record.mode, before.record.replay_of) == ("shadow", None)
+        assert (after.record.mode, after.record.replay_of) == ("replay", "ctl-direct")
+        assert after.events[: len(before.events)] == before.events
+        assert len(after.events) == 2 * len(before.events)
 
 
 # -- bodies that decode past irimi's cap (#94) ---------------------------------------------------

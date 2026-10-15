@@ -274,8 +274,10 @@ def anthropic(
     tools: list[dict[str, Any]] | None = None,
     max_tokens: int = 1024,
     label: str | None = None,
+    metadata: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """One Anthropic Messages call. An error status raises: an agent has no answer to go on."""
+    """One Anthropic Messages call. An error status raises: an agent has no answer to go on.
+    `metadata` is the call's own, which says who asked and never what (#82)."""
     body: dict[str, Any] = {
         "model": "claude-sonnet-5",
         "max_tokens": max_tokens,
@@ -284,6 +286,8 @@ def anthropic(
     }
     if tools:
         body["tools"] = tools
+    if metadata:
+        body["metadata"] = metadata
     headers = {"x-api-key": key("ANTHROPIC_API_KEY"), "anthropic-version": "2023-06-01"}
     url = base("anthropic") + "/v1/messages"
     resp = http("POST", url, json_body=body, headers=headers, label=label)

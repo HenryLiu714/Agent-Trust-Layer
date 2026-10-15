@@ -143,13 +143,14 @@ printed at the end, hold every event that ended by then and none after.
 5. The agent exited the same way under shadow as bare, unless the scenario is marked `diverges`.
 
 `tests/workflows/test_replays.py` replays every run of every scenario's shadow recording,
-unchanged (#82), and holds each replay to seven rules: invariants 1 to 4 and no write forwarded,
+unchanged (#82), and holds each replay to eight rules: invariants 1 to 4 and no write forwarded,
 matched or missed; the exit code its recording had; every exchange a policy decided flagged
 `from-recording` or `replay-miss`, never both; every answer irimi decided stamped as recorded;
 `irimi compare <recorded run> <its replay>` all `=`, or `?` for a cut write and exit 1; nothing on
 the fake internet but a read or llm call forwarded as a miss, telemetry, or an escape irimi never
-saw; and, for a scenario whose one run its recording holds whole, no request there and no miss at
-all. What a scenario cannot owe it names in a table with the reason: other runs of the process
+saw; for a scenario whose one run its recording holds whole, no request there and no miss at
+all; and the agent's calls, answered with the statuses they were answered with when recorded, so a
+replay whose agent never ran fails. What a scenario cannot owe it names in a table with the reason: other runs of the process
 (each replay answers one), recorded answers that are not whole (`stream-truncated`,
 `body-truncated`, `upstream-error`), telemetry, a port in a query (W11 `redirected`), an escape,
 W7 `two_callers`' lockstep (exit 4 replayed), a write refused for its cut body before any policy

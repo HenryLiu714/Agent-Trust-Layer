@@ -2097,6 +2097,8 @@ def test_a_refused_target_is_flagged_once_even_if_the_client_then_vanishes(tmp_p
     (ex,) = seen
     assert ex.answered_by == "delegated"
     assert ex.flags.count("target-failed") == 1
+    # And the answer's own flags are kept on the failure path, as `response` keeps them (#82).
+    assert ex.flags == ("fidelity:delegated", "target-failed")
 
 
 def test_an_untargeted_write_is_still_faked(tmp_path, monkeypatch, target):

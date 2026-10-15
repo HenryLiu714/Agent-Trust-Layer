@@ -141,6 +141,26 @@ def test_the_query_is_compared_as_its_pairs_in_any_order():
     assert recording.take(_req(path="/v1/charges", query="limit=4"), "read") is None
 
 
+def test_the_method_decides_a_match_between_two_requests_of_one_kind():
+    """A GET and a HEAD of one charge are both reads of it, with no body, but a HEAD's answer has
+    no body: the recorded GET's must never answer it (#82)."""
+    recording = _recording(_stored(_req()))
+    assert classify(_req("HEAD"), SHIPPED).kind == classify(_req(), SHIPPED).kind
+    assert recording.take(_req("HEAD"), classify(_req("HEAD"), SHIPPED).kind) is None
+    assert recording.take(_req(), "read") is not None
+
+
+def test_a_repeated_query_name_keeps_the_order_of_its_values():
+    """Names in any order, but the values of a repeated name in theirs: `sort=created&sort=amount`
+    asks for another order than `sort=amount&sort=created`, and is not answered with its list."""
+    recorded = _req(path="/v1/charges", query="sort=created&limit=3&sort=amount")
+    recording = _recording(_stored(recorded), _stored(recorded))
+    swapped = _req(path="/v1/charges", query="sort=amount&limit=3&sort=created")
+    assert recording.take(swapped, "read") is None
+    same = _req(path="/v1/charges", query="limit=3&sort=created&sort=amount")
+    assert recording.take(same, "read") is not None
+
+
 def test_a_volatile_field_never_decides_a_match_and_any_other_does():
     """`idempotency_key` is `volatile:` on the shipped refund route."""
     recording = _recording(_recorded_refund(), _recorded_refund())
@@ -446,6 +466,29 @@ def test_a_write_miss_ends_serving_reads_and_an_llm_miss_does_not():
     assert policy.recording.diverged
     answer = _answer(policy, _req())
     assert (answer.answered_by, answer.flags) == ("live", (REPLAY_MISS_FLAG,))
+
+
+def test_an_llm_call_is_still_answered_from_the_recording_once_the_replay_has_diverged():
+    """An llm call shows no world irimi made: what it asks is in its key, so a write that missed
+    changes it only by changing what the agent sends (#82)."""
+    recording = _recording(_recorded_refund(), _stored(_llm()))
+    policy = ReplayPolicy(recording, SHIPPED)
+    assert REPLAY_MISS_FLAG in _answer(policy, _refund(250)).flags
+    assert policy.recording.diverged
+    answer = _answer(policy, _llm())
+    assert (answer.answered_by, answer.flags[-1]) == ("recording", FROM_RECORDING_FLAG)
+
+
+def test_an_unknown_request_that_misses_is_faked_and_the_replay_diverges():
+    """An unknown request is answered as a write is: faked, never forwarded, and, missed, a
+    change to the world the recording's reads no longer show (#82)."""
+    unknown = _req("POST", path="/v1/not_a_route", body=b"a=1", ct=FORM)
+    assert classify(unknown, SHIPPED).kind == "unknown"
+    policy = ReplayPolicy(_recording(_stored(_req())), SHIPPED)
+    answer = _answer(policy, unknown)
+    assert (answer.answered_by, answer.flags[-1]) == ("fake-L0", REPLAY_MISS_FLAG)
+    assert policy.recording.diverged
+    assert _answer(policy, _req()).answered_by == "live"
 
 
 def test_a_matched_write_holds_its_idempotency_key_for_a_retry_that_misses():

@@ -19,7 +19,9 @@ A replay of a recording its agent makes again owes:
 6. nothing reaching the fake internet but what the replay could not answer from that run, each
    one a read or llm call it forwarded as a miss, telemetry, or an escape irimi never saw - and
    nothing at all for a scenario whose one run the recording holds whole;
-7. and for that scenario, no miss at all: an unchanged replay of a whole recording never diverges.
+7. and for that scenario, no miss at all: an unchanged replay of a whole recording never diverges;
+8. and the agent making the calls it made when it was recorded, each answered with the status it
+   was answered with then, in any order, so a replay that never ran its agent passes nothing.
 
 What a scenario cannot owe, it names in a table below with the reason, and each entry must still be
 needed, so a fix that makes one unnecessary fails here until the entry goes.
@@ -163,6 +165,12 @@ def flag_problems(replay: Result) -> list[str]:
     ]
 
 
+def calls(result: Result) -> Counter:
+    """The agent's calls, as `(label or URL, status)`, in any order: concurrent runs (W3) make
+    theirs in another order each time."""
+    return Counter((c.get("label") or c["url"], c.get("status")) for c in result.calls())
+
+
 def line(ex) -> str:
     return f"{ex.answered_by} {ex.request.method} {ex.request.host}{ex.request.path} {ex.flags}"
 
@@ -254,6 +262,10 @@ def test_every_run_of_every_scenario_replays_from_its_recording(
             # 7. And a recording its replay could answer whole is answered whole: nothing misses.
             missed = [line(ex) for ex in replay.reported if REPLAY_MISS_FLAG in ex.flags]
             assert missed == [], r.run_id
+        # 8. The agent made the calls it made when it was recorded, and was answered alike: the
+        # rules above hold of a replay whose agent never ran, too (#82).
+        if case not in EXIT_DIFFERS:
+            assert calls(replay) == calls(recorded), r.run_id
     # Each exception is still needed.
     if case in REACHES_THE_INTERNET:
         assert any(r.replay.internet.requests() for r in replays)

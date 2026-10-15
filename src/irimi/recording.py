@@ -193,9 +193,9 @@ def _match_key(request: Request, kind: Kind, maps: MapIndex) -> _Key:
     """The key of a request AS STORED: already redacted. The recorded side calls this on a stored
     request, and `_live_key` on a live one after redacting it, so both sides are keyed alike.
 
-    Every request is keyed by its kind, method, host, path, sorted query pairs and the headers
-    that scope its service's state (`services.scope_of`, which the write log, the idempotency
-    store and L3 compare too): a query can say what an llm call asks as much as a read's
+    Every request is keyed by its kind, method, host, path, query pairs sorted by name and the
+    headers that scope its service's state (`services.scope_of`, which the write log, the
+    idempotency store and L3 compare too): a query can say what an llm call asks as much as a read's
     (`?alt=sse`, `?api-version=`), and a `Stripe-Account` says whose objects a request names (#82).
     An llm call whose body is a JSON object (`_json_body`) adds that object less `LLM_VOLATILE` and
     every `cache_control`, as canonical JSON. Everything else adds its body as `bodies.reflect`
@@ -203,7 +203,10 @@ def _match_key(request: Request, kind: Kind, maps: MapIndex) -> _Key:
     `reflect` cannot read is keyed by its sha256. The kind leads, so a read never matches a
     write."""
     classification = pipeline.classify(request, maps)
-    query = tuple(sorted(parse_qsl(request.query, keep_blank_values=True)))
+    # Sorted by name only, and stably: names in any order, but a repeated name's values in theirs,
+    # since `sort=created&sort=amount` asks for another order than the reverse (#82).
+    pairs = parse_qsl(request.query, keep_blank_values=True)
+    query = tuple(sorted(pairs, key=lambda pair: pair[0]))
     scope = services.scope_of(classification.service, request)
     head = (kind, request.method, request.host, request.path, query, scope)
     if kind == "llm":

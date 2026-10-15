@@ -652,3 +652,45 @@ def test_irimi_compare_shows_the_post_a_streamed_tool_call_made_and_nothing_else
         "  0 same · 0 changed · 0 only in A · 1 only in B",
     ]
     assert rows_not_shown(posted, a, b, out) == []
+
+
+# ------------------------------------------------------------------------------- replay (#82)
+
+RECORDED_LINES = [
+    line.replace("live     ", "recording") + "  [fidelity:recording, from-recording]"
+    for line in LLM_LINES
+]
+
+
+def test_both_streams_replay_from_the_recording_and_the_agent_reassembles_them(replayed):
+    """A recorded stream is served as its joined chunks, in one piece, and the agent's 7-byte SSE
+    parser reassembles it as it did the live one. The trace post is telemetry, which a replay
+    forwards as shadow mode does."""
+    recorded, replay = replayed(W, "normal")
+    assert replay.result(with_time=False) == recorded.result(with_time=False)
+    assert replay.result()["caller_text"] == ANSWER
+    assert replay.exchange_lines() == [*RECORDED_LINES, TRACE_LINE]
+    assert [r.host for r in replay.internet.requests()] == ["api.smith.langchain.com"]
+
+
+def test_a_secret_a_stream_sent_in_pieces_replays_whole_and_matches_its_placeholder(replayed):
+    """The recorded Anthropic stream holds the secret in pieces, unredacted (#92), so the replay
+    hands the agent the secret whole, and the agent's OpenAI request carries it. Its recording
+    holds the placeholder, and the live request, redacted with the same key, matches it."""
+    recorded, replay = replayed(W, "secret_in_stream")
+    assert SECRET in replay.result()["caller_text"]
+    assert replay.result(with_time=False) == recorded.result(with_time=False)
+    assert replay.exchange_lines() == RECORDED_LINES
+    assert replay.internet.requests() == []
+
+
+def test_a_secret_stored_redacted_replays_as_its_placeholder(replayed):
+    """The recorded stream holds the secret as its placeholder (#71), so a replay answers the
+    agent with the placeholder, which the agent passes on to OpenAI, whose recording holds the
+    same placeholder: nothing diverges, and the agent never sees the secret."""
+    recorded, replay = replayed(W, "secret_split_across_writes")
+    hidden = redact.placeholder(redact.load_key(replay.home), SECRET)
+    assert recorded.result()["caller_text"] == LONG_ANSWER
+    assert replay.result()["caller_text"] == LONG_ANSWER.replace(SECRET, hidden)
+    assert replay.exchange_lines() == RECORDED_LINES
+    assert replay.internet.requests() == []

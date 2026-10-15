@@ -513,3 +513,20 @@ def test_irimi_compare_shows_what_each_failure_changed_about_the_runs_writes(
         [],
     )
     assert rows_not_shown(other, a, b, out[1]) == []
+
+
+def test_a_refund_whose_precondition_read_failed_replays_as_unvalidated(replayed):
+    """irimi's own read of the charge got a 500 in the recorded run, so the refund was faked at
+    L2. The replayed refund is the same write, answered with its recorded answer and its recorded
+    `not_evaluable`, and is checked against nothing: no precondition read, recorded or live, and
+    no request reaches the fake Stripe. The recording serving a failed read to a write that
+    missed is `tests/test_replay_engine.py`'s."""
+    recorded, replay = replayed(W, "precondition_read_fails")
+    [refund] = [ex for ex in replay.reported if ex.request.path == "/v1/refunds"]
+    assert (refund.precondition, refund.flags) == (
+        "not_evaluable",
+        ("fidelity:L1", "from-recording"),
+    )
+    assert [ex for ex in replay.reported if ex.issued_by == "engine"] == []
+    assert replay.internet.requests() == []
+    assert "  ○ refund 500 on ch_PAYOUT1  unvalidated (L2)" in replay.summaries()

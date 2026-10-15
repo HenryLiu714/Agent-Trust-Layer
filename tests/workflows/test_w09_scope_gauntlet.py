@@ -741,6 +741,18 @@ def test_a_get_that_writes_escapes_and_the_scenario_says_so(run_workflow, mode):
     )
 
 
+def test_a_replay_answers_the_get_that_writes_from_its_recording_so_it_writes_nothing(replayed):
+    """The GET that deletes escaped when it was recorded, as every GET does (a read is live). A
+    replay answers it from the recording, so the delete does not happen a second time (#82)."""
+    recorded, replay = replayed(W, "get_that_writes")
+    assert [(r.method, r.path) for r in recorded.internet.writes()] == [("GET", "/api/delete_user")]
+    assert replay.internet.writes() == []
+    assert (
+        "recording read      GET legacy.internal/api/delete_user -> 200"
+        "  [fidelity:recording, from-recording]" in replay.exchange_lines()
+    )
+
+
 # -- bodies that decode past irimi's cap (#94) ---------------------------------------------------
 #
 # `bombs` sends gzip bodies of a few hundred KB that decode to 128 MiB, past the most irimi decodes

@@ -341,3 +341,89 @@ def test_irimi_compare_reads_a_run_whose_last_line_a_crash_cut(shared_store_run,
         ],
         [],
     )
+
+
+# ------------------------------------------------------------------------------- replay (#82)
+
+LLM = ("llm#1", "llm#2", "llm#3", "llm#4")
+
+
+def test_a_full_refund_replayed_unchanged_is_answered_from_its_recording(replayed):
+    """Every read and llm call is answered from the recording, and the refund with its recorded
+    answer at its recorded level, so the agent walks the same loop and nothing reaches the fake
+    internet at all."""
+    recorded, replay = replayed(W, "full_refund")
+    assert replay.exit_code == recorded.exit_code == 0
+    assert replay.result(with_time=False) == recorded.result(with_time=False)
+    assert replay.answered() == [
+        ("llm#1", 200, "recording"),
+        ("get_charge#1", 200, "recording"),
+        ("llm#2", 200, "recording"),
+        (REFUND, 200, "fake-L1"),
+        ("llm#3", 200, "recording"),
+        ("llm#4", 200, "recording"),
+    ]
+    [refund] = [ex for ex in replay.reported if ex.kind == "write"]
+    assert refund.flags == ("fidelity:L1", "from-recording")
+    assert refund.precondition == "passed"
+    # The refund's minted id is the recorded one, so every later call naming it matched.
+    [recorded_refund] = [ex for ex in recorded.reported if ex.kind == "write"]
+    assert refund.response.body == recorded_refund.response.body
+    # No precondition read either: the write was checked when it was recorded.
+    assert [ex for ex in replay.reported if ex.issued_by == "engine"] == []
+    assert replay.internet.requests() == []
+    # Every run the replay stored says what it is: its process run and the SDK's run (#82).
+    source = recorded.one("run.start")["run"]
+    mine = {replay.process_run_id(), replay.one("run.start")["run"]}
+    records = [r for r in replay.stored().list_runs() if r.run_id in mine]
+    assert [(r.mode, r.replay_of) for r in records] == [("replay", source)] * 2
+    summary = replay.summaries()
+    assert "  api.stripe.com     1 read (1 from the recording)  1 write intercepted" in summary
+    assert "  api.anthropic.com  4 llm (4 from the recording)" in summary
+    assert "  ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)" in summary
+
+
+def test_a_full_refund_replayed_with_the_half_prompt_diverges_at_the_first_llm_call(replayed):
+    """`PROMPT=half` changes the system prompt, which is in the match: `llm#1` misses and goes to
+    the model, and so does every llm call after it, each carrying what came before. The charge
+    read is still answered from the recording, since no write has missed yet. The refund of 2450
+    misses, is faked, and is checked against the recording's own read of the charge, never the
+    fake Stripe's, which sees no request at all."""
+    recorded, replay = replayed(W, "full_refund", {"PROMPT": "half"})
+    assert replay.answered() == [
+        ("llm#1", 200, None),
+        ("get_charge#1", 200, "recording"),
+        ("llm#2", 200, None),
+        (REFUND, 200, "fake-L1"),
+        ("llm#3", 200, None),
+        ("llm#4", 200, None),
+    ]
+    assert replay.exchange_lines()[0] == (
+        "live      llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]"
+    )
+    [refund] = [ex for ex in replay.reported if ex.kind == "write"]
+    assert refund.flags == ("fidelity:L1", "replay-miss")
+    assert refund.precondition == "passed"
+    [check] = [ex for ex in replay.reported if ex.issued_by == "engine"]
+    assert (check.answered_by, check.request.path) == ("recording", "/v1/charges/ch_TICKET1")
+    assert check.flags == ("fidelity:recording", "from-recording")
+    assert replay.internet.requests("api.stripe.com") == []
+    assert len(replay.internet.requests("api.anthropic.com")) == 4
+    assert "  ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)" in (
+        replay.summaries()
+    )
+    assert replay.result()["refund_statuses"] == recorded.result()["refund_statuses"] == [200]
+
+
+def test_a_retried_refund_replays_as_the_two_refunds_it_recorded(replayed):
+    """The model sends one refund twice in a turn with one key. The replay's agent sends a key of
+    its own, which is a header and never in the match, so both refunds meet their recordings: the
+    first one's answer, and the retry's, which the recording holds as an idempotent replay."""
+    recorded, replay = replayed(W, "retried_refund")
+    refunds = [ex for ex in replay.reported if ex.kind == "write"]
+    assert [ex.flags for ex in refunds] == [
+        ("fidelity:L1", "from-recording"),
+        ("fidelity:L1", "idempotent-replay", "from-recording"),
+    ]
+    assert replay.internet.requests() == []
+    assert replay.result(with_time=False) == recorded.result(with_time=False)

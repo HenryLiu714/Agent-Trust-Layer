@@ -96,6 +96,7 @@ def test_answered_by_names_every_way_an_exchange_is_answered():
         "fake-L1",
         "delegated",
         "overlay",
+        "recording",
     }
 
 
@@ -121,6 +122,7 @@ def test_every_locally_decided_answer_has_a_fidelity_flag():
         FIDELITY_L0_FLAG,
         FIDELITY_L1_FLAG,
         FIDELITY_OVERLAY_FLAG,
+        FIDELITY_RECORDING_FLAG,
         AnsweredBy,
     )
 
@@ -130,6 +132,7 @@ def test_every_locally_decided_answer_has_a_fidelity_flag():
         "fake-L1": FIDELITY_L1_FLAG,
         "delegated": FIDELITY_DELEGATED_FLAG,
         "overlay": FIDELITY_OVERLAY_FLAG,
+        "recording": FIDELITY_RECORDING_FLAG,
     }
 
 

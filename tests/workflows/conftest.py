@@ -10,6 +10,9 @@ into the one store its workflow's runs share, or into the one named `store`, onc
 
 `traced_run(name, scenario)` runs a scenario's shadow run once more, uncached, and returns it with
 the most memory Python held at once while it ran (#94).
+
+`replayed(name, scenario, env)` records a scenario under `irimi shadow` and replays its one run in
+the same home, with `env` over the scenario's environment, once per session (#82).
 """
 
 import tracemalloc
@@ -17,11 +20,12 @@ from pathlib import Path
 
 import pytest
 
-from examples.workflows.harness.run import Result, run, workflows
+from examples.workflows.harness.run import Result, replay, replayed_run_id, run, workflows
 
 _CACHE: dict[tuple[str, str, str], Result] = {}
 _SHARED: dict[tuple[str, str, str], Result] = {}  # (store, scenario, mode)
 _STORES: dict[str, Path] = {}
+_REPLAYS: dict[tuple[str, str, tuple[tuple[str, str], ...]], tuple[Result, Result]] = {}
 
 
 @pytest.fixture
@@ -74,5 +78,24 @@ def traced_run(run_workflow, tmp_path_factory):
         finally:
             tracemalloc.stop()
         return result, peak
+
+    return get
+
+
+@pytest.fixture
+def replayed(tmp_path_factory):
+    """`(recorded, replay)`: the scenario recorded under `irimi shadow` into a home of its own, and
+    its one run (`replayed_run_id`) replayed in that home with `env` over the scenario's own (#82).
+    Not `run_workflow`'s shadow run: a replay records into the store it answers from, and that
+    run's pins read its store whole. A recording is replayed once, so each `env` records its own."""
+
+    def get(name: str, scenario: str, env: dict[str, str] | None = None) -> tuple[Result, Result]:
+        key = (name, scenario, tuple(sorted((env or {}).items())))
+        if key not in _REPLAYS:
+            workdir = tmp_path_factory.mktemp(f"{name}-{scenario}-replay")
+            recorded = run(workflows()[name], scenario, "shadow", workdir / "recorded")
+            replayed_run = replay(recorded, replayed_run_id(recorded), workdir / "replay", env)
+            _REPLAYS[key] = (recorded, replayed_run)
+        return _REPLAYS[key]
 
     return get

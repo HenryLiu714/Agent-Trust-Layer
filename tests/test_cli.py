@@ -155,6 +155,89 @@ def test_the_composition_root_builds_the_service_overlay_over_the_run_s_maps():
     assert engine.store is run.store
 
 
+def test_the_composition_root_builds_a_replay_policy_over_the_run_s_recording():
+    """A config naming a run to replay gets a `ReplayPolicy` over the recording `_prepare_run`
+    read, and a reader over the recording, never the upstream (#82).
+    One that names none gets shadow mode's policy, reading the real upstream (#45)."""
+    from dataclasses import replace
+
+    from irimi.policy import ReplayPolicy, ShadowPolicy
+    from irimi.reader import UpstreamReader
+    from irimi.recording import Recording, RecordingReader
+    from irimi.store import NullStore
+
+    index = _shipped_index()
+    args = argparse.Namespace(allow_host=[], port=4321, listen_host=paths.LISTEN_HOST)
+    p = ca.ca_paths()
+    config = cli._engine_config(args, index, "t3st", p)
+    recording = Recording.from_events([], b"k" * 32, index)
+    run = cli._Run(
+        index, p, "t3st", replace(config, replay_of="rec1"), NullStore(), None, recording
+    )
+    engine = cli._build_engine(run, on_exchange=lambda ex: None)
+    assert isinstance(engine.policy, ReplayPolicy)
+    assert engine.policy.recording is recording
+    assert engine.policy.maps is index
+    assert isinstance(engine.policy.shadow.reader, RecordingReader)
+    shadow = cli._build_engine(cli._Run(index, p, "t3st", config, NullStore()), lambda ex: None)
+    assert isinstance(shadow.policy, ShadowPolicy)
+    assert isinstance(shadow.policy.reader, UpstreamReader)
+
+
+def test_a_replay_of_a_run_the_store_does_not_hold_starts_nothing(tmp_path, monkeypatch, capsys):
+    """`_prepare_run` reads the recording before anything runs, and a run the store does not hold
+    is refused as a store that cannot be opened is: an error, and no command (#82)."""
+    from dataclasses import replace
+
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    ca.generate_ca(ca.ca_paths())
+    real = cli._engine_config
+    monkeypatch.setattr(
+        cli, "_engine_config", lambda *a, **kw: replace(real(*a, **kw), replay_of="nosuchrun")
+    )
+    marker = tmp_path / "ran"
+    command = [sys.executable, "-c", f"open({str(marker)!r}, 'w')"]
+    assert main(["shadow", "--port", "0", "--", *command]) == 1
+    assert capsys.readouterr().err == f"error: no run nosuchrun in {tmp_path / 'store'}\n"
+    assert not marker.exists()
+    assert not (tmp_path / "store").exists()
+
+
+def test_serve_mode_refuses_to_replay(tmp_path, monkeypatch, capsys):
+    """A replay is one run against one engine, whose write log and recording are the engine's;
+    serve mode is many runs at once. Refused before the store is opened (#82)."""
+    from dataclasses import replace
+
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    ca.generate_ca(ca.ca_paths())
+    real = cli._engine_config
+    monkeypatch.setattr(
+        cli, "_engine_config", lambda *a, **kw: replace(real(*a, **kw), replay_of="rec1")
+    )
+    assert main(["shadow", "--serve", "--port", "0"]) == 1
+    assert capsys.readouterr().err == "error: a replay is one run; serve mode cannot replay\n"
+    assert not (tmp_path / "store").exists()
+
+
+def test_the_unattributed_pool_is_not_a_run_to_replay(tmp_path, monkeypatch, capsys):
+    """`unattributed` holds every serve session's requests no run named: there is no one run in it
+    to answer from (#82)."""
+    from dataclasses import replace
+
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    ca.generate_ca(ca.ca_paths())
+    real = cli._engine_config
+    monkeypatch.setattr(
+        cli, "_engine_config", lambda *a, **kw: replace(real(*a, **kw), replay_of="unattributed")
+    )
+    assert main(["shadow", "--port", "0", "--", sys.executable, "-c", "pass"]) == 1
+    assert capsys.readouterr().err == "error: unattributed is not a run to replay\n"
+    assert not (tmp_path / "store").exists()
+
+
 def test_engine_config_defaults_to_no_maps(tmp_path, monkeypatch):
     """An EngineConfig built without maps classifies by the verb rule alone. That is the default
     the engine's own tests rely on; the CLI always passes an index."""

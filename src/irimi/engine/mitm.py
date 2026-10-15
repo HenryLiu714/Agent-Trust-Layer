@@ -322,8 +322,9 @@ class _Decision:
     """What the worker thread decided, with nothing of mitmproxy's in it (#45).
 
     `request` is the request as the trace should show it - rewritten, if the overlay translated a
-    cursor. `rewritten` is None when nothing was translated, and is otherwise the same object,
-    which is what tells the loop side there is a flow to edit.
+    cursor, whoever answered it (#82). `rewritten` is that same object when the read is forwarded
+    live with a translation, which is what tells the loop side there is a flow to edit, and None
+    otherwise.
     """
 
     request: Request
@@ -777,9 +778,19 @@ class IrimiAddon:
                     ),
                     flags + (TARGET_FAILED_FLAG,),
                 )
-        flow.metadata[META_KEY] = _Pending(req, cls, run_id, door, ans, flags, started_at, target)
+        built: http.Response | None = None
         if response is not None:
-            flow.response = _to_mitm_response(response)
+            # Guarded, because the answer may not be irimi's own: a replay answers with a response
+            # read off disk (#82), whose headers mitmproxy may refuse to encode. A raise here would
+            # forward the flow - the write included - so it fails closed like a decision that did.
+            try:
+                built = _to_mitm_response(response)
+            except Exception as exc:
+                self._answer_failed_decision(flow, req, door, run_id, started_at, exc)
+                return
+        flow.metadata[META_KEY] = _Pending(req, cls, run_id, door, ans, flags, started_at, target)
+        if built is not None:
+            flow.response = built
         for ex in ans.issued:
             # Recorded on the loop, like every other exchange, so the store and the per-exchange
             # line stay single-threaded. They are reads irimi made on its own account; they never
@@ -810,17 +821,24 @@ class IrimiAddon:
                     f"its body decodes past the {MAX_DECODED_BODY} bytes irimi decodes, and "
                     "irimi does not answer a write it cannot read whole"
                 )
-            ans = self.policy.answer(req, cls, writes, run_id)
-            rewritten = None
-            if ans.answered_by == "live" and cls.kind == "read" and writes:
-                rewritten = self._rewrite_read(req, writes)
-            return _Decision(rewritten or req, cls, run_id, ans, rewritten)
+            # A READ IS RECORDED AS IRIMI WOULD ASK IT, WHOEVER ANSWERS IT (#82). It is translated
+            # before the policy decides, so the policy, the trace and a later replay of that trace
+            # all see the one request; only a live forward carries the translation onto the flow.
+            # A delegated read is never translated: its target owns that service's state (D20).
+            translated = None
+            if cls.kind == "read" and writes and delegation.delegate(req, cls) is None:
+                translated = self._rewrite_read(req, writes)
+            asked = translated or req
+            ans = self.policy.answer(asked, cls, writes, run_id)
+            rewritten = translated if ans.answered_by == "live" else None
+            return _Decision(asked, cls, run_id, ans, rewritten)
         except Exception as exc:
             return _failed_decision(req, exc)
 
     def _rewrite_read(self, req: Request, writes: tuple[Exchange, ...]) -> Request | None:
-        """Let the overlay translate a live read before mitmproxy forwards it (#43). None when
-        nothing changed; the flow is edited by `_apply_rewrite`, back on the loop (#45).
+        """Let the overlay translate a read before the policy decides about it (#43, #82). None
+        when nothing changed; a live forward's flow is edited by `_apply_rewrite`, back on the loop
+        (#45).
 
         Guarded on its own inside the decision's never-raise guard, because the two failures want
         opposite answers: a decision that raises must be answered locally with a 502, since the
@@ -863,9 +881,9 @@ class IrimiAddon:
         would suppress the agent's own minted refund from a list page.
 
         `ServiceOverlay.rewrite` strips one too, and that guard stays - the overlay is called
-        directly by `tests/test_overlay.py` and will be called by Phase 5's replay, neither of
-        which comes through here. But the engine only enters the rewrite path once the write log
-        holds a write, so that strip could not run before the run's first faked write, and the
+        directly by `tests/test_overlay.py`, which does not come through here. But the engine only
+        enters the rewrite path once the write log holds a write, so that strip could not run
+        before the run's first faked write, and the
         forged header was forwarded to the real service intact. Two more holes closed by moving
         it here: an `llm` or `telemetry` kind is forwarded live and never went near the rewrite
         path at all, and the snapshot `request()` takes can be empty while a concurrent write
@@ -1027,7 +1045,9 @@ class IrimiAddon:
         # The overlay stays off for a delegated read: the target owns that service's state, and
         # layering our own minted objects over it would corrupt read-after-write there (D20).
         answered_by = pending.answered_by
-        overlay_fidelity: OverlayFidelity | None = None
+        # What the answer already says of the overlay: a read a replay answered from the recording
+        # carries the recorded read's own fidelity, the overlay's work in the run it replays (#82).
+        overlay_fidelity: OverlayFidelity | None = pending.answer.overlay
         # Only once there is a write to show: with an empty log there is nothing to apply, and the
         # request side asks the overlay under the same condition.
         if (
@@ -1112,7 +1132,8 @@ class IrimiAddon:
         if flow.response is not None and isinstance(tee, _StreamTee):
             response, stream_chunks, _ = _recorded_stream(flow, tee, whole=False)
             extra_flags += (STREAM_TRUNCATED_FLAG,)
-        ex = _exchange(pending, response, pending.answered_by, extra_flags, None, stream_chunks)
+        overlay = pending.answer.overlay  # a replayed read's recorded fidelity, as `response` takes
+        ex = _exchange(pending, response, pending.answered_by, extra_flags, overlay, stream_chunks)
         self._finish(ex)
 
     def _finish(self, ex: Exchange) -> None:

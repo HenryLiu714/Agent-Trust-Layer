@@ -150,6 +150,34 @@ def test_the_first_event_of_a_run_with_no_start_creates_a_header_run(root, key):
     assert (record.attribution, record.trigger, record.outcome) == ("header", None, None)
 
 
+def test_every_run_a_replay_s_store_starts_is_that_replay_s(root, key):
+    """The process run and an SDK run alike, whatever their records say (#82)."""
+    s = DirectoryStore(root, key, replay_of="rec1")
+    s.start_run(_record("p1"))
+    s.start_run(dataclasses.replace(_record("s1"), attribution="sdk"))
+    s.close()
+    reader = StoreReader(root)
+    for run_id in ("p1", "s1"):
+        record = reader.load_run(run_id).record
+        assert (record.mode, record.replay_of) == ("replay", "rec1")
+    s = DirectoryStore(root / "other", key)
+    s.start_run(_record("p2"))
+    s.close()
+    record = StoreReader(root / "other").load_run("p2").record
+    assert (record.mode, record.replay_of) == ("shadow", None)
+
+
+def test_a_header_run_a_replay_makes_is_that_replay_s(root, key):
+    """A store a replay writes names the run it replays, and so does each header run it makes:
+    `mode: replay` and `replay_of`, by `trace.mode_for`, the rule the process run follows (#82)."""
+    s = DirectoryStore(root, key, replay_of="rec1")
+    s.record(_exchange("r2"))
+    s.close()
+    record = StoreReader(root).load_run("r2").record
+    assert (record.mode, record.replay_of, record.attribution) == ("replay", "rec1", "header")
+    assert record == store.header_record("r2", started_at=1.0, replay_of="rec1")
+
+
 def test_a_header_run_started_by_an_event_with_no_clock_has_no_start(root, key):
     s = DirectoryStore(root, key)
     s.record(dataclasses.replace(_exchange("r2"), started_at=0.0, ended_at=0.0))

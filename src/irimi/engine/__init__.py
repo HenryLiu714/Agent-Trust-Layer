@@ -28,6 +28,10 @@ class EngineConfig:
     # `irimi shadow --serve`: no child process, runs named by their requests. Reported by the
     # control endpoint's health answer (#73); P3-11 (#77) sets it.
     serve: bool = False
+    # The stored run this engine answers from, as a replay (#82): `cli._build_engine` builds a
+    # `ReplayPolicy` over it instead of a `ShadowPolicy`. None is shadow mode. `irimi replay`
+    # (#84) sets it.
+    replay_of: str | None = None
 
 
 class Engine(Protocol):

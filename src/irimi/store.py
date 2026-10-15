@@ -78,6 +78,7 @@ from irimi.trace import (
     TelemetrySeen,
     ToolCall,
     TraceFormatError,
+    mode_for,
 )
 
 logger = logging.getLogger(__name__)
@@ -184,7 +185,9 @@ class NullStore:
         return None
 
 
-def header_record(run_id: str, started_at: float | None = None) -> RunRecord:
+def header_record(
+    run_id: str, started_at: float | None = None, replay_of: str | None = None
+) -> RunRecord:
     """The record of a run id that arrived on an event with no start: `attribution: "header"`,
     every optional field None. The writer creates it on the first event of a run with no
     `run.json`, and `StoreReader` gives it to `unattributed/`, which has none (#70).
@@ -192,11 +195,14 @@ def header_record(run_id: str, started_at: float | None = None) -> RunRecord:
     The writer passes that first event's `started_at`, the earliest moment the run is known by.
     Without it a header run sorted after every run that has a start, so `irimi runs list` hid an
     agent's labelled runs behind its process runs as soon as there were more of those than its
-    `--limit` (#72)."""
+    `--limit` (#72).
+
+    A store a replay writes passes the run it replays: a header run made then is that replay's,
+    and says so (`trace.mode_for`, #82)."""
     return RunRecord(
         schema_version=SCHEMA_VERSION,
         run_id=run_id,
-        mode="shadow",
+        mode=mode_for(replay_of),
         attribution="header",
         trigger=None,
         agent_version=None,
@@ -207,6 +213,7 @@ def header_record(run_id: str, started_at: float | None = None) -> RunRecord:
         outcome=None,
         error=None,
         exit_code=None,
+        replay_of=replay_of,
     )
 
 
@@ -292,20 +299,30 @@ class _Run:
 class DirectoryStore:
     """A TraceStore writing the layout `docs/trace-format.md` describes under `root`."""
 
-    def __init__(self, root: Path, key: bytes, on_run_ended: OnRunEnded | None = None) -> None:
+    def __init__(
+        self,
+        root: Path,
+        key: bytes,
+        on_run_ended: OnRunEnded | None = None,
+        replay_of: str | None = None,
+    ) -> None:
         """Raises OSError when `root` cannot be made a writable directory: a store that would
         silently drop every event must not start a run (the one place this class raises).
 
         `on_run_ended` is called on the writer thread with a run's id once that run's end is
         written, so every event queued before the end is already on disk: `serve` prints the
         run's summary from it (#77). What it raises is logged and swallowed. It runs before the
-        writer takes its next item, so a slow one holds the queue back."""
+        writer takes its next item, so a slow one holds the queue back.
+
+        `replay_of` is the stored run the engine writing here answers from, if it is a replay: each
+        run this store starts or makes from a header is that replay's (#82)."""
         _mkdirs(root)
         if not root.is_dir() or not os.access(root, os.W_OK | os.X_OK):
             raise PermissionError(f"the trace store {root} is not a writable directory")
         self.layout = StoreLayout(root)
         self._key = key
         self._on_run_ended = on_run_ended
+        self._replay_of = replay_of
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=QUEUE_SIZE)
         self._lock = threading.Lock()  # guards everything below it and `_closed`
         self._closed = False
@@ -481,13 +498,17 @@ class DirectoryStore:
                 name=self._redact_text(trigger.name),
                 args=redact.redact_json(trigger.args, self._key),
             )
+        # Every run a replay's store starts is that replay's, the process run and an SDK run alike,
+        # whatever its record says: one rule for a run's mode, `trace.mode_for` (#82).
+        if self._replay_of is not None:
+            record = replace(record, mode=mode_for(self._replay_of), replay_of=self._replay_of)
         self._write_record(
             run, replace(record, trigger=trigger, error=self._redact_error(record.error))
         )
 
     def _end(self, end: _EndRun) -> None:
         run = self._run_dir(end.run_id)
-        record = run.record or header_record(end.run_id)
+        record = run.record or header_record(end.run_id, replay_of=self._replay_of)
         self._write_record(
             run,
             replace(
@@ -551,7 +572,8 @@ class DirectoryStore:
             raise ValueError(f"run {event.run_id!r} is another schema version")
         if run.dir is not None and run.record is None:
             # `0.0` is an event built with no clock: no start at all (docs/trace-format.md, #72).
-            self._write_record(run, header_record(event.run_id, event.started_at or None))
+            started_at = event.started_at or None
+            self._write_record(run, header_record(event.run_id, started_at, self._replay_of))
         stored = self._for_disk(event, bad_run_id=run.dir is None)
         line = json.dumps(
             trace.event_to_json(run.next_seq, stored, self._put_body), allow_nan=False
@@ -700,7 +722,8 @@ class DirectoryStore:
                 if not (run.dir is not None and run.writable):
                     continue
                 if self._dropped_in(run, run_id) != run.dropped_written:
-                    self._write_record(run, run.record or header_record(run_id))
+                    record = run.record or header_record(run_id, replay_of=self._replay_of)
+                    self._write_record(run, record)
             except Exception as exc:
                 logger.warning(
                     "irimi: the trace store could not record run %r's drops: %s",

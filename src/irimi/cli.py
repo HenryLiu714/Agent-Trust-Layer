@@ -17,6 +17,7 @@ if TYPE_CHECKING:  # the quoted annotations below; no runtime import
     from irimi.control import OnToolCall
     from irimi.engine import Engine, EngineConfig, OnExchange
     from irimi.exchange import Exchange
+    from irimi.recording import Recording
     from irimi.servicemap import MapIndex
     from irimi.store import ServeLock, TraceStore
     from irimi.trace import ToolCall
@@ -345,6 +346,8 @@ class _Run:
     store: "TraceStore"
     # The store's `serve.lock`, held, in serve mode only (#77).
     lock: "ServeLock | None" = None
+    # The run `config.replay_of` names, read back to answer from, in a replay only (#82).
+    recording: "Recording | None" = None
 
 
 # What serve mode calls when a run's end is on disk: the maps the run was decided with, and its id.
@@ -354,10 +357,11 @@ _OnRunEnded = Callable[["MapIndex", str], None]
 def _prepare_run(
     args: argparse.Namespace, *, serve: bool = False, on_run_ended: _OnRunEnded | None = None
 ) -> _Run | None:
-    """Load the maps, find the CA and open the trace store, or print why not and return None.
+    """Load the maps, find the CA, read back the run a replay answers from (#82) and open the trace
+    store, or print why not and return None.
 
-    Fail closed: without all three, no engine starts and no child is spawned. The store is opened
-    last, so a run refused for its maps or its CA leaves nothing on disk.
+    Fail closed: without all of them, no engine starts and no child is spawned. The store is opened
+    last, so a run refused for its maps, its CA or its recording leaves nothing on disk.
 
     In serve mode (#77) the engine's own run is `trace.UNATTRIBUTED`, so a request no `Irimi-Run`
     names is stored there and builds no run, and the store's `serve.lock` is taken as soon as the
@@ -373,34 +377,91 @@ def _prepare_run(
     if not ca.ca_exists(p):
         print(f"error: no CA at {p.key.parent}. Run `irimi init` first.", file=sys.stderr)
         return None
+    # 16 hex characters: the run id is a directory name in the store, and must not collide with
+    # another run's across months of them (#70).
+    run_id = trace.UNATTRIBUTED if serve else secrets.token_hex(8)
+    config = _engine_config(args, index, run_id, p, serve=serve)
+    if serve and config.replay_of is not None:
+        # A replay is one run against one engine, whose write log and recording are the engine's;
+        # serve mode is many runs at once (#82).
+        print("error: a replay is one run; serve mode cannot replay", file=sys.stderr)
+        return None
+    key = _redaction_key()
+    if key is None:
+        return None
+    recording = None
+    if config.replay_of is not None:
+        # A replay whose recording cannot be read starts nothing, as a run whose store cannot be
+        # opened does, and is refused before that store is opened (#82).
+        recording = _load_recording(args, config, key)
+        if recording is None:
+            return None
     ended = None if on_run_ended is None else (lambda run_id: on_run_ended(index, run_id))
-    store = _open_store(args, ended)
+    store = _open_store(args, key, ended, config.replay_of)
     if store is None:
         return None
     lock = _hold_serve_lock(args) if serve else None
     if serve and lock is None:
         _close_store(store)
         return None
-    # 16 hex characters: the run id is a directory name in the store, and must not collide with
-    # another run's across months of them (#70).
-    run_id = trace.UNATTRIBUTED if serve else secrets.token_hex(8)
-    config = _engine_config(args, index, run_id, p, serve=serve)
-    return _Run(index, p, run_id, config, store, lock)
+    return _Run(index, p, run_id, config, store, lock, recording)
+
+
+def _redaction_key() -> bytes | None:
+    """This install's redaction key (#69), loaded once for the store that redacts with it and the
+    recording a replay matches against it, or None after printing why it cannot be used."""
+    from irimi import redact
+
+    try:
+        return redact.load_key(paths.irimi_home())
+    except (redact.RedactKeyError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return None
+
+
+def _load_recording(
+    args: argparse.Namespace, config: "EngineConfig", key: bytes
+) -> "Recording | None":
+    """The run `config.replay_of` names in the store under `--store`, as a `Recording` keyed with
+    this install's redaction key, which made its placeholders, or None after printing why it
+    cannot be read (#82)."""
+    from irimi import trace
+    from irimi.recording import Recording
+    from irimi.store import RunNotFound, StoreReader
+    from irimi.trace import TraceFormatError
+
+    assert config.replay_of is not None
+    root = _store_root(args)
+    if config.replay_of == trace.UNATTRIBUTED:
+        # Every serve session's requests no run named, in one pool: not one run to answer from.
+        print(f"error: {trace.UNATTRIBUTED} is not a run to replay", file=sys.stderr)
+        return None
+    try:
+        events = StoreReader(root).load_run(config.replay_of).events
+    except RunNotFound:
+        print(f"error: no run {config.replay_of} in {root}", file=sys.stderr)
+        return None
+    except (TraceFormatError, OSError) as exc:
+        print(f"error: run {config.replay_of} could not be read: {exc}", file=sys.stderr)
+        return None
+    return Recording.from_events(events, key, config.maps)
 
 
 def _open_store(
-    args: argparse.Namespace, on_run_ended: Callable[[str], None] | None = None
+    args: argparse.Namespace,
+    key: bytes,
+    on_run_ended: Callable[[str], None] | None = None,
+    replay_of: str | None = None,
 ) -> "TraceStore | None":
-    """The trace store under `--store`, default `$IRIMI_HOME/store`, or None after printing why
-    this install's redaction key or the store's directory cannot be used (#69, #70). A run that
-    could not redact what it stores, or would drop every event unseen, must not start."""
-    from irimi import redact
+    """The trace store under `--store`, default `$IRIMI_HOME/store`, redacting with `key`, or None
+    after printing why its directory cannot be used (#69, #70): a run that would drop every event
+    unseen must not start. `replay_of` is the run a replay answers from, which every header run
+    the store makes names (#82)."""
     from irimi.store import DirectoryStore
 
     try:
-        key = redact.load_key(paths.irimi_home())
-        return DirectoryStore(_store_root(args), key, on_run_ended)
-    except (redact.RedactKeyError, OSError) as exc:
+        return DirectoryStore(_store_root(args), key, on_run_ended, replay_of)
+    except OSError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return None
 
@@ -427,19 +488,26 @@ def _build_engine(
     """
     from irimi.engine.mitm import MitmEngine
     from irimi.overlay import ServiceOverlay
-    from irimi.policy import ShadowPolicy
+    from irimi.policy import AnswerPolicy, ReplayPolicy, ShadowPolicy
     from irimi.reader import UpstreamReader
 
     # The overlay is built with the same maps the engine classifies against, because it has to
     # ask the same question of a read - which service, which operation - and there is one place
     # that answers it (#43).
+    overlay = ServiceOverlay(run.config.maps)
+    policy: AnswerPolicy
+    if run.recording is None:
+        # The reader is the real upstream, chosen here and nowhere else (#45).
+        policy = ShadowPolicy(reader=UpstreamReader(), maps=run.config.maps)
+    else:
+        # A replay's reader is the recording, which the policy builds itself: it never reads live
+        # state for a precondition (#82).
+        policy = ReplayPolicy(run.recording, maps=run.config.maps)
     return MitmEngine(
         run.config,
-        # The reader is the real upstream, chosen here and nowhere else: Phase 5's replay policy
-        # gets a reader over the recording at this same line (#45).
-        ShadowPolicy(reader=UpstreamReader(), maps=run.config.maps),
+        policy,
         run.store,
-        ServiceOverlay(run.config.maps),
+        overlay,
         on_exchange=on_exchange,
         on_tool_call=on_tool_call,
     )

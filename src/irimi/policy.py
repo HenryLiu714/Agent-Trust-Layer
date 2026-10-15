@@ -1,14 +1,15 @@
 """AnswerPolicy: decides whether an exchange is forwarded live, delegated, or answered locally.
 
 The decision is all that lives here. What a local answer *contains* is `irimi.echo`; where a
-delegated one goes is `irimi.delegation`; the read L3 issues goes through `irimi.reader`.
+delegated one goes is `irimi.delegation`; the read L3 issues goes through `irimi.reader`; what a
+replay answers from is `irimi.recording`.
 """
 
 import json
 import logging
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 from irimi import bodies, echo, idempotency, pipeline, services, writelog
@@ -16,17 +17,22 @@ from irimi.delegation import ForwardTo, delegate
 from irimi.exchange import (
     FIDELITY_DELEGATED_FLAG,
     FIDELITY_FLAGS,
+    FIXTURE_FAILED_FLAG,
+    FROM_RECORDING_FLAG,
     IDEMPOTENCY_CONFLICT_FLAG,
     IDEMPOTENT_REPLAY_FLAG,
     LIVE_KINDS,
+    REPLAY_MISS_FLAG,
     AnsweredBy,
     Exchange,
+    OverlayFidelity,
     PreconditionOutcome,
     Request,
     Response,
 )
 from irimi.pipeline import Classification
-from irimi.reader import NoReader, Reader
+from irimi.reader import NoReader, Reader, answered_as
+from irimi.recording import Recording, RecordingReader
 from irimi.servicemap import MapIndex, Route
 
 logger = logging.getLogger(__name__)
@@ -59,6 +65,10 @@ class Answer:
     # amount: `report.write_sentence` renders the map's `human:` sentence before it branches on
     # the rejection, so the `✗` line carries the amount too.
     currency: str = ""
+    # How much of the run's writes this answer's body shows, for an answer the engine does not
+    # put past the overlay itself: a read a replay answered from the recording, whose bytes the
+    # overlay edited in the run it replays (#82). None for every other answer.
+    overlay: OverlayFidelity | None = None
 
 
 @dataclass(frozen=True)
@@ -155,6 +165,20 @@ class ShadowPolicy:
         )
         _remember(self.idempotency, slot, answer)
         return answer
+
+    def remember(
+        self, request: Request, classification: Classification, run_id: str, answer: Answer
+    ) -> None:
+        """Keep `answer` as this write's, under its idempotency key, as `answer` keeps its own: a
+        replay calls it for a write it answered from the recording (#82), so the agent's retry
+        meets it. Never raises: a key that cannot be read costs that retry its replay, and nothing
+        else."""
+        try:
+            slot = idempotency.slot_for(request, classification, run_id)
+        except Exception:
+            logger.exception("irimi: this write's idempotency key could not be read")
+            return
+        _remember(self.idempotency, slot, answer)
 
     def _delegated(self, route: Route | None, forward: ForwardTo) -> Answer:
         """A delegated write is one irimi did not author and cannot check, and nothing in Phase 2
@@ -258,6 +282,7 @@ class ShadowPolicy:
                 logger.warning("irimi: the precondition read %s raised: %s", probe.operation, exc)
                 response = None
             ended_at = time.time()
+            read_answered_by, read_flags = answered_as(self.reader, response is not None)
             # Recorded before any verdict, and with no response when the reader got none, so a
             # network failure, a 429 and a body irimi cannot use all leave a trace of the read
             # irimi attempted on the agent's behalf (#45).
@@ -266,8 +291,9 @@ class ShadowPolicy:
                     probe_request,
                     response,
                     probe_cls,
-                    "live",
+                    read_answered_by,
                     run_id,
+                    extra_flags=read_flags,
                     issued_by="engine",
                     started_at=started_at,
                     ended_at=ended_at,
@@ -320,6 +346,126 @@ class ShadowPolicy:
             # `not_evaluable` and never None.
             logger.exception("irimi: the precondition check failed; faking the write at L2")
             return _Checked("not_evaluable", issued)
+
+
+# The flags a recorded ANSWER carried besides its level: a fixture that did not load, and the two
+# halves of idempotency. A replay that answers again carries its level's fidelity flag, these, and
+# `from-recording`, and no other: the classifier's own flags come back from this request's
+# classification, and the engine's (a body cut at the cap, a lost upstream) are facts about the
+# recorded exchange, never about this one (#82).
+_ANSWER_FLAGS = frozenset({FIXTURE_FAILED_FLAG, IDEMPOTENT_REPLAY_FLAG, IDEMPOTENCY_CONFLICT_FLAG})
+# Headers a recorded response carries that describe bytes it no longer has. The body was stored
+# decoded and whole, so its `Content-Encoding` and framing are not the body served; mitmproxy sets
+# the length of what is. And the recorded run's own stamp, which `pipeline.respond` replaces (#82).
+_RECORDED_ONLY_HEADERS = frozenset(
+    {"content-encoding", "content-length", "transfer-encoding", pipeline.ANSWERED_BY_HEADER}
+)
+
+
+class ReplayPolicy:
+    """Answers a run from a stored one where it can, decides the rest as shadow mode would, and
+    never forwards a write (#82).
+
+    | request | in the recording (`from-recording`) | not in it (`replay-miss`) |
+    | --- | --- | --- |
+    | llm; read before the replay diverged | the recorded response | live |
+    | read, after the replay diverged | not looked up | live, with the overlay |
+    | write, unknown | the recorded ANSWER, at its recorded level | faked; the replay diverges |
+    | telemetry, delegated | not looked up, no flag | as in shadow mode |
+
+    AN ANSWER FROM THE RECORDING IS WHAT IT WAS. It keeps the recorded `answered_by` and the
+    recorded read's overlay fidelity: a write is the same fake irimi built in the recorded run,
+    so `is_authored_write` puts it in the write log, the summary prints it as it did, and its minted
+    ids are the recorded ones, which every later read or llm call naming one then matches without
+    any mapping of ids; a read the overlay edited is still the overlay's, and its `↳` line comes
+    back. One exception: `live` becomes `recording`, because irimi answered it, from disk, and
+    `Irimi-Answered-By` must say so. Every such answer carries `from-recording`, which is how a
+    reader of the trace tells it from the decision the run would have made itself.
+
+    ONCE A WRITE HAS MISSED, THE REPLAY HAS DIVERGED (`Recording.diverge`), AND READS GO LIVE. A
+    recorded read after that point shows the recorded write and not the new one, so from then on
+    every read is answered as shadow mode answers it: live, with the overlay applying every write
+    in the write log, recorded and new alike. An llm call that misses changes nothing about the
+    world irimi shows, so it does not end serving reads. The engine translates a read before it
+    asks (#43), as it translated the one it recorded, and a recorded read is not overlaid again: a
+    matched write's effect is already in those bytes.
+
+    Everything it cannot answer goes to the `ShadowPolicy` it holds, whose reader is the recording
+    (`RecordingReader`): a replay never checks a precondition against live state.
+
+    THE NEVER-RAISE RULE covers matching too. An exception while looking a request up is logged, and
+    the request is decided as a miss, so a write that broke the matcher is still faked and never
+    forwarded.
+    """
+
+    name: str = "replay"
+
+    def __init__(self, recording: Recording, maps: MapIndex | None = None) -> None:
+        self.recording = recording
+        self.maps = maps if maps is not None else MapIndex()
+        self.shadow = ShadowPolicy(reader=RecordingReader(recording), maps=self.maps)
+
+    def answer(
+        self,
+        request: Request,
+        classification: Classification,
+        write_log: Sequence[Exchange] = (),
+        run_id: str = "",
+    ) -> Answer:
+        kind = classification.kind
+        try:
+            if kind == "telemetry" or delegate(request, classification) is not None:
+                return self.shadow.answer(request, classification, write_log, run_id)
+            found = self._from_recording(request, classification, run_id)
+        except Exception:
+            logger.exception("irimi: the recording could not be searched; deciding this as a miss")
+            found = None
+        if found is not None:
+            return found
+        if kind not in LIVE_KINDS:
+            self.recording.diverge()
+        answer = self.shadow.answer(request, classification, write_log, run_id)
+        return replace(answer, flags=(*answer.flags, REPLAY_MISS_FLAG))
+
+    def _from_recording(
+        self, request: Request, classification: Classification, run_id: str
+    ) -> Answer | None:
+        """The recorded answer to this request, or None when the recording has none to give."""
+        kind = classification.kind
+        if kind == "read" and self.recording.diverged:
+            return None
+        recorded = self.recording.take(request, kind)
+        if recorded is None or recorded.response is None:
+            return None
+        answered_by: AnsweredBy = (
+            "recording" if recorded.answered_by == "live" else recorded.answered_by
+        )
+        kept = tuple(flag for flag in recorded.flags if flag in _ANSWER_FLAGS)
+        answer = Answer(
+            answered_by=answered_by,
+            response=_as_served(recorded.response),
+            flags=(FIDELITY_FLAGS[answered_by], *kept, FROM_RECORDING_FLAG),
+            precondition=recorded.precondition,
+            rejection_code=recorded.rejection_code,
+            would_fire=recorded.would_fire,
+            currency=recorded.currency,
+            overlay=recorded.overlay if kind == "read" else None,
+        )
+        if kind not in LIVE_KINDS:
+            # Shadow mode keeps the answer under its idempotency key, so a retry that misses later
+            # with the same key and other parameters is refused as the service would refuse it
+            # (#46). Kept without `from-recording`: shadow mode answers that retry.
+            self.shadow.remember(
+                request, classification, run_id, replace(answer, flags=answer.flags[:-1])
+            )
+        return answer
+
+
+def _as_served(recorded: Response) -> Response:
+    """A recorded response as a replay sends it: the recorded status and body, and the recorded
+    headers less the ones that describe how the body travelled (`_RECORDED_ONLY_HEADERS`)."""
+    headers = tuple((k, v) for k, v in recorded.headers if k.lower() not in _RECORDED_ONLY_HEADERS)
+    return Response(status=recorded.status, headers=headers, body=recorded.body)
 
 
 def _probe_request(request: Request, service: str, probe: services.Probe) -> Request:

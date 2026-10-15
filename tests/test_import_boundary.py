@@ -21,7 +21,7 @@ LAYERS: list[set[str]] = [
     {"ca", "servicemap", "fixture", "bodies", "trace"},
     {"pipeline", "reverse_door", "redact", "sdk"},
     {"delegation", "echo", "services"},
-    {"writelog", "idempotency", "reader"},
+    {"writelog", "idempotency", "reader", "recording"},
     {"policy", "overlay", "store"},
     {"control"},
     {"engine"},

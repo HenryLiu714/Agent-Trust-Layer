@@ -26,7 +26,7 @@ from typing import Any, Literal, Protocol
 
 from irimi import paths, trace
 from irimi.exchange import RECORDED_ACTION, RUNS_ROUTE, TOOL_CALLS_ACTION
-from irimi.sdk.capture import serialized
+from irimi.sdk.capture import MAX_CAPTURED_BYTES, serialized
 from irimi.sdk.instrumentation import unlabelled
 from irimi.trace import JSONValue, RecordedOutcome
 
@@ -36,6 +36,10 @@ logger = logging.getLogger(LOGGER_NAME)
 TIMEOUT_S = 2.0
 # The most of a refusal's body a warning quotes. The endpoint's own are shorter (#73).
 MAX_DETAIL = 200
+# The most of an answer the SDK reads. irimi's largest is a recorded tool call's outcome (#83),
+# whose result the SDK posted at most MAX_CAPTURED_BYTES of; one past this is from something else
+# on the port, and is refused rather than read into the agent's memory to its end.
+MAX_ANSWER = 16 * MAX_CAPTURED_BYTES
 
 # The run actions the SDK posts: the endpoint's `exchange.RUN_ACTIONS`.
 Action = Literal["start", "tool-calls", "end"]
@@ -130,7 +134,7 @@ class ControlClient:
         try:
             # To irimi's own listener, which `instrument()` labels: the route names the run (#75).
             with unlabelled(), self._opener.open(request, timeout=TIMEOUT_S) as response:
-                body: bytes = response.read()
+                body: bytes = response.read(MAX_ANSWER + 1)
         except urllib.error.HTTPError as exc:  # an answer outside 2xx, a redirect included
             with exc:
                 said = exc.read(MAX_DETAIL).decode("utf-8", "replace")
@@ -143,6 +147,8 @@ class ControlClient:
             return _Failed("timeout", f"no answer in {TIMEOUT_S}s")
         except OSError as exc:
             return _Failed("unreachable", f"{type(exc).__name__}: {exc}")
+        if len(body) > MAX_ANSWER:
+            return _Failed("rejected", f"the answer is past {MAX_ANSWER} bytes")
         return body
 
     def _warn_once(self, route: str, failed: _Failed, what: str, consequence: str) -> None:

@@ -54,12 +54,13 @@ def _as_builtin(builtin: type[Exception]) -> type[RecordedToolError]:
     with _as_builtin_lock:
         made = _AS_BUILTIN.get(builtin)
         if made is None:
-            # Named as the builtin is, so an agent that logs `type(exc).__name__`, or tells its
-            # model, says what it said when it was recorded.
+            # Named as the builtin is, module included, so an agent that logs `type(exc).__name__`,
+            # or tells its model, and a traceback say what they said when it was recorded (#83).
+            # It pickles by `__reduce__`, never by that name.
             made = type(
                 builtin.__name__,
                 (RecordedToolError, builtin),
-                {"__qualname__": builtin.__qualname__},
+                {"__qualname__": builtin.__qualname__, "__module__": builtin.__module__},
             )
             _AS_BUILTIN[builtin] = made
         return made

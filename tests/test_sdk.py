@@ -21,6 +21,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 import typing
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -1434,6 +1435,7 @@ def test_revive_refuses_a_description_anywhere_in_the_value(value):
         ({"__irimi_type__": "tests.test_sdk:Ticket", "value": [1]}, "fields are not an object"),
         ({"__irimi_type__": 7, "value": {}}, "names no class"),
         ({"__irimi_bytes__": "not base64!"}, "not base64"),
+        ({"__irimi_bytes__": "é"}, "not base64"),
         ({"__irimi_bytes__": 12}, "not base64"),
     ],
 )
@@ -1449,6 +1451,23 @@ def test_revive_never_imports_a_module_a_stored_run_names(monkeypatch):
     with pytest.raises(capture.NotReplayable, match="has not imported"):
         capture.revive({"__irimi_type__": "json.tool:main", "value": {}})
     assert "json.tool" not in sys.modules
+
+
+def test_revive_never_asks_a_module_s_getattr(monkeypatch):
+    """A lazy package's PEP 562 `__getattr__` imports on first use: revive looks a class up in what
+    the module already holds, so a stored run's name cannot make it import after all (#83)."""
+    asked: list[str] = []
+    lazy = types.ModuleType("lazy_pkg")
+
+    def lazy_getattr(name: str) -> Any:
+        asked.append(name)
+        return Ticket
+
+    lazy.__getattr__ = lazy_getattr  # type: ignore[method-assign]
+    monkeypatch.setitem(sys.modules, "lazy_pkg", lazy)
+    with pytest.raises(capture.NotReplayable, match="not in its module"):
+        capture.revive({"__irimi_type__": "lazy_pkg:Ticket", "value": {"ticket_id": "T1"}})
+    assert asked == []
 
 
 def test_revive_raises_nothing_but_not_replayable_however_deep_the_value():

@@ -16,7 +16,8 @@ endpoint, for the result the recorded run's same call got:
     | kind  | the recording                | Runs                                 | Records     |
     | read  | holds it, revivable          | nothing: the revived result, or      | `recording` |
     |       |                              | RecordedToolError if it raised       |             |
-    | read  | misses, or cannot revive it  | the real function                    | `real`      |
+    | read  | misses, cannot revive it, or | the real function                    | `real`      |
+    |       | was stopped from outside     |                                      |             |
     | write | is not asked                 | ONLY the stand-in, as in shadow      | `shadow`    |
 
 A read tool's `ran="real"` in a replay is that replay's miss. A result is revivable when
@@ -54,16 +55,10 @@ from typing import Any, get_args
 from irimi import paths, trace
 from irimi.sdk import context, runs
 from irimi.sdk.api import entrypoint
-from irimi.sdk.capture import (
-    MAX_CAPTURED_BYTES,
-    TRUNCATED_KEY,
-    capture,
-    capture_call,
-    revive,
-    serialized,
-)
+from irimi.sdk.capture import MAX_CAPTURED_BYTES, capture, capture_call, revive, serialized
 from irimi.sdk.client import LOGGER_NAME
 from irimi.sdk.errors import error_info, recorded_error
+from irimi.trace import STOPPED_ERROR_TYPES, TRUNCATED_KEY
 
 logger = logging.getLogger(LOGGER_NAME)
 
@@ -290,11 +285,16 @@ class _Recorded:
 
 def _replay_answer(spec: _Tool, args: trace.JSONValue) -> _Recorded | None:
     """The recorded outcome of this read tool called with `args`, as captured, asked of the
-    control endpoint, or None: a miss, a lookup that failed, or a result `revive` cannot rebuild,
-    and the tool runs for real. Never raises (#83)."""
+    control endpoint, or None, and the tool runs for real: a miss, a lookup that failed, a result
+    `revive` cannot rebuild, or a recorded call something outside it stopped
+    (`trace.STOPPED_ERROR_TYPES`), which has no outcome to give. Never raises (#83)."""
     try:
         outcome = runs.reporter.recorded(_run_id(), spec.name, args)
         if outcome is None:
+            return None
+        if outcome.error is not None and outcome.error.type in STOPPED_ERROR_TYPES:
+            # The engine refuses these entries itself (#83), so the HTTP the recorded body made is
+            # left for the body that runs now; checked here too, so one is never raised again.
             return None
         result = None if outcome.error is not None else revive(outcome.result)
         return _Recorded(result, outcome.error, outcome.awaited)

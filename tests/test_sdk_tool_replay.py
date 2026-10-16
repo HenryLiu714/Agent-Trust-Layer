@@ -11,11 +11,15 @@ tool's always raises `_RealWriteRan`, so a test that let either run where it mus
 """
 
 import asyncio
+import contextlib
 import copy
 import dataclasses
 import http.client
+import http.server
 import json
 import pickle
+import threading
+import traceback
 from collections.abc import Callable, Coroutine, Iterator
 from decimal import Decimal
 from typing import Any
@@ -25,10 +29,10 @@ import pytest
 from irimi import exchange, paths, redact, runner, sdk
 from irimi.policy import ReplayPolicy, ShadowPolicy
 from irimi.recording import Recording
-from irimi.sdk import client, runs
+from irimi.sdk import client, context, runs
 from irimi.sdk.errors import recorded_error
 from irimi.store import DirectoryStore, StoreReader
-from irimi.trace import ErrorInfo, ToolCall
+from irimi.trace import ErrorInfo, RecordedOutcome, ToolCall
 from tests import test_sdk
 from tests.test_engine_mitm import _config, _start
 
@@ -231,6 +235,9 @@ def test_a_recorded_key_error_comes_back_as_recorded_tool_error_catchable_as_key
     assert (raised.type, raised.message) == ("builtins.KeyError", "'acc_missing'")
     # Its `str` is the recorded message, not KeyError's quoting of it again.
     assert str(raised) == "'acc_missing'"
+    # Named as recorded, module included, so a traceback says `KeyError: 'acc_missing'`.
+    assert (type(raised).__module__, type(raised).__qualname__) == ("builtins", "KeyError")
+    assert traceback.format_exception_only(raised) == ["KeyError: 'acc_missing'\n"]
     assert (call.ran, call.result) == ("recording", None)
     # Recorded as it was recorded, not as the class it was raised as.
     assert call.error == ErrorInfo("builtins.KeyError", "'acc_missing'")
@@ -549,3 +556,205 @@ def test_an_async_tool_outside_a_replay_runs_its_body_without_a_hop_off_the_loop
     monkeypatch.setattr(runs, "off_the_loop", counted)
     irimi.record(lambda: asyncio.run(balance_async("acc_1")))
     assert "_replay_answer" not in hops
+
+
+# -- found on the verification pass (#83) ----------------------------------------------------------
+
+
+@sdk.tool(kind="read", name="db.slow")
+async def slow(account: str) -> dict[str, Any]:
+    _REAL_READS.append(account)
+    await asyncio.sleep(30)  # longer than any test waits: the agent's timeout always cancels it
+    return {"account": account}
+
+
+def _times_out() -> str:
+    async def main() -> str:
+        try:
+            await asyncio.wait_for(slow("acc_1"), 0.05)
+        except TimeoutError:
+            return "timed out"
+        return "answered"
+
+    return asyncio.run(main())
+
+
+def test_a_recorded_call_that_was_cancelled_is_a_miss_and_the_tool_runs(irimi):
+    """A call the agent's own timeout cancelled recorded `CancelledError`, which the tool never
+    raised. Answered with it, the agent's `except TimeoutError` would meet a RecordedToolError and
+    the replay would end where the recording went on; it runs again instead, and is cancelled
+    again (#83)."""
+    run_id = irimi.record(_times_out)
+    [recorded] = [
+        e for e in StoreReader(irimi.root).load_run(run_id).events if isinstance(e, ToolCall)
+    ]
+    assert recorded.error == ErrorInfo("asyncio.exceptions.CancelledError", "")
+    result, [call] = irimi.replay(run_id, _times_out)
+    assert result == "timed out"
+    assert _REAL_READS == ["acc_1", "acc_1"]
+    assert (call.ran, call.error) == ("real", recorded.error)
+
+
+def test_a_recorded_call_that_was_closed_unawaited_is_a_miss(monkeypatch):
+    """`GeneratorExit` is what a coroutine closed before it finished records: no outcome of the
+    tool's own either (#83)."""
+    monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
+    monkeypatch.setenv(paths.REPLAY_RUN_ENV, "abcd1234abcd1234")
+    posted: list[Any] = []
+
+    class _Closed:
+        def post(self, run_id: str, action: str, doc: Any) -> None:
+            posted.append(doc)
+
+        def recorded(self, *args: Any) -> RecordedOutcome:
+            return RecordedOutcome(None, ErrorInfo("builtins.GeneratorExit", ""), awaited=False)
+
+    monkeypatch.setattr(runs, "reporter", _Closed())
+    assert balance("acc_1") == {"account": "acc_1", "balance": 100}
+    assert [doc["ran"] for doc in posted] == ["real"]
+
+
+def test_an_inactive_sdk_is_never_told_it_replays(monkeypatch):
+    """`replay_run_id` is the one rule for "this is a replay", and #84's `RunScope` will ask it
+    too: a variable left in an environment irimi is not in front of says nothing (#83)."""
+    monkeypatch.setenv(paths.REPLAY_RUN_ENV, "abcd1234abcd1234")
+    monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
+    assert context.replay_run_id() == "abcd1234abcd1234"
+    monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "0")
+    assert context.replay_run_id() is None
+
+
+class _Answers(http.server.BaseHTTPRequestHandler):
+    """Answers every request `status` with `body`, and keeps each one's path and headers."""
+
+    status = 200
+    body = b""
+    seen: list[tuple[str, dict[str, str]]]
+
+    def do_POST(self) -> None:  # noqa: N802 - the stdlib's spelling
+        self.seen.append((self.path, {k.lower(): v for k, v in self.headers.items()}))
+        self.rfile.read(int(self.headers["content-length"]))
+        self.send_response(self.status)
+        self.send_header("content-length", str(len(self.body)))
+        self.end_headers()
+        self.wfile.write(self.body)
+
+    def log_message(self, *args: Any) -> None:
+        pass
+
+
+@contextlib.contextmanager
+def _answering(monkeypatch, status: int, body: bytes) -> Iterator[list[tuple[str, dict[str, str]]]]:
+    """A control endpoint that answers every request `status` with `body`, for a replay's child."""
+    seen: list[tuple[str, dict[str, str]]] = []
+    handler = type("Handler", (_Answers,), {"status": status, "body": body, "seen": seen})
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}).start()
+    monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
+    monkeypatch.setenv(paths.REPLAY_RUN_ENV, "abcd1234abcd1234")
+    monkeypatch.setenv(paths.CONTROL_ENV, f"http://127.0.0.1:{server.server_address[1]}/_irimi")
+    monkeypatch.setattr(runs, "reporter", client.ControlClient())
+    try:
+        yield seen
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+_HIT = {"result": {"account": "acc_1", "balance": 1}, "error": None, "awaited": False}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"",
+        b"not json",
+        b"\xff\xfe",
+        b"[1]",
+        b'{"result": 1}',
+        json.dumps({**_HIT, "error": {"type": 1, "message": "x"}}).encode(),
+        json.dumps({**_HIT, "awaited": "yes"}).encode(),
+        b"[" * 100_000 + b"]" * 100_000,
+    ],
+)
+def test_an_answer_the_sdk_cannot_read_is_a_miss_warned_once(monkeypatch, warnings, body):
+    with _answering(monkeypatch, 200, body):
+        assert [balance("acc_1"), balance("acc_1")] == [{"account": "acc_1", "balance": 100}] * 2
+    said = [w.getMessage() for w in warnings()]
+    assert len([w for w in said if "look up a recorded call of tool db.balance" in w]) == 1
+
+
+def test_an_answer_past_the_bound_is_a_miss_and_is_never_read_whole(monkeypatch, warnings):
+    """irimi's own answer is at most a recorded call; one larger is from something else on the
+    port, and is not read into the agent's memory to the end (#83)."""
+    monkeypatch.setattr(client, "MAX_ANSWER", 1000, raising=False)
+    body = json.dumps({**_HIT, "result": {"account": "acc_1", "pad": "x" * 2000}}).encode()
+    with _answering(monkeypatch, 200, body):
+        assert balance("acc_1") == {"account": "acc_1", "balance": 100}
+    [said] = [w.getMessage() for w in warnings() if "look up" in w.getMessage()]
+    assert "the answer is past 1000 bytes" in said
+
+
+def test_a_lookup_carries_no_run_header_and_never_goes_through_a_proxy(monkeypatch):
+    """A control request, as the posts are: unlabelled under `instrument()` (#75), and to the
+    endpoint itself whatever `HTTP_PROXY` says."""
+    monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{test_sdk._closed_port()}")
+    with _answering(monkeypatch, 200, json.dumps(_HIT).encode()) as seen:
+        with sdk.run(trigger={}, name="labelled"):  # which instruments the HTTP clients (#75)
+            assert balance("acc_1") == {"account": "acc_1", "balance": 1}
+    [lookup] = [h for path, h in seen if path.endswith(exchange.RECORDED_ACTION)]
+    assert exchange.RUN_HEADER not in lookup
+
+
+class Ledger:
+    """Read tools on a method, a static method and a class method, as W3's ledger has (#76)."""
+
+    def __init__(self, owner: str) -> None:
+        self.owner = owner
+
+    @sdk.tool(kind="read", name="ledger.entry")
+    def entry(self, account: str) -> dict[str, Any]:
+        _real(account)
+        return {"owner": self.owner, "account": account}
+
+    @staticmethod
+    @sdk.tool(kind="read", name="ledger.rate")
+    def rate(account: str) -> int:
+        _real(account)
+        return len(_REAL_READS)
+
+    @sdk.tool(kind="read", name="ledger.kind")
+    @classmethod
+    def kind(cls, account: str) -> str:
+        _real(account)
+        return f"{cls.__name__}:{len(_REAL_READS)}"
+
+
+def test_method_tools_and_a_tool_on_a_thread_are_answered_from_the_recording(irimi):
+    """The receiver is no argument, so a method's call matches on what it was given; a thread the
+    agent hands the run to (`sdk.propagate`) asks from that run (#83)."""
+
+    def script() -> list[Any]:
+        got: list[Any] = []
+        ledger = Ledger("first")
+        worker = threading.Thread(target=sdk.propagate(lambda: got.append(balance("acc_t"))))
+        worker.start()
+        worker.join()
+        return [ledger.entry("acc_m"), Ledger.rate("acc_s"), Ledger.kind("acc_c"), *got]
+
+    run_id = irimi.record(script)
+    _FORBIDDEN.update({"acc_m", "acc_s", "acc_c", "acc_t"})
+    result, calls = irimi.replay(run_id, script)
+    assert result == [
+        {"owner": "first", "account": "acc_m"},
+        3,
+        "Ledger:4",
+        {"account": "acc_t", "balance": 100},
+    ]
+    assert sorted((c.name, c.ran) for c in calls) == [
+        ("db.balance", "recording"),
+        ("ledger.entry", "recording"),
+        ("ledger.kind", "recording"),
+        ("ledger.rate", "recording"),
+    ]
+    assert {c.name: c.args for c in calls}["ledger.entry"] == {"account": "acc_m"}

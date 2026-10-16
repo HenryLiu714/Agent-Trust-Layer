@@ -40,7 +40,6 @@ or a `model_dump` that raises makes its value `{"__irimi_repr__": ...}`, never t
 """
 
 import base64
-import binascii
 import dataclasses
 import inspect
 import json
@@ -49,12 +48,12 @@ import sys
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from irimi.trace import JSONValue
+from irimi.trace import REPR_KEY, TRUNCATED_KEY, JSONValue, holds_description
 
-REPR_KEY = "__irimi_repr__"
+# The two markers that describe a value, `REPR_KEY` and `TRUNCATED_KEY`, are the trace format's,
+# so a replay's recording and `revive` refuse one rule (#83); these two are capture's own.
 TYPE_KEY = "__irimi_type__"
 BYTES_KEY = "__irimi_bytes__"
-TRUNCATED_KEY = "__irimi_truncated__"
 RESERVED_KEYS = frozenset({REPR_KEY, TYPE_KEY, BYTES_KEY, TRUNCATED_KEY})
 
 # The deepest a captured value nests: a value inside more containers than this is not walked.
@@ -148,9 +147,14 @@ def revive(value: JSONValue) -> Any:
         {"__irimi_truncated__": ...}, anywhere  is not the value
 
     REVIVE NEVER IMPORTS. A stored run names its classes, and importing a module runs its code, so
-    a class is looked up only in a module already in `sys.modules`: a tool that returned one has
-    imported it, as has the agent a replay re-runs. A class it cannot find there, that is neither,
+    a class is looked up only in a module already in `sys.modules`, and only in what it already
+    holds, never through its `__getattr__`: a tool that returned one has imported it, as has the
+    agent a replay re-runs. A class it cannot find there, that is neither,
     or whose constructor raises is NotReplayable naming it. Never raises anything else."""
+    # One walk for the refusal, the trace format's (`trace.holds_description`), before any class is
+    # built: the engine refuses the same recorded results (#83).
+    if holds_description(value):
+        raise NotReplayable("the value was recorded as its description, not as itself")
     try:
         return _revive(value)
     except NotReplayable:
@@ -167,15 +171,13 @@ def _revive(value: JSONValue) -> Any:
     marker = RESERVED_KEYS.intersection(value)
     if not marker:
         return {key: _revive(item) for key, item in value.items()}
-    if REPR_KEY in marker or TRUNCATED_KEY in marker:
-        raise NotReplayable("the value was recorded as its description, not as itself")
     if BYTES_KEY in marker:
         encoded = value[BYTES_KEY]
         if not isinstance(encoded, str):
             raise NotReplayable("a bytes value is not base64 text")
         try:
             return base64.b64decode(encoded, validate=True)
-        except binascii.Error:
+        except ValueError:  # binascii.Error, or text that is not ASCII
             raise NotReplayable("a bytes value is not base64 text") from None
     return _revive_typed(value.get(TYPE_KEY), value.get("value"))
 
@@ -190,7 +192,10 @@ def _revive_typed(name: JSONValue, fields: JSONValue) -> Any:
         raise NotReplayable(f"{name} is in a module this process has not imported")
     try:
         for part in qualname.split("."):
-            found = getattr(found, part)
+            # Looked up statically: `getattr` would run a module's `__getattr__` (PEP 562), which a
+            # lazy package uses to import on first use, or a metaclass's, so a name in a stored
+            # run could make revive import after all (#83).
+            found = inspect.getattr_static(found, part)
     except AttributeError:
         raise NotReplayable(f"{name} is not in its module") from None
     if not isinstance(found, type):

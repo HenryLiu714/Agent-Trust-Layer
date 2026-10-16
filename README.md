@@ -557,23 +557,31 @@ def find_accounts(segment: str) -> list[Account]: ...
   recording`. A recorded exception is raised as `sdk.RecordedToolError`, which carries the
   recorded `type` and `message`. For a builtin `Exception`, such as `KeyError`, it is also a
   subclass of that builtin and bears its name, so the agent's own `except KeyError` catches it as
-  it caught the original. Otherwise the real function runs (`ran: real`, the replay's miss):
+  it caught the original (all but `ExceptionGroup` and the three `Unicode…Error`s, which take
+  more than a message). Otherwise the real function runs (`ran: real`, the replay's miss):
   - the recording has no such call;
   - its result was stored as a description, `__irimi_repr__` or `__irimi_truncated__` (a
-    `Decimal`, a `datetime`, anything past 1 MiB);
+    `Decimal`, a `datetime`, anything past 1 MiB), or holds a class that cannot be rebuilt here
+    (below);
+  - the recorded call was cancelled, or its coroutine closed, before it finished: it has no
+    outcome of its own, and the agent's `except TimeoutError` around `asyncio.wait_for` would
+    not catch a `RecordedToolError`;
   - it was recorded after a write the replay has not made, or the replay has diverged, as for a
     read on the wire. Unlike a read on the wire, this alone does not make the replay diverge: the
-    tool's body runs, and its own HTTP is decided as any request is.
+    tool's body runs, and its own HTTP is decided as any request is;
+  - irimi could not be asked, or its answer could not be read: a warning on the `irimi.sdk`
+    logger, once per kind of failure, as for a failed post.
 
   A result redaction replaced comes back with its `<redacted:…>` placeholder, not the secret. A
-  class in a result is rebuilt only from a module the process has already imported: a stored run
-  never makes irimi import anything. A recorded exception is its type and message alone, so the
-  one raised again has `args == (message,)`, and none of the original's other attributes (an
-  `OSError`'s `errno`). The HTTP a tool's body made inside it is never made in a replay that
-  answers the tool, and the recorded answers to it are used up with the call. A
-  write tool runs its stand-in in a replay too, even when the recorded run made the same call.
-  With no tool overlay, no recorded read shows what a stand-in did, so a write tool never
-  diverges a replay.
+  class in a result is rebuilt only when it is a dataclass or a model (`model_validate`) that builds
+  from its recorded fields, and only from a module the process has already imported: a stored run
+  never makes irimi import anything. A recorded exception is its type and message alone, so the one
+  raised again has `args == (message,)`, and none of the original's other attributes (an `OSError`'s
+  `errno`). The HTTP a tool's body made inside it is never made in a replay that answers the tool,
+  and the recorded answers to it are used up with the call, as are the recorded results of the read
+  tools its body called that a later identical call would otherwise be answered with. A write tool
+  runs its stand-in in a replay too, even when the recorded run made the same call. With no tool
+  overlay, no recorded read shows what a stand-in did, so a write tool never diverges a replay.
 
 ## Serve mode
 

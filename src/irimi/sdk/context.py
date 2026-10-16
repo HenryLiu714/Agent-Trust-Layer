@@ -27,7 +27,11 @@ def active() -> bool:
 def replay_run_id() -> str | None:
     """The run a replay's engine names in `IRIMI_REPLAY_RUN` for its child, or None when irimi is
     not replaying this process (#83): the one rule `tools` asks before it looks a read tool up,
-    and #84's `RunScope` will ask before it adopts the id. Read at each call, never cached."""
+    and #84's `RunScope` will ask before it adopts the id. Never while the SDK is inactive, as
+    `current_run_id`: irimi is not in front, whatever the environment says. Read at each call,
+    never cached."""
+    if not active():
+        return None
     return os.environ.get(paths.REPLAY_RUN_ENV) or None
 
 

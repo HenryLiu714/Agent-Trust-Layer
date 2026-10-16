@@ -15,6 +15,8 @@ import pytest
 from irimi import __version__, redact, trace
 from irimi.control import MAX_CONTROL_BODY, MAX_REFUSAL, TOO_DEEP, ControlEndpoint
 from irimi.exchange import Exchange, Request
+from irimi.policy import ReplayPolicy, ShadowPolicy
+from irimi.recording import Recording
 from irimi.store import DirectoryStore, NullStore, StoreReader
 from irimi.trace import MAX_ERROR_MESSAGE, MAX_QUOTED, ErrorInfo, ToolCall, Trigger
 from tests import test_engine_mitm
@@ -218,6 +220,9 @@ def test_health_says_serve_when_the_engine_serves(tmp_path, monkeypatch):
 
 _START = f"/_irimi/runs/{RUN}/start"
 _NOT_JSON = "the body is not JSON: "
+# A replay's lookup of a read tool's recorded outcome (#83).
+_LOOKUP = f"/_irimi/runs/{RUN}/tool-calls/recorded"
+LOOKUP = {"name": "db.balance", "args": {"account": "acc_1"}}
 
 # (method, path, body, status, error). Every refusal names what was wrong in one line.
 REFUSALS = [
@@ -319,6 +324,29 @@ REFUSALS = [
         400,
         f"'{PROCESS_RUN}' {OWN_RUN}",
     ),
+    # The lookup is checked in the same order, and refused in the same words (#83).
+    ("GET", _LOOKUP, None, 405, f"{_LOOKUP} takes POST, not GET"),
+    ("POST", "/_irimi/runs/../x/tool-calls/recorded", LOOKUP, 400, "'../x' cannot name a run"),
+    (
+        "POST",
+        _LOOKUP,
+        b" " * (MAX_CONTROL_BODY + 1),
+        413,
+        f"the body is {MAX_CONTROL_BODY + 1} bytes, over the {MAX_CONTROL_BODY} allowed",
+    ),
+    (
+        "POST",
+        _LOOKUP,
+        b"{",
+        400,
+        _NOT_JSON + "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+    ),
+    ("POST", _LOOKUP, b'{"name": "x", "args": NaN}', 400, _NOT_JSON + "NaN is not a finite number"),
+    ("POST", _LOOKUP, b"[]", 400, "the body is a list, not an object"),
+    ("POST", _LOOKUP, {"name": "db.balance"}, 400, "missing required field 'args'"),
+    ("POST", _LOOKUP, {"args": {}}, 400, "missing required field 'name'"),
+    ("POST", _LOOKUP, {"name": 1, "args": {}}, 400, "'name' is an integer, not a string"),
+    ("POST", _LOOKUP, {**LOOKUP, "run_id": RUN}, 400, "unknown field 'run_id'"),
 ]
 
 
@@ -363,6 +391,78 @@ def test_a_tool_call_made_in_no_run_is_taken_unattributed_but_not_a_start(engine
     assert (call.run_id, call.name) == ("unattributed", "db.write")
     assert engine.tool_calls == [call]
     assert reader.list_runs() == []
+
+
+@pytest.mark.parametrize("run_id", [RUN, PROCESS_RUN, "unattributed"])
+def test_a_lookup_under_an_engine_that_is_not_replaying_is_a_404_and_records_nothing(
+    engine, run_id
+):
+    """Shadow mode answers no read tool from anything, so the SDK runs it for real (#83). An SDK
+    run, the process run and no run may all ask, and the lookup is no exchange, no tool call and
+    no run."""
+    route = f"/_irimi/runs/{run_id}/tool-calls/recorded"
+    status, headers, body = engine.call("POST", route, LOOKUP)
+    assert (status, json.loads(body)) == (404, {"error": "no recorded call"})
+    assert STAMP in headers
+    reader = engine.finish()
+    assert reader.list_runs() == []
+    assert not (engine.root / "runs").exists() and not (engine.root / "unattributed").exists()
+    assert engine.seen == [] and engine.tool_calls == []
+
+
+def _replaying(tmp_path, monkeypatch, *events, policy=None) -> _Engine:
+    """An engine replaying a run whose `events` are given, as `cli._build_engine` builds one: its
+    policy a `ReplayPolicy` over their `Recording`, unless `policy` is given."""
+    cfg = _config(tmp_path, monkeypatch)
+    key = redact.load_key(tmp_path)
+    store = DirectoryStore(tmp_path / "store", key, replay_of="recorded01")
+    policy = policy or ReplayPolicy(Recording.from_events(list(events), key, cfg.maps), cfg.maps)
+    tool_calls: list[ToolCall] = []
+    eng, seen, stop = _start(cfg, policy=policy, store=store, on_tool_call=tool_calls.append)
+    return _Engine(eng.listen_port(), store, seen, tool_calls, stop)
+
+
+def test_a_lookup_the_recording_answers_is_a_stamped_200_once_and_records_nothing(
+    tmp_path, monkeypatch, caplog
+):
+    """A hit is not a tool call: the SDK posts the call afterwards, as it posts every call (#83).
+    Args nested too deep to redact match nothing, and are a miss, never irimi's 500."""
+    recorded = ToolCall(
+        "tc-1", "recorded01", "db.balance", "read", "real", LOOKUP["args"], {"n": 1}, None, 1.0, 2.0
+    )
+    engine = _replaying(tmp_path, monkeypatch, recorded)
+    with caplog.at_level(logging.ERROR, logger="irimi.control"):
+        try:
+            hit = engine.call("POST", _LOOKUP, LOOKUP)
+            again = engine.call("POST", _LOOKUP, LOOKUP)
+            deep = engine.call("POST", _LOOKUP, _nested(LOOKUP, "args"))
+        finally:
+            reader = engine.finish()
+    answer = {"result": {"n": 1}, "error": None, "awaited": False}
+    assert (hit[0], json.loads(hit[2])) == (200, answer)
+    for status, _, body in (again, deep):
+        assert (status, json.loads(body)) == (404, {"error": "no recorded call"})
+    assert all(STAMP in headers for _, headers, _ in (hit, again, deep))
+    assert [r for r in caplog.records if r.name == "irimi.control"] == []
+    assert reader.list_runs() == []
+    assert engine.seen == [] and engine.tool_calls == []
+
+
+def test_a_policy_whose_lookup_raises_is_irimi_s_500_never_a_forward(tmp_path, monkeypatch):
+    """`AnswerPolicy.recorded_tool_call` never raises, but one that did would be answered as any
+    failure of the endpoint's own is: a stamped 500, which the SDK takes for a miss (#83)."""
+
+    class _Broken(ShadowPolicy):
+        def recorded_tool_call(self, name, args):
+            raise RuntimeError("the recording is on fire")
+
+    engine = _replaying(tmp_path, monkeypatch, policy=_Broken())
+    try:
+        status, headers, body = engine.call("POST", _LOOKUP, LOOKUP)
+    finally:
+        engine.finish()
+    assert (status, json.loads(body)) == (500, {"error": "internal"})
+    assert STAMP in headers and engine.seen == []
 
 
 def test_a_control_request_through_the_forward_proxy_is_answered_the_same(engine):

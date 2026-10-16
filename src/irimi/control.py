@@ -251,8 +251,8 @@ class ControlEndpoint:
         if unknown:
             raise _Refused(400, f"unknown field {unknown[0]!r}")
         for field in trace.RECORDED_LOOKUP_FIELDS:
-            if field not in posted:
-                raise _Refused(400, f"missing field {field!r}")
+            if field not in posted:  # in the words of the decoders every other route uses
+                raise _Refused(400, f"missing required field {field!r}")
         name = posted["name"]
         if not isinstance(name, str):
             raise _Refused(400, f"'name' is {trace.json_type(name)}, not a string")

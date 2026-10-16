@@ -1,5 +1,6 @@
 """Trace format v1 (#68): every record survives its codec, and the reference page decodes."""
 
+import asyncio
 import dataclasses
 import hashlib
 import itertools
@@ -840,3 +841,22 @@ def test_the_documented_example_is_what_the_encoders_write():
         documented = json.loads(text)
         seq, event = trace.event_from_json(documented, lambda ref: blobs[ref.sha256])
         assert trace.event_to_json(seq, event, trace.body_ref) == documented
+
+
+def test_a_description_is_found_anywhere_in_a_captured_value():
+    """`__irimi_repr__` and `__irimi_truncated__` say what a value was, not what it is, so a
+    replay never hands one back as the value (#83). Found at any depth without recursion."""
+    assert trace.DESCRIPTION_KEYS == {trace.REPR_KEY, trace.TRUNCATED_KEY}
+    assert trace.holds_description({"a": [1, {"b": {"__irimi_repr__": "Decimal('1')"}}]})
+    assert trace.holds_description([{"__irimi_truncated__": True, "bytes": 9}])
+    for whole in (None, 1, "__irimi_repr__", ["__irimi_repr__"], {"__irimi_bytes__": "AA=="}):
+        assert not trace.holds_description(whole)
+    deep: list = [{"__irimi_repr__": "x"}]
+    for _ in range(100_000):
+        deep = [deep]
+    assert trace.holds_description(deep)
+
+
+def test_the_stopped_error_types_are_how_a_cancelled_or_closed_call_is_recorded():
+    stops = (asyncio.CancelledError(), GeneratorExit())
+    assert {ErrorInfo.from_exception(e).type for e in stops} == trace.STOPPED_ERROR_TYPES

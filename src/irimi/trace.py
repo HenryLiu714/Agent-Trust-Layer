@@ -199,6 +199,38 @@ class RecordedOutcome:
 # args as captured, and nothing else (#83).
 RECORDED_LOOKUP_FIELDS = ("name", "args")
 
+# The markers of a captured value that describe it rather than hold it (`docs/trace-format.md`,
+# "Captured values"): its repr, or its size when it was too large to keep. Trace format, not the
+# SDK's alone: a replay's recording refuses a recorded result holding one, as the SDK's `revive`
+# does, so neither side states the rule apart (#83).
+REPR_KEY = "__irimi_repr__"
+TRUNCATED_KEY = "__irimi_truncated__"
+DESCRIPTION_KEYS = frozenset({REPR_KEY, TRUNCATED_KEY})
+
+# The `ErrorInfo.type` a tool call records when something outside it stopped it before it
+# finished: its task was cancelled (an `asyncio.wait_for` that timed out), or its coroutine was
+# closed unawaited. It holds no outcome of the tool's own, so a replay never answers with it: the
+# agent's `except TimeoutError` would meet a RecordedToolError where the recording went on (#83).
+# `ErrorInfo.from_exception` spells them so on every supported Python.
+STOPPED_ERROR_TYPES = frozenset({"asyncio.exceptions.CancelledError", "builtins.GeneratorExit"})
+
+
+def holds_description(value: JSONValue) -> bool:
+    """Whether a captured value holds a description of a value anywhere in it (`DESCRIPTION_KEYS`
+    as a key of a JSON object at any depth), so that it cannot be rebuilt as the value (#83). Walked
+    with a stack, never recursion, so a value nested past the interpreter's stack is answered too.
+    Never raises."""
+    stack: list[Any] = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            if not DESCRIPTION_KEYS.isdisjoint(item):
+                return True
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return False
+
 
 @dataclass(frozen=True)
 class TelemetrySeen:

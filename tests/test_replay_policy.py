@@ -1018,3 +1018,91 @@ def test_a_read_tool_call_and_an_exchange_never_answer_each_other():
     assert recording.take_tool_call("GET", {"path": "/v1/charges/ch_1"}) is None
     assert recording.take(_req(), "read") is not None
     assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is not None
+
+
+def test_an_answered_read_tool_uses_up_the_read_tools_its_body_called():
+    """The recorded `db.account` called `db.balance` inside it, and the agent called `db.balance`
+    again later, after the balance changed. A replay that answers `db.account` never calls the
+    inner one, which must not then answer the agent's later call with the balance before."""
+    inner = _tool(result={"balance": 1}, span=(10.2, 10.4))
+    outer = _tool(name="db.account", result={"account": "acc_1"}, span=(10.0, 11.0))
+    later = _tool(result={"balance": 2}, span=(12.0, 12.1))
+    recording = _recording(inner, outer, later)
+    assert recording.take_tool_call("db.account", {"account": "acc_1"}) is outer
+    taken = recording.take_tool_call("db.balance", {"account": "acc_1"})
+    assert taken is not None and taken.result == {"balance": 2}
+
+
+def test_a_read_tool_call_within_an_answered_one_s_span_that_none_repeats_still_answers():
+    """Two read tools at once (an `asyncio.gather`, or a sync tool's coroutine left pending while
+    the agent awaits another): the shorter is within the longer one's span, though its body never
+    called it. A replay that answers the longer one first must still answer the shorter from its
+    own recorded call: no later call of its name and args is there for that one to answer in its
+    place, so using it up would only make the shorter a miss, decided by which lookup won (#83)."""
+    alongside = _tool(name="db.owner", result={"owner": "a"}, span=(10.2, 10.4))
+    longer = _tool(span=(10.0, 11.0))
+    recording = _recording(alongside, longer)
+    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is longer
+    assert recording.take_tool_call("db.owner", {"account": "acc_1"}) is alongside
+
+
+def test_two_read_tool_calls_clocked_alike_never_use_each_other_up():
+    first = _tool(result={"balance": 1}, span=(10.0, 11.0))
+    second = _tool(name="db.account", span=(10.0, 11.0))
+    recording = _recording(first, second)
+    assert recording.take_tool_call("db.account", {"account": "acc_1"}) is second
+    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is first
+
+
+def test_a_recorded_tool_redaction_could_not_read_uses_up_nothing_its_body_made():
+    """It is a miss, so its body runs again, and makes the requests and tool calls it made when
+    recorded, which the recording still answers: none of them is a miss, and its write does not
+    diverge the replay."""
+    read = _stored(_req(), started_at=10.2, ended_at=10.3)
+    write = _recorded_refund(started_at=10.4, ended_at=10.5)
+    nested = _tool(name="db.rate", span=(10.6, 10.7))
+    unreadable = replace(_tool(span=(10.0, 11.0)), result=redact.REDACTION_FAILED)
+    recording = _recording(read, write, nested, unreadable)
+    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is None
+    assert recording.take(_req(), "read") is not None
+    assert recording.take(_refund(), "write") is not None
+    assert recording.take_tool_call("db.rate", {"account": "acc_1"}) is nested
+    assert not recording.diverged
+    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is None
+
+
+def test_a_recorded_error_whose_message_redaction_could_not_read_is_a_miss_in_its_place():
+    """The store keeps such a message as `<redaction-failed>`, which the replay would raise as the
+    recorded error's message (#69)."""
+    error = ErrorInfo("builtins.KeyError", redact.REDACTION_FAILED)
+    recording = _recording(_tool(error=error), _tool(result={"balance": 2}))
+    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is None
+    taken = recording.take_tool_call("db.balance", {"account": "acc_1"})
+    assert taken is not None and taken.result == {"balance": 2}
+
+
+@pytest.mark.parametrize(
+    ("result", "error"),
+    [
+        ({"invoices": [{"due": 1, "amount": {"__irimi_repr__": "Decimal('49.00')"}}]}, None),
+        ({"__irimi_truncated__": True, "bytes": 2_000_000}, None),
+        (None, ErrorInfo("asyncio.exceptions.CancelledError", "")),
+        (None, ErrorInfo("builtins.GeneratorExit", "")),
+    ],
+    ids=["a-description", "truncated", "cancelled", "closed"],
+)
+def test_a_recorded_tool_with_no_outcome_to_give_leaves_its_body_s_http_to_answer_it(result, error):
+    """A result that describes a value is not the value, and a call stopped from outside recorded
+    no outcome of its own, so the SDK runs the body for real (#83). The lookup is a miss in its
+    place, so the body's read and its write are answered from the recording as when recorded, and
+    the replay does not diverge."""
+    read = _stored(_req(), started_at=10.2, ended_at=10.3)
+    write = _recorded_refund(started_at=10.4, ended_at=10.5)
+    tool = replace(_tool(span=(10.0, 11.0)), result=result, error=error)
+    recording = _recording(read, write, tool, _stored(_req()))
+    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is None
+    assert recording.take(_req(), "read") is not None
+    assert recording.take(_refund(), "write") is not None
+    assert not recording.diverged
+    assert recording.take(_req(), "read") is not None  # the agent's own read after, unchanged
+    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is None

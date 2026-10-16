@@ -140,6 +140,12 @@ START_ACTION = "start"
 TOOL_CALLS_ACTION = "tool-calls"
 END_ACTION = "end"
 RUN_ACTIONS = (START_ACTION, TOOL_CALLS_ACTION, END_ACTION)
+# The one control route that answers with something: `runs/{run_id}/tool-calls/recorded`, where the
+# SDK asks a replay for a read tool's recorded result (#83). Not a run action: it reports nothing.
+RECORDED_ACTION = f"{TOOL_CALLS_ACTION}/recorded"
+# The routes about a tool call, which a run with no SDK start may use: the process run, or
+# `unattributed` for a call made in no run (#76, #83).
+TOOL_ACTIONS = frozenset({TOOL_CALLS_ACTION, RECORDED_ACTION})
 # The header that names the run a request belongs to. irimi reads it and strips it (#67); the SDK
 # puts it on every request a run makes (#75). Here, in layer 0, rather than in `pipeline`, so the
 # SDK, which sits beside `pipeline` and may not import it, spells it the same way (#74). Header

@@ -350,7 +350,7 @@ def _key_paths(d, path=()):
 # Fields added after #68 shipped v1. Each decodes as its default when absent, and has a test of its
 # own below.
 _ADDED_WITHIN_V1 = {("exchange", ("stream_chunks",))}  # #71
-_ADDED_IN_V2 = {("run", ("replay_of",))}  # #82
+_ADDED_IN_V2 = {("run", ("replay_of",)), ("tool_call", ("awaited",))}  # #82, #83
 
 _REQUIRED = [
     (name, path)
@@ -397,7 +397,8 @@ _FIRST_ITEM_REFUSED = {
     "stream_chunks": "'stream_chunks'[0] is not a positive integer",
 }
 _TYPED = [(name, path) for name, path in _REQUIRED if path[-1] not in _FREE_JSON] + [
-    ("exchange", ("stream_chunks",))
+    ("exchange", ("stream_chunks",)),
+    ("tool_call", ("awaited",)),
 ]
 
 
@@ -534,6 +535,31 @@ def test_a_replay_names_the_run_it_replays():
     assert trace.run_from_json(trace.run_to_json(record)) == record
 
 
+def test_a_recorded_outcome_round_trips_and_holds_a_tool_call_s_outcome():
+    """What the control endpoint answers a replay's lookup with, and the SDK reads (#83)."""
+    call = dataclasses.replace(
+        _filled(ToolCall), result=None, error=ErrorInfo("builtins.KeyError", "'k'"), awaited=True
+    )
+    d = trace.recorded_outcome_to_json(call)
+    assert d == {
+        "result": None,
+        "error": {"type": "builtins.KeyError", "message": "'k'"},
+        "awaited": True,
+    }
+    assert trace.recorded_outcome_from_json(d) == trace.RecordedOutcome(None, call.error, True)
+    with pytest.raises(TraceFormatError, match="'awaited'"):
+        trace.recorded_outcome_from_json(d | {"awaited": "yes"})
+
+
+def test_a_tool_call_written_before_awaited_existed_reads_as_one_no_coroutine_gave():
+    """#83 added `awaited` within v2, so a tool call recorded before it has no such key, and reads
+    as the field's default: a call that returned its result itself."""
+    d = trace.tool_call_to_json(dataclasses.replace(_filled(ToolCall), awaited=True))
+    assert trace.tool_call_from_json(d).awaited is True
+    del d["awaited"]
+    assert trace.tool_call_from_json(d).awaited is False
+
+
 def test_an_exchange_written_before_stream_chunks_existed_reads_as_one_that_did_not_stream():
     """#71 added `stream_chunks` within v1, so a recording made before it has no such key, and
     reads as the field's default: a response that did not stream."""
@@ -580,6 +606,7 @@ _DECODERS = {
     "run_from_json": trace.run_from_json,
     "tool_call_from_json": trace.tool_call_from_json,
     "telemetry_from_json": trace.telemetry_from_json,
+    "recorded_outcome_from_json": trace.recorded_outcome_from_json,
     "exchange_from_json": lambda d: trace.exchange_from_json(d, _never),
     "event_from_json": lambda d: trace.event_from_json(d, _never),
 }

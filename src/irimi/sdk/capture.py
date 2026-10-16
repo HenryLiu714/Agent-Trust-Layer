@@ -1,10 +1,11 @@
 """How the SDK captures a trigger's arguments as JSON (#74).
 
 A run's trigger is stored as `Trigger.args` in its `run.json`, and replay (#84) re-runs the
-trigger with those args turned back into values by `revive`, this module's inverse, which #84
-adds. So capture says two things about every value: its JSON, and whether that JSON is enough to
-rebuild an equal value (`replayable`). The rules are a table, each row has a test, and
-`docs/trace-format.md` ("Captured arguments") is the reference:
+trigger with those args turned back into values by `revive`, this module's inverse, which a
+replay also uses to hand a read tool its recorded result (#83). So capture says two things about
+every value: its JSON, and whether that JSON is enough to rebuild an equal value (`replayable`).
+The rules are a table, each row has a test, and `docs/trace-format.md` ("Captured arguments") is
+the reference:
 
     None, bool, int, str, finite float  itself                                   replayable
     non-finite float                    {"__irimi_repr__": "nan"}, "inf", "-inf" not
@@ -39,6 +40,7 @@ or a `model_dump` that raises makes its value `{"__irimi_repr__": ...}`, never t
 """
 
 import base64
+import binascii
 import dataclasses
 import inspect
 import json
@@ -125,6 +127,87 @@ def _signature(fn: Callable[..., Any]) -> inspect.Signature:
 
         return inspect.signature(fn, annotation_format=annotationlib.Format.FORWARDREF)
     return inspect.signature(fn)
+
+
+class NotReplayable(Exception):
+    """A captured value `revive` cannot turn back into the value it was (#83, #84): the reason."""
+
+
+def revive(value: JSONValue) -> Any:
+    """The value `value` was captured from (see the module doc), or NotReplayable naming why not.
+    The inverse of the capture table, row by row:
+
+        JSON scalars, lists, objects            themselves; a tuple was captured as a list, and
+                                                comes back as one
+        {"__irimi_bytes__": <base64>}           bytes
+        {"__irimi_type__": "m:q", "value": v}   the class `m:q` names, in a module this process
+                                                has imported: a dataclass is `cls(**revive(v))`,
+                                                a class with a callable `model_validate` is
+                                                `cls.model_validate(revive(v))`
+        {"__irimi_repr__": ...}, anywhere       NotReplayable: its JSON describes the value, it
+        {"__irimi_truncated__": ...}, anywhere  is not the value
+
+    REVIVE NEVER IMPORTS. A stored run names its classes, and importing a module runs its code, so
+    a class is looked up only in a module already in `sys.modules`: a tool that returned one has
+    imported it, as has the agent a replay re-runs. A class it cannot find there, that is neither,
+    or whose constructor raises is NotReplayable naming it. Never raises anything else."""
+    try:
+        return _revive(value)
+    except NotReplayable:
+        raise
+    except Exception as exc:  # a stored value deeper than the stack, or a class that misbehaves
+        raise NotReplayable(f"{type(exc).__name__} while reviving") from None
+
+
+def _revive(value: JSONValue) -> Any:
+    if isinstance(value, list):
+        return [_revive(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    marker = RESERVED_KEYS.intersection(value)
+    if not marker:
+        return {key: _revive(item) for key, item in value.items()}
+    if REPR_KEY in marker or TRUNCATED_KEY in marker:
+        raise NotReplayable("the value was recorded as its description, not as itself")
+    if BYTES_KEY in marker:
+        encoded = value[BYTES_KEY]
+        if not isinstance(encoded, str):
+            raise NotReplayable("a bytes value is not base64 text")
+        try:
+            return base64.b64decode(encoded, validate=True)
+        except binascii.Error:
+            raise NotReplayable("a bytes value is not base64 text") from None
+    return _revive_typed(value.get(TYPE_KEY), value.get("value"))
+
+
+def _revive_typed(name: JSONValue, fields: JSONValue) -> Any:
+    """A dataclass or a model, from its `module:qualname` and its captured fields."""
+    if not isinstance(name, str) or ":" not in name:
+        raise NotReplayable(f"{TYPE_KEY} names no class")
+    module, _, qualname = name.partition(":")
+    found: Any = sys.modules.get(module)
+    if found is None:
+        raise NotReplayable(f"{name} is in a module this process has not imported")
+    try:
+        for part in qualname.split("."):
+            found = getattr(found, part)
+    except AttributeError:
+        raise NotReplayable(f"{name} is not in its module") from None
+    if not isinstance(found, type):
+        raise NotReplayable(f"{name} is not a class")
+    revived = _revive(fields)
+    try:
+        if dataclasses.is_dataclass(found):
+            if not isinstance(revived, dict):
+                raise NotReplayable(f"{name}'s fields are not an object")
+            return found(**revived)
+        if callable(getattr(found, "model_validate", None)):
+            return found.model_validate(revived)  # type: ignore[attr-defined]
+    except NotReplayable:
+        raise
+    except Exception:
+        raise NotReplayable(f"{name} could not be built from its fields") from None
+    raise NotReplayable(f"{name} is neither a dataclass nor a model")
 
 
 def serialized(value: JSONValue) -> bytes:

@@ -13,6 +13,12 @@ REDACT_KEY_NAME = "redact.key"  # the redaction HMAC key (0600), created on firs
 ENGINE_ACTIVE_ENV = "IRIMI_ENGINE_ACTIVE"
 RUN_ENV = "IRIMI_RUN"
 CONTROL_ENV = "IRIMI_CONTROL"
+# Set only for the child of an engine that replays a stored run, to the run the replay is: the
+# engine's own, `IRIMI_RUN`, never the run replayed (#83). Until #84 makes a top-level run adopt
+# the id, the SDK reads it only as "this is a replay" (`context.replay_run_id`), and asks the
+# recording for a read tool's result. `irimi shadow` removes it from a child it does not replay
+# for, so it is irimi's word.
+REPLAY_RUN_ENV = "IRIMI_REPLAY_RUN"
 # The proxy variables `irimi shadow` points at its own listener, in both spellings, since clients
 # disagree on which they read. Declared once, here, because the SDK reads these same names to tell
 # a connection to irimi from one that bypasses it (#75).

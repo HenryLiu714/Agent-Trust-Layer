@@ -961,3 +961,89 @@ def test_irimi_compare_finds_a_lost_run_s_writes_in_the_engine_s_run(run_workflo
         f"  0 same · 0 changed · 0 only in A · {len(added)} only in B",
     ]
     assert rows_not_shown(shadow, a, engine, out) == []
+
+
+# ------------------------------------------------------------------------------- replay (#82)
+#
+# One process, several runs: a replay answers from one of them (the issue's "Replay which run?"),
+# so every other run's requests are missing from its recording. `test_replays.py` replays each run
+# of every scenario here; these pin what that means for the runs it does not answer.
+
+
+@pytest.mark.parametrize("index", range(8))
+def test_replaying_one_of_eight_concurrent_runs_fakes_the_others_writes_unchecked(
+    run_workflow, replayed, index
+):
+    """Each of `threads_8`'s eight runs replayed in turn. The replayed run's refund is its
+    recording's, or, when another run's refund missed first and the replay diverged, checked again
+    against its recording's own read of its charge: either way L3 passed, as recorded. Every other
+    run's refund misses, is faked and never forwarded, and is checked against nothing: its charge
+    read is not in the recording, and a replay never checks a precondition against live state, so
+    it is `not_evaluable`, L2. Only the other runs' own charge reads reach the fake Stripe."""
+    recorded = run_workflow(W, "threads_8", "shadow")
+    run_id = sorted(r.run_id for r in recorded.sdk_runs())[index]
+    _, replay = replayed(W, "threads_8", run_id=run_id)
+    [mine] = [c for c in recorded.sdk_runs() if c.run_id == run_id]
+    charge = mine.trigger.args["message"]["charge"]
+    refunds = [ex for ex in replay.reported if ex.kind == "write"]
+    assert len(refunds) == 8
+    own = [ex for ex in refunds if f"charge={charge}&" in ex.request.body.decode() + "&"]
+    others = [ex for ex in refunds if ex not in own]
+    assert [ex.precondition for ex in own] == ["passed"]
+    assert {(ex.precondition, ex.flags) for ex in others} == {
+        ("not_evaluable", ("fidelity:L1", "replay-miss"))
+    }
+    checks = [ex for ex in replay.reported if ex.issued_by == "engine"]
+    assert {(ex.answered_by, ex.response is None, ex.flags[-1]) for ex in checks} <= {
+        ("recording", True, "replay-miss"),
+        ("recording", False, "from-recording"),
+    }
+    assert sum(ex.response is None for ex in checks) == 7
+    seen = [(r.method, r.path) for r in replay.internet.requests()]
+    assert {m for m, _ in seen} == {"GET"}
+    assert {p for _, p in seen} >= {f"/v1/charges/ch_Q{i}" for i in range(8)} - {
+        f"/v1/charges/{charge}"
+    }
+    summary = replay.summaries()
+    assert sum(" unvalidated (L2)" in line for line in summary) == 7
+    assert (
+        sum(f"on {charge}  unvalidated (L3 preconditions passed)" in line for line in summary) == 1
+    )
+
+
+def test_replaying_the_second_shared_charge_run_hands_its_refusal_to_the_first(
+    run_workflow, replayed
+):
+    """LOOKS WRONG: a replay answers every run of the process from the one run's recording, so the
+    first run's refund, identical to the second's, takes the second's recorded refusal, and its
+    read the recorded read the overlay edited to show a refund no run has made yet. The second
+    run, the one replayed, then misses everything: its read goes live, and its refund, checked
+    against its recording's own read of the charge, passes. `irimi compare` of the second run and
+    its replay shows the refusal gone."""
+    recorded = run_workflow(W, "shared_charge", "shadow")
+    second = max(recorded.sdk_runs(), key=lambda r: r.trigger.args["message"]["index"])
+    _, replay = replayed(W, "shared_charge", run_id=second.run_id)
+    assert replay.answered() == [
+        ("read:ch_QSHARED", 200, "overlay"),
+        ("refund:ch_QSHARED", 400, "fake-L1"),
+        ("read:ch_QSHARED", 200, None),
+        ("refund:ch_QSHARED", 200, "fake-L1"),
+    ]
+    first, replayed_second = (c["run"] for c in replay.calls() if c["label"].startswith("read"))
+    assert first != replayed_second
+    [mine] = [
+        r.run_id
+        for r in replay.stored().list_runs()
+        if r.run_id == replayed_second and r.trigger.args["message"]["index"] == 6
+    ]
+    code, out, err = replay.compare_runs(second.run_id, mine)
+    assert (code, out[4:], err) == (
+        1,
+        [
+            "  ~ A ✗ refund $30.00 on ch_QSHARED  would fail: amount_too_large",
+            "    B ○ refund $30.00 on ch_QSHARED  unvalidated (L3 preconditions passed)",
+            "",
+            "  0 same · 1 changed · 0 only in A · 0 only in B",
+        ],
+        [],
+    )

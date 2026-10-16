@@ -13,6 +13,7 @@ from typing import assert_never
 from irimi import netaddr
 from irimi.bodies import reflect
 from irimi.exchange import (
+    FROM_RECORDING_FLAG,
     IDEMPOTENCY_CONFLICT_FLAG,
     IDEMPOTENT_REPLAY_FLAG,
     TARGET_FAILED_FLAG,
@@ -314,20 +315,28 @@ def _host_line(host: str, rows: Sequence[Exchange], width: int) -> str:
     # An engine-issued read is a real read that the AGENT did not make (#45). Counting it in
     # `N reads` would inflate the one number this tool rests on, so it is a different number in
     # its own phrase, never inside the headline's brackets (#48).
-    live_reads = sum(
-        1
+    #
+    # A read a replay answered from the recording is a real read too, made by the recorded run
+    # and handed to this one byte for byte: it is counted with them, as what it was (`overlay` for
+    # one the overlay edited then), and qualified by its `from-recording` flag (#82).
+    agent_reads = [
+        ex
         for ex in rows
-        if ex.kind == "read" and ex.answered_by == "live" and ex.issued_by == "agent"
-    )
-    overlaid_reads = sum(
-        1
-        for ex in rows
-        if ex.kind == "read" and ex.answered_by == "overlay" and ex.issued_by == "agent"
-    )
-    if live_reads or overlaid_reads:
-        reads = _plural(live_reads + overlaid_reads, "read")
+        if ex.kind == "read"
+        and ex.issued_by == "agent"
+        and ex.answered_by in ("live", "overlay", "recording")
+    ]
+    overlaid_reads = sum(1 for ex in agent_reads if ex.answered_by == "overlay")
+    recorded_reads = sum(1 for ex in agent_reads if FROM_RECORDING_FLAG in ex.flags)
+    if agent_reads:
+        reads = _plural(len(agent_reads), "read")
+        qualified = []
         if overlaid_reads:
-            reads = f"{reads} ({overlaid_reads} showing this run's writes)"
+            qualified.append(f"{overlaid_reads} showing this run's writes")
+        if recorded_reads:
+            qualified.append(f"{recorded_reads} from the recording")
+        if qualified:
+            reads = f"{reads} ({', '.join(qualified)})"
         phrases.append(reads)
     engine_reads = sum(1 for ex in rows if ex.issued_by == "engine")
     if engine_reads:
@@ -337,9 +346,11 @@ def _host_line(host: str, rows: Sequence[Exchange], width: int) -> str:
     target_reads = sum(1 for ex in rows if ex.kind == "read" and ex.answered_by == "delegated")
     if target_reads:
         phrases.append(f"{_plural(target_reads, 'read')} from the target")
-    llm = sum(1 for ex in rows if ex.kind == "llm")
+    llm = [ex for ex in rows if ex.kind == "llm"]
     if llm:
-        phrases.append(f"{llm} llm")
+        recorded_llm = sum(1 for ex in llm if FROM_RECORDING_FLAG in ex.flags)
+        note = f" ({recorded_llm} from the recording)" if recorded_llm else ""
+        phrases.append(f"{len(llm)} llm{note}")
     writes = [ex for ex in rows if is_intercepted(ex)]
     if writes:
         detail = []
@@ -485,7 +496,8 @@ def _overlay_lines(reads: Sequence[Exchange]) -> list[str]:
         elif ex.answered_by == "overlay":
             verb, column = SAW_PART, "overlay (partial)"
         else:
-            verb, column = DID_NOT_SHOW, "live (partial)"
+            # Untouched, so it is whoever answered it: the service, or a replay's recording (#82).
+            verb, column = DID_NOT_SHOW, f"{ex.answered_by} (partial)"
         lines.append(f"    {OVERLAY_MARKER} {what} {verb}  {column}")
     return lines
 
@@ -509,7 +521,9 @@ def _writes_with_their_reads(
     Pairs rather than a dict keyed by write: `Exchange` is a mutable dataclass and so unhashable.
     A qualifying read with no such write before it is left out, and cannot happen - the overlay
     stamps or flags a read only on the strength of a same-service write in the log, and every
-    write-log entry is a printed write. `tests/test_invariants.py` holds it over a real run.
+    write-log entry is a printed write. A replay serves a recorded overlaid read only once every
+    recorded write before it has been made (`recording.Recording.take`, #82), so it holds there
+    too. `tests/test_invariants.py` holds it over a real run.
     """
     paired: list[tuple[Exchange, list[Exchange]]] = []
     last: dict[str, int] = {}
@@ -637,8 +651,13 @@ def _summary(
     # afterwards to show the run's own faked writes. This line's buckets are about WHO answered,
     # so it belongs with `live`: counting it as `virtualized` claimed irimi had answered a read
     # the agent really made (#43). That its body was edited is said in the per-host block above,
-    # and which write it saw is said by its `↳` line under that write (#48).
-    live = len(telemetry) + sum(1 for ex in exchanges if ex.answered_by in ("live", "overlay"))
+    # and which write it saw is said by its `↳` line under that write (#48). One a replay answered
+    # from the recording reached no service, so it is irimi's, `virtualized` (#82).
+    live = len(telemetry) + sum(
+        1
+        for ex in exchanges
+        if ex.answered_by in ("live", "overlay") and FROM_RECORDING_FLAG not in ex.flags
+    )
     delegated = sum(1 for ex in exchanges if ex.answered_by == "delegated")
     virtualized = total - live - delegated
     lines = [

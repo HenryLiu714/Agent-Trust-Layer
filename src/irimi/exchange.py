@@ -8,10 +8,14 @@ Kind = Literal["read", "write", "llm", "telemetry", "unknown"]
 # reflected back - and `fake-L1` is a route whose map names a vendored response object to start
 # from (#41). A level is only ever added here: L0 stays the answer for every route without one.
 FakeLevel = Literal["fake-L0", "fake-L1"]
-# `overlay` is a LIVE read whose body irimi changed so that it shows the run's faked writes
-# (#43). It is not a `FakeLevel`: nothing was faked, a real response was edited, and the level
-# vocabulary stays the one `echo.fake_response` can return.
-AnsweredBy = Literal["live", "fake-L0", "fake-L1", "delegated", "overlay"]
+# `overlay` is a LIVE read whose body irimi changed so that it shows the run's faked writes (#43),
+# or a replay's answer from such a read in the recording (#82). It is not a `FakeLevel`: nothing was
+# faked, a real response was edited, and the level vocabulary stays the one `echo.fake_response` can
+# return. `recording` is an answer the service gave a stored run, which a replay sent again from
+# disk, byte for byte: a read, an llm call, or a precondition read (#82). Anything else a replay
+# answers from the recording keeps the `answered_by` it was recorded with - a write its fake level,
+# a read the overlay edited `overlay` - and every such answer carries `from-recording`.
+AnsweredBy = Literal["live", "fake-L0", "fake-L1", "delegated", "overlay", "recording"]
 # How much of the write log the overlay could express in the read it was given (#43). `full` is
 # the whole modeled effect. `partial` is irimi saying "this read is incomplete and I could not
 # fix it" - a page the effects table does not model, a filter it cannot read, a body it cannot
@@ -70,6 +74,7 @@ FIDELITY_L0_FLAG = "fidelity:L0"
 FIDELITY_L1_FLAG = "fidelity:L1"
 FIDELITY_DELEGATED_FLAG = "fidelity:delegated"
 FIDELITY_OVERLAY_FLAG = "fidelity:overlay"
+FIDELITY_RECORDING_FLAG = "fidelity:recording"
 # A route whose map names a `fixture:` was answered at L0 anyway, because this install could not
 # read the object. The answer is still safe - L0 is the floor - but it is not the fidelity the
 # map promised, and a trace that did not say so would read as a working L1 (#41).
@@ -110,6 +115,16 @@ BAD_RUN_ID_FLAG = "bad-run-id"
 # arrived either way; this is a fact about the recording only.
 STREAM_TRUNCATED_FLAG = "stream-truncated"
 
+# A replay looked this request up in the run it replays and found no answer it could give, so it
+# was decided as shadow mode decides it: a read or an llm call forwarded live, a write faked and
+# never forwarded (#82). The first one in a run is where the replay diverged from its recording.
+REPLAY_MISS_FLAG = "replay-miss"
+# A replay answered this exchange from the recording: with the answer the recorded run got for the
+# same request, and the `answered_by` it was recorded with, but `live`, which is `recording` (#82).
+# A write keeps its body, its level, its L3 outcome and its webhooks, so its minted ids are the
+# recorded ones. The one flag a reader counts the recording's answers by.
+FROM_RECORDING_FLAG = "from-recording"
+
 # The control endpoint (#73): a request addressed to irimi's own listener whose path starts here is
 # the SDK reporting a run's start, end or tool calls, and is answered by `irimi.control`. It is
 # never forwarded and never an `Exchange`.
@@ -138,6 +153,7 @@ FIDELITY_FLAGS: dict[AnsweredBy, str] = {
     "fake-L1": FIDELITY_L1_FLAG,
     "delegated": FIDELITY_DELEGATED_FLAG,
     "overlay": FIDELITY_OVERLAY_FLAG,
+    "recording": FIDELITY_RECORDING_FLAG,
 }
 
 Headers = tuple[tuple[str, str], ...]
@@ -309,6 +325,12 @@ def is_authored_write(exchange: Exchange) -> bool:
     like any other answer, and without this clause the overlay replayed a write that never
     happened.
 
+    A WRITE IRIMI COULD NOT DECIDE ABOUT IS NOT A WRITE (#94, #82). `DECISION_FAILED_FLAG` is the
+    engine's own 502 for a request whose decision raised, or whose body decoded past the cap: no
+    policy was asked, nothing was faked, and the engine records it without ever offering it to the
+    write log. Counted here, a replay of that run waited for a recorded write no replay can make,
+    and diverged at the next read.
+
     A REJECTED WRITE IS NOT A WRITE (#45). L3 said the real service would have refused it, and the
     agent got that refusal. Replaying it onto later reads would show the agent a refund that
     neither Stripe nor irimi ever made.
@@ -323,6 +345,7 @@ def is_authored_write(exchange: Exchange) -> bool:
         exchange.kind not in LIVE_KINDS
         and exchange.answered_by not in ("live", "delegated")
         and TARGET_FAILED_FLAG not in exchange.flags
+        and DECISION_FAILED_FLAG not in exchange.flags
         and exchange.precondition != "rejected"
         and not any(flag in exchange.flags for flag in IDEMPOTENCY_FLAGS)
     )

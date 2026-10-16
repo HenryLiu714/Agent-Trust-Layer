@@ -347,15 +347,16 @@ def _key_paths(d, path=()):
             yield from _key_paths(value, (*path, key))
 
 
-# Fields added within v1 after #68 shipped it. Each decodes as its default when absent, and has a
-# test of its own below.
+# Fields added after #68 shipped v1. Each decodes as its default when absent, and has a test of its
+# own below.
 _ADDED_WITHIN_V1 = {("exchange", ("stream_chunks",))}  # #71
+_ADDED_IN_V2 = {("run", ("replay_of",))}  # #82
 
 _REQUIRED = [
     (name, path)
     for name in ("run", "exchange", "tool_call", "telemetry")
     for path in _key_paths(_decodable(name)[0])
-    if (name, path) not in _ADDED_WITHIN_V1
+    if (name, path) not in _ADDED_WITHIN_V1 | _ADDED_IN_V2
 ] + [(f"{event} line", (key,)) for event in _EVENTS for key in ("seq", "type")]
 
 
@@ -511,7 +512,26 @@ def test_a_quoted_string_spells_its_control_characters():
     by the terminal (#72)."""
     with pytest.raises(TraceFormatError) as refused:
         trace.run_from_json(_encoded_run() | {"mode": "\x1b[2J\n"})
-    assert str(refused.value) == "'mode' is '\\x1b[2J\\n', not one of ('shadow',)"
+    assert str(refused.value) == "'mode' is '\\x1b[2J\\n', not one of ('shadow', 'replay')"
+
+
+def test_a_v1_run_reads_under_v2_as_a_run_that_is_no_replay():
+    """#82 made the format v2. A run.json v1 wrote has `schema_version: 1` and no `replay_of`, and
+    reads as written, as a run no replay answered."""
+    d = _encoded_run() | {"schema_version": 1, "mode": "shadow"}
+    del d["replay_of"]
+    record = trace.run_from_json(d)
+    assert (record.schema_version, record.mode, record.replay_of) == (1, "shadow", None)
+
+
+def test_a_v3_run_is_refused():
+    with pytest.raises(TraceFormatError, match="schema_version is newer than this irimi reads"):
+        trace.run_from_json(_encoded_run() | {"schema_version": 3})
+
+
+def test_a_replay_names_the_run_it_replays():
+    record = _run_record(mode="replay", replay_of="4f1c9a2b7d3e8a60")
+    assert trace.run_from_json(trace.run_to_json(record)) == record
 
 
 def test_an_exchange_written_before_stream_chunks_existed_reads_as_one_that_did_not_stream():

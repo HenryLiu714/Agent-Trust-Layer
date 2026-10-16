@@ -10,7 +10,9 @@ A helpdesk POSTs a ticket to `/tickets`. `handle_ticket` is the trigger: it runs
                      runs under shadow and whose real body must never run there
 
 The system prompt is picked by `PROMPT` (a named variant), so editing the prompt changes what the
-scripted model does: this is the agent use case 1's replay diverges on (#84, #85).
+scripted model does: this is the agent use case 1's replay diverges on (#84, #85). Every model
+call carries `metadata.user_id`, a session id new in each process, as a helpdesk integration tags
+its calls, so no two runs send the same bytes: a replay matches a call by what it asks (#82).
 
     python -m examples.workflows.launch \\
         examples.workflows.w01_ticket_triage.agent <ticket_id> <charge> <customer> <message>
@@ -24,12 +26,15 @@ from __future__ import annotations
 import json
 import os
 import sys
+import uuid
 from dataclasses import asdict, dataclass
 from typing import Any
 
 from examples.workflows import agentkit, sdk
 
 MAX_TURNS = 6
+# Who is asking, new in every process: in the model call's `metadata`, never in what it asks.
+SESSION = {"user_id": f"helpdesk-{uuid.uuid4().hex}"}
 DB_NAME = "helpdesk.sqlite3"
 PROMPTS = {
     "full": "You are a refund agent. Refund the full remaining amount of a disputed charge.",
@@ -38,6 +43,8 @@ PROMPTS = {
     "double": "You are a refund agent. Refund in full, then refund again to be sure.",
     "retry": "You are a refund agent. Refund in full, and send the refund twice in case one drops.",
     "runaway": "You are a refund agent. Keep checking the charge until it changes.",
+    "verify": "You are a refund agent. Refund in full; check the charge again before replying.",
+    "verify_only": "You are a refund agent. Do not refund; check the charge again before replying.",
 }
 TOOLS = [
     {"name": "get_charge", "input_schema": {"type": "object"}},
@@ -126,7 +133,9 @@ def handle_ticket(ticket: Ticket) -> dict[str, Any]:
     ]
     refunds: list[int] = []
     for turn in range(1, MAX_TURNS + 1):
-        reply = agentkit.anthropic(system, messages, tools=TOOLS, label=f"llm#{turn}")
+        reply = agentkit.anthropic(
+            system, messages, tools=TOOLS, label=f"llm#{turn}", metadata=SESSION
+        )
         messages.append({"role": "assistant", "content": reply["content"]})
         if reply["stop_reason"] != "tool_use":
             return {"turns": turn, "refund_statuses": refunds, "final": agentkit.text_of(reply)}

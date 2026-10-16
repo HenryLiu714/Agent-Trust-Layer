@@ -7,7 +7,7 @@ tool) changes it.
 
 import pytest
 
-from examples.workflows.harness.run import check_invariants, compare
+from examples.workflows.harness.run import check_invariants, compare, replay, replayed_run_id
 from examples.workflows.w02_nightly_reconcile.agent import LEDGER, customer_id
 from irimi.exchange import Exchange
 
@@ -187,3 +187,41 @@ def test_irimi_compare_shows_a_clean_night_and_forty_mismatches_eighty_writes_ap
         "",
         "  0 same · 1 changed · 0 only in A · 80 only in B",
     ]
+
+
+def test_a_refund_then_page_replay_answers_the_page_naming_its_minted_refund(replayed):
+    """The refund is answered with its recorded answer, so its minted `re_` is the recorded one,
+    and the page whose cursor names it is translated as it was recorded (#53) and answered from
+    the recording. Nothing reaches the fake internet."""
+    recorded, replay = replayed(W, "refund_then_page")
+    assert replay.events("refunds", with_time=False) == recorded.events("refunds", with_time=False)
+    # Each answer is what it was when recorded: the first page is still the overlay's, its
+    # bytes edited to show the refund, and the page after it the service's, from disk.
+    assert [(c["label"], c["answered_by"]) for c in replay.calls()] == [
+        ("list_charges", "recording"),
+        ("refund", "fake-L1"),
+        ("list_refunds", "overlay"),
+        ("page_refunds", "recording"),
+        (None, "fake-L1"),
+    ]
+    assert replay.internet.requests() == []
+    summary = replay.summaries()
+    i = summary.index("  ○ refund $1.00 on ch_N000  unvalidated (L3 preconditions passed)")
+    assert summary[i + 1] == "    ↳ GET /v1/refunds saw it  overlay"
+    assert (
+        "  api.stripe.com  3 reads (1 showing this run's writes, 3 from the recording)"
+        "  1 write intercepted"
+    ) in summary
+
+
+def test_a_replay_of_a_replay_answers_the_page_from_the_first_replay(replayed, tmp_path):
+    """A replay is a stored run like any other, so it can be replayed (#82). The engine records a
+    read as it would ask it, translated, whoever answers it, so the second replay finds the page
+    the first one answered just as the first found the recorded one."""
+    recorded, first = replayed(W, "refund_then_page")
+    second = replay(first, replayed_run_id(first), tmp_path / "again")
+    assert [(c["label"], c["answered_by"]) for c in second.calls()] == [
+        (c["label"], c["answered_by"]) for c in first.calls()
+    ]
+    assert second.internet.requests() == []
+    assert second.events("refunds", with_time=False) == recorded.events("refunds", with_time=False)

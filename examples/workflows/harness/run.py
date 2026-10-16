@@ -19,7 +19,14 @@ and says whether anything about it is expected to differ from a bare run.
   `Scenario.serve_flags`. A serve that refuses to start (a map it will not load) starts no agent,
   as `irimi shadow` starts none.
 
-A later mode, such as `replay`, is a new branch here and not a new harness.
+- **replay**: a scenario recorded under `irimi shadow` is run again, in the same `IRIMI_HOME`, with
+  the engine answering from one run it stored (`EngineConfig.replay_of`, #82), and a fresh `World`
+  from the same `setup`, so anything not answered from the recording reaches the fake internet and
+  shows up there. `replay()` runs it; `run()` never does, since there is nothing to replay before
+  a recording exists. Until `irimi replay` (#84) exists, the replay is `irimi shadow` with its
+  `_engine_config` made to name the run.
+
+A later mode is a new branch here and not a new harness.
 """
 
 from __future__ import annotations
@@ -40,13 +47,13 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from examples.workflows.harness.internet import BOMB_SECRET, FakeInternet, Req
 from examples.workflows.harness.services import CLIENT_SECRET_CANARY, World
-from irimi import ca, paths, report, runner, servicemap, trace
+from irimi import ca, cli, paths, report, runner, servicemap, trace
 from irimi import store as irimi_store
 from irimi.cli import build_parser
 from irimi.cli import main as irimi_main
@@ -88,8 +95,9 @@ FAKE_HANDLER = "(process_request_thread)"
 # How long the threads a serve started have to end once it has returned.
 THREAD_EXIT_S = 5.0
 # A tool call's line in irimi's stream (`report.tool_call_line`, #76). Its first column is `ran`,
-# which no `answered_by` an exchange line starts with ever is.
-TOOL_LINE = re.compile(r"(real|shadow) +(read|write) +tool .* -> ")
+# and its second the tool's kind followed by ` tool `, which no exchange line has: `recording` is
+# also an `answered_by` an exchange line starts with (#82).
+TOOL_LINE = re.compile(r"(real|shadow|recording) +(read|write) +tool .* -> ")
 # A write tool's line in a summary, without its indent (`report.tool_write_line`, #76). The summary
 # prints these after the HTTP writes, and `irimi compare` among them, in `seq` order (#79).
 TOOL_WRITE = re.compile(rf"{report.WRITE_MARKER} tool \S+  shadow stand-in ")
@@ -292,10 +300,10 @@ class Result:
 
     def process_run_id(self) -> str:
         """The id of the one run `irimi shadow` stored for the agent's process (#70). A store runs
-        share holds one process run per `irimi shadow` (#79): this one's is the run its banner
-        named."""
+        share holds one process run per `irimi shadow` (#79), as a replay's store holds the
+        recording's and its own (#82): this one's is the run its banner named."""
         runs = [r.run_id for r in self.stored().list_runs() if r.attribution == "process"]
-        if self.store is None:
+        if self.store is None and self.mode != "replay":
             (run_id,) = runs
             return run_id
         (run_id,) = [m[1] for line in self.irimi if (m := BANNER_RUN.match(line))][:1]
@@ -392,9 +400,114 @@ def run(
     into one store and be compared (#79); without it irimi records into the run's own home."""
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
+    return _execute(workflow, scenario_name, mode, workdir, store)
+
+
+def replay(
+    recorded: Result, run_id: str, workdir: Path, env: dict[str, str] | None = None
+) -> Result:
+    """`run_id`, a run `recorded` stored, replayed (#82): `recorded`'s scenario, recorded under
+    `irimi shadow` or itself a replay, run again under
+    `irimi shadow`, in its `IRIMI_HOME` and its store, with the engine answering from that run,
+    and with `env` over the scenario's own environment - `PROMPT=half` is the prompt edit.
+
+    Everything else is the run's own: a fresh `World` from the scenario's `setup` and a fresh fake
+    internet, so a request the recording does not answer shows up in `internet.requests()`, and its
+    own state, working directory and TMPDIR under `workdir`. The result's `mode` is `replay`."""
+    if recorded.mode not in ("shadow", "replay"):
+        raise ValueError(
+            f"replay takes a run recorded under shadow or replayed, not {recorded.mode}"
+        )
+    return _execute(
+        recorded.workflow,
+        recorded.scenario,
+        "replay",
+        workdir,
+        recorded.store,
+        home=recorded.home,
+        env=env or {},
+        replay_of=run_id,
+    )
+
+
+def replayed_run_id(recorded: Result) -> str:
+    """The run a replay of `recorded` answers from (#82): the one run besides the process run that
+    `recorded`'s irimi put exchanges in - the SDK's, or a `header` run whose start never reached
+    irimi (W10's control faults) - or the process run when there is none (W9, W11). Read off the
+    exchanges it reported, so a store that holds other runs too, as a replay's holds its
+    recording's, still names `recorded`'s own. A recording with several (W3, W8) has no one run to
+    replay, and raises."""
+    process = recorded.process_run_id()
+    runs = sorted({ex.run_id for ex in recorded.reported} - {process})
+    if len(runs) > 1:
+        raise AssertionError(f"{recorded.scenario} stored {len(runs)} runs; a replay names one")
+    return runs[0] if runs else process
+
+
+def replay_targets(recorded: Result) -> list[str]:
+    """Every run a replay of `recorded` can answer from (#82), in the order they started: each run
+    its irimi stored besides the process run - an SDK run, a run W9 posted by hand, a `header` run -
+    exchanges or none, or the process run alone when there is none (W9's scripts). A process that
+    held several runs (W3, W5's cascade, W8) is replayed once per run, each answering that run
+    alone, as the issue's "Replay which run?" says. Read before anything replays into its store."""
+    process = recorded.process_run_id()
+    runs = [r for r in recorded.stored().list_runs() if r.run_id != process]
+    runs.sort(key=lambda r: (r.started_at is None, r.started_at or 0.0, r.run_id))
+    return [r.run_id for r in runs] or [process]
+
+
+def counterpart(recorded: Result, replayed: Result, run_id: str) -> str | None:
+    """The run of `replayed` that stands for `recorded`'s run `run_id` (#82): the process run for
+    the process run, and otherwise, among the runs the replay started (those its store holds and
+    `recorded`'s does not), the one with the same attribution and trigger, or failing that the one
+    that started in the same place among the runs sharing its attribution and trigger name - the
+    trigger's args may name an id a miss minted afresh. None when the replay started no such run,
+    as when its agent names its runs itself and named the recorded ones again (W9's control
+    scenarios)."""
+    if run_id == recorded.process_run_id():
+        return replayed.process_run_id()
+    before = {r.run_id: r for r in recorded.stored().list_runs()}
+    after = [r for r in replayed.stored().list_runs() if r.run_id not in before]
+    after = [r for r in after if r.attribution != "process"]
+    wanted = before[run_id]
+    same = [r for r in after if (r.attribution, r.trigger) == (wanted.attribution, wanted.trigger)]
+    if len(same) == 1 and sum(r.trigger == wanted.trigger for r in before.values()) == 1:
+        return same[0].run_id
+
+    def named(record: RunRecord) -> tuple[str, str | None, str | None]:
+        trigger = record.trigger
+        return (
+            record.attribution,
+            *(trigger and (trigger.name, trigger.entrypoint) or (None, None)),
+        )
+
+    def by_start(records: list[RunRecord]) -> list[str]:
+        records = sorted(records, key=lambda r: (r.started_at or 0.0, r.run_id))
+        return [r.run_id for r in records if named(r) == named(wanted)]
+
+    mine, theirs = by_start(list(before.values())), by_start(after)
+    place = mine.index(run_id)
+    return theirs[place] if place < len(theirs) else None
+
+
+def _execute(
+    workflow: Workflow,
+    scenario_name: str,
+    mode: str,
+    workdir: Path,
+    store: Path | None,
+    *,
+    home: Path | None = None,
+    env: dict[str, str] | None = None,
+    replay_of: str | None = None,
+) -> Result:
+    """`run` and `replay` alike: `home` is the `IRIMI_HOME` to run in, `workdir`'s own unless a
+    replay names the recording's, `env` is laid over the scenario's environment, and `replay_of`
+    is the stored run a replay answers from."""
     scenario = workflow.scenarios[scenario_name]
     workdir.mkdir(parents=True, exist_ok=True)
-    home, state, cwd, tmp = (workdir / d for d in ("home", "state", "cwd", "tmp"))
+    state, cwd, tmp = (workdir / d for d in ("state", "cwd", "tmp"))
+    home = home if home is not None else workdir / "home"
     for d in (home, state, cwd, tmp):
         d.mkdir(exist_ok=True)
     obs_path = workdir / "obs.jsonl"
@@ -412,22 +525,28 @@ def run(
     try:
         for host, action, match, times in scenario.faults:
             internet.inject(host, action, match, times)
-        env = _agent_env(internet, state, obs_path, home, tmp)
-        env.update(scenario.env)
+        agent_env = _agent_env(internet, state, obs_path, home, tmp)
+        agent_env.update(scenario.env)
+        agent_env.update(env or {})
         cmd = [sys.executable, "-m", "examples.workflows.launch", workflow.module, *scenario.argv]
         flags = ("--store", str(store)) if store is not None else ()
         if mode == "bare":
-            code = _run_bare(cmd, env, cwd, internet)
-        elif mode == "shadow":
-            with _watching_the_store(reported, handed, handed_events):
+            code = _run_bare(cmd, agent_env, cwd, internet)
+        elif mode in ("shadow", "replay"):
+            with (
+                _watching_the_store(reported, handed, handed_events),
+                _replaying(replay_of),
+            ):
                 code, irimi_out = _run_shadow(
-                    cmd, env, cwd, tmp, internet, scenario, workdir, flags
+                    cmd, agent_env, cwd, tmp, internet, scenario, workdir, flags
                 )
         else:
             if scenario.serve_flags is None:
                 raise ValueError(f"{workflow.name}:{scenario_name} does not run in serve mode")
             with _watching_the_store(reported, handed, handed_events):
-                code, irimi_out = _run_serve(cmd, env, cwd, tmp, internet, scenario, workdir, flags)
+                code, irimi_out = _run_serve(
+                    cmd, agent_env, cwd, tmp, internet, scenario, workdir, flags
+                )
     finally:
         internet.stop()
     obs = [json.loads(line) for line in obs_path.read_text().splitlines() if line.strip()]
@@ -727,6 +846,26 @@ def _watching_the_store(
 
 
 @contextlib.contextmanager
+def _replaying(run_id: str | None) -> Iterator[None]:
+    """`irimi shadow` unchanged, but answering from the stored run `run_id` (#82): its
+    `_engine_config` names the run in `replay_of`, which no flag sets until `irimi replay` (#84).
+    Nothing changes when `run_id` is None."""
+    if run_id is None:
+        yield
+        return
+    real = cli._engine_config
+
+    def replaying(*args: Any, **kwargs: Any) -> Any:
+        return replace(real(*args, **kwargs), replay_of=run_id)
+
+    cli._engine_config = replaying
+    try:
+        yield
+    finally:
+        cli._engine_config = real
+
+
+@contextlib.contextmanager
 def _tempdir(path: Path) -> Iterator[None]:
     """`tempfile`'s directory in this process: it reads TMPDIR once and caches it."""
     saved = tempfile.tempdir
@@ -761,10 +900,11 @@ def _maps(scenario: Scenario, workdir: Path) -> Iterator[None]:
 
 
 def check_invariants(shadow: Result, bare: Result | None = None) -> list[str]:
-    """What every shadow run owes, whatever the workflow, and every serve run (#77). Returns the
-    broken ones, worded. Invariant 5 compares exit codes with `bare`, when it is given."""
-    if shadow.mode not in ("shadow", "serve"):
-        raise ValueError(f"check_invariants takes a shadow or serve run, not a {shadow.mode} one")
+    """What every shadow run owes, whatever the workflow, and every serve run (#77) and replay
+    (#82). Returns the broken ones, worded. Invariant 5 compares exit codes with `bare`, when it
+    is given."""
+    if shadow.mode not in ("shadow", "serve", "replay"):
+        raise ValueError(f"check_invariants takes a shadow, serve or replay run, not {shadow.mode}")
     scenario = shadow.workflow.scenarios[shadow.scenario]
     problems = []
     # Invariant 1 watches the fake internet, so it holds only if irimi's upstream IS the fake
@@ -779,7 +919,8 @@ def check_invariants(shadow: Result, bare: Result | None = None) -> list[str]:
             "1. a write reached a fake service: "
             + ", ".join(f"{r.method} {r.host}{r.path}" for r in writes)
         )
-    if scenario.leaks and not writes:
+    # A replay answers the leaking read from the recording, so it may leak nothing (#82).
+    if scenario.leaks and not writes and shadow.mode != "replay":
         problems.append("1. a scenario marked `leaks` leaked nothing")
     labelled = [r for r in shadow.internet.requests() if "irimi-run" in r.headers]
     if labelled:

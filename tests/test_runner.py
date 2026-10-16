@@ -1,9 +1,11 @@
 import asyncio
+import dataclasses
 import threading
 from dataclasses import replace
 from pathlib import Path
 
 from irimi.exchange import (
+    FROM_RECORDING_FLAG,
     IDEMPOTENCY_CONFLICT_FLAG,
     IDEMPOTENT_REPLAY_FLAG,
     Exchange,
@@ -312,6 +314,41 @@ def test_an_overlaid_read_is_a_real_read_and_says_it_shows_the_run_s_writes():
     rows = [_exchange(), _exchange(answered_by="overlay")]
     line = _block(summary_lines("7f3a", rows, 0.0, _maps()), "api.stripe.com")
     assert line == "  api.stripe.com  2 reads (1 showing this run's writes)"
+
+
+def test_a_read_answered_from_the_recording_is_a_read_and_says_so():
+    """A replay answers a read with what the recorded run was sent (#82): a real read, made by the
+    recorded run, so it is counted with the reads, as what it was - one the overlay edited is
+    still overlaid - and qualified by its `from-recording` flag. irimi answered it, not the
+    service, so the closing line counts it virtualized."""
+    rows = [
+        _exchange(),
+        _exchange(answered_by="overlay", flags=("fidelity:overlay", FROM_RECORDING_FLAG)),
+        _exchange(answered_by="recording", flags=("fidelity:recording", FROM_RECORDING_FLAG)),
+    ]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert _block(lines, "api.stripe.com") == (
+        "  api.stripe.com  3 reads (1 showing this run's writes, 2 from the recording)"
+    )
+    assert "  3 exchanges · 1 live · 0 delegated · 2 virtualized" in lines
+
+
+def test_llm_calls_answered_from_the_recording_say_so():
+    llm = _exchange(method="POST", kind="llm", host="api.anthropic.com", service="anthropic")
+    rows = [llm, dataclasses.replace(llm, answered_by="recording", flags=(FROM_RECORDING_FLAG,))]
+    line = _block(summary_lines("7f3a", rows, 0.0, _maps()), "api.anthropic.com")
+    assert line == "  api.anthropic.com  2 llm (1 from the recording)"
+
+
+def test_a_replayed_read_the_overlay_could_not_complete_names_who_answered_it():
+    """A read flagged `partial` the overlay left alone is whoever answered it: the service, or a
+    replay's recording, which is not `live` (#82)."""
+    refund = _refund()
+    read = dataclasses.replace(
+        _exchange(), answered_by="recording", overlay="partial", flags=(FROM_RECORDING_FLAG,)
+    )
+    lines = summary_lines("7f3a", [refund, read], 0.0, _maps())
+    assert "    ↳ GET /v1/charges did not show it  recording (partial)" in lines
 
 
 def test_an_overlaid_read_is_counted_live_and_never_virtualized():

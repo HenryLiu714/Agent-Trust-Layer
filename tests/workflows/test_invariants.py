@@ -229,3 +229,34 @@ def test_invariant_4_reads_a_store_a_run_was_given_outside_its_home(shared_store
     assert leaked == [
         f"4. a canary reached disk where irimi writes: ['{name} in {tmp_path / 'events.jsonl'}']"
     ]
+
+
+# The replays the workflows pin (#82): (workflow, scenario, environment over the scenario's own).
+REPLAYS = [
+    ("w01_ticket_triage", "full_refund", {}),
+    ("w01_ticket_triage", "full_refund", {"PROMPT": "half"}),
+    ("w01_ticket_triage", "retried_refund", {}),
+    ("w02_nightly_reconcile", "refund_then_page", {}),
+    ("w07_streaming_assistant", "normal", {}),
+    ("w07_streaming_assistant", "secret_in_stream", {}),
+    ("w07_streaming_assistant", "secret_split_across_writes", {}),
+    ("w09_scope_gauntlet", "get_that_writes", {}),
+    ("w10_flaky_upstream", "precondition_read_fails", {}),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "scenario", "env"),
+    REPLAYS,
+    ids=[f"{n}:{s}{''.join(f':{k}={v}' for k, v in e.items())}" for n, s, e in REPLAYS],
+)
+def test_every_replay_holds_the_invariants_and_never_forwards_a_write(
+    replayed, name, scenario, env
+):
+    """Invariants 1 to 4 over each replay, and what a replay owes besides: the agent exits as it
+    did when it was recorded, and no write reaches a fake service, whether the recording answered
+    it or shadow mode faked it."""
+    recorded, replay = replayed(name, scenario, env)
+    assert check_invariants(replay) == []
+    assert replay.internet.writes() == []
+    assert replay.exit_code == recorded.exit_code

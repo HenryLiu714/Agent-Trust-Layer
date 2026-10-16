@@ -1,4 +1,4 @@
-"""Trace format v1: the records a stored run is made of, and their JSON codecs (#68).
+"""Trace format v2: the records a stored run is made of, and their JSON codecs (#68, #82).
 
 Phase 3 records runs and every later phase reads them, so the shape is written down once, here and
 in `docs/trace-format.md`, and versioned. This module is the shape and nothing else: frozen
@@ -8,8 +8,8 @@ hands the exchange codec two callables for the bodies, which never go inline.
 THE ROUND TRIP IS THE CONTRACT. Every field of `Exchange`, `RunRecord`, `ToolCall` and
 `TelemetrySeen` is spelled out in its encoder and its decoder, and `tests/test_trace.py` builds
 each record with a non-default value in every field and asks for it back. A field added to any of
-them without codec support fails that test, which is what keeps a Phase 3 recording readable by
-Phase 5: a stored run gets no second chance to repeat an L3 read.
+them without codec support fails that test, which is what keeps a recording readable by a replay
+(#82): a stored run gets no second chance to repeat an L3 read.
 
 Decoders raise `TraceFormatError` and nothing else on a malformed record - one that is not a JSON
 object, lacks a field, or holds a value of the wrong type, outside its vocabulary or not finite -
@@ -47,13 +47,16 @@ from irimi.exchange import (
 # One integer for the whole format (#68). `run.json` carries it and a run's events are read under
 # it; `unattributed/events.jsonl`, which has no `run.json`, is read under this one. A decoder
 # refuses a newer version and ignores keys it does not know. Every field v1 shipped with in #68 is
-# required. A field added later within v1 must decode as its dataclass default when absent, so a
-# recording made before it existed still reads, and whoever adds it - #71's `stream_chunks` first -
-# adds that decoder path. A new value in a closed vocabulary (`kind`, `answered_by`, `mode`,
-# `attribution`: every field read with `_one_of`) IS a bump, because an older reader refuses a value
-# it does not know; `flags` is open, and a reader accepts a flag it does not know. Changing what a
-# field means is a bump too. `docs/trace-format.md`, "Versioning", is the rule in full.
-SCHEMA_VERSION = 1
+# required. A field added later must decode as its dataclass default when absent, so a recording
+# made before it existed still reads, and whoever adds it - #71's `stream_chunks` first - adds that
+# decoder path. A new value in a closed vocabulary (`kind`, `answered_by`, `mode`, `attribution`:
+# every field read with `_one_of`) IS a bump, because an older reader refuses a value it does not
+# know; `flags` is open, and a reader accepts a flag it does not know. Changing what a field means
+# is a bump too. `docs/trace-format.md`, "Versioning", is the rule in full.
+#
+# Version 2 is replay's (#82): `mode` gains `replay`, `answered_by` and `ran` gain `recording`, and
+# a run record gains `replay_of`. A v1 run reads under it unchanged, as a run with no `replay_of`.
+SCHEMA_VERSION = 2
 
 # The run id of an exchange no run claimed: `irimi serve` with no `Irimi-Run` header (#77).
 UNATTRIBUTED = "unattributed"
@@ -79,17 +82,24 @@ MAX_QUOTED = 64
 
 type JSONValue = None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
 
-Mode = Literal["shadow"]
+Mode = Literal["shadow", "replay"]
 Attribution = Literal["process", "sdk", "header"]
 Outcome = Literal["ok", "error"]
 ToolKind = Literal["read", "write"]
-Ran = Literal["real", "shadow"]
+Ran = Literal["real", "shadow", "recording"]
 EventType = Literal["exchange", "tool_call", "telemetry"]
 
 
 class TraceFormatError(ValueError):
     """A record this version cannot read: a newer `schema_version`, a missing field, or a value
     of the wrong type or outside its vocabulary."""
+
+
+def mode_for(replay_of: str | None) -> Mode:
+    """The mode of a run an engine stores: `replay` when it answers from the stored run `replay_of`,
+    `shadow` when it answers from nothing (#82). One rule for every record an engine writes itself,
+    the process run's and a header run's."""
+    return "shadow" if replay_of is None else "replay"
 
 
 def is_valid_run_id(run_id: str) -> bool:
@@ -133,7 +143,7 @@ class RunRecord:
 
     schema_version: int
     run_id: str
-    mode: Mode  # the only mode in Phase 3; `record` and `replay` come later
+    mode: Mode  # `replay` is a run a replay answered from a stored one (#82)
     # `process` is the `irimi shadow -- <cmd>` run, `sdk` a run the SDK started, and `header` a
     # run id that arrived on exchanges with no start event.
     attribution: Attribution
@@ -147,6 +157,9 @@ class RunRecord:
     error: ErrorInfo | None
     exit_code: int | None  # set only for the process run
     dropped_events: int = 0
+    # The run a replay answered this one from (#82). None for every run that is not a replay. Added
+    # in v2: a v1 run.json has no such key and reads as None.
+    replay_of: str | None = None
 
 
 @dataclass(frozen=True)
@@ -157,7 +170,9 @@ class ToolCall:
     run_id: str
     name: str
     kind: ToolKind
-    ran: Ran  # `real` ran the function; `shadow` ran its shadow stand-in
+    # `real` ran the function; `shadow` ran its shadow stand-in; `recording` was answered from the
+    # run a replay replays (#82, used from #83).
+    ran: Ran
     args: JSONValue
     result: JSONValue
     error: ErrorInfo | None
@@ -213,6 +228,7 @@ def run_to_json(record: RunRecord) -> dict[str, Any]:
         "error": error_to_json(record.error),
         "exit_code": record.exit_code,
         "dropped_events": record.dropped_events,
+        "replay_of": record.replay_of,
     }
 
 
@@ -351,6 +367,7 @@ def run_from_json(d: Mapping[str, Any]) -> RunRecord:
         error=_error_from_json(d, "error"),
         exit_code=_optional(d, "exit_code", _int),
         dropped_events=_int(d, "dropped_events"),
+        replay_of=_added_later(d, "replay_of", _str),
     )
 
 
@@ -599,6 +616,15 @@ def _strings(d: Mapping[str, Any], key: str) -> tuple[str, ...]:
         if not isinstance(item, str):
             raise TraceFormatError(f"{key!r}[{index}] is {json_type(item)}, not a string")
     return tuple(value)
+
+
+def _added_later[T](
+    d: Mapping[str, Any], key: str, read: Callable[[Mapping[str, Any], str], T]
+) -> T | None:
+    """A field added after v1 shipped (#82's `replay_of`): absent or `null` is None, so a run
+    recorded before it existed reads as one that never set it; any other value is read with
+    `read`."""
+    return None if key not in d else _optional(d, key, read)
 
 
 def _chunk_lengths(d: Mapping[str, Any], key: str) -> tuple[int, ...]:

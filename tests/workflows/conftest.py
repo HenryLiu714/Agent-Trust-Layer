@@ -10,18 +10,25 @@ into the one store its workflow's runs share, or into the one named `store`, onc
 
 `traced_run(name, scenario)` runs a scenario's shadow run once more, uncached, and returns it with
 the most memory Python held at once while it ran (#94).
+
+`replayed(name, scenario, env, run_id)` replays a run of a scenario's shadow run, in a copy of its
+home, with `env` over the scenario's environment, once per session (#82).
 """
 
+import dataclasses
+import shutil
 import tracemalloc
 from pathlib import Path
 
 import pytest
 
-from examples.workflows.harness.run import Result, run, workflows
+from examples.workflows.harness.run import Result, replay, replayed_run_id, run, workflows
 
 _CACHE: dict[tuple[str, str, str], Result] = {}
 _SHARED: dict[tuple[str, str, str], Result] = {}  # (store, scenario, mode)
 _STORES: dict[str, Path] = {}
+# (workflow, scenario, env, the run replayed)
+_REPLAYS: dict[tuple[str, str, tuple[tuple[str, str], ...], str], tuple[Result, Result]] = {}
 
 
 @pytest.fixture
@@ -74,5 +81,33 @@ def traced_run(run_workflow, tmp_path_factory):
         finally:
             tracemalloc.stop()
         return result, peak
+
+    return get
+
+
+@pytest.fixture
+def replayed(run_workflow, tmp_path_factory):
+    """`(recorded, replay)`: `run_workflow`'s shadow run of the scenario, and its run `run_id` -
+    by default its one run, `replayed_run_id` - replayed with `env` over the scenario's own (#82),
+    once per session.
+
+    The replay runs in a copy of the recording's `IRIMI_HOME`, its store included: a replay
+    records into the store it answers from, and the shadow run's own pins read its store whole.
+    So `recorded` is that shadow run, its store as it recorded it, and `replay.stored()` holds the
+    recording and the replay. Each replay gets a copy of its own, so no replay reads another's."""
+
+    def get(
+        name: str, scenario: str, env: dict[str, str] | None = None, run_id: str | None = None
+    ) -> tuple[Result, Result]:
+        recorded = run_workflow(name, scenario, "shadow")
+        run_id = run_id if run_id is not None else replayed_run_id(recorded)
+        key = (name, scenario, tuple(sorted((env or {}).items())), run_id)
+        if key not in _REPLAYS:
+            workdir = tmp_path_factory.mktemp(f"{name}-{scenario}-replay")
+            home = workdir / "recorded-home"
+            shutil.copytree(recorded.home, home)
+            source = dataclasses.replace(recorded, home=home)
+            _REPLAYS[key] = (recorded, replay(source, run_id, workdir / "replay", env))
+        return _REPLAYS[key]
 
     return get

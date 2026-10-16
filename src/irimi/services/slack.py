@@ -34,7 +34,7 @@ and a JSON body can deliver a float, so every value is coerced defensively and a
 is "cannot tell".
 
 Pure functions over plain data: no clock, no minting, no I/O, no module state. Every `ts` used here
-comes off a write's answer. Phase 5 replay runs these same functions over a recording.
+comes off a write's answer. replay (#82) runs these same functions over a recording.
 """
 
 import re

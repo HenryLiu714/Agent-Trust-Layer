@@ -41,7 +41,8 @@ from irimi.exchange import (
 )
 from irimi.overlay import NoOverlay, Overlaid, ServiceOverlay
 from irimi.pipeline import ANSWERED_BY_HEADER, annotate, respond
-from irimi.policy import Answer, ShadowPolicy
+from irimi.policy import Answer, ReplayPolicy, ShadowPolicy
+from irimi.recording import Recording
 from irimi.store import NullStore
 
 # One host, one read route and one write route. The servers in this file all listen on loopback,
@@ -295,6 +296,37 @@ def test_the_locally_answered_write_is_stamped_and_the_live_read_is_not(
     seen, replies = _run(tmp_path, monkeypatch, maps, calls)
     assert [stamped for _, _, stamped in replies] == [None, "fake-L0"]
     assert stamping_violations(seen) == []
+
+
+def test_a_replay_stamps_what_it_answered_and_leaves_a_live_forward_bare(
+    tmp_path, monkeypatch, upstream
+):
+    """(a) in a replay (#82): a read answered from the recording carries `recording`, the write
+    answered with its recorded answer carries its recorded level, and the read the recording had
+    no second answer for goes live and carries nothing. Nothing in these requests is a secret, so
+    the recording is the run's own exchanges, as the store would have written them."""
+    maps = _maps(tmp_path, monkeypatch)
+
+    def calls(port):
+        return [
+            _via_proxy(port, "GET", f"http://127.0.0.1:{upstream}/hello"),
+            _via_proxy(port, "POST", f"http://127.0.0.1:{upstream}/things", body=b"{}"),
+        ]
+
+    recorded, _ = _run(tmp_path, monkeypatch, maps, calls)
+    _Recorder.seen = []
+    policy = ReplayPolicy(Recording.from_events(recorded, b"k" * 32, maps), maps)
+    seen, replies = _run(
+        tmp_path,
+        monkeypatch,
+        maps,
+        lambda port: [*calls(port), _via_proxy(port, "GET", f"http://127.0.0.1:{upstream}/hello")],
+        policy=policy,
+    )
+    assert [stamped for _, _, stamped in replies] == ["recording", "fake-L0", None]
+    assert [ex.answered_by for ex in seen] == ["recording", "fake-L0", "live"]
+    assert stamping_violations(seen) == []
+    assert _Recorder.seen == [("GET", "/hello")]
 
 
 def test_the_answer_a_failed_decision_gives_is_stamped_too(tmp_path, monkeypatch, upstream):

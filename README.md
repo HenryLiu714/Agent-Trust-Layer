@@ -34,8 +34,9 @@ Every `serve` and `shadow` run is recorded, redacted, in the trace store under `
 back, and `irimi compare` puts two stored runs' writes side by side
 ([Comparing two runs](#comparing-two-runs)). The SDK, `irimi.sdk`, marks where an agent's runs
 start and end and labels the tools the proxy cannot see
-([Attributing runs with the SDK](#attributing-runs-with-the-sdk)). What does not exist yet:
-replay. See [Roadmap](#roadmap).
+([Attributing runs with the SDK](#attributing-runs-with-the-sdk)). The engine can answer a run
+from a stored one (#82), but nothing invokes it yet: `irimi replay` is #84. See
+[Roadmap](#roadmap).
 
 ## Quickstart
 
@@ -801,14 +802,15 @@ by phase.
   `Irimi-Run` on every request a run makes through irimi (#75), and `@sdk.tool` for calls the
   proxy cannot see (#76). `irimi shadow --serve` with per-run summaries (#77). A server agent
   beside it in containers, and the Phase 3 exit test for use case 0 (#78). `irimi compare`, two
-  stored runs' writes side by side (#79).
+  stored runs' writes side by side (#79). Trace format v2 and the replay policy: a run answered
+  from its recording where it can, decided as shadow mode decides it where it cannot, and never
+  a write forwarded (#82).
 
 **Next: the rest of Phase 3, the run**
 
 - Slack channel names in the summary (#61).
-- Replay: answer a run from its recording (#82), read and write tools in replay (#83),
-  `irimi replay` and `sdk.replay()` (#84), and record, edit a prompt, replay and diff end to end
-  (#85).
+- Replay: read and write tools in replay (#83), `irimi replay` and `sdk.replay()` (#84), and
+  record, edit a prompt, replay and diff end to end (#85).
 
 **Later.** A shadow-week report over many runs, with readiness checks for clients that bypass the
 proxy (the Phase 4 backstop the banner names). Then diffs of an agent's behaviour on pull requests,

@@ -10,7 +10,7 @@ import urllib.request
 from typing import Any, Protocol
 
 from irimi import bodies
-from irimi.exchange import Request, Response
+from irimi.exchange import AnsweredBy, Request, Response
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +26,26 @@ class Reader(Protocol):
     """One real read, issued by the engine rather than by the agent (#45).
 
     Returning None, or raising, means `not_evaluable`: irimi could not find out, says so on the
-    exchange, and falls back to the L2 answer. Shadow mode's reader dials the real upstream;
-    Phase 5's replay policy gets one over the recording, which is why this is a seam and not a
-    call inside the engine.
+    exchange, and falls back to the L2 answer. Shadow mode's reader dials the real upstream; a
+    replay's reads the recording (`recording.RecordingReader`, #82), which is why this is a seam
+    and not a call inside the engine.
+
+    A reader may also say what its reads are answered by, and the flags a read it answered and one
+    it could not answer carry, so the policy records the read as what it was: `recording` for one
+    a replay answered from disk, `replay-miss` for one the recording lacked (#82). `answered_as`
+    reads it, and a reader that says nothing is a live one.
     """
 
     def __call__(self, request: Request) -> Response | None: ...
+
+
+def answered_as(reader: Reader, answered: bool) -> tuple[AnsweredBy, tuple[str, ...]]:
+    """`(answered_by, flags)` for a read `reader` made, and `answered` or not: its own
+    `answered_by`, and its `flags` or `miss_flags`, when it names them, as
+    `recording.RecordingReader` does, and `("live", ())` when it does not (#82)."""
+    answered_by: AnsweredBy = getattr(reader, "answered_by", "live")
+    flags: tuple[str, ...] = getattr(reader, "flags" if answered else "miss_flags", ())
+    return answered_by, flags
 
 
 class NoReader:

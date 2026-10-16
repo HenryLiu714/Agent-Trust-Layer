@@ -1,8 +1,8 @@
-# Trace format, version 1
+# Trace format, version 2
 
 This is the reference for what irimi writes about a run, and the contract between the phase that
-records runs (Phase 3) and every phase that reads them: the Phase 4 report prints a stored run,
-and Phase 5 replays one. The shape and its JSON codec live in `src/irimi/trace.py`, which does no
+records runs (Phase 3) and everything that reads them: `irimi runs show` prints a stored run,
+`irimi compare` lines two up, and a replay answers an agent from one (#82). The shape and its JSON codec live in `src/irimi/trace.py`, which does no
 I/O. The store (#70) writes the files described here. `tests/test_trace.py` holds this page to the
 code: the example at the end decodes with those codecs and re-encodes to itself, key for key, and
 the first column of each field table below is exactly the keys its encoder writes, in order.
@@ -30,8 +30,11 @@ the first column of each field table below is exactly the keys its encoder write
   `trace.is_valid_run_id` refuses - the store checks again rather than trust its caller - and an
   id that differs only in case from a run directory already there: `Run1` and `run1` are both
   valid, and on a case-insensitive filesystem (macOS APFS by default) they would be one directory.
-  The first to reach the store keeps it, so two runs are never merged into one directory. An event
-  whose run id is `unattributed` itself goes there unflagged.
+  The first to reach the store keeps it, so two runs are never merged into one directory. So is
+  any run a replay's store did not make itself - the run it replays, and every other run already
+  in the store: an agent that names its runs itself names the recorded ones again, and no
+  recording is ever written to by a replay. A start or an end posted for one is dropped, and
+  counted (#82). An event whose run id is `unattributed` itself goes there unflagged.
 - The first event of a run id that has no `run.json` creates one, with `attribution: "header"`,
   `started_at` that event's own, and every other optional field `null`. An event built with no
   clock (`started_at` `0.0`) leaves it `null` too. With no start, a header run sorted after every
@@ -173,9 +176,9 @@ An exchange's `started_at` and `ended_at` are `0.0` only on an exchange built wi
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `schema_version` | integer | The format version this run was written in. `1` here. |
+| `schema_version` | integer | The format version this run was written in. `2` here; a run written in `1` reads as one that is no replay. |
 | `run_id` | string | The run's id; also its directory name. |
-| `mode` | `"shadow"` | The only mode in Phase 3. `record` and `replay` come later. |
+| `mode` | `"shadow"`, `"replay"` | `replay` is a run a replay answered from a stored run (#82). |
 | `attribution` | `"process"`, `"sdk"`, `"header"` | How the run came to exist. `process` is the `irimi shadow -- <cmd>` run. `sdk` is a run the SDK started around a trigger, by posting its start to the control endpoint (#73). `header` is a run id that arrived on exchanges with no start event. |
 | `trigger` | trigger or `null` | What started the run. `null` for a `header` run. |
 | `agent_version` | string or `null` | The agent's own version, from `IRIMI_AGENT_VERSION`. |
@@ -187,6 +190,7 @@ An exchange's `started_at` and `ended_at` are `0.0` only on an exchange built wi
 | `error` | error or `null` | Why the run failed, when `outcome` is `"error"`. |
 | `exit_code` | integer or `null` | The child's exit code, set only for the `process` run. |
 | `dropped_events` | integer | Events the store could not write. `0` means the run is whole. |
+| `replay_of` | string or `null` | Added in v2 (#82). The run a replay answered this one from; `null` for a run that is no replay. Absent in a v1 run, and read then as `null`. |
 
 A **trigger** (`trace.Trigger`):
 
@@ -260,7 +264,7 @@ names:
 | `service` | string | The service its map names, or its host when no map claims it. |
 | `operation` | string | The route's operation (`refunds.create`), or `METHOD /path` when no route matched. `""` when the classify/answer decision itself failed, flagged `decision-failed` (`pipeline.unclassified`). |
 | `kind` | `read`, `write`, `llm`, `telemetry`, `unknown` | What the classifier said it is. |
-| `answered_by` | `live`, `fake-L0`, `fake-L1`, `delegated`, `overlay` | Who produced the response the agent got. |
+| `answered_by` | `live`, `fake-L0`, `fake-L1`, `delegated`, `overlay`, `recording` | Who produced the response the agent got. `recording` (v2, #82) is an answer the service gave a stored run, which a replay sent again: a read, an llm call, or a precondition read. Anything else a replay answers from the stored run keeps the value it was recorded with, and every such exchange is flagged `from-recording`. |
 | `validation` | `validated`, `unvalidated` | Always `unvalidated` in Phase 3. |
 | `door` | `forward`, `reverse` | Which door it came in by. |
 | `issued_by` | `agent`, `engine` | `engine` is a read irimi made on its own account, the L3 precondition read. |
@@ -298,7 +302,7 @@ A **request** is `method`, `scheme`, `host`, `port` (integer), `path`, `query` (
 | `run_id` | string | The run it belongs to: the run it was made in, else the process run (`IRIMI_RUN`), else `unattributed`. |
 | `name` | string | The tool's name: `@sdk.tool(name=...)`, or the function's `module.qualname` (#76). |
 | `kind` | `read`, `write` | What the tool does. |
-| `ran` | `real`, `shadow` | `real` ran the function; `shadow` ran its shadow stand-in. |
+| `ran` | `real`, `shadow`, `recording` | `real` ran the function; `shadow` ran its shadow stand-in; `recording` (v2) was answered from the run a replay replays. |
 | `args` | any JSON | What it was called with, bound against the real function's signature and captured as a trigger's are ([Captured arguments](#captured-arguments)). |
 | `result` | any JSON | What it returned, captured the same way. `null` when it raised. A result that would take `args` and `result` together past 1 MiB is `{"__irimi_truncated__": true, "bytes": n}`. |
 | `error` | error or `null` | What it raised. |
@@ -364,11 +368,14 @@ sample workflows hold every scenario to that (`tests/workflows/test_stored_runs.
   `trace.TraceFormatError`.
 - A decoder ignores a field it does not know, in any record or nested object.
 - **Every field version 1 shipped with is required**: every field on this page as #68 wrote it.
-- **A field added later within version 1 is optional on decode.** When it is absent the decoder
-  gives the field's dataclass default, so a recording made before the field existed still reads.
-  Whoever adds the field adds that decoder path and its test, and marks the field on this page with
-  the issue that added it; #71's `stream_chunks` is the first. Such a field must be one an older
-  reader, which ignores it, still reads correctly without. Adding it is not a version bump.
+- **A field added later is optional on decode.** When it is absent the decoder gives the field's
+  dataclass default, so a recording made before the field existed still reads. Whoever adds the
+  field adds that decoder path and its test, and marks the field on this page with the issue that
+  added it; #71's `stream_chunks` is the first, added within version 1, and #82's `replay_of` the
+  second. A field added within a version must be one an older reader, which ignores it, still reads
+  correctly without; adding it is not a version bump.
+- **Version 2** (#82) added `replay` to `mode`, `recording` to `answered_by` and `ran`, and
+  `replay_of` to the run record. A version 1 run reads under it unchanged.
 - **These are version bumps:** removing or renaming a field, changing its type or what it means,
   and adding a value to a closed vocabulary: `mode`, `attribution`, `outcome`, `kind`, `ran`,
   `answered_by`, `validation`, `door`, `issued_by`, `overlay`, `precondition`, and an event's
@@ -394,7 +401,7 @@ reporter sends one event to Sentry.
 
 ```json run.json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "run_id": "4f1c9a2b7d3e8a60",
   "mode": "shadow",
   "attribution": "sdk",
@@ -412,7 +419,8 @@ reporter sends one event to Sentry.
   "outcome": "ok",
   "error": null,
   "exit_code": null,
-  "dropped_events": 0
+  "dropped_events": 0,
+  "replay_of": null
 }
 ```
 

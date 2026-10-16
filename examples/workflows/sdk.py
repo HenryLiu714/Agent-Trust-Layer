@@ -19,7 +19,9 @@ Agents write `from examples.workflows import sdk` where a real agent would write
     and is given it as written: a `staticmethod` or `classmethod`, the function's or the
     stand-in's, stays one, the logging wrapper inside it; a stand-in that is the function itself
     stays the function's own wrapper; and the agent's own `name`, so the name irimi stores is the
-    real default.
+    real default. A read tool a replay answers from its recording runs neither (#83), so the
+    decorated tool is wrapped once more, outside the real one, to log `ran="recording"` for a call
+    in which neither logged.
   - `trigger` and `run` log `run.start` and `run.end` from inside the real run, with the real
     run id, so the pins on them hold in both modes.
 - **Until then**, it implements the same API with no control endpoint and no recording:
@@ -264,6 +266,20 @@ class run:  # noqa: N801 - the SDK's spelling
         return self.__exit__(*exc)
 
 
+# Within one call of a tool `_answered` wraps: a cell `_logged` sets once the function or the
+# stand-in has run, so a call in which neither did logs `ran="recording"` (#83).
+_ran_a_body: contextvars.ContextVar[list[bool] | None] = contextvars.ContextVar(
+    "ran_a_body", default=None
+)
+
+
+def _log_tool(tool_name: str, kind: str, ran: str) -> None:
+    cell = _ran_a_body.get()
+    if cell is not None:
+        cell[0] = True
+    agentkit.obs("tool", name=tool_name, kind=kind, ran=ran, run=current_run_id())
+
+
 def _logged(fn: Callable[..., Any], tool_name: str, kind: str, ran: str) -> Callable[..., Any]:
     """`fn`, logging that it ran. Keeps `fn`'s signature and its sync/async nature, which #76
     checks and binds against. What #76 refuses (a stand-in that is not callable, a generator) is
@@ -274,15 +290,51 @@ def _logged(fn: Callable[..., Any], tool_name: str, kind: str, ran: str) -> Call
 
         @functools.wraps(fn)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-            agentkit.obs("tool", name=tool_name, kind=kind, ran=ran, run=current_run_id())
+            _log_tool(tool_name, kind, ran)
             return await fn(*args, **kwargs)
 
         return async_wrapper
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        agentkit.obs("tool", name=tool_name, kind=kind, ran=ran, run=current_run_id())
+        _log_tool(tool_name, kind, ran)
         return fn(*args, **kwargs)
+
+    return wrapper
+
+
+def _answered(decorated: Callable[..., Any], tool_name: str, kind: str) -> Callable[..., Any]:
+    """`decorated`, the real `tool`'s wrapper, logging `ran="recording"` for a call in which
+    neither the function nor its stand-in ran: a read tool a replay answered from its recording,
+    returning or raising what it was recorded doing (#83). Keeps the wrapper's sync/async nature."""
+
+    def answered(cell: list[bool]) -> None:
+        if not cell[0] and active():
+            agentkit.obs("tool", name=tool_name, kind=kind, ran="recording", run=current_run_id())
+
+    if inspect.iscoroutinefunction(decorated):
+
+        @functools.wraps(decorated)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            cell = [False]
+            token = _ran_a_body.set(cell)
+            try:
+                return await decorated(*args, **kwargs)
+            finally:
+                _ran_a_body.reset(token)
+                answered(cell)
+
+        return async_wrapper
+
+    @functools.wraps(decorated)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        cell = [False]
+        token = _ran_a_body.set(cell)
+        try:
+            return decorated(*args, **kwargs)
+        finally:
+            _ran_a_body.reset(token)
+            answered(cell)
 
     return wrapper
 
@@ -320,7 +372,10 @@ def tool(*, kind: str, shadow: Callable[..., Any] | None = None, name: str | Non
             # the name irimi stores is the real SDK's default and the log's is this module's, and
             # the corpus holds the two equal (`test_stored_runs.py`).
             wrapped = real_fn if descriptor is None else descriptor(real_fn)
-            return real(kind=kind, shadow=stand_in, name=name)(wrapped)
+            decorated = real(kind=kind, shadow=stand_in, name=name)(wrapped)
+            if descriptor is None:
+                return _answered(decorated, tool_name, kind)
+            return descriptor(_answered(decorated.__func__, tool_name, kind))
         if inspect.iscoroutinefunction(fn):
 
             @functools.wraps(fn)

@@ -517,3 +517,88 @@ def test_two_writes_at_once_are_compared_in_the_order_they_ended(run_workflow, m
         [],
     )
     assert [line for line in shadow.summaries() if "○ tool" in line] == [f"  {r[4:]}" for r in rows]
+
+
+# ------------------------------------------------------------------------------- replay (#83)
+
+
+def replayed_calls(replay) -> list[ToolCall]:
+    """The tool calls the replay's own engine stored, in `seq` order: not the recording's, which
+    the replay's store holds too."""
+    return [e for e in replay.handed_events if isinstance(e, ToolCall)]
+
+
+def test_enrich_replayed_answers_its_read_tools_from_the_recording(replayed):
+    """Each read tool the recording holds is answered from it, and its real body never runs (the
+    corpus's log says which body ran). `score_account`'s recorded result holds `Decimal` and
+    `datetime` as their repr, which does not revive, so it runs for real: the replay's one miss.
+    Every write runs its stand-in, as in the recording, and nothing reaches the fake internet:
+    `fetch_enrichment`'s GET is never made, since the tool around it is answered."""
+    recorded, replay = replayed(W, "enrich")
+    assert replay.exit_code == recorded.exit_code == 0
+    assert [name for name, _ in replay.tools()] == [name for name, _ in recorded.tools()]
+    assert dict(replay.tools("read")) == {
+        "crm.connect_with": "recording",
+        "crm.find_accounts": "recording",
+        "crm.fetch_enrichment": "recording",
+        "crm.score_account": "real",
+    }
+    assert {ran for _, ran in replay.tools("write")} == {"shadow"}
+    assert [(c.name, c.ran) for c in replayed_calls(replay)] == replay.tools()
+    assert replay.internet.requests() == []
+    assert replay.exchange_lines() == []
+    # The agent got what it got the first time, the revived values and the real ones alike.
+    assert replay.events("scored", with_time=False) == recorded.events("scored", with_time=False)
+    assert replay.result(with_time=False) == recorded.result(with_time=False)
+    assert rows(replay) == SEED
+
+
+def test_a_credential_in_a_replayed_tool_s_args_matches_its_placeholder(replayed):
+    """`connect_with` is called with the real key in its DSN, and the recording holds the DSN
+    with the key's placeholder: they match only once the live args are redacted with the store's
+    key, as the recording's were (#69)."""
+    recorded, replay = replayed(W, "enrich")
+    [stored] = [c for c in tool_calls(recorded) if c.name == "crm.connect_with"]
+    assert CANARIES["STRIPE_API_KEY"] not in stored.args["dsn"]
+    [again] = [
+        c for c in tool_calls(replay) if (c.name, c.ran) == ("crm.connect_with", "recording")
+    ]
+    assert (again.args, again.result) == (stored.args, stored.result)
+
+
+def test_read_after_write_replayed_matches_both_reads_in_order(replayed):
+    """Both `find_accounts("smb")` calls take the two recorded results, in the order they were
+    recorded, so the replay shows the old row, as shadow did. The stand-in ran between them, and
+    with no tool overlay (#119) neither recorded read showed it."""
+    recorded, replay = replayed(W, "read_after_write")
+    assert replay.tools() == [
+        ("crm.find_accounts", "recording"),
+        ("crm.upsert_account", "shadow"),
+        ("crm.find_accounts", "recording"),
+    ]
+    assert replay.result()["saw_rename"] is recorded.result()["saw_rename"] is False
+
+
+def test_tool_raises_replayed_raises_what_was_recorded_and_the_agent_catches_it_again(replayed):
+    """`flaky_lookup`'s recorded KeyError comes back as `sdk.RecordedToolError`, a subclass of
+    KeyError named KeyError, so the agent's `except KeyError` catches it and logs what it logged
+    the first time. `score_account`'s ends the run where it ended."""
+    recorded, replay = replayed(W, "tool_raises")
+    assert replay.exit_code == recorded.exit_code == 1
+    assert replay.events("lookup_failed", with_time=False) == [
+        {"event": "lookup_failed", "error": "KeyError", "key": "'acc_1'"}
+    ]
+    assert replay.result(with_time=False) == recorded.result(with_time=False)
+    assert replay.tool_call_lines() == [
+        "recording read      tool crm.flaky_lookup -> raised builtins.KeyError",
+        "recording read      tool crm.score_account -> raised builtins.KeyError",
+    ]
+    assert [(c.name, c.error) for c in replayed_calls(replay)] == [
+        ("crm.flaky_lookup", ErrorInfo("builtins.KeyError", "'acc_1'")),
+        ("crm.score_account", ErrorInfo("builtins.KeyError", "'acc_missing'")),
+    ]
+    # And the run ends on the recorded type, not on the class it was raised again as.
+    [run] = [r for r in replay.sdk_runs() if r.mode == "replay"]
+    [source] = recorded.sdk_runs()
+    assert (run.outcome, run.error) == (source.outcome, source.error)
+    assert run.error == ErrorInfo("builtins.KeyError", "'acc_missing'")

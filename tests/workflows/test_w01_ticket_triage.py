@@ -347,6 +347,8 @@ def test_irimi_compare_reads_a_run_whose_last_line_a_crash_cut(shared_store_run,
 # ------------------------------------------------------------------------------- replay (#82)
 
 LLM = ("llm#1", "llm#2", "llm#3", "llm#4")
+LOOKUP_TOOL = f"{AGENT}.lookup_customer"
+REPLY_TOOL = f"{AGENT}.send_reply"
 
 
 def test_a_full_refund_replayed_unchanged_is_answered_from_its_recording(replayed):
@@ -382,6 +384,14 @@ def test_a_full_refund_replayed_unchanged_is_answered_from_its_recording(replaye
     assert "  api.stripe.com     1 read (1 from the recording)  1 write intercepted" in summary
     assert "  api.anthropic.com  4 llm (4 from the recording)" in summary
     assert "  ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)" in summary
+    # The tools the proxy cannot see (#83): the customer comes from the recording, so the real
+    # SQLite read never runs (the corpus logs which body ran), and the reply through its stand-in.
+    assert recorded.tools() == [(LOOKUP_TOOL, "real"), (REPLY_TOOL, "shadow")]
+    assert replay.tools() == [(LOOKUP_TOOL, "recording"), (REPLY_TOOL, "shadow")]
+    assert replay.tool_call_lines() == [
+        f"recording read      tool {LOOKUP_TOOL} -> ok",
+        f"shadow    write     tool {REPLY_TOOL} -> ok",
+    ]
 
 
 def test_a_full_refund_replayed_with_the_half_prompt_diverges_at_the_first_llm_call(replayed):
@@ -414,6 +424,9 @@ def test_a_full_refund_replayed_with_the_half_prompt_diverges_at_the_first_llm_c
         replay.summaries()
     )
     assert replay.result()["refund_statuses"] == recorded.result()["refund_statuses"] == [200]
+    # The customer is looked up before any write misses, so the recording still answers it. The
+    # reply's text changed with the prompt, and its stand-in runs all the same (#83).
+    assert replay.tools() == [(LOOKUP_TOOL, "recording"), (REPLY_TOOL, "shadow")]
 
 
 def test_a_retried_refund_replays_as_the_two_refunds_it_recorded(replayed):

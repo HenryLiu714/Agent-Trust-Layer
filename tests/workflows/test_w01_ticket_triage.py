@@ -10,7 +10,8 @@ import shutil
 import pytest
 
 from examples.workflows.harness.run import check_invariants, compare
-from examples.workflows.w01_ticket_triage.agent import DB_NAME
+from examples.workflows.w01_ticket_triage.agent import DB_LOST_ENV, DB_NAME
+from examples.workflows.w01_ticket_triage.scenarios import CUSTOMER
 from irimi.trace import ErrorInfo, ToolCall, Trigger
 
 W = "w01_ticket_triage"
@@ -394,6 +395,27 @@ def test_a_full_refund_replayed_unchanged_is_answered_from_its_recording(replaye
     ]
 
 
+def test_a_full_refund_replayed_without_its_database_reads_the_customer_from_the_recording(
+    replayed,
+):
+    """The helpdesk database is gone since the recording (#83): the agent seeds none, so a real
+    `lookup_customer` would raise `no such table` and the ticket would fail. The recording answers
+    the read, so the replay ends as recorded, and the database file is never so much as opened,
+    which `sqlite3.connect` would have done. The reply runs its stand-in, which needs none."""
+    recorded, replay = replayed(W, "full_refund", {DB_LOST_ENV: "1"})
+    assert (recorded.state / DB_NAME).exists()
+    assert not (replay.state / DB_NAME).exists()
+    assert replay.exit_code == recorded.exit_code == 0
+    assert replay.result(with_time=False) == recorded.result(with_time=False)
+    assert replay.tools() == [(LOOKUP_TOOL, "recording"), (REPLY_TOOL, "shadow")]
+    [lookup, _] = [e for e in replay.handed_events if isinstance(e, ToolCall)]
+    [recorded_lookup, _] = [e for e in recorded.handed_events if isinstance(e, ToolCall)]
+    assert (
+        lookup.result == recorded_lookup.result == {"id": CUSTOMER, "name": "Ada", "tier": "gold"}
+    )
+    assert replay.internet.requests() == []
+
+
 def test_a_full_refund_replayed_with_the_half_prompt_diverges_at_the_first_llm_call(replayed):
     """`PROMPT=half` changes the system prompt, which is in the match: `llm#1` misses and goes to
     the model, and so does every llm call after it, each carrying what came before. The charge
@@ -588,3 +610,47 @@ def test_a_replay_that_adds_a_refund_reads_live_after_it_and_sees_it(replayed):
         ("GET", "/v1/charges/ch_TICKET1")
     ]
     assert replay.internet.writes() == []
+
+
+def _place(result, event: str, name: str) -> int:
+    """Where in the agent's log the first `event` named `name` (a tool's name, a call's label)
+    is."""
+    return next(
+        i
+        for i, o in enumerate(result.obs)
+        if o["event"] == event and name in (o.get("name"), o.get("label"))
+    )
+
+
+def test_a_lookup_recorded_after_a_refund_the_replay_has_not_made_runs_for_real_alone(replayed):
+    """`late_lookup` refunds, and only then looks the customer up, beside its second read of the
+    charge. Replayed with `PROMPT=verify`, the agent looks the customer up first, before it
+    refunds: the recorded lookup came after a refund this replay has not made, so what it read may
+    show that refund, and the tool runs for real, the replay's one tool miss (#83). The miss does
+    not diverge the replay: the refund is answered from the recording after it, and so is the read
+    of the charge after the refund, refund and all. Only the model calls miss, the prompt having
+    changed, and nothing reaches the fake internet but them."""
+    recorded, replay = replayed(W, "late_lookup", {"PROMPT": "verify"})
+    assert _place(recorded, "http", REFUND) < _place(recorded, "tool", LOOKUP_TOOL)
+    assert _place(replay, "tool", LOOKUP_TOOL) < _place(replay, "http", REFUND)
+    assert recorded.tools() == replay.tools() == [(LOOKUP_TOOL, "real"), (REPLY_TOOL, "shadow")]
+    [lookup] = [e for e in replay.handed_events if isinstance(e, ToolCall) and e.kind == "read"]
+    assert (lookup.ran, lookup.result) == ("real", {"id": CUSTOMER, "name": "Ada", "tier": "gold"})
+    assert replay.answered() == [
+        ("llm#1", 200, None),
+        ("get_charge#1", 200, "recording"),
+        ("llm#2", 200, None),
+        (REFUND, 200, "fake-L1"),
+        ("llm#3", 200, None),
+        ("get_charge#3", 200, "overlay"),
+        ("llm#4", 200, None),
+        ("llm#5", 200, None),
+    ]
+    stripe = [(ex.answered_by, ex.flags) for ex in replay.reported if ex.kind != "llm"]
+    assert stripe == [
+        ("recording", ("fidelity:recording", "from-recording")),
+        ("fake-L1", ("fidelity:L1", "from-recording")),
+        ("overlay", ("fidelity:overlay", "from-recording")),
+    ]
+    assert replay.internet.requests("api.stripe.com") == []
+    assert replay.result(with_time=False) == recorded.result(with_time=False)

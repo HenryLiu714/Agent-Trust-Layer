@@ -13,6 +13,9 @@ from examples.workflows.harness.internet import Req, Resp
 from examples.workflows.harness.run import Scenario, Workflow
 from examples.workflows.harness.services import JsonService, World
 
+# A replay's run id a shell left exported from an earlier replay (#83).
+STALE_REPLAY_RUN = "5a1e5a1e5a1e5a1e"
+
 
 def _enrichment(world: World) -> None:
     def company(req: Req, state: dict) -> Resp:
@@ -34,7 +37,13 @@ WORKFLOW = Workflow(
         ),
         "read_after_write": Scenario(
             ("read_after_write", "smb"),
-            doc="a read tool after a stood-in write sees the old row (no tool overlay)",
+            # Run from a shell that exported a stale `IRIMI_REPLAY_RUN` (#83): `irimi shadow`
+            # removes it from its child, a bare agent's SDK is inert, and a serve agent, not
+            # irimi's child, asks the recording, which an engine that does not replay misses.
+            env={"IRIMI_REPLAY_RUN": STALE_REPLAY_RUN},
+            doc="a read tool after a stood-in write sees the old row (no tool overlay), and after "
+            "an unlabelled one, which is real, the new last_seen; run with a stale "
+            "IRIMI_REPLAY_RUN exported",
         ),
         "unlabeled_write": Scenario(
             ("unlabeled_write",),
@@ -75,7 +84,8 @@ WORKFLOW = Workflow(
         ),
         "async_tools": Scenario(
             ("async_tools",),
-            doc="an async read, and a sync write that returns a coroutine: its call ends, and is "
+            doc="an async read, a sync read that returns a coroutine, left pending while a sync "
+            "read finds the segment, and a sync write that returns one: its call ends, and is "
             "recorded, when the coroutine does, after the read tool it awaits; then an async "
             "static method whose stand-in is a static method in the same class body",
         ),

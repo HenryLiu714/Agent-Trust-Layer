@@ -8,8 +8,10 @@ call to the run it was made in (#76).
 
 import pytest
 
+from examples.workflows.agentkit import LOOKUP_REFUSED_ENV
 from examples.workflows.harness.run import CANARIES, check_invariants, compare, rows_not_shown
 from examples.workflows.w06_crm_db_agent.agent import DB_NAME, SEED
+from examples.workflows.w06_crm_db_agent.scenarios import STALE_REPLAY_RUN
 from irimi.sdk.capture import REPR_KEY
 from irimi.trace import UNATTRIBUTED, ErrorInfo, ToolCall
 
@@ -37,6 +39,10 @@ SEED_SMB = [
     for i, n, s, seen, score, industry in SEED
     if s == "smb"
 ]
+
+
+# The CRM after `_touch_last_seen("acc_1")`, the write no label covers, which is real in every mode.
+TOUCHED = [("acc_1", "Acme", "smb", "2026-09-28", 0, None), *SEED[1:]]
 
 
 def rows(result):
@@ -180,11 +186,34 @@ def test_a_credential_in_a_tool_s_args_is_stored_as_its_placeholder(run_workflow
 @pytest.mark.parametrize("mode", MODES)
 def test_a_read_tool_after_a_stood_in_write_sees_the_old_row(run_workflow, mode):
     # No tool overlay exists: the stand-in wrote nothing, so the read tool shows the old row
-    # under shadow while bare shows the rename. This is the gap, pinned on purpose.
-    assert run_workflow(W, "read_after_write", "bare").result()["saw_rename"] is True
+    # under shadow while bare shows the rename. This is the gap, pinned on purpose. The write no
+    # label covers is real in every mode, so the second read shows its `last_seen` (#83).
+    bare = run_workflow(W, "read_after_write", "bare")
+    assert bare.result()["saw_rename"] is True
     shadow = run_workflow(W, "read_after_write", mode)
     assert shadow.result()["saw_rename"] is False
-    assert rows(shadow) == SEED
+    assert (
+        shadow.result()["last_seen"] == bare.result()["last_seen"] == ["2026-01-01", "2026-09-28"]
+    )
+    assert rows(shadow) == TOUCHED
+
+
+@pytest.mark.parametrize("mode", ("bare", *MODES))
+def test_a_stale_irimi_replay_run_asks_no_recording_but_where_irimi_cannot_remove_it(
+    run_workflow, mode
+):
+    """`read_after_write` runs from a shell that exported a stale `IRIMI_REPLAY_RUN` (#83).
+    `irimi shadow` removes it from its child, so its SDK never asks the recording. A bare agent
+    keeps it, and its SDK is inert, so it asks nothing either: no control request reaches the fake
+    internet (`test_control_endpoint.py`). A serve agent is not irimi's child and keeps it too, so
+    its SDK asks for each read's recorded result, and serve's engine, which replays nothing,
+    answers each `404`: a miss, which warns of nothing, and the read runs for real."""
+    result = run_workflow(W, "read_after_write", mode)
+    expected = None if mode == "shadow" else STALE_REPLAY_RUN
+    assert [start["replay"] for start in result.events("start")] == [expected]
+    assert result.tools("read") == [("crm.find_accounts", "real")] * 2
+    if mode != "bare":  # bare, the one warning is the real write's (`test_control_endpoint.py`)
+        assert result.events("log") == []
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -408,23 +437,32 @@ def test_a_sync_tool_that_returns_a_coroutine_is_recorded_when_the_coroutine_end
     returned, not the coroutine. `lookup_owner` is an async read tool, awaited in the run's event
     loop. Last, `Outbox.send_reminder`, an async static method whose stand-in is a static method
     in the same class body: judged as the async function inside it, so accepted, and run in the
-    write's place (#76)."""
+    write's place (#76). `last_contact` is sync and returns a coroutine too, which the agent leaves
+    pending while `find_accounts` runs, so the find is stored first and within its span."""
     shadow = run_workflow(W, "async_tools", mode)
     bare = run_workflow(W, "async_tools", "bare")
     assert shadow.tools() == [
         ("crm.lookup_owner", "real"),
+        ("crm.last_contact", "real"),
+        ("crm.find_accounts", "real"),
         ("crm.schedule_followup", "shadow"),
         ("crm.lookup_owner", "real"),
         ("crm.send_reminder", "shadow"),
     ]
     [run] = shadow.sdk_runs()
-    first, inner, schedule, remind = shadow.stored().load_run(run.run_id).events
-    assert [(c.name, c.ran) for c in (first, inner, schedule, remind)] == [
-        ("crm.lookup_owner", "real"),
-        ("crm.lookup_owner", "real"),
-        ("crm.schedule_followup", "shadow"),
-        ("crm.send_reminder", "shadow"),
+    first, found, contact, inner, schedule, remind = shadow.stored().load_run(run.run_id).events
+    calls = (first, found, contact, inner, schedule, remind)
+    assert [(c.name, c.ran, c.awaited) for c in calls] == [
+        ("crm.lookup_owner", "real", False),
+        ("crm.find_accounts", "real", False),
+        ("crm.last_contact", "real", True),
+        ("crm.lookup_owner", "real", False),
+        ("crm.schedule_followup", "shadow", True),
+        ("crm.send_reminder", "shadow", False),
     ]
+    # `last_contact` is stored with what the coroutine returned, and `find_accounts` within it.
+    assert contact.result == {"id": "acc_1", "last_seen": "2026-01-01"}
+    assert contact.started_at <= found.started_at <= found.ended_at <= contact.ended_at
     assert schedule.args == {"account_id": "acc_1", "days": 7}
     owner = "owner@acme.example"
     assert schedule.result == {"stood_in": True, "owner": owner, "in_days": 7}
@@ -436,6 +474,8 @@ def test_a_sync_tool_that_returns_a_coroutine_is_recorded_when_the_coroutine_end
     )
     assert shadow.tool_call_lines() == [
         "real      read      tool crm.lookup_owner -> ok",
+        "real      read      tool crm.find_accounts -> ok",
+        "real      read      tool crm.last_contact -> ok",
         "real      read      tool crm.lookup_owner -> ok",
         "shadow    write     tool crm.schedule_followup -> ok",
         "shadow    write     tool crm.send_reminder -> ok",
@@ -446,6 +486,8 @@ def test_a_sync_tool_that_returns_a_coroutine_is_recorded_when_the_coroutine_end
     ]
     assert shadow.result()["scheduled"] == {"stood_in": True, "owner": owner, "in_days": 7}
     assert shadow.result()["reminded"] == {"stood_in": True, "to": owner}
+    assert shadow.result()["last_seen"] == bare.result()["last_seen"] == "2026-01-01"
+    assert shadow.result()["segment"] == bare.result()["segment"] == ["acc_1", "acc_2"]
     assert files(shadow) == ["crm.sqlite3"]
     assert bare.result()["scheduled"] == {"scheduled": "acc_1", "owner": owner, "in_days": 7}
     assert bare.result()["reminded"] == {"sent": "acc_1", "to": owner}
@@ -537,19 +579,60 @@ def test_enrich_replayed_answers_its_read_tools_from_the_recording(replayed):
     recorded, replay = replayed(W, "enrich")
     assert replay.exit_code == recorded.exit_code == 0
     assert [name for name, _ in replay.tools()] == [name for name, _ in recorded.tools()]
-    assert dict(replay.tools("read")) == {
-        "crm.connect_with": "recording",
-        "crm.find_accounts": "recording",
-        "crm.fetch_enrichment": "recording",
-        "crm.score_account": "real",
-    }
-    assert {ran for _, ran in replay.tools("write")} == {"shadow"}
+    per_account = [
+        ("crm.fetch_enrichment", "recording"),
+        ("crm.score_account", "real"),
+        ("crm.upsert_account", "shadow"),
+    ]
+    assert replay.tools() == [
+        ("crm.connect_with", "recording"),
+        ("crm.find_accounts", "recording"),
+        *per_account,
+        *per_account,
+        ("crm.bulk_update", "shadow"),
+        ("crm.delete_stale", "shadow"),
+        ("crm.export_csv", "shadow"),
+        ("crm.notify_owner", "shadow"),
+    ]
     assert [(c.name, c.ran) for c in replayed_calls(replay)] == replay.tools()
     assert replay.internet.requests() == []
     assert replay.exchange_lines() == []
     # The agent got what it got the first time, the revived values and the real ones alike.
     assert replay.events("scored", with_time=False) == recorded.events("scored", with_time=False)
     assert replay.result(with_time=False) == recorded.result(with_time=False)
+    assert rows(replay) == SEED
+
+
+def test_enrich_replayed_where_no_lookup_reaches_irimi_runs_each_read_for_real(replayed):
+    """The agent reaches irimi's control endpoint through a gateway that refuses the route a read
+    tool asks its recorded result on (`agentkit.lookup_gateway`), and forwards every post. Each
+    lookup fails, so each read tool is a miss and runs for real, `ran="real"`, and the SDK says so
+    once, on its logger, for six failed lookups; the agent is unharmed and ends as recorded, every
+    call is still recorded, and nothing reaches the fake internet: `fetch_enrichment`'s body runs,
+    and its GET, which the tool's recorded call did not use up, is answered from the recording
+    (#83)."""
+    recorded, replay = replayed(W, "enrich", {LOOKUP_REFUSED_ENV: "1"})
+    assert replay.exit_code == recorded.exit_code == 0
+    assert replay.result(with_time=False) == recorded.result(with_time=False)
+    assert replay.tools("read") == [(name, "real") for name, _ in recorded.tools("read")]
+    assert len(replay.tools("read")) == 6
+    assert replay.tools("write") == recorded.tools("write")
+    assert [(c.name, c.ran) for c in replayed_calls(replay)] == replay.tools()
+    [warned] = replay.events("log", with_time=False)
+    assert (warned["logger"], warned["level"]) == ("irimi.sdk", "WARNING")
+    assert warned["message"].startswith(
+        "irimi could not look up a recorded call of tool crm.connect_with in run "
+    )
+    assert "(rejected: HTTP 502: " in warned["message"]
+    assert warned["message"].endswith(
+        "The tool runs for real; further failures of this kind are not logged."
+    )
+    assert replay.exchange_lines() == [
+        f"recording read      GET enrich.internal/v1/companies/{account} -> 200  "
+        "[fidelity:recording, from-recording]"
+        for account in ("acc_1", "acc_2")
+    ]
+    assert replay.internet.requests() == []
     assert rows(replay) == SEED
 
 
@@ -577,6 +660,17 @@ def test_read_after_write_replayed_matches_both_reads_in_order(replayed):
         ("crm.find_accounts", "recording"),
     ]
     assert replay.result()["saw_rename"] is recorded.result()["saw_rename"] is False
+    # The write no label covers made the two recorded results differ: the first read got the
+    # first, untouched, and the second the second (#83).
+    assert replay.result()["last_seen"] == recorded.result()["last_seen"]
+    assert recorded.result()["last_seen"] == ["2026-01-01", "2026-09-28"]
+    first, second = (c for c in replayed_calls(replay) if c.name == "crm.find_accounts")
+    assert [first.result[0]["last_seen"], second.result[0]["last_seen"]] == [
+        "2026-01-01",
+        "2026-09-28",
+    ]
+    # The stale `IRIMI_REPLAY_RUN` the scenario exported is irimi's own run in a replay.
+    assert [start["replay"] for start in replay.events("start")] == [replay.process_run_id()]
 
 
 def test_tool_raises_replayed_raises_what_was_recorded_and_the_agent_catches_it_again(replayed):
@@ -602,3 +696,39 @@ def test_tool_raises_replayed_raises_what_was_recorded_and_the_agent_catches_it_
     [source] = recorded.sdk_runs()
     assert (run.outcome, run.error) == (source.outcome, source.error)
     assert run.error == ErrorInfo("builtins.KeyError", "'acc_missing'")
+
+
+def test_async_tools_replayed_answers_each_read_with_what_its_await_got(replayed):
+    """`lookup_owner` is an async read, and `last_contact` a sync read whose recorded call
+    returned a coroutine (`awaited`): the recording answers the first with a coroutine function's
+    result and the second with a coroutine, so the agent's `await` gets what it got when recorded,
+    and neither real body runs. `lookup_owner` is called a second time inside the stand-in of the
+    sync write `schedule_followup`, and the recording answers it there too (#83).
+
+    `find_accounts` was recorded within `last_contact`'s span, the agent having left its coroutine
+    pending, though `last_contact`'s body never called it. Answering `last_contact` does not use
+    it up, since no later call of it would take its record in its place: it is answered too."""
+    recorded, replay = replayed(W, "async_tools")
+    assert replay.exit_code == recorded.exit_code == 0
+    assert replay.tools() == [
+        ("crm.lookup_owner", "recording"),
+        ("crm.last_contact", "recording"),
+        ("crm.find_accounts", "recording"),
+        ("crm.schedule_followup", "shadow"),
+        ("crm.lookup_owner", "recording"),
+        ("crm.send_reminder", "shadow"),
+    ]
+    calls = replayed_calls(replay)
+    assert [(c.name, c.ran, c.awaited) for c in calls] == [
+        ("crm.lookup_owner", "recording", False),
+        ("crm.find_accounts", "recording", False),
+        ("crm.last_contact", "recording", True),
+        ("crm.lookup_owner", "recording", False),
+        ("crm.schedule_followup", "shadow", True),
+        ("crm.send_reminder", "shadow", False),
+    ]
+    recorded_calls = [e for e in recorded.handed_events if isinstance(e, ToolCall)]
+    assert [(c.name, c.args, c.result) for c in calls] == [
+        (c.name, c.args, c.result) for c in recorded_calls
+    ]
+    assert replay.result(with_time=False) == recorded.result(with_time=False)

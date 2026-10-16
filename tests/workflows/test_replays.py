@@ -24,7 +24,8 @@ A replay of a recording its agent makes again owes:
    was answered with then, in any order, so a replay that never ran its agent passes nothing;
 9. and the tool calls the proxy cannot see made again (#83): the replayed run's counterpart makes
    the recorded run's, each read tool answered from the recording and each write tool through its
-   stand-in, and the corpus's own log of which body ran says what irimi stored.
+   stand-in, and the corpus's own log of which body ran says what irimi stored; and the agent
+   told it replays, `IRIMI_REPLAY_RUN` naming the replay's own process run.
 
 What a scenario cannot owe, it names in a table below with the reason, and each entry must still be
 needed, so a fix that makes one unnecessary fails here until the entry goes.
@@ -341,7 +342,9 @@ def test_every_run_of_every_scenario_replays_from_its_recording(
         elif case not in EXIT_DIFFERS:
             assert calls(replay) == calls(recorded), r.run_id
         # 9. The tool calls the proxy cannot see were made again, and answered as replay answers
-        # them (#83).
+        # them (#83), by an agent told it replays, in the replay's own run.
+        told = {start["replay"] for start in replay.events("start")}
+        assert told == {replay.process_run_id()}, r.run_id
         for_real = TOOLS_RUN_FOR_REAL.get(case, {})
         # An agent that names its runs itself posts its tool calls itself too (W9), and logs none.
         logs = case not in NAMES_ITS_OWN_RUNS
@@ -380,3 +383,25 @@ def test_the_tables_name_only_scenarios_that_exist():
         | set(READ_TOOLS_TAKEN)
     )
     assert named <= set(CASES)
+
+
+def test_rule_9_catches_a_replay_whose_tools_ran_as_they_did_under_shadow(run_workflow):
+    """Rule 9 has something to catch: W6 `enrich`'s shadow run held up as its own replay, every
+    read tool run for real and no tool call stored by a run it started, is flagged for each read
+    the recording would have answered and for its log, but not for `score_account`, which a
+    replay runs for real too, nor for a write, whose stand-in ran as a replay's does (#83)."""
+    recorded = run_workflow(W6, "enrich", "shadow")
+    [run] = recorded.sdk_runs()
+    as_replay = Replayed(run.run_id, recorded, run.run_id, None)
+    problems = tool_problems(recorded, as_replay, TOOLS_RUN_FOR_REAL[(W6, "enrich")], False, True)
+    ran_for_real = [p for p in problems if p.endswith(" ran real")]
+    assert sorted(ran_for_real) == [
+        "crm.connect_with ran real",
+        "crm.fetch_enrichment ran real",
+        "crm.fetch_enrichment ran real",
+        "crm.find_accounts ran real",
+    ]
+    assert [p for p in problems if p not in ran_for_real] == [
+        p for p in problems if p.startswith("stored [], logged ")
+    ]
+    assert len(problems) == len(ran_for_real) + 1

@@ -12,7 +12,12 @@ from urllib.parse import parse_qs
 import pytest
 
 import irimi
-from examples.workflows.harness.run import check_invariants, rows_not_shown
+from examples.workflows.harness.run import (
+    check_invariants,
+    counterpart,
+    replay_targets,
+    rows_not_shown,
+)
 from examples.workflows.w03_queue_worker.agent import CLIENTS, LEDGER, POOLED
 from examples.workflows.w03_queue_worker.scenarios import AGENT_VERSION
 from irimi.exchange import Exchange
@@ -1047,3 +1052,26 @@ def test_replaying_the_second_shared_charge_run_hands_its_refusal_to_the_first(
         ],
         [],
     )
+
+
+def test_replaying_each_worker_run_answers_its_static_read_tool_from_the_recording_first_only(
+    run_workflow, replayed
+):
+    """`ledger_worker`'s ledger as the worker's methods (#76): `Worker.fee`, a static-method read
+    tool, `journal`, a class-method write, and `ack`, a plain method's. The worker takes its
+    messages one at a time. Replayed, the first run's `fee` is answered from its recording, and
+    neither write's real body runs (#83). LOOKS WRONG (#155): replaying a later run answers every
+    run of the process from that run's recording, so the first run's refund, an HTTP write the
+    recording lacks, diverges the replay before the replayed run reads, and its own `fee` runs
+    for real."""
+    recorded = run_workflow(W, "ledger_worker", "shadow")
+    targets = replay_targets(recorded)
+    assert len(targets) == 4
+    for place, run_id in enumerate(targets):
+        _, replay = replayed(W, "ledger_worker", run_id=run_id)
+        mine = counterpart(recorded, replay, run_id)
+        assert mine is not None
+        stored = replay.stored().load_run(mine).events
+        calls = [(c.name.rsplit(".", 1)[1], c.ran) for c in stored if isinstance(c, ToolCall)]
+        fee = "recording" if place == 0 else "real"
+        assert calls == [("fee", fee), ("journal", "shadow"), ("ack", "shadow")], place

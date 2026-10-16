@@ -21,7 +21,7 @@ Agents write `from examples.workflows import sdk` where a real agent would write
     stays the function's own wrapper; and the agent's own `name`, so the name irimi stores is the
     real default. A read tool a replay answers from its recording runs neither (#83), so the
     decorated tool is wrapped once more, outside the real one, to log `ran="recording"` for a call
-    in which neither logged.
+    that returned or raised and in which neither logged.
   - `trigger` and `run` log `run.start` and `run.end` from inside the real run, with the real
     run id, so the pins on them hold in both modes.
 - **Until then**, it implements the same API with no control endpoint and no recording:
@@ -306,7 +306,11 @@ def _logged(fn: Callable[..., Any], tool_name: str, kind: str, ran: str) -> Call
 def _answered(decorated: Callable[..., Any], tool_name: str, kind: str) -> Callable[..., Any]:
     """`decorated`, the real `tool`'s wrapper, logging `ran="recording"` for a call in which
     neither the function nor its stand-in ran: a read tool a replay answered from its recording,
-    returning or raising what it was recorded doing (#83). Keeps the wrapper's sync/async nature."""
+    returning or raising what it was recorded doing (#83). Keeps the wrapper's sync/async nature.
+
+    A recorded call raises again as `sdk.RecordedToolError`, an `Exception`. A call interrupted
+    by anything else (a task cancelled while it asked the recording, Ctrl-C) ran nothing and was
+    answered by nothing, and irimi stores no call of it, so it logs nothing either (#83)."""
 
     def answered(cell: list[bool]) -> None:
         if not cell[0] and active():
@@ -319,10 +323,14 @@ def _answered(decorated: Callable[..., Any], tool_name: str, kind: str) -> Calla
             cell = [False]
             token = _ran_a_body.set(cell)
             try:
-                return await decorated(*args, **kwargs)
+                result = await decorated(*args, **kwargs)
+            except Exception:
+                answered(cell)
+                raise
             finally:
                 _ran_a_body.reset(token)
-                answered(cell)
+            answered(cell)
+            return result
 
         return async_wrapper
 
@@ -331,10 +339,14 @@ def _answered(decorated: Callable[..., Any], tool_name: str, kind: str) -> Calla
         cell = [False]
         token = _ran_a_body.set(cell)
         try:
-            return decorated(*args, **kwargs)
+            result = decorated(*args, **kwargs)
+        except Exception:
+            answered(cell)
+            raise
         finally:
             _ran_a_body.reset(token)
-            answered(cell)
+        answered(cell)
+        return result
 
     return wrapper
 

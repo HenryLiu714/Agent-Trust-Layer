@@ -12,10 +12,10 @@ Beyond `enrich`, each scenario puts one case of #76 through the real `irimi shad
 stand-in that raises and a retry (`merge_retry`), and the same merge right the first time
 (`merge_once`), which `irimi compare` holds the retry against (#79); tools called in no run
 (`outside_run`); HTTP made inside a write's stand-in (`stand_in_http`); and an async read, a sync
-write that returns a coroutine and an async static method whose stand-in is a static method too
-(`async_tools`); and two writes at once, the one that started first ending last
-(`overlapping_writes`), which a run stores, and `irimi compare` lines up, in the order they ended
-(#79).
+read and a sync write that each return a coroutine, the read's left pending while a sync read
+runs, and an async static method whose stand-in is a static method too (`async_tools`); and two
+writes at once, the one that started first ending last (`overlapping_writes`), which a run stores,
+and `irimi compare` lines up, in the order they ended (#79).
 
 Seeding the CRM on first run is setup, not a tool: it happens in both modes, before the trigger.
 Tools carry explicit, short names (`crm.find_accounts`), the way a developer would name the
@@ -114,6 +114,21 @@ async def lookup_owner(account_id: str) -> dict[str, Any]:
         row = conn.execute("SELECT name FROM accounts WHERE id = ?", (account_id,)).fetchone()
     await asyncio.sleep(0)
     return {"id": account_id, "owner": f"owner@{row[0].lower()}.example" if row else None}
+
+
+@sdk.tool(kind="read", name="crm.last_contact")
+def last_contact(account_id: str) -> Any:
+    """A sync read that returns its work as a coroutine, as a plain decorator over an `async def`
+    does: its call ends when the coroutine does (#76), and a replay answers it with a coroutine
+    too, so the agent's `await` gets what it got when it was recorded (#83)."""
+    return _last_seen(account_id)
+
+
+async def _last_seen(account_id: str) -> dict[str, Any]:
+    await asyncio.sleep(0)
+    with agentkit.sqlite(DB_NAME) as conn:
+        row = conn.execute("SELECT last_seen FROM accounts WHERE id = ?", (account_id,)).fetchone()
+    return {"id": account_id, "last_seen": row[0] if row else None}
 
 
 # -- write tools: the stand-in runs under shadow, never the real body -----------------------------
@@ -339,10 +354,16 @@ def enrich_accounts(scenario: str, segment: str) -> dict[str, Any]:
     if scenario == "read_after_write":
         before = find_accounts(segment)[0]
         upsert_account({**before, "name": before["name"] + " Renamed"})
+        # A write with no label, so real under shadow too: the two reads, made with the same args,
+        # get different rows, and a replay that answered them out of order would say so (#83).
+        _touch_last_seen(before["id"])
         after = find_accounts(segment)[0]
         # No tool overlay exists: under shadow the stand-in wrote nothing, so the read tool shows
         # the old row. This is the gap, pinned on purpose.
-        return {"saw_rename": after["name"].endswith(" Renamed")}
+        return {
+            "saw_rename": after["name"].endswith(" Renamed"),
+            "last_seen": [before["last_seen"], after["last_seen"]],
+        }
     if scenario == "unlabeled_write":
         _touch_last_seen("acc_1")
         return {"touched": "acc_1"}
@@ -405,9 +426,21 @@ def enrich_accounts(scenario: str, segment: str) -> dict[str, Any]:
 
 async def _follow_up_on(account_id: str) -> dict[str, Any]:
     owner = await lookup_owner(account_id)
+    # The segment is found while the last contact is still being read: the sync read's coroutine is
+    # left pending, so the find is made within that call's span, though its body never made it. A
+    # replay that answers `last_contact` must still answer the find from its own record (#83).
+    pending = last_contact(account_id)
+    segment = find_accounts("smb")
+    contact = await pending
     scheduled = await schedule_followup(account_id, 7)
     reminded = await Outbox.send_reminder(account_id, owner["owner"])
-    return {"owner": owner["owner"], "scheduled": scheduled, "reminded": reminded}
+    return {
+        "owner": owner["owner"],
+        "last_seen": contact["last_seen"],
+        "segment": [account["id"] for account in segment],
+        "scheduled": scheduled,
+        "reminded": reminded,
+    }
 
 
 def decoration_errors() -> list[str]:
@@ -464,7 +497,8 @@ def main(argv: list[str]) -> int:
             "housekeeping", stale=delete_stale(STALE_BEFORE), smb=len(find_accounts("smb"))
         )
     try:
-        outcome = enrich_accounts(scenario, segment)
+        with agentkit.lookup_gateway():
+            outcome = enrich_accounts(scenario, segment)
     except KeyError as exc:
         agentkit.obs("result", error=type(exc).__name__)
         return 1

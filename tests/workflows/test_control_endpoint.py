@@ -2,8 +2,9 @@
 
 Every workflow that uses the SDK posts each run's start and end to it (#74), and W9 calls it by
 hand. These hold all of them: a control request is never an exchange, `IRIMI_CONTROL` reaches
-every agent `irimi shadow` starts and no bare one, a bare agent, with no irimi, starts no run
-and calls no control endpoint, and the SDK warns only where W10 takes the endpoint away.
+every agent `irimi shadow` starts and no bare one, and `IRIMI_REPLAY_RUN` none of either but in a
+replay (#83), a bare agent, with no irimi, starts no run and calls no control endpoint, and the
+SDK warns only where W10 takes the endpoint away.
 """
 
 import pytest
@@ -11,6 +12,7 @@ import pytest
 from examples.workflows.harness.run import serve_cases, workflows
 from examples.workflows.w10_flaky_upstream.scenarios import CONTROL_DOWN
 from irimi.exchange import CONTROL_PREFIX, Exchange
+from irimi.paths import REPLAY_RUN_ENV
 
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
 # Every scenario under `irimi shadow -- <cmd>`, and every one that runs under serve mode (#77).
@@ -42,8 +44,13 @@ def test_irimi_control_reaches_every_shadow_agent_and_no_bare_one(
     mode the agent is not irimi's child, and is given both as the README's serve-mode guide says
     (#77), with the same result.
 
-    `agentkit.start()` logs both, first thing in every agent. A bare run always starts its agent,
-    and a shadow run starts it as often, but for the scenarios where irimi refused to start
+    `IRIMI_REPLAY_RUN` is irimi's word that it replays (#83), so an `irimi shadow` that does not
+    replay removes a stale one its own environment holds, as W6 `read_after_write`'s does; a bare
+    agent and a serve agent, which are not irimi's children, keep it, and are told nothing else.
+    `test_replays.py` holds every replay's agent to being told.
+
+    `agentkit.start()` logs all three, first thing in every agent. A bare run always starts its
+    agent, and a shadow run starts it as often, but for the scenarios where irimi refused to start
     (`NO_AGENT_UNDER_SHADOW`): there the agent logged nothing at all."""
     shadow = run_workflow(name, scenario, mode)
     bare = run_workflow(name, scenario, "bare")
@@ -52,10 +59,13 @@ def test_irimi_control_reaches_every_shadow_agent_and_no_bare_one(
         assert shadow.obs == []
     else:
         assert len(shadow.events("start")) == len(bare.events("start"))
+    exported = shadow.workflow.scenarios[scenario].env.get(REPLAY_RUN_ENV)
     for start in shadow.events("start"):
         assert start["control"] == start["proxy"] + CONTROL_PREFIX.rstrip("/")
+        assert start["replay"] == (exported if mode == "serve" else None)
     for start in bare.events("start"):
         assert start["control"] is None
+        assert start["replay"] == exported
 
 
 # W9's scenarios that call a control endpoint by hand. Bare, they call it at the fake internet,

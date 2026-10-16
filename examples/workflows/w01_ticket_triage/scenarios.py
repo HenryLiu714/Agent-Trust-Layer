@@ -37,13 +37,13 @@ def triage_script(call: LlmCall) -> LlmTurn:
     if "Keep checking" in call.system:
         return LlmTurn(tool_calls=(("get_charge", {"charge": ticket["charge"]}),))
     charges = [r["body"] for r in results if r["tool"] == "get_charge"]
+    # "only then look the customer up": not before the refund, but beside the second read.
+    lookup = ("lookup_customer", {"customer": ticket["customer"]})
+    late = "only then look the customer up" in call.system
     if not charges:
+        first = ("get_charge", {"charge": ticket["charge"]})
         return LlmTurn(
-            text="Let me look into this.",
-            tool_calls=(
-                ("get_charge", {"charge": ticket["charge"]}),
-                ("lookup_customer", {"customer": ticket["customer"]}),
-            ),
+            text="Let me look into this.", tool_calls=(first,) if late else (first, lookup)
         )
     # The first read decides the refund; a second, which `verify` asks for, only confirms it.
     charge = charges[0]
@@ -61,7 +61,8 @@ def triage_script(call: LlmCall) -> LlmTurn:
         # "send the refund twice": the same call twice in one turn, as a model repeats itself.
         return LlmTurn(tool_calls=(refund, refund) if "twice" in call.system else (refund,))
     if "check the charge again" in call.system and len(charges) < 2:
-        return LlmTurn(tool_calls=(("get_charge", {"charge": charge["id"]}),))
+        again = ("get_charge", {"charge": charge["id"]})
+        return LlmTurn(tool_calls=(lookup, again) if late else (again,))
     if not any(r["tool"] == "send_reply" for r in results):
         statuses = ", ".join(str(r["status"]) for r in refunds)
         body = f"Refund of {amount} requested (statuses: {statuses})."
@@ -104,6 +105,13 @@ WORKFLOW = Workflow(
             "verify_only",
             "refund nothing and read the charge twice; replayed with `PROMPT=verify`, which "
             "refunds, the second read is the recording's no longer: it goes live, overlaid (#82)",
+        ),
+        "late_lookup": _scenario(
+            "late_lookup",
+            "refund the whole charge, and only then look the customer up and read the charge "
+            "again; replayed with `PROMPT=verify`, which looks the customer up before the refund, "
+            "that recorded lookup shows a world with a refund the replay has not made yet: the "
+            "tool runs for real, and the replay goes on answering from the recording (#83)",
         ),
     },
 )

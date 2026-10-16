@@ -1,4 +1,5 @@
-"""AnswerPolicy: decides whether an exchange is forwarded live, delegated, or answered locally.
+"""AnswerPolicy: decides whether an exchange is forwarded live, delegated, or answered locally,
+and whether a read tool the proxy cannot see is answered from a replay's recording (#83).
 
 The decision is all that lives here. What a local answer *contains* is `irimi.echo`; where a
 delegated one goes is `irimi.delegation`; the read L3 issues goes through `irimi.reader`; what a
@@ -34,6 +35,7 @@ from irimi.pipeline import Classification
 from irimi.reader import NoReader, Reader, answered_as
 from irimi.recording import Recording, RecordingReader
 from irimi.servicemap import MapIndex, Route
+from irimi.trace import JSONValue, ToolCall
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +96,11 @@ class AnswerPolicy(Protocol):
         run_id: str = "",
     ) -> Answer: ...
 
+    def recorded_tool_call(self, name: str, args: JSONValue) -> ToolCall | None:
+        """The recorded read tool call that answers this one, which the SDK hands back in place
+        of running the tool, or None: the tool runs for real (#83). Never raises."""
+        ...
+
 
 class ShadowPolicy:
     """Reads, llm and telemetry go live. write and unknown are answered locally.
@@ -115,6 +122,10 @@ class ShadowPolicy:
         # Per-instance, never a class attribute: one store per run, and two policies in one test
         # process must not answer each other's keys (#46).
         self.idempotency = idempotency.Store()
+
+    def recorded_tool_call(self, name: str, args: JSONValue) -> ToolCall | None:
+        """None: shadow mode answers from no recording, so every read tool runs for real (#76)."""
+        return None
 
     def answer(
         self,
@@ -425,6 +436,15 @@ class ReplayPolicy:
         self.recording = recording
         self.maps = maps if maps is not None else MapIndex()
         self.shadow = ShadowPolicy(reader=RecordingReader(recording), maps=self.maps)
+
+    def recorded_tool_call(self, name: str, args: JSONValue) -> ToolCall | None:
+        """The recording's answer to a read tool call (`Recording.take_tool_call`, #83). A lookup
+        that raises is logged and is a miss, as a request's is: the tool runs for real."""
+        try:
+            return self.recording.take_tool_call(name, args)
+        except Exception:
+            logger.exception("irimi: the recording could not be searched; the tool runs for real")
+            return None
 
     def answer(
         self,

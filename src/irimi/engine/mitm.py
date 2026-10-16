@@ -556,8 +556,14 @@ class IrimiAddon:
         self.overlay = overlay
         self.on_exchange = on_exchange
         self.on_running = on_running
+        # The policy that decides the wire answers the SDK's read tools there too: from a
+        # replay's recording, or from nothing (#83).
         self.control = ControlEndpoint(
-            store, serve=config.serve, process_run=config.run_id, on_tool_call=on_tool_call
+            store,
+            serve=config.serve,
+            process_run=config.run_id,
+            on_tool_call=on_tool_call,
+            policy=policy,
         )
         self.write_log: list[Exchange] = []
 

@@ -10,6 +10,21 @@ for a write on the wire:
     | true       | read  | the real function, `ran="real"`   | a ToolCall |
     | true       | write | ONLY the stand-in, `ran="shadow"` | a ToolCall |
 
+In a replay (`IRIMI_REPLAY_RUN` set, #83), a read tool first asks the recording, over the control
+endpoint, for the result the recorded run's same call got:
+
+    | kind  | the recording                | Runs                                 | Records     |
+    | read  | holds it, revivable          | nothing: the revived result, or      | `recording` |
+    |       |                              | RecordedToolError if it raised       |             |
+    | read  | misses, or cannot revive it  | the real function                    | `real`      |
+    | write | is not asked                 | ONLY the stand-in, as in shadow      | `shadow`    |
+
+A read tool's `ran="real"` in a replay is that replay's miss. A result is revivable when
+`capture.revive` can rebuild it: one recorded as `__irimi_repr__` or `__irimi_truncated__` is a
+description of the value, not the value. A result redaction replaced comes back with its
+placeholder. A write tool's stand-in runs even when the recorded run made the same call: it is the
+developer's substitute, and nothing recorded can stand for it.
+
 THE SCOPE RULE, APPLIED TO THE SDK: nothing unnamed runs live. A write must name the stand-in that
 replaces it, a read may not name one, and every mistake is a TypeError when the agent loads, never
 at the call (`tool`).
@@ -22,7 +37,7 @@ function or the stand-in propagates unchanged, the same object, after the post.
 
 HTTP made inside a tool is recorded as ordinary exchanges of the run, with no link to the call.
 
-Which body runs is decided in one place, `_chosen`, so replay (#83) adds its branch there.
+Which body runs is decided in one place, `_chosen`.
 """
 
 import functools
@@ -44,9 +59,11 @@ from irimi.sdk.capture import (
     TRUNCATED_KEY,
     capture,
     capture_call,
+    revive,
     serialized,
 )
 from irimi.sdk.client import LOGGER_NAME
+from irimi.sdk.errors import error_info, recorded_error
 
 logger = logging.getLogger(LOGGER_NAME)
 
@@ -164,25 +181,29 @@ class _Tool:
     shadow: Callable[..., Any] | None
 
 
-def _chosen(spec: _Tool) -> tuple[Callable[..., Any], trace.Ran] | None:
-    """Which body this call runs, and what the record says ran. None while the SDK is inactive:
-    the real function, recorded by nobody. THE ONE DISPATCH: replay (#83) adds its branch here,
-    the stand-in for a write and the recording for a read."""
-    if not context.active():
-        return None
+def _chosen(spec: _Tool, recorded: "_Recorded | None") -> tuple[Callable[..., Any], trace.Ran]:
+    """Which body an active call runs, and what the record says ran, given what a replay's
+    recording answered (`_replay_answer`, None outside a replay). THE ONE DISPATCH: a write runs
+    its stand-in, in a replay too; a read the recording answered runs the recorded outcome; any
+    other read runs the real function. An inactive SDK never gets here: the real function runs,
+    recorded by nobody."""
     if spec.kind == "write":
         assert spec.shadow is not None  # `tool` refused a write with none
         return spec.shadow, "shadow"
+    if recorded is not None:
+        return recorded.body(inspect.iscoroutinefunction(spec.fn)), "recording"
     return spec.fn, "real"
 
 
 def _call(spec: _Tool, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-    chosen = _chosen(spec)
-    if chosen is None:
+    if not context.active():
         _warn_if_real_write(spec)
         return spec.fn(*args, **kwargs)
-    body, ran = chosen
-    call = _Call(spec, ran, args, kwargs)
+    # Bound against the REAL function, which is what the agent called, whatever runs (#76).
+    captured, _ = capture_call(spec.fn, args, kwargs)
+    recorded = _replay_answer(spec, captured) if _asks_the_recording(spec) else None
+    body, ran = _chosen(spec, recorded)
+    call = _Call(spec, ran, captured)
     try:
         result = body(*args, **kwargs)
     except BaseException as exc:
@@ -191,7 +212,8 @@ def _call(spec: _Tool, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
     if inspect.iscoroutine(result):
         # A sync function that returned a coroutine has not run its body yet: the call ends when
         # the coroutine does, as a sync trigger's run does (`RunScope.hand_off`, #74). One that
-        # is never awaited is never recorded.
+        # is never awaited is never recorded. The record says so, for a replay (#83).
+        call.awaited = True
         return _finished_with(call, result)
     # Inline, as a sync trigger's posts are, even on an event loop's thread (#74).
     call.send(call.doc(result, None))
@@ -199,12 +221,17 @@ def _call(spec: _Tool, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
 
 
 async def _call_async(spec: _Tool, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-    chosen = _chosen(spec)
-    if chosen is None:
+    if not context.active():
         _warn_if_real_write(spec)
         return await spec.fn(*args, **kwargs)
-    body, ran = chosen
-    call = _Call(spec, ran, args, kwargs)
+    captured, _ = capture_call(spec.fn, args, kwargs)
+    recorded = None
+    if _asks_the_recording(spec):
+        # Only a read in a replay waits on the endpoint, and off the event loop, as a post does:
+        # any other call goes straight to its body, as it did before replay existed.
+        recorded = await runs.off_the_loop(_replay_answer, spec, captured)
+    body, ran = _chosen(spec, recorded)
+    call = _Call(spec, ran, captured)
     try:
         coroutine = body(*args, **kwargs)
     except BaseException as exc:  # raised before it awaited anything: called with wrong args
@@ -230,17 +257,61 @@ async def _finished_with[T](call: "_Call", coroutine: Coroutine[Any, Any, T]) ->
     return result
 
 
-class _Call:
-    """One recorded call: its arguments are captured, and its clock started, before its body
-    runs, so a body that changes them is recorded with what it was given."""
+def _asks_the_recording(spec: _Tool) -> bool:
+    """A read tool in a replay asks the recording before it runs (#83); nothing else does."""
+    return spec.kind == "read" and context.replay_run_id() is not None
 
-    def __init__(
-        self, spec: _Tool, ran: trace.Ran, args: tuple[Any, ...], kwargs: dict[str, Any]
-    ) -> None:
+
+@dataclass(frozen=True)
+class _Recorded:
+    """A read tool call's recorded outcome, as a replay hands it back (#83): the revived result,
+    or the error the recorded call raised, and whether a coroutine the call returned gave it
+    (`trace.ToolCall.awaited`)."""
+
+    result: Any
+    error: trace.ErrorInfo | None
+    awaited: bool
+
+    def body(self, is_async: bool) -> Callable[..., Any]:
+        """A body that gives the recorded outcome in place of the tool's, whatever arguments it is
+        given: from a coroutine for an `async def` tool, and for a sync one whose recorded call
+        returned a coroutine, so the agent's `await` gets what it got the first time."""
+
+        def answer(*args: Any, **kwargs: Any) -> Any:
+            if self.error is not None:
+                raise recorded_error(self.error)
+            return self.result
+
+        async def answer_async(*args: Any, **kwargs: Any) -> Any:
+            return answer()
+
+        return answer_async if is_async or self.awaited else answer
+
+
+def _replay_answer(spec: _Tool, args: trace.JSONValue) -> _Recorded | None:
+    """The recorded outcome of this read tool called with `args`, as captured, asked of the
+    control endpoint, or None: a miss, a lookup that failed, or a result `revive` cannot rebuild,
+    and the tool runs for real. Never raises (#83)."""
+    try:
+        outcome = runs.reporter.recorded(_run_id(), spec.name, args)
+        if outcome is None:
+            return None
+        result = None if outcome.error is not None else revive(outcome.result)
+        return _Recorded(result, outcome.error, outcome.awaited)
+    except Exception:  # NotReplayable: the tool runs for real
+        return None
+
+
+class _Call:
+    """One recorded call: what ran, its arguments as captured before its body ran, and its
+    clock, started then too, so a body that changes them is recorded with what it was given."""
+
+    def __init__(self, spec: _Tool, ran: trace.Ran, args: trace.JSONValue) -> None:
         self.spec = spec
         self.ran = ran
-        # Bound against the REAL function, which is what the agent called, whatever ran (#76).
-        self.args, _ = capture_call(spec.fn, args, kwargs)
+        self.args = args
+        # A sync tool that returned a coroutine (`trace.ToolCall.awaited`, #83).
+        self.awaited = False
         self.run_id = _run_id()
         self.started_at = time.time()
 
@@ -261,9 +332,10 @@ class _Call:
                 ran=self.ran,
                 args=self.args,
                 result=captured,
-                error=None if exc is None else trace.ErrorInfo.from_exception(exc),
+                error=None if exc is None else error_info(exc),
                 started_at=self.started_at,
                 ended_at=time.time(),
+                awaited=self.awaited,
             )
             # The run is the route's, never the body's: a body naming one is refused (#73).
             doc = trace.tool_call_to_json(call)

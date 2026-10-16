@@ -1115,6 +1115,7 @@ def test_a_trigger_keeps_its_functions_name_signature_and_nature():
 
 def test_the_public_api_is_the_issues():
     assert sorted(sdk.__all__) == [
+        "RecordedToolError",  # #83
         "active",
         "current_run_id",
         "instrument",

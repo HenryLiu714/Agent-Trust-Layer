@@ -47,7 +47,7 @@ from types import TracebackType
 from typing import Any
 
 from irimi import __version__, paths, trace
-from irimi.sdk import context
+from irimi.sdk import context, errors
 from irimi.sdk.capture import Captured
 from irimi.sdk.client import LOGGER_NAME, ControlClient, Reporter
 from irimi.sdk.instrumentation import instrument
@@ -197,25 +197,24 @@ class RunScope:
             pass
 
 
-async def off_the_loop(fn: Callable[..., None], *args: Any) -> None:
-    """`fn(*args)` in a worker thread, so the event loop goes on serving other tasks while it
-    waits. Inline wherever `asyncio.to_thread` would raise into the agent: when no asyncio loop is
-    running - a coroutine driven by trio, or by hand - and when the loop's executor takes no more
-    work, shut down at the end of `asyncio.run` or as the interpreter exits (#74).
+async def off_the_loop[T](fn: Callable[..., T], *args: Any) -> T:
+    """`fn(*args)`, and what it returns, from a worker thread, so the event loop goes on serving
+    other tasks while it waits: a post, or a replay's lookup (#83). Inline wherever
+    `asyncio.to_thread` would raise into the agent: when no asyncio loop is running - a coroutine
+    driven by trio, or by hand - and when the loop's executor takes no more work, shut down at the
+    end of `asyncio.run` or as the interpreter exits (#74).
 
     This is `asyncio.to_thread` spelled out, so that a refusal to start the thread, which raises
     before the future exists, is told apart from the wait."""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        fn(*args)
-        return
+        return fn(*args)
     try:
         waiting = loop.run_in_executor(None, contextvars.copy_context().run, fn, *args)
     except RuntimeError:
-        fn(*args)
-        return
-    await waiting
+        return fn(*args)
+    return await waiting
 
 
 def _report_start(opened: _Opened) -> None:
@@ -235,7 +234,7 @@ def _report_start(opened: _Opened) -> None:
 
 
 def _report_end(opened: _Opened, exc: BaseException | None) -> None:
-    error = None if exc is None else trace.ErrorInfo.from_exception(exc)
+    error = None if exc is None else errors.error_info(exc)
     reporter.post(
         opened.run_id,
         "end",

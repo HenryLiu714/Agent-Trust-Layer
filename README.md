@@ -35,8 +35,8 @@ back, and `irimi compare` puts two stored runs' writes side by side
 ([Comparing two runs](#comparing-two-runs)). The SDK, `irimi.sdk`, marks where an agent's runs
 start and end and labels the tools the proxy cannot see
 ([Attributing runs with the SDK](#attributing-runs-with-the-sdk)). The engine can answer a run
-from a stored one (#82), but nothing invokes it yet: `irimi replay` is #84. See
-[Roadmap](#roadmap).
+from a stored one, its HTTP (#82) and its read tools (#83), but nothing invokes it yet: `irimi
+replay` is #84. See [Roadmap](#roadmap).
 
 ## Quickstart
 
@@ -194,7 +194,8 @@ And a refund the real service would have refused, from `w01_ticket_triage double
 `irimi shadow` gives the command `HTTP_PROXY`, `HTTPS_PROXY` (and their lowercase forms),
 `NO_PROXY=localhost,127.0.0.1`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`,
 `NODE_EXTRA_CA_CERTS`, `NODE_USE_ENV_PROXY=1`, `IRIMI_ENGINE_ACTIVE=1`, `IRIMI_RUN` and
-`IRIMI_CONTROL`. That covers requests, httpx, urllib, curl and Node's fetch with no code change.
+`IRIMI_CONTROL`, and, only when the engine replays a stored run, `IRIMI_REPLAY_RUN` (#83). That
+covers requests, httpx, urllib, curl and Node's fetch with no code change.
 The command's exit code is passed through. One process tree is one run; the subcommand is the only
 thing that chooses the mode. SIGTERM to `irimi shadow`, as a supervisor or a container runtime
 sends it, is passed to the command, and the command's exit then ends the run as any exit does:
@@ -202,8 +203,9 @@ the run is stored with its code, what is queued is written, and the summary is p
 
 `IRIMI_CONTROL` is `http://127.0.0.1:<port>/_irimi`, irimi's control endpoint on the same listener.
 The SDK posts a run's start, its end and the tool calls the proxy cannot see there
-(`POST /_irimi/runs/<run_id>/start`, `/tool-calls`, `/end`), and `GET /_irimi/health` reports the
-engine's version and the trace store's counters. Every answer carries
+(`POST /_irimi/runs/<run_id>/start`, `/tool-calls`, `/end`), and in a replay asks it for a read
+tool's recorded result (`POST /_irimi/runs/<run_id>/tool-calls/recorded`, #83). `GET
+/_irimi/health` reports the engine's version and the trace store's counters. Every answer carries
 `Irimi-Answered-By: control`, and a control request is never forwarded or recorded as an exchange.
 The process run (`IRIMI_RUN`) is irimi's: the SDK may post tool calls to it, but a start or an end
 for it is refused.
@@ -548,6 +550,30 @@ def find_accounts(segment: str) -> list[Account]: ...
 - **HTTP inside a tool** is recorded as the run's own exchanges, with no link to the tool call.
 - **No tool overlay.** A read tool after a stood-in write sees the world as it was: nothing
   shows it the write that did not happen, as the overlay does for HTTP.
+- **In a replay** (#83), a read tool asks the recording first, by its name and its arguments,
+  redacted as the recording's were and taken in the order they were recorded, as an HTTP read
+  is. When the recorded run made the same call, nothing runs: the call returns the recorded
+  result, rebuilt from its captured JSON (`irimi.sdk.capture.revive`), and is recorded `ran:
+  recording`. A recorded exception is raised as `sdk.RecordedToolError`, which carries the
+  recorded `type` and `message`. For a builtin `Exception`, such as `KeyError`, it is also a
+  subclass of that builtin and bears its name, so the agent's own `except KeyError` catches it as
+  it caught the original. Otherwise the real function runs (`ran: real`, the replay's miss):
+  - the recording has no such call;
+  - its result was stored as a description, `__irimi_repr__` or `__irimi_truncated__` (a
+    `Decimal`, a `datetime`, anything past 1 MiB);
+  - it was recorded after a write the replay has not made, or the replay has diverged, as for a
+    read on the wire. Unlike a read on the wire, this alone does not make the replay diverge: the
+    tool's body runs, and its own HTTP is decided as any request is.
+
+  A result redaction replaced comes back with its `<redacted:…>` placeholder, not the secret. A
+  class in a result is rebuilt only from a module the process has already imported: a stored run
+  never makes irimi import anything. A recorded exception is its type and message alone, so the
+  one raised again has `args == (message,)`, and none of the original's other attributes (an
+  `OSError`'s `errno`). The HTTP a tool's body made inside it is never made in a replay that
+  answers the tool, and the recorded answers to it are used up with the call. A
+  write tool runs its stand-in in a replay too, even when the recorded run made the same call.
+  With no tool overlay, no recorded read shows what a stand-in did, so a write tool never
+  diverges a replay.
 
 ## Serve mode
 
@@ -804,13 +830,14 @@ by phase.
   beside it in containers, and the Phase 3 exit test for use case 0 (#78). `irimi compare`, two
   stored runs' writes side by side (#79). Trace format v2 and the replay policy: a run answered
   from its recording where it can, decided as shadow mode decides it where it cannot, and never
-  a write forwarded (#82).
+  a write forwarded (#82). Read tools answered from the recording in a replay, and write tools
+  through their stand-ins (#83).
 
 **Next: the rest of Phase 3, the run**
 
 - Slack channel names in the summary (#61).
-- Replay: read and write tools in replay (#83), `irimi replay` and `sdk.replay()` (#84), and
-  record, edit a prompt, replay and diff end to end (#85).
+- Replay: `irimi replay` and `sdk.replay()` (#84), and record, edit a prompt, replay and diff
+  end to end (#85).
 
 **Later.** A shadow-week report over many runs, with readiness checks for clients that bypass the
 proxy (the Phase 4 backstop the banner names). Then diffs of an agent's behaviour on pull requests,

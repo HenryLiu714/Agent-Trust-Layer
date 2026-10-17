@@ -48,18 +48,26 @@ WATCHDOG_S = 90
 CONTROL_ENV = "IRIMI_CONTROL"
 # The process run's id (`irimi.paths.RUN_ENV`), spelled here for the same reason (#73).
 RUN_ENV = "IRIMI_RUN"
+# Set only for the child of an `irimi shadow` that replays (`irimi.paths.REPLAY_RUN_ENV`, #83),
+# spelled here for the same reason.
+REPLAY_RUN_ENV = "IRIMI_REPLAY_RUN"
 # The logger irimi's SDK speaks on (`irimi.sdk` is its child), spelled here for the same reason. A
 # WARNING there is the SDK's only sign that a run's record was lost (#74).
 IRIMI_LOGGER = "irimi"
+# Set for an agent that reaches irimi's control endpoint through a gateway that forwards the routes
+# it knows and refuses the one a replay's read tools ask (`lookup_gateway`, #83).
+LOOKUP_REFUSED_ENV = "WORKFLOW_LOOKUP_REFUSED"
+# That route's tail (`irimi.exchange.RECORDED_ACTION`), spelled here for the same reason.
+RECORDED_ROUTE = "/tool-calls/recorded"
 
 _obs_lock = threading.Lock()
 
 
 def start() -> None:
-    """Call first in every agent's `main()`. Logs the proxy and the control endpoint (#73) the
-    agent was given, so the harness can hold every run to what `irimi shadow` sets, and every bare
-    run to having neither from irimi. From here on, each record an irimi logger emits is a `log`
-    event too (#74)."""
+    """Call first in every agent's `main()`. Logs the proxy, the control endpoint (#73) and the
+    replay's run (#83) the agent was given, so the harness can hold every run to what `irimi
+    shadow` sets, and every bare run to having none of them from irimi. From here on, each record
+    an irimi logger emits is a `log` event too (#74)."""
     if hasattr(signal, "SIGALRM"):
         signal.alarm(WATCHDOG_S)
     logging.getLogger(IRIMI_LOGGER).addHandler(_LogToObs())
@@ -67,6 +75,7 @@ def start() -> None:
         "start",
         proxy=proxy(),
         control=os.environ.get(CONTROL_ENV),
+        replay=os.environ.get(REPLAY_RUN_ENV),
     )
 
 
@@ -335,6 +344,52 @@ def serve(handler: type[BaseHTTPRequestHandler]) -> Iterator[int]:
     finally:
         server.shutdown()
         server.server_close()
+
+
+@contextlib.contextmanager
+def lookup_gateway() -> Iterator[None]:
+    """When `LOOKUP_REFUSED_ENV` is set and irimi named a control endpoint, reach it through a
+    gateway for the block, as a deploy that fronts irimi with a proxy of its own may: every post is
+    forwarded and answered as irimi answered it, and a read tool's lookup of its recorded result
+    (#83) is answered 502, the gateway knowing no such route. So in a replay the lookup fails while
+    the run's start, its end and its tool calls are still recorded (#83: a failed lookup is a miss,
+    warned once, and the tool runs for real). Otherwise the block runs as it is."""
+    control = os.environ.get(CONTROL_ENV)
+    if not os.environ.get(LOOKUP_REFUSED_ENV) or control is None:
+        yield
+        return
+    prefix = urlsplit(control).path
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    class Gateway(Handler):
+        def do_POST(self) -> None:
+            body = self.rfile.read(int(self.headers.get("content-length", 0)))
+            if self.path.endswith(RECORDED_ROUTE):
+                self.reply(502, {"error": "the gateway has no such route"})
+                return
+            sent = urllib.request.Request(
+                control + self.path.removeprefix(prefix),
+                body,
+                {"Content-Type": self.headers.get("content-type", "application/json")},
+                method="POST",
+            )
+            try:
+                with opener.open(sent, timeout=5) as answer:
+                    status, said = answer.status, answer.read()
+            except urllib.error.HTTPError as refused:
+                with refused:
+                    status, said = refused.code, refused.read()
+            self.send_response(status)
+            self.send_header("content-length", str(len(said)))
+            self.end_headers()
+            self.wfile.write(said)
+
+    with serve(Gateway) as port:
+        os.environ[CONTROL_ENV] = f"http://127.0.0.1:{port}{prefix}"
+        try:
+            yield
+        finally:
+            os.environ[CONTROL_ENV] = control
 
 
 def gzip_bomb(head: bytes, line: bytes, size: int, tail: bytes = b"") -> bytes:

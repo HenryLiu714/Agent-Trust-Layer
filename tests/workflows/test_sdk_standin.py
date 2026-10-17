@@ -23,6 +23,7 @@ import itertools
 import json
 import socket
 import sys
+import threading
 import types
 from collections.abc import Callable, Iterator
 from typing import Any
@@ -614,6 +615,298 @@ def test_without_the_real_sdk_unknown_names_are_attribute_errors(load_sdk):
     sdk = load_sdk(None)
     with pytest.raises(AttributeError, match="replay"):
         _ = sdk.replay
+
+
+# -- (f) a read tool a replay answers from its recording (#83) ------------------------------------
+
+REPLAY_RUN = "abcd1234abcd1234"
+
+
+class _Recording:
+    """A reporter, as `runs.reporter` is, over a recording that answers each lookup with
+    `outcome` (None: a miss), keeping each lookup's tool name and each posted call's `ran`.
+    `gate`, when given, holds every lookup until it is set."""
+
+    def __init__(self, outcome: Any = None, gate: threading.Event | None = None) -> None:
+        self.outcome = outcome
+        self.gate = gate
+        self.asked: list[str] = []
+        self.posted: list[tuple[str, str]] = []
+
+    def post(self, run_id: str, action: str, doc: dict[str, Any]) -> None:
+        self.posted.append((doc["name"], doc["ran"]))
+
+    def recorded(self, run_id: str, name: str, args: Any) -> Any:
+        self.asked.append(name)
+        if self.gate is not None:
+            self.gate.wait(5)
+        return self.outcome
+
+
+@pytest.fixture
+def replaying(load_sdk, monkeypatch) -> Callable[..., tuple[types.ModuleType, _Recording]]:
+    """`replaying(outcome, active=, gate=)`: this module over the real `irimi.sdk`, as a replay's
+    child has it: active, told it replays (`IRIMI_REPLAY_RUN`), and its reporter a `_Recording`."""
+    import irimi.sdk as real_sdk  # noqa: PLC0415
+    from irimi import paths  # noqa: PLC0415
+    from irimi.sdk import runs  # noqa: PLC0415
+
+    def get(
+        outcome: Any = None, *, active: bool = True, gate: threading.Event | None = None
+    ) -> tuple[types.ModuleType, _Recording]:
+        recording = _Recording(outcome, gate)
+        monkeypatch.setattr(runs, "reporter", recording)
+        sdk = load_sdk(real_sdk)
+        monkeypatch.setenv(sdk.ENGINE_ACTIVE_ENV, "1" if active else "0")
+        monkeypatch.setenv(paths.REPLAY_RUN_ENV, REPLAY_RUN)
+        return sdk, recording
+
+    return get
+
+
+def _outcome(result: Any = None, error: tuple[str, str] | None = None, awaited: bool = False):
+    from irimi.trace import ErrorInfo, RecordedOutcome  # noqa: PLC0415
+
+    return RecordedOutcome(result, None if error is None else ErrorInfo(*error), awaited)
+
+
+def _called(sdk: types.ModuleType, form: str) -> Any:
+    """A read tool `t.read` in `form`, whose real body fails the test, called as an agent calls
+    it: what the call gave the agent."""
+
+    def real(account: str) -> Any:
+        raise AssertionError("the real read ran")
+
+    async def real_async(account: str) -> Any:
+        raise AssertionError("the real read ran")
+
+    if form == "sync":
+        return sdk.tool(kind="read", name="t.read")(real)("acc_1")
+    if form == "async":
+        return asyncio.run(sdk.tool(kind="read", name="t.read")(real_async)("acc_1"))
+    if form == "returns_coroutine":
+        # A sync read that returns its work as a coroutine (W3's `ledger_history`): the recording
+        # says it was awaited, so the answer is a coroutine too.
+        returned = sdk.tool(kind="read", name="t.read")(real)("acc_1")
+        assert inspect.iscoroutine(returned)
+        return asyncio.run(returned)
+
+    class Ledger:
+        @sdk.tool(kind="read", name="t.read")
+        @staticmethod
+        def static(account: str) -> Any:
+            raise AssertionError("the real read ran")
+
+        @sdk.tool(kind="read", name="t.read")
+        @classmethod
+        def by_class(cls, account: str) -> Any:
+            raise AssertionError("the real read ran")
+
+    return getattr(Ledger(), form)("acc_1")
+
+
+FORMS = ("sync", "async", "returns_coroutine", "static", "by_class")
+
+
+@pytest.mark.parametrize("form", FORMS)
+def test_a_read_tool_a_replay_answers_logs_recording_and_runs_neither_body(replaying, obs, form):
+    """Neither the function nor a stand-in runs, so neither logs; the outer wrapper logs
+    `ran="recording"`, once, as irimi records the call. Every form a tool takes in the corpus."""
+    sdk, recording = replaying(_outcome({"balance": 7}, awaited=form == "returns_coroutine"))
+    assert _called(sdk, form) == {"balance": 7}
+    assert recording.asked == ["t.read"]
+    assert (
+        [(e["name"], e["ran"]) for e in obs("tool")]
+        == recording.posted
+        == [("t.read", "recording")]
+    )
+
+
+@pytest.mark.parametrize("form", FORMS)
+def test_a_recorded_error_raised_again_logs_recording(replaying, obs, form):
+    """A recorded call that raised raises `sdk.RecordedToolError` again, catchable as the recorded
+    builtin, and was answered from the recording all the same (W6 `tool_raises`)."""
+    sdk, recording = replaying(_outcome(error=("builtins.KeyError", "'acc_1'")))
+    with pytest.raises(KeyError) as caught:
+        _called(sdk, form)
+    assert isinstance(caught.value, sdk.RecordedToolError)
+    assert (
+        [(e["name"], e["ran"]) for e in obs("tool")]
+        == recording.posted
+        == [("t.read", "recording")]
+    )
+
+
+def test_a_miss_runs_the_real_read_and_logs_it_once(replaying, obs):
+    sdk, recording = replaying(None)
+
+    @sdk.tool(kind="read", name="t.read")
+    def read(account: str) -> str:
+        return f"live {account}"
+
+    assert read("acc_1") == "live acc_1"
+    assert recording.asked == ["t.read"]
+    assert [(e["name"], e["ran"]) for e in obs("tool")] == recording.posted == [("t.read", "real")]
+
+
+def test_a_write_in_a_replay_runs_its_stand_in_and_asks_no_recording(replaying, obs):
+    """Even one the recording holds: a write tool never asks (#83)."""
+    sdk, recording = replaying(_outcome({"written": True}))
+
+    def stand_in(row: int) -> str:
+        return "stood in"
+
+    @sdk.tool(kind="write", shadow=stand_in, name="t.write")
+    def write(row: int) -> str:
+        raise AssertionError("the real write ran")
+
+    assert write(1) == "stood in"
+    assert recording.asked == []
+    assert (
+        [(e["name"], e["ran"]) for e in obs("tool")] == recording.posted == [("t.write", "shadow")]
+    )
+
+
+def test_an_inactive_sdk_told_it_replays_asks_nothing_and_logs_the_real_read(replaying, obs):
+    """`IRIMI_REPLAY_RUN` with no irimi in front, as a bare agent run from a shell that exported
+    it has it: the SDK is inert, so the real read runs, nothing is asked or posted, and the log
+    says `real` and never `recording`."""
+    sdk, recording = replaying(_outcome({"balance": 7}), active=False)
+
+    @sdk.tool(kind="read", name="t.read")
+    def read(account: str) -> str:
+        return f"live {account}"
+
+    assert read("acc_1") == "live acc_1"
+    assert recording.asked == recording.posted == []
+    assert [(e["name"], e["ran"]) for e in obs("tool")] == [("t.read", "real")]
+
+
+def test_a_read_cancelled_while_it_asks_the_recording_logs_nothing(replaying, obs):
+    """Cancelled while its lookup waits off the loop, the call ran no body and was answered by
+    nothing, and irimi stores no call of it: the log says so too, not `recording` (#83)."""
+    gate = threading.Event()
+    sdk, recording = replaying(_outcome({"balance": 7}), gate=gate)
+
+    @sdk.tool(kind="read", name="t.read")
+    async def read(account: str) -> Any:
+        raise AssertionError("the real read ran")
+
+    async def agent() -> str:
+        try:
+            await asyncio.wait_for(read("acc_1"), 0.05)
+        except TimeoutError:
+            return "timed out"
+        finally:
+            gate.set()
+        return "answered"
+
+    assert asyncio.run(agent()) == "timed out"
+    assert recording.asked == ["t.read"]
+    assert recording.posted == obs("tool") == []
+
+
+# What `_Kept` drops of a posted call: its id and its clock, new at every call.
+_UNKEPT = ("tool_call_id", "started_at", "ended_at")
+
+
+class _Kept(_Recording):
+    """A `_Recording` that keeps each posted call whole, but for its id and its clock."""
+
+    def __init__(self, outcome: Any = None) -> None:
+        super().__init__(outcome)
+        self.docs: list[dict[str, Any]] = []
+
+    def post(self, run_id: str, action: str, doc: dict[str, Any]) -> None:
+        super().post(run_id, action, doc)
+        self.docs.append({k: v for k, v in doc.items() if k not in _UNKEPT})
+
+
+def _through(decorate: Callable[..., Any], kind: str, form: str) -> tuple[Any, list[str]]:
+    """A tool `t.tool` of `kind` in `form`, made with `decorate` (an `sdk.tool`), called as an agent
+    calls it: what the call gave the agent (returned, or raised: its name, its message and the two
+    classes an agent catches it as), and which bodies ran."""
+    from irimi.sdk import RecordedToolError  # noqa: PLC0415
+
+    ran: list[str] = []
+
+    async def value(v: Any) -> Any:
+        return v
+
+    def real(account: str) -> Any:
+        ran.append("real")
+        return value({"real": account}) if form == "returns_coroutine" else {"real": account}
+
+    def stand_in(account: str) -> Any:
+        ran.append("shadow")
+        return value({"shadow": account}) if form == "returns_coroutine" else {"shadow": account}
+
+    async def real_async(account: str) -> Any:
+        ran.append("real")
+        return {"real": account}
+
+    async def stand_in_async(account: str) -> Any:
+        ran.append("shadow")
+        return {"shadow": account}
+
+    def made(fn: Any, shadow: Any) -> Any:
+        return decorate(kind=kind, shadow=shadow if kind == "write" else None, name="t.tool")(fn)
+
+    class Ledger:
+        static = made(staticmethod(real), staticmethod(stand_in))
+        by_class = made(classmethod(lambda cls, account: real(account)), lambda cls, a: stand_in(a))
+
+    try:
+        if form == "async":
+            got = asyncio.run(made(real_async, stand_in_async)("acc_1"))
+        elif form in ("sync", "returns_coroutine"):
+            got = made(real, stand_in)("acc_1")
+            if form == "returns_coroutine":
+                assert inspect.iscoroutine(got)
+                got = asyncio.run(got)
+        else:
+            got = getattr(Ledger, form)("acc_1")
+    except Exception as exc:
+        caught = (isinstance(exc, KeyError), isinstance(exc, RecordedToolError))
+        return ("raised", type(exc).__name__, str(exc), *caught), ran
+    return ("returned", got), ran
+
+
+@pytest.mark.parametrize("form", FORMS)
+@pytest.mark.parametrize("kind", ("read", "write"))
+@pytest.mark.parametrize("mode", ("bare", "shadow", "miss", "hit", "raised"))
+def test_a_tool_through_this_module_does_what_the_real_sdk_s_does(
+    replaying, monkeypatch, form, kind, mode
+):
+    """The agents write `sdk.tool` from this module, and the corpus must test the SDK that ships:
+    in every mode a tool runs in - bare, shadow, and a replay whose recording misses, answers or
+    raises - the same tool made with this module's `tool` and with `irimi.sdk.tool` gives the
+    agent the same thing, runs the same bodies and posts the same records (#83)."""
+    import irimi.sdk as real_sdk  # noqa: PLC0415
+    from irimi import paths  # noqa: PLC0415
+    from irimi.sdk import runs  # noqa: PLC0415
+
+    outcome = {
+        "hit": _outcome({"balance": 7}, awaited=form == "returns_coroutine"),
+        "raised": _outcome(error=("builtins.KeyError", "'acc_1'")),
+    }.get(mode)
+    sdk, _ = replaying(outcome, active=mode != "bare")
+    if mode == "shadow":
+        monkeypatch.delenv(paths.REPLAY_RUN_ENV)
+    seen = []
+    for decorate in (sdk.tool, real_sdk.tool):
+        kept = _Kept(outcome)
+        monkeypatch.setattr(runs, "reporter", kept)
+        got, ran = _through(decorate, kind, form)
+        seen.append((got, ran, kept.asked, kept.docs))
+    shim, real = seen
+    assert shim == real
+    if mode == "bare":
+        assert real[1] == ["real"] and real[3] == []
+    elif kind == "write" or mode in ("shadow", "miss"):
+        assert real[1] == ["shadow" if kind == "write" else "real"]
+    else:
+        assert real[1] == [] and [d["ran"] for d in real[3]] == ["recording"]
 
 
 # -- the fake internet's resolver ----------------------------------------------------------------

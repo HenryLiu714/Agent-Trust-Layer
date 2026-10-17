@@ -12,13 +12,14 @@ from pathlib import Path
 from irimi import __version__, netaddr
 from irimi.engine import Engine, EngineStartError
 from irimi.exchange import CONTROL_PREFIX
-from irimi.paths import CONTROL_ENV, ENGINE_ACTIVE_ENV, PROXY_ENVS, RUN_ENV
+from irimi.paths import CONTROL_ENV, ENGINE_ACTIVE_ENV, PROXY_ENVS, REPLAY_RUN_ENV, RUN_ENV
 from irimi.store import TraceStore
 from irimi.trace import SCHEMA_VERSION, ErrorInfo, JSONValue, RunRecord, Trigger
 
-# The variables issue #3 specifies, plus `IRIMI_CONTROL` from #73. Nothing is added to this list
-# without a new issue. The `IRIMI_*` names are declared in `paths`, where the SDK can import them,
-# and imported above, so `runner.RUN_ENV` still names them. `IRIMI_AGENT_VERSION` is there too
+# The variables issue #3 specifies, plus `IRIMI_CONTROL` from #73 and, in a replay only,
+# `IRIMI_REPLAY_RUN` from #83. Nothing is added to this list without a new issue. The `IRIMI_*`
+# names are declared in `paths`, where the SDK can import them, and imported above, so
+# `runner.RUN_ENV` still names them. `IRIMI_AGENT_VERSION` is there too
 # (`paths.AGENT_VERSION_ENV`): the process run records it (#70) and the SDK's runs do (#74). So
 # are the four proxy variables (`paths.PROXY_ENVS`), which the SDK reads to find irimi (#75).
 NO_PROXY_VALUE = "localhost,127.0.0.1"
@@ -29,9 +30,19 @@ CHILD_GRACE_S = 10.0
 
 
 def child_env(
-    base: dict[str, str], host: str, port: int, ca_cert: Path, run_id: str
+    base: dict[str, str],
+    host: str,
+    port: int,
+    ca_cert: Path,
+    run_id: str,
+    *,
+    replaying: bool = False,
 ) -> dict[str, str]:
     """`base` plus the proxy and CA variables. `base` is never mutated.
+
+    `replaying` says the engine answers from a stored run (#83): the child is told so in
+    `IRIMI_REPLAY_RUN`, naming `run_id`. Otherwise any `IRIMI_REPLAY_RUN` in `base` is dropped, so a
+    shell that exported one cannot make a shadow run's SDK ask for recorded results.
 
     `ca_cert` must be the CA certificate (`~/.irimi/ca/ca.pem`), never the mitmproxy bundle,
     which also contains the private key. An IPv6 listen host is bracketed, as a URL spells it
@@ -58,6 +69,9 @@ def child_env(
             CONTROL_ENV: proxy + CONTROL_PREFIX.rstrip("/"),
         }
     )
+    env.pop(REPLAY_RUN_ENV, None)
+    if replaying:
+        env[REPLAY_RUN_ENV] = run_id
     return env
 
 

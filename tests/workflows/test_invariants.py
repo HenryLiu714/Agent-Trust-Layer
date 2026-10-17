@@ -235,8 +235,13 @@ def test_invariant_4_reads_a_store_a_run_was_given_outside_its_home(shared_store
 REPLAYS = [
     ("w01_ticket_triage", "full_refund", {}),
     ("w01_ticket_triage", "full_refund", {"PROMPT": "half"}),
+    ("w01_ticket_triage", "full_refund", {"HELPDESK_DB_LOST": "1"}),
     ("w01_ticket_triage", "retried_refund", {}),
+    ("w01_ticket_triage", "verified_refund", {"PROMPT": "verify_only"}),
+    ("w01_ticket_triage", "checked_charge", {"PROMPT": "verify"}),
+    ("w01_ticket_triage", "late_lookup", {"PROMPT": "verify"}),
     ("w02_nightly_reconcile", "refund_then_page", {}),
+    ("w06_crm_db_agent", "enrich", {"WORKFLOW_LOOKUP_REFUSED": "1"}),
     ("w07_streaming_assistant", "normal", {}),
     ("w07_streaming_assistant", "secret_in_stream", {}),
     ("w07_streaming_assistant", "secret_split_across_writes", {}),

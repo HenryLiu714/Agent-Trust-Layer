@@ -36,6 +36,9 @@ MAX_TURNS = 6
 # Who is asking, new in every process: in the model call's `metadata`, never in what it asks.
 SESSION = {"user_id": f"helpdesk-{uuid.uuid4().hex}"}
 DB_NAME = "helpdesk.sqlite3"
+# Set for a run whose helpdesk database is gone, as a replay's may be since its recording (#83):
+# the agent seeds nothing, so a real `lookup_customer` raises (`no such table`).
+DB_LOST_ENV = "HELPDESK_DB_LOST"
 PROMPTS = {
     "full": "You are a refund agent. Refund the full remaining amount of a disputed charge.",
     "half": "You are a refund agent. Refund half of the remaining amount of a disputed charge.",
@@ -45,6 +48,8 @@ PROMPTS = {
     "runaway": "You are a refund agent. Keep checking the charge until it changes.",
     "verify": "You are a refund agent. Refund in full; check the charge again before replying.",
     "verify_only": "You are a refund agent. Do not refund; check the charge again before replying.",
+    "late_lookup": "You are a refund agent. Refund in full; only then look the customer up, and "
+    "check the charge again before replying.",
 }
 TOOLS = [
     {"name": "get_charge", "input_schema": {"type": "object"}},
@@ -174,7 +179,8 @@ def main(argv: list[str]) -> int:
         print("usage: agent.py <ticket_id> <charge> <customer> <message>", file=sys.stderr)
         return 2
     ticket_id, charge, customer, message = argv
-    seed(customer)
+    if not os.environ.get(DB_LOST_ENV):
+        seed(customer)
     # A Zendesk-shaped webhook, delivered to our own handler.
     event = {
         "ticket": {"id": ticket_id, "charge": charge, "description": message},

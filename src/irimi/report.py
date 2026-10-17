@@ -643,7 +643,7 @@ def _summary(
     """The one implementation of the summary. `exchanges` holds no telemetry; `telemetry` is one
     host per telemetry exchange, each of them forwarded live (#72). A tool call is not an exchange
     and is in no count: each write tool whose stand-in ran gets a line after the HTTP writes, and a
-    read tool, which ran for real, gets none (#76)."""
+    read tool, run for real or answered from a replay's recording, gets none (#76, #83)."""
     paired = _writes_with_their_reads(exchanges)
     writes = [write for write, _ in paired]
     total = len(exchanges) + len(telemetry)

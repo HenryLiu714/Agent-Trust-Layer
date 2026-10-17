@@ -432,13 +432,14 @@ def replay(
 
 def replayed_run_id(recorded: Result) -> str:
     """The run a replay of `recorded` answers from (#82): the one run besides the process run that
-    `recorded`'s irimi put exchanges in - the SDK's, or a `header` run whose start never reached
-    irimi (W10's control faults) - or the process run when there is none (W9, W11). Read off the
-    exchanges it reported, so a store that holds other runs too, as a replay's holds its
-    recording's, still names `recorded`'s own. A recording with several (W3, W8) has no one run to
-    replay, and raises."""
+    `recorded`'s irimi put exchanges or tool calls in (#83) - the SDK's, or a `header` run whose
+    start never reached irimi (W10's control faults) - or the process run when there is none (W9,
+    W11). Read off the events it handed its store, so a store that holds other runs too, as a
+    replay's holds its recording's, still names `recorded`'s own. A recording with several (W3,
+    W8) has no one run to replay, and raises."""
     process = recorded.process_run_id()
-    runs = sorted({ex.run_id for ex in recorded.reported} - {process})
+    events = [*recorded.reported, *recorded.handed_events]
+    runs = sorted({event.run_id for event in events} - {process})
     if len(runs) > 1:
         raise AssertionError(f"{recorded.scenario} stored {len(runs)} runs; a replay names one")
     return runs[0] if runs else process

@@ -21,7 +21,11 @@ A replay of a recording its agent makes again owes:
    nothing at all for a scenario whose one run the recording holds whole;
 7. and for that scenario, no miss at all: an unchanged replay of a whole recording never diverges;
 8. and the agent making the calls it made when it was recorded, each answered with the status it
-   was answered with then, in any order, so a replay that never ran its agent passes nothing.
+   was answered with then, in any order, so a replay that never ran its agent passes nothing;
+9. and the tool calls the proxy cannot see made again (#83): the replayed run's counterpart makes
+   the recorded run's, each read tool answered from the recording and each write tool through its
+   stand-in, and the corpus's own log of which body ran says what irimi stored; and the agent
+   told it replays, `IRIMI_REPLAY_RUN` naming the replay's own process run.
 
 What a scenario cannot owe, it names in a table below with the reason, and each entry must still be
 needed, so a fix that makes one unnecessary fails here until the entry goes.
@@ -47,6 +51,7 @@ from irimi.exchange import (
     REPLAY_MISS_FLAG,
 )
 from irimi.runner import NO_PROXY_VALUE
+from irimi.trace import ToolCall
 
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
 W3, W5, W7 = "w03_queue_worker", "w05_dispute_responder", "w07_streaming_assistant"
@@ -126,12 +131,38 @@ COMPARE_DIFFERS = {(W3, "shared_charge")}
 # map recorded nothing (W8 `map_refused`).
 NAMES_ITS_OWN_RUNS = {(W9, "control_runs"), (W9, "control_hazards")}
 NOTHING_RECORDED = {(W8, "map_refused")}
+# Rule 8's exception: the scenarios whose agent makes fewer calls in a replay, and why.
+W6 = "w06_crm_db_agent"
+CALLS_FEWER = {
+    (W6, "enrich"): (
+        "`crm.fetch_enrichment` makes its GET inside a read tool the recording answers, so the GET "
+        "is never made"
+    ),
+}
+# Rule 9's exceptions. The read tools a replay runs for real, by scenario, and why:
+_NOT_REVIVED = "its recorded result holds `Decimal` and `datetime` as `__irimi_repr__`"
+TOOLS_RUN_FOR_REAL: dict[tuple[str, str], dict[str, str]] = {
+    (W6, "enrich"): {"crm.score_account": _NOT_REVIVED},
+}
+# And the scenarios in which any read tool may. LOOKS WRONG: the recording answers every run of the
+# process (#155), so another run takes the replayed run's recorded result first, or diverges the
+# replay with a write the replayed run's recording lacks, after which no read is answered from it.
+_TAKEN = "another run of the process asks first, or diverges the replay first (#155)"
+READ_TOOLS_TAKEN: dict[tuple[str, str], str] = {
+    **{
+        (W3, s): _TAKEN
+        for s in ("ledger_threads_8", "ledger_asyncio_8", "ledger_unpropagated", "ledger_worker")
+    },
+    (W6, "outside_run"): "the process run's `find_accounts` before the trigger takes the SDK run's",
+    (W8, "nested_tools"): _TAKEN,
+}
 
 
 @dataclass
 class Replayed:
     run_id: str
     replay: Result
+    counterpart: str | None  # the replay's run that stands for `run_id` (`counterpart`)
     compared: tuple[int, list[str]] | None  # irimi compare's exit and rows, None if no counterpart
 
 
@@ -149,8 +180,50 @@ def replays_of(run_workflow, replayed, name: str, scenario: str) -> list[Replaye
             code, out, err = replay.compare_runs(run_id, other)
             assert err == [], err
             compared = (code, out[out.index("") + 1 :])
-        found.append(Replayed(run_id, replay, compared))
+        found.append(Replayed(run_id, replay, other, compared))
     return found
+
+
+def tool_calls(result: Result, run_ids: set[str]) -> list[ToolCall]:
+    """The tool calls `result`'s store holds in the runs `run_ids`, run by run in `seq` order."""
+    reader = result.stored()
+    return [
+        event
+        for run_id in sorted(run_ids)
+        for event in reader.load_run(run_id).events
+        if isinstance(event, ToolCall)
+    ]
+
+
+def tool_problems(
+    recorded: Result, r: Replayed, for_real: dict[str, str], taken: bool, logs: bool
+) -> list[str]:
+    """Rule 9: how the replay's tool calls differ from what it owes (#83). Its counterpart run
+    made the recorded run's tool calls, by name and kind, in any order; each read ran from the
+    recording, but those `for_real` names, and any read at all when another run may have `taken`
+    its answer, and each write its stand-in. And when the agent `logs` its tools through
+    `examples/workflows/sdk.py`, the log of which body ran agrees with every tool call the replay
+    stored."""
+    problems = []
+    if r.counterpart is not None:
+        mine = tool_calls(recorded, {r.run_id})
+        theirs = tool_calls(r.replay, {r.counterpart})
+        made = Counter((c.name, c.kind) for c in theirs)
+        if made != Counter((c.name, c.kind) for c in mine):
+            problems.append(f"made {sorted(made.elements())}, recorded {mine}")
+        for call in theirs:
+            owed = "shadow" if call.kind == "write" else "real" if call.name in for_real else None
+            if call.ran != (owed or "recording") and not (taken and call.kind == "read"):
+                problems.append(f"{call.name} ran {call.ran}")
+    if not logs:
+        return problems
+    before = {run.run_id for run in recorded.stored().list_runs()}
+    replayed_runs = {run.run_id for run in r.replay.stored().list_runs()} - before
+    stored = Counter((c.name, c.ran) for c in tool_calls(r.replay, replayed_runs))
+    logged = Counter((t["name"], t["ran"]) for t in r.replay.events("tool"))
+    if stored != logged:
+        problems.append(f"stored {sorted(stored.elements())}, logged {sorted(logged.elements())}")
+    return problems
 
 
 def flag_problems(replay: Result) -> list[str]:
@@ -264,8 +337,19 @@ def test_every_run_of_every_scenario_replays_from_its_recording(
             assert missed == [], r.run_id
         # 8. The agent made the calls it made when it was recorded, and was answered alike: the
         # rules above hold of a replay whose agent never ran, too (#82).
-        if case not in EXIT_DIFFERS:
+        if case in CALLS_FEWER:
+            assert calls(replay) < calls(recorded), r.run_id
+        elif case not in EXIT_DIFFERS:
             assert calls(replay) == calls(recorded), r.run_id
+        # 9. The tool calls the proxy cannot see were made again, and answered as replay answers
+        # them (#83), by an agent told it replays, in the replay's own run.
+        told = {start["replay"] for start in replay.events("start")}
+        assert told == {replay.process_run_id()}, r.run_id
+        for_real = TOOLS_RUN_FOR_REAL.get(case, {})
+        # An agent that names its runs itself posts its tool calls itself too (W9), and logs none.
+        logs = case not in NAMES_ITS_OWN_RUNS
+        problems = tool_problems(recorded, r, for_real, case in READ_TOOLS_TAKEN, logs)
+        assert problems == [], r.run_id
     # Each exception is still needed.
     if case in REACHES_THE_INTERNET:
         assert any(r.replay.internet.requests() for r in replays)
@@ -273,6 +357,17 @@ def test_every_run_of_every_scenario_replays_from_its_recording(
         assert any(flag_problems(r.replay) for r in replays)
     if case in COMPARE_DIFFERS:
         assert any(r.compared and " · 1 changed · " in r.compared[1][-1] for r in replays)
+    if case in CALLS_FEWER:
+        assert any(calls(r.replay) != calls(recorded) for r in replays)
+    ran = [
+        (c.name, c.kind, c.ran)
+        for r in replays
+        for c in tool_calls(r.replay, {r.counterpart} if r.counterpart else set())
+    ]
+    for name in TOOLS_RUN_FOR_REAL.get(case, {}):
+        assert (name, "read", "real") in ran
+    if case in READ_TOOLS_TAKEN:
+        assert any(kind == "read" and how == "real" for _, kind, how in ran)
 
 
 def test_the_tables_name_only_scenarios_that_exist():
@@ -283,5 +378,30 @@ def test_the_tables_name_only_scenarios_that_exist():
         | COMPARE_DIFFERS
         | NAMES_ITS_OWN_RUNS
         | NOTHING_RECORDED
+        | set(CALLS_FEWER)
+        | set(TOOLS_RUN_FOR_REAL)
+        | set(READ_TOOLS_TAKEN)
     )
     assert named <= set(CASES)
+
+
+def test_rule_9_catches_a_replay_whose_tools_ran_as_they_did_under_shadow(run_workflow):
+    """Rule 9 has something to catch: W6 `enrich`'s shadow run held up as its own replay, every
+    read tool run for real and no tool call stored by a run it started, is flagged for each read
+    the recording would have answered and for its log, but not for `score_account`, which a
+    replay runs for real too, nor for a write, whose stand-in ran as a replay's does (#83)."""
+    recorded = run_workflow(W6, "enrich", "shadow")
+    [run] = recorded.sdk_runs()
+    as_replay = Replayed(run.run_id, recorded, run.run_id, None)
+    problems = tool_problems(recorded, as_replay, TOOLS_RUN_FOR_REAL[(W6, "enrich")], False, True)
+    ran_for_real = [p for p in problems if p.endswith(" ran real")]
+    assert sorted(ran_for_real) == [
+        "crm.connect_with ran real",
+        "crm.fetch_enrichment ran real",
+        "crm.fetch_enrichment ran real",
+        "crm.find_accounts ran real",
+    ]
+    assert [p for p in problems if p not in ran_for_real] == [
+        p for p in problems if p.startswith("stored [], logged ")
+    ]
+    assert len(problems) == len(ran_for_real) + 1

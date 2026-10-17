@@ -1,5 +1,6 @@
 """Trace format v1 (#68): every record survives its codec, and the reference page decodes."""
 
+import asyncio
 import dataclasses
 import hashlib
 import itertools
@@ -350,7 +351,7 @@ def _key_paths(d, path=()):
 # Fields added after #68 shipped v1. Each decodes as its default when absent, and has a test of its
 # own below.
 _ADDED_WITHIN_V1 = {("exchange", ("stream_chunks",))}  # #71
-_ADDED_IN_V2 = {("run", ("replay_of",))}  # #82
+_ADDED_IN_V2 = {("run", ("replay_of",)), ("tool_call", ("awaited",))}  # #82, #83
 
 _REQUIRED = [
     (name, path)
@@ -397,7 +398,8 @@ _FIRST_ITEM_REFUSED = {
     "stream_chunks": "'stream_chunks'[0] is not a positive integer",
 }
 _TYPED = [(name, path) for name, path in _REQUIRED if path[-1] not in _FREE_JSON] + [
-    ("exchange", ("stream_chunks",))
+    ("exchange", ("stream_chunks",)),
+    ("tool_call", ("awaited",)),
 ]
 
 
@@ -534,6 +536,31 @@ def test_a_replay_names_the_run_it_replays():
     assert trace.run_from_json(trace.run_to_json(record)) == record
 
 
+def test_a_recorded_outcome_round_trips_and_holds_a_tool_call_s_outcome():
+    """What the control endpoint answers a replay's lookup with, and the SDK reads (#83)."""
+    call = dataclasses.replace(
+        _filled(ToolCall), result=None, error=ErrorInfo("builtins.KeyError", "'k'"), awaited=True
+    )
+    d = trace.recorded_outcome_to_json(call)
+    assert d == {
+        "result": None,
+        "error": {"type": "builtins.KeyError", "message": "'k'"},
+        "awaited": True,
+    }
+    assert trace.recorded_outcome_from_json(d) == trace.RecordedOutcome(None, call.error, True)
+    with pytest.raises(TraceFormatError, match="'awaited'"):
+        trace.recorded_outcome_from_json(d | {"awaited": "yes"})
+
+
+def test_a_tool_call_written_before_awaited_existed_reads_as_one_no_coroutine_gave():
+    """#83 added `awaited` within v2, so a tool call recorded before it has no such key, and reads
+    as the field's default: a call that returned its result itself."""
+    d = trace.tool_call_to_json(dataclasses.replace(_filled(ToolCall), awaited=True))
+    assert trace.tool_call_from_json(d).awaited is True
+    del d["awaited"]
+    assert trace.tool_call_from_json(d).awaited is False
+
+
 def test_an_exchange_written_before_stream_chunks_existed_reads_as_one_that_did_not_stream():
     """#71 added `stream_chunks` within v1, so a recording made before it has no such key, and
     reads as the field's default: a response that did not stream."""
@@ -580,6 +607,7 @@ _DECODERS = {
     "run_from_json": trace.run_from_json,
     "tool_call_from_json": trace.tool_call_from_json,
     "telemetry_from_json": trace.telemetry_from_json,
+    "recorded_outcome_from_json": trace.recorded_outcome_from_json,
     "exchange_from_json": lambda d: trace.exchange_from_json(d, _never),
     "event_from_json": lambda d: trace.event_from_json(d, _never),
 }
@@ -813,3 +841,22 @@ def test_the_documented_example_is_what_the_encoders_write():
         documented = json.loads(text)
         seq, event = trace.event_from_json(documented, lambda ref: blobs[ref.sha256])
         assert trace.event_to_json(seq, event, trace.body_ref) == documented
+
+
+def test_a_description_is_found_anywhere_in_a_captured_value():
+    """`__irimi_repr__` and `__irimi_truncated__` say what a value was, not what it is, so a
+    replay never hands one back as the value (#83). Found at any depth without recursion."""
+    assert trace.DESCRIPTION_KEYS == {trace.REPR_KEY, trace.TRUNCATED_KEY}
+    assert trace.holds_description({"a": [1, {"b": {"__irimi_repr__": "Decimal('1')"}}]})
+    assert trace.holds_description([{"__irimi_truncated__": True, "bytes": 9}])
+    for whole in (None, 1, "__irimi_repr__", ["__irimi_repr__"], {"__irimi_bytes__": "AA=="}):
+        assert not trace.holds_description(whole)
+    deep: list = [{"__irimi_repr__": "x"}]
+    for _ in range(100_000):
+        deep = [deep]
+    assert trace.holds_description(deep)
+
+
+def test_the_stopped_error_types_are_how_a_cancelled_or_closed_call_is_recorded():
+    stops = (asyncio.CancelledError(), GeneratorExit())
+    assert {ErrorInfo.from_exception(e).type for e in stops} == trace.STOPPED_ERROR_TYPES

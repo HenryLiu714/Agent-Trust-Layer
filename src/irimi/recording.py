@@ -25,6 +25,23 @@ Each recorded exchange answers once, in the order it was recorded, so a third id
 run that recorded two is a miss. The engine's own precondition reads are kept apart: they are never
 served to the agent, and the agent's reads are never used for one (#82, "Decided").
 
+A READ TOOL THE PROXY CANNOT SEE IS A READ TOO (#83). The SDK asks for its recorded result by the
+tool's name and its captured args, redacted with the store's key as the recording's were, compared
+as canonical JSON, in order. A recorded tool call answered holds the HTTP its body made inside it,
+and the read tools it called, which a replay that answers the call never makes: the exchanges
+recorded within the call's span are used up with it, and so are the read tool calls within it that
+a later call of the same name and args comes after (`_displacing`), so none of them answers a later
+request or tool call of the agent's with what the tool saw.
+Under the world rule a tool is placed where its body began, its first such exchange, so a write
+its own body made is not one it waits on; and a tool recorded after a write the replay has not
+made is a miss that does not diverge the replay, since its body then runs, and its own HTTP is
+decided as any request is. A recorded call with no outcome to give (`_tool_servable`: a result
+that is a description, as a `Decimal` is captured, or a call stopped from outside) is a miss that
+uses up only itself: the SDK could not use it, and the body that runs in its place is answered
+what it was answered when recorded. A write tool is not kept: its stand-in runs in a replay as it
+did when recorded, and with no tool overlay (#119) no recorded read shows what one did, so it
+neither diverges a replay nor holds a read back.
+
 THE REPLAY'S STATE IS HERE, AND ONLY HERE: which recorded exchanges have answered, and whether
 the replay has diverged - made a write the recording could not answer, or reached a recorded answer
 made from a world holding a recorded write the replay has not made - after which a recorded answer
@@ -36,7 +53,7 @@ import hashlib
 import json
 import threading
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, get_args
 from urllib.parse import parse_qsl
 
@@ -63,10 +80,12 @@ from irimi.exchange import (
     media_type,
 )
 from irimi.servicemap import MapIndex
-from irimi.trace import Event
+from irimi.trace import STOPPED_ERROR_TYPES, Event, JSONValue, ToolCall, holds_description
 
 # What a match key is: a tuple of strings and tuples of strings, comparable and hashable.
 _Key = tuple[Any, ...]
+# What a read tool call is matched by: its name, and its args as canonical JSON (#83).
+_ToolKey = tuple[str, str]
 # Where a recorded exchange waits to be taken: its key, whether it is an llm call that asked to
 # stream (`_stream_bucket`), and the idempotency flag its answer carried (`_held`).
 _Bucket = tuple[_Key, bool, str]
@@ -266,11 +285,89 @@ def _canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
+def _tool_key(name: str, args: JSONValue) -> _ToolKey:
+    """A read tool call's key: its name and its args, already redacted, as canonical JSON, so key
+    order never decides a match and `true` is never `1` (#83)."""
+    return (name, _canonical(args))
+
+
+def _tool_servable(call: ToolCall) -> bool:
+    """Whether a recorded read tool call's outcome may be handed back. Not when the store could
+    not redact it: a result stored as `redact.REDACTION_FAILED` would revive as the tool's answer,
+    and an error message as that string would be raised as the recorded error's (#69). Not when it
+    is no outcome to give: a result holding a description of a value (`trace.holds_description`)
+    is not the value, and a call something outside it stopped (`trace.STOPPED_ERROR_TYPES`)
+    recorded none of its own (#83). Each of those the SDK would decline, after the call had used up
+    what its body made, which its body then runs again and needs. Whether any other result can be
+    revived is the SDK's to say."""
+    if call.error is not None:
+        return (
+            call.error.message != redact.REDACTION_FAILED
+            and call.error.type not in STOPPED_ERROR_TYPES
+        )
+    return call.result != redact.REDACTION_FAILED and not holds_description(call.result)
+
+
 @dataclass
 class _Entry:
     exchange: Exchange
-    position: int  # its place among the agent's recorded exchanges
+    position: int  # its place among the agent's recorded exchanges and read tool calls
     consumed: bool = False
+
+
+@dataclass
+class _ToolEntry:
+    call: ToolCall
+    # Where its body began, in the same count as `_Entry.position`: its first inner exchange's,
+    # or its own when it made none.
+    position: int
+    # The agent's exchanges recorded within the call's span: its body's HTTP (#83).
+    inner: list[_Entry]
+    # The read tool calls recorded within the call's span that a later call repeats: the tools its
+    # body called, which would answer that later call in its place (`_displacing`, #83).
+    nested: list["_ToolEntry"] = field(default_factory=list)
+    consumed: bool = False
+
+
+def _within(started_at: float, ended_at: float, call: ToolCall) -> bool:
+    """Whether an exchange or a tool call made over `started_at`..`ended_at` was made within
+    `call`'s span, which is how a stored run says it was the call's body's: a tool call records no
+    link to its HTTP or to the tools it called (#76). One another task made in the span is taken
+    for the call's too, and so used up with it: in the replay it is then a miss, decided afresh,
+    never an answer from the wrong world. One with no clock (`started_at` 0.0, built outside the
+    engine and the SDK) is within no call."""
+    return 0.0 < started_at and call.started_at <= started_at and ended_at <= call.ended_at
+
+
+def _nested_in(other: ToolCall, call: ToolCall) -> bool:
+    """Whether the read tool call `other` was made within `call`'s span (`_within`). Never one
+    with the same span, so two calls clocked alike never use each other up (#83)."""
+    span = (other.started_at, other.ended_at)
+    return span != (call.started_at, call.ended_at) and _within(*span, call)
+
+
+def _displacing(
+    within: list[tuple[_ToolKey, _ToolEntry]], tools: dict[_ToolKey, list[_ToolEntry]]
+) -> list[_ToolEntry]:
+    """The read tool calls `within` a call's span that answering the call uses up: each one that
+    a later recorded call of its name and args, outside that span, comes after, so that it would
+    answer that later call in its place (#83).
+
+    A span does not say whose a call was. One within it may be the body's, never made once the
+    call is answered, or another task's, made at the same time: two tools gathered, or a sync
+    tool's coroutine left pending while the agent awaits another. Used up, the other task's would
+    be a miss whenever its lookup came second, so a race would decide it. So only one that would
+    answer a later call wrongly is used up, and any other is left to answer its own call. One of
+    another task's that a later call repeats is still used up, and that task's call then takes the
+    later answer: no stored run says whose it was (the follow-up that records the link)."""
+    inside = {id(entry) for _, entry in within}
+    found = []
+    for tool_key, entry in within:
+        same = tools[tool_key]
+        after = next(i for i, other in enumerate(same) if other is entry) + 1
+        if any(id(other) not in inside for other in same[after:]):
+            found.append(entry)
+    return found
 
 
 class Recording:
@@ -280,11 +377,13 @@ class Recording:
     def __init__(
         self,
         agent: dict[_Bucket, list[_Entry]],
+        tools: dict[_ToolKey, list[_ToolEntry]],
         engine: dict[_Key, Exchange],
         maps: MapIndex,
         redaction_key: bytes,
     ) -> None:
         self._agent = agent
+        self._tools = tools
         # The recorded writes that entered the write log (`is_authored_write`): the ones every
         # recorded read after them shows.
         self._writes = [
@@ -308,13 +407,23 @@ class Recording:
 
         Every exchange the agent made is kept, in order, whether or not it can be served: one that
         cannot is still the agent's Nth such request, so the request in its place is a miss and the
-        next one still meets its own. Telemetry is never stored as an exchange (#70), and a tool
-        call is #83's. The engine's precondition reads are kept by key, the first that can be served
-        of each, or else the first."""
+        next one still meets its own. Telemetry is never stored as an exchange (#70). Every read
+        tool call is kept the same way, by name and args, counted in the same order as the
+        exchanges so the world rule can compare them; a write tool call is not (#83, module doc).
+        The engine's precondition reads are kept by key, the first that can be served of each, or
+        else the first."""
         agent: dict[_Bucket, list[_Entry]] = {}
         engine: dict[_Key, Exchange] = {}
+        calls: list[tuple[_ToolKey, ToolCall, int]] = []
         position = 0
         for event in events:
+            if isinstance(event, ToolCall) and event.kind == "read":
+                try:
+                    calls.append((_tool_key(event.name, event.args), event, position))
+                except Exception:  # args this cannot key are args nothing can match
+                    continue
+                position += 1
+                continue
             if not isinstance(event, Exchange) or event.kind == "telemetry":
                 continue
             try:
@@ -329,7 +438,20 @@ class Recording:
                 bucket = (found, _stream_bucket(event.request, event.kind), _held(event))
                 agent.setdefault(bucket, []).append(_Entry(event, position))
                 position += 1
-        return cls(agent, engine, maps, redaction_key)
+        made = [entry for entries in agent.values() for entry in entries]
+        kept: list[tuple[_ToolKey, _ToolEntry]] = []
+        for tool_key, call, at in calls:
+            inner = [e for e in made if _within(e.exchange.started_at, e.exchange.ended_at, call)]
+            kept.append(
+                (tool_key, _ToolEntry(call, min([at, *(e.position for e in inner)]), inner))
+            )
+        tools: dict[_ToolKey, list[_ToolEntry]] = {}
+        for tool_key, entry in kept:
+            tools.setdefault(tool_key, []).append(entry)
+        for _, entry in kept:
+            within = [(key, other) for key, other in kept if _nested_in(other.call, entry.call)]
+            entry.nested = _displacing(within, tools)
+        return cls(agent, tools, engine, maps, redaction_key)
 
     def take(self, request: Request, kind: Kind, held: str = "") -> Exchange | None:
         """The recorded exchange that answers this live request, or None for a miss. `held` is the
@@ -355,13 +477,7 @@ class Recording:
         with self._lock:
             for entry in self._agent.get(wanted, ()):
                 if not entry.consumed:
-                    if _shows_the_world(entry.exchange) and (
-                        self._diverged
-                        or any(
-                            not write.consumed and write.position < entry.position
-                            for write in self._writes
-                        )
-                    ):
+                    if _shows_the_world(entry.exchange) and self._stale(entry.position):
                         self._diverged = True
                         return None
                     entry.consumed = True
@@ -372,6 +488,55 @@ class Recording:
                         return None
                     return recorded
         return None
+
+    def take_tool_call(self, name: str, args: JSONValue) -> ToolCall | None:
+        """The recorded read tool call that answers this live one, or None for a miss (#83). `args`
+        are the call's as the SDK captured them, not yet redacted.
+
+        It is the first recorded read tool call of the same name whose args equal `args` redacted
+        with the store's key, as the recording's were, that has not answered yet, and it never
+        answers again. Args redaction could not read (`redact.REDACTION_FAILED`) match nothing,
+        and one with no outcome to give - one redaction could not read, a result that is a
+        description, a call stopped from outside - is a miss in its place (`_tool_servable`),
+        which uses up nothing else. The exchanges recorded within an answered call, and the read
+        tool calls within it that a later call repeats, are used up with it (module doc).
+
+        A READ TOOL SHOWS THE WORLD, as an HTTP read does (`take`): its result may have been made
+        from what it read over HTTP, which showed every recorded write before it. One recorded
+        after a write the replay has not made, or reached once the replay has diverged, is a miss,
+        and is not used up. Unlike a read's, it does not diverge the replay: its body runs, and
+        what the body reads over HTTP is decided as every request is, by the policy."""
+        redacted = redact.redact_json(args, self._redaction_key)
+        if redacted == redact.REDACTION_FAILED:
+            return None
+        try:
+            wanted = _tool_key(name, redacted)
+        except Exception:  # args no recording holds: `from_events` skips what it cannot key
+            return None
+        with self._lock:
+            for entry in self._tools.get(wanted, ()):
+                if not entry.consumed:
+                    if self._stale(entry.position):
+                        return None
+                    entry.consumed = True
+                    if not _tool_servable(entry.call):
+                        # A miss in its place: its body runs, and makes the requests and tool
+                        # calls it was recorded making, which are still there to answer them.
+                        return None
+                    for made in entry.inner:
+                        made.consumed = True
+                    for nested in entry.nested:
+                        nested.consumed = True
+                    return entry.call
+        return None
+
+    def _stale(self, position: int) -> bool:
+        """Whether a recorded answer at `position` that shows the world shows one the replay is not
+        in: the replay has diverged, or a recorded write before it has not been made. Called under
+        the lock, by the step that would consume that answer."""
+        return self._diverged or any(
+            not write.consumed and write.position < position for write in self._writes
+        )
 
     def engine_read(self, request: Request) -> Response | None:
         """The response the recorded run's own precondition read of this request got, or None

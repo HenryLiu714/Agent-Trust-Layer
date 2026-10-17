@@ -232,6 +232,12 @@ row:
 - **The markers are reserved.** A `dict` holding `__irimi_repr__`, `__irimi_type__`,
   `__irimi_bytes__` or `__irimi_truncated__` as a key of its own is captured by its repr, so a
   marker in `args` was always written by capture.
+- **A description is not the value.** `__irimi_repr__` and `__irimi_truncated__` say what a value
+  was, not what it is, wherever they appear in it. They are part of this format, not of the SDK
+  alone: `trace.REPR_KEY`, `trace.TRUNCATED_KEY` (`trace.DESCRIPTION_KEYS`), and
+  `trace.holds_description(value)` says whether a captured value holds either anywhere. A replay
+  never hands such a value back as the value: neither a recording (`recording.Recording`) nor the
+  SDK's `revive` does (#83).
 - **Importable classes only.** A dataclass or model defined inside a function (`<locals>` in its
   qualname), or in `__main__`, which is another module in the process that replays it, cannot be
   imported to rebuild it, so it is not replayable.
@@ -302,12 +308,13 @@ A **request** is `method`, `scheme`, `host`, `port` (integer), `path`, `query` (
 | `run_id` | string | The run it belongs to: the run it was made in, else the process run (`IRIMI_RUN`), else `unattributed`. |
 | `name` | string | The tool's name: `@sdk.tool(name=...)`, or the function's `module.qualname` (#76). |
 | `kind` | `read`, `write` | What the tool does. |
-| `ran` | `real`, `shadow`, `recording` | `real` ran the function; `shadow` ran its shadow stand-in; `recording` (v2) was answered from the run a replay replays. |
+| `ran` | `real`, `shadow`, `recording` | `real` ran the function; `shadow` ran its shadow stand-in; `recording` (v2) was answered from the run a replay replays: a read tool whose recorded outcome was handed back, its body never run (#83). In a replay's run, a read tool's `real` is that replay's miss, as `replay-miss` is an exchange's. |
 | `args` | any JSON | What it was called with, bound against the real function's signature and captured as a trigger's are ([Captured arguments](#captured-arguments)). |
 | `result` | any JSON | What it returned, captured the same way. `null` when it raised. A result that would take `args` and `result` together past 1 MiB is `{"__irimi_truncated__": true, "bytes": n}`. |
-| `error` | error or `null` | What it raised. |
+| `error` | error or `null` | What it raised. A call something outside it stopped before it finished, its task cancelled or its coroutine closed unawaited, records `asyncio.exceptions.CancelledError` or `builtins.GeneratorExit` (`trace.STOPPED_ERROR_TYPES`): no outcome of the tool's own, so a replay never answers with it (#83). |
 | `started_at` | number | When the call began. |
 | `ended_at` | number | When it returned or raised. |
+| `awaited` | boolean | Added in #83. `true` for a sync tool that returned a coroutine: the call ended when the coroutine did, and `result` and `error` are the coroutine's, so a replay that answers it from the recording hands the agent a coroutine again. `false` for any other call. Absent in a recording made before #83, and read then as `false`. |
 
 **A `telemetry`** event (`trace.TelemetrySeen`) records only that one telemetry exchange happened:
 `run_id`, `host` and `started_at`. Telemetry is forwarded, and its requests and responses are never
@@ -371,8 +378,8 @@ sample workflows hold every scenario to that (`tests/workflows/test_stored_runs.
 - **A field added later is optional on decode.** When it is absent the decoder gives the field's
   dataclass default, so a recording made before the field existed still reads. Whoever adds the
   field adds that decoder path and its test, and marks the field on this page with the issue that
-  added it; #71's `stream_chunks` is the first, added within version 1, and #82's `replay_of` the
-  second. A field added within a version must be one an older reader, which ignores it, still reads
+  added it; #71's `stream_chunks` is the first, added within version 1, #82's `replay_of` the
+  second, and #83's `awaited` the third, added within version 2. A field added within a version must be one an older reader, which ignores it, still reads
   correctly without; adding it is not a version bump.
 - **Version 2** (#82) added `replay` to `mode`, `recording` to `answered_by` and `ran`, and
   `replay_of` to the run record. A version 1 run reads under it unchanged.
@@ -545,7 +552,8 @@ The agent's own database write, which the proxy never sees, run as its shadow st
   "result": {"updated": 1},
   "error": null,
   "started_at": 1790600001.625,
-  "ended_at": 1790600001.6875
+  "ended_at": 1790600001.6875,
+  "awaited": false
 }
 ```
 

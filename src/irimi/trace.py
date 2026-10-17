@@ -178,6 +178,58 @@ class ToolCall:
     error: ErrorInfo | None
     started_at: float
     ended_at: float
+    # A sync tool that returned a coroutine: the call ended when the coroutine did, and `result`
+    # and `error` are the coroutine's. A replay that answers such a call from the recording hands
+    # the agent a coroutine again, which it awaits as it awaited the first (#83). Added within v2.
+    awaited: bool = False
+
+
+@dataclass(frozen=True)
+class RecordedOutcome:
+    """What a recorded read tool call came to, as a replay hands it back (#83): the control
+    endpoint answers the SDK's lookup with it (`recorded_outcome_to_json`), and the SDK reads it
+    (`recorded_outcome_from_json`). `result` is still captured JSON, for the SDK to revive."""
+
+    result: JSONValue
+    error: ErrorInfo | None
+    awaited: bool
+
+
+# What the SDK posts to ask a replay for a read tool's recorded outcome: the tool's name and its
+# args as captured, and nothing else (#83).
+RECORDED_LOOKUP_FIELDS = ("name", "args")
+
+# The markers of a captured value that describe it rather than hold it (`docs/trace-format.md`,
+# "Captured values"): its repr, or its size when it was too large to keep. Trace format, not the
+# SDK's alone: a replay's recording refuses a recorded result holding one, as the SDK's `revive`
+# does, so neither side states the rule apart (#83).
+REPR_KEY = "__irimi_repr__"
+TRUNCATED_KEY = "__irimi_truncated__"
+DESCRIPTION_KEYS = frozenset({REPR_KEY, TRUNCATED_KEY})
+
+# The `ErrorInfo.type` a tool call records when something outside it stopped it before it
+# finished: its task was cancelled (an `asyncio.wait_for` that timed out), or its coroutine was
+# closed unawaited. It holds no outcome of the tool's own, so a replay never answers with it: the
+# agent's `except TimeoutError` would meet a RecordedToolError where the recording went on (#83).
+# `ErrorInfo.from_exception` spells them so on every supported Python.
+STOPPED_ERROR_TYPES = frozenset({"asyncio.exceptions.CancelledError", "builtins.GeneratorExit"})
+
+
+def holds_description(value: JSONValue) -> bool:
+    """Whether a captured value holds a description of a value anywhere in it (`DESCRIPTION_KEYS`
+    as a key of a JSON object at any depth), so that it cannot be rebuilt as the value (#83). Walked
+    with a stack, never recursion, so a value nested past the interpreter's stack is answered too.
+    Never raises."""
+    stack: list[Any] = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            if not DESCRIPTION_KEYS.isdisjoint(item):
+                return True
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return False
 
 
 @dataclass(frozen=True)
@@ -244,7 +296,13 @@ def tool_call_to_json(call: ToolCall) -> dict[str, Any]:
         "error": error_to_json(call.error),
         "started_at": call.started_at,
         "ended_at": call.ended_at,
+        "awaited": call.awaited,
     }
+
+
+def recorded_outcome_to_json(call: ToolCall) -> dict[str, Any]:
+    """The recorded outcome of `call`, as the control endpoint answers a lookup that hit (#83)."""
+    return {"result": call.result, "error": error_to_json(call.error), "awaited": call.awaited}
 
 
 def telemetry_to_json(seen: TelemetrySeen) -> dict[str, Any]:
@@ -383,6 +441,16 @@ def tool_call_from_json(d: Mapping[str, Any]) -> ToolCall:
         error=_error_from_json(d, "error"),
         started_at=_float(d, "started_at"),
         ended_at=_float(d, "ended_at"),
+        awaited=_added_later(d, "awaited", _bool) or False,
+    )
+
+
+def recorded_outcome_from_json(d: Mapping[str, Any]) -> RecordedOutcome:
+    """The outcome `recorded_outcome_to_json` wrote, held to the rules a stored tool call is."""
+    return RecordedOutcome(
+        result=_json(d, "result"),
+        error=_error_from_json(d, "error"),
+        awaited=_bool(d, "awaited"),
     )
 
 
@@ -621,9 +689,9 @@ def _strings(d: Mapping[str, Any], key: str) -> tuple[str, ...]:
 def _added_later[T](
     d: Mapping[str, Any], key: str, read: Callable[[Mapping[str, Any], str], T]
 ) -> T | None:
-    """A field added after v1 shipped (#82's `replay_of`): absent or `null` is None, so a run
-    recorded before it existed reads as one that never set it; any other value is read with
-    `read`."""
+    """A field added after v1 shipped (#82's `replay_of`, #83's `awaited`): absent or `null` is
+    None, so a record made before it existed reads as one that never set it; any other value is
+    read with `read`."""
     return None if key not in d else _optional(d, key, read)
 
 

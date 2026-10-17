@@ -21,6 +21,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 import typing
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -1115,6 +1116,7 @@ def test_a_trigger_keeps_its_functions_name_signature_and_nature():
 
 def test_the_public_api_is_the_issues():
     assert sorted(sdk.__all__) == [
+        "RecordedToolError",  # #83
         "active",
         "current_run_id",
         "instrument",
@@ -1359,3 +1361,118 @@ def test_a_trigger_parameter_may_nest_as_deep_as_a_run_trigger():
     assert capture.capture(deep)[1] is True
     assert capture.capture_call(f, (deep,), {})[1] is True
     assert capture.capture_call(f, ([deep],), {})[1] is False
+
+
+# -- revive: capture's inverse, one test per row (#83) -------------------------------------------
+
+
+class Validated:
+    """Shaped like a pydantic v2 model both ways: `model_dump(mode="json")` and `model_validate`."""
+
+    def __init__(self, **fields: Any) -> None:
+        self.fields = fields
+
+    def model_dump(self, mode: str = "python") -> dict[str, Any]:
+        return dict(self.fields)
+
+    @classmethod
+    def model_validate(cls, value: Any) -> "Validated":
+        return cls(**value)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Validated) and other.fields == self.fields
+
+
+@pytest.mark.parametrize(
+    "value", [None, True, 0, -12, "é", 1.5, [1, [2, "x"]], {"a": {"b": [None]}}]
+)
+def test_revive_gives_json_back_as_itself(value):
+    assert capture.revive(value) == value
+
+
+def test_revive_gives_a_captured_tuple_back_as_a_list():
+    assert capture.revive(capture.capture((1, (2, "x")))[0]) == [1, [2, "x"]]
+
+
+def test_revive_gives_bytes_back():
+    assert capture.revive({"__irimi_bytes__": "AA=="}) == b"\x00"
+    assert capture.revive(capture.capture(b"\xffraw")[0]) == b"\xffraw"
+
+
+def test_revive_rebuilds_a_dataclass_from_its_init_fields():
+    revived = capture.revive(capture.capture(Ticket("T1", 4900))[0])
+    assert type(revived) is Ticket and revived == Ticket("T1", 4900)
+
+
+def test_revive_rebuilds_a_model_with_model_validate():
+    assert capture.revive(capture.capture(Validated(a=1, b=[2]))[0]) == Validated(a=1, b=[2])
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"__irimi_repr__": "Decimal('0.87')"},
+        {"__irimi_truncated__": True, "bytes": 2_000_000},
+        [1, {"x": {"__irimi_repr__": "nan"}}],
+    ],
+)
+def test_revive_refuses_a_description_anywhere_in_the_value(value):
+    with pytest.raises(capture.NotReplayable, match="its description"):
+        capture.revive(value)
+
+
+@pytest.mark.parametrize(
+    ("value", "said"),
+    [
+        ({"__irimi_type__": "tests.test_sdk:Nowhere", "value": {}}, "not in its module"),
+        ({"__irimi_type__": "no.such.module:Ticket", "value": {}}, "has not imported"),
+        ({"__irimi_type__": "tests.test_sdk:HERE", "value": {}}, "is not a class"),
+        (
+            {"__irimi_type__": "tests.test_sdk:Model", "value": {}},
+            "neither a dataclass nor a model",
+        ),
+        ({"__irimi_type__": "tests.test_sdk:Ticket", "value": {"nope": 1}}, "could not be built"),
+        ({"__irimi_type__": "tests.test_sdk:Ticket", "value": [1]}, "fields are not an object"),
+        ({"__irimi_type__": 7, "value": {}}, "names no class"),
+        ({"__irimi_bytes__": "not base64!"}, "not base64"),
+        ({"__irimi_bytes__": "é"}, "not base64"),
+        ({"__irimi_bytes__": 12}, "not base64"),
+    ],
+)
+def test_revive_names_why_a_value_cannot_be_rebuilt(value, said):
+    with pytest.raises(capture.NotReplayable, match=said):
+        capture.revive(value)
+
+
+def test_revive_never_imports_a_module_a_stored_run_names(monkeypatch):
+    """Importing runs a module's code, and a stored run is data: a class is found only in a module
+    this process already holds."""
+    monkeypatch.delitem(sys.modules, "json.tool", raising=False)
+    with pytest.raises(capture.NotReplayable, match="has not imported"):
+        capture.revive({"__irimi_type__": "json.tool:main", "value": {}})
+    assert "json.tool" not in sys.modules
+
+
+def test_revive_never_asks_a_module_s_getattr(monkeypatch):
+    """A lazy package's PEP 562 `__getattr__` imports on first use: revive looks a class up in what
+    the module already holds, so a stored run's name cannot make it import after all (#83)."""
+    asked: list[str] = []
+    lazy = types.ModuleType("lazy_pkg")
+
+    def lazy_getattr(name: str) -> Any:
+        asked.append(name)
+        return Ticket
+
+    lazy.__getattr__ = lazy_getattr  # type: ignore[method-assign]
+    monkeypatch.setitem(sys.modules, "lazy_pkg", lazy)
+    with pytest.raises(capture.NotReplayable, match="not in its module"):
+        capture.revive({"__irimi_type__": "lazy_pkg:Ticket", "value": {"ticket_id": "T1"}})
+    assert asked == []
+
+
+def test_revive_raises_nothing_but_not_replayable_however_deep_the_value():
+    deep: Any = []
+    for _ in range(100_000):
+        deep = [deep]
+    with pytest.raises(capture.NotReplayable):
+        capture.revive(deep)

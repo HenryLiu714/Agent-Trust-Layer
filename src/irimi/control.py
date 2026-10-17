@@ -11,11 +11,17 @@ against an exchange only by comparing two processes' clocks.
     POST /_irimi/runs/{run_id}/tool-calls   204   one tool call, its run id from the path;
                                                   `unattributed` for one made in no run (#76)
     POST /_irimi/runs/{run_id}/end          204   the run's end
+    POST /_irimi/runs/{run_id}/tool-calls/recorded
+                                            200   a replay's recorded result for a read tool
+                                                  (#83); 404 on a miss, or when not replaying
     GET  /_irimi/health                     200   engine version, serve mode, store counters
 
-A control request is answered here and nowhere else: never forwarded, never put to the policy,
-never recorded as an exchange. Every answer is stamped `Irimi-Answered-By: control`, because every
-response irimi decided is stamped (CLAUDE.md). Its run id is in the path, never in `Irimi-Run`.
+A control request is answered here and nowhere else: never forwarded, never decided as an
+exchange, never recorded as one. The one question it puts to the policy is a replay's lookup of a
+read tool's recorded outcome (`AnswerPolicy.recorded_tool_call`, #83), so whether irimi replays is
+the policy's to say, here as on the wire. Every answer is stamped `Irimi-Answered-By: control`,
+because every response irimi decided is stamped (CLAUDE.md). Its run id is in the path, never in
+`Irimi-Run`.
 
 NOTHING HERE RAISES. `ControlEndpoint.answer` runs inside mitmproxy's request hook, and a raised
 hook forwards the flow - here, to irimi's own listener. A request this endpoint refuses is a 4xx
@@ -36,9 +42,11 @@ from irimi import __version__, trace
 from irimi.exchange import (
     CONTROL_ANSWER,
     CONTROL_PREFIX,
+    RECORDED_ACTION,
     RUN_ACTIONS,
     RUNS_ROUTE,
     START_ACTION,
+    TOOL_ACTIONS,
     TOOL_CALLS_ACTION,
     Door,
     Headers,
@@ -46,6 +54,7 @@ from irimi.exchange import (
     Response,
 )
 from irimi.pipeline import ANSWERED_BY_HEADER
+from irimi.policy import AnswerPolicy
 from irimi.store import TraceStore, header_record, names_a_run_dir
 from irimi.trace import (
     MAX_ERROR_MESSAGE,
@@ -83,6 +92,9 @@ HEALTH_ROUTE = "health"
 START_FIELDS = ("trigger", "agent_version", "sdk_version", "started_at")
 START_REQUIRED = ("trigger", "sdk_version", "started_at")  # `agent_version` may be null
 END_FIELDS = ("ended_at", "outcome", "error")  # `error` may be null
+# The answer to a lookup the recording cannot answer, and to every lookup when the engine is not
+# replaying: the SDK then runs the tool for real (#83).
+NO_RECORDED_CALL = "no recorded call"
 
 # Called with each tool call the store accepted, for the live summary (P3-10, #76).
 OnToolCall = Callable[[ToolCall], None]
@@ -135,6 +147,7 @@ class ControlEndpoint:
         serve: bool,
         process_run: str | None = None,
         on_tool_call: OnToolCall | None = None,
+        policy: AnswerPolicy | None = None,
     ) -> None:
         self.store = store
         self.serve = serve
@@ -142,6 +155,10 @@ class ControlEndpoint:
         # may post tool calls to it, never its start or its end (#73).
         self.process_run = process_run
         self.on_tool_call = on_tool_call
+        # The engine's policy, which answers `tool-calls/recorded` from a replay's recording, and
+        # from nothing otherwise. The recording is engine-wide, as its exchanges are: the run id in
+        # the path is checked, never used to choose (#83).
+        self.policy = policy
 
     def answer(self, request: Request, *, whole_body: bool = True) -> Response:
         """The response to one control request. Never raises (see the module doc).
@@ -166,27 +183,27 @@ class ControlEndpoint:
         if route == HEALTH_ROUTE:
             _require_method(request, "GET")
             return _json_response(200, self._health())
-        # `runs/{run_id}/{action}`. The run id is everything between `runs/` and the action, so an
-        # id holding a `/` - `../x` - is refused as an id (400) rather than as a route (404).
-        segments = route.split("/")
-        if len(segments) < 3 or segments[0] != RUNS_ROUTE or segments[-1] not in RUN_ACTIONS:
+        split = _split_run_route(route)
+        if split is None:
             raise _Refused(404, f"no control route {request.path!r}")
         _require_method(request, "POST")
-        run_id = "/".join(segments[1:-1])
-        action = segments[-1]
+        run_id, action = split
         # A tool call made outside every run, by an agent with no process run (`serve`, #77), is
-        # filed under no run, as an exchange that names none is (#76).
-        unattributed = run_id == UNATTRIBUTED and action == TOOL_CALLS_ACTION
+        # filed under no run, as an exchange that names none is (#76), and may be looked up (#83).
+        about_a_tool = action in TOOL_ACTIONS
+        unattributed = run_id == UNATTRIBUTED and about_a_tool
         if not names_a_run_dir(run_id) and not unattributed:
             # The store would only count such an event as a drop, or file it in `unattributed/`:
             # the agent is told instead, and no directory is made (#70).
             raise _Refused(400, f"{run_id!r} cannot name a run")
-        if run_id == self.process_run and action != TOOL_CALLS_ACTION:
+        if run_id == self.process_run and not about_a_tool:
             # IRIMI'S OWN RUN IS IRIMI'S TO RECORD, as `attribution` and `engine_version` are. Under
             # `irimi shadow` it is the process run: a start would replace its argv trigger with an
             # `sdk` record, and an end would close it before the child's exit is recorded (#73).
             raise _Refused(400, f"{run_id!r} {OWN_RUN}")
         posted = _posted(request, whole_body)
+        if action == RECORDED_ACTION:
+            return self._recorded(posted)
         if action == START_ACTION:
             self._start(run_id, posted)
         elif action == TOOL_CALLS_ACTION:
@@ -224,6 +241,28 @@ class ControlEndpoint:
         except Exception:
             logger.exception("irimi: on_tool_call raised; the tool call is still stored")
 
+    def _recorded(self, posted: Mapping[str, Any]) -> Response:
+        """The recorded outcome of the read tool call `posted` names (#83): `200` with its result,
+        its error and whether a coroutine gave them (`ToolCall.awaited`), which the SDK hands back
+        in place of running the tool, or `404` when the
+        recording has none for it, or there is no recording. A hit is not a tool call: the SDK
+        posts the call to `tool-calls` afterwards, as it posts every call it makes."""
+        unknown = sorted(set(posted) - set(trace.RECORDED_LOOKUP_FIELDS))
+        if unknown:
+            raise _Refused(400, f"unknown field {unknown[0]!r}")
+        for field in trace.RECORDED_LOOKUP_FIELDS:
+            if field not in posted:  # in the words of the decoders every other route uses
+                raise _Refused(400, f"missing required field {field!r}")
+        name = posted["name"]
+        if not isinstance(name, str):
+            raise _Refused(400, f"'name' is {trace.json_type(name)}, not a string")
+        found = (
+            None if self.policy is None else self.policy.recorded_tool_call(name, posted["args"])
+        )
+        if found is None:
+            return _error_response(404, NO_RECORDED_CALL)
+        return _json_response(200, trace.recorded_outcome_to_json(found))
+
     def _end(self, run_id: str, posted: Mapping[str, Any]) -> None:
         record = _sdk_run(run_id, posted, END_FIELDS)
         if record.ended_at is None:
@@ -231,6 +270,21 @@ class ControlEndpoint:
         if record.outcome is None:
             _null("outcome")
         self.store.end_run(run_id, record.ended_at, record.outcome, _label(record.error))
+
+
+def _split_run_route(route: str) -> tuple[str, str] | None:
+    """`runs/{run_id}/{action}` as its run id and its action, or None for no run route. The action
+    is the longest of the run actions and `tool-calls/recorded` (#83) the route ends with, and the
+    run id everything between `runs/` and it, so an id holding a `/` - `../x` - is refused as an
+    id (400) rather than as a route (404)."""
+    head = f"{RUNS_ROUTE}/"
+    if not route.startswith(head):
+        return None
+    rest = route[len(head) :]
+    for action in (RECORDED_ACTION, *RUN_ACTIONS):
+        if rest.endswith(f"/{action}"):
+            return rest[: -len(action) - 1], action
+    return None
 
 
 def _require_method(request: Request, method: str) -> None:

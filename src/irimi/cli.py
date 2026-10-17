@@ -812,7 +812,14 @@ def _shadow(args: argparse.Namespace, cmd: list[str], child: _Child) -> int:
     try:
         host, port = run.config.listen_host, handle.port()
         print_startup("shadow", args, run.index, run.run_id, host, port, run.ca.cert)
-        env = runner.child_env(dict(os.environ), host, port, run.ca.cert, run.run_id)
+        env = runner.child_env(
+            dict(os.environ),
+            host,
+            port,
+            run.ca.cert,
+            run.run_id,
+            replaying=run.config.replay_of is not None,
+        )
         if child.terminated:  # SIGTERM while irimi started: the command is never run (#77)
             print("error: terminated before the command started.", file=sys.stderr)
             code = SIGTERM_EXIT_CODE

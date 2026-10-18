@@ -24,10 +24,11 @@ records it (`errors.error_info`), so a replay that ends on a recorded `KeyError`
 
 It exits 0 when the call returns and 1 when it raises, printing the traceback to stderr, as an
 uncaught exception would. A call it cannot make - a module that does not import, a qualname that
-names nothing, a method, whose instance a run does not record, args that do not revive or do not
-bind to its parameters - exits `CANNOT_CALL` with one `error:` line, and its outcome says why:
-`irimi replay` reports that as a replay that could not run, never as an agent that ran and
-differed.
+names nothing or whose lookup raises, a method, whose instance a run does not record, a function
+in `__main__`, args that do not revive or do not bind to its parameters - exits `CANNOT_CALL`
+with one `error:` line, and its outcome says why: `irimi replay` reports that as a replay that
+could not run, never as an agent that ran and differed. The outcome is written on every path: an
+interruption before the call says the call was never made, and then ends the process.
 """
 
 import asyncio
@@ -64,10 +65,13 @@ class CallOutcome:
     @classmethod
     def read(cls, path: Path) -> "CallOutcome | None":
         """The outcome the child wrote at `path`, or None when it wrote none that reads: it was
-        killed, or never started, or the file is not one this module writes."""
+        killed, or never started, or the file is not one this module writes. Never raises: the
+        agent can write the file too, since its environment names it, and JSON nested deeper than
+        the stack raises RecursionError, which would end `irimi replay` before it ends the run
+        (#84)."""
         try:
             d = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             return None
         if not isinstance(d, dict) or set(d) != {"called", "error"}:
             return None
@@ -97,9 +101,15 @@ def main() -> int:
     try:
         fn = resolve(entrypoint)
         args, kwargs = _arguments(fn, _revived(args_file))
-    except NotCallable as exc:
-        print(f"error: cannot call {entrypoint}: {exc}", file=sys.stderr)
-        _write(outcome_file, CallOutcome(False, trace.ErrorInfo("cannot-call", str(exc))))
+    except BaseException as exc:
+        # Whatever stops the child before the call is a call never made, never an agent that ran
+        # and raised (#84): a KeyboardInterrupt as the module loads too, which then ends this
+        # process as it would have.
+        why = _why_not_called(exc)
+        print(f"error: cannot call {entrypoint}: {why}", file=sys.stderr)
+        _write(outcome_file, CallOutcome(False, trace.ErrorInfo("cannot-call", why)))
+        if not isinstance(exc, Exception):
+            raise
         return CANNOT_CALL
     try:
         result = fn(*args, **kwargs)
@@ -115,6 +125,14 @@ def main() -> int:
         return 1
     _write(outcome_file, CallOutcome(True, None))
     return 0
+
+
+def _why_not_called(exc: BaseException) -> str:
+    """The reason a call was never made: a NotCallable's own, else what stopped the child."""
+    if isinstance(exc, NotCallable):
+        return str(exc)
+    said = str(exc)
+    return f"{type(exc).__name__} before the call" + (f": {said}" if said else "")
 
 
 def _arguments(fn: Any, revived: dict[str, Any]) -> tuple[list[Any], dict[str, Any]]:

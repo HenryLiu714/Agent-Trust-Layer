@@ -9,8 +9,13 @@ alone: `RunScope`'s adopting branch against a reporter that writes down every po
 
 import asyncio
 import json
+import os
+import signal
+import stat
 import subprocess
 import sys
+import threading
+import types
 from typing import Any
 
 import pytest
@@ -18,6 +23,7 @@ import pytest
 from irimi import paths, sdk
 from irimi.sdk import api, capture, runs
 from irimi.sdk.replays import ReplayResult
+from irimi.trace import ErrorInfo
 
 REPLAY = "abcd1234abcd1234"
 
@@ -101,6 +107,64 @@ def test_an_async_trigger_and_a_handed_off_coroutine_adopt_it_too(posts, instrum
     assert posts.posts == []
 
 
+def test_the_adopted_run_is_current_when_it_is_instrumented(posts, monkeypatch):
+    """The patch reads the current run as each request is sent, so the run is current before
+    `instrument()` runs, and so before the run's first request (#75, #84)."""
+    seen: list[str | None] = []
+    monkeypatch.setattr(runs, "instrument", lambda: seen.append(sdk.current_run_id()))
+    handle("T1")
+    asyncio.run(handle_async("T2"))
+    assert seen == [REPLAY, REPLAY]
+
+
+@sdk.trigger
+def hands_to_workers(ticket: str) -> list[str | None]:
+    """The run's id as a thread handed the run (`sdk.propagate`), an asyncio task, and a thread
+    that was not handed it but calls a trigger of its own see it."""
+    seen: list[str | None] = []
+    for target in (
+        sdk.propagate(lambda: seen.append(sdk.current_run_id())),
+        lambda: seen.append(handle(ticket)),
+    ):
+        worker = threading.Thread(target=target)
+        worker.start()
+        worker.join()
+
+    async def in_a_task() -> str | None:
+        return await asyncio.create_task(handle_async(ticket))
+
+    seen.append(asyncio.run(in_a_task()))
+    return seen
+
+
+def test_threads_and_tasks_of_an_adopted_run_stay_in_it_and_a_thread_s_own_trigger_adopts_it(
+    posts, instrumented
+):
+    assert hands_to_workers("T1") == [REPLAY, REPLAY, REPLAY]
+    assert posts.posts == []
+
+
+@types.coroutine
+def _suspend() -> Any:
+    yield
+
+
+@sdk.trigger
+async def suspends(ticket: str) -> None:
+    await _suspend()
+
+
+def test_an_adopted_async_run_closed_unawaited_posts_nothing_and_leaves_the_run(
+    posts, instrumented
+):
+    """`GeneratorExit` is never awaited through (#74), and an adopted run has no end to post."""
+    coroutine = suspends("T1")
+    coroutine.send(None)
+    coroutine.close()
+    assert posts.posts == []
+    assert sdk.current_run_id() is None
+
+
 def test_a_tool_call_in_an_adopted_run_is_posted_to_the_replay_s_run(posts, instrumented):
     @sdk.tool(kind="write", shadow=lambda body: "stood in")
     def reply(body: str) -> str:
@@ -157,6 +221,10 @@ def _h(x, /, y):
     return (x, y)
 
 
+def _p(a, /, **kw):
+    return (a, kw)
+
+
 @pytest.mark.parametrize(
     ("fn", "args", "kwargs"),
     [
@@ -164,6 +232,7 @@ def _h(x, /, y):
         (_f, (1, 2, 3), {}),
         (_g, (1, 2, 3), {"k": 4, "z": 9}),
         (_h, (1,), {"y": 2}),
+        (_p, (1,), {"a": 2}),  # a positional-only parameter's name is free for `**kwargs`
     ],
 )
 def test_call_arguments_undoes_capture_call_s_binding(fn, args, kwargs):
@@ -173,6 +242,29 @@ def test_call_arguments_undoes_capture_call_s_binding(fn, args, kwargs):
     assert replayable
     again, named = capture.call_arguments(fn, capture.revive(captured))
     assert fn(*again, **named) == fn(*args, **kwargs)
+
+
+def _r(a, b=2, *rest):
+    return (a, b, rest)
+
+
+@pytest.mark.parametrize(
+    ("fn", "arguments", "error"),
+    [
+        (_r, {"a": 1, "rest": [9]}, "rest takes its values after b, which was left to its default"),
+        (_g, {"a": 1, "rest": "ab"}, "rest must be a list, not str"),
+        (_g, {"a": 1, "kw": "ab"}, "kw must be an object, not str"),
+        (_g, {"a": 1, "k": 1, "kw": {"k": 2}}, "kw names k, which is a parameter of its own"),
+    ],
+)
+def test_call_arguments_refuses_args_that_would_bind_otherwise_than_they_say(fn, arguments, error):
+    """Args given by hand (`--args`) can say what no call binds: `*args` with a positional
+    parameter before it left out, which would fill that parameter instead; a `*args` that is no
+    list or a `**kwargs` that is no object, which would be spread as characters or keys; and a
+    `**kwargs` naming a parameter, which would replace that parameter's value (#84)."""
+    with pytest.raises(TypeError) as raised:
+        capture.call_arguments(fn, arguments)
+    assert str(raised.value) == error
 
 
 class Desk:
@@ -190,6 +282,26 @@ class Desk:
     def by_class(cls, ticket: str) -> str:
         return ticket
 
+    @staticmethod
+    @sdk.trigger
+    def static_self(self: str, ticket: str) -> tuple[str, str]:
+        return (self, ticket)
+
+
+@sdk.trigger
+def plain_cls(cls: str, ticket: str) -> tuple[str, str]:
+    return (cls, ticket)
+
+
+@pytest.mark.parametrize("fn", [Desk.static_self, plain_cls])
+def test_a_trigger_receiving_no_instance_is_called_again_with_its_first_parameter(fn):
+    """A static method's or a plain function's first parameter is an argument, even named `self`
+    or `cls`: captured, it calls the trigger again (#84)."""
+    captured, replayable = capture.capture_call(fn.__wrapped__, ("desk", "T1"), {})
+    assert replayable
+    again, named = capture.call_arguments(api.resolve(api.entrypoint(fn)), capture.revive(captured))
+    assert fn(*again, **named) == ("desk", "T1")
+
 
 def test_resolve_finds_a_function_a_staticmethod_and_a_classmethod_by_name():
     assert api.resolve(f"{__name__}:handle") is handle
@@ -205,6 +317,7 @@ def test_resolve_finds_a_function_a_staticmethod_and_a_classmethod_by_name():
         ("no_such_module_84:handle", "importing no_such_module_84 raised ModuleNotFoundError"),
         (f"{__name__}:REPLAY", "REPLAY is not callable"),
         ("handle", "it is not module:qualname"),
+        ("__main__:main", "it is in __main__, which in a replay's child is the child itself"),
     ],
 )
 def test_resolve_refuses_what_it_cannot_call(entrypoint, reason):
@@ -215,6 +328,8 @@ def test_resolve_refuses_what_it_cannot_call(entrypoint, reason):
 CHILD_MODULE = """
 import asyncio
 from dataclasses import dataclass
+
+from irimi import sdk
 
 
 @dataclass(frozen=True)
@@ -231,17 +346,55 @@ def fails(ticket):
     raise KeyError(ticket.charge)
 
 
+def interrupts(ticket):
+    raise KeyboardInterrupt
+
+
+def exits(ticket):
+    raise SystemExit(3)
+
+
 async def waits(ticket):
     await asyncio.sleep(0)
     print("awaited", ticket.charge)
+
+
+def spreads(**more):
+    print("spread", more)
+
+
+def __getattr__(name):
+    if name == "lazy":
+        raise RuntimeError("the lazy import broke")
+    raise AttributeError(name)
+
+
+@sdk.trigger
+def handled(ticket):
+    return _later(ticket)
+
+
+async def _later(ticket):
+    await asyncio.sleep(0)
+    print("later", ticket.charge, sdk.current_run_id())
+
+
+@sdk.trigger
+async def adopted(ticket):
+    await asyncio.sleep(0)
+    print("adopted", ticket.charge, sdk.current_run_id())
 """
 
 
-def _child(tmp_path, entrypoint: str, args: dict) -> tuple[subprocess.CompletedProcess[str], Any]:
-    """`replay_child` run as `irimi replay` runs it: what it did, and the outcome it wrote."""
+def _child(
+    tmp_path, entrypoint: str, args: dict, env: dict[str, str] | None = None
+) -> tuple[subprocess.CompletedProcess[str], Any]:
+    """`replay_child` run as `irimi replay` runs it, with `env` besides: what it did, and the
+    outcome it wrote."""
     from irimi.sdk.replay_child import CallOutcome
 
     (tmp_path / "child_agent.py").write_text(CHILD_MODULE)
+    (tmp_path / "interrupted_agent.py").write_text("raise KeyboardInterrupt\n")
     args_file, outcome_file = tmp_path / "args.json", tmp_path / "outcome.json"
     args_file.write_text(json.dumps(args))
     env = {
@@ -250,6 +403,7 @@ def _child(tmp_path, entrypoint: str, args: dict) -> tuple[subprocess.CompletedP
         paths.REPLAY_CALL_ENV: entrypoint,
         paths.REPLAY_ARGS_FILE_ENV: str(args_file),
         paths.REPLAY_OUTCOME_FILE_ENV: str(outcome_file),
+        **(env or {}),
     }
     done = subprocess.run(
         [sys.executable, "-m", "irimi.sdk.replay_child"],
@@ -278,11 +432,31 @@ def test_the_child_runs_a_coroutine_to_its_end(tmp_path):
     assert (done.returncode, done.stdout) == (0, "awaited ch_1\n")
 
 
+@pytest.mark.parametrize(
+    ("entrypoint", "printed"),
+    [
+        ("child_agent:handled", "later ch_1 abcd1234abcd1234\n"),
+        ("child_agent:adopted", "adopted ch_1 abcd1234abcd1234\n"),
+    ],
+)
+def test_the_child_s_trigger_adopts_the_replay_s_run_and_its_handed_off_coroutine_runs(
+    tmp_path, entrypoint, printed
+):
+    """A sync trigger that returns a coroutine hands its run to it (#74): the child runs that
+    coroutine to its end, in the replay's run, as it runs an `async def` trigger's (#84). Nothing
+    is posted, so no control endpoint is needed."""
+    from irimi.sdk.replay_child import CallOutcome
+
+    replaying = {paths.ENGINE_ACTIVE_ENV: "1", paths.RUN_ENV: REPLAY, paths.REPLAY_RUN_ENV: REPLAY}
+    done, outcome = _child(tmp_path, entrypoint, TICKET, replaying)
+    assert (done.returncode, done.stdout, done.stderr) == (0, printed, "")
+    assert outcome == CallOutcome(True, None)
+
+
 def test_a_trigger_that_raises_exits_1_with_its_traceback_and_says_what_it_raised(tmp_path):
     """The outcome is what a run records an exception as (`errors.error_info`), so the replay's
     run ends on `builtins.KeyError` as its recording's did (#83, #84)."""
     from irimi.sdk.replay_child import CallOutcome
-    from irimi.trace import ErrorInfo
 
     done, outcome = _child(tmp_path, "child_agent:fails", TICKET)
     assert done.returncode == 1
@@ -305,6 +479,17 @@ def test_a_trigger_that_raises_exits_1_with_its_traceback_and_says_what_it_raise
             {"ticket": {"__irimi_type__": "child_agent:NoSuchTicket", "value": {}}},
             "its args do not revive: child_agent:NoSuchTicket is not in its module",
         ),
+        (
+            "child_agent:lazy",
+            {},
+            "looking up lazy in child_agent raised RuntimeError: the lazy import broke",
+        ),
+        (
+            "child_agent:spreads",
+            {"more": "ab"},
+            "its args do not bind: more must be an object, not str",
+        ),
+        ("__main__:main", {}, "it is in __main__, which in a replay's child is the child itself"),
     ],
 )
 def test_a_call_the_child_cannot_make_exits_cannot_call_and_says_why(
@@ -313,13 +498,45 @@ def test_a_call_the_child_cannot_make_exits_cannot_call_and_says_why(
     """Never an agent that ran and raised: the child exits `CANNOT_CALL`, with one `error:` line,
     and its outcome says it never called (#84)."""
     from irimi.sdk.replay_child import CANNOT_CALL, CallOutcome
-    from irimi.trace import ErrorInfo
 
     done, outcome = _child(tmp_path, entrypoint, args)
     assert (done.returncode, done.stderr) == (
         CANNOT_CALL,
         f"error: cannot call {entrypoint}: {error}\n",
     )
+    assert outcome == CallOutcome(False, ErrorInfo("cannot-call", error))
+
+
+@pytest.mark.parametrize(
+    ("entrypoint", "code", "error"),
+    [
+        ("child_agent:interrupts", -signal.SIGINT, ErrorInfo("builtins.KeyboardInterrupt", "")),
+        ("child_agent:exits", 3, ErrorInfo("builtins.SystemExit", "3")),
+    ],
+)
+def test_a_call_ended_by_an_interrupt_or_an_exit_says_so_and_ends_the_child_as_it_would(
+    tmp_path, entrypoint, code, error
+):
+    """What a run records them as, and then the process ends as they would have ended it, never
+    as a trigger that raised (#74, #84)."""
+    from irimi.sdk.replay_child import CallOutcome
+
+    done, outcome = _child(tmp_path, entrypoint, TICKET)
+    assert done.returncode == code
+    assert outcome == CallOutcome(True, error)
+
+
+def test_a_child_interrupted_before_its_call_says_it_never_called_and_stops_as_interrupted(
+    tmp_path,
+):
+    """Whatever ends the child before the call, a KeyboardInterrupt as its module loads too, is a
+    call never made, never an agent that ran (#84); the interruption then ends the process."""
+    from irimi.sdk.replay_child import CallOutcome
+
+    done, outcome = _child(tmp_path, "interrupted_agent:main", {})
+    assert done.returncode == -signal.SIGINT
+    error = "KeyboardInterrupt before the call"
+    assert done.stderr.startswith(f"error: cannot call interrupted_agent:main: {error}\n")
     assert outcome == CallOutcome(False, ErrorInfo("cannot-call", error))
 
 
@@ -332,6 +549,9 @@ def test_a_call_the_child_cannot_make_exits_cannot_call_and_says_why(
         '{"called": 1, "error": null}',
         '{"called": true}',
         '{"called": true, "error": {"type": 1, "message": "m"}}',
+        # The agent can write this file too, its env names it: deeper than the stack (#84).
+        pytest.param("[" * 200000 + "]" * 200000, id="deeper-than-the-stack"),
+        pytest.param(b"\xff\xfe not utf-8", id="not-utf-8"),
     ],
 )
 def test_an_outcome_the_child_did_not_write_reads_as_none(tmp_path, written):
@@ -339,7 +559,10 @@ def test_an_outcome_the_child_did_not_write_reads_as_none(tmp_path, written):
 
     path = tmp_path / "outcome.json"
     assert CallOutcome.read(path) is None
-    path.write_text(written)
+    if isinstance(written, bytes):
+        path.write_bytes(written)
+    else:
+        path.write_text(written)
     assert CallOutcome.read(path) is None
 
 
@@ -368,18 +591,131 @@ def test_a_result_it_did_not_write_is_refused(broken):
         ReplayResult.from_json(broken)
 
 
-def test_sdk_replay_refuses_a_function_from_main_or_one_its_name_does_not_find():
+def test_sdk_replay_refuses_a_function_from_main_or_one_its_name_does_not_find(monkeypatch):
     def local(ticket: str) -> str:
         return ticket
 
+    def in_main(ticket: str) -> str:
+        return ticket
+
+    in_main.__module__, in_main.__qualname__ = "__main__", "in_main"
+    monkeypatch.setattr(sys.modules["__main__"], "in_main", in_main, raising=False)
+    with pytest.raises(ValueError) as raised:
+        sdk.replay("r", in_main, "T1")
+    assert str(raised.value) == (
+        "__main__:in_main cannot be called by its name: it is in __main__, which in a replay's "
+        "child is the child itself"
+    )
+
     with pytest.raises(ValueError, match="cannot be called by its name"):
         sdk.replay("r", local, "T1")
+
+    def impostor(ticket: str) -> str:
+        return ticket
+
+    impostor.__qualname__ = "handle"  # its name finds `handle`, another function
+    with pytest.raises(ValueError) as raised:
+        sdk.replay("r", impostor, "T1")
+    assert str(raised.value) == f"{__name__}:handle names another function than the one given"
     with pytest.raises(ValueError, match="arguments only for a function"):
         sdk.replay("r", None, "T1")
-    with pytest.raises(ValueError, match="do not capture replayably"):
-        sdk.replay("r", handle, object())
     with pytest.raises(ValueError, match="it is a method"):
         sdk.replay("r", Desk.answer, "T1")
+
+
+@pytest.mark.parametrize(
+    ("args", "error"),
+    [
+        (("T1", "T2"), "the arguments do not bind to handle: too many positional arguments"),
+        ((), "the arguments do not bind to handle: missing a required argument: 'ticket'"),
+        ((object(),), "the argument ticket to handle does not capture replayably"),
+    ],
+)
+def test_sdk_replay_says_why_the_arguments_it_was_given_cannot_be_replayed(args, error):
+    with pytest.raises(ValueError) as raised:
+        sdk.replay("r", handle, *args)
+    assert str(raised.value) == error
+
+
+@sdk.trigger
+def pair(a: str, b: str) -> None: ...
+
+
+def test_sdk_replay_refuses_arguments_each_of_which_fits_but_not_together():
+    half = "x" * (capture.MAX_CAPTURED_BYTES // 2)
+    with pytest.raises(ValueError) as raised:
+        sdk.replay("r", pair, half, half)
+    assert str(raised.value) == (
+        "the arguments to pair are larger than a run records (1048576 bytes)"
+    )
+
+
+def _answering(argv: list[str], seen: dict[str, Any]) -> int:
+    """A stand-in for `irimi`, through `sdk.replay`'s one seam: writes down what it was given
+    and how the directory holding its files was, and writes a result."""
+    tmp = os.path.dirname(argv[argv.index("--result-file") + 1])
+    seen["argv"], seen["tmp"] = argv, tmp
+    seen["mode"] = stat.S_IMODE(os.stat(tmp).st_mode)
+    if "--args-file" in argv:
+        seen["args"] = json.loads(open(argv[argv.index("--args-file") + 1]).read())
+    result = ReplayResult(argv[-1], "new0new0new0new0", 1, None, ("a",))
+    with open(argv[argv.index("--result-file") + 1], "w") as fh:
+        json.dump(result.to_json(), fh)
+    return 1
+
+
+def test_sdk_replay_passes_its_call_in_a_private_directory_it_removes(monkeypatch):
+    """The args in a file in a directory only this user can enter, never on the command line;
+    the run id after `--`; this process's `sys.path` as the child's; and the directory gone
+    when `sdk.replay` returns, raises, or finds no result (#84)."""
+    from irimi.sdk import replays
+
+    seen: dict[str, Any] = {}
+
+    def run_irimi(argv: list[str], env: Any) -> int:
+        seen["pythonpath"] = env["PYTHONPATH"]
+        return _answering(argv, seen)
+
+    monkeypatch.setattr(replays, "_run_irimi", run_irimi)
+    result = sdk.replay("-r", handle, "T1", store="/s")
+    assert result == ReplayResult("-r", "new0new0new0new0", 1, None, ("a",))
+    tmp = seen["tmp"]
+    assert seen["argv"] == [
+        "replay",
+        "--port",
+        "0",
+        "--result-file",
+        f"{tmp}/result.json",
+        "--call",
+        f"{__name__}:handle",
+        "--args-file",
+        f"{tmp}/args.json",
+        "--store",
+        "/s",
+        "--",
+        "-r",
+    ]
+    assert (seen["mode"], seen["args"], seen["pythonpath"]) == (
+        0o700,
+        {"ticket": "T1"},
+        os.pathsep.join(sys.path),
+    )
+    assert not os.path.exists(tmp)
+
+    def interrupted(argv: list[str], env: Any) -> int:
+        _answering(argv, seen)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(replays, "_run_irimi", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        sdk.replay("r")
+    assert not os.path.exists(seen["tmp"])
+    monkeypatch.setattr(
+        replays, "_run_irimi", lambda argv, env: seen.update(tmp=os.path.dirname(argv[4])) or 3
+    )
+    with pytest.raises(RuntimeError, match="^irimi replay exited 3 and wrote no result: "):
+        sdk.replay("r")
+    assert not os.path.exists(seen["tmp"])
 
 
 def test_a_replay_s_child_is_told_which_trigger_to_call_and_no_other_child_is(tmp_path):

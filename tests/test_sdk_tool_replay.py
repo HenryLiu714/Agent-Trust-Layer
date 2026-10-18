@@ -19,6 +19,7 @@ import http.server
 import json
 import pickle
 import threading
+import time
 import traceback
 from collections.abc import Callable, Coroutine, Iterator
 from decimal import Decimal
@@ -162,6 +163,9 @@ class _Irimi:
         # Each replay is a run of its own, the engine's, as each `irimi replay` mints one (#84).
         self.cfg = dataclasses.replace(self.cfg, run_id=runs.new_run_id())
         store = DirectoryStore(self.root, self.key, replay_of=run_id)
+        # Stored before the script runs, as `irimi replay` stores its run before its child exists,
+        # so the run is read back whatever reached the engine (#84).
+        store.start_run(runner.process_run(self.cfg.run_id, ["script"], None, time.time()))
         self.monkeypatch.setenv(paths.RUN_ENV, self.cfg.run_id)
         self.monkeypatch.setenv(paths.REPLAY_RUN_ENV, self.cfg.run_id)
         policy = ReplayPolicy(recording, maps=self.cfg.maps)
@@ -171,8 +175,6 @@ class _Irimi:
         # (#84).
         replay_run = self.cfg.run_id
         assert replay_run not in before
-        if replay_run not in {r.run_id for r in reader.list_runs()}:
-            return result, []  # nothing the script did reached the engine
         assert reader.load_run(replay_run).record.replay_of == run_id
         calls = [e for e in reader.load_run(replay_run).events if isinstance(e, ToolCall)]
         return result, calls
@@ -405,6 +407,33 @@ def test_an_inactive_sdk_never_asks_the_recording(monkeypatch):
 
     monkeypatch.setattr(runs, "reporter", _Refuses())
     assert balance("acc_1") == {"account": "acc_1", "balance": 100}
+
+
+@pytest.mark.parametrize("run_env", [None, "another0another0"])
+def test_a_replay_id_irimi_did_not_set_asks_no_recording(monkeypatch, run_env):
+    """An `IRIMI_REPLAY_RUN` beside no `IRIMI_RUN`, or another, is a stale export, not irimi's
+    word (`context.replay_run_id`, #84): the read tool runs for real and only posts its call."""
+    monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
+    monkeypatch.setenv(paths.REPLAY_RUN_ENV, "abcd1234abcd1234")
+    if run_env is None:
+        monkeypatch.delenv(paths.RUN_ENV, raising=False)
+    else:
+        monkeypatch.setenv(paths.RUN_ENV, run_env)
+    posted: list[str] = []
+
+    class _Writes:
+        """Writes down each post and each lookup; a lookup that raised would be swallowed as a
+        failed one (`_replay_answer` never raises), so it is counted instead."""
+
+        def post(self, run_id: str, kind: str, payload: Any) -> None:
+            posted.append(kind)
+
+        def recorded(self, *args: Any) -> None:
+            posted.append("recorded")
+
+    monkeypatch.setattr(runs, "reporter", _Writes())
+    assert balance("acc_1") == {"account": "acc_1", "balance": 100}
+    assert (posted, _REAL_READS) == (["tool-calls"], ["acc_1"])
 
 
 def test_a_hit_is_used_up_and_is_not_itself_a_tool_call(irimi):

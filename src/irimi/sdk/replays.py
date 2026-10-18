@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from irimi.sdk.api import NotCallable, entrypoint, resolve
-from irimi.sdk.capture import capture_call
+from irimi.sdk.capture import MAX_CAPTURED_BYTES, bind, capture, capture_call
 
 RESULT_FIELDS = ("source_run_id", "replay_run_id", "exit_code", "diverged_at", "lines")
 
@@ -127,14 +127,12 @@ def replay(
 
 def _importable(fn: Callable[..., Any]) -> str:
     """`fn`'s `module:qualname`, which the child imports it by, or ValueError naming why it would
-    import something else, or nothing."""
+    import something else, or nothing: `api.resolve`'s refusals, `__main__` among them, are the
+    child's, so they are asked of it here, the one rule (#84)."""
     try:
         name = entrypoint(fn, "sdk.replay")
     except TypeError as exc:
         raise ValueError(str(exc)) from None
-    module = name.partition(":")[0]
-    if module == "__main__":
-        raise ValueError(f"{name} is in __main__, which is another module in the replay's child")
     try:
         found = resolve(name)
     except NotCallable as exc:
@@ -145,7 +143,26 @@ def _importable(fn: Callable[..., Any]) -> str:
 
 
 def _captured(fn: Callable[..., Any], args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> Any:
+    """`args` and `kwargs` bound to `fn` and captured as a trigger's are, or ValueError naming
+    why the child could not be given them: they do not bind, as calling `fn` would say, or which
+    of them does not capture replayably (#84)."""
+    try:
+        bound = bind(fn, args, kwargs)
+    except TypeError as exc:
+        raise ValueError(f"the arguments do not bind to {fn.__qualname__}: {exc}") from None
     captured, replayable = capture_call(fn, args, kwargs)
-    if not replayable:
-        raise ValueError(f"the arguments for {fn.__qualname__} do not capture replayably")
-    return captured
+    if replayable:
+        return captured
+    unreplayable = [name for name, value in bound.arguments.items() if not capture(value)[1]]
+    if not unreplayable:
+        raise ValueError(
+            f"the arguments to {fn.__qualname__} are larger than a run records "
+            f"({MAX_CAPTURED_BYTES} bytes)"
+        )
+    if len(unreplayable) == 1:
+        raise ValueError(
+            f"the argument {unreplayable[0]} to {fn.__qualname__} does not capture replayably"
+        )
+    raise ValueError(
+        f"the arguments {', '.join(unreplayable)} to {fn.__qualname__} do not capture replayably"
+    )

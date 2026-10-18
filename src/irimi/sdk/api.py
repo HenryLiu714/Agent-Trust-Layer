@@ -102,6 +102,12 @@ def entrypoint(f: Callable[..., Any], decorator: str = "@sdk.trigger") -> str:
     return f"{module}:{qualname}"
 
 
+# The module a replay never calls a trigger in: in a replay's child it is `replay_child` itself,
+# and in any other process another module than the one the child would import. The one rule, which
+# `resolve` and `irimi replay`'s plan both refuse by (#84).
+MAIN_MODULE = "__main__"
+
+
 class NotCallable(Exception):
     """The trigger cannot be called from what `irimi replay` gave this process: the reason."""
 
@@ -110,10 +116,15 @@ def resolve(entrypoint: str) -> Callable[..., Any]:
     """The function `entrypoint`, `module:qualname`, names, imported: `entrypoint`'s inverse, which
     a replay calls a trigger by (#84). A method defined on a class, called without the instance it
     was bound to, is refused: the run recorded its args without `self` (#74). A `staticmethod` and
-    a `classmethod` are what their class gives."""
+    a `classmethod` are what their class gives. A function in `__main__` is refused too: in a
+    replay's child `__main__` is `replay_child` itself, whose `main` would call itself until the
+    stack ran out (#84). An Exception or a SystemExit the import or a lookup raises is
+    NotCallable."""
     module_name, sep, qualname = entrypoint.partition(":")
     if not sep or not module_name or not qualname:
         raise NotCallable("it is not module:qualname")
+    if module_name == MAIN_MODULE:
+        raise NotCallable("it is in __main__, which in a replay's child is the child itself")
     try:
         found: Any = importlib.import_module(module_name)
     except (Exception, SystemExit) as exc:
@@ -126,6 +137,12 @@ def resolve(entrypoint: str) -> Callable[..., Any]:
             found = getattr(found, part)
         except AttributeError:
             raise NotCallable(f"{module_name} has no {qualname}") from None
+        except Exception as exc:
+            # A module's `__getattr__` that imports lazily, or a class attribute's descriptor,
+            # raising: the call is never made, as when the import raises (#84).
+            raise NotCallable(
+                f"looking up {qualname} in {module_name} raised {type(exc).__name__}: {exc}"
+            ) from None
     if isinstance(owner, type) and isinstance(
         inspect.getattr_static(owner, qualname.rsplit(".", 1)[-1], None), types.FunctionType
     ):

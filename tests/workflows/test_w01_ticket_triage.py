@@ -3,14 +3,15 @@
 The labels are the calls in `examples/workflows/w01_ticket_triage/agent.py`; `#N` is the turn.
 """
 
+import dataclasses
 import json
 import re
 import shutil
 
 import pytest
 
-from examples.workflows.harness.run import check_invariants, compare
-from examples.workflows.w01_ticket_triage.agent import DB_LOST_ENV, DB_NAME
+from examples.workflows.harness.run import check_invariants, compare, sdk_replay
+from examples.workflows.w01_ticket_triage.agent import DB_LOST_ENV, DB_NAME, Ticket, handle_ticket
 from examples.workflows.w01_ticket_triage.scenarios import CUSTOMER
 from irimi.trace import ErrorInfo, ToolCall, Trigger
 
@@ -401,6 +402,18 @@ def test_a_full_refund_replayed_unchanged_is_answered_from_its_recording(replaye
         f"recording read      tool {LOOKUP_TOOL} -> ok",
         f"shadow    write     tool {REPLY_TOOL} -> ok",
     ]
+    # What `irimi replay` says of it: every call answered, and the same two writes (#84).
+    assert replay.replay_result() == [
+        f"irimi replay · {source} → {replay.process_run_id()} · - → -",
+        "  agent exited 0",
+        "  no divergence: every call was answered from the recording",
+        "  7 from the recording · 0 missed",
+        "",
+        "  = ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)",
+        f"  = ○ tool {REPLY_TOOL}  shadow stand-in ran",
+        "",
+        "  2 same · 0 changed · 0 only in A · 0 only in B",
+    ]
 
 
 def test_a_full_refund_replayed_without_its_database_reads_the_customer_from_the_recording(
@@ -459,6 +472,52 @@ def test_a_full_refund_replayed_with_the_half_prompt_diverges_at_the_first_llm_c
     # The customer is looked up before any write misses, so the recording still answers it. The
     # reply's text changed with the prompt, and its stand-in runs all the same (#83).
     assert replay.tools() == [(LOOKUP_TOOL, "recording"), (REPLY_TOOL, "shadow")]
+    # What `irimi replay` says of it (#84): where it diverged, the first llm call, and the refund
+    # it changed. The reply compares `=`: a write tool's line names no args (#141).
+    source = recorded.one("run.start")["run"]
+    assert replay.replay_result() == [
+        f"irimi replay · {source} → {replay.process_run_id()} · - → -",
+        "  agent exited 0",
+        "  diverged at #1: live      llm       POST api.anthropic.com/v1/messages -> 200  "
+        "[replay-miss]",
+        "  2 from the recording · 5 missed",
+        "",
+        "  ~ A ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)",
+        "    B ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)",
+        f"  = ○ tool {REPLY_TOOL}  shadow stand-in ran",
+        "",
+        "  1 same · 1 changed · 0 only in A · 0 only in B",
+    ]
+
+
+def test_sdk_replay_from_a_test_returns_the_result_irimi_replay_writes(
+    run_workflow, replayed, tmp_path
+):
+    """`sdk.replay(run_id)`, and `sdk.replay(run_id, handle_ticket, Ticket(...))` with the ticket
+    the run recorded, called as a test calls them (#84): each returns what `irimi replay
+    --result-file` writes for the same run, but for the replay's own new run id, and holds the
+    invariants as every replay does, nothing reaching the fake internet."""
+    recorded, by_cli = replayed(W, "full_refund")
+    expected = by_cli.replay
+    assert expected is not None and (expected.exit_code, expected.diverged_at) == (0, None)
+    run_id = recorded.one("run.start")["run"]
+    ticket = Ticket("T-1001", "ch_TICKET1", CUSTOMER, "I was charged twice for the same order")
+    for i, call in enumerate([(), (handle_ticket, ticket)]):
+        home = tmp_path / f"home{i}"
+        shutil.copytree(recorded.home, home)
+        source = dataclasses.replace(recorded, home=home)
+        by_sdk = sdk_replay(source, run_id, tmp_path / f"sdk{i}", *call)
+        # Its `irimi` ran in this process, where the fake internet resolves and the harness
+        # watches the engine: it saw every exchange the command's replay did.
+        assert len(by_sdk.reported) == len(by_cli.reported) == 6
+        assert check_invariants(by_sdk) == []
+        assert by_sdk.internet.requests() == []
+        got = by_sdk.replay
+        assert got is not None and got.replay_run_id not in (None, expected.replay_run_id)
+        lines = tuple(line.replace(got.replay_run_id, expected.replay_run_id) for line in got.lines)
+        assert dataclasses.replace(got, replay_run_id=expected.replay_run_id, lines=lines) == (
+            expected
+        )
 
 
 def test_a_retried_refund_replays_as_the_two_refunds_it_recorded(replayed):

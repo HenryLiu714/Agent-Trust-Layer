@@ -1107,3 +1107,23 @@ def test_irimi_compare_of_one_key_used_three_times_under_shadow_against_serve(sh
         "  4 same · 0 changed · 0 only in A · 0 only in B",
     ]
     assert rows_not_shown(other, a, b, out) == []
+
+
+def test_a_process_run_with_no_trigger_replays_by_running_its_argv_again(run_workflow, replayed):
+    """`verbs` starts no SDK run: its one run is the process run, whose trigger is the command
+    line. `irimi replay` runs that argv again (#84), so the agent's `main()` runs, is told it
+    replays, and makes every call it made, each answered from the recording; the replay is one
+    run, recording the same trigger."""
+    recorded, replay = replayed(W, "verbs")
+    [source] = recorded.stored().list_runs()
+    assert source.attribution == "process" and source.trigger is not None
+    [mine] = [r for r in replay.stored().list_runs() if r.replay_of == source.run_id]
+    assert (mine.run_id, mine.trigger) == (replay.process_run_id(), source.trigger)
+    assert replay.agent_exit_code() == recorded.exit_code == 0
+    assert [start["replay"] for start in replay.events("start")] == [replay.process_run_id()]
+    assert replay.answered() == [
+        (label, status, "recording" if by is None else by)
+        for label, status, by in recorded.answered()
+    ]
+    assert replay.internet.requests() == []
+    assert replay.exit_code == 0

@@ -64,7 +64,7 @@ MAX_REPR = 1000
 # a start of up to 2 MiB (`control.MAX_CONTROL_BODY`), so the args fit with room for the rest.
 MAX_CAPTURED_BYTES = 1024 * 1024
 TOO_DEEP = "<too deep>"
-# A first parameter with one of these names is the receiver of a method, not an argument.
+# A method's first parameter with one of these names is its receiver, not an argument (`_receiver`).
 RECEIVER_NAMES = ("self", "cls")
 
 type Captured = tuple[JSONValue, bool]
@@ -94,13 +94,13 @@ def capture_call(
 ) -> Captured:
     """A trigger's arguments as `{parameter: value}`, bound against `fn`'s signature, captured.
 
-    A first parameter named `self` or `cls` is the receiver and is left out: it says nothing about
-    the run, and leaving it in would make every method's run unreplayable. Defaults are not
-    applied: the args are what the caller passed, so a replay of edited code takes the new
-    defaults. When the call does not bind - the agent called the function wrongly, and Python is
-    about to say so - the args are captured as `{"args": [...], "kwargs": {...}}`, not
-    replayable: the call raised TypeError the first time, and the shape is the one a function
-    whose parameters are named `args` and `kwargs` binds to."""
+    A method's or a classmethod's first parameter named `self` or `cls` is the receiver and is
+    left out (`_receiver`): it says nothing about the run, and leaving it in would make every
+    method's run unreplayable. Defaults are not applied: the args are what the caller passed, so
+    a replay of edited code takes the new defaults. When the call does not bind - the agent
+    called the function wrongly, and Python is about to say so - the args are captured as
+    `{"args": [...], "kwargs": {...}}`, not replayable: the call raised TypeError the first time,
+    and the shape is the one a function whose parameters are named `args` and `kwargs` binds to."""
     try:
         signature = _signature(fn)
         bound = signature.bind(*args, **kwargs)
@@ -108,12 +108,45 @@ def capture_call(
         encoded, _ = capture({"args": list(args), "kwargs": dict(kwargs)})
         return encoded, False
     arguments = dict(bound.arguments)
-    first = next(iter(signature.parameters), None)
-    if first in RECEIVER_NAMES:
-        arguments.pop(first, None)
+    receiver = _receiver(fn, signature)
+    if receiver is not None:
+        arguments.pop(receiver, None)
     # One level less than the dict: each parameter's value may nest MAX_DEPTH deep, as a value
     # given to `sdk.run(trigger=...)` may.
     return _capture(arguments, -1)
+
+
+def bind(
+    fn: Callable[..., Any], args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> inspect.BoundArguments:
+    """`args` and `kwargs` bound to `fn`'s parameters, as `capture_call` binds a trigger's call:
+    TypeError when they do not bind, as calling `fn` would raise (#84)."""
+    return _signature(fn).bind(*args, **kwargs)
+
+
+def _receiver(fn: Callable[..., Any], signature: inspect.Signature) -> str | None:
+    """The name of `fn`'s first parameter when it is the receiver of a method or a classmethod,
+    else None. It is when it is named `self` or `cls` and `fn` is defined in a class body - its
+    qualname says so - unless the class holds it as a `staticmethod`. A plain function or a static
+    method receives no instance, so its first parameter is an argument whatever its name, and
+    leaving it out made a run replay could not call again (#84). A bound method's receiver is
+    already bound, and not in its signature. A class this cannot look up statically in a module
+    already imported - one defined in a function, or not yet built - is taken by the name alone.
+    Never raises."""
+    first = next(iter(signature.parameters), None)
+    qualname = getattr(fn, "__qualname__", None)
+    if first not in RECEIVER_NAMES or inspect.ismethod(fn) or not isinstance(qualname, str):
+        return None
+    owner, _, name = qualname.rpartition(".")
+    if not owner or owner.endswith("<locals>"):
+        return None  # defined at a module's top level or in a function, not in a class body
+    found: Any = sys.modules.get(getattr(fn, "__module__", None) or "")
+    try:
+        for part in (*owner.split("."), name):
+            found = inspect.getattr_static(found, part)
+    except AttributeError:
+        return first
+    return None if isinstance(found, staticmethod) else first
 
 
 def _signature(fn: Callable[..., Any]) -> inspect.Signature:
@@ -126,6 +159,67 @@ def _signature(fn: Callable[..., Any]) -> inspect.Signature:
 
         return inspect.signature(fn, annotation_format=annotationlib.Format.FORWARDREF)
     return inspect.signature(fn)
+
+
+# The parameters a keyword argument binds to (`call_arguments`).
+_KEYWORDS = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+
+
+def call_arguments(
+    fn: Callable[..., Any], arguments: Mapping[str, Any]
+) -> tuple[list[Any], dict[str, Any]]:
+    """`capture_call`'s binding undone (#84): the positional and keyword arguments that call `fn`
+    with `arguments`, `{parameter: value}` as a trigger's args are captured, revived. Each value
+    goes where its parameter takes it: the leading positional parameters in their places, up to the
+    first one the call left to its default, `*args` spread out after them, `**kwargs` spread in,
+    and every other by its name. TypeError when they do not bind to `fn`'s parameters, as calling
+    it would raise: a parameter missing or unknown. TypeError too for what no call binds, which
+    args given by hand (`--args`) can say and Python would bind otherwise than they say (#84): a
+    `*args` after a positional parameter left out, whose values would fill that parameter; a
+    `*args` that is no list or a `**kwargs` that is no object, which would be spread as
+    characters or keys; and a `**kwargs` naming a parameter a keyword binds to, whose value it
+    would replace."""
+    positional: list[Any] = []
+    named = dict(arguments)
+    left_out: str | None = None  # the first positional parameter the call left to its default
+    signature = _signature(fn)
+    for name, parameter in signature.parameters.items():
+        kind = parameter.kind
+        is_positional = kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+        if name not in named:
+            if is_positional and left_out is None:
+                left_out = name
+            continue
+        if is_positional and left_out is None:
+            positional.append(named.pop(name))
+        elif kind is inspect.Parameter.VAR_POSITIONAL:
+            spread = named.pop(name)
+            if not isinstance(spread, list):
+                raise TypeError(f"{name} must be a list, not {type(spread).__name__}")
+            if left_out is not None:
+                raise TypeError(
+                    f"{name} takes its values after {left_out}, which was left to its default"
+                )
+            positional.extend(spread)
+        elif kind is inspect.Parameter.VAR_KEYWORD:
+            spread = named.pop(name)
+            if not isinstance(spread, dict):
+                raise TypeError(f"{name} must be an object, not {type(spread).__name__}")
+            # Only a name a keyword binds to is taken. A positional-only parameter's, or `*args`'
+            # or `**kwargs`' own, is free for `**kwargs`: `f(1, a=2)` and `f(kwargs=2)` bind so.
+            taken = sorted(
+                key
+                for key in spread
+                if key in signature.parameters and signature.parameters[key].kind in _KEYWORDS
+            )
+            if taken:
+                raise TypeError(f"{name} names {', '.join(taken)}, which is a parameter of its own")
+            named.update(spread)
+    signature.bind(*positional, **named)
+    return positional, named
 
 
 class NotReplayable(Exception):

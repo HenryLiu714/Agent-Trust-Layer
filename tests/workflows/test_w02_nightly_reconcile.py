@@ -99,13 +99,17 @@ def test_a_datetime_trigger_is_stored_by_its_repr_and_cannot_be_replayed(run_wor
     assert trigger["type"] == "datetime"
     assert trigger["value"].startswith("datetime.datetime(2026, 9, 27, 2, 0")
     # A `datetime` is not JSON, so #74 captures it as its repr and the run is not replayable.
-    # `sdk.run` records no entrypoint, so #84 replays it only with `--call` or `-- CMD`.
+    # `sdk.run` records no entrypoint, so `irimi replay` refuses it for that first, before it
+    # would ask for `--args`: only `--call` or `-- CMD` replays it (#84).
     [run] = shadow.sdk_runs()
     assert run.trigger is not None
     assert (run.trigger.name, run.trigger.entrypoint) == ("nightly-reconcile", None)
     when = "datetime.datetime(2026, 9, 27, 2, 0, tzinfo=datetime.timezone.utc)"
     assert run.trigger.args == {"date": {"__irimi_repr__": when}}
     assert not run.trigger.replayable
+    code, out, err = shadow.command("replay", run.run_id, "--store", str(shadow.store_root()))
+    assert (code, out) == (2, [])
+    assert err == [f"error: run {run.run_id} has no entrypoint and no argv; pass --call or -- CMD"]
     assert [c["url"] for c in shadow.calls("tag_customer")] == [
         "api.stripe.com/v1/customers/cus_N001",
         "api.stripe.com/v1/customers/cus_N000",
@@ -192,8 +196,9 @@ def test_irimi_compare_shows_a_clean_night_and_forty_mismatches_eighty_writes_ap
 def test_a_refund_then_page_replay_answers_the_page_naming_its_minted_refund(replayed):
     """The refund is answered with its recorded answer, so its minted `re_` is the recorded one,
     and the page whose cursor names it is translated as it was recorded (#53) and answered from
-    the recording. Nothing reaches the fake internet."""
-    recorded, replay = replayed(W, "refund_then_page")
+    the recording. Nothing reaches the fake internet. Replayed by its command: the run is an
+    `sdk.run` block, which records no entrypoint to call (#84)."""
+    recorded, replay = replayed(W, "refund_then_page", command=True)
     assert replay.events("refunds", with_time=False) == recorded.events("refunds", with_time=False)
     # Each answer is what it was when recorded: the first page is still the overlay's, its
     # bytes edited to show the refund, and the page after it the service's, from disk.
@@ -218,8 +223,8 @@ def test_a_replay_of_a_replay_answers_the_page_from_the_first_replay(replayed, t
     """A replay is a stored run like any other, so it can be replayed (#82). The engine records a
     read as it would ask it, translated, whoever answers it, so the second replay finds the page
     the first one answered just as the first found the recorded one."""
-    recorded, first = replayed(W, "refund_then_page")
-    second = replay(first, replayed_run_id(first), tmp_path / "again")
+    recorded, first = replayed(W, "refund_then_page", command=True)
+    second = replay(first, replayed_run_id(first), tmp_path / "again", command=True)
     assert [(c["label"], c["answered_by"]) for c in second.calls()] == [
         (c["label"], c["answered_by"]) for c in first.calls()
     ]

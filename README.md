@@ -34,9 +34,10 @@ Every `serve` and `shadow` run is recorded, redacted, in the trace store under `
 back, and `irimi compare` puts two stored runs' writes side by side
 ([Comparing two runs](#comparing-two-runs)). The SDK, `irimi.sdk`, marks where an agent's runs
 start and end and labels the tools the proxy cannot see
-([Attributing runs with the SDK](#attributing-runs-with-the-sdk)). The engine can answer a run
-from a stored one, its HTTP (#82) and its read tools (#83), but nothing invokes it yet: `irimi
-replay` is #84. See [Roadmap](#roadmap).
+([Attributing runs with the SDK](#attributing-runs-with-the-sdk)). `irimi replay` re-runs a
+stored run's trigger through irimi, answering its HTTP and its read tools from the run's recording,
+and prints what the agent did differently ([Replaying a run](#replaying-a-run)). See
+[Roadmap](#roadmap).
 
 ## Quickstart
 
@@ -194,7 +195,9 @@ And a refund the real service would have refused, from `w01_ticket_triage double
 `irimi shadow` gives the command `HTTP_PROXY`, `HTTPS_PROXY` (and their lowercase forms),
 `NO_PROXY=localhost,127.0.0.1`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`,
 `NODE_EXTRA_CA_CERTS`, `NODE_USE_ENV_PROXY=1`, `IRIMI_ENGINE_ACTIVE=1`, `IRIMI_RUN` and
-`IRIMI_CONTROL`, and, only when the engine replays a stored run, `IRIMI_REPLAY_RUN` (#83). That
+`IRIMI_CONTROL`, and, only when the engine replays a stored run, `IRIMI_REPLAY_RUN` (#83), and,
+when `irimi replay` calls a trigger, `IRIMI_REPLAY_CALL`, `IRIMI_REPLAY_ARGS_FILE` and
+`IRIMI_REPLAY_OUTCOME_FILE` (#84). That
 covers requests, httpx, urllib, curl and Node's fetch with no code change.
 The command's exit code is passed through. One process tree is one run; the subcommand is the only
 thing that chooses the mode. SIGTERM to `irimi shadow`, as a supervisor or a container runtime
@@ -450,8 +453,8 @@ itself always propagates, unchanged. `sdk.current_run_id()` is the current run's
   trigger on a generator function, a class, a `functools.partial` or an object with `__call__`.
   Names are cut to 1000 characters.
 - **Start the agent by module name.** `python -m my_agent` and `python my_agent.py` run it as
-  `__main__`, so its entrypoint is recorded as `__main__:handle_ticket`, which replay (#84) cannot
-  import. Import the module by its name and call it, as the sample workflows'
+  `__main__`, so its entrypoint is recorded as `__main__:handle_ticket`, which `irimi replay`
+  cannot import. Import the module by its name and call it, as the sample workflows'
   `examples/workflows/launch.py` does.
 
 ### Every request a run makes through irimi carries its run
@@ -703,8 +706,9 @@ irimi compare · 42e7ad03a867410b vs 5cf7f4695f22ce95 · a comparison, not a ver
   a write in it was cut. Both runs must be in one store, `--store DIR` or the default.
 - **It is not replay.** Both runs happened, each against the world as it was then, so a
   difference can come from the world changing between them (a live read answered differently) or
-  from the model sampling another answer, not only from the agent's code. Replay, which re-runs a
-  stored run's trigger against its own recording, comes next ([Roadmap](#roadmap)).
+  from the model sampling another answer, not only from the agent's code. Replay re-runs a stored
+  run's trigger against its own recording, so a difference is the agent's
+  ([Replaying a run](#replaying-a-run)).
 - **What it cannot see.** A write is compared by its summary line, so two writes whose lines read
   the same are `=` even when something the line does not print differed: a refund that names no
   amount prints `refund ? on ch_…` in both (#135), and a write tool's arguments are not compared.
@@ -713,6 +717,107 @@ irimi compare · 42e7ad03a867410b vs 5cf7f4695f22ce95 · a comparison, not a ver
   either order, so a run that made the same two writes in the other order shows one of them as `-`
   and again as `+`. Stored values are redacted with this install's key, so a secret compares equal
   only between two runs one install recorded.
+
+## Replaying a run
+
+`irimi replay RUN_ID` runs a stored run's trigger again through irimi, answers what it can from
+that run's recording, and prints what the agent did differently. Record a run under `irimi shadow`
+with the trigger marked `@sdk.trigger`, edit the prompt, and replay it:
+
+```
+$ irimi shadow -- python -c "import agent; agent.main()"
+...
+$ irimi replay 725dc6add559a16f
+irimi replay · run d63663c6da8905c7 · listening on 127.0.0.1:4000 · ca /home/me/.irimi/ca/ca.pem
+replaying 725dc6add559a16f as d63663c6da8905c7
+...
+live      llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]
+recording read      GET api.stripe.com/v1/charges/ch_TICKET1 -> 200  [fidelity:recording, from-recording]
+...
+irimi replay · 725dc6add559a16f → d63663c6da8905c7 · - → -
+  agent exited 0
+  diverged at #1: live      llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]
+  2 from the recording · 5 missed
+
+  ~ A ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)
+    B ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)
+  = ○ tool agent.send_reply  shadow stand-in ran
+
+  1 same · 1 changed · 0 only in A · 0 only in B
+```
+
+- **What runs**, in order of precedence:
+  1. `-- CMD` given: that command, as `irimi shadow -- CMD` runs it.
+  2. `--call MODULE:QUALNAME` given, or the run's trigger has an entrypoint: that function, called
+     with `--args JSON` or `--args-file PATH` (an object of `{parameter: value}`, captured values
+     as the run stores them) or the trigger's recorded args, in a child,
+     `python -m irimi.sdk.replay_child`, under the interpreter irimi runs under. The child imports
+     the function by its name, rebuilds the args (`irimi.sdk.capture.revive`), and calls it,
+     running a coroutine to its end. It exits 0 when the call returns and 1 when it raises, and
+     the replay's run ends with what it raised, as the recorded run did.
+  3. A process run (`irimi shadow -- CMD` with no trigger): its recorded command, run again.
+
+  A run with none of these, an `sdk.run` block or a run whose start never reached irimi, is
+  refused: `error: run <id> has no entrypoint and no argv; pass --call or -- CMD`. So are recorded
+  args that are not values, one stored by its description (a callable, a `datetime`), a call that
+  did not bind, or args the store could not redact: `error: run <id>'s trigger arguments were not
+  recorded replayably (<why>); pass --args`. An entrypoint in `__main__` (an agent run as
+  `python agent.py`) is refused too, a process run's argv is no function's args, and `--args`
+  needs a function to give them to. A call the child then cannot make - a method, whose instance
+  a run does not record, a module that does not import, args whose class it cannot rebuild - is a
+  replay that could not run: `agent could not be called: <why>`, and exit 2.
+- **RUN_ID comes first.** `irimi replay RUN_ID -- CMD`; a run id that starts with `-` is given
+  after `--`, as `irimi replay -- RUN_ID`, and a command then follows a second `--`. `-- CMD`
+  with `--call` or `--args` is a usage error.
+- **The replay is one run.** Every run the child's SDK starts adopts the replay's run, whatever
+  started it, and posts no start or end of its own. `irimi replay` stores that run with the trigger
+  it replayed, `mode: replay` and `replay_of`, and ends it with the child's exit code, so
+  `irimi runs show` and `irimi compare` read it, and a replay can be replayed.
+- **From the recording, and missed.** A request the recording holds is answered with its recorded
+  answer, in the order it was recorded, flagged `from-recording`; a read tool the recording holds
+  returns its recorded result (`ran: recording`). Anything else misses: the request is decided as
+  shadow mode decides it, a read going live and a write faked and never forwarded, flagged
+  `replay-miss`, and a read tool runs for real (`ran: real`). After a missed write, a recorded read
+  that would show the write the replay did not make misses too.
+- **Where it diverged** is the first event of the replay's run, in the order stored, that missed:
+  an exchange the agent sent flagged `replay-miss`, or a read tool that ran for real. A
+  precondition read irimi issued and a write tool's stand-in never are. The counts below it are
+  the agent's exchanges and read tools answered from the recording, and missed.
+- **The comparison** is `irimi compare`'s, the recorded run as A and the replay as B
+  ([Comparing two runs](#comparing-two-runs)), with the header saying when `--args` gave the
+  trigger other arguments. A replay that missed nothing but made fewer calls than its recording,
+  an agent that stopped early, says how many it never made, and one the store dropped events of
+  says so and is never called the same. The exit code is the comparison's: 0 when the writes are
+  the same, 1 when any differs or was cut, 2 when the replay was refused, could not start its
+  command or call its trigger, or its run could not be read back, and 130 or 143 when SIGINT or
+  SIGTERM stopped it.
+  The child's own exit code is printed and decides nothing. `--result-file PATH` writes the result
+  as JSON, a refused replay's with what irimi said of why.
+- **From a test**, `sdk.replay(run_id)` replays the run's own trigger, and
+  `sdk.replay(run_id, handle, Ticket(...))` your function with its arguments, in a subprocess
+  running `python -m irimi replay`, and returns a `ReplayResult`: `source_run_id`,
+  `replay_run_id`, `exit_code`, `diverged_at` and `lines`. A refused replay is a result with
+  `exit_code` 2, and a stopped one 130 or 143, as the command exits. The args go to
+  `irimi replay` in a file only you can read, never on its command line.
+
+What a replay cannot do:
+
+- **A trigger called alone runs without its process.** What the agent's `main()` set up - a
+  database it seeded, a flag it parsed, the event loop a task is scheduled on, a thread the trigger
+  started and `main()` waited for - is not there. Replay such a run with `-- CMD`. A method's run
+  cannot be called alone at all: a run does not record the instance it was called on. And the
+  call runs under irimi's own interpreter, so install irimi where the agent's packages are, or
+  replay with `-- CMD`.
+- **A command is the whole process.** With `-- CMD`, every run the process starts is the one
+  replay, answered from the one recorded run, so a process that held several runs shows the others'
+  writes as added (#155).
+- **A divergence makes the rest live.** Past it, a read the recording holds after a write the
+  replay did not make goes to the real service, and the model is asked again.
+- **No provenance ids.** A stored tool call names none of the exchanges its body made, so a replay
+  that answers the tool takes the exchanges recorded within its span as its body's (#160).
+- **Redacted values stay redacted.** A recorded secret comes back as its placeholder (#152).
+- **One run, one store, one process.** The run replayed and its replay share one store, serve mode
+  cannot replay (#150), and each `irimi replay` replays one run.
 
 ## CLI
 
@@ -725,9 +830,12 @@ irimi maps list                   print each mapped host, its service, route cou
 irimi runs list [--limit N]       print one line per stored run, newest first (default 20)
 irimi runs show RUN_ID            print a stored run: its record, every event, its summary
 irimi compare RUN_A RUN_B         print two stored runs' writes side by side, no verdict
+irimi replay RUN_ID [-- CMD]      run a stored run's trigger again, answered from its recording,
+                                  and print what changed: --call M:Q, --args JSON (or
+                                  --args-file PATH), --result-file PATH
 ```
 
-`serve` and `shadow` take `--port`, `--listen-host HOST`, `--store DIR`, `--allow-host HOST`,
+`serve`, `shadow` and `replay` take `--port`, `--listen-host HOST`, `--store DIR`, `--allow-host HOST`,
 `--target SPEC`, `--target-reads HOST` and `--allow-target-host HOST`; the last four repeat. Every
 run is recorded, redacted, under `--store` (default `$IRIMI_HOME/store`). `shadow` stores its
 command as one `process` run with the command's exit code, and the agent's version when
@@ -839,13 +947,13 @@ by phase.
   stored runs' writes side by side (#79). Trace format v2 and the replay policy: a run answered
   from its recording where it can, decided as shadow mode decides it where it cannot, and never
   a write forwarded (#82). Read tools answered from the recording in a replay, and write tools
-  through their stand-ins (#83).
+  through their stand-ins (#83). `irimi replay` and `sdk.replay()`: a stored run's trigger re-run
+  against its recording, and what changed (#84).
 
 **Next: the rest of Phase 3, the run**
 
 - Slack channel names in the summary (#61).
-- Replay: `irimi replay` and `sdk.replay()` (#84), and record, edit a prompt, replay and diff
-  end to end (#85).
+- Record, edit a prompt, replay and diff, end to end (#85).
 
 **Later.** A shadow-week report over many runs, with readiness checks for clients that bypass the
 proxy (the Phase 4 backstop the banner names). Then diffs of an agent's behaviour on pull requests,

@@ -236,3 +236,30 @@ def test_irimi_compare_cannot_tell_two_refunds_of_the_rest_of_a_charge_apart(
         "  3 same · 0 changed · 0 only in A · 0 only in B",
     ]
     assert rows_not_shown(rest, a, b, out) == []
+
+
+# ------------------------------------------------------------------------------- replay (#84)
+
+
+def test_the_raw_webhook_body_is_revived_as_bytes_and_the_trigger_replays(replayed):
+    """`on_event(raw, signature)` is given the webhook's raw body, which #74 captures as
+    `__irimi_bytes__`, and `irimi replay` revives as the same bytes (`capture.revive`, #84): the
+    trigger, called alone, verifies the same signature over them, handles the same dispute, and is
+    answered from its recording, so nothing reaches the fake internet and the writes are the
+    same."""
+    recorded, replay = replayed(W, "under_threshold")
+    [run] = recorded.sdk_runs()
+    assert run.trigger is not None and run.trigger.replayable
+    assert set(run.trigger.args["raw"]) == {"__irimi_bytes__"}
+    assert base64.b64decode(run.trigger.args["raw"]["__irimi_bytes__"]).startswith(b"{")
+    assert (replay.exit_code, replay.agent_exit_code()) == (0, 0)
+    # The trigger was called with `bytes` again, as when it was recorded, and did what it did.
+    called_with = {"raw": "bytes", "signature": "str"}
+    assert replay.one("run.start")["called_with"] == called_with
+    assert recorded.one("run.start")["called_with"] == called_with
+    assert replay.returned() == recorded.returned() == "refund"
+    assert replay.replay_result()[1:3] == [
+        "  agent exited 0",
+        "  no divergence: every call was answered from the recording",
+    ]
+    assert replay.internet.requests() == []

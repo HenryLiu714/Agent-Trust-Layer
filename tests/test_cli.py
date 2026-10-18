@@ -22,6 +22,17 @@ def test_no_command_prints_help_and_fails(capsys):
     assert "usage: irimi" in capsys.readouterr().out
 
 
+def test_python_m_irimi_is_the_command_and_importing_it_runs_nothing():
+    """`sdk.replay()` runs `python -m irimi` (#84); a tool that imports every module, as pydoc
+    does, must not start the command."""
+    import subprocess
+
+    ran = subprocess.run([sys.executable, "-m", "irimi", "--version"], capture_output=True)
+    assert (ran.returncode, ran.stdout) == (0, f"irimi {__version__}\n".encode())
+    imported = subprocess.run([sys.executable, "-c", "import irimi.__main__"], capture_output=True)
+    assert (imported.returncode, imported.stdout, imported.stderr) == (0, b"", b"")
+
+
 def test_serve_without_ca_fails(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
     assert main(["serve"]) == 1
@@ -185,20 +196,15 @@ def test_the_composition_root_builds_a_replay_policy_over_the_run_s_recording():
 
 
 def test_a_replay_of_a_run_the_store_does_not_hold_starts_nothing(tmp_path, monkeypatch, capsys):
-    """`_prepare_run` reads the recording before anything runs, and a run the store does not hold
-    is refused as a store that cannot be opened is: an error, and no command (#82)."""
-    from dataclasses import replace
-
+    """`irimi replay` reads the recording before anything runs, and a run the store does not hold
+    is refused, exit 2 as `irimi compare` refuses it: an error, no command and no store (#82,
+    #84)."""
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
     monkeypatch.chdir(tmp_path)
     ca.generate_ca(ca.ca_paths())
-    real = cli._engine_config
-    monkeypatch.setattr(
-        cli, "_engine_config", lambda *a, **kw: replace(real(*a, **kw), replay_of="nosuchrun")
-    )
     marker = tmp_path / "ran"
     command = [sys.executable, "-c", f"open({str(marker)!r}, 'w')"]
-    assert main(["shadow", "--port", "0", "--", *command]) == 1
+    assert main(["replay", "nosuchrun", "--port", "0", "--", *command]) == 2
     assert capsys.readouterr().err == f"error: no run nosuchrun in {tmp_path / 'store'}\n"
     assert not marker.exists()
     assert not (tmp_path / "store").exists()
@@ -208,9 +214,9 @@ def test_a_replay_of_a_run_the_store_does_not_hold_starts_nothing(tmp_path, monk
 def test_a_replay_of_a_damaged_run_starts_nothing(tmp_path, monkeypatch, capsys, damage):
     """A recording `StoreReader` cannot read - a line that does not parse, a run.json that does
     not, a newer schema version, a missing blob - refuses the replay as `runs show` refuses the
-    run, with no traceback, no command and no run of its own in the store (#82)."""
+    run, with no traceback, no command and no run of its own in the store, and exits 2 (#82,
+    #84)."""
     import json
-    from dataclasses import replace
 
     from irimi import redact
     from irimi.exchange import Exchange, Request, Response
@@ -245,13 +251,9 @@ def test_a_replay_of_a_damaged_run_starts_nothing(tmp_path, monkeypatch, capsys,
     else:
         for blob in (store / "blobs").iterdir():
             blob.unlink()
-    real = cli._engine_config
-    monkeypatch.setattr(
-        cli, "_engine_config", lambda *a, **kw: replace(real(*a, **kw), replay_of="rec1")
-    )
     marker = tmp_path / "ran"
     command = [sys.executable, "-c", f"open({str(marker)!r}, 'w')"]
-    assert main(["shadow", "--port", "0", "--", *command]) == 1
+    assert main(["replay", "rec1", "--port", "0", "--", *command]) == 2
     err = capsys.readouterr().err
     assert err.startswith("error: run rec1 could not be read: ")
     assert err.count("\n") == 1
@@ -259,36 +261,14 @@ def test_a_replay_of_a_damaged_run_starts_nothing(tmp_path, monkeypatch, capsys,
     assert [p.name for p in (store / "runs").iterdir()] == ["rec1"]
 
 
-def test_serve_mode_refuses_to_replay(tmp_path, monkeypatch, capsys):
-    """A replay is one run against one engine, whose write log and recording are the engine's;
-    serve mode is many runs at once. Refused before the store is opened (#82)."""
-    from dataclasses import replace
-
-    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
-    monkeypatch.chdir(tmp_path)
-    ca.generate_ca(ca.ca_paths())
-    real = cli._engine_config
-    monkeypatch.setattr(
-        cli, "_engine_config", lambda *a, **kw: replace(real(*a, **kw), replay_of="rec1")
-    )
-    assert main(["shadow", "--serve", "--port", "0"]) == 1
-    assert capsys.readouterr().err == "error: a replay is one run; serve mode cannot replay\n"
-    assert not (tmp_path / "store").exists()
-
-
 def test_the_unattributed_pool_is_not_a_run_to_replay(tmp_path, monkeypatch, capsys):
     """`unattributed` holds every serve session's requests no run named: there is no one run in it
-    to answer from (#82)."""
-    from dataclasses import replace
-
+    to answer from (#82). Refused with exit 2 (#84)."""
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
     monkeypatch.chdir(tmp_path)
     ca.generate_ca(ca.ca_paths())
-    real = cli._engine_config
-    monkeypatch.setattr(
-        cli, "_engine_config", lambda *a, **kw: replace(real(*a, **kw), replay_of="unattributed")
-    )
-    assert main(["shadow", "--port", "0", "--", sys.executable, "-c", "pass"]) == 1
+    command = [sys.executable, "-c", "pass"]
+    assert main(["replay", "unattributed", "--port", "0", "--", *command]) == 2
     assert capsys.readouterr().err == "error: unattributed is not a run to replay\n"
     assert not (tmp_path / "store").exists()
 

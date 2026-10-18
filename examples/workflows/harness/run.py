@@ -19,12 +19,14 @@ and says whether anything about it is expected to differ from a bare run.
   `Scenario.serve_flags`. A serve that refuses to start (a map it will not load) starts no agent,
   as `irimi shadow` starts none.
 
-- **replay**: a scenario recorded under `irimi shadow` is run again, in the same `IRIMI_HOME`, with
-  the engine answering from one run it stored (`EngineConfig.replay_of`, #82), and a fresh `World`
-  from the same `setup`, so anything not answered from the recording reaches the fake internet and
-  shows up there. `replay()` runs it; `run()` never does, since there is nothing to replay before
-  a recording exists. Until `irimi replay` (#84) exists, the replay is `irimi shadow` with its
-  `_engine_config` made to name the run.
+- **replay**: one run a scenario stored under `irimi shadow` is replayed by `irimi replay <run id>`
+  (#84), in THIS process too, in the same `IRIMI_HOME`, with a fresh `World` from the same `setup`,
+  so anything not answered from the recording reaches the fake internet and shows up there. The
+  replay runs what `irimi replay` runs for that run: its trigger, called by `irimi.sdk.replay_child`
+  from its entrypoint and args, or a process run's argv; or, with `command`, the scenario's own
+  agent command (`-- <cmd>`). Every run the SDK starts in the replay's child adopts the replay's
+  one run. `replay()` runs it; `run()` never does, since there is nothing to replay before a
+  recording exists. `sdk_replay()` calls `sdk.replay()` the same way, from this process.
 
 A later mode is a new branch here and not a new harness.
 """
@@ -47,17 +49,19 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from examples.workflows import sdk as agent_sdk
 from examples.workflows.harness.internet import BOMB_SECRET, FakeInternet, Req
 from examples.workflows.harness.services import CLIENT_SECRET_CANARY, World
-from irimi import ca, cli, paths, report, runner, servicemap, trace
+from irimi import ca, cli, paths, report, runner, sdk, servicemap, trace
 from irimi import store as irimi_store
 from irimi.cli import build_parser
 from irimi.cli import main as irimi_main
 from irimi.exchange import Exchange
+from irimi.sdk import replays as sdk_replays
 from irimi.servicemap import MapIndex, loader
 from irimi.store import StoreReader
 from irimi.trace import RunRecord, ToolCall
@@ -86,7 +90,7 @@ MODES = ("bare", "shadow", "serve")
 # The line irimi's serve mode prints above each run's summary when the SDK ends the run (#77).
 RUN_BLOCK = re.compile(r"--- run (\S+) ---")
 # The run `irimi shadow`'s banner names, its process run (#70).
-BANNER_RUN = re.compile(r"irimi shadow · run (\S+) · ")
+BANNER_RUN = re.compile(r"irimi (?:shadow|replay) · run (\S+) · ")
 # How long a serve-mode run waits for irimi's banner, and then for irimi to stop.
 SERVE_TIMEOUT_S = 60
 # What the name of a thread the fake internet answers a request on ends in: the one kind of
@@ -167,6 +171,8 @@ class Result:
     # The store `run` was told to record into, which other runs may share (#79); None for irimi's
     # default, `$IRIMI_HOME/store`, the run's own.
     store: Path | None = None
+    # A replay's result, as `irimi replay --result-file` wrote it or `sdk.replay` returned it (#84).
+    replay: sdk.ReplayResult | None = None
 
     def events(self, event: str, *, with_time: bool = True) -> list[dict[str, Any]]:
         """Every `event` the agent logged, in order. `with_time=False` drops each one's
@@ -185,6 +191,14 @@ class Result:
         """The agent's final `result` event, if it logged one."""
         found = self.events("result", with_time=with_time)
         return found[-1] if found else None
+
+    def returned(self) -> Any:
+        """What the one trigger the agent's run started with returned, as its `run.end` logged it
+        (`examples/workflows/sdk.py`, #84): a replay that calls the trigger alone logs no `result`.
+        Raises unless exactly one run ended, and ended `ok`, and its end says what it returned."""
+        end = self.one("run.end")
+        assert end["outcome"] == "ok", end
+        return end["returned"]
 
     def calls(self, label: str | None = None) -> list[dict[str, Any]]:
         """The agent's HTTP calls (`http` events), in order: all of them, or those with `label`."""
@@ -288,11 +302,37 @@ class Result:
         return [line for block in self.run_blocks().values() for line in block]
 
     def summary(self) -> list[str]:
-        """irimi's closing block, from its `N exchanges` header on."""
+        """irimi's closing block, from its `N exchanges` header on. `irimi replay` prints its result
+        instead (#84), so a replay's is its run's summary as `irimi runs show` prints it."""
+        if self.mode == "replay":
+            run_id = self.process_run_id()
+            _, out, _ = self.runs("show", run_id, "--store", str(self.store_root()))
+            start = next(
+                i
+                for i, line in enumerate(out)
+                if line.startswith(f"irimi shadow · run {run_id} · ")
+            )
+            return out[start:]
         for i, line in enumerate(self.irimi):
             if line.startswith("irimi shadow · run ") and re.search(r" · \d+ exchanges? · ", line):
                 return self.irimi[i:]
         return []
+
+    def replay_result(self) -> list[str]:
+        """What `irimi replay` said of the replay (#84): its result's lines, the block it printed
+        last, or why it could not run."""
+        assert self.replay is not None, self.mode
+        return list(self.replay.lines)
+
+    def agent_exit_code(self) -> int:
+        """How the agent exited: the process's exit code, which is irimi's under `irimi shadow`.
+        Under `irimi replay`, whose exit code is the comparison's (#84), its child's, as the
+        replay's run recorded it: a called trigger's 0 or 1, or the agent command's."""
+        if self.mode != "replay":
+            return self.exit_code
+        record = self.stored().load_run(self.process_run_id()).record
+        assert record.exit_code is not None, record
+        return record.exit_code
 
     def sdk_runs(self) -> list[RunRecord]:
         """The runs the SDK started (#74), as stored: `attribution: "sdk"`, newest first."""
@@ -301,7 +341,8 @@ class Result:
     def process_run_id(self) -> str:
         """The id of the one run `irimi shadow` stored for the agent's process (#70). A store runs
         share holds one process run per `irimi shadow` (#79), as a replay's store holds the
-        recording's and its own (#82): this one's is the run its banner named."""
+        recording's and its own (#82): this one's is the run its banner named. A replay's is the
+        replay's one run (#84)."""
         runs = [r.run_id for r in self.stored().list_runs() if r.attribution == "process"]
         if self.store is None and self.mode != "replay":
             (run_id,) = runs
@@ -404,16 +445,50 @@ def run(
 
 
 def replay(
-    recorded: Result, run_id: str, workdir: Path, env: dict[str, str] | None = None
+    recorded: Result,
+    run_id: str,
+    workdir: Path,
+    env: dict[str, str] | None = None,
+    options: tuple[str, ...] = (),
+    *,
+    command: bool = False,
 ) -> Result:
-    """`run_id`, a run `recorded` stored, replayed (#82): `recorded`'s scenario, recorded under
-    `irimi shadow` or itself a replay, run again under
-    `irimi shadow`, in its `IRIMI_HOME` and its store, with the engine answering from that run,
-    and with `env` over the scenario's own environment - `PROMPT=half` is the prompt edit.
+    """`run_id`, a run `recorded` stored, replayed by `irimi replay <run_id>` (#82, #84):
+    `recorded`'s scenario, recorded under `irimi shadow` or itself a replay, in its `IRIMI_HOME`
+    and its store, with `env` over the scenario's own environment - `PROMPT=half` is the prompt
+    edit - and `options` given to `irimi replay` too (`--call`, `--args`). What runs is what
+    `irimi replay` runs for the run, or, with `command`, the scenario's agent command. The result
+    file `irimi replay` writes is the result's `replay`.
 
     Everything else is the run's own: a fresh `World` from the scenario's `setup` and a fresh fake
     internet, so a request the recording does not answer shows up in `internet.requests()`, and its
     own state, working directory and TMPDIR under `workdir`. The result's `mode` is `replay`."""
+    return _replayed(recorded, run_id, workdir, env, _Replay(options, command))
+
+
+def sdk_replay(recorded: Result, run_id: str, workdir: Path, *call: Any) -> Result:
+    """`sdk.replay(run_id, *call)` (#84) called as a test calls it, through the agents' own `sdk`
+    (`examples/workflows/sdk.py`, which forwards `replay` to `irimi.sdk`), a `replay` of
+    `recorded` in every other way. `sdk.replay`'s one seam, `sdk.replays._run_irimi`, runs `irimi`
+    in this process instead of a subprocess, so the fake internet resolves its names and the
+    scenario's maps load: the agent is still a child process of its own, `replay_child`, as `irimi
+    replay` starts it. The result's `replay` is what `sdk.replay` returned."""
+    return _replayed(recorded, run_id, workdir, None, _Replay(call=call))
+
+
+@dataclass(frozen=True)
+class _Replay:
+    """How `_execute` replays a run (#84): the `options` `irimi replay` is given, whether it runs
+    the scenario's `command`, and, for `sdk_replay`, the `sdk.replay` `call` it makes instead."""
+
+    options: tuple[str, ...] = ()
+    command: bool = False
+    call: tuple[Any, ...] | None = None
+
+
+def _replayed(
+    recorded: Result, run_id: str, workdir: Path, env: dict[str, str] | None, how: _Replay
+) -> Result:
     if recorded.mode not in ("shadow", "replay"):
         raise ValueError(
             f"replay takes a run recorded under shadow or replayed, not {recorded.mode}"
@@ -427,6 +502,7 @@ def replay(
         home=recorded.home,
         env=env or {},
         replay_of=run_id,
+        how=how,
     )
 
 
@@ -458,37 +534,11 @@ def replay_targets(recorded: Result) -> list[str]:
 
 
 def counterpart(recorded: Result, replayed: Result, run_id: str) -> str | None:
-    """The run of `replayed` that stands for `recorded`'s run `run_id` (#82): the process run for
-    the process run, and otherwise, among the runs the replay started (those its store holds and
-    `recorded`'s does not), the one with the same attribution and trigger, or failing that the one
-    that started in the same place among the runs sharing its attribution and trigger name - the
-    trigger's args may name an id a miss minted afresh. None when the replay started no such run,
-    as when its agent names its runs itself and named the recorded ones again (W9's control
-    scenarios)."""
-    if run_id == recorded.process_run_id():
-        return replayed.process_run_id()
-    before = {r.run_id: r for r in recorded.stored().list_runs()}
-    after = [r for r in replayed.stored().list_runs() if r.run_id not in before]
-    after = [r for r in after if r.attribution != "process"]
-    wanted = before[run_id]
-    same = [r for r in after if (r.attribution, r.trigger) == (wanted.attribution, wanted.trigger)]
-    if len(same) == 1 and sum(r.trigger == wanted.trigger for r in before.values()) == 1:
-        return same[0].run_id
-
-    def named(record: RunRecord) -> tuple[str, str | None, str | None]:
-        trigger = record.trigger
-        return (
-            record.attribution,
-            *(trigger and (trigger.name, trigger.entrypoint) or (None, None)),
-        )
-
-    def by_start(records: list[RunRecord]) -> list[str]:
-        records = sorted(records, key=lambda r: (r.started_at or 0.0, r.run_id))
-        return [r.run_id for r in records if named(r) == named(wanted)]
-
-    mine, theirs = by_start(list(before.values())), by_start(after)
-    place = mine.index(run_id)
-    return theirs[place] if place < len(theirs) else None
+    """The run of `replayed` that stands for `recorded`'s run `run_id` (#82): the replay's one run,
+    which every run its child's SDK started adopted (#84), as its result names it. None when the
+    replay stored no run, refused before it ran."""
+    assert replayed.replay is not None and replayed.replay.source_run_id == run_id
+    return replayed.replay.replay_run_id
 
 
 def _execute(
@@ -501,10 +551,11 @@ def _execute(
     home: Path | None = None,
     env: dict[str, str] | None = None,
     replay_of: str | None = None,
+    how: _Replay | None = None,
 ) -> Result:
     """`run` and `replay` alike: `home` is the `IRIMI_HOME` to run in, `workdir`'s own unless a
-    replay names the recording's, `env` is laid over the scenario's environment, and `replay_of`
-    is the stored run a replay answers from."""
+    replay names the recording's, `env` is laid over the scenario's environment, `replay_of` is the
+    stored run a replay answers from, and `how` how it is replayed."""
     scenario = workflow.scenarios[scenario_name]
     workdir.mkdir(parents=True, exist_ok=True)
     state, cwd, tmp = (workdir / d for d in ("state", "cwd", "tmp"))
@@ -523,6 +574,7 @@ def _execute(
     reported: list[Exchange] = []
     handed: list[Exchange] = []
     handed_events: list[Exchange | ToolCall] = []
+    result_file = workdir / "result.json"
     try:
         for host, action, match, times in scenario.faults:
             internet.inject(host, action, match, times)
@@ -533,13 +585,22 @@ def _execute(
         flags = ("--store", str(store)) if store is not None else ()
         if mode == "bare":
             code = _run_bare(cmd, agent_env, cwd, internet)
-        elif mode in ("shadow", "replay"):
-            with (
-                _watching_the_store(reported, handed, handed_events),
-                _replaying(replay_of),
-            ):
-                code, irimi_out = _run_shadow(
-                    cmd, agent_env, cwd, tmp, internet, scenario, workdir, flags
+        elif mode == "shadow":
+            argv = ["shadow", "--port", "0", *flags, "--", *cmd]
+            with _watching_the_store(reported, handed, handed_events):
+                code, irimi_out = _run_irimi(argv, agent_env, cwd, tmp, internet, scenario, workdir)
+        elif mode == "replay":
+            assert replay_of is not None and how is not None
+            argv = ["replay", "--port", "0", *flags, "--result-file", str(result_file)]
+            # As its user types it: the run id, then `-- <cmd>` for a command (#84).
+            argv += [*how.options, replay_of, *(["--", *cmd] if how.command else [])]
+            with _watching_the_store(reported, handed, handed_events):
+                if how.call is None:
+                    run_irimi = lambda: irimi_main(argv)  # noqa: E731
+                else:
+                    run_irimi = _calling_sdk_replay(replay_of, how.call, store, result_file)
+                code, irimi_out = _run_irimi(
+                    argv, agent_env, cwd, tmp, internet, scenario, workdir, run_irimi
                 )
         else:
             if scenario.serve_flags is None:
@@ -568,7 +629,33 @@ def _execute(
         handed,
         handed_events,
         store,
+        _replay_result(result_file) if mode == "replay" else None,
     )
+
+
+def _replay_result(path: Path) -> sdk.ReplayResult:
+    """The result file a replay wrote, as `sdk.replay` reads it back."""
+    return sdk.ReplayResult.from_json(json.loads(path.read_text(encoding="utf-8")))
+
+
+def _calling_sdk_replay(
+    run_id: str, call: tuple[Any, ...], store: Path | None, result_file: Path
+) -> Callable[[], int]:
+    """`sdk.replay(run_id, *call, store=store)`, its `irimi` run in this process: what it
+    returned written to `result_file`, as `irimi replay --result-file` writes it, and its exit
+    code."""
+
+    def run() -> int:
+        real = sdk_replays._run_irimi
+        sdk_replays._run_irimi = lambda argv, env: irimi_main(argv)
+        try:
+            got = agent_sdk.replay(run_id, *call, store=store)
+        finally:
+            sdk_replays._run_irimi = real
+        result_file.write_text(json.dumps(got.to_json()), encoding="utf-8")
+        return got.exit_code
+
+    return run
 
 
 def compare(a: Result, b: Result) -> tuple[int, list[str], list[str]]:
@@ -656,21 +743,21 @@ def _run_bare(cmd: list[str], env: dict[str, str], cwd: Path, internet: FakeInte
     return runner.exit_code_for(returncode)
 
 
-def _run_shadow(
-    cmd: list[str],
+def _run_irimi(
+    argv: list[str],
     env: dict[str, str],
     cwd: Path,
     tmp: Path,
     internet: FakeInternet,
     scenario: Scenario,
     workdir: Path,
-    flags: tuple[str, ...] = (),
+    run: Callable[[], int] | None = None,
 ) -> tuple[int, list[str]]:
-    """`irimi shadow -- <agent>` in this process, as a user would run it from `cwd`, with
-    `flags` before the `--`."""
+    """`irimi <argv>` in this process, as a user would run it from `cwd`: `irimi shadow -- <agent>`,
+    or `irimi replay <run id>` (#84), or `run`, which runs it another way (`sdk_replay`)."""
     buf = io.StringIO()
     with _as_irimi(env, cwd, tmp, internet, scenario, workdir), contextlib.redirect_stdout(buf):
-        code = irimi_main(["shadow", "--port", "0", *flags, "--", *cmd])
+        code = irimi_main(argv) if run is None else run()
     return code, buf.getvalue().splitlines()
 
 
@@ -818,14 +905,19 @@ def _watching_the_store(
     """`irimi shadow` unchanged, but each exchange it prints a line for is appended to `reported`,
     and each one its engine hands the trace store to `handed`, and to `handed_events` with each
     tool call the control endpoint hands it (#73). `cli` imports `DirectoryStore` when it opens the
-    store and calls `report.exchange_line` from its `on_exchange`, so swapping the two modules'
-    names is enough, as `tests/test_trace_e2e.py` does (#70)."""
+    store and builds its engine with `_build_engine`, which it hands the `on_exchange` that prints
+    each line, so swapping the two names is enough, as `tests/test_trace_e2e.py` does (#70). Not
+    `report.exchange_line` itself, which `irimi replay` also calls for the line of its divergence
+    point (#84)."""
     real = irimi_store.DirectoryStore
-    line = report.exchange_line
+    build = cli._build_engine
 
-    def printing(ex: Exchange) -> str:
-        reported.append(ex)
-        return line(ex)
+    def building(run: Any, on_exchange: Any, *args: Any) -> Any:
+        def printing(ex: Exchange) -> None:
+            reported.append(ex)
+            on_exchange(ex)
+
+        return build(run, printing, *args)
 
     class Handed(real):
         def record(self, exchange: Exchange) -> None:
@@ -838,32 +930,12 @@ def _watching_the_store(
             super().record_tool_call(call)
 
     irimi_store.DirectoryStore = Handed
-    report.exchange_line = printing
+    cli._build_engine = building
     try:
         yield
     finally:
         irimi_store.DirectoryStore = real
-        report.exchange_line = line
-
-
-@contextlib.contextmanager
-def _replaying(run_id: str | None) -> Iterator[None]:
-    """`irimi shadow` unchanged, but answering from the stored run `run_id` (#82): its
-    `_engine_config` names the run in `replay_of`, which no flag sets until `irimi replay` (#84).
-    Nothing changes when `run_id` is None."""
-    if run_id is None:
-        yield
-        return
-    real = cli._engine_config
-
-    def replaying(*args: Any, **kwargs: Any) -> Any:
-        return replace(real(*args, **kwargs), replay_of=run_id)
-
-    cli._engine_config = replaying
-    try:
-        yield
-    finally:
-        cli._engine_config = real
+        cli._build_engine = build
 
 
 @contextlib.contextmanager

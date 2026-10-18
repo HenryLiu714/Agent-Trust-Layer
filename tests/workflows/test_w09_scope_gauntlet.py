@@ -788,12 +788,14 @@ def _files(root) -> dict[str, bytes]:
 
 
 def test_a_replay_never_writes_into_the_run_it_replays(replayed):
-    """`control_runs` names its runs itself, so its replay posts `ctl-direct` again: its start,
+    """`control_runs` names its runs itself, posting each by hand, with args `irimi replay` will
+    not call a trigger with, so it is replayed by its command (#84), which posts `ctl-direct`
+    again: its start,
     its tool calls, its end, and a read labelled `Irimi-Run: ctl-direct`. A replay never writes
     into the run it answers from (#82): that run's files are byte for byte what was recorded, and
     what the replay said of it is filed in `unattributed`, its exchange flagged `bad-run-id` - and
     still answered from the recording."""
-    recorded, replay = replayed(W, "control_runs", run_id="ctl-direct")
+    recorded, replay = replayed(W, "control_runs", run_id="ctl-direct", command=True)
     stored = _files(recorded.store_root() / RUNS_DIR / "ctl-direct")
     assert stored and _files(replay.store_root() / RUNS_DIR / "ctl-direct") == stored
     assert recorded.stored().load_run(trace.UNATTRIBUTED).events == []
@@ -813,7 +815,7 @@ def test_a_replay_writes_no_other_recorded_run_its_agent_names_again(replayed):
     byte what was recorded, the replay's own run is the one run that names what it replays, and
     what it said of each recorded run is filed in `unattributed`, its exchanges flagged
     `bad-run-id`."""
-    recorded, replay = replayed(W, "control_runs", run_id="ctl-direct")
+    recorded, replay = replayed(W, "control_runs", run_id="ctl-direct", command=True)
     runs = recorded.store_root() / RUNS_DIR
     for directory in runs.iterdir():
         assert _files(replay.store_root() / RUNS_DIR / directory.name) == _files(directory)
@@ -1105,3 +1107,38 @@ def test_irimi_compare_of_one_key_used_three_times_under_shadow_against_serve(sh
         "  4 same · 0 changed · 0 only in A · 0 only in B",
     ]
     assert rows_not_shown(other, a, b, out) == []
+
+
+def test_a_process_run_with_no_trigger_replays_by_running_its_argv_again(run_workflow, replayed):
+    """`verbs` starts no SDK run: its one run is the process run, whose trigger is the command
+    line. `irimi replay` runs that argv again (#84), so the agent's `main()` runs, is told it
+    replays, and makes every call it made, each answered from the recording; the replay is one
+    run, recording the same trigger."""
+    recorded, replay = replayed(W, "verbs")
+    [source] = recorded.stored().list_runs()
+    assert source.attribution == "process" and source.trigger is not None
+    [mine] = [r for r in replay.stored().list_runs() if r.replay_of == source.run_id]
+    assert (mine.run_id, mine.trigger) == (replay.process_run_id(), source.trigger)
+    assert replay.agent_exit_code() == recorded.exit_code == 0
+    assert [start["replay"] for start in replay.events("start")] == [replay.process_run_id()]
+    assert replay.answered() == [
+        (label, status, "recording" if by is None else by)
+        for label, status, by in recorded.answered()
+    ]
+    assert replay.internet.requests() == []
+    assert replay.exit_code == 0
+    assert replay.replay_result() == [
+        f"irimi replay · {source.run_id} → {replay.process_run_id()} · - → -",
+        "  agent exited 0",
+        "  no divergence: every call was answered from the recording",
+        "  9 from the recording · 0 missed",
+        "",
+        "  = ○ DELETE api.stripe.com/v1/customers/cus_GAUNTLET  unclassified (L0)",
+        "  = ○ PATCH api.stripe.com/v1/customers/cus_GAUNTLET  unclassified (L0)",
+        "  = ○ PUT api.stripe.com/v1/charges/ch_GAUNTLET  unclassified (L0)",
+        "  = ○ POST api.stripe.com/v1/subscriptions  unclassified (L0)",
+        "  = ○ cancel pi_GAUNTLET  unvalidated (L1)",
+        "  = ○ add :eyes: to a message in C0GAUNT  unvalidated (L0)",
+        "",
+        "  6 same · 0 changed · 0 only in A · 0 only in B",
+    ]

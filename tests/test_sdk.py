@@ -1117,10 +1117,12 @@ def test_a_trigger_keeps_its_functions_name_signature_and_nature():
 def test_the_public_api_is_the_issues():
     assert sorted(sdk.__all__) == [
         "RecordedToolError",  # #83
+        "ReplayResult",  # #84
         "active",
         "current_run_id",
         "instrument",
         "propagate",
+        "replay",  # #84
         "run",
         "tool",
         "trigger",
@@ -1331,6 +1333,45 @@ def test_capture_call_leaves_out_a_receiver_named_self_or_cls():
     def plain(other: Any, x: int) -> None: ...
 
     assert capture.capture_call(plain, (object(), 1), {})[1] is False
+
+
+def _self_first(self: int, x: int) -> None: ...
+
+
+class _Statics:
+    @staticmethod
+    def outside(self: int, x: int) -> None: ...
+
+    @sdk.trigger
+    @staticmethod
+    def trigger_outside(cls: int, x: int) -> None: ...
+
+    @staticmethod
+    @sdk.trigger
+    def trigger_inside(self: int, x: int) -> None: ...
+
+    @classmethod
+    def build(cls, self: int, x: int) -> None: ...
+
+
+def test_capture_call_keeps_a_first_parameter_named_self_or_cls_that_receives_nothing():
+    """A function outside a class body, or a static method in one, receives no instance: its
+    first parameter is an argument whatever its name, and leaving it out made its run one replay
+    could not call again (#84)."""
+
+    def inner(cls: int, x: int) -> None: ...
+
+    assert capture.capture_call(_self_first, (1, 2), {}) == ({"self": 1, "x": 2}, True)
+    assert capture.capture_call(inner, (1, 2), {}) == ({"cls": 1, "x": 2}, True)
+    assert capture.capture_call(_Statics.outside, (1, 2), {}) == ({"self": 1, "x": 2}, True)
+    # What `@sdk.trigger` captures: the function it wraps, in either decorator order.
+    outside = _Statics.trigger_outside.__wrapped__  # type: ignore[attr-defined]
+    inside = _Statics.trigger_inside.__wrapped__  # type: ignore[attr-defined]
+    assert capture.capture_call(outside, (1, 2), {}) == ({"cls": 1, "x": 2}, True)
+    assert capture.capture_call(inside, (1, 2), {}) == ({"self": 1, "x": 2}, True)
+    # A bound method's receiver is bound already: its first parameter left is an argument.
+    bound = _Statics.build
+    assert capture.capture_call(bound, (1, 2), {}) == ({"self": 1, "x": 2}, True)
 
 
 def test_a_call_that_does_not_bind_is_captured_as_args_and_kwargs_and_not_replayable():

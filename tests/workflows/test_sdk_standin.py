@@ -297,9 +297,24 @@ def test_a_real_trigger_logs_one_run_with_the_real_id_and_nested_triggers_join(l
 
     outer_id, inner_id = outer(1, y="b")
     assert outer_id == inner_id == "real000000000001" == fake.minted[0]
-    assert obs("run.start") == [{"event": "run.start", "name": "outer", "run": outer_id}]
+    # The run's start says the type of each argument the trigger was called with, and its end
+    # what the trigger returned (#84).
+    assert obs("run.start") == [
+        {
+            "event": "run.start",
+            "name": "outer",
+            "run": outer_id,
+            "called_with": {"x": "int", "y": "str"},
+        }
+    ]
     assert obs("run.end") == [
-        {"event": "run.end", "name": "outer", "run": outer_id, "outcome": "ok"}
+        {
+            "event": "run.end",
+            "name": "outer",
+            "run": outer_id,
+            "outcome": "ok",
+            "returned": [outer_id, inner_id],
+        }
     ]
     # The real decorator got the name as given and a function with the agent's signature, which
     # #74 binds the captured args against and names the entrypoint after.
@@ -307,6 +322,28 @@ def test_a_real_trigger_logs_one_run_with_the_real_id_and_nested_triggers_join(l
     assert (inner_name, outer_name) == (None, "outer")
     assert list(inspect.signature(outer_fn).parameters) == ["x", "y"]
     assert (outer_fn.__module__, outer_fn.__qualname__) == (__name__, outer.__qualname__)
+
+
+@pytest.mark.skipif(sys.version_info < (3, 14), reason="3.12 evaluates annotations at definition")
+def test_a_real_trigger_annotated_with_a_name_never_defined_runs_and_logs_its_types(load_sdk, obs):
+    """The real SDK leaves a trigger's annotations unevaluated (`capture._signature`), so a name
+    imported only for type checkers never raises into the agent; nor does the log of its types
+    (#84). This module's annotations are strings (`from __future__`), so the trigger is compiled
+    without its flags."""
+    sdk = load_sdk(fake_sdk(active=True))
+    namespace: dict[str, Any] = {"__name__": __name__}
+    source = "def handle(ticket: OnlyForTypeCheckers) -> str:\n    return 'ok'\n"
+    exec(compile(source, "<agent>", "exec", dont_inherit=True), namespace)
+    handle = sdk.trigger(namespace["handle"])
+    assert handle("T1") == "ok"
+    assert obs("run.start") == [
+        {
+            "event": "run.start",
+            "name": "handle",
+            "run": "real000000000001",
+            "called_with": {"ticket": "str"},
+        }
+    ]
 
 
 def test_a_real_trigger_that_raises_logs_the_error_and_re_raises_the_same_object(load_sdk, obs):
@@ -646,7 +683,8 @@ class _Recording:
 @pytest.fixture
 def replaying(load_sdk, monkeypatch) -> Callable[..., tuple[types.ModuleType, _Recording]]:
     """`replaying(outcome, active=, gate=)`: this module over the real `irimi.sdk`, as a replay's
-    child has it: active, told it replays (`IRIMI_REPLAY_RUN`), and its reporter a `_Recording`."""
+    child has it: active, told it replays (`IRIMI_REPLAY_RUN`, naming its `IRIMI_RUN`, #84), and its
+    reporter a `_Recording`."""
     import irimi.sdk as real_sdk  # noqa: PLC0415
     from irimi import paths  # noqa: PLC0415
     from irimi.sdk import runs  # noqa: PLC0415
@@ -658,6 +696,7 @@ def replaying(load_sdk, monkeypatch) -> Callable[..., tuple[types.ModuleType, _R
         monkeypatch.setattr(runs, "reporter", recording)
         sdk = load_sdk(real_sdk)
         monkeypatch.setenv(sdk.ENGINE_ACTIVE_ENV, "1" if active else "0")
+        monkeypatch.setenv(paths.RUN_ENV, REPLAY_RUN)
         monkeypatch.setenv(paths.REPLAY_RUN_ENV, REPLAY_RUN)
         return sdk, recording
 

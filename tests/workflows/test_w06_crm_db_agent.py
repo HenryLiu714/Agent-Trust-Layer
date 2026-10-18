@@ -205,15 +205,19 @@ def test_a_stale_irimi_replay_run_asks_no_recording_but_where_irimi_cannot_remov
     """`read_after_write` runs from a shell that exported a stale `IRIMI_REPLAY_RUN` (#83).
     `irimi shadow` removes it from its child, so its SDK never asks the recording. A bare agent
     keeps it, and its SDK is inert, so it asks nothing either: no control request reaches the fake
-    internet (`test_control_endpoint.py`). A serve agent is not irimi's child and keeps it too, so
-    its SDK asks for each read's recorded result, and serve's engine, which replays nothing,
-    answers each `404`: a miss, which warns of nothing, and the read runs for real."""
+    internet (`test_control_endpoint.py`). A serve agent is not irimi's child and keeps it too, but
+    names no `IRIMI_RUN`, which serve never sets, and the SDK takes a replay's run only when irimi
+    named it as both (#84): so it asks nothing, adopts nothing, and the read runs for real."""
     result = run_workflow(W, "read_after_write", mode)
     expected = None if mode == "shadow" else STALE_REPLAY_RUN
     assert [start["replay"] for start in result.events("start")] == [expected]
     assert result.tools("read") == [("crm.find_accounts", "real")] * 2
     if mode != "bare":  # bare, the one warning is the real write's (`test_control_endpoint.py`)
         assert result.events("log") == []
+        # The run is the SDK's own, started and stored, never the stale id adopted (#84).
+        [start] = result.events("run.start")
+        assert start["run"] != STALE_REPLAY_RUN
+        assert [(r.run_id, r.attribution) for r in result.sdk_runs()] == [(start["run"], "sdk")]
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -575,9 +579,10 @@ def test_enrich_replayed_answers_its_read_tools_from_the_recording(replayed):
     corpus's log says which body ran). `score_account`'s recorded result holds `Decimal` and
     `datetime` as their repr, which does not revive, so it runs for real: the replay's one miss.
     Every write runs its stand-in, as in the recording, and nothing reaches the fake internet:
-    `fetch_enrichment`'s GET is never made, since the tool around it is answered."""
+    `fetch_enrichment`'s GET is never made, since the tool around it is answered. The trigger is
+    called alone (#84), so the agent's `main()` never seeds its database, which no tool needs."""
     recorded, replay = replayed(W, "enrich")
-    assert replay.exit_code == recorded.exit_code == 0
+    assert replay.exit_code == recorded.exit_code == replay.agent_exit_code() == 0
     assert [name for name, _ in replay.tools()] == [name for name, _ in recorded.tools()]
     per_account = [
         ("crm.fetch_enrichment", "recording"),
@@ -599,8 +604,8 @@ def test_enrich_replayed_answers_its_read_tools_from_the_recording(replayed):
     assert replay.exchange_lines() == []
     # The agent got what it got the first time, the revived values and the real ones alike.
     assert replay.events("scored", with_time=False) == recorded.events("scored", with_time=False)
-    assert replay.result(with_time=False) == recorded.result(with_time=False)
-    assert rows(replay) == SEED
+    assert replay.returned() == recorded.returned()
+    assert not (replay.state / DB_NAME).exists()
 
 
 def test_enrich_replayed_where_no_lookup_reaches_irimi_runs_each_read_for_real(replayed):
@@ -610,9 +615,10 @@ def test_enrich_replayed_where_no_lookup_reaches_irimi_runs_each_read_for_real(r
     once, on its logger, for six failed lookups; the agent is unharmed and ends as recorded, every
     call is still recorded, and nothing reaches the fake internet: `fetch_enrichment`'s body runs,
     and its GET, which the tool's recorded call did not use up, is answered from the recording
-    (#83)."""
-    recorded, replay = replayed(W, "enrich", {LOOKUP_REFUSED_ENV: "1"})
-    assert replay.exit_code == recorded.exit_code == 0
+    (#83). Replayed by its command (#84): the gateway and the logger the warning reaches are the
+    agent's `main()`'s, which a trigger called alone never runs."""
+    recorded, replay = replayed(W, "enrich", {LOOKUP_REFUSED_ENV: "1"}, command=True)
+    assert replay.exit_code == recorded.exit_code == replay.agent_exit_code() == 0
     assert replay.result(with_time=False) == recorded.result(with_time=False)
     assert replay.tools("read") == [(name, "real") for name, _ in recorded.tools("read")]
     assert len(replay.tools("read")) == 6
@@ -652,8 +658,9 @@ def test_a_credential_in_a_replayed_tool_s_args_matches_its_placeholder(replayed
 def test_read_after_write_replayed_matches_both_reads_in_order(replayed):
     """Both `find_accounts("smb")` calls take the two recorded results, in the order they were
     recorded, so the replay shows the old row, as shadow did. The stand-in ran between them, and
-    with no tool overlay (#119) neither recorded read showed it."""
-    recorded, replay = replayed(W, "read_after_write")
+    with no tool overlay (#119) neither recorded read showed it. Replayed by its command (#84):
+    the write no label covers runs for real, against the database the agent's `main()` creates."""
+    recorded, replay = replayed(W, "read_after_write", command=True)
     assert replay.tools() == [
         ("crm.find_accounts", "recording"),
         ("crm.upsert_account", "shadow"),
@@ -676,13 +683,14 @@ def test_read_after_write_replayed_matches_both_reads_in_order(replayed):
 def test_tool_raises_replayed_raises_what_was_recorded_and_the_agent_catches_it_again(replayed):
     """`flaky_lookup`'s recorded KeyError comes back as `sdk.RecordedToolError`, a subclass of
     KeyError named KeyError, so the agent's `except KeyError` catches it and logs what it logged
-    the first time. `score_account`'s ends the run where it ended."""
+    the first time. `score_account`'s ends the run where it ended, and the trigger, called alone
+    (#84), raises out of `replay_child`, which exits 1 as the agent did."""
     recorded, replay = replayed(W, "tool_raises")
-    assert replay.exit_code == recorded.exit_code == 1
+    assert replay.agent_exit_code() == recorded.exit_code == 1
+    assert replay.exit_code == 0
     assert replay.events("lookup_failed", with_time=False) == [
         {"event": "lookup_failed", "error": "KeyError", "key": "'acc_1'"}
     ]
-    assert replay.result(with_time=False) == recorded.result(with_time=False)
     assert replay.tool_call_lines() == [
         "recording read      tool crm.flaky_lookup -> raised builtins.KeyError",
         "recording read      tool crm.score_account -> raised builtins.KeyError",
@@ -691,11 +699,14 @@ def test_tool_raises_replayed_raises_what_was_recorded_and_the_agent_catches_it_
         ("crm.flaky_lookup", ErrorInfo("builtins.KeyError", "'acc_1'")),
         ("crm.score_account", ErrorInfo("builtins.KeyError", "'acc_missing'")),
     ]
-    # And the run ends on the recorded type, not on the class it was raised again as.
-    [run] = [r for r in replay.sdk_runs() if r.mode == "replay"]
+    # And the run ends on the recorded type, not on the class it was raised again as: the
+    # replay's run posts no end of its own, and `irimi replay` ends it with what `replay_child`
+    # said its call raised (#84).
+    assert replay.one("run.end")["error"] == recorded.one("run.end")["error"] == "KeyError"
     [source] = recorded.sdk_runs()
-    assert (run.outcome, run.error) == (source.outcome, source.error)
-    assert run.error == ErrorInfo("builtins.KeyError", "'acc_missing'")
+    record = replay.stored().load_run(replay.process_run_id()).record
+    assert (record.outcome, record.error) == (source.outcome, source.error)
+    assert record.error == ErrorInfo("builtins.KeyError", "'acc_missing'")
 
 
 def test_async_tools_replayed_answers_each_read_with_what_its_await_got(replayed):
@@ -709,7 +720,7 @@ def test_async_tools_replayed_answers_each_read_with_what_its_await_got(replayed
     pending, though `last_contact`'s body never called it. Answering `last_contact` does not use
     it up, since no later call of it would take its record in its place: it is answered too."""
     recorded, replay = replayed(W, "async_tools")
-    assert replay.exit_code == recorded.exit_code == 0
+    assert replay.exit_code == recorded.exit_code == replay.agent_exit_code() == 0
     assert replay.tools() == [
         ("crm.lookup_owner", "recording"),
         ("crm.last_contact", "recording"),
@@ -731,4 +742,4 @@ def test_async_tools_replayed_answers_each_read_with_what_its_await_got(replayed
     assert [(c.name, c.args, c.result) for c in calls] == [
         (c.name, c.args, c.result) for c in recorded_calls
     ]
-    assert replay.result(with_time=False) == recorded.result(with_time=False)
+    assert replay.returned() == recorded.returned()

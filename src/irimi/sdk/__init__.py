@@ -21,7 +21,8 @@ stand-in that runs in its place under irimi, and each call is recorded in its ru
     def database_write(row: Row) -> None: ...
 
 In a replay, a read tool is answered from the recording when it can be, and what it raised then
-comes back as `sdk.RecordedToolError` (#83).
+comes back as `sdk.RecordedToolError` (#83). `sdk.replay(run_id)` replays a stored run from a test,
+as `irimi replay` does, and returns a `ReplayResult` (#84).
 
 THE SDK IS INERT WITHOUT IRIMI. It is active only while `IRIMI_ENGINE_ACTIVE=1`, which `irimi
 shadow` sets for its child; otherwise a trigger or a run calls straight through, so the SDK is
@@ -35,14 +36,17 @@ from irimi.sdk.api import run, trigger
 from irimi.sdk.context import active, current_run_id, propagate
 from irimi.sdk.errors import RecordedToolError
 from irimi.sdk.instrumentation import instrument
+from irimi.sdk.replays import ReplayResult, replay
 from irimi.sdk.tools import tool
 
 __all__ = [
     "RecordedToolError",
+    "ReplayResult",
     "active",
     "current_run_id",
     "instrument",
     "propagate",
+    "replay",
     "run",
     "tool",
     "trigger",

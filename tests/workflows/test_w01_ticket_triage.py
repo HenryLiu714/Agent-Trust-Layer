@@ -3,14 +3,15 @@
 The labels are the calls in `examples/workflows/w01_ticket_triage/agent.py`; `#N` is the turn.
 """
 
+import dataclasses
 import json
 import re
 import shutil
 
 import pytest
 
-from examples.workflows.harness.run import check_invariants, compare
-from examples.workflows.w01_ticket_triage.agent import DB_LOST_ENV, DB_NAME
+from examples.workflows.harness.run import check_invariants, compare, replay, sdk_replay
+from examples.workflows.w01_ticket_triage.agent import DB_LOST_ENV, DB_NAME, Ticket, handle_ticket
 from examples.workflows.w01_ticket_triage.scenarios import CUSTOMER
 from irimi.trace import ErrorInfo, ToolCall, Trigger
 
@@ -348,17 +349,27 @@ def test_irimi_compare_reads_a_run_whose_last_line_a_crash_cut(shared_store_run,
 # ------------------------------------------------------------------------------- replay (#82)
 
 LLM = ("llm#1", "llm#2", "llm#3", "llm#4")
+# What `handle_ticket` returns for the full refund: four model calls, one refund, and the model's
+# last word.
+FULL_REFUND_RETURNED = {"turns": 4, "refund_statuses": [200], "final": "Ticket resolved."}
 LOOKUP_TOOL = f"{AGENT}.lookup_customer"
 REPLY_TOOL = f"{AGENT}.send_reply"
 
 
 def test_a_full_refund_replayed_unchanged_is_answered_from_its_recording(replayed):
-    """Every read and llm call is answered from the recording, and the refund with its recorded
-    answer at its recorded level, so the agent walks the same loop and nothing reaches the fake
-    internet at all."""
+    """`irimi replay <run>` calls the recorded trigger again (#84): `replay_child` imports
+    `handle_ticket` by its entrypoint and revives the `Ticket` it was given. Every read and llm
+    call is answered from the recording, and the refund with its recorded answer at its recorded
+    level, so the trigger walks the same loop, returns what it returned, and nothing reaches the
+    fake internet at all. The trigger alone runs: the agent's `main()` never seeds its database."""
     recorded, replay = replayed(W, "full_refund")
     assert replay.exit_code == recorded.exit_code == 0
-    assert replay.result(with_time=False) == recorded.result(with_time=False)
+    assert replay.agent_exit_code() == 0
+    assert replay.returned() == recorded.returned() == FULL_REFUND_RETURNED
+    # The ticket it was called with is a `Ticket` again, revived from its capture (#84).
+    assert replay.one("run.start")["called_with"] == {"ticket": "Ticket"}
+    assert recorded.one("run.start")["called_with"] == {"ticket": "Ticket"}
+    assert not (replay.state / DB_NAME).exists()
     assert replay.answered() == [
         ("llm#1", 200, "recording"),
         ("get_charge#1", 200, "recording"),
@@ -376,11 +387,15 @@ def test_a_full_refund_replayed_unchanged_is_answered_from_its_recording(replaye
     # No precondition read either: the write was checked when it was recorded.
     assert [ex for ex in replay.reported if ex.issued_by == "engine"] == []
     assert replay.internet.requests() == []
-    # Every run the replay stored says what it is: its process run and the SDK's run (#82).
+    # The replay is one run, its process run, which the trigger adopted (#84), and it says what
+    # it is (#82).
     source = recorded.one("run.start")["run"]
-    mine = {replay.process_run_id(), replay.one("run.start")["run"]}
-    records = [r for r in replay.stored().list_runs() if r.run_id in mine]
-    assert [(r.mode, r.replay_of) for r in records] == [("replay", source)] * 2
+    assert replay.one("run.start")["run"] == replay.process_run_id()
+    records = [r for r in replay.stored().list_runs() if r.replay_of == source]
+    assert [(r.run_id, r.mode, r.attribution) for r in records] == [
+        (replay.process_run_id(), "replay", "process")
+    ]
+    assert records[0].trigger == recorded.stored().load_run(source).record.trigger
     summary = replay.summaries()
     assert "  api.stripe.com     1 read (1 from the recording)  1 write intercepted" in summary
     assert "  api.anthropic.com  4 llm (4 from the recording)" in summary
@@ -393,20 +408,33 @@ def test_a_full_refund_replayed_unchanged_is_answered_from_its_recording(replaye
         f"recording read      tool {LOOKUP_TOOL} -> ok",
         f"shadow    write     tool {REPLY_TOOL} -> ok",
     ]
+    # What `irimi replay` says of it: every call answered, and the same two writes (#84).
+    assert replay.replay_result() == [
+        f"irimi replay · {source} → {replay.process_run_id()} · - → -",
+        "  agent exited 0",
+        "  no divergence: every call was answered from the recording",
+        "  7 from the recording · 0 missed",
+        "",
+        "  = ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)",
+        f"  = ○ tool {REPLY_TOOL}  shadow stand-in ran",
+        "",
+        "  2 same · 0 changed · 0 only in A · 0 only in B",
+    ]
 
 
 def test_a_full_refund_replayed_without_its_database_reads_the_customer_from_the_recording(
     replayed,
 ):
-    """The helpdesk database is gone since the recording (#83): the agent seeds none, so a real
-    `lookup_customer` would raise `no such table` and the ticket would fail. The recording answers
-    the read, so the replay ends as recorded, and the database file is never so much as opened,
-    which `sqlite3.connect` would have done. The reply runs its stand-in, which needs none."""
-    recorded, replay = replayed(W, "full_refund", {DB_LOST_ENV: "1"})
+    """The whole agent replayed by its command (`irimi replay <run> -- <cmd>`, #84), its helpdesk
+    database gone since the recording (#83): the agent seeds none, so a real `lookup_customer`
+    would raise `no such table` and the ticket would fail. The recording answers the read, so the
+    replay ends as recorded, and the database file is never so much as opened, which
+    `sqlite3.connect` would have done. The reply runs its stand-in, which needs none."""
+    recorded, replay = replayed(W, "full_refund", {DB_LOST_ENV: "1"}, command=True)
     assert (recorded.state / DB_NAME).exists()
     assert not (replay.state / DB_NAME).exists()
-    assert replay.exit_code == recorded.exit_code == 0
-    assert replay.result(with_time=False) == recorded.result(with_time=False)
+    assert replay.exit_code == recorded.exit_code == replay.agent_exit_code() == 0
+    assert replay.returned() == recorded.returned()
     assert replay.tools() == [(LOOKUP_TOOL, "recording"), (REPLY_TOOL, "shadow")]
     [lookup, _] = [e for e in replay.handed_events if isinstance(e, ToolCall)]
     [recorded_lookup, _] = [e for e in recorded.handed_events if isinstance(e, ToolCall)]
@@ -423,6 +451,7 @@ def test_a_full_refund_replayed_with_the_half_prompt_diverges_at_the_first_llm_c
     misses, is faked, and is checked against the recording's own read of the charge, never the
     fake Stripe's, which sees no request at all."""
     recorded, replay = replayed(W, "full_refund", {"PROMPT": "half"})
+    assert replay.exit_code == 1
     assert replay.answered() == [
         ("llm#1", 200, None),
         ("get_charge#1", 200, "recording"),
@@ -445,10 +474,204 @@ def test_a_full_refund_replayed_with_the_half_prompt_diverges_at_the_first_llm_c
     assert "  ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)" in (
         replay.summaries()
     )
-    assert replay.result()["refund_statuses"] == recorded.result()["refund_statuses"] == [200]
+    assert replay.returned()["refund_statuses"] == recorded.returned()["refund_statuses"] == [200]
     # The customer is looked up before any write misses, so the recording still answers it. The
     # reply's text changed with the prompt, and its stand-in runs all the same (#83).
     assert replay.tools() == [(LOOKUP_TOOL, "recording"), (REPLY_TOOL, "shadow")]
+    # What `irimi replay` says of it (#84): where it diverged, the first llm call, and the refund
+    # it changed. The reply compares `=`: a write tool's line names no args (#141).
+    source = recorded.one("run.start")["run"]
+    assert replay.replay_result() == [
+        f"irimi replay · {source} → {replay.process_run_id()} · - → -",
+        "  agent exited 0",
+        "  diverged at #1: live      llm       POST api.anthropic.com/v1/messages -> 200  "
+        "[replay-miss]",
+        "  2 from the recording · 5 missed",
+        "",
+        "  ~ A ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)",
+        "    B ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)",
+        f"  = ○ tool {REPLY_TOOL}  shadow stand-in ran",
+        "",
+        "  1 same · 1 changed · 0 only in A · 0 only in B",
+    ]
+    # The result file says the same: the divergence point's line, and the comparison's exit.
+    assert replay.replay is not None
+    assert (replay.replay.exit_code, replay.replay.diverged_at) == (
+        1,
+        "#1: live      llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]",
+    )
+
+
+def test_sdk_replay_from_a_test_returns_the_result_irimi_replay_writes(
+    run_workflow, replayed, tmp_path
+):
+    """`sdk.replay(run_id)`, and `sdk.replay(run_id, handle_ticket, Ticket(...))` with the ticket
+    the run recorded, called as a test calls them (#84): each returns what `irimi replay
+    --result-file` writes for the same run, but for the replay's own new run id, and holds the
+    invariants as every replay does, nothing reaching the fake internet."""
+    recorded, by_cli = replayed(W, "full_refund")
+    expected = by_cli.replay
+    assert expected is not None and (expected.exit_code, expected.diverged_at) == (0, None)
+    run_id = recorded.one("run.start")["run"]
+    ticket = Ticket("T-1001", "ch_TICKET1", CUSTOMER, "I was charged twice for the same order")
+    for i, call in enumerate([(), (handle_ticket, ticket)]):
+        home = tmp_path / f"home{i}"
+        shutil.copytree(recorded.home, home)
+        source = dataclasses.replace(recorded, home=home)
+        by_sdk = sdk_replay(source, run_id, tmp_path / f"sdk{i}", *call)
+        # Its `irimi` ran in this process, where the fake internet resolves and the harness
+        # watches the engine: it saw every exchange the command's replay did.
+        assert len(by_sdk.reported) == len(by_cli.reported) == 6
+        assert check_invariants(by_sdk) == []
+        assert by_sdk.internet.requests() == []
+        got = by_sdk.replay
+        assert got is not None and got.replay_run_id not in (None, expected.replay_run_id)
+        lines = tuple(line.replace(got.replay_run_id, expected.replay_run_id) for line in got.lines)
+        assert dataclasses.replace(got, replay_run_id=expected.replay_run_id, lines=lines) == (
+            expected
+        )
+
+
+# The ticket `full_refund` recorded, captured as `irimi replay --args` takes it (#74, #84), with
+# another message: what a developer passes to replay the run with other parameters.
+OTHER_TICKET = {
+    "ticket": {
+        "__irimi_type__": f"{AGENT}:Ticket",
+        "value": {
+            "ticket_id": "T-1001",
+            "charge": "ch_TICKET1",
+            "customer": CUSTOMER,
+            "message": "Please refund",
+        },
+    }
+}
+
+
+def test_a_full_refund_replayed_with_other_args_says_its_args_differ(replayed):
+    """`--args` replaces the recorded args (#84): the ticket's message is in the first model call,
+    which misses and diverges the replay there, and every model call after it with it. The charge
+    read is the recording's still, and the refund the model then asks for is the recorded one, the
+    same body under the same key, so the comparison is the same two writes and exits 0, while the
+    result says the triggers' args differ (#79). The replay's run records the args it was given,
+    and nothing reaches the fake Stripe."""
+    recorded, replay = replayed(W, "full_refund", options=("--args", json.dumps(OTHER_TICKET)))
+    source = recorded.one("run.start")["run"]
+    assert replay.replay_result() == [
+        f"irimi replay · {source} → {replay.process_run_id()} · - → -",
+        "  agent exited 0",
+        "  (the triggers' args differ)",
+        "  diverged at #1: live      llm       POST api.anthropic.com/v1/messages -> 200  "
+        "[replay-miss]",
+        "  3 from the recording · 4 missed",
+        "",
+        "  = ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)",
+        f"  = ○ tool {REPLY_TOOL}  shadow stand-in ran",
+        "",
+        "  2 same · 0 changed · 0 only in A · 0 only in B",
+    ]
+    assert (replay.exit_code, replay.agent_exit_code()) == (0, 0)
+    record = replay.stored().load_run(replay.process_run_id()).record
+    assert record.trigger == Trigger("handle_ticket", f"{AGENT}:handle_ticket", OTHER_TICKET, True)
+    assert replay.returned() == FULL_REFUND_RETURNED
+    assert replay.internet.requests("api.stripe.com") == []
+    assert len(replay.internet.requests("api.anthropic.com")) == 4
+    assert check_invariants(replay) == []
+
+
+def test_a_call_of_another_function_is_replayed_in_place_of_the_trigger(replayed):
+    """`--call` names the function to call in place of the recorded entrypoint, and `--args` its
+    parameters (#84): here the read tool `lookup_customer`, called in no run, which the replay's
+    run takes. The recording answers it, and nothing else is called, so the result says the
+    recording's other calls were never made and its two writes are only in A, and exits 1. The
+    replay's run names the function it called, `lookup_customer`, as `@sdk.trigger` names a run,
+    never the trigger that did not run."""
+    options = ("--call", f"{AGENT}:lookup_customer", "--args", json.dumps({"customer": CUSTOMER}))
+    recorded, replay = replayed(W, "full_refund", options=options)
+    source = recorded.one("run.start")["run"]
+    assert replay.replay_result() == [
+        f"irimi replay · {source} → {replay.process_run_id()} · - → -",
+        "  agent exited 0",
+        "  (the triggers' args differ)",
+        "  no divergence, but 6 of the recording's calls were never made",
+        "  1 from the recording · 0 missed",
+        "",
+        "  - ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)",
+        f"  - ○ tool {REPLY_TOOL}  shadow stand-in ran",
+        "",
+        "  0 same · 0 changed · 2 only in A · 0 only in B",
+    ]
+    assert (replay.exit_code, replay.agent_exit_code()) == (1, 0)
+    assert replay.tools() == [(LOOKUP_TOOL, "recording")]
+    assert replay.events("run.start") == []
+    record = replay.stored().load_run(replay.process_run_id()).record
+    assert record.trigger == Trigger(
+        "lookup_customer", f"{AGENT}:lookup_customer", {"customer": CUSTOMER}, True
+    )
+    assert replay.internet.requests() == []
+    assert check_invariants(replay) == []
+
+
+@pytest.mark.parametrize(
+    ("prompt", "again"),
+    [
+        ("full", {}),
+        ("half", {"PROMPT": "half"}),
+    ],
+)
+def test_a_replay_is_replayed_by_the_trigger_it_called(replayed, tmp_path, prompt, again):
+    """A replay's run keeps the trigger it replayed, entrypoint and args (#84), so `irimi replay`
+    calls it again: a replay of the unchanged replay, and a replay with the half prompt replayed
+    with the same prompt, each answered whole from the first replay's run, whose live model calls
+    it recorded as their answers. Nothing reaches the fake internet, and the refund is the first
+    replay's."""
+    env = {} if prompt == "full" else {"PROMPT": prompt}
+    _, first = replayed(W, "full_refund", env)
+    second = replay(first, first.process_run_id(), tmp_path / "again", again)
+    [record] = [r for r in second.stored().list_runs() if r.replay_of == first.process_run_id()]
+    assert (record.run_id, record.trigger) == (
+        second.process_run_id(),
+        first.stored().load_run(first.process_run_id()).record.trigger,
+    )
+    amount = "$49.00" if prompt == "full" else "$24.50"
+    assert second.replay_result() == [
+        f"irimi replay · {first.process_run_id()} → {second.process_run_id()} · - → -",
+        "  agent exited 0",
+        "  no divergence: every call was answered from the recording",
+        "  7 from the recording · 0 missed",
+        "",
+        f"  = ○ refund {amount} on ch_TICKET1  unvalidated (L3 preconditions passed)",
+        f"  = ○ tool {REPLY_TOOL}  shadow stand-in ran",
+        "",
+        "  2 same · 0 changed · 0 only in A · 0 only in B",
+    ]
+    assert second.exit_code == 0
+    assert second.internet.requests() == []
+    assert second.returned() == first.returned()
+    assert check_invariants(second) == []
+
+
+def test_the_half_prompt_s_replay_replayed_with_the_full_prompt_diverges_back(replayed, tmp_path):
+    """The other way round: the half prompt's replay replayed with the recording's own prompt
+    diverges at the first model call again, and the refund changes back, `$24.50` to `$49.00`."""
+    _, first = replayed(W, "full_refund", {"PROMPT": "half"})
+    second = replay(first, first.process_run_id(), tmp_path / "back")
+    assert second.replay_result() == [
+        f"irimi replay · {first.process_run_id()} → {second.process_run_id()} · - → -",
+        "  agent exited 0",
+        "  diverged at #1: live      llm       POST api.anthropic.com/v1/messages -> 200  "
+        "[replay-miss]",
+        "  2 from the recording · 5 missed",
+        "",
+        "  ~ A ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)",
+        "    B ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)",
+        f"  = ○ tool {REPLY_TOOL}  shadow stand-in ran",
+        "",
+        "  1 same · 1 changed · 0 only in A · 0 only in B",
+    ]
+    assert second.exit_code == 1
+    assert second.internet.requests("api.stripe.com") == []
+    assert second.returned() == FULL_REFUND_RETURNED
+    assert check_invariants(second) == []
 
 
 def test_a_retried_refund_replays_as_the_two_refunds_it_recorded(replayed):
@@ -462,7 +685,8 @@ def test_a_retried_refund_replays_as_the_two_refunds_it_recorded(replayed):
         ("fidelity:L1", "idempotent-replay", "from-recording"),
     ]
     assert replay.internet.requests() == []
-    assert replay.result(with_time=False) == recorded.result(with_time=False)
+    assert replay.returned() == recorded.returned()
+    assert replay.returned()["refund_statuses"] == [200, 200]
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -629,8 +853,12 @@ def test_a_lookup_recorded_after_a_refund_the_replay_has_not_made_runs_for_real_
     show that refund, and the tool runs for real, the replay's one tool miss (#83). The miss does
     not diverge the replay: the refund is answered from the recording after it, and so is the read
     of the charge after the refund, refund and all. Only the model calls miss, the prompt having
-    changed, and nothing reaches the fake internet but them."""
-    recorded, replay = replayed(W, "late_lookup", {"PROMPT": "verify"})
+    changed, and nothing reaches the fake internet but them.
+
+    Replayed by its command (`-- <cmd>`, #84): the lookup runs for real, against the database the
+    agent's `main()` seeds, which a replay of the trigger alone never runs, so there the real
+    lookup raises `no such table` (the README's "Replaying a run" names the limit)."""
+    recorded, replay = replayed(W, "late_lookup", {"PROMPT": "verify"}, command=True)
     assert _place(recorded, "http", REFUND) < _place(recorded, "tool", LOOKUP_TOOL)
     assert _place(replay, "tool", LOOKUP_TOOL) < _place(replay, "http", REFUND)
     assert recorded.tools() == replay.tools() == [(LOOKUP_TOOL, "real"), (REPLY_TOOL, "shadow")]
@@ -653,4 +881,4 @@ def test_a_lookup_recorded_after_a_refund_the_replay_has_not_made_runs_for_real_
         ("overlay", ("fidelity:overlay", "from-recording")),
     ]
     assert replay.internet.requests("api.stripe.com") == []
-    assert replay.result(with_time=False) == recorded.result(with_time=False)
+    assert replay.returned() == recorded.returned()

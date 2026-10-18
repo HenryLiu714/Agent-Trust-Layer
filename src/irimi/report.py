@@ -45,10 +45,16 @@ RESET = "\033[0m"
 
 
 def banner_lines(
-    command: str, run_id: str | None, host: str, port: int, ca_cert: Path
+    command: str,
+    run_id: str | None,
+    host: str,
+    port: int,
+    ca_cert: Path,
+    replay_of: str | None = None,
 ) -> list[str]:
-    """The startup lines. `command` is "shadow" or "shadow --serve"; `run_id` is None in serve
-    mode, which names its runs per request (#77).
+    """The startup lines. `command` is "shadow", "replay" or "shadow --serve"; `run_id` is None in
+    serve mode, which names its runs per request (#77). A replay says which run it replays as which
+    (#84).
 
     A listener that is not loopback adds a line saying so: every machine that reaches the port can
     send its traffic through irimi and post runs to the control endpoint, which is not a boundary
@@ -60,6 +66,8 @@ def banner_lines(
         NOT_VIRTUALIZED_NOTICE,
         BACKSTOP_NOTICE,
     ]
+    if replay_of is not None:
+        lines.insert(1, f"replaying {replay_of} as {run_id}")
     if not netaddr.is_loopback(host):
         lines.append(f"listening on {host}: {WIDE_BIND_NOTICE}")
     return lines

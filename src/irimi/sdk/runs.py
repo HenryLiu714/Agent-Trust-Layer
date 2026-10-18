@@ -5,12 +5,17 @@ trigger makes a fresh one for each call, and `sdk.run` one for each block it is 
 Entering it:
 
 1. NESTING. If a run is already current, this entry joins it: no new run, no capture, no post.
-2. A NEW RUN. Otherwise it captures the trigger, mints an id (`new_run_id`) and makes it current,
+2. A REPLAY'S RUN. Otherwise, in a replay's child (`context.replay_run_id`), it ADOPTS the run the
+   replay is: makes that id current, calls `instrument()`, and captures and posts nothing, since
+   `irimi replay` owns that run's record, start and end alike (#84). So everything the child does
+   lands in the one run: a trigger `replay_child` calls, a trigger an argv reaches, or several.
+3. A NEW RUN. Otherwise it captures the trigger, mints an id (`new_run_id`) and makes it current,
    posts the run's `start` and calls `instrument()`.
-3. The body runs.
-4. It posts the run's `end`: outcome `ok`, or `error` with what was raised - ANY BaseException,
-   KeyboardInterrupt and CancelledError included - which then propagates, the same object.
-5. It makes current again whatever was current before.
+4. The body runs.
+5. It posts the run's `end`, unless it adopted the run: outcome `ok`, or `error` with what was
+   raised - ANY BaseException, KeyboardInterrupt and CancelledError included - which then
+   propagates, the same object.
+6. It makes current again whatever was current before.
 
 An entry interrupted while its start is posted (a KeyboardInterrupt, a cancelled task) never ran
 its body: it leaves the run at once and posts no end, and if the start arrived the run is stored
@@ -31,8 +36,8 @@ its last: `with` posts inline, and `async with` in a worker thread (`off_the_loo
 event loop keeps serving other tasks meanwhile. A post never raises (`client.ControlClient`); a
 run whose posts failed goes on, current and labelled, and irimi only lacks its record.
 
-The id and the start and end posts live here and nowhere else. Replay (#84) adds its rule here, as
-one branch in `_open`: a top-level run under `IRIMI_REPLAY_RUN` adopts that id and posts nothing.
+The id and the start and end posts live here and nowhere else, and so does adopting a replay's id
+(#84): one branch in `_open`.
 """
 
 import asyncio
@@ -74,11 +79,14 @@ def new_run_id() -> str:
 
 @dataclass(frozen=True)
 class _Opened:
-    """A run this entry started: its id, the token that undoes it, and the start to post."""
+    """A run this entry made current: its id, the token that undoes it, and the start to post.
+    `adopted` is a replay's run, whose start and end are `irimi replay`'s: it posts neither
+    (#84)."""
 
     run_id: str
     token: contextvars.Token[str | None]
     start: dict[str, Any]
+    adopted: bool = False
 
 
 class RunScope:
@@ -166,12 +174,16 @@ class RunScope:
         return result
 
     def _open(self) -> _Opened | None:
-        """Steps 1 and 2 but the post: decide, and when this entry starts a run, capture its
-        trigger, make it current and build its start. None when the SDK is inactive or this entry
-        joins a run. Captured before the id is current, so nothing past this point can leave the
-        id set without `_close` to undo it."""
+        """Steps 1 to 3 but the post: decide, and when this entry adopts a replay's run, make it
+        current, or when it starts a run, capture its trigger, make it current and build its
+        start. None when the SDK is inactive or this entry joins a run. Captured before the id is
+        current, so nothing past this point can leave the id set without `_close` to undo it."""
         if not context.active() or context.current_run_id() is not None:
             return None
+        adopted = context.replay_run_id()
+        if adopted is not None:
+            self._opened = _Opened(adopted, context.enter(adopted), {}, adopted=True)
+            return self._opened
         args, replayable = self._capture()
         trigger = trace.Trigger(self._name, self._entrypoint, args, replayable)
         start = {
@@ -218,8 +230,11 @@ async def off_the_loop[T](fn: Callable[..., T], *args: Any) -> T:
 
 
 def _report_start(opened: _Opened) -> None:
+    """The run's start, posted, then `instrument()`, before the run's first request. An adopted run
+    posts none, and is instrumented all the same (#84)."""
     global _instrument_failed
-    reporter.post(opened.run_id, "start", opened.start)
+    if not opened.adopted:
+        reporter.post(opened.run_id, "start", opened.start)
     try:
         instrument()
     except Exception:
@@ -234,6 +249,9 @@ def _report_start(opened: _Opened) -> None:
 
 
 def _report_end(opened: _Opened, exc: BaseException | None) -> None:
+    """The run's end, posted. An adopted run posts none: `irimi replay` ends it (#84)."""
+    if opened.adopted:
+        return
     error = None if exc is None else errors.error_info(exc)
     reporter.post(
         opened.run_id,

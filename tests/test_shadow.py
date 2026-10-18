@@ -200,7 +200,7 @@ def test_interrupt_while_waiting_exits_cleanly(home, monkeypatch, capsys):
     from irimi import cli
 
     monkeypatch.setattr(
-        cli, "_wait_for_child", lambda proc: (_ for _ in ()).throw(KeyboardInterrupt)
+        cli, "_wait_for_child", lambda proc, child: (_ for _ in ()).throw(KeyboardInterrupt)
     )
     assert main(["shadow", *_py("pass")]) == 130
     assert "0 exchanges" in capsys.readouterr().out

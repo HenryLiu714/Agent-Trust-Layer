@@ -865,11 +865,11 @@ def _under_the_engine(args: argparse.Namespace, run: _Run, child: _Child, launch
 
     ran = _Ran(SIGINT_EXIT_CODE)
 
-    def on_exchange(ex: Exchange) -> None:
+    def on_exchange(ex: "Exchange") -> None:
         ran.exchanges.append(ex)
         print(report.exchange_line(ex), flush=True)
 
-    def on_tool_call(call: ToolCall) -> None:
+    def on_tool_call(call: "ToolCall") -> None:
         # On the proxy's event loop, after the store took the call (#73): it only appends and
         # prints. The line names the tool and what it raised, never its args or result, which
         # are stored redacted and would be printed raw here.

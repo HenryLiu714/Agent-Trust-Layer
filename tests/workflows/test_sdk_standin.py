@@ -324,6 +324,28 @@ def test_a_real_trigger_logs_one_run_with_the_real_id_and_nested_triggers_join(l
     assert (outer_fn.__module__, outer_fn.__qualname__) == (__name__, outer.__qualname__)
 
 
+@pytest.mark.skipif(sys.version_info < (3, 14), reason="3.12 evaluates annotations at definition")
+def test_a_real_trigger_annotated_with_a_name_never_defined_runs_and_logs_its_types(load_sdk, obs):
+    """The real SDK leaves a trigger's annotations unevaluated (`capture._signature`), so a name
+    imported only for type checkers never raises into the agent; nor does the log of its types
+    (#84). This module's annotations are strings (`from __future__`), so the trigger is compiled
+    without its flags."""
+    sdk = load_sdk(fake_sdk(active=True))
+    namespace: dict[str, Any] = {"__name__": __name__}
+    source = "def handle(ticket: OnlyForTypeCheckers) -> str:\n    return 'ok'\n"
+    exec(compile(source, "<agent>", "exec", dont_inherit=True), namespace)
+    handle = sdk.trigger(namespace["handle"])
+    assert handle("T1") == "ok"
+    assert obs("run.start") == [
+        {
+            "event": "run.start",
+            "name": "handle",
+            "run": "real000000000001",
+            "called_with": {"ticket": "str"},
+        }
+    ]
+
+
 def test_a_real_trigger_that_raises_logs_the_error_and_re_raises_the_same_object(load_sdk, obs):
     sdk = load_sdk(fake_sdk(active=True))
     boom = ValueError("x")

@@ -49,6 +49,7 @@ import importlib
 import inspect
 import os
 import secrets
+import sys
 from collections.abc import Callable, Iterator
 from types import ModuleType
 from typing import Any, TypeVar
@@ -187,10 +188,19 @@ def _observed(name: str, called_with: dict[str, str] | None = None) -> Iterator[
 
 def _called_with(f: Callable[..., Any], args: Any, kwargs: Any) -> dict[str, str]:
     """`{parameter: type name}` for a call of `f`, as it binds; empty for a call that does not bind,
-    which then raises its own TypeError (#84)."""
+    which then raises its own TypeError (#84). Its annotations are left unevaluated, as the real
+    SDK leaves them (`capture._signature`): on Python 3.14 a name imported only for type checkers
+    would raise NameError into the agent, where the real trigger runs it, and this logs nothing
+    rather than raise."""
     try:
-        bound = inspect.signature(f).bind(*args, **kwargs)
-    except TypeError:
+        if sys.version_info >= (3, 14):
+            import annotationlib
+
+            signature = inspect.signature(f, annotation_format=annotationlib.Format.FORWARDREF)
+        else:
+            signature = inspect.signature(f)
+        bound = signature.bind(*args, **kwargs)
+    except Exception:
         return {}
     return {name: type(value).__qualname__ for name, value in bound.arguments.items()}
 

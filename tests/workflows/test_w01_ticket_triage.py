@@ -11,7 +11,13 @@ import shutil
 import pytest
 
 from examples.workflows.harness.run import check_invariants, compare, replay, sdk_replay
-from examples.workflows.w01_ticket_triage.agent import DB_LOST_ENV, DB_NAME, Ticket, handle_ticket
+from examples.workflows.w01_ticket_triage.agent import (
+    DB_LOST_ENV,
+    DB_NAME,
+    RESULT_TAG_ENV,
+    Ticket,
+    handle_ticket,
+)
 from examples.workflows.w01_ticket_triage.scenarios import CUSTOMER
 from irimi.trace import ErrorInfo, ToolCall, Trigger
 
@@ -672,6 +678,47 @@ def test_the_half_prompt_s_replay_replayed_with_the_full_prompt_diverges_back(re
     assert second.internet.requests("api.stripe.com") == []
     assert second.returned() == FULL_REFUND_RETURNED
     assert check_invariants(second) == []
+
+
+def test_a_full_refund_replayed_with_its_tool_results_changed_diverges_mid_conversation(replayed):
+    """An edit to the agent's code, not its prompt (#85): `TOOL_RESULT_TAG` adds a field to every
+    tool result the model is sent. The first model call carries none, so the recording answers
+    it, and the charge read and the customer lookup it asks for; the second carries their results
+    and misses, and so does every model call after it. Given the same facts, the model walks the
+    same loop, so the refund meets its recording and the reply runs its stand-in: the replay
+    diverged mid-conversation and changed no write."""
+    recorded, replay = replayed(W, "full_refund", {RESULT_TAG_ENV: "v2"})
+    assert check_invariants(replay) == []
+    assert replay.answered() == [
+        ("llm#1", 200, "recording"),
+        ("get_charge#1", 200, "recording"),
+        ("llm#2", 200, None),
+        (REFUND, 200, "fake-L1"),
+        ("llm#3", 200, None),
+        ("llm#4", 200, None),
+    ]
+    assert len(replay.internet.requests("api.anthropic.com")) == 3
+    assert replay.internet.requests("api.stripe.com") == []
+    [refund] = [ex for ex in replay.reported if ex.kind == "write"]
+    assert refund.flags == ("fidelity:L1", "from-recording")
+    assert replay.tools() == [(LOOKUP_TOOL, "recording"), (REPLY_TOOL, "shadow")]
+    assert replay.returned() == recorded.returned()
+    # What `irimi replay` says of it: where it diverged, the second model call, and exit 0, the
+    # writes being the same.
+    source = recorded.one("run.start")["run"]
+    assert replay.exit_code == 0
+    assert replay.replay_result() == [
+        f"irimi replay · {source} → {replay.process_run_id()} · - → -",
+        "  agent exited 0",
+        "  diverged at #4: live      llm       POST api.anthropic.com/v1/messages -> 200  "
+        "[replay-miss]",
+        "  4 from the recording · 3 missed",
+        "",
+        "  = ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)",
+        f"  = ○ tool {REPLY_TOOL}  shadow stand-in ran",
+        "",
+        "  2 same · 0 changed · 0 only in A · 0 only in B",
+    ]
 
 
 def test_a_retried_refund_replays_as_the_two_refunds_it_recorded(replayed):

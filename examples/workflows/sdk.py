@@ -23,7 +23,9 @@ Agents write `from examples.workflows import sdk` where a real agent would write
     decorated tool is wrapped once more, outside the real one, to log `ran="recording"` for a call
     that returned or raised and in which neither logged.
   - `trigger` and `run` log `run.start` and `run.end` from inside the real run, with the real
-    run id, so the pins on them hold in both modes.
+    run id, so the pins on them hold in both modes. A trigger's `run.end` carries what it
+    `returned`, so a replay that calls the trigger alone (#84), with no `main()` to log a result,
+    is held to what its recording's trigger returned.
 - **Until then**, it implements the same API with no control endpoint and no recording:
   - a context-variable run id that nested triggers join;
   - `agentkit.http`, and W3's clients, labelling each request with `Irimi-Run` (which irimi
@@ -128,81 +130,87 @@ def propagate(fn: Callable[..., Any]) -> Callable[..., Any]:
 
 
 @contextlib.contextmanager
-def _logged_run(name: str, run_id: str) -> Iterator[None]:
-    """Log `run.start`, then `run.end` with how the block ended. The one place both modes log a
-    run, so the corpus's pins on these events mean the same thing in each."""
+def _logged_run(name: str, run_id: str) -> Iterator[dict[str, Any]]:
+    """Log `run.start`, then `run.end` with how the block ended, and what the block put in the dict
+    it is given as `returned` (#84). The one place both modes log a run, so the corpus's pins on
+    these events mean the same thing in each."""
     agentkit.obs("run.start", name=name, run=run_id)
+    ended: dict[str, Any] = {}
     try:
-        yield
+        yield ended
     except BaseException as exc:
         agentkit.obs("run.end", name=name, run=run_id, outcome="error", error=type(exc).__name__)
         raise
     else:
-        agentkit.obs("run.end", name=name, run=run_id, outcome="ok")
+        agentkit.obs("run.end", name=name, run=run_id, outcome="ok", **ended)
 
 
 @contextlib.contextmanager
-def _entered(name: str) -> Iterator[None]:
+def _entered(name: str) -> Iterator[dict[str, Any]]:
     """A run while the fallback is in use. A nested entry joins the current run."""
     if not active() or _run_id.get() is not None:
-        yield
+        yield {}
         return
     run_id = secrets.token_hex(8)
     token = _run_id.set(run_id)
     try:
-        with _logged_run(name, run_id):
-            yield
+        with _logged_run(name, run_id) as ended:
+            yield ended
     finally:
         _run_id.reset(token)
 
 
 @contextlib.contextmanager
-def _observed(name: str) -> Iterator[None]:
+def _observed(name: str) -> Iterator[dict[str, Any]]:
     """Entered inside a real trigger or `run`: log the real run it started. The real SDK decides
     whether there is a run (inactive: none) and whether this entry joined an outer one (the same
     id this module already logged), so this only reads its id."""
     run_id = current_run_id()
     if run_id is None or run_id in _logged_runs:
-        yield
+        yield {}
         return
     _logged_runs.add(run_id)
     try:
-        with _logged_run(name, run_id):
-            yield
+        with _logged_run(name, run_id) as ended:
+            yield ended
     finally:
         _logged_runs.discard(run_id)
 
 
 def _around(f: Callable[..., Any], enter: Callable[[], Any]) -> Callable[..., Any]:
     """`f` inside the context manager `enter()` makes, keeping `f`'s signature (which #74 binds
-    the captured args against) and its sync/async nature."""
+    the captured args against) and its sync/async nature. What `f` returns is logged with the
+    run's end (#84)."""
     if inspect.iscoroutinefunction(f):
 
         @functools.wraps(f)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-            with enter():
-                return await f(*args, **kwargs)
+            with enter() as ended:
+                ended["returned"] = result = await f(*args, **kwargs)
+                return result
 
         return async_wrapper
 
     @functools.wraps(f)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         with contextlib.ExitStack() as stack:
-            stack.enter_context(enter())
+            ended = stack.enter_context(enter())
             result = f(*args, **kwargs)
             if _real is not None and inspect.iscoroutine(result):
                 # The real trigger hands its run to the coroutine and ends it when the coroutine
                 # ends (#74), so the logged run goes with it: `run.end` is the coroutine's outcome.
-                return _carried(stack.pop_all(), result)
+                return _carried(stack.pop_all(), ended, result)
+            ended["returned"] = result
             return result
 
     return wrapper
 
 
-async def _carried(observed: contextlib.ExitStack, coroutine: Any) -> Any:
+async def _carried(observed: contextlib.ExitStack, ended: dict[str, Any], coroutine: Any) -> Any:
     """`coroutine`, awaited inside the observation a sync trigger opened before it returned it."""
     with observed:
-        return await coroutine
+        ended["returned"] = result = await coroutine
+        return result
 
 
 def trigger(fn: Callable[..., Any] | None = None, *, name: str | None = None) -> Any:

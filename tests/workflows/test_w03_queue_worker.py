@@ -14,13 +14,13 @@ import pytest
 import irimi
 from examples.workflows.harness.run import (
     check_invariants,
-    counterpart,
     replay_targets,
     rows_not_shown,
 )
 from examples.workflows.w03_queue_worker.agent import CLIENTS, LEDGER, POOLED
 from examples.workflows.w03_queue_worker.scenarios import AGENT_VERSION
 from irimi.exchange import Exchange
+from irimi.sdk.replay_child import CANNOT_CALL
 from irimi.trace import UNATTRIBUTED, ErrorInfo, ToolCall
 
 W = "w03_queue_worker"
@@ -970,108 +970,93 @@ def test_irimi_compare_finds_a_lost_run_s_writes_in_the_engine_s_run(run_workflo
 
 # ------------------------------------------------------------------------------- replay (#82)
 #
-# One process, several runs: a replay answers from one of them (the issue's "Replay which run?"),
-# so every other run's requests are missing from its recording. `test_replays.py` replays each run
-# of every scenario here; these pin what that means for the runs it does not answer.
+# One process, several runs: `irimi replay` replays one of them, its trigger called alone (#84), so
+# the replay is that run and no other. `test_replays.py` replays each run of every scenario here;
+# these pin what that means: no other run of the process is in the replay to take its answers, as
+# every one did when a replay re-ran the whole process (#155).
 
 
 @pytest.mark.parametrize("index", range(8))
-def test_replaying_one_of_eight_concurrent_runs_fakes_the_others_writes_unchecked(
+def test_replaying_one_of_eight_concurrent_runs_replays_that_run_alone(
     run_workflow, replayed, index
 ):
-    """Each of `threads_8`'s eight runs replayed in turn. The replayed run's refund is its
-    recording's, or, when another run's refund missed first and the replay diverged, checked again
-    against its recording's own read of its charge: either way L3 passed, as recorded. Every other
-    run's refund misses, is faked and never forwarded, and is checked against nothing: its charge
-    read is not in the recording, and a replay never checks a precondition against live state, so
-    it is `not_evaluable`, L2. Only the other runs' own charge reads reach the fake Stripe."""
+    """Each of `threads_8`'s eight runs replayed in turn: its trigger, `handle(message)`, called
+    alone. It reads its charge and refunds it, both answered from its own recording, the refund
+    at L3 as recorded, and the other seven runs are not in the replay at all: nothing reaches the
+    fake Stripe, and the replay's one run makes the one write its recording did."""
     recorded = run_workflow(W, "threads_8", "shadow")
     run_id = sorted(r.run_id for r in recorded.sdk_runs())[index]
     _, replay = replayed(W, "threads_8", run_id=run_id)
     [mine] = [c for c in recorded.sdk_runs() if c.run_id == run_id]
     charge = mine.trigger.args["message"]["charge"]
-    refunds = [ex for ex in replay.reported if ex.kind == "write"]
-    assert len(refunds) == 8
-    own = [ex for ex in refunds if f"charge={charge}&" in ex.request.body.decode() + "&"]
-    others = [ex for ex in refunds if ex not in own]
-    assert [ex.precondition for ex in own] == ["passed"]
-    assert {(ex.precondition, ex.flags) for ex in others} == {
-        ("not_evaluable", ("fidelity:L1", "replay-miss"))
-    }
-    checks = [ex for ex in replay.reported if ex.issued_by == "engine"]
-    assert {(ex.answered_by, ex.response is None, ex.flags[-1]) for ex in checks} <= {
-        ("recording", True, "replay-miss"),
-        ("recording", False, "from-recording"),
-    }
-    assert sum(ex.response is None for ex in checks) == 7
-    seen = [(r.method, r.path) for r in replay.internet.requests()]
-    assert {m for m, _ in seen} == {"GET"}
-    assert {p for _, p in seen} >= {f"/v1/charges/ch_Q{i}" for i in range(8)} - {
-        f"/v1/charges/{charge}"
-    }
-    summary = replay.summaries()
-    assert sum(" unvalidated (L2)" in line for line in summary) == 7
-    assert (
-        sum(f"on {charge}  unvalidated (L3 preconditions passed)" in line for line in summary) == 1
-    )
+    [refund] = [ex for ex in replay.reported if ex.kind == "write"]
+    assert f"charge={charge}&" in refund.request.body.decode() + "&"
+    assert (refund.precondition, refund.flags) == ("passed", ("fidelity:L1", "from-recording"))
+    assert [ex for ex in replay.reported if ex.issued_by == "engine"] == []
+    assert replay.internet.requests() == []
+    assert {ex.run_id for ex in replay.reported} == {replay.process_run_id()}
+    assert replay.exit_code == 0
+    assert replay.replay_result()[2:4] == [
+        "  no divergence: every call was answered from the recording",
+        "  2 from the recording · 0 missed",
+    ]
 
 
-def test_replaying_the_second_shared_charge_run_hands_its_refusal_to_the_first(
-    run_workflow, replayed
-):
-    """LOOKS WRONG: a replay answers every run of the process from the one run's recording, so the
-    first run's refund, identical to the second's, takes the second's recorded refusal, and its
-    read the recorded read the overlay edited to show a refund no run has made yet. The second
-    run, the one replayed, then misses everything: its read goes live, and its refund, checked
-    against its recording's own read of the charge, passes. `irimi compare` of the second run and
-    its replay shows the refusal gone."""
+def test_replaying_the_second_shared_charge_run_replays_its_refusal(run_workflow, replayed):
+    """`shared_charge`'s second run refunds the charge the first already refunded, and was refused
+    `amount_too_large`, its read showing the first run's refund, which the overlay edited in.
+    Replayed alone, it is answered as it was recorded, read and refusal alike, and its comparison
+    is the same write: the first run is not in the replay to take the refusal first, as it did when
+    a replay re-ran the process (#155)."""
     recorded = run_workflow(W, "shared_charge", "shadow")
     second = max(recorded.sdk_runs(), key=lambda r: r.trigger.args["message"]["index"])
     _, replay = replayed(W, "shared_charge", run_id=second.run_id)
     assert replay.answered() == [
         ("read:ch_QSHARED", 200, "overlay"),
         ("refund:ch_QSHARED", 400, "fake-L1"),
-        ("read:ch_QSHARED", 200, None),
-        ("refund:ch_QSHARED", 200, "fake-L1"),
     ]
-    first, replayed_second = (c["run"] for c in replay.calls() if c["label"].startswith("read"))
-    assert first != replayed_second
-    [mine] = [
-        r.run_id
-        for r in replay.stored().list_runs()
-        if r.run_id == replayed_second and r.trigger.args["message"]["index"] == 6
-    ]
-    code, out, err = replay.compare_runs(second.run_id, mine)
-    assert (code, out[4:], err) == (
-        1,
+    assert replay.internet.requests() == []
+    result = replay.replay_result()
+    assert (replay.exit_code, result[result.index("") + 1 :]) == (
+        0,
         [
-            "  ~ A ✗ refund $30.00 on ch_QSHARED  would fail: amount_too_large",
-            "    B ○ refund $30.00 on ch_QSHARED  unvalidated (L3 preconditions passed)",
+            "  = ✗ refund $30.00 on ch_QSHARED  would fail: amount_too_large",
             "",
-            "  0 same · 1 changed · 0 only in A · 0 only in B",
+            "  1 same · 0 changed · 0 only in A · 0 only in B",
         ],
-        [],
     )
 
 
-def test_replaying_each_worker_run_answers_its_static_read_tool_from_the_recording_first_only(
+def test_a_worker_method_s_run_cannot_be_called_alone_and_replays_by_its_command(
     run_workflow, replayed
 ):
-    """`ledger_worker`'s ledger as the worker's methods (#76): `Worker.fee`, a static-method read
-    tool, `journal`, a class-method write, and `ack`, a plain method's. The worker takes its
-    messages one at a time. Replayed, the first run's `fee` is answered from its recording, and
-    neither write's real body runs (#83). LOOKS WRONG (#155): replaying a later run answers every
-    run of the process from that run's recording, so the first run's refund, an HTTP write the
-    recording lacks, diverges the replay before the replayed run reads, and its own `fee` runs
-    for real."""
+    """`ledger_worker`'s runs are the worker's methods (#76), whose instance a run does not record
+    (#74). Replayed alone, `replay_child` will not call a method without it: the replay is one that
+    could not run, exit 2, its run holding nothing but the reason it ended. Replayed
+    by its command, the worker's whole process runs, every run of it adopted into the replay's one
+    run (#84): the first run's `fee`, a static-method read tool, is answered from the recording,
+    and the later runs, which the recording lacks, run theirs for real, while neither write's real
+    body runs (#83)."""
     recorded = run_workflow(W, "ledger_worker", "shadow")
     targets = replay_targets(recorded)
     assert len(targets) == 4
-    for place, run_id in enumerate(targets):
-        _, replay = replayed(W, "ledger_worker", run_id=run_id)
-        mine = counterpart(recorded, replay, run_id)
-        assert mine is not None
-        stored = replay.stored().load_run(mine).events
-        calls = [(c.name.rsplit(".", 1)[1], c.ran) for c in stored if isinstance(c, ToolCall)]
-        fee = "recording" if place == 0 else "real"
-        assert calls == [("fee", fee), ("journal", "shadow"), ("ack", "shadow")], place
+    first = targets[0]
+    _, alone = replayed(W, "ledger_worker", run_id=first)
+    assert (alone.exit_code, alone.agent_exit_code()) == (2, CANNOT_CALL)
+    why = "it is a method, and a run does not record the instance it was called on"
+    assert alone.replay_result()[1] == f"  agent could not be called: {why}"
+    stored = alone.stored().load_run(alone.process_run_id())
+    assert (stored.events, stored.record.error) == ([], ErrorInfo("cannot-call", why))
+    _, whole = replayed(W, "ledger_worker", run_id=first, command=True)
+    stored = whole.stored().load_run(whole.process_run_id()).events
+    calls = [(c.name.rsplit(".", 1)[1], c.ran) for c in stored if isinstance(c, ToolCall)]
+    assert (
+        calls
+        == [("fee", "recording"), ("journal", "shadow"), ("ack", "shadow")]
+        + [
+            ("fee", "real"),
+            ("journal", "shadow"),
+            ("ack", "shadow"),
+        ]
+        * 3
+    )

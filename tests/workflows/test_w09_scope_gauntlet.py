@@ -788,12 +788,14 @@ def _files(root) -> dict[str, bytes]:
 
 
 def test_a_replay_never_writes_into_the_run_it_replays(replayed):
-    """`control_runs` names its runs itself, so its replay posts `ctl-direct` again: its start,
+    """`control_runs` names its runs itself, posting each by hand, with args `irimi replay` will
+    not call a trigger with, so it is replayed by its command (#84), which posts `ctl-direct`
+    again: its start,
     its tool calls, its end, and a read labelled `Irimi-Run: ctl-direct`. A replay never writes
     into the run it answers from (#82): that run's files are byte for byte what was recorded, and
     what the replay said of it is filed in `unattributed`, its exchange flagged `bad-run-id` - and
     still answered from the recording."""
-    recorded, replay = replayed(W, "control_runs", run_id="ctl-direct")
+    recorded, replay = replayed(W, "control_runs", run_id="ctl-direct", command=True)
     stored = _files(recorded.store_root() / RUNS_DIR / "ctl-direct")
     assert stored and _files(replay.store_root() / RUNS_DIR / "ctl-direct") == stored
     assert recorded.stored().load_run(trace.UNATTRIBUTED).events == []
@@ -813,7 +815,7 @@ def test_a_replay_writes_no_other_recorded_run_its_agent_names_again(replayed):
     byte what was recorded, the replay's own run is the one run that names what it replays, and
     what it said of each recorded run is filed in `unattributed`, its exchanges flagged
     `bad-run-id`."""
-    recorded, replay = replayed(W, "control_runs", run_id="ctl-direct")
+    recorded, replay = replayed(W, "control_runs", run_id="ctl-direct", command=True)
     runs = recorded.store_root() / RUNS_DIR
     for directory in runs.iterdir():
         assert _files(replay.store_root() / RUNS_DIR / directory.name) == _files(directory)

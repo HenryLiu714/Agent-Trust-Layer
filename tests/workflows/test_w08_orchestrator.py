@@ -345,38 +345,26 @@ def test_a_reservation_whose_answer_target_is_down_is_answered_502_and_compared_
 
 
 @pytest.mark.parametrize("scenario", ["nested_runs", "nested_write"])
-def test_replaying_the_second_of_two_identical_runs_answers_the_first(
+def test_replaying_the_second_of_two_identical_runs_replays_it_alone(
     run_workflow, replayed, scenario
 ):
-    """LOOKS WRONG: the two orchestrator runs make the same requests, and a replay answers every
-    run of the process from the one run's recording. Replaying the second, the first run takes
-    every recorded answer, the nested trigger's read and the reservation included, and the second
-    run, the one replayed, misses each and forwards its reads live. No write is forwarded, and
-    `irimi compare` cannot tell: the reservation is the same write either way."""
+    """The two orchestrator runs make the same requests. Replaying the second calls its trigger
+    alone (#84): one run, the replay's, which its nested trigger joins, every read and the
+    reservation answered from the second run's recording, and nothing reaching the fake internet.
+    The first run is not in the replay to take those answers, as it did when a replay re-ran the
+    process (#155)."""
     recorded = run_workflow(W, scenario, "shadow")
     _, second = sorted(recorded.sdk_runs(), key=lambda r: r.started_at or 0.0)
     _, replay = replayed(W, scenario, run_id=second.run_id)
     starts = [e["run"] for e in replay.events("run.start") if e["name"] == "plan_quarter_close"]
-    assert len(starts) == 2
-    marks = {
-        run: {("from-recording" in ex.flags, "replay-miss" in ex.flags) for ex in exchanges}
-        for run in starts
-        if (exchanges := [ex for ex in replay.reported if ex.run_id == run])
-    }
-    assert marks == {starts[0]: {(True, False)}, starts[1]: {(False, True)}}
+    assert starts == [replay.process_run_id()]
+    assert {ex.run_id for ex in replay.reported} == {replay.process_run_id()}
+    assert {"from-recording" in ex.flags for ex in replay.reported} == {True}
     assert [answered for _, _, answered in replay.answered()] == [
         "recording",
         "recording",
         "recording",
         "fake-L0",
-        None,
-        None,
-        None,
-        "fake-L0",
     ]
-    assert [(r.method, r.host) for r in replay.internet.requests()] == [
-        ("GET", HOST),
-        ("POST", HOST),
-        ("GET", "api.stripe.com"),
-    ]
-    assert replay.internet.writes() == []
+    assert replay.internet.requests() == []
+    assert replay.exit_code == 0

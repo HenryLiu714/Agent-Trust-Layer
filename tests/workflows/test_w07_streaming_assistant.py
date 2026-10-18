@@ -468,7 +468,9 @@ def test_two_streams_at_once_are_each_stored_against_their_own_request(run_workf
 def test_the_callers_send_function_is_stored_by_its_repr_and_cannot_be_replayed(run_workflow, mode):
     """#74's capture of a value that is not data: `chat(question, send)` is the ordinary shape of
     a streaming handler, and `send` is a closure over the caller's connection. It is stored as
-    its repr and makes the run not replayable; the question is stored as itself."""
+    its repr and makes the run not replayable; the question is stored as itself. So `irimi replay`
+    refuses to call it (#84), and `--args` cannot hand it a callable either: only `-- CMD`, the
+    agent's own process, replays it, as every replay below does."""
     shadow = run_workflow(W, "normal", mode)
     [run] = shadow.sdk_runs()
     assert run.trigger is not None and not run.trigger.replayable
@@ -478,6 +480,12 @@ def test_the_callers_send_function_is_stored_by_its_repr_and_cannot_be_replayed(
     send = args["send"]
     assert isinstance(send, dict) and set(send) == {"__irimi_repr__"}
     assert str(send["__irimi_repr__"]).startswith("<function ")
+    code, out, err = shadow.command("replay", run.run_id, "--store", str(shadow.store_root()))
+    assert (code, out) == (2, [])
+    assert err == [
+        f"error: run {run.run_id}'s trigger arguments were not recorded replayably (a value was "
+        "recorded as its description); pass --args"
+    ]
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -660,6 +668,9 @@ def test_irimi_compare_shows_the_post_a_streamed_tool_call_made_and_nothing_else
 
 
 # ------------------------------------------------------------------------------- replay (#82)
+#
+# Every chat's trigger is given its caller's `send`, a callable `irimi replay` cannot call it with
+# (above), so each replay here runs the agent's own command (`-- <cmd>`, #84).
 
 RECORDED_LINES = [
     line.replace("live     ", "recording") + "  [fidelity:recording, from-recording]"
@@ -671,7 +682,7 @@ def test_both_streams_replay_from_the_recording_and_the_agent_reassembles_them(r
     """A recorded stream is served as its joined chunks, in one piece, and the agent's 7-byte SSE
     parser reassembles it as it did the live one. The trace post is telemetry, which a replay
     forwards as shadow mode does."""
-    recorded, replay = replayed(W, "normal")
+    recorded, replay = replayed(W, "normal", command=True)
     assert replay.result(with_time=False) == recorded.result(with_time=False)
     assert replay.result()["caller_text"] == ANSWER
     assert replay.exchange_lines() == [*RECORDED_LINES, TRACE_LINE]
@@ -682,7 +693,7 @@ def test_a_secret_a_stream_sent_in_pieces_replays_whole_and_matches_its_placehol
     """The recorded Anthropic stream holds the secret in pieces, unredacted (#92), so the replay
     hands the agent the secret whole, and the agent's OpenAI request carries it. Its recording
     holds the placeholder, and the live request, redacted with the same key, matches it."""
-    recorded, replay = replayed(W, "secret_in_stream")
+    recorded, replay = replayed(W, "secret_in_stream", command=True)
     assert SECRET in replay.result()["caller_text"]
     assert replay.result(with_time=False) == recorded.result(with_time=False)
     assert replay.exchange_lines() == RECORDED_LINES
@@ -693,7 +704,7 @@ def test_a_secret_stored_redacted_replays_as_its_placeholder(replayed):
     """The recorded stream holds the secret as its placeholder (#71), so a replay answers the
     agent with the placeholder, which the agent passes on to OpenAI, whose recording holds the
     same placeholder: nothing diverges, and the agent never sees the secret."""
-    recorded, replay = replayed(W, "secret_split_across_writes")
+    recorded, replay = replayed(W, "secret_split_across_writes", command=True)
     hidden = redact.placeholder(redact.load_key(replay.home), SECRET)
     assert recorded.result()["caller_text"] == LONG_ANSWER
     assert replay.result()["caller_text"] == LONG_ANSWER.replace(SECRET, hidden)
@@ -717,7 +728,7 @@ def test_a_stream_recorded_cut_is_never_served_and_goes_to_the_model_again(repla
     """A recorded stream that is not the whole stream - a caller that hung up, an upstream reset,
     a stream cut at irimi's cap - is not an answer a replay hands back (#71): it is a miss, and the
     stream goes to the fake Anthropic again, while the embedding before it is the recording's."""
-    recorded, replay = replayed(W, scenario)
+    recorded, replay = replayed(W, scenario, command=True)
     [cut] = [ex for ex in recorded.reported if ex.request.path == "/v1/messages"]
     assert {STREAM_TRUNCATED_FLAG, UPSTREAM_ERROR_FLAG} & set(cut.flags)
     [stream] = [ex for ex in replay.reported if ex.request.path == "/v1/messages"]
@@ -728,18 +739,19 @@ def test_a_stream_recorded_cut_is_never_served_and_goes_to_the_model_again(repla
     assert [(r.method, r.host, r.path) for r in replay.internet.requests()] == [
         ("POST", "api.anthropic.com", "/v1/messages")
     ]
-    assert replay.exit_code == recorded.exit_code
+    assert replay.agent_exit_code() == recorded.exit_code
 
 
 def test_replaying_one_of_two_lockstep_chats_leaves_the_other_waiting(run_workflow, replayed):
     """`two_callers` streams two chats in lockstep, each chunk held for the other's. Replaying
     either chat answers its whole stream from the recording; the other chat misses everything,
-    and its live stream waits for a partner that never comes, until the fake gives up. So a replay
-    of one run exits 4 where its recording exited 0, and no write is forwarded either way."""
+    and its live stream waits for a partner that never comes, until the fake gives up. So the
+    agent, replayed by its command against one chat's run, exits 4 where its recording exited 0,
+    and no write is forwarded either way."""
     recorded = run_workflow(W, "two_callers", "shadow")
     for source in recorded.sdk_runs():
-        _, replay = replayed(W, "two_callers", run_id=source.run_id)
-        assert (recorded.exit_code, replay.exit_code) == (0, 4)
+        _, replay = replayed(W, "two_callers", run_id=source.run_id, command=True)
+        assert (recorded.exit_code, replay.agent_exit_code()) == (0, 4)
         answered = [ex for ex in replay.reported if "from-recording" in ex.flags]
         assert sorted(ex.request.path for ex in answered) == [
             "/v1/chat/completions",
@@ -784,7 +796,7 @@ def test_a_gzip_encoded_stream_replays_decoded_without_its_encoding(replayed):
     replay serves the decoded bytes and drops the header, so the agent reads plain text, decodes
     nothing (no `stream_encoded`), and answers its caller as it did; sent under the recorded
     header, the agent would have gunzipped plain text and failed."""
-    recorded, replay = replayed(W, "gzip_stream")
+    recorded, replay = replayed(W, "gzip_stream", command=True)
     assert recorded.events("stream_encoded") and replay.events("stream_encoded") == []
     assert replay.events("stream_error") == []
     assert replay.result(with_time=False) == recorded.result(with_time=False)

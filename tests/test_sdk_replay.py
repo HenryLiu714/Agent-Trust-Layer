@@ -233,6 +233,7 @@ def _p(a, /, **kw):
         (_g, (1, 2, 3), {"k": 4, "z": 9}),
         (_h, (1,), {"y": 2}),
         (_p, (1,), {"a": 2}),  # a positional-only parameter's name is free for `**kwargs`
+        (_g, (1,), {"rest": 2, "kw": 3}),  # so are `*args`' and `**kwargs`' own
     ],
 )
 def test_call_arguments_undoes_capture_call_s_binding(fn, args, kwargs):

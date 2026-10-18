@@ -161,6 +161,10 @@ def _signature(fn: Callable[..., Any]) -> inspect.Signature:
     return inspect.signature(fn)
 
 
+# The parameters a keyword argument binds to (`call_arguments`).
+_KEYWORDS = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+
+
 def call_arguments(
     fn: Callable[..., Any], arguments: Mapping[str, Any]
 ) -> tuple[list[Any], dict[str, Any]]:
@@ -173,7 +177,7 @@ def call_arguments(
     args given by hand (`--args`) can say and Python would bind otherwise than they say (#84): a
     `*args` after a positional parameter left out, whose values would fill that parameter; a
     `*args` that is no list or a `**kwargs` that is no object, which would be spread as
-    characters or keys; and a `**kwargs` naming a parameter a keyword can name, whose value it
+    characters or keys; and a `**kwargs` naming a parameter a keyword binds to, whose value it
     would replace."""
     positional: list[Any] = []
     named = dict(arguments)
@@ -204,12 +208,12 @@ def call_arguments(
             spread = named.pop(name)
             if not isinstance(spread, dict):
                 raise TypeError(f"{name} must be an object, not {type(spread).__name__}")
-            # A positional-only parameter's name is free for `**kwargs`: `f(1, a=2)` binds so.
+            # Only a name a keyword binds to is taken. A positional-only parameter's, or `*args`'
+            # or `**kwargs`' own, is free for `**kwargs`: `f(1, a=2)` and `f(kwargs=2)` bind so.
             taken = sorted(
                 key
                 for key in spread
-                if key in signature.parameters
-                and signature.parameters[key].kind is not inspect.Parameter.POSITIONAL_ONLY
+                if key in signature.parameters and signature.parameters[key].kind in _KEYWORDS
             )
             if taken:
                 raise TypeError(f"{name} names {', '.join(taken)}, which is a parameter of its own")

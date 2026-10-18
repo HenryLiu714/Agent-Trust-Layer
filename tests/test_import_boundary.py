@@ -7,7 +7,8 @@ Both rules are mechanical, so a refactor cannot quietly undo them:
      without a proxy and lets the engine be swapped.
   2. A module imports only from layers below its own. The layers are listed lowest first; a
      module in one may import any module in an earlier layer and none in its own or a later one.
-     `cli` is the top and may import everything, which is what makes it the composition root.
+     `cli` may import everything else, which is what makes it the composition root; only
+     `__main__`, `python -m irimi`, is above it (#84).
 """
 
 import ast

@@ -22,6 +22,17 @@ def test_no_command_prints_help_and_fails(capsys):
     assert "usage: irimi" in capsys.readouterr().out
 
 
+def test_python_m_irimi_is_the_command_and_importing_it_runs_nothing():
+    """`sdk.replay()` runs `python -m irimi` (#84); a tool that imports every module, as pydoc
+    does, must not start the command."""
+    import subprocess
+
+    ran = subprocess.run([sys.executable, "-m", "irimi", "--version"], capture_output=True)
+    assert (ran.returncode, ran.stdout) == (0, f"irimi {__version__}\n".encode())
+    imported = subprocess.run([sys.executable, "-c", "import irimi.__main__"], capture_output=True)
+    assert (imported.returncode, imported.stdout, imported.stderr) == (0, b"", b"")
+
+
 def test_serve_without_ca_fails(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
     assert main(["serve"]) == 1

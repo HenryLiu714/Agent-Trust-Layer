@@ -962,21 +962,17 @@ def cmd_replay(args: argparse.Namespace) -> int:
     `--result-file` writes the result as JSON, the one `sdk.replay()` reads
     (`sdk.replays.ReplayResult`), whether or not the replay ran, holding what irimi said on
     stderr of a replay that did not."""
+    args.cmd = _replay_command(args)
     if args.cmd and (args.call is not None or args.args is not None):
         args.parser.error(
             "-- CMD runs a command, not a call: drop --call and --args, or the command"
         )
-    from dataclasses import replace
-
-    from irimi import replay
-
     with _passing_sigterm_to_child() as child, _keeping_stderr() as said:
         try:
             result = _replay(args, child, said)
         except KeyboardInterrupt:
-            # Ctrl-C while irimi read a run, prepared one or compared them: no agent to wait on.
-            print("error: interrupted.", file=sys.stderr)
-            result = replace(replay.refused(args.run_id, said), exit_code=SIGINT_EXIT_CODE)
+            # Ctrl-C while irimi read a run or prepared one, before any was stored.
+            result = _interrupted(args, said, None)
     if args.result_file is not None:
         import json
 
@@ -997,8 +993,6 @@ def _replay(args: argparse.Namespace, child: _Child, said: list[str]) -> "Replay
     from dataclasses import replace
 
     from irimi import replay, runner
-    from irimi.store import RunNotFound, StoreReader
-    from irimi.trace import TraceFormatError
 
     try:
         source = _load_source(args)
@@ -1035,17 +1029,60 @@ def _replay(args: argparse.Namespace, child: _Child, said: list[str]) -> "Replay
             return replace(result, exit_code=ran.code)
         return result
     try:
-        replayed = StoreReader(_store_root(args)).load_run(run.run_id)
+        return _replayed(args, source, run.run_id, ran, said)
+    except KeyboardInterrupt:
+        # Ctrl-C while irimi read the runs back or compared them: the replay's run is stored and
+        # ended, and its result names it (#84).
+        return _interrupted(args, said, run.run_id)
+
+
+def _replayed(
+    args: argparse.Namespace, source: "StoredRun", run_id: str, ran: _Ran, said: list[str]
+) -> "ReplayResult":
+    """A replay whose run `run_id` was stored and ended: both runs read back, and what the
+    replay did printed and returned (`replay.outcome`)."""
+    from irimi import replay
+    from irimi.store import RunNotFound, StoreReader
+    from irimi.trace import TraceFormatError
+
+    try:
+        replayed = StoreReader(_store_root(args)).load_run(run_id)
     except (RunNotFound, TraceFormatError, OSError) as exc:
-        print(
-            f"error: the replay's run {run.run_id} could not be read back: {exc}", file=sys.stderr
-        )
-        return replay.refused(args.run_id, said, run.run_id)
+        print(f"error: the replay's run {run_id} could not be read back: {exc}", file=sys.stderr)
+        return replay.refused(args.run_id, said, run_id)
     ended = replay.Ended(ran.code, ran.call, ran.stopped)
     outcome = replay.outcome(source, replayed, ended, _maps_for_stored_runs())
     for line in outcome.lines():
         print(line, flush=True)
     return outcome.result()
+
+
+def _interrupted(args: argparse.Namespace, said: list[str], run_id: str | None) -> "ReplayResult":
+    """A replay Ctrl-C stopped while no agent ran, so none was waited on: exit 130, as `irimi
+    shadow` exits, its result naming the replay's run when one was stored (#84)."""
+    from dataclasses import replace
+
+    from irimi import replay
+
+    print("error: interrupted.", file=sys.stderr)
+    return replace(replay.refused(args.run_id, said, run_id), exit_code=SIGINT_EXIT_CODE)
+
+
+def _replay_command(args: argparse.Namespace) -> list[str]:
+    """`irimi replay`'s `-- CMD`. After `--` argparse takes every word as a positional, RUN_ID
+    first, so `irimi replay -- python agent.py` read as a replay of a run named `python` (#84).
+    `-- RUN_ID` is how a run id that starts with `-` is given (`sdk.replay` gives every one so),
+    and a command may follow it only after a second `--`. `args.argv` is what was typed."""
+    cmd = list(args.cmd)
+    typed = list(args.argv or ())
+    if "--" not in typed or typed[typed.index("--") + 1 :] == cmd:
+        return cmd  # RUN_ID came before `--`, and every word after it is the command
+    if cmd and cmd[0] != "--":
+        args.parser.error(
+            "RUN_ID comes before `-- CMD`: irimi replay RUN_ID -- CMD, or "
+            "irimi replay -- RUN_ID -- CMD for a run id that starts with -"
+        )
+    return cmd[1:]
 
 
 class _Tee:
@@ -1345,13 +1382,18 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="-- <command> [args...]",
         help="run this command instead of a call of the run's trigger",
     )
-    replay.set_defaults(func=cmd_replay, parser=replay)
+    # `argv` is what was typed, which `main` sets (`_replay_command`).
+    replay.set_defaults(func=cmd_replay, parser=replay, argv=None)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
+    argv = sys.argv[1:] if argv is None else argv
     args = parser.parse_args(argv)
+    # What was typed, for `irimi replay`, whose RUN_ID argparse cannot tell from a command's first
+    # word once both follow `--` (`_replay_command`, #84).
+    args.argv = argv
     if args.command is None:
         parser.print_help()
         return 1

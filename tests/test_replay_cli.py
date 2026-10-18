@@ -289,8 +289,9 @@ def test_call_and_args_override_the_recorded_entrypoint_and_args(home, capfd):
     )
     assert (code, err) == (1, [])
     [replay] = _replay_runs(home, source)
+    # Named after the function it called, as `@sdk.trigger` names a run (#84).
     assert (replay.trigger.name, replay.trigger.entrypoint) == (
-        "handle",
+        "refund_half",
         "replay_agent:refund_half",
     )
     result = _result(out)
@@ -300,6 +301,10 @@ def test_call_and_args_override_the_recorded_entrypoint_and_args(home, capfd):
         "  1 from the recording · 1 missed",
     ]
     assert "    B ○ refund $24.50 on ch_REAL1  unvalidated (L3 preconditions passed)" in result
+    # `#3` is the event's own `seq` as stored, which the store numbers from 1 with no gap.
+    lines = (home / "store" / "runs" / replay.run_id / "events.jsonl").read_text().splitlines()
+    [third] = [json.loads(line) for line in lines if json.loads(line)["seq"] == 3]
+    assert (third["request"]["method"], third["request"]["path"]) == ("POST", "/v1/refunds")
     # Other args: the model is asked something else, so its call misses, and the header says so.
     other = {"ticket": {**ticket["ticket"], "value": {"charge": "ch_REAL1", "note": "please"}}}
     code, out, err = _replay(capfd, source, "--args", json.dumps(other))
@@ -572,3 +577,139 @@ def test_a_replay_interrupted_before_its_run_is_stored_exits_130_with_no_run(
     result = ReplayResult.from_json(json.loads(written.read_text()))
     assert (result.replay_run_id, result.exit_code) == (None, 130)
     assert _replay_runs(home, source) == []
+
+
+def test_a_replay_interrupted_after_its_run_is_stored_names_the_run_and_exits_130(
+    home, capfd, monkeypatch, tmp_path
+):
+    """A Ctrl-C while irimi compares the runs, after the agent ran: the replay's run is stored and
+    ended, so the result names it, and the replay exits 130 (#84)."""
+    from irimi import replay
+
+    source = _record(home, f"replay_agent.handle({TICKET})")
+
+    def interrupted(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(replay, "outcome", interrupted)
+    written = tmp_path / "result.json"
+    capfd.readouterr()
+    code, _, err = _replay(capfd, source, "--result-file", str(written))
+    [run] = _replay_runs(home, source)
+    assert (code, err) == (130, ["error: interrupted."])
+    result = ReplayResult.from_json(json.loads(written.read_text()))
+    assert result == ReplayResult(source, run.run_id, 130, None, ("error: interrupted.",))
+    assert (run.outcome, run.exit_code) == ("ok", 0)
+
+
+def test_a_run_that_did_not_end_is_replayed_after_one_warning(home, capfd):
+    source = _record(home, f"replay_agent.handle({TICKET})")
+    run_json = home / "store" / "runs" / source / "run.json"
+    record = json.loads(run_json.read_text())
+    record.update(ended_at=None, outcome=None, exit_code=None, error=None)
+    run_json.write_text(json.dumps(record))
+    capfd.readouterr()
+    code, out, err = _replay(capfd, source)
+    assert (code, err) == (
+        0,
+        [f"warning: run {source} did not end; it is replayed as far as it was recorded"],
+    )
+    assert _result(out)[2] == "  no divergence: every call was answered from the recording"
+
+
+def test_a_command_that_does_not_start_is_a_replay_that_could_not_run(home, capfd, tmp_path):
+    """The run is stored before the command is spawned, and ends with the shell's 127; the replay
+    exits 2, its result naming that run and holding why (#84)."""
+    source = _record(home, f"replay_agent.handle({TICKET})")
+    written = tmp_path / "result.json"
+    capfd.readouterr()
+    code, _, err = _replay(capfd, source, "--result-file", str(written), "--", "no-such-agent")
+    [run] = _replay_runs(home, source)
+    assert (code, err) == (2, ["error: command not found: no-such-agent"])
+    assert ReplayResult.from_json(json.loads(written.read_text())) == ReplayResult(
+        source, run.run_id, 2, None, ("error: command not found: no-such-agent",)
+    )
+    assert (run.outcome, run.exit_code) == ("error", 127)
+
+
+def test_an_agent_that_names_the_recorded_run_never_rewrites_it(home, capfd, monkeypatch):
+    """A replayed agent that posts a start for the run it replays, and labels a request with its
+    id, is stored in `unattributed/`, flagged `bad-run-id`: the recording is byte for byte as it
+    was (#82, #84)."""
+    source = _record(home, f"replay_agent.handle({TICKET})")
+    store = home / "store"
+    before = {p.name: p.read_bytes() for p in (store / "runs" / source).iterdir()}
+    (home.parent / "names_it.py").write_text(
+        "import http.client, json, os, urllib.parse, urllib.request\n"
+        "import replay_agent\n"
+        "src = os.environ['SOURCE']\n"
+        "start = open(os.path.join(os.environ['STORE'], 'runs', src, 'run.json'), 'rb').read()\n"
+        "opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))\n"
+        "url = os.environ['IRIMI_CONTROL'] + f'/runs/{src}/start'\n"
+        "opener.open(urllib.request.Request(url, data=start, method='POST'))\n"
+        "door = urllib.parse.urlparse(os.environ['HTTPS_PROXY'])\n"
+        "conn = http.client.HTTPConnection(door.hostname, door.port, timeout=10)\n"
+        "host = replay_agent.STRIPE.split('/')[2]\n"
+        "url = replay_agent.STRIPE + '/v1/charges/ch_REAL1'\n"
+        "conn.request('GET', url, headers={'host': host, 'irimi-run': src})\n"
+        "conn.getresponse().read()\n"
+    )
+    monkeypatch.setenv("SOURCE", source)
+    monkeypatch.setenv("STORE", str(store))
+    capfd.readouterr()
+    code, _, err = _replay(capfd, source, "--", sys.executable, "names_it.py")
+    assert (code, err) == (1, [])
+    assert {p.name: p.read_bytes() for p in (store / "runs" / source).iterdir()} == before
+    [stray] = StoreReader(store).load_run("unattributed").events
+    assert (stray.run_id, stray.flags) == (
+        source,
+        ("fidelity:recording", "from-recording", "bad-run-id"),
+    )
+
+
+def test_a_command_given_with_no_run_id_before_it_is_a_usage_error(home, capfd):
+    """After `--` argparse takes the first word as RUN_ID: `irimi replay -- python agent.py` would
+    replay a run named `python` (#84). `-- RUN_ID` alone is a run id, and a command follows it
+    after a second `--`."""
+    source = _record(home, "sys.exit(0 if replay_agent.plain('ch_REAL1') == 200 else 1)")
+    capfd.readouterr()
+    with pytest.raises(SystemExit) as usage:
+        main(["replay", "--port", "0", "--", sys.executable, "-c", "pass"])
+    assert usage.value.code == 2
+    assert capfd.readouterr().err.splitlines()[-1] == (
+        "irimi replay: error: RUN_ID comes before `-- CMD`: irimi replay RUN_ID -- CMD, or irimi "
+        "replay -- RUN_ID -- CMD for a run id that starts with -"
+    )
+    command = [sys.executable, "-c", "import replay_agent; replay_agent.plain('ch_REAL1')"]
+    code = main(["replay", "--port", "0", "--", source, "--", *command])
+    out = capfd.readouterr().out.splitlines()
+    assert code == 0
+    assert _result(out)[2] == "  no divergence: every call was answered from the recording"
+    assert main(["replay", "--port", "0", "--", source]) == 0
+
+
+def test_an_outcome_file_the_agent_nested_past_the_stack_is_no_outcome(home, capfd, tmp_path):
+    """The agent's environment names the outcome file, so it can write one: JSON nested deeper than
+    the stack is no outcome, and the replay still ends its run, stops its engine and writes its
+    result, the agent's exit deciding the run's end (#84)."""
+    (home.parent / "deep_agent.py").write_text(
+        "import os\nfrom irimi import sdk\n\n\n@sdk.trigger\ndef handle(n):\n"
+        "    outcome = os.environ.get('IRIMI_REPLAY_OUTCOME_FILE')\n"
+        "    if outcome:\n"
+        "        with open(outcome, 'w') as fh:\n"
+        "            fh.write('[' * 200000 + ']' * 200000)\n"
+        "        os._exit(0)\n"
+    )
+    command = [sys.executable, "-c", "import deep_agent; deep_agent.handle(1)"]
+    assert main(["shadow", "--port", "0", "--", *command]) == 0
+    [source] = [r for r in StoreReader(home / "store").list_runs() if r.attribution == "sdk"]
+    written = tmp_path / "result.json"
+    capfd.readouterr()
+    code, out, err = _replay(capfd, source.run_id, "--result-file", str(written))
+    assert (code, err) == (0, [])
+    assert _result(out)[1] == "  agent exited 0"
+    [run] = _replay_runs(home, source.run_id)
+    assert ReplayResult.from_json(json.loads(written.read_text())) == ReplayResult(
+        source.run_id, run.run_id, 0, None, tuple(_result(out))
+    )
+    assert (run.outcome, run.exit_code) == ("ok", 0)

@@ -37,10 +37,21 @@ def test_call_and_args_replace_the_entrypoint_and_the_args_and_the_trigger_says_
     other = {"ticket": None}
     plan = replay.plan(_record(), [], "agent:other", other)
     assert plan.call == replay.Call("agent:other", other)
-    assert plan.trigger == Trigger("handle", "agent:other", other, True)
+    assert plan.trigger == Trigger("other", "agent:other", other, True)
     # A run with no trigger at all is called by `--call`'s name.
     bare = replay.plan(_record(None, "header"), [], "agent:other", other)
-    assert bare.trigger == Trigger("agent:other", "agent:other", other, True)
+    assert bare.trigger == Trigger("other", "agent:other", other, True)
+
+
+def test_a_call_of_another_function_names_the_trigger_after_it_as_the_sdk_names_one():
+    """The replay's run names the function it called, by its qualname, as `@sdk.trigger` names a
+    run, never the recorded trigger that did not run (#84). The recorded entrypoint called again
+    keeps the recorded name, which `@sdk.trigger(name=...)` may have given."""
+    named = _record(replace(TRIGGER, name="refund"))
+    plan = replay.plan(named, [], "agent:Desk.lookup", {"customer": "c"})
+    assert plan.trigger == Trigger("Desk.lookup", "agent:Desk.lookup", {"customer": "c"}, True)
+    again = replay.plan(named, [], "agent:handle", None)
+    assert again.trigger == replace(TRIGGER, name="refund")
 
 
 @pytest.mark.parametrize("call", [None, "__main__:handle"])
@@ -67,6 +78,15 @@ def test_a_process_run_s_argv_is_no_function_s_parameters():
     )
 
 
+def test_a_replay_s_run_of_a_trigger_taking_argv_is_called_with_its_args_not_run_as_argv():
+    """A replay's run is a process run that keeps the trigger it called: its entrypoint says its
+    args are that function's, even a parameter named `argv` (#84)."""
+    called = Trigger("main", "agent:main", {"argv": ["agent", "-v"]}, True)
+    record = replace(runner.process_run("src", ["python"], None, 1.0), trigger=called)
+    plan = replay.plan(record, [], "agent:other", None)
+    assert plan.call == replay.Call("agent:other", {"argv": ["agent", "-v"]})
+
+
 def test_args_with_no_function_to_give_them_to_are_refused():
     record = runner.process_run("src", ["python", "agent.py"], None, 1.0)
     with pytest.raises(replay.Refused) as refused:
@@ -91,6 +111,8 @@ def test_a_process_run_is_its_argv_run_again():
         _record(Trigger("block", None, {"date": "d"}, True)),
         _record(Trigger("python", None, {"argv": []}, True), "process"),
         _record(Trigger("python", None, {"argv": ["python", 3]}, True), "process"),
+        # Only a process run's args are its argv: an `sdk.run` may record any args (#84).
+        _record(Trigger("block", None, {"argv": ["python", "x.py"]}, True)),
     ],
 )
 def test_a_run_with_nothing_to_call_or_run_is_refused(record):
@@ -136,14 +158,18 @@ def test_args_not_recorded_replayably_are_refused_unless_args_are_given():
         replay.plan(record, [], None, {"ticket": {"__irimi_repr__": "x"}})
 
 
-def _exchange(path: str, flags: tuple[str, ...], issued_by: str = "agent") -> Exchange:
+def _exchange(
+    path: str, flags: tuple[str, ...], issued_by: str = "agent", answered_by: str | None = None
+) -> Exchange:
+    if answered_by is None:
+        answered_by = "recording" if "from-recording" in flags else "live"
     return Exchange(
         request=Request("GET", "https", "api.stripe.com", 443, path, "", (), b""),
         response=Response(200, (), b"{}"),
         service="stripe",
         operation="charges.retrieve",
         kind="read",
-        answered_by="recording" if "from-recording" in flags else "live",
+        answered_by=answered_by,  # type: ignore[arg-type]
         validation="unvalidated",
         flags=flags,
         issued_by=issued_by,  # type: ignore[arg-type]
@@ -186,6 +212,9 @@ def test_the_divergence_is_the_first_agent_exchange_or_read_tool_the_recording_m
         "  0 same · 0 changed · 0 only in A · 1 only in B",
     ]
     assert outcome.exit_code == 1
+    assert outcome.result() == ReplayResult(
+        "src", "new", 1, "#5: real      read      tool db.read -> ok", tuple(outcome.lines())
+    )
 
 
 def test_a_replay_that_missed_nothing_says_so_and_names_both_versions_and_other_args():
@@ -197,6 +226,20 @@ def test_a_replay_that_missed_nothing_says_so_and_names_both_versions_and_other_
         "irimi replay · src → new · v1 → v2\\n",
         "  agent exited 3",
         "  (the triggers' args differ)",
+        f"  {replay.NO_DIVERGENCE}",
+    ]
+
+
+def test_a_run_with_no_trigger_replayed_by_a_command_says_no_args_differ():
+    """A `header` run recorded no trigger, and its replay by `-- CMD` records the command line, as
+    a process run does: no args were given, so none are said to differ (#84)."""
+    source = _run(_record(None, "header"), [])
+    record = runner.process_run("new", ["python", "agent.py"], None, 1.0)
+    replayed = _run(replace(record, replay_of="src"), [])
+    lines = replay.outcome(source, replayed, replay.Ended(0), None).lines()
+    assert lines[:3] == [
+        "irimi replay · src → new · - → -",
+        "  agent exited 0",
         f"  {replay.NO_DIVERGENCE}",
     ]
 
@@ -215,6 +258,10 @@ def test_a_replay_that_made_fewer_calls_than_its_recording_says_how_many_it_neve
         "  no divergence, but 1 of the recording's calls was never made",
         "  1 from the recording · 0 missed",
     ]
+    # A delegated answer is the target's, never looked up in the recording: not a call missed.
+    delegated = _exchange("/v1/charges/d", (), answered_by="delegated")
+    outcome = replay.outcome(_run(_record(), [delegated]), _new([]), replay.Ended(0), None)
+    assert outcome.lines()[2] == f"  {replay.NO_DIVERGENCE}"
     cut = _exchange("/v1/refunds", ("decision-failed", "body-truncated"))
     outcome = replay.outcome(_run(_record(), [cut]), _new([cut]), replay.Ended(0), None)
     assert outcome.lines()[2] == f"  {replay.NO_DIVERGENCE}"

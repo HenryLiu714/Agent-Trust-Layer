@@ -40,6 +40,8 @@ from dataclasses import dataclass
 from irimi import compare, redact, report
 from irimi.exchange import FROM_RECORDING_FLAG, REPLAY_MISS_FLAG, Exchange
 from irimi.recording import made_within
+from irimi.sdk import replay_child
+from irimi.sdk.api import MAIN_MODULE
 from irimi.sdk.replay_child import CallOutcome
 from irimi.sdk.replays import ReplayResult
 from irimi.servicemap import MapIndex
@@ -47,9 +49,8 @@ from irimi.store import StoredRun
 from irimi.trace import JSONValue, RunRecord, ToolCall, Trigger, holds_description
 
 NO_DIVERGENCE = "no divergence: every call was answered from the recording"
-CHILD_MODULE = "irimi.sdk.replay_child"
-# Where a run recorded under `python -m agent` or `python agent.py` says its trigger is (#89).
-MAIN_MODULE = "__main__"
+# What `python -m` runs to call a trigger: the child's own module, by its name.
+CHILD_MODULE = replay_child.__name__
 
 
 @dataclass(frozen=True)
@@ -63,7 +64,9 @@ class Call:
 @dataclass(frozen=True)
 class Plan:
     """What a replay runs: a `Call`, or a command (`argv`), and the trigger its run records - the
-    replayed run's, with the call's entrypoint and args when they were given in its place."""
+    replayed run's, with the call's entrypoint and args when they were given in its place, and
+    named after another function `--call` names. None for a command run for a run that recorded no
+    trigger: its run records the command line, as a process run does."""
 
     call: Call | None
     argv: tuple[str, ...]
@@ -93,8 +96,7 @@ def plan(
                 "irimi's own child when it is called; start the agent by its module name, or "
                 "pass --call or -- CMD"
             )
-        # A process run's args are its argv, which no function takes; a replay's run is a process
-        # run too, but keeps the trigger it replayed, entrypoint and args (#84).
+        # A process run's args are its argv, which no function takes (#84).
         if args is None and call is not None and _argv(source) is not None:
             raise Refused(
                 f"run {source.run_id} is a process run, whose args are its argv; pass --args "
@@ -111,7 +113,13 @@ def plan(
             args = trigger.args
         elif holds_description(args):
             raise Refused("--args holds a value's description, not the value")
-        name = trigger.name if trigger is not None else entrypoint
+        # The run is named after the function it calls, by its qualname, as `@sdk.trigger` names
+        # one; the recorded entrypoint called again keeps the recorded name, which `name=` may
+        # have given (#84).
+        if trigger is not None and entrypoint == trigger.entrypoint:
+            name = trigger.name
+        else:
+            name = entrypoint.partition(":")[2]
         return Plan(Call(entrypoint, args), (), Trigger(name, entrypoint, args, True))
     if args is not None:
         raise Refused(f"run {source.run_id} has no entrypoint to give --args to; pass --call too")
@@ -141,14 +149,17 @@ def not_replayable(trigger: Trigger | None) -> str | None:
 
 
 def _argv(source: RunRecord) -> tuple[str, ...] | None:
-    """The command line a process run recorded (`runner.process_run`), or None."""
+    """The command line a process run recorded (`runner.process_run`), or None. A replay's run is
+    a process run too, but one that keeps the trigger it called, whose entrypoint says its args
+    are a function's, even one with a parameter named `argv` (#84)."""
     trigger = source.trigger
-    if source.attribution != "process" or trigger is None or not isinstance(trigger.args, dict):
+    if source.attribution != "process" or trigger is None or trigger.entrypoint is not None:
         return None
-    argv = trigger.args.get("argv")
-    if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv):
+    argv = trigger.args.get("argv") if isinstance(trigger.args, dict) else None
+    if not isinstance(argv, list):
         return None
-    return tuple(a for a in argv if isinstance(a, str))
+    words = [a for a in argv if isinstance(a, str)]
+    return tuple(words) if words and len(words) == len(argv) else None
 
 
 @dataclass(frozen=True)
@@ -204,7 +215,9 @@ class Outcome:
         lines = [header, f"  agent {self._agent()}"]
         if self.ended.stopped is not None:
             lines.append("  stopped: irimi replay was interrupted before the agent ended")
-        if compare.args_differ(self.source, self.replayed):
+        # Only of a trigger the source recorded: a run with none, replayed by its command, records
+        # that command line as its trigger, and was given no args (#84).
+        if self.source.trigger is not None and compare.args_differ(self.source, self.replayed):
             lines.append(f"  {compare.ARGS_DIFFER}")
         lines.append(f"  {self._diverged()}")
         lines.append(f"  {self.answered} from the recording · {self.missed} missed")

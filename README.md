@@ -759,12 +759,16 @@ irimi replay · 725dc6add559a16f → d63663c6da8905c7 · - → -
 
   A run with none of these, an `sdk.run` block or a run whose start never reached irimi, is
   refused: `error: run <id> has no entrypoint and no argv; pass --call or -- CMD`. So are recorded
-  args that are not values: one stored by its description (a callable, a `datetime`), a call that
-  did not bind, or args the store could not redact. `pass --args`. An entrypoint in `__main__`
-  (an agent run as `python agent.py`) is refused too, and a process run's argv is no function's
-  args. A call the child then cannot make - a method, whose instance a run does not record, a
-  module that does not import, args whose class it cannot rebuild - is a replay that could not
-  run: `agent could not be called: <why>`, and exit 2.
+  args that are not values, one stored by its description (a callable, a `datetime`), a call that
+  did not bind, or args the store could not redact: `error: run <id>'s trigger arguments were not
+  recorded replayably (<why>); pass --args`. An entrypoint in `__main__` (an agent run as
+  `python agent.py`) is refused too, a process run's argv is no function's args, and `--args`
+  needs a function to give them to. A call the child then cannot make - a method, whose instance
+  a run does not record, a module that does not import, args whose class it cannot rebuild - is a
+  replay that could not run: `agent could not be called: <why>`, and exit 2.
+- **RUN_ID comes first.** `irimi replay RUN_ID -- CMD`; a run id that starts with `-` is given
+  after `--`, as `irimi replay -- RUN_ID`, and a command then follows a second `--`. `-- CMD`
+  with `--call` or `--args` is a usage error.
 - **The replay is one run.** Every run the child's SDK starts adopts the replay's run, whatever
   started it, and posts no start or end of its own. `irimi replay` stores that run with the trigger
   it replayed, `mode: replay` and `replay_of`, and ends it with the child's exit code, so
@@ -784,16 +788,17 @@ irimi replay · 725dc6add559a16f → d63663c6da8905c7 · - → -
   trigger other arguments. A replay that missed nothing but made fewer calls than its recording,
   an agent that stopped early, says how many it never made, and one the store dropped events of
   says so and is never called the same. The exit code is the comparison's: 0 when the writes are
-  the same, 1 when any differs or was cut, 2 when the replay was refused, could not call its
-  trigger, or its run could not be read back, and 130 or 143 when SIGINT or SIGTERM stopped it.
+  the same, 1 when any differs or was cut, 2 when the replay was refused, could not start its
+  command or call its trigger, or its run could not be read back, and 130 or 143 when SIGINT or
+  SIGTERM stopped it.
   The child's own exit code is printed and decides nothing. `--result-file PATH` writes the result
   as JSON, a refused replay's with what irimi said of why.
 - **From a test**, `sdk.replay(run_id)` replays the run's own trigger, and
   `sdk.replay(run_id, handle, Ticket(...))` your function with its arguments, in a subprocess
   running `python -m irimi replay`, and returns a `ReplayResult`: `source_run_id`,
   `replay_run_id`, `exit_code`, `diverged_at` and `lines`. A refused replay is a result with
-  `exit_code` 2, and a stopped one 130 or 143, as the command exits. The args go to `irimi replay` in a file only you can read, never on its command
-  line.
+  `exit_code` 2, and a stopped one 130 or 143, as the command exits. The args go to
+  `irimi replay` in a file only you can read, never on its command line.
 
 What a replay cannot do:
 

@@ -1,10 +1,13 @@
-"""The SDK under `irimi replay` (#84): a trigger is called again from its entrypoint and captured
-args, and `sdk.replay`'s result codec.
+"""The SDK under `irimi replay` (#84): a top-level run adopts the replay's run and posts nothing, a
+trigger is called again from its entrypoint and captured args, and `sdk.replay`'s result codec.
 
-These are its parts, each alone: `capture.call_arguments` and `api.resolve`,
-`irimi.sdk.replay_child` as the subprocess it is, and `ReplayResult`'s JSON.
+`tests/test_replay_cli.py` drives all of it through the real command; these are its parts, each
+alone: `RunScope`'s adopting branch against a reporter that writes down every post,
+`capture.call_arguments` and `api.resolve`, `irimi.sdk.replay_child` as the subprocess it is, and
+`ReplayResult`'s JSON.
 """
 
+import asyncio
 import json
 import subprocess
 import sys
@@ -13,15 +16,130 @@ from typing import Any
 import pytest
 
 from irimi import paths, sdk
-from irimi.sdk import api, capture
+from irimi.sdk import api, capture, runs
 from irimi.sdk.replays import ReplayResult
 
 REPLAY = "abcd1234abcd1234"
 
 
+class _Posts:
+    """A `Reporter` that writes down each post, and answers no recorded tool call."""
+
+    def __init__(self) -> None:
+        self.posts: list[tuple[str, str]] = []
+
+    def post(self, run_id: str, kind: str, payload: Any) -> None:
+        self.posts.append((run_id, kind))
+
+    def recorded(self, run_id: str, name: str, args: Any) -> None:
+        return None
+
+
+@pytest.fixture
+def posts(monkeypatch) -> _Posts:
+    """This process as `irimi replay` sets up its child: active, and told the run it replays as."""
+    reporter = _Posts()
+    monkeypatch.setattr(runs, "reporter", reporter)
+    monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
+    monkeypatch.setenv(paths.RUN_ENV, REPLAY)
+    monkeypatch.setenv(paths.REPLAY_RUN_ENV, REPLAY)
+    return reporter
+
+
+@pytest.fixture
+def instrumented(monkeypatch) -> list[int]:
+    """Each call `runs` makes of `instrument()`, which an adopted run makes too (#75, #84)."""
+    calls: list[int] = []
+    monkeypatch.setattr(runs, "instrument", lambda: calls.append(1))
+    return calls
+
+
 @sdk.trigger
 def handle(ticket: str) -> str | None:
     return sdk.current_run_id()
+
+
+@sdk.trigger
+def outer(ticket: str) -> tuple[str | None, str | None]:
+    return sdk.current_run_id(), handle(ticket)
+
+
+@sdk.trigger
+async def handle_async(ticket: str) -> str | None:
+    await asyncio.sleep(0)
+    return sdk.current_run_id()
+
+
+@sdk.trigger
+def hands_off(ticket: str) -> Any:
+    return handle_async.__wrapped__(ticket)  # type: ignore[attr-defined]
+
+
+def test_a_top_level_trigger_adopts_the_replay_s_run_and_posts_nothing(posts, instrumented):
+    assert handle("T1") == REPLAY
+    assert sdk.current_run_id() is None
+    assert posts.posts == []
+    assert instrumented == [1]
+
+
+def test_a_nested_trigger_joins_the_adopted_run(posts, instrumented):
+    assert outer("T1") == (REPLAY, REPLAY)
+    assert posts.posts == []
+
+
+def test_every_top_level_run_of_the_process_adopts_the_one_replay_run(posts, instrumented):
+    """Two triggers one after the other, and a block: one run, the replay's (#84)."""
+    with sdk.run(trigger={"n": 1}, name="block"):
+        in_block = sdk.current_run_id()
+    assert [handle("T1"), handle("T2"), in_block] == [REPLAY] * 3
+    assert posts.posts == []
+
+
+def test_an_async_trigger_and_a_handed_off_coroutine_adopt_it_too(posts, instrumented):
+    assert asyncio.run(handle_async("T1")) == REPLAY
+    assert asyncio.run(hands_off("T1")) == REPLAY
+    assert posts.posts == []
+
+
+def test_a_tool_call_in_an_adopted_run_is_posted_to_the_replay_s_run(posts, instrumented):
+    @sdk.tool(kind="write", shadow=lambda body: "stood in")
+    def reply(body: str) -> str:
+        raise AssertionError("never for real")
+
+    @sdk.trigger
+    def answer() -> str:
+        return reply("hi")
+
+    assert answer() == "stood in"
+    assert posts.posts == [(REPLAY, "tool-calls")]
+
+
+def test_outside_a_replay_a_trigger_starts_its_own_run(posts, instrumented, monkeypatch):
+    monkeypatch.delenv(paths.REPLAY_RUN_ENV)
+    run_id = handle("T1")
+    assert run_id not in (None, REPLAY)
+    assert posts.posts == [(run_id, "start"), (run_id, "end")]
+
+
+def test_a_replay_id_irimi_did_not_set_adopts_nothing(posts, instrumented, monkeypatch):
+    """A stale `IRIMI_REPLAY_RUN` left in a serve agent's environment, which names no `IRIMI_RUN`,
+    or another, is not irimi's word: the trigger starts its own run, as it would (#84)."""
+    for run_env in (None, "another0another0"):
+        if run_env is None:
+            monkeypatch.delenv(paths.RUN_ENV)
+        else:
+            monkeypatch.setenv(paths.RUN_ENV, run_env)
+        posts.posts.clear()
+        run_id = handle("T1")
+        assert run_id not in (None, REPLAY)
+        assert posts.posts == [(run_id, "start"), (run_id, "end")]
+
+
+def test_an_inactive_sdk_adopts_nothing(posts, instrumented, monkeypatch):
+    monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "0")
+    assert handle("T1") is None
+    assert posts.posts == []
+    assert instrumented == []
 
 
 # -- calling a trigger again ----------------------------------------------------------------------

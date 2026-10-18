@@ -4,9 +4,9 @@ import secrets
 import sys
 import threading
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TextIO
 
 from irimi import __version__, paths
 
@@ -18,9 +18,12 @@ if TYPE_CHECKING:  # the quoted annotations below; no runtime import
     from irimi.engine import Engine, EngineConfig, OnExchange
     from irimi.exchange import Exchange
     from irimi.recording import Recording
+    from irimi.runner import ChildCall
+    from irimi.sdk.replay_child import CallOutcome
+    from irimi.sdk.replays import ReplayResult
     from irimi.servicemap import MapIndex
-    from irimi.store import ServeLock, TraceStore
-    from irimi.trace import ToolCall
+    from irimi.store import ServeLock, StoredRun, TraceStore
+    from irimi.trace import JSONValue, RunRecord, ToolCall
 
 SIGINT_EXIT_CODE = 130  # 128 + SIGINT, the shell convention for a Ctrl-C'd command
 SIGTERM_EXIT_CODE = 143  # 128 + SIGTERM: `irimi shadow` terminated before its command started
@@ -139,6 +142,37 @@ def _add_store_arg(parser: argparse.ArgumentParser, what: str = "the trace store
     )
 
 
+def _call_arg(value: str) -> str:
+    """argparse type for --call: a function's `module:qualname`, as a trigger records it (#84)."""
+    module, sep, qualname = value.partition(":")
+    if not sep or not module.strip() or not qualname.strip():
+        raise argparse.ArgumentTypeError(f"{value!r}: give the function as module:qualname")
+    return value
+
+
+def _args_arg(value: str) -> "dict[str, JSONValue]":
+    """argparse type for --args: a JSON object, `{parameter: captured value}`, the shape a trigger
+    records its args in (#74, #84)."""
+    import json
+
+    try:
+        parsed = json.loads(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"--args is not JSON: {exc}") from None
+    if not isinstance(parsed, dict):
+        raise argparse.ArgumentTypeError("--args is a JSON object of {parameter: value}")
+    return parsed
+
+
+def _args_file_arg(value: str) -> "dict[str, JSONValue]":
+    """argparse type for --args-file: `--args`, read from the file `value` names (#84)."""
+    try:
+        text = Path(value).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise argparse.ArgumentTypeError(f"--args-file {value}: {exc}") from None
+    return _args_arg(text)
+
+
 def _positive_int(value: str) -> int:
     """argparse type for --limit: a whole number of runs, at least one."""
     try:
@@ -163,8 +197,10 @@ def _engine_config(
     ca_paths: "CAPaths",
     *,
     serve: bool = False,
+    replay_of: str | None = None,
 ) -> "EngineConfig":
-    """The EngineConfig `serve` and `shadow` share.
+    """The EngineConfig `serve`, `shadow` and `replay` share. `replay_of` is the stored run a
+    replay answers from (#82, #84).
 
     `maps=index` is what makes the classifier use the maps: without it the engine falls back to the
     verb rule and every mapped write on a POST-only service reads as `unknown`.
@@ -180,6 +216,7 @@ def _engine_config(
         reverse_hosts=_reverse_hosts(args, index),
         maps=index,
         serve=serve,
+        replay_of=replay_of,
     )
 
 
@@ -242,9 +279,11 @@ def print_startup(
     host: str,
     port: int,
     ca_cert: "Path",
+    replay_of: str | None = None,
 ) -> None:
     """Everything a run says before it starts: the escape-hatch warning, the banner, and one line
-    per delegated service. `command` is "shadow" or "shadow --serve", whose `run_id` is None.
+    per delegated service. `command` is "shadow", "replay" or "shadow --serve", whose `run_id` is
+    None. `replay_of` is the run a replay answers from (#84).
 
     Every line is flushed. Python block-buffers stdout when it is a pipe rather than a terminal,
     and `serve` is a foreground process that may then print nothing for minutes, so
@@ -260,7 +299,7 @@ def print_startup(
     warning = _escape_hatch_warning(args)
     if warning is not None:
         print(warning, file=sys.stderr, flush=True)
-    for line in report.banner_lines(command, run_id, host, port, ca_cert):
+    for line in report.banner_lines(command, run_id, host, port, ca_cert, replay_of):
         print(line, flush=True)
     for line in report.delegated_lines(index, color=sys.stdout.isatty()):
         print(line, flush=True)
@@ -346,7 +385,7 @@ class _Run:
     store: "TraceStore"
     # The store's `serve.lock`, held, in serve mode only (#77).
     lock: "ServeLock | None" = None
-    # The run `config.replay_of` names, read back to answer from, in a replay only (#82).
+    # The run `config.replay_of` names, read back to answer from, in a replay only (#82, #84).
     recording: "Recording | None" = None
 
 
@@ -355,13 +394,17 @@ _OnRunEnded = Callable[["MapIndex", str], None]
 
 
 def _prepare_run(
-    args: argparse.Namespace, *, serve: bool = False, on_run_ended: _OnRunEnded | None = None
+    args: argparse.Namespace,
+    *,
+    serve: bool = False,
+    on_run_ended: _OnRunEnded | None = None,
+    source: "StoredRun | None" = None,
 ) -> _Run | None:
-    """Load the maps, find the CA, read back the run a replay answers from (#82) and open the trace
-    store, or print why not and return None.
+    """Load the maps, find the CA, key the recording of `source`, the run a replay answers from
+    (#82, #84), and open the trace store, or print why not and return None.
 
     Fail closed: without all of them, no engine starts and no child is spawned. The store is opened
-    last, so a run refused for its maps, its CA or its recording leaves nothing on disk.
+    last, so a run refused for its maps, its CA or its key leaves nothing on disk.
 
     In serve mode (#77) the engine's own run is `trace.UNATTRIBUTED`, so a request no `Irimi-Run`
     names is stored there and builds no run, and the store's `serve.lock` is taken as soon as the
@@ -379,23 +422,21 @@ def _prepare_run(
         return None
     # 16 hex characters: the run id is a directory name in the store, and must not collide with
     # another run's across months of them (#70).
+    # A replay is one run against one engine, whose write log and recording are the engine's;
+    # serve mode is many runs at once, and `irimi serve` has no run to replay (#82, #84).
+    assert not (serve and source is not None)
     run_id = trace.UNATTRIBUTED if serve else secrets.token_hex(8)
-    config = _engine_config(args, index, run_id, p, serve=serve)
-    if serve and config.replay_of is not None:
-        # A replay is one run against one engine, whose write log and recording are the engine's;
-        # serve mode is many runs at once (#82).
-        print("error: a replay is one run; serve mode cannot replay", file=sys.stderr)
-        return None
+    replay_of = None if source is None else source.record.run_id
+    config = _engine_config(args, index, run_id, p, serve=serve, replay_of=replay_of)
     key = _redaction_key()
     if key is None:
         return None
     recording = None
-    if config.replay_of is not None:
-        # A replay whose recording cannot be read starts nothing, as a run whose store cannot be
-        # opened does, and is refused before that store is opened (#82).
-        recording = _load_recording(args, config, key)
-        if recording is None:
-            return None
+    if source is not None:
+        from irimi.recording import Recording
+
+        # Keyed with this install's redaction key, which made the recording's placeholders (#82).
+        recording = Recording.from_events(source.events, key, config.maps)
     ended = None if on_run_ended is None else (lambda run_id: on_run_ended(index, run_id))
     store = _open_store(args, key, ended, config.replay_of)
     if store is None:
@@ -419,32 +460,24 @@ def _redaction_key() -> bytes | None:
         return None
 
 
-def _load_recording(
-    args: argparse.Namespace, config: "EngineConfig", key: bytes
-) -> "Recording | None":
-    """The run `config.replay_of` names in the store under `--store`, as a `Recording` keyed with
-    this install's redaction key, which made its placeholders, or None after printing why it
-    cannot be read (#82)."""
+def _load_source(args: argparse.Namespace) -> "StoredRun":
+    """The run `irimi replay` answers from, in the store under `--store`, read whole before
+    anything starts, or `replay.Refused` saying why it cannot be (#82, #84)."""
     from irimi import trace
-    from irimi.recording import Recording
+    from irimi.replay import Refused
     from irimi.store import RunNotFound, StoreReader
     from irimi.trace import TraceFormatError
 
-    assert config.replay_of is not None
     root = _store_root(args)
-    if config.replay_of == trace.UNATTRIBUTED:
+    if args.run_id == trace.UNATTRIBUTED:
         # Every serve session's requests no run named, in one pool: not one run to answer from.
-        print(f"error: {trace.UNATTRIBUTED} is not a run to replay", file=sys.stderr)
-        return None
+        raise Refused(f"{trace.UNATTRIBUTED} is not a run to replay")
     try:
-        events = StoreReader(root).load_run(config.replay_of).events
+        return StoreReader(root).load_run(args.run_id)
     except RunNotFound:
-        print(f"error: no run {config.replay_of} in {root}", file=sys.stderr)
-        return None
+        raise Refused(f"no run {args.run_id} in {root}") from None
     except (TraceFormatError, OSError) as exc:
-        print(f"error: run {config.replay_of} could not be read: {exc}", file=sys.stderr)
-        return None
-    return Recording.from_events(events, key, config.maps)
+        raise Refused(f"run {args.run_id} could not be read: {exc}") from None
 
 
 def _open_store(
@@ -715,6 +748,9 @@ class _Child:
 
     def __init__(self) -> None:
         self.terminated = False
+        # A Ctrl-C reached irimi while the command ran (`_wait_for_child`), which a replay that it
+        # stopped says (#84).
+        self.interrupted = False
         self._proc: subprocess.Popen[bytes] | None = None
 
     def on_sigterm(self, signum: int, _frame: object) -> None:
@@ -765,31 +801,79 @@ def _passing_sigterm_to_child() -> Iterator[_Child]:
 def _shadow(args: argparse.Namespace, cmd: list[str], child: _Child) -> int:
     """`irimi shadow -- <cmd>` inside its SIGTERM handler: the run, start to summary."""
     import os
-    import subprocess
-    import time
 
     from irimi import report, runner
-    from irimi.engine import EngineStartError
-    from irimi.exchange import Exchange
-    from irimi.trace import ToolCall
 
     run = _prepare_run(args)
     if run is None:
         return 1
+    agent_version = os.environ.get(paths.AGENT_VERSION_ENV)
+    record = runner.process_run(run.run_id, cmd, agent_version, 0.0)
+    ran = _under_the_engine(args, run, child, _Launch("shadow", cmd, record))
+    if not ran.summarize:
+        return ran.code
+    for line in report.summary_lines(
+        run.run_id, ran.exchanges, ran.elapsed, run.index, ran.tool_calls
+    ):
+        print(line, flush=True)
+    return ran.code
 
-    exchanges: list[Exchange] = []
-    tool_calls: list[ToolCall] = []
-    elapsed = 0.0
+
+@dataclass(frozen=True)
+class _Launch:
+    """What a run starts under its engine (#84): the banner's command, `shadow` or `replay`; the
+    child's argv; the run's record, stamped with its start as the child is spawned; and the
+    trigger a replay's child calls (`runner.child_env`)."""
+
+    banner: str
+    argv: list[str]
+    record: "RunRecord"
+    call: "ChildCall | None" = None
+
+
+@dataclass
+class _Ran:
+    """A child run under the engine: its exit code, how long it ran, and every exchange and tool
+    call the engine reported meanwhile. `summarize` is False when the child never ran and irimi
+    printed why, the code then irimi's own (1, 126, 127, 130, 143), and `stored` whether the run's
+    record was stored first. `stopped` is the exit code of a SIGINT or SIGTERM that reached irimi
+    while the child ran, and `call` how a replay's call ended, as its child wrote it (#84)."""
+
+    code: int
+    elapsed: float = 0.0
+    exchanges: "list[Exchange]" = field(default_factory=list)
+    tool_calls: "list[ToolCall]" = field(default_factory=list)
+    summarize: bool = True
+    stored: bool = False
+    stopped: int | None = None
+    call: "CallOutcome | None" = None
+
+
+def _under_the_engine(args: argparse.Namespace, run: _Run, child: _Child, launch: _Launch) -> _Ran:
+    """`launch` run as `run`'s child, under its engine, as `irimi shadow` and `irimi replay` run one
+    (#84): the engine started, the banner, the run's record stored before the child exists, the
+    child waited for, the run ended, the engine stopped and the store closed. A replay's run ends
+    with what its call raised, as `replay_child` wrote it, and otherwise with the exit code."""
+    import os
+    import subprocess
+    import time
+    from dataclasses import replace
+
+    from irimi import report, runner
+    from irimi.engine import EngineStartError
+    from irimi.sdk.replay_child import CallOutcome
+
+    ran = _Ran(SIGINT_EXIT_CODE)
 
     def on_exchange(ex: Exchange) -> None:
-        exchanges.append(ex)
+        ran.exchanges.append(ex)
         print(report.exchange_line(ex), flush=True)
 
     def on_tool_call(call: ToolCall) -> None:
         # On the proxy's event loop, after the store took the call (#73): it only appends and
         # prints. The line names the tool and what it raised, never its args or result, which
         # are stored redacted and would be printed raw here.
-        tool_calls.append(call)
+        ran.tool_calls.append(call)
         print(report.tool_call_line(call), flush=True)
 
     engine = _build_engine(run, on_exchange, on_tool_call)
@@ -801,68 +885,197 @@ def _shadow(args: argparse.Namespace, cmd: list[str], child: _Child) -> int:
         reason = str(exc) or f"proxy did not start within {runner.READY_TIMEOUT_S:.0f}s"
         print(f"error: {reason}", file=sys.stderr)
         _close_store(run.store)
-        return 1  # fail closed: the child is never spawned without the proxy
+        return _Ran(1, summarize=False)  # fail closed: the child is never spawned without the proxy
     except KeyboardInterrupt:
         print("error: interrupted before the proxy was ready.", file=sys.stderr)
         _close_store(run.store)
-        return SIGINT_EXIT_CODE
+        return _Ran(SIGINT_EXIT_CODE, summarize=False)
 
-    started_run = False
-    code = SIGINT_EXIT_CODE
+    cmd = launch.argv
     try:
         host, port = run.config.listen_host, handle.port()
-        print_startup("shadow", args, run.index, run.run_id, host, port, run.ca.cert)
+        replay_of = run.config.replay_of
+        print_startup(
+            launch.banner, args, run.index, run.run_id, host, port, run.ca.cert, replay_of
+        )
         env = runner.child_env(
             dict(os.environ),
             host,
             port,
             run.ca.cert,
             run.run_id,
-            replaying=run.config.replay_of is not None,
+            replaying=replay_of is not None,
+            call=launch.call,
         )
         if child.terminated:  # SIGTERM while irimi started: the command is never run (#77)
             print("error: terminated before the command started.", file=sys.stderr)
-            code = SIGTERM_EXIT_CODE
-            return code
+            ran.code, ran.summarize = SIGTERM_EXIT_CODE, False
+            return ran
         # The process run is stored before the child exists, so every exchange it makes lands in
         # a run that already has its record (#70).
-        agent_version = os.environ.get(paths.AGENT_VERSION_ENV)
-        run.store.start_run(runner.process_run(run.run_id, cmd, agent_version, time.time()))
-        started_run = True
+        run.store.start_run(replace(launch.record, started_at=time.time()))
+        ran.stored = True
         try:
             proc = subprocess.Popen(cmd, env=env)
             child.adopt(proc)
         except FileNotFoundError:
             print(f"error: command not found: {cmd[0]}", file=sys.stderr)
-            code = 127
-            return code
+            ran.code, ran.summarize = 127, False
+            return ran
         except OSError as exc:
             print(f"error: could not run {cmd[0]}: {exc}", file=sys.stderr)
-            code = 126
-            return code
+            ran.code, ran.summarize = 126, False
+            return ran
         # The summary's duration is the child's, not the proxy's: what the reader wants to know is
         # how long the agent ran. monotonic, so a clock change mid-run cannot make it negative.
         started = time.monotonic()
-        code = runner.exit_code_for(_wait_for_child(proc))
-        elapsed = time.monotonic() - started
+        ran.code = runner.exit_code_for(_wait_for_child(proc, child))
+        ran.elapsed = time.monotonic() - started
+        if child.terminated or child.interrupted:
+            ran.stopped = SIGTERM_EXIT_CODE if child.terminated else SIGINT_EXIT_CODE
     except KeyboardInterrupt:  # Ctrl-C outside _wait_for_child's own handling
-        code = SIGINT_EXIT_CODE
+        ran.code = ran.stopped = SIGINT_EXIT_CODE
     finally:
         # The run ends before the engine stops, because stopping the engine closes the store.
         # An exchange that finishes after this line is still recorded: a late event is not an
         # error (#70).
-        if started_run:
-            runner.end_process_run(run.store, run.run_id, code, time.time())
+        if ran.stored:
+            if launch.call is not None:
+                ran.call = CallOutcome.read(launch.call.outcome_file)
+            error = ran.call.error if ran.call is not None else None
+            runner.end_process_run(run.store, run.run_id, ran.code, time.time(), error)
         # An impatient second Ctrl-C lands here, while the engine thread is being joined.
         try:
             handle.stop()
         except KeyboardInterrupt:
             pass
         _close_store(run.store)
+    return ran
 
-    for line in report.summary_lines(run.run_id, exchanges, elapsed, run.index, tool_calls):
+
+def cmd_replay(args: argparse.Namespace) -> int:
+    """`irimi replay RUN_ID`: a stored run's trigger run again through irimi, answered from the
+    run's recording, and what the agent did differently (#84). What it runs is `replay.plan`'s
+    to say, and what it prints `replay.Outcome`'s. Exits as `irimi compare` does: 0 when the
+    replay made the writes its recording did, 1 when it did not, 2 for a replay that could not
+    run, or whose run could not be read back, and 130 or 143 for one SIGINT or SIGTERM stopped.
+    `--result-file` writes the result as JSON, the one `sdk.replay()` reads
+    (`sdk.replays.ReplayResult`), whether or not the replay ran, holding what irimi said on
+    stderr of a replay that did not."""
+    if args.cmd and (args.call is not None or args.args is not None):
+        args.parser.error(
+            "-- CMD runs a command, not a call: drop --call and --args, or the command"
+        )
+    from dataclasses import replace
+
+    from irimi import replay
+
+    with _passing_sigterm_to_child() as child, _keeping_stderr() as said:
+        try:
+            result = _replay(args, child, said)
+        except KeyboardInterrupt:
+            # Ctrl-C while irimi read a run, prepared one or compared them: no agent to wait on.
+            print("error: interrupted.", file=sys.stderr)
+            result = replace(replay.refused(args.run_id, said), exit_code=SIGINT_EXIT_CODE)
+    if args.result_file is not None:
+        import json
+
+        try:
+            args.result_file.write_text(json.dumps(result.to_json()), encoding="utf-8")
+        except OSError as exc:
+            print(f"error: could not write {args.result_file}: {exc}", file=sys.stderr)
+            return 2
+    return result.exit_code
+
+
+def _replay(args: argparse.Namespace, child: _Child, said: list[str]) -> "ReplayResult":
+    """`cmd_replay` inside its SIGTERM handler: refused with what irimi said on stderr, or run,
+    start to result."""
+    import json
+    import os
+    import tempfile
+    from dataclasses import replace
+
+    from irimi import replay, runner
+    from irimi.store import RunNotFound, StoreReader
+    from irimi.trace import TraceFormatError
+
+    try:
+        source = _load_source(args)
+        plan = replay.plan(source.record, list(args.cmd), args.call, args.args)
+    except replay.Refused as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return replay.refused(args.run_id, said)
+    if source.record.outcome is None:
+        print(
+            f"warning: run {args.run_id} did not end; it is replayed as far as it was recorded",
+            file=sys.stderr,
+        )
+    # Made before the store is opened, so nothing after it can leave the store unclosed. Only
+    # this user can enter it: the args are the run's, and the outcome the child's.
+    with tempfile.TemporaryDirectory(prefix="irimi-replay-") as tmp:
+        argv, call = list(plan.argv), None
+        if plan.call is not None:
+            call = runner.ChildCall(
+                plan.call.entrypoint, Path(tmp) / "args.json", Path(tmp) / "outcome.json"
+            )
+            call.args_file.write_text(json.dumps(plan.call.args), encoding="utf-8")
+            argv = [sys.executable, "-m", replay.CHILD_MODULE]
+        run = _prepare_run(args, source=source)
+        if run is None:
+            return replay.refused(args.run_id, said)
+        agent_version = os.environ.get(paths.AGENT_VERSION_ENV)
+        record = runner.process_run(run.run_id, argv, agent_version, 0.0, plan.trigger)
+        ran = _under_the_engine(args, run, child, _Launch("replay", argv, record, call))
+    if not ran.summarize or not ran.stored:
+        # The agent never ran: refused, or stopped by a signal before its run was stored, which
+        # exits as `irimi shadow` would.
+        result = replay.refused(args.run_id, said, run.run_id if ran.stored else None)
+        if ran.code in (SIGINT_EXIT_CODE, SIGTERM_EXIT_CODE):
+            return replace(result, exit_code=ran.code)
+        return result
+    try:
+        replayed = StoreReader(_store_root(args)).load_run(run.run_id)
+    except (RunNotFound, TraceFormatError, OSError) as exc:
+        print(
+            f"error: the replay's run {run.run_id} could not be read back: {exc}", file=sys.stderr
+        )
+        return replay.refused(args.run_id, said, run.run_id)
+    ended = replay.Ended(ran.code, ran.call, ran.stopped)
+    outcome = replay.outcome(source, replayed, ended, _maps_for_stored_runs())
+    for line in outcome.lines():
         print(line, flush=True)
-    return code
+    return outcome.result()
+
+
+class _Tee:
+    """`stream`, but each whole line written to it is kept in `lines` too. Everything else - a
+    flush, `isatty`, `fileno` - is the stream's own. Not an `io` class, whose finalizer would
+    flush a stream the caller may since have closed."""
+
+    def __init__(self, stream: "TextIO", lines: list[str]) -> None:
+        self._stream = stream
+        self._lines = lines
+        self._partial = ""
+
+    def write(self, text: str) -> int:
+        self._stream.write(text)
+        *whole, self._partial = (self._partial + text).split("\n")
+        self._lines.extend(whole)
+        return len(text)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._stream, name)
+
+
+@contextlib.contextmanager
+def _keeping_stderr() -> Iterator[list[str]]:
+    """For the block, stderr as it is, and each line written to it kept in the list yielded: what
+    irimi said of why a replay could not run, which its result holds (#84). Python's own writes
+    to stderr only, not a child's, which writes to the same file descriptor directly."""
+    lines: list[str] = []
+    with contextlib.redirect_stderr(_Tee(sys.stderr, lines)):  # type: ignore[type-var]
+        yield lines
 
 
 def _store_root(args: argparse.Namespace) -> Path:
@@ -975,8 +1188,9 @@ def _close_store(store: "TraceStore") -> None:
         pass
 
 
-def _wait_for_child(proc: "subprocess.Popen[bytes]") -> int:
-    """Wait for the child, surviving Ctrl-C. Returns Popen's returncode (negative if signalled).
+def _wait_for_child(proc: "subprocess.Popen[bytes]", child: _Child) -> int:
+    """Wait for the child, surviving Ctrl-C, which `child.interrupted` then says. Returns Popen's
+    returncode (negative if signalled).
 
     Ctrl-C in a terminal reaches the whole foreground process group, so the child already got its
     own SIGINT; give it time to exit, then escalate.
@@ -988,7 +1202,7 @@ def _wait_for_child(proc: "subprocess.Popen[bytes]") -> int:
     try:
         return proc.wait()
     except KeyboardInterrupt:
-        pass
+        child.interrupted = True
     try:
         return proc.wait(timeout=runner.CHILD_GRACE_S)
     except KeyboardInterrupt:
@@ -1088,6 +1302,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_store_arg(compare_runs)
     compare_runs.set_defaults(func=cmd_compare)
+
+    replay = subparsers.add_parser(
+        "replay",
+        help="run a stored run's trigger again, answered from its recording, and print what the "
+        "agent did differently",
+    )
+    replay.add_argument("run_id", metavar="RUN_ID", help="the stored run's exact id")
+    _add_engine_args(replay)
+    replay.add_argument(
+        "--call",
+        type=_call_arg,
+        metavar="MODULE:QUALNAME",
+        help="call this function instead of the run's recorded entrypoint",
+    )
+    given = replay.add_mutually_exclusive_group()
+    given.add_argument(
+        "--args",
+        type=_args_arg,
+        metavar="JSON",
+        help="call it with these arguments, a JSON object of {parameter: value}, instead of the "
+        "run's recorded ones",
+    )
+    given.add_argument(
+        "--args-file",
+        type=_args_file_arg,
+        dest="args",
+        metavar="PATH",
+        help="the same, read from a file: args too long for a command line, or not for `ps`",
+    )
+    replay.add_argument(
+        "--result-file",
+        type=Path,
+        metavar="PATH",
+        help="also write the result as JSON, the one sdk.replay() returns",
+    )
+    # Not REMAINDER, as `shadow`'s is: that would take every flag after RUN_ID as the command.
+    # After `--`, argparse takes everything as positional, flags included.
+    replay.add_argument(
+        "cmd",
+        nargs="*",
+        metavar="-- <command> [args...]",
+        help="run this command instead of a call of the run's trigger",
+    )
+    replay.set_defaults(func=cmd_replay, parser=replay)
     return parser
 
 

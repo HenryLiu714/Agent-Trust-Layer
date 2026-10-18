@@ -27,12 +27,20 @@ def active() -> bool:
 def replay_run_id() -> str | None:
     """The run a replay's engine names in `IRIMI_REPLAY_RUN` for its child, or None when irimi is
     not replaying this process (#83): the one rule `tools` asks before it looks a read tool up,
-    and #84's `RunScope` will ask before it adopts the id. Never while the SDK is inactive, as
+    and `runs.RunScope` before it adopts the id (#84). Never while the SDK is inactive, as
     `current_run_id`: irimi is not in front, whatever the environment says. Read at each call,
-    never cached."""
+    never cached.
+
+    irimi names a replay's run twice, as the child's process run (`IRIMI_RUN`) and as the run it
+    replays as, so the two must agree. A variable a shell exported and irimi did not set - a serve
+    agent is not irimi's child, and serve sets neither - says nothing: adopting it would merge
+    every run the agent starts into one that was never started (#84)."""
     if not active():
         return None
-    return os.environ.get(paths.REPLAY_RUN_ENV) or None
+    replaying = os.environ.get(paths.REPLAY_RUN_ENV) or None
+    if replaying is None or replaying != os.environ.get(paths.RUN_ENV):
+        return None
+    return replaying
 
 
 def current_run_id() -> str | None:

@@ -25,8 +25,9 @@ the reverse door.
 NEVER THE SDK'S OWN POSTS. `ControlClient` sends them to irimi's listener inside `unlabelled()`.
 
 The patches are on classes, not instances, so a client created before the first run is covered
-too. They are installed on the first run the SDK starts (`runs._report_start`), never on import,
-and never while the SDK is inactive, so a process without irimi in front is untouched.
+too. They are installed on the first run the SDK starts or, in a replay's child, adopts
+(`runs._report_start`, #84), never on import, and never while the SDK is inactive, so a process
+without irimi in front is untouched.
 """
 
 import contextlib

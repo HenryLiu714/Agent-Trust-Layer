@@ -153,17 +153,26 @@ class _Irimi:
         return self._only_sdk_run(StoreReader(self.root), set())
 
     def replay(self, run_id: str, script: Callable[[], Any]) -> tuple[Any, list[ToolCall]]:
-        """`script` run again in one SDK run under an engine answering from `run_id`: what it
-        returned, and the replay run's tool calls as stored."""
+        """`script` run again in one SDK run under an engine answering from `run_id`, which adopts
+        the engine's run as `irimi replay`'s child does (#84): what it returned, and the replay
+        run's tool calls as stored."""
         before = {r.run_id for r in StoreReader(self.root).list_runs()}
         events = StoreReader(self.root).load_run(run_id).events
         recording = Recording.from_events(events, self.key, self.cfg.maps)
+        # Each replay is a run of its own, the engine's, as each `irimi replay` mints one (#84).
+        self.cfg = dataclasses.replace(self.cfg, run_id=runs.new_run_id())
         store = DirectoryStore(self.root, self.key, replay_of=run_id)
+        self.monkeypatch.setenv(paths.RUN_ENV, self.cfg.run_id)
         self.monkeypatch.setenv(paths.REPLAY_RUN_ENV, self.cfg.run_id)
         policy = ReplayPolicy(recording, maps=self.cfg.maps)
         result = self._serve(policy, store, script)
         reader = StoreReader(self.root)
-        replay_run = self._only_sdk_run(reader, before)
+        # The script's `sdk.run` adopted the replay's run, the engine's own, and posted no start
+        # (#84).
+        replay_run = self.cfg.run_id
+        assert replay_run not in before
+        if replay_run not in {r.run_id for r in reader.list_runs()}:
+            return result, []  # nothing the script did reached the engine
         assert reader.load_run(replay_run).record.replay_of == run_id
         calls = [e for e in reader.load_run(replay_run).events if isinstance(e, ToolCall)]
         return result, calls
@@ -384,6 +393,7 @@ def test_a_miss_is_said_by_no_warning(irimi, warnings):
 
 def test_an_inactive_sdk_never_asks_the_recording(monkeypatch):
     monkeypatch.delenv(paths.ENGINE_ACTIVE_ENV, raising=False)
+    monkeypatch.setenv(paths.RUN_ENV, "abcd1234abcd1234")
     monkeypatch.setenv(paths.REPLAY_RUN_ENV, "abcd1234abcd1234")
 
     class _Refuses:
@@ -502,8 +512,9 @@ def test_a_replay_s_child_is_told_it_replays_and_a_shadow_run_s_never_is(tmp_pat
 
 
 def test_a_run_that_ends_on_a_recorded_error_records_the_recorded_type(irimi):
-    """The replay's run ends where its recording's did, on the same `builtins.KeyError`, so
-    `irimi runs show` and a comparison say one thing of both (#83)."""
+    """The recorded run ends on `builtins.KeyError` (#83). Its replay raises the same, as
+    `RecordedToolError`, out of a run that adopted the replay's and so posts no end of its own:
+    `irimi replay` ends the replay's run with how its child exited (#84)."""
 
     def ends_on_it() -> None:
         balance("acc_missing")
@@ -511,16 +522,13 @@ def test_a_run_that_ends_on_a_recorded_error_records_the_recorded_type(irimi):
     with pytest.raises(KeyError):
         irimi.record(ends_on_it)
     [recorded] = [r for r in StoreReader(irimi.root).list_runs() if r.attribution == "sdk"]
+    assert recorded.error == ErrorInfo("builtins.KeyError", "'acc_missing'")
     _FORBIDDEN.add("acc_missing")
-    before = {r.run_id for r in StoreReader(irimi.root).list_runs()}
-    with pytest.raises(sdk.RecordedToolError):
+    with pytest.raises(sdk.RecordedToolError) as raised:
         irimi.replay(recorded.run_id, ends_on_it)
-    [replayed] = [
-        r
-        for r in StoreReader(irimi.root).list_runs()
-        if r.attribution == "sdk" and r.run_id not in before
-    ]
-    assert replayed.error == recorded.error == ErrorInfo("builtins.KeyError", "'acc_missing'")
+    assert isinstance(raised.value, KeyError)
+    replayed = StoreReader(irimi.root).load_run(irimi.cfg.run_id).record
+    assert (replayed.outcome, replayed.error) == (None, None)
 
 
 @pytest.mark.parametrize("kind", ["builtins.KeyboardInterrupt", "builtins.SystemExit"])
@@ -599,6 +607,7 @@ def test_a_recorded_call_that_was_closed_unawaited_is_a_miss(monkeypatch):
     """`GeneratorExit` is what a coroutine closed before it finished records: no outcome of the
     tool's own either (#83)."""
     monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
+    monkeypatch.setenv(paths.RUN_ENV, "abcd1234abcd1234")
     monkeypatch.setenv(paths.REPLAY_RUN_ENV, "abcd1234abcd1234")
     posted: list[Any] = []
 
@@ -615,8 +624,9 @@ def test_a_recorded_call_that_was_closed_unawaited_is_a_miss(monkeypatch):
 
 
 def test_an_inactive_sdk_is_never_told_it_replays(monkeypatch):
-    """`replay_run_id` is the one rule for "this is a replay", and #84's `RunScope` will ask it
-    too: a variable left in an environment irimi is not in front of says nothing (#83)."""
+    """`replay_run_id` is the one rule for "this is a replay", which `RunScope` asks too (#84): a
+    variable left in an environment irimi is not in front of says nothing (#83)."""
+    monkeypatch.setenv(paths.RUN_ENV, "abcd1234abcd1234")
     monkeypatch.setenv(paths.REPLAY_RUN_ENV, "abcd1234abcd1234")
     monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
     assert context.replay_run_id() == "abcd1234abcd1234"
@@ -651,6 +661,7 @@ def _answering(monkeypatch, status: int, body: bytes) -> Iterator[list[tuple[str
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}).start()
     monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
+    monkeypatch.setenv(paths.RUN_ENV, "abcd1234abcd1234")
     monkeypatch.setenv(paths.REPLAY_RUN_ENV, "abcd1234abcd1234")
     monkeypatch.setenv(paths.CONTROL_ENV, f"http://127.0.0.1:{server.server_address[1]}/_irimi")
     monkeypatch.setattr(runs, "reporter", client.ControlClient())

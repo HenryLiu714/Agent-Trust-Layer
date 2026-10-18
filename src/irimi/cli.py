@@ -159,6 +159,9 @@ def _args_arg(value: str) -> "dict[str, JSONValue]":
         parsed = json.loads(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(f"--args is not JSON: {exc}") from None
+    except RecursionError:
+        # Which argparse lets through, a traceback where a usage error belongs (#84).
+        raise argparse.ArgumentTypeError("--args is nested deeper than it can be read") from None
     if not isinstance(parsed, dict):
         raise argparse.ArgumentTypeError("--args is a JSON object of {parameter: value}")
     return parsed
@@ -1072,17 +1075,31 @@ def _replay_command(args: argparse.Namespace) -> list[str]:
     """`irimi replay`'s `-- CMD`. After `--` argparse takes every word as a positional, RUN_ID
     first, so `irimi replay -- python agent.py` read as a replay of a run named `python` (#84).
     `-- RUN_ID` is how a run id that starts with `-` is given (`sdk.replay` gives every one so),
-    and a command may follow it only after a second `--`. `args.argv` is what was typed."""
-    cmd = list(args.cmd)
+    and a command may follow it only after a second `--`. `args.argv` is what was typed.
+
+    The command is read from what was typed, never from `args.cmd`: an older argparse, which
+    Python 3.12's earlier releases ship, strips every `--` from it, the command's own as well,
+    where a newer one strips only the first (#84)."""
     typed = list(args.argv or ())
-    if "--" not in typed or typed[typed.index("--") + 1 :] == cmd:
-        return cmd  # RUN_ID came before `--`, and every word after it is the command
-    if cmd and cmd[0] != "--":
+    if "--" not in typed:
+        return list(args.cmd)
+    first = typed.index("--")
+    after = typed[first + 1 :]
+    # The subcommand's own words before `--`, parsed again with a stand-in run id after it: the
+    # stand-in is the run id only when none was typed before `--`.
+    before = typed[typed.index("replay") + 1 : first]
+    if args.parser.parse_known_args([*before, "--", _NO_RUN_ID])[0].run_id != _NO_RUN_ID:
+        return after  # RUN_ID came before `--`, and every word after it is the command
+    if after[1:] and after[1] != "--":
         args.parser.error(
             "RUN_ID comes before `-- CMD`: irimi replay RUN_ID -- CMD, or "
             "irimi replay -- RUN_ID -- CMD for a run id that starts with -"
         )
-    return cmd[1:]
+    return after[2:]
+
+
+# What `_replay_command` puts where a run id typed after `--` would be: no word anyone types.
+_NO_RUN_ID = "\0irimi: no run id\0"
 
 
 class _Tee:

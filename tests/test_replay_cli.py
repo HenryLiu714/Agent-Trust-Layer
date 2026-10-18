@@ -468,6 +468,21 @@ def test_args_from_a_file_and_a_command_with_a_call_is_a_usage_error(home, capfd
     assert "-- CMD runs a command, not a call" in capfd.readouterr().err
 
 
+@pytest.mark.parametrize("flag", ["--args", "--args-file"])
+def test_args_nested_deeper_than_the_stack_are_a_usage_error(capfd, tmp_path, flag):
+    """`--args` is typed by hand, or its file written so: JSON nested deeper than the stack raises
+    RecursionError, which argparse would let through as a traceback (#84)."""
+    deep = "[" * 200_000 + "]" * 200_000
+    (tmp_path / "args.json").write_text(deep)
+    value = deep if flag == "--args" else str(tmp_path / "args.json")
+    with pytest.raises(SystemExit) as usage:
+        main(["replay", "RUN", flag, value])
+    assert usage.value.code == 2
+    assert capfd.readouterr().err.splitlines()[-1] == (
+        f"irimi replay: error: argument {flag}: --args is nested deeper than it can be read"
+    )
+
+
 def test_a_refused_replay_s_result_file_holds_the_reason_irimi_gave(home, capfd, tmp_path):
     """`sdk.replay`'s caller gets the reason, not only the one who read stderr (#84)."""
     source = _record(home, f"replay_agent.handle({TICKET})")
@@ -686,6 +701,32 @@ def test_a_command_given_with_no_run_id_before_it_is_a_usage_error(home, capfd):
     assert code == 0
     assert _result(out)[2] == "  no divergence: every call was answered from the recording"
     assert main(["replay", "--port", "0", "--", source]) == 0
+
+
+@pytest.mark.parametrize(
+    ("typed", "command"),
+    [
+        (["replay", "RUN"], []),
+        (["replay", "RUN", "--", "pytest", "--", "-k", "x"], ["pytest", "--", "-k", "x"]),
+        (["replay", "--store", "s", "RUN", "--", "a", "--"], ["a", "--"]),
+        (["replay", "--", "RUN"], []),
+        (["replay", "--", "-RUN", "--", "pytest", "--", "-k"], ["pytest", "--", "-k"]),
+    ],
+)
+@pytest.mark.parametrize("strips_every_dashes", [False, True])
+def test_the_command_is_what_was_typed_whichever_dashes_argparse_strips(
+    typed, command, strips_every_dashes
+):
+    """An older argparse, which Python 3.12's earlier releases ship, strips every `--` from the
+    command, its own too; a newer one only the first. The command is what was typed either way
+    (#84)."""
+    from irimi import cli
+
+    args = cli.build_parser().parse_args(typed)
+    args.argv = typed
+    if strips_every_dashes:
+        args.cmd = [word for word in args.cmd if word != "--"]
+    assert cli._replay_command(args) == command
 
 
 def test_an_outcome_file_the_agent_nested_past_the_stack_is_no_outcome(home, capfd, tmp_path):

@@ -745,6 +745,11 @@ def run_list_line(record: RunRecord, events: Sequence[Event] | None) -> str:
     elapsed = run_elapsed(record)
     duration = NOT_SET if elapsed is None else f"{elapsed:.1f}s"
     trigger = printable(record.trigger.name) if record.trigger is not None else NOT_SET
+    # A run a replay stored is listed as the run it replayed, in place of its attribution: the
+    # one run `irimi replay` stores is `process`, which alone lists it as a shadow run (#154).
+    attribution: str = record.attribution
+    if record.replay_of is not None:
+        attribution = f"replay of {printable(record.replay_of)}"
     if events is None:
         exchanges = writes = "?"
     else:
@@ -758,7 +763,7 @@ def run_list_line(record: RunRecord, events: Sequence[Event] | None) -> str:
             started,
             duration,
             run_status(record),
-            record.attribution,
+            attribution,
             trigger,
             f"{exchanges} exchanges",
             f"{writes} writes",
@@ -789,9 +794,13 @@ def run_header_lines(record: RunRecord) -> list[str]:
             args = ARGS_TOO_DEEP
         if len(args) > MAX_ARGS_SHOWN:
             args = args[:MAX_ARGS_SHOWN] + "…"
-    lines = [
-        f"run: {record.run_id}",
-        f"attribution: {record.attribution}",
+    lines = [f"run: {record.run_id}", f"attribution: {record.attribution}"]
+    # A replay's run says so, and which run it replayed (#154); a shadow run's block is as it was.
+    if record.mode != "shadow":
+        lines.append(f"mode: {record.mode}")
+    if record.replay_of is not None:
+        lines.append(f"replay of: {printable(record.replay_of)}")
+    lines += [
         f"trigger: {printable(trigger.name) if trigger is not None else NOT_SET}",
         f"entrypoint: {printable(entrypoint)}",
         f"args: {printable(args)}",

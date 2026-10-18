@@ -349,6 +349,11 @@ the block `irimi shadow` printed on exit except in four places:
   `dropped_events` says how many, and `runs show` prints it. The unattributed events are not a
   run and have no `run.json` to count their drops in.
 
+A run a replay stored names the run it replayed (`replay_of`): `runs list` prints
+`replay of <run id>` in its attribution column, in place of the attribution, which for the one
+run `irimi replay` stores is `process` and would list it as an `irimi shadow` process run. `runs
+show` prints `mode: replay` and `replay of: <run id>` under the attribution (#154).
+
 `runs show` prints a stored record's text with each control character escaped (`\n`, `\x1b`): an
 error is the agent's own `str(exc)`, and printed raw it could break a line or drive the terminal.
 `runs list` counts each run's exchanges and writes from its events loaded without their bodies

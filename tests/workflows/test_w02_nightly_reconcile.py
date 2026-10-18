@@ -230,3 +230,19 @@ def test_a_replay_of_a_replay_answers_the_page_from_the_first_replay(replayed, t
     ]
     assert second.internet.requests() == []
     assert second.events("refunds", with_time=False) == recorded.events("refunds", with_time=False)
+    # `runs list` lists each replay as the run it replayed, and `runs show` names it (#154).
+    source = replayed_run_id(recorded)
+    middle, last = first.process_run_id(), second.process_run_id()
+    code, listed, _ = second.runs("list", "--store", str(second.store_root()))
+    assert code == 0
+    attributions = {line.split("  ")[0]: line.split("  ")[4] for line in listed}
+    replays = {run: a for run, a in attributions.items() if a.startswith("replay of ")}
+    assert replays == {middle: f"replay of {source}", last: f"replay of {middle}"}
+    code, shown, _ = second.runs("show", last, "--store", str(second.store_root()))
+    assert code == 0
+    assert shown[:4] == [
+        f"run: {last}",
+        "attribution: process",
+        "mode: replay",
+        f"replay of: {middle}",
+    ]

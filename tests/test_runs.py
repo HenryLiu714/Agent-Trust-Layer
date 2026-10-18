@@ -275,6 +275,39 @@ def test_runs_list_shows_a_labelled_run_newer_than_the_limit_s_worth_of_process_
     )
 
 
+def test_runs_list_and_show_name_the_run_a_replay_replayed(home, capfd):
+    """`irimi replay` stores its one run `attribution: process`, as `irimi shadow` stores one, so
+    `runs list` lists a replay as the run it replayed, `replay of <id>`, and `runs show` prints
+    its mode and the run it replayed under the attribution (#85, #154). The store stamps
+    `replay_of` and `mode: replay` on every run it is told is a replay, as `irimi replay`'s does."""
+    s = DirectoryStore(home / "store", redact.load_key(home))
+    s.start_run(_ended_run("recorded", HAND_BUILT_AT))
+    s.close()
+    replays = DirectoryStore(home / "store", redact.load_key(home), replay_of="recorded")
+    replays.start_run(_ended_run("replayed", HAND_BUILT_AT + 5))
+    replays.close()
+    assert main(["runs", "list"]) == 0
+    assert capfd.readouterr().out.splitlines() == [
+        f"replayed  {_local(HAND_BUILT_AT + 5)}  1.0s  ok  replay of recorded  -  "
+        "0 exchanges  0 writes",
+        f"recorded  {_local(HAND_BUILT_AT)}  1.0s  ok  process  -  0 exchanges  0 writes",
+    ]
+    assert main(["runs", "show", "replayed"]) == 0
+    assert capfd.readouterr().out.splitlines()[:5] == [
+        "run: replayed",
+        "attribution: process",
+        "mode: replay",
+        "replay of: recorded",
+        "trigger: -",
+    ]
+    assert main(["runs", "show", "recorded"]) == 0
+    assert capfd.readouterr().out.splitlines()[:3] == [
+        "run: recorded",
+        "attribution: process",
+        "trigger: -",
+    ]
+
+
 def test_runs_list_reads_no_body_to_count_a_run_s_events(home, capfd, monkeypatch):
     """Counting needs each event's kind and answer, never its body: a few runs of LLM streams were
     hundreds of MB read to print two numbers (#72)."""

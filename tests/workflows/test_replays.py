@@ -10,7 +10,7 @@ process that held several runs (W3, W5, W8, W9's control scenarios) is replayed 
 `irimi.sdk.replay_child` from its entrypoint and its recorded args, or a process run's argv. A run
 it cannot call - an `sdk.run` block or a `header` run with no entrypoint, args stored by their
 description - it refuses, exit 2, and those scenarios are replayed by their command instead
-(`-- <cmd>`, `BY_COMMAND`), which runs the agent's whole process, every run of it adopted into the
+(`-- <cmd>`, `REFUSED`), which runs the agent's whole process, every run of it adopted into the
 replay's one run. Either way a replay is ONE run, so another run of the process no longer takes the
 replayed run's answers (#155 for the runs replayed alone).
 

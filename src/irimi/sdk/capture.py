@@ -128,6 +128,38 @@ def _signature(fn: Callable[..., Any]) -> inspect.Signature:
     return inspect.signature(fn)
 
 
+def call_arguments(
+    fn: Callable[..., Any], arguments: Mapping[str, Any]
+) -> tuple[list[Any], dict[str, Any]]:
+    """`capture_call`'s binding undone (#84): the positional and keyword arguments that call `fn`
+    with `arguments`, `{parameter: value}` as a trigger's args are captured, revived. Each value
+    goes where its parameter takes it: the leading positional parameters in their places, up to the
+    first one the call left to its default, `*args` spread out after them, `**kwargs` spread in,
+    and every other by its name. TypeError when they do not bind to `fn`'s parameters, as calling
+    it would raise: a parameter missing or unknown, a `*args` value that is no sequence, a
+    `**kwargs` value that is no object."""
+    positional: list[Any] = []
+    named = dict(arguments)
+    in_place = True  # every positional parameter so far was given, so the next one may be too
+    for name, parameter in _signature(fn).parameters.items():
+        kind = parameter.kind
+        is_positional = kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+        if name not in named:
+            in_place = in_place and not is_positional
+            continue
+        if is_positional and in_place:
+            positional.append(named.pop(name))
+        elif kind is inspect.Parameter.VAR_POSITIONAL:
+            positional.extend(named.pop(name))
+        elif kind is inspect.Parameter.VAR_KEYWORD:
+            named.update(named.pop(name))
+    _signature(fn).bind(*positional, **named)
+    return positional, named
+
+
 class NotReplayable(Exception):
     """A captured value `revive` cannot turn back into the value it was (#83, #84): the reason."""
 

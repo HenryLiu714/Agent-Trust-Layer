@@ -3,7 +3,9 @@
 
 import contextvars
 import functools
+import importlib
 import inspect
+import types
 from collections.abc import Callable
 from dataclasses import dataclass
 from types import TracebackType
@@ -98,6 +100,39 @@ def entrypoint(f: Callable[..., Any], decorator: str = "@sdk.trigger") -> str:
             f"{decorator} wraps a function or a method, not {what}: decorate the function itself"
         )
     return f"{module}:{qualname}"
+
+
+class NotCallable(Exception):
+    """The trigger cannot be called from what `irimi replay` gave this process: the reason."""
+
+
+def resolve(entrypoint: str) -> Callable[..., Any]:
+    """The function `entrypoint`, `module:qualname`, names, imported: `entrypoint`'s inverse, which
+    a replay calls a trigger by (#84). A method defined on a class, called without the instance it
+    was bound to, is refused: the run recorded its args without `self` (#74). A `staticmethod` and
+    a `classmethod` are what their class gives."""
+    module_name, sep, qualname = entrypoint.partition(":")
+    if not sep or not module_name or not qualname:
+        raise NotCallable("it is not module:qualname")
+    try:
+        found: Any = importlib.import_module(module_name)
+    except (Exception, SystemExit) as exc:
+        # SystemExit too: a module that parses its argv as it is imported exits on irimi's.
+        raise NotCallable(f"importing {module_name} raised {type(exc).__name__}: {exc}") from None
+    owner: Any = None
+    for part in qualname.split("."):
+        owner = found
+        try:
+            found = getattr(found, part)
+        except AttributeError:
+            raise NotCallable(f"{module_name} has no {qualname}") from None
+    if isinstance(owner, type) and isinstance(
+        inspect.getattr_static(owner, qualname.rsplit(".", 1)[-1], None), types.FunctionType
+    ):
+        raise NotCallable("it is a method, and a run does not record the instance it was called on")
+    if not callable(found):
+        raise NotCallable(f"{qualname} is not callable")
+    return found
 
 
 class run:  # noqa: N801 - the SDK's spelling: `with sdk.run(...)`

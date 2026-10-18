@@ -19,8 +19,8 @@ An action whose body was cut when stored is never the same as another, whatever 
 first pass anchors none, and the second pairs it by key into a `cut` row, `?` (#79, #94).
 
 Pure, like `report`: `compare_runs` returns a `Comparison` and prints nothing. `irimi compare`
-prints `header_lines` over the comparison's lines, and `irimi replay` (#84) prints its own header
-over the same lines, so there is one alignment.
+prints `header_lines` over the comparison's lines, and `irimi replay` prints its own header over
+the same lines (`replay.Outcome`, #84), with `args_differ`'s note too, so there is one alignment.
 """
 
 import difflib
@@ -223,12 +223,12 @@ def header_lines(a: RunRecord, b: RunRecord) -> list[str]:
         f"  A  {report.run_label(a)}",
         f"  B  {report.run_label(b)}",
     ]
-    if _args_differ(a, b):
+    if args_differ(a, b):
         lines.append(f"  {ARGS_DIFFER}")
     return lines
 
 
-def _args_differ(a: RunRecord, b: RunRecord) -> bool:
+def args_differ(a: RunRecord, b: RunRecord) -> bool:
     """Compared as the JSON they are stored as, keys sorted: in Python `True == 1`, and the
     triggers' args `{"n": 1}` and `{"n": true}` differ. Args nested deeper than `json.dumps`
     writes are called different, since irimi cannot say they are the same (#100)."""

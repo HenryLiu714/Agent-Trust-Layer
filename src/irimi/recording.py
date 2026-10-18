@@ -329,21 +329,22 @@ class _ToolEntry:
     consumed: bool = False
 
 
-def _within(started_at: float, ended_at: float, call: ToolCall) -> bool:
+def made_within(started_at: float, ended_at: float, call: ToolCall) -> bool:
     """Whether an exchange or a tool call made over `started_at`..`ended_at` was made within
     `call`'s span, which is how a stored run says it was the call's body's: a tool call records no
     link to its HTTP or to the tools it called (#76). One another task made in the span is taken
     for the call's too, and so used up with it: in the replay it is then a miss, decided afresh,
     never an answer from the wrong world. One with no clock (`started_at` 0.0, built outside the
-    engine and the SDK) is within no call."""
+    engine and the SDK) is within no call. `irimi replay`'s count of the calls a replay never made
+    reads the same rule (#84)."""
     return 0.0 < started_at and call.started_at <= started_at and ended_at <= call.ended_at
 
 
 def _nested_in(other: ToolCall, call: ToolCall) -> bool:
-    """Whether the read tool call `other` was made within `call`'s span (`_within`). Never one
+    """Whether the read tool call `other` was made within `call`'s span (`made_within`). Never one
     with the same span, so two calls clocked alike never use each other up (#83)."""
     span = (other.started_at, other.ended_at)
-    return span != (call.started_at, call.ended_at) and _within(*span, call)
+    return span != (call.started_at, call.ended_at) and made_within(*span, call)
 
 
 def _displacing(
@@ -441,7 +442,9 @@ class Recording:
         made = [entry for entries in agent.values() for entry in entries]
         kept: list[tuple[_ToolKey, _ToolEntry]] = []
         for tool_key, call, at in calls:
-            inner = [e for e in made if _within(e.exchange.started_at, e.exchange.ended_at, call)]
+            inner = [
+                e for e in made if made_within(e.exchange.started_at, e.exchange.ended_at, call)
+            ]
             kept.append(
                 (tool_key, _ToolEntry(call, min([at, *(e.position for e in inner)]), inner))
             )

@@ -27,6 +27,7 @@ LAYERS: list[set[str]] = [
     {"engine"},
     {"report", "runner"},
     {"compare"},
+    {"replay"},
     {"cli"},
     {"__main__"},
 ]

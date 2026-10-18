@@ -214,6 +214,10 @@ def test_a_stale_irimi_replay_run_asks_no_recording_but_where_irimi_cannot_remov
     assert result.tools("read") == [("crm.find_accounts", "real")] * 2
     if mode != "bare":  # bare, the one warning is the real write's (`test_control_endpoint.py`)
         assert result.events("log") == []
+        # The run is the SDK's own, started and stored, never the stale id adopted (#84).
+        [start] = result.events("run.start")
+        assert start["run"] != STALE_REPLAY_RUN
+        assert [(r.run_id, r.attribution) for r in result.sdk_runs()] == [(start["run"], "sdk")]
 
 
 @pytest.mark.parametrize("mode", MODES)

@@ -576,8 +576,10 @@ def test_a_read_whose_recording_lost_its_upstream_fails_again_live(replayed, sce
 def test_a_run_that_died_after_its_write_replays_to_the_same_end(replayed, scenario):
     """The refund is answered from the recording, minted id and all, so the trigger, called alone
     (#84), dies just as it did - raising with the recorded refund's id, killed, or interrupted -
-    and `replay_child` exits as the agent did. The replay's run is the process's, ended with that
-    exit, and the trigger's own end is the recorded one's, or none at all."""
+    and `replay_child` exits as the agent did. The replay's run is the process's, ended with what
+    the trigger raised, under the type its recorded run stored (`replay_child`'s outcome, #84), or,
+    for a kill, which leaves the trigger no end to say, with that exit; and the trigger's own end
+    is the recorded one's, or none at all."""
     recorded, replay = replayed(W, scenario)
     assert replay.agent_exit_code() == recorded.exit_code != 0
     [refund] = [ex for ex in replay.reported if ex.request.path == "/v1/refunds"]
@@ -590,6 +592,16 @@ def test_a_run_that_died_after_its_write_replays_to_the_same_end(replayed, scena
         "process",
         "error",
         recorded.exit_code,
+    )
+    killed = ErrorInfo("exit", f"exited {recorded.exit_code}")
+    assert mine.error == (killed if source.outcome is None else source.error)
+    assert (
+        mine.error.type
+        == {
+            "raise_after_write": "builtins.RuntimeError",
+            "sigterm_mid_run": "exit",
+            "sigint_mid_run": "builtins.KeyboardInterrupt",
+        }[scenario]
     )
     ended = [(e["outcome"], e.get("error")) for e in recorded.events("run.end")]
     assert [(e["outcome"], e.get("error")) for e in replay.events("run.end")] == ended

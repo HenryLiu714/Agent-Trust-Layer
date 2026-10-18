@@ -297,8 +297,16 @@ def test_a_real_trigger_logs_one_run_with_the_real_id_and_nested_triggers_join(l
 
     outer_id, inner_id = outer(1, y="b")
     assert outer_id == inner_id == "real000000000001" == fake.minted[0]
-    assert obs("run.start") == [{"event": "run.start", "name": "outer", "run": outer_id}]
-    # The run's end says what the trigger returned (#84).
+    # The run's start says the type of each argument the trigger was called with, and its end
+    # what the trigger returned (#84).
+    assert obs("run.start") == [
+        {
+            "event": "run.start",
+            "name": "outer",
+            "run": outer_id,
+            "called_with": {"x": "int", "y": "str"},
+        }
+    ]
     assert obs("run.end") == [
         {
             "event": "run.end",

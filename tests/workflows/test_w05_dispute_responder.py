@@ -253,6 +253,13 @@ def test_the_raw_webhook_body_is_revived_as_bytes_and_the_trigger_replays(replay
     assert set(run.trigger.args["raw"]) == {"__irimi_bytes__"}
     assert base64.b64decode(run.trigger.args["raw"]["__irimi_bytes__"]).startswith(b"{")
     assert (replay.exit_code, replay.agent_exit_code()) == (0, 0)
-    assert replay.returned() == recorded.returned()
-    assert "  no divergence: every call was answered from the recording" in replay.replay_result()
+    # The trigger was called with `bytes` again, as when it was recorded, and did what it did.
+    called_with = {"raw": "bytes", "signature": "str"}
+    assert replay.one("run.start")["called_with"] == called_with
+    assert recorded.one("run.start")["called_with"] == called_with
+    assert replay.returned() == recorded.returned() == "refund"
+    assert replay.replay_result()[1:3] == [
+        "  agent exited 0",
+        "  no divergence: every call was answered from the recording",
+    ]
     assert replay.internet.requests() == []

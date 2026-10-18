@@ -18,11 +18,15 @@ A replay of a recording its agent makes again owes:
 
 1. invariants 1 to 4, and no write reaching a fake service but an escape irimi never saw;
 2. the exit code its recording had: a trigger called alone exits 0 for a run that ended `ok` and 1
-   for one that raised, and a command exits as the recorded process did;
+   for one that raised, and a command exits as the recorded process did; and a trigger called
+   alone, or a process run's argv, ends the replay's run as the recorded run ended, a raised
+   builtin stored under its recorded type (#83, #84);
 3. every exchange the policy decided flagged `from-recording` or `replay-miss`, never both;
 4. every answer irimi decided reaching the agent stamped `Irimi-Answered-By`, as irimi recorded it;
 5. `irimi replay`'s comparison of the recorded run with its replay (#79, #84) printing `=` rows, or
-   a `?` pair for a write whose body was cut, and exiting 0, or 1 for the cut;
+   a `?` pair for a write whose body was cut, and exiting 0, or 1 for the cut; its result never
+   saying the triggers' args differ, since the replay was given the recorded ones (#79), and its
+   result file saying what it printed and exited (`result_problems`);
 6. nothing reaching the fake internet but what the replay could not answer from that run, each
    one a read or llm call it forwarded as a miss, telemetry, or an escape irimi never saw - and
    nothing at all for a scenario whose one run the recording holds whole;
@@ -53,6 +57,7 @@ from examples.workflows.harness.run import (
     workflows,
 )
 from irimi import replay as irimi_replay
+from irimi.compare import ARGS_DIFFER
 from irimi.exchange import (
     BODY_TRUNCATED_FLAG,
     DECISION_FAILED_FLAG,
@@ -229,6 +234,16 @@ EXIT_DIFFERS = {
 }
 # Rule 5's exception: the comparison differs, and why.
 COMPARE_DIFFERS = {(W3, "async_run"): _ALL_RUNS}
+# Rule 2's end's exception: a trigger called alone that ends otherwise than its recorded run, but
+# exits as it did, by scenario: (the recorded run's error type, the replay's, and why).
+ENDS_DIFFER = {
+    (W3, "cancelled_on_shutdown"): (
+        "asyncio.exceptions.CancelledError",
+        "builtins.AssertionError",
+        "the stuck message's trigger waits on the event `main()`'s shutdown creates and then "
+        "cancels; called alone it finds none, and raises",
+    ),
+}
 # Rule 9 cannot hold for an agent that names its runs itself and posts its tool calls itself too
 # (W9's control scenarios, `test_w09_scope_gauntlet.py`): its posts name the recorded runs again,
 # which a replay's store files as `unattributed` (#82), and it logs none; nor rule 7's "no
@@ -325,6 +340,42 @@ def tool_problems(recorded: Result, r: Replayed, for_real: dict[str, str], logs:
     if stored != logged:
         problems.append(f"stored {sorted(stored.elements())}, logged {sorted(logged.elements())}")
     return problems
+
+
+def result_problems(r: Replayed) -> list[str]:
+    """Rule 5's result: what `irimi replay --result-file` wrote (#84) names the run replayed and the
+    replay's one run, exits as `irimi replay` did, and holds the divergence point its lines name,
+    or none when they name none; and no replay given the recorded args says they differ (#79)."""
+    result, replay = r.replay.replay, r.replay
+    assert result is not None
+    problems = []
+    if (result.source_run_id, result.replay_run_id) != (r.run_id, replay.process_run_id()):
+        problems.append(f"names {result.source_run_id} -> {result.replay_run_id}")
+    if result.exit_code != replay.exit_code:
+        problems.append(f"result exit {result.exit_code}, irimi replay exited {replay.exit_code}")
+    said = [line for line in result.lines if line.startswith("  diverged at ")]
+    owed = [] if result.diverged_at is None else [f"  diverged at {result.diverged_at}"]
+    if said != owed:
+        problems.append(f"diverged_at {result.diverged_at!r}, lines {said}")
+    if f"  {ARGS_DIFFER}" in result.lines:
+        problems.append(ARGS_DIFFER)
+    return problems
+
+
+def end_problems(recorded: Result, r: Replayed) -> list[str]:
+    """Rule 2's end: a trigger called alone, or a process run's argv, ends the replay's run as the
+    recorded run ended (#84): `ok`, or `error` with what it raised, under the type the recording
+    stored, `builtins.KeyError` for a `KeyError` (#83), and a process run with its exit. A run the
+    recording never saw end (a kill) owes nothing here."""
+    source = recorded.stored().load_run(r.run_id).record
+    if r.by_command or source.outcome is None:
+        return []
+    mine = r.replay.stored().load_run(r.replay.process_run_id()).record
+    if (mine.outcome, mine.error) != (source.outcome, source.error):
+        recorded_type = source.error.type if source.error is not None else None
+        replayed_type = mine.error.type if mine.error is not None else None
+        return [f"ended {mine.outcome} {replayed_type}, recorded {source.outcome} {recorded_type}"]
+    return []
 
 
 def flag_problems(replay: Result) -> list[str]:
@@ -434,6 +485,11 @@ def test_every_run_of_every_scenario_replays_from_its_recording(
         expected = EXIT_DIFFERS.get(case, (*owed, ""))[:2]
         if not alone_differs:
             assert (recorded.exit_code, replay.agent_exit_code()) == expected, r.run_id
+            ended = end_problems(recorded, r)
+            if case in ENDS_DIFFER:
+                was, now, _ = ENDS_DIFFER[case]
+                ended = [p for p in ended if p != f"ended error {now}, recorded error {was}"]
+            assert ended == [], r.run_id
         # 3. Every looked-up exchange says whether the recording answered it.
         lost = flag_problems(replay)
         if case in CUT_BEFORE_THE_POLICY:
@@ -452,6 +508,7 @@ def test_every_run_of_every_scenario_replays_from_its_recording(
         totals = " · 0 changed · 0 only in A · 0 only in B" in rows[-1]
         if case not in COMPARE_DIFFERS and not alone_differs:
             assert (code, same, totals) == (1 if cut else 0, True, True), (r.run_id, rows)
+        assert result_problems(r) == [], r.run_id
         # 6. Nothing else reaches the fake internet.
         assert unaccounted(replay, spec.leaks) == [], r.run_id
         if case not in REACHES_THE_INTERNET:
@@ -505,6 +562,8 @@ def test_every_run_of_every_scenario_replays_from_its_recording(
         assert any(r.compared and r.compared[0] == 1 for r in replays)
     if case in CALLS_FEWER:
         assert any(calls(r.replay) != owed_calls(recorded, r) for r in replays)
+    if case in ENDS_DIFFER:
+        assert any(end_problems(recorded, r) for r in replays)
     ran = [
         (c.name, c.kind, c.ran)
         for r in replays
@@ -542,6 +601,7 @@ def test_the_tables_name_only_scenarios_that_exist():
         | CUT_BEFORE_THE_POLICY
         | set(EXIT_DIFFERS)
         | set(COMPARE_DIFFERS)
+        | set(ENDS_DIFFER)
         | NAMES_ITS_OWN_RUNS
         | NOTHING_RECORDED
         | set(CALLS_FEWER)

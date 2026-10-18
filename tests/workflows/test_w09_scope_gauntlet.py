@@ -1127,3 +1127,18 @@ def test_a_process_run_with_no_trigger_replays_by_running_its_argv_again(run_wor
     ]
     assert replay.internet.requests() == []
     assert replay.exit_code == 0
+    assert replay.replay_result() == [
+        f"irimi replay · {source.run_id} → {replay.process_run_id()} · - → -",
+        "  agent exited 0",
+        "  no divergence: every call was answered from the recording",
+        "  9 from the recording · 0 missed",
+        "",
+        "  = ○ DELETE api.stripe.com/v1/customers/cus_GAUNTLET  unclassified (L0)",
+        "  = ○ PATCH api.stripe.com/v1/customers/cus_GAUNTLET  unclassified (L0)",
+        "  = ○ PUT api.stripe.com/v1/charges/ch_GAUNTLET  unclassified (L0)",
+        "  = ○ POST api.stripe.com/v1/subscriptions  unclassified (L0)",
+        "  = ○ cancel pi_GAUNTLET  unvalidated (L1)",
+        "  = ○ add :eyes: to a message in C0GAUNT  unvalidated (L0)",
+        "",
+        "  6 same · 0 changed · 0 only in A · 0 only in B",
+    ]

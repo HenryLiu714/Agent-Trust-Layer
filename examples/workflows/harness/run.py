@@ -53,6 +53,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from examples.workflows import sdk as agent_sdk
 from examples.workflows.harness.internet import BOMB_SECRET, FakeInternet, Req
 from examples.workflows.harness.services import CLIENT_SECRET_CANARY, World
 from irimi import ca, cli, paths, report, runner, sdk, servicemap, trace
@@ -194,10 +195,10 @@ class Result:
     def returned(self) -> Any:
         """What the one trigger the agent's run started with returned, as its `run.end` logged it
         (`examples/workflows/sdk.py`, #84): a replay that calls the trigger alone logs no `result`.
-        Raises unless exactly one run ended, and ended `ok`."""
+        Raises unless exactly one run ended, and ended `ok`, and its end says what it returned."""
         end = self.one("run.end")
         assert end["outcome"] == "ok", end
-        return end.get("returned")
+        return end["returned"]
 
     def calls(self, label: str | None = None) -> list[dict[str, Any]]:
         """The agent's HTTP calls (`http` events), in order: all of them, or those with `label`."""
@@ -466,11 +467,12 @@ def replay(
 
 
 def sdk_replay(recorded: Result, run_id: str, workdir: Path, *call: Any) -> Result:
-    """`sdk.replay(run_id, *call)` (#84) called as a test calls it, a `replay` of `recorded` in
-    every other way. `sdk.replay`'s one seam, `sdk.replays._run_irimi`, runs `irimi` in this process
-    instead of a subprocess, so the fake internet resolves its names and the scenario's maps load:
-    the agent is still a child process of its own, `replay_child`, as `irimi replay` starts it. The
-    result's `replay` is what `sdk.replay` returned."""
+    """`sdk.replay(run_id, *call)` (#84) called as a test calls it, through the agents' own `sdk`
+    (`examples/workflows/sdk.py`, which forwards `replay` to `irimi.sdk`), a `replay` of
+    `recorded` in every other way. `sdk.replay`'s one seam, `sdk.replays._run_irimi`, runs `irimi`
+    in this process instead of a subprocess, so the fake internet resolves its names and the
+    scenario's maps load: the agent is still a child process of its own, `replay_child`, as `irimi
+    replay` starts it. The result's `replay` is what `sdk.replay` returned."""
     return _replayed(recorded, run_id, workdir, None, _Replay(call=call))
 
 
@@ -590,7 +592,8 @@ def _execute(
         elif mode == "replay":
             assert replay_of is not None and how is not None
             argv = ["replay", "--port", "0", *flags, "--result-file", str(result_file)]
-            argv += [*how.options, "--", replay_of, *(cmd if how.command else [])]
+            # As its user types it: the run id, then `-- <cmd>` for a command (#84).
+            argv += [*how.options, replay_of, *(["--", *cmd] if how.command else [])]
             with _watching_the_store(reported, handed, handed_events):
                 if how.call is None:
                     run_irimi = lambda: irimi_main(argv)  # noqa: E731
@@ -646,7 +649,7 @@ def _calling_sdk_replay(
         real = sdk_replays._run_irimi
         sdk_replays._run_irimi = lambda argv, env: irimi_main(argv)
         try:
-            got = sdk.replay(run_id, *call, store=store)
+            got = agent_sdk.replay(run_id, *call, store=store)
         finally:
             sdk_replays._run_irimi = real
         result_file.write_text(json.dumps(got.to_json()), encoding="utf-8")

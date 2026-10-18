@@ -11,9 +11,9 @@ into the one store its workflow's runs share, or into the one named `store`, onc
 `traced_run(name, scenario)` runs a scenario's shadow run once more, uncached, and returns it with
 the most memory Python held at once while it ran (#94).
 
-`replayed(name, scenario, env, run_id, command)` replays a run of a scenario's shadow run by
-`irimi replay`, in a copy of its home, with `env` over the scenario's environment, once per session
-(#82, #84).
+`replayed(name, scenario, env, run_id, command, options)` replays a run of a scenario's shadow run
+by `irimi replay`, in a copy of its home, with `env` over the scenario's environment and `options`
+given to `irimi replay` (`--call`, `--args`), once per session (#82, #84).
 """
 
 import dataclasses
@@ -28,8 +28,9 @@ from examples.workflows.harness.run import Result, replay, replayed_run_id, run,
 _CACHE: dict[tuple[str, str, str], Result] = {}
 _SHARED: dict[tuple[str, str, str], Result] = {}  # (store, scenario, mode)
 _STORES: dict[str, Path] = {}
-# (workflow, scenario, env, the run replayed, by the scenario's command)
-_REPLAYS: dict[tuple[str, str, tuple[tuple[str, str], ...], str, bool], tuple[Result, Result]] = {}
+# (workflow, scenario, env, the run replayed, by the scenario's command, irimi replay's options)
+_ReplayKey = tuple[str, str, tuple[tuple[str, str], ...], str, bool, tuple[str, ...]]
+_REPLAYS: dict[_ReplayKey, tuple[Result, Result]] = {}
 
 
 @pytest.fixture
@@ -91,7 +92,8 @@ def replayed(run_workflow, tmp_path_factory):
     """`(recorded, replay)`: `run_workflow`'s shadow run of the scenario, and its run `run_id` -
     by default its one run, `replayed_run_id` - replayed by `irimi replay` with `env` over the
     scenario's own (#82, #84), once per session: what `irimi replay` runs for the run, or with
-    `command` the scenario's own agent command.
+    `command` the scenario's own agent command, and `options` given to `irimi replay` as well
+    (`--call`, `--args`, #84).
 
     The replay runs in a copy of the recording's `IRIMI_HOME`, its store included: a replay
     records into the store it answers from, and the shadow run's own pins read its store whole.
@@ -104,10 +106,11 @@ def replayed(run_workflow, tmp_path_factory):
         env: dict[str, str] | None = None,
         run_id: str | None = None,
         command: bool = False,
+        options: tuple[str, ...] = (),
     ) -> tuple[Result, Result]:
         recorded = run_workflow(name, scenario, "shadow")
         run_id = run_id if run_id is not None else replayed_run_id(recorded)
-        key = (name, scenario, tuple(sorted((env or {}).items())), run_id, command)
+        key = (name, scenario, tuple(sorted((env or {}).items())), run_id, command, options)
         if key not in _REPLAYS:
             workdir = tmp_path_factory.mktemp(f"{name}-{scenario}-replay")
             home = workdir / "recorded-home"
@@ -115,7 +118,7 @@ def replayed(run_workflow, tmp_path_factory):
             source = dataclasses.replace(recorded, home=home)
             _REPLAYS[key] = (
                 recorded,
-                replay(source, run_id, workdir / "replay", env, command=command),
+                replay(source, run_id, workdir / "replay", env, options, command=command),
             )
         return _REPLAYS[key]
 

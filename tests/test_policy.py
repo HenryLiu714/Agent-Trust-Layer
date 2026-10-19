@@ -1725,9 +1725,14 @@ def test_a_rejection_whose_fixture_will_not_load_says_so(monkeypatch):
 class _Upstream(BaseHTTPRequestHandler):
     status = 200
     body = b'{"object": "charge"}'
+    location: str | None = None
+    seen: list[str] = []
 
     def do_GET(self):
+        _Upstream.seen.append(self.path)
         self.send_response(_Upstream.status)
+        if _Upstream.location is not None:
+            self.send_header("location", _Upstream.location)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(_Upstream.body)))
         self.end_headers()
@@ -1740,6 +1745,8 @@ class _Upstream(BaseHTTPRequestHandler):
 @pytest.fixture
 def upstream(monkeypatch):
     monkeypatch.setattr(_Upstream, "status", 200)
+    monkeypatch.setattr(_Upstream, "location", None)
+    monkeypatch.setattr(_Upstream, "seen", [])
     srv = HTTPServer(("127.0.0.1", 0), _Upstream)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     yield srv.server_address[1]
@@ -1769,6 +1776,40 @@ def test_an_unreachable_upstream_is_none_and_not_a_raise():
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     assert UpstreamReader()(_local(port)) is None
+
+
+def _dead_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def test_the_upstream_reader_dials_the_upstream_whatever_proxy_the_shell_exported(
+    upstream, monkeypatch
+):
+    """NO PROXY (#85's verification): `urlopen`'s default opener sent the engine's own read to the
+    `HTTP_PROXY`/`HTTPS_PROXY` a shell exported, which mitmproxy's forwarding never reads, so a
+    dead proxy made every L3 check `not_evaluable`. The read reaches the upstream it names."""
+    dead = f"http://127.0.0.1:{_dead_port()}"
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY"):
+        monkeypatch.setenv(name, dead)
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    response = UpstreamReader()(_local(upstream))
+    assert response is not None
+    assert (response.status, response.body) == (200, _Upstream.body)
+    assert _Upstream.seen == ["/v1/charges/ch_1"]
+
+
+def test_the_upstream_reader_returns_a_redirect_and_never_follows_it(upstream, monkeypatch):
+    """NO REDIRECT (#85's verification): the read dials the host the classifier saw and no other,
+    so a 302 comes back as the answer it is, and wherever it pointed is never asked."""
+    monkeypatch.setattr(_Upstream, "status", 302)
+    monkeypatch.setattr(_Upstream, "location", f"http://127.0.0.1:{upstream}/elsewhere")
+    response = UpstreamReader()(_local(upstream))
+    assert response is not None
+    assert response.status == 302
+    assert _Upstream.seen == ["/v1/charges/ch_1"]
 
 
 # ------------------------------------------------------------------ the idempotency store (#46)

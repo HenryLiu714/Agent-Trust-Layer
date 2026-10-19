@@ -20,7 +20,8 @@ and says whether anything about it is expected to differ from a bare run.
   as `irimi shadow` starts none.
 
 - **replay**: one run a scenario stored under `irimi shadow` is replayed by `irimi replay <run id>`
-  (#84), in THIS process too, in the same `IRIMI_HOME`, with a fresh `World` from the same `setup`,
+  (#84), in THIS process too, in a copy of the recording's `IRIMI_HOME` and store, so the replay
+  never adds its run to a recording another test reads, with a fresh `World` from the same `setup`,
   so anything not answered from the recording reaches the fake internet and shows up there. The
   replay runs what `irimi replay` runs for that run: its trigger, called by `irimi.sdk.replay_child`
   from its entrypoint and args, or a process run's argv; or, with `command`, the scenario's own
@@ -303,14 +304,13 @@ class Result:
 
     def summary(self) -> list[str]:
         """irimi's closing block, from its `N exchanges` header on. `irimi replay` prints its result
-        instead (#84), so a replay's is its run's summary as `irimi runs show` prints it."""
+        instead (#84), so a replay's is its run's summary as `irimi runs show` prints it, which
+        opens `irimi replay · run` and never `irimi shadow · run` (#154)."""
         if self.mode == "replay":
             run_id = self.process_run_id()
             _, out, _ = self.runs("show", run_id, "--store", str(self.store_root()))
             start = next(
-                i
-                for i, line in enumerate(out)
-                if line.startswith(f"irimi shadow · run {run_id} · ")
+                i for i, line in enumerate(out) if line.startswith(_summary_headers(run_id)[1])
             )
             return out[start:]
         for i, line in enumerate(self.irimi):
@@ -386,9 +386,7 @@ class Result:
         assert (code, err) == (0, []), (run_id, code, err)
         fields = dict(line.split(": ", 1) for line in out[: out.index("")])
         label = f"{fields['trigger']}  {fields['entrypoint']}  agent {fields['agent version']}"
-        start = next(
-            i for i, line in enumerate(out) if line.startswith(f"irimi shadow · run {run_id} · ")
-        )
+        start = next(i for i, line in enumerate(out) if line.startswith(_summary_headers(run_id)))
         writes = [line[2:] for line in out[start:] if line.startswith(WRITE_LINE_PREFIXES)]
         return label, writes
 
@@ -406,6 +404,12 @@ class Result:
                 return servicemap.load()
             except servicemap.MapError:
                 return None
+
+
+def _summary_headers(run_id: str) -> tuple[str, str]:
+    """The line `irimi runs show` opens a stored run's summary with: `irimi replay · run` for a
+    replay's run, which printed no summary live, `irimi shadow · run` for any other (#154)."""
+    return (f"irimi shadow · run {run_id} · ", f"irimi replay · run {run_id} · ")
 
 
 def workflows() -> dict[str, Workflow]:
@@ -454,9 +458,10 @@ def replay(
     command: bool = False,
 ) -> Result:
     """`run_id`, a run `recorded` stored, replayed by `irimi replay <run_id>` (#82, #84):
-    `recorded`'s scenario, recorded under `irimi shadow` or itself a replay, in its `IRIMI_HOME`
-    and its store, with `env` over the scenario's own environment - `PROMPT=half` is the prompt
-    edit - and `options` given to `irimi replay` too (`--call`, `--args`). What runs is what
+    `recorded`'s scenario, recorded under `irimi shadow` or itself a replay, in a copy of its
+    `IRIMI_HOME` and its store under `workdir`, so `recorded` reads its store as it was and the
+    replay's holds both, with `env` over the scenario's own environment - `PROMPT=half` is the
+    prompt edit - and `options` given to `irimi replay` too (`--call`, `--args`). What runs is what
     `irimi replay` runs for the run, or, with `command`, the scenario's agent command. The result
     file `irimi replay` writes is the result's `replay`.
 
@@ -493,13 +498,25 @@ def _replayed(
         raise ValueError(
             f"replay takes a run recorded under shadow or replayed, not {recorded.mode}"
         )
+    # A replay records into the store it answers from, so it runs in a copy of `recorded`'s home,
+    # and of the store it was given: never in `recorded`'s own, which a session-cached recording
+    # or replay shares with every test that reads it. A replay of the cached replay wrote its run
+    # there, and `test_replays.py`'s rule 9 then failed for W1 `full_refund` whenever W1's
+    # replay-of-a-replay tests ran first (found under #85; on main since #84).
+    workdir.mkdir(parents=True, exist_ok=True)
+    home = workdir / "recorded-home"
+    shutil.copytree(recorded.home, home)
+    store = None
+    if recorded.store is not None:
+        store = workdir / "recorded-store"
+        shutil.copytree(recorded.store, store)
     return _execute(
         recorded.workflow,
         recorded.scenario,
         "replay",
         workdir,
-        recorded.store,
-        home=recorded.home,
+        store,
+        home=home,
         env=env or {},
         replay_of=run_id,
         how=how,

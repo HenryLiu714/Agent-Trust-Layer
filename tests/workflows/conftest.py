@@ -16,8 +16,6 @@ by `irimi replay`, in a copy of its home, with `env` over the scenario's environ
 given to `irimi replay` (`--call`, `--args`), once per session (#82, #84).
 """
 
-import dataclasses
-import shutil
 import tracemalloc
 from pathlib import Path
 
@@ -95,10 +93,11 @@ def replayed(run_workflow, tmp_path_factory):
     `command` the scenario's own agent command, and `options` given to `irimi replay` as well
     (`--call`, `--args`, #84).
 
-    The replay runs in a copy of the recording's `IRIMI_HOME`, its store included: a replay
-    records into the store it answers from, and the shadow run's own pins read its store whole.
-    So `recorded` is that shadow run, its store as it recorded it, and `replay.stored()` holds the
-    recording and the replay. Each replay gets a copy of its own, so no replay reads another's."""
+    The replay runs in a copy of the recording's `IRIMI_HOME`, its store included, which `replay`
+    makes: a replay records into the store it answers from, and the shadow run's own pins read its
+    store whole. So `recorded` is that shadow run, its store as it recorded it, and
+    `replay.stored()` holds the recording and the replay. Each replay gets a copy of its own, so no
+    replay reads another's, and a replay of this replay copies it in turn (#85)."""
 
     def get(
         name: str,
@@ -112,13 +111,12 @@ def replayed(run_workflow, tmp_path_factory):
         run_id = run_id if run_id is not None else replayed_run_id(recorded)
         key = (name, scenario, tuple(sorted((env or {}).items())), run_id, command, options)
         if key not in _REPLAYS:
+            # `replay` runs in a copy of the recording's home of its own (#85), so neither the
+            # recording nor this cached replay is changed by a replay made after it.
             workdir = tmp_path_factory.mktemp(f"{name}-{scenario}-replay")
-            home = workdir / "recorded-home"
-            shutil.copytree(recorded.home, home)
-            source = dataclasses.replace(recorded, home=home)
             _REPLAYS[key] = (
                 recorded,
-                replay(source, run_id, workdir / "replay", env, options, command=command),
+                replay(recorded, run_id, workdir / "replay", env, options, command=command),
             )
         return _REPLAYS[key]
 

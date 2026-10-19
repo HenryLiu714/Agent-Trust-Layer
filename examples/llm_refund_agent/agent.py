@@ -147,7 +147,11 @@ def ask_model(system: str, content: str) -> dict[str, Any]:
     if answer.get("stop_reason") in ("refusal", "max_tokens"):
         raise ValueError(f"the model stopped without a decision: {answer['stop_reason']}")
     text = next((b["text"] for b in answer.get("content", []) if b.get("type") == "text"), None)
-    decision = json.loads(text) if isinstance(text, str) else None
+    # Text that is not JSON is no decision either, and the error says what the model said (#85).
+    try:
+        decision = json.loads(text) if isinstance(text, str) else None
+    except json.JSONDecodeError:
+        decision = None
     if not (
         isinstance(decision, dict)
         and type(decision.get("refund_amount")) is int

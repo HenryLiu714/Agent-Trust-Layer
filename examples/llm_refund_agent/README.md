@@ -33,8 +33,9 @@ entrypoint is importable. It refuses a Stripe key that is not `sk_test_`.
 
 ## Running the live half
 
-You need a Stripe test-mode key, an Anthropic API key and `uv`, with the `examples` group installed
-for the seed script (`uv sync --group examples`). From the repository root:
+You need a Stripe test-mode key, an Anthropic API key and `uv`, with irimi's CA made
+(`scripts/setup.sh` runs `irimi init`) and the `examples` group installed for the charge's seed
+script (`uv sync --group examples`). From the repository root:
 
 ```
 export STRIPE_API_KEY=sk_test_... ANTHROPIC_API_KEY=sk-ant-...
@@ -51,8 +52,8 @@ The model is `claude-opus-5`; set `ANTHROPIC_MODEL` to use another. The agent's 
 A pass looks like this:
 
 - **The recording.** `irimi shadow` prints the customer lookup run for real, the charge read and
-  the model call live, the refund `fake-L1`, and `record_decision`'s stand-in. `irimi runs list`
-  shows the run as `sdk  handle_ticket`.
+  the model call live, the refund `fake-L1`, and `record_decision`'s stand-in. The run id it
+  prints is the process's; `irimi runs list` shows the run to replay as `sdk  handle_ticket`.
 - **The replay.** It ends with a block that names the model call as where it diverged, and the
   refund as the write that changed:
 

@@ -33,6 +33,7 @@ the function that runs an AgentRun through the proxy and says what changed, `iri
 import contextlib
 import json
 import os
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -45,6 +46,7 @@ import pytest
 
 from examples.llm_refund_agent import agent, seed
 from examples.llm_refund_agent.agent import Ticket, handle_ticket
+from examples.workflows.harness.internet import resolving_only
 from irimi import ca, paths, runner, sdk
 from irimi.cli import main
 from irimi.exchange import Exchange
@@ -64,18 +66,24 @@ HALF = "○ refund $24.50 on ch_A  unvalidated (L3 preconditions passed)"
 RECORDED = f"○ tool {AGENT}.record_decision  shadow stand-in ran"
 # The names the stubs answer as, which only irimi's process resolves, to loopback.
 SERVED = ("api.stripe.com", "api.anthropic.com")
+# How long one irimi process may take: a CI runner starts an agent in seconds, so this is a hang.
+# irimi dumps every thread's stack to its stderr before the test gives up on it, so a hang on a
+# slow runner says where it was (#85).
+TIMEOUT_S = 120
 # irimi as `irimi.cli.main`, in a process where `SERVED` resolves to loopback, the stubs' ports
-# being in the agent's URLs, and no other name resolves at all. With no proxy variable set, urllib
-# there (irimi's L3 read) falls back to the system's proxy settings, which would carry it past the
-# fake names to a real proxy: `*` keeps it direct, as the sample workflows keep theirs (#89).
-# irimi sets its child's own `NO_PROXY`.
+# being in the agent's URLs, and no other name resolves at all. irimi's L3 read names no proxy
+# (`UpstreamReader`, since #85), but anything else there that asks urllib would take the shell's or
+# the system's proxy past the fake names: `*` keeps it direct, as the sample workflows keep theirs
+# (#89). irimi sets its child's own `NO_PROXY`.
 IRIMI = f"""
+import faulthandler
 import os
 import sys
 
 from examples.workflows.harness.internet import resolving_only
 from irimi import cli
 
+faulthandler.dump_traceback_later({TIMEOUT_S - 20}, exit=True)
 os.environ["NO_PROXY"] = os.environ["no_proxy"] = "*"
 with resolving_only({SERVED!r}):
     sys.exit(cli.main(sys.argv[1:]))
@@ -85,9 +93,10 @@ with resolving_only({SERVED!r}):
 class _Model(BaseHTTPRequestHandler):
     """Anthropic's `POST /v1/messages`, deciding from the system prompt alone: the charge's whole
     remaining amount for `prompt.txt`, half of it for `prompt_half.txt`. A request the real API
-    would refuse - no key or version header, no model or `max_tokens`, no JSON-schema output
-    format - and any other prompt is a 400. Answers as `claude-opus-5` does, its empty `thinking`
-    block first. Records every request's body."""
+    would refuse - no key or version header, no model, `max_tokens` or messages, no JSON-schema
+    output format or one that leaves `additionalProperties` open - and any other prompt is a 400.
+    Answers as `claude-opus-5` does, its empty `thinking` block first. Records every request's
+    body."""
 
     seen: list[dict[str, Any]] = []
 
@@ -95,13 +104,17 @@ class _Model(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)))
         _Model.seen.append(body)
         prompts = {PROMPT.read_text(): 1, PROMPT_HALF.read_text(): 2}
+        output = body.get("output_config", {}).get("format", {})
         well_formed = (
             self.path == "/v1/messages"
             and self.headers.get("x-api-key")
             and self.headers.get("anthropic-version") == agent.ANTHROPIC_VERSION
             and body.get("model")
             and body.get("max_tokens")
-            and body.get("output_config", {}).get("format", {}).get("type") == "json_schema"
+            and body.get("messages")
+            and output.get("type") == "json_schema"
+            # Structured outputs refuse an object schema that leaves `additionalProperties` open.
+            and output.get("schema", {}).get("additionalProperties") is False
             and body.get("system") in prompts
         )
         if not well_formed:
@@ -157,6 +170,16 @@ def stubs():
 
 
 @pytest.fixture
+def direct(monkeypatch):
+    """The agent called in this process reaches a loopback stub directly, whatever proxy the shell
+    or the system names: an in-process call is not under irimi, and is not meant to be (#85)."""
+    for name in [n for n in os.environ if n.lower().endswith("_proxy")]:
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
+
+
+@pytest.fixture
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
     monkeypatch.chdir(tmp_path)
@@ -187,15 +210,20 @@ def _agent_env(home: Path, stripe_port: int, model_port: int) -> dict[str, str]:
 
 def _irimi(env: dict[str, str], *argv: str) -> subprocess.CompletedProcess[str]:
     """`irimi <argv>` through `IRIMI`, from the repository root, so the child it starts imports
-    `examples.llm_refund_agent` as the agent's user would."""
-    return subprocess.run(
-        [sys.executable, "-c", IRIMI, *argv],
-        cwd=ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    `examples.llm_refund_agent` as the agent's user would. A hang fails with what irimi printed,
+    its threads' stacks included."""
+    try:
+        return subprocess.run(
+            [sys.executable, "-c", IRIMI, *argv],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        said = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr
+        pytest.fail(f"irimi {argv[0]} did not end in {TIMEOUT_S}s; its stderr:\n{said}")
 
 
 def _replay(
@@ -228,8 +256,11 @@ def _event(event: Exchange | ToolCall | Any) -> tuple[Any, ...]:
 
 
 def _tool_calls(reader: StoreReader, run_id: str) -> dict[str, ToolCall]:
-    events = reader.load_run(run_id).events
-    return {e.name.removeprefix(f"{AGENT}."): e for e in events if isinstance(e, ToolCall)}
+    """The run's tool calls by name; each tool is called once a run, so a second call fails."""
+    calls = [e for e in reader.load_run(run_id).events if isinstance(e, ToolCall)]
+    named = {e.name.removeprefix(f"{AGENT}."): e for e in calls}
+    assert len(named) == len(calls), [e.name for e in calls]
+    return named
 
 
 def _anonymous(result: sdk.ReplayResult) -> tuple[Any, ...]:
@@ -248,6 +279,13 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
 ):
     """The Phase 3 exit criterion for use case 1 (#85)."""
     assert set(SERVED).isdisjoint(runner.NO_PROXY_VALUE.split(",")), "the trap: see the module doc"
+    # The bootstrap's rule, before irimi relies on it: each served name is loopback, so nothing
+    # irimi sends in this test can leave the machine (#89). Were it the real address, a forward
+    # would hang on a real host's closed port until the timeout, rather than fail here.
+    with resolving_only(SERVED):
+        for name in SERVED:
+            assert socket.gethostbyname(name) == "127.0.0.1"
+            assert {a[4][0] for a in socket.getaddrinfo(name, 443)} == {"127.0.0.1"}
     env = _agent_env(home, *stubs)
     store = home / "store"
     db = home / "agent.sqlite3"
@@ -367,7 +405,8 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
 
     # --- The function form, from a test (feature 4): the same two replays, the same results.
     def run_irimi(argv: list[str], env: dict[str, str]) -> int:
-        return subprocess.run([sys.executable, "-c", IRIMI, *argv], env=dict(env)).returncode
+        command = [sys.executable, "-c", IRIMI, *argv]
+        return subprocess.run(command, env=dict(env), timeout=TIMEOUT_S).returncode
 
     monkeypatch.setattr(replays, "_run_irimi", run_irimi)
     for name in [n for n in os.environ if n.lower().endswith("_proxy")]:
@@ -394,6 +433,7 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
     assert main(["runs", "list", "--store", str(store)]) == 0
     columns = [line.split("  ") for line in capsys.readouterr().out.splitlines()]
     listed = {column[0]: column[4] for column in columns}
+    assert len(listed) == len(columns)
     replayed = [same, edited, by_function, by_function_edited]
     assert listed == {
         **{r.run_id: r.attribution for r in records},
@@ -415,7 +455,7 @@ def test_the_agent_run_as_main_refuses_and_says_how_to_start_it(argv):
     assert done.stderr == "start the agent by module name: python -m examples.llm_refund_agent\n"
 
 
-def test_the_agent_sends_no_stripe_key_that_is_not_test_mode(monkeypatch, stubs):
+def test_the_agent_sends_no_stripe_key_that_is_not_test_mode(monkeypatch, stubs, direct):
     """The check is on the request path, so a replay, which calls the trigger without `main()`,
     makes it too (#85): a live key is refused before anything is sent."""
     monkeypatch.setenv(agent.STRIPE_KEY_ENV, "sk_live_nope")
@@ -436,7 +476,89 @@ def test_the_agent_takes_no_decision_from_an_answer_that_stopped_short(monkeypat
         agent.ask_model(PROMPT.read_text(), "{}")
 
 
-def test_an_error_status_says_what_the_service_said(monkeypatch, stubs):
+@pytest.mark.parametrize(
+    "answer",
+    [
+        # `pause_turn`: a turn the API paused, with no text yet. This agent uses no server tools,
+        # so it should never see one; if it does, there is no decision in it.
+        {"stop_reason": "pause_turn", "content": [{"type": "thinking", "thinking": ""}]},
+        {"stop_reason": "end_turn", "content": [{"type": "text", "text": "Refund it all."}]},
+        {"stop_reason": "end_turn", "content": [{"type": "text", "text": "[4900]"}]},
+        {"stop_reason": "end_turn", "content": [{"type": "text", "text": '{"refund_amount": 1}'}]},
+        {
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": '{"refund_amount": true, "reply": ""}'}],
+        },
+        {
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": '{"refund_amount": "4900", "reply": ""}'}],
+        },
+    ],
+)
+def test_the_agent_takes_no_decision_from_an_answer_that_holds_none(monkeypatch, answer):
+    """An answer is acted on only when its text is the decision `DECISION_SCHEMA` asks for: an
+    integer amount (not `true`, which Python counts as 1) and a reply (#85)."""
+    monkeypatch.setattr(agent, "_call", lambda request: answer)
+    with pytest.raises(ValueError, match="the model did not answer with a decision: "):
+        agent.ask_model(PROMPT.read_text(), "{}")
+
+
+@pytest.mark.parametrize("amount", [4900, 0])
+def test_outside_irimi_the_agent_refunds_what_the_model_decided_and_records_it(
+    tmp_path, monkeypatch, amount
+):
+    """The control for every "nothing happened" assertion above: run with no irimi, the agent's
+    tools run for real, so `record_decision` writes its row, and the refund is asked of Stripe -
+    none when the model decides nothing (#85)."""
+    monkeypatch.delenv(paths.ENGINE_ACTIVE_ENV, raising=False)
+    db = tmp_path / "agent.sqlite3"
+    seed.seed(str(db), TICKET[1], CUSTOMER)
+    monkeypatch.setenv(agent.DB_ENV, str(db))
+    charge = {"id": "ch_A", "amount": 4900, "amount_refunded": 0, "currency": "usd"}
+    asked: list[tuple[str, str, dict[str, str] | None]] = []
+
+    def stripe(method: str, path: str, form: dict[str, str] | None = None) -> dict[str, Any]:
+        asked.append((method, path, form))
+        return charge
+
+    told: list[dict[str, Any]] = []
+
+    def ask_model(system: str, content: str) -> dict[str, Any]:
+        told.append(json.loads(content))
+        return {"refund_amount": amount, "reply": "Done."}
+
+    monkeypatch.setattr(agent, "stripe", stripe)
+    monkeypatch.setattr(agent, "ask_model", ask_model)
+    assert handle_ticket(Ticket(*TICKET)) == "Done."
+    refund = [("POST", "/v1/refunds", {"charge": "ch_A", "amount": str(amount)})]
+    assert asked == [("GET", "/v1/charges/ch_A", None), *(refund if amount else [])]
+    assert told == [
+        {
+            "ticket": {"ticket_id": "T1", "charge": "ch_A", "message": "double charged"},
+            "customer": {"charge": "ch_A", "name": CUSTOMER},
+            "charge": charge,
+        }
+    ]
+    assert _decisions(db) == [("T1", amount, "Done.")]
+
+
+def test_the_read_tool_raises_for_a_database_that_is_not_there_and_makes_none(
+    tmp_path, monkeypatch
+):
+    """Why deleting the database proves a replay's `lookup_customer` came from the recording: the
+    real one, run with no database, raises rather than answer from an empty file it made (#85)."""
+    monkeypatch.delenv(paths.ENGINE_ACTIVE_ENV, raising=False)
+    db = tmp_path / "agent.sqlite3"
+    monkeypatch.setenv(agent.DB_ENV, str(db))
+    with pytest.raises(sqlite3.OperationalError):
+        agent.lookup_customer("ch_A")
+    assert not db.exists()
+    seed.seed(str(db), "ch_A", CUSTOMER)
+    assert agent.lookup_customer("ch_A") == {"charge": "ch_A", "name": CUSTOMER}
+    assert agent.lookup_customer("ch_B") == {"charge": "ch_B", "name": None}
+
+
+def test_an_error_status_says_what_the_service_said(monkeypatch, stubs, direct):
     """urllib's own message names only the status; the agent's carries the service's error body,
     so the live half says what was wrong."""
     monkeypatch.setenv(agent.ANTHROPIC_BASE_ENV, f"http://127.0.0.1:{stubs[1]}")

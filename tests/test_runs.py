@@ -278,34 +278,61 @@ def test_runs_list_shows_a_labelled_run_newer_than_the_limit_s_worth_of_process_
 def test_runs_list_and_show_name_the_run_a_replay_replayed(home, capfd):
     """`irimi replay` stores its one run `attribution: process`, as `irimi shadow` stores one, so
     `runs list` lists a replay as the run it replayed, `replay of <id>`, and `runs show` prints
-    its mode and the run it replayed under the attribution (#85, #154). The store stamps
-    `replay_of` and `mode: replay` on every run it is told is a replay, as `irimi replay`'s does."""
+    its mode and the run it replayed under the attribution, and opens its summary `irimi replay`
+    (#85, #154). The store stamps `replay_of` and `mode: replay` on every run it is told is a
+    replay, as `irimi replay`'s does: an `sdk` run started there and a `header` run an
+    `Irimi-Run` label makes there too, and each keeps its attribution in the column."""
     s = DirectoryStore(home / "store", redact.load_key(home))
     s.start_run(_ended_run("recorded", HAND_BUILT_AT))
     s.close()
     replays = DirectoryStore(home / "store", redact.load_key(home), replay_of="recorded")
     replays.start_run(_ended_run("replayed", HAND_BUILT_AT + 5))
+    replays.start_run(_ended_run("started", HAND_BUILT_AT + 6, attribution="sdk"))
+    replays.record(dataclasses.replace(_refund("labelled"), started_at=HAND_BUILT_AT + 7))
     replays.close()
     assert main(["runs", "list"]) == 0
     assert capfd.readouterr().out.splitlines() == [
+        f"labelled  {_local(HAND_BUILT_AT + 7)}  -  incomplete  header, replay of recorded  -  "
+        "1 exchanges  1 writes",
+        f"started  {_local(HAND_BUILT_AT + 6)}  1.0s  ok  sdk, replay of recorded  -  "
+        "0 exchanges  0 writes",
         f"replayed  {_local(HAND_BUILT_AT + 5)}  1.0s  ok  replay of recorded  -  "
         "0 exchanges  0 writes",
         f"recorded  {_local(HAND_BUILT_AT)}  1.0s  ok  process  -  0 exchanges  0 writes",
     ]
     assert main(["runs", "show", "replayed"]) == 0
-    assert capfd.readouterr().out.splitlines()[:5] == [
+    shown = capfd.readouterr().out.splitlines()
+    assert shown[:5] == [
         "run: replayed",
         "attribution: process",
         "mode: replay",
         "replay of: recorded",
         "trigger: -",
     ]
+    assert "irimi replay · run replayed · 0 exchanges · 1.0s · backstop: none (Phase 4)" in shown
+    assert not any(line.startswith("irimi shadow · ") for line in shown)
     assert main(["runs", "show", "recorded"]) == 0
-    assert capfd.readouterr().out.splitlines()[:3] == [
+    shown = capfd.readouterr().out.splitlines()
+    assert shown[:3] == [
         "run: recorded",
         "attribution: process",
         "trigger: -",
     ]
+    assert "irimi shadow · run recorded · 0 exchanges · 1.0s · backstop: none (Phase 4)" in shown
+
+
+def test_a_damaged_replay_record_is_still_marked_and_prints_on_one_line():
+    """No irimi writes a `mode: replay` run that names no run, or a `replay_of` that is not a run
+    id, but `runs list` reads what a hand-edited or damaged `run.json` holds (#100): the first is
+    still marked a replay, and the second is escaped as every stored text is (#154)."""
+    unnamed = _ended_run("x", HAND_BUILT_AT, mode="replay")
+    assert report.run_attribution(unnamed) == "process, replay"
+    assert "mode: replay" in report.run_header_lines(unnamed)
+    odd = _ended_run("y", HAND_BUILT_AT, attribution="sdk", replay_of="a\nb\x1b")
+    assert report.run_attribution(odd) == "sdk, replay of a\\nb\\x1b"
+    assert "replay of: a\\nb\\x1b" in report.run_header_lines(odd)
+    assert "\n" not in report.run_list_line(odd, [])
+    assert report.run_attribution(_ended_run("z", HAND_BUILT_AT)) == "process"
 
 
 def test_runs_list_reads_no_body_to_count_a_run_s_events(home, capfd, monkeypatch):

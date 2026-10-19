@@ -350,9 +350,14 @@ the block `irimi shadow` printed on exit except in four places:
   run and have no `run.json` to count their drops in.
 
 A run a replay stored names the run it replayed (`replay_of`): `runs list` prints
-`replay of <run id>` in its attribution column, in place of the attribution, which for the one
-run `irimi replay` stores is `process` and would list it as an `irimi shadow` process run. `runs
-show` prints `mode: replay` and `replay of: <run id>` under the attribution (#154).
+`replay of <run id>` in its attribution column in place of `process`, the attribution of the one
+run `irimi replay` stores, which alone would list it as an `irimi shadow` process run. Any other
+run a replay's store holds - an `sdk` run, or a `header` run an `Irimi-Run` label made - keeps its
+attribution in front: `header, replay of <run id>`. `runs show` prints `mode: replay` and
+`replay of: <run id>` under the attribution, and opens the run's summary `irimi replay · run`
+where a shadow run's opens `irimi shadow · run`: `irimi replay` prints its comparison on exit, not
+a summary, so a replay's block is the one place `runs show`'s summary was never printed live
+(#154).
 
 `runs show` prints a stored record's text with each control character escaped (`\n`, `\x1b`): an
 error is the agent's own `str(exc)`, and printed raw it could break a line or drive the terminal.

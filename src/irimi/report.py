@@ -631,13 +631,18 @@ def stored_summary_lines(run: StoredRun, index: MapIndex | None) -> list[str]:
     Where a stored line may still differ from the live one: redaction replaced a field a `human:`
     template renders, the path of a request no route matched on a credential-path host, which the
     write line spells out, or an event the store dropped (docs/trace-format.md, "Reading a run
-    back").
+    back"). A replay's run printed no summary live, and its block opens `irimi replay` (#154).
     """
     exchanges = [event for event in run.events if isinstance(event, Exchange)]
     telemetry = [event.host for event in run.events if isinstance(event, TelemetrySeen)]
     tool_calls = [event for event in run.events if isinstance(event, ToolCall)]
     elapsed = run_elapsed(run.record)
-    return _summary(run.record.run_id, exchanges, telemetry, elapsed or 0.0, index, tool_calls)
+    # A replay's run opens `irimi replay · run`: `irimi replay` printed its comparison and no
+    # summary, and a block opening `irimi shadow` said a replay was a shadow run (#154).
+    command = "replay" if run.record.mode == "replay" else "shadow"
+    return _summary(
+        run.record.run_id, exchanges, telemetry, elapsed or 0.0, index, tool_calls, command
+    )
 
 
 def _summary(
@@ -647,6 +652,7 @@ def _summary(
     elapsed_s: float,
     index: MapIndex | None,
     tool_calls: Sequence[ToolCall],
+    command: str = "shadow",
 ) -> list[str]:
     """The one implementation of the summary. `exchanges` holds no telemetry; `telemetry` is one
     host per telemetry exchange, each of them forwarded live (#72). A tool call is not an exchange
@@ -669,7 +675,7 @@ def _summary(
     delegated = sum(1 for ex in exchanges if ex.answered_by == "delegated")
     virtualized = total - live - delegated
     lines = [
-        f"irimi shadow · run {run_id} · {_plural(total, 'exchange')} · "
+        f"irimi {command} · run {run_id} · {_plural(total, 'exchange')} · "
         f"{elapsed_s:.1f}s · backstop: {BACKSTOP}"
     ]
     host_lines = _host_lines(exchanges, telemetry)
@@ -745,11 +751,6 @@ def run_list_line(record: RunRecord, events: Sequence[Event] | None) -> str:
     elapsed = run_elapsed(record)
     duration = NOT_SET if elapsed is None else f"{elapsed:.1f}s"
     trigger = printable(record.trigger.name) if record.trigger is not None else NOT_SET
-    # A run a replay stored is listed as the run it replayed, in place of its attribution: the
-    # one run `irimi replay` stores is `process`, which alone lists it as a shadow run (#154).
-    attribution: str = record.attribution
-    if record.replay_of is not None:
-        attribution = f"replay of {printable(record.replay_of)}"
     if events is None:
         exchanges = writes = "?"
     else:
@@ -763,12 +764,27 @@ def run_list_line(record: RunRecord, events: Sequence[Event] | None) -> str:
             started,
             duration,
             run_status(record),
-            attribution,
+            run_attribution(record),
             trigger,
             f"{exchanges} exchanges",
             f"{writes} writes",
         ]
     )
+
+
+def run_attribution(record: RunRecord) -> str:
+    """`irimi runs list`'s attribution column (#154). A run a replay stored is listed as the run it
+    replayed: `replay of <id>` for the process run `irimi replay` stores, which `process` alone
+    lists as a shadow run, and after its attribution for any other, since a replay's store makes
+    `header` runs and `sdk` runs too and the column must not hide which (`<attribution>, replay of
+    <id>`). A record that says `mode: replay` and names no run - one no irimi writes - is still
+    marked (`<attribution>, replay`)."""
+    if record.replay_of is not None:
+        replayed = f"replay of {printable(record.replay_of)}"
+        return replayed if record.attribution == "process" else f"{record.attribution}, {replayed}"
+    if record.mode != "shadow":
+        return f"{record.attribution}, {record.mode}"
+    return record.attribution
 
 
 def run_label(record: RunRecord) -> str:

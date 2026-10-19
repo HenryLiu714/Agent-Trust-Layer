@@ -774,7 +774,7 @@ irimi replay · 725dc6add559a16f → d63663c6da8905c7 · - → -
   it replayed, `mode: replay` and `replay_of`, and ends it with the child's exit code, so
   `irimi runs show` and `irimi compare` read it, and a replay can be replayed. `irimi runs list`
   lists it as `replay of <run id>`, and `runs show` prints `mode: replay` and
-  `replay of: <run id>` (#154).
+  `replay of: <run id>` and opens its summary `irimi replay · run` (#154).
 - **From the recording, and missed.** A request the recording holds is answered with its recorded
   answer, in the order it was recorded, flagged `from-recording`; a read tool the recording holds
   returns its recorded result (`ran: recording`). Anything else misses: the request is decided as
@@ -854,10 +854,11 @@ use. `IRIMI_HOME` moves irimi's state (see `.env.example`).
 
 `runs list`, `runs show` and `compare` take `--store DIR` too. `runs list` prints each run's id,
 start, duration, status (`ok`, `error`, or `incomplete` for one that never ended), attribution
-(`replay of <run id>` for a replay's run), trigger, and its exchange and write counts. `runs show`
-prints the summary `irimi shadow` printed for the run, from what was stored; `runs show
-unattributed` shows the exchanges no run claimed. See
-[Reading a run back](docs/trace-format.md#reading-a-run-back) for where the two summaries differ.
+(`replay of <run id>` for a replay's run, `header, replay of <run id>` for a run an
+`Irimi-Run` label made in a replay), trigger, and its exchange and write counts. `runs show`
+prints the summary `irimi shadow` printed for the run, from what was stored (a replay's run, which
+printed none, opens its block `irimi replay`); `runs show unattributed` shows the exchanges no run
+claimed. See [Reading a run back](docs/trace-format.md#reading-a-run-back) for where the two summaries differ.
 
 To install irimi as a standalone tool instead of using the venv, run `uv tool install .` or
 `pipx install .` from the repo root.
@@ -958,7 +959,8 @@ by phase.
   a write forwarded (#82). Read tools answered from the recording in a replay, and write tools
   through their stand-ins (#83). `irimi replay` and `sdk.replay()`: a stored run's trigger re-run
   against its recording, and what changed (#84). An LLM agent recorded, its prompt edited and
-  replayed, and the Phase 3 exit test for use case 1 (#85).
+  replayed, and the Phase 3 exit test for use case 1 (#85). `runs list` and `runs show` say
+  which run a replay replayed (#154).
 
 **Next: the rest of Phase 3, the run**
 

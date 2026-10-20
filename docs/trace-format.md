@@ -339,7 +339,7 @@ one run: its record, every event in `seq` order, and its summary (#72). That sum
 `report.stored_summary_lines`, the same code that prints the live one, fed the run's exchanges,
 one host per `TelemetrySeen`, each counted as forwarded live because telemetry always is, and its
 tool calls, each write whose stand-in ran printed as a line after the writes (#76). It equals
-the block `irimi shadow` printed on exit except in four places:
+the block `irimi shadow` printed on exit except in five places:
 
 - **The elapsed seconds.** The live summary times the child; a stored one is the run's
   `ended_at - started_at`, never negative, or `0.0` when either is `null`.
@@ -348,7 +348,12 @@ the block `irimi shadow` printed on exit except in four places:
 - **A write no route matched on a credential-path host.** Its line spells out the request, and
   the stored path is a placeholder (`hooks.slack.com`'s webhook path, say). A write a route *did*
   match there prints the map's sentence as it did live: its path matches no route once stored,
-  so the route is found by the `operation` the exchange recorded (`MapIndex.route_named`).
+  so the route is found by the `operation` the exchange recorded (`MapIndex.route_named`). A
+  write irimi refused with its body cut spells out the request live too, so it differs the same
+  way (#112).
+- **A write irimi refused whose body only the store cut.** Its decision raised and its body was
+  past `MAX_STORED_BODY`: live, it prints the map's sentence and `refused by irimi
+  (decision-failed)`; stored, the request it was and `(decision-failed, body-truncated)` (#112).
 - **An event the store dropped.** It is in the live summary and not in the stored one; the run's
   `dropped_events` says how many, and `runs show` prints it. The unattributed events are not a
   run and have no `run.json` to count their drops in.

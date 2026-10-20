@@ -13,6 +13,8 @@ from typing import assert_never
 from irimi import netaddr
 from irimi.bodies import reflect
 from irimi.exchange import (
+    BODY_TRUNCATED_FLAG,
+    DECISION_FAILED_FLAG,
     FROM_RECORDING_FLAG,
     IDEMPOTENCY_CONFLICT_FLAG,
     IDEMPOTENT_REPLAY_FLAG,
@@ -188,6 +190,12 @@ WOULD_HAVE_FIRED = "Would have fired:"
 # class of lie as counting a delegated read as live (#20) - the summary would show a write
 # safely handled by the stub when the stub was not running.
 TARGET_UNREACHABLE = "target unreachable"
+# A write irimi answered with its own 502 because it could not decide about it: the decision
+# raised, or the body decodes past what irimi reads (#94). It was refused, not faked (#112).
+REFUSED_BY_IRIMI = "refused by irimi"
+# The flags that say why, named in the order the exchange carries them. A fixed list, not every
+# flag: `unclassified` is the classification the refusal was recorded under, not a reason (#112).
+REFUSAL_REASONS: tuple[str, ...] = (DECISION_FAILED_FLAG, BODY_TRUNCATED_FLAG)
 
 # Currencies with no minor unit: ¥4900 is four thousand nine hundred yen, not ¥49.00. Stripe's
 # own zero-decimal list, which is the one the amounts in these bodies are denominated in.
@@ -429,12 +437,22 @@ def _write_line(exchange: Exchange, index: MapIndex | None) -> str:
 def write_sentence(exchange: Exchange, index: MapIndex | None) -> str:
     """One intercepted write, as the map's own sentence plus what irimi did with it: its summary
     line without the indent and before it is escaped, which `irimi compare` decides two writes are
-    the same by (#79)."""
+    the same by (#79). A write irimi refused with a body it never read whole is spelled as the
+    request it was instead (#112)."""
+    refused = DECISION_FAILED_FLAG in exchange.flags
+    # A `human:` sentence is never filled in from a body irimi did not read: a refused write whose
+    # body was cut renders every field `?`, the same line for every such refund (#112).
+    unread = refused and BODY_TRUNCATED_FLAG in exchange.flags
     route = _route_of(exchange, index)
-    if route is not None and route.human:
+    if route is not None and route.human and not unread:
         what = render_human(route.human, exchange, route)
     else:
         what = f"{exchange.request.method} {exchange.request.host}{exchange.request.path}"
+    # A write irimi could not decide about got irimi's own 502: it was refused, not faked, so it
+    # takes `✗` and names the flags that say why, in the order it carries them (#112).
+    if refused:
+        reasons = ", ".join(flag for flag in exchange.flags if flag in REFUSAL_REASONS)
+        return f"{REJECTED_MARKER} {what}  {REFUSED_BY_IRIMI} ({reasons})"
     if exchange.answered_by == "delegated":
         what = f"{what} → {exchange.target}"
     if _failed_target(exchange):
@@ -629,9 +647,11 @@ def stored_summary_lines(run: StoredRun, index: MapIndex | None) -> list[str]:
     where the live summary timed the child; a run with no start or no end has `0.0`.
 
     Where a stored line may still differ from the live one: redaction replaced a field a `human:`
-    template renders, the path of a request no route matched on a credential-path host, which the
-    write line spells out, or an event the store dropped (docs/trace-format.md, "Reading a run
-    back"). A replay's run printed no summary live, and its block opens `irimi replay` (#154).
+    template renders, the path of a request on a credential-path host that the write line spells
+    out, because no route matched it or irimi refused it with its body cut (#112), a write irimi
+    refused whose body only the store cut, spelled out and naming `body-truncated` stored (#112),
+    or an event the store dropped (docs/trace-format.md, "Reading a run back"). A replay's run
+    printed no summary live, and its block opens `irimi replay` (#154).
     """
     exchanges = [event for event in run.events if isinstance(event, Exchange)]
     telemetry = [event.host for event in run.events if isinstance(event, TelemetrySeen)]

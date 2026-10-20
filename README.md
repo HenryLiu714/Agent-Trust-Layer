@@ -185,6 +185,12 @@ And a refund the real service would have refused, from `w01_ticket_triage double
 - Each write gets one line, written from its route's `human:` template with this request's fields.
   The bracket says what irimi knew: `L3 preconditions passed`, `L2` when the check could not be
   made, `L1` or `L0` when the route has no check, and `unclassified` for a route no map names.
+- A write irimi could not decide about got irimi's own 502: it was refused, not faked. Its line
+  takes `✗` and the flags that say why, as
+  `✗ refund $49.00 on ch_N000  refused by irimi (decision-failed)` when the decision raised. A
+  body that decodes past what irimi reads is never read, so no `human:` sentence is filled in
+  from it, and the line spells out the request:
+  `✗ POST api.stripe.com/v1/refunds  refused by irimi (decision-failed, body-truncated)`.
 - An `engine read` is one irimi made itself for an L3 check. It is counted apart, so "reads are
   real" means the reads your agent made.
 - A `↳` line is one of the agent's own later reads of that service. `saw it  overlay` is a read
@@ -712,7 +718,7 @@ irimi compare · 42e7ad03a867410b vs 5cf7f4695f22ce95 · a comparison, not a ver
 - **A cut body is `?`.** A pair either of whose writes was stored with a body cut short
   (`body-truncated`, the request's or the response's) is `?`, not compared, whatever its lines
   say, and never `=`: a body cut, or dropped for its size, renders one line for different
-  requests, so two cut refunds of different amounts both print `refund ? on ?`. That holds for a
+  requests, so two cut refunds of different amounts can print the same line. That holds for a
   run compared with itself too. The totals count `?` rows as not compared.
 - **Exit code.** As `diff(1)`'s: 0 when every write is `=`, 1 when any is not, `?` included, and
   2 when a run is not in the store or cannot be read. A run compared with itself exits 0 unless

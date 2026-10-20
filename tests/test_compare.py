@@ -296,7 +296,7 @@ def test_two_writes_whose_bodies_were_cut_are_not_compared_and_not_called_the_sa
 
 def test_a_cut_pair_whose_lines_read_the_same_is_still_not_compared_and_exits_1(home, capfd):
     """A body cut when stored, or dropped as #94 drops one past the cap, renders one line for
-    different requests: two cut refunds of different amounts both print `refund ? on ?`. Compared
+    different requests: two cut refunds of different amounts can print the same line. Compared
     by its line, the pair was `=` and exited 0. A pair either side of which was cut is `?`,
     whatever its lines say (#79)."""
     cut = _refund(flags=(BODY_TRUNCATED_FLAG,))

@@ -5,14 +5,24 @@ from dataclasses import replace
 from pathlib import Path
 
 from irimi.exchange import (
+    BODY_TRUNCATED_FLAG,
+    DECISION_FAILED_FLAG,
     FROM_RECORDING_FLAG,
     IDEMPOTENCY_CONFLICT_FLAG,
     IDEMPOTENT_REPLAY_FLAG,
+    REDACTION_FAILED_FLAG,
+    UNCLASSIFIED_FLAG,
     Exchange,
     Request,
     Response,
 )
-from irimi.report import banner_lines, delegated_lines, exchange_line, summary_lines
+from irimi.report import (
+    banner_lines,
+    delegated_lines,
+    exchange_line,
+    summary_lines,
+    write_sentence,
+)
 from irimi.runner import EngineThread, child_env, exit_code_for
 
 
@@ -713,6 +723,58 @@ def test_an_idempotency_conflict_prints_as_a_write_that_would_fail():
     line = _block(lines, "would fail")
     assert line == "  ✗ refund $49.00 on ch_3QabcXYZ  would fail: idempotency_error"
     assert _block(lines, "api.stripe.com") == "  api.stripe.com  2 writes intercepted"
+
+
+# ------------------------------------------------------------ a write irimi refused (#112)
+
+
+def test_a_write_irimi_could_not_decide_prints_as_refused_and_names_why():
+    """irimi answered this refund with its own 502: its body decodes past what irimi reads (#94),
+    so it was recorded with no body and flagged. Rendered through its route's `human:` template it
+    printed `○ refund ? on ?  unclassified (L0)`, a faked write described from a body irimi never
+    read. It prints as refused, `✗`, as the request it was, with the flags that say why in the
+    order it carries them, and no other flag (#112). It is still a write that did not happen."""
+    cut = _exchange(
+        method="POST",
+        kind="unknown",
+        answered_by="fake-L0",
+        status=502,
+        path="/v1/refunds",
+        content_type=FORM,
+        flags=(UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG, BODY_TRUNCATED_FLAG, REDACTION_FAILED_FLAG),
+    )
+    lines = summary_lines("7f3a", [cut], 0.0, _maps())
+    assert [line for line in lines if line.startswith(("  ○ ", "  ✗ "))] == [
+        "  ✗ POST api.stripe.com/v1/refunds  refused by irimi (decision-failed, body-truncated)"
+    ]
+    assert _block(lines, "api.stripe.com") == (
+        "  api.stripe.com  1 write intercepted (1 unclassified)"
+    )
+    assert lines[-1] == "  These writes did not happen."
+
+
+def test_a_write_whose_decision_raised_prints_its_sentence_as_refused():
+    """A decision that raised read the whole body, so the refusal keeps the map's sentence, and two
+    refunds of different amounts that both raised print, and compare, as different writes (#79):
+    the request line alone would read the same for both (#112)."""
+    raised = _exchange(
+        method="POST",
+        kind="unknown",
+        answered_by="fake-L0",
+        status=502,
+        path="/v1/refunds",
+        body=b"charge=ch_3QabcXYZ&amount=4900&currency=usd",
+        content_type=FORM,
+        flags=(UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG),
+    )
+    assert write_sentence(raised, _maps()) == (
+        "✗ refund $49.00 on ch_3QabcXYZ  refused by irimi (decision-failed)"
+    )
+    body = b"charge=ch_3QabcXYZ&amount=2450&currency=usd"
+    half = replace(raised, request=replace(raised.request, body=body))
+    assert write_sentence(half, _maps()) == (
+        "✗ refund $24.50 on ch_3QabcXYZ  refused by irimi (decision-failed)"
+    )
 
 
 # ------------------------------ the reads that saw a write, and what it would have fired (#48)

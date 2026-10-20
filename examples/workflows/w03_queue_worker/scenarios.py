@@ -83,6 +83,12 @@ WORKFLOW = Workflow(
             doc="threads_8 with the ledger tools: each message's read tool on its pool thread and "
             "its write tool in the propagated refund thread, all landing in its own run (#76)",
         ),
+        "ledger_two_tools_8": Scenario(
+            ("ledger_two_tools_8",),
+            setup=_charges,
+            doc="ledger_threads_8 with every odd message's ledger row written by a second write "
+            "tool: two tool names ending at once, printed in the order they ended (#120)",
+        ),
         "ledger_asyncio_8": Scenario(
             ("ledger_asyncio_8",),
             setup=_charges,

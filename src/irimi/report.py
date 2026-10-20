@@ -631,9 +631,10 @@ def summary_lines(
 ) -> list[str]:
     """The exit summary (#13): what ran, what was real, what irimi answered, and what that means.
 
-    Built from the exchanges the engine reported and the tool calls the control endpoint passed
-    on (#76), each in the order it arrived. `stored_summary_lines` prints the same block from a
-    stored run, and both are `_summary`, so the two cannot drift (#72).
+    Built from the exchanges the engine reported, in the order they arrived, and the tool calls
+    the control endpoint passed on (#76), which `_summary` puts in the order they ended (#120).
+    `stored_summary_lines` prints the same block from a stored run, and both are `_summary`, so
+    the two cannot drift (#72).
 
     `index` is the loaded maps, used only to find each write's `human:` template. Without it the
     writes still get a line, spelled as the request they were.
@@ -709,7 +710,19 @@ def _summary(
     for write, reads in paired:
         write_lines.append(_write_line(write, index))
         write_lines += _overlay_lines(reads)
-    stood_in = [call for call in tool_calls if is_stood_in(call)]
+    # In the order the calls ended, whatever order they came in: live, the order their posts
+    # reached the control endpoint, which two tools ending at once on two threads can reverse, and
+    # stored, `seq` order within each run (#120). The start, the id and then the line itself break
+    # a tie, since a call posted by hand can repeat another's id and times.
+    stood_in = sorted(
+        (call for call in tool_calls if is_stood_in(call)),
+        key=lambda call: (
+            call.ended_at,
+            call.started_at,
+            call.tool_call_id,
+            tool_write_sentence(call),
+        ),
+    )
     write_lines += [tool_write_line(call) for call in stood_in]
     if write_lines:
         lines += ["", *write_lines]

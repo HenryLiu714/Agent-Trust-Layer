@@ -24,7 +24,9 @@ a `Worker`'s methods, and `async with sdk.run(...)` around a block.
 The `ledger_*` scenarios keep the worker's own SQLite ledger of refunds with `@sdk.tool`s (#76):
 reads that run for real, a write whose stand-in runs under shadow, sync and async, called from
 four threads at once, from eight asyncio tasks at once and from a thread that lost its run, and,
-on the `Worker`, a plain method, a static method and a class method.
+on the `Worker`, a plain method, a static method and a class method. `ledger_two_tools_8` writes
+every odd message's row through a second write tool, so tool calls of two names end at once on
+four threads (#120).
 
     python -m examples.workflows.launch \\
         examples.workflows.w03_queue_worker.agent <scenario>
@@ -272,6 +274,13 @@ def record_refund(charge: str, amount: int) -> dict[str, Any]:
     return {"recorded": True, "charge": charge}
 
 
+@sdk.tool(kind="write", shadow=_record_stand_in)
+def mark_refunded(charge: str, amount: int) -> dict[str, Any]:
+    """`record_refund` under another name: the worker's second way to write the same row (#120)."""
+    _insert_refund(charge, amount)
+    return {"recorded": True, "charge": charge}
+
+
 async def _record_async_stand_in(charge: str, amount: int) -> dict[str, Any]:
     await asyncio.sleep(0)
     return {"recorded": False, "charge": charge}
@@ -301,8 +310,11 @@ def refund(message: dict[str, Any]) -> None:
     call(message["index"], "POST", "/v1/refunds", form, f"refund:{charge}", message.get("client"))
     if message.get("ledger") == "sync":
         # In whatever thread the refund ran in: a propagated one keeps the run, a bare one has
-        # none, and its call lands in the process run (#76).
-        agentkit.obs("ledger", charge=charge, recorded=record_refund(charge, message["amount"]))
+        # none, and its call lands in the process run (#76). An odd message of
+        # `ledger_two_tools_8` writes through the second tool (#120).
+        two = message.get("two_tools") and message["index"] % 2
+        record = mark_refunded if two else record_refund
+        agentkit.obs("ledger", charge=charge, recorded=record(charge, message["amount"]))
 
 
 @sdk.trigger(name="audit")
@@ -555,6 +567,11 @@ SCENARIOS: dict[str, tuple[int, str, dict[str, Any]]] = {
     "task_outlives_trigger": (2, "task", {}),
     # The worker's ledger tools (#76), in each place a run's identity has to follow them.
     "ledger_threads_8": (8, "threads", {"refund_in": "propagated_thread", "ledger": "sync"}),
+    "ledger_two_tools_8": (
+        8,
+        "threads",
+        {"refund_in": "propagated_thread", "ledger": "sync", "two_tools": True},
+    ),
     "ledger_asyncio_8": (8, "asyncio", {"ledger": "async"}),
     "ledger_unpropagated": (2, "serial", {"refund_in": "bare_thread", "ledger": "sync"}),
     "ledger_worker": (4, "worker", {"ledger": "worker"}),

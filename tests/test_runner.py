@@ -1,5 +1,6 @@
 import asyncio
 import dataclasses
+import itertools
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -593,8 +594,15 @@ def test_two_delegated_writes_read_as_were():
     assert summary_lines("7f3a", rows, 0.0, _maps())[-1].startswith("  2 were delegated to")
 
 
-def _tool_call(kind="write", ran="shadow", name="db.mark_refunded"):
-    return ToolCall("t", "7f3a", name, kind, ran, {}, None, None, 1.0, 2.0)
+def _tool_call(
+    kind="write",
+    ran="shadow",
+    name="db.mark_refunded",
+    tool_call_id="t",
+    started_at=1.0,
+    ended_at=2.0,
+):
+    return ToolCall(tool_call_id, "7f3a", name, kind, ran, {}, None, None, started_at, ended_at)
 
 
 def test_a_delegated_write_s_closing_lines_say_the_tool_writes_did_not_happen_either():
@@ -615,6 +623,26 @@ def test_a_delegated_write_s_closing_lines_say_the_tool_writes_did_not_happen_ei
     assert lines[-2] == "  These writes did not reach stripe. The tool writes did not happen."
     lines = summary_lines("7f3a", [delegated], 0.0, _maps(), tools[1:])
     assert lines[-2] == "  These writes did not reach stripe."
+
+
+def test_stood_in_tool_writes_print_in_the_order_they_ended_whatever_order_they_came_in():
+    """Live, the summary's tool calls come in the order their posts reached the control endpoint,
+    which two tools ending at once on two threads can reverse; a stored run's come in `seq` order,
+    run by run. Each summary printed them as they came, so the two disagreed (#120). They print in
+    the order they ended, a tie broken by the start, then by the id, then by the line itself: a
+    call posted by hand can repeat another's id and times."""
+    ended = [
+        _tool_call(name="db.first", ended_at=2.0),
+        _tool_call(name="db.second", ended_at=3.0),
+        _tool_call(name="db.tie_started_first", started_at=0.5, ended_at=4.0, tool_call_id="z"),
+        _tool_call(name="db.tie_lower_id", ended_at=4.0, tool_call_id="a"),
+        _tool_call(name="db.tie_higher_id_a", ended_at=4.0, tool_call_id="b"),
+        _tool_call(name="db.tie_higher_id_b", ended_at=4.0, tool_call_id="b"),
+    ]
+    printed = [f"  ○ tool {call.name}  shadow stand-in ran" for call in ended]
+    for calls in itertools.permutations(ended):
+        lines = summary_lines("7f3a", [], 0.0, None, calls)
+        assert [line for line in lines if "○ tool" in line] == printed
 
 
 def test_a_run_that_only_read_claims_nothing_about_writes():

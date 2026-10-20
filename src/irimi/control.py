@@ -58,6 +58,7 @@ from irimi.policy import AnswerPolicy
 from irimi.store import TraceStore, header_record, names_a_run_dir
 from irimi.trace import (
     MAX_ERROR_MESSAGE,
+    MAX_ERROR_TYPE,
     UNATTRIBUTED,
     ErrorInfo,
     RunRecord,
@@ -316,11 +317,13 @@ def _posted(request: Request, whole_body: bool) -> Mapping[str, Any]:
 
 def _label(error: ErrorInfo | None) -> ErrorInfo | None:
     """A posted error cut to MAX_ERROR_MESSAGE characters, as `ErrorInfo.from_exception` cuts one:
-    a run's error is a label, not a log (#68). Cut rather than refused, so that a long message
-    never costs a run its end."""
-    if error is None or len(error.message) <= MAX_ERROR_MESSAGE:
-        return error
-    return dataclasses.replace(error, message=error.message[:MAX_ERROR_MESSAGE])
+    a run's error is a label, not a log (#68). Its type is cut to MAX_ERROR_TYPE too, since a
+    posted type is the client's to say and may be 2 MiB, which the store would queue and write,
+    and `runs show` print (#99). Cut rather than refused, so that a long error never costs a run
+    its end."""
+    if error is None:
+        return None
+    return ErrorInfo(error.type[:MAX_ERROR_TYPE], error.message[:MAX_ERROR_MESSAGE])
 
 
 def _decoded[T](decode: Callable[[Mapping[str, Any]], T], doc: Mapping[str, Any]) -> T:

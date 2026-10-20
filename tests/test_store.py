@@ -150,6 +150,46 @@ def test_the_first_event_of_a_run_with_no_start_creates_a_header_run(root, key):
     assert (record.attribution, record.trigger, record.outcome) == ("header", None, None)
 
 
+def test_a_start_for_a_header_run_rewrites_its_record(root, key):
+    """A run whose events arrived before its start is a `header` run until the start arrives,
+    which rewrites its record whole and keeps its events (#70)."""
+    s = DirectoryStore(root, key)
+    s.record(_exchange("r2"))
+    s.start_run(dataclasses.replace(_record("r2"), attribution="sdk"))
+    s.close()
+    run = StoreReader(root).load_run("r2")
+    assert run.record == dataclasses.replace(_record("r2"), attribution="sdk")
+    assert _paths(run) == ["/v1/things"]
+    assert s.stats().dropped == 0
+
+
+def test_a_start_for_a_run_that_has_ended_is_dropped_and_the_run_kept_whole(root, key):
+    """A start re-posted after its run's end rewrote run.json whole, so the run lost its end, its
+    outcome and its first trigger, and listed `incomplete` (#97). It is dropped instead, counted on
+    the store alone, and the run's files are not rewritten: it lost nothing, so its `dropped_events`
+    stays 0. So it is when the run ended in an earlier process, and the start reaches a store that
+    has never seen it."""
+    s = DirectoryStore(root, key)
+    s.start_run(dataclasses.replace(_record("r1"), attribution="sdk"))
+    s.record(_exchange("r1"))
+    s.end_run("r1", 20.0, "ok")
+    s.start_run(dataclasses.replace(_record("r1", started_at=30.0), attribution="sdk"))
+    s.close()
+    assert s.stats().dropped == 1
+    assert "r1" not in s._runs  # forgotten again, as at its end: a serve holds only open runs
+    run = StoreReader(root).load_run("r1")
+    assert run.record == dataclasses.replace(
+        _record("r1"), attribution="sdk", ended_at=20.0, outcome="ok"
+    )
+    assert _paths(run) == ["/v1/things"]
+    ended = {p.name: p.read_bytes() for p in (root / "runs" / "r1").iterdir()}
+    s = DirectoryStore(root, key)
+    s.start_run(dataclasses.replace(_record("r1", started_at=40.0), attribution="sdk"))
+    s.close()
+    assert s.stats().dropped == 1
+    assert {p.name: p.read_bytes() for p in (root / "runs" / "r1").iterdir()} == ended
+
+
 def test_every_run_a_replay_s_store_starts_is_that_replay_s(root, key):
     """The process run and an SDK run alike, whatever their records say (#82)."""
     s = DirectoryStore(root, key, replay_of="rec1")
@@ -966,8 +1006,9 @@ def test_the_queue_is_bounded_in_body_bytes_too(root, key, monkeypatch):
 
 def test_a_tool_calls_args_and_result_count_against_the_byte_budget(root, key, monkeypatch):
     """The control endpoint takes a tool call of up to 2 MiB, and 10,000 of them would be 20 GiB
-    waiting (#76): its args and result as JSON count as body bytes do."""
-    monkeypatch.setattr(store, "MAX_QUEUED_BYTES", 100)
+    waiting (#76): the call as JSON, its args and result included, counts as body bytes do."""
+    size = len(json.dumps(trace.tool_call_to_json(_tool_call("r1", {"x": "y" * 400}))))
+    monkeypatch.setattr(store, "MAX_QUEUED_BYTES", size + size // 2)
     taken, release = threading.Event(), threading.Event()
     real = DirectoryStore._handle
 
@@ -980,15 +1021,92 @@ def test_a_tool_calls_args_and_result_count_against_the_byte_budget(root, key, m
     s = DirectoryStore(root, key)
     s.record(_exchange("r1", "/held"))  # the writer holds it, so the queue is empty again
     assert taken.wait(5)
-    s.record_tool_call(_tool_call("r1", {"x": "y" * 40}))  # `[{"x": "y..."}, null]`: 57 bytes
-    s.record_tool_call(_tool_call("r1", {"x": "z" * 40}))  # 57 + 57 > 100
+    s.record_tool_call(_tool_call("r1", {"x": "y" * 400}))
+    s.record_tool_call(_tool_call("r1", {"x": "z" * 400}))  # size + size > the budget
     s.record(_exchange("r1", "/no-body"))
     assert s.stats().dropped == 1
     release.set()
     s.close()
     run = StoreReader(root).load_run("r1")
-    assert [e.args for e in run.events if isinstance(e, ToolCall)] == [{"x": "y" * 40}]
+    assert [e.args for e in run.events if isinstance(e, ToolCall)] == [{"x": "y" * 400}]
     assert run.record.dropped_events == 1
+
+
+def test_a_tool_calls_name_and_id_count_against_the_byte_budget(root, key, monkeypatch):
+    """A posted tool call's name and id are the client's to say too, and either may be nearly all
+    of a 2 MiB post, which counting its args and result alone let through uncounted (#99): the
+    whole call as JSON counts, as a start's whole record does."""
+    named = dataclasses.replace(_tool_call("r1", None), name="n" * 400)
+    size = len(json.dumps(trace.tool_call_to_json(named)))
+    monkeypatch.setattr(store, "MAX_QUEUED_BYTES", size + size // 2)
+    taken, release = threading.Event(), threading.Event()
+    real = DirectoryStore._handle
+
+    def paused(self, item):
+        taken.set()
+        release.wait(10)
+        real(self, item)
+
+    monkeypatch.setattr(DirectoryStore, "_handle", paused)
+    s = DirectoryStore(root, key)
+    s.record(_exchange("r1", "/held"))  # the writer holds it, so the queue is empty again
+    assert taken.wait(5)
+    s.record_tool_call(named)
+    s.record_tool_call(dataclasses.replace(named, tool_call_id="i" * 400, name="look_up"))
+    s.record(_exchange("r1", "/no-body"))
+    assert s.stats().dropped == 1
+    release.set()
+    s.close()
+    run = StoreReader(root).load_run("r1")
+    assert [e.name for e in run.events if isinstance(e, ToolCall)] == ["n" * 400]
+    assert run.record.dropped_events == 1
+
+
+def test_a_runs_start_counts_against_the_byte_budget(root, key, monkeypatch):
+    """The control endpoint takes a start of up to 2 MiB, its trigger's args, and 10,000 of them
+    would be 20 GiB waiting (#99): its record as JSON counts as body bytes do. A start dropped so
+    leaves its run to be made from its first event, a `header` run that says it dropped one."""
+    started = _record("r1", args={"x": "y" * 400})
+    size = len(json.dumps(trace.run_to_json(started)))
+    monkeypatch.setattr(store, "MAX_QUEUED_BYTES", size + size // 2)
+    taken, release = threading.Event(), threading.Event()
+    real = DirectoryStore._handle
+
+    def paused(self, item):
+        taken.set()
+        release.wait(10)
+        real(self, item)
+
+    monkeypatch.setattr(DirectoryStore, "_handle", paused)
+    s = DirectoryStore(root, key)
+    s.record(_exchange("r0", "/held"))  # the writer holds it, so the queue is empty again
+    assert taken.wait(5)
+    s.start_run(started)
+    s.start_run(_record("r2", args={"x": "z" * 400}))  # size + size > the budget
+    s.record(_exchange("r2", "/no-body"))
+    assert s.stats().dropped == 1
+    release.set()
+    s.close()
+    reader = StoreReader(root)
+    assert reader.load_run("r1").record == started
+    late = reader.load_run("r2")
+    assert late.record == dataclasses.replace(store.header_record("r2", 1.0), dropped_events=1)
+    assert _paths(late) == ["/no-body"]
+
+
+def test_a_start_that_cannot_be_measured_is_a_drop_on_its_run(root, key):
+    """A start is measured as JSON on the caller's thread (#99), so one that is not JSON - args no
+    decoder could have made, from a caller other than the control endpoint - is dropped there,
+    never raised into the caller, and counted on its run, which its first event makes a `header`
+    run, as every dropped start leaves it."""
+    s = DirectoryStore(root, key)
+    s.start_run(_record("r1", args={"x": {1, 2}}))
+    s.record(_exchange("r1"))
+    s.close()
+    assert s.stats().dropped == 1
+    run = StoreReader(root).load_run("r1")
+    assert run.record == dataclasses.replace(store.header_record("r1", 1.0), dropped_events=1)
+    assert _paths(run) == ["/v1/things"]
 
 
 def test_the_writer_fsyncs_in_batches_before_close(root, key, monkeypatch, store_os):

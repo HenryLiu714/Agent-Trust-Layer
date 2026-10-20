@@ -50,9 +50,6 @@ LATE_EVENTS = {
     ("w03_queue_worker", "task_outlives_trigger"),
     ("w07_streaming_assistant", "hand_off"),
 }
-# W9's run started again after its end (#97): its block is the run as it was when it ended, and
-# the stored run is the reopened one. `test_w09_scope_gauntlet.py` pins that block.
-REOPENED = {("w09_scope_gauntlet", "control_hazards")}
 # A control post that ends a run, as W9 makes one by hand: `<listener>/_irimi/runs/<id>/end`.
 END_POST = re.compile(r"/_irimi/runs/([^/]+)/end$")
 
@@ -91,8 +88,6 @@ def test_every_run_a_serve_ended_prints_its_stored_summary_once(run_workflow, na
     maps = serve.maps()
     for run_id, block in serve.run_blocks().items():
         stored = reader.load_run(run_id)
-        if (name, scenario) in REOPENED:
-            continue
         if (name, scenario) not in LATE_EVENTS:
             assert block == report.stored_summary_lines(stored, maps), run_id
             continue

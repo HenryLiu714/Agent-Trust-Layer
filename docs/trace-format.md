@@ -386,7 +386,9 @@ sample workflows hold every scenario to that (`tests/workflows/test_stored_runs.
 `run.json`. Event lines carry none.
 
 - A run's `events.jsonl` is read under its `run.json`'s version. A writer never appends events to
-  a run whose `run.json` carries a `schema_version` other than its own.
+  a run whose `run.json` carries a `schema_version` other than its own, or one it cannot decode:
+  damage, which since #167 includes a `replay_of` that is no run id or disagrees with `mode`. It
+  drops and counts that run's events and its end, and leaves the `run.json` as it found it.
 - `unattributed/events.jsonl` has no `run.json`, and is read under the reader's own
   `trace.SCHEMA_VERSION`.
 - A decoder refuses a `schema_version` greater than its own, or less than 1, with

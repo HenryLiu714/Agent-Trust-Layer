@@ -296,7 +296,7 @@ class _Run:
     dir: Path | None
     record: RunRecord | None
     next_seq: int
-    writable: bool  # False: its run.json is another schema version, so nothing is appended
+    writable: bool  # False: its run.json is another version or damaged, so nothing is appended
     # The `dropped_events` its run.json held when this process first touched it: drops of an
     # earlier process, which this one adds its own to.
     dropped_before: int = 0
@@ -710,7 +710,10 @@ class DirectoryStore:
     def _open(self, events: Path, directory: Path | None) -> _Run:
         """Start tracking a run. An existing directory - a serve-mode restart - resumes its `seq`
         from its last readable line, after truncating a half-written one, and is never appended
-        to when its run.json is another schema version (docs/trace-format.md, "Versioning")."""
+        to when its run.json is another schema version (docs/trace-format.md, "Versioning") or
+        cannot be decoded: damage, which since #167 includes a `replay_of` that is no run id or
+        disagrees with `mode`. Its events and end are dropped and counted, and the record is left
+        as it was found, never rewritten as a header run's over the damage."""
         _mkdirs(events.parent)
         record: RunRecord | None = None
         writable = True

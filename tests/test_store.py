@@ -761,6 +761,34 @@ def test_a_run_of_a_newer_schema_version_is_never_appended_to(root, key):
     assert s.stats().dropped == 1
 
 
+@pytest.mark.parametrize(
+    "damage",
+    [
+        {"mode": "replay", "replay_of": "a  b"},
+        {"mode": "replay"},
+        {"replay_of": "4f1c9a2b7d3e8a60"},
+    ],
+    ids=["replay-of-no-run-id", "replay-naming-no-run", "shadow-naming-a-run"],
+)
+def test_a_run_whose_run_json_cannot_be_decoded_is_never_appended_to(root, key, damage):
+    """A store reopened on a run whose run.json it cannot decode - since #167, one whose
+    `replay_of` is no run id or disagrees with its `mode` - drops that run's events and its end,
+    as it drops a run of another version's: its lines would sit under a record no reader reads,
+    and its end would write a header record over the damage, a replay's or a shadow run's by
+    whichever field it trusted. Fail closed: the run is left as it was found, and each event is
+    counted dropped."""
+    (root / "runs/old").mkdir(parents=True)
+    damaged = trace.run_to_json(_record("old")) | damage
+    (root / "runs/old/run.json").write_text(json.dumps(damaged))
+    s = DirectoryStore(root, key)
+    s.record(_exchange("old"))
+    s.end_run("old", 20.0, "ok")
+    s.close()
+    assert not (root / "runs/old/events.jsonl").exists()
+    assert json.loads((root / "runs/old/run.json").read_text()) == damaged
+    assert s.stats().dropped == 2
+
+
 def test_a_run_of_an_older_schema_version_is_never_appended_to(root, key, monkeypatch):
     """The other direction: this irimi is newer than the run it finds (docs/trace-format.md,
     "Versioning"). Appending would mix two versions' lines under one run.json."""

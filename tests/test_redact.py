@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import random
+import re
 import stat
 import subprocess
 import sys
@@ -19,7 +20,7 @@ import time
 
 import pytest
 
-from irimi import delegation, paths, redact
+from irimi import delegation, paths, redact, trace
 from irimi.exchange import REDACTION_FAILED_FLAG, Exchange, Request, Response
 from irimi.redact import placeholder, redact_exchange, redact_json
 from tests.test_trace import _filled
@@ -270,6 +271,28 @@ def test_the_shapes_are_the_issues_list_exactly():
 @pytest.mark.parametrize("secret", SAMPLES)
 def test_every_shape_is_replaced_whole_inside_text(secret):
     assert redact_json(f"uses {secret}, then stops", KEY) == f"uses {_ph(secret)}, then stops"
+
+
+def test_every_shape_is_spelled_in_the_characters_a_cut_between_tokens_keeps_whole():
+    """The SDK cuts a name, a repr and an error's message before irimi redacts them, and
+    `trace.cut_between_tokens` keeps no part of a key only because it backs out of a run of
+    `trace.TOKEN_CHARS`: a shape spelled with any other character could straddle its cut (#179)."""
+    for pattern in redact.SECRET_PATTERNS:
+        spelled = re.sub(r"\{\d+,?\d*\}|[()|?+*\[\]]|A-Z|a-z|0-9", "", pattern)
+        assert set(spelled) <= set(trace.TOKEN_CHARS), pattern
+
+
+@pytest.mark.parametrize("secret", SAMPLES)
+def test_text_cut_between_tokens_redacts_to_a_prefix_of_the_whole_redacted(secret):
+    """Wherever the cut falls, a key after a space, after an escape or at the very start: what it
+    keeps, redacted, is a prefix of the whole redacted, so it holds no part of a key and every
+    key it holds is its whole key's placeholder (#179)."""
+    text = f"{secret} refused key:\\n{secret}, retry with {secret}."
+    whole = redact_json(text, KEY)
+    assert isinstance(whole, str)
+    for limit in range(len(text) + 1):
+        kept = redact_json(trace.cut_between_tokens(text, limit), KEY)
+        assert isinstance(kept, str) and whole.startswith(kept), limit
 
 
 @pytest.mark.parametrize(

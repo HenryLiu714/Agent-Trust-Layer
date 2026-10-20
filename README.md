@@ -464,7 +464,7 @@ itself always propagates, unchanged. `sdk.current_run_id()` is the current run's
 - **Names.** A trigger's name is a string: `@sdk.trigger(name="refund")`. A name passed
   positionally, or one that is not a string, is a `TypeError` when the module loads, and so is a
   trigger on a generator function, a class, a `functools.partial` or an object with `__call__`.
-  Names are cut to 1000 characters.
+  Names are cut to 1000 characters, never inside a key (#179).
 - **Start the agent by module name.** `python -m my_agent` and `python my_agent.py` run it as
   `__main__`, so its entrypoint is recorded as `__main__:handle_ticket`, which `irimi replay`
   cannot import. Import the module by its name and call it, as the sample workflows'

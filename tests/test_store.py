@@ -374,13 +374,15 @@ def test_a_tool_calls_args_and_result_are_redacted_and_share_the_runs_seq(root, 
     }
 
 
-def test_an_error_message_and_a_trigger_name_are_redacted_before_they_reach_disk(root, key):
+def test_an_error_and_a_trigger_name_are_redacted_before_they_reach_disk(root, key):
     """`ErrorInfo.from_exception` keeps `str(exc)`, and an exception's message may quote the key
-    it refused; a trigger's name is the argv[0] its args repeat (#69)."""
+    it refused; a trigger's name is the argv[0] its args repeat (#69). A posted error's type is
+    whatever the client sent, so it is redacted as its message is (#179)."""
     s = DirectoryStore(root, key)
     s.start_run(dataclasses.replace(_record("r1"), trigger=Trigger(SECRET, None, None, True)))
     call = _tool_call("r1", None)
-    s.record_tool_call(dataclasses.replace(call, error=ErrorInfo("x.Err", f"refused {SECRET}")))
+    error = ErrorInfo(f"x.{SECRET}", f"refused {SECRET}")
+    s.record_tool_call(dataclasses.replace(call, error=error))
     s.end_run("r1", 3.0, "error", ErrorInfo("x.Err", f"Invalid API key: {SECRET}"), exit_code=1)
     s.close()
     run = StoreReader(root).load_run("r1")
@@ -389,8 +391,35 @@ def test_an_error_message_and_a_trigger_name_are_redacted_before_they_reach_disk
     assert run.record.error == ErrorInfo("x.Err", f"Invalid API key: {hidden}")
     (stored,) = run.events
     assert isinstance(stored, ToolCall)
-    assert stored.error == ErrorInfo("x.Err", f"refused {hidden}")
+    assert stored.error == ErrorInfo(f"x.{hidden}", f"refused {hidden}")
     assert not any(SECRET.encode() in p.read_bytes() for p in root.rglob("*") if p.is_file())
+
+
+def test_an_error_is_redacted_whole_and_only_then_cut(root, key):
+    """A key straddling MAX_ERROR_TYPE and one straddling MAX_ERROR_MESSAGE, on a tool call and
+    on an end. Cut first, each kept part is shorter than `ghp_`'s shape, which redaction would
+    not find, so it reached disk. Redacted whole, the stored error is a prefix of the redacted
+    whole, as a stored body is: each key is its whole placeholder, and no part of it is kept
+    (#179)."""
+    secret = "ghp_" + "S" * 36
+    kind = "t" * (trace.MAX_ERROR_TYPE - 30) + "." + secret + ".Boom"
+    message = "m" * (trace.MAX_ERROR_MESSAGE - 30) + " " + secret + " and more"
+    s = DirectoryStore(root, key)
+    s.start_run(_record("r1"))
+    s.record_tool_call(dataclasses.replace(_tool_call("r1", None), error=ErrorInfo(kind, message)))
+    s.end_run("r1", 3.0, "error", ErrorInfo(kind, message), exit_code=1)
+    s.close()
+    run = StoreReader(root).load_run("r1")
+    hidden = redact.placeholder(key, secret)
+    cut = ErrorInfo(
+        kind.replace(secret, hidden)[: trace.MAX_ERROR_TYPE],
+        message.replace(secret, hidden)[: trace.MAX_ERROR_MESSAGE],
+    )
+    assert cut.type.endswith(hidden + ".B") and cut.message.endswith(hidden + " a")
+    (stored,) = run.events
+    assert isinstance(stored, ToolCall)
+    assert (run.record.error, stored.error) == (cut, cut)
+    assert not any(b"ghp_" in p.read_bytes() for p in root.rglob("*") if p.is_file())
 
 
 def test_a_run_json_says_the_version_its_lines_are_written_in(root, key):
@@ -1092,6 +1121,58 @@ def test_a_runs_start_counts_against_the_byte_budget(root, key, monkeypatch):
     late = reader.load_run("r2")
     assert late.record == dataclasses.replace(store.header_record("r2", 1.0), dropped_events=1)
     assert _paths(late) == ["/no-body"]
+
+
+def test_an_end_waits_with_its_error_cut_between_tokens_and_is_never_dropped_for_bytes(
+    root, key, monkeypatch
+):
+    """A posted error may be 2 MiB, and the writer cuts it only once redacted (#179). So it waits
+    cut between tokens to MAX_QUEUED_ERROR, an end costs the byte budget nothing, and no run
+    loses its end to it: a key across that cut is left out whole, and the stored error is still
+    a prefix of the redacted whole."""
+    monkeypatch.setattr(store, "MAX_QUEUED_BYTES", 100)
+    held: list[object] = []
+    taken, release = threading.Event(), threading.Event()
+    real = DirectoryStore._handle
+
+    def paused(self, item):
+        held.append(item)
+        taken.set()
+        release.wait(10)
+        real(self, item)
+
+    monkeypatch.setattr(DirectoryStore, "_handle", paused)
+    secret = "ghp_" + "Q" * 36
+    long = "m" * (store.MAX_QUEUED_ERROR - 10) + " " + secret + " " + "m" * 2_000_000
+    s = DirectoryStore(root, key)
+    s.record(_exchange("r0", "/held", answer=b"x" * 500))  # over budget, so nothing else fits
+    assert taken.wait(5)
+    s.end_run("r1", 3.0, "error", ErrorInfo("t." * 1_000_000, long), exit_code=1)
+    assert s.stats().dropped == 0
+    release.set()
+    s.close()
+    [queued] = [item for item in held if isinstance(item, store._EndRun)]
+    assert queued.error == ErrorInfo(
+        "t." * (store.MAX_QUEUED_ERROR // 2), "m" * (store.MAX_QUEUED_ERROR - 10) + " "
+    )
+    record = StoreReader(root).load_run("r1").record
+    assert (record.outcome, record.error) == (
+        "error",
+        ErrorInfo("t." * (trace.MAX_ERROR_TYPE // 2), "m" * trace.MAX_ERROR_MESSAGE),
+    )
+
+
+def test_an_end_whose_error_is_not_text_is_a_drop_on_its_run(root, key):
+    """An end's error is cut as it is queued (#179), so one that is not text - from a caller
+    other than the control endpoint - is dropped there, never raised into the caller, and
+    counted on its run."""
+    s = DirectoryStore(root, key)
+    s.start_run(_record("r1"))
+    s.end_run("r1", 3.0, "error", ErrorInfo("x.Boom", None), exit_code=1)  # type: ignore[arg-type]
+    s.close()
+    assert s.stats().dropped == 1
+    run = StoreReader(root).load_run("r1")
+    assert (run.record.outcome, run.record.dropped_events) == (None, 1)
 
 
 def test_a_start_that_cannot_be_measured_is_a_drop_on_its_run(root, key):

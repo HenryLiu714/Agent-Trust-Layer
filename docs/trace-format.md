@@ -100,8 +100,8 @@ the first column of each field table below is exactly the keys its encoder write
 ## Redaction
 
 The store writes `redact.redact_exchange(exchange, key)`, never the exchange the engine answered
-with, and passes a trigger's name and args, a tool call's args and result, and every error
-message (a run's and a tool call's) through `redact.redact_json`.
+with, and passes a trigger's name and args, a tool call's args and result, and every error's type
+and message (a run's and a tool call's) through `redact.redact_json`.
 Redaction is always on; there is no switch and no per-repo rule in Phase 3.
 
 - **A placeholder** is `<redacted:` + the first 16 hex digits of HMAC-SHA256(key, value) + `>`.
@@ -148,6 +148,20 @@ Redaction is always on; there is no switch and no per-repo rule in Phase 3.
   moves to the end of that line, and two boundaries that land together make one chunk. When the
   redacted body does not have the same lines - it was one JSON document, or could not be
   redacted - it is one chunk. So `stream_chunks` always splits the body that is stored.
+- **An error is redacted whole, then cut** to the 300 and 1000 characters a trace keeps of its
+  type and message, so a stored error is a prefix of the redacted whole, as a stored body is: a
+  key across either cut is stored as its own placeholder, or the part of that placeholder the cut
+  keeps, and never as part of the key (#179). The control endpoint hands the store a posted error
+  whole, and the SDK posts an exception's message whole, up to 65,536 characters
+  (`trace.MAX_POSTED_MESSAGE`). A run's end waits for the writer with its type and message each
+  cut between tokens (below) to 4000 characters (`store.MAX_QUEUED_ERROR`), so it costs the
+  store's byte budget nothing and is never dropped by it.
+- **A cut made before redaction is made between tokens.** Nothing that cuts before the store
+  redacts can redact, so a trigger's name (1000 characters) and a captured `repr` (1000), cut by
+  the SDK, and a message past 65,536 characters and an end's error waiting to be written, are cut
+  before any of a run of letters, digits, `_` and `-` the cut would split, the characters every
+  secret shape is spelled with (`trace.cut_between_tokens`, #179). What is kept, redacted, is a
+  prefix of the whole redacted. Text that is one such run past the limit keeps none of it.
 - **Failure is closed.** A part that cannot be redacted is stored as `<redaction-failed>` (a path as
   `/<redaction-failed>`), and the exchange gains the flag `redaction-failed`. That includes a
   JSON body or JSON line the walk cannot see whole: an object with a repeated key, or JSON
@@ -205,8 +219,9 @@ A **trigger** (`trace.Trigger`):
 | `replayable` | boolean | Whether `args` captured everything needed to call `entrypoint` again. |
 
 An **error** (`trace.ErrorInfo`) is `{"type": string, "message": string}`. `type` is the
-exception's `module.qualname`, and `message` is at most 1000 characters. A `type` posted to the
-control endpoint is cut to 300 characters (`trace.MAX_ERROR_TYPE`, #99).
+exception's `module.qualname`, at most 300 characters (`trace.MAX_ERROR_TYPE`, #99), and
+`message` is at most 1000 (`trace.MAX_ERROR_MESSAGE`). The store cuts both, each once it has
+redacted the whole of it (see Redaction, #179).
 
 ### Captured arguments
 
@@ -224,11 +239,11 @@ row:
 | non-finite `float` | `{"__irimi_repr__": "nan"}` (or `"inf"`, `"-inf"`) | no |
 | `list`, `tuple` | a JSON list: a tuple becomes a list | when every item is |
 | `dict` whose every key is a `str` | a JSON object | when every value is |
-| `dict` with any other key | `{"__irimi_repr__": repr(v)[:1000]}` | no |
+| `dict` with any other key | `{"__irimi_repr__": repr(v)}`, the repr cut to 1000 characters between tokens (see Redaction) | no |
 | dataclass instance | `{"__irimi_type__": "module:qualname", "value": <its init=True fields, captured>}` | when every field is, and its class can be imported |
 | object with a callable `model_dump` (pydantic v2) | `{"__irimi_type__": "module:qualname", "value": <v.model_dump(mode="json"), captured>}` | the same |
 | `bytes` | `{"__irimi_bytes__": <base64>}` | yes |
-| anything else | `{"__irimi_repr__": repr(v)[:1000]}`, or `"<unrepresentable {type}>"` in place of the repr when `repr` raises | no |
+| anything else | `{"__irimi_repr__": repr(v)}`, cut as above, or `"<unrepresentable {type}>"` in place of the repr when `repr` raises | no |
 
 - **Types match exactly.** An `IntEnum`, a namedtuple, an `OrderedDict` or a `bytearray` is
   "anything else", because replay (#84) would rebuild the base type rather than the value the

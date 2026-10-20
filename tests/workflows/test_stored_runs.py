@@ -26,7 +26,7 @@ from examples.workflows.w10_flaky_upstream.scenarios import CONTROL_DOWN
 from irimi import paths, redact, report, trace
 from irimi.exchange import BODY_TRUNCATED_FLAG, Exchange
 from irimi.store import SERVE_LOCK_FILE, StoredRun, header_record
-from irimi.trace import TelemetrySeen, ToolCall
+from irimi.trace import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE, ErrorInfo, TelemetrySeen, ToolCall
 
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
 IDS = [f"{n}:{s}" for n, s in CASES]
@@ -136,7 +136,7 @@ def test_every_stored_event_is_the_exchange_irimi_handed_its_store_redacted(
     `control_hazards` posts there by hand (#76).
 
     A tool call the control endpoint handed the store (#73) is in its run's order among them,
-    stored with its args, result and error message redacted (#70). Under serve mode (#77) what no
+    stored with its args, result and error redacted (#70, #179). Under serve mode (#77) what no
     run names is `unattributed`, so there it is no exception."""
     shadow = run_workflow(name, scenario, mode)
     assert len(shadow.handed) == len(shadow.reported) == len(shadow.exchange_lines())
@@ -171,12 +171,13 @@ def test_every_stored_event_is_the_exchange_irimi_handed_its_store_redacted(
 
 
 def redacted_tool_call(call: ToolCall, key: bytes) -> ToolCall:
-    """`call` as the store keeps it: its args, its result and its error's message redacted (#70)."""
+    """`call` as the store keeps it: its args, its result and its error redacted (#70), the error's
+    type and message each whole, and only then cut to what a trace keeps (#179)."""
     error = call.error
     if error is not None:
-        message = redact.redact_json(error.message, key)
-        assert isinstance(message, str)
-        error = dataclasses.replace(error, message=message)
+        kind, message = (redact.redact_json(text, key) for text in (error.type, error.message))
+        assert isinstance(kind, str) and isinstance(message, str)
+        error = ErrorInfo(kind[:MAX_ERROR_TYPE], message[:MAX_ERROR_MESSAGE])
     return dataclasses.replace(
         call,
         args=redact.redact_json(call.args, key),

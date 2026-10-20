@@ -729,14 +729,37 @@ def test_an_invalid_run_id(run_id):
     assert not trace.is_valid_run_id(run_id)
 
 
-def test_error_info_names_the_exception_by_module_and_qualname_and_caps_the_message():
+def test_error_info_names_the_exception_by_module_and_qualname_and_keeps_its_message_whole():
+    """The message is posted whole, for the store to redact before it cuts it to
+    MAX_ERROR_MESSAGE (#179). Past MAX_POSTED_MESSAGE it is cut, between tokens, so a key
+    straddling that cut is left out whole, never cut in two."""
+
     class Boom(Exception):
         pass
 
     info = ErrorInfo.from_exception(Boom("x" * 5000))
     assert info.type == f"{__name__}.{Boom.__qualname__}"
-    assert info.message == "x" * trace.MAX_ERROR_MESSAGE
+    assert info.message == "x" * 5000
     assert ErrorInfo.from_exception(ValueError("bad")) == ErrorInfo("builtins.ValueError", "bad")
+    said = "x" * (trace.MAX_POSTED_MESSAGE - 10) + " ghp_" + "k" * 36
+    assert ErrorInfo.from_exception(Boom(said)).message == said[: trace.MAX_POSTED_MESSAGE - 9]
+
+
+@pytest.mark.parametrize(
+    ("text", "kept"),
+    [
+        ("abcdefgh", "abcdefgh"),  # within the limit: whole
+        ("abcdefghi", "abcdefghi"),  # at the limit: whole
+        ("abc defgh ij", "abc defgh"),  # past it, but the cut ends a run: there
+        ("abc def ghi", "abc def "),  # inside a run: before the whole run
+        ("abc def/g_h-ij", "abc def/"),  # `_` and `-` are a run's, `/` is not
+        ("abcdefghijk", ""),  # one run past the limit keeps nothing
+    ],
+)
+def test_a_cut_between_tokens_never_falls_inside_a_run_of_token_characters(text, kept):
+    """The SDK cuts before irimi redacts, and every secret shape is one run of TOKEN_CHARS, so
+    its cut never keeps part of one (#179)."""
+    assert trace.cut_between_tokens(text, 9) == kept
 
 
 def test_error_info_survives_an_exception_it_cannot_print():

@@ -896,10 +896,20 @@ def test_a_name_that_is_not_a_string_is_refused_at_decoration_or_kept_as_a_label
         sdk.trigger(name=7)  # type: ignore[call-overload]
     with sdk.run(name=None):  # type: ignore[arg-type]
         pass
-    with sdk.run(name="n" * 5000):
+    with sdk.run(name="name " * 1000):
         pass
     names = sorted(r.trigger.name for r in irimi.sdk_runs() if r.trigger is not None)
-    assert names == ["None", "n" * runs.MAX_NAME]
+    assert names == ["None", "name " * (runs.MAX_NAME // 5)]
+
+
+def test_a_long_name_is_cut_between_tokens_so_it_keeps_no_part_of_a_key(irimi):
+    """The SDK cuts a name before irimi redacts it: cut inside a key, the part it kept was too
+    short for the key's shape, and reached disk. Cut between tokens, the key is left out whole
+    (#179)."""
+    head = "n" * (runs.MAX_NAME - 10) + " "
+    with sdk.run(name=head + "ghp_" + "k" * 36):
+        pass
+    assert [r.trigger.name for r in irimi.sdk_runs() if r.trigger is not None] == [head]
 
 
 def test_a_trigger_annotated_with_a_type_checking_only_import_still_binds_by_name():
@@ -1238,12 +1248,21 @@ def test_anything_else_is_its_repr_and_not_replayable(value):
     assert capture.capture(value) == ({"__irimi_repr__": repr(value)[:1000]}, False)
 
 
-def test_a_repr_is_cut_to_1000_characters():
-    class Long:
-        def __repr__(self) -> str:
-            return "x" * 5000
+def test_a_repr_is_cut_to_1000_characters_between_tokens():
+    """Cut before the store redacts it, so never inside a key, which redaction would no longer
+    find (#179): a repr that is one run of token characters past 1000 keeps none of it."""
 
-    assert capture.capture(Long()) == ({"__irimi_repr__": "x" * 1000}, False)
+    class Long:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def __repr__(self) -> str:
+            return self.text
+
+    assert capture.capture(Long("x " * 2500)) == ({"__irimi_repr__": "x " * 500}, False)
+    keyed = Long("x" * 990 + " ghp_" + "k" * 36)
+    assert capture.capture(keyed) == ({"__irimi_repr__": "x" * 990 + " "}, False)
+    assert capture.capture(Long("x" * 5000)) == ({"__irimi_repr__": ""}, False)
 
 
 def test_a_repr_that_raises_is_named_unrepresentable():

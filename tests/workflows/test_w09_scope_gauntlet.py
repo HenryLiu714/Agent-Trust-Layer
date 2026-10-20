@@ -19,11 +19,12 @@ from examples.workflows.w09_scope_gauntlet.agent import (
     CHARGE,
     CUSTOMER,
     ENTRYPOINT,
+    ERROR_KEY,
     LONG_MESSAGE_CHARS,
     OVERSIZED_BODY_BYTES,
 )
 from examples.workflows.w09_scope_gauntlet.scenarios import BIG_DESCRIPTION_BYTES, WORKFLOW
-from irimi import control, paths, report, trace
+from irimi import control, paths, redact, report, trace
 from irimi.bodies import MAX_BODY_BYTES
 from irimi.exchange import BODY_TRUNCATED_FLAG, Exchange
 from irimi.store import MAX_STORED_BODY, RUNS_DIR, SERVE_LOCK_FILE
@@ -491,27 +492,38 @@ def test_two_runs_posted_at_once_do_not_mix(run_workflow, mode):
 
 
 @pytest.mark.parametrize("mode", MODES)
-def test_a_run_that_ends_in_error_keeps_its_error_cut_to_what_a_trace_keeps(run_workflow, mode):
+def test_a_run_that_ends_in_error_keeps_its_error_redacted_then_cut_to_what_a_trace_keeps(
+    run_workflow, mode
+):
     """A run posts a tool call that raised and an end in error, each message past the 1000
     characters `ErrorInfo` promises (#68): both are stored, cut to that length, not refused. The
-    end's error type is past the 300 characters a posted one is cut to, and is cut so (#99)."""
+    end's error type is past the 300 characters a posted one is cut to, and is cut so (#99). One
+    key is across all three cuts, and each is redacted whole before it is cut: the stored error
+    is a prefix of the redacted whole, the key its one placeholder in all three, and no part of
+    the key reaches the store or `irimi runs show` (#179)."""
     shadow = run_workflow(W, "control_runs", mode)
     stored = shadow.stored().load_run("ctl-error")
     tool = stored_tool_call(shadow, "ctl-error", "error_tool")
     run_type = posted(shadow, "error_end")["error"]["type"]
     run_message = posted(shadow, "error_end")["error"]["message"]
     tool_message = tool.error.message
-    assert (len(run_message), len(tool_message)) == (LONG_MESSAGE_CHARS + 4, LONG_MESSAGE_CHARS + 5)
-    cut = ErrorInfo(run_type[:MAX_ERROR_TYPE], run_message[:MAX_ERROR_MESSAGE])
-    assert (len(run_type), len(cut.type)) == (616, 300)
+    assert (len(run_type), len(run_message), len(tool_message)) == (657, *[LONG_MESSAGE_CHARS] * 2)
+    hidden = redact.placeholder(redact.load_key(shadow.home), ERROR_KEY)
+
+    def kept(posted_text: str, limit: int) -> str:
+        """What a trace keeps of `posted_text`: redacted whole, then cut."""
+        assert posted_text.index(ERROR_KEY) < limit < posted_text.index(ERROR_KEY) + len(ERROR_KEY)
+        return posted_text.replace(ERROR_KEY, hidden)[:limit]
+
+    cut = ErrorInfo(kept(run_type, MAX_ERROR_TYPE), kept(run_message, MAX_ERROR_MESSAGE))
+    tool_cut = ErrorInfo("builtins.ValueError", kept(tool_message, MAX_ERROR_MESSAGE))
+    assert all(hidden in text for text in (cut.type, cut.message, tool_cut.message))
     assert stored.record == dataclasses.replace(
         sdk_record(shadow, "ctl-error", "error_start", "error_end"), error=cut
     )
-    assert stored.events == [
-        dataclasses.replace(
-            tool, error=ErrorInfo("builtins.ValueError", tool_message[:MAX_ERROR_MESSAGE])
-        )
-    ]
+    assert stored.events == [dataclasses.replace(tool, error=tool_cut)]
+    on_disk = [p.read_bytes() for p in shadow.store_root().rglob("*") if p.is_file()]
+    assert not any(ERROR_KEY[:8].encode() in data for data in on_disk)
     assert shown(shadow, "ctl-error") == [
         "run: ctl-error",
         "attribution: sdk",
@@ -520,7 +532,7 @@ def test_a_run_that_ends_in_error_keeps_its_error_cut_to_what_a_trace_keeps(run_
         'args: {"run":"ctl-error"}',
         f"agent version: {AGENT_VERSION}",
         "outcome: error",
-        f"error: {run_type[:MAX_ERROR_TYPE]}: run {'y' * (MAX_ERROR_MESSAGE - 4)}",
+        f"error: {cut.type}: {cut.message}",
         "",
         "real      read      tool charge_card -> raised builtins.ValueError",
         "",

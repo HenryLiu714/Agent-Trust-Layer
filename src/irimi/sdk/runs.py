@@ -60,7 +60,8 @@ from irimi.sdk.instrumentation import instrument
 logger = logging.getLogger(LOGGER_NAME)
 
 # The longest trigger name a run records. A name is a label, as an error message is (#68), and a
-# start past `control.MAX_CONTROL_BODY` would be refused whole.
+# start past `control.MAX_CONTROL_BODY` would be refused whole. Cut between tokens, since the
+# store redacts it only after this cut (`trace.cut_between_tokens`, #179).
 MAX_NAME = 1000
 
 # Every post the SDK makes goes through this one client, so each kind of failure is logged once
@@ -94,7 +95,7 @@ class RunScope:
     run starts, and returns the trigger's args and whether they are replayable."""
 
     def __init__(self, name: str, entrypoint: str | None, capture: Callable[[], Captured]) -> None:
-        self._name = name[:MAX_NAME]
+        self._name = trace.cut_between_tokens(name, MAX_NAME)
         self._entrypoint = entrypoint
         self._capture = capture
         self._opened: _Opened | None = None

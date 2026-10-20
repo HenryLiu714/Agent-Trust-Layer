@@ -26,6 +26,7 @@ the caller unchanged.
 import hashlib
 import math
 import re
+import string
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, assert_never, get_args
@@ -72,11 +73,21 @@ RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # against this before a store can join it onto a path.
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
-# The longest `ErrorInfo.message` kept: a run's error is a label, not a log (#68).
+# The longest `ErrorInfo.message` a trace keeps: a run's error is a label, not a log (#68).
 MAX_ERROR_MESSAGE = 1000
-# The longest `ErrorInfo.type` the control endpoint keeps of a posted one (#99): a class's
-# `module.qualname` is far shorter, but a posted type is whatever the client sent, up to 2 MiB.
+# The longest `ErrorInfo.type` a trace keeps (#99): a class's `module.qualname` is far shorter, but
+# a posted type is whatever the client sent, up to 2 MiB.
+# The store cuts both, and only once it has redacted the whole of each (#179): a key cut in two is
+# no longer its shape, so redaction would not find the half a cut kept.
 MAX_ERROR_TYPE = 300
+# The most of an exception's message `ErrorInfo.from_exception` keeps, far past MAX_ERROR_MESSAGE:
+# the SDK posts the message for the store to redact and cut, and must only keep a post under the
+# control endpoint's 2 MiB (#179).
+MAX_POSTED_MESSAGE = 64 * 1024
+# The characters every secret shape `redact` looks for is spelled with (`redact.SECRET_PATTERNS`;
+# `tests/test_redact.py` holds the two together). A cut made before redaction backs out of a run
+# of them (`cut_between_tokens`, #179).
+TOKEN_CHARS = string.ascii_letters + string.digits + "_-"
 
 # The most of a string a decoder's message quotes (`_quoted`). The message is read by a person, on
 # `irimi runs show`'s stderr, in `list_runs`'s warning or as a control refusal, and a damaged
@@ -110,14 +121,32 @@ def is_valid_run_id(run_id: str) -> bool:
     return RUN_ID_PATTERN.fullmatch(run_id) is not None
 
 
+def cut_between_tokens(text: str, limit: int) -> str:
+    """`text` cut to at most `limit` characters, never inside a run of TOKEN_CHARS: a cut that
+    would fall inside one is made before the whole run instead, so text that is one run past
+    `limit` keeps nothing.
+
+    For a cut made before redaction, as the SDK's are: it cannot redact, since the key is irimi's.
+    Every secret shape is one run of TOKEN_CHARS, so the half of a key a plain cut kept would no
+    longer be its shape, and redaction would store it as it is (#179). Cut here, what is kept,
+    redacted, is a prefix of the whole redacted."""
+    if len(text) <= limit:
+        return text
+    kept = text[:limit]
+    return kept.rstrip(TOKEN_CHARS) if text[limit] in TOKEN_CHARS else kept
+
+
 @dataclass(frozen=True)
 class ErrorInfo:
-    type: str  # the exception's `module.qualname`; a posted one at most MAX_ERROR_TYPE (#99)
-    message: str  # at most MAX_ERROR_MESSAGE characters
+    type: str  # the exception's `module.qualname`; a stored one at most MAX_ERROR_TYPE (#99)
+    message: str  # a stored one at most MAX_ERROR_MESSAGE characters (#68)
 
     @classmethod
     def from_exception(cls, exc: BaseException) -> "ErrorInfo":
         """The one spelling of "what went wrong" a run or a tool call records.
+
+        Its message is `str(exc)`, up to MAX_POSTED_MESSAGE characters cut between tokens. The
+        store redacts it whole, and only then cuts it to MAX_ERROR_MESSAGE (#179).
 
         Never raises on an exception whose `__str__` does: the SDK (#74, #76) calls this while an
         agent's own exception is in flight, and recording it must not replace it with another."""
@@ -126,7 +155,8 @@ class ErrorInfo:
             message = str(exc)
         except Exception:
             message = f"<unprintable {kind.__qualname__}>"
-        return cls(f"{kind.__module__}.{kind.__qualname__}", message[:MAX_ERROR_MESSAGE])
+        message = cut_between_tokens(message, MAX_POSTED_MESSAGE)
+        return cls(f"{kind.__module__}.{kind.__qualname__}", message)
 
 
 @dataclass(frozen=True)

@@ -8,6 +8,7 @@ files under the root say, so a test here breaks only when what reaches disk chan
 import dataclasses
 import errno
 import json
+import logging
 import math
 import os
 import threading
@@ -760,6 +761,34 @@ def test_a_run_of_a_newer_schema_version_is_never_appended_to(root, key):
     assert s.stats().dropped == 1
 
 
+@pytest.mark.parametrize(
+    "damage",
+    [
+        {"mode": "replay", "replay_of": "a  b"},
+        {"mode": "replay"},
+        {"replay_of": "4f1c9a2b7d3e8a60"},
+    ],
+    ids=["replay-of-no-run-id", "replay-naming-no-run", "shadow-naming-a-run"],
+)
+def test_a_run_whose_run_json_cannot_be_decoded_is_never_appended_to(root, key, damage):
+    """A store reopened on a run whose run.json it cannot decode - since #167, one whose
+    `replay_of` is no run id or disagrees with its `mode` - drops that run's events and its end,
+    as it drops a run of another version's: its lines would sit under a record no reader reads,
+    and its end would write a header record over the damage, a replay's or a shadow run's by
+    whichever field it trusted. Fail closed: the run is left as it was found, and each event is
+    counted dropped."""
+    (root / "runs/old").mkdir(parents=True)
+    damaged = trace.run_to_json(_record("old")) | damage
+    (root / "runs/old/run.json").write_text(json.dumps(damaged))
+    s = DirectoryStore(root, key)
+    s.record(_exchange("old"))
+    s.end_run("old", 20.0, "ok")
+    s.close()
+    assert not (root / "runs/old/events.jsonl").exists()
+    assert json.loads((root / "runs/old/run.json").read_text()) == damaged
+    assert s.stats().dropped == 2
+
+
 def test_a_run_of_an_older_schema_version_is_never_appended_to(root, key, monkeypatch):
     """The other direction: this irimi is newer than the run it finds (docs/trace-format.md,
     "Versioning"). Appending would mix two versions' lines under one run.json."""
@@ -1320,6 +1349,91 @@ def test_a_damaged_line_that_is_not_the_last_is_a_trace_format_error(root, key):
     path.write_text(first[:20] + "\n" + second + "\n")
     with pytest.raises(TraceFormatError):
         StoreReader(root).load_run("r1")
+
+
+def test_every_refusal_names_its_file_and_its_line(root, key):
+    """A line that parses but does not decode is named by its file and line, as one that does not
+    parse is: in a run of thousands of events, `'seq' is a string` alone cannot be found. A missing
+    blob is named by the line whose event refers to it, and a run.json's refusal by its file
+    (#134)."""
+    s = DirectoryStore(root, key)
+    s.start_run(_record("r1"))
+    s.record(_exchange("r1", "/a"))
+    s.record(_exchange("r1", "/b", answer=b"a body"))
+    s.close()
+    events = root / "runs/r1/events.jsonl"
+    first, second = events.read_text().splitlines()
+    events.write_text(first + "\n" + second.replace('"seq": 2', '"seq": "2"') + "\n")
+    reader = StoreReader(root)
+    with pytest.raises(TraceFormatError) as refused:
+        reader.load_run("r1")
+    assert str(refused.value) == f"{events}, line 2: 'seq' is a string, not an integer"
+    events.write_text(first + "\n" + second + "\n")
+    blob = root / "blobs" / trace.body_ref(b"a body").sha256
+    blob.unlink()
+    for bodies in (True, False):
+        with pytest.raises(TraceFormatError) as refused:
+            reader.load_run("r1", bodies=bodies)
+        assert str(refused.value).startswith(f"{events}, line 2: blob {blob.name} is missing: ")
+    record = root / "runs/r1/run.json"
+    record.write_text(
+        record.read_text().replace('"engine_version": "0.0.0"', '"engine_version": 0')
+    )
+    with pytest.raises(TraceFormatError) as refused:
+        reader.load_run("r1")
+    assert str(refused.value) == f"{record}: 'engine_version' is an integer, not a string"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a directory whatever its mode")
+def test_a_run_irimi_may_not_read_is_an_os_error_not_a_missing_run(root, key, caplog):
+    """`Path.is_file` reads a run.json it may not stat as none, so a `chmod 0` run was `no run X`
+    and vanished from `list_runs` without a word, and `Path.exists` read unattributed events it
+    may not read as none (#142). Each is an OSError, which `runs show` and `compare` print as
+    `could not be read`, and `list_runs` skips the run with a warning, as it skips a damaged one."""
+    s = DirectoryStore(root, key)
+    s.start_run(_record("good"))
+    s.start_run(_record("shut"))
+    s.record(_exchange("not a run id"))
+    s.close()
+    shut, unattributed = root / "runs/shut", root / trace.UNATTRIBUTED
+    reader = StoreReader(root)
+    assert len(reader.load_run(trace.UNATTRIBUTED).events) == 1
+    # The run's directory, and then its run.json alone.
+    for closed in (shut, shut / "run.json"):
+        closed.chmod(0)
+        unattributed.chmod(0)
+        caplog.clear()
+        try:
+            with caplog.at_level(logging.WARNING, logger="irimi.store"):
+                assert [r.run_id for r in reader.list_runs()] == ["good"]
+            assert caplog.messages == [
+                f"irimi: skipping stored run shut: [Errno 13] Permission denied: '{shut}/run.json'"
+            ]
+            for run_id in ("shut", trace.UNATTRIBUTED):
+                with pytest.raises(PermissionError):
+                    reader.load_run(run_id)
+        finally:
+            closed.chmod(0o700 if closed == shut else 0o600)
+            unattributed.chmod(0o700)
+    # Still no run: no directory, a file where the directory would be, a run.json that is no file.
+    (root / "runs/a-file").write_text("")
+    (root / "runs/hollow/run.json").mkdir(parents=True)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="irimi.store"):
+        assert [r.run_id for r in reader.list_runs()] == ["good", "shut"]
+    assert caplog.messages == []
+    for run_id in ("gone", "a-file", "hollow"):
+        with pytest.raises(RunNotFound):
+            reader.load_run(run_id)
+    # The store itself: one with no `runs/` holds no run, and one irimi may not enter is an
+    # OSError, where `Path.is_dir` read it as none, and `runs list` said `no runs in` it.
+    assert StoreReader(root / "nowhere").list_runs() == []
+    root.chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            reader.list_runs()
+    finally:
+        root.chmod(0o700)
 
 
 def test_a_run_id_is_never_answered_by_its_other_spelling(root, key):

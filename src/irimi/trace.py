@@ -413,7 +413,7 @@ def run_from_json(d: Mapping[str, Any]) -> RunRecord:
     if version < 1:
         raise TraceFormatError("schema_version is below 1, the first version")
     trigger = _optional(d, "trigger", _object)
-    return RunRecord(
+    record = RunRecord(
         schema_version=version,
         run_id=_str(d, "run_id"),
         mode=_one_of(d, "mode", Mode),
@@ -428,8 +428,15 @@ def run_from_json(d: Mapping[str, Any]) -> RunRecord:
         error=_error_from_json(d, "error"),
         exit_code=_optional(d, "exit_code", _int),
         dropped_events=_int(d, "dropped_events"),
-        replay_of=_added_later(d, "replay_of", _str),
+        replay_of=_added_later(d, "replay_of", _run_id),
     )
+    # A replay's run names the run it replayed, and only a replay's: the store stamps both by one
+    # rule, `mode_for`, so a record where they disagree is damage, never half a replay (#167).
+    if record.mode != mode_for(record.replay_of):
+        if record.replay_of is None:
+            raise TraceFormatError("'mode' is 'replay', but 'replay_of' is null")
+        raise TraceFormatError(f"'replay_of' names a run, but 'mode' is {record.mode!r}")
+    return record
 
 
 def tool_call_from_json(d: Mapping[str, Any]) -> ToolCall:
@@ -622,6 +629,17 @@ def _str(d: Mapping[str, Any], key: str) -> str:
     value = _present(d, key)
     if not isinstance(value, str):
         raise TraceFormatError(f"{key!r} is {json_type(value)}, not a string")
+    return value
+
+
+def _run_id(d: Mapping[str, Any], key: str) -> str:
+    """A run id one record names another run by (`replay_of`), held to `is_valid_run_id`, the rule
+    a run id must keep to name a directory: `runs list` prints it in a column, and `irimi replay`
+    looks it up as a run. Refused by its length, never quoted, as a decoder refuses any value
+    (#100, #167)."""
+    value = _str(d, key)
+    if not is_valid_run_id(value):
+        raise TraceFormatError(f"{key!r} is not a run id ({len(value)} characters)")
     return value
 
 

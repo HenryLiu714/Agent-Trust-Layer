@@ -99,10 +99,11 @@ class _Post:
     # caller posted. None when the answer carried no message to show - the fixture failed and the
     # write degraded to `fake-L0` (#42).
     message: dict[str, Any] | None
-
-    @property
-    def ts(self) -> str | None:
-        return None if self.message is None else self.message["ts"]
+    # The post's own id: the message's `ts`, or else the envelope's. A post whose fixture failed
+    # still has the `ts` irimi minted for it on the envelope, so it can still be PLACED - a read
+    # of its thread knows it is one this run touched - though it cannot be SHOWN (#64). None only
+    # when the answer carried no `ts` that parses.
+    ts: str | None
 
 
 def apply_read(read: Read, document: Any, writes: Sequence[Write]) -> Applied:
@@ -257,12 +258,9 @@ def _minted_thread(read: Read, posts: Sequence[_Post]) -> Applied | None:
     than the editing path's `is not False`: leaving a post off a page is one kind of incomplete,
     and building a whole page for a channel irimi cannot match is another kind of wrong.
 
-    The `parent.message is None` guard below cannot fire today, and is kept for narrowing and for
-    safety: `_Post.ts` is read off the message, so a PARENT whose answer carried none has
-    `ts is None` and never matches the thread being asked about. Such a post is invisible to
-    `_would_apply` too, so that read is left unflagged rather than `partial` - a pre-existing gap
-    whose root is `_posts` ignoring the envelope's own minted `ts`, filed as #64 rather than
-    widened into this issue.
+    A PARENT whose answer carried no message to show is found here too, by the envelope's `ts`
+    (`_Post.ts`), and declined by the `parent.message is None` guard below: the caller's
+    `_would_apply` then finds the same post by the same `ts` and flags the read `partial` (#64).
     """
     if read.operation != "conversations.replies":
         return None
@@ -413,9 +411,23 @@ def _posts(writes: Sequence[Write]) -> list[_Post]:
                 broadcast=thread_ts is not None
                 and _flag(write.posted.get("reply_broadcast")) is True,
                 message=own,
+                ts=_own_ts(message, write.answer.get("ts")),
             )
         )
     return out
+
+
+def _own_ts(message: Any, envelope_ts: Any) -> str | None:
+    """A post's own id: its message's `ts`, else the envelope's, each only when it parses.
+
+    The envelope's is the fallback for a post whose fixture failed: its answer carries no message,
+    and irimi's minted `ts` is on the envelope alone (#42). It is the post's id whatever thread the
+    post names, so a reply to a thread irimi cannot name still has one (#64).
+    """
+    for ts in (message.get("ts") if isinstance(message, dict) else None, envelope_ts):
+        if isinstance(ts, str) and _ts(ts) is not None:
+            return ts
+    return None
 
 
 def _would_apply(read: Read, post: _Post) -> bool:

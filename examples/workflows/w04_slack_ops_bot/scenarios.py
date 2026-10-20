@@ -13,6 +13,7 @@ from examples.workflows.w04_slack_ops_bot.agent import (
     OPS,
     THREAD_TS,
 )
+from irimi.servicemap import loader
 
 ANSWER = "Payouts are on schedule."
 
@@ -55,6 +56,16 @@ def _no_chat_write(world: World) -> None:
     world.slack.scopes.discard("chat:write")
 
 
+# The shipped Slack map with `chat.postMessage`'s fixture renamed to one `slack.json` lacks, the
+# only route naming `fixture: message`. Every post degrades to `fake-L0`, flagged `fixture-failed`,
+# its answer an envelope with no `message`, and its minted `ts` on the envelope alone (#42, #64).
+NO_POST_FIXTURE_MAP = (
+    (loader.shipped_dir() / "slack.yaml")
+    .read_text()
+    .replace("fixture: message", "fixture: no_such_message")
+)
+
+
 WORKFLOW = Workflow(
     name="w04_slack_ops_bot",
     summary="A Slack Events API bot: signed inbound events, threaded replies, reactions, a file, "
@@ -72,6 +83,15 @@ WORKFLOW = Workflow(
             ("own_thread",),
             setup=_workspace,
             doc="open a top-level message, reply under its minted ts, read that thread (#52)",
+        ),
+        "own_thread_fixture_failed": Scenario(
+            ("own_thread",),
+            env={"SLACK_CHECK_INCIDENT": "1"},
+            setup=_workspace,
+            extra_maps={"slack.yaml": NO_POST_FIXTURE_MAP},
+            doc="own_thread with the post's fixture unreadable, reading the incident's thread "
+            "before replying: both posts fake-L0, and each read of the thread they minted "
+            "partial (#64)",
         ),
         "channel_by_name": Scenario(
             ("channel_by_name",),

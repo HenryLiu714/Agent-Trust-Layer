@@ -204,9 +204,10 @@ And a refund the real service would have refused, from `w01_ticket_triage double
   for a 4900-yen refund.
 - `Would have fired:` lists webhooks for accepted writes only. A refused write, an idempotent retry
   and a delegated write list none.
-- A write tool the SDK ran as its stand-in gets a line after the HTTP writes:
-  `○ tool db.mark_refunded  shadow stand-in ran`, or `raised <type>`, and it did not happen
-  either: a run whose only writes are tool writes still closes with `These writes did not happen.`
+- A write tool the SDK ran as its stand-in gets a line after the HTTP writes, in the order the
+  calls ended: `○ tool db.mark_refunded  shadow stand-in ran`, or `raised <type>`, and it did not
+  happen either: a run whose only writes are tool writes still closes with
+  `These writes did not happen.`
   A run with a write delegated or unanswered closes by naming the services its writes did not
   reach, and then the tool writes:
   `These writes did not reach stripe. The tool writes did not happen.` A read tool gets no line,

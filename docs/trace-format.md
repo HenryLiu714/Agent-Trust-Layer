@@ -338,8 +338,9 @@ starts first and finishes last, so its precondition read is `seq` 1 and the refu
 one run: its record, every event in `seq` order, and its summary (#72). That summary is
 `report.stored_summary_lines`, the same code that prints the live one, fed the run's exchanges,
 one host per `TelemetrySeen`, each counted as forwarded live because telemetry always is, and its
-tool calls, each write whose stand-in ran printed as a line after the writes (#76). It equals
-the block `irimi shadow` printed on exit except in five places:
+tool calls, each write whose stand-in ran printed as a line after the writes (#76), in the order
+the calls ended, as the live one prints them whatever order their posts came in (#120). It
+equals the block `irimi shadow` printed on exit except in five places:
 
 - **The elapsed seconds.** The live summary times the child; a stored one is the run's
   `ended_at - started_at`, never negative, or `0.0` when either is `null`.

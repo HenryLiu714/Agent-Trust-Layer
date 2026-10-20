@@ -26,7 +26,10 @@ reads that run for real, a write whose stand-in runs under shadow, sync and asyn
 four threads at once, from eight asyncio tasks at once and from a thread that lost its run, and,
 on the `Worker`, a plain method, a static method and a class method. `ledger_two_tools_8` writes
 every odd message's row through a second write tool, so tool calls of two names end at once on
-four threads (#120).
+four threads (#120). `ledger_post_waits` makes their posts reach irimi in the other order than
+the calls ended, every time: the first run's async write ends while the loop's one executor
+thread is busy with the worker's own job, so its post waits, and the second run's sync write,
+made after it, posts at once (#120).
 
     python -m examples.workflows.launch \\
         examples.workflows.w03_queue_worker.agent <scenario>
@@ -281,8 +284,20 @@ def mark_refunded(charge: str, amount: int) -> dict[str, Any]:
     return {"recorded": True, "charge": charge}
 
 
+# `ledger_post_waits` (#120): set as the first run's async ledger write ends, whichever body
+# runs. The SDK records the call's end and queues its post before the task awaits again, so the
+# second run, woken by it, writes after that end; None in every other scenario.
+_ledger_written: asyncio.Event | None = None
+
+
+def _ledger_written_now() -> None:
+    if _ledger_written is not None:
+        _ledger_written.set()
+
+
 async def _record_async_stand_in(charge: str, amount: int) -> dict[str, Any]:
     await asyncio.sleep(0)
+    _ledger_written_now()
     return {"recorded": False, "charge": charge}
 
 
@@ -290,6 +305,7 @@ async def _record_async_stand_in(charge: str, amount: int) -> dict[str, Any]:
 async def record_refund_async(charge: str, amount: int) -> dict[str, Any]:
     await asyncio.sleep(0)
     _insert_refund(charge, amount)
+    _ledger_written_now()
     return {"recorded": True, "charge": charge}
 
 
@@ -370,6 +386,43 @@ async def handle_async(message: dict[str, Any]) -> None:
         recorded = await record_refund_async(charge, message["amount"])
         history = await ledger_history(charge)
         agentkit.obs("ledger", charge=charge, before=before, recorded=recorded, history=history)
+
+
+# `ledger_post_waits`' worker job on the loop's one executor thread, done once the second run has
+# written (#120).
+_flushed = threading.Event()
+
+
+@sdk.trigger(name="handle_ledger")
+async def handle_ledger(message: dict[str, Any]) -> None:
+    """`ledger_post_waits`' runs (#120). The first starts the worker's own job on the loop's one
+    executor thread, which waits for the second run, then writes its ledger row through the async
+    tool, whose post waits off the loop behind that job. The second waits for that write to end,
+    writes through the sync tool, which posts at once on the loop, and lets the job finish.
+    Called alone, by a replay, each run just writes its row."""
+    charge, amount = message["charge"], message["amount"]
+    together = _ledger_written is not None
+    if message["index"] == 0:
+        loop = asyncio.get_running_loop()
+        job = loop.run_in_executor(None, _flushed.wait, agentkit.timeout()) if together else None
+        recorded = await record_refund_async(charge, amount)
+        if job is not None:
+            await job
+    else:
+        if _ledger_written is not None:
+            await _ledger_written.wait()
+        recorded = mark_refunded(charge, amount)
+        _flushed.set()
+    agentkit.obs("ledger", charge=charge, recorded=recorded)
+
+
+async def post_waits(messages: list[dict[str, Any]]) -> list[Any]:
+    """`ledger_post_waits`: both messages' runs at once on a loop whose default executor has one
+    thread, the one the SDK posts an async tool's call from (#120)."""
+    global _ledger_written
+    _ledger_written = asyncio.Event()
+    asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(1))
+    return await asyncio.gather(*(handle_ledger(m) for m in messages), return_exceptions=True)
 
 
 def _journal_stand_in(cls: type, charge: str, net: int) -> dict[str, Any]:
@@ -532,6 +585,8 @@ def consume(messages: list[dict[str, Any]], how: str) -> tuple[int, int]:
         done = tally(messages, asyncio.run(all_of()))
     elif how == "shutdown":
         done = tally(messages, asyncio.run(shut_down(messages)))
+    elif how == "post_waits":
+        done = tally(messages, asyncio.run(post_waits(messages)))
     elif how == "pooled":
         _count_connections()
         with ThreadPoolExecutor(4) as pool:
@@ -573,6 +628,7 @@ SCENARIOS: dict[str, tuple[int, str, dict[str, Any]]] = {
         {"refund_in": "propagated_thread", "ledger": "sync", "two_tools": True},
     ),
     "ledger_asyncio_8": (8, "asyncio", {"ledger": "async"}),
+    "ledger_post_waits": (2, "post_waits", {}),
     "ledger_unpropagated": (2, "serial", {"refund_in": "bare_thread", "ledger": "sync"}),
     "ledger_worker": (4, "worker", {"ledger": "worker"}),
 }

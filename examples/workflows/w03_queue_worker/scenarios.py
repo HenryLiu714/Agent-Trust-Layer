@@ -89,6 +89,13 @@ WORKFLOW = Workflow(
             doc="ledger_threads_8 with every odd message's ledger row written by a second write "
             "tool: two tool names ending at once, printed in the order they ended (#120)",
         ),
+        "ledger_post_waits": Scenario(
+            ("ledger_post_waits",),
+            setup=_charges,
+            doc="two runs whose ledger writes' posts reach irimi in the other order than the "
+            "writes ended: an async write's post waits behind the loop's one busy executor "
+            "thread, and a sync write after it posts at once (#120)",
+        ),
         "ledger_asyncio_8": Scenario(
             ("ledger_asyncio_8",),
             setup=_charges,

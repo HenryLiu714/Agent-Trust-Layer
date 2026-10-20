@@ -182,27 +182,29 @@ def test_an_answer_target_naming_the_address_irimi_was_reached_at_is_never_diall
     if address is None:
         assert not os.environ.get("CI"), "a CI runner with no route has no address to test"
         pytest.skip("this machine has no route, so no non-loopback address")
-    with socket.socket() as probe:  # a free port, so the target can name it before the bind
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
     maps_dir = tmp_path / "maps"
     maps_dir.mkdir()
     (maps_dir / "demo.yaml").write_text(TARGETED_MAP)
-    maps = servicemap.load(
-        allow_target_hosts=frozenset({address}),
-        cwd=tmp_path,
-        maps_dir=maps_dir,
-        targets=[("api.demo.test", "/things", f"http://{address}:{port}/w")],
-    )
-    cfg = dataclasses.replace(
-        _config(tmp_path, monkeypatch, listen_host="0.0.0.0"), listen_port=port, maps=maps
-    )
+    # The target has to name the port the engine bound, so the engine binds port 0 and the target
+    # is loaded once the port is known, into the index the engine and the policy were built with,
+    # which both read per request. A port reserved by binding a socket and closing it could be
+    # taken by another test before the engine bound it (#133).
+    maps = servicemap.MapIndex()
+    cfg = dataclasses.replace(_config(tmp_path, monkeypatch, listen_host="0.0.0.0"), maps=maps)
     calls = _counting_requests(monkeypatch)
     engine = MitmEngine(cfg, ShadowPolicy(maps=maps), NullStore(), NoOverlay())
     from irimi import runner
 
     handle = runner.start_engine(engine)
     try:
+        port = handle.port()
+        loaded = servicemap.load(
+            allow_target_hosts=frozenset({address}),
+            cwd=tmp_path,
+            maps_dir=maps_dir,
+            targets=[("api.demo.test", "/things", f"http://{address}:{port}/w")],
+        )
+        vars(maps).update(vars(loaded))
         import http.client
 
         conn = http.client.HTTPConnection(address, port, timeout=10)

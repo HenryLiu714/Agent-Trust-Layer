@@ -1771,17 +1771,14 @@ def test_the_upstream_reader_refuses_a_body_past_the_cap(upstream, monkeypatch):
     assert UpstreamReader()(_local(upstream)) is None
 
 
-def test_an_unreachable_upstream_is_none_and_not_a_raise():
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-    assert UpstreamReader()(_local(port)) is None
-
-
 def _dead_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+def test_an_unreachable_upstream_is_none_and_not_a_raise():
+    assert UpstreamReader()(_local(_dead_port())) is None
 
 
 def test_the_upstream_reader_dials_the_upstream_whatever_proxy_the_shell_exported(
@@ -1801,14 +1798,16 @@ def test_the_upstream_reader_dials_the_upstream_whatever_proxy_the_shell_exporte
     assert _Upstream.seen == ["/v1/charges/ch_1"]
 
 
-def test_the_upstream_reader_returns_a_redirect_and_never_follows_it(upstream, monkeypatch):
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_the_upstream_reader_returns_a_redirect_and_never_follows_it(upstream, status, monkeypatch):
     """NO REDIRECT (#85's verification): the read dials the host the classifier saw and no other,
-    so a 302 comes back as the answer it is, and wherever it pointed is never asked."""
-    monkeypatch.setattr(_Upstream, "status", 302)
+    so every 3xx urllib would follow for a GET comes back as the answer it is, body and all, and
+    wherever it pointed is never asked."""
+    monkeypatch.setattr(_Upstream, "status", status)
     monkeypatch.setattr(_Upstream, "location", f"http://127.0.0.1:{upstream}/elsewhere")
     response = UpstreamReader()(_local(upstream))
     assert response is not None
-    assert response.status == 302
+    assert (response.status, response.body) == (status, _Upstream.body)
     assert _Upstream.seen == ["/v1/charges/ch_1"]
 
 

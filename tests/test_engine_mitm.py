@@ -3658,7 +3658,8 @@ def _charge(charge_id, amount_refunded=0):
 
 class _PreconditionStub(BaseHTTPRequestHandler):
     """The real Stripe as L3 sees it: one refundable charge, one fully refunded, one slow to
-    answer and one rate-limited. A POST reaching it is a faked write that escaped."""
+    answer, one rate-limited and one that redirects to the fully refunded one. A POST reaching it
+    is a faked write that escaped."""
 
     seen: list = []  # (method, path) of every request
     heard: list = []  # the header pairs of every GET, so a test can see what irimi sent (#67)
@@ -3676,6 +3677,8 @@ class _PreconditionStub(BaseHTTPRequestHandler):
             status, document = 200, _charge("ch_SLOW1")
         elif route == "/v1/charges/ch_BUSY1":
             status, document = 429, {"error": {"type": "rate_limit_error"}}
+        elif route == "/v1/charges/ch_MOVED1":
+            status, document = 302, {"moved_to": "ch_FULL1"}
         elif route == "/v1/charges":
             status, document = (
                 200,
@@ -3687,6 +3690,8 @@ class _PreconditionStub(BaseHTTPRequestHandler):
             status, document = 404, {"error": {"type": "invalid_request_error"}}
         body = json.dumps(document).encode()
         self.send_response(status)
+        if status == 302:
+            self.send_header("location", "/v1/charges/ch_FULL1")
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(body)))
         self.end_headers()
@@ -3830,6 +3835,23 @@ def test_a_refund_l3_could_not_check_still_lists_its_webhooks(precondition_stub)
     (write,) = _writes(seen)
     assert write.precondition == "not_evaluable"
     assert write.would_fire == ("refund.created", "charge.refunded")
+
+
+def test_a_precondition_read_that_redirects_is_not_followed_and_decides_nothing(precondition_stub):
+    """NO REDIRECT (#85): the engine's read dials the object the classifier saw and no other.
+    Followed, `ch_MOVED1`'s 302 to the fully refunded `ch_FULL1` rejected this refund by another
+    charge's state. The 302 is the answer: `not_evaluable`, the write faked at L2 as a 429's is,
+    and `ch_FULL1` never asked."""
+    proxy, stub, seen = precondition_stub
+    status, headers, data = _refund(proxy, stub, "ch_MOVED1")
+    assert status == 200
+    assert json.loads(data)["object"] == "refund"
+    assert headers[pipeline.ANSWERED_BY_HEADER] == "fake-L1"
+    (write,) = _writes(seen)
+    assert (write.answered_by, write.precondition) == ("fake-L1", "not_evaluable")
+    (issued,) = [ex for ex in seen if ex.issued_by == "engine"]
+    assert issued.response is not None and issued.response.status == 302
+    assert _PreconditionStub.seen == [("GET", "/v1/charges/ch_MOVED1")]
 
 
 def test_a_concurrent_request_is_not_delayed_by_another_requests_precondition_read(

@@ -74,8 +74,9 @@ class UpstreamReader:
     `HTTP_PROXY`/`HTTPS_PROXY` and, on macOS, the system's proxy settings, which mitmproxy's own
     forwarding never does: a shell with a proxy exported sent this read, and only this one, to
     that proxy, or to nothing when it was not running, and every L3 check came back
-    `not_evaluable`. It followed a 301, 302 or 303 to wherever it pointed too, a host no map
-    classified. So the opener names no proxy, and a 3xx comes back as the answer it is.
+    `not_evaluable`. It followed a 301, 302, 303, 307 or 308 to wherever it pointed too, a host no
+    map classified. So the opener names no proxy, and a 3xx comes back as the answer it is, which
+    the policy, evaluating only a 200, takes as `not_evaluable`.
     """
 
     def __init__(self) -> None:

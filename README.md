@@ -53,8 +53,10 @@ irimi init
 irimi shadow -- python agent.py
 ```
 
-An irimi installed apart from your agent cannot import it, so replay such an agent with
-`irimi replay RUN_ID -- python agent.py`, not `irimi replay RUN_ID` alone (#162).
+An irimi installed apart from your agent runs under a Python of its own, without your agent's
+packages. So replay a run whose trigger the SDK recorded under your agent's Python, which has
+irimi too since its SDK recorded the run: `irimi replay RUN_ID --python .venv/bin/python`. A run of
+a plain command is replayed by that command ([Replaying a run](#replaying-a-run)).
 
 To run the examples below and the sample workflows, clone the repo:
 
@@ -764,10 +766,11 @@ irimi replay · 725dc6add559a16f → d63663c6da8905c7 · - → -
   2. `--call MODULE:QUALNAME` given, or the run's trigger has an entrypoint: that function, called
      with `--args JSON` or `--args-file PATH` (an object of `{parameter: value}`, captured values
      as the run stores them) or the trigger's recorded args, in a child,
-     `python -m irimi.sdk.replay_child`, under the interpreter irimi runs under. The child imports
-     the function by its name, rebuilds the args (`irimi.sdk.capture.revive`), and calls it,
-     running a coroutine to its end. It exits 0 when the call returns and 1 when it raises, and
-     the replay's run ends with what it raised, as the recorded run did.
+     `python -m irimi.sdk.replay_child`, under irimi's own Python or the agent's (`--python`,
+     below). The child imports the function by its name, rebuilds the args
+     (`irimi.sdk.capture.revive`), and calls it, running a coroutine to its end. It exits 0 when
+     the call returns and 1 when it raises, and the replay's run ends with what it raised, as the
+     recorded run did.
   3. A process run (`irimi shadow -- CMD` with no trigger): its recorded command, run again.
 
   A run with none of these, an `sdk.run` block or a run whose start never reached irimi, is
@@ -782,6 +785,18 @@ irimi replay · 725dc6add559a16f → d63663c6da8905c7 · - → -
 - **RUN_ID comes first.** `irimi replay RUN_ID -- CMD`; a run id that starts with `-` is given
   after `--`, as `irimi replay -- RUN_ID`, and a command then follows a second `--`. `-- CMD`
   with `--call` or `--args` is a usage error.
+- **Which Python calls the trigger.** irimi's own, unless `--python PATH` names the agent's. An
+  irimi in the agent's environment (`uv run irimi`, or `sdk.replay()`) runs under the agent's
+  Python already. One installed apart from it (`uv tool install irimi`, `pipx`) runs under its
+  own, which does not have the agent's packages: the replay could not run, exit 2, and a `hint:`
+  names the Python irimi used. Replay it with `--python .venv/bin/python`, the Python itself
+  rather than its environment's directory, or whichever Python runs the agent. That Python runs
+  irimi's replay child, so it needs irimi installed, as an agent whose trigger the SDK recorded
+  has. irimi asks it before the replay starts: a Python that does not run, or cannot import
+  irimi, is refused, exit 2, and one whose irimi is another version than this one is warned of,
+  since its irimi makes the call; keep the two the same version. A SIGTERM while irimi asks it
+  stops the replay, exit 143. `--python` with `-- CMD`, or for a process run replayed by its
+  command, is refused: a command names its own Python.
 - **The replay is one run.** Every run the child's SDK starts adopts the replay's run, whatever
   started it, and posts no start or end of its own. `irimi replay` stores that run with the trigger
   it replayed, `mode: replay` and `replay_of`, and ends it with the child's exit code, so
@@ -826,9 +841,7 @@ What a replay cannot do:
 - **A trigger called alone runs without its process.** What the agent's `main()` set up - a
   database it seeded, a flag it parsed, the event loop a task is scheduled on, a thread the trigger
   started and `main()` waited for - is not there. Replay such a run with `-- CMD`. A method's run
-  cannot be called alone at all: a run does not record the instance it was called on. And the
-  call runs under irimi's own interpreter, so install irimi where the agent's packages are, or
-  replay with `-- CMD`.
+  cannot be called alone at all: a run does not record the instance it was called on.
 - **A command is the whole process.** With `-- CMD`, every run the process starts is the one
   replay, answered from the one recorded run, so a process that held several runs shows the others'
   writes as added (#155).
@@ -853,7 +866,7 @@ irimi runs show RUN_ID            print a stored run: its record, every event, i
 irimi compare RUN_A RUN_B         print two stored runs' writes side by side, no verdict
 irimi replay RUN_ID [-- CMD]      run a stored run's trigger again, answered from its recording,
                                   and print what changed: --call M:Q, --args JSON (or
-                                  --args-file PATH), --result-file PATH
+                                  --args-file PATH), --python PATH, --result-file PATH
 ```
 
 `serve`, `shadow` and `replay` take `--port`, `--listen-host HOST`, `--store DIR`, `--allow-host HOST`,

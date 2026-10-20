@@ -7,8 +7,9 @@ WHAT RUNS, in order of precedence (`plan`):
 
 1. `-- CMD` given: that command, as `irimi shadow -- CMD` would run it.
 2. `--call` given, or the run's trigger has an entrypoint: a call of that function with the args,
-   `--args` or the trigger's, in `python -m irimi.sdk.replay_child`. Args the trigger did not
-   record replayably are refused (`not_replayable`).
+   `--args` or the trigger's, in `python -m irimi.sdk.replay_child`, under irimi's own Python or
+   `--python`'s (#162). Args the trigger did not record replayably are refused
+   (`not_replayable`).
 3. A process run (`irimi shadow -- <cmd>`): its recorded argv, run again.
 
 Anything else is refused: there is nothing to run. So is a call `replay_child` could never make:

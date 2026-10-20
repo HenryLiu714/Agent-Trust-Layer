@@ -161,19 +161,58 @@ def test_a_thread_minted_by_posts_whose_fixture_failed_is_read_back_partial(run_
         "thread_not_found",
         False,
     )
-    summary = shadow.summaries()
-    incident = summary.index(
-        '  ○ post to #C0OPS: "Incident: Payouts are delayed; investigating."'
-        "  unvalidated (L3 preconditions passed)"
-    )
-    assert summary[incident + 1] == (
-        "    ↳ POST /api/conversations.replies did not show it  live (partial)"
-    )
+    assert _writes_block(shadow.summaries()) == _fixture_failed_writes("live")
     # Real Slack holds the incident, so the bare run's check sees it alone, and its read-back the
     # reply.
     bare = run_workflow(W, "own_thread_fixture_failed", "bare")
     assert (bare.one("incident_check")["ok"], bare.one("incident_check")["messages"]) == (True, 1)
     assert bare.one("readback")["sees_reply"] is True
+
+
+def test_a_replay_of_a_thread_minted_by_posts_whose_fixture_failed_reads_it_partial(replayed):
+    """Replayed, both posts are answered with their recorded envelopes, `ts` and all, and each read
+    of the thread with Slack's recorded `thread_not_found`. The overlay runs again over the
+    recording, and places the parent by the envelope's `ts` as the shadow run did (#64)."""
+    recorded, replay = replayed(W, "own_thread_fixture_failed")
+    assert replay.internet.requests() == []
+    posts = [ex for ex in replay.reported if ex.request.path == "/api/chat.postMessage"]
+    assert [(ex.answered_by, FIXTURE_FAILED_FLAG in ex.flags) for ex in posts] == [
+        ("fake-L0", True)
+    ] * 2
+    reads = [ex for ex in replay.reported if ex.request.path == "/api/conversations.replies"]
+    assert [(ex.answered_by, ex.overlay) for ex in reads] == [
+        ("recording", None),
+        ("recording", "partial"),
+        ("recording", "partial"),
+    ]
+    for name in ("incident_check", "readback"):
+        assert replay.events(name, with_time=False) == recorded.events(name, with_time=False)
+    assert _writes_block(replay.summaries()) == _fixture_failed_writes("recording")
+
+
+def _writes_block(summary: list[str]) -> list[str]:
+    """A summary's write lines and the `↳` lines under them, from its first write on."""
+    start = next(i for i, line in enumerate(summary) if line.startswith("  ○ "))
+    end = next(i for i in range(start, len(summary)) if not summary[i].startswith(("  ○", "    ↳")))
+    return summary[start:end]
+
+
+def _fixture_failed_writes(source: str) -> list[str]:
+    """`own_thread_fixture_failed`'s writes, as its summary prints them, each read `source`."""
+    missed = f"    ↳ POST /api/conversations.replies did not show it  {source} (partial)"
+    return [
+        '  ○ post to #C0OPS: "Incident: Payouts are delayed; investigating."'
+        "  unvalidated (L3 preconditions passed)",
+        missed,  # the incident check, which only the parent's envelope `ts` can place (#64)
+        '  ○ post to #C0OPS: "Payouts are delayed; investigating."'
+        "  unvalidated (L3 preconditions passed)",
+        "  ○ add :eyes: to a message in C0OPS  unvalidated (L0)",
+        "  ○ upload status.csv to C0OPS  unvalidated (L0)",
+        '  ○ post via webhook: "ops bot answered alice"  unvalidated (L0)',
+        # LOOKS WRONG: the read-back's line hangs under the webhook post, as
+        # `test_the_overlay_line_hangs_under_the_webhook_post_it_cannot_have_seen` pins.
+        missed,
+    ]
 
 
 @pytest.mark.parametrize("mode", MODES)

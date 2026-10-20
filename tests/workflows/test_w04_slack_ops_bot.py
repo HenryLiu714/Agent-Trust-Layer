@@ -8,7 +8,7 @@ import pytest
 
 from examples.workflows.harness.run import CANARIES, check_invariants, compare, rows_not_shown
 from irimi import redact
-from irimi.exchange import Exchange
+from irimi.exchange import FIXTURE_FAILED_FLAG, Exchange
 
 W = "w04_slack_ops_bot"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi (#77).
@@ -133,6 +133,47 @@ def test_a_reply_under_the_runs_own_minted_thread_is_answered_from_the_write_log
     assert len(stub_saw) == 2  # the live read before, and the forwarded read-back irimi replaced
     bare = run_workflow(W, "own_thread", "bare")
     assert (bare.one("readback")["sees_reply"], bare.one("readback")["messages"]) == (True, 2)
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_thread_minted_by_posts_whose_fixture_failed_is_read_back_partial(run_workflow, mode):
+    """The post's fixture is unreadable, so both posts degrade to `fake-L0`: an envelope with no
+    `message`, the minted `ts` on the envelope alone (#42). Real Slack has never heard of the
+    thread and irimi has no message to build it from, so `thread_not_found` stands, and each read
+    of the thread says the world irimi showed is incomplete. The read before the reply is the one
+    only the parent's own `ts` can place (#64)."""
+    shadow = run_workflow(W, "own_thread_fixture_failed", mode)
+    posts = [ex for ex in shadow.reported if ex.request.path == "/api/chat.postMessage"]
+    assert [(ex.answered_by, ex.flags) for ex in posts] == [
+        ("fake-L0", ("fidelity:L0", FIXTURE_FAILED_FLAG))
+    ] * 2
+    reads = [ex for ex in shadow.reported if ex.request.path == "/api/conversations.replies"]
+    assert [(ex.answered_by, ex.overlay) for ex in reads] == [
+        ("live", None),  # the mention's own thread, read before any write
+        ("live", "partial"),  # the incident's thread, holding its parent alone
+        ("live", "partial"),  # the read-back, after the reply
+    ]
+    check = shadow.one("incident_check")
+    assert (check["ok"], check["error"]) == (False, "thread_not_found")
+    readback = shadow.one("readback")
+    assert (readback["ok"], readback["error"], readback["sees_reply"]) == (
+        False,
+        "thread_not_found",
+        False,
+    )
+    summary = shadow.summaries()
+    incident = summary.index(
+        '  ○ post to #C0OPS: "Incident: Payouts are delayed; investigating."'
+        "  unvalidated (L3 preconditions passed)"
+    )
+    assert summary[incident + 1] == (
+        "    ↳ POST /api/conversations.replies did not show it  live (partial)"
+    )
+    # Real Slack holds the incident, so the bare run's check sees it alone, and its read-back the
+    # reply.
+    bare = run_workflow(W, "own_thread_fixture_failed", "bare")
+    assert (bare.one("incident_check")["ok"], bare.one("incident_check")["messages"]) == (True, 1)
+    assert bare.one("readback")["sees_reply"] is True
 
 
 @pytest.mark.parametrize("mode", MODES)

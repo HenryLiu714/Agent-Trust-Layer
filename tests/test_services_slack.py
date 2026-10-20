@@ -586,10 +586,7 @@ def test_a_minted_parent_in_a_channel_the_read_spells_differently_stays_partial(
 def test_a_minted_thread_whose_reply_has_no_message_to_show_stays_partial():
     """The fixture failed and that reply degraded to `fake-L0` (#42): the run put a message in this
     thread and the overlay has nothing to show for it, so the page cannot be built honestly and
-    Slack's own error stands (#52).
-
-    The PARENT's own message cannot be missing here and still reach this point - see
-    `_minted_thread`'s docstring and #64.
+    Slack's own error stands (#52). Its parent-side twin is the next test (#64).
     """
     error = {"ok": False, "error": "thread_not_found"}
     parent = _post_write(ts=MINTED1)
@@ -603,6 +600,57 @@ def test_a_minted_thread_whose_reply_has_no_message_to_show_stays_partial():
     assert out.changed is False
     assert out.partial is True
     assert out.status is None
+
+
+def test_a_minted_thread_whose_parent_has_no_message_to_show_stays_partial():
+    """The parent-side twin of the test above (#64). The fixture failed and the PARENT degraded to
+    `fake-L0`: its answer is an envelope with no `message`, irimi's minted `ts` on the envelope
+    alone. The post is found by that `ts`, `_minted_thread` declines it for having nothing to
+    show, and Slack's own error stands, `partial`. The thread holds no reply, since a reply's own
+    `thread_ts` would flag this read whatever the parent's `ts` was."""
+    error = {"ok": False, "error": "thread_not_found"}
+    mute = Write(
+        operation="chat.postMessage",
+        posted={"channel": "C0123", "text": "hi"},
+        answer={"ok": True, "channel": "C0123", "ts": MINTED1},
+    )
+    out = apply_read(_replies(MINTED1), dict(error), [mute])
+    assert out.document == error
+    assert out.changed is False
+    assert out.partial is True
+    assert out.status is None
+    # A thread the post did not start is not one it would have touched (#44).
+    other = apply_read(_replies(MINTED2), dict(error), [mute])
+    assert (other.document, other.partial) == (error, False)
+
+
+def test_a_reply_to_a_thread_irimi_cannot_name_is_still_placed_by_its_own_ts():
+    """A reply whose posted `thread_ts` is not a string has no thread irimi can name, and nothing
+    it can show. Its `ts` is still its own id, so a read of the thread it would start is `partial`
+    and not left unflagged (#64)."""
+    error = {"ok": False, "error": "thread_not_found"}
+    reply = _post_write(ts=MINTED1, thread_ts=17)
+    out = apply_read(_replies(MINTED1), dict(error), [reply])
+    assert out.document == error
+    assert out.partial is True
+
+
+def test_a_post_with_no_message_is_left_off_a_history_window_its_ts_is_outside():
+    """`latest=<a real ts>` excludes a minted `ts`, which is above every real one, so the page
+    needs nothing the run posted and is complete - for a post the overlay cannot show as for one
+    it can. The post is placed by its envelope's `ts` (#64); without the window the page is
+    `partial` (the next test)."""
+    write = Write(
+        operation="chat.postMessage",
+        posted={"channel": "C0123", "text": "hi"},
+        answer={"ok": True, "channel": "C0123", "ts": MINTED1},
+    )
+    page = _history_page(REAL_OLD)
+    before = copy.deepcopy(page)
+    out = apply_read(_history(latest=REAL_NEW), page, [write])
+    assert out.document == before
+    assert out.changed is False
+    assert out.partial is False
 
 
 def test_a_post_whose_answer_has_no_message_is_partial_and_unchanged():

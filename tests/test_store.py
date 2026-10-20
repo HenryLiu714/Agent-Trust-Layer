@@ -1094,6 +1094,21 @@ def test_a_runs_start_counts_against_the_byte_budget(root, key, monkeypatch):
     assert _paths(late) == ["/no-body"]
 
 
+def test_a_start_that_cannot_be_measured_is_a_drop_on_its_run(root, key):
+    """A start is measured as JSON on the caller's thread (#99), so one that is not JSON - args no
+    decoder could have made, from a caller other than the control endpoint - is dropped there,
+    never raised into the caller, and counted on its run, which its first event makes a `header`
+    run, as every dropped start leaves it."""
+    s = DirectoryStore(root, key)
+    s.start_run(_record("r1", args={"x": {1, 2}}))
+    s.record(_exchange("r1"))
+    s.close()
+    assert s.stats().dropped == 1
+    run = StoreReader(root).load_run("r1")
+    assert run.record == dataclasses.replace(store.header_record("r1", 1.0), dropped_events=1)
+    assert _paths(run) == ["/v1/things"]
+
+
 def test_the_writer_fsyncs_in_batches_before_close(root, key, monkeypatch, store_os):
     synced: set[int] = set()  # inodes
     monkeypatch.setattr(store, "SYNC_EVERY", 3)

@@ -69,7 +69,22 @@ class UpstreamReader:
     claiming a loopback stub is dialled at the stub and the real Stripe is never touched. It does
     not go through irimi's own listener: the agent's request has already been rewritten to its
     upstream by the time the policy sees it.
+
+    NO PROXY AND NO REDIRECT (#85's verification). `urllib.request.urlopen`'s default opener reads
+    `HTTP_PROXY`/`HTTPS_PROXY` and, on macOS, the system's proxy settings, which mitmproxy's own
+    forwarding never does: a shell with a proxy exported sent this read, and only this one, to
+    that proxy, or to nothing when it was not running, and every L3 check came back
+    `not_evaluable`. It followed a 301, 302, 303, 307 or 308 to wherever it pointed too, a host no
+    map classified. So the opener names no proxy, and a 3xx comes back as the answer it is, which
+    the policy, evaluating only a 200, takes as `not_evaluable`.
     """
+
+    def __init__(self) -> None:
+        self._opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+            _NoRedirects(),
+        )
 
     def __call__(self, request: Request) -> Response | None:
         req = urllib.request.Request(
@@ -79,10 +94,7 @@ class UpstreamReader:
             method=request.method,
         )
         try:
-            # A context on an `http://` URL is accepted and ignored, so there is no scheme branch.
-            with urllib.request.urlopen(
-                req, timeout=PRECONDITION_TIMEOUT_S, context=ssl.create_default_context()
-            ) as resp:
+            with self._opener.open(req, timeout=PRECONDITION_TIMEOUT_S) as resp:
                 return _capped(resp.status, resp.headers.items(), resp)
         except urllib.error.HTTPError as err:
             # A 429 or a 404 is information, not a failure to read: the exchange records it before
@@ -93,6 +105,14 @@ class UpstreamReader:
             # Not `logger.exception`: an unreachable upstream is a normal outcome here, not a bug.
             logger.warning("irimi: the precondition read of %s failed: %s", request.url, exc)
             return None
+
+
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """Never follows a redirect, so a 3xx is an HTTPError, which `UpstreamReader` returns as the
+    response it is: the engine's read dials the host the classifier saw and no other (#85)."""
+
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
 
 
 def _capped(status: int, headers: Any, body: Any) -> Response | None:

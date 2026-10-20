@@ -39,6 +39,10 @@ DB_NAME = "helpdesk.sqlite3"
 # Set for a run whose helpdesk database is gone, as a replay's may be since its recording (#83):
 # the agent seeds nothing, so a real `lookup_customer` raises (`no such table`).
 DB_LOST_ENV = "HELPDESK_DB_LOST"
+# Set for a replay of an edit to the agent's own code rather than its prompt (#85): every tool
+# result the model is sent carries the tag, so the first model call, which holds no tool result
+# yet, still matches its recording, and every later one does not. The replay diverges mid-loop.
+RESULT_TAG_ENV = "TOOL_RESULT_TAG"
 PROMPTS = {
     "full": "You are a refund agent. Refund the full remaining amount of a disputed charge.",
     "half": "You are a refund agent. Refund half of the remaining amount of a disputed charge.",
@@ -98,7 +102,8 @@ def send_reply(ticket_id: str, body: str) -> dict[str, Any]:
 
 
 def _tool_result(tool: str, **fields: Any) -> str:
-    return json.dumps({"tool": tool, **fields})
+    tag = os.environ.get(RESULT_TAG_ENV)
+    return json.dumps({"tool": tool, **fields, **({"tag": tag} if tag else {})})
 
 
 def run_tool(ticket: Ticket, turn: int, name: str, args: dict[str, Any]) -> str:

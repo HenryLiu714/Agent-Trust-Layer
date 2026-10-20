@@ -163,7 +163,9 @@ printed at the end, hold every event that ended by then and none after.
    credential shape `redact` misses is fixed in `redact`, not in the canary. `CANARIES` are the
    credentials the agent is given and sends; `SERVED_CANARIES` are those a fake service hands
    back in a response body (W5's payment intent, and the first lines of W10's bombs, #94), which a
-   live read stores.
+   live read stores. A canary's first 12 characters on disk fail it too: a cut made before
+   redaction keeps a part of a key that is no longer its shape, so it is stored as it is, and the
+   whole canary is never there to find (#179).
 5. The agent exited the same way under shadow as bare, unless the scenario is marked `diverges`.
 
 `tests/workflows/test_replays.py` replays every run of every scenario's shadow recording, unchanged,

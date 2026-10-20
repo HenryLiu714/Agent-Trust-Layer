@@ -355,9 +355,8 @@ run `irimi replay` stores, which alone would list it as an `irimi shadow` proces
 run a replay's store holds - an `sdk` run, or a `header` run an `Irimi-Run` label made - keeps its
 attribution in front: `header, replay of <run id>`. `runs show` prints `mode: replay` and
 `replay of: <run id>` under the attribution, and opens the run's summary `irimi replay · run`
-where a shadow run's opens `irimi shadow · run`: `irimi replay` prints its comparison on exit, not
-a summary, so a replay's block is the one place `runs show`'s summary was never printed live
-(#154).
+where a shadow run's opens `irimi shadow · run`, so the block names the command that made the run.
+`irimi replay` prints its comparison on exit, never this block (#154).
 
 `runs show` prints a stored record's text with each control character escaped (`\n`, `\x1b`): an
 error is the agent's own `str(exc)`, and printed raw it could break a line or drive the terminal.

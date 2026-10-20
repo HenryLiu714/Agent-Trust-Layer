@@ -193,7 +193,7 @@ An exchange's `started_at` and `ended_at` are `0.0` only on an exchange built wi
 | `error` | error or `null` | Why the run failed, when `outcome` is `"error"`. |
 | `exit_code` | integer or `null` | The child's exit code, set only for the `process` run. |
 | `dropped_events` | integer | Events the store could not write. `0` means the run is whole. |
-| `replay_of` | string or `null` | Added in v2 (#82). The run a replay answered this one from; `null` for a run that is no replay. Absent in a v1 run, and read then as `null`. |
+| `replay_of` | string or `null` | Added in v2 (#82). The run a replay answered this one from; `null` for a run that is no replay. Absent in a v1 run, and read then as `null`. A run id, as `run_id` is (`trace.is_valid_run_id`), set exactly when `mode` is `replay`: a record holding anything else is refused (#167). |
 
 A **trigger** (`trace.Trigger`):
 

@@ -1101,6 +1101,54 @@ def test_a_replay_is_replayed_by_the_trigger_it_called(replayed, tmp_path, promp
     assert len(recording) == 1
 
 
+# The full refund's replay's run.json damaged as #167 says one can be, and how it is refused: a
+# `replay_of` that no run id could be, by its length and never quoted, and a `mode` and
+# `replay_of` that disagree.
+DAMAGED_REPLAYS = {
+    "five-megabytes": ({"replay_of": "x" * 5_000_000}, "is not a run id (5000000 characters)"),
+    "a-path": ({"replay_of": "../x"}, "is not a run id (4 characters)"),
+    "empty": ({"replay_of": ""}, "is not a run id (0 characters)"),
+    "two-spaces": ({"replay_of": "a  b"}, "is not a run id (4 characters)"),
+    "names-no-run": ({"replay_of": None}, "'mode' is 'replay', but 'replay_of' is null"),
+    "a-shadow-run": ({"mode": "shadow"}, "'replay_of' names a run, but 'mode' is 'shadow'"),
+}
+
+
+@pytest.mark.parametrize("damage", DAMAGED_REPLAYS)
+def test_a_replay_whose_run_json_names_no_run_it_replayed_is_refused(replayed, tmp_path, damage):
+    """The full refund's replay, its run.json damaged in a copy of its store: `runs list` skips the
+    run with a warning naming the file and why, and lists the others as it did, where a 5 MB
+    `replay_of` was printed whole on the run's line and an empty one or one with two spaces broke
+    its columns; `runs show` and `irimi replay` of the replay each say it could not be read
+    (#167)."""
+    _, replay = replayed(W, "full_refund")
+    run = replay.process_run_id()
+    copy = tmp_path / "store"
+    shutil.copytree(replay.store_root(), copy)
+    record = copy / "runs" / run / "run.json"
+    changes, why = DAMAGED_REPLAYS[damage]
+    record.write_text(json.dumps(json.loads(record.read_text()) | changes))
+    refused = f"{record}: {why}" if why.startswith("'") else f"{record}: 'replay_of' {why}"
+    damaged = dataclasses.replace(replay, store=copy)
+    # In this process the store's warning goes to pytest's log capture, not to stderr, so
+    # `listed_attributions` sees none; `runs list` in a process of its own, last, prints it.
+    listed = replay.listed_attributions()
+    assert listed[run].startswith("replay of ")
+    assert damaged.listed_attributions() == {r: a for r, a in listed.items() if r != run}
+    shown = damaged.runs("show", run, "--store", str(copy))
+    assert shown == (1, [], [f"error: run {run} could not be read: {refused}"])
+    assert damaged.command("replay", run, "--store", str(copy)) == (
+        2,
+        [],
+        [f"error: run {run} could not be read: {refused}"],
+    )
+    warned = _irimi_process(replay, "runs", "list", "--store", str(copy))
+    assert (warned.returncode, warned.stderr) == (
+        0,
+        f"irimi: skipping stored run {run}: {refused}\n",
+    )
+
+
 def test_a_run_recorded_into_a_shared_store_is_replayed_into_a_copy_of_it(
     shared_store_run, tmp_path
 ):

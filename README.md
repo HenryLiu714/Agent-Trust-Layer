@@ -212,10 +212,13 @@ And a refund the real service would have refused, from `w01_ticket_triage double
 when `irimi replay` calls a trigger, `IRIMI_REPLAY_CALL`, `IRIMI_REPLAY_ARGS_FILE` and
 `IRIMI_REPLAY_OUTCOME_FILE` (#84). That
 covers requests, httpx, urllib, curl and Node's fetch with no code change.
-The command's exit code is passed through. One process tree is one run; the subcommand is the only
-thing that chooses the mode. SIGTERM to `irimi shadow`, as a supervisor or a container runtime
-sends it, is passed to the command, and the command's exit then ends the run as any exit does:
-the run is stored with its code, what is queued is written, and the summary is printed (#77).
+The command's exit code is passed through, unless the reader of irimi's own output has gone
+(`irimi shadow -- ... | head -1`): irimi then exits 141 quietly, the run stored and ended if the
+command had started, and the command never started if the reader went during the banner (#142).
+One process tree is one run; the subcommand is the only thing that chooses the mode. SIGTERM to
+`irimi shadow`, as a supervisor or a container runtime sends it, is passed to the command, and the
+command's exit then ends the run as any exit does: the run is stored with its code, what is queued
+is written, and the summary is printed (#77).
 
 `IRIMI_CONTROL` is `http://127.0.0.1:<port>/_irimi`, irimi's control endpoint on the same listener.
 The SDK posts a run's start, its end and the tool calls the proxy cannot see there

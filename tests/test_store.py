@@ -1397,6 +1397,15 @@ def test_a_run_irimi_may_not_read_is_an_os_error_not_a_missing_run(root, key, ca
     for run_id in ("gone", "a-file", "hollow"):
         with pytest.raises(RunNotFound):
             reader.load_run(run_id)
+    # The store itself: one with no `runs/` holds no run, and one irimi may not enter is an
+    # OSError, where `Path.is_dir` read it as none, and `runs list` said `no runs in` it.
+    assert StoreReader(root / "nowhere").list_runs() == []
+    root.chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            reader.list_runs()
+    finally:
+        root.chmod(0o700)
 
 
 def test_a_run_id_is_never_answered_by_its_other_spelling(root, key):

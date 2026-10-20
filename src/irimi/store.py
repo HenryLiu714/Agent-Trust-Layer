@@ -1008,12 +1008,18 @@ class StoreReader:
 
     def list_runs(self) -> list[RunRecord]:
         """Every run, newest `started_at` first and a None `started_at` last. A run.json this
-        irimi cannot read - a newer schema version - is skipped with a WARNING, so one run
-        cannot hide the others. So is one that names another run than its directory does:
-        `load_run` would refuse that id, so listing it would name a run that cannot be shown
-        (#70)."""
+        irimi cannot read - a newer schema version, damage, or one it may not open - is skipped
+        with a WARNING, so one run cannot hide the others. So is one that names another run than
+        its directory does: `load_run` would refuse that id, so listing it would name a run that
+        cannot be shown (#70). A store with no `runs/` holds no run; one irimi may not list
+        raises its OSError (#142)."""
         records = []
-        runs = sorted(self.layout.runs.iterdir()) if self.layout.runs.is_dir() else []
+        try:
+            # `Path.is_dir` read a store irimi may not enter as none, so `runs list` said it held
+            # no runs (#142).
+            runs = sorted(self.layout.runs.iterdir())
+        except (FileNotFoundError, NotADirectoryError):
+            runs = []
         for directory in runs:
             # One irimi may not read is skipped with a warning too, never silently (#142).
             try:

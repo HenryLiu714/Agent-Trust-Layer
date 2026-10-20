@@ -18,7 +18,7 @@ from irimi.exchange import Exchange, Request
 from irimi.policy import ReplayPolicy, ShadowPolicy
 from irimi.recording import Recording
 from irimi.store import DirectoryStore, NullStore, StoreReader
-from irimi.trace import MAX_ERROR_MESSAGE, MAX_QUOTED, ErrorInfo, ToolCall, Trigger
+from irimi.trace import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE, MAX_QUOTED, ErrorInfo, ToolCall, Trigger
 from tests import test_engine_mitm
 from tests.test_engine_mitm import _config, _start, _via_proxy
 
@@ -626,6 +626,21 @@ def test_a_posted_error_message_is_cut_to_the_length_a_trace_keeps(engine):
     run = engine.finish().load_run(RUN)
     [call] = run.events
     cut = ErrorInfo("x.Boom", "m" * MAX_ERROR_MESSAGE)
+    assert (run.record.outcome, run.record.error, call.error) == ("error", cut, cut)
+
+
+def test_a_posted_error_type_is_cut_to_the_length_a_trace_keeps(engine):
+    """A posted error's type is the client's to say, so it may be nearly all of a 2 MiB body. It
+    is cut to MAX_ERROR_TYPE characters, on an end and on a tool call, never refused (#99)."""
+    long = {"type": "t" * (MAX_CONTROL_BODY - 1000), "message": "no"}
+    t0 = time.time()
+    _ok(engine.call("POST", _START, _start_body(t0)))
+    _ok(engine.call("POST", f"/_irimi/runs/{RUN}/tool-calls", {**_tool_call(t0), "error": long}))
+    end = {"ended_at": t0 + 1, "outcome": "error", "error": long}
+    _ok(engine.call("POST", f"/_irimi/runs/{RUN}/end", end))
+    run = engine.finish().load_run(RUN)
+    [call] = run.events
+    cut = ErrorInfo("t" * MAX_ERROR_TYPE, "no")
     assert (run.record.outcome, run.record.error, call.error) == ("error", cut, cut)
 
 

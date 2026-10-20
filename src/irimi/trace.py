@@ -74,6 +74,9 @@ SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 # The longest `ErrorInfo.message` kept: a run's error is a label, not a log (#68).
 MAX_ERROR_MESSAGE = 1000
+# The longest `ErrorInfo.type` the control endpoint keeps of a posted one (#99): a class's
+# `module.qualname` is far shorter, but a posted type is whatever the client sent, up to 2 MiB.
+MAX_ERROR_TYPE = 300
 
 # The most of a string a decoder's message quotes (`_quoted`). The message is read by a person, on
 # `irimi runs show`'s stderr, in `list_runs`'s warning or as a control refusal, and a damaged
@@ -109,7 +112,7 @@ def is_valid_run_id(run_id: str) -> bool:
 
 @dataclass(frozen=True)
 class ErrorInfo:
-    type: str  # the exception's `module.qualname`
+    type: str  # the exception's `module.qualname`; a posted one at most MAX_ERROR_TYPE (#99)
     message: str  # at most MAX_ERROR_MESSAGE characters
 
     @classmethod

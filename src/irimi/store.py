@@ -40,11 +40,12 @@ so a root has at most one: it holds `serve.lock` while it runs (`ServeLock`), an
 the same root refuses to start (#77).
 
 A LONG `irimi serve` STAYS BOUNDED. The queue is capped in items and in bytes - an exchange's
-bodies and a tool call's args and result (#76) - and a body over MAX_REDACTED_BODY is dropped
-before it is queued, so the writer never redacts hundreds of MB while holding the GIL the proxy
-needs. A telemetry exchange is reduced to its `TelemetrySeen` on the caller's side, for the same
-reason. The files a writer touched are fsynced in batches, a run's state is forgotten once it ends
-(a late event reopens it from disk), and resuming a run reads only the tail of its file.
+bodies, a tool call (#76) and a run's start (#99), each whole as JSON - and a body over
+MAX_REDACTED_BODY is dropped before it is queued, so the writer never redacts hundreds of MB while
+holding the GIL the proxy needs. A telemetry exchange is reduced to its `TelemetrySeen` on the
+caller's side, for the same reason. The files a writer touched are fsynced in batches, a run's
+state is forgotten once it ends (a late event reopens it from disk), and resuming a run reads only
+the tail of its file.
 
 A FAILED WRITE LEAVES NO DAMAGE BEHIND. A line the disk refused half-way is truncated off again, a
 blob whose size is wrong - torn by a crash before any fsync - is rewritten by the next event that
@@ -91,7 +92,8 @@ MAX_STORED_BODY = 8 * 1024 * 1024
 # How many items may wait for the writer. A full queue drops the event rather than block a hook.
 QUEUE_SIZE = 10_000
 # How many body bytes may wait for the writer, whatever the item count: 10,000 exchanges of 8 MiB
-# each would otherwise hold 80 GiB. A tool call's args and result count as body bytes (#76). An
+# each would otherwise hold 80 GiB. A tool call counts as body bytes (#76), and so does a run's
+# start, each as its whole JSON, of which the control endpoint takes up to 2 MiB (#99). An
 # item that would pass it is dropped, unless the queue holds no bodies at all, so one large
 # exchange still reaches an idle writer.
 MAX_QUEUED_BYTES = 256 * 1024 * 1024
@@ -260,6 +262,8 @@ class StoreLayout:
 @dataclass(frozen=True)
 class _StartRun:
     record: RunRecord
+    # The record as JSON, in bytes, measured once as it is queued (#99).
+    json_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -274,7 +278,8 @@ class _EndRun:
 @dataclass(frozen=True)
 class _Record:
     event: Exchange | ToolCall | TelemetrySeen
-    # A tool call's args and result as JSON, in bytes, measured once as it is queued (#76).
+    # A tool call as JSON, in bytes, measured once as it is queued (#76): the whole call, since a
+    # posted name or id may be nearly all of its 2 MiB, as its args may (#99).
     json_bytes: int = 0
 
 
@@ -347,7 +352,17 @@ class DirectoryStore:
     # -- the public methods: each enqueues one item and returns ------------------------------
 
     def start_run(self, record: RunRecord) -> None:
-        self._put(_StartRun(record))
+        # A start counts against the byte budget as a tool call does (#99), so one that cannot be
+        # measured is a drop, as a tool call's is. A dropped start leaves its run to be made from
+        # its first event as a `header` run, as every dropped start does (docs/trace-format.md).
+        try:
+            size = len(json.dumps(trace.run_to_json(record)))
+        except Exception as exc:
+            self._drop(
+                _item_run_id(_StartRun(record)), f"it could not be queued: {type(exc).__name__}"
+            )
+            return
+        self._put(_StartRun(record, size))
 
     def record(self, exchange: Exchange) -> None:
         try:
@@ -361,7 +376,7 @@ class DirectoryStore:
 
     def record_tool_call(self, call: ToolCall) -> None:
         try:
-            size = len(json.dumps([call.args, call.result]))
+            size = len(json.dumps(trace.tool_call_to_json(call)))
         except Exception as exc:
             self._drop(_item_run_id(_Record(call)), f"it could not be queued: {type(exc).__name__}")
             return
@@ -495,6 +510,18 @@ class DirectoryStore:
 
     def _start(self, record: RunRecord) -> None:
         run = self._run_dir(record.run_id)
+        # A RUN THAT HAS ENDED IS NOT STARTED AGAIN (#97). A start re-posted after the run's end
+        # would rewrite its run.json whole, losing its end, its outcome and its first trigger, so
+        # it listed `incomplete` again. It is dropped, and counted on the store alone, in health's
+        # `dropped` (the endpoint answered 204 when it queued it): the run lost nothing, so its
+        # run.json is not rewritten, its `dropped_events` included. `_run` reopens a run forgotten
+        # at its end from disk, so its stored outcome is seen here, and it is forgotten again, so
+        # a serve holds only the runs still open. A `header` run has no outcome, so a start still
+        # rewrites it (#70).
+        if run.record is not None and run.record.outcome is not None:
+            self._drop(UNATTRIBUTED, "a start was posted for a run that has already ended")
+            self._forget(record.run_id, run)
+            return
         trigger = record.trigger
         if trigger is not None:
             # The name is the command's argv[0], which `args` repeats, so it is redacted as they
@@ -794,12 +821,13 @@ def _fsync(path: Path) -> None:
 
 
 def _item_bytes(item: _Item) -> int:
-    """The bytes `item` holds while it waits: an exchange's two bodies, and a tool call's args and
-    result, which the control endpoint takes up to `control.MAX_CONTROL_BODY` of (#76)."""
+    """The bytes `item` holds while it waits: an exchange's two bodies, and a tool call (#76) and a
+    run's start (#99) as their whole JSON, which the control endpoint takes up to
+    `control.MAX_CONTROL_BODY` of. An end holds an error cut to a label (`control._label`)."""
     if isinstance(item, _Record) and isinstance(item.event, Exchange):
         response = item.event.response
         return len(item.event.request.body) + (0 if response is None else len(response.body))
-    if isinstance(item, _Record):
+    if isinstance(item, _Record | _StartRun):
         return item.json_bytes
     return 0
 

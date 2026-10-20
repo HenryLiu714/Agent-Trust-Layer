@@ -59,8 +59,8 @@ An irimi installed apart from your agent cannot import it, so replay such an age
 To run the examples below and the sample workflows, clone the repo:
 
 ```
-git clone https://github.com/HenryLiu714/Agent-Trust-Layer.git
-cd Agent-Trust-Layer
+git clone https://github.com/HenryLiu714/Irimi.git
+cd Irimi
 scripts/setup.sh              # creates the venv, installs irimi, runs `irimi init`
 uv run irimi --help
 ```
@@ -938,7 +938,7 @@ refused with `charge_already_refunded`. Stripe itself never sees a refund.
 
 ## Roadmap
 
-Work is tracked in the [issues](https://github.com/HenryLiu714/Agent-Trust-Layer/issues), labelled
+Work is tracked in the [issues](https://github.com/HenryLiu714/Irimi/issues), labelled
 by phase.
 
 **Done**

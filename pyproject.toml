@@ -37,9 +37,9 @@ dependencies = [
 irimi = "irimi.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/HenryLiu714/Agent-Trust-Layer"
-Source = "https://github.com/HenryLiu714/Agent-Trust-Layer"
-Issues = "https://github.com/HenryLiu714/Agent-Trust-Layer/issues"
+Homepage = "https://github.com/HenryLiu714/Irimi"
+Source = "https://github.com/HenryLiu714/Irimi"
+Issues = "https://github.com/HenryLiu714/Irimi/issues"
 
 [dependency-groups]
 # `uv sync` installs `dev` by default. `examples` is opt-in: `uv sync --group examples`.

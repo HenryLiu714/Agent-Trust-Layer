@@ -10,8 +10,8 @@
 ## Set up
 
 ```
-git clone https://github.com/HenryLiu714/Agent-Trust-Layer.git
-cd Agent-Trust-Layer
+git clone https://github.com/HenryLiu714/Irimi.git
+cd Irimi
 scripts/setup.sh          # or: make setup
 ```
 

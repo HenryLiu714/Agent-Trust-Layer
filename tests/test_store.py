@@ -1006,8 +1006,9 @@ def test_the_queue_is_bounded_in_body_bytes_too(root, key, monkeypatch):
 
 def test_a_tool_calls_args_and_result_count_against_the_byte_budget(root, key, monkeypatch):
     """The control endpoint takes a tool call of up to 2 MiB, and 10,000 of them would be 20 GiB
-    waiting (#76): its args and result as JSON count as body bytes do."""
-    monkeypatch.setattr(store, "MAX_QUEUED_BYTES", 100)
+    waiting (#76): the call as JSON, its args and result included, counts as body bytes do."""
+    size = len(json.dumps(trace.tool_call_to_json(_tool_call("r1", {"x": "y" * 400}))))
+    monkeypatch.setattr(store, "MAX_QUEUED_BYTES", size + size // 2)
     taken, release = threading.Event(), threading.Event()
     real = DirectoryStore._handle
 
@@ -1020,14 +1021,44 @@ def test_a_tool_calls_args_and_result_count_against_the_byte_budget(root, key, m
     s = DirectoryStore(root, key)
     s.record(_exchange("r1", "/held"))  # the writer holds it, so the queue is empty again
     assert taken.wait(5)
-    s.record_tool_call(_tool_call("r1", {"x": "y" * 40}))  # `[{"x": "y..."}, null]`: 57 bytes
-    s.record_tool_call(_tool_call("r1", {"x": "z" * 40}))  # 57 + 57 > 100
+    s.record_tool_call(_tool_call("r1", {"x": "y" * 400}))
+    s.record_tool_call(_tool_call("r1", {"x": "z" * 400}))  # size + size > the budget
     s.record(_exchange("r1", "/no-body"))
     assert s.stats().dropped == 1
     release.set()
     s.close()
     run = StoreReader(root).load_run("r1")
-    assert [e.args for e in run.events if isinstance(e, ToolCall)] == [{"x": "y" * 40}]
+    assert [e.args for e in run.events if isinstance(e, ToolCall)] == [{"x": "y" * 400}]
+    assert run.record.dropped_events == 1
+
+
+def test_a_tool_calls_name_and_id_count_against_the_byte_budget(root, key, monkeypatch):
+    """A posted tool call's name and id are the client's to say too, and either may be nearly all
+    of a 2 MiB post, which counting its args and result alone let through uncounted (#99): the
+    whole call as JSON counts, as a start's whole record does."""
+    named = dataclasses.replace(_tool_call("r1", None), name="n" * 400)
+    size = len(json.dumps(trace.tool_call_to_json(named)))
+    monkeypatch.setattr(store, "MAX_QUEUED_BYTES", size + size // 2)
+    taken, release = threading.Event(), threading.Event()
+    real = DirectoryStore._handle
+
+    def paused(self, item):
+        taken.set()
+        release.wait(10)
+        real(self, item)
+
+    monkeypatch.setattr(DirectoryStore, "_handle", paused)
+    s = DirectoryStore(root, key)
+    s.record(_exchange("r1", "/held"))  # the writer holds it, so the queue is empty again
+    assert taken.wait(5)
+    s.record_tool_call(named)
+    s.record_tool_call(dataclasses.replace(named, tool_call_id="i" * 400, name="look_up"))
+    s.record(_exchange("r1", "/no-body"))
+    assert s.stats().dropped == 1
+    release.set()
+    s.close()
+    run = StoreReader(root).load_run("r1")
+    assert [e.name for e in run.events if isinstance(e, ToolCall)] == ["n" * 400]
     assert run.record.dropped_events == 1
 
 

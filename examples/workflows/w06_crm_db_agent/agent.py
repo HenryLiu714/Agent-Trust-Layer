@@ -50,6 +50,32 @@ SCENARIOS = (
     "overlapping_writes",
 )
 STALE_BEFORE = "2025-06-01"
+# A database host the agent cannot reach: `connect_with` raises for it as a driver does, quoting
+# the DSN it was given, key and all (#179).
+UNREACHABLE_HOST = "db.unreachable.internal"
+# What that driver says before the DSN: long enough that the key in it straddles the 1000
+# characters a trace keeps of an error message (`irimi.trace.MAX_ERROR_MESSAGE`), and that the
+# key's 27-character placeholder ends before that cut (#179).
+CONNECT_RETRIES = "connection timed out, retrying; " * 29
+# What a driver's options say before their password (`DriverOptions`): long enough that the key
+# straddles the 1000 characters the SDK keeps of a captured repr (`irimi.sdk.capture.MAX_REPR`),
+# and that the part of the key a plain cut there kept is 15 characters, too short for its shape
+# and long enough for universal invariant 4 to find (#179).
+DRIVER_NOTE = "retry; " * 136
+
+
+class DriverOptions:
+    """A driver's options, which print their password, as many drivers' do: a value JSON cannot
+    hold, so a tool call's args capture it as its repr, which the SDK cuts before irimi redacts
+    it (#179)."""
+
+    def __init__(self, password: str) -> None:
+        self.password = password
+
+    def __repr__(self) -> str:
+        return f"DriverOptions(note='{DRIVER_NOTE}', password='{self.password}')"
+
+
 SEED = [
     ("acc_1", "Acme", "smb", "2026-01-01", 0, None),
     ("acc_2", "Globex", "smb", "2025-01-01", 0, None),
@@ -88,9 +114,16 @@ def fetch_enrichment(account_id: str) -> dict[str, Any]:
 
 
 @sdk.tool(kind="read", name="crm.connect_with")
-def connect_with(dsn: str) -> dict[str, Any]:
-    """Its argument carries a credential, so a stored tool call must redact it (#69)."""
-    return {"connected": dsn.rpartition("@")[2]}
+def connect_with(dsn: str, options: DriverOptions | None = None) -> dict[str, Any]:
+    """Its argument carries a credential, so a stored tool call must redact it (#69). For a host
+    it cannot reach it raises, and its message quotes the DSN after its retries, so the key in it
+    straddles where a trace cuts a message, which a stored error must redact all the same (#179).
+    Its `options`, when given, are captured as their repr, which holds a key across the cut the
+    SDK makes of a repr (#179)."""
+    host = dsn.rpartition("@")[2]
+    if host.startswith(UNREACHABLE_HOST):
+        raise ConnectionError(f"{CONNECT_RETRIES}could not connect with {dsn}")
+    return {"connected": host}
 
 
 @sdk.tool(kind="read", name="crm.score_account")
@@ -392,6 +425,13 @@ def enrich_accounts(scenario: str, segment: str) -> dict[str, Any]:
     if scenario == "overlapping_writes":
         return asyncio.run(_overlapping("acc_1"))
     if scenario == "tool_raises":
+        try:
+            connect_with(
+                f"postgres://crm:{agentkit.key('STRIPE_API_KEY')}@{UNREACHABLE_HOST}/crm",
+                DriverOptions(agentkit.key("OPENAI_API_KEY")),
+            )
+        except ConnectionError as exc:
+            agentkit.obs("connect_failed", error=type(exc).__name__)
         try:
             flaky_lookup("acc_1")
         except KeyError as exc:

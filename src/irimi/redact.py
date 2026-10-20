@@ -16,8 +16,8 @@ one (`delegation`, #32) and disk may not be handed one either.
 
 FAILURE IS CLOSED. A value that cannot be redacted is stored as `<redaction-failed>`, never as it
 was, and the exchange gains `REDACTION_FAILED_FLAG`. `redact_exchange` and `redact_json` never
-raise. Layer 2: it imports `exchange`, `paths`, `ca` (its file modes), `bodies`, `servicemap`
-and `trace`.
+raise. Layer 2: it imports `exchange`, `paths`, `secret_shapes` (what it looks for in text), `ca`
+(its file modes), `bodies`, `servicemap` and `trace`.
 """
 
 import hmac
@@ -46,6 +46,7 @@ from irimi.exchange import (
     header_value,
     media_type,
 )
+from irimi.secret_shapes import SECRET_SHAPE
 from irimi.servicemap import CREDENTIAL_PATH_HOSTS
 from irimi.trace import JSONValue
 
@@ -98,32 +99,10 @@ SECRET_KEYS: frozenset[str] = frozenset(
     }
 )
 
-# Credential shapes, replaced wherever they appear in text irimi can read: header values, the
-# path, query and form values, JSON strings, and a UTF-8 body that is neither JSON nor a form.
-SECRET_PATTERNS: tuple[str, ...] = (
-    r"sk_(live|test)_[A-Za-z0-9]+",
-    r"rk_(live|test)_[A-Za-z0-9]+",
-    r"whsec_[A-Za-z0-9]+",
-    r"xox[abprs]-[A-Za-z0-9-]+",
-    r"xapp-[A-Za-z0-9-]+",
-    r"gh[pousr]_[A-Za-z0-9]{36,}",
-    r"github_pat_[A-Za-z0-9_]+",
-    r"AKIA[0-9A-Z]{16}",
-    r"sk-ant-[A-Za-z0-9_-]+",
-    r"sk-(proj-)?[A-Za-z0-9_-]{20,}",
-)
-# One pass over the text, the patterns tried in the order above at each position, so `sk-ant-` is
-# replaced whole before the wider `sk-` could claim it. A shape must not follow a letter or a
-# digit: without that, `task_test_runner` stored as `ta<redacted:…>` and any slug holding `risk-`
-# followed by 20 more characters lost its tail. A real key follows a space, a quote, `=`, `/`, `_`
-# or the start of the value, and still matches.
-#
-# Unless that letter or digit ends an escape. Text stored raw spells a separator as one: a JSON
-# string inside an SSE line as `\n` or `\u0020`, a path, a header or a form field's name as `%20`,
-# `%3D` or `%2F`. Each ends in a letter or a digit, so `key:\nsk_live_…` and
-# `/Bearer%20sk_live_…` were stored whole (#69).
-_BOUNDARY = r"(?:(?<![A-Za-z0-9])|(?<=\\[bfnrt])|(?<=\\u[0-9A-Fa-f]{4})|(?<=%[0-9A-Fa-f]{2}))"
-_SECRET_SHAPE = re.compile(_BOUNDARY + "(?:" + "|".join(SECRET_PATTERNS) + ")")
+# Credential shapes (`secret_shapes.SECRET_PATTERNS`) are replaced wherever they appear in text
+# irimi can read: header values, the path, query and form values, JSON strings, and a UTF-8 body
+# that is neither JSON nor a form. They live below this layer, so that a cut made before redaction
+# can avoid them by the same rule (#179).
 
 # A header value that is an absolute URL: `Location` hands an OAuth token back in its query or
 # fragment, and `Referer` repeats a page's, with no shape either would be caught by (#69).
@@ -656,5 +635,5 @@ def _hide(value: str, key: bytes) -> str:
 
 def _redact_text(text: str, key: bytes) -> str:
     """`text` itself when no secret shape is in it, else a copy with each one replaced."""
-    redacted, count = _SECRET_SHAPE.subn(lambda m: placeholder(key, m.group(0)), text)
+    redacted, count = SECRET_SHAPE.subn(lambda m: placeholder(key, m.group(0)), text)
     return redacted if count else text

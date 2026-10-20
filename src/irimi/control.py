@@ -231,14 +231,14 @@ class ControlEndpoint:
         if "run_id" in posted:
             raise _Refused(400, "'run_id' comes from the path, not the body")
         call = _decoded(trace.tool_call_from_json, {**posted, "run_id": run_id})
-        call = dataclasses.replace(call, error=_label(call.error))
+        # The store is handed the error whole: it redacts it, and only then cuts it (#179).
         self.store.record_tool_call(call)
         if self.on_tool_call is None:
             return
         # The call is stored whatever the callback does: a live summary that breaks costs the
         # summary its line, never the run its record (#73).
         try:
-            self.on_tool_call(call)
+            self.on_tool_call(dataclasses.replace(call, error=_label(call.error)))
         except Exception:
             logger.exception("irimi: on_tool_call raised; the tool call is still stored")
 
@@ -270,7 +270,8 @@ class ControlEndpoint:
             _null("ended_at")
         if record.outcome is None:
             _null("outcome")
-        self.store.end_run(run_id, record.ended_at, record.outcome, _label(record.error))
+        # The store is handed the error whole: it redacts it, and only then cuts it (#179).
+        self.store.end_run(run_id, record.ended_at, record.outcome, record.error)
 
 
 def _split_run_route(route: str) -> tuple[str, str] | None:
@@ -316,11 +317,10 @@ def _posted(request: Request, whole_body: bool) -> Mapping[str, Any]:
 
 
 def _label(error: ErrorInfo | None) -> ErrorInfo | None:
-    """A posted error cut to MAX_ERROR_MESSAGE characters, as `ErrorInfo.from_exception` cuts one:
-    a run's error is a label, not a log (#68). Its type is cut to MAX_ERROR_TYPE too, since a
-    posted type is the client's to say and may be 2 MiB, which the store would queue and write,
-    and `runs show` print (#99). Cut rather than refused, so that a long error never costs a run
-    its end."""
+    """A posted error cut as the store cuts the one it stores, for the live line a tool call
+    prints: its type to MAX_ERROR_TYPE, since a posted type is the client's to say and may be
+    2 MiB (#99), and its message to MAX_ERROR_MESSAGE. Never what the store is handed: a cut
+    before redaction can keep half a key, which redaction no longer finds (#179)."""
     if error is None:
         return None
     return ErrorInfo(error.type[:MAX_ERROR_TYPE], error.message[:MAX_ERROR_MESSAGE])

@@ -7,7 +7,8 @@
 4. No canary credential reached disk where irimi writes: its home, its working directory, TMPDIR,
    and a store it was given outside its home (#79). The trace store is under its home (#70), so
    this is the redaction test across the corpus, of what the agent sends (`CANARIES`) and of what
-   a live read hands back (`SERVED_CANARIES`).
+   a live read hands back (`SERVED_CANARIES`), and of the start of each, which is what a cut made
+   before redaction leaves of a key (#179).
 5. The agent exited under shadow as it did bare, unless the scenario is marked `diverges`.
 
 A new workflow is picked up by name (`harness.run.workflows`), so it is held to these without an
@@ -27,6 +28,7 @@ import pytest
 
 from examples.workflows.harness.run import (
     CANARIES,
+    CANARY_PART,
     RUN_BLOCK,
     SERVED_CANARIES,
     Result,
@@ -223,6 +225,29 @@ def test_invariant_4_reads_a_store_a_run_was_given_outside_its_home(shared_store
     leaked = check_invariants(dataclasses.replace(shadow, store=tmp_path))
     assert leaked == [
         f"4. a canary reached disk where irimi writes: ['{name} in {tmp_path / 'events.jsonl'}']"
+    ]
+
+
+@pytest.mark.parametrize("name", [*CANARIES, *SERVED_CANARIES])
+def test_invariant_4_finds_the_start_of_a_canary_a_cut_left_on_disk(
+    shared_store_run, tmp_path, name
+):
+    """A key cut before redaction is no longer its shape, so the part the cut kept is stored as it
+    is, and the whole canary is never on disk to be found (#179). Invariant 4 finds its first
+    CANARY_PART characters too, and names a canary found whole once."""
+    shadow = shared_store_run("w01_ticket_triage", "full_refund")
+    value = {**CANARIES, **SERVED_CANARIES}[name]
+    stored = tmp_path / "events.jsonl"
+    found = "4. a canary reached disk where irimi writes: "
+    stored.write_text(f"cut: {value[: CANARY_PART - 1]}")
+    assert check_invariants(dataclasses.replace(shadow, store=tmp_path)) == []
+    stored.write_text(f"cut: {value[:CANARY_PART]}")
+    assert check_invariants(dataclasses.replace(shadow, store=tmp_path)) == [
+        f'{found}["{name}\'s first {CANARY_PART} characters in {stored}"]'
+    ]
+    stored.write_text(f"whole: {value}")
+    assert check_invariants(dataclasses.replace(shadow, store=tmp_path)) == [
+        f"{found}['{name} in {stored}']"
     ]
 
 

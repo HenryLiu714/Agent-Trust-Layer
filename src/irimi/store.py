@@ -13,10 +13,10 @@ a recording failure never affects traffic (design §5.2).
 
 NOTHING REACHES DISK UNREDACTED (#69). The writer thread runs `redact.redact_exchange` on every
 exchange, and `redact.redact_json` on every trigger's name and args, every tool call's args and
-result, and every error's message, before it hashes or writes anything. A body is redacted whole
-and only then cut at MAX_STORED_BODY, so a secret straddling the cut is never stored as half a
-secret. A streamed body's `stream_chunks` are cut with it, so they still split what is stored
-(#71).
+result, and every error's type and message, before it hashes or writes anything. A body is
+redacted whole and only then cut at MAX_STORED_BODY, so a secret straddling the cut is never stored
+as half a secret. A streamed body's `stream_chunks` are cut with it, so they still split what is
+stored (#71). An error is redacted whole and only then cut to a label, for the same reason (#179).
 
 A RUN ID NAMES A DIRECTORY ONLY WHEN THIS STORE CAN USE IT AS ONE. `trace.is_valid_run_id` is the
 path-traversal guard, and it is checked again here rather than trusted (#68). A valid id can still
@@ -71,7 +71,10 @@ from typing import Any, Protocol
 from irimi import __version__, redact, trace
 from irimi.ca import DIR_MODE, KEY_MODE
 from irimi.exchange import BAD_RUN_ID_FLAG, BODY_TRUNCATED_FLAG, Exchange, clip_chunks
+from irimi.secret_shapes import cut_outside_secrets
 from irimi.trace import (
+    MAX_ERROR_MESSAGE,
+    MAX_ERROR_TYPE,
     SCHEMA_VERSION,
     UNATTRIBUTED,
     BodyRef,
@@ -98,6 +101,12 @@ QUEUE_SIZE = 10_000
 # item that would pass it is dropped, unless the queue holds no bodies at all, so one large
 # exchange still reaches an idle writer.
 MAX_QUEUED_BYTES = 256 * 1024 * 1024
+# The most of an end's error type and of its message that wait for the writer, each cut outside
+# any secret's shape (`secret_shapes.cut_outside_secrets`), so an end costs the byte budget
+# nothing and is never dropped by it, and what the writer redacts, then cuts to a label, is still a
+# prefix of the redacted whole (#179). Four labels' worth, so the label is cut short only when
+# redaction shrank keys by more than three labels.
+MAX_QUEUED_ERROR = 4 * MAX_ERROR_MESSAGE
 # The writer fsyncs the files it has written once it has made this many writes (lines and blobs)
 # since the last sync, whenever the queue has been idle for SYNC_IDLE_S, and on close. Counting
 # writes, not files, bounds what a crash can lose: one long run appends to one file, which as a
@@ -268,6 +277,8 @@ class _StartRun:
 
 @dataclass(frozen=True)
 class _EndRun:
+    # Counts one item of QUEUE_SIZE and no bytes (`_item_bytes`): its error waits cut to
+    # MAX_QUEUED_ERROR, so the byte budget never drops a run's end (#179).
     run_id: str
     ended_at: float
     outcome: Outcome
@@ -390,7 +401,16 @@ class DirectoryStore:
         error: ErrorInfo | None = None,
         exit_code: int | None = None,
     ) -> None:
-        self._put(_EndRun(run_id, ended_at, outcome, error, exit_code))
+        # A posted error may be 2 MiB, and the writer cuts it only once it has redacted it (#179),
+        # so it waits cut outside any secret to MAX_QUEUED_ERROR, and an end is never counted
+        # against MAX_QUEUED_BYTES: a run never loses its end to the byte budget. An error that is
+        # not text is a drop, never raised into the caller.
+        try:
+            queued = None if error is None else _queued_error(error)
+        except Exception as exc:
+            self._drop(run_id, f"it could not be queued: {type(exc).__name__}")
+            return
+        self._put(_EndRun(run_id, ended_at, outcome, queued, exit_code))
 
     def stats(self) -> StoreStats:
         with self._lock:
@@ -579,11 +599,17 @@ class DirectoryStore:
         return redacted if isinstance(redacted, str) else redact.REDACTION_FAILED
 
     def _redact_error(self, error: ErrorInfo | None) -> ErrorInfo | None:
-        """An error's message redacted as text: `ErrorInfo.from_exception` keeps `str(exc)`, and
-        an exception's message may quote the key it refused (#69)."""
+        """An error as a trace keeps it: its type and its message each redacted as text, whole,
+        and only then cut, to MAX_ERROR_TYPE and MAX_ERROR_MESSAGE. An exception's message may quote
+        the key it refused (#69), and a posted type is whatever the client sent (#179). Cut first,
+        a key straddling the cut would no longer be its shape, and its kept half would reach disk:
+        so a stored error is a prefix of the redacted whole, as a stored body is (#179)."""
         if error is None:
             return None
-        return replace(error, message=self._redact_text(error.message))
+        return ErrorInfo(
+            self._redact_text(error.type)[:MAX_ERROR_TYPE],
+            self._redact_text(error.message)[:MAX_ERROR_MESSAGE],
+        )
 
     def _forget(self, run_id: str, run: _Run) -> None:
         """An ended run is fsynced and forgotten, so a `serve` of thousands of runs holds only the
@@ -826,13 +852,22 @@ def _fsync(path: Path) -> None:
 def _item_bytes(item: _Item) -> int:
     """The bytes `item` holds while it waits: an exchange's two bodies, and a tool call (#76) and a
     run's start (#99) as their whole JSON, which the control endpoint takes up to
-    `control.MAX_CONTROL_BODY` of. An end holds an error cut to a label (`control._label`)."""
+    `control.MAX_CONTROL_BODY` of. An end holds an error cut to MAX_QUEUED_ERROR (#179)."""
     if isinstance(item, _Record) and isinstance(item.event, Exchange):
         response = item.event.response
         return len(item.event.request.body) + (0 if response is None else len(response.body))
     if isinstance(item, _Record | _StartRun):
         return item.json_bytes
     return 0
+
+
+def _queued_error(error: ErrorInfo) -> ErrorInfo:
+    """`error` as it waits for the writer: its type and its message each cut to MAX_QUEUED_ERROR
+    outside any secret's shape (#179). Raises TypeError for one that is not text."""
+    return ErrorInfo(
+        cut_outside_secrets(error.type, MAX_QUEUED_ERROR),
+        cut_outside_secrets(error.message, MAX_QUEUED_ERROR),
+    )
 
 
 def _item_run_id(item: _Item) -> str:

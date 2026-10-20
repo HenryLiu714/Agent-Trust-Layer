@@ -417,7 +417,9 @@ def test_every_run_the_process_stored_prints_the_summary_irimi_shadow_printed(
     route was found by its stored operation instead.
 
     The tool calls too, each a line under the writes when its stand-in ran (#76): W1's reply, W2's
-    forty ledger marks and W6's six database and file writes."""
+    forty ledger marks and W6's six database and file writes. They are left as stored, run by run
+    and each run's in `seq` order: the summary prints them in the order they ended, as the live
+    one did, whatever order their posts reached irimi in (#120)."""
     shadow = run_workflow(name, scenario, "shadow")
     live = shadow.summary()
     if not live:
@@ -427,7 +429,7 @@ def test_every_run_the_process_stored_prints_the_summary_irimi_shadow_printed(
     events = [event for run_id in ids for event in reader.load_run(run_id).events]
     exchanges = sorted((e for e in events if isinstance(e, Exchange)), key=lambda e: e.ended_at)
     telemetry = [e for e in events if isinstance(e, TelemetrySeen)]
-    tool_calls = sorted((e for e in events if isinstance(e, ToolCall)), key=lambda e: e.ended_at)
+    tool_calls = [e for e in events if isinstance(e, ToolCall)]
     process = reader.load_run(shadow.process_run_id()).record
     union = StoredRun(process, [*exchanges, *telemetry, *tool_calls])
     assert no_elapsed(report.stored_summary_lines(union, shadow.maps())) == no_elapsed(live)
@@ -481,9 +483,10 @@ def test_all_of_a_serves_runs_together_are_what_it_reported_live(run_workflow, n
     """#72's invariant under serve mode (#77): "all of a process's runs together (unattributed
     included, in the order the exchanges ended) are the live block". Serve prints no closing block,
     so the live block is the summary of what it reported as it happened: every exchange it printed
-    a line for and every tool call the control endpoint passed on, in the order they came. That is
-    the summary over every stored run and `unattributed/` together: redacting and storing them
-    changed nothing a summary shows, and no event was lost between runs."""
+    a line for, in the order they came, and every tool call the control endpoint passed on, which
+    the summary prints in the order they ended (#120), so the stored ones are left run by run.
+    That is the summary over every stored run and `unattributed/` together: redacting and storing
+    them changed nothing a summary shows, and no event was lost between runs."""
     serve = run_workflow(name, scenario, "serve")
     if not started(serve):
         return
@@ -492,7 +495,7 @@ def test_all_of_a_serves_runs_together_are_what_it_reported_live(run_workflow, n
     events = [event for run_id in ids for event in reader.load_run(run_id).events]
     exchanges = sorted((e for e in events if isinstance(e, Exchange)), key=lambda e: e.ended_at)
     telemetry = [e for e in events if isinstance(e, TelemetrySeen)]
-    tool_calls = sorted((e for e in events if isinstance(e, ToolCall)), key=lambda e: e.ended_at)
+    tool_calls = [e for e in events if isinstance(e, ToolCall)]
     union = StoredRun(header_record(trace.UNATTRIBUTED), [*exchanges, *telemetry, *tool_calls])
     maps = serve.maps()
     handed_calls = [e for e in serve.handed_events if isinstance(e, ToolCall)]

@@ -1,19 +1,31 @@
 import asyncio
 import dataclasses
+import itertools
 import threading
 from dataclasses import replace
 from pathlib import Path
 
 from irimi.exchange import (
+    BODY_TRUNCATED_FLAG,
+    DECISION_FAILED_FLAG,
     FROM_RECORDING_FLAG,
     IDEMPOTENCY_CONFLICT_FLAG,
     IDEMPOTENT_REPLAY_FLAG,
+    REDACTION_FAILED_FLAG,
+    UNCLASSIFIED_FLAG,
     Exchange,
     Request,
     Response,
 )
-from irimi.report import banner_lines, delegated_lines, exchange_line, summary_lines
+from irimi.report import (
+    banner_lines,
+    delegated_lines,
+    exchange_line,
+    summary_lines,
+    write_sentence,
+)
 from irimi.runner import EngineThread, child_env, exit_code_for
+from irimi.trace import ToolCall
 
 
 def _exchange(
@@ -582,6 +594,57 @@ def test_two_delegated_writes_read_as_were():
     assert summary_lines("7f3a", rows, 0.0, _maps())[-1].startswith("  2 were delegated to")
 
 
+def _tool_call(
+    kind="write",
+    ran="shadow",
+    name="db.mark_refunded",
+    tool_call_id="t",
+    started_at=1.0,
+    ended_at=2.0,
+):
+    return ToolCall(tool_call_id, "7f3a", name, kind, ran, {}, None, None, started_at, ended_at)
+
+
+def test_a_delegated_write_s_closing_lines_say_the_tool_writes_did_not_happen_either():
+    """A run whose writes were delegated or went unanswered closes by saying they did not reach
+    their service. A write tool whose stand-in ran did not happen either (#76), and the closing
+    lines said nothing of it: only its own `○ tool` line did (#121). A read tool, which ran for
+    real, is no write and changes nothing."""
+    tools = [_tool_call(), _tool_call(kind="read", ran="real", name="db.lookup")]
+    delegated = _refund(answered_by="delegated", target="http://127.0.0.1:3000/refund")
+    faked = replace(_refund(answered_by="fake-L1"), would_fire=("refund.created",))
+    lines = summary_lines("7f3a", [faked, delegated], 0.0, _maps(), tools)
+    assert lines[-2:] == [
+        "  These writes did not reach stripe. The tool writes did not happen. "
+        "Would have fired: refund.created.",
+        "  1 was delegated to http://127.0.0.1:3000/refund.",
+    ]
+    lines = summary_lines("7f3a", [_unreachable()], 0.0, _maps(), tools)
+    assert lines[-2] == "  These writes did not reach stripe. The tool writes did not happen."
+    lines = summary_lines("7f3a", [delegated], 0.0, _maps(), tools[1:])
+    assert lines[-2] == "  These writes did not reach stripe."
+
+
+def test_stood_in_tool_writes_print_in_the_order_they_ended_whatever_order_they_came_in():
+    """Live, the summary's tool calls come in the order their posts reached the control endpoint,
+    which two tools ending at once on two threads can reverse; a stored run's come in `seq` order,
+    run by run. Each summary printed them as they came, so the two disagreed (#120). They print in
+    the order they ended, a tie broken by the start, then by the id, then by the line itself: a
+    call posted by hand can repeat another's id and times."""
+    ended = [
+        _tool_call(name="db.first", ended_at=2.0),
+        _tool_call(name="db.second", ended_at=3.0),
+        _tool_call(name="db.tie_started_first", started_at=0.5, ended_at=4.0, tool_call_id="z"),
+        _tool_call(name="db.tie_lower_id", ended_at=4.0, tool_call_id="a"),
+        _tool_call(name="db.tie_higher_id_a", ended_at=4.0, tool_call_id="b"),
+        _tool_call(name="db.tie_higher_id_b", ended_at=4.0, tool_call_id="b"),
+    ]
+    printed = [f"  ○ tool {call.name}  shadow stand-in ran" for call in ended]
+    for calls in itertools.permutations(ended):
+        lines = summary_lines("7f3a", [], 0.0, None, calls)
+        assert [line for line in lines if "○ tool" in line] == printed
+
+
 def test_a_run_that_only_read_claims_nothing_about_writes():
     lines = summary_lines("7f3a", [_exchange()], 0.0, _maps())
     assert not any("did not happen" in line or "did not reach" in line for line in lines)
@@ -713,6 +776,66 @@ def test_an_idempotency_conflict_prints_as_a_write_that_would_fail():
     line = _block(lines, "would fail")
     assert line == "  ✗ refund $49.00 on ch_3QabcXYZ  would fail: idempotency_error"
     assert _block(lines, "api.stripe.com") == "  api.stripe.com  2 writes intercepted"
+
+
+# ------------------------------------------------------------ a write irimi refused (#112)
+
+
+def test_a_write_irimi_could_not_decide_prints_as_refused_and_names_why():
+    """irimi answered this refund with its own 502: its body decodes past what irimi reads (#94),
+    so it was recorded with no body and flagged. Rendered through its route's `human:` template it
+    printed `○ refund ? on ?  unclassified (L0)`, a faked write described from a body irimi never
+    read. It prints as refused, `✗`, as the request it was, with the flags that say why in the
+    order it carries them, and no other flag (#112). It is still a write that did not happen.
+
+    Its host line counts it as its line names it, `refused by irimi`: counted `unclassified`, the
+    word a route no map names prints, the host line named a write no line showed (#112)."""
+    cut = _exchange(
+        method="POST",
+        kind="unknown",
+        answered_by="fake-L0",
+        status=502,
+        path="/v1/refunds",
+        content_type=FORM,
+        flags=(UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG, BODY_TRUNCATED_FLAG, REDACTION_FAILED_FLAG),
+    )
+    lines = summary_lines("7f3a", [cut], 0.0, _maps())
+    assert [line for line in lines if line.startswith(("  ○ ", "  ✗ "))] == [
+        "  ✗ POST api.stripe.com/v1/refunds  refused by irimi (decision-failed, body-truncated)"
+    ]
+    assert _block(lines, "api.stripe.com") == (
+        "  api.stripe.com  1 write intercepted (1 refused by irimi)"
+    )
+    assert lines[-1] == "  These writes did not happen."
+    presumed = _exchange(method="DELETE", kind="unknown", answered_by="fake-L0")
+    lines = summary_lines("7f3a", [cut, presumed], 0.0, _maps())
+    assert _block(lines, "api.stripe.com") == (
+        "  api.stripe.com  2 writes intercepted (1 unclassified, 1 refused by irimi)"
+    )
+
+
+def test_a_write_whose_decision_raised_prints_its_sentence_as_refused():
+    """A decision that raised read the whole body, so the refusal keeps the map's sentence, and two
+    refunds of different amounts that both raised print, and compare, as different writes (#79):
+    the request line alone would read the same for both (#112)."""
+    raised = _exchange(
+        method="POST",
+        kind="unknown",
+        answered_by="fake-L0",
+        status=502,
+        path="/v1/refunds",
+        body=b"charge=ch_3QabcXYZ&amount=4900&currency=usd",
+        content_type=FORM,
+        flags=(UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG),
+    )
+    assert write_sentence(raised, _maps()) == (
+        "✗ refund $49.00 on ch_3QabcXYZ  refused by irimi (decision-failed)"
+    )
+    body = b"charge=ch_3QabcXYZ&amount=2450&currency=usd"
+    half = replace(raised, request=replace(raised.request, body=body))
+    assert write_sentence(half, _maps()) == (
+        "✗ refund $24.50 on ch_3QabcXYZ  refused by irimi (decision-failed)"
+    )
 
 
 # ------------------------------ the reads that saw a write, and what it would have fired (#48)

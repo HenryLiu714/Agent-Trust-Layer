@@ -341,6 +341,31 @@ def test_a_reservation_whose_answer_target_is_down_is_answered_502_and_compared_
     assert rows_not_shown(unreached, a, b, out) == []
 
 
+@pytest.mark.parametrize("mode", MODES)
+def test_a_down_target_s_closing_lines_say_the_tool_write_did_not_happen_either(run_workflow, mode):
+    """`target_down` with `--record`: the reservation goes unanswered, its target down, and the
+    orchestrator records its decision through the write tool's stand-in. The closing lines say the
+    reservation did not reach the internal service, and now that the tool writes did not happen
+    either, which before #121 only the tool's own `○ tool` line said. Under serve, the run's block,
+    printed as it ends, says the same. Bare, the decision is really recorded."""
+    down = run_workflow(W, "target_down_tools", mode)
+    bare = run_workflow(W, "target_down_tools", "bare")
+    assert down.by_label()["reserve"] == (502, "delegated")
+    summary = down.summaries()
+    assert [line for line in summary if line.startswith("  ○ ")] == [
+        f"  ○ POST {HOST}/reservations → {DOWN_TARGET}/reservations  unanswered (target "
+        "unreachable)",
+        f"  ○ tool {AGENT}.record_decision  shadow stand-in ran",
+    ]
+    assert summary[-2:] == [
+        "  These writes did not reach subagent. The tool writes did not happen.",
+        f"  1 was not answered at all: {DOWN_TARGET}/reservations could not be reached, and the "
+        "agent got a 502.",
+    ]
+    assert not (down.state / "decisions.jsonl").exists()
+    assert len((bare.state / "decisions.jsonl").read_text().splitlines()) == 1
+
+
 # ------------------------------------------------------------------------------- replay (#82)
 
 

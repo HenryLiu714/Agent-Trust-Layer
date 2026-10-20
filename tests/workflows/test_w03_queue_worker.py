@@ -682,6 +682,75 @@ def test_tool_calls_from_four_threads_each_land_in_their_own_run(run_workflow, m
     ]
 
 
+def test_two_write_tools_ending_at_once_print_in_the_order_they_ended(run_workflow):
+    """`ledger_threads_8` with every odd message's ledger row written by a second write tool,
+    `mark_refunded`: eight runs on four threads, tool calls of two names ending at once. Their
+    posts can reach irimi in another order than they ended, and the live summary printed them as
+    they came while a stored run prints them by `seq`, so the two summaries could differ (#120).
+    The summary prints the stood-in writes in the order they ended, the start and then the id
+    breaking a tie, which is the order the stored calls say. Which order these posts come in is
+    left to the threads: this holds the printed order to the stored one on every run, and
+    `test_stored_runs.py` holds the summary of the runs together to the live one;
+    `ledger_post_waits` reverses two posts every time. Bare, the eight rows really reach the
+    ledger."""
+    shadow = run_workflow(W, "ledger_two_tools_8", "shadow")
+    bare = run_workflow(W, "ledger_two_tools_8", "bare")
+    calls = [e for e in shadow.stored_events() if isinstance(e, ToolCall) and e.kind == "write"]
+    assert Counter(c.name for c in calls) == {
+        f"{AGENT}.record_refund": 4,
+        f"{AGENT}.mark_refunded": 4,
+    }
+    ended = sorted(calls, key=lambda c: (c.ended_at, c.started_at, c.tool_call_id))
+    assert [line for line in shadow.summary() if "○ tool" in line] == [
+        f"  ○ tool {c.name}  shadow stand-in ran" for c in ended
+    ]
+    assert shadow.query(LEDGER, "SELECT * FROM refunds") == []
+    assert sorted(bare.query(LEDGER, "SELECT * FROM refunds")) == [
+        (f"ch_Q{i}", 100 + i) for i in range(8)
+    ]
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_tool_writes_whose_posts_came_in_the_other_order_print_in_the_order_they_ended(
+    run_workflow, mode
+):
+    """`ledger_post_waits` makes what `ledger_two_tools_8` leaves to chance happen every time. The
+    first run's async ledger write ends while the loop's one executor thread is busy with the
+    worker's own job, so its post waits off the loop; the second run's sync write starts after it
+    ended, and posts at once. irimi gets the second first, as its stream lines show, and printed
+    the live summary in that order while the runs together, read back, printed the first first
+    (#120). Under shadow the summary prints them in the order they ended; under serve each run's
+    block holds its own. `test_stored_runs.py` holds the runs together to the live summary in both
+    modes. Bare, both rows reach the ledger."""
+    shadow = run_workflow(W, "ledger_post_waits", mode)
+    bare = run_workflow(W, "ledger_post_waits", "bare")
+    first, second = f"{AGENT}.record_refund_async", f"{AGENT}.mark_refunded"
+    assert shadow.tool_call_lines() == [
+        f"shadow    write     tool {second} -> ok",
+        f"shadow    write     tool {first} -> ok",
+    ]
+    calls = {c.name: c for c in shadow.stored_events() if isinstance(c, ToolCall)}
+    assert calls.keys() == {first, second}
+    assert calls[first].ended_at <= calls[second].started_at
+    assert calls[first].run_id != calls[second].run_id
+    if mode == "shadow":
+        assert [line for line in shadow.summary() if "○ tool" in line] == [
+            f"  ○ tool {first}  shadow stand-in ran",
+            f"  ○ tool {second}  shadow stand-in ran",
+        ]
+    else:
+        blocks = shadow.run_blocks()
+        assert {
+            run_id: [line for line in blocks[run_id] if "○ tool" in line]
+            for run_id in (calls[first].run_id, calls[second].run_id)
+        } == {
+            calls[first].run_id: [f"  ○ tool {first}  shadow stand-in ran"],
+            calls[second].run_id: [f"  ○ tool {second}  shadow stand-in ran"],
+        }
+    assert shadow.query(LEDGER, "SELECT * FROM refunds") == []
+    assert sorted(bare.query(LEDGER, "SELECT * FROM refunds")) == [("ch_Q0", 100), ("ch_Q1", 101)]
+
+
 @pytest.mark.parametrize("mode", MODES)
 def test_async_tool_calls_from_eight_tasks_each_land_in_their_task_s_run(run_workflow, mode):
     """`asyncio_8` with the ledger: an async read, an async write and a sync read that returns a

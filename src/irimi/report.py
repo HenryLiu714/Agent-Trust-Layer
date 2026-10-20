@@ -13,6 +13,8 @@ from typing import assert_never
 from irimi import netaddr
 from irimi.bodies import reflect
 from irimi.exchange import (
+    BODY_TRUNCATED_FLAG,
+    DECISION_FAILED_FLAG,
     FROM_RECORDING_FLAG,
     IDEMPOTENCY_CONFLICT_FLAG,
     IDEMPOTENT_REPLAY_FLAG,
@@ -188,6 +190,12 @@ WOULD_HAVE_FIRED = "Would have fired:"
 # class of lie as counting a delegated read as live (#20) - the summary would show a write
 # safely handled by the stub when the stub was not running.
 TARGET_UNREACHABLE = "target unreachable"
+# A write irimi answered with its own 502 because it could not decide about it: the decision
+# raised, or the body decodes past what irimi reads (#94). It was refused, not faked (#112).
+REFUSED_BY_IRIMI = "refused by irimi"
+# The flags that say why, named in the order the exchange carries them. A fixed list, not every
+# flag: `unclassified` is the classification the refusal was recorded under, not a reason (#112).
+REFUSAL_REASONS: tuple[str, ...] = (DECISION_FAILED_FLAG, BODY_TRUNCATED_FLAG)
 
 # Currencies with no minor unit: ¥4900 is four thousand nine hundred yen, not ¥49.00. Stripe's
 # own zero-decimal list, which is the one the amounts in these bodies are denominated in.
@@ -311,6 +319,11 @@ def _failed_target(exchange: Exchange) -> bool:
     return TARGET_FAILED_FLAG in exchange.flags
 
 
+def _refused_by_irimi(exchange: Exchange) -> bool:
+    """A write irimi answered with its own 502 because it could not decide about it (#112)."""
+    return DECISION_FAILED_FLAG in exchange.flags
+
+
 def _host_line(host: str, rows: Sequence[Exchange], width: int) -> str:
     """One host's counts, in the order a reader asks them: what was real, then what was not."""
     phrases: list[str] = []
@@ -362,11 +375,16 @@ def _host_line(host: str, rows: Sequence[Exchange], width: int) -> str:
     writes = [ex for ex in rows if is_intercepted(ex)]
     if writes:
         detail = []
-        unclassified = sum(1 for ex in writes if ex.kind == "unknown")
+        # A write irimi refused is recorded `unknown`, but its line says `refused by irimi`, and
+        # so does its count here: `unclassified` is what a route no map names prints (#112).
+        refused = sum(1 for ex in writes if _refused_by_irimi(ex))
+        unclassified = sum(1 for ex in writes if ex.kind == "unknown" and not _refused_by_irimi(ex))
         delegated = sum(1 for ex in writes if _reached_target(ex))
         unreachable = sum(1 for ex in writes if _failed_target(ex))
         if unclassified:
             detail.append(f"{unclassified} unclassified")
+        if refused:
+            detail.append(f"{refused} {REFUSED_BY_IRIMI}")
         if delegated:
             detail.append(f"{delegated} delegated")
         if unreachable:
@@ -429,12 +447,22 @@ def _write_line(exchange: Exchange, index: MapIndex | None) -> str:
 def write_sentence(exchange: Exchange, index: MapIndex | None) -> str:
     """One intercepted write, as the map's own sentence plus what irimi did with it: its summary
     line without the indent and before it is escaped, which `irimi compare` decides two writes are
-    the same by (#79)."""
+    the same by (#79). A write irimi refused with a body it never read whole is spelled as the
+    request it was instead (#112)."""
+    refused = _refused_by_irimi(exchange)
+    # A `human:` sentence is never filled in from a body irimi did not read: a refused write whose
+    # body was cut renders every field `?`, the same line for every such refund (#112).
+    unread = refused and BODY_TRUNCATED_FLAG in exchange.flags
     route = _route_of(exchange, index)
-    if route is not None and route.human:
+    if route is not None and route.human and not unread:
         what = render_human(route.human, exchange, route)
     else:
         what = f"{exchange.request.method} {exchange.request.host}{exchange.request.path}"
+    # A write irimi could not decide about got irimi's own 502: it was refused, not faked, so it
+    # takes `✗` and names the flags that say why, in the order it carries them (#112).
+    if refused:
+        reasons = ", ".join(flag for flag in exchange.flags if flag in REFUSAL_REASONS)
+        return f"{REJECTED_MARKER} {what}  {REFUSED_BY_IRIMI} ({reasons})"
     if exchange.answered_by == "delegated":
         what = f"{what} → {exchange.target}"
     if _failed_target(exchange):
@@ -575,6 +603,9 @@ def _closing_lines(writes: Sequence[Exchange], tool_writes: Sequence[ToolCall]) 
 
     A write tool whose stand-in ran did not happen either (#76): a run whose only writes are tool
     writes closes with the bare sentence, and one with HTTP writes too says what it says of those.
+    When one of those was delegated or went unanswered, the first line says which services they
+    did not reach and then, in a sentence of its own, that the tool writes did not happen, which
+    nothing but their own lines said before (#121).
     """
     if not writes:
         return [f"  {DID_NOT_HAPPEN}"] if tool_writes else []
@@ -585,7 +616,8 @@ def _closing_lines(writes: Sequence[Exchange], tool_writes: Sequence[ToolCall]) 
     if not delegated and not unreachable:
         return [f"  {DID_NOT_HAPPEN}{clause}"]
     services = ", ".join(sorted({ex.service for ex in writes}))
-    lines = [f"  These writes did not reach {services}.{clause}"]
+    tools = " The tool writes did not happen." if tool_writes else ""
+    lines = [f"  These writes did not reach {services}.{tools}{clause}"]
     if delegated:
         targets = ", ".join(sorted({ex.target for ex in delegated}))
         verb = "was" if len(delegated) == 1 else "were"
@@ -609,9 +641,10 @@ def summary_lines(
 ) -> list[str]:
     """The exit summary (#13): what ran, what was real, what irimi answered, and what that means.
 
-    Built from the exchanges the engine reported and the tool calls the control endpoint passed
-    on (#76), each in the order it arrived. `stored_summary_lines` prints the same block from a
-    stored run, and both are `_summary`, so the two cannot drift (#72).
+    Built from the exchanges the engine reported, in the order they arrived, and the tool calls
+    the control endpoint passed on (#76), which `_summary` puts in the order they ended (#120).
+    `stored_summary_lines` prints the same block from a stored run, and both are `_summary`, so
+    the two cannot drift (#72).
 
     `index` is the loaded maps, used only to find each write's `human:` template. Without it the
     writes still get a line, spelled as the request they were.
@@ -629,9 +662,11 @@ def stored_summary_lines(run: StoredRun, index: MapIndex | None) -> list[str]:
     where the live summary timed the child; a run with no start or no end has `0.0`.
 
     Where a stored line may still differ from the live one: redaction replaced a field a `human:`
-    template renders, the path of a request no route matched on a credential-path host, which the
-    write line spells out, or an event the store dropped (docs/trace-format.md, "Reading a run
-    back"). A replay's run printed no summary live, and its block opens `irimi replay` (#154).
+    template renders, the path of a request on a credential-path host that the write line spells
+    out, because no route matched it or irimi refused it with its body cut (#112), a write irimi
+    refused whose body only the store cut, spelled out and naming `body-truncated` stored (#112),
+    or an event the store dropped (docs/trace-format.md, "Reading a run back"). A replay's run
+    printed no summary live, and its block opens `irimi replay` (#154).
     """
     exchanges = [event for event in run.events if isinstance(event, Exchange)]
     telemetry = [event.host for event in run.events if isinstance(event, TelemetrySeen)]
@@ -685,7 +720,19 @@ def _summary(
     for write, reads in paired:
         write_lines.append(_write_line(write, index))
         write_lines += _overlay_lines(reads)
-    stood_in = [call for call in tool_calls if is_stood_in(call)]
+    # In the order the calls ended, whatever order they came in: live, the order their posts
+    # reached the control endpoint, which two tools ending at once on two threads can reverse, and
+    # stored, `seq` order within each run (#120). The start, the id and then the line itself break
+    # a tie, since a call posted by hand can repeat another's id and times.
+    stood_in = sorted(
+        (call for call in tool_calls if is_stood_in(call)),
+        key=lambda call: (
+            call.ended_at,
+            call.started_at,
+            call.tool_call_id,
+            tool_write_sentence(call),
+        ),
+    )
     write_lines += [tool_write_line(call) for call in stood_in]
     if write_lines:
         lines += ["", *write_lines]

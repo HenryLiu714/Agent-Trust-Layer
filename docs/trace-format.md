@@ -368,7 +368,9 @@ error is the agent's own `str(exc)`, and printed raw it could break a line or dr
 (`StoreReader.load_run(run_id, bodies=False)`), which still checks every blob exists at its size.
 A run that cannot be read is named with the file its refusal came from, and in an `events.jsonl`
 the line: one that does not parse, one that parses but does not decode, and one whose blob is
-missing alike (#134).
+missing alike (#134). A run irimi may not read (`chmod 0`) is one that cannot be read too, with
+the operating system's reason, never `no run`; `runs list` skips it with a warning, as it skips a
+run.json it cannot decode (#142).
 
 The live summary covers every exchange the proxy saw while the command ran, whatever run each one
 named; a stored run holds only its own events. The two are the same block when the agent sends no

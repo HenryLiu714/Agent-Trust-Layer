@@ -22,6 +22,13 @@ def test_no_command_prints_help_and_fails(capsys):
     assert "usage: irimi" in capsys.readouterr().out
 
 
+def test_a_stdout_closed_before_irimi_started_is_written_nothing(tmp_path, monkeypatch):
+    """Python makes `sys.stdout` None when fd 1 is closed at startup (`irimi runs list >&-`):
+    `print` writes nothing to it, and `main`'s flush of stdout (#142) must not raise there."""
+    monkeypatch.setattr(sys, "stdout", None)
+    assert main(["runs", "list", "--store", str(tmp_path)]) == 0
+
+
 def test_python_m_irimi_is_the_command_and_importing_it_runs_nothing():
     """`sdk.replay()` runs `python -m irimi` (#84); a tool that imports every module, as pydoc
     does, must not start the command."""

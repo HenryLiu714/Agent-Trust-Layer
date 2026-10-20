@@ -27,6 +27,9 @@ if TYPE_CHECKING:  # the quoted annotations below; no runtime import
 
 SIGINT_EXIT_CODE = 130  # 128 + SIGINT, the shell convention for a Ctrl-C'd command
 SIGTERM_EXIT_CODE = 143  # 128 + SIGTERM: `irimi shadow` terminated before its command started
+# 128 + SIGPIPE, the shell's status for a command whose reader went away (`irimi runs show X |
+# head -1`), which irimi ends quietly with in place of a traceback and Python's 120 (#142).
+BROKEN_PIPE_EXIT_CODE = 141
 DEFAULT_RUNS_LIMIT = 20  # `irimi runs list` without --limit (#72)
 
 # Since #76 a non-HTTP write the agent labels with `@sdk.tool` runs only its stand-in under irimi,
@@ -1405,6 +1408,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """The `irimi` command. A reader of its stdout that goes away (`irimi runs show X | head -1`)
+    ends it quietly with BROKEN_PIPE_EXIT_CODE, wherever it was writing, `--help` included (#142).
+    stdout is flushed here, not at exit, so a reader gone by the last write is caught too; a
+    stdout closed before irimi started is None, which `print` writes nothing to."""
+    try:
+        try:
+            return _main(argv)
+        finally:
+            if sys.stdout is not None:
+                sys.stdout.flush()
+    except BrokenPipeError:
+        _discard_stdout()
+        return BROKEN_PIPE_EXIT_CODE
+
+
+def _main(argv: list[str] | None) -> int:
     parser = build_parser()
     argv = sys.argv[1:] if argv is None else argv
     args, unplaced = parser.parse_known_args(argv)
@@ -1424,6 +1443,20 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 1
     return args.func(args)
+
+
+def _discard_stdout() -> None:
+    """Point stdout at /dev/null once its reader has gone, so the interpreter's flush at exit of
+    what is still buffered cannot raise BrokenPipeError again and exit 120 (#142). A stdout that
+    is no file (a test's) has nothing to repoint."""
+    import os
+
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    try:
+        with contextlib.suppress(OSError):  # io.UnsupportedOperation is an OSError
+            os.dup2(devnull, sys.stdout.fileno())
+    finally:
+        os.close(devnull)
 
 
 if __name__ == "__main__":

@@ -363,19 +363,31 @@ def test_irimi_compare_reads_a_run_whose_last_line_a_crash_cut(shared_store_run,
     )
 
 
-def _irimi_process(result, *argv: str) -> subprocess.CompletedProcess[str]:
+def _irimi_process(
+    result, *argv: str, stdout: int = subprocess.PIPE
+) -> subprocess.CompletedProcess[str]:
     """`irimi <argv>` in a process of its own, over `result`'s `IRIMI_HOME` and working directory,
     as its user types it: unlike `Result.command`, its stderr holds what irimi's logger warns, as
-    `StoreReader.list_runs` warns of a run it skips (#134)."""
+    `StoreReader.list_runs` warns of a run it skips (#134), and its stdout may be a pipe whose
+    reader has gone (`_closed_pipe`, #142)."""
     return subprocess.run(
         [sys.executable, "-m", "irimi", *argv],
         env={**os.environ, paths.IRIMI_HOME_ENV: str(result.home)},
         cwd=result.cwd,
-        capture_output=True,
+        stdout=stdout,
+        stderr=subprocess.PIPE,
         text=True,
         timeout=60,
         check=False,
     )
+
+
+def _closed_pipe() -> int:
+    """The write end of a pipe whose read end is closed, as `irimi ... | head -1` leaves it once
+    `head` has its line: every write to it fails, from the first (#142)."""
+    read, write = os.pipe()
+    os.close(read)
+    return write
 
 
 def test_runs_show_and_list_name_the_file_and_line_of_a_damaged_event(run_workflow, tmp_path):
@@ -420,6 +432,52 @@ def test_runs_show_and_list_name_the_file_and_line_of_a_damaged_event(run_workfl
     )
     others = [r.run_id for r in result.stored().list_runs() if r.run_id != run]
     assert [line.split()[0] for line in listed.stdout.splitlines()] == others != []
+
+
+def test_runs_show_and_compare_end_quietly_when_their_reader_goes_away(shared_store_run):
+    """`irimi compare A B | head -1` and `irimi runs show X | head -1` printed a BrokenPipeError
+    traceback and exited 120: each now ends at its reader's going, saying nothing, with the shell's
+    141, and so does `irimi --help`, which argparse prints (#142)."""
+    full = shared_store_run(W, "full_refund")
+    half = shared_store_run(W, "half_refund")
+    a, b = (result.one("run.start")["run"] for result in (full, half))
+    root = str(half.store_root())
+    commands = [("compare", a, b, "--store", root), ("runs", "show", b, "--store", root)]
+    for argv in [*commands, ("--help",)]:
+        write = _closed_pipe()
+        try:
+            ended = _irimi_process(half, *argv, stdout=write)
+        finally:
+            os.close(write)
+        assert (ended.returncode, ended.stderr) == (141, ""), argv
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a directory whatever its mode")
+def test_a_run_irimi_may_not_read_is_named_unreadable_not_missing(shared_store_run, tmp_path):
+    """`half_refund`'s run made `chmod 0` in a copy of the store `full_refund` recorded into too:
+    `runs show` exits 1 and `compare` 2, each saying it `could not be read` and why, where both
+    said `no run`, and `runs list` warns that it skips it, where it left it out without a word
+    (#142)."""
+    full = shared_store_run(W, "full_refund")
+    half = shared_store_run(W, "half_refund")
+    a, b = (result.one("run.start")["run"] for result in (full, half))
+    copy = tmp_path / "store"
+    shutil.copytree(half.store_root(), copy)
+    shut = copy / "runs" / b
+    why = f"[Errno 13] Permission denied: '{shut}/run.json'"
+    others = [r.run_id for r in half.stored().list_runs() if r.run_id != b]
+    shut.chmod(0)
+    try:
+        refused = [f"error: run {b} could not be read: {why}"]
+        assert half.runs("show", b, "--store", str(copy)) == (1, [], refused)
+        assert half.command("compare", a, b, "--store", str(copy)) == (2, [], refused)
+        # Every run: the store is the session's, which other tests record into.
+        listed = _irimi_process(half, "runs", "list", "--store", str(copy), "--limit", "1000")
+    finally:
+        shut.chmod(0o700)
+    assert (listed.returncode, listed.stderr) == (0, f"irimi: skipping stored run {b}: {why}\n")
+    assert [line.split()[0] for line in listed.stdout.splitlines()] == others
+    assert a in others
 
 
 # ------------------------------------------------------------------------------- replay (#82)

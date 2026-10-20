@@ -716,7 +716,9 @@ irimi compare · 42e7ad03a867410b vs 5cf7f4695f22ce95 · a comparison, not a ver
   run compared with itself too. The totals count `?` rows as not compared.
 - **Exit code.** As `diff(1)`'s: 0 when every write is `=`, 1 when any is not, `?` included, and
   2 when a run is not in the store or cannot be read. A run compared with itself exits 0 unless
-  a write in it was cut. Both runs must be in one store, `--store DIR` or the default.
+  a write in it was cut. Both runs must be in one store, `--store DIR` or the default. Like every
+  irimi command, it stops quietly with 141 when the reader of its output goes away
+  (`irimi compare A B | head -1`).
 - **It is not replay.** Both runs happened, each against the world as it was then, so a
   difference can come from the world changing between them (a live read answered differently) or
   from the model sampling another answer, not only from the agent's code. Replay re-runs a stored

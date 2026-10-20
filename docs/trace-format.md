@@ -121,7 +121,7 @@ Redaction is always on; there is no switch and no per-repo rule in Phase 3.
   value that is not a string is replaced by the placeholder of its JSON with sorted keys. `null`
   and `""` hide nothing and are left as they are.
 - **Secret shapes.** Stripe, Slack, GitHub, AWS, Anthropic and OpenAI key shapes
-  (`redact.SECRET_PATTERNS`) are replaced wherever they appear: header names and values, the
+  (`secret_shapes.SECRET_PATTERNS`) are replaced wherever they appear: header names and values, the
   path, the query string and a form body (names and values), JSON strings and keys, every line of
   a text body (SSE included), `target` and `operation`. A shape glued to a preceding letter or
   digit (`task_test_runner`) is part of a word and is left alone, unless that letter or digit ends
@@ -153,15 +153,16 @@ Redaction is always on; there is no switch and no per-repo rule in Phase 3.
   key across either cut is stored as its own placeholder, or the part of that placeholder the cut
   keeps, and never as part of the key (#179). The control endpoint hands the store a posted error
   whole, and the SDK posts an exception's message whole, up to 65,536 characters
-  (`trace.MAX_POSTED_MESSAGE`). A run's end waits for the writer with its type and message each
-  cut between tokens (below) to 4000 characters (`store.MAX_QUEUED_ERROR`), so it costs the
-  store's byte budget nothing and is never dropped by it.
-- **A cut made before redaction is made between tokens.** Nothing that cuts before the store
+  (`trace.MAX_POSTED_MESSAGE`), and its type up to 1200 (`trace.MAX_POSTED_TYPE`). A run's end
+  waits for the writer with its type and message each cut outside secrets (below) to 4000
+  characters (`store.MAX_QUEUED_ERROR`), so it costs the store's byte budget nothing and is never
+  dropped by it.
+- **A cut made before redaction is made outside secrets.** Nothing that cuts before the store
   redacts can redact, so a trigger's name (1000 characters) and a captured `repr` (1000), cut by
-  the SDK, and a message past 65,536 characters and an end's error waiting to be written, are cut
-  before any of a run of letters, digits, `_` and `-` the cut would split, the characters every
-  secret shape is spelled with (`trace.cut_between_tokens`, #179). What is kept, redacted, is a
-  prefix of the whole redacted. Text that is one such run past the limit keeps none of it.
+  the SDK, an exception's message and type past what the SDK posts, and an end's error waiting
+  to be written, are cut at their limit, or, when a secret shape runs across it, where that shape
+  starts (`secret_shapes.cut_outside_secrets`, #179). What is kept, redacted, is a prefix of the
+  whole redacted, and only a key across the cut is left out: text with none keeps all it can.
 - **Failure is closed.** A part that cannot be redacted is stored as `<redaction-failed>` (a path as
   `/<redaction-failed>`), and the exchange gains the flag `redaction-failed`. That includes a
   JSON body or JSON line the walk cannot see whole: an object with a repeated key, or JSON
@@ -239,7 +240,7 @@ row:
 | non-finite `float` | `{"__irimi_repr__": "nan"}` (or `"inf"`, `"-inf"`) | no |
 | `list`, `tuple` | a JSON list: a tuple becomes a list | when every item is |
 | `dict` whose every key is a `str` | a JSON object | when every value is |
-| `dict` with any other key | `{"__irimi_repr__": repr(v)}`, the repr cut to 1000 characters between tokens (see Redaction) | no |
+| `dict` with any other key | `{"__irimi_repr__": repr(v)}`, the repr cut to 1000 characters outside secrets (see Redaction) | no |
 | dataclass instance | `{"__irimi_type__": "module:qualname", "value": <its init=True fields, captured>}` | when every field is, and its class can be imported |
 | object with a callable `model_dump` (pydantic v2) | `{"__irimi_type__": "module:qualname", "value": <v.model_dump(mode="json"), captured>}` | the same |
 | `bytes` | `{"__irimi_bytes__": <base64>}` | yes |

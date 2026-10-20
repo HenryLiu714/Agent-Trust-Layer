@@ -70,6 +70,7 @@ from typing import Any, Protocol
 from irimi import __version__, redact, trace
 from irimi.ca import DIR_MODE, KEY_MODE
 from irimi.exchange import BAD_RUN_ID_FLAG, BODY_TRUNCATED_FLAG, Exchange, clip_chunks
+from irimi.secret_shapes import cut_outside_secrets
 from irimi.trace import (
     MAX_ERROR_MESSAGE,
     MAX_ERROR_TYPE,
@@ -99,11 +100,11 @@ QUEUE_SIZE = 10_000
 # item that would pass it is dropped, unless the queue holds no bodies at all, so one large
 # exchange still reaches an idle writer.
 MAX_QUEUED_BYTES = 256 * 1024 * 1024
-# The most of an end's error type and of its message that wait for the writer, each cut between
-# tokens (`trace.cut_between_tokens`), so an end costs the byte budget nothing and is never dropped
-# by it, and what the writer redacts, then cuts to a label, is still a prefix of the redacted
-# whole (#179). Four labels' worth, so the label is cut short only when redaction shrank keys
-# by more than three.
+# The most of an end's error type and of its message that wait for the writer, each cut outside
+# any secret's shape (`secret_shapes.cut_outside_secrets`), so an end costs the byte budget
+# nothing and is never dropped by it, and what the writer redacts, then cuts to a label, is still a
+# prefix of the redacted whole (#179). Four labels' worth, so the label is cut short only when
+# redaction shrank keys by more than three labels.
 MAX_QUEUED_ERROR = 4 * MAX_ERROR_MESSAGE
 # The writer fsyncs the files it has written once it has made this many writes (lines and blobs)
 # since the last sync, whenever the queue has been idle for SYNC_IDLE_S, and on close. Counting
@@ -276,6 +277,8 @@ class _StartRun:
 
 @dataclass(frozen=True)
 class _EndRun:
+    # Counts one item of QUEUE_SIZE and no bytes (`_item_bytes`): its error waits cut to
+    # MAX_QUEUED_ERROR, so the byte budget never drops a run's end (#179).
     run_id: str
     ended_at: float
     outcome: Outcome
@@ -399,8 +402,9 @@ class DirectoryStore:
         exit_code: int | None = None,
     ) -> None:
         # A posted error may be 2 MiB, and the writer cuts it only once it has redacted it (#179),
-        # so it waits cut between tokens to MAX_QUEUED_ERROR: a run never loses its end to the byte
-        # budget. An error that is not text is a drop, never raised into the caller.
+        # so it waits cut outside any secret to MAX_QUEUED_ERROR, and an end is never counted
+        # against MAX_QUEUED_BYTES: a run never loses its end to the byte budget. An error that is
+        # not text is a drop, never raised into the caller.
         try:
             queued = None if error is None else _queued_error(error)
         except Exception as exc:
@@ -855,11 +859,11 @@ def _item_bytes(item: _Item) -> int:
 
 
 def _queued_error(error: ErrorInfo) -> ErrorInfo:
-    """`error` as it waits for the writer: its type and its message each cut between tokens to
-    MAX_QUEUED_ERROR (#179). Raises TypeError for one that is not text."""
+    """`error` as it waits for the writer: its type and its message each cut to MAX_QUEUED_ERROR
+    outside any secret's shape (#179). Raises TypeError for one that is not text."""
     return ErrorInfo(
-        trace.cut_between_tokens(error.type, MAX_QUEUED_ERROR),
-        trace.cut_between_tokens(error.message, MAX_QUEUED_ERROR),
+        cut_outside_secrets(error.type, MAX_QUEUED_ERROR),
+        cut_outside_secrets(error.message, MAX_QUEUED_ERROR),
     )
 
 

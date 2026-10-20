@@ -1123,11 +1123,11 @@ def test_a_runs_start_counts_against_the_byte_budget(root, key, monkeypatch):
     assert _paths(late) == ["/no-body"]
 
 
-def test_an_end_waits_with_its_error_cut_between_tokens_and_is_never_dropped_for_bytes(
+def test_an_end_waits_with_its_error_cut_outside_secrets_and_is_never_dropped_for_bytes(
     root, key, monkeypatch
 ):
     """A posted error may be 2 MiB, and the writer cuts it only once redacted (#179). So it waits
-    cut between tokens to MAX_QUEUED_ERROR, an end costs the byte budget nothing, and no run
+    cut outside secrets to MAX_QUEUED_ERROR, an end costs the byte budget nothing, and no run
     loses its end to it: a key across that cut is left out whole, and the stored error is still
     a prefix of the redacted whole."""
     monkeypatch.setattr(store, "MAX_QUEUED_BYTES", 100)

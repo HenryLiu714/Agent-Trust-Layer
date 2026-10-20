@@ -33,7 +33,7 @@ from irimi import __version__, exchange, paths, redact, sdk
 from irimi.exchange import Exchange
 from irimi.sdk import capture, client, runs
 from irimi.store import DirectoryStore, StoreReader
-from irimi.trace import ErrorInfo, RunRecord, Trigger
+from irimi.trace import MAX_ERROR_TYPE, ErrorInfo, RunRecord, Trigger
 from tests import test_engine_mitm
 from tests.test_engine_mitm import _config, _start, _via_proxy
 
@@ -322,6 +322,19 @@ def test_a_trigger_that_raises_re_raises_the_same_object_and_its_run_ends_in_err
     assert caught.value is boom
     [run] = irimi.sdk_runs()
     assert (run.outcome, run.error) == ("error", ErrorInfo("builtins.ValueError", "x"))
+
+
+def test_an_exception_named_past_what_the_control_endpoint_takes_still_ends_its_run(irimi):
+    """A class made with `type()` may be named anything. Posted whole, a name past the control
+    endpoint's 2 MiB made the run's end a 413, and the run never ended. The SDK posts the type
+    cut to MAX_POSTED_TYPE, and the store keeps MAX_ERROR_TYPE of it, redacted (#179)."""
+    name = "H" * (3 * 1024 * 1024)
+    huge = type(name, (Exception,), {})
+    with pytest.raises(huge), sdk.run(name="huge"):
+        raise huge("x")
+    [run] = irimi.sdk_runs()
+    kept = f"{__name__}.{name}"[:MAX_ERROR_TYPE]
+    assert (run.outcome, run.error) == ("error", ErrorInfo(kept, "x"))
 
 
 def test_a_keyboard_interrupt_ends_the_run_in_error_and_still_propagates(irimi):
@@ -902,9 +915,9 @@ def test_a_name_that_is_not_a_string_is_refused_at_decoration_or_kept_as_a_label
     assert names == ["None", "name " * (runs.MAX_NAME // 5)]
 
 
-def test_a_long_name_is_cut_between_tokens_so_it_keeps_no_part_of_a_key(irimi):
+def test_a_long_name_is_cut_outside_secrets_so_it_keeps_no_part_of_a_key(irimi):
     """The SDK cuts a name before irimi redacts it: cut inside a key, the part it kept was too
-    short for the key's shape, and reached disk. Cut between tokens, the key is left out whole
+    short for the key's shape, and reached disk. Cut outside secrets, the key is left out whole
     (#179)."""
     head = "n" * (runs.MAX_NAME - 10) + " "
     with sdk.run(name=head + "ghp_" + "k" * 36):
@@ -1248,9 +1261,10 @@ def test_anything_else_is_its_repr_and_not_replayable(value):
     assert capture.capture(value) == ({"__irimi_repr__": repr(value)[:1000]}, False)
 
 
-def test_a_repr_is_cut_to_1000_characters_between_tokens():
+def test_a_repr_is_cut_to_1000_characters_outside_secrets():
     """Cut before the store redacts it, so never inside a key, which redaction would no longer
-    find (#179): a repr that is one run of token characters past 1000 keeps none of it."""
+    find (#179): a key across the cut is left out whole, and a repr with none across it keeps
+    1000 characters, one long word included."""
 
     class Long:
         def __init__(self, text: str) -> None:
@@ -1262,7 +1276,9 @@ def test_a_repr_is_cut_to_1000_characters_between_tokens():
     assert capture.capture(Long("x " * 2500)) == ({"__irimi_repr__": "x " * 500}, False)
     keyed = Long("x" * 990 + " ghp_" + "k" * 36)
     assert capture.capture(keyed) == ({"__irimi_repr__": "x" * 990 + " "}, False)
-    assert capture.capture(Long("x" * 5000)) == ({"__irimi_repr__": ""}, False)
+    assert capture.capture(Long("x" * 5000)) == ({"__irimi_repr__": "x" * 1000}, False)
+    openai = Long("x" * 985 + "'sk-" + "k" * 40 + "'")
+    assert capture.capture(openai) == ({"__irimi_repr__": "x" * 985 + "'"}, False)
 
 
 def test_a_repr_that_raises_is_named_unrepresentable():

@@ -15,10 +15,11 @@ from examples.workflows.w06_crm_db_agent.agent import (
     DB_NAME,
     SEED,
     UNREACHABLE_HOST,
+    DriverOptions,
 )
 from examples.workflows.w06_crm_db_agent.scenarios import STALE_REPLAY_RUN
 from irimi import redact
-from irimi.sdk.capture import REPR_KEY
+from irimi.sdk.capture import MAX_REPR, REPR_KEY
 from irimi.trace import MAX_ERROR_MESSAGE, UNATTRIBUTED, ErrorInfo, ToolCall
 
 W = "w06_crm_db_agent"
@@ -287,11 +288,30 @@ def test_an_sdk_error_quoting_a_key_across_the_cut_is_stored_as_its_placeholder(
     hidden = redact.placeholder(redact.load_key(shadow.home), CANARIES["STRIPE_API_KEY"])
     assert connect.error == connect_error(shadow)
     assert f"could not connect with postgres://crm:{hidden}@" in connect.error.message
-    assert connect.args == {"dsn": f"postgres://crm:{hidden}@{UNREACHABLE_HOST}/crm"}
+    assert connect.args["dsn"] == f"postgres://crm:{hidden}@{UNREACHABLE_HOST}/crm"
     for result in (shadow, run_workflow(W, "tool_raises", "bare")):
         assert result.events("connect_failed", with_time=False) == [
             {"event": "connect_failed", "error": "ConnectionError"}
         ]
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_repr_quoting_a_key_across_the_sdks_cut_keeps_no_part_of_it(run_workflow, mode):
+    """`connect_with`'s options are captured as their repr, which quotes a key across the 1000
+    characters the SDK keeps of one. The SDK cuts before irimi redacts, so it cuts where the key
+    starts, and keeps everything before it: cut at 1000, the 15 characters of the key it kept
+    were no longer its shape, and reached disk as they were, which universal invariant 4 finds
+    (#179). The store's copy is the SDK's, so it holds no placeholder either."""
+    shadow = run_workflow(W, "tool_raises", mode)
+    [connect] = [c for c in tool_calls(shadow) if c.name == "crm.connect_with"]
+    key = CANARIES["OPENAI_API_KEY"]
+    said = repr(DriverOptions(key))
+    assert said.index(key) < MAX_REPR < said.index(key) + len(key)
+    assert connect.args["options"] == {REPR_KEY: said[: said.index(key)]}
+    assert said[: said.index(key)].endswith("', password='")
+    on_disk = [p.read_bytes() for p in shadow.store_root().rglob("*") if p.is_file()]
+    assert not any(key[:12].encode() in data for data in on_disk)
+    assert check_invariants(shadow) == []
 
 
 @pytest.mark.parametrize("mode", MODES)

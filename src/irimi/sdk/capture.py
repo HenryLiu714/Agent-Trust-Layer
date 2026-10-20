@@ -33,8 +33,9 @@ whole by `{"__irimi_truncated__": true, "bytes": n}`, not replayable. The walk c
 is producing as it goes and stops as soon as they pass the limit, so a value that holds one large
 object many times, or itself, is walked at most that far; when it stops early, `n` is the count
 so far, already past the limit. A `repr` is the value's own cost: it is cut to 1000 characters
-after it is made, between tokens (`trace.cut_between_tokens`), since the store redacts it only
-after this cut, and the kept half of a key would no longer be its shape (#179).
+after it is made, outside any secret's shape (`secret_shapes.cut_outside_secrets`), since the
+store redacts it only after this cut, and the kept half of a key would no longer be its shape
+(#179).
 
 CAPTURE NEVER RAISES. It runs inside the agent's call, before the agent's own function: a `repr`
 or a `model_dump` that raises makes its value `{"__irimi_repr__": ...}`, never the agent's error.
@@ -49,7 +50,8 @@ import sys
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from irimi.trace import REPR_KEY, TRUNCATED_KEY, JSONValue, cut_between_tokens, holds_description
+from irimi.secret_shapes import cut_outside_secrets
+from irimi.trace import REPR_KEY, TRUNCATED_KEY, JSONValue, holds_description
 
 # The two markers that describe a value, `REPR_KEY` and `TRUNCATED_KEY`, are the trace format's,
 # so a replay's recording and `revive` refuse one rule (#83); these two are capture's own.
@@ -416,6 +418,6 @@ class _Walk:
 
 def _repr(value: object) -> str:
     try:
-        return cut_between_tokens(repr(value), MAX_REPR)
+        return cut_outside_secrets(repr(value), MAX_REPR)
     except Exception:
         return f"<unrepresentable {type(value).__qualname__}>"

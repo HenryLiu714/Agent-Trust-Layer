@@ -56,12 +56,13 @@ from irimi.sdk import context, errors
 from irimi.sdk.capture import Captured
 from irimi.sdk.client import LOGGER_NAME, ControlClient, Reporter
 from irimi.sdk.instrumentation import instrument
+from irimi.secret_shapes import cut_outside_secrets
 
 logger = logging.getLogger(LOGGER_NAME)
 
 # The longest trigger name a run records. A name is a label, as an error message is (#68), and a
-# start past `control.MAX_CONTROL_BODY` would be refused whole. Cut between tokens, since the
-# store redacts it only after this cut (`trace.cut_between_tokens`, #179).
+# start past `control.MAX_CONTROL_BODY` would be refused whole. Cut outside any secret's shape,
+# since the store redacts it only after this cut (`secret_shapes.cut_outside_secrets`, #179).
 MAX_NAME = 1000
 
 # Every post the SDK makes goes through this one client, so each kind of failure is logged once
@@ -95,7 +96,7 @@ class RunScope:
     run starts, and returns the trigger's args and whether they are replayable."""
 
     def __init__(self, name: str, entrypoint: str | None, capture: Callable[[], Captured]) -> None:
-        self._name = trace.cut_between_tokens(name, MAX_NAME)
+        self._name = cut_outside_secrets(name, MAX_NAME)
         self._entrypoint = entrypoint
         self._capture = capture
         self._opened: _Opened | None = None

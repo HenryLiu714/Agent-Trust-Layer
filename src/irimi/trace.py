@@ -26,7 +26,6 @@ the caller unchanged.
 import hashlib
 import math
 import re
-import string
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, assert_never, get_args
@@ -44,6 +43,7 @@ from irimi.exchange import (
     Response,
     Validation,
 )
+from irimi.secret_shapes import cut_outside_secrets
 
 # One integer for the whole format (#68). `run.json` carries it and a run's events are read under
 # it; `unattributed/events.jsonl`, which has no `run.json`, is read under this one. A decoder
@@ -84,10 +84,11 @@ MAX_ERROR_TYPE = 300
 # the SDK posts the message for the store to redact and cut, and must only keep a post under the
 # control endpoint's 2 MiB (#179).
 MAX_POSTED_MESSAGE = 64 * 1024
-# The characters every secret shape `redact` looks for is spelled with (`redact.SECRET_PATTERNS`;
-# `tests/test_redact.py` holds the two together). A cut made before redaction backs out of a run
-# of them (`cut_between_tokens`, #179).
-TOKEN_CHARS = string.ascii_letters + string.digits + "_-"
+# The most of an exception's type `ErrorInfo.from_exception` keeps: four labels' worth, as the store
+# keeps of an end's while it waits (`store.MAX_QUEUED_ERROR`). A class's `module.qualname` is far
+# shorter, but one made with `type()` may be any length, and one past the control endpoint's 2 MiB
+# cost its run the post, and so its end (#179).
+MAX_POSTED_TYPE = 4 * MAX_ERROR_TYPE
 
 # The most of a string a decoder's message quotes (`_quoted`). The message is read by a person, on
 # `irimi runs show`'s stderr, in `list_runs`'s warning or as a control refusal, and a damaged
@@ -121,21 +122,6 @@ def is_valid_run_id(run_id: str) -> bool:
     return RUN_ID_PATTERN.fullmatch(run_id) is not None
 
 
-def cut_between_tokens(text: str, limit: int) -> str:
-    """`text` cut to at most `limit` characters, never inside a run of TOKEN_CHARS: a cut that
-    would fall inside one is made before the whole run instead, so text that is one run past
-    `limit` keeps nothing.
-
-    For a cut made before redaction, as the SDK's are: it cannot redact, since the key is irimi's.
-    Every secret shape is one run of TOKEN_CHARS, so the half of a key a plain cut kept would no
-    longer be its shape, and redaction would store it as it is (#179). Cut here, what is kept,
-    redacted, is a prefix of the whole redacted."""
-    if len(text) <= limit:
-        return text
-    kept = text[:limit]
-    return kept.rstrip(TOKEN_CHARS) if text[limit] in TOKEN_CHARS else kept
-
-
 @dataclass(frozen=True)
 class ErrorInfo:
     type: str  # the exception's `module.qualname`; a stored one at most MAX_ERROR_TYPE (#99)
@@ -145,8 +131,9 @@ class ErrorInfo:
     def from_exception(cls, exc: BaseException) -> "ErrorInfo":
         """The one spelling of "what went wrong" a run or a tool call records.
 
-        Its message is `str(exc)`, up to MAX_POSTED_MESSAGE characters cut between tokens. The
-        store redacts it whole, and only then cuts it to MAX_ERROR_MESSAGE (#179).
+        Its message is `str(exc)`, and its type the class's `module.qualname`, cut to
+        MAX_POSTED_MESSAGE and MAX_POSTED_TYPE characters outside any secret's shape: the SDK
+        cannot redact, and the store redacts each whole before it cuts it to a label (#179).
 
         Never raises on an exception whose `__str__` does: the SDK (#74, #76) calls this while an
         agent's own exception is in flight, and recording it must not replace it with another."""
@@ -155,8 +142,10 @@ class ErrorInfo:
             message = str(exc)
         except Exception:
             message = f"<unprintable {kind.__qualname__}>"
-        message = cut_between_tokens(message, MAX_POSTED_MESSAGE)
-        return cls(f"{kind.__module__}.{kind.__qualname__}", message)
+        return cls(
+            cut_outside_secrets(f"{kind.__module__}.{kind.__qualname__}", MAX_POSTED_TYPE),
+            cut_outside_secrets(message, MAX_POSTED_MESSAGE),
+        )
 
 
 @dataclass(frozen=True)

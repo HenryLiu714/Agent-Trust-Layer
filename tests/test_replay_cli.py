@@ -11,12 +11,13 @@ through `NO_PROXY` and the stubs are on loopback. The maps are `tests/test_repla
 """
 
 import json
+import shlex
 import sys
 from dataclasses import replace
 
 import pytest
 
-from irimi import ca, paths
+from irimi import __version__, ca, paths
 from irimi.cli import main
 from irimi.sdk.replays import ReplayResult
 from irimi.servicemap import loader
@@ -436,6 +437,147 @@ def test_a_trigger_recorded_in_main_is_refused(home, capfd):
     assert err == [
         f"error: run {run.run_id}'s entrypoint __main__:main is in __main__, which is irimi's own "
         "child when it is called; start the agent by its module name, or pass --call or -- CMD"
+    ]
+
+
+def _python(tmp_path, name: str, setup: str, flags: str = "") -> str:
+    """A Python for `--python` (#162): a script that runs `setup` in the shell, then this test's
+    interpreter with `flags` and every argument it was given."""
+    path = tmp_path / name
+    path.write_text(f'#!/bin/sh\n{setup}\nexec {shlex.quote(sys.executable)} {flags} "$@"\n')
+    path.chmod(0o755)
+    return str(path)
+
+
+def test_a_trigger_only_the_agent_s_python_can_import_is_called_under_python(home, capfd, tmp_path):
+    """irimi installed apart from the agent, as a tool, runs under a Python that cannot import the
+    agent (#162): here the agent's module leaves the working directory once its run is recorded.
+    Under irimi's own Python the call is never made, exit 2, and irimi says which Python that was;
+    `--python` names a Python whose path holds the module, which calls it as it was recorded."""
+    source = _record(home, f"replay_agent.handle({TICKET})")
+    site = tmp_path / "agent-site"
+    site.mkdir()
+    (tmp_path / "replay_agent.py").rename(site / "replay_agent.py")
+    capfd.readouterr()
+    code, out, err = _replay(capfd, source)
+    assert code == 2
+    why = "importing replay_agent raised ModuleNotFoundError: No module named 'replay_agent'"
+    assert _result(out)[1] == f"  agent could not be called: {why}"
+    assert err == [
+        f"error: cannot call replay_agent:handle: {why}",
+        f"hint: the trigger was called under irimi's own Python, {sys.executable}; if the agent "
+        "runs under another, call it there with --python PATH",
+    ]
+    # Named with --python, a Python is the agent's: irimi says nothing of its own.
+    code, out, err = _replay(capfd, source, "--python", sys.executable)
+    assert (code, err) == (2, [f"error: cannot call replay_agent:handle: {why}"])
+    _python(tmp_path, "agent-python", f"export PYTHONPATH={shlex.quote(str(site))}")
+    # A relative path, as `--python .venv/bin/python` is typed, from the working directory.
+    code, out, err = _replay(capfd, source, "--python", "./agent-python")
+    assert (code, err) == (0, [])
+    assert _result(out)[1:] == [
+        "  agent exited 0",
+        "  no divergence: every call was answered from the recording",
+        "  3 from the recording · 0 missed",
+        "",
+        "  = ○ refund $49.00 on ch_REAL1  unvalidated (L3 preconditions passed)",
+        "",
+        "  1 same · 0 changed · 0 only in A · 0 only in B",
+    ]
+    assert _Stripe.seen == [] and _Llm.seen == []
+
+
+def test_a_python_that_cannot_run_irimi_s_replay_child_is_refused_before_anything_runs(
+    home, capfd, tmp_path, monkeypatch
+):
+    """`--python` must import irimi's replay child, which calls the trigger and says how the call
+    ended (#162). A Python without irimi, here this one with no site-packages, a path that is no
+    program, and one that does not answer in time are each refused before the replay starts:
+    exit 2, and no run stored."""
+    from irimi import cli
+
+    source = _record(home, f"replay_agent.handle({TICKET})")
+    bare = _python(tmp_path, "bare-python", "unset PYTHONPATH", "-S")
+    missing = str(tmp_path / "no-such-python")
+    slow = _python(tmp_path, "slow-python", "exec sleep 5")
+    monkeypatch.setattr(cli, "PYTHON_PROBE_TIMEOUT_S", 1.0)
+    capfd.readouterr()
+    code, out, err = _replay(capfd, source, "--python", bare)
+    assert (code, out) == (2, [])
+    assert err == [
+        f"error: --python {bare} cannot import irimi's replay child (ModuleNotFoundError: No "
+        "module named 'irimi'); install irimi in that Python's environment, or replay with -- CMD"
+    ]
+    code, out, err = _replay(capfd, source, "--python", missing)
+    assert (code, out) == (2, [])
+    assert err == [f"error: --python {missing} could not be run: No such file or directory"]
+    code, out, err = _replay(capfd, source, "--python", slow)
+    assert (code, out) == (2, [])
+    assert err == [f"error: --python {slow} did not answer within 1s"]
+    code, out, err = _replay(capfd, source, "--python", "python\0")
+    assert (code, out) == (2, [])
+    assert err == ["error: --python python\\x00 could not be run: embedded null byte"]
+    assert _replay_runs(home, source) == []
+
+
+def test_a_python_with_another_irimi_is_warned_of_and_called_under(home, capfd, tmp_path):
+    """The agent's Python calls the trigger with its own irimi's replay child (#162), which may not
+    be this irimi's version: a tool's irimi upgraded apart from the agent's. irimi says so, and
+    the replay runs."""
+    source = _record(home, f"replay_agent.handle({TICKET})")
+    older = tmp_path / "older-irimi"
+    (older / "irimi-0.0.1.dist-info").mkdir(parents=True)
+    (older / "irimi-0.0.1.dist-info" / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: irimi\nVersion: 0.0.1\n"
+    )
+    python = _python(tmp_path, "older-python", f"export PYTHONPATH={shlex.quote(str(older))}")
+    capfd.readouterr()
+    code, out, err = _replay(capfd, source, "--python", python)
+    assert (code, err) == (
+        0,
+        [
+            f"warning: --python {python} has irimi 0.0.1, and this is irimi {__version__}; the "
+            "trigger is called by that irimi, so install the same version in both"
+        ],
+    )
+    assert _result(out)[2] == "  no divergence: every call was answered from the recording"
+
+
+def test_a_sigterm_while_python_is_asked_stops_the_replay_with_143(home, capfd, tmp_path):
+    """SIGTERM to `irimi replay` while it asks `--python` (#162), here sent by that Python itself,
+    which then fails: the replay was stopped, not refused, so it exits 143, as one stopped before
+    its command started, and stores no run. `irimi replay` runs as its own process, so the signal
+    reaches it alone."""
+    import os
+    import subprocess
+
+    source = _record(home, f"replay_agent.handle({TICKET})")
+    python = _python(tmp_path, "stopping-python", "kill -TERM $PPID\nexit 1")
+    written = tmp_path / "result.json"
+    command = [sys.executable, "-m", "irimi", "replay", source, "--port", "0"]
+    command += ["--python", python, "--result-file", str(written)]
+    proc = subprocess.run(command, env=dict(os.environ), capture_output=True, timeout=60)
+    assert proc.returncode == 143
+    assert ReplayResult.from_json(json.loads(written.read_text())).exit_code == 143
+    assert _replay_runs(home, source) == []
+
+
+def test_python_with_a_command_is_a_usage_error_and_for_a_process_run_refused(home, capfd):
+    """A command names its own Python (#162): `--python` with `-- CMD` is a usage error, and for a
+    process run, which a replay runs by its recorded command, it is refused, exit 2."""
+    source = _record(home, f"replay_agent.handle({TICKET})")
+    capfd.readouterr()
+    with pytest.raises(SystemExit) as usage:
+        main(["replay", source, "--python", sys.executable, "--", "true"])
+    assert usage.value.code == 2
+    assert "-- CMD names its own Python: drop --python, or the command" in capfd.readouterr().err
+    process = _record(home, "replay_agent.plain('ch_REAL1')")
+    capfd.readouterr()
+    code, out, err = _replay(capfd, process, "--python", sys.executable)
+    assert (code, out) == (2, [])
+    assert err == [
+        f"error: run {process} is replayed by its recorded command, which names its own Python; "
+        "drop --python"
     ]
 
 

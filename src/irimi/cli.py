@@ -18,6 +18,7 @@ if TYPE_CHECKING:  # the quoted annotations below; no runtime import
     from irimi.engine import Engine, EngineConfig, OnExchange
     from irimi.exchange import Exchange
     from irimi.recording import Recording
+    from irimi.replay import Plan
     from irimi.runner import ChildCall
     from irimi.sdk.replay_child import CallOutcome
     from irimi.sdk.replays import ReplayResult
@@ -970,6 +971,8 @@ def cmd_replay(args: argparse.Namespace) -> int:
         args.parser.error(
             "-- CMD runs a command, not a call: drop --call and --args, or the command"
         )
+    if args.cmd and args.python is not None:
+        args.parser.error("-- CMD names its own Python: drop --python, or the command")
     with _passing_sigterm_to_child() as child, _keeping_stderr() as said:
         try:
             result = _replay(args, child, said)
@@ -1000,9 +1003,13 @@ def _replay(args: argparse.Namespace, child: _Child, said: list[str]) -> "Replay
     try:
         source = _load_source(args)
         plan = replay.plan(source.record, list(args.cmd), args.call, args.args)
+        python = _replay_python(args, plan)
     except replay.Refused as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return replay.refused(args.run_id, said)
+        result = replay.refused(args.run_id, said)
+        # A SIGTERM that came while `--python` was asked stopped the replay, which exits as one
+        # stopped before its command started, whatever the answer (#162).
+        return replace(result, exit_code=SIGTERM_EXIT_CODE) if child.terminated else result
     if source.record.outcome is None:
         print(
             f"warning: run {args.run_id} did not end; it is replayed as far as it was recorded",
@@ -1017,13 +1024,21 @@ def _replay(args: argparse.Namespace, child: _Child, said: list[str]) -> "Replay
                 plan.call.entrypoint, Path(tmp) / "args.json", Path(tmp) / "outcome.json"
             )
             call.args_file.write_text(json.dumps(plan.call.args), encoding="utf-8")
-            argv = [sys.executable, "-m", replay.CHILD_MODULE]
+            argv = [python, "-m", replay.CHILD_MODULE]
         run = _prepare_run(args, source=source)
         if run is None:
             return replay.refused(args.run_id, said)
         agent_version = os.environ.get(paths.AGENT_VERSION_ENV)
         record = runner.process_run(run.run_id, argv, agent_version, 0.0, plan.trigger)
         ran = _under_the_engine(args, run, child, _Launch("replay", argv, record, call))
+    if args.python is None and _no_such_module(ran.call):
+        # irimi's own Python is not the agent's when irimi is installed apart from it, as a tool
+        # (#162): say which Python it was, and how to name the agent's.
+        print(
+            f"hint: the trigger was called under irimi's own Python, {sys.executable}; if the "
+            "agent runs under another, call it there with --python PATH",
+            file=sys.stderr,
+        )
     if not ran.summarize or not ran.stored:
         # The agent never ran: refused, or stopped by a signal before its run was stored, which
         # exits as `irimi shadow` would.
@@ -1037,6 +1052,76 @@ def _replay(args: argparse.Namespace, child: _Child, said: list[str]) -> "Replay
         # Ctrl-C while irimi read the runs back or compared them: the replay's run is stored and
         # ended, and its result names it (#84).
         return _interrupted(args, said, run.run_id)
+
+
+# What `irimi replay --python` runs first, under that Python (#162): it imports irimi's replay
+# child, which calls the trigger and writes how the call ended, and prints that irimi's version.
+# It imports irimi alone: the agent's code runs only in the child, under the replay's engine.
+_PYTHON_PROBE = "import irimi.sdk.replay_child, irimi; print(irimi.__version__)"
+PYTHON_PROBE_TIMEOUT_S = 30.0
+
+
+def _replay_python(args: argparse.Namespace, plan: "Plan") -> str:
+    """The Python a replay's child calls its trigger under (#162): irimi's own, or `--python`, the
+    agent's, once it has run `_PYTHON_PROBE`. One that does not run, or cannot import irimi's
+    replay child, is Refused before anything starts; one with another irimi than this is warned
+    of, since that irimi makes the call. `--python` for a run replayed by its recorded command is
+    Refused, as with `-- CMD`: the command names its own Python."""
+    import subprocess
+
+    from irimi import replay, report
+
+    if args.python is None:
+        return sys.executable
+    if plan.call is None:
+        raise replay.Refused(
+            f"run {args.run_id} is replayed by its recorded command, which names its own Python; "
+            "drop --python"
+        )
+    named = f"--python {report.printable(args.python)}"
+    try:
+        probe = subprocess.run(
+            [args.python, "-c", _PYTHON_PROBE],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=PYTHON_PROBE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        raise replay.Refused(
+            f"{named} did not answer within {PYTHON_PROBE_TIMEOUT_S:.0f}s"
+        ) from None
+    except (OSError, ValueError) as exc:  # ValueError: a path holding a NUL
+        why = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
+        raise replay.Refused(f"{named} could not be run: {why}") from None
+    if probe.returncode != 0:
+        said = probe.stderr.strip().splitlines()
+        why = report.printable(said[-1]) if said else f"it exited {probe.returncode}"
+        raise replay.Refused(
+            f"{named} cannot import irimi's replay child ({why}); install irimi in that "
+            "Python's environment, or replay with -- CMD"
+        )
+    printed = probe.stdout.strip().splitlines()
+    version = report.printable(printed[-1]) if printed else "?"
+    if version != __version__:
+        print(
+            f"warning: {named} has irimi {version}, and this is irimi {__version__}; the "
+            "trigger is called by that irimi, so install the same version in both",
+            file=sys.stderr,
+        )
+    return args.python
+
+
+def _no_such_module(call: "CallOutcome | None") -> bool:
+    """Whether a replay's child could not call its trigger because a module it imports is not
+    installed under the child's Python (`api.resolve`'s refusal)."""
+    return (
+        call is not None
+        and not call.called
+        and call.error is not None
+        and "raised ModuleNotFoundError: " in call.error.message
+    )
 
 
 def _replayed(
@@ -1369,6 +1454,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=_call_arg,
         metavar="MODULE:QUALNAME",
         help="call this function instead of the run's recorded entrypoint",
+    )
+    replay.add_argument(
+        "--python",
+        metavar="PATH",
+        help="call the trigger under this Python, the agent's, with irimi installed in it, "
+        "instead of irimi's own",
     )
     given = replay.add_mutually_exclusive_group()
     given.add_argument(

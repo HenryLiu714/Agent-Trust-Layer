@@ -465,8 +465,8 @@ def test_a_trigger_only_the_agent_s_python_can_import_is_called_under_python(hom
     assert _result(out)[1] == f"  agent could not be called: {why}"
     assert err == [
         f"error: cannot call replay_agent:handle: {why}",
-        f"hint: the trigger was called under irimi's own Python, {sys.executable}; if the agent "
-        "runs under another, call it there with --python PATH",
+        f"hint: the trigger was called under irimi's own Python, {sys.executable}, which may not "
+        "have the agent's packages; name the agent's Python with --python PATH",
     ]
     # Named with --python, a Python is the agent's: irimi says nothing of its own.
     code, out, err = _replay(capfd, source, "--python", sys.executable)
@@ -492,8 +492,8 @@ def test_a_python_that_cannot_run_irimi_s_replay_child_is_refused_before_anythin
 ):
     """`--python` must import irimi's replay child, which calls the trigger and says how the call
     ended (#162). A Python without irimi, here this one with no site-packages, a path that is no
-    program, and one that does not answer in time are each refused before the replay starts:
-    exit 2, and no run stored."""
+    program, a virtual environment's directory rather than its Python, and one that does not answer
+    in time are each refused before the replay starts: exit 2, and no run stored."""
     from irimi import cli
 
     source = _record(home, f"replay_agent.handle({TICKET})")
@@ -511,6 +511,16 @@ def test_a_python_that_cannot_run_irimi_s_replay_child_is_refused_before_anythin
     code, out, err = _replay(capfd, source, "--python", missing)
     assert (code, out) == (2, [])
     assert err == [f"error: --python {missing} could not be run: No such file or directory"]
+    # `--python .venv`, as uv's own `--python` takes it: named relative and absolute, one is looked
+    # up on PATH and the other cannot be executed, so neither says the directory is the trouble.
+    (tmp_path / "venv" / "bin").mkdir(parents=True)
+    for venv in ("venv", str(tmp_path / "venv")):
+        code, out, err = _replay(capfd, source, "--python", venv)
+        assert (code, out) == (2, [])
+        assert err == [
+            f"error: --python {venv} is a directory; name the Python in it, as --python "
+            f"{venv}/bin/python"
+        ]
     code, out, err = _replay(capfd, source, "--python", slow)
     assert (code, out) == (2, [])
     assert err == [f"error: --python {slow} did not answer within 1s"]

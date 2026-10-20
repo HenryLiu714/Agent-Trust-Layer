@@ -927,14 +927,15 @@ def test_a_call_of_another_function_is_replayed_in_place_of_the_trigger(replayed
 
 
 def test_a_full_refund_replayed_under_the_agent_s_python_is_answered_from_its_recording(
-    replayed, tmp_path
+    replayed, tmp_path, capfd
 ):
     """irimi installed apart from the agent, as a tool, runs under a Python that cannot import it
     (#162). Here the agent's environment loses the repo from its `PYTHONPATH`, and only the
     agent's Python, `agent-python`, puts it back. Replayed under irimi's own Python, the trigger's
-    module does not import: the call is never made, nothing reaches the fake internet, and the
-    replay exits 2. `--python agent-python` calls it, and the replay is the unchanged one: every
-    call answered from the recording, the same two writes, exit 0."""
+    module does not import: the call is never made, nothing reaches the fake internet, the replay
+    exits 2, and irimi's hint names the Python it used and the flag. `--python agent-python`
+    calls it, and the replay is the unchanged one: every call answered from the recording, the
+    same two writes, exit 0, and no hint."""
     python = tmp_path / "agent-python"
     python.write_text(
         f"#!/bin/sh\nexport PYTHONPATH={shlex.quote(str(REPO_ROOT))}\n"
@@ -942,8 +943,14 @@ def test_a_full_refund_replayed_under_the_agent_s_python_is_answered_from_its_re
     )
     python.chmod(0o755)
     no_path = {"PYTHONPATH": ""}
-    recorded, alone = replayed(W, "full_refund", no_path)
+    recorded, _ = replayed(W, "full_refund")
     source = recorded.one("run.start")["run"]
+    capfd.readouterr()
+    alone = replay(recorded, source, tmp_path / "alone", no_path)
+    assert capfd.readouterr().err.splitlines()[-1:] == [
+        f"hint: the trigger was called under irimi's own Python, {sys.executable}, which may not "
+        "have the agent's packages; name the agent's Python with --python PATH"
+    ]
     assert alone.replay_result()[1] == (
         f"  agent could not be called: importing {AGENT} raised ModuleNotFoundError: No module "
         "named 'examples'"
@@ -951,9 +958,10 @@ def test_a_full_refund_replayed_under_the_agent_s_python_is_answered_from_its_re
     assert (alone.exit_code, alone.agent_exit_code()) == (2, 126)
     assert alone.events("run.start") == []
     assert alone.internet.requests() == []
-    _, replay = replayed(W, "full_refund", no_path, options=("--python", str(python)))
-    assert replay.replay_result() == [
-        f"irimi replay · {source} → {replay.process_run_id()} · - → -",
+    agent = replay(recorded, source, tmp_path / "agent", no_path, ("--python", str(python)))
+    assert "hint: " not in capfd.readouterr().err
+    assert agent.replay_result() == [
+        f"irimi replay · {source} → {agent.process_run_id()} · - → -",
         "  agent exited 0",
         "  no divergence: every call was answered from the recording",
         "  7 from the recording · 0 missed",
@@ -963,11 +971,11 @@ def test_a_full_refund_replayed_under_the_agent_s_python_is_answered_from_its_re
         "",
         "  2 same · 0 changed · 0 only in A · 0 only in B",
     ]
-    assert (replay.exit_code, replay.agent_exit_code()) == (0, 0)
-    assert replay.returned() == FULL_REFUND_RETURNED
-    assert replay.tools() == [(LOOKUP_TOOL, "recording"), (REPLY_TOOL, "shadow")]
-    assert replay.internet.requests() == []
-    assert check_invariants(replay) == []
+    assert (agent.exit_code, agent.agent_exit_code()) == (0, 0)
+    assert agent.returned() == FULL_REFUND_RETURNED
+    assert agent.tools() == [(LOOKUP_TOOL, "recording"), (REPLY_TOOL, "shadow")]
+    assert agent.internet.requests() == []
+    assert check_invariants(agent) == []
 
 
 @pytest.mark.parametrize(

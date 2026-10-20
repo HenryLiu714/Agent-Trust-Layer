@@ -1035,8 +1035,8 @@ def _replay(args: argparse.Namespace, child: _Child, said: list[str]) -> "Replay
         # irimi's own Python is not the agent's when irimi is installed apart from it, as a tool
         # (#162): say which Python it was, and how to name the agent's.
         print(
-            f"hint: the trigger was called under irimi's own Python, {sys.executable}; if the "
-            "agent runs under another, call it there with --python PATH",
+            f"hint: the trigger was called under irimi's own Python, {sys.executable}, which may "
+            "not have the agent's packages; name the agent's Python with --python PATH",
             file=sys.stderr,
         )
     if not ran.summarize or not ran.stored:
@@ -1067,6 +1067,7 @@ def _replay_python(args: argparse.Namespace, plan: "Plan") -> str:
     replay child, is Refused before anything starts; one with another irimi than this is warned
     of, since that irimi makes the call. `--python` for a run replayed by its recorded command is
     Refused, as with `-- CMD`: the command names its own Python."""
+    import os
     import subprocess
 
     from irimi import replay, report
@@ -1079,6 +1080,11 @@ def _replay_python(args: argparse.Namespace, plan: "Plan") -> str:
             "drop --python"
         )
     named = f"--python {report.printable(args.python)}"
+    if os.path.isdir(args.python):
+        # `--python .venv`, as uv's own `--python` takes it, is looked up on PATH, or cannot be
+        # executed: either error would hide that the directory is the trouble (#162).
+        inside = report.printable(os.path.join(args.python, "bin", "python"))
+        raise replay.Refused(f"{named} is a directory; name the Python in it, as --python {inside}")
     try:
         probe = subprocess.run(
             [args.python, "-c", _PYTHON_PROBE],

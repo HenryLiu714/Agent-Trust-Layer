@@ -273,6 +273,26 @@ def test_the_unattributed_pool_is_not_a_run_to_replay(tmp_path, monkeypatch, cap
     assert not (tmp_path / "store").exists()
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["replay", "r1", "--port", "0", "--bogus"],
+        ["replay", "r1", "--port", "0", "--bogus", "--", "true"],
+        ["runs", "list", "--bogus"],
+    ],
+)
+def test_a_word_no_argument_takes_is_refused_as_parse_args_refuses_it(argv, tmp_path, capsys):
+    """`main` lets a replay's words after its first `--` go unplaced, which an older argparse
+    (Python 3.12.3) leaves them once an option sits between RUN_ID and `--`. Any other unplaced
+    word is refused with argparse's own message and exit 2, on every Python (#177)."""
+    store = tmp_path / "store"
+    with pytest.raises(SystemExit) as exit_:
+        main([*argv[:2], "--store", str(store), *argv[2:]])
+    assert exit_.value.code == 2
+    assert "irimi: error: unrecognized arguments: --bogus" in capsys.readouterr().err
+    assert not store.exists()
+
+
 def test_engine_config_defaults_to_no_maps(tmp_path, monkeypatch):
     """An EngineConfig built without maps classifies by the verb rule alone. That is the default
     the engine's own tests rely on; the CLI always passes an index."""

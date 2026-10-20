@@ -1407,7 +1407,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     argv = sys.argv[1:] if argv is None else argv
-    args = parser.parse_args(argv)
+    args, unplaced = parser.parse_known_args(argv)
+    # An older argparse (Python 3.12.3, CI's ubuntu 3.12) fills `replay`'s RUN_ID and an empty
+    # `cmd` before it reaches `--`, and leaves `-- CMD` unplaced, where a newer one takes it as
+    # `cmd`. `_replay_command` reads the command from what was typed either way, so a replay's
+    # unplaced words are accepted when they are exactly what follows its first `--`; anything else
+    # is refused as `parse_args` refuses it (#177).
+    if unplaced and not (
+        args.command == "replay" and "--" in argv and unplaced == argv[argv.index("--") :]
+    ):
+        parser.error(f"unrecognized arguments: {' '.join(unplaced)}")
     # What was typed, for `irimi replay`, whose RUN_ID argparse cannot tell from a command's first
     # word once both follow `--` (`_replay_command`, #84).
     args.argv = argv

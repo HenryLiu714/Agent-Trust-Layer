@@ -10,8 +10,8 @@
 ## Set up
 
 ```
-git clone https://github.com/HenryLiu714/Agent-Trust-Layer.git
-cd Agent-Trust-Layer
+git clone https://github.com/HenryLiu714/Irimi.git
+cd Irimi
 scripts/setup.sh          # or: make setup
 ```
 
@@ -22,6 +22,20 @@ to generate the local CA under `~/.irimi/ca/`. Set `IRIMI_HOME` first if you wan
 ```
 uv run irimi --help
 ```
+
+## Releasing
+
+A `v<version>` tag publishes irimi to PyPI through `.github/workflows/release.yml`, with PyPI
+Trusted Publishing, so there is no token to keep (#169). Bump `version` in `pyproject.toml` and
+irimi's own entry in `uv.lock` in a PR; once it is merged, tag that commit on `main` and push the
+tag:
+
+```
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+The workflow refuses a tag that does not match `pyproject.toml`. A version, once on PyPI, can never
+be uploaded again, even after it is deleted.
 
 ## Day to day
 

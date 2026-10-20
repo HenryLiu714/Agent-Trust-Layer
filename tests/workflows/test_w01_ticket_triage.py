@@ -10,7 +10,13 @@ import shutil
 
 import pytest
 
-from examples.workflows.harness.run import check_invariants, compare, replay, sdk_replay
+from examples.workflows.harness.run import (
+    check_invariants,
+    compare,
+    replay,
+    sdk_replay,
+    workflows,
+)
 from examples.workflows.w01_ticket_triage.agent import (
     DB_LOST_ENV,
     DB_NAME,
@@ -631,6 +637,186 @@ def test_each_further_scenario_replayed_unchanged_does_not_diverge(replayed, sce
     ]
 
 
+# Where a replay of a W1 run with another prompt first misses its recording: the first model call,
+# since the system prompt is in every call (#85).
+FIRST_CALL = "#1: live      llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]"
+
+
+# What each of those replays says of its calls: how many the recording answered, and how many it
+# missed, every model call among them.
+EDITED_COUNTS = {
+    "half_refund": "2 from the recording · 5 missed",
+    "too_large": "2 from the recording · 5 missed",
+    "double_refund": "3 from the recording · 6 missed",
+    "retried_refund": "3 from the recording · 5 missed",
+    "runaway_loop": "1 from the recording · 11 missed",
+}
+
+
+def _ending(result):
+    """How the trigger's run ended, as the agent logged it: its outcome and its error's type."""
+    return [(e["outcome"], e.get("error")) for e in result.events("run.end")]
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("scenario", COMPARED)
+def test_the_full_refund_replayed_with_each_prompt_shows_what_compare_shows_of_its_run(
+    run_workflow, replayed, scenario, mode
+):
+    """#85's exit on the corpus for every prompt `irimi compare` compares the full refund's with
+    (`COMPARED`, #79), and for a run recorded under serve, as a deployed agent records it, as well
+    as under `irimi shadow`: `full_refund` replayed with each of those prompts diverges at the first
+    model call, and shows, row for row, what `irimi compare` showed of `full_refund` against that
+    prompt's own recorded run. A refund changed (`half_refund`), refused by L3 (`too_large`), added
+    and refused (`double_refund`), sent twice under one key and so one write, exit 0
+    (`retried_refund`), or never made, the loop cut off (`runaway_loop`). Nothing reaches the fake
+    Stripe but the reads that missed, the reply runs its stand-in, and the trigger ends as that
+    prompt's recording did."""
+    prompt = workflows()[W].scenarios[scenario].env["PROMPT"]
+    recorded, replay = replayed(W, "full_refund", {"PROMPT": prompt}, mode=mode)
+    own = run_workflow(W, scenario, mode)
+    assert check_invariants(replay) == []
+    source = recorded.one("run.start")["run"]
+    code, rows = COMPARED[scenario]
+    ended = _ending(own)
+    assert replay.replay_result() == [
+        f"irimi replay · {source} → {replay.process_run_id()} · - → -",
+        f"  agent exited {0 if ended == [('ok', None)] else 1}",
+        f"  diverged at {FIRST_CALL}",
+        f"  {EDITED_COUNTS[scenario]}",
+        "",
+        *rows,
+    ]
+    assert replay.exit_code == code
+    assert _ending(replay) == ended
+    assert [(r.method, r.path) for r in replay.internet.writes()] == []
+    assert {r.method for r in replay.internet.requests("api.stripe.com")} <= {"GET"}
+    # The customer is read from the recording, there being no database, and the reply stood in;
+    # the runaway prompt's model only reads the charge, and calls neither tool.
+    called = [(LOOKUP_TOOL, "recording"), (REPLY_TOOL, "shadow")]
+    assert replay.tools() == ([] if scenario == "runaway_loop" else called)
+    assert not (replay.state / DB_NAME).exists()
+
+
+# Each scenario replayed with `full_refund`'s prompt, as (exit, calls answered and missed, rows):
+# `COMPARED` the other way round, the scenario's run now A, but for what a replay can know of a
+# write its recording never made.
+RESTORED = {
+    "half_refund": (
+        1,
+        "2 from the recording · 5 missed",
+        [
+            "  ~ A ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)",
+            f"    B {FULL}",
+            f"  = {REPLY}",
+            "",
+            "  1 same · 1 changed · 0 only in A · 0 only in B",
+        ],
+    ),
+    "too_large": (
+        1,
+        "2 from the recording · 5 missed",
+        [
+            "  ~ A ✗ refund $98.00 on ch_TICKET1  would fail: amount_too_large",
+            f"    B {FULL}",
+            f"  = {REPLY}",
+            "",
+            "  1 same · 1 changed · 0 only in A · 0 only in B",
+        ],
+    ),
+    "double_refund": (
+        1,
+        "3 from the recording · 4 missed",
+        [
+            f"  = {FULL}",
+            "  - ✗ refund $49.00 on ch_TICKET1  would fail: charge_already_refunded",
+            f"  = {REPLY}",
+            "",
+            "  2 same · 0 changed · 1 only in A · 0 only in B",
+        ],
+    ),
+    "retried_refund": (
+        0,
+        "3 from the recording · 4 missed",
+        [f"  = {FULL}", f"  = {REPLY}", "", "  2 same · 0 changed · 0 only in A · 0 only in B"],
+    ),
+    # Both writes are new. The refund misses, and the recording holds no L3 read of the charge to
+    # check it against (only the agent's own reads of it), nor does a replay read live state for
+    # one: `not_evaluable`, L2, and its amount printed as sent, no checked read having named a
+    # currency (#60, #82), where `irimi compare` of two recorded runs prints `$49.00`.
+    "runaway_loop": (
+        1,
+        "1 from the recording · 6 missed",
+        [
+            "  + ○ refund 4900 on ch_TICKET1  unvalidated (L2)",
+            f"  + {REPLY}",
+            "",
+            "  0 same · 0 changed · 0 only in A · 2 only in B",
+        ],
+    ),
+}
+
+
+@pytest.mark.parametrize("scenario", RESTORED)
+def test_each_scenario_replayed_with_the_full_refund_s_prompt_shows_the_writes_it_changes(
+    replayed, scenario
+):
+    """The other direction of the prompt edit (#85): each run `COMPARED` compares with the full
+    refund's, replayed with `full_refund`'s prompt, by the agent's command, so its `main()` seeds
+    the helpdesk database a lookup the recording never made (`runaway_loop`'s) reads for real. The
+    replay diverges at the first model call, ends `ok` as the full refund does, and shows the writes
+    the edit changed: the refund made whole again, a refused second refund gone, the retry still one
+    write, and a run that wrote nothing now refunding and replying. Nothing reaches the fake Stripe
+    but the reads that missed, and `replies` stays empty."""
+    recorded, replay = replayed(W, scenario, {"PROMPT": "full"}, command=True)
+    assert check_invariants(replay) == []
+    source = recorded.one("run.start")["run"]
+    code, counts, rows = RESTORED[scenario]
+    assert replay.replay_result() == [
+        f"irimi replay · {source} → {replay.process_run_id()} · - → -",
+        "  agent exited 0",
+        f"  diverged at {FIRST_CALL}",
+        f"  {counts}",
+        "",
+        *rows,
+    ]
+    assert (replay.exit_code, replay.agent_exit_code()) == (code, 0)
+    assert _ending(replay) == [("ok", None)]
+    assert replay.returned() == FULL_REFUND_RETURNED
+    assert replay.internet.writes() == []
+    assert replies(replay) == []
+    looked_up = "real" if scenario == "runaway_loop" else "recording"
+    assert replay.tools() == [(LOOKUP_TOOL, looked_up), (REPLY_TOOL, "shadow")]
+
+
+def test_a_full_refund_recorded_under_serve_is_replayed_as_one_recorded_under_shadow(replayed):
+    """A deployed agent's run, recorded under `irimi shadow --serve`, replayed unchanged by its
+    trigger alone (#85): `irimi replay` reads only the store, so it says what the replay of the
+    shadow recording says, `no divergence`, with nothing sent anywhere and the customer read from
+    the recording, there being no database. `irimi runs list` lists serve's run as `sdk`, with no
+    process run, which serve has none of, and the replay as `replay of` it (#154)."""
+    recorded, replay = replayed(W, "full_refund", mode="serve")
+    _, by_shadow = replayed(W, "full_refund")
+    assert check_invariants(replay) == []
+    assert replay.internet.requests() == []
+    source = recorded.one("run.start")["run"]
+    assert replay.replay_result()[0] == (
+        f"irimi replay · {source} → {replay.process_run_id()} · - → -"
+    )
+    assert replay.replay_result()[1:] == by_shadow.replay_result()[1:]
+    assert replay.replay_result()[2] == (
+        "  no divergence: every call was answered from the recording"
+    )
+    assert (replay.exit_code, replay.agent_exit_code()) == (0, 0)
+    assert replay.returned() == recorded.returned() == FULL_REFUND_RETURNED
+    assert replay.tools() == [(LOOKUP_TOOL, "recording"), (REPLY_TOOL, "shadow")]
+    assert not (replay.state / DB_NAME).exists()
+    assert replay.listed_attributions() == {
+        source: "sdk",
+        replay.process_run_id(): f"replay of {source}",
+    }
+
+
 def test_sdk_replay_from_a_test_returns_the_result_irimi_replay_writes(
     run_workflow, replayed, tmp_path
 ):
@@ -748,8 +934,8 @@ def test_a_replay_is_replayed_by_the_trigger_it_called(replayed, tmp_path, promp
     """A replay's run keeps the trigger it replayed, entrypoint and args (#84), so `irimi replay`
     calls it again: a replay of the unchanged replay, and a replay with the half prompt replayed
     with the same prompt, each answered whole from the first replay's run, whose live model calls
-    it recorded as their answers. Nothing reaches the fake internet, and the refund is the first
-    replay's."""
+    it recorded as their answers. Nothing reaches the fake internet, the refund is the first
+    replay's, and `irimi runs list` lists the second as a replay of the first (#154)."""
     env = {} if prompt == "full" else {"PROMPT": prompt}
     _, first = replayed(W, "full_refund", env)
     before = [r.run_id for r in first.stored().list_runs()]
@@ -779,6 +965,18 @@ def test_a_replay_is_replayed_by_the_trigger_it_called(replayed, tmp_path, promp
     assert second.internet.requests() == []
     assert second.returned() == first.returned()
     assert check_invariants(second) == []
+    # `irimi runs list` names each replay after the run it replayed, a replay of a replay after
+    # the first replay, and lists the recording's runs as they were (#154).
+    source = first.replay.source_run_id
+    processes = [r for r in second.stored().list_runs() if r.attribution == "process"]
+    recording = [r.run_id for r in processes if r.replay_of is None]
+    assert second.listed_attributions() == {
+        **dict.fromkeys(recording, "process"),
+        source: "sdk",
+        first.process_run_id(): f"replay of {source}",
+        second.process_run_id(): f"replay of {first.process_run_id()}",
+    }
+    assert len(recording) == 1
 
 
 def test_a_run_recorded_into_a_shared_store_is_replayed_into_a_copy_of_it(

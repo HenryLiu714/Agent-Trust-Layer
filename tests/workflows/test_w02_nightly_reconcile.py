@@ -5,8 +5,6 @@ the run's state directory, seeded by the agent before the run; only `mark_reconc
 tool) changes it.
 """
 
-import re
-
 import pytest
 
 from examples.workflows.harness.run import check_invariants, compare, replay, replayed_run_id
@@ -18,9 +16,6 @@ W = "w02_nightly_reconcile"
 MODES = ("shadow", "serve")
 AGENT = "examples.workflows.w02_nightly_reconcile.agent"
 CUSTOMER_UPDATE = "fake-L1   write     POST api.stripe.com/v1/customers/"
-# An `irimi runs list` line (`report.run_list_line`): run id, started (a date and a time, or `-`),
-# duration and status, then the attribution column, which never holds two spaces, and the trigger.
-RUN_LIST_LINE = re.compile(r"(\S+)  (?:\S+ \S+|-)  \S+  \S+  (.+?)  \S")
 
 
 def reconciled_rows(result):
@@ -242,11 +237,7 @@ def test_a_replay_of_a_replay_answers_the_page_from_the_first_replay(replayed, t
     # run the store holds, by its attribution column: the recording's two as they were.
     source = replayed_run_id(recorded)
     middle, last = first.process_run_id(), second.process_run_id()
-    code, listed, _ = second.runs("list", "--store", str(second.store_root()))
-    assert code == 0
-    columns = [RUN_LIST_LINE.match(line) for line in listed]
-    assert None not in columns, listed
-    assert {m[1]: m[2] for m in columns if m is not None} == {
+    assert second.listed_attributions() == {
         recorded.process_run_id(): "process",
         source: "sdk",
         middle: f"replay of {source}",

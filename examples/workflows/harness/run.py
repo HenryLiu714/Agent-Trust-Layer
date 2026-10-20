@@ -92,6 +92,10 @@ MODES = ("bare", "shadow", "serve")
 RUN_BLOCK = re.compile(r"--- run (\S+) ---")
 # The run `irimi shadow`'s banner names, its process run (#70).
 BANNER_RUN = re.compile(r"irimi (?:shadow|replay) · run (\S+) · ")
+# An `irimi runs list` line (`report.run_list_line`): run id, started (a date and a time, or `-`),
+# duration and status, then the attribution column, which never holds two spaces, and the trigger
+# (#154).
+RUN_LIST_LINE = re.compile(r"(\S+)  (?:\S+ \S+|-)  \S+  \S+  (.+?)  \S")
 # How long a serve-mode run waits for irimi's banner, and then for irimi to stop.
 SERVE_TIMEOUT_S = 60
 # What the name of a thread the fake internet answers a request on ends in: the one kind of
@@ -372,6 +376,17 @@ class Result:
             code = irimi_main(list(argv))
         return code, out.getvalue().splitlines(), err.getvalue().splitlines()
 
+    def listed_attributions(self) -> dict[str, str]:
+        """`irimi runs list` over the store this run recorded into, named with `--store` as its
+        user would name it: each run it lists, by id, to its attribution column, which says a
+        replay's run is a `replay of` the run it replayed (#154). Raises unless it exits 0, quiet,
+        with every line a run's."""
+        code, listed, err = self.runs("list", "--store", str(self.store_root()))
+        assert (code, err) == (0, []), (code, err)
+        columns = [RUN_LIST_LINE.match(line) for line in listed]
+        assert None not in columns, listed
+        return {m[1]: m[2] for m in columns if m is not None}
+
     def compare_runs(self, run_a: str, run_b: str) -> tuple[int, list[str], list[str]]:
         """`irimi compare <run_a> <run_b>` over the store this run recorded into, named with
         `--store` as its user would name it (#79): any two runs it holds, `unattributed` too."""
@@ -458,12 +473,12 @@ def replay(
     command: bool = False,
 ) -> Result:
     """`run_id`, a run `recorded` stored, replayed by `irimi replay <run_id>` (#82, #84):
-    `recorded`'s scenario, recorded under `irimi shadow` or itself a replay, in a copy of its
-    `IRIMI_HOME` and its store under `workdir`, so `recorded` reads its store as it was and the
-    replay's holds both, with `env` over the scenario's own environment - `PROMPT=half` is the
-    prompt edit - and `options` given to `irimi replay` too (`--call`, `--args`). What runs is what
-    `irimi replay` runs for the run, or, with `command`, the scenario's agent command. The result
-    file `irimi replay` writes is the result's `replay`.
+    `recorded`'s scenario, recorded under `irimi shadow` or serve (#85) or itself a replay, in a
+    copy of its `IRIMI_HOME` and its store under `workdir`, so `recorded` reads its store as it was
+    and the replay's holds both, with `env` over the scenario's own environment - `PROMPT=half` is
+    the prompt edit - and `options` given to `irimi replay` too (`--call`, `--args`). What runs is
+    what `irimi replay` runs for the run, or, with `command`, the scenario's agent command. The
+    result file `irimi replay` writes is the result's `replay`.
 
     Everything else is the run's own: a fresh `World` from the scenario's `setup` and a fresh fake
     internet, so a request the recording does not answer shows up in `internet.requests()`, and its
@@ -494,9 +509,11 @@ class _Replay:
 def _replayed(
     recorded: Result, run_id: str, workdir: Path, env: dict[str, str] | None, how: _Replay
 ) -> Result:
-    if recorded.mode not in ("shadow", "replay"):
+    # A run recorded under serve is replayed as one recorded under `irimi shadow`: `irimi replay`
+    # reads only the store, and serve's runs are the ones a deployed agent records (#85).
+    if recorded.mode not in ("shadow", "serve", "replay"):
         raise ValueError(
-            f"replay takes a run recorded under shadow or replayed, not {recorded.mode}"
+            f"replay takes a run recorded under shadow or serve, or replayed, not {recorded.mode}"
         )
     # A replay records into the store it answers from, so it runs in a copy of `recorded`'s home,
     # and of the store it was given: never in `recorded`'s own, which a session-cached recording
@@ -524,13 +541,14 @@ def _replayed(
 
 
 def replayed_run_id(recorded: Result) -> str:
-    """The run a replay of `recorded` answers from (#82): the one run besides the process run that
-    `recorded`'s irimi put exchanges or tool calls in (#83) - the SDK's, or a `header` run whose
-    start never reached irimi (W10's control faults) - or the process run when there is none (W9,
-    W11). Read off the events it handed its store, so a store that holds other runs too, as a
-    replay's holds its recording's, still names `recorded`'s own. A recording with several (W3,
-    W8) has no one run to replay, and raises."""
-    process = recorded.process_run_id()
+    """The run a replay of `recorded` answers from (#82): the one run besides the engine's own (the
+    process run, or serve's `unattributed`, #85) that `recorded`'s irimi put exchanges or tool
+    calls in (#83) - the SDK's, or a `header` run whose start never reached irimi (W10's control
+    faults) - or, when there is none, the engine's own: the process run (W9, W11). Read off the
+    events it handed its store, so a store that holds other runs too, as a replay's holds its
+    recording's, still names `recorded`'s own. A recording with several (W3, W8) has no one run to
+    replay, and raises."""
+    process = recorded.engine_run_id()
     events = [*recorded.reported, *recorded.handed_events]
     runs = sorted({event.run_id for event in events} - {process})
     if len(runs) > 1:

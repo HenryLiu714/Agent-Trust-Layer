@@ -926,7 +926,9 @@ def test_a_write_whose_body_decodes_past_the_cap_is_refused_and_never_leaves(run
     """A refund whose form decodes to 128 MiB. irimi cannot answer it from the start of its body -
     a form is one line, so the start it keeps is nothing at all - and fails closed, as a decision
     that raised does: its own 502, stamped, recorded `unknown` and flagged. The service never sees
-    it, and nothing it would have fired is claimed for it."""
+    it, and nothing it would have fired is claimed for it. The summary prints it as irimi refused
+    it, `✗`, the request as sent and the flags that say why, not a `human:` sentence filled from a
+    body irimi never read, and its host line counts it so, not as `unclassified` (#112)."""
     shadow = run_workflow(W, "bombs", mode)
     posted = [(r.method, r.path) for r in shadow.internet.requests() if r.method == "POST"]
     assert posted == [("POST", "/v1/messages")]
@@ -936,12 +938,12 @@ def test_a_write_whose_body_decodes_past_the_cap_is_refused_and_never_leaves(run
     assert ex.request.body == b""
     assert ex.response is not None and ex.response.status == 502
     assert json.loads(ex.response.body)["error"]["type"] == "irimi_decision_failed"
-    # LOOKS WRONG: the summary lists the refused refund among the writes that "did not happen",
-    # as it lists any write whose decision failed, with no word that irimi refused it or why: the
-    # agent was told 502, not that its refund was faked.
     summary = summary_of(shadow)
-    assert [line for line in summary if line.startswith("  ○")] == [
-        "  ○ refund ? on ?  unclassified (L0)",
+    assert [line for line in summary if line.startswith("  api.stripe.com ")] == [
+        "  api.stripe.com     1 read  1 engine read  2 writes intercepted (1 refused by irimi)"
+    ]
+    assert [line for line in summary if line.startswith(("  ○", "  ✗"))] == [
+        f"  {CUT_REFUND}",
         f"  ○ refund $9.00 on {CHARGE}  unvalidated (L3 preconditions passed)",
     ]
     assert summary[-1] == (
@@ -1022,7 +1024,9 @@ def test_a_run_start_that_decodes_past_the_cap_is_refused_413_unread(run_workflo
 
 NOT_A_VERDICT = "a comparison, not a verdict: nothing was replayed"
 PLAIN_REFUND = "○ refund $9.00 on ch_GAUNTLET  unvalidated (L3 preconditions passed)"
-CUT_REFUND = "○ refund ? on ?  unclassified (L0)"
+# A write whose body decoded past the cap, as irimi refused it (#94), never a sentence filled from a
+# body irimi did not read (#112).
+CUT_REFUND = "✗ POST api.stripe.com/v1/refunds  refused by irimi (decision-failed, body-truncated)"
 
 
 def recorded_pair(shared_store_run, a: str, b: str, mode: str, store: str):
@@ -1055,7 +1059,8 @@ def test_irimi_compare_will_not_compare_two_writes_whose_bodies_were_cut(shared_
         "  (the triggers' args differ)",
         "",
         f"  ? A {CUT_REFUND}",
-        "    B ○ update customer cus_GAUNTLET  unclassified (L0)",
+        "    B ✗ POST api.stripe.com/v1/customers/cus_GAUNTLET  refused by irimi "
+        "(decision-failed, body-truncated)",
         f"  = {PLAIN_REFUND}",
         "",
         "  1 same · 0 changed · 0 only in A · 0 only in B · 1 not compared (a body was cut when "
@@ -1069,10 +1074,10 @@ def test_irimi_compare_will_not_call_two_cut_refunds_of_different_amounts_the_sa
     shared_store_run, mode
 ):
     """`bombs` refunds 800 and `cut_refund` 700, each in a body irimi could not keep (#94), so
-    neither stored body says how much, and both print `refund ? on ?`. A text rendered from no
-    body is the same for every refund, and compared by it the pair was `=`, exit 0, as if the runs
-    made the same writes: a pair either side of which was cut is `?` whatever its texts, and the
-    run exits 1 (#79)."""
+    neither stored body says how much, and both print the one line irimi refuses a cut refund with
+    (#112). That line is the same for every refund, and compared by it the pair was `=`, exit 0, as
+    if the runs made the same writes: a pair either side of which was cut is `?` whatever its
+    texts, and the run exits 1 (#79)."""
     one, a, other, b = recorded_pair(shared_store_run, "bombs", "cut_refund", mode, "cut-equal")
     code, out, err = other.compare_runs(a, b)
     assert (code, err) == (1, [])

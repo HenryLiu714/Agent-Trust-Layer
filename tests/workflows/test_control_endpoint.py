@@ -106,8 +106,18 @@ def test_the_sdk_warns_only_where_its_control_endpoint_is_taken_away(
     warned = [(e["logger"], e["level"], e["message"]) for e in bare.events("log")]
     real_writes = [tool for tool, ran in bare.tools("write") if ran == "real"]
     if real_writes:
-        message = f"irimi: write tool {real_writes[0]} ran for real: {REAL_WRITE_WARNING}"
-        assert warned == [("irimi.sdk", "WARNING", message)]
+        # The one warning names whichever write tool ran first, which concurrent runs of two
+        # tools (W3 `ledger_two_tools_8`, #120) race for: any one of them, once.
+        assert warned in [
+            [
+                (
+                    "irimi.sdk",
+                    "WARNING",
+                    f"irimi: write tool {tool} ran for real: {REAL_WRITE_WARNING}",
+                )
+            ]
+            for tool in dict.fromkeys(real_writes)
+        ]
     else:
         assert warned == []
     shadow = run_workflow(name, scenario, mode)

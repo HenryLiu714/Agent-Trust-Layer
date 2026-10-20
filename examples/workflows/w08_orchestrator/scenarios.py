@@ -143,6 +143,13 @@ WORKFLOW = Workflow(
             doc="with_map with the reservation delegated to an answer target nothing listens on: "
             "irimi answers 502 and the write goes unanswered (#16, #79)",
         ),
+        "target_down_tools": Scenario(
+            ("--record",),
+            setup=_world,
+            extra_maps={"subagent.yaml": TARGET_DOWN_MAP},
+            doc="target_down with the decision recorded through its write tool's stand-in: the "
+            "closing lines say the tool write did not happen either (#121)",
+        ),
         "nested_write": Scenario(
             ("--runs", "2", "--nested-reserve"),
             setup=_world,

@@ -187,6 +187,13 @@ And a refund the real service would have refused, from `w01_ticket_triage double
 - Each write gets one line, written from its route's `human:` template with this request's fields.
   The bracket says what irimi knew: `L3 preconditions passed`, `L2` when the check could not be
   made, `L1` or `L0` when the route has no check, and `unclassified` for a route no map names.
+- A write irimi could not decide about got irimi's own 502: it was refused, not faked. Its line
+  takes `✗` and the flags that say why, as
+  `✗ refund $49.00 on ch_N000  refused by irimi (decision-failed)` when the decision raised. A
+  body that decodes past what irimi reads is never read, so no `human:` sentence is filled in
+  from it, and the line spells out the request:
+  `✗ POST api.stripe.com/v1/refunds  refused by irimi (decision-failed, body-truncated)`. Its
+  host line counts it the same way, `2 writes intercepted (1 refused by irimi)`.
 - An `engine read` is one irimi made itself for an L3 check. It is counted apart, so "reads are
   real" means the reads your agent made.
 - A `↳` line is one of the agent's own later reads of that service. `saw it  overlay` is a read
@@ -199,10 +206,14 @@ And a refund the real service would have refused, from `w01_ticket_triage double
   for a 4900-yen refund.
 - `Would have fired:` lists webhooks for accepted writes only. A refused write, an idempotent retry
   and a delegated write list none.
-- A write tool the SDK ran as its stand-in gets a line after the HTTP writes:
-  `○ tool db.mark_refunded  shadow stand-in ran`, or `raised <type>`, and it did not happen
-  either: a run whose only writes are tool writes still closes with `These writes did not happen.`
-  A read tool gets no line, and neither is counted as an exchange
+- A write tool the SDK ran as its stand-in gets a line after the HTTP writes, in the order the
+  calls ended: `○ tool db.mark_refunded  shadow stand-in ran`, or `raised <type>`, and it did not
+  happen either: a run whose only writes are tool writes still closes with
+  `These writes did not happen.`
+  A run with a write delegated or unanswered closes by naming the services its writes did not
+  reach, and then the tool writes:
+  `These writes did not reach stripe. The tool writes did not happen.` A read tool gets no line,
+  and neither is counted as an exchange
   ([Tools the proxy cannot see](#tools-the-proxy-cannot-see)).
 
 ### The child process
@@ -717,7 +728,7 @@ irimi compare · 42e7ad03a867410b vs 5cf7f4695f22ce95 · a comparison, not a ver
 - **A cut body is `?`.** A pair either of whose writes was stored with a body cut short
   (`body-truncated`, the request's or the response's) is `?`, not compared, whatever its lines
   say, and never `=`: a body cut, or dropped for its size, renders one line for different
-  requests, so two cut refunds of different amounts both print `refund ? on ?`. That holds for a
+  requests, so two cut refunds of different amounts can print the same line. That holds for a
   run compared with itself too. The totals count `?` rows as not compared.
 - **Exit code.** As `diff(1)`'s: 0 when every write is `=`, 1 when any is not, `?` included, and
   2 when a run is not in the store or cannot be read. A run compared with itself exits 0 unless

@@ -27,7 +27,7 @@ from irimi import control, paths, report, trace
 from irimi.bodies import MAX_BODY_BYTES
 from irimi.exchange import BODY_TRUNCATED_FLAG, Exchange
 from irimi.store import MAX_STORED_BODY, RUNS_DIR, SERVE_LOCK_FILE
-from irimi.trace import MAX_ERROR_MESSAGE, ErrorInfo, RunRecord, ToolCall, Trigger
+from irimi.trace import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE, ErrorInfo, RunRecord, ToolCall, Trigger
 
 W = "w09_scope_gauntlet"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi (#77).
@@ -493,14 +493,17 @@ def test_two_runs_posted_at_once_do_not_mix(run_workflow, mode):
 @pytest.mark.parametrize("mode", MODES)
 def test_a_run_that_ends_in_error_keeps_its_error_cut_to_what_a_trace_keeps(run_workflow, mode):
     """A run posts a tool call that raised and an end in error, each message past the 1000
-    characters `ErrorInfo` promises (#68): both are stored, cut to that length, not refused."""
+    characters `ErrorInfo` promises (#68): both are stored, cut to that length, not refused. The
+    end's error type is past the 300 characters a posted one is cut to, and is cut so (#99)."""
     shadow = run_workflow(W, "control_runs", mode)
     stored = shadow.stored().load_run("ctl-error")
     tool = stored_tool_call(shadow, "ctl-error", "error_tool")
+    run_type = posted(shadow, "error_end")["error"]["type"]
     run_message = posted(shadow, "error_end")["error"]["message"]
     tool_message = tool.error.message
     assert (len(run_message), len(tool_message)) == (LONG_MESSAGE_CHARS + 4, LONG_MESSAGE_CHARS + 5)
-    cut = ErrorInfo("builtins.RuntimeError", run_message[:MAX_ERROR_MESSAGE])
+    cut = ErrorInfo(run_type[:MAX_ERROR_TYPE], run_message[:MAX_ERROR_MESSAGE])
+    assert (len(run_type), len(cut.type)) == (616, 300)
     assert stored.record == dataclasses.replace(
         sdk_record(shadow, "ctl-error", "error_start", "error_end"), error=cut
     )
@@ -517,7 +520,7 @@ def test_a_run_that_ends_in_error_keeps_its_error_cut_to_what_a_trace_keeps(run_
         'args: {"run":"ctl-error"}',
         f"agent version: {AGENT_VERSION}",
         "outcome: error",
-        f"error: builtins.RuntimeError: run {'y' * (MAX_ERROR_MESSAGE - 4)}",
+        f"error: {run_type[:MAX_ERROR_TYPE]}: run {'y' * (MAX_ERROR_MESSAGE - 4)}",
         "",
         "real      read      tool charge_card -> raised builtins.ValueError",
         "",

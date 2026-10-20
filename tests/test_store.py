@@ -1031,6 +1031,38 @@ def test_a_tool_calls_args_and_result_count_against_the_byte_budget(root, key, m
     assert run.record.dropped_events == 1
 
 
+def test_a_runs_start_counts_against_the_byte_budget(root, key, monkeypatch):
+    """The control endpoint takes a start of up to 2 MiB, its trigger's args, and 10,000 of them
+    would be 20 GiB waiting (#99): its record as JSON counts as body bytes do. A start dropped so
+    leaves its run to be made from its first event, a `header` run that says it dropped one."""
+    started = _record("r1", args={"x": "y" * 400})
+    size = len(json.dumps(trace.run_to_json(started)))
+    monkeypatch.setattr(store, "MAX_QUEUED_BYTES", size + size // 2)
+    taken, release = threading.Event(), threading.Event()
+    real = DirectoryStore._handle
+
+    def paused(self, item):
+        taken.set()
+        release.wait(10)
+        real(self, item)
+
+    monkeypatch.setattr(DirectoryStore, "_handle", paused)
+    s = DirectoryStore(root, key)
+    s.record(_exchange("r0", "/held"))  # the writer holds it, so the queue is empty again
+    assert taken.wait(5)
+    s.start_run(started)
+    s.start_run(_record("r2", args={"x": "z" * 400}))  # size + size > the budget
+    s.record(_exchange("r2", "/no-body"))
+    assert s.stats().dropped == 1
+    release.set()
+    s.close()
+    reader = StoreReader(root)
+    assert reader.load_run("r1").record == started
+    late = reader.load_run("r2")
+    assert late.record == dataclasses.replace(store.header_record("r2", 1.0), dropped_events=1)
+    assert _paths(late) == ["/no-body"]
+
+
 def test_the_writer_fsyncs_in_batches_before_close(root, key, monkeypatch, store_os):
     synced: set[int] = set()  # inodes
     monkeypatch.setattr(store, "SYNC_EVERY", 3)

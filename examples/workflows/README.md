@@ -240,7 +240,8 @@ hand:
 - `control_runs`: the SDK's job by hand, with posts the test controls exactly. Runs are started,
   given two tool calls with a Stripe read labelled `Irimi-Run: <id>` between them, and ended: one
   posted direct (`127.0.0.1`), one through the proxy to itself (`127.1`), two at once from threads
-  kept in lockstep, and one ended in error with a message past the 1000 characters a trace keeps.
+  kept in lockstep, and one ended in error with a message past the 1000 characters a trace keeps
+  and an error type past the 300 it keeps of a posted one (#99).
   Then every refusal (405, 404, 400 for `../x`, `unattributed`, `NaN`, a missing field and a tool
   call naming its run, 413), and the health check before and after. The tests pin what is stored:
   `attribution: sdk`, the posted trigger, the tool calls in order with the read between them, the

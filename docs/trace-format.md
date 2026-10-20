@@ -205,7 +205,8 @@ A **trigger** (`trace.Trigger`):
 | `replayable` | boolean | Whether `args` captured everything needed to call `entrypoint` again. |
 
 An **error** (`trace.ErrorInfo`) is `{"type": string, "message": string}`. `type` is the
-exception's `module.qualname`, and `message` is at most 1000 characters.
+exception's `module.qualname`, and `message` is at most 1000 characters. A `type` posted to the
+control endpoint is cut to 300 characters (`trace.MAX_ERROR_TYPE`, #99).
 
 ### Captured arguments
 

@@ -172,6 +172,9 @@ AGENT_VERSION = "w09-by-hand"
 SDK_VERSION = "by-hand"
 # Past `irimi.trace.MAX_ERROR_MESSAGE` (1000), the most of an error message a trace keeps.
 LONG_MESSAGE_CHARS = 1500
+# Past `irimi.trace.MAX_ERROR_TYPE` (300), the most of a posted error type a trace keeps (#99): a
+# dotted path of 616 characters, which no class's `module.qualname` comes near.
+LONG_ERROR_TYPE = "pkg" + ".sub" * 150 + ".RuntimeError"
 # Past `irimi.control.MAX_CONTROL_BODY` (2 MiB), the most a control request may post.
 OVERSIZED_BODY_BYTES = 2 * 1024 * 1024 + 1
 # How deep `refuse_deep` nests a tool call's name: deeper than `repr` went on some Pythons, and
@@ -188,8 +191,8 @@ def control_runs() -> None:
     One run posts direct to `IRIMI_CONTROL` (`127.0.0.1`, which NO_PROXY sends straight to the
     listener) and one through the proxy to itself (`127.1`). Two more run at once, on two threads
     kept in lockstep, so their posts and reads interleave on the wire and must not mix. One ends
-    in error, its message past what a trace keeps. Then every refusal the endpoint documents, and
-    the health check before and after."""
+    in error, its message past what a trace keeps, and its error type too (#99). Then every
+    refusal the endpoint documents, and the health check before and after."""
     control = _control_base()
     _health(control, "health_before")
     _run_by_hand(control, "ctl-direct", f"/v1/charges/{CHARGE}", "direct")
@@ -224,7 +227,7 @@ def control_runs() -> None:
         "ctl-error",
         "error_end",
         outcome="error",
-        error={"type": "builtins.RuntimeError", "message": "run " + "y" * LONG_MESSAGE_CHARS},
+        error={"type": LONG_ERROR_TYPE, "message": "run " + "y" * LONG_MESSAGE_CHARS},
     )
     _refusals(control)
     _health(control, "health_after")

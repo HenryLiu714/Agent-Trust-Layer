@@ -43,7 +43,20 @@ and prints what the agent did differently ([Replaying a run](#replaying-a-run)).
 
 Requirements: macOS or Linux, and [`uv`](https://docs.astral.sh/uv/) (the setup script installs it
 if it is missing). `uv` fetches Python 3.14 for you; installed as a tool, irimi runs on 3.12 or
-newer.
+newer, though not on a free-threaded build (`python3.14t`), for which mitmproxy has no wheels.
+
+To use irimi on your own agent, install it from PyPI:
+
+```
+uv tool install irimi         # or: pipx install irimi
+irimi init
+irimi shadow -- python agent.py
+```
+
+An irimi installed apart from your agent cannot import it, so replay such an agent with
+`irimi replay RUN_ID -- python agent.py`, not `irimi replay RUN_ID` alone (#162).
+
+To run the examples below and the sample workflows, clone the repo:
 
 ```
 git clone https://github.com/HenryLiu714/Agent-Trust-Layer.git
@@ -973,3 +986,7 @@ conventions. [`docs/architecture.md`](docs/architecture.md) has the module map, 
 moves through the engine, and the rules the tests enforce. Branch per issue, named
 `<issue-number>-<short-slug>`, and open a PR against `main` with `Closes #<n>`. CI runs on Ubuntu
 and macOS, on Python 3.14 and 3.12.
+
+## License
+
+Apache-2.0. See [`LICENSE`](LICENSE).

@@ -39,7 +39,10 @@ the first column of each field table below is exactly the keys its encoder write
   `started_at` that event's own, and every other optional field `null`. An event built with no
   clock (`started_at` `0.0`) leaves it `null` too. With no start, a header run sorted after every
   run that had one, and `irimi runs list` hid an agent's labelled runs behind its process runs
-  (#72).
+  (#72). A start that arrives later rewrites the header run's `run.json` whole, its events kept.
+- **A run that has ended is not started again.** A start for a run whose `run.json` has an
+  `outcome` is dropped and counted on the store, in the health check's `dropped`, and its
+  `run.json` is not rewritten: the run lost nothing, so its `dropped_events` is unchanged (#97).
 - `events.jsonl` is appended one whole line at a time, each in one `write` on an `O_APPEND`
   descriptor. Nothing is fsynced per line: the blobs and `events.jsonl` files a writer touched are
   fsynced once it has made 1000 writes (`store.SYNC_EVERY`) since the last sync, whenever its queue

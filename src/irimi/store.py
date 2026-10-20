@@ -495,6 +495,18 @@ class DirectoryStore:
 
     def _start(self, record: RunRecord) -> None:
         run = self._run_dir(record.run_id)
+        # A RUN THAT HAS ENDED IS NOT STARTED AGAIN (#97). A start re-posted after the run's end
+        # would rewrite its run.json whole, losing its end, its outcome and its first trigger, so
+        # it listed `incomplete` again. It is dropped, and counted on the store alone, in health's
+        # `dropped` (the endpoint answered 204 when it queued it): the run lost nothing, so its
+        # run.json is not rewritten, its `dropped_events` included. `_run` reopens a run forgotten
+        # at its end from disk, so its stored outcome is seen here, and it is forgotten again, so
+        # a serve holds only the runs still open. A `header` run has no outcome, so a start still
+        # rewrites it (#70).
+        if run.record is not None and run.record.outcome is not None:
+            self._drop(UNATTRIBUTED, "a start was posted for a run that has already ended")
+            self._forget(record.run_id, run)
+            return
         trigger = record.trigger
         if trigger is not None:
             # The name is the command's argv[0], which `args` repeats, so it is redacted as they

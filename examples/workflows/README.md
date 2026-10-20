@@ -248,13 +248,13 @@ hand:
   `IRIMI_CONTROL` and posts to the same URL shape at its proxy, the fake internet, which answers
   502, so it exits as it does under shadow.
 - `control_hazards`: posts the SDK must never make. A start re-posted after its run ended is
-  accepted and reopens the run (pinned `LOOKS WRONG`); a start or an end for the process run's own
+  answered 204 and dropped by the store, so the run keeps its end and its `dropped_events` 0;
+  the health check after it counts the drop (#97). A start or an end for the process run's own
   id (`IRIMI_RUN`) is refused 400, while a tool call posted to it is stored in it; and a tool call
   posted to `unattributed`, as the SDK posts one made in no run where there is no process run
   (`irimi serve`, #77), is taken and filed there, the one post that may name it (#76). Under serve
   mode, irimi's own run is `unattributed`, so the start and the end are refused as naming no run,
-  and the reopened run's block, printed at its first end, no longer matches what the store holds
-  (pinned `LOOKS WRONG`, #97).
+  and the ended run's block, printed at its end, is the one `irimi runs show` ends in.
 
 A new workflow package is found by its name, `wNN_<name>`, and is held to all five rules without
 any registry edit. A last test checks that the corpus gives rules 1 to 4 something to catch: a rule

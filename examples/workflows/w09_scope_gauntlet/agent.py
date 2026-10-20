@@ -236,7 +236,8 @@ def control_hazards() -> None:
     `IRIMI_RUN`, which irimi starts and ends itself, or under serve mode for `unattributed`, its
     own run (#77). Between those two, a tool call posted to that run, which may hold one. Last, a
     tool call posted to `unattributed`, as the SDK posts one made in no run by an agent with no
-    process run (`irimi serve`, #77): the one post that may name it (#76)."""
+    process run (`irimi serve`, #77): the one post that may name it (#76). Then the health check,
+    whose `dropped` is where irimi says it dropped the re-posted start (#97)."""
     control = _control_base()
     _start(control, "ctl-restarted", "restarted_start")
     stripe(
@@ -267,6 +268,7 @@ def control_hazards() -> None:
         ),
     ]:
         agentkit.obs("answer", label=label, body=resp.json())
+    _health(control, "health_after")
 
 
 def _control_base() -> str:

@@ -150,6 +150,46 @@ def test_the_first_event_of_a_run_with_no_start_creates_a_header_run(root, key):
     assert (record.attribution, record.trigger, record.outcome) == ("header", None, None)
 
 
+def test_a_start_for_a_header_run_rewrites_its_record(root, key):
+    """A run whose events arrived before its start is a `header` run until the start arrives,
+    which rewrites its record whole and keeps its events (#70)."""
+    s = DirectoryStore(root, key)
+    s.record(_exchange("r2"))
+    s.start_run(dataclasses.replace(_record("r2"), attribution="sdk"))
+    s.close()
+    run = StoreReader(root).load_run("r2")
+    assert run.record == dataclasses.replace(_record("r2"), attribution="sdk")
+    assert _paths(run) == ["/v1/things"]
+    assert s.stats().dropped == 0
+
+
+def test_a_start_for_a_run_that_has_ended_is_dropped_and_the_run_kept_whole(root, key):
+    """A start re-posted after its run's end rewrote run.json whole, so the run lost its end, its
+    outcome and its first trigger, and listed `incomplete` (#97). It is dropped instead, counted on
+    the store alone, and the run's files are not rewritten: it lost nothing, so its `dropped_events`
+    stays 0. So it is when the run ended in an earlier process, and the start reaches a store that
+    has never seen it."""
+    s = DirectoryStore(root, key)
+    s.start_run(dataclasses.replace(_record("r1"), attribution="sdk"))
+    s.record(_exchange("r1"))
+    s.end_run("r1", 20.0, "ok")
+    s.start_run(dataclasses.replace(_record("r1", started_at=30.0), attribution="sdk"))
+    s.close()
+    assert s.stats().dropped == 1
+    assert "r1" not in s._runs  # forgotten again, as at its end: a serve holds only open runs
+    run = StoreReader(root).load_run("r1")
+    assert run.record == dataclasses.replace(
+        _record("r1"), attribution="sdk", ended_at=20.0, outcome="ok"
+    )
+    assert _paths(run) == ["/v1/things"]
+    ended = {p.name: p.read_bytes() for p in (root / "runs" / "r1").iterdir()}
+    s = DirectoryStore(root, key)
+    s.start_run(dataclasses.replace(_record("r1", started_at=40.0), attribution="sdk"))
+    s.close()
+    assert s.stats().dropped == 1
+    assert {p.name: p.read_bytes() for p in (root / "runs" / "r1").iterdir()} == ended
+
+
 def test_every_run_a_replay_s_store_starts_is_that_replay_s(root, key):
     """The process run and an SDK run alike, whatever their records say (#82)."""
     s = DirectoryStore(root, key, replay_of="rec1")

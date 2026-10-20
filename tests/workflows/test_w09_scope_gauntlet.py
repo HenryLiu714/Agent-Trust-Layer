@@ -596,13 +596,12 @@ def test_a_run_ended_over_the_control_endpoint_no_longer_lists_as_incomplete(run
 
 
 @pytest.mark.parametrize("mode", MODES)
-def test_a_start_re_posted_after_its_end_reopens_the_run(run_workflow, mode):
-    """The SDK must never re-post a start. Made anyway, it is accepted with a 204."""
+def test_a_start_re_posted_after_its_end_is_dropped_and_the_run_kept_whole(run_workflow, mode):
+    """The SDK must never re-post a start. Made anyway, it is answered 204, since the endpoint
+    only queues it, and the store drops it (#97): the run keeps its first trigger, its end and its
+    read, and lists `ok`. The run lost nothing, so the drop is counted in health's `dropped`
+    alone, not in the run's `dropped_events`."""
     shadow = run_workflow(W, "control_hazards", mode)
-    # LOOKS WRONG (#97): the second start is accepted, and replaces the ended run's record
-    # whole, so its end, its outcome and its first trigger are gone and the run lists as
-    # `incomplete` again, though its read is kept. A start for a run that has already ended could
-    # be refused instead, as a start for the process run is.
     assert shadow.by_label() == {
         "restarted_start": (204, "control"),
         "restarted_read": (200, None),
@@ -612,12 +611,28 @@ def test_a_start_re_posted_after_its_end_reopens_the_run(run_workflow, mode):
         "process_tool": (204, "control"),
         "process_end": (400, "control"),
         "unattributed_tool": (204, "control"),
+        "health_after": (200, "control"),
     }
     stored = shadow.stored().load_run("ctl-restarted")
-    assert stored.record == sdk_record(shadow, "ctl-restarted", "restarted_again", None)
+    assert stored.record == sdk_record(shadow, "ctl-restarted", "restarted_start", "restarted_end")
     assert [report.event_line(e) for e in stored.events] == [read_line(f"/v1/charges/{CHARGE}")]
     [line] = [f for f in listed(shadow) if f[0] == "ctl-restarted"]
-    assert line[3:] == ["incomplete", "sdk", "ctl-restarted again", "1 exchanges", "0 writes"]
+    assert line[3:] == ["ok", "sdk", "ctl-restarted", "1 exchanges", "0 writes"]
+    assert shown(shadow, "ctl-restarted")[:8] == [
+        "run: ctl-restarted",
+        "attribution: sdk",
+        "trigger: ctl-restarted",
+        f"entrypoint: {ENTRYPOINT}:ctl-restarted",
+        'args: {"run":"ctl-restarted"}',
+        f"agent version: {AGENT_VERSION}",
+        "outcome: ok",
+        "",
+    ]
+    # The start dropped, under shadow and serve alike. Once the queue is empty the writer has
+    # taken the last tool call, so it is done with the start before it; `written` is not pinned,
+    # since the last tool call's line may not be written yet.
+    [health] = (e["body"] for e in shadow.events("health"))
+    assert (health["store"]["queued"], health["store"]["dropped"]) == (0, 1)
 
 
 def test_the_process_runs_start_and_end_are_irimis_and_only_its_tool_calls_are_taken(
@@ -674,9 +689,9 @@ def test_under_serve_irimis_own_run_is_unattributed_and_only_its_tool_calls_are_
     400 by the run-id check, before the own-run check is reached (#73), and the two tool calls
     posted to it are taken and filed there, as the SDK files a tool call made in no run (#76).
 
-    The run started again after its end (#97) printed its block when its first end was taken: one
-    read, ended. LOOKS WRONG (#97): the store now holds the reopened run, `incomplete`, whose
-    record no longer says it ended, so the block and `irimi runs show` disagree."""
+    The run printed its block when its end was taken: one read, ended. The start re-posted after
+    it is dropped (#97), so the store still holds the run ended, and the block is the one
+    `irimi runs show` ends in, as `test_invariants.py` holds every serve's blocks to."""
     serve = run_workflow(W, "control_hazards", "serve")
     assert [e["id"] for e in serve.events("process_run")] == [trace.UNATTRIBUTED]
     refused = {"error": f"{trace.UNATTRIBUTED!r} cannot name a run"}
@@ -704,7 +719,10 @@ def test_under_serve_irimis_own_run_is_unattributed_and_only_its_tool_calls_are_
         "  1 exchange · 1 live · 0 delegated · 0 virtualized",
     ]
     [line] = [f for f in listed(serve) if f[0] == "ctl-restarted"]
-    assert line[3] == "incomplete"
+    assert line[3] == "ok"
+    assert shown(serve, "ctl-restarted")[-len(block) :] == [
+        ELAPSED.sub(" · <elapsed> · ", line) for line in block
+    ]
 
 
 def argv(result) -> list[str]:

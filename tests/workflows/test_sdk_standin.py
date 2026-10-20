@@ -32,7 +32,7 @@ import pytest
 
 from examples.workflows import agentkit
 from examples.workflows import sdk as sdk_module
-from examples.workflows.harness.internet import FakeInternet, Req, Resp
+from examples.workflows.harness.internet import FakeInternet, Req, Resp, resolving_only
 
 AGENTS = tuple(
     f"examples.workflows.{name}.agent"
@@ -978,4 +978,21 @@ def test_resolving_refuses_every_lookup_of_a_name_it_does_not_serve():
         assert socket.gethostbyname_ex("api.stripe.com")[2] == ["127.0.0.1"]
         assert {ai[4][0] for ai in socket.getaddrinfo("api.stripe.com", 443)} == {"127.0.0.1"}
         assert socket.gethostbyname("127.0.0.1") == "127.0.0.1"
+    assert (socket.getaddrinfo, socket.gethostbyname, socket.gethostbyname_ex) == originals
+
+
+def test_resolving_only_serves_the_names_it_is_given_whatever_their_case():
+    """`resolving_only`, the fake internet's resolver taken out of it for a test whose irimi
+    reaches loopback stubs by their real names (`tests/test_phase3_replay_exit.py`, #85): a name
+    given in any case resolves to loopback in any case and with a trailing dot, every other name is
+    refused, and the socket module is restored even when the block raises."""
+    originals = (socket.getaddrinfo, socket.gethostbyname, socket.gethostbyname_ex)
+    with pytest.raises(RuntimeError, match="block raised"):
+        with resolving_only(["Stub.Example"]):
+            assert socket.gethostbyname("stub.example.") == "127.0.0.1"
+            assert socket.gethostbyname(b"STUB.EXAMPLE") == "127.0.0.1"
+            assert {ai[4][0] for ai in socket.getaddrinfo("stub.example", 443)} == {"127.0.0.1"}
+            with pytest.raises(socket.gaierror, match="not on the fake internet"):
+                socket.gethostbyname("api.stripe.com")
+            raise RuntimeError("block raised")
     assert (socket.getaddrinfo, socket.gethostbyname, socket.gethostbyname_ex) == originals

@@ -224,9 +224,35 @@ def test_a_replay_of_a_replay_answers_the_page_from_the_first_replay(replayed, t
     read as it would ask it, translated, whoever answers it, so the second replay finds the page
     the first one answered just as the first found the recorded one."""
     recorded, first = replayed(W, "refund_then_page", command=True)
+    before = [r.run_id for r in first.stored().list_runs()]
     second = replay(first, replayed_run_id(first), tmp_path / "again", command=True)
+    # Into a copy of the first replay's store, which the session caches for other tests (#85).
+    assert [r.run_id for r in first.stored().list_runs()] == before
     assert [(c["label"], c["answered_by"]) for c in second.calls()] == [
         (c["label"], c["answered_by"]) for c in first.calls()
     ]
     assert second.internet.requests() == []
     assert second.events("refunds", with_time=False) == recorded.events("refunds", with_time=False)
+    # `runs list` lists each replay as the run it replayed, and `runs show` names it (#154). Every
+    # run the store holds, by its attribution column: the recording's two as they were.
+    source = replayed_run_id(recorded)
+    middle, last = first.process_run_id(), second.process_run_id()
+    assert second.listed_attributions() == {
+        recorded.process_run_id(): "process",
+        source: "sdk",
+        middle: f"replay of {source}",
+        last: f"replay of {middle}",
+    }
+    for run_id, of in ((middle, source), (last, middle)):
+        code, shown, _ = second.runs("show", run_id, "--store", str(second.store_root()))
+        assert code == 0
+        assert shown[:4] == [
+            f"run: {run_id}",
+            "attribution: process",
+            "mode: replay",
+            f"replay of: {of}",
+        ]
+    # A shadow run's block names neither, as before #154.
+    code, shown, _ = second.runs("show", source, "--store", str(second.store_root()))
+    assert code == 0
+    assert shown[:3] == [f"run: {source}", "attribution: sdk", "trigger: nightly-reconcile"]

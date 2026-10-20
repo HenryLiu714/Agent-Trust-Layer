@@ -77,6 +77,12 @@ irimi, checks that irimi stored two ok runs and that Stripe holds no refund, and
 STRIPE_API_KEY=sk_test_... examples/server_agent/check.sh
 ```
 
+Phase 3's exit for an LLM agent (use case 1) has a hermetic half too,
+`tests/test_phase3_replay_exit.py`, and a live half run by hand before closing the phase
+(`examples/llm_refund_agent/README.md`): record the agent against Stripe test mode and the real
+Anthropic API, replay it with `prompt_half.txt`, and check that the replay names the model call as
+where it diverged, the refund as the write that changed, and that Stripe holds no refund.
+
 ## Sample workflows
 
 `examples/workflows/` holds eleven small agents, each built to exercise one part of irimi: a
@@ -128,6 +134,7 @@ src/irimi/
 tests/                                one file per module, plus the invariant and exit tests
 examples/refund_agent/                the fixture agent the proxy is tested against
 examples/server_agent/                a server agent beside `irimi shadow --serve`, in containers
+examples/llm_refund_agent/            an LLM agent recorded, its prompt edited, and replayed
 examples/workflows/                   the sample workflows and the harness that runs them
 tests/workflows/                      the workflows' invariants and per-workflow pins
 ```

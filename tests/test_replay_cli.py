@@ -682,6 +682,51 @@ def test_an_agent_that_names_the_recorded_run_never_rewrites_it(home, capfd, mon
     )
 
 
+def test_runs_list_and_show_mark_a_run_a_label_made_in_a_replay(home, capfd):
+    """#154 through the real commands, for the run `tests/test_runs.py` can only build by hand: a
+    replayed command that labels a request with an `Irimi-Run` of its own makes a `header` run in
+    the replay's store, which `runs list` lists as `header, replay of <id>` beside the replay's
+    own `replay of <id>`, and `runs show` prints as a replay's, opening `irimi replay · run`."""
+    source = _record(home, f"replay_agent.handle({TICKET})")
+    (home.parent / "labels.py").write_text(
+        "import http.client, os, urllib.parse\n"
+        "import replay_agent\n"
+        "door = urllib.parse.urlparse(os.environ['HTTPS_PROXY'])\n"
+        "conn = http.client.HTTPConnection(door.hostname, door.port, timeout=10)\n"
+        "host = replay_agent.STRIPE.split('/')[2]\n"
+        "url = replay_agent.STRIPE + '/v1/charges/ch_REAL1'\n"
+        "conn.request('GET', url, headers={'host': host, 'irimi-run': 'labelled-in-replay'})\n"
+        "conn.getresponse().read()\n"
+    )
+    capfd.readouterr()
+    code, _, err = _replay(capfd, source, "--", sys.executable, "labels.py")
+    # Exit 1: the recorded refund is only in A, since the command makes none.
+    assert (code, err) == (1, [])
+    replays = {r.attribution: r.run_id for r in _replay_runs(home, source)}
+    assert replays == {"process": replays["process"], "header": "labelled-in-replay"}
+    assert main(["runs", "list"]) == 0
+    listed = [line.split("  ") for line in capfd.readouterr().out.splitlines()]
+    attribution = {columns[0]: columns[4] for columns in listed}
+    assert attribution[source] == "sdk"
+    assert attribution[replays["process"]] == f"replay of {source}"
+    assert attribution["labelled-in-replay"] == f"header, replay of {source}"
+    assert sorted(attribution.values()) == sorted(
+        ["process", "sdk", f"replay of {source}", f"header, replay of {source}"]
+    )
+    assert main(["runs", "show", "labelled-in-replay"]) == 0
+    shown = capfd.readouterr().out.splitlines()
+    assert shown[:5] == [
+        "run: labelled-in-replay",
+        "attribution: header",
+        "mode: replay",
+        f"replay of: {source}",
+        "trigger: -",
+    ]
+    assert [line for line in shown if line.startswith("irimi ")] == [
+        "irimi replay · run labelled-in-replay · 1 exchange · 0.0s · backstop: none (Phase 4)"
+    ]
+
+
 def test_a_command_given_with_no_run_id_before_it_is_a_usage_error(home, capfd):
     """After `--` argparse takes the first word as RUN_ID: `irimi replay -- python agent.py` would
     replay a run named `python` (#84). `-- RUN_ID` alone is a run id, and a command follows it

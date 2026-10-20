@@ -33,7 +33,7 @@ import struct
 import threading
 import time
 import zlib
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Protocol
@@ -246,49 +246,10 @@ class FakeInternet:
         """The base URL an agent is given for `host`: the real name, this server's port."""
         return f"http://{host}:{self.port}"
 
-    @contextlib.contextmanager
-    def resolving(self) -> Iterator[None]:
+    def resolving(self) -> contextlib.AbstractContextManager[None]:
         """Resolve every host this fake internet serves to loopback, and refuse every other name,
-        for the duration of the block and in this process only."""
-        # One rule for every lookup, so no path through the socket module resolves a real name
-        # (#89): `localhost` and a loopback or unspecified literal go to the real resolver, which
-        # answers them without DNS; a served name is loopback; everything else, a public IP
-        # literal included, is refused.
-        real_getaddrinfo = socket.getaddrinfo
-        real_gethostbyname = socket.gethostbyname
-        real_gethostbyname_ex = socket.gethostbyname_ex
-        served = frozenset(self.services)
-
-        def route(host: Any) -> bool:
-            """True to pass `host` to the real resolver, False to answer loopback; raises for a
-            name the fake internet does not serve."""
-            name = host.decode() if isinstance(host, bytes) else host
-            if not isinstance(name, str) or _is_loopback(name):
-                return True  # None, or a type the real function refuses itself
-            if name.lower().rstrip(".") in served:
-                return False
-            raise socket.gaierror(socket.EAI_NONAME, f"{name} is not on the fake internet")
-
-        def getaddrinfo(host: Any, port: Any, *args: Any, **kwargs: Any) -> Any:
-            if route(host):
-                return real_getaddrinfo(host, port, *args, **kwargs)
-            return real_getaddrinfo("127.0.0.1", port, *args, **kwargs)
-
-        def gethostbyname(host: Any) -> Any:
-            return real_gethostbyname(host) if route(host) else "127.0.0.1"
-
-        def gethostbyname_ex(host: Any) -> Any:
-            return real_gethostbyname_ex(host) if route(host) else (host, [], ["127.0.0.1"])
-
-        socket.getaddrinfo = getaddrinfo
-        socket.gethostbyname = gethostbyname
-        socket.gethostbyname_ex = gethostbyname_ex
-        try:
-            yield
-        finally:
-            socket.getaddrinfo = real_getaddrinfo
-            socket.gethostbyname = real_gethostbyname
-            socket.gethostbyname_ex = real_gethostbyname_ex
+        for the duration of the block and in this process only (`resolving_only`)."""
+        return resolving_only(self.services)
 
     # -- what happened ---------------------------------------------------------------------
 
@@ -367,6 +328,52 @@ class FakeInternet:
             }
             return Resp(resp.status, sent, headers), None
         return resp, action
+
+
+@contextlib.contextmanager
+def resolving_only(served: Iterable[str]) -> Iterator[None]:
+    """Resolve each name in `served` to loopback, and refuse every other name, for the duration of
+    the block and in this process only. The fake internet's resolver, and the one of any test whose
+    irimi reaches loopback stubs by their real names (`tests/test_phase3_replay_exit.py`, #85)."""
+    # One rule for every lookup, so no path through the socket module resolves a real name
+    # (#89): `localhost` and a loopback or unspecified literal go to the real resolver, which
+    # answers them without DNS; a served name is loopback; everything else, a public IP
+    # literal included, is refused.
+    real_getaddrinfo = socket.getaddrinfo
+    real_gethostbyname = socket.gethostbyname
+    real_gethostbyname_ex = socket.gethostbyname_ex
+    names = frozenset(name.lower() for name in served)
+
+    def route(host: Any) -> bool:
+        """True to pass `host` to the real resolver, False to answer loopback; raises for a
+        name that is not served."""
+        name = host.decode() if isinstance(host, bytes) else host
+        if not isinstance(name, str) or _is_loopback(name):
+            return True  # None, or a type the real function refuses itself
+        if name.lower().rstrip(".") in names:
+            return False
+        raise socket.gaierror(socket.EAI_NONAME, f"{name} is not on the fake internet")
+
+    def getaddrinfo(host: Any, port: Any, *args: Any, **kwargs: Any) -> Any:
+        if route(host):
+            return real_getaddrinfo(host, port, *args, **kwargs)
+        return real_getaddrinfo("127.0.0.1", port, *args, **kwargs)
+
+    def gethostbyname(host: Any) -> Any:
+        return real_gethostbyname(host) if route(host) else "127.0.0.1"
+
+    def gethostbyname_ex(host: Any) -> Any:
+        return real_gethostbyname_ex(host) if route(host) else (host, [], ["127.0.0.1"])
+
+    socket.getaddrinfo = getaddrinfo
+    socket.gethostbyname = gethostbyname
+    socket.gethostbyname_ex = gethostbyname_ex
+    try:
+        yield
+    finally:
+        socket.getaddrinfo = real_getaddrinfo
+        socket.gethostbyname = real_gethostbyname
+        socket.gethostbyname_ex = real_gethostbyname_ex
 
 
 def _is_loopback(name: str) -> bool:

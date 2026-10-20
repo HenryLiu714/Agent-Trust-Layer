@@ -87,6 +87,11 @@ CANARIES = {
 # bomb's first line holds one, so the start of a body cut at irimi's decoding cap is held to it
 # too (#94).
 SERVED_CANARIES = {"STRIPE_CLIENT_SECRET": CLIENT_SECRET_CANARY, "BOMB_SECRET": BOMB_SECRET}
+# How much of a canary's start invariant 4 finds on its own: what a cut made before redaction
+# keeps of a key straddling it is no longer the key's shape, so it reached disk as it was, and the
+# whole canary was never there to find (#179). Twelve characters: past the prefix every shape
+# starts with (`sk-ant-`, `whsec_`), into the part of a canary that is the canary's own.
+CANARY_PART = 12
 MODES = ("bare", "shadow", "serve")
 # The line irimi's serve mode prints above each run's summary when the SDK ends the run (#77).
 RUN_BLOCK = re.compile(r"--- run (\S+) ---")
@@ -1073,10 +1078,17 @@ def _live_answers_not_served(result: Result) -> list[str]:
 
 
 def _canaries_under(root: Path) -> list[str]:
-    needles = {name: value.encode() for name, value in {**CANARIES, **SERVED_CANARIES}.items()}
+    """Each canary found whole in a file under `root`, or else its first CANARY_PART characters: a
+    key cut before redaction is no longer its shape, so the part a cut kept reached disk as it was,
+    which the whole canary is never found as (#179)."""
+    canaries = {**CANARIES, **SERVED_CANARIES}
     found = []
     for path in root.rglob("*"):
         if path.is_file():
             data = path.read_bytes()
-            found += [f"{name} in {path}" for name, v in needles.items() if v in data]
+            for name, value in canaries.items():
+                if value.encode() in data:
+                    found.append(f"{name} in {path}")
+                elif value[:CANARY_PART].encode() in data:
+                    found.append(f"{name}'s first {CANARY_PART} characters in {path}")
     return found

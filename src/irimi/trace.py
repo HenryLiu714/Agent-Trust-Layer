@@ -43,6 +43,7 @@ from irimi.exchange import (
     Response,
     Validation,
 )
+from irimi.secret_shapes import cut_outside_secrets
 
 # One integer for the whole format (#68). `run.json` carries it and a run's events are read under
 # it; `unattributed/events.jsonl`, which has no `run.json`, is read under this one. A decoder
@@ -72,11 +73,22 @@ RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # against this before a store can join it onto a path.
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
-# The longest `ErrorInfo.message` kept: a run's error is a label, not a log (#68).
+# The longest `ErrorInfo.message` a trace keeps: a run's error is a label, not a log (#68).
 MAX_ERROR_MESSAGE = 1000
-# The longest `ErrorInfo.type` the control endpoint keeps of a posted one (#99): a class's
-# `module.qualname` is far shorter, but a posted type is whatever the client sent, up to 2 MiB.
+# The longest `ErrorInfo.type` a trace keeps (#99): a class's `module.qualname` is far shorter, but
+# a posted type is whatever the client sent, up to 2 MiB.
+# The store cuts both, and only once it has redacted the whole of each (#179): a key cut in two is
+# no longer its shape, so redaction would not find the half a cut kept.
 MAX_ERROR_TYPE = 300
+# The most of an exception's message `ErrorInfo.from_exception` keeps, far past MAX_ERROR_MESSAGE:
+# the SDK posts the message for the store to redact and cut, and must only keep a post under the
+# control endpoint's 2 MiB (#179).
+MAX_POSTED_MESSAGE = 64 * 1024
+# The most of an exception's type `ErrorInfo.from_exception` keeps: four labels' worth, as the store
+# keeps of an end's while it waits (`store.MAX_QUEUED_ERROR`). A class's `module.qualname` is far
+# shorter, but one made with `type()` may be any length, and one past the control endpoint's 2 MiB
+# cost its run the post, and so its end (#179).
+MAX_POSTED_TYPE = 4 * MAX_ERROR_TYPE
 
 # The most of a string a decoder's message quotes (`_quoted`). The message is read by a person, on
 # `irimi runs show`'s stderr, in `list_runs`'s warning or as a control refusal, and a damaged
@@ -112,12 +124,16 @@ def is_valid_run_id(run_id: str) -> bool:
 
 @dataclass(frozen=True)
 class ErrorInfo:
-    type: str  # the exception's `module.qualname`; a posted one at most MAX_ERROR_TYPE (#99)
-    message: str  # at most MAX_ERROR_MESSAGE characters
+    type: str  # the exception's `module.qualname`; a stored one at most MAX_ERROR_TYPE (#99)
+    message: str  # a stored one at most MAX_ERROR_MESSAGE characters (#68)
 
     @classmethod
     def from_exception(cls, exc: BaseException) -> "ErrorInfo":
         """The one spelling of "what went wrong" a run or a tool call records.
+
+        Its message is `str(exc)`, and its type the class's `module.qualname`, cut to
+        MAX_POSTED_MESSAGE and MAX_POSTED_TYPE characters outside any secret's shape: the SDK
+        cannot redact, and the store redacts each whole before it cuts it to a label (#179).
 
         Never raises on an exception whose `__str__` does: the SDK (#74, #76) calls this while an
         agent's own exception is in flight, and recording it must not replace it with another."""
@@ -126,7 +142,10 @@ class ErrorInfo:
             message = str(exc)
         except Exception:
             message = f"<unprintable {kind.__qualname__}>"
-        return cls(f"{kind.__module__}.{kind.__qualname__}", message[:MAX_ERROR_MESSAGE])
+        return cls(
+            cut_outside_secrets(f"{kind.__module__}.{kind.__qualname__}", MAX_POSTED_TYPE),
+            cut_outside_secrets(message, MAX_POSTED_MESSAGE),
+        )
 
 
 @dataclass(frozen=True)

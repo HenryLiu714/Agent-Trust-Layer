@@ -615,8 +615,8 @@ def test_an_end_in_error_carries_its_error_to_the_store():
 
 def test_a_posted_error_message_is_cut_to_the_length_a_trace_keeps(engine):
     """`ErrorInfo.message` is at most MAX_ERROR_MESSAGE characters (#68): a label, not a log. An
-    SDK that posts a longer one, on an end or on a tool call, has it cut, never refused, so a long
-    message never costs a run its end."""
+    SDK that posts a longer one, on an end or on a tool call, has it cut by the store, once it is
+    redacted (#179), never refused, so a long message never costs a run its end."""
     long = {"type": "x.Boom", "message": "m" * (MAX_ERROR_MESSAGE * 3)}
     t0 = time.time()
     _ok(engine.call("POST", _START, _start_body(t0)))
@@ -631,8 +631,9 @@ def test_a_posted_error_message_is_cut_to_the_length_a_trace_keeps(engine):
 
 def test_a_posted_error_type_is_cut_to_the_length_a_trace_keeps(engine):
     """A posted error's type is the client's to say, so it may be nearly all of a 2 MiB body. It
-    is cut to MAX_ERROR_TYPE characters, on an end and on a tool call, never refused (#99)."""
-    long = {"type": "t" * (MAX_CONTROL_BODY - 1000), "message": "no"}
+    is cut to MAX_ERROR_TYPE characters, on an end and on a tool call, never refused (#99): by the
+    store, once it is redacted (#179), and for the live line a tool call prints."""
+    long = {"type": "t." * (MAX_CONTROL_BODY // 2 - 500), "message": "no"}
     t0 = time.time()
     _ok(engine.call("POST", _START, _start_body(t0)))
     _ok(engine.call("POST", f"/_irimi/runs/{RUN}/tool-calls", {**_tool_call(t0), "error": long}))
@@ -640,8 +641,40 @@ def test_a_posted_error_type_is_cut_to_the_length_a_trace_keeps(engine):
     _ok(engine.call("POST", f"/_irimi/runs/{RUN}/end", end))
     run = engine.finish().load_run(RUN)
     [call] = run.events
-    cut = ErrorInfo("t" * MAX_ERROR_TYPE, "no")
+    cut = ErrorInfo("t." * (MAX_ERROR_TYPE // 2), "no")
     assert (run.record.outcome, run.record.error, call.error) == ("error", cut, cut)
+    assert [c.error for c in engine.tool_calls] == [cut]
+
+
+def test_a_posted_error_reaches_the_store_whole_so_a_key_straddling_a_cut_is_redacted(
+    engine, tmp_path
+):
+    """The endpoint hands the store a posted error whole, and the store redacts it before it cuts
+    it. Cut here first, a key straddling either cut kept a part too short for its shape, which
+    redaction no longer found, and which reached disk (#179). The live line's call is cut as
+    the stored one is, its type all it prints, and it is never stored."""
+    secret = "ghp_" + "C" * 36
+    kind = "t" * (MAX_ERROR_TYPE - 30) + "." + secret + ".Boom"
+    message = "m" * (MAX_ERROR_MESSAGE - 30) + " " + secret + " and more"
+    error = {"type": kind, "message": message}
+    t0 = time.time()
+    _ok(engine.call("POST", _START, _start_body(t0)))
+    _ok(engine.call("POST", f"/_irimi/runs/{RUN}/tool-calls", {**_tool_call(t0), "error": error}))
+    end = {"ended_at": t0 + 1, "outcome": "error", "error": error}
+    _ok(engine.call("POST", f"/_irimi/runs/{RUN}/end", end))
+    run = engine.finish().load_run(RUN)
+    [call] = run.events
+    hidden = redact.placeholder(redact.load_key(tmp_path), secret)
+    cut = ErrorInfo(
+        kind.replace(secret, hidden)[:MAX_ERROR_TYPE],
+        message.replace(secret, hidden)[:MAX_ERROR_MESSAGE],
+    )
+    assert (run.record.error, call.error) == (cut, cut)
+    assert [c.error for c in engine.tool_calls] == [
+        ErrorInfo(kind[:MAX_ERROR_TYPE], message[:MAX_ERROR_MESSAGE])
+    ]
+    store_files = (tmp_path / "store").rglob("*")
+    assert not any(b"ghp_" in p.read_bytes() for p in store_files if p.is_file())
 
 
 def test_a_refusal_quotes_at_most_a_line_of_what_it_refused(engine):

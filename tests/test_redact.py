@@ -19,7 +19,7 @@ import time
 
 import pytest
 
-from irimi import delegation, paths, redact
+from irimi import delegation, paths, redact, secret_shapes
 from irimi.exchange import REDACTION_FAILED_FLAG, Exchange, Request, Response
 from irimi.redact import placeholder, redact_exchange, redact_json
 from tests.test_trace import _filled
@@ -253,7 +253,7 @@ SAMPLES = [
 
 
 def test_the_shapes_are_the_issues_list_exactly():
-    assert redact.SECRET_PATTERNS == (
+    assert secret_shapes.SECRET_PATTERNS == (
         r"sk_(live|test)_[A-Za-z0-9]+",
         r"rk_(live|test)_[A-Za-z0-9]+",
         r"whsec_[A-Za-z0-9]+",
@@ -270,6 +270,72 @@ def test_the_shapes_are_the_issues_list_exactly():
 @pytest.mark.parametrize("secret", SAMPLES)
 def test_every_shape_is_replaced_whole_inside_text(secret):
     assert redact_json(f"uses {secret}, then stops", KEY) == f"uses {_ph(secret)}, then stops"
+
+
+@pytest.mark.parametrize("secret", SAMPLES)
+def test_text_cut_outside_secrets_redacts_to_a_prefix_of_the_whole_redacted(secret):
+    """Wherever the cut falls, a key at the very start, after a space, after `_`, after each
+    escape, or after a run of letters it does not follow: what it keeps, redacted, is a prefix of
+    the whole redacted, so it holds no part of a key and every key it holds is its whole key's
+    placeholder (#179)."""
+    text = (
+        f"{secret} refused key:\\n{secret}, retry_{secret} as %20{secret} or \\u0020{secret}; "
+        f"xx{secret} {'x' * 30}."
+    )
+    whole = redact_json(text, KEY)
+    assert isinstance(whole, str) and whole.count("<redacted:") == 5
+    for limit in range(len(text) + 1):
+        kept = secret_shapes.cut_outside_secrets(text, limit)
+        redacted = redact_json(kept, KEY)
+        assert text.startswith(kept) and len(kept) <= limit, limit
+        assert isinstance(redacted, str) and whole.startswith(redacted), limit
+
+
+def test_any_text_cut_outside_secrets_redacts_to_a_prefix_of_the_whole_redacted():
+    """The same over text built at random from the pieces a shape is spelled with, its
+    separators and its escapes, each cut at every length: no cut keeps a part of a key, or a
+    key's prefix that redaction would take for a key of its own (#179)."""
+    pieces = [
+        *("sk_live_", "sk_test_", "rk_test_", "whsec_", "xoxb-", "xapp-", "ghp_", "github_pat_"),
+        *("AKIA", "sk-ant-", "sk-", "sk-proj-", "proj-", "A", "z", "0", "_", "-", " ", "/", "="),
+        *("\\n", "\\u0020", "%20", "\\", "%", "é", "x" * 7, "Q" * 20, "AB12CD34EF56GH78"),
+    ]
+    chosen = random.Random(179)
+    for _ in range(1500):
+        text = "".join(chosen.choice(pieces) for _ in range(chosen.randint(1, 30)))
+        whole = redact_json(text, KEY)
+        assert isinstance(whole, str)
+        for limit in range(len(text) + 1):
+            redacted = redact_json(secret_shapes.cut_outside_secrets(text, limit), KEY)
+            assert isinstance(redacted, str) and whole.startswith(redacted), (text, limit)
+
+
+@pytest.mark.parametrize(
+    ("text", "kept"),
+    [
+        ("abc defgh", "abc defgh"),  # within the limit: whole
+        ("x" * 20, "x" * 9),  # no key across the cut: at the limit, inside a word or not
+        ("abc sk_live_a1b2", "abc "),  # a key across the cut: before the whole key
+        ("sk_live_a1b2", ""),  # a key from the start: none of it
+        ("abc sk_live_a1 more", "abc "),  # the cut inside a key that ends past it
+        ("sk_live_a / b", "sk_live_a"),  # a key that ends at the cut: kept whole
+        ("abcdefghi sk_live_a", "abcdefghi"),  # a key that starts at the cut: up to it
+        ("ask_live_a1b2", "ask_live_"),  # a shape after a letter is no key: at the limit
+        ("x_sk_live_a1b2", "x_"),  # after `_` it is one
+        ("%20sk_live_a1", "%20"),  # and after an escape
+    ],
+)
+def test_a_cut_outside_secrets_moves_only_for_a_key_across_it(text, kept):
+    """The SDK cuts before irimi redacts, so its cut must never keep part of a key (#179). It is
+    made before a key the cut would cross, and at the limit otherwise, so text with no key
+    across the cut, one long word included, keeps as much as a plain cut would."""
+    assert secret_shapes.cut_outside_secrets(text, 9) == kept
+
+
+def test_redaction_finds_the_shapes_a_cut_moves_for():
+    """`redact` and `cut_outside_secrets` read one compiled pattern, so a shape added for one is
+    a shape the other knows (#179)."""
+    assert redact.SECRET_SHAPE is secret_shapes.SECRET_SHAPE
 
 
 @pytest.mark.parametrize(

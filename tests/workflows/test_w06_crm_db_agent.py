@@ -10,10 +10,17 @@ import pytest
 
 from examples.workflows.agentkit import LOOKUP_REFUSED_ENV
 from examples.workflows.harness.run import CANARIES, check_invariants, compare, rows_not_shown
-from examples.workflows.w06_crm_db_agent.agent import DB_NAME, SEED
+from examples.workflows.w06_crm_db_agent.agent import (
+    CONNECT_RETRIES,
+    DB_NAME,
+    SEED,
+    UNREACHABLE_HOST,
+    DriverOptions,
+)
 from examples.workflows.w06_crm_db_agent.scenarios import STALE_REPLAY_RUN
-from irimi.sdk.capture import REPR_KEY
-from irimi.trace import UNATTRIBUTED, ErrorInfo, ToolCall
+from irimi import redact
+from irimi.sdk.capture import MAX_REPR, REPR_KEY
+from irimi.trace import MAX_ERROR_MESSAGE, UNATTRIBUTED, ErrorInfo, ToolCall
 
 W = "w06_crm_db_agent"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi (#77).
@@ -242,18 +249,69 @@ def test_a_raising_read_tool_ends_the_run_in_error_under_shadow(run_workflow, mo
     # Stored under the exception's full name (#74).
     [run] = shadow.sdk_runs()
     assert (run.outcome, run.error) == ("error", ErrorInfo("builtins.KeyError", "'acc_missing'"))
-    # Both tools that raised are recorded with what they raised and no result, the caught one and
+    # Every tool that raised is recorded with what it raised and no result, the caught ones and
     # the one that ended the run (#76).
     assert [(c.name, c.result, c.error) for c in tool_calls(shadow)] == [
+        ("crm.connect_with", None, connect_error(shadow)),
         ("crm.flaky_lookup", None, ErrorInfo("builtins.KeyError", "'acc_1'")),
         ("crm.score_account", None, ErrorInfo("builtins.KeyError", "'acc_missing'")),
     ]
     assert shadow.tool_call_lines() == [
+        "real      read      tool crm.connect_with -> raised builtins.ConnectionError",
         "real      read      tool crm.flaky_lookup -> raised builtins.KeyError",
         "real      read      tool crm.score_account -> raised builtins.KeyError",
     ]
     # Bare, the SDK is inactive: no run is opened at all.
     assert bare.events("run.start") == []
+
+
+def connect_error(shadow) -> ErrorInfo:
+    """What a trace keeps of the error `connect_with` raised in `tool_raises`, which quotes its
+    DSN's key across the 1000-character cut: the SDK posts the message whole, and the store
+    redacts it whole before it cuts it, so the key is its whole placeholder (#179)."""
+    key = CANARIES["STRIPE_API_KEY"]
+    said = f"{CONNECT_RETRIES}could not connect with postgres://crm:{key}@{UNREACHABLE_HOST}/crm"
+    assert said.index(key) < MAX_ERROR_MESSAGE < said.index(key) + len(key)
+    hidden = redact.placeholder(redact.load_key(shadow.home), key)
+    return ErrorInfo("builtins.ConnectionError", said.replace(key, hidden)[:MAX_ERROR_MESSAGE])
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_an_sdk_error_quoting_a_key_across_the_cut_is_stored_as_its_placeholder(run_workflow, mode):
+    """`connect_with` raises a message that quotes its DSN, the key in it across the 1000
+    characters a trace keeps. The SDK posts it whole and the store redacts it whole, then cuts
+    it, so the stored message is a prefix of the redacted whole: the key's own placeholder, the
+    one its args hold, and no part of the key. Cut first, the part kept was redacted as a key of
+    its own (#179). The agent caught it, so it ran on, in every mode."""
+    shadow = run_workflow(W, "tool_raises", mode)
+    [connect] = [c for c in tool_calls(shadow) if c.name == "crm.connect_with"]
+    hidden = redact.placeholder(redact.load_key(shadow.home), CANARIES["STRIPE_API_KEY"])
+    assert connect.error == connect_error(shadow)
+    assert f"could not connect with postgres://crm:{hidden}@" in connect.error.message
+    assert connect.args["dsn"] == f"postgres://crm:{hidden}@{UNREACHABLE_HOST}/crm"
+    for result in (shadow, run_workflow(W, "tool_raises", "bare")):
+        assert result.events("connect_failed", with_time=False) == [
+            {"event": "connect_failed", "error": "ConnectionError"}
+        ]
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_repr_quoting_a_key_across_the_sdks_cut_keeps_no_part_of_it(run_workflow, mode):
+    """`connect_with`'s options are captured as their repr, which quotes a key across the 1000
+    characters the SDK keeps of one. The SDK cuts before irimi redacts, so it cuts where the key
+    starts, and keeps everything before it: cut at 1000, the 15 characters of the key it kept
+    were no longer its shape, and reached disk as they were, which universal invariant 4 finds
+    (#179). The store's copy is the SDK's, so it holds no placeholder either."""
+    shadow = run_workflow(W, "tool_raises", mode)
+    [connect] = [c for c in tool_calls(shadow) if c.name == "crm.connect_with"]
+    key = CANARIES["OPENAI_API_KEY"]
+    said = repr(DriverOptions(key))
+    assert said.index(key) < MAX_REPR < said.index(key) + len(key)
+    assert connect.args["options"] == {REPR_KEY: said[: said.index(key)]}
+    assert said[: said.index(key)].endswith("', password='")
+    on_disk = [p.read_bytes() for p in shadow.store_root().rglob("*") if p.is_file()]
+    assert not any(key[:12].encode() in data for data in on_disk)
+    assert check_invariants(shadow) == []
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -692,10 +750,12 @@ def test_tool_raises_replayed_raises_what_was_recorded_and_the_agent_catches_it_
         {"event": "lookup_failed", "error": "KeyError", "key": "'acc_1'"}
     ]
     assert replay.tool_call_lines() == [
+        "recording read      tool crm.connect_with -> raised builtins.ConnectionError",
         "recording read      tool crm.flaky_lookup -> raised builtins.KeyError",
         "recording read      tool crm.score_account -> raised builtins.KeyError",
     ]
     assert [(c.name, c.error) for c in replayed_calls(replay)] == [
+        ("crm.connect_with", connect_error(recorded)),
         ("crm.flaky_lookup", ErrorInfo("builtins.KeyError", "'acc_1'")),
         ("crm.score_account", ErrorInfo("builtins.KeyError", "'acc_missing'")),
     ]

@@ -172,9 +172,16 @@ AGENT_VERSION = "w09-by-hand"
 SDK_VERSION = "by-hand"
 # Past `irimi.trace.MAX_ERROR_MESSAGE` (1000), the most of an error message a trace keeps.
 LONG_MESSAGE_CHARS = 1500
-# Past `irimi.trace.MAX_ERROR_TYPE` (300), the most of a posted error type a trace keeps (#99): a
-# dotted path of 616 characters, which no class's `module.qualname` comes near.
-LONG_ERROR_TYPE = "pkg" + ".sub" * 150 + ".RuntimeError"
+# A key in a posted error, across each cut a trace makes of one (#179). `ghp_`'s shape needs 36
+# characters after it, so the part of the key a cut kept would no longer be its shape.
+ERROR_KEY = "ghp_" + "W9errorKey" + "0" * 26
+# Where ERROR_KEY starts in a posted message: across the 1000-character cut, its 27-character
+# placeholder ending before it.
+ERROR_KEY_AT = 966
+# Past `irimi.trace.MAX_ERROR_TYPE` (300), the most of an error type a trace keeps (#99): a dotted
+# path of 657 characters, which no class's `module.qualname` comes near, ERROR_KEY one of its
+# names, 264 characters in, across that cut (#179).
+LONG_ERROR_TYPE = "pkg" + ".sub" * 65 + f".{ERROR_KEY}" + ".sub" * 85 + ".RuntimeError"
 # Past `irimi.control.MAX_CONTROL_BODY` (2 MiB), the most a control request may post.
 OVERSIZED_BODY_BYTES = 2 * 1024 * 1024 + 1
 # How deep `refuse_deep` nests a tool call's name: deeper than `repr` went on some Pythons, and
@@ -191,8 +198,9 @@ def control_runs() -> None:
     One run posts direct to `IRIMI_CONTROL` (`127.0.0.1`, which NO_PROXY sends straight to the
     listener) and one through the proxy to itself (`127.1`). Two more run at once, on two threads
     kept in lockstep, so their posts and reads interleave on the wire and must not mix. One ends
-    in error, its message past what a trace keeps, and its error type too (#99). Then every
-    refusal the endpoint documents, and the health check before and after."""
+    in error, its message past what a trace keeps, and its error type too (#99), a key across
+    each cut (#179). Then every refusal the endpoint documents, and the health check before and
+    after."""
     control = _control_base()
     _health(control, "health_before")
     _run_by_hand(control, "ctl-direct", f"/v1/charges/{CHARGE}", "direct")
@@ -220,17 +228,25 @@ def control_runs() -> None:
         "charge_card",
         "error_tool",
         result=None,
-        error={"type": "builtins.ValueError", "message": "card " + "x" * LONG_MESSAGE_CHARS},
+        error={"type": "builtins.ValueError", "message": _keyed_message("card ", "x")},
     )
     _end(
         control,
         "ctl-error",
         "error_end",
         outcome="error",
-        error={"type": LONG_ERROR_TYPE, "message": "run " + "y" * LONG_MESSAGE_CHARS},
+        error={"type": LONG_ERROR_TYPE, "message": _keyed_message("run ", "y")},
     )
     _refusals(control)
     _health(control, "health_after")
+
+
+def _keyed_message(head: str, filler: str) -> str:
+    """An error message of LONG_MESSAGE_CHARS characters, `head` and then `filler`, with ERROR_KEY
+    from ERROR_KEY_AT, across the cut a trace makes of it (#179)."""
+    before = head + filler * (ERROR_KEY_AT - len(head) - 1) + " "
+    after = " " + filler * (LONG_MESSAGE_CHARS - len(before) - len(ERROR_KEY) - 1)
+    return before + ERROR_KEY + after
 
 
 def control_hazards() -> None:

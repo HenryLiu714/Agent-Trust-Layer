@@ -51,7 +51,10 @@ WORKFLOW = Workflow(
         ),
         "tool_raises": Scenario(
             ("tool_raises",),
-            doc="a read tool raises and is caught; another raises and ends the run in error",
+            doc="a read tool raises quoting a DSN, its key across the cut a trace makes of the "
+            "message, given options whose repr holds a key across the cut the SDK makes of a "
+            "repr, and is caught; another raises and is caught; a third raises and ends the run "
+            "in error",
         ),
         "decoration_errors": Scenario(
             ("decoration_errors",),

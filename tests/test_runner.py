@@ -786,7 +786,10 @@ def test_a_write_irimi_could_not_decide_prints_as_refused_and_names_why():
     so it was recorded with no body and flagged. Rendered through its route's `human:` template it
     printed `○ refund ? on ?  unclassified (L0)`, a faked write described from a body irimi never
     read. It prints as refused, `✗`, as the request it was, with the flags that say why in the
-    order it carries them, and no other flag (#112). It is still a write that did not happen."""
+    order it carries them, and no other flag (#112). It is still a write that did not happen.
+
+    Its host line counts it as its line names it, `refused by irimi`: counted `unclassified`, the
+    word a route no map names prints, the host line named a write no line showed (#112)."""
     cut = _exchange(
         method="POST",
         kind="unknown",
@@ -801,9 +804,14 @@ def test_a_write_irimi_could_not_decide_prints_as_refused_and_names_why():
         "  ✗ POST api.stripe.com/v1/refunds  refused by irimi (decision-failed, body-truncated)"
     ]
     assert _block(lines, "api.stripe.com") == (
-        "  api.stripe.com  1 write intercepted (1 unclassified)"
+        "  api.stripe.com  1 write intercepted (1 refused by irimi)"
     )
     assert lines[-1] == "  These writes did not happen."
+    presumed = _exchange(method="DELETE", kind="unknown", answered_by="fake-L0")
+    lines = summary_lines("7f3a", [cut, presumed], 0.0, _maps())
+    assert _block(lines, "api.stripe.com") == (
+        "  api.stripe.com  2 writes intercepted (1 unclassified, 1 refused by irimi)"
+    )
 
 
 def test_a_write_whose_decision_raised_prints_its_sentence_as_refused():

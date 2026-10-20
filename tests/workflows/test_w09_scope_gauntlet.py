@@ -928,7 +928,7 @@ def test_a_write_whose_body_decodes_past_the_cap_is_refused_and_never_leaves(run
     that raised does: its own 502, stamped, recorded `unknown` and flagged. The service never sees
     it, and nothing it would have fired is claimed for it. The summary prints it as irimi refused
     it, `✗`, the request as sent and the flags that say why, not a `human:` sentence filled from a
-    body irimi never read (#112)."""
+    body irimi never read, and its host line counts it so, not as `unclassified` (#112)."""
     shadow = run_workflow(W, "bombs", mode)
     posted = [(r.method, r.path) for r in shadow.internet.requests() if r.method == "POST"]
     assert posted == [("POST", "/v1/messages")]
@@ -939,6 +939,9 @@ def test_a_write_whose_body_decodes_past_the_cap_is_refused_and_never_leaves(run
     assert ex.response is not None and ex.response.status == 502
     assert json.loads(ex.response.body)["error"]["type"] == "irimi_decision_failed"
     summary = summary_of(shadow)
+    assert [line for line in summary if line.startswith("  api.stripe.com ")] == [
+        "  api.stripe.com     1 read  1 engine read  2 writes intercepted (1 refused by irimi)"
+    ]
     assert [line for line in summary if line.startswith(("  ○", "  ✗"))] == [
         f"  {CUT_REFUND}",
         f"  ○ refund $9.00 on {CHARGE}  unvalidated (L3 preconditions passed)",

@@ -319,6 +319,11 @@ def _failed_target(exchange: Exchange) -> bool:
     return TARGET_FAILED_FLAG in exchange.flags
 
 
+def _refused_by_irimi(exchange: Exchange) -> bool:
+    """A write irimi answered with its own 502 because it could not decide about it (#112)."""
+    return DECISION_FAILED_FLAG in exchange.flags
+
+
 def _host_line(host: str, rows: Sequence[Exchange], width: int) -> str:
     """One host's counts, in the order a reader asks them: what was real, then what was not."""
     phrases: list[str] = []
@@ -370,11 +375,16 @@ def _host_line(host: str, rows: Sequence[Exchange], width: int) -> str:
     writes = [ex for ex in rows if is_intercepted(ex)]
     if writes:
         detail = []
-        unclassified = sum(1 for ex in writes if ex.kind == "unknown")
+        # A write irimi refused is recorded `unknown`, but its line says `refused by irimi`, and
+        # so does its count here: `unclassified` is what a route no map names prints (#112).
+        refused = sum(1 for ex in writes if _refused_by_irimi(ex))
+        unclassified = sum(1 for ex in writes if ex.kind == "unknown" and not _refused_by_irimi(ex))
         delegated = sum(1 for ex in writes if _reached_target(ex))
         unreachable = sum(1 for ex in writes if _failed_target(ex))
         if unclassified:
             detail.append(f"{unclassified} unclassified")
+        if refused:
+            detail.append(f"{refused} {REFUSED_BY_IRIMI}")
         if delegated:
             detail.append(f"{delegated} delegated")
         if unreachable:
@@ -439,7 +449,7 @@ def write_sentence(exchange: Exchange, index: MapIndex | None) -> str:
     line without the indent and before it is escaped, which `irimi compare` decides two writes are
     the same by (#79). A write irimi refused with a body it never read whole is spelled as the
     request it was instead (#112)."""
-    refused = DECISION_FAILED_FLAG in exchange.flags
+    refused = _refused_by_irimi(exchange)
     # A `human:` sentence is never filled in from a body irimi did not read: a refused write whose
     # body was cut renders every field `?`, the same line for every such refund (#112).
     unread = refused and BODY_TRUNCATED_FLAG in exchange.flags

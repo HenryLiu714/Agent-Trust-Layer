@@ -190,7 +190,8 @@ And a refund the real service would have refused, from `w01_ticket_triage double
   `✗ refund $49.00 on ch_N000  refused by irimi (decision-failed)` when the decision raised. A
   body that decodes past what irimi reads is never read, so no `human:` sentence is filled in
   from it, and the line spells out the request:
-  `✗ POST api.stripe.com/v1/refunds  refused by irimi (decision-failed, body-truncated)`.
+  `✗ POST api.stripe.com/v1/refunds  refused by irimi (decision-failed, body-truncated)`. Its
+  host line counts it the same way, `2 writes intercepted (1 refused by irimi)`.
 - An `engine read` is one irimi made itself for an L3 check. It is counted apart, so "reads are
   real" means the reads your agent made.
 - A `↳` line is one of the agent's own later reads of that service. `saw it  overlay` is a read

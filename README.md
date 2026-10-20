@@ -206,7 +206,10 @@ And a refund the real service would have refused, from `w01_ticket_triage double
 - A write tool the SDK ran as its stand-in gets a line after the HTTP writes:
   `○ tool db.mark_refunded  shadow stand-in ran`, or `raised <type>`, and it did not happen
   either: a run whose only writes are tool writes still closes with `These writes did not happen.`
-  A read tool gets no line, and neither is counted as an exchange
+  A run with a write delegated or unanswered closes by naming the services its writes did not
+  reach, and then the tool writes:
+  `These writes did not reach stripe. The tool writes did not happen.` A read tool gets no line,
+  and neither is counted as an exchange
   ([Tools the proxy cannot see](#tools-the-proxy-cannot-see)).
 
 ### The child process

@@ -24,6 +24,7 @@ from irimi.report import (
     write_sentence,
 )
 from irimi.runner import EngineThread, child_env, exit_code_for
+from irimi.trace import ToolCall
 
 
 def _exchange(
@@ -590,6 +591,30 @@ def test_two_unreachable_writes_read_as_were():
 def test_two_delegated_writes_read_as_were():
     rows = [_refund(answered_by="delegated", target="http://127.0.0.1:3000/refund")] * 2
     assert summary_lines("7f3a", rows, 0.0, _maps())[-1].startswith("  2 were delegated to")
+
+
+def _tool_call(kind="write", ran="shadow", name="db.mark_refunded"):
+    return ToolCall("t", "7f3a", name, kind, ran, {}, None, None, 1.0, 2.0)
+
+
+def test_a_delegated_write_s_closing_lines_say_the_tool_writes_did_not_happen_either():
+    """A run whose writes were delegated or went unanswered closes by saying they did not reach
+    their service. A write tool whose stand-in ran did not happen either (#76), and the closing
+    lines said nothing of it: only its own `○ tool` line did (#121). A read tool, which ran for
+    real, is no write and changes nothing."""
+    tools = [_tool_call(), _tool_call(kind="read", ran="real", name="db.lookup")]
+    delegated = _refund(answered_by="delegated", target="http://127.0.0.1:3000/refund")
+    faked = replace(_refund(answered_by="fake-L1"), would_fire=("refund.created",))
+    lines = summary_lines("7f3a", [faked, delegated], 0.0, _maps(), tools)
+    assert lines[-2:] == [
+        "  These writes did not reach stripe. The tool writes did not happen. "
+        "Would have fired: refund.created.",
+        "  1 was delegated to http://127.0.0.1:3000/refund.",
+    ]
+    lines = summary_lines("7f3a", [_unreachable()], 0.0, _maps(), tools)
+    assert lines[-2] == "  These writes did not reach stripe. The tool writes did not happen."
+    lines = summary_lines("7f3a", [delegated], 0.0, _maps(), tools[1:])
+    assert lines[-2] == "  These writes did not reach stripe."
 
 
 def test_a_run_that_only_read_claims_nothing_about_writes():

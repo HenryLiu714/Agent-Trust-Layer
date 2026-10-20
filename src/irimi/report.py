@@ -593,6 +593,9 @@ def _closing_lines(writes: Sequence[Exchange], tool_writes: Sequence[ToolCall]) 
 
     A write tool whose stand-in ran did not happen either (#76): a run whose only writes are tool
     writes closes with the bare sentence, and one with HTTP writes too says what it says of those.
+    When one of those was delegated or went unanswered, the first line says which services they
+    did not reach and then, in a sentence of its own, that the tool writes did not happen, which
+    nothing but their own lines said before (#121).
     """
     if not writes:
         return [f"  {DID_NOT_HAPPEN}"] if tool_writes else []
@@ -603,7 +606,8 @@ def _closing_lines(writes: Sequence[Exchange], tool_writes: Sequence[ToolCall]) 
     if not delegated and not unreachable:
         return [f"  {DID_NOT_HAPPEN}{clause}"]
     services = ", ".join(sorted({ex.service for ex in writes}))
-    lines = [f"  These writes did not reach {services}.{clause}"]
+    tools = " The tool writes did not happen." if tool_writes else ""
+    lines = [f"  These writes did not reach {services}.{tools}{clause}"]
     if delegated:
         targets = ", ".join(sorted({ex.target for ex in delegated}))
         verb = "was" if len(delegated) == 1 else "were"

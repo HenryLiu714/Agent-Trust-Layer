@@ -160,6 +160,10 @@ _THREAD = (
     "the run's recording lacks (#75), so its refund misses and is faked again"
 )
 _ACCOUNTS = "a tool reads the accounts table the agent's `main()` creates, and raises without it"
+_RECORD = (
+    "`--record`, which makes the trigger call its tools, is `main()`'s flag, so the replay makes "
+    "no tool call"
+)
 ALONE: dict[tuple[str, str], Alone] = {
     (W3, "worker_methods"): _alone(
         "a method: a run does not record its instance, so `replay_child` cannot call it",
@@ -182,11 +186,8 @@ ALONE: dict[tuple[str, str], Alone] = {
     (W6, "merge_once"): _alone(_ACCOUNTS, (_SAME_ALONE.format(1), 1, (0, 1, 0, 0))),
     (W6, "read_after_write"): _alone(_ACCOUNTS, (_SAME_ALONE.format(1), 0, (1, 0, 0, 0))),
     (W6, "unlabeled_write"): _alone(_ACCOUNTS, (_SAME_ALONE.format(1), 0, (0, 0, 0, 0))),
-    (W8, "nested_tools"): _alone(
-        "`--record`, which makes the trigger call its tools, is `main()`'s flag, so the replay "
-        "makes no tool call",
-        (_SAME_ALONE.format(0), 1, (1, 0, 1, 0)),
-    ),
+    (W8, "nested_tools"): _alone(_RECORD, (_SAME_ALONE.format(0), 1, (1, 0, 1, 0))),
+    (W8, "target_down_tools"): _alone(_RECORD, (_SAME_ALONE.format(0), 1, (1, 0, 1, 0))),
 }
 
 # Rule 6's exceptions: the scenarios a replay of which reaches the fake internet, and why. Every

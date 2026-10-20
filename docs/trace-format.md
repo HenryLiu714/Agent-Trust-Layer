@@ -366,6 +366,9 @@ where a shadow run's opens `irimi shadow · run`, so the block names the command
 error is the agent's own `str(exc)`, and printed raw it could break a line or drive the terminal.
 `runs list` counts each run's exchanges and writes from its events loaded without their bodies
 (`StoreReader.load_run(run_id, bodies=False)`), which still checks every blob exists at its size.
+A run that cannot be read is named with the file its refusal came from, and in an `events.jsonl`
+the line: one that does not parse, one that parses but does not decode, and one whose blob is
+missing alike (#134).
 
 The live summary covers every exchange the proxy saw while the command ran, whatever run each one
 named; a stored run holds only its own events. The two are the same block when the agent sends no

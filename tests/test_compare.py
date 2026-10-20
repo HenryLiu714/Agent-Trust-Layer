@@ -439,8 +439,9 @@ def test_a_damaged_run_exits_2_and_names_it(home, capfd):
         blob.unlink()
     assert main(["compare", "a", "b"]) == compare.TROUBLE
     out, err = capfd.readouterr()
+    events = home / "store" / "runs" / "a" / "events.jsonl"
     assert out == ""
-    assert err.startswith("error: run a could not be read: blob ")
+    assert err.startswith(f"error: run a could not be read: {events}, line 1: blob ")
 
 
 def test_a_store_named_with_store_is_the_one_read(home, capfd, tmp_path):

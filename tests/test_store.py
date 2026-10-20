@@ -1322,6 +1322,39 @@ def test_a_damaged_line_that_is_not_the_last_is_a_trace_format_error(root, key):
         StoreReader(root).load_run("r1")
 
 
+def test_every_refusal_names_its_file_and_its_line(root, key):
+    """A line that parses but does not decode is named by its file and line, as one that does not
+    parse is: in a run of thousands of events, `'seq' is a string` alone cannot be found. A missing
+    blob is named by the line whose event refers to it, and a run.json's refusal by its file
+    (#134)."""
+    s = DirectoryStore(root, key)
+    s.start_run(_record("r1"))
+    s.record(_exchange("r1", "/a"))
+    s.record(_exchange("r1", "/b", answer=b"a body"))
+    s.close()
+    events = root / "runs/r1/events.jsonl"
+    first, second = events.read_text().splitlines()
+    events.write_text(first + "\n" + second.replace('"seq": 2', '"seq": "2"') + "\n")
+    reader = StoreReader(root)
+    with pytest.raises(TraceFormatError) as refused:
+        reader.load_run("r1")
+    assert str(refused.value) == f"{events}, line 2: 'seq' is a string, not an integer"
+    events.write_text(first + "\n" + second + "\n")
+    blob = root / "blobs" / trace.body_ref(b"a body").sha256
+    blob.unlink()
+    for bodies in (True, False):
+        with pytest.raises(TraceFormatError) as refused:
+            reader.load_run("r1", bodies=bodies)
+        assert str(refused.value).startswith(f"{events}, line 2: blob {blob.name} is missing: ")
+    record = root / "runs/r1/run.json"
+    record.write_text(
+        record.read_text().replace('"engine_version": "0.0.0"', '"engine_version": 0')
+    )
+    with pytest.raises(TraceFormatError) as refused:
+        reader.load_run("r1")
+    assert str(refused.value) == f"{record}: 'engine_version' is an integer, not a string"
+
+
 def test_a_run_id_is_never_answered_by_its_other_spelling(root, key):
     """On a case-insensitive filesystem `run1` opens `Run1/`: that is another run."""
     s = DirectoryStore(root, key)

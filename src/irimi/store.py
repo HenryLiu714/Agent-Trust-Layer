@@ -226,14 +226,13 @@ def _read_run_json(directory: Path) -> RunRecord:
     OSError when the file cannot be read now, and TraceFormatError, and nothing else, for what it
     holds when this irimi cannot read that: a newer version, bytes that are not UTF-8 or JSON
     (ValueErrors), or JSON nested past the parser's depth (a RecursionError, which would otherwise
-    escape `list_runs` and hide every other run) (#70)."""
+    escape `list_runs` and hide every other run) (#70). Every refusal names the file, a decoder's
+    as well as the parser's: `'name' is a list` alone does not say which run.json it is (#134)."""
     path = directory / RUN_FILE
     data = path.read_bytes()
     try:
         return trace.run_from_json(json.loads(data.decode("utf-8")))
-    except TraceFormatError:
-        raise
-    except (ValueError, RecursionError) as exc:
+    except (ValueError, RecursionError) as exc:  # TraceFormatError is a ValueError
         raise TraceFormatError(f"{path}: {exc}") from exc
 
 
@@ -1064,7 +1063,15 @@ class StoreReader:
             raise TraceFormatError(f"{directory / RUN_FILE}: {exc}") from exc
 
     def _events(self, path: Path, get_body: trace.GetBody) -> list[Event]:
-        numbered = [trace.event_from_json(d, get_body) for d in _lines(path)]
+        numbered = []
+        for line, d in _lines(path):
+            # Every refusal names its file and line, as a line that does not parse does: in a run
+            # of thousands of events, `'name' is a list` alone cannot be found. A missing blob is
+            # named by the line whose event refers to it (#134).
+            try:
+                numbered.append(trace.event_from_json(d, get_body))
+            except TraceFormatError as exc:
+                raise TraceFormatError(f"{path}, line {line}: {exc}") from exc
         return [event for _, event in sorted(numbered, key=lambda pair: pair[0])]
 
     def _get_body(self, ref: BodyRef) -> bytes:
@@ -1087,9 +1094,10 @@ class StoreReader:
         return b""
 
 
-def _lines(path: Path) -> Iterator[Any]:
-    """Each line of an `events.jsonl`, parsed. A final line with no newline that does not parse
-    was cut off by a crash mid-write, and is skipped; any other that does not parse is damage."""
+def _lines(path: Path) -> Iterator[tuple[int, Any]]:
+    """Each line of an `events.jsonl`, parsed, after its line number from 1. A final line with no
+    newline that does not parse was cut off by a crash mid-write, and is skipped; any other that
+    does not parse is damage."""
     if not path.exists():
         return
     data = path.read_bytes()
@@ -1098,8 +1106,9 @@ def _lines(path: Path) -> Iterator[Any]:
         if not line:
             continue
         try:
-            yield json.loads(line)
+            parsed = json.loads(line)
         except (ValueError, RecursionError) as exc:
             if i == len(lines) - 1:  # no newline after it: the crash's half line
                 return
             raise TraceFormatError(f"{path}, line {i + 1}: {exc}") from exc
+        yield i + 1, parsed

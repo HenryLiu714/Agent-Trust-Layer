@@ -5,8 +5,11 @@ The labels are the calls in `examples/workflows/w01_ticket_triage/agent.py`; `#N
 
 import dataclasses
 import json
+import os
 import re
 import shutil
+import subprocess
+import sys
 
 import pytest
 
@@ -25,6 +28,7 @@ from examples.workflows.w01_ticket_triage.agent import (
     handle_ticket,
 )
 from examples.workflows.w01_ticket_triage.scenarios import CUSTOMER
+from irimi import paths
 from irimi.trace import ErrorInfo, ToolCall, Trigger
 
 W = "w01_ticket_triage"
@@ -316,8 +320,9 @@ def test_irimi_compare_says_which_run_it_could_not_read(shared_store_run, tmp_pa
     assert (code, out) == (2, [])
     [line] = err
     missing_blob = re.fullmatch(
-        rf"error: run {a} could not be read: blob ([0-9a-f]{{64}}) is missing: \[Errno 2\] No "
-        rf"such file or directory: '{re.escape(str(copy))}/blobs/([0-9a-f]{{64}})'",
+        rf"error: run {a} could not be read: {re.escape(str(copy))}/runs/{a}/events\.jsonl, line "
+        rf"\d+: blob ([0-9a-f]{{64}}) is missing: \[Errno 2\] No such file or directory: "
+        rf"'{re.escape(str(copy))}/blobs/([0-9a-f]{{64}})'",
         line,
     )
     assert missing_blob is not None and missing_blob[1] == missing_blob[2], line
@@ -356,6 +361,65 @@ def test_irimi_compare_reads_a_run_whose_last_line_a_crash_cut(shared_store_run,
         ],
         [],
     )
+
+
+def _irimi_process(result, *argv: str) -> subprocess.CompletedProcess[str]:
+    """`irimi <argv>` in a process of its own, over `result`'s `IRIMI_HOME` and working directory,
+    as its user types it: unlike `Result.command`, its stderr holds what irimi's logger warns, as
+    `StoreReader.list_runs` warns of a run it skips (#134)."""
+    return subprocess.run(
+        [sys.executable, "-m", "irimi", *argv],
+        env={**os.environ, paths.IRIMI_HOME_ENV: str(result.home)},
+        cwd=result.cwd,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+
+def test_runs_show_and_list_name_the_file_and_line_of_a_damaged_event(run_workflow, tmp_path):
+    """`full_refund`'s run in a copy of its store, its reply tool call's `name` made a list: a line
+    that parses but does not decode, which `runs show` and `runs list` name by its file and line,
+    as they name one that does not parse; and its run.json's `engine_version` made a list, which
+    `runs show` names by its file, and `runs list`, which skips the run, warns of by its file
+    (#134)."""
+    result = run_workflow(W, "full_refund", "shadow")
+    run = result.one("run.start")["run"]
+    copy = tmp_path / "store"
+    shutil.copytree(result.store_root(), copy)
+    events = copy / "runs" / run / "events.jsonl"
+    lines = events.read_text().splitlines(keepends=True)
+    [reply] = [i for i, line in enumerate(lines) if f'"name": "{AGENT}.send_reply"' in line]
+    damaged = lines[reply].replace(f'"name": "{AGENT}.send_reply"', '"name": ["send_reply"]')
+    events.write_text("".join([*lines[:reply], damaged, *lines[reply + 1 :]]))
+    refused = f"could not be read: {events}, line {reply + 1}: 'name' is a list, not a string"
+    assert result.runs("show", run, "--store", str(copy)) == (
+        1,
+        [],
+        [f"error: run {run} {refused}"],
+    )
+    code, out, err = result.runs("list", "--store", str(copy))
+    assert (code, err) == (0, [f"warning: run {run} {refused}"])
+    [listed] = [line for line in out if line.startswith(f"{run}  ")]
+    assert listed.endswith("  ? exchanges  ? writes"), listed
+    events.write_text("".join(lines))
+    record = copy / "runs" / run / "run.json"
+    stored = json.loads(record.read_text())
+    record.write_text(json.dumps({**stored, "engine_version": [stored["engine_version"]]}))
+    refused = f"{record}: 'engine_version' is a list, not a string"
+    assert result.runs("show", run, "--store", str(copy)) == (
+        1,
+        [],
+        [f"error: run {run} could not be read: {refused}"],
+    )
+    listed = _irimi_process(result, "runs", "list", "--store", str(copy))
+    assert (listed.returncode, listed.stderr) == (
+        0,
+        f"irimi: skipping stored run {run}: {refused}\n",
+    )
+    others = [r.run_id for r in result.stored().list_runs() if r.run_id != run]
+    assert [line.split()[0] for line in listed.stdout.splitlines()] == others != []
 
 
 # ------------------------------------------------------------------------------- replay (#82)

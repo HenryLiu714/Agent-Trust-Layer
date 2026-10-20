@@ -236,7 +236,8 @@ def test_runs_list_names_a_damaged_run_and_still_lists_the_others(home, capfd):
         f"handbuilt  {_local(HAND_BUILT_AT)}  -  incomplete  sdk  refund_ticket  "
         "? exchanges  ? writes"
     ]
-    assert err.startswith("warning: run handbuilt could not be read: blob ")
+    events = home / "store" / "runs" / "handbuilt" / "events.jsonl"
+    assert err.startswith(f"warning: run handbuilt could not be read: {events}, line 1: blob ")
 
 
 def _ended_run(run_id: str, started_at: float, **changes) -> RunRecord:
@@ -606,7 +607,7 @@ def test_runs_show_and_list_name_an_event_nested_too_deep_to_quote_as_damage(hom
     refused = "error: run handbuilt could not be read: "
     assert out == "" and err.startswith(refused) and err.count("\n") == 1 and "[[" not in err
     if depth == _READ_EVERYWHERE:
-        assert err == refused + "'name' is a list, not a string\n"
+        assert err == f"{refused}{events}, line 2: 'name' is a list, not a string\n"
     assert main(["runs", "list"]) == 0
     out, err = capfd.readouterr()
     assert out == (
@@ -627,7 +628,8 @@ def test_runs_show_names_a_run_json_nested_too_deep_to_quote_as_damage(home, cap
     assert main(["runs", "show", "handbuilt"]) == 1
     assert capfd.readouterr() == (
         "",
-        "error: run handbuilt could not be read: 'sdk_version' is a list, not a string\n",
+        f"error: run handbuilt could not be read: {run_json}: 'sdk_version' is a list, not a "
+        "string\n",
     )
     assert main(["runs", "list"]) == 0
     assert capfd.readouterr().out == f"no runs in {home / 'store'}\n"

@@ -59,6 +59,7 @@ import logging
 import os
 import queue
 import secrets
+import stat
 import threading
 import time
 from collections import Counter
@@ -226,14 +227,13 @@ def _read_run_json(directory: Path) -> RunRecord:
     OSError when the file cannot be read now, and TraceFormatError, and nothing else, for what it
     holds when this irimi cannot read that: a newer version, bytes that are not UTF-8 or JSON
     (ValueErrors), or JSON nested past the parser's depth (a RecursionError, which would otherwise
-    escape `list_runs` and hide every other run) (#70)."""
+    escape `list_runs` and hide every other run) (#70). Every refusal names the file, a decoder's
+    as well as the parser's: `'name' is a list` alone does not say which run.json it is (#134)."""
     path = directory / RUN_FILE
     data = path.read_bytes()
     try:
         return trace.run_from_json(json.loads(data.decode("utf-8")))
-    except TraceFormatError:
-        raise
-    except (ValueError, RecursionError) as exc:
+    except (ValueError, RecursionError) as exc:  # TraceFormatError is a ValueError
         raise TraceFormatError(f"{path}: {exc}") from exc
 
 
@@ -296,7 +296,7 @@ class _Run:
     dir: Path | None
     record: RunRecord | None
     next_seq: int
-    writable: bool  # False: its run.json is another schema version, so nothing is appended
+    writable: bool  # False: its run.json is another version or damaged, so nothing is appended
     # The `dropped_events` its run.json held when this process first touched it: drops of an
     # earlier process, which this one adds its own to.
     dropped_before: int = 0
@@ -710,7 +710,10 @@ class DirectoryStore:
     def _open(self, events: Path, directory: Path | None) -> _Run:
         """Start tracking a run. An existing directory - a serve-mode restart - resumes its `seq`
         from its last readable line, after truncating a half-written one, and is never appended
-        to when its run.json is another schema version (docs/trace-format.md, "Versioning")."""
+        to when its run.json is another schema version (docs/trace-format.md, "Versioning") or
+        cannot be decoded: damage, which since #167 includes a `replay_of` that is no run id or
+        disagrees with `mode`. Its events and end are dropped and counted, and the record is left
+        as it was found, never rewritten as a header run's over the damage."""
         _mkdirs(events.parent)
         record: RunRecord | None = None
         writable = True
@@ -1008,18 +1011,25 @@ class StoreReader:
 
     def list_runs(self) -> list[RunRecord]:
         """Every run, newest `started_at` first and a None `started_at` last. A run.json this
-        irimi cannot read - a newer schema version - is skipped with a WARNING, so one run
-        cannot hide the others. So is one that names another run than its directory does:
-        `load_run` would refuse that id, so listing it would name a run that cannot be shown
-        (#70)."""
+        irimi cannot read - a newer schema version, damage, or one it may not open - is skipped
+        with a WARNING, so one run cannot hide the others. So is one that names another run than
+        its directory does: `load_run` would refuse that id, so listing it would name a run that
+        cannot be shown (#70). A store with no `runs/` holds no run; one irimi may not list
+        raises its OSError (#142)."""
         records = []
-        runs = sorted(self.layout.runs.iterdir()) if self.layout.runs.is_dir() else []
+        try:
+            # `Path.is_dir` read a store irimi may not enter as none, so `runs list` said it held
+            # no runs (#142).
+            runs = sorted(self.layout.runs.iterdir())
+        except (FileNotFoundError, NotADirectoryError):
+            runs = []
         for directory in runs:
-            if not (directory / RUN_FILE).is_file():
-                continue
+            # One irimi may not read is skipped with a warning too, never silently (#142).
             try:
-                record = self._record(directory)
-            except TraceFormatError as exc:
+                if not _holds_run_file(directory):
+                    continue
+                record = _read_run_json(directory)
+            except (TraceFormatError, OSError) as exc:
                 logger.warning("irimi: skipping stored run %s: %s", directory.name, exc)
                 continue
             if record.run_id != directory.name:
@@ -1035,8 +1045,10 @@ class StoreReader:
 
     def load_run(self, run_id: str, *, bodies: bool = True) -> StoredRun:
         """One run, its events in `seq` order. `UNATTRIBUTED` gives the unattributed events under
-        `header_record`. Raises RunNotFound for an id with no run, and TraceFormatError for a
-        damaged run: an unparseable line other than a crash's truncated last one, a missing blob.
+        `header_record`. Raises RunNotFound for an id with no run, TraceFormatError for a
+        damaged run: an unparseable line other than a crash's truncated last one, a missing blob;
+        and OSError for one irimi may not read, its directory or a file in it, which is not a
+        missing run (#142).
 
         `bodies=False` leaves every body empty and reads no blob, though each is still checked to
         exist at its size, so a missing or resized blob is damage either way. It is for a caller
@@ -1049,22 +1061,24 @@ class StoreReader:
         if not trace.is_valid_run_id(run_id):
             raise RunNotFound(run_id)
         directory = self.layout.run_dir(run_id)
-        if not (directory / RUN_FILE).is_file():
+        if not _holds_run_file(directory):
             raise RunNotFound(run_id)
-        record = self._record(directory)
+        record = _read_run_json(directory)
         # On a case-insensitive filesystem `run1` opens `Run1/`: that is another run, not this one.
         if record.run_id != run_id:
             raise RunNotFound(run_id)
         return StoredRun(record, self._events(directory / EVENTS_FILE, get_body))
 
-    def _record(self, directory: Path) -> RunRecord:
-        try:
-            return _read_run_json(directory)
-        except OSError as exc:
-            raise TraceFormatError(f"{directory / RUN_FILE}: {exc}") from exc
-
     def _events(self, path: Path, get_body: trace.GetBody) -> list[Event]:
-        numbered = [trace.event_from_json(d, get_body) for d in _lines(path)]
+        numbered = []
+        for line, d in _lines(path):
+            # Every refusal names its file and line, as a line that does not parse does: in a run
+            # of thousands of events, `'name' is a list` alone cannot be found. A missing blob is
+            # named by the line whose event refers to it (#134).
+            try:
+                numbered.append(trace.event_from_json(d, get_body))
+            except TraceFormatError as exc:
+                raise TraceFormatError(f"{path}, line {line}: {exc}") from exc
         return [event for _, event in sorted(numbered, key=lambda pair: pair[0])]
 
     def _get_body(self, ref: BodyRef) -> bytes:
@@ -1087,19 +1101,32 @@ class StoreReader:
         return b""
 
 
-def _lines(path: Path) -> Iterator[Any]:
-    """Each line of an `events.jsonl`, parsed. A final line with no newline that does not parse
-    was cut off by a crash mid-write, and is skipped; any other that does not parse is damage."""
-    if not path.exists():
+def _holds_run_file(directory: Path) -> bool:
+    """Whether a run directory holds a run.json. An OSError other than its absence is raised:
+    `Path.is_file` reads one as False, and a run irimi may not read was reported missing (#142)."""
+    try:
+        return stat.S_ISREG((directory / RUN_FILE).stat().st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
+def _lines(path: Path) -> Iterator[tuple[int, Any]]:
+    """Each line of an `events.jsonl`, parsed, after its line number from 1. A final line with no
+    newline that does not parse was cut off by a crash mid-write, and is skipped; any other that
+    does not parse is damage. A file that is not there holds no line; one irimi may not read
+    raises its OSError, never reads as empty (#142)."""
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
         return
-    data = path.read_bytes()
     lines = data.split(b"\n")
     for i, line in enumerate(lines):
         if not line:
             continue
         try:
-            yield json.loads(line)
+            parsed = json.loads(line)
         except (ValueError, RecursionError) as exc:
             if i == len(lines) - 1:  # no newline after it: the crash's half line
                 return
             raise TraceFormatError(f"{path}, line {i + 1}: {exc}") from exc
+        yield i + 1, parsed

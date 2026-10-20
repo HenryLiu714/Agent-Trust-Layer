@@ -5,10 +5,13 @@ The labels are the calls in `examples/workflows/w01_ticket_triage/agent.py`; `#N
 
 import dataclasses
 import json
+import os
 import re
 import shlex
 import shutil
+import subprocess
 import sys
+import time
 
 import pytest
 
@@ -28,6 +31,7 @@ from examples.workflows.w01_ticket_triage.agent import (
     handle_ticket,
 )
 from examples.workflows.w01_ticket_triage.scenarios import CUSTOMER
+from irimi import paths
 from irimi.trace import ErrorInfo, ToolCall, Trigger
 
 W = "w01_ticket_triage"
@@ -319,8 +323,9 @@ def test_irimi_compare_says_which_run_it_could_not_read(shared_store_run, tmp_pa
     assert (code, out) == (2, [])
     [line] = err
     missing_blob = re.fullmatch(
-        rf"error: run {a} could not be read: blob ([0-9a-f]{{64}}) is missing: \[Errno 2\] No "
-        rf"such file or directory: '{re.escape(str(copy))}/blobs/([0-9a-f]{{64}})'",
+        rf"error: run {a} could not be read: {re.escape(str(copy))}/runs/{a}/events\.jsonl, line "
+        rf"\d+: blob ([0-9a-f]{{64}}) is missing: \[Errno 2\] No such file or directory: "
+        rf"'{re.escape(str(copy))}/blobs/([0-9a-f]{{64}})'",
         line,
     )
     assert missing_blob is not None and missing_blob[1] == missing_blob[2], line
@@ -359,6 +364,226 @@ def test_irimi_compare_reads_a_run_whose_last_line_a_crash_cut(shared_store_run,
         ],
         [],
     )
+
+
+def _irimi_process(
+    result, *argv: str, stdout: int = subprocess.PIPE, stderr: int = subprocess.PIPE
+) -> subprocess.CompletedProcess[str]:
+    """`irimi <argv>` in a process of its own, over `result`'s `IRIMI_HOME` and working directory,
+    as its user types it: unlike `Result.command`, its stderr holds what irimi's logger warns, as
+    `StoreReader.list_runs` warns of a run it skips (#134), and its stdout or stderr may be a pipe
+    whose reader has gone (`_closed_pipe`, #142)."""
+    return subprocess.run(
+        [sys.executable, "-m", "irimi", *argv],
+        env={**os.environ, paths.IRIMI_HOME_ENV: str(result.home)},
+        cwd=result.cwd,
+        stdout=stdout,
+        stderr=stderr,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+
+def _closed_pipe() -> int:
+    """The write end of a pipe whose read end is closed, as `irimi ... | head -1` leaves it once
+    `head` has its line: every write to it fails, from the first (#142)."""
+    read, write = os.pipe()
+    os.close(read)
+    return write
+
+
+def test_runs_show_and_list_name_the_file_and_line_of_a_damaged_event(run_workflow, tmp_path):
+    """`full_refund`'s run in a copy of its store, its reply tool call's `name` made a list: a line
+    that parses but does not decode, which `runs show` and `runs list` name by its file and line,
+    as they name one that does not parse; and its run.json's `engine_version` made a list, which
+    `runs show` names by its file, and `runs list`, which skips the run, warns of by its file
+    (#134); and that warning into a stderr whose reader has gone, which ends `runs list` with 141,
+    its listing whole (#142)."""
+    result = run_workflow(W, "full_refund", "shadow")
+    run = result.one("run.start")["run"]
+    copy = tmp_path / "store"
+    shutil.copytree(result.store_root(), copy)
+    events = copy / "runs" / run / "events.jsonl"
+    lines = events.read_text().splitlines(keepends=True)
+    [reply] = [i for i, line in enumerate(lines) if f'"name": "{AGENT}.send_reply"' in line]
+    damaged = lines[reply].replace(f'"name": "{AGENT}.send_reply"', '"name": ["send_reply"]')
+    events.write_text("".join([*lines[:reply], damaged, *lines[reply + 1 :]]))
+    refused = f"could not be read: {events}, line {reply + 1}: 'name' is a list, not a string"
+    assert result.runs("show", run, "--store", str(copy)) == (
+        1,
+        [],
+        [f"error: run {run} {refused}"],
+    )
+    code, out, err = result.runs("list", "--store", str(copy))
+    assert (code, err) == (0, [f"warning: run {run} {refused}"])
+    [listed] = [line for line in out if line.startswith(f"{run}  ")]
+    assert listed.endswith("  ? exchanges  ? writes"), listed
+    events.write_text("".join(lines))
+    record = copy / "runs" / run / "run.json"
+    stored = json.loads(record.read_text())
+    record.write_text(json.dumps({**stored, "engine_version": [stored["engine_version"]]}))
+    refused = f"{record}: 'engine_version' is a list, not a string"
+    assert result.runs("show", run, "--store", str(copy)) == (
+        1,
+        [],
+        [f"error: run {run} could not be read: {refused}"],
+    )
+    listed = _irimi_process(result, "runs", "list", "--store", str(copy))
+    assert (listed.returncode, listed.stderr) == (
+        0,
+        f"irimi: skipping stored run {run}: {refused}\n",
+    )
+    others = [r.run_id for r in result.stored().list_runs() if r.run_id != run]
+    assert [line.split()[0] for line in listed.stdout.splitlines()] == others != []
+    # That warning into a stderr whose reader has gone, the listing read whole: the logger
+    # swallows the failed write, which stays buffered, and the interpreter's flush of it at exit
+    # made the exit 120 (#142).
+    write = _closed_pipe()
+    try:
+        quiet = _irimi_process(result, "runs", "list", "--store", str(copy), stderr=write)
+    finally:
+        os.close(write)
+    assert (quiet.returncode, quiet.stdout, quiet.stderr) == (141, listed.stdout, None)
+
+
+def test_runs_show_and_compare_end_quietly_when_their_reader_goes_away(shared_store_run):
+    """`irimi compare A B | head -1` and `irimi runs show X | head -1` printed a BrokenPipeError
+    traceback and exited 120: each now ends at its reader's going, saying nothing, with the shell's
+    141, and so does `irimi --help`, which argparse prints; and so does each under `2>&1`, when
+    the first write that fails is the error it prints on stderr (#142)."""
+    full = shared_store_run(W, "full_refund")
+    half = shared_store_run(W, "half_refund")
+    a, b = (result.one("run.start")["run"] for result in (full, half))
+    root = str(half.store_root())
+    commands = [("compare", a, b, "--store", root), ("runs", "show", b, "--store", root)]
+    for argv in [*commands, ("--help",)]:
+        write = _closed_pipe()
+        try:
+            ended = _irimi_process(half, *argv, stdout=write)
+        finally:
+            os.close(write)
+        assert (ended.returncode, ended.stderr) == (141, ""), argv
+    # `2>&1 | head -1`, its reader gone before irimi's first line, which is an error on stderr:
+    # 141 as well, where the stderr still buffered at exit made it 120.
+    refused = [
+        ("compare", a, "absent", "--store", root),
+        ("runs", "show", "absent", "--store", root),
+    ]
+    for argv in refused:
+        write = _closed_pipe()
+        try:
+            ended = _irimi_process(half, *argv, stdout=write, stderr=write)
+        finally:
+            os.close(write)
+        assert ended.returncode == 141, argv
+
+
+# A command `irimi shadow` runs that says it has started, then waits for the test to say go, and
+# exits 5: the test closes irimi's stdout between the two. W1's agent cannot be it here: its fake
+# internet resolves names only in the test's own process.
+WAITING_COMMAND = """import pathlib, sys, time
+started, go = map(pathlib.Path, sys.argv[1:])
+started.write_text("")
+while not go.exists():
+    time.sleep(0.02)
+raise SystemExit(5)
+"""
+
+
+def test_irimi_shadow_whose_reader_goes_away_ends_quietly_with_its_run_stored(
+    shared_store_run, tmp_path
+):
+    """The real `irimi shadow`, in its own process, over W1's home and a copy of the store the
+    full and half refunds recorded into (#142). Its stdout's reader gone before the banner: 141
+    and nothing said, the command never started, and no run stored. Gone while the command runs:
+    the run is ended with the command's exit code before the summary's write fails, the engine
+    stopped and the store closed, and irimi exits 141 where Python's flush at exit made it 120;
+    the store's other runs are as they were."""
+    half = shared_store_run(W, "half_refund")
+    copy = tmp_path / "store"
+    shutil.copytree(half.store_root(), copy)
+    before = {r.run_id for r in half.stored().list_runs()}
+    started, go = tmp_path / "started", tmp_path / "go"
+    shadow = ["shadow", "--port", "0", "--store", str(copy), "--", sys.executable, "-c"]
+    shadow += [WAITING_COMMAND, str(started), str(go)]
+    write = _closed_pipe()
+    try:
+        ended = _irimi_process(half, *shadow, stdout=write)
+    finally:
+        os.close(write)
+    assert (ended.returncode, ended.stderr, started.exists()) == (141, "", False)
+    stored = _irimi_process(half, "runs", "list", "--store", str(copy), "--limit", "1000")
+    assert {line.split()[0] for line in stored.stdout.splitlines()} == before
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "irimi", *shadow],
+        env={**os.environ, paths.IRIMI_HOME_ENV: str(half.home)},
+        cwd=half.cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert proc.stdout is not None and proc.stdout.readline().startswith("irimi shadow · run ")
+        while not started.exists() and proc.poll() is None:
+            time.sleep(0.02)
+        proc.stdout.close()
+        go.write_text("")
+        _, err = proc.communicate(timeout=60)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert (proc.returncode, err) == (141, "")
+    listed = _irimi_process(half, "runs", "list", "--store", str(copy), "--limit", "1000")
+    [new] = [line for line in listed.stdout.splitlines() if line.split()[0] not in before]
+    assert new.split("  ")[3:5] == ["error", "process"], new
+    shown = _irimi_process(half, "runs", "show", new.split()[0], "--store", str(copy))
+    assert "exit code: 5" in shown.stdout.splitlines(), shown.stdout
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a directory whatever its mode")
+def test_a_run_irimi_may_not_read_is_named_unreadable_not_missing(shared_store_run, tmp_path):
+    """`half_refund`'s run made `chmod 0` in a copy of the store `full_refund` recorded into too:
+    `runs show` exits 1 and `compare` 2, each saying it `could not be read` and why, where both
+    said `no run`, and `runs list` warns that it skips it, where it left it out without a word;
+    and the copy itself made `chmod 0`, which `runs list` said held no runs (#142)."""
+    full = shared_store_run(W, "full_refund")
+    half = shared_store_run(W, "half_refund")
+    a, b = (result.one("run.start")["run"] for result in (full, half))
+    copy = tmp_path / "store"
+    shutil.copytree(half.store_root(), copy)
+    shut = copy / "runs" / b
+    why = f"[Errno 13] Permission denied: '{shut}/run.json'"
+    others = [r.run_id for r in half.stored().list_runs() if r.run_id != b]
+    shut.chmod(0)
+    try:
+        refused = [f"error: run {b} could not be read: {why}"]
+        assert half.runs("show", b, "--store", str(copy)) == (1, [], refused)
+        assert half.command("compare", a, b, "--store", str(copy)) == (2, [], refused)
+        # Every run: the store is the session's, which other tests record into.
+        listed = _irimi_process(half, "runs", "list", "--store", str(copy), "--limit", "1000")
+    finally:
+        shut.chmod(0o700)
+    assert (listed.returncode, listed.stderr) == (0, f"irimi: skipping stored run {b}: {why}\n")
+    assert [line.split()[0] for line in listed.stdout.splitlines()] == others
+    assert a in others
+    # The store itself: `runs list` says why it could not list it, where it said `no runs in`
+    # the store, as if it held none, and `runs show` that a run in it could not be read.
+    copy.chmod(0)
+    try:
+        assert half.runs("list", "--store", str(copy)) == (
+            1,
+            [],
+            [f"error: [Errno 13] Permission denied: '{copy / 'runs'}'"],
+        )
+        why = f"[Errno 13] Permission denied: '{copy / 'runs' / a / 'run.json'}'"
+        assert half.runs("show", a, "--store", str(copy)) == (
+            1,
+            [],
+            [f"error: run {a} could not be read: {why}"],
+        )
+    finally:
+        copy.chmod(0o700)
 
 
 # ------------------------------------------------------------------------------- replay (#82)
@@ -1032,6 +1257,54 @@ def test_a_replay_is_replayed_by_the_trigger_it_called(replayed, tmp_path, promp
         second.process_run_id(): f"replay of {first.process_run_id()}",
     }
     assert len(recording) == 1
+
+
+# The full refund's replay's run.json damaged as #167 says one can be, and how it is refused: a
+# `replay_of` that no run id could be, by its length and never quoted, and a `mode` and
+# `replay_of` that disagree.
+DAMAGED_REPLAYS = {
+    "five-megabytes": ({"replay_of": "x" * 5_000_000}, "is not a run id (5000000 characters)"),
+    "a-path": ({"replay_of": "../x"}, "is not a run id (4 characters)"),
+    "empty": ({"replay_of": ""}, "is not a run id (0 characters)"),
+    "two-spaces": ({"replay_of": "a  b"}, "is not a run id (4 characters)"),
+    "names-no-run": ({"replay_of": None}, "'mode' is 'replay', but 'replay_of' is null"),
+    "a-shadow-run": ({"mode": "shadow"}, "'replay_of' names a run, but 'mode' is 'shadow'"),
+}
+
+
+@pytest.mark.parametrize("damage", DAMAGED_REPLAYS)
+def test_a_replay_whose_run_json_names_no_run_it_replayed_is_refused(replayed, tmp_path, damage):
+    """The full refund's replay, its run.json damaged in a copy of its store: `runs list` skips the
+    run with a warning naming the file and why, and lists the others as it did, where a 5 MB
+    `replay_of` was printed whole on the run's line and an empty one or one with two spaces broke
+    its columns; `runs show` and `irimi replay` of the replay each say it could not be read
+    (#167)."""
+    _, replay = replayed(W, "full_refund")
+    run = replay.process_run_id()
+    copy = tmp_path / "store"
+    shutil.copytree(replay.store_root(), copy)
+    record = copy / "runs" / run / "run.json"
+    changes, why = DAMAGED_REPLAYS[damage]
+    record.write_text(json.dumps(json.loads(record.read_text()) | changes))
+    refused = f"{record}: {why}" if why.startswith("'") else f"{record}: 'replay_of' {why}"
+    damaged = dataclasses.replace(replay, store=copy)
+    # In this process the store's warning goes to pytest's log capture, not to stderr, so
+    # `listed_attributions` sees none; `runs list` in a process of its own, last, prints it.
+    listed = replay.listed_attributions()
+    assert listed[run].startswith("replay of ")
+    assert damaged.listed_attributions() == {r: a for r, a in listed.items() if r != run}
+    shown = damaged.runs("show", run, "--store", str(copy))
+    assert shown == (1, [], [f"error: run {run} could not be read: {refused}"])
+    assert damaged.command("replay", run, "--store", str(copy)) == (
+        2,
+        [],
+        [f"error: run {run} could not be read: {refused}"],
+    )
+    warned = _irimi_process(replay, "runs", "list", "--store", str(copy))
+    assert (warned.returncode, warned.stderr) == (
+        0,
+        f"irimi: skipping stored run {run}: {refused}\n",
+    )
 
 
 def test_a_run_recorded_into_a_shared_store_is_replayed_into_a_copy_of_it(

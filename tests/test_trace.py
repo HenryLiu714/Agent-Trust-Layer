@@ -536,6 +536,37 @@ def test_a_replay_names_the_run_it_replays():
     assert trace.run_from_json(trace.run_to_json(record)) == record
 
 
+@pytest.mark.parametrize(
+    "replay_of",
+    ["x" * 5_000_000, "../x", "", "a  b", "run\n", "a\nb\x1b", "x" * 65],
+    ids=["five-megabytes", "a-path", "empty", "two-spaces", "a-newline", "control", "too-long"],
+)
+def test_a_replay_of_that_is_no_run_id_is_refused_by_its_length(replay_of):
+    """irimi only ever writes a stored run's id in `replay_of`, but a damaged run.json can hold
+    anything: a 5 MB string `runs list` printed whole, a path `irimi replay` looked up as a run,
+    and an empty one or one with two spaces that broke `runs list`'s columns. Each is held to
+    `is_valid_run_id`, as the run's own id is, and refused without being quoted (#167)."""
+    with pytest.raises(TraceFormatError) as refused:
+        trace.run_from_json(_encoded_run() | {"mode": "replay", "replay_of": replay_of})
+    assert str(refused.value) == f"'replay_of' is not a run id ({len(replay_of)} characters)"
+
+
+@pytest.mark.parametrize(
+    ("mode", "replay_of", "refusal"),
+    [
+        ("replay", None, "'mode' is 'replay', but 'replay_of' is null"),
+        ("shadow", "4f1c9a2b7d3e8a60", "'replay_of' names a run, but 'mode' is 'shadow'"),
+    ],
+)
+def test_a_run_whose_mode_and_replay_of_disagree_is_refused(mode, replay_of, refusal):
+    """The store stamps a run's `mode` and `replay_of` by one rule, `mode_for`, so a record where
+    they disagree is damage: `runs list` read one and `runs show` another, and printed it half as
+    a replay (#167)."""
+    with pytest.raises(TraceFormatError) as refused:
+        trace.run_from_json(_encoded_run() | {"mode": mode, "replay_of": replay_of})
+    assert str(refused.value) == refusal
+
+
 def test_a_recorded_outcome_round_trips_and_holds_a_tool_call_s_outcome():
     """What the control endpoint answers a replay's lookup with, and the SDK reads (#83)."""
     call = dataclasses.replace(

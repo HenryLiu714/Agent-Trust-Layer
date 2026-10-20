@@ -193,7 +193,7 @@ An exchange's `started_at` and `ended_at` are `0.0` only on an exchange built wi
 | `error` | error or `null` | Why the run failed, when `outcome` is `"error"`. |
 | `exit_code` | integer or `null` | The child's exit code, set only for the `process` run. |
 | `dropped_events` | integer | Events the store could not write. `0` means the run is whole. |
-| `replay_of` | string or `null` | Added in v2 (#82). The run a replay answered this one from; `null` for a run that is no replay. Absent in a v1 run, and read then as `null`. |
+| `replay_of` | string or `null` | Added in v2 (#82). The run a replay answered this one from; `null` for a run that is no replay. Absent in a v1 run, and read then as `null`. A run id, as `run_id` is (`trace.is_valid_run_id`), set exactly when `mode` is `replay`: a record holding anything else is refused (#167). |
 
 A **trigger** (`trace.Trigger`):
 
@@ -366,6 +366,11 @@ where a shadow run's opens `irimi shadow · run`, so the block names the command
 error is the agent's own `str(exc)`, and printed raw it could break a line or drive the terminal.
 `runs list` counts each run's exchanges and writes from its events loaded without their bodies
 (`StoreReader.load_run(run_id, bodies=False)`), which still checks every blob exists at its size.
+A run that cannot be read is named with the file its refusal came from, and in an `events.jsonl`
+the line: one that does not parse, one that parses but does not decode, and one whose blob is
+missing alike (#134). A run irimi may not read (`chmod 0`) is one that cannot be read too, with
+the operating system's reason, never `no run`; `runs list` skips it with a warning, as it skips a
+run.json it cannot decode (#142).
 
 The live summary covers every exchange the proxy saw while the command ran, whatever run each one
 named; a stored run holds only its own events. The two are the same block when the agent sends no
@@ -381,7 +386,9 @@ sample workflows hold every scenario to that (`tests/workflows/test_stored_runs.
 `run.json`. Event lines carry none.
 
 - A run's `events.jsonl` is read under its `run.json`'s version. A writer never appends events to
-  a run whose `run.json` carries a `schema_version` other than its own.
+  a run whose `run.json` carries a `schema_version` other than its own, or one it cannot decode:
+  damage, which since #167 includes a `replay_of` that is no run id or disagrees with `mode`. It
+  drops and counts that run's events and its end, and leaves the `run.json` as it found it.
 - `unattributed/events.jsonl` has no `run.json`, and is read under the reader's own
   `trace.SCHEMA_VERSION`.
 - A decoder refuses a `schema_version` greater than its own, or less than 1, with

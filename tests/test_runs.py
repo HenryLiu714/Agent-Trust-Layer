@@ -236,7 +236,8 @@ def test_runs_list_names_a_damaged_run_and_still_lists_the_others(home, capfd):
         f"handbuilt  {_local(HAND_BUILT_AT)}  -  incomplete  sdk  refund_ticket  "
         "? exchanges  ? writes"
     ]
-    assert err.startswith("warning: run handbuilt could not be read: blob ")
+    events = home / "store" / "runs" / "handbuilt" / "events.jsonl"
+    assert err.startswith(f"warning: run handbuilt could not be read: {events}, line 1: blob ")
 
 
 def _ended_run(run_id: str, started_at: float, **changes) -> RunRecord:
@@ -323,8 +324,9 @@ def test_runs_list_and_show_name_the_run_a_replay_replayed(home, capfd):
 
 def test_a_damaged_replay_record_is_still_marked_and_prints_on_one_line():
     """No irimi writes a `mode: replay` run that names no run, or a `replay_of` that is not a run
-    id, but `runs list` reads what a hand-edited or damaged `run.json` holds (#100): the first is
-    still marked a replay, and the second is escaped as every stored text is (#154)."""
+    id, and since #167 the decoder refuses a run.json that holds either (the next test), but
+    `report` renders the record it is handed: the first is still marked a replay, and the second
+    is escaped as every stored text is (#154)."""
     unnamed = _ended_run("x", HAND_BUILT_AT, mode="replay")
     assert report.run_attribution(unnamed) == "process, replay"
     assert "mode: replay" in report.run_header_lines(unnamed)
@@ -333,6 +335,32 @@ def test_a_damaged_replay_record_is_still_marked_and_prints_on_one_line():
     assert "replay of: a\\nb\\x1b" in report.run_header_lines(odd)
     assert "\n" not in report.run_list_line(odd, [])
     assert report.run_attribution(_ended_run("z", HAND_BUILT_AT)) == "process"
+
+
+def test_a_replay_s_run_json_naming_no_run_is_skipped_by_list_and_refused_by_show(home, capfd):
+    """A `replay_of` with two spaces broke `runs list`'s columns, and a 5 MB one was printed whole
+    on its line. The decoder refuses one `is_valid_run_id` refuses, by its length (#167), so
+    `runs list` skips the run, as it skips any run.json it cannot read (#70), and `runs show`
+    names the file and why."""
+    s = DirectoryStore(home / "store", redact.load_key(home))
+    s.start_run(_ended_run("recorded", HAND_BUILT_AT))
+    s.close()
+    replays = DirectoryStore(home / "store", redact.load_key(home), replay_of="recorded")
+    replays.start_run(_ended_run("replayed", HAND_BUILT_AT + 5))
+    replays.close()
+    run_json = home / "store" / "runs" / "replayed" / "run.json"
+    for replay_of in ("a  b", "x" * 5_000_000):
+        run_json.write_text(json.dumps(json.loads(run_json.read_text()) | {"replay_of": replay_of}))
+        assert main(["runs", "list"]) == 0
+        assert capfd.readouterr().out == (
+            f"recorded  {_local(HAND_BUILT_AT)}  1.0s  ok  process  -  0 exchanges  0 writes\n"
+        )
+        assert main(["runs", "show", "replayed"]) == 1
+        assert capfd.readouterr() == (
+            "",
+            f"error: run replayed could not be read: {run_json}: 'replay_of' is not a run id "
+            f"({len(replay_of)} characters)\n",
+        )
 
 
 def test_runs_list_reads_no_body_to_count_a_run_s_events(home, capfd, monkeypatch):
@@ -606,7 +634,7 @@ def test_runs_show_and_list_name_an_event_nested_too_deep_to_quote_as_damage(hom
     refused = "error: run handbuilt could not be read: "
     assert out == "" and err.startswith(refused) and err.count("\n") == 1 and "[[" not in err
     if depth == _READ_EVERYWHERE:
-        assert err == refused + "'name' is a list, not a string\n"
+        assert err == f"{refused}{events}, line 2: 'name' is a list, not a string\n"
     assert main(["runs", "list"]) == 0
     out, err = capfd.readouterr()
     assert out == (
@@ -627,7 +655,8 @@ def test_runs_show_names_a_run_json_nested_too_deep_to_quote_as_damage(home, cap
     assert main(["runs", "show", "handbuilt"]) == 1
     assert capfd.readouterr() == (
         "",
-        "error: run handbuilt could not be read: 'sdk_version' is a list, not a string\n",
+        f"error: run handbuilt could not be read: {run_json}: 'sdk_version' is a list, not a "
+        "string\n",
     )
     assert main(["runs", "list"]) == 0
     assert capfd.readouterr().out == f"no runs in {home / 'store'}\n"

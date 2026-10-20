@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from irimi import __version__, ca, cli, paths, report, servicemap
-from irimi.cli import main
+from irimi.cli import BROKEN_PIPE_EXIT_CODE, main
 
 
 def test_version_flag(capsys):
@@ -20,6 +20,28 @@ def test_version_flag(capsys):
 def test_no_command_prints_help_and_fails(capsys):
     assert main([]) == 1
     assert "usage: irimi" in capsys.readouterr().out
+
+
+def test_a_stdout_closed_before_irimi_started_is_written_nothing(tmp_path, monkeypatch):
+    """Python makes `sys.stdout` None when fd 1 is closed at startup (`irimi runs list >&-`):
+    `print` writes nothing to it, and `main`'s flush of stdout (#142) must not raise there."""
+    monkeypatch.setattr(sys, "stdout", None)
+    assert main(["runs", "list", "--store", str(tmp_path)]) == 0
+
+
+class _GoneReader(io.StringIO):
+    """A stream whose reader has gone: every write fails as a closed pipe's does."""
+
+    def write(self, text: str) -> int:
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+def test_a_stderr_whose_reader_went_with_stdout_closed_ends_quietly(tmp_path, monkeypatch):
+    """`irimi runs show X >&- 2>&1`-like: the first write that fails is stderr's, and stdout is
+    None. That is the reader gone too (#142): 141, and nothing raised past `main`."""
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", _GoneReader())
+    assert main(["runs", "show", "absent", "--store", str(tmp_path)]) == BROKEN_PIPE_EXIT_CODE
 
 
 def test_python_m_irimi_is_the_command_and_importing_it_runs_nothing():
@@ -667,6 +689,70 @@ def test_shadow_closes_the_store_when_the_proxy_never_starts(home, monkeypatch, 
     assert "refused by the test" in capsys.readouterr().err
     assert spy.closed != []
     assert list((home / "store").iterdir()) == []  # no run began, so none is on disk
+
+
+class _ReaderGoneWhen(io.StringIO):
+    """stdout, whose reader goes away once `gone` is set: every later write fails as a closed
+    pipe's does (#142)."""
+
+    gone = False
+
+    def write(self, text: str) -> int:
+        if self.gone:
+            raise BrokenPipeError(32, "Broken pipe")
+        return super().write(text)
+
+
+@pytest.mark.parametrize("when", ["at-the-banner", "at-the-summary"])
+def test_a_reader_gone_costs_shadow_no_run_and_leaves_no_engine(home, monkeypatch, when):
+    """`irimi shadow -- cmd | head -1` (#142). A reader gone by the banner stops irimi before the
+    command starts, so no run is stored; one gone by the summary, once the command has ended,
+    finds the run ended with the command's exit code. Either way irimi exits 141 with the engine
+    stopped and the store closed: the write that failed was inside the `try` whose `finally`
+    stops them (`_under_the_engine`), or after it."""
+    import threading
+
+    from irimi import runner
+    from irimi.store import StoreReader
+
+    spy = _spy_on_the_store(monkeypatch)
+    out = _ReaderGoneWhen()
+    out.gone = when == "at-the-banner"
+    real_end = runner.end_process_run
+
+    def end_then_go(*args, **kwargs):
+        real_end(*args, **kwargs)
+        out.gone = True
+
+    monkeypatch.setattr(runner, "end_process_run", end_then_go)
+    monkeypatch.setattr(sys, "stdout", out)
+    before = set(threading.enumerate())
+    assert main(["shadow", *_child("raise SystemExit(3)")]) == BROKEN_PIPE_EXIT_CODE
+    assert spy.closed != []
+    assert [t for t in threading.enumerate() if t not in before and t.is_alive()] == []
+    stored = StoreReader(home / "store").list_runs()
+    if when == "at-the-banner":
+        assert stored == []
+    else:
+        assert [(r.outcome, r.exit_code) for r in stored] == [("error", 3)]
+
+
+def test_a_reader_gone_by_serve_s_banner_closes_its_store_and_releases_its_lock(home, monkeypatch):
+    """`irimi serve | head -1`, its reader gone before the banner (#142): 141, with the engine
+    stopped, the store closed and its `serve.lock` released, so the next serve may take it."""
+    import threading
+
+    from irimi.store import ServeLock
+
+    spy = _spy_on_the_store(monkeypatch)
+    out = _ReaderGoneWhen()
+    out.gone = True
+    monkeypatch.setattr(sys, "stdout", out)
+    before = set(threading.enumerate())
+    assert main(["serve", "--port", "0"]) == BROKEN_PIPE_EXIT_CODE
+    assert spy.closed != []
+    assert [t for t in threading.enumerate() if t not in before and t.is_alive()] == []
+    ServeLock.hold(home / "store").release()
 
 
 def test_a_ctrl_c_while_the_store_closes_still_prints_the_summary(home, monkeypatch, capsys):

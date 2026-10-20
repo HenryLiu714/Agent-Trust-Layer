@@ -214,10 +214,13 @@ And a refund the real service would have refused, from `w01_ticket_triage double
 when `irimi replay` calls a trigger, `IRIMI_REPLAY_CALL`, `IRIMI_REPLAY_ARGS_FILE` and
 `IRIMI_REPLAY_OUTCOME_FILE` (#84). That
 covers requests, httpx, urllib, curl and Node's fetch with no code change.
-The command's exit code is passed through. One process tree is one run; the subcommand is the only
-thing that chooses the mode. SIGTERM to `irimi shadow`, as a supervisor or a container runtime
-sends it, is passed to the command, and the command's exit then ends the run as any exit does:
-the run is stored with its code, what is queued is written, and the summary is printed (#77).
+The command's exit code is passed through, unless the reader of irimi's own output has gone
+(`irimi shadow -- ... | head -1`): irimi then exits 141 quietly, the run stored and ended if the
+command had started, and the command never started if the reader went during the banner (#142).
+One process tree is one run; the subcommand is the only thing that chooses the mode. SIGTERM to
+`irimi shadow`, as a supervisor or a container runtime sends it, is passed to the command, and the
+command's exit then ends the run as any exit does: the run is stored with its code, what is queued
+is written, and the summary is printed (#77).
 
 `IRIMI_CONTROL` is `http://127.0.0.1:<port>/_irimi`, irimi's control endpoint on the same listener.
 The SDK posts a run's start, its end and the tool calls the proxy cannot see there
@@ -718,7 +721,9 @@ irimi compare · 42e7ad03a867410b vs 5cf7f4695f22ce95 · a comparison, not a ver
   run compared with itself too. The totals count `?` rows as not compared.
 - **Exit code.** As `diff(1)`'s: 0 when every write is `=`, 1 when any is not, `?` included, and
   2 when a run is not in the store or cannot be read. A run compared with itself exits 0 unless
-  a write in it was cut. Both runs must be in one store, `--store DIR` or the default.
+  a write in it was cut. Both runs must be in one store, `--store DIR` or the default. Like every
+  irimi command, it stops quietly with 141 when the reader of its output goes away
+  (`irimi compare A B | head -1`).
 - **It is not replay.** Both runs happened, each against the world as it was then, so a
   difference can come from the world changing between them (a live read answered differently) or
   from the model sampling another answer, not only from the agent's code. Replay re-runs a stored

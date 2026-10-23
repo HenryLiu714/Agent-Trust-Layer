@@ -1,4 +1,4 @@
-"""`@sdk.tool` under replay (#83), against a real engine replaying a stored run.
+"""`@sdk.tool` under replay, against a real engine replaying a stored run.
 
 Each test records a run first, through a shadow engine and a real `DirectoryStore`, then starts a
 second engine answering from that run - a `ReplayPolicy` over its `Recording`, which answers the
@@ -111,7 +111,7 @@ async def _history(account: str) -> list[int]:
 
 @sdk.tool(kind="read", name="db.history")
 def history(account: str) -> Coroutine[Any, Any, list[int]]:
-    """A sync read that returns a coroutine: recorded with what the coroutine returned (#76)."""
+    """A sync read that returns a coroutine: recorded with what the coroutine returned."""
     return _history(account)
 
 
@@ -155,24 +155,23 @@ class _Irimi:
 
     def replay(self, run_id: str, script: Callable[[], Any]) -> tuple[Any, list[ToolCall]]:
         """`script` run again in one SDK run under an engine answering from `run_id`, which adopts
-        the engine's run as `irimi replay`'s child does (#84): what it returned, and the replay
+        the engine's run as `irimi replay`'s child does: what it returned, and the replay
         run's tool calls as stored."""
         before = {r.run_id for r in StoreReader(self.root).list_runs()}
         events = StoreReader(self.root).load_run(run_id).events
         recording = Recording.from_events(events, self.key, self.cfg.maps)
-        # Each replay is a run of its own, the engine's, as each `irimi replay` mints one (#84).
+        # Each replay is a run of its own, the engine's, as each `irimi replay` mints one.
         self.cfg = dataclasses.replace(self.cfg, run_id=runs.new_run_id())
         store = DirectoryStore(self.root, self.key, replay_of=run_id)
         # Stored before the script runs, as `irimi replay` stores its run before its child exists,
-        # so the run is read back whatever reached the engine (#84).
+        # so the run is read back whatever reached the engine.
         store.start_run(runner.process_run(self.cfg.run_id, ["script"], None, time.time()))
         self.monkeypatch.setenv(paths.RUN_ENV, self.cfg.run_id)
         self.monkeypatch.setenv(paths.REPLAY_RUN_ENV, self.cfg.run_id)
         policy = ReplayPolicy(recording, maps=self.cfg.maps)
         result = self._serve(policy, store, script)
         reader = StoreReader(self.root)
-        # The script's `sdk.run` adopted the replay's run, the engine's own, and posted no start
-        # (#84).
+        # The script's `sdk.run` adopted the replay's run, the engine's own, and posted no start.
         replay_run = self.cfg.run_id
         assert replay_run not in before
         assert reader.load_run(replay_run).record.replay_of == run_id
@@ -209,7 +208,7 @@ def _post(port: int, path: str, body: object, method: str = "POST") -> tuple[int
     return resp.status, data
 
 
-# -- the issue's "Done when" -----------------------------------------------------------------------
+# -- tools answered from the recording ------------------------------------------------------------
 
 
 def test_a_read_tool_the_recording_holds_returns_its_recorded_result_and_never_runs(irimi):
@@ -318,7 +317,7 @@ def test_an_async_read_tool_is_answered_from_the_recording(irimi):
 
 def test_a_sync_tool_that_returned_a_coroutine_is_answered_with_a_coroutine_again(irimi):
     """The agent awaits what the tool returns: a replay that handed it the recorded list would
-    raise TypeError at its `await` (#83)."""
+    raise TypeError at its `await`."""
 
     async def awaits() -> list[int]:
         return await history("acc_1")
@@ -343,7 +342,7 @@ def test_a_dataclass_result_is_revived_as_the_dataclass(irimi):
 
 
 def test_a_secret_in_a_recorded_result_comes_back_as_its_placeholder(irimi):
-    """The store redacted the result before it wrote it (#69), so the recording holds no secret
+    """The store redacted the result before it wrote it, so the recording holds no secret
     to hand back, and README says so."""
     run_id = irimi.record(lambda: api_key("acc_1"))
     _FORBIDDEN.add("acc_1")
@@ -412,7 +411,7 @@ def test_an_inactive_sdk_never_asks_the_recording(monkeypatch):
 @pytest.mark.parametrize("run_env", [None, "another0another0"])
 def test_a_replay_id_irimi_did_not_set_asks_no_recording(monkeypatch, run_env):
     """An `IRIMI_REPLAY_RUN` beside no `IRIMI_RUN`, or another, is a stale export, not irimi's
-    word (`context.replay_run_id`, #84): the read tool runs for real and only posts its call."""
+    word (`context.replay_run_id`): the read tool runs for real and only posts its call."""
     monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
     monkeypatch.setenv(paths.REPLAY_RUN_ENV, "abcd1234abcd1234")
     if run_env is None:
@@ -512,7 +511,7 @@ def test_the_lookup_route_is_validated_like_every_control_route(
 @pytest.mark.parametrize("run_id", ["unattributed", "t3st"])
 def test_a_tool_called_in_no_run_or_the_process_run_may_ask_the_recording(irimi, run_id):
     """A tool outside every SDK run is filed in the process run, or in `unattributed` when there
-    is none (#76), and asks its recording from there."""
+    is none, and asks its recording from there."""
     recorded = irimi.record(lambda: balance("acc_1"))
     events = StoreReader(irimi.root).load_run(recorded).events
     recording = Recording.from_events(events, irimi.key, irimi.cfg.maps)
@@ -541,9 +540,9 @@ def test_a_replay_s_child_is_told_it_replays_and_a_shadow_run_s_never_is(tmp_pat
 
 
 def test_a_run_that_ends_on_a_recorded_error_records_the_recorded_type(irimi):
-    """The recorded run ends on `builtins.KeyError` (#83). Its replay raises the same, as
+    """The recorded run ends on `builtins.KeyError`. Its replay raises the same, as
     `RecordedToolError`, out of a run that adopted the replay's and so posts no end of its own:
-    `irimi replay` ends the replay's run with how its child exited (#84)."""
+    `irimi replay` ends the replay's run with how its child exited."""
 
     def ends_on_it() -> None:
         balance("acc_missing")
@@ -582,7 +581,7 @@ def test_an_async_tool_outside_a_replay_runs_its_body_without_a_hop_off_the_loop
     irimi, monkeypatch
 ):
     """Only a read in a replay waits on the endpoint: shadow mode's async tools go straight to
-    their bodies, so an agent whose executor is busy is never held up by one (#83)."""
+    their bodies, so an agent whose executor is busy is never held up by one."""
     hops: list[str] = []
     real = runs.off_the_loop
 
@@ -595,7 +594,7 @@ def test_an_async_tool_outside_a_replay_runs_its_body_without_a_hop_off_the_loop
     assert "_replay_answer" not in hops
 
 
-# -- found on the verification pass (#83) ----------------------------------------------------------
+# -- found on the verification pass --------------------------------------------------------------
 
 
 @sdk.tool(kind="read", name="db.slow")
@@ -620,7 +619,7 @@ def test_a_recorded_call_that_was_cancelled_is_a_miss_and_the_tool_runs(irimi):
     """A call the agent's own timeout cancelled recorded `CancelledError`, which the tool never
     raised. Answered with it, the agent's `except TimeoutError` would meet a RecordedToolError and
     the replay would end where the recording went on; it runs again instead, and is cancelled
-    again (#83)."""
+    again."""
     run_id = irimi.record(_times_out)
     [recorded] = [
         e for e in StoreReader(irimi.root).load_run(run_id).events if isinstance(e, ToolCall)
@@ -634,7 +633,7 @@ def test_a_recorded_call_that_was_cancelled_is_a_miss_and_the_tool_runs(irimi):
 
 def test_a_recorded_call_that_was_closed_unawaited_is_a_miss(monkeypatch):
     """`GeneratorExit` is what a coroutine closed before it finished records: no outcome of the
-    tool's own either (#83)."""
+    tool's own either."""
     monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
     monkeypatch.setenv(paths.RUN_ENV, "abcd1234abcd1234")
     monkeypatch.setenv(paths.REPLAY_RUN_ENV, "abcd1234abcd1234")
@@ -653,8 +652,8 @@ def test_a_recorded_call_that_was_closed_unawaited_is_a_miss(monkeypatch):
 
 
 def test_an_inactive_sdk_is_never_told_it_replays(monkeypatch):
-    """`replay_run_id` is the one rule for "this is a replay", which `RunScope` asks too (#84): a
-    variable left in an environment irimi is not in front of says nothing (#83)."""
+    """`replay_run_id` is the one rule for "this is a replay", which `RunScope` asks too: a
+    variable left in an environment irimi is not in front of says nothing."""
     monkeypatch.setenv(paths.RUN_ENV, "abcd1234abcd1234")
     monkeypatch.setenv(paths.REPLAY_RUN_ENV, "abcd1234abcd1234")
     monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
@@ -726,7 +725,7 @@ def test_an_answer_the_sdk_cannot_read_is_a_miss_warned_once(monkeypatch, warnin
 
 def test_an_answer_past_the_bound_is_a_miss_and_is_never_read_whole(monkeypatch, warnings):
     """irimi's own answer is at most a recorded call; one larger is from something else on the
-    port, and is not read into the agent's memory to the end (#83)."""
+    port, and is not read into the agent's memory to the end."""
     monkeypatch.setattr(client, "MAX_ANSWER", 1000, raising=False)
     body = json.dumps({**_HIT, "result": {"account": "acc_1", "pad": "x" * 2000}}).encode()
     with _answering(monkeypatch, 200, body):
@@ -736,18 +735,18 @@ def test_an_answer_past_the_bound_is_a_miss_and_is_never_read_whole(monkeypatch,
 
 
 def test_a_lookup_carries_no_run_header_and_never_goes_through_a_proxy(monkeypatch):
-    """A control request, as the posts are: unlabelled under `instrument()` (#75), and to the
+    """A control request, as the posts are: unlabelled under `instrument()`, and to the
     endpoint itself whatever `HTTP_PROXY` says."""
     monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{test_sdk._closed_port()}")
     with _answering(monkeypatch, 200, json.dumps(_HIT).encode()) as seen:
-        with sdk.run(trigger={}, name="labelled"):  # which instruments the HTTP clients (#75)
+        with sdk.run(trigger={}, name="labelled"):  # which instruments the HTTP clients
             assert balance("acc_1") == {"account": "acc_1", "balance": 1}
     [lookup] = [h for path, h in seen if path.endswith(exchange.RECORDED_ACTION)]
     assert exchange.RUN_HEADER not in lookup
 
 
 class Ledger:
-    """Read tools on a method, a static method and a class method, as W3's ledger has (#76)."""
+    """Read tools on a method, a static method and a class method, as W3's ledger has."""
 
     def __init__(self, owner: str) -> None:
         self.owner = owner
@@ -772,7 +771,7 @@ class Ledger:
 
 def test_method_tools_and_a_tool_on_a_thread_are_answered_from_the_recording(irimi):
     """The receiver is no argument, so a method's call matches on what it was given; a thread the
-    agent hands the run to (`sdk.propagate`) asks from that run (#83)."""
+    agent hands the run to (`sdk.propagate`) asks from that run."""
 
     def script() -> list[Any]:
         got: list[Any] = []

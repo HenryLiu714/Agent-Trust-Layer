@@ -1,4 +1,4 @@
-"""Stripe's L2 effects (#43): what a faked write does to a later live read, as pure functions."""
+"""Stripe's L2 effects: what a faked write does to a later live read, as pure functions."""
 
 import copy
 
@@ -205,7 +205,7 @@ def test_a_refunds_page_filtered_by_charge_only_shows_a_matching_minted_refund()
 def test_a_filter_the_minted_refund_cannot_answer_is_partial():
     """The refund fixture's `payment_intent` is null, so a refund posted with only `charge` cannot
     say whether it belongs on `?payment_intent=pi_X`. Dropping it and calling the page complete
-    hid the agent's own refund; irimi says `partial` instead (#43)."""
+    hid the agent's own refund; irimi says `partial` instead."""
     page = _refunds_page("re_REAL1")
     before = copy.deepcopy(page)
     out = apply_read(
@@ -340,7 +340,7 @@ def test_expand_is_a_known_list_filter():
 
 
 def test_retrieving_a_minted_refund_is_answered_from_the_write_log():
-    """#52's Stripe half. Stripe has never heard of the id and answers `404 resource_missing`; the
+    """Stripe has never heard of the id and answers `404 resource_missing`; the
     agent asked for an object irimi told it exists, so the answer is that object, at 200. This is
     the one read where the effects replace a STATUS as well as a body."""
     error = {
@@ -372,7 +372,7 @@ def test_retrieving_a_minted_refund_is_answered_from_the_write_log():
 
 def test_a_minted_refund_is_answered_over_whatever_stripe_said():
     """Not only over a 404: a 24-character random id colliding with a real refund is not a
-    scenario, and the object the agent asked for is the one irimi minted (#52)."""
+    scenario, and the object the agent asked for is the one irimi minted."""
     write = _refund_write()
     other = {"id": "re_MINTED1", "object": "refund", "amount": 1, "charge": "ch_SOMEONE_ELSE"}
     out = apply_read(_asked("refunds.retrieve", "/v1/refunds/re_MINTED1"), other, [write])
@@ -391,8 +391,7 @@ def test_a_minted_refund_is_answered_over_whatever_stripe_said():
 def test_a_minted_refund_read_that_stripe_refused_for_another_reason_is_not_answered(error):
     """Whatever Stripe said about the OBJECT - but a 429, a 401 or a 5xx is about the caller or
     Stripe itself, and production would have sent it for the real refund too. Answering 200 over
-    it would turn an error into a success, so the body stands and the read is `partial`, the
-    pre-#52 answer (#52)."""
+    it would turn an error into a success, so the body stands and the read is `partial`."""
     body = {"error": error}
     out = apply_read(_asked("refunds.retrieve", "/v1/refunds/re_MINTED1"), body, [_refund_write()])
     assert out.document == body
@@ -408,7 +407,7 @@ def test_retrieving_a_real_refund_is_untouched():
     assert out.partial is False
     assert out.changed is False
     assert out.document == before
-    assert out.status is None  # the service's own status stands (#52)
+    assert out.status is None  # the service's own status stands
 
 
 # ------------------------------------------------------------------------------ the customer

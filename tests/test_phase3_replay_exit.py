@@ -1,11 +1,11 @@
-"""Phase 3's exit test for use case 1, the hermetic half (#85): "a developer records a run of an
-LLM agent, edits its prompt, replays the run, and sees where it diverged and which writes changed,
-with no write reaching a real service and no substitute-labeled tool running for real".
+"""Record, edit the prompt, replay, the hermetic half: a developer records a run of an LLM agent,
+edits its prompt, replays the run, and sees where it diverged and which writes changed, with no
+write reaching a real service and no substitute-labeled tool running for real.
 
 The agent is `examples/llm_refund_agent`, run as its user runs it: `irimi shadow -- python -m
 examples.llm_refund_agent ...` records it, and `irimi replay <run>` and `sdk.replay(<run>)` replay
-it, each the real CLI in a process of its own. On the other side, a loopback Stripe (the Phase 2
-exit test's `_Stripe`) and a loopback Anthropic (`_Model`), which answers from the system prompt
+it, each the real CLI in a process of its own. On the other side, a loopback Stripe (the refund
+agent test's `_Stripe`) and a loopback Anthropic (`_Model`), which answers from the system prompt
 alone: the full remaining amount for `prompt.txt`, half of it for `prompt_half.txt`. Both record
 every request they hear. The live half is the example's README, run by hand; it is not in CI.
 
@@ -23,11 +23,11 @@ from the store: each stub heard exactly the requests irimi stored as live.
 test points at the same bootstrap: still a subprocess, and everything else `sdk.replay` does is
 its own.
 
-The Phase 3 page's four features, as each block below proves them: (1) the AgentRun shape, the
-run stored with its trigger, args and events; (2) an SDK-labeled trigger whose run is stored
-automatically; (3) SDK-labeled tool calls, a write tool's substitute running in a proxied run; (4)
-the function that runs an AgentRun through the proxy and says what changed, `irimi replay` and
-`sdk.replay`.
+The four features the record-and-replay path rests on, as each block below proves them: (1) the
+AgentRun shape, the run stored with its trigger, args and events; (2) an SDK-labeled trigger
+whose run is stored automatically; (3) SDK-labeled tool calls, a write tool's substitute running
+in a proxied run; (4) the function that runs an AgentRun through the proxy and says what
+changed, `irimi replay` and `sdk.replay`.
 """
 
 import contextlib
@@ -68,13 +68,13 @@ RECORDED = f"○ tool {AGENT}.record_decision  shadow stand-in ran"
 SERVED = ("api.stripe.com", "api.anthropic.com")
 # How long one irimi process may take: a CI runner starts an agent in seconds, so this is a hang.
 # irimi dumps every thread's stack to its stderr before the test gives up on it, so a hang on a
-# slow runner says where it was (#85).
+# slow runner says where it was.
 TIMEOUT_S = 120
 # irimi as `irimi.cli.main`, in a process where `SERVED` resolves to loopback, the stubs' ports
 # being in the agent's URLs, and no other name resolves at all. irimi's L3 read names no proxy
-# (`UpstreamReader`, since #85), but anything else there that asks urllib would take the shell's or
-# the system's proxy past the fake names: `*` keeps it direct, as the sample workflows keep theirs
-# (#89). irimi sets its child's own `NO_PROXY`.
+# (`UpstreamReader`), but anything else there that asks urllib would take the shell's or
+# the system's proxy past the fake names: `*` keeps it direct, as the sample workflows keep theirs.
+# irimi sets its child's own `NO_PROXY`.
 IRIMI = f"""
 import faulthandler
 import os
@@ -172,7 +172,7 @@ def stubs():
 @pytest.fixture
 def direct(monkeypatch):
     """The agent called in this process reaches a loopback stub directly, whatever proxy the shell
-    or the system names: an in-process call is not under irimi, and is not meant to be (#85)."""
+    or the system names: an in-process call is not under irimi, and is not meant to be."""
     for name in [n for n in os.environ if n.lower().endswith("_proxy")]:
         monkeypatch.delenv(name)
     monkeypatch.setenv("NO_PROXY", "*")
@@ -277,10 +277,11 @@ def _heard_stripe() -> list[tuple[str, str]]:
 def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_changed(
     home, stubs, monkeypatch, capsys
 ):
-    """The Phase 3 exit criterion for use case 1 (#85)."""
+    """Record an LLM agent's run, edit its prompt, replay it: the replay shows where it diverged
+    and which writes changed, and no write or write tool ran for real."""
     assert set(SERVED).isdisjoint(runner.NO_PROXY_VALUE.split(",")), "the trap: see the module doc"
     # The bootstrap's rule, before irimi relies on it: each served name is loopback, so nothing
-    # irimi sends in this test can leave the machine (#89). Were it the real address, a forward
+    # irimi sends in this test can leave the machine. Were it the real address, a forward
     # would hang on a real host's closed port until the timeout, rather than fail here.
     with resolving_only(SERVED):
         for name in SERVED:
@@ -446,7 +447,7 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
 )
 def test_the_agent_run_as_main_refuses_and_says_how_to_start_it(argv):
     """Run as `__main__`, its run's entrypoint would be `__main__:handle_ticket`, which `irimi
-    replay` cannot import (#84): the agent refuses at once, rather than record an unreplayable
+    replay` cannot import: the agent refuses at once, rather than record an unreplayable
     run."""
     done = subprocess.run(
         [sys.executable, *argv], cwd=ROOT, capture_output=True, text=True, timeout=60
@@ -457,7 +458,7 @@ def test_the_agent_run_as_main_refuses_and_says_how_to_start_it(argv):
 
 def test_the_agent_sends_no_stripe_key_that_is_not_test_mode(monkeypatch, stubs, direct):
     """The check is on the request path, so a replay, which calls the trigger without `main()`,
-    makes it too (#85): a live key is refused before anything is sent."""
+    makes it too: a live key is refused before anything is sent."""
     monkeypatch.setenv(agent.STRIPE_KEY_ENV, "sk_live_nope")
     monkeypatch.setenv(agent.STRIPE_BASE_ENV, f"http://127.0.0.1:{stubs[0]}")
     with pytest.raises(ValueError, match=r"STRIPE_API_KEY must be a test-mode key \(sk_test_"):
@@ -497,7 +498,7 @@ def test_the_agent_takes_no_decision_from_an_answer_that_stopped_short(monkeypat
 )
 def test_the_agent_takes_no_decision_from_an_answer_that_holds_none(monkeypatch, answer):
     """An answer is acted on only when its text is the decision `DECISION_SCHEMA` asks for: an
-    integer amount (not `true`, which Python counts as 1) and a reply (#85)."""
+    integer amount (not `true`, which Python counts as 1) and a reply."""
     monkeypatch.setattr(agent, "_call", lambda request: answer)
     with pytest.raises(ValueError, match="the model did not answer with a decision: "):
         agent.ask_model(PROMPT.read_text(), "{}")
@@ -509,7 +510,7 @@ def test_outside_irimi_the_agent_refunds_what_the_model_decided_and_records_it(
 ):
     """The control for every "nothing happened" assertion above: run with no irimi, the agent's
     tools run for real, so `record_decision` writes its row, and the refund is asked of Stripe -
-    none when the model decides nothing (#85)."""
+    none when the model decides nothing."""
     monkeypatch.delenv(paths.ENGINE_ACTIVE_ENV, raising=False)
     db = tmp_path / "agent.sqlite3"
     seed.seed(str(db), TICKET[1], CUSTOMER)
@@ -546,7 +547,7 @@ def test_the_read_tool_raises_for_a_database_that_is_not_there_and_makes_none(
     tmp_path, monkeypatch
 ):
     """Why deleting the database proves a replay's `lookup_customer` came from the recording: the
-    real one, run with no database, raises rather than answer from an empty file it made (#85)."""
+    real one, run with no database, raises rather than answer from an empty file it made."""
     monkeypatch.delenv(paths.ENGINE_ACTIVE_ENV, raising=False)
     db = tmp_path / "agent.sqlite3"
     monkeypatch.setenv(agent.DB_ENV, str(db))

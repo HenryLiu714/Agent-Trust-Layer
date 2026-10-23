@@ -1,4 +1,4 @@
-"""A compressed body is decoded only up to a cap, inside every hook that decodes one (#94).
+"""A compressed body is decoded only up to a cap, inside every hook that decodes one.
 
 irimi records bodies decoded, so that redaction reads text and not gzip. A few KB of gzip, br or
 zstd can decode to gigabytes, and a hook that decoded it whole stalled every flow behind it and
@@ -107,7 +107,7 @@ def test_a_cut_buffered_body_is_recorded_empty(cap_of_10_lines):
 
 def test_a_cut_stream_is_kept_to_its_last_complete_line(cap_of_10_lines):
     """The cap lands inside a line here, and inside a UTF-8 character: a body cut there is one
-    redaction cannot read, so it is stored unscanned (#69). What is kept ends at a line end, as
+    redaction cannot read, so it is stored unscanned. What is kept ends at a line end, as
     one chunk, flagged."""
     tee = mitm._StreamTee()
     tee(gzip.compress(b"ok\n" + "é".encode() * (20 * len(LINE))))
@@ -125,7 +125,7 @@ def test_an_encoding_irimi_does_not_decode_is_not_run_through_python_s_codecs(
 ):
     """mitmproxy's decoder fell back to `codecs.decode` for a name it did not know, where `bz2`
     and `zlib` are decompressions with no bound of their own. Neither is an HTTP content coding;
-    such a body is undecodable, and recorded as it came (#94)."""
+    such a body is undecodable, and recorded as it came."""
     assert mitm._decoded(packed, content_encoding) is None
 
 
@@ -139,7 +139,7 @@ def test_an_empty_body_decodes_to_nothing_in_every_encoding(content_encoding):
 def test_a_zstd_stream_that_ends_early_is_still_cut_at_the_cap(cap_of_10_lines, cut_by):
     """Incompressible bytes are a raw block, which zstd hands out as it arrives even when the
     stream ends early, as mitmproxy's decoder keeps them. Read to the cap and then once more, the
-    second read came back empty and a body cut at the cap was called whole (#94)."""
+    second read comes back empty, and the body cut at the cap must not be called whole."""
     plain = os.urandom(20 * len(LINE))
     decoded = mitm._decoded(encoding.encode(plain, "zstd")[:-cut_by], "zstd")
     assert decoded is not None
@@ -148,7 +148,7 @@ def test_a_zstd_stream_that_ends_early_is_still_cut_at_the_cap(cap_of_10_lines, 
 
 def test_a_deflate_stream_that_ends_early_is_refused_even_right_at_the_cap(cap_of_10_lines):
     """`deflate` refuses a stream that ends early, as `zlib.decompress` does: at the cap, as
-    anywhere else. Its last four bytes are the checksum, so all of the body is there (#94)."""
+    anywhere else. Its last four bytes are the checksum, so all of the body is there."""
     plain = LINE * 10
     assert len(plain) == cap_of_10_lines
     assert mitm._decoded(zlib.compress(plain)[:-2], "deflate") is None
@@ -180,13 +180,13 @@ def _zstd_bomb(n_bytes: int) -> bytes:
     )
 
 
-# The line #94's bomb decodes to, a GiB of it. Short lines compress about 500 to 1.
+# The line the gzip bomb decodes to, a GiB of it. Short lines compress about 500 to 1.
 BOMB_LINE = b" " * 15 + b"\n"
 
 
 @pytest.fixture(scope="module")
 def gigabyte_gzip() -> bytes:
-    """About 2 MiB of gzip that decodes to 1 GiB of BOMB_LINE, as #94 asks: built here rather than
+    """About 2 MiB of gzip that decodes to 1 GiB of BOMB_LINE: built here rather than
     taken from the sample workflows' harness, whose bombs are theirs to change."""
     deflater = zlib.compressobj(9, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
     block = BOMB_LINE * (MIB // len(BOMB_LINE))
@@ -195,7 +195,7 @@ def gigabyte_gzip() -> bytes:
 
 @pytest.fixture(scope="module")
 def bombs(gigabyte_gzip) -> dict[str, bytes]:
-    """One bomb per codec: gzip's decodes to 1 GiB, as #94 asks, and the others to four times the
+    """One bomb per codec: gzip's decodes to 1 GiB, and the others to four times the
     cap, which is as far past it as they need to be."""
     return {
         "gzip": gigabyte_gzip,
@@ -266,7 +266,7 @@ def test_a_buffered_read_bomb_reaches_the_agent_whole_and_is_recorded_empty(
 ):
     """The agent gets the service's bytes, every one, whatever the overlay returns: irimi has only
     the start of the document, and an overlay that edited it would send the agent half a document
-    as the whole (#94). The overlay is shown the empty body irimi records, so a read the run has a
+    as the whole. The overlay is shown the empty body irimi records, so a read the run has a
     write for is `partial`, as a body it cannot parse is, and the summary says the read did not
     show the write. The recording is empty, flagged."""
     shown = []
@@ -306,7 +306,7 @@ def test_a_delegated_read_bomb_reaches_the_agent_whole_stamped_and_recorded_empt
     tmp_path, monkeypatch, bomb_upstream, gigabyte_gzip
 ):
     """A delegated answer is rebuilt to stamp `Irimi-Answered-By`. Only its headers are written
-    back, so the agent gets every byte the target sent, never the empty body irimi records (#94)."""
+    back, so the agent gets every byte the target sent, never the empty body irimi records."""
     maps = _targeted(
         tmp_path,
         monkeypatch,
@@ -352,10 +352,10 @@ def _pretty_document_bomb() -> bytes:
 def test_a_document_that_decodes_past_the_cap_is_stored_empty_never_in_part(
     tmp_path, monkeypatch, bomb_upstream
 ):
-    """A STORED BODY IS ALWAYS A PREFIX OF THE REDACTED WHOLE (#70). A body past the cap is never
+    """A STORED BODY IS ALWAYS A PREFIX OF THE REDACTED WHOLE. A body past the cap is never
     decoded whole, so never redacted whole, and the start of a JSON document is not JSON:
     redaction reads it line by line, where `"password": "..."` is a line no shape matches. So it
-    is recorded empty and flagged, as the store records any body past MAX_REDACTED_BODY (#94)."""
+    is recorded empty and flagged, as the store records any body past MAX_REDACTED_BODY."""
     _BombUpstream.bomb = _pretty_document_bomb()
     store = DirectoryStore(tmp_path / "store", bytes(32))
     eng, seen, stop = _start(_config(tmp_path, monkeypatch), store=store)
@@ -402,7 +402,7 @@ def test_a_compressed_stream_the_tee_cut_is_recorded_as_the_whole_lines_it_decod
 ):
     """The tee caps its copy of the ENCODED stream, so what it kept is a compressed stream that
     ends early. It decodes as far as it goes, under the cap here, and is kept to its last complete
-    line as one chunk, flagged once as not the whole stream (#71, #94)."""
+    line as one chunk, flagged once as not the whole stream."""
     plain = b"".join(b"data: %d\n" % i for i in range(200_000))
     packed = encoding.encode(plain, content_encoding)
     monkeypatch.setattr(mitm, "MAX_STORED_BODY", len(packed) // 2)
@@ -420,7 +420,7 @@ def test_a_compressed_stream_the_tee_cut_is_recorded_as_the_whole_lines_it_decod
 def test_a_write_whose_request_is_a_bomb_is_refused_never_faked_from_part_of_it(
     tmp_path, monkeypatch, bomb_upstream, gigabyte_gzip
 ):
-    """IRIMI NEVER ANSWERS A WRITE FROM PART OF ITS BODY (#94). The request hook decodes the body
+    """IRIMI NEVER ANSWERS A WRITE FROM PART OF ITS BODY. The request hook decodes the body
     it decides on only up to the cap, and the policy would fake the write from that start - its
     echo, its idempotency key's body hash, its precondition - and tell the agent a write it never
     sent succeeded. It is refused as an undecidable request is: locally, with irimi's own 502,
@@ -479,7 +479,7 @@ def test_a_bomb_is_refused_on_every_path_a_write_takes(
     """Not only a faked write: a write its map hands to an answer target, whose target would get
     every byte but whose exchange irimi could not record, and a request no route names, which is
     answered as a presumed write. Each is refused with irimi's own 502, never forwarded, and a
-    retry with the same body is refused again rather than replayed from any slot (#94)."""
+    retry with the same body is refused again rather than replayed from any slot."""
     _EchoBombUpstream.bomb, _EchoBombUpstream.bodies = b"{}", []
     srv = HTTPServer(("127.0.0.1", 0), _EchoBombUpstream)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
@@ -516,7 +516,7 @@ def test_a_live_request_that_is_a_bomb_is_forwarded_as_the_agent_sent_it(
 ):
     """A live kind is classified without its body, and forwarded with the agent's own bytes, not
     what irimi decoded of them. Its answer is a bomb too: the exchange is cut on both sides, and
-    says so once (#94)."""
+    says so once."""
     _EchoBombUpstream.bomb, _EchoBombUpstream.bodies = gigabyte_gzip, []
     srv = HTTPServer(("127.0.0.1", 0), _EchoBombUpstream)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
@@ -545,7 +545,7 @@ def test_a_live_request_that_is_a_bomb_says_so_when_its_upstream_fails_too(
     tmp_path, monkeypatch, gigabyte_gzip
 ):
     """The `error` hook builds a live forward's flags afresh, and kept only `upstream-error`: the
-    request it records is still cut (#94)."""
+    request it records is still cut."""
     with socket.socket() as sock:  # a port nothing listens on
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -570,7 +570,7 @@ def test_a_live_request_that_is_a_bomb_says_so_when_its_upstream_fails_too(
 def test_a_control_request_bomb_is_refused_without_decoding_it_whole(
     tmp_path, monkeypatch, gigabyte_gzip
 ):
-    """The control endpoint refuses a body past 2 MiB, and checks it decoded (#73). Decoded at
+    """The control endpoint refuses a body past 2 MiB, and checks it decoded. Decoded at
     most to the cap, a 1 GiB bomb is refused as over 2 MiB, and never decoded to its gigabyte."""
     eng, seen, stop = _start(_config(tmp_path, monkeypatch))
     try:
@@ -607,7 +607,7 @@ def test_a_control_request_bomb_of_one_line_is_refused_as_too_large_not_as_bad_j
     tmp_path, monkeypatch
 ):
     """A cut body reaches the endpoint empty, and an empty body is not JSON: it answered 400 for
-    JSON it was never sent. A cut body is past 2 MiB whatever its start holds, so 413 (#94)."""
+    JSON it was never sent. A cut body is past 2 MiB whatever its start holds, so 413."""
     eng, seen, stop = _start(_config(tmp_path, monkeypatch))
     try:
         status, data = _reverse(
@@ -625,7 +625,7 @@ def test_a_control_request_bomb_of_one_line_is_refused_as_too_large_not_as_bad_j
 
 def test_the_control_endpoint_refuses_a_body_that_is_not_whole_whatever_it_holds():
     """Whatever `request.body` holds, even valid JSON under 2 MiB: the engine says it is not the
-    body, which decoded past the cap (#94)."""
+    body, which decoded past the cap."""
     body = json.dumps({"ended_at": 1.0, "outcome": "ok", "error": None}).encode()
     request = Request("POST", "http", "127.0.0.1", 1, "/_irimi/runs/r1/end", "", (), body)
     endpoint = ControlEndpoint(NullStore(), serve=False)
@@ -636,13 +636,13 @@ def test_the_control_endpoint_refuses_a_body_that_is_not_whole_whatever_it_holds
 
 
 def test_a_cut_body_is_always_past_the_control_endpoint_s_limit():
-    """Why a cut control body is refused as too large without reading it (#94)."""
+    """Why a cut control body is refused as too large without reading it."""
     assert mitm.MAX_DECODED_BODY > control.MAX_CONTROL_BODY
 
 
 def test_the_bomb_fixtures_decode_past_the_cap(bombs):
     """The bombs are what the tests above say they are: small, and far past the cap decoded."""
-    assert len(bombs["gzip"]) < 2.1 * MIB  # #94's bomb: about 1 MiB of gzip to 1 GiB
+    assert len(bombs["gzip"]) < 2.1 * MIB  # the gzip bomb: about 2 MiB of gzip to 1 GiB
     assert all(len(bomb) < 4 * MIB for bomb in bombs.values())
     for content_encoding, bomb in bombs.items():
         decoded = mitm._decoded(bomb, content_encoding)

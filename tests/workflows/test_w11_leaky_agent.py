@@ -5,7 +5,7 @@ each flips from "irimi printed nothing" to "irimi flagged it", and the test says
 which escape.
 
 `labelled_sidecar` is not one: the sidecar's write made by an `@sdk.tool` write, which closes the
-escape today (#76).
+escape today.
 """
 
 import pytest
@@ -15,7 +15,7 @@ from examples.workflows.w11_leaky_agent.agent import CHANNEL, CHARGE
 from irimi.exchange import Exchange
 
 W = "w11_leaky_agent"
-# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi (#77).
+# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.
 MODES = ("shadow", "serve")
 NOTHING_SEEN = "0 exchanges · 0 live · 0 delegated · 0 virtualized"
 
@@ -40,10 +40,9 @@ def test_an_escape_writes_for_real_and_irimi_never_sees_it(run_workflow, mode, e
     assert "did not happen" not in summary
     # The agent got the real service's answer, unstamped: it cannot tell it escaped.
     assert [c["answered_by"] for c in shadow.calls()] == [None]
-    # Nor can a stored run (#70): the escape's own run, which the SDK started and ended (#74),
+    # Nor can a stored run: the escape's own run, which the SDK started and ended,
     # and the process run are both `ok`, with no event at all. The escaped request carried no
-    # `Irimi-Run` either (universal invariant 2): the SDK labels only what goes through irimi
-    # (#75).
+    # `Irimi-Run` either (universal invariant 2): the SDK labels only what goes through irimi.
     reader = shadow.stored()
     runs = {r.attribution: r for r in reader.list_runs()}
     assert sorted(runs) == (["process", "sdk"] if mode == "shadow" else ["sdk"])
@@ -84,7 +83,7 @@ def test_irimis_own_no_proxy_default_exempts_a_loopback_sidecar(run_workflow, mo
 def test_the_control_through_the_proxy_is_faked_and_the_ledger_is_untouched(run_workflow, mode):
     shadow = run_workflow(W, "proxied", mode)
     # Through irimi, the refund is labelled with its run and stored there with irimi's L3 read of
-    # the charge it names, and the process run holds nothing (#75).
+    # the charge it names, and the process run holds nothing.
     [run] = shadow.sdk_runs()
     events = shadow.stored().load_run(run.run_id).events
     assert sorted(
@@ -113,7 +112,7 @@ def test_a_redirect_off_irimis_route_is_labelled_on_each_hop_through_irimi_and_o
     """`redirected`: urllib, `requests`, httpx and async httpx each read an export that redirects
     twice, inside one `sdk.run`: to `/export/v2` on the same host, through irimi, then to the
     sidecar on loopback, which irimi's `NO_PROXY` sends direct. The SDK labels a hop by where its
-    own connection goes (#75): both hops through irimi carry the run and are stored in it, and the
+    own connection goes: both hops through irimi carry the run and are stored in it, and the
     hop to the sidecar goes out with no `Irimi-Run`. httpx builds a redirect from the request it
     just sent, so the SDK must take its label off once sent, or the label rides on to the sidecar
     (universal invariant 2 and the check below).
@@ -156,7 +155,7 @@ def test_a_redirect_off_irimis_route_is_labelled_on_each_hop_through_irimi_and_o
 
 @pytest.mark.parametrize("mode", MODES)
 def test_a_sidecar_write_made_by_a_write_tool_is_stood_in_and_the_escape_closed(run_workflow, mode):
-    """`loopback_service`'s write, made by `enqueue_job`, an `@sdk.tool(kind="write")` (#76). The
+    """`loopback_service`'s write, made by `enqueue_job`, an `@sdk.tool(kind="write")`. The
     proxy still cannot see it, and does not need to: the SDK runs the stand-in in its place, so
     the sidecar receives nothing under shadow, a witness that does not rest on the agent's own log
     (universal invariant 3), while bare it receives the job. irimi prints and stores the call in
@@ -189,10 +188,10 @@ def test_a_sidecar_write_made_by_a_write_tool_is_stood_in_and_the_escape_closed(
     ]
 
 
-# ---------------------------------------------------------------------- irimi compare (#79)
+# ---------------------------------------------------------------------- irimi compare
 
 NOT_A_VERDICT = "a comparison, not a verdict: nothing was replayed"
-# Each escape is an `sdk.run` named `escape`, with no function to name its entrypoint (#75).
+# Each escape is an `sdk.run` named `escape`, with no function to name its entrypoint.
 ESCAPE = "escape  -  agent -"
 FAKED_REFUND = f"○ refund $5.00 on {CHARGE}  unvalidated (L3 preconditions passed)"
 
@@ -215,7 +214,7 @@ def compared(shared_store_run, a: str, b: str, mode: str) -> tuple[str, str, lis
 @pytest.mark.parametrize("mode", MODES)
 def test_irimi_compare_cannot_show_a_write_that_escaped(shared_store_run, escape, mode):
     """`proxied` refunds through irimi, which fakes it; each escape makes its write around irimi,
-    and it lands (#79 over W11). Recorded into one store, the escape under shadow or serve: an
+    and it lands. Recorded into one store, the escape under shadow or serve: an
     escaped write never reached irimi, so it is not in the store, and compare shows the escape as
     a run that wrote nothing.
 
@@ -237,9 +236,9 @@ def test_irimi_compare_cannot_show_a_write_that_escaped(shared_store_run, escape
 @pytest.mark.parametrize("mode", MODES)
 def test_irimi_compare_shows_the_sidecar_write_a_write_tool_closed(shared_store_run, mode):
     """`loopback_service` posts its job to the sidecar around irimi, and `labelled_sidecar` posts
-    the same job through a write tool, whose stand-in runs instead (#76). Recorded into one store,
+    the same job through a write tool, whose stand-in runs instead. Recorded into one store,
     the second under shadow or serve: the escape shows nothing, and the closed escape is the one
-    write, a write only B made (#79)."""
+    write, a write only B made."""
     a, b, out = compared(shared_store_run, "loopback_service", "labelled_sidecar", mode)
     assert out == [
         f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
@@ -253,7 +252,7 @@ def test_irimi_compare_shows_the_sidecar_write_a_write_tool_closed(shared_store_
     ]
 
 
-# ------------------------------------------------------------------------------- replay (#82)
+# ------------------------------------------------------------------------------- replay
 
 
 @pytest.mark.parametrize(
@@ -262,7 +261,7 @@ def test_irimi_compare_shows_the_sidecar_write_a_write_tool_closed(shared_store_
 def test_an_escape_escapes_its_replay_too(replayed, scenario):
     """An escaped write never passed irimi, so its recording holds nothing of it, and a replay has
     nothing to answer it from: it lands on the fake service again, exactly as it landed when it was
-    recorded. A replay is no more a backstop than shadow mode is (Phase 4)."""
+    recorded. A replay catches an escape no more than shadow mode does."""
     recorded, replay = replayed(W, scenario)
     escaped = [(r.method, r.host, r.path) for r in recorded.internet.writes()]
     assert escaped

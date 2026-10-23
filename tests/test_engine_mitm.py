@@ -43,7 +43,7 @@ from irimi.store import MAX_STORED_BODY, DirectoryStore, NullStore, StoreReader
 
 class _Upstream(BaseHTTPRequestHandler):
     # (path, header pairs) of every GET, so a test can see what was forwarded. Pairs, not a dict:
-    # a dict keeps one of a repeated name, and "exactly once on the wire" is a claim (#53).
+    # a dict keeps one of a repeated name, and "exactly once on the wire" is a claim.
     seen: list = []
 
     def do_GET(self):
@@ -130,7 +130,7 @@ routes:
 """
 
 # A map claiming the loopback upstream as `slack`, so a read through it is a Slack read. The
-# service name is what the `ts` watermark keys on, not the host or the port (#42).
+# service name is what the `ts` watermark keys on, not the host or the port.
 SLACK_MAP = """
 version: 1
 service: slack
@@ -307,7 +307,7 @@ def test_a_tunnelled_request_whose_method_mitmproxy_would_not_call_http_is_still
     engine, upstream
 ):
     """mitmproxy's raw TCP mode relays a plain tunnel past every hook when its first line does not
-    start with three letters. Off, `M-SEARCH` is parsed as the HTTP it is, and faked (#75)."""
+    start with three letters. Off, `M-SEARCH` is parsed as the HTTP it is, and faked."""
     eng, seen = engine
     s = _raw_tunnel(eng.listen_port(), upstream)
     with s:
@@ -319,7 +319,7 @@ def test_a_tunnelled_request_whose_method_mitmproxy_would_not_call_http_is_still
 
 def test_bytes_in_a_tunnel_that_are_not_http_are_never_relayed(engine):
     """Shadow mode cannot read them, so it cannot know they are not a write: the tunnel fails
-    closed, and the destination is never even dialled (#75)."""
+    closed, and the destination is never even dialled."""
     eng, seen = engine
     with socket.create_server(("127.0.0.1", 0)) as destination:
         s = _raw_tunnel(eng.listen_port(), destination.getsockname()[1])
@@ -339,7 +339,7 @@ def test_bytes_in_a_tunnel_that_are_not_http_are_never_relayed(engine):
 def test_a_tunnelled_request_whose_first_segment_is_short_is_still_seen(engine):
     """mitmproxy decides a tunnel's protocol on its first bytes, and with raw TCP on it relays
     one whose first segment holds fewer than three, an ordinary `POST` among them, past every hook.
-    Off, the request is read once it is whole, and faked; the destination is never dialled (#75)."""
+    Off, the request is read once it is whole, and faked; the destination is never dialled."""
     eng, seen = engine
     with socket.create_server(("127.0.0.1", 0)) as destination:
         s = _raw_tunnel(eng.listen_port(), destination.getsockname()[1])
@@ -357,7 +357,7 @@ def test_a_tunnelled_request_whose_first_segment_is_short_is_still_seen(engine):
 def test_a_connection_a_live_read_upgraded_is_closed_not_relayed(engine):
     """A read is forwarded live, and the real service may answer `101` to an upgrade that is not
     a WebSocket. With raw TCP on, mitmproxy then relays the connection as bytes, past every hook,
-    so a write sent on it reaches the service. Off, irimi closes it after the `101` (#75)."""
+    so a write sent on it reaches the service. Off, irimi closes it after the `101`."""
     eng, seen = engine
     heard: list[bytes] = []
     with socket.create_server(("127.0.0.1", 0)) as service:
@@ -424,7 +424,7 @@ def test_mapped_read_is_named_and_forwarded(tmp_path, monkeypatch, upstream):
 
 
 def test_a_slack_read_raises_the_ts_watermark(tmp_path, monkeypatch, upstream):
-    """#42: a minted `ts` has to sort after the real messages the run already read, and this hook
+    """A minted `ts` has to sort after the real messages the run already read, and this hook
     is the only place those values go past - the write log holds writes, not reads."""
     from irimi import echo
     from irimi.echo import slack as echo_slack
@@ -469,7 +469,7 @@ def test_bundle_written_from_irimi_ca(engine, upstream):
     assert ca.ca_paths().cert.read_bytes() in bundle.read_bytes()
 
 
-# `rot13` is an encoding mitmproxy raises TypeError for rather than ValueError (#71).
+# `rot13` is an encoding mitmproxy raises TypeError for rather than ValueError.
 @pytest.mark.parametrize("content_encoding", ["gzip", "rot13"])
 def test_undecodable_request_body_is_still_faked(engine, upstream, content_encoding):
     # A strict body decode raising inside the hook would make mitmproxy forward the write.
@@ -503,7 +503,7 @@ def test_an_upstream_body_in_an_encoding_that_is_not_a_decoding_is_still_recorde
     """mitmproxy raises TypeError, not ValueError, for a text codec it cannot run on bytes
     (`rot13`), and `get_content(strict=False)` let it through: out of the `response` hook, that
     dropped the exchange from the trace. A byte-to-text codec (`utf-8`) decodes to a str, which is
-    no body at all. Either way the body is recorded as it came, as an undecodable one is (#71)."""
+    no body at all. Either way the body is recorded as it came, as an undecodable one is."""
     eng, seen = engine
     url = f"http://127.0.0.1:{upstream}/encoded/{content_encoding}"
     status, data = _via_proxy(eng.listen_port(), "GET", url)
@@ -538,7 +538,7 @@ def test_an_overlaid_read_in_an_encoding_mitmproxy_cannot_apply_still_reaches_th
 ):
     """The overlay keeps the upstream's headers, and mitmproxy re-encodes a rebuilt body per its
     `content-encoding`: for a text codec that raised TypeError out of the `response` hook, and the
-    exchange was never recorded. The body goes out as the overlay built it (#71)."""
+    exchange was never recorded. The body goes out as the overlay built it."""
 
     class _Overlay:
         def __call__(self, write_log, read_request, upstream_response):
@@ -794,7 +794,7 @@ def test_live_read_carries_no_fidelity_flag(engine, upstream):
     assert seen[0].flags == ()
 
 
-# ---------------------------------- telemetry is stored as a count only, and SSE streams (#8/#9)
+# ---------------------------------- telemetry is stored as a count only, and SSE streams
 
 
 class _RecordingStore:
@@ -853,8 +853,8 @@ def _exchange(kind, answered_by="live"):
 
 
 def test_telemetry_is_reported_and_stored_only_as_having_happened(tmp_path, monkeypatch):
-    """Forwarded in every mode, counted in its own bucket, and stored only as having happened
-    (#70): one `TelemetrySeen` line with its host and time, so a stored run's summary can count
+    """Forwarded in every mode, counted in its own bucket, and stored only as having happened:
+    one `TelemetrySeen` line with its host and time, so a stored run's summary can count
     it, and never its request or response - a recording of the agent's own observability traffic
     would re-emit someone else's events on replay. So no blob is written for its body."""
     from dataclasses import replace
@@ -882,7 +882,7 @@ def test_telemetry_is_reported_and_stored_only_as_having_happened(tmp_path, monk
 def test_a_store_that_raises_neither_escapes_the_hook_nor_hides_the_exchange(
     tmp_path, monkeypatch, caplog
 ):
-    """A recording failure never affects traffic (#70). `TraceStore.record` may not raise, and
+    """A recording failure never affects traffic. `TraceStore.record` may not raise, and
     `_finish` guards it anyway: a store that broke the contract escaped every hook that finishes
     a flow, and took the terminal line and the summary's count of the exchange with it."""
 
@@ -894,7 +894,7 @@ def test_a_store_that_raises_neither_escapes_the_hook_nor_hides_the_exchange(
     with caplog.at_level("WARNING", logger="irimi.engine.mitm"):
         addon._finish(_exchange("write", answered_by="fake-L0"))
     assert [ex.kind for ex in seen] == ["write"]
-    # The type, never the message: a message may quote the value the store choked on (#69).
+    # The type, never the message: a message may quote the value the store choked on.
     assert "the trace store raised RuntimeError" in caplog.text
     assert "exploded" not in caplog.text
 
@@ -967,7 +967,7 @@ class _StreamUpstream(BaseHTTPRequestHandler):
         # that socket never returns from serve_forever, so shutdown() would block forever.
         self.close_connection = True
 
-    do_GET = do_POST  # the same stream for a `kind: read` route (#28)
+    do_GET = do_POST  # the same stream for a `kind: read` route
 
     def _chunk(self, payload: bytes) -> None:
         self.wfile.write(b"%x\r\n" % len(payload) + payload + b"\r\n")
@@ -1020,7 +1020,7 @@ def test_a_server_sent_event_response_reaches_the_client_in_chunks(tmp_path, mon
     assert ex.answered_by == "live"
     assert ex.flags == ()
     # mitmproxy never assembles a streamed body; the exchange records the chunks the agent was
-    # sent, joined, and how long each was (#71).
+    # sent, joined, and how long each was.
     assert ex.response.status == 200
     assert ex.response.body == SSE_FIRST + SSE_SECOND
     assert ex.stream_chunks == (len(SSE_FIRST), len(SSE_SECOND))
@@ -1031,7 +1031,7 @@ def test_a_streamed_response_ends_when_its_stream_does_not_when_its_headers_leav
 ):
     """A streamed exchange is finished by the `response` hook, which mitmproxy runs once the
     last chunk has gone - so its `ended_at` covers the whole stream the agent waited on, and not
-    only the headers `responseheaders` let through early (#8, #68)."""
+    only the headers `responseheaders` let through early."""
     _STREAM_GATE.clear()
     srv = HTTPServer(("127.0.0.1", 0), _StreamUpstream)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
@@ -1069,8 +1069,8 @@ READ_STREAM_MAP = STREAM_MAP.replace("kind: llm", "kind: read").replace(
 
 
 class _RewritingOverlay:
-    """The first real overlay's shape: it returns a NEW Response rather than the one it was
-    handed. `NoOverlay` returns the same object, which is what hid #28 for a whole phase."""
+    """A real overlay's shape: it returns a NEW Response rather than the one it was handed.
+    `NoOverlay` returns the same object, so it cannot show the addon assigning a new one."""
 
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -1090,7 +1090,7 @@ class _RewritingOverlay:
 
 
 def test_an_overlay_is_not_handed_a_streamed_read_and_cannot_rewrite_one(tmp_path, monkeypatch):
-    """#28: `responseheaders` streams any live `text/event-stream` response, `kind: read`
+    """`responseheaders` streams any live `text/event-stream` response, `kind: read`
     included, and mitmproxy never assembles a streamed body. An overlay called there would see
     `body == b""` and return a new Response, which the addon would then assign to the flow -
     turning a streamed read into a buffered, empty-bodied one. It presents as "reads through the
@@ -1143,7 +1143,7 @@ def test_a_json_response_is_still_buffered_and_recorded(tmp_path, monkeypatch, u
     assert seen[0].response.body == b"hello from upstream"
 
 
-# ----------------------------------------------------------- recording a streamed body (#71)
+# ----------------------------------------------------------- recording a streamed body
 
 
 def _stream_server(chunks, gates=(), reset=False, extra_headers=(), tls_leaf=None):
@@ -1242,8 +1242,8 @@ def _stream_three_chunks(tmp_path, monkeypatch, store=None):
 def test_a_streamed_response_is_recorded_as_its_chunks_joined_with_each_chunk_s_length(
     tmp_path, monkeypatch
 ):
-    """#71: the agent still gets each chunk as it arrives, and the exchange now holds the whole
-    stream - its body the chunks joined, `stream_chunks` their lengths in arrival order."""
+    """The agent gets each chunk as it arrives, and the exchange holds the whole stream - its
+    body the chunks joined, `stream_chunks` their lengths in arrival order."""
     (ex,) = _stream_three_chunks(tmp_path, monkeypatch)
     assert (ex.kind, ex.answered_by, ex.flags) == ("llm", "live", ())
     assert ex.response is not None and ex.response.body == b"".join(THREE_CHUNKS)
@@ -1287,7 +1287,7 @@ def test_a_stream_longer_than_the_stored_maximum_reaches_the_client_whole(tmp_pa
 
 def test_a_copy_that_raises_stops_the_recording_and_never_the_stream(tmp_path, monkeypatch):
     """The tee's own copy raises on the second chunk. The client still gets every byte, the
-    recording keeps what it copied before, and says it is not the whole stream (#71)."""
+    recording keeps what it copied before, and says it is not the whole stream."""
     calls = itertools.count(1)
     capture = mitm._StreamTee._capture
 
@@ -1308,7 +1308,7 @@ def test_an_upstream_reset_mid_stream_is_recorded_with_what_arrived_and_flagged(
 ):
     """A chunked stream that loses its upstream after the first chunk ends in the `error` hook.
     The agent already has the headers and that chunk, so the exchange keeps them, and says both
-    that the upstream failed and that the recorded body is not the whole stream (#71)."""
+    that the upstream failed and that the recorded body is not the whole stream."""
     # Reset only once the client has the first chunk: a reset that overtakes data the proxy has
     # not read yet takes that data with it.
     gate = threading.Event()
@@ -1336,7 +1336,7 @@ def test_an_upstream_reset_mid_stream_is_recorded_with_what_arrived_and_flagged(
 
 def test_a_stream_over_tls_is_recorded_as_its_chunks(tmp_path, monkeypatch):
     """The tee sits on mitmproxy's HTTP layer, above TLS, so a stream from an HTTPS upstream is
-    recorded as a plain one is. Through the reverse door, which always dials HTTPS (#4, #71)."""
+    recorded as a plain one is. Through the reverse door, which always dials HTTPS."""
     cfg = _config(
         tmp_path,
         monkeypatch,
@@ -1380,8 +1380,8 @@ def test_a_reset_inside_a_character_records_only_the_complete_lines_before_it(
     tmp_path, monkeypatch
 ):
     """The last read before a reset can end anywhere, inside a UTF-8 character included. A body
-    that does not decode is stored unscanned (#69), so the recording keeps only its complete
-    lines: the key on the first line is then redacted like any other (#71)."""
+    that does not decode is stored unscanned, so the recording keeps only its complete
+    lines: the key on the first line is then redacted like any other."""
     secret = "sk_live_CutMidCharacter"
     first = b'data: {"api_key": "' + secret.encode() + b'"}\n\n'
     torn = b'data: {"text": "caf\xc3'  # the first byte of a two-byte character
@@ -1416,7 +1416,7 @@ def test_a_reset_inside_a_character_records_only_the_complete_lines_before_it(
 def test_a_compressed_stream_is_recorded_decoded_as_one_chunk(tmp_path, monkeypatch):
     """A body is recorded as `_body` reads a buffered one, `Content-Encoding` decoded, so
     redaction reads text and not gzip. Decoded bytes do not split where the wire's did, so the
-    body is one chunk. The client gets the compressed bytes it was sent (#39)."""
+    body is one chunk. The client gets the compressed bytes it was sent."""
     plain = b"".join(THREE_CHUNKS)
     packed = gzip.compress(plain)
     half = len(packed) // 2
@@ -1442,8 +1442,8 @@ def test_a_compressed_stream_is_recorded_decoded_as_one_chunk(tmp_path, monkeypa
 
 
 def test_a_streamed_read_is_not_observed_now_that_its_body_is_recorded(tmp_path, monkeypatch):
-    """#71 records a streamed body, and `echo.observe_read` still never sees one: a stream is not
-    a document an observer can read, and its copy may be cut short (#28)."""
+    """A streamed body is recorded, and `echo.observe_read` never sees one: a stream is not
+    a document an observer can read, and its copy may be cut short."""
     observed = []
     monkeypatch.setattr(echo, "observe_read", lambda service, body: observed.append(body))
     _STREAM_GATE.clear()
@@ -1486,7 +1486,7 @@ def _streamed_flow(*headers):
 
 def test_a_capped_stream_is_recorded_up_to_its_last_complete_line(small_cap):
     """The cap cuts the copy inside a character here. The recorded body ends at the last line
-    end before it, so it is text redaction can read, with no half of anything on it (#71)."""
+    end before it, so it is text redaction can read, with no half of anything on it."""
     tee = mitm._StreamTee()
     tee(b"ok\n")
     tee(b"123456\xc3\xa9\n")  # the cap at 10 keeps b"123456\xc3"
@@ -1504,7 +1504,7 @@ def test_a_whole_stream_is_recorded_as_it_came_even_without_a_final_line_end():
 
 
 def test_a_stream_that_ended_in_an_error_keeps_lines_a_lone_carriage_return_ends():
-    """SSE ends a line at CRLF, LF or a lone CR, and redaction reads it the same way (#69)."""
+    """SSE ends a line at CRLF, LF or a lone CR, and redaction reads it the same way."""
     tee = mitm._StreamTee()
     tee(b"data: one\r\rdata: tw")
     response, chunks, cut = mitm._recorded_stream(_streamed_flow(), tee, whole=False)
@@ -1515,7 +1515,7 @@ def test_a_stream_that_ended_in_an_error_keeps_lines_a_lone_carriage_return_ends
 def test_a_stream_that_cannot_be_decoded_is_recorded_empty_and_flagged(content_encoding):
     """Never as its compressed bytes, which redaction cannot read. mitmproxy raises TypeError for
     an encoding it does not know, which `get_content(strict=False)` does not catch, decodes
-    `utf-8` to a str, and has no decoder for two encodings stacked (#71)."""
+    `utf-8` to a str, and has no decoder for two encodings stacked."""
     tee = mitm._StreamTee()
     tee(b"not compressed at all\n")
     flow = _streamed_flow((b"content-encoding", content_encoding.encode()))
@@ -1525,7 +1525,7 @@ def test_a_stream_that_cannot_be_decoded_is_recorded_empty_and_flagged(content_e
 
 @pytest.mark.parametrize("content_encoding", ["gzip", "GZIP", "deflate", "br", "zstd"])
 def test_a_whole_stream_in_every_encoding_mitmproxy_decodes_is_recorded_decoded(content_encoding):
-    """Split anywhere on the wire, it is one chunk once decoded (#71)."""
+    """Split anywhere on the wire, it is one chunk once decoded."""
     plain = b"".join(THREE_CHUNKS)
     packed = encoding.encode(plain, content_encoding.lower())
     tee = mitm._StreamTee()
@@ -1552,7 +1552,7 @@ def test_a_compressed_stream_cut_short_is_recorded_as_whole_decoded_lines_or_emp
 ):
     """Decision 6's cut stream. `gzip` decodes what arrived, which is kept up to its last complete
     line; `br` and `deflate` refuse a cut body and `zstd` decodes it to nothing, so it is recorded
-    empty. Never the compressed bytes, and never half a line (#71)."""
+    empty. Never the compressed bytes, and never half a line."""
     plain = b"".join(THREE_CHUNKS) * 200
     packed = encoding.encode(plain, content_encoding)
     tee = mitm._StreamTee()
@@ -1599,7 +1599,7 @@ def test_the_tee_stops_copying_for_good_once_its_copy_raises(monkeypatch):
     assert (tee.chunks, tee.truncated) == ([b"one"], True)
 
 
-# -------------------------------------------------------- answer targets through the engine (#16)
+# -------------------------------------------------------- answer targets through the engine
 
 
 NOT_GZIP = b"not-actually-gzip"
@@ -1688,7 +1688,7 @@ def test_an_https_write_is_answered_when_the_real_host_is_not_listening(tmp_path
     ClientHello carrying real SNI - before it has seen the request it would have answered. An
     HTTPS route could then not be answered at all when the real service was unreachable, which is
     exactly the case shadow mode and delegation are for: an offline, decommissioned or
-    not-yet-built API (#32). `lazy` connects only when there is something to send.
+    not-yet-built API. `lazy` connects only when there is something to send.
 
     The dead port stands in for the unreachable service; nothing is ever listening on it, so a
     pass here means no connection to it was attempted.
@@ -1712,7 +1712,7 @@ def test_an_https_write_is_answered_when_the_real_host_is_not_listening(tmp_path
 
 
 def test_a_targeted_write_is_answered_by_the_target_not_by_the_fake(tmp_path, monkeypatch, target):
-    """The headline of #16: the write lands on an address the developer controls, that stub's
+    """What a target is for: the write lands on an address the developer controls, that stub's
     body is what the agent parses, and the fake never runs."""
     maps = _targeted(
         tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{target}/w")]
@@ -1742,16 +1742,14 @@ def test_a_targeted_write_is_answered_by_the_target_not_by_the_fake(tmp_path, mo
 def test_a_delegated_body_reaches_the_agent_as_the_target_sent_it(
     tmp_path, monkeypatch, target, path, body
 ):
-    """#39: the answer is stamped with a header, and stamping it used to rebuild the response.
-    `http.Response.make` assigns `.content`, which mitmproxy re-encodes per the surviving
-    `content-encoding` - so an already-compressed body was compressed again, and a body that was
-    never valid gzip came back as a valid gzip stream of itself. Either way the agent got
-    different bytes than the target sent, in a tool whose thesis is that it sees what the service
-    would have sent.
+    """Stamping the answer's header does not rebuild the response. `http.Response.make` assigns
+    `.content`, which mitmproxy re-encodes per the surviving `content-encoding` - so a rebuilt
+    response compresses an already-compressed body again, and turns a body that was never valid
+    gzip into a valid gzip stream of itself. Either way the agent would get different bytes than
+    the target sent, in a tool whose thesis is that it sees what the service would have sent.
 
-    Since #12 `respond` returns a new Response for every non-live answer, so this ran for every
-    delegated exchange; the live path stayed safe only because `respond` hands back the object it
-    was given there.
+    `respond` returns a new Response for every non-live answer, so this covers every delegated
+    exchange; the live path is safe because `respond` hands back the object it was given there.
     """
     maps = _targeted(
         tmp_path,
@@ -1808,10 +1806,10 @@ def test_every_credential_header_is_stripped_before_it_reaches_a_target(
     tmp_path, monkeypatch, target
 ):
     """A local stub does not need the real key, and forwarding it makes the target an
-    exfiltration path for a credential the agent never meant it to have (design §7).
+    exfiltration path for a credential the agent never meant it to have.
 
     Every credential header, not only `Authorization`: the rule is about keys, and `Cookie`,
-    `x-api-key` and `DD-API-KEY` are keys (#32).
+    `x-api-key` and `DD-API-KEY` are keys.
     """
     maps = _targeted(
         tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{target}/w")]
@@ -1909,12 +1907,12 @@ def test_an_unreachable_target_is_a_502_with_the_json_body_the_issue_specifies(
     tmp_path, monkeypatch
 ):
     """Never a silent fall back to the local fake: that would hide a broken setup and look
-    exactly like a working shadow run (design D20).
+    exactly like a working shadow run.
 
     And the body is JSON naming irimi and the target, not mitmproxy's HTML error page. The flag
     was right all along; the page was not. An SDK parses the body, and stripe-python, openai and
     slack_sdk all raise on an HTML blob that names neither irimi nor the answer target, so "my
-    shadow run started failing" gave no hint that the developer's own stub was down (#38).
+    shadow run started failing" gave no hint that the developer's own stub was down.
     """
     closed = socket.socket()
     closed.bind(("127.0.0.1", 0))
@@ -1961,7 +1959,7 @@ def test_a_target_that_stops_listening_mid_run_is_still_flagged(tmp_path, monkey
 
 def test_a_faked_write_on_a_route_with_no_fixture_still_lists_its_webhooks(tmp_path, monkeypatch):
     """`fires:` is about the write, not the answer's fidelity: DEMO_MAP's route names no
-    `fixture:`, so the fake is L0, and it was still accepted (#47)."""
+    `fixture:`, so the fake is L0, and it was still accepted."""
     eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch)))
     try:
         status, _ = _via_proxy(eng.listen_port(), "POST", "http://127.0.0.1/things", body=b"{}")
@@ -1977,7 +1975,7 @@ def test_a_delegated_write_lists_no_webhooks_whether_or_not_its_target_answers(
     tmp_path, monkeypatch, target
 ):
     """The target performed the write, or did something else with it, or was not there; irimi
-    built nothing and claims nothing about what the real service would have sent (#47). The
+    built nothing and claims nothing about what the real service would have sent. The
     route names `fires:`, so the empty lists are the policy withholding it, not a map without
     one - the test above is the same route faked."""
     maps = _targeted(
@@ -1997,7 +1995,7 @@ def test_a_delegated_write_lists_no_webhooks_whether_or_not_its_target_answers(
 
 
 def test_a_target_naming_our_own_listener_is_refused_with_a_json_502(tmp_path, monkeypatch):
-    """Forwarding to ourselves is the self-connection loop of #4 wearing a different hat.
+    """Forwarding to ourselves would make irimi connect to its own listener in a loop.
 
     Driven through the addon rather than a live engine on purpose: the check compares the target
     against the port the listener actually bound, and arranging for a real engine to bind the one
@@ -2037,10 +2035,10 @@ def test_a_target_naming_our_own_listener_is_refused_with_a_json_502(tmp_path, m
 
 
 def test_a_locally_answered_flow_that_errors_keeps_its_own_flags(tmp_path, monkeypatch):
-    """#29 item 5: the `error` hook used to assert `upstream-error` on every flow it saw. For a
-    write irimi answered itself that is untrue twice over - nothing was ever sent upstream, and
-    the fidelity flag the answer really carried was dropped. Driven through the addon because
-    the case is a client disappearing between two hooks, which a live engine cannot stage."""
+    """The `error` hook does not assert `upstream-error` on a write irimi answered itself: nothing
+    was ever sent upstream, and the fidelity flag the answer really carried must survive. Driven
+    through the addon because the case is a client disappearing between two hooks, which a live
+    engine cannot stage."""
     from mitmproxy.test import tflow, tutils
 
     from irimi.engine.mitm import IrimiAddon
@@ -2068,8 +2066,8 @@ def test_a_locally_answered_flow_that_errors_keeps_its_own_flags(tmp_path, monke
 
 def test_a_refused_target_is_flagged_once_even_if_the_client_then_vanishes(tmp_path, monkeypatch):
     """`request()` already answered and flagged this one; the client going away afterwards does
-    not make the target fail a second time. The flag is a fact about the exchange, not a counter
-    (#32). Driven through the addon, like every other client-disappears case."""
+    not make the target fail a second time. The flag is a fact about the exchange, not a counter.
+    Driven through the addon, like every other client-disappears case."""
     from mitmproxy.test import tflow, tutils
 
     from irimi.engine.mitm import IrimiAddon
@@ -2097,7 +2095,7 @@ def test_a_refused_target_is_flagged_once_even_if_the_client_then_vanishes(tmp_p
     (ex,) = seen
     assert ex.answered_by == "delegated"
     assert ex.flags.count("target-failed") == 1
-    # And the answer's own flags are kept on the failure path, as `response` keeps them (#82).
+    # And the answer's own flags are kept on the failure path, as `response` keeps them.
     assert ex.flags == ("fidelity:delegated", "target-failed")
 
 
@@ -2123,7 +2121,7 @@ def test_an_untargeted_write_is_still_faked(tmp_path, monkeypatch, target):
 def test_a_raise_in_the_decision_answers_locally_instead_of_forwarding(
     tmp_path, monkeypatch, upstream
 ):
-    """The never-raise rule, as a whole rather than per call site (COMPAT 4.10, #16 review D-3).
+    """The never-raise rule, as a whole rather than per call site.
 
     A hook that raises makes mitmproxy forward the flow untouched, so an exception anywhere in
     the classify/answer decision sends the agent's write to the real service - and `_Pending` is
@@ -2176,10 +2174,10 @@ def _bare_flow(method, path):
 
 
 def test_a_raise_handing_the_decision_to_a_worker_answers_locally(tmp_path, monkeypatch):
-    """The hook awaits `asyncio.to_thread` as of #45, and the hand-off can fail on its own - an
+    """The hook awaits `asyncio.to_thread`, and the hand-off can fail on its own - an
     executor already shut down under a stopping proxy - before `_decide`'s guard is ever reached.
     It takes the same 502 as a decision that raised: the request may be a write. It is timed like
-    any other exchange, from the request hook's first line to the answer (#68): the engine's clock
+    any other exchange, from the request hook's first line to the answer: the engine's clock
     is a counter here, so an `ended_at` the 502 path forgot would read 100.0, not 101.0."""
     from irimi.engine import mitm
 
@@ -2203,9 +2201,9 @@ def test_a_raise_handing_the_decision_to_a_worker_answers_locally(tmp_path, monk
 
 
 def test_a_raise_carrying_a_rewrite_onto_the_flow_answers_locally(tmp_path, monkeypatch):
-    """`_apply_rewrite` runs back on the loop, outside `_decide`'s guard (#45). Before the split
-    its lines sat under the decision's backstop; they still do, so a raise there cannot escape
-    the hook and forward a half-edited read with nothing recorded."""
+    """`_apply_rewrite` runs back on the loop, outside `_decide`'s guard, but under the
+    decision's backstop all the same, so a raise there cannot escape the hook and forward a
+    half-edited read with nothing recorded."""
     from dataclasses import replace
 
     class _Translating:
@@ -2235,7 +2233,7 @@ def test_a_raise_carrying_a_rewrite_onto_the_flow_answers_locally(tmp_path, monk
 
 
 def test_a_raise_recording_an_engine_read_leaves_the_write_answered(tmp_path, monkeypatch):
-    """`Answer.issued` is recorded last, after the write's own answer is on the flow (#45). A store
+    """`Answer.issued` is recorded last, after the write's own answer is on the flow. A store
     or `on_exchange` that raises there escapes the hook, and mitmproxy forwards a flow only when
     it has no response - so the write is still answered locally and still pending its record."""
     from irimi.engine.mitm import META_KEY
@@ -2286,7 +2284,7 @@ def test_a_raise_recording_an_engine_read_leaves_the_write_answered(tmp_path, mo
 def test_neither_half_of_a_delegated_exchange_is_a_write(tmp_path, monkeypatch, target):
     """`answered_by != "live"` was an exhaustive spelling of "is a write" only while every read
     was live. `target_reads` makes a delegated read the first non-live read, and the write log is
-    what the overlay replays onto later reads (#20, #28)."""
+    what the overlay replays onto later reads."""
     maps = _targeted(
         tmp_path,
         monkeypatch,
@@ -2299,8 +2297,8 @@ def test_neither_half_of_a_delegated_exchange_is_a_write(tmp_path, monkeypatch, 
         status, _ = _via_proxy(eng.listen_port(), "GET", "http://127.0.0.1:1/hello")
         assert status == 200
         assert [ex.kind for ex in addon.write_log] == [], "a delegated read is in the write log"
-        # Nor is the delegated *write*, since #43: the target performed it, or did not, and the
-        # overlay cannot replay a write irimi did not author.
+        # Nor is the delegated *write*: the target performed it, or did not, and the overlay
+        # cannot apply a write irimi did not author.
         _via_proxy(eng.listen_port(), "POST", "http://127.0.0.1:1/things", body=b"{}")
         assert addon.write_log == [], "a delegated write is in the overlay's write log"
     finally:
@@ -2309,14 +2307,14 @@ def test_neither_half_of_a_delegated_exchange_is_a_write(tmp_path, monkeypatch, 
 
 def test_a_refused_target_is_not_a_write_either(tmp_path, monkeypatch, target):
     """A target irimi refuses is answered `502` in `request()`, which DOES set `_Pending`, so
-    unlike a target that could not be dialled it reaches `response()` and was being appended to
-    the write log - the log the Phase 2 overlay replays onto live reads.
+    unlike a target that could not be dialled it reaches `response()` - but it must not reach the
+    write log, the log the overlay applies to live reads.
 
     Nothing was performed: not at the target, not at the real service, not by the fake. The
-    overlay would have handed the agent back a write irimi refused to send anywhere.
+    overlay would hand the agent back a write irimi refused to send anywhere.
 
     It is asked with the port and the address the connection reached irimi at, which is irimi's
-    own listener too (#77).
+    own listener too.
     """
     asked = []
 
@@ -2389,7 +2387,7 @@ def test_the_host_header_is_set_to_the_target_not_left_as_the_service(
 
 
 def test_the_response_hook_writes_nothing_back_to_a_streamed_flow(tmp_path, monkeypatch):
-    """The other half of #28, at the seam rather than end to end.
+    """The streamed-flow rule at the seam rather than end to end.
 
     A streamed response's headers were sent before this hook ran, and its body is never assembled,
     so anything `response()` writes back is either ignored or destructive: rebuilding the flow
@@ -2436,9 +2434,9 @@ def test_the_response_hook_writes_nothing_back_to_a_streamed_flow(tmp_path, monk
 def test_the_response_hook_records_a_streamed_flow_from_its_tee_and_writes_nothing_back(
     tmp_path, monkeypatch
 ):
-    """#28's seam test above, with the stream going through a real `_StreamTee` as
+    """The seam test above, with the stream going through a real `_StreamTee` as
     `responseheaders` sets one up: the flow is still left exactly as it was, and the exchange is
-    recorded from the tee's copy (#71)."""
+    recorded from the tee's copy."""
     from mitmproxy.test import tflow, tutils
 
     from irimi.engine.mitm import META_KEY, STREAM_KEY, IrimiAddon
@@ -2462,7 +2460,7 @@ def test_the_response_hook_records_a_streamed_flow_from_its_tee_and_writes_nothi
     flow.client_conn.sockname = ("127.0.0.1", 4000)
     asyncio.run(addon.request(flow))
     assert flow.metadata[META_KEY].answered_by == "delegated"
-    # What `responseheaders` does for an event stream, and a chunk through it (#71).
+    # What `responseheaders` does for an event stream, and a chunk through it.
     tee = mitm._StreamTee()
     flow.metadata[STREAM_KEY] = flow.response.stream = tee
     tee(SSE_FIRST)
@@ -2479,8 +2477,8 @@ def test_the_response_hook_records_a_streamed_flow_from_its_tee_and_writes_nothi
 
 
 def test_a_streamed_target_response_is_not_buffered(tmp_path, monkeypatch):
-    """The streaming guard names `delegated` as well as `live`; reverting it to `("live",)` passed
-    the whole suite. A delegated SSE route is the case #28 is about."""
+    """The streaming guard names `delegated` as well as `live`, and only a delegated SSE route
+    tells the two apart: a guard of `("live",)` alone would buffer it."""
     _STREAM_GATE.clear()
     srv = HTTPServer(("127.0.0.1", 0), _StreamUpstream)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
@@ -2514,14 +2512,14 @@ def test_a_streamed_target_response_is_not_buffered(tmp_path, monkeypatch):
             stop()
     finally:
         srv.shutdown()
-    # A delegated stream is recorded as a live one is: the target's chunks, joined (#71).
+    # A delegated stream is recorded as a live one is: the target's chunks, joined.
     (ex,) = seen
     assert (ex.answered_by, ex.target) == ("delegated", f"http://127.0.0.1:{stream_port}/v1/stream")
     assert ex.response is not None and ex.response.body == SSE_FIRST + SSE_SECOND
     assert ex.stream_chunks == (len(SSE_FIRST), len(SSE_SECOND))
 
 
-# ------------------------------------------------------ the overlay through the engine (#43)
+# ------------------------------------------------------ the overlay through the engine
 
 
 class _OverlayDouble:
@@ -2686,9 +2684,8 @@ def test_the_overlay_is_not_asked_about_a_read_before_any_write(tmp_path, monkey
     finally:
         stop()
     assert status == 200
-    # The gate #53 deliberately did NOT widen: the header is stripped by the engine instead, so
-    # the overlay still sees no read until the write log holds a write (Notion, § Architecture
-    # changes).
+    # The rewrite gate stays closed until the write log holds a write: the engine strips the
+    # header itself, so the overlay sees no read before then.
     assert (overlay.calls, overlay.rewrites) == (0, 0)
     assert seen[-1].overlay is None
 
@@ -2696,10 +2693,10 @@ def test_the_overlay_is_not_asked_about_a_read_before_any_write(tmp_path, monkey
 def test_a_rewrote_header_the_agent_sent_is_not_forwarded_upstream(tmp_path, monkeypatch, upstream):
     """Only irimi may tell the response side that a page follows a minted refund. The overlay
     strips an agent's own `irimi-rewrote`, and the engine has to carry that onto the flow too, or
-    the header reaches the real service anyway (#43).
+    the header reaches the real service anyway.
 
-    Since #53 the engine strips it in `request()` before the overlay is asked, so this now holds
-    even for an overlay whose `rewrite` strips nothing. It stays as the non-empty-log twin of
+    The engine strips it in `request()` before the overlay is asked, so this holds even for an
+    overlay whose `rewrite` strips nothing. It is the non-empty-log twin of
     `test_a_rewrote_header_the_agent_sent_is_stripped_before_the_runs_first_write`.
     """
     from dataclasses import replace
@@ -2727,9 +2724,9 @@ def test_a_rewrote_header_the_agent_sent_is_not_forwarded_upstream(tmp_path, mon
 def test_a_rewrote_header_the_agent_sent_is_stripped_before_the_runs_first_write(
     tmp_path, monkeypatch, upstream
 ):
-    """#53. The engine's rewrite path is closed until the write log holds a write, so the overlay's
-    own strip could not run - and irimi's vocabulary reached the real service on a read irimi did
-    not touch. The engine strips it in `request()` now, whatever the log holds.
+    """The engine's rewrite path is closed until the write log holds a write, so the overlay's own
+    strip cannot run before then. The engine strips the header in `request()` whatever the log
+    holds, so irimi's vocabulary never reaches the real service on a read irimi did not touch.
 
     `_start` with no overlay gives `NoOverlay`, whose `rewrite` returns the request it was handed,
     so nothing but the engine could have removed the header here. Sent twice, in two spellings:
@@ -2761,7 +2758,7 @@ def test_a_rewrote_header_the_agent_sent_is_kept_out_of_the_recorded_request(
 ):
     """The Exchange records what irimi asked the service. It did not ask with this header, and the
     response side reads the recorded request - `ServiceOverlay._apply` looks for `Irimi-Rewrote`
-    there - so leaving it on would let a forgery be believed by a later hook (#53)."""
+    there - so leaving it on would let a forgery be believed by a later hook."""
     cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch))
     eng, seen, stop = _start(cfg)
     try:
@@ -2777,7 +2774,7 @@ def test_a_rewrote_header_the_agent_sent_is_kept_out_of_the_recorded_request(
 
 def test_only_irimis_own_rewrote_header_reaches_the_upstream(tmp_path, monkeypatch, upstream):
     """The forgery is gone and irimi's own is there, exactly once. Two headers of one name would
-    make `stripe._refunds_list` read whichever mitmproxy happened to hand it first (#53)."""
+    make `stripe._refunds_list` read whichever mitmproxy happened to hand it first."""
     from dataclasses import replace
 
     stamp = (pipeline.REWROTE_HEADER, "starting_after=re_MINTED1")
@@ -2810,7 +2807,7 @@ def test_a_write_carrying_a_rewrote_header_is_still_faked_and_records_none(
     tmp_path, monkeypatch, upstream
 ):
     """A write is answered locally, so the header never leaves the machine either way - but it must
-    not survive on the recorded request, where a trace reader would read it as irimi's (#53)."""
+    not survive on the recorded request, where a trace reader would read it as irimi's."""
     cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch))
     eng, seen, stop = _start(cfg)
     try:
@@ -2833,7 +2830,7 @@ def test_a_write_carrying_a_rewrote_header_is_still_faked_and_records_none(
     assert [k for k, _ in ex.request.headers if k == pipeline.REWROTE_HEADER] == []
 
 
-# ------------------------------------------------ the Stripe overlay, end to end (#43)
+# ------------------------------------------------ the Stripe overlay, end to end
 
 # A map claiming the loopback upstream as `stripe`, so the real `ServiceOverlay` applies Stripe's
 # effects table to reads through it. `fixture: refund` resolves against the shipped Stripe
@@ -2975,7 +2972,7 @@ class _StripeStub(BaseHTTPRequestHandler):
             )
         else:
             # Stripe's own shape for an id it has never heard of. The code is what tells a minted
-            # object's read apart from a rate limit or a bad key on the same read (#52).
+            # object's read apart from a rate limit or a bad key on the same read.
             status, document = (
                 404,
                 {"error": {"type": "invalid_request_error", "code": "resource_missing"}},
@@ -3036,8 +3033,8 @@ def test_a_charge_reread_after_a_faked_refund_shows_the_refund(stripe_stub):
 
 
 def test_a_faked_refund_records_the_webhooks_it_would_have_fired(stripe_stub):
-    """#47's done-when through the proxy, where `_Pending` and the response hook's `annotate`
-    carry it: a faked refund lists `refund.created` and `charge.refunded`, and the read after it
+    """Would-fire webhooks through the proxy, where `_Pending` and the response hook's `annotate`
+    carry them: a faked refund lists `refund.created` and `charge.refunded`, and the read after it
     lists nothing."""
     proxy, stub, seen = stripe_stub
     status, _ = _via_proxy(
@@ -3090,11 +3087,11 @@ class _HeldRefundsStub(_StripeStub):
 
 
 def test_a_forged_rewrote_header_cannot_hide_a_refund_that_lands_mid_read(tmp_path, monkeypatch):
-    """The race #53 closed, which was a real forgery and not only noise. `request()` snapshots
-    the write log, empty here, so the read is never rewritten; the refund then lands before the
-    read's `response()`, which tests the live log and overlays the page. The overlay read the
-    agent's forged `Irimi-Rewrote: starting_after=...` off the recorded request, took the page
-    for the one after a minted refund, and left the refund off it."""
+    """A forged header racing a refund. `request()` snapshots the write log, empty here, so the
+    read is never rewritten; the refund then lands before the read's `response()`, which tests
+    the live log and overlays the page. An overlay that read the agent's forged `Irimi-Rewrote:
+    starting_after=...` off the recorded request would take the page for the one after a minted
+    refund and leave the refund off it."""
     from irimi.overlay import ServiceOverlay
 
     _StripeStub.seen = []
@@ -3154,9 +3151,9 @@ def _keyed_refund(proxy, stub, key, amount=100):
 
 
 def test_a_retry_with_the_same_key_is_one_refund_not_two(stripe_stub):
-    """The bug #46 exists for: a retry with the key it already sent got a second minted id, the
-    engine logged it as a second write, and the overlay applied one 100 refund as 200. The retry
-    now gets the first answer's own bytes and never reaches the write log."""
+    """A retry with the key it already sent gets the first answer's own bytes and never reaches
+    the write log. A second minted id would be logged as a second write, and the overlay would
+    apply one 100 refund as 200."""
     proxy, stub, seen = stripe_stub
     status, first_headers, first = _keyed_refund(proxy, stub, "k-1")
     assert status == 200
@@ -3180,7 +3177,7 @@ def test_a_retry_with_the_same_key_is_one_refund_not_two(stripe_stub):
 
 def test_a_replayed_refund_records_no_webhooks(stripe_stub):
     """The retry's events are already on the first write's own exchange; listing them again
-    would promise one refund's `refund.created` twice (#46, #47)."""
+    would promise one refund's `refund.created` twice."""
     proxy, stub, seen = stripe_stub
     _keyed_refund(proxy, stub, "k-1")
     _keyed_refund(proxy, stub, "k-1")
@@ -3191,7 +3188,7 @@ def test_a_replayed_refund_records_no_webhooks(stripe_stub):
 
 def test_the_same_key_with_a_different_amount_is_refused(stripe_stub):
     """A key reused for a different write is Stripe's own `idempotency_error`, and it is not a
-    write: the charge still shows the first refund only (#46)."""
+    write: the charge still shows the first refund only."""
     proxy, stub, seen = stripe_stub
     status, _, _ = _keyed_refund(proxy, stub, "k-2")
     assert status == 200
@@ -3207,7 +3204,7 @@ def test_the_same_key_with_a_different_amount_is_refused(stripe_stub):
 
 def test_a_reused_key_on_a_different_write_records_no_webhooks(stripe_stub):
     """The real service would have refused the reused key, so nothing would have fired. A
-    conflict is not `precondition: rejected`, so it is pinned on its own (#46, #47)."""
+    conflict is not `precondition: rejected`, so it is pinned on its own."""
     proxy, stub, seen = stripe_stub
     _keyed_refund(proxy, stub, "k-2")
     _keyed_refund(proxy, stub, "k-2", amount=250)
@@ -3255,7 +3252,7 @@ def _fake_refund(proxy, stub, charge="ch_REAL1", amount=100):
 def test_a_full_refunds_page_drops_the_oldest_real_refund_and_says_there_is_more(stripe_stub):
     """A page Stripe filled to the limit cannot also hold the minted refund. The page stays the
     length the agent asked for and `has_more` becomes true, because a longer page is one no real
-    Stripe read could return (#43)."""
+    Stripe read could return."""
     proxy, stub, seen = stripe_stub
     refund_id = _fake_refund(proxy, stub)
     limit = _StripeStub.REFUNDS_PAGE_SIZE
@@ -3274,7 +3271,7 @@ def test_a_cursor_naming_a_minted_refund_is_dropped_before_the_read_reaches_stri
     """Stripe has never heard of the refund irimi minted and would answer the page with an error,
     so the cursor is dropped and `Irimi-Rewrote` carries what was removed. The page that comes back
     is the real list from its top, and the minted refund is NOT prepended again: it belongs on the
-    page before this one (#43)."""
+    page before this one."""
     proxy, stub, seen = stripe_stub
     refund_id = _fake_refund(proxy, stub)
     _StripeStub.seen.clear()
@@ -3340,10 +3337,10 @@ def test_a_payment_intent_reread_after_a_faked_cancel_shows_it_canceled(stripe_s
 
 
 def test_a_reread_of_a_minted_refund_by_id_is_answered_not_404d(stripe_stub):
-    """#52's done-when, end to end through the real proxy. Stripe 404s an id it has never heard
-    of; the agent stored that id because irimi told it the refund exists, and irimi answers with
-    the object it minted, at 200, stamped `overlay`. The read still reached Stripe - that is what
-    makes it a real read the summary counts."""
+    """A minted refund read back by id, end to end through the real proxy. Stripe 404s an id it
+    has never heard of; the agent stored that id because irimi told it the refund exists, and
+    irimi answers with the object it minted, at 200, stamped `overlay`. The read still reached
+    Stripe - that is what makes it a real read the summary counts."""
     proxy, stub, seen = stripe_stub
     # `_fake_refund` returns the minted id and asserts its own 200.
     minted = _fake_refund(proxy, stub)
@@ -3359,13 +3356,13 @@ def test_a_reread_of_a_minted_refund_by_id_is_answered_not_404d(stripe_stub):
         "full",
         "agent",
     )
-    # The read reached Stripe and the refund did not: it is still a real read (#52).
+    # The read reached Stripe and the refund did not: it is still a real read.
     assert _StripeStub.seen == [("GET", f"/v1/refunds/{minted}")], "a faked write reached Stripe"
 
 
 def test_a_read_of_a_refund_stripe_really_does_not_have_keeps_its_404(stripe_stub):
     """The status moves for a minted object and for nothing else. An id neither Stripe nor irimi
-    has is Stripe's own 404, unstamped and unflagged (#52)."""
+    has is Stripe's own 404, unstamped and unflagged."""
     proxy, stub, seen = stripe_stub
     assert _fake_refund(proxy, stub).startswith("re_")
     status, headers, _ = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds/re_NOTHING")
@@ -3379,7 +3376,7 @@ def test_a_read_of_a_refund_stripe_really_does_not_have_keeps_its_404(stripe_stu
 def test_a_rate_limited_read_of_a_minted_refund_keeps_its_429(stripe_stub):
     """Only Stripe's `resource_missing` is answered. A 429 on the same read is Stripe's answer
     about the caller, which production would have sent for the real refund too, so the agent
-    gets it as sent and the exchange says the world irimi showed is incomplete (#52)."""
+    gets it as sent and the exchange says the world irimi showed is incomplete."""
     proxy, stub, seen = stripe_stub
     minted = _fake_refund(proxy, stub)
     _StripeStub.rate_limited = True
@@ -3392,8 +3389,8 @@ def test_a_rate_limited_read_of_a_minted_refund_keeps_its_429(stripe_stub):
 
 
 def test_a_minted_refund_read_by_id_is_listed_under_its_refund(stripe_stub, tmp_path, monkeypatch):
-    """The summary line #52 changes, off a real run: before it the read hung under the refund as
-    `did not show it  live (partial)`, and now it is a read that saw it (#48, #52)."""
+    """The summary line for a minted refund read by id, off a real run: the read hangs under the
+    refund as one that saw it, not as `did not show it  live (partial)`."""
     proxy, stub, seen = stripe_stub
     minted = _fake_refund(proxy, stub)
     assert _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds/{minted}")[0] == 200
@@ -3402,7 +3399,7 @@ def test_a_minted_refund_read_by_id_is_listed_under_its_refund(stripe_stub, tmp_
     assert lines[write + 1] == f"    ↳ GET /v1/refunds/{minted} saw it  overlay"
 
 
-# ------------------------------------------------- the Slack overlay, end to end (#44)
+# ------------------------------------------------- the Slack overlay, end to end
 
 # The loopback upstream claimed as `slack`, with the shipped map's two routes that matter here.
 # `verbs: post-only` because a Slack read is a POST, as it is in `maps/slack.yaml`; `fixture:
@@ -3435,7 +3432,7 @@ routes:
     kind: read
     human: read a thread in {channel}
 """
-SLACK_JSON = "application/json;charset=utf-8"  # what slack_sdk sends (#44)
+SLACK_JSON = "application/json;charset=utf-8"  # what slack_sdk sends
 REAL_SLACK_TS = "1700000000.000100"
 
 
@@ -3448,7 +3445,7 @@ class _SlackStub(BaseHTTPRequestHandler):
     faked write that escaped.
 
     A `conversations.replies` for any other thread than `REAL_SLACK_TS` is `thread_not_found` at
-    HTTP 200, which is how a read of a thread irimi minted arrives here (#52)."""
+    HTTP 200, which is how a read of a thread irimi minted arrives here."""
 
     seen: list = []  # (method, path) of every request
 
@@ -3463,7 +3460,7 @@ class _SlackStub(BaseHTTPRequestHandler):
         posted = json.loads(raw or b"{}")
         if self.path == "/api/conversations.replies" and posted.get("ts") != REAL_SLACK_TS:
             # A thread Slack has never seen: `thread_not_found`, at HTTP 200, which is what a read
-            # of a thread irimi MINTED really gets from Slack (#52).
+            # of a thread irimi MINTED really gets from Slack.
             document = {"ok": False, "error": "thread_not_found"}
         else:
             document = {"ok": True, "messages": [dict(REAL_SLACK_MESSAGE)], "has_more": False}
@@ -3524,7 +3521,7 @@ def test_a_slack_history_read_after_a_faked_post_shows_the_post_first(slack_stub
 
 def test_a_slack_history_read_of_another_channel_is_forwarded_unstamped(slack_stub):
     """Two different channel ids are a definite no, not a "cannot tell": the read is left as
-    Slack sent it and is not `partial` (#44)."""
+    Slack sent it and is not `partial`."""
     proxy, stub, seen = slack_stub
     status, _, _ = _slack_call(proxy, stub, "chat.postMessage", {"channel": "C0123", "text": "hi"})
     assert status == 200
@@ -3539,7 +3536,7 @@ def test_a_slack_history_read_of_another_channel_is_forwarded_unstamped(slack_st
 
 
 def test_a_slack_replies_read_after_a_faked_reply_shows_it_at_the_tail(slack_stub):
-    """#44's done-when for the second read: the reply last, the parent's counts moved, the whole
+    """A replies read after a faked reply: the reply last, the parent's counts moved, the whole
     page stamped `overlay` - and the post itself never reached Slack."""
     proxy, stub, seen = slack_stub
     status, _, data = _slack_call(
@@ -3568,7 +3565,7 @@ def test_a_slack_replies_read_after_a_faked_reply_shows_it_at_the_tail(slack_stu
 def test_a_slack_read_the_effects_cannot_place_is_recorded_partial_and_left_alone(slack_stub):
     """`chat.postMessage` takes `#general`, `conversations.history` requires the id, and irimi's own
     echo carries the posted spelling - so the two sides cannot be matched. The body is left exactly
-    as Slack sent it and the exchange says the world irimi showed is incomplete (#44)."""
+    as Slack sent it and the exchange says the world irimi showed is incomplete."""
     proxy, stub, seen = slack_stub
     status, _, _ = _slack_call(
         proxy, stub, "chat.postMessage", {"channel": "#general", "text": "hi"}
@@ -3583,7 +3580,7 @@ def test_a_slack_read_the_effects_cannot_place_is_recorded_partial_and_left_alon
 
 
 def test_a_faked_post_answers_with_its_thread_or_with_no_thread_key_through_the_proxy(slack_stub):
-    """#55's done-when off the real proxy: a threaded post's own answer names the thread it was
+    """Off the real proxy, a threaded post's own answer names the thread it was
     posted in, and a top-level post's answer has no `thread_ts` key at all - not a `null` one,
     which real Slack never sends. Neither reached Slack."""
     proxy, stub, _ = slack_stub
@@ -3604,9 +3601,9 @@ def test_a_faked_post_answers_with_its_thread_or_with_no_thread_key_through_the_
 
 
 def test_a_slack_replies_read_of_a_minted_thread_is_answered_not_thread_not_found(slack_stub):
-    """#52's Slack done-when, end to end. The agent posts, then reads the thread its own post
-    started - which Slack has never heard of and refuses at HTTP 200. irimi answers with the
-    thread from its write log, and the post still never reached Slack."""
+    """A minted Slack thread read back, end to end. The agent posts, then reads the thread its
+    own post started - which Slack has never heard of and refuses at HTTP 200. irimi answers with
+    the thread from its write log, and the post still never reached Slack."""
     proxy, stub, seen = slack_stub
     status, _, data = _slack_call(
         proxy, stub, "chat.postMessage", {"channel": "C0123", "text": "refunded"}
@@ -3629,11 +3626,11 @@ def test_a_slack_replies_read_of_a_minted_thread_is_answered_not_thread_not_foun
         "full",
         "agent",
     )
-    # The read reached Slack and the post did not: it is still a real read (#52).
+    # The read reached Slack and the post did not: it is still a real read.
     assert _SlackStub.seen == [("POST", "/api/conversations.replies")], "a faked post reached Slack"
 
 
-# ------------------------------------------------ L3 preconditions through the engine (#45)
+# ------------------------------------------------ L3 preconditions through the engine
 
 # STRIPE_MAP with the shipped map's `precondition:` on `refunds.create`. Its own copy, so the
 # `stripe_stub` tests above keep meaning exactly what they meant and issue no probes.
@@ -3662,7 +3659,7 @@ class _PreconditionStub(BaseHTTPRequestHandler):
     is a faked write that escaped."""
 
     seen: list = []  # (method, path) of every request
-    heard: list = []  # the header pairs of every GET, so a test can see what irimi sent (#67)
+    heard: list = []  # the header pairs of every GET, so a test can see what irimi sent
 
     def do_GET(self):
         _PreconditionStub.seen.append(("GET", self.path))
@@ -3759,7 +3756,7 @@ def test_a_refund_of_a_fully_refunded_charge_is_rejected_with_stripes_own_body(
 
 def test_a_rejected_refund_records_no_webhooks(precondition_stub):
     """L3 said the real service would have refused this refund: nothing was performed, so
-    nothing would have fired (#45, #47). A refund L3 passed goes first, so the empty list is
+    nothing would have fired. A refund L3 passed goes first, so the empty list is
     this map's `fires:` withheld and not a map that never had one."""
     proxy, stub, seen = precondition_stub
     status, _, _ = _refund(proxy, stub, "ch_REAL1")
@@ -3776,8 +3773,9 @@ def test_a_rejected_refund_records_no_webhooks(precondition_stub):
 def test_a_second_refund_in_one_run_is_rejected_because_the_overlay_applied_the_first(
     precondition_stub,
 ):
-    """#45's done-when. The real charge is untouched and refundable both times; what makes the
-    second refund one Stripe would refuse is the first, which only irimi's write log knows about."""
+    """The precondition check sees the run's own writes. The real charge is untouched and
+    refundable both times; what makes the second refund one Stripe would refuse is the first,
+    which only irimi's write log knows about."""
     proxy, stub, seen = precondition_stub
     first, _, data = _refund(proxy, stub, "ch_REAL1", amount=4900)
     assert first == 200
@@ -3827,8 +3825,8 @@ def test_a_precondition_read_that_429s_leaves_the_write_faked_at_l2(precondition
 
 def test_a_refund_l3_could_not_check_still_lists_its_webhooks(precondition_stub):
     """`not_evaluable` is not `rejected`: irimi could not find out, faked the write anyway, and
-    so accepted it - its events are listed like a passed refund's. Only a refusal lists nothing
-    (#45, #47)."""
+    so accepted it - its events are listed like a passed refund's. Only a refusal lists nothing.
+    """
     proxy, stub, seen = precondition_stub
     status, _, _ = _refund(proxy, stub, "ch_BUSY1")
     assert status == 200
@@ -3838,7 +3836,7 @@ def test_a_refund_l3_could_not_check_still_lists_its_webhooks(precondition_stub)
 
 
 def test_a_precondition_read_that_redirects_is_not_followed_and_decides_nothing(precondition_stub):
-    """NO REDIRECT (#85): the engine's read dials the object the classifier saw and no other.
+    """NO REDIRECT: the engine's read dials the object the classifier saw and no other.
     Followed, `ch_MOVED1`'s 302 to the fully refunded `ch_FULL1` rejected this refund by another
     charge's state. The 302 is the answer: `not_evaluable`, the write faked at L2 as a 429's is,
     and `ch_FULL1` never asked."""
@@ -3900,7 +3898,7 @@ def _refund_then_list_summary(proxy, stub, seen, tmp_path, monkeypatch):
 
     The index is built again by the same `_maps` call `precondition_stub` made, so the write line
     is the map's `human:` sentence and not the bare request. The fixture does not yield its index
-    because nine tests unpack it and only these two print a summary (#48)."""
+    because nine tests unpack it and only these two print a summary."""
     status, _, _ = _refund(proxy, stub, "ch_REAL1", amount=4900)
     assert status == 200
     status, headers, _ = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds")
@@ -3913,14 +3911,14 @@ def _refund_then_list_summary(proxy, stub, seen, tmp_path, monkeypatch):
 def test_an_overlaid_read_is_listed_under_the_write_it_saw_through_the_proxy(
     precondition_stub, tmp_path, monkeypatch
 ):
-    """The `↳` line off a real run (#48): the refunds list the overlay edited to show the refund
+    """The `↳` line off a real run: the refunds list the overlay edited to show the refund
     sits directly under that refund, and is the only `↳` line. The precondition read L3 issued
-    between them is counted as an engine read and never in `N reads` (#45); it is live and
+    between them is counted as an engine read and never in `N reads`; it is live and
     unedited, so it owes no line either way."""
     proxy, stub, seen = precondition_stub
     lines = _refund_then_list_summary(proxy, stub, seen, tmp_path, monkeypatch)
-    # `$49.00` and not `4900` since #60: the write names no currency, and irimi's own precondition
-    # read of `ch_REAL1` found `usd` on the charge.
+    # `$49.00` and not `4900`: the write names no currency, and irimi's own precondition read of
+    # `ch_REAL1` found `usd` on the charge.
     write = lines.index("  ○ refund $49.00 on ch_REAL1  unvalidated (L3 preconditions passed)")
     assert lines[write + 1] == "    ↳ GET /v1/refunds saw it  overlay"
     assert [line for line in lines if "↳" in line] == [lines[write + 1]]
@@ -3932,8 +3930,8 @@ def test_an_overlaid_read_is_listed_under_the_write_it_saw_through_the_proxy(
 def test_the_closing_line_names_the_webhooks_a_real_refund_would_have_sent(
     precondition_stub, tmp_path, monkeypatch
 ):
-    """The closing clause off a real run (#48): the events are the ones the engine put on the
-    accepted refund's `Exchange.would_fire`, named once each in the map's order (#47)."""
+    """The closing clause off a real run: the events are the ones the engine put on the
+    accepted refund's `Exchange.would_fire`, named once each in the map's order."""
     proxy, stub, seen = precondition_stub
     lines = _refund_then_list_summary(proxy, stub, seen, tmp_path, monkeypatch)
     assert [ex.would_fire for ex in _writes(seen)] == [("refund.created", "charge.refunded")]
@@ -3943,7 +3941,7 @@ def test_the_closing_line_names_the_webhooks_a_real_refund_would_have_sent(
 
 
 def test_a_faked_refund_carries_the_currency_its_precondition_read_found(precondition_stub):
-    """#60 end to end through the real proxy: the charge the stub answers is in `usd`, the refund
+    """End to end through the real proxy: the charge the stub answers is in `usd`, the refund
     posts no currency, and the exchange carries the code across so the summary can format it."""
     proxy, stub, seen = precondition_stub
     status, _, _ = _refund(proxy, stub, "ch_REAL1")
@@ -3957,7 +3955,7 @@ def test_a_write_whose_precondition_read_never_answered_carries_no_currency(
     precondition_stub, tmp_path, monkeypatch
 ):
     """`ch_BUSY1` 429s, so no document was read and there is nothing to denominate the amount
-    with. The write is still faked at L2 and its line still prints raw minor units (#60)."""
+    with. The write is still faked at L2 and its line still prints raw minor units."""
     proxy, stub, seen = precondition_stub
     status, _, _ = _refund(proxy, stub, "ch_BUSY1")
     assert status == 200
@@ -4071,7 +4069,7 @@ def test_a_post_to_a_healthy_channel_passes_and_the_probe_was_a_conversations_in
     assert _SlackPreconditionStub.seen == [("POST", "/api/conversations.info")]
 
 
-# ------------------------------------------------ Irimi-Run stops at irimi (#67)
+# ------------------------------------------------ Irimi-Run stops at irimi
 
 # Sent twice, in two spellings: a repeat has to lose every instance, not the first.
 RUN_HEADERS = {"Irimi-Run": "abc", "irimi-run": "abc"}
@@ -4213,12 +4211,12 @@ def test_every_other_header_is_forwarded_untouched(engine, upstream):
     assert ("traceparent", traceparent) in seen[0].request.headers
 
 
-# ------------------------------------ a run id names a directory; every exchange is timed (#68)
+# ------------------------------------ a run id names a directory; every exchange is timed
 
 
 def test_an_invalid_run_header_is_stripped_and_the_exchange_keeps_the_engines_run(engine, upstream):
-    """`../x` would name a directory outside the trace store (#70), so it is no run id: the
-    exchange keeps the engine's own. It is still stripped, like any other value (#67)."""
+    """`../x` would name a directory outside the trace store, so it is no run id: the
+    exchange keeps the engine's own. It is still stripped, like any other value."""
     eng, seen = engine
     status, _ = _via_proxy(
         eng.listen_port(),
@@ -4254,7 +4252,7 @@ def test_a_live_read_a_faked_write_and_a_lost_upstream_are_each_timed(engine, up
 def test_the_precondition_read_is_timed_by_its_own_reader_call_inside_the_write(
     precondition_stub,
 ):
-    """An engine-issued read spans its `Reader` call, not the write's hook (#68): it starts after
+    """An engine-issued read spans its `Reader` call, not the write's hook: it starts after
     the write it checks, ends before it, and lasts as long as `ch_SLOW1`'s stub takes. It is also
     recorded first - `seq` will be completion order - while the write started first."""
     proxy, stub, seen = precondition_stub

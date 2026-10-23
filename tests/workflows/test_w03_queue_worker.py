@@ -24,11 +24,11 @@ from irimi.sdk.replay_child import CANNOT_CALL
 from irimi.trace import UNATTRIBUTED, ErrorInfo, ToolCall
 
 W = "w03_queue_worker"
-# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi (#77).
+# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.
 MODES = ("shadow", "serve")
 AGENT = "examples.workflows.w03_queue_worker.agent"
 # The trigger each scenario's runs are started by: `handle` on a thread pool, `handle_async` under
-# `asyncio.gather` (#74).
+# `asyncio.gather`.
 TRIGGERS = {"threads_8": "handle", "asyncio_8": "handle_async"}
 REFUND_LINE = "fake-L1   write     POST api.stripe.com/v1/refunds -> 200  [fidelity:L1]"
 
@@ -43,7 +43,7 @@ def ends(result):
 
 @pytest.mark.parametrize("scenario", ["threads_8", "asyncio_8"])
 def test_eight_concurrent_runs_print_eight_summaries_under_serve(run_workflow, scenario):
-    """Under `irimi shadow --serve` (#77) the same eight messages are eight runs, and each run's
+    """Under `irimi shadow --serve` the same eight messages are eight runs, and each run's
     summary is printed when the SDK ends it: eight `--- run <id> ---` blocks, one per run, each
     holding its own refund and no other run's. The universal checks hold each block to its stored
     summary (`test_invariants.py`). No process run exists to hold anything."""
@@ -90,10 +90,10 @@ CONCURRENT = ("threads_8", "asyncio_8", "one_pool_8", "ledger_threads_8", "ledge
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("scenario", CONCURRENT)
 def test_concurrent_runs_each_store_exactly_their_own_events(run_workflow, scenario, mode):
-    """Phase 3's exit, "two concurrent requests don't mix", as equality, not containment: each of
+    """Two concurrent requests don't mix, as equality, not containment: each of
     the eight runs stores exactly the requests the agent made in it, by method, host and path,
     exactly the tool calls it made in it, and irimi's own L3 reads of its own charge alone; and
-    the engine's own run, the process run or under serve mode `unattributed` (#77), holds nothing.
+    the engine's own run, the process run or under serve mode `unattributed`, holds nothing.
     Under serve, each run's block, printed while the others still ran, names its own charge and
     no other run's."""
     shadow = run_workflow(W, scenario, mode)
@@ -134,15 +134,15 @@ def test_concurrent_runs_each_store_exactly_their_own_events(run_workflow, scena
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("scenario", CONCURRENT)
 def test_phase_3_exit_holds_for_eight_concurrent_runs(run_workflow, scenario, mode):
-    """Phase 3's exit (#78), "a server-style agent produces attributed runs with their triggers,
-    and two concurrent requests don't mix", as `tests/test_phase3_exit.py` asserts it for two
+    """A server-style agent produces attributed runs with their triggers, and two concurrent
+    requests don't mix, as `tests/test_phase3_exit.py` asserts it for two
     requests, held here for eight over W3's six clients, over two shared one-connection pools,
     and with tools. Exactly eight runs, all `sdk` and `ok`, plus the process run under
-    `irimi shadow -- <cmd>` and nothing more under serve (#77); each run's trigger args name its
+    `irimi shadow -- <cmd>` and nothing more under serve; each run's trigger args name its
     own charge, and its exchanges and tool calls name that charge alone;
     `unattributed/` holds nothing; `irimi runs list` prints one line per run; each write tool was
     stood in, and the ledger it would have written holds no row; and the routing is proved from
-    the store (#78's "Since #67"): the fake Stripe answered exactly the charge reads irimi stored
+    the store: the fake Stripe answered exactly the charge reads irimi stored
     as live, so none went past it. Under serve, each run's block holds its own refund (and its own
     stood-in tool write) alone. Invariants 1 to 5 hold."""
     result = run_workflow(W, scenario, mode)
@@ -153,7 +153,7 @@ def test_phase_3_exit_holds_for_eight_concurrent_runs(run_workflow, scenario, mo
     assert sorted(r.attribution for r in records) == [*process, *["sdk"] * 8]
     runs = [r for r in records if r.attribution == "sdk"]
     assert {(r.outcome, r.error) for r in runs} == {("ok", None)}
-    # What no run names is filed here: without the SDK's labels (#75), every request is.
+    # What no run names is filed here: without the SDK's labels, every request is.
     assert reader.load_run(UNATTRIBUTED).events == []
     ledger = scenario.startswith("ledger_")
     charges = {}
@@ -173,7 +173,7 @@ def test_phase_3_exit_holds_for_eight_concurrent_runs(run_workflow, scenario, mo
     assert sorted(line.split("  ", 1)[0] for line in out if "  sdk  " in line) == sorted(
         charges.values()
     )
-    # Invariant 3, as #78 states it for its SQLite file: what the write tool would have written
+    # Invariant 3 for a SQLite file: what the write tool would have written
     # does not exist. Bare, the same eight rows really land; a scenario with no tools has no ledger.
     if ledger:
         assert result.query(LEDGER, "SELECT * FROM refunds") == []
@@ -216,11 +216,11 @@ def charge_named(ex: Exchange) -> str:
 def test_eight_messages_are_eight_stored_runs_each_holding_only_its_own_charge(
     run_workflow, mode, scenario
 ):
-    """Each message is one run the SDK started and ended (#74): `attribution: "sdk"`, `ok`, its
+    """Each message is one run the SDK started and ended: `attribution: "sdk"`, `ok`, its
     trigger the function the queue called and its args the message, which names the run's own
     charge. Each holds its read, its refund and irimi's L3 read of that charge and no other,
     whichever thread or task made them. The process run holds none of them, and under serve
-    mode (#77), which has none, nothing is left `unattributed`."""
+    mode, which has none, nothing is left `unattributed`."""
     shadow = run_workflow(W, scenario, mode)
     reader = shadow.stored()
     records = reader.list_runs()
@@ -259,7 +259,7 @@ def test_every_client_went_through_the_proxy(run_workflow, mode):
 
 # A free-threaded 3.14 build starts a thread in a copy of its creator's context
 # (`sys.flags.thread_inherit_context`), so there the bare thread keeps the run and this scenario's
-# premise does not hold; `tests/test_sdk.py` pins that build's behaviour (#74).
+# premise does not hold; `tests/test_sdk.py` pins that build's behaviour.
 @pytest.mark.skipif(
     bool(getattr(sys.flags, "thread_inherit_context", 0)),
     reason="threads inherit their creator's context on this build",
@@ -270,13 +270,13 @@ def test_a_thread_started_without_propagate_loses_its_run(run_workflow):
     assert len(runs) == 2
     # Each read belongs to its message's run; each refund, made in a thread started without
     # `sdk.propagate`, belongs to none. It was still faked, and carried no `Irimi-Run`, so it falls
-    # back to the engine's own run (#75): the process run under `irimi shadow -- <cmd>`, and
-    # `unattributed` only in serve mode (#77). That fallback is what this scenario is for.
+    # back to the engine's own run: the process run under `irimi shadow -- <cmd>`, and
+    # `unattributed` only in serve mode. That fallback is what this scenario is for.
     assert sorted((c["label"], c["run"], c["answered_by"]) for c in shadow.calls()) == sorted(
         [("read:ch_Q0", runs[0], None), ("read:ch_Q1", runs[1], None)]
         + [(f"refund:ch_Q{i}", None, "fake-L1") for i in (0, 1)]
     )
-    # Stored the same way (#74): each message's run holds its read and nothing else, and both
+    # Stored the same way: each message's run holds its read and nothing else, and both
     # refunds, which carried no `Irimi-Run`, land in the process run with their L3 reads.
     reader = shadow.stored()
     stored = {r.run_id: r.attribution for r in reader.list_runs()}
@@ -294,8 +294,8 @@ def test_a_thread_started_without_propagate_loses_its_run(run_workflow):
     reason="threads inherit their creator's context on this build",
 )
 def test_a_thread_that_lost_its_run_is_unattributed_under_serve(run_workflow):
-    """Serve mode has no process run to fall back on: a request no run labels is `unattributed`
-    (#77). The two refunds made in threads started without `sdk.propagate` land there, with the
+    """Serve mode has no process run to fall back on: a request no run labels is `unattributed`.
+    The two refunds made in threads started without `sdk.propagate` land there, with the
     L3 reads irimi made for them, and build no run; each message's run holds its read alone."""
     serve = run_workflow(W, "unpropagated_thread", "serve")
     runs = [e["run"] for e in serve.events("run.start")]
@@ -321,8 +321,7 @@ def test_a_nested_trigger_joins_the_run_it_is_called_in(run_workflow, mode):
     for labels in runs.values():
         assert own_charge_only(labels)
         assert sorted(label.split(":")[0] for label in labels) == ["audit", "read", "refund"]
-    # The nested `audit` trigger started no run of its own, and irimi stored two runs, not four
-    # (#74).
+    # The nested `audit` trigger started no run of its own, and irimi stored two runs, not four.
     assert [e["name"] for e in shadow.events("run.start")] == ["handle", "handle"]
     stored = [r for r in shadow.stored().list_runs() if r.attribution == "sdk"]
     assert {r.run_id for r in stored} == set(runs)
@@ -339,7 +338,7 @@ def test_one_failing_message_fails_only_its_own_run(run_workflow, mode):
     assert sorted(outcomes.values()) == ["error", "ok", "ok", "ok"]
     failed = next(run for run, outcome in outcomes.items() if outcome == "error")
     assert shadow.by_run()[failed] == ["read:ch_Q2"]
-    # Stored: exactly one run ended in error, with the poison message's ValueError (#74).
+    # Stored: exactly one run ended in error, with the poison message's ValueError.
     stored = [r for r in shadow.stored().list_runs() if r.attribution == "sdk"]
     assert sorted(r.outcome or "" for r in stored) == ["error", "ok", "ok", "ok"]
     [error] = [r for r in stored if r.outcome == "error"]
@@ -352,12 +351,12 @@ def test_one_failing_message_fails_only_its_own_run(run_workflow, mode):
 
 @pytest.mark.parametrize("mode", ["shadow", "serve"])
 def test_a_second_run_sees_the_first_runs_faked_refund(run_workflow, mode):
-    """The write log is the engine's, not the run's, by decision (#77): run 2's read of the charge
+    """The write log is the engine's, not the run's, by decision: run 2's read of the charge
     is overlaid with run 1's faked refund, and L3 then refuses run 2's refund against it. That is
     what production would have done, since production has one Stripe, and the bare run agrees. The
     shadow week's report counts exactly this: a refund an earlier run already made would have
-    been rejected, or was a duplicate (design §5.9). "Two concurrent requests don't mix", Phase 3's
-    exit (#78), means attribution: each exchange and tool call is stored in the run that named it.
+    been rejected, or was a duplicate. "Two concurrent requests don't mix" means attribution: each
+    exchange and tool call is stored in the run that named it.
     What one run faked, the other still sees, under `irimi shadow -- <cmd>` and under serve mode
     alike."""
     shadow = run_workflow(W, "shared_charge", mode)
@@ -399,9 +398,9 @@ def test_runs_list_prints_one_line_per_message_and_one_for_the_process(
     run_workflow, mode, scenario
 ):
     """`irimi runs list` over the store: each message's `sdk` run, ended `ok` and named by its
-    trigger (#74), holding its read, irimi's L3 read and its faked refund; and the process run,
-    which holds none of them (#72). Each message's run started after the process run did, so the
-    process run is listed last, the oldest. Under serve mode (#77) there is no process run: the
+    trigger, holding its read, irimi's L3 read and its faked refund; and the process run,
+    which holds none of them. Each message's run started after the process run did, so the
+    process run is listed last, the oldest. Under serve mode there is no process run: the
     eight runs are all it lists."""
     shadow = run_workflow(W, scenario, mode)
     code, out, err = shadow.runs("list")
@@ -425,7 +424,7 @@ def test_runs_list_prints_one_line_per_message_and_one_for_the_process(
             )
 
 
-# -- each way the SDK marks a run (#74) -----------------------------------------------------------
+# -- each way the SDK marks a run -----------------------------------------------------------------
 
 
 def stored_by_charge(shadow, args_of):
@@ -447,7 +446,7 @@ def test_each_async_with_sdk_run_block_is_one_run_with_its_message_as_the_trigge
     run_workflow, mode
 ):
     """Each message is a block, `async with sdk.run(trigger=message, name="message")`, four at
-    once under `asyncio.gather` (#74). Each is one `sdk` run named `message`, with no entrypoint,
+    once under `asyncio.gather`. Each is one `sdk` run named `message`, with no entrypoint,
     because no function names it, and the message itself as its args, replayable. The block that
     raised ends in error with its ValueError and holds only its read; the queue carries on. Bare,
     no run is started and the other three refunds land."""
@@ -476,7 +475,7 @@ def test_each_async_with_sdk_run_block_is_one_run_with_its_message_as_the_trigge
 @pytest.mark.parametrize("mode", MODES)
 def test_a_run_cancelled_at_shutdown_ends_in_error_with_its_cancellation(run_workflow, mode):
     """The worker shuts down with one message in flight and cancels its task. Cancellation is a
-    BaseException, not an Exception, and the SDK still ends the run (#74): `error`, under
+    BaseException, not an Exception, and the SDK still ends the run: `error`, under
     `asyncio.exceptions.CancelledError`, holding the read it made before it stuck, and no refund.
     The other two runs end `ok`, and the worker exits 0 in both modes."""
     shadow = run_workflow(W, "cancelled_on_shutdown", mode)
@@ -501,11 +500,11 @@ def test_a_run_cancelled_at_shutdown_ends_in_error_with_its_cancellation(run_wor
 
 @pytest.mark.parametrize("mode", MODES)
 def test_a_trigger_on_a_method_names_its_class_and_leaves_self_out_of_the_args(run_workflow, mode):
-    """`Worker.handle` and `Worker.handle_async` are triggers on methods (#74). The entrypoint
-    names the class, `module:Worker.handle`, which replay (#84) can import; `self` is left out of
+    """`Worker.handle` and `Worker.handle_async` are triggers on methods. The entrypoint
+    names the class, `module:Worker.handle`, which replay can import; `self` is left out of
     the args, so the run stays replayable. An unnamed trigger is named by its `__qualname__`, a
     named one by its name. Every run records the version the deployment named, as the process run
-    does (#70)."""
+    does."""
     shadow = run_workflow(W, "worker_methods", mode)
     found = stored_by_charge(shadow, lambda args: args["message"])
     sync = ("Worker.handle", f"{AGENT}:Worker.handle")
@@ -529,8 +528,8 @@ def test_a_trigger_on_a_method_names_its_class_and_leaves_self_out_of_the_args(r
 @pytest.mark.parametrize("mode", MODES)
 def test_a_sync_trigger_that_returns_a_coroutine_hands_the_run_to_it(run_workflow, mode):
     """`enqueue` is sync and returns a coroutine its caller's loop awaits, four at once under
-    `asyncio.gather`. Its body runs only when the coroutine does, so the SDK hands the run over
-    (#74): every call the coroutine makes carries its run, the `audit` trigger it calls joins that
+    `asyncio.gather`. Its body runs only when the coroutine does, so the SDK hands the run over:
+    every call the coroutine makes carries its run, the `audit` trigger it calls joins that
     run rather than starting one, and the run ends with the coroutine's outcome. So the poison
     message's run, which raised inside the coroutine after the sync call had returned, is stored
     `error`, holding its read alone; each other run is `ok`, holding its read, its audit, its
@@ -562,18 +561,18 @@ def test_a_sync_trigger_that_returns_a_coroutine_hands_the_run_to_it(run_workflo
     assert shadow.exchange_lines().count(REFUND_LINE) == 3
 
 
-# -- runs that share a connection, and a task that outlives its run (#75) -------------------------
+# -- runs that share a connection, and a task that outlives its run -------------------------------
 
 
 @pytest.mark.parametrize("mode", MODES)
 def test_runs_that_share_one_pooled_connection_never_mix(run_workflow, mode):
-    """Two concurrent requests don't mix (Phase 3's exit), on one connection. Eight runs on four
+    """Two concurrent requests don't mix, on one connection. Eight runs on four
     threads send every call through one of two shared pools, a `requests.Session` and an
     `httpx.Client`, each holding a single connection to irimi. A faked refund leaves its
     connection open and is its run's last call, so the next call on that pool, another run's,
     goes out on the same connection: fewer connections were opened than calls made. irimi still
     stores each run's read, refund and L3 read in that run and no other, because it attributes by
-    the `Irimi-Run` the SDK put on each request (#75), never by connection (D8)."""
+    the `Irimi-Run` the SDK put on each request, never by connection."""
     shadow = run_workflow(W, "one_pool_8", mode)
     assert {c["client"] for c in shadow.calls()} == set(POOLED)
     per_client = Counter(c["client"] for c in shadow.calls())
@@ -598,9 +597,9 @@ def test_a_task_a_sync_trigger_returns_files_its_calls_in_the_run_that_already_e
     run_workflow, mode
 ):
     """`schedule` is sync and returns an `asyncio.Task`, not a coroutine, so the SDK does not hand
-    the run over (#74): the run ends `ok` as `schedule` returns, before the task has run a step.
+    the run over: the run ends `ok` as `schedule` returns, before the task has run a step.
     The task was created inside the run, so its context still holds the run's id, and the SDK
-    labels its read and refund with it (#75, decision 10).
+    labels its read and refund with it.
 
     LOOKS WRONG: every one of the task's exchanges is stored in a run that had already ended,
     after its `ended_at`, and the run reads back `ok` though its work had not started. #75 accepted
@@ -626,7 +625,7 @@ def test_a_task_a_sync_trigger_returns_files_its_calls_in_the_run_that_already_e
     assert reader.load_run(shadow.engine_run_id()).events == []
     assert shadow.exchange_lines().count(REFUND_LINE) == 2
     if mode == "serve":
-        # Serve mode prints each run's block once its end is on disk (#77), which is before the
+        # Serve mode prints each run's block once its end is on disk, which is before the
         # task has run a step. LOOKS WRONG: so each block says the run made no call at all, and
         # its refund is in no block, though the stored run holds it (`test_invariants.py`'s
         # `LATE_EVENTS`, #125).
@@ -637,7 +636,7 @@ def test_a_task_a_sync_trigger_returns_files_its_calls_in_the_run_that_already_e
         assert not [line for line in shadow.summaries() if "○" in line]
 
 
-# -- the worker's ledger tools: tool calls under concurrency (#76) --------------------------------
+# -- the worker's ledger tools: tool calls under concurrency --------------------------------------
 
 
 def stored_tool_calls(shadow, run_id):
@@ -653,7 +652,7 @@ def test_tool_calls_from_four_threads_each_land_in_their_own_run(run_workflow, m
     """`threads_8` with the ledger: each message's read tool runs on its pool thread, and its write
     tool in the refund thread `sdk.propagate` handed the run to. Eight runs on four threads, and
     each holds its own two calls, for its own charge, and no other run's: none lost, none mixed,
-    none left to the process run (#76). Bare, the eight refunds really reach the ledger."""
+    none left to the process run. Bare, the eight refunds really reach the ledger."""
     shadow = run_workflow(W, "ledger_threads_8", mode)
     bare = run_workflow(W, "ledger_threads_8", "bare")
     found = stored_by_charge(shadow, lambda args: args["message"])
@@ -686,7 +685,7 @@ def test_two_write_tools_ending_at_once_print_in_the_order_they_ended(run_workfl
     """`ledger_threads_8` with every odd message's ledger row written by a second write tool,
     `mark_refunded`: eight runs on four threads, tool calls of two names ending at once. Their
     posts can reach irimi in another order than they ended, and the live summary printed them as
-    they came while a stored run prints them by `seq`, so the two summaries could differ (#120).
+    they came while a stored run prints them by `seq`, so the two summaries could differ.
     The summary prints the stood-in writes in the order they ended, the start and then the id
     breaking a tie, which is the order the stored calls say. Which order these posts come in is
     left to the threads: this holds the printed order to the stored one on every run, and
@@ -718,8 +717,8 @@ def test_tool_writes_whose_posts_came_in_the_other_order_print_in_the_order_they
     first run's async ledger write ends while the loop's one executor thread is busy with the
     worker's own job, so its post waits off the loop; the second run's sync write starts after it
     ended, and posts at once. irimi gets the second first, as its stream lines show, and printed
-    the live summary in that order while the runs together, read back, printed the first first
-    (#120). Under shadow the summary prints them in the order they ended; under serve each run's
+    the live summary in that order while the runs together, read back, printed the first first.
+    Under shadow the summary prints them in the order they ended; under serve each run's
     block holds its own. `test_stored_runs.py` holds the runs together to the live summary in both
     modes. Bare, both rows reach the ledger."""
     shadow = run_workflow(W, "ledger_post_waits", mode)
@@ -756,7 +755,7 @@ def test_async_tool_calls_from_eight_tasks_each_land_in_their_task_s_run(run_wor
     """`asyncio_8` with the ledger: an async read, an async write and a sync read that returns a
     coroutine, awaited in each message's own task, eight at once on one event loop, every one
     yielding to the others mid-call. Each run holds its three calls in the order its task made
-    them (#76). The coroutine read's call is recorded with the list the coroutine returned: the
+    them. The coroutine read's call is recorded with the list the coroutine returned: the
     ledger as the stood-in write left it, empty, where bare it holds the refund (no tool
     overlay, as W6's `read_after_write` pins)."""
     shadow = run_workflow(W, "ledger_asyncio_8", mode)
@@ -793,9 +792,9 @@ def test_a_tool_called_in_a_thread_that_lost_its_run_lands_in_the_engines_own_ru
     run_workflow, mode
 ):
     """`unpropagated_thread` with the ledger: the write tool is called in the refund thread,
-    started without `sdk.propagate`, so it is in no run, as that thread's request is (#75). Its
+    started without `sdk.propagate`, so it is in no run, as that thread's request is. Its
     call is recorded in the process run `IRIMI_RUN` names, still stood in, and the read tool,
-    called on the trigger's own thread, in the message's run (#76). Under serve mode (#77) the
+    called on the trigger's own thread, in the message's run. Under serve mode the
     write is filed in `unattributed`, with the refunds, and so is in no run's block."""
     shadow = run_workflow(W, "ledger_unpropagated", mode)
     runs = {e["run"]: e for e in shadow.events("run.start")}
@@ -823,10 +822,10 @@ def test_tools_on_a_worker_s_methods_keep_their_receiver_and_leave_it_out_of_the
     run_workflow,
     mode,
 ):
-    """The ledger as the `Worker`'s own methods (#76): `fee`, a static method, `journal`, a class
+    """The ledger as the `Worker`'s own methods: `fee`, a static method, `journal`, a class
     method, each with `@sdk.tool` written above the descriptor, and `ack`, a plain method. Each is
     named by its `module.qualname`, `Worker.` included; the receiver is left out of the stored
-    args, as a trigger's is (#74); and each stand-in is called as its method is, the class
+    args, as a trigger's is; and each stand-in is called as its method is, the class
     method's with the class and the plain method's with the worker, which their results show."""
     shadow = run_workflow(W, "ledger_worker", mode)
     bare = run_workflow(W, "ledger_worker", "bare")
@@ -865,7 +864,7 @@ def test_tools_on_a_worker_s_methods_keep_their_receiver_and_leave_it_out_of_the
     assert len(bare.query(LEDGER, "SELECT * FROM acks")) == 4
 
 
-# ---------------------------------------------------------------------- irimi compare (#79)
+# ---------------------------------------------------------------------- irimi compare
 
 NOT_A_VERDICT = "a comparison, not a verdict: nothing was replayed"
 ARGS_DIFFER = "  (the triggers' args differ)"
@@ -905,7 +904,7 @@ def label(trigger: str, version: str = "-", entrypoint: str | None = None) -> st
 def test_irimi_compare_of_two_concurrent_runs_shows_each_run_s_own_writes_alone(
     run_workflow, scenario, mode
 ):
-    """Phase 3's exit through `irimi compare` (#79): the eight runs one process made at once,
+    """Concurrent runs stay apart through `irimi compare`: the eight runs one process made at once,
     recorded into its one store, each compared with message 0's. Each pair is one refund changed,
     its charge and amount the run's own, and the ledger's write tool the same: a run that held
     another's refund or tool call would show a row more, and one that lost its own a row less."""
@@ -949,9 +948,9 @@ PAIRS = {
         [f"  - {refund_text(0)}"],
     ),
     # Two runs refund one charge in turn. The second is refused because the engine's one write
-    # log shows it the first's faked refund (#77's decision; its summary calls that refund its
-    # own, pinned LOOKS WRONG under #129). Each stored run holds its own refund alone, so the
-    # compare is right where that summary is not.
+    # log shows it the first's faked refund; its summary calls that refund its own, pinned
+    # LOOKS WRONG above. Each stored run holds its own refund alone, so the compare is right where
+    # that summary is not. See #129.
     "shared_charge": (
         (0, len(CLIENTS)),
         (label("handle"), label("handle")),
@@ -971,8 +970,8 @@ PAIRS = {
         [f"  ~ A {refund_text(0)}", f"    B {refund_text(1)}"],
     ),
     # The task each trigger returns makes its calls after its run has ended, and they are stored
-    # in that run (#75, pinned LOOKS WRONG under #111): compare reads the store, so it shows the
-    # refunds that serve's block, printed at the run's end, left out (#77, #125).
+    # in that run, pinned LOOKS WRONG above: compare reads the store, so it shows the refunds that
+    # serve's block, printed at the run's end, left out. See #111.
     "task_outlives_trigger": (
         (0, 1),
         (label("schedule"), label("schedule")),
@@ -984,8 +983,9 @@ PAIRS = {
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("scenario", PAIRS)
 def test_irimi_compare_of_two_runs_one_process_made(run_workflow, scenario, mode):
-    """#79 over runs that failed, were cancelled, refused or outlived: each stored run is compared
-    as it was stored, ended or not, with every compared line one its own summary printed."""
+    """Compare over runs that failed, were cancelled, refused or outlived: each stored run is
+    compared as it was stored, ended or not, with every compared line one its own summary
+    printed."""
     (i, j), (label_a, label_b), rows = PAIRS[scenario]
     shadow = run_workflow(W, scenario, mode)
     a, b = run_of(shadow, i), run_of(shadow, j)
@@ -1009,9 +1009,9 @@ def test_irimi_compare_of_two_runs_one_process_made(run_workflow, scenario, mode
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("scenario", ["unpropagated_thread", "ledger_unpropagated"])
 def test_irimi_compare_finds_a_lost_run_s_writes_in_the_engine_s_run(run_workflow, scenario, mode):
-    """A refund made in a thread started without `sdk.propagate` belongs to no run (#75), and its
-    ledger write too (#76): each lands in the engine's own run, the process run under
-    `irimi shadow -- <cmd>` and `unattributed` under serve (#77). Compared with that run, message
+    """A refund made in a thread started without `sdk.propagate` belongs to no run, and its
+    ledger write too: each lands in the engine's own run, the process run under
+    `irimi shadow -- <cmd>` and `unattributed` under serve. Compared with that run, message
     0's run made no write, and the engine's run made both messages' in the order they ended."""
     shadow = run_workflow(W, scenario, mode)
     a, engine = run_of(shadow, 0), shadow.engine_run_id()
@@ -1037,12 +1037,12 @@ def test_irimi_compare_finds_a_lost_run_s_writes_in_the_engine_s_run(run_workflo
     assert rows_not_shown(shadow, a, engine, out) == []
 
 
-# ------------------------------------------------------------------------------- replay (#82)
+# ------------------------------------------------------------------------------- replay
 #
-# One process, several runs: `irimi replay` replays one of them, its trigger called alone (#84), so
+# One process, several runs: `irimi replay` replays one of them, its trigger called alone, so
 # the replay is that run and no other. `test_replays.py` replays each run of every scenario here;
 # these pin what that means: no other run of the process is in the replay to take its answers, as
-# every one did when a replay re-ran the whole process (#155).
+# every one did when a replay re-ran the whole process.
 
 
 @pytest.mark.parametrize("index", range(8))
@@ -1076,7 +1076,7 @@ def test_replaying_the_second_shared_charge_run_replays_its_refusal(run_workflow
     `amount_too_large`, its read showing the first run's refund, which the overlay edited in.
     Replayed alone, it is answered as it was recorded, read and refusal alike, and its comparison
     is the same write: the first run is not in the replay to take the refusal first, as it did when
-    a replay re-ran the process (#155)."""
+    a replay re-ran the process."""
     recorded = run_workflow(W, "shared_charge", "shadow")
     second = max(recorded.sdk_runs(), key=lambda r: r.trigger.args["message"]["index"])
     _, replay = replayed(W, "shared_charge", run_id=second.run_id)
@@ -1099,13 +1099,13 @@ def test_replaying_the_second_shared_charge_run_replays_its_refusal(run_workflow
 def test_a_worker_method_s_run_cannot_be_called_alone_and_replays_by_its_command(
     run_workflow, replayed
 ):
-    """`ledger_worker`'s runs are the worker's methods (#76), whose instance a run does not record
-    (#74). Replayed alone, `replay_child` will not call a method without it: the replay is one that
+    """`ledger_worker`'s runs are the worker's methods, whose instance a run does not record.
+    Replayed alone, `replay_child` will not call a method without it: the replay is one that
     could not run, exit 2, its run holding nothing but the reason it ended. Replayed
     by its command, the worker's whole process runs, every run of it adopted into the replay's one
-    run (#84): the first run's `fee`, a static-method read tool, is answered from the recording,
+    run: the first run's `fee`, a static-method read tool, is answered from the recording,
     and the later runs, which the recording lacks, run theirs for real, while neither write's real
-    body runs (#83)."""
+    body runs."""
     recorded = run_workflow(W, "ledger_worker", "shadow")
     targets = replay_targets(recorded)
     assert len(targets) == 4

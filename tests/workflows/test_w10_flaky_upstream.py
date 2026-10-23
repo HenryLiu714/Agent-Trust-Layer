@@ -19,14 +19,14 @@ from irimi.exchange import BODY_TRUNCATED_FLAG, UPSTREAM_ERROR_FLAG, Exchange
 from irimi.trace import ErrorInfo
 
 W = "w10_flaky_upstream"
-# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi (#77).
+# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.
 MODES = ("shadow", "serve")
 # What a shadow run holds besides a body it decodes: its exchanges, its store's queue, the fake
-# internet's answers. Measured at 2 to 45 MiB on top of twice the cap (#94).
+# internet's answers. Measured at 2 to 45 MiB on top of twice the cap.
 MEMORY_MARGIN = 64 * 1024 * 1024
 REFUND_LINE = "  ○ refund $5.00 on ch_PAYOUT1  unvalidated (L3 preconditions passed)"
 # What the agent saw when nothing failed: the list and the model live, the refund and the Slack
-# post faked. A run whose SDK cannot reach irimi must see exactly this (#74).
+# post faked. A run whose SDK cannot reach irimi must see exactly this.
 ANSWERED = [
     ("list_charges", 200, None),
     ("api.anthropic.com/v1/messages", 200, None),
@@ -44,7 +44,7 @@ def retries(result):
 
 
 def listed_status(result, run_id: str | None = None) -> str:
-    """A run's status column in `irimi runs list` (#72): the process run's, or `run_id`'s."""
+    """A run's status column in `irimi runs list`: the process run's, or `run_id`'s."""
     code, out, err = result.runs("list")
     assert (code, err) == (0, [])
     run_id = run_id or result.process_run_id()
@@ -129,7 +129,7 @@ def test_a_reset_on_a_read_reaches_the_agent_as_an_unstamped_502(run_workflow, m
         "live      read      GET api.stripe.com/v1/charges -> 200",
     ]
     assert REFUND_LINE in shadow.summaries()
-    # Stored as printed (#70): an exchange with no response reads back as one.
+    # Stored as printed: an exchange with no response reads back as one.
     assert unanswered(shadow) == [("/v1/charges", (UPSTREAM_ERROR_FLAG,))]
 
 
@@ -216,7 +216,7 @@ def test_an_agent_that_raises_after_its_write_still_shows_the_write(run_workflow
     assert shadow.exit_code == run_workflow(W, "raise_after_write", "bare").exit_code == 1
     [end] = shadow.events("run.end")
     assert (end["outcome"], end["error"]) == ("error", "RuntimeError")
-    # Stored under the exception's full name (#74), the refund id it names included.
+    # Stored under the exception's full name, the refund id it names included.
     [run] = shadow.sdk_runs()
     assert run.outcome == "error" and run.error is not None
     assert run.error.type == "builtins.RuntimeError"
@@ -227,13 +227,13 @@ def test_an_agent_that_raises_after_its_write_still_shows_the_write(run_workflow
     # one that finished.
     assert not any("error" in line.lower() or "exit" in line for line in summary)
     if mode == "serve":
-        # Serve mode's block for the run is its stored summary (#77), which says no more: the
+        # Serve mode's block for the run is its stored summary, which says no more: the
         # run's own status is in `irimi runs list`, as the SDK ended it.
         assert listed_status(shadow, run.run_id) == "error"
         return
-    # The stored run does say so (#70); the summary above still does not.
+    # The stored run does say so; the summary above still does not.
     assert process_run(shadow) == ("error", 1, ErrorInfo("exit", "exited 1"))
-    # `irimi runs list` and `runs show` print it where the summary cannot (#72). The summary pin
+    # `irimi runs list` and `runs show` print it where the summary cannot. The summary pin
     # above stays: a stored run's summary is the live one, and the live one says nothing.
     assert listed_status(shadow) == "error"
     assert shown_outcome(shadow) == ["outcome: error", "error: exit: exited 1", "exit code: 1"]
@@ -262,13 +262,13 @@ def test_an_agent_killed_after_its_write_leaves_a_run_with_no_end(run_workflow, 
     # The header names the process run, 16 random hex characters, which can spell `143` by chance.
     said = [line.replace(shadow.engine_run_id(), "<run>").lower() for line in summary]
     assert not any(word in line for line in said for word in ("143", "kill", "signal"))
-    # The stored process run ends with the child's code, which is how the kill is visible (#70).
+    # The stored process run ends with the child's code, which is how the kill is visible.
     assert process_run(shadow) == ("error", 143, ErrorInfo("exit", "exited 143"))
     assert listed_status(shadow) == "error"
     assert shown_outcome(shadow) == ["outcome: error", "error: exit: exited 143", "exit code: 143"]
-    # The agent's own run is the one the SDK started (#74), and it reads back whole, the faked
+    # The agent's own run is the one the SDK started, and it reads back whole, the faked
     # refund included, with no end: the default SIGTERM handler raises nothing, so the SDK never
-    # posted one, and the run is incomplete, as a killed run is (#70).
+    # posted one, and the run is incomplete, as a killed run is.
     reader = shadow.stored()
     [run] = shadow.sdk_runs()
     assert (run.run_id, run.outcome, run.ended_at) == (shadow.one("run.start")["run"], None, None)
@@ -281,7 +281,7 @@ def test_an_agent_killed_after_its_write_leaves_a_run_with_no_end(run_workflow, 
 
 
 def _killed_under_serve(serve) -> None:
-    """Serve mode prints a run's summary when the SDK ends it (#77), and a killed agent's SDK never
+    """Serve mode prints a run's summary when the SDK ends it, and a killed agent's SDK never
     does: no block is printed, and the run is stored `incomplete`, its faked refund in it.
 
     LOOKS WRONG: so nothing serve prints summarizes the refund. Its exchange line went by as it
@@ -307,7 +307,7 @@ def test_an_agent_interrupted_after_its_write_ends_its_run_in_keyboard_interrupt
     run_workflow, mode
 ):
     """Ctrl-C mid-run: Python raises KeyboardInterrupt, a BaseException, not an Exception. The SDK
-    posts the run's end as it propagates (#74), so unlike after SIGTERM the run is complete:
+    posts the run's end as it propagates, so unlike after SIGTERM the run is complete:
     `error`, under `builtins.KeyboardInterrupt`, with the faked refund in it. The interrupt still
     ends the agent, 130 (128 + SIGINT) in both modes."""
     bare = run_workflow(W, "sigint_mid_run", "bare")
@@ -326,7 +326,7 @@ def test_an_agent_interrupted_after_its_write_ends_its_run_in_keyboard_interrupt
     )
     assert bare.events("run.end") == []
     if mode == "serve":
-        # The SDK ended the run, so serve printed its block, the faked refund in it (#77).
+        # The SDK ended the run, so serve printed its block, the faked refund in it.
         assert REFUND_LINE in shadow.run_blocks()[run.run_id]
         return
     assert process_run(shadow) == ("error", 130, ErrorInfo("exit", "exited 130"))
@@ -345,12 +345,12 @@ CONTROL_KIND = {
 def test_an_sdk_that_cannot_reach_irimi_warns_once_and_changes_nothing(
     run_workflow, mode, scenario
 ):
-    """The SDK never raises into the agent (#74). With its control endpoint unset, gone, or
+    """The SDK never raises into the agent. With its control endpoint unset, gone, or
     refusing every post, the run goes on: its id is current, logged and on every request, and the
     agent makes the calls it makes with the SDK working and exits 0, as it does bare. The SDK
     logs one WARNING on `irimi.sdk`, though both the start and the end failed: once per kind of
     failure. irimi never hears of the run, so the store holds only the `header` run its labelled
-    requests made, with no trigger and no end (#70)."""
+    requests made, with no trigger and no end."""
     bare = run_workflow(W, scenario, "bare")
     shadow = run_workflow(W, scenario, mode)
     assert shadow.exit_code == bare.exit_code == 0
@@ -359,7 +359,7 @@ def test_an_sdk_that_cannot_reach_irimi_warns_once_and_changes_nothing(
     assert (end["run"], end["outcome"]) == (start["run"], "ok")
     assert {c["run"] for c in shadow.calls()} == {start["run"]}
     assert shadow.answered() == ANSWERED
-    # Under serve mode (#77) the run's end never reached irimi, so no block is printed for it, and
+    # Under serve mode the run's end never reached irimi, so no block is printed for it, and
     # LOOKS WRONG (#107): nothing serve prints summarizes its refund, as `_killed_under_serve`.
     assert (REFUND_LINE in shadow.summaries()) is (mode == "shadow")
     [warning] = shadow.events("log")
@@ -382,7 +382,7 @@ def test_a_bomb_on_the_read_reaches_the_agent_whole_and_is_recorded_empty(
 ):
     """The read is answered with a body that decodes to 1 GiB, in gzip (2 MiB), br or zstd (a few
     KB to 100 KB), which the agent never asked for and cannot read. irimi decodes it only up to its
-    cap (#94): the agent gets every byte it was sent, the bomb's own, so it does what it does bare
+    cap: the agent gets every byte it was sent, the bomb's own, so it does what it does bare
     - finds no charges and posts that there was nothing to do. The read is recorded and stored
     empty, flagged `body-truncated` once: the start of a document is not one redaction can read,
     and this one's credential, on a line of its own, never reaches disk (universal invariant 4)."""
@@ -421,23 +421,23 @@ def test_a_bomb_on_the_read_reaches_the_agent_whole_and_is_recorded_empty(
         (BODY_TRUNCATED_FLAG,),
     )
     assert stored.response.header("content-encoding") == encoding
-    # The run and, under `irimi shadow`, the process run; serve mode has none (#77).
+    # The run and, under `irimi shadow`, the process run; serve mode has none.
     runs = 2 if mode == "shadow" else 1
     assert [r.dropped_events for r in shadow.stored().list_runs()] == [0] * runs
 
 
 @pytest.mark.parametrize("scenario", sorted(BOMBED))
 def test_a_bomb_costs_irimi_its_cap_in_memory_not_what_it_decodes_to(traced_run, scenario):
-    """#94's bound, through the real `irimi shadow`: a body that decodes to a GiB costs the process
-    irimi runs in no more than twice the cap it decodes to - a codec assembles its output once and
-    copies it once - and a margin for everything else a run holds, never the GiB."""
+    """irimi's decoding bound, through the real `irimi shadow`: a body that decodes to a GiB costs
+    the process irimi runs in no more than twice the cap it decodes to - a codec assembles its
+    output once and copies it once - and a margin for everything else a run holds, never the GiB."""
     result, peak = traced_run(W, scenario)
     assert result.exit_code == 0
     assert "[body-truncated]" in result.exchange_lines()[0]
     assert peak < 2 * MAX_DECODED_BODY + MEMORY_MARGIN
 
 
-# ---------------------------------------------------------------------- irimi compare (#79)
+# ---------------------------------------------------------------------- irimi compare
 
 NOT_A_VERDICT = "a comparison, not a verdict: nothing was replayed"
 SYNC = "sync_payouts  examples.workflows.w10_flaky_upstream.agent:sync_payouts  agent -"
@@ -457,8 +457,8 @@ AGAINST_A_RETRIED_READ = {
     "reset_on_write": (0, False, WROTE_BOTH),
     "retry_without_key": (0, True, WROTE_BOTH),
     # irimi's own L3 read failed, so it could not check the refund, nor price it: the refund
-    # changed by its fidelity, not by anything the agent did differently (#79's README: a
-    # difference can come from the world between two runs).
+    # changed by its fidelity, not by anything the agent did differently: a difference can come
+    # from the live service changing between two runs.
     "precondition_read_fails": (
         1,
         False,
@@ -467,7 +467,7 @@ AGAINST_A_RETRIED_READ = {
     # The model answered prose, and the agent posted that it did nothing: the refund is gone, and
     # the post is the same post, changed.
     "malformed_llm": (1, False, [f"  - {REFUND}", f"  ~ A {POSTED}", f"    B {NO_ACTION}"]),
-    # The read was a bomb the agent could not parse (#94): no charge to refund.
+    # The read was a bomb the agent could not parse: no charge to refund.
     "gzip_bomb_read": (1, False, [f"  - {REFUND}", f"  ~ A {POSTED}", f"    B {NO_ACTION}"]),
     # The agent raised, was interrupted or was killed after its refund: the post it never made.
     "raise_after_write": (1, True, [f"  = {REFUND}", f"  - {POSTED}"]),
@@ -485,7 +485,7 @@ AGAINST_A_RETRIED_READ = {
 def test_irimi_compare_shows_what_each_failure_changed_about_the_runs_writes(
     shared_store_run, scenario, mode
 ):
-    """W10's failures against a run whose only trouble was a retried read (#79), recorded into
+    """W10's failures against a run whose only trouble was a retried read, recorded into
     one store, `rate_limited` under shadow and each other under shadow or serve: a failed read or
     a failed write is nothing compare can show, and a crash, a kill, a model that answered prose
     and irimi's own failed check are each the rows below. Every row is a line its own run's
@@ -554,7 +554,7 @@ def test_a_read_whose_recording_lost_its_upstream_fails_again_live(replayed, sce
     """The recorded read got no answer (`upstream-error`), which a replay cannot serve: it misses,
     goes to the fake Stripe, whose fault fails it again, and the agent's retry takes the recorded
     200 in its place. The miss says so beside its `upstream-error`: the answer's own flags are kept
-    whoever failed (#82)."""
+    whoever failed."""
     recorded, replay = replayed(W, scenario)
     [lost] = [ex for ex in recorded.reported if UPSTREAM_ERROR_FLAG in ex.flags]
     first, retry = [ex for ex in replay.reported if ex.request.path == "/v1/charges"]
@@ -574,10 +574,10 @@ def test_a_read_whose_recording_lost_its_upstream_fails_again_live(replayed, sce
 
 @pytest.mark.parametrize("scenario", ["raise_after_write", "sigterm_mid_run", "sigint_mid_run"])
 def test_a_run_that_died_after_its_write_replays_to_the_same_end(replayed, scenario):
-    """The refund is answered from the recording, minted id and all, so the trigger, called alone
-    (#84), dies just as it did - raising with the recorded refund's id, killed, or interrupted -
+    """The refund is answered from the recording, minted id and all, so the trigger, called alone,
+    dies just as it did - raising with the recorded refund's id, killed, or interrupted -
     and `replay_child` exits as the agent did. The replay's run is the process's, ended with what
-    the trigger raised, under the type its recorded run stored (`replay_child`'s outcome, #84), or,
+    the trigger raised, under the type its recorded run stored (`replay_child`'s outcome), or,
     for a kill, which leaves the trigger no end to say, with that exit; and the trigger's own end
     is the recorded one's, or none at all."""
     recorded, replay = replayed(W, scenario)

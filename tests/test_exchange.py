@@ -82,9 +82,9 @@ def test_exchange_default_door_is_forward():
 
 
 def test_answered_by_names_every_way_an_exchange_is_answered():
-    """`delegated` is a frozen seam value, so it lands in Phase 1 even though the summary that
-    counts it separately is #20 (design D20, issue #16). `fake-L1` is #41's fixture answer, and
-    `fake-L0` stays beside it: L0 is the floor every route without a fixture is still answered at.
+    """`delegated` is a frozen seam value for an answer from a target, counted apart in the
+    summary. `fake-L1` is the fixture answer, and `fake-L0` stays beside it: L0 is the echo every
+    route without a fixture is still answered with.
     """
     from typing import get_args
 
@@ -113,7 +113,7 @@ def test_fake_level_is_the_locally_answered_subset_of_answered_by():
 
 def test_every_locally_decided_answer_has_a_fidelity_flag():
     """One mapping rather than a branch per caller. A new `answered_by` value that forgets its
-    fidelity flag would print as `L0` in the summary and read as the floor it is not (#41)."""
+    fidelity flag would print as `L0` in the summary and read as the floor it is not."""
     from typing import get_args
 
     from irimi.exchange import (
@@ -146,7 +146,7 @@ def test_target_defaults_to_empty_and_records_a_delegated_address():
 def test_overlay_is_not_a_fake_level():
     """`FakeLevel` is what `echo.fake_response` may return, and the overlay fakes nothing: it
     edits a real response. Keeping it out is what stops a read from being counted as a faked
-    write by anything that reads the level (#43)."""
+    write by anything that reads the level."""
     from typing import get_args
 
     from irimi.exchange import FakeLevel
@@ -166,7 +166,7 @@ def test_stream_chunks_are_empty_unless_a_response_streamed():
 
 
 def test_clip_chunks_keeps_the_chunks_of_a_body_s_first_bytes():
-    """The store cuts a body at MAX_STORED_BODY; its chunks are cut at the same byte (#71)."""
+    """The store cuts a body at MAX_STORED_BODY; its chunks are cut at the same byte."""
     assert clip_chunks((3, 4, 5), 12) == (3, 4, 5)
     assert clip_chunks((3, 4, 5), 20) == (3, 4, 5)
     assert clip_chunks((3, 4, 5), 7) == (3, 4)

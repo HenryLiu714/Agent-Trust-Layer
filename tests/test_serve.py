@@ -1,4 +1,4 @@
-"""Serve mode (#77): `irimi shadow --serve`, a sidecar with no child process.
+"""Serve mode: `irimi shadow --serve`, a sidecar with no child process.
 
 The engine half first: a listener bound wider than loopback is this machine at every address it
 was reached at, so a request naming that address, or a name that resolves to it, is never
@@ -54,7 +54,7 @@ def _own_address() -> str | None:
 def test_the_reverse_door_refuses_a_peer_that_is_not_loopback(tmp_path, monkeypatch):
     """A wider bind lets other machines reach the listener, but never through the reverse door,
     which relays plain HTTP with the agent's credentials to the real service: the peer check in
-    `IrimiAddon._through_reverse_door` is unchanged (#77). Driven through the addon, because a
+    `IrimiAddon._through_reverse_door` is unchanged. Driven through the addon, because a
     connection from another machine cannot be staged here."""
     from mitmproxy.test import tflow, tutils
 
@@ -119,13 +119,12 @@ def test_a_request_naming_the_address_irimi_was_reached_at_is_never_forwarded_to
     irimi's port - or for a name that resolves to it, as `irimi` does in compose - is irimi's own
     listener: answered by irimi, here the reverse door's refusal of a peer that is not loopback,
     and never forwarded, which would open a connection to the listener and arrive a second time
-    (#4's loop, #77). The name is resolved by a `getaddrinfo` patch, in the process that runs
-    irimi."""
+    in a loop. The name is resolved by a `getaddrinfo` patch, in the process that runs irimi."""
     import os
 
     address = _own_address()
     if address is None:
-        # The one proof of the done-when's non-loopback case: CI must run it, never skip it.
+        # The one proof of the non-loopback case: CI must run it, never skip it.
         assert not os.environ.get("CI"), "a CI runner with no route has no address to test"
         pytest.skip("this machine has no route, so no non-loopback address")
     if named:
@@ -171,7 +170,7 @@ def test_an_answer_target_naming_the_address_irimi_was_reached_at_is_never_diall
     tmp_path, monkeypatch
 ):
     """An answer target is irimi's own listener at the address a connection reached it at, as a
-    request is (#77): with `--listen-host 0.0.0.0` and `--allow-target-host` naming this machine's
+    request is: with `--listen-host 0.0.0.0` and `--allow-target-host` naming this machine's
     own address, a write the target would answer is refused by irimi as its own listener, with
     `irimi_target_failed`, and no second connection to the listener is opened. Before, the target
     was dialled and the reverse door refused the looped request, as from a peer not on loopback."""
@@ -188,7 +187,7 @@ def test_an_answer_target_naming_the_address_irimi_was_reached_at_is_never_diall
     # The target has to name the port the engine bound, so the engine binds port 0 and the target
     # is loaded once the port is known, into the index the engine and the policy were built with,
     # which both read per request. A port reserved by binding a socket and closing it could be
-    # taken by another test before the engine bound it (#133).
+    # taken by another test before the engine bound it.
     maps = servicemap.MapIndex()
     cfg = dataclasses.replace(_config(tmp_path, monkeypatch, listen_host="0.0.0.0"), maps=maps)
     calls = _counting_requests(monkeypatch)
@@ -223,8 +222,8 @@ def test_an_answer_target_naming_the_address_irimi_was_reached_at_is_never_diall
 
 
 def test_a_door_that_cannot_be_told_is_refused_never_forwarded(tmp_path, monkeypatch):
-    """Telling the doors apart now parses the address a connection arrived on and may resolve a
-    name (#77). If that raises, the hook would forward the flow, and the request it was asking
+    """Telling the doors apart parses the address a connection arrived on and may resolve a
+    name. If that raises, the hook would forward the flow, and the request it was asking
     about may be one addressed to irimi itself: it is answered 400 by irimi instead."""
     from mitmproxy.test import tflow, tutils
 
@@ -252,8 +251,8 @@ def test_a_door_that_cannot_be_told_is_refused_never_forwarded(tmp_path, monkeyp
 
 
 def test_a_failed_decision_under_serve_mode_is_unattributed(tmp_path, monkeypatch):
-    """Serve mode's engine run is `trace.UNATTRIBUTED` (#77), and the failed-decision path reads
-    the same fallback as every other (#67's note on #77): irimi's own 502, filed under no run, not
+    """Serve mode's engine run is `trace.UNATTRIBUTED`, and the failed-decision path reads
+    the same fallback as every other: irimi's own 502, filed under no run, not
     under a process run that does not exist."""
     from mitmproxy.test import tflow, tutils
 
@@ -309,7 +308,7 @@ def test_a_loopback_bind_still_finds_its_own_loopback_spellings(tmp_path, monkey
 def test_the_store_calls_back_on_its_writer_once_a_runs_end_is_on_disk(tmp_path):
     """`on_run_ended` is called with the run's id by the writer thread after it wrote the end, so
     a reader opened in the callback finds the run whole: every event queued before the end, and
-    the end itself (#77). A run that has not ended is not called back for."""
+    the end itself. A run that has not ended is not called back for."""
     import threading
 
     from irimi.store import DirectoryStore, StoreReader
@@ -335,7 +334,7 @@ def test_the_store_calls_back_on_its_writer_once_a_runs_end_is_on_disk(tmp_path)
 
 def test_a_callback_that_raises_is_logged_and_the_store_carries_on(tmp_path, caplog):
     """What `on_run_ended` raises is the caller's problem, never the run's: one WARNING naming the
-    exception's type, and the next event is still written (#77)."""
+    exception's type, and the next event is still written."""
     from irimi.store import DirectoryStore, StoreReader
     from tests.test_store import _exchange, _record
 
@@ -358,7 +357,7 @@ def test_a_callback_that_raises_is_logged_and_the_store_carries_on(tmp_path, cap
 
 def test_one_serve_per_store_root(tmp_path):
     """A second holder of a root's `serve.lock` is refused while the first holds it, and the lock
-    is free again once the first releases it, which it may do twice (#77)."""
+    is free again once the first releases it, which it may do twice."""
     import os
 
     from irimi.store import ServeLock, StoreLocked
@@ -403,7 +402,7 @@ def test_a_loopback_bind_adds_none(host):
 
 def test_an_ipv6_listener_is_bracketed_where_it_is_a_url(tmp_path):
     """`::1:4000` reads as an address with one more group; the banner and the child's proxy and
-    control variables say `[::1]:4000` (#77)."""
+    control variables say `[::1]:4000`."""
     from pathlib import Path
 
     from irimi import report, runner
@@ -428,7 +427,7 @@ def home(tmp_path, monkeypatch):
 
 def test_serve_with_a_command_is_a_usage_error(home, monkeypatch, capsys):
     """Serve mode launches nothing, so `-- echo hi` with it is answered as argparse answers a bad
-    invocation: usage on stderr, exit 2, and nothing started or stored (#77)."""
+    invocation: usage on stderr, exit 2, and nothing started or stored."""
     from irimi import cli
     from irimi.cli import main
 
@@ -443,8 +442,8 @@ def test_serve_with_a_command_is_a_usage_error(home, monkeypatch, capsys):
 
 
 def test_serve_with_a_command_exits_2_from_the_command_line(home):
-    """The done-when's own spelling, as a shell runs it: `irimi shadow --serve -- echo hi` exits 2
-    with argparse's usage, and starts and stores nothing (#77)."""
+    """As a shell runs it: `irimi shadow --serve -- echo hi` exits 2 with argparse's usage, and
+    starts and stores nothing."""
     import os
     import subprocess
     import sys
@@ -465,8 +464,8 @@ def test_serve_with_a_command_exits_2_from_the_command_line(home):
 
 def test_a_second_serve_on_one_store_is_refused_before_it_starts(home, capsys):
     """Two serves on one root would share `unattributed/events.jsonl`, repeating each other's
-    `seq` and cutting each other's lines as a crash's (#70). The second is refused with one line
-    and exit 1, its store closed again, and the first serves on (#77). Once the first stops, the
+    `seq` and cutting each other's lines as a crash's. The second is refused with one line
+    and exit 1, its store closed again, and the first serves on. Once the first stops, the
     root is free again. The second is given a `stop` already set, so a serve that is wrongly let
     through returns at once rather than serving for ever."""
     import threading
@@ -522,7 +521,7 @@ def _signals_caught_here():
 
 def test_a_signal_during_serve_only_records_itself():
     """Serve's handlers take no lock: one that ran inside `Event.wait` on the main thread and set
-    the event would wait on itself for ever (#77). Each signal is recorded and nothing else; once
+    the event would wait on itself for ever. Each signal is recorded and nothing else; once
     one has arrived, serve is stopping and both are ignored on the way out, so a second during the
     interpreter's exit cannot end it. With none, the handlers found are put back."""
     import signal
@@ -547,7 +546,7 @@ def test_a_signal_during_serve_only_records_itself():
 
 def test_a_sigint_ignored_when_serve_starts_stays_ignored():
     """`irimi serve &` from a script inherits an ignored SIGINT, and a Ctrl-C meant for the script
-    must not stop the serve. SIGTERM is still serve's (#77)."""
+    must not stop the serve. SIGTERM is still serve's."""
     import signal
 
     from irimi import cli
@@ -567,7 +566,7 @@ def test_a_signal_before_the_proxy_is_ready_stops_serve_with_no_banner(
 ):
     """A signal that arrives while serve loads its maps and opens its store, or while its engine
     binds, is held until serve can act on it: it prints no banner that would say it serves, stops
-    whatever it started, closes the store, releases the lock and exits 0 (#77)."""
+    whatever it started, closes the store, releases the lock and exits 0."""
     import signal
 
     from irimi import cli, runner
@@ -600,7 +599,7 @@ def test_a_signal_before_the_proxy_is_ready_stops_serve_with_no_banner(
 
 def test_an_engine_that_cannot_be_built_leaves_the_store_closed_and_unlocked(home, monkeypatch):
     """What `_build_engine` raises reaches the caller, after the store is closed and its lock
-    released: nothing it opened outlives it (#77)."""
+    released: nothing it opened outlives it."""
     import threading
 
     from irimi import cli
@@ -619,7 +618,7 @@ def test_an_engine_that_cannot_be_built_leaves_the_store_closed_and_unlocked(hom
 
 def test_two_blocks_printed_at_once_never_interleave(tmp_path, monkeypatch):
     """The store's writer prints a run's summary while the engine's thread prints exchange lines:
-    `_ServeOutput` prints each call's lines under one lock, so a block comes out whole (#77). The
+    `_ServeOutput` prints each call's lines under one lock, so a block comes out whole. The
     stdout here yields between writes, which is where two unlocked writers would interleave."""
     import sys
     import threading
@@ -656,7 +655,7 @@ def test_a_run_that_cannot_be_read_back_is_one_warning_naming_only_its_type(
 ):
     """A run whose end is on disk but which cannot be read back prints one line on stderr instead
     of its summary, naming the exception's type and never its message, which may quote what it
-    choked on, as the store's own warnings never do (#69, #77)."""
+    choked on, as the store's own warnings never do."""
     from irimi import cli
     from irimi.store import StoreReader
     from irimi.trace import TraceFormatError
@@ -673,7 +672,7 @@ def test_a_run_that_cannot_be_read_back_is_one_warning_naming_only_its_type(
 
 def test_an_engine_that_stops_on_its_own_ends_serve_as_a_failure(home, monkeypatch, capsys):
     """A sidecar whose proxy is gone must not look alive to its supervisor: serve exits 1 and
-    says why (#77). Run on the main thread, it installed its signal handlers, and puts back the
+    says why. Run on the main thread, it installed its signal handlers, and puts back the
     ones it found when it returns."""
     import signal
 
@@ -711,7 +710,7 @@ class _Served:
     """`irimi <argv>` as its own process, on a free port, with this test's `$IRIMI_HOME`. Its
     stdout is read line by line on a thread, so a test waits for a line with a deadline rather
     than blocking on a pipe, and its stderr goes to a file. `launcher` is what Python runs irimi
-    as: its own module, or a `-c` bootstrap that calls `irimi.cli.main` (#78)."""
+    as: its own module, or a `-c` bootstrap that calls `irimi.cli.main`."""
 
     def __init__(self, home, *argv: str, launcher: tuple[str, ...] = ("-m", "irimi.cli")) -> None:
         import os
@@ -776,7 +775,7 @@ def _port_of(banner: list[str]) -> int:
     ids=["serve-SIGTERM", "shadow-serve-SIGTERM", "shadow-serve-SIGINT"],
 )
 def test_serve_and_its_alias_print_one_banner_and_stop_cleanly_on_a_signal(home, argv, signame):
-    """`irimi serve` is `irimi shadow --serve` (#77): one banner, which names no run of its own,
+    """`irimi serve` is `irimi shadow --serve`: one banner, which names no run of its own,
     and both stop on SIGTERM, as a container runtime stops a sidecar, and on Ctrl-C's SIGINT, by
     closing the store and exiting 0 with nothing more to say."""
     from irimi import report
@@ -798,7 +797,7 @@ def test_serve_and_its_alias_print_one_banner_and_stop_cleanly_on_a_signal(home,
 
 def test_a_wide_bind_says_so_in_the_banner(home):
     """`--listen-host 0.0.0.0` adds the banner line saying who can now reach irimi, as a real
-    serve prints it (#77); the loopback default does not, which the test above pins."""
+    serve prints it; the loopback default does not, which the test above pins."""
     import re
 
     from irimi import report
@@ -854,8 +853,8 @@ with sdk.run(trigger={"n": 3}):
 
 
 def test_a_served_sdk_agent_gets_one_summary_block_per_run_it_ends(home, tmp_path_factory):
-    """The issue's own end-to-end: `irimi shadow --serve` as its own process, and an SDK agent in
-    another, pointed at it by the variables the README's "Serve mode" names (#77).
+    """Serve mode end to end: `irimi shadow --serve` as its own process, and an SDK agent in
+    another, pointed at it by the variables the README's "Serve mode" names.
 
     The agent runs two triggers, each a read and a write, then a read in no run, then a third run
     it never ends: it exits mid-run. Each ended run prints a `--- run <id> ---` block equal to
@@ -892,7 +891,7 @@ def test_a_served_sdk_agent_gets_one_summary_block_per_run_it_ends(home, tmp_pat
     try:
         port = _port_of(served.banner())
         listener = f"http://127.0.0.1:{port}"
-        # The control endpoint says it serves: `EngineConfig.serve`, which the CLI sets (#73).
+        # The control endpoint says it serves: `EngineConfig.serve`, which the CLI sets.
         direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with direct.open(f"{listener}/_irimi/health", timeout=10) as health:
             assert json.load(health)["serve"] is True
@@ -959,7 +958,7 @@ def _run_agent(tmp_path_factory, source: str, listener: str, *argv: str) -> None
 def _blocks(lines: list[str], reader) -> list[str]:
     """The run ids of the `--- run <id> ---` blocks in `lines`, each checked to be followed at once
     by `stored_summary_lines` for that run, as the store holds it now: printed under one lock, a
-    block is never split by another line (#77)."""
+    block is never split by another line."""
     from irimi import report
 
     maps = servicemap.load()
@@ -999,7 +998,7 @@ for n in range(10):
 
 def test_a_stream_read_to_its_end_is_in_its_runs_block(home, tmp_path_factory):
     """A streamed answer is recorded once its last chunk has gone through irimi, and the run's
-    block is printed when the SDK's end is on disk (#71, #77). For a stream the agent reads to its
+    block is printed when the SDK's end is on disk. For a stream the agent reads to its
     end, the record comes first: mitmproxy sends the agent the stream's end only after the
     `response` hook has queued the exchange, and the agent posts its run's end after that. So the
     block of each run holds its stream. (A stream the agent leaves open past its run's end is

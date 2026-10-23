@@ -59,7 +59,7 @@ def test_init_refuses_symlinked_key(tmp_path, monkeypatch, capsys):
 
 
 def test_the_non_http_notice_names_the_way_to_label_a_non_http_write(tmp_path, monkeypatch, capsys):
-    """Since #76 a non-HTTP side effect happens for real only when its function is unlabelled:
+    """A non-HTTP side effect happens for real only when its function is unlabelled:
     `irimi init` must not say every one does."""
     _setup(tmp_path, monkeypatch)
     assert main(["init"]) == 0

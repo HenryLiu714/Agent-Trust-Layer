@@ -11,7 +11,7 @@ from irimi import redact
 from irimi.exchange import FIXTURE_FAILED_FLAG, Exchange
 
 W = "w04_slack_ops_bot"
-# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi (#77).
+# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.
 MODES = ("shadow", "serve")
 WEBHOOK_PATH = CANARIES["SLACK_WEBHOOK_PATH"]
 API = "slack.com/api/"
@@ -45,7 +45,7 @@ def test_a_mention_is_one_run_and_its_reply_is_read_back_through_the_overlay(run
     assert [e["name"] for e in shadow.events("run.start")] == ["on_mention"]
     run_id = shadow.one("run.start")["run"]
     assert {c["run"] for c in shadow.calls()} == {run_id}
-    # L3 probed the channel before faking the post (#45).
+    # L3 probed the channel before faking the post.
     lines = shadow.exchange_lines()
     assert "live      read      POST slack.com/api/conversations.info -> 200" in lines
     assert (
@@ -68,13 +68,13 @@ def test_a_mention_is_one_run_and_its_reply_is_read_back_through_the_overlay(run
 @pytest.mark.parametrize("mode", MODES)
 def test_the_incoming_webhooks_secret_path_is_printed_until_87_lands(run_workflow, mode):
     shadow = run_workflow(W, "mention_in_thread", mode)
-    # #87: the per-exchange line still prints the webhook's secret path. When #87 lands this
-    # assertion flips: the line must name the route and not the credential.
+    # The per-exchange line prints the webhook's secret path. When it names the route and not
+    # the credential, this assertion flips. See #87.
     assert (
         f"fake-L0   write     POST hooks.slack.com{WEBHOOK_PATH} -> 200  [fidelity:L0]"
         in shadow.exchange_lines()
     )
-    # The store already hides it (#69, #70): the whole path is one placeholder, and invariant 4
+    # The store already hides it: the whole path is one placeholder, and invariant 4
     # finds the canary in no file under irimi's home.
     [hook] = [
         e
@@ -90,7 +90,7 @@ def test_runs_show_prints_the_webhook_post_as_the_maps_sentence_from_its_stored_
     run_workflow, mode
 ):
     """The stored webhook path is a placeholder no route matches, so `irimi runs show` found the
-    route by the operation the exchange recorded (#72). Its event line spells the placeholder, as
+    route by the operation the exchange recorded. Its event line spells the placeholder, as
     stored, and its summary line is the map's sentence, as `irimi shadow` printed it."""
     shadow = run_workflow(W, "mention_in_thread", mode)
     (run_id,) = [r.run_id for r in shadow.sdk_runs()]
@@ -125,7 +125,7 @@ def test_a_reply_under_the_runs_own_minted_thread_is_answered_from_the_write_log
         (f"{API}chat.postMessage", 200, "fake-L1"),
     ]
     # The thread's parent exists only in irimi's write log: real Slack says `thread_not_found`,
-    # and irimi answers the read from the write log instead (#52).
+    # and irimi answers the read from the write log instead.
     readback = shadow.one("readback")
     assert (readback["ok"], readback["sees_reply"], readback["messages"]) == (True, True, 2)
     assert shadow.answered()[-1] == (f"{API}conversations.replies", 200, "overlay")
@@ -138,10 +138,10 @@ def test_a_reply_under_the_runs_own_minted_thread_is_answered_from_the_write_log
 @pytest.mark.parametrize("mode", MODES)
 def test_a_thread_minted_by_posts_whose_fixture_failed_is_read_back_partial(run_workflow, mode):
     """The post's fixture is unreadable, so both posts degrade to `fake-L0`: an envelope with no
-    `message`, the minted `ts` on the envelope alone (#42). Real Slack has never heard of the
+    `message`, the minted `ts` on the envelope alone. Real Slack has never heard of the
     thread and irimi has no message to build it from, so `thread_not_found` stands, and each read
     of the thread says the world irimi showed is incomplete. The read before the reply is the one
-    only the parent's own `ts` can place (#64)."""
+    only the parent's own `ts` can place."""
     shadow = run_workflow(W, "own_thread_fixture_failed", mode)
     posts = [ex for ex in shadow.reported if ex.request.path == "/api/chat.postMessage"]
     assert [(ex.answered_by, ex.flags) for ex in posts] == [
@@ -172,7 +172,7 @@ def test_a_thread_minted_by_posts_whose_fixture_failed_is_read_back_partial(run_
 def test_a_replay_of_a_thread_minted_by_posts_whose_fixture_failed_reads_it_partial(replayed):
     """Replayed, both posts are answered with their recorded envelopes, `ts` and all, and each read
     of the thread with Slack's recorded `thread_not_found`. The overlay runs again over the
-    recording, and places the parent by the envelope's `ts` as the shadow run did (#64)."""
+    recording, and places the parent by the envelope's `ts` as the shadow run did."""
     recorded, replay = replayed(W, "own_thread_fixture_failed")
     assert replay.internet.requests() == []
     posts = [ex for ex in replay.reported if ex.request.path == "/api/chat.postMessage"]
@@ -203,7 +203,7 @@ def _fixture_failed_writes(source: str) -> list[str]:
     return [
         '  ○ post to #C0OPS: "Incident: Payouts are delayed; investigating."'
         "  unvalidated (L3 preconditions passed)",
-        missed,  # the incident check, which only the parent's envelope `ts` can place (#64)
+        missed,  # the incident check, which only the parent's envelope `ts` can place
         '  ○ post to #C0OPS: "Payouts are delayed; investigating."'
         "  unvalidated (L3 preconditions passed)",
         "  ○ add :eyes: to a message in C0OPS  unvalidated (L0)",
@@ -219,8 +219,8 @@ def _fixture_failed_writes(source: str) -> list[str]:
 def test_a_post_to_a_channel_name_is_unprobed_and_its_read_back_misses(run_workflow, mode):
     shadow = run_workflow(W, "channel_by_name", mode)
     bare = run_workflow(W, "channel_by_name", "bare")
-    # Real Slack answers a post to `#ops` with the channel's id; irimi's fake echoes the name back
-    # (#44), so the agent's read-back names a channel Slack does not know.
+    # Real Slack answers a post to `#ops` with the channel's id; irimi's fake echoes the name back,
+    # so the agent's read-back names a channel Slack does not know.
     assert bare.one("post_reply")["channel"] == "C0OPS"
     assert shadow.one("post_reply")["channel"] == "#ops"
     assert bare.one("readback")["sees_reply"] is True
@@ -230,7 +230,7 @@ def test_a_post_to_a_channel_name_is_unprobed_and_its_read_back_misses(run_workf
         "channel_not_found",
         False,
     )
-    # A name is not probed by L3 (#45), so the post is L2, not "L3 preconditions passed".
+    # A name is not probed by L3, so the post is L2, not "L3 preconditions passed".
     # LOOKS WRONG (no issue yet; #61 covers ids only): the doubled `##` is the human template's
     # `#{channel}` over a name that already has one.
     lines = shadow.exchange_lines()
@@ -279,7 +279,7 @@ def test_a_retried_delivery_is_acknowledged_and_handled_once(run_workflow):
         assert len(posts) == 1
     shadow = run_workflow(W, "duplicate_delivery", "shadow")
     assert len(shadow.events("run.start")) == 1
-    # Under serve mode (#77) the two deliveries are one run, stored and summarized once: the
+    # Under serve mode the two deliveries are one run, stored and summarized once: the
     # retry is acknowledged before a trigger is called, so it starts none.
     serve = run_workflow(W, "duplicate_delivery", "serve")
     [run] = serve.events("run.start")
@@ -290,13 +290,13 @@ def test_a_retried_delivery_is_acknowledged_and_handled_once(run_workflow):
     ]
 
 
-# ---------------------------------------------------------------------- irimi compare (#79)
+# ---------------------------------------------------------------------- irimi compare
 
 ON_MENTION = "on_mention  examples.workflows.w04_slack_ops_bot.agent:on_mention  agent -"
 ANSWER_POST = 'post to #C0OPS: "Payouts are on schedule."  unvalidated (L3 preconditions passed)'
 WEBHOOK_POST = '○ post via webhook: "ops bot answered alice"  unvalidated (L0)'
 AGAINST_A_PLAIN_MENTION = {
-    # Slack would refuse the bot's post for a missing scope, which L3 cannot see (#45): the run
+    # Slack would refuse the bot's post for a missing scope, which L3 cannot see: the run
     # is faked as if it posted, so it compares the same, exit 0.
     "missing_scope": (
         0,
@@ -330,7 +330,7 @@ AGAINST_A_PLAIN_MENTION = {
 @pytest.mark.parametrize("scenario", AGAINST_A_PLAIN_MENTION)
 def test_irimi_compare_shows_what_l3_saw_of_slack_s_refusals(shared_store_run, scenario, mode):
     """`mention_in_thread` against a mention Slack would refuse, recorded into one store, B under
-    shadow or serve (#79): a refusal L3 checks is a `~` whose B line carries `✗`, and one it
+    shadow or serve: a refusal L3 checks is a `~` whose B line carries `✗`, and one it
     cannot see is no difference at all."""
     code, differ, rows = AGAINST_A_PLAIN_MENTION[scenario]
     plain = shared_store_run(W, "mention_in_thread")
@@ -359,10 +359,10 @@ def test_irimi_compare_shows_what_l3_saw_of_slack_s_refusals(shared_store_run, s
 @pytest.mark.parametrize("mode", MODES)
 def test_irimi_compare_tells_a_newline_from_a_typed_backslash_n(shared_store_run, mode):
     """`two_line_answer` posts an answer holding a newline, and `typed_escape_answer` one holding
-    a backslash and an `n`. irimi prints each escaped, so the summary's line does not break
-    (#72), and the two print alike; compare compares what was posted, so the pair is changed, and
+    a backslash and an `n`. irimi prints each escaped, so the summary's line does not break,
+    and the two print alike; compare compares what was posted, so the pair is changed, and
     prints a pair whose lines print alike with each backslash escaped too, so its two lines say
-    how the posts differ: the newline as `\\n`, the typed one as `\\\\n` (#79). Recorded into one
+    how the posts differ: the newline as `\\n`, the typed one as `\\\\n`. Recorded into one
     store, B under shadow or serve."""
     newline = shared_store_run(W, "two_line_answer")
     typed = shared_store_run(W, "typed_escape_answer", mode)
@@ -393,7 +393,7 @@ def test_rows_not_shown_finds_a_row_no_summary_printed_and_a_pair_not_told_apart
     """The harness's check that each compared row is a line its own run's summary printed, held
     to catching something: over the newline against the typed backslash-n, it passes compare's
     own output, and finds a row added, a row from the wrong side, and a pair whose escaped lines
-    are not the two posts the summaries printed (#79)."""
+    are not the two posts the summaries printed."""
     newline = shared_store_run(W, "two_line_answer")
     typed = shared_store_run(W, "typed_escape_answer")
     a, b = (result.one("run.start")["run"] for result in (newline, typed))

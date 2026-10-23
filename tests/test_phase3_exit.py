@@ -1,6 +1,5 @@
-"""Phase 3's exit test, the hermetic half (#78): "a server-style agent in a container produces
-attributed runs with their triggers, and two concurrent requests don't mix" (the Rough Phases
-Roadmap).
+"""The server agent end to end, the hermetic half: a server-style agent in a container produces
+attributed runs with their triggers, and two concurrent requests don't mix.
 
 Three processes, as in production: `irimi shadow --serve`, the server agent
 `examples/server_agent` beside it, pointed at irimi by the variables the README's "Serve mode"
@@ -13,13 +12,13 @@ THE TRAP THIS TEST MUST NOT FALL INTO. The stub is on loopback, and a `NO_PROXY`
 `127.0.0.1` or `localhost` sends `urllib` straight to it: irimi then sees nothing, and every
 assertion about what irimi stored fails or, worse, the ones about what the stub never saw pass.
 The agent's environment carries no `NO_PROXY` at all. And because irimi strips `Irimi-Run` from
-everything it forwards, and the SDK labels only requests to irimi (#67, #75), "the stub saw no
+everything it forwards, and the SDK labels only requests to irimi, "the stub saw no
 `Irimi-Run`" proves nothing about routing: it is kept as a leak check. Routing is proved from the
 store instead: each run holds its own agent-issued charge read, and the stub answered exactly as
 many charge reads as irimi stored as live.
 
 irimi runs as the real CLI in its own process, through a bootstrap that only points the shipped
-maps at the loopback Stripe's (`tests.test_engine_mitm.PRECONDITION_STRIPE_MAP`, the Phase 2 exit
+maps at the loopback Stripe's (`tests.test_engine_mitm.PRECONDITION_STRIPE_MAP`, the refund agent
 test's map), since a process of its own cannot be monkeypatched from here.
 """
 
@@ -72,13 +71,13 @@ sys.exit(cli.main(sys.argv[2:]))
 
 
 class _HeardStripe(_Stripe):
-    """The Phase 2 exit test's loopback Stripe, which answers any charge as refundable and records
+    """The refund agent test's loopback Stripe, which answers any charge as refundable and records
     every request, also keeping each request's header names, so a leaked `Irimi-Run` shows. Three
     charges it answers with an error instead, as Stripe answers ones it never heard of (404) and
     one it fails on (500). `FAILING` names each as the agent is given it, and each is matched by
     the path segment the agent sent, so a charge holding `/` and `?` fails only when the agent
-    quoted it into its one segment: unquoted, it names another Stripe path, which answers 200
-    (#78)."""
+    quoted it into its one segment: unquoted, it names another Stripe path, which answers 200.
+    """
 
     heard: list[list[str]] = []
     FAILING = {"ch_MISSING": 404, "ch_DOWN": 500, "ch_ODD/../refunds?x=1": 404}
@@ -186,7 +185,7 @@ def _agent_beside_serve(home: Path, stub_port: int, *, barrier: bool):
             _wait_for(lambda: bool(said))
         except AssertionError:
             # Say where a silent app is stuck: faulthandler dumps every thread's stack to its
-            # stderr on SIGABRT (#78, a macOS CI runner once held it past the deadline).
+            # stderr on SIGABRT, which shows where a slow runner holds it past the deadline.
             agent.send_signal(signal.SIGABRT)
             agent.wait(timeout=10)
             stuck = (home / "app.err").read_text()
@@ -237,7 +236,8 @@ def _ended_runs(count: int):
 def test_two_concurrent_requests_to_a_served_agent_are_two_runs_that_never_mix(
     home, stripe_stub, capsys
 ):
-    """The Phase 3 exit criterion for use case 0 (#78)."""
+    """A served agent's two concurrent requests are stored as two runs, each with its own
+    trigger and its own exchanges."""
     store = home / "store"
     db = home / "refunds.sqlite3"
     with (
@@ -357,7 +357,7 @@ def test_two_concurrent_requests_to_a_served_agent_are_two_runs_that_never_mix(
 def test_a_refund_stripe_refuses_is_a_502_and_a_run_ended_in_error_and_a_bad_body_no_run(
     home, stripe_stub
 ):
-    """The agent answers every request, never hangs one, and its runs say what went wrong (#78): a
+    """The agent answers every request, never hangs one, and its runs say what went wrong: a
     charge Stripe has never heard of (404) or fails on (500) is answered 502 with the error, and
     its run ends `error` holding only its read, which names the charge as one quoted path segment
     whatever it holds; a body that is not `{"charge", "reason"}` is answered 400 before any run
@@ -419,7 +419,7 @@ def test_a_refund_stripe_refuses_is_a_502_and_a_run_ended_in_error_and_a_bad_bod
 
 
 def test_a_caller_that_sends_less_body_than_it_named_is_cut_off_not_waited_on(monkeypatch):
-    """A request whose body never arrives does not hold its thread forever (#78): the handler's
+    """A request whose body never arrives does not hold its thread forever: the handler's
     socket times out and the connection is closed. Here in-process, with the timeout shortened."""
     assert app._Handler.timeout is not None and 0 < app._Handler.timeout <= 60
     monkeypatch.setattr(app._Handler, "timeout", 0.2)
@@ -441,7 +441,7 @@ def test_a_caller_that_sends_less_body_than_it_named_is_cut_off_not_waited_on(mo
 )
 def test_the_app_run_as_main_refuses_and_says_how_to_start_it(argv):
     """Run as `__main__`, its runs' entrypoint would be `__main__:handle_refund`, which replay
-    cannot import (#74, #84): the app refuses at once, rather than serve unreplayable runs."""
+    cannot import: the app refuses at once, rather than serve unreplayable runs."""
     done = subprocess.run(
         [sys.executable, *argv], cwd=ROOT, capture_output=True, text=True, timeout=60
     )

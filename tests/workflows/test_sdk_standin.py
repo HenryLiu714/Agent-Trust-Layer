@@ -1,8 +1,8 @@
-"""The SDK stand-in, `examples/workflows/sdk.py`, against the `irimi.sdk` that replaces it (#89).
+"""The SDK stand-in, `examples/workflows/sdk.py`, against the `irimi.sdk` that replaces it.
 
-`irimi.sdk` does not exist yet (#74, #76, #84), so each test here reloads the stand-in over a fake
-one put in `sys.modules`, and reloads it again afterwards over whatever is really installed. The
-stand-in must: resolve each name on its own (#74 ships before #76's `tool`), log `run.start` and
+Each test here reloads the stand-in over a fake `irimi.sdk` put in `sys.modules`, and reloads it
+again afterwards over whatever is really installed. The stand-in must: resolve each name on its
+own (an `irimi.sdk` without `tool` still serves the rest), log `run.start` and
 `run.end` with the REAL run id, leave the real `tool`'s decoration-time checks to it, fall back
 only when `irimi.sdk` is absent (never when it is broken), and forward names it does not define.
 
@@ -58,7 +58,7 @@ REAL_TYPE_ERROR = "irimi.sdk refuses"
 
 
 def fake_sdk(*, active: bool = True, with_tool: bool = False, **extra: Any) -> types.ModuleType:
-    """A module shaped like #74's `irimi.sdk` (and #76's `tool` with `with_tool`): a context
+    """A module shaped like `irimi.sdk` (with its `tool` when `with_tool`): a context
     variable run id that nested triggers join, minted from a counter so a test can tell it from
     the stand-in's `token_hex`. Every decoration is recorded in `mod.decorated`."""
     mod = types.ModuleType("irimi.sdk")
@@ -240,7 +240,7 @@ def obs(tmp_path, monkeypatch) -> Callable[[str], list[dict[str, Any]]]:
     return read
 
 
-# -- (a) #74 without #76: per-name resolution ----------------------------------------------------
+# -- (a) an SDK without `tool`: per-name resolution ----------------------------------------------
 
 
 def test_with_only_74s_names_every_agent_imports_and_tools_are_the_stand_ins(
@@ -298,7 +298,7 @@ def test_a_real_trigger_logs_one_run_with_the_real_id_and_nested_triggers_join(l
     outer_id, inner_id = outer(1, y="b")
     assert outer_id == inner_id == "real000000000001" == fake.minted[0]
     # The run's start says the type of each argument the trigger was called with, and its end
-    # what the trigger returned (#84).
+    # what the trigger returned.
     assert obs("run.start") == [
         {
             "event": "run.start",
@@ -317,7 +317,7 @@ def test_a_real_trigger_logs_one_run_with_the_real_id_and_nested_triggers_join(l
         }
     ]
     # The real decorator got the name as given and a function with the agent's signature, which
-    # #74 binds the captured args against and names the entrypoint after.
+    # the SDK binds the captured args against and names the entrypoint after.
     [(_, inner_name, inner_fn), (_, outer_name, outer_fn)] = fake.decorated
     assert (inner_name, outer_name) == (None, "outer")
     assert list(inspect.signature(outer_fn).parameters) == ["x", "y"]
@@ -327,8 +327,8 @@ def test_a_real_trigger_logs_one_run_with_the_real_id_and_nested_triggers_join(l
 @pytest.mark.skipif(sys.version_info < (3, 14), reason="3.12 evaluates annotations at definition")
 def test_a_real_trigger_annotated_with_a_name_never_defined_runs_and_logs_its_types(load_sdk, obs):
     """The real SDK leaves a trigger's annotations unevaluated (`capture._signature`), so a name
-    imported only for type checkers never raises into the agent; nor does the log of its types
-    (#84). This module's annotations are strings (`from __future__`), so the trigger is compiled
+    imported only for type checkers never raises into the agent; nor does the log of its types.
+    This module's annotations are strings (`from __future__`), so the trigger is compiled
     without its flags."""
     sdk = load_sdk(fake_sdk(active=True))
     namespace: dict[str, Any] = {"__name__": __name__}
@@ -411,8 +411,8 @@ def test_a_generator_trigger_is_refused_by_the_real_sdk(load_sdk):
 
 @pytest.mark.parametrize("real", [True, False], ids=["real", "absent"])
 def test_a_trigger_above_a_static_or_class_method_keeps_it_one(load_sdk, obs, monkeypatch, real):
-    """`irimi.sdk`'s trigger keeps a `staticmethod` or `classmethod` one above which it is written
-    (#74). The stand-in's own wrapper, put between, must too: it called the descriptor itself, so
+    """`irimi.sdk`'s trigger keeps a `staticmethod` or `classmethod` one above which it is written.
+    The stand-in's own wrapper, put between, must too: it called the descriptor itself, so
     a class method was not callable, and a static method made a plain function would be bound and
     given the instance as an argument."""
     fake = fake_sdk(active=True)
@@ -443,7 +443,7 @@ def test_a_trigger_above_a_static_or_class_method_keeps_it_one(load_sdk, obs, mo
 
 @pytest.mark.parametrize("real", [True, False], ids=["real", "absent"])
 def test_a_tool_above_a_static_or_class_method_keeps_it_one(load_sdk, obs, monkeypatch, real):
-    """`irimi.sdk`'s tool keeps a `staticmethod` or `classmethod` it is written above (#76). The
+    """`irimi.sdk`'s tool keeps a `staticmethod` or `classmethod` it is written above. The
     stand-in's logging wrapper goes inside the descriptor, so a static method is not handed the
     instance, a class method's stand-in is handed the class, and the real tool is given the
     descriptor itself, with the agent's own `name` (None), so the name it records is its own
@@ -489,7 +489,7 @@ def test_a_tool_above_a_static_or_class_method_keeps_it_one(load_sdk, obs, monke
 @pytest.mark.parametrize("real", [True, False], ids=["real", "absent"])
 def test_a_stand_in_reaches_the_real_tool_as_the_agent_wrote_it(load_sdk, obs, monkeypatch, real):
     """The real `tool` judges a `staticmethod` stand-in by the function inside, and refuses a
-    stand-in that is the function itself (#76). This module's logging wrapper must not hide
+    stand-in that is the function itself. This module's logging wrapper must not hide
     either: wrapped as a plain callable, an async static stand-in, or an object whose `__call__`
     is async, read as sync and was refused, a generator one passed, and the function and its
     stand-in became two wrappers, so the real write ran under irimi, logged as the stand-in. The
@@ -557,7 +557,7 @@ def test_w6_decoration_errors_are_the_real_tools_own(load_sdk, fresh_import, obs
     assert len(raised) == 9
     messages = [e["message"] for e in obs("decoration_error")]
     assert len(messages) == 9 and all(m.startswith(REAL_TYPE_ERROR) for m in messages), messages
-    # What #76 checks reached the real decorator as the agent wrote it.
+    # What the real `tool` checks reached it as the agent wrote it.
     seen = {(kind, shadow if not callable(shadow) else "fn", fn.__name__) for _, kind, shadow, fn
             in fake.decorated}  # fmt: skip
     assert ("write", "mock_database_write", "real") in seen
@@ -654,7 +654,7 @@ def test_without_the_real_sdk_unknown_names_are_attribute_errors(load_sdk):
         _ = sdk.replay
 
 
-# -- (f) a read tool a replay answers from its recording (#83) ------------------------------------
+# -- (f) a read tool a replay answers from its recording -----------------------------------------
 
 REPLAY_RUN = "abcd1234abcd1234"
 
@@ -683,7 +683,7 @@ class _Recording:
 @pytest.fixture
 def replaying(load_sdk, monkeypatch) -> Callable[..., tuple[types.ModuleType, _Recording]]:
     """`replaying(outcome, active=, gate=)`: this module over the real `irimi.sdk`, as a replay's
-    child has it: active, told it replays (`IRIMI_REPLAY_RUN`, naming its `IRIMI_RUN`, #84), and its
+    child has it: active, told it replays (`IRIMI_REPLAY_RUN`, naming its `IRIMI_RUN`), and its
     reporter a `_Recording`."""
     import irimi.sdk as real_sdk
     from irimi import paths
@@ -789,7 +789,7 @@ def test_a_miss_runs_the_real_read_and_logs_it_once(replaying, obs):
 
 
 def test_a_write_in_a_replay_runs_its_stand_in_and_asks_no_recording(replaying, obs):
-    """Even one the recording holds: a write tool never asks (#83)."""
+    """Even one the recording holds: a write tool never asks."""
     sdk, recording = replaying(_outcome({"written": True}))
 
     def stand_in(row: int) -> str:
@@ -823,7 +823,7 @@ def test_an_inactive_sdk_told_it_replays_asks_nothing_and_logs_the_real_read(rep
 
 def test_a_read_cancelled_while_it_asks_the_recording_logs_nothing(replaying, obs):
     """Cancelled while its lookup waits off the loop, the call ran no body and was answered by
-    nothing, and irimi stores no call of it: the log says so too, not `recording` (#83)."""
+    nothing, and irimi stores no call of it: the log says so too, not `recording`."""
     gate = threading.Event()
     sdk, recording = replaying(_outcome({"balance": 7}), gate=gate)
 
@@ -920,7 +920,7 @@ def test_a_tool_through_this_module_does_what_the_real_sdk_s_does(
     """The agents write `sdk.tool` from this module, and the corpus must test the SDK that ships:
     in every mode a tool runs in - bare, shadow, and a replay whose recording misses, answers or
     raises - the same tool made with this module's `tool` and with `irimi.sdk.tool` gives the
-    agent the same thing, runs the same bodies and posts the same records (#83)."""
+    agent the same thing, runs the same bodies and posts the same records."""
     import irimi.sdk as real_sdk
     from irimi import paths
     from irimi.sdk import runs
@@ -983,7 +983,7 @@ def test_resolving_refuses_every_lookup_of_a_name_it_does_not_serve():
 
 def test_resolving_only_serves_the_names_it_is_given_whatever_their_case():
     """`resolving_only`, the fake internet's resolver taken out of it for a test whose irimi
-    reaches loopback stubs by their real names (`tests/test_phase3_replay_exit.py`, #85): a name
+    reaches loopback stubs by their real names (`tests/test_phase3_replay_exit.py`): a name
     given in any case resolves to loopback in any case and with a trailing dot, every other name is
     refused, and the socket module is restored even when the block raises."""
     originals = (socket.getaddrinfo, socket.gethostbyname, socket.gethostbyname_ex)

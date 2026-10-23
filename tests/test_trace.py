@@ -1,4 +1,4 @@
-"""Trace format v1 (#68): every record survives its codec, and the reference page decodes."""
+"""Trace format v1: every record survives its codec, and the reference page decodes."""
 
 import asyncio
 import dataclasses
@@ -63,7 +63,7 @@ def _sample(tp, name, n, default=dataclasses.MISSING):
         return _sample(arm, name, n, default)
     if origin is tuple and len(args) == 2 and args[1] is Ellipsis:
         # Three distinct items, neither ascending nor descending: a codec that sorts, reverses or
-        # dedups the sequence fails. For #71's `stream_chunks: tuple[int, ...]` as much as `flags`.
+        # dedups the sequence fails. For `stream_chunks: tuple[int, ...]` as much as `flags`.
         first, second, third = (_sample(args[0], f"{name}{i}", n) for i in range(3))
         return (second, first, third)
     if origin is tuple:
@@ -113,7 +113,7 @@ def test_the_samples_differ_from_field_to_field():
 
 
 class _Blobs:
-    """An in-memory body store with the contract the codec assumes of the real one (#70)."""
+    """An in-memory body store with the contract the codec assumes of the real one."""
 
     def __init__(self):
         self.blobs: dict[str, bytes] = {}
@@ -253,7 +253,7 @@ def test_a_body_ref_that_is_not_a_digest_is_refused_before_the_store_is_asked():
 
 
 def test_get_body_is_handed_the_ref_as_stored_truncated_and_size_included():
-    """The codec does not rebuild a ref from the bytes: a truncating store (#70) says what it kept,
+    """The codec does not rebuild a ref from the bytes: a truncating store says what it kept,
     and that is what comes back to it."""
     body = b"the first bytes of a longer body"
     stored = BodyRef(hashlib.sha256(body).hexdigest(), 8 * 1024 * 1024, True)
@@ -293,7 +293,7 @@ def _encoded_run():
 )
 def test_a_newer_schema_version_is_refused(version):
     """Refused without quoting the version: `str` of one past `sys.get_int_max_str_digits()`
-    raises ValueError, and a decoder raises only TraceFormatError (#100)."""
+    raises ValueError, and a decoder raises only TraceFormatError."""
     d = _encoded_run() | {"schema_version": version}
     with pytest.raises(TraceFormatError, match="schema_version is newer than this irimi reads"):
         trace.run_from_json(d)
@@ -348,10 +348,10 @@ def _key_paths(d, path=()):
             yield from _key_paths(value, (*path, key))
 
 
-# Fields added after #68 shipped v1. Each decodes as its default when absent, and has a test of its
-# own below.
-_ADDED_WITHIN_V1 = {("exchange", ("stream_chunks",))}  # #71
-_ADDED_IN_V2 = {("run", ("replay_of",)), ("tool_call", ("awaited",))}  # #82, #83
+# Fields added after the first v1 format. Each decodes as its default when absent, and has a test
+# of its own below.
+_ADDED_WITHIN_V1 = {("exchange", ("stream_chunks",))}
+_ADDED_IN_V2 = {("run", ("replay_of",)), ("tool_call", ("awaited",))}
 
 _REQUIRED = [
     (name, path)
@@ -388,7 +388,7 @@ def _nested_list(depth):
 
 
 # Deeper than `repr` goes on any Python or stack irimi runs on, and within what 3.14's `json.loads`
-# reads, so what an agent may post to the control endpoint (#73, #100).
+# reads, so what an agent may post to the control endpoint.
 _DEEP = 100_000
 # A field that holds a list is refused at its first item, by its place.
 _FIRST_ITEM_REFUSED = {
@@ -410,7 +410,7 @@ def test_a_value_nested_too_deep_to_quote_is_refused_by_its_type(name, path):
     """A decoder fed a 100,000-deep list in any field but a free JSON one raises TraceFormatError,
     on 3.12 and 3.14 alike, and names what it found rather than quoting it. Quoting it with `repr`
     raised RecursionError on some Pythons and stacks and not others, so the control endpoint's
-    answer to the same body differed between CI's runners (#100, #123)."""
+    answer to the same body differed between CI's runners."""
     d, decode = _decodable(name)
     *parents, key = path
     holder = d
@@ -441,7 +441,7 @@ _FREE = [(name, path) for name, path in _REQUIRED if path[-1] in _FREE_JSON]
 )
 def test_a_free_json_field_nested_too_deep_to_quote_is_read_back_whole(name, path, nested):
     """`args` and `result` hold any JSON, so a deep one is no refusal: it is read back as it was,
-    by a walk for non-finite numbers that does not recurse, on 3.12 and 3.14 alike (#100)."""
+    by a walk for non-finite numbers that does not recurse, on 3.12 and 3.14 alike."""
     d, decode = _decodable(name)
     *parents, key = path
     holder = d
@@ -481,7 +481,7 @@ def test_a_free_json_field_nested_too_deep_to_quote_is_read_back_whole(name, pat
 )
 def test_a_refused_value_is_named_by_its_json_type(value, named):
     """The one spelling of what a refused value is, for the decoders and the control endpoint
-    alike: never the value itself (#100). A boolean is not an integer, though Python's is."""
+    alike: never the value itself. A boolean is not an integer, though Python's is."""
     assert trace.json_type(value) == named
 
 
@@ -496,7 +496,7 @@ def test_a_refused_value_is_named_by_its_json_type(value, named):
 )
 def test_a_string_a_refusal_quotes_is_cut_to_max_quoted_characters(length, quoted):
     """A word outside a vocabulary and a `sha256` that is no digest are quoted back, cut, so a
-    damaged line's 5 MB string is never a 5 MB message on `runs show`'s stderr (#100)."""
+    damaged line's 5 MB string is never a 5 MB message on `runs show`'s stderr."""
     blobs = _Blobs()
     d = trace.exchange_to_json(_filled(Exchange), blobs.put) | {"kind": "z" * length}
     with pytest.raises(TraceFormatError) as refused:
@@ -511,15 +511,15 @@ def test_a_string_a_refusal_quotes_is_cut_to_max_quoted_characters(length, quote
 
 def test_a_quoted_string_spells_its_control_characters():
     """`repr`, so a damaged line's escape sequence is shown on `runs show`'s stderr, never obeyed
-    by the terminal (#72)."""
+    by the terminal."""
     with pytest.raises(TraceFormatError) as refused:
         trace.run_from_json(_encoded_run() | {"mode": "\x1b[2J\n"})
     assert str(refused.value) == "'mode' is '\\x1b[2J\\n', not one of ('shadow', 'replay')"
 
 
 def test_a_v1_run_reads_under_v2_as_a_run_that_is_no_replay():
-    """#82 made the format v2. A run.json v1 wrote has `schema_version: 1` and no `replay_of`, and
-    reads as written, as a run no replay answered."""
+    """`replay_of` is a v2 field. A run.json v1 wrote has `schema_version: 1` and no
+    `replay_of`, and reads as written, as a run no replay answered."""
     d = _encoded_run() | {"schema_version": 1, "mode": "shadow"}
     del d["replay_of"]
     record = trace.run_from_json(d)
@@ -545,7 +545,7 @@ def test_a_replay_of_that_is_no_run_id_is_refused_by_its_length(replay_of):
     """irimi only ever writes a stored run's id in `replay_of`, but a damaged run.json can hold
     anything: a 5 MB string `runs list` printed whole, a path `irimi replay` looked up as a run,
     and an empty one or one with two spaces that broke `runs list`'s columns. Each is held to
-    `is_valid_run_id`, as the run's own id is, and refused without being quoted (#167)."""
+    `is_valid_run_id`, as the run's own id is, and refused without being quoted."""
     with pytest.raises(TraceFormatError) as refused:
         trace.run_from_json(_encoded_run() | {"mode": "replay", "replay_of": replay_of})
     assert str(refused.value) == f"'replay_of' is not a run id ({len(replay_of)} characters)"
@@ -561,14 +561,14 @@ def test_a_replay_of_that_is_no_run_id_is_refused_by_its_length(replay_of):
 def test_a_run_whose_mode_and_replay_of_disagree_is_refused(mode, replay_of, refusal):
     """The store stamps a run's `mode` and `replay_of` by one rule, `mode_for`, so a record where
     they disagree is damage: `runs list` read one and `runs show` another, and printed it half as
-    a replay (#167)."""
+    a replay."""
     with pytest.raises(TraceFormatError) as refused:
         trace.run_from_json(_encoded_run() | {"mode": mode, "replay_of": replay_of})
     assert str(refused.value) == refusal
 
 
 def test_a_recorded_outcome_round_trips_and_holds_a_tool_call_s_outcome():
-    """What the control endpoint answers a replay's lookup with, and the SDK reads (#83)."""
+    """What the control endpoint answers a replay's lookup with, and the SDK reads."""
     call = dataclasses.replace(
         _filled(ToolCall), result=None, error=ErrorInfo("builtins.KeyError", "'k'"), awaited=True
     )
@@ -584,7 +584,7 @@ def test_a_recorded_outcome_round_trips_and_holds_a_tool_call_s_outcome():
 
 
 def test_a_tool_call_written_before_awaited_existed_reads_as_one_no_coroutine_gave():
-    """#83 added `awaited` within v2, so a tool call recorded before it has no such key, and reads
+    """`awaited` was added within v2, so a tool call recorded before it has no such key, and reads
     as the field's default: a call that returned its result itself."""
     d = trace.tool_call_to_json(dataclasses.replace(_filled(ToolCall), awaited=True))
     assert trace.tool_call_from_json(d).awaited is True
@@ -593,7 +593,7 @@ def test_a_tool_call_written_before_awaited_existed_reads_as_one_no_coroutine_ga
 
 
 def test_an_exchange_written_before_stream_chunks_existed_reads_as_one_that_did_not_stream():
-    """#71 added `stream_chunks` within v1, so a recording made before it has no such key, and
+    """`stream_chunks` was added within v1, so a recording made before it has no such key, and
     reads as the field's default: a response that did not stream."""
     blobs = _Blobs()
     d = trace.exchange_to_json(_filled(Exchange), blobs.put)
@@ -617,7 +617,7 @@ def test_an_exchange_written_before_stream_chunks_existed_reads_as_one_that_did_
         [4, None],
         [[4]],
         # Past `sys.get_int_max_str_digits()`, where `repr` raises ValueError: the message must not
-        # quote the value, or the decoder raises something other than TraceFormatError (#68).
+        # quote the value, or the decoder raises something other than TraceFormatError.
         pytest.param([-(10**5000)], id="a-negative-past-the-digit-limit"),
         pytest.param([10**5000, 0], id="a-zero-after-a-length-past-the-digit-limit"),
         pytest.param(10**5000, id="an-integer-past-the-digit-limit"),
@@ -646,7 +646,7 @@ _DECODERS = {
 
 @pytest.mark.parametrize("decoder", list(_DECODERS))
 def test_a_line_that_is_a_list_nested_too_deep_to_quote_is_named_a_list(decoder):
-    """A line `json.loads` reads as a deep list, which 3.14's does, is named by its type (#100)."""
+    """A line `json.loads` reads as a deep list, which 3.14's does, is named by its type."""
     with pytest.raises(TraceFormatError, match="must be read from an object, not a list$"):
         _DECODERS[decoder](_nested_list(_DEEP))
 
@@ -661,7 +661,7 @@ def test_every_public_decoder_is_in_the_not_an_object_test():
 @pytest.mark.parametrize("text", ["null", "5", '"seq"', "[]"])
 def test_a_line_that_is_not_an_object_is_a_trace_format_error(decoder, text):
     """What `json.loads` makes of a damaged line need not be a dict, and TypeError is not the
-    one exception a store catches (#70)."""
+    one exception a store catches."""
     with pytest.raises(TraceFormatError, match="object, not"):
         _DECODERS[decoder](json.loads(text))
 
@@ -690,7 +690,7 @@ def test_a_timestamp_that_is_not_a_finite_float_is_a_trace_format_error(number):
 @pytest.mark.parametrize("number", ["NaN", "Infinity", "-Infinity"])
 def test_free_json_holding_a_number_that_is_not_finite_is_a_trace_format_error(number):
     """`args` and `result` hold any JSON, but not what `json.loads` alone would let in: a record
-    holding `NaN` could not be written back with `allow_nan=False` (#68)."""
+    holding `NaN` could not be written back with `allow_nan=False`."""
     nested = json.loads(f'{{"a": [1, {{"b": {number}}}]}}')
     call = trace.tool_call_to_json(_filled(ToolCall))
     for key in ("args", "result"):
@@ -762,7 +762,7 @@ def test_an_invalid_run_id(run_id):
 
 def test_error_info_names_the_exception_by_module_and_qualname_and_keeps_its_message_whole():
     """The message is posted whole, for the store to redact before it cuts it to
-    MAX_ERROR_MESSAGE (#179). Past MAX_POSTED_MESSAGE it is cut outside any secret, so a key
+    MAX_ERROR_MESSAGE. Past MAX_POSTED_MESSAGE it is cut outside any secret, so a key
     straddling that cut is left out whole, never cut in two, and text with none keeps all it can."""
 
     class Boom(Exception):
@@ -781,7 +781,7 @@ def test_error_info_names_the_exception_by_module_and_qualname_and_keeps_its_mes
 def test_error_info_cuts_a_type_no_class_statement_would_make():
     """A class made with `type()` may be named anything. Its type is cut to MAX_POSTED_TYPE
     outside any secret, so its post stays under the control endpoint's 2 MiB and the run keeps
-    its end, and a key across that cut is left out whole (#179)."""
+    its end, and a key across that cut is left out whole."""
     long = type("L" * (3 * 1024 * 1024), (Exception,), {})
     assert (
         ErrorInfo.from_exception(long()).type
@@ -793,7 +793,7 @@ def test_error_info_cuts_a_type_no_class_statement_would_make():
 
 
 def test_error_info_survives_an_exception_it_cannot_print():
-    """The SDK records an agent's exception while it is in flight (#74, #76): a `__str__` that
+    """The SDK records an agent's exception while it is in flight: a `__str__` that
     raises, or returns something that is not a string, must not raise a second one."""
 
     class Raises(Exception):
@@ -898,7 +898,7 @@ def test_the_documented_example_is_what_the_encoders_write():
 
 def test_a_description_is_found_anywhere_in_a_captured_value():
     """`__irimi_repr__` and `__irimi_truncated__` say what a value was, not what it is, so a
-    replay never hands one back as the value (#83). Found at any depth without recursion."""
+    replay never hands one back as the value. Found at any depth without recursion."""
     assert trace.DESCRIPTION_KEYS == {trace.REPR_KEY, trace.TRUNCATED_KEY}
     assert trace.holds_description({"a": [1, {"b": {"__irimi_repr__": "Decimal('1')"}}]})
     assert trace.holds_description([{"__irimi_truncated__": True, "bytes": 9}])

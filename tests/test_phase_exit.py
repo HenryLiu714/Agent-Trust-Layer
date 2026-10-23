@@ -1,32 +1,31 @@
-"""The phase exit tests: the whole tool, end to end, on the write it was built for.
+"""The refund agent end to end: the whole tool, on the write it was built for.
 
-Two phases, a hermetic criterion for each, and one live check that has grown with them. The
-difference between a criterion and the live check is the whole argument:
+Two hermetic criteria and one live check. The difference between a criterion and the live check
+is the whole argument:
 
 * `test_a_refund_through_the_door_is_answered_by_irimi_and_never_leaves_the_machine` is the
-  **Phase 1 exit criterion** (#13). It runs `irimi shadow` over a child that speaks the exact wire
-  shape `stripe-python` produces through the reverse door - `stripe.api_base` is an origin plus the
+  **base-URL criterion**. It runs `irimi shadow` over a child that speaks the exact wire
+  shape `stripe-python` produces in base-URL mode - `stripe.api_base` is an origin plus the
   upstream host, and `Refund.create` posts a form body - and it needs no key, no network and no
-  SDK, so it runs on every `uv run pytest -q`. A criterion that can skip is a criterion a phase
-  can close without ever having run. It is left as Phase 1 closed it, and it keeps the reverse
-  door covered.
+  SDK, so it runs on every `uv run pytest -q`. A criterion that can skip is a criterion that can
+  pass without ever having run. It keeps base-URL mode covered.
 
 * `test_the_refund_agents_four_calls_through_the_forward_proxy_are_answered_shadow_mode_correctly`
-  is the **Phase 2 exit criterion** (#48). It drives the refund agent's first read and then its
+  is the **forward-proxy criterion**. It drives the refund agent's first read and then its
   four calls - refund, list refunds, re-read, retry - through the FORWARD proxy against a loopback
   Stripe, and asserts the answers, the exchanges and the summary block line by line. It does not
-  go through the reverse door on purpose: the door rewrites the host to `api.stripe.com`, so
-  irimi's own L3 precondition read would dial the real Stripe (Notion, Phase 2 § Exit test). The
-  Phase 1 test answers that by swapping in `_StandInReader`; this one needs no stand-in at all.
+  use base-URL mode on purpose: that rewrites the host to `api.stripe.com`, so irimi's own L3
+  precondition read would dial the real Stripe. The base-URL test answers that by swapping in
+  `_StandInReader`; this one needs no stand-in at all.
   `test_the_same_five_calls_under_irimi_shadow_print_the_phase_2_summary` is its twin through the
   real CLI: the same calls from a child of `irimi shadow`, proving the engine the criterion builds
   is the one `cli._build_engine` builds, and that the block it prints on exit is the one pinned.
 
-* `test_the_refund_agent_leaves_no_refund_on_a_real_test_mode_charge` is the live version both
-  phases describe. It runs `examples/refund_agent/agent.py` itself against Stripe test mode and
+* `test_the_refund_agent_leaves_no_refund_on_a_real_test_mode_charge` is the live version of
+  both. It runs `examples/refund_agent/agent.py` itself against Stripe test mode and
   re-reads the charge afterwards. It skips without `STRIPE_API_KEY` and the `stripe` SDK, which
   is exactly why it is not a criterion - but it is the one that proves the claim against the
-  real ledger, so it stays, and it is run once by hand before a phase closes.
+  real ledger, so it stays, and it is run by hand with `uv run pytest -m live`.
 
 What the hermetic tests give up: they prove the refund never left this machine, not that Stripe's
 ledger is unchanged. Those differ only if irimi both answered the write locally and forwarded it,
@@ -61,7 +60,7 @@ from tests.test_engine_mitm import (
 AGENT_PATH = Path(__file__).resolve().parent.parent / "examples" / "refund_agent" / "agent.py"
 
 CHARGE_ID = "ch_3QTESTONLY000000"
-REFUND_AMOUNT_MINOR = 100  # the Phase 1 child's own refund: a partial one of `_Stripe`'s 4900
+REFUND_AMOUNT_MINOR = 100  # the base-URL child's own refund: a partial one of `_Stripe`'s 4900
 
 
 class _Stripe(BaseHTTPRequestHandler):
@@ -93,8 +92,8 @@ class _Stripe(BaseHTTPRequestHandler):
             "amount_refunded": 0,
             "currency": "usd",
         }
-        # `GET /v1/charges/{id}` is the L3 precondition read irimi makes before faking the refund
-        # (#45); the bare collection is the agent's own read.
+        # `GET /v1/charges/{id}` is the L3 precondition read irimi makes before faking the refund;
+        # the bare collection is the agent's own read.
         document = charge if one else {"object": "list", "data": [charge]}
         payload = json.dumps(document).encode()
         self.send_response(200)
@@ -114,11 +113,11 @@ class _Stripe(BaseHTTPRequestHandler):
 
 
 class _StandInReader(reader.UpstreamReader):
-    """`UpstreamReader` pointed at the loopback stand-in (#45).
+    """`UpstreamReader` pointed at the loopback stand-in.
 
     In a real run through the door the precondition read dials `api.stripe.com`, which is correct
-    and is the whole reason Phase 2's exit test goes through the FORWARD proxy instead (Notion,
-    Phase 2 § Exit test). A test may not make a network call, so the one thing the door forces -
+    and is the whole reason the forward-proxy criterion goes through the FORWARD proxy instead.
+    A test may not make a network call, so the one thing the door forces -
     a real host on the write - is redirected here and nowhere else in the product.
     """
 
@@ -133,8 +132,8 @@ class _StandInReader(reader.UpstreamReader):
 @pytest.fixture
 def stripe_stand_in():
     _Stripe.seen = []
-    # Threaded: irimi's own precondition read runs on a worker thread as of #45, and a
-    # single-threaded stand-in would serialize it against the agent's traffic.
+    # Threaded: irimi's own precondition read runs on a worker thread, and a single-threaded
+    # stand-in would serialize it against the agent's traffic.
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _Stripe)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     yield srv.server_address[1]
@@ -194,7 +193,7 @@ print("WRITE", status, stamp, refund.decode())
 def test_a_refund_through_the_door_is_answered_by_irimi_and_never_leaves_the_machine(
     home, tmp_path, stripe_stand_in, capfd, monkeypatch
 ):
-    """The Phase 1 exit criterion. One run of the real CLI: a live read that reaches the world,
+    """The base-URL criterion. One run of the real CLI: a live read that reaches the world,
     a refund that does not, an echo the caller can parse, and a summary that says so."""
     # `cli._build_engine` imports the reader inside the function, so this is what it builds.
     monkeypatch.setattr("irimi.reader.UpstreamReader", _StandInReader)
@@ -210,9 +209,9 @@ def test_a_refund_through_the_door_is_answered_by_irimi_and_never_leaves_the_mac
     out = capfd.readouterr().out
 
     # 1. The read was real: it reached the only server there is, came back from it, and carries
-    #    no `Irimi-Answered-By` - absence is how a live forward says it was not ours (#12). The
+    #    no `Irimi-Answered-By` - absence is how a live forward says it was not ours. The
     #    second GET is irimi's own precondition read of the charge, made before it faked the
-    #    refund (#45) - and it reaching this stand-in is the proof it did not reach Stripe.
+    #    refund - and it reaching this stand-in is the proof it did not reach Stripe.
     assert [(m, p) for m, p, _ in _Stripe.seen] == [
         ("GET", "/v1/charges"),
         ("GET", f"/v1/charges/{CHARGE_ID}"),
@@ -221,7 +220,7 @@ def test_a_refund_through_the_door_is_answered_by_irimi_and_never_leaves_the_mac
     assert read.split(" ", 3)[:3] == ["READ", "200", "None"]
     assert CHARGE_ID in read
 
-    # 2. The write was answered by irimi, and says so on the wire (#12).
+    # 2. The write was answered by irimi, and says so on the wire.
     write = next(line for line in out.splitlines() if line.startswith("WRITE "))
     _, status, stamp, payload = write.split(" ", 3)
     assert status == "200"
@@ -229,8 +228,8 @@ def test_a_refund_through_the_door_is_answered_by_irimi_and_never_leaves_the_mac
 
     # 3. The answer is something an SDK can read: the id it minted, the object, and the fields
     #    the caller sent back unchanged. `stripe.Refund.create(...).id` is this assertion in the
-    #    SDK. Since #41 it is a whole refund object, so the fields the caller never sent - the
-    #    ones an agent branches on - are there too.
+    #    SDK. It is a whole refund object, so the fields the caller never sent - the ones an
+    #    agent branches on - are there too.
     body = json.loads(payload)
     assert body["object"] == "refund"
     assert body["id"].startswith("re_")
@@ -246,7 +245,7 @@ def test_a_refund_through_the_door_is_answered_by_irimi_and_never_leaves_the_mac
 
     # 5. The summary says all of it, in the map's own words.
     # `$1.00`, not `100`: the child posts no currency, and `_Stripe`'s charge is in `usd`, which
-    # irimi's own precondition read of it carried onto the write's exchange (#60).
+    # irimi's own precondition read of it carried onto the write's exchange.
     assert (
         f"  ○ refund {report.money(REFUND_AMOUNT_MINOR, 'usd')} on {CHARGE_ID}  "
         "unvalidated (L3 preconditions passed)" in out
@@ -254,12 +253,12 @@ def test_a_refund_through_the_door_is_answered_by_irimi_and_never_leaves_the_mac
     assert "  These writes did not happen." in out
     assert "1 read" in out
 
-    # 6. And irimi checked with Stripe before answering (#45). The charge GET in (1) is a read
+    # 6. And irimi checked with Stripe before answering. The charge GET in (1) is a read
     #    irimi issued on its own account, and it is recorded `issued_by: engine` so that it can be
     #    counted apart from the agent's: "reads are real" means the reads the AGENT made. It did
     #    reach the service, so the run's `live` bucket holds it beside the agent's own read. The
     #    agent's read went to the stand-in's own address, so Stripe's line holds no read of the
-    #    agent's at all - before #45 it said `1 read` here, and that read was irimi's.
+    #    agent's at all: irimi's check read is not counted as one.
     host = next(line for line in out.splitlines() if line.startswith("  api.stripe.com  "))
     assert host == "  api.stripe.com  1 engine read  1 write intercepted"
     assert "  3 exchanges · 2 live · 0 delegated · 1 virtualized" in out
@@ -268,13 +267,12 @@ def test_a_refund_through_the_door_is_answered_by_irimi_and_never_leaves_the_mac
 # The loopback Stripe's one refundable charge: 4900, nothing refunded (`tests.test_engine_mitm`).
 PHASE2_CHARGE = "ch_REAL1"
 PHASE2_AMOUNT = 4900
-# The amount as a person reads it, since #60: the refund names no currency and irimi's own
-# precondition read of `ch_REAL1` found `usd` on the charge. #48 printed `4900`, because the
-# currency had nowhere to travel, and Notion's target block said so until #60 restored `$49.00`.
+# The amount as a person reads it: the refund names no currency and irimi's own precondition read
+# of `ch_REAL1` found `usd` on the charge, which the write's exchange carries.
 PHASE2_MONEY = report.money(PHASE2_AMOUNT, "usd")
-# The Phase 2 summary under its header line, as the criterion and its CLI twin both assert it: the
-# overlaid reads hang under the refund they saw, and the engine's reads are counted but kept out
-# of the agent's `N reads` (#45, #48). Notion's target block, character for character.
+# The refund agent's summary under its header line, as the criterion and its CLI twin both assert
+# it: the overlaid reads hang under the refund they saw, and the engine's reads are counted but
+# kept out of the agent's `N reads`.
 PHASE2_SUMMARY = [
     "",
     "  127.0.0.1  3 reads (2 showing this run's writes)  2 engine reads  2 writes intercepted",
@@ -311,9 +309,9 @@ def phase2_stub(tmp_path, monkeypatch):
 
 def _stripe_refund(proxy, stub):
     """`stripe.Refund.create(charge=, amount=)` on the wire: a form body, and a fresh
-    `Idempotency-Key` on every call, because stripe-python defaults one per POST (Notion, Phase 2
-    § Architecture changes). A retry is therefore a new request to the idempotency store, and it
-    is L3 that must refuse it - a shared key would have the store replay the first answer (#46)."""
+    `Idempotency-Key` on every call, because stripe-python defaults one per POST. A retry is
+    therefore a new request to the idempotency store, and it is L3 that must refuse it - a shared
+    key would have the store replay the first answer."""
     return _read_via_proxy(
         proxy,
         f"http://127.0.0.1:{stub}/v1/refunds",
@@ -329,27 +327,27 @@ def _stripe_refund(proxy, stub):
 def test_the_refund_agents_four_calls_through_the_forward_proxy_are_answered_shadow_mode_correctly(
     phase2_stub,
 ):
-    """The Phase 2 exit criterion (#48). The refund agent's first read and then its four calls -
+    """The forward-proxy criterion. The refund agent's first read and then its four calls -
     refund the charge in full, list its refunds, re-read the charge, retry the refund - through the
     forward proxy, with no key, no network and no SDK.
 
     The calls are made from this process with `_read_via_proxy`, not from a child under `irimi
     shadow`: the claim is about what the proxy answers each call with, `irimi shadow`'s spawning of
-    a child is already the Phase 1 test's subject, and a second subprocess would buy nothing but a
+    a child is already the base-URL test's subject, and a second subprocess would buy nothing but a
     layer of stdout to parse. The wire shape is stripe-python's all the same.
 
     The refund is for the charge's FULL amount, as the agent's is. A partial refund leaves the
-    charge refundable, and the retry would be accepted rather than refused (#45).
+    charge refundable, and the retry would be accepted rather than refused.
     """
     proxy, stub, seen, maps = phase2_stub
     base = f"http://127.0.0.1:{stub}"
 
-    # 1. The agent's first read is real: it reached the stub and carries no stamp (#12).
+    # 1. The agent's first read is real: it reached the stub and carries no stamp.
     status, headers, _ = _read_via_proxy(proxy, f"{base}/v1/charges")
     assert status == 200
     assert pipeline.ANSWERED_BY_HEADER not in headers
 
-    # 2. The refund is irimi's, and a whole refund object an SDK can parse (#41).
+    # 2. The refund is irimi's, and a whole refund object an SDK can parse.
     status, headers, data = _stripe_refund(proxy, stub)
     assert status == 200
     assert headers[pipeline.ANSWERED_BY_HEADER] == "fake-L1"
@@ -360,7 +358,7 @@ def test_the_refund_agents_four_calls_through_the_forward_proxy_are_answered_sha
     assert (refund["charge"], refund["amount"]) == (PHASE2_CHARGE, PHASE2_AMOUNT)
 
     # 3. The agent's refunds list, filtered as an agent filters it, is shown the refund in full:
-    #    `charge` and `limit` are both parameters the overlay knows how to apply (#43).
+    #    `charge` and `limit` are both parameters the overlay knows how to apply.
     status, headers, data = _read_via_proxy(
         proxy, f"{base}/v1/refunds?charge={PHASE2_CHARGE}&limit=10"
     )
@@ -368,7 +366,7 @@ def test_the_refund_agents_four_calls_through_the_forward_proxy_are_answered_sha
     assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
     assert [r["id"] for r in json.loads(data)["data"]] == [refund["id"]]
 
-    # 4. The charge re-read is shown refunded, though the real charge is untouched (#43).
+    # 4. The charge re-read is shown refunded, though the real charge is untouched.
     status, headers, data = _read_via_proxy(proxy, f"{base}/v1/charges/{PHASE2_CHARGE}")
     assert status == 200
     assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
@@ -384,7 +382,7 @@ def test_the_refund_agents_four_calls_through_the_forward_proxy_are_answered_sha
     assert json.loads(data)["error"]["code"] == "charge_already_refunded"
 
     # Each refund was checked with the real service first, by a read irimi issued on its own
-    # account and counted apart from the agent's (#45).
+    # account and counted apart from the agent's.
     issued = [ex for ex in seen if ex.issued_by == "engine"]
     assert [(ex.kind, ex.request.method, ex.request.path) for ex in issued] == [
         ("read", "GET", f"/v1/charges/{PHASE2_CHARGE}"),
@@ -393,7 +391,7 @@ def test_the_refund_agents_four_calls_through_the_forward_proxy_are_answered_sha
     assert [ex.precondition for ex in writes] == ["passed", "rejected"]
     assert writes[1].rejection_code == "charge_already_refunded"
     # On the exchange, not only in the summary line: the refused refund would have fired nothing,
-    # and the closing clause must be built from exactly this (#47).
+    # and the closing clause must be built from exactly this.
     assert [ex.would_fire for ex in writes] == [("refund.created", "charge.refunded"), ()]
 
     # Nothing on the other side was ever asked to do anything.
@@ -444,7 +442,7 @@ def _run_phase2_under_shadow(
     """The refund agent's five calls from a child of the real `irimi shadow`, against the loopback
     Stripe, which never hears a write. `flags` go before the `--`, and `calls` are more of the
     child's own `call(...)` lines after the five. Shared with `tests/test_trace_e2e.py` and
-    `tests/test_runs.py`, which read back what the run stored (#68, #70, #72)."""
+    `tests/test_runs.py`, which read back what the run stored."""
     _PreconditionStub.seen = []
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _PreconditionStub)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
@@ -469,7 +467,7 @@ def _run_phase2_under_shadow(
 def test_the_same_five_calls_under_irimi_shadow_print_the_phase_2_summary(
     home, tmp_path, capfd, monkeypatch
 ):
-    """The criterion's twin through the real CLI (#48). The criterion builds its engine the way
+    """The criterion's twin through the real CLI. The criterion builds its engine the way
     `cli._build_engine` builds one; this proves that is the engine `irimi shadow` really builds -
     the real overlay, a policy holding the real reader - and that the block it prints on exit is
     the one the criterion pins. Nothing is swapped but where the shipped maps are read from: a
@@ -498,18 +496,17 @@ def test_the_same_five_calls_under_irimi_shadow_print_the_phase_2_summary(
     reason="live phase-exit check: set STRIPE_API_KEY to a sk_test_ key and seed a charge",
 )
 def test_the_refund_agent_leaves_no_refund_on_a_real_test_mode_charge(home, capfd):
-    """The live half of both exit criteria, run by hand once before a phase closes
-    (CONTRIBUTING.md). The refund agent itself, through the reverse door, against Stripe test mode:
-    it refunds a charge in full, finds its refund in the list, re-reads the charge refunded,
-    retries and is refused - every answer irimi's - and a live re-read of the charge afterwards
-    shows none of it happened.
+    """The live half of both criteria, run by hand (CONTRIBUTING.md). The refund agent itself,
+    through the reverse door, against Stripe test mode: it refunds a charge in full, finds its
+    refund in the list, re-reads the charge refunded, retries and is refused - every answer
+    irimi's - and a live re-read of the charge afterwards shows none of it happened.
 
         uv sync --group examples && uv run python examples/refund_agent/seed.py
         STRIPE_API_KEY=sk_test_... uv run pytest -m live -q -rs tests/test_phase_exit.py
 
     With SLACK_BOT_TOKEN and SLACK_CHANNEL set the agent also posts and reads the channel back,
     and the post must be in what it read. SLACK_CHANNEL has to be a channel id for that: a post
-    to `#general` is read back from a channel irimi cannot match to it (#44).
+    to `#general` is read back from a channel irimi cannot match to it.
     """
     stripe = pytest.importorskip("stripe", reason="live phase-exit check needs the stripe SDK")
     stripe.api_key = os.environ["STRIPE_API_KEY"]
@@ -535,9 +532,9 @@ def test_the_refund_agent_leaves_no_refund_on_a_real_test_mode_charge(home, capf
         "retry",
     }, line
     charge_id, amount = result["charge"], int(result["amount"])
-    # The agent prints the charge's currency since #60, because irimi now formats the amount in the
-    # summary from the code its own precondition read found on that charge - so the expected line
-    # cannot be built from the amount alone.
+    # The agent prints the charge's currency, because irimi formats the amount in the summary from
+    # the code its own precondition read found on that charge - so the expected line cannot be
+    # built from the amount alone.
     money = report.money(amount, result["currency"])
     assert result["refund"].startswith("re_"), "the agent did not get a parseable refund id"
     # What the agent saw: its refund in the list and the charge refunded in full, both overlaid,
@@ -553,7 +550,7 @@ def test_the_refund_agent_leaves_no_refund_on_a_real_test_mode_charge(home, capf
     assert list(stripe.Refund.list(charge=charge_id).data) == []
 
     # The summary says so. Through the door every Stripe call is on `api.stripe.com`, the agent's
-    # reads and irimi's two precondition reads alike (#45).
+    # reads and irimi's two precondition reads alike.
     lines = out.splitlines()
     assert (
         "  api.stripe.com  3 reads (2 showing this run's writes)  2 engine reads  "
@@ -569,8 +566,8 @@ def test_the_refund_agent_leaves_no_refund_on_a_real_test_mode_charge(home, capf
         "  These writes did not happen. Would have fired: refund.created, charge.refunded."
     ) in lines
 
-    # Slack is optional. Its read-back is asserted to show the post, as Notion words it - not to
-    # be `overlay: full`, which only a channel id makes it (#44).
+    # Slack is optional. Its read-back is asserted to show the post - not to be `overlay: full`,
+    # which only a channel id makes it.
     if os.environ.get("SLACK_BOT_TOKEN") and os.environ.get("SLACK_CHANNEL"):
         history = next((row for row in lines if row.startswith("slack: history on ")), None)
         assert history is not None, out

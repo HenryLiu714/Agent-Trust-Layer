@@ -8,7 +8,7 @@ Both rules are mechanical, so a refactor cannot quietly undo them:
   2. A module imports only from layers below its own. The layers are listed lowest first; a
      module in one may import any module in an earlier layer and none in its own or a later one.
      `cli` may import everything else, which is what makes it the composition root; only
-     `__main__`, `python -m irimi`, is above it (#84).
+     `__main__`, `python -m irimi`, is above it.
 """
 
 import ast

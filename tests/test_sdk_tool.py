@@ -1,6 +1,6 @@
-"""`@sdk.tool`: the tool calls the proxy cannot see (#76), against a real engine and store.
+"""`@sdk.tool`: the tool calls the proxy cannot see, against a real engine and store.
 
-Each recorded call is posted over a socket to the engine's control endpoint (#73) and read back
+Each recorded call is posted over a socket to the engine's control endpoint and read back
 off disk with `StoreReader` once the engine has stopped. A write tool's real function raises
 `_RealWriteRan` wherever a test says it must not run, so a test that let it run fails on it rather
 than on a missing record. The last test runs the real `irimi shadow` over a child that makes one
@@ -243,7 +243,7 @@ def test_a_tool_called_under_irimi_shadow_with_no_trigger_lands_in_the_process_r
     irimi, monkeypatch
 ):
     """`irimi shadow` names its process run in `IRIMI_RUN`; a call made in no SDK run is the
-    process's, which may hold tool calls though not an SDK start or end (#73)."""
+    process's, which may hold tool calls though not an SDK start or end."""
     monkeypatch.setenv(paths.RUN_ENV, ENGINE_RUN)
     assert mark_refunded(9) == {"stood_in": 9, "note": ""}
     reader = irimi.finish()
@@ -254,7 +254,7 @@ def test_a_tool_called_under_irimi_shadow_with_no_trigger_lands_in_the_process_r
 
 def test_a_tool_called_in_no_run_with_no_process_run_is_stored_unattributed(irimi, monkeypatch):
     """`irimi serve` gives no `IRIMI_RUN`: a call outside every run is filed under none, as an
-    exchange that names none is, and the control endpoint takes it there (#76, #77)."""
+    exchange that names none is, and the control endpoint takes it there."""
     monkeypatch.delenv(paths.RUN_ENV, raising=False)
     assert look_up(4) == {"order": 4, "status": "paid"}
     reader = irimi.finish()
@@ -277,7 +277,7 @@ def test_a_tool_call_is_posted_to_its_runs_route_with_no_run_id_in_the_body(post
 
 
 def test_the_args_are_bound_against_the_real_function_not_the_stand_in(posted):
-    """The agent called the real function, so its parameter names are what a replay (#83) binds
+    """The agent called the real function, so its parameter names are what a replay binds
     against; a stand-in that takes anything would record `{"args": [...], "kwargs": {...}}`."""
 
     def anything(*args: Any, **kwargs: Any) -> str:
@@ -450,7 +450,7 @@ def test_an_async_tool_closed_mid_call_records_the_close_and_raises_nothing(post
 
 def test_an_async_tools_result_is_captured_on_the_callers_thread_as_it_was_returned(posted):
     """Only the post waits off the event loop: the result's `repr` runs where the tool returned,
-    before any other task can change what it returned (#76)."""
+    before any other task can change what it returned."""
     shared = {"status": "as returned"}
     seen: list[str] = []
 
@@ -491,7 +491,7 @@ def test_a_record_that_cannot_be_built_costs_the_agent_nothing(posted, monkeypat
 def test_a_stand_in_that_is_the_function_itself_is_refused_when_the_agent_loads(posted):
     """`shadow=` names what runs IN PLACE of the write. Naming the write itself - reading `shadow`
     as "the function to shadow" - would run the real write under irimi, so it is refused, as every
-    other way of leaving a write unnamed is (#76)."""
+    other way of leaving a write unnamed is."""
 
     def database_write(order: int) -> None:
         raise _RealWriteRan("the real write ran")
@@ -527,8 +527,8 @@ class _Repository:
 
 def test_a_static_method_stand_in_is_judged_and_called_as_its_function(posted):
     """A `staticmethod` in a class body is callable, but `inspect` sees neither its nature nor a
-    generator through it: an async one was refused as sync, and a generator one slipped through
-    (#76)."""
+    generator through it: an async one was refused as sync, and a generator one slipped through.
+    """
     assert _Repository.save(1) == "stood in for 1"
     assert asyncio.run(_Repository.save_async(2)) == "stood in async for 2"
     assert [doc["name"] for _, _, doc in posted.posts] == ["repo.save", "repo.save_async"]
@@ -650,7 +650,7 @@ ELAPSED = re.compile(r" · \d+\.\ds$")
 
 
 def _summary(lines: list[str]) -> list[str]:
-    """irimi's closing block, from its header on, the elapsed seconds normalized (#72)."""
+    """irimi's closing block, from its header on, the elapsed seconds normalized."""
     start = next(i for i, line in enumerate(lines) if re.search(r" · \d+ exchanges? · ", line))
     return [ELAPSED.sub(" · <elapsed>", line) for line in lines[start:]]
 
@@ -670,7 +670,7 @@ def test_irimi_shadow_prints_a_tool_call_in_the_stream_and_the_summary_and_store
     assert live[live.index("  ○ update customer cus_1  unvalidated (L1)") + 1] == (
         "  ○ tool db.mark_refunded  shadow stand-in ran"
     )
-    # Stored in the process run, which then prints the summary `irimi shadow` printed (#72).
+    # Stored in the process run, which then prints the summary `irimi shadow` printed.
     reader = StoreReader(tmp_path / "home" / "store")
     [process] = [r for r in reader.list_runs() if r.attribution == "process"]
     run = reader.load_run(process.run_id)
@@ -686,7 +686,7 @@ def test_irimi_shadow_prints_a_tool_call_in_the_stream_and_the_summary_and_store
 
 
 def test_the_posted_tool_call_is_valid_json_the_endpoint_reads(posted):
-    """`allow_nan=False` is how both the SDK and the store write (#68, #70): a NaN result is
+    """`allow_nan=False` is how both the SDK and the store write: a NaN result is
     captured as a marker, never posted as a bare NaN."""
 
     @sdk.tool(kind="read", name="db.nan")
@@ -702,7 +702,7 @@ def test_the_posted_tool_call_is_valid_json_the_endpoint_reads(posted):
 
 def test_the_client_posts_exactly_the_endpoints_run_actions():
     """`client.Action` is a `Literal`, which cannot be built from `exchange.RUN_ACTIONS`: this is
-    what keeps the two one list (#76 added `tool-calls` to both)."""
+    what keeps the two one list."""
     assert get_args(client.Action) == exchange.RUN_ACTIONS
 
 

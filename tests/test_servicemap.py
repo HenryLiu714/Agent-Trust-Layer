@@ -195,7 +195,7 @@ MAP_FILE_NAMES = [
     "stripe.yaml",
     "telemetry.yaml",
 ]
-# The L1 response fixtures (#41), one JSON file per service that has any.
+# The L1 response fixtures, one JSON file per service that has any.
 FIXTURE_FILE_NAMES = ["slack.json", "stripe.json"]
 
 
@@ -207,17 +207,17 @@ def test_the_shipped_maps_directory_holds_every_map():
 def test_the_shipped_maps_and_fixtures_are_inside_a_built_wheel(tmp_path):
     """The maps are data files, and a wheel that drops them is an install that refuses to start.
 
-    This builds one and looks inside it. Reading `shipped_dir()` instead - which is what this test
-    did until #29 - reads the *source tree*, so it passes for a packaging change that ships no
-    YAML at all: hatchling's default file selection honours `.gitignore`, so one `*.yaml` line
-    there, or an `exclude` in pyproject, empties `irimi/maps/` in the wheel while the working
-    copy still looks right. That install then fails on `irimi maps list` with the named refusal
-    #21 added, which is the failure this test exists to get ahead of.
+    This builds one and looks inside it. Reading `shipped_dir()` instead reads the *source tree*,
+    so it would pass for a packaging change that ships no YAML at all: hatchling's default file
+    selection honours `.gitignore`, so one `*.yaml` line there, or an `exclude` in pyproject,
+    empties `irimi/maps/` in the wheel while the working copy still looks right. That install
+    then fails on `irimi maps list` with a named refusal, which is the failure this test exists
+    to get ahead of.
 
     The L1 fixtures ride along for the same reason and are checked in the same wheel, because
     building a second one somewhere else would double the slowest test in the suite. A wheel
     without them is subtler than one without maps: every mapped write still answers, at L0 with
-    the `fixture-failed` flag, so only the trace says anything is wrong (#41).
+    the `fixture-failed` flag, so only the trace says anything is wrong.
 
     A skip here is an environment that cannot build (no `uv`, no network for the build backend),
     not a packaging verdict: the assertion is about what is inside a wheel, so with no wheel there
@@ -303,7 +303,7 @@ def test_index_lookups(tmp_path):
 
 def test_a_route_is_found_by_its_operation_when_its_path_cannot_be_matched(tmp_path):
     """A stored request on a credential-path host has a placeholder for a path, and its write line
-    finds the route by the operation it recorded instead (#72). Only one route may answer: two that
+    finds the route by the operation it recorded instead. Only one route may answer: two that
     name the operation for this method are no answer, and so is a method the route does not take."""
     index = load(tmp_path)
     found = index.route_named("DEMO.EXAMPLE", "post", "things.create")
@@ -463,7 +463,7 @@ def test_empty_and_invalid_files_are_refused(tmp_path):
     refuses(tmp_path, "- just a list\n", "must be a mapping")
 
 
-# ------------------------------------------------------------ no write downgraded to a read (#7)
+# ------------------------------------------------------------ no write downgraded to a read
 
 
 def test_unsafe_method_read_needs_persists_false_and_a_comment(tmp_path):
@@ -513,7 +513,7 @@ def test_default_kind_is_accepted_for_the_kinds_that_are_answered_locally(tmp_pa
 
 def test_default_kinds_is_derived_from_the_live_set(tmp_path):
     """The rule is `not forwarded live`, not a hand-kept list: a live kind added to LIVE_KINDS
-    later must be refused as a default the day it is added, with no second edit here (#30)."""
+    later must be refused as a default the day it is added, with no second edit here."""
     assert set(servicemap.DEFAULT_KINDS) == set(KINDS) - set(LIVE_KINDS)
     assert set(servicemap.DEFAULT_KINDS).isdisjoint(LIVE_KINDS)
 
@@ -535,9 +535,9 @@ def test_default_kind_may_not_be_llm(tmp_path):
 
 
 def test_default_kind_may_not_be_telemetry(tmp_path):
-    """The bug PR #24 shipped: `telemetry` is forwarded live, and most of these vendors serve
-    their REST control plane from the same host as their intake, so a telemetry default performed
-    `DELETE /api/v1/dashboard/{id}` for real. Fixed in the map data then; refused here now."""
+    """`telemetry` is forwarded live, and most of these vendors serve their REST control plane
+    from the same host as their intake, so a telemetry default would perform
+    `DELETE /api/v1/dashboard/{id}` for real. The loader refuses it."""
     refuses(
         tmp_path,
         GOOD.replace("verbs: honest", "default_kind: telemetry"),
@@ -570,8 +570,8 @@ def test_an_override_cannot_set_default_kind(tmp_path):
 
 def test_a_fixture_on_a_live_route_is_refused(tmp_path):
     """A live route is answered by the real service, so a `fixture:` on it is never read. A key
-    that reads as configured and is never consulted is #4's `--allow-host` and #9's wildcard host
-    all over again, so the loader names it instead of ignoring it (#41)."""
+    that reads as configured and is never consulted misleads whoever wrote it, so the loader names
+    it instead of ignoring it."""
     refuses(
         tmp_path,
         GOOD.replace("    human: list things", "    fixture: thing"),
@@ -593,7 +593,7 @@ def test_a_fixture_on_an_unknown_route_is_allowed(tmp_path):
 def test_every_shipped_precondition_names_a_check_that_exists():
     """`precondition:` is the opt-in and `services.PRECONDITIONS` is what it opts into. A shipped
     name with no entry would degrade to `not_evaluable` on every write, silently - a key that reads
-    as configured and is never consulted (#45)."""
+    as configured and is never consulted."""
     index = servicemap.load(cwd=None, maps_dir=servicemap.shipped_dir())
     named = [
         (sm.service, route.precondition)
@@ -608,7 +608,7 @@ def test_every_shipped_precondition_names_a_check_that_exists():
 
 def test_a_precondition_on_a_live_route_is_refused(tmp_path):
     """A live route is forwarded to the real service, which checks its own preconditions, so a
-    `precondition:` on it would never run (#45)."""
+    `precondition:` on it would never run."""
     refuses(
         tmp_path,
         GOOD.replace("    human: list things", "    precondition: thing_exists"),
@@ -618,7 +618,7 @@ def test_a_precondition_on_a_live_route_is_refused(tmp_path):
 
 def test_every_shipped_fires_list_is_pinned_to_the_writes_the_effects_model():
     """`fires:` is free text with no table to check a name against, so the shipped values are
-    pinned here instead (#47). The three routes are exactly the three writes
+    pinned here instead. The three routes are exactly the three writes
     `services/stripe.py` models an effect for: a route that fires an event the overlay does not
     model is a write whose visible effect and its webhooks disagree, so a fourth route gaining
     `fires:` breaks this test and has to be thought about rather than drifting in."""
@@ -638,7 +638,7 @@ def test_every_shipped_fires_list_is_pinned_to_the_writes_the_effects_model():
 
 def test_every_shipped_fires_route_is_a_write_irimi_answers_itself():
     """A live route is forwarded and the real service sends its own webhooks, so `fires:` on one
-    would never be read. The loader refuses it; this holds that no shipped map has one (#47)."""
+    would never be read. The loader refuses it; this holds that no shipped map has one."""
     index = servicemap.load(maps_dir=servicemap.shipped_dir())
     for sm in index.services:
         for route in sm.routes:
@@ -649,7 +649,7 @@ def test_every_shipped_fires_route_is_a_write_irimi_answers_itself():
 def test_fires_on_a_live_route_is_refused(tmp_path):
     """A live route is forwarded to the real service, which sends its own webhooks, so a `fires:`
     on it would never be listed - the `--allow-host` class of key that reads as configured and is
-    never consulted (#4, #47)."""
+    never consulted."""
     refuses(
         tmp_path,
         GOOD.replace("    human: list things", "    fires:\n      - thing.listed"),
@@ -670,7 +670,7 @@ def test_fires_on_an_unknown_route_is_allowed(tmp_path):
 
 def test_a_repeated_event_name_in_fires_is_refused(tmp_path):
     """The summary prints this list as it is given, so a repeat would promise one write's event
-    twice - the untruth the `{name}` uniqueness rule stops one scope down (#47)."""
+    twice - the untruth the `{name}` uniqueness rule stops one scope down."""
     refuses(
         tmp_path,
         GOOD.replace(
@@ -682,8 +682,8 @@ def test_a_repeated_event_name_in_fires_is_refused(tmp_path):
 
 
 def test_a_misspelled_fires_key_is_refused(tmp_path):
-    """The done-when's "still rejects a misspelling": `ROUTE_KEYS` is a closed set, so `fired:` is
-    refused by name rather than read as configured and ignored (#47)."""
+    """A misspelled route key is still rejected: `ROUTE_KEYS` is a closed set, so `fired:` is
+    refused by name rather than read as configured and ignored."""
     refuses(
         tmp_path,
         GOOD.replace("    fixture: thing", "    fired:\n      - thing.created"),
@@ -704,7 +704,7 @@ def test_persists_and_volatile_are_restricted_to_their_kinds(tmp_path):
     )
 
 
-# -------------------------------------------------------------------------- targets (design D20)
+# ----------------------------------------------------------------------------------------- targets
 
 
 def test_default_target_is_self(tmp_path):
@@ -1005,7 +1005,7 @@ def test_a_directory_with_no_yaml_is_the_same_refusal(tmp_path):
 
 def test_a_maps_directory_that_cannot_be_scanned_is_a_named_refusal(tmp_path, monkeypatch):
     """The same refusal as the test below, reached without a directory mode, so it also runs as
-    root - in a root CI container the mode-based one skips and this path was then uncovered (#29).
+    root - in a root CI container the mode-based one skips and this path was then uncovered.
 
     The OSError is raised from `iterdir` itself, which is where a real unreadable directory raises
     it: everything between there and the MapError is the code under test.
@@ -1056,7 +1056,7 @@ def test_an_unreadable_maps_directory_is_a_named_refusal(tmp_path):
 
 @pytest.mark.parametrize("argv", [["maps", "list"], ["serve"], ["shadow", "--", "true"]])
 def test_a_missing_maps_directory_is_one_line_on_the_cli(tmp_path, monkeypatch, capsys, argv):
-    """The bug this issue exists for: a stripped install printed a traceback, not a refusal."""
+    """A stripped install prints a named refusal, not a traceback."""
     from irimi.cli import main
 
     missing = tmp_path / "gone"
@@ -1069,7 +1069,7 @@ def test_a_missing_maps_directory_is_one_line_on_the_cli(tmp_path, monkeypatch, 
     assert err.count("\n") == 1
 
 
-# ------------------------------------------------------------------------- wildcard hosts (#9)
+# ------------------------------------------------------------------------- wildcard hosts
 
 # `*` opens a YAML alias, so every wildcard host has to be quoted or the document does not parse.
 WILDCARD = """
@@ -1187,16 +1187,16 @@ def test_patterns_are_not_in_the_reverse_doors_allow_list(tmp_path):
     assert MapIndex().patterns == ()
 
 
-# ------------------------------------------------------ the conftest isolation guards itself (#29)
+# ------------------------------------------------------ the conftest isolation guards itself
 
 
 def test_the_conftest_redirects_irimi_home_away_from_the_developers_own(tmp_path):
-    """Regression guard for the `$IRIMI_HOME` half of `tests/conftest.py`, which had none.
+    """Guard the `$IRIMI_HOME` half of `tests/conftest.py`.
 
-    Deleting its `monkeypatch.setenv` left the suite green on a clean box and failed only for a
-    developer who followed the README and created `~/.irimi/maps.yaml`. This fails on every box:
-    the env var is gone, so the lookup below raises, and the overrides file the loader then reads
-    is the real one. Renaming the `cwd` half already fails four tests immediately (#29).
+    Without its `monkeypatch.setenv` the rest of the suite stays green on a clean box and fails
+    only for a developer who followed the README and created `~/.irimi/maps.yaml`. This fails on
+    every box: the env var is gone, so the lookup below raises, and the overrides file the loader
+    then reads is the real one. Renaming the `cwd` half fails four tests immediately.
     """
     home = Path(os.environ[paths.IRIMI_HOME_ENV])
     assert home != Path.home() / ".irimi"
@@ -1208,6 +1208,9 @@ def test_the_conftest_redirects_irimi_home_away_from_the_developers_own(tmp_path
     )
     assert servicemap.override_path(cwd=tmp_path / "empty") == home / servicemap.HOME_OVERRIDE_NAME
     assert load(tmp_path).services[0].target == "http://127.0.0.1:3000"
+
+
+# ------------------------------------------------------------------------------- path parameters
 
 
 def test_path_params_binds_nothing_when_the_literal_segments_differ():
@@ -1223,8 +1226,8 @@ def test_path_params_binds_nothing_when_the_literal_segments_differ():
 
 def test_path_params_percent_decodes_a_captured_segment():
     """The service decodes it, so we do: `cus%5FREAL123` is the same customer as `cus_REAL123`,
-    and reading the raw segment made `policy.named_id` mint a fresh id for a resource the request
-    already named (#33). Literal segments are still compared raw, so this cannot widen a match."""
+    and reading the raw segment would make `policy.named_id` mint a fresh id for a resource the
+    request already named. Literal segments are still compared raw, so this cannot widen a match."""
     assert servicemap.path_params("/v1/customers/{customer}", "/v1/customers/cus%5FX") == {
         "customer": "cus_X"
     }
@@ -1252,7 +1255,7 @@ routes:
     refuses(tmp_path, doc, "appears more than once in the path")
 
 
-# ------------------------------------------------ the --target and --target-reads flags (#16)
+# ------------------------------------------------ the --target and --target-reads flags
 
 
 def _flagged(tmp_path, targets=(), target_reads=(), allow=frozenset()):
@@ -1382,7 +1385,7 @@ def test_a_flag_target_beats_the_overrides_file(tmp_path):
 
 def test_a_credential_path_host_may_only_be_targeted_at_loopback():
     """A Slack incoming webhook URL is the whole credential, so `--allow-target-host` does not
-    reach it: sending one off this machine hands the secret to whoever is listening (§7)."""
+    reach it: sending one off this machine hands the secret to whoever is listening."""
     index = servicemap.load(
         cwd=None,
         maps_dir=servicemap.shipped_dir(),
@@ -1401,10 +1404,11 @@ def test_a_credential_path_host_may_only_be_targeted_at_loopback():
 
 
 def test_a_loopback_webhook_route_does_not_license_an_off_machine_service_target():
-    """THE SCOPE RULE, host scope. The rule used to be keyed on (service, operation), so a
-    loopback target on the *listed* webhook route satisfied it while a service target sent every
-    *unlisted* path off the machine. `/workflows/...` and `/triggers/...` are real Slack webhook
-    forms whose path is the credential just as `/services/...` is (#16 review D-2)."""
+    """THE SCOPE RULE, host scope. The rule is keyed on the host, not on (service, operation):
+    keyed on the route, a loopback target on the *listed* webhook route would satisfy it while a
+    service target sent every *unlisted* path off the machine. `/workflows/...` and
+    `/triggers/...` are real Slack webhook forms whose path is the credential just as
+    `/services/...` is."""
     with pytest.raises(MapError) as exc:
         servicemap.load(
             cwd=None,
@@ -1413,7 +1417,7 @@ def test_a_loopback_webhook_route_does_not_license_an_off_machine_service_target
             targets=[
                 # The route-level rule is satisfied: this one really is loopback.
                 ("hooks.slack.com", "/services/{team}/{bot}/{token}", "http://127.0.0.1:3000"),
-                # ... and this used to delegate every path the map does not list.
+                # ... and this would delegate every path the map does not list.
                 ("slack.com", "", "http://stub.internal:9000"),
             ],
         )
@@ -1445,7 +1449,7 @@ def test_the_webhook_rule_covers_the_other_host_of_the_same_service():
         )
 
 
-# --------------------------------------------------- THE SCOPE RULE: live kinds and methods (#31)
+# --------------------------------------------------- THE SCOPE RULE: live kinds and methods
 
 _ANY_METHOD_TELEMETRY = """
 version: 1
@@ -1464,9 +1468,9 @@ routes:
 def test_a_live_kind_may_not_match_every_method(tmp_path):
     """THE SCOPE RULE, method scope. `kind` is written per route, but "forward this to the real
     service" is a decision about a verb: a `match:` with no `method:` means `*`, and `*` includes
-    DELETE. This is #30's bug one scope down, and reachable by omission rather than by writing
-    `"*"` on purpose - every shipped route happens to carry a `method:`, which is the only reason
-    nothing shipped broken."""
+    DELETE. This is the live `default_kind` hazard one scope down, and reachable by omission
+    rather than by writing `"*"` on purpose - every shipped route happens to carry a `method:`,
+    which is the only reason nothing shipped broken."""
     refuses(tmp_path, _ANY_METHOD_TELEMETRY, "may not match every method")
     # Naming the method it actually serves is all it takes.
     named = _ANY_METHOD_TELEMETRY.replace("      path:", "      method: POST\n      path:")

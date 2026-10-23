@@ -1,9 +1,9 @@
-"""`Irimi-Run` on every request a run makes through irimi (#75), against a real engine.
+"""`Irimi-Run` on every request a run makes through irimi, against a real engine.
 
 Each test runs the engine over a map that claims the loopback upstream as a read, with a real
 `DirectoryStore`, and this process set up as `irimi shadow` sets up its child. A request is
 labelled when the exchange irimi recorded for it carries the trigger's run id; the upstream must
-never see the header, which irimi strips (#67). A request that does not go through irimi is never
+never see the header, which irimi strips. A request that does not go through irimi is never
 labelled at all, since nothing would strip it.
 """
 
@@ -188,7 +188,7 @@ def test_a_request_in_a_run_is_attributed_to_it_and_the_upstream_never_sees_the_
     assert (ex.request.path, ex.run_id) == ("/hello", run_id)
     assert [path for path, _ in _Upstream.seen] == ["/hello"]
     assert not _upstream_saw_the_header()
-    # Stored in that run, which the SDK started and ended around it (#74).
+    # Stored in that run, which the SDK started and ended around it.
     reader = irimi.finish()
     [read] = reader.load_run(run_id).events
     assert isinstance(read, Exchange) and read.request.path == "/hello"
@@ -259,7 +259,7 @@ def test_two_threads_sharing_one_session_each_keep_their_own_run(irimi, upstream
 def test_a_request_that_bypasses_irimi_is_never_labelled(irimi, upstream, name):
     """A client with no proxy goes straight to the upstream. Nothing would strip a run's id on
     that path, so the SDK never puts one there: the upstream sees no header, and irimi sees no
-    exchange (#75)."""
+    exchange."""
     url = f"http://127.0.0.1:{upstream}/hello"
 
     @sdk.trigger
@@ -282,9 +282,9 @@ def test_a_request_that_bypasses_irimi_is_never_labelled(irimi, upstream, name):
 def test_the_proxy_variables_name_irimi_when_the_control_endpoint_is_unset(
     irimi, upstream, monkeypatch
 ):
-    """A launcher that passes on only the variables it knows can drop `IRIMI_CONTROL` (W10). irimi
+    """A launcher that passes on only the variables it knows can drop `IRIMI_CONTROL`. irimi
     then never hears of the run, but the proxy variables still name its listener, so the run's
-    requests are labelled as before and land together (#74, #75)."""
+    requests are labelled as before and land together."""
     monkeypatch.delenv(paths.CONTROL_ENV)
     monkeypatch.setenv("HTTP_PROXY", irimi.proxy)
     run_id = fetch("urllib", irimi.proxy, f"http://127.0.0.1:{upstream}/hello")
@@ -293,7 +293,7 @@ def test_the_proxy_variables_name_irimi_when_the_control_endpoint_is_unset(
 
 def test_a_request_through_the_reverse_door_is_labelled(tls):
     """The reverse door is irimi's own listener, addressed as an origin: a connection to irimi's
-    host and port is labelled whatever its request line says (#75)."""
+    host and port is labelled whatever its request line says."""
     running, up, _ = tls
 
     @sdk.trigger
@@ -339,7 +339,7 @@ def test_a_connect_tunnel_through_irimi_is_labelled_inside_the_tunnel(tls):
 def test_a_plain_tunnel_through_irimi_is_labelled_and_never_relayed_raw(irimi, upstream, method):
     """Plain HTTP in a CONNECT tunnel is labelled like any request on irimi's connection, and
     irimi reads it whatever its method: one mitmproxy would not call HTTP (`M-SEARCH`) would
-    otherwise be relayed as raw bytes, its `Irimi-Run` and all, straight to the upstream (#75)."""
+    otherwise be relayed as raw bytes, its `Irimi-Run` and all, straight to the upstream."""
 
     @sdk.trigger
     def tunnelled() -> str | None:
@@ -456,7 +456,7 @@ class _ControlStandIn(http.server.BaseHTTPRequestHandler):
 
 def test_the_sdks_own_control_posts_carry_no_run_header(monkeypatch):
     """The control endpoint is on irimi's own listener, which `instrument()` labels, and the
-    route already names the run (#73). So every start and end the SDK posts, the ones after the
+    route already names the run. So every start and end the SDK posts, the ones after the
     patches are in place included, goes out unlabelled."""
     _ControlStandIn.heard = []
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _ControlStandIn)
@@ -491,7 +491,7 @@ def test_the_sdks_own_control_posts_carry_no_run_header(monkeypatch):
 def test_instrument_returns_only_once_every_patch_is_in_place(monkeypatch):
     """A run that starts while another run's `instrument()` is still patching must not go on with
     the patches half made: its own call waits for the first, rather than returning as soon as the
-    first has begun (#75). Here the first call is held between its first patch and the rest, as
+    first has begun. Here the first call is held between its first patch and the rest, as
     importing httpx would hold it."""
     monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
     holding, release = threading.Event(), threading.Event()
@@ -525,7 +525,7 @@ def test_instrument_returns_only_once_every_patch_is_in_place(monkeypatch):
 def test_instrument_called_while_it_patches_returns_rather_than_waiting_on_itself(monkeypatch):
     """Patching imports httpx, and an import hook may start a run on the same thread, which calls
     `instrument()` again while the first call holds its lock. That call returns at once: it neither
-    deadlocks the agent nor patches a second time (#75)."""
+    deadlocks the agent nor patches a second time."""
     monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
     patch = instrumentation._patch
 
@@ -550,7 +550,7 @@ def test_instrument_called_while_it_patches_returns_rather_than_waiting_on_itsel
 
 def test_a_proxy_variable_spelled_without_a_scheme_names_irimi(irimi, upstream, monkeypatch):
     """urllib, requests and httpx all read `HTTP_PROXY=127.0.0.1:4000` as an http proxy, so a
-    deployment that sets it by hand that way still sends through irimi, and is labelled (#75)."""
+    deployment that sets it by hand that way still sends through irimi, and is labelled."""
     monkeypatch.delenv(paths.CONTROL_ENV)
     monkeypatch.setenv("HTTP_PROXY", irimi.proxy.removeprefix("http://"))
     run_id = fetch("requests", irimi.proxy, f"http://127.0.0.1:{upstream}/hello")
@@ -589,7 +589,7 @@ def _get_https(name: str, proxy: str, url: str, ca_cert: Path) -> bytes:
 def test_https_through_irimi_is_labelled_inside_the_tunnel(tls, name):
     """Every covered client sends HTTPS through the proxy as a CONNECT tunnel, and each decides by
     the connection it tunnels through, which is irimi's: `requests`' urllib3 connects to the proxy
-    and tunnels from there, and httpx's transport has the proxy's address (#75)."""
+    and tunnels from there, and httpx's transport has the proxy's address."""
     running, up, ca_cert = tls
 
     @sdk.trigger
@@ -607,7 +607,7 @@ def test_https_through_irimi_is_labelled_inside_the_tunnel(tls, name):
 
 def test_an_http_client_request_that_names_its_own_run_is_the_sdks_first(irimi, upstream):
     """`http.client` gets the SDK's header right after the request line, ahead of any the agent
-    set, and irimi takes the first: the run is the trigger's, as the README says (#75)."""
+    set, and irimi takes the first: the run is the trigger's, as the README says."""
 
     @sdk.trigger
     def own() -> str | None:
@@ -665,7 +665,7 @@ class _Redirecting(http.server.BaseHTTPRequestHandler):
 def test_a_redirect_away_from_irimi_is_not_labelled(tmp_path, monkeypatch, name):
     """A read through irimi answers 302 to a host the client reaches directly. The first hop went
     through irimi and was labelled; the second does not, and is not: each hop is decided by the
-    connection that sends it, so the run's id never follows a redirect out of irimi (#75)."""
+    connection that sends it, so the run's id never follows a redirect out of irimi."""
     _Redirecting.landed = []
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Redirecting)
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}).start()
@@ -719,7 +719,7 @@ def test_httpx_takes_the_header_off_when_sending_fails_and_the_failure_is_the_ag
     irimi, monkeypatch, name
 ):
     """A send to irimi's listener that fails raises to the agent exactly what httpx raised, and
-    the request it may retry or reuse is left with no header (#75). The proxy here is a port
+    the request it may retry or reuse is left with no header. The proxy here is a port
     nothing listens on, which the proxy variable names as irimi's."""
     dead = socket.socket()
     dead.bind(("127.0.0.1", 0))

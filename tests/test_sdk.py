@@ -1,6 +1,6 @@
-"""The SDK, `irimi.sdk` (#74), against a real engine and a real `DirectoryStore`.
+"""The SDK, `irimi.sdk`, against a real engine and a real `DirectoryStore`.
 
-Every run here is posted over a socket to the engine's control endpoint (#73), and every claim
+Every run here is posted over a socket to the engine's control endpoint, and every claim
 about it is read back off disk with `StoreReader` once the engine has stopped. The capture rules,
 which are pure, are tested row by row at the end, and so is the promise that `import irimi.sdk`
 pulls in no mitmproxy.
@@ -204,7 +204,7 @@ def test_a_run_id_is_16_lower_case_hex_characters(irimi):
 
 def test_an_exchange_the_run_labels_lands_in_the_run_the_sdk_started(irimi, upstream):
     """The start is posted before the trigger's body runs, so an exchange labelled with the run
-    reaches a run that already has its record: `sdk`, never a `header` run (#70, #74)."""
+    reaches a run that already has its record: `sdk`, never a `header` run."""
 
     @sdk.trigger
     def fetch() -> int:
@@ -236,7 +236,7 @@ class _Posts:
 
 def test_the_start_is_posted_before_the_body_runs_and_the_end_after_it(monkeypatch):
     """So the start reaches irimi before the run's first request and the end after its last. The
-    store would make a late start's run `sdk` all the same (#70), so only the order shows it."""
+    store would make a late start's run `sdk` all the same, so only the order shows it."""
     monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
     log: list[str] = []
     monkeypatch.setattr(runs, "reporter", _Posts(log))
@@ -327,7 +327,7 @@ def test_a_trigger_that_raises_re_raises_the_same_object_and_its_run_ends_in_err
 def test_an_exception_named_past_what_the_control_endpoint_takes_still_ends_its_run(irimi):
     """A class made with `type()` may be named anything. Posted whole, a name past the control
     endpoint's 2 MiB made the run's end a 413, and the run never ended. The SDK posts the type
-    cut to MAX_POSTED_TYPE, and the store keeps MAX_ERROR_TYPE of it, redacted (#179)."""
+    cut to MAX_POSTED_TYPE, and the store keeps MAX_ERROR_TYPE of it, redacted."""
     name = "H" * (3 * 1024 * 1024)
     huge = type(name, (Exception,), {})
     with pytest.raises(huge), sdk.run(name="huge"):
@@ -640,7 +640,7 @@ def test_an_exit_in_a_context_that_only_inherited_an_entry_leaves_it_to_its_make
 def test_a_stray_exit_after_the_block_has_ended_ends_nothing_and_does_not_raise(irimi):
     """The same stray exit as above, made after the block's own: the entry it inherited has been
     taken off by its maker, whose token is spent. Resetting a spent token is a RuntimeError, which
-    reached the agent, where one not yet spent is a ValueError, which did not (#74)."""
+    reached the agent, where one not yet spent is a ValueError, which did not."""
     with JOB:
         run_id = sdk.current_run_id()
         stray = sdk.propagate(JOB.__exit__)
@@ -714,7 +714,7 @@ def test_an_async_trigger_driven_with_no_asyncio_loop_posts_inline(irimi):
 def test_an_async_trigger_whose_loop_takes_no_more_threads_posts_inline(irimi):
     """A loop whose default executor has been shut down - at the end of `asyncio.run`, or once
     the interpreter is exiting - refuses `asyncio.to_thread` with RuntimeError, which reached the
-    agent. The posts are made inline instead (#74)."""
+    agent. The posts are made inline instead."""
 
     async def late() -> str | None:
         await asyncio.get_running_loop().shutdown_default_executor()
@@ -772,7 +772,7 @@ async def synchronous_handler(charge: str) -> tuple[str, str | None]:
 def test_a_sync_entrypoint_to_an_async_function_still_returns_its_value(irimi, monkeypatch, active):
     """`functools.wraps` makes the wrapper look async to `inspect.unwrap`, but it returns the
     value, not a coroutine. Wrapped as async, a call returned an unawaited coroutine and the body
-    never ran - in production too, with the SDK inactive (#74)."""
+    never ran - in production too, with the SDK inactive."""
     if not active:
         monkeypatch.delenv(paths.ENGINE_ACTIVE_ENV)
     charge, run_id = synchronous_handler("ch_1")
@@ -799,7 +799,7 @@ def settle(charge: str) -> Any:
 def test_a_sync_trigger_that_returns_a_coroutine_keeps_its_run_until_the_coroutine_ends(irimi):
     """The body is in the coroutine, so the run lasts until it is awaited to its end, in whatever
     task awaits it, and its outcome is the coroutine's. Before, the run ended when the coroutine
-    was made, and the body ran outside every run (#74)."""
+    was made, and the body ran outside every run."""
     log: list[str] = []
     inner = runs.reporter
 
@@ -853,9 +853,10 @@ class Handlers:
 
 
 def test_a_static_or_class_method_stays_one_in_either_decorator_order(irimi):
-    """Above `@staticmethod`, the trigger used to return a plain function, which Python binds:
-    called on an instance, the static method was given the instance as its first argument, even
-    with the SDK inactive. Above `@classmethod`, it was refused as a name passed positionally."""
+    """Above `@staticmethod`, the trigger returns a static method, not a plain function Python
+    would bind: called on an instance, the static method is never given the instance as its first
+    argument, even with the SDK inactive. Above `@classmethod`, it is not taken for a name passed
+    positionally."""
     ids = [
         call("ch_1")
         for handlers in (Handlers, Handlers())
@@ -885,8 +886,8 @@ class Handler:
     ids=["partial", "callable instance", "class"],
 )
 def test_what_has_no_importable_function_to_name_is_refused_at_decoration(target):
-    """A trigger records `module:qualname`, which replay (#84) imports. A partial or an instance
-    has none (decorating one used to raise AttributeError), and a class decorated would be
+    """A trigger records `module:qualname`, which replay imports. A partial or an instance
+    has none, and a class decorated would be
     replaced by a function, so `isinstance` against it would break in production too."""
     with pytest.raises(TypeError, match="function or a method"):
         sdk.trigger(target)
@@ -895,7 +896,7 @@ def test_what_has_no_importable_function_to_name_is_refused_at_decoration(target
 def test_a_function_defined_with_no_module_is_refused_by_its_name():
     """A function `exec` defines in a namespace with no `__name__` has `__module__` None, so no
     `module:qualname` to import. It is refused as the others are, but by its name: the refusal
-    said it was "not function", which reads as a contradiction (#74)."""
+    said it was "not function", which reads as a contradiction."""
     namespace: dict[str, Any] = {}
     exec("def on_message(body): ...", namespace)
     with pytest.raises(TypeError, match="on_message, which names no module"):
@@ -916,9 +917,9 @@ def test_a_name_that_is_not_a_string_is_refused_at_decoration_or_kept_as_a_label
 
 
 def test_a_long_name_is_cut_outside_secrets_so_it_keeps_no_part_of_a_key(irimi):
-    """The SDK cuts a name before irimi redacts it: cut inside a key, the part it kept was too
-    short for the key's shape, and reached disk. Cut outside secrets, the key is left out whole
-    (#179)."""
+    """The SDK cuts a name before irimi redacts it: cut inside a key, the part it kept would be
+    too short for the key's shape, and reach disk. Cut outside secrets, the key is left out whole.
+    """
     head = "n" * (runs.MAX_NAME - 10) + " "
     with sdk.run(name=head + "ghp_" + "k" * 36):
         pass
@@ -1009,7 +1010,7 @@ def test_an_inactive_sdk_calls_straight_through(tripwire, monkeypatch, value):
     outside = len(contextvars.copy_context())
     with JOB, JOB:  # nested in itself, inactive: nothing to join and nothing to refuse
         assert sdk.current_run_id() is None
-        # Not even the object's own record of its entries: the issue's "set no context variable".
+        # Inactive, it sets no context variable, not even the object's own record of its entries.
         assert len(contextvars.copy_context()) == outside
     assert not sdk.active()
     assert tripwire == [] and calls == []
@@ -1061,7 +1062,7 @@ def test_a_refused_post_is_one_warning_quoting_irimis_answer(irimi, monkeypatch,
 def test_a_redirect_is_a_refused_post_never_followed(monkeypatch, warnings, status):
     """irimi's endpoint never redirects, so a redirect is an answer from something else. urllib
     followed a 301, 302 or 303 as a GET to wherever it pointed, outside the proxy, and called the
-    run recorded when that answered 200; it is refused like any answer outside 2xx (#74)."""
+    run recorded when that answered 200; it is refused like any answer outside 2xx."""
     with _recorder(status=200) as (elsewhere, landed):
         with _recorder(status=status, location=f"http://127.0.0.1:{elsewhere}/x") as (port, hits):
             monkeypatch.setenv(paths.CONTROL_ENV, f"http://127.0.0.1:{port}/_irimi")
@@ -1072,7 +1073,7 @@ def test_a_redirect_is_a_refused_post_never_followed(monkeypatch, warnings, stat
 
 
 def test_irimi_control_with_a_trailing_slash_names_the_same_endpoint(irimi, monkeypatch, warnings):
-    """irimi sets `IRIMI_CONTROL` with no trailing slash (#73), but serve mode (#77) has the agent's
+    """irimi sets `IRIMI_CONTROL` with no trailing slash, but serve mode has the agent's
     deployment set it by hand. One typed with a slash posted to `/_irimi//runs/...`, a 404, and
     every run was lost."""
     monkeypatch.setenv(paths.CONTROL_ENV, f"http://127.0.0.1:{irimi.port}/_irimi/")
@@ -1084,8 +1085,8 @@ def test_irimi_control_with_a_trailing_slash_names_the_same_endpoint(irimi, monk
 
 def test_every_action_the_sdk_posts_is_one_the_control_endpoint_answers():
     """The SDK and the endpoint spell a run route from the same names (`exchange.RUNS_ROUTE`,
-    `exchange.RUN_ACTIONS`), so an action the SDK posts can never be one the endpoint 404s
-    (#73, #74)."""
+    `exchange.RUN_ACTIONS`), so an action the SDK posts can never be one the endpoint 404s.
+    """
     assert set(typing.get_args(client.Action)) <= set(exchange.RUN_ACTIONS)
 
 
@@ -1139,13 +1140,13 @@ def test_a_trigger_keeps_its_functions_name_signature_and_nature():
 
 def test_the_public_api_is_the_issues():
     assert sorted(sdk.__all__) == [
-        "RecordedToolError",  # #83
-        "ReplayResult",  # #84
+        "RecordedToolError",
+        "ReplayResult",
         "active",
         "current_run_id",
         "instrument",
         "propagate",
-        "replay",  # #84
+        "replay",
         "run",
         "tool",
         "trigger",
@@ -1263,7 +1264,7 @@ def test_anything_else_is_its_repr_and_not_replayable(value):
 
 def test_a_repr_is_cut_to_1000_characters_outside_secrets():
     """Cut before the store redacts it, so never inside a key, which redaction would no longer
-    find (#179): a key across the cut is left out whole, and a repr with none across it keeps
+    find: a key across the cut is left out whole, and a repr with none across it keeps
     1000 characters, one long word included."""
 
     class Long:
@@ -1392,7 +1393,7 @@ class _Statics:
 def test_capture_call_keeps_a_first_parameter_named_self_or_cls_that_receives_nothing():
     """A function outside a class body, or a static method in one, receives no instance: its
     first parameter is an argument whatever its name, and leaving it out made its run one replay
-    could not call again (#84)."""
+    could not call again."""
 
     def inner(cls: int, x: int) -> None: ...
 
@@ -1439,7 +1440,7 @@ def test_a_trigger_parameter_may_nest_as_deep_as_a_run_trigger():
     assert capture.capture_call(f, ([deep],), {})[1] is False
 
 
-# -- revive: capture's inverse, one test per row (#83) -------------------------------------------
+# -- revive: capture's inverse, one test per row -------------------------------------------------
 
 
 class Validated:
@@ -1531,7 +1532,7 @@ def test_revive_never_imports_a_module_a_stored_run_names(monkeypatch):
 
 def test_revive_never_asks_a_module_s_getattr(monkeypatch):
     """A lazy package's PEP 562 `__getattr__` imports on first use: revive looks a class up in what
-    the module already holds, so a stored run's name cannot make it import after all (#83)."""
+    the module already holds, so a stored run's name cannot make it import after all."""
     asked: list[str] = []
     lazy = types.ModuleType("lazy_pkg")
 

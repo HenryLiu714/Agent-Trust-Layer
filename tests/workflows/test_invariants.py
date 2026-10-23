@@ -5,16 +5,16 @@
 2. No request that reached a fake service carried `Irimi-Run`.
 3. No write tool's real function ran under shadow.
 4. No canary credential reached disk where irimi writes: its home, its working directory, TMPDIR,
-   and a store it was given outside its home (#79). The trace store is under its home (#70), so
+   and a store it was given outside its home. The trace store is under its home, so
    this is the redaction test across the corpus, of what the agent sends (`CANARIES`) and of what
    a live read hands back (`SERVED_CANARIES`), and of the start of each, which is what a cut made
-   before redaction leaves of a key (#179).
+   before redaction leaves of a key.
 5. The agent exited under shadow as it did bare, unless the scenario is marked `diverges`.
 
 A new workflow is picked up by name (`harness.run.workflows`), so it is held to these without an
 edit here.
 
-Every scenario runs under `irimi shadow --serve` too (`Scenario.serve_flags`, #77), and is held
+Every scenario runs under `irimi shadow --serve` too (`Scenario.serve_flags`), and is held
 to the same five there, and to what serve mode owes each run whose end it took: one
 `--- run <id> ---` block, equal to that run's stored summary.
 """
@@ -43,7 +43,7 @@ from irimi.store import StoredRun
 TESTS = Path(__file__).parent
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
 SERVE_CASES = serve_cases()
-# The scenarios whose runs hold events recorded after their end (#77). Serve prints a run's block
+# The scenarios whose runs hold events recorded after their end. Serve prints a run's block
 # as soon as its end is on disk, so an event stored after that is in the run and not in its block.
 # LOOKS WRONG: W3 `task_outlives_trigger`'s task makes its calls after its run has ended (#75),
 # and W7 `hand_off`'s stream, sent inside its run, ends after it (the issue's "Since #70": a
@@ -76,7 +76,7 @@ def test_every_serve_run_keeps_the_universal_invariants(run_workflow, name, scen
     ("name", "scenario"), SERVE_CASES, ids=[f"{n}:{s}" for n, s in SERVE_CASES]
 )
 def test_every_run_a_serve_ended_prints_its_stored_summary_once(run_workflow, name, scenario):
-    """Serve mode prints a run's summary when its end is on disk, read back from the store (#77):
+    """Serve mode prints a run's summary when its end is on disk, read back from the store:
     one `--- run <id> ---` block per end irimi took, none for a run that did not end (W10
     `sigterm_mid_run`, killed) or whose end never reached it (W10's `CONTROL_DOWN`), and each
     equal to `stored_summary_lines` for its run. It starts no process run, so none is stored."""
@@ -129,10 +129,10 @@ def test_every_workflow_has_scenarios_and_a_summary():
 
 
 def test_a_scenario_whose_doc_says_looks_wrong_has_a_looks_wrong_pin():
-    """A fix that flips a `LOOKS WRONG` pin drops the marker in the same PR (#89), the scenario's
-    doc included: W9 `cut_refund`'s still said compare called its cut refund the same, pinned
-    `LOOKS WRONG`, after #79 made that pair `?` and no pin said so. Each scenario whose doc says
-    `LOOKS WRONG` is named in a test of its workflow whose docstring says it too."""
+    """A fix that flips a `LOOKS WRONG` pin drops the marker in the same PR, the scenario's doc
+    included, so no scenario's doc says `LOOKS WRONG` once its pins have stopped saying it. Each
+    scenario whose doc says `LOOKS WRONG` is named in a test of its workflow whose docstring says
+    it too."""
     stale = []
     for name, wf in workflows().items():
         module = ast.parse((TESTS / f"test_{name}.py").read_text())
@@ -150,7 +150,7 @@ def test_a_scenario_whose_doc_says_looks_wrong_has_a_looks_wrong_pin():
 
 def test_every_scenario_runs_under_serve_too():
     """Serve is how irimi runs beside an agent it did not launch, so every scenario is held to the
-    checks above under it as well (#77). A scenario whose `serve_flags` became None would drop out
+    checks above under it as well. A scenario whose `serve_flags` became None would drop out
     of every serve check here silently: none may, until one needs irimi to be its agent's parent
     and says why."""
     assert serve_cases() == CASES
@@ -159,7 +159,7 @@ def test_every_scenario_runs_under_serve_too():
 @pytest.mark.parametrize("mode", ["shadow", "serve"])
 def test_the_corpus_gives_every_invariant_something_to_catch(run_workflow, mode):
     """An invariant nothing exercises passes by default. Each needs at least one scenario whose
-    shadow run, and whose serve run (#77), could have broken it: a write irimi held back, an
+    shadow run, and whose serve run, could have broken it: a write irimi held back, an
     `Irimi-Run` label irimi had to strip, a write tool irimi's SDK had to stand in for, a
     credential irimi handled - sent by the agent, and handed back by a live read - and an escape
     the fake services did see."""
@@ -184,7 +184,7 @@ def test_the_corpus_gives_every_invariant_something_to_catch(run_workflow, mode)
         for _, s in runs
         if any(v in r.headers.values() for r in s.internet.requests() for v in CANARIES.values())
     ]
-    # A credential in a live read's response: the response side of redaction (#70).
+    # A credential in a live read's response: the response side of redaction.
     served_canary = [
         s.scenario
         for _, s in runs
@@ -215,7 +215,7 @@ def test_the_corpus_gives_every_invariant_something_to_catch(run_workflow, mode)
 
 
 def test_invariant_4_reads_a_store_a_run_was_given_outside_its_home(shared_store_run, tmp_path):
-    """A run recorded into a store runs share keeps it outside its own home (#79): a canary on
+    """A run recorded into a store runs share keeps it outside its own home: a canary on
     disk there is still on disk where irimi writes."""
     shadow = shared_store_run("w01_ticket_triage", "full_refund")
     assert not shadow.store_root().is_relative_to(shadow.home)
@@ -233,7 +233,7 @@ def test_invariant_4_finds_the_start_of_a_canary_a_cut_left_on_disk(
     shared_store_run, tmp_path, name
 ):
     """A key cut before redaction is no longer its shape, so the part the cut kept is stored as it
-    is, and the whole canary is never on disk to be found (#179). Invariant 4 finds its first
+    is, and the whole canary is never on disk to be found. Invariant 4 finds its first
     CANARY_PART characters too, and names a canary found whole once."""
     shadow = shared_store_run("w01_ticket_triage", "full_refund")
     value = {**CANARIES, **SERVED_CANARIES}[name]
@@ -251,8 +251,8 @@ def test_invariant_4_finds_the_start_of_a_canary_a_cut_left_on_disk(
     ]
 
 
-# The replays the workflows pin (#82): (workflow, scenario, environment over the scenario's own,
-# replayed by the scenario's command rather than by what `irimi replay` runs for the run, #84).
+# The replays the workflows pin: (workflow, scenario, environment over the scenario's own,
+# replayed by the scenario's command rather than by what `irimi replay` runs for the run).
 REPLAYS = [
     ("w01_ticket_triage", "full_refund", {}, False),
     ("w01_ticket_triage", "full_refund", {"PROMPT": "half"}, False),

@@ -1,16 +1,16 @@
-"""Trace format v1 end to end: what `irimi shadow` stores, read back off disk (#68, #69, #70).
+"""Trace format v1 end to end: what `irimi shadow` stores, read back off disk.
 
 The unit tests in `tests/test_trace.py` and `tests/test_store.py` prove the codecs and the store
 over exchanges built by hand, and the engine tests prove a real engine stamps its exchanges. None
-of them proves the claim #70 is for: a run of the real CLI, over the Phase 2 scenario, leaves a run
-on disk whose exchanges read back as exactly what the engine handed its store - redacted, with
-every Phase 2 field intact and every span in order.
+of them proves this: a run of the real CLI, over the refund agent's scenario, leaves a run on disk
+whose exchanges read back as exactly what the engine handed its store - redacted, with every
+precondition, overlay and webhook field intact and every span in order.
 
 `cli._open_store` imports `DirectoryStore` when it runs, so each test here swaps in `_SpyStore`:
 the real store, unchanged, which also remembers each exchange the engine handed it. Every
 assertion is made on what `StoreReader` reads back and on the files under the store's root.
 
-The last part holds #69's redaction to the same standard: real traffic through the real
+The last part holds redaction to the same standard: real traffic through the real
 `irimi shadow`, both doors, against loopback stand-ins, with every assertion made on the stored
 lines and blobs.
 """
@@ -65,8 +65,8 @@ home = test_phase_exit.home
 stripe_stand_in = test_phase_exit.stripe_stand_in
 upstream = test_engine_mitm.upstream
 
-# The fields the roadmap names: "the exchange record has to carry every field Phase 2 added, or
-# the Phase 4 report cannot print what the live summary prints" (Notion, Phase 3; #68).
+# The fields the live summary prints from: a stored exchange must carry each of them, or a summary
+# printed from the store cannot say what the live one said.
 PHASE2_FIELDS = ("precondition", "rejection_code", "overlay", "issued_by", "would_fire", "currency")
 
 
@@ -125,8 +125,8 @@ class _Disk:
 def stored(home, monkeypatch):
     """Returns a function giving the store the run opened, read back after `main` returned. The
     store dropped nothing and has nothing left to write, and it was handed exactly the exchanges
-    `irimi shadow`'s `on_exchange` printed, in the same order: the live exchanges #70's
-    done-when compares a stored run against."""
+    `irimi shadow`'s `on_exchange` printed, in the same order: the live exchanges a stored run
+    is compared against."""
     _SpyStore.built = []
     monkeypatch.setattr("irimi.store.DirectoryStore", _SpyStore)
     printed: list[Exchange] = []
@@ -156,7 +156,7 @@ def _assert_same(stored: Exchange, expected: Exchange) -> None:
 
 def _decoded(disk: _Disk) -> list[Exchange]:
     """The process run's exchanges read back off disk, in `seq` order: each is the exchange the
-    engine handed the store, redacted (#69), and `seq` runs 1..n with no gap."""
+    engine handed the store, redacted, and `seq` runs 1..n with no gap."""
     run = disk.process_run()
     seqs = [json.loads(line)["seq"] for line in disk.lines(run.record.run_id)]
     assert seqs == list(range(1, len(disk.received) + 1))
@@ -169,11 +169,11 @@ def _decoded(disk: _Disk) -> list[Exchange]:
 def test_the_phase_2_run_under_irimi_shadow_survives_the_trace_format_event_for_event(
     home, tmp_path, monkeypatch, stored
 ):
-    """#70's end-to-end test, and #68's round trip through the real composition. The Phase 2
-    scenario run with `--store` leaves one run directory: the process run, with its argv and
-    `outcome: ok`. Every exchange `irimi shadow` handed its store - the agent's five calls and the
-    engine's two L3 reads - reads back off disk equal to itself redacted, and the six fields Phase
-    2 added each arrive with the value the live summary prints from."""
+    """The trace round trip through the real composition. The refund agent's scenario run with
+    `--store` leaves one run directory: the process run, with its argv and `outcome: ok`. Every
+    exchange `irimi shadow` handed its store - the agent's five calls and the engine's two L3
+    reads - reads back off disk equal to itself redacted, and the six summary fields each arrive
+    with the value the live summary prints from."""
     root = tmp_path / "trace"
     _run_phase2_under_shadow(tmp_path, monkeypatch, "--store", str(root))
 
@@ -225,7 +225,7 @@ def test_the_phase_2_run_under_irimi_shadow_survives_the_trace_format_event_for_
 def test_every_exchange_the_phase_2_run_stores_is_timed_and_seq_is_completion_order(
     home, tmp_path, monkeypatch, stored
 ):
-    """#68's timestamps, read back off disk. Every exchange spans `0 < started_at <= ended_at`
+    """Exchange timestamps, read back off disk. Every exchange spans `0 < started_at <= ended_at`
     inside the run; each engine-issued L3 read spans its `Reader` call, inside the write it
     checked; and `seq` is completion order, so the read is stored before its write while the write
     started first - `started_at` is what recovers start order. The run itself spans them all."""
@@ -292,13 +292,13 @@ call("POST", "write", [("Irimi-Run", "../x")])
 def test_an_invalid_run_header_from_a_shadowed_child_names_no_run_and_reaches_no_service(
     home, tmp_path, capfd, upstream, stored
 ):
-    """#68's path-traversal guard through the real CLI, with #67's strip beside it. A run id
-    becomes a directory in the trace store, so a value `trace.is_valid_run_id` refuses - `../x`,
-    65 characters, a space - is no run id and the exchange keeps the engine's own, read or faked
-    write alike. A valid one names its run in any spelling of the header name, trimmed, and a
-    repeated header's first valid value wins. Whatever the value, no service ever sees the header
-    and no stored request carries it. On disk, each valid id is a `header` run of its own (#70),
-    and nothing is created outside the store's root."""
+    """The run-id path-traversal guard through the real CLI, with the run header's strip beside
+    it. A run id becomes a directory in the trace store, so a value `trace.is_valid_run_id`
+    refuses - `../x`, 65 characters, a space - is no run id and the exchange keeps the engine's
+    own, read or faked write alike. A valid one names its run in any spelling of the header name,
+    trimmed, and a repeated header's first valid value wins. Whatever the value, no service ever
+    sees the header and no stored request carries it. On disk, each valid id is a `header` run of
+    its own, and nothing is created outside the store's root."""
     child = tmp_path / "child.py"
     child.write_text(
         RUN_HEADER_CHILD.replace("__PORT__", str(upstream)).replace("__RUN_ENV__", runner.RUN_ENV)
@@ -349,10 +349,10 @@ def test_an_invalid_run_header_from_a_shadowed_child_names_no_run_and_reaches_no
 def test_the_phase_1_run_through_the_reverse_door_survives_the_trace_format(
     home, tmp_path, monkeypatch, stripe_stand_in, stored
 ):
-    """The Phase 1 criterion's run (#13), stored: a read through the forward proxy, and a refund
-    through the reverse door answered from the SHIPPED Stripe map's fixture after an L3 read of
-    the charge. Every exchange decodes equal and is timed, the refund's `door: reverse` included,
-    and the engine's read sits inside the refund's span."""
+    """The refund agent's read-and-refund run, stored: a read through the forward proxy, and a
+    refund through the reverse door answered from the SHIPPED Stripe map's fixture after an L3
+    read of the charge. Every exchange decodes equal and is timed, the refund's `door: reverse`
+    included, and the engine's read sits inside the refund's span."""
     _run_phase1_under_shadow(tmp_path, monkeypatch, stripe_stand_in)
 
     read, check, refund = _decoded(stored())
@@ -373,8 +373,8 @@ def test_the_phase_1_run_through_the_reverse_door_survives_the_trace_format(
 
 
 def _run_phase1_under_shadow(tmp_path, monkeypatch, stripe_port: int) -> None:
-    """The Phase 1 criterion's child (`tests.test_phase_exit.CHILD`) under the real `irimi shadow`,
-    against the loopback Stripe, which never hears a write. Its calls carry
+    """The refund agent's read-and-refund child (`tests.test_phase_exit.CHILD`) under the real
+    `irimi shadow`, against the loopback Stripe, which never hears a write. Its calls carry
     `authorization: Bearer sk_test_notreal`."""
     monkeypatch.setattr("irimi.reader.UpstreamReader", _StandInReader)
     _StandInReader.port = stripe_port
@@ -391,7 +391,7 @@ def _run_phase1_under_shadow(tmp_path, monkeypatch, stripe_port: int) -> None:
 def test_the_phase_1_run_redacted_for_disk_carries_no_credential_and_changes_nothing_else(
     home, tmp_path, monkeypatch, stripe_stand_in, stored
 ):
-    """#69 over what a real `irimi shadow` run stored (#70). No file under the store's root holds
+    """Redaction over what a real `irimi shadow` run stored. No file under the store's root holds
     `sk_test_` - no line, no blob, no run record - and the one bearer token is one placeholder
     wherever it was sent, the engine's own L3 read included. Nothing else changes: swap the token
     for its placeholder in what the engine recorded and it equals what was stored, bodies byte
@@ -406,11 +406,11 @@ def test_the_phase_1_run_redacted_for_disk_carries_no_credential_and_changes_not
     assert disk.received[0].request.header("authorization") == bearer
 
 
-# ------------------------------------------------------------ redaction over real traffic (#69)
+# ------------------------------------------------------------ redaction over real traffic
 #
-# Each rule of #69 that real traffic exercises, through the real `irimi shadow`: the child below
+# Each redaction rule that real traffic exercises, through the real `irimi shadow`: the child below
 # makes the calls a test hands it, through the forward proxy or the reverse door, and prints what
-# it was answered. The store's writer redacts each exchange before it writes it (#70), and
+# it was answered. The store's writer redacts each exchange before it writes it, and
 # `_assert_stored_as` holds the two promises over the files it wrote: no secret is in any of
 # them, and swapping each secret for its placeholder in what the engine recorded gives exactly
 # what was stored - so one secret has one placeholder everywhere it went, and every other byte
@@ -428,9 +428,9 @@ def _with_placeholders(ex: Exchange, hidden: dict[str, str]) -> Exchange:
     and the operation. Longest secret first, so a header value holding a shorter secret is swapped
     whole.
 
-    A body is swapped byte for byte, then held to #69's rule 5: a JSON body a rule changed is
-    re-serialized compact, and every other body - a form, a stream, bytes that are not UTF-8 -
-    keeps its bytes. A streamed body's chunks then follow it (`_chunks_after`, #71)."""
+    A body is swapped byte for byte, then held to the re-serialization rule: a JSON body a rule
+    changed is re-serialized compact, and every other body - a form, a stream, bytes that are not
+    UTF-8 - keeps its bytes. A streamed body's chunks then follow it (`_chunks_after`)."""
     order = sorted(hidden, key=len, reverse=True)
 
     def text(value: str) -> str:
@@ -481,7 +481,7 @@ def _with_placeholders(ex: Exchange, hidden: dict[str, str]) -> Exchange:
 
 
 def _chunks_after(sent: bytes, stored: bytes, chunks: tuple[int, ...]) -> tuple[int, ...]:
-    """#71's rule for a stream's chunks once its body is redacted, stated apart from `redact`'s
+    """The rule for a stream's chunks once its body is redacted, stated apart from `redact`'s
     own: the two bodies pair up line for line; a boundary in an unchanged line keeps its place in
     it, one in a changed line moves to that line's end, and boundaries that meet make one chunk."""
     if sent == stored:
@@ -501,7 +501,7 @@ def _chunks_after(sent: bytes, stored: bytes, chunks: tuple[int, ...]) -> tuple[
 
 
 def _assert_stored_as(disk: _Disk, hidden: dict[str, str]) -> list[Exchange]:
-    """#69's two promises over what the store wrote (#70): no secret in `hidden` is in any file
+    """Redaction's two promises over what the store wrote: no secret in `hidden` is in any file
     under its root, and each stored exchange is the one the engine handed the store with exactly
     those secrets swapped for their placeholders - every field compared, bodies byte for byte.
     Returns the stored exchanges."""
@@ -548,7 +548,7 @@ SSE_BODY = (
     b'data: {"text":"key: ' + SSE_PLAIN_KEY.encode() + b'"}\n\n'
     b'data: {"text":"key:\\n' + SSE_ESCAPED_KEY.encode() + b'"}\n\n'
 )
-# Where the stand-in cuts SSE_BODY into chunks (#71): inside the first key, at the end of the blank
+# Where the stand-in cuts SSE_BODY into chunks: inside the first key, at the end of the blank
 # line after it, and inside the second key. So a stored boundary moves to the end of a line
 # redaction changed, and one in a line it left alone keeps its place.
 SSE_CUTS = (
@@ -746,7 +746,7 @@ def _webhook_call() -> _Call:
 def test_a_delegated_slack_webhook_stores_its_secret_path_as_one_placeholder_in_path_and_target(
     home, tmp_path, monkeypatch, redact_stand_in, stored
 ):
-    """#69's credential-path rule over a real delegated write. A `hooks.slack.com/services/T/B/
+    """The credential-path rule over a real delegated write. A `hooks.slack.com/services/T/B/
     <secret>` post through the reverse door, its service pointed at a bare-origin loopback target,
     reaches that target on its own path (`delegation.target_url`), so the secret is in both the
     request path and `Exchange.target`. On disk both hold the one placeholder of the whole path and
@@ -787,10 +787,10 @@ def test_a_delegated_slack_webhook_stores_its_secret_path_as_one_placeholder_in_
 def test_an_unreachable_webhook_target_leaves_its_secret_path_nowhere_on_disk(
     home, tmp_path, monkeypatch, redact_stand_in, stored
 ):
-    """#69 over #16's failure answer. When a webhook's loopback target is not listening, irimi
-    answers a 502 whose JSON names the target, and a bare-origin target's URL carries the secret
-    path. The agent is told (its answer is never redacted), and the copy for disk holds the path
-    nowhere: not the request, not `Exchange.target`, not the 502's body."""
+    """Redaction over a target's failure answer. When a webhook's loopback target is not
+    listening, irimi answers a 502 whose JSON names the target, and a bare-origin target's URL
+    carries the secret path. The agent is told (its answer is never redacted), and the copy for
+    disk holds the path nowhere: not the request, not `Exchange.target`, not the 502's body."""
     closed = socket.socket()
     closed.bind(("127.0.0.1", 0))
     dead = closed.getsockname()[1]
@@ -826,7 +826,7 @@ def test_an_unreachable_webhook_target_leaves_its_secret_path_nowhere_on_disk(
 def test_a_stripe_form_write_through_the_door_stores_its_card_token_and_query_key_as_placeholders(
     home, tmp_path, monkeypatch, redact_stand_in, stored
 ):
-    """#69's secret-key rule over a real faked write. A Stripe form post through the reverse door
+    """The secret-key rule over a real faked write. A Stripe form post through the reverse door
     with `card[token]=…&amount=100` and `?api_key=…` stores the token (by its last bracket
     segment) and the query key (by its name) as placeholders, and the bearer header as one;
     `amount=100` and every other byte survive. `/v1/payment_methods` is a route the shipped map
@@ -876,10 +876,10 @@ def test_a_stripe_form_write_through_the_door_stores_its_card_token_and_query_ke
 def test_an_llm_request_stores_a_nested_live_key_and_a_token_key_as_placeholders_not_max_tokens(
     home, tmp_path, monkeypatch, redact_stand_in, stored
 ):
-    """#69's JSON rules over a real live LLM call through the forward proxy. An `sk_live_` key three
-    objects deep and a whole `token` key are placeholders on disk, `max_tokens` is not, and the
-    `x-api-key` header is one placeholder. The model's answer echoes the nested key, and it is
-    stored as the same placeholder as the request's. The stand-in heard, and the agent was
+    """The JSON redaction rules over a real live LLM call through the forward proxy. An `sk_live_`
+    key three objects deep and a whole `token` key are placeholders on disk, `max_tokens` is not,
+    and the `x-api-key` header is one placeholder. The model's answer echoes the nested key, and
+    it is stored as the same placeholder as the request's. The stand-in heard, and the agent was
     answered, unredacted - a live forward carries no `Irimi-Answered-By`."""
     authority = f"127.0.0.1:{redact_stand_in}"
     (answer,) = _run_calls_under_shadow(
@@ -924,7 +924,7 @@ def test_an_llm_request_stores_a_nested_live_key_and_a_token_key_as_placeholders
 def test_a_streamed_sse_answer_is_stored_whole_with_each_live_key_as_its_placeholder(
     home, tmp_path, monkeypatch, redact_stand_in, stored
 ):
-    """#69's text rule over a real `text/event-stream` answer, recorded by #71. The agent reads
+    """The text redaction rule over a real, recorded `text/event-stream` answer. The agent reads
     the whole stream unredacted, both keys included. The engine streams it through and records
     the chunks it sent, and the run's own store holds that body with each key as its placeholder:
     the second key too, which follows a JSON `\\n` escape inside the data line."""
@@ -966,9 +966,9 @@ def test_a_streamed_sse_answer_is_stored_whole_with_each_live_key_as_its_placeho
 def test_a_live_reads_set_cookie_is_stored_as_a_placeholder_and_its_binary_body_unchanged(
     home, tmp_path, monkeypatch, redact_stand_in, stored
 ):
-    """#69's response-header rule and its binary limitation over a real live read. The response's
-    `Set-Cookie` is one placeholder on disk; its body is not UTF-8, so it is stored unscanned and
-    byte for byte. The agent got the cookie and the body as the stand-in sent them."""
+    """The response-header redaction rule and its binary limitation over a real live read. The
+    response's `Set-Cookie` is one placeholder on disk; its body is not UTF-8, so it is stored
+    unscanned and byte for byte. The agent got the cookie and the body as the stand-in sent them."""
     authority = f"127.0.0.1:{redact_stand_in}"
     (answer,) = _run_calls_under_shadow(
         tmp_path,

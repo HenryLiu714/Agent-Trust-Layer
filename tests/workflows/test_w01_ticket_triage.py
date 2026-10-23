@@ -35,7 +35,7 @@ from irimi import paths
 from irimi.trace import ErrorInfo, ToolCall, Trigger
 
 W = "w01_ticket_triage"
-# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi (#77).
+# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.
 MODES = ("shadow", "serve")
 AGENT = "examples.workflows.w01_ticket_triage.agent"
 REFUND = "issue_refund#2"
@@ -67,7 +67,7 @@ def test_a_full_refund_walks_the_same_loop_as_bare_and_neither_write_happens(run
     assert replies(shadow) == []
     summary = shadow.summaries()
     refund = "  ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)"
-    # The tool write's line follows the HTTP write's (#76).
+    # The tool write's line follows the HTTP write's.
     reply = f"  ○ tool {AGENT}.send_reply  shadow stand-in ran"
     assert summary[summary.index(refund) : summary.index(refund) + 2] == [refund, reply]
     # irimi recorded both calls in the run, under the default name: the function's own
@@ -129,7 +129,7 @@ def test_a_refund_the_model_repeats_with_the_same_key_is_one_write(run_workflow,
     assert bare.result()["refund_statuses"] == shadow.result()["refund_statuses"] == [200, 200]
     # Both sends carry `T-1001-turn2`. Stripe refunds once and answers the repeat with the same
     # refund, marked `Idempotent-Replayed`; irimi's idempotency store does the same without a
-    # second L3 read (#46).
+    # second L3 read.
     assert len(bare.world.stripe.refunds) == 1
     for result in (bare, shadow):
         first, again = result.events("refund")
@@ -158,7 +158,7 @@ def test_a_model_that_never_stops_is_cut_off_at_max_turns_in_both_modes(run_work
         ("error", "RuntimeError")
     ]
     assert replies(shadow) == replies(bare) == []
-    # Stored under the exception's full name (#74); the log above has its short one.
+    # Stored under the exception's full name; the log above has its short one.
     [run] = shadow.sdk_runs()
     assert (run.outcome, run.error) == (
         "error",
@@ -168,8 +168,8 @@ def test_a_model_that_never_stops_is_cut_off_at_max_turns_in_both_modes(run_work
 
 @pytest.mark.parametrize("mode", MODES)
 def test_the_ticket_is_stored_as_the_runs_trigger_by_its_dataclass(run_workflow, mode):
-    """#74's capture of a dataclass argument: the `Ticket` is stored as its class, by the module
-    name `launch` keeps for the agent, and its fields, so replay (#84) can rebuild it."""
+    """A dataclass argument is captured whole: the `Ticket` is stored as its class, by the module
+    name `launch` keeps for the agent, and its fields, so replay can rebuild it."""
     shadow = run_workflow(W, "full_refund", mode)
     [run] = shadow.sdk_runs()
     ticket = {
@@ -187,7 +187,7 @@ def test_the_ticket_is_stored_as_the_runs_trigger_by_its_dataclass(run_workflow,
     assert (run.outcome, run.run_id) == ("ok", shadow.one("run.start")["run"])
 
 
-# ---------------------------------------------------------------------- irimi compare (#79)
+# ---------------------------------------------------------------------- irimi compare
 
 TRIAGE = f"handle_ticket  {AGENT}:handle_ticket  agent -"
 FULL = "○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)"
@@ -227,7 +227,7 @@ COMPARED = {
             "  2 same · 0 changed · 0 only in A · 1 only in B",
         ],
     ),
-    # The repeated send is the same write, answered by the idempotency store (#46): two runs, and
+    # The repeated send is the same write, answered by the idempotency store: two runs, and
     # nothing between them to show.
     "retried_refund": (
         0,
@@ -273,10 +273,10 @@ def test_irimi_compare_shows_each_prompt_s_writes_against_the_full_refund_s(
 
 
 def test_irimi_compare_says_which_run_it_could_not_read(shared_store_run, tmp_path):
-    """#79's exit 2, end to end over the store `full_refund` and `half_refund` recorded into: a
-    run id the store does not hold, on either side, is `no run`, and nothing goes to stdout; a run
-    it holds damaged, in a copy of the store, `could not be read`, worded as `runs show` words it,
-    the first side that cannot be read named."""
+    """Compare exits 2 on a run it cannot read, end to end over the store `full_refund` and
+    `half_refund` recorded into: a run id the store does not hold, on either side, is `no run`, and
+    nothing goes to stdout; a run it holds damaged, in a copy of the store, `could not be read`,
+    worded as `runs show` words it, the first side that cannot be read named."""
     full = shared_store_run(W, "full_refund")
     half = shared_store_run(W, "half_refund")
     a, b = (result.one("run.start")["run"] for result in (full, half))
@@ -333,7 +333,7 @@ def test_irimi_compare_says_which_run_it_could_not_read(shared_store_run, tmp_pa
 
 def test_irimi_compare_reads_a_run_whose_last_line_a_crash_cut(shared_store_run, tmp_path):
     """A store keeps a run whose last line was cut, as a crash mid-write leaves it, and reads it
-    without that line (#70). Here `half_refund`'s run ends mid-way through its `send_reply` tool
+    without that line. Here `half_refund`'s run ends mid-way through its `send_reply` tool
     call, the run's last write, in a copy of the store.
 
     LOOKS WRONG: compare exits 1 and calls the reply a write only A made, and nothing it prints
@@ -371,8 +371,8 @@ def _irimi_process(
 ) -> subprocess.CompletedProcess[str]:
     """`irimi <argv>` in a process of its own, over `result`'s `IRIMI_HOME` and working directory,
     as its user types it: unlike `Result.command`, its stderr holds what irimi's logger warns, as
-    `StoreReader.list_runs` warns of a run it skips (#134), and its stdout or stderr may be a pipe
-    whose reader has gone (`_closed_pipe`, #142)."""
+    `StoreReader.list_runs` warns of a run it skips, and its stdout or stderr may be a pipe
+    whose reader has gone (`_closed_pipe`)."""
     return subprocess.run(
         [sys.executable, "-m", "irimi", *argv],
         env={**os.environ, paths.IRIMI_HOME_ENV: str(result.home)},
@@ -387,7 +387,7 @@ def _irimi_process(
 
 def _closed_pipe() -> int:
     """The write end of a pipe whose read end is closed, as `irimi ... | head -1` leaves it once
-    `head` has its line: every write to it fails, from the first (#142)."""
+    `head` has its line: every write to it fails, from the first."""
     read, write = os.pipe()
     os.close(read)
     return write
@@ -397,9 +397,9 @@ def test_runs_show_and_list_name_the_file_and_line_of_a_damaged_event(run_workfl
     """`full_refund`'s run in a copy of its store, its reply tool call's `name` made a list: a line
     that parses but does not decode, which `runs show` and `runs list` name by its file and line,
     as they name one that does not parse; and its run.json's `engine_version` made a list, which
-    `runs show` names by its file, and `runs list`, which skips the run, warns of by its file
-    (#134); and that warning into a stderr whose reader has gone, which ends `runs list` with 141,
-    its listing whole (#142)."""
+    `runs show` names by its file, and `runs list`, which skips the run, warns of by its file;
+    and that warning into a stderr whose reader has gone, which ends `runs list` with 141,
+    its listing whole."""
     result = run_workflow(W, "full_refund", "shadow")
     run = result.one("run.start")["run"]
     copy = tmp_path / "store"
@@ -438,7 +438,7 @@ def test_runs_show_and_list_name_the_file_and_line_of_a_damaged_event(run_workfl
     assert [line.split()[0] for line in listed.stdout.splitlines()] == others != []
     # That warning into a stderr whose reader has gone, the listing read whole: the logger
     # swallows the failed write, which stays buffered, and the interpreter's flush of it at exit
-    # made the exit 120 (#142).
+    # made the exit 120.
     write = _closed_pipe()
     try:
         quiet = _irimi_process(result, "runs", "list", "--store", str(copy), stderr=write)
@@ -448,10 +448,10 @@ def test_runs_show_and_list_name_the_file_and_line_of_a_damaged_event(run_workfl
 
 
 def test_runs_show_and_compare_end_quietly_when_their_reader_goes_away(shared_store_run):
-    """`irimi compare A B | head -1` and `irimi runs show X | head -1` printed a BrokenPipeError
-    traceback and exited 120: each now ends at its reader's going, saying nothing, with the shell's
-    141, and so does `irimi --help`, which argparse prints; and so does each under `2>&1`, when
-    the first write that fails is the error it prints on stderr (#142)."""
+    """`irimi compare A B | head -1` and `irimi runs show X | head -1` print no BrokenPipeError
+    traceback: each ends at its reader's going, saying nothing, with the shell's 141, and so does
+    `irimi --help`, which argparse prints; and so does each under `2>&1`, when
+    the first write that fails is the error it prints on stderr."""
     full = shared_store_run(W, "full_refund")
     half = shared_store_run(W, "half_refund")
     a, b = (result.one("run.start")["run"] for result in (full, half))
@@ -495,7 +495,7 @@ def test_irimi_shadow_whose_reader_goes_away_ends_quietly_with_its_run_stored(
     shared_store_run, tmp_path
 ):
     """The real `irimi shadow`, in its own process, over W1's home and a copy of the store the
-    full and half refunds recorded into (#142). Its stdout's reader gone before the banner: 141
+    full and half refunds recorded into. Its stdout's reader gone before the banner: 141
     and nothing said, the command never started, and no run stored. Gone while the command runs:
     the run is ended with the command's exit code before the summary's write fails, the engine
     stopped and the store closed, and irimi exits 141 where Python's flush at exit made it 120;
@@ -546,7 +546,7 @@ def test_a_run_irimi_may_not_read_is_named_unreadable_not_missing(shared_store_r
     """`half_refund`'s run made `chmod 0` in a copy of the store `full_refund` recorded into too:
     `runs show` exits 1 and `compare` 2, each saying it `could not be read` and why, where both
     said `no run`, and `runs list` warns that it skips it, where it left it out without a word;
-    and the copy itself made `chmod 0`, which `runs list` said held no runs (#142)."""
+    and the copy itself made `chmod 0`, which `runs list` said held no runs."""
     full = shared_store_run(W, "full_refund")
     half = shared_store_run(W, "half_refund")
     a, b = (result.one("run.start")["run"] for result in (full, half))
@@ -586,7 +586,7 @@ def test_a_run_irimi_may_not_read_is_named_unreadable_not_missing(shared_store_r
         copy.chmod(0o700)
 
 
-# ------------------------------------------------------------------------------- replay (#82)
+# ------------------------------------------------------------------------------- replay
 
 LLM = ("llm#1", "llm#2", "llm#3", "llm#4")
 # What `handle_ticket` returns for the full refund: four model calls, one refund, and the model's
@@ -597,7 +597,7 @@ REPLY_TOOL = f"{AGENT}.send_reply"
 
 
 def test_a_full_refund_replayed_unchanged_is_answered_from_its_recording(replayed):
-    """`irimi replay <run>` calls the recorded trigger again (#84): `replay_child` imports
+    """`irimi replay <run>` calls the recorded trigger again: `replay_child` imports
     `handle_ticket` by its entrypoint and revives the `Ticket` it was given. Every read and llm
     call is answered from the recording, and the refund with its recorded answer at its recorded
     level, so the trigger walks the same loop, returns what it returned, and nothing reaches the
@@ -607,7 +607,7 @@ def test_a_full_refund_replayed_unchanged_is_answered_from_its_recording(replaye
     assert replay.exit_code == recorded.exit_code == 0
     assert replay.agent_exit_code() == 0
     assert replay.returned() == recorded.returned() == FULL_REFUND_RETURNED
-    # The ticket it was called with is a `Ticket` again, revived from its capture (#84).
+    # The ticket it was called with is a `Ticket` again, revived from its capture.
     assert replay.one("run.start")["called_with"] == {"ticket": "Ticket"}
     assert recorded.one("run.start")["called_with"] == {"ticket": "Ticket"}
     assert not (replay.state / DB_NAME).exists()
@@ -628,8 +628,8 @@ def test_a_full_refund_replayed_unchanged_is_answered_from_its_recording(replaye
     # No precondition read either: the write was checked when it was recorded.
     assert [ex for ex in replay.reported if ex.issued_by == "engine"] == []
     assert replay.internet.requests() == []
-    # The replay is one run, its process run, which the trigger adopted (#84), and it says what
-    # it is (#82).
+    # The replay is one run, its process run, which the trigger adopted, and it says what
+    # it is.
     source = recorded.one("run.start")["run"]
     assert replay.one("run.start")["run"] == replay.process_run_id()
     records = [r for r in replay.stored().list_runs() if r.replay_of == source]
@@ -638,8 +638,7 @@ def test_a_full_refund_replayed_unchanged_is_answered_from_its_recording(replaye
     ]
     assert records[0].trigger == recorded.stored().load_run(source).record.trigger
     summary = replay.summaries()
-    # `runs show` opens a replay's stored summary `irimi replay`, its recording's `irimi shadow`
-    # (#154).
+    # `runs show` opens a replay's stored summary `irimi replay`, its recording's `irimi shadow`.
     assert summary[0].startswith(f"irimi replay · run {replay.process_run_id()} · 6 exchanges · ")
     _, shown, _ = replay.runs("show", source, "--store", str(replay.store_root()))
     assert [line for line in shown if line.startswith("irimi ")] == [
@@ -648,7 +647,7 @@ def test_a_full_refund_replayed_unchanged_is_answered_from_its_recording(replaye
     assert "  api.stripe.com     1 read (1 from the recording)  1 write intercepted" in summary
     assert "  api.anthropic.com  4 llm (4 from the recording)" in summary
     assert "  ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)" in summary
-    # The tools the proxy cannot see (#83): the customer comes from the recording, so the real
+    # The tools the proxy cannot see: the customer comes from the recording, so the real
     # SQLite read never runs (the corpus logs which body ran), and the reply through its stand-in.
     assert recorded.tools() == [(LOOKUP_TOOL, "real"), (REPLY_TOOL, "shadow")]
     assert replay.tools() == [(LOOKUP_TOOL, "recording"), (REPLY_TOOL, "shadow")]
@@ -656,7 +655,7 @@ def test_a_full_refund_replayed_unchanged_is_answered_from_its_recording(replaye
         f"recording read      tool {LOOKUP_TOOL} -> ok",
         f"shadow    write     tool {REPLY_TOOL} -> ok",
     ]
-    # What `irimi replay` says of it: every call answered, and the same two writes (#84).
+    # What `irimi replay` says of it: every call answered, and the same two writes.
     assert replay.replay_result() == [
         f"irimi replay · {source} → {replay.process_run_id()} · - → -",
         "  agent exited 0",
@@ -673,8 +672,8 @@ def test_a_full_refund_replayed_unchanged_is_answered_from_its_recording(replaye
 def test_a_full_refund_replayed_without_its_database_reads_the_customer_from_the_recording(
     replayed,
 ):
-    """The whole agent replayed by its command (`irimi replay <run> -- <cmd>`, #84), its helpdesk
-    database gone since the recording (#83): the agent seeds none, so a real `lookup_customer`
+    """The whole agent replayed by its command (`irimi replay <run> -- <cmd>`), its helpdesk
+    database gone since the recording: the agent seeds none, so a real `lookup_customer`
     would raise `no such table` and the ticket would fail. The recording answers the read, so the
     replay ends as recorded, and the database file is never so much as opened, which
     `sqlite3.connect` would have done. The reply runs its stand-in, which needs none."""
@@ -691,7 +690,7 @@ def test_a_full_refund_replayed_without_its_database_reads_the_customer_from_the
         lookup.result == recorded_lookup.result == {"id": CUSTOMER, "name": "Ada", "tier": "gold"}
     )
     assert replay.internet.requests() == []
-    # And `irimi replay` says so (#85's "Since #89 landed"): no divergence, the same two writes.
+    # And `irimi replay` says so: no divergence, the same two writes.
     source = recorded.one("run.start")["run"]
     assert replay.replay_result() == [
         f"irimi replay · {source} → {replay.process_run_id()} · - → -",
@@ -739,13 +738,13 @@ def test_a_full_refund_replayed_with_the_half_prompt_diverges_at_the_first_llm_c
     )
     assert replay.returned()["refund_statuses"] == recorded.returned()["refund_statuses"] == [200]
     # The customer is looked up before any write misses, so the recording still answers it. The
-    # reply's text changed with the prompt, and its stand-in runs all the same (#83).
+    # reply's text changed with the prompt, and its stand-in runs all the same.
     assert replay.tools() == [(LOOKUP_TOOL, "recording"), (REPLY_TOOL, "shadow")]
     # The trigger alone never seeds the helpdesk database, so no reply could have been written;
-    # the replay by its command below writes none to the one its `main()` seeds (#85).
+    # the replay by its command below writes none to the one its `main()` seeds.
     assert not (replay.state / DB_NAME).exists()
-    # What `irimi replay` says of it (#84): where it diverged, the first llm call, and the refund
-    # it changed. The reply compares `=`: a write tool's line names no args (#141).
+    # What `irimi replay` says of it: where it diverged, the first llm call, and the refund
+    # it changed. The reply compares `=`: a write tool's line names no args.
     source = recorded.one("run.start")["run"]
     assert replay.replay_result() == [
         f"irimi replay · {source} → {replay.process_run_id()} · - → -",
@@ -769,11 +768,11 @@ def test_a_full_refund_replayed_with_the_half_prompt_diverges_at_the_first_llm_c
 
 
 def test_the_half_prompt_replayed_by_its_command_writes_no_reply_to_the_seeded_database(replayed):
-    """#85's exit sentence on the corpus, with a database to write to: the half prompt replayed by
-    the agent's command (`-- <cmd>`, #84), so its `main()` seeds the helpdesk database the trigger
-    alone never has. The replay diverges at the first model call, the refund changes to `$24.50`,
-    nothing reaches the fake Stripe, and the reply runs its stand-in, so `replies` stays empty in
-    the database a real `send_reply` would have written."""
+    """A replay with a changed prompt diverges and fakes its writes, with a database to write to:
+    the half prompt replayed by the agent's command (`-- <cmd>`), so its `main()` seeds the helpdesk
+    database the trigger alone never has. The replay diverges at the first model call, the refund
+    changes to `$24.50`, nothing reaches the fake Stripe, and the reply runs its stand-in, so
+    `replies` stays empty in the database a real `send_reply` would have written."""
     recorded, replay = replayed(W, "full_refund", {"PROMPT": "half"}, command=True)
     assert check_invariants(replay) == []
     assert (replay.exit_code, replay.agent_exit_code()) == (1, 0)
@@ -797,7 +796,7 @@ def test_the_half_prompt_replayed_by_its_command_writes_no_reply_to_the_seeded_d
     ]
 
 
-# What each scenario W1 goes further with (#85's "Since #89 landed") prints replayed unchanged:
+# What each scenario W1 goes further with prints replayed unchanged:
 # `irimi replay`'s whole result, but its first line, which names the two runs.
 UNCHANGED = {
     # One refund sent twice under one key: both meet their recordings, the retry as the
@@ -831,7 +830,7 @@ UNCHANGED = {
         ],
     ),
     # Six model calls answered from the recording, and the trigger raising as recorded: the child
-    # exits 1, which never decides the replay's exit (#84), and there is no write to compare.
+    # exits 1, which never decides the replay's exit, and there is no write to compare.
     "runaway_loop": (
         0,
         [
@@ -850,7 +849,7 @@ def test_each_further_scenario_replayed_unchanged_does_not_diverge(replayed, sce
     """`retried_refund` (a refund twice under one `Idempotency-Key`), `double_refund` (a refund L3
     rejects) and `runaway_loop` (cut off at six model calls, ending in error), each replayed
     unchanged by its trigger alone: `no divergence`, nothing reaching the fake internet, the
-    trigger ending as it was recorded, and every write the recording's (#85)."""
+    trigger ending as it was recorded, and every write the recording's."""
     recorded, replay = replayed(W, scenario)
     assert check_invariants(replay) == []
     assert replay.internet.requests() == []
@@ -866,7 +865,7 @@ def test_each_further_scenario_replayed_unchanged_does_not_diverge(replayed, sce
 
 
 # Where a replay of a W1 run with another prompt first misses its recording: the first model call,
-# since the system prompt is in every call (#85).
+# since the system prompt is in every call.
 FIRST_CALL = "#1: live      llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]"
 
 
@@ -891,15 +890,15 @@ def _ending(result):
 def test_the_full_refund_replayed_with_each_prompt_shows_what_compare_shows_of_its_run(
     run_workflow, replayed, scenario, mode
 ):
-    """#85's exit on the corpus for every prompt `irimi compare` compares the full refund's with
-    (`COMPARED`, #79), and for a run recorded under serve, as a deployed agent records it, as well
-    as under `irimi shadow`: `full_refund` replayed with each of those prompts diverges at the first
-    model call, and shows, row for row, what `irimi compare` showed of `full_refund` against that
-    prompt's own recorded run. A refund changed (`half_refund`), refused by L3 (`too_large`), added
-    and refused (`double_refund`), sent twice under one key and so one write, exit 0
-    (`retried_refund`), or never made, the loop cut off (`runaway_loop`). Nothing reaches the fake
-    Stripe but the reads that missed, the reply runs its stand-in, and the trigger ends as that
-    prompt's recording did."""
+    """A replay shows what compare shows, on the corpus, for every prompt `irimi compare` compares
+    the full refund's with (`COMPARED`), and for a run recorded under serve, as a deployed agent
+    records it, as well as under `irimi shadow`: `full_refund` replayed with each of those prompts
+    diverges at the first model call, and shows, row for row, what `irimi compare` showed of
+    `full_refund` against that prompt's own recorded run. A refund changed (`half_refund`), refused
+    by L3 (`too_large`), added and refused (`double_refund`), sent twice under one key and so one
+    write, exit 0 (`retried_refund`), or never made, the loop cut off (`runaway_loop`). Nothing
+    reaches the fake Stripe but the reads that missed, the reply runs its stand-in, and the trigger
+    ends as that prompt's recording did."""
     prompt = workflows()[W].scenarios[scenario].env["PROMPT"]
     recorded, replay = replayed(W, "full_refund", {"PROMPT": prompt}, mode=mode)
     own = run_workflow(W, scenario, mode)
@@ -971,7 +970,7 @@ RESTORED = {
     # Both writes are new. The refund misses, and the recording holds no L3 read of the charge to
     # check it against (only the agent's own reads of it), nor does a replay read live state for
     # one: `not_evaluable`, L2, and its amount printed as sent, no checked read having named a
-    # currency (#60, #82), where `irimi compare` of two recorded runs prints `$49.00`.
+    # currency, where `irimi compare` of two recorded runs prints `$49.00`.
     "runaway_loop": (
         1,
         "1 from the recording · 6 missed",
@@ -989,7 +988,7 @@ RESTORED = {
 def test_each_scenario_replayed_with_the_full_refund_s_prompt_shows_the_writes_it_changes(
     replayed, scenario
 ):
-    """The other direction of the prompt edit (#85): each run `COMPARED` compares with the full
+    """The other direction of the prompt edit: each run `COMPARED` compares with the full
     refund's, replayed with `full_refund`'s prompt, by the agent's command, so its `main()` seeds
     the helpdesk database a lookup the recording never made (`runaway_loop`'s) reads for real. The
     replay diverges at the first model call, ends `ok` as the full refund does, and shows the writes
@@ -1019,10 +1018,10 @@ def test_each_scenario_replayed_with_the_full_refund_s_prompt_shows_the_writes_i
 
 def test_a_full_refund_recorded_under_serve_is_replayed_as_one_recorded_under_shadow(replayed):
     """A deployed agent's run, recorded under `irimi shadow --serve`, replayed unchanged by its
-    trigger alone (#85): `irimi replay` reads only the store, so it says what the replay of the
+    trigger alone: `irimi replay` reads only the store, so it says what the replay of the
     shadow recording says, `no divergence`, with nothing sent anywhere and the customer read from
     the recording, there being no database. `irimi runs list` lists serve's run as `sdk`, with no
-    process run, which serve has none of, and the replay as `replay of` it (#154)."""
+    process run, which serve has none of, and the replay as `replay of` it."""
     recorded, replay = replayed(W, "full_refund", mode="serve")
     _, by_shadow = replayed(W, "full_refund")
     assert check_invariants(replay) == []
@@ -1049,7 +1048,7 @@ def test_sdk_replay_from_a_test_returns_the_result_irimi_replay_writes(
     run_workflow, replayed, tmp_path
 ):
     """`sdk.replay(run_id)`, and `sdk.replay(run_id, handle_ticket, Ticket(...))` with the ticket
-    the run recorded, called as a test calls them (#84): each returns what `irimi replay
+    the run recorded, called as a test calls them: each returns what `irimi replay
     --result-file` writes for the same run, but for the replay's own new run id, and holds the
     invariants as every replay does, nothing reaching the fake internet."""
     recorded, by_cli = replayed(W, "full_refund")
@@ -1072,7 +1071,7 @@ def test_sdk_replay_from_a_test_returns_the_result_irimi_replay_writes(
         )
 
 
-# The ticket `full_refund` recorded, captured as `irimi replay --args` takes it (#74, #84), with
+# The ticket `full_refund` recorded, captured as `irimi replay --args` takes it, with
 # another message: what a developer passes to replay the run with other parameters.
 OTHER_TICKET = {
     "ticket": {
@@ -1088,11 +1087,11 @@ OTHER_TICKET = {
 
 
 def test_a_full_refund_replayed_with_other_args_says_its_args_differ(replayed):
-    """`--args` replaces the recorded args (#84): the ticket's message is in the first model call,
+    """`--args` replaces the recorded args: the ticket's message is in the first model call,
     which misses and diverges the replay there, and every model call after it with it. The charge
     read is the recording's still, and the refund the model then asks for is the recorded one, the
     same body under the same key, so the comparison is the same two writes and exits 0, while the
-    result says the triggers' args differ (#79). The replay's run records the args it was given,
+    result says the triggers' args differ. The replay's run records the args it was given,
     and nothing reaches the fake Stripe."""
     recorded, replay = replayed(W, "full_refund", options=("--args", json.dumps(OTHER_TICKET)))
     source = recorded.one("run.start")["run"]
@@ -1120,7 +1119,7 @@ def test_a_full_refund_replayed_with_other_args_says_its_args_differ(replayed):
 
 def test_a_call_of_another_function_is_replayed_in_place_of_the_trigger(replayed):
     """`--call` names the function to call in place of the recorded entrypoint, and `--args` its
-    parameters (#84): here the read tool `lookup_customer`, called in no run, which the replay's
+    parameters: here the read tool `lookup_customer`, called in no run, which the replay's
     run takes. The recording answers it, and nothing else is called, so the result says the
     recording's other calls were never made and its two writes are only in A, and exits 1. The
     replay's run names the function it called, `lookup_customer`, as `@sdk.trigger` names a run,
@@ -1154,8 +1153,8 @@ def test_a_call_of_another_function_is_replayed_in_place_of_the_trigger(replayed
 def test_a_full_refund_replayed_under_the_agent_s_python_is_answered_from_its_recording(
     replayed, tmp_path, capfd
 ):
-    """irimi installed apart from the agent, as a tool, runs under a Python that cannot import it
-    (#162). Here the agent's environment loses the repo from its `PYTHONPATH`, and only the
+    """irimi installed apart from the agent, as a tool, runs under a Python that cannot import it.
+    Here the agent's environment loses the repo from its `PYTHONPATH`, and only the
     agent's Python, `agent-python`, puts it back. Replayed under irimi's own Python, the trigger's
     module does not import: the call is never made, nothing reaches the fake internet, the replay
     exits 2, and irimi's hint names the Python it used and the flag. `--python agent-python`
@@ -1211,17 +1210,17 @@ def test_a_full_refund_replayed_under_the_agent_s_python_is_answered_from_its_re
     ],
 )
 def test_a_replay_is_replayed_by_the_trigger_it_called(replayed, tmp_path, prompt, again):
-    """A replay's run keeps the trigger it replayed, entrypoint and args (#84), so `irimi replay`
+    """A replay's run keeps the trigger it replayed, entrypoint and args, so `irimi replay`
     calls it again: a replay of the unchanged replay, and a replay with the half prompt replayed
     with the same prompt, each answered whole from the first replay's run, whose live model calls
     it recorded as their answers. Nothing reaches the fake internet, the refund is the first
-    replay's, and `irimi runs list` lists the second as a replay of the first (#154)."""
+    replay's, and `irimi runs list` lists the second as a replay of the first."""
     env = {} if prompt == "full" else {"PROMPT": prompt}
     _, first = replayed(W, "full_refund", env)
     before = [r.run_id for r in first.stored().list_runs()]
     second = replay(first, first.process_run_id(), tmp_path / "again", again)
     # The second replay records into a copy of the first's store, never the first's own, which
-    # the session caches for every test that reads it (`test_replays.py`'s rule 9, #85).
+    # the session caches for every test that reads it (`test_replays.py`'s rule 9).
     assert [r.run_id for r in first.stored().list_runs()] == before
     assert check_invariants(first) == []
     [record] = [r for r in second.stored().list_runs() if r.replay_of == first.process_run_id()]
@@ -1246,7 +1245,7 @@ def test_a_replay_is_replayed_by_the_trigger_it_called(replayed, tmp_path, promp
     assert second.returned() == first.returned()
     assert check_invariants(second) == []
     # `irimi runs list` names each replay after the run it replayed, a replay of a replay after
-    # the first replay, and lists the recording's runs as they were (#154).
+    # the first replay, and lists the recording's runs as they were.
     source = first.replay.source_run_id
     processes = [r for r in second.stored().list_runs() if r.attribution == "process"]
     recording = [r.run_id for r in processes if r.replay_of is None]
@@ -1259,7 +1258,7 @@ def test_a_replay_is_replayed_by_the_trigger_it_called(replayed, tmp_path, promp
     assert len(recording) == 1
 
 
-# The full refund's replay's run.json damaged as #167 says one can be, and how it is refused: a
+# The full refund's replay's run.json damaged in the ways one can be, and how it is refused: a
 # `replay_of` that no run id could be, by its length and never quoted, and a `mode` and
 # `replay_of` that disagree.
 DAMAGED_REPLAYS = {
@@ -1277,8 +1276,8 @@ def test_a_replay_whose_run_json_names_no_run_it_replayed_is_refused(replayed, t
     """The full refund's replay, its run.json damaged in a copy of its store: `runs list` skips the
     run with a warning naming the file and why, and lists the others as it did, where a 5 MB
     `replay_of` was printed whole on the run's line and an empty one or one with two spaces broke
-    its columns; `runs show` and `irimi replay` of the replay each say it could not be read
-    (#167)."""
+    its columns; `runs show` and `irimi replay` of the replay each say it could not be read.
+    """
     _, replay = replayed(W, "full_refund")
     run = replay.process_run_id()
     copy = tmp_path / "store"
@@ -1312,7 +1311,7 @@ def test_a_run_recorded_into_a_shared_store_is_replayed_into_a_copy_of_it(
 ):
     """A recording given `--store`, as `irimi compare`'s pins record theirs into one, is replayed
     in a copy of that store as well as of its home: the session's shared store, which those pins
-    read, keeps the runs it held, and the copy holds them and the replay's run (#85)."""
+    read, keeps the runs it held, and the copy holds them and the replay's run."""
     recorded = shared_store_run(W, "full_refund")
     assert recorded.store is not None
     before = sorted(r.run_id for r in recorded.stored().list_runs())
@@ -1354,7 +1353,7 @@ def test_the_half_prompt_s_replay_replayed_with_the_full_prompt_diverges_back(re
 
 
 def test_a_full_refund_replayed_with_its_tool_results_changed_diverges_mid_conversation(replayed):
-    """An edit to the agent's code, not its prompt (#85): `TOOL_RESULT_TAG` adds a field to every
+    """An edit to the agent's code, not its prompt: `TOOL_RESULT_TAG` adds a field to every
     tool result the model is sent. The first model call carries none, so the recording answers
     it, and the charge read and the customer lookup it asks for; the second carries their results
     and misses, and so does every model call after it. Given the same facts, the model walks the
@@ -1549,7 +1548,7 @@ def test_a_replay_that_adds_a_refund_reads_live_after_it_and_sees_it(replayed):
         None,
         ("fidelity:recording", "replay-miss"),
     )
-    # No read named a currency, so the amount is printed as sent (#60).
+    # No read named a currency, so the amount is printed as sent.
     assert "  ○ refund 4900 on ch_TICKET1  unvalidated (L2)" in replay.summaries()
     again = [ex for ex in replay.reported if ex.request.path == "/v1/charges/ch_TICKET1"][-1]
     assert again.flags == ("replay-miss", "fidelity:overlay")
@@ -1574,12 +1573,12 @@ def test_a_lookup_recorded_after_a_refund_the_replay_has_not_made_runs_for_real_
     """`late_lookup` refunds, and only then looks the customer up, beside its second read of the
     charge. Replayed with `PROMPT=verify`, the agent looks the customer up first, before it
     refunds: the recorded lookup came after a refund this replay has not made, so what it read may
-    show that refund, and the tool runs for real, the replay's one tool miss (#83). The miss does
+    show that refund, and the tool runs for real, the replay's one tool miss. The miss does
     not diverge the replay: the refund is answered from the recording after it, and so is the read
     of the charge after the refund, refund and all. Only the model calls miss, the prompt having
     changed, and nothing reaches the fake internet but them.
 
-    Replayed by its command (`-- <cmd>`, #84): the lookup runs for real, against the database the
+    Replayed by its command (`-- <cmd>`): the lookup runs for real, against the database the
     agent's `main()` seeds, which a replay of the trigger alone never runs, so there the real
     lookup raises `no such table` (the README's "Replaying a run" names the limit)."""
     recorded, replay = replayed(W, "late_lookup", {"PROMPT": "verify"}, command=True)

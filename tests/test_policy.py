@@ -161,9 +161,8 @@ def test_slack_write_gets_slacks_own_envelope():
 
 def test_two_slack_writes_in_the_same_second_get_different_timestamps():
     """Slack uses `ts` as a message's identifier and as `thread_ts`, so a collision is two
-    messages that are the same message. The random six digits collided 9% of the time in 200,000
-    draws (#29); they are a counter now, so a run can post a million messages a second before one
-    repeats."""
+    messages that are the same message. Random six digits collide 9% of the time in 200,000
+    draws; a counter lets a run post a million messages a second before one repeats."""
     seen = [echo.slack_ts() for _ in range(5_000)]
     assert len(set(seen)) == len(seen)
     # And increasing, because that is the other half of what a `ts` means: real ones sort by time,
@@ -198,9 +197,9 @@ def test_slack_write_reads_the_json_body_slack_sdk_actually_posts():
 
 
 def test_a_threaded_post_answers_with_the_thread_it_was_posted_in():
-    """#55's first done-when. Real Slack puts `thread_ts` on the returned `message` for a reply,
-    and irimi knows the value exactly - the caller posted it. Before #55 the fixture did not name
-    the field, so `echo.reflect_over` had nothing to write over and the answer omitted it."""
+    """A reply's faked `message` carries the posted `thread_ts`. Real Slack puts it there, and
+    irimi knows the value exactly - the caller posted it. The fixture names the field so that
+    `echo.reflect_over` has something to write over."""
     ans = _answer(
         _req(
             "POST",
@@ -214,14 +213,14 @@ def test_a_threaded_post_answers_with_the_thread_it_was_posted_in():
     assert ans.answered_by == "fake-L1"
     assert body["message"]["thread_ts"] == "1700000000.000100"
     # The envelope's own fields are unchanged: `ts` is minted and is the reply's identity, not the
-    # thread's, so the two must differ (#42).
+    # thread's, so the two must differ.
     assert body["message"]["ts"] == body["ts"] != body["message"]["thread_ts"]
 
 
 def test_a_top_level_post_answers_with_no_thread_ts_key_at_all():
-    """#55's second done-when, and the reason it is not a one-line fixture edit: the fixture holds
-    `thread_ts` as `null` so a posted value can land on it, and `reflect_over` reflects over a
-    `null`. Shipping the placeholder would send `thread_ts: null`, which real Slack never sends."""
+    """A top-level post's faked `message` has no `thread_ts` key. The fixture holds `thread_ts` as
+    `null` so a posted value can land on it, and `reflect_over` reflects over a `null`. Shipping
+    the placeholder would send `thread_ts: null`, which real Slack never sends."""
     ans = _answer(
         _req(
             "POST",
@@ -237,8 +236,8 @@ def test_a_top_level_post_answers_with_no_thread_ts_key_at_all():
 
 
 def test_slack_sdk_parses_a_threaded_and_a_top_level_faked_post():
-    """#55's third done-when. The SDK is what an agent actually reads the field through, and a
-    `None` where it expects a string is the failure a fixture-only fix would have shipped."""
+    """slack_sdk reads both faked posts' `thread_ts` as Slack sends it. The SDK is what an agent
+    actually reads the field through, and a `None` where it expects a string would break it."""
     slack_sdk = pytest.importorskip("slack_sdk")
 
     def answer(body: bytes) -> dict:
@@ -282,8 +281,8 @@ def test_an_unlisted_slack_route_does_not_get_the_slack_envelope():
 
 def test_reactions_add_answers_the_bare_ok_slack_really_sends():
     """Slack answers reactions.add with `{"ok": true}` and nothing else. The `ts` and `channel`
-    the one-shape envelope used to add here are chat.postMessage's, and an agent that read the
-    `ts` of its own reaction as a message id was reading a field the real API never sent (#42)."""
+    a one-shape envelope would add here are chat.postMessage's, and an agent that read the `ts`
+    of its own reaction as a message id would be reading a field the real API never sends."""
     ans = _answer(
         _req(
             "POST",
@@ -436,7 +435,7 @@ def test_every_shipped_route_that_mints_an_id_names_a_real_object():
 
 
 def test_stripe_python_parses_the_faked_refund():
-    """Issue #11's done-criterion, against the real SDK.
+    """stripe-python parses irimi's faked refund into a `Refund` with the fields it sent.
 
     `stripe` is not a dependency of this project, so this test is skipped in the plain dev venv.
     `uv sync --group examples` installs it, after which `uv run pytest -q -k stripe` runs it.
@@ -458,7 +457,7 @@ def test_stripe_python_parses_the_faked_refund():
     assert refund.charge == "ch_test"
 
 
-# ------------------------------------------------- form bodies with structure in them (#27)
+# ------------------------------------------------- form bodies with structure in them
 
 
 def test_a_bracket_nested_form_field_becomes_a_nested_object():
@@ -470,7 +469,7 @@ def test_a_bracket_nested_form_field_becomes_a_nested_object():
 
 def test_a_metadata_value_stays_a_string_at_any_depth():
     """A Stripe metadata value is always a string on the live API, so coercing one hands back
-    something other than what the caller sent (#27). The field name is what decides, wherever it
+    something other than what the caller sent. The field name is what decides, wherever it
     sits on the path into the value."""
     assert bodies.parse_form("metadata[n]=6735")["metadata"]["n"] == "6735"
     assert bodies.parse_form("a[metadata][n]=6735")["a"]["metadata"]["n"] == "6735"
@@ -479,7 +478,7 @@ def test_a_metadata_value_stays_a_string_at_any_depth():
 def test_a_nested_number_is_a_number_like_the_same_number_at_the_top_level():
     """`line_items[0][quantity]=2` echoed `"2"` while `amount=4900` echoed `4900`, so
     `quantity * 2` was `"22"` with no raise. "Stays a string" is right for `metadata` and wrong
-    for every other numeric nested field (#33)."""
+    for every other numeric nested field."""
     assert bodies.parse_form("n=6735")["n"] == 6735
     body = bodies.parse_form("line_items[0][quantity]=2&line_items[0][price]=price_1")
     assert body == {"line_items": [{"quantity": 2, "price": "price_1"}]}
@@ -531,7 +530,7 @@ def test_a_bracket_shape_we_will_not_guess_at_stays_flat(text, expected):
 )
 def test_a_bracketed_key_beats_a_bare_one_in_either_order(text):
     """The same name spelled both ways is nonsense input, but it must not be order-dependent:
-    structure surviving is what #27 is about, and a bare value cannot carry any."""
+    form-body structure must survive parsing, and a bare value cannot carry any."""
     result = bodies.parse_form(text)
     assert isinstance(result["a"], list), result
     assert 1 in result["a"]
@@ -540,7 +539,7 @@ def test_a_bracketed_key_beats_a_bare_one_in_either_order(text):
 @pytest.mark.parametrize("text", ["a[0][b]=1&a[0]=2", "a[0]=2&a[0][b]=1"])
 def test_a_bracket_path_beats_a_scalar_at_the_same_leaf_in_either_order(text):
     """The same class one level down, and the same answer: the deeper structure survives, so the
-    echo does not depend on which spelling arrived first (#33)."""
+    echo does not depend on which spelling arrived first."""
     assert bodies.parse_form(text) == {"a": [{"b": 1}]}
 
 
@@ -556,7 +555,7 @@ def test_an_append_beats_a_bare_key_of_the_same_name_in_either_order(text):
 
 def test_an_empty_bracket_pair_is_a_list(tmp_path):
     """`expand[]=a&expand[]=b` is Stripe's own documented curl spelling. It echoed the literal
-    JSON key `"expand[]"`, which is a field no SDK looks for (#33). One repeat or none, the shape
+    JSON key `"expand[]"`, which is a field no SDK looks for. One repeat or none, the shape
     is the same: a caller writing `[]` means a list either way."""
     assert bodies.parse_form("expand[]=a&expand[]=b") == {"expand": ["a", "b"]}
     assert bodies.parse_form("expand[]=a") == {"expand": ["a"]}
@@ -607,7 +606,7 @@ def test_a_hostile_form_body_still_reflects_and_never_raises():
     assert json.loads(ans.response.body)["id"].startswith("re_")
 
 
-# ---------------------------------------------------- the id the request already names (#26)
+# ---------------------------------------------------- the id the request already names
 
 
 @pytest.mark.parametrize(
@@ -658,7 +657,7 @@ def test_a_captured_segment_that_is_not_this_ids_prefix_is_not_used():
 def test_the_id_shaped_capture_wins_when_one_prefix_matches_two_segments():
     """`sub_` matches `sub_sched_1` before `sub_2` - a real Stripe pair, and the first capture is
     the wrong one. An id is its prefix plus one run of id characters, so the second `_` in
-    `sub_sched_1` is what rules it out (#33)."""
+    `sub_sched_1` is what rules it out."""
     route = servicemap.Route(
         method="POST",
         path="/v1/subscription_schedules/{schedule}/subscriptions/{subscription}",
@@ -675,7 +674,7 @@ def test_the_id_shaped_capture_wins_when_one_prefix_matches_two_segments():
 def test_a_client_secret_is_never_echoed_back_as_the_resource_id():
     """A PaymentIntent's client secret starts with the id's own prefix
     (`pi_ABC_secret_XYZ`), so prefix matching alone hands it back as `id` - a credential in the
-    one field an agent is most likely to log or store (#33)."""
+    one field an agent is most likely to log or store."""
     route = servicemap.Route(
         method="POST",
         path="/v1/payment_intents/{payment_intent}/cancel",
@@ -692,7 +691,7 @@ def test_a_client_secret_is_never_echoed_back_as_the_resource_id():
 
 def test_a_percent_encoded_id_is_still_the_id_the_request_names():
     """`cus%5FREAL123` is the same customer as `cus_REAL123` to the service, so reading the raw
-    segment minted a fresh id and reinstated #26 for any caller that over-encodes (#33)."""
+    segment would mint a fresh id where the request names one, for any caller that over-encodes."""
     route = servicemap.Route(
         method="POST",
         path="/v1/customers/{customer}",
@@ -707,7 +706,7 @@ def test_a_percent_encoded_id_is_still_the_id_the_request_names():
 
 def test_every_shipped_write_route_that_names_ids_round_trips_or_mints():
     """Across every shipped write route: a route with a `{…}` segment carrying an id prefix must
-    echo it, and one without must mint. This is what would have caught #26 when it shipped."""
+    echo it, and one without must mint, so no route answers with a fresh id for a named one."""
     for sm in SHIPPED.services:
         for route in sm.routes:
             for name, prefix in route.ids.items():
@@ -732,7 +731,7 @@ def test_every_shipped_write_route_that_names_ids_round_trips_or_mints():
                 )
 
 
-# ------------------------------------- content types, literal bodies and one encode (#29)
+# ------------------------------------- content types, literal bodies and one encode
 
 
 @pytest.mark.parametrize(
@@ -793,8 +792,8 @@ def test_a_body_a_strict_json_parser_would_refuse_reflects_nothing():
 
 
 def test_the_body_is_serialized_exactly_once(monkeypatch):
-    """It used to be encoded twice - once inside reflect purely to validate it and throw away,
-    once in answer - and that second call was the only one outside the never-raise guard."""
+    """Encoding it a second time, say inside reflect purely to validate it, would put that call
+    outside the never-raise guard."""
     calls = []
 
     def counting(*args, **kwargs):
@@ -817,9 +816,9 @@ def test_the_body_is_serialized_exactly_once(monkeypatch):
 
 
 def test_a_digit_keyed_metadata_field_stays_an_object():
-    """#27's failure class, one step along. `metadata[0]=zero` is the key "0", and the live API
-    answers `{"metadata": {"0": "zero"}}`. Promoted to a list, `refund.metadata["0"]` raises
-    TypeError instead of returning the value the caller itself just sent."""
+    """Form-body structure survives for digit keys too. `metadata[0]=zero` is the key "0", and
+    the live API answers `{"metadata": {"0": "zero"}}`. Promoted to a list,
+    `refund.metadata["0"]` raises TypeError instead of returning the value the caller sent."""
     assert bodies.parse_form("metadata[0]=zero") == {"metadata": {"0": "zero"}}
     assert bodies.parse_form("metadata[0]=a&metadata[1]=b") == {"metadata": {"0": "a", "1": "b"}}
     # Nested under another field, and mixed with a string key, it is the same field name.
@@ -836,7 +835,7 @@ def test_a_real_array_field_is_still_promoted_to_a_list():
     assert bodies.parse_form("line_items[0][price]=p") == {"line_items": [{"price": "p"}]}
 
 
-# ------------------------------------------------------- the L1 fixture answer (#41)
+# ------------------------------------------------------- the L1 fixture answer
 
 
 @pytest.fixture
@@ -921,8 +920,9 @@ def test_livemode_is_set_where_the_object_has_it():
 
 
 def test_l1_still_echoes_the_id_the_path_names_and_mints_the_rest():
-    """L0's #26 and #33 fixes are properties of the answer, not of the echo, so they hold here
-    too: an update answers with the id it was given, a create mints one."""
+    """Echoing a named id and never echoing a client secret are properties of the answer, not
+    of the echo, so they hold here too: an update answers with the id it was given, a create
+    mints one."""
     update = json.loads(_answer(_req("POST", path="/v1/customers/cus_REAL123")).response.body)
     assert update["id"] == "cus_REAL123"
     assert update["object"] == "customer"
@@ -939,9 +939,9 @@ def test_l1_still_echoes_the_id_the_path_names_and_mints_the_rest():
 
 
 def test_a_client_secret_is_still_never_echoed_back_as_the_id_at_l1():
-    """#33's rule, on the route that has a client secret in its own path. The fixture carries a
-    `client_secret` of its own, and the one thing that must not happen is the path's copy of it
-    becoming `id`."""
+    """A client secret in the path never becomes the answer's `id`, on the route that has one.
+    The fixture carries a `client_secret` of its own, and the one thing that must not happen is
+    the path's copy of it becoming `id`."""
     body = json.loads(
         _answer(_req("POST", path="/v1/payment_intents/pi_ABC_secret_XYZ/cancel")).response.body
     )
@@ -950,7 +950,7 @@ def test_a_client_secret_is_still_never_echoed_back_as_the_id_at_l1():
 
 
 def test_metadata_keeps_its_string_keys_and_string_values_at_l1():
-    """#27 and its follow-on, pinned against L1: `metadata` is a dict in the fixture, so the
+    """Form-body structure, pinned against L1: `metadata` is a dict in the fixture, so the
     parsed form value replaces it wholesale and every rule `parse_form` applies survives."""
     body = json.loads(_refund(b"metadata[order_id]=6735&metadata[0]=zero").response.body)
     assert body["metadata"] == {"order_id": "6735", "0": "zero"}
@@ -975,7 +975,7 @@ def test_two_writes_do_not_share_one_fixture():
 def test_a_route_whose_fixture_cannot_be_read_falls_back_to_l0_and_says_so(no_fixtures):
     """A damaged or trimmed install must still answer the write - L0 is the floor - but the
     trace has to say the fidelity is not the one the map promised, or the run reads as a
-    working L1 (#41)."""
+    working L1."""
     ans = _refund()
     assert ans.answered_by == "fake-L0"
     assert ans.flags == (FIDELITY_L0_FLAG, FIXTURE_FAILED_FLAG)
@@ -994,7 +994,7 @@ def test_an_unmapped_write_is_still_l0_with_no_flag():
 
 def test_every_shipped_fixture_route_names_an_object_that_ships():
     """A `fixture:` naming an object the package does not have degrades to L0 silently but for
-    the flag, which is the `--allow-host` class of bug (#4): configured, never consulted."""
+    the flag, which is the `--allow-host` class of bug: configured, never consulted."""
     for sm in SHIPPED.services:
         for route in sm.routes:
             if route.fixture:
@@ -1014,8 +1014,9 @@ def test_every_shipped_fixture_route_names_an_object_that_ships():
 def test_stripe_python_parses_every_faked_object_with_every_field(
     path, body, cls_name, fixture_field
 ):
-    """Issue #41's done-criterion, against the real SDK. `stripe` is not a dependency of this
-    project, so this is skipped in the plain dev venv; `uv sync --group examples` installs it."""
+    """stripe-python parses every fixture-faked object, every field included. `stripe` is not a
+    dependency of this project, so this is skipped in the plain dev venv; `uv sync --group
+    examples` installs it."""
     stripe = pytest.importorskip("stripe")
     ans = _answer(_req("POST", path=path, body=body, content_type=FORM))
     assert ans.answered_by == "fake-L1"
@@ -1031,7 +1032,7 @@ def test_stripe_python_parses_every_faked_object_with_every_field(
     assert getattr(obj, fixture_field) == parsed[fixture_field]
 
 
-# ------------------------------------------------------------------ answer targets (#16, D20)
+# ------------------------------------------------------------------ answer targets
 
 
 def _targeted_index(targets=(), target_reads=()):
@@ -1054,7 +1055,7 @@ def test_a_route_target_makes_the_answer_delegated_not_faked():
 
 
 def test_self_is_the_default_target_and_is_exactly_the_old_behaviour():
-    """`target: self` is today's local fake, now named rather than assumed (D20)."""
+    """`target: self` is the local fake, named rather than assumed."""
     ans = _answer(_req("POST", path="/v1/refunds"))
     assert ans.answered_by == "fake-L1"
     assert ans.forward_to is None
@@ -1119,7 +1120,7 @@ def test_forward_auth_reaches_the_engine_through_the_answer():
 
 def test_a_delegated_answer_carries_its_own_fidelity_flag():
     """Symmetry with `fidelity:L0`: every locally decided answer says how it was produced, so a
-    delegated exchange is not the one row in the log with no fidelity at all (#16 §5)."""
+    delegated exchange is not the one row in the log with no fidelity at all."""
     index = _targeted_index([("api.stripe.com", "/v1/refunds", "http://127.0.0.1:3000/r")])
     ans = _answer_with(index, _req("POST", path="/v1/refunds"))
     assert ans.flags == ("fidelity:delegated",)
@@ -1141,7 +1142,7 @@ def test_an_unmatched_llm_or_telemetry_request_is_never_delegated():
     inference or someone else's events just because the map does not list the route.
 
     The classification is built here rather than loaded, because the only way a map could give an
-    *unmatched* route a live kind is a live `default_kind`, which the loader now refuses (#30).
+    *unmatched* route a live kind is a live `default_kind`, which the loader refuses.
     """
     sm = servicemap.load_shipped()[0]
     sm = replace(sm, target="http://127.0.0.1:3000", target_reads=True)
@@ -1165,7 +1166,7 @@ def test_a_credential_path_host_is_never_delegated_off_the_machine():
     """THE SCOPE RULE, decision half. The loader already refuses this configuration whichever
     layer it arrived through; this asks the same question of the request and the answer actually
     in front of `delegate`, so a target reaching it some other way is refused rather than
-    escaping. The map is built here because the loader will not produce one (#16 review D-2)."""
+    escaping. The map is built here because the loader will not produce one."""
     slack = next(sm for sm in servicemap.load_shipped() if sm.service == "slack")
     assert "hooks.slack.com" in slack.hosts
     off_machine = replace(slack, target="http://stub.internal:9000")
@@ -1188,7 +1189,7 @@ def test_a_credential_path_host_is_never_delegated_off_the_machine():
     assert forward is not None and forward.url.startswith("http://127.0.0.1:3000")
 
 
-# ------------------------------------------------------- the L1 Slack envelope (#42)
+# ------------------------------------------------------- the L1 Slack envelope
 
 
 def _post_message(body: bytes = b'{"channel": "C1", "text": "hi"}'):
@@ -1206,7 +1207,7 @@ def _post_message(body: bytes = b'{"channel": "C1", "text": "hi"}'):
 def test_a_faked_slack_post_nests_the_fixture_message_inside_the_envelope():
     """slack_sdk reads `ok` to decide the call succeeded and `ts` to address the message it just
     posted; both are the envelope's. The fixture is what sits under `message:` - the fields a real
-    response carries and the request never sent (#42)."""
+    response carries and the request never sent."""
     ans = _post_message()
     body = json.loads(ans.response.body)
     assert ans.answered_by == "fake-L1"
@@ -1238,7 +1239,7 @@ def test_a_slack_post_still_answers_the_envelope_when_the_fixture_cannot_be_read
 
 
 def test_slack_sdk_parses_the_faked_post():
-    """#42's done-when: slack_sdk has to read this body as a success rather than raise on it."""
+    """slack_sdk reads the faked post's body as a success rather than raising on it."""
     slack_sdk = pytest.importorskip("slack_sdk")
     body = json.loads(_post_message().response.body)
     response = slack_sdk.web.slack_response.SlackResponse(
@@ -1256,7 +1257,7 @@ def test_slack_sdk_parses_the_faked_post():
     assert response["ts"] == response["message"]["ts"]
 
 
-# ------------------------------------------------------- the `ts` watermark (#42)
+# ------------------------------------------------------- the `ts` watermark
 #
 # Every test here monkeypatches `echo_slack._last_slack_ts`, which restores it at teardown: the
 # watermark is module state for the life of the process, and a test that raised it and walked away
@@ -1272,8 +1273,8 @@ def _ts(value: str) -> tuple[int, int]:
 
 
 def test_a_minted_ts_sorts_after_a_real_one_the_run_has_seen(monkeypatch):
-    """#42's done-when. A history read going past first is what puts the faked message after the
-    real ones instead of somewhere in the middle of them."""
+    """A minted `ts` sorts after every real one the run has read. A history read going past first
+    is what puts the faked message after the real ones instead of somewhere in the middle."""
     monkeypatch.setattr(echo_slack, "_last_slack_ts", (0, 0))
     newest = "1999999999.000500"
     echo.observe_slack_history(
@@ -1322,7 +1323,7 @@ def test_observing_a_body_that_carries_no_timestamp_changes_nothing(monkeypatch,
 
 def test_only_a_service_with_an_observer_learns_from_a_read(monkeypatch):
     """The engine hands `observe_read` every read it forwards and names no service of its own.
-    Which services learn anything from a body is this module's table to hold (#42)."""
+    Which services learn anything from a body is this module's table to hold."""
     monkeypatch.setattr(echo_slack, "_last_slack_ts", (0, 0))
     body = json.dumps({"messages": [{"ts": "1999999999.000500"}]}).encode()
     echo.observe_read("stripe", body)
@@ -1331,7 +1332,7 @@ def test_only_a_service_with_an_observer_learns_from_a_read(monkeypatch):
     assert echo_slack._last_slack_ts == (1_999_999_999, 500)
 
 
-# ------------------------------------------------------------------- L3 preconditions (#45)
+# ------------------------------------------------------------------- L3 preconditions
 
 
 class _Reader:
@@ -1407,7 +1408,7 @@ def test_a_refund_of_a_fully_refunded_charge_is_answered_with_stripes_own_refusa
 
 
 def test_stripe_python_raises_invalid_request_error_off_the_modeled_refusal():
-    """#45's done-when, against the real SDK: the modeled body is not merely Stripe-shaped, it is
+    """Against the real SDK, the modeled refusal is not merely Stripe-shaped, it is
     what makes stripe-python raise the error the agent's `except` clause is already written for.
 
     `stripe` is not a dependency of this project, so this is skipped in the plain dev venv;
@@ -1429,9 +1430,9 @@ def test_stripe_python_raises_invalid_request_error_off_the_modeled_refusal():
 
 
 def test_a_policy_with_no_reader_does_not_do_l3_at_all():
-    """Scope call 14. A bare `ShadowPolicy()` asks nothing, so it claims nothing: the refund is
-    the ordinary L1 fixture and the outcome is None, not `not_evaluable`. This is the test that
-    keeps every other bare construction in the suite meaning what it meant before #45."""
+    """A bare `ShadowPolicy()` asks nothing, so it claims nothing: the refund is the ordinary L1
+    fixture and the outcome is None, not `not_evaluable`. Every other bare construction in the
+    suite relies on this."""
     request = _refund_request()
     ans = ShadowPolicy().answer(request, classify(request, SHIPPED))
     assert ans.precondition is None
@@ -1464,7 +1465,7 @@ def test_a_precondition_read_that_429s_is_not_evaluable_and_is_still_recorded():
 
 
 def test_a_passed_check_carries_the_charges_currency_onto_the_answer():
-    """#60's first half. `Refund.create(charge=, amount=)` names no currency; the charge irimi read
+    """`Refund.create(charge=, amount=)` names no currency; the charge irimi read
     to decide about it does, and that is the only honest source there is."""
     ans = _checked(_reader(_json(200, _charge())), _refund_request())
     assert ans.precondition == "passed"
@@ -1473,14 +1474,14 @@ def test_a_passed_check_carries_the_charges_currency_onto_the_answer():
 
 def test_a_rejected_check_carries_it_too():
     """`report.write_sentence` renders the map's `human:` sentence before it branches on the
-    rejection, so the `✗` line prints an amount as well and needs the same currency (#60)."""
+    rejection, so the `✗` line prints an amount as well and needs the same currency."""
     ans = _checked(_reader(_json(200, _charge(refunded_so_far=4900))), _refund_request())
     assert ans.precondition == "rejected"
     assert ans.currency == "usd"
 
 
 def test_a_policy_with_no_reader_offers_no_currency():
-    """Never asked, so nothing claimed - the same rule `precondition: None` follows (#60)."""
+    """Never asked, so nothing claimed - the same rule `precondition: None` follows."""
     request = _refund_request()
     ans = ShadowPolicy().answer(request, classify(request, SHIPPED))
     assert ans.currency == ""
@@ -1496,7 +1497,7 @@ def test_a_policy_with_no_reader_offers_no_currency():
     ],
 )
 def test_a_read_that_never_produced_a_document_offers_no_currency(answer):
-    """#60's own rule: the currency comes from a document irimi actually read. None of these is
+    """The currency comes only from a document irimi actually read. None of these is
     one, so the amount still prints as the write sent it."""
     ans = _checked(_reader(answer), _refund_request())
     assert ans.precondition == "not_evaluable"
@@ -1504,8 +1505,8 @@ def test_a_read_that_never_produced_a_document_offers_no_currency(answer):
 
 
 def test_a_verdict_that_could_not_tell_still_knows_what_the_charge_is_in():
-    """The one place this branch is narrower than #60's open-question bullet, and deliberately: the
-    charge WAS read and parsed, so the currency is known. Whether irimi could decide the service
+    """A check that could not decide still carries the currency: the charge WAS read and
+    parsed, so the currency is known. Whether irimi could decide the service
     would have taken the write is a different question from what the write is denominated in."""
     charge = _charge()
     charge["amount_refunded"] = "not a number"  # `_refund_verdict` -> NOT_EVALUABLE
@@ -1528,7 +1529,7 @@ def test_a_verdict_that_could_not_tell_still_knows_what_the_charge_is_in():
     ids=["raises", "none", "not-json", "not-an-object", "404", "500", "503"],
 )
 def test_a_reader_that_cannot_tell_leaves_the_write_faked_and_not_evaluable(answer):
-    """Only a 200 carrying a JSON object is evaluable (scope call 8). Everything else is irimi
+    """Only a 200 carrying a JSON object is evaluable. Everything else is irimi
     saying it could not find out, and the write is faked at its ordinary level regardless."""
     ans = _checked(_reader(answer), _refund_request())
     assert ans.precondition == "not_evaluable"
@@ -1544,9 +1545,9 @@ def test_a_reader_that_cannot_tell_leaves_the_write_faked_and_not_evaluable(answ
 
 
 def test_the_runs_own_earlier_refund_is_what_makes_the_second_one_rejected():
-    """The issue's central claim. The real charge says `refunded: false` both times - the first
-    refund was never made - and the overlay applying it is the only thing that can turn the
-    second into the refusal Stripe would have given."""
+    """The precondition check sees the run's own writes. The real charge says `refunded: false`
+    both times - the first refund was never made - and the overlay applying it is the only thing
+    that can turn the second into the refusal Stripe would have given."""
     request = _refund_request()
     cls = classify(request, SHIPPED)
     first = _checked(_reader(_json(200, _charge())), request)
@@ -1563,7 +1564,7 @@ def test_the_runs_own_earlier_refund_is_what_makes_the_second_one_rejected():
 
 
 def test_an_overlay_that_knows_it_is_incomplete_makes_the_check_not_evaluable(monkeypatch):
-    """Scope call 6: a write checked against a world irimi knows is incomplete was not checked."""
+    """A write checked against a world irimi knows is incomplete was not checked."""
     monkeypatch.setitem(
         services.EFFECTS, "stripe", lambda read, doc, writes: services.Applied(doc, partial=True)
     )
@@ -1619,7 +1620,8 @@ def test_a_delegated_write_on_a_checked_route_is_not_evaluable_and_issues_no_rea
 
 
 def test_a_probe_the_maps_do_not_call_a_read_is_refused(monkeypatch):
-    """Scope call 9: "read operations only" is enforced by asking the maps, not by the verb."""
+    """A probe may make read operations only, which is enforced by asking the maps, not by the
+    verb."""
     check = services.Check(
         probe=lambda proposal: services.Probe("refunds.create", "POST", "/v1/refunds"),
         verdict=lambda proposal, document: None,
@@ -1643,7 +1645,7 @@ def _slack_post(channel: str) -> Request:
 
 @pytest.mark.parametrize("channel", ["#general", "general"])
 def test_a_slack_post_to_a_channel_name_is_not_probed(channel):
-    """Scope call 5: `conversations.info` only knows ids, so probing a name would report a
+    """`conversations.info` only knows ids, so probing a name would report a
     rejection Slack would never have made."""
     reader = _reader()
     ans = _checked(reader, _slack_post(channel))
@@ -1668,7 +1670,7 @@ def test_a_slack_post_to_a_channel_id_is_probed_with_conversations_info():
 def test_a_slack_error_irimi_cannot_read_is_not_evaluable_and_the_post_is_still_faked(error):
     """Slack answers these at HTTP 200, so the policy's own non-200 rule never sees them. Before
     the verdict had a third state they were recorded `passed`, and the summary then printed
-    `L3 preconditions passed` for a write irimi had not managed to check at all (#45)."""
+    `L3 preconditions passed` for a write irimi had not managed to check at all."""
     reader = _reader(_json(200, {"ok": False, "error": error}))
     ans = _checked(reader, _slack_post("C0123"))
     assert ans.precondition == "not_evaluable"
@@ -1707,7 +1709,7 @@ def test_a_rejection_carries_the_level_the_refund_would_have_been_answered_at():
 
 
 def test_a_rejection_of_a_write_with_no_fixture_is_honestly_l0():
-    """Scope call 10: there is no `fake-L3`, and `reactions.add` has no fixture to be L1 from."""
+    """There is no `fake-L3`, and `reactions.add` has no fixture to be L1 from."""
     request = _req("POST", host="slack.com", path="/api/reactions.add", body=b"{}")
     fake = echo.fake_rejection(*_classified(request), {"ok": False, "error": "x"})
     assert (fake.answered_by, fake.flags) == ("fake-L0", ())
@@ -1719,7 +1721,7 @@ def test_a_rejection_whose_fixture_will_not_load_says_so(monkeypatch):
     assert (fake.answered_by, fake.flags) == ("fake-L0", (FIXTURE_FAILED_FLAG,))
 
 
-# ------------------------------------------------------------------ the upstream reader (#45)
+# ------------------------------------------------------------------ the upstream reader
 
 
 class _Upstream(BaseHTTPRequestHandler):
@@ -1784,9 +1786,9 @@ def test_an_unreachable_upstream_is_none_and_not_a_raise():
 def test_the_upstream_reader_dials_the_upstream_whatever_proxy_the_shell_exported(
     upstream, monkeypatch
 ):
-    """NO PROXY (#85's verification): `urlopen`'s default opener sent the engine's own read to the
+    """No proxy: `urlopen`'s default opener would send the engine's own read to the
     `HTTP_PROXY`/`HTTPS_PROXY` a shell exported, which mitmproxy's forwarding never reads, so a
-    dead proxy made every L3 check `not_evaluable`. The read reaches the upstream it names."""
+    dead proxy would make every L3 check `not_evaluable`. The read reaches the upstream it names."""
     dead = f"http://127.0.0.1:{_dead_port()}"
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY"):
         monkeypatch.setenv(name, dead)
@@ -1800,7 +1802,7 @@ def test_the_upstream_reader_dials_the_upstream_whatever_proxy_the_shell_exporte
 
 @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
 def test_the_upstream_reader_returns_a_redirect_and_never_follows_it(upstream, status, monkeypatch):
-    """NO REDIRECT (#85's verification): the read dials the host the classifier saw and no other,
+    """No redirect: the read dials the host the classifier saw and no other,
     so every 3xx urllib would follow for a GET comes back as the answer it is, body and all, and
     wherever it pointed is never asked."""
     monkeypatch.setattr(_Upstream, "status", status)
@@ -1811,7 +1813,7 @@ def test_the_upstream_reader_returns_a_redirect_and_never_follows_it(upstream, s
     assert _Upstream.seen == ["/v1/charges/ch_1"]
 
 
-# ------------------------------------------------------------------ the idempotency store (#46)
+# ------------------------------------------------------------------ the idempotency store
 
 
 def _cancel_request(intent: str) -> Request:
@@ -1855,7 +1857,7 @@ def test_a_replay_issues_no_precondition_read():
     assert second.issued == ()
     assert second.precondition == first.precondition == "passed"
     # The stored answer's currency comes back too, so the replayed exchange and the first one agree
-    # about what that single write was denominated in (#60).
+    # about what that single write was denominated in.
     assert second.currency == first.currency == "usd"
 
 
@@ -1962,8 +1964,8 @@ def test_a_store_that_raises_answers_the_write_afresh(broken):
 
 def test_a_key_reused_on_another_object_of_one_route_is_refused():
     """A key names one write, not one route. `payment_intents.cancel` posts nothing at all, so
-    before the path was compared a key reused to cancel a second intent replayed the first
-    intent's answer and told the agent it had cancelled an object it never named (#46)."""
+    without comparing the path a key reused to cancel a second intent would replay the first
+    intent's answer and tell the agent it had cancelled an object it never named."""
     policy = ShadowPolicy()
     first = _ask(policy, _cancel_request("pi_AAA"))
     second = _ask(policy, _cancel_request("pi_BBB"))
@@ -1976,7 +1978,7 @@ def test_a_key_reused_on_another_object_of_one_route_is_refused():
 
 def test_a_key_reused_on_another_route_is_refused():
     """The same hole across two routes: a cancel and a customer update both post an empty body,
-    so without the path the agent asking to update a customer got a payment intent back (#46)."""
+    so without the path the agent asking to update a customer would get a payment intent back."""
     policy = ShadowPolicy()
     _ask(policy, _cancel_request("pi_AAA"))
     ans = _ask(policy, replace(_req("POST", path="/v1/customers/cus_ZZZ"), headers=AGENT_HEADERS))
@@ -2004,33 +2006,33 @@ def test_stripe_python_raises_idempotency_error_on_the_conflict_body():
     assert raised.http_status == 400
 
 
-# ---------------------------------------------------- would-have-fired (#47)
+# ---------------------------------------------------- would-have-fired
 
 
 def test_a_faked_refund_lists_the_webhooks_it_would_have_fired():
-    """Notion's done-when for P2-07, at the decision: a faked refund lists `refund.created` and
-    `charge.refunded`, off its route's `fires:` (#47)."""
+    """At the decision, a faked refund lists `refund.created` and `charge.refunded`, off its
+    route's `fires:`."""
     ans = _answer(_req("POST", path="/v1/refunds"))
     assert ans.answered_by == "fake-L1"
     assert ans.would_fire == ("refund.created", "charge.refunded")
 
 
 def test_a_faked_customer_update_lists_its_one_event():
-    """Each route lists its own events, not the refund's (#47)."""
+    """Each route lists its own events, not the refund's."""
     ans = _answer(_req("POST", path="/v1/customers/cus_REAL123"))
     assert ans.would_fire == ("customer.updated",)
 
 
 def test_a_write_on_an_unmapped_host_lists_nothing():
     """No route, no `fires:`, so no claim about what the service would have sent. It is still an
-    accepted fake, so this is the `route is None` arm of the one line that sets it (#47)."""
+    accepted fake, so this is the `route is None` arm of the one line that sets it."""
     ans = _answer(_req("POST", host="example.invalid", path="/things", body=b"{}"))
     assert ans.answered_by == "fake-L0"
     assert ans.would_fire == ()
 
 
 def test_a_live_read_lists_nothing():
-    """A read is forwarded and performs nothing, so there is nothing that did not fire (#47)."""
+    """A read is forwarded and performs nothing, so there is nothing that did not fire."""
     ans = _answer(_req())
     assert ans.answered_by == "live"
     assert ans.would_fire == ()
@@ -2048,7 +2050,7 @@ def test_a_live_read_lists_nothing():
 def test_every_precondition_outcome_but_rejected_lists_the_webhooks(reader, outcome):
     """`precondition` has four states, and three of them mean irimi faked the write: it passed,
     irimi could not find out, or nothing was asked. All three are accepted writes and list their
-    events; only `rejected` lists nothing (#45, #47)."""
+    events; only `rejected` lists nothing."""
     ans = ShadowPolicy(reader=reader, maps=SHIPPED).answer(
         _refund_request(), classify(_refund_request(), SHIPPED)
     )
@@ -2058,7 +2060,7 @@ def test_every_precondition_outcome_but_rejected_lists_the_webhooks(reader, outc
 
 def test_a_rejected_write_lists_no_webhooks():
     """L3 said the service would have refused this refund. Nothing was performed, so nothing
-    would have fired (#47)."""
+    would have fired."""
     policy = ShadowPolicy(reader=_reader(_json(200, _charge(refunded_so_far=4900))), maps=SHIPPED)
     ans = _ask(policy, _refund_request())
     assert ans.precondition == "rejected"
@@ -2068,7 +2070,7 @@ def test_a_rejected_write_lists_no_webhooks():
 
 def test_a_replayed_write_lists_no_webhooks():
     """A replay is the first write's own answer. Its events are already on the first write's
-    exchange; listing them again would promise `refund.created` twice for one refund (#46, #47)."""
+    exchange; listing them again would promise `refund.created` twice for one refund."""
     policy = ShadowPolicy(reader=_reader(_json(200, _charge())), maps=SHIPPED)
     first = _ask(policy, _refund_request())
     second = _ask(policy, _refund_request())
@@ -2079,8 +2081,8 @@ def test_a_replayed_write_lists_no_webhooks():
 
 def test_an_idempotency_conflict_lists_no_webhooks():
     """The service would have refused the reused key, so nothing would have fired. A conflict is
-    not `precondition: rejected`, so a check written against that alone would let it through
-    (#46, #47)."""
+    not `precondition: rejected`, so a check written against that alone would let it through.
+    """
     policy = ShadowPolicy(reader=_reader(_json(200, _charge())), maps=SHIPPED)
     _ask(policy, _refund_request(b"charge=ch_REAL&amount=100"))
     ans = _ask(policy, _refund_request(b"charge=ch_REAL&amount=250"))
@@ -2092,7 +2094,7 @@ def test_an_idempotency_conflict_lists_no_webhooks():
 
 def test_a_delegated_write_lists_no_webhooks():
     """The target performed the write, or did not; irimi built nothing and claims nothing - the
-    same reason `report._fidelity` refuses to print `L2` for one (#45, #47)."""
+    same reason `report._fidelity` refuses to print `L2` for one."""
     index = _targeted_index([("api.stripe.com", "/v1/refunds", "http://127.0.0.1:3000/refund")])
     ans = _answer_with(index, _req("POST", path="/v1/refunds"))
     assert ans.answered_by == "delegated"

@@ -1,4 +1,4 @@
-"""`irimi.replay`, the pure part of `irimi replay` (#84): what a replay runs for a stored run
+"""`irimi.replay`, the pure part of `irimi replay`: what a replay runs for a stored run
 (`plan`), why it refuses one (`not_replayable`), and what it says once it has run (`outcome`),
 over records and events built by hand. `tests/test_replay_cli.py` runs the command itself."""
 
@@ -45,7 +45,7 @@ def test_call_and_args_replace_the_entrypoint_and_the_args_and_the_trigger_says_
 
 def test_a_call_of_another_function_names_the_trigger_after_it_as_the_sdk_names_one():
     """The replay's run names the function it called, by its qualname, as `@sdk.trigger` names a
-    run, never the recorded trigger that did not run (#84). The recorded entrypoint called again
+    run, never the recorded trigger that did not run. The recorded entrypoint called again
     keeps the recorded name, which `@sdk.trigger(name=...)` may have given."""
     named = _record(replace(TRIGGER, name="refund"))
     plan = replay.plan(named, [], "agent:Desk.lookup", {"customer": "c"})
@@ -80,7 +80,7 @@ def test_a_process_run_s_argv_is_no_function_s_parameters():
 
 def test_a_replay_s_run_of_a_trigger_taking_argv_is_called_with_its_args_not_run_as_argv():
     """A replay's run is a process run that keeps the trigger it called: its entrypoint says its
-    args are that function's, even a parameter named `argv` (#84)."""
+    args are that function's, even a parameter named `argv`."""
     called = Trigger("main", "agent:main", {"argv": ["agent", "-v"]}, True)
     record = replace(runner.process_run("src", ["python"], None, 1.0), trigger=called)
     plan = replay.plan(record, [], "agent:other", None)
@@ -111,7 +111,7 @@ def test_a_process_run_is_its_argv_run_again():
         _record(Trigger("block", None, {"date": "d"}, True)),
         _record(Trigger("python", None, {"argv": []}, True), "process"),
         _record(Trigger("python", None, {"argv": ["python", 3]}, True), "process"),
-        # Only a process run's args are its argv: an `sdk.run` may record any args (#84).
+        # Only a process run's args are its argv: an `sdk.run` may record any args.
         _record(Trigger("block", None, {"argv": ["python", "x.py"]}, True)),
     ],
 )
@@ -187,7 +187,7 @@ def _run(record: RunRecord, events: list) -> StoredRun:
 
 def test_the_divergence_is_the_first_agent_exchange_or_read_tool_the_recording_missed():
     """A precondition read irimi issued and a write tool's stand-in are never one, and are not
-    counted; a read tool that ran for real is (#83)."""
+    counted; a read tool that ran for real is."""
     events = [
         _exchange("/v1/charges/a", ("fidelity:recording", "from-recording")),
         _exchange("/v1/charges/p", ("replay-miss",), issued_by="engine"),
@@ -232,7 +232,7 @@ def test_a_replay_that_missed_nothing_says_so_and_names_both_versions_and_other_
 
 def test_a_run_with_no_trigger_replayed_by_a_command_says_no_args_differ():
     """A `header` run recorded no trigger, and its replay by `-- CMD` records the command line, as
-    a process run does: no args were given, so none are said to differ (#84)."""
+    a process run does: no args were given, so none are said to differ."""
     source = _run(_record(None, "header"), [])
     record = runner.process_run("new", ["python", "agent.py"], None, 1.0)
     replayed = _run(replace(record, replay_of="src"), [])
@@ -249,8 +249,8 @@ def _new(events: list) -> StoredRun:
 
 
 def test_a_replay_that_made_fewer_calls_than_its_recording_says_how_many_it_never_made():
-    """A child that stopped early is no replay that answered every call (#84). A write cut before
-    any policy was asked (#94) carries no replay flag, and was made all the same."""
+    """A child that stopped early is no replay that answered every call. A write cut before
+    any policy was asked carries no replay flag, and was made all the same."""
     recorded = [_exchange("/v1/charges/a", ()), _tool("read", "real"), _tool("write", "shadow")]
     hit = _exchange("/v1/charges/a", ("fidelity:recording", "from-recording"))
     outcome = replay.outcome(_run(_record(), recorded), _new([hit]), replay.Ended(1), None)

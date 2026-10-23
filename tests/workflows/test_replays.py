@@ -1,4 +1,4 @@
-"""Every scenario's recording, replayed unchanged, run by run (#82, #84).
+"""Every scenario's recording, replayed unchanged, run by run.
 
 `test_invariants.py` holds the replays the workflows pin to invariants 1 to 4. This holds EVERY
 scenario's: each run its shadow run stored (`replay_targets`) - the SDK's runs, a run W9 posted by
@@ -6,13 +6,13 @@ hand, a `header` run, or the process run when there is no other - replayed by th
 replay <run id>`, in a copy of the recording's home, against a fresh `World` and fake internet. A
 process that held several runs (W3, W5, W8, W9's control scenarios) is replayed once per run.
 
-`irimi replay` runs what it runs for that run (#84): the run's trigger, called alone by
+`irimi replay` runs what it runs for that run: the run's trigger, called alone by
 `irimi.sdk.replay_child` from its entrypoint and its recorded args, or a process run's argv. A run
 it cannot call - an `sdk.run` block or a `header` run with no entrypoint, args stored by their
 description - it refuses, exit 2, and those scenarios are replayed by their command instead
 (`-- <cmd>`, `REFUSED`), which runs the agent's whole process, every run of it adopted into the
 replay's one run. Either way a replay is ONE run, so another run of the process no longer takes the
-replayed run's answers (#155 for the runs replayed alone).
+replayed run's answers.
 
 A replay of a recording its agent makes again owes:
 
@@ -20,12 +20,12 @@ A replay of a recording its agent makes again owes:
 2. the exit code its recording had: a trigger called alone exits 0 for a run that ended `ok` and 1
    for one that raised, and a command exits as the recorded process did; and a trigger called
    alone, or a process run's argv, ends the replay's run as the recorded run ended, a raised
-   builtin stored under its recorded type (#83, #84);
+   builtin stored under its recorded type;
 3. every exchange the policy decided flagged `from-recording` or `replay-miss`, never both;
 4. every answer irimi decided reaching the agent stamped `Irimi-Answered-By`, as irimi recorded it;
-5. `irimi replay`'s comparison of the recorded run with its replay (#79, #84) printing `=` rows, or
+5. `irimi replay`'s comparison of the recorded run with its replay printing `=` rows, or
    a `?` pair for a write whose body was cut, and exiting 0, or 1 for the cut; its result never
-   saying the triggers' args differ, since the replay was given the recorded ones (#79), and its
+   saying the triggers' args differ, since the replay was given the recorded ones, and its
    result file saying what it printed and exited (`result_problems`);
 6. nothing reaching the fake internet but what the replay could not answer from that run, each
    one a read or llm call it forwarded as a miss, telemetry, or an escape irimi never saw - and
@@ -35,7 +35,7 @@ A replay of a recording its agent makes again owes:
 8. and the agent making the calls its run made when it was recorded - the run's own, for a trigger
    called alone, and the whole process's for a command - each answered with the status it was
    answered with then, in any order, so a replay that never ran its agent passes nothing;
-9. and the tool calls the proxy cannot see made again (#83): the replay's run makes the recorded
+9. and the tool calls the proxy cannot see made again: the replay's run makes the recorded
    run's, each read tool answered from the recording and each write tool through its stand-in,
    and the corpus's own log of which body ran says what irimi stored; and an agent whose `main()`
    ran told it replays, `IRIMI_REPLAY_RUN` naming the replay's one run.
@@ -133,7 +133,7 @@ REFUSED: dict[tuple[str, str], str] = {
     },
 }
 # The runs whose trigger, called alone, does not do what it did in its process, and why: what it
-# depended on is the agent's `main()`'s, or another run's (#84). Each replay of one is pinned to
+# depended on is the agent's `main()`'s, or another run's. Each replay of one is pinned to
 # how it ended instead of rules 2, 4, 5, 7, 8 and 9: `(the agent's line, the replay's exit, the
 # comparison's totals)`, one per distinct ending among the scenario's runs. Rules 1, 3 and 6 hold.
 _SAME_ALONE = "  agent exited {}"
@@ -221,7 +221,7 @@ REACHES_THE_INTERNET: dict[tuple[str, str], str] = {
     (W11, "redirected"): "each hop's query names the fake internet's port, new in every run",
 }
 # Rule 3's exception: a write whose body decoded past irimi's cap is refused by the engine before
-# any policy is asked (#94), in a replay as when it was recorded, so no replay flag is due.
+# any policy is asked, in a replay as when it was recorded, so no replay flag is due.
 CUT_BEFORE_THE_POLICY = {(W9, "bombs"), (W9, "cut_refund"), (W9, "cut_update")}
 # Rule 2's exception: (recorded exit, replay's agent exit, why).
 EXIT_DIFFERS = {
@@ -247,7 +247,7 @@ ENDS_DIFFER = {
 }
 # Rule 9 cannot hold for an agent that names its runs itself and posts its tool calls itself too
 # (W9's control scenarios, `test_w09_scope_gauntlet.py`): its posts name the recorded runs again,
-# which a replay's store files as `unattributed` (#82), and it logs none; nor rule 7's "no
+# which a replay's store files as `unattributed`, and it logs none; nor rule 7's "no
 # divergence", since a tool it posts says it ran for real. A serve that refused its map recorded
 # nothing to replay (W8 `map_refused`).
 NAMES_ITS_OWN_RUNS = {(W9, "control_runs"), (W9, "control_hazards")}
@@ -316,7 +316,7 @@ def tool_calls(result: Result, run_ids: set[str]) -> list[ToolCall]:
 
 
 def tool_problems(recorded: Result, r: Replayed, for_real: dict[str, str], logs: bool) -> list[str]:
-    """Rule 9: how the replay's tool calls differ from what it owes (#83). Its run made the
+    """Rule 9: how the replay's tool calls differ from what it owes. Its run made the
     recorded run's tool calls, by name and kind, in any order; each read ran from the recording,
     but those `for_real` names, and each write its stand-in. And when the agent `logs` its tools
     through `examples/workflows/sdk.py`, the log of which body ran agrees with every tool call the
@@ -344,9 +344,9 @@ def tool_problems(recorded: Result, r: Replayed, for_real: dict[str, str], logs:
 
 
 def result_problems(r: Replayed) -> list[str]:
-    """Rule 5's result: what `irimi replay --result-file` wrote (#84) names the run replayed and the
+    """Rule 5's result: what `irimi replay --result-file` wrote names the run replayed and the
     replay's one run, exits as `irimi replay` did, and holds the divergence point its lines name,
-    or none when they name none; and no replay given the recorded args says they differ (#79)."""
+    or none when they name none; and no replay given the recorded args says they differ."""
     result, replay = r.replay.replay, r.replay
     assert result is not None
     problems = []
@@ -365,8 +365,8 @@ def result_problems(r: Replayed) -> list[str]:
 
 def end_problems(recorded: Result, r: Replayed) -> list[str]:
     """Rule 2's end: a trigger called alone, or a process run's argv, ends the replay's run as the
-    recorded run ended (#84): `ok`, or `error` with what it raised, under the type the recording
-    stored, `builtins.KeyError` for a `KeyError` (#83), and a process run with its exit. A run the
+    recorded run ended: `ok`, or `error` with what it raised, under the type the recording
+    stored, `builtins.KeyError` for a `KeyError`, and a process run with its exit. A run the
     recording never saw end (a kill) owes nothing here."""
     source = recorded.stored().load_run(r.run_id).record
     if r.by_command or source.outcome is None:
@@ -427,7 +427,7 @@ def stamp_problems(replay: Result) -> Counter:
     """The `Irimi-Answered-By` values the agent saw, less those irimi decided, and the reverse: a
     decided answer that reached the agent unstamped, or stamped otherwise. By value, since a call
     the agent logs by its first URL may be answered at a redirect's (W11) or through the reverse
-    door (W9). `control` is the control endpoint's, which no exchange is (#73)."""
+    door (W9). `control` is the control endpoint's, which no exchange is."""
     seen = Counter(c["answered_by"] for c in replay.calls() if c.get("answered_by"))
     seen.pop("control", None)
     decided = Counter(
@@ -519,20 +519,20 @@ def test_every_run_of_every_scenario_replays_from_its_recording(
             missed = [line(ex) for ex in replay.reported if REPLAY_MISS_FLAG in ex.flags]
             if not alone_differs:
                 assert missed == [], r.run_id
-            # A read tool run for real is a miss too (#83), which a scenario's table names.
+            # A read tool run for real is a miss too, which a scenario's table names.
             whole = not (alone_differs or case in TOOLS_RUN_FOR_REAL or case in NAMES_ITS_OWN_RUNS)
             if whole:
                 assert f"  {irimi_replay.NO_DIVERGENCE}" in replay.replay_result(), r.run_id
         if alone_differs:
             continue
         # 8. The agent made the calls its run made when it was recorded, and was answered alike:
-        # the rules above hold of a replay whose agent never ran, too (#82).
+        # the rules above hold of a replay whose agent never ran, too.
         if case in CALLS_FEWER:
             assert calls(replay) < owed_calls(recorded, r), r.run_id
         elif case not in EXIT_DIFFERS:
             assert calls(replay) == owed_calls(recorded, r), r.run_id
         # 9. The tool calls the proxy cannot see were made again, and answered as replay answers
-        # them (#83), by an agent told it replays, in the replay's one run.
+        # them, by an agent told it replays, in the replay's one run.
         told = {start["replay"] for start in replay.events("start")}
         ran_main = (
             r.by_command or recorded.stored().load_run(r.run_id).record.attribution == "process"
@@ -576,7 +576,7 @@ def test_every_run_of_every_scenario_replays_from_its_recording(
 
 def test_the_runs_replayed_by_their_command_are_the_ones_irimi_refuses(run_workflow):
     """`REFUSED` names the scenarios holding a run `irimi replay` will not call alone, each with
-    irimi's reason in its own words; every other scenario's runs it calls (#84). Read off the
+    irimi's reason in its own words; every other scenario's runs it calls. Read off the
     records, with no replay."""
     found = {}
     for case in CASES:
@@ -615,7 +615,7 @@ def test_rule_9_catches_a_replay_whose_tools_ran_as_they_did_under_shadow(run_wo
     """Rule 9 has something to catch: W6 `enrich`'s shadow run held up as its own replay, every
     read tool run for real and no tool call stored by a run it started, is flagged for each read
     the recording would have answered and for its log, but not for `score_account`, which a
-    replay runs for real too, nor for a write, whose stand-in ran as a replay's does (#83)."""
+    replay runs for real too, nor for a write, whose stand-in ran as a replay's does."""
     recorded = run_workflow(W6, "enrich", "shadow")
     [run] = recorded.sdk_runs()
     as_replay = Replayed(run.run_id, recorded, False, run.run_id, None)

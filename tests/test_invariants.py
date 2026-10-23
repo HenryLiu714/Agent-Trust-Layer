@@ -1,4 +1,4 @@
-"""The Phase 1 stamping invariants (#12), in one file, written to fail loudly.
+"""The stamping invariants, in one file, written to fail loudly.
 
 Five claims irimi makes about every exchange, checked against a real run rather than against a
 hand-built list, and each one demonstrated to fail on a policy that breaks it:
@@ -7,10 +7,10 @@ hand-built list, and each one demonstrated to fail on a policy that breaks it:
   (b) nothing carrying that header is stamped anything but `unvalidated`;
   (c) `ShadowPolicy` cannot produce `validated` at all - that label is reserved for record mode;
   (d) a `delegated` exchange never reached the host the agent addressed;
-  (e) a write L3 rejected never enters the write log, nor does an idempotent replay or conflict
-      (#46), a read irimi issued is never a write, and every read the overlay showed a write
+  (e) a write L3 rejected never enters the write log, nor does an idempotent replay or conflict,
+      a read irimi issued is never a write, and every read the overlay showed a write
       sits in the summary under a printed write of its own service that the overlay really
-      held (#48).
+      held.
 
 `stamping_violations` is the machinery for (a) and (b): it returns a list of strings rather than
 asserting, so the same function can be asserted empty for an honest run and non-empty for a
@@ -106,7 +106,7 @@ class _Target(BaseHTTPRequestHandler):
 
 
 class _StreamTarget(BaseHTTPRequestHandler):
-    """A target that answers a write with server-sent events, so the response streams (#28)."""
+    """A target that answers a write with server-sent events, so the response streams."""
 
     seen: list[tuple[str, str]] = []
 
@@ -301,7 +301,7 @@ def test_the_locally_answered_write_is_stamped_and_the_live_read_is_not(
 def test_a_replay_stamps_what_it_answered_and_leaves_a_live_forward_bare(
     tmp_path, monkeypatch, upstream
 ):
-    """(a) in a replay (#82): a read answered from the recording carries `recording`, the write
+    """(a) in a replay: a read answered from the recording carries `recording`, the write
     answered with its recorded answer carries its recorded level, and the read the recording had
     no second answer for goes live and carries nothing. Nothing in these requests is a secret, so
     the recording is the run's own exchanges, as the store would have written them."""
@@ -428,7 +428,7 @@ def test_a_header_that_names_the_wrong_answer_is_caught():
 
 def test_shadow_policy_cannot_produce_validated(tmp_path, monkeypatch):
     """(c). `annotate` takes no validation argument and writes the literal `unvalidated`; the only
-    other inhabitant of `Validation` is reserved for record mode in Phase 3. Every kind and every
+    other inhabitant of `Validation` is reserved and never written. Every kind and every
     answer `ShadowPolicy` can give, through the same function the engine calls."""
     maps = _maps(tmp_path, monkeypatch)
     policy = ShadowPolicy()
@@ -519,7 +519,7 @@ def test_a_streamed_delegated_answer_is_stamped_too(tmp_path, monkeypatch, upstr
     assert ex.answered_by == "delegated"
 
 
-# ------------------------------------------------------------------------ the L3 reader (#45)
+# ------------------------------------------------------------------------ the L3 reader
 
 
 def test_shadow_mode_is_never_built_without_a_reader(tmp_path, monkeypatch):
@@ -702,7 +702,7 @@ def test_a_rejected_write_is_never_in_the_write_log(tmp_path, monkeypatch):
 
 
 def test_a_replayed_write_is_never_in_the_write_log_twice(tmp_path, monkeypatch):
-    """The agent's retry with the key it already sent is the same write (#46). A second entry
+    """The agent's retry with the key it already sent is the same write. A second entry
     would have the overlay apply one refund twice."""
     seen, overlay, replies = _stripe_run(
         tmp_path, monkeypatch, [("ch_REAL1", 100, "k-1"), ("ch_REAL1", 100, "k-1")]
@@ -718,7 +718,7 @@ def test_a_replayed_write_is_never_in_the_write_log_twice(tmp_path, monkeypatch)
 
 def test_an_idempotency_conflict_is_never_in_the_write_log(tmp_path, monkeypatch):
     """A key reused for a different write was refused, as the real service would refuse it:
-    nothing was minted and there is no effect to replay (#46)."""
+    nothing was minted and there is no effect to replay."""
     seen, overlay, replies = _stripe_run(
         tmp_path, monkeypatch, [("ch_REAL1", 100, "k-2"), ("ch_REAL1", 250, "k-2")]
     )
@@ -733,7 +733,7 @@ def test_an_idempotency_conflict_is_never_in_the_write_log(tmp_path, monkeypatch
 
 def test_only_a_write_that_would_have_happened_lists_its_webhooks(tmp_path, monkeypatch):
     """`would_fire` is a claim about a write irimi accepted, and the write log is the run's own
-    record of which those are (#47). Said once, as the one-directional property: an exchange that
+    record of which those are. Said once, as the one-directional property: an exchange that
     lists webhooks is one the overlay was handed as a write. The three that list nothing do so
     for three different reasons - L3 said the service would have refused it, the service would
     have refused the reused key, and a replay's events are already on the first write's own
@@ -774,7 +774,7 @@ def test_only_a_write_that_would_have_happened_lists_its_webhooks(tmp_path, monk
 
 def _owes_overlay_line(ex: Exchange) -> bool:
     """One of the agent's own reads that irimi edited to show a write, or knows it showed only in
-    part (#48). This deliberately restates `report._shows_overlay` rather than calling it: the
+    part. This deliberately restates `report._shows_overlay` rather than calling it: the
     invariant is what the summary OWES, so a `_shows_overlay` that stopped owing a line must fail
     here instead of agreeing with itself."""
     return (
@@ -812,7 +812,7 @@ def overlay_line_violations(
 
 def test_every_overlaid_read_has_a_write_of_its_own_service_to_sit_under(tmp_path, monkeypatch):
     """An overlaid read shows the agent a write that never happened, and the summary's `↳` line
-    is the only place a reader learns which of the agent's reads were shown one (#48). The report
+    is the only place a reader learns which of the agent's reads were shown one. The report
     files each under the latest earlier write of its own service and quietly skips one it cannot
     place; that skip is safe only because a real run never produces such a read - the overlay
     edits or flags a read only on the strength of a same-service write in the log, and every entry
@@ -844,7 +844,7 @@ def test_every_overlaid_read_has_a_write_of_its_own_service_to_sit_under(tmp_pat
 
 def test_a_replayed_rejection_is_never_in_the_write_log(tmp_path, monkeypatch):
     """A retry of a write L3 rejected gets the same refusal back, and stays out of the log on
-    both counts: it is a rejection and it is a replay (#45, #46). A passed refund goes first so
+    both counts: it is a rejection and it is a replay. A passed refund goes first so
     the log is not empty for the trivial reason."""
     seen, overlay, replies = _stripe_run(
         tmp_path,

@@ -1,4 +1,4 @@
-"""The control endpoint, `/_irimi/` on irimi's own listener (#73), against a real engine and a real
+"""The control endpoint, `/_irimi/` on irimi's own listener, against a real engine and a real
 `DirectoryStore`: every request goes over a socket to the listener, and every claim about the run
 is read back off disk with `StoreReader`.
 """
@@ -220,7 +220,7 @@ def test_health_says_serve_when_the_engine_serves(tmp_path, monkeypatch):
 
 _START = f"/_irimi/runs/{RUN}/start"
 _NOT_JSON = "the body is not JSON: "
-# A replay's lookup of a read tool's recorded outcome (#83).
+# A replay's lookup of a read tool's recorded outcome.
 _LOOKUP = f"/_irimi/runs/{RUN}/tool-calls/recorded"
 LOOKUP = {"name": "db.balance", "args": {"account": "acc_1"}}
 
@@ -324,7 +324,7 @@ REFUSALS = [
         400,
         f"'{PROCESS_RUN}' {OWN_RUN}",
     ),
-    # The lookup is checked in the same order, and refused in the same words (#83).
+    # The lookup is checked in the same order, and refused in the same words.
     ("GET", _LOOKUP, None, 405, f"{_LOOKUP} takes POST, not GET"),
     ("POST", "/_irimi/runs/../x/tool-calls/recorded", LOOKUP, 400, "'../x' cannot name a run"),
     (
@@ -372,7 +372,7 @@ def test_a_refused_control_request_answers_its_status_and_names_what_was_wrong(
 
 def test_a_tool_call_may_name_the_process_run(engine):
     """Only the process run's start and end are irimi's: a tool call made outside any SDK run
-    belongs to the process run, as an exchange with no `Irimi-Run` does (#73)."""
+    belongs to the process run, as an exchange with no `Irimi-Run` does."""
     _ok(engine.call("POST", f"/_irimi/runs/{PROCESS_RUN}/tool-calls", _tool_call(time.time())))
     [call] = engine.finish().load_run(PROCESS_RUN).events
     assert (call.run_id, call.name) == (PROCESS_RUN, "db.write")
@@ -380,9 +380,9 @@ def test_a_tool_call_may_name_the_process_run(engine):
 
 
 def test_a_tool_call_made_in_no_run_is_taken_unattributed_but_not_a_start(engine):
-    """`irimi serve` gives its agent no process run (#77), so a tool call made outside every SDK
+    """`irimi serve` gives its agent no process run, so a tool call made outside every SDK
     run names none: it is filed in `unattributed/`, as an exchange with no `Irimi-Run` is there.
-    A start or an end for `unattributed` is still refused (#76)."""
+    A start or an end for `unattributed` is still refused."""
     _ok(engine.call("POST", "/_irimi/runs/unattributed/tool-calls", _tool_call(time.time())))
     status, _, body = engine.call("POST", "/_irimi/runs/unattributed/start", _start_body(1.0))
     assert (status, json.loads(body)) == (400, {"error": "'unattributed' cannot name a run"})
@@ -397,7 +397,7 @@ def test_a_tool_call_made_in_no_run_is_taken_unattributed_but_not_a_start(engine
 def test_a_lookup_under_an_engine_that_is_not_replaying_is_a_404_and_records_nothing(
     engine, run_id
 ):
-    """Shadow mode answers no read tool from anything, so the SDK runs it for real (#83). An SDK
+    """Shadow mode answers no read tool from anything, so the SDK runs it for real. An SDK
     run, the process run and no run may all ask, and the lookup is no exchange, no tool call and
     no run."""
     route = f"/_irimi/runs/{run_id}/tool-calls/recorded"
@@ -425,7 +425,7 @@ def _replaying(tmp_path, monkeypatch, *events, policy=None) -> _Engine:
 def test_a_lookup_the_recording_answers_is_a_stamped_200_once_and_records_nothing(
     tmp_path, monkeypatch, caplog
 ):
-    """A hit is not a tool call: the SDK posts the call afterwards, as it posts every call (#83).
+    """A hit is not a tool call: the SDK posts the call afterwards, as it posts every call.
     Args nested too deep to redact match nothing, and are a miss, never irimi's 500."""
     recorded = ToolCall(
         "tc-1", "recorded01", "db.balance", "read", "real", LOOKUP["args"], {"n": 1}, None, 1.0, 2.0
@@ -450,7 +450,7 @@ def test_a_lookup_the_recording_answers_is_a_stamped_200_once_and_records_nothin
 
 def test_a_policy_whose_lookup_raises_is_irimi_s_500_never_a_forward(tmp_path, monkeypatch):
     """`AnswerPolicy.recorded_tool_call` never raises, but one that did would be answered as any
-    failure of the endpoint's own is: a stamped 500, which the SDK takes for a miss (#83)."""
+    failure of the endpoint's own is: a stamped 500, which the SDK takes for a miss."""
 
     class _Broken(ShadowPolicy):
         def recorded_tool_call(self, name, args):
@@ -553,9 +553,9 @@ def test_the_endpoint_answers_500_itself_when_its_store_raises():
 def test_a_decoder_that_raises_anything_but_its_refusal_is_irimi_s_500_never_too_deep(
     monkeypatch, caplog
 ):
-    """A decoder raises only TraceFormatError, however deep the value it refuses (#100), so one
+    """A decoder raises only TraceFormatError, however deep the value it refuses, so one
     that raised RecursionError would be irimi's own bug: a 500 logged with its traceback, never
-    TOO_DEEP blaming the agent for a body `json.loads` read, as `_decoded` answered before #100."""
+    TOO_DEEP blaming the agent for a body `json.loads` read."""
 
     def broken(doc):
         raise RecursionError("maximum recursion depth exceeded")
@@ -599,7 +599,8 @@ def test_an_on_tool_call_that_raises_costs_the_callback_not_the_record(
 
 def test_an_end_in_error_carries_its_error_to_the_store():
     """The `error` an end posts is read into the `ErrorInfo` the store is handed. Over the seam,
-    with a store that remembers its calls: what `DirectoryStore` does with it is #70's."""
+    with a store that remembers its calls: what `DirectoryStore` does with it is tested in
+    `tests/test_store.py`."""
     ended = []
 
     class _Ends(NullStore):
@@ -614,9 +615,9 @@ def test_an_end_in_error_carries_its_error_to_the_store():
 
 
 def test_a_posted_error_message_is_cut_to_the_length_a_trace_keeps(engine):
-    """`ErrorInfo.message` is at most MAX_ERROR_MESSAGE characters (#68): a label, not a log. An
+    """`ErrorInfo.message` is at most MAX_ERROR_MESSAGE characters: a label, not a log. An
     SDK that posts a longer one, on an end or on a tool call, has it cut by the store, once it is
-    redacted (#179), never refused, so a long message never costs a run its end."""
+    redacted, never refused, so a long message never costs a run its end."""
     long = {"type": "x.Boom", "message": "m" * (MAX_ERROR_MESSAGE * 3)}
     t0 = time.time()
     _ok(engine.call("POST", _START, _start_body(t0)))
@@ -631,8 +632,8 @@ def test_a_posted_error_message_is_cut_to_the_length_a_trace_keeps(engine):
 
 def test_a_posted_error_type_is_cut_to_the_length_a_trace_keeps(engine):
     """A posted error's type is the client's to say, so it may be nearly all of a 2 MiB body. It
-    is cut to MAX_ERROR_TYPE characters, on an end and on a tool call, never refused (#99): by the
-    store, once it is redacted (#179), and for the live line a tool call prints."""
+    is cut to MAX_ERROR_TYPE characters, on an end and on a tool call, never refused: by the
+    store, once it is redacted, and for the live line a tool call prints."""
     long = {"type": "t." * (MAX_CONTROL_BODY // 2 - 500), "message": "no"}
     t0 = time.time()
     _ok(engine.call("POST", _START, _start_body(t0)))
@@ -651,7 +652,7 @@ def test_a_posted_error_reaches_the_store_whole_so_a_key_straddling_a_cut_is_red
 ):
     """The endpoint hands the store a posted error whole, and the store redacts it before it cuts
     it. Cut here first, a key straddling either cut kept a part too short for its shape, which
-    redaction no longer found, and which reached disk (#179). The live line's call is cut as
+    redaction no longer found, and which reached disk. The live line's call is cut as
     the stored one is, its type all it prints, and it is never stored."""
     secret = "ghp_" + "C" * 36
     kind = "t" * (MAX_ERROR_TYPE - 30) + "." + secret + ".Boom"
@@ -679,8 +680,8 @@ def test_a_posted_error_reaches_the_store_whole_so_a_key_straddling_a_cut_is_red
 
 def test_a_refusal_quotes_at_most_a_line_of_what_it_refused(engine):
     """A word outside a vocabulary is quoted back, a 1 MB one cut by its decoder at MAX_QUOTED
-    characters (#100). A refusal that quotes the path is cut at MAX_REFUSAL (#73). A value of the
-    wrong type is named by its type, never quoted (#100)."""
+    characters. A refusal that quotes the path is cut at MAX_REFUSAL. A value of the
+    wrong type is named by its type, never quoted."""
     body = {**_tool_call(1.0), "kind": "s" * 1_000_000}
     status, _, raw = engine.call("POST", f"/_irimi/runs/{RUN}/tool-calls", body)
     word = "s" * MAX_QUOTED
@@ -698,7 +699,7 @@ def test_a_refusal_quotes_at_most_a_line_of_what_it_refused(engine):
 def test_a_head_request_gets_its_405_without_a_body_and_the_connection_stays_usable(engine):
     """A response to HEAD carries no content (RFC 9110), and mitmproxy sends whatever a response
     holds: a 405 that kept its JSON would be read as the start of the connection's next response,
-    so `HEAD /_irimi/health` broke every later request on that connection (#73).
+    so `HEAD /_irimi/health` broke every later request on that connection.
 
     Over a raw socket, both requests in one write: `http.client` passes or fails this by when the
     stray bytes arrive."""
@@ -722,7 +723,7 @@ def test_a_head_request_gets_its_405_without_a_body_and_the_connection_stays_usa
 
 
 # A field nested this deep is read by every Python's `json.loads` on any thread (3.12's stops near
-# 10,000), so its refusal is the decoder's on every platform (#123). A decoder fed one 100,000 deep
+# 10,000), so its refusal is the decoder's on every platform. A decoder fed one 100,000 deep
 # is `tests/test_trace.py`'s.
 _DEEP = 5_000
 
@@ -752,10 +753,10 @@ def test_a_body_nested_too_deeply_to_read_is_a_400_never_a_500(
     engine, caplog, path, body, expected
 ):
     """A mistyped field is a 400 however it is mistyped, never a 500 logged as irimi's failure
-    for what is the agent's (#73). A body `json.loads` cannot read, a million deep, is TOO_DEEP on
+    for what is the agent's. A body `json.loads` cannot read, a million deep, is TOO_DEEP on
     every Python. A deeply nested field is refused by its decoder, which names the field's type
     and never quotes it: quoting it with `repr` raised RecursionError on some Pythons and stacks
-    and not others, so the same body was answered differently on CI's runners (#100, #123)."""
+    and not others, so the same body was answered differently on CI's runners."""
     with caplog.at_level(logging.ERROR, logger="irimi.control"):
         status, headers, raw = engine.call("POST", path, body)
     assert (status, json.loads(raw)) == (400, {"error": expected})

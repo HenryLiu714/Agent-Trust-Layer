@@ -1,9 +1,7 @@
 """Test-wide isolation from the developer's own irimi setup.
 
-The map loader reads `./irimi.maps.yaml`, then `$IRIMI_HOME/maps.yaml`. A developer who followed
-the README and created an overrides file must not see this suite fail: before this fixture existed
-in three separate copies, a real overrides file failed 31 of 76 tests. One copy now, autouse, so a
-new test file inherits it instead of rediscovering the problem.
+Isolate every test from the developer's own `$IRIMI_HOME` and `./irimi.maps.yaml`, and undo the
+SDK's HTTP patches after each test. The fixture is autouse, so a new test file inherits it.
 """
 
 import pytest
@@ -23,7 +21,7 @@ def no_ambient_irimi(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def no_instrumentation_left_behind():
-    """Every patch a test's runs made to the HTTP clients is undone after it (#75): `instrument()`
+    """Every patch a test's runs made to the HTTP clients is undone after it: `instrument()`
     patches classes for the life of the process, which here is the whole suite."""
     yield
     instrumentation._uninstall()

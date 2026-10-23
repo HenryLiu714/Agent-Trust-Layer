@@ -12,7 +12,7 @@ from examples.workflows.w02_nightly_reconcile.agent import LEDGER, customer_id
 from irimi.exchange import Exchange
 
 W = "w02_nightly_reconcile"
-# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi (#77).
+# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.
 MODES = ("shadow", "serve")
 AGENT = "examples.workflows.w02_nightly_reconcile.agent"
 CUSTOMER_UPDATE = "fake-L1   write     POST api.stripe.com/v1/customers/"
@@ -37,7 +37,7 @@ def test_a_clean_night_pages_everything_and_posts_one_summary(run_workflow, mode
     # The SDK's run wrapped the whole job, and the read tool ran for real inside it.
     run_id = shadow.events("run.start")[0]["run"]
     assert [t["run"] for t in shadow.events("tool")] == [run_id]
-    # #76's default tool name is the real module's, because the harness launches every agent
+    # The default tool name is the real module's, because the harness launches every agent
     # through `examples.workflows.launch` rather than as `__main__`.
     assert shadow.tools("read") == [(f"{AGENT}.load_ledger", "real")]
 
@@ -56,7 +56,7 @@ def test_forty_mismatches_are_forty_faked_writes_and_the_ledger_is_untouched(run
     # Forty writes fire one event name, listed once.
     assert summary[-1] == "  These writes did not happen. Would have fired: customer.updated."
     # And forty ledger marks, one line each after the forty updates, as the HTTP writes are each
-    # a line however many there are (#76).
+    # a line however many there are.
     tool_lines = [line for line in summary if line.startswith("  ○ tool ")]
     assert tool_lines == [f"  ○ tool {AGENT}.mark_reconciled  shadow stand-in ran"] * 40
     assert summary.index(tool_lines[0]) > max(
@@ -76,8 +76,8 @@ def test_forty_mismatches_are_forty_faked_writes_and_the_ledger_is_untouched(run
 
 @pytest.mark.parametrize("mode", MODES)
 def test_forty_mismatches_store_all_47_exchanges_and_drop_none(run_workflow, mode):
-    """The busiest run in the corpus, stored whole (#70): every exchange irimi reported is on
-    disk, and no run records a dropped event. Under serve mode (#77) the run is the only one,
+    """The busiest run in the corpus, stored whole: every exchange irimi reported is on
+    disk, and no run records a dropped event. Under serve mode the run is the only one,
     with no process run beside it, and its block is printed from the store at its end."""
     shadow = run_workflow(W, "forty_mismatches", mode)
     stored = [e for e in shadow.stored_events() if isinstance(e, Exchange)]
@@ -85,7 +85,7 @@ def test_forty_mismatches_store_all_47_exchanges_and_drop_none(run_workflow, mod
     process = ["0 exchanges  0 writes"] if mode == "shadow" else []
     assert [r.dropped_events for r in shadow.stored().list_runs()] == [0] * (len(process) + 1)
     # `irimi runs list` counts them in the run that holds them, and its writes are the summary's
-    # `41 virtualized`: forty customer updates and the Slack post (#72).
+    # `41 virtualized`: forty customer updates and the Slack post.
     code, out, err = shadow.runs("list")
     assert (code, err) == (0, [])
     assert sorted(line.split("  ", 6)[6] for line in out) == [*process, "47 exchanges  41 writes"]
@@ -98,9 +98,9 @@ def test_a_datetime_trigger_is_stored_by_its_repr_and_cannot_be_replayed(run_wor
     [trigger] = shadow.events("trigger")
     assert trigger["type"] == "datetime"
     assert trigger["value"].startswith("datetime.datetime(2026, 9, 27, 2, 0")
-    # A `datetime` is not JSON, so #74 captures it as its repr and the run is not replayable.
+    # A `datetime` is not JSON, so the SDK captures it as its repr and the run is not replayable.
     # `sdk.run` records no entrypoint, so `irimi replay` refuses it for that first, before it
-    # would ask for `--args`: only `--call` or `-- CMD` replays it (#84).
+    # would ask for `--args`: only `--call` or `-- CMD` replays it.
     [run] = shadow.sdk_runs()
     assert run.trigger is not None
     assert (run.trigger.name, run.trigger.entrypoint) == ("nightly-reconcile", None)
@@ -121,7 +121,7 @@ def test_the_same_date_twice_is_six_writes_in_both_modes(run_workflow, mode):
     shadow = run_workflow(W, "same_date_twice", mode)
     bare = run_workflow(W, "same_date_twice", "bare")
     # Nothing in the run stops the repeat, so the report shows each customer update twice: the
-    # duplicate a Phase 4 report must flag. Bare, the same six reach Stripe.
+    # duplicate a future check for repeated writes would flag. Bare, the same six reach Stripe.
     lines = [line for line in shadow.summaries() if "○ update customer" in line]
     assert lines == [f"  ○ update customer cus_N00{i}  unvalidated (L1)" for i in (2, 1, 0)] * 2
     assert [r.path for r in bare.internet.writes() if r.host == "api.stripe.com"] == [
@@ -148,7 +148,7 @@ def test_paging_from_a_minted_refund_is_translated_and_finds_the_real_one(run_wo
         ("page_refunds", None),
         (None, "fake-L1"),
     ]
-    # irimi dropped the cursor naming its own refund before forwarding (#53): Stripe never heard
+    # irimi dropped the cursor naming its own refund before forwarding: Stripe never heard
     # the minted id.
     refund_reads = [r.query for r in shadow.internet.requests() if r.path == "/v1/refunds"]
     assert refund_reads == [{"charge": "ch_N000", "limit": "1"}] * 2
@@ -162,8 +162,8 @@ def test_paging_from_a_minted_refund_is_translated_and_finds_the_real_one(run_wo
 def test_irimi_compare_shows_a_clean_night_and_forty_mismatches_eighty_writes_apart(
     shared_store_run,
 ):
-    """#79 at volume: forty customer updates and forty write tools only B made, each in the order
-    B made it, and the one Slack post both made, changed by its count."""
+    """Compare at volume: forty customer updates and forty write tools only B made, each in the
+    order B made it, and the one Slack post both made, changed by its count."""
     clean = shared_store_run(W, "clean")
     forty = shared_store_run(W, "forty_mismatches")
     assert check_invariants(forty) == []
@@ -195,9 +195,9 @@ def test_irimi_compare_shows_a_clean_night_and_forty_mismatches_eighty_writes_ap
 
 def test_a_refund_then_page_replay_answers_the_page_naming_its_minted_refund(replayed):
     """The refund is answered with its recorded answer, so its minted `re_` is the recorded one,
-    and the page whose cursor names it is translated as it was recorded (#53) and answered from
+    and the page whose cursor names it is translated as it was recorded and answered from
     the recording. Nothing reaches the fake internet. Replayed by its command: the run is an
-    `sdk.run` block, which records no entrypoint to call (#84)."""
+    `sdk.run` block, which records no entrypoint to call."""
     recorded, replay = replayed(W, "refund_then_page", command=True)
     assert replay.events("refunds", with_time=False) == recorded.events("refunds", with_time=False)
     # Each answer is what it was when recorded: the first page is still the overlay's, its
@@ -220,20 +220,20 @@ def test_a_refund_then_page_replay_answers_the_page_naming_its_minted_refund(rep
 
 
 def test_a_replay_of_a_replay_answers_the_page_from_the_first_replay(replayed, tmp_path):
-    """A replay is a stored run like any other, so it can be replayed (#82). The engine records a
+    """A replay is a stored run like any other, so it can be replayed. The engine records a
     read as it would ask it, translated, whoever answers it, so the second replay finds the page
     the first one answered just as the first found the recorded one."""
     recorded, first = replayed(W, "refund_then_page", command=True)
     before = [r.run_id for r in first.stored().list_runs()]
     second = replay(first, replayed_run_id(first), tmp_path / "again", command=True)
-    # Into a copy of the first replay's store, which the session caches for other tests (#85).
+    # Into a copy of the first replay's store, which the session caches for other tests.
     assert [r.run_id for r in first.stored().list_runs()] == before
     assert [(c["label"], c["answered_by"]) for c in second.calls()] == [
         (c["label"], c["answered_by"]) for c in first.calls()
     ]
     assert second.internet.requests() == []
     assert second.events("refunds", with_time=False) == recorded.events("refunds", with_time=False)
-    # `runs list` lists each replay as the run it replayed, and `runs show` names it (#154). Every
+    # `runs list` lists each replay as the run it replayed, and `runs show` names it. Every
     # run the store holds, by its attribution column: the recording's two as they were.
     source = replayed_run_id(recorded)
     middle, last = first.process_run_id(), second.process_run_id()
@@ -252,7 +252,7 @@ def test_a_replay_of_a_replay_answers_the_page_from_the_first_replay(replayed, t
             "mode: replay",
             f"replay of: {of}",
         ]
-    # A shadow run's block names neither, as before #154.
+    # A shadow run's block names neither.
     code, shown, _ = second.runs("show", source, "--store", str(second.store_root()))
     assert code == 0
     assert shown[:3] == [f"run: {source}", "attribution: sdk", "trigger: nightly-reconcile"]

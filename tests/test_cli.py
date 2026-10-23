@@ -24,7 +24,7 @@ def test_no_command_prints_help_and_fails(capsys):
 
 def test_a_stdout_closed_before_irimi_started_is_written_nothing(tmp_path, monkeypatch):
     """Python makes `sys.stdout` None when fd 1 is closed at startup (`irimi runs list >&-`):
-    `print` writes nothing to it, and `main`'s flush of stdout (#142) must not raise there."""
+    `print` writes nothing to it, and `main`'s flush of stdout must not raise there."""
     monkeypatch.setattr(sys, "stdout", None)
     assert main(["runs", "list", "--store", str(tmp_path)]) == 0
 
@@ -38,14 +38,14 @@ class _GoneReader(io.StringIO):
 
 def test_a_stderr_whose_reader_went_with_stdout_closed_ends_quietly(tmp_path, monkeypatch):
     """`irimi runs show X >&- 2>&1`-like: the first write that fails is stderr's, and stdout is
-    None. That is the reader gone too (#142): 141, and nothing raised past `main`."""
+    None. That is the reader gone too: 141, and nothing raised past `main`."""
     monkeypatch.setattr(sys, "stdout", None)
     monkeypatch.setattr(sys, "stderr", _GoneReader())
     assert main(["runs", "show", "absent", "--store", str(tmp_path)]) == BROKEN_PIPE_EXIT_CODE
 
 
 def test_python_m_irimi_is_the_command_and_importing_it_runs_nothing():
-    """`sdk.replay()` runs `python -m irimi` (#84); a tool that imports every module, as pydoc
+    """`sdk.replay()` runs `python -m irimi`; a tool that imports every module, as pydoc
     does, must not start the command."""
     import subprocess
 
@@ -155,7 +155,7 @@ def test_reverse_hosts_adds_allow_host_lower_cased():
 def test_engine_config_carries_the_maps():
     """`serve` and `shadow` both build the engine's config here, and the classifier only sees the
     maps because `maps=index` is part of it. The bind is `--listen-host`'s, and `serve` is set only
-    for serve mode, whose health answer says so (#73, #77)."""
+    for serve mode, whose health answer says so."""
     from irimi.cli import _engine_config, build_parser
 
     index = _shipped_index()
@@ -171,9 +171,9 @@ def test_engine_config_carries_the_maps():
 
 
 def test_the_composition_root_builds_the_service_overlay_over_the_run_s_maps():
-    """The overlay classifies a read against the same maps the engine does (#43): a second index
+    """The overlay classifies a read against the same maps the engine does: a second index
     would let the two disagree about which service a read belongs to. The engine records into the
-    store `_prepare_run` opened, the one `irimi shadow` starts and ends its run in (#70)."""
+    store `_prepare_run` opened, the one `irimi shadow` starts and ends its run in."""
     from irimi.overlay import ServiceOverlay
     from irimi.store import NullStore
 
@@ -190,8 +190,8 @@ def test_the_composition_root_builds_the_service_overlay_over_the_run_s_maps():
 
 def test_the_composition_root_builds_a_replay_policy_over_the_run_s_recording():
     """A config naming a run to replay gets a `ReplayPolicy` over the recording `_prepare_run`
-    read, and a reader over the recording, never the upstream (#82).
-    One that names none gets shadow mode's policy, reading the real upstream (#45)."""
+    read, and a reader over the recording, never the upstream.
+    One that names none gets shadow mode's policy, reading the real upstream."""
     from dataclasses import replace
 
     from irimi.policy import ReplayPolicy, ShadowPolicy
@@ -219,8 +219,7 @@ def test_the_composition_root_builds_a_replay_policy_over_the_run_s_recording():
 
 def test_a_replay_of_a_run_the_store_does_not_hold_starts_nothing(tmp_path, monkeypatch, capsys):
     """`irimi replay` reads the recording before anything runs, and a run the store does not hold
-    is refused, exit 2 as `irimi compare` refuses it: an error, no command and no store (#82,
-    #84)."""
+    is refused, exit 2 as `irimi compare` refuses it: an error, no command and no store."""
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
     monkeypatch.chdir(tmp_path)
     ca.generate_ca(ca.ca_paths())
@@ -236,8 +235,7 @@ def test_a_replay_of_a_run_the_store_does_not_hold_starts_nothing(tmp_path, monk
 def test_a_replay_of_a_damaged_run_starts_nothing(tmp_path, monkeypatch, capsys, damage):
     """A recording `StoreReader` cannot read - a line that does not parse, a run.json that does
     not, a newer schema version, a missing blob - refuses the replay as `runs show` refuses the
-    run, with no traceback, no command and no run of its own in the store, and exits 2 (#82,
-    #84)."""
+    run, with no traceback, no command and no run of its own in the store, and exits 2."""
     import json
 
     from irimi import redact
@@ -285,7 +283,7 @@ def test_a_replay_of_a_damaged_run_starts_nothing(tmp_path, monkeypatch, capsys,
 
 def test_the_unattributed_pool_is_not_a_run_to_replay(tmp_path, monkeypatch, capsys):
     """`unattributed` holds every serve session's requests no run named: there is no one run in it
-    to answer from (#82). Refused with exit 2 (#84)."""
+    to answer from. Refused with exit 2."""
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
     monkeypatch.chdir(tmp_path)
     ca.generate_ca(ca.ca_paths())
@@ -306,7 +304,7 @@ def test_the_unattributed_pool_is_not_a_run_to_replay(tmp_path, monkeypatch, cap
 def test_a_word_no_argument_takes_is_refused_as_parse_args_refuses_it(argv, tmp_path, capsys):
     """`main` lets a replay's words after its first `--` go unplaced, which an older argparse
     (Python 3.12.3) leaves them once an option sits between RUN_ID and `--`. Any other unplaced
-    word is refused with argparse's own message and exit 2, on every Python (#177)."""
+    word is refused with argparse's own message and exit 2, on every Python."""
     store = tmp_path / "store"
     with pytest.raises(SystemExit) as exit_:
         main([*argv[:2], "--store", str(store), *argv[2:]])
@@ -382,8 +380,8 @@ def test_target_arg_parses_a_service_and_a_route_spec():
 
 def test_a_trailing_slash_on_the_host_is_the_service_target():
     """`api.stripe.com/=<url>` is how a reader used to nginx `proxy_pass` spells "the whole
-    service". It was read as the route path `/`, which no map claims, so a spelling that means
-    the right thing failed with "no `write` or `unknown` route matches '/'" (#32)."""
+    service". Read as the route path `/`, which no map claims, a spelling that means the right
+    thing would fail with "no `write` or `unknown` route matches '/'"."""
     from irimi.cli import _target_arg
 
     assert _target_arg("api.stripe.com/=http://127.0.0.1:3000") == (
@@ -450,7 +448,7 @@ def test_a_target_on_the_listeners_own_port_fails_closed(capsys):
 
 def test_a_target_on_the_listen_host_fails_closed(capsys):
     """`--listen-host` is the listener's address too, so a target the escape hatch lets name it,
-    on irimi's own port, is refused before anything starts (#77)."""
+    on irimi's own port, is refused before anything starts."""
     code = main(
         [
             "serve",
@@ -539,9 +537,8 @@ def _startup_on_a_pipe(monkeypatch, index, args=None):
 
 
 def test_the_banner_reaches_a_piped_stdout_before_anything_else_is_printed(monkeypatch):
-    """`irimi serve | tee` showed nothing until the first exchange forced a flush, and a serve
-    nobody talks to showed nothing at all - not the port, not the CA path, not the proxy-only
-    notice."""
+    """`irimi serve | tee` shows the banner at once, not at the first exchange's flush, so a
+    serve nobody talks to still shows the port, the CA path and the proxy-only notice."""
     visible = _startup_on_a_pipe(monkeypatch, servicemap.MapIndex())
     assert "listening on 127.0.0.1:4000" in visible
     assert "/ca.pem" in visible
@@ -574,15 +571,14 @@ def test_the_escape_hatch_warning_goes_to_stderr_flushed(monkeypatch, capsys):
 
 
 def test_serve_and_shadow_print_the_same_startup_lines(monkeypatch):
-    """They drifted once: `shadow` flushed and `serve` did not. One function now, so a future
-    line added for one is added for both."""
+    """One function prints both, so a line added for one is added for both, flushed alike."""
     import inspect
 
     source = inspect.getsource(cli)
     assert source.count("print_startup(") == 3  # the definition plus one call each
 
 
-# ------------------------------------------------- the trace store under serve and shadow (#70)
+# ------------------------------------------------- the trace store under serve and shadow
 
 
 @pytest.fixture
@@ -623,7 +619,7 @@ def _spy_on_the_store(monkeypatch, close=None):
 def test_a_redaction_key_that_cannot_be_used_stops_the_run_with_one_line(
     home, capsys, command, key
 ):
-    """A run that could not redact what it stores must not start (#69, #70), in `serve` as in
+    """A run that could not redact what it stores must not start, in `serve` as in
     `shadow`: one `error:` line, exit 1, no traceback, and no store on disk."""
     path = home / paths.REDACT_KEY_NAME
     if key == "short":
@@ -644,7 +640,7 @@ def test_a_redaction_key_that_cannot_be_used_stops_the_run_with_one_line(
 @pytest.mark.parametrize("command", ["serve", "shadow"])
 def test_a_store_that_cannot_be_written_stops_the_run_with_one_line(home, capsys, command):
     """A store that would drop every event behind one warning must not start a run that looks
-    recorded (#70), in `serve` as in `shadow`: a file, and - unless root, whom no mode stops - a
+    recorded, in `serve` as in `shadow`: a file, and - unless root, whom no mode stops - a
     read-only directory and one that cannot be created under it."""
     import os
 
@@ -663,7 +659,7 @@ def test_a_store_that_cannot_be_written_stops_the_run_with_one_line(home, capsys
 
 
 def test_shadow_stores_its_process_run_with_the_agent_and_engine_versions(home, monkeypatch):
-    """The process run's record (#70): its argv, which a replay runs again, the agent's version
+    """The process run's record: its argv, which a replay runs again, the agent's version
     from `IRIMI_AGENT_VERSION`, this irimi's version, and how the child exited."""
     from irimi.store import StoreReader
     from irimi.trace import ErrorInfo
@@ -690,7 +686,7 @@ def test_shadow_stores_its_process_run_with_the_agent_and_engine_versions(home, 
 
 
 def test_shadow_closes_the_store_when_the_proxy_never_starts(home, monkeypatch, capsys):
-    """`cli` opened the store, so `cli` closes it on every path out (#70), and not only when an
+    """`cli` opened the store, so `cli` closes it on every path out, and not only when an
     engine thread got far enough to close it for it: one that never started, or outlived
     `handle.stop()`, did not."""
     from irimi import runner
@@ -710,7 +706,7 @@ def test_shadow_closes_the_store_when_the_proxy_never_starts(home, monkeypatch, 
 
 class _ReaderGoneWhen(io.StringIO):
     """stdout, whose reader goes away once `gone` is set: every later write fails as a closed
-    pipe's does (#142)."""
+    pipe's does."""
 
     gone = False
 
@@ -722,7 +718,7 @@ class _ReaderGoneWhen(io.StringIO):
 
 @pytest.mark.parametrize("when", ["at-the-banner", "at-the-summary"])
 def test_a_reader_gone_costs_shadow_no_run_and_leaves_no_engine(home, monkeypatch, when):
-    """`irimi shadow -- cmd | head -1` (#142). A reader gone by the banner stops irimi before the
+    """`irimi shadow -- cmd | head -1`. A reader gone by the banner stops irimi before the
     command starts, so no run is stored; one gone by the summary, once the command has ended,
     finds the run ended with the command's exit code. Either way irimi exits 141 with the engine
     stopped and the store closed: the write that failed was inside the `try` whose `finally`
@@ -755,7 +751,7 @@ def test_a_reader_gone_costs_shadow_no_run_and_leaves_no_engine(home, monkeypatc
 
 
 def test_a_reader_gone_by_serve_s_banner_closes_its_store_and_releases_its_lock(home, monkeypatch):
-    """`irimi serve | head -1`, its reader gone before the banner (#142): 141, with the engine
+    """`irimi serve | head -1`, its reader gone before the banner: 141, with the engine
     stopped, the store closed and its `serve.lock` released, so the next serve may take it."""
     import threading
 
@@ -775,7 +771,7 @@ def test_a_reader_gone_by_serve_s_banner_closes_its_store_and_releases_its_lock(
 def test_a_ctrl_c_while_the_store_closes_still_prints_the_summary(home, monkeypatch, capsys):
     """The impatient second Ctrl-C of `handle.stop()` can land in the store's close as well, which
     waits up to `store.CLOSE_TIMEOUT_S` for the writer. It must not cost the summary or the
-    child's exit code (#70)."""
+    child's exit code."""
     import threading
 
     def interrupt(store):
@@ -792,7 +788,7 @@ def test_a_ctrl_c_while_the_store_closes_still_prints_the_summary(home, monkeypa
 
 
 def test_serve_prints_a_line_for_each_tool_call(home, monkeypatch, capsys):
-    """`serve` wires the control endpoint's tool calls to its stream, as it does exchanges (#76).
+    """`serve` wires the control endpoint's tool calls to its stream, as it does exchanges.
     The engine here refuses to start, so only the wiring is under test. Its `run` serves until
     `shutdown`, as a real engine's does: a `run` that returned at once would stop the loop before
     `wait_ready` ran, and the test would fail on the ready timeout instead of the refusal."""
@@ -829,9 +825,9 @@ def test_serve_prints_a_line_for_each_tool_call(home, monkeypatch, capsys):
 
 
 def test_serve_records_under_the_store_it_was_given(home, monkeypatch):
-    """`--store` on `serve` is where its exchanges go, not `$IRIMI_HOME/store` (#70). Serve mode
+    """`--store` on `serve` is where its exchanges go, not `$IRIMI_HOME/store`. Serve mode
     starts no process run, so an exchange that names no run is stored in `unattributed/` and
-    builds none (#77), and the store is closed when serve stops. Stopped by its `stop` event, as
+    builds none, and the store is closed when serve stops. Stopped by its `stop` event, as
     the sample-workflow harness stops it, rather than by a signal to the test process."""
     import threading
     import urllib.request

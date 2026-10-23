@@ -1,4 +1,4 @@
-"""A streamed answer over HTTP/2 on both sides of the proxy (#71).
+"""A streamed answer over HTTP/2 on both sides of the proxy.
 
 `tests/test_engine_mitm.py` streams over HTTP/1.1, plain and TLS, and the sample corpus has no
 TLS at all. A real provider speaks HTTP/2 to a client that offers it, and mitmproxy offers the
@@ -110,7 +110,7 @@ def _h2_through_the_proxy(cfg, proxy_port: int, upstream_port: int, gates):
 
 def test_a_stream_over_http2_on_both_sides_is_recorded_as_its_chunks(tmp_path, monkeypatch):
     """Each chunk reaches the agent before the upstream sends the next, and the exchange holds
-    the whole stream and each chunk's length, as it does over HTTP/1.1 (#71)."""
+    the whole stream and each chunk's length, as it does over HTTP/1.1."""
     cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch, STREAM_MAP))
     gates = [threading.Event(), threading.Event()]
     upstream_alpn: list = []

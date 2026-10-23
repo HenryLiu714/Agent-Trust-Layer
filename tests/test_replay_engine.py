@@ -1,4 +1,4 @@
-"""`ReplayPolicy` through a real engine (#82): a run is recorded under shadow mode into a real
+"""`ReplayPolicy` through a real engine: a run is recorded under shadow mode into a real
 `DirectoryStore`, read back, and replayed against a Stripe-shaped stub and an LLM stub on loopback,
 each of which writes down every request it is given, so a test can prove what the replay never
 sent anywhere.
@@ -364,7 +364,7 @@ def test_a_recorded_stream_answers_a_streaming_call_and_never_a_plain_one(home, 
 
 
 def test_a_secret_in_a_request_body_matches_its_placeholder_in_the_recording(home, maps, stubs):
-    """The recording holds the secret's placeholder (#69). The live call is redacted with the same
+    """The recording holds the secret's placeholder. The live call is redacted with the same
     key before it is keyed, so the same secret matches, and another does not."""
     _, llm = stubs
     url, body = _message(llm, system="The key is sk_live_REPLAYSECRET123.")
@@ -435,7 +435,7 @@ def test_the_same_write_is_answered_with_the_recorded_answer(home, maps, stubs):
     assert write.flags == ("fidelity:L1", FROM_RECORDING_FLAG)
     assert write.would_fire == ("refund.created",)
     # Stripe has never heard of the minted id, so the overlay answered its read when it was
-    # recorded (#52): it is still the overlay's answer, from the recording.
+    # recorded: it is still the overlay's answer, from the recording.
     assert (read.answered_by, read.flags, read.overlay) == (
         "overlay",
         ("fidelity:overlay", FROM_RECORDING_FLAG),
@@ -524,7 +524,7 @@ def test_a_miss_whose_upstream_then_fails_still_says_it_missed(home, maps, stubs
     """A read whose recorded upstream failed holds no answer to serve, so the replay misses and
     forwards it, and the stub hangs up again. The exchange keeps the policy's `replay-miss` beside
     the engine's `upstream-error`, as one whose upstream answered keeps it: the answer's own flags
-    are kept on every path (#82). Under shadow mode a live answer has none, and gets only its
+    are kept on every path. Under shadow mode a live answer has none, and gets only its
     `upstream-error`."""
     stripe, _ = stubs
     url = f"http://127.0.0.1:{stripe}/v1/charges/ch_RESET"
@@ -582,7 +582,7 @@ def test_an_answer_the_engine_cannot_send_fails_closed_and_forwards_nothing(home
     """A replay answers with a response read off disk, whose headers need not encode as latin-1.
     `Recording.take` keeps such a recording from being served, and the engine's own guard is
     the second half: building the response raised out of the request hook, which forwarded the
-    write (#82). It is answered as a decision that raised is."""
+    write. It is answered as a decision that raised is."""
     stripe, _ = stubs
 
     class _Unsendable:
@@ -606,7 +606,7 @@ def test_an_answer_the_engine_cannot_send_fails_closed_and_forwards_nothing(home
 def test_the_reads_an_answer_issued_are_recorded_when_it_cannot_be_sent(home, maps, stubs):
     """The decision returned, so the precondition read it made is in hand: an answer the engine
     then cannot send is refused, and that read is still recorded after the refusal, as every read
-    irimi made on the agent's behalf is (#45, #82; #86 is the decision that raises instead)."""
+    irimi made on the agent's behalf is. A decision that raises instead is a different case."""
     stripe, _ = stubs
     url = f"http://127.0.0.1:{stripe}/v1/charges/ch_REAL1"
     probe = Request("GET", "http", "127.0.0.1", stripe, "/v1/charges/ch_REAL1", "", (), b"")
@@ -642,8 +642,8 @@ def test_the_reads_an_answer_issued_are_recorded_when_it_cannot_be_sent(home, ma
 
 
 def test_a_read_the_overlay_translates_is_recorded_translated_whoever_answers_it(home, maps, stubs):
-    """A page whose cursor names the refund the run minted is translated before it is forwarded
-    (#43), and recorded so. The engine translates a read before the policy decides (#82), so a
+    """A page whose cursor names the refund the run minted is translated before it is forwarded,
+    and recorded so. The engine translates a read before the policy decides, so a
     replay looks the translated read up, records it translated too, and a replay of that replay
     finds it the same way. Neither replay sends the stub anything."""
     stripe, _ = stubs
@@ -722,7 +722,7 @@ def test_the_engine_asks_and_records_a_read_translated_and_edits_only_a_forwarde
 ):
     """The engine translates a read before the policy decides, so the policy is asked, and the
     trace records, the read as irimi would ask it whoever answers; only a read forwarded live
-    carries the translation onto the flow (#82)."""
+    carries the translation onto the flow."""
     policy, overlay = _Asked(answer), _Translating()
     decision = _decided(home, maps, policy, overlay)
     assert [r.query for r in policy.asked] == ["translated=1"]
@@ -732,7 +732,7 @@ def test_the_engine_asks_and_records_a_read_translated_and_edits_only_a_forwarde
 
 def test_the_engine_never_translates_a_delegated_read(home, tmp_path):
     """A delegated read's target owns that service's state, so the overlay never touches it,
-    on either side (D20, #43)."""
+    on either side."""
     maps_dir = tmp_path / "targeted"
     maps_dir.mkdir()
     (maps_dir / "stripe.yaml").write_text(STRIPE_MAP)
@@ -752,7 +752,7 @@ def test_the_engine_never_translates_a_delegated_read(home, tmp_path):
 def test_a_read_recorded_after_a_write_the_replay_did_not_make_goes_live(home, maps, stubs):
     """The recorded run refunded and then read the charge, which showed the refund. A replay that
     reads the charge without refunding - a prompt edit stopped it - is not shown a refund it never
-    made: the read misses, the replay diverges, and the stub answers it (#82)."""
+    made: the read misses, the replay diverges, and the stub answers it."""
     stripe, _ = stubs
 
     def refund_then_read(session):
@@ -769,9 +769,9 @@ def test_a_read_recorded_after_a_write_the_replay_did_not_make_goes_live(home, m
 
 
 def test_an_unchanged_replay_compares_the_same_as_its_recording(home, maps, stubs):
-    """What `irimi compare` and #84's diff rest on: a replay that changes nothing prints every
-    write, and the `↳` line under it, as its recording printed them, so every compared row is `=`
-    (#79, #82). The run reads the charge, refunds it, reads it again through the overlay and pages
+    """What `irimi compare` and the replay's diff rest on: a replay that changes nothing prints
+    every write, and the `↳` line under it, as its recording printed them, so every compared row
+    is `=`. The run reads the charge, refunds it, reads it again through the overlay and pages
     the refunds after the one it minted; the replay answers all of it from the recording."""
     from irimi import compare, report
 

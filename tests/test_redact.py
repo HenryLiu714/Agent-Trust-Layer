@@ -1,7 +1,7 @@
-"""Redaction before anything reaches disk (#69): one or more tests per rule in `irimi.redact`.
+"""Redaction before anything reaches disk: one or more tests per rule in `irimi.redact`.
 
 Every test builds its exchange by hand and asks `redact_exchange` or `redact_json` for the copy
-the store (#70) will write. `tests/test_trace_e2e.py` runs the same function over what a real
+the store will write. `tests/test_trace_e2e.py` runs the same function over what a real
 `irimi shadow` run hands its store.
 """
 
@@ -82,7 +82,7 @@ def test_a_placeholder_is_16_hex_digits_of_an_hmac_of_the_value_under_the_key():
 
 
 def test_the_same_secret_gives_the_same_placeholder_and_another_key_a_different_one():
-    """Design §5.3: what lets a replay match a request against its recording, and what keeps two
+    """What lets a replay match a request against its recording, and what keeps two
     installs' placeholders apart."""
     auth = "Bearer sk_test_one"
     ex = _exchange(_request(headers=(("authorization", auth),)))
@@ -161,7 +161,7 @@ def test_a_url_in_a_header_has_its_query_and_fragment_redacted_by_name():
 
 
 def test_the_credential_header_rule_is_the_one_delegation_strips_by():
-    """One statement of "this header is a credential" (#69): a target may not see it, and disk may
+    """One statement of "this header is a credential": a target may not see it, and disk may
     not see it. `delegation` re-exports it and states it nowhere else."""
     assert delegation.is_credential_header is redact.is_credential_header
     assert not hasattr(delegation, "CREDENTIAL_MARKERS")
@@ -277,7 +277,7 @@ def test_text_cut_outside_secrets_redacts_to_a_prefix_of_the_whole_redacted(secr
     """Wherever the cut falls, a key at the very start, after a space, after `_`, after each
     escape, or after a run of letters it does not follow: what it keeps, redacted, is a prefix of
     the whole redacted, so it holds no part of a key and every key it holds is its whole key's
-    placeholder (#179)."""
+    placeholder."""
     text = (
         f"{secret} refused key:\\n{secret}, retry_{secret} as %20{secret} or \\u0020{secret}; "
         f"xx{secret} {'x' * 30}."
@@ -294,7 +294,7 @@ def test_text_cut_outside_secrets_redacts_to_a_prefix_of_the_whole_redacted(secr
 def test_any_text_cut_outside_secrets_redacts_to_a_prefix_of_the_whole_redacted():
     """The same over text built at random from the pieces a shape is spelled with, its
     separators and its escapes, each cut at every length: no cut keeps a part of a key, or a
-    key's prefix that redaction would take for a key of its own (#179)."""
+    key's prefix that redaction would take for a key of its own."""
     pieces = [
         *("sk_live_", "sk_test_", "rk_test_", "whsec_", "xoxb-", "xapp-", "ghp_", "github_pat_"),
         *("AKIA", "sk-ant-", "sk-", "sk-proj-", "proj-", "A", "z", "0", "_", "-", " ", "/", "="),
@@ -326,7 +326,7 @@ def test_any_text_cut_outside_secrets_redacts_to_a_prefix_of_the_whole_redacted(
     ],
 )
 def test_a_cut_outside_secrets_moves_only_for_a_key_across_it(text, kept):
-    """The SDK cuts before irimi redacts, so its cut must never keep part of a key (#179). It is
+    """The SDK cuts before irimi redacts, so its cut must never keep part of a key. It is
     made before a key the cut would cross, and at the limit otherwise, so text with no key
     across the cut, one long word included, keeps as much as a plain cut would."""
     assert secret_shapes.cut_outside_secrets(text, 9) == kept
@@ -334,7 +334,7 @@ def test_a_cut_outside_secrets_moves_only_for_a_key_across_it(text, kept):
 
 def test_redaction_finds_the_shapes_a_cut_moves_for():
     """`redact` and `cut_outside_secrets` read one compiled pattern, so a shape added for one is
-    a shape the other knows (#179)."""
+    a shape the other knows."""
     assert redact.SECRET_SHAPE is secret_shapes.SECRET_SHAPE
 
 
@@ -591,7 +591,7 @@ LAST = b'data: {"text":"bye"}\n'
 
 
 def _stream(body: bytes, chunks: tuple[int, ...]) -> Exchange:
-    """`redact_exchange`'s copy of a live read whose body streamed as `chunks` (#71)."""
+    """`redact_exchange`'s copy of a live read whose body streamed as `chunks`."""
     assert sum(chunks) == len(body)
     response = Response(status=200, headers=(SSE,), body=body)
     return redact_exchange(_exchange(response=response, stream_chunks=chunks), KEY)
@@ -599,7 +599,7 @@ def _stream(body: bytes, chunks: tuple[int, ...]) -> Exchange:
 
 def test_a_streamed_body_s_chunks_are_recomputed_over_the_redacted_body_line_by_line():
     """A boundary in a line redaction left alone keeps its place, and one inside a line it
-    changed moves to that line's end: a JSON `data:` line is re-serialized whole (#71)."""
+    changed moves to that line's end: a JSON `data:` line is re-serialized whole."""
     sent = QUIET + b"\n" + LOUD + b"\n" + LAST
     chunks = (10, len(QUIET) - 10 + 1 + 15, len(LOUD) - 15 + 1 + 5, len(LAST) - 5)
     stored = _stream(sent, chunks)
@@ -615,7 +615,7 @@ def test_a_streamed_body_s_chunks_are_recomputed_over_the_redacted_body_line_by_
 
 def test_a_secret_split_across_two_chunks_is_redacted_whole():
     """The joined body is redacted, never chunk by chunk: a key cut in two by a chunk boundary is
-    one secret on one line, and neither half reaches disk (#71)."""
+    one secret on one line, and neither half reaches disk."""
     cut = LOUD.index(b"abc123")
     stored = _stream(LOUD, (cut, len(LOUD) - cut))
     assert stored.response is not None
@@ -674,7 +674,7 @@ def test_every_split_of_a_stream_still_splits_its_redacted_body():
 
 def test_a_boundary_between_a_carriage_return_and_its_line_feed_stays_in_that_line():
     """CRLF is one line end, so a boundary between its CR and LF is inside the line: kept there
-    when redaction left the line alone, moved past the LF when it changed it (#71)."""
+    when redaction left the line alone, moved past the LF when it changed it."""
     quiet, loud, loud_stored = (line.replace(b"\n", b"\r\n") for line in (QUIET, LOUD, LOUD_STORED))
     sent = quiet + loud + LAST
     chunks = (len(quiet) - 1, len(loud), len(LAST) + 1)  # after each CR, before its LF
@@ -687,7 +687,7 @@ def test_a_boundary_between_a_carriage_return_and_its_line_feed_stays_in_that_li
 
 def test_rechunk_never_raises_and_still_splits_the_stored_body():
     """Chunks that do not add up to the body - no engine hands redaction those - are still no
-    reason to raise on the writer thread: the stored body is one chunk (#71)."""
+    reason to raise on the writer thread: the stored body is one chunk."""
     assert redact._rechunk(QUIET + LOUD, QUIET + LOUD_STORED, (1, 999, 5)) == (
         len(QUIET + LOUD_STORED),
     )
@@ -736,11 +736,11 @@ def _random_stream(rng) -> bytes:
 
 
 def test_any_split_of_any_stream_is_carried_over_to_its_redacted_body():
-    """#71's rule, restated boundary by boundary over seeded random streams cut at random bytes -
-    inside a secret, inside a character, between a CR and its LF, one byte from either end: the
-    stored chunks are positive and add up to the stored body, a boundary in a line redaction left
-    alone keeps its offset in it, one in a line it changed moves to that line's end, and there is
-    no other boundary."""
+    """The stream-chunk rule, restated boundary by boundary over seeded random streams cut at
+    random bytes - inside a secret, inside a character, between a CR and its LF, one byte from
+    either end: the stored chunks are positive and add up to the stored body, a boundary in a line
+    redaction left alone keeps its offset in it, one in a line it changed moves to that line's
+    end, and there is no other boundary."""
     rng = random.Random(71)
     for _ in range(1000):
         sent = _random_stream(rng)
@@ -962,7 +962,7 @@ def test_a_key_path_that_is_not_a_regular_file_is_refused(tmp_path):
 
 def test_a_symlinked_key_is_followed_so_two_installs_can_share_one(tmp_path):
     """A key mounted from elsewhere (a Kubernetes Secret volume is a tree of symlinks) is this
-    install's key, and it is read, never replaced (#69)."""
+    install's key, and it is read, never replaced."""
     shared = tmp_path / "secret" / "redact.key"
     shared.parent.mkdir()
     shared.write_bytes(b"k" * 32)
@@ -1005,7 +1005,7 @@ print(redact.load_key(home).hex())
 
 
 def test_load_key_raced_by_separate_processes_gives_each_the_one_0600_key(tmp_path):
-    """#69's "if creation loses a race with another process, it reads the winner's file", between
+    """A key creation that loses a race with another process reads the winner's file, between
     processes. Eight interpreters, released together against one home that does not exist yet,
     all read back the one key: 32 bytes, the file mode 0600, and no temporary file left behind."""
     home = tmp_path / "fresh-home"

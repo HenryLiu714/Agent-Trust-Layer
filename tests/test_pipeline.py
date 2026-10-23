@@ -284,7 +284,7 @@ def test_attribute_run_blank_header_uses_default():
 @pytest.mark.parametrize("value", ["../x", "", "a" * 65, "a b"])
 def test_attribute_run_treats_an_invalid_run_id_as_absent(value):
     """A run id becomes a directory name in the trace store, so one `trace.is_valid_run_id`
-    refuses never names a run (#68)."""
+    refuses never names a run."""
     assert attribute_run(_req(headers=(("irimi-run", value),)), "dflt") == "dflt"
 
 
@@ -300,14 +300,14 @@ def test_annotate_carries_the_callers_timestamps():
 
 
 def test_annotate_never_ends_an_exchange_before_it_started():
-    """The wall clock can step back mid-exchange; a stored run's reader subtracts the two (#68)."""
+    """The wall clock can step back mid-exchange; a stored run's reader subtracts the two."""
     cls = Classification("api.stripe.com", "GET /v1/charges", "read", ())
     ex = annotate(_req(), None, cls, "live", "7f3a", started_at=2.25, ended_at=1.5)
     assert (ex.started_at, ex.ended_at) == (2.25, 2.25)
 
 
 def test_attribute_run_compares_the_header_name_case_insensitively():
-    """As `header_value` does: a `Request` built outside `parse` keeps its spelling (#68)."""
+    """As `header_value` does: a `Request` built outside `parse` keeps its spelling."""
     assert attribute_run(_req(headers=(("Irimi-Run", "run_A-1"),)), "dflt") == "run_A-1"
 
 
@@ -383,7 +383,7 @@ def test_detect_door_resolves_unknown_name_on_own_port(monkeypatch):
 
 
 def test_detect_door_takes_the_address_the_connection_arrived_on_as_this_machine(monkeypatch):
-    """Bound wider than loopback, the listener is also the address it was reached at (#77). That
+    """Bound wider than loopback, the listener is also the address it was reached at. That
     address on irimi's port, in either spelling a dual-stack socket reports, is the reverse door;
     so is a name that resolves to it, as `irimi` does from another container. Another address,
     another port, or no local address at all is still the forward door."""
@@ -528,7 +528,7 @@ def test_annotate_records_reverse_door():
     assert ex.door == "reverse"
 
 
-# ------------------------------------------------- the llm, telemetry and webhook maps (#8/#9/#10)
+# ------------------------------------------------- the llm, telemetry and webhook maps
 
 
 def _shipped(tmp_path, monkeypatch, method: str, host: str, path: str) -> Classification:
@@ -544,7 +544,7 @@ def test_openai_inference_routes_are_llm(tmp_path, monkeypatch):
 
 def test_openai_models_listing_is_a_read_not_llm(tmp_path, monkeypatch):
     """A models listing is not inference. `llm` also opted the path out of the read overlay,
-    which the engine gates on `kind: read`, so it could never be overlaid either (#29)."""
+    which the engine gates on `kind: read`, so it could never be overlaid either."""
     cls = _shipped(tmp_path, monkeypatch, "GET", "api.openai.com", "/v1/models")
     assert (cls.operation, cls.kind) == ("models.list", "read")
 
@@ -583,7 +583,7 @@ def test_an_unlisted_anthropic_write_is_unknown_and_flagged(tmp_path, monkeypatc
 
 
 def test_a_sentry_project_subdomain_classifies_through_the_wildcard(tmp_path, monkeypatch):
-    """The test issue #9 asks for: a wildcard in a shipped map really resolves a subdomain."""
+    """A wildcard in a shipped map really resolves a subdomain."""
     cls = _shipped(tmp_path, monkeypatch, "POST", "o0.ingest.sentry.io", "/api/7/envelope/")
     assert (cls.service, cls.operation, cls.kind) == ("sentry", "envelope.send", "telemetry")
     assert cls.flags == ()
@@ -601,7 +601,7 @@ def test_a_posthog_regional_host_classifies(tmp_path, monkeypatch):
 def test_a_region_qualified_sentry_ingest_host_classifies(tmp_path, monkeypatch, host):
     """Sentry split ingest by region in 2024. `*.ingest.sentry.io` misses `…ingest.us.sentry.io`
     entirely, so every DSN issued in roughly the last two years classified as `unknown` and the
-    summary said `unclassified` where it should have said `telemetry` (#25)."""
+    summary said `unclassified` where it should have said `telemetry`."""
     cls = _shipped(tmp_path, monkeypatch, "POST", host, "/api/4507/envelope/")
     assert (cls.service, cls.operation, cls.kind) == ("sentry", "envelope.send", "telemetry")
     assert cls.flags == ()
@@ -609,7 +609,7 @@ def test_a_region_qualified_sentry_ingest_host_classifies(tmp_path, monkeypatch,
 
 def test_the_sentry_web_app_is_not_claimed_by_the_ingest_map(tmp_path, monkeypatch):
     """Why three ingest patterns and not one `*.sentry.io`: sentry.io is also the web app, whose
-    REST control plane would then inherit the telemetry service and be forwarded live (#25).
+    REST control plane would then inherit the telemetry service and be forwarded live.
 
     The probe is a **subdomain**, not the bare host. A `*.x` pattern is keyed `.x` and matched
     with `endswith`, so bare `sentry.io` misses `*.sentry.io` too - probing it is probing the one
@@ -627,7 +627,7 @@ def test_the_sentry_web_app_is_not_claimed_by_the_ingest_map(tmp_path, monkeypat
 
 def test_one_posthog_pattern_covers_the_regional_ingest_hosts(tmp_path, monkeypatch):
     """`*.posthog.com` matches one *or more* leading labels, so the second `*.i.posthog.com`
-    pattern resolved to the same map and matched nothing the shorter one missed (#29)."""
+    pattern resolved to the same map and matched nothing the shorter one missed."""
     index = _index(tmp_path, monkeypatch)
     assert index.by_suffix.get(".i.posthog.com") is None
     for host in ("eu.i.posthog.com", "us.i.posthog.com", "eu.posthog.com"):
@@ -652,9 +652,9 @@ def test_one_posthog_pattern_covers_the_regional_ingest_hosts(tmp_path, monkeypa
     ],
 )
 def test_a_regional_telemetry_host_classifies(tmp_path, monkeypatch, host, path, operation):
-    """The silent-never-matches class again, one vendor set further along than #25: a host the
-    map does not claim is not an error, it is intake that gets faked instead of forwarded, and
-    nothing in the output says the map did nothing (#34)."""
+    """A pattern that silently never matches, for regional telemetry hosts: a host the map does
+    not claim is not an error, it is intake that gets faked instead of forwarded, and
+    nothing in the output says the map did nothing."""
     cls = _shipped(tmp_path, monkeypatch, "POST", host, path)
     assert (cls.operation, cls.kind, cls.flags) == (operation, "telemetry", ())
 
@@ -662,7 +662,7 @@ def test_a_regional_telemetry_host_classifies(tmp_path, monkeypatch, host, path,
 def test_the_regional_telemetry_patterns_do_not_claim_their_vendors_web_apps(tmp_path, monkeypatch):
     """Why exact hosts for Honeycomb and LangSmith and patterns only for Datadog: the two `.io` /
     `.com` names are shared with a web app and a control plane, and `*.honeycomb.io` or
-    `*.smith.langchain.com` would hand those to a live-forwarded service (#25, #34).
+    `*.smith.langchain.com` would hand those to a live-forwarded service.
 
     Probed with subdomains, not bare hosts: a `*.x` pattern is keyed `.x` and matched with
     `endswith`, so the bare host misses an over-broad pattern too and would pass either way.
@@ -732,7 +732,7 @@ def test_a_webhook_url_of_another_shape_still_falls_back_to_unknown(tmp_path, mo
     assert cls.flags == ("unclassified",)
 
 
-# ------------------------------------------------------------------ answer targets (#16, D20)
+# ------------------------------------------------------------------ answer targets
 
 
 @pytest.mark.parametrize(
@@ -769,7 +769,7 @@ def test_target_url_follows_proxy_pass_path_semantics(target, path, query, match
 
 def test_a_target_on_our_own_listener_is_refused():
     """Targets are loopback-only, so the host cannot tell a stub from us - the port can. Dialling
-    our own listener is the self-connection loop the reverse door was fixed for in #4."""
+    our own listener is the self-connection loop the reverse door also refuses."""
     with pytest.raises(TargetRefused) as exc:
         refuse_self_target("http://127.0.0.1:4000", 4000)
     assert "own listener" in str(exc.value)
@@ -785,7 +785,7 @@ def test_a_target_on_another_port_is_allowed():
 
 def test_a_target_naming_the_address_irimi_was_reached_at_is_refused(monkeypatch):
     """Bound wider than loopback, irimi is also the address a connection reached it at, and a
-    name resolving to it, as `detect_door` says of a request (#77). A target there, which only
+    name resolving to it, as `detect_door` says of a request. A target there, which only
     `--allow-target-host` lets off loopback, is irimi's own listener too: refused as one, never
     dialled to be refused again by the reverse door."""
     import socket
@@ -808,7 +808,7 @@ def test_a_target_naming_the_address_irimi_was_reached_at_is_refused(monkeypatch
 def test_classify_reports_the_service_map_even_when_no_route_matched(tmp_path, monkeypatch):
     """A service-level target has to reach the routes its own map does not list, and for those
     `matched` is None. Without this field the policy could not tell "unmapped host" from
-    "mapped host, unlisted route" (#16)."""
+    "mapped host, unlisted route"."""
     index = _index(tmp_path, monkeypatch)
     listed = classify(replace(_req("POST"), path="/v1/refunds"), index)
     assert listed.matched is not None
@@ -830,7 +830,7 @@ def test_annotate_records_the_target():
 
 def test_annotate_carries_would_fire_and_defaults_to_empty():
     """The webhooks an accepted write would have sent ride the same path `precondition` and
-    `target` do (#47)."""
+    `target` do."""
     assert annotate(_req(), None, classify(_req()), "fake-L1", "7f3a").would_fire == ()
     carried = annotate(
         _req(), None, classify(_req()), "fake-L1", "7f3a", would_fire=("refund.created",)
@@ -841,8 +841,8 @@ def test_annotate_carries_would_fire_and_defaults_to_empty():
 def test_a_hash_in_the_request_path_survives_the_target_url():
     """The policy->engine seam is a URL *string*, so the engine splits it again to rewrite the
     flow. A literal `#` in a request target is legal and means nothing there, but `urlsplit`
-    reads it as a fragment: `POST /unlisted#x?a=1` reached the target as `/unlisted` with no
-    query at all, and `Exchange.target` recorded a URL that was never sent (#16 review D-4)."""
+    reads it as a fragment: unescaped, `POST /unlisted#x?a=1` would reach the target as
+    `/unlisted` with no query at all, and `Exchange.target` would record a URL never sent."""
     req = replace(_req("POST"), path="/unlisted#x", query="a=1")
     url = target_url("http://127.0.0.1:3000", req, matched=False)
     parts = urlsplit(url)
@@ -858,9 +858,9 @@ def test_a_live_kind_is_downgraded_when_the_route_did_not_name_the_method():
     """THE SCOPE RULE, decision half. The loader refuses this configuration, so nothing can reach
     the classifier this way today - which is the point. The rule is asked of the request in front
     of us, so a live kind arriving by a route the loader does not police is answered locally
-    instead of performed on the real service (#30, #31).
+    instead of performed on the real service.
 
-    The map is built here rather than loaded, because the loader now refuses to produce one.
+    The map is built here rather than loaded, because the loader refuses to produce one.
     """
     from irimi.servicemap import MapIndex, Route, ServiceMap
 

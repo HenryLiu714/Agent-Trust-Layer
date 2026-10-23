@@ -14,7 +14,7 @@ from irimi import redact, report
 from irimi.exchange import Exchange
 
 W = "w05_dispute_responder"
-# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi (#77).
+# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.
 MODES = ("shadow", "serve")
 
 
@@ -57,7 +57,7 @@ def test_the_intents_client_secret_reaches_the_agent_and_only_its_placeholder_re
 ):
     """Reads are real, so the agent is handed the payment intent's real `client_secret`. The store
     keeps that live read's response with the secret swapped for its placeholder and nothing else
-    changed (#69, #70), and invariant 4 finds the canary in no file under irimi's home. The one
+    changed, and invariant 4 finds the canary in no file under irimi's home. The one
     corpus response that carries a credential: every other canary is one the agent sends."""
     shadow = run_workflow(W, "over_threshold", mode)
     path = "/v1/payment_intents/pi_BIG"
@@ -112,10 +112,10 @@ def test_the_refunds_own_charge_refunded_event_is_a_second_run_with_no_calls(run
     assert [r["name"] for r in runs] == ["on_event", "on_event"]
     assert {c["run"] for c in shadow.calls()} == {runs[0]["run"]}
     # The second run is built from irimi's minted refund: in production this event would never
-    # arrive for a shadowed refund. Phase 4's would-have-fired list is where it shows instead.
+    # arrive for a shadowed refund. The summary's would-have-fired list is where it shows instead.
     refund_id = shadow.events("refund")[0]["id"]
     assert shadow.events("event")[1]["id"] == f"evt_refunded_{refund_id}"
-    # The event fed back is one irimi says the refund would have fired (#47).
+    # The event fed back is one irimi says the refund would have fired.
     assert shadow.summary()[-1] == (
         "  These writes did not happen. Would have fired: customer.updated, refund.created, "
         "charge.refunded."
@@ -123,7 +123,7 @@ def test_the_refunds_own_charge_refunded_event_is_a_second_run_with_no_calls(run
 
 
 def test_under_serve_the_cascade_is_two_runs_and_two_summaries_the_second_empty(run_workflow):
-    """Under `irimi shadow --serve` (#77) each delivery is its own run, printed when it ends: the
+    """Under `irimi shadow --serve` each delivery is its own run, printed when it ends: the
     dispute's run with its three faked writes and what they would have fired, and the fed-back
     `charge.refunded`'s run with no calls at all."""
     serve = run_workflow(W, "cascade", "serve")
@@ -176,8 +176,8 @@ def test_a_replayed_event_id_is_handled_once(run_workflow):
 
 @pytest.mark.parametrize("mode", MODES)
 def test_the_raw_webhook_body_is_stored_as_the_triggers_bytes_and_is_replayable(run_workflow, mode):
-    """#74's capture of `bytes`: `on_event(raw, signature)` stores the body it verified as
-    `__irimi_bytes__`, which replay (#84) can hand back byte for byte."""
+    """A `bytes` argument is captured whole: `on_event(raw, signature)` stores the body it verified
+    as `__irimi_bytes__`, which replay can hand back byte for byte."""
     shadow = run_workflow(W, "over_threshold", mode)
     [run] = shadow.sdk_runs()
     assert run.trigger is not None and run.trigger.replayable
@@ -190,7 +190,7 @@ def test_the_raw_webhook_body_is_stored_as_the_triggers_bytes_and_is_replayable(
     assert (event["id"], event["type"]) == ("evt_dp_BIG", "charge.dispute.created")
 
 
-# ---------------------------------------------------------------------- irimi compare (#79)
+# ---------------------------------------------------------------------- irimi compare
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -237,12 +237,12 @@ def test_irimi_compare_cannot_tell_two_refunds_of_the_rest_of_a_charge_apart(
     assert rows_not_shown(rest, a, b, out) == []
 
 
-# ------------------------------------------------------------------------------- replay (#84)
+# ------------------------------------------------------------------------------- replay
 
 
 def test_the_raw_webhook_body_is_revived_as_bytes_and_the_trigger_replays(replayed):
-    """`on_event(raw, signature)` is given the webhook's raw body, which #74 captures as
-    `__irimi_bytes__`, and `irimi replay` revives as the same bytes (`capture.revive`, #84): the
+    """`on_event(raw, signature)` is given the webhook's raw body, which the SDK captures as
+    `__irimi_bytes__`, and `irimi replay` revives as the same bytes (`capture.revive`): the
     trigger, called alone, verifies the same signature over them, handles the same dispute, and is
     answered from its recording, so nothing reaches the fake internet and the writes are the
     same."""

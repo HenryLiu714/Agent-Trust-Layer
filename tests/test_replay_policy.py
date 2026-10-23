@@ -1,4 +1,4 @@
-"""`recording.Recording` and `policy.ReplayPolicy` over hand-built stored runs (#82).
+"""`recording.Recording` and `policy.ReplayPolicy` over hand-built stored runs.
 
 A stored run here is a list of `Exchange`s, as `StoredRun.events` holds them: the store redacts
 before it writes, so a recorded body that held a secret holds its placeholder, which `_stored`
@@ -145,7 +145,7 @@ def test_the_query_is_compared_as_its_pairs_in_any_order():
 
 def test_the_method_decides_a_match_between_two_requests_of_one_kind():
     """A GET and a HEAD of one charge are both reads of it, with no body, but a HEAD's answer has
-    no body: the recorded GET's must never answer it (#82)."""
+    no body: the recorded GET's must never answer it."""
     recording = _recording(_stored(_req()))
     assert classify(_req("HEAD"), SHIPPED).kind == classify(_req(), SHIPPED).kind
     assert recording.take(_req("HEAD"), classify(_req("HEAD"), SHIPPED).kind) is None
@@ -198,8 +198,8 @@ def test_a_form_body_and_a_json_body_with_the_same_fields_are_the_same_write():
 
 
 def test_a_number_respelled_by_redaction_still_matches():
-    """A JSON body a redaction rule changed is stored compactly re-serialized, `1.10` as `1.1`
-    (#69). The key compares parsed JSON, never stored bytes against live bytes."""
+    """A JSON body a redaction rule changed is stored compactly re-serialized, `1.10` as `1.1`.
+    The key compares parsed JSON, never stored bytes against live bytes."""
     body = b'{"amount": 1.10, "password": "hunter2"}'
     stored = _stored(_req("POST", path="/v1/refunds", body=body, ct=JSON))
     assert b"1.10" not in stored.request.body
@@ -351,7 +351,7 @@ def test_a_recorded_read_is_served_as_it_was_recorded():
 def test_an_answer_from_the_recording_is_what_it_was_and_says_where_it_came_from():
     """A read the overlay edited is still the overlay's, its fidelity carried, so the summary
     hangs its `↳` line under the write again. One the service answered is `recording`: irimi
-    answered it this time, from disk. Both carry `from-recording` (#82)."""
+    answered it this time, from disk. Both carry `from-recording`."""
     edited = _stored(_req(), answered_by="overlay", flags=("fidelity:overlay",), overlay="full")
     answer = _answer(ReplayPolicy(_recording(edited), SHIPPED), _req())
     assert (answer.answered_by, answer.flags, answer.overlay) == (
@@ -492,7 +492,7 @@ def test_a_write_miss_ends_serving_reads_and_an_llm_miss_does_not():
 
 def test_an_llm_call_is_still_answered_from_the_recording_once_the_replay_has_diverged():
     """An llm call shows no world irimi made: what it asks is in its key, so a write that missed
-    changes it only by changing what the agent sends (#82)."""
+    changes it only by changing what the agent sends."""
     recording = _recording(_recorded_refund(), _stored(_llm()))
     policy = ReplayPolicy(recording, SHIPPED)
     assert REPLAY_MISS_FLAG in _answer(policy, _refund(250)).flags
@@ -503,7 +503,7 @@ def test_an_llm_call_is_still_answered_from_the_recording_once_the_replay_has_di
 
 def test_an_unknown_request_that_misses_is_faked_and_the_replay_diverges():
     """An unknown request is answered as a write is: faked, never forwarded, and, missed, a
-    change to the world the recording's reads no longer show (#82)."""
+    change to the world the recording's reads no longer show."""
     unknown = _req("POST", path="/v1/not_a_route", body=b"a=1", ct=FORM)
     assert classify(unknown, SHIPPED).kind == "unknown"
     policy = ReplayPolicy(_recording(_stored(_req())), SHIPPED)
@@ -515,7 +515,7 @@ def test_an_unknown_request_that_misses_is_faked_and_the_replay_diverges():
 
 def test_a_matched_write_holds_its_idempotency_key_for_a_retry_that_misses():
     """Stripe refuses a key reused for a different write. A replay answered the first from the
-    recording, so it is the replay's store that has to remember the key (#46)."""
+    recording, so it is the replay's store that has to remember the key."""
     policy = ReplayPolicy(_recording(_recorded_refund()), SHIPPED)
     assert FROM_RECORDING_FLAG in _answer(policy, _refund(key="k-9")).flags
     answer = _answer(policy, _refund(amount=250, key="k-9"))
@@ -556,7 +556,7 @@ def test_a_matcher_that_raises_decides_a_miss(monkeypatch):
 
 def test_a_tool_lookup_that_raises_is_a_miss(monkeypatch):
     """The control endpoint answers inside a hook, so the policy's lookup never raises: the tool
-    runs for real instead (#83). Shadow mode answers no tool from anything."""
+    runs for real instead. Shadow mode answers no tool from anything."""
 
     def broken(*args, **kwargs):
         raise RuntimeError("the matcher broke")
@@ -569,7 +569,7 @@ def test_a_tool_lookup_that_raises_is_a_miss(monkeypatch):
 
 def test_a_write_irimi_refused_in_the_recording_is_decided_afresh():
     """A write whose body decoded past the cap was refused with irimi's own 502 and recorded with
-    an empty body (#94). That refusal is not an answer to give the write again."""
+    an empty body. That refusal is not an answer to give the write again."""
     refusal = Response(
         502, (("content-type", JSON),), b'{"error": {"type": "irimi_decision_failed"}}'
     )
@@ -592,7 +592,7 @@ def test_the_policy_is_named_replay():
 
 def test_a_recorded_header_the_engine_cannot_send_is_a_miss():
     """irimi's writer stores headers it read as latin-1, but a run from elsewhere may hold any
-    text, and a header mitmproxy cannot encode would raise in the request hook (#82)."""
+    text, and a header mitmproxy cannot encode would raise in the request hook."""
     odd = Response(200, (("content-type", JSON), ("x-note", "€")), b"{}")
     recording = _recording(_stored(_req(), odd), _stored(_req()))
     assert recording.take(_req(), "read") is None
@@ -602,12 +602,12 @@ def test_a_recorded_header_the_engine_cannot_send_is_a_miss():
 @pytest.mark.parametrize("status", [42, 100, 101, 600, 999])
 def test_a_recorded_status_no_response_can_carry_is_a_miss(status):
     """A 1xx is never a final answer, and a 101 switched the recorded connection to a protocol a
-    replay cannot carry on; past 599 is no status HTTP defines (#82)."""
+    replay cannot carry on; past 599 is no status HTTP defines."""
     assert _recording(_stored(_req(), replace(OK, status=status))).take(_req(), "read") is None
 
 
 def test_an_empty_event_stream_200_recorded_before_streams_were_kept_is_a_miss():
-    """Before #71 a streamed answer was stored with an empty body and no chunks."""
+    """A streamed answer stored with an empty body and no chunks is not a recorded stream."""
     empty = Response(200, (("content-type", "text/event-stream"),), b"")
     recording = _recording(_stored(_llm(stream=True), empty))
     assert recording.take(_llm(stream=True), "llm") is None
@@ -643,12 +643,12 @@ def test_a_precondition_read_is_the_first_the_recording_can_serve():
     assert RecordingReader(_recording(failed, good))(_req()) == good.response
 
 
-# ----------------------------------------------------------------------- policy, after review
+# ------------------------------------------------- divergence, recorded writes and their reads
 
 
 def test_a_replay_diverges_for_the_whole_engine():
     """A replay is one run against one engine, whose write log is the engine's: a write that
-    missed is in the world every later read is shown, whichever run asks (#82). Serve mode, many
+    missed is in the world every later read is shown, whichever run asks. Serve mode, many
     runs at once, refuses to replay (`tests/test_cli.py`)."""
     recording = _recording(_stored(_req()), _stored(_req()))
     policy = ReplayPolicy(recording, SHIPPED)
@@ -666,7 +666,7 @@ def test_a_recorded_write_irimi_did_not_fake_is_never_answered_again():
 
 def test_a_reader_that_says_nothing_answers_live_and_the_recording_s_says_so():
     """`reader.answered_as` is the one rule for what a precondition read is recorded as: a reader
-    that names nothing, as any plain callable, is live (#82)."""
+    that names nothing, as any plain callable, is live."""
     for answered in (True, False):
         assert answered_as(lambda request: None, answered) == ("live", ())
         assert answered_as(UpstreamReader(), answered) == ("live", ())
@@ -710,9 +710,9 @@ def test_a_recorded_write_that_was_refused_is_not_one_a_later_read_shows():
 
 def test_a_recorded_write_irimi_could_not_decide_about_is_not_one_a_later_read_shows():
     """A write whose body decoded past the cap was refused with irimi's own 502 before any policy
-    was asked (#94), and the engine never put it in the write log. A replay refuses it the same
+    was asked, and the engine never put it in the write log. A replay refuses it the same
     way, so no policy is asked about it then either: counted among the recorded writes, it was
-    never made, and the read after it missed and diverged an unchanged replay (#82)."""
+    never made, and the read after it missed and diverged an unchanged replay."""
     refusal = Response(
         502, (("content-type", JSON),), b'{"error": {"type": "irimi_decision_failed"}}'
     )
@@ -766,7 +766,7 @@ TOO_LARGE = Response(400, (("content-type", JSON),), b'{"error": {"code": "amoun
 def test_a_retry_never_takes_the_answer_to_a_second_distinct_write():
     """The recorded run made two refunds; this one retries its first. Stripe answers the retry
     with the first refund again, so the recorded second refund - another minted id, a second entry
-    in the write log - is not its answer (#46, #82)."""
+    in the write log - is not its answer."""
     second = replace(REFUND_ANSWER, body=b'{"id": "re_RECORDED2", "amount": 100}')
     recording = _recording(_recorded_keyed(100, "k1"), _recorded_keyed(100, "k2", second))
     policy = ReplayPolicy(recording, SHIPPED)
@@ -779,7 +779,7 @@ def test_a_retry_never_takes_the_answer_to_a_second_distinct_write():
 def test_a_fresh_write_never_takes_a_recorded_retry():
     """The recorded run retried its refund; this one makes a second refund with a new key. Stripe
     makes a second refund, so the recorded retry - the first refund's bytes, kept out of the write
-    log - is not its answer (#46, #82)."""
+    log - is not its answer."""
     retried = _recorded_keyed(100, "k1", flags=(FIDELITY_L1_FLAG, IDEMPOTENT_REPLAY_FLAG))
     policy = ReplayPolicy(_recording(_recorded_keyed(100, "k1"), retried), SHIPPED)
     assert FROM_RECORDING_FLAG in _answer(policy, _keyed_refund(100, "k1")).flags
@@ -801,7 +801,7 @@ def test_a_recorded_retry_answers_the_same_retry():
 
 def test_a_key_reused_for_another_write_is_refused_whatever_the_recording_holds():
     """The recording holds a refund of 100. This run sent a refund of 250 under key `k`, then the
-    refund of 100 under the same key, which Stripe refuses with `idempotency_error` (#46)."""
+    refund of 100 under the same key, which Stripe refuses with `idempotency_error`."""
     policy = ReplayPolicy(_recording(_recorded_keyed(100, "k-recorded")), SHIPPED)
     assert REPLAY_MISS_FLAG in _answer(policy, _keyed_refund(250, "k")).flags
     reused = _answer(policy, _keyed_refund(100, "k"))
@@ -814,7 +814,7 @@ def test_a_key_reused_for_another_write_is_refused_whatever_the_recording_holds(
 def test_a_checked_write_recorded_after_a_write_the_replay_has_not_made_is_checked_again():
     """The recorded run refunded 1000 of a 4900 charge, so its refund of 4900 was refused. This
     run never refunded the 1000, and against the recording's own read of the charge its 4900 is
-    taken (#45, #82)."""
+    taken."""
     engine = _stored(_req(), CHARGE, issued_by="engine")
     first = _recorded_keyed(1000, "a", precondition="passed")
     refused = _recorded_keyed(
@@ -830,7 +830,7 @@ def test_a_checked_write_recorded_after_a_write_the_replay_has_not_made_is_check
 def test_a_checked_write_after_the_replay_diverged_is_checked_again():
     """This run refunded 2000 first, which the recorded run never did, so the recorded refund of
     4900 passed against a charge this run has already refunded part of. Checked again, against the
-    recording's read of the charge and this run's write log, it is refused (#45, #82)."""
+    recording's read of the charge and this run's write log, it is refused."""
     engine = _stored(_req(), CHARGE, issued_by="engine")
     recorded = _recorded_keyed(4900, "a", precondition="passed")
     policy = ReplayPolicy(_recording(engine, recorded), SHIPPED)
@@ -899,7 +899,7 @@ def test_a_request_in_another_account_is_another_request():
     assert recording.take(replace(_refund(), headers=_refund().headers + in_a), "write")
 
 
-# ----------------------------------------------------------------- read tool calls (#83)
+# ----------------------------------------------------------------- read tool calls
 
 
 def _tool(
@@ -953,7 +953,7 @@ def test_a_secret_in_the_args_matches_the_placeholder_the_recording_holds():
 
 def test_args_redaction_cannot_read_match_nothing():
     """`redact_json` says `<redaction-failed>` for any value it cannot redact, so two different
-    such args would compare equal: neither side's is ever matched (#69)."""
+    such args would compare equal: neither side's is ever matched."""
     recording = _recording(_tool(args={"a": 1}))
     assert recording.take_tool_call("db.balance", ("not", "json")) is None  # type: ignore[arg-type]
     unreadable = replace(_tool(), args=redact.REDACTION_FAILED)
@@ -975,7 +975,7 @@ def test_a_recorded_call_that_raised_is_answered_with_its_error():
 
 
 def test_a_write_tool_call_is_never_an_answer_and_never_holds_a_read_back():
-    """With no tool overlay (#119), no recorded read shows what a write tool's stand-in did, so a
+    """With no tool overlay, no recorded read shows what a write tool's stand-in did, so a
     recorded write tool the replay never calls changes nothing."""
     write = _tool(name="db.debit", kind="write", ran="shadow")
     recording = _recording(write, _tool(), _stored(_req()))
@@ -1060,7 +1060,7 @@ def test_a_read_tool_call_within_an_answered_one_s_span_that_none_repeats_still_
     the agent awaits another): the shorter is within the longer one's span, though its body never
     called it. A replay that answers the longer one first must still answer the shorter from its
     own recorded call: no later call of its name and args is there for that one to answer in its
-    place, so using it up would only make the shorter a miss, decided by which lookup won (#83)."""
+    place, so using it up would only make the shorter a miss, decided by which lookup won."""
     alongside = _tool(name="db.owner", result={"owner": "a"}, span=(10.2, 10.4))
     longer = _tool(span=(10.0, 11.0))
     recording = _recording(alongside, longer)
@@ -1095,7 +1095,7 @@ def test_a_recorded_tool_redaction_could_not_read_uses_up_nothing_its_body_made(
 
 def test_a_recorded_error_whose_message_redaction_could_not_read_is_a_miss_in_its_place():
     """The store keeps such a message as `<redaction-failed>`, which the replay would raise as the
-    recorded error's message (#69)."""
+    recorded error's message."""
     error = ErrorInfo("builtins.KeyError", redact.REDACTION_FAILED)
     recording = _recording(_tool(error=error), _tool(result={"balance": 2}))
     assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is None
@@ -1115,7 +1115,7 @@ def test_a_recorded_error_whose_message_redaction_could_not_read_is_a_miss_in_it
 )
 def test_a_recorded_tool_with_no_outcome_to_give_leaves_its_body_s_http_to_answer_it(result, error):
     """A result that describes a value is not the value, and a call stopped from outside recorded
-    no outcome of its own, so the SDK runs the body for real (#83). The lookup is a miss in its
+    no outcome of its own, so the SDK runs the body for real. The lookup is a miss in its
     place, so the body's read and its write are answered from the recording as when recorded, and
     the replay does not diverge."""
     read = _stored(_req(), started_at=10.2, ended_at=10.3)

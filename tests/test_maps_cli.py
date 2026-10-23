@@ -67,7 +67,7 @@ routes:
 
 def test_maps_list_shows_a_route_level_target(tmp_path, capsys):
     """The listing read the *service* target, so a target set on a single route was invisible and
-    every one of Slack's three hosts printed `target: self` for a partly delegated service (#20)."""
+    every one of Slack's three hosts printed `target: self` for a partly delegated service."""
     (tmp_path / "cwd" / servicemap.CWD_OVERRIDE_NAME).write_text(ROUTE_OVERRIDE)
     assert main(["maps", "list"]) == 0
     out = capsys.readouterr().out

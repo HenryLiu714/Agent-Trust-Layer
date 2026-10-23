@@ -1,4 +1,4 @@
-"""`writelog`: the run's faked writes, decoded for the overlay and the policy alike (#45)"""
+"""`writelog`: the run's faked writes, decoded for the overlay and the policy alike"""
 
 import json
 

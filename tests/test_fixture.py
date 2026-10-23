@@ -1,4 +1,4 @@
-"""`irimi.fixture`: the vendored response objects the L1 faker starts from (#41).
+"""`irimi.fixture`: the vendored response objects the L1 faker starts from.
 
 Everything here is about the module never raising and never handing out the object it cached.
 It is read from inside a mitmproxy hook, where a raise forwards the flow and a forwarded write
@@ -105,14 +105,14 @@ def test_the_fixtures_directory_holds_one_json_file_per_service():
 
 def test_the_shipped_slack_fixtures_hold_the_message_object():
     """chat.postMessage is the one Slack write with a payload of its own. `fixture:` on its route
-    names this object and the envelope nests it under `message:` (#42)."""
+    names this object and the envelope nests it under `message:`."""
     assert sorted(fixture.objects("slack")) == ["message"]
     message = fixture.get("slack", "message")
     assert message["type"] == "message"
     assert re.fullmatch(r"\d+\.\d{6}", message["ts"])
     # A null placeholder, not a value: the field is here so a threaded post's own `thread_ts` can
     # be reflected onto it, and `echo.slack.SlackEnvelope.optional` drops it again when none was
-    # posted (#55). A non-null value here would ship a thread the caller never named.
+    # posted. A non-null value here would ship a thread the caller never named.
     assert message["thread_ts"] is None
 
 

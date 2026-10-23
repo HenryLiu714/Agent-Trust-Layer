@@ -1,4 +1,4 @@
-"""`idempotency`: the run's answers to keyed writes, so a retry is one write and not two (#46)"""
+"""`idempotency`: the run's answers to keyed writes, so a retry is one write and not two"""
 
 import threading
 from dataclasses import replace
@@ -101,7 +101,7 @@ def test_canonical_params_keep_everything_else():
 def test_canonical_tells_two_objects_on_one_route_apart():
     """`payment_intents.cancel` is one route over every `pi_`, and it posts nothing at all, so
     the path is the whole of what says which object the caller named. Without it a key reused to
-    cancel a second intent compared equal to the first and replayed its answer (#46)."""
+    cancel a second intent compared equal to the first and replayed its answer."""
     cancel = servicemap.match_route(STRIPE, "POST", "/v1/payment_intents/pi_AAA/cancel")
     assert cancel is not None
     one = idempotency.canonical(_request(path="/v1/payment_intents/pi_AAA/cancel"), cancel)
@@ -112,7 +112,7 @@ def test_canonical_tells_two_objects_on_one_route_apart():
 
 def test_canonical_tells_two_routes_with_the_same_empty_body_apart():
     """A key reused on another endpoint is another write. Both of these post nothing, so only
-    the path separates a cancelled intent from an updated customer (#46)."""
+    the path separates a cancelled intent from an updated customer."""
     cancel = servicemap.match_route(STRIPE, "POST", "/v1/payment_intents/pi_AAA/cancel")
     update = servicemap.match_route(STRIPE, "POST", "/v1/customers/cus_ZZZ")
     assert cancel is not None and update is not None
@@ -123,7 +123,7 @@ def test_canonical_tells_two_routes_with_the_same_empty_body_apart():
 
 def test_canonical_tells_two_sendings_apart_by_their_query():
     """A parameter a caller put in the query is still a parameter. `bodies.reflect` reads the body
-    only, so the query rides in the identity beside the path (#46)."""
+    only, so the query rides in the identity beside the path."""
     route = Route(method="POST", path="/v1/refunds", operation="refunds.create", kind="write")
     plain = idempotency.canonical(_request(), route)
     with_query = idempotency.canonical(_request(query="amount=250"), route)

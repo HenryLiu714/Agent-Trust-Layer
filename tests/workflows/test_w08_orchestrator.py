@@ -13,7 +13,7 @@ from irimi.servicemap.loader import MapError, parse_service
 from irimi.trace import UNATTRIBUTED, ToolCall
 
 W = "w08_orchestrator"
-# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi (#77).
+# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.
 MODES = ("shadow", "serve")
 AGENT = "examples.workflows.w08_orchestrator.agent"
 HOST = "subagent.internal"
@@ -87,7 +87,7 @@ def test_a_post_read_without_persists_false_is_refused_and_nothing_runs(run_work
     parse_service(yaml.safe_load(SUBAGENT_MAP), "subagent.yaml")
     with pytest.raises(MapError, match="unsafe method downgrades a write.*persists: false"):
         parse_service(yaml.safe_load(UNJUSTIFIED_MAP), "subagent.yaml")
-    # Under serve mode the same refusal ends serve before it listens (#77): exit 1, no banner, and
+    # Under serve mode the same refusal ends serve before it listens: exit 1, no banner, and
     # so no agent is started beside it.
     for mode in MODES:
         shadow = run_workflow(W, "map_refused", mode)
@@ -95,7 +95,7 @@ def test_a_post_read_without_persists_false_is_refused_and_nothing_runs(run_work
         assert shadow.irimi == []
         assert shadow.obs == []
         assert shadow.internet.requests() == []
-        # Refused before the store is opened (#70): no run, no store, not even a redaction key.
+        # Refused before the store is opened: no run, no store, not even a redaction key.
         # The CA is the harness's own, made before irimi starts.
         assert sorted(path.name for path in shadow.home.iterdir()) == ["ca"]
     assert run_workflow(W, "map_refused", "bare").exit_code == 0
@@ -106,9 +106,9 @@ def test_irimi_strips_its_run_header_at_the_hop_and_only_the_agents_own_header_s
     run_workflow, mode
 ):
     """Attribution across a service hop is an open design question: irimi strips `Irimi-Run`
-    from everything it forwards (#67), so the internal service cannot tell which run called it
+    from everything it forwards, so the internal service cannot tell which run called it
     unless the agent carries the id itself. This pins both halves, under `irimi shadow -- <cmd>`
-    and under serve mode (#77), where the internal service is the callee a sidecar sits beside."""
+    and under serve mode, where the internal service is the callee a sidecar sits beside."""
     shadow = run_workflow(W, "run_header_across_hop", mode)
     run_id = shadow.events("run.start")[0]["run"]
     forwarded = shadow.internet.requests(HOST)
@@ -116,7 +116,7 @@ def test_irimi_strips_its_run_header_at_the_hop_and_only_the_agents_own_header_s
     for req in forwarded:
         assert "irimi-run" not in req.headers
         assert req.headers["x-parent-run"] == run_id
-    # And yet each call reached irimi labelled: the SDK put `Irimi-Run` on it (#75), so irimi
+    # And yet each call reached irimi labelled: the SDK put `Irimi-Run` on it, so irimi
     # stored every one in the run: the two reads it forwarded to the internal service, and the
     # reservation it faked.
     assert {c["run"] for c in shadow.calls()} == {run_id}
@@ -154,9 +154,9 @@ def test_every_sub_agent_call_joins_its_parents_run(run_workflow, mode):
         assert sorted(labels) == ["charges", "inventory", "quote", "reserve"]
     assert {e["outcome"] for e in shadow.events("run.end")} == {"ok"}
     assert shadow.result()["reserved"] == 2
-    # Stored the same way (#70, #74): two runs the SDK started, not four, each holding its own
+    # Stored the same way: two runs the SDK started, not four, each holding its own
     # four calls, the sub-agents' included, and the process run holds none of them. Under serve
-    # mode (#77) there is no process run, nothing is left `unattributed`, and each run's block
+    # mode there is no process run, nothing is left `unattributed`, and each run's block
     # names its own reservation alone.
     reader = shadow.stored()
     records = {r.run_id: r.attribution for r in reader.list_runs()}
@@ -193,7 +193,7 @@ def test_every_sub_agent_call_joins_its_parents_run(run_workflow, mode):
 
 @pytest.mark.parametrize("mode", MODES)
 def test_a_tool_called_in_a_nested_trigger_is_a_call_of_its_parent_s_run(run_workflow, mode):
-    """`nested_runs` with tools (#76): `inventory_agent`, a nested trigger that joins its parent's
+    """`nested_runs` with tools: `inventory_agent`, a nested trigger that joins its parent's
     run, reads the planning file with a read tool, and the orchestrator records its decision with
     a write tool. Two orchestrator runs, and each holds its own two calls, the sub-agent's
     included: the run a nested trigger joined is the one its tools' calls are filed in. Bare, the
@@ -230,7 +230,7 @@ def test_a_tool_called_in_a_nested_trigger_is_a_call_of_its_parent_s_run(run_wor
     assert len((bare.state / "decisions.jsonl").read_text().splitlines()) == 2
 
 
-# ---------------------------------------------------------------------- irimi compare (#79)
+# ---------------------------------------------------------------------- irimi compare
 
 NOT_A_VERDICT = "a comparison, not a verdict: nothing was replayed"
 PLAN = f"plan_quarter_close  {AGENT}:plan_quarter_close  agent -"
@@ -250,10 +250,10 @@ NESTED = {
 def test_irimi_compare_of_two_orchestrator_runs_holds_their_nested_triggers_writes(
     run_workflow, scenario, mode
 ):
-    """A nested trigger joins its parent's run and starts none (#74), so there is no inner run to
-    compare: what a sub-agent wrote is its parent's write (`nested_write`), as a tool it called is
-    (#76). The two orchestrator runs, given the same args, are the same, write for write, and
-    neither shows the other's: each holds its own reservation and no more (#79). The engine's own
+    """A nested trigger joins its parent's run and starts none, so there is no inner run to
+    compare: what a sub-agent wrote is its parent's write (`nested_write`), as a tool it called is.
+    The two orchestrator runs, given the same args, are the same, write for write, and
+    neither shows the other's: each holds its own reservation and no more. The engine's own
     run holds none of them."""
     shadow = run_workflow(W, scenario, mode)
     a, b = (e["run"] for e in shadow.events("run.start"))
@@ -281,7 +281,7 @@ def test_irimi_compare_shows_what_a_map_changed_about_the_runs_writes(shared_sto
     orchestrator prices the basket and reserves it; `no_map` fakes the quote at L0, and the agent,
     given no price, reserves nothing. Recorded into one store, B under shadow or serve, the map is
     the whole difference: A's reservation against B's faked quote, two writes on one host by
-    different routes, so not a pair (#79)."""
+    different routes, so not a pair."""
     mapped = shared_store_run(W, "with_map")
     unmapped = shared_store_run(W, "no_map", mode)
     assert check_invariants(unmapped) == []
@@ -305,12 +305,12 @@ def test_irimi_compare_shows_what_a_map_changed_about_the_runs_writes(shared_sto
 def test_a_reservation_whose_answer_target_is_down_is_answered_502_and_compared_as_printed(
     shared_store_run, run_workflow, mode
 ):
-    """`target_down` delegates the reservation to an answer target nothing listens on (#16): irimi
+    """`target_down` delegates the reservation to an answer target nothing listens on: irimi
     cannot reach it, the agent gets a 502 marked `delegated`, and the summary says the write went
     unanswered. Bare, the service reserves. Recorded into one store with `with_map`, B under
     shadow or serve, compare pairs the two reservations and shows the unanswered one as its
     summary printed it: a write whose target failed is still a write the agent attempted, which
-    the issue's own set of actions would have dropped (#79, decision 1)."""
+    a set of answered actions alone would drop."""
     bare = run_workflow(W, "target_down", "bare")
     down = run_workflow(W, "target_down", mode)
     assert bare.by_label()["reserve"] == (200, None)
@@ -345,8 +345,8 @@ def test_a_reservation_whose_answer_target_is_down_is_answered_502_and_compared_
 def test_a_down_target_s_closing_lines_say_the_tool_write_did_not_happen_either(run_workflow, mode):
     """`target_down` with `--record`: the reservation goes unanswered, its target down, and the
     orchestrator records its decision through the write tool's stand-in. The closing lines say the
-    reservation did not reach the internal service, and now that the tool writes did not happen
-    either, which before #121 only the tool's own `○ tool` line said. Under serve, the run's block,
+    reservation did not reach the internal service, and that the tool writes did not happen
+    either, beyond what the tool's own `○ tool` line says. Under serve, the run's block,
     printed as it ends, says the same. Bare, the decision is really recorded."""
     down = run_workflow(W, "target_down_tools", mode)
     bare = run_workflow(W, "target_down_tools", "bare")
@@ -366,7 +366,7 @@ def test_a_down_target_s_closing_lines_say_the_tool_write_did_not_happen_either(
     assert len((bare.state / "decisions.jsonl").read_text().splitlines()) == 1
 
 
-# ------------------------------------------------------------------------------- replay (#82)
+# ------------------------------------------------------------------------------- replay
 
 
 @pytest.mark.parametrize("scenario", ["nested_runs", "nested_write"])
@@ -374,10 +374,10 @@ def test_replaying_the_second_of_two_identical_runs_replays_it_alone(
     run_workflow, replayed, scenario
 ):
     """The two orchestrator runs make the same requests. Replaying the second calls its trigger
-    alone (#84): one run, the replay's, which its nested trigger joins, every read and the
+    alone: one run, the replay's, which its nested trigger joins, every read and the
     reservation answered from the second run's recording, and nothing reaching the fake internet.
     The first run is not in the replay to take those answers, as it did when a replay re-ran the
-    process (#155)."""
+    process."""
     recorded = run_workflow(W, scenario, "shadow")
     _, second = sorted(recorded.sdk_runs(), key=lambda r: r.started_at or 0.0)
     _, replay = replayed(W, scenario, run_id=second.run_id)

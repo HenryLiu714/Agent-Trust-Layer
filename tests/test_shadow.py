@@ -65,7 +65,7 @@ def test_child_receives_proxy_env(home, capsys):
 
     assert env["IRIMI_ENGINE_ACTIVE"] == "1"
     run_id = env["IRIMI_RUN"]
-    assert len(run_id) == 16  # a directory name in the store, unique across months of runs (#70)
+    assert len(run_id) == 16  # a directory name in the store, unique across months of runs
     assert all(c in "0123456789abcdef" for c in run_id)
     assert env["NO_PROXY"] == "localhost,127.0.0.1"
     assert env["HTTPS_PROXY"].startswith("http://127.0.0.1:")
@@ -236,7 +236,7 @@ def test_reverse_door_allow_host(home, capfd):
 
 
 def test_banner_names_a_delegated_service(home, tmp_path, capsys):
-    """A routed host may not be live either: nothing in the banner said so before (#20)."""
+    """A routed host may not be live either, and the banner says so."""
     from irimi import servicemap
 
     (tmp_path / "cwd" / servicemap.CWD_OVERRIDE_NAME).write_text(
@@ -276,7 +276,7 @@ def test_no_delegated_service_leaves_the_banner_alone(home, capsys):
 
 
 def test_a_redaction_key_irimi_did_not_write_stops_shadow_with_one_line(home, capsys):
-    """A run that could not redact what it stores must not start (#69, #70): one `error:` line,
+    """A run that could not redact what it stores must not start: one `error:` line,
     exit 1, no traceback, and the child never runs."""
     (home / paths.REDACT_KEY_NAME).write_bytes(b"short")
     marker = home / "ran"
@@ -288,7 +288,7 @@ def test_a_redaction_key_irimi_did_not_write_stops_shadow_with_one_line(home, ca
 
 def test_a_store_that_cannot_be_written_stops_shadow_with_one_line(home, tmp_path, capsys):
     """A store that would drop every event behind one warning must not start a run that looks
-    recorded (#70)."""
+    recorded."""
     not_a_dir = tmp_path / "a-file"
     not_a_dir.write_text("")
     marker = home / "ran"
@@ -302,9 +302,9 @@ def test_sigterm_stops_the_command_ends_the_run_and_closes_the_store(home, upstr
     """SIGTERM is how a supervisor or a container runtime stops `irimi shadow`. It is passed to
     the command, whose exit then ends the run as any exit does: the run is stored ended with the
     command's code, what was queued is written before irimi exits, the summary is printed, and
-    irimi exits with the command's code, 143 for a command SIGTERM ended. Before, the default
-    action ended irimi at once, the command lived on with its proxy gone, the run stayed
-    incomplete and the store was never closed (#70's note, #77)."""
+    irimi exits with the command's code, 143 for a command SIGTERM ended. Python's default action
+    would end irimi at once, leaving the command running with its proxy gone, the run incomplete
+    and the store never closed."""
     import os
     import signal
     import subprocess
@@ -364,7 +364,7 @@ def test_sigterm_stops_the_command_ends_the_run_and_closes_the_store(home, upstr
 def test_sigterm_before_the_command_starts_runs_nothing(home, monkeypatch, capsys):
     """A SIGTERM that arrives while irimi loads its maps or binds is held until the command would
     start, and the command then never does: no run is stored, the store is closed and irimi exits
-    143 (#77)."""
+    143."""
     import signal
 
     from irimi import cli
@@ -398,7 +398,7 @@ def test_sigterm_before_the_command_starts_runs_nothing(home, monkeypatch, capsy
 
 def test_sigterm_while_the_command_starts_is_passed_to_it_once_it_exists(home, monkeypatch):
     """A SIGTERM that lands after the command was started but before irimi holds it, when there is
-    no command to pass it to, is held and passed on as the command is adopted (#77): the command
+    no command to pass it to, is held and passed on as the command is adopted: the command
     ends at once, and the run is stored with its 143."""
     import signal
     import subprocess
@@ -423,7 +423,7 @@ def test_sigterm_while_the_command_starts_is_passed_to_it_once_it_exists(home, m
 
 def test_sigterm_after_the_command_exited_signals_no_pid(home, monkeypatch):
     """Once the command has been reaped its pid may be another process's, so a SIGTERM that comes
-    while irimi ends the run and closes the store is passed to no one (#77): the run keeps the
+    while irimi ends the run and closes the store is passed to no one: the run keeps the
     command's own exit, and irimi closes the store and exits with it."""
     import os
     import signal
@@ -452,8 +452,8 @@ def test_sigterm_after_the_command_exited_signals_no_pid(home, monkeypatch):
 
 def test_an_ignored_sigterm_stays_ignored_and_a_thread_installs_nothing(home, monkeypatch):
     """`irimi shadow` started with SIGTERM ignored leaves it ignored, as serve does, and one run off
-    the main thread, where Python allows no handler, installs none and still runs its command
-    (#77)."""
+    the main thread, where Python allows no handler, installs none and still runs its command.
+    """
     import signal
 
     from irimi import cli

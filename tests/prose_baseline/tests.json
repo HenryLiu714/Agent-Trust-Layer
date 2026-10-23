@@ -1,267 +1,68 @@
 {
-  "tests/conftest.py": {
-    "issue_ref": 1
-  },
   "tests/test_bounded_decoding.py": {
-    "caps_run": 4,
-    "issue_possessive": 2,
-    "issue_ref": 23
-  },
-  "tests/test_cli.py": {
-    "issue_ref": 31
-  },
-  "tests/test_compare.py": {
-    "issue_ref": 19
-  },
-  "tests/test_control.py": {
-    "issue_possessive": 1,
-    "issue_ref": 25
-  },
-  "tests/test_engine_mitm.py": {
-    "decision_code": 1,
-    "design_ref": 2,
-    "issue_possessive": 7,
-    "issue_ref": 123,
-    "notion": 1,
-    "phase": 1,
-    "section_sign": 1,
-    "since_issue": 4
-  },
-  "tests/test_engine_stream_h2.py": {
-    "issue_ref": 2
-  },
-  "tests/test_exchange.py": {
-    "decision_code": 1,
-    "design_ref": 1,
-    "issue_possessive": 1,
-    "issue_ref": 6,
-    "phase": 1
-  },
-  "tests/test_fixture.py": {
-    "issue_ref": 3
-  },
-  "tests/test_idempotency.py": {
-    "issue_ref": 4
-  },
-  "tests/test_import_boundary.py": {
-    "issue_ref": 1
-  },
-  "tests/test_init.py": {
-    "issue_ref": 1,
-    "since_issue": 1
-  },
-  "tests/test_invariants.py": {
-    "issue_ref": 13,
-    "phase": 2
-  },
-  "tests/test_maps_cli.py": {
-    "issue_ref": 1
-  },
-  "tests/test_overlay.py": {
-    "issue_possessive": 1,
-    "issue_ref": 12
+    "caps_run": 4
   },
   "tests/test_phase3_exit.py": {
-    "caps_run": 1,
-    "issue_ref": 10,
-    "phase": 4,
-    "use_case": 1
+    "caps_run": 1
   },
   "tests/test_phase3_replay_exit.py": {
-    "caps_run": 1,
-    "issue_ref": 12,
-    "phase": 4,
-    "since_issue": 1,
-    "use_case": 2
-  },
-  "tests/test_phase_exit.py": {
-    "issue_ref": 34,
-    "notion": 6,
-    "phase": 13,
-    "since_issue": 3
+    "caps_run": 1
   },
   "tests/test_pipeline.py": {
-    "caps_run": 1,
-    "decision_code": 1,
-    "issue_ref": 24
+    "caps_run": 1
   },
   "tests/test_policy.py": {
-    "caps_run": 1,
-    "decision_code": 2,
-    "issue_possessive": 15,
-    "issue_ref": 70,
-    "notion": 1,
-    "planning_id": 1,
-    "section_sign": 1
-  },
-  "tests/test_redact.py": {
-    "issue_possessive": 2,
-    "issue_ref": 15,
-    "section_sign": 1
-  },
-  "tests/test_replay.py": {
-    "issue_ref": 8
+    "caps_run": 1
   },
   "tests/test_replay_cli.py": {
-    "issue_ref": 30
-  },
-  "tests/test_replay_engine.py": {
-    "decision_code": 1,
-    "issue_possessive": 1,
-    "issue_ref": 16
-  },
-  "tests/test_replay_policy.py": {
-    "issue_ref": 31
-  },
-  "tests/test_runner.py": {
-    "issue_possessive": 2,
-    "issue_ref": 51,
-    "notion": 1,
-    "since_issue": 1
-  },
-  "tests/test_runs.py": {
-    "issue_possessive": 1,
-    "issue_ref": 22,
-    "phase": 2,
-    "since_issue": 1
-  },
-  "tests/test_sdk.py": {
-    "issue_ref": 25
-  },
-  "tests/test_sdk_inject.py": {
-    "issue_ref": 16
-  },
-  "tests/test_sdk_replay.py": {
-    "issue_ref": 23
-  },
-  "tests/test_sdk_tool.py": {
-    "caps_run": 1,
-    "issue_ref": 14
-  },
-  "tests/test_sdk_tool_replay.py": {
-    "issue_ref": 23
-  },
-  "tests/test_serve.py": {
-    "issue_possessive": 2,
-    "issue_ref": 34
-  },
-  "tests/test_servicemap.py": {
-    "caps_run": 3,
-    "decision_code": 1,
-    "design_ref": 1,
-    "issue_possessive": 3,
-    "issue_ref": 28,
-    "section_sign": 1
-  },
-  "tests/test_services_preconditions.py": {
-    "issue_ref": 8
-  },
-  "tests/test_services_slack.py": {
-    "issue_possessive": 6,
-    "issue_ref": 37,
-    "since_issue": 1
-  },
-  "tests/test_services_stripe.py": {
-    "issue_possessive": 1,
-    "issue_ref": 7
-  },
-  "tests/test_shadow.py": {
-    "issue_possessive": 1,
-    "issue_ref": 11
-  },
-  "tests/test_store.py": {
-    "issue_ref": 29,
-    "since_issue": 1
-  },
-  "tests/test_trace.py": {
-    "caps_run": 1,
-    "issue_possessive": 1,
-    "issue_ref": 32
-  },
-  "tests/test_trace_e2e.py": {
-    "issue_possessive": 16,
-    "issue_ref": 34,
-    "notion": 1,
-    "phase": 8
-  },
-  "tests/test_writelog.py": {
     "issue_ref": 1
   },
-  "tests/workflows/conftest.py": {
-    "issue_ref": 12
+  "tests/test_sdk_tool.py": {
+    "caps_run": 1
   },
-  "tests/workflows/test_control_endpoint.py": {
-    "issue_ref": 14
+  "tests/test_servicemap.py": {
+    "caps_run": 3
+  },
+  "tests/test_trace.py": {
+    "caps_run": 1
   },
   "tests/workflows/test_invariants.py": {
-    "issue_ref": 17,
+    "issue_ref": 2,
     "since_issue": 1
-  },
-  "tests/workflows/test_replays.py": {
-    "issue_ref": 24
-  },
-  "tests/workflows/test_sdk_standin.py": {
-    "issue_possessive": 3,
-    "issue_ref": 23
-  },
-  "tests/workflows/test_stored_runs.py": {
-    "issue_possessive": 4,
-    "issue_ref": 52
   },
   "tests/workflows/test_w01_ticket_triage.py": {
-    "issue_possessive": 6,
-    "issue_ref": 68,
-    "since_issue": 2
+    "issue_ref": 1
   },
   "tests/workflows/test_w02_nightly_reconcile.py": {
-    "issue_possessive": 1,
-    "issue_ref": 17,
-    "phase": 1
+    "issue_ref": 1
   },
   "tests/workflows/test_w03_queue_worker.py": {
-    "decision_code": 1,
-    "design_ref": 1,
-    "issue_possessive": 2,
-    "issue_ref": 71,
-    "phase": 5,
-    "section_sign": 1,
-    "since_issue": 1
+    "issue_ref": 7
   },
   "tests/workflows/test_w04_slack_ops_bot.py": {
-    "issue_ref": 22
+    "issue_ref": 2
   },
   "tests/workflows/test_w05_dispute_responder.py": {
-    "issue_possessive": 2,
-    "issue_ref": 13,
-    "phase": 1,
+    "issue_possessive": 1,
+    "issue_ref": 2,
     "since_issue": 1
   },
-  "tests/workflows/test_w06_crm_db_agent.py": {
-    "issue_possessive": 1,
-    "issue_ref": 39,
-    "phase": 1
-  },
   "tests/workflows/test_w07_streaming_assistant.py": {
-    "issue_possessive": 4,
-    "issue_ref": 49,
-    "phase": 1,
+    "issue_possessive": 2,
+    "issue_ref": 5,
     "since_issue": 1
   },
   "tests/workflows/test_w08_orchestrator.py": {
-    "caps_run": 2,
-    "issue_ref": 21
+    "caps_run": 2
   },
   "tests/workflows/test_w09_scope_gauntlet.py": {
-    "issue_possessive": 1,
-    "issue_ref": 60,
-    "phase": 2
+    "issue_ref": 1
   },
   "tests/workflows/test_w10_flaky_upstream.py": {
-    "issue_possessive": 3,
-    "issue_ref": 31
+    "issue_possessive": 1,
+    "issue_ref": 3
   },
   "tests/workflows/test_w11_leaky_agent.py": {
-    "issue_ref": 14,
-    "phase": 3
+    "phase": 2
   }
 }

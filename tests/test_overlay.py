@@ -1,4 +1,4 @@
-"""`ServiceOverlay`: the effect tables applied to a live read, and the cursor it translates (#43)"""
+"""`ServiceOverlay`: the effect tables applied to a live read, and the cursor it translates"""
 
 import json
 
@@ -37,7 +37,7 @@ CHARGE = {
     "amount_refunded": 0,
     "refunded": False,
 }
-SLACK_JSON = "application/json;charset=utf-8"  # what slack_sdk sends (#44)
+SLACK_JSON = "application/json;charset=utf-8"  # what slack_sdk sends
 HISTORY = {
     "ok": True,
     "messages": [{"type": "message", "ts": "1700000000.000100", "text": "real", "user": "U1"}],
@@ -60,7 +60,7 @@ def _read(path, query="", headers=(), host="api.stripe.com", method="GET", body=
 
 def _slack_read(params, headers=(), operation="conversations.history"):
     """A Slack read as slack_sdk sends it: a POST with every parameter in the JSON body, which is
-    where the effects read them from (#44)."""
+    where the effects read them from."""
     return _read(
         f"/api/{operation}",
         headers=(("content-type", SLACK_JSON), *headers),
@@ -112,7 +112,7 @@ def _write_exchange(headers=(), refund_id=MINTED):
 
 
 def _slack_post_exchange(ts, channel="C0123", headers=(), thread_ts=None):
-    """A faked `chat.postMessage`, answered in `echo.slack.SLACK_ENVELOPES`' shape (#42)."""
+    """A faked `chat.postMessage`, answered in `echo.slack.SLACK_ENVELOPES`' shape."""
     posted = {"channel": channel, "text": "refund issued"}
     if thread_ts is not None:
         posted["thread_ts"] = thread_ts
@@ -262,7 +262,7 @@ def test_a_rewrote_header_the_agent_sent_itself_is_not_trusted():
     assert json.loads(out.response.body)["data"][0]["id"] == MINTED
 
 
-# ---------------------------------------------------------------------------- Slack (#44)
+# ---------------------------------------------------------------------------- Slack
 
 
 def test_a_slack_history_read_after_a_faked_post_is_rewritten():
@@ -284,7 +284,7 @@ def test_a_slack_read_with_an_empty_write_log_is_untouched():
 
 def test_slack_writes_under_different_tokens_are_all_replayed():
     """Slack has no `SCOPE_HEADERS` entry, so a run holds one Slack scope and the token a write
-    was made with does not keep it off a read made with another (#44)."""
+    was made with does not keep it off a read made with another."""
     upstream = _upstream(HISTORY)
     log = [
         _slack_post_exchange("1800000000.000001", headers=(("authorization", "Bearer xoxb-A"),)),
@@ -303,14 +303,14 @@ def test_slack_writes_under_different_tokens_are_all_replayed():
 
 def test_rewrite_leaves_a_slack_read_as_the_same_object():
     """Slack has no `REWRITES` entry: its cursor is opaque and server-issued, so there is nothing
-    of irimi's in it to translate (#44)."""
+    of irimi's in it to translate."""
     read = _slack_read({"channel": "C0123", "cursor": "dXNlcjpVMEc5V0ZYTlo="})
     log = [_slack_post_exchange("1800000000.000001")]
     assert ServiceOverlay(MAPS).rewrite(log, read) is read
 
 
 def test_a_slack_replies_read_after_a_faked_reply_is_rewritten():
-    """#44's done-when for the other half: the reply at the tail of the last page, its parent's
+    """A replies read after a faked reply: the reply at the tail of the last page, its parent's
     counts moved, and the whole read stamped through the seam."""
     parent_ts = "1700000000.000100"
     upstream = _upstream(
@@ -330,7 +330,7 @@ def test_a_slack_replies_read_after_a_faked_reply_is_rewritten():
 
 def test_a_slack_read_the_effects_do_not_model_is_untouched():
     """`conversations.info` is not overlaid, so the read stays byte-identical and unflagged - the
-    same object, which is how the engine knows not to stamp it (#44)."""
+    same object, which is how the engine knows not to stamp it."""
     upstream = _upstream({"ok": True, "channel": {"id": "C0123", "name": "general"}})
     read = _slack_read({"channel": "C0123"}, operation="conversations.info")
     out = ServiceOverlay(MAPS)([_slack_post_exchange("1800000000.000001")], read, upstream)
@@ -339,7 +339,7 @@ def test_a_slack_read_the_effects_do_not_model_is_untouched():
 
 
 def test_a_read_of_a_minted_refund_comes_back_as_that_refund_at_200():
-    """#52 through the seam: the effects answer the read and the overlay carries the status onto
+    """Through the seam, the effects answer the read and the overlay carries the status onto
     the response, so the agent gets the object irimi told it exists rather than Stripe's 404."""
     overlay = ServiceOverlay(MAPS)
     upstream = Response(
@@ -356,7 +356,7 @@ def test_a_read_of_a_minted_refund_comes_back_as_that_refund_at_200():
 
 def test_a_read_of_a_refund_this_run_did_not_mint_keeps_stripes_own_404():
     """The status only moves for an object irimi minted. Stripe's own 404 about Stripe's own state
-    reaches the agent byte-identical and unstamped (#52)."""
+    reaches the agent byte-identical and unstamped."""
     overlay = ServiceOverlay(MAPS)
     upstream = Response(
         status=404,
@@ -370,7 +370,7 @@ def test_a_read_of_a_refund_this_run_did_not_mint_keeps_stripes_own_404():
 
 
 def test_a_slack_replies_read_of_a_minted_thread_comes_back_as_the_thread():
-    """The Slack twin, which needs no status: Slack answers `thread_not_found` at 200 (#52)."""
+    """The Slack twin, which needs no status: Slack answers `thread_not_found` at 200."""
     overlay = ServiceOverlay(MAPS)
     ts = "1800000000.000001"
     upstream = _upstream({"ok": False, "error": "thread_not_found"})

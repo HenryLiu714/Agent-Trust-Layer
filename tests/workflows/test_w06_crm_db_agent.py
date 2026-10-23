@@ -3,7 +3,7 @@
 What a tool call did is read from the agent's observation log (`tool` events say which body ran)
 and from the state directory itself: the SQLite CRM and the files the write tools would create.
 What irimi made of it is read from its stream, its summary and its store: `@sdk.tool` posts every
-call to the run it was made in (#76).
+call to the run it was made in.
 """
 
 import pytest
@@ -23,7 +23,7 @@ from irimi.sdk.capture import MAX_REPR, REPR_KEY
 from irimi.trace import MAX_ERROR_MESSAGE, UNATTRIBUTED, ErrorInfo, ToolCall
 
 W = "w06_crm_db_agent"
-# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi (#77).
+# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.
 MODES = ("shadow", "serve")
 WRITE_TOOLS = [
     "crm.upsert_account",
@@ -99,7 +99,7 @@ def test_read_tools_run_for_real_in_both_modes_and_the_call_sequence_is_the_same
     assert [n for n, _ in bare.tools()] == [n for n, _ in shadow.tools()]
     assert {ran for _, ran in shadow.tools("read")} == {"real"}
     # Decimal and datetime came back from the read tool as themselves: not JSON, not revivable
-    # once recorded, so a replay (#83) must run `score_account` for real.
+    # once recorded, so a replay must run `score_account` for real.
     assert {tuple(e["types"]) for e in shadow.events("scored")} == {("Decimal", "datetime")}
 
 
@@ -110,7 +110,7 @@ def test_http_made_inside_a_read_tool_is_an_ordinary_exchange_of_the_run(run_wor
         "live      read      GET enrich.internal/v1/companies/acc_1 -> 200",
         "live      read      GET enrich.internal/v1/companies/acc_2 -> 200",
     ]
-    # Each exchange is in the run the tool was called in, with no link to the call (#76), and
+    # Each exchange is in the run the tool was called in, with no link to the call, and
     # neither count holds a tool call.
     [run] = shadow.sdk_runs()
     stored = shadow.stored().load_run(run.run_id).events
@@ -171,7 +171,7 @@ def test_every_tool_call_is_stored_in_its_run_with_what_ran_and_what_it_returned
     assert by_name["crm.export_csv"].result == "<not written: smb.csv>"
     assert by_name["crm.notify_owner"].result == {"stood_in": True}
     assert by_name["crm.delete_stale"].result == 0
-    # Values JSON cannot hold are stored as their repr, which a replay cannot revive (#83).
+    # Values JSON cannot hold are stored as their repr, which a replay cannot revive.
     assert {k: set(v) for k, v in by_name["crm.score_account"].result.items()} == {
         "score": {REPR_KEY},
         "scored_at": {REPR_KEY},
@@ -181,7 +181,7 @@ def test_every_tool_call_is_stored_in_its_run_with_what_ran_and_what_it_returned
 @pytest.mark.parametrize("mode", MODES)
 def test_a_credential_in_a_tool_s_args_is_stored_as_its_placeholder(run_workflow, mode):
     """`connect_with` is a read tool given a DSN that carries a key: its stored args are redacted,
-    and only the key is (#69, #70). Universal invariant 4 holds the whole home to it too."""
+    and only the key is. Universal invariant 4 holds the whole home to it too."""
     shadow = run_workflow(W, "enrich", mode)
     [connect] = [c for c in tool_calls(shadow) if c.name == "crm.connect_with"]
     dsn = connect.args["dsn"]
@@ -194,7 +194,7 @@ def test_a_credential_in_a_tool_s_args_is_stored_as_its_placeholder(run_workflow
 def test_a_read_tool_after_a_stood_in_write_sees_the_old_row(run_workflow, mode):
     # No tool overlay exists: the stand-in wrote nothing, so the read tool shows the old row
     # under shadow while bare shows the rename. This is the gap, pinned on purpose. The write no
-    # label covers is real in every mode, so the second read shows its `last_seen` (#83).
+    # label covers is real in every mode, so the second read shows its `last_seen`.
     bare = run_workflow(W, "read_after_write", "bare")
     assert bare.result()["saw_rename"] is True
     shadow = run_workflow(W, "read_after_write", mode)
@@ -209,19 +209,19 @@ def test_a_read_tool_after_a_stood_in_write_sees_the_old_row(run_workflow, mode)
 def test_a_stale_irimi_replay_run_asks_no_recording_but_where_irimi_cannot_remove_it(
     run_workflow, mode
 ):
-    """`read_after_write` runs from a shell that exported a stale `IRIMI_REPLAY_RUN` (#83).
+    """`read_after_write` runs from a shell that exported a stale `IRIMI_REPLAY_RUN`.
     `irimi shadow` removes it from its child, so its SDK never asks the recording. A bare agent
     keeps it, and its SDK is inert, so it asks nothing either: no control request reaches the fake
     internet (`test_control_endpoint.py`). A serve agent is not irimi's child and keeps it too, but
     names no `IRIMI_RUN`, which serve never sets, and the SDK takes a replay's run only when irimi
-    named it as both (#84): so it asks nothing, adopts nothing, and the read runs for real."""
+    named it as both: so it asks nothing, adopts nothing, and the read runs for real."""
     result = run_workflow(W, "read_after_write", mode)
     expected = None if mode == "shadow" else STALE_REPLAY_RUN
     assert [start["replay"] for start in result.events("start")] == [expected]
     assert result.tools("read") == [("crm.find_accounts", "real")] * 2
     if mode != "bare":  # bare, the one warning is the real write's (`test_control_endpoint.py`)
         assert result.events("log") == []
-        # The run is the SDK's own, started and stored, never the stale id adopted (#84).
+        # The run is the SDK's own, started and stored, never the stale id adopted.
         [start] = result.events("run.start")
         assert start["run"] != STALE_REPLAY_RUN
         assert [(r.run_id, r.attribution) for r in result.sdk_runs()] == [(start["run"], "sdk")]
@@ -229,8 +229,8 @@ def test_a_stale_irimi_replay_run_asks_no_recording_but_where_irimi_cannot_remov
 
 @pytest.mark.parametrize("mode", MODES)
 def test_an_unlabelled_database_write_happens_for_real_under_shadow(run_workflow, mode):
-    # irimi cannot see a write that is neither HTTP nor an @sdk.tool. The case for Phase 4's
-    # "production database URL" readiness check; this assertion flips when that check lands.
+    # irimi cannot see a write that is neither HTTP nor an @sdk.tool. A future check that flags a
+    # production database URL in the agent's environment would flip this assertion.
     shadow = run_workflow(W, "unlabeled_write", mode)
     assert rows(shadow)[0] == ("acc_1", "Acme", "smb", "2026-09-28", 0, None)
     assert shadow.exchange_lines() == []
@@ -246,11 +246,11 @@ def test_a_raising_read_tool_ends_the_run_in_error_under_shadow(run_workflow, mo
         assert [e["key"] for e in result.events("lookup_failed")] == ["'acc_1'"]
     ends = shadow.events("run.end")
     assert [(e["outcome"], e["error"]) for e in ends] == [("error", "KeyError")]
-    # Stored under the exception's full name (#74).
+    # Stored under the exception's full name.
     [run] = shadow.sdk_runs()
     assert (run.outcome, run.error) == ("error", ErrorInfo("builtins.KeyError", "'acc_missing'"))
     # Every tool that raised is recorded with what it raised and no result, the caught ones and
-    # the one that ended the run (#76).
+    # the one that ended the run.
     assert [(c.name, c.result, c.error) for c in tool_calls(shadow)] == [
         ("crm.connect_with", None, connect_error(shadow)),
         ("crm.flaky_lookup", None, ErrorInfo("builtins.KeyError", "'acc_1'")),
@@ -268,7 +268,7 @@ def test_a_raising_read_tool_ends_the_run_in_error_under_shadow(run_workflow, mo
 def connect_error(shadow) -> ErrorInfo:
     """What a trace keeps of the error `connect_with` raised in `tool_raises`, which quotes its
     DSN's key across the 1000-character cut: the SDK posts the message whole, and the store
-    redacts it whole before it cuts it, so the key is its whole placeholder (#179)."""
+    redacts it whole before it cuts it, so the key is its whole placeholder."""
     key = CANARIES["STRIPE_API_KEY"]
     said = f"{CONNECT_RETRIES}could not connect with postgres://crm:{key}@{UNREACHABLE_HOST}/crm"
     assert said.index(key) < MAX_ERROR_MESSAGE < said.index(key) + len(key)
@@ -282,7 +282,7 @@ def test_an_sdk_error_quoting_a_key_across_the_cut_is_stored_as_its_placeholder(
     characters a trace keeps. The SDK posts it whole and the store redacts it whole, then cuts
     it, so the stored message is a prefix of the redacted whole: the key's own placeholder, the
     one its args hold, and no part of the key. Cut first, the part kept was redacted as a key of
-    its own (#179). The agent caught it, so it ran on, in every mode."""
+    its own. The agent caught it, so it ran on, in every mode."""
     shadow = run_workflow(W, "tool_raises", mode)
     [connect] = [c for c in tool_calls(shadow) if c.name == "crm.connect_with"]
     hidden = redact.placeholder(redact.load_key(shadow.home), CANARIES["STRIPE_API_KEY"])
@@ -300,8 +300,8 @@ def test_a_repr_quoting_a_key_across_the_sdks_cut_keeps_no_part_of_it(run_workfl
     """`connect_with`'s options are captured as their repr, which quotes a key across the 1000
     characters the SDK keeps of one. The SDK cuts before irimi redacts, so it cuts where the key
     starts, and keeps everything before it: cut at 1000, the 15 characters of the key it kept
-    were no longer its shape, and reached disk as they were, which universal invariant 4 finds
-    (#179). The store's copy is the SDK's, so it holds no placeholder either."""
+    were no longer its shape, and reached disk as they were, which universal invariant 4 finds.
+    The store's copy is the SDK's, so it holds no placeholder either."""
     shadow = run_workflow(W, "tool_raises", mode)
     [connect] = [c for c in tool_calls(shadow) if c.name == "crm.connect_with"]
     key = CANARIES["OPENAI_API_KEY"]
@@ -341,7 +341,7 @@ def test_a_write_stand_in_that_raises_hands_the_agent_its_own_exception_and_a_re
 ):
     """`merge_accounts` first names an account that does not exist. Its stand-in validates as the
     real merge does and raises; the SDK records the call with its error and re-raises the very
-    object the stand-in raised, so the agent catches it and retries with the right account (#76).
+    object the stand-in raised, so the agent catches it and retries with the right account.
     Both calls are recorded and printed, the first with what it raised; the summary says the
     stand-in raised, and the run, which caught it, ends `ok`."""
     shadow = run_workflow(W, "merge_retry", mode)
@@ -387,8 +387,8 @@ def test_a_write_stand_in_that_raises_hands_the_agent_its_own_exception_and_a_re
 
 
 def test_under_serve_a_tool_called_outside_every_run_is_unattributed(run_workflow):
-    """Serve mode has no process run (#77): the housekeeping tools called in no run post to
-    `runs/unattributed/tool-calls`, which the control endpoint takes for tool calls only (#76),
+    """Serve mode has no process run: the housekeeping tools called in no run post to
+    `runs/unattributed/tool-calls`, which the control endpoint takes for tool calls only,
     and land in `unattributed/`. The trigger's own calls are its run's, and only its stood-in
     write is in its summary."""
     serve = run_workflow(W, "outside_run", "serve")
@@ -412,7 +412,7 @@ def test_under_serve_a_tool_called_outside_every_run_is_unattributed(run_workflo
 def test_a_tool_called_outside_every_run_lands_in_the_process_run(run_workflow):
     """Housekeeping before the trigger: `delete_stale` and `find_accounts` are called in no run,
     so under `irimi shadow -- <cmd>` each is recorded in the process run that `IRIMI_RUN` names,
-    and printed like any other (#76). The trigger's own calls are its run's. Nothing is left
+    and printed like any other. The trigger's own calls are its run's. Nothing is left
     `unattributed`."""
     shadow = run_workflow(W, "outside_run", "shadow")
     bare = run_workflow(W, "outside_run", "bare")
@@ -464,7 +464,7 @@ def test_http_made_inside_a_write_stand_in_is_an_ordinary_exchange_of_the_run(ru
     """`sync_industry`'s stand-in checks the account upstream before saying what it would have
     written. Its request is the run's like any other: labelled by the SDK, forwarded, printed and
     stored in the run, before the tool call, which is posted once the stand-in returned, with no
-    link between them (#76). Bare, the real body writes the row and makes no request at all."""
+    link between them. Bare, the real body writes the row and makes no request at all."""
     shadow = run_workflow(W, "stand_in_http", mode)
     bare = run_workflow(W, "stand_in_http", "bare")
     [run] = shadow.sdk_runs()
@@ -494,12 +494,12 @@ def test_a_sync_tool_that_returns_a_coroutine_is_recorded_when_the_coroutine_end
     run_workflow, mode
 ):
     """`schedule_followup` is sync and returns its work as a coroutine; its stand-in does the same.
-    The call ends when the coroutine does (#76), so the read tool the coroutine awaits is stored
+    The call ends when the coroutine does, so the read tool the coroutine awaits is stored
     before it, though the agent called it after, and the stored result is what the coroutine
     returned, not the coroutine. `lookup_owner` is an async read tool, awaited in the run's event
     loop. Last, `Outbox.send_reminder`, an async static method whose stand-in is a static method
     in the same class body: judged as the async function inside it, so accepted, and run in the
-    write's place (#76). `last_contact` is sync and returns a coroutine too, which the agent leaves
+    write's place. `last_contact` is sync and returns a coroutine too, which the agent leaves
     pending while `find_accounts` runs, so the find is stored first and within its span."""
     shadow = run_workflow(W, "async_tools", mode)
     bare = run_workflow(W, "async_tools", "bare")
@@ -556,7 +556,7 @@ def test_a_sync_tool_that_returns_a_coroutine_is_recorded_when_the_coroutine_end
     assert files(bare) == ["crm.sqlite3", "followups.jsonl", "outbox.jsonl"]
 
 
-# ---------------------------------------------------------------------- irimi compare (#79)
+# ---------------------------------------------------------------------- irimi compare
 
 ENRICH = "enrich_accounts  examples.workflows.w06_crm_db_agent.agent:enrich_accounts  agent -"
 
@@ -564,10 +564,11 @@ ENRICH = "enrich_accounts  examples.workflows.w06_crm_db_agent.agent:enrich_acco
 @pytest.mark.parametrize("mode", MODES)
 def test_irimi_compare_shows_the_retry_s_failed_merge_as_the_one_it_added(shared_store_run, mode):
     """`merge_once` makes the merge right the first time; `merge_retry` makes it after a first
-    call whose stand-in raised (#76), each recorded into one store, B under shadow or serve.
+    call whose stand-in raised, each recorded into one store, B under shadow or serve.
     Compared, the call both made, the stand-in that ran, is the same, and the one that raised is
     the one B added: the same tool, so lining the two up by name alone would have paired the merge
-    that ran with the one that raised and called it changed (#79's two passes)."""
+    that ran with the one that raised and called it changed (compare pairs identical calls before
+    it pairs by name)."""
     once = shared_store_run(W, "merge_once")
     retry = shared_store_run(W, "merge_retry", mode)
     assert check_invariants(retry) == []
@@ -591,9 +592,9 @@ def test_irimi_compare_shows_the_retry_s_failed_merge_as_the_one_it_added(shared
 @pytest.mark.parametrize("mode", MODES)
 def test_two_writes_at_once_are_compared_in_the_order_they_ended(run_workflow, mode):
     """`overlapping_writes`: the archive starts first and ends only after the flag has ended, so
-    the run stores the flag first (`seq` is the order calls ended, #68). The summary prints the
+    the run stores the flag first (`seq` is the order calls ended). The summary prints the
     two in that order, and so does `irimi compare`, which lines writes up in `seq` order and not
-    in the order they started (#79, decision 12)."""
+    in the order they started."""
     shadow = run_workflow(W, "overlapping_writes", mode)
     bare = run_workflow(W, "overlapping_writes", "bare")
     assert bare.result()["flagged"] == {"flagged": True}
@@ -623,7 +624,7 @@ def test_two_writes_at_once_are_compared_in_the_order_they_ended(run_workflow, m
     assert [line for line in shadow.summaries() if "○ tool" in line] == [f"  {r[4:]}" for r in rows]
 
 
-# ------------------------------------------------------------------------------- replay (#83)
+# ------------------------------------------------------------------------------- replay
 
 
 def replayed_calls(replay) -> list[ToolCall]:
@@ -638,7 +639,7 @@ def test_enrich_replayed_answers_its_read_tools_from_the_recording(replayed):
     `datetime` as their repr, which does not revive, so it runs for real: the replay's one miss.
     Every write runs its stand-in, as in the recording, and nothing reaches the fake internet:
     `fetch_enrichment`'s GET is never made, since the tool around it is answered. The trigger is
-    called alone (#84), so the agent's `main()` never seeds its database, which no tool needs."""
+    called alone, so the agent's `main()` never seeds its database, which no tool needs."""
     recorded, replay = replayed(W, "enrich")
     assert replay.exit_code == recorded.exit_code == replay.agent_exit_code() == 0
     assert [name for name, _ in replay.tools()] == [name for name, _ in recorded.tools()]
@@ -672,8 +673,8 @@ def test_enrich_replayed_where_no_lookup_reaches_irimi_runs_each_read_for_real(r
     lookup fails, so each read tool is a miss and runs for real, `ran="real"`, and the SDK says so
     once, on its logger, for six failed lookups; the agent is unharmed and ends as recorded, every
     call is still recorded, and nothing reaches the fake internet: `fetch_enrichment`'s body runs,
-    and its GET, which the tool's recorded call did not use up, is answered from the recording
-    (#83). Replayed by its command (#84): the gateway and the logger the warning reaches are the
+    and its GET, which the tool's recorded call did not use up, is answered from the recording.
+    Replayed by its command: the gateway and the logger the warning reaches are the
     agent's `main()`'s, which a trigger called alone never runs."""
     recorded, replay = replayed(W, "enrich", {LOOKUP_REFUSED_ENV: "1"}, command=True)
     assert replay.exit_code == recorded.exit_code == replay.agent_exit_code() == 0
@@ -703,7 +704,7 @@ def test_enrich_replayed_where_no_lookup_reaches_irimi_runs_each_read_for_real(r
 def test_a_credential_in_a_replayed_tool_s_args_matches_its_placeholder(replayed):
     """`connect_with` is called with the real key in its DSN, and the recording holds the DSN
     with the key's placeholder: they match only once the live args are redacted with the store's
-    key, as the recording's were (#69)."""
+    key, as the recording's were."""
     recorded, replay = replayed(W, "enrich")
     [stored] = [c for c in tool_calls(recorded) if c.name == "crm.connect_with"]
     assert CANARIES["STRIPE_API_KEY"] not in stored.args["dsn"]
@@ -716,7 +717,7 @@ def test_a_credential_in_a_replayed_tool_s_args_matches_its_placeholder(replayed
 def test_read_after_write_replayed_matches_both_reads_in_order(replayed):
     """Both `find_accounts("smb")` calls take the two recorded results, in the order they were
     recorded, so the replay shows the old row, as shadow did. The stand-in ran between them, and
-    with no tool overlay (#119) neither recorded read showed it. Replayed by its command (#84):
+    with no tool overlay neither recorded read showed it. Replayed by its command:
     the write no label covers runs for real, against the database the agent's `main()` creates."""
     recorded, replay = replayed(W, "read_after_write", command=True)
     assert replay.tools() == [
@@ -726,7 +727,7 @@ def test_read_after_write_replayed_matches_both_reads_in_order(replayed):
     ]
     assert replay.result()["saw_rename"] is recorded.result()["saw_rename"] is False
     # The write no label covers made the two recorded results differ: the first read got the
-    # first, untouched, and the second the second (#83).
+    # first, untouched, and the second the second.
     assert replay.result()["last_seen"] == recorded.result()["last_seen"]
     assert recorded.result()["last_seen"] == ["2026-01-01", "2026-09-28"]
     first, second = (c for c in replayed_calls(replay) if c.name == "crm.find_accounts")
@@ -741,8 +742,8 @@ def test_read_after_write_replayed_matches_both_reads_in_order(replayed):
 def test_tool_raises_replayed_raises_what_was_recorded_and_the_agent_catches_it_again(replayed):
     """`flaky_lookup`'s recorded KeyError comes back as `sdk.RecordedToolError`, a subclass of
     KeyError named KeyError, so the agent's `except KeyError` catches it and logs what it logged
-    the first time. `score_account`'s ends the run where it ended, and the trigger, called alone
-    (#84), raises out of `replay_child`, which exits 1 as the agent did."""
+    the first time. `score_account`'s ends the run where it ended, and the trigger, called alone,
+    raises out of `replay_child`, which exits 1 as the agent did."""
     recorded, replay = replayed(W, "tool_raises")
     assert replay.agent_exit_code() == recorded.exit_code == 1
     assert replay.exit_code == 0
@@ -761,7 +762,7 @@ def test_tool_raises_replayed_raises_what_was_recorded_and_the_agent_catches_it_
     ]
     # And the run ends on the recorded type, not on the class it was raised again as: the
     # replay's run posts no end of its own, and `irimi replay` ends it with what `replay_child`
-    # said its call raised (#84).
+    # said its call raised.
     assert replay.one("run.end")["error"] == recorded.one("run.end")["error"] == "KeyError"
     [source] = recorded.sdk_runs()
     record = replay.stored().load_run(replay.process_run_id()).record
@@ -774,7 +775,7 @@ def test_async_tools_replayed_answers_each_read_with_what_its_await_got(replayed
     returned a coroutine (`awaited`): the recording answers the first with a coroutine function's
     result and the second with a coroutine, so the agent's `await` gets what it got when recorded,
     and neither real body runs. `lookup_owner` is called a second time inside the stand-in of the
-    sync write `schedule_followup`, and the recording answers it there too (#83).
+    sync write `schedule_followup`, and the recording answers it there too.
 
     `find_accounts` was recorded within `last_contact`'s span, the agent having left its coroutine
     pending, though `last_contact`'s body never called it. Answering `last_contact` does not use

@@ -31,7 +31,7 @@ from irimi.store import MAX_STORED_BODY, RUNS_DIR, SERVE_LOCK_FILE
 from irimi.trace import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE, ErrorInfo, RunRecord, ToolCall, Trigger
 
 W = "w09_scope_gauntlet"
-# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi (#77).
+# Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.
 MODES = ("shadow", "serve")
 
 
@@ -82,8 +82,8 @@ def test_one_idempotency_key_is_one_write_and_a_reused_key_is_stripes_own_error(
     # The agent sees the same statuses either way: irimi's idempotency is Stripe's.
     assert [s for s, _ in shadow.by_label().values()] == [s for s, _ in bare.by_label().values()]
     assert shadow.by_label()["refund_key_reused"] == (400, "fake-L1")
-    # A replayed key hands back the first answer, minted id and all, and says it is a replay
-    # (#46); a keyless retry mints a new id.
+    # A replayed key hands back the first answer, minted id and all, and says it is a replay;
+    # a keyless retry mints a new id.
     ids = {e["label"]: (e["id"], e["replayed"]) for e in shadow.events("refund")}
     first_id = ids["refund_first"][0]
     assert first_id and first_id.startswith("re_")
@@ -98,7 +98,7 @@ def test_one_idempotency_key_is_one_write_and_a_reused_key_is_stripes_own_error(
     # A replayed key issues no second L3 read; each keyless refund issues its own.
     engine_reads = [r for r in shadow.internet.requests() if r.path == "/v1/charges/ch_GAUNTLET"]
     assert len(engine_reads) == 3
-    # The summary counts the two keyless refunds as two writes: the duplicate Phase 4 must flag.
+    # The summary counts the two keyless refunds as two writes: a duplicate it does not flag.
     summary = "\n".join(summary_of(shadow))
     assert summary.count("refund $0.50 on ch_GAUNTLET") == 2
     assert "✗ refund 200 on ch_GAUNTLET  would fail: idempotency_error" in summary
@@ -117,7 +117,7 @@ def test_gzip_chunked_and_oversized_bodies_are_still_faked(run_workflow, mode):
     assert "refund $3.00 on ch_GAUNTLET" in summary
     assert "refund $4.00 on ch_GAUNTLET" in summary
     # The 3 MB update and irimi's 3 MB fake of the customer are under MAX_STORED_BODY, so both
-    # are stored whole, as blobs, and not flagged cut (#70).
+    # are stored whole, as blobs, and not flagged cut.
     [update] = [
         e
         for e in shadow.stored_events()
@@ -159,8 +159,8 @@ def test_a_read_past_the_body_limit_leaves_the_check_and_the_overlay_unable_to_s
 
 
 def summary_of(result) -> list[str]:
-    """What irimi said of the script's writes: `irimi shadow`'s closing block, or under serve mode
-    (#77), where a plain script names no run, so every request is `unattributed` and no run's
+    """What irimi said of the script's writes: `irimi shadow`'s closing block, or under serve mode,
+    where a plain script names no run, so every request is `unattributed` and no run's
     block is printed, the summary `irimi runs show unattributed` ends in."""
     if result.mode == "shadow":
         return result.summary()
@@ -183,7 +183,7 @@ def test_the_big_charge_is_past_irimis_body_limit():
     assert BIG_DESCRIPTION_BYTES > MAX_BODY_BYTES
 
 
-# The scenarios that send one write whose body decodes past irimi's cap (#94, #79).
+# The scenarios that send one write whose body decodes past irimi's cap.
 CUT_WRITES = ("bombs", "cut_refund", "cut_update")
 
 
@@ -192,7 +192,7 @@ CUT_WRITES = ("bombs", "cut_refund", "cut_update")
 def test_no_decision_ever_fails(run_workflow, scenario, mode):
     """The never-raise hook: a decision that raised would answer 502 `decision-failed`. No edge
     in the gauntlet may reach that path, and every agent call got an HTTP answer. But one: a write
-    whose body decodes past irimi's cap is refused on that path by design (#94), and says why,
+    whose body decodes past irimi's cap is refused on that path by design, and says why,
     once in each scenario that sends one (`CUT_WRITES`)."""
     shadow = run_workflow(W, scenario, mode)
     assert shadow.exchange_lines()
@@ -229,7 +229,7 @@ def test_every_spelling_of_the_proxys_own_address_is_the_reverse_door(run_workfl
     proxy to itself) all name irimi's listener, so each refund is taken through the reverse door
     and faked. Missing a spelling would forward the request to the proxy itself, or past it.
 
-    Serve mode binds irimi to 0.0.0.0 here (#77), so the listener is every address of this
+    Serve mode binds irimi to 0.0.0.0 here, so the listener is every address of this
     machine: the same three spellings still find it, the agent still reaches it from loopback, so
     the reverse door's peer check lets it through, and nothing reaches the fake internet. This
     machine's own non-loopback address is not a spelling the fake resolver allows, so that case
@@ -247,7 +247,7 @@ def test_every_spelling_of_the_proxys_own_address_is_the_reverse_door(run_workfl
     read = "live      read      GET api.stripe.com/v1/charges/ch_GAUNTLET -> -"
     write = "fake-L1   write     POST api.stripe.com/v1/refunds -> 200  [fidelity:L1]"
     assert shadow.exchange_lines() == [read, write] * 3
-    assert engine_reads(shadow) == [(None, ())] * 3  # stored as `big_reads` stores its one (#70)
+    assert engine_reads(shadow) == [(None, ())] * 3  # stored as `big_reads` stores its one
     if mode == "shadow":
         refunds = [line for line in shadow.summary() if "○" in line]
         assert refunds == ["  ○ refund 600 on ch_GAUNTLET  unvalidated (L2)"] * 3
@@ -264,7 +264,7 @@ def test_every_spelling_of_the_proxys_own_address_is_the_reverse_door(run_workfl
 def test_the_control_endpoint_answers_at_every_spelling_and_is_never_an_exchange(
     run_workflow, mode
 ):
-    """The same three spellings reach irimi's control endpoint (#73), direct and through the proxy
+    """The same three spellings reach irimi's control endpoint, direct and through the proxy
     to itself: health answers 200 and a path no route names 404, both stamped `control`. Neither
     is forwarded, decided or recorded, so the exchange lines above are the refunds' alone."""
     shadow = run_workflow(W, "self_addressed", mode)
@@ -285,11 +285,11 @@ def test_the_control_endpoint_answers_at_every_spelling_and_is_never_an_exchange
     assert bare.exit_code == shadow.exit_code == 0
 
 
-# -- the control endpoint, called as the SDK will call it (#73) -----------------------------------
+# -- the control endpoint, called as the SDK will call it -----------------------------------------
 #
 # `control_runs` and `control_hazards` do the SDK's job by hand, with posts the test controls
 # exactly: what `irimi shadow` stores for a run reported over the control endpoint, and what each
-# refusal answers. The SDK's own posts (#74) are pinned by every other workflow.
+# refusal answers. The SDK's own posts are pinned by every other workflow.
 
 # The runs `control_runs` posts in full: run id, the tag its labels start with, the path its one
 # labelled read GETs.
@@ -313,7 +313,7 @@ REFUSALS = {
         f"the body is {OVERSIZED_BODY_BYTES + 11} bytes, over the "
         f"{control.MAX_CONTROL_BODY} allowed",
     ),
-    # Named by its type, never quoted: the same line on every Python (#100, #123).
+    # Named by its type, never quoted: the same line on every Python.
     "refuse_deep": (400, "'name' is a list, not a string"),
 }
 ELAPSED = re.compile(r" · \d+\.\ds$")
@@ -374,14 +374,14 @@ def read_line(path: str) -> str:
 
 
 def listed(result) -> list[list[str]]:
-    """`irimi runs list`, each line's fields, its start time and duration masked (#72)."""
+    """`irimi runs list`, each line's fields, its start time and duration masked."""
     code, out, err = result.runs("list")
     assert (code, err) == (0, [])
     return sorted([f[0], "<started>", "<elapsed>", *f[3:]] for f in (o.split("  ") for o in out))
 
 
 def shown(result, run_id: str) -> list[str]:
-    """`irimi runs show <run_id>`, its elapsed seconds masked (#72)."""
+    """`irimi runs show <run_id>`, its elapsed seconds masked."""
     code, out, err = result.runs("show", run_id)
     assert (code, err) == (0, [])
     return [ELAPSED.sub(" · <elapsed>", line) for line in out]
@@ -427,10 +427,10 @@ def test_the_sdks_posts_are_answered_by_irimi_and_its_reads_go_live(run_workflow
 
 @pytest.mark.parametrize("mode", MODES)
 def test_a_run_posted_over_the_control_endpoint_is_stored_as_an_sdk_run(run_workflow, mode):
-    """#73's headline, through the real `irimi shadow`: each run is stored `attribution: "sdk"`
-    with the trigger, versions and times it posted and `outcome: ok`, and holds its two tool calls
-    with its labelled read between them - whether it posted direct (`ctl-direct`) or through the
-    proxy to itself (`ctl-proxied`). `irimi runs show` prints it so."""
+    """Runs posted over the control endpoint, through the real `irimi shadow`: each run is stored
+    `attribution: "sdk"` with the trigger, versions and times it posted and `outcome: ok`, and holds
+    its two tool calls with its labelled read between them - whether it posted direct (`ctl-direct`)
+    or through the proxy to itself (`ctl-proxied`). `irimi runs show` prints it so."""
     shadow = run_workflow(W, "control_runs", mode)
     reader = shadow.stored()
     for run_id, (tag, path) in CONTROL_RUNS.items():
@@ -441,7 +441,7 @@ def test_a_run_posted_over_the_control_endpoint_is_stored_as_an_sdk_run(run_work
         assert after == stored_tool_call(shadow, run_id, f"{tag}_tool_2")
         assert isinstance(read, Exchange)
         assert (read.run_id, report.exchange_line(read)) == (run_id, read_line(path))
-        # In time as well as in `seq` (#73): the run's start, its first tool call, the read, its
+        # In time as well as in `seq`: the run's start, its first tool call, the read, its
         # second tool call and its end, each clock read after the last.
         times = [stored.record.started_at, before.ended_at, read.started_at, read.ended_at]
         times += [after.started_at, stored.record.ended_at]
@@ -469,7 +469,7 @@ def test_a_run_posted_over_the_control_endpoint_is_stored_as_an_sdk_run(run_work
 
 @pytest.mark.parametrize("mode", MODES)
 def test_two_runs_posted_at_once_do_not_mix(run_workflow, mode):
-    """The Phase 3 exit test, "two concurrent requests don't mix", on the control endpoint. Two
+    """Two concurrent requests don't mix, on the control endpoint. Two
     threads in lockstep: both start, both post a tool call, both read, both post another, both end,
     so each step of one run is between steps of the other on the wire and in the store's queue.
     Each run still holds only its own: its own tool calls, and the read it labelled, which the
@@ -496,11 +496,11 @@ def test_a_run_that_ends_in_error_keeps_its_error_redacted_then_cut_to_what_a_tr
     run_workflow, mode
 ):
     """A run posts a tool call that raised and an end in error, each message past the 1000
-    characters `ErrorInfo` promises (#68): both are stored, cut to that length, not refused. The
-    end's error type is past the 300 characters a posted one is cut to, and is cut so (#99). One
+    characters `ErrorInfo` promises: both are stored, cut to that length, not refused. The
+    end's error type is past the 300 characters a posted one is cut to, and is cut so. One
     key is across all three cuts, and each is redacted whole before it is cut: the stored error
     is a prefix of the redacted whole, the key its one placeholder in all three, and no part of
-    the key reaches the store or `irimi runs show` (#179)."""
+    the key reaches the store or `irimi runs show`."""
     shadow = run_workflow(W, "control_runs", mode)
     stored = shadow.stored().load_run("ctl-error")
     tool = stored_tool_call(shadow, "ctl-error", "error_tool")
@@ -544,12 +544,12 @@ def test_a_run_that_ends_in_error_keeps_its_error_redacted_then_cut_to_what_a_tr
 
 @pytest.mark.parametrize("mode", MODES)
 def test_each_refusal_answers_its_status_and_line_and_makes_no_run(run_workflow, mode):
-    """Every refusal #73 documents, through the real proxy: the wrong method (405), no such route
-    (404), a run id the store cannot use (400 for `../x` and for `unattributed`), `NaN`, a missing
-    field, a tool call naming its own run, a field nested 5,000 deep, named by its type (#100)
-    (400), and a body past 2 MiB (413). Each names its own run, and none of them is a directory,
-    or an unattributed event, afterwards. Under serve mode (#77) the store also holds the serve's
-    `serve.lock`, and no process run."""
+    """Every refusal the control endpoint documents, through the real proxy: the wrong method (405),
+    no such route (404), a run id the store cannot use (400 for `../x` and for `unattributed`),
+    `NaN`, a missing field, a tool call naming its own run, a field nested 5,000 deep, named by its
+    type (400), and a body past 2 MiB (413). Each names its own run, and none of them is a
+    directory, or an unattributed event, afterwards. Under serve mode the store also holds the
+    serve's `serve.lock`, and no process run."""
     shadow = run_workflow(W, "control_runs", mode)
     assert {e["label"]: e["body"] for e in shadow.events("refusal")} == {
         label: {"error": line} for label, (_, line) in REFUSALS.items()
@@ -567,7 +567,7 @@ def test_each_refusal_answers_its_status_and_line_and_makes_no_run(run_workflow,
 @pytest.mark.parametrize("mode", MODES)
 def test_health_reports_the_engine_and_what_the_store_wrote(run_workflow, mode):
     """`GET /_irimi/health` before the first run and after the last, each once the store had
-    nothing queued: the engine's version, whether it serves (`true` only under `--serve`, #77),
+    nothing queued: the engine's version, whether it serves (`true` only under `--serve`),
     and the store's counters, `written` grown from nothing to every event line the runs hold."""
     shadow = run_workflow(W, "control_runs", mode)
     before, after = (e["body"] for e in shadow.events("health"))
@@ -579,10 +579,10 @@ def test_health_reports_the_engine_and_what_the_store_wrote(run_workflow, mode):
 
 @pytest.mark.parametrize("mode", MODES)
 def test_a_run_ended_over_the_control_endpoint_no_longer_lists_as_incomplete(run_workflow, mode):
-    """#72 listed every run but the process run `incomplete`, because nothing could end one. Each
-    run here posted its end, so `irimi runs list` says how it ended. A tool call counts as no
-    exchange. Under serve mode (#77) there is no process run to list, and each run printed its
-    block when its end was taken, the same block `irimi runs show` ends in."""
+    """A run that posts its end lists as ended, not `incomplete`. Each run here posted its end, so
+    `irimi runs list` says how it ended. A tool call counts as no exchange. Under serve mode there
+    is no process run to list, and each run printed its block when its end was taken, the same
+    block `irimi runs show` ends in."""
     shadow = run_workflow(W, "control_runs", mode)
     ran = [
         *(
@@ -613,7 +613,7 @@ def test_a_run_ended_over_the_control_endpoint_no_longer_lists_as_incomplete(run
 @pytest.mark.parametrize("mode", MODES)
 def test_a_start_re_posted_after_its_end_is_dropped_and_the_run_kept_whole(run_workflow, mode):
     """The SDK must never re-post a start. Made anyway, it is answered 204, since the endpoint
-    only queues it, and the store drops it (#97): the run keeps its first trigger, its end and its
+    only queues it, and the store drops it: the run keeps its first trigger, its end and its
     read, and lists `ok`. The run lost nothing, so the drop is counted in health's `dropped`
     alone, not in the run's `dropped_events`."""
     shadow = run_workflow(W, "control_hazards", mode)
@@ -685,8 +685,8 @@ def test_the_process_runs_start_and_end_are_irimis_and_only_its_tool_calls_are_t
         "  0 exchanges · 0 live · 0 delegated · 0 virtualized",
     ]
     # A tool call posted for no run at all, as the SDK posts one where there is no process run
-    # (`irimi serve`, #77), is taken too, and filed in `unattributed/`: the one post that may name
-    # it, where a start or an end is refused (`control_runs`, #76).
+    # (`irimi serve`), is taken too, and filed in `unattributed/`: the one post that may name
+    # it, where a start or an end is refused (`control_runs`).
     unattributed = shadow.stored().load_run(trace.UNATTRIBUTED).events
     assert unattributed == [stored_tool_call(shadow, trace.UNATTRIBUTED, "unattributed_tool")]
     # Printed like the process run's: one line each, the same text, so counted, not looked for.
@@ -700,12 +700,12 @@ def test_under_serve_irimis_own_run_is_unattributed_and_only_its_tool_calls_are_
     run_workflow,
 ):
     """Serve mode starts no process run and gives the agent no `IRIMI_RUN`, so irimi's own run is
-    `unattributed` (#77), and the hazard's posts name it. A start and an end for it are refused
-    400 by the run-id check, before the own-run check is reached (#73), and the two tool calls
-    posted to it are taken and filed there, as the SDK files a tool call made in no run (#76).
+    `unattributed`, and the hazard's posts name it. A start and an end for it are refused
+    400 by the run-id check, before the own-run check is reached, and the two tool calls
+    posted to it are taken and filed there, as the SDK files a tool call made in no run.
 
     The run printed its block when its end was taken: one read, ended. The start re-posted after
-    it is dropped (#97), so the store still holds the run ended, and the block is the one
+    it is dropped, so the store still holds the run ended, and the block is the one
     `irimi runs show` ends in, as `test_invariants.py` holds every serve's blocks to."""
     serve = run_workflow(W, "control_hazards", "serve")
     assert [e["id"] for e in serve.events("process_run")] == [trace.UNATTRIBUTED]
@@ -741,7 +741,7 @@ def test_under_serve_irimis_own_run_is_unattributed_and_only_its_tool_calls_are_
 
 
 def argv(result) -> list[str]:
-    """The argv the harness started the agent with: the process run's trigger args (#70)."""
+    """The argv the harness started the agent with: the process run's trigger args."""
     workflow = WORKFLOW.scenarios[result.scenario]
     return [sys.executable, "-m", "examples.workflows.launch", WORKFLOW.module, *workflow.argv]
 
@@ -776,7 +776,7 @@ def test_a_get_that_writes_escapes_and_the_scenario_says_so(run_workflow, mode):
 
 def test_a_replay_answers_the_get_that_writes_from_its_recording_so_it_writes_nothing(replayed):
     """The GET that deletes escaped when it was recorded, as every GET does (a read is live). A
-    replay answers it from the recording, so the delete does not happen a second time (#82)."""
+    replay answers it from the recording, so the delete does not happen a second time."""
     recorded, replay = replayed(W, "get_that_writes")
     assert [(r.method, r.path) for r in recorded.internet.writes()] == [("GET", "/api/delete_user")]
     assert replay.internet.writes() == []
@@ -790,12 +790,12 @@ def test_a_replay_answers_the_get_that_writes_from_its_recording_so_it_writes_no
 def test_a_replay_refuses_a_cut_write_again_and_answers_the_rest_from_its_recording(
     replayed, scenario
 ):
-    """A write whose body decoded past irimi's cap was refused, never decided (#94), and a replay
+    """A write whose body decoded past irimi's cap was refused, never decided, and a replay
     refuses it again the same way: the engine answers it 502 before any policy is asked, so it
     carries neither replay flag, and nothing reaches the fake Stripe. That refusal was never a
     write - the engine never put it in the write log (`is_authored_write`) - so the $9 refund after
     it, which L3 checked, is answered from the recording, check and all, and the replay never
-    diverges (#82). `irimi compare` of the recording and its replay calls the cut pair `?` and
+    diverges. `irimi compare` of the recording and its replay calls the cut pair `?` and
     exits 1."""
     recorded, replay = replayed(W, scenario)
     cut, refund = replay.reported
@@ -822,10 +822,10 @@ def _files(root) -> dict[str, bytes]:
 
 def test_a_replay_never_writes_into_the_run_it_replays(replayed):
     """`control_runs` names its runs itself, posting each by hand, with args `irimi replay` will
-    not call a trigger with, so it is replayed by its command (#84), which posts `ctl-direct`
+    not call a trigger with, so it is replayed by its command, which posts `ctl-direct`
     again: its start,
     its tool calls, its end, and a read labelled `Irimi-Run: ctl-direct`. A replay never writes
-    into the run it answers from (#82): that run's files are byte for byte what was recorded, and
+    into the run it answers from: that run's files are byte for byte what was recorded, and
     what the replay said of it is filed in `unattributed`, its exchange flagged `bad-run-id` - and
     still answered from the recording."""
     recorded, replay = replayed(W, "control_runs", run_id="ctl-direct", command=True)
@@ -844,7 +844,7 @@ def test_a_replay_never_writes_into_the_run_it_replays(replayed):
 
 def test_a_replay_writes_no_other_recorded_run_its_agent_names_again(replayed):
     """`control_runs` posts its other four runs by name too, each a recorded run in the shared
-    store. A replay writes only the runs it makes (#82): every recorded run's files are byte for
+    store. A replay writes only the runs it makes: every recorded run's files are byte for
     byte what was recorded, the replay's own run is the one run that names what it replays, and
     what it said of each recorded run is filed in `unattributed`, its exchanges flagged
     `bad-run-id`."""
@@ -866,7 +866,7 @@ def test_a_replay_writes_no_other_recorded_run_its_agent_names_again(replayed):
     assert all("bad-run-id" in e.flags for e in filed if isinstance(e, Exchange))
 
 
-# -- bodies that decode past irimi's cap (#94) ---------------------------------------------------
+# -- bodies that decode past irimi's cap ----------------------------------------------------------
 #
 # `bombs` sends gzip bodies of a few hundred KB that decode to 128 MiB, past the most irimi decodes
 # of any body, and reads one back that decodes as far. irimi records each with no body, flags it
@@ -940,7 +940,7 @@ def test_a_write_whose_body_decodes_past_the_cap_is_refused_and_never_leaves(run
     that raised does: its own 502, stamped, recorded `unknown` and flagged. The service never sees
     it, and nothing it would have fired is claimed for it. The summary prints it as irimi refused
     it, `✗`, the request as sent and the flags that say why, not a `human:` sentence filled from a
-    body irimi never read, and its host line counts it so, not as `unclassified` (#112)."""
+    body irimi never read, and its host line counts it so, not as `unclassified`."""
     shadow = run_workflow(W, "bombs", mode)
     posted = [(r.method, r.path) for r in shadow.internet.requests() if r.method == "POST"]
     assert posted == [("POST", "/v1/messages")]
@@ -1012,7 +1012,7 @@ def test_a_read_back_that_decodes_past_the_cap_is_never_overlaid(run_workflow, m
 def test_a_run_start_that_decodes_past_the_cap_is_refused_413_unread(run_workflow, mode):
     """Three run starts, each valid JSON followed by 128 MiB of blanks: in lines, after a line of
     its own with no line after it, and on the same line. A body past the control endpoint's 2 MiB
-    is refused 413 (#73), and a cut one is past it whatever its start holds (#94): no start makes a
+    is refused 413, and a cut one is past it whatever its start holds: no start makes a
     run, and the store wrote only the exchanges."""
     shadow = run_workflow(W, "bombs", mode)
     allowed = control.MAX_CONTROL_BODY
@@ -1020,24 +1020,24 @@ def test_a_run_start_that_decodes_past_the_cap_is_refused_413_unread(run_workflo
         CONTROL_BOMBS, {"error": f"the body decodes past the {allowed} bytes allowed"}
     )
     root = shadow.home / paths.STORE_DIR_NAME
-    # No run but the process run, which serve mode does not have (#77).
+    # No run but the process run, which serve mode does not have.
     process = [shadow.process_run_id()] if mode == "shadow" else []
     assert sorted(p.name for p in (root / "runs").glob("*")) == process
     [health] = shadow.events("health")
     assert health["body"]["store"] == {"queued": 0, "written": len(BOMB_LINES), "dropped": 0}
 
 
-# ---------------------------------------------------------------------- irimi compare (#79)
+# ---------------------------------------------------------------------- irimi compare
 #
 # W9 is a plain script: under `irimi shadow` its every write is its process run's, and under serve
-# mode `unattributed`'s (#77). Every serve run recorded into a store files its writes in the same
+# mode `unattributed`'s. Every serve run recorded into a store files its writes in the same
 # `unattributed`, so each pin below records into a store of its own, which one serve run at most
 # records into: A under shadow, and B under shadow (its process run) or serve (`unattributed`).
 
 NOT_A_VERDICT = "a comparison, not a verdict: nothing was replayed"
 PLAIN_REFUND = "○ refund $9.00 on ch_GAUNTLET  unvalidated (L3 preconditions passed)"
-# A write whose body decoded past the cap, as irimi refused it (#94), never a sentence filled from a
-# body irimi did not read (#112).
+# A write whose body decoded past the cap, as irimi refused it, never a sentence filled from a
+# body irimi did not read.
 CUT_REFUND = "✗ POST api.stripe.com/v1/refunds  refused by irimi (decision-failed, body-truncated)"
 
 
@@ -1057,10 +1057,10 @@ def side(result) -> str:
 
 @pytest.mark.parametrize("mode", MODES)
 def test_irimi_compare_will_not_compare_two_writes_whose_bodies_were_cut(shared_store_run, mode):
-    """`cut_refund` and `cut_update` each send one Stripe write whose body irimi could not keep
-    (#94), a refund and a customer update, and then the same plain refund. irimi could not decide
+    """`cut_refund` and `cut_update` each send one Stripe write whose body irimi could not keep,
+    a refund and a customer update, and then the same plain refund. irimi could not decide
     either cut write, so it keys both by host alone, and they pair: texts that differ while a body
-    was cut are a `?` row, not a change, and the totals say how many it did not compare (#79)."""
+    was cut are a `?` row, not a change, and the totals say how many it did not compare."""
     one, a, other, b = recorded_pair(shared_store_run, "cut_refund", "cut_update", mode, "cut")
     code, out, err = other.compare_runs(a, b)
     assert (code, err) == (1, [])
@@ -1085,11 +1085,11 @@ def test_irimi_compare_will_not_compare_two_writes_whose_bodies_were_cut(shared_
 def test_irimi_compare_will_not_call_two_cut_refunds_of_different_amounts_the_same(
     shared_store_run, mode
 ):
-    """`bombs` refunds 800 and `cut_refund` 700, each in a body irimi could not keep (#94), so
-    neither stored body says how much, and both print the one line irimi refuses a cut refund with
-    (#112). That line is the same for every refund, and compared by it the pair was `=`, exit 0, as
+    """`bombs` refunds 800 and `cut_refund` 700, each in a body irimi could not keep, so
+    neither stored body says how much, and both print the one line irimi refuses a cut refund with.
+    That line is the same for every refund, and compared by it the pair was `=`, exit 0, as
     if the runs made the same writes: a pair either side of which was cut is `?` whatever its
-    texts, and the run exits 1 (#79)."""
+    texts, and the run exits 1."""
     one, a, other, b = recorded_pair(shared_store_run, "bombs", "cut_refund", mode, "cut-equal")
     code, out, err = other.compare_runs(a, b)
     assert (code, err) == (1, [])
@@ -1118,10 +1118,10 @@ def test_irimi_compare_will_not_call_two_cut_refunds_of_different_amounts_the_sa
 
 
 def test_irimi_compare_of_one_key_used_three_times_under_shadow_against_serve(shared_store_run):
-    """`idempotency` under shadow, its process run, against itself under serve, `unattributed`
-    (#77): the first refund, the same key reused for a different amount, which irimi says would
-    fail (#46), and two keyless refunds, each the same. The second use of the key, the same refund
-    again, is the idempotency store's answer to the first and no write (#79)."""
+    """`idempotency` under shadow, its process run, against itself under serve, `unattributed`:
+    the first refund, the same key reused for a different amount, which irimi says would
+    fail, and two keyless refunds, each the same. The second use of the key, the same refund
+    again, is the idempotency store's answer to the first and no write."""
     one, a, other, b = recorded_pair(
         shared_store_run, "idempotency", "idempotency", "serve", "idem"
     )
@@ -1149,7 +1149,7 @@ def test_irimi_compare_of_one_key_used_three_times_under_shadow_against_serve(sh
 
 def test_a_process_run_with_no_trigger_replays_by_running_its_argv_again(run_workflow, replayed):
     """`verbs` starts no SDK run: its one run is the process run, whose trigger is the command
-    line. `irimi replay` runs that argv again (#84), so the agent's `main()` runs, is told it
+    line. `irimi replay` runs that argv again, so the agent's `main()` runs, is told it
     replays, and makes every call it made, each answered from the recording; the replay is one
     run, recording the same trigger."""
     recorded, replay = replayed(W, "verbs")

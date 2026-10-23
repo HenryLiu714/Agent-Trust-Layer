@@ -9,8 +9,7 @@ from irimi.cli.options import epilog, help_formatted
 from irimi.config import ca
 from irimi.core import exitcodes
 
-# A non-HTTP write the agent labels with `@sdk.write_tool` runs only its fake under irimi, so the
-# notice says the rest happen for real, not that all of them do.
+# A `@sdk.write_tool` runs only its fake under irimi, so only unlabelled non-HTTP writes are real.
 NON_HTTP_NOTICE = (
     "irimi shadows HTTP(S) only: database writes, files, gRPC and WebSockets happen for real, "
     "unless the agent labels the function that makes them with @sdk.write_tool"

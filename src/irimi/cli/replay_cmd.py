@@ -1,5 +1,4 @@
-"""`irimi replay RUN_ID`: a stored run's trigger run again through irimi, answered from the
-run's recording, and what the agent did differently."""
+"""`irimi replay RUN_ID`: re-run a stored run's trigger against its recording and show changes."""
 
 import argparse
 import contextlib
@@ -113,22 +112,17 @@ def register(subparsers: "argparse._SubParsersAction[Any]") -> None:
         help="write the result as JSON to PATH",
     )
     add_proxy_options(replay, 0)
-    # What follows `--`, which `main` splits off before argparse sees it: a command to run in
-    # place of a call of the run's entrypoint.
+    # `cmd` is what follows `--`: a command to run instead of calling the entrypoint.
     replay.set_defaults(func=cmd_replay, cmd=[])
 
 
 def cmd_replay(
     args: argparse.Namespace, *, engine_factory: compose.EngineFactory = compose.build_engine
 ) -> int:
-    """`irimi replay RUN`: a stored run's trigger run again through irimi, answered from the
-    run's recording, and what the agent did differently. What it runs is `replay.plan`'s
-    to say, and what it prints `replay.report.ReplayReport`'s. Exits with `EXIT_CODES`: as
-    `irimi compare` does, 2 for a replay that could not run, or whose run could not be read back,
-    and 130 or 143 for one SIGINT or SIGTERM stopped.
-    `--result-file` writes the result as JSON, the one `testing.replay()` reads
-    (`protocol.replay_files.ReplayResult`), whether or not the replay ran, holding what irimi
-    said on stderr of a replay that did not."""
+    """Run `irimi replay RUN` and return one of `EXIT_CODES`.
+
+    `--result-file` is written whether or not the replay ran; a refusal's stderr lines go in it.
+    """
     if args.run_id is not None and args.run is not None:
         raise UsageError("give the run once: RUN, or --run=RUN")
     if args.run_id is None and args.run is None:
@@ -144,7 +138,7 @@ def cmd_replay(
         try:
             result = _run_replay(args, child, said, engine_factory)
         except KeyboardInterrupt:
-            # Ctrl-C while irimi read a run or prepared one, before any was stored.
+            # Ctrl-C before any run was stored.
             result = _interrupted(args, said, None)
     if args.result_file is not None:
         try:
@@ -162,8 +156,7 @@ def _run_replay(
     said: list[str],
     engine_factory: compose.EngineFactory,
 ) -> ReplayResult:
-    """`cmd_replay` inside its SIGTERM handler: refused with what irimi said on stderr, or run,
-    start to result."""
+    """Plan and run the replay, or return a refusal holding what irimi printed to stderr."""
     try:
         source = _load_source(args)
         plan = replay_plan.plan(source.record, list(args.cmd), args.entrypoint, args.args)
@@ -171,16 +164,15 @@ def _run_replay(
     except replay_plan.Refused as exc:
         print(f"error: {exc}", file=sys.stderr)
         result = replay_report.refused(args.run_id, said)
-        # A SIGTERM that came while `--python` was asked stopped the replay, which exits as one
-        # stopped before its command started, whatever the answer.
+        # A SIGTERM during the `--python` probe exits as one before the command started.
         return replace(result, exit_code=exitcodes.SIGTERM) if child.terminated else result
     if source.record.end is None:
         print(
             f"warning: run {args.run_id} did not end; it is replayed as far as it was recorded",
             file=sys.stderr,
         )
-    # Made before the store is opened, so nothing after it can leave the store unclosed. Only
-    # this user can enter it: the args are the run's, and the outcome the child's.
+    # Made before the store opens, so nothing after it can leave the store unclosed. It is private
+    # to this user, since it holds the run's args.
     with tempfile.TemporaryDirectory(prefix="irimi-replay-") as tmp:
         argv, call = list(plan.argv), None
         if plan.call is not None:
@@ -199,24 +191,21 @@ def _run_replay(
                 args, run, child, ChildSpec("replay", argv, record, call), engine_factory
             )
     if args.python is None and _no_such_module(ran.call):
-        # irimi's own Python is not the agent's when irimi is installed apart from it, as a tool:
-        # say which Python it was, and how to name the agent's.
+        # irimi installed as a tool runs under a Python without the agent's packages.
         print(
             f"hint: the trigger was called under irimi's own Python, {sys.executable}, which may "
             "not have the agent's packages; name the agent's Python with --python PATH",
             file=sys.stderr,
         )
     if ran.status != "ran":
-        # The agent never ran: refused, or stopped by a signal before its run was stored, which
-        # exits as `irimi shadow` would.
+        # The agent never ran; a signal exits as `irimi shadow` would.
         stored = run.run_id if ran.status == "not-spawned" else None
         result = replay_report.refused(args.run_id, said, stored)
         if ran.code in (exitcodes.SIGINT, exitcodes.SIGTERM):
             return replace(result, exit_code=ran.code)
         return result
     if plan.call is not None and ran.call is not None and not ran.call.called:
-        # The child said why on stderr, and the hint is said: the agent never ran, so there is no
-        # replay to report and nothing to compare. The result holds both lines.
+        # The trigger was never called, so there is nothing to compare.
         why = ran.call.error.message if ran.call.error is not None else "it was not called"
         cannot = f"error: cannot call {plan.call.entrypoint}: {printable(why)}"
         lines = [*said[:said_before], cannot, *said[said_before:]]
@@ -226,20 +215,18 @@ def _run_replay(
         rerun = plan.argv if plan.rerun else None
         return _report_replay(args, source, run.run_id, ran, said, rerun)
     except KeyboardInterrupt:
-        # Ctrl-C while irimi read the runs back or compared them: the replay's run is stored and
-        # ended, and its result names it.
+        # The replay's run is already stored and ended, so the result names it.
         return _interrupted(args, said, run.run_id)
 
 
 def _load_source(args: argparse.Namespace) -> StoredRun:
-    """The run `irimi replay` answers from, in the store under `--store`, read whole before
-    anything starts, or `replay.plan.Refused` saying why it cannot be."""
+    """Return the stored run to replay, read whole; raise `replay.plan.Refused` if it cannot be."""
     root = compose.store_root(args)
     if args.run_id == UNATTRIBUTED:
-        # Every serve session's requests no run named, in one pool: not one run to answer from.
+        # A pool of requests from many sessions, not one run.
         raise replay_plan.Refused(f"{UNATTRIBUTED} is not a run to replay")
     try:
-        # The whole id from here on: the replay's messages and its result name the run it read.
+        # Messages and the result name the full id from here on.
         args.run_id = compose.resolve_run_id(root, args.run_id)
     except LookupError as exc:
         raise replay_plan.Refused(str(exc)) from None
@@ -250,11 +237,11 @@ def _load_source(args: argparse.Namespace) -> StoredRun:
 
 
 def _replay_python(args: argparse.Namespace, plan: replay_plan.Plan) -> str:
-    """The Python a replay's child calls its trigger under: irimi's own, or `--python`, the
-    agent's, once `runner.probe_python` has asked it for its irimi. One that does not run, or
-    cannot import irimi's replay child, is Refused before anything starts; one with another irimi
-    than this is warned of, since that irimi makes the call. `--python` for a run replayed by its
-    recorded command is Refused, as with `-- CMD`: the command names its own Python."""
+    """Return the Python the child calls the trigger under: irimi's own, or a probed `--python`.
+
+    Raises Refused for a `--python` that cannot run the replay child, or with a recorded command.
+    Warns when its irimi version differs from this one.
+    """
     if args.python is None:
         return sys.executable
     if plan.call is None:
@@ -264,8 +251,7 @@ def _replay_python(args: argparse.Namespace, plan: replay_plan.Plan) -> str:
         )
     named = f"--python {printable(args.python)}"
     if os.path.isdir(args.python):
-        # `--python .venv`, as uv's own `--python` takes it, is looked up on PATH, or cannot be
-        # executed: either error would hide that the directory is the trouble.
+        # Running a directory gives an error that hides the real mistake.
         inside = printable(os.path.join(args.python, "bin", "python"))
         raise replay_plan.Refused(
             f"{named} is a directory; name the Python in it, as --python {inside}"
@@ -293,8 +279,7 @@ def _replay_python(args: argparse.Namespace, plan: replay_plan.Plan) -> str:
 
 
 def _no_such_module(call: CallResult | None) -> bool:
-    """Whether a replay's child could not call its trigger because a module it imports is not
-    installed under the child's Python."""
+    """Return True if the trigger was not called because a module was not installed."""
     return call is not None and not call.called and call.cause == "builtins.ModuleNotFoundError"
 
 
@@ -306,9 +291,10 @@ def _report_replay(
     said: list[str],
     rerun: tuple[str, ...] | None,
 ) -> ReplayResult:
-    """A replay whose run `run_id` was stored and ended: both runs read back, and what the
-    replay did printed and returned (`replay.report.outcome`). `rerun` is the recorded
-    command line a process run's replay ran again."""
+    """Read both runs back, print the comparison and return the result.
+
+    `rerun` is the recorded command line a process run's replay ran again.
+    """
     try:
         replayed = compose.load_stored_run(compose.store_root(args), run_id)
     except CliError as exc:
@@ -324,16 +310,16 @@ def _report_replay(
 
 
 def _interrupted(args: argparse.Namespace, said: list[str], run_id: str | None) -> ReplayResult:
-    """A replay Ctrl-C stopped while no agent ran, so none was waited on: exit 130, as `irimi
-    shadow` exits, its result naming the replay's run when one was stored."""
+    """Return the result of a replay Ctrl-C stopped while no agent ran: exit 130."""
     print("error: interrupted", file=sys.stderr)
     return replace(replay_report.refused(args.run_id, said, run_id), exit_code=exitcodes.SIGINT)
 
 
 class _Tee:
-    """`stream`, but each whole line written to it is kept in `lines` too. Everything else - a
-    flush, `isatty`, `fileno` - is the stream's own. Not an `io` class, whose finalizer would
-    flush a stream the caller may since have closed."""
+    """Wrap `stream`, also keeping each whole line written in `lines`.
+
+    Not an `io` class, whose finalizer would flush a stream the caller may have closed.
+    """
 
     def __init__(self, stream: TextIO, lines: list[str]) -> None:
         self._stream = stream
@@ -352,9 +338,7 @@ class _Tee:
 
 @contextlib.contextmanager
 def _keeping_stderr() -> Iterator[list[str]]:
-    """For the block, stderr as it is, and each line written to it kept in the list yielded: what
-    irimi said of why a replay could not run, which its result holds. Python's own writes
-    to stderr only, not a child's, which writes to the same file descriptor directly."""
+    """Keep each line Python writes to stderr in the yielded list; a child's writes are not seen."""
     lines: list[str] = []
     with contextlib.redirect_stderr(cast(TextIO, _Tee(sys.stderr, lines))):
         yield lines

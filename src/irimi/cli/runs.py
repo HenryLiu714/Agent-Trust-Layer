@@ -1,5 +1,4 @@
-"""`irimi runs list`, `irimi runs show` and `irimi compare`: the runs in the trace store, read
-back. `irimi runs rm` and `irimi runs prune` delete them."""
+"""`irimi runs list|show|rm|prune` and `irimi compare`: read and delete stored runs."""
 
 import argparse
 import re
@@ -151,10 +150,8 @@ def cmd_runs_list(args: argparse.Namespace) -> int:
     records = every if args.all else every[: args.limit]
     rows = []
     for record in records:
-        # One damaged run is named and counted as `?`, never allowed to hide the others: the
-        # store's own rule for `list_runs`.
-        # Counted, never read: no body is loaded, or a few runs of LLM streams cost hundreds of
-        # MB to print two numbers each.
+        # A damaged run shows as `?` rather than hiding the others. Bodies are not loaded: large
+        # LLM streams would cost hundreds of MB just to count events.
         try:
             events = compose.load_stored_run(root, record.run_id, bodies=False).events
         except CliError as exc:
@@ -194,7 +191,7 @@ class Duration:
 
 
 def duration(value: str) -> Duration:
-    """argparse type for --older-than: a whole number of hours or days, `12h` or `30d`."""
+    """Parse --older-than: a whole number of hours or days, `12h` or `30d`."""
     match = re.fullmatch(r"(\d+)([hd])", value)
     if match is None:
         raise argparse.ArgumentTypeError(
@@ -252,9 +249,10 @@ def _remove(args: argparse.Namespace, root: Path, run_ids: list[str], *, dry_run
 
 
 def cmd_compare(args: argparse.Namespace) -> int:
-    """`irimi compare RUN_A RUN_B`: two stored runs' writes side by side. Exits as diff(1) does
-    (`COMPARE_EXIT_CODES`): 0 when every write is the same, 1 when any is not, 2 when a run cannot
-    be read."""
+    """`irimi compare RUN_A RUN_B`: two stored runs' writes side by side.
+
+    Exits as diff(1) does: 0 same, 1 different, 2 when a run cannot be read.
+    """
     root = compose.store_root(args)
     stored = []
     for typed in (args.run_a, args.run_b):

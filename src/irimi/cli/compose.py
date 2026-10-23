@@ -1,8 +1,7 @@
-"""The composition root: what `shadow`, `serve` and `replay` need before and around an engine,
-and how every command reads a stored run back.
+"""The composition root: setup around an engine for `shadow`, `serve` and `replay`.
 
-`prepare_run` loads the maps, finds the CA and the redaction key, and opens the trace store;
-`build_engine` is the one place the concrete engine, policy, store and overlay meet.
+`prepare_run` loads the maps, CA and redaction key and opens the store; `build_engine` wires the
+concrete engine. Also how every command reads a stored run back.
 """
 
 import argparse
@@ -51,22 +50,21 @@ from irimi.servicemaps import MapIndex
 
 @dataclass(frozen=True)
 class Run:
-    """Everything `serve`, `shadow` and `replay` need before an engine exists. Used as a context
-    manager, it closes its store and releases its lock on the way out."""
+    """What `serve`, `shadow` and `replay` need before an engine exists.
+
+    As a context manager it closes its store and releases its lock on exit.
+    """
 
     index: MapIndex
     ca: CAPaths
     run_id: str
     config: EngineConfig
     store: RunStore
-    # The store's `serve.lock`, held, in serve mode only.
-    lock: ServeLock | None = None
-    # The run a `Replay` mode names, read back to answer from, in a replay only.
-    recording: ReplayIndex | None = None
-    # Each run's faked writes, dropped as the store reports the run ended. None: the engine
-    # keeps its own, and nothing ends its runs.
+    lock: ServeLock | None = None  # serve mode only
+    recording: ReplayIndex | None = None  # replay only
+    # Faked writes and idempotency keys per run, dropped when the run ends. None lets the engine
+    # or policy keep its own.
     write_log: WriteLog | None = None
-    # Each run's idempotency keys, dropped with its writes. None: the policy keeps its own.
     keys: idempotency.Store | None = None
 
     def __enter__(self) -> "Run":
@@ -78,8 +76,7 @@ class Run:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        """The engine never closes the store: the composition root opened it, so it closes it,
-        once the engine has stopped."""
+        """Close the store and release the lock; call only after the engine has stopped."""
         try:
             _close_store(self.store)
         finally:
@@ -87,13 +84,12 @@ class Run:
                 self.lock.release()
 
 
-# What serve mode calls when a run's end is on disk, after the run's writes and idempotency keys
-# have been dropped: the maps the run was decided with, and its id.
+# Called with the maps and run id once a run's end is on disk and its state dropped.
 OnRunEnded = Callable[[MapIndex, str], None]
 
 
 class EngineFactory(Protocol):
-    """What builds a run's engine: `build_engine`, or a harness's own in its place (`cli.main`)."""
+    """Builds a run's engine: `build_engine`, or a test harness's replacement."""
 
     def __call__(
         self,
@@ -111,22 +107,16 @@ def prepare_run(
     on_run_ended: OnRunEnded | None = None,
     source: StoredRun | None = None,
 ) -> Run | None:
-    """Load the maps, find the CA, key the recording of `source`, the run a replay answers from,
-    and open the trace store, or print why not and return None.
+    """Load the maps, CA and key, index `source` for a replay, and open the store.
 
-    Fail closed: without all of them, no engine starts and no child is spawned. The store is opened
-    last, so a run refused for its maps, its CA or its key leaves nothing on disk.
-
-    In serve mode the engine's own run is `trace.UNATTRIBUTED`, so a request no `Irimi-Run`
-    names is stored there and builds no run, and the store's `serve.lock` is taken as soon as the
-    store is open: a second serve on one root is refused before its engine starts, and writes
-    nothing.
+    Returns None after printing why when any step fails; no engine may start then. The store opens
+    last, so a refused run leaves nothing on disk. In serve mode the run is `trace.UNATTRIBUTED`
+    and `serve.lock` is taken, so a second serve on one store is refused.
     """
     index = load_maps(frozenset(args.allow_remote_target), args.target, args.target_reads)
     if index is None:
         return None
     try:
-        # A `--bind` address is the listener too.
         targets.refuse_self_targets(index, args.port, args.bind)
     except targets.TargetRefused as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -135,8 +125,7 @@ def prepare_run(
     if not ca.ca_exists(p):
         print(f"error: no CA at {p.key.parent}; run `irimi init` first", file=sys.stderr)
         return None
-    # A replay is one run against one engine, whose recording is the engine's;
-    # serve mode is many runs at once, and `irimi serve` has no run to replay.
+    # Serve mode is many runs at once, so it cannot replay one.
     assert not (serve and source is not None)
     run_id = trace.UNATTRIBUTED if serve else trace.new_run_id()
     mode: EngineMode = Shadow()
@@ -150,13 +139,13 @@ def prepare_run(
         return None
     recording = None
     if source is not None:
-        # Keyed with this install's redaction key, which made the recording's placeholders.
+        # The recording's placeholders were made with this install's redaction key.
         recording = ReplayIndex.from_events(source.events, key, config.maps)
     write_log = WriteLog()
     keys = idempotency.Store()
 
     def ended(run_id: str) -> None:
-        # A run that has ended makes no more requests, so nothing reads its writes or keys again.
+        # An ended run makes no more requests, so its writes and keys are never read again.
         write_log.end_run(run_id)
         keys.end_run(run_id)
         if on_run_ended is not None:
@@ -173,7 +162,7 @@ def prepare_run(
 
 
 def replayed_run(mode: EngineMode) -> str | None:
-    """The stored run a replay answers from, or None when `mode` is no replay."""
+    """Return the stored run a replay answers from, or None when `mode` is not a replay."""
     return mode.source_run_id if isinstance(mode, Replay) else None
 
 
@@ -184,11 +173,10 @@ def _engine_config(
     ca_paths: CAPaths,
     mode: EngineMode | None = None,
 ) -> EngineConfig:
-    """The EngineConfig `serve`, `shadow` and `replay` share; `mode` is `Shadow()` when None.
+    """Return the EngineConfig `serve`, `shadow` and `replay` share; `mode` defaults to Shadow.
 
-    `maps=index` is what makes the classifier use the maps: without it the engine falls back to the
-    verb rule and every mapped write on a POST-only service reads as `unknown`. Base-URL mode
-    relays to every host in a loaded map, plus each `--base-url-host`.
+    Without `maps=index` the classifier falls back to the verb rule. Base-URL requests may go to
+    every mapped host plus each `--base-url-host`.
     """
     return EngineConfig(
         run_id=run_id,
@@ -207,11 +195,9 @@ def load_maps(
     targets: Sequence[tuple[str, str, str]] = (),
     target_reads: Sequence[str] = (),
 ) -> MapIndex | None:
-    """The loaded service maps, with `--target`, `--target-reads` and `--allow-remote-target`'s
-    values, or None after printing why they were refused.
+    """Return the loaded service maps with the target options applied, or None after printing why.
 
-    Fail closed: a map, overrides file or `--target` the loader rejects must not start a proxy
-    that would then classify and answer with half a policy.
+    A rejected map must not start a proxy that answers with half a policy.
     """
     try:
         index = servicemaps.load(
@@ -219,8 +205,8 @@ def load_maps(
             targets=targets,
             target_reads=target_reads,
         )
-        # The Python tables key on the maps' names; a map they disagree with would switch an
-        # effect, a check or a fixture off silently, so it is refused here instead.
+        # The Python tables key on map names; a mismatch would silently switch an effect, check or
+        # fixture off.
         services.check(index)
         return index
     except servicemaps.MapError as exc:
@@ -229,11 +215,9 @@ def load_maps(
 
 
 def _escape_hatch_warning(args: argparse.Namespace) -> str | None:
-    """The one line `--allow-remote-target` has to print, or None when it was not used.
+    """Return the warning `--allow-remote-target` prints, or None when it was not used.
 
-    Targets are loopback-only so that a delegated request cannot leave the machine; this flag is
-    the deliberate way out of that, so it says so out loud. The delegated-service banner and the
-    summary's accounting of delegated writes are printed elsewhere.
+    Targets are loopback-only by default; this flag lifts that, so it says so.
     """
     hosts = getattr(args, "allow_remote_target", None)
     if not hosts:
@@ -243,8 +227,7 @@ def _escape_hatch_warning(args: argparse.Namespace) -> str | None:
 
 
 def _ca_expiry_warning(ca_cert: Path) -> str | None:
-    """The line a CA that expires within `ca.EXPIRY_WARNING` prints, or None: a client stops
-    trusting the certificates irimi mints once it has expired."""
+    """Return a warning if the CA expires within `ca.EXPIRY_WARNING`, else None."""
     expires = ca.expires_at(ca_cert)
     now = dt.datetime.now(dt.UTC)
     if expires is None or expires - now > ca.EXPIRY_WARNING:
@@ -265,13 +248,10 @@ def print_startup(
     ca_cert: Path,
     replay_of: str | None = None,
 ) -> None:
-    """Everything a run says before it starts: the escape-hatch and CA-expiry warnings, the banner,
-    and one line per delegated service. `command` is "shadow", "replay" or "serve", whose `run_id`
-    is None. `replay_of` is the run a replay answers from.
+    """Print the startup warnings, banner and target lines.
 
-    Every line is flushed. Under a pipe or a supervisor stdout is block-buffered, and `serve` may
-    print nothing else for minutes, so without the flush the port, the CA path a client needs and
-    the `NOT loopback` line would not appear until the first request.
+    Every line is flushed: under a pipe stdout is block-buffered, and `serve` may print nothing
+    else for minutes.
     """
     for warning in (_escape_hatch_warning(args), _ca_expiry_warning(ca_cert)):
         if warning is not None:
@@ -283,8 +263,7 @@ def print_startup(
 
 
 def _redaction_key() -> bytes | None:
-    """The install's redaction key, loaded once for the store that redacts with it and the
-    recording a replay matches against it, or None after printing why it cannot be used."""
+    """Return the install's redaction key, or None after printing why it cannot be used."""
     home = paths.irimi_home()
     try:
         return redact.load_key(home)
@@ -301,7 +280,7 @@ def store_root(args: argparse.Namespace) -> Path:
 
 
 def store_subject(args: argparse.Namespace) -> str:
-    """The store as an error names it: the `--store` typed, or the default one."""
+    """Return the store as an error names it: the `--store` typed, or the default."""
     return f"--store {args.store}" if args.store else f"the trace store {store_root(args)}"
 
 
@@ -311,10 +290,10 @@ def _open_store(
     on_run_ended: Callable[[str], None] | None = None,
     replay_of: str | None = None,
 ) -> RunStore | None:
-    """The trace store under `--store` (default `paths.store_dir()`), redacting with `key`, or None
-    after printing why its directory cannot be used: a run that would drop every event
-    unseen must not start. `replay_of` is the run a replay answers from, which every header run
-    the store makes names."""
+    """Return the trace store, redacting with `key`, or None after printing why it cannot open.
+
+    `replay_of` is recorded on every header run the store creates.
+    """
     try:
         return writer.DirectoryStore(store_root(args), key, on_run_ended, replay_of)
     except OSError as exc:
@@ -323,8 +302,7 @@ def _open_store(
 
 
 def _hold_serve_lock(args: argparse.Namespace) -> ServeLock | None:
-    """The store's `serve.lock`, held, or None after printing why not: another serve writes this
-    store, or the lock file cannot be opened."""
+    """Return the store's held `serve.lock`, or None after printing why not."""
     try:
         return ServeLock.hold(store_root(args))
     except OSError as exc:
@@ -333,8 +311,7 @@ def _hold_serve_lock(args: argparse.Namespace) -> ServeLock | None:
 
 
 def _close_store(store: RunStore) -> None:
-    """Close a store `prepare_run` opened. An impatient Ctrl-C here, as in `handle.stop()`, may
-    cut the writer's last seconds short, and never costs the summary."""
+    """Close a store `prepare_run` opened, swallowing a Ctrl-C that cuts the last writes short."""
     with contextlib.suppress(KeyboardInterrupt):
         store.close()
 
@@ -345,23 +322,18 @@ def build_engine(
     on_tool_call: OnToolCall | None = None,
     on_tls_failure: OnTlsFailure | None = None,
 ) -> Engine:
-    """Wire the engine, answer policy, overlay, control endpoint and store for one run. The store
-    is the run's, and the caller closes it once the engine has stopped."""
-    # Imported here alone: `runs` and `compare` share this module, start no proxy, and so never
-    # load mitmproxy.
+    """Wire the engine, answer policy, overlay and store for one run."""
+    # Imported here so `runs` and `compare`, which share this module, never load mitmproxy.
     from irimi.engine.mitm import MitmEngine  # noqa: PLC0415
 
     overlay = ServiceOverlay()
     policy: AnswerPolicy
     if run.recording is None:
-        # The reader is the real upstream, chosen here and nowhere else.
         policy = ShadowPolicy(reader=reader.UpstreamReader(), maps=run.config.maps, keys=run.keys)
     else:
-        # A replay's reader is the recording, which the policy builds itself: it never reads live
-        # state for a precondition.
+        # A replay reads from the recording and never from live state.
         policy = ReplayPolicy(run.recording, maps=run.config.maps, keys=run.keys)
-    # The policy that decides the wire answers the SDK's read tools too: from a replay's
-    # recording, or from nothing.
+    # The same policy answers the SDK's read tools.
     control = ControlEndpoint(
         run.store,
         serve=isinstance(run.config.mode, Serve),
@@ -383,8 +355,7 @@ def build_engine(
 
 
 def start_engine(engine: Engine) -> runner.EngineThread | None:
-    """`engine` started on its own thread, or None after printing why it did not: the one place
-    a command says so. A child is never spawned without the proxy."""
+    """Start `engine` on its own thread, or return None after printing why it did not."""
     try:
         return runner.start_engine(engine)
     except EngineStartError as exc:
@@ -393,12 +364,12 @@ def start_engine(engine: Engine) -> runner.EngineThread | None:
 
 
 def resolve_run_id(root: Path, typed: str) -> str:
-    """The stored run `typed` names: `unattributed`, `last` for the newest run, a whole run id,
-    or a prefix only one run id starts with. A prefix no run has is returned as typed, so the
-    caller's read says there is no such run, as it does for a damaged one `list_runs` skips.
-    Raises LookupError, saying why, for `last` in an empty store and for a prefix more than one
-    run id starts with."""
-    # An empty prefix would name every run, so it names none.
+    """Return the run id `typed` names: `unattributed`, `last`, a full id, or a unique prefix.
+
+    An unmatched prefix is returned as typed, for the caller's read to report. Raises LookupError
+    for `last` in an empty store or an ambiguous prefix.
+    """
+    # An empty prefix would match every run, so it matches none.
     if typed in ("", trace.UNATTRIBUTED):
         return typed
     try:
@@ -418,9 +389,7 @@ def resolve_run_id(root: Path, typed: str) -> str:
 
 
 def load_stored_run(root: Path, run_id: str, *, bodies: bool = True) -> StoredRun:
-    """The run `run_id` in the store at `root`, or CliError saying why not: no such run, or one
-    that cannot be read. The error's cause is what the store raised, which a caller with wording
-    of its own names instead."""
+    """Return the stored run `run_id`; raise CliError, chained to the store's error, if not."""
     try:
         return StoreReader(root).load_run(run_id, bodies=bodies)
     except RunNotFound as exc:
@@ -430,12 +399,10 @@ def load_stored_run(root: Path, run_id: str, *, bodies: bool = True) -> StoredRu
 
 
 def maps_for_stored_runs() -> MapIndex | None:
-    """The maps `runs show` and `compare` render a stored run's write lines with, loaded as
-    `serve` and `shadow` load them.
+    """Return the maps `runs show` and `compare` render write lines with, or None.
 
-    Only the `human:` templates are read from them, so maps that do not load cost the reader
-    those sentences and nothing else: the writes print as the requests they were. Unlike
-    `serve` and `shadow`, which must not start with half a policy, this carries on."""
+    Only the `human:` templates are used, so a load failure is a warning, not an error.
+    """
     try:
         return servicemaps.load()
     except servicemaps.MapError:

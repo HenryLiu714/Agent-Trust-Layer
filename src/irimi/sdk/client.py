@@ -1,8 +1,8 @@
-"""How the SDK reaches irimi: one POST to the control endpoint per run start, run end (#74) and
-tool call (#76), and in a replay one per read tool call, asking for its recorded result (#83).
+"""How the SDK reaches irimi: one POST to the control endpoint per run start, run end and
+tool call, and in a replay one per read tool call, asking for its recorded result.
 
 `ControlClient.post` sends a JSON body to `{IRIMI_CONTROL}/runs/{run_id}/{action}`, the route the
-control endpoint answers (#73), with stdlib urllib and NEVER THROUGH A PROXY: the endpoint is
+control endpoint answers, with stdlib urllib and NEVER THROUGH A PROXY: the endpoint is
 irimi's own listener, `IRIMI_CONTROL` names it directly, and the agent's `HTTP_PROXY` points at
 that same listener, which would only hand the request back to itself. It waits `TIMEOUT_S` at most.
 
@@ -34,9 +34,9 @@ LOGGER_NAME = "irimi.sdk"
 logger = logging.getLogger(LOGGER_NAME)
 
 TIMEOUT_S = 2.0
-# The most of a refusal's body a warning quotes. The endpoint's own are shorter (#73).
+# The most of a refusal's body a warning quotes. The endpoint's own are shorter.
 MAX_DETAIL = 200
-# The most of an answer the SDK reads. irimi's largest is a recorded tool call's outcome (#83),
+# The most of an answer the SDK reads. irimi's largest is a recorded tool call's outcome,
 # whose result the SDK posted at most MAX_CAPTURED_BYTES of; one past this is from something else
 # on the port, and is refused rather than read into the agent's memory to its end.
 MAX_ANSWER = 16 * MAX_CAPTURED_BYTES
@@ -49,7 +49,7 @@ Failure = Literal["unset", "rejected", "timeout", "unreachable", "failed"]
 
 class Reporter(Protocol):
     """Where a run's start, its end and its tool calls are sent, and, in a replay, where a read
-    tool's recorded result is asked for (#83). `ControlClient` is the one the SDK uses."""
+    tool's recorded result is asked for. `ControlClient` is the one the SDK uses."""
 
     def post(self, run_id: str, action: Action, doc: Mapping[str, Any]) -> None: ...
 
@@ -72,7 +72,7 @@ class ControlClient:
     def __init__(self) -> None:
         # No ProxyHandler entries: urllib's default opener reads HTTP_PROXY, this one never does.
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirects())
-        # By what failed and how: a lookup that fails (#83) never silences a post's warning.
+        # By what failed and how: a lookup that fails never silences a post's warning.
         self._warned: set[tuple[str, Failure]] = set()
         self._lock = threading.Lock()
 
@@ -93,7 +93,7 @@ class ControlClient:
 
     def recorded(self, run_id: str, name: str, args: JSONValue) -> RecordedOutcome | None:
         """The recorded outcome of the read tool `name` called with `args`, from a replay's
-        recording (#83): the endpoint's answer to `runs/{run_id}/tool-calls/recorded`, read by
+        recording: the endpoint's answer to `runs/{run_id}/tool-calls/recorded`, read by
         `trace.recorded_outcome_from_json`, or None for a miss. Its `404` is the endpoint's miss,
         said by no warning; any other failure, and an answer that does not decode, is warned once
         per kind and is a miss too. Never raises."""
@@ -120,8 +120,8 @@ class ControlClient:
 
     def _send(self, route: str, doc: Mapping[str, Any]) -> bytes | _Failed:
         """POST `doc` to `{IRIMI_CONTROL}/runs/{route}`: the answer's body, or why there is none."""
-        # irimi sets the variable with no trailing slash (#73), but a deployment that sets it by
-        # hand (#77) may type one, which would make every route `//runs/...`, a 404.
+        # irimi sets the variable with no trailing slash, but a deployment that sets it by
+        # hand may type one, which would make every route `//runs/...`, a 404.
         base = os.environ.get(paths.CONTROL_ENV, "").rstrip("/")
         if not base:
             return _Failed("unset", f"{paths.CONTROL_ENV} is not set")
@@ -132,7 +132,7 @@ class ControlClient:
             headers={"Content-Type": "application/json"},
         )
         try:
-            # To irimi's own listener, which `instrument()` labels: the route names the run (#75).
+            # To irimi's own listener, which `instrument()` labels: the route names the run.
             with unlabelled(), self._opener.open(request, timeout=TIMEOUT_S) as response:
                 body: bytes = response.read(MAX_ANSWER + 1)
         except urllib.error.HTTPError as exc:  # an answer outside 2xx, a redirect included
@@ -169,7 +169,7 @@ class _NoRedirects(urllib.request.HTTPRedirectHandler):
     """Never follows a redirect, so a 3xx is refused as an HTTPError like any answer outside 2xx.
     irimi's endpoint never sends one: it comes from something else on that port, and urllib would
     have followed a 301, 302 or 303 as a GET to wherever it pointed, outside the proxy, and called
-    the run recorded when that answered (#74)."""
+    the run recorded when that answered."""
 
     def redirect_request(self, *args: Any, **kwargs: Any) -> None:
         return None

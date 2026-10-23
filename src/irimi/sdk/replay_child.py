@@ -1,4 +1,4 @@
-"""The child `irimi replay` starts to call a stored run's trigger again (#84).
+"""The child `irimi replay` starts to call a stored run's trigger again.
 
     IRIMI_REPLAY_CALL=module:qualname IRIMI_REPLAY_ARGS_FILE=args.json \\
         IRIMI_REPLAY_OUTCOME_FILE=outcome.json python -m irimi.sdk.replay_child
@@ -12,7 +12,7 @@ gives its child, so this process's requests go through the replay's engine. It:
    are loaded;
 2. revives the args, the JSON object `{parameter: captured value}` the file holds;
 3. calls the function with them (`capture.call_arguments`), and when the call returns a coroutine,
-   an `async def` trigger's or a run a sync trigger handed off (#74), runs it to its end with
+   an `async def` trigger's or a run a sync trigger handed off, runs it to its end with
    `asyncio.run`, so the run's body runs and the run ends.
 
 The function is normally the `@sdk.trigger` the run recorded, so the call is a run, which the SDK
@@ -20,7 +20,7 @@ adopts as the replay's (`runs.RunScope`): every request and tool call lands in t
 and posts no end of its own. So the child says how the call ended in the outcome file
 (`CallOutcome`), and `irimi replay` ends the run with it: what the call raised, recorded as a run
 records it (`errors.error_info`), so a replay that ends on a recorded `KeyError` stores
-`builtins.KeyError`, as its recording did (#83).
+`builtins.KeyError`, as its recording did.
 
 It exits 0 when the call returns and 1 when it raises, printing the traceback to stderr, as an
 uncaught exception would. A call it cannot make - a module that does not import, a qualname that
@@ -67,8 +67,7 @@ class CallOutcome:
         """The outcome the child wrote at `path`, or None when it wrote none that reads: it was
         killed, or never started, or the file is not one this module writes. Never raises: the
         agent can write the file too, since its environment names it, and JSON nested deeper than
-        the stack raises RecursionError, which would end `irimi replay` before it ends the run
-        (#84)."""
+        the stack raises RecursionError, which would end `irimi replay` before it ends the run."""
         try:
             d = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError, RecursionError):
@@ -103,7 +102,7 @@ def main() -> int:
         args, kwargs = _arguments(fn, _revived(args_file))
     except BaseException as exc:
         # Whatever stops the child before the call is a call never made, never an agent that ran
-        # and raised (#84): a KeyboardInterrupt as the module loads too, which then ends this
+        # and raised: a KeyboardInterrupt as the module loads too, which then ends this
         # process as it would have.
         why = _why_not_called(exc)
         print(f"error: cannot call {entrypoint}: {why}", file=sys.stderr)
@@ -117,7 +116,7 @@ def main() -> int:
             asyncio.run(result)
     except BaseException as exc:
         # Whatever ended the call is what its run records, a SystemExit or a KeyboardInterrupt as
-        # a recorded run records it (#74); those two then end this process as they would have.
+        # a recorded run records it; those two then end this process as they would have.
         _write(outcome_file, CallOutcome(True, error_info(exc)))
         if isinstance(exc, SystemExit | KeyboardInterrupt):
             raise

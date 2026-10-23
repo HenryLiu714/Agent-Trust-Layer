@@ -1,4 +1,4 @@
-"""Which run is current: the SDK's one piece of per-call state, a context variable (#74).
+"""Which run is current: the SDK's one piece of per-call state, a context variable.
 
 A run's id lives in a `contextvars.ContextVar`, so it follows the code a run runs rather than the
 thread it runs on. An `asyncio` task created inside a run and a call through `asyncio.to_thread`
@@ -19,22 +19,22 @@ _RUN_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar("irimi_run_
 
 def active() -> bool:
     """True when irimi is in front of this process: `IRIMI_ENGINE_ACTIVE` is `1`, as `irimi
-    shadow` sets it for its child (#73). Read at each call, never cached. Here rather than in
-    `runs`, so `instrumentation`, which `runs` imports, reads the same rule (#75)."""
+    shadow` sets it for its child. Read at each call, never cached. Here rather than in
+    `runs`, so `instrumentation`, which `runs` imports, reads the same rule."""
     return os.environ.get(paths.ENGINE_ACTIVE_ENV) == "1"
 
 
 def replay_run_id() -> str | None:
     """The run a replay's engine names in `IRIMI_REPLAY_RUN` for its child, or None when irimi is
-    not replaying this process (#83): the one rule `tools` asks before it looks a read tool up,
-    and `runs.RunScope` before it adopts the id (#84). Never while the SDK is inactive, as
+    not replaying this process: the one rule `tools` asks before it looks a read tool up,
+    and `runs.RunScope` before it adopts the id. Never while the SDK is inactive, as
     `current_run_id`: irimi is not in front, whatever the environment says. Read at each call,
     never cached.
 
     irimi names a replay's run twice, as the child's process run (`IRIMI_RUN`) and as the run it
     replays as, so the two must agree. A variable a shell exported and irimi did not set - a serve
     agent is not irimi's child, and serve sets neither - says nothing: adopting it would merge
-    every run the agent starts into one that was never started (#84)."""
+    every run the agent starts into one that was never started."""
     if not active():
         return None
     replaying = os.environ.get(paths.REPLAY_RUN_ENV) or None

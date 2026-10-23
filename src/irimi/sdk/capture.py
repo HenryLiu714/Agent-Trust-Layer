@@ -1,8 +1,8 @@
-"""How the SDK captures a trigger's arguments as JSON (#74).
+"""How the SDK captures a trigger's arguments as JSON.
 
-A run's trigger is stored as `Trigger.args` in its `run.json`, and replay (#84) re-runs the
+A run's trigger is stored as `Trigger.args` in its `run.json`, and replay re-runs the
 trigger with those args turned back into values by `revive`, this module's inverse, which a
-replay also uses to hand a read tool its recorded result (#83). So capture says two things about
+replay also uses to hand a read tool its recorded result. So capture says two things about
 every value: its JSON, and whether that JSON is enough to rebuild an equal value (`replayable`).
 The rules are a table, each row has a test, and `docs/trace-format.md` ("Captured arguments") is
 the reference:
@@ -34,8 +34,7 @@ is producing as it goes and stops as soon as they pass the limit, so a value tha
 object many times, or itself, is walked at most that far; when it stops early, `n` is the count
 so far, already past the limit. A `repr` is the value's own cost: it is cut to 1000 characters
 after it is made, outside any secret's shape (`secret_shapes.cut_outside_secrets`), since the
-store redacts it only after this cut, and the kept half of a key would no longer be its shape
-(#179).
+store redacts it only after this cut, and the kept half of a key would no longer be its shape.
 
 CAPTURE NEVER RAISES. It runs inside the agent's call, before the agent's own function: a `repr`
 or a `model_dump` that raises makes its value `{"__irimi_repr__": ...}`, never the agent's error.
@@ -54,7 +53,7 @@ from irimi.secret_shapes import cut_outside_secrets
 from irimi.trace import REPR_KEY, TRUNCATED_KEY, JSONValue, holds_description
 
 # The two markers that describe a value, `REPR_KEY` and `TRUNCATED_KEY`, are the trace format's,
-# so a replay's recording and `revive` refuse one rule (#83); these two are capture's own.
+# so a replay's recording and `revive` refuse one rule; these two are capture's own.
 TYPE_KEY = "__irimi_type__"
 BYTES_KEY = "__irimi_bytes__"
 RESERVED_KEYS = frozenset({REPR_KEY, TYPE_KEY, BYTES_KEY, TRUNCATED_KEY})
@@ -123,7 +122,7 @@ def bind(
     fn: Callable[..., Any], args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> inspect.BoundArguments:
     """`args` and `kwargs` bound to `fn`'s parameters, as `capture_call` binds a trigger's call:
-    TypeError when they do not bind, as calling `fn` would raise (#84)."""
+    TypeError when they do not bind, as calling `fn` would raise."""
     return _signature(fn).bind(*args, **kwargs)
 
 
@@ -132,7 +131,7 @@ def _receiver(fn: Callable[..., Any], signature: inspect.Signature) -> str | Non
     else None. It is when it is named `self` or `cls` and `fn` is defined in a class body - its
     qualname says so - unless the class holds it as a `staticmethod`. A plain function or a static
     method receives no instance, so its first parameter is an argument whatever its name, and
-    leaving it out made a run replay could not call again (#84). A bound method's receiver is
+    leaving it out would make a run replay could not call again. A bound method's receiver is
     already bound, and not in its signature. A class this cannot look up statically in a module
     already imported - one defined in a function, or not yet built - is taken by the name alone.
     Never raises."""
@@ -171,13 +170,13 @@ _KEYWORDS = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_
 def call_arguments(
     fn: Callable[..., Any], arguments: Mapping[str, Any]
 ) -> tuple[list[Any], dict[str, Any]]:
-    """`capture_call`'s binding undone (#84): the positional and keyword arguments that call `fn`
+    """`capture_call`'s binding undone: the positional and keyword arguments that call `fn`
     with `arguments`, `{parameter: value}` as a trigger's args are captured, revived. Each value
     goes where its parameter takes it: the leading positional parameters in their places, up to the
     first one the call left to its default, `*args` spread out after them, `**kwargs` spread in,
     and every other by its name. TypeError when they do not bind to `fn`'s parameters, as calling
     it would raise: a parameter missing or unknown. TypeError too for what no call binds, which
-    args given by hand (`--args`) can say and Python would bind otherwise than they say (#84): a
+    args given by hand (`--args`) can say and Python would bind otherwise than they say: a
     `*args` after a positional parameter left out, whose values would fill that parameter; a
     `*args` that is no list or a `**kwargs` that is no object, which would be spread as
     characters or keys; and a `**kwargs` naming a parameter a keyword binds to, whose value it
@@ -226,7 +225,7 @@ def call_arguments(
 
 
 class NotReplayable(Exception):
-    """A captured value `revive` cannot turn back into the value it was (#83, #84): the reason."""
+    """A captured value `revive` cannot turn back into the value it was: the reason."""
 
 
 def revive(value: JSONValue) -> Any:
@@ -249,7 +248,7 @@ def revive(value: JSONValue) -> Any:
     agent a replay re-runs. A class it cannot find there, that is neither,
     or whose constructor raises is NotReplayable naming it. Never raises anything else."""
     # One walk for the refusal, the trace format's (`trace.holds_description`), before any class is
-    # built: the engine refuses the same recorded results (#83).
+    # built: the engine refuses the same recorded results.
     if holds_description(value):
         raise NotReplayable("the value was recorded as its description, not as itself")
     try:
@@ -291,7 +290,7 @@ def _revive_typed(name: JSONValue, fields: JSONValue) -> Any:
         for part in qualname.split("."):
             # Looked up statically: `getattr` would run a module's `__getattr__` (PEP 562), which a
             # lazy package uses to import on first use, or a metaclass's, so a name in a stored
-            # run could make revive import after all (#83).
+            # run could make revive import after all.
             found = inspect.getattr_static(found, part)
     except AttributeError:
         raise NotReplayable(f"{name} is not in its module") from None

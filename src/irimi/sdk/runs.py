@@ -1,4 +1,4 @@
-"""Where a run begins and ends: the one place `@sdk.trigger` and `sdk.run` share (#74).
+"""Where a run begins and ends: the one place `@sdk.trigger` and `sdk.run` share.
 
 `RunScope` is ONE entry into a run, as a context manager for both `with` and `async with`: a
 trigger makes a fresh one for each call, and `sdk.run` one for each block it is entered for.
@@ -7,7 +7,7 @@ Entering it:
 1. NESTING. If a run is already current, this entry joins it: no new run, no capture, no post.
 2. A REPLAY'S RUN. Otherwise, in a replay's child (`context.replay_run_id`), it ADOPTS the run the
    replay is: makes that id current, calls `instrument()`, and captures and posts nothing, since
-   `irimi replay` owns that run's record, start and end alike (#84). So everything the child does
+   `irimi replay` owns that run's record, start and end alike. So everything the child does
    lands in the one run: a trigger `replay_child` calls, a trigger an argv reaches, or several.
 3. A NEW RUN. Otherwise it captures the trigger, mints an id (`new_run_id`) and makes it current,
    posts the run's `start` and calls `instrument()`.
@@ -36,8 +36,8 @@ its last: `with` posts inline, and `async with` in a worker thread (`off_the_loo
 event loop keeps serving other tasks meanwhile. A post never raises (`client.ControlClient`); a
 run whose posts failed goes on, current and labelled, and irimi only lacks its record.
 
-The id and the start and end posts live here and nowhere else, and so does adopting a replay's id
-(#84): one branch in `_open`.
+The id and the start and end posts live here and nowhere else, and so does adopting a replay's id:
+one branch in `_open`.
 """
 
 import asyncio
@@ -60,9 +60,9 @@ from irimi.secret_shapes import cut_outside_secrets
 
 logger = logging.getLogger(LOGGER_NAME)
 
-# The longest trigger name a run records. A name is a label, as an error message is (#68), and a
+# The longest trigger name a run records. A name is a label, as an error message is, and a
 # start past `control.MAX_CONTROL_BODY` would be refused whole. Cut outside any secret's shape,
-# since the store redacts it only after this cut (`secret_shapes.cut_outside_secrets`, #179).
+# since the store redacts it only after this cut (`secret_shapes.cut_outside_secrets`).
 MAX_NAME = 1000
 
 # Every post the SDK makes goes through this one client, so each kind of failure is logged once
@@ -75,15 +75,14 @@ _instrument_failed = False
 def new_run_id() -> str:
     """A fresh run id: 16 lower-case hex characters. It passes `trace.is_valid_run_id`, and being
     lower-case it never differs only in case from another, which a case-insensitive filesystem
-    would file in `unattributed/` (#70, #73)."""
+    would file in `unattributed/`."""
     return secrets.token_hex(8)
 
 
 @dataclass(frozen=True)
 class _Opened:
     """A run this entry made current: its id, the token that undoes it, and the start to post.
-    `adopted` is a replay's run, whose start and end are `irimi replay`'s: it posts neither
-    (#84)."""
+    `adopted` is a replay's run, whose start and end are `irimi replay`'s: it posts neither."""
 
     run_id: str
     token: contextvars.Token[str | None]
@@ -144,7 +143,7 @@ class RunScope:
         if isinstance(exc, GeneratorExit):
             # The coroutine is being closed, not awaited: a pending task garbage-collected, or a
             # `.close()` by hand. Nothing may be awaited now - Python would raise "coroutine
-            # ignored GeneratorExit" into whoever closed it - so the end is posted inline (#74).
+            # ignored GeneratorExit" into whoever closed it - so the end is posted inline.
             self.__exit__(exc_type, exc, tb)
             return
         try:
@@ -157,7 +156,7 @@ class RunScope:
         """The run this entry opened, handed to `coroutine`: called inside a sync `with`, by a sync
         function that returned a coroutine instead of running its body. The run leaves this
         context now, with no end, and is current again in whatever task awaits the coroutine that
-        is returned, which ends it as `async with` would, with the coroutine's outcome (#74).
+        is returned, which ends it as `async with` would, with the coroutine's outcome.
         `coroutine` itself when this entry opened no run: inactive, or joined."""
         opened = self._opened
         if opened is None:
@@ -207,16 +206,16 @@ class RunScope:
         except ValueError:
             # Closed from another context than the one that entered it - a coroutine the garbage
             # collector closes runs in whatever context collected it. The entering context is
-            # abandoned with the coroutine, so there is nothing to make current again there (#74).
+            # abandoned with the coroutine, so there is nothing to make current again there.
             pass
 
 
 async def off_the_loop[T](fn: Callable[..., T], *args: Any) -> T:
     """`fn(*args)`, and what it returns, from a worker thread, so the event loop goes on serving
-    other tasks while it waits: a post, or a replay's lookup (#83). Inline wherever
+    other tasks while it waits: a post, or a replay's lookup. Inline wherever
     `asyncio.to_thread` would raise into the agent: when no asyncio loop is running - a coroutine
     driven by trio, or by hand - and when the loop's executor takes no more work, shut down at the
-    end of `asyncio.run` or as the interpreter exits (#74).
+    end of `asyncio.run` or as the interpreter exits.
 
     This is `asyncio.to_thread` spelled out, so that a refusal to start the thread, which raises
     before the future exists, is told apart from the wait."""
@@ -233,14 +232,15 @@ async def off_the_loop[T](fn: Callable[..., T], *args: Any) -> T:
 
 def _report_start(opened: _Opened) -> None:
     """The run's start, posted, then `instrument()`, before the run's first request. An adopted run
-    posts none, and is instrumented all the same (#84)."""
+    posts none, and is instrumented all the same."""
     global _instrument_failed
     if not opened.adopted:
         reporter.post(opened.run_id, "start", opened.start)
     try:
         instrument()
     except Exception:
-        # The SDK never raises into the agent, #75's patching included: the run goes on unlabelled.
+        # The SDK never raises into the agent, its HTTP patching included: the run goes on
+        # unlabelled.
         if not _instrument_failed:
             _instrument_failed = True
             logger.warning(
@@ -251,7 +251,7 @@ def _report_start(opened: _Opened) -> None:
 
 
 def _report_end(opened: _Opened, exc: BaseException | None) -> None:
-    """The run's end, posted. An adopted run posts none: `irimi replay` ends it (#84)."""
+    """The run's end, posted. An adopted run posts none: `irimi replay` ends it."""
     if opened.adopted:
         return
     error = None if exc is None else errors.error_info(exc)

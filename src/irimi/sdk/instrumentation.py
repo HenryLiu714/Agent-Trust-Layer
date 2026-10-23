@@ -1,8 +1,8 @@
-"""Putting `Irimi-Run` on every request a run makes through irimi (#75).
+"""Putting `Irimi-Run` on every request a run makes through irimi.
 
 The proxy attributes an exchange to a run by its `Irimi-Run` request header
 (`pipeline.attribute_run`), and never by connection or timing, which fail under pools and
-concurrency (D8). So `instrument()` patches the HTTP clients' classes, once per process, to add
+concurrency. So `instrument()` patches the HTTP clients' classes, once per process, to add
 the header from the context variable (`context.current_run_id`), read as each request is sent:
 
 - `http.client.HTTPConnection.putrequest`, which `urllib.request`, `requests`/`urllib3`,
@@ -12,13 +12,13 @@ the header from the context variable (`context.current_run_id`), read as each re
   httpx is installed: the OpenAI and Anthropic SDKs, and stripe-python's async client. aiohttp,
   which slack_sdk's `AsyncWebClient` is built on, is not covered.
 
-ONLY ON A CONNECTION TO IRIMI. irimi strips the header from everything it forwards (#67), but it
+ONLY ON A CONNECTION TO IRIMI. irimi strips the header from everything it forwards, but it
 can strip only what passes through it. A request whose connection goes anywhere but irimi's own
 listener - a `NO_PROXY` host, a client built with no proxy, a sidecar on loopback - is sent with
 no header, so a run's id never reaches a service irimi does not stand in front of. irimi's
-listener is any host and port named by `IRIMI_CONTROL`, which names the control endpoint on it
-(#73), or by the proxy variables, which `irimi shadow` points at it (`runner.child_env`): the
-proxy alone still names it when a launcher passed on only the variables it knows (W10). That
+listener is any host and port named by `IRIMI_CONTROL`, which names the control endpoint on it,
+or by the proxy variables, which `irimi shadow` points at it (`runner.child_env`): the proxy
+alone still names it when a launcher passed on only the variables it knows. That
 covers the proxy, a CONNECT tunnel (`http.client` runs `putrequest` on the proxy connection), and
 the reverse door.
 
@@ -26,7 +26,7 @@ NEVER THE SDK'S OWN POSTS. `ControlClient` sends them to irimi's listener inside
 
 The patches are on classes, not instances, so a client created before the first run is covered
 too. They are installed on the first run the SDK starts or, in a replay's child, adopts
-(`runs._report_start`, #84), never on import, and never while the SDK is inactive, so a process
+(`runs._report_start`), never on import, and never while the SDK is inactive, so a process
 without irimi in front is untouched.
 """
 
@@ -49,20 +49,20 @@ from irimi.sdk.context import active, current_run_id
 # The port a URL with none names, by scheme.
 DEFAULT_PORTS = {"http": 80, "https": 443}
 # The variables that name irimi's listener: the control endpoint's, and the proxy's, which
-# `runner.child_env` sets from the same `paths.PROXY_ENVS` (#75).
+# `runner.child_env` sets from the same `paths.PROXY_ENVS`.
 LISTENER_ENVS = (paths.CONTROL_ENV, *paths.PROXY_ENVS)
 
 # Set while the SDK sends its own posts to the control endpoint: they name their run in their
-# path, and carry no `Irimi-Run` (#73, #75).
+# path, and carry no `Irimi-Run`.
 _UNLABELLED: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "irimi_unlabelled", default=False
 )
 
 # Reentrant, because patching imports httpx, and an import hook may start a run on the thread that
-# holds it: that call returns at once (`_patching`) rather than wait on itself forever (#75).
+# holds it: that call returns at once (`_patching`) rather than wait on itself forever.
 _lock = threading.RLock()
 # Set, under `_lock`, once every patch is in place, so a call that finds it set never sends a run's
-# request ahead of them (#75); and set even when a patch raised, so that patch is never retried and
+# request ahead of them; and set even when a patch raised, so that patch is never retried and
 # nothing is ever wrapped twice.
 _installed = False
 # Set, under `_lock`, while the first call patches, so a call made inside it never patches again.
@@ -131,7 +131,7 @@ def _listeners(urls: tuple[str, ...]) -> frozenset[tuple[str, int]]:
     found = set()
     for url in urls:
         # A proxy spelled with no scheme, `127.0.0.1:4000`, is an http proxy to urllib, requests
-        # and httpx alike, so it names irimi as surely as one spelled in full (#75).
+        # and httpx alike, so it names irimi as surely as one spelled in full.
         if url and "://" not in url:
             url = f"http://{url}"
         try:
@@ -166,7 +166,7 @@ def _labelling_putrequest(original: Callable[..., None]) -> Callable[..., None]:
     def putrequest(self: http.client.HTTPConnection, *args: Any, **kwargs: Any) -> None:
         original(self, *args, **kwargs)
         # `host` and `port` are where the connection goes: the proxy's when there is one, a
-        # CONNECT tunnel's included, and the origin's otherwise (#75).
+        # CONNECT tunnel's included, and the origin's otherwise.
         run_id = run_id_for(self.host, self.port)
         if run_id is not None:
             self.putheader(RUN_HEADER, run_id)
@@ -204,7 +204,7 @@ def _labelled(transport: Any, request: Any) -> Iterator[None]:
         yield
     finally:
         # Off again once sent: httpx builds a redirect from this request's headers, and the next
-        # hop may not go through irimi. Each hop is labelled by its own transport (#75).
+        # hop may not go through irimi. Each hop is labelled by its own transport.
         del request.headers[RUN_HEADER]
 
 

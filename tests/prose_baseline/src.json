@@ -30,46 +30,22 @@
     "caps_run": 1
   },
   "src/irimi/sdk/__init__.py": {
-    "caps_run": 2,
-    "issue_ref": 5
-  },
-  "src/irimi/sdk/api.py": {
-    "issue_ref": 12
+    "caps_run": 2
   },
   "src/irimi/sdk/capture.py": {
-    "caps_run": 2,
-    "issue_ref": 13
+    "caps_run": 2
   },
   "src/irimi/sdk/client.py": {
-    "caps_run": 1,
-    "issue_ref": 13
-  },
-  "src/irimi/sdk/context.py": {
-    "issue_ref": 6
-  },
-  "src/irimi/sdk/errors.py": {
-    "issue_ref": 2
+    "caps_run": 1
   },
   "src/irimi/sdk/instrumentation.py": {
-    "caps_run": 2,
-    "decision_code": 1,
-    "issue_ref": 12
-  },
-  "src/irimi/sdk/replay_child.py": {
-    "issue_ref": 6
-  },
-  "src/irimi/sdk/replays.py": {
-    "issue_ref": 5
+    "caps_run": 2
   },
   "src/irimi/sdk/runs.py": {
-    "caps_run": 2,
-    "issue_possessive": 1,
-    "issue_ref": 16
+    "caps_run": 2
   },
   "src/irimi/sdk/tools.py": {
-    "caps_run": 3,
-    "issue_possessive": 1,
-    "issue_ref": 21
+    "caps_run": 3
   },
   "src/irimi/servicemap/rules.py": {
     "caps_run": 2

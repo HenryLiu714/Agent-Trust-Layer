@@ -1,4 +1,4 @@
-"""What a read tool raised when the recorded run called it, raised again in a replay (#83).
+"""What a read tool raised when the recorded run called it, raised again in a replay.
 
 A replay answers a read tool from its recording, and a recorded call that raised raises again. The
 recording holds what it raised as `trace.ErrorInfo`, a type's `module.qualname` and a message,
@@ -55,7 +55,7 @@ def _as_builtin(builtin: type[Exception]) -> type[RecordedToolError]:
         made = _AS_BUILTIN.get(builtin)
         if made is None:
             # Named as the builtin is, module included, so an agent that logs `type(exc).__name__`,
-            # or tells its model, and a traceback say what they said when it was recorded (#83).
+            # or tells its model, and a traceback say what they said when it was recorded.
             # It pickles by `__reduce__`, never by that name.
             made = type(
                 builtin.__name__,

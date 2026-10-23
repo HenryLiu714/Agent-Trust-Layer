@@ -1,5 +1,5 @@
-"""The two ways an agent marks a run: `@sdk.trigger` around a function, `sdk.run()` around a block
-(#74). Both are thin: what a run is, is `runs.RunScope`, and what its args are, is `capture`."""
+"""The two ways an agent marks a run: `@sdk.trigger` around a function, `sdk.run()` around a block.
+Both are thin: what a run is, is `runs.RunScope`, and what its args are, is `capture`."""
 
 import contextvars
 import functools
@@ -34,7 +34,7 @@ def trigger(fn: Callable[..., Any] | None = None, *, name: str | None = None) ->
     `return handle_async(x)` - has not run its body when it returns, so its run goes with the
     coroutine and ends when the coroutine does (`RunScope.hand_off`). Anything else it returns is
     its result: a sync entrypoint that drives a coroutine to completion itself keeps returning
-    its value (#74).
+    its value.
 
     Refused at decoration time, with TypeError, so the mistake shows when the agent loads rather
     than as a lost run: a generator or async-generator function, whose call returns before its
@@ -49,7 +49,7 @@ def trigger(fn: Callable[..., Any] | None = None, *, name: str | None = None) ->
         if isinstance(f, staticmethod | classmethod):
             # The function inside is the trigger, and the descriptor stays: a static method
             # returned as a plain function would be bound, and given the instance as its first
-            # argument, with the SDK inactive too (#74).
+            # argument, with the SDK inactive too.
             return type(f)(decorate(f.__func__))
         entry = entrypoint(f)
         if inspect.isgeneratorfunction(f) or inspect.isasyncgenfunction(f):
@@ -82,11 +82,11 @@ def trigger(fn: Callable[..., Any] | None = None, *, name: str | None = None) ->
 
 
 def entrypoint(f: Callable[..., Any], decorator: str = "@sdk.trigger") -> str:
-    """`f`'s `module:qualname`, which replay (#84) imports it by. Refused with TypeError for what
+    """`f`'s `module:qualname`, which replay imports it by. Refused with TypeError for what
     has none: a `functools.partial` or an instance with `__call__`, a function `exec` defined with
     no `__name__` in its namespace, and a class, which decorated would be replaced by a function,
-    so that `isinstance` against it broke even in production. `decorator` names the one refusing:
-    `@sdk.tool` refuses the same things, for its default name (#76)."""
+    so that `isinstance` against it would break even in production. `decorator` names the one
+    refusing: `@sdk.tool` refuses the same things, for its default name."""
     module = getattr(f, "__module__", None)
     qualname = getattr(f, "__qualname__", None)
     if isinstance(f, type) or not isinstance(module, str) or not isinstance(qualname, str):
@@ -104,7 +104,7 @@ def entrypoint(f: Callable[..., Any], decorator: str = "@sdk.trigger") -> str:
 
 # The module a replay never calls a trigger in: in a replay's child it is `replay_child` itself,
 # and in any other process another module than the one the child would import. The one rule, which
-# `resolve` and `irimi replay`'s plan both refuse by (#84).
+# `resolve` and `irimi replay`'s plan both refuse by.
 MAIN_MODULE = "__main__"
 
 
@@ -114,11 +114,11 @@ class NotCallable(Exception):
 
 def resolve(entrypoint: str) -> Callable[..., Any]:
     """The function `entrypoint`, `module:qualname`, names, imported: `entrypoint`'s inverse, which
-    a replay calls a trigger by (#84). A method defined on a class, called without the instance it
-    was bound to, is refused: the run recorded its args without `self` (#74). A `staticmethod` and
+    a replay calls a trigger by. A method defined on a class, called without the instance it
+    was bound to, is refused: the run recorded its args without `self`. A `staticmethod` and
     a `classmethod` are what their class gives. A function in `__main__` is refused too: in a
     replay's child `__main__` is `replay_child` itself, whose `main` would call itself until the
-    stack ran out (#84). An Exception or a SystemExit the import or a lookup raises is
+    stack ran out. An Exception or a SystemExit the import or a lookup raises is
     NotCallable."""
     module_name, sep, qualname = entrypoint.partition(":")
     if not sep or not module_name or not qualname:
@@ -139,7 +139,7 @@ def resolve(entrypoint: str) -> Callable[..., Any]:
             raise NotCallable(f"{module_name} has no {qualname}") from None
         except Exception as exc:
             # A module's `__getattr__` that imports lazily, or a class attribute's descriptor,
-            # raising: the call is never made, as when the import raises (#84).
+            # raising: the call is never made, as when the import raises.
             raise NotCallable(
                 f"looking up {qualname} in {module_name} raised {type(exc).__name__}: {exc}"
             ) from None
@@ -154,7 +154,7 @@ def resolve(entrypoint: str) -> Callable[..., Any]:
 
 class run:
     """A block that is one run, with `with` or `async with`. `trigger` is any value, captured as
-    the run's args (`capture.capture`); the run has no entrypoint, so replay (#84) needs one named
+    the run's args (`capture.capture`); the run has no entrypoint, so replay needs one named
     for it. `name` is the run's display name.
 
     One object may be entered again - nested in itself, on several threads, in several tasks at
@@ -213,11 +213,11 @@ class run:
 
     def _push(self) -> RunScope | None:
         """A new entry's scope, on this context's stack. None, and nothing pushed, while the SDK
-        is inactive and the stack is empty: the issue's "set no context variable" holds for this
-        object's own bookkeeping too (#74). An exit then finds the stack as empty as the entry
-        did, so it pops nothing, whatever `active()` says by then. A stack that holds entries is
-        pushed onto whatever `active()` says, so an exit always takes off the entry it pairs
-        with."""
+        is inactive and the stack is empty: an inactive SDK sets no context variable, and that
+        holds for this object's own bookkeeping too. An exit then finds the stack as empty as the
+        entry did, so it pops nothing, whatever `active()` says by then. A stack that holds
+        entries is pushed onto whatever `active()` says, so an exit always takes off the entry it
+        pairs with."""
         entries = self._entries.get()
         if not entries and not active():
             return None

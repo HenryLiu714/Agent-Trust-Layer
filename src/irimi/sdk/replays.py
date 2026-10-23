@@ -1,4 +1,4 @@
-"""`sdk.replay()`: `irimi replay` as a Python function, for a test (#84).
+"""`sdk.replay()`: `irimi replay` as a Python function, for a test.
 
     result = sdk.replay(run_id)                         # the run's own trigger and args
     result = sdk.replay(run_id, handle, Ticket(...))    # a function of yours, with its args
@@ -44,7 +44,7 @@ def _run_irimi(argv: list[str], env: Mapping[str, str]) -> int:
 
 @dataclass(frozen=True)
 class ReplayResult:
-    """What one `irimi replay` said (#84). `replay_run_id` is the run the replay stored, None when
+    """What one `irimi replay` said. `replay_run_id` is the run the replay stored, None when
     it was refused before it ran (`exit_code` 2, the reason in `lines`). `exit_code` is the
     comparison's, as `irimi compare`'s: 0 the same writes, 1 any differ, 2 trouble (a replay that
     could not run, or call its trigger); and 130 or 143 for one SIGINT or SIGTERM stopped.
@@ -95,7 +95,7 @@ def replay(
     store: str | os.PathLike[str] | None = None,
     **kwargs: Any,
 ) -> ReplayResult:
-    """Replay the stored run `run_id` through irimi, and return what changed (#84).
+    """Replay the stored run `run_id` through irimi, and return what changed.
 
     `fn=None` replays the run's recorded entrypoint with its recorded args. Given `fn`, it is
     called instead, with `args` and `kwargs`: it must be importable as `module:qualname`, as a
@@ -128,7 +128,7 @@ def replay(
 def _importable(fn: Callable[..., Any]) -> str:
     """`fn`'s `module:qualname`, which the child imports it by, or ValueError naming why it would
     import something else, or nothing: `api.resolve`'s refusals, `__main__` among them, are the
-    child's, so they are asked of it here, the one rule (#84)."""
+    child's, so they are asked of it here, the one rule."""
     try:
         name = entrypoint(fn, "sdk.replay")
     except TypeError as exc:
@@ -145,7 +145,7 @@ def _importable(fn: Callable[..., Any]) -> str:
 def _captured(fn: Callable[..., Any], args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> Any:
     """`args` and `kwargs` bound to `fn` and captured as a trigger's are, or ValueError naming
     why the child could not be given them: they do not bind, as calling `fn` would say, or which
-    of them does not capture replayably (#84)."""
+    of them does not capture replayably."""
     try:
         bound = bind(fn, args, kwargs)
     except TypeError as exc:

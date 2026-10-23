@@ -1,4 +1,4 @@
-"""`@sdk.tool`: a tool call the proxy cannot see, labelled read or write (#76).
+"""`@sdk.tool`: a tool call the proxy cannot see, labelled read or write.
 
 The proxy sees only HTTP. A database write, a file write or a call into another library is
 invisible to it, so the agent labels each such tool, and the SDK does for it what shadow mode does
@@ -10,7 +10,7 @@ for a write on the wire:
     | true       | read  | the real function, `ran="real"`   | a ToolCall |
     | true       | write | ONLY the stand-in, `ran="shadow"` | a ToolCall |
 
-In a replay (`IRIMI_REPLAY_RUN` set, #83), a read tool first asks the recording, over the control
+In a replay (`IRIMI_REPLAY_RUN` set), a read tool first asks the recording, over the control
 endpoint, for the result the recorded run's same call got:
 
     | kind  | the recording                | Runs                                 | Records     |
@@ -65,8 +65,8 @@ logger = logging.getLogger(LOGGER_NAME)
 
 KINDS: tuple[trace.ToolKind, ...] = get_args(trace.ToolKind)
 # The variables whose presence says this process meant to go through a proxy: an inactive SDK
-# with either set ran a write tool for real where irimi was probably meant to be in front (#76).
-# Both spellings of `HTTPS_PROXY`, from the one list of them (#75).
+# with either set ran a write tool for real where irimi was probably meant to be in front.
+# Both spellings of `HTTPS_PROXY`, from the one list of them.
 PROXY_HINTS = tuple(name for name in paths.PROXY_ENVS if name.upper() == "HTTPS_PROXY")
 
 # Set once the "ran for real" WARNING has been logged: once per process, not per call or per tool.
@@ -88,7 +88,7 @@ def tool[F: Callable[..., Any]](
 
     It keeps the function's signature and its nature - the wrapper is a coroutine function exactly
     when the function is - and keeps a `staticmethod` or `classmethod` one, in either decorator
-    order, as `@sdk.trigger` does (#74), so a stand-in is never handed an instance it does not
+    order, as `@sdk.trigger` does, so a stand-in is never handed an instance it does not
     expect. The stand-in of a plain method is called as the method is, with the instance first.
 
     Refused at decoration time, with TypeError: a `kind` that is neither; a write with no stand-in;
@@ -113,7 +113,7 @@ def tool[F: Callable[..., Any]](
     if isinstance(shadow, staticmethod):
         # A stand-in written as a static method in its tool's class body is callable, but
         # `inspect` sees neither its nature nor a generator through it: it is judged, and called,
-        # as the function inside it (#76).
+        # as the function inside it.
         shadow = shadow.__func__
     if shadow is not None and not callable(shadow):
         raise TypeError(f"@sdk.tool(shadow=...) must be callable, not {shadow!r}")
@@ -126,7 +126,7 @@ def tool[F: Callable[..., Any]](
 
     def decorate(fn: Callable[..., Any]) -> Any:
         if isinstance(fn, staticmethod | classmethod):
-            # The function inside is the tool, and the descriptor stays (#74's rule for triggers).
+            # The function inside is the tool, and the descriptor stays, as for a trigger.
             return type(fn)(decorate(fn.__func__))
         entrypoint(fn, "@sdk.tool")
         if inspect.isgeneratorfunction(fn) or inspect.isasyncgenfunction(fn):
@@ -135,7 +135,7 @@ def tool[F: Callable[..., Any]](
                 "recorded when it returns, before a generator's body has run"
             )
         if shadow is fn:
-            # Read as "the function to shadow", `shadow=` would run the write for real (#76).
+            # Read as "the function to shadow", `shadow=` would run the write for real.
             raise TypeError(
                 f"@sdk.tool: the stand-in for {fn.__qualname__} is the function itself: shadow= "
                 "names the function that runs in its place under irimi"
@@ -195,7 +195,7 @@ def _call(spec: _Tool, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
     if not context.active():
         _warn_if_real_write(spec)
         return spec.fn(*args, **kwargs)
-    # Bound against the REAL function, which is what the agent called, whatever runs (#76).
+    # Bound against the REAL function, which is what the agent called, whatever runs.
     captured, _ = capture_call(spec.fn, args, kwargs)
     recorded = _replay_answer(spec, captured) if _asks_the_recording(spec) else None
     body, ran = _chosen(spec, recorded)
@@ -207,11 +207,11 @@ def _call(spec: _Tool, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
         raise
     if inspect.iscoroutine(result):
         # A sync function that returned a coroutine has not run its body yet: the call ends when
-        # the coroutine does, as a sync trigger's run does (`RunScope.hand_off`, #74). One that
-        # is never awaited is never recorded. The record says so, for a replay (#83).
+        # the coroutine does, as a sync trigger's run does (`RunScope.hand_off`). One that
+        # is never awaited is never recorded. The record says so, for a replay.
         call.awaited = True
         return _finished_with(call, result)
-    # Inline, as a sync trigger's posts are, even on an event loop's thread (#74).
+    # Inline, as a sync trigger's posts are, even on an event loop's thread.
     call.send(call.doc(result, None))
     return result
 
@@ -224,7 +224,7 @@ async def _call_async(spec: _Tool, args: tuple[Any, ...], kwargs: dict[str, Any]
     recorded = None
     if _asks_the_recording(spec):
         # Only a read in a replay waits on the endpoint, and off the event loop, as a post does:
-        # any other call goes straight to its body, as it did before replay existed.
+        # any other call goes straight to its body.
         recorded = await runs.off_the_loop(_replay_answer, spec, captured)
     body, ran = _chosen(spec, recorded)
     call = _Call(spec, ran, captured)
@@ -243,7 +243,7 @@ async def _finished_with[T](call: "_Call", coroutine: Coroutine[Any, Any, T]) ->
     try:
         result = await coroutine
     except GeneratorExit as exc:
-        # Closed, not awaited: nothing may be awaited now, so the post is made inline (#74).
+        # Closed, not awaited: nothing may be awaited now, so the post is made inline.
         call.send(call.doc(None, exc))
         raise
     except BaseException as exc:
@@ -254,13 +254,13 @@ async def _finished_with[T](call: "_Call", coroutine: Coroutine[Any, Any, T]) ->
 
 
 def _asks_the_recording(spec: _Tool) -> bool:
-    """A read tool in a replay asks the recording before it runs (#83); nothing else does."""
+    """A read tool in a replay asks the recording before it runs; nothing else does."""
     return spec.kind == "read" and context.replay_run_id() is not None
 
 
 @dataclass(frozen=True)
 class _Recorded:
-    """A read tool call's recorded outcome, as a replay hands it back (#83): the revived result,
+    """A read tool call's recorded outcome, as a replay hands it back: the revived result,
     or the error the recorded call raised, and whether a coroutine the call returned gave it
     (`trace.ToolCall.awaited`)."""
 
@@ -288,13 +288,13 @@ def _replay_answer(spec: _Tool, args: trace.JSONValue) -> _Recorded | None:
     """The recorded outcome of this read tool called with `args`, as captured, asked of the
     control endpoint, or None, and the tool runs for real: a miss, a lookup that failed, a result
     `revive` cannot rebuild, or a recorded call something outside it stopped
-    (`trace.STOPPED_ERROR_TYPES`), which has no outcome to give. Never raises (#83)."""
+    (`trace.STOPPED_ERROR_TYPES`), which has no outcome to give. Never raises."""
     try:
         outcome = runs.reporter.recorded(_run_id(), spec.name, args)
         if outcome is None:
             return None
         if outcome.error is not None and outcome.error.type in STOPPED_ERROR_TYPES:
-            # The engine refuses these entries itself (#83), so the HTTP the recorded body made is
+            # The engine refuses these entries itself, so the HTTP the recorded body made is
             # left for the body that runs now; checked here too, so one is never raised again.
             return None
         result = None if outcome.error is not None else revive(outcome.result)
@@ -311,7 +311,7 @@ class _Call:
         self.spec = spec
         self.ran = ran
         self.args = args
-        # A sync tool that returned a coroutine (`trace.ToolCall.awaited`, #83).
+        # A sync tool that returned a coroutine (`trace.ToolCall.awaited`).
         self.awaited = False
         self.run_id = _run_id()
         self.started_at = time.time()
@@ -338,7 +338,7 @@ class _Call:
                 ended_at=time.time(),
                 awaited=self.awaited,
             )
-            # The run is the route's, never the body's: a body naming one is refused (#73).
+            # The run is the route's, never the body's: a body naming one is refused.
             doc = trace.tool_call_to_json(call)
             del doc["run_id"]
             return doc
@@ -369,7 +369,7 @@ def _is_async(f: Callable[..., Any]) -> bool:
 def _run_id() -> str:
     """The run a call belongs to: the current one, else the process run `irimi shadow` names for
     its child, else none. irimi files a call for no run in `unattributed/`, as it does an
-    exchange that names none (#70, #77)."""
+    exchange that names none."""
     return context.current_run_id() or os.environ.get(paths.RUN_ENV) or trace.UNATTRIBUTED
 
 

@@ -19,7 +19,8 @@ is the whole argument:
   `_StandInReader`; this one needs no stand-in at all.
   `test_the_same_five_calls_under_irimi_shadow_print_the_phase_2_summary` is its twin through the
   real CLI: the same calls from a child of `irimi shadow`, proving the engine the criterion builds
-  is the one `cli._build_engine` builds, and that the block it prints on exit is the one pinned.
+  is the one `cli.session.build_engine` builds, and that the block it prints on exit is the one
+  pinned.
 
 * `test_the_refund_agent_leaves_no_refund_on_a_real_test_mode_charge` is the live version of
   both. It runs `examples/refund_agent/agent.py` itself against Stripe test mode and
@@ -201,7 +202,7 @@ def test_a_refund_through_the_door_is_answered_by_irimi_and_never_leaves_the_mac
 ):
     """The base-URL criterion. One run of the real CLI: a live read that reaches the world,
     a refund that does not, an echo the caller can parse, and a summary that says so."""
-    # `cli._build_engine` imports the reader inside the function, so this is what it builds.
+    # `cli.session.build_engine` looks the reader up when it runs, so this is what it builds.
     monkeypatch.setattr("irimi.reader.UpstreamReader", _StandInReader)
     _StandInReader.port = stripe_stand_in
     child = tmp_path / "child.py"
@@ -300,9 +301,10 @@ PHASE2_SUMMARY = [
 
 @pytest.fixture
 def phase2_stub(tmp_path, monkeypatch):
-    """The shared loopback Stripe, and an engine over it built the way `cli._build_engine` builds
-    one: the real overlay, and a policy holding the real reader. Nothing is swapped for a
-    stand-in - through the forward proxy the precondition read goes where the agent's reads go.
+    """The shared loopback Stripe, and an engine over it built the way
+    `cli.session.build_engine` builds one: the real overlay, and a policy holding the real reader.
+    Nothing is swapped for a stand-in - through the forward proxy the precondition read goes where
+    the agent's reads go.
     Yields (proxy port, stub port, exchanges, maps)."""
     _PreconditionStub.seen = []
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _PreconditionStub)
@@ -481,12 +483,12 @@ def test_the_same_five_calls_under_irimi_shadow_print_the_phase_2_summary(
     home, tmp_path, capfd, monkeypatch
 ):
     """The criterion's twin through the real CLI. The criterion builds its engine the way
-    `cli._build_engine` builds one; this proves that is the engine `irimi shadow` really builds -
-    the real overlay, a policy holding the real reader - and that the block it prints on exit is
-    the one the criterion pins. Nothing is swapped but where the shipped maps are read from: a
-    directory holding the loopback Stripe's map, so the stub's host is the `stripe` service. The
-    child uses the forward proxy explicitly, because `irimi shadow` exempts loopback from it
-    through `NO_PROXY` and the stub is on loopback."""
+    `cli.session.build_engine` builds one; this proves that is the engine `irimi shadow` really
+    builds - the real overlay, a policy holding the real reader - and that the block it prints on
+    exit is the one the criterion pins. Nothing is swapped but where the shipped maps are read
+    from: a directory holding the loopback Stripe's map, so the stub's host is the `stripe`
+    service. The child uses the forward proxy explicitly, because `irimi shadow` exempts loopback
+    from it through `NO_PROXY` and the stub is on loopback."""
     _run_phase2_under_shadow(tmp_path, monkeypatch)
     lines = capfd.readouterr().out.splitlines()
 

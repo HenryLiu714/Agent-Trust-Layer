@@ -575,16 +575,16 @@ def test_shadow_mode_is_never_built_without_a_reader(tmp_path, monkeypatch):
     `ShadowPolicy()`s in tests keep their meaning. The hole that leaves is a shadow run silently
     skipping L3 because the composition root forgot an argument: the `--allow-host` failure shape
     again, configured and never consulted. So the one construction site is pinned here."""
-    from irimi import cli
+    from irimi.cli import options, session
     from irimi.reader import NoReader
     from tests.doubles import NullStore
 
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
     index = servicemap.MapIndex(tuple(servicemap.loader.load_shipped()))
-    args = argparse.Namespace(allow_host=[], port=4321, listen_host=paths.LISTEN_HOST)
+    args = argparse.Namespace(allow_host=[], port=4321, listen_host=options.LISTEN_HOST)
     p = ca.ca_paths()
-    run = cli._Run(index, p, "t3st", cli._engine_config(args, index, "t3st", p), NullStore())
-    engine = cli._build_engine(run, on_exchange=lambda ex: None)
+    run = session.Run(index, p, "t3st", session._engine_config(args, index, "t3st", p), NullStore())
+    engine = session.build_engine(run, on_exchange=lambda ex: None)
     assert isinstance(engine.policy, ShadowPolicy)
     assert not isinstance(engine.policy.reader, NoReader)
     assert engine.policy.maps is run.config.maps

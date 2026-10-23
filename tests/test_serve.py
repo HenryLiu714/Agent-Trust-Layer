@@ -358,6 +358,7 @@ def test_a_run_s_writes_and_keys_are_dropped_once_its_end_is_on_disk(tmp_path, m
     keys from the policy's store, as the store reports the run ended, before serve prints its
     summary, so a long serve holds open runs' alone. Another run's stay."""
     from irimi import cli, idempotency
+    from irimi.cli import session
     from tests.test_idempotency import PARAMS, _stored
     from tests.test_store import _exchange, _record
 
@@ -372,7 +373,7 @@ def test_a_run_s_writes_and_keys_are_dropped_once_its_end_is_on_disk(tmp_path, m
         assert run.keys is not None
         left_at_end.append((run.write_log.for_run(run_id), run.keys.get(slot_of[run_id], PARAMS)))
 
-    run = cli._prepare_run(args, serve=True, on_run_ended=on_run_ended)
+    run = session.prepare_run(args, serve=True, on_run_ended=on_run_ended)
     assert run is not None and run.write_log is not None and run.keys is not None
     ended, still_open = _exchange("r1"), _exchange("r2")
     run.write_log.add(ended)
@@ -388,7 +389,7 @@ def test_a_run_s_writes_and_keys_are_dropped_once_its_end_is_on_disk(tmp_path, m
     assert left_at_end == [((), (None, False))]
     assert run.write_log.for_run("r2") == (still_open,)
     assert run.keys.get(slot_of["r2"], PARAMS) == (_stored(), False)
-    engine = cli._build_engine(run, lambda ex: None)
+    engine = session.build_engine(run, lambda ex: None)
     assert engine.write_log is run.write_log
     assert engine.policy.idempotency is run.keys
 
@@ -491,10 +492,11 @@ def home(tmp_path, monkeypatch):
 def test_serve_with_a_command_is_a_usage_error(home, monkeypatch, capsys):
     """Serve mode launches nothing, so `-- echo hi` with it is answered as argparse answers a bad
     invocation: usage on stderr, exit 2, and nothing started or stored."""
-    from irimi import cli
-    from irimi.cli import main
+    from irimi.cli import main, serve
 
-    monkeypatch.setattr(cli, "cmd_serve", lambda *args: pytest.fail("serve was started"))
+    monkeypatch.setattr(
+        serve, "cmd_serve", lambda *args, **kwargs: pytest.fail("serve was started")
+    )
     with pytest.raises(SystemExit) as exc:
         main(["shadow", "--serve", "--", "echo", "hi"])
     assert exc.value.code == 2
@@ -513,7 +515,7 @@ def test_serve_with_a_command_exits_2_from_the_command_line(home):
 
     env = {**os.environ, paths.IRIMI_HOME_ENV: str(home)}
     done = subprocess.run(
-        [sys.executable, "-m", "irimi.cli", "shadow", "--serve", "--", "echo", "hi"],
+        [sys.executable, "-m", "irimi", "shadow", "--serve", "--", "echo", "hi"],
         cwd=home,
         env=env,
         capture_output=True,
@@ -534,6 +536,7 @@ def test_a_second_serve_on_one_store_is_refused_before_it_starts(home, capsys):
     import threading
 
     from irimi import cli
+    from irimi.cli import shadow
     from irimi.store.lock import ServeLock
 
     def writers() -> int:
@@ -542,7 +545,7 @@ def test_a_second_serve_on_one_store_is_refused_before_it_starts(home, capsys):
     stop = threading.Event()
     args = cli.build_parser().parse_args(["shadow", "--serve", "--port", "0"])
     codes: list[int] = []
-    first = threading.Thread(target=lambda: codes.append(cli.cmd_shadow(args, stop)))
+    first = threading.Thread(target=lambda: codes.append(shadow.cmd_shadow(args, stop)))
     first.start()
     try:
         _wait_for(lambda: "listening on" in capsys.readouterr().out)
@@ -589,15 +592,15 @@ def test_a_signal_during_serve_only_records_itself():
     interpreter's exit cannot end it. With none, the handlers found are put back."""
     import signal
 
-    from irimi import cli
+    from irimi import runner
 
     with _signals_caught_here() as (outside, record):
-        with cli._stopping_on_signals() as quiet:
+        with runner.stopping_on_signals() as quiet:
             pass
         after_none = {
             signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)
         }
-        with cli._stopping_on_signals() as signalled:
+        with runner.stopping_on_signals() as signalled:
             signal.raise_signal(signal.SIGTERM)
             signal.raise_signal(signal.SIGINT)
         after_two = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
@@ -612,11 +615,11 @@ def test_a_sigint_ignored_when_serve_starts_stays_ignored():
     must not stop the serve. SIGTERM is still serve's."""
     import signal
 
-    from irimi import cli
+    from irimi import runner
 
     with _signals_caught_here() as (outside, record):
         signal.signal(signal.SIGINT, signal.SIG_IGN)
-        with cli._stopping_on_signals() as signalled:
+        with runner.stopping_on_signals() as signalled:
             during = signal.getsignal(signal.SIGINT)
             signal.raise_signal(signal.SIGTERM)
     assert during is signal.SIG_IGN
@@ -633,9 +636,10 @@ def test_a_signal_before_the_proxy_is_ready_stops_serve_with_no_banner(
     import signal
 
     from irimi import cli, runner
+    from irimi.cli import session
     from irimi.store.lock import ServeLock
 
-    prepare, start = cli._prepare_run, runner.start_engine
+    prepare, start = session.prepare_run, runner.start_engine
     started = []
 
     def signalled_while_preparing(*args, **kwargs):
@@ -650,7 +654,7 @@ def test_a_signal_before_the_proxy_is_ready_stops_serve_with_no_banner(
             signal.raise_signal(signal.SIGTERM)
         return started[-1]
 
-    monkeypatch.setattr(cli, "_prepare_run", signalled_while_preparing)
+    monkeypatch.setattr(session, "prepare_run", signalled_while_preparing)
     monkeypatch.setattr(runner, "start_engine", signalled_while_starting)
     with _signals_caught_here() as (outside, record):
         assert cli.main(["serve", "--port", "0"]) == 0
@@ -661,7 +665,7 @@ def test_a_signal_before_the_proxy_is_ready_stops_serve_with_no_banner(
 
 
 def test_an_engine_that_cannot_be_built_leaves_the_store_closed_and_unlocked(home, monkeypatch):
-    """What `_build_engine` raises reaches the caller, after the store is closed and its lock
+    """What the engine factory raises reaches the caller, after the store is closed and its lock
     released: nothing it opened outlives it."""
     import threading
 
@@ -672,9 +676,8 @@ def test_an_engine_that_cannot_be_built_leaves_the_store_closed_and_unlocked(hom
         raise RuntimeError("no engine")
 
     writers = sum(thread.name == "irimi-store" for thread in threading.enumerate())
-    monkeypatch.setattr(cli, "_build_engine", broken)
     with pytest.raises(RuntimeError, match="no engine"):
-        cli.main(["serve", "--port", "0"])
+        cli.main(["serve", "--port", "0"], engine_factory=broken)
     assert sum(thread.name == "irimi-store" for thread in threading.enumerate()) == writers
     ServeLock.hold(home / "store").release()
 
@@ -687,7 +690,7 @@ def test_two_blocks_printed_at_once_never_interleave(tmp_path, monkeypatch):
     import threading
     import time
 
-    from irimi import cli
+    from irimi.cli import serve
 
     class _Slow:
         def __init__(self):
@@ -703,7 +706,7 @@ def test_two_blocks_printed_at_once_never_interleave(tmp_path, monkeypatch):
 
     out = _Slow()
     monkeypatch.setattr(sys, "stdout", out)
-    output = cli._ServeOutput(tmp_path / "store")
+    output = serve._ServeOutput(tmp_path / "store")
     blocks = {name: [f"{name} {i}" for i in range(20)] for name in ("a", "b")}
     threads = [threading.Thread(target=output.say, args=(block,)) for block in blocks.values()]
     for thread in threads:
@@ -719,7 +722,7 @@ def test_a_run_that_cannot_be_read_back_is_one_warning_naming_only_its_type(
     """A run whose end is on disk but which cannot be read back prints one line on stderr instead
     of its summary, naming the exception's type and never its message, which may quote what it
     choked on, as the store's own warnings never do."""
-    from irimi import cli
+    from irimi.cli import serve
     from irimi.store.reader import StoreReader
     from irimi.trace import TraceFormatError
 
@@ -727,7 +730,7 @@ def test_a_run_that_cannot_be_read_back_is_one_warning_naming_only_its_type(
         raise TraceFormatError("cannot read sk_live_CANARY0000000000000000")
 
     monkeypatch.setattr(StoreReader, "load_run", unreadable)
-    cli._ServeOutput(tmp_path / "store").run_ended(servicemap.MapIndex(), "r1")
+    serve._ServeOutput(tmp_path / "store").run_ended(servicemap.MapIndex(), "r1")
     out, err = capsys.readouterr()
     assert out == ""
     assert err == "warning: run r1 ended but could not be read back: TraceFormatError\n"
@@ -740,21 +743,23 @@ def test_an_engine_that_stops_on_its_own_ends_serve_as_a_failure(home, monkeypat
     import signal
 
     from irimi import cli
+    from irimi.cli import session
 
     engines = []
-    build = cli._build_engine
-    monkeypatch.setattr(
-        cli, "_build_engine", lambda *a, **kw: engines.append(build(*a, **kw)) or engines[-1]
-    )
-    printed = cli.print_startup
+
+    def build(*a, **kw):
+        engines.append(session.build_engine(*a, **kw))
+        return engines[-1]
+
+    printed = session.print_startup
 
     def startup(*args):
         printed(*args)
         engines[0].shutdown()
 
-    monkeypatch.setattr(cli, "print_startup", startup)
+    monkeypatch.setattr(session, "print_startup", startup)
     before = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
-    assert cli.main(["serve", "--port", "0"]) == 1
+    assert cli.main(["serve", "--port", "0"], engine_factory=build) == 1
     assert capsys.readouterr().err.strip() == "error: the proxy stopped on its own"
     assert {signum: signal.getsignal(signum) for signum in before} == before
 
@@ -775,7 +780,7 @@ class _Served:
     than blocking on a pipe, and its stderr goes to a file. `launcher` is what Python runs irimi
     as: its own module, or a `-c` bootstrap that calls `irimi.cli.main`."""
 
-    def __init__(self, home, *argv: str, launcher: tuple[str, ...] = ("-m", "irimi.cli")) -> None:
+    def __init__(self, home, *argv: str, launcher: tuple[str, ...] = ("-m", "irimi")) -> None:
         import os
         import subprocess
         import sys

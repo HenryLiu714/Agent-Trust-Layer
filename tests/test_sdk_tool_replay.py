@@ -2,9 +2,9 @@
 
 Each test records a run first, through a shadow engine and a real `DirectoryStore`, then starts a
 second engine answering from that run - a `ReplayPolicy` over its `ReplayIndex`, which answers the
-control endpoint's lookups too, as `cli._build_engine` builds it - with this process set up as
-`irimi shadow` sets up a replay's child: `IRIMI_REPLAY_RUN` names the engine's run. Every claim
-about what the replay stored is read back off disk once its engine has stopped.
+control endpoint's lookups too, as `cli.session.build_engine` builds it - with this process set
+up as `irimi shadow` sets up a replay's child: `IRIMI_REPLAY_RUN` names the engine's run. Every
+claim about what the replay stored is read back off disk once its engine has stopped.
 
 A read tool's real function raises `_RealReadRan` for the accounts in `_FORBIDDEN`, and a write
 tool's always raises `_RealWriteRan`, so a test that let either run where it must not fails on it.

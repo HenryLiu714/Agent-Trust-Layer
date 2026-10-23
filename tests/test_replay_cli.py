@@ -545,13 +545,13 @@ def test_a_python_that_cannot_run_irimi_s_replay_child_is_refused_before_anythin
     ended. A Python without irimi, here this one with no site-packages, a path that is no
     program, a virtual environment's directory rather than its Python, and one that does not answer
     in time are each refused before the replay starts: exit 2, and no run stored."""
-    from irimi import cli
+    from irimi import runner
 
     source = _record(home, f"replay_agent.handle({TICKET})")
     bare = _python(tmp_path, "bare-python", "unset PYTHONPATH", "-S")
     missing = str(tmp_path / "no-such-python")
     slow = _python(tmp_path, "slow-python", "exec sleep 5")
-    monkeypatch.setattr(cli, "PYTHON_PROBE_TIMEOUT_S", 1.0)
+    monkeypatch.setattr(runner, "PYTHON_PROBE_TIMEOUT_S", 1.0)
     capfd.readouterr()
     code, out, err = _replay(capfd, source, "--python", bare)
     assert (code, out) == (2, [])
@@ -780,14 +780,14 @@ def test_a_replay_interrupted_before_its_run_is_stored_exits_130_with_no_run(
 ):
     """A Ctrl-C while the replay's engine starts, before its run is stored: no agent ran and no
     run exists, so the result names none, and the replay exits 130 as `irimi shadow` would."""
-    from irimi import cli
+    from irimi.cli import session
 
     source = _record(home, f"replay_agent.handle({TICKET})")
 
     def interrupted(*args: object, **kwargs: object) -> None:
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli, "print_startup", interrupted)
+    monkeypatch.setattr(session, "print_startup", interrupted)
     written = tmp_path / "result.json"
     capfd.readouterr()
     code, _, _ = _replay(capfd, source, "--result-file", str(written))
@@ -971,12 +971,13 @@ def test_the_command_is_what_was_typed_whichever_dashes_argparse_strips(
     command, its own too; a newer one only the first. The command is what was typed either way.
     """
     from irimi import cli
+    from irimi.cli import replay_cmd
 
     args = cli.build_parser().parse_args(typed)
     args.argv = typed
     if strips_every_dashes:
         args.cmd = [word for word in args.cmd if word != "--"]
-    assert cli._replay_command(args) == command
+    assert replay_cmd._replay_command(args) == command
 
 
 def test_an_outcome_file_the_agent_nested_past_the_stack_is_no_outcome(home, capfd, tmp_path):

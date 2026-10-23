@@ -270,11 +270,11 @@ def test_interrupt_before_ready_exits_cleanly(home, monkeypatch, capsys):
 
 
 def test_interrupt_while_waiting_exits_cleanly(home, monkeypatch, capsys):
-    """Ctrl-C that escapes _wait_for_child still stops the engine and prints the summary."""
-    from irimi import cli
+    """Ctrl-C that escapes wait_for_child still stops the engine and prints the summary."""
+    from irimi import runner
 
     monkeypatch.setattr(
-        cli, "_wait_for_child", lambda proc, child: (_ for _ in ()).throw(KeyboardInterrupt)
+        runner, "wait_for_child", lambda proc, child: (_ for _ in ()).throw(KeyboardInterrupt)
     )
     assert main(["shadow", *_py("pass")]) == 130
     assert "0 exchanges" in capsys.readouterr().out
@@ -405,7 +405,7 @@ def test_sigterm_stops_the_command_ends_the_run_and_closes_the_store(home, upstr
     env = {**os.environ, paths.IRIMI_HOME_ENV: str(home)}
     env.pop("STRIPE_API_KEY", None)
     proc = subprocess.Popen(
-        [sys.executable, "-m", "irimi.cli", "shadow", *_py(src)],
+        [sys.executable, "-m", "irimi", "shadow", *_py(src)],
         cwd=home,
         env=env,
         stdout=subprocess.PIPE,
@@ -426,7 +426,7 @@ def test_sigterm_stops_the_command_ends_the_run_and_closes_the_store(home, upstr
         if proc.poll() is None:
             proc.kill()
             proc.wait()
-    # Passed on at once, not after `_wait_for_child`'s grace: the command was told, not waited out.
+    # Passed on at once, not after `wait_for_child`'s grace: the command was told, not waited out.
     assert time.monotonic() - started < 5
     assert proc.returncode == 143, err
     with pytest.raises(ProcessLookupError):
@@ -445,18 +445,18 @@ def test_sigterm_before_the_command_starts_runs_nothing(home, monkeypatch, capsy
     143."""
     import signal
 
-    from irimi import cli
+    from irimi.cli import session
     from irimi.store.reader import StoreReader
 
     monkeypatch.chdir(home)  # so SHOULD_NOT_EXIST would land here, not in the repo
-    prepare = cli._prepare_run
+    prepare = session.prepare_run
 
     def terminated_while_preparing(*args, **kwargs):
         run = prepare(*args, **kwargs)
         signal.raise_signal(signal.SIGTERM)
         return run
 
-    monkeypatch.setattr(cli, "_prepare_run", terminated_while_preparing)
+    monkeypatch.setattr(session, "prepare_run", terminated_while_preparing)
     outside: list[int] = []
 
     def record(signum, frame):
@@ -534,16 +534,16 @@ def test_an_ignored_sigterm_stays_ignored_and_a_thread_installs_nothing(home, mo
     """
     import signal
 
-    from irimi import cli
+    from irimi.cli import session
 
     during: list[object] = []
-    prepare = cli._prepare_run
+    prepare = session.prepare_run
 
     def seen(*args, **kwargs):
         during.append(signal.getsignal(signal.SIGTERM))
         return prepare(*args, **kwargs)
 
-    monkeypatch.setattr(cli, "_prepare_run", seen)
+    monkeypatch.setattr(session, "prepare_run", seen)
     saved = signal.signal(signal.SIGTERM, signal.SIG_IGN)
     try:
         assert main(["shadow", *_py("pass")]) == 0

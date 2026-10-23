@@ -19,7 +19,8 @@ from pathlib import Path
 import pytest
 
 from irimi import redact, servicemap, trace
-from irimi.cli import DEFAULT_RUNS_LIMIT, main
+from irimi.cli import main
+from irimi.cli.runs import DEFAULT_RUNS_LIMIT
 from irimi.exchange import Exchange, Precondition, Request, Response
 from irimi.report.model import RunView
 from irimi.report.runs import (

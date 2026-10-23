@@ -6,9 +6,9 @@ of them proves this: a run of the real CLI, over the refund agent's scenario, le
 whose exchanges read back as exactly what the engine handed its store - redacted, with every
 precondition, overlay and webhook field intact and every span in order.
 
-`cli._open_store` imports `DirectoryStore` when it runs, so each test here swaps in `_SpyStore`:
-the real store, unchanged, which also remembers each exchange the engine handed it. Every
-assertion is made on what `StoreReader` reads back and on the files under the store's root.
+`cli.session` looks `DirectoryStore` up when it opens the store, so each test here swaps in
+`_SpyStore`: the real store, unchanged, which also remembers each exchange the engine handed it.
+Every assertion is made on what `StoreReader` reads back and on the files under the store's root.
 
 The last part holds redaction to the same standard: real traffic through the real
 `irimi shadow`, both doors, against loopback stand-ins, with every assertion made on the stored

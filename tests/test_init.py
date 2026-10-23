@@ -1,5 +1,6 @@
 from irimi import ca, paths
-from irimi.cli import NON_HTTP_NOTICE, main
+from irimi.cli import main
+from irimi.cli.init import NON_HTTP_NOTICE
 
 
 def _setup(tmp_path, monkeypatch):

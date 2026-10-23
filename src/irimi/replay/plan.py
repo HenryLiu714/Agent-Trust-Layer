@@ -1,6 +1,6 @@
 """What `irimi replay` runs for a stored run.
 
-Pure: nothing here runs a process or prints. `cli.cmd_replay` asks `plan` what to run, runs it
+Pure: nothing here runs a process or prints. `cli.replay_cmd` asks `plan` what to run, runs it
 under the replay's engine, and prints `replay.report`'s lines.
 
 WHAT RUNS, in order of precedence (`plan`):

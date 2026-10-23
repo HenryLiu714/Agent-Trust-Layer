@@ -1,7 +1,7 @@
 """The engine's own reads: the `Reader` seam L3 issues its one precondition read through, and
 `UpstreamReader`, shadow mode's reader over the real service. Here rather than in `policy` because
-a network client is not a decision; `cli._build_engine` is the only place in the product that
-builds one."""
+a network client is not a decision; `cli.session.build_engine` is the only place in the product
+that builds one."""
 
 import logging
 import ssl
@@ -55,8 +55,8 @@ class NoReader(Reader):
     Distinct from a reader that tried and could not tell. A precondition on a policy holding this
     is recorded `precondition: None` - the same state as a route that declares no check - because
     nothing was asked, and `not_evaluable` is reserved for a question irimi put and could not get
-    an answer to. Shadow mode never holds one: `cli._build_engine` wires `UpstreamReader`, and
-    `tests/test_invariants.py` pins that it does.
+    an answer to. Shadow mode never holds one: `cli.session.build_engine` wires `UpstreamReader`,
+    and `tests/test_invariants.py` pins that it does.
     """
 
     def __call__(self, request: Request) -> Response | None:

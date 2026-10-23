@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from irimi import __version__, ca, cli, paths, servicemap
-from irimi.cli import BROKEN_PIPE_EXIT_CODE, main
+from irimi.cli import BROKEN_PIPE_EXIT_CODE, main, options, session
 from irimi.engine import Replay, Serve, Shadow
 from irimi.netaddr import Target
 from irimi.protocol.env import AGENT_VERSION_ENV
@@ -83,7 +83,7 @@ def test_a_command_s_proxy_takes_any_free_port_and_a_sidecar_s_a_fixed_one(capsy
     """A child is told its proxy's port in its environment, so `shadow` and `replay` need none
     fixed; a sidecar's agents are pointed at one, so `serve` keeps it. The help says so."""
     parser = cli.build_parser()
-    assert parser.parse_args(["serve"]).port == paths.DEFAULT_PORT
+    assert parser.parse_args(["serve"]).port == options.DEFAULT_PORT
     assert parser.parse_args(["replay", "abc"]).port == 0
     assert parser.parse_args(["shadow", "--", "true"]).port is None  # `--serve` decides
     with pytest.raises(SystemExit):
@@ -156,19 +156,22 @@ def _shipped_index():
     return servicemap.load(maps_dir=servicemap.loader.shipped_dir())
 
 
-def test_reverse_hosts_are_the_mapped_hosts():
-    from irimi.cli import _reverse_hosts
+def _reverse_hosts(args, index):
+    return session._engine_config(args, index, "t3st", ca.ca_paths()).reverse_hosts
 
+
+def test_reverse_hosts_are_the_mapped_hosts():
     index = _shipped_index()
-    assert _reverse_hosts(argparse.Namespace(allow_host=[]), index) == index.hosts
+    args = cli.build_parser().parse_args(["serve"])
+    assert _reverse_hosts(args, index) == index.hosts
     assert {"api.stripe.com", "slack.com"} <= index.hosts
 
 
 def test_reverse_hosts_adds_allow_host_lower_cased():
-    from irimi.cli import _reverse_hosts
-
     index = _shipped_index()
-    args = argparse.Namespace(allow_host=[" Foo.Example ", "", "bar.example"])
+    args = cli.build_parser().parse_args(
+        ["serve", "--allow-host", " Foo.Example ", "--allow-host", "bar.example"]
+    )
     assert _reverse_hosts(args, index) == index.hosts | {"foo.example", "bar.example"}
 
 
@@ -176,7 +179,8 @@ def test_engine_config_carries_the_maps():
     """`serve` and `shadow` both build the engine's config here, and the classifier only sees the
     maps because `maps=index` is part of it. The bind is `--listen-host`'s, and `serve` is set only
     for serve mode, whose health answer says so."""
-    from irimi.cli import _engine_config, build_parser
+    from irimi.cli import build_parser
+    from irimi.cli.session import _engine_config
 
     index = _shipped_index()
     args = argparse.Namespace(allow_host=[], port=4321, listen_host="0.0.0.0")
@@ -187,28 +191,28 @@ def test_engine_config_carries_the_maps():
     assert cfg.mode == Shadow()
     assert _engine_config(args, index, "t3st", ca.ca_paths(), Serve()).mode == Serve()
     for command in (["serve"], ["shadow", "--", "true"]):
-        assert build_parser().parse_args(command).listen_host == paths.LISTEN_HOST
+        assert build_parser().parse_args(command).listen_host == options.LISTEN_HOST
 
 
 def test_the_composition_root_builds_the_service_overlay_and_records_into_the_run_s_store():
     """The overlay is handed the engine's own classification of a read and holds no index of its
     own, so the two cannot disagree about which service a read belongs to. The engine records into
-    the store `_prepare_run` opened, the one `irimi shadow` starts and ends its run in."""
+    the store `prepare_run` opened, the one `irimi shadow` starts and ends its run in."""
     from irimi.overlay import ServiceOverlay
     from tests.doubles import NullStore
 
     index = _shipped_index()
-    args = argparse.Namespace(allow_host=[], port=4321, listen_host=paths.LISTEN_HOST)
+    args = argparse.Namespace(allow_host=[], port=4321, listen_host=options.LISTEN_HOST)
     p = ca.ca_paths()
-    run = cli._Run(index, p, "t3st", cli._engine_config(args, index, "t3st", p), NullStore())
-    engine = cli._build_engine(run, on_exchange=lambda ex: None)
+    run = session.Run(index, p, "t3st", session._engine_config(args, index, "t3st", p), NullStore())
+    engine = session.build_engine(run, on_exchange=lambda ex: None)
     assert isinstance(engine.overlay, ServiceOverlay)
     assert engine.config.maps is index
     assert engine.store is run.store
 
 
 def test_the_composition_root_builds_a_replay_policy_over_the_run_s_recording():
-    """A config naming a run to replay gets a `ReplayPolicy` over the recording `_prepare_run`
+    """A config naming a run to replay gets a `ReplayPolicy` over the recording `prepare_run`
     read, and a reader over the recording, never the upstream.
     One that names none gets shadow mode's policy, reading the real upstream."""
     from dataclasses import replace
@@ -220,19 +224,21 @@ def test_the_composition_root_builds_a_replay_policy_over_the_run_s_recording():
     from tests.doubles import NullStore
 
     index = _shipped_index()
-    args = argparse.Namespace(allow_host=[], port=4321, listen_host=paths.LISTEN_HOST)
+    args = argparse.Namespace(allow_host=[], port=4321, listen_host=options.LISTEN_HOST)
     p = ca.ca_paths()
-    config = cli._engine_config(args, index, "t3st", p)
+    config = session._engine_config(args, index, "t3st", p)
     recording = ReplayIndex.from_events([], b"k" * 32, index)
-    run = cli._Run(
+    run = session.Run(
         index, p, "t3st", replace(config, mode=Replay("rec1")), NullStore(), None, recording
     )
-    engine = cli._build_engine(run, on_exchange=lambda ex: None)
+    engine = session.build_engine(run, on_exchange=lambda ex: None)
     assert isinstance(engine.policy, ReplayPolicy)
     assert engine.policy.recording is recording
     assert engine.policy.maps is index
     assert isinstance(engine.policy.shadow.reader, RecordingReader)
-    shadow = cli._build_engine(cli._Run(index, p, "t3st", config, NullStore()), lambda ex: None)
+    shadow = session.build_engine(
+        session.Run(index, p, "t3st", config, NullStore()), lambda ex: None
+    )
     assert isinstance(shadow.policy, ShadowPolicy)
     assert isinstance(shadow.policy.reader, UpstreamReader)
 
@@ -359,7 +365,7 @@ def test_engine_config_defaults_to_no_maps(tmp_path, monkeypatch):
         run_id="t3st",
         ca=ca.ca_paths(),
         confdir=paths.mitm_dir(),
-        listen_host=paths.LISTEN_HOST,
+        listen_host=options.LISTEN_HOST,
         listen_port=0,
     )
     assert cfg.maps.services == ()
@@ -383,7 +389,7 @@ def test_allow_host_is_lower_cased():
 
 
 def test_target_arg_parses_a_service_and_a_route_spec():
-    from irimi.cli import _target_arg
+    from irimi.cli.options import _target_arg
 
     assert _target_arg("api.stripe.com=http://127.0.0.1:3000") == (
         "api.stripe.com",
@@ -401,7 +407,7 @@ def test_a_trailing_slash_on_the_host_is_the_service_target():
     """`api.stripe.com/=<url>` is how a reader used to nginx `proxy_pass` spells "the whole
     service". Read as the route path `/`, which no map claims, a spelling that means the right
     thing would fail with "no `write` or `unknown` route matches '/'"."""
-    from irimi.cli import _target_arg
+    from irimi.cli.options import _target_arg
 
     assert _target_arg("api.stripe.com/=http://127.0.0.1:3000") == (
         "api.stripe.com",
@@ -426,7 +432,7 @@ def test_a_trailing_slash_on_the_host_is_the_service_target():
     ],
 )
 def test_a_malformed_target_flag_is_an_argparse_error(value):
-    from irimi.cli import _target_arg
+    from irimi.cli.options import _target_arg
 
     with pytest.raises(argparse.ArgumentTypeError):
         _target_arg(value)
@@ -492,7 +498,8 @@ def test_a_target_naming_an_unmapped_host_fails_closed(capsys):
 
 
 def test_the_escape_hatch_warning_says_what_it_allows():
-    from irimi.cli import _escape_hatch_warning, build_parser
+    from irimi.cli import build_parser
+    from irimi.cli.session import _escape_hatch_warning
 
     plain = build_parser().parse_args(["serve"])
     assert _escape_hatch_warning(plain) is None
@@ -550,7 +557,7 @@ def _startup_args(**kwargs):
 def _startup_on_a_pipe(monkeypatch, index, args=None):
     out = _PipedStdout()
     monkeypatch.setattr(sys, "stdout", out)
-    cli.print_startup(
+    session.print_startup(
         "serve", args or _startup_args(), index, "7f3a", "127.0.0.1", 4000, Path("/ca.pem")
     )
     return out.visible
@@ -577,7 +584,7 @@ def test_a_delegated_services_warning_reaches_a_piped_stdout_too(monkeypatch):
 def test_the_escape_hatch_warning_goes_to_stderr_flushed(monkeypatch, capsys):
     out = _PipedStdout()
     monkeypatch.setattr(sys, "stdout", out)
-    cli.print_startup(
+    session.print_startup(
         "shadow",
         _startup_args(allow_target_host=["stub.internal"]),
         servicemap.MapIndex(),
@@ -592,9 +599,7 @@ def test_the_escape_hatch_warning_goes_to_stderr_flushed(monkeypatch, capsys):
 
 def test_serve_and_shadow_print_the_same_startup_lines(monkeypatch):
     """One function prints both, so a line added for one is added for both, flushed alike."""
-    import inspect
-
-    source = inspect.getsource(cli)
+    source = "".join(py.read_text() for py in Path(cli.__file__).parent.glob("*.py"))
     assert source.count("print_startup(") == 3  # the definition plus one call each
 
 
@@ -613,7 +618,7 @@ def _child(source: str = "pass") -> list[str]:
 
 
 def _spy_on_the_store(monkeypatch, close=None):
-    """Swap the class `_open_store` builds for a real `DirectoryStore` that remembers each
+    """Swap the class `session._open_store` builds for a real `DirectoryStore` that remembers each
     `close()` and the thread it came from, and may do `close(store)` after the real one."""
     import threading
 
@@ -742,7 +747,7 @@ def test_a_reader_gone_costs_shadow_no_run_and_leaves_no_engine(home, monkeypatc
     command starts, so no run is stored; one gone by the summary, once the command has ended,
     finds the run ended with the command's exit code. Either way irimi exits 141 with the engine
     stopped and the store closed: the write that failed was inside the `try` whose `finally`
-    stops them (`_under_the_engine`), or after it."""
+    stops them (`shadow.run_child`), or after it."""
     import threading
 
     from irimi import runner
@@ -836,8 +841,7 @@ def test_serve_prints_a_line_for_each_tool_call(home, monkeypatch, capsys):
         wired.append(on_tool_call)
         return _Refuses()
 
-    monkeypatch.setattr(cli, "_build_engine", build)
-    assert main(["serve", "--port", "0"]) == 1
+    assert main(["serve", "--port", "0"], engine_factory=build) == 1
     assert "error: not started" in capsys.readouterr().err.splitlines()
     [on_tool_call] = wired
     on_tool_call(ToolCall("t", "r", "db.write", "write", "shadow", {}, None, None, 1.0, 2.0))
@@ -883,7 +887,7 @@ def test_serve_records_under_the_store_it_was_given(home, monkeypatch, capsys):
     def startup(mode, args, index, run_id, host, port, cert):
         threading.Thread(target=drive, args=(port,), daemon=True).start()
 
-    monkeypatch.setattr(cli, "print_startup", startup)
+    monkeypatch.setattr(session, "print_startup", startup)
     elsewhere = home / "elsewhere"
     args = cli.build_parser().parse_args(
         ["shadow", "--serve", "--port", "0", "--store", str(elsewhere)]

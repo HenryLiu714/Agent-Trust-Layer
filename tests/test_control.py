@@ -476,8 +476,8 @@ def test_every_route_ignores_a_field_it_does_not_know(engine):
 
 
 def _replaying(tmp_path, monkeypatch, *events, policy=None) -> _Engine:
-    """An engine replaying a run whose `events` are given, as `cli._build_engine` builds one: its
-    policy a `ReplayPolicy` over their `ReplayIndex`, unless `policy` is given."""
+    """An engine replaying a run whose `events` are given, as `cli.session.build_engine` builds
+    one: its policy a `ReplayPolicy` over their `ReplayIndex`, unless `policy` is given."""
     cfg = _config(tmp_path, monkeypatch)
     key = redact.load_key(tmp_path)
     store = DirectoryStore(tmp_path / "store", key, replay_of="recorded01")

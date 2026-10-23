@@ -146,7 +146,7 @@ src/irimi/
   report.py  runner.py                what a run prints; the child env and engine thread
   compare.py                          two stored runs' writes side by side
   replay.py                           what `irimi replay` runs, and what it says a replay did
-  cli.py  __main__.py                 argparse and the composition root; `python -m irimi`
+  cli/  __main__.py                   argparse and the composition root; `python -m irimi`
   maps/*.yaml                         the shipped service maps
   fixtures/*.json                     the vendored response objects L1 answers start from
 tests/                                one file per module, plus the invariant and exit tests

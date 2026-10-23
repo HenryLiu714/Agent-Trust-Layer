@@ -25,5 +25,7 @@ def test_mitm_dir_under_irimi_home(monkeypatch, tmp_path):
 
 
 def test_listen_defaults():
-    assert paths.DEFAULT_PORT == 4000
-    assert paths.LISTEN_HOST == "127.0.0.1"
+    from irimi.cli import options
+
+    assert options.DEFAULT_PORT == 4000
+    assert options.LISTEN_HOST == "127.0.0.1"

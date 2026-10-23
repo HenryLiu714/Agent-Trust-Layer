@@ -35,6 +35,7 @@ A later mode is a new branch here and not a new harness.
 from __future__ import annotations
 
 import contextlib
+import functools
 import importlib
 import io
 import json
@@ -57,9 +58,10 @@ from typing import Any
 from examples.workflows import sdk as agent_sdk
 from examples.workflows.harness.internet import BOMB_SECRET, FakeInternet, Req
 from examples.workflows.harness.services import CLIENT_SECRET_CANARY, World
-from irimi import ca, cli, paths, runner, sdk, servicemap, trace
-from irimi.cli import build_parser
+from irimi import ca, paths, runner, sdk, servicemap, trace
+from irimi.cli import build_parser, session
 from irimi.cli import main as irimi_main
+from irimi.cli.session import EngineFactory
 from irimi.exchange import Exchange
 from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV, PROXY_ENVS
 from irimi.protocol.replay_files import replay_result_from_json, replay_result_to_json
@@ -654,27 +656,30 @@ def _execute(
             code = _run_bare(cmd, agent_env, cwd, internet)
         elif mode == "shadow":
             argv = ["shadow", "--port", "0", *flags, *scenario.shadow_flags, "--", *cmd]
-            with _watching_the_store(reported, handed, handed_events):
-                code, irimi_out = _run_irimi(argv, agent_env, cwd, tmp, internet, scenario, workdir)
+            with _watching_the_store(reported, handed, handed_events) as build:
+                run_irimi = functools.partial(irimi_main, argv, engine_factory=build)
+                code, irimi_out = _run_irimi(
+                    run_irimi, agent_env, cwd, tmp, internet, scenario, workdir
+                )
         elif mode == "replay":
             assert replay_of is not None and how is not None
             argv = ["replay", "--port", "0", *flags, "--result-file", str(result_file)]
             # As its user types it: the run id, then `-- <cmd>` for a command.
             argv += [*how.options, replay_of, *(["--", *cmd] if how.command else [])]
-            with _watching_the_store(reported, handed, handed_events):
+            with _watching_the_store(reported, handed, handed_events) as build:
                 if how.call is None:
-                    run_irimi = lambda: irimi_main(argv)  # noqa: E731
+                    run_irimi = functools.partial(irimi_main, argv, engine_factory=build)
                 else:
-                    run_irimi = _calling_sdk_replay(replay_of, how.call, store, result_file)
+                    run_irimi = _calling_sdk_replay(replay_of, how.call, store, result_file, build)
                 code, irimi_out = _run_irimi(
-                    argv, agent_env, cwd, tmp, internet, scenario, workdir, run_irimi
+                    run_irimi, agent_env, cwd, tmp, internet, scenario, workdir
                 )
         else:
             if scenario.serve_flags is None:
                 raise ValueError(f"{workflow.name}:{scenario_name} does not run in serve mode")
-            with _watching_the_store(reported, handed, handed_events):
+            with _watching_the_store(reported, handed, handed_events) as build:
                 code, irimi_out = _run_serve(
-                    cmd, agent_env, cwd, tmp, internet, scenario, workdir, flags
+                    cmd, agent_env, cwd, tmp, internet, scenario, workdir, build, flags
                 )
     finally:
         internet.stop()
@@ -706,15 +711,20 @@ def _replay_result(path: Path) -> sdk.ReplayResult:
 
 
 def _calling_sdk_replay(
-    run_id: str, call: tuple[Any, ...], store: Path | None, result_file: Path
+    run_id: str,
+    call: tuple[Any, ...],
+    store: Path | None,
+    result_file: Path,
+    build: EngineFactory,
 ) -> Callable[[], int]:
     """`sdk.replay(run_id, fn, args=args, store=store)` for `call` = `(fn, *args)`, or of the
-    recorded trigger for an empty `call`, its `irimi` run in this process: what it returned
-    written to `result_file`, as `irimi replay --result-file` writes it, and its exit code."""
+    recorded trigger for an empty `call`, its `irimi` run in this process, building its engine
+    with `build`: what it returned written to `result_file`, as `irimi replay --result-file`
+    writes it, and its exit code."""
 
     def run() -> int:
         real = sdk_replays._run_irimi
-        sdk_replays._run_irimi = lambda argv, env: irimi_main(argv)
+        sdk_replays._run_irimi = lambda argv, env: irimi_main(argv, engine_factory=build)
         try:
             if call:
                 got = agent_sdk.replay(run_id, call[0], args=tuple(call[1:]), store=store)
@@ -826,20 +836,19 @@ def _run_bare(cmd: list[str], env: dict[str, str], cwd: Path, internet: FakeInte
 
 
 def _run_irimi(
-    argv: list[str],
+    run: Callable[[], int],
     env: dict[str, str],
     cwd: Path,
     tmp: Path,
     internet: FakeInternet,
     scenario: Scenario,
     workdir: Path,
-    run: Callable[[], int] | None = None,
 ) -> tuple[int, list[str]]:
-    """`irimi <argv>` in this process, as a user would run it from `cwd`: `irimi shadow -- <agent>`,
-    or `irimi replay <run id>`, or `run`, which runs it another way (`sdk_replay`)."""
+    """`run`, which runs irimi in this process, as a user would run it from `cwd`: `irimi shadow
+    -- <agent>`, or `irimi replay <run id>`, or `sdk.replay` (`_calling_sdk_replay`)."""
     buf = io.StringIO()
     with _as_irimi(env, cwd, tmp, internet, scenario, workdir), contextlib.redirect_stdout(buf):
-        code = irimi_main(argv) if run is None else run()
+        code = run()
     return code, buf.getvalue().splitlines()
 
 
@@ -882,13 +891,15 @@ def _run_serve(
     internet: FakeInternet,
     scenario: Scenario,
     workdir: Path,
+    build: EngineFactory,
     flags: tuple[str, ...] = (),
 ) -> tuple[int, list[str]]:
     """`irimi shadow --serve` in this process, as `_run_shadow` runs `irimi shadow`, on a thread of
     its own; the agent beside it as its own process; and irimi stopped when the agent exits.
 
     The command is parsed by irimi's own parser and run by the function `irimi shadow --serve`
-    runs, with the `stop` event in place of SIGTERM, which would reach this whole test process.
+    runs, with the `stop` event in place of SIGTERM, which would reach this whole test process,
+    and `build` building its engine.
     The agent is given exactly the variables an agent container is (README, "Serve mode"): the
     proxy, the CA, `IRIMI_ENGINE_ACTIVE` and `IRIMI_CONTROL`, and never `IRIMI_RUN`, so a
     request no SDK run names is `unattributed`.
@@ -902,7 +913,8 @@ def _run_serve(
     before = set(threading.enumerate())
     with _as_irimi(env, cwd, tmp, internet, scenario, workdir), contextlib.redirect_stdout(buf):
         serving = threading.Thread(
-            target=lambda: codes.append(args.func(args, stop)), name="irimi-serve"
+            target=lambda: codes.append(args.func(args, stop, engine_factory=build)),
+            name="irimi-serve",
         )
         serving.start()
         try:
@@ -983,23 +995,23 @@ def _environ(env: dict[str, str]) -> Iterator[None]:
 @contextlib.contextmanager
 def _watching_the_store(
     reported: list[Exchange], handed: list[Exchange], handed_events: list[Exchange | ToolCall]
-) -> Iterator[None]:
+) -> Iterator[EngineFactory]:
     """`irimi shadow` unchanged, but each exchange it prints a line for is appended to `reported`,
     and each one its engine hands the trace store to `handed`, and to `handed_events` with each
-    tool call the control endpoint hands it. `cli` imports `DirectoryStore` when it opens the
-    store and builds its engine with `_build_engine`, which it hands the `on_exchange` that prints
-    each line, so swapping the two names is enough, as `tests/test_trace_e2e.py` does. Not
+    tool call the control endpoint hands it. The block is given the engine factory to pass irimi
+    (`cli.main(engine_factory=)`): `cli.session.build_engine`, handed an `on_exchange` that
+    records each exchange before it prints its line. `cli.session` looks `DirectoryStore` up when
+    it opens the store, so swapping that name is enough, as `tests/test_trace_e2e.py` does. Not
     `report.terminal.exchange_line` itself, which `irimi replay` also calls for the line of its
     divergence point."""
     real = store_writer.DirectoryStore
-    build = cli._build_engine
 
     def building(run: Any, on_exchange: Any, *args: Any) -> Any:
         def printing(ex: Exchange) -> None:
             reported.append(ex)
             on_exchange(ex)
 
-        return build(run, printing, *args)
+        return session.build_engine(run, printing, *args)
 
     class Handed(real):
         def record(self, exchange: Exchange) -> None:
@@ -1012,12 +1024,10 @@ def _watching_the_store(
             super().record_tool_call(call)
 
     store_writer.DirectoryStore = Handed
-    cli._build_engine = building
     try:
-        yield
+        yield building
     finally:
         store_writer.DirectoryStore = real
-        cli._build_engine = build
 
 
 @contextlib.contextmanager

@@ -11,7 +11,7 @@ flow and a forwarded write escapes shadow mode: a file that is missing, unreadab
 answers "no such object" and the caller degrades to the L0 echo, which is the floor.
 
 Layer 1 (see docs/architecture.md): it reads a file that ships with the package and imports
-nothing from irimi, exactly like `servicemap`'s loader does with the maps.
+nothing from irimi.
 """
 
 import copy
@@ -27,8 +27,7 @@ RESOURCES_KEY = "resources"
 
 # A service name that may become a file name. The name comes from a map's `service:`, which is any
 # non-empty string the loader accepted, and `<service>.json` would otherwise let one spelled
-# `../../etc/passwd` choose the file that is read. Shipped maps are the only maps that can set
-# `fixture:` today; the guard is here so that stays true of the ones added later.
+# `../../etc/passwd` choose the file that is read.
 _SERVICE_NAME = re.compile(r"[A-Za-z0-9_-]+")
 
 

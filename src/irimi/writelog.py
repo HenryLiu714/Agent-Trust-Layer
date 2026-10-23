@@ -1,10 +1,6 @@
-"""The run's faked writes, decoded out of the trace and matched to the reads they can affect.
-
-Both `overlay` and `policy` need it: a precondition checks a write against real state *plus the
-run's overlay*, and the two live in the same layer and may not import each other. It is its own
-job in any case - turning `Exchange`es into
-`services.Write`s is neither deciding nor overlaying - and it is pure, so replay decodes a
-recording with the same function.
+"""Turns the run's write log (the `Exchange`s irimi faked) into `services.Write`s scoped to one
+read. Shared by the overlay and the L3 precondition check, which live in the same layer and may
+not import each other.
 
 `WriteLog` keeps those writes per run: a run sees its own faked writes and no other run's, and a
 run's writes are dropped when it ends.

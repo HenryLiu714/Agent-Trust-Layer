@@ -12,14 +12,8 @@ from irimi.servicemap import MapIndex
 
 logger = logging.getLogger(__name__)
 
-# The engine never calls the overlay for two kinds of read, so an effects table need not handle
-# them:
-#   - Reads of a service with an answer target (`target_reads: true`). The target owns that
-#     service's state, and adding irimi's faked objects on top would show the agent its own write
-#     twice. Neither a delegated read nor a failed target's `502` (flagged `target-failed`) enters
-#     the write log, and irimi runs no precondition check on a write it delegates.
-#   - Streamed responses. mitmproxy does not assemble a streamed body (the overlay would see
-#     `b""`), and its headers are already sent before the overlay could run.
+# A delegated read is never overlaid: its target owns that state. A streamed response never
+# reaches the overlay: mitmproxy does not assemble its body, and its headers are already sent.
 # Both are enforced in `IrimiAddon.response` and covered by tests/test_engine_mitm.py.
 
 

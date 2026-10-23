@@ -44,8 +44,8 @@ that Stripe holds no refund for either charge, and tears everything down. A pass
 4087dd7e4ab996b9  2026-10-13 20:50:26  0.4s  ok  sdk  handle_refund  3 exchanges  1 writes
 ...
 --- Stripe holds no refund for either charge
-ch_3UQCeL7pT5LmqpFO0yHaEgM7: amount_refunded=0 refunds=0
-ch_3UQCeM7pT5LmqpFO0F3xajCP: amount_refunded=0 refunds=0
+ch_irimiExample00000000001: amount_refunded=0 refunds=0
+ch_irimiExample00000000002: amount_refunded=0 refunds=0
 PASS: two concurrent refunds were two ok runs in irimi, and neither reached Stripe
 ```
 

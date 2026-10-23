@@ -47,6 +47,47 @@ def test_the_shipped_fixtures_name_where_they_came_from():
     assert "fixtures3.json" in source
 
 
+# The id prefix Stripe gives each object type the shipped fixture holds, nested ones included.
+STRIPE_ID_PREFIXES = {
+    "account": "acct_",
+    "balance_transaction": "txn_",
+    "charge": "ch_",
+    "customer": "cus_",
+    "payment_intent": "pi_",
+    "refund": "re_",
+    "source": "src_",
+}
+
+
+def _stripe_objects(value):
+    """Every dict in `value` that names its `object` type, at any depth."""
+    if isinstance(value, dict):
+        if isinstance(value.get("object"), str):
+            yield value
+        for item in value.values():
+            yield from _stripe_objects(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _stripe_objects(item)
+
+
+def test_every_shipped_stripe_id_starts_with_its_objects_prefix():
+    """A placeholder id (`obj_123`) is not the shape an agent reading the answer expects."""
+    checked = [
+        (obj["object"], obj["id"])
+        for name in SHIPPED
+        for obj in _stripe_objects(fixture.get("stripe", name))
+        if "id" in obj
+    ]
+    assert {kind for kind, _ in checked} == set(STRIPE_ID_PREFIXES)
+    assert [(k, i) for k, i in checked if not i.startswith(STRIPE_ID_PREFIXES[k])] == []
+
+
+def test_the_shipped_customer_has_no_discount():
+    """A customer with no coupon carries `discount: null`; anything else reads as an active one."""
+    assert fixture.get("stripe", "customer")["discount"] is None
+
+
 def test_a_shipped_object_is_the_real_shape():
     refund = fixture.get("stripe", "refund")
     assert refund["object"] == "refund"

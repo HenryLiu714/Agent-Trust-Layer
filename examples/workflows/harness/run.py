@@ -54,7 +54,9 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
+from examples.workflows import credentials
 from examples.workflows.harness.internet import BOMB_SECRET, FakeInternet, Req
 from examples.workflows.harness.services import CLIENT_SECRET_CANARY, World
 from irimi import servicemaps, testing
@@ -63,6 +65,8 @@ from irimi.cli import main as irimi_main
 from irimi.cli.compose import EngineFactory
 from irimi.config import ca, paths
 from irimi.core.exchange import Exchange
+from irimi.engine import Engine, OnExchange, OnTlsFailure
+from irimi.engine.control import OnToolCall
 from irimi.protocol import trace
 from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV, PROXY_ENVS
 from irimi.protocol.replay_files import replay_result_from_json, replay_result_to_json
@@ -80,13 +84,13 @@ WORKFLOWS_DIR = REPO_ROOT / "examples" / "workflows"
 # Every credential a workflow is given is a canary: fake, recognisable, and greppable. The fake
 # services accept them by prefix. A canary found on disk under irimi's home is a redaction leak.
 CANARIES = {
-    "STRIPE_API_KEY": "sk_test_CANARYstripe0000000000000000",
-    "SLACK_BOT_TOKEN": "xoxb-CANARY-slack-0000000000",
-    "SLACK_SIGNING_SECRET": "CANARYslacksigning00000000000000",
-    "STRIPE_WEBHOOK_SECRET": "whsec_CANARYwebhook000000000000000",
-    "ANTHROPIC_API_KEY": "sk-ant-CANARYanthropic0000000000000",
-    "OPENAI_API_KEY": "sk-CANARYopenai000000000000000000000",
-    "SLACK_WEBHOOK_PATH": "/services/T0CANARY/B0CANARY/CANARYwebhookpath000000",
+    "STRIPE_API_KEY": credentials.STRIPE_API_KEY,
+    "SLACK_BOT_TOKEN": credentials.SLACK_BOT_TOKEN,
+    "SLACK_SIGNING_SECRET": credentials.SLACK_SIGNING_SECRET,
+    "STRIPE_WEBHOOK_SECRET": credentials.STRIPE_WEBHOOK_SECRET,
+    "ANTHROPIC_API_KEY": credentials.ANTHROPIC_API_KEY,
+    "OPENAI_API_KEY": credentials.OPENAI_API_KEY,
+    "SLACK_WEBHOOK_PATH": credentials.SLACK_WEBHOOK_PATH,
 }
 # And every credential a fake service hands back in a response body. A live read's response is
 # stored, so one found on disk is a leak on the response side, which the canaries above, all sent
@@ -355,7 +359,7 @@ class Result:
         if self.mode != "replay":
             return self.exit_code
         record = self.stored().load_run(self.process_run_id()).record
-        assert record.end.exit_code is not None, record
+        assert record.end is not None and record.end.exit_code is not None, record
         return record.end.exit_code
 
     def sdk_runs(self) -> list[RunRecord]:
@@ -657,7 +661,9 @@ def _execute(
         elif mode == "shadow":
             argv = ["shadow", "--port", "0", *flags, *scenario.shadow_flags, "--", *cmd]
             with _watching_the_store(reported, handed, handed_events) as build:
-                run_irimi = functools.partial(irimi_main, argv, engine_factory=build)
+                run_irimi: Callable[[], int] = functools.partial(
+                    irimi_main, argv, engine_factory=build
+                )
                 code, irimi_out = _run_irimi(
                     run_irimi, agent_env, cwd, tmp, internet, scenario, workdir
                 )
@@ -861,7 +867,7 @@ def _as_irimi(
     scenario: Scenario,
     workdir: Path,
 ) -> Iterator[None]:
-    """This process made the one irimi runs in, for `irimi shadow` and `irimi serve`
+    """The current process made the one irimi runs in, for `irimi shadow` and `irimi serve`
     alike: the agent's environment, `cwd`, TMPDIR, the scenario's maps, the fake resolver,
     and a CA under the run's `IRIMI_HOME`.
 
@@ -1004,16 +1010,20 @@ def _watching_the_store(
     it opens the store, so swapping that name is enough, as `tests/test_trace_e2e.py` does. Not
     `report.terminal.exchange_line` itself, which `irimi replay` also calls for the line of its
     divergence point."""
-    real = store_writer.DirectoryStore
 
-    def building(run: Any, on_exchange: Any, *args: Any) -> Any:
+    def building(
+        run: compose.Run,
+        on_exchange: OnExchange,
+        on_tool_call: OnToolCall | None = None,
+        on_tls_failure: OnTlsFailure | None = None,
+    ) -> Engine:
         def printing(ex: Exchange) -> None:
             reported.append(ex)
             on_exchange(ex)
 
-        return compose.build_engine(run, printing, *args)
+        return compose.build_engine(run, printing, on_tool_call, on_tls_failure)
 
-    class Handed(real):
+    class Handed(store_writer.DirectoryStore):
         def record(self, exchange: Exchange) -> None:
             handed.append(exchange)
             handed_events.append(exchange)
@@ -1023,11 +1033,8 @@ def _watching_the_store(
             handed_events.append(call)
             super().record_tool_call(call)
 
-    store_writer.DirectoryStore = Handed
-    try:
+    with mock.patch.object(store_writer, "DirectoryStore", Handed):
         yield building
-    finally:
-        store_writer.DirectoryStore = real
 
 
 @contextlib.contextmanager

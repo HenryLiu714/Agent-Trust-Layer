@@ -62,7 +62,7 @@ def instrument() -> None:
 
         sdk.instrument()
     """
-    global _installed, _patching
+    global _installed, _patching  # noqa: PLW0603  # the patch is process-wide, and so are these
     if _installed or not is_active():
         return
     with _lock:
@@ -114,11 +114,10 @@ def _listeners(urls: tuple[str, ...]) -> frozenset[tuple[str, int]]:
     """irimi's listener as `(host, port)`s: each URL in `urls` that names a host, its port spelled
     out. Cached by the variables' values, which are read at each request."""
     found = set()
-    for url in urls:
+    for given in urls:
         # A proxy spelled with no scheme, `127.0.0.1:4000`, is an http proxy to urllib, requests
         # and httpx alike, so it names irimi as surely as one spelled in full.
-        if url and "://" not in url:
-            url = f"http://{url}"
+        url = f"http://{given}" if given and "://" not in given else given
         try:
             parts = urlsplit(url)
             port = parts.port or DEFAULT_PORTS.get(parts.scheme)
@@ -138,7 +137,7 @@ def _patch(owner: type, name: str, wrap: Callable[[Any], Any]) -> None:
 def uninstall() -> None:
     """Put back every method `instrument` replaced, so the next call patches afresh. For tests
     (`_state.reset_for_tests`): an agent has no reason to call it."""
-    global _installed, _patching
+    global _installed, _patching  # noqa: PLW0603  # the patch is process-wide, and so are these
     with _lock:
         while _patched:
             owner, name, original = _patched.pop()

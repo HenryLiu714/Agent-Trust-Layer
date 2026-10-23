@@ -1,4 +1,4 @@
-"""`idempotency`: the run's answers to keyed writes, so a retry is one write and not two"""
+"""`idempotency`: the run's answers to keyed writes, so a retry is one write and not two."""
 
 import threading
 from dataclasses import replace
@@ -104,6 +104,7 @@ def test_canonical_tells_two_objects_on_one_route_apart():
     """`payment_intents.cancel` is one route over every `pi_`, and it posts nothing at all, so
     the path is the whole of what says which object the caller named. Without it a key reused to
     cancel a second intent compared equal to the first and replayed its answer."""
+    assert STRIPE is not None
     cancel = servicemaps.model.match_route(STRIPE, "POST", "/v1/payment_intents/pi_AAA/cancel")
     assert cancel is not None
     one = idempotency.canonical(_request(path="/v1/payment_intents/pi_AAA/cancel"), cancel)
@@ -115,6 +116,7 @@ def test_canonical_tells_two_objects_on_one_route_apart():
 def test_canonical_tells_two_routes_with_the_same_empty_body_apart():
     """A key reused on another endpoint is another write. Both of these post nothing, so only
     the path separates a cancelled intent from an updated customer."""
+    assert STRIPE is not None
     cancel = servicemaps.model.match_route(STRIPE, "POST", "/v1/payment_intents/pi_AAA/cancel")
     update = servicemaps.model.match_route(STRIPE, "POST", "/v1/customers/cus_ZZZ")
     assert cancel is not None and update is not None

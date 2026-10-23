@@ -46,6 +46,7 @@ needed, so a fix that makes one unnecessary fails here until the entry goes.
 
 from collections import Counter
 from dataclasses import dataclass
+from typing import cast
 
 import pytest
 
@@ -383,6 +384,7 @@ def end_problems(recorded: Result, r: Replayed) -> list[str]:
         return []
     mine = r.replay.stored().load_run(r.replay.process_run_id()).record
     ours, theirs = mine.end, source.end
+    assert ours is not None
     if (ours.outcome, ours.error) != (theirs.outcome, theirs.error):
         recorded_type = theirs.error.type if theirs.error is not None else None
         replayed_type = ours.error.type if ours.error is not None else None
@@ -429,6 +431,7 @@ def owed_exit(recorded: Result, r: Replayed) -> int:
     record = recorded.stored().load_run(r.run_id).record
     if r.by_command or record.attribution == "process" or recorded.exit_code >= 128:
         return recorded.exit_code
+    assert record.end is not None
     return 0 if record.end.outcome == "ok" else 1
 
 
@@ -595,7 +598,9 @@ def test_the_runs_replayed_by_their_command_are_the_ones_irimi_refuses(run_workf
         recorded = run_workflow(*case, "shadow")
         if not recorded.stored().list_runs():
             continue
-        reasons = {refused(recorded, run_id) for run_id in replay_targets(recorded)} - {None}
+        reasons = cast(
+            set[str], {refused(recorded, run_id) for run_id in replay_targets(recorded)} - {None}
+        )
         if reasons:
             found[case] = reasons
     assert set(found) == set(REFUSED)

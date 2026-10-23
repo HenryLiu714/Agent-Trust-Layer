@@ -39,7 +39,7 @@ class WriteLog:
         self._lock = threading.Lock()
 
     def for_run(self, run_id: str) -> tuple[Exchange, ...]:
-        """This run's writes, oldest first. The tuple is the log's own and never changes, so the
+        """The run's writes, oldest first. The tuple is the log's own and never changes, so the
         caller may read it from another thread without a copy."""
         with self._lock:
             return self._runs.get(run_id, ())
@@ -56,7 +56,7 @@ class WriteLog:
 
 
 def decode(service: str, request: Request, write_log: Sequence[Exchange]) -> list[services.Write]:
-    """This service's faked writes, in the scope the read is asking about.
+    """The service's faked writes, in the scope the read is asking about.
 
     A write made against another connected account or another API version says nothing about
     this read, so it is left out. The scope is taken from each write's OWN request headers,

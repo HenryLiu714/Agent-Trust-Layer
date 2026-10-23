@@ -9,6 +9,7 @@ could not make. Imports only the stdlib and the SDK's layers, so it runs under t
 """
 
 import asyncio
+import contextlib
 import inspect
 import json
 import os
@@ -95,10 +96,8 @@ def _arguments(fn: Any, revived: dict[str, Any]) -> tuple[list[Any], dict[str, A
 def _write(path: str, outcome: CallResult) -> None:
     """Never raises: a child that cannot say how it ended still exits as it ended, and `irimi
     replay` then ends the run by its exit code alone."""
-    try:
+    with contextlib.suppress(Exception):
         Path(path).write_text(json.dumps(call_outcome_to_json(outcome)), encoding="utf-8")
-    except Exception:
-        pass
 
 
 def _revived(args_file: str) -> dict[str, Any]:

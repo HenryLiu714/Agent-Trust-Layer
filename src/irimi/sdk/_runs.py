@@ -7,6 +7,7 @@ nothing at all, and a post never raises into the agent.
 """
 
 import asyncio
+import contextlib
 import contextvars
 import functools
 import inspect
@@ -180,13 +181,11 @@ class RunScope:
         opened, self._opened = self._opened, None
         if opened is None:
             return
-        try:
+        # ValueError: closed from another context than the one that entered it - a coroutine the
+        # garbage collector closes runs in whatever context collected it. The entering context is
+        # abandoned with the coroutine, so there is nothing to make current again there.
+        with contextlib.suppress(ValueError):
             context.leave(opened.token)
-        except ValueError:
-            # Closed from another context than the one that entered it - a coroutine the garbage
-            # collector closes runs in whatever context collected it. The entering context is
-            # abandoned with the coroutine, so there is nothing to make current again there.
-            pass
 
 
 async def off_the_loop[T](fn: Callable[..., T], *args: Any) -> T:
@@ -454,10 +453,11 @@ class run:
         async generator closed from another task - ends nothing, and that run is stored
         incomplete."""
         entries = self._entries.get()
-        if not entries:
+        token = entries[-1].token if entries else None
+        if token is None:
             return None
         try:
-            self._entries.reset(entries[-1].token)
+            self._entries.reset(token)
         except (ValueError, RuntimeError):
             return None
         return entries[-1].scope
@@ -471,4 +471,4 @@ class _Entry:
     stack."""
 
     scope: RunScope
-    token: contextvars.Token[tuple["_Entry", ...]] = None  # type: ignore[assignment]
+    token: contextvars.Token[tuple["_Entry", ...]] | None = None

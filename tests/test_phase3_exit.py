@@ -35,6 +35,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from typing import cast
 from urllib.parse import parse_qs, quote
 
 import pytest
@@ -47,11 +48,12 @@ from irimi.config import ca, paths
 from irimi.core.exchange import Exchange
 from irimi.protocol.control import CONTROL_PREFIX
 from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV, PROXY_ENVS, RUN_ENV
-from irimi.protocol.trace import UNATTRIBUTED, ToolCall
+from irimi.protocol.trace import UNATTRIBUTED, RunEnd, ToolCall
 from irimi.record.store.reader import StoreReader
 from irimi.report.model import RunView
 from irimi.report.summary import summary_lines
 from tests.maps_for_cli import complete_for_check
+from tests.support.credentials import HERMETIC_STRIPE_KEY
 from tests.test_engine_mitm import PRECONDITION_STRIPE_MAP
 from tests.test_phase_exit import _Stripe
 from tests.test_serve import _blocks, _port_of, _Served, _wait_for
@@ -147,7 +149,7 @@ def _agent_env(listener: str, stub_port: int, db: Path, *, barrier: bool) -> dic
             ENGINE_ACTIVE_ENV: "1",
             CONTROL_ENV: listener + CONTROL_PREFIX.rstrip("/"),
             "STRIPE_API_BASE": f"http://127.0.0.1:{stub_port}",
-            "STRIPE_API_KEY": "sk_test_hermetic",
+            "STRIPE_API_KEY": HERMETIC_STRIPE_KEY,
             "REFUND_DB": str(db),
             "HOST": "127.0.0.1",  # never a `HOST` the runner exported
             "PORT": "0",
@@ -274,7 +276,9 @@ def test_two_concurrent_requests_to_a_served_agent_are_two_runs_that_never_mix(
     # Exactly two runs, both the SDK's and both ended ok, each triggered by its own request.
     reader = StoreReader(store)
     records = reader.list_runs()
-    assert sorted((r.attribution, r.end.outcome) for r in records) == [("sdk", "ok")] * 2
+    assert (
+        sorted((r.attribution, cast(RunEnd, r.end).outcome) for r in records) == [("sdk", "ok")] * 2
+    )
     by_charge = {}
     for record in records:
         assert record.trigger is not None
@@ -283,7 +287,10 @@ def test_two_concurrent_requests_to_a_served_agent_are_two_runs_that_never_mix(
             "examples.server_agent.app:handle_refund",
         )
         assert record.trigger.replayable
-        charge = record.trigger.args["charge"]
+        args = record.trigger.args
+        assert isinstance(args, dict)
+        charge = args["charge"]
+        assert isinstance(charge, str)
         assert record.trigger.args == {"charge": charge, "reason": REASON}
         by_charge[charge] = record.run_id
     assert sorted(by_charge) == list(CHARGES)
@@ -356,8 +363,8 @@ def test_two_concurrent_requests_to_a_served_agent_are_two_runs_that_never_mix(
             in block
         )
         assert f"  ○ tool  {TOOL_NAME}  fake ran instead" in block
-        other = next(c for c in CHARGES if c != charge)
-        assert not any(other in line for line in block), block
+        other_charge = next(c for c in CHARGES if c != charge)
+        assert not any(other_charge in line for line in block), block
 
     # `irimi runs list` over the store: a header row, then the two runs, one line each.
     capsys.readouterr()
@@ -407,10 +414,13 @@ def test_a_refund_stripe_refuses_is_a_502_and_a_run_ended_in_error_and_a_bad_bod
     # One run per refused refund, ended in error with what was raised; none for a bad body.
     reader = StoreReader(home / "store")
     records = reader.list_runs()
-    assert sorted(r.trigger.args["charge"] for r in records if r.trigger) == sorted(failing)
+    assert sorted(cast(dict, r.trigger.args)["charge"] for r in records if r.trigger) == sorted(
+        failing
+    )
     for record in records:
+        assert record.end is not None
         assert (record.attribution, record.end.outcome) == ("sdk", "error")
-        charge = record.trigger.args["charge"] if record.trigger else None
+        charge = cast(str, cast(dict, record.trigger.args)["charge"] if record.trigger else None)
         assert record.end.error is not None
         assert (record.end.error.type, record.end.error.message) == (
             "urllib.error.HTTPError",
@@ -438,7 +448,8 @@ def test_a_caller_that_sends_less_body_than_it_named_is_cut_off_not_waited_on(mo
     srv = ThreadingHTTPServer(("127.0.0.1", 0), app._Handler)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     try:
-        with socket.create_connection(srv.server_address[:2], timeout=10) as conn:
+        address = cast(tuple[str, int], srv.server_address[:2])
+        with socket.create_connection(address, timeout=10) as conn:
             conn.sendall(b"POST /refund HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\n{}")
             started = time.monotonic()
             assert conn.recv(1024) == b""

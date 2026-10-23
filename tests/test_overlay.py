@@ -1,14 +1,15 @@
-"""`ServiceOverlay`: the effect tables applied to a live read, and the cursor it translates"""
+"""`ServiceOverlay`: the effect tables applied to a live read, and the cursor it translates."""
 
 import json
 from dataclasses import replace
 
 from irimi import services
-from irimi.core.bodies import MAX_BODY_BYTES
 from irimi.core.exchange import Exchange, Request, Response
+from irimi.core.limits import MAX_BODY_BYTES
 from irimi.decide.overlay import ServiceOverlay
 from irimi.servicemaps import IdSpec, MapIndex, Route, ServiceMap
 from irimi.servicemaps.classify import classify
+from tests.support.credentials import SLACK_BOT
 
 STRIPE = ServiceMap(
     service="stripe",
@@ -41,7 +42,7 @@ CHARGE = {
     "refunded": False,
 }
 SLACK_JSON = "application/json;charset=utf-8"  # what slack_sdk sends
-HISTORY = {
+HISTORY: dict = {
     "ok": True,
     "messages": [{"type": "message", "ts": "1700000000.000100", "text": "real", "user": "U1"}],
     "has_more": False,
@@ -306,11 +307,12 @@ def test_slack_writes_under_different_tokens_are_all_replayed():
     """Slack has no `SCOPE_HEADERS` entry, so a run holds one Slack scope and the token a write
     was made with does not keep it off a read made with another."""
     upstream = _upstream(HISTORY)
+    bot = SLACK_BOT
     log = [
-        _slack_post_exchange("1800000000.000001", headers=(("authorization", "Bearer xoxb-A"),)),
-        _slack_post_exchange("1800000000.000002", headers=(("authorization", "Bearer xoxb-B"),)),
+        _slack_post_exchange("1800000000.000001", headers=(("authorization", f"Bearer {bot}A"),)),
+        _slack_post_exchange("1800000000.000002", headers=(("authorization", f"Bearer {bot}B"),)),
     ]
-    read = _slack_read({"channel": "C0123"}, headers=(("authorization", "Bearer xoxb-C"),))
+    read = _slack_read({"channel": "C0123"}, headers=(("authorization", f"Bearer {bot}C"),))
     out = _Overlay()(log, read, upstream)
     messages = json.loads(out.response.body)["messages"]
     assert [m["ts"] for m in messages] == [

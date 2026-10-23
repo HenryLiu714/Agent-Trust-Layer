@@ -215,14 +215,15 @@ def _customer(customer: dict[str, Any], writes: Sequence[Write]) -> Applied:
     for write in writes:
         if write.operation != "customers.update" or write.answer.get("id") != customer.get("id"):
             continue
-        for name, value in write.posted.items():
+        for name, posted in write.posted.items():
             # `name not in customer` is `generic.reflect_over`'s rule: a field the live object
             # does not have is one the real service would not have returned. It also keeps
             # `expand[0]` and friends out, without a second list of parameter names to maintain.
             if name in SERVICE_OWNED or name not in customer:
                 continue
-            if name == "metadata" and isinstance(value, dict) and isinstance(customer[name], dict):
-                value = {**customer[name], **value}  # Stripe merges metadata
+            value = posted
+            if name == "metadata" and isinstance(posted, dict) and isinstance(customer[name], dict):
+                value = {**customer[name], **posted}  # Stripe merges metadata
             # `changed` only when a field really moved: an update whose every field was skipped
             # leaves the live body as Stripe sent it, and must not be stamped `overlay`.
             if customer[name] != value:

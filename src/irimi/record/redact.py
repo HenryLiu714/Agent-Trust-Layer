@@ -158,7 +158,7 @@ def placeholder(key: bytes, value: str) -> str:
 
 
 def load_key(home: Path) -> bytes:
-    """This install's redaction key, `home/redact.key`, created on first use.
+    """The install's redaction key, `home/redact.key`, created on first use.
 
     Raises RedactKeyError when the file is there and is not 32 bytes: a key irimi did not write
     would give every secret a placeholder no earlier recording shares, and silently replacing it

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from examples.workflows import agentkit
 from examples.workflows.harness.internet import PADDED_BYTES, PADDED_LINE, Req, Resp
 from examples.workflows.harness.run import Scenario, Workflow
@@ -38,7 +40,7 @@ def _refunds_read(req: Req) -> bool:
 def _internal(world: World) -> None:
     _stripe(world)
 
-    def gql(req: Req, state: dict) -> Resp:
+    def gql(req: Req, state: dict[str, Any]) -> Resp:
         doc = req.json() or {}
         if str(doc.get("query", "")).lstrip().startswith("mutation"):
             state.setdefault("cancelled", []).append(doc)
@@ -96,7 +98,7 @@ WORKFLOW = Workflow(
             setup=_stripe,
             doc="a refund to the proxy's own address as 127.0.0.1, 127.1 and 0.0.0.0; in serve "
             "mode with irimi bound to 0.0.0.0",
-            serve_flags=("--bind", "0.0.0.0"),
+            serve_flags=("--bind", "0.0.0.0"),  # noqa: S104  # the bind this scenario tests
         ),
         "control_runs": Scenario(
             ("control_runs",),

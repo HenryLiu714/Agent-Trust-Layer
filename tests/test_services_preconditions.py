@@ -8,7 +8,7 @@ has three answers, and `NOT_EVALUABLE` is the one that says irimi asked and did 
 import pytest
 
 from irimi import services
-from irimi.services import NOT_EVALUABLE, Probe, Proposal
+from irimi.services import NOT_EVALUABLE, Probe, Proposal, Rejection
 from irimi.services.slack import preconditions as slack
 from irimi.services.stripe import preconditions as stripe
 
@@ -61,7 +61,7 @@ def test_a_refund_probes_the_charge_it_names():
 def test_a_refund_of_a_fully_refunded_charge_is_charge_already_refunded():
     document = _charge(amount_refunded=4900, refunded=True)
     rejection = stripe.CHARGE_REFUNDABLE.verdict(_refund(amount=4900), document)
-    assert rejection is not None
+    assert isinstance(rejection, Rejection)
     assert rejection.status == 400
     assert rejection.code == "charge_already_refunded"
     assert rejection.body == {
@@ -77,7 +77,7 @@ def test_a_refund_of_a_fully_refunded_charge_is_charge_already_refunded():
 def test_a_refund_over_the_remaining_amount_is_stripes_amount_error_with_irimis_label():
     document = _charge(amount_refunded=4000)
     rejection = stripe.CHARGE_REFUNDABLE.verdict(_refund(amount=1000), document)
-    assert rejection is not None
+    assert isinstance(rejection, Rejection)
     assert rejection.status == 400
     assert rejection.code == "amount_too_large"
     error = rejection.body["error"]
@@ -172,6 +172,7 @@ def test_a_charge_that_names_no_currency_offers_none(document):
     """No coercion: a currency irimi is not sure of is no currency, and the amount then prints as
     the write sent it. A wrong symbol is worse than an unformatted number
     (`money.format_minor_units`)."""
+    assert stripe.CHARGE_REFUNDABLE.currency is not None
     assert stripe.CHARGE_REFUNDABLE.currency(document) == ""
 
 
@@ -200,7 +201,7 @@ def test_channel_not_found_rejects_with_the_envelope():
     rejection = slack.CHANNEL_POSTABLE.verdict(
         _post("C0123"), {"ok": False, "error": "channel_not_found"}
     )
-    assert rejection is not None
+    assert isinstance(rejection, Rejection)
     assert (rejection.status, rejection.code) == (200, "channel_not_found")
     assert rejection.body == {"ok": False, "error": "channel_not_found"}
 
@@ -209,7 +210,7 @@ def test_an_archived_channel_rejects_with_the_envelope():
     rejection = slack.CHANNEL_POSTABLE.verdict(
         _post("C0123"), _info(is_channel=True, is_archived=True, is_member=True)
     )
-    assert rejection is not None
+    assert isinstance(rejection, Rejection)
     assert (rejection.status, rejection.code) == (200, "is_archived")
     assert rejection.body == {"ok": False, "error": "is_archived"}
 
@@ -219,7 +220,7 @@ def test_a_channel_the_bot_is_not_in_rejects_with_the_envelope(kind):
     rejection = slack.CHANNEL_POSTABLE.verdict(
         _post("C0123"), _info(is_member=False, **{kind: True})
     )
-    assert rejection is not None
+    assert isinstance(rejection, Rejection)
     assert (rejection.status, rejection.code) == (200, "not_in_channel")
     assert rejection.body == {"ok": False, "error": "not_in_channel"}
 

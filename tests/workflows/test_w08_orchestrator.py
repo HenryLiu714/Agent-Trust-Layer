@@ -10,7 +10,8 @@ from examples.workflows.harness.run import check_invariants, compare, rows_not_s
 from examples.workflows.w08_orchestrator.scenarios import DOWN_TARGET, SUBAGENT_MAP, UNJUSTIFIED_MAP
 from irimi.core.exchange import Exchange
 from irimi.protocol.trace import UNATTRIBUTED, ToolCall
-from irimi.servicemaps.loader import MapError, parse_service
+from irimi.servicemaps.loader import parse_service
+from irimi.servicemaps.model import MapError
 
 W = "w08_orchestrator"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.
@@ -87,7 +88,7 @@ def test_a_post_read_without_persists_false_is_refused_and_nothing_runs(run_work
     # The refusal is THE SCOPE RULE's, and not some other fault in the map: the same map with the
     # justification loads.
     parse_service(yaml.safe_load(SUBAGENT_MAP), "subagent.yaml")
-    with pytest.raises(MapError, match="unsafe method downgrades a write.*live_because"):
+    with pytest.raises(MapError, match=r"unsafe method downgrades a write.*live_because"):
         parse_service(yaml.safe_load(UNJUSTIFIED_MAP), "subagent.yaml")
     # Under serve mode the same refusal ends serve before it listens: exit 2, no banner, and
     # so no agent is started beside it.

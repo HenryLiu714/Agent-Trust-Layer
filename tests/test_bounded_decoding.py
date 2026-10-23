@@ -29,15 +29,16 @@ from mitmproxy.net import encoding
 from mitmproxy.test import tutils
 
 from irimi.core.exchange import Exchange, Flag, Request, Response
-from irimi.core.limits import MAX_STORED_BODY
+from irimi.core.limits import MAX_CONTROL_BODY, MAX_STORED_BODY
 from irimi.decide.overlay import Overlaid
 from irimi.engine import capture, control, decoding, mitm
 from irimi.engine.capture import StreamCapture
-from irimi.engine.control import MAX_CONTROL_BODY, ControlEndpoint
+from irimi.engine.control import ControlEndpoint
 from irimi.engine.decoding import Decoded, decode_body
 from irimi.record.store.reader import StoreReader
 from irimi.record.store.writer import DirectoryStore
 from tests.doubles import NullStore
+from tests.support.servers import stop_server
 from tests.test_engine_mitm import (
     STREAM_MAP,
     _config,
@@ -52,7 +53,7 @@ from tests.test_engine_mitm import (
     _via_proxy,
 )
 
-CAP = decoding.MAX_DECODED_BODY
+CAP = decoding.MAX_DECODED_BODY  # type: ignore[attr-defined]
 LINE = b"x" * 1023 + b"\n"  # a body of whole 1 KiB lines, so a cut one keeps whole lines
 MIB = 1024 * 1024
 
@@ -250,7 +251,7 @@ def bomb_upstream(gigabyte_gzip):
     srv = HTTPServer(("127.0.0.1", 0), _BombUpstream)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     yield srv.server_address[1]
-    srv.shutdown()
+    stop_server(srv)
 
 
 @pytest.mark.parametrize(
@@ -384,7 +385,7 @@ def test_a_streamed_bomb_reaches_the_agent_whole_and_is_recorded_cut(
         conn.close()
     finally:
         stop()
-        srv.shutdown()
+        stop_server(srv)
     (ex,) = seen
     assert (ex.kind, ex.answered_by, ex.flags) == ("llm", "live", (Flag.STREAM_TRUNCATED,))
     assert ex.response is not None
@@ -499,7 +500,7 @@ def test_a_bomb_is_refused_on_every_path_a_write_takes(
             conn.close()
     finally:
         stop()
-        srv.shutdown()
+        stop_server(srv)
     assert answers == [(502, "irimi")] * 2
     assert _EchoBombUpstream.bodies == []
     kind, unclassified = ("write", ()) if delegated else ("unknown", (Flag.UNCLASSIFIED,))
@@ -529,7 +530,7 @@ def test_a_live_request_that_is_a_bomb_is_forwarded_as_the_agent_sent_it(
         )
     finally:
         stop()
-        srv.shutdown()
+        stop_server(srv)
     assert (status, data == gigabyte_gzip) == (200, True)
     assert _EchoBombUpstream.bodies == [gigabyte_gzip]
     (ex,) = seen
@@ -637,7 +638,7 @@ def test_the_control_endpoint_refuses_a_body_that_is_not_whole_whatever_it_holds
 
 def test_a_cut_body_is_always_past_the_control_endpoint_s_limit():
     """Why a cut control body is refused as too large without reading it."""
-    assert decoding.MAX_DECODED_BODY > control.MAX_CONTROL_BODY
+    assert decoding.MAX_DECODED_BODY > control.MAX_CONTROL_BODY  # type: ignore[attr-defined]
 
 
 def test_the_bomb_fixtures_decode_past_the_cap(bombs):

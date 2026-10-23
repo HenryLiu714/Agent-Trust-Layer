@@ -144,7 +144,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--record", action="store_true")
     parser.add_argument("--nested-reserve", action="store_true")
     args = parser.parse_args(argv)
-    global RECORD, NESTED_RESERVE
+    global RECORD, NESTED_RESERVE  # noqa: PLW0603  # the scenario's flags, set once per process
     RECORD = args.record
     NESTED_RESERVE = args.nested_reserve
     decisions = [plan_quarter_close(args.parent_header) for _ in range(args.runs)]

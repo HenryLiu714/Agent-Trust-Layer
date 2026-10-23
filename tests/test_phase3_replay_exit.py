@@ -57,6 +57,11 @@ from irimi.protocol.env import ENGINE_ACTIVE_ENV
 from irimi.protocol.replay_files import replay_result_from_json
 from irimi.protocol.trace import ToolCall, Trigger
 from irimi.record.store.reader import StoreReader
+from tests.support.credentials import (
+    HERMETIC_ANTHROPIC_KEY,
+    HERMETIC_STRIPE_KEY,
+    REFUSED_LIVE_KEY,
+)
 from tests.test_phase_exit import _Stripe
 
 pytestmark = pytest.mark.e2e
@@ -205,8 +210,8 @@ def _agent_env(home: Path, stripe_port: int, model_port: int) -> dict[str, str]:
             paths.IRIMI_HOME_ENV: str(home),
             agent.STRIPE_BASE_ENV: f"http://api.stripe.com:{stripe_port}",
             agent.ANTHROPIC_BASE_ENV: f"http://api.anthropic.com:{model_port}",
-            agent.STRIPE_KEY_ENV: "sk_test_hermetic",
-            agent.ANTHROPIC_KEY_ENV: "sk-ant-hermetic",
+            agent.STRIPE_KEY_ENV: HERMETIC_STRIPE_KEY,
+            agent.ANTHROPIC_KEY_ENV: HERMETIC_ANTHROPIC_KEY,
             agent.DB_ENV: str(home / "agent.sqlite3"),
             "PYTHONFAULTHANDLER": "1",
         }
@@ -226,6 +231,7 @@ def _irimi(env: dict[str, str], *argv: str) -> subprocess.CompletedProcess[str]:
             capture_output=True,
             text=True,
             timeout=TIMEOUT_S,
+            check=False,
         )
     except subprocess.TimeoutExpired as exc:
         said = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr
@@ -309,6 +315,7 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
     assert sorted(r.attribution for r in records) == ["process", "sdk"]
     [run] = [r for r in records if r.attribution == "sdk"]
     source = run.run_id
+    assert run.end is not None
     assert run.end.outcome == "ok"
     # The ticket is the trigger's argument, stored as the dataclass it is, so a replay rebuilds it.
     assert run.trigger == Trigger(
@@ -423,7 +430,7 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
     # --- The function form, from a test (feature 4): the same two replays, the same results.
     def run_irimi(argv: list[str], env: dict[str, str]) -> int:
         command = [sys.executable, "-c", IRIMI, *argv]
-        return subprocess.run(command, env=dict(env), timeout=TIMEOUT_S).returncode
+        return subprocess.run(command, env=dict(env), timeout=TIMEOUT_S, check=False).returncode
 
     monkeypatch.setattr(testing, "_run_irimi", run_irimi)
     for name in [n for n in os.environ if n.lower().endswith("_proxy")]:
@@ -454,16 +461,17 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
     listed = {column[0]: column[4] for column in columns}
     assert len(listed) == len(columns)
     replayed = [same, edited, by_function, by_function_edited]
-    assert listed == {
+    expected: dict[str | None, str] = {
         **{r.run_id: r.attribution for r in records},
         **{r.replay_run_id: f"replay of {source}" for r in replayed},
     }
+    assert listed == expected
 
 
 def test_the_agent_sends_no_stripe_key_that_is_not_test_mode(monkeypatch, stubs, direct):
     """The check is on the request path, so a replay, which calls the trigger without `main()`,
     makes it too: a live key is refused before anything is sent."""
-    monkeypatch.setenv(agent.STRIPE_KEY_ENV, "sk_live_nope")
+    monkeypatch.setenv(agent.STRIPE_KEY_ENV, REFUSED_LIVE_KEY)
     monkeypatch.setenv(agent.STRIPE_BASE_ENV, f"http://127.0.0.1:{stubs[0]}")
     with pytest.raises(ValueError, match=r"STRIPE_API_KEY must be a test-mode key \(sk_test_"):
         agent.stripe("GET", "/v1/charges/ch_A")

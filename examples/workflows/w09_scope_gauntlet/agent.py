@@ -145,7 +145,7 @@ def self_addressed() -> None:
     proxy = urlsplit(agentkit.proxy() or "")
     auth = {"Authorization": f"Bearer {agentkit.key('STRIPE_API_KEY')}"}
     stripe_authority = urlsplit(base("stripe")).netloc
-    for spelling in ("127.0.0.1", "127.1", "0.0.0.0"):
+    for spelling in ("127.0.0.1", "127.1", "0.0.0.0"):  # noqa: S104  # addresses, not binds
         listener = f"http://{spelling}:{proxy.port}"
         http(
             "POST",
@@ -387,7 +387,7 @@ def _refusals(control: str) -> None:
     run id of its own that nothing else uses."""
     ended = {"ended_at": time.time(), "outcome": "ok", "error": None}
     started = {"agent_version": None, "sdk_version": SDK_VERSION, "started_at": time.time()}
-    tool = {
+    tool: dict[str, Any] = {
         "tool_call_id": "t",
         "name": "look_up",
         "kind": "read",

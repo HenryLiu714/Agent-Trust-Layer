@@ -74,7 +74,7 @@ SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 # line's 5 MB `kind` must not come back as a 5 MB line.
 MAX_QUOTED = 64
 
-type JSONValue = None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
+type JSONValue = bool | int | float | str | list[JSONValue] | dict[str, JSONValue] | None
 
 Mode = Literal["shadow", "replay"]
 Attribution = Literal["process", "sdk", "header"]
@@ -157,7 +157,7 @@ class ErrorInfo:
         )
 
     def as_label(self) -> "ErrorInfo":
-        """This error cut to what a trace keeps: its type to MAX_ERROR_TYPE and its message to
+        """The error cut to what a trace keeps: its type to MAX_ERROR_TYPE and its message to
         MAX_ERROR_MESSAGE. Cut only what is already redacted: a cut first can keep half a key,
         which redaction no longer finds."""
         return ErrorInfo(self.type[:MAX_ERROR_TYPE], self.message[:MAX_ERROR_MESSAGE])
@@ -403,7 +403,7 @@ def body_ref(body: bytes, truncated: bool = False) -> BodyRef:
 # ------------------------------------------------------------------------------------- encoders
 
 
-def run_to_json(record: RunRecord) -> dict[str, Any]:
+def run_to_json(record: RunRecord) -> dict[str, JSONValue]:
     end = record.end
     # How the run ended stays four flat keys, each null for a run that has not ended.
     return {
@@ -425,7 +425,7 @@ def run_to_json(record: RunRecord) -> dict[str, Any]:
     }
 
 
-def tool_call_to_json(call: ToolCall) -> dict[str, Any]:
+def tool_call_to_json(call: ToolCall) -> dict[str, JSONValue]:
     return {
         "tool_call_id": call.tool_call_id,
         "run_id": call.run_id,
@@ -441,11 +441,11 @@ def tool_call_to_json(call: ToolCall) -> dict[str, Any]:
     }
 
 
-def telemetry_to_json(seen: TelemetrySeen) -> dict[str, Any]:
+def telemetry_to_json(seen: TelemetrySeen) -> dict[str, JSONValue]:
     return {"run_id": seen.run_id, "host": seen.host, "started_at": seen.started_at}
 
 
-def exchange_to_json(ex: Exchange, put_body: PutBody) -> dict[str, Any]:
+def exchange_to_json(ex: Exchange, put_body: PutBody) -> dict[str, JSONValue]:
     """`ex` as a JSON object. Bodies never go inline: each non-empty one is handed to `put_body`,
     and the ref it returns is what is written. An empty body is `null` and reaches no store."""
     return {
@@ -472,9 +472,9 @@ def exchange_to_json(ex: Exchange, put_body: PutBody) -> dict[str, Any]:
     }
 
 
-def event_to_json(seq: int, event: Event, put_body: PutBody) -> dict[str, Any]:
+def event_to_json(seq: int, event: Event, put_body: PutBody) -> dict[str, JSONValue]:
     """One `events.jsonl` line: `seq` and `type` first, then the record's own fields."""
-    head: dict[str, Any] = {"seq": seq}
+    head: dict[str, JSONValue] = {"seq": seq}
     if isinstance(event, Exchange):
         return head | {"type": "exchange"} | exchange_to_json(event, put_body)
     if isinstance(event, ToolCall):
@@ -484,7 +484,7 @@ def event_to_json(seq: int, event: Event, put_body: PutBody) -> dict[str, Any]:
     assert_never(event)
 
 
-def trigger_to_json(trigger: Trigger) -> dict[str, Any]:
+def trigger_to_json(trigger: Trigger) -> dict[str, JSONValue]:
     """`trigger` as `run.json` holds it, and as the SDK posts it in a run's start: one
     encoding for the file and the wire, so the endpoint reads a posted trigger with the decoder a
     stored one is read with."""
@@ -496,12 +496,12 @@ def trigger_to_json(trigger: Trigger) -> dict[str, Any]:
     }
 
 
-def error_to_json(error: ErrorInfo | None) -> dict[str, Any] | None:
+def error_to_json(error: ErrorInfo | None) -> dict[str, JSONValue] | None:
     """`error` as a run or a tool call holds it, and as the SDK posts it in a run's end."""
     return None if error is None else {"type": error.type, "message": error.message}
 
 
-def _request_to_json(request: Request, put_body: PutBody) -> dict[str, Any]:
+def _request_to_json(request: Request, put_body: PutBody) -> dict[str, JSONValue]:
     return {
         "method": request.method,
         "scheme": request.scheme,
@@ -514,7 +514,7 @@ def _request_to_json(request: Request, put_body: PutBody) -> dict[str, Any]:
     }
 
 
-def _response_to_json(response: Response, put_body: PutBody) -> dict[str, Any]:
+def _response_to_json(response: Response, put_body: PutBody) -> dict[str, JSONValue]:
     return {
         "status": response.status,
         "headers": _headers_to_json(response.headers),
@@ -522,12 +522,12 @@ def _response_to_json(response: Response, put_body: PutBody) -> dict[str, Any]:
     }
 
 
-def _headers_to_json(headers: Headers) -> list[list[str]]:
+def _headers_to_json(headers: Headers) -> list[JSONValue]:
     # Pairs, not an object: order and repeats (`set-cookie`) are part of what was sent.
     return [[name, value] for name, value in headers]
 
 
-def _body_to_json(body: bytes, put_body: PutBody) -> dict[str, Any] | None:
+def _body_to_json(body: bytes, put_body: PutBody) -> dict[str, JSONValue] | None:
     ref = put_body(body) if body else None
     if ref is None:
         return None
@@ -843,7 +843,7 @@ def read_float(d: Mapping[str, Any], key: str) -> float:
 def read_json(d: Mapping[str, Any], key: str) -> JSONValue:
     """A free JSON value (`args`, `result`), refused when a float anywhere in it is not finite:
     `json.loads` reads `NaN`, and a record holding one could not be written back."""
-    value = _present(d, key)
+    value: JSONValue = _present(d, key)
     stack = [value]
     while stack:
         item = stack.pop()

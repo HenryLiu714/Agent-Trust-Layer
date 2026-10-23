@@ -1,5 +1,6 @@
 import json
 from dataclasses import replace
+from typing import Any
 from urllib.parse import urlsplit
 
 import pytest
@@ -17,7 +18,7 @@ from irimi.servicemaps.classify import Classification, classify, unclassified
 
 
 def _parse(**overrides) -> Request:
-    args = {
+    args: dict[str, Any] = {
         "method": "GET",
         "scheme": "https",
         "host": "api.stripe.com",
@@ -177,6 +178,7 @@ def test_classify_matched_carries_the_service_map_and_route(tmp_path, monkeypatc
     index = _index(tmp_path, monkeypatch)
     cls = classify(_req("POST", path="/v1/refunds"), index)
     assert cls.matched == index.route_for("api.stripe.com", "POST", "/v1/refunds")
+    assert cls.matched is not None
     service_map, route = cls.matched
     assert service_map.service == "stripe"
     assert route.human == "refund {amount:money} on {charge}"
@@ -349,7 +351,7 @@ def test_detect_door_resolves_unknown_name_on_own_port(monkeypatch):
             return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))]
         raise socket.gaierror("no such host")
 
-    monkeypatch.setattr(netaddr.socket, "getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr(netaddr.socket, "getaddrinfo", fake_getaddrinfo)  # type: ignore[attr-defined]
     assert detect_door(_door_req("/api.stripe.com/v1", host="self.test"), 4000) == "reverse"
     assert detect_door(_door_req("/api.stripe.com/v1", host="nowhere.test"), 4000) == "forward"
     # Other ports never resolve anything.
@@ -370,7 +372,7 @@ def test_detect_door_takes_the_address_the_connection_arrived_on_as_this_machine
             return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("172.18.0.3", 0))]
         raise socket.gaierror("no such host")
 
-    monkeypatch.setattr(netaddr.socket, "getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr(netaddr.socket, "getaddrinfo", fake_getaddrinfo)  # type: ignore[attr-defined]
     for host in ("172.18.0.3", "irimi"):
         req = _door_req("/api.stripe.com/v1", host=host)
         assert detect_door(req, 4000, "172.18.0.3") == "reverse", host
@@ -781,8 +783,9 @@ def test_a_target_on_our_own_listener_is_refused():
 
 
 def test_a_target_on_another_port_is_allowed():
-    assert refuse_self_target(Target.parse("http://127.0.0.1:3000"), 4000) is None
-    assert refuse_self_target(Target.parse("http://127.0.0.1"), 4000) is None  # port 80, not ours
+    assert refuse_self_target(Target.parse("http://127.0.0.1:3000"), 4000) is None  # type: ignore[func-returns-value]
+    # Port 80, not ours.
+    assert refuse_self_target(Target.parse("http://127.0.0.1"), 4000) is None  # type: ignore[func-returns-value]
 
 
 def test_a_target_naming_the_address_irimi_was_reached_at_is_refused(monkeypatch):
@@ -803,9 +806,9 @@ def test_a_target_naming_the_address_irimi_was_reached_at_is_refused(monkeypatch
             with pytest.raises(TargetRefused, match="own listener"):
                 refuse_self_target(Target.parse(target), 4000, local)
         # Reached on loopback, it is another machine's.
-        assert refuse_self_target(Target.parse(target), 4000) is None
-        assert refuse_self_target(Target.parse(target), 4000, "10.0.0.6") is None
-    assert refuse_self_target(Target.parse("http://10.0.0.5:3000"), 4000, "10.0.0.5") is None
+        assert refuse_self_target(Target.parse(target), 4000) is None  # type: ignore[func-returns-value]
+        assert refuse_self_target(Target.parse(target), 4000, "10.0.0.6") is None  # type: ignore[func-returns-value]
+    assert refuse_self_target(Target.parse("http://10.0.0.5:3000"), 4000, "10.0.0.5") is None  # type: ignore[func-returns-value]
 
 
 def test_classify_reports_the_service_map_even_when_no_route_matched(tmp_path, monkeypatch):

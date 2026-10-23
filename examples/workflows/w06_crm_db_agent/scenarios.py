@@ -9,6 +9,8 @@ check that flags a production database URL).
 
 from __future__ import annotations
 
+from typing import Any
+
 from examples.workflows.harness.internet import Req, Resp
 from examples.workflows.harness.run import Scenario, Workflow
 from examples.workflows.harness.services import JsonService, World
@@ -18,7 +20,7 @@ STALE_REPLAY_RUN = "5a1e5a1e5a1e5a1e"
 
 
 def _enrichment(world: World) -> None:
-    def company(req: Req, state: dict) -> Resp:
+    def company(req: Req, state: dict[str, Any]) -> Resp:
         account = req.path.rsplit("/", 1)[1]
         return Resp(200, {"id": account, "industry": "manufacturing"})
 

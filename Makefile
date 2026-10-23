@@ -34,7 +34,7 @@ fmt:  ## ruff: format and apply the safe fixes
 	uv run ruff format .
 	uv run ruff check --fix .
 
-typecheck:  ## mypy over src/
+typecheck:  ## mypy over src/, examples/ and tests/
 	uv run mypy
 
 check: lint typecheck test  ## everything CI runs, in CI's order

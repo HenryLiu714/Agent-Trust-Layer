@@ -44,6 +44,7 @@ from irimi.report.model import RunView, build, for_summary
 from irimi.report.summary import OVERLAY_MARKER, Live, summary_lines
 from irimi.servicemaps import classify
 from tests.doubles import NullStore
+from tests.support.servers import stop_server
 
 # One host, one read route and one write route. The servers in this file all listen on loopback,
 # so the map claims 127.0.0.1; hosts carry no port, so their random ports do not matter.
@@ -135,14 +136,14 @@ def _serve(handler):
 def upstream():
     srv = _serve(_Recorder)
     yield srv.server_address[1]
-    srv.shutdown()
+    stop_server(srv)
 
 
 @pytest.fixture
 def stub():
     srv = _serve(_Target)
     yield srv.server_address[1]
-    srv.shutdown()
+    stop_server(srv)
 
 
 def _maps(tmp_path, monkeypatch, targets=()):
@@ -534,7 +535,7 @@ def test_a_delegated_exchange_never_reaches_the_host_the_agent_addressed(
 def stream_stub():
     srv = _serve(_StreamTarget)
     yield srv.server_address[1]
-    srv.shutdown()
+    stop_server(srv)
 
 
 def test_a_streamed_delegated_answer_is_stamped_too(tmp_path, monkeypatch, upstream, stream_stub):
@@ -587,6 +588,7 @@ def test_shadow_mode_is_never_built_without_a_reader(tmp_path, monkeypatch):
     p = ca.ca_paths()
     run = compose.Run(index, p, "t3st", compose._engine_config(args, index, "t3st", p), NullStore())
     engine = compose.build_engine(run, on_exchange=lambda ex: None)
+    assert isinstance(engine, MitmEngine)
     assert isinstance(engine.policy, ShadowPolicy)
     assert not isinstance(engine.policy.reader, NoReader)
     assert engine.policy.maps is run.config.maps
@@ -739,7 +741,7 @@ def _stripe_run(tmp_path, monkeypatch, refunds, *, real_overlay=False):
             overlay=overlay,
         )
     finally:
-        srv.shutdown()
+        stop_server(srv)
     return seen, overlay, replies
 
 

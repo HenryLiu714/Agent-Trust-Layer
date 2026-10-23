@@ -10,7 +10,7 @@ import tempfile
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, TextIO, cast
 
 from irimi import __version__
 from irimi.cli import CliError, UsageError, compose, os_error, runner
@@ -288,7 +288,8 @@ def _replay_python(args: argparse.Namespace, plan: replay_plan.Plan) -> str:
             "trigger is called by that irimi, so install the same version in both",
             file=sys.stderr,
         )
-    return args.python
+    python: str = args.python
+    return python
 
 
 def _no_such_module(call: CallResult | None) -> bool:
@@ -355,5 +356,5 @@ def _keeping_stderr() -> Iterator[list[str]]:
     irimi said of why a replay could not run, which its result holds. Python's own writes
     to stderr only, not a child's, which writes to the same file descriptor directly."""
     lines: list[str] = []
-    with contextlib.redirect_stderr(_Tee(sys.stderr, lines)):  # type: ignore[type-var]
+    with contextlib.redirect_stderr(cast(TextIO, _Tee(sys.stderr, lines))):
         yield lines

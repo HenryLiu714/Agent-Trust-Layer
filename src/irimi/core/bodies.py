@@ -56,7 +56,7 @@ def _is_json(ct: str) -> bool:
     `application/json-patch+json`; `text/json` is a legacy spelling clients still send. A JSON
     body under any of them that reflected nothing would be indistinguishable from a malformed one.
     """
-    return ct == JSON_CT or ct == "text/json" or ct.endswith("+json")
+    return ct in (JSON_CT, "text/json") or ct.endswith("+json")
 
 
 def _has_non_finite(value: Any) -> bool:

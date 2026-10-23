@@ -8,6 +8,7 @@ import pytest
 from irimi.core.exchange import Request
 from irimi.services.model import Read, Write
 from irimi.services.slack.effects import THREAD_FIELDS, apply_read
+from tests.support.credentials import SLACK_BOT
 
 # Minted `ts` values sit above every real one, as `services.TsClock` guarantees.
 MINTED1 = "1800000000.000001"
@@ -456,7 +457,7 @@ def test_include_all_metadata_is_known_to_replies_too():
 
 
 def test_the_token_parameter_is_known():
-    out = apply_read(_history(token="xoxb-1"), _history_page(REAL_OLD), [_post_write()])
+    out = apply_read(_history(token=SLACK_BOT + "1"), _history_page(REAL_OLD), [_post_write()])
     assert _ts_of(out.document) == [MINTED1, REAL_OLD]
     assert out.partial is False
 

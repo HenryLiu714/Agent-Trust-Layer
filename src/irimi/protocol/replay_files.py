@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from irimi.core import exitcodes
-from irimi.protocol.trace import ErrorInfo, error_to_json
+from irimi.protocol.trace import ErrorInfo, JSONValue, error_to_json
 
 RESULT_FIELDS = ("source_run_id", "replay_run_id", "exit_code", "diverged_at", "lines")
 
@@ -64,8 +64,8 @@ class ReplayResult:
         return "\n".join(self.lines)
 
 
-def call_outcome_to_json(outcome: CallResult) -> dict[str, Any]:
-    d: dict[str, Any] = {"called": outcome.called, "error": error_to_json(outcome.error)}
+def call_outcome_to_json(outcome: CallResult) -> dict[str, JSONValue]:
+    d: dict[str, JSONValue] = {"called": outcome.called, "error": error_to_json(outcome.error)}
     if outcome.cause is not None:
         d["cause"] = outcome.cause
     return d
@@ -94,7 +94,7 @@ def read_call_outcome(path: Path) -> CallResult | None:
     return CallResult(called, ErrorInfo(error["type"], error["message"]), cause)
 
 
-def replay_result_to_json(result: ReplayResult) -> dict[str, Any]:
+def replay_result_to_json(result: ReplayResult) -> dict[str, JSONValue]:
     return {
         "source_run_id": result.source_run_id,
         "replay_run_id": result.replay_run_id,

@@ -7,6 +7,7 @@ shadow run. Order between runs is never asserted: the pool and the event loop in
 import re
 import sys
 from collections import Counter
+from typing import cast
 from urllib.parse import parse_qs
 
 import pytest
@@ -169,7 +170,8 @@ def test_phase_3_exit_holds_for_eight_concurrent_runs(run_workflow, scenario, mo
         events = reader.load_run(record.run_id).events
         assert {charge_named(e) for e in events if isinstance(e, Exchange)} == {charge}, events
         calls = [e for e in events if isinstance(e, ToolCall)]
-        assert {c.args["charge"] for c in calls} == ({charge} if ledger else set()), calls
+        charged = {cast(dict, c.args)["charge"] for c in calls}
+        assert charged == ({charge} if ledger else set()), calls
         writes = [(c.kind, c.ran) for c in calls if c.kind == "write"]
         assert writes == ([("write", "shadow")] if ledger else []), calls
     assert sorted(charges) == [f"ch_Q{i}" for i in range(8)]

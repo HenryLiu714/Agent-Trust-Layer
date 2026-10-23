@@ -158,7 +158,7 @@ MISTAKES: dict[str, tuple[Callable[[], Any], str]] = {
         lambda: sdk.write_tool(fake=_gen)(_sync),
         "cannot be the generator function",
     ),
-    "name_not_a_string": (lambda: sdk.read_tool(name=7)(_sync), "must be a string"),  # type: ignore[arg-type]
+    "name_not_a_string": (lambda: sdk.read_tool(name=7)(_sync), "must be a string"),  # type: ignore[call-overload]
     "write_name_not_a_string": (
         lambda: sdk.write_tool(fake=_sync, name=7)(_sync),  # type: ignore[arg-type]
         "@sdk.write_tool(name=...) must be a string",
@@ -338,10 +338,10 @@ def test_the_args_are_captured_before_the_body_runs(posted):
 
 
 def test_args_and_result_together_stay_inside_one_capture_budget(posted):
-    """Each is bounded alone (`capture.MAX_CAPTURED_BYTES`); the post must stay under the
+    """Each is bounded alone (`limits.MAX_CAPTURED_BYTES`); the post must stay under the
     control endpoint's 2 MiB, so a result that would take the pair past one budget is replaced by
     the truncation marker, and the call is still recorded."""
-    half = "x" * (capture.MAX_CAPTURED_BYTES // 2 + 10)
+    half = "x" * (limits.MAX_CAPTURED_BYTES // 2 + 10)
 
     @sdk.read_tool(name="db.echo")
     def echo(text: str) -> str:
@@ -350,8 +350,8 @@ def test_args_and_result_together_stay_inside_one_capture_budget(posted):
     assert echo(half) == half
     [(_, _, doc)] = posted.posts
     assert doc["args"] == {"text": half}
-    assert doc["result"] == {capture.TRUNCATED_KEY: True, "bytes": len(half) + 2}
-    assert len(capture.serialized(doc)) < 2 * capture.MAX_CAPTURED_BYTES
+    assert doc["result"] == {trace.TRUNCATED_KEY: True, "bytes": len(half) + 2}
+    assert len(capture.serialized(doc)) < 2 * limits.MAX_CAPTURED_BYTES
 
 
 def test_a_sync_tool_that_returns_a_coroutine_is_recorded_when_the_coroutine_ends(posted):
@@ -420,7 +420,7 @@ def test_an_async_stand_in_that_raises_re_raises_the_same_object_and_records_its
     async def fails(order: int) -> Any:
         raise _RealWriteRan("the real write ran")
 
-    with pytest.raises(ValueError) as caught:
+    with pytest.raises(ValueError) as caught:  # noqa: PT011  # checked by identity below
         asyncio.run(fails(1))
     assert caught.value is raised
     [(_, _, doc)] = posted.posts
@@ -432,7 +432,7 @@ def test_an_async_stand_in_that_raises_re_raises_the_same_object_and_records_its
 
 def test_an_async_tool_called_with_the_wrong_arguments_is_recorded_with_the_type_error(posted):
     with pytest.raises(TypeError):
-        asyncio.run(mark_refunded_async(1, 2))  # type: ignore[call-arg]
+        asyncio.run(mark_refunded_async(1, 2))  # type: ignore[call-arg, arg-type]
     [(_, _, doc)] = posted.posts
     assert doc["error"]["type"] == "builtins.TypeError"
     assert doc["args"] == {"args": [1, 2], "kwargs": {}}  # it did not bind (`capture_call`)
@@ -503,7 +503,7 @@ def test_an_async_tools_result_is_captured_on_the_callers_thread_as_it_was_retur
 
     asyncio.run(main())
     [(_, _, doc)] = posted.posts
-    assert doc["result"] == [{capture.REPR_KEY: "<thing>"}, {"status": "as returned"}]
+    assert doc["result"] == [{trace.REPR_KEY: "<thing>"}, {"status": "as returned"}]
     assert seen == [threading.current_thread().name]
 
 
@@ -728,7 +728,7 @@ def test_the_posted_tool_call_is_valid_json_the_endpoint_reads(posted):
     assert len(posted.posts) == 2
     for _, _, doc in posted.posts:
         json.loads(capture.serialized(doc))
-        assert doc["result"] == {capture.REPR_KEY: "nan"}
+        assert doc["result"] == {trace.REPR_KEY: "nan"}
 
 
 def test_a_tool_name_is_cut_to_the_run_name_limit(posted):

@@ -32,7 +32,7 @@ from examples.workflows.w01_ticket_triage.agent import (
 )
 from examples.workflows.w01_ticket_triage.scenarios import CUSTOMER
 from irimi.config import paths
-from irimi.protocol.trace import ErrorInfo, ToolCall, Trigger
+from irimi.protocol.trace import ErrorInfo, JSONValue, ToolCall, Trigger
 
 W = "w01_ticket_triage"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.
@@ -247,7 +247,7 @@ def test_the_ticket_is_stored_as_the_runs_trigger_by_its_dataclass(run_workflow,
     name `launch` keeps for the agent, and its fields, so replay can rebuild it."""
     shadow = run_workflow(W, "full_refund", mode)
     [run] = shadow.sdk_runs()
-    ticket = {
+    ticket: dict[str, JSONValue] = {
         "ticket_id": "T-1001",
         "charge": "ch_TICKET1",
         "customer": "cus_TICKET1",
@@ -538,7 +538,8 @@ def test_runs_show_and_list_name_the_file_and_line_of_a_damaged_event(run_workfl
         quiet = _irimi_process(result, "runs", "list", "--store", str(copy), stderr=write)
     finally:
         os.close(write)
-    assert (quiet.returncode, quiet.stdout, quiet.stderr) == (141, listed.stdout, None)
+    unpiped: str | None = quiet.stderr  # None, as stderr went to `write`, not a capture
+    assert (quiet.returncode, quiet.stdout, unpiped) == (141, listed.stdout, None)
 
 
 def test_runs_show_and_compare_end_quietly_when_their_reader_goes_away(shared_store_run):
@@ -1168,7 +1169,7 @@ def test_sdk_replay_from_a_test_returns_the_result_irimi_replay_writes(
 
 # The ticket `full_refund` recorded, captured as `irimi replay --args` takes it, with
 # another message: what a developer passes to replay the run with other parameters.
-OTHER_TICKET = {
+OTHER_TICKET: dict[str, JSONValue] = {
     "ticket": {
         "__irimi_type__": f"{AGENT}:Ticket",
         "value": {
@@ -1601,6 +1602,7 @@ def test_a_replay_that_makes_no_refund_reads_live_where_its_recording_shows_one(
         for e in replay.stored().load_run(run_id).events
         if isinstance(e, ToolCall) and e.name.endswith(":send_reply")
     ]
+    assert isinstance(reply.args, dict)
     assert reply.args["body"] == "No refund issued; 0 already refunded."
     code, out, err = replay.compare_runs(recorded.one("run.start")["run"], run_id)
     # The reply says so, and compare shows the text that changed under the one line it prints.
@@ -1640,7 +1642,7 @@ def test_a_replay_that_adds_a_refund_reads_live_after_it_and_sees_it(replayed):
     `not_evaluable`, and could not be checked. The replay diverges: its second read, which the
     recording holds, shows a world without the refund, so it goes live, and the overlay shows the
     refund in it."""
-    recorded, replay = replayed(W, "checked_charge", {"PROMPT": "verify"})
+    _recorded, replay = replayed(W, "checked_charge", {"PROMPT": "verify"})
     assert check_invariants(replay) == []
     assert replay.answered() == [
         ("llm#1", 200, None),

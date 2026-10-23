@@ -197,6 +197,7 @@ def test_sdk_run_with_and_async_with_are_one_run_each_with_no_entrypoint(irimi):
 
     async_id = asyncio.run(block())
     assert None not in (sync_id, async_id) and sync_id != async_id
+    assert sync_id is not None
     assert nightly == sdk.Run(sync_id, "nightly")
     found = {r.run_id: r for r in irimi.sdk_runs()}
     assert set(found) == {sync_id, async_id}
@@ -334,7 +335,7 @@ def test_a_trigger_that_raises_re_raises_the_same_object_and_its_run_ends_in_err
     def fails() -> None:
         raise boom
 
-    with pytest.raises(ValueError) as caught:
+    with pytest.raises(ValueError) as caught:  # noqa: PT011  # checked by identity below
         fails()
     assert caught.value is boom
     [run] = irimi.sdk_runs()
@@ -824,17 +825,18 @@ def test_a_sync_trigger_that_returns_a_coroutine_keeps_its_run_until_the_corouti
     inner = state.reporter
 
     class Order:
-        def post(self, run_id: str, action: str, doc: Any) -> None:
+        def post(self, run_id: str, action: RunAction, doc: Any) -> None:
             log.append(action)
             inner.post(run_id, action, doc)
 
-    state.reporter = Order()  # restored by the fixture's monkeypatch
+    # Restored by the fixture's monkeypatch; no tool runs, so `recorded` is never asked for.
+    state.reporter = typing.cast(client.Reporter, Order())
 
     async def main() -> tuple[str | None, str | None]:
         made = settle("ch_1")
         assert log == ["start"] and sdk.current_run_id() is None  # its body has not run yet
         ran_in = await asyncio.create_task(made)
-        with pytest.raises(ValueError) as caught:
+        with pytest.raises(ValueError) as caught:  # noqa: PT011  # checked by identity below
             await settle("bad")
         assert caught.value is _BOOM
         return ran_in, sdk.current_run_id()
@@ -1087,10 +1089,12 @@ def test_a_redirect_is_a_refused_post_never_followed(monkeypatch, warnings, stat
     """irimi's endpoint never redirects, so a redirect is an answer from something else. urllib
     followed a 301, 302 or 303 as a GET to wherever it pointed, outside the proxy, and called the
     run recorded when that answered 200; it is refused like any answer outside 2xx."""
-    with _recorder(status=200) as (elsewhere, landed):
-        with _recorder(status=status, location=f"http://127.0.0.1:{elsewhere}/x") as (port, hits):
-            monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{port}/_irimi")
-            client.ControlClient().post("r1", "start", {})
+    with (
+        _recorder(status=200) as (elsewhere, landed),
+        _recorder(status=status, location=f"http://127.0.0.1:{elsewhere}/x") as (port, hits),
+    ):
+        monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{port}/_irimi")
+        client.ControlClient().post("r1", "start", {})
     assert len(hits) == 1 and landed == []
     [warning] = warnings()
     assert f"rejected: HTTP {status}" in warning.getMessage()
@@ -1279,7 +1283,7 @@ def test_the_public_api_is_the_issues():
         "trigger",
         "write_tool",
     ]
-    assert sdk.instrument() is None
+    assert sdk.instrument() is None  # type: ignore[func-returns-value]
 
 
 def test_importing_the_sdk_imports_no_mitmproxy():
@@ -1471,7 +1475,9 @@ def test_a_value_that_shares_itself_is_bounded_in_time():
     encoded, replayable = capture.capture(shared)
     assert time.monotonic() - began < 2
     assert isinstance(encoded, dict) and encoded["__irimi_truncated__"] is True
-    assert encoded["bytes"] > capture.MAX_CAPTURED_BYTES and replayable is False
+    size = encoded["bytes"]
+    assert isinstance(size, int)
+    assert size > limits.MAX_CAPTURED_BYTES and replayable is False
 
 
 def test_capture_call_binds_arguments_by_parameter_name():
@@ -1492,7 +1498,7 @@ def test_capture_call_leaves_out_a_receiver_named_self_or_cls():
         def build(cls, x: int) -> None: ...
 
     assert capture.capture_call(Thing.method, (Thing(), 1), {}) == ({"x": 1}, True)
-    assert capture.capture_call(Thing.build.__func__, (Thing, 1), {}) == ({"x": 1}, True)
+    assert capture.capture_call(Thing.build.__func__, (Thing, 1), {}) == ({"x": 1}, True)  # type: ignore[attr-defined]
 
     def plain(other: Any, x: int) -> None: ...
 
@@ -1571,7 +1577,7 @@ def test_a_trigger_parameter_may_nest_as_deep_as_a_run_trigger():
 # -- revive: capture's inverse, one test per row -------------------------------------------------
 
 
-class Validated:
+class Validated:  # noqa: PLW1641  # unhashable, as a pydantic model is
     """Shaped like a pydantic v2 model both ways: `model_dump(mode="json")` and `model_validate`."""
 
     def __init__(self, **fields: Any) -> None:

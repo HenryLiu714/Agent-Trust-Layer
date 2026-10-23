@@ -22,6 +22,7 @@ holds it to `LAYERS`, so the two cannot drift.
 import ast
 import re
 from pathlib import Path
+from typing import cast
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "irimi"
@@ -212,7 +213,9 @@ def _mitmproxy_imports(py: Path) -> list[str]:
             called = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
             if called in {"import_module", "__import__"} and isinstance(node.args[0].value, str):
                 names = [node.args[0].value]
-        found += [f"line {node.lineno}: {n}" for n in names if n.split(".")[0] == "mitmproxy"]
+        # Only an import or a call sets `names`, and each has a line.
+        line = cast(ast.stmt | ast.expr, node)
+        found += [f"line {line.lineno}: {n}" for n in names if n.split(".")[0] == "mitmproxy"]
     return found
 
 

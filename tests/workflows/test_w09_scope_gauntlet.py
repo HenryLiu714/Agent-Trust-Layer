@@ -26,10 +26,14 @@ from examples.workflows.w09_scope_gauntlet.agent import (
 )
 from examples.workflows.w09_scope_gauntlet.scenarios import BIG_DESCRIPTION_BYTES, WORKFLOW
 from irimi.config import paths
-from irimi.core.bodies import MAX_BODY_BYTES
 from irimi.core.exchange import Exchange, Flag
-from irimi.core.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE, MAX_STORED_BODY
-from irimi.engine import control
+from irimi.core.limits import (
+    MAX_BODY_BYTES,
+    MAX_CONTROL_BODY,
+    MAX_ERROR_MESSAGE,
+    MAX_ERROR_TYPE,
+    MAX_STORED_BODY,
+)
 from irimi.protocol import trace
 from irimi.protocol.trace import ErrorInfo, RunEnd, RunRecord, ToolCall, Trigger
 from irimi.record import redact
@@ -330,8 +334,7 @@ REFUSALS = {
     "refuse_run_id": (400, "'run_id' comes from the path, not the body"),
     "refuse_big": (
         413,
-        f"the body is {OVERSIZED_BODY_BYTES + 11} bytes, over the "
-        f"{control.MAX_CONTROL_BODY} allowed",
+        f"the body is {OVERSIZED_BODY_BYTES + 11} bytes, over the {MAX_CONTROL_BODY} allowed",
     ),
     # Named by its type, never quoted: the same line on every Python.
     "refuse_deep": (400, "'name' is a list, not a string"),
@@ -349,7 +352,7 @@ def sdk_record(result, run_id: str, start: str, end: str | None) -> RunRecord:
     """The record a run started by the post labelled `start` and ended by the one labelled `end`
     is stored as: every field the SDK may say, as it said it, and the rest irimi's."""
     began = posted(result, start)
-    ended = posted(result, end) if end else {"ended_at": None, "outcome": None, "error": None}
+    ended: dict = posted(result, end) if end else {"ended_at": None, "outcome": None, "error": None}
     trigger = began["trigger"]
     error = ended["error"]
     return RunRecord(
@@ -518,7 +521,7 @@ def test_two_runs_posted_at_once_do_not_mix(run_workflow, mode):
     assert sorted(handed[:2]) == ["ctl-thread-1", "ctl-thread-2"]
     reader = shadow.stored()
     for run_id in ("ctl-thread-1", "ctl-thread-2"):
-        tag, path = CONTROL_RUNS[run_id]
+        _tag, path = CONTROL_RUNS[run_id]
         assert [e.run_id for e in reader.load_run(run_id).events] == [run_id] * 3
         assert shown(shadow, run_id)[8:11] == [
             "tool-real     read      look_up -> ok",
@@ -542,6 +545,7 @@ def test_a_run_that_ends_in_error_keeps_its_error_redacted_then_cut_to_what_a_tr
     tool = stored_tool_call(shadow, "ctl-error", "error_tool")
     run_type = posted(shadow, "error_end")["error"]["type"]
     run_message = posted(shadow, "error_end")["error"]["message"]
+    assert tool.error is not None
     tool_message = tool.error.message
     assert (len(run_type), len(run_message), len(tool_message)) == (657, *[LONG_MESSAGE_CHARS] * 2)
     hidden = redact.placeholder(redact.load_key(shadow.home), ERROR_KEY)
@@ -1073,7 +1077,7 @@ def test_a_run_start_that_decodes_past_the_cap_is_refused_413_unread(run_workflo
     is refused 413, and a cut one is past it whatever its start holds: no start makes a
     run, and the store wrote only the exchanges."""
     shadow = run_workflow(W, "bombs", mode)
-    allowed = control.MAX_CONTROL_BODY
+    allowed = MAX_CONTROL_BODY
     assert {e["label"]: e["body"] for e in shadow.events("refusal")} == dict.fromkeys(
         CONTROL_BOMBS, control_refusal(f"the body decodes past the {allowed} bytes allowed")
     )

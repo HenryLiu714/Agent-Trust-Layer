@@ -27,6 +27,7 @@ from irimi.record import redact
 from irimi.replay.index import RecordingReader, ReplayIndex
 from irimi.replay.policy import ReplayPolicy
 from irimi.servicemaps.classify import classify
+from tests.support.credentials import OTHER_RECORDED_SECRET, RECORDED_SECRET
 from tests.test_policy import answer as decided
 
 SHIPPED = servicemaps.MapIndex(tuple(servicemaps.loader.load_shipped()))
@@ -296,11 +297,11 @@ def test_a_recorded_request_that_got_no_answer_is_a_miss_in_its_place():
 
 
 def test_a_secret_matches_the_placeholder_the_recording_holds():
-    secret = _llm(content="the key is sk_live_ABCDEF123456")
+    secret = _llm(content=f"the key is {RECORDED_SECRET}")
     stored = _stored(secret)
-    assert b"sk_live_ABCDEF123456" not in stored.request.body
+    assert RECORDED_SECRET.encode() not in stored.request.body
     recording = _recording(stored)
-    assert recording.answer_for(_llm(content="the key is sk_live_OTHER9876"), "llm") is None
+    assert recording.answer_for(_llm(content=f"the key is {OTHER_RECORDED_SECRET}"), "llm") is None
     assert recording.answer_for(secret, "llm") is not None
 
 
@@ -822,7 +823,7 @@ def test_a_checked_write_recorded_after_a_write_the_replay_has_not_made_is_check
 
 
 def test_a_checked_write_after_the_replay_diverged_is_checked_again():
-    """This run refunded 2000 first, which the recorded run never did, so the recorded refund of
+    """The replay refunded 2000 first, which the recorded run never did, so the recorded refund of
     4900 passed against a charge this run has already refunded part of. Checked again, against the
     recording's read of the charge and this run's write log, it is refused."""
     engine = _stored(_req(), CHARGE, issued_by="engine")
@@ -852,7 +853,9 @@ def test_an_unchecked_write_is_answered_from_the_recording_after_the_replay_dive
     """A write no `precondition:` checked was not made from the world: its recorded answer is
     still the one, and its minted ids the recorded ones."""
     unchecked = _req("POST", path="/v1/customers/cus_1", body=b"email=a%40b.c", ct=FORM)
-    assert not classify(unchecked, SHIPPED).route.precondition
+    route = classify(unchecked, SHIPPED).route
+    assert route is not None
+    assert not route.precondition
     recorded = _stored(unchecked, REFUND_ANSWER, answered_by="fake-L0", flags=())
     policy = ReplayPolicy(_recording(recorded), SHIPPED)
     _answer(policy, _keyed_refund(2000, "x"))
@@ -950,9 +953,9 @@ def test_args_redaction_cannot_read_match_nothing():
     """`redact_json` says `<redaction-failed>` for any value it cannot redact, so two different
     such args would compare equal: neither side's is ever matched."""
     recording = _recording(_tool(args={"a": 1}))
-    assert recording.tool_answer_for("db.balance", ("not", "json")) is None  # type: ignore[arg-type]
+    assert recording.tool_answer_for("db.balance", ("not", "json")) is None
     unreadable = replace(_tool(), args=redact.REDACTION_FAILED)
-    assert _recording(unreadable).tool_answer_for("db.balance", ("x",)) is None  # type: ignore[arg-type]
+    assert _recording(unreadable).tool_answer_for("db.balance", ("x",)) is None
 
 
 def test_a_recorded_result_redaction_could_not_read_is_a_miss_in_its_place():

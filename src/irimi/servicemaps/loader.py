@@ -8,6 +8,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import replace
 from functools import lru_cache
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -95,8 +96,6 @@ RETIRED_ROUTE_KEYS = {
 
 def shipped_dir() -> Path:
     """The directory holding the maps that ship inside the package."""
-    from importlib.resources import files
-
     return Path(str(files("irimi").joinpath(MAPS_DIR_NAME)))
 
 

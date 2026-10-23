@@ -229,7 +229,7 @@ def test_bodies_never_go_inline_and_an_empty_one_is_null_and_stores_nothing():
         response=Response(status=200, headers=(), body=b'{"ok": true}'),
     )
     blobs = _Blobs()
-    encoded = trace.exchange_to_json(ex, blobs.put)
+    encoded: typing.Any = trace.exchange_to_json(ex, blobs.put)
     assert encoded["request"]["body"] is None
     assert encoded["response"]["body"] == {
         "sha256": hashlib.sha256(b'{"ok": true}').hexdigest(),
@@ -250,13 +250,15 @@ def test_headers_keep_their_order_their_repeats_and_their_case():
         ["X-B", "2"],
         ["Set-Cookie", "c=3"],
     ]
-    assert trace.exchange_from_json(encoded, blobs.get).response.headers == headers
+    decoded = trace.exchange_from_json(encoded, blobs.get).response
+    assert decoded is not None
+    assert decoded.headers == headers
 
 
 def test_a_body_ref_that_is_not_a_digest_is_refused_before_the_store_is_asked():
     """A store joins the digest onto `blobs/`, so a ref read off disk is a path it cannot trust."""
     blobs = _Blobs()
-    encoded = trace.exchange_to_json(_filled(Exchange), blobs.put)
+    encoded: typing.Any = trace.exchange_to_json(_filled(Exchange), blobs.put)
     encoded["request"]["body"]["sha256"] = "../../etc/passwd"
 
     def never(ref):
@@ -318,7 +320,7 @@ def test_an_unknown_extra_field_is_ignored():
     assert trace.run_from_json(d) == trace.run_from_json(_encoded_run())
     blobs = _Blobs()
     ex = _filled(Exchange)
-    line = trace.exchange_to_json(ex, blobs.put) | {"added_later": True}
+    line: typing.Any = trace.exchange_to_json(ex, blobs.put) | {"added_later": True}
     line["request"] = line["request"] | {"added_later": True}
     assert trace.exchange_from_json(line, blobs.get) == ex
 
@@ -400,7 +402,7 @@ def test_a_missing_required_field_is_a_trace_format_error(name, path):
 
 def _nested_list(depth):
     """A list nested `depth` deep, built without recursion."""
-    value = []
+    value: list = []
     for _ in range(depth):
         value = [value]
     return value
@@ -442,7 +444,7 @@ def test_a_value_nested_too_deep_to_quote_is_refused_by_its_type(name, path):
 
 def _nested_object(depth):
     """An object nested `depth` deep, built without recursion."""
-    value = {}
+    value: dict = {}
     for _ in range(depth):
         value = {"a": value}
     return value
@@ -514,7 +516,7 @@ def test_a_string_a_refusal_quotes_is_cut_to_max_quoted_characters(length, quote
     """A word outside a vocabulary and a `sha256` that is no digest are quoted back, cut, so a
     damaged line's 5 MB string is never a 5 MB message on `runs show`'s stderr."""
     blobs = _Blobs()
-    d = trace.exchange_to_json(_filled(Exchange), blobs.put) | {"kind": "z" * length}
+    d: typing.Any = trace.exchange_to_json(_filled(Exchange), blobs.put) | {"kind": "z" * length}
     with pytest.raises(TraceFormatError) as refused:
         trace.exchange_from_json(d, blobs.get)
     assert str(refused.value) == f"'kind' is {quoted}, not one of {typing.get_args(Kind)}"
@@ -645,7 +647,7 @@ _DECODERS = {
 @pytest.mark.parametrize("decoder", list(_DECODERS))
 def test_a_line_that_is_a_list_nested_too_deep_to_quote_is_named_a_list(decoder):
     """A line `json.loads` reads as a deep list, which 3.14's does, is named by its type."""
-    with pytest.raises(TraceFormatError, match="must be read from an object, not a list$"):
+    with pytest.raises(TraceFormatError, match=r"must be read from an object, not a list$"):
         _DECODERS[decoder](_nested_list(_DEEP))
 
 
@@ -697,7 +699,8 @@ def test_free_json_holding_a_number_that_is_not_finite_is_a_trace_format_error(n
     for key in ("args", "result"):
         with pytest.raises(TraceFormatError, match=key):
             trace.tool_call_from_json(call | {key: nested})
-    trigger = trace.run_to_json(_run_record())["trigger"] | {"args": nested}
+    encoded: typing.Any = trace.run_to_json(_run_record())["trigger"]
+    trigger = encoded | {"args": nested}
     with pytest.raises(TraceFormatError, match="args"):
         trace.run_from_json(_encoded_run() | {"trigger": trigger})
 
@@ -722,7 +725,7 @@ def test_a_malformed_exchange_is_a_trace_format_error_and_nothing_else(key, valu
 @pytest.mark.parametrize("pairs", [{"a": "1"}, [["a"]], [["a", 1]], ["a: 1"]])
 def test_headers_that_are_not_name_value_pairs_are_refused(pairs):
     blobs = _Blobs()
-    d = trace.exchange_to_json(_filled(Exchange), blobs.put)
+    d: typing.Any = trace.exchange_to_json(_filled(Exchange), blobs.put)
     d["request"]["headers"] = pairs
     with pytest.raises(TraceFormatError, match="headers"):
         trace.exchange_from_json(d, blobs.get)
@@ -858,6 +861,7 @@ def test_each_field_table_on_the_page_is_what_its_encoder_writes(marker, encode)
 def test_the_documented_example_decodes_with_the_codecs():
     (run_text,) = _doc_blocks("run.json")
     record = trace.run_from_json(json.loads(run_text))
+    assert record.end is not None
     assert (record.schema_version, record.attribution, record.end.outcome) == (
         SCHEMA_VERSION,
         "sdk",
@@ -900,10 +904,17 @@ def test_the_documented_example_is_what_the_encoders_write():
 def test_a_description_is_found_anywhere_in_a_captured_value():
     """`__irimi_repr__` and `__irimi_truncated__` say what a value was, not what it is, so a
     replay never hands one back as the value. Found at any depth without recursion."""
-    assert trace.DESCRIPTION_KEYS == {trace.REPR_KEY, trace.TRUNCATED_KEY}
+    assert {trace.REPR_KEY, trace.TRUNCATED_KEY} == trace.DESCRIPTION_KEYS
     assert trace.holds_description({"a": [1, {"b": {"__irimi_repr__": "Decimal('1')"}}]})
     assert trace.holds_description([{"__irimi_truncated__": True, "bytes": 9}])
-    for whole in (None, 1, "__irimi_repr__", ["__irimi_repr__"], {"__irimi_bytes__": "AA=="}):
+    wholes: tuple[trace.JSONValue, ...] = (
+        None,
+        1,
+        "__irimi_repr__",
+        ["__irimi_repr__"],
+        {"__irimi_bytes__": "AA=="},
+    )
+    for whole in wholes:
         assert not trace.holds_description(whole)
     deep: list = [{"__irimi_repr__": "x"}]
     for _ in range(100_000):

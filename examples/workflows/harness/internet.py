@@ -39,10 +39,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Protocol
 from urllib.parse import parse_qsl, urlsplit
 
-import brotli  # type: ignore[import-untyped]  # ships no stubs
+import brotli
 import zstandard
 
-from examples.workflows import agentkit
+from examples.workflows import agentkit, credentials
 
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # How long a `stall` fault holds a request before answering. Agents under test use a shorter
@@ -65,7 +65,7 @@ BOMB_DECODED_BYTES = 1024 * 1024 * 1024
 BOMB_LINE = b" " * 15 + b"\n"
 # A served credential, a canary like `services.CLIENT_SECRET_CANARY` (`run.SERVED_CANARIES`): a
 # body irimi decodes only in part is still recorded, and must reach disk redacted or not at all.
-BOMB_SECRET = "CANARYbombsecret00000000000000"
+BOMB_SECRET = credentials.BOMB_SECRET
 # How every bomb a fault answers with starts: a JSON document, its credential on a line of its
 # own. Redaction reads the start of a document line by line, as it is not JSON, and no shape gives
 # that line away: only its key says it is a secret.
@@ -441,10 +441,9 @@ class _Handler(BaseHTTPRequestHandler):
         if resp is None:
             self._reset()
             return
-        try:
+        # The client may hang up mid-answer, which some scenarios do on purpose.
+        with contextlib.suppress(BrokenPipeError, ConnectionResetError):
             self._write(resp, reset_after_first_chunk=action == "reset-stream")
-        except (BrokenPipeError, ConnectionResetError):
-            pass  # the client hung up mid-answer, which some scenarios do on purpose
 
     def _write(self, resp: Resp, reset_after_first_chunk: bool) -> None:
         headers = dict(resp.headers)

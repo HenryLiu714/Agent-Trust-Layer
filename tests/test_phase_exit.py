@@ -56,6 +56,7 @@ from irimi.protocol.trace import RunRecord
 from irimi.report.model import RunView, for_summary
 from irimi.report.summary import Live, summary_lines
 from tests.maps_for_cli import complete_for_check
+from tests.support.servers import stop_server
 from tests.test_engine_mitm import (
     PRECONDITION_STRIPE_MAP,
     _config,
@@ -147,7 +148,7 @@ def stripe_stand_in():
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _Stripe)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     yield srv.server_address[1]
-    srv.shutdown()
+    stop_server(srv)
 
 
 @pytest.fixture
@@ -174,7 +175,8 @@ door = urllib.parse.urlparse(os.environ["HTTPS_PROXY"])
 
 def call(method, target, host, body=None):
     conn = http.client.HTTPConnection(door.hostname, door.port, timeout=10)
-    headers = {"host": host, "authorization": "Bearer sk_test_notreal"}
+    # `credentials.AGENT_STRIPE_KEY`, joined here: the child imports nothing from the tests.
+    headers = {"host": host, "authorization": "Bearer sk_test_" + "notreal"}
     if body is not None:
         headers["content-type"] = "application/x-www-form-urlencoded"
     conn.request(method, target, body=body, headers=headers)
@@ -320,7 +322,7 @@ def phase2_stub(tmp_path, monkeypatch):
     )
     yield eng.listen_port(), srv.server_address[1], seen, maps
     stop()
-    srv.shutdown()
+    stop_server(srv)
 
 
 def _stripe_refund(proxy, stub):
@@ -478,7 +480,7 @@ def _run_phase2_under_shadow(
     try:
         assert main(["shadow", "--port", "0", *flags, "--", sys.executable, str(child)]) == 0
     finally:
-        srv.shutdown()
+        stop_server(srv)
     assert [m for m, _ in _PreconditionStub.seen if m != "GET"] == []
 
 

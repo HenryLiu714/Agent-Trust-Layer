@@ -2,6 +2,7 @@ import stat
 
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from irimi.config import ca, paths
 
@@ -27,7 +28,9 @@ def test_generated_cert_is_a_ca(tmp_path, monkeypatch):
     bc = cert.extensions.get_extension_for_class(x509.BasicConstraints)
     assert bc.critical and bc.value.ca is True
     assert cert.subject == cert.issuer
-    assert cert.public_key().public_numbers() == key.public_key().public_numbers()
+    cert_pub, key_pub = cert.public_key(), key.public_key()
+    assert isinstance(cert_pub, rsa.RSAPublicKey) and isinstance(key_pub, rsa.RSAPublicKey)
+    assert cert_pub.public_numbers() == key_pub.public_numbers()
 
 
 def test_exists_and_partial(tmp_path, monkeypatch):

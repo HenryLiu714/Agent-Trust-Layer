@@ -54,7 +54,7 @@ def signature(fn: Callable[..., Any]) -> inspect.Signature:
     function annotated with a name imported under `TYPE_CHECKING` would raise NameError, and its
     every call be captured as one that does not bind."""
     if sys.version_info >= (3, 14):
-        import annotationlib
+        import annotationlib  # noqa: PLC0415  # exists from 3.14 only
 
         return inspect.signature(fn, annotation_format=annotationlib.Format.FORWARDREF)
     return inspect.signature(fn)

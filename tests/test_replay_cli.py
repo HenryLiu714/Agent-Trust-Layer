@@ -21,6 +21,7 @@ import pytest
 from irimi import __version__, cli
 from irimi.cli import main
 from irimi.config import ca, paths
+from irimi.core.exchange import Exchange
 from irimi.protocol.replay_files import ReplayResult, replay_result_from_json
 from irimi.protocol.trace import ErrorInfo, ToolCall
 from irimi.record.store.reader import StoreReader
@@ -241,7 +242,7 @@ def test_an_unchanged_agent_replays_with_no_divergence_and_sends_nothing(home, c
     assert _Stripe.seen == [] and _Llm.seen == []
     # The replay is one run: the SDK's trigger adopted it, so it holds every event.
     events = StoreReader(home / "store").load_run(replay.run_id).events
-    assert [e.request.path for e in events] == [
+    assert [e.request.path if isinstance(e, Exchange) else e for e in events] == [
         "/v1/messages",
         "/v1/charges/ch_REAL1",
         "/v1/refunds",
@@ -287,6 +288,7 @@ def test_a_process_run_with_no_trigger_replays_by_running_its_argv_again(home, c
     assert "  no divergence: every call was answered from the recording" in out
     assert _Stripe.seen == []
     # The header says only the argv ran again: nothing else of the process was recorded.
+    assert recorded.trigger is not None and recorded.trigger.argv is not None
     argv = shlex.join(recorded.trigger.argv)
     assert _result(out)[1] == (
         f"  re-ran {argv} (argv only: environment, cwd and stdin are not recorded)"
@@ -326,7 +328,10 @@ def test_call_and_args_override_the_recorded_entrypoint_and_args(home, capfd):
     # The agent's 2nd call, as the totals count two: irimi's check read of the charge, stored
     # between the two, is not the agent's and is not counted.
     events = StoreReader(home / "store").load_run(replay.run_id).events
-    made = [(e.issued_by, e.request.method, e.request.path) for e in events]
+    made = [
+        (e.issued_by, e.request.method, e.request.path) if isinstance(e, Exchange) else e
+        for e in events
+    ]
     assert made == [
         ("agent", "GET", "/v1/charges/ch_REAL1"),
         ("engine", "GET", "/v1/charges/ch_REAL1"),
@@ -351,6 +356,7 @@ def test_args_stored_by_their_description_are_refused_and_given_with_args_run(ho
     ]
     assert _replay_runs(home, source) == []
     recorded = StoreReader(home / "store").load_run(source).record.trigger
+    assert recorded is not None and isinstance(recorded.args, dict)
     args = {**recorded.args, "notify": None}
     code, out, err = _replay(capfd, source, "--args", json.dumps(args))
     assert (code, err) == (0, [])
@@ -386,7 +392,7 @@ def test_sdk_replay_returns_the_result_the_cli_writes(home, capfd, monkeypatch, 
     assert by_cli.lines == tuple(_result(out))
     assert by_cli.diverged_at is None
     monkeypatch.syspath_prepend(str(tmp_path))
-    import replay_agent
+    import replay_agent  # type: ignore[import-not-found]
 
     for result in (
         testing.replay(source),
@@ -396,6 +402,7 @@ def test_sdk_replay_returns_the_result_the_cli_writes(home, capfd, monkeypatch, 
     ):
         capfd.readouterr()
         assert result.replay_run_id not in (None, by_cli.replay_run_id)
+        assert by_cli.replay_run_id is not None
         same = [line.replace(result.replay_run_id, by_cli.replay_run_id) for line in result.lines]
         assert replace(result, replay_run_id=by_cli.replay_run_id, lines=tuple(same)) == by_cli
     tools = [
@@ -621,7 +628,9 @@ def test_a_sigterm_while_python_is_asked_stops_the_replay_with_143(home, capfd, 
     written = tmp_path / "result.json"
     command = [sys.executable, "-m", "irimi", "replay", source, "--port", "0"]
     command += ["--python", python, "--result-file", str(written)]
-    proc = subprocess.run(command, env=dict(os.environ), capture_output=True, timeout=60)
+    proc = subprocess.run(
+        command, env=dict(os.environ), capture_output=True, timeout=60, check=False
+    )
     assert proc.returncode == 143
     assert replay_result_from_json(json.loads(written.read_text())).exit_code == 143
     assert _replay_runs(home, source) == []
@@ -658,6 +667,7 @@ def test_a_replay_that_ends_on_what_its_trigger_raised_records_it_as_its_recordi
     assert _result(out)[1] == "  agent exited 1"
     [replay] = _replay_runs(home, source.run_id)
     assert (replay.end.outcome, replay.end.exit_code) == ("error", 1)
+    assert source.end is not None
     assert replay.end.error == source.end.error == ErrorInfo("builtins.KeyError", "'ch_REAL1'")
 
 
@@ -665,7 +675,9 @@ def test_args_from_a_file_and_a_command_with_a_call_is_a_usage_error(home, capfd
     source = _record(home, f"replay_agent.handle({TICKET})")
     capfd.readouterr()
     args = tmp_path / "args.json"
-    args.write_text(json.dumps(StoreReader(home / "store").load_run(source).record.trigger.args))
+    trigger = StoreReader(home / "store").load_run(source).record.trigger
+    assert trigger is not None
+    args.write_text(json.dumps(trigger.args))
     code, out, err = _replay(capfd, source, "--args-file", str(args))
     assert (code, err) == (0, [])
     assert "  no divergence: every call was answered from the recording" in out
@@ -882,6 +894,7 @@ def test_an_agent_that_names_the_recorded_run_never_rewrites_it(home, capfd, mon
     assert (code, err) == (1, [])
     assert {p.name: p.read_bytes() for p in (store / "runs" / source).iterdir()} == before
     [stray] = StoreReader(store).load_run("unattributed").events
+    assert isinstance(stray, Exchange)
     assert (stray.run_id, stray.flags) == (
         source,
         ("from-recording", "bad-run-id"),

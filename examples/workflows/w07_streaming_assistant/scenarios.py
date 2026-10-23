@@ -5,9 +5,9 @@ from __future__ import annotations
 import gzip
 import json
 import threading
-from typing import Any
+from typing import Any, ClassVar
 
-from examples.workflows import agentkit
+from examples.workflows import agentkit, credentials
 from examples.workflows.harness.internet import BOMB_DECODED_BYTES, BOMB_LINE, Req, Resp
 from examples.workflows.harness.run import Scenario, Workflow
 from examples.workflows.harness.services import (
@@ -20,7 +20,7 @@ from examples.workflows.harness.services import (
 
 CHANNEL = "C0CHAT"
 # Shaped like a live Stripe key, so the redaction rules would recognise it on disk.
-SECRET = "sk_live_CANARYstreamsecret0000000000"
+SECRET = credentials.STREAM_SECRET
 ANSWER = (
     "Refunds return money to the original payment method. A partial refund leaves the rest "
     "of the charge in place, and a charge can be refunded until nothing is left."
@@ -233,7 +233,10 @@ class HeldStreamLLM(ScriptedLLM):
     when the run ends, and irimi records it after the run's end, whatever the scheduler does:
     a streamed exchange recorded after its run's SDK end."""
 
-    MODELS = {"data": [{"type": "model", "id": "claude-sonnet-5"}], "has_more": False}
+    MODELS: ClassVar[dict[str, Any]] = {
+        "data": [{"type": "model", "id": "claude-sonnet-5"}],
+        "has_more": False,
+    }
 
     def __init__(self, script: Any) -> None:
         super().__init__(script)

@@ -316,7 +316,7 @@ def made_within(started_at: float, ended_at: float, call: ToolCall) -> bool:
     never an answer from the wrong world. One with no clock (`started_at` 0.0, built outside the
     engine and the SDK) is within no call. `irimi replay`'s count of the calls a replay never made
     reads the same rule."""
-    return 0.0 < started_at and call.started_at <= started_at and ended_at <= call.ended_at
+    return started_at > 0.0 and call.started_at <= started_at and ended_at <= call.ended_at
 
 
 def nested_in(other: ToolCall, call: ToolCall) -> bool:

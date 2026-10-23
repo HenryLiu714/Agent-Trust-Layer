@@ -16,12 +16,14 @@ import subprocess
 import sys
 import threading
 import types
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from irimi import sdk, testing
 from irimi.core import calls
+from irimi.core.limits import MAX_CAPTURED_BYTES
 from irimi.protocol import entrypoints
 from irimi.protocol.env import (
     ENGINE_ACTIVE_ENV,
@@ -61,7 +63,8 @@ class _Posts:
 
 @pytest.fixture
 def posts(monkeypatch) -> _Posts:
-    """This process as `irimi replay` sets up its child: active, and told the run it replays as."""
+    """The test process as `irimi replay` sets up its child: active, and told the run it replays
+    as."""
     reporter = _Posts()
     monkeypatch.setattr(state, "reporter", reporter)
     monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
@@ -413,7 +416,6 @@ def _child(
 ) -> tuple[subprocess.CompletedProcess[str], Any]:
     """`replay_child` run as `irimi replay` runs it, with `env` besides: what it did, and the
     outcome it wrote."""
-
     (tmp_path / "child_agent.py").write_text(CHILD_MODULE)
     (tmp_path / "interrupted_agent.py").write_text("raise KeyboardInterrupt\n")
     args_file, outcome_file = tmp_path / "args.json", tmp_path / "outcome.json"
@@ -465,7 +467,6 @@ def test_the_child_s_trigger_adopts_the_replay_s_run_and_its_handed_off_coroutin
     """A sync trigger that returns a coroutine hands its run to it: the child runs that
     coroutine to its end, in the replay's run, as it runs an `async def` trigger's. Nothing
     is posted, so no control endpoint is needed."""
-
     replaying = {ENGINE_ACTIVE_ENV: "1", RUN_ENV: REPLAY, REPLAY_RUN_ENV: REPLAY}
     done, outcome = _child(tmp_path, entrypoint, TICKET, replaying)
     assert (done.returncode, done.stdout, done.stderr) == (0, printed, "")
@@ -475,7 +476,6 @@ def test_the_child_s_trigger_adopts_the_replay_s_run_and_its_handed_off_coroutin
 def test_a_trigger_that_raises_exits_1_with_its_traceback_and_says_what_it_raised(tmp_path):
     """The outcome is what a run records an exception as (`_errors.error_info`), so the replay's
     run ends on `builtins.KeyError` as its recording's did."""
-
     done, outcome = _child(tmp_path, "child_agent:fails", TICKET)
     assert done.returncode == 1
     assert done.stderr.startswith("Traceback (most recent call last):")
@@ -537,7 +537,6 @@ def test_a_call_ended_by_an_interrupt_or_an_exit_says_so_and_ends_the_child_as_i
 ):
     """What a run records them as, and then the process ends as they would have ended it, never
     as a trigger that raised."""
-
     done, outcome = _child(tmp_path, entrypoint, TICKET)
     assert done.returncode == code
     assert outcome == CallResult(True, error)
@@ -548,7 +547,6 @@ def test_a_child_interrupted_before_its_call_says_it_never_called_and_stops_as_i
 ):
     """Whatever ends the child before the call, a KeyboardInterrupt as its module loads too, is a
     call never made, never an agent that ran; the interruption then ends the process."""
-
     done, outcome = _child(tmp_path, "interrupted_agent:main", {})
     assert done.returncode == -signal.SIGINT
     error = "KeyboardInterrupt before the call"
@@ -609,7 +607,7 @@ def test_a_replay_result_says_whether_it_is_the_same_and_prints_what_irimi_said(
     ],
 )
 def test_a_result_it_did_not_write_is_refused(broken):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"^a replay result"):
         replay_result_from_json(broken)
 
 
@@ -666,7 +664,7 @@ def pair(a: str, b: str) -> None: ...
 
 
 def test_sdk_replay_refuses_arguments_each_of_which_fits_but_not_together():
-    half = "x" * (capture.MAX_CAPTURED_BYTES // 2)
+    half = "x" * (MAX_CAPTURED_BYTES // 2)
     with pytest.raises(testing.ReplayError) as raised:
         testing.replay("r", pair, args=(half,), kwargs={"b": half})
     assert str(raised.value) == (
@@ -681,7 +679,7 @@ def _answering(argv: list[str], seen: dict[str, Any]) -> int:
     seen["argv"], seen["tmp"] = argv, tmp
     seen["mode"] = stat.S_IMODE(os.stat(tmp).st_mode)
     if "--args-file" in argv:
-        seen["args"] = json.loads(open(argv[argv.index("--args-file") + 1]).read())
+        seen["args"] = json.loads(Path(argv[argv.index("--args-file") + 1]).read_text())
     run_id = next(word for word in argv if word.startswith("--run="))[len("--run=") :]
     result = ReplayResult(run_id, "new0new0new0new0", 1, None, ("a",))
     with open(argv[argv.index("--result-file") + 1], "w") as fh:
@@ -735,7 +733,7 @@ def test_sdk_replay_passes_its_call_in_a_private_directory_it_removes(monkeypatc
     monkeypatch.setattr(
         testing, "_run_irimi", lambda argv, env: seen.update(tmp=os.path.dirname(argv[4])) or 3
     )
-    with pytest.raises(testing.ReplayError, match="^irimi replay exited 3 and wrote no result: "):
+    with pytest.raises(testing.ReplayError, match=r"^irimi replay exited 3 and wrote no result: "):
         testing.replay("r")
     assert not os.path.exists(seen["tmp"])
 

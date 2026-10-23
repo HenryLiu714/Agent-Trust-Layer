@@ -31,8 +31,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     catalog = workflows()
     if args.workflow is None:
-        for wf in catalog.values():
-            _list(wf, sys.stdout)
+        for listed in catalog.values():
+            _list(listed, sys.stdout)
         return 0
     wf = catalog.get(args.workflow)
     if wf is None:

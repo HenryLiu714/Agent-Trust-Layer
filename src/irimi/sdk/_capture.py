@@ -14,7 +14,7 @@ import json
 import math
 import sys
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, Protocol, cast
 
 from irimi.core.calls import receiver, signature
 from irimi.core.limits import MAX_CAPTURED_BYTES
@@ -102,6 +102,7 @@ class NotReplayable(Exception):
 
 def revive(value: JSONValue) -> Any:
     """The value `value` was captured from, or NotReplayable naming why not.
+
     The inverse of the capture table, row by row:
 
         JSON scalars, lists, objects            themselves; a tuple was captured as a list, and
@@ -177,12 +178,21 @@ def _revive_typed(name: JSONValue, fields: JSONValue) -> Any:
                 raise NotReplayable(f"{name}'s fields are not an object")
             return found(**revived)
         if callable(getattr(found, "model_validate", None)):
-            return found.model_validate(revived)  # type: ignore[attr-defined]
+            return cast(type[_Model], found).model_validate(revived)
     except NotReplayable:
         raise
     except Exception:
         raise NotReplayable(f"{name} could not be built from its fields") from None
     raise NotReplayable(f"{name} is neither a dataclass nor a model")
+
+
+class _Model(Protocol):
+    """The two pydantic methods capture and revive call, so the SDK never imports pydantic."""
+
+    @classmethod
+    def model_validate(cls, obj: object) -> object: ...
+
+    def model_dump(self, *, mode: str) -> object: ...
 
 
 def serialized(value: JSONValue) -> bytes:
@@ -265,7 +275,7 @@ class _Walk:
             init = {f.name: getattr(value, f.name) for f in dataclasses.fields(value) if f.init}
             return self._typed(kind, init, depth)
         if callable(getattr(kind, "model_dump", None)) and not isinstance(value, type):
-            return self._typed(kind, value.model_dump(mode="json"), depth)  # type: ignore[attr-defined]
+            return self._typed(kind, cast(_Model, value).model_dump(mode="json"), depth)
         return self._opaque(value), False
 
     def _typed(self, kind: type, fields: object, depth: int) -> Captured:

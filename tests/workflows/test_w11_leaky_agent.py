@@ -205,7 +205,7 @@ def compared(shared_store_run, a: str, b: str, mode: str) -> tuple[str, str, lis
     code, out, err = compare(one, other)
     ids = [result.one("run.start")["run"] for result in (one, other)]
     assert (code, err) == (1, [])
-    assert rows_not_shown(other, *ids, out) == []
+    assert rows_not_shown(other, ids[0], ids[1], out) == []
     return ids[0], ids[1], out
 
 

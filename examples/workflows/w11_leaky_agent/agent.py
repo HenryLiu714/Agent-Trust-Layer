@@ -85,6 +85,7 @@ def _local_dns() -> Iterator[None]:
 def _send(opener: urllib.request.OpenerDirector, label: str, url: str, **kw: Any) -> int:
     """One request through `opener`, logged the way `agentkit.http` logs one."""
     request = urllib.request.Request(url, **kw)
+    status: int
     try:
         with opener.open(request, timeout=agentkit.timeout()) as raw:
             status, headers = raw.status, raw.headers

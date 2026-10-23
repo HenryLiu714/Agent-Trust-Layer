@@ -88,7 +88,7 @@ class RecordedOutcome:
     awaited: bool
 
 
-def run_start_to_json(start: RunStart) -> dict[str, Any]:
+def run_start_to_json(start: RunStart) -> dict[str, JSONValue]:
     return {
         "trigger": trigger_to_json(start.trigger),
         "agent_version": start.agent_version,
@@ -112,7 +112,7 @@ def run_start_from_json(d: Mapping[str, Any]) -> RunStart:
     return RunStart(trigger_from_json(trigger), agent_version, sdk_version, started_at)
 
 
-def run_end_to_json(end: RunEnd) -> dict[str, Any]:
+def run_end_to_json(end: RunEnd) -> dict[str, JSONValue]:
     """`end` as the SDK posts it. Its exit code is not posted: only the process run has one."""
     return {"ended_at": end.ended_at, "outcome": end.outcome, "error": error_to_json(end.error)}
 
@@ -131,7 +131,7 @@ def run_end_from_json(d: Mapping[str, Any]) -> RunEnd:
     return RunEnd(ended_at, outcome, error, None)
 
 
-def recorded_outcome_to_json(call: ToolCall) -> dict[str, Any]:
+def recorded_outcome_to_json(call: ToolCall) -> dict[str, JSONValue]:
     """The recorded outcome of `call`, as the control endpoint answers a lookup that hit."""
     return {"result": call.result, "error": error_to_json(call.error), "awaited": call.awaited}
 

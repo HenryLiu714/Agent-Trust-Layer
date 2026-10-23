@@ -540,7 +540,7 @@ def test_a_refund_whose_precondition_read_failed_replays_as_unvalidated(replayed
     live, and no request reaches the fake Stripe, so its summary line says the recorded run could
     not check it. The recording serving a failed read to a write that missed is
     `tests/test_replay_engine.py`'s."""
-    recorded, replay = replayed(W, "precondition_read_fails")
+    _recorded, replay = replayed(W, "precondition_read_fails")
     [refund] = [ex for ex in replay.reported if ex.request.path == "/v1/refunds"]
     assert (refund.precondition.outcome, refund.flags) == (
         "not_evaluable",

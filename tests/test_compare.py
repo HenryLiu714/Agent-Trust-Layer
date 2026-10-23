@@ -30,7 +30,7 @@ home = test_phase_exit.home  # bound here so pytest finds it
 
 AT = 1_700_000_000.0
 FORM = (("content-type", "application/x-www-form-urlencoded"),)
-TICKET = {"ticket": "T-1"}
+TICKET: dict[str, trace.JSONValue] = {"ticket": "T-1"}
 HEADER = "irimi compare · a vs b"
 LABELS = [
     "  A  refund_ticket  agent:refund_ticket  agent 1.0",
@@ -130,6 +130,7 @@ def _store(home, runs: dict[str, tuple[RunRecord, list[Event]]]) -> None:
             if isinstance(event, ToolCall):
                 s.record_tool_call(dataclasses.replace(event, run_id=run_id))
             else:
+                assert isinstance(event, Exchange)
                 s.record(dataclasses.replace(event, run_id=run_id))
     s.close()
 
@@ -152,7 +153,7 @@ def _compare(home, capfd, a: list[Event], b: list[Event], **b_record) -> tuple[i
 
 
 def test_two_runs_that_wrote_the_same_print_every_write_as_same_and_exit_0(home, capfd):
-    events = [_read("/v1/charges/ch_1"), _refund(), _tool()]
+    events: list[Event] = [_read("/v1/charges/ch_1"), _refund(), _tool()]
     assert _compare(home, capfd, events, events) == (
         0,
         [
@@ -201,8 +202,8 @@ UPDATE = "○ stripe  update customer cus_1  faked; not checked"
 def test_two_updates_that_print_alike_but_send_other_fields_are_changed_and_say_which(home, capfd):
     """The map's sentence names the customer and nothing it sets: compared by that line, an
     update that blocks the customer and clears its email was the same as one that set an email."""
-    a = [_update(b"email=alice%40x.com")]
-    b = [_update(b"metadata[blocked]=true&email=")]
+    a: list[Event] = [_update(b"email=alice%40x.com")]
+    b: list[Event] = [_update(b"metadata[blocked]=true&email=")]
     code, lines = _compare(home, capfd, a, b)
     assert (code, lines[3:]) == (
         1,
@@ -416,9 +417,9 @@ def test_a_second_refused_refund_is_the_write_added_not_the_first(home, capfd):
 
 
 def test_reads_llm_calls_read_tools_real_tools_and_a_replayed_retry_are_not_writes(home, capfd):
-    a = [_read("/v1/charges/ch_1"), _llm("refund it"), _refund(), _tool()]
+    a: list[Event] = [_read("/v1/charges/ch_1"), _llm("refund it"), _refund(), _tool()]
     replayed = _refund(flags=(Flag.IDEMPOTENT_REPLAY,))
-    b = [
+    b: list[Event] = [
         _llm("refund it, politely"),
         _read("/v1/charges/ch_1", b'{"amount": 1}'),
         _read("/v1/customers/cus_1"),
@@ -673,7 +674,9 @@ def test_a_newline_and_a_typed_backslash_n_print_alike_and_are_still_not_the_sam
         ],
     )
     # A tool's name is its key, but the error type its stand-in raised is only in its line.
-    raised = [dataclasses.replace(_tool(), error=ErrorInfo(kind, "")) for kind in ("a\nb", "a\\nb")]
+    raised: list[Event] = [
+        dataclasses.replace(_tool(), error=ErrorInfo(kind, "")) for kind in ("a\nb", "a\\nb")
+    ]
     comparison = compare.compare_runs(_run(raised[:1]), _run(raised[1:]), None)
     assert comparison.lines() == [
         "  ~ A ○ tool  db.mark_refunded  fake raised a\\nb",
@@ -761,7 +764,11 @@ def test_align_keeps_every_action_once_in_its_order_and_a_run_is_the_same_as_its
     rng = random.Random(79)
 
     def action() -> compare.Action:
-        key = (compare.EXCHANGE_KEY, "stripe", rng.choice(["refunds.create", "customers.update"]))
+        key: tuple[str, ...] = (
+            compare.EXCHANGE_KEY,
+            "stripe",
+            rng.choice(["refunds.create", "customers.update"]),
+        )
         key = rng.choice([key, (compare.TOOL_KEY, "db.x")])
         fields = (("body.amount", rng.choice(["1", "2"])),)
         return compare.Action(key, rng.choice("ab"), cut=rng.random() < 0.2, fields=fields)

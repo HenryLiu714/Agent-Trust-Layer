@@ -75,7 +75,7 @@ def fake_sdk(*, active: bool = True, with_tool: bool = False, **extra: Any) -> t
             yield
             return
         run_id = next(ids)
-        mod.minted.append(run_id)  # type: ignore[attr-defined]
+        mod.minted.append(run_id)
         token = run_var.set(run_id)
         try:
             yield
@@ -86,7 +86,7 @@ def fake_sdk(*, active: bool = True, with_tool: bool = False, **extra: Any) -> t
         def decorate(f: Callable[..., Any]) -> Callable[..., Any]:
             if inspect.isgeneratorfunction(f) or inspect.isasyncgenfunction(f):
                 raise TypeError(f"{REAL_TYPE_ERROR}: a generator trigger")
-            mod.decorated.append(("trigger", name, f))  # type: ignore[attr-defined]
+            mod.decorated.append(("trigger", name, f))
             if inspect.iscoroutinefunction(f):
 
                 @functools.wraps(f)
@@ -135,7 +135,7 @@ def fake_sdk(*, active: bool = True, with_tool: bool = False, **extra: Any) -> t
 
         def tool(kind: str, shadow: Any) -> Any:
             def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
-                mod.decorated.append(("tool", kind, shadow, fn))  # type: ignore[attr-defined]
+                mod.decorated.append(("tool", kind, shadow, fn))
                 if shadow is not None and not callable(shadow):
                     raise TypeError(f"{REAL_TYPE_ERROR}: shadow not callable")
                 if shadow is fn:
@@ -323,7 +323,7 @@ def test_a_real_trigger_logs_one_run_with_the_real_id_and_nested_triggers_join(l
     ]
     # The real decorator got the name as given and a function with the agent's signature, which
     # the SDK binds the captured args against and names the entrypoint after.
-    [(_, inner_name, inner_fn), (_, outer_name, outer_fn)] = fake.decorated
+    [(_, inner_name, _inner_fn), (_, outer_name, outer_fn)] = fake.decorated
     assert (inner_name, outer_name) == (None, "outer")
     assert list(inspect.signature(outer_fn).parameters) == ["x", "y"]
     assert (outer_fn.__module__, outer_fn.__qualname__) == (__name__, outer.__qualname__)
@@ -359,7 +359,7 @@ def test_a_real_trigger_that_raises_logs_the_error_and_re_raises_the_same_object
     def fails() -> None:
         raise boom
 
-    with pytest.raises(ValueError) as caught:
+    with pytest.raises(ValueError) as caught:  # noqa: PT011  # checked by identity below
         fails()
     assert caught.value is boom
     [end] = obs("run.end")
@@ -923,8 +923,8 @@ def _through(sdk: Any, kind: str, form: str) -> tuple[Any, list[str]]:
 
 
 @pytest.mark.parametrize("form", FORMS)
-@pytest.mark.parametrize("kind", ("read", "write"))
-@pytest.mark.parametrize("mode", ("bare", "shadow", "miss", "hit", "raised"))
+@pytest.mark.parametrize("kind", ["read", "write"])
+@pytest.mark.parametrize("mode", ["bare", "shadow", "miss", "hit", "raised"])
 def test_a_tool_through_this_module_does_what_the_real_sdk_s_does(
     replaying, monkeypatch, form, kind, mode
 ):
@@ -963,7 +963,7 @@ def test_a_tool_through_this_module_does_what_the_real_sdk_s_does(
 
 
 class _Stripe:
-    hosts = ("api.stripe.com",)
+    hosts: tuple[str, ...] = ("api.stripe.com",)
 
     def handle(self, req: Req) -> Resp:
         return Resp()
@@ -977,8 +977,9 @@ def test_resolving_refuses_every_lookup_of_a_name_it_does_not_serve():
     internet = FakeInternet([_Stripe()])
     lookups: dict[str, Callable[[str], Any]] = {
         "getaddrinfo": lambda host: socket.getaddrinfo(host, 443),
-        "gethostbyname": lambda host: socket.gethostbyname(host),
-        "gethostbyname_ex": lambda host: socket.gethostbyname_ex(host),
+        # Looked up at each call, so the call reaches the resolver `resolving()` patches in.
+        "gethostbyname": lambda host: socket.gethostbyname(host),  # noqa: PLW0108
+        "gethostbyname_ex": lambda host: socket.gethostbyname_ex(host),  # noqa: PLW0108
     }
     with internet.resolving():
         for lookup in lookups.values():
@@ -998,12 +999,15 @@ def test_resolving_only_serves_the_names_it_is_given_whatever_their_case():
     given in any case resolves to loopback in any case and with a trailing dot, every other name is
     refused, and the socket module is restored even when the block raises."""
     originals = (socket.getaddrinfo, socket.gethostbyname, socket.gethostbyname_ex)
-    with pytest.raises(RuntimeError, match="block raised"):
-        with resolving_only(["Stub.Example"]):
-            assert socket.gethostbyname("stub.example.") == "127.0.0.1"
-            assert socket.gethostbyname(b"STUB.EXAMPLE") == "127.0.0.1"
-            assert {ai[4][0] for ai in socket.getaddrinfo("stub.example", 443)} == {"127.0.0.1"}
-            with pytest.raises(socket.gaierror, match="not on the fake internet"):
-                socket.gethostbyname("api.stripe.com")
-            raise RuntimeError("block raised")
+    # The block raises on purpose, to show the socket module is restored all the same.
+    with (  # noqa: PT012
+        pytest.raises(RuntimeError, match="block raised"),
+        resolving_only(["Stub.Example"]),
+    ):
+        assert socket.gethostbyname("stub.example.") == "127.0.0.1"
+        assert socket.gethostbyname(b"STUB.EXAMPLE") == "127.0.0.1"  # type: ignore[arg-type]
+        assert {ai[4][0] for ai in socket.getaddrinfo("stub.example", 443)} == {"127.0.0.1"}
+        with pytest.raises(socket.gaierror, match="not on the fake internet"):
+            socket.gethostbyname("api.stripe.com")
+        raise RuntimeError("block raised")
     assert (socket.getaddrinfo, socket.gethostbyname, socket.gethostbyname_ex) == originals

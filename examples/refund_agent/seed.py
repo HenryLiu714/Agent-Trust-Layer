@@ -14,7 +14,7 @@ CURRENCY = "usd"
 
 
 def main() -> int:
-    import stripe
+    import stripe  # noqa: PLC0415  # an optional dependency, needed only to seed
 
     if os.environ.get("IRIMI_ENGINE_ACTIVE") == "1":
         print(

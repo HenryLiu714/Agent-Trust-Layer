@@ -145,7 +145,7 @@ class ControlClient:
         base = os.environ.get(CONTROL_ENV, "").rstrip("/")
         if not base:
             return _Failed("unset", f"{CONTROL_ENV} is not set")
-        request = urllib.request.Request(
+        request = urllib.request.Request(  # noqa: S310  # the http URL irimi set for its endpoint
             f"{base}/{RUNS_ROUTE}/{route}",
             data=serialized(dict(doc)),
             method="POST",

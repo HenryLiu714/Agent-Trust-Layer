@@ -180,7 +180,7 @@ class Request:
         return header_value(self.headers, name)
 
     def without_header(self, name: str) -> "Request":
-        """This request minus every `name` header. The SAME object when it carried none, so a
+        """The request minus every `name` header. The SAME object when it carried none, so a
         caller's identity check keeps meaning "nothing changed"."""
         kept = without_header(self.headers, name)
         return self if len(kept) == len(self.headers) else replace(self, headers=kept)
@@ -204,7 +204,7 @@ class Response:
         return header_value(self.headers, name)
 
     def without_header(self, name: str) -> "Response":
-        """This response minus every `name` header. The SAME object when it carried none, so a
+        """The response minus every `name` header. The SAME object when it carried none, so a
         caller's identity check keeps meaning "nothing changed"."""
         kept = without_header(self.headers, name)
         return self if len(kept) == len(self.headers) else replace(self, headers=kept)

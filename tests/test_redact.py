@@ -23,8 +23,27 @@ from irimi.config import files, paths
 from irimi.core import secret_shapes
 from irimi.core.exchange import Exchange, Flag, Request, Response
 from irimi.decide import targets
+from irimi.protocol.trace import JSONValue
 from irimi.record import redact
 from irimi.record.redact import placeholder, redact_exchange, redact_json
+from tests.support.credentials import (
+    ANTHROPIC,
+    AWS,
+    GITHUB,
+    GITHUB_PAT,
+    LIVE_KEY,
+    LIVE_KEY_SHORT,
+    OPENAI,
+    OPENAI_PROJECT,
+    SLACK_APP,
+    SLACK_BOT,
+    SLACK_WEBHOOKS,
+    STRIPE_LIVE,
+    STRIPE_RESTRICTED,
+    STRIPE_TEST,
+    STRIPE_WEBHOOK,
+    TEST_KEY,
+)
 from tests.test_trace import _filled
 
 KEY = bytes(range(32))
@@ -79,14 +98,14 @@ def _response_body(body: bytes, *headers: tuple[str, str]) -> bytes:
 
 
 def test_a_placeholder_is_16_hex_digits_of_an_hmac_of_the_value_under_the_key():
-    digest = hmac.new(KEY, b"sk_live_abc", "sha256").hexdigest()
-    assert placeholder(KEY, "sk_live_abc") == f"<redacted:{digest[:16]}>"
+    digest = hmac.new(KEY, LIVE_KEY_SHORT.encode(), "sha256").hexdigest()
+    assert placeholder(KEY, LIVE_KEY_SHORT) == f"<redacted:{digest[:16]}>"
 
 
 def test_the_same_secret_gives_the_same_placeholder_and_another_key_a_different_one():
     """What lets a replay match a request against its recording, and what keeps two
     installs' placeholders apart."""
-    auth = "Bearer sk_test_one"
+    auth = f"Bearer {STRIPE_TEST}one"
     ex = _exchange(_request(headers=(("authorization", auth),)))
     first, again = redact_exchange(ex, KEY), redact_exchange(ex, KEY)
     other = redact_exchange(ex, OTHER_KEY)
@@ -99,7 +118,7 @@ def test_the_same_secret_gives_the_same_placeholder_and_another_key_a_different_
 
 
 def test_a_credential_header_is_replaced_whole_on_the_request():
-    basic = "Basic c2tfdGVzdF9hYmM6"  # base64 of `sk_test_abc:`, which no shape can see
+    basic = "Basic c2tfdGVzdF9hYmM6"  # base64 of `TEST_KEY` and a colon, which no shape can see
     ex = _exchange(
         _request(headers=(("Authorization", basic), ("X-Api-Key", "k-123"), ("Accept", "*/*")))
     )
@@ -128,7 +147,7 @@ def test_a_credential_header_is_replaced_on_the_response_and_set_cookie_there_on
 
 
 def test_a_shape_in_a_header_name_is_replaced_on_the_request_and_the_response():
-    secret = "sk_live_abc123"
+    secret = LIVE_KEY
     response = Response(status=200, headers=((f"X-{secret}", "v"),), body=b"")
     ex = _exchange(_request(headers=((f"x-{secret}", "v"), ("accept", "*/*"))), response)
     stored = redact_exchange(ex, KEY)
@@ -142,7 +161,7 @@ def test_a_url_in_a_header_has_its_query_and_fragment_redacted_by_name():
     repeats the page's; neither token has a shape. A URL's path to a credential-path host is the
     secret there too."""
     location = "https://app.example/cb?state=s1&access_token=at1#id_token=it1&x=1"
-    referer = "https://hooks.slack.com/services/T1/B1/S3CR3T?a=1"
+    referer = f"{SLACK_WEBHOOKS}T1/B1/S3CR3T?a=1"
     response = Response(status=302, headers=(("Location", location),), body=b"")
     ex = _exchange(_request(headers=(("referer", referer), ("x-plain", "a?token=b"))), response)
     stored = redact_exchange(ex, KEY)
@@ -219,15 +238,15 @@ def test_an_empty_bracket_segment_names_nothing_so_the_one_before_it_counts():
 
 
 def test_a_shape_in_a_form_fields_name_is_replaced():
-    stored = _body(b"sk_live_abc123=1&x%20sk_test_abc=2", FORM)
-    assert stored == f"{_ph('sk_live_abc123')}=1&x%20{_ph('sk_test_abc')}=2".encode()
+    stored = _body(f"{LIVE_KEY}=1&x%20{TEST_KEY}=2".encode(), FORM)
+    assert stored == f"{_ph(LIVE_KEY)}=1&x%20{_ph(TEST_KEY)}=2".encode()
 
 
 def test_a_json_body_that_only_claims_to_be_a_form_is_walked_as_json():
     """Read as a form, `{"password": "hunter2"}` is one pair whose name is the whole document and
     whose value is empty, so no secret key is ever seen and `hunter2` has no shape."""
-    stored = _body(b'{"password": "hunter2", "note": "sk_live_abc123"}', FORM)
-    assert json.loads(stored) == {"password": _ph("hunter2"), "note": _ph("sk_live_abc123")}
+    stored = _body(f'{{"password": "hunter2", "note": "{LIVE_KEY}"}}'.encode(), FORM)
+    assert json.loads(stored) == {"password": _ph("hunter2"), "note": _ph(LIVE_KEY)}
 
 
 def test_query_parameter_names_are_matched_whole_and_case_insensitively():
@@ -240,18 +259,18 @@ def test_query_parameter_names_are_matched_whole_and_case_insensitively():
 # ------------------------------------------------------------------------------ rule 3: shapes
 
 SAMPLES = [
-    "sk_live_abc123",
-    "sk_test_abc123",
-    "rk_live_abc123",
-    "whsec_abc123",
-    "xoxb-123-456-abc",
-    "xapp-1-A0-abc",
-    "ghp_" + "a" * 36,
-    "github_pat_11AB_cd",
-    "AKIAABCDEFGHIJKLMNOP",
-    "sk-ant-api03-ab_c-d",
-    "sk-proj-" + "a" * 20,
-    "sk-" + "a" * 20,
+    LIVE_KEY,
+    STRIPE_TEST + "abc123",
+    STRIPE_RESTRICTED + "abc123",
+    STRIPE_WEBHOOK + "abc123",
+    SLACK_BOT + "123-456-abc",
+    SLACK_APP + "1-A0-abc",
+    GITHUB + "a" * 36,
+    GITHUB_PAT + "11AB_cd",
+    AWS + "ABCDEFGHIJKLMNOP",
+    ANTHROPIC + "api03-ab_c-d",
+    OPENAI_PROJECT + "a" * 20,
+    OPENAI + "a" * 20,
 ]
 
 
@@ -318,14 +337,14 @@ def test_any_text_cut_outside_secrets_redacts_to_a_prefix_of_the_whole_redacted(
     [
         ("abc defgh", "abc defgh"),  # within the limit: whole
         ("x" * 20, "x" * 9),  # no key across the cut: at the limit, inside a word or not
-        ("abc sk_live_a1b2", "abc "),  # a key across the cut: before the whole key
-        ("sk_live_a1b2", ""),  # a key from the start: none of it
-        ("abc sk_live_a1 more", "abc "),  # the cut inside a key that ends past it
-        ("sk_live_a / b", "sk_live_a"),  # a key that ends at the cut: kept whole
-        ("abcdefghi sk_live_a", "abcdefghi"),  # a key that starts at the cut: up to it
+        (f"abc {STRIPE_LIVE}a1b2", "abc "),  # a key across the cut: before the whole key
+        (f"{STRIPE_LIVE}a1b2", ""),  # a key from the start: none of it
+        (f"abc {STRIPE_LIVE}a1 more", "abc "),  # the cut inside a key that ends past it
+        (f"{STRIPE_LIVE}a / b", f"{STRIPE_LIVE}a"),  # a key that ends at the cut: kept whole
+        (f"abcdefghi {STRIPE_LIVE}a", "abcdefghi"),  # a key that starts at the cut: up to it
         ("ask_live_a1b2", "ask_live_"),  # a shape after a letter is no key: at the limit
-        ("x_sk_live_a1b2", "x_"),  # after `_` it is one
-        ("%20sk_live_a1", "%20"),  # and after an escape
+        (f"x_{STRIPE_LIVE}a1b2", "x_"),  # after `_` it is one
+        (f"%20{STRIPE_LIVE}a1", "%20"),  # and after an escape
     ],
 )
 def test_a_cut_outside_secrets_moves_only_for_a_key_across_it(text, kept):
@@ -338,14 +357,18 @@ def test_a_cut_outside_secrets_moves_only_for_a_key_across_it(text, kept):
 def test_redaction_finds_the_shapes_a_cut_moves_for():
     """`redact` and `cut_outside_secrets` read one compiled pattern, so a shape added for one is
     a shape the other knows."""
-    assert redact.SECRET_SHAPE is secret_shapes.SECRET_SHAPE
+    assert redact.SECRET_SHAPE is secret_shapes.SECRET_SHAPE  # type: ignore[attr-defined]
+
+
+SHORTEST = STRIPE_LIVE + "a"
 
 
 @pytest.mark.parametrize(
-    "text", ['"sk_live_a"', "=sk_live_a", "/sk_live_a", "_sk_live_a", "sk_live_a", "(sk_live_a)"]
+    "text",
+    [f'"{SHORTEST}"', f"={SHORTEST}", f"/{SHORTEST}", f"_{SHORTEST}", SHORTEST, f"({SHORTEST})"],
 )
 def test_a_shape_after_punctuation_or_at_the_start_is_still_a_secret(text):
-    assert "sk_live_a" not in str(redact_json(text, KEY))
+    assert SHORTEST not in str(redact_json(text, KEY))
 
 
 # What raw text spells a separator as: a JSON string escape inside an SSE line or a text body, and
@@ -355,12 +378,12 @@ ESCAPES = ["\\n", "\\t", "\\r", "\\b", "\\f", "\\u0020", "\\u00A0", "%20", "%3D"
 
 @pytest.mark.parametrize("escape", ESCAPES)
 def test_a_shape_after_an_escape_is_still_a_secret(escape):
-    text = f"key:{escape}sk_live_abc123"
-    assert redact_json(text, KEY) == f"key:{escape}{_ph('sk_live_abc123')}"
+    text = f"key:{escape}{LIVE_KEY}"
+    assert redact_json(text, KEY) == f"key:{escape}{_ph(LIVE_KEY)}"
 
 
 def test_a_shape_after_an_escape_is_replaced_where_text_is_stored_raw():
-    secret = "sk_live_abc123"
+    secret = LIVE_KEY
     sse = f'data: {{"partial_json": "{{\\"note\\": \\"key:\\n{secret}'
     response = Response(status=200, headers=(("content-type", "text/event-stream"),), body=b"")
     ex = _exchange(
@@ -382,7 +405,7 @@ def test_a_shape_glued_to_a_word_is_part_of_the_word():
 
 
 def test_a_shape_is_replaced_in_every_place_text_is_stored():
-    secret = "sk_live_abc123"
+    secret = LIVE_KEY
     response = Response(
         status=200,
         headers=(("Content-Type", "text/event-stream"),),
@@ -453,7 +476,8 @@ def test_a_json_line_the_walk_cannot_see_whole_fails_the_body_closed():
 
 
 def test_a_shape_in_a_json_key_is_replaced_too():
-    assert redact_json({"sk_live_k": 1}, KEY) == {_ph("sk_live_k"): 1}
+    named = STRIPE_LIVE + "k"
+    assert redact_json({named: 1}, KEY) == {_ph(named): 1}
 
 
 # ------------------------------------------------------------------------------ rule 4: paths
@@ -499,7 +523,7 @@ def test_a_credential_path_holding_a_shape_is_replaced_whole_wherever_else_it_is
     """The shape rule runs first, so a path holding `xoxb-…` was no longer there literally: the
     header and the 502 kept the team and bot ids beside a placeholder of the shape alone, not the
     one placeholder the request's path is stored as."""
-    path = "/services/T0SHAPE/B0SHAPE/xoxb-12-abc"
+    path = f"/services/T0SHAPE/B0SHAPE/{SLACK_BOT}12-abc"
     reason = f"answer target 'http://127.0.0.1:9{path}' could not be reached"
     response = Response(
         status=502,
@@ -524,12 +548,12 @@ def test_an_operation_named_after_the_path_is_redacted_with_the_path():
         _request(host="hooks.slack.com", path=path), service="slack", operation=f"POST {path}"
     )
     assert redact_exchange(hook, KEY).operation == f"POST /{_ph(path)}"
-    keyed = _exchange(_request(method="GET", path="/v1/keys/sk_live_abc"))
-    keyed = dataclasses.replace(keyed, operation="GET /v1/keys/sk_live_abc")
-    assert redact_exchange(keyed, KEY).operation == f"GET /v1/keys/{_ph('sk_live_abc')}"
+    keyed = _exchange(_request(method="GET", path=f"/v1/keys/{LIVE_KEY_SHORT}"))
+    keyed = dataclasses.replace(keyed, operation=f"GET /v1/keys/{LIVE_KEY_SHORT}")
+    assert redact_exchange(keyed, KEY).operation == f"GET /v1/keys/{_ph(LIVE_KEY_SHORT)}"
     assert redact_exchange(_exchange(), KEY).operation == "refunds.create"
-    named = _exchange(operation="keys.sk_live_abc")
-    assert redact_exchange(named, KEY).operation == f"keys.{_ph('sk_live_abc')}"
+    named = _exchange(operation=f"keys.{LIVE_KEY_SHORT}")
+    assert redact_exchange(named, KEY).operation == f"keys.{_ph(LIVE_KEY_SHORT)}"
 
 
 def test_the_answer_target_is_redacted_by_the_requests_rules():
@@ -544,9 +568,9 @@ def test_the_answer_target_is_redacted_by_the_requests_rules():
     assert (
         redact_exchange(hook, KEY).target == f"http://127.0.0.1:3000/{_ph(path)}?token={_ph('t1')}"
     )
-    stripe = _exchange(target="http://127.0.0.1:3000/v1/refunds?k=sk_test_abc")
+    stripe = _exchange(target=f"http://127.0.0.1:3000/v1/refunds?k={TEST_KEY}")
     assert redact_exchange(stripe, KEY).target == (
-        f"http://127.0.0.1:3000/v1/refunds?k={_ph('sk_test_abc')}"
+        f"http://127.0.0.1:3000/v1/refunds?k={_ph(TEST_KEY)}"
     )
     assert redact_exchange(_exchange(), KEY).target == ""
 
@@ -564,7 +588,7 @@ def test_a_body_with_nothing_to_redact_comes_back_byte_for_byte():
 
 
 def test_a_body_that_is_not_utf8_is_stored_unscanned():
-    body = b"\xff\xfe sk_live_abc123"
+    body = b"\xff\xfe " + LIVE_KEY.encode()
     assert _body(body, ("content-type", "application/octet-stream")) == body
 
 
@@ -588,8 +612,8 @@ def test_redact_exchange_returns_a_new_exchange_and_copies_every_other_field():
 
 SSE = ("content-type", "text/event-stream")
 QUIET = b'data: {"text":"hi"}\n'
-LOUD = b'data: {"key":"sk_live_abc123"}\n'
-LOUD_STORED = b'data: {"key":"' + _ph("sk_live_abc123").encode() + b'"}\n'
+LOUD = b'data: {"key":"' + LIVE_KEY.encode() + b'"}\n'
+LOUD_STORED = b'data: {"key":"' + _ph(LIVE_KEY).encode() + b'"}\n'
 LAST = b'data: {"text":"bye"}\n'
 
 
@@ -642,10 +666,10 @@ def test_a_stream_redaction_left_alone_keeps_its_chunks():
 def test_a_stream_whose_lines_do_not_pair_up_after_redaction_is_one_chunk():
     """A body that is one JSON document is re-serialized compactly, which can join its lines, so
     no boundary can be carried over: the stored body is one chunk."""
-    sent = b'{\n  "key": "sk_live_abc123"\n}\n'
+    sent = b'{\n  "key": "' + LIVE_KEY.encode() + b'"\n}\n'
     stored = _stream(sent, (4, len(sent) - 4))
     assert stored.response is not None
-    assert stored.response.body == b'{"key":"' + _ph("sk_live_abc123").encode() + b'"}'
+    assert stored.response.body == b'{"key":"' + _ph(LIVE_KEY).encode() + b'"}'
     assert stored.stream_chunks == (len(stored.response.body),)
 
 
@@ -700,17 +724,17 @@ def test_rechunk_never_raises_and_still_splits_the_stored_body():
 
 # Every secret shape redaction knows, each a line of its own among lines nothing changes.
 _STREAM_SECRETS = (
-    "sk_live_abc123",
-    "sk_test_Q9",
-    "rk_live_zz9",
-    "whsec_abc",
-    "xoxb-123-abc",
-    "xapp-1-A0-xyz",
-    "ghp_" + "a" * 36,
-    "github_pat_11AA_bb",
-    "AKIA" + "ABCDEFGHIJKLMNOP",
-    "sk-ant-api03-xy_z",
-    "sk-proj-" + "q" * 22,
+    LIVE_KEY,
+    STRIPE_TEST + "Q9",
+    STRIPE_RESTRICTED + "zz9",
+    STRIPE_WEBHOOK + "abc",
+    SLACK_BOT + "123-abc",
+    SLACK_APP + "1-A0-xyz",
+    GITHUB + "a" * 36,
+    GITHUB_PAT + "11AA_bb",
+    AWS + "ABCDEFGHIJKLMNOP",
+    ANTHROPIC + "api03-xy_z",
+    OPENAI_PROJECT + "q" * 22,
 )
 # Characters several bytes long, so a boundary can fall inside one, and characters `str.splitlines`
 # ends a line at and SSE does not: a remap that split the text and the bytes differently would
@@ -795,7 +819,7 @@ def test_a_parser_that_raises_stores_neither_body_and_flags_the_exchange(monkeyp
     def boom(*args, **kwargs):
         raise RuntimeError("parser broke")
 
-    monkeypatch.setattr(redact.json, "loads", boom)
+    monkeypatch.setattr(redact.json, "loads", boom)  # type: ignore[attr-defined]
     stored = redact_exchange(ex, KEY)
     assert stored.response is not None
     assert (stored.request.body, stored.response.body) == (FAILED_BODY, FAILED_BODY)
@@ -825,7 +849,7 @@ def test_json_the_walk_cannot_see_whole_fails_closed_rather_than_scanned_as_text
 def test_a_body_too_deep_to_redact_fails_closed_and_the_log_names_no_value(caplog):
     """Python 3.12's `json.loads` raises RecursionError on this body and 3.14's parses it, so the
     walk raises instead. Either way the body is not stored."""
-    body = b"[" * 100_000 + b'"sk_live_abc"' + b"]" * 100_000
+    body = b"[" * 100_000 + f'"{LIVE_KEY_SHORT}"'.encode() + b"]" * 100_000
     with caplog.at_level(logging.WARNING, logger="irimi.record.redact"):
         stored = redact_exchange(_exchange(_request(headers=(JSON,), body=body)), KEY)
     assert stored.request.body == FAILED_BODY
@@ -872,20 +896,23 @@ def test_a_lone_surrogate_in_a_body_that_changed_fails_that_body_alone():
 
 
 def test_redact_json_hides_trigger_and_tool_arguments():
-    args = {"argv": ["agent.py", "--key", "sk_test_abc"], "config": {"API_KEY": "v", "n": 2}}
+    args: dict[str, JSONValue] = {
+        "argv": ["agent.py", "--key", TEST_KEY],
+        "config": {"API_KEY": "v", "n": 2},
+    }
     assert redact_json(args, KEY) == {
-        "argv": ["agent.py", "--key", _ph("sk_test_abc")],
+        "argv": ["agent.py", "--key", _ph(TEST_KEY)],
         "config": {"API_KEY": _ph("v"), "n": 2},
     }
     assert args["config"] == {"API_KEY": "v", "n": 2}
-    untouched = {"a": [1, 2.5, None, True, "x"]}
+    untouched: dict[str, JSONValue] = {"a": [1, 2.5, None, True, "x"]}
     assert redact_json(untouched, KEY) is untouched
 
 
 def test_redact_json_fails_closed_on_a_value_that_is_not_json():
     """A tuple is not JSON, and `json.dumps` would still write its secret as an array."""
-    assert redact_json(("sk_live_abc",), KEY) == redact.REDACTION_FAILED
-    assert redact_json({"a": {"b"}}, KEY) == redact.REDACTION_FAILED
+    assert redact_json((LIVE_KEY_SHORT,), KEY) == redact.REDACTION_FAILED  # type: ignore[arg-type]
+    assert redact_json({"a": {"b"}}, KEY) == redact.REDACTION_FAILED  # type: ignore[dict-item]
 
 
 def test_redact_json_fails_closed_on_a_value_too_deep_to_walk():
@@ -938,7 +965,7 @@ def test_a_process_that_loses_the_race_reads_the_winners_key(tmp_path, monkeypat
         (home / paths.REDACT_KEY_NAME).write_bytes(winner)
         real_link(src, dst)
 
-    monkeypatch.setattr(redact.os, "link", link_after_the_winner)
+    monkeypatch.setattr(redact.os, "link", link_after_the_winner)  # type: ignore[attr-defined]
     assert redact.load_key(home) == winner
     assert sorted(p.name for p in home.iterdir()) == [paths.REDACT_KEY_NAME]
 

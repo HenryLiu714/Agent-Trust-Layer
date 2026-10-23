@@ -55,7 +55,7 @@ import secrets
 import sys
 from collections.abc import Callable, Iterator
 from types import ModuleType
-from typing import Any, TypeVar
+from typing import Any, TypeVar, overload
 
 from examples.workflows import agentkit
 
@@ -208,7 +208,7 @@ def _called_with(f: Callable[..., Any], args: Any, kwargs: Any) -> dict[str, str
     rather than raise."""
     try:
         if sys.version_info >= (3, 14):
-            import annotationlib
+            import annotationlib  # noqa: PLC0415  # exists from 3.14 only
 
             signature = inspect.signature(f, annotation_format=annotationlib.Format.FORWARDREF)
         else:
@@ -255,6 +255,10 @@ async def _carried(observed: contextlib.ExitStack, ended: dict[str, Any], corout
         return result
 
 
+@overload
+def trigger[F: Callable[..., Any]](fn: F, /) -> F: ...
+@overload
+def trigger(*, name: str | None = None) -> Callable[[F], F]: ...
 def trigger(fn: Callable[..., Any] | None = None, *, name: str | None = None) -> Any:
     real = _from_real("trigger")
 
@@ -412,13 +416,17 @@ def _is_async(f: Callable[..., Any]) -> bool:
     return not inspect.isroutine(f) and inspect.iscoroutinefunction(type(f).__call__)
 
 
+@overload
+def read_tool[F: Callable[..., Any]](fn: F, /) -> F: ...
+@overload
+def read_tool(*, name: str | None = None) -> Callable[[F], F]: ...
 def read_tool(fn: Callable[..., Any] | None = None, /, *, name: str | None = None) -> Any:
     real = _from_real("read_tool")
     decorate = _tool("read", None, name, None if real is None else real(name=name))
     return decorate if fn is None else decorate(fn)
 
 
-def write_tool(*, fake: Callable[..., Any], name: str | None = None) -> Any:
+def write_tool(*, fake: Callable[..., Any], name: str | None = None) -> Callable[[F], F]:
     real = _from_real("write_tool")
     return _tool(
         "write",
@@ -432,7 +440,7 @@ def _tool(kind: str, fake: Any, name: str | None, real: Any) -> Callable[[Any], 
     """The decorator `read_tool` and `write_tool` return. `real` is the real SDK's decorator for a
     read, or for a write the function that makes it from a fake; None under the fallback."""
 
-    def decorate(fn: Callable[..., Any]) -> Any:
+    def decorate(fn: Any) -> Any:
         # A `staticmethod` or `classmethod` stays one, as the real decorators keep it: this
         # module's logging wrapper goes around the function inside, never around the descriptor,
         # which it could not call with the receiver the descriptor supplies.

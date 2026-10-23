@@ -99,8 +99,9 @@ def post_to_slack(text: str) -> None:
     channel = os.environ.get("SLACK_CHANNEL")
     if not token or not channel:
         return
-    from slack_sdk import WebClient
-    from slack_sdk.errors import SlackApiError
+    # Imported only when Slack is configured: slack_sdk is optional.
+    from slack_sdk import WebClient  # noqa: PLC0415
+    from slack_sdk.errors import SlackApiError  # noqa: PLC0415
 
     client = WebClient(token=token)
     try:
@@ -121,7 +122,7 @@ def post_to_slack(text: str) -> None:
 
 
 def main() -> int:
-    import stripe
+    import stripe  # noqa: PLC0415  # an optional dependency, needed only to run the agent
 
     key = os.environ.get("STRIPE_API_KEY")
     if not key:

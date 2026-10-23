@@ -8,6 +8,7 @@ import pytest
 
 from irimi.cli import main
 from irimi.config import ca, paths
+from tests.support.servers import stop_server
 
 
 class _Upstream(BaseHTTPRequestHandler):
@@ -29,7 +30,7 @@ def upstream():
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     yield srv.server_address[1]
-    srv.shutdown()
+    stop_server(srv)
 
 
 @pytest.fixture
@@ -392,6 +393,7 @@ def test_sigterm_stops_the_command_ends_the_run_and_closes_the_store(home, upstr
     import subprocess
     import time
 
+    from irimi.core.exchange import Exchange
     from irimi.record.store.reader import StoreReader
 
     ready = home / "child.pid"
@@ -436,8 +438,10 @@ def test_sigterm_stops_the_command_ends_the_run_and_closes_the_store(home, upstr
     with pytest.raises(ProcessLookupError):
         os.kill(child, 0)
     [record] = StoreReader(home / "store").list_runs()
+    assert record.end is not None
     assert (record.end.outcome, record.end.exit_code) == ("error", 143)
     [event] = StoreReader(home / "store").load_run(record.run_id).events
+    assert isinstance(event, Exchange)
     assert event.request.path == "/hello"
     assert "1 exchange ·" in out
     assert "Traceback" not in err
@@ -500,6 +504,7 @@ def test_sigterm_while_the_command_starts_is_passed_to_it_once_it_exists(home, m
     assert main(["shadow", *_py("import time; time.sleep(60)")]) == 143
     assert time.monotonic() - started < 30
     [record] = StoreReader(home / "store").list_runs()
+    assert record.end is not None
     assert (record.end.outcome, record.end.exit_code) == ("error", 143)
 
 
@@ -529,6 +534,7 @@ def test_sigterm_after_the_command_exited_signals_no_pid(home, monkeypatch):
     assert main(["shadow", *_py("pass")]) == 0
     assert killed == []
     [record] = StoreReader(home / "store").list_runs()
+    assert record.end is not None
     assert (record.end.outcome, record.end.exit_code) == ("ok", 0)
 
 

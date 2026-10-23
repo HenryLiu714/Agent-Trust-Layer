@@ -339,7 +339,7 @@ def test_rows_not_shown_finds_a_row_no_summary_printed_and_a_pair_not_told_apart
     newline = shared_store_run(W, "two_line_answer")
     typed = shared_store_run(W, "typed_escape_answer")
     a, b = (result.one("run.start")["run"] for result in (newline, typed))
-    code, out, err = compare(newline, typed)
+    _code, out, _err = compare(newline, typed)
     assert rows_not_shown(typed, a, b, out) == []
     pair = out.index(next(row for row in out if row.startswith("  ~ A ")))
     added = f'  + ○ slack  post to #C0OPS: "Payouts are late."  {CHECKED}'

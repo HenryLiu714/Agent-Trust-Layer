@@ -200,7 +200,7 @@ def match_route(sm: ServiceMap, method: str, path: str) -> Route | None:
     best: Route | None = None
     best_holes = 0
     for route in sm.routes:
-        if route.method != ANY_METHOD and route.method != method:
+        if route.method not in (ANY_METHOD, method):
             continue
         holes = match_path(route.path, segments)
         if holes is None:
@@ -246,12 +246,13 @@ def fill_path(pattern: str, params: dict[str, str]) -> str | None:
     value or a value would add segments, a query or a fragment. The inverse of `path_params`."""
     parts: list[str] = []
     for part in path_segments(pattern):
-        if is_hole(part):
-            value = params.get(part[1:-1], "")
-            if not value or any(c in value for c in "/?#"):
-                return None
-            part = value
-        parts.append(part)
+        if not is_hole(part):
+            parts.append(part)
+            continue
+        value = params.get(part[1:-1], "")
+        if not value or any(c in value for c in "/?#"):
+            return None
+        parts.append(value)
     return "/" + "/".join(parts) + ("/" if pattern.endswith("/") and parts else "")
 
 

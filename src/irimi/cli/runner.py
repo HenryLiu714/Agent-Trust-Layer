@@ -181,10 +181,8 @@ def start_engine(engine: Engine, timeout: float = READY_TIMEOUT_S) -> EngineThre
     def serve() -> None:
         # A failed bind reaches the caller through wait_ready(); letting it escape the thread as
         # well would print a traceback next to the caller's own error message.
-        try:
+        with contextlib.suppress(EngineStartError):
             loop.run_until_complete(engine.run())
-        except EngineStartError:
-            pass
 
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
@@ -362,6 +360,7 @@ def probe_python(python: str) -> str | None:
             text=True,
             errors="replace",
             timeout=timeout,
+            check=False,
         )
     except subprocess.TimeoutExpired:
         raise PythonProbeFailed("timeout", f"{timeout:.0f}s") from None

@@ -20,6 +20,8 @@ from irimi.servicemaps.classify import Classification, classify
 from irimi.services import generic
 from irimi.services.slack import answers as slack_answers
 from irimi.services.stripe import answers as stripe_answers
+from tests.support.credentials import STRIPE_TEST_X
+from tests.support.servers import stop_server
 
 SHIPPED = servicemaps.MapIndex(tuple(servicemaps.loader.load_shipped()))
 
@@ -230,7 +232,7 @@ def test_two_slack_writes_in_the_same_second_get_different_timestamps():
 def test_a_slack_timestamp_still_names_the_current_second(monkeypatch):
     """The counter must not drift off the clock: a `ts` is a real epoch time, and an SDK that
     renders one as a date has to get today."""
-    monkeypatch.setattr(slack_answers.time, "time", lambda: 1_700_000_000.9)
+    monkeypatch.setattr(slack_answers.time, "time", lambda: 1_700_000_000.9)  # type: ignore[attr-defined]
     clock = services.TsClock()
     assert clock.mint() == "1700000000.000000"
     assert clock.mint() == "1700000000.000001"
@@ -503,7 +505,7 @@ def test_stripe_python_parses_the_faked_refund():
             content_type="application/x-www-form-urlencoded",
         )
     )
-    refund = stripe.Refund.construct_from(json.loads(ans.response.body), "sk_test_x")
+    refund = stripe.Refund.construct_from(json.loads(ans.response.body), STRIPE_TEST_X)
     assert type(refund).__name__ == "Refund"  # the class comes from `object`, so it must be there
     assert refund.id.startswith("re_")
     assert refund.object == "refund"
@@ -926,7 +928,9 @@ def test_the_faked_refund_is_a_whole_refund_object_not_just_what_was_posted():
     """The point of L1. An agent branches on `status`, `currency` and `destination_details`,
     and at L0 none of them are there at all - it reads `None` and takes the wrong branch."""
     body = json.loads(_refund().response.body)
-    assert body.keys() == generic.fixture_object("stripe", "refund").keys()
+    fixture = generic.fixture_object("stripe", "refund")
+    assert fixture is not None
+    assert body.keys() == fixture.keys()
     assert body["status"] == "succeeded"
     assert body["currency"] == "usd"
     assert body["destination_details"] == {"card": {"type": "reversal"}, "type": "card"}
@@ -954,7 +958,9 @@ def test_a_value_of_the_wrong_type_leaves_the_fixtures_own_in_place():
     """`amount` is a number in every real refund. A form body can say anything, and a string
     there is what makes `refund.amount / 100` raise inside the agent instead of here."""
     body = json.loads(_refund(b"amount=not-a-number").response.body)
-    assert body["amount"] == generic.fixture_object("stripe", "refund")["amount"]
+    fixture = generic.fixture_object("stripe", "refund")
+    assert fixture is not None
+    assert body["amount"] == fixture["amount"]
 
 
 def test_the_service_owns_the_fields_that_say_what_this_object_is():
@@ -1026,7 +1032,9 @@ def test_two_writes_do_not_share_one_fixture():
     second = json.loads(_refund(b"charge=ch_SECOND").response.body)
     assert first["charge"] == "ch_FIRST"
     assert second["charge"] == "ch_SECOND"
-    assert second["amount"] == generic.fixture_object("stripe", "refund")["amount"]
+    fixture = generic.fixture_object("stripe", "refund")
+    assert fixture is not None
+    assert second["amount"] == fixture["amount"]
 
 
 def test_a_route_whose_fixture_cannot_be_read_falls_back_to_l0_and_says_so(no_fixtures):
@@ -1078,7 +1086,7 @@ def test_stripe_python_parses_every_faked_object_with_every_field(
     ans = _answer(_req("POST", path=path, body=body, content_type=FORM))
     assert ans.answered_by == "fake-L1"
     parsed = json.loads(ans.response.body)
-    obj = getattr(stripe, cls_name).construct_from(parsed, "sk_test_x")
+    obj = getattr(stripe, cls_name).construct_from(parsed, STRIPE_TEST_X)
     assert obj.object == parsed["object"]
     # Every field survives the SDK's own round trip, which is what "with every fixture field
     # present" means. Through `str(obj)` - the SDK's JSON serialization - because it turns each
@@ -1264,7 +1272,9 @@ def test_a_faked_slack_post_nests_the_fixture_message_inside_the_envelope():
     assert (body["ok"], body["channel"]) == (True, "C1")
     assert body["message"]["text"] == "hi"
     assert body["message"]["type"] == "message"
-    assert body["message"]["user"] == generic.fixture_object("slack", "message")["user"]
+    fixture = generic.fixture_object("slack", "message")
+    assert fixture is not None
+    assert body["message"]["user"] == fixture["user"]
     assert "text" not in body  # the payload nests; it does not leak into the envelope
 
 
@@ -1273,7 +1283,9 @@ def test_the_faked_messages_ts_is_the_envelopes_and_not_the_fixtures():
     the fixture's frozen one would make every faked message the same message."""
     body = json.loads(_post_message().response.body)
     assert body["message"]["ts"] == body["ts"]
-    assert body["ts"] != generic.fixture_object("slack", "message")["ts"]
+    fixture = generic.fixture_object("slack", "message")
+    assert fixture is not None
+    assert body["ts"] != fixture["ts"]
 
 
 def test_a_slack_post_still_answers_the_envelope_when_the_fixture_cannot_be_read(no_fixtures):
@@ -1359,7 +1371,7 @@ def test_a_nested_ts_is_observed_wherever_it_sits():
     ],
 )
 def test_observing_a_body_that_carries_no_timestamp_changes_nothing(body):
-    """This runs inside a mitmproxy hook, where a raise forwards the flow and a forwarded write
+    """The clock runs inside a mitmproxy hook, where a raise forwards the flow and a forwarded write
     escapes shadow mode. Every shape a real service - or a hostile one - can send is a no-op."""
     clock = services.TsClock()
     clock.last = (1_700_000_000, 7)
@@ -1429,7 +1441,7 @@ def _charge(ident="ch_REAL", amount=4900, refunded_so_far=0):
 
 
 AGENT_HEADERS = (
-    ("authorization", "Bearer sk_test_x"),
+    ("authorization", f"Bearer {STRIPE_TEST_X}"),
     ("stripe-account", "acct_1"),
     ("stripe-version", "2024-06-20"),
     ("idempotency-key", "idem-1"),
@@ -1662,7 +1674,7 @@ def test_the_probe_carries_the_writes_credentials_and_scope_and_nothing_else():
     _checked(reader, _refund_request())
     (probe,) = reader.asked
     headers = dict(probe.headers)
-    assert headers["authorization"] == "Bearer sk_test_x"
+    assert headers["authorization"] == f"Bearer {STRIPE_TEST_X}"
     assert headers["stripe-account"] == "acct_1"
     assert headers["stripe-version"] == "2024-06-20"
     assert headers["accept"] == "application/json"
@@ -1700,7 +1712,7 @@ def test_a_probe_the_maps_do_not_call_a_read_is_refused(monkeypatch):
     """A probe may make read operations only, which is enforced by asking the maps, not by the
     verb."""
     check = services.Check(
-        probe=lambda proposal: services.Probe("refunds.create", "POST", "/v1/refunds"),
+        probe=lambda proposal: services.Probe("refunds.create", "POST", "/v1/refunds"),  # type: ignore[arg-type]
         verdict=lambda proposal, document: None,
     )
     stripe = replace(services.REGISTRY["stripe"], preconditions={"charge_refundable": check})
@@ -1826,7 +1838,7 @@ def upstream(monkeypatch):
     srv = HTTPServer(("127.0.0.1", 0), _Upstream)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     yield srv.server_address[1]
-    srv.shutdown()
+    stop_server(srv)
 
 
 def _local(port: int) -> Request:
@@ -1838,6 +1850,7 @@ def test_the_upstream_reader_returns_what_the_service_answered(upstream, status,
     """A 429 is information the exchange records, so it comes back as a response, not as None."""
     monkeypatch.setattr(_Upstream, "status", status)
     response = UpstreamReader()(_local(upstream))
+    assert response is not None
     assert response.status == status
     assert response.body == _Upstream.body
 

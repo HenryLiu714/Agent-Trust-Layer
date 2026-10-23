@@ -31,6 +31,7 @@ of the stream. Exit codes: 0 answered, 3 the caller went away, 4 an upstream str
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import http.client
 import itertools
@@ -44,7 +45,7 @@ import urllib.error
 import urllib.request
 import zlib
 from collections.abc import Callable, Iterator
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 
@@ -252,7 +253,8 @@ def openai_stream(answer: str) -> tuple[str, list[dict[str, Any]]]:
     }
     headers = {"Authorization": f"Bearer {agentkit.key('OPENAI_API_KEY')}"}
     url = agentkit.base("openai") + "/v1/chat/completions"
-    content, calls, done = "", {}, False
+    calls: dict[int, dict[str, Any]] = {}
+    content, done = "", False
     for _, data in sse_events(stream_post(url, body, headers, "openai_stream")):
         if data == "[DONE]":
             done = True
@@ -327,7 +329,7 @@ def handed_off(question: str, send: Callable[[str, dict[str, Any]], None]) -> di
 
 class _Chat(agentkit.Handler):
     protocol_version = "HTTP/1.0"
-    outcomes: dict[str, dict[str, Any]] = {}  # by question
+    outcomes: ClassVar[dict[str, dict[str, Any]]] = {}  # by question
     finished = threading.Semaphore(0)  # released once per chat answered
     hand_off = False  # answer with `handed_off`, not the `chat` trigger
 
@@ -357,10 +359,8 @@ class _Chat(agentkit.Handler):
             }
         except UpstreamBroke as exc:
             _Chat.outcomes[question] = {"outcome": "upstream_broke", "error": str(exc)}
-            try:
+            with contextlib.suppress(ClientGone):
                 send("error", {"error": str(exc)})
-            except ClientGone:
-                pass
         finally:
             _Chat.finished.release()
 

@@ -52,18 +52,18 @@ from irimi.services.model import (
 from irimi.services.slack.answers import TsClock
 
 __all__ = [
+    "NOT_EVALUABLE",
+    "REGISTRY",
     "Answer",
     "AnswerClock",
     "Applied",
     "Check",
     "Fake",
     "Idempotency",
-    "NOT_EVALUABLE",
     "NotEvaluable",
     "Probe",
     "Proposal",
     "QueryRewrite",
-    "REGISTRY",
     "Read",
     "ReadEffects",
     "Rejection",

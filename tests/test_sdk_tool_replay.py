@@ -569,6 +569,7 @@ def test_a_run_that_ends_on_a_recorded_error_records_the_recorded_type(irimi):
     with pytest.raises(KeyError):
         irimi.record(ends_on_it)
     [recorded] = [r for r in StoreReader(irimi.root).list_runs() if r.attribution == "sdk"]
+    assert recorded.end is not None
     assert recorded.end.error == ErrorInfo("builtins.KeyError", "'acc_missing'")
     _FORBIDDEN.add("acc_missing")
     with pytest.raises(sdk.RecordedToolError) as raised:
@@ -757,9 +758,11 @@ def test_a_lookup_carries_no_run_header_and_never_goes_through_a_proxy(monkeypat
     """A control request, as the posts are: unlabelled under `instrument()`, and to the
     endpoint itself whatever `HTTP_PROXY` says."""
     monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{test_sdk._closed_port()}")
-    with _answering(monkeypatch, 200, json.dumps(_HIT).encode()) as seen:
-        with sdk.run("labelled", inputs={}):  # which instruments the HTTP clients
-            assert balance("acc_1") == {"account": "acc_1", "balance": 1}
+    with (
+        _answering(monkeypatch, 200, json.dumps(_HIT).encode()) as seen,
+        sdk.run("labelled", inputs={}),  # which instruments the HTTP clients
+    ):
+        assert balance("acc_1") == {"account": "acc_1", "balance": 1}
     [lookup] = [h for path, h in seen if path.endswith(RECORDED_ACTION)]
     assert RUN_HEADER not in lookup
 
@@ -795,7 +798,11 @@ def test_method_tools_and_a_tool_on_a_thread_are_answered_from_the_recording(iri
     def script() -> list[Any]:
         got: list[Any] = []
         ledger = Ledger("first")
-        worker = threading.Thread(target=sdk.propagate(lambda: got.append(balance("acc_t"))))
+
+        def ask() -> None:
+            got.append(balance("acc_t"))
+
+        worker = threading.Thread(target=sdk.propagate(ask))
         worker.start()
         worker.join()
         return [ledger.entry("acc_m"), Ledger.rate("acc_s"), Ledger.kind("acc_c"), *got]

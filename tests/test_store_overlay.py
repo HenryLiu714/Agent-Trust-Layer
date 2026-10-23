@@ -35,8 +35,8 @@ def _exchange() -> Exchange:
 
 def test_null_store_record_and_close_return_none():
     store = NullStore()
-    assert store.record(_exchange()) is None
-    assert store.close() is None
+    assert store.record(_exchange()) is None  # type: ignore[func-returns-value]
+    assert store.close() is None  # type: ignore[func-returns-value]
 
 
 def test_no_overlay_returns_upstream_response_unchanged():

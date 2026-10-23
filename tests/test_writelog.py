@@ -1,10 +1,11 @@
-"""`writelog`: the run's faked writes, decoded for the overlay and the policy alike"""
+"""`writelog`: the run's faked writes, decoded for the overlay and the policy alike."""
 
 import json
 from dataclasses import replace
 
 from irimi.core import bodies
 from irimi.core.exchange import Exchange, Request, Response
+from irimi.core.limits import MAX_BODY_BYTES
 from irimi.decide import writelog
 from irimi.protocol.trace import UNATTRIBUTED
 
@@ -132,6 +133,6 @@ def test_a_run_s_writes_already_read_do_not_change_when_it_adds_more():
 
 
 def test_a_body_over_the_size_cap_is_not_a_json_object():
-    padded = json.dumps({"description": "x" * bodies.MAX_BODY_BYTES}).encode()
+    padded = json.dumps({"description": "x" * MAX_BODY_BYTES}).encode()
     assert bodies.json_object(padded) is None
     assert bodies.json_object(b'{"ok": true}') == {"ok": True}

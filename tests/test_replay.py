@@ -9,16 +9,26 @@ import pytest
 from irimi.core import exitcodes
 from irimi.core.exchange import Exchange, Request, Response
 from irimi.protocol.replay_files import CallResult, ReplayResult
-from irimi.protocol.trace import ErrorInfo, RunRecord, StoredRun, ToolCall, Trigger
+from irimi.protocol.trace import (
+    Attribution,
+    ErrorInfo,
+    JSONValue,
+    RunRecord,
+    StoredRun,
+    ToolCall,
+    Trigger,
+)
 from irimi.record import redact
 from irimi.replay import plan as replay_plan
 from irimi.replay import report as replay_report
 
-TICKET = {"ticket": {"__irimi_type__": "agent:Ticket", "value": {"charge": "ch_1"}}}
+TICKET: dict[str, JSONValue] = {
+    "ticket": {"__irimi_type__": "agent:Ticket", "value": {"charge": "ch_1"}}
+}
 TRIGGER = Trigger("handle", "agent:handle", TICKET, True)
 
 
-def _record(trigger: Trigger | None = TRIGGER, attribution: str = "sdk") -> RunRecord:
+def _record(trigger: Trigger | None = TRIGGER, attribution: Attribution = "sdk") -> RunRecord:
     record = RunRecord.process("src", ["python", "agent.py"], None, 1.0)
     return replace(record, attribution=attribution, trigger=trigger)
 
@@ -35,7 +45,7 @@ def test_a_trigger_with_an_entrypoint_is_called_with_its_recorded_args():
 
 
 def test_call_and_args_replace_the_entrypoint_and_the_args_and_the_trigger_says_so():
-    other = {"ticket": None}
+    other: dict[str, JSONValue] = {"ticket": None}
     plan = replay_plan.plan(_record(), [], "agent:other", other)
     assert plan.call == replay_plan.Call("agent:other", other)
     assert plan.trigger == Trigger("agent:other", "agent:other", other, True)
@@ -230,7 +240,7 @@ def _exchange(
         operation="charges.retrieve",
         kind="read",
         answered_by=answered_by,  # type: ignore[arg-type]
-        flags=flags,
+        flags=flags,  # type: ignore[arg-type]
         issued_by=issued_by,  # type: ignore[arg-type]
         run_id="new",
     )

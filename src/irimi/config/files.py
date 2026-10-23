@@ -5,6 +5,7 @@ any byte lands, never through a symlink at its own path, and in one of three way
 or as one more whole line of a file several processes append to (`append_line`).
 """
 
+import contextlib
 import os
 import secrets
 from pathlib import Path
@@ -29,10 +30,8 @@ def private_dir(path: Path) -> None:
         missing.append(path)
         path = path.parent
     for directory in reversed(missing):
-        try:
+        with contextlib.suppress(FileExistsError):  # another process made it first
             directory.mkdir(mode=DIR_MODE)
-        except FileExistsError:
-            pass  # another process made it first
 
 
 def write_private(
@@ -58,10 +57,9 @@ def write_private(
         if how == "atomic":
             os.replace(tmp, path)
         else:
-            try:
+            # Another process may publish first, and then its file is the one.
+            with contextlib.suppress(FileExistsError):
                 os.link(tmp, path)
-            except FileExistsError:
-                pass  # another process published first, and its file is the one
     finally:
         tmp.unlink(missing_ok=True)
 

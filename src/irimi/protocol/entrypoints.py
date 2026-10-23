@@ -87,4 +87,5 @@ def resolve(entrypoint: str) -> Callable[..., Any]:
         raise NotCallable("it is a method, and a run does not record the instance it was called on")
     if not callable(found):
         raise NotCallable(f"{qualname} is not callable")
-    return found
+    call: Callable[..., Any] = found
+    return call

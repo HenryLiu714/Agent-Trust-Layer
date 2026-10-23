@@ -10,7 +10,7 @@ import zlib
 from collections.abc import Callable
 from dataclasses import dataclass
 
-import brotli  # type: ignore[import-untyped]  # ships no stubs
+import brotli
 import zstandard
 
 from irimi.core.limits import MAX_DECODED_BODY

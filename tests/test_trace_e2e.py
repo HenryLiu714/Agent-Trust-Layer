@@ -42,6 +42,15 @@ from irimi.record.store.writer import DirectoryStore
 from irimi.report.terminal import exchange_line
 from irimi.servicemaps import loader
 from tests import test_engine_mitm, test_phase_exit
+from tests.support.credentials import (
+    AGENT_STRIPE_KEY,
+    E2E_LLM_KEY,
+    E2E_NESTED_KEY,
+    E2E_SSE_ESCAPED_KEY,
+    E2E_SSE_PLAIN_KEY,
+    E2E_STRIPE_KEY,
+)
+from tests.support.servers import stop_server
 from tests.test_engine_mitm import (
     _carries_run_header,
     _Upstream,
@@ -387,7 +396,7 @@ def test_the_phase_1_run_through_the_reverse_door_survives_the_trace_format(
 def _run_phase1_under_shadow(tmp_path, monkeypatch, stripe_port: int) -> None:
     """The refund agent's read-and-refund child (`tests.test_phase_exit.CHILD`) under the real
     `irimi shadow`, against the loopback Stripe, which never hears a write. Its calls carry
-    `authorization: Bearer sk_test_notreal`."""
+    `AGENT_STRIPE_KEY` as their bearer token."""
     monkeypatch.setattr("irimi.decide.reader.UpstreamReader", _StandInReader)
     _StandInReader.port = stripe_port
     child = tmp_path / "child.py"
@@ -410,7 +419,7 @@ def test_the_phase_1_run_redacted_for_disk_carries_no_credential_and_changes_not
     for byte."""
     _run_phase1_under_shadow(tmp_path, monkeypatch, stripe_stand_in)
     disk = stored()
-    bearer = "Bearer sk_test_notreal"
+    bearer = f"Bearer {AGENT_STRIPE_KEY}"
     written = _assert_stored_as(disk, _placeholders(disk.key, bearer))
     assert disk.files_holding(b"sk_test_") == []
     sent = [ex.request.header("authorization") for ex in written]
@@ -531,10 +540,10 @@ WEBHOOK_PATH = f"/services/T0REDACT/B0REDACT/{WEBHOOK_TOKEN}"
 WEBHOOK_BODY = b'{"text":"deploy finished"}'
 QUERY_API_KEY = "qs-secret-api-key-4f2"  # a secret by its name only, like CARD_TOKEN
 CARD_TOKEN = "tok_redact_e2e"
-STRIPE_BEARER = "Bearer sk_test_RedactE2e"
+STRIPE_BEARER = f"Bearer {E2E_STRIPE_KEY}"
 STRIPE_FORM = f"card[token]={CARD_TOKEN}&amount=100".encode()
-LLM_API_KEY = "sk-ant-api03-RedactE2eHeaderKey"
-NESTED_KEY = "sk_live_NestedThreeDeep"
+LLM_API_KEY = E2E_LLM_KEY
+NESTED_KEY = E2E_NESTED_KEY
 LLM_TOKEN = "plain-session-token"  # under the whole key `token`, beside `max_tokens`
 LLM_BODY = json.dumps(
     {
@@ -553,8 +562,8 @@ LLM_ANSWER = json.dumps(
         "usage": {"input_tokens": 3, "output_tokens": 5},
     }
 ).encode()
-SSE_PLAIN_KEY = "sk_live_StreamedPlain"
-SSE_ESCAPED_KEY = "sk_live_AfterAnEscape"
+SSE_PLAIN_KEY = E2E_SSE_PLAIN_KEY
+SSE_ESCAPED_KEY = E2E_SSE_ESCAPED_KEY
 # The second event's key follows a JSON `\n` escape: a backslash and an `n`, as the wire has it.
 SSE_BODY = (
     b'data: {"text":"key: ' + SSE_PLAIN_KEY.encode() + b'"}\n\n'
@@ -650,7 +659,7 @@ def redact_stand_in():
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _RedactStandIn)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     yield srv.server_address[1]
-    srv.shutdown()
+    stop_server(srv)
 
 
 @dataclasses.dataclass(frozen=True)

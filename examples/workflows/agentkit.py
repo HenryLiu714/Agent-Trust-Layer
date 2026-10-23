@@ -247,13 +247,13 @@ def obs_http(
 
 def _current_run_id() -> str | None:
     # Imported late: `sdk` imports this module.
-    from examples.workflows import sdk
+    from examples.workflows import sdk  # noqa: PLC0415
 
     return sdk.current_run_id()
 
 
 def _sdk_labels_requests() -> bool:
-    from examples.workflows import sdk
+    from examples.workflows import sdk  # noqa: PLC0415  # as above
 
     return sdk.labels_requests()
 
@@ -358,6 +358,7 @@ def lookup_gateway() -> Iterator[None]:
     if not os.environ.get(LOOKUP_REFUSED_ENV) or control is None:
         yield
         return
+    irimi_control: str = control
     prefix = urlsplit(control).path
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -368,7 +369,7 @@ def lookup_gateway() -> Iterator[None]:
                 self.reply(502, {"error": "the gateway has no such route"})
                 return
             sent = urllib.request.Request(
-                control + self.path.removeprefix(prefix),
+                irimi_control + self.path.removeprefix(prefix),
                 body,
                 {"Content-Type": self.headers.get("content-type", "application/json")},
                 method="POST",

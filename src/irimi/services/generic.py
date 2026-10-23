@@ -21,6 +21,7 @@ import secrets
 import string
 import uuid
 from functools import lru_cache
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +42,7 @@ INT_ID_SPAN = 9 * 10**9
 _ID_TOKEN = re.compile(r"[A-Za-z0-9]+")
 # Stripe spells a PaymentIntent's client secret `pi_<id>_secret_<token>`, so it starts with the
 # same prefix as the id and is the one value in a path that must never be echoed back as one.
-SECRET_MARKER = "_secret"
+SECRET_MARKER = "_secret"  # noqa: S105  # a marker in an id, not a credential
 
 
 def mint_id(prefix: str) -> str:
@@ -197,8 +198,6 @@ _SERVICE_NAME = re.compile(r"[A-Za-z0-9_-]+")
 
 def fixtures_dir() -> Path:
     """The directory holding the fixture files that ship inside the package."""
-    from importlib.resources import files
-
     return Path(str(files("irimi").joinpath(FIXTURES_DIR_NAME)))
 
 

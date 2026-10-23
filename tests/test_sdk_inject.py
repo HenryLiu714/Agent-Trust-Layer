@@ -35,6 +35,7 @@ from irimi.sdk import _control_client as client
 from irimi.sdk import _http_labels as instrumentation
 from irimi.sdk._state import state
 from tests import test_engine_mitm
+from tests.support.servers import stop_server
 from tests.test_engine_mitm import (
     _config,
     _leaf_cert_for_loopback,
@@ -119,7 +120,7 @@ def tls(tmp_path, monkeypatch) -> Iterator[tuple[_Irimi, int, Path]]:
         with _running(cfg, tmp_path, monkeypatch, trust_upstream_ca=cfg.ca.cert) as running:
             yield running, srv.server_address[1], cfg.ca.cert
     finally:
-        srv.shutdown()
+        stop_server(srv)
 
 
 def _get(name: str, proxy: str, url: str, **kw: Any) -> int:
@@ -250,7 +251,9 @@ def test_two_threads_sharing_one_session_each_keep_their_own_run(irimi, upstream
     for t in threads:
         t.join(timeout=60)
     assert None not in ids.values() and len(set(ids.values())) == 2
-    assert sorted(ex.run_id for ex in irimi.seen) == sorted([ids[0]] * 20 + [ids[1]] * 20)
+    first, second = ids[0], ids[1]
+    assert first is not None and second is not None
+    assert sorted(ex.run_id for ex in irimi.seen) == sorted([first] * 20 + [second] * 20)
     assert not _upstream_saw_the_header()
     reader = irimi.finish()
     for run_id in ids.values():

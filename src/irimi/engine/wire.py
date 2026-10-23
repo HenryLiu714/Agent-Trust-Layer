@@ -83,7 +83,7 @@ def stamp(response: Response, answered_by: AnsweredBy) -> Response:
     # Any header of this name already on the response came from somewhere else - a target that
     # echoes headers, or a service of the same name - and ours is the one that is true here.
     kept = response.without_header(ANSWERED_BY_HEADER)
-    return replace(kept, headers=kept.headers + ((ANSWERED_BY_HEADER, value),))
+    return replace(kept, headers=(*kept.headers, (ANSWERED_BY_HEADER, value)))
 
 
 def irimi_error(status: int, error_type: str, message: str, headers: Headers = ()) -> Response:

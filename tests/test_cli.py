@@ -3,6 +3,7 @@ import io
 import socket
 import sys
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -14,6 +15,7 @@ from irimi.core.netaddr import Target
 from irimi.engine import Replay, Serve, Shadow
 from irimi.protocol.env import AGENT_VERSION_ENV
 from irimi.report.terminal import NOT_LOOPBACK_NOTICE, PROXY_ONLY_NOTICE
+from tests.support.servers import stop_server
 
 
 def test_version_flag(capsys):
@@ -116,9 +118,13 @@ def test_python_m_irimi_is_the_command_and_importing_it_runs_nothing():
     does, must not start the command."""
     import subprocess
 
-    ran = subprocess.run([sys.executable, "-m", "irimi", "--version"], capture_output=True)
+    ran = subprocess.run(
+        [sys.executable, "-m", "irimi", "--version"], capture_output=True, check=False
+    )
     assert (ran.returncode, ran.stdout) == (0, f"irimi {__version__}\n".encode())
-    imported = subprocess.run([sys.executable, "-c", "import irimi.__main__"], capture_output=True)
+    imported = subprocess.run(
+        [sys.executable, "-c", "import irimi.__main__"], capture_output=True, check=False
+    )
     assert (imported.returncode, imported.stdout, imported.stderr) == (0, b"", b"")
 
 
@@ -329,6 +335,7 @@ def test_the_composition_root_builds_the_service_overlay_and_records_into_the_ru
     own, so the two cannot disagree about which service a read belongs to. The engine records into
     the store `prepare_run` opened, the one `irimi shadow` starts and ends its run in."""
     from irimi.decide.overlay import ServiceOverlay
+    from irimi.engine.mitm import MitmEngine
     from tests.doubles import NullStore
 
     index = _shipped_index()
@@ -336,6 +343,7 @@ def test_the_composition_root_builds_the_service_overlay_and_records_into_the_ru
     p = ca.ca_paths()
     run = compose.Run(index, p, "t3st", compose._engine_config(args, index, "t3st", p), NullStore())
     engine = compose.build_engine(run, on_exchange=lambda ex: None)
+    assert isinstance(engine, MitmEngine)
     assert isinstance(engine.overlay, ServiceOverlay)
     assert engine.config.maps is index
     assert engine.store is run.store
@@ -349,6 +357,7 @@ def test_the_composition_root_builds_a_replay_policy_over_the_run_s_recording():
 
     from irimi.decide.policy import ShadowPolicy
     from irimi.decide.reader import UpstreamReader
+    from irimi.engine.mitm import MitmEngine
     from irimi.replay.index import RecordingReader, ReplayIndex
     from irimi.replay.policy import ReplayPolicy
     from tests.doubles import NullStore
@@ -362,6 +371,7 @@ def test_the_composition_root_builds_a_replay_policy_over_the_run_s_recording():
         index, p, "t3st", replace(config, mode=Replay("rec1")), NullStore(), None, recording
     )
     engine = compose.build_engine(run, on_exchange=lambda ex: None)
+    assert isinstance(engine, MitmEngine)
     assert isinstance(engine.policy, ReplayPolicy)
     assert engine.policy.recording is recording
     assert engine.policy.maps is index
@@ -369,6 +379,7 @@ def test_the_composition_root_builds_a_replay_policy_over_the_run_s_recording():
     shadow = compose.build_engine(
         compose.Run(index, p, "t3st", config, NullStore()), lambda ex: None
     )
+    assert isinstance(shadow, MitmEngine)
     assert isinstance(shadow.policy, ShadowPolicy)
     assert isinstance(shadow.policy.reader, UpstreamReader)
 
@@ -545,7 +556,8 @@ def test_a_trailing_slash_on_the_host_is_the_service_target():
 
     index = servicemaps.load(targets=[_target_arg("api.stripe.com/=http://127.0.0.1:3000")])
     stripe = index.service_for("api.stripe.com")
-    assert stripe is not None and stripe.target.url == "http://127.0.0.1:3000"
+    assert stripe is not None and stripe.target is not None
+    assert stripe.target.url == "http://127.0.0.1:3000"
 
 
 @pytest.mark.parametrize(
@@ -852,6 +864,7 @@ def test_shadow_stores_its_process_run_with_the_agent_and_engine_versions(home, 
         __version__,
         None,
     )
+    assert record.end is not None
     assert (record.end.outcome, record.end.exit_code, record.end.error) == (
         "error",
         3,
@@ -924,7 +937,8 @@ def test_a_reader_gone_costs_shadow_no_run_and_leaves_no_engine(home, monkeypatc
     if when == "at-the-banner":
         assert stored == []
     else:
-        assert [(r.end.outcome, r.end.exit_code) for r in stored] == [("error", 3)]
+        ends = [(r.end.outcome, r.end.exit_code) if r.end is not None else None for r in stored]
+        assert ends == [("error", 3)]
 
 
 def test_a_reader_gone_by_serve_s_banner_closes_its_store_and_releases_its_lock(home, monkeypatch):
@@ -993,7 +1007,8 @@ def test_serve_prints_a_line_for_each_tool_call(home, monkeypatch, capsys):
         wired.append(on_tool_call)
         return _Refuses()
 
-    assert main(["serve", "--port", "0"], engine_factory=build) == exitcodes.ERROR
+    factory = cast(compose.EngineFactory, build)
+    assert main(["serve", "--port", "0"], engine_factory=factory) == exitcodes.ERROR
     assert "error: not started" in capsys.readouterr().err.splitlines()
     [on_tool_call] = wired
     on_tool_call(ToolCall("t", "r", "db.write", "write", "shadow", {}, None, None, 1.0, 2.0))
@@ -1010,6 +1025,7 @@ def test_serve_records_under_the_store_it_was_given(home, monkeypatch, capsys):
     import urllib.request
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
+    from irimi.core.exchange import Exchange
     from irimi.protocol.trace import UNATTRIBUTED
     from irimi.record.store.reader import StoreReader
 
@@ -1045,7 +1061,7 @@ def test_serve_records_under_the_store_it_was_given(home, monkeypatch, capsys):
     try:
         assert args.func(args, stop) == 0
     finally:
-        upstream.shutdown()
+        stop_server(upstream)
     assert got == [b"hello"]
     assert capsys.readouterr().out.splitlines()[-1] == (
         "stopped · 1 exchange not in any run: irimi runs show unattributed"
@@ -1053,4 +1069,10 @@ def test_serve_records_under_the_store_it_was_given(home, monkeypatch, capsys):
     assert not (home / "store").exists()
     assert StoreReader(elsewhere).list_runs() == []
     stored = StoreReader(elsewhere).load_run(UNATTRIBUTED)
-    assert [(ex.request.path, ex.response.body) for ex in stored.events] == [("/hello", b"hello")]
+    seen = [
+        (ex.request.path, ex.response.body)
+        if isinstance(ex, Exchange) and ex.response is not None
+        else ex
+        for ex in stored.events
+    ]
+    assert seen == [("/hello", b"hello")]

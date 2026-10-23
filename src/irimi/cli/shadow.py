@@ -2,6 +2,7 @@
 child run under an engine that `irimi shadow` and `irimi replay` share (`run_child`)."""
 
 import argparse
+import contextlib
 import os
 import shutil
 import subprocess
@@ -274,8 +275,6 @@ def run_child(
             error = ran.call.error if ran.call is not None else None
             runner.end_process_run(run.store, run.run_id, ran.code, time.time(), error)
         # An impatient second Ctrl-C lands here, while the engine thread is being joined.
-        try:
+        with contextlib.suppress(KeyboardInterrupt):
             handle.stop()
-        except KeyboardInterrupt:
-            pass
     return ran

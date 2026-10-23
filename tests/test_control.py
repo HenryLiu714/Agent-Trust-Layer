@@ -9,17 +9,18 @@ import json
 import logging
 import socket
 import time
+from collections.abc import Callable
 
 import pytest
 
 from irimi import __version__
 from irimi.core.exchange import Exchange, Request
-from irimi.core.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE
+from irimi.core.limits import MAX_CONTROL_BODY, MAX_ERROR_MESSAGE, MAX_ERROR_TYPE
 from irimi.decide.policy import ShadowPolicy
 from irimi.engine import Serve
-from irimi.engine.control import MAX_CONTROL_BODY, MAX_REFUSAL, TOO_DEEP, ControlEndpoint
+from irimi.engine.control import MAX_REFUSAL, TOO_DEEP, ControlEndpoint
 from irimi.protocol import control as protocol_control
-from irimi.protocol.trace import MAX_QUOTED, ErrorInfo, ToolCall, Trigger
+from irimi.protocol.trace import MAX_QUOTED, ErrorInfo, JSONValue, ToolCall, Trigger
 from irimi.record import redact
 from irimi.record.store.reader import StoreReader
 from irimi.record.store.writer import DirectoryStore
@@ -86,7 +87,7 @@ class _Engine:
     store: DirectoryStore
     seen: list[Exchange]  # what the engine handed `on_exchange`
     tool_calls: list[ToolCall]  # what it handed `on_tool_call`
-    stop: object
+    stop: Callable[[], object]
 
     @property
     def root(self):
@@ -244,10 +245,10 @@ _START = f"/_irimi/runs/{RUN}/start"
 _NOT_JSON = "the body is not JSON: "
 # A replay's lookup of a read tool's recorded outcome.
 _LOOKUP = f"/_irimi/runs/{RUN}/tool-calls/recorded"
-LOOKUP = {"name": "db.balance", "args": {"account": "acc_1"}}
+LOOKUP: dict[str, JSONValue] = {"name": "db.balance", "args": {"account": "acc_1"}}
 
 # (method, path, body, status, error). Every refusal names what was wrong in one line.
-REFUSALS = [
+REFUSALS: list[tuple[str, str, bytes | dict | None, int, str]] = [
     ("GET", "/_irimi/nope", None, 404, "no control route '/_irimi/nope'"),
     (
         "POST",
@@ -657,6 +658,7 @@ def test_an_on_tool_call_that_raises_costs_the_callback_not_the_record(
     finally:
         stop()
     [call] = StoreReader(tmp_path / "store").load_run(RUN).events
+    assert isinstance(call, ToolCall)
     assert call.name == "db.write"
     # Swallowed, and logged with its traceback.
     [logged] = [r for r in caplog.records if r.name == "irimi.engine.control"]

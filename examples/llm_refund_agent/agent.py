@@ -98,7 +98,8 @@ def _call(request: urllib.request.Request) -> dict[str, Any]:
     error body, which says what was wrong where urllib's message names only the status."""
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT_S) as response:
-            return json.load(response)
+            answer: dict[str, Any] = json.load(response)
+            return answer
     except urllib.error.HTTPError as exc:
         said = exc.read().decode(errors="replace")[:500]
         raise RuntimeError(
@@ -209,7 +210,8 @@ def handle_ticket(ticket: Ticket) -> str:
             {"charge": ticket.charge, "amount": str(decision["refund_amount"])},
         )
     record_decision(ticket.ticket_id, decision)
-    return decision["reply"]
+    reply: str = decision["reply"]
+    return reply
 
 
 def main(argv: list[str]) -> int:

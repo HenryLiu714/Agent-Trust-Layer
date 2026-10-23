@@ -65,7 +65,8 @@ def stripe(method: str, path: str, form: dict[str, str] | None = None) -> dict[s
         headers={"Authorization": f"Bearer {os.environ.get('STRIPE_API_KEY', '')}"},
     )
     with urllib.request.urlopen(request, timeout=30) as response:
-        return json.load(response)
+        answer: dict[str, Any] = json.load(response)
+        return answer
 
 
 def _mark_refunded_stand_in(charge: str) -> dict[str, Any]:

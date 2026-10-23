@@ -100,17 +100,22 @@ def test_every_shipped_stripe_id_starts_with_its_objects_prefix():
 
 def test_the_shipped_customer_has_no_discount():
     """A customer with no coupon carries `discount: null`; anything else reads as an active one."""
-    assert generic.fixture_object("stripe", "customer")["discount"] is None
+    customer = generic.fixture_object("stripe", "customer")
+    assert customer is not None
+    assert customer["discount"] is None
 
 
 def test_a_shipped_object_is_the_real_shape():
     refund = generic.fixture_object("stripe", "refund")
+    assert refund is not None
     assert refund["object"] == "refund"
     assert refund["status"] == "succeeded"
     # Stripe's refund object carries no `livemode`, which is why the L1 faker sets that field
     # only where the fixture already has it.
     assert "livemode" not in refund
-    assert "livemode" in generic.fixture_object("stripe", "customer")
+    customer = generic.fixture_object("stripe", "customer")
+    assert customer is not None
+    assert "livemode" in customer
 
 
 def test_the_fixtures_directory_holds_one_json_file_per_service():
@@ -123,6 +128,7 @@ def test_the_shipped_slack_fixtures_hold_the_message_object():
     names this object and the envelope nests it under `message:`."""
     assert sorted(generic.fixture_objects("slack")) == ["message"]
     message = generic.fixture_object("slack", "message")
+    assert message is not None
     assert message["type"] == "message"
     assert re.fullmatch(r"\d+\.\d{6}", message["ts"])
     # A null placeholder, not a value: the field is here so a threaded post's own `thread_ts` can
@@ -146,9 +152,11 @@ def test_get_hands_out_a_copy_so_one_answer_cannot_change_the_next():
     """The faker writes the request's fields straight over the object it is given. Handing out
     the cached one would make every later refund carry the first caller's amount and metadata."""
     first = generic.fixture_object("stripe", "refund")
+    assert first is not None
     first["amount"] = 999_999
     first["metadata"]["leaked"] = "yes"
     second = generic.fixture_object("stripe", "refund")
+    assert second is not None
     assert second["amount"] != 999_999
     assert second["metadata"] == {}
 

@@ -165,7 +165,9 @@ class _Tool:
 
 def _chosen(spec: _Tool, recorded: "_Recorded | None") -> tuple[Callable[..., Any], trace.Ran]:
     """Which body an active call runs, and what the record says ran, given what a replay's
-    recording answered (`_replay_answer`, None outside a replay). The one dispatch:
+    recording answered (`_replay_answer`, None outside a replay).
+
+    The one dispatch:
 
         | `is_active()` | tool  | Runs                              | Records    |
         | false         | read  | the real function                 | nothing    |
@@ -319,7 +321,7 @@ class _Call:
         self.started_at = time.time()
 
     def doc(self, result: object, exc: BaseException | None) -> dict[str, Any] | None:
-        """This call with its outcome, as it is posted: built on the caller's thread, the result
+        """The call with its outcome, as it is posted: built on the caller's thread, the result
         captured as the body left it. None, logged once per process, if building it failed: the
         agent's own result or exception goes on whatever happens here."""
         try:

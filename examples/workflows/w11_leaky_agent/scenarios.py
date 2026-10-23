@@ -12,6 +12,7 @@ tool, whose stand-in runs under shadow: the one escape the agent can close itsel
 
 from __future__ import annotations
 
+from typing import Any
 from urllib.parse import urlencode
 
 from examples.workflows.harness.internet import Req, Resp
@@ -24,11 +25,11 @@ def _services(world: World) -> None:
     world.stripe.add_charge(CHARGE, 5000)
     world.slack.add_channel(CHANNEL, "leaky")
 
-    def enqueue(req: Req, state: dict) -> Resp:
+    def enqueue(req: Req, state: dict[str, Any]) -> Resp:
         state.setdefault("jobs", []).append(req.json())
         return Resp(201, {"queued": len(state["jobs"])})
 
-    def stats(req: Req, state: dict) -> Resp:
+    def stats(req: Req, state: dict[str, Any]) -> Resp:
         return Resp(200, {"queued": len(state.get("jobs", []))})
 
     # A sidecar on loopback, addressed as 127.0.0.1 the way agent config names one.
@@ -40,10 +41,10 @@ def _services(world: World) -> None:
 
     # An export service that answers through two redirects: to its own `/export/v2`, through
     # irimi like the first hop, then to wherever `next` names, the loopback sidecar.
-    def export(req: Req, state: dict) -> Resp:
+    def export(req: Req, state: dict[str, Any]) -> Resp:
         return Resp(302, headers={"location": "/export/v2?" + urlencode(req.query)})
 
-    def export_v2(req: Req, state: dict) -> Resp:
+    def export_v2(req: Req, state: dict[str, Any]) -> Resp:
         return Resp(302, headers={"location": req.query["next"]})
 
     world.extra.append(

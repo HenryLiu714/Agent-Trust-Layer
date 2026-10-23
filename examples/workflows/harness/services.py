@@ -20,6 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from examples.workflows import credentials
 from examples.workflows.harness.internet import SAFE_METHODS, Req, Resp, json_error
 
 # -- Stripe ---------------------------------------------------------------------------------------
@@ -56,7 +57,7 @@ def charge(
 # client secret back on every retrieve made with a secret key, and it lets whoever holds it confirm
 # the payment, so a live read of an intent stores a credential in a response body: the store must
 # keep only its placeholder.
-CLIENT_SECRET_CANARY = "CANARYclientsecret000000000000"
+CLIENT_SECRET_CANARY = credentials.CLIENT_SECRET
 
 
 def client_secret(pi_id: str) -> str:
@@ -164,9 +165,8 @@ class FakeStripe:
             return self._list(
                 list(self.charges.values()), req, "/v1/charges", "customer", "customer"
             )
-        if found := re.fullmatch(r"/v1/charges/([^/]+)", p):
-            if m == "GET":
-                return self._one(self.charges, found.group(1), "charge")
+        if (found := re.fullmatch(r"/v1/charges/([^/]+)", p)) and m == "GET":
+            return self._one(self.charges, found.group(1), "charge")
         if p == "/v1/refunds":
             if m == "POST":
                 return self._refund(req.params())

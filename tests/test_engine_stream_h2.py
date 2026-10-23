@@ -12,6 +12,7 @@ import socket
 import ssl
 import threading
 from pathlib import Path
+from typing import cast
 
 from h2.config import H2Configuration
 from h2.connection import H2Connection
@@ -94,7 +95,8 @@ def _h2_through_the_proxy(cfg, proxy_port: int, upstream_port: int, gates):
             assert data, "the proxy closed the connection before the stream ended"
             for event in conn.receive_data(data):
                 if isinstance(event, ResponseReceived):
-                    status = dict(event.headers)[":status"]
+                    # `header_encoding="utf-8"` hands the headers back as str, not h2's typed bytes.
+                    status = cast(dict[str, str], dict(event.headers))[":status"]
                 elif isinstance(event, DataReceived):
                     conn.acknowledge_received_data(event.flow_controlled_length, event.stream_id)
                     if not event.data:  # mitmproxy ends the stream with an empty DATA frame

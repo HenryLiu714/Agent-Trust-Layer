@@ -34,6 +34,7 @@ needs it rather than trusted because it exists, and a run.json is synced before 
 place, so a crash never leaves one empty.
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -301,10 +302,8 @@ class DirectoryStore:
                 self._closed = True  # `_put` refuses from here on, so the sentinel is last
             deadline = time.monotonic() + CLOSE_TIMEOUT_S
             if first:
-                try:
+                with contextlib.suppress(queue.Full):
                     self._queue.put(_CLOSE, timeout=CLOSE_TIMEOUT_S)
-                except queue.Full:
-                    pass
             # A second caller waits for the first one's writer too, so whoever returns from
             # close() - the engine's shutdown or `irimi shadow` itself - finds the files whole.
             self._thread.join(max(0.0, deadline - time.monotonic()))

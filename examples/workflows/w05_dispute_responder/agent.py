@@ -32,7 +32,7 @@ import threading
 import time
 from typing import Any
 
-from examples.workflows import agentkit, sdk
+from examples.workflows import agentkit, credentials, sdk
 
 DISPUTES_CHANNEL = "C0DISPUTES"
 REFUND_UNDER = 2000  # minor units: disputes under $20 are refunded, not fought
@@ -179,7 +179,7 @@ def main(argv: list[str]) -> int:
         return 2
     scenario = argv[0]
     dispute = BIG if scenario == "over_threshold" else SMALL
-    secret = "whsec_not_the_real_one" if scenario == "bad_signature" else None
+    secret = credentials.WRONG_WEBHOOK_SECRET if scenario == "bad_signature" else None
     with agentkit.serve(_Webhook) as port:
         answers = [_deliver(port, dispute_created(dispute), secret)]
         if scenario == "replayed_event":

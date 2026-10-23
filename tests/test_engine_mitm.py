@@ -43,6 +43,8 @@ from irimi.record.store.writer import DirectoryStore
 from irimi.report import model, summary
 from irimi.report.model import RunView
 from tests.doubles import NullStore
+from tests.support.credentials import BEARER_SECRET, TORN_STREAM_SECRET
+from tests.support.servers import stop_server
 
 
 class _Upstream(BaseHTTPRequestHandler):
@@ -91,7 +93,7 @@ def upstream():
     _Upstream.seen = []
     srv = _serve()
     yield srv.server_address[1]
-    srv.shutdown()
+    stop_server(srv)
 
 
 def _config(tmp_path, monkeypatch, port=0, reverse_hosts=frozenset(), maps=None):
@@ -177,7 +179,7 @@ def _start(
 ):
     """Serve `cfg` on a background loop until the returned stop() is called, which closes
     `store` once the engine has stopped."""
-    seen = []
+    seen: list[Exchange] = []
     policy = policy or ShadowPolicy()
     store = store or NullStore()
     control = ControlEndpoint(
@@ -205,6 +207,7 @@ def _start(
         # these tests presents a leaf signed by the irimi CA, so trust that instead. This reaches
         # into the engine on purpose; there is no product option for it.
         async def trust() -> None:  # on the engine's loop, like every other options change
+            assert eng._master is not None
             eng._master.options.update(ssl_verify_upstream_trusted_ca=str(trust_upstream_ca))
 
         asyncio.run_coroutine_threadsafe(trust(), loop).result(timeout=15)
@@ -255,6 +258,7 @@ def _reverse(proxy_port, method, path, body=None, host_name="127.0.0.1", extra_h
 def _leaf_cert_for_loopback(p: ca.CAPaths, out: Path) -> Path:
     """Mint a leaf for 127.0.0.1 signed by the irimi CA; writes cert+key PEM to `out`."""
     ca_key = serialization.load_pem_private_key(p.key.read_bytes(), None)
+    assert isinstance(ca_key, rsa.RSAPrivateKey)
     ca_cert = x509.load_pem_x509_certificate(p.cert.read_bytes())
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     now = dt.datetime.now(dt.UTC)
@@ -598,7 +602,7 @@ def test_repeated_headers_survive_a_local_answer(tmp_path, monkeypatch, upstream
         def rewrite(self, write_log, classification, read_request):
             return None
 
-    eng, seen, stop = _start(_config(tmp_path, monkeypatch), overlay=_Overlay())
+    eng, _seen, stop = _start(_config(tmp_path, monkeypatch), overlay=_Overlay())
     try:
         # The overlay is asked only once there is a write to show.
         _via_proxy(eng.listen_port(), "POST", f"http://127.0.0.1:{upstream}/things", body=b"{}")
@@ -669,7 +673,7 @@ def test_the_engine_never_closes_the_store_even_when_setup_fails(tmp_path, monke
 
     cfg = _config(tmp_path, monkeypatch)
     cfg.ca.key.unlink()  # bundle write fails before mitmproxy starts
-    eng = MitmEngine(cfg, ShadowPolicy(), _Store(), NoOverlay())
+    eng = MitmEngine(cfg, ShadowPolicy(), _Store(), NoOverlay())  # type: ignore[arg-type]
     with pytest.raises(FileNotFoundError):
         asyncio.run(eng.run())
     assert closed == []
@@ -684,7 +688,7 @@ def test_reverse_door_forwards_to_tls_upstream(tmp_path, monkeypatch):
         status, data = _reverse(eng.listen_port(), "GET", f"/127.0.0.1:{up}/hello?x=1")
     finally:
         stop()
-        srv.shutdown()
+        stop_server(srv)
     assert (status, data) == (200, b"hello from upstream")
     assert len(seen) == 1
     ex = seen[0]
@@ -880,7 +884,7 @@ def _addon(tmp_path, monkeypatch, store):
     engine would only add a thread between the assertion and the thing asserted."""
     from irimi.engine.mitm import IrimiAddon
 
-    seen = []
+    seen: list[Exchange] = []
     addon = IrimiAddon(
         _config(tmp_path, monkeypatch),
         ShadowPolicy(),
@@ -1078,7 +1082,7 @@ def test_a_server_sent_event_response_reaches_the_client_in_chunks(tmp_path, mon
     finally:
         _STREAM_GATE.set()
         stop()
-        srv.shutdown()
+        stop_server(srv)
     assert len(seen) == 1
     ex = seen[0]
     assert (ex.service, ex.operation, ex.kind) == ("llmhost", "chat.completions.create", "llm")
@@ -1122,7 +1126,7 @@ def test_a_streamed_response_ends_when_its_stream_does_not_when_its_headers_leav
     finally:
         _STREAM_GATE.set()
         stop()
-        srv.shutdown()
+        stop_server(srv)
     (ex,) = seen
     assert ex.response is not None and ex.response.body == SSE_FIRST + SSE_SECOND
     assert 0 < ex.started_at <= first_chunk_at < released_at <= ex.ended_at
@@ -1192,7 +1196,7 @@ def test_an_overlay_is_not_handed_a_streamed_read_and_cannot_rewrite_one(tmp_pat
     finally:
         _STREAM_GATE.set()
         stop()
-        srv.shutdown()
+        stop_server(srv)
     assert overlay.calls == [], "the overlay was handed a body mitmproxy never assembled"
     _, ex = seen
     assert (ex.kind, ex.answered_by) == ("read", "live")
@@ -1302,7 +1306,7 @@ def _stream_three_chunks(tmp_path, monkeypatch, store=None):
         for gate in gates:
             gate.set()
         stop()
-        srv.shutdown()
+        stop_server(srv)
     return seen
 
 
@@ -1344,7 +1348,7 @@ def test_a_stream_longer_than_the_stored_maximum_reaches_the_client_whole(tmp_pa
         conn.close()
     finally:
         stop()
-        srv.shutdown()
+        stop_server(srv)
     assert received == b"".join(chunks)
     (ex,) = seen
     assert ex.flags == (Flag.STREAM_TRUNCATED,)
@@ -1393,7 +1397,7 @@ def test_an_upstream_reset_mid_stream_is_recorded_with_what_arrived_and_flagged(
     finally:
         gate.set()
         stop()
-        srv.shutdown()
+        stop_server(srv)
     (ex,) = seen
     assert ex.flags == (Flag.UPSTREAM_ERROR, Flag.STREAM_TRUNCATED)
     assert ex.response is not None
@@ -1436,7 +1440,7 @@ def test_a_stream_over_tls_is_recorded_as_its_chunks(tmp_path, monkeypatch):
         for gate in gates:
             gate.set()
         stop()
-        srv.shutdown()
+        stop_server(srv)
     (ex,) = seen
     assert (ex.request.scheme, ex.door, ex.kind, ex.flags) == ("https", "reverse", "llm", ())
     assert ex.response is not None and ex.response.body == b"".join(THREE_CHUNKS)
@@ -1449,7 +1453,7 @@ def test_a_reset_inside_a_character_records_only_the_complete_lines_before_it(
     """The last read before a reset can end anywhere, inside a UTF-8 character included. A body
     that does not decode is stored unscanned, so the recording keeps only its complete
     lines: the key on the first line is then redacted like any other."""
-    secret = "sk_live_CutMidCharacter"
+    secret = TORN_STREAM_SECRET
     first = b'data: {"api_key": "' + secret.encode() + b'"}\n\n'
     torn = b'data: {"text": "caf\xc3'  # the first byte of a two-byte character
     gates = [threading.Event(), threading.Event()]
@@ -1469,7 +1473,7 @@ def test_a_reset_inside_a_character_records_only_the_complete_lines_before_it(
         for gate in gates:
             gate.set()
         stop()
-        srv.shutdown()
+        stop_server(srv)
     (ex,) = seen
     assert ex.flags == (Flag.UPSTREAM_ERROR, Flag.STREAM_TRUNCATED)
     assert ex.response is not None and ex.response.body == first
@@ -1502,7 +1506,7 @@ def test_a_compressed_stream_is_recorded_decoded_as_one_chunk(tmp_path, monkeypa
     finally:
         gate.set()
         stop()
-        srv.shutdown()
+        stop_server(srv)
     (ex,) = seen
     assert ex.response is not None and ex.response.body == plain
     assert (ex.stream_chunks, ex.flags) == ((len(plain),), ())
@@ -1532,7 +1536,7 @@ def test_a_streamed_read_is_not_observed_now_that_its_body_is_recorded(tmp_path,
     finally:
         _STREAM_GATE.set()
         stop()
-        srv.shutdown()
+        stop_server(srv)
     (ex,) = seen
     assert (ex.kind, ex.answered_by) == ("read", "live")
     assert ex.response is not None and ex.response.body == SSE_FIRST + SSE_SECOND
@@ -1913,7 +1917,7 @@ def test_a_delegated_exchange_records_what_the_agent_asked_for(tmp_path, monkeyp
 
 
 CREDENTIAL_HEADERS_SENT = {
-    "authorization": "Bearer sk_live_SECRET",
+    "authorization": f"Bearer {BEARER_SECRET}",
     "cookie": "session=SECRET",
     "x-api-key": "SECRET",
     "dd-api-key": "SECRET",
@@ -1933,7 +1937,7 @@ def test_every_credential_header_is_stripped_before_it_reaches_a_target(
     maps = _targeted(
         tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{target}/w")]
     )
-    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
+    eng, _seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
     try:
         _via_proxy(
             eng.listen_port(),
@@ -1965,7 +1969,7 @@ def test_forward_auth_keeps_the_credential_headers(tmp_path, monkeypatch, target
         for r in sm.routes
     )
     maps = servicemaps.MapIndex((_replace(sm, routes=routes),))
-    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
+    eng, _seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
     try:
         _via_proxy(
             eng.listen_port(),
@@ -2123,7 +2127,7 @@ def test_a_remote_target_is_probed_too_and_an_unreachable_one_is_irimis_json_502
         dialled.append(address)
         raise ConnectionRefusedError("refused")
 
-    monkeypatch.setattr(session.socket, "create_connection", refuse)
+    monkeypatch.setattr(socket, "create_connection", refuse)
     forward = targets.ForwardTo(netaddr.Target.parse("https://sandbox.example.com/v1"))
     refused = session._target_refusal(forward, ("127.0.0.1", 4000))
     assert isinstance(refused, targets.TargetUnreachable)
@@ -2148,7 +2152,7 @@ def test_a_target_naming_our_own_listener_is_refused_with_a_json_502(tmp_path, m
         monkeypatch,
         targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{listen_port}/w")],
     )
-    seen = []
+    seen: list[Exchange] = []
     addon = IrimiAddon(
         _config(tmp_path, monkeypatch, maps=maps),
         ShadowPolicy(),
@@ -2161,6 +2165,7 @@ def test_a_target_naming_our_own_listener_is_refused_with_a_json_502(tmp_path, m
     flow.client_conn.sockname = ("127.0.0.1", listen_port)
     asyncio.run(addon.request(flow))
 
+    assert flow.response is not None and flow.response.content is not None
     assert flow.response.status_code == 502
     assert json.loads(flow.response.content)["error"]["type"] == "irimi_target_failed"
     assert "own listener" in json.loads(flow.response.content)["error"]["message"]
@@ -2183,7 +2188,7 @@ def test_a_locally_answered_flow_that_errors_keeps_its_own_flags(tmp_path, monke
     from irimi.engine.mitm import IrimiAddon
 
     maps = _targeted(tmp_path, monkeypatch)
-    seen = []
+    seen: list[Exchange] = []
     addon = IrimiAddon(
         _config(tmp_path, monkeypatch, maps=maps),
         ShadowPolicy(),
@@ -2216,7 +2221,7 @@ def test_a_refused_target_is_flagged_once_even_if_the_client_then_vanishes(tmp_p
         monkeypatch,
         targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{listen_port}/w")],
     )
-    seen = []
+    seen: list[Exchange] = []
     addon = IrimiAddon(
         _config(tmp_path, monkeypatch, maps=maps),
         ShadowPolicy(),
@@ -2316,13 +2321,13 @@ def test_a_raise_handing_the_decision_to_a_worker_answers_locally(tmp_path, monk
     It takes the same 502 as a decision that raised: the request may be a write. It is timed like
     any other exchange, from the request hook's first line to the answer: the engine's clock
     is a counter here, so an `ended_at` the 502 path forgot would read 100.0, not 101.0."""
-    seen = []
+    seen: list[Exchange] = []
     addon = _bare_addon(tmp_path, monkeypatch, on_exchange=seen.append)
 
     def no_threads(*args, **kwargs):
         raise RuntimeError("cannot schedule new futures after shutdown")
 
-    monkeypatch.setattr(mitm.asyncio, "to_thread", no_threads)
+    monkeypatch.setattr(asyncio, "to_thread", no_threads)
     clock = itertools.count(100)
     counter = types.SimpleNamespace(time=lambda: float(next(clock)))
     monkeypatch.setattr(mitm, "time", counter)
@@ -2352,7 +2357,7 @@ def test_a_raise_carrying_a_rewrite_onto_the_flow_answers_locally(tmp_path, monk
         def rewrite(self, write_log, classification, read_request):
             return Translation(replace(read_request, query="translated=1"), "translated=0")
 
-    seen = []
+    seen: list[Exchange] = []
     addon = _bare_addon(tmp_path, monkeypatch, overlay=_Translating(), on_exchange=seen.append)
     write = _bare_flow(b"POST", b"/things")
     asyncio.run(addon.request(write))
@@ -2434,7 +2439,7 @@ def test_neither_half_of_a_delegated_exchange_is_a_write(tmp_path, monkeypatch, 
         targets=[("127.0.0.1", "", f"http://127.0.0.1:{target}")],
         target_reads=["127.0.0.1"],
     )
-    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
+    eng, _seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
     try:
         addon = next(a for a in eng._master.addons.chain if isinstance(a, IrimiAddon))
         status, _ = _via_proxy(eng.listen_port(), "GET", "http://127.0.0.1:1/hello")
@@ -2501,7 +2506,7 @@ def test_an_ipv6_target_gets_a_bracketed_host_header(tmp_path, monkeypatch):
         maps = _targeted(
             tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://[::1]:{port}/w")]
         )
-        eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
+        eng, _seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
         try:
             status, _ = _via_proxy(
                 eng.listen_port(), "POST", "http://127.0.0.1:1/things", body=b"{}"
@@ -2513,7 +2518,7 @@ def test_an_ipv6_target_gets_a_bracketed_host_header(tmp_path, monkeypatch):
         host_header = _host_header(_Target.seen[0][3])
         assert host_header == f"[::1]:{port}", host_header
     finally:
-        srv.shutdown()
+        stop_server(srv)
 
 
 def test_the_host_header_is_set_to_the_target_not_left_as_the_service(
@@ -2524,7 +2529,7 @@ def test_the_host_header_is_set_to_the_target_not_left_as_the_service(
     maps = _targeted(
         tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{target}/w")]
     )
-    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
+    eng, _seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
     try:
         _via_proxy(eng.listen_port(), "POST", "http://127.0.0.1:1/things", body=b"{}")
     finally:
@@ -2568,6 +2573,7 @@ def test_the_response_hook_writes_nothing_back_to_a_streamed_flow(tmp_path, monk
     monkeypatch.setattr(session, "_probe_target", lambda url: None)  # nothing listens at 3999
     asyncio.run(addon.request(flow))
     assert flow.metadata[META_KEY].answered_by == "delegated"
+    assert flow.response is not None
     flow.response.stream = True  # what `responseheaders` does for an event stream
     before = (flow.response.status_code, tuple(flow.response.headers.fields), flow.response.content)
 
@@ -2609,6 +2615,7 @@ def test_the_response_hook_records_a_streamed_flow_from_its_tee_and_writes_nothi
     asyncio.run(addon.request(flow))
     assert flow.metadata[META_KEY].answered_by == "delegated"
     # What `responseheaders` does for an event stream, and a chunk through it.
+    assert flow.response is not None
     tee = StreamCapture()
     flow.metadata[STREAM_KEY] = flow.response.stream = tee
     tee(SSE_FIRST)
@@ -2659,7 +2666,7 @@ def test_a_streamed_target_response_is_not_buffered(tmp_path, monkeypatch):
             _STREAM_GATE.set()
             stop()
     finally:
-        srv.shutdown()
+        stop_server(srv)
     # A delegated stream is recorded as a live one is: the target's chunks, joined.
     (ex,) = seen
     assert (ex.answered_by, ex.target) == ("delegated", f"http://127.0.0.1:{stream_port}/v1/stream")
@@ -2674,7 +2681,7 @@ class _OverlayDouble:
     """An overlay whose answers a test chooses, counting how often the engine asked it."""
 
     def __init__(self, answer=None, rewrite=None):
-        self._answer = answer or (lambda upstream: Overlaid(upstream))
+        self._answer = answer or Overlaid
         self._rewrite = rewrite or (lambda request: None)
         self.calls = 0
         self.rewrites = 0
@@ -2789,7 +2796,7 @@ def test_an_overlay_that_changes_a_read_stamps_it_overlay(tmp_path, monkeypatch,
 def test_an_overlay_that_changes_nothing_leaves_the_read_live_and_unstamped(
     tmp_path, monkeypatch, upstream
 ):
-    overlay = _OverlayDouble(answer=lambda upstream: Overlaid(upstream))
+    overlay = _OverlayDouble(answer=Overlaid)
     status, headers, data, ex = _overlaid_read(tmp_path, monkeypatch, upstream, overlay)
     assert overlay.calls == 1
     assert (status, data) == (200, b"hello from upstream")
@@ -2893,7 +2900,7 @@ def test_a_rewrote_header_the_agent_sent_is_not_forwarded_upstream(tmp_path, mon
     `test_a_rewrote_header_the_agent_sent_is_stripped_before_the_runs_first_write`.
     """
     overlay = _OverlayDouble()
-    eng, seen, stop = _engine_with_a_write(tmp_path, monkeypatch, upstream, overlay)
+    eng, _seen, stop = _engine_with_a_write(tmp_path, monkeypatch, upstream, overlay)
     try:
         status, _, _ = _read_via_proxy(
             eng.listen_port(),
@@ -2920,7 +2927,7 @@ def test_a_rewrote_header_the_agent_sent_is_stripped_before_the_runs_first_write
     a forged repeat has to lose every instance, not the first.
     """
     cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch))
-    eng, seen, stop = _start(cfg)
+    eng, _seen, stop = _start(cfg)
     try:
         addon = next(a for a in eng._master.addons.chain if isinstance(a, IrimiAddon))
         status, _, _ = _read_via_proxy(
@@ -3196,7 +3203,7 @@ def stripe_stub(tmp_path, monkeypatch):
     eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps), overlay=ServiceOverlay())
     yield eng.listen_port(), srv.server_address[1], seen
     stop()
-    srv.shutdown()
+    stop_server(srv)
 
 
 def test_a_charge_reread_after_a_faked_refund_shows_the_refund(stripe_stub):
@@ -3314,7 +3321,7 @@ def test_a_forged_rewrote_header_cannot_hide_a_refund_that_lands_mid_read(tmp_pa
     finally:
         _HeldRefundsStub.release.set()
         stop()
-        srv.shutdown()
+        stop_server(srv)
     status, headers, page = read["result"]
     assert status == 200
     assert json.loads(page)["data"][0]["id"] == json.loads(data)["id"]
@@ -3674,7 +3681,7 @@ def slack_stub(tmp_path, monkeypatch):
     eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps), overlay=ServiceOverlay())
     yield eng.listen_port(), srv.server_address[1], seen
     stop()
-    srv.shutdown()
+    stop_server(srv)
 
 
 def _slack_call(proxy, stub, method, params):
@@ -3908,7 +3915,7 @@ def precondition_stub(tmp_path, monkeypatch):
     )
     yield eng.listen_port(), srv.server_address[1], seen
     stop()
-    srv.shutdown()
+    stop_server(srv)
 
 
 def _refund(proxy, stub, charge, amount=100):
@@ -4226,7 +4233,7 @@ def slack_precondition_stub(tmp_path, monkeypatch):
     )
     yield eng.listen_port(), srv.server_address[1], seen
     stop()
-    srv.shutdown()
+    stop_server(srv)
 
 
 def test_a_post_to_an_archived_channel_is_rejected(slack_precondition_stub):
@@ -4299,7 +4306,7 @@ def test_a_reverse_door_read_is_attributed_and_its_run_header_is_not_forwarded(
         )
     finally:
         stop()
-        srv.shutdown()
+        stop_server(srv)
     assert status == 200
     ((path, received),) = _Upstream.seen
     assert path == "/hello"

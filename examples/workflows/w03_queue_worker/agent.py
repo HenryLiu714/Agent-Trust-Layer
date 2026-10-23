@@ -154,7 +154,7 @@ def _count_connections() -> None:
     """Count each connection a pooled call opens, so `one_pool_8` can show its runs shared one."""
     connect = socket.socket.connect
 
-    def counting(self: socket.socket, address: Any) -> None:
+    def counting(self: Any, address: Any) -> None:
         client = getattr(_pooled_call, "client", None)
         if client is not None:
             with _pools_lock:
@@ -447,7 +447,7 @@ async def handle_ledger(message: dict[str, Any]) -> None:
 async def post_waits(messages: list[dict[str, Any]]) -> list[Any]:
     """`ledger_post_waits`: both messages' runs at once on a loop whose default executor has one
     thread, the one the SDK posts an async tool's call from."""
-    global _ledger_written
+    global _ledger_written  # noqa: PLW0603  # one scenario's knob, set once per process
     _ledger_written = asyncio.Event()
     asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(1))
     return await asyncio.gather(*(handle_ledger(m) for m in messages), return_exceptions=True)
@@ -557,7 +557,7 @@ async def shut_down(messages: list[dict[str, Any]]) -> list[Any]:
     """Handle every message as a task, then shut down as a worker does on a deploy: once the rest
     are done, cancel what is still in flight. The stuck message is cancelled mid-run, past its read.
     """
-    global _in_flight
+    global _in_flight  # noqa: PLW0603  # one scenario's knob, set once per process
     _in_flight = asyncio.Event()
     tasks = [asyncio.create_task(handle_async(m)) for m in messages]
     stuck = [t for t, m in zip(tasks, messages, strict=True) if m.get("stuck")]
@@ -597,7 +597,7 @@ def consume(messages: list[dict[str, Any]], how: str) -> tuple[int, int]:
 
     if how in ("threads", "in_turn"):
         if how == "in_turn":
-            global _turns
+            global _turns  # noqa: PLW0603  # one scenario's knob, set once per process
             _turns = _Turns(threading.Event(), threading.Barrier(len(messages)))
         with ThreadPoolExecutor(4) as pool:
             done = list(pool.map(safe, messages))

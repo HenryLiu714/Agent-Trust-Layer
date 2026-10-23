@@ -126,14 +126,74 @@ extend-exclude = [".claude"]
 
 [tool.ruff.lint]
 # E/F/I/UP: errors, pyflakes, import order, modern syntax. B: bugbear's likely-bug patterns.
-# C4: comprehension hygiene.
-select = ["E", "F", "I", "UP", "B", "C4"]
+# C4, SIM, RUF: comprehension hygiene, simpler forms, ruff's own checks. PT: pytest style.
+# PLC0415: imports at the top, so the few lazy ones carry a reason. PLR1714, PLW: pylint's
+# likely bugs. S: bandit's security checks. D2, D4: docstring summary lines (CONTRIBUTING.md).
+select = [
+    "E", "F", "I", "UP", "B", "C4", "SIM", "RUF", "PT", "PLC0415", "PLR1714", "PLW", "S", "D2",
+    "D4",
+]
+ignore = [
+    # The docstring style: the summary starts on the first line, a class docstring has no blank
+    # line above it, the closing quotes end the last line, and a section needs no blank line after.
+    "D203", "D209", "D213", "D413",
+    # D400 wants a period; D415 also accepts `?` and `!`. A summary may open with a lower-case
+    # name: irimi, argparse, mitmproxy.
+    "D400", "D403",
+    # The style guide's blank line after the summary and its imperative mood: enforced once the
+    # docstrings follow it.
+    "D205", "D401",
+    # An assert narrows a type mypy cannot follow; none guards input, so `-O` loses no check.
+    "S101",
+    # A hook and the SDK never raise, so an exception neither can act on is dropped on purpose.
+    "S110", "S112",
+    # Running the command the user typed is what `irimi shadow` is for.
+    "S603",
+    # `assert a and b` reads as one fact, and pytest's report shows which side failed.
+    "PT018",
+]
+flake8-bugbear.extend-immutable-calls = [
+    "irimi.core.exchange.Precondition", "irimi.core.exchange.WriteOutcome",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# A test imports where it needs the name, often after a monkeypatch, and its credentials, binds,
+# temp paths and subprocesses are fixtures.
+"tests/**" = [
+    "PLC0415", "S102", "S104", "S105", "S106", "S108", "S301", "S311", "S607",
+    # A fake service keeps its request log on the class, which every handler instance shares.
+    "RUF012",
+    # An expected row is split across lines with `+` where it is too long for one.
+    "RUF005",
+    # A test string holds a look-alike character on purpose, to check irimi escapes it.
+    "RUF001",
+    # A test names a staticmethod's first parameter `self` or `cls` to check nothing binds it.
+    "PLW0211",
+]
+# The example agents call the URLs their configuration names, through urllib.
+"examples/**" = ["S310"]
 
 [tool.mypy]
 python_version = "3.12"
-files = ["src"]
-strict_optional = true
-check_untyped_defs = true
-warn_unused_ignores = true
-warn_redundant_casts = true
-no_implicit_reexport = false
+files = ["src", "examples", "tests"]
+mypy_path = "src"
+explicit_package_bases = true
+strict = true
+enable_error_code = ["ignore-without-code"]
+# mitmproxy's own API is partly unannotated; calling it is still checked against what it declares.
+untyped_calls_exclude = ["mitmproxy"]
+
+[[tool.mypy.overrides]]
+module = ["brotli"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Tests check behaviour, not signatures: a test function, fixture or helper may go unannotated,
+# and a bare `dict` or an `Any` return is fine in one.
+module = ["tests.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+disallow_untyped_decorators = false
+disallow_any_generics = false
+warn_return_any = false

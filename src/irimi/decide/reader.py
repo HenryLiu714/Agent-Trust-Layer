@@ -86,7 +86,7 @@ class UpstreamReader(Reader):
         )
 
     def __call__(self, request: Request) -> Response | None:
-        req = urllib.request.Request(
+        req = urllib.request.Request(  # noqa: S310  # the service's own http(s) URL
             request.url,
             data=request.body or None,
             headers={k: v for k, v in request.headers if k not in ("host", "content-length")},

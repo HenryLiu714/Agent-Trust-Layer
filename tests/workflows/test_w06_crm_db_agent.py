@@ -6,6 +6,8 @@ What irimi made of it is read from its stream, its summary and its store: a tool
 every call to the run it was made in.
 """
 
+from typing import cast
+
 import pytest
 
 from examples.workflows.agentkit import LOOKUP_REFUSED_ENV
@@ -19,9 +21,9 @@ from examples.workflows.w06_crm_db_agent.agent import (
 )
 from examples.workflows.w06_crm_db_agent.scenarios import STALE_REPLAY_RUN
 from irimi.core.limits import MAX_ERROR_MESSAGE
-from irimi.protocol.trace import UNATTRIBUTED, ErrorInfo, ToolCall
+from irimi.protocol.trace import REPR_KEY, UNATTRIBUTED, ErrorInfo, ToolCall
 from irimi.record import redact
-from irimi.sdk._capture import MAX_REPR, REPR_KEY
+from irimi.sdk._capture import MAX_REPR
 
 W = "w06_crm_db_agent"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.
@@ -175,7 +177,7 @@ def test_every_tool_call_is_stored_in_its_run_with_what_ran_and_what_it_returned
     assert by_name["crm.notify_owner"].result == {"stood_in": True}
     assert by_name["crm.delete_stale"].result == 0
     # Values JSON cannot hold are stored as their repr, which a replay cannot revive.
-    assert {k: set(v) for k, v in by_name["crm.score_account"].result.items()} == {
+    assert {k: set(v) for k, v in cast(dict, by_name["crm.score_account"].result).items()} == {
         "score": {REPR_KEY},
         "scored_at": {REPR_KEY},
     }
@@ -187,7 +189,7 @@ def test_a_credential_in_a_tool_s_args_is_stored_as_its_placeholder(run_workflow
     and only the key is. Universal invariant 4 holds the whole home to it too."""
     shadow = run_workflow(W, "enrich", mode)
     [connect] = [c for c in tool_calls(shadow) if c.name == "crm.connect_with"]
-    dsn = connect.args["dsn"]
+    dsn = cast(dict, connect.args)["dsn"]
     assert CANARIES["STRIPE_API_KEY"] not in dsn
     assert dsn.startswith("postgres://crm:<redacted:") and dsn.endswith(">@db.internal/crm")
     assert connect.result == {"connected": "db.internal/crm"}
@@ -208,7 +210,7 @@ def test_a_read_tool_after_a_stood_in_write_sees_the_old_row(run_workflow, mode)
     assert rows(shadow) == TOUCHED
 
 
-@pytest.mark.parametrize("mode", ("bare", *MODES))
+@pytest.mark.parametrize("mode", ["bare", *MODES])
 def test_a_stale_irimi_replay_run_asks_no_recording_but_where_irimi_cannot_remove_it(
     run_workflow, mode
 ):
@@ -294,7 +296,7 @@ def test_an_sdk_error_quoting_a_key_across_the_cut_is_stored_as_its_placeholder(
     hidden = redact.placeholder(redact.load_key(shadow.home), CANARIES["STRIPE_API_KEY"])
     assert connect.error == connect_error(shadow)
     assert f"could not connect with postgres://crm:{hidden}@" in connect.error.message
-    assert connect.args["dsn"] == f"postgres://crm:{hidden}@{UNREACHABLE_HOST}/crm"
+    assert cast(dict, connect.args)["dsn"] == f"postgres://crm:{hidden}@{UNREACHABLE_HOST}/crm"
     for result in (shadow, run_workflow(W, "tool_raises", "bare")):
         assert result.events("connect_failed", with_time=False) == [
             {"event": "connect_failed", "error": "ConnectionError"}
@@ -313,7 +315,7 @@ def test_a_repr_quoting_a_key_across_the_sdks_cut_keeps_no_part_of_it(run_workfl
     key = CANARIES["OPENAI_API_KEY"]
     said = repr(DriverOptions(key))
     assert said.index(key) < MAX_REPR < said.index(key) + len(key)
-    assert connect.args["options"] == {REPR_KEY: said[: said.index(key)]}
+    assert cast(dict, connect.args)["options"] == {REPR_KEY: said[: said.index(key)]}
     assert said[: said.index(key)].endswith("', password='")
     on_disk = [p.read_bytes() for p in shadow.store_root().rglob("*") if p.is_file()]
     assert not any(key[:12].encode() in data for data in on_disk)
@@ -714,7 +716,7 @@ def test_a_credential_in_a_replayed_tool_s_args_matches_its_placeholder(replayed
     key, as the recording's were."""
     recorded, replay = replayed(W, "enrich")
     [stored] = [c for c in tool_calls(recorded) if c.name == "crm.connect_with"]
-    assert CANARIES["STRIPE_API_KEY"] not in stored.args["dsn"]
+    assert CANARIES["STRIPE_API_KEY"] not in cast(dict, stored.args)["dsn"]
     [again] = [
         c for c in tool_calls(replay) if (c.name, c.ran) == ("crm.connect_with", "recording")
     ]
@@ -738,7 +740,10 @@ def test_read_after_write_replayed_matches_both_reads_in_order(replayed):
     assert replay.result()["last_seen"] == recorded.result()["last_seen"]
     assert recorded.result()["last_seen"] == ["2026-01-01", "2026-09-28"]
     first, second = (c for c in replayed_calls(replay) if c.name == "crm.find_accounts")
-    assert [first.result[0]["last_seen"], second.result[0]["last_seen"]] == [
+    assert [
+        cast(list, first.result)[0]["last_seen"],
+        cast(list, second.result)[0]["last_seen"],
+    ] == [
         "2026-01-01",
         "2026-09-28",
     ]

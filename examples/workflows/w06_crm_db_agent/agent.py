@@ -28,6 +28,7 @@ import csv
 import json
 import sqlite3
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -288,8 +289,9 @@ RAISED: list[BaseException] = []
 def _missing(*ids: str) -> list[str]:
     """Which of `ids` the CRM does not hold. A read, so a stand-in may make it too."""
     with agentkit.sqlite(DB_NAME) as conn:
-        marks = ", ".join("?" * len(ids))
-        found = {r[0] for r in conn.execute(f"SELECT id FROM accounts WHERE id IN ({marks})", ids)}
+        marks = ", ".join("?" * len(ids))  # placeholders only: the ids themselves are bound
+        query = f"SELECT id FROM accounts WHERE id IN ({marks})"  # noqa: S608
+        found = {r[0] for r in conn.execute(query, ids)}
     return sorted(set(ids) - found)
 
 
@@ -496,10 +498,11 @@ def decoration_errors() -> list[str]:
         yield x
 
     not_callable: Any = "mock_database_write"
-    mistakes = {
-        "write_without_fake": lambda: sdk.write_tool()(real),
-        "read_with_fake": lambda: sdk.read_tool(fake=real)(real),
-        "bare_write_tool": lambda: sdk.write_tool(real),
+    misused: Any = sdk  # each mistake below is a call the SDK's signature already refuses
+    mistakes: dict[str, Callable[[], object]] = {
+        "write_without_fake": lambda: misused.write_tool()(real),
+        "read_with_fake": lambda: misused.read_tool(fake=real)(real),
+        "bare_write_tool": lambda: misused.write_tool(real),
         "fake_not_callable": lambda: sdk.write_tool(fake=not_callable)(real),
         "sync_fake_for_async": lambda: sdk.write_tool(fake=real)(real_async),
         "async_fake_for_sync": lambda: sdk.write_tool(fake=real_async)(real),

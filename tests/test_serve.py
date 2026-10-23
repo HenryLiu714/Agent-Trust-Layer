@@ -11,17 +11,21 @@ import contextlib
 import dataclasses
 import json
 import socket
+from typing import cast
 
 import pytest
 
 from irimi import servicemaps
 from irimi.config import ca, paths
+from irimi.core.exchange import Exchange
 from irimi.decide.overlay import NoOverlay
 from irimi.decide.policy import ShadowPolicy
 from irimi.engine import EngineConfig, Serve
 from irimi.engine.mitm import IrimiAddon, MitmEngine
 from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV
 from tests.doubles import NullStore
+from tests.support.credentials import MESSAGE_SECRET, UNREADABLE_SECRET
+from tests.support.servers import stop_server
 
 
 def _config(tmp_path, monkeypatch, listen_host="127.0.0.1"):
@@ -40,7 +44,7 @@ def _config(tmp_path, monkeypatch, listen_host="127.0.0.1"):
 
 
 def _own_address() -> str | None:
-    """This machine's non-loopback IPv4 address: the one a connected UDP socket would send from.
+    """The machine's non-loopback IPv4 address: the one a connected UDP socket would send from.
     Connecting a UDP socket sends nothing; it only asks the routing table. None with no route."""
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         try:
@@ -61,7 +65,7 @@ def test_the_reverse_door_refuses_a_peer_that_is_not_loopback(tmp_path, monkeypa
     connection from another machine cannot be staged here."""
     from mitmproxy.test import tflow, tutils
 
-    seen = []
+    seen: list[Exchange] = []
     addon = IrimiAddon(
         _config(tmp_path, monkeypatch, listen_host="0.0.0.0"),
         ShadowPolicy(),
@@ -77,6 +81,7 @@ def test_the_reverse_door_refuses_a_peer_that_is_not_loopback(tmp_path, monkeypa
     flow.client_conn.peername = ("10.0.0.9", 51515)
     asyncio.run(addon.request(flow))
 
+    assert flow.response is not None and flow.response.content is not None
     assert flow.response.status_code == 403
     assert flow.response.headers["irimi-answered-by"] == "irimi"
     assert (
@@ -246,7 +251,7 @@ def test_a_door_that_cannot_be_told_is_refused_never_forwarded(tmp_path, monkeyp
         raise ValueError("no address")
 
     monkeypatch.setattr(ingress, "detect_door", broken)
-    seen = []
+    seen: list[Exchange] = []
     addon = IrimiAddon(
         _config(tmp_path, monkeypatch, listen_host="0.0.0.0"),
         ShadowPolicy(),
@@ -258,6 +263,7 @@ def test_a_door_that_cannot_be_told_is_refused_never_forwarded(tmp_path, monkeyp
     flow = tflow.tflow(req=tutils.treq(method=b"POST", host="irimi", port=4000, path=b"/x"))
     flow.client_conn.sockname = ("10.0.0.5", 4000)
     asyncio.run(addon.request(flow))
+    assert flow.response is not None and flow.response.content is not None
     assert flow.response.status_code == 400
     assert json.loads(flow.response.content) == {
         "error": {
@@ -296,6 +302,7 @@ def test_a_failed_decision_under_serve_mode_is_unattributed(tmp_path, monkeypatc
     )
     flow.client_conn.sockname = ("127.0.0.1", 4000)
     asyncio.run(addon.request(flow))
+    assert flow.response is not None
     assert flow.response.status_code == 502
     [ex] = store.recorded
     assert ex.run_id == UNATTRIBUTED
@@ -339,6 +346,7 @@ def test_the_store_calls_back_on_its_writer_once_a_runs_end_is_on_disk(tmp_path)
 
     def ended(run_id):
         stored = StoreReader(root).load_run(run_id)
+        assert stored.record.end is not None
         seen.append(
             (run_id, threading.current_thread().name, stored.record.end.outcome, stored.events)
         )
@@ -368,15 +376,16 @@ def test_a_run_s_writes_and_keys_are_dropped_once_its_end_is_on_disk(tmp_path, m
     monkeypatch.chdir(tmp_path)
     ca.generate_ca(ca.ca_paths())
     args = cli.parse_args(["serve", "--store", str(tmp_path / "store")])
-    left_at_end = []
+    left_at_end: list[tuple] = []
     slot_of = {run_id: idempotency.slot_id(run_id, "stripe", (), "k-1") for run_id in ("r1", "r2")}
 
     def on_run_ended(index, run_id):
-        assert run.keys is not None
+        assert run is not None and run.write_log is not None and run.keys is not None
         left_at_end.append((run.write_log.for_run(run_id), run.keys.get(slot_of[run_id], PARAMS)))
 
     run = compose.prepare_run(args, serve=True, on_run_ended=on_run_ended)
     assert run is not None and run.write_log is not None and run.keys is not None
+    assert run.lock is not None
     ended, still_open = _exchange("r1"), _exchange("r2")
     run.write_log.add(ended)
     run.write_log.add(still_open)
@@ -392,6 +401,7 @@ def test_a_run_s_writes_and_keys_are_dropped_once_its_end_is_on_disk(tmp_path, m
     assert run.write_log.for_run("r2") == (still_open,)
     assert run.keys.get(slot_of["r2"], PARAMS) == (_stored(), False)
     engine = compose.build_engine(run, lambda ex: None)
+    assert isinstance(engine, MitmEngine) and isinstance(engine.policy, ShadowPolicy)
     assert engine.write_log is run.write_log
     assert engine.policy.idempotency is run.keys
 
@@ -406,7 +416,7 @@ def test_a_callback_that_raises_is_logged_and_the_store_carries_on(tmp_path, cap
     root = tmp_path / "store"
 
     def ended(run_id):
-        raise ValueError("cannot print sk_live_secret")
+        raise ValueError(f"cannot print {MESSAGE_SECRET}")
 
     store = DirectoryStore(root, b"k" * 32, ended)
     store.start_run(_record("r1"))
@@ -415,7 +425,9 @@ def test_a_callback_that_raises_is_logged_and_the_store_carries_on(tmp_path, cap
     store.close()
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert warnings == ["irimi: the end-of-run callback raised ValueError"]
-    assert StoreReader(root).load_run("r1").record.end.outcome == "ok"
+    end = StoreReader(root).load_run("r1").record.end
+    assert end is not None
+    assert end.outcome == "ok"
     assert len(StoreReader(root).load_run("r2").events) == 1
     assert store.stats().dropped == 0
 
@@ -534,6 +546,7 @@ def test_serve_with_a_command_exits_2_from_the_command_line(home):
         capture_output=True,
         text=True,
         timeout=60,
+        check=False,
     )
     assert done.returncode == 2
     assert done.stderr.startswith("usage: irimi serve") and done.stdout == ""
@@ -630,7 +643,7 @@ def test_a_sigint_ignored_when_serve_starts_stays_ignored():
 
     from irimi.cli import runner
 
-    with _signals_caught_here() as (outside, record):
+    with _signals_caught_here() as (outside, _record):
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         with runner.stopping_on_signals() as signalled:
             during = signal.getsignal(signal.SIGINT)
@@ -669,7 +682,7 @@ def test_a_signal_before_the_proxy_is_ready_stops_serve_with_no_banner(
 
     monkeypatch.setattr(compose, "prepare_run", signalled_while_preparing)
     monkeypatch.setattr(runner, "start_engine", signalled_while_starting)
-    with _signals_caught_here() as (outside, record):
+    with _signals_caught_here() as (outside, _record):
         assert cli.main(["serve", "--port", "0"]) == 0
     assert len(started) == (when == "starting") and outside == []
     assert "listening on" not in capsys.readouterr().out
@@ -740,7 +753,7 @@ def test_a_run_that_cannot_be_read_back_is_one_warning_naming_only_its_type(
     from irimi.record.store.reader import StoreReader
 
     def unreadable(self, run_id, *, bodies=True):
-        raise TraceFormatError("cannot read sk_live_CANARY0000000000000000")
+        raise TraceFormatError(f"cannot read {UNREADABLE_SECRET}")
 
     monkeypatch.setattr(StoreReader, "load_run", unreadable)
     serve._ServeOutput(tmp_path / "store").run_ended(servicemaps.MapIndex(), "r1")
@@ -817,8 +830,9 @@ class _Served:
 
     def _read(self) -> None:
         assert self.proc.stdout is not None
-        for line in self.proc.stdout:
-            self.lines.append(line.rstrip("\n"))
+        with self.proc.stdout:
+            for line in self.proc.stdout:
+                self.lines.append(line.rstrip("\n"))
 
     def wait_for(self, condition) -> None:
         _wait_for(lambda: condition(self.lines))
@@ -980,7 +994,7 @@ def test_a_served_sdk_agent_gets_one_summary_block_per_run_it_ends(home, tmp_pat
         code, lines, err = served.stop("SIGTERM")
     finally:
         served.kill()
-        upstream.shutdown()
+        stop_server(upstream)
     assert code == 0, err
     reader = StoreReader(home / "store")
     records = {r.run_id: r for r in reader.list_runs()}
@@ -993,9 +1007,11 @@ def test_a_served_sdk_agent_gets_one_summary_block_per_run_it_ends(home, tmp_pat
     assert sorted(_blocks(lines, reader)) == ended
     # The read in no run is stored as no run's: in `unattributed/`, never as a run of its own.
     [bare] = reader.load_run(UNATTRIBUTED).events
+    assert isinstance(bare, Exchange)
     assert bare.request.path == "/bare"
     paths_by_run = {
-        run_id: [e.request.path for e in reader.load_run(run_id).events] for run_id in records
+        run_id: [cast(Exchange, e).request.path for e in reader.load_run(run_id).events]
+        for run_id in records
     }
     assert sorted(paths_by_run.values()) == [
         ["/items/1", "/items/1"],
@@ -1026,7 +1042,12 @@ def _run_agent(tmp_path_factory, source: str, listener: str, *argv: str) -> None
         }
     )
     done = subprocess.run(
-        [sys.executable, str(agent), *argv], env=env, capture_output=True, text=True, timeout=120
+        [sys.executable, str(agent), *argv],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
     )
     assert done.returncode == 0, done.stderr
     assert "irimi.sdk" not in done.stderr, done.stderr  # every post reached irimi
@@ -1080,8 +1101,8 @@ def test_a_stream_read_to_its_end_is_in_its_runs_block(home, tmp_path_factory):
     block is printed when the SDK's end is on disk. For a stream the agent reads to its
     end, the record comes first: mitmproxy sends the agent the stream's end only after the
     `response` hook has queued the exchange, and the agent posts its run's end after that. So the
-    block of each run holds its stream. (A stream the agent leaves open past its run's end is
-    recorded when it closes, after the block: the README says so.)"""
+    block of each run holds its stream. A stream the agent leaves open past its run's end is
+    recorded when it closes, after the block, as the README says."""
     import threading
     import time
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1121,11 +1142,12 @@ def test_a_stream_read_to_its_end_is_in_its_runs_block(home, tmp_path_factory):
         code, lines, err = served.stop()
     finally:
         served.kill()
-        upstream.shutdown()
+        stop_server(upstream)
     assert code == 0, err
     reader = StoreReader(home / "store")
     ended = _blocks(lines, reader)
     assert len(ended) == 10
     for run_id in ended:
         [stream] = reader.load_run(run_id).events
+        assert isinstance(stream, Exchange)
         assert stream.stream_chunks, run_id

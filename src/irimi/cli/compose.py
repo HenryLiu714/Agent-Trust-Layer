@@ -6,6 +6,7 @@ and how every command reads a stored run back.
 """
 
 import argparse
+import contextlib
 import datetime as dt
 import sys
 from collections.abc import Callable, Sequence
@@ -282,7 +283,7 @@ def print_startup(
 
 
 def _redaction_key() -> bytes | None:
-    """This install's redaction key, loaded once for the store that redacts with it and the
+    """The install's redaction key, loaded once for the store that redacts with it and the
     recording a replay matches against it, or None after printing why it cannot be used."""
     home = paths.irimi_home()
     try:
@@ -334,10 +335,8 @@ def _hold_serve_lock(args: argparse.Namespace) -> ServeLock | None:
 def _close_store(store: RunStore) -> None:
     """Close a store `prepare_run` opened. An impatient Ctrl-C here, as in `handle.stop()`, may
     cut the writer's last seconds short, and never costs the summary."""
-    try:
+    with contextlib.suppress(KeyboardInterrupt):
         store.close()
-    except KeyboardInterrupt:
-        pass
 
 
 def build_engine(
@@ -350,7 +349,7 @@ def build_engine(
     is the run's, and the caller closes it once the engine has stopped."""
     # Imported here alone: `runs` and `compare` share this module, start no proxy, and so never
     # load mitmproxy.
-    from irimi.engine.mitm import MitmEngine
+    from irimi.engine.mitm import MitmEngine  # noqa: PLC0415
 
     overlay = ServiceOverlay()
     policy: AnswerPolicy

@@ -4,12 +4,14 @@ import itertools
 import threading
 from dataclasses import replace
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
 from irimi.cli.runner import EngineThread, child_env, exit_code_for
 from irimi.core.exchange import Exchange, Flag, Precondition, Request, Response
 from irimi.core.netaddr import Target
+from irimi.engine import Engine
 from irimi.protocol.trace import ErrorInfo, RunRecord, ToolCall
 from irimi.report import model, summary
 from irimi.report.model import RunView, for_summary
@@ -205,7 +207,7 @@ def test_an_engine_that_never_binds_is_an_engine_start_error_with_a_message():
             stopped.set()
 
     with pytest.raises(EngineStartError) as refused:
-        start_engine(_NeverReady(), timeout=1.0)
+        start_engine(cast(Engine, _NeverReady()), timeout=1.0)
     assert str(refused.value) == "proxy did not start within 1s"
     assert stopped.is_set()
 
@@ -252,7 +254,7 @@ def test_engine_thread_stop_is_idempotent():
 
     thread = threading.Thread(target=loop.run_forever, daemon=True)
     thread.start()
-    handle = EngineThread(engine=_StubEngine(), thread=thread, loop=loop)
+    handle = EngineThread(engine=cast(Engine, _StubEngine()), thread=thread, loop=loop)
     handle.stop()
     assert not thread.is_alive()
     assert loop.is_closed()
@@ -282,7 +284,7 @@ def test_exchange_line_names_a_delegated_answer():
 def _service(**kwargs):
     from irimi.servicemaps import ServiceMap
 
-    base = {
+    base: dict[str, Any] = {
         "service": "stripe",
         "hosts": frozenset({"api.stripe.com"}),
         "routes": (),
@@ -296,7 +298,12 @@ def _service(**kwargs):
 def _route(**kwargs):
     from irimi.servicemaps import Route
 
-    base = {"method": "POST", "path": "/v1/refunds", "operation": "refunds.create", "kind": "write"}
+    base: dict[str, Any] = {
+        "method": "POST",
+        "path": "/v1/refunds",
+        "operation": "refunds.create",
+        "kind": "write",
+    }
     base.update(kwargs)
     if isinstance(base.get("target"), str):
         base["target"] = Target.parse(base["target"])

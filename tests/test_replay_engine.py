@@ -14,6 +14,7 @@ import json
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import cast
 
 import pytest
 
@@ -37,6 +38,8 @@ from irimi.replay.index import ReplayIndex
 from irimi.replay.policy import ReplayPolicy
 from irimi.servicemaps import classify
 from tests.doubles import NullStore
+from tests.support.credentials import OTHER_PROMPT_SECRET, PROMPT_SECRET
+from tests.support.servers import stop_server
 from tests.test_invariants import stamping_violations
 
 STRIPE_MAP = """
@@ -178,8 +181,8 @@ def stubs():
     _Stripe.seen, _Stripe.charge_status, _Llm.seen = [], 200, []
     stripe, llm = _serve(_Stripe), _serve(_Llm)
     yield stripe.server_address[1], llm.server_address[1]
-    stripe.shutdown()
-    llm.shutdown()
+    stop_server(stripe)
+    stop_server(llm)
 
 
 @pytest.fixture
@@ -214,7 +217,7 @@ class _Session:
             listen_port=0,
             maps=maps,
         )
-        self.seen = []
+        self.seen: list[Exchange] = []
         self.engine = MitmEngine(
             cfg,
             policy,
@@ -350,11 +353,11 @@ def test_a_recorded_stream_answers_a_streaming_call_and_never_a_plain_one(home, 
     prompt asked without streaming is a miss: it gets an answer of its own, from the model."""
     _, llm = stubs
     url, streaming = _message(llm, stream=True)
-    recorded = {}
+    recorded: dict = {}
     events = _record(home, maps, lambda s: recorded.setdefault("r", s.call("POST", url, streaming)))
     assert recorded["r"][2].count(b"data: ") == 3
 
-    replies = []
+    replies: list = []
     session = _replay(home, maps, events, lambda s: replies.append(s.call("POST", url, streaming)))
     (status, headers, data), (ex,) = replies[0], session.seen
     assert (status, data) == (200, recorded["r"][2])
@@ -373,13 +376,13 @@ def test_a_secret_in_a_request_body_matches_its_placeholder_in_the_recording(hom
     """The recording holds the secret's placeholder. The live call is redacted with the same
     key before it is keyed, so the same secret matches, and another does not."""
     _, llm = stubs
-    url, body = _message(llm, system="The key is sk_live_REPLAYSECRET123.")
+    url, body = _message(llm, system=f"The key is {PROMPT_SECRET}.")
     events = _record(home, maps, lambda s: s.call("POST", url, body))
-    stored = [ex for ex in events if ex.kind == "llm"][0]
-    assert b"sk_live_REPLAYSECRET123" not in stored.request.body
+    stored = next(ex for ex in events if ex.kind == "llm")
+    assert PROMPT_SECRET.encode() not in stored.request.body
     session = _replay(home, maps, events, lambda s: s.call("POST", url, body))
     assert [ex.answered_by for ex in session.seen] == ["recording"]
-    _, other = _message(llm, system="The key is sk_live_ANOTHERSECRET456.")
+    _, other = _message(llm, system=f"The key is {OTHER_PROMPT_SECRET}.")
     session = _replay(home, maps, events, lambda s: s.call("POST", url, other))
     assert [ex.answered_by for ex in session.seen] == ["live"]
 
@@ -392,7 +395,7 @@ def test_a_read_is_answered_once_per_time_it_was_recorded(home, maps, stubs):
     third reaches the stub."""
     stripe, _ = stubs
     events = _record(home, maps, lambda s: [_charge(s, stripe) for _ in range(2)])
-    replies = []
+    replies: list = []
     session = _replay(
         home, maps, events, lambda s: replies.extend(_charge(s, stripe) for _ in range(3))
     )
@@ -425,7 +428,7 @@ def test_the_same_write_is_answered_with_the_recorded_answer(home, maps, stubs):
     currency, and the read of the id it minted is answered from the recording too."""
     stripe, _ = stubs
     events = _record(home, maps, _refund_then_read_it(stripe))
-    recorded = [ex for ex in events if ex.kind == "write"][0]
+    recorded = next(ex for ex in events if ex.kind == "write")
     session = _replay(home, maps, events, _refund_then_read_it(stripe, key="k-other"))
     write, read = session.seen
     assert write.response.body == recorded.response.body
@@ -518,7 +521,10 @@ def test_after_a_write_misses_a_recorded_read_goes_live_and_shows_the_new_write(
     events = _record(home, maps, script(100))
     replies = []
     session = _replay(
-        home, maps, events, lambda s: (_refund(s, stripe, 250), replies.append(_charge(s, stripe)))
+        home,
+        maps,
+        events,
+        lambda s: (_refund(s, stripe, 250), replies.append(_charge(s, stripe))),  # type: ignore[func-returns-value]
     )
     read = session.seen[-1]
     assert (read.answered_by, Flag.REPLAY_MISS in read.flags) == ("overlay", True)
@@ -646,7 +652,7 @@ def test_the_reads_an_answer_issued_are_recorded_when_it_cannot_be_sent(home, ma
     assert Flag.DECISION_FAILED in refusal.flags
     assert (issued.issued_by, issued.request.url) == ("engine", url)
     events = StoreReader(home / "store").load_run("rep").events
-    assert [e.issued_by for e in events] == ["agent", "engine"]
+    assert [cast(Exchange, e).issued_by for e in events] == ["agent", "engine"]
 
 
 def test_a_read_the_overlay_translates_is_recorded_translated_whoever_answers_it(home, maps, stubs):

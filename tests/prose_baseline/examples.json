@@ -1,0 +1,126 @@
+{
+  "examples/llm_refund_agent/__init__.py": {
+    "issue_ref": 1,
+    "use_case": 1
+  },
+  "examples/llm_refund_agent/__main__.py": {
+    "issue_ref": 2
+  },
+  "examples/llm_refund_agent/agent.py": {
+    "issue_ref": 5,
+    "use_case": 1
+  },
+  "examples/llm_refund_agent/seed.py": {
+    "issue_ref": 1
+  },
+  "examples/refund_agent/agent.py": {
+    "caps_run": 1,
+    "issue_ref": 10,
+    "phase": 1,
+    "since_issue": 2
+  },
+  "examples/server_agent/__init__.py": {
+    "issue_ref": 1,
+    "phase": 1
+  },
+  "examples/server_agent/__main__.py": {
+    "issue_ref": 2
+  },
+  "examples/server_agent/app.py": {
+    "issue_ref": 7,
+    "phase": 1
+  },
+  "examples/workflows/__main__.py": {
+    "issue_ref": 1
+  },
+  "examples/workflows/agentkit.py": {
+    "issue_ref": 15
+  },
+  "examples/workflows/harness/internet.py": {
+    "issue_ref": 15
+  },
+  "examples/workflows/harness/run.py": {
+    "issue_ref": 79,
+    "since_issue": 1
+  },
+  "examples/workflows/harness/services.py": {
+    "issue_ref": 3
+  },
+  "examples/workflows/launch.py": {
+    "issue_possessive": 1,
+    "issue_ref": 3
+  },
+  "examples/workflows/sdk.py": {
+    "issue_possessive": 3,
+    "issue_ref": 36,
+    "since_issue": 2
+  },
+  "examples/workflows/w01_ticket_triage/agent.py": {
+    "issue_ref": 6,
+    "use_case": 1
+  },
+  "examples/workflows/w02_nightly_reconcile/agent.py": {
+    "issue_possessive": 1,
+    "issue_ref": 2,
+    "use_case": 1
+  },
+  "examples/workflows/w03_queue_worker/agent.py": {
+    "decision_code": 1,
+    "issue_ref": 32
+  },
+  "examples/workflows/w03_queue_worker/scenarios.py": {
+    "issue_ref": 2
+  },
+  "examples/workflows/w04_slack_ops_bot/agent.py": {
+    "issue_ref": 3
+  },
+  "examples/workflows/w04_slack_ops_bot/scenarios.py": {
+    "issue_ref": 3
+  },
+  "examples/workflows/w05_dispute_responder/scenarios.py": {
+    "issue_ref": 1
+  },
+  "examples/workflows/w06_crm_db_agent/agent.py": {
+    "issue_possessive": 1,
+    "issue_ref": 29,
+    "phase": 1
+  },
+  "examples/workflows/w06_crm_db_agent/scenarios.py": {
+    "issue_ref": 2,
+    "phase": 1
+  },
+  "examples/workflows/w07_streaming_assistant/agent.py": {
+    "issue_ref": 12
+  },
+  "examples/workflows/w07_streaming_assistant/scenarios.py": {
+    "issue_ref": 8,
+    "since_issue": 1
+  },
+  "examples/workflows/w08_orchestrator/agent.py": {
+    "issue_ref": 8
+  },
+  "examples/workflows/w08_orchestrator/scenarios.py": {
+    "issue_ref": 2
+  },
+  "examples/workflows/w09_scope_gauntlet/agent.py": {
+    "caps_run": 2,
+    "issue_ref": 26
+  },
+  "examples/workflows/w09_scope_gauntlet/scenarios.py": {
+    "issue_ref": 1
+  },
+  "examples/workflows/w10_flaky_upstream/agent.py": {
+    "issue_ref": 5
+  },
+  "examples/workflows/w10_flaky_upstream/scenarios.py": {
+    "issue_ref": 2
+  },
+  "examples/workflows/w11_leaky_agent/agent.py": {
+    "issue_ref": 4,
+    "phase": 1
+  },
+  "examples/workflows/w11_leaky_agent/scenarios.py": {
+    "issue_ref": 3,
+    "phase": 1
+  }
+}

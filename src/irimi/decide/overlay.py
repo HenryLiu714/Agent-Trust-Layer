@@ -1,4 +1,8 @@
-"""Overlay: applies the run's faked writes to a live read. Pure function so replay can reuse it."""
+"""The overlay: applies the run's faked writes to a live read, purely, so replay reuses it.
+
+The engine never calls it for reads sent to a target (`target_reads: true`; the target owns that
+state) or for streamed responses (headers already sent).
+"""
 
 import json
 import logging
@@ -15,25 +19,15 @@ from irimi.servicemaps.classify import Classification
 
 logger = logging.getLogger(__name__)
 
-# A delegated read is never overlaid: its target owns that state. A streamed response never
-# reaches the overlay: mitmproxy does not assemble its body, and its headers are already sent.
-# Both are enforced in `session.ShadowSession.complete` and covered by the tests in tests/engine/.
-
 
 @dataclass(frozen=True)
 class Overlaid:
     """What the overlay did to one live read.
 
-    `response` is the very object the overlay was handed when nothing changed, which is how the
-    engine tells an untouched read - live, unstamped, byte-identical to what the service sent -
-    from one it must stamp `overlay`. `fidelity` is independent of that: a page the effects
-    cannot model is `partial` with the body left alone, and the exchange has to say so.
-
-    The response carries a status as well as a body, and an effect may replace it - for
-    one case only, a read of an object this run minted, which the service answers with an error
-    because it has never heard of the id. `services.Applied.status` is how an effect says so, and
-    `ShadowSession.complete` stamps `overlay` off the same identity check either way, so a status
-    of irimi's is never handed back as the service's.
+    `response` is the same object it was handed when nothing changed; the engine stamps
+    `overlay` on any other. `fidelity` is separate: a page the effects cannot model is `partial`
+    with the body untouched. An effect replaces the status only for a read of an object this run
+    minted, which the real service answers with an error (`services.Applied.status`).
     """
 
     response: Response
@@ -56,7 +50,7 @@ class Overlay(Protocol):
         classification: Classification,
         read_request: Request,
     ) -> Translation | None:
-        """The read to forward instead of `read_request`, or None to forward it as it is."""
+        """Return the read to forward instead of `read_request`, or None to forward it as is."""
         ...
 
 
@@ -81,14 +75,10 @@ class NoOverlay:
 
 
 class ServiceOverlay:
-    """The real overlay: `irimi.services`' effect tables, applied to a live read.
+    """The real overlay: `irimi.services`' effect tables, keyed by the read's classification.
 
-    The effect tables key on the read's service and operation, which the caller's
-    `Classification` already holds.
-
-    Both entry points swallow everything. They are called from inside mitmproxy hooks, where a
-    raise forwards the flow untouched: on the response side that would hand the agent a read the
-    overlay half-edited, and on the request side it would turn a read into a 502.
+    Neither entry point raises (fail-closed hook rule): a failure leaves the read as the service
+    sent it.
     """
 
     def __call__(
@@ -119,8 +109,6 @@ class ServiceOverlay:
             logger.exception("irimi: the overlay's rewrite failed; forwarding the read unchanged")
             return None
 
-    # --------------------------------------------------------------------------------- inside
-
     def _apply(
         self,
         write_log: Sequence[Exchange],
@@ -129,8 +117,7 @@ class ServiceOverlay:
         upstream_response: Response,
         translated_from: str | None,
     ) -> Overlaid:
-        # A body the overlay cannot read is a body it cannot apply the run's writes to: `apply`
-        # says `partial`, and the agent still gets exactly what the service sent.
+        # An unreadable body comes back `partial`, and the agent gets what the service sent.
         applied = writelog.apply(
             classification.service,
             classification.operation,
@@ -145,16 +132,10 @@ class ServiceOverlay:
         if applied.partial:
             fidelity = "partial"
         elif applied.changed or translated_from is not None or applied.status is not None:
-            # A translated cursor is an effect too, even when the page itself needed no edit. So is
-            # a replaced status: the effects that set one also set `changed`, but an
-            # exchange stamped `overlay` with `overlay: None` would print a `saw it  overlay` line
-            # off a fidelity the trace says was never considered, so it is held here by
-            # construction rather than by that convention.
+            # A translated cursor or a replaced status is an effect even when the page needed no
+            # edit, so an exchange stamped `overlay` never records `overlay: None`.
             fidelity = "full"
-        # An effect may replace the status only for a read of an object this run minted, which the
-        # service refused because it never heard of the id (`Applied.status`). Both halves of
-        # the test, so a status-only answer is rebuilt rather than dropped: identity is how the
-        # engine tells an untouched read from one to stamp.
+        # A status-only change is rebuilt too: identity is how the engine tells an untouched read.
         status = upstream_response.status if applied.status is None else applied.status
         if not applied.changed and status == upstream_response.status:
             return Overlaid(upstream_response, fidelity)

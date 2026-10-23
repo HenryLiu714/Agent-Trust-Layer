@@ -1,10 +1,4 @@
-"""Turns the run's write log (the `Exchange`s irimi faked) into `services.Write`s scoped to one
-read, and applies them to that read's document. Shared by the overlay and the precondition check,
-so both show a read the same writes the same way.
-
-`WriteLog` keeps those writes per run: a run sees its own faked writes and no other run's, and a
-run's writes are dropped when it ends.
-"""
+"""The run's faked writes, and how they are applied to a read's document."""
 
 import threading
 from collections.abc import Callable, Sequence
@@ -18,29 +12,21 @@ from irimi.core.exchange import Exchange, Request
 
 @dataclass(frozen=True)
 class Translation:
-    """A read the overlay translated before it is forwarded: the request irimi asks instead, and
-    the `key=value` query pair it dropped. irimi keeps `removed` and hands it back to the overlay
-    with the response; it never goes on the wire."""
+    """A read the overlay rewrote, and the `key=value` query pair it removed from the wire."""
 
     request: Request
     removed: str
 
 
 class WriteLog:
-    """The faked writes each run has made, keyed by run id.
-
-    Requests that name no run share the id the engine files them under (`unattributed` in serve
-    mode), so they form one log of their own. The engine adds from its event loop and the store
-    ends runs from its writer thread, so one lock covers both.
-    """
+    """The faked writes each run has made, keyed by run id; a run sees only its own. Thread-safe."""
 
     def __init__(self) -> None:
         self._runs: dict[str, tuple[Exchange, ...]] = {}
         self._lock = threading.Lock()
 
     def for_run(self, run_id: str) -> tuple[Exchange, ...]:
-        """The run's writes, oldest first. The tuple is the log's own and never changes, so the
-        caller may read it from another thread without a copy."""
+        """Return the run's writes, oldest first, as an immutable tuple safe to share."""
         with self._lock:
             return self._runs.get(run_id, ())
 
@@ -50,18 +36,13 @@ class WriteLog:
             self._runs[exchange.run_id] = (*self._runs.get(exchange.run_id, ()), exchange)
 
     def end_run(self, run_id: str) -> None:
-        """Drop the run's writes: nothing reads them once the run has ended."""
+        """Drop the run's writes."""
         with self._lock:
             self._runs.pop(run_id, None)
 
 
 def decode(service: str, request: Request, write_log: Sequence[Exchange]) -> list[services.Write]:
-    """The service's faked writes, in the scope the read is asking about.
-
-    A write made against another connected account or another API version says nothing about
-    this read, so it is left out. The scope is taken from each write's OWN request headers,
-    because that is the world it was made in.
-    """
+    """Return the service's faked writes made in the read's scope (account, API version)."""
     wanted = services.scope_of(service, request)
     out: list[services.Write] = []
     for exchange in write_log:
@@ -85,12 +66,7 @@ def decode(service: str, request: Request, write_log: Sequence[Exchange]) -> lis
 def scoped_writes[T](
     entry: T | None, service: str, request: Request, write_log: Sequence[Exchange]
 ) -> tuple[T, list[services.Write]] | None:
-    """`entry` (a field of the service's spec) and this service's faked writes in the read's
-    scope, or None when the spec leaves that field unset or the run has no such write.
-
-    The overlay's effects and rewrites and the precondition check all start here, so the three
-    agree on which writes a read can see.
-    """
+    """Return `(entry, writes in the read's scope)`, or None if either is empty."""
     if entry is None:
         return None
     writes = decode(service, request, write_log)
@@ -107,13 +83,11 @@ def apply(
     write_log: Sequence[Exchange],
     translated_from: str | None = None,
 ) -> services.Applied | None:
-    """The run's writes in the read's scope applied to the read's document, or None when the
-    service models no effects or the run has no write the read can see.
+    """Apply the run's writes in the read's scope to the read's document.
 
-    The one path from a write log to a read's document, for the overlay and the precondition
-    check alike. `document` is called only once there is a write to apply, so no body is parsed
-    for nothing. A document of None is a body irimi could not read: the writes cannot be shown
-    in it, so it comes back `partial` and unchanged.
+    Returns None when the service models no effects or no write is in scope. `document` is
+    called only when there is a write to apply; if it returns None (an unreadable body) the
+    result is `partial` and unchanged.
     """
     found = scoped_writes(services.of(service).effects, service, request, write_log)
     if found is None:
@@ -126,8 +100,7 @@ def apply(
 
 
 def read_of(operation: str, request: Request, translated_from: str | None = None) -> services.Read:
-    """A live read as the effects are handed it: its operation, its own body reflected once, and
-    the query pair irimi dropped from it, if any."""
+    """Return a live read as the effects receive it."""
     return services.Read(
         operation=operation,
         request=request,

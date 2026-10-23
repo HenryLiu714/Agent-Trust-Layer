@@ -1,10 +1,6 @@
-"""AnswerPolicy: decides whether a request is forwarded live, sent to its target, or answered by
-irimi, and whether a read tool the proxy cannot see is answered from a replay's recording.
+"""AnswerPolicy: whether a request goes live, goes to its target, or is answered by irimi.
 
-A decision is one of three values: `Forward`, `Delegate` or `Respond`, each carrying only its own
-data. What a faked answer *contains* is `irimi.services`; which target a request goes to is
-`irimi.decide.targets`, resolved by the caller; the precondition check is
-`irimi.decide.preconditions`; a replay's policy is `irimi.replay.policy`.
+A replay's policy is `irimi.replay.policy`.
 """
 
 import logging
@@ -38,9 +34,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Forward:
-    """Send the request to the real service. `translation` is set when the overlay translated a
-    read before it was asked: its query goes onto the wire, and the pair it dropped goes back to
-    the overlay with the response."""
+    """Send the request to the real service, rewritten by `translation` if the overlay set one."""
 
     translation: Translation | None = None
 
@@ -51,8 +45,7 @@ class Forward:
 
 @dataclass(frozen=True)
 class Delegate:
-    """Send the request to its answer target instead of the real service. `precondition` is
-    `not_evaluable` for a checked route: irimi checks no write a target performs."""
+    """Send the request to its target (recorded `delegated`); irimi checks no write it performs."""
 
     target: ForwardTo
     precondition: Precondition = Precondition()
@@ -64,9 +57,7 @@ class Delegate:
 
 @dataclass(frozen=True)
 class Respond:
-    """Answer with `response`, which never leaves the machine. `outcome` is what irimi decided
-    about a write; `overlay` is how much of the run's writes a read a replay answers from the
-    recording shows, which the overlay decided in the recorded run."""
+    """Answer with `response`; `overlay` is the fidelity of a read answered from a recording."""
 
     response: Response
     answered_by: AnsweredBy
@@ -79,9 +70,7 @@ Decision = Forward | Delegate | Respond
 
 @dataclass(frozen=True)
 class Decided:
-    """A policy's decision, the flags it adds to the exchange, and the reads it issued on its own
-    account, already recorded as exchanges. The caller records those reads; they never reach the
-    agent."""
+    """A decision, the flags it adds, and irimi's own reads for the caller to record."""
 
     decision: Decision
     flags: tuple[Flag, ...] = ()
@@ -99,35 +88,29 @@ class AnswerPolicy(Protocol):
         run_id: str = "",
         target: ForwardTo | None = None,
     ) -> Decided:
-        """How this request is answered. `target` is its answer target, which the caller
-        resolves once (`targets.delegate`), or None when it has none."""
+        """Return how this request is answered; `target` comes from `targets.delegate`."""
         ...
 
     def recorded_tool_call(self, name: str, args: JSONValue) -> ToolCall | None:
-        """The recorded read tool call that answers this one, which the SDK hands back in place
-        of running the tool, or None: the tool runs for real. Never raises."""
+        """Return the recorded read tool call to hand back, or None to run it. Never raises."""
         ...
 
     def observe_read(self, service: str, body: bytes) -> None:
-        """Learn from a read the engine forwarded what later fakes have to sort after. Never
-        raises."""
+        """Learn from a forwarded read what later fakes must sort after. Never raises."""
         ...
 
 
 class ShadowPolicy:
-    """Reads, llm and telemetry go live. write and unknown are answered by irimi.
+    """Shadow mode's policy; the first matching row decides.
 
     | request | decision |
     | --- | --- |
-    | has an answer target | `Delegate` |
+    | has a target | `Delegate` |
     | read, llm, telemetry | `Forward` |
     | a retry of a key this run answered | the first answer again |
     | the key again with other parameters | the service's idempotency error |
     | the precondition check rejects it | the service's own error body |
-    | anything else | the fixture (L1) or the echo (L0) |
-
-    `services.fake_response` decides the level of a faked write and says so; the level it reports
-    is what the Exchange and the `Irimi-Answered-By` header carry.
+    | anything else (write, unknown) | the fixture, else the echo |
     """
 
     name: str = "shadow"
@@ -140,15 +123,12 @@ class ShadowPolicy:
     ) -> None:
         self.reader: Reader = reader if reader is not None else NoReader()
         self.maps = maps if maps is not None else MapIndex()
-        # Per-instance, never a class attribute: two policies in one test process must not answer
-        # each other's keys. `keys` is the composition root's, which drops a run's as it ends.
+        # Per instance, so two policies in one process share neither keys nor Slack `ts` sequence.
         self.idempotency = keys if keys is not None else idempotency.Store()
-        # Per-instance for the same reason: one engine's faked Slack messages never take their
-        # `ts` from another's sequence.
         self.slack_ts = services.TsClock()
 
     def recorded_tool_call(self, name: str, args: JSONValue) -> ToolCall | None:
-        """None: shadow mode answers from no recording, so every read tool runs for real."""
+        """Return None: shadow mode has no recording, so every read tool runs for real."""
         return None
 
     def observe_read(self, service: str, body: bytes) -> None:
@@ -182,9 +162,7 @@ class ShadowPolicy:
         try:
             fake = services.fake_response(request, classification, self.slack_ts)
         except Exception:
-            # The belt to reflect()'s braces, and to the fixture's. Raising here would make
-            # mitmproxy forward the flow, and a forwarded write escapes shadow mode - an empty
-            # object is far better. L0 is the floor whatever failed above it.
+            # Fail-closed hook rule: a fake that fails is answered with an empty object.
             logger.exception("irimi: the local answer failed; answering with an empty object")
             fake = services.Fake(b"{}", bodies.JSON_CT)
         fires = route.fires if route is not None else ()
@@ -194,8 +172,7 @@ class ShadowPolicy:
         return decided
 
     def _delegated(self, route: Route | None, target: ForwardTo) -> Delegate:
-        """A delegated write is one irimi did not author and cannot check: no precondition reads
-        from a target. A policy with no reader asked nothing, delegated or not."""
+        """Return the `Delegate`; `not_evaluable` if a check was declared and a reader exists."""
         declared = route is not None and bool(route.precondition)
         asked = declared and not isinstance(self.reader, NoReader)
         return Delegate(target, preconditions.NOT_EVALUABLE if asked else Precondition())
@@ -209,8 +186,7 @@ def _local(
     *,
     issued: tuple[Exchange, ...] = (),
 ) -> Decided:
-    """An answer irimi built itself, from the body `services` built: the fake's level is the
-    answer's, and its flags are the fake's own, then the caller's."""
+    """Return an answer by irimi from `fake`, with the fake's flags then the caller's."""
     response = Response(
         status=status, headers=(("content-type", fake.content_type),), body=fake.body
     )
@@ -221,22 +197,17 @@ def _local(
     )
 
 
-# ------------------------------------------------------------------------- the idempotency store
-#
-# One `idempotency.Store` per engine, shared by a replay's policy and the shadow policy it holds:
-# a write a replay answered from the recording is remembered under its key as shadow mode's own
-# answers are, so the agent's retry meets it.
+# The idempotency store is one per engine, shared by a replay's policy and the shadow policy it
+# holds, so a retry also gets a write a replay answered from the recording.
 
 
 def _recall(
     store: idempotency.Store, request: Request, classification: Classification, run_id: str
 ) -> tuple[idempotency.Slot | None, Decided | None]:
-    """`(the slot this write occupies, the answer the run already gave it)`.
+    """Return `(slot, answer already given)` for this write, before any check or mint.
 
-    Before L3, and before anything is minted. A retry with a key this run has already answered
-    is the SAME write: it gets the first answer's own bytes, issues no precondition read, and
-    appends nothing to the write log. Its own guard, because a store that failed must fall
-    through to the ordinary answer rather than 502 a perfectly fakeable write.
+    A retry gets the first answer's bytes, no precondition read and no write-log entry. Never
+    raises: a failed store falls through to the ordinary answer.
     """
     slot: idempotency.Slot | None = None
     try:
@@ -258,12 +229,11 @@ def _recall(
 def idempotency_standing(
     store: idempotency.Store, request: Request, classification: Classification, run_id: str
 ) -> str:
-    """The idempotency flag shadow mode's answer to this write would carry:
-    `idempotent-replay` when the run has answered its key with the same parameters,
-    `idempotency-conflict` when with others, and "" when it has not, or there is no key. A
-    replay takes a recorded write only from one that carried the same: the service
-    answers a retry, a reused key and a fresh write three ways whatever their bodies say. Never
-    raises: `_recall` is guarded."""
+    """Return the idempotency flag shadow mode's answer would carry, or "" for a fresh write.
+
+    `idempotent-replay` for a retry, `idempotency-conflict` for a reused key. A replay matches a
+    recorded write only with the same flag. Never raises.
+    """
     _, known = _recall(store, request, classification, run_id)
     if known is None:
         return ""
@@ -279,8 +249,7 @@ def remember_answer(
     run_id: str,
     decided: Decided,
 ) -> None:
-    """Keep `decided` as this write's, under its idempotency key. Never raises: a key that cannot
-    be read costs that retry its first answer, and nothing else."""
+    """Keep `decided` under this write's idempotency key. Never raises."""
     try:
         slot = idempotency.slot_for(request, classification, run_id)
     except Exception:
@@ -290,15 +259,7 @@ def remember_answer(
 
 
 def _retry_answer(first: idempotency.FirstAnswer, service: str) -> Decided:
-    """The first answer to this key, again, marked the way `service` marks a retry's answer.
-
-    Every field is the first answer's. `answered_by` in particular is not re-derived: a fixture
-    that has become unreadable since the first call would make the retry `fake-L0` over an
-    original stamped `fake-L1`, and the trace would disagree with itself about one write. There is
-    no `issued` because a retry makes no precondition read - the write was checked once, when it
-    was made. The precondition is the first one's too, its currency included, so a retried
-    refund's exchange and the first one's agree about what that single write was.
-    """
+    """Return the key's first answer again (see `FirstAnswer`), marked as a retry for `service`."""
     headers: tuple[tuple[str, str], ...] = (("content-type", first.content_type),)
     marker = idempotency.replayed_header(service)
     if marker is not None:
@@ -314,26 +275,14 @@ def _retry_answer(first: idempotency.FirstAnswer, service: str) -> Decided:
 
 
 def _conflict_answer(classification: Classification, refusal: services.Rejection) -> Decided:
-    """The service's own `idempotency_error`: this key was used for a different write.
-
-    NOT `precondition: rejected` - the outcome says what L3 decided, and L3 was never asked.
-    `rejection_code` is still set, because the summary's `would fail:` line is about what the
-    real service would have answered, and this is one of those. The body is carried at the level
-    this route's write would have been faked at, the way `fake_rejection` carries an L3 one.
-    """
+    """Return the service's idempotency error for a reused key; no check ran, so no verdict."""
     fake = services.fake_rejection(classification, refusal.body)
     outcome = WriteOutcome(Precondition(rejection_code=refusal.code))
     return _local(fake, refusal.status, outcome, (Flag.IDEMPOTENCY_CONFLICT,))
 
 
 def _remember(store: idempotency.Store, slot: idempotency.Slot | None, decided: Decided) -> None:
-    """Keep this answer under its key, so the agent's retry gets it back.
-
-    A service stores the first response under a key whether it was accepted or REJECTED, so this
-    is called on both of `decide`'s faking paths. Guarded like the lookup: a store that cannot
-    remember costs the next retry its first answer, and nothing else - raising here would forward
-    a write that has already been answered.
-    """
+    """Keep this answer, accepted or rejected, under its key for a retry. Never raises."""
     decision = decided.decision
     if slot is None or not isinstance(decision, Respond):
         return

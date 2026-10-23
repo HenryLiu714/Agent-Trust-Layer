@@ -114,8 +114,8 @@ def _charge(charge: dict[str, Any], writes: Sequence[Write]) -> Applied:
 
 
 def _charges_list(document: dict[str, Any], writes: Sequence[Write]) -> Applied:
-    """The same charge effect, wherever the charge appears. `examples/refund_agent/agent.py`
-    picks its charge out of this list by reading `refunded` and `amount_refunded`."""
+    """The same charge effect, wherever the charge appears. `examples/quickstart/agent.py`
+    picks its charge out of this list by reading `amount_refunded`."""
     data = document.get("data")
     if not isinstance(data, list):
         return Applied(document)

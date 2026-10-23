@@ -1,34 +1,34 @@
-"""Create one refundable test-mode charge, so `agent.py` has something to refund.
+"""Create one refundable test-mode charge for the examples to refund.
 
-    uv sync --group examples
-    uv run python examples/refund_agent/seed.py
+    python -m examples.seed_stripe
 
-Run it OUTSIDE `irimi shadow`: under shadow the payment would be faked and no charge would exist.
+Run it outside irimi: under `irimi shadow` the payment would be faked and no charge would exist.
+Needs `STRIPE_API_KEY`, a test-mode key (`sk_test_...`); it refuses any other. Prints
+`seeded charge <ch_...> (<pi_...>, 4900 usd)`.
 """
 
 import os
 import sys
 
+import stripe
+
 AMOUNT_MINOR = 4900
 CURRENCY = "usd"
+TEST_KEY_PREFIX = "sk_test_"
 
 
 def main() -> int:
-    import stripe  # noqa: PLC0415  # an optional dependency, needed only to seed
-
     if os.environ.get("IRIMI_ENGINE_ACTIVE") == "1":
+        print("error: run the seed outside irimi, or the charge is faked", file=sys.stderr)
+        return 2
+    key = os.environ.get("STRIPE_API_KEY", "")
+    if not key.startswith(TEST_KEY_PREFIX):
         print(
-            "error: seed.py must run outside `irimi shadow` - under shadow the charge would be "
-            "faked and nothing would exist to refund.",
+            f"error: STRIPE_API_KEY must be a test-mode key ({TEST_KEY_PREFIX}...)",
             file=sys.stderr,
         )
         return 2
-    key = os.environ.get("STRIPE_API_KEY")
-    if not key or not key.startswith("sk_test_"):
-        print("error: set STRIPE_API_KEY to a Stripe test-mode key (sk_test_...).", file=sys.stderr)
-        return 2
     stripe.api_key = key
-
     try:
         intent = stripe.PaymentIntent.create(
             amount=AMOUNT_MINOR,
@@ -40,7 +40,6 @@ def main() -> int:
     except stripe.StripeError as exc:
         print(f"error: could not create the test charge: {exc}", file=sys.stderr)
         return 1
-
     print(f"seeded charge {intent.latest_charge} ({intent.id}, {AMOUNT_MINOR} {CURRENCY})")
     return 0
 

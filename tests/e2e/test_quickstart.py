@@ -1,5 +1,6 @@
-"""The refund agent's calls, end to end: through base-URL mode and through the forward proxy,
-each refund answered by irimi and none reaching the loopback Stripe."""
+"""The quickstart refund agent end to end: the agent itself under `irimi shadow`, and its calls
+through base-URL mode and through the forward proxy, each refund answered by irimi and none
+reaching Stripe."""
 
 import json
 import sys
@@ -25,11 +26,55 @@ from tests.support.scenarios import (
     REFUND_CHARGE,
     REFUND_SUMMARY,
     StandInReader,
+    demo,
     run_refund_scenario,
 )
 from tests.support.upstreams import FakeStripe, precondition_stripe, serve
 
 pytestmark = pytest.mark.e2e
+
+
+def test_the_quickstart_agent_refunds_reads_back_and_is_refused_and_stripe_hears_no_write(
+    home, tmp_path, capfd
+):
+    """The agent itself, stripe-python and all, under the real `irimi shadow` against the fake
+    Stripe: what it prints is what it was shown, a refund that the two reads after it see and a
+    retry Stripe would refuse, and no write reached Stripe."""
+    code, internet = demo().run("quickstart", tmp_path)
+    out = capfd.readouterr().out
+    assert code == 0, out
+    assert internet.writes() == []
+
+    # What the agent saw, from its own lines: its refund, in the list and on the charge, and the
+    # retry refused.
+    charge = demo().CHARGE
+    said = [line for line in out.splitlines() if line.startswith(("charge ", "refund", "retry "))]
+    assert len(said) == 5, out
+    refund_id = said[1].split()[1].rstrip(":")
+    assert refund_id.startswith("re_")
+    assert said == [
+        f"charge {charge}: 49.00 USD left to refund",
+        f"refund {refund_id}: 49.00 USD",
+        f"refunds on {charge}: {refund_id}",
+        f"charge {charge}: 49.00 USD refunded",
+        "retry refused: charge_already_refunded",
+    ]
+
+    # And what irimi says of it: both refunds faked, the second refused, the reads overlaid.
+    lines = out.splitlines()
+    write = lines.index(
+        f"  ○ stripe  refund $49.00 on {charge}  faked; checked against live state: would succeed"
+    )
+    assert lines[write + 1 : write + 4] == [
+        "    ↳ GET /v1/refunds saw it  overlay",
+        f"    ↳ GET /v1/charges/{charge} saw it  overlay",
+        f"  ✗ stripe  refund $49.00 on {charge}  faked; would fail: charge_already_refunded",
+    ]
+    # The run is the agent's `@sdk.trigger`, ready to replay.
+    assert any(
+        line.startswith("  run ") and "examples.quickstart.agent:refund_one_charge()" in line
+        for line in lines
+    ), out
 
 
 def test_a_refund_through_the_door_is_answered_by_irimi_and_never_leaves_the_machine(

@@ -532,6 +532,18 @@ def _mitm_options(config: EngineConfig) -> Options:
     return opts
 
 
+async def _close_listeners(master: Master) -> None:
+    """Close the proxy's listening sockets, which `Master.run` returns with still open. Only a
+    server that is listening is stopped: one whose bind failed has nothing to close."""
+    try:
+        proxyserver = master.addons.get("proxyserver")
+        for server in list(proxyserver.servers) if proxyserver is not None else ():
+            if server.listen_addrs:
+                await server.stop()
+    except Exception:
+        logger.debug("irimi: could not close the proxy's listener", exc_info=True)
+
+
 class MitmEngine:
     def __init__(
         self,
@@ -588,7 +600,10 @@ class MitmEngine:
             )
             if self._stopped:  # shutdown() was called before we got here
                 return
-            await self._master.run()
+            try:
+                await self._master.run()
+            finally:
+                await _close_listeners(self._master)
             if self._start_error is not None:
                 raise self._start_error
         finally:

@@ -11,5 +11,5 @@ RUN uv export --project /build --frozen --no-dev --no-emit-project -o /tmp/requi
 WORKDIR /app
 COPY examples/server_agent /app/examples/server_agent
 ENV PYTHONUNBUFFERED=1
-# By module name, never as `__main__`, so the trigger's entrypoint is importable (#74, #84).
-CMD ["python", "-m", "examples.server_agent"]
+# With `python -m`, so the trigger's entrypoint is importable.
+CMD ["python", "-m", "examples.server_agent.app"]

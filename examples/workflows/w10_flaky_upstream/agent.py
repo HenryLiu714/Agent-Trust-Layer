@@ -7,8 +7,7 @@ rate-limited read, a server error, a stalled read, a reset on a read and on the 
 L3 read failing, a model that answers prose, an agent that raises, is interrupted or is killed
 after its write, a write retried with no key, and irimi's own control endpoint taken away.
 
-    python -m examples.workflows.launch \\
-        examples.workflows.w10_flaky_upstream.agent \\
+    python -m examples.workflows.w10_flaky_upstream.agent \\
         [--no-key] [--raise-after-write] [--sigterm-after-write] [--sigint-after-write] \\
         [--control {unset,unreachable,refused}]
 

@@ -43,7 +43,7 @@ def test_a_mention_is_one_run_and_its_reply_is_read_back_through_the_overlay(run
     assert shadow.answered() == MENTION_SHADOW
     assert shadow.one("readback")["sees_reply"] is True
     # One trigger, one run, and every call the run made carried its id (stripped by irimi).
-    assert [e["name"] for e in shadow.events("run.start")] == ["on_mention"]
+    assert [e["name"] for e in shadow.events("run.start")] == [ON_MENTION]
     run_id = shadow.one("run.start")["run"]
     assert {c["run"] for c in shadow.calls()} == {run_id}
     # L3 probed the channel before faking the post.
@@ -297,7 +297,7 @@ def test_a_retried_delivery_is_acknowledged_and_handled_once(run_workflow):
 
 # ---------------------------------------------------------------------- irimi compare
 
-ON_MENTION = "on_mention  examples.workflows.w04_slack_ops_bot.agent:on_mention"
+ON_MENTION = "examples.workflows.w04_slack_ops_bot.agent:on_mention"
 ANSWER_POST = (
     'slack  post to #C0OPS: "Payouts are on schedule."'
     "  faked; checked against live state: would succeed"

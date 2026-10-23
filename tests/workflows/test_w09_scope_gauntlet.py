@@ -782,7 +782,7 @@ def test_under_serve_irimis_own_run_is_unattributed_and_only_its_tool_calls_are_
 def argv(result) -> list[str]:
     """The argv the harness started the agent with: the process run's trigger args."""
     workflow = WORKFLOW.scenarios[result.scenario]
-    return [sys.executable, "-m", "examples.workflows.launch", WORKFLOW.module, *workflow.argv]
+    return [sys.executable, "-m", WORKFLOW.module, *workflow.argv]
 
 
 @pytest.mark.parametrize("mode", MODES)

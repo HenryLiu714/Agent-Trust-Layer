@@ -57,7 +57,8 @@ WORKFLOW = Workflow(
         "async_run": Scenario(
             ("async_run",),
             setup=_charges,
-            doc="each message an `async with sdk.run(trigger=message)` block, gathered; one raises",
+            doc="each message an `async with sdk.run('message', inputs=message)` block, gathered; "
+            "one raises",
         ),
         "cancelled_on_shutdown": Scenario(
             ("cancelled_on_shutdown",),

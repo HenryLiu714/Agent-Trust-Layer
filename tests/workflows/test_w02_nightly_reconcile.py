@@ -39,9 +39,9 @@ def test_a_clean_night_pages_everything_and_posts_one_summary(run_workflow, mode
     # The SDK's run wrapped the whole job, and the read tool ran for real inside it.
     run_id = shadow.events("run.start")[0]["run"]
     assert [t["run"] for t in shadow.events("tool")] == [run_id]
-    # The default tool name is the real module's, because the harness launches every agent
-    # through `examples.workflows.launch` rather than as `__main__`.
-    assert shadow.tools("read") == [(f"{AGENT}.load_ledger", "real")]
+    # The default tool name is the real module's, because the harness starts every agent with
+    # `python -m <module>`, which the SDK records by the module's name.
+    assert shadow.tools("read") == [(f"{AGENT}:load_ledger", "real")]
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -60,17 +60,17 @@ def test_forty_mismatches_are_forty_faked_writes_and_the_ledger_is_untouched(run
     # And forty ledger marks, one line each after the forty updates, as the HTTP writes are each
     # a line however many there are.
     tool_lines = [line for line in summary if line.startswith("  ○ tool ")]
-    assert tool_lines == [f"  ○ tool  {AGENT}.mark_reconciled  fake ran instead"] * 40
+    assert tool_lines == [f"  ○ tool  {AGENT}:mark_reconciled  fake ran instead"] * 40
     assert summary.index(tool_lines[0]) > max(
         i for i, line in enumerate(summary) if "○ stripe  update customer" in line
     )
     assert (
-        shadow.tool_call_lines().count(f"tool-fake     write     {AGENT}.mark_reconciled -> ok")
+        shadow.tool_call_lines().count(f"tool-fake     write     {AGENT}:mark_reconciled -> ok")
         == 40
     )
     # The write tool ran its stand-in forty times under shadow, and for real forty times bare.
-    assert shadow.tools("write") == [(f"{AGENT}.mark_reconciled", "shadow")] * 40
-    assert bare.tools("write") == [(f"{AGENT}.mark_reconciled", "real")] * 40
+    assert shadow.tools("write") == [(f"{AGENT}:mark_reconciled", "shadow")] * 40
+    assert bare.tools("write") == [(f"{AGENT}:mark_reconciled", "real")] * 40
     assert reconciled_rows(shadow) == 0
     assert reconciled_rows(bare) == 40
     assert len(bare.internet.writes()) == 41  # forty customers and the Slack post
@@ -176,7 +176,7 @@ def test_irimi_compare_shows_a_clean_night_and_forty_mismatches_eighty_writes_ap
     assert check_invariants(forty) == []
     code, out, err = compare(clean, forty)
     a, b = (result.one("run.start")["run"] for result in (clean, forty))
-    reconciled = "○ tool  examples.workflows.w02_nightly_reconcile.agent.mark_reconciled"
+    reconciled = "○ tool  examples.workflows.w02_nightly_reconcile.agent:mark_reconciled"
     added = [
         line
         for i in reversed(range(40))
@@ -210,7 +210,7 @@ def test_a_replay_that_tags_each_customer_otherwise_compares_its_updates_changed
     assert check_invariants(replay) == []
     assert replay.internet.writes() == []
     source = recorded.one("run.start")["run"]
-    reconciled = "○ tool  examples.workflows.w02_nightly_reconcile.agent.mark_reconciled"
+    reconciled = "○ tool  examples.workflows.w02_nightly_reconcile.agent:mark_reconciled"
     post = f'slack  post to #C0RECON: "reconciled 2 for 2026-09-27"  {PASSED}'
     rows = [
         line

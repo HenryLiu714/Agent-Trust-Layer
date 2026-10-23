@@ -193,7 +193,7 @@ And a refund the real service would have refused, from `w01_ticket_triage double
   None of these writes reached the real service:
   ○ stripe  refund $49.00 on ch_TICKET1  faked; checked against live state: would succeed
   ✗ stripe  refund $49.00 on ch_TICKET1  faked; would fail: charge_already_refunded
-  ○ tool  examples.workflows.w01_ticket_triage.agent.send_reply  fake ran instead
+  ○ tool  examples.workflows.w01_ticket_triage.agent:send_reply  fake ran instead
   money: $98.00 in faked writes; $49.00 of it would fail
   would have fired: refund.created, charge.refunded
 ```
@@ -304,7 +304,7 @@ https.
   to the real service. The banner says so on every run, and `w11_leaky_agent` pins each known
   escape.
 - **HTTP(S) only.** Database writes, files on disk, gRPC and WebSocket traffic are not shadowed
-  and happen for real, unless the agent labels the function that makes them with `@sdk.tool`
+  and happen for real, unless the agent labels the function that makes them with `@sdk.write_tool`
   ([Tools the proxy cannot see](#tools-the-proxy-cannot-see)). Point database URLs at scratch
   data. Bytes sent through the proxy that are not HTTP, and a connection upgraded to anything but
   a WebSocket, are refused, never relayed, and leave no record (#75).
@@ -463,7 +463,7 @@ def handle_ticket(ticket: Ticket) -> None: ...
 async def on_event(raw: bytes, signature: str) -> None: ...
 
 
-with sdk.run(trigger={"date": "2026-09-29"}, name="nightly"):  # or `async with`
+with sdk.run("nightly", inputs={"date": "2026-09-29"}) as run:  # or `async with`
     ...
 ```
 
@@ -475,7 +475,7 @@ set, and how the run ended: `ok`, or `error` with the exception's type and messa
 itself always propagates, unchanged. `sdk.current_run_id()` is the current run's id.
 
 - **When it is active.** Only while `IRIMI_ENGINE_ACTIVE=1`, which `irimi shadow` sets for its
-  child (`sdk.active()`). Otherwise a trigger or `sdk.run` calls straight through: no run id, no
+  child (`sdk.is_active()`). Otherwise a trigger or `sdk.run` calls straight through: no run id, no
   network call, no patching, so the SDK is safe to leave in production code. When active, it
   reports each run to `IRIMI_CONTROL` directly, never through the proxy. If it cannot, it logs
   one warning per kind of failure on the `irimi.sdk` logger and the agent carries on.
@@ -498,10 +498,8 @@ itself always propagates, unchanged. `sdk.current_run_id()` is the current run's
   positionally, or one that is not a string, is a `TypeError` when the module loads, and so is a
   trigger on a generator function, a class, a `functools.partial` or an object with `__call__`.
   Names are cut to 1000 characters, never inside a key (#179).
-- **Start the agent by module name.** `python -m my_agent` and `python my_agent.py` run it as
-  `__main__`, so its entrypoint is recorded as `__main__:handle_ticket`, which `irimi replay`
-  cannot import. Import the module by its name and call it, as the sample workflows'
-  `examples/workflows/launch.py` does.
+- **Start the agent with `python -m my_agent`**, so its entrypoint is recorded by its module's
+  name; one run as `python my_agent.py` records `__main__`, which `irimi replay` cannot import.
 
 ### Every request a run makes through irimi carries its run
 
@@ -539,8 +537,8 @@ context variable as the request is sent. irimi strips the header before anything
 ### Tools the proxy cannot see
 
 The proxy sees only HTTP. A database write, a file written to disk or a call into another library
-happens for real under `irimi shadow` unless the agent labels it. `@sdk.tool` labels a function
-as a read or a write. A write names its stand-in: the function irimi runs in its place, with the
+happens for real under `irimi shadow` unless the agent labels it. `@sdk.read_tool` and
+`@sdk.write_tool` label a function as a read or a write. A write names its stand-in: the function irimi runs in its place, with the
 same arguments, while irimi is in front.
 
 ```python
@@ -551,27 +549,26 @@ def mock_database_write(account: Account) -> dict:
     return {"id": account.id, "stood_in": True}
 
 
-@sdk.tool(kind="write", shadow=mock_database_write)  # name= defaults to "module.qualname"
+@sdk.write_tool(fake=mock_database_write)  # name= defaults to "module:qualname"
 def database_write(account: Account) -> dict:
     with db.transaction() as tx:
         tx.upsert(account)
     return {"id": account.id}
 
 
-@sdk.tool(kind="read")  # a read runs for real, and takes no stand-in
+@sdk.read_tool  # a read runs for real, and takes no fake
 def find_accounts(segment: str) -> list[Account]: ...
 ```
 
-| `sdk.active()` | kind | What runs | What irimi records |
+| `sdk.is_active()` | tool | What runs | What irimi records |
 | --- | --- | --- | --- |
 | false | read | the real function | nothing |
 | false | write | the real function | nothing; one warning, below |
 | true | read | the real function | a tool call, `ran: real` |
 | true | write | **only the stand-in**: the real function never runs | a tool call, `ran: shadow` |
 
-- **Mistakes fail when the module loads**, with `TypeError`, never at the call: a `kind` that is
-  not `"read"` or `"write"`, a write with no `shadow=`, a read with one, a stand-in that is not
-  callable, is a generator or is the function itself, a stand-in that is sync where the function
+- **Mistakes fail when the module loads**, with `TypeError`, never at the call: a
+  `write_tool` with no `fake=`, a `read_tool` with one, a fake that is not callable, is a generator or is the function itself, a stand-in that is sync where the function
   is `async def` or the reverse, a generator function, and what `@sdk.trigger` also refuses (a
   class, a `functools.partial`, a name that is not a string). Nothing unnamed runs for real under
   irimi. A `staticmethod` stand-in in the tool's own class body is taken as its function.
@@ -604,7 +601,7 @@ def find_accounts(segment: str) -> list[Account]: ...
   is. When the recorded run made the same call, nothing runs: the call returns the recorded
   result, rebuilt from its captured JSON (`irimi.sdk.capture.revive`), and is recorded `ran:
   recording`. A recorded exception is raised as `sdk.RecordedToolError`, which carries the
-  recorded `type` and `message`. For a builtin `Exception`, such as `KeyError`, it is also a
+  recorded `type_name` and `message`. For a builtin `Exception`, such as `KeyError`, it is also a
   subclass of that builtin and bears its name, so the agent's own `except KeyError` catches it as
   it caught the original (all but `ExceptionGroup` and the three `Unicode…Error`s, which take
   more than a message). Otherwise the real function runs (`ran: real`, the replay's miss):
@@ -874,9 +871,11 @@ irimi replay · 725dc6add559a16f -> d63663c6da8905c7
   The child's own exit code is printed and decides nothing. `--result-file PATH` writes the result
   as JSON, a refused replay's with what irimi said of why.
 - **From a test**, `sdk.replay(run_id)` replays the run's own trigger, and
-  `sdk.replay(run_id, handle, Ticket(...))` your function with its arguments, in a subprocess
-  running `python -m irimi replay`, and returns a `ReplayResult`: `source_run_id`,
-  `replay_run_id`, `exit_code`, `diverged_at` and `lines`. A refused replay is a result with
+  `sdk.replay(run_id, handle, args=(Ticket(...),))` your function with its arguments, in a
+  subprocess running `python -m irimi replay`, and returns a `ReplayResult`: `same`,
+  `source_run_id`, `replay_run_id`, `exit_code`, `diverged_at` and `lines`
+  (`assert result.same, result` prints the comparison). A replay that cannot start raises
+  `sdk.ReplayError`. A refused replay is a result with
   `exit_code` 2, and a stopped one 130 or 143, as the command exits. The args go to
   `irimi replay` in a file only you can read, never on its command line.
 
@@ -983,7 +982,7 @@ Where each feature is exercised end to end:
 | Unmapped internal services, a map the loader refuses, `Irimi-Run` across a hop | W8 `w08_orchestrator` |
 | Upstream failures: 429, 500, timeouts, resets, a failed L3 read, a killed run | W10 `w10_flaky_upstream` |
 | What irimi cannot see: clients that bypass the proxy, loopback services | W11 `w11_leaky_agent` |
-| Tool calls the proxy cannot see: `@sdk.tool` stand-ins, recorded, printed and redacted | W6 `w06_crm_db_agent`, W1, W2 |
+| Tool calls the proxy cannot see: `@sdk.write_tool` fakes, recorded, printed and redacted | W6 `w06_crm_db_agent`, W1, W2 |
 | The control endpoint: runs started, given tool calls and ended over `/_irimi/`, health, every refusal | W9 `w09_scope_gauntlet`; every workflow (`tests/workflows/test_control_endpoint.py`) |
 
 Answer targets, overrides, the telemetry maps beyond W7's one LangSmith trace, and the CLI's own
@@ -992,7 +991,7 @@ feature is driven through the real `irimi shadow` in the workflows its issue nam
 their scenarios and pins, and a fix that flips a `LOOKS WRONG:` pin updates it in the same PR
 (`CONTRIBUTING.md`).
 
-The agents use the SDK API (`@sdk.trigger`, `sdk.run`, `@sdk.tool`) through
+The agents use the SDK API (`@sdk.trigger`, `sdk.run`, `@sdk.read_tool`, `@sdk.write_tool`) through
 `examples/workflows/sdk.py`, which re-exports `irimi.sdk`. Its triggers, runs (#74) and tools
 (#76) are irimi's own; `sdk.py` only wraps them to log which function ran, for the invariants.
 

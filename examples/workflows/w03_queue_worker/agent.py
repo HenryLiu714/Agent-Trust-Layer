@@ -21,7 +21,7 @@ calls name only R's own charge.
 A run is marked each way the SDK offers: `@sdk.trigger` on a function, sync or async, and on
 a `Worker`'s methods, and `async with sdk.run(...)` around a block.
 
-The `ledger_*` scenarios keep the worker's own SQLite ledger of refunds with `@sdk.tool`s:
+The `ledger_*` scenarios keep the worker's own SQLite ledger of refunds with tool decorators:
 reads that run for real, a write whose stand-in runs under shadow, sync and async, called from
 four threads at once, from eight asyncio tasks at once and from a thread that lost its run, and,
 on the `Worker`, a plain method, a static method and a class method. `ledger_two_tools_8` writes
@@ -31,8 +31,7 @@ the calls ended, every time: the first run's async write ends while the loop's o
 thread is busy with the worker's own job, so its post waits, and the second run's sync write,
 made after it, posts at once.
 
-    python -m examples.workflows.launch \\
-        examples.workflows.w03_queue_worker.agent <scenario>
+    python -m examples.workflows.w03_queue_worker.agent <scenario>
 """
 
 from __future__ import annotations
@@ -238,18 +237,18 @@ def _refunded(charge: str) -> int:
         return int(row.fetchone()[0])
 
 
-@sdk.tool(kind="read")
+@sdk.read_tool
 def ledger_balance(charge: str) -> int:
     return _refunded(charge)
 
 
-@sdk.tool(kind="read")
+@sdk.read_tool
 async def ledger_balance_async(charge: str) -> int:
     await asyncio.sleep(0)  # lets the other messages' tasks run in between
     return _refunded(charge)
 
 
-@sdk.tool(kind="read")
+@sdk.read_tool
 def ledger_history(charge: str) -> Coroutine[Any, Any, list[int]]:
     """A sync read that returns a coroutine: its call ends, and is recorded with what the
     coroutine returned, when the coroutine does."""
@@ -272,13 +271,13 @@ def _record_stand_in(charge: str, amount: int) -> dict[str, Any]:
     return {"recorded": False, "charge": charge}
 
 
-@sdk.tool(kind="write", shadow=_record_stand_in)
+@sdk.write_tool(fake=_record_stand_in)
 def record_refund(charge: str, amount: int) -> dict[str, Any]:
     _insert_refund(charge, amount)
     return {"recorded": True, "charge": charge}
 
 
-@sdk.tool(kind="write", shadow=_record_stand_in)
+@sdk.write_tool(fake=_record_stand_in)
 def mark_refunded(charge: str, amount: int) -> dict[str, Any]:
     """`record_refund` under another name: the worker's second way to write the same row."""
     _insert_refund(charge, amount)
@@ -302,7 +301,7 @@ async def _record_async_stand_in(charge: str, amount: int) -> dict[str, Any]:
     return {"recorded": False, "charge": charge}
 
 
-@sdk.tool(kind="write", shadow=_record_async_stand_in)
+@sdk.write_tool(fake=_record_async_stand_in)
 async def record_refund_async(charge: str, amount: int) -> dict[str, Any]:
     await asyncio.sleep(0)
     _insert_refund(charge, amount)
@@ -495,18 +494,18 @@ class Worker:
         ack = self.ack(message)
         agentkit.obs("ledger", charge=charge, fee=fee, journal=journal, ack=ack)
 
-    @sdk.tool(kind="read")
+    @sdk.read_tool
     @staticmethod
     def fee(amount: int) -> int:
         return amount // 10
 
-    @sdk.tool(kind="write", shadow=_journal_stand_in)
+    @sdk.write_tool(fake=_journal_stand_in)
     @classmethod
     def journal(cls, charge: str, net: int) -> dict[str, Any]:
         _insert_refund(charge, net)
         return {"journaled": True, "by": cls.__name__}
 
-    @sdk.tool(kind="write", shadow=_ack_stand_in)
+    @sdk.write_tool(fake=_ack_stand_in)
     def ack(self, message: dict[str, Any]) -> dict[str, Any]:
         with agentkit.sqlite(LEDGER) as db:
             db.execute("INSERT INTO acks VALUES (?, ?)", (message["charge"], self.queue))
@@ -547,7 +546,7 @@ async def _process_later(message: dict[str, Any]) -> None:
 async def handle_in_block(message: dict[str, Any]) -> None:
     """One message as a block that is one run, `async with sdk.run(...)`, with the message as its
     trigger: no function names it, so the run has no entrypoint."""
-    async with sdk.run(trigger=message, name="message"):
+    async with sdk.run("message", inputs=message):
         await asyncio.to_thread(read, message)
         if message.get("poison"):
             raise ValueError(f"cannot refund {message['charge']}: poison message")

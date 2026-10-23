@@ -1,7 +1,7 @@
 """Run a sample workflow's scenario, bare or under `irimi shadow`, and check what every run owes.
 
 A workflow is a package `examples/workflows/wNN_<name>/` holding an agent (`agent.py`, started
-through `examples.workflows.launch` so it keeps its real module name) and a `scenarios.py` that
+with `python -m <module>`, so the SDK records its real module name) and a `scenarios.py` that
 defines `WORKFLOW`. A scenario seeds the fake services, names the agent's argv and environment,
 and says whether anything about it is expected to differ from a bare run.
 
@@ -245,7 +245,7 @@ class Result:
         return found
 
     def tools(self, kind: str | None = None) -> list[tuple[str, str]]:
-        """`(tool name, which body ran)` per `@sdk.tool` call, in order: all, or one `kind`'s."""
+        """`(tool name, which body ran)` per tool call, in order: all, or one `kind`'s."""
         return [
             (t["name"], t["ran"]) for t in self.events("tool") if kind is None or t["kind"] == kind
         ]
@@ -417,9 +417,14 @@ class Result:
         if out == [f"no unattributed events in {self.store_root()}"]:
             return "", []
         fields = dict(line.split(": ", 1) for line in out[: out.index("")])
-        # `runs show` prints `-` for what the run did not record, which compare leaves out.
+        # `runs show` prints `-` for what the run did not record, which compare leaves out, and
+        # compare leaves out an entrypoint that is the trigger's name too.
         version = fields["agent version"]
-        parts = [fields["trigger"], fields["entrypoint"]]
+        entrypoint = fields["entrypoint"]
+        parts = [
+            fields["trigger"],
+            report.NOT_SET if entrypoint == fields["trigger"] else entrypoint,
+        ]
         parts.append(report.NOT_SET if version == report.NOT_SET else f"agent {version}")
         label = "  ".join(part for part in parts if part != report.NOT_SET)
         start = next(i for i, line in enumerate(out) if line.startswith(_summary_headers(run_id)))
@@ -508,7 +513,8 @@ def replay(
 
 
 def sdk_replay(recorded: Result, run_id: str, workdir: Path, *call: Any) -> Result:
-    """`sdk.replay(run_id, *call)` called as a test calls it, through the agents' own `sdk`
+    """`sdk.replay(run_id, fn, args=args)` for `call` = `(fn, *args)` (or `sdk.replay(run_id)`
+    for none) called as a test calls it, through the agents' own `sdk`
     (`examples/workflows/sdk.py`, which forwards `replay` to `irimi.sdk`), a `replay` of
     `recorded` in every other way. `sdk.replay`'s one seam, `sdk.replays._run_irimi`, runs `irimi`
     in this process instead of a subprocess, so the fake internet resolves its names and the
@@ -637,7 +643,7 @@ def _execute(
         agent_env = _agent_env(internet, state, obs_path, home, tmp)
         agent_env.update(scenario.env)
         agent_env.update(env or {})
-        cmd = [sys.executable, "-m", "examples.workflows.launch", workflow.module, *scenario.argv]
+        cmd = [sys.executable, "-m", workflow.module, *scenario.argv]
         flags = ("--store", str(store)) if store is not None else ()
         if mode == "bare":
             code = _run_bare(cmd, agent_env, cwd, internet)
@@ -697,15 +703,18 @@ def _replay_result(path: Path) -> sdk.ReplayResult:
 def _calling_sdk_replay(
     run_id: str, call: tuple[Any, ...], store: Path | None, result_file: Path
 ) -> Callable[[], int]:
-    """`sdk.replay(run_id, *call, store=store)`, its `irimi` run in this process: what it
-    returned written to `result_file`, as `irimi replay --result-file` writes it, and its exit
-    code."""
+    """`sdk.replay(run_id, fn, args=args, store=store)` for `call` = `(fn, *args)`, or of the
+    recorded trigger for an empty `call`, its `irimi` run in this process: what it returned
+    written to `result_file`, as `irimi replay --result-file` writes it, and its exit code."""
 
     def run() -> int:
         real = sdk_replays._run_irimi
         sdk_replays._run_irimi = lambda argv, env: irimi_main(argv)
         try:
-            got = agent_sdk.replay(run_id, *call, store=store)
+            if call:
+                got = agent_sdk.replay(run_id, call[0], args=tuple(call[1:]), store=store)
+            else:
+                got = agent_sdk.replay(run_id, store=store)
         finally:
             sdk_replays._run_irimi = real
         result_file.write_text(json.dumps(got.to_json()), encoding="utf-8")

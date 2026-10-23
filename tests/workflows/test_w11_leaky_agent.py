@@ -4,7 +4,7 @@ LOOKS WRONG: every escape assertion here pins today's limit. When Phase 4's read
 each flips from "irimi printed nothing" to "irimi flagged it", and the test says which check flagged
 which escape.
 
-`labelled_sidecar` is not one: the sidecar's write made by an `@sdk.tool` write, which closes the
+`labelled_sidecar` is not one: the sidecar's write made by an `@sdk.write_tool`, which closes the
 escape today.
 """
 
@@ -156,14 +156,14 @@ def test_a_redirect_off_irimis_route_is_labelled_on_each_hop_through_irimi_and_o
 
 @pytest.mark.parametrize("mode", MODES)
 def test_a_sidecar_write_made_by_a_write_tool_is_stood_in_and_the_escape_closed(run_workflow, mode):
-    """`loopback_service`'s write, made by `enqueue_job`, an `@sdk.tool(kind="write")`. The
+    """`loopback_service`'s write, made by `enqueue_job`, an `@sdk.write_tool()`. The
     proxy still cannot see it, and does not need to: the SDK runs the stand-in in its place, so
     the sidecar receives nothing under shadow, a witness that does not rest on the agent's own log
     (universal invariant 3), while bare it receives the job. irimi prints and stores the call in
     the escape's run, and the summary says the write did not happen."""
     shadow = run_workflow(W, "labelled_sidecar", mode)
     bare = run_workflow(W, "labelled_sidecar", "bare")
-    tool = "examples.workflows.w11_leaky_agent.agent.enqueue_job"
+    tool = "examples.workflows.w11_leaky_agent.agent:enqueue_job"
     assert shadow.internet.requests() == []
     assert [(r.method, r.host, r.path) for r in bare.internet.writes()] == [
         ("POST", "127.0.0.1", "/queue/jobs")
@@ -245,7 +245,7 @@ def test_irimi_compare_shows_the_sidecar_write_a_write_tool_closed(shared_store_
         f"  B  {ESCAPE}",
         "  (the triggers' args differ)",
         "",
-        "  + ○ tool  examples.workflows.w11_leaky_agent.agent.enqueue_job  fake ran instead",
+        "  + ○ tool  examples.workflows.w11_leaky_agent.agent:enqueue_job  fake ran instead",
         "",
         "  0 same · 0 changed · 0 only in A · 1 only in B",
     ]

@@ -76,12 +76,12 @@ logs=""
 for _ in $(seq 1 50); do
   runs="$("${compose[@]}" exec -T irimi irimi runs list)"
   logs="$("${compose[@]}" logs --no-log-prefix irimi)"
-  [ "$(echo "$runs" | grep -cE ' ok +sdk +handle_refund ')" = 2 ] &&
+  [ "$(echo "$runs" | grep -cE ' ok +sdk +examples\.server_agent\.app:handle_refund ')" = 2 ] &&
     [ "$(echo "$logs" | grep -cE '^  [0-9]+ exchanges? · [0-9]+ real · ')" = 2 ] && break
   sleep 0.2
 done
 echo "$runs"
-[ "$(echo "$runs" | grep -cE ' ok +sdk +handle_refund ')" = 2 ]
+[ "$(echo "$runs" | grep -cE ' ok +sdk +examples\.server_agent\.app:handle_refund ')" = 2 ]
 # The header row and the two runs.
 [ "$(echo "$runs" | grep -c .)" = 3 ]
 

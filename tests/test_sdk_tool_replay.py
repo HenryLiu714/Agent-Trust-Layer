@@ -1,4 +1,4 @@
-"""`@sdk.tool` under replay, against a real engine replaying a stored run.
+"""The tool decorators under replay, against a real engine replaying a stored run.
 
 Each test records a run first, through a shadow engine and a real `DirectoryStore`, then starts a
 second engine answering from that run - a `ReplayPolicy` over its `Recording`, which answers the
@@ -67,7 +67,7 @@ def _real(account: str) -> None:
     _REAL_READS.append(account)
 
 
-@sdk.tool(kind="read", name="db.balance")
+@sdk.read_tool(name="db.balance")
 def balance(account: str) -> dict[str, Any]:
     _real(account)
     if account == "acc_missing":
@@ -77,27 +77,27 @@ def balance(account: str) -> dict[str, Any]:
     return {"account": account, "balance": _BALANCES.get(account, 100)}
 
 
-@sdk.tool(kind="read", name="db.balance_async")
+@sdk.read_tool(name="db.balance_async")
 async def balance_async(account: str) -> dict[str, Any]:
     _real(account)
     await asyncio.sleep(0)
     return {"account": account, "balance": 100}
 
 
-@sdk.tool(kind="read", name="db.score")
+@sdk.read_tool(name="db.score")
 def score(account: str) -> dict[str, Any]:
     """A result JSON cannot hold: it is recorded as `__irimi_repr__`, which does not revive."""
     _real(account)
     return {"score": Decimal("0.87")}
 
 
-@sdk.tool(kind="read", name="db.statement")
+@sdk.read_tool(name="db.statement")
 def statement(account: str) -> Statement:
     _real(account)
     return Statement(account, [1, 2])
 
 
-@sdk.tool(kind="read", name="db.api_key")
+@sdk.read_tool(name="db.api_key")
 def api_key(account: str) -> dict[str, Any]:
     _real(account)
     return {"account": account, "key": SECRET}
@@ -109,7 +109,7 @@ async def _history(account: str) -> list[int]:
     return [1, 2, 3]
 
 
-@sdk.tool(kind="read", name="db.history")
+@sdk.read_tool(name="db.history")
 def history(account: str) -> Coroutine[Any, Any, list[int]]:
     """A sync read that returns a coroutine: recorded with what the coroutine returned."""
     return _history(account)
@@ -119,7 +119,7 @@ def _debit_stand_in(account: str, amount: int) -> dict[str, Any]:
     return {"stood_in": True, "account": account, "amount": amount}
 
 
-@sdk.tool(kind="write", shadow=_debit_stand_in, name="db.debit")
+@sdk.write_tool(fake=_debit_stand_in, name="db.debit")
 def debit(account: str, amount: int) -> dict[str, Any]:
     raise _RealWriteRan(account)
 
@@ -183,7 +183,7 @@ class _Irimi:
         self.port = eng.listen_port()
         self.monkeypatch.setenv(paths.CONTROL_ENV, f"http://127.0.0.1:{self.port}/_irimi")
         try:
-            with sdk.run(trigger={"test": True}, name="script"):
+            with sdk.run("script", inputs={"test": True}):
                 return script()
         finally:
             stop()
@@ -242,7 +242,7 @@ def test_a_recorded_key_error_comes_back_as_recorded_tool_error_catchable_as_key
     _FORBIDDEN.add("acc_missing")
     raised, [call] = irimi.replay(run_id, look)
     assert isinstance(raised, sdk.RecordedToolError) and isinstance(raised, KeyError)
-    assert (raised.type, raised.message) == ("builtins.KeyError", "'acc_missing'")
+    assert (raised.type_name, raised.message) == ("builtins.KeyError", "'acc_missing'")
     # Its `str` is the recorded message, not KeyError's quoting of it again.
     assert str(raised) == "'acc_missing'"
     # Named as recorded, module included, so a traceback says `KeyError: 'acc_missing'`.
@@ -383,9 +383,10 @@ def test_a_lookup_that_fails_runs_the_tool_for_real_and_warns_once(irimi, monkey
     assert calls == []  # their posts could not reach the engine either
     assert _REAL_READS == ["acc_1", "acc_1", "acc_1"]
     said = [w.getMessage() for w in warnings()]
-    assert len([w for w in said if "look up a recorded call of tool db.balance" in w]) == 1
-    # A failed lookup never silences a post's warning of the same kind.
-    assert len([w for w in said if "could not record a tool call" in w]) == 1
+    [lookup] = [w for w in said if "look up a recorded call of tool db.balance" in w]
+    # The failure paused every send, so the posts after it were skipped, and not warned of.
+    assert "irimi is not asked again for 30s" in lookup
+    assert not [w for w in said if "could not record a tool call" in w]
 
 
 def test_a_miss_is_said_by_no_warning(irimi, warnings):
@@ -470,13 +471,6 @@ def test_a_hit_is_used_up_and_is_not_itself_a_tool_call(irimi):
             "POST",
             400,
             "'name'",
-        ),
-        (
-            "runs/abcd1234abcd1234/tool-calls/recorded",
-            {"name": "x", "args": {}, "run_id": "y"},
-            "POST",
-            400,
-            "unknown field 'run_id'",
         ),
         (
             "runs/abcd1234abcd1234/tool-calls/recorded",
@@ -580,7 +574,7 @@ def test_a_recorded_tool_error_pickles_and_copies_as_itself(kind):
     raised = recorded_error(ErrorInfo(kind, "'acc_1'"))
     for again in (pickle.loads(pickle.dumps(raised)), copy.copy(raised)):
         assert type(again) is type(raised)
-        assert (again.type, again.message, str(again)) == (kind, "'acc_1'", "'acc_1'")
+        assert (again.type_name, again.message, str(again)) == (kind, "'acc_1'", "'acc_1'")
 
 
 def test_an_async_tool_outside_a_replay_runs_its_body_without_a_hop_off_the_loop(
@@ -603,7 +597,7 @@ def test_an_async_tool_outside_a_replay_runs_its_body_without_a_hop_off_the_loop
 # -- found on the verification pass --------------------------------------------------------------
 
 
-@sdk.tool(kind="read", name="db.slow")
+@sdk.read_tool(name="db.slow")
 async def slow(account: str) -> dict[str, Any]:
     _REAL_READS.append(account)
     await asyncio.sleep(30)  # longer than any test waits: the agent's timeout always cancels it
@@ -745,7 +739,7 @@ def test_a_lookup_carries_no_run_header_and_never_goes_through_a_proxy(monkeypat
     endpoint itself whatever `HTTP_PROXY` says."""
     monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{test_sdk._closed_port()}")
     with _answering(monkeypatch, 200, json.dumps(_HIT).encode()) as seen:
-        with sdk.run(trigger={}, name="labelled"):  # which instruments the HTTP clients
+        with sdk.run("labelled", inputs={}):  # which instruments the HTTP clients
             assert balance("acc_1") == {"account": "acc_1", "balance": 1}
     [lookup] = [h for path, h in seen if path.endswith(exchange.RECORDED_ACTION)]
     assert exchange.RUN_HEADER not in lookup
@@ -757,18 +751,18 @@ class Ledger:
     def __init__(self, owner: str) -> None:
         self.owner = owner
 
-    @sdk.tool(kind="read", name="ledger.entry")
+    @sdk.read_tool(name="ledger.entry")
     def entry(self, account: str) -> dict[str, Any]:
         _real(account)
         return {"owner": self.owner, "account": account}
 
     @staticmethod
-    @sdk.tool(kind="read", name="ledger.rate")
+    @sdk.read_tool(name="ledger.rate")
     def rate(account: str) -> int:
         _real(account)
         return len(_REAL_READS)
 
-    @sdk.tool(kind="read", name="ledger.kind")
+    @sdk.read_tool(name="ledger.kind")
     @classmethod
     def kind(cls, account: str) -> str:
         _real(account)

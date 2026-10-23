@@ -1,40 +1,40 @@
-"""`@sdk.tool`: a tool call the proxy cannot see, labelled read or write.
+"""`@sdk.read_tool` and `@sdk.write_tool`: tool calls the proxy cannot see, labelled.
 
 The proxy sees only HTTP. A database write, a file write or a call into another library is
 invisible to it, so the agent labels each such tool, and the SDK does for it what shadow mode does
 for a write on the wire:
 
-    | `active()` | kind  | Runs                              | Records    |
-    | false      | read  | the real function                 | nothing    |
-    | false      | write | the real function (WARNING, once) | nothing    |
-    | true       | read  | the real function, `ran="real"`   | a ToolCall |
-    | true       | write | ONLY the stand-in, `ran="shadow"` | a ToolCall |
+    | `is_active()` | tool  | Runs                              | Records    |
+    | false         | read  | the real function                 | nothing    |
+    | false         | write | the real function (WARNING, once) | nothing    |
+    | true          | read  | the real function, `ran="real"`   | a ToolCall |
+    | true          | write | ONLY the fake, `ran="shadow"`     | a ToolCall |
 
 In a replay (`IRIMI_REPLAY_RUN` set), a read tool first asks the recording, over the control
 endpoint, for the result the recorded run's same call got:
 
-    | kind  | the recording                | Runs                                 | Records     |
+    | tool  | the recording                | Runs                                 | Records     |
     | read  | holds it, revivable          | nothing: the revived result, or      | `recording` |
     |       |                              | RecordedToolError if it raised       |             |
     | read  | misses, cannot revive it, or | the real function                    | `real`      |
     |       | was stopped from outside     |                                      |             |
-    | write | is not asked                 | ONLY the stand-in, as in shadow      | `shadow`    |
+    | write | is not asked                 | ONLY the fake, as in shadow          | `shadow`    |
 
 A read tool's `ran="real"` in a replay is that replay's miss. A result is revivable when
 `capture.revive` can rebuild it: one recorded as `__irimi_repr__` or `__irimi_truncated__` is a
 description of the value, not the value. A result redaction replaced comes back with its
-placeholder. A write tool's stand-in runs even when the recorded run made the same call: it is the
+placeholder. A write tool's fake runs even when the recorded run made the same call: it is the
 developer's substitute, and nothing recorded can stand for it.
 
-THE SCOPE RULE, APPLIED TO THE SDK: nothing unnamed runs live. A write must name the stand-in that
-replaces it, a read may not name one, and every mistake is a TypeError when the agent loads, never
-at the call (`tool`).
+THE SCOPE RULE, APPLIED TO THE SDK: nothing unnamed runs live. `write_tool` cannot be declared
+without its fake, `read_tool` cannot be given one, and every other mistake is a TypeError when the
+agent loads, never at the call.
 
 A recorded call is posted to `{IRIMI_CONTROL}/runs/{run_id}/tool-calls` through `runs.reporter`
 once it has returned or raised, so a post fails as a run's does: it never raises, and each kind of
 failure is warned once per process. The call's run is the current one, or the process run
 `irimi shadow` names in `IRIMI_RUN`, or none at all (`trace.UNATTRIBUTED`). An exception from the
-function or the stand-in propagates unchanged, the same object, after the post.
+function or the fake propagates unchanged, the same object, after the post.
 
 HTTP made inside a tool is recorded as ordinary exchanges of the run, with no link to the call.
 
@@ -50,20 +50,18 @@ import threading
 import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
-from typing import Any, get_args
+from typing import Any, overload
 
 from irimi import paths, trace
 from irimi.sdk import context, runs
-from irimi.sdk.api import entrypoint
+from irimi.sdk.api import check_name, label
 from irimi.sdk.capture import MAX_CAPTURED_BYTES, capture, capture_call, revive, serialized
 from irimi.sdk.client import LOGGER_NAME
 from irimi.sdk.errors import error_info, recorded_error
-from irimi.secret_shapes import cut_outside_secrets
 from irimi.trace import STOPPED_ERROR_TYPES, TRUNCATED_KEY
 
 logger = logging.getLogger(LOGGER_NAME)
 
-KINDS: tuple[trace.ToolKind, ...] = get_args(trace.ToolKind)
 # The variables whose presence says this process meant to go through a proxy: an inactive SDK
 # with either set ran a write tool for real where irimi was probably meant to be in front.
 # Both spellings of `HTTPS_PROXY`, from the one list of them.
@@ -76,79 +74,88 @@ _warn_lock = threading.Lock()
 _record_failed = False
 
 
-def tool[F: Callable[..., Any]](
-    *, kind: trace.ToolKind, shadow: Callable[..., Any] | None = None, name: str | None = None
+@overload
+def read_tool[F: Callable[..., Any]](fn: F, /) -> F: ...
+@overload
+def read_tool[F: Callable[..., Any]](*, name: str | None = None) -> Callable[[F], F]: ...
+def read_tool(fn: Callable[..., Any] | None = None, /, *, name: str | None = None) -> Any:
+    """Label the decorated function as a read the proxy cannot see: it always runs for real, and
+    under irimi each call is recorded in its run (see the module doc).
+
+    Usable bare (`@sdk.read_tool`) or called (`@sdk.read_tool(name="lookup")`); `name` defaults
+    to the function's `module:qualname` (`api.label`). It keeps the function's signature and its
+    nature - the wrapper is a coroutine function exactly when the function is - and keeps a
+    `staticmethod` or `classmethod` one, in either decorator order, as `@sdk.trigger` does.
+
+    Refused at decoration time, with TypeError: a generator or async-generator function; what has
+    no importable `module:qualname` (`api.entrypoint`); a `name` that is not a string; and a name
+    passed positionally."""
+    if fn is not None and not callable(fn) and not isinstance(fn, staticmethod | classmethod):
+        raise TypeError(f"@sdk.read_tool takes its name as name=, not {fn!r}")
+    decorate = _decorator("read", None, name, "@sdk.read_tool")
+    return decorate if fn is None else decorate(fn)
+
+
+def write_tool[F: Callable[..., Any]](
+    *, fake: Callable[..., Any], name: str | None = None
 ) -> Callable[[F], F]:
-    """Label the decorated function as a tool the proxy cannot see (see the module doc).
+    """Label the decorated function as a write the proxy cannot see: under irimi only `fake`
+    runs in its place, called with the same arguments, and each call is recorded in its run (see
+    the module doc).
 
-    `kind` is `"read"` or `"write"`. A write names `shadow`, the stand-in that runs in its place
-    while irimi is in front, called with the same arguments; a read names none, because it runs
-    for real and a stand-in would hide a real read. `name` defaults to the function's
-    `module.qualname`.
+    `name` defaults to the function's `module:qualname` (`api.label`). The decorator keeps the
+    function's signature, nature and descriptor as `read_tool` does, so a fake is never handed an
+    instance it does not expect. The fake of a plain method is called as the method is, with the
+    instance first; a `staticmethod` fake is its function.
 
-    It keeps the function's signature and its nature - the wrapper is a coroutine function exactly
-    when the function is - and keeps a `staticmethod` or `classmethod` one, in either decorator
-    order, as `@sdk.trigger` does, so a stand-in is never handed an instance it does not
-    expect. The stand-in of a plain method is called as the method is, with the instance first.
+    Refused at decoration time, with TypeError: a fake that is not callable, is a generator
+    function, is the function itself, or is sync where the function is `async def` or the
+    reverse; a generator or async-generator function; what has no importable `module:qualname`;
+    and a `name` that is not a string."""
+    if isinstance(fake, staticmethod):
+        # A fake written as a static method in its tool's class body is callable, but `inspect`
+        # sees neither its nature nor a generator through it: it is judged, and called, as the
+        # function inside it.
+        fake = fake.__func__
+    if not callable(fake):
+        raise TypeError(f"@sdk.write_tool(fake=...) must be callable, not {fake!r}")
+    if inspect.isgeneratorfunction(fake) or inspect.isasyncgenfunction(fake):
+        raise TypeError(
+            f"@sdk.write_tool(fake=...) cannot be the generator function {fake.__qualname__}"
+        )
+    return _decorator("write", fake, name, "@sdk.write_tool")
 
-    Refused at decoration time, with TypeError: a `kind` that is neither; a write with no stand-in;
-    a read with one; a stand-in that is not callable, is a generator function, is the function
-    itself, or is sync where the function is `async def` or the reverse; a generator or
-    async-generator function; what has no importable `module.qualname` (`api.entrypoint`); and a
-    `name` that is not a string. A `staticmethod` stand-in is its function."""
-    if kind not in KINDS:
-        raise TypeError(f"@sdk.tool(kind=...) must be 'read' or 'write', not {kind!r}")
-    if name is not None and not isinstance(name, str):
-        raise TypeError(f"@sdk.tool(name=...) must be a string, not {name!r}")
-    if kind == "write" and shadow is None:
-        raise TypeError(
-            "@sdk.tool(kind='write') must name its stand-in as shadow=: a write the proxy cannot "
-            "see never runs for real under irimi"
-        )
-    if kind == "read" and shadow is not None:
-        raise TypeError(
-            "@sdk.tool(kind='read') takes no shadow=: a read runs for real, and a stand-in would "
-            "hide it"
-        )
-    if isinstance(shadow, staticmethod):
-        # A stand-in written as a static method in its tool's class body is callable, but
-        # `inspect` sees neither its nature nor a generator through it: it is judged, and called,
-        # as the function inside it.
-        shadow = shadow.__func__
-    if shadow is not None and not callable(shadow):
-        raise TypeError(f"@sdk.tool(shadow=...) must be callable, not {shadow!r}")
-    if shadow is not None and (
-        inspect.isgeneratorfunction(shadow) or inspect.isasyncgenfunction(shadow)
-    ):
-        raise TypeError(
-            f"@sdk.tool(shadow=...) cannot be the generator function {shadow.__qualname__}"
-        )
+
+def _decorator(
+    kind: trace.ToolKind, fake: Callable[..., Any] | None, name: str | None, api: str
+) -> Callable[[Any], Any]:
+    """The decorator both tool decorators return: checks the function and wraps it."""
+    check_name(name, api)
 
     def decorate(fn: Callable[..., Any]) -> Any:
         if isinstance(fn, staticmethod | classmethod):
             # The function inside is the tool, and the descriptor stays, as for a trigger.
             return type(fn)(decorate(fn.__func__))
-        entrypoint(fn, "@sdk.tool")
+        tool_name = label(fn, name, api)
         if inspect.isgeneratorfunction(fn) or inspect.isasyncgenfunction(fn):
             raise TypeError(
-                f"@sdk.tool cannot wrap the generator function {fn.__qualname__}: a call is "
+                f"{api} cannot wrap the generator function {fn.__qualname__}: a call is "
                 "recorded when it returns, before a generator's body has run"
             )
-        if shadow is fn:
-            # Read as "the function to shadow", `shadow=` would run the write for real.
+        if fake is fn:
+            # Read as "the function to fake", `fake=` would run the write for real.
             raise TypeError(
-                f"@sdk.tool: the stand-in for {fn.__qualname__} is the function itself: shadow= "
-                "names the function that runs in its place under irimi"
+                f"{api}: the fake for {fn.__qualname__} is the function itself: fake= names "
+                "the function that runs in its place under irimi"
             )
         is_async = inspect.iscoroutinefunction(fn)
-        if shadow is not None and _is_async(shadow) != is_async:
+        if fake is not None and _is_async(fake) != is_async:
             nature = "an async def" if is_async else "a sync function"
             raise TypeError(
-                f"@sdk.tool: the stand-in for {fn.__qualname__} must be {nature}, as the "
-                "function it stands in for is"
+                f"{api}: the fake for {fn.__qualname__} must be {nature}, as the function it "
+                "replaces is"
             )
-        label = f"{fn.__module__}.{fn.__qualname__}" if name is None else name
-        spec = _Tool(cut_outside_secrets(label, runs.MAX_NAME), kind, fn, shadow)
+        spec = _Tool(tool_name, kind, fn, fake)
 
         if is_async:
 
@@ -174,25 +181,25 @@ class _Tool:
     name: str
     kind: trace.ToolKind
     fn: Callable[..., Any]
-    shadow: Callable[..., Any] | None
+    fake: Callable[..., Any] | None
 
 
 def _chosen(spec: _Tool, recorded: "_Recorded | None") -> tuple[Callable[..., Any], trace.Ran]:
     """Which body an active call runs, and what the record says ran, given what a replay's
     recording answered (`_replay_answer`, None outside a replay). THE ONE DISPATCH: a write runs
-    its stand-in, in a replay too; a read the recording answered runs the recorded outcome; any
+    its fake, in a replay too; a read the recording answered runs the recorded outcome; any
     other read runs the real function. An inactive SDK never gets here: the real function runs,
     recorded by nobody."""
     if spec.kind == "write":
-        assert spec.shadow is not None  # `tool` refused a write with none
-        return spec.shadow, "shadow"
+        assert spec.fake is not None  # `write_tool` requires one
+        return spec.fake, "shadow"
     if recorded is not None:
         return recorded.body(inspect.iscoroutinefunction(spec.fn)), "recording"
     return spec.fn, "real"
 
 
 def _call(spec: _Tool, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-    if not context.active():
+    if not context.is_active():
         _warn_if_real_write(spec)
         return spec.fn(*args, **kwargs)
     # Bound against the REAL function, which is what the agent called, whatever runs.
@@ -217,7 +224,7 @@ def _call(spec: _Tool, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
 
 
 async def _call_async(spec: _Tool, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-    if not context.active():
+    if not context.is_active():
         _warn_if_real_write(spec)
         return await spec.fn(*args, **kwargs)
     captured, _ = capture_call(spec.fn, args, kwargs)

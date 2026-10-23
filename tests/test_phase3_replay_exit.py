@@ -3,11 +3,12 @@ edits its prompt, replays the run, and sees where it diverged and which writes c
 write reaching a real service and no substitute-labeled tool running for real.
 
 The agent is `examples/llm_refund_agent`, run as its user runs it: `irimi shadow -- python -m
-examples.llm_refund_agent ...` records it, and `irimi replay <run>` and `sdk.replay(<run>)` replay
-it, each the real CLI in a process of its own. On the other side, a loopback Stripe (the refund
-agent test's `_Stripe`) and a loopback Anthropic (`_Model`), which answers from the system prompt
-alone: the full remaining amount for `prompt.txt`, half of it for `prompt_half.txt`. Both record
-every request they hear. The live half is the example's README, run by hand; it is not in CI.
+examples.llm_refund_agent.agent ...` records it, and `irimi replay <run>` and
+`sdk.replay(<run>)` replay it, each the real CLI in a process of its own. On the other side, a
+loopback Stripe (the refund agent test's `_Stripe`) and a loopback Anthropic (`_Model`), which
+answers from the system prompt alone: the full remaining amount for `prompt.txt`, half of it for
+`prompt_half.txt`. Both record every request they hear. The live half is the example's README,
+run by hand; it is not in CI.
 
 THE TRAP THIS TEST MUST NOT FALL INTO. `irimi shadow` and `irimi replay` give their child
 `NO_PROXY=localhost,127.0.0.1` (`runner.NO_PROXY_VALUE`), so an agent pointed at a stub on a
@@ -64,7 +65,7 @@ TICKET = ("T1", "ch_A", "double charged")
 CUSTOMER = "Ada"
 FULL = "○ stripe  refund $49.00 on ch_A  faked; checked against live state: would succeed"
 HALF = "○ stripe  refund $24.50 on ch_A  faked; checked against live state: would succeed"
-RECORDED = f"○ tool  {AGENT}.record_decision  fake ran instead"
+RECORDED = f"○ tool  {AGENT}:record_decision  fake ran instead"
 # The names the stubs answer as, which only irimi's process resolves, to loopback.
 SERVED = ("api.stripe.com", "api.anthropic.com")
 # How long one irimi process may take: a CI runner starts an agent in seconds, so this is a hang.
@@ -244,7 +245,7 @@ def _decisions(db: Path) -> list[tuple[Any, ...]]:
 
 def _event(event: Exchange | ToolCall | Any) -> tuple[Any, ...]:
     if isinstance(event, ToolCall):
-        return ("tool", event.name.removeprefix(f"{AGENT}."), event.kind, event.ran)
+        return ("tool", event.name.removeprefix(f"{AGENT}:"), event.kind, event.ran)
     assert isinstance(event, Exchange), event
     request = event.request
     return (
@@ -259,7 +260,7 @@ def _event(event: Exchange | ToolCall | Any) -> tuple[Any, ...]:
 def _tool_calls(reader: StoreReader, run_id: str) -> dict[str, ToolCall]:
     """The run's tool calls by name; each tool is called once a run, so a second call fails."""
     calls = [e for e in reader.load_run(run_id).events if isinstance(e, ToolCall)]
-    named = {e.name.removeprefix(f"{AGENT}."): e for e in calls}
+    named = {e.name.removeprefix(f"{AGENT}:"): e for e in calls}
     assert len(named) == len(calls), [e.name for e in calls]
     return named
 
@@ -295,7 +296,7 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
 
     # --- Record: the agent under `irimi shadow`, as its user runs it. Features 1 and 2: one run,
     # the SDK's, stored with its trigger and its args.
-    command = [sys.executable, "-m", "examples.llm_refund_agent", *TICKET]
+    command = [sys.executable, "-m", "examples.llm_refund_agent.agent", *TICKET]
     shadow = _irimi(env, "shadow", "--port", "0", "--store", str(store), "--", *command)
     assert shadow.returncode == 0, shadow.stderr
     assert "Refunded 4900.\n" in shadow.stdout
@@ -307,7 +308,7 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
     assert run.outcome == "ok"
     # The ticket is the trigger's argument, stored as the dataclass it is, so a replay rebuilds it.
     assert run.trigger == Trigger(
-        "handle_ticket",
+        f"{AGENT}:handle_ticket",
         f"{AGENT}:handle_ticket",
         {
             "ticket": {
@@ -431,7 +432,7 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
     assert _anonymous(by_function) == _anonymous(same)
     assert (_Stripe.seen, _Model.seen) == ([], [])
     monkeypatch.setenv(agent.PROMPT_FILE_ENV, str(PROMPT_HALF))
-    by_function_edited = sdk.replay(source, handle_ticket, Ticket(*TICKET), store=store)
+    by_function_edited = sdk.replay(source, handle_ticket, args=(Ticket(*TICKET),), store=store)
     assert _anonymous(by_function_edited) == _anonymous(edited)
     assert [m["system"] for m in _Model.seen] == [PROMPT_HALF.read_text()]
     assert _Stripe.seen == []
@@ -450,20 +451,6 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
         **{r.run_id: r.attribution for r in records},
         **{r.replay_run_id: f"replay of {source}" for r in replayed},
     }
-
-
-@pytest.mark.parametrize(
-    "argv", [["examples/llm_refund_agent/agent.py"], ["-m", "examples.llm_refund_agent.agent"]]
-)
-def test_the_agent_run_as_main_refuses_and_says_how_to_start_it(argv):
-    """Run as `__main__`, its run's entrypoint would be `__main__:handle_ticket`, which `irimi
-    replay` cannot import: the agent refuses at once, rather than record an unreplayable
-    run."""
-    done = subprocess.run(
-        [sys.executable, *argv], cwd=ROOT, capture_output=True, text=True, timeout=60
-    )
-    assert (done.returncode, done.stdout) == (1, "")
-    assert done.stderr == "start the agent by module name: python -m examples.llm_refund_agent\n"
 
 
 def test_the_agent_sends_no_stripe_key_that_is_not_test_mode(monkeypatch, stubs, direct):

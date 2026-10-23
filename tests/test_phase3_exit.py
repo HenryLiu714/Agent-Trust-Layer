@@ -169,7 +169,7 @@ def _agent_beside_serve(home: Path, stub_port: int, *, barrier: bool):
         assert not any(name.lower() == "no_proxy" for name in env), "the trap: see the module doc"
         with open(home / "app.err", "w") as err:
             agent = subprocess.Popen(
-                [sys.executable, "-m", "examples.server_agent"],
+                [sys.executable, "-m", "examples.server_agent.app"],
                 cwd=ROOT,
                 env=env,
                 stdout=subprocess.PIPE,
@@ -271,7 +271,7 @@ def test_two_concurrent_requests_to_a_served_agent_are_two_runs_that_never_mix(
     for record in records:
         assert record.trigger is not None
         assert (record.trigger.name, record.trigger.entrypoint) == (
-            "handle_refund",
+            "examples.server_agent.app:handle_refund",
             "examples.server_agent.app:handle_refund",
         )
         assert record.trigger.replayable
@@ -437,16 +437,3 @@ def test_a_caller_that_sends_less_body_than_it_named_is_cut_off_not_waited_on(mo
     finally:
         srv.shutdown()
         srv.server_close()
-
-
-@pytest.mark.parametrize(
-    "argv", [["examples/server_agent/app.py"], ["-m", "examples.server_agent.app"]]
-)
-def test_the_app_run_as_main_refuses_and_says_how_to_start_it(argv):
-    """Run as `__main__`, its runs' entrypoint would be `__main__:handle_refund`, which replay
-    cannot import: the app refuses at once, rather than serve unreplayable runs."""
-    done = subprocess.run(
-        [sys.executable, *argv], cwd=ROOT, capture_output=True, text=True, timeout=60
-    )
-    assert (done.returncode, done.stdout) == (1, "")
-    assert done.stderr == "start the server agent by module name: python -m examples.server_agent\n"

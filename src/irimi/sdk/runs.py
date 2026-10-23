@@ -27,8 +27,8 @@ the caller's context unended, and the task that awaits the coroutine makes it cu
 ends it when the coroutine ends. Its start was posted inline, as every sync entry's is, even on an
 event loop's thread: until the function returned, nothing said its body was not already running.
 
-INACTIVE MEANS INERT. While `active()` is false - production, with no irimi in front - an entry
-does nothing at all: it sets no context variable, captures nothing, makes no network call and
+INACTIVE MEANS INERT. While `is_active()` is false - production, with no irimi in front - an
+entry does nothing at all: it sets no context variable, captures nothing, makes no network call and
 patches nothing. That is what makes the SDK safe to leave in production code.
 
 POSTS ARE SYNCHRONOUS, so the start reaches irimi before the run's first request and the end after
@@ -56,13 +56,12 @@ from irimi.sdk import context, errors
 from irimi.sdk.capture import Captured
 from irimi.sdk.client import LOGGER_NAME, ControlClient, Reporter
 from irimi.sdk.instrumentation import instrument
-from irimi.secret_shapes import cut_outside_secrets
 
 logger = logging.getLogger(LOGGER_NAME)
 
-# The longest trigger name a run records. A name is a label, as an error message is, and a
+# The longest name a run or a tool call records. A name is a label, as an error message is, and a
 # start past `control.MAX_CONTROL_BODY` would be refused whole. Cut outside any secret's shape,
-# since the store redacts it only after this cut (`secret_shapes.cut_outside_secrets`).
+# since the store redacts it only after this cut (`api.label`).
 MAX_NAME = 1000
 
 # Every post the SDK makes goes through this one client, so each kind of failure is logged once
@@ -91,24 +90,26 @@ class _Opened:
 
 
 class RunScope:
-    """One entry into a run (see the module doc), used once. `capture` is called only if a new
-    run starts, and returns the trigger's args and whether they are replayable."""
+    """One entry into a run (see the module doc), used once. `name` is already cut to MAX_NAME.
+    `capture` is called only if a new run starts, and returns the trigger's args and whether
+    they are replayable. Entering it gives the id of the run it opened or adopted, or None."""
 
     def __init__(self, name: str, entrypoint: str | None, capture: Callable[[], Captured]) -> None:
-        self._name = cut_outside_secrets(name, MAX_NAME)
+        self._name = name
         self._entrypoint = entrypoint
         self._capture = capture
         self._opened: _Opened | None = None
 
-    def __enter__(self) -> None:
+    def __enter__(self) -> str | None:
         opened = self._open()
         if opened is None:
-            return
+            return None
         try:
             _report_start(opened)
         except BaseException:
             self._close()  # interrupted while the start was posted: `with` will not call `__exit__`
             raise
+        return opened.run_id
 
     def __exit__(
         self,
@@ -122,10 +123,10 @@ class RunScope:
         finally:
             self._close()
 
-    async def __aenter__(self) -> None:
+    async def __aenter__(self) -> str | None:
         opened = self._open()
         if opened is None:
-            return
+            return None
         try:
             await off_the_loop(_report_start, opened)
         except BaseException:
@@ -133,6 +134,7 @@ class RunScope:
             # post finishes in its thread.
             self._close()
             raise
+        return opened.run_id
 
     async def __aexit__(
         self,
@@ -179,7 +181,7 @@ class RunScope:
         current, or when it starts a run, capture its trigger, make it current and build its
         start. None when the SDK is inactive or this entry joins a run. Captured before the id is
         current, so nothing past this point can leave the id set without `_close` to undo it."""
-        if not context.active() or context.current_run_id() is not None:
+        if not context.is_active() or context.current_run_id() is not None:
             return None
         adopted = context.replay_run_id()
         if adopted is not None:

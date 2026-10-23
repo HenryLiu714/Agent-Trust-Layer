@@ -23,8 +23,10 @@ A type is matched exactly, never by `isinstance`: an IntEnum, a namedtuple or an
 "anything else", because `revive` would build the base type, not the value the trigger was given.
 A dict holding one of the four keys capture writes (`RESERVED_KEYS`) is captured by its repr, so a
 revived marker always means capture wrote it. A dataclass or model whose class `revive` could not
-import - defined inside a function (`<locals>` in its qualname), or in `__main__`, which is a
-different module in the process that replays it - is not replayable either.
+import - defined inside a function (`<locals>` in its qualname), or in a script run by path,
+whose `__main__` is a different module in the process that replays it - is not replayable either.
+A class in a module started with `python -m` is named by the module's real name
+(`importable_module`).
 
 Two bounds keep the walk short whatever the agent passes. A value inside more than `MAX_DEPTH`
 containers is `{"__irimi_repr__": "<too deep>"}`, not replayable; for a trigger, depth counts from
@@ -50,7 +52,14 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from irimi.secret_shapes import cut_outside_secrets
-from irimi.trace import REPR_KEY, TRUNCATED_KEY, JSONValue, holds_description
+from irimi.trace import (
+    MAIN_MODULE,
+    REPR_KEY,
+    TRUNCATED_KEY,
+    JSONValue,
+    holds_description,
+    importable_module,
+)
 
 # The two markers that describe a value, `REPR_KEY` and `TRUNCATED_KEY`, are the trace format's,
 # so a replay's recording and `revive` refuse one rule; these two are capture's own.
@@ -114,7 +123,7 @@ def capture_call(
     if receiver is not None:
         arguments.pop(receiver, None)
     # One level less than the dict: each parameter's value may nest MAX_DEPTH deep, as a value
-    # given to `sdk.run(trigger=...)` may.
+    # given to `sdk.run(name, inputs=...)` may.
     return _capture(arguments, -1)
 
 
@@ -284,6 +293,8 @@ def _revive_typed(name: JSONValue, fields: JSONValue) -> Any:
         raise NotReplayable(f"{TYPE_KEY} names no class")
     module, _, qualname = name.partition(":")
     found: Any = sys.modules.get(module)
+    if found is None and module == importable_module(MAIN_MODULE):
+        found = sys.modules.get(MAIN_MODULE)  # this process was started as `python -m module`
     if found is None:
         raise NotReplayable(f"{name} is in a module this process has not imported")
     try:
@@ -396,10 +407,11 @@ class _Walk:
 
     def _typed(self, kind: type, fields: object, depth: int) -> Captured:
         """A dataclass or a pydantic model: its class, and its fields captured at its own depth."""
-        name = f"{kind.__module__}:{kind.__qualname__}"
+        module = importable_module(kind.__module__)
+        name = f"{module}:{kind.__qualname__}"
         self._count(len(name) + len(TYPE_KEY) + 15)
         encoded, replayable = self.encode(fields, depth)
-        importable = "<locals>" not in name and kind.__module__ != "__main__"
+        importable = "<locals>" not in name and module != MAIN_MODULE
         return {TYPE_KEY: name, "value": encoded}, replayable and importable
 
     def _opaque(self, value: object) -> JSONValue:

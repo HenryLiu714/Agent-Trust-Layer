@@ -5,7 +5,7 @@ is one run, `handle_refund`, marked with `@sdk.trigger`, which:
 
 1. reads the charge from Stripe (`GET /v1/charges/{charge}`), a live read under irimi;
 2. marks it refunded in the agent's own SQLite (`mark_refunded`), a write the proxy cannot see,
-   labelled `@sdk.tool(kind="write")` so that under irimi only its stand-in runs;
+   labelled `@sdk.write_tool` so that under irimi only its stand-in runs;
 3. refunds it (`POST /v1/refunds`, form body `charge=...`), a write irimi fakes;
 4. answers `200 {"refund": "<id>"}`.
 
@@ -17,10 +17,9 @@ Stripe is called with stdlib `urllib.request`, not stripe-python: urllib honours
 the environment alone. stripe-python verifies against the CA bundle it ships, never irimi's, and
 the reverse door it would need instead is loopback-only, so another container cannot reach it.
 
-    PORT=8080 STRIPE_API_KEY=sk_test_... python -m examples.server_agent
+    PORT=8080 STRIPE_API_KEY=sk_test_... python -m examples.server_agent.app
 
-Start it by module name, as above, never as `python app.py`: run as `__main__`, its trigger's
-entrypoint would be `__main__:handle_refund`, which replay cannot import, so it refuses to.
+Started with `python -m`, its runs record an entrypoint replay can import.
 
 Environment: `PORT` (default 8080; 0 picks a free one), `HOST` (default 127.0.0.1; a container
 needs 0.0.0.0), `STRIPE_API_KEY`, `STRIPE_API_BASE` (default https://api.stripe.com; the exit test
@@ -34,6 +33,7 @@ import json
 import os
 import socketserver
 import sqlite3
+import sys
 import threading
 import urllib.parse
 import urllib.request
@@ -72,7 +72,7 @@ def _mark_refunded_stand_in(charge: str) -> dict[str, Any]:
     return {"stood_in": True}
 
 
-@sdk.tool(kind="write", shadow=_mark_refunded_stand_in, name=TOOL_NAME)
+@sdk.write_tool(fake=_mark_refunded_stand_in, name=TOOL_NAME)
 def mark_refunded(charge: str) -> dict[str, Any]:
     """The agent's own record of the refund. Under irimi it never runs: the file is not created."""
     path = os.environ.get("REFUND_DB", "refunds.sqlite3")
@@ -165,6 +165,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    # Run as a script, every run's entrypoint would be `__main__:handle_refund`, which replay
-    # cannot import: refuse, and say how to start it.
-    raise SystemExit("start the server agent by module name: python -m examples.server_agent")
+    sys.exit(main())

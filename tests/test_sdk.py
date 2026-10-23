@@ -15,7 +15,9 @@ import functools
 import gc
 import http.server
 import inspect
+import json
 import logging
+import os
 import socket
 import subprocess
 import sys
@@ -144,7 +146,9 @@ def test_a_sync_trigger_is_one_stored_sdk_run_with_its_entrypoint_and_args(irimi
     assert run_id is not None and sdk.current_run_id() is None
     [run] = irimi.sdk_runs()
     assert run.run_id == run_id
-    assert run.trigger == Trigger("handle", f"{HERE}:handle", {"ticket_id": 7, "note": "hi"}, True)
+    assert run.trigger == Trigger(
+        f"{HERE}:handle", f"{HERE}:handle", {"ticket_id": 7, "note": "hi"}, True
+    )
     assert (run.outcome, run.error, run.exit_code) == ("ok", None, None)
     assert (run.sdk_version, run.engine_version, run.agent_version) == (
         __version__,
@@ -167,20 +171,24 @@ def test_a_decorated_method_records_its_class_and_leaves_self_out_of_the_args(ir
     run_id = Desk().answer(42)
     [run] = irimi.sdk_runs()
     assert run.run_id == run_id
-    assert run.trigger == Trigger("Desk.answer", f"{HERE}:Desk.answer", {"ticket_id": 42}, True)
+    assert run.trigger == Trigger(
+        f"{HERE}:Desk.answer", f"{HERE}:Desk.answer", {"ticket_id": 42}, True
+    )
     assert run.outcome == "ok"
 
 
 def test_sdk_run_with_and_async_with_are_one_run_each_with_no_entrypoint(irimi):
-    with sdk.run(trigger={"date": "2026-09-29"}, name="nightly"):
+    with sdk.run("nightly", inputs={"date": "2026-09-29"}) as nightly:
         sync_id = sdk.current_run_id()
 
     async def block() -> str | None:
-        async with sdk.run(trigger=["a", 1]):
-            return sdk.current_run_id()
+        async with sdk.run("run", inputs=["a", 1]) as entered:
+            assert entered is not None
+            return entered.id
 
     async_id = asyncio.run(block())
     assert None not in (sync_id, async_id) and sync_id != async_id
+    assert nightly == sdk.Run(sync_id, "nightly")
     found = {r.run_id: r for r in irimi.sdk_runs()}
     assert set(found) == {sync_id, async_id}
     assert found[sync_id].trigger == Trigger("nightly", None, {"date": "2026-09-29"}, True)
@@ -251,7 +259,7 @@ def test_the_start_is_posted_before_the_body_runs_and_the_end_after_it(monkeypat
 
     body()
     asyncio.run(async_body())
-    with sdk.run():
+    with sdk.run("run"):
         log.append("block")
     assert log == ["start", "body", "end", "start", "async body", "end", "start", "block", "end"]
 
@@ -330,7 +338,7 @@ def test_an_exception_named_past_what_the_control_endpoint_takes_still_ends_its_
     cut to MAX_POSTED_TYPE, and the store keeps MAX_ERROR_TYPE of it, redacted."""
     name = "H" * (3 * 1024 * 1024)
     huge = type(name, (Exception,), {})
-    with pytest.raises(huge), sdk.run(name="huge"):
+    with pytest.raises(huge), sdk.run("huge"):
         raise huge("x")
     [run] = irimi.sdk_runs()
     kept = f"{__name__}.{name}"[:MAX_ERROR_TYPE]
@@ -340,7 +348,7 @@ def test_an_exception_named_past_what_the_control_endpoint_takes_still_ends_its_
 def test_a_keyboard_interrupt_ends_the_run_in_error_and_still_propagates(irimi):
     stop = KeyboardInterrupt()
 
-    with pytest.raises(KeyboardInterrupt) as caught, sdk.run(name="interrupted"):
+    with pytest.raises(KeyboardInterrupt) as caught, sdk.run("interrupted"):
         raise stop
     assert caught.value is stop
     [run] = irimi.sdk_runs()
@@ -500,7 +508,7 @@ def test_a_nested_trigger_joins_the_run_it_is_called_in(irimi):
 
 
 def test_a_trigger_inside_sdk_run_joins_it(irimi):
-    with sdk.run(name="batch"):
+    with sdk.run("batch"):
         block_id = sdk.current_run_id()
         assert inner() == block_id
     [run] = irimi.sdk_runs()
@@ -523,7 +531,7 @@ def test_a_thread_loses_the_run_unless_its_work_is_propagated(irimi):
     def bare_thread() -> None:
         seen["thread"] = sdk.current_run_id()
 
-    with sdk.run(name="fan-out"):
+    with sdk.run("fan-out"):
         run_id = sdk.current_run_id()
         worker = threading.Thread(target=bare_thread)
         worker.start()
@@ -544,10 +552,10 @@ def test_a_thread_loses_the_run_unless_its_work_is_propagated(irimi):
 
 
 def test_propagate_takes_the_context_when_it_is_called_not_when_its_wrapper_runs(irimi):
-    with sdk.run(name="first"):
+    with sdk.run("first"):
         first = sdk.current_run_id()
         work = sdk.propagate(sdk.current_run_id)
-    with sdk.run(name="second"):
+    with sdk.run("second"):
         assert work() == first != sdk.current_run_id()
 
 
@@ -558,14 +566,14 @@ def test_one_propagated_wrapper_may_run_on_two_threads_at_once(irimi):
         barrier.wait()
         return sdk.current_run_id()
 
-    with sdk.run(name="shared"):
+    with sdk.run("shared"):
         run_id = sdk.current_run_id()
         work = sdk.propagate(meet)
         with ThreadPoolExecutor(2) as pool:
             assert [f.result() for f in [pool.submit(work), pool.submit(work)]] == [run_id] * 2
 
 
-JOB = sdk.run(name="job")  # one object, entered from everywhere, as a module constant is
+JOB = sdk.run("job")  # one object, entered from everywhere, as a module constant is
 
 
 def test_one_sdk_run_object_may_be_entered_nested_on_threads_and_in_tasks_at_once(irimi):
@@ -611,10 +619,10 @@ def test_one_sdk_run_object_may_be_entered_nested_on_threads_and_in_tasks_at_onc
 
 
 def test_an_exit_in_a_context_that_made_no_entry_ends_nothing_and_does_not_raise(irimi):
-    """An async generator closed by another task leaves its `async with sdk.run()` in a context
+    """An async generator closed by another task leaves its `async with sdk.run(...)` in a context
     other than the one it entered in. That exit has no entry of its own to end, so it ends none,
     and the run is stored incomplete rather than ended by the wrong caller."""
-    block = sdk.run(name="moved")
+    block = sdk.run("moved")
     entered = contextvars.copy_context()
     run_id = entered.run(lambda: (block.__enter__(), sdk.current_run_id())[1])
     contextvars.copy_context().run(block.__exit__, None, None, None)
@@ -903,17 +911,21 @@ def test_a_function_defined_with_no_module_is_refused_by_its_name():
         sdk.trigger(namespace["on_message"])
 
 
-def test_a_name_that_is_not_a_string_is_refused_at_decoration_or_kept_as_a_label(irimi):
+def test_a_name_that_is_not_a_string_is_refused_and_a_long_one_is_cut(irimi):
     with pytest.raises(TypeError, match="name="):
         sdk.trigger("refund")  # type: ignore[call-overload]
     with pytest.raises(TypeError, match="must be a string"):
         sdk.trigger(name=7)  # type: ignore[call-overload]
-    with sdk.run(name=None):  # type: ignore[arg-type]
-        pass
-    with sdk.run(name="name " * 1000):
+    with pytest.raises(TypeError, match="must be a string"):
+        sdk.run(None)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="must be a string"):
+        sdk.run(7)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        sdk.run()  # type: ignore[call-arg]
+    with sdk.run("name " * 1000):
         pass
     names = sorted(r.trigger.name for r in irimi.sdk_runs() if r.trigger is not None)
-    assert names == ["None", "name " * (runs.MAX_NAME // 5)]
+    assert names == ["name " * (runs.MAX_NAME // 5)]
 
 
 def test_a_long_name_is_cut_outside_secrets_so_it_keeps_no_part_of_a_key(irimi):
@@ -921,7 +933,7 @@ def test_a_long_name_is_cut_outside_secrets_so_it_keeps_no_part_of_a_key(irimi):
     too short for the key's shape, and reach disk. Cut outside secrets, the key is left out whole.
     """
     head = "n" * (runs.MAX_NAME - 10) + " "
-    with sdk.run(name=head + "ghp_" + "k" * 36):
+    with sdk.run(head + "ghp_" + "k" * 36):
         pass
     assert [r.trigger.name for r in irimi.sdk_runs() if r.trigger is not None] == [head]
 
@@ -1012,7 +1024,7 @@ def test_an_inactive_sdk_calls_straight_through(tripwire, monkeypatch, value):
         assert sdk.current_run_id() is None
         # Inactive, it sets no context variable, not even the object's own record of its entries.
         assert len(contextvars.copy_context()) == outside
-    assert not sdk.active()
+    assert not sdk.is_active()
     assert tripwire == [] and calls == []
 
 
@@ -1020,7 +1032,7 @@ def test_active_is_read_at_each_call(tripwire, monkeypatch):
     monkeypatch.delenv(paths.ENGINE_ACTIVE_ENV, raising=False)
     assert handle(1) is None
     monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
-    assert sdk.active() and handle(1) is not None
+    assert sdk.is_active() and handle(1) is not None
     assert [path.rsplit("/", 1)[1] for path in tripwire] == ["start", "end"]
 
 
@@ -1115,7 +1127,109 @@ def test_a_fault_of_the_clients_own_is_a_warning_not_an_exception(monkeypatch, w
     assert "failed: TypeError" in warning.getMessage()
 
 
+def test_an_unreachable_endpoint_pauses_every_send_for_30s_then_irimi_is_asked_again(
+    monkeypatch, warnings
+):
+    """A stalled irimi costs the agent one timeout, not one per call: the breaker skips every
+    post and lookup while it is open, silently, and the first send after it closes goes out."""
+    now = [100.0]
+    reporter = client.ControlClient(clock=lambda: now[0])
+    monkeypatch.setenv(paths.CONTROL_ENV, f"http://127.0.0.1:{_closed_port()}/_irimi")
+    reporter.post("r1", "start", {})
+    [warning] = warnings()
+    assert "unreachable" in warning.getMessage()
+    assert "irimi is not asked again for 30s" in warning.getMessage()
+    with _recorder(status=204) as (port, hits):
+        monkeypatch.setenv(paths.CONTROL_ENV, f"http://127.0.0.1:{port}/_irimi")
+        now[0] += client.PAUSE_S - 1
+        reporter.post("r1", "end", {})
+        assert reporter.recorded("r1", "db.read", {}) is None
+        assert hits == []
+        now[0] += 2
+        reporter.post("r1", "end", {})
+        assert len(hits) == 1
+    assert len(warnings()) == 1
+
+
+def test_a_proxy_speaking_another_protocol_is_one_warning_naming_both_versions(
+    irimi, monkeypatch, warnings
+):
+    """Every post names the protocol the SDK speaks; the endpoint answers another major 426,
+    with its own, and the SDK says both once, whatever it was posting."""
+    monkeypatch.setattr(client, "PROTOCOL_VERSION", "2")
+    assert handle(1) is not None and handle(2) is not None
+    assert runs.reporter.recorded("r1", "db.read", {}) is None
+    [warning] = warnings()
+    said = warning.getMessage()
+    assert said == (
+        f"irimi: this SDK speaks control protocol 2, but the proxy at "
+        f"http://127.0.0.1:{irimi.port}/_irimi speaks 1; runs are not recorded until the two match"
+    )
+    assert irimi.sdk_runs() == []
+
+
 # -- decoration ----------------------------------------------------------------------------------
+
+
+_SCRIPT_AGENT = """\
+import dataclasses, json
+from irimi import sdk
+from irimi.sdk import api, capture
+
+@dataclasses.dataclass
+class Ticket:
+    n: int
+
+@sdk.trigger
+def handle(ticket: Ticket) -> None: ...
+
+@sdk.trigger
+def other() -> None: ...
+
+@sdk.read_tool
+def look() -> None: ...
+
+if __name__ == "__main__":
+    print(json.dumps([
+        api.entrypoint(handle.__wrapped__),
+        api.label(look.__wrapped__, None, "@sdk.read_tool"),
+        capture.capture(Ticket(1)),
+    ]))
+"""
+
+
+def _run_agent(tmp_path, argv: list[str], *, active: bool) -> subprocess.CompletedProcess[str]:
+    package = tmp_path / "pkg"
+    package.mkdir(exist_ok=True)
+    (package / "__init__.py").write_text("")
+    (package / "agent.py").write_text(_SCRIPT_AGENT)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("IRIMI_")}
+    if active:
+        env[paths.ENGINE_ACTIVE_ENV] = "1"
+    return subprocess.run(
+        [sys.executable, *argv], cwd=tmp_path, env=env, capture_output=True, text=True, check=True
+    )
+
+
+def test_a_trigger_in_a_module_run_with_python_m_records_its_importable_name(tmp_path):
+    done = _run_agent(tmp_path, ["-m", "pkg.agent"], active=True)
+    entry, tool_name, ticket = json.loads(done.stdout)
+    assert entry == "pkg.agent:handle" and tool_name == "pkg.agent:look"
+    assert ticket == [{"__irimi_type__": "pkg.agent:Ticket", "value": {"n": 1}}, True]
+    assert done.stderr == ""
+
+
+def test_a_trigger_in_a_script_run_by_path_is_warned_of_once_under_irimi(tmp_path):
+    done = _run_agent(tmp_path, ["pkg/agent.py"], active=True)
+    entry, _, ticket = json.loads(done.stdout)
+    assert entry == "__main__:handle"
+    assert ticket[1] is False  # its class cannot be imported by another process either
+    assert done.stderr == (
+        "irimi: trigger handle is in a script run by path, so its runs cannot be replayed by "
+        "entrypoint; start the agent with python -m <module> instead\n"
+    )
+    # Production stays quiet.
+    assert _run_agent(tmp_path, ["pkg/agent.py"], active=False).stderr == ""
 
 
 def test_a_generator_function_is_refused_at_decoration():
@@ -1141,15 +1255,18 @@ def test_a_trigger_keeps_its_functions_name_signature_and_nature():
 def test_the_public_api_is_the_issues():
     assert sorted(sdk.__all__) == [
         "RecordedToolError",
+        "ReplayError",
         "ReplayResult",
-        "active",
+        "Run",
         "current_run_id",
         "instrument",
+        "is_active",
         "propagate",
+        "read_tool",
         "replay",
         "run",
-        "tool",
         "trigger",
+        "write_tool",
     ]
     assert sdk.instrument() is None
 

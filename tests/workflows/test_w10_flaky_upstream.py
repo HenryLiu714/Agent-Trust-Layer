@@ -453,7 +453,7 @@ def test_a_bomb_costs_irimi_its_cap_in_memory_not_what_it_decodes_to(traced_run,
 
 # ---------------------------------------------------------------------- irimi compare
 
-SYNC = "sync_payouts  examples.workflows.w10_flaky_upstream.agent:sync_payouts"
+SYNC = "examples.workflows.w10_flaky_upstream.agent:sync_payouts"
 REFUND = REFUND_LINE.removeprefix("  ")
 CHECKED = "faked; checked against live state: would succeed"
 POSTED = f'○ slack  post to #C0PAYOUT: "refunded 500 on ch_PAYOUT1"  {CHECKED}'

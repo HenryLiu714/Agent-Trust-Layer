@@ -1083,11 +1083,12 @@ def run_attribution(record: RunRecord) -> str:
 def run_label(record: RunRecord) -> str:
     """A stored run in one line, as `irimi compare` names each side: its trigger's name and
     entrypoint, and the agent version it reported, each one it has, escaped as `runs show`
-    escapes them; "" for a run that has none."""
+    escapes them; "" for a run that has none. The entrypoint is left out when it is the name,
+    as a trigger's default name is."""
     trigger = record.trigger
     parts = [
         trigger.name if trigger is not None else None,
-        trigger.entrypoint if trigger is not None else None,
+        trigger.entrypoint if trigger is not None and trigger.entrypoint != trigger.name else None,
         f"agent {record.agent_version}" if record.agent_version else None,
     ]
     return "  ".join(printable(part) for part in parts if part)

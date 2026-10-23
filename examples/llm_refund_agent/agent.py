@@ -2,13 +2,13 @@
 
 A support ticket comes in; `handle_ticket`, marked `@sdk.trigger`, decides what to refund:
 
-1. `lookup_customer(charge)`, an `@sdk.tool(kind="read")` over the agent's own SQLite, which the
+1. `lookup_customer(charge)`, an `@sdk.read_tool` over the agent's own SQLite, which the
    proxy cannot see;
 2. `GET /v1/charges/{charge}` from Stripe, a live read under irimi;
 3. `POST /v1/messages` to Anthropic, the system prompt read from `PROMPT_FILE`, the ticket, the
    customer and the charge in the user turn, asking for `{"refund_amount": int, "reply": str}`;
 4. `POST /v1/refunds` for that amount, when it is above zero, a write irimi fakes;
-5. `record_decision(ticket_id, decision)`, an `@sdk.tool(kind="write")` over the same SQLite,
+5. `record_decision(ticket_id, decision)`, an `@sdk.write_tool` over the same SQLite,
    whose stand-in runs under irimi instead.
 
 So the prompt decides the refund: edit it, replay a recorded run (`irimi replay`), and see where
@@ -20,12 +20,11 @@ irimi by the environment alone. It sends a Stripe key only when it is a test-mod
 the check is on the request path, so a replay, which calls `handle_ticket` without `main()`, makes
 it too.
 
-    python -m examples.llm_refund_agent <ticket_id> <charge> <message>
+    python -m examples.llm_refund_agent.agent <ticket_id> <charge> <message>
 
-Start it by module name, never as `python agent.py`: run as `__main__`, its trigger's entrypoint
-would be `__main__:handle_ticket`, which `irimi replay` cannot import. `main()` sets nothing
-up that `handle_ticket` needs, since a replay calls the trigger alone; the database is seeded
-beforehand (`python -m examples.llm_refund_agent.seed`).
+Started with `python -m`, its runs record an entrypoint `irimi replay` can import. `main()`
+sets nothing up that `handle_ticket` needs, since a replay calls the trigger alone; the database
+is seeded beforehand (`python -m examples.llm_refund_agent.seed`).
 
 Environment: `STRIPE_API_KEY` (`sk_test_` only), `STRIPE_API_BASE` (default
 https://api.stripe.com), `ANTHROPIC_API_KEY`, `ANTHROPIC_API_BASE` (default
@@ -161,7 +160,7 @@ def ask_model(system: str, content: str) -> dict[str, Any]:
     return {"refund_amount": decision["refund_amount"], "reply": decision["reply"]}
 
 
-@sdk.tool(kind="read")
+@sdk.read_tool
 def lookup_customer(charge: str) -> dict[str, Any]:
     """The customer the agent's own database holds for `charge`. Opened read-only, so a database
     that is not there raises (`sqlite3.OperationalError`) rather than being created empty."""
@@ -175,7 +174,7 @@ def record_decision_stand_in(ticket_id: str, decision: dict[str, Any]) -> dict[s
     return {"recorded": False, "stood_in": True}
 
 
-@sdk.tool(kind="write", shadow=record_decision_stand_in)
+@sdk.write_tool(fake=record_decision_stand_in)
 def record_decision(ticket_id: str, decision: dict[str, Any]) -> dict[str, Any]:
     """The agent's own record of what it decided. Under irimi it never runs: no row is written."""
     with contextlib.closing(sqlite3.connect(db_path())) as conn, conn:
@@ -216,7 +215,8 @@ def handle_ticket(ticket: Ticket) -> str:
 def main(argv: list[str]) -> int:
     if len(argv) != 3:
         print(
-            "usage: python -m examples.llm_refund_agent TICKET_ID CHARGE MESSAGE", file=sys.stderr
+            "usage: python -m examples.llm_refund_agent.agent TICKET_ID CHARGE MESSAGE",
+            file=sys.stderr,
         )
         return 2
     print(handle_ticket(Ticket(*argv)))
@@ -224,6 +224,4 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    # Run as a script, its run's entrypoint would be `__main__:handle_ticket`, which `irimi
-    # replay` cannot import: refuse, and say how to start it, as `examples/server_agent` does.
-    raise SystemExit("start the agent by module name: python -m examples.llm_refund_agent")
+    sys.exit(main(sys.argv[1:]))

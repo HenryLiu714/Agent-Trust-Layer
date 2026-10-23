@@ -1,12 +1,11 @@
 """W6 `crm_db_agent`: tools the proxy cannot see, over a local SQLite CRM.
 
-A database write labelled with `@sdk.tool` runs its stand-in under shadow, called with the same
-arguments the real function would get. Every database and filesystem write here is an
-`@sdk.tool(kind="write", shadow=...)`, so under `irimi shadow` the stand-in runs and the real
-body never does. Reads are `@sdk.tool(kind="read")` and run for real.
+A database write labelled with `@sdk.write_tool` runs its stand-in under shadow, called with the
+same arguments the real function would get. Every database and filesystem write here is an
+`@sdk.write_tool(fake=...)`, so under `irimi shadow` the stand-in runs and the real body never
+does. Reads are `@sdk.read_tool` and run for real.
 
-    python -m examples.workflows.launch \\
-        examples.workflows.w06_crm_db_agent.agent <scenario> [segment]
+    python -m examples.workflows.w06_crm_db_agent.agent <scenario> [segment]
 
 Beyond `enrich`, each scenario puts one case of the tool API through the real `irimi shadow`: a
 write's stand-in that raises and a retry (`merge_retry`), and the same merge right the first time
@@ -97,7 +96,7 @@ def seed() -> None:
 # -- read tools: run for real, shadow or not ------------------------------------------------------
 
 
-@sdk.tool(kind="read", name="crm.find_accounts")
+@sdk.read_tool(name="crm.find_accounts")
 def find_accounts(segment: str) -> list[dict[str, Any]]:
     with agentkit.sqlite(DB_NAME) as conn:
         conn.row_factory = sqlite3.Row
@@ -105,7 +104,7 @@ def find_accounts(segment: str) -> list[dict[str, Any]]:
         return [dict(r) for r in rows]
 
 
-@sdk.tool(kind="read", name="crm.fetch_enrichment")
+@sdk.read_tool(name="crm.fetch_enrichment")
 def fetch_enrichment(account_id: str) -> dict[str, Any]:
     """A read tool that makes an HTTP call inside it: recorded as an ordinary exchange."""
     url = agentkit.internal("enrich.internal") + f"/v1/companies/{account_id}"
@@ -113,7 +112,7 @@ def fetch_enrichment(account_id: str) -> dict[str, Any]:
     return resp.json() or {}
 
 
-@sdk.tool(kind="read", name="crm.connect_with")
+@sdk.read_tool(name="crm.connect_with")
 def connect_with(dsn: str, options: DriverOptions | None = None) -> dict[str, Any]:
     """Its argument carries a credential, so a stored tool call must redact it. For a host
     it cannot reach it raises, and its message quotes the DSN after its retries, so the key in it
@@ -126,7 +125,7 @@ def connect_with(dsn: str, options: DriverOptions | None = None) -> dict[str, An
     return {"connected": host}
 
 
-@sdk.tool(kind="read", name="crm.score_account")
+@sdk.read_tool(name="crm.score_account")
 def score_account(account: dict[str, Any]) -> dict[str, Any]:
     """Returns values JSON cannot hold: a recorded result is not revivable, so replay must
     run this for real."""
@@ -135,12 +134,12 @@ def score_account(account: dict[str, Any]) -> dict[str, Any]:
     return {"score": Decimal("0.87"), "scored_at": datetime(2026, 9, 28, tzinfo=UTC)}
 
 
-@sdk.tool(kind="read", name="crm.flaky_lookup")
+@sdk.read_tool(name="crm.flaky_lookup")
 def flaky_lookup(account_id: str) -> dict[str, Any]:
     raise KeyError(account_id)
 
 
-@sdk.tool(kind="read", name="crm.lookup_owner")
+@sdk.read_tool(name="crm.lookup_owner")
 async def lookup_owner(account_id: str) -> dict[str, Any]:
     """An async read tool, awaited in the run's event loop."""
     with agentkit.sqlite(DB_NAME) as conn:
@@ -149,7 +148,7 @@ async def lookup_owner(account_id: str) -> dict[str, Any]:
     return {"id": account_id, "owner": f"owner@{row[0].lower()}.example" if row else None}
 
 
-@sdk.tool(kind="read", name="crm.last_contact")
+@sdk.read_tool(name="crm.last_contact")
 def last_contact(account_id: str) -> Any:
     """A sync read that returns its work as a coroutine, as a plain decorator over an `async def`
     does: its call ends when the coroutine does, and a replay answers it with a coroutine
@@ -171,7 +170,7 @@ def _upsert_stand_in(account: dict[str, Any]) -> dict[str, Any]:
     return {"stood_in": True, "id": account["id"]}
 
 
-@sdk.tool(kind="write", shadow=_upsert_stand_in, name="crm.upsert_account")
+@sdk.write_tool(fake=_upsert_stand_in, name="crm.upsert_account")
 def upsert_account(account: dict[str, Any]) -> dict[str, Any]:
     with agentkit.sqlite(DB_NAME) as conn:
         conn.execute(
@@ -186,7 +185,7 @@ def _delete_stand_in(cutoff: str) -> int:
     return 0
 
 
-@sdk.tool(kind="write", shadow=_delete_stand_in, name="crm.delete_stale")
+@sdk.write_tool(fake=_delete_stand_in, name="crm.delete_stale")
 def delete_stale(cutoff: str) -> int:
     with agentkit.sqlite(DB_NAME) as conn:
         return conn.execute("DELETE FROM accounts WHERE last_seen < ?", (cutoff,)).rowcount
@@ -196,7 +195,7 @@ def _bulk_stand_in(scores: dict[str, int]) -> int:
     return len(scores)
 
 
-@sdk.tool(kind="write", shadow=_bulk_stand_in, name="crm.bulk_update")
+@sdk.write_tool(fake=_bulk_stand_in, name="crm.bulk_update")
 def bulk_update(scores: dict[str, int]) -> int:
     """One transaction: all rows or none."""
     with agentkit.sqlite(DB_NAME) as conn:
@@ -210,7 +209,7 @@ def _export_stand_in(rows: list[dict[str, Any]], name: str) -> str:
     return f"<not written: {name}.csv>"
 
 
-@sdk.tool(kind="write", shadow=_export_stand_in, name="crm.export_csv")
+@sdk.write_tool(fake=_export_stand_in, name="crm.export_csv")
 def export_csv(rows: list[dict[str, Any]], name: str) -> str:
     path = agentkit.state_dir() / "exports" / f"{name}.csv"
     path.parent.mkdir(exist_ok=True)
@@ -225,7 +224,7 @@ async def _notify_stand_in(account_id: str, message: str) -> dict[str, Any]:
     return {"stood_in": True}
 
 
-@sdk.tool(kind="write", shadow=_notify_stand_in, name="crm.notify_owner")
+@sdk.write_tool(fake=_notify_stand_in, name="crm.notify_owner")
 async def notify_owner(account_id: str, message: str) -> dict[str, Any]:
     outbox = agentkit.state_dir() / "outbox.jsonl"
     with outbox.open("a") as fh:
@@ -250,7 +249,7 @@ async def _archive_stand_in(account_id: str) -> dict[str, Any]:
     return {"archived": False, "stood_in": True}
 
 
-@sdk.tool(kind="write", shadow=_archive_stand_in, name="crm.archive_account")
+@sdk.write_tool(fake=_archive_stand_in, name="crm.archive_account")
 async def archive_account(account_id: str) -> dict[str, Any]:
     await _wait_for_the_flag()
     with agentkit.sqlite(DB_NAME) as conn:
@@ -262,7 +261,7 @@ async def _flag_stand_in(account_id: str) -> dict[str, Any]:
     return {"flagged": False, "stood_in": True}
 
 
-@sdk.tool(kind="write", shadow=_flag_stand_in, name="crm.flag_account")
+@sdk.write_tool(fake=_flag_stand_in, name="crm.flag_account")
 async def flag_account(account_id: str) -> dict[str, Any]:
     with agentkit.sqlite(DB_NAME) as conn:
         conn.execute("UPDATE accounts SET score = -1 WHERE id = ?", (account_id,))
@@ -309,7 +308,7 @@ def _merge_stand_in(*ids: str) -> dict[str, Any]:
     return {"kept": keep, "merged": drop, "stood_in": True}
 
 
-@sdk.tool(kind="write", shadow=_merge_stand_in, name="crm.merge_accounts")
+@sdk.write_tool(fake=_merge_stand_in, name="crm.merge_accounts")
 def merge_accounts(keep: str, drop: str) -> dict[str, Any]:
     if missing := _missing(keep, drop):
         _raise_missing(missing)
@@ -326,7 +325,7 @@ def _sync_industry_stand_in(account_id: str, industry: str) -> dict[str, Any]:
     return {"stood_in": True, "industry": industry, "upstream": upstream}
 
 
-@sdk.tool(kind="write", shadow=_sync_industry_stand_in, name="crm.sync_industry")
+@sdk.write_tool(fake=_sync_industry_stand_in, name="crm.sync_industry")
 def sync_industry(account_id: str, industry: str) -> dict[str, Any]:
     with agentkit.sqlite(DB_NAME) as conn:
         conn.execute("UPDATE accounts SET industry = ? WHERE id = ?", (industry, account_id))
@@ -346,7 +345,7 @@ def _schedule_stand_in(account_id: str, days: int) -> Any:
     return _followup(account_id, days, None)
 
 
-@sdk.tool(kind="write", shadow=_schedule_stand_in, name="crm.schedule_followup")
+@sdk.write_tool(fake=_schedule_stand_in, name="crm.schedule_followup")
 def schedule_followup(account_id: str, days: int) -> Any:
     """A sync write that returns its work as a coroutine, as a plain decorator over an `async def`
     does. Its body has not run when it returns, so the call ends when the coroutine does: the
@@ -364,7 +363,7 @@ class Outbox:
         await asyncio.sleep(0)
         return {"stood_in": True, "to": owner}
 
-    @sdk.tool(kind="write", shadow=_send_stand_in, name="crm.send_reminder")
+    @sdk.write_tool(fake=_send_stand_in, name="crm.send_reminder")
     @staticmethod
     async def send_reminder(account_id: str, owner: str) -> dict[str, Any]:
         await asyncio.sleep(0)
@@ -484,7 +483,8 @@ async def _follow_up_on(account_id: str) -> dict[str, Any]:
 
 
 def decoration_errors() -> list[str]:
-    """Each decoration-time mistake `@sdk.tool` refuses: each must raise TypeError before a call."""
+    """Each decoration-time mistake the tool decorators refuse: each must raise TypeError before a
+    call."""
 
     def real(x: int) -> int:
         return x
@@ -497,17 +497,17 @@ def decoration_errors() -> list[str]:
 
     not_callable: Any = "mock_database_write"
     mistakes = {
-        "write_without_shadow": lambda: sdk.tool(kind="write")(real),
-        "read_with_shadow": lambda: sdk.tool(kind="read", shadow=real)(real),
-        "bad_kind": lambda: sdk.tool(kind="delete", shadow=real)(real),
-        "stand_in_not_callable": lambda: sdk.tool(kind="write", shadow=not_callable)(real),
-        "sync_stand_in_for_async": lambda: sdk.tool(kind="write", shadow=real)(real_async),
-        "async_stand_in_for_sync": lambda: sdk.tool(kind="write", shadow=real_async)(real),
-        "generator": lambda: sdk.tool(kind="read")(gen),
-        # A stand-in that is a generator, or the function itself: the second would run the
-        # real write under irimi.
-        "generator_stand_in": lambda: sdk.tool(kind="write", shadow=gen)(real),
-        "stand_in_is_the_function": lambda: sdk.tool(kind="write", shadow=real)(real),
+        "write_without_fake": lambda: sdk.write_tool()(real),
+        "read_with_fake": lambda: sdk.read_tool(fake=real)(real),
+        "bare_write_tool": lambda: sdk.write_tool(real),
+        "fake_not_callable": lambda: sdk.write_tool(fake=not_callable)(real),
+        "sync_fake_for_async": lambda: sdk.write_tool(fake=real)(real_async),
+        "async_fake_for_sync": lambda: sdk.write_tool(fake=real_async)(real),
+        "generator": lambda: sdk.read_tool(gen),
+        # A fake that is a generator, or the function itself: the second would run the real
+        # write under irimi.
+        "generator_fake": lambda: sdk.write_tool(fake=gen)(real),
+        "fake_is_the_function": lambda: sdk.write_tool(fake=real)(real),
     }
     raised = []
     for case, attempt in mistakes.items():

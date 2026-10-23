@@ -5,8 +5,7 @@ local SQLite ledger, and for each mismatch tags the Stripe customer (`metadata[r
 marks the ledger row reconciled. It ends with one Slack summary. This is a plain shadow run at
 volume: the summary has to say what forty writes in one run would have done.
 
-    python -m examples.workflows.launch \\
-        examples.workflows.w02_nightly_reconcile.agent --date 2026-09-27 \\
+    python -m examples.workflows.w02_nightly_reconcile.agent --date 2026-09-27 \\
         [--charges 45] [--mismatches 40] [--datetime-trigger] [--twice] [--refund-then-page]
 
 The ledger is seeded by the agent itself before the run starts (`seed_ledger`), standing in for the
@@ -54,7 +53,7 @@ def seed_ledger(charges: int, mismatches: int) -> None:
             db.execute("INSERT INTO ledger VALUES (?, ?, NULL)", (charge_id(i), amount))
 
 
-@sdk.tool(kind="read")
+@sdk.read_tool
 def load_ledger() -> dict[str, int]:
     with agentkit.sqlite(LEDGER) as db:
         return dict(db.execute("SELECT charge, amount FROM ledger").fetchall())
@@ -64,7 +63,7 @@ def _mark_stand_in(charge: str, date: str) -> dict[str, Any]:
     return {"stood_in": True, "charge": charge, "date": date}
 
 
-@sdk.tool(kind="write", shadow=_mark_stand_in)
+@sdk.write_tool(fake=_mark_stand_in)
 def mark_reconciled(charge: str, date: str) -> dict[str, Any]:
     with agentkit.sqlite(LEDGER) as db:
         db.execute("UPDATE ledger SET reconciled_on = ? WHERE charge = ?", (date, charge))
@@ -148,7 +147,7 @@ def main(argv: list[str]) -> int:
     agentkit.obs("trigger", value=when, type=type(when).__name__)
     date = when.date().isoformat() if isinstance(when, dt.datetime) else when
 
-    with sdk.run(name="nightly-reconcile", trigger={"date": when}):
+    with sdk.run("nightly-reconcile", inputs={"date": when}):
         total = reconcile(date)
         if args.twice:
             total += reconcile(date)

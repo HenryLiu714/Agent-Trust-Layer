@@ -19,8 +19,7 @@ idempotent consumer notes it and stops. Every event id is handled once, however 
 The agent delivers its own events over loopback, through no proxy: an inbound webhook is not the
 agent's egress, and irimi must never see it.
 
-    python -m examples.workflows.launch \\
-        examples.workflows.w05_dispute_responder.agent <scenario>
+    python -m examples.workflows.w05_dispute_responder.agent <scenario>
 """
 
 from __future__ import annotations

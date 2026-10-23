@@ -615,7 +615,7 @@ def test_a_stream_its_trigger_hands_off_is_stored_in_its_run_after_the_run_ended
 
 # ---------------------------------------------------------------------- irimi compare
 
-CHAT = "chat  examples.workflows.w07_streaming_assistant.agent:chat"
+CHAT = "examples.workflows.w07_streaming_assistant.agent:chat"
 # The trigger's args hold the handler's `send` callable, stored as its repr, address and all,
 # so no two chats' args are ever the same.
 ARGS_DIFFER = "  (the triggers' args differ)"

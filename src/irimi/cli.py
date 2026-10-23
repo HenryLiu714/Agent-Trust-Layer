@@ -38,11 +38,11 @@ DEFAULT_RUNS_LIMIT = 20  # `irimi runs list` without --limit
 LAST_RUN = "last"
 RUN_ID_HELP = f"a run id, a prefix only one run id starts with, {LAST_RUN}, or unattributed"
 
-# A non-HTTP write the agent labels with `@sdk.tool` runs only its fake under irimi, so the
+# A non-HTTP write the agent labels with `@sdk.write_tool` runs only its fake under irimi, so the
 # notice says the rest happen for real, not that all of them do.
 NON_HTTP_NOTICE = (
     "irimi shadows HTTP(S) only: database writes, files, gRPC and WebSockets happen for real, "
-    "unless the agent labels the function that makes them with @sdk.tool"
+    "unless the agent labels the function that makes them with @sdk.write_tool"
 )
 NEXT_STEP = "next: irimi shadow -- python3 your_agent.py"
 

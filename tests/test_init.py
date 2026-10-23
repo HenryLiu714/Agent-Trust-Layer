@@ -76,5 +76,5 @@ def test_the_non_http_notice_names_the_way_to_label_a_non_http_write(tmp_path, m
     _setup(tmp_path, monkeypatch)
     assert main(["init"]) == 0
     out = capsys.readouterr().out
-    assert "unless" in NON_HTTP_NOTICE and "@sdk.tool" in NON_HTTP_NOTICE
+    assert "unless" in NON_HTTP_NOTICE and "@sdk.write_tool" in NON_HTTP_NOTICE
     assert NON_HTTP_NOTICE in out

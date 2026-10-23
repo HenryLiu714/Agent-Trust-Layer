@@ -51,12 +51,11 @@ from irimi.exchange import (
 )
 from irimi.recording import made_within
 from irimi.sdk import replay_child
-from irimi.sdk.api import MAIN_MODULE
 from irimi.sdk.replay_child import CallOutcome
 from irimi.sdk.replays import ReplayResult
 from irimi.servicemap import MapIndex
 from irimi.store import StoredRun
-from irimi.trace import JSONValue, RunRecord, ToolCall, Trigger, holds_description
+from irimi.trace import MAIN_MODULE, JSONValue, RunRecord, ToolCall, Trigger, holds_description
 
 # A version a run did not record, beside one the other run did.
 UNSET = "(unset)"
@@ -125,13 +124,13 @@ def plan(
             args = trigger.args
         elif holds_description(args):
             raise Refused("--args holds a value's description, not the value")
-        # The run is named after the function it calls, by its qualname, as `@sdk.trigger` names
-        # one; the recorded entrypoint called again keeps the recorded name, which `name=` may
-        # have given.
+        # The run is named after the function it calls, by its `module:qualname`, as
+        # `@sdk.trigger` names one; the recorded entrypoint called again keeps the recorded name,
+        # which `name=` may have given.
         if trigger is not None and entrypoint == trigger.entrypoint:
             name = trigger.name
         else:
-            name = entrypoint.partition(":")[2]
+            name = entrypoint
         return Plan(Call(entrypoint, args), (), Trigger(name, entrypoint, args, True))
     if args is not None:
         raise Refused(f"run {source.run_id} has no entrypoint to give --args to; pass --call too")
@@ -181,7 +180,7 @@ def not_replayable(trigger: Trigger | None) -> str | None:
     no trigger at all; args capture said were not replayable (a value stored by its description, a
     call that did not bind, a class `revive` could not find); args the store could not redact,
     stored as `<redaction-failed>` with `replayable` still true; or args that are not an
-    object of parameters, as `sdk.run(trigger=...)` may record."""
+    object of parameters, as `sdk.run(name, inputs=...)` may record."""
     if trigger is None:
         return "the run has no trigger"
     if trigger.args == redact.REDACTION_FAILED:

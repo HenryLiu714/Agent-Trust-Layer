@@ -44,7 +44,7 @@ from urllib.parse import urlsplit
 
 from irimi import paths
 from irimi.exchange import RUN_HEADER
-from irimi.sdk.context import active, current_run_id
+from irimi.sdk.context import current_run_id, is_active
 
 # The port a URL with none names, by scheme.
 DEFAULT_PORTS = {"http": 80, "https": 443}
@@ -78,7 +78,7 @@ def instrument() -> None:
     nothing while the SDK is inactive. The SDK calls it on the first run it starts; it stays public
     for code that wants to call it at startup."""
     global _installed, _patching
-    if _installed or not active():
+    if _installed or not is_active():
         return
     with _lock:
         if _installed or _patching:

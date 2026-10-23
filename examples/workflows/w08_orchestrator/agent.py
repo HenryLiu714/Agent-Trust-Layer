@@ -11,13 +11,12 @@ The orchestrator then reserves the stock (`POST /reservations`, a write) unless 
 it. The internal service is the point: irimi has no map for it unless the scenario adds one.
 
 With `--record`, the sub-agent reads its reorder policy and the orchestrator records its decision
-in the planning file, each an `@sdk.tool`: a tool called inside a nested trigger is a call of
-the run that trigger joined, the parent's. With `--nested-reserve`, a third sub-agent,
-`reservation_agent()`, makes the reservation: a write made inside a nested trigger, which is the
-parent run's own write, as `irimi compare` shows it.
+in the planning file, each a tool (`@sdk.read_tool` or `@sdk.write_tool`): a tool called inside a
+nested trigger is a call of the run that trigger joined, the parent's. With `--nested-reserve`, a
+third sub-agent, `reservation_agent()`, makes the reservation: a write made inside a nested
+trigger, which is the parent run's own write, as `irimi compare` shows it.
 
-    python -m examples.workflows.launch \\
-        examples.workflows.w08_orchestrator.agent [--runs N] [--parent-header] [--record]
+    python -m examples.workflows.w08_orchestrator.agent [--runs N] [--parent-header] [--record]
         [--nested-reserve]
 """
 
@@ -40,7 +39,7 @@ RECORD = False
 NESTED_RESERVE = False
 
 
-@sdk.tool(kind="read")
+@sdk.read_tool
 def load_reorder_policy() -> dict[str, Any]:
     """What the sub-agent reads before it plans: the decisions recorded so far, which the bare
     run's real `record_decision` adds to and the shadow run's stand-in never does."""
@@ -52,7 +51,7 @@ def _record_stand_in(decision: dict[str, Any]) -> dict[str, Any]:
     return {"recorded": False}
 
 
-@sdk.tool(kind="write", shadow=_record_stand_in)
+@sdk.write_tool(fake=_record_stand_in)
 def record_decision(decision: dict[str, Any]) -> dict[str, Any]:
     with (agentkit.state_dir() / PLAN_FILE).open("a") as fh:
         fh.write(json.dumps(decision) + "\n")

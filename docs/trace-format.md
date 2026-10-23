@@ -231,7 +231,7 @@ An `sdk` run's `trigger.args` are what the SDK captured (#74, `irimi.sdk.capture
 `@sdk.trigger` they are the call's arguments bound to the function's parameters,
 `{"param": value}`: a method's or classmethod's first parameter named `self` or `cls` is left
 out (a plain function's or a static method's is kept, #84), and defaults are not applied. A call that does not bind is captured as `{"args": [...], "kwargs": {...}}` and is not
-replayable. For `sdk.run(trigger=value)` they are `value`. Each value is captured by the first row
+replayable. For `sdk.run(name, inputs=value)` they are `value`. Each value is captured by the first row
 that matches it, and `replayable` is true only when every part of it was captured by a replayable
 row:
 
@@ -264,7 +264,7 @@ row:
   imported to rebuild it, so it is not replayable.
 - **Depth.** A value inside more than 32 containers is `{"__irimi_repr__": "<too deep>"}`, not
   replayable. For `@sdk.trigger`, depth counts from each parameter's value, so a parameter may
-  nest as deep as a value given to `sdk.run(trigger=...)`.
+  nest as deep as a value given to `sdk.run(name, inputs=...)`.
 - **Size.** Captured args that would be more than 1 MiB of JSON are replaced, whole, by
   `{"__irimi_truncated__": true, "bytes": n}`, not replayable. Capture counts as it goes and stops
   as soon as it passes the limit, so for a value that holds one object many times over `n` is the
@@ -327,7 +327,7 @@ A **request** is `method`, `scheme`, `host`, `port` (integer), `path`, `query` (
 | --- | --- | --- |
 | `tool_call_id` | string | Its id, unique in the run. |
 | `run_id` | string | The run it belongs to: the run it was made in, else the process run (`IRIMI_RUN`), else `unattributed`. |
-| `name` | string | The tool's name: `@sdk.tool(name=...)`, or the function's `module.qualname` (#76). |
+| `name` | string | The tool's name: `name=` given to `@sdk.read_tool` or `@sdk.write_tool`, or the function's `module:qualname` (#76). |
 | `kind` | `read`, `write` | What the tool does. |
 | `ran` | `real`, `shadow`, `recording` | `real` ran the function; `shadow` ran its shadow stand-in; `recording` (v2) was answered from the run a replay replays: a read tool whose recorded outcome was handed back, its body never run (#83). In a replay's run, a read tool's `real` is that replay's miss, as `replay-miss` is an exchange's. |
 | `args` | any JSON | What it was called with, bound against the real function's signature and captured as a trigger's are ([Captured arguments](#captured-arguments)). |

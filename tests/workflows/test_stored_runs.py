@@ -110,7 +110,7 @@ def test_every_shadow_run_stores_one_process_run_with_its_argv_and_exit(
     workflow = workflows()[name]
     records = shadow.stored().list_runs()
     (run,) = [r for r in records if r.attribution == "process"]
-    argv = [sys.executable, "-m", "examples.workflows.launch", workflow.module]
+    argv = [sys.executable, "-m", workflow.module]
     assert run.trigger is not None
     assert run.trigger.args == {"argv": [*argv, *workflow.scenarios[scenario].argv]}
     assert (run.exit_code, run.outcome) == (
@@ -335,7 +335,7 @@ def test_every_request_a_run_sent_through_irimi_is_stored_in_that_run(
 def test_every_tool_call_the_agent_made_is_stored_in_its_run_and_printed_once(
     run_workflow, name, scenario, mode
 ):
-    """`@sdk.tool` end to end: what irimi recorded is what the agent did. The corpus's `sdk`
+    """The tool decorators end to end: what irimi recorded is what the agent did. The corpus's `sdk`
     wraps each tool's real function and stand-in to log which ran, in which run (`tool` events),
     and that log is the witness the store is checked against: under shadow, each run holds exactly
     the calls the agent logged in it, by name, kind and which body ran, a call made in no run held

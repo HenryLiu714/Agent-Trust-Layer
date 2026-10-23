@@ -19,8 +19,7 @@ agent's egress, and irimi must never see it. Each delivery is signed as Slack si
 handler verifies it. Slack retries a slow delivery with `X-Slack-Retry-Num`; the bot dedupes on
 `event_id`, so a retry is acknowledged and not handled twice.
 
-    python -m examples.workflows.launch \\
-        examples.workflows.w04_slack_ops_bot.agent <scenario>
+    python -m examples.workflows.w04_slack_ops_bot.agent <scenario>
 """
 
 from __future__ import annotations

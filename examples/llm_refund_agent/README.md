@@ -8,17 +8,17 @@ real service and no substitute-labeled tool running for real" (#85).
 `Ticket` it takes is a dataclass `(ticket_id, charge, message)`:
 
 1. it looks the customer up in its own SQLite through `lookup_customer`, an
-   `@sdk.tool(kind="read")`;
+   `@sdk.read_tool`;
 2. it reads the charge from Stripe;
 3. it asks Anthropic what to refund, with the system prompt read from `PROMPT_FILE` (`prompt.txt`
    by default), for `{"refund_amount": int, "reply": str}`;
 4. it refunds that amount, when it is above zero;
-5. it records the decision in its SQLite through `record_decision`, an `@sdk.tool(kind="write")`
+5. it records the decision in its SQLite through `record_decision`, an `@sdk.write_tool`
    whose stand-in runs under irimi instead.
 
 `prompt_half.txt` tells the model to refund half. Both calls go out with stdlib `urllib.request`,
 which takes `HTTPS_PROXY` and `SSL_CERT_FILE` from the environment, so the agent needs no code to
-go through irimi. Start it by module name, `python -m examples.llm_refund_agent`, so its trigger's
+go through irimi. Start it with `python -m examples.llm_refund_agent.agent`, so its trigger's
 entrypoint is importable. It refuses a Stripe key that is not `sk_test_`.
 
 ## Two halves
@@ -41,7 +41,7 @@ script (`uv sync --group examples`). From the repository root:
 export STRIPE_API_KEY=sk_test_... ANTHROPIC_API_KEY=sk-ant-...
 uv run python examples/refund_agent/seed.py        # outside irimi: prints "seeded charge ch_..."
 uv run python -m examples.llm_refund_agent.seed ch_... "Ada Lovelace"
-uv run irimi shadow -- python -m examples.llm_refund_agent T-1 ch_... "I was charged twice"
+uv run irimi shadow -- python -m examples.llm_refund_agent.agent T-1 ch_... "I was charged twice"
 uv run irimi runs list                             # the handle_ticket run's id is the first column
 PROMPT_FILE=examples/llm_refund_agent/prompt_half.txt uv run irimi replay <run id>
 ```
@@ -53,7 +53,7 @@ A pass looks like this:
 
 - **The recording.** `irimi shadow` prints the customer lookup run for real, the charge read and
   the model call live, the refund `fake-L1`, and `record_decision`'s stand-in. The run id it
-  prints is the process's; `irimi runs list` shows the run to replay as `sdk  handle_ticket`.
+  prints is the process's; `irimi runs list` shows the run to replay as `sdk  examples.llm_refund_agent.agent:handle_ticket`.
 - **The replay.** It ends with a block that names the model call as where it diverged, and the
   refund as the write that changed:
 
@@ -65,8 +65,8 @@ A pass looks like this:
 
     ~ A ○ stripe  refund $49.00 on ch_...  faked; checked against live state: would succeed
       B ○ stripe  refund $24.50 on ch_...  faked; checked against live state: would succeed
-    ~ A ○ tool  examples.llm_refund_agent.agent.record_decision  fake ran instead
-      B ○ tool  examples.llm_refund_agent.agent.record_decision  fake ran instead
+    ~ A ○ tool  examples.llm_refund_agent.agent:record_decision  fake ran instead
+      B ○ tool  examples.llm_refund_agent.agent:record_decision  fake ran instead
         args.decision.refund_amount: 4900 -> 2450
         args.decision.reply: "Refunded 4900." -> "Refunded 2450."
 

@@ -5,6 +5,8 @@ import contextvars
 import functools
 import importlib
 import inspect
+import logging
+import threading
 import types
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -12,8 +14,17 @@ from types import TracebackType
 from typing import Any, overload
 
 from irimi.sdk.capture import capture, capture_call
-from irimi.sdk.context import active
-from irimi.sdk.runs import RunScope
+from irimi.sdk.client import LOGGER_NAME
+from irimi.sdk.context import is_active
+from irimi.sdk.runs import MAX_NAME, RunScope
+from irimi.secret_shapes import cut_outside_secrets
+from irimi.trace import MAIN_MODULE, importable_module
+
+logger = logging.getLogger(LOGGER_NAME)
+
+# Set once a trigger defined in a script run by path has been warned of.
+_warned_script = False
+_warn_lock = threading.Lock()
 
 
 @overload
@@ -24,11 +35,12 @@ def trigger(fn: Callable[..., Any] | None = None, *, name: str | None = None) ->
     """Mark `fn` as where a run starts: each call that is not already inside a run is one.
 
     Usable bare (`@sdk.trigger`) or called (`@sdk.trigger(name="refund")`); `name` defaults to the
-    function's `__qualname__`. It wraps sync functions, `async def` functions and methods - a
-    `staticmethod` or `classmethod` in either decorator order, which stays one - and keeps their
-    signature and their nature: the wrapper is a coroutine function exactly when `fn` is. The
-    run's trigger records the function's `module:qualname` as its entrypoint and the call's
-    arguments, captured (`capture.capture_call`).
+    function's `module:qualname` (`label`). It wraps sync functions, `async def` functions and
+    methods - a `staticmethod` or `classmethod` in either decorator order, which stays one - and
+    keeps their signature and their nature: the wrapper is a coroutine function exactly when `fn`
+    is. The run's trigger records the function's `module:qualname` as its entrypoint and the
+    call's arguments, captured (`capture.capture_call`). A trigger in a script run by path records
+    `__main__`, which no replay can import, and is warned of once under irimi.
 
     A sync function that returns a coroutine - a plain decorator over an `async def`, or
     `return handle_async(x)` - has not run its body when it returns, so its run goes with the
@@ -42,8 +54,7 @@ def trigger(fn: Callable[..., Any] | None = None, *, name: str | None = None) ->
     that is not a string; and a name passed positionally."""
     if fn is not None and not callable(fn) and not isinstance(fn, staticmethod | classmethod):
         raise TypeError(f"@sdk.trigger takes its name as name=, not {fn!r}")
-    if name is not None and not isinstance(name, str):
-        raise TypeError(f"@sdk.trigger(name=...) must be a string, not {name!r}")
+    check_name(name, "@sdk.trigger")
 
     def decorate(f: Callable[..., Any]) -> Callable[..., Any]:
         if isinstance(f, staticmethod | classmethod):
@@ -57,7 +68,9 @@ def trigger(fn: Callable[..., Any] | None = None, *, name: str | None = None) ->
                 f"@sdk.trigger cannot wrap the generator function {f.__qualname__}: a run ends "
                 "when the call returns, before a generator's body has run"
             )
-        run_name = f.__qualname__ if name is None else name
+        run_name = label(f, name, "@sdk.trigger")
+        if entry.startswith(f"{MAIN_MODULE}:"):
+            _warn_script(f)
 
         if inspect.iscoroutinefunction(f):
 
@@ -82,11 +95,13 @@ def trigger(fn: Callable[..., Any] | None = None, *, name: str | None = None) ->
 
 
 def entrypoint(f: Callable[..., Any], decorator: str = "@sdk.trigger") -> str:
-    """`f`'s `module:qualname`, which replay imports it by. Refused with TypeError for what
-    has none: a `functools.partial` or an instance with `__call__`, a function `exec` defined with
-    no `__name__` in its namespace, and a class, which decorated would be replaced by a function,
-    so that `isinstance` against it would break even in production. `decorator` names the one
-    refusing: `@sdk.tool` refuses the same things, for its default name."""
+    """`f`'s `module:qualname`, which replay imports it by: a function in a module started with
+    `python -m` is named by that module's real name (`trace.importable_module`). Refused with
+    TypeError for what has none: a `functools.partial` or an instance with `__call__`, a function
+    `exec` defined with no `__name__` in its namespace, and a class, which decorated would be
+    replaced by a function, so that `isinstance` against it would break even in production.
+    `decorator` names the one refusing: the tool decorators refuse the same things, for their
+    default name."""
     module = getattr(f, "__module__", None)
     qualname = getattr(f, "__qualname__", None)
     if isinstance(f, type) or not isinstance(module, str) or not isinstance(qualname, str):
@@ -99,13 +114,40 @@ def entrypoint(f: Callable[..., Any], decorator: str = "@sdk.trigger") -> str:
         raise TypeError(
             f"{decorator} wraps a function or a method, not {what}: decorate the function itself"
         )
-    return f"{module}:{qualname}"
+    return f"{importable_module(module)}:{qualname}"
 
 
-# The module a replay never calls a trigger in: in a replay's child it is `replay_child` itself,
-# and in any other process another module than the one the child would import. The one rule, which
-# `resolve` and `irimi replay`'s plan both refuse by.
-MAIN_MODULE = "__main__"
+def label(f: Callable[..., Any], name: object, api: str) -> str:
+    """The name a trigger's runs or a tool's calls record: `name`, or `f`'s `module:qualname`.
+    The one naming rule, which `sdk.run` follows too (`check_name`). `f` must have a
+    `module:qualname` even when `name` is given, so a named tool is refused what a bare one is."""
+    check_name(name, api)
+    default = entrypoint(f, api)
+    return cut_outside_secrets(default if name is None else str(name), MAX_NAME)
+
+
+def check_name(name: object, api: str) -> None:
+    """TypeError for a name that is not a string, at decoration rather than as a lost run. Cut
+    outside any secret's shape (`secret_shapes.cut_outside_secrets`) by `label` and `RunScope`."""
+    if name is not None and not isinstance(name, str):
+        raise TypeError(f"{api}(name=...) must be a string, not {name!r}")
+
+
+def _warn_script(f: Callable[..., Any]) -> None:
+    """A trigger in a script run by path records `__main__:fn`, which no replay can import. Warned
+    once per process, and only under irimi, so production stays quiet."""
+    global _warned_script
+    if not is_active():
+        return
+    with _warn_lock:
+        if _warned_script:
+            return
+        _warned_script = True
+    logger.warning(
+        "irimi: trigger %s is in a script run by path, so its runs cannot be replayed by "
+        "entrypoint; start the agent with python -m <module> instead",
+        f.__qualname__,
+    )
 
 
 class NotCallable(Exception):
@@ -152,10 +194,19 @@ def resolve(entrypoint: str) -> Callable[..., Any]:
     return found
 
 
+@dataclass(frozen=True)
+class Run:
+    """The run a `with sdk.run(...) as r` block started: its id and its name."""
+
+    id: str
+    name: str
+
+
 class run:
-    """A block that is one run, with `with` or `async with`. `trigger` is any value, captured as
-    the run's args (`capture.capture`); the run has no entrypoint, so replay needs one named
-    for it. `name` is the run's display name.
+    """A block that is one run, with `with` or `async with`. `name` is the run's display name,
+    a string. `inputs` is any value, captured as the run's args (`capture.capture`); the run has
+    no entrypoint, so replay needs one named for it. The block gets a `Run`, or None while the
+    SDK is inactive or the block joins a run already current.
 
     One object may be entered again - nested in itself, on several threads, in several tasks at
     once, or as a module-level constant - and each entry is one `RunScope` of its own (nested
@@ -164,22 +215,25 @@ class run:
     An exit in a context that made no entry - an async generator closed from another task - ends
     nothing, and that run is stored incomplete."""
 
-    def __init__(self, trigger: object = None, name: str = "run") -> None:
-        self._trigger = trigger
-        self._name = str(name)  # never a lost run over a mistyped name: it is a label
+    def __init__(self, name: str, *, inputs: object = None) -> None:
+        if not isinstance(name, str):
+            raise TypeError(f"sdk.run(name) must be a string, not {name!r}")
+        self._inputs = inputs
+        self._name = cut_outside_secrets(name, MAX_NAME)
         self._entries: contextvars.ContextVar[tuple[_Entry, ...]] = contextvars.ContextVar(
             "irimi_sdk_run_entries", default=()
         )
 
-    def __enter__(self) -> None:
+    def __enter__(self) -> Run | None:
         scope = self._push()
         if scope is None:
-            return
+            return None
         try:
-            scope.__enter__()
+            run_id = scope.__enter__()
         except BaseException:
             self._pop()
             raise
+        return None if run_id is None else Run(run_id, self._name)
 
     def __exit__(
         self,
@@ -191,15 +245,16 @@ class run:
         if scope is not None:
             scope.__exit__(exc_type, exc, tb)
 
-    async def __aenter__(self) -> None:
+    async def __aenter__(self) -> Run | None:
         scope = self._push()
         if scope is None:
-            return
+            return None
         try:
-            await scope.__aenter__()
+            run_id = await scope.__aenter__()
         except BaseException:
             self._pop()
             raise
+        return None if run_id is None else Run(run_id, self._name)
 
     async def __aexit__(
         self,
@@ -215,13 +270,13 @@ class run:
         """A new entry's scope, on this context's stack. None, and nothing pushed, while the SDK
         is inactive and the stack is empty: an inactive SDK sets no context variable, and that
         holds for this object's own bookkeeping too. An exit then finds the stack as empty as the
-        entry did, so it pops nothing, whatever `active()` says by then. A stack that holds
-        entries is pushed onto whatever `active()` says, so an exit always takes off the entry it
+        entry did, so it pops nothing, whatever `is_active()` says by then. A stack that holds
+        entries is pushed onto whatever `is_active()` says, so an exit always takes off the entry it
         pairs with."""
         entries = self._entries.get()
-        if not entries and not active():
+        if not entries and not is_active():
             return None
-        entry = _Entry(RunScope(self._name, None, lambda: capture(self._trigger)))
+        entry = _Entry(RunScope(self._name, None, lambda: capture(self._inputs)))
         entry.token = self._entries.set((*entries, entry))
         return entry.scope
 

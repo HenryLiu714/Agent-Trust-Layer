@@ -103,7 +103,7 @@ where it diverged, the refund as the write that changed, and that Stripe holds n
 
 `examples/workflows/` holds eleven small agents, each built to exercise one part of irimi: a
 multi-turn LLM tool loop, a nightly batch job, a concurrent queue worker, Slack and Stripe webhook
-handlers, database writes behind `@sdk.tool`, SSE streaming, internal services, failure paths,
+handlers, database writes behind `@sdk.write_tool`, SSE streaming, internal services, failure paths,
 and agents that get around the proxy. A harness runs each scenario bare, under `irimi shadow` and
 under `irimi shadow --serve` (#77), against a fake internet that answers for the real host
 names, so irimi's shipped maps decide every call. `tests/workflows/` holds every scenario to

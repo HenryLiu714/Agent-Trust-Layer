@@ -37,19 +37,21 @@ def test_call_and_args_replace_the_entrypoint_and_the_args_and_the_trigger_says_
     other = {"ticket": None}
     plan = replay.plan(_record(), [], "agent:other", other)
     assert plan.call == replay.Call("agent:other", other)
-    assert plan.trigger == Trigger("other", "agent:other", other, True)
+    assert plan.trigger == Trigger("agent:other", "agent:other", other, True)
     # A run with no trigger at all is called by `--call`'s name.
     bare = replay.plan(_record(None, "header"), [], "agent:other", other)
-    assert bare.trigger == Trigger("other", "agent:other", other, True)
+    assert bare.trigger == Trigger("agent:other", "agent:other", other, True)
 
 
 def test_a_call_of_another_function_names_the_trigger_after_it_as_the_sdk_names_one():
-    """The replay's run names the function it called, by its qualname, as `@sdk.trigger` names a
-    run, never the recorded trigger that did not run. The recorded entrypoint called again
+    """The replay's run names the function it called, by its `module:qualname`, as `@sdk.trigger`
+    names a run, never the recorded trigger that did not run. The recorded entrypoint called again
     keeps the recorded name, which `@sdk.trigger(name=...)` may have given."""
     named = _record(replace(TRIGGER, name="refund"))
     plan = replay.plan(named, [], "agent:Desk.lookup", {"customer": "c"})
-    assert plan.trigger == Trigger("Desk.lookup", "agent:Desk.lookup", {"customer": "c"}, True)
+    assert plan.trigger == Trigger(
+        "agent:Desk.lookup", "agent:Desk.lookup", {"customer": "c"}, True
+    )
     again = replay.plan(named, [], "agent:handle", None)
     assert again.trigger == replace(TRIGGER, name="refund")
 

@@ -94,7 +94,7 @@ def plain(charge):
     return refund(Ticket(charge, "-"), 4900)
 
 
-@sdk.tool(kind="read")
+@sdk.read_tool
 def lookup(customer: str) -> dict:
     return {"id": customer, "tier": os.environ.get("TIER", "gold")}
 
@@ -103,7 +103,7 @@ def _reply_stand_in(body: str) -> dict:
     return {"sent": True, "stood_in": True}
 
 
-@sdk.tool(kind="write", shadow=_reply_stand_in)
+@sdk.write_tool(fake=_reply_stand_in)
 def reply(body: str) -> dict:
     raise AssertionError("a write tool never runs for real under irimi")
 
@@ -120,7 +120,7 @@ def fails(ticket: Ticket) -> None:
     raise KeyError(ticket.charge)
 
 
-@sdk.tool(kind="read")
+@sdk.read_tool
 def charge_of(ticket: Ticket) -> int:
     """A read tool whose body makes HTTP of its own, which a replay that answers it never makes."""
     return call("GET", f"{STRIPE}/v1/charges/{ticket.charge}")[0]
@@ -306,7 +306,7 @@ def test_call_and_args_override_the_recorded_entrypoint_and_args(home, capfd):
     [replay] = _replay_runs(home, source)
     # Named after the function it called, as `@sdk.trigger` names a run.
     assert (replay.trigger.name, replay.trigger.entrypoint) == (
-        "refund_half",
+        "replay_agent:refund_half",
         "replay_agent:refund_half",
     )
     result = _result(out)
@@ -356,7 +356,7 @@ def test_args_stored_by_their_description_are_refused_and_given_with_args_run(ho
 
 def test_a_run_with_no_entrypoint_and_no_argv_is_refused(home, capfd):
     source = _record(
-        home, 'exec(\'with replay_agent.sdk.run(name="block"): replay_agent.plain("ch_REAL1")\')'
+        home, 'exec(\'with replay_agent.sdk.run("block"): replay_agent.plain("ch_REAL1")\')'
     )
     capfd.readouterr()
     code, out, err = _replay(capfd, source)
@@ -384,7 +384,9 @@ def test_sdk_replay_returns_the_result_the_cli_writes(home, capfd, monkeypatch, 
 
     for result in (
         sdk.replay(source),
-        sdk.replay(source, replay_agent.answer, replay_agent.Ticket("ch_REAL1", "refund please")),
+        sdk.replay(
+            source, replay_agent.answer, args=(replay_agent.Ticket("ch_REAL1", "refund please"),)
+        ),
     ):
         capfd.readouterr()
         assert result.replay_run_id not in (None, by_cli.replay_run_id)
@@ -396,9 +398,11 @@ def test_sdk_replay_returns_the_result_the_cli_writes(home, capfd, monkeypatch, 
         for e in StoreReader(home / "store").load_run(r.run_id).events
         if isinstance(e, ToolCall)
     ]
-    assert tools == [("replay_agent.lookup", "recording"), ("replay_agent.reply", "shadow")] * 3
+    assert tools == [("replay_agent:lookup", "recording"), ("replay_agent:reply", "shadow")] * 3
     # Args far past what one command-line argument may hold go in a file, never on the line.
-    big = sdk.replay(source, replay_agent.answer, replay_agent.Ticket("ch_REAL1", "x" * 300_000))
+    big = sdk.replay(
+        source, replay_agent.answer, args=(replay_agent.Ticket("ch_REAL1", "x" * 300_000),)
+    )
     capfd.readouterr()
     assert (big.exit_code, big.lines[2]) == (0, "  (the triggers' args differ)")
 

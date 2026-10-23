@@ -95,7 +95,7 @@ def test_a_nested_trigger_joins_the_adopted_run(posts, instrumented):
 
 def test_every_top_level_run_of_the_process_adopts_the_one_replay_run(posts, instrumented):
     """Two triggers one after the other, and a block: one run, the replay's."""
-    with sdk.run(trigger={"n": 1}, name="block"):
+    with sdk.run("block", inputs={"n": 1}):
         in_block = sdk.current_run_id()
     assert [handle("T1"), handle("T2"), in_block] == [REPLAY] * 3
     assert posts.posts == []
@@ -166,7 +166,7 @@ def test_an_adopted_async_run_closed_unawaited_posts_nothing_and_leaves_the_run(
 
 
 def test_a_tool_call_in_an_adopted_run_is_posted_to_the_replay_s_run(posts, instrumented):
-    @sdk.tool(kind="write", shadow=lambda body: "stood in")
+    @sdk.write_tool(fake=lambda body: "stood in")
     def reply(body: str) -> str:
         raise AssertionError("never for real")
 
@@ -577,6 +577,13 @@ def test_a_replay_result_round_trips_through_its_json():
     assert ReplayResult.from_json(refused.to_json()) == refused
 
 
+def test_a_replay_result_says_whether_it_is_the_same_and_prints_what_irimi_said():
+    assert ReplayResult("s", "n", 0, None, ("no divergence",)).same
+    changed = ReplayResult("s", "n", 1, None, ("irimi replay · s -> n", "  ~ A ..."))
+    assert not changed.same and not ReplayResult("s", None, 2, None, ()).same
+    assert str(changed) == "irimi replay · s -> n\n  ~ A ..."
+
+
 @pytest.mark.parametrize(
     "broken",
     [
@@ -601,27 +608,29 @@ def test_sdk_replay_refuses_a_function_from_main_or_one_its_name_does_not_find(m
 
     in_main.__module__, in_main.__qualname__ = "__main__", "in_main"
     monkeypatch.setattr(sys.modules["__main__"], "in_main", in_main, raising=False)
-    with pytest.raises(ValueError) as raised:
-        sdk.replay("r", in_main, "T1")
+    with pytest.raises(sdk.ReplayError) as raised:
+        sdk.replay("r", in_main, args=("T1",))
     assert str(raised.value) == (
         "__main__:in_main cannot be called by its name: it is in __main__, which in a replay's "
         "child is the child itself"
     )
 
-    with pytest.raises(ValueError, match="cannot be called by its name"):
-        sdk.replay("r", local, "T1")
+    with pytest.raises(sdk.ReplayError, match="cannot be called by its name"):
+        sdk.replay("r", local, args=("T1",))
 
     def impostor(ticket: str) -> str:
         return ticket
 
     impostor.__qualname__ = "handle"  # its name finds `handle`, another function
-    with pytest.raises(ValueError) as raised:
-        sdk.replay("r", impostor, "T1")
+    with pytest.raises(sdk.ReplayError) as raised:
+        sdk.replay("r", impostor, args=("T1",))
     assert str(raised.value) == f"{__name__}:handle names another function than the one given"
-    with pytest.raises(ValueError, match="arguments only for a function"):
-        sdk.replay("r", None, "T1")
-    with pytest.raises(ValueError, match="it is a method"):
-        sdk.replay("r", Desk.answer, "T1")
+    with pytest.raises(sdk.ReplayError, match="args and kwargs only for a call it is given"):
+        sdk.replay("r", None, args=("T1",))
+    with pytest.raises(sdk.ReplayError, match="args and kwargs only for a call it is given"):
+        sdk.replay("r", kwargs={"ticket": "T1"})
+    with pytest.raises(sdk.ReplayError, match="it is a method"):
+        sdk.replay("r", Desk.answer, args=("T1",))
 
 
 @pytest.mark.parametrize(
@@ -633,8 +642,8 @@ def test_sdk_replay_refuses_a_function_from_main_or_one_its_name_does_not_find(m
     ],
 )
 def test_sdk_replay_says_why_the_arguments_it_was_given_cannot_be_replayed(args, error):
-    with pytest.raises(ValueError) as raised:
-        sdk.replay("r", handle, *args)
+    with pytest.raises(sdk.ReplayError) as raised:
+        sdk.replay("r", handle, args=args)
     assert str(raised.value) == error
 
 
@@ -644,8 +653,8 @@ def pair(a: str, b: str) -> None: ...
 
 def test_sdk_replay_refuses_arguments_each_of_which_fits_but_not_together():
     half = "x" * (capture.MAX_CAPTURED_BYTES // 2)
-    with pytest.raises(ValueError) as raised:
-        sdk.replay("r", pair, half, half)
+    with pytest.raises(sdk.ReplayError) as raised:
+        sdk.replay("r", pair, args=(half,), kwargs={"b": half})
     assert str(raised.value) == (
         "the arguments to pair are larger than a run records (1048576 bytes)"
     )
@@ -678,7 +687,7 @@ def test_sdk_replay_passes_its_call_in_a_private_directory_it_removes(monkeypatc
         return _answering(argv, seen)
 
     monkeypatch.setattr(replays, "_run_irimi", run_irimi)
-    result = sdk.replay("-r", handle, "T1", store="/s")
+    result = sdk.replay("-r", handle, kwargs={"ticket": "T1"}, store="/s")
     assert result == ReplayResult("-r", "new0new0new0new0", 1, None, ("a",))
     tmp = seen["tmp"]
     assert seen["argv"] == [
@@ -714,7 +723,7 @@ def test_sdk_replay_passes_its_call_in_a_private_directory_it_removes(monkeypatc
     monkeypatch.setattr(
         replays, "_run_irimi", lambda argv, env: seen.update(tmp=os.path.dirname(argv[4])) or 3
     )
-    with pytest.raises(RuntimeError, match="^irimi replay exited 3 and wrote no result: "):
+    with pytest.raises(sdk.ReplayError, match="^irimi replay exited 3 and wrote no result: "):
         sdk.replay("r")
     assert not os.path.exists(seen["tmp"])
 

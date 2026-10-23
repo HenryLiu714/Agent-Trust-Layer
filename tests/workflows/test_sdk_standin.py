@@ -58,9 +58,9 @@ REAL_TYPE_ERROR = "irimi.sdk refuses"
 
 
 def fake_sdk(*, active: bool = True, with_tool: bool = False, **extra: Any) -> types.ModuleType:
-    """A module shaped like `irimi.sdk` (with its `tool` when `with_tool`): a context
-    variable run id that nested triggers join, minted from a counter so a test can tell it from
-    the stand-in's `token_hex`. Every decoration is recorded in `mod.decorated`."""
+    """A module shaped like `irimi.sdk` (with `read_tool` and `write_tool` when `with_tool`): a
+    context variable run id that nested triggers join, minted from a counter so a test can tell
+    it from the stand-in's `token_hex`. Every decoration is recorded in `mod.decorated`."""
     mod = types.ModuleType("irimi.sdk")
     run_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("fake_run", default=None)
     ids = (f"real{n:012d}" for n in itertools.count(1))
@@ -104,7 +104,7 @@ def fake_sdk(*, active: bool = True, with_tool: bool = False, **extra: Any) -> t
         return decorate(fn) if fn is not None else decorate
 
     class run:
-        def __init__(self, trigger: Any = None, name: str = "run") -> None:
+        def __init__(self, name: str, *, inputs: Any = None) -> None:
             self._cm = entered()
 
         def __enter__(self) -> None:
@@ -127,17 +127,13 @@ def fake_sdk(*, active: bool = True, with_tool: bool = False, **extra: Any) -> t
     mod.run = run  # type: ignore[attr-defined]
     mod.current_run_id = run_var.get  # type: ignore[attr-defined]
     mod.propagate = propagate  # type: ignore[attr-defined]
-    mod.active = lambda: active  # type: ignore[attr-defined]
+    mod.is_active = lambda: active  # type: ignore[attr-defined]
 
     if with_tool:
 
-        def tool(*, kind: str, shadow: Any = None, name: str | None = None) -> Any:
+        def tool(kind: str, shadow: Any) -> Any:
             def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
                 mod.decorated.append(("tool", kind, shadow, fn))  # type: ignore[attr-defined]
-                if kind not in ("read", "write"):
-                    raise TypeError(f"{REAL_TYPE_ERROR}: kind {kind!r}")
-                if (kind == "write") != (shadow is not None):
-                    raise TypeError(f"{REAL_TYPE_ERROR}: shadow for {kind}")
                 if shadow is not None and not callable(shadow):
                     raise TypeError(f"{REAL_TYPE_ERROR}: shadow not callable")
                 if shadow is fn:
@@ -154,7 +150,14 @@ def fake_sdk(*, active: bool = True, with_tool: bool = False, **extra: Any) -> t
 
             return decorate
 
-        mod.tool = tool  # type: ignore[attr-defined]
+        def read_tool(fn: Any = None, /, *, name: str | None = None) -> Any:
+            return tool("read", None) if fn is None else tool("read", None)(fn)
+
+        def write_tool(*, fake: Any, name: str | None = None) -> Any:
+            return tool("write", fake)
+
+        mod.read_tool = read_tool  # type: ignore[attr-defined]
+        mod.write_tool = write_tool  # type: ignore[attr-defined]
 
     for key, value in extra.items():
         setattr(mod, key, value)
@@ -249,17 +252,17 @@ def test_with_only_74s_names_every_agent_imports_and_tools_are_the_stand_ins(
     fake = fake_sdk(active=True)
     sdk = load_sdk(fake)
     assert sdk.trigger is not fake.trigger  # wrapped, for the log
-    assert sdk._from_real("tool") is None
+    assert sdk._from_real("write_tool") is None
     for name in AGENTS:
-        fresh_import(name)  # an AttributeError on `tool` would fail here
+        fresh_import(name)  # an AttributeError on `write_tool` would fail here
     w6 = sys.modules[W6]
 
     @sdk.trigger(name="enrich")
     def enrich() -> Any:
         return w6.upsert_account({"id": "acc_1"})
 
-    # The fake says active (IRIMI_ENGINE_ACTIVE is unset): the stand-in `tool` asks the real
-    # `active()`, so the write tool's stand-in runs, inside the real run.
+    # The fake says active (IRIMI_ENGINE_ACTIVE is unset): the stand-in `write_tool` asks the
+    # real `is_active()`, so the write tool's fake runs, inside the real run.
     assert enrich() == {"stood_in": True, "id": "acc_1"}
     [minted] = fake.minted
     assert obs("tool") == [
@@ -276,8 +279,8 @@ def test_with_only_74s_names_the_stand_in_tool_still_refuses_at_decoration(load_
     def real(x: int) -> int:
         return x
 
-    with pytest.raises(TypeError, match="must name a shadow stand-in"):
-        sdk.tool(kind="write")(real)
+    with pytest.raises(TypeError, match="real is the function itself"):
+        sdk.write_tool(fake=real)(real)
 
 
 # -- (b) run.start / run.end carry the real run id -----------------------------------------------
@@ -339,7 +342,7 @@ def test_a_real_trigger_annotated_with_a_name_never_defined_runs_and_logs_its_ty
     assert obs("run.start") == [
         {
             "event": "run.start",
-            "name": "handle",
+            "name": f"{__name__}:handle",
             "run": "real000000000001",
             "called_with": {"ticket": "str"},
         }
@@ -365,7 +368,7 @@ def test_real_run_and_async_trigger_log_the_real_id(load_sdk, obs):
     fake = fake_sdk(active=True)
     sdk = load_sdk(fake)
 
-    with sdk.run(name="batch", trigger={"date": "2026-09-29"}):
+    with sdk.run("batch", inputs={"date": "2026-09-29"}):
         sync_id = sdk.current_run_id()
 
     @sdk.trigger(name="handle_async")
@@ -373,7 +376,7 @@ def test_real_run_and_async_trigger_log_the_real_id(load_sdk, obs):
         return sdk.current_run_id()
 
     async def both() -> list[str | None]:
-        async with sdk.run(name="stream"):
+        async with sdk.run("stream"):
             in_run = sdk.current_run_id()
         return [in_run, *await asyncio.gather(handle(), handle())]
 
@@ -393,7 +396,7 @@ def test_an_inactive_real_sdk_logs_no_run(load_sdk, obs):
     def work() -> int:
         return 7
 
-    with sdk.run(name="batch"):
+    with sdk.run("batch"):
         pass
     assert work() == 7
     assert obs("run.start") == obs("run.end") == []
@@ -436,7 +439,7 @@ def test_a_trigger_above_a_static_or_class_method_keeps_it_one(load_sdk, obs, mo
     ids = [run_id for _, run_id in results]
     assert None not in ids and len(set(ids)) == 4
     static = Handlers.static.__qualname__
-    assert [e["name"] for e in obs("run.start")] == [static, "by_class"] * 2
+    assert [e["name"] for e in obs("run.start")] == [f"{__name__}:{static}", "by_class"] * 2
     if real:
         assert ids == fake.minted
 
@@ -465,12 +468,12 @@ def test_a_tool_above_a_static_or_class_method_keeps_it_one(load_sdk, obs, monke
         return f"stood in for {cls.__name__}:{charge}"
 
     class Ledger:
-        @sdk.tool(kind="read")
+        @sdk.read_tool
         @staticmethod
         def fee(amount: int) -> int:
             return amount // 10
 
-        @sdk.tool(kind="write", shadow=journal_stand_in)
+        @sdk.write_tool(fake=journal_stand_in)
         @classmethod
         def journal(cls, charge: str) -> str:
             raise AssertionError("the real write ran")
@@ -481,7 +484,7 @@ def test_a_tool_above_a_static_or_class_method_keeps_it_one(load_sdk, obs, monke
         assert owner.fee(100) == 10
         assert owner.journal("ch_1") == "stood in for Ledger:ch_1"
     logged = [(e["name"], e["ran"]) for e in obs("tool")]
-    names = [f"{__name__}.{Ledger.__qualname__}.{fn}" for fn in ("fee", "journal")]
+    names = [f"{__name__}:{Ledger.__qualname__}.{fn}" for fn in ("fee", "journal")]
     assert logged == [(names[0], "real"), (names[1], "shadow")] * 2
     assert posted == ([("tool-calls", name, ran) for name, ran in logged] if real else [])
 
@@ -506,7 +509,7 @@ def test_a_stand_in_reaches_the_real_tool_as_the_agent_wrote_it(load_sdk, obs, m
         async def _save_stand_in(row: int) -> str:
             return f"stood in for {row}"
 
-        @sdk.tool(kind="write", shadow=_save_stand_in, name="repo.save")
+        @sdk.write_tool(fake=_save_stand_in, name="repo.save")
         @staticmethod
         async def save(row: int) -> str:
             raise AssertionError("the real write ran")
@@ -517,7 +520,7 @@ def test_a_stand_in_reaches_the_real_tool_as_the_agent_wrote_it(load_sdk, obs, m
         async def __call__(self, row: int) -> str:
             return f"mailed {row}"
 
-    @sdk.tool(kind="write", shadow=Mailer(), name="repo.mail")
+    @sdk.write_tool(fake=Mailer(), name="repo.mail")
     async def mail(row: int) -> str:
         raise AssertionError("the real write ran")
 
@@ -535,12 +538,12 @@ def test_a_stand_in_reaches_the_real_tool_as_the_agent_wrote_it(load_sdk, obs, m
         yield row
 
     with pytest.raises(TypeError):
-        sdk.tool(kind="write", shadow=write)(write)
+        sdk.write_tool(fake=write)(write)
     with pytest.raises(TypeError):
-        sdk.tool(kind="write", shadow=staticmethod(write))(staticmethod(write))
+        sdk.write_tool(fake=staticmethod(write))(staticmethod(write))
     for stand_in in (generator, staticmethod(generator)):
         with pytest.raises(TypeError):
-            sdk.tool(kind="write", shadow=stand_in)(write)
+            sdk.write_tool(fake=stand_in)(write)
 
 
 # -- (c) the real tool's decoration-time checks decide -------------------------------------------
@@ -555,8 +558,10 @@ def test_w6_decoration_errors_are_the_real_tools_own(load_sdk, fresh_import, obs
     raised = w6.decoration_errors()
 
     assert len(raised) == 9
-    messages = [e["message"] for e in obs("decoration_error")]
-    assert len(messages) == 9 and all(m.startswith(REAL_TYPE_ERROR) for m in messages), messages
+    # The three the signature refuses are Python's own, as the real decorators' signatures are.
+    by_signature = {"write_without_fake", "read_with_fake", "bare_write_tool"}
+    messages = [e["message"] for e in obs("decoration_error") if e["case"] not in by_signature]
+    assert len(messages) == 6 and all(m.startswith(REAL_TYPE_ERROR) for m in messages), messages
     # What the real `tool` checks reached it as the agent wrote it.
     seen = {(kind, shadow if not callable(shadow) else "fn", fn.__name__) for _, kind, shadow, fn
             in fake.decorated}  # fmt: skip
@@ -567,16 +572,17 @@ def test_w6_decoration_errors_are_the_real_tools_own(load_sdk, fresh_import, obs
 def test_the_stand_in_does_not_pre_empt_a_real_tool_that_accepts(load_sdk, obs):
     fake = fake_sdk(active=True, with_tool=True)
 
-    def lenient(*, kind: str, shadow: Any = None, name: str | None = None) -> Any:
+    def lenient(*, fake: Any, name: str | None = None) -> Any:
         return lambda fn: fn
 
-    fake.tool = lenient  # type: ignore[attr-defined]
+    fake.write_tool = lenient  # type: ignore[attr-defined]
     sdk = load_sdk(fake)
 
     def real(x: int) -> int:
         return x
 
-    assert sdk.tool(kind="delete")(real)(3) == 3  # the stand-in alone would raise TypeError
+    # The stand-in alone would refuse a fake that is the function itself.
+    assert sdk.write_tool(fake=real)(real)(3) == 3
 
 
 def test_a_real_write_tool_logs_which_function_ran(load_sdk, obs):
@@ -585,7 +591,7 @@ def test_a_real_write_tool_logs_which_function_ran(load_sdk, obs):
     def stand_in(x: int) -> str:
         return "stood in"
 
-    @sdk.tool(kind="write", shadow=stand_in, name="t.write")
+    @sdk.write_tool(fake=stand_in, name="t.write")
     def write(x: int) -> str:
         raise AssertionError("the real write ran")
 
@@ -622,7 +628,9 @@ def test_an_absent_irimi_sdk_falls_back_to_the_stand_in(load_sdk, obs, monkeypat
 
     run_id = work()
     assert run_id is not None and len(run_id) == 16 and not run_id.startswith("real")
-    assert [(e["name"], e["run"]) for e in obs("run.start")] == [(work.__qualname__, run_id)]
+    assert [(e["name"], e["run"]) for e in obs("run.start")] == [
+        (f"{__name__}:{work.__qualname__}", run_id)
+    ]
 
 
 # -- (e) names the stand-in does not define ------------------------------------------------------
@@ -720,23 +728,23 @@ def _called(sdk: types.ModuleType, form: str) -> Any:
         raise AssertionError("the real read ran")
 
     if form == "sync":
-        return sdk.tool(kind="read", name="t.read")(real)("acc_1")
+        return sdk.read_tool(name="t.read")(real)("acc_1")
     if form == "async":
-        return asyncio.run(sdk.tool(kind="read", name="t.read")(real_async)("acc_1"))
+        return asyncio.run(sdk.read_tool(name="t.read")(real_async)("acc_1"))
     if form == "returns_coroutine":
         # A sync read that returns its work as a coroutine (W3's `ledger_history`): the recording
         # says it was awaited, so the answer is a coroutine too.
-        returned = sdk.tool(kind="read", name="t.read")(real)("acc_1")
+        returned = sdk.read_tool(name="t.read")(real)("acc_1")
         assert inspect.iscoroutine(returned)
         return asyncio.run(returned)
 
     class Ledger:
-        @sdk.tool(kind="read", name="t.read")
+        @sdk.read_tool(name="t.read")
         @staticmethod
         def static(account: str) -> Any:
             raise AssertionError("the real read ran")
 
-        @sdk.tool(kind="read", name="t.read")
+        @sdk.read_tool(name="t.read")
         @classmethod
         def by_class(cls, account: str) -> Any:
             raise AssertionError("the real read ran")
@@ -779,7 +787,7 @@ def test_a_recorded_error_raised_again_logs_recording(replaying, obs, form):
 def test_a_miss_runs_the_real_read_and_logs_it_once(replaying, obs):
     sdk, recording = replaying(None)
 
-    @sdk.tool(kind="read", name="t.read")
+    @sdk.read_tool(name="t.read")
     def read(account: str) -> str:
         return f"live {account}"
 
@@ -795,7 +803,7 @@ def test_a_write_in_a_replay_runs_its_stand_in_and_asks_no_recording(replaying, 
     def stand_in(row: int) -> str:
         return "stood in"
 
-    @sdk.tool(kind="write", shadow=stand_in, name="t.write")
+    @sdk.write_tool(fake=stand_in, name="t.write")
     def write(row: int) -> str:
         raise AssertionError("the real write ran")
 
@@ -812,7 +820,7 @@ def test_an_inactive_sdk_told_it_replays_asks_nothing_and_logs_the_real_read(rep
     says `real` and never `recording`."""
     sdk, recording = replaying(_outcome({"balance": 7}), active=False)
 
-    @sdk.tool(kind="read", name="t.read")
+    @sdk.read_tool(name="t.read")
     def read(account: str) -> str:
         return f"live {account}"
 
@@ -827,7 +835,7 @@ def test_a_read_cancelled_while_it_asks_the_recording_logs_nothing(replaying, ob
     gate = threading.Event()
     sdk, recording = replaying(_outcome({"balance": 7}), gate=gate)
 
-    @sdk.tool(kind="read", name="t.read")
+    @sdk.read_tool(name="t.read")
     async def read(account: str) -> Any:
         raise AssertionError("the real read ran")
 
@@ -861,8 +869,8 @@ class _Kept(_Recording):
         self.docs.append({k: v for k, v in doc.items() if k not in _UNKEPT})
 
 
-def _through(decorate: Callable[..., Any], kind: str, form: str) -> tuple[Any, list[str]]:
-    """A tool `t.tool` of `kind` in `form`, made with `decorate` (an `sdk.tool`), called as an agent
+def _through(sdk: Any, kind: str, form: str) -> tuple[Any, list[str]]:
+    """A tool `t.tool` of `kind` in `form`, made with `sdk`'s tool decorators, called as an agent
     calls it: what the call gave the agent (returned, or raised: its name, its message and the two
     classes an agent catches it as), and which bodies ran."""
     from irimi.sdk import RecordedToolError
@@ -888,8 +896,10 @@ def _through(decorate: Callable[..., Any], kind: str, form: str) -> tuple[Any, l
         ran.append("shadow")
         return {"shadow": account}
 
-    def made(fn: Any, shadow: Any) -> Any:
-        return decorate(kind=kind, shadow=shadow if kind == "write" else None, name="t.tool")(fn)
+    def made(fn: Any, fake: Any) -> Any:
+        if kind == "write":
+            return sdk.write_tool(fake=fake, name="t.tool")(fn)
+        return sdk.read_tool(name="t.tool")(fn)
 
     class Ledger:
         static = made(staticmethod(real), staticmethod(stand_in))
@@ -917,10 +927,11 @@ def _through(decorate: Callable[..., Any], kind: str, form: str) -> tuple[Any, l
 def test_a_tool_through_this_module_does_what_the_real_sdk_s_does(
     replaying, monkeypatch, form, kind, mode
 ):
-    """The agents write `sdk.tool` from this module, and the corpus must test the SDK that ships:
-    in every mode a tool runs in - bare, shadow, and a replay whose recording misses, answers or
-    raises - the same tool made with this module's `tool` and with `irimi.sdk.tool` gives the
-    agent the same thing, runs the same bodies and posts the same records."""
+    """The agents write `sdk.read_tool` and `sdk.write_tool` from this module, and the corpus
+    must test the SDK that ships: in every mode a tool runs in - bare, shadow, and a replay whose
+    recording misses, answers or raises - the same tool made with this module's decorators and
+    with `irimi.sdk`'s gives the agent the same thing, runs the same bodies and posts the same
+    records."""
     import irimi.sdk as real_sdk
     from irimi import paths
     from irimi.sdk import runs
@@ -933,10 +944,10 @@ def test_a_tool_through_this_module_does_what_the_real_sdk_s_does(
     if mode == "shadow":
         monkeypatch.delenv(paths.REPLAY_RUN_ENV)
     seen = []
-    for decorate in (sdk.tool, real_sdk.tool):
+    for module in (sdk, real_sdk):
         kept = _Kept(outcome)
         monkeypatch.setattr(runs, "reporter", kept)
-        got, ran = _through(decorate, kind, form)
+        got, ran = _through(module, kind, form)
         seen.append((got, ran, kept.asked, kept.docs))
     shim, real = seen
     assert shim == real

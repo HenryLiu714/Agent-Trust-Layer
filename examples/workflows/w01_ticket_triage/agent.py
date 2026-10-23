@@ -4,9 +4,9 @@ A helpdesk POSTs a ticket to `/tickets`. `handle_ticket` is the trigger: it runs
 `tool_use` loop of up to `MAX_TURNS` turns in which the model may call four tools:
 
 - `get_charge`       a Stripe read (HTTP, seen by the proxy)
-- `lookup_customer`  a read tool over the agent's own SQLite (`@sdk.tool(kind="read")`)
+- `lookup_customer`  a read tool over the agent's own SQLite (`@sdk.read_tool`)
 - `issue_refund`     a Stripe write (HTTP, faked by the proxy under shadow)
-- `send_reply`       a write tool over the same SQLite (`@sdk.tool(kind="write")`), whose stand-in
+- `send_reply`       a write tool over the same SQLite (`@sdk.write_tool`), whose stand-in
                      runs under shadow and whose real body must never run there
 
 The system prompt is picked by `PROMPT` (a named variant), so editing the prompt changes what the
@@ -14,8 +14,7 @@ scripted model does: this is the agent whose replay diverges after a prompt edit
 call carries `metadata.user_id`, a session id new in each process, as a helpdesk integration tags
 its calls, so no two runs send the same bytes: a replay matches a call by what it asks.
 
-    python -m examples.workflows.launch \\
-        examples.workflows.w01_ticket_triage.agent <ticket_id> <charge> <customer> <message>
+    python -m examples.workflows.w01_ticket_triage.agent <ticket_id> <charge> <customer> <message>
 
 The agent serves `/tickets` on loopback and delivers the one ticket to itself, as a helpdesk
 would. It exits 0 when the ticket was handled and 1 when the handler failed.
@@ -81,7 +80,7 @@ def seed(customer: str) -> None:
         conn.execute("INSERT OR IGNORE INTO customers VALUES (?, ?, ?)", (customer, "Ada", "gold"))
 
 
-@sdk.tool(kind="read")
+@sdk.read_tool
 def lookup_customer(customer: str) -> dict[str, Any]:
     with agentkit.sqlite(DB_NAME) as conn:
         row = conn.execute(
@@ -94,7 +93,7 @@ def _reply_stand_in(ticket_id: str, body: str) -> dict[str, Any]:
     return {"sent": True, "stood_in": True}
 
 
-@sdk.tool(kind="write", shadow=_reply_stand_in)
+@sdk.write_tool(fake=_reply_stand_in)
 def send_reply(ticket_id: str, body: str) -> dict[str, Any]:
     with agentkit.sqlite(DB_NAME) as conn:
         conn.execute("INSERT INTO replies VALUES (?, ?)", (ticket_id, body))

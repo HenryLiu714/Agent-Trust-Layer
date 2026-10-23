@@ -2,8 +2,8 @@
 
 What a tool call did is read from the agent's observation log (`tool` events say which body ran)
 and from the state directory itself: the SQLite CRM and the files the write tools would create.
-What irimi made of it is read from its stream, its summary and its store: `@sdk.tool` posts every
-call to the run it was made in.
+What irimi made of it is read from its stream, its summary and its store: a tool decorator posts
+every call to the run it was made in.
 """
 
 import pytest
@@ -231,8 +231,8 @@ def test_a_stale_irimi_replay_run_asks_no_recording_but_where_irimi_cannot_remov
 
 @pytest.mark.parametrize("mode", MODES)
 def test_an_unlabelled_database_write_happens_for_real_under_shadow(run_workflow, mode):
-    # irimi cannot see a write that is neither HTTP nor an @sdk.tool. A future check that flags a
-    # production database URL in the agent's environment would flip this assertion.
+    # irimi cannot see a write that is neither HTTP nor an @sdk.write_tool. A future check that
+    # flags a production database URL in the agent's environment would flip this assertion.
     shadow = run_workflow(W, "unlabeled_write", mode)
     assert rows(shadow)[0] == ("acc_1", "Acme", "smb", "2026-09-28", 0, None)
     assert shadow.exchange_lines() == []
@@ -320,15 +320,15 @@ def test_a_repr_quoting_a_key_across_the_sdks_cut_keeps_no_part_of_it(run_workfl
 def test_each_decoration_time_mistake_raises_type_error(run_workflow, mode):
     shadow = run_workflow(W, "decoration_errors", mode)
     assert shadow.result()["raised"] == [
-        "write_without_shadow",
-        "read_with_shadow",
-        "bad_kind",
-        "stand_in_not_callable",
-        "sync_stand_in_for_async",
-        "async_stand_in_for_sync",
+        "write_without_fake",
+        "read_with_fake",
+        "bare_write_tool",
+        "fake_not_callable",
+        "sync_fake_for_async",
+        "async_fake_for_sync",
         "generator",
-        "generator_stand_in",
-        "stand_in_is_the_function",
+        "generator_fake",
+        "fake_is_the_function",
     ]
     assert (
         run_workflow(W, "decoration_errors", "bare").result()["raised"]

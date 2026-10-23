@@ -9,7 +9,7 @@ Each escape runs inside `sdk.run`, so under shadow it is a run whose requests th
 only those that go through irimi: a run's id must never ride out on an escape, where nothing
 would strip it. Universal invariant 2 checks that no fake service ever saw `Irimi-Run`.
 
-`labelled_sidecar` writes to the loopback sidecar through an `@sdk.tool(kind="write")`, so under
+`labelled_sidecar` writes to the loopback sidecar through an `@sdk.write_tool`, so under
 shadow its stand-in runs and nothing escapes.
 
 `redirected` writes nothing. It is a read that each client the SDK labels (urllib, `requests`,
@@ -19,8 +19,7 @@ labelled or not by where its own connection goes, so the last one goes out unlab
 for `requests`, which keeps the first request's proxy across redirects whatever `NO_PROXY` says:
 its last hop goes through irimi after all, labelled, and is stripped there.
 
-    python -m examples.workflows.launch \\
-        examples.workflows.w11_leaky_agent.agent <escape>
+    python -m examples.workflows.w11_leaky_agent.agent <escape>
 
 Safety: no escape ever resolves a real host name. A client that bypasses the proxy resolves the
 name itself, so this agent resolves the fake internet's names to 127.0.0.1 (`_local_dns`) and
@@ -178,7 +177,7 @@ def _enqueue_stand_in(job: dict[str, Any]) -> dict[str, Any]:
     return {"queued": None, "stood_in": True}
 
 
-@sdk.tool(kind="write", shadow=_enqueue_stand_in)
+@sdk.write_tool(fake=_enqueue_stand_in)
 def enqueue_job(job: dict[str, Any]) -> dict[str, Any]:
     """`loopback_service`'s write, labelled as one."""
     resp = agentkit.http(
@@ -245,7 +244,7 @@ def main(argv: list[str]) -> int:
     if len(argv) != 1 or argv[0] not in ESCAPES:
         print(f"usage: agent.py {{{','.join(ESCAPES)}}}", file=sys.stderr)
         return 2
-    with sdk.run(trigger={"escape": argv[0]}, name="escape"):
+    with sdk.run("escape", inputs={"escape": argv[0]}):
         ESCAPES[argv[0]]()
     agentkit.obs("result", escape=argv[0])
     return 0

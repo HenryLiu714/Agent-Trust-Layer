@@ -1,4 +1,5 @@
-"""`@sdk.tool`: the tool calls the proxy cannot see, against a real engine and store.
+"""`@sdk.read_tool` and `@sdk.write_tool`: the tool calls the proxy cannot see, against a real
+engine and store.
 
 Each recorded call is posted over a socket to the engine's control endpoint and read back
 off disk with `StoreReader` once the engine has stopped. A write tool's real function raises
@@ -45,17 +46,17 @@ async def _stand_in_async(order: int, *, note: str = "") -> dict[str, Any]:
     return {"stood_in": order, "note": note}
 
 
-@sdk.tool(kind="write", shadow=_stand_in, name="db.mark_refunded")
+@sdk.write_tool(fake=_stand_in, name="db.mark_refunded")
 def mark_refunded(order: int, *, note: str = "") -> dict[str, Any]:
     raise _RealWriteRan("the real write ran")
 
 
-@sdk.tool(kind="write", shadow=_stand_in_async, name="db.mark_refunded_async")
+@sdk.write_tool(fake=_stand_in_async, name="db.mark_refunded_async")
 async def mark_refunded_async(order: int, *, note: str = "") -> dict[str, Any]:
     raise _RealWriteRan("the real write ran")
 
 
-@sdk.tool(kind="read")
+@sdk.read_tool
 def look_up(order: int) -> dict[str, Any]:
     return {"order": order, "status": "paid"}
 
@@ -119,30 +120,46 @@ class _Klass:
 
 
 MISTAKES: dict[str, tuple[Callable[[], Any], str]] = {
-    "bad_kind": (lambda: sdk.tool(kind="delete", shadow=_sync)(_sync), "'read' or 'write'"),  # type: ignore[arg-type]
-    "write_without_shadow": (lambda: sdk.tool(kind="write")(_sync), "must name its stand-in"),
-    "read_with_shadow": (lambda: sdk.tool(kind="read", shadow=_sync)(_sync), "takes no shadow="),
+    "write_without_fake": (
+        lambda: sdk.write_tool()(_sync),  # type: ignore[call-arg]
+        "missing 1 required keyword-only argument: 'fake'",
+    ),
+    "read_with_fake": (
+        lambda: sdk.read_tool(fake=_sync)(_sync),  # type: ignore[call-overload]
+        "unexpected keyword argument 'fake'",
+    ),
+    "bare_write_tool": (lambda: sdk.write_tool(_sync), "positional"),  # type: ignore[call-arg]
+    "name_positional": (lambda: sdk.read_tool("lookup"), "takes its name as name="),  # type: ignore[call-overload]
+    "fake_none": (lambda: sdk.write_tool(fake=None)(_sync), "must be callable"),  # type: ignore[arg-type]
     "stand_in_not_callable": (
-        lambda: sdk.tool(kind="write", shadow="mock_database_write")(_sync),  # type: ignore[arg-type]
+        lambda: sdk.write_tool(fake="mock_database_write")(_sync),  # type: ignore[arg-type]
         "must be callable",
     ),
     "sync_stand_in_for_async": (
-        lambda: sdk.tool(kind="write", shadow=_sync)(_async),
+        lambda: sdk.write_tool(fake=_sync)(_async),
         "must be an async def",
     ),
     "async_stand_in_for_sync": (
-        lambda: sdk.tool(kind="write", shadow=_async)(_sync),
+        lambda: sdk.write_tool(fake=_async)(_sync),
         "must be a sync function",
     ),
-    "generator": (lambda: sdk.tool(kind="read")(_gen), "generator function"),
-    "async_generator": (lambda: sdk.tool(kind="read")(_agen), "generator function"),
+    "generator": (lambda: sdk.read_tool(_gen), "generator function"),
+    "async_generator": (lambda: sdk.read_tool(_agen), "generator function"),
     "generator_stand_in": (
-        lambda: sdk.tool(kind="write", shadow=_gen)(_sync),
+        lambda: sdk.write_tool(fake=_gen)(_sync),
         "cannot be the generator function",
     ),
-    "name_not_a_string": (lambda: sdk.tool(kind="read", name=7)(_sync), "must be a string"),  # type: ignore[arg-type]
-    "partial": (lambda: sdk.tool(kind="read")(functools.partial(_sync, 1)), "@sdk.tool wraps"),
-    "class": (lambda: sdk.tool(kind="read")(_Klass), "@sdk.tool wraps a function or a method"),
+    "name_not_a_string": (lambda: sdk.read_tool(name=7)(_sync), "must be a string"),  # type: ignore[arg-type]
+    "write_name_not_a_string": (
+        lambda: sdk.write_tool(fake=_sync, name=7)(_sync),  # type: ignore[arg-type]
+        "@sdk.write_tool(name=...) must be a string",
+    ),
+    "partial": (lambda: sdk.read_tool(functools.partial(_sync, 1)), "@sdk.read_tool wraps"),
+    "named_partial": (
+        lambda: sdk.write_tool(fake=_sync, name="db.write")(functools.partial(_sync, 1)),
+        "@sdk.write_tool wraps",
+    ),
+    "class": (lambda: sdk.read_tool(_Klass), "@sdk.read_tool wraps a function or a method"),
 }
 
 
@@ -154,9 +171,14 @@ def test_each_decoration_time_mistake_raises_type_error_before_any_call(case, po
     assert posted.posts == []
 
 
-def test_bare_sdk_tool_without_its_kind_is_refused_when_the_agent_loads():
-    with pytest.raises(TypeError):
-        sdk.tool(_sync)  # type: ignore[call-arg]
+def test_a_bare_read_tool_is_a_read_tool():
+    lookup = sdk.read_tool(_sync)
+    assert lookup(3) == 3
+    assert lookup.__name__ == "_sync"
+
+
+def test_the_old_tool_decorator_is_gone():
+    assert not hasattr(sdk, "tool")
 
 
 def test_a_tool_keeps_its_functions_name_signature_and_nature():
@@ -196,7 +218,7 @@ def test_an_active_read_runs_for_real_and_is_stored_as_real(irimi):
     assert check(3) == {"order": 3, "status": "paid"}
     reader = irimi.finish()
     [call] = _tool_calls(reader, _only_sdk_run(reader))
-    assert (call.name, call.kind, call.ran) == (f"{__name__}.look_up", "read", "real")
+    assert (call.name, call.kind, call.ran) == (f"{__name__}:look_up", "read", "real")
     assert (call.args, call.result) == ({"order": 3}, {"order": 3, "status": "paid"})
 
 
@@ -222,7 +244,7 @@ def test_a_stand_in_that_raises_re_raises_the_same_object_and_records_its_error(
     def failing_stand_in(order: int) -> Any:
         raise raised
 
-    @sdk.tool(kind="write", shadow=failing_stand_in, name="db.fails")
+    @sdk.write_tool(fake=failing_stand_in, name="db.fails")
     def fails(order: int) -> Any:
         raise _RealWriteRan("the real write ran")
 
@@ -259,12 +281,12 @@ def test_a_tool_called_in_no_run_with_no_process_run_is_stored_unattributed(irim
     assert look_up(4) == {"order": 4, "status": "paid"}
     reader = irimi.finish()
     [call] = _tool_calls(reader, trace.UNATTRIBUTED)
-    assert (call.run_id, call.name, call.ran) == (trace.UNATTRIBUTED, f"{__name__}.look_up", "real")
+    assert (call.run_id, call.name, call.ran) == (trace.UNATTRIBUTED, f"{__name__}:look_up", "real")
     assert reader.list_runs() == []
 
 
 def test_a_tool_call_is_posted_to_its_runs_route_with_no_run_id_in_the_body(posted):
-    with sdk.run(name="r"):
+    with sdk.run("r"):
         run_id = sdk.current_run_id()
         mark_refunded(1)
     [(posted_run, action, doc)] = [p for p in posted.posts if p[1] == "tool-calls"]
@@ -283,7 +305,7 @@ def test_the_args_are_bound_against_the_real_function_not_the_stand_in(posted):
     def anything(*args: Any, **kwargs: Any) -> str:
         return "stood in"
 
-    @sdk.tool(kind="write", shadow=anything, name="db.charge")
+    @sdk.write_tool(fake=anything, name="db.charge")
     def charge(customer: str, amount: int) -> str:
         raise _RealWriteRan("the real write ran")
 
@@ -297,7 +319,7 @@ def test_the_args_are_captured_before_the_body_runs(posted):
         rows.append(99)
         return len(rows)
 
-    @sdk.tool(kind="write", shadow=appending_stand_in, name="db.append")
+    @sdk.write_tool(fake=appending_stand_in, name="db.append")
     def append(rows: list[int]) -> int:
         raise _RealWriteRan("the real write ran")
 
@@ -312,7 +334,7 @@ def test_args_and_result_together_stay_inside_one_capture_budget(posted):
     the truncation marker, and the call is still recorded."""
     half = "x" * (capture.MAX_CAPTURED_BYTES // 2 + 10)
 
-    @sdk.tool(kind="read", name="db.echo")
+    @sdk.read_tool(name="db.echo")
     def echo(text: str) -> str:
         return text
 
@@ -328,7 +350,7 @@ def test_a_sync_tool_that_returns_a_coroutine_is_recorded_when_the_coroutine_end
         await asyncio.sleep(0)
         return order * 2
 
-    @sdk.tool(kind="read", name="db.later")
+    @sdk.read_tool(name="db.later")
     def later(order: int) -> Any:
         return body(order)
 
@@ -343,21 +365,21 @@ class _Ledger:
     def _mark_stand_in(self, order: int) -> str:
         return f"stood in for {order}"
 
-    @sdk.tool(kind="write", shadow=_mark_stand_in, name="ledger.mark")
+    @sdk.write_tool(fake=_mark_stand_in, name="ledger.mark")
     def mark(self, order: int) -> str:
         raise _RealWriteRan("the real write ran")
 
-    @sdk.tool(kind="write", shadow=lambda order: f"static {order}", name="ledger.static_below")
+    @sdk.write_tool(fake=lambda order: f"static {order}", name="ledger.static_below")
     @staticmethod
     def static_below(order: int) -> str:
         raise _RealWriteRan("the real write ran")
 
     @staticmethod
-    @sdk.tool(kind="write", shadow=lambda order: f"static {order}", name="ledger.static_above")
+    @sdk.write_tool(fake=lambda order: f"static {order}", name="ledger.static_above")
     def static_above(order: int) -> str:
         raise _RealWriteRan("the real write ran")
 
-    @sdk.tool(kind="read", name="ledger.kind")
+    @sdk.read_tool(name="ledger.kind")
     @classmethod
     def kind(cls, order: int) -> str:
         return f"{cls.__name__} {order}"
@@ -385,7 +407,7 @@ def test_an_async_stand_in_that_raises_re_raises_the_same_object_and_records_its
         await asyncio.sleep(0)
         raise raised
 
-    @sdk.tool(kind="write", shadow=failing, name="db.fails_async")
+    @sdk.write_tool(fake=failing, name="db.fails_async")
     async def fails(order: int) -> Any:
         raise _RealWriteRan("the real write ran")
 
@@ -412,7 +434,7 @@ def test_a_cancelled_async_tool_is_recorded_as_cancelled_and_stays_cancelled(pos
         await asyncio.sleep(10)
         return "never"
 
-    @sdk.tool(kind="write", shadow=slow, name="db.slow")
+    @sdk.write_tool(fake=slow, name="db.slow")
     async def write(order: int) -> str:
         raise _RealWriteRan("the real write ran")
 
@@ -437,7 +459,7 @@ def test_an_async_tool_closed_mid_call_records_the_close_and_raises_nothing(post
         await _Pause()
         return "never"
 
-    @sdk.tool(kind="write", shadow=waits, name="db.waits")
+    @sdk.write_tool(fake=waits, name="db.waits")
     async def write(order: int) -> str:
         raise _RealWriteRan("the real write ran")
 
@@ -459,7 +481,7 @@ def test_an_async_tools_result_is_captured_on_the_callers_thread_as_it_was_retur
             seen.append(threading.current_thread().name)
             return "<thing>"
 
-    @sdk.tool(kind="read", name="db.shared")
+    @sdk.read_tool(name="db.shared")
     async def read() -> list[Any]:
         return [_Repr(), shared]
 
@@ -489,17 +511,17 @@ def test_a_record_that_cannot_be_built_costs_the_agent_nothing(posted, monkeypat
 
 
 def test_a_stand_in_that_is_the_function_itself_is_refused_when_the_agent_loads(posted):
-    """`shadow=` names what runs IN PLACE of the write. Naming the write itself - reading `shadow`
-    as "the function to shadow" - would run the real write under irimi, so it is refused, as every
+    """`fake=` names what runs IN PLACE of the write. Naming the write itself - reading `fake`
+    as "the function to fake" - would run the real write under irimi, so it is refused, as every
     other way of leaving a write unnamed is."""
 
     def database_write(order: int) -> None:
         raise _RealWriteRan("the real write ran")
 
     with pytest.raises(TypeError, match="is the function itself"):
-        sdk.tool(kind="write", shadow=database_write)(database_write)
+        sdk.write_tool(fake=database_write)(database_write)
     with pytest.raises(TypeError, match="is the function itself"):
-        sdk.tool(kind="write", shadow=database_write)(staticmethod(database_write))
+        sdk.write_tool(fake=database_write)(staticmethod(database_write))
     assert posted.posts == []
 
 
@@ -514,12 +536,12 @@ class _Repository:
     async def _save_async_stand_in(row: int) -> str:
         return f"stood in async for {row}"
 
-    @sdk.tool(kind="write", shadow=_save_stand_in, name="repo.save")
+    @sdk.write_tool(fake=_save_stand_in, name="repo.save")
     @staticmethod
     def save(row: int) -> str:
         raise _RealWriteRan("the real write ran")
 
-    @sdk.tool(kind="write", shadow=_save_async_stand_in, name="repo.save_async")
+    @sdk.write_tool(fake=_save_async_stand_in, name="repo.save_async")
     @staticmethod
     async def save_async(row: int) -> str:
         raise _RealWriteRan("the real write ran")
@@ -533,7 +555,7 @@ def test_a_static_method_stand_in_is_judged_and_called_as_its_function(posted):
     assert asyncio.run(_Repository.save_async(2)) == "stood in async for 2"
     assert [doc["name"] for _, _, doc in posted.posts] == ["repo.save", "repo.save_async"]
     with pytest.raises(TypeError, match="cannot be the generator function"):
-        sdk.tool(kind="write", shadow=staticmethod(_gen))(_sync)
+        sdk.write_tool(fake=staticmethod(_gen))(_sync)
 
 
 def test_an_object_with_an_async_call_is_an_async_stand_in(posted):
@@ -541,18 +563,18 @@ def test_an_object_with_an_async_call_is_an_async_stand_in(posted):
         async def __call__(self, order: int) -> str:
             return "mocked"
 
-    @sdk.tool(kind="write", shadow=_Mock(), name="db.mocked")
+    @sdk.write_tool(fake=_Mock(), name="db.mocked")
     async def write(order: int) -> str:
         raise _RealWriteRan("the real write ran")
 
     assert asyncio.run(write(1)) == "mocked"
     with pytest.raises(TypeError, match="must be a sync function"):
-        sdk.tool(kind="write", shadow=_Mock())(_sync)
+        sdk.write_tool(fake=_Mock())(_sync)
 
 
 def test_a_failed_post_never_reaches_the_agent(irimi, monkeypatch, warnings):
     monkeypatch.setenv(paths.CONTROL_ENV, "http://127.0.0.1:1/_irimi")
-    with sdk.run(name="r"):
+    with sdk.run("r"):
         assert mark_refunded(1) == {"stood_in": 1, "note": ""}
     assert [r.levelname for r in warnings()] == ["WARNING"]
     assert "could not record the start of run" in warnings()[0].getMessage()
@@ -573,7 +595,7 @@ def test_an_inactive_write_runs_for_real_posts_nothing_and_warns_once_when_a_pro
     monkeypatch.setattr(runs, "reporter", reporter)
     ran: list[int] = []
 
-    @sdk.tool(kind="write", shadow=lambda order: "stood in", name="db.inactive")
+    @sdk.write_tool(fake=lambda order: "stood in", name="db.inactive")
     def write(order: int) -> str:
         ran.append(order)
         return "real"
@@ -634,7 +656,7 @@ def _stand_in(order: int) -> str:
     return "stood in"
 
 
-@sdk.tool(kind="write", shadow=_stand_in, name="db.mark_refunded")
+@sdk.write_tool(fake=_stand_in, name="db.mark_refunded")
 def mark_refunded(order: int) -> str:
     raise SystemExit("the real write ran")
 
@@ -689,7 +711,7 @@ def test_the_posted_tool_call_is_valid_json_the_endpoint_reads(posted):
     """`allow_nan=False` is how both the SDK and the store write: a NaN result is
     captured as a marker, never posted as a bare NaN."""
 
-    @sdk.tool(kind="read", name="db.nan")
+    @sdk.read_tool(name="db.nan")
     def nan() -> float:
         return float("nan")
 
@@ -707,7 +729,7 @@ def test_the_client_posts_exactly_the_endpoints_run_actions():
 
 
 def test_a_tool_name_is_cut_to_the_run_name_limit(posted):
-    @sdk.tool(kind="read", name="n" * (runs.MAX_NAME + 5))
+    @sdk.read_tool(name="n" * (runs.MAX_NAME + 5))
     def long_named() -> None:
         return None
 
@@ -721,7 +743,7 @@ def test_a_long_tool_name_is_cut_outside_secrets_so_it_keeps_no_part_of_a_key(po
     left out whole rather than kept in part, too short for its shape to be redacted."""
     head = "n" * (runs.MAX_NAME - 10) + " "
 
-    @sdk.tool(kind="read", name=head + "ghp_" + "k" * 36)
+    @sdk.read_tool(name=head + "ghp_" + "k" * 36)
     def keyed() -> None:
         return None
 

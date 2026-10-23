@@ -7,14 +7,14 @@ their triggers, and two concurrent requests don't mix" (#78).
 `{"charge": "ch_...", "reason": "..."}` is one run, `handle_refund` (`@sdk.trigger`):
 
 1. it reads the charge from Stripe, a live read;
-2. it records the refund in its own SQLite through `mark_refunded`, an `@sdk.tool(kind="write")`
+2. it records the refund in its own SQLite through `mark_refunded`, an `@sdk.write_tool`
    whose stand-in runs under irimi;
 3. it refunds the charge, a write irimi fakes;
 4. it answers `200 {"refund": "re_..."}`.
 
 It calls Stripe with `urllib.request`, which takes `HTTPS_PROXY` and `SSL_CERT_FILE` from the
-environment, so it needs no code to go through irimi. Start it by module name,
-`python -m examples.server_agent`, so the trigger's entrypoint is importable.
+environment, so it needs no code to go through irimi. Start it with
+`python -m examples.server_agent.app`, so the trigger's entrypoint is importable.
 
 ## Two halves
 
@@ -40,8 +40,8 @@ that Stripe holds no refund for either charge, and tears everything down. A pass
 
 ```
 --- irimi runs list
-30c26ae8c452baa9  2026-10-13 20:50:26  0.4s  ok  sdk  handle_refund  3 exchanges  1 write
-4087dd7e4ab996b9  2026-10-13 20:50:26  0.4s  ok  sdk  handle_refund  3 exchanges  1 write
+30c26ae8c452baa9  2026-10-13 20:50:26  0.4s  ok  sdk  examples.server_agent.app:handle_refund  3 exchanges  1 write
+4087dd7e4ab996b9  2026-10-13 20:50:26  0.4s  ok  sdk  examples.server_agent.app:handle_refund  3 exchanges  1 write
 ...
 --- Stripe holds no refund for either charge
 ch_irimiExample00000000001: amount_refunded=0 refunds=0

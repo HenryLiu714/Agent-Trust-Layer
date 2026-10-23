@@ -6,8 +6,7 @@ headers arriving from the agent, and requests addressed to the proxy itself. Und
 the run is attributed `process`, but for the runs the control groups start over the control
 endpoint, doing by hand what the SDK does for the other workflows.
 
-    python -m examples.workflows.launch \\
-        examples.workflows.w09_scope_gauntlet.agent <group>
+    python -m examples.workflows.w09_scope_gauntlet.agent <group>
 
 Each group is one scenario in `scenarios.py`. Every call is logged with a label, which is what the
 tests key their expectations on.

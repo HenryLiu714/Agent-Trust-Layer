@@ -17,7 +17,7 @@ from irimi import paths
 _RUN_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar("irimi_run_id", default=None)
 
 
-def active() -> bool:
+def is_active() -> bool:
     """True when irimi is in front of this process: `IRIMI_ENGINE_ACTIVE` is `1`, as `irimi
     shadow` sets it for its child. Read at each call, never cached. Here rather than in
     `runs`, so `instrumentation`, which `runs` imports, reads the same rule."""
@@ -35,7 +35,7 @@ def replay_run_id() -> str | None:
     replays as, so the two must agree. A variable a shell exported and irimi did not set - a serve
     agent is not irimi's child, and serve sets neither - says nothing: adopting it would merge
     every run the agent starts into one that was never started."""
-    if not active():
+    if not is_active():
         return None
     replaying = os.environ.get(paths.REPLAY_RUN_ENV) or None
     if replaying is None or replaying != os.environ.get(paths.RUN_ENV):

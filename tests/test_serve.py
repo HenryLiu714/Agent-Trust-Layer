@@ -903,7 +903,7 @@ def handle(n):
 handle(1)
 handle(2)
 call("GET", "/bare")
-with sdk.run(trigger={"n": 3}):
+with sdk.run("run", inputs={"n": 3}):
     call("GET", "/items/3")
     os._exit(0)
 """

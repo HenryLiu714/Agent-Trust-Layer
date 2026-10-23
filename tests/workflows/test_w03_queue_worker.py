@@ -485,7 +485,7 @@ def stored_by_charge(shadow, args_of):
 def test_each_async_with_sdk_run_block_is_one_run_with_its_message_as_the_trigger(
     run_workflow, mode
 ):
-    """Each message is a block, `async with sdk.run(trigger=message, name="message")`, four at
+    """Each message is a block, `async with sdk.run("message", inputs=message)`, four at
     once under `asyncio.gather`. Each is one `sdk` run named `message`, with no entrypoint,
     because no function names it, and the message itself as its args, replayable. The block that
     raised ends in error with its ValueError and holds only its read; the queue carries on. Bare,
@@ -542,12 +542,12 @@ def test_a_run_cancelled_at_shutdown_ends_in_error_with_its_cancellation(run_wor
 def test_a_trigger_on_a_method_names_its_class_and_leaves_self_out_of_the_args(run_workflow, mode):
     """`Worker.handle` and `Worker.handle_async` are triggers on methods. The entrypoint
     names the class, `module:Worker.handle`, which replay can import; `self` is left out of
-    the args, so the run stays replayable. An unnamed trigger is named by its `__qualname__`, a
-    named one by its name. Every run records the version the deployment named, as the process run
+    the args, so the run stays replayable. An unnamed trigger is named by its `module:qualname`,
+    a named one by its name. Every run records the version the deployment named, as the process run
     does."""
     shadow = run_workflow(W, "worker_methods", mode)
     found = stored_by_charge(shadow, lambda args: args["message"])
-    sync = ("Worker.handle", f"{AGENT}:Worker.handle")
+    sync = (f"{AGENT}:Worker.handle", f"{AGENT}:Worker.handle")
     async_ = ("worker.handle_async", f"{AGENT}:Worker.handle_async")
     assert {c: (r.trigger.name, r.trigger.entrypoint) for c, r in found.items() if r.trigger} == {
         "ch_Q0": sync,
@@ -700,9 +700,9 @@ def test_tool_calls_from_four_threads_each_land_in_their_own_run(run_workflow, m
     for charge, record in found.items():
         calls = stored_tool_calls(shadow, record.run_id)
         assert [(c.name, c.ran, c.args, c.result) for c in calls] == [
-            (f"{AGENT}.ledger_balance", "real", {"charge": charge}, 0),
+            (f"{AGENT}:ledger_balance", "real", {"charge": charge}, 0),
             (
-                f"{AGENT}.record_refund",
+                f"{AGENT}:record_refund",
                 "shadow",
                 {"charge": charge, "amount": amount_of(charge)},
                 {"recorded": False, "charge": charge},
@@ -710,11 +710,11 @@ def test_tool_calls_from_four_threads_each_land_in_their_own_run(run_workflow, m
         ]
     assert stored_tool_calls(shadow, shadow.engine_run_id()) == []
     assert Counter(shadow.tool_call_lines()) == {
-        f"tool-real     read      {AGENT}.ledger_balance -> ok": 8,
-        f"tool-fake     write     {AGENT}.record_refund -> ok": 8,
+        f"tool-real     read      {AGENT}:ledger_balance -> ok": 8,
+        f"tool-fake     write     {AGENT}:record_refund -> ok": 8,
     }
     tool_lines = [line for line in shadow.summaries() if "○ tool" in line]
-    assert tool_lines == [f"  ○ tool  {AGENT}.record_refund  fake ran instead"] * 8
+    assert tool_lines == [f"  ○ tool  {AGENT}:record_refund  fake ran instead"] * 8
     assert shadow.query(LEDGER, "SELECT * FROM refunds") == []
     assert sorted(bare.query(LEDGER, "SELECT * FROM refunds")) == [
         (f"ch_Q{i}", 100 + i) for i in range(8)
@@ -736,8 +736,8 @@ def test_two_write_tools_ending_at_once_print_in_the_order_they_ended(run_workfl
     bare = run_workflow(W, "ledger_two_tools_8", "bare")
     calls = [e for e in shadow.stored_events() if isinstance(e, ToolCall) and e.kind == "write"]
     assert Counter(c.name for c in calls) == {
-        f"{AGENT}.record_refund": 4,
-        f"{AGENT}.mark_refunded": 4,
+        f"{AGENT}:record_refund": 4,
+        f"{AGENT}:mark_refunded": 4,
     }
     ended = sorted(calls, key=lambda c: (c.ended_at, c.started_at, c.tool_call_id))
     assert [line for line in shadow.summary() if "○ tool" in line] == [
@@ -763,7 +763,7 @@ def test_tool_writes_whose_posts_came_in_the_other_order_print_in_the_order_they
     modes. Bare, both rows reach the ledger."""
     shadow = run_workflow(W, "ledger_post_waits", mode)
     bare = run_workflow(W, "ledger_post_waits", "bare")
-    first, second = f"{AGENT}.record_refund_async", f"{AGENT}.mark_refunded"
+    first, second = f"{AGENT}:record_refund_async", f"{AGENT}:mark_refunded"
     assert shadow.tool_call_lines() == [
         f"tool-fake     write     {second} -> ok",
         f"tool-fake     write     {first} -> ok",
@@ -806,14 +806,14 @@ def test_async_tool_calls_from_eight_tasks_each_land_in_their_task_s_run(run_wor
         assert record.outcome == "ok"
         calls = stored_tool_calls(shadow, record.run_id)
         assert [(c.name, c.ran, c.args, c.result) for c in calls] == [
-            (f"{AGENT}.ledger_balance_async", "real", {"charge": charge}, 0),
+            (f"{AGENT}:ledger_balance_async", "real", {"charge": charge}, 0),
             (
-                f"{AGENT}.record_refund_async",
+                f"{AGENT}:record_refund_async",
                 "shadow",
                 {"charge": charge, "amount": amount_of(charge)},
                 {"recorded": False, "charge": charge},
             ),
-            (f"{AGENT}.ledger_history", "real", {"charge": charge}, []),
+            (f"{AGENT}:ledger_history", "real", {"charge": charge}, []),
         ]
     assert stored_tool_calls(shadow, shadow.engine_run_id()) == []
     assert len(shadow.tool_call_lines()) == 24
@@ -843,12 +843,12 @@ def test_a_tool_called_in_a_thread_that_lost_its_run_lands_in_the_engines_own_ru
     for charge, record in found.items():
         calls = stored_tool_calls(shadow, record.run_id)
         assert [(c.name, c.args) for c in calls] == [
-            (f"{AGENT}.ledger_balance", {"charge": charge})
+            (f"{AGENT}:ledger_balance", {"charge": charge})
         ]
     process = stored_tool_calls(shadow, shadow.engine_run_id())
     assert sorted((c.name, c.ran, c.args["charge"]) for c in process) == [
-        (f"{AGENT}.record_refund", "shadow", "ch_Q0"),
-        (f"{AGENT}.record_refund", "shadow", "ch_Q1"),
+        (f"{AGENT}:record_refund", "shadow", "ch_Q0"),
+        (f"{AGENT}:record_refund", "shadow", "ch_Q1"),
     ]
     assert [t["run"] for t in shadow.events("tool") if t["kind"] == "write"] == [None, None]
     if mode == "shadow":
@@ -863,9 +863,9 @@ def test_tools_on_a_worker_s_methods_keep_their_receiver_and_leave_it_out_of_the
     mode,
 ):
     """The ledger as the `Worker`'s own methods: `fee`, a static method, `journal`, a class
-    method, each with `@sdk.tool` written above the descriptor, and `ack`, a plain method. Each is
-    named by its `module.qualname`, `Worker.` included; the receiver is left out of the stored
-    args, as a trigger's is; and each stand-in is called as its method is, the class
+    method, each with a tool decorator written above the descriptor, and `ack`, a plain method.
+    Each is named by its `module:qualname`, `Worker.` included; the receiver is left out of the
+    stored args, as a trigger's is; and each stand-in is called as its method is, the class
     method's with the class and the plain method's with the worker, which their results show."""
     shadow = run_workflow(W, "ledger_worker", mode)
     bare = run_workflow(W, "ledger_worker", "bare")
@@ -877,16 +877,16 @@ def test_tools_on_a_worker_s_methods_keep_their_receiver_and_leave_it_out_of_the
         message = record.trigger.args["message"]
         calls = stored_tool_calls(shadow, record.run_id)
         assert [(c.name, c.kind, c.ran, c.args, c.result) for c in calls] == [
-            (f"{AGENT}.Worker.fee", "read", "real", {"amount": amount}, fee),
+            (f"{AGENT}:Worker.fee", "read", "real", {"amount": amount}, fee),
             (
-                f"{AGENT}.Worker.journal",
+                f"{AGENT}:Worker.journal",
                 "write",
                 "shadow",
                 {"charge": charge, "net": amount - fee},
                 {"journaled": False, "by": "Worker"},
             ),
             (
-                f"{AGENT}.Worker.ack",
+                f"{AGENT}:Worker.ack",
                 "write",
                 "shadow",
                 {"message": message},
@@ -894,8 +894,8 @@ def test_tools_on_a_worker_s_methods_keep_their_receiver_and_leave_it_out_of_the
             ),
         ]
     assert [line for line in shadow.summaries() if "○ tool" in line] == [
-        f"  ○ tool  {AGENT}.Worker.journal  fake ran instead",
-        f"  ○ tool  {AGENT}.Worker.ack  fake ran instead",
+        f"  ○ tool  {AGENT}:Worker.journal  fake ran instead",
+        f"  ○ tool  {AGENT}:Worker.ack  fake ran instead",
     ] * 4
     assert shadow.query(LEDGER, "SELECT * FROM acks") == []
     assert [(e["journal"], e["ack"]) for e in bare.events("ledger")] == [
@@ -937,8 +937,11 @@ def run_of(result, index: int) -> str:
 
 
 def label(trigger: str, version: str | None = None, entrypoint: str | None = None) -> str:
-    """A run as compare names it, leaving out an agent version it did not record."""
+    """A run as compare names it, leaving out an agent version it did not record, and its
+    entrypoint when it is the trigger's name, as an unnamed trigger's is."""
     agent = f"  agent {version}" if version else ""
+    if trigger == f"{AGENT}:{entrypoint or trigger.partition(':')[2]}":
+        return f"{trigger}{agent}"
     return f"{trigger}  {AGENT}:{entrypoint or trigger}{agent}"
 
 
@@ -957,7 +960,7 @@ def test_irimi_compare_of_two_concurrent_runs_shows_each_run_s_own_writes_alone(
     trigger = TRIGGER_OF[scenario]
     tool = LEDGER_WRITE.get(scenario)
     for i in range(1, 8):
-        line = f"○ tool  {AGENT}.{tool}  fake ran instead"
+        line = f"○ tool  {AGENT}:{tool}  fake ran instead"
         ledger = [
             f"  ~ A {line}",
             f"    B {line}",
@@ -1002,7 +1005,7 @@ PAIRS = {
     "worker_methods": (
         (0, 1),
         (
-            label("Worker.handle", AGENT_VERSION),
+            label(f"{AGENT}:Worker.handle", AGENT_VERSION),
             label("worker.handle_async", AGENT_VERSION, "Worker.handle_async"),
         ),
         [f"  ~ A {refund_text(0)}", f"    B {refund_text(1)}"],
@@ -1078,7 +1081,7 @@ def test_irimi_compare_finds_a_lost_run_s_writes_in_the_engine_s_run(run_workflo
     shadow = run_workflow(W, scenario, mode)
     a, engine = run_of(shadow, 0), shadow.engine_run_id()
     code, out, err = shadow.compare_runs(a, engine)
-    tool = [f"  + ○ tool  {AGENT}.record_refund  fake ran instead"]
+    tool = [f"  + ○ tool  {AGENT}:record_refund  fake ran instead"]
     added = [
         line
         for i in range(2)

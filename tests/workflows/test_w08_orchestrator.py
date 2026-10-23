@@ -204,7 +204,7 @@ def test_a_tool_called_in_a_nested_trigger_is_a_call_of_its_parent_s_run(run_wor
     starts = shadow.events("run.start")
     assert [e["name"] for e in starts] == ["plan_quarter_close", "plan_quarter_close"]
     runs = [e["run"] for e in starts]
-    assert [(t["name"].rsplit(".", 1)[1], t["ran"], t["run"]) for t in shadow.events("tool")] == [
+    assert [(t["name"].rpartition(":")[2], t["ran"], t["run"]) for t in shadow.events("tool")] == [
         ("load_reorder_policy", "real", runs[0]),
         ("record_decision", "shadow", runs[0]),
         ("load_reorder_policy", "real", runs[1]),
@@ -217,12 +217,12 @@ def test_a_tool_called_in_a_nested_trigger_is_a_call_of_its_parent_s_run(run_wor
     for run_id, decision in zip(runs, decisions, strict=True):
         calls = [e for e in reader.load_run(run_id).events if isinstance(e, ToolCall)]
         assert [(c.name, c.ran, c.args, c.result) for c in calls] == [
-            (f"{AGENT}.load_reorder_policy", "real", {}, {"decisions_so_far": 0}),
-            (f"{AGENT}.record_decision", "shadow", {"decision": decision}, {"recorded": False}),
+            (f"{AGENT}:load_reorder_policy", "real", {}, {"decisions_so_far": 0}),
+            (f"{AGENT}:record_decision", "shadow", {"decision": decision}, {"recorded": False}),
         ]
     assert reader.load_run(shadow.engine_run_id()).events == []
     assert [line for line in shadow.summaries() if "○ tool" in line] == [
-        f"  ○ tool  {AGENT}.record_decision  fake ran instead"
+        f"  ○ tool  {AGENT}:record_decision  fake ran instead"
     ] * 2
     assert [e["decisions_so_far"] for e in shadow.events("policy")] == [0, 0]
     assert [e["decisions_so_far"] for e in bare.events("policy")] == [0, 1]
@@ -241,7 +241,7 @@ UNREACHED = f"✗ subagent  POST {HOST}/reservations  could not reach target {DO
 # `--record` the decision's write tool. The sub-agent's read tool is no write.
 NESTED = {
     "nested_runs": [RESERVATION],
-    "nested_tools": [RESERVATION, f"○ tool  {AGENT}.record_decision  fake ran instead"],
+    "nested_tools": [RESERVATION, f"○ tool  {AGENT}:record_decision  fake ran instead"],
     "nested_write": [RESERVATION],
 }
 
@@ -366,7 +366,7 @@ def test_a_down_target_s_closing_lines_say_the_tool_write_did_not_happen_either(
     start = summary.index("  None of these writes reached the real service:")
     assert summary[start + 1 : start + 4] == [
         f"  {UNREACHED}",
-        f"  ○ tool  {AGENT}.record_decision  fake ran instead",
+        f"  ○ tool  {AGENT}:record_decision  fake ran instead",
         "",
     ]
     assert f"  {HOST}  2 reads  1 write that could not reach the target" in summary

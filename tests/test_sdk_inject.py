@@ -405,7 +405,7 @@ def _patched_methods() -> list[Any]:
 
 
 def test_instrument_patches_once_however_often_and_from_however_many_threads(monkeypatch):
-    """Eight threads all get past the unlocked check before any of them patches: `active()` is
+    """Eight threads all get past the unlocked check before any of them patches: `is_active()` is
     where each waits for the others. Then they queue on the lock, and only the first patches."""
     originals = _patched_methods()
     assert not any(hasattr(m, "__wrapped__") for m in originals)
@@ -415,7 +415,7 @@ def test_instrument_patches_once_however_often_and_from_however_many_threads(mon
         barrier.wait(timeout=10)
         return True
 
-    monkeypatch.setattr(instrumentation, "active", active_once_all_are_here)
+    monkeypatch.setattr(instrumentation, "is_active", active_once_all_are_here)
 
     def race() -> None:
         sdk.instrument()
@@ -425,7 +425,7 @@ def test_instrument_patches_once_however_often_and_from_however_many_threads(mon
         t.start()
     for t in threads:
         t.join(timeout=10)
-    monkeypatch.setattr(instrumentation, "active", lambda: True)
+    monkeypatch.setattr(instrumentation, "is_active", lambda: True)
     sdk.instrument()
     # Each method wrapped exactly once: its wrapper wraps the original, which wraps nothing.
     assert [m.__wrapped__ for m in _patched_methods()] == originals

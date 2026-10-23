@@ -27,6 +27,7 @@ import hashlib
 import json
 import math
 import re
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, assert_never, get_args
@@ -124,6 +125,23 @@ def is_valid_run_id(run_id: str) -> bool:
     return RUN_ID_PATTERN.fullmatch(run_id) is not None
 
 
+# The module name a function or class defined in the script being run has.
+MAIN_MODULE = "__main__"
+
+
+def importable_module(module: str) -> str:
+    """The name another process imports `module` by. `__main__` started with `python -m pkg.agent`
+    is `pkg.agent`, its `__spec__` name; a script run by path has no spec, and stays `__main__`,
+    which no other process can import. So does a package's `__main__.py`, since importing it again
+    would run the agent's whole main."""
+    if module != MAIN_MODULE:
+        return module
+    name = getattr(getattr(sys.modules.get(MAIN_MODULE), "__spec__", None), "name", None)
+    if not isinstance(name, str) or not name or name.rpartition(".")[2] == MAIN_MODULE:
+        return module
+    return name
+
+
 @dataclass(frozen=True)
 class ErrorInfo:
     type: str  # the exception's `module.qualname`; a stored one at most MAX_ERROR_TYPE
@@ -133,9 +151,9 @@ class ErrorInfo:
     def from_exception(cls, exc: BaseException) -> "ErrorInfo":
         """The one spelling of "what went wrong" a run or a tool call records.
 
-        Its message is `str(exc)`, and its type the class's `module.qualname`, cut to
-        MAX_POSTED_MESSAGE and MAX_POSTED_TYPE characters outside any secret's shape: the SDK
-        cannot redact, and the store redacts each whole before it cuts it to a label.
+        Its message is `str(exc)`, and its type the class's `module.qualname` (`importable_module`),
+        cut to MAX_POSTED_MESSAGE and MAX_POSTED_TYPE characters outside any secret's shape: the
+        SDK cannot redact, and the store redacts each whole before it cuts it to a label.
 
         Never raises on an exception whose `__str__` does: the SDK calls this while an
         agent's own exception is in flight, and recording it must not replace it with another."""
@@ -145,7 +163,9 @@ class ErrorInfo:
         except Exception:
             message = f"<unprintable {kind.__qualname__}>"
         return cls(
-            cut_outside_secrets(f"{kind.__module__}.{kind.__qualname__}", MAX_POSTED_TYPE),
+            cut_outside_secrets(
+                f"{importable_module(kind.__module__)}.{kind.__qualname__}", MAX_POSTED_TYPE
+            ),
             cut_outside_secrets(message, MAX_POSTED_MESSAGE),
         )
 

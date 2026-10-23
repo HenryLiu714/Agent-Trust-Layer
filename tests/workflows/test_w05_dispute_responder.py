@@ -14,6 +14,7 @@ from irimi import redact, report
 from irimi.exchange import Exchange
 
 W = "w05_dispute_responder"
+AGENT = "examples.workflows.w05_dispute_responder.agent"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.
 MODES = ("shadow", "serve")
 
@@ -109,7 +110,7 @@ def test_the_refunds_own_charge_refunded_event_is_a_second_run_with_no_calls(run
         assert len(result.calls()) == 8
     shadow = run_workflow(W, "cascade", "shadow")
     runs = shadow.events("run.start")
-    assert [r["name"] for r in runs] == ["on_event", "on_event"]
+    assert [r["name"] for r in runs] == [f"{AGENT}:on_event"] * 2
     assert {c["run"] for c in shadow.calls()} == {runs[0]["run"]}
     # The second run is built from irimi's minted refund: in production this event would never
     # arrive for a shadowed refund. The summary's would-have-fired list is where it shows instead.
@@ -211,7 +212,7 @@ def test_irimi_compare_cannot_tell_two_refunds_of_the_rest_of_a_charge_apart(
     ] == [[1500], [1000]]
     code, out, err = compare(full, rest)
     a, b = (result.one("run.start")["run"] for result in (full, rest))
-    on_event = "on_event  examples.workflows.w05_dispute_responder.agent:on_event"
+    on_event = "examples.workflows.w05_dispute_responder.agent:on_event"
     # The same event's bytes, and a signature that names the second it was signed in: the args
     # differ only when the two deliveries were signed in different seconds.
     triggers = [rest.stored().load_run(run_id).record.trigger for run_id in (a, b)]

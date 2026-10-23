@@ -1,7 +1,8 @@
 """`sdk.replay()`: `irimi replay` as a Python function, for a test.
 
-    result = sdk.replay(run_id)                         # the run's own trigger and args
-    result = sdk.replay(run_id, handle, Ticket(...))    # a function of yours, with its args
+    result = sdk.replay(run_id)                                 # the run's own trigger and args
+    result = sdk.replay(run_id, handle, args=(Ticket(...),))    # a function of yours, with args
+    assert result.same, result
 
 It runs `python -m irimi replay --call ... --args-file ... --result-file ... -- RUN_ID` as a
 subprocess and returns what that wrote, as a `ReplayResult`. The agent gets a fresh process, whose
@@ -44,18 +45,27 @@ def _run_irimi(argv: list[str], env: Mapping[str, str]) -> int:
 
 @dataclass(frozen=True)
 class ReplayResult:
-    """What one `irimi replay` said. `replay_run_id` is the run the replay stored, None when
-    it was refused before it ran (`exit_code` 2, the reason in `lines`). `exit_code` is the
-    comparison's, as `irimi compare`'s: 0 the same writes, 1 any differ, 2 trouble (a replay that
-    could not run, or call its trigger); and 130 or 143 for one SIGINT or SIGTERM stopped.
-    `diverged_at` is the line of the first call the recording did not answer, None when every call
-    was."""
+    """What one `irimi replay` said. `same` is True when the replay made the same writes as the
+    recording; `str(result)` is what `irimi replay` printed, so `assert result.same, result` shows
+    the difference. `replay_run_id` is the run the replay stored, None when it was refused before
+    it ran (`exit_code` 2, the reason in `lines`). `exit_code` is the CLI's, as `irimi compare`'s:
+    0 the same writes, 1 any differ, 2 trouble (a replay that could not run, or call its trigger);
+    and 130 or 143 for one SIGINT or SIGTERM stopped. `diverged_at` is the line of the first call
+    the recording did not answer, None when every call was."""
 
     source_run_id: str
     replay_run_id: str | None
     exit_code: int
     diverged_at: str | None
     lines: tuple[str, ...]
+
+    @property
+    def same(self) -> bool:
+        """The replay ran and made the same writes as the recording: exit code 0."""
+        return self.exit_code == 0
+
+    def __str__(self) -> str:
+        return "\n".join(self.lines)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -87,34 +97,39 @@ class ReplayResult:
         return cls(source, replayed, code, diverged, tuple(lines))
 
 
+class ReplayError(Exception):
+    """`sdk.replay` could not start a replay, or the replay wrote no result: the reason."""
+
+
 def replay(
     run_id: str,
-    fn: Callable[..., Any] | None = None,
-    /,
-    *args: Any,
+    call: Callable[..., Any] | None = None,
+    *,
+    args: tuple[Any, ...] = (),
+    kwargs: Mapping[str, Any] | None = None,
     store: str | os.PathLike[str] | None = None,
-    **kwargs: Any,
 ) -> ReplayResult:
     """Replay the stored run `run_id` through irimi, and return what changed.
 
-    `fn=None` replays the run's recorded entrypoint with its recorded args. Given `fn`, it is
+    `call=None` replays the run's recorded entrypoint with its recorded args. Given `call`, it is
     called instead, with `args` and `kwargs`: it must be importable as `module:qualname`, as a
-    decorated trigger normally is, and its arguments must capture replayably (`capture`), or this
-    raises ValueError naming why. `store` is the trace store, `$IRIMI_HOME/store` by default.
+    decorated trigger normally is, and its arguments must capture replayably (`capture`).
+    `store` is the trace store, `$IRIMI_HOME/store` by default.
 
     Never raises on the replay's own exit code: a refused replay is a result with `exit_code` 2.
-    RuntimeError when `irimi replay` exited without writing a result at all."""
-    if fn is None and (args or kwargs):
-        raise ValueError("sdk.replay takes arguments only for a function it is given")
-    call = None if fn is None else (_importable(fn), _captured(fn, args, kwargs))
+    ReplayError when the replay cannot be started as asked, or exited without writing a result."""
+    kwargs = {} if kwargs is None else kwargs
+    if call is None and (args or kwargs):
+        raise ReplayError("sdk.replay takes args and kwargs only for a call it is given")
+    planned = None if call is None else (_importable(call), _captured(call, tuple(args), kwargs))
     # A directory only this user can enter: the args are the caller's, unredacted.
     with tempfile.TemporaryDirectory(prefix="irimi-replay-") as tmp:
         result_file = Path(tmp) / "result.json"
         argv = ["replay", "--port", "0", "--result-file", str(result_file)]
-        if call is not None:
+        if planned is not None:
             args_file = Path(tmp) / "args.json"
-            args_file.write_text(json.dumps(call[1]), encoding="utf-8")
-            argv += ["--call", call[0], "--args-file", str(args_file)]
+            args_file.write_text(json.dumps(planned[1]), encoding="utf-8")
+            argv += ["--call", planned[0], "--args-file", str(args_file)]
         if store is not None:
             argv += ["--store", os.fspath(store)]
         env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
@@ -122,47 +137,47 @@ def replay(
         try:
             return ReplayResult.from_json(json.loads(result_file.read_text(encoding="utf-8")))
         except (OSError, ValueError) as exc:
-            raise RuntimeError(f"irimi replay exited {code} and wrote no result: {exc}") from None
+            raise ReplayError(f"irimi replay exited {code} and wrote no result: {exc}") from None
 
 
 def _importable(fn: Callable[..., Any]) -> str:
-    """`fn`'s `module:qualname`, which the child imports it by, or ValueError naming why it would
-    import something else, or nothing: `api.resolve`'s refusals, `__main__` among them, are the
-    child's, so they are asked of it here, the one rule."""
+    """`fn`'s `module:qualname`, which the child imports it by, or ReplayError naming why it
+    would import something else, or nothing: `api.resolve`'s refusals, `__main__` among them, are
+    the child's, so they are asked of it here, the one rule."""
     try:
         name = entrypoint(fn, "sdk.replay")
     except TypeError as exc:
-        raise ValueError(str(exc)) from None
+        raise ReplayError(str(exc)) from None
     try:
         found = resolve(name)
     except NotCallable as exc:
-        raise ValueError(f"{name} cannot be called by its name: {exc}") from None
+        raise ReplayError(f"{name} cannot be called by its name: {exc}") from None
     if found != fn:  # a classmethod is bound afresh on each lookup, and compares equal
-        raise ValueError(f"{name} names another function than the one given")
+        raise ReplayError(f"{name} names another function than the one given")
     return name
 
 
 def _captured(fn: Callable[..., Any], args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> Any:
-    """`args` and `kwargs` bound to `fn` and captured as a trigger's are, or ValueError naming
+    """`args` and `kwargs` bound to `fn` and captured as a trigger's are, or ReplayError naming
     why the child could not be given them: they do not bind, as calling `fn` would say, or which
     of them does not capture replayably."""
     try:
         bound = bind(fn, args, kwargs)
     except TypeError as exc:
-        raise ValueError(f"the arguments do not bind to {fn.__qualname__}: {exc}") from None
+        raise ReplayError(f"the arguments do not bind to {fn.__qualname__}: {exc}") from None
     captured, replayable = capture_call(fn, args, kwargs)
     if replayable:
         return captured
     unreplayable = [name for name, value in bound.arguments.items() if not capture(value)[1]]
     if not unreplayable:
-        raise ValueError(
+        raise ReplayError(
             f"the arguments to {fn.__qualname__} are larger than a run records "
             f"({MAX_CAPTURED_BYTES} bytes)"
         )
     if len(unreplayable) == 1:
-        raise ValueError(
+        raise ReplayError(
             f"the argument {unreplayable[0]} to {fn.__qualname__} does not capture replayably"
         )
-    raise ValueError(
+    raise ReplayError(
         f"the arguments {', '.join(unreplayable)} to {fn.__qualname__} do not capture replayably"
     )

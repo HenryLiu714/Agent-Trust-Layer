@@ -61,25 +61,25 @@ def test_a_full_refund_walks_the_same_loop_as_bare_and_neither_write_happens(run
     assert shadow.world.stripe.refunds == []
     assert shadow.world.stripe.charges["ch_TICKET1"]["amount_refunded"] == 0
     # The tool write: its real body ran bare and only its stand-in under shadow.
-    assert bare.tools() == [(f"{AGENT}.lookup_customer", "real"), (f"{AGENT}.send_reply", "real")]
+    assert bare.tools() == [(f"{AGENT}:lookup_customer", "real"), (f"{AGENT}:send_reply", "real")]
     assert shadow.tools() == [
-        (f"{AGENT}.lookup_customer", "real"),
-        (f"{AGENT}.send_reply", "shadow"),
+        (f"{AGENT}:lookup_customer", "real"),
+        (f"{AGENT}:send_reply", "shadow"),
     ]
     assert replies(bare) == [("T-1001", "Refund of 4900 requested (statuses: 200).")]
     assert replies(shadow) == []
     summary = shadow.summaries()
     refund = f"  ○ stripe  refund $49.00 on ch_TICKET1  {PASSED}"
     # The tool write's line follows the HTTP write's.
-    reply = f"  ○ tool  {AGENT}.send_reply  fake ran instead"
+    reply = f"  ○ tool  {AGENT}:send_reply  fake ran instead"
     assert summary[summary.index(refund) : summary.index(refund) + 2] == [refund, reply]
     # irimi recorded both calls in the run, under the default name: the function's own
-    # `module.qualname`, the real module's because the harness launches through `launch.py`.
+    # `module:qualname`, the real module's because the harness starts it with `python -m`.
     [run] = shadow.sdk_runs()
     stored = shadow.stored().load_run(run.run_id).events
     assert [(e.name, e.kind, e.ran) for e in stored if isinstance(e, ToolCall)] == [
-        (f"{AGENT}.lookup_customer", "read", "real"),
-        (f"{AGENT}.send_reply", "write", "shadow"),
+        (f"{AGENT}:lookup_customer", "read", "real"),
+        (f"{AGENT}:send_reply", "write", "shadow"),
     ]
     # One run, attributed by the SDK stand-in, ended ok.
     assert [e["outcome"] for e in shadow.events("run.end")] == ["ok"]
@@ -192,7 +192,7 @@ def test_the_shadow_summary_names_the_sdk_run_inside_the_process_and_how_to_repl
     assert summary[0].startswith(f"irimi shadow · run {process} (whole process) · 10 exchanges · ")
     assert summary[-3:] == [
         "",
-        f"  run {run.run_id[:8]}  handle_ticket(...)  10 exchanges · 2 writes",
+        f"  run {run.run_id[:8]}  {AGENT}:handle_ticket(...)  10 exchanges · 2 writes",
         f"  replay with: irimi replay {run.run_id[:8]}",
     ]
 
@@ -254,7 +254,7 @@ def test_the_ticket_is_stored_as_the_runs_trigger_by_its_dataclass(run_workflow,
         "message": "I was charged twice for the same order",
     }
     assert run.trigger == Trigger(
-        "handle_ticket",
+        f"{AGENT}:handle_ticket",
         f"{AGENT}:handle_ticket",
         {"ticket": {"__irimi_type__": f"{AGENT}:Ticket", "value": ticket}},
         True,
@@ -264,9 +264,9 @@ def test_the_ticket_is_stored_as_the_runs_trigger_by_its_dataclass(run_workflow,
 
 # ---------------------------------------------------------------------- irimi compare
 
-TRIAGE = f"handle_ticket  {AGENT}:handle_ticket"
+TRIAGE = f"{AGENT}:handle_ticket"
 FULL = f"○ stripe  refund $49.00 on ch_TICKET1  {PASSED}"
-REPLY = f"○ tool  {AGENT}.send_reply  fake ran instead"
+REPLY = f"○ tool  {AGENT}:send_reply  fake ran instead"
 # The reply the full refund's run sends the customer, which its summary line does not print.
 SENT = "Refund of 4900 requested (statuses: 200)."
 
@@ -441,7 +441,7 @@ def test_irimi_compare_reads_a_run_whose_last_line_a_crash_cut(shared_store_run,
     events = copy / "runs" / b / "events.jsonl"
     lines = events.read_text().splitlines(keepends=True)
     [last_write] = [i for i, line in enumerate(lines) if '"type": "tool_call"' in line][-1:]
-    assert f"{AGENT}.send_reply" in lines[last_write]
+    assert f"{AGENT}:send_reply" in lines[last_write]
     events.write_text("".join(lines[:last_write]) + lines[last_write][:40])
     assert half.command("compare", a, b, "--store", str(copy)) == (
         1,
@@ -500,8 +500,8 @@ def test_runs_show_and_list_name_the_file_and_line_of_a_damaged_event(run_workfl
     shutil.copytree(result.store_root(), copy)
     events = copy / "runs" / run / "events.jsonl"
     lines = events.read_text().splitlines(keepends=True)
-    [reply] = [i for i, line in enumerate(lines) if f'"name": "{AGENT}.send_reply"' in line]
-    damaged = lines[reply].replace(f'"name": "{AGENT}.send_reply"', '"name": ["send_reply"]')
+    [reply] = [i for i, line in enumerate(lines) if f'"name": "{AGENT}:send_reply"' in line]
+    damaged = lines[reply].replace(f'"name": "{AGENT}:send_reply"', '"name": ["send_reply"]')
     events.write_text("".join([*lines[:reply], damaged, *lines[reply + 1 :]]))
     refused = f"could not be read: {events}, line {reply + 1}: 'name' is a list, not a string"
     assert result.runs("show", run, "--store", str(copy)) == (
@@ -686,8 +686,8 @@ LLM = ("llm#1", "llm#2", "llm#3", "llm#4")
 # What `handle_ticket` returns for the full refund: four model calls, one refund, and the model's
 # last word.
 FULL_REFUND_RETURNED = {"turns": 4, "refund_statuses": [200], "final": "Ticket resolved."}
-LOOKUP_TOOL = f"{AGENT}.lookup_customer"
-REPLY_TOOL = f"{AGENT}.send_reply"
+LOOKUP_TOOL = f"{AGENT}:lookup_customer"
+REPLY_TOOL = f"{AGENT}:send_reply"
 
 
 def test_a_full_refund_replayed_unchanged_is_answered_from_its_recording(replayed):
@@ -1205,7 +1205,9 @@ def test_a_full_refund_replayed_with_other_args_says_its_args_differ(replayed):
     ]
     assert (replay.exit_code, replay.agent_exit_code()) == (0, 0)
     record = replay.stored().load_run(replay.process_run_id()).record
-    assert record.trigger == Trigger("handle_ticket", f"{AGENT}:handle_ticket", OTHER_TICKET, True)
+    assert record.trigger == Trigger(
+        f"{AGENT}:handle_ticket", f"{AGENT}:handle_ticket", OTHER_TICKET, True
+    )
     assert replay.returned() == FULL_REFUND_RETURNED
     assert replay.internet.requests("api.stripe.com") == []
     assert len(replay.internet.requests("api.anthropic.com")) == 4
@@ -1217,8 +1219,8 @@ def test_a_call_of_another_function_is_replayed_in_place_of_the_trigger(replayed
     parameters: here the read tool `lookup_customer`, called in no run, which the replay's
     run takes. The recording answers it, and nothing else is called, so the result says the
     recording's other calls were never made and its two writes are only in A, and exits 1. The
-    replay's run names the function it called, `lookup_customer`, as `@sdk.trigger` names a run,
-    never the trigger that did not run."""
+    replay's run names the function it called, `module:lookup_customer`, as `@sdk.trigger` names
+    a run, never the trigger that did not run."""
     options = ("--call", f"{AGENT}:lookup_customer", "--args", json.dumps({"customer": CUSTOMER}))
     recorded, replay = replayed(W, "full_refund", options=options)
     source = recorded.one("run.start")["run"]
@@ -1239,7 +1241,7 @@ def test_a_call_of_another_function_is_replayed_in_place_of_the_trigger(replayed
     assert replay.events("run.start") == []
     record = replay.stored().load_run(replay.process_run_id()).record
     assert record.trigger == Trigger(
-        "lookup_customer", f"{AGENT}:lookup_customer", {"customer": CUSTOMER}, True
+        f"{AGENT}:lookup_customer", f"{AGENT}:lookup_customer", {"customer": CUSTOMER}, True
     )
     assert replay.internet.requests() == []
     assert check_invariants(replay) == []
@@ -1592,7 +1594,7 @@ def test_a_replay_that_makes_no_refund_reads_live_where_its_recording_shows_one(
     [reply] = [
         e
         for e in replay.stored().load_run(run_id).events
-        if isinstance(e, ToolCall) and e.name.endswith(".send_reply")
+        if isinstance(e, ToolCall) and e.name.endswith(":send_reply")
     ]
     assert reply.args["body"] == "No refund issued; 0 already refunded."
     code, out, err = replay.compare_runs(recorded.one("run.start")["run"], run_id)

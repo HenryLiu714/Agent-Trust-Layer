@@ -17,8 +17,7 @@ it is read, but only so far (`decoded`). They are read with urllib, or, with
 the SDK labels each at httpx's transport, and takes the label off again while the stream is still
 open.
 
-    python -m examples.workflows.launch \\
-        examples.workflows.w07_streaming_assistant.agent <question> \\
+    python -m examples.workflows.w07_streaming_assistant.agent <question> \\
         {read_all,hang_up,two_callers,hand_off}
 
 The agent delivers the question to itself over loopback. `hang_up` makes that caller reset the

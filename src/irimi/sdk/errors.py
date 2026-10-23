@@ -18,19 +18,24 @@ from irimi import trace
 
 
 class RecordedToolError(Exception):
-    """A recorded exception, raised again: its `type`, as `trace.ErrorInfo` spells it, and its
-    `message`, its `str`. Picklable and copyable, as the agent's own exceptions are."""
+    """A recorded exception, raised again: `type_name`, the original's type as
+    `trace.ErrorInfo` spells it (`builtins.KeyError`), and `message`, its `str`. Picklable and
+    copyable, as the agent's own exceptions are.
 
-    def __init__(self, type: str, message: str) -> None:
+    For a builtin exception such as KeyError, the raised error is also a subclass of that builtin
+    and has its name, so existing `except` clauses catch it; `isinstance(e, sdk.RecordedToolError)`
+    tells it apart."""
+
+    def __init__(self, type_name: str, message: str) -> None:
         super().__init__(message)
-        self.type = type
+        self.type_name = type_name
         self.message = message
 
     def __str__(self) -> str:
         return self.message
 
     def __reduce__(self) -> tuple[object, tuple[trace.ErrorInfo]]:
-        return recorded_error, (trace.ErrorInfo(self.type, self.message),)
+        return recorded_error, (trace.ErrorInfo(self.type_name, self.message),)
 
 
 # One class per builtin, so two recorded KeyErrors are of one type.
@@ -70,5 +75,5 @@ def error_info(exc: BaseException) -> trace.ErrorInfo:
     """What a run or a tool call records it raised: a recorded error as it was recorded, so a
     replay's record and its recording's say one type, and anything else as `from_exception`."""
     if isinstance(exc, RecordedToolError):
-        return trace.ErrorInfo(exc.type, exc.message)
+        return trace.ErrorInfo(exc.type_name, exc.message)
     return trace.ErrorInfo.from_exception(exc)

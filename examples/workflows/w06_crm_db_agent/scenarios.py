@@ -3,7 +3,7 @@
 Every assertion about a write tool is about which body ran. Under shadow the stand-in runs, so
 the CRM and the state directory must be exactly as seeded. Two scenarios pin gaps rather than
 guarantees: `read_after_write` (no tool overlay, so a read tool cannot see a stood-in write) and
-`unlabeled_write` (a write with no `@sdk.tool` label happens for real; the case for a future
+`unlabeled_write` (a write with no `@sdk.write_tool` label happens for real; the case for a future
 check that flags a production database URL).
 """
 
@@ -27,8 +27,8 @@ def _enrichment(world: World) -> None:
 
 WORKFLOW = Workflow(
     name="w06_crm_db_agent",
-    summary="Tools the proxy cannot see: SQLite and file writes labelled with @sdk.tool, run as "
-    "their stand-ins under shadow, plus the gaps (no tool overlay, unlabelled writes).",
+    summary="Tools the proxy cannot see: SQLite and file writes labelled with @sdk.write_tool, "
+    "run as their stand-ins under shadow, plus the gaps (no tool overlay, unlabelled writes).",
     scenarios={
         "enrich": Scenario(
             ("enrich", "smb"),
@@ -47,7 +47,7 @@ WORKFLOW = Workflow(
         ),
         "unlabeled_write": Scenario(
             ("unlabeled_write",),
-            doc="a SQLite write with no @sdk.tool label happens for real under shadow",
+            doc="a SQLite write with no @sdk.write_tool label happens for real under shadow",
         ),
         "tool_raises": Scenario(
             ("tool_raises",),

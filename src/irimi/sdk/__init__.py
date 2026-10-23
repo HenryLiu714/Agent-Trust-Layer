@@ -9,15 +9,15 @@ calls. The SDK marks each run in the agent's own code:
     @sdk.trigger
     def handle(ticket: Ticket) -> None: ...
 
-    with sdk.run(trigger={"date": "2026-09-29"}, name="nightly"): ...
+    with sdk.run("nightly", inputs={"date": "2026-09-29"}) as run: ...
 
 It reports each run's start (with what triggered it) and its end to irimi's control endpoint, and
 keeps the run's id in a context variable that `instrument()` puts on every request the run makes.
 
 A tool the proxy cannot see, because it is not HTTP, is labelled read or write; a write names the
-stand-in that runs in its place under irimi, and each call is recorded in its run:
+fake that runs in its place under irimi, and each call is recorded in its run:
 
-    @sdk.tool(kind="write", shadow=mock_database_write)
+    @sdk.write_tool(fake=mock_database_write)
     def database_write(row: Row) -> None: ...
 
 In a replay, a read tool is answered from the recording when it can be, and what it raised then
@@ -32,22 +32,25 @@ cannot reach is a warning on the `irimi.sdk` logger, and the run goes on.
 Imports only the stdlib and irimi's lowest layers, never mitmproxy, so it can ship on its own.
 """
 
-from irimi.sdk.api import run, trigger
-from irimi.sdk.context import active, current_run_id, propagate
+from irimi.sdk.api import Run, run, trigger
+from irimi.sdk.context import current_run_id, is_active, propagate
 from irimi.sdk.errors import RecordedToolError
 from irimi.sdk.instrumentation import instrument
-from irimi.sdk.replays import ReplayResult, replay
-from irimi.sdk.tools import tool
+from irimi.sdk.replays import ReplayError, ReplayResult, replay
+from irimi.sdk.tools import read_tool, write_tool
 
 __all__ = [
     "RecordedToolError",
+    "ReplayError",
     "ReplayResult",
-    "active",
+    "Run",
     "current_run_id",
     "instrument",
+    "is_active",
     "propagate",
+    "read_tool",
     "replay",
     "run",
-    "tool",
     "trigger",
+    "write_tool",
 ]

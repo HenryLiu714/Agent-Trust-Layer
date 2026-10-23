@@ -24,12 +24,11 @@ from irimi.replay.index import compared_body
 from irimi.report.model import RunView
 from irimi.report.summary import summary_lines
 from irimi.servicemaps import MapError
-from tests import test_phase_exit
-
-home = test_phase_exit.home  # bound here so pytest finds it
+from tests.support import builders
+from tests.support.builders import FORM_HEADER
 
 AT = 1_700_000_000.0
-FORM = (("content-type", "application/x-www-form-urlencoded"),)
+FORM = (FORM_HEADER,)
 TICKET: dict[str, trace.JSONValue] = {"ticket": "T-1"}
 HEADER = "irimi compare · a vs b"
 LABELS = [
@@ -42,18 +41,7 @@ TOOL = "○ tool  db.mark_refunded  fake ran instead"
 
 def _refund(amount: int = 4900, **changes) -> Exchange:
     """A refund irimi faked after its L3 read passed, as `report` prints `REFUND` for 4900."""
-    body = f"charge=ch_1&amount={amount}&currency=usd".encode()
-    refund = Exchange(
-        request=Request("POST", "https", "api.stripe.com", 443, "/v1/refunds", "", FORM, body),
-        response=Response(200, (), b"{}"),
-        service="stripe",
-        operation="refunds.create",
-        kind="write",
-        answered_by="fake-L1",
-        run_id="",
-        precondition=Precondition("passed"),
-    )
-    return dataclasses.replace(refund, **changes)
+    return builders.refund_exchange(amount, **changes)
 
 
 def _post(text: str) -> Exchange:
@@ -101,21 +89,21 @@ def _llm(prompt: str) -> Exchange:
 
 
 def _tool(name: str = "db.mark_refunded", kind: str = "write", ran: str = "shadow") -> ToolCall:
-    return ToolCall("tc", "", name, kind, ran, {}, None, None, AT, AT + 1)  # type: ignore[arg-type]
+    return builders.tool_call(
+        tool_call_id="tc", run_id="", name=name, kind=kind, ran=ran, started_at=AT, ended_at=AT + 1
+    )
 
 
 def _record(run_id: str, args: trace.JSONValue = TICKET, **changes) -> RunRecord:
+    """An SDK run of `refund_ticket` that started at `AT` and ended a second later."""
     end = trace.RunEnd(changes.pop("ended_at", AT + 1), "ok", None, None)
-    record = RunRecord(
-        schema_version=trace.SCHEMA_VERSION,
-        run_id=run_id,
-        mode="shadow",
+    record = builders.run_record(
+        run_id,
+        AT,
         attribution="sdk",
         trigger=Trigger("refund_ticket", "agent:refund_ticket", args, True),
         agent_version="1.0",
-        engine_version="0.0.0",
         sdk_version="0.0.0",
-        started_at=AT,
         end=end,
     )
     return dataclasses.replace(record, **changes)

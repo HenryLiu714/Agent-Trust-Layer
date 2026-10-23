@@ -11,21 +11,27 @@ import contextlib
 import dataclasses
 import json
 import socket
+import sys
 from typing import cast
 
 import pytest
 
-from irimi import servicemaps
+from irimi import cli, servicemaps
+from irimi.cli import compose, main
 from irimi.config import ca, paths
+from irimi.core import exitcodes
 from irimi.core.exchange import Exchange
 from irimi.decide.overlay import NoOverlay
 from irimi.decide.policy import ShadowPolicy
 from irimi.engine import EngineConfig, Serve
 from irimi.engine.mitm import IrimiAddon, MitmEngine
 from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV
-from tests.doubles import NullStore
+from tests.support import builders
 from tests.support.credentials import MESSAGE_SECRET, UNREADABLE_SECRET
+from tests.support.doubles import NullStore
+from tests.support.engine import ReaderGoneWhen, Served, port_of, serve_blocks, spy_on_the_store
 from tests.support.servers import stop_server
+from tests.support.waiting import eventually
 
 
 def _config(tmp_path, monkeypatch, listen_host="127.0.0.1"):
@@ -339,7 +345,6 @@ def test_the_store_calls_back_on_its_writer_once_a_runs_end_is_on_disk(tmp_path)
 
     from irimi.record.store.reader import StoreReader
     from irimi.record.store.writer import DirectoryStore
-    from tests.test_store import _exchange, _record
 
     root = tmp_path / "store"
     seen = []
@@ -352,9 +357,9 @@ def test_the_store_calls_back_on_its_writer_once_a_runs_end_is_on_disk(tmp_path)
         )
 
     store = DirectoryStore(root, b"k" * 32, ended)
-    store.start_run(_record("r1"))
-    store.record(_exchange("r1"))
-    store.record(_exchange("r2"))
+    store.start_run(builders.run_record("r1"))
+    store.record(builders.exchange(run_id="r1"))
+    store.record(builders.exchange(run_id="r2"))
     store.end_run("r1", 20.0, "ok")
     store.close()
     [(run_id, thread, outcome, events)] = seen
@@ -369,8 +374,6 @@ def test_a_run_s_writes_and_keys_are_dropped_once_its_end_is_on_disk(tmp_path, m
     from irimi import cli
     from irimi.cli import compose
     from irimi.decide import idempotency
-    from tests.test_idempotency import PARAMS, _stored
-    from tests.test_store import _exchange, _record
 
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "home"))
     monkeypatch.chdir(tmp_path)
@@ -381,25 +384,27 @@ def test_a_run_s_writes_and_keys_are_dropped_once_its_end_is_on_disk(tmp_path, m
 
     def on_run_ended(index, run_id):
         assert run is not None and run.write_log is not None and run.keys is not None
-        left_at_end.append((run.write_log.for_run(run_id), run.keys.get(slot_of[run_id], PARAMS)))
+        left_at_end.append(
+            (run.write_log.for_run(run_id), run.keys.get(slot_of[run_id], builders.REFUND_PARAMS))
+        )
 
     run = compose.prepare_run(args, serve=True, on_run_ended=on_run_ended)
     assert run is not None and run.write_log is not None and run.keys is not None
     assert run.lock is not None
-    ended, still_open = _exchange("r1"), _exchange("r2")
+    ended, still_open = builders.exchange(run_id="r1"), builders.exchange(run_id="r2")
     run.write_log.add(ended)
     run.write_log.add(still_open)
     for slot in slot_of.values():
-        run.keys.put(slot, PARAMS, _stored())
+        run.keys.put(slot, builders.REFUND_PARAMS, builders.first_answer())
     try:
-        run.store.start_run(_record("r1"))
+        run.store.start_run(builders.run_record("r1"))
         run.store.end_run("r1", 20.0, "ok")
     finally:
         run.store.close()
         run.lock.release()
     assert left_at_end == [((), (None, False))]
     assert run.write_log.for_run("r2") == (still_open,)
-    assert run.keys.get(slot_of["r2"], PARAMS) == (_stored(), False)
+    assert run.keys.get(slot_of["r2"], builders.REFUND_PARAMS) == (builders.first_answer(), False)
     engine = compose.build_engine(run, lambda ex: None)
     assert isinstance(engine, MitmEngine) and isinstance(engine.policy, ShadowPolicy)
     assert engine.write_log is run.write_log
@@ -411,7 +416,6 @@ def test_a_callback_that_raises_is_logged_and_the_store_carries_on(tmp_path, cap
     exception's type, and the next event is still written."""
     from irimi.record.store.reader import StoreReader
     from irimi.record.store.writer import DirectoryStore
-    from tests.test_store import _exchange, _record
 
     root = tmp_path / "store"
 
@@ -419,9 +423,9 @@ def test_a_callback_that_raises_is_logged_and_the_store_carries_on(tmp_path, cap
         raise ValueError(f"cannot print {MESSAGE_SECRET}")
 
     store = DirectoryStore(root, b"k" * 32, ended)
-    store.start_run(_record("r1"))
+    store.start_run(builders.run_record("r1"))
     store.end_run("r1", 20.0, "ok")
-    store.record(_exchange("r2"))
+    store.record(builders.exchange(run_id="r2"))
     store.close()
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert warnings == ["irimi: the end-of-run callback raised ValueError"]
@@ -496,11 +500,10 @@ def test_an_ipv6_listener_is_bracketed_where_it_is_a_url(tmp_path):
 
 
 @pytest.fixture
-def home(tmp_path, monkeypatch):
-    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
-    monkeypatch.chdir(tmp_path)
-    ca.generate_ca(ca.ca_paths())
-    return tmp_path
+def home(home, monkeypatch):
+    """The shared `home`, which is also the working directory here."""
+    monkeypatch.chdir(home)
+    return home
 
 
 def test_serve_with_a_command_is_a_usage_error(home, monkeypatch, capsys):
@@ -574,7 +577,7 @@ def test_a_second_serve_on_one_store_is_refused_before_it_starts(home, capsys):
     first = threading.Thread(target=lambda: codes.append(serve.cmd_serve(args, stop)))
     first.start()
     try:
-        _wait_for(lambda: "listening on" in capsys.readouterr().out)
+        eventually(lambda: "listening on" in capsys.readouterr().out, timeout=30)
         running = writers()
         second = cli.parse_args(["serve", "--port", "0"])
         stopped = threading.Event()
@@ -790,80 +793,6 @@ def test_an_engine_that_stops_on_its_own_ends_serve_as_a_failure(home, monkeypat
     assert {signum: signal.getsignal(signum) for signum in before} == before
 
 
-def _wait_for(condition, timeout: float = 30.0) -> None:
-    import time
-
-    deadline = time.monotonic() + timeout
-    while not condition():
-        if time.monotonic() > deadline:
-            raise AssertionError("timed out")
-        time.sleep(0.02)
-
-
-class _Served:
-    """`irimi <argv>` as its own process, on a free port, with this test's `$IRIMI_HOME`. Its
-    stdout is read line by line on a thread, so a test waits for a line with a deadline rather
-    than blocking on a pipe, and its stderr goes to a file. `launcher` is what Python runs irimi
-    as: its own module, or a `-c` bootstrap that calls `irimi.cli.main`."""
-
-    def __init__(self, home, *argv: str, launcher: tuple[str, ...] = ("-m", "irimi")) -> None:
-        import os
-        import subprocess
-        import sys
-        import threading
-
-        env = {**os.environ, paths.IRIMI_HOME_ENV: str(home)}
-        env.pop("STRIPE_API_KEY", None)
-        self.err = home / "irimi.err"
-        with open(self.err, "w") as err:
-            self.proc = subprocess.Popen(
-                [sys.executable, *launcher, *argv, "--port", "0"],
-                cwd=home,
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=err,
-                text=True,
-            )
-        self.lines: list[str] = []
-        self._reader = threading.Thread(target=self._read, daemon=True)
-        self._reader.start()
-
-    def _read(self) -> None:
-        assert self.proc.stdout is not None
-        with self.proc.stdout:
-            for line in self.proc.stdout:
-                self.lines.append(line.rstrip("\n"))
-
-    def wait_for(self, condition) -> None:
-        _wait_for(lambda: condition(self.lines))
-
-    def banner(self) -> list[str]:
-        self.wait_for(lambda lines: len(lines) >= 2)
-        return self.lines[:2]
-
-    def stop(self, signame: str = "SIGTERM") -> tuple[int, list[str], str]:
-        """Send `signame`, and return the exit code, every line printed and stderr."""
-        import signal
-
-        self.proc.send_signal(getattr(signal, signame))
-        code = self.proc.wait(timeout=60)
-        self._reader.join(timeout=10)
-        return code, self.lines, self.err.read_text()
-
-    def kill(self) -> None:
-        if self.proc.poll() is None:
-            self.proc.kill()
-            self.proc.wait(timeout=10)
-
-
-def _port_of(banner: list[str]) -> int:
-    import re
-
-    match = re.search(r" · listening on 127\.0\.0\.1:(\d+) · ", banner[0])
-    assert match, banner
-    return int(match.group(1))
-
-
 @pytest.mark.parametrize(
     ("argv", "signame"),
     [(["serve"], "SIGTERM"), (["serve"], "SIGINT")],
@@ -875,10 +804,10 @@ def test_serve_prints_one_banner_and_stops_cleanly_on_a_signal(home, argv, signa
     with nothing more to say."""
     from irimi.report import terminal
 
-    served = _Served(home, *argv)
+    served = Served(home, *argv)
     try:
         banner = served.banner()
-        port = _port_of(banner)
+        port = port_of(banner)
         assert banner == terminal.banner_lines("serve", None, "127.0.0.1", port, ca.ca_paths().cert)
         code, lines, err = served.stop(signame)
     finally:
@@ -895,7 +824,7 @@ def test_a_wide_bind_says_so_in_the_banner(home):
 
     from irimi.report import terminal
 
-    served = _Served(home, "serve", "--bind", "0.0.0.0")
+    served = Served(home, "serve", "--bind", "0.0.0.0")
     try:
         served.wait_for(lambda lines: len(lines) >= 3)
         banner = served.lines[:3]
@@ -978,9 +907,9 @@ def test_a_served_sdk_agent_gets_one_summary_block_per_run_it_ends(home, tmp_pat
 
     upstream = HTTPServer(("127.0.0.1", 0), _Items)
     threading.Thread(target=upstream.serve_forever, daemon=True).start()
-    served = _Served(home, "serve")
+    served = Served(home, "serve")
     try:
-        port = _port_of(served.banner())
+        port = port_of(served.banner())
         listener = f"http://127.0.0.1:{port}"
         # The control endpoint says it serves: `EngineConfig.serve`, which the CLI sets.
         direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -1004,7 +933,7 @@ def test_a_served_sdk_agent_gets_one_summary_block_per_run_it_ends(home, tmp_pat
     assert all(r.attribution == "sdk" for r in records.values())
     assert run_status(records[open_run]) == "incomplete"
 
-    assert sorted(_blocks(lines, reader)) == ended
+    assert sorted(serve_blocks(lines, reader)) == ended
     # The read in no run is stored as no run's: in `unattributed/`, never as a run of its own.
     [bare] = reader.load_run(UNATTRIBUTED).events
     assert isinstance(bare, Exchange)
@@ -1051,26 +980,6 @@ def _run_agent(tmp_path_factory, source: str, listener: str, *argv: str) -> None
     )
     assert done.returncode == 0, done.stderr
     assert "irimi.sdk" not in done.stderr, done.stderr  # every post reached irimi
-
-
-def _blocks(lines: list[str], reader) -> list[str]:
-    """The run ids of the `--- run <id> ---` blocks in `lines`, each checked to be followed at once
-    by the summary of that run as the store holds it now: printed under one lock, a
-    block is never split by another line."""
-    from irimi.report.model import RunView
-    from irimi.report.summary import summary_lines
-
-    maps = servicemaps.load()
-    ids = []
-    for at, line in enumerate(lines):
-        if not line.startswith("--- run "):
-            continue
-        run_id = line.removeprefix("--- run ").removesuffix(" ---")
-        stored = reader.load_run(run_id)
-        expected = summary_lines(RunView(stored.record, stored.events), maps)
-        assert lines[at + 1 : at + 1 + len(expected)] == expected, run_id
-        ids.append(run_id)
-    return ids
 
 
 STREAMING_AGENT = """
@@ -1129,9 +1038,9 @@ def test_a_stream_read_to_its_end_is_in_its_runs_block(home, tmp_path_factory):
 
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), _Events)
     threading.Thread(target=upstream.serve_forever, daemon=True).start()
-    served = _Served(home, "serve")
+    served = Served(home, "serve")
     try:
-        listener = f"http://127.0.0.1:{_port_of(served.banner())}"
+        listener = f"http://127.0.0.1:{port_of(served.banner())}"
         _run_agent(
             tmp_path_factory,
             STREAMING_AGENT,
@@ -1145,9 +1054,171 @@ def test_a_stream_read_to_its_end_is_in_its_runs_block(home, tmp_path_factory):
         stop_server(upstream)
     assert code == 0, err
     reader = StoreReader(home / "store")
-    ended = _blocks(lines, reader)
+    ended = serve_blocks(lines, reader)
     assert len(ended) == 10
     for run_id in ended:
         [stream] = reader.load_run(run_id).events
         assert isinstance(stream, Exchange)
         assert stream.stream_chunks, run_id
+
+
+def test_serve_without_a_ca_is_refused(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
+    assert main(["serve"]) == exitcodes.ERROR
+    assert "irimi init" in capsys.readouterr().err
+
+
+def test_the_top_level_help_lists_serve(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["--help"])
+    assert exc.value.code == 0
+    assert "serve" in capsys.readouterr().out
+
+
+def test_serve_help_documents_port(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["serve", "--help"])
+    assert exc.value.code == 0
+    assert "--port" in capsys.readouterr().out
+
+
+def test_serve_on_a_port_in_use_is_refused(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
+    ca.generate_ca(ca.ca_paths())
+    sock = socket.socket()
+    try:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen()
+        port = sock.getsockname()[1]
+        assert main(["serve", "--port", str(port)]) == exitcodes.ERROR
+        assert capsys.readouterr().err.splitlines() == [
+            f"error: port {port} on 127.0.0.1 is in use; pick another with --port, or --port 0 "
+            "for any free port"
+        ]
+    finally:
+        sock.close()
+
+
+def test_serve_help_has_base_url_host(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["serve", "--help"])
+    assert exc.value.code == 0
+    assert "--base-url-host" in capsys.readouterr().out
+
+
+def test_a_reader_gone_by_serve_s_banner_closes_its_store_and_releases_its_lock(home, monkeypatch):
+    """`irimi serve | head -1`, its reader gone before the banner: 141, with the engine
+    stopped, the store closed and its `serve.lock` released, so the next serve may take it."""
+    import threading
+
+    from irimi.record.store.lock import ServeLock
+
+    spy = spy_on_the_store(monkeypatch)
+    out = ReaderGoneWhen()
+    out.gone = True
+    monkeypatch.setattr(sys, "stdout", out)
+    before = set(threading.enumerate())
+    assert main(["serve", "--port", "0"]) == exitcodes.BROKEN_PIPE
+    assert spy.closed != []
+    assert [t for t in threading.enumerate() if t not in before and t.is_alive()] == []
+    ServeLock.hold(home / "store").release()
+
+
+def test_serve_prints_a_line_for_each_tool_call(home, monkeypatch, capsys):
+    """`serve` wires the control endpoint's tool calls to its stream, as it does exchanges.
+    The engine here refuses to start, so only the wiring is under test. Its `run` serves until
+    `shutdown`, as a real engine's does: a `run` that returned at once would stop the loop before
+    `wait_ready` ran, and the test would fail on the ready timeout instead of the refusal."""
+    import asyncio
+    import threading
+
+    from irimi.engine import EngineStartError
+    from irimi.protocol.trace import ToolCall
+
+    wired = []
+    stopped = threading.Event()
+
+    class _Refuses:
+        async def run(self) -> None:
+            while not stopped.is_set():
+                await asyncio.sleep(0.01)
+
+        async def wait_ready(self) -> None:
+            raise EngineStartError("not started")
+
+        def shutdown(self) -> None:
+            stopped.set()
+
+    def build(run, on_exchange, on_tool_call):
+        wired.append(on_tool_call)
+        return _Refuses()
+
+    factory = cast(compose.EngineFactory, build)
+    assert main(["serve", "--port", "0"], engine_factory=factory) == exitcodes.ERROR
+    assert "error: not started" in capsys.readouterr().err.splitlines()
+    [on_tool_call] = wired
+    on_tool_call(ToolCall("t", "r", "db.write", "write", "shadow", {}, None, None, 1.0, 2.0))
+    assert "tool-fake     write     db.write -> ok" in capsys.readouterr().out.splitlines()
+
+
+def test_serve_records_under_the_store_it_was_given(home, monkeypatch, capsys):
+    """`--store` on `serve` is where its exchanges go, not `$IRIMI_HOME/store`. Serve mode
+    starts no process run, so an exchange that names no run is stored in `unattributed/` and
+    builds none, and the store is closed when serve stops, with a line pointing at it. Stopped
+    by its `stop` event, as the sample-workflow harness stops it, rather than by a signal to the
+    test process."""
+    import threading
+    import urllib.request
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from irimi.core.exchange import Exchange
+    from irimi.protocol.trace import UNATTRIBUTED
+    from irimi.record.store.reader import StoreReader
+
+    class _Hello(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("content-length", "5")
+            self.end_headers()
+            self.wfile.write(b"hello")
+
+        def log_message(self, *args):
+            pass
+
+    upstream = HTTPServer(("127.0.0.1", 0), _Hello)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    stop = threading.Event()
+    got = []
+
+    def drive(port):
+        proxy = urllib.request.ProxyHandler({"http": f"http://127.0.0.1:{port}"})
+        url = f"http://127.0.0.1:{upstream.server_address[1]}/hello"
+        try:
+            got.append(urllib.request.build_opener(proxy).open(url, timeout=10).read())
+        finally:  # stop serve whatever happened, or the test would wait on it forever
+            stop.set()
+
+    def startup(mode, args, index, run_id, host, port, cert):
+        threading.Thread(target=drive, args=(port,), daemon=True).start()
+
+    monkeypatch.setattr(compose, "print_startup", startup)
+    elsewhere = home / "elsewhere"
+    args = cli.parse_args(["serve", "--port", "0", "--store", str(elsewhere)])
+    try:
+        assert args.func(args, stop) == 0
+    finally:
+        stop_server(upstream)
+    assert got == [b"hello"]
+    assert capsys.readouterr().out.splitlines()[-1] == (
+        "stopped · 1 exchange not in any run: irimi runs show unattributed"
+    )
+    assert not (home / "store").exists()
+    assert StoreReader(elsewhere).list_runs() == []
+    stored = StoreReader(elsewhere).load_run(UNATTRIBUTED)
+    seen = [
+        (ex.request.path, ex.response.body)
+        if isinstance(ex, Exchange) and ex.response is not None
+        else ex
+        for ex in stored.events
+    ]
+    assert seen == [("/hello", b"hello")]

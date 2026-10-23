@@ -1,3 +1,5 @@
+"""`irimi maps list`: the maps irimi loaded, and what a bad overrides file says."""
+
 import pytest
 
 from irimi import servicemaps
@@ -37,7 +39,7 @@ def test_maps_without_a_subcommand_lists_the_maps(capsys):
     assert "api.stripe.com" in capsys.readouterr().out
 
 
-def test_maps_help_mentions_list(capsys):
+def test_maps_help_names_the_list_subcommand(capsys):
     with pytest.raises(SystemExit) as exc:
         main(["maps", "--help"])
     assert exc.value.code == 0

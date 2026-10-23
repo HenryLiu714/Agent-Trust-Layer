@@ -39,11 +39,9 @@ from irimi.report.runs import (
 )
 from irimi.report.summary import NO_TRAFFIC, Live, summary_lines, tool_write_line
 from irimi.report.terminal import printable, tool_call_line
-from tests import test_phase_exit
-from tests.test_engine_mitm import PRECONDITION_STRIPE_MAP
-from tests.test_phase_exit import PHASE2_SUMMARY, _run_phase2_under_shadow
-
-home = test_phase_exit.home  # bound here so pytest finds it
+from tests.support import builders
+from tests.support.maps import PRECONDITION_STRIPE_MAP
+from tests.support.scenarios import REFUND_SUMMARY, run_refund_scenario
 
 # The loopback Stripe's map with one telemetry route on it. A GET, because the stand-in fails the
 # helper on any other verb it hears; telemetry is forwarded live, so the stand-in answers it.
@@ -72,13 +70,13 @@ def _process_run(store) -> RunRecord:
     return run
 
 
-def test_the_phase_2_run_prints_the_same_summary_from_its_store_as_it_did_live(
+def test_the_refund_scenario_prints_the_same_summary_stored_as_live(
     home, tmp_path, capfd, monkeypatch
 ):
     """A stored run prints the summary it printed live. The only field allowed to differ is the
     elapsed seconds: the live summary times the child, and the stored one the run record's own
     start and end."""
-    _run_phase2_under_shadow(
+    run_refund_scenario(
         tmp_path,
         monkeypatch,
         stripe_map=STRIPE_WITH_TELEMETRY,
@@ -87,7 +85,7 @@ def test_the_phase_2_run_prints_the_same_summary_from_its_store_as_it_did_live(
     live = _summary_block(capfd.readouterr().out.splitlines())
     # The refund agent's block, with the telemetry call on a line of its own and in the counts.
     assert live[1:] == [
-        *PHASE2_SUMMARY[:-2],
+        *REFUND_SUMMARY[:-2],
         "  telemetry  1 exchange to 1 host, forwarded live",
         "",
         "  8 exchanges · 6 real · 2 answered by irimi (2 faked writes) · 0 sent to targets",
@@ -168,22 +166,10 @@ def _hand_built_incomplete_run(store, key) -> None:
 
 
 def _refund(run_id: str) -> Exchange:
-    return Exchange(
-        request=Request(
-            "POST",
-            "https",
-            "api.stripe.com",
-            443,
-            "/v1/refunds",
-            "",
-            (("content-type", "application/x-www-form-urlencoded"),),
-            b"charge=ch_1&amount=4900&currency=usd",
-        ),
-        response=Response(200, (), b"{}"),
-        service="stripe",
-        operation="refunds.create",
-        kind="write",
+    """A refund irimi faked at L0 without a precondition check, in a hand-built run."""
+    return builders.refund_exchange(
         answered_by="fake-L0",
+        precondition=Precondition(),
         run_id=run_id,
         started_at=HAND_BUILT_AT,
         ended_at=HAND_BUILT_AT + 0.5,

@@ -1,3 +1,5 @@
+"""`irimi init`: making the CA, keeping one that exists, and refusing a key it did not write."""
+
 from irimi.cli import main
 from irimi.cli.init import NON_HTTP_NOTICE
 from irimi.config import ca, paths
@@ -17,7 +19,7 @@ def test_init_creates_ca_and_prints_paths(tmp_path, monkeypatch, capsys):
     assert out.splitlines()[-2:] == [NON_HTTP_NOTICE, "next: irimi shadow -- python3 your_agent.py"]
 
 
-def test_init_second_run_is_noop(tmp_path, monkeypatch, capsys):
+def test_a_second_init_changes_nothing(tmp_path, monkeypatch, capsys):
     """A CA already there is left alone, and the note on what irimi shadows is printed only by
     the run that generated one."""
     p = _setup(tmp_path, monkeypatch)
@@ -31,7 +33,7 @@ def test_init_second_run_is_noop(tmp_path, monkeypatch, capsys):
     assert p.cert.read_bytes() == cert_before
 
 
-def test_init_force_regenerates(tmp_path, monkeypatch):
+def test_init_force_makes_a_new_ca(tmp_path, monkeypatch):
     p = _setup(tmp_path, monkeypatch)
     assert main(["init"]) == 0
     key_before = p.key.read_bytes()
@@ -49,7 +51,7 @@ def test_init_incomplete_dir_errors_without_force(tmp_path, monkeypatch, capsys)
     assert p.cert.is_file()
 
 
-def test_init_refuses_symlinked_key(tmp_path, monkeypatch, capsys):
+def test_init_refuses_a_symlinked_key(tmp_path, monkeypatch, capsys):
     p = _setup(tmp_path, monkeypatch)
     p.key.parent.mkdir(parents=True)
     victim = tmp_path / "victim"

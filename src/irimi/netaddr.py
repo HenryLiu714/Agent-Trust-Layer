@@ -12,18 +12,9 @@ from urllib.parse import urlsplit
 
 
 def is_self_host(host: str) -> bool:
-    """True when `host` is a literal for this machine's loopback: "localhost", any 127/8 or ::1
-    address in any spelling inet_aton accepts (127.1, 0177.0.0.1), an IPv4-mapped one
-    (::ffff:127.0.0.1), or the unspecified address (0.0.0.0, ::), which also connects locally."""
-    if host.rstrip(".") == "localhost":
-        return True
-    ip = _address(host)
-    if ip is None:
-        try:
-            ip = ipaddress.IPv4Address(socket.inet_aton(host))
-        except OSError:
-            return False
-    return ip.is_loopback or ip.is_unspecified
+    """True when `host` is a literal for this machine: loopback in any spelling `_local` reads,
+    or the unspecified address (0.0.0.0, ::), which also connects locally."""
+    return _local(host) is not None
 
 
 def resolves_to_self(host: str, local_address: str = "") -> bool:
@@ -60,18 +51,34 @@ def _address(text: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
     return ip
 
 
+def _local(host: str) -> str | None:
+    """`loopback` or `unspecified` when `host` names this machine, else None. The one reading of
+    a host that the predicates here share: "localhost" (with or without its trailing dot), any
+    127/8 or ::1 address in any spelling inet_aton accepts (127.1, 0177.0.0.1), an IPv4-mapped one
+    (::ffff:127.0.0.1), and 0.0.0.0 or ::. Anything unparseable is neither."""
+    if host.rstrip(".").lower() == "localhost":
+        return "loopback"
+    ip = _address(host)
+    if ip is None:
+        try:
+            ip = ipaddress.IPv4Address(socket.inet_aton(host))
+        except (OSError, ValueError):
+            return None
+    if ip.is_loopback:
+        return "loopback"
+    return "unspecified" if ip.is_unspecified else None
+
+
 def is_loopback(address: str) -> bool:
-    """True for 127.0.0.0/8 and ::1. Anything unparseable is not loopback."""
-    try:
-        return ipaddress.ip_address(address).is_loopback
-    except ValueError:
-        return False
+    """True for loopback as `_local` reads it, so not for 0.0.0.0 or ::."""
+    return _local(address) == "loopback"
 
 
-def authority(host: str, port: int) -> str:
+def authority(host: str, port: int, default_port: int | None = None) -> str:
     """`host:port` as a URL spells it: an IPv6 literal in brackets (`[::1]:4000`), so the port is
-    not read as one more group of the address."""
-    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+    not read as one more group of the address. The port is left out when it is `default_port`."""
+    literal = f"[{host}]" if ":" in host else host
+    return literal if port == default_port else f"{literal}:{port}"
 
 
 def is_local_target(url: str) -> bool:
@@ -79,11 +86,12 @@ def is_local_target(url: str) -> bool:
 
     One spelling of the question, because three surfaces ask it: `delegation.delegate` refuses a
     non-loopback target on a credential-path host, and the banner and `irimi maps list` paint a
-    non-loopback target red. Three copies would drift, and the one that drifts is the one that
-    lets a credential off the machine.
+    non-loopback target red. The one intended difference from `is_self_host`: a target may not be
+    0.0.0.0 or ::, which reach this machine only by an accident of the OS, while a request whose
+    Host is one of them does reach irimi's listener.
     """
     try:
         host = urlsplit(url).hostname or ""
     except ValueError:
         return False
-    return host == "localhost" or is_loopback(host)
+    return is_loopback(host)

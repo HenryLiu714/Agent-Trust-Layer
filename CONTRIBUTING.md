@@ -105,7 +105,7 @@ where it diverged, the refund as the write that changed, and that Stripe holds n
 multi-turn LLM tool loop, a nightly batch job, a concurrent queue worker, Slack and Stripe webhook
 handlers, database writes behind `@sdk.write_tool`, SSE streaming, internal services, failure paths,
 and agents that get around the proxy. A harness runs each scenario bare, under `irimi shadow` and
-under `irimi shadow --serve` (#77), against a fake internet that answers for the real host
+under `irimi serve` (#77), against a fake internet that answers for the real host
 names, so irimi's shipped maps decide every call. `tests/workflows/` holds every scenario to
 five universal invariants and pins what irimi does in each one. `examples/workflows/README.md`
 explains the harness.
@@ -151,7 +151,7 @@ src/irimi/
   fixtures/*.json                     the vendored response objects L1 answers start from
 tests/                                one file per module, plus the invariant and exit tests
 examples/refund_agent/                the fixture agent the proxy is tested against
-examples/server_agent/                a server agent beside `irimi shadow --serve`, in containers
+examples/server_agent/                a server agent beside `irimi serve`, in containers
 examples/llm_refund_agent/            an LLM agent recorded, its prompt edited, and replayed
 examples/workflows/                   the sample workflows and the harness that runs them
 tests/workflows/                      the workflows' invariants and per-workflow pins

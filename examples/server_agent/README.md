@@ -1,4 +1,4 @@
-# A server agent beside `irimi shadow --serve`
+# A server agent beside `irimi serve`
 
 Phase 3's exit, for use case 0: "a server-style agent in a container produces attributed runs with
 their triggers, and two concurrent requests don't mix" (#78).
@@ -18,7 +18,7 @@ environment, so it needs no code to go through irimi. Start it with
 
 ## Two halves
 
-- **Hermetic, in CI.** `tests/test_phase3_exit.py` runs the real `irimi shadow --serve` and this
+- **Hermetic, in CI.** `tests/test_phase3_exit.py` runs the real `irimi serve` and this
   app as two processes against a loopback Stripe, sends two refunds at once and checks that each
   is one run holding only its own charge.
 - **Containers, by hand.** `check.sh` runs irimi and the app in two containers
@@ -68,7 +68,7 @@ containers and irimi's store.
 ## How the containers are wired
 
 - `irimi` runs `irimi init`, copies **only** `ca.pem` into the `ca-public` volume, and serves with
-  `--listen-host 0.0.0.0`. Its `irimi-home` volume, which holds the CA key, the `mitm/` bundle and
+  `--bind 0.0.0.0`. Its `irimi-home` volume, which holds the CA key, the `mitm/` bundle and
   the trace store, is mounted on `irimi` alone. Its port is not published: the control endpoint
   has no authentication. To reach irimi from the host, publish its port unchanged (`4000:4000`):
   irimi knows a request is its own by the port it arrived on, and one remapped would be forwarded

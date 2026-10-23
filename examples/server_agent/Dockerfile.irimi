@@ -1,4 +1,4 @@
-# irimi as a sidecar: `irimi shadow --serve` beside the server agent (#78). Built from this repo,
+# irimi as a sidecar: `irimi serve` beside the server agent. Built from this repo,
 # with the repo root as the build context (see compose.yaml).
 FROM python:3.12-slim
 COPY --from=ghcr.io/astral-sh/uv:0.12 /uv /usr/local/bin/uv

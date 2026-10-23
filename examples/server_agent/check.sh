@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Phase 3's exit, the container half (#78): the server agent and `irimi shadow --serve` in two
-# containers, two refunds at once against Stripe test mode, and Stripe left untouched.
+# The server agent and `irimi serve` in two containers, two refunds at once against Stripe test
+# mode, and Stripe left untouched.
 #
 #     STRIPE_API_KEY=sk_test_... examples/server_agent/check.sh
 #

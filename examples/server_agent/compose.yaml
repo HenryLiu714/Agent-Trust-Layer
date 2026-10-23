@@ -1,5 +1,5 @@
-# Phase 3's exit, the container half (#78): the server agent beside `irimi shadow --serve`, in two
-# containers, as in production. Run it with `./check.sh`; see README.md.
+# The server agent beside `irimi serve`, in two containers, as in production. Run it with
+# `./check.sh`; see README.md.
 services:
   irimi:
     build:
@@ -11,7 +11,7 @@ services:
     command:
       - sh
       - -c
-      - irimi init && cp /irimi-home/ca/ca.pem /ca/ca.pem && exec irimi shadow --serve --listen-host 0.0.0.0 --port 4000
+      - irimi init && cp /irimi-home/ca/ca.pem /ca/ca.pem && exec irimi serve --bind 0.0.0.0 --port 4000
     volumes:
       - irimi-home:/irimi-home
       - ca-public:/ca

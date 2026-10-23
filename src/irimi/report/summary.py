@@ -1,6 +1,4 @@
-"""The exit summary: a `model.RunSummary` as the lines `irimi shadow`, serve and `runs show`
-print. String formatting only; what each line counts is the model's.
-"""
+"""Format a `model.RunSummary` as the exit summary `irimi shadow`, serve and `runs show` print."""
 
 import re
 from collections.abc import Mapping, Sequence
@@ -29,16 +27,12 @@ from irimi.servicemaps import MapIndex, Route, path_params
 
 WRITE_MARKER = "○"
 REJECTED_MARKER = "✗"
-# The service column of a write tool's line.
 TOOL_SERVICE = "tool"
-# One of the agent's own reads that irimi either edited to show this run's writes, or knows it
-# could not fully show them. It hangs under the write it is about, so a reader sees the
-# write and the reads that then saw it as one thing.
+# Marks an agent read under the write it shows, or might not fully show.
 OVERLAY_MARKER = "↳"
 SAW_IT = "saw it"
 SAW_PART = "saw it in part"
 DID_NOT_SHOW = "did not show it"
-# The line that opens the writes block. True of every line in it, whoever answered the write.
 NOTHING_HAPPENED = "None of these writes reached the real service:"
 WOULD_HAVE_FIRED = "would have fired:"
 # A write's status, after its service and its sentence.
@@ -54,30 +48,23 @@ REFUSED_BY_IRIMI = "refused by irimi"
 TOO_LARGE = "its body is too large to read whole"
 DECISION_FAILED = "irimi could not decide how to answer it"
 UNKNOWN_CURRENCY = "minor units, currency unknown"
-# How much of a run id the summary prints: `irimi replay` and `runs show` take a unique prefix.
+# `irimi replay` and `runs show` accept a unique prefix of a run id.
 SHORT_ID = 8
-# A host-line phrase for requests whose target irimi refused or could not reach.
 UNREACHED = "that could not reach the target"
-# What a live run that saw no exchange says: an agent whose client ignored the proxy, or refused
-# irimi's CA, still made its calls. Not said of a stored run, whose traffic its SDK runs may hold.
+# Live runs only: a stored run's traffic may sit in its SDK runs.
 NO_TRAFFIC = (
     "irimi saw no HTTP(S) traffic; if the agent made calls, they bypassed the proxy or failed TLS"
 )
 
-# A `{name}` hole in a map's `human:` template, or `{name:money}` for a field holding an amount in
-# minor units. Deliberately not `str.format`: a template carries literal braces (Slack's
-# `#{channel}` sits next to none, but a body field might) and `format` raises on an unmatched one,
-# inside the function that prints the run's most important output.
+# A `{name}` or `{name:money}` (minor units) hole in a `human:` template. Not `str.format`, which
+# raises on an unmatched literal brace.
 _FIELD = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)(?::(money))?\}")
 MISSING_FIELD = "?"
 
 
 @dataclass(frozen=True)
 class Live:
-    """What only a live `irimi shadow` knows of its run, which a stored run does not keep: the
-    runs the SDK started inside the process, by id, each with its stored record or None; how many
-    TLS handshakes clients refused, by host; and the certificate those lines tell the reader to
-    point a client at."""
+    """Facts only a live `irimi shadow` knows: SDK runs by id, TLS refusals by host, the CA path."""
 
     sdk_runs: Mapping[str, RunRecord | None] = field(default_factory=dict)
     tls_failures: Mapping[str, int] = field(default_factory=dict)
@@ -90,23 +77,12 @@ def summary_lines(
     elapsed_s: float | None = None,
     live: Live | None = None,
 ) -> list[str]:
-    """The exit summary: what the agent tried to write, what was real, and what irimi answered.
+    """Return the exit summary: what the agent tried to write, what was real, what irimi answered.
 
-    `index` is the loaded maps, used only to find each write's `human:` template. Without it the
-    writes still get a line, spelled as the request they were. `elapsed_s` is how long the child
-    ran, which a live run timed; a stored run's is its own, `ended_at - started_at`, or `0.0` for
-    one with no start or no end. A replay's run opens `irimi replay`: `irimi replay` printed its
-    comparison and no summary, and a block opening `irimi shadow` would say it was a shadow run.
-
-    `live` is a live run's own facts. With SDK runs among them the header says it covers the
-    whole process and the block ends with a line per run; a live run that saw no exchange says so,
-    and each host whose clients refused irimi's certificate gets a line. A stored run has none of
-    these lines. Where a stored line may still differ from the live one: redaction replaced a
-    field a `human:` template renders, the path of a request on a credential-path host that the
-    write line spells out, because no route matched it or irimi refused it with its body cut, a
-    write irimi refused whose body only the store cut, spelled out, or an event the store dropped
-    (docs/trace-format.md, "Reading a run back"). A process run's stored summary covers its own
-    events, never the SDK runs inside it.
+    `index` only supplies `human:` templates; without it writes are spelled as requests.
+    `elapsed_s` defaults to the stored run's own duration, or 0.0. `live` adds the live-only lines
+    (SDK runs, no traffic, TLS failures). A stored run's lines may differ where redaction or the
+    store's body cap changed what a line reads, or events were dropped.
     """
     summary = model.build(view, index)
     if elapsed_s is None:
@@ -124,12 +100,9 @@ def summary_lines(
 
 
 def _summary(summary: RunSummary, elapsed_s: float, whole: bool) -> list[str]:
-    """The block every summary prints. A tool call is in no count: each write tool whose fake ran
-    gets a line after the HTTP writes, and a read tool gets none.
+    """Return the block every summary prints: writes, money and webhooks, host counts, totals.
 
-    The writes come first, under the line saying none of them reached the real service, with
-    the money they name and the webhooks they would have fired; then each host's counts; then
-    the totals."""
+    Tool calls are in no count; each write tool whose fake ran gets a line after the HTTP writes."""
     record = summary.record
     command = "replay" if record.mode == "replay" else "shadow"
     scope = " (whole process)" if whole else ""
@@ -142,10 +115,8 @@ def _summary(summary: RunSummary, elapsed_s: float, whole: bool) -> list[str]:
     for entry in summary.writes:
         write_lines.append(_write_line(entry))
         write_lines += _overlay_lines(entry.reads)
-    # In the order the calls ended, whatever order they came in: live, the order their posts
-    # reached the control endpoint, which two tools ending at once on two threads can reverse, and
-    # stored, `seq` order within each run. The start, the id and then the line itself break
-    # a tie, since a call posted by hand can repeat another's id and times.
+    # Sort by end time, since posts from two threads can arrive out of order. Later keys break
+    # ties, since a hand-posted call can repeat another's id and times.
     tools = sorted(
         summary.tool_writes,
         key=lambda call: (
@@ -175,33 +146,26 @@ def _summary(summary: RunSummary, elapsed_s: float, whole: bool) -> list[str]:
 
 
 def tool_write_line(call: ToolCall) -> str:
-    """The summary's line for a write tool whose fake ran in its place, escaped as
-    `terminal.tool_call_line` is."""
+    """Return the escaped summary line for a write tool whose fake ran."""
     return f"  {printable(tool_write_sentence(call))}"
 
 
 def tool_write_sentence(call: ToolCall) -> str:
-    """`tool_write_line` without the summary's indent and before it is escaped, which `irimi
-    compare` prints for it: the real function did not run, so it is a write that did not happen,
-    and it takes the write marker."""
+    """Return `tool_write_line` unindented and unescaped, as `irimi compare` uses it."""
     return f"{WRITE_MARKER} {TOOL_SERVICE}  {call.name}  fake {tool_outcome(call, 'ran instead')}"
 
 
 def _write_line(entry: WriteEntry) -> str:
-    """One write's summary line. Escaped as `runs show` escapes a run's text: a template's fields
-    are the agent's own, a newline in a Slack post would split the line, and a lone surrogate
-    would make printing it raise."""
+    """Return one write's escaped summary line."""
     return f"  {printable(write_sentence(entry))}"
 
 
 def write_sentence(entry: WriteEntry) -> str:
-    """One write: its marker, its service, the map's own sentence, and what irimi did with it.
-    Its summary line without the indent and before it is escaped, which `irimi compare` prints
-    for it. A write irimi refused with a body it never read whole is spelled as the request it
-    was instead."""
+    """Return a write's marker, service, sentence and status, unindented and unescaped.
+
+    A write refused with a cut body is spelled as its request."""
     exchange, status = entry.exchange, entry.status
-    # A `human:` sentence is never filled in from a body irimi did not read: a refused write whose
-    # body was cut renders every field `?`, the same line for every such refund.
+    # A cut body would render every `human:` field as `?`.
     unread = isinstance(status, Refused) and status.body_cut
     route = entry.route
     if route is not None and route.human and not unread:
@@ -220,8 +184,7 @@ def write_sentence(entry: WriteEntry) -> str:
         case SentToTarget():
             return f"{WRITE_MARKER} {what}  {SENT_TO_TARGET} {_target_host(status.target)}"
         case Faked(would_fail=str() as code):
-            # A write the real service would have refused, and irimi is saying so. `✗`, not `○`,
-            # and the code is the one the agent's SDK raised on.
+            # The real service would have refused it; the code is the one the agent's SDK saw.
             return f"{REJECTED_MARKER} {what}  {FAKED}; {WOULD_FAIL}: {code}"
         case Faked(checked="passed"):
             return f"{WRITE_MARKER} {what}  {FAKED}; {CHECKED}"
@@ -235,20 +198,18 @@ def write_sentence(entry: WriteEntry) -> str:
 
 
 def _target_host(target: str) -> str:
-    """A target's host and port, as a write line names it."""
+    """Return a target's host and port, as a write line names it."""
     return urlsplit(target).netloc or target
 
 
 def _why_not_checked(exchange: Exchange, status: Faked, check_read: Exchange | None) -> str:
-    """Why irimi could not check a write against live state, read off the read it made to. A
-    write a replay answered from the recording made its check read in the recorded run."""
+    """Return why irimi could not check a write against live state, from its check read."""
     if check_read is None and status.recorded:
         return "the recorded run could not check it"
     if check_read is None:
         return "irimi made no check read"
     if check_read.response is None:
-        # No answer irimi could use: a network failure, a body too large to read, or a replay
-        # whose recording holds none.
+        # A network failure, a body too large to read, or a replay whose recording holds none.
         return f"irimi's check read of {exchange.service} got no usable answer"
     if check_read.response.status != 200:
         return f"{exchange.service} answered irimi's check read with {check_read.response.status}"
@@ -256,9 +217,7 @@ def _why_not_checked(exchange: Exchange, status: Faked, check_read: Exchange | N
 
 
 def _overlay_lines(reads: Sequence[tuple[Exchange, Shown]]) -> list[str]:
-    """The `↳` lines under one write: which of the agent's reads were shown it, and how fully. A
-    read irimi edited is the overlay's; one it left untouched is whoever answered it, the service
-    or a replay's recording."""
+    """Return the `↳` lines under one write: which agent reads showed it, and how fully."""
     lines: list[str] = []
     for ex, shown in reads:
         what = f"{ex.request.method} {ex.request.path}"
@@ -276,16 +235,14 @@ def _overlay_lines(reads: Sequence[tuple[Exchange, Shown]]) -> list[str]:
 
 
 def _minor_units(value: object) -> int | None:
-    """`value` when it can be an amount in minor units, else None."""
+    """Return `value` if it can be an amount in minor units, else None."""
     if isinstance(value, int) and not isinstance(value, bool):
         return value
     return None
 
 
 def _field_value(value: object, as_money: bool, currency: object) -> str:
-    """One template field, rendered. A field the template marks `:money` is minor units of the
-    write's currency (the request's, else the one its precondition read found); a currency irimi
-    does not know prints the bare amount rather than a guessed one."""
+    """Return one template field; `:money` formats in `currency`, or bare if it is unknown."""
     amount = _minor_units(value) if as_money else None
     if amount is None:
         return str(value)
@@ -295,28 +252,20 @@ def _field_value(value: object, as_money: bool, currency: object) -> str:
 
 
 def _fields(exchange: Exchange, route: Route | None) -> tuple[dict[str, object], object]:
-    """A write's template fields and its currency, as `render_human` reads them."""
+    """Return a write's template fields and its currency, as `render_human` reads them."""
     fields: dict[str, object] = {}
     if route is not None:
         fields.update(path_params(route.path, exchange.request.path))
     fields.update(reflect(exchange.request))
-    # `or` and not `setdefault`: a body that sent `currency=` sent nothing, and falls back to the
-    # L3 read's currency like a body that sent no key at all.
+    # An empty `currency=` falls back to the check read's currency, as a missing one does.
     return fields, fields.get("currency") or exchange.precondition.currency
 
 
 def render_human(template: str, exchange: Exchange, route: Route | None) -> str:
-    """A map's `human:` template with this request's own fields in its holes.
+    """Return a map's `human:` template filled with this request's fields.
 
-    Fields come from two places and the body wins: the route pattern's `{name}` segments bound to
-    the path (`/v1/charges/{charge}`), and the request body as the L0 echo reflects it, which is
-    the one parser that already knows Stripe's bracketed form encoding. A hole with no field
-    renders `?` rather than disappearing: a summary that silently drops what it could not read
-    would claim to describe a write it did not fully understand.
-
-    The currency is the one field that may come from outside the request: a write whose L3
-    precondition read named one carries it on the exchange, and it fills in for a request that
-    named none. The request still wins when it named one.
+    Fields come from the route's path params and the body (`bodies.reflect`); the body wins. A hole
+    with no field renders `?`. A currency missing from the request comes from the check read.
     """
     fields, currency = _fields(exchange, route)
 
@@ -330,8 +279,7 @@ def render_human(template: str, exchange: Exchange, route: Route | None) -> str:
 
 
 def _amounts(exchange: Exchange, route: Route | None) -> list[tuple[int, str]]:
-    """Each amount a write's `human:` sentence shows, with its lower-case currency, or "" for an
-    amount whose currency irimi does not know."""
+    """Return each `:money` amount a write's sentence shows, with its lower-case currency or ""."""
     if route is None or not route.human:
         return []
     fields, currency = _fields(exchange, route)
@@ -345,9 +293,9 @@ def _amounts(exchange: Exchange, route: Route | None) -> list[tuple[int, str]]:
 
 
 def _money_line(writes: Sequence[WriteEntry]) -> list[str]:
-    """The amounts the faked writes' sentences show, summed per currency, and how much of that the
-    real service would have refused. Nothing when no amount has a known currency: an amount irimi
-    cannot denominate is counted apart rather than added to one it can."""
+    """Return the faked writes' amounts summed per currency, and how much would fail.
+
+    Amounts in an unknown currency are counted apart; no line if no currency is known."""
     total: dict[str, int] = {}
     failing: dict[str, int] = {}
     unknown = 0
@@ -380,7 +328,7 @@ def _sum(amounts: dict[str, int]) -> str:
 
 
 def _host_line(counts: HostCounts, width: int) -> str:
-    """One host's counts, in the order a reader asks them: what was real, then what was not."""
+    """Return one host's counts: what was real, then what was not."""
     phrases: list[str] = []
     if counts.reads:
         qualified = []
@@ -418,12 +366,9 @@ def _host_line(counts: HostCounts, width: int) -> str:
 
 
 def _host_lines(hosts: Sequence[HostCounts], telemetry: Sequence[str]) -> list[str]:
-    """One line per host, plus one line for all telemetry hosts together.
+    """Return a line per host, plus one line for all telemetry hosts together.
 
-    Telemetry gets a single line however many vendors it reached: a run posts to Datadog, Sentry
-    and PostHog in the same breath and a line each would bury the two hosts the agent's work is
-    actually on. It also says where they went, because they went there for real. It counts
-    hosts only, since that is all the store keeps of a telemetry exchange.
+    One telemetry line keeps several vendors from burying the agent's hosts.
     """
     width = max((len(counts.host) for counts in hosts), default=0)
     width = max(width, len("telemetry")) if telemetry else width
@@ -445,8 +390,7 @@ def _host_lines(hosts: Sequence[HostCounts], telemetry: Sequence[str]) -> list[s
 def _sdk_run_lines(
     view: RunView, summary: RunSummary, runs: Mapping[str, RunRecord | None]
 ) -> list[str]:
-    """One line per SDK run inside the process, then how to replay one: the live summary counts
-    the whole process, and a replay needs the SDK run's own id."""
+    """Return a line per SDK run in the process, then how to replay one by its own id."""
     lines: list[str] = []
     for run_id, record in runs.items():
         trigger = record.trigger if record is not None else None
@@ -468,8 +412,9 @@ def _sdk_run_lines(
 
 
 def tls_failure_lines(failures: Mapping[str, int], ca_cert: Path | None) -> list[str]:
-    """One line per host whose clients refused irimi's certificate. Such a call never became an
-    exchange, so nothing else in the summary says it was made."""
+    """Return a line per host whose clients refused irimi's certificate.
+
+    Such calls never became exchanges, so nothing else in the summary shows them."""
     ca = str(ca_cert) if ca_cert is not None else "irimi's CA certificate"
     return [
         printable(

@@ -1,14 +1,4 @@
-"""What a run did, counted and grouped, before any of it is a line.
-
-`disposition` and `answered` read one exchange's raw fields (`kind`, `issued_by`, `answered_by`,
-`flags`, `precondition`) and say what it was for the summary. `build` groups a `RunView`'s events
-into a `RunSummary`: a `WriteEntry` per write the summary prints a line for, with the reads under
-it, and a `HostCounts` per host. `report.summary` turns that into lines, `compare` lines up its
-write entries and `report.runs` counts them, so the three agree about which writes a run made.
-
-A live `irimi shadow` and a stored run are summarised alike: both are a `RunView`, and a live
-run keeps of each exchange only what the summary reads (`for_summary`).
-"""
+"""Classify a run's exchanges and group them into a `RunSummary`, before any of it is a line."""
 
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -29,20 +19,19 @@ from irimi.servicemaps import MapIndex, Route
 
 # ------------------------------------------------------------------------------------- classify
 
-# The `↳` line one of the agent's reads owes under the write it is about: the overlay edited its
-# body to show the write (`saw`), edited it knowing the world it showed was incomplete (`part`),
-# or left it untouched knowing the same (`did_not`). A read irimi only translated, live and
-# `overlay: full`, owes none.
+# The `↳` line an agent read gets under its write:
+#   saw      the overlay edited the body to show the write
+#   part     the overlay edited it, but knows what it shows is incomplete
+#   did_not  untouched, and the overlay knows it is incomplete
 Shown = Literal["saw", "part", "did_not"]
-# Who answered one of the agent's reads: the service (live, overlaid, or a replay's recording of
-# it), a target, irimi refusing it, irimi unable to reach its target, or anything else.
+# Who answered an agent read: the service (live, overlaid or recorded), a target, irimi refusing
+# it, irimi unable to reach its target, or anything else.
 ReadBy = Literal["service", "target", "refused", "unreached", "other"]
 
 
 @dataclass(frozen=True)
 class AgentRead:
-    """One of the agent's own reads. `failed` is the status a read the service answered failed
-    with, or `no answer`; None when it did not fail."""
+    """One of the agent's own reads. `failed` is its failing status or `no answer`, else None."""
 
     by: ReadBy
     overlaid: bool = False
@@ -53,7 +42,7 @@ class AgentRead:
 
 @dataclass(frozen=True)
 class CheckRead:
-    """A read irimi made for its own precondition check. Real, but the agent did not make it."""
+    """irimi's check read: real, but not made by the agent."""
 
 
 @dataclass(frozen=True)
@@ -65,9 +54,10 @@ class Llm:
 
 @dataclass(frozen=True)
 class Faked:
-    """A write irimi answered with a fake of its own. `checked` is what its precondition check
-    said, None when nothing was asked; `would_fail` the code the real service would have refused
-    it with; `recorded` when a replay answered it from the recording."""
+    """A faked write.
+
+    `checked` is the precondition check's outcome, or None; `would_fail` the code the real service
+    would have refused it with; `recorded` when a replay answered it from the recording."""
 
     checked: PreconditionOutcome | None = None
     would_fail: str | None = None
@@ -77,8 +67,7 @@ class Faked:
 
 @dataclass(frozen=True)
 class Refused:
-    """A write irimi answered with its own error: refused, or one it could not decide about.
-    `body_cut` when irimi never read its body whole."""
+    """A write irimi answered with its own error. `body_cut` when its body was never read whole."""
 
     decision_failed: bool = False
     body_cut: bool = False
@@ -99,9 +88,10 @@ WriteStatus = Faked | Refused | SentToTarget | TargetUnreachable
 
 @dataclass(frozen=True)
 class Write:
-    """One of the writes the summary prints a line for (`exchange.is_intercepted`). `authored`
-    when it is in the run's write log (`exchange.is_authored_write`), so a later read may have
-    been shown it; `asked` when irimi made a check read for it in this run."""
+    """A write the summary prints a line for (`is_intercepted`).
+
+    `authored` when it is in the write log (`is_authored_write`); `asked` when irimi made a check
+    read for it in this run."""
 
     status: WriteStatus
     authored: bool = False
@@ -110,8 +100,7 @@ class Write:
 
 @dataclass(frozen=True)
 class Uncounted:
-    """Anything no count takes: a retry the idempotency store answered as the write it repeats, or
-    a write forwarded live."""
+    """An exchange no count takes: an idempotent retry, or a write forwarded live."""
 
 
 Disposition = AgentRead | CheckRead | Llm | Write | Uncounted
@@ -119,7 +108,7 @@ Answerer = Literal["real", "target", "irimi"]
 
 
 def disposition(exchange: Exchange) -> Disposition:
-    """What one exchange was, for the summary."""
+    """Return what one exchange was, for the summary."""
     flags = exchange.flags
     recorded = Flag.FROM_RECORDING in flags
     if exchange.issued_by == "engine":
@@ -170,18 +159,17 @@ def _write_status(exchange: Exchange, recorded: bool) -> WriteStatus:
         return SentToTarget(exchange.target)
     precondition = exchange.precondition
     would_fail = None
-    # The precondition check rejected it, or this run had already used its idempotency key for a
-    # different write.
+    # An idempotency conflict means this run used the key for a different write.
     if precondition.outcome == "rejected" or Flag.IDEMPOTENCY_CONFLICT in flags:
         would_fail = precondition.rejection_code or "rejected"
     return Faked(precondition.outcome, would_fail, exchange.kind == "unknown", recorded)
 
 
 def answered(exchange: Exchange) -> Answerer:
-    """Who answered an exchange, as the closing totals count it. An overlaid read is real: the
-    service answered it before irimi wrote the run's writes into the body. One a replay answered
-    from the recording reached no service, so irimi answered it, and so did a target mitmproxy
-    could not finish dialling."""
+    """Return who answered an exchange, for the closing totals.
+
+    An overlaid read is real: the service answered it first. A recorded answer or an unreachable
+    target counts as irimi."""
     if exchange.answered_by in ("live", "overlay") and Flag.FROM_RECORDING not in exchange.flags:
         return "real"
     if exchange.answered_by == "delegated" and not failed_target(exchange):
@@ -194,17 +182,17 @@ def answered(exchange: Exchange) -> Answerer:
 
 @dataclass(frozen=True)
 class RunView:
-    """A run as the summary reads it: its record and its events, in the order they happened."""
+    """A run as the summary reads it: its record and its events, in order."""
 
     record: RunRecord
     events: Sequence[Event]
 
 
 def for_summary(exchange: Exchange) -> Exchange | TelemetrySeen:
-    """What the summary reads of a live exchange, and no more: a telemetry exchange as the host it
-    went to, as the store keeps one, and any other without its response body or its stream's
-    chunks. A write keeps its request body, which its `human:` sentence reads; nothing else
-    does."""
+    """Return only what the summary reads of a live exchange.
+
+    Telemetry becomes its host; others drop response body and chunks. Only a write keeps its
+    request body, for its `human:` sentence."""
     if exchange.kind == "telemetry":
         return TelemetrySeen(exchange.run_id, exchange.request.host, exchange.started_at)
     request = exchange.request
@@ -218,10 +206,10 @@ def for_summary(exchange: Exchange) -> Exchange | TelemetrySeen:
 
 @dataclass(frozen=True)
 class WriteEntry:
-    """One write's line and what hangs under it. `route` is the route it was classified under,
-    for its `human:` template; `check_read` irimi's check read for it, which says why a check
-    could not be made; `reads` the agent's reads the overlay showed it to, or knows it could not
-    fully show it, each with the `↳` line it owes."""
+    """One write's line and what hangs under it.
+
+    `route` supplies its `human:` template; `check_read` is irimi's check read for it; `reads` are
+    the agent reads that show the write (or might not fully), each with its `↳` line."""
 
     exchange: Exchange
     status: WriteStatus
@@ -232,15 +220,11 @@ class WriteEntry:
 
 @dataclass(frozen=True)
 class HostCounts:
-    """One host's exchanges, counted in the order a reader asks: what was real, then what was not.
+    """One host's exchanges, counted: what was real, then what was not.
 
-    `reads` are the agent's own reads a service answered: an overlaid read is one, since it went
-    to the real service and came back before irimi wrote the run's writes into the body, and so is
-    a read a replay answered from the recording, since the recorded run made it. `overlaid` and
-    `recorded_reads` count those, whose body is not what the service sent now, and `failed_reads`
-    holds each failed one's status. A read irimi made for its own precondition check is real, but
-    the agent did not make it, so it is in `check_reads` and never in `reads`. A read a target
-    answered is not a real read, so it is in `target_reads`.
+    `reads` are agent reads a service answered, overlaid and recorded ones included (also counted
+    in `overlaid` and `recorded_reads`). irimi's check reads count only in `check_reads`, and
+    reads a target answered only in `target_reads`.
     """
 
     host: str
@@ -263,10 +247,11 @@ class HostCounts:
 
 @dataclass(frozen=True)
 class RunSummary:
-    """A run, summarised. `actions` are its write lines in the order the run made them: a
-    `WriteEntry` per write, and each write tool call whose fake ran. `telemetry` is one host per
-    telemetry exchange, every one of them forwarded live. `exchanges` counts telemetry too, and
-    no tool call."""
+    """A run, summarised.
+
+    `actions` are its write lines in run order: a `WriteEntry` per write, and each write tool call
+    whose fake ran. `telemetry` is one host per (live) telemetry exchange. `exchanges` counts
+    telemetry but no tool calls."""
 
     record: RunRecord
     actions: tuple[WriteEntry | ToolCall, ...] = ()
@@ -300,9 +285,8 @@ AUTH_FAILURES: frozenset[int] = frozenset({401, 403})
 
 
 def build(view: RunView, index: MapIndex | None) -> RunSummary:
-    """`view` summarised. `index` is the loaded maps, used only to find each write's route;
-    without it every write still gets an entry, with no route."""
-    # A telemetry exchange counts only by its host, which is all the store keeps of one.
+    """Return `view` summarised. `index` only finds each write's route; None leaves routes unset."""
+    # The store keeps only a telemetry exchange's host.
     telemetry: list[str] = []
     exchanges: list[tuple[int, Exchange]] = []
     for at, event in enumerate(view.events):
@@ -315,9 +299,8 @@ def build(view: RunView, index: MapIndex | None) -> RunSummary:
     seen = {at: disposition(ex) for at, ex in exchanges}
     checks = _check_reads(exchanges, seen)
     under: dict[int, list[tuple[Exchange, Shown]]] = {}
-    # A read is filed under the most recent write before it of its own service that is in the
-    # write log (`is_authored_write`): the overlay applies only those to a read, so a refused write
-    # never has a read under it and a Slack read never sits under a Stripe refund.
+    # File a read under its service's latest earlier write in the write log: the overlay applies
+    # only those, so a refused write gets no reads and a Slack read never sits under a refund.
     last: dict[str, int] = {}
     for at, ex in exchanges:
         what = seen[at]
@@ -397,12 +380,10 @@ def _host_counts(host: str, rows: Sequence[Disposition]) -> HostCounts:
 
 
 def route_of(exchange: Exchange, index: MapIndex | None) -> Route | None:
-    """The route a write was classified under, for its `human:` template.
+    """Return the route a write was classified under, for its `human:` template.
 
-    Its path is matched, as the live classification matched it. A stored write on a
-    credential-path host has a redaction placeholder for a path, which matches no route, so the
-    route is then found by the `operation` it recorded: a webhook post prints `post via
-    webhook: "..."` from the store as it did live."""
+    A stored write whose path was redacted (a webhook) matches no route, so it falls back to the
+    recorded `operation`."""
     if index is None:
         return None
     request = exchange.request
@@ -415,12 +396,10 @@ def route_of(exchange: Exchange, index: MapIndex | None) -> Route | None:
 def _check_reads(
     exchanges: Sequence[tuple[int, Exchange]], seen: dict[int, Disposition]
 ) -> dict[int, Exchange]:
-    """irimi's check read for each write it made one for in this run (`Write.asked`), keyed by
-    the write's place among the events. A write whose read the run did not record has no entry.
+    """Return irimi's check read per `Write.asked` write, keyed by the write's event index.
 
-    The engine records a check read before the write it was made for, both in the write's run,
-    so each such write takes the latest unclaimed read of its service before it, preferring one
-    made while the write was being decided."""
+    A check read is recorded before its write, so each write takes its service's latest unclaimed
+    earlier check read, preferring one made during the write."""
     found: dict[int, Exchange] = {}
     unclaimed: list[Exchange] = []
     for at, ex in exchanges:
@@ -440,7 +419,7 @@ def _check_reads(
 
 
 def auth_failed(check_read: Exchange | None) -> bool:
-    """Whether the service refused irimi's check read for the agent's own credentials."""
+    """Return True if the service refused irimi's check read for the agent's credentials."""
     return (
         check_read is not None
         and check_read.response is not None
@@ -449,22 +428,13 @@ def auth_failed(check_read: Exchange | None) -> bool:
 
 
 def _would_fire(writes: Sequence[WriteEntry]) -> tuple[str, ...]:
-    """Every webhook event the run's faked writes would have caused, each named once, in the order
-    the run first listed it.
-
-    Off `Exchange.would_fire` and never off `route.fires`: `would_fire` is already empty for
-    an L3 rejection, an idempotency conflict, a replay and a delegated write. A write whose check
-    read the service refused for its credentials is left out too: the real write would most
-    likely have been refused the same way. De-duplicated because two refunds carry two identical
-    tuples and one refund's `refund.created` must not be promised twice.
-    """
+    """Return each webhook event the faked writes would have caused, once, in first-seen order."""
     fired = (entry.exchange for entry in writes if not auth_failed(entry.check_read))
     return tuple(dict.fromkeys(event for ex in fired for event in ex.would_fire))
 
 
 def run_elapsed(record: RunRecord) -> float | None:
-    """How long a stored run took, or None for one with no start or no end. Never negative: the
-    wall clock can step back between the two, as `Exchange` knows of its own."""
+    """Return how long a stored run took (never negative), or None without a start and end."""
     if record.started_at is None or record.end is None:
         return None
     return max(0.0, record.end.ended_at - record.started_at)

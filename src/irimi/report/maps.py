@@ -1,4 +1,4 @@
-"""What `irimi maps list` prints: every host the loaded maps route, and where each is answered."""
+"""Build `irimi maps list`: every host the loaded maps route, and where each is answered."""
 
 from pathlib import Path
 
@@ -6,13 +6,10 @@ from irimi.servicemaps import SELF_TARGET, MapIndex
 
 
 def maps_lines(index: MapIndex, override_path: Path | None) -> list[str]:
-    """A header counting services, hosts, wildcard patterns and routes, then a line per exact host
-    and per pattern with its service, route count and target, and the overrides file when one is
-    loaded.
+    """Return a counts header, a line per exact host and wildcard pattern, and the overrides file.
 
-    A pattern is listed so a map whose hosts are all wildcards still appears, and counted apart
-    from the exact hosts, since only those are relayed in base-URL mode. Route targets are listed
-    under their host, because the host's column is the service's target."""
+    Patterns are counted apart from exact hosts: only exact hosts are relayed in base-URL mode.
+    Route targets are listed under their host."""
     hosts = sorted(index.hosts)
     patterns = index.patterns
     rows = [(host, index.by_host[host]) for host in hosts]

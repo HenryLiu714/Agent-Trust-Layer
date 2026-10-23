@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from irimi import limits, trace
-from irimi.exchange import Exchange, Kind, Request, Response
+from irimi.exchange import Exchange, Flag, Kind, Request, Response
 from irimi.trace import (
     SCHEMA_VERSION,
     BodyRef,
@@ -311,6 +311,18 @@ def test_an_unknown_extra_field_is_ignored():
     line = trace.exchange_to_json(ex, blobs.put) | {"added_later": True}
     line["request"] = line["request"] | {"added_later": True}
     assert trace.exchange_from_json(line, blobs.get) == ex
+
+
+def test_a_schema_2_exchange_reads_without_its_validation_and_fidelity_flag():
+    """Schema 3 dropped both; a run stored under schema 2 still reads, and an unknown flag says
+    nothing this version can act on."""
+    blobs = _Blobs()
+    ex = dataclasses.replace(_filled(Exchange), flags=(Flag.FROM_RECORDING,))
+    line = trace.exchange_to_json(ex, blobs.put) | {
+        "validation": "unvalidated",
+        "flags": ["fidelity:L1", "from-recording", "added-later"],
+    }
+    assert trace.exchange_from_json(_json_round_trip(line), blobs.get) == ex
 
 
 @pytest.mark.parametrize("version", [0, -1, pytest.param(-(10**5000), id="past-the-digit-limit")])

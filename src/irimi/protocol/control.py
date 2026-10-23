@@ -1,13 +1,9 @@
-"""The control endpoint's routes and the bodies posted to them: what the SDK sends and what
-`irimi.engine.control` reads, spelled once for both.
+"""The control endpoint's routes and bodies; a refused body raises `TraceFormatError`.
 
-    POST /_irimi/runs/{run_id}/start                  a `RunStart`
-    POST /_irimi/runs/{run_id}/tool-calls             a `trace.ToolCall`, its run id the path's
-    POST /_irimi/runs/{run_id}/end                    a `trace.RunEnd` with no exit code
-    POST /_irimi/runs/{run_id}/tool-calls/recorded    a lookup, answered a `RecordedOutcome`
-
-Each body is decoded by the trace format's own readers, so a posted value is held to exactly the
-rules a stored one is, and each refusal is a `TraceFormatError`.
+POST /_irimi/runs/{run_id}/start                  a `RunStart`
+POST /_irimi/runs/{run_id}/tool-calls             a `trace.ToolCall`, its run id the path's
+POST /_irimi/runs/{run_id}/end                    a `trace.RunEnd` with no exit code
+POST /_irimi/runs/{run_id}/tool-calls/recorded    a lookup, answered a `RecordedOutcome`
 """
 
 from collections.abc import Mapping
@@ -35,41 +31,32 @@ from irimi.protocol.trace import (
     trigger_to_json,
 )
 
-# A request addressed to irimi's own listener whose path starts here is the SDK reporting a run's
-# start, end or tool calls. It is never forwarded and never an `Exchange`.
+# The SDK reports under this path; such a request is never forwarded or recorded as an `Exchange`.
 CONTROL_PREFIX = "/_irimi/"
-# The `Irimi-Answered-By` value every control answer carries. Not an `AnsweredBy`: that vocabulary
-# is the trace's, and a control request never appears in a trace.
+# Not an `AnsweredBy`: control requests never appear in a trace.
 CONTROL_ANSWER = "control"
-# The run routes under CONTROL_PREFIX: `runs/{run_id}/{action}`.
 RUNS_ROUTE = "runs"
 RunAction = Literal["start", "tool-calls", "end"]
 START_ACTION: RunAction = "start"
 TOOL_CALLS_ACTION: RunAction = "tool-calls"
 END_ACTION: RunAction = "end"
 RUN_ACTIONS: tuple[RunAction, ...] = get_args(RunAction)
-# The one control route that answers with something: `runs/{run_id}/tool-calls/recorded`, where the
-# SDK asks a replay for a read tool's recorded result. Not a run action: it reports nothing.
+# A replay's lookup of a read tool's recorded result; it reports nothing, so is no run action.
 RECORDED_ACTION = f"{TOOL_CALLS_ACTION}/recorded"
-# The routes about a tool call, which a run with no SDK start may use: the process run, or
-# `unattributed` for a call made in no run.
+# Tool-call routes, usable by a run with no SDK start (the process run, or `unattributed`).
 TOOL_ACTIONS = frozenset({TOOL_CALLS_ACTION, RECORDED_ACTION})
-# The control protocol this irimi speaks. The endpoint answers 426 to another major version, so an
-# SDK and a proxy upgraded apart say so instead of losing runs.
-PROTOCOL_VERSION = "1"
-# What the SDK posts to ask a replay for a read tool's recorded outcome: the tool's name and its
-# args as captured, and nothing else.
+PROTOCOL_VERSION = "1"  # another major version gets a 426, so a mismatched SDK fails loudly
 RECORDED_LOOKUP_FIELDS = ("name", "args")
 
 
 def protocol_major(version: str) -> str:
-    """The major part of a control protocol version: `1` of `1.2`."""
+    """Return the major part of a control protocol version: `1` of `1.2`."""
     return version.strip().partition(".")[0]
 
 
 @dataclass(frozen=True)
 class RunStart:
-    """What the SDK posts when it starts a run. The rest of the run's record is irimi's to say."""
+    """What the SDK posts when it starts a run."""
 
     trigger: Trigger
     agent_version: str | None
@@ -79,9 +66,7 @@ class RunStart:
 
 @dataclass(frozen=True)
 class RecordedOutcome:
-    """What a recorded read tool call came to, as a replay hands it back: the control endpoint
-    answers the SDK's lookup with it, and the SDK reads it. `result` is still captured JSON, for
-    the SDK to revive."""
+    """A recorded read tool call's outcome for a replay lookup; `result` is still captured JSON."""
 
     result: JSONValue
     error: ErrorInfo | None
@@ -98,7 +83,7 @@ def run_start_to_json(start: RunStart) -> dict[str, JSONValue]:
 
 
 def run_start_from_json(d: Mapping[str, Any]) -> RunStart:
-    """A posted start. Every field must be present, and only `agent_version` may be null."""
+    """Return a posted start. Every field is required; only `agent_version` may be null."""
     trigger = read_optional(d, "trigger", read_object)
     agent_version = read_optional(d, "agent_version", read_str)
     sdk_version = read_optional(d, "sdk_version", read_str)
@@ -113,12 +98,12 @@ def run_start_from_json(d: Mapping[str, Any]) -> RunStart:
 
 
 def run_end_to_json(end: RunEnd) -> dict[str, JSONValue]:
-    """`end` as the SDK posts it. Its exit code is not posted: only the process run has one."""
+    """Return `end` as the SDK posts it, without the exit code (only a process run has one)."""
     return {"ended_at": end.ended_at, "outcome": end.outcome, "error": error_to_json(end.error)}
 
 
 def run_end_from_json(d: Mapping[str, Any]) -> RunEnd:
-    """A posted end. Every field must be present, and only `error` may be null."""
+    """Return a posted end. Every field is required; only `error` may be null."""
     ended_at = read_optional(d, "ended_at", read_float)
     outcome: RunStatus | None = read_optional(
         d, "outcome", lambda d, k: read_one_of(d, k, RunStatus)
@@ -132,12 +117,12 @@ def run_end_from_json(d: Mapping[str, Any]) -> RunEnd:
 
 
 def recorded_outcome_to_json(call: ToolCall) -> dict[str, JSONValue]:
-    """The recorded outcome of `call`, as the control endpoint answers a lookup that hit."""
+    """Return the recorded outcome of `call`, as the endpoint answers a lookup that hit."""
     return {"result": call.result, "error": error_to_json(call.error), "awaited": call.awaited}
 
 
 def recorded_outcome_from_json(d: Mapping[str, Any]) -> RecordedOutcome:
-    """The outcome `recorded_outcome_to_json` wrote, held to the rules a stored tool call is."""
+    """Return the outcome `recorded_outcome_to_json` wrote."""
     return RecordedOutcome(
         result=read_json(d, "result"),
         error=read_error(d, "error"),

@@ -45,8 +45,8 @@ neither diverges a replay nor holds a read back.
 THE REPLAY'S STATE IS HERE, AND ONLY HERE: which recorded exchanges have answered, and whether
 the replay has diverged - made a write the recording could not answer, or reached a recorded answer
 made from a world holding a recorded write the replay has not made - after which a recorded answer
-made from the world (`_shows_the_world`) is never served again. One replay is one run against one
-engine, whose write log is the engine's, so both are the engine's too.
+made from the world (`_depends_on_prior_writes`) is never served again. One replay is one run
+against one engine, whose write log is the engine's, so both are the engine's too.
 """
 
 import hashlib
@@ -87,7 +87,8 @@ _Key = tuple[Any, ...]
 # What a read tool call is matched by: its name, and its args as canonical JSON.
 _ToolKey = tuple[str, str]
 # Where a recorded exchange waits to be taken: its key, whether it is an llm call that asked to
-# stream (`_stream_bucket`), and the idempotency flag its answer carried (`_held`).
+# stream (`_stream_bucket`), and the idempotency flag its answer carried
+# (`_idempotency_standing`).
 _Bucket = tuple[_Key, bool, str]
 
 # A prompt-caching hint, at any depth of an llm call's body: it changes what the call costs, never
@@ -139,7 +140,7 @@ def _json_body(request: Request) -> dict[str, Any] | None:
     return bodies.json_object(request.body, max_bytes=None)
 
 
-def _held(exchange: Exchange) -> str:
+def _idempotency_standing(exchange: Exchange) -> str:
     """The idempotency flag a recorded answer carried: `idempotent-replay` when it was the run's
     first answer to its key again, `idempotency-conflict` when the key had come back on another
     write, and "" for an answer to a key the run had not answered, or no key.
@@ -151,7 +152,7 @@ def _held(exchange: Exchange) -> str:
     return next((flag for flag in IDEMPOTENCY_FLAGS if flag in exchange.flags), "")
 
 
-def _shows_the_world(exchange: Exchange) -> bool:
+def _depends_on_prior_writes(exchange: Exchange) -> bool:
     """Whether a recorded answer was made from the world the recorded run's writes had made: a
     read, which shows them, or a write L3 checked against them, whose verdict a refund the
     replay has not made, or one the recording never held, would change. A replay serves one only
@@ -412,7 +413,11 @@ class Recording:
                 if held is None or (_servable(event) and not _servable(held)):
                     engine[found] = event
             else:
-                bucket = (found, _stream_bucket(event.request, event.kind), _held(event))
+                bucket = (
+                    found,
+                    _stream_bucket(event.request, event.kind),
+                    _idempotency_standing(event),
+                )
                 agent.setdefault(bucket, []).append(_Entry(event, position))
                 position += 1
         made = [entry for entries in agent.values() for entry in entries]
@@ -434,8 +439,9 @@ class Recording:
 
     def take(self, request: Request, kind: Kind, held: str = "") -> Exchange | None:
         """The recorded exchange that answers this live request, or None for a miss. `held` is the
-        idempotency flag the run's own answer to this request would carry (`_held`), which the
-        caller reads off the run's idempotency store; "" for anything that is not a write.
+        idempotency flag the run's own answer to this request would carry
+        (`_idempotency_standing`), which the caller reads off the run's idempotency store; "" for
+        anything that is not a write.
 
         It is the first recorded exchange of the same kind, key, stream bucket and `held` that has
         not answered yet, and it never answers again. When that one cannot be served
@@ -443,20 +449,20 @@ class Recording:
         request is a miss all the same: the recorded run had no answer this one can be given.
 
         AN ANSWER MADE FROM A WORLD THE REPLAY IS NOT IN IS A MISS, AND THE REPLAY DIVERGES
-        (`_shows_the_world`): a read, or a write L3 checked, recorded after a recorded write the
-        replay has not made, or reached once the replay has diverged. It shows that write - a
-        refund in `amount_refunded`, a post in a thread - or was refused because of it, and the run
-        being replayed made no such write, as when a prompt edit stops the agent refunding; or the
-        replay made a write the recorded run did not. It is not consumed, and from then on reads go
-        live and checked writes are checked again, against the recording's own reads and the
-        replay's write log. The check and the take are one step under the lock, so a write that
-        diverges on another thread cannot slip between them."""
+        (`_depends_on_prior_writes`): a read, or a write L3 checked, recorded after a recorded
+        write the replay has not made, or reached once the replay has diverged. It shows that
+        write - a refund in `amount_refunded`, a post in a thread - or was refused because of it,
+        and the run being replayed made no such write, as when a prompt edit stops the agent
+        refunding; or the replay made a write the recorded run did not. It is not consumed, and
+        from then on reads go live and checked writes are checked again, against the recording's
+        own reads and the replay's write log. The check and the take are one step under the lock,
+        so a write that diverges on another thread cannot slip between them."""
         asks = _stream_bucket(request, kind)
         wanted = (_live_key(request, kind, self._maps, self._redaction_key), asks, held)
         with self._lock:
             for entry in self._agent.get(wanted, ()):
                 if not entry.consumed:
-                    if _shows_the_world(entry.exchange) and self._stale(entry.position):
+                    if _depends_on_prior_writes(entry.exchange) and self._stale(entry.position):
                         self._diverged = True
                         return None
                     entry.consumed = True

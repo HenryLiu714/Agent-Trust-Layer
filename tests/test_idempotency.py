@@ -77,8 +77,9 @@ def test_a_request_that_sent_no_key_has_none():
 
 def test_canonical_params_drop_the_routes_volatile_names():
     assert REFUNDS_CREATE is not None
-    request = _request(headers=(FORM,), body=b"charge=ch_1&amount=100&idempotency_key=k")
-    assert idempotency.canonical(request, REFUNDS_CREATE) == (
+    route = replace(REFUNDS_CREATE, volatile=("nonce",))
+    request = _request(headers=(FORM,), body=b"charge=ch_1&amount=100&nonce=n-1")
+    assert idempotency.canonical(request, route) == (
         "POST",
         "/v1/refunds",
         "",
@@ -88,12 +89,12 @@ def test_canonical_params_drop_the_routes_volatile_names():
 
 def test_canonical_params_keep_everything_else():
     route = Route(method="POST", path="/v1/refunds", operation="refunds.create", kind="write")
-    request = _request(headers=(FORM,), body=b"charge=ch_1&amount=100&idempotency_key=k")
+    request = _request(headers=(FORM,), body=b"charge=ch_1&amount=100&nonce=n-1")
     assert idempotency.canonical(request, route) == (
         "POST",
         "/v1/refunds",
         "",
-        {"charge": "ch_1", "amount": 100, "idempotency_key": "k"},
+        {"charge": "ch_1", "amount": 100, "nonce": "n-1"},
     )
 
 

@@ -37,7 +37,7 @@ routes:
     ids:
       id: th_
     volatile:
-      - idempotency_key
+      - nonce
   - match:
       method: POST
       path: /v1/search
@@ -112,7 +112,7 @@ def test_shipped_stripe_map_is_complete():
     assert (refund.operation, refund.kind) == ("refunds.create", "write")
     assert refund.human == "refund {amount} on {charge}"
     assert refund.ids == {"id": "re_", "balance_transaction": "txn_"}
-    assert refund.volatile == ("idempotency_key",)
+    assert refund.volatile == ()
     assert refund.fixture == "refund"
     assert refund.fires == ("refund.created", "charge.refunded")
 
@@ -280,7 +280,7 @@ def test_every_field_round_trips(tmp_path):
     assert create.ids == {"id": "th_"}
     assert create.fixture == "thing"
     assert listing.fixture == ""  # optional, and meaningless on a live route
-    assert create.volatile == ("idempotency_key",)
+    assert create.volatile == ("nonce",)
     assert create.persists is None
     assert create.target == servicemap.SELF_TARGET
     assert create.forward_auth is False
@@ -404,7 +404,7 @@ routes:
         ("      id: th_", "      id: ''", "must be a non-empty id prefix"),
         ("      path: /v1/things\n", "\n", "must start with"),
         ("      method: GET\n      path: /v1/things\n", "      verb: GET\n", "unknown match"),
-        ("volatile:\n      - idempotency_key", "volatile: 3", "must be a list of strings"),
+        ("volatile:\n      - nonce", "volatile: 3", "must be a list of strings"),
         ("    fixture: thing", "    fixture: 3", "`fixture` must be a string"),
         ("    fixture: thing", "    fires: 3", "`fires` must be a list of strings"),
         ("    fixture: thing", "    fires:\n      - 3", "`fires` entry must be a string"),

@@ -48,10 +48,6 @@ routes:
     ids:
       id: re_
       balance_transaction: txn_
-    # The Idempotency-Key header. Duplicate-write detection canonicalizes a write's arguments
-    # before comparing them, and a fresh key must not hide a repeat.
-    volatile:
-      - idempotency_key
 
   - match:
       method: GET

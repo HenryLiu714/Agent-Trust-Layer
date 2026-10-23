@@ -91,8 +91,10 @@ def _llm(content="hi", stream=False, **extra):
     return _req("POST", "api.anthropic.com", "/v1/messages", json.dumps(body).encode(), JSON)
 
 
-def _refund(amount=100, key="k-1"):
-    body = f"charge=ch_1&amount={amount}&idempotency_key={key}".encode()
+def _refund(amount=100, key="k-1", nonce=None):
+    body = f"charge=ch_1&amount={amount}".encode()
+    if nonce is not None:
+        body += f"&nonce={nonce}".encode()
     return _req("POST", path="/v1/refunds", body=body, ct=FORM, headers=(("idempotency-key", key),))
 
 
@@ -162,10 +164,30 @@ def test_a_repeated_query_name_keeps_the_order_of_its_values():
 
 
 def test_a_volatile_field_never_decides_a_match_and_any_other_does():
-    """`idempotency_key` is `volatile:` on the shipped refund route."""
-    recording = _recording(_recorded_refund(), _recorded_refund())
+    """`nonce` is `volatile:` on the refund route of a test map built from the shipped one."""
+    maps = servicemap.MapIndex(
+        tuple(
+            replace(
+                sm,
+                routes=tuple(
+                    replace(route, volatile=("nonce",))
+                    if route.operation == "refunds.create"
+                    else route
+                    for route in sm.routes
+                ),
+            )
+            for sm in servicemap.load_shipped()
+        )
+    )
+    recorded = _stored(_refund(nonce="n-1"), REFUND_ANSWER, answered_by="fake-L1")
+    recording = Recording.from_events([recorded, recorded], KEY, maps)
+    assert recording.take(_refund(nonce="n-other"), "write") is not None
+    assert recording.take(_refund(amount=250, nonce="n-1"), "write") is None
+
+
+def test_the_idempotency_key_header_never_decides_a_match():
+    recording = _recording(_recorded_refund())
     assert recording.take(_refund(key="k-other"), "write") is not None
-    assert recording.take(_refund(amount=250), "write") is None
 
 
 def test_a_form_body_and_a_json_body_with_the_same_fields_are_the_same_write():

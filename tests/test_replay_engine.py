@@ -59,8 +59,6 @@ routes:
       - refund.created
     ids:
       id: re_
-    volatile:
-      - idempotency_key
   - match:
       method: GET
       path: /v1/refunds
@@ -274,7 +272,7 @@ def _message(llm, system="Be brief.", stream=False, **extra):
 
 
 def _refund(session, stripe, amount=100, key="k-1"):
-    body = f"charge=ch_REAL1&amount={amount}&idempotency_key={key}".encode()
+    body = f"charge=ch_REAL1&amount={amount}".encode()
     headers = {"content-type": FORM, "idempotency-key": key}
     return session.call("POST", f"http://127.0.0.1:{stripe}/v1/refunds", body, headers)
 
@@ -416,7 +414,7 @@ def _refund_then_read_it(stripe, amount=100, key="k-1"):
 
 
 def test_the_same_write_is_answered_with_the_recorded_answer(home, maps, stubs):
-    """A different `Idempotency-Key` header and `idempotency_key` field are not a different write.
+    """A different `Idempotency-Key` header is not a different write.
     It is answered with the recorded body at the recorded level, with the recorded L3 outcome and
     currency, and the read of the id it minted is answered from the recording too."""
     stripe, _ = stubs

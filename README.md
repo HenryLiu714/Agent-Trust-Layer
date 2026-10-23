@@ -346,8 +346,6 @@ routes:
       - charge.refunded
     ids:
       id: re_
-    volatile:
-      - idempotency_key
 ```
 
 - `match.path` may carry `{name}` segments, each matching one path segment; a literal path beats a

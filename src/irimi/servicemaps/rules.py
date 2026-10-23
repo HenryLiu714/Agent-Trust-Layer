@@ -1,7 +1,4 @@
-"""What a loaded map may not say. Every refusal is a MapError naming the source and the rule.
-
-`loader` calls the three public checks; the rest are the pieces they are made of.
-"""
+"""What a loaded map may not say. Every refusal is a MapError naming the source and the rule."""
 
 from irimi.core.exchange import ANY_METHOD, LIVE_KINDS, SAFE_METHODS
 from irimi.core.netaddr import Target
@@ -16,23 +13,20 @@ from irimi.servicemaps.model import (
     target_for,
 )
 
-# The kinds whose request bodies irimi compares (idempotent retries, replay matching, `compare`),
-# and so the kinds a route's `compare_ignores:` may name fields of.
+# The kinds whose request bodies irimi compares (retries, replay matching, `compare`), and so the
+# kinds a route's `compare_ignores:` may name fields of.
 COMPARED_KINDS: frozenset[str] = TARGETABLE_KINDS | {"llm"}
 
 # Scope rule: a safety property is checked at the scope it belongs to (method, route, host or
-# service), and twice: when maps are loaded, so a bad configuration is refused by name whichever
-# layer it came through (shipped map, overrides file or `--target` flag), and again at the
-# decision, so a configuration that slips past the loader still cannot act. Examples:
-#   - "telemetry is forwarded live" is per route, so it may not be a service's `default_kind`;
-#   - "forwarded live" is per method, so a live route must name its unsafe methods;
-#   - "the URL is the credential" is per host (hooks.slack.com), so it covers unlisted paths.
-# The decision-time check asks only about the request in front of it, so a new way of reaching
-# delegation or classification inherits the rule instead of escaping it.
+# service), and twice: when maps load, so a bad config is refused by name, and again at the
+# decision, so a config that slips past the loader still cannot act. For example, "forwarded
+# live" is per method, so a live route must name its methods: no classification that forwards
+# live may apply to an unsafe method it did not name explicitly. "The URL is the credential" is
+# per host, so it covers unlisted paths. The decision half is `classify._apply_scope_rule`.
 
 
 def validate_targets(sm: ServiceMap, allow_target_hosts: frozenset[str]) -> None:
-    """The target rules that can only be checked once overrides are merged in."""
+    """Check the target rules, which hold only once overrides and `--target` are merged in."""
     if sm.target_reads and sm.target is None:
         raise MapError(
             f"{sm.source}: `target_reads: true` needs a `target:` URL to send the reads to"
@@ -54,7 +48,7 @@ def validate_targets(sm: ServiceMap, allow_target_hosts: frozenset[str]) -> None
 def _check_target_host(
     target: Target | None, allow_target_hosts: frozenset[str], where: str
 ) -> None:
-    """Targets must be loopback unless `--allow-remote-target` names the host."""
+    """Refuse a non-loopback target unless `--allow-remote-target` names its host."""
     if target is None or target.is_loopback:
         return
     host = target.host
@@ -67,19 +61,11 @@ def _check_target_host(
 
 
 def _check_live_kind_methods(sm: ServiceMap, route: Route, where: str) -> None:
-    """A live-forwarded kind may only apply to a method the route named explicitly.
+    """Enforce the method scope of the scope rule on a live-forwarded route.
 
-    The METHOD scope of THE SCOPE RULE. `kind` is written per route, but "forward this to the
-    real service" is a decision about a *verb*: `match: {path: /api/{v}/{thing}}` with no
-    `method:` means `*`, and `*` includes DELETE. A route like that would classify
-    `DELETE /api/v1/dashboard` as telemetry and perform it for real, reached by omission rather
-    than by deliberately writing `"*"`.
-
-    The rule: **no classification that forwards live may apply to an unsafe method it did not
-    name explicitly.** `*` names nothing, so it never satisfies it. A route that really does
-    serve a destructive verb live has to say so, and then justify it the way `kind: read`
-    already has to, with `live_because:`. POST is left alone: it is the honest verb for inference
-    and for telemetry intake, which is what these kinds exist for.
+    A route with no `method:` matches `*`, which includes DELETE, so a live kind is refused there.
+    A destructive method needs `live_because:`. POST is allowed: inference and telemetry intake
+    use it.
     """
     if route.kind not in LIVE_KINDS:
         return
@@ -97,20 +83,11 @@ def _check_live_kind_methods(sm: ServiceMap, route: Route, where: str) -> None:
 
 
 def _check_credential_path_targets(sm: ServiceMap) -> None:
-    """Every target of a service claiming a credential-path host must be loopback.
+    """Enforce the host scope of the scope rule: a credential-path service's targets are loopback.
 
-    The HOST scope of THE SCOPE RULE. Keyed on the webhook *route*, it would leave a
-    service-level target free to delegate every path the map does not list, and on
-    `hooks.slack.com` the unlisted paths (`/workflows/...`, `/triggers/...`) carry the credential
-    just as the listed one does. Checking every target the service can answer with covers the
-    service target, each route target, the overrides file and `--target` alike, because all four
-    have already been merged into `sm` by the time this runs.
-
-    Every route target, and not only the ones whose path looks like a webhook, because routes are
-    matched by path within a SERVICE and not within a host: `route_for("hooks.slack.com", "POST",
-    "/api/chat.postMessage")` matches, so a target on that route would answer a request addressed
-    to the credential host. Routes being service-scoped while the credential is host-scoped is
-    the same confusion one level down.
+    Every target is checked, not only webhook routes: unlisted paths on the host carry the
+    credential too, and routes match by path within the service, so any route can answer a
+    request to the credential host.
     """
     hosts = sorted(h for h in sm.hosts if h in sm.credential_hosts)
     if not hosts:
@@ -124,7 +101,7 @@ def _check_credential_path_targets(sm: ServiceMap) -> None:
 
 
 def _require_loopback_target(target: Target | None, where: str) -> None:
-    """A credential-path target must be loopback, with no escape hatch (`credential_hosts`)."""
+    """Refuse a non-loopback target; `--allow-remote-target` does not apply here."""
     if target is None or target.is_loopback:
         return
     raise MapError(
@@ -135,7 +112,7 @@ def _require_loopback_target(target: Target | None, where: str) -> None:
 
 
 def check_route_rules(sm: ServiceMap) -> None:
-    """Per-route rules that need the service's own fields (`style`) to judge."""
+    """Check each route's rules, some of which need the service's own fields (`style`)."""
     seen: set[tuple[str, str]] = set()
     for route in sm.routes:
         where = f"{sm.source}: route {route.method} {route.path}"
@@ -154,27 +131,21 @@ def check_route_rules(sm: ServiceMap) -> None:
                 f"{where}: `compare_ignores` belongs on a `write`, `unknown` or `llm` route, "
                 f"whose bodies irimi compares; a `{route.kind}` route's never are"
             )
+        # A live route is answered by the real service, so `fixture:`, `precondition:` and
+        # `fires:` would never be used there; a key that silently does nothing is refused.
         if route.fixture and route.kind in LIVE_KINDS:
-            # A key that silently does nothing reads as configured and is never consulted, so it
-            # is refused. A live route is answered by the real service, so it has no body of ours
-            # to start from.
             raise MapError(
                 f"{where}: `fixture:` names the object a locally answered write starts from, "
                 f"and a `{route.kind}` route is forwarded to the real service, so it would "
                 "never be used"
             )
         if route.precondition and route.kind in LIVE_KINDS:
-            # The same rule as `fixture:`, for the same reason: a live route is forwarded, so a
-            # check that runs before a write is faked would never run on it.
             raise MapError(
                 f"{where}: `precondition:` names the check run before a write is faked, and a "
                 f"`{route.kind}` route is forwarded to the real service, which checks its own "
                 "preconditions; it would never be used"
             )
         if route.fires and route.kind in LIVE_KINDS:
-            # The same rule as `fixture:` and `precondition:`, for the same reason: a
-            # live route is forwarded, the real service performs the write and sends its own
-            # webhooks, so ours would never be listed.
             raise MapError(
                 f"{where}: `fires:` names the webhooks a FAKED write would have sent, and a "
                 f"`{route.kind}` route is forwarded to the real service, which sends its own; "
@@ -182,8 +153,8 @@ def check_route_rules(sm: ServiceMap) -> None:
             )
         repeated_events = sorted({e for e in route.fires if route.fires.count(e) > 1})
         if repeated_events:
-            # One write does not fire one event twice, and the baseline report prints this list
-            # verbatim - a repeat would promise two `refund.created` for one refund.
+            # The summary prints this list verbatim, so a repeat would promise two
+            # `refund.created` events for one refund.
             raise MapError(
                 f"{where}: `fires:` names {repeated_events[0]!r} more than once. A write fires an "
                 "event once, and the summary prints this list as it is given"
@@ -202,12 +173,7 @@ def check_route_rules(sm: ServiceMap) -> None:
 
 
 def _check_unique_holes(pattern: str, where: str) -> None:
-    """A `{name}` may appear once in a pattern: `path_params` returns one entry per name.
-
-    `/a/{x}/b/{x}` would bind `x` to the last segment and drop the first silently, which is how
-    `named_id` would come to echo the wrong id. Refusing the pattern is the fail-closed answer,
-    and no shipped route repeats a name.
-    """
+    """Refuse a pattern that repeats a `{name}`: `path_params` would keep only the last capture."""
     holes = [p[1:-1] for p in path_segments(pattern) if is_hole(p)]
     repeated = sorted({name for name in holes if holes.count(name) > 1})
     if repeated:

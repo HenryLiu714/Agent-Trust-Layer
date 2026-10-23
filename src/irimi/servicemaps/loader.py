@@ -79,7 +79,7 @@ ROUTE_KEYS = frozenset(
 MATCH_KEYS = frozenset({"method", "path"})
 OVERRIDE_SERVICE_KEYS = frozenset({"service", "target", "target_reads", "routes"})
 OVERRIDE_ROUTE_KEYS = frozenset({"match", "target", "forward_auth"})
-# Keys a map may no longer use, and what to write instead.
+# Retired keys, and what to write instead.
 RETIRED_SERVICE_KEYS = {"verbs": "is now `style:` (`honest` is `rest`, `post-only` is `rpc`)"}
 RETIRED_ROUTE_KEYS = {
     "volatile": "is now `compare_ignores:`",
@@ -115,13 +115,10 @@ def load(
     targets: Sequence[tuple[str, str, str]] = (),
     target_reads: Sequence[str] = (),
 ) -> MapIndex:
-    """Load the shipped maps, merge what the user says over them, and validate the result.
+    """Load the shipped maps, merge the overrides file and flags over them, and validate.
 
-    Three layers, each beating the one before it: the shipped maps, the overrides file, then the
-    `--target` / `--target-reads` flags. Validation runs last, over the merged result, so a
-    non-loopback target is refused however it arrived. Raises MapError on anything wrong, naming
-    the source and the rule. `allow_target_hosts` is the set of non-loopback hosts a target may
-    name (`--allow-remote-target`).
+    Raises MapError naming the source and the rule. `allow_target_hosts` is the non-loopback
+    hosts a target may name (`--allow-remote-target`).
     """
     maps = load_shipped(maps_dir)
     override = override_path(cwd)
@@ -137,10 +134,8 @@ def load(
 def load_shipped(maps_dir: Path | None = None) -> list[ServiceMap]:
     """Parse every `*.yaml` in the maps directory, in file-name order.
 
-    A directory that cannot be scanned, or that holds no maps at all, is a MapError like every
-    other refusal here. It is not an empty index: an empty index silently empties the reverse
-    door's allow-list and sends every route to the RFC fallback, so a damaged install would look
-    like a working one that classifies nothing.
+    An unreadable or empty directory is a MapError, not an empty index, so a damaged install
+    cannot pass for a working one that classifies nothing.
     """
     directory = maps_dir if maps_dir is not None else shipped_dir()
     try:
@@ -192,10 +187,10 @@ def parse_service(doc: Any, source: str) -> ServiceMap:
 
 
 def apply_overrides(maps: list[ServiceMap], path: Path) -> list[ServiceMap]:
-    """Merge the user's overrides file over the shipped maps, by service name and exact route.
+    """Merge the overrides file over the shipped maps, by service name and exact route.
 
-    An override may set `target`, `target_reads` and `forward_auth` and nothing else. Naming a
-    service or a route that does not exist is an error, not a silent no-op.
+    An override may set `target`, `target_reads` and `forward_auth` only. Naming a service or a
+    route that does not exist is a MapError.
     """
     source = str(path)
     by_name = {sm.service: sm for sm in maps}
@@ -265,17 +260,11 @@ def apply_cli_targets(
 ) -> list[ServiceMap]:
     """Apply `--target '<host>[<path>]=<url>'` and `--target-reads <host>` over the loaded maps.
 
-    A host with no path sets the **service** target. A host with a path sets it on every
-    targetable route of that service the path names - matched against the route pattern literally
-    (`/v1/customers/{customer}`) or as a concrete request path (`/v1/customers/cus_1`), so the
-    caller does not have to know how the map spells it. `read`, `llm` and `telemetry` routes are
-    skipped, because a route target is only valid on `write` and `unknown`; delegate reads with
-    `--target-reads`.
-
-    Naming a host or a path no loaded map claims is a MapError, not a silent no-op: a typo that
-    quietly changed nothing would look exactly like a working delegation.
+    A host alone sets the service target. A host with a path sets it on every `write` and
+    `unknown` route the path names, as the pattern itself or a concrete path that matches it.
+    A host or path no map claims is a MapError, so a typo cannot pass for a working target.
     """
-    index = MapIndex(tuple(maps))  # built once, before by_name starts changing underneath it
+    index = MapIndex(tuple(maps))  # built before by_name starts changing
     by_name = {sm.service: sm for sm in maps}
     for host, route_path, url in targets:
         claimed = index.service_for(host)
@@ -401,12 +390,10 @@ def _parse_hosts(raw: Any, source: str) -> frozenset[str]:
 
 
 def _check_pattern(host: str, item: Any, source: str) -> None:
-    """A wildcard host is exactly one leading `*.` label plus two or more labels of its own.
+    """Refuse a wildcard host that is not one leading `*.` label plus two or more labels.
 
-    The rule is label counting, not public suffixes: `*.com` is refused because one label after
-    the star is almost always a mistake, while `*.co.uk` and `*.github.io` satisfy it and would
-    each claim a whole public suffix. No shipped map uses one. `*foo.com`, `foo.*.com` and
-    `**.foo.com` are refused because they would load cleanly and silently never match.
+    The rule counts labels, not public suffixes, so `*.co.uk` passes. `*foo.com`, `foo.*.com`
+    and `**.foo.com` would load and never match.
     """
     rest = host[2:] if is_pattern(host) else ""
     if not is_pattern(host) or "*" in rest or "." not in rest or "" in rest.split("."):
@@ -441,8 +428,7 @@ def _parse_ids(raw: Any, where: str) -> dict[str, IdSpec]:
 
 
 def _parse_human(raw: Any, where: str) -> str:
-    """A summary template. A hole may name one format, `{amount:money}`; any other is refused,
-    because the summary would print it as literal text."""
+    """Return a summary template; a hole may name only the `money` format, `{amount:money}`."""
     template = _parse_str(raw, where)
     for spec in _HUMAN_HOLE.findall(template):
         if spec and spec not in HUMAN_FORMATS:
@@ -454,8 +440,7 @@ def _parse_human(raw: Any, where: str) -> str:
 
 
 def _parse_credential_hosts(raw: Any, hosts: frozenset[str], where: str) -> frozenset[str]:
-    """Hosts of this map whose request path is the credential. Each must be one of the map's own
-    exact hosts, because the rule is keyed on a host the map claims."""
+    """Return the map's credential-path hosts; each must be one of its own exact `hosts`."""
     named = frozenset(name.lower() for name in _parse_str_list(raw, where))
     for host in sorted(named):
         if host not in hosts or is_pattern(host):
@@ -465,8 +450,10 @@ def _parse_credential_hosts(raw: Any, hosts: frozenset[str], where: str) -> froz
 
 @lru_cache(maxsize=1)
 def shipped_credential_hosts() -> frozenset[str]:
-    """`CREDENTIAL_PATH_HOSTS` plus every host a shipped map declares in `credential_path_hosts:`,
-    for code with no `MapIndex` at hand. Never raises: maps that do not load leave the floor."""
+    """Return `CREDENTIAL_PATH_HOSTS` plus every shipped map's `credential_path_hosts:`.
+
+    For code with no `MapIndex` at hand. Never raises: if the maps do not load, the built-in set.
+    """
     try:
         maps = load_shipped()
     except Exception:
@@ -474,8 +461,8 @@ def shipped_credential_hosts() -> frozenset[str]:
     return CREDENTIAL_PATH_HOSTS.union(*(sm.credential_path_hosts for sm in maps))
 
 
-# Why each live-forwarding kind is refused as a service-wide default. The *rule* is LIVE_KINDS;
-# these only say why, because a generic message would not tell a map author what to write instead.
+# Why each live kind is refused as `default_kind`, so the map author learns what to write
+# instead. The rule itself is LIVE_KINDS.
 DEFAULT_KIND_REASONS: dict[str, str] = {
     "read": (
         "that forwards every route this map does not list to the real service. List the read "
@@ -494,12 +481,9 @@ DEFAULT_KIND_REASONS: dict[str, str] = {
 
 
 def _parse_default_kind(raw: Any, where: str) -> Kind | None:
-    """The service-wide kind for routes the map does not list, or None to use the RFC fallback.
+    """Return the kind for unlisted routes, or None for the RFC 9110 fallback.
 
-    A default may not name a kind shadow mode forwards live (`exchange.LIVE_KINDS`): that sends
-    every route this map does not list to the real service, which is the bypass the maps exist to
-    close. `DEFAULT_KINDS` is derived from that same set rather than listed by hand, so the rule
-    covers a live kind added later; DEFAULT_KIND_REASONS only explains each one.
+    A live kind is refused: it would forward every unlisted route to the real service.
     """
     if raw is None:
         return None
@@ -513,14 +497,10 @@ def _parse_default_kind(raw: Any, where: str) -> Kind | None:
 
 
 def _parse_target(raw: Any, where: str) -> Target | None:
-    """None for `self`, or an http(s) origin with an optional path. Query, fragment and userinfo
-    are out.
+    """Return None for `self`, or an http(s) origin with an optional path. Raises MapError.
 
-    Every target reaches this function - shipped map, overrides file and `--target` alike - so it
-    is the one place a malformed URL may turn into a MapError. Both `urlsplit` and its `.port`
-    accessor raise ValueError on input a user can type (`http://[::1/x`, `http://h:99999`), and a
-    ValueError escaping here is an uncaught traceback out of `irimi serve` instead of the one-line
-    refusal every other bad target gets.
+    `urlsplit` and `.port` raise ValueError on typed input (`http://[::1/x`, `http://h:99999`),
+    so it is turned into a MapError rather than a traceback.
     """
     target = _parse_str(raw, where).strip()
     if target == SELF_TARGET:

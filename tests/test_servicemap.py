@@ -752,7 +752,7 @@ def test_target_reads_without_a_target_is_refused(tmp_path):
     refuses(
         tmp_path,
         GOOD.replace("verbs: honest", "verbs: honest\ntarget_reads: true"),
-        "would be a twin",
+        "needs a `target:` URL to send the reads to",
     )
 
 
@@ -1316,13 +1316,18 @@ def test_target_reads_without_a_target_is_still_refused_when_it_comes_from_a_fla
     would be the twin the design rejects, and `--target-reads` must not be a way around it."""
     with pytest.raises(MapError) as exc:
         _flagged(tmp_path, target_reads=["demo.example"])
-    assert "needs a `target:` URL" in str(exc.value)
+    assert str(exc.value).endswith(
+        "`target_reads: true` needs a `target:` URL to send the reads to"
+    )
 
 
 def test_a_flag_target_is_validated_like_every_other_one(tmp_path):
     with pytest.raises(MapError) as exc:
         _flagged(tmp_path, targets=[("demo.example", "", "http://example.com")])
-    assert "is not loopback" in str(exc.value)
+    assert str(exc.value).endswith(
+        "target host 'example.com' is not loopback; targets must be 127.0.0.1, ::1 or localhost "
+        "unless you pass --allow-target-host example.com"
+    )
     ok = _flagged(
         tmp_path,
         targets=[("demo.example", "", "http://example.com")],

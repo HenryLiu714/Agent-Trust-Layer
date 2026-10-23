@@ -51,8 +51,7 @@ def validate_targets(sm: ServiceMap, allow_target_hosts: frozenset[str]) -> None
     """The target rules that can only be checked once overrides are merged in."""
     if sm.target_reads and sm.target == SELF_TARGET:
         raise MapError(
-            f"{sm.source}: `target_reads: true` needs a `target:` URL — a service irimi answers "
-            "end to end would be a twin, not a shadow"
+            f"{sm.source}: `target_reads: true` needs a `target:` URL to send the reads to"
         )
     _check_target_host(sm.target, allow_target_hosts, f"{sm.source}: `target`")
     for route in sm.routes:
@@ -78,8 +77,8 @@ def _check_target_host(target: str, allow_target_hosts: frozenset[str], where: s
     if host in allow_target_hosts:
         return
     raise MapError(
-        f"{where}: target host {host!r} is not loopback. Phase 1 forwards to 127.0.0.1, ::1 or "
-        "localhost only; pass --allow-target-host to override it deliberately"
+        f"{where}: target host {host!r} is not loopback; targets must be 127.0.0.1, ::1 or "
+        f"localhost unless you pass --allow-target-host {host}"
     )
 
 

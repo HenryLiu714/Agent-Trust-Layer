@@ -11,9 +11,12 @@ import random
 
 import pytest
 
-from irimi import compare, recording, redact, report, servicemap, trace
+from irimi import compare, redact, servicemap, trace
 from irimi.cli import main
 from irimi.exchange import Exchange, Flag, Precondition, Request, Response
+from irimi.replay.index import compared_body
+from irimi.report.model import RunView
+from irimi.report.summary import summary_lines
 from irimi.servicemap import MapError
 from irimi.store.writer import DirectoryStore
 from irimi.trace import ErrorInfo, Event, RunRecord, StoredRun, ToolCall, Trigger
@@ -224,7 +227,7 @@ def test_a_refund_whose_reason_alone_differs_is_changed(home, capfd):
 
 def test_an_ignored_field_is_not_compared_and_any_other_is():
     """`nonce` is in `compare_ignores:` on the refund route of a test map built from the shipped
-    one, which a replay never matches on either (`recording.compared_body`)."""
+    one, which a replay never matches on either (`replay.index.compared_body`)."""
     index = servicemap.MapIndex(
         tuple(
             dataclasses.replace(
@@ -338,7 +341,7 @@ def test_a_webhook_s_redacted_path_is_not_compared_and_its_text_is():
 
 
 def test_an_llm_body_is_compared_less_who_asked_and_how_as_a_replay_matches_it():
-    """`recording.compared_body` is the one rule: an llm call's body less its route's
+    """`replay.index.compared_body` is the one rule: an llm call's body less its route's
     `compare_ignores:` and every `cache_control`, at any depth."""
     asked = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
     noisy = {
@@ -352,7 +355,7 @@ def test_an_llm_body_is_compared_less_who_asked_and_how_as_a_replay_matches_it()
     body = dataclasses.replace(request, body=json.dumps(noisy).encode())
     found = servicemap.load().route_for(request.host, request.method, request.path)
     assert found is not None
-    assert recording.compared_body(body, "llm", found[1]) == asked
+    assert compared_body(body, "llm", found[1]) == asked
 
 
 def test_a_slack_post_only_b_made_is_one_write_added(home, capfd):
@@ -644,7 +647,7 @@ def test_writes_print_as_requests_with_a_warning_when_the_maps_do_not_load(
 def test_an_action_s_text_is_its_summary_line_without_the_indent():
     """The comparison and the summary print one string for one write."""
     run = _run([_refund(), _tool()])
-    summary = report.stored_summary_lines(run, None)
+    summary = summary_lines(RunView(run.record, run.events), None)
     assert [f"  {a.text}" for a in compare.actions(run, None)] == [
         line for line in summary if line.startswith("  ○ ")
     ]
@@ -735,7 +738,7 @@ def test_every_write_shape_s_action_is_the_line_the_stored_summary_prints_for_it
         dataclasses.replace(_tool("db.x\n"), error=ErrorInfo("Boom\x1b", "no")),
     ]
     run, index = _run(events), servicemap.load()
-    summary = report.stored_summary_lines(run, index)
+    summary = summary_lines(RunView(run.record, run.events), index)
     acts = compare.actions(run, index)
     exchanges = [a for a in acts if a.key[0] == compare.EXCHANGE_KEY]
     tools = [a for a in acts if a.key[0] == compare.TOOL_KEY]
@@ -822,9 +825,9 @@ def test_a_run_of_hundreds_of_one_write_is_lined_up_write_by_write():
     ],
 )
 def test_a_pair_that_differs_by_a_character_no_one_can_see_spells_it(a, b, spelled_a, spelled_b):
-    """`report.printable` escapes control characters, not a zero-width space, a no-break space or
-    a right-to-left override, so two posts that differ only by one printed two identical lines
-    under `~`. A pair whose lines print alike spells each such character as its escape."""
+    """`report.terminal.printable` escapes control characters, not a zero-width space, a no-break
+    space or a right-to-left override, so two posts that differ only by one printed two identical
+    lines under `~`. A pair whose lines print alike spells each such character as its escape."""
     pair = compare.compare_runs(_run([_post(a)]), _run([_post(b)]), servicemap.load())
     assert pair.lines()[:2] == [
         f'  ~ A ○ slack  post to #C1: "{spelled_a}"  faked; not checked',

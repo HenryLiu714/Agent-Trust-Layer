@@ -30,11 +30,12 @@ from pathlib import Path
 
 import pytest
 
-from irimi import redact, report, trace
+from irimi import redact, trace
 from irimi.bodies import FORM_CT
 from irimi.cli import main
 from irimi.exchange import Exchange, Flag, Headers, Precondition, header_value, media_type
 from irimi.protocol.env import RUN_ENV
+from irimi.report.terminal import exchange_line
 from irimi.servicemap import loader
 from irimi.store.reader import StoreReader
 from irimi.store.writer import DirectoryStore
@@ -132,13 +133,13 @@ def stored(home, monkeypatch):
     _SpyStore.built = []
     monkeypatch.setattr("irimi.store.writer.DirectoryStore", _SpyStore)
     printed: list[Exchange] = []
-    line = report.exchange_line
+    line = exchange_line
 
     def printing(ex: Exchange) -> str:
         printed.append(ex)
         return line(ex)
 
-    monkeypatch.setattr("irimi.report.exchange_line", printing)
+    monkeypatch.setattr("irimi.report.terminal.exchange_line", printing)
 
     def the_disk() -> _Disk:
         (store,) = _SpyStore.built

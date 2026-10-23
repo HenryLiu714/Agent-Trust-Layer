@@ -1,7 +1,7 @@
 """The tool decorators under replay, against a real engine replaying a stored run.
 
 Each test records a run first, through a shadow engine and a real `DirectoryStore`, then starts a
-second engine answering from that run - a `ReplayPolicy` over its `Recording`, which answers the
+second engine answering from that run - a `ReplayPolicy` over its `ReplayIndex`, which answers the
 control endpoint's lookups too, as `cli._build_engine` builds it - with this process set up as
 `irimi shadow` sets up a replay's child: `IRIMI_REPLAY_RUN` names the engine's run. Every claim
 about what the replay stored is read back off disk once its engine has stopped.
@@ -28,7 +28,7 @@ from typing import Any
 import pytest
 
 from irimi import redact, runner, sdk
-from irimi.policy import ReplayPolicy, ShadowPolicy
+from irimi.policy import ShadowPolicy
 from irimi.protocol.control import RECORDED_ACTION, RecordedOutcome
 from irimi.protocol.env import (
     AGENT_VERSION_ENV,
@@ -38,7 +38,8 @@ from irimi.protocol.env import (
     RUN_ENV,
 )
 from irimi.protocol.headers import RUN_HEADER
-from irimi.recording import Recording
+from irimi.replay.index import ReplayIndex
+from irimi.replay.policy import ReplayPolicy
 from irimi.sdk import client, context, runs
 from irimi.sdk.errors import recorded_error
 from irimi.store.reader import StoreReader
@@ -169,7 +170,7 @@ class _Irimi:
         run's tool calls as stored."""
         before = {r.run_id for r in StoreReader(self.root).list_runs()}
         events = StoreReader(self.root).load_run(run_id).events
-        recording = Recording.from_events(events, self.key, self.cfg.maps)
+        recording = ReplayIndex.from_events(events, self.key, self.cfg.maps)
         # Each replay is a run of its own, the engine's, as each `irimi replay` mints one.
         self.cfg = dataclasses.replace(self.cfg, run_id=new_run_id())
         store = DirectoryStore(self.root, self.key, replay_of=run_id)
@@ -454,7 +455,7 @@ def test_a_replay_id_irimi_did_not_set_asks_no_recording(monkeypatch, run_env):
 def test_a_hit_is_used_up_and_is_not_itself_a_tool_call(irimi):
     run_id = irimi.record(lambda: balance("acc_1"))
     events = StoreReader(irimi.root).load_run(run_id).events
-    recording = Recording.from_events(events, irimi.key, irimi.cfg.maps)
+    recording = ReplayIndex.from_events(events, irimi.key, irimi.cfg.maps)
     store = DirectoryStore(irimi.root, irimi.key, replay_of=run_id)
     eng, _seen, stop = _start(irimi.cfg, policy=ReplayPolicy(recording), store=store)
     route = f"/_irimi/runs/abcd1234abcd1234/{RECORDED_ACTION}"
@@ -526,7 +527,7 @@ def test_a_tool_called_in_no_run_or_the_process_run_may_ask_the_recording(irimi,
     is none, and asks its recording from there."""
     recorded = irimi.record(lambda: balance("acc_1"))
     events = StoreReader(irimi.root).load_run(recorded).events
-    recording = Recording.from_events(events, irimi.key, irimi.cfg.maps)
+    recording = ReplayIndex.from_events(events, irimi.key, irimi.cfg.maps)
     store = DirectoryStore(irimi.root, irimi.key, replay_of=recorded)
     eng, _seen, stop = _start(irimi.cfg, policy=ReplayPolicy(recording), store=store)
     try:

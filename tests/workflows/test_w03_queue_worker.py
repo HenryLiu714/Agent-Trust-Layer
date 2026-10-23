@@ -19,8 +19,8 @@ from examples.workflows.harness.run import (
 )
 from examples.workflows.w03_queue_worker.agent import CLIENTS, LEDGER, POOLED
 from examples.workflows.w03_queue_worker.scenarios import AGENT_VERSION
-from irimi import report
 from irimi.exchange import Exchange
+from irimi.report.runs import RUN_LIST_HEADER
 from irimi.sdk.replay_child import CANNOT_CALL
 from irimi.trace import UNATTRIBUTED, ErrorInfo, ToolCall
 
@@ -446,7 +446,7 @@ def test_runs_list_prints_one_line_per_message_and_one_for_the_process(
     shadow = run_workflow(W, scenario, mode)
     code, out, err = shadow.runs("list")
     assert (code, err) == (0, [])
-    assert out[0].split() == list(report.RUN_LIST_HEADER)
+    assert out[0].split() == list(RUN_LIST_HEADER)
     fields = [re.split(r"  +", line) for line in out[1:]]
     assert len(fields) == (9 if mode == "shadow" else 8)
     runs = sorted(f[0] for f in fields if f[4] == "sdk")

@@ -9,16 +9,35 @@ import pytest
 
 from irimi.exchange import Exchange, Flag, Precondition, Request, Response
 from irimi.netaddr import Target
-from irimi.report import (
-    banner_lines,
-    delegated_lines,
-    exchange_line,
-    summary_lines,
-    tool_call_line,
-    write_sentence,
-)
+from irimi.report import model, summary
+from irimi.report.model import RunView, for_summary
+from irimi.report.summary import Live
+from irimi.report.terminal import banner_lines, delegated_lines, exchange_line, tool_call_line
 from irimi.runner import EngineThread, child_env, exit_code_for
-from irimi.trace import ErrorInfo, ToolCall
+from irimi.trace import ErrorInfo, RunRecord, ToolCall
+
+
+def summary_lines(
+    run_id,
+    exchanges,
+    elapsed_s=0.0,
+    index=None,
+    tool_calls=(),
+    sdk_runs=None,
+    tls_failures=None,
+    ca_cert=None,
+):
+    """The summary `irimi shadow` prints for a run whose engine reported `exchanges` and
+    `tool_calls`."""
+    view = RunView(RunRecord.header(run_id), [*map(for_summary, exchanges), *tool_calls])
+    live = Live(sdk_runs or {}, tls_failures or {}, ca_cert)
+    return summary.summary_lines(view, index, elapsed_s, live)
+
+
+def write_sentence(exchange, index):
+    """The summary's sentence for one write, as `irimi compare` prints it."""
+    (entry,) = model.build(RunView(RunRecord.header("7f3a"), [exchange]), index).writes
+    return summary.write_sentence(entry)
 
 
 def _exchange(
@@ -538,8 +557,8 @@ def test_the_requests_own_currency_still_wins_over_the_one_the_read_found():
 
 
 def test_a_rejected_write_is_denominated_the_same_way():
-    """`report.write_sentence` renders the sentence before it branches on the rejection, so the
-    `✗` line carries an amount too and must read the same as the `○` one."""
+    """`report.summary.write_sentence` renders the sentence before it branches on the rejection, so
+    the `✗` line carries an amount too and must read the same as the `○` one."""
     write = replace(
         _refund(body=b"charge=ch_9&amount=4900"),
         precondition=Precondition("rejected", "charge_already_refunded", "usd"),

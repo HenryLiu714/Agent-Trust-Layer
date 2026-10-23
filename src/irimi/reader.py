@@ -28,7 +28,7 @@ class Reader(Protocol):
 
     Returning None, or raising, means `not_evaluable`: irimi could not find out, says so on the
     exchange, and falls back to the L2 answer. Shadow mode's reader dials the real upstream; a
-    replay's reads the recording (`recording.RecordingReader`), which is why this is a seam
+    replay's reads the recording (`replay.index.RecordingReader`), which is why this is a seam
     and not a call inside the engine.
 
     A reader also says what its reads are answered by, and the flags a read it answered and one

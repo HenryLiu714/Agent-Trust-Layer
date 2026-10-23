@@ -4,7 +4,7 @@ A run's actions are the writes it attempted, in `seq` order: each exchange its s
 write line for (`exchange.is_intercepted`) and each write tool whose fake ran
 (`exchange.fake_ran`). An action is compared by its data, never by the line it prints: its key,
 what irimi did with it (`outcome`), and what it sent (`fields`), the request less what says who
-asked rather than what, as a replay matches it (`recording.compared_body`). A map's `human:`
+asked rather than what, as a replay matches it (`replay.index.compared_body`). A map's `human:`
 template names a few of a write's fields, so two customer updates that print one line may still
 differ; such a pair prints the fields that differ under its two lines.
 
@@ -23,9 +23,13 @@ first refund with the refused one and show the first as added.
 An action whose body was cut when stored is never the same as another, whatever its data: the
 first pass anchors none, and the second pairs it by key into a `cut` row, `?`.
 
+The actions are the summary model's (`report.model.RunSummary.actions`), so `irimi compare`
+and a run's summary agree about which writes it made.
+
 Pure, like `report`: `compare_runs` returns a `Comparison` and prints nothing. `irimi compare`
 prints `header_lines` over the comparison's lines, and `irimi replay` prints its own header over
-the same lines (`replay.Outcome`), with `args_differ`'s note too, so there is one alignment.
+the same lines (`replay.report.ReplayReport`), with `args_differ`'s note too, so there is one
+alignment.
 """
 
 import difflib
@@ -37,11 +41,16 @@ from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import parse_qsl
 
-from irimi import report, services
-from irimi.exchange import Exchange, Flag, fake_ran, is_intercepted
-from irimi.recording import compared_body
+from irimi import services
+from irimi.exchange import Flag
+from irimi.replay.index import compared_body
+from irimi.report import model
+from irimi.report.model import RunView, WriteEntry
+from irimi.report.runs import run_label
+from irimi.report.summary import tool_write_sentence, write_sentence
+from irimi.report.terminal import printable
 from irimi.servicemap import MapIndex, path_params
-from irimi.trace import JSONValue, RunRecord, StoredRun, ToolCall, canonical_json, trigger_args
+from irimi.trace import JSONValue, RunRecord, StoredRun, canonical_json, trigger_args
 
 # The exit codes, as diff(1)'s: the same, different, or trouble (a run that cannot be read).
 SAME = 0
@@ -100,14 +109,14 @@ class Action:
     @property
     def text(self) -> str:
         """The summary's line for it, without the indent, as the summary prints it."""
-        return report.printable(self.sentence)
+        return printable(self.sentence)
 
     @property
     def escaped(self) -> str:
         """`text` with each backslash escaped too, so a newline prints as `\\n` and a typed one as
         `\\\\n`, and each character that prints as nothing or as a space spelled as its escape:
         printed for a pair whose texts are alike though its sentences are not."""
-        escaped = report.printable(self.sentence.replace("\\", "\\\\"))
+        escaped = printable(self.sentence.replace("\\", "\\\\"))
         return "".join(_spelled(char) for char in escaped)
 
     @property
@@ -127,7 +136,7 @@ class Action:
 
 # The Unicode categories that print as nothing or as a space: format characters (a zero-width
 # space, a right-to-left override), separators, private-use and unassigned code points. Two posts
-# that differ only by one print alike, and `report.printable` leaves them as they are.
+# that differ only by one print alike, and `printable` leaves them as they are.
 _UNSEEN = frozenset({"Cf", "Zs", "Zl", "Zp", "Co", "Cn"})
 
 
@@ -183,24 +192,23 @@ class Comparison:
 
 
 def actions(run: StoredRun, index: MapIndex | None) -> list[Action]:
-    """The writes `run` attempted, in `seq` order, each with its summary line. Reads, LLM
-    calls, telemetry and read tools are not actions, and neither is a retry the idempotency store
-    answered as the write it repeats."""
+    """The writes `run` attempted, in `seq` order, each with its summary line: the summary
+    model's actions. Reads, LLM calls, telemetry and read tools are not actions, and neither is a
+    retry the idempotency store answered as the write it repeats."""
     out: list[Action] = []
-    checks = report.check_reads([event for event in run.events if isinstance(event, Exchange)])
-    for event in run.events:
-        if isinstance(event, Exchange) and is_intercepted(event):
-            out.append(_exchange_action(event, index, checks.get(id(event))))
-        elif isinstance(event, ToolCall) and fake_ran(event):
-            error = event.error.type if event.error is not None else None
-            out.append(
-                Action(
-                    (TOOL_KEY, event.name),
-                    report.tool_write_sentence(event),
-                    outcome=_named({"raised": error}),
-                    fields=_fields(_spread("args", event.args)),
-                )
+    for action in model.build(RunView(run.record, run.events), index).actions:
+        if isinstance(action, WriteEntry):
+            out.append(_exchange_action(action))
+            continue
+        error = action.error.type if action.error is not None else None
+        out.append(
+            Action(
+                (TOOL_KEY, action.name),
+                tool_write_sentence(action),
+                outcome=_named({"raised": error}),
+                fields=_fields(_spread("args", action.args)),
             )
+        )
     return out
 
 
@@ -212,11 +220,9 @@ def _spread(name: str, value: JSONValue) -> dict[str, JSONValue]:
     return {name: value}
 
 
-def _exchange_action(
-    exchange: Exchange, index: MapIndex | None, check_read: Exchange | None
-) -> Action:
+def _exchange_action(entry: WriteEntry) -> Action:
+    exchange, route = entry.exchange, entry.route
     request = exchange.request
-    route = report.route_of(exchange, index)
     pairs = parse_qsl(request.query, keep_blank_values=True)
     sent: dict[str, JSONValue] = {}
     if route is not None:
@@ -246,7 +252,7 @@ def _exchange_action(
     }
     return Action(
         (EXCHANGE_KEY, exchange.service, exchange.operation),
-        report.write_sentence(exchange, index, check_read),
+        write_sentence(entry),
         Flag.BODY_TRUNCATED in exchange.flags,
         _named(outcome),
         fields,
@@ -311,7 +317,7 @@ def _pair(x: Action, y: Action) -> Row:
 
 def compare_runs(a: StoredRun, b: StoredRun, index: MapIndex | None) -> Comparison:
     """`a`'s writes against `b`'s. `index` is the loaded maps, for each write's `human:` sentence
-    and its route's `compare_ignores:` fields, as `report.stored_summary_lines` takes it."""
+    and its route's `compare_ignores:` fields, as `report.summary.summary_lines` takes it."""
     return Comparison(align(actions(a, index), actions(b, index)))
 
 
@@ -320,8 +326,8 @@ def header_lines(a: RunRecord, b: RunRecord) -> list[str]:
     triggers' args differ, since then the runs were not given the same work."""
     lines = [
         f"irimi compare · {a.run_id} vs {b.run_id}",
-        f"  A  {report.run_label(a)}".rstrip(),
-        f"  B  {report.run_label(b)}".rstrip(),
+        f"  A  {run_label(a)}".rstrip(),
+        f"  B  {run_label(b)}".rstrip(),
     ]
     if args_differ(a, b):
         lines.append(f"  {ARGS_DIFFER}")
@@ -375,7 +381,7 @@ def field_diff(a: Action, b: Action) -> list[str]:
         for name in sorted(x.keys() | y.keys(), key=lambda n: (n.startswith("body"), n)):
             if x.get(name) != y.get(name):
                 differ += _differences(name, _parsed(x.get(name)), _parsed(y.get(name)))
-    shown = [f"      {report.printable(line)}" for line in differ[:MAX_FIELDS_SHOWN]]
+    shown = [f"      {printable(line)}" for line in differ[:MAX_FIELDS_SHOWN]]
     more = len(differ) - MAX_FIELDS_SHOWN
     return [*shown, f"      and {more} more"] if more > 0 else shown
 

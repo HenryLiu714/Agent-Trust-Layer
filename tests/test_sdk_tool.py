@@ -20,9 +20,11 @@ from typing import Any
 
 import pytest
 
-from irimi import ca, limits, paths, report, sdk, servicemap, trace
+from irimi import ca, limits, paths, sdk, servicemap, trace
 from irimi.cli import main
 from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV, RUN_ENV
+from irimi.report.model import RunView
+from irimi.report.summary import summary_lines
 from irimi.sdk import capture, client, runs, tools
 from irimi.store.reader import StoreReader
 from irimi.trace import ErrorInfo, ToolCall
@@ -704,7 +706,7 @@ def test_irimi_shadow_prints_a_tool_call_in_the_stream_and_the_summary_and_store
         {"order": 7},
         "stood in",
     )
-    stored = report.stored_summary_lines(run, servicemap.load())
+    stored = summary_lines(RunView(run.record, run.events), servicemap.load())
     assert [ELAPSED.sub(" · <elapsed>", line) for line in stored] == live
 
 

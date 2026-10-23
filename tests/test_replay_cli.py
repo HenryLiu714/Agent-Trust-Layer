@@ -802,14 +802,14 @@ def test_a_replay_interrupted_after_its_run_is_stored_names_the_run_and_exits_13
 ):
     """A Ctrl-C while irimi compares the runs, after the agent ran: the replay's run is stored and
     ended, so the result names it, and the replay exits 130."""
-    from irimi import replay
+    from irimi.replay import report as replay_report
 
     source = _record(home, f"replay_agent.handle({TICKET})")
 
     def interrupted(*args: object, **kwargs: object) -> None:
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(replay, "outcome", interrupted)
+    monkeypatch.setattr(replay_report, "outcome", interrupted)
     written = tmp_path / "result.json"
     capfd.readouterr()
     code, _, err = _replay(capfd, source, "--result-file", str(written))

@@ -18,13 +18,13 @@ if TYPE_CHECKING:  # the quoted annotations below; no runtime import
     from irimi.exchange import Exchange
     from irimi.idempotency import Store as IdempotencyStore
     from irimi.protocol.replay_files import CallOutcome, ReplayResult
-    from irimi.recording import Recording
-    from irimi.replay import Plan
+    from irimi.replay.index import ReplayIndex
+    from irimi.replay.plan import Plan
     from irimi.runner import ChildCall, EngineThread
     from irimi.servicemap import MapIndex
     from irimi.store import TraceStore
     from irimi.store.lock import ServeLock
-    from irimi.trace import JSONValue, RunRecord, StoredRun, ToolCall, Trigger
+    from irimi.trace import Event, JSONValue, RunRecord, StoredRun, ToolCall, Trigger
     from irimi.writelog import WriteLog
 
 SIGINT_EXIT_CODE = 130  # 128 + SIGINT, the shell convention for a Ctrl-C'd command
@@ -304,54 +304,26 @@ def print_startup(
     print nothing else for minutes, so without the flush the port, the CA path a client needs and
     the `NOT loopback` line would not appear until the first request.
     """
-    from irimi import report  # deferred like every other heavy import in this module
+    from irimi.report import terminal  # deferred like every other heavy import here
 
     warning = _escape_hatch_warning(args)
     if warning is not None:
         print(warning, file=sys.stderr, flush=True)
-    for line in report.banner_lines(command, run_id, host, port, ca_cert, replay_of):
+    for line in terminal.banner_lines(command, run_id, host, port, ca_cert, replay_of):
         print(line, flush=True)
-    for line in report.delegated_lines(index, color=sys.stdout.isatty()):
+    for line in terminal.delegated_lines(index, color=sys.stdout.isatty()):
         print(line, flush=True)
 
 
 def cmd_maps_list(args: argparse.Namespace) -> int:
     from irimi import servicemap
+    from irimi.report.maps import maps_lines
 
     index = _load_maps()
     if index is None:
         return 1
-    # Exact hosts first, then the wildcard patterns. A pattern is printed because a map whose
-    # hosts are all wildcards would otherwise not appear here at all; it is still not a
-    # reverse-door allow-list entry (see MapIndex.hosts).
-    hosts = sorted(index.hosts)
-    patterns = index.patterns
-    rows = [(host, index.by_host[host]) for host in hosts]
-    rows += [(pattern, index.by_suffix[pattern[1:]]) for pattern in patterns]
-    width = max((len(name) for name, _ in rows), default=0)
-    service_width = max((len(sm.service) for _, sm in rows), default=0)
-    routes = sum(len(sm.routes) for sm in index.services)
-    # Hosts and patterns are counted separately: only the exact hosts are the reverse door's
-    # allow-list, and a pattern host is refused there with a 403.
-    print(
-        f"irimi maps · {len(index.services)} service(s) · {len(hosts)} host(s) · "
-        f"{len(patterns)} pattern(s) · {routes} route(s)"
-    )
-    for name, sm in rows:
-        reads = " + reads" if sm.target_reads else ""
-        print(
-            f"  {name:<{width}}  {sm.service:<{service_width}}  {len(sm.routes):>3} routes  "
-            f"target: {servicemap.SELF_TARGET if sm.target is None else sm.target.url}{reads}"
-        )
-        # A service whose *routes* carry targets still says `target: self` in the column above,
-        # so each route target gets a line of its own under the host: the column is the
-        # service's answer and this is the route's.
-        for route in sm.routes:
-            if route.target is not None:
-                print(f"  {'':<{width}}  route {route.method} {route.path} -> {route.target.url}")
-    override = servicemap.override_path()
-    if override is not None:
-        print(f"  overrides from {override}")
+    for line in maps_lines(index, servicemap.override_path()):
+        print(line)
     return 0
 
 
@@ -405,7 +377,7 @@ class _Run:
     # The store's `serve.lock`, held, in serve mode only.
     lock: "ServeLock | None" = None
     # The run a `Replay` mode names, read back to answer from, in a replay only.
-    recording: "Recording | None" = None
+    recording: "ReplayIndex | None" = None
     # Each run's faked writes, dropped as the store reports the run ended. None: the engine
     # keeps its own, and nothing ends its runs.
     write_log: "WriteLog | None" = None
@@ -462,10 +434,10 @@ def _prepare_run(
         return None
     recording = None
     if source is not None:
-        from irimi.recording import Recording
+        from irimi.replay.index import ReplayIndex
 
         # Keyed with this install's redaction key, which made the recording's placeholders.
-        recording = Recording.from_events(source.events, key, config.maps)
+        recording = ReplayIndex.from_events(source.events, key, config.maps)
     write_log = WriteLog()
     keys = idempotency.Store()
 
@@ -511,9 +483,9 @@ def _redaction_key() -> bytes | None:
 
 def _load_source(args: argparse.Namespace) -> "StoredRun":
     """The run `irimi replay` answers from, in the store under `--store`, read whole before
-    anything starts, or `replay.Refused` saying why it cannot be."""
+    anything starts, or `replay.plan.Refused` saying why it cannot be."""
     from irimi import trace
-    from irimi.replay import Refused
+    from irimi.replay.plan import Refused
     from irimi.store.reader import RunNotFound, StoreReader
     from irimi.trace import TraceFormatError
 
@@ -577,8 +549,9 @@ def _build_engine(
     from irimi.engine import Serve
     from irimi.engine.mitm import MitmEngine
     from irimi.overlay import ServiceOverlay
-    from irimi.policy import AnswerPolicy, ReplayPolicy, ShadowPolicy
+    from irimi.policy import AnswerPolicy, ShadowPolicy
     from irimi.reader import UpstreamReader
+    from irimi.replay.policy import ReplayPolicy
 
     overlay = ServiceOverlay()
     policy: AnswerPolicy
@@ -660,28 +633,29 @@ class _ServeOutput:
                 print(line, file=sys.stderr if err else sys.stdout, flush=True)
 
     def exchange(self, ex: "Exchange") -> None:
-        from irimi import report
+        from irimi.report import terminal
         from irimi.trace import UNATTRIBUTED
 
         if ex.run_id == UNATTRIBUTED:
             self.unattributed += 1
         if not self.quiet:
-            self.say([report.exchange_line(ex)])
+            self.say([terminal.exchange_line(ex)])
 
     def tool_call(self, call: "ToolCall") -> None:
         """The tool's name and what it raised, never its args or result, which are stored
         redacted and would print raw here."""
-        from irimi import report
+        from irimi.report import terminal
 
         if not self.quiet:
-            self.say([report.tool_call_line(call)])
+            self.say([terminal.tool_call_line(call)])
 
     def run_ended(self, index: "MapIndex", run_id: str) -> None:
         """The run's summary, read back from the store as `irimi runs show` reads it, under
         `--- run <id> ---`. Called on the store's writer thread after it wrote the run's end, so
         the run is whole on disk. A run that cannot be read back is one warning naming the
         exception's type only, as the store logs its own: a message may quote what it read."""
-        from irimi import report
+        from irimi.report.model import RunView
+        from irimi.report.summary import summary_lines
         from irimi.store.reader import RunNotFound, StoreReader
         from irimi.trace import TraceFormatError
 
@@ -693,7 +667,8 @@ class _ServeOutput:
             )
             self.say([warning], err=True)
             return
-        self.say([f"--- run {run_id} ---", *report.stored_summary_lines(stored, index)])
+        summary = summary_lines(RunView(stored.record, stored.events), index)
+        self.say([f"--- run {run_id} ---", *summary])
 
 
 def _serve(args: argparse.Namespace, stop: threading.Event, signalled: list[int]) -> int:
@@ -886,7 +861,8 @@ def _passing_sigterm_to_child() -> Iterator[_Child]:
 
 def _shadow(args: argparse.Namespace, cmd: list[str], child: _Child) -> int:
     """`irimi shadow -- <cmd>` inside its SIGTERM handler: the run, start to summary."""
-    from irimi import report
+    from irimi.report.model import RunView
+    from irimi.report.summary import Live, summary_lines
 
     run = _prepare_run(args)
     if run is None:
@@ -897,16 +873,8 @@ def _shadow(args: argparse.Namespace, cmd: list[str], child: _Child) -> int:
         return ran.code
     sdk_runs = _sdk_runs(args, run.run_id, ran)
     _end_the_childs_line()
-    lines = report.summary_lines(
-        run.run_id,
-        ran.exchanges,
-        ran.elapsed,
-        run.index,
-        ran.tool_calls,
-        sdk_runs,
-        ran.tls_failures,
-        run.ca.cert,
-    )
+    live = Live(sdk_runs, ran.tls_failures, run.ca.cert)
+    lines = summary_lines(RunView(record, ran.events), run.index, ran.elapsed, live)
     for line in lines:
         print(line, flush=True)
     return ran.code
@@ -943,9 +911,13 @@ def _sdk_runs(
     """The runs the SDK started inside `irimi shadow`'s process, in the order their first event
     arrived, each with its record read back from the store, or None for one that cannot be."""
     from irimi.store.reader import RunNotFound, StoreReader
-    from irimi.trace import UNATTRIBUTED, TraceFormatError
+    from irimi.trace import UNATTRIBUTED, ToolCall, TraceFormatError
 
-    seen = [*(ex.run_id for ex in ran.exchanges), *(call.run_id for call in ran.tool_calls)]
+    # Exchanges first, then tool calls, each in the order they came.
+    seen = [
+        *(ev.run_id for ev in ran.events if not isinstance(ev, ToolCall)),
+        *(ev.run_id for ev in ran.events if isinstance(ev, ToolCall)),
+    ]
     ids = [rid for rid in dict.fromkeys(seen) if rid not in (process_run_id, UNATTRIBUTED)]
     reader = StoreReader(_store_root(args))
     runs: dict[str, RunRecord | None] = {}
@@ -971,16 +943,16 @@ class _Launch:
 
 @dataclass
 class _Ran:
-    """A child run under the engine: its exit code, how long it ran, and every exchange and tool
-    call the engine reported meanwhile. `summarize` is False when the child never ran and irimi
+    """A child run under the engine: its exit code, how long it ran, and what its summary reads
+    of every exchange and tool call the engine reported meanwhile (`model.for_summary`), in the
+    order they came. `summarize` is False when the child never ran and irimi
     printed why, the code then irimi's own (1, 126, 127, 130, 143), and `stored` whether the run's
     record was stored first. `stopped` is the exit code of a SIGINT or SIGTERM that reached irimi
     while the child ran, and `call` how a replay's call ended, as its child wrote it."""
 
     code: int
     elapsed: float = 0.0
-    exchanges: "list[Exchange]" = field(default_factory=list)
-    tool_calls: "list[ToolCall]" = field(default_factory=list)
+    events: "list[Event]" = field(default_factory=list)
     summarize: bool = True
     stored: bool = False
     stopped: int | None = None
@@ -1017,8 +989,10 @@ def _under_the_engine(args: argparse.Namespace, run: _Run, child: _Child, launch
     import time
     from dataclasses import replace
 
-    from irimi import report, runner
+    from irimi import runner
     from irimi.protocol.replay_files import read_call_outcome
+    from irimi.report import terminal
+    from irimi.report.model import for_summary
 
     cannot = _cannot_run(launch.argv[0])
     if cannot is not None:
@@ -1028,17 +1002,17 @@ def _under_the_engine(args: argparse.Namespace, run: _Run, child: _Child, launch
     ran = _Ran(SIGINT_EXIT_CODE)
 
     def on_exchange(ex: "Exchange") -> None:
-        ran.exchanges.append(ex)
+        ran.events.append(for_summary(ex))
         if not args.quiet:
-            print(report.exchange_line(ex), flush=True)
+            print(terminal.exchange_line(ex), flush=True)
 
     def on_tool_call(call: "ToolCall") -> None:
         # On the proxy's event loop, after the store took the call: it only appends and
         # prints. The line names the tool and what it raised, never its args or result, which
         # are stored redacted and would be printed raw here.
-        ran.tool_calls.append(call)
+        ran.events.append(call)
         if not args.quiet:
-            print(report.tool_call_line(call), flush=True)
+            print(terminal.tool_call_line(call), flush=True)
 
     def on_tls_failure(host: str) -> None:
         # On the proxy's event loop, as the lines above: no flow exists, only a count for the
@@ -1122,9 +1096,10 @@ def _under_the_engine(args: argparse.Namespace, run: _Run, child: _Child, launch
 def cmd_replay(args: argparse.Namespace) -> int:
     """`irimi replay RUN_ID`: a stored run's trigger run again through irimi, answered from the
     run's recording, and what the agent did differently. What it runs is `replay.plan`'s
-    to say, and what it prints `replay.Outcome`'s. Exits as `irimi compare` does: 0 when the
-    replay made the writes its recording did, 1 when it did not, 2 for a replay that could not
-    run, or whose run could not be read back, and 130 or 143 for one SIGINT or SIGTERM stopped.
+    to say, and what it prints `replay.report.ReplayReport`'s. Exits as `irimi compare` does: 0
+    when the replay made the writes its recording did, 1 when it did not, 2 for a replay that
+    could not run, or whose run could not be read back, and 130 or 143 for one SIGINT or SIGTERM
+    stopped.
     `--result-file` writes the result as JSON, the one `sdk.replay()` reads
     (`protocol.replay_files.ReplayResult`), whether or not the replay ran, holding what irimi
     said on stderr of a replay that did not."""
@@ -1162,15 +1137,18 @@ def _replay(args: argparse.Namespace, child: _Child, said: list[str]) -> "Replay
     import tempfile
     from dataclasses import replace
 
-    from irimi import replay, report, runner
+    from irimi import runner
+    from irimi.replay import plan as replay_plan
+    from irimi.replay.report import refused
+    from irimi.report.terminal import printable
 
     try:
         source = _load_source(args)
-        plan = replay.plan(source.record, list(args.cmd), args.call, args.args)
+        plan = replay_plan.plan(source.record, list(args.cmd), args.call, args.args)
         python = _replay_python(args, plan)
-    except replay.Refused as exc:
+    except replay_plan.Refused as exc:
         print(f"error: {exc}", file=sys.stderr)
-        result = replay.refused(args.run_id, said)
+        result = refused(args.run_id, said)
         # A SIGTERM that came while `--python` was asked stopped the replay, which exits as one
         # stopped before its command started, whatever the answer.
         return replace(result, exit_code=SIGTERM_EXIT_CODE) if child.terminated else result
@@ -1188,10 +1166,10 @@ def _replay(args: argparse.Namespace, child: _Child, said: list[str]) -> "Replay
                 plan.call.entrypoint, Path(tmp) / "args.json", Path(tmp) / "outcome.json"
             )
             call.args_file.write_text(json.dumps(plan.call.args), encoding="utf-8")
-            argv = [python, "-m", replay.CHILD_MODULE]
+            argv = [python, "-m", replay_plan.CHILD_MODULE]
         run = _prepare_run(args, source=source)
         if run is None:
-            return replay.refused(args.run_id, said)
+            return refused(args.run_id, said)
         record = _process_run(run.run_id, argv, plan.trigger, source.record.run_id)
         said_before = len(said)
         ran = _under_the_engine(args, run, child, _Launch("replay", argv, record, call))
@@ -1206,7 +1184,7 @@ def _replay(args: argparse.Namespace, child: _Child, said: list[str]) -> "Replay
     if not ran.summarize or not ran.stored:
         # The agent never ran: refused, or stopped by a signal before its run was stored, which
         # exits as `irimi shadow` would.
-        result = replay.refused(args.run_id, said, run.run_id if ran.stored else None)
+        result = refused(args.run_id, said, run.run_id if ran.stored else None)
         if ran.code in (SIGINT_EXIT_CODE, SIGTERM_EXIT_CODE):
             return replace(result, exit_code=ran.code)
         return result
@@ -1214,9 +1192,9 @@ def _replay(args: argparse.Namespace, child: _Child, said: list[str]) -> "Replay
         # The child said why on stderr, and the hint is said: the agent never ran, so there is no
         # replay to report and nothing to compare. The result holds both lines.
         why = ran.call.error.message if ran.call.error is not None else "it was not called"
-        cannot = f"error: cannot call {plan.call.entrypoint}: {report.printable(why)}"
+        cannot = f"error: cannot call {plan.call.entrypoint}: {printable(why)}"
         lines = [*said[:said_before], cannot, *said[said_before:]]
-        result = replay.refused(args.run_id, lines, run.run_id)
+        result = refused(args.run_id, lines, run.run_id)
         return result if ran.stopped is None else replace(result, exit_code=ran.stopped)
     try:
         rerun = plan.argv if plan.rerun else None
@@ -1243,21 +1221,22 @@ def _replay_python(args: argparse.Namespace, plan: "Plan") -> str:
     import os
     import subprocess
 
-    from irimi import replay, report
+    from irimi.replay.plan import Refused
+    from irimi.report.terminal import printable
 
     if args.python is None:
         return sys.executable
     if plan.call is None:
-        raise replay.Refused(
+        raise Refused(
             f"run {args.run_id} is replayed by its recorded command, which names its own Python; "
             "drop --python"
         )
-    named = f"--python {report.printable(args.python)}"
+    named = f"--python {printable(args.python)}"
     if os.path.isdir(args.python):
         # `--python .venv`, as uv's own `--python` takes it, is looked up on PATH, or cannot be
         # executed: either error would hide that the directory is the trouble.
-        inside = report.printable(os.path.join(args.python, "bin", "python"))
-        raise replay.Refused(f"{named} is a directory; name the Python in it, as --python {inside}")
+        inside = printable(os.path.join(args.python, "bin", "python"))
+        raise Refused(f"{named} is a directory; name the Python in it, as --python {inside}")
     try:
         probe = subprocess.run(
             [args.python, "-c", _PYTHON_PROBE],
@@ -1268,21 +1247,19 @@ def _replay_python(args: argparse.Namespace, plan: "Plan") -> str:
             timeout=PYTHON_PROBE_TIMEOUT_S,
         )
     except subprocess.TimeoutExpired:
-        raise replay.Refused(
-            f"{named} did not answer within {PYTHON_PROBE_TIMEOUT_S:.0f}s"
-        ) from None
+        raise Refused(f"{named} did not answer within {PYTHON_PROBE_TIMEOUT_S:.0f}s") from None
     except (OSError, ValueError) as exc:  # ValueError: a path holding a NUL
         why = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
-        raise replay.Refused(f"{named} could not be run: {why}") from None
+        raise Refused(f"{named} could not be run: {why}") from None
     if probe.returncode != 0:
         said = probe.stderr.strip().splitlines()
-        why = report.printable(said[-1]) if said else f"it exited {probe.returncode}"
-        raise replay.Refused(
+        why = printable(said[-1]) if said else f"it exited {probe.returncode}"
+        raise Refused(
             f"{named} cannot import irimi's replay child ({why}); install irimi in that "
             "Python's environment, or replay with -- CMD"
         )
     printed = probe.stdout.strip().splitlines()
-    version = report.printable(printed[-1]) if printed else "?"
+    version = printable(printed[-1]) if printed else "?"
     if version != __version__:
         print(
             f"warning: {named} has irimi {version}, and this is irimi {__version__}; the "
@@ -1312,9 +1289,9 @@ def _replayed(
     rerun: tuple[str, ...] | None,
 ) -> "ReplayResult":
     """A replay whose run `run_id` was stored and ended: both runs read back, and what the
-    replay did printed and returned (`replay.outcome`). `rerun` is the recorded command line a
-    process run's replay ran again."""
-    from irimi import replay
+    replay did printed and returned (`replay.report.outcome`). `rerun` is the recorded
+    command line a process run's replay ran again."""
+    from irimi.replay import report as replay_report
     from irimi.store.reader import RunNotFound, StoreReader
     from irimi.trace import TraceFormatError
 
@@ -1322,9 +1299,9 @@ def _replayed(
         replayed = StoreReader(_store_root(args)).load_run(run_id)
     except (RunNotFound, TraceFormatError, OSError) as exc:
         print(f"error: the replay's run {run_id} could not be read back: {exc}", file=sys.stderr)
-        return replay.refused(args.run_id, said, run_id)
-    ended = replay.Ended(ran.code, ran.call, ran.stopped)
-    outcome = replay.outcome(source, replayed, ended, _maps_for_stored_runs(), rerun)
+        return replay_report.refused(args.run_id, said, run_id)
+    ended = replay_report.Ended(ran.code, ran.call, ran.stopped)
+    outcome = replay_report.outcome(source, replayed, ended, _maps_for_stored_runs(), rerun)
     _end_the_childs_line()
     for line in outcome.lines():
         print(line, flush=True)
@@ -1336,10 +1313,10 @@ def _interrupted(args: argparse.Namespace, said: list[str], run_id: str | None) 
     shadow` exits, its result naming the replay's run when one was stored."""
     from dataclasses import replace
 
-    from irimi import replay
+    from irimi.replay.report import refused
 
     print("error: interrupted", file=sys.stderr)
-    return replace(replay.refused(args.run_id, said, run_id), exit_code=SIGINT_EXIT_CODE)
+    return replace(refused(args.run_id, said, run_id), exit_code=SIGINT_EXIT_CODE)
 
 
 def _replay_command(args: argparse.Namespace) -> list[str]:
@@ -1414,7 +1391,7 @@ def _store_subject(args: argparse.Namespace) -> str:
 
 def cmd_runs_list(args: argparse.Namespace) -> int:
     """`irimi runs list`: one line per stored run, newest first."""
-    from irimi import report
+    from irimi.report import runs
     from irimi.store.reader import RunNotFound, StoreReader
     from irimi.trace import TraceFormatError
 
@@ -1440,8 +1417,8 @@ def cmd_runs_list(args: argparse.Namespace) -> int:
         except (TraceFormatError, OSError, RunNotFound) as exc:
             print(f"warning: run {record.run_id} could not be read: {exc}", file=sys.stderr)
             events = None
-        rows.append(report.run_list_columns(record, events))
-    for line in report.run_list_lines(rows, older=len(every) - len(records)):
+        rows.append(runs.run_list_columns(record, events))
+    for line in runs.run_list_lines(rows, older=len(every) - len(records)):
         print(line)
     return 0
 
@@ -1476,7 +1453,7 @@ def _resolve_run_id(root: Path, typed: str) -> str:
 
 def cmd_runs_show(args: argparse.Namespace) -> int:
     """`irimi runs show RUN_ID`: a stored run's header, every event, and its summary."""
-    from irimi import report
+    from irimi.report.runs import run_show_lines
     from irimi.store.reader import RunNotFound, StoreReader
     from irimi.trace import UNATTRIBUTED, TraceFormatError
 
@@ -1498,7 +1475,7 @@ def cmd_runs_show(args: argparse.Namespace) -> int:
     if run_id == UNATTRIBUTED and not run.events:
         print(f"no unattributed events in {root}")
         return 0
-    for line in report.run_show_lines(run, _maps_for_stored_runs()):
+    for line in run_show_lines(run, _maps_for_stored_runs()):
         print(line)
     return 0
 

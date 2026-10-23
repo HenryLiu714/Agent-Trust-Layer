@@ -23,9 +23,12 @@ import pytest
 import irimi
 from examples.workflows.harness.run import CANARIES, TOOL_WRITE, Result, serve_cases, workflows
 from examples.workflows.w10_flaky_upstream.scenarios import CONTROL_DOWN
-from irimi import exchange, paths, redact, report, trace
+from irimi import exchange, paths, redact, trace
 from irimi.exchange import Exchange, Flag
 from irimi.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE
+from irimi.report.model import RunView, for_summary
+from irimi.report.summary import NO_TRAFFIC, Live, summary_lines
+from irimi.report.terminal import exchange_line, tool_call_line
 from irimi.store.layout import SERVE_LOCK_FILE
 from irimi.trace import ErrorInfo, RunRecord, StoredRun, TelemetrySeen, ToolCall
 
@@ -88,7 +91,7 @@ def reported(result: Result) -> list[str]:
     lines = result.exchange_lines()
     if is_quiet(result):
         assert lines == [], lines
-        lines = [report.exchange_line(e) for e in result.reported]
+        lines = [exchange_line(e) for e in result.reported]
     secret = CANARIES["SLACK_WEBHOOK_PATH"]
     if not any(secret in line for line in lines):
         return lines
@@ -131,7 +134,7 @@ def test_every_exchange_irimi_reported_is_stored_exactly_once(run_workflow, name
     shadow = run_workflow(name, scenario, "shadow")
     events = shadow.stored_events()
     lines = reported(shadow)
-    stored = [report.exchange_line(e) for e in events if isinstance(e, Exchange)]
+    stored = [exchange_line(e) for e in events if isinstance(e, Exchange)]
     assert sorted(stored) == sorted(line for line in lines if not is_telemetry(line))
     hosts = [line.split()[3].split("/", 1)[0] for line in lines if is_telemetry(line)]
     assert sorted(e.host for e in events if isinstance(e, TelemetrySeen)) == sorted(hosts)
@@ -356,7 +359,7 @@ def test_every_tool_call_the_agent_made_is_stored_in_its_run_and_printed_once(
     assert {ran for _, ran in bare.tools()} <= {"real"}
     shadow = run_workflow(name, scenario, mode)
     stored = [e for e in shadow.stored_events() if isinstance(e, ToolCall)]
-    printed = [] if is_quiet(shadow) else sorted(report.tool_call_line(c) for c in stored)
+    printed = [] if is_quiet(shadow) else sorted(tool_call_line(c) for c in stored)
     assert sorted(shadow.tool_call_lines()) == printed
     if (name, scenario) in BY_HAND_SCENARIOS:
         return
@@ -460,7 +463,7 @@ def test_every_run_the_process_stored_prints_the_summary_irimi_shadow_printed(
     tool_calls = [e for e in events if isinstance(e, ToolCall)]
     process = reader.load_run(shadow.process_run_id()).record
     union = StoredRun(process, [*exchanges, *telemetry, *tool_calls])
-    stored = report.stored_summary_lines(union, shadow.maps())
+    stored = summary_lines(RunView(union.record, union.events), shadow.maps())
     assert no_elapsed(stored) == no_elapsed(process_part(live))
 
 
@@ -484,11 +487,11 @@ def test_every_exchange_and_tool_call_a_serve_reported_is_stored_once_in_its_run
     ids = [record.run_id for record in reader.list_runs()] + [trace.UNATTRIBUTED]
     events = {run_id: reader.load_run(run_id).events for run_id in ids}
     flat = [event for run_events in events.values() for event in run_events]
-    stored = [report.exchange_line(e) for e in flat if isinstance(e, Exchange)]
+    stored = [exchange_line(e) for e in flat if isinstance(e, Exchange)]
     assert sorted(stored) == sorted(line for line in reported(serve) if not is_telemetry(line))
     assert all(e.run_id == run_id for run_id, run_events in events.items() for e in run_events)
     calls = [e for e in flat if isinstance(e, ToolCall)]
-    printed = [] if is_quiet(serve) else sorted(report.tool_call_line(c) for c in calls)
+    printed = [] if is_quiet(serve) else sorted(tool_call_line(c) for c in calls)
     assert sorted(serve.tool_call_lines()) == printed
 
 
@@ -530,10 +533,12 @@ def test_all_of_a_serves_runs_together_are_what_it_reported_live(run_workflow, n
     union = StoredRun(RunRecord.header(trace.UNATTRIBUTED), [*exchanges, *telemetry, *tool_calls])
     maps = serve.maps()
     handed_calls = [e for e in serve.handed_events if isinstance(e, ToolCall)]
-    live = report.summary_lines(trace.UNATTRIBUTED, serve.reported, 0.0, maps, handed_calls)
+    events = [*map(for_summary, serve.reported), *handed_calls]
+    view = RunView(RunRecord.header(trace.UNATTRIBUTED), events)
+    live = summary_lines(view, maps, 0.0, Live())
     # The one line only a live block prints, for a run that saw no traffic.
-    live = [line for line in live if line != f"  {report.NO_TRAFFIC}"]
-    assert report.stored_summary_lines(union, maps) == live
+    live = [line for line in live if line != f"  {NO_TRAFFIC}"]
+    assert summary_lines(RunView(union.record, union.events), maps) == live
 
 
 # -- irimi compare --------------------------------------------------------------------------------

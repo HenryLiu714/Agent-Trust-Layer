@@ -45,11 +45,14 @@ from pathlib import Path
 
 import pytest
 
-from irimi import ca, paths, policy, reader, report
+from irimi import ca, paths, policy, reader
 from irimi.cli import main
 from irimi.money import format_minor_units
 from irimi.overlay import ServiceOverlay
 from irimi.protocol.headers import ANSWERED_BY_HEADER
+from irimi.report.model import RunView, for_summary
+from irimi.report.summary import Live, summary_lines
+from irimi.trace import RunRecord
 from tests.maps_for_cli import complete_for_check
 from tests.test_engine_mitm import (
     PRECONDITION_STRIPE_MAP,
@@ -407,7 +410,8 @@ def test_the_refund_agents_four_calls_through_the_forward_proxy_are_answered_sha
 
     # The summary, line by line.
     run_id = seen[0].run_id
-    assert report.summary_lines(run_id, seen, 1.0, maps) == [
+    view = RunView(RunRecord.header(run_id), [*map(for_summary, seen)])
+    assert summary_lines(view, maps, 1.0, Live()) == [
         f"irimi shadow · run {run_id} · 7 exchanges · 1.0s",
         *PHASE2_SUMMARY,
     ]

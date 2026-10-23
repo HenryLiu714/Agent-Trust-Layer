@@ -442,10 +442,10 @@ def test_one_serve_per_store_root(tmp_path):
 def test_a_bind_that_is_not_loopback_adds_one_banner_line(host):
     from pathlib import Path
 
-    from irimi import report
+    from irimi.report import terminal
 
-    lines = report.banner_lines("shadow --serve", None, host, 4000, Path("/ca.pem"))
-    assert lines[0].startswith(f"irimi shadow --serve · {report.SERVE_RUNS} · listening on ")
+    lines = terminal.banner_lines("shadow --serve", None, host, 4000, Path("/ca.pem"))
+    assert lines[0].startswith(f"irimi shadow --serve · {terminal.SERVE_RUNS} · listening on ")
     assert lines[2:] == [
         f"listening on {host}: any machine that can reach this port can send traffic through "
         "irimi and call its control endpoint"
@@ -456,9 +456,9 @@ def test_a_bind_that_is_not_loopback_adds_one_banner_line(host):
 def test_a_loopback_bind_adds_none(host):
     from pathlib import Path
 
-    from irimi import report
+    from irimi.report import terminal
 
-    lines = report.banner_lines("shadow", "7f3a", host, 4000, Path("/ca.pem"))
+    lines = terminal.banner_lines("shadow", "7f3a", host, 4000, Path("/ca.pem"))
     assert len(lines) == 2
 
 
@@ -467,9 +467,10 @@ def test_an_ipv6_listener_is_bracketed_where_it_is_a_url(tmp_path):
     control variables say `[::1]:4000`."""
     from pathlib import Path
 
-    from irimi import report, runner
+    from irimi import runner
+    from irimi.report import terminal
 
-    [first, *_] = report.banner_lines("shadow", "7f3a", "::1", 4000, Path("/ca.pem"))
+    [first, *_] = terminal.banner_lines("shadow", "7f3a", "::1", 4000, Path("/ca.pem"))
     assert "listening on [::1]:4000 ·" in first
     env = runner.child_env({}, "::1", 4000, Path("/ca.pem"), "7f3a")
     assert env["HTTPS_PROXY"] == "http://[::1]:4000"
@@ -840,13 +841,13 @@ def test_serve_and_its_alias_print_one_banner_and_stop_cleanly_on_a_signal(home,
     """`irimi serve` is `irimi shadow --serve`: one banner, which names no run of its own,
     and both stop on SIGTERM, as a container runtime stops a sidecar, and on Ctrl-C's SIGINT, by
     closing the store and exiting 0 with nothing more to say."""
-    from irimi import report
+    from irimi.report import terminal
 
     served = _Served(home, *argv)
     try:
         banner = served.banner()
         port = _port_of(banner)
-        assert banner == report.banner_lines(
+        assert banner == terminal.banner_lines(
             "shadow --serve", None, "127.0.0.1", port, ca.ca_paths().cert
         )
         code, lines, err = served.stop(signame)
@@ -862,7 +863,7 @@ def test_a_wide_bind_says_so_in_the_banner(home):
     serve prints it; the loopback default does not, which the test above pins."""
     import re
 
-    from irimi import report
+    from irimi.report import terminal
 
     served = _Served(home, "serve", "--listen-host", "0.0.0.0")
     try:
@@ -871,7 +872,7 @@ def test_a_wide_bind_says_so_in_the_banner(home):
         match = re.search(r" · listening on 0\.0\.0\.0:(\d+) · ", banner[0])
         assert match, banner
         port = int(match.group(1))
-        assert banner == report.banner_lines(
+        assert banner == terminal.banner_lines(
             "shadow --serve", None, "0.0.0.0", port, ca.ca_paths().cert
         )
         assert banner[2] == (
@@ -920,7 +921,7 @@ def test_a_served_sdk_agent_gets_one_summary_block_per_run_it_ends(home, tmp_pat
 
     The agent runs two triggers, each a read and a write, then a read in no run, then a third run
     it never ends: it exits mid-run. Each ended run prints a `--- run <id> ---` block equal to
-    `stored_summary_lines` for that run, read from the store; the read in no run lands in
+    the summary of that run, read from the store; the read in no run lands in
     `unattributed/`, which builds no run; and after SIGTERM, which exits 0, the run the agent never
     ended loads as `incomplete`. The health answer says serve mode."""
     import json
@@ -928,7 +929,7 @@ def test_a_served_sdk_agent_gets_one_summary_block_per_run_it_ends(home, tmp_pat
     import urllib.request
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
-    from irimi import report
+    from irimi.report.runs import run_status
     from irimi.store.reader import StoreReader
     from irimi.trace import UNATTRIBUTED
 
@@ -973,7 +974,7 @@ def test_a_served_sdk_agent_gets_one_summary_block_per_run_it_ends(home, tmp_pat
     [open_run] = [run_id for run_id, r in records.items() if r.end is None]
     assert len(records) == 3 and len(ended) == 2
     assert all(r.attribution == "sdk" for r in records.values())
-    assert report.run_status(records[open_run]) == "incomplete"
+    assert run_status(records[open_run]) == "incomplete"
 
     assert sorted(_blocks(lines, reader)) == ended
     # The read in no run is stored as no run's: in `unattributed/`, never as a run of its own.
@@ -1019,9 +1020,10 @@ def _run_agent(tmp_path_factory, source: str, listener: str, *argv: str) -> None
 
 def _blocks(lines: list[str], reader) -> list[str]:
     """The run ids of the `--- run <id> ---` blocks in `lines`, each checked to be followed at once
-    by `stored_summary_lines` for that run, as the store holds it now: printed under one lock, a
+    by the summary of that run as the store holds it now: printed under one lock, a
     block is never split by another line."""
-    from irimi import report
+    from irimi.report.model import RunView
+    from irimi.report.summary import summary_lines
 
     maps = servicemap.load()
     ids = []
@@ -1029,7 +1031,8 @@ def _blocks(lines: list[str], reader) -> list[str]:
         if not line.startswith("--- run "):
             continue
         run_id = line.removeprefix("--- run ").removesuffix(" ---")
-        expected = report.stored_summary_lines(reader.load_run(run_id), maps)
+        stored = reader.load_run(run_id)
+        expected = summary_lines(RunView(stored.record, stored.events), maps)
         assert lines[at + 1 : at + 1 + len(expected)] == expected, run_id
         ids.append(run_id)
     return ids

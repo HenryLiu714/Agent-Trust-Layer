@@ -56,9 +56,10 @@ from examples.workflows.harness.run import (
     replay_targets,
     workflows,
 )
-from irimi import replay as irimi_replay
 from irimi.compare import ARGS_DIFFER
 from irimi.exchange import LIVE_KINDS, Flag
+from irimi.replay import plan as replay_plan
+from irimi.replay import report as replay_report
 from irimi.runner import NO_PROXY_VALUE
 from irimi.trace import ToolCall
 
@@ -72,10 +73,11 @@ W2, W3, W5, W6 = (
 W7, W8, W9 = "w07_streaming_assistant", "w08_orchestrator", "w09_scope_gauntlet"
 W10, W11 = "w10_flaky_upstream", "w11_leaky_agent"
 
-# The runs `irimi replay` refuses to call alone, by scenario, and why (`irimi.replay.plan`): each is
-# replayed by its scenario's command instead. Read off each run's record, so this table only says
-# which scenarios hold one, and `test_the_runs_replayed_by_their_command_are_the_ones_irimi_refuses`
-# holds it to what irimi refuses.
+# The runs `irimi replay` refuses to call alone, by scenario, and why (`irimi.replay.plan.plan`):
+# each is replayed by its scenario's command instead. Read off each run's record, so this table
+# only says which scenarios hold one, and
+# `test_the_runs_replayed_by_their_command_are_the_ones_irimi_refuses` holds it to what irimi
+# refuses.
 _NO_ENTRYPOINT = "an `sdk.run` block or a `header` run: no entrypoint to call"
 _DESCRIBED = "its trigger's args hold a value stored by its description, a callable"
 _BY_HAND = "its run was posted by hand, args not captured as values"
@@ -274,11 +276,11 @@ class Replayed:
 
 def refused(recorded: Result, run_id: str) -> str | None:
     """Why `irimi replay` refuses to call the recorded run `run_id` alone, or None when it calls
-    it: irimi's own rule, `irimi.replay.plan`."""
+    it: irimi's own rule, `irimi.replay.plan.plan`."""
     record = recorded.stored().load_run(run_id).record
     try:
-        irimi_replay.plan(record, [], None, None)
-    except irimi_replay.Refused as exc:
+        replay_plan.plan(record, [], None, None)
+    except replay_plan.Refused as exc:
         return str(exc)
     return None
 
@@ -536,7 +538,7 @@ def test_every_run_of_every_scenario_replays_from_its_recording(
             # A read tool run for real is a miss too, which a scenario's table names.
             whole = not (alone_differs or case in TOOLS_RUN_FOR_REAL or case in NAMES_ITS_OWN_RUNS)
             if whole:
-                assert f"  {irimi_replay.NO_DIVERGENCE}" in replay.replay_result(), r.run_id
+                assert f"  {replay_report.NO_DIVERGENCE}" in replay.replay_result(), r.run_id
         if alone_differs:
             continue
         # 8. The agent made the calls its run made when it was recorded, and was answered alike:

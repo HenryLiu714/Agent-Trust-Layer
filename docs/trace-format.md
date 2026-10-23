@@ -257,7 +257,7 @@ row:
   was, not what it is, wherever they appear in it. They are part of this format, not of the SDK
   alone: `trace.REPR_KEY`, `trace.TRUNCATED_KEY` (`trace.DESCRIPTION_KEYS`), and
   `trace.holds_description(value)` says whether a captured value holds either anywhere. A replay
-  never hands such a value back as the value: neither a recording (`recording.Recording`) nor the
+  never hands such a value back as the value: neither a recording (`replay.index.ReplayIndex`) nor the
   SDK's `revive` does (#83).
 - **Importable classes only.** A dataclass or model defined inside a function (`<locals>` in its
   qualname), or in `__main__`, which is another module in the process that replays it, cannot be
@@ -352,7 +352,7 @@ starts first and finishes last, so its precondition read is `seq` 1 and the refu
 
 `irimi runs list` prints one line per stored run, newest first, and `irimi runs show RUN_ID` prints
 one run: its record, every event in `seq` order, and its summary (#72). That summary is
-`report.stored_summary_lines`, the same code that prints the live one, fed the run's exchanges,
+`report.summary.summary_lines`, the same code that prints the live one, fed the run's exchanges,
 one host per `TelemetrySeen`, each counted as forwarded live because telemetry always is, and its
 tool calls, each write whose stand-in ran printed as a line after the writes (#76), in the order
 the calls ended, as the live one prints them whatever order their posts came in (#120). It

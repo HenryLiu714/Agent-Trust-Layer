@@ -57,12 +57,15 @@ from typing import Any
 from examples.workflows import sdk as agent_sdk
 from examples.workflows.harness.internet import BOMB_SECRET, FakeInternet, Req
 from examples.workflows.harness.services import CLIENT_SECRET_CANARY, World
-from irimi import ca, cli, paths, report, runner, sdk, servicemap, trace
+from irimi import ca, cli, paths, runner, sdk, servicemap, trace
 from irimi.cli import build_parser
 from irimi.cli import main as irimi_main
 from irimi.exchange import Exchange
 from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV, PROXY_ENVS
 from irimi.protocol.replay_files import replay_result_from_json, replay_result_to_json
+from irimi.report.runs import NOT_SET, RUN_LIST_HEADER
+from irimi.report.summary import REJECTED_MARKER, TOOL_SERVICE, WRITE_MARKER
+from irimi.report.terminal import DELEGATED_PREFIX
 from irimi.sdk import replays as sdk_replays
 from irimi.servicemap import MapIndex, loader
 from irimi.store import writer as store_writer
@@ -99,9 +102,9 @@ MODES = ("bare", "shadow", "serve")
 RUN_BLOCK = re.compile(r"--- run (\S+) ---")
 # The run `irimi shadow`'s banner names, its process run.
 BANNER_RUN = re.compile(r"irimi (?:shadow|replay) · run (\S+) · ")
-# An `irimi runs list` row (`report.run_list_lines`): run id, started (a date and a time, or `-`),
-# duration and status (`error (exit N)` or one word), then the attribution column, which never
-# holds two spaces, and the trigger. Columns are padded, so any run of spaces separates them.
+# An `irimi runs list` row (`report.runs.run_list_lines`): run id, started (a date and a time, or
+# `-`), duration and status (`error (exit N)` or one word), then the attribution column, which
+# never holds two spaces, and the trigger. Columns are padded, so any run of spaces separates them.
 RUN_LIST_LINE = re.compile(r"(\S+) +(?:\S+ \S+|-) +\S+ +(?:error \(exit -?\d+\)|\S+) +(.+?)  ")
 # How long a serve-mode run waits for irimi's banner, and then for irimi to stop.
 SERVE_TIMEOUT_S = 60
@@ -110,17 +113,17 @@ SERVE_TIMEOUT_S = 60
 FAKE_HANDLER = "(process_request_thread)"
 # How long the threads a serve started have to end once it has returned.
 THREAD_EXIT_S = 5.0
-# A tool call's line in irimi's stream (`report.tool_call_line`). Its first column says how the
-# tool ran, in words no exchange line starts with, and its second the tool's kind.
+# A tool call's line in irimi's stream (`report.terminal.tool_call_line`). Its first column says
+# how the tool ran, in words no exchange line starts with, and its second the tool's kind.
 TOOL_LINE = re.compile(r"(tool-real|tool-fake|tool-recorded) +(read|write) +\S.* -> ")
 # How `irimi replay`'s header line starts, which names its two runs with an arrow, as an
 # exchange line names its status.
 REPLAY_HEADER = "irimi replay · "
-# A write tool's line in a summary, without its indent (`report.tool_write_line`). The summary
-# prints these after the HTTP writes, and `irimi compare` among them, in `seq` order.
-TOOL_WRITE = re.compile(rf"{report.WRITE_MARKER} {report.TOOL_SERVICE}  \S+  fake ")
+# A write tool's line in a summary, without its indent (`report.summary.tool_write_line`). The
+# summary prints these after the HTTP writes, and `irimi compare` among them, in `seq` order.
+TOOL_WRITE = re.compile(rf"{WRITE_MARKER} {TOOL_SERVICE}  \S+  fake ")
 # How a summary's write line starts, a write irimi answered or one it says would fail.
-WRITE_LINE_PREFIXES = (f"  {report.WRITE_MARKER} ", f"  {report.REJECTED_MARKER} ")
+WRITE_LINE_PREFIXES = (f"  {WRITE_MARKER} ", f"  {REJECTED_MARKER} ")
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy")
 # The only variables an agent inherits from the harness's own environment. Everything else it is
 # given by name, so a developer's shell cannot change a run: an exported `IRIMI_ENGINE_ACTIVE=1`
@@ -266,7 +269,7 @@ class Result:
             line
             for line in self.irimi
             if " -> " in line
-            and not line.startswith((" ", report.DELEGATED_PREFIX, REPLAY_HEADER))
+            and not line.startswith((" ", DELEGATED_PREFIX, REPLAY_HEADER))
             and not TOOL_LINE.match(line)
         ]
 
@@ -398,7 +401,7 @@ class Result:
         with every line after the header row a run's."""
         code, listed, err = self.runs("list", "--all", "--store", str(self.store_root()))
         assert (code, err) == (0, []), (code, err)
-        assert listed[0].split() == list(report.RUN_LIST_HEADER), listed
+        assert listed[0].split() == list(RUN_LIST_HEADER), listed
         columns = [RUN_LIST_LINE.match(line) for line in listed[1:]]
         assert None not in columns, listed
         return {m[1]: m[2] for m in columns if m is not None}
@@ -425,10 +428,10 @@ class Result:
         entrypoint = fields["entrypoint"]
         parts = [
             fields["trigger"],
-            report.NOT_SET if entrypoint == fields["trigger"] else entrypoint,
+            NOT_SET if entrypoint == fields["trigger"] else entrypoint,
         ]
-        parts.append(report.NOT_SET if version == report.NOT_SET else f"agent {version}")
-        label = "  ".join(part for part in parts if part != report.NOT_SET)
+        parts.append(NOT_SET if version == NOT_SET else f"agent {version}")
+        label = "  ".join(part for part in parts if part != NOT_SET)
         start = next(i for i, line in enumerate(out) if line.startswith(_summary_headers(run_id)))
         writes = [line[2:] for line in out[start:] if line.startswith(WRITE_LINE_PREFIXES)]
         return label, writes
@@ -986,8 +989,8 @@ def _watching_the_store(
     tool call the control endpoint hands it. `cli` imports `DirectoryStore` when it opens the
     store and builds its engine with `_build_engine`, which it hands the `on_exchange` that prints
     each line, so swapping the two names is enough, as `tests/test_trace_e2e.py` does. Not
-    `report.exchange_line` itself, which `irimi replay` also calls for the line of its divergence
-    point."""
+    `report.terminal.exchange_line` itself, which `irimi replay` also calls for the line of its
+    divergence point."""
     real = store_writer.DirectoryStore
     build = cli._build_engine
 

@@ -37,8 +37,9 @@ from examples.workflows.harness.run import (
     workflows,
 )
 from examples.workflows.w10_flaky_upstream.scenarios import CONTROL_DOWN
-from irimi import report, trace
-from irimi.trace import StoredRun
+from irimi import trace
+from irimi.report.model import RunView
+from irimi.report.summary import summary_lines
 
 TESTS = Path(__file__).parent
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
@@ -79,7 +80,7 @@ def test_every_run_a_serve_ended_prints_its_stored_summary_once(run_workflow, na
     """Serve mode prints a run's summary when its end is on disk, read back from the store:
     one `--- run <id> ---` block per end irimi took, none for a run that did not end (W10
     `sigterm_mid_run`, killed) or whose end never reached it (W10's `CONTROL_DOWN`), and each
-    equal to `stored_summary_lines` for its run. It starts no process run, so none is stored."""
+    equal to the stored summary of its run. It starts no process run, so none is stored."""
     serve = run_workflow(name, scenario, "serve")
     reader = serve.stored()
     records = reader.list_runs()
@@ -91,7 +92,7 @@ def test_every_run_a_serve_ended_prints_its_stored_summary_once(run_workflow, na
     for run_id, block in serve.run_blocks().items():
         stored = reader.load_run(run_id)
         if (name, scenario) not in LATE_EVENTS:
-            assert block == report.stored_summary_lines(stored, maps), run_id
+            assert block == summary_lines(RunView(stored.record, stored.events), maps), run_id
             continue
         # LOOKS WRONG (`LATE_EVENTS`): the block is the run as it stood at its end, every event
         # that ended by then and none after; the run itself holds more.
@@ -99,7 +100,7 @@ def test_every_run_a_serve_ended_prints_its_stored_summary_once(run_workflow, na
         assert ended is not None
         before = [e for e in stored.events if _ended_at(e) <= ended]
         assert len(before) < len(stored.events), run_id
-        assert block == report.stored_summary_lines(StoredRun(stored.record, before), maps)
+        assert block == summary_lines(RunView(stored.record, before), maps)
 
 
 def ends_taken(result: Result) -> list[str]:

@@ -25,10 +25,11 @@ from irimi.exchange import Exchange, Flag, Request, Response
 from irimi.ingress import Admitted
 from irimi.netaddr import Target
 from irimi.overlay import ServiceOverlay
-from irimi.policy import Decided, Delegate, Forward, ReplayPolicy, Respond, ShadowPolicy
+from irimi.policy import Decided, Delegate, Forward, Respond, ShadowPolicy
 from irimi.protocol.headers import ANSWERED_BY_HEADER
 from irimi.reader import UpstreamReader
-from irimi.recording import Recording
+from irimi.replay.index import ReplayIndex
+from irimi.replay.policy import ReplayPolicy
 from irimi.store.reader import StoreReader
 from irimi.store.writer import DirectoryStore
 from irimi.writelog import Translation
@@ -256,7 +257,7 @@ def _replay(home, maps, events, script, run_id="rep"):
     """Run `script(session)` as a replay of `events`, as the run `run_id`, with every request
     either stub saw so far forgotten. Returns the session, stopped."""
     _Stripe.seen, _Llm.seen = [], []
-    recording = Recording.from_events(events, redact.load_key(home), maps)
+    recording = ReplayIndex.from_events(events, redact.load_key(home), maps)
     policy = ReplayPolicy(recording, maps=maps)
     session = _Session(home, maps, policy, run_id)
     try:
@@ -549,7 +550,7 @@ def test_a_matcher_that_raises_decides_a_miss_and_still_never_forwards_a_write(
     def broken(*args, **kwargs):
         raise RuntimeError("the matcher broke")
 
-    monkeypatch.setattr(Recording, "take", broken)
+    monkeypatch.setattr(ReplayIndex, "answer_for", broken)
     session = _replay(home, maps, events, lambda s: _refund(s, stripe, 100))
     write = session.seen[-1]
     assert (write.answered_by, Flag.REPLAY_MISS in write.flags) == ("fake-L1", True)
@@ -582,7 +583,7 @@ def test_a_replay_stamps_every_answer_it_decided(home, maps, stubs):
 
 def test_an_answer_the_engine_cannot_send_fails_closed_and_forwards_nothing(home, maps, stubs):
     """A replay answers with a response read off disk, whose headers need not encode as latin-1.
-    `Recording.take` keeps such a recording from being served, and the engine's own guard is
+    `ReplayIndex.answer_for` keeps such a recording from being served, and the engine's own guard is
     the second half: building the response raised out of the request hook, which forwarded the
     write. It is answered as a decision that raised is."""
     stripe, _ = stubs
@@ -795,7 +796,9 @@ def test_an_unchanged_replay_compares_the_same_as_its_recording(home, maps, stub
     every write, and the `↳` line under it, as its recording printed them, so every compared row
     is `=`. The run reads the charge, refunds it, reads it again through the overlay and pages
     the refunds after the one it minted; the replay answers all of it from the recording."""
-    from irimi import compare, report
+    from irimi import compare
+    from irimi.report.model import RunView
+    from irimi.report.summary import summary_lines
 
     stripe, llm = stubs
     url, body = _message(llm)
@@ -819,7 +822,7 @@ def test_an_unchanged_replay_compares_the_same_as_its_recording(home, maps, stub
     assert comparison.exit_code == compare.SAME
 
     def writes(run):
-        lines = report.stored_summary_lines(run, maps)
+        lines = summary_lines(RunView(run.record, run.events), maps)
         return [line for line in lines if line.lstrip()[:1] in ("○", "✗", "↳")]
 
     assert writes(replayed) == writes(recorded)

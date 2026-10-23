@@ -41,11 +41,13 @@ import pytest
 
 from examples.server_agent import app
 from examples.server_agent.app import BARRIER_ENV, TOOL_NAME
-from irimi import ca, paths, report, servicemap
+from irimi import ca, paths, servicemap
 from irimi.cli import main
 from irimi.exchange import Exchange
 from irimi.protocol.control import CONTROL_PREFIX
 from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV, PROXY_ENVS, RUN_ENV
+from irimi.report.model import RunView
+from irimi.report.summary import summary_lines
 from irimi.store.reader import StoreReader
 from irimi.trace import UNATTRIBUTED, ToolCall
 from tests.maps_for_cli import complete_for_check
@@ -344,7 +346,8 @@ def test_two_concurrent_requests_to_a_served_agent_are_two_runs_that_never_mix(
     assert sorted(_blocks(lines, reader)) == sorted(by_charge.values())
     maps = servicemap.load()
     for charge, run_id in by_charge.items():
-        block = report.stored_summary_lines(reader.load_run(run_id), maps)
+        stored = reader.load_run(run_id)
+        block = summary_lines(RunView(stored.record, stored.events), maps)
         # `?`: the refund names no amount, as Stripe refunds what is left (W5 prints the same).
         assert (
             f"  ○ stripe  refund ? on {charge}  faked; checked against live state: would succeed"

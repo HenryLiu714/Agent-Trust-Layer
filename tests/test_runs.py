@@ -18,9 +18,20 @@ from pathlib import Path
 
 import pytest
 
-from irimi import redact, report, servicemap, trace
+from irimi import redact, servicemap, trace
 from irimi.cli import DEFAULT_RUNS_LIMIT, main
 from irimi.exchange import Exchange, Precondition, Request, Response
+from irimi.report.model import RunView
+from irimi.report.runs import (
+    ARGS_TOO_DEEP,
+    MAX_TRIGGER_SHOWN,
+    RUN_LIST_HEADER,
+    run_attribution,
+    run_header_lines,
+    run_list_columns,
+)
+from irimi.report.summary import NO_TRAFFIC, Live, summary_lines, tool_write_line
+from irimi.report.terminal import printable, tool_call_line
 from irimi.store.reader import StoreReader
 from irimi.store.writer import DirectoryStore
 from irimi.trace import ErrorInfo, RunRecord, ToolCall, Trigger
@@ -81,7 +92,7 @@ def test_the_phase_2_run_prints_the_same_summary_from_its_store_as_it_did_live(
     store = home / "store"
     run = StoreReader(store).load_run(_process_run(store).run_id)
     assert [type(e).__name__ for e in run.events].count("TelemetrySeen") == 1
-    stored = report.stored_summary_lines(run, servicemap.load())
+    stored = summary_lines(RunView(run.record, run.events), servicemap.load())
     assert _no_elapsed(stored) == _no_elapsed(live)
 
     # And `runs show` ends in that same block, maps loaded as `shadow` loaded them.
@@ -97,7 +108,7 @@ def _rows(out: str) -> list[list[str]]:
     """`irimi runs list`'s rows, each split into its cells: the header row comes first, and the
     columns are padded, so two spaces or more separate one cell from the next."""
     header, *rows = out.splitlines()
-    assert header.split() == list(report.RUN_LIST_HEADER), header
+    assert header.split() == list(RUN_LIST_HEADER), header
     return [re.split(r"  +", row.rstrip()) for row in rows]
 
 
@@ -203,7 +214,7 @@ def test_runs_list_prints_an_ok_an_error_and_an_incomplete_run_newest_first(home
     *shadowed, handbuilt = _rows(capfd.readouterr().out)
     # A process run's trigger is its command line, the program without its directory.
     python = os.path.basename(sys.executable)
-    failing = report.printable(shlex.join([python, "-c", "import sys\nsys.exit(3)"]))
+    failing = printable(shlex.join([python, "-c", "import sys\nsys.exit(3)"]))
     assert [[re.sub(STARTED, "<started>", c) for c in row] for row in shadowed] == [
         [error, "<started>", shadowed[0][2], "error (exit 3)", "process", failing]
         + ["0 exchanges", "0 writes"],
@@ -381,12 +392,12 @@ def test_a_damaged_replay_record_is_still_marked_and_prints_on_one_line():
     `report` renders the record it is handed: the first is still marked a replay, and the second
     is escaped as every stored text is."""
     unnamed = _ended_run("x", HAND_BUILT_AT, mode="replay")
-    assert "mode: replay" in report.run_header_lines(unnamed)
+    assert "mode: replay" in run_header_lines(unnamed)
     odd = _ended_run("y", HAND_BUILT_AT, attribution="sdk", replay_of="a\nb\x1b")
-    assert report.run_attribution(odd) == "sdk, replay of a\\nb\\x1b"
-    assert "replay of: a\\nb\\x1b" in report.run_header_lines(odd)
-    assert not any("\n" in cell for cell in report.run_list_columns(odd, []))
-    assert report.run_attribution(_ended_run("z", HAND_BUILT_AT)) == "process"
+    assert run_attribution(odd) == "sdk, replay of a\\nb\\x1b"
+    assert "replay of: a\\nb\\x1b" in run_header_lines(odd)
+    assert not any("\n" in cell for cell in run_list_columns(odd, []))
+    assert run_attribution(_ended_run("z", HAND_BUILT_AT)) == "process"
 
 
 def test_a_replay_s_run_json_naming_no_run_is_skipped_by_list_and_refused_by_show(home, capfd):
@@ -454,8 +465,8 @@ def test_runs_list_pads_each_column_to_its_widest_cell_under_a_header_row(home, 
     s.close()
     assert main(["runs", "list"]) == 0
     header, *rows = capfd.readouterr().out.splitlines()
-    assert header.split() == list(report.RUN_LIST_HEADER)
-    starts = [header.index(name) for name in report.RUN_LIST_HEADER]
+    assert header.split() == list(RUN_LIST_HEADER)
+    starts = [header.index(name) for name in RUN_LIST_HEADER]
     for row in rows:
         for start in starts[1:]:
             assert row[start - 2 : start] == "  " and row[start] != " ", (row, start)
@@ -467,12 +478,12 @@ def test_runs_list_shows_a_process_run_s_command_without_its_program_s_directory
     the program's base name and its arguments, cut to forty characters."""
     argv = ["/opt/venv/bin/python3", "agent.py", "--ticket", "T-1"]
     run = _ended_run("p", HAND_BUILT_AT, trigger=Trigger.command(argv))
-    assert report.run_list_columns(run, [])[5] == "python3 agent.py --ticket T-1"
+    assert run_list_columns(run, [])[5] == "python3 agent.py --ticket T-1"
     long = ["/usr/bin/python3", "agent.py", "x" * 60]
     run = _ended_run("q", HAND_BUILT_AT, trigger=Trigger.command(long))
-    cell = report.run_list_columns(run, [])[5]
-    assert len(cell) == report.MAX_TRIGGER_SHOWN
-    assert cell == ("python3 agent.py " + "x" * 60)[: report.MAX_TRIGGER_SHOWN - 1] + "…"
+    cell = run_list_columns(run, [])[5]
+    assert len(cell) == MAX_TRIGGER_SHOWN
+    assert cell == ("python3 agent.py " + "x" * 60)[: MAX_TRIGGER_SHOWN - 1] + "…"
 
 
 def test_runs_list_says_how_many_older_runs_it_left_out_and_all_lists_every_one(home, capfd):
@@ -658,8 +669,8 @@ def test_a_tool_call_line_escapes_the_control_characters_it_was_posted_with():
     name = "evil\x1b[2J\nshadow    write     tool x"
     call = ToolCall("t", "r", name, "write", "shadow", {}, None, ErrorInfo("a\nb", "m"), 1.0, 2.0)
     escaped = "evil\\x1b[2J\\nshadow    write     tool x"
-    assert report.tool_call_line(call) == f"tool-fake     write     {escaped} -> raised a\\nb"
-    assert report.tool_write_line(call) == f"  ○ tool  {escaped}  fake raised a\\nb"
+    assert tool_call_line(call) == f"tool-fake     write     {escaped} -> raised a\\nb"
+    assert tool_write_line(call) == f"  ○ tool  {escaped}  fake raised a\\nb"
 
 
 def test_a_run_whose_only_writes_are_tool_writes_still_says_they_did_not_happen():
@@ -668,28 +679,30 @@ def test_a_run_whose_only_writes_are_tool_writes_still_says_they_did_not_happen(
     write = ToolCall("t", "r", "db.write", "write", "shadow", {}, 1, None, 1.0, 2.0)
     read = ToolCall("u", "r", "db.read", "read", "real", {}, 1, None, 1.0, 2.0)
     totals = "  0 exchanges · 0 real · 0 answered by irimi (0 faked writes) · 0 sent to targets"
-    assert report.summary_lines("r", [], tool_calls=[read, write]) == [
+    view = RunView(RunRecord.header("r"), [read, write])
+    assert summary_lines(view, None, live=Live()) == [
         "irimi shadow · run r · 0 exchanges · 0.0s",
         "",
         "  None of these writes reached the real service:",
         "  ○ tool  db.write  fake ran instead",
         "",
         totals,
-        f"  {report.NO_TRAFFIC}",
+        f"  {NO_TRAFFIC}",
     ]
-    assert report.summary_lines("r", [], tool_calls=[read]) == [
+    view = RunView(RunRecord.header("r"), [read])
+    assert summary_lines(view, None, live=Live()) == [
         "irimi shadow · run r · 0 exchanges · 0.0s",
         "",
         totals,
-        f"  {report.NO_TRAFFIC}",
+        f"  {NO_TRAFFIC}",
     ]
 
 
 def test_tool_call_line_is_in_the_exchange_line_s_columns():
     call = ToolCall("t", "r", "db.mark_refunded", "write", "shadow", {}, None, None, 1.0, 2.0)
-    assert report.tool_call_line(call) == "tool-fake     write     db.mark_refunded -> ok"
+    assert tool_call_line(call) == "tool-fake     write     db.mark_refunded -> ok"
     real = ToolCall("t", "r", "crm.lookup", "read", "real", {}, {}, None, 1.0, 2.0)
-    assert report.tool_call_line(real) == "tool-real     read      crm.lookup -> ok"
+    assert tool_call_line(real) == "tool-real     read      crm.lookup -> ok"
 
 
 def test_runs_show_prints_a_stored_message_s_control_characters_escaped(home, capfd):
@@ -810,4 +823,4 @@ def test_runs_show_says_a_trigger_s_args_nest_too_deeply_to_show_and_never_raise
     for _ in range(1_000_000):
         args = [args]
     record = _ended_run("deep", HAND_BUILT_AT, trigger=Trigger("job", None, args, False))
-    assert report.run_header_lines(record)[4] == f"args: {report.ARGS_TOO_DEEP}"
+    assert run_header_lines(record)[4] == f"args: {ARGS_TOO_DEEP}"

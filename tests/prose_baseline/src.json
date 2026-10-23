@@ -20,16 +20,16 @@
   "src/irimi/idempotency.py": {
     "caps_run": 1
   },
-  "src/irimi/policy.py": {
-    "caps_run": 4
-  },
-  "src/irimi/recording.py": {
-    "caps_run": 10
-  },
   "src/irimi/redact.py": {
     "caps_run": 1
   },
-  "src/irimi/replay.py": {
+  "src/irimi/replay/index.py": {
+    "caps_run": 10
+  },
+  "src/irimi/replay/policy.py": {
+    "caps_run": 4
+  },
+  "src/irimi/replay/report.py": {
     "caps_run": 1
   },
   "src/irimi/sdk/__init__.py": {

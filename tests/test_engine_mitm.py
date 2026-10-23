@@ -30,7 +30,6 @@ from irimi import (
     netaddr,
     paths,
     redact,
-    report,
     servicemap,
     services,
     session,
@@ -45,8 +44,11 @@ from irimi.limits import MAX_STORED_BODY
 from irimi.overlay import NoOverlay, Overlaid
 from irimi.policy import Decided, Respond, ShadowPolicy
 from irimi.protocol.headers import ANSWERED_BY_HEADER, REWROTE_HEADER, RUN_HEADER
+from irimi.report import model, summary
+from irimi.report.model import RunView
 from irimi.store.reader import StoreReader
 from irimi.store.writer import DirectoryStore
+from irimi.trace import RunRecord
 from irimi.writelog import Translation
 from tests.doubles import NullStore
 
@@ -164,6 +166,12 @@ def _maps(tmp_path, monkeypatch, doc=DEMO_MAP):
     maps_dir.mkdir(exist_ok=True)
     (maps_dir / "demo.yaml").write_text(doc)
     return servicemap.load(cwd=tmp_path, maps_dir=maps_dir)
+
+
+def _live_summary(seen, maps):
+    """The summary `irimi shadow` prints for a run whose engine reported `seen`."""
+    view = RunView(RunRecord.header("t3st"), [*map(model.for_summary, seen)])
+    return summary.summary_lines(view, maps, 1.0, summary.Live())
 
 
 def _start(
@@ -733,7 +741,8 @@ def test_a_refused_post_is_still_listed_among_the_writes(engine):
     (ex,) = seen
     assert (ex.answered_by, ex.kind) == ("irimi", "unknown")
     assert exchange.is_intercepted(ex)
-    assert report.write_sentence(ex, None).endswith("  refused by irimi")
+    (entry,) = model.build(RunView(RunRecord.header("t3st"), [ex]), None).writes
+    assert summary.write_sentence(entry).endswith("  refused by irimi")
 
 
 def test_reverse_door_refuses_missing_host(engine):
@@ -3580,7 +3589,7 @@ def test_a_minted_refund_read_by_id_is_listed_under_its_refund(stripe_stub, tmp_
     proxy, stub, seen = stripe_stub
     minted = _fake_refund(proxy, stub)
     assert _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds/{minted}")[0] == 200
-    lines = report.summary_lines("t3st", seen, 1.0, _maps(tmp_path, monkeypatch, doc=STRIPE_MAP))
+    lines = _live_summary(seen, _maps(tmp_path, monkeypatch, doc=STRIPE_MAP))
     write = next(i for i, line in enumerate(lines) if line.startswith("  ○ stripe  refund 100"))
     assert lines[write + 1] == f"    ↳ GET /v1/refunds/{minted} saw it  overlay"
 
@@ -4089,7 +4098,7 @@ def _refund_then_list_summary(proxy, stub, seen, tmp_path, monkeypatch):
     assert status == 200
     assert headers[ANSWERED_BY_HEADER] == "overlay"
     maps = _maps(tmp_path, monkeypatch, doc=PRECONDITION_STRIPE_MAP)
-    return report.summary_lines("t3st", seen, 1.0, maps)
+    return _live_summary(seen, maps)
 
 
 def test_an_overlaid_read_is_listed_under_the_write_it_saw_through_the_proxy(
@@ -4148,7 +4157,7 @@ def test_a_write_whose_precondition_read_never_answered_carries_no_currency(
     assert write.precondition.outcome == "not_evaluable"
     assert write.precondition.currency == ""
     maps = _maps(tmp_path, monkeypatch, doc=PRECONDITION_STRIPE_MAP)
-    lines = report.summary_lines("t3st", seen, 1.0, maps)
+    lines = _live_summary(seen, maps)
     assert (
         "  ○ stripe  refund 100 (minor units, currency unknown) on ch_BUSY1  faked; could not "
         "check: stripe answered irimi's check read with 429"

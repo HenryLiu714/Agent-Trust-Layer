@@ -10,8 +10,9 @@ import pytest
 
 from examples.workflows.harness.run import check_invariants, compare, rows_not_shown
 from examples.workflows.harness.services import client_secret
-from irimi import redact, report
+from irimi import redact
 from irimi.exchange import Exchange
+from irimi.report.model import run_elapsed
 
 W = "w05_dispute_responder"
 AGENT = "examples.workflows.w05_dispute_responder.agent"
@@ -144,7 +145,7 @@ def test_under_serve_the_cascade_is_two_runs_and_two_summaries_the_second_empty(
 
 def _elapsed(result, run_id):
     [record] = [r for r in result.stored().list_runs() if r.run_id == run_id]
-    return f"{report.run_elapsed(record) or 0.0:.1f}s"
+    return f"{run_elapsed(record) or 0.0:.1f}s"
 
 
 def test_a_forged_signature_is_refused_before_any_call(run_workflow):

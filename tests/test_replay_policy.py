@@ -1,4 +1,4 @@
-"""`recording.Recording` and `policy.ReplayPolicy` over hand-built stored runs.
+"""`replay.index.ReplayIndex` and `replay.policy.ReplayPolicy` over hand-built stored runs.
 
 A stored run here is a list of `Exchange`s, as `StoredRun.events` holds them: the store redacts
 before it writes, so a recorded body that held a secret holds its placeholder, which `_stored`
@@ -21,9 +21,10 @@ from irimi.exchange import (
     Request,
     Response,
 )
-from irimi.policy import ReplayPolicy, ShadowPolicy
+from irimi.policy import ShadowPolicy
 from irimi.reader import NoReader, UpstreamReader, answered_as
-from irimi.recording import Recording, RecordingReader
+from irimi.replay.index import RecordingReader, ReplayIndex
+from irimi.replay.policy import ReplayPolicy
 from irimi.trace import ErrorInfo, TelemetrySeen, ToolCall
 from tests.test_policy import answer as decided
 
@@ -75,7 +76,7 @@ def _stored(request, response=OK, **fields):
 
 
 def _recording(*events):
-    return Recording.from_events(list(events), KEY, SHIPPED)
+    return ReplayIndex.from_events(list(events), KEY, SHIPPED)
 
 
 def _llm(content="hi", stream=False, **extra):
@@ -117,7 +118,7 @@ def test_each_recorded_exchange_answers_once_in_order():
     first = _stored(_req(), replace(OK, body=b'{"n": 1}'))
     second = _stored(_req(), replace(OK, body=b'{"n": 2}'))
     recording = _recording(first, second)
-    taken = [recording.take(_req(), "read") for _ in range(3)]
+    taken = [recording.answer_for(_req(), "read") for _ in range(3)]
     assert [None if t is None else t.response.body for t in taken] == [
         b'{"n": 1}',
         b'{"n": 2}',
@@ -128,13 +129,13 @@ def test_each_recorded_exchange_answers_once_in_order():
 def test_headers_and_the_port_never_decide_a_match():
     recording = _recording(_stored(_req(headers=(("user-agent", "a"),))))
     live = replace(_req(headers=(("user-agent", "b"), ("authorization", "Bearer x"))), port=8443)
-    assert recording.take(live, "read") is not None
+    assert recording.answer_for(live, "read") is not None
 
 
 def test_the_query_is_compared_as_its_pairs_in_any_order():
     recording = _recording(_stored(_req(path="/v1/charges", query="limit=3&customer=cus_1")))
-    assert recording.take(_req(path="/v1/charges", query="customer=cus_1&limit=3"), "read")
-    assert recording.take(_req(path="/v1/charges", query="limit=4"), "read") is None
+    assert recording.answer_for(_req(path="/v1/charges", query="customer=cus_1&limit=3"), "read")
+    assert recording.answer_for(_req(path="/v1/charges", query="limit=4"), "read") is None
 
 
 def test_the_method_decides_a_match_between_two_requests_of_one_kind():
@@ -142,8 +143,8 @@ def test_the_method_decides_a_match_between_two_requests_of_one_kind():
     no body: the recorded GET's must never answer it."""
     recording = _recording(_stored(_req()))
     assert classify(_req("HEAD"), SHIPPED).kind == classify(_req(), SHIPPED).kind
-    assert recording.take(_req("HEAD"), classify(_req("HEAD"), SHIPPED).kind) is None
-    assert recording.take(_req(), "read") is not None
+    assert recording.answer_for(_req("HEAD"), classify(_req("HEAD"), SHIPPED).kind) is None
+    assert recording.answer_for(_req(), "read") is not None
 
 
 def test_a_repeated_query_name_keeps_the_order_of_its_values():
@@ -152,9 +153,9 @@ def test_a_repeated_query_name_keeps_the_order_of_its_values():
     recorded = _req(path="/v1/charges", query="sort=created&limit=3&sort=amount")
     recording = _recording(_stored(recorded), _stored(recorded))
     swapped = _req(path="/v1/charges", query="sort=amount&limit=3&sort=created")
-    assert recording.take(swapped, "read") is None
+    assert recording.answer_for(swapped, "read") is None
     same = _req(path="/v1/charges", query="limit=3&sort=created&sort=amount")
-    assert recording.take(same, "read") is not None
+    assert recording.answer_for(same, "read") is not None
 
 
 def test_an_ignored_field_never_decides_a_match_and_any_other_does():
@@ -175,21 +176,21 @@ def test_an_ignored_field_never_decides_a_match_and_any_other_does():
         )
     )
     recorded = _stored(_refund(nonce="n-1"), REFUND_ANSWER, answered_by="fake-L1")
-    recording = Recording.from_events([recorded, recorded], KEY, maps)
-    assert recording.take(_refund(nonce="n-other"), "write") is not None
-    assert recording.take(_refund(amount=250, nonce="n-1"), "write") is None
+    recording = ReplayIndex.from_events([recorded, recorded], KEY, maps)
+    assert recording.answer_for(_refund(nonce="n-other"), "write") is not None
+    assert recording.answer_for(_refund(amount=250, nonce="n-1"), "write") is None
 
 
 def test_the_idempotency_key_header_never_decides_a_match():
     recording = _recording(_recorded_refund())
-    assert recording.take(_refund(key="k-other"), "write") is not None
+    assert recording.answer_for(_refund(key="k-other"), "write") is not None
 
 
 def test_a_form_body_and_a_json_body_with_the_same_fields_are_the_same_write():
     """Both are read with `bodies.reflect`, which reads a form's `1` as an integer."""
     recording = _recording(_stored(_req("POST", path="/v1/refunds", body=b"amount=1", ct=FORM)))
     json_body = _req("POST", path="/v1/refunds", body=b'{"amount": 1}', ct=JSON)
-    assert recording.take(json_body, "write") is not None
+    assert recording.answer_for(json_body, "write") is not None
 
 
 def test_a_number_respelled_by_redaction_still_matches():
@@ -199,21 +200,25 @@ def test_a_number_respelled_by_redaction_still_matches():
     stored = _stored(_req("POST", path="/v1/refunds", body=body, ct=JSON))
     assert b"1.10" not in stored.request.body
     recording = _recording(stored)
-    assert recording.take(_req("POST", path="/v1/refunds", body=body, ct=JSON), "write")
+    assert recording.answer_for(_req("POST", path="/v1/refunds", body=body, ct=JSON), "write")
 
 
 def test_a_body_reflect_cannot_read_is_compared_whole():
     recording = _recording(_stored(_req("POST", path="/v1/refunds", body=b"\x00raw", ct="x/y")))
     assert (
-        recording.take(_req("POST", path="/v1/refunds", body=b"\x00other", ct="x/y"), "write")
+        recording.answer_for(_req("POST", path="/v1/refunds", body=b"\x00other", ct="x/y"), "write")
         is None
     )
-    assert recording.take(_req("POST", path="/v1/refunds", body=b"\x00raw", ct="x/y"), "write")
+    assert recording.answer_for(
+        _req("POST", path="/v1/refunds", body=b"\x00raw", ct="x/y"), "write"
+    )
 
 
 def test_a_read_never_matches_a_recorded_write():
     recording = _recording(_stored(_req("POST", path="/v1/refunds", body=b"a=1", ct=FORM)))
-    assert recording.take(_req("POST", path="/v1/refunds", body=b"a=1", ct=FORM), "read") is None
+    assert (
+        recording.answer_for(_req("POST", path="/v1/refunds", body=b"a=1", ct=FORM), "read") is None
+    )
 
 
 @pytest.mark.parametrize(
@@ -227,24 +232,24 @@ def test_a_read_never_matches_a_recorded_write():
 )
 def test_an_llm_call_that_differs_only_in_who_asked_matches(extra):
     recording = _recording(_stored(_llm()))
-    assert recording.take(_llm(**extra), "llm") is not None
+    assert recording.answer_for(_llm(**extra), "llm") is not None
 
 
 def test_a_cache_control_hint_at_any_depth_never_decides_a_match():
     recording = _recording(_stored(_llm(content=[{"type": "text", "text": "hi"}])))
     hinted = [{"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}]
-    assert recording.take(_llm(content=hinted), "llm") is not None
+    assert recording.answer_for(_llm(content=hinted), "llm") is not None
 
 
 def test_an_llm_call_that_asks_something_else_is_a_miss():
     recording = _recording(_stored(_llm()))
-    assert recording.take(_llm(content="bye"), "llm") is None
+    assert recording.answer_for(_llm(content="bye"), "llm") is None
 
 
 def test_an_llm_body_that_is_not_json_is_compared_whole():
     raw = _req("POST", "api.anthropic.com", "/v1/messages", b"not json", "text/plain")
     recording = _recording(_stored(raw))
-    assert recording.take(raw, "llm") is not None
+    assert recording.answer_for(raw, "llm") is not None
 
 
 def test_a_streamed_answer_answers_only_a_call_that_asks_to_stream():
@@ -252,15 +257,15 @@ def test_a_streamed_answer_answers_only_a_call_that_asks_to_stream():
     answer for one that does."""
     streamed = _stored(_llm(stream=True), Response(200, (), b"data: 1\n\n"), stream_chunks=(9,))
     recording = _recording(streamed)
-    assert recording.take(_llm(), "llm") is None
-    assert recording.take(_llm(stream=True), "llm") is not None
+    assert recording.answer_for(_llm(), "llm") is None
+    assert recording.answer_for(_llm(stream=True), "llm") is not None
 
 
 def test_an_event_stream_that_sent_no_body_still_streamed():
     empty = Response(204, (("content-type", "text/event-stream"),), b"")
     recording = _recording(_stored(_llm(stream=True), empty))
-    assert recording.take(_llm(), "llm") is None
-    assert recording.take(_llm(stream=True), "llm") is not None
+    assert recording.answer_for(_llm(), "llm") is None
+    assert recording.answer_for(_llm(stream=True), "llm") is not None
 
 
 @pytest.mark.parametrize(
@@ -279,14 +284,14 @@ def test_a_recorded_answer_that_is_not_whole_is_a_miss_in_its_place(fields):
     """It is still the agent's first such request: the request in its place misses, and the next
     one meets the second recording."""
     recording = _recording(_stored(_req(), **fields), _stored(_req()))
-    assert recording.take(_req(), "read") is None
-    assert recording.take(_req(), "read") is not None
+    assert recording.answer_for(_req(), "read") is None
+    assert recording.answer_for(_req(), "read") is not None
 
 
 def test_a_recorded_request_that_got_no_answer_is_a_miss_in_its_place():
     recording = _recording(_stored(_req(), None, flags=(Flag.UPSTREAM_ERROR,)), _stored(_req()))
-    assert recording.take(_req(), "read") is None
-    assert recording.take(_req(), "read") is not None
+    assert recording.answer_for(_req(), "read") is None
+    assert recording.answer_for(_req(), "read") is not None
 
 
 def test_a_secret_matches_the_placeholder_the_recording_holds():
@@ -294,14 +299,14 @@ def test_a_secret_matches_the_placeholder_the_recording_holds():
     stored = _stored(secret)
     assert b"sk_live_ABCDEF123456" not in stored.request.body
     recording = _recording(stored)
-    assert recording.take(_llm(content="the key is sk_live_OTHER9876"), "llm") is None
-    assert recording.take(secret, "llm") is not None
+    assert recording.answer_for(_llm(content="the key is sk_live_OTHER9876"), "llm") is None
+    assert recording.answer_for(secret, "llm") is not None
 
 
 def test_engine_reads_answer_only_the_precondition_and_are_never_used_up():
     engine = _stored(_req(), issued_by="engine")
     recording = _recording(engine)
-    assert recording.take(_req(), "read") is None
+    assert recording.answer_for(_req(), "read") is None
     reader = RecordingReader(recording)
     assert reader(_req()) == engine.response
     assert reader(_req()) == engine.response
@@ -315,7 +320,7 @@ def test_an_agent_read_never_answers_a_precondition():
 def test_telemetry_and_tool_calls_never_answer_an_exchange():
     tool = ToolCall("t1", "rec", "tool", "read", "real", {}, {}, None, 0.0, 0.0)
     recording = _recording(TelemetrySeen("rec", "api.datadoghq.com", 0.0), tool)
-    assert recording.take(_req(), "read") is None
+    assert recording.answer_for(_req(), "read") is None
 
 
 # ----------------------------------------------------------------------------------- policy
@@ -386,7 +391,7 @@ def test_a_delegated_write_is_never_looked_up_and_never_flagged():
             )
         )
     )
-    recording = Recording.from_events([_recorded_refund()], KEY, maps)
+    recording = ReplayIndex.from_events([_recorded_refund()], KEY, maps)
     request = _refund()
     answer = decided(ReplayPolicy(recording, maps), request, classify(request, maps))
     assert (answer.answered_by, Flag.REPLAY_MISS in answer.flags) == ("delegated", False)
@@ -531,14 +536,14 @@ def test_a_long_conversation_is_keyed_as_an_llm_call():
     `bodies.MAX_BODY_BYTES` still loses who asked before it is compared."""
     long = "x" * 2_100_000
     recording = _recording(_stored(_llm(content=long, stream=True), stream_chunks=(31,)))
-    assert recording.take(_llm(content=long, stream=True, metadata={"user_id": "u"}), "llm")
+    assert recording.answer_for(_llm(content=long, stream=True, metadata={"user_id": "u"}), "llm")
 
 
 def test_a_matcher_that_raises_decides_a_miss(monkeypatch):
     def broken(*args, **kwargs):
         raise RuntimeError("the matcher broke")
 
-    monkeypatch.setattr(Recording, "take", broken)
+    monkeypatch.setattr(ReplayIndex, "answer_for", broken)
     policy = ReplayPolicy(_recording(_recorded_refund()), SHIPPED)
     answer = _answer(policy, _refund())
     assert answer.answered_by == "fake-L1"
@@ -554,7 +559,7 @@ def test_a_tool_lookup_that_raises_is_a_miss(monkeypatch):
     def broken(*args, **kwargs):
         raise RuntimeError("the matcher broke")
 
-    monkeypatch.setattr(Recording, "take_tool_call", broken)
+    monkeypatch.setattr(ReplayIndex, "tool_answer_for", broken)
     policy = ReplayPolicy(_recording(_tool()), SHIPPED)
     assert policy.recorded_tool_call("db.balance", {"account": "acc_1"}) is None
     assert ShadowPolicy().recorded_tool_call("db.balance", {"account": "acc_1"}) is None
@@ -588,22 +593,24 @@ def test_a_recorded_header_the_engine_cannot_send_is_a_miss():
     text, and a header mitmproxy cannot encode would raise in the request hook."""
     odd = Response(200, (("content-type", JSON), ("x-note", "€")), b"{}")
     recording = _recording(_stored(_req(), odd), _stored(_req()))
-    assert recording.take(_req(), "read") is None
-    assert recording.take(_req(), "read") is not None
+    assert recording.answer_for(_req(), "read") is None
+    assert recording.answer_for(_req(), "read") is not None
 
 
 @pytest.mark.parametrize("status", [42, 100, 101, 600, 999])
 def test_a_recorded_status_no_response_can_carry_is_a_miss(status):
     """A 1xx is never a final answer, and a 101 switched the recorded connection to a protocol a
     replay cannot carry on; past 599 is no status HTTP defines."""
-    assert _recording(_stored(_req(), replace(OK, status=status))).take(_req(), "read") is None
+    assert (
+        _recording(_stored(_req(), replace(OK, status=status))).answer_for(_req(), "read") is None
+    )
 
 
 def test_only_an_llm_call_is_bucketed_by_streaming():
     """A read whose recorded answer was an event stream is served like any read."""
     sse = Response(200, (("content-type", "text/event-stream"),), b"data: 1\n\n")
     recording = _recording(_stored(_req(path="/v1/events"), sse, stream_chunks=(9,)))
-    assert recording.take(_req(path="/v1/events"), "read") is not None
+    assert recording.answer_for(_req(path="/v1/events"), "read") is not None
 
 
 def test_a_streaming_call_answered_with_an_error_is_answered_with_it_again():
@@ -611,7 +618,7 @@ def test_a_streaming_call_answered_with_an_error_is_answered_with_it_again():
     that asks to stream gets the 429 back, and the agent's retry path replays."""
     limited = Response(429, (("content-type", JSON),), b'{"error": "overloaded"}')
     recording = _recording(_stored(_llm(stream=True), limited))
-    taken = recording.take(_llm(stream=True), "llm")
+    taken = recording.answer_for(_llm(stream=True), "llm")
     assert taken is not None and taken.response.status == 429
 
 
@@ -620,7 +627,7 @@ def test_a_streamed_answer_is_never_served_to_a_call_that_did_not_ask_for_one():
     stream and got one. A live call that does not ask either is never served a stream."""
     sse = Response(200, (("content-type", "text/event-stream"),), b"data: 1\n\n")
     recording = _recording(_stored(_llm(), sse, stream_chunks=(9,)))
-    assert recording.take(_llm(), "llm") is None
+    assert recording.answer_for(_llm(), "llm") is None
 
 
 def test_a_precondition_read_is_the_first_the_recording_can_serve():
@@ -857,15 +864,15 @@ def test_the_recording_never_hands_out_a_read_once_the_replay_has_diverged():
     the replay undiverged cannot be served after a write on another thread diverged it."""
     recording = _recording(_stored(_req()))
     recording.diverge()
-    assert recording.take(_req(), "read") is None
+    assert recording.answer_for(_req(), "read") is None
 
 
 def test_an_llm_call_whose_query_differs_is_a_miss():
     """A query can say what an llm call asks (`?alt=sse`, `?api-version=`) as much as a read's."""
     recording = _recording(_stored(_llm()))
     asked = replace(_llm(), query="alt=sse")
-    assert recording.take(asked, "llm") is None
-    assert recording.take(_llm(), "llm") is not None
+    assert recording.answer_for(asked, "llm") is None
+    assert recording.answer_for(_llm(), "llm") is not None
 
 
 def test_a_request_in_another_account_is_another_request():
@@ -877,11 +884,13 @@ def test_a_request_in_another_account_is_another_request():
     refund_a = _stored(replace(_refund(), headers=_refund().headers + in_a), REFUND_ANSWER)
     recording = _recording(read_a, refund_a)
     in_b = (("stripe-account", "acct_B"),)
-    assert recording.take(_req(headers=in_b), "read") is None
-    assert recording.take(replace(_refund(), headers=_refund().headers + in_b), "write") is None
-    taken = recording.take(_req(headers=(*in_a, ("user-agent", "x"))), "read")
+    assert recording.answer_for(_req(headers=in_b), "read") is None
+    assert (
+        recording.answer_for(replace(_refund(), headers=_refund().headers + in_b), "write") is None
+    )
+    taken = recording.answer_for(_req(headers=(*in_a, ("user-agent", "x"))), "read")
     assert taken is not None and taken.response.body == b'{"a": 1}'
-    assert recording.take(replace(_refund(), headers=_refund().headers + in_a), "write")
+    assert recording.answer_for(replace(_refund(), headers=_refund().headers + in_a), "write")
 
 
 # ----------------------------------------------------------------- read tool calls
@@ -909,53 +918,53 @@ def _tool(
 
 def test_each_recorded_read_tool_call_answers_once_in_order():
     recording = _recording(_tool(result={"balance": 1}), _tool(result={"balance": 2}))
-    taken = [recording.take_tool_call("db.balance", {"account": "acc_1"}) for _ in range(3)]
+    taken = [recording.tool_answer_for("db.balance", {"account": "acc_1"}) for _ in range(3)]
     assert [t and t.result for t in taken] == [{"balance": 1}, {"balance": 2}, None]
 
 
 def test_a_read_tool_call_matches_on_its_name_and_args_and_nothing_else():
     recording = _recording(_tool())
-    assert recording.take_tool_call("db.other", {"account": "acc_1"}) is None
-    assert recording.take_tool_call("db.balance", {"account": "acc_2"}) is None
-    assert recording.take_tool_call("db.balance", {"account": "acc_1", "x": 1}) is None
-    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is not None
+    assert recording.tool_answer_for("db.other", {"account": "acc_1"}) is None
+    assert recording.tool_answer_for("db.balance", {"account": "acc_2"}) is None
+    assert recording.tool_answer_for("db.balance", {"account": "acc_1", "x": 1}) is None
+    assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is not None
 
 
 def test_args_match_as_canonical_json_so_true_is_never_one():
     """Key order never decides a match, and a JSON `true` is not `1`, though Python says
     `True == 1`."""
     recording = _recording(_tool(args={"a": 1, "b": True}))
-    assert recording.take_tool_call("db.balance", {"a": 1, "b": 1}) is None
-    assert recording.take_tool_call("db.balance", {"b": True, "a": 1}) is not None
+    assert recording.tool_answer_for("db.balance", {"a": 1, "b": 1}) is None
+    assert recording.tool_answer_for("db.balance", {"b": True, "a": 1}) is not None
 
 
 def test_a_secret_in_the_args_matches_the_placeholder_the_recording_holds():
     dsn = {"dsn": "postgres://crm:sk_test_" + "a" * 24 + "@db.internal/crm"}
     recorded = _tool(args=dsn)
     assert recorded.args != dsn
-    assert _recording(recorded).take_tool_call("db.balance", dsn) is recorded
+    assert _recording(recorded).tool_answer_for("db.balance", dsn) is recorded
 
 
 def test_args_redaction_cannot_read_match_nothing():
     """`redact_json` says `<redaction-failed>` for any value it cannot redact, so two different
     such args would compare equal: neither side's is ever matched."""
     recording = _recording(_tool(args={"a": 1}))
-    assert recording.take_tool_call("db.balance", ("not", "json")) is None  # type: ignore[arg-type]
+    assert recording.tool_answer_for("db.balance", ("not", "json")) is None  # type: ignore[arg-type]
     unreadable = replace(_tool(), args=redact.REDACTION_FAILED)
-    assert _recording(unreadable).take_tool_call("db.balance", ("x",)) is None  # type: ignore[arg-type]
+    assert _recording(unreadable).tool_answer_for("db.balance", ("x",)) is None  # type: ignore[arg-type]
 
 
 def test_a_recorded_result_redaction_could_not_read_is_a_miss_in_its_place():
     unreadable = replace(_tool(), result=redact.REDACTION_FAILED)
     recording = _recording(unreadable, _tool(result={"balance": 2}))
-    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is None
-    taken = recording.take_tool_call("db.balance", {"account": "acc_1"})
+    assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is None
+    taken = recording.tool_answer_for("db.balance", {"account": "acc_1"})
     assert taken is not None and taken.result == {"balance": 2}
 
 
 def test_a_recorded_call_that_raised_is_answered_with_its_error():
     error = ErrorInfo("builtins.KeyError", "'acc_1'")
-    taken = _recording(_tool(error=error)).take_tool_call("db.balance", {"account": "acc_1"})
+    taken = _recording(_tool(error=error)).tool_answer_for("db.balance", {"account": "acc_1"})
     assert taken is not None and (taken.result, taken.error) == (None, error)
 
 
@@ -964,9 +973,9 @@ def test_a_write_tool_call_is_never_an_answer_and_never_holds_a_read_back():
     recorded write tool the replay never calls changes nothing."""
     write = _tool(name="db.debit", kind="write", ran="shadow")
     recording = _recording(write, _tool(), _stored(_req()))
-    assert recording.take_tool_call("db.debit", {"account": "acc_1"}) is None
-    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is not None
-    assert recording.take(_req(), "read") is not None
+    assert recording.tool_answer_for("db.debit", {"account": "acc_1"}) is None
+    assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is not None
+    assert recording.answer_for(_req(), "read") is not None
     assert not recording.diverged
 
 
@@ -975,11 +984,11 @@ def test_a_read_tool_recorded_after_a_write_the_replay_has_not_made_is_a_miss_al
     served. But the replay does not diverge: the tool's body runs, and its own HTTP is decided as
     any request is. Nor is the recorded call used up."""
     recording = _recording(_tool(result={"balance": 1}), _recorded_refund(), _tool())
-    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is not None
-    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is None
+    assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is not None
+    assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is None
     assert not recording.diverged
-    assert recording.take(_refund(), "write") is not None
-    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is not None
+    assert recording.answer_for(_refund(), "write") is not None
+    assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is not None
 
 
 def test_an_answered_read_tool_uses_up_the_http_its_body_made():
@@ -991,9 +1000,9 @@ def test_an_answered_read_tool_uses_up_the_http_its_body_made():
     after = _stored(_req(), shown, started_at=12.0, ended_at=12.1)
     tool = _tool(span=(10.0, 11.0))
     recording = _recording(before, tool, _recorded_refund(), after)
-    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is not None
-    assert recording.take(_refund(), "write") is not None
-    taken = recording.take(_req(), "read")
+    assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is not None
+    assert recording.answer_for(_refund(), "write") is not None
+    taken = recording.answer_for(_req(), "read")
     assert taken is not None and taken.response.body == shown.body
 
 
@@ -1002,29 +1011,29 @@ def test_a_write_a_read_tool_s_body_made_does_not_hold_the_tool_back():
     sent as a POST). It is placed where its body began, so an unchanged replay answers it."""
     inner = _recorded_refund(started_at=10.5, ended_at=10.6)
     recording = _recording(inner, _tool(span=(10.0, 11.0)), _stored(_req()))
-    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is not None
+    assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is not None
     assert not recording.diverged
-    assert recording.take(_req(), "read") is not None
+    assert recording.answer_for(_req(), "read") is not None
 
 
 def test_a_read_tool_recorded_after_a_write_the_replay_made_is_answered():
     recording = _recording(_recorded_refund(), _tool())
-    assert recording.take(_refund(), "write") is not None
-    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is not None
+    assert recording.answer_for(_refund(), "write") is not None
+    assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is not None
     assert not recording.diverged
 
 
 def test_no_read_tool_is_answered_once_the_replay_has_diverged():
     recording = _recording(_tool())
     recording.diverge()
-    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is None
+    assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is None
 
 
 def test_a_read_tool_call_and_an_exchange_never_answer_each_other():
     recording = _recording(_tool(), _stored(_req()))
-    assert recording.take_tool_call("GET", {"path": "/v1/charges/ch_1"}) is None
-    assert recording.take(_req(), "read") is not None
-    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is not None
+    assert recording.tool_answer_for("GET", {"path": "/v1/charges/ch_1"}) is None
+    assert recording.answer_for(_req(), "read") is not None
+    assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is not None
 
 
 def test_an_answered_read_tool_uses_up_the_read_tools_its_body_called():
@@ -1035,8 +1044,8 @@ def test_an_answered_read_tool_uses_up_the_read_tools_its_body_called():
     outer = _tool(name="db.account", result={"account": "acc_1"}, span=(10.0, 11.0))
     later = _tool(result={"balance": 2}, span=(12.0, 12.1))
     recording = _recording(inner, outer, later)
-    assert recording.take_tool_call("db.account", {"account": "acc_1"}) is outer
-    taken = recording.take_tool_call("db.balance", {"account": "acc_1"})
+    assert recording.tool_answer_for("db.account", {"account": "acc_1"}) is outer
+    taken = recording.tool_answer_for("db.balance", {"account": "acc_1"})
     assert taken is not None and taken.result == {"balance": 2}
 
 
@@ -1049,16 +1058,16 @@ def test_a_read_tool_call_within_an_answered_one_s_span_that_none_repeats_still_
     alongside = _tool(name="db.owner", result={"owner": "a"}, span=(10.2, 10.4))
     longer = _tool(span=(10.0, 11.0))
     recording = _recording(alongside, longer)
-    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is longer
-    assert recording.take_tool_call("db.owner", {"account": "acc_1"}) is alongside
+    assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is longer
+    assert recording.tool_answer_for("db.owner", {"account": "acc_1"}) is alongside
 
 
 def test_two_read_tool_calls_clocked_alike_never_use_each_other_up():
     first = _tool(result={"balance": 1}, span=(10.0, 11.0))
     second = _tool(name="db.account", span=(10.0, 11.0))
     recording = _recording(first, second)
-    assert recording.take_tool_call("db.account", {"account": "acc_1"}) is second
-    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is first
+    assert recording.tool_answer_for("db.account", {"account": "acc_1"}) is second
+    assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is first
 
 
 def test_a_recorded_tool_redaction_could_not_read_uses_up_nothing_its_body_made():
@@ -1070,12 +1079,12 @@ def test_a_recorded_tool_redaction_could_not_read_uses_up_nothing_its_body_made(
     nested = _tool(name="db.rate", span=(10.6, 10.7))
     unreadable = replace(_tool(span=(10.0, 11.0)), result=redact.REDACTION_FAILED)
     recording = _recording(read, write, nested, unreadable)
-    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is None
-    assert recording.take(_req(), "read") is not None
-    assert recording.take(_refund(), "write") is not None
-    assert recording.take_tool_call("db.rate", {"account": "acc_1"}) is nested
+    assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is None
+    assert recording.answer_for(_req(), "read") is not None
+    assert recording.answer_for(_refund(), "write") is not None
+    assert recording.tool_answer_for("db.rate", {"account": "acc_1"}) is nested
     assert not recording.diverged
-    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is None
+    assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is None
 
 
 def test_a_recorded_error_whose_message_redaction_could_not_read_is_a_miss_in_its_place():
@@ -1083,8 +1092,8 @@ def test_a_recorded_error_whose_message_redaction_could_not_read_is_a_miss_in_it
     recorded error's message."""
     error = ErrorInfo("builtins.KeyError", redact.REDACTION_FAILED)
     recording = _recording(_tool(error=error), _tool(result={"balance": 2}))
-    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is None
-    taken = recording.take_tool_call("db.balance", {"account": "acc_1"})
+    assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is None
+    taken = recording.tool_answer_for("db.balance", {"account": "acc_1"})
     assert taken is not None and taken.result == {"balance": 2}
 
 
@@ -1107,9 +1116,9 @@ def test_a_recorded_tool_with_no_outcome_to_give_leaves_its_body_s_http_to_answe
     write = _recorded_refund(started_at=10.4, ended_at=10.5)
     tool = replace(_tool(span=(10.0, 11.0)), result=result, error=error)
     recording = _recording(read, write, tool, _stored(_req()))
-    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is None
-    assert recording.take(_req(), "read") is not None
-    assert recording.take(_refund(), "write") is not None
+    assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is None
+    assert recording.answer_for(_req(), "read") is not None
+    assert recording.answer_for(_refund(), "write") is not None
     assert not recording.diverged
-    assert recording.take(_req(), "read") is not None  # the agent's own read after, unchanged
-    assert recording.take_tool_call("db.balance", {"account": "acc_1"}) is None
+    assert recording.answer_for(_req(), "read") is not None  # the agent's own read after, unchanged
+    assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is None

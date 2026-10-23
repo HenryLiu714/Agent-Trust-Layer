@@ -6,11 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from irimi import __version__, ca, cli, paths, report, servicemap
+from irimi import __version__, ca, cli, paths, servicemap
 from irimi.cli import BROKEN_PIPE_EXIT_CODE, main
 from irimi.engine import Replay, Serve, Shadow
 from irimi.netaddr import Target
 from irimi.protocol.env import AGENT_VERSION_ENV
+from irimi.report.terminal import NOT_LOOPBACK_NOTICE, PROXY_ONLY_NOTICE
 
 
 def test_version_flag(capsys):
@@ -212,16 +213,17 @@ def test_the_composition_root_builds_a_replay_policy_over_the_run_s_recording():
     One that names none gets shadow mode's policy, reading the real upstream."""
     from dataclasses import replace
 
-    from irimi.policy import ReplayPolicy, ShadowPolicy
+    from irimi.policy import ShadowPolicy
     from irimi.reader import UpstreamReader
-    from irimi.recording import Recording, RecordingReader
+    from irimi.replay.index import RecordingReader, ReplayIndex
+    from irimi.replay.policy import ReplayPolicy
     from tests.doubles import NullStore
 
     index = _shipped_index()
     args = argparse.Namespace(allow_host=[], port=4321, listen_host=paths.LISTEN_HOST)
     p = ca.ca_paths()
     config = cli._engine_config(args, index, "t3st", p)
-    recording = Recording.from_events([], b"k" * 32, index)
+    recording = ReplayIndex.from_events([], b"k" * 32, index)
     run = cli._Run(
         index, p, "t3st", replace(config, mode=Replay("rec1")), NullStore(), None, recording
     )
@@ -560,7 +562,7 @@ def test_the_banner_reaches_a_piped_stdout_before_anything_else_is_printed(monke
     visible = _startup_on_a_pipe(monkeypatch, servicemap.MapIndex())
     assert "listening on 127.0.0.1:4000" in visible
     assert "/ca.pem" in visible
-    assert report.PROXY_ONLY_NOTICE in visible
+    assert PROXY_ONLY_NOTICE in visible
 
 
 def test_a_delegated_services_warning_reaches_a_piped_stdout_too(monkeypatch):
@@ -569,7 +571,7 @@ def test_a_delegated_services_warning_reaches_a_piped_stdout_too(monkeypatch):
     sm = _delegated_service("http://10.0.0.9:3000")
     visible = _startup_on_a_pipe(monkeypatch, servicemap.MapIndex((sm,)))
     assert "delegated: stripe -> http://10.0.0.9:3000 (writes)" in visible
-    assert report.NOT_LOOPBACK_NOTICE in visible
+    assert NOT_LOOPBACK_NOTICE in visible
 
 
 def test_the_escape_hatch_warning_goes_to_stderr_flushed(monkeypatch, capsys):

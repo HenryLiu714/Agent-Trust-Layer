@@ -28,14 +28,18 @@ from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 import pytest
 
-from irimi import ca, classify, ingress, paths, report, servicemap, wire
+from irimi import ca, classify, ingress, paths, servicemap, wire
 from irimi.engine import EngineConfig, mitm
 from irimi.engine.mitm import MitmEngine
 from irimi.exchange import KINDS, Exchange, Flag, Request, Response
 from irimi.overlay import NoOverlay, Overlaid, ServiceOverlay
-from irimi.policy import Decided, Forward, ReplayPolicy, Respond, ShadowPolicy
+from irimi.policy import Decided, Forward, Respond, ShadowPolicy
 from irimi.protocol.headers import ANSWERED_BY_HEADER
-from irimi.recording import Recording
+from irimi.replay.index import ReplayIndex
+from irimi.replay.policy import ReplayPolicy
+from irimi.report.model import RunView, build, for_summary
+from irimi.report.summary import OVERLAY_MARKER, Live, summary_lines
+from irimi.trace import RunRecord
 from irimi.wire import stamp
 from tests.doubles import NullStore
 
@@ -306,7 +310,7 @@ def test_a_replay_stamps_what_it_answered_and_leaves_a_live_forward_bare(
 
     recorded, _ = _run(tmp_path, monkeypatch, maps, calls)
     _Recorder.seen = []
-    policy = ReplayPolicy(Recording.from_events(recorded, b"k" * 32, maps), maps)
+    policy = ReplayPolicy(ReplayIndex.from_events(recorded, b"k" * 32, maps), maps)
     seen, replies = _run(
         tmp_path,
         monkeypatch,
@@ -822,14 +826,21 @@ def test_only_a_write_that_would_have_happened_lists_its_webhooks(tmp_path, monk
 
 def _owes_overlay_line(ex: Exchange) -> bool:
     """One of the agent's own reads that irimi edited to show a write, or knows it showed only in
-    part. This deliberately restates `report._shows_overlay` rather than calling it: the
-    invariant is what the summary OWES, so a `_shows_overlay` that stopped owing a line must fail
-    here instead of agreeing with itself."""
+    part. This deliberately restates the rule `report.model.disposition` applies rather than
+    calling it: the invariant is what the summary OWES, so a model that stopped owing a line
+    must fail here instead of agreeing with itself."""
     return (
         ex.kind == "read"
         and ex.issued_by == "agent"
         and (ex.answered_by == "overlay" or ex.overlay == "partial")
     )
+
+
+def _filed(exchanges: Sequence[Exchange]) -> list[tuple[Exchange, list[Exchange]]]:
+    """Each write the summary prints, with the reads it files under it."""
+    view = RunView(RunRecord.header("t3st"), list(exchanges))
+    writes = build(view, None).writes
+    return [(entry.exchange, [read for read, _ in entry.reads]) for entry in writes]
 
 
 def overlay_line_violations(
@@ -840,11 +851,7 @@ def overlay_line_violations(
     overlay held during the run: a read cannot have been shown a write outside it, so a `↳` under
     one - a refused retry, say - tells the reader the agent saw what it never saw. Matched by
     identity, not equality: a copy of a filed read is a different read."""
-    filed = [
-        (write, read)
-        for write, reads in report._writes_with_their_reads(exchanges)
-        for read in reads
-    ]
+    filed = [(write, read) for write, reads in _filed(exchanges) for read in reads]
     violations = []
     for ex in exchanges:
         if not _owes_overlay_line(ex):
@@ -880,8 +887,9 @@ def test_every_overlaid_read_has_a_write_of_its_own_service_to_sit_under(tmp_pat
     held = [ex for log in overlay.logs for ex in log]
     assert [ex.precondition.outcome for ex in held] == ["passed"] * len(held)
     assert overlay_line_violations(seen, held) == []
-    lines = report.summary_lines("t3st", seen)
-    assert sum(line.lstrip().startswith(report.OVERLAY_MARKER) for line in lines) == len(owed)
+    view = RunView(RunRecord.header("t3st"), [*map(for_summary, seen)])
+    lines = summary_lines(view, None, live=Live())
+    assert sum(line.lstrip().startswith(OVERLAY_MARKER) for line in lines) == len(owed)
 
     # And the check can fail: a read before any write, one whose service wrote nothing, and one
     # filed under a write the overlay never held.

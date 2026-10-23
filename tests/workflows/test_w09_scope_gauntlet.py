@@ -25,10 +25,12 @@ from examples.workflows.w09_scope_gauntlet.agent import (
     OVERSIZED_BODY_BYTES,
 )
 from examples.workflows.w09_scope_gauntlet.scenarios import BIG_DESCRIPTION_BYTES, WORKFLOW
-from irimi import control, paths, redact, report, trace
+from irimi import control, paths, redact, trace
 from irimi.bodies import MAX_BODY_BYTES
 from irimi.exchange import Exchange, Flag
 from irimi.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE, MAX_STORED_BODY
+from irimi.report.runs import MAX_TRIGGER_SHOWN, RUN_LIST_HEADER, event_line
+from irimi.report.terminal import WIDE_BIND_NOTICE, exchange_line
 from irimi.store.layout import RUNS_DIR, SERVE_LOCK_FILE
 from irimi.trace import ErrorInfo, RunEnd, RunRecord, ToolCall, Trigger
 
@@ -271,7 +273,7 @@ def test_every_spelling_of_the_proxys_own_address_is_the_reverse_door(run_workfl
     # summary prints. The bind wider than loopback is in the banner, once.
     assert shadow.stored().list_runs() == [] and shadow.run_blocks() == {}
     assert [line for line in shadow.irimi if line.startswith("listening on 0.0.0.0: ")] == [
-        f"listening on 0.0.0.0: {report.WIDE_BIND_NOTICE}"
+        f"listening on 0.0.0.0: {WIDE_BIND_NOTICE}"
     ]
 
 
@@ -397,18 +399,18 @@ def listed(result) -> list[list[str]]:
     masked. Columns are padded, so any run of two or more spaces separates two fields."""
     code, out, err = result.runs("list")
     assert (code, err) == (0, [])
-    assert out[0].split() == list(report.RUN_LIST_HEADER)
+    assert out[0].split() == list(RUN_LIST_HEADER)
     rows = (re.split(r"  +", line.rstrip()) for line in out[1:])
     return sorted([f[0], "<started>", "<elapsed>", *f[3:]] for f in rows)
 
 
 def listed_command(argv: list[str]) -> str:
     """A process run's trigger column: its command line without the program's directory, cut to
-    `report.MAX_TRIGGER_SHOWN` characters."""
+    `report.runs.MAX_TRIGGER_SHOWN` characters."""
     command = shlex.join([argv[0].rsplit("/", 1)[-1], *argv[1:]])
-    if len(command) <= report.MAX_TRIGGER_SHOWN:
+    if len(command) <= MAX_TRIGGER_SHOWN:
         return command
-    return command[: report.MAX_TRIGGER_SHOWN - 1] + "…"
+    return command[: MAX_TRIGGER_SHOWN - 1] + "…"
 
 
 def shown(result, run_id: str) -> list[str]:
@@ -471,7 +473,7 @@ def test_a_run_posted_over_the_control_endpoint_is_stored_as_an_sdk_run(run_work
         assert before == stored_tool_call(shadow, run_id, f"{tag}_tool_1")
         assert after == stored_tool_call(shadow, run_id, f"{tag}_tool_2")
         assert isinstance(read, Exchange)
-        assert (read.run_id, report.exchange_line(read)) == (run_id, read_line(path))
+        assert (read.run_id, exchange_line(read)) == (run_id, read_line(path))
         # In time as well as in `seq`: the run's start, its first tool call, the read, its
         # second tool call and its end, each clock read after the last.
         times = [stored.record.started_at, before.ended_at, read.started_at, read.ended_at]
@@ -674,7 +676,7 @@ def test_a_start_re_posted_after_its_end_is_dropped_and_the_run_kept_whole(run_w
     }
     stored = shadow.stored().load_run("ctl-restarted")
     assert stored.record == sdk_record(shadow, "ctl-restarted", "restarted_start", "restarted_end")
-    assert [report.event_line(e) for e in stored.events] == [read_line(f"/v1/charges/{CHARGE}")]
+    assert [event_line(e) for e in stored.events] == [read_line(f"/v1/charges/{CHARGE}")]
     [line] = [f for f in listed(shadow) if f[0] == "ctl-restarted"]
     assert line[3:] == ["ok", "sdk", "ctl-restarted", "1 exchange", "0 writes"]
     assert shown(shadow, "ctl-restarted")[:8] == [

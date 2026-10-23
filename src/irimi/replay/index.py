@@ -1,8 +1,8 @@
 """A stored run as a replay answers from it: its exchanges, keyed so that a live request can
 find the one the recorded run made in its place, and the replay's own state.
 
-A replay re-runs an agent and answers it from a run it made before. `policy.ReplayPolicy` asks
-this module one question per request - did the recorded run make this same request, and what
+A replay re-runs an agent and answers it from a run it made before. `replay.policy.ReplayPolicy`
+asks this module one question per request - did the recorded run make this same request, and what
 was it answered? - and this module answers it with nothing but the recording: no clock, no I/O,
 no minting. It reads a `trace.StoredRun`'s events.
 
@@ -156,7 +156,7 @@ def _depends_on_prior_writes(exchange: Exchange) -> bool:
     """Whether a recorded answer was made from the world the recorded run's writes had made: a
     read, which shows them, or a write L3 checked against them, whose verdict a refund the
     replay has not made, or one the recording never held, would change. A replay serves one only
-    while that world is the replay's too (`Recording.take`)."""
+    while that world is the replay's too (`ReplayIndex.answer_for`)."""
     return exchange.kind == "read" or (
         exchange.kind not in LIVE_KINDS and exchange.precondition.outcome is not None
     )
@@ -317,9 +317,10 @@ def made_within(started_at: float, ended_at: float, call: ToolCall) -> bool:
     return 0.0 < started_at and call.started_at <= started_at and ended_at <= call.ended_at
 
 
-def _nested_in(other: ToolCall, call: ToolCall) -> bool:
+def nested_in(other: ToolCall, call: ToolCall) -> bool:
     """Whether the read tool call `other` was made within `call`'s span (`made_within`). Never one
-    with the same span, so two calls clocked alike never use each other up."""
+    with the same span, so two calls clocked alike never use each other up. `irimi replay`'s
+    count of the calls a replay never made reads the same rule."""
     span = (other.started_at, other.ended_at)
     return span != (call.started_at, call.ended_at) and made_within(*span, call)
 
@@ -348,7 +349,7 @@ def _displacing(
     return found
 
 
-class Recording:
+class ReplayIndex:
     """One stored run's exchanges, ready to answer a replay from, and that replay's state.
     Thread-safe: the policy that asks it runs on the engine's worker threads."""
 
@@ -379,7 +380,7 @@ class Recording:
     @classmethod
     def from_events(
         cls, events: Sequence[Event], redaction_key: bytes, maps: MapIndex
-    ) -> "Recording":
+    ) -> "ReplayIndex":
         """The recording of a stored run's `events` (`StoredRun.events`, in `seq` order), whose
         bodies the store redacted with `redaction_key`, keyed against `maps`.
 
@@ -433,11 +434,11 @@ class Recording:
         for tool_key, entry in kept:
             tools.setdefault(tool_key, []).append(entry)
         for _, entry in kept:
-            within = [(key, other) for key, other in kept if _nested_in(other.call, entry.call)]
+            within = [(key, other) for key, other in kept if nested_in(other.call, entry.call)]
             entry.nested = _displacing(within, tools)
         return cls(agent, tools, engine, maps, redaction_key)
 
-    def take(self, request: Request, kind: Kind, held: str = "") -> Exchange | None:
+    def answer_for(self, request: Request, kind: Kind, held: str = "") -> Exchange | None:
         """The recorded exchange that answers this live request, or None for a miss. `held` is the
         idempotency flag the run's own answer to this request would carry
         (`_idempotency_standing`), which the caller reads off the run's idempotency store; "" for
@@ -474,7 +475,7 @@ class Recording:
                     return recorded
         return None
 
-    def take_tool_call(self, name: str, args: JSONValue) -> ToolCall | None:
+    def tool_answer_for(self, name: str, args: JSONValue) -> ToolCall | None:
         """The recorded read tool call that answers this live one, or None for a miss. `args`
         are the call's as the SDK captured them, not yet redacted.
 
@@ -486,8 +487,8 @@ class Recording:
         which uses up nothing else. The exchanges recorded within an answered call, and the read
         tool calls within it that a later call repeats, are used up with it (module doc).
 
-        A READ TOOL SHOWS THE WORLD, as an HTTP read does (`take`): its result may have been made
-        from what it read over HTTP, which showed every recorded write before it. One recorded
+        A READ TOOL SHOWS THE WORLD, as an HTTP read does (`answer_for`): its result may have been
+        made from what it read over HTTP, which showed every recorded write before it. One recorded
         after a write the replay has not made, or reached once the replay has diverged, is a miss,
         and is not used up. Unlike a read's, it does not diverge the replay: its body runs, and
         what the body reads over HTTP is decided as every request is, by the policy."""
@@ -557,7 +558,7 @@ class RecordingReader(Reader):
     flags: tuple[Flag, ...] = (Flag.FROM_RECORDING,)
     miss_flags: tuple[Flag, ...] = (Flag.REPLAY_MISS,)
 
-    def __init__(self, recording: Recording) -> None:
+    def __init__(self, recording: ReplayIndex) -> None:
         self.recording = recording
 
     def __call__(self, request: Request) -> Response | None:

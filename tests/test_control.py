@@ -17,9 +17,10 @@ from irimi.control import MAX_CONTROL_BODY, MAX_REFUSAL, TOO_DEEP, ControlEndpoi
 from irimi.engine import Serve
 from irimi.exchange import Exchange, Request
 from irimi.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE
-from irimi.policy import ReplayPolicy, ShadowPolicy
+from irimi.policy import ShadowPolicy
 from irimi.protocol import control as protocol_control
-from irimi.recording import Recording
+from irimi.replay.index import ReplayIndex
+from irimi.replay.policy import ReplayPolicy
 from irimi.store.reader import StoreReader
 from irimi.store.writer import DirectoryStore
 from irimi.trace import MAX_QUOTED, ErrorInfo, ToolCall, Trigger
@@ -476,11 +477,11 @@ def test_every_route_ignores_a_field_it_does_not_know(engine):
 
 def _replaying(tmp_path, monkeypatch, *events, policy=None) -> _Engine:
     """An engine replaying a run whose `events` are given, as `cli._build_engine` builds one: its
-    policy a `ReplayPolicy` over their `Recording`, unless `policy` is given."""
+    policy a `ReplayPolicy` over their `ReplayIndex`, unless `policy` is given."""
     cfg = _config(tmp_path, monkeypatch)
     key = redact.load_key(tmp_path)
     store = DirectoryStore(tmp_path / "store", key, replay_of="recorded01")
-    policy = policy or ReplayPolicy(Recording.from_events(list(events), key, cfg.maps), cfg.maps)
+    policy = policy or ReplayPolicy(ReplayIndex.from_events(list(events), key, cfg.maps), cfg.maps)
     tool_calls: list[ToolCall] = []
     eng, seen, stop = _start(cfg, policy=policy, store=store, on_tool_call=tool_calls.append)
     return _Engine(eng.listen_port(), store, seen, tool_calls, stop)

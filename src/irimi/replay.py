@@ -1,4 +1,4 @@
-"""What `irimi replay` runs, and what it says of a replay once it has run (#84).
+"""What `irimi replay` runs, and what it says of a replay once it has run.
 
 Pure, like `compare`: nothing here runs a process or prints. `cli.cmd_replay` asks `plan` what to
 run for a stored run, runs it under the replay's engine, and prints `outcome`'s lines.
@@ -8,7 +8,7 @@ WHAT RUNS, in order of precedence (`plan`):
 1. `-- CMD` given: that command, as `irimi shadow -- CMD` would run it.
 2. `--call` given, or the run's trigger has an entrypoint: a call of that function with the args,
    `--args` or the trigger's, in `python -m irimi.sdk.replay_child`, under irimi's own Python or
-   `--python`'s (#162). Args the trigger did not record replayably are refused
+   `--python`'s. Args the trigger did not record replayably are refused
    (`not_replayable`).
 3. A process run (`irimi shadow -- <cmd>`): its recorded argv, run again.
 
@@ -21,16 +21,16 @@ WHAT IT SAYS (`Outcome.lines`): which run was replayed as which; how the agent e
 printed and never deciding the exit, or the call it could not make (`replay_child.CallOutcome`),
 which makes the replay one that could not run; where the replay diverged; how many of the agent's
 calls the recording answered and how many it missed; then the body of `irimi compare` between the
-two runs (#79), whose exit code is the replay's. A divergence is the first of the replayed run's
+two runs, whose exit code is the replay's. A divergence is the first of the replayed run's
 events, in the order stored (`seq`, which the store numbers from 1 with no gap), that the recording
 did not answer: an exchange the agent sent flagged `replay-miss` (a precondition read irimi issued
-never is), or a read tool that ran for real (#83). A write tool's stand-in runs in a replay as it
-does under shadow, and is neither (#83). It is not `recording.Recording.diverged`, the engine's
-state after a missed write, which a missed llm call never sets (#82).
+never is), or a read tool that ran for real. A write tool's stand-in runs in a replay as it
+does under shadow, and is neither. It is not `recording.Recording.diverged`, the engine's
+state after a missed write, which a missed llm call never sets.
 
 A replay that missed nothing says so only when it made every call the recording holds; one that
 made fewer, an agent that stopped early, says how many it never made. A call recorded within a
-read tool's span is that tool's body's (`recording.made_within`, #83), which a replay answering the
+read tool's span is that tool's body's (`recording.made_within`), which a replay answering the
 tool never makes: it is the tool's, and not counted. A run the store dropped events of is never
 called the same: what it lacks is not compared.
 """
@@ -97,7 +97,7 @@ def plan(
                 "irimi's own child when it is called; start the agent by its module name, or "
                 "pass --call or -- CMD"
             )
-        # A process run's args are its argv, which no function takes (#84).
+        # A process run's args are its argv, which no function takes.
         if args is None and call is not None and _argv(source) is not None:
             raise Refused(
                 f"run {source.run_id} is a process run, whose args are its argv; pass --args "
@@ -116,7 +116,7 @@ def plan(
             raise Refused("--args holds a value's description, not the value")
         # The run is named after the function it calls, by its qualname, as `@sdk.trigger` names
         # one; the recorded entrypoint called again keeps the recorded name, which `name=` may
-        # have given (#84).
+        # have given.
         if trigger is not None and entrypoint == trigger.entrypoint:
             name = trigger.name
         else:
@@ -134,7 +134,7 @@ def not_replayable(trigger: Trigger | None) -> str | None:
     """Why a trigger's recorded args cannot be given to its function again, or None when they can:
     no trigger at all; args capture said were not replayable (a value stored by its description, a
     call that did not bind, a class `revive` could not find); args the store could not redact,
-    stored as `<redaction-failed>` with `replayable` still true (#70); or args that are not an
+    stored as `<redaction-failed>` with `replayable` still true; or args that are not an
     object of parameters, as `sdk.run(trigger=...)` may record."""
     if trigger is None:
         return "the run has no trigger"
@@ -152,7 +152,7 @@ def not_replayable(trigger: Trigger | None) -> str | None:
 def _argv(source: RunRecord) -> tuple[str, ...] | None:
     """The command line a process run recorded (`runner.process_run`), or None. A replay's run is
     a process run too, but one that keeps the trigger it called, whose entrypoint says its args
-    are a function's, even one with a parameter named `argv` (#84)."""
+    are a function's, even one with a parameter named `argv`."""
     trigger = source.trigger
     if source.attribution != "process" or trigger is None or trigger.entrypoint is not None:
         return None
@@ -186,7 +186,7 @@ class Outcome:
     missed: int  # and those it did not
     # How many of the recording's calls the replay never made: those of the kinds a replay looks
     # up (`_looked_up`), less those it answered, and less those the replay made that no policy
-    # was asked of (a write refused for its cut body before any was, #94).
+    # was asked of (a write refused for its cut body before any policy saw it).
     never_made: int
     comparison: compare.Comparison
 
@@ -217,7 +217,7 @@ class Outcome:
         if self.ended.stopped is not None:
             lines.append("  stopped: irimi replay was interrupted before the agent ended")
         # Only of a trigger the source recorded: a run with none, replayed by its command, records
-        # that command line as its trigger, and was given no args (#84).
+        # that command line as its trigger, and was given no args.
         if self.source.trigger is not None and compare.args_differ(self.source, self.replayed):
             lines.append(f"  {compare.ARGS_DIFFER}")
         lines.append(f"  {self._diverged()}")
@@ -299,8 +299,7 @@ def outcome(
 
 def _looked_up(event: object) -> bool:
     """Whether a replay asks the recording for `event`'s kind of call: an exchange the agent sent,
-    but telemetry and a delegated answer, which a replay never looks up, and a read tool (#82,
-    #83)."""
+    but telemetry and a delegated answer, which a replay never looks up, and a read tool."""
     if isinstance(event, Exchange):
         return (
             event.issued_by == "agent"
@@ -312,7 +311,7 @@ def _looked_up(event: object) -> bool:
 
 def _in_a_tool(event: object, tools: list[ToolCall]) -> bool:
     """Whether `event` was recorded within one of the read `tools`' spans, its body's: an exchange,
-    or a read tool its body called (#83)."""
+    or a read tool its body called."""
     if isinstance(event, Exchange):
         return any(made_within(event.started_at, event.ended_at, tool) for tool in tools)
     if not isinstance(event, ToolCall):

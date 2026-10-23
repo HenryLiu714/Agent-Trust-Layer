@@ -1,21 +1,7 @@
 {
-  "src/irimi/__main__.py": {
-    "issue_ref": 1
-  },
   "src/irimi/bodies.py": {
     "issue_possessive": 1,
     "issue_ref": 9
-  },
-  "src/irimi/cli.py": {
-    "issue_possessive": 1,
-    "issue_ref": 83,
-    "phase": 2,
-    "since_issue": 1
-  },
-  "src/irimi/compare.py": {
-    "decision_code": 1,
-    "design_ref": 1,
-    "issue_ref": 20
   },
   "src/irimi/control.py": {
     "caps_run": 3,
@@ -80,9 +66,6 @@
     "section_sign": 1,
     "since_issue": 2
   },
-  "src/irimi/paths.py": {
-    "issue_ref": 11
-  },
   "src/irimi/pipeline.py": {
     "caps_run": 2,
     "decision_code": 1,
@@ -116,8 +99,7 @@
     "section_sign": 2
   },
   "src/irimi/replay.py": {
-    "caps_run": 1,
-    "issue_ref": 16
+    "caps_run": 1
   },
   "src/irimi/report.py": {
     "decision_code": 1,
@@ -125,9 +107,6 @@
     "issue_possessive": 3,
     "issue_ref": 95,
     "section_sign": 1
-  },
-  "src/irimi/runner.py": {
-    "issue_ref": 18
   },
   "src/irimi/sdk/__init__.py": {
     "caps_run": 2,

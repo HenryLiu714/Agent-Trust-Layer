@@ -26,13 +26,7 @@ from irimi.paths import (
 from irimi.store import TraceStore
 from irimi.trace import SCHEMA_VERSION, ErrorInfo, JSONValue, RunRecord, Trigger
 
-# The variables issue #3 specifies, plus `IRIMI_CONTROL` from #73 and, in a replay only,
-# `IRIMI_REPLAY_RUN` from #83 and, for a replay that calls a trigger, `IRIMI_REPLAY_CALL`,
-# `IRIMI_REPLAY_ARGS_FILE` and `IRIMI_REPLAY_OUTCOME_FILE` from #84. Nothing is added to this list
-# without a new issue. The `IRIMI_*` names are declared in `paths`, where the SDK can import them,
-# and imported above, so `runner.RUN_ENV` still names them. `IRIMI_AGENT_VERSION` is there too
-# (`paths.AGENT_VERSION_ENV`): the process run records it (#70) and the SDK's runs do (#74). So
-# are the four proxy variables (`paths.PROXY_ENVS`), which the SDK reads to find irimi (#75).
+# Hosts the child reaches directly, bypassing the proxy.
 NO_PROXY_VALUE = "localhost,127.0.0.1"
 
 READY_TIMEOUT_S = 30.0
@@ -42,7 +36,7 @@ _CALL_ENVS = (REPLAY_CALL_ENV, REPLAY_ARGS_FILE_ENV, REPLAY_OUTCOME_FILE_ENV)
 
 
 class ChildCall(NamedTuple):
-    """The trigger a replay's child calls (#84): its `module:qualname`, the file holding its
+    """The trigger a replay's child calls: its `module:qualname`, the file holding its
     captured args, and the file the child writes how the call ended to."""
 
     entrypoint: str
@@ -60,25 +54,39 @@ def child_env(
     replaying: bool = False,
     call: ChildCall | None = None,
 ) -> dict[str, str]:
-    """`base` plus the proxy and CA variables. `base` is never mutated.
+    """`base` plus the variables that route the child through irimi. `base` is never mutated.
 
-    `replaying` says the engine answers from a stored run (#83): the child is told so in
+        HTTP(S)_PROXY, http(s)_proxy  the listener (`paths.PROXY_ENVS`)
+        NO_PROXY, no_proxy            `NO_PROXY_VALUE`
+        SSL_CERT_FILE and the like    irimi's CA certificate
+        NODE_USE_ENV_PROXY=1          makes Node honour the proxy variables
+        IRIMI_ENGINE_ACTIVE=1         turns the SDK on
+        IRIMI_RUN                     the run id
+        IRIMI_CONTROL                 the control endpoint's base URL
+        IRIMI_REPLAY_RUN              set only for a replay; removed otherwise
+        IRIMI_REPLAY_CALL,            set only for a replay that calls a trigger: its entrypoint,
+        IRIMI_REPLAY_ARGS_FILE,       its args file and the file the child writes its outcome
+        IRIMI_REPLAY_OUTCOME_FILE     to; removed otherwise
+
+    The `IRIMI_*` names are declared in `paths`, where the SDK can import them.
+    `IRIMI_AGENT_VERSION` is read from the environment the child inherits, not set here.
+
+    `replaying` says the engine answers from a stored run: the child is told so in
     `IRIMI_REPLAY_RUN`, naming `run_id`. Otherwise any `IRIMI_REPLAY_RUN` in `base` is dropped, so a
     shell that exported one cannot make a shadow run's SDK ask for recorded results.
 
-    `call` is the trigger a replay's child calls (#84), for `irimi.sdk.replay_child`; without it
+    `call` is the trigger a replay's child calls, for `irimi.sdk.replay_child`; without it
     its three variables are dropped, as `IRIMI_REPLAY_RUN` is.
 
     `ca_cert` must be the CA certificate (`~/.irimi/ca/ca.pem`), never the mitmproxy bundle,
-    which also contains the private key. An IPv6 listen host is bracketed, as a URL spells it
-    (#77).
+    which also contains the private key. An IPv6 listen host is bracketed, as a URL spells it.
     """
     proxy = f"http://{netaddr.authority(host, port)}"
     cert = str(ca_cert)
     env = dict(base)
     env.update(
         {
-            # The SDK labels a run's requests only on a connection to what these name (#75).
+            # The SDK labels a run's requests only on a connection to what these name.
             **dict.fromkeys(PROXY_ENVS, proxy),
             "NO_PROXY": NO_PROXY_VALUE,
             "no_proxy": NO_PROXY_VALUE,
@@ -89,7 +97,7 @@ def child_env(
             "NODE_USE_ENV_PROXY": "1",
             ENGINE_ACTIVE_ENV: "1",
             RUN_ENV: run_id,
-            # The control endpoint on this same listener (#73), with no trailing slash, so the
+            # The control endpoint on this same listener, with no trailing slash, so the
             # SDK appends `/runs/<id>/start` and friends.
             CONTROL_ENV: proxy + CONTROL_PREFIX.rstrip("/"),
         }
@@ -116,10 +124,10 @@ def process_run(
     started_at: float,
     trigger: Trigger | None = None,
 ) -> RunRecord:
-    """The record `irimi shadow` stores for its child before spawning it (#70): one process tree
+    """The record `irimi shadow` stores for its child before spawning it: one process tree
     is one run, and its trigger is the command line, which a replay can run again. `irimi replay`
-    gives the trigger it replays instead (#84), and its store makes the record a replay's
-    (`trace.mode_for`, #82)."""
+    gives the trigger it replays instead, and its store makes the record a replay's
+    (`trace.mode_for`)."""
     argv: list[JSONValue] = list(cmd)
     if trigger is None:
         trigger = Trigger(name=cmd[0], entrypoint=None, args={"argv": argv}, replayable=True)
@@ -144,7 +152,7 @@ def end_process_run(
     store: TraceStore, run_id: str, code: int, ended_at: float, error: ErrorInfo | None = None
 ) -> None:
     """Close the process run with the child's exit code: `ok` for 0, `error` for anything else,
-    a signal included (#70). `error` is what a replay's child said its call raised (#84), which the
+    a signal included. `error` is what a replay's child said its call raised, which the
     run records in place of its exit."""
     if code == 0:
         store.end_run(run_id, ended_at, "ok", exit_code=code)

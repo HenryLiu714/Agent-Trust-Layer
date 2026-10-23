@@ -29,12 +29,12 @@ if TYPE_CHECKING:  # the quoted annotations below; no runtime import
 SIGINT_EXIT_CODE = 130  # 128 + SIGINT, the shell convention for a Ctrl-C'd command
 SIGTERM_EXIT_CODE = 143  # 128 + SIGTERM: `irimi shadow` terminated before its command started
 # 128 + SIGPIPE, the shell's status for a command whose reader went away (`irimi runs show X |
-# head -1`), which irimi ends quietly with in place of a traceback and Python's 120 (#142).
+# head -1`), which irimi ends quietly with in place of a traceback and Python's 120.
 BROKEN_PIPE_EXIT_CODE = 141
-DEFAULT_RUNS_LIMIT = 20  # `irimi runs list` without --limit (#72)
+DEFAULT_RUNS_LIMIT = 20  # `irimi runs list` without --limit
 
-# Since #76 a non-HTTP write the agent labels with `@sdk.tool` runs only its stand-in under irimi,
-# so the notice says the rest happen for real, not that all of them do.
+# A non-HTTP write the agent labels with `@sdk.tool` runs only its stand-in under irimi, so the
+# notice says the rest happen for real, not that all of them do.
 NON_HTTP_NOTICE = (
     "Note: irimi only sees HTTP(S). Side effects that are not HTTP "
     "(database writes, files, gRPC, WebSockets) are not virtualized and happen for real, "
@@ -63,9 +63,8 @@ def _target_arg(value: str) -> tuple[str, str, str]:
     validated by the map loader, which owns every target rule.
 
     A trailing bare slash is the service too: `api.stripe.com/=<url>` is how a reader used to
-    `proxy_pass` spells "the whole service", and it used to be taken as the route path `/`, which
-    no map claims - so a spelling that means the right thing failed with "no route matches '/'"
-    (#32).
+    `proxy_pass` spells "the whole service", and taken as the route path `/` it would match no
+    map's route.
     """
     spec, sep, url = value.partition("=")
     host, slash, path = spec.strip().partition("/")
@@ -147,7 +146,7 @@ def _add_store_arg(parser: argparse.ArgumentParser, what: str = "the trace store
 
 
 def _call_arg(value: str) -> str:
-    """argparse type for --call: a function's `module:qualname`, as a trigger records it (#84)."""
+    """argparse type for --call: a function's `module:qualname`, as a trigger records it."""
     module, sep, qualname = value.partition(":")
     if not sep or not module.strip() or not qualname.strip():
         raise argparse.ArgumentTypeError(f"{value!r}: give the function as module:qualname")
@@ -156,7 +155,7 @@ def _call_arg(value: str) -> str:
 
 def _args_arg(value: str) -> "dict[str, JSONValue]":
     """argparse type for --args: a JSON object, `{parameter: captured value}`, the shape a trigger
-    records its args in (#74, #84)."""
+    records its args in."""
     import json
 
     try:
@@ -164,7 +163,7 @@ def _args_arg(value: str) -> "dict[str, JSONValue]":
     except ValueError as exc:
         raise argparse.ArgumentTypeError(f"--args is not JSON: {exc}") from None
     except RecursionError:
-        # Which argparse lets through, a traceback where a usage error belongs (#84).
+        # argparse would let this through as a traceback where a usage error belongs.
         raise argparse.ArgumentTypeError("--args is nested deeper than it can be read") from None
     if not isinstance(parsed, dict):
         raise argparse.ArgumentTypeError("--args is a JSON object of {parameter: value}")
@@ -172,7 +171,7 @@ def _args_arg(value: str) -> "dict[str, JSONValue]":
 
 
 def _args_file_arg(value: str) -> "dict[str, JSONValue]":
-    """argparse type for --args-file: `--args`, read from the file `value` names (#84)."""
+    """argparse type for --args-file: `--args`, read from the file `value` names."""
     try:
         text = Path(value).read_text(encoding="utf-8")
     except OSError as exc:
@@ -207,7 +206,7 @@ def _engine_config(
     replay_of: str | None = None,
 ) -> "EngineConfig":
     """The EngineConfig `serve`, `shadow` and `replay` share. `replay_of` is the stored run a
-    replay answers from (#82, #84).
+    replay answers from.
 
     `maps=index` is what makes the classifier use the maps: without it the engine falls back to the
     verb rule and every mapped write on a POST-only service reads as `unknown`.
@@ -247,7 +246,7 @@ def _load_maps(args: argparse.Namespace | None = None) -> "MapIndex | None":
         # addon repeats this per request against the port it actually bound, which is the
         # authoritative check; this one is here so `--port 4000` with a target on 4000 fails
         # before anything starts rather than on the first request. A `--listen-host` address is
-        # the listener too (#77).
+        # the listener too.
         port = getattr(args, "port", 0) or 0
         listen_host = getattr(args, "listen_host", "") or ""
         if port:
@@ -266,7 +265,7 @@ def _escape_hatch_warning(args: argparse.Namespace) -> str | None:
 
     Targets are loopback-only so that a delegated request cannot leave the machine; this flag is
     the deliberate way out of that, so it says so out loud. The delegated-service banner and the
-    summary's own accounting are issue #20, not this one.
+    summary's accounting of delegated writes are printed elsewhere.
     """
     hosts = getattr(args, "allow_target_host", None)
     if not hosts:
@@ -290,16 +289,11 @@ def print_startup(
 ) -> None:
     """Everything a run says before it starts: the escape-hatch warning, the banner, and one line
     per delegated service. `command` is "shadow", "replay" or "shadow --serve", whose `run_id` is
-    None. `replay_of` is the run a replay answers from (#84).
+    None. `replay_of` is the run a replay answers from.
 
-    Every line is flushed. Python block-buffers stdout when it is a pipe rather than a terminal,
-    and `serve` is a foreground process that may then print nothing for minutes, so
-    `irimi serve > log`, `irimi serve | tee` and any supervisor capturing the process showed none
-    of this until an exchange came along and flushed it - and a `serve` nobody talks to showed
-    nothing at all. What was withheld is the port it bound, the CA path a client needs, the
-    proxy-only notice, and the red `NOT loopback` line saying the agent's requests are leaving
-    this machine. `shadow` flushed already; `serve` did not, and the two are one function now so
-    they cannot drift again.
+    Every line is flushed. Under a pipe or a supervisor stdout is block-buffered, and `serve` may
+    print nothing else for minutes, so without the flush the port, the CA path a client needs and
+    the `NOT loopback` line would not appear until the first request.
     """
     from irimi import report  # deferred like every other heavy import in this module
 
@@ -329,8 +323,7 @@ def cmd_maps_list(args: argparse.Namespace) -> int:
     service_width = max((len(sm.service) for _, sm in rows), default=0)
     routes = sum(len(sm.routes) for sm in index.services)
     # Hosts and patterns are counted separately: only the exact hosts are the reverse door's
-    # allow-list, and one number covering both told an operator a pattern host was reachable
-    # through the door when it 403s (#29).
+    # allow-list, and a pattern host is refused there with a 403.
     print(
         f"irimi maps · {len(index.services)} service(s) · {len(hosts)} host(s) · "
         f"{len(patterns)} pattern(s) · {routes} route(s)"
@@ -341,10 +334,9 @@ def cmd_maps_list(args: argparse.Namespace) -> int:
             f"  {name:<{width}}  {sm.service:<{service_width}}  {len(sm.routes):>3} routes  "
             f"target: {sm.target}{reads}"
         )
-        # The service target alone printed `target: self` for a service whose *routes* carry
-        # targets, so a partly delegated service looked untouched in the listing and contradicted
-        # the banner printed two seconds later (#20). Route targets get a line of their own under
-        # the host, because the column above is the service's answer and this is the route's.
+        # A service whose *routes* carry targets still says `target: self` in the column above,
+        # so each route target gets a line of its own under the host: the column is the
+        # service's answer and this is the route's.
         for route in sm.routes:
             if route.target != servicemap.SELF_TARGET:
                 print(f"  {'':<{width}}  route {route.method} {route.path} → {route.target}")
@@ -390,9 +382,9 @@ class _Run:
     run_id: str
     config: "EngineConfig"
     store: "TraceStore"
-    # The store's `serve.lock`, held, in serve mode only (#77).
+    # The store's `serve.lock`, held, in serve mode only.
     lock: "ServeLock | None" = None
-    # The run `config.replay_of` names, read back to answer from, in a replay only (#82, #84).
+    # The run `config.replay_of` names, read back to answer from, in a replay only.
     recording: "Recording | None" = None
 
 
@@ -407,13 +399,13 @@ def _prepare_run(
     on_run_ended: _OnRunEnded | None = None,
     source: "StoredRun | None" = None,
 ) -> _Run | None:
-    """Load the maps, find the CA, key the recording of `source`, the run a replay answers from
-    (#82, #84), and open the trace store, or print why not and return None.
+    """Load the maps, find the CA, key the recording of `source`, the run a replay answers from,
+    and open the trace store, or print why not and return None.
 
     Fail closed: without all of them, no engine starts and no child is spawned. The store is opened
     last, so a run refused for its maps, its CA or its key leaves nothing on disk.
 
-    In serve mode (#77) the engine's own run is `trace.UNATTRIBUTED`, so a request no `Irimi-Run`
+    In serve mode the engine's own run is `trace.UNATTRIBUTED`, so a request no `Irimi-Run`
     names is stored there and builds no run, and the store's `serve.lock` is taken as soon as the
     store is open: a second serve on one root is refused before its engine starts, and writes
     nothing.
@@ -428,9 +420,9 @@ def _prepare_run(
         print(f"error: no CA at {p.key.parent}. Run `irimi init` first.", file=sys.stderr)
         return None
     # 16 hex characters: the run id is a directory name in the store, and must not collide with
-    # another run's across months of them (#70).
+    # another run's across months of them.
     # A replay is one run against one engine, whose write log and recording are the engine's;
-    # serve mode is many runs at once, and `irimi serve` has no run to replay (#82, #84).
+    # serve mode is many runs at once, and `irimi serve` has no run to replay.
     assert not (serve and source is not None)
     run_id = trace.UNATTRIBUTED if serve else secrets.token_hex(8)
     replay_of = None if source is None else source.record.run_id
@@ -442,7 +434,7 @@ def _prepare_run(
     if source is not None:
         from irimi.recording import Recording
 
-        # Keyed with this install's redaction key, which made the recording's placeholders (#82).
+        # Keyed with this install's redaction key, which made the recording's placeholders.
         recording = Recording.from_events(source.events, key, config.maps)
     ended = None if on_run_ended is None else (lambda run_id: on_run_ended(index, run_id))
     store = _open_store(args, key, ended, config.replay_of)
@@ -456,7 +448,7 @@ def _prepare_run(
 
 
 def _redaction_key() -> bytes | None:
-    """This install's redaction key (#69), loaded once for the store that redacts with it and the
+    """This install's redaction key, loaded once for the store that redacts with it and the
     recording a replay matches against it, or None after printing why it cannot be used."""
     from irimi import redact
 
@@ -469,7 +461,7 @@ def _redaction_key() -> bytes | None:
 
 def _load_source(args: argparse.Namespace) -> "StoredRun":
     """The run `irimi replay` answers from, in the store under `--store`, read whole before
-    anything starts, or `replay.Refused` saying why it cannot be (#82, #84)."""
+    anything starts, or `replay.Refused` saying why it cannot be."""
     from irimi import trace
     from irimi.replay import Refused
     from irimi.store import RunNotFound, StoreReader
@@ -494,9 +486,9 @@ def _open_store(
     replay_of: str | None = None,
 ) -> "TraceStore | None":
     """The trace store under `--store`, default `$IRIMI_HOME/store`, redacting with `key`, or None
-    after printing why its directory cannot be used (#69, #70): a run that would drop every event
+    after printing why its directory cannot be used: a run that would drop every event
     unseen must not start. `replay_of` is the run a replay answers from, which every header run
-    the store makes names (#82)."""
+    the store makes names."""
     from irimi.store import DirectoryStore
 
     try:
@@ -508,7 +500,7 @@ def _open_store(
 
 def _hold_serve_lock(args: argparse.Namespace) -> "ServeLock | None":
     """The store's `serve.lock`, held, or None after printing why not: another serve writes this
-    store, or the lock file cannot be opened (#77)."""
+    store, or the lock file cannot be opened."""
     from irimi.store import ServeLock
 
     try:
@@ -521,11 +513,7 @@ def _hold_serve_lock(args: argparse.Namespace) -> "ServeLock | None":
 def _build_engine(
     run: _Run, on_exchange: "OnExchange", on_tool_call: "OnToolCall | None" = None
 ) -> "Engine":
-    """The composition root: the one place the concrete engine, policy, store and overlay meet.
-
-    Phase 2 swapped `NoOverlay` for the real overlay here in #43, and Phase 3 swapped `NullStore`
-    for the directory store `_prepare_run` opens (#70).
-    """
+    """Wire the engine, answer policy, overlay and store for one run."""
     from irimi.engine.mitm import MitmEngine
     from irimi.overlay import ServiceOverlay
     from irimi.policy import AnswerPolicy, ReplayPolicy, ShadowPolicy
@@ -533,15 +521,15 @@ def _build_engine(
 
     # The overlay is built with the same maps the engine classifies against, because it has to
     # ask the same question of a read - which service, which operation - and there is one place
-    # that answers it (#43).
+    # that answers it.
     overlay = ServiceOverlay(run.config.maps)
     policy: AnswerPolicy
     if run.recording is None:
-        # The reader is the real upstream, chosen here and nowhere else (#45).
+        # The reader is the real upstream, chosen here and nowhere else.
         policy = ShadowPolicy(reader=UpstreamReader(), maps=run.config.maps)
     else:
         # A replay's reader is the recording, which the policy builds itself: it never reads live
-        # state for a precondition (#82).
+        # state for a precondition.
         policy = ReplayPolicy(run.recording, maps=run.config.maps)
     return MitmEngine(
         run.config,
@@ -553,16 +541,16 @@ def _build_engine(
     )
 
 
-# The signals that stop a serve (#77): Ctrl-C, and what a container runtime or supervisor sends.
+# The signals that stop a serve: Ctrl-C, and what a container runtime or supervisor sends.
 SERVE_STOP_SIGNALS = ("SIGINT", "SIGTERM")
-# How often serve's main thread looks for a signal or a stop (#77). A handler only records the
+# How often serve's main thread looks for a signal or a stop. A handler only records the
 # signal, and the main thread acts on it within this long.
 SERVE_POLL_S = 0.1
 
 
 def cmd_serve(args: argparse.Namespace, stop: threading.Event | None = None) -> int:
     """`irimi shadow --serve`, and `irimi serve`, its alias: the engine as a sidecar, with no child
-    process, until SIGINT or SIGTERM, or until `stop` is set (#77).
+    process, until SIGINT or SIGTERM, or until `stop` is set.
 
     Runs are named by their requests: each SDK run's `Irimi-Run`, and `unattributed` for a request
     that names none. Each exchange and tool call prints its line as it happens, and each run its
@@ -584,7 +572,7 @@ def cmd_serve(args: argparse.Namespace, stop: threading.Event | None = None) -> 
 
 
 class _ServeOutput:
-    """Everything serve prints while it serves (#77): a line per exchange and per tool call as
+    """Everything serve prints while it serves: a line per exchange and per tool call as
     each happens, from the engine's thread, and each run's summary once its end is on disk, from
     the store's writer thread. One lock covers every line, so two runs' summaries never
     interleave, nor does an exchange's line split one."""
@@ -605,7 +593,7 @@ class _ServeOutput:
 
     def tool_call(self, call: "ToolCall") -> None:
         """The tool's name and what it raised, never its args or result, which are stored
-        redacted and would print raw here (#76)."""
+        redacted and would print raw here."""
         from irimi import report
 
         self.say([report.tool_call_line(call)])
@@ -679,7 +667,7 @@ def _serve(args: argparse.Namespace, stop: threading.Event, signalled: list[int]
 def _watch_engine(thread: threading.Thread, stop: threading.Event, died: threading.Event) -> None:
     """Stop serve when the engine's thread ends, and say whether it ended first. An engine that
     stops on its own ends serve as a failure: a sidecar whose proxy is gone must not look alive
-    to its supervisor (#77)."""
+    to its supervisor."""
     thread.join()
     if not stop.is_set():
         died.set()
@@ -691,7 +679,7 @@ def _stopping_on_signals() -> Iterator[list[int]]:
     """For the length of the block, SIGINT and SIGTERM append their number to the list it yields
     and do nothing else: no KeyboardInterrupt to unwind through the engine thread's join, and a
     second signal while the store closes is ignored rather than cutting its last writes short. A
-    container runtime sends SIGTERM and waits, which is what serve exists for (#77).
+    container runtime sends SIGTERM and waits, which is what serve exists for.
 
     A handler takes no lock. It runs on the main thread between two bytecodes, which may be
     inside `Event.wait` holding the event's own lock, so a handler calling `Event.set` there
@@ -730,7 +718,7 @@ def cmd_shadow(args: argparse.Namespace, stop: threading.Event | None = None) ->
         cmd = cmd[1:]
     if args.serve:
         # Serve mode launches nothing, so a command with it is a mistake in the invocation, and is
-        # answered as argparse answers one: usage and exit 2 (#77). `stop` is serve's (#77).
+        # answered as argparse answers one: usage and exit 2. `stop` is serve's.
         if cmd:
             args.parser.error("--serve runs no command: drop the `-- <command>`, or the --serve")
         return cmd_serve(args, stop)
@@ -742,11 +730,11 @@ def cmd_shadow(args: argparse.Namespace, stop: threading.Event | None = None) ->
 
 
 class _Child:
-    """The command `irimi shadow` runs, as SIGTERM to irimi sees it (#77).
+    """The command `irimi shadow` runs, as SIGTERM to irimi sees it.
 
     A supervisor or a container runtime stops `irimi shadow` with SIGTERM, which reaches irimi
-    alone, not its command. Its default action ended irimi at once, with the command still running
-    and its proxy gone, the run never ended and the store never closed (#70's note). So SIGTERM is
+    alone, not its command. Its default action would end irimi at once, with the command still
+    running and its proxy gone, the run never ended and the store never closed. So SIGTERM is
     passed to the command instead, and the command's exit ends the run as any exit does. One that
     arrives before the command exists is held, and the command is then never started.
 
@@ -756,7 +744,7 @@ class _Child:
     def __init__(self) -> None:
         self.terminated = False
         # A Ctrl-C reached irimi while the command ran (`_wait_for_child`), which a replay that it
-        # stopped says (#84).
+        # stopped says.
         self.interrupted = False
         self._proc: subprocess.Popen[bytes] | None = None
 
@@ -784,7 +772,7 @@ class _Child:
 
 @contextlib.contextmanager
 def _passing_sigterm_to_child() -> Iterator[_Child]:
-    """For the length of the block, SIGTERM is `_Child.on_sigterm` (#77), on the main thread only,
+    """For the length of the block, SIGTERM is `_Child.on_sigterm`, on the main thread only,
     where Python allows a handler; a SIGTERM ignored when `irimi shadow` started stays ignored, as
     under serve. The handler found is put back on the way out. SIGINT is untouched: Ctrl-C reaches
     the whole foreground process group, the command included, and `_wait_for_child` handles it."""
@@ -828,7 +816,7 @@ def _shadow(args: argparse.Namespace, cmd: list[str], child: _Child) -> int:
 
 @dataclass(frozen=True)
 class _Launch:
-    """What a run starts under its engine (#84): the banner's command, `shadow` or `replay`; the
+    """What a run starts under its engine: the banner's command, `shadow` or `replay`; the
     child's argv; the run's record, stamped with its start as the child is spawned; and the
     trigger a replay's child calls (`runner.child_env`)."""
 
@@ -844,7 +832,7 @@ class _Ran:
     call the engine reported meanwhile. `summarize` is False when the child never ran and irimi
     printed why, the code then irimi's own (1, 126, 127, 130, 143), and `stored` whether the run's
     record was stored first. `stopped` is the exit code of a SIGINT or SIGTERM that reached irimi
-    while the child ran, and `call` how a replay's call ended, as its child wrote it (#84)."""
+    while the child ran, and `call` how a replay's call ended, as its child wrote it."""
 
     code: int
     elapsed: float = 0.0
@@ -857,8 +845,8 @@ class _Ran:
 
 
 def _under_the_engine(args: argparse.Namespace, run: _Run, child: _Child, launch: _Launch) -> _Ran:
-    """`launch` run as `run`'s child, under its engine, as `irimi shadow` and `irimi replay` run one
-    (#84): the engine started, the banner, the run's record stored before the child exists, the
+    """`launch` run as `run`'s child, under its engine, as `irimi shadow` and `irimi replay` run
+    one: the engine started, the banner, the run's record stored before the child exists, the
     child waited for, the run ended, the engine stopped and the store closed. A replay's run ends
     with what its call raised, as `replay_child` wrote it, and otherwise with the exit code."""
     import os
@@ -877,7 +865,7 @@ def _under_the_engine(args: argparse.Namespace, run: _Run, child: _Child, launch
         print(report.exchange_line(ex), flush=True)
 
     def on_tool_call(call: "ToolCall") -> None:
-        # On the proxy's event loop, after the store took the call (#73): it only appends and
+        # On the proxy's event loop, after the store took the call: it only appends and
         # prints. The line names the tool and what it raised, never its args or result, which
         # are stored redacted and would be printed raw here.
         ran.tool_calls.append(call)
@@ -914,12 +902,12 @@ def _under_the_engine(args: argparse.Namespace, run: _Run, child: _Child, launch
             replaying=replay_of is not None,
             call=launch.call,
         )
-        if child.terminated:  # SIGTERM while irimi started: the command is never run (#77)
+        if child.terminated:  # SIGTERM while irimi started: the command is never run
             print("error: terminated before the command started.", file=sys.stderr)
             ran.code, ran.summarize = SIGTERM_EXIT_CODE, False
             return ran
         # The process run is stored before the child exists, so every exchange it makes lands in
-        # a run that already has its record (#70).
+        # a run that already has its record.
         run.store.start_run(replace(launch.record, started_at=time.time()))
         ran.stored = True
         try:
@@ -945,7 +933,7 @@ def _under_the_engine(args: argparse.Namespace, run: _Run, child: _Child, launch
     finally:
         # The run ends before the engine stops, because stopping the engine closes the store.
         # An exchange that finishes after this line is still recorded: a late event is not an
-        # error (#70).
+        # error.
         if ran.stored:
             if launch.call is not None:
                 ran.call = CallOutcome.read(launch.call.outcome_file)
@@ -962,7 +950,7 @@ def _under_the_engine(args: argparse.Namespace, run: _Run, child: _Child, launch
 
 def cmd_replay(args: argparse.Namespace) -> int:
     """`irimi replay RUN_ID`: a stored run's trigger run again through irimi, answered from the
-    run's recording, and what the agent did differently (#84). What it runs is `replay.plan`'s
+    run's recording, and what the agent did differently. What it runs is `replay.plan`'s
     to say, and what it prints `replay.Outcome`'s. Exits as `irimi compare` does: 0 when the
     replay made the writes its recording did, 1 when it did not, 2 for a replay that could not
     run, or whose run could not be read back, and 130 or 143 for one SIGINT or SIGTERM stopped.
@@ -1011,7 +999,7 @@ def _replay(args: argparse.Namespace, child: _Child, said: list[str]) -> "Replay
         print(f"error: {exc}", file=sys.stderr)
         result = replay.refused(args.run_id, said)
         # A SIGTERM that came while `--python` was asked stopped the replay, which exits as one
-        # stopped before its command started, whatever the answer (#162).
+        # stopped before its command started, whatever the answer.
         return replace(result, exit_code=SIGTERM_EXIT_CODE) if child.terminated else result
     if source.record.outcome is None:
         print(
@@ -1035,8 +1023,8 @@ def _replay(args: argparse.Namespace, child: _Child, said: list[str]) -> "Replay
         record = runner.process_run(run.run_id, argv, agent_version, 0.0, plan.trigger)
         ran = _under_the_engine(args, run, child, _Launch("replay", argv, record, call))
     if args.python is None and _no_such_module(ran.call):
-        # irimi's own Python is not the agent's when irimi is installed apart from it, as a tool
-        # (#162): say which Python it was, and how to name the agent's.
+        # irimi's own Python is not the agent's when irimi is installed apart from it, as a tool:
+        # say which Python it was, and how to name the agent's.
         print(
             f"hint: the trigger was called under irimi's own Python, {sys.executable}, which may "
             "not have the agent's packages; name the agent's Python with --python PATH",
@@ -1053,11 +1041,11 @@ def _replay(args: argparse.Namespace, child: _Child, said: list[str]) -> "Replay
         return _replayed(args, source, run.run_id, ran, said)
     except KeyboardInterrupt:
         # Ctrl-C while irimi read the runs back or compared them: the replay's run is stored and
-        # ended, and its result names it (#84).
+        # ended, and its result names it.
         return _interrupted(args, said, run.run_id)
 
 
-# What `irimi replay --python` runs first, under that Python (#162): it imports irimi's replay
+# What `irimi replay --python` runs first, under that Python: it imports irimi's replay
 # child, which calls the trigger and writes how the call ended, and prints that irimi's version.
 # It imports irimi alone: the agent's code runs only in the child, under the replay's engine.
 _PYTHON_PROBE = "import irimi.sdk.replay_child, irimi; print(irimi.__version__)"
@@ -1065,7 +1053,7 @@ PYTHON_PROBE_TIMEOUT_S = 30.0
 
 
 def _replay_python(args: argparse.Namespace, plan: "Plan") -> str:
-    """The Python a replay's child calls its trigger under (#162): irimi's own, or `--python`, the
+    """The Python a replay's child calls its trigger under: irimi's own, or `--python`, the
     agent's, once it has run `_PYTHON_PROBE`. One that does not run, or cannot import irimi's
     replay child, is Refused before anything starts; one with another irimi than this is warned
     of, since that irimi makes the call. `--python` for a run replayed by its recorded command is
@@ -1085,7 +1073,7 @@ def _replay_python(args: argparse.Namespace, plan: "Plan") -> str:
     named = f"--python {report.printable(args.python)}"
     if os.path.isdir(args.python):
         # `--python .venv`, as uv's own `--python` takes it, is looked up on PATH, or cannot be
-        # executed: either error would hide that the directory is the trouble (#162).
+        # executed: either error would hide that the directory is the trouble.
         inside = report.printable(os.path.join(args.python, "bin", "python"))
         raise replay.Refused(f"{named} is a directory; name the Python in it, as --python {inside}")
     try:
@@ -1156,7 +1144,7 @@ def _replayed(
 
 def _interrupted(args: argparse.Namespace, said: list[str], run_id: str | None) -> "ReplayResult":
     """A replay Ctrl-C stopped while no agent ran, so none was waited on: exit 130, as `irimi
-    shadow` exits, its result naming the replay's run when one was stored (#84)."""
+    shadow` exits, its result naming the replay's run when one was stored."""
     from dataclasses import replace
 
     from irimi import replay
@@ -1167,13 +1155,13 @@ def _interrupted(args: argparse.Namespace, said: list[str], run_id: str | None) 
 
 def _replay_command(args: argparse.Namespace) -> list[str]:
     """`irimi replay`'s `-- CMD`. After `--` argparse takes every word as a positional, RUN_ID
-    first, so `irimi replay -- python agent.py` read as a replay of a run named `python` (#84).
+    first, so `irimi replay -- python agent.py` would read as a replay of a run named `python`.
     `-- RUN_ID` is how a run id that starts with `-` is given (`sdk.replay` gives every one so),
     and a command may follow it only after a second `--`. `args.argv` is what was typed.
 
     The command is read from what was typed, never from `args.cmd`: an older argparse, which
     Python 3.12's earlier releases ship, strips every `--` from it, the command's own as well,
-    where a newer one strips only the first (#84)."""
+    where a newer one strips only the first."""
     typed = list(args.argv or ())
     if "--" not in typed:
         return list(args.cmd)
@@ -1219,7 +1207,7 @@ class _Tee:
 @contextlib.contextmanager
 def _keeping_stderr() -> Iterator[list[str]]:
     """For the block, stderr as it is, and each line written to it kept in the list yielded: what
-    irimi said of why a replay could not run, which its result holds (#84). Python's own writes
+    irimi said of why a replay could not run, which its result holds. Python's own writes
     to stderr only, not a child's, which writes to the same file descriptor directly."""
     lines: list[str] = []
     with contextlib.redirect_stderr(_Tee(sys.stderr, lines)):  # type: ignore[type-var]
@@ -1231,7 +1219,7 @@ def _store_root(args: argparse.Namespace) -> Path:
 
 
 def cmd_runs_list(args: argparse.Namespace) -> int:
-    """`irimi runs list`: one line per stored run, newest first (#72)."""
+    """`irimi runs list`: one line per stored run, newest first."""
     from irimi import report
     from irimi.store import RunNotFound, StoreReader
     from irimi.trace import TraceFormatError
@@ -1248,9 +1236,9 @@ def cmd_runs_list(args: argparse.Namespace) -> int:
         return 0
     for record in records:
         # One damaged run is named and counted as `?`, never allowed to hide the others: the
-        # store's own rule for `list_runs` (#70).
+        # store's own rule for `list_runs`.
         # Counted, never read: no body is loaded, or a few runs of LLM streams cost hundreds of
-        # MB to print two numbers each (#72).
+        # MB to print two numbers each.
         try:
             events = reader.load_run(record.run_id, bodies=False).events
         except (TraceFormatError, OSError, RunNotFound) as exc:
@@ -1261,7 +1249,7 @@ def cmd_runs_list(args: argparse.Namespace) -> int:
 
 
 def cmd_runs_show(args: argparse.Namespace) -> int:
-    """`irimi runs show RUN_ID`: a stored run's header, every event, and its summary (#72)."""
+    """`irimi runs show RUN_ID`: a stored run's header, every event, and its summary."""
     from irimi import report
     from irimi.store import RunNotFound, StoreReader
     from irimi.trace import UNATTRIBUTED, TraceFormatError
@@ -1285,7 +1273,7 @@ def cmd_runs_show(args: argparse.Namespace) -> int:
 
 
 def cmd_compare(args: argparse.Namespace) -> int:
-    """`irimi compare RUN_A RUN_B`: two stored runs' writes side by side, and no verdict (#79).
+    """`irimi compare RUN_A RUN_B`: two stored runs' writes side by side, and no verdict.
     Exits as diff(1) does: 0 when every write is the same, 1 when any is not, 2 when a run cannot
     be read."""
     from irimi import compare
@@ -1313,10 +1301,10 @@ def cmd_compare(args: argparse.Namespace) -> int:
 
 def _maps_for_stored_runs() -> "MapIndex | None":
     """The maps `runs show` and `compare` render a stored run's write lines with, loaded as
-    `serve` and `shadow` load them (#72, #79).
+    `serve` and `shadow` load them.
 
     Only the `human:` templates are read from them, so maps that do not load cost the reader
-    those sentences and nothing else: the writes print as the requests they were (#72). Unlike
+    those sentences and nothing else: the writes print as the requests they were. Unlike
     `serve` and `shadow`, which must not start with half a policy, this carries on."""
     from irimi import servicemap
 
@@ -1328,7 +1316,7 @@ def _maps_for_stored_runs() -> "MapIndex | None":
 
 
 def _close_store(store: "TraceStore") -> None:
-    """Close the store `_prepare_run` opened, on every path out of `serve` and `shadow` (#70).
+    """Close the store `_prepare_run` opened, on every path out of `serve` and `shadow`.
 
     The engine closes it too, when it stops. This does not rely on that: an engine that never
     started, or whose thread outlived `handle.stop()`, has not, and a second close waits out the
@@ -1392,7 +1380,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.set_defaults(func=cmd_init)
 
     # `irimi serve` is `irimi shadow --serve` under a shorter name: the same function, flags and
-    # banner (#77).
+    # banner.
     serve = subparsers.add_parser(
         "serve",
         allow_abbrev=False,
@@ -1523,7 +1511,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """The `irimi` command. A reader of its output that goes away (`irimi runs show X | head -1`,
     or `2>&1 | head -1`, where the write that fails may be stderr's) ends it quietly with
-    BROKEN_PIPE_EXIT_CODE, wherever it was writing, `--help` included (#142). stdout and stderr
+    BROKEN_PIPE_EXIT_CODE, wherever it was writing, `--help` included. stdout and stderr
     are flushed here, not at exit, so a reader gone by the last write is caught too, and so is a
     warning the store's logger could not write, which the logger swallows and leaves buffered; a
     stream closed before irimi started is None, which `print` writes nothing to."""
@@ -1547,13 +1535,13 @@ def _main(argv: list[str] | None) -> int:
     # `cmd` before it reaches `--`, and leaves `-- CMD` unplaced, where a newer one takes it as
     # `cmd`. `_replay_command` reads the command from what was typed either way, so a replay's
     # unplaced words are accepted when they are exactly what follows its first `--`; anything else
-    # is refused as `parse_args` refuses it (#177).
+    # is refused as `parse_args` refuses it.
     if unplaced and not (
         args.command == "replay" and "--" in argv and unplaced == argv[argv.index("--") :]
     ):
         parser.error(f"unrecognized arguments: {' '.join(unplaced)}")
     # What was typed, for `irimi replay`, whose RUN_ID argparse cannot tell from a command's first
-    # word once both follow `--` (`_replay_command`, #84).
+    # word once both follow `--` (`_replay_command`).
     args.argv = argv
     if args.command is None:
         parser.print_help()
@@ -1564,7 +1552,7 @@ def _main(argv: list[str] | None) -> int:
 def _discard_unread_output() -> None:
     """Point stdout, and stderr, at /dev/null when its reader has gone: one that still holds
     what it could not write fails to flush, and the interpreter's flush of it at exit would raise
-    BrokenPipeError again and exit 120 (#142). A stream that flushes is still read and is left as
+    BrokenPipeError again and exit 120. A stream that flushes is still read and is left as
     it is; one that is None (closed before irimi started) or no file (a test's) has nothing to
     repoint."""
     import os

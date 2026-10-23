@@ -1,4 +1,4 @@
-"""Two stored runs side by side, write by write, with no verdict (#79, design D12).
+"""Two stored runs side by side, write by write, with no verdict.
 
 A run's actions are the writes it attempted, in `seq` order: each exchange its summary prints a
 write line for (`report.is_intercepted`) and each write tool whose stand-in ran
@@ -16,11 +16,11 @@ a second, refused refund after the first shows that one added, where lining up b
 pair the first refund with the refused one and show the first as added.
 
 An action whose body was cut when stored is never the same as another, whatever its text: the
-first pass anchors none, and the second pairs it by key into a `cut` row, `?` (#79, #94).
+first pass anchors none, and the second pairs it by key into a `cut` row, `?`.
 
 Pure, like `report`: `compare_runs` returns a `Comparison` and prints nothing. `irimi compare`
 prints `header_lines` over the comparison's lines, and `irimi replay` prints its own header over
-the same lines (`replay.Outcome`, #84), with `args_differ`'s note too, so there is one alignment.
+the same lines (`replay.Outcome`), with `args_differ`'s note too, so there is one alignment.
 """
 
 import difflib
@@ -47,10 +47,10 @@ EXCHANGE_KEY = "exchange"
 TOOL_KEY = "tool"
 NOT_A_VERDICT = "a comparison, not a verdict: nothing was replayed"
 ARGS_DIFFER = "(the triggers' args differ)"
-# A pair either side of which is flagged `body-truncated` (#70, #94), whatever its two texts: a
-# text rendered from part of a request, or from none (#94 stores an over-cap body empty), says
+# A pair either side of which is flagged `body-truncated`, whatever its two texts: a
+# text rendered from part of a request, or from none (an over-cap body is stored empty), says
 # nothing of what the cut part held, so two cut refunds of different amounts print alike and a
-# pair irimi could not read is never called the same (#79). The flag does not say which body was
+# pair irimi could not read is never called the same. The flag does not say which body was
 # cut, so a cut response counts too.
 CUT_NOTE = "a body was cut when stored"
 
@@ -65,33 +65,33 @@ class Action:
     key: tuple[str, ...]  # (EXCHANGE_KEY, service, operation), or (TOOL_KEY, the tool's name)
     # The summary's line for it, without the indent and before it is escaped. Two actions are the
     # same by this and not by `text`: escaping leaves a backslash as it is, so a Slack post holding
-    # a newline and one holding a typed `\n` printed alike and compared `=` (#79).
+    # a newline and one holding a typed `\n` print alike and would compare `=`.
     sentence: str
     cut: bool = False  # its exchange is flagged `body-truncated`
 
     @property
     def text(self) -> str:
-        """The summary's line for it, without the indent, as the summary prints it (#72)."""
+        """The summary's line for it, without the indent, as the summary prints it."""
         return report.printable(self.sentence)
 
     @property
     def escaped(self) -> str:
         """`text` with each backslash escaped too, so a newline prints as `\\n` and a typed one as
         `\\\\n`, and each character that prints as nothing or as a space spelled as its escape:
-        printed for a pair whose texts are alike though its sentences are not (#79)."""
+        printed for a pair whose texts are alike though its sentences are not."""
         escaped = report.printable(self.sentence.replace("\\", "\\\\"))
         return "".join(_spelled(char) for char in escaped)
 
     @property
     def seen(self) -> str:
         """`text` as a reader sees it: each character that prints as nothing dropped, and each that
-        prints as a space a space (#79)."""
+        prints as a space a space."""
         return "".join(_seen(char) for char in self.text)
 
 
 # The Unicode categories that print as nothing or as a space: format characters (a zero-width
 # space, a right-to-left override), separators, private-use and unassigned code points. Two posts
-# that differ only by one print alike, and `report.printable` leaves them as they are (#79).
+# that differ only by one print alike, and `report.printable` leaves them as they are.
 _UNSEEN = frozenset({"Cf", "Zs", "Zl", "Zp", "Co", "Cn"})
 
 
@@ -149,7 +149,7 @@ class Comparison:
 def actions(run: StoredRun, index: MapIndex | None) -> list[Action]:
     """The writes `run` attempted, in `seq` order, each with its summary line. Reads, LLM
     calls, telemetry and read tools are not actions, and neither is a retry the idempotency store
-    answered as the write it repeats (#46)."""
+    answered as the write it repeats."""
     out: list[Action] = []
     for event in run.events:
         if isinstance(event, Exchange) and report.is_intercepted(event):
@@ -175,7 +175,7 @@ def align(a: Sequence[Action], b: Sequence[Action]) -> tuple[Row, ...]:
 
 def _anchor(action: Action) -> Hashable:
     """What the first pass lines `action` up by. A cut action's is a new object, equal to nothing,
-    so it anchors nothing as the same and the second pass pairs it by key as `cut` (#79, #94)."""
+    so it anchors nothing as the same and the second pass pairs it by key as `cut`."""
     return object() if action.cut else (action.key, action.sentence)
 
 
@@ -203,7 +203,7 @@ def _opcodes(
 
 
 def _pair(x: Action, y: Action) -> Row:
-    """Two actions of one key: `cut` when either was cut, whatever their texts (#79, #94)."""
+    """Two actions of one key: `cut` when either was cut, whatever their texts."""
     if x.cut or y.cut:
         return Row("cut", x, y)
     return Row("same" if x.sentence == y.sentence else "changed", x, y)
@@ -231,7 +231,7 @@ def header_lines(a: RunRecord, b: RunRecord) -> list[str]:
 def args_differ(a: RunRecord, b: RunRecord) -> bool:
     """Compared as the JSON they are stored as, keys sorted: in Python `True == 1`, and the
     triggers' args `{"n": 1}` and `{"n": true}` differ. Args nested deeper than `json.dumps`
-    writes are called different, since irimi cannot say they are the same (#100)."""
+    writes are called different, since irimi cannot say they are the same."""
     try:
         return _canonical(a) != _canonical(b)
     except RecursionError:
@@ -247,7 +247,7 @@ def _row_lines(row: Row) -> list[str]:
     """A pair that differs prints both sides, A over B; every other row prints its one action.
 
     Escaping leaves a backslash as it is, so a Slack post holding a newline and one holding a
-    typed `\\n` print one line, and a `~` over two identical lines tells its reader nothing (#79).
+    typed `\\n` print one line, and a `~` over two identical lines tells its reader nothing.
     A pair whose sentences differ but print alike to a reader prints both with each backslash
     escaped first, the newline as `\\n` and the typed one as `\\\\n`, and each character a reader
     cannot see spelled as its escape: a zero-width space, a no-break space."""

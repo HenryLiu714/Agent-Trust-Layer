@@ -4,12 +4,12 @@
 `docs/trace-format.md` describes, and `StoreReader` reads it back.
 
 NOTHING HERE MAY RAISE INTO ITS CALLER, AND NOTHING HERE MAY BLOCK IT. `record` is called from
-mitmproxy's hooks, and a raised hook forwards the flow (CLAUDE.md). So every public method of
-`DirectoryStore` only puts one item on a bounded queue, with `put_nowait`, and returns; one daemon
-writer thread does all the redaction, hashing and file I/O. A full queue drops the event, and so
-does a writer that fails on it. Either way the drop is counted on the store and on the event's run
-(`RunRecord.dropped_events`), and a WARNING is logged on the first drop and every 1000th after it:
-a recording failure never affects traffic (design §5.2).
+mitmproxy's hooks, and a raised hook forwards the flow, so a write escapes shadow mode. So every
+public method of `DirectoryStore` only puts one item on a bounded queue, with `put_nowait`, and
+returns; one daemon writer thread does all the redaction, hashing and file I/O. A full queue drops
+the event, and so does a writer that fails on it. Either way the drop is counted on the store and
+on the event's run (`RunRecord.dropped_events`), and a WARNING is logged on the first drop and
+every 1000th after it: a recording failure never affects traffic (design §5.2).
 
 NOTHING REACHES DISK UNREDACTED (#69). The writer thread runs `redact.redact_exchange` on every
 exchange, and `redact.redact_json` on every trigger's name and args, every tool call's args and

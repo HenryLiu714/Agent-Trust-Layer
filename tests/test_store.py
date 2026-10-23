@@ -870,7 +870,8 @@ def test_a_run_id_that_is_not_a_string_is_a_drop_and_the_writer_goes_on(root, ke
 
 def test_a_call_with_the_wrong_type_is_a_drop_not_a_raise(root, key):
     """Every public method is a mitmproxy hook's callee or the SDK's, and a raised hook forwards
-    the flow (CLAUDE.md): even a caller breaking the types gets a counted drop, not an exception."""
+    the flow, so a write escapes shadow mode: even a caller breaking the types gets a counted
+    drop, not an exception."""
     s = DirectoryStore(root, key)
     s.record(None)  # type: ignore[arg-type]
     s.record_tool_call(None)  # type: ignore[arg-type]

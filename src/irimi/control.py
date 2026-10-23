@@ -20,8 +20,8 @@ A control request is answered here and nowhere else: never forwarded, never deci
 exchange, never recorded as one. The one question it puts to the policy is a replay's lookup of a
 read tool's recorded outcome (`AnswerPolicy.recorded_tool_call`, #83), so whether irimi replays is
 the policy's to say, here as on the wire. Every answer is stamped `Irimi-Answered-By: control`,
-because every response irimi decided is stamped (CLAUDE.md). Its run id is in the path, never in
-`Irimi-Run`.
+because every response irimi decided carries that header and only a live forward carries none.
+Its run id is in the path, never in `Irimi-Run`.
 
 NOTHING HERE RAISES. `ControlEndpoint.answer` runs inside mitmproxy's request hook, and a raised
 hook forwards the flow - here, to irimi's own listener. A request this endpoint refuses is a 4xx

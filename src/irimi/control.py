@@ -23,6 +23,11 @@ the policy's to say, here as on the wire. Every answer is stamped `Irimi-Answere
 because every response irimi decided carries that header and only a live forward carries none.
 Its run id is in the path, never in `Irimi-Run`.
 
+The SDK names its protocol version in `Irimi-Protocol` on every post. A request naming another
+major version is answered `426`; every answer names the version this endpoint speaks in the same
+header. A request that names none is read as this version. Decoders ignore fields they do not
+know, on every route, so a minor addition to a body never breaks an older endpoint.
+
 NOTHING HERE RAISES. `ControlEndpoint.answer` runs inside mitmproxy's request hook, and a raised
 hook forwards the flow - here, to irimi's own listener. A request this endpoint refuses is a 4xx
 whose body names what was wrong; anything else that fails is a 500, logged with its traceback. The
@@ -42,6 +47,8 @@ from irimi import __version__, trace
 from irimi.exchange import (
     CONTROL_ANSWER,
     CONTROL_PREFIX,
+    PROTOCOL_HEADER,
+    PROTOCOL_VERSION,
     RECORDED_ACTION,
     RUN_ACTIONS,
     RUNS_ROUTE,
@@ -52,6 +59,7 @@ from irimi.exchange import (
     Headers,
     Request,
     Response,
+    protocol_major,
 )
 from irimi.pipeline import ANSWERED_BY_HEADER, irimi_error
 from irimi.policy import AnswerPolicy
@@ -101,6 +109,8 @@ NO_RECORDED_CALL = "no recorded call"
 OnToolCall = Callable[[ToolCall], None]
 
 _STAMP = (ANSWERED_BY_HEADER, CONTROL_ANSWER)
+# On every answer, so a client can tell which protocol the endpoint speaks without a 426.
+_PROTOCOL = (PROTOCOL_HEADER, PROTOCOL_VERSION)
 
 
 class _Refused(Exception):
@@ -125,17 +135,19 @@ def is_control_request(request: Request, door: Door) -> bool:
 
 def _json_response(status: int, doc: Mapping[str, Any], headers: Headers = ()) -> Response:
     body = json.dumps(doc, allow_nan=False).encode()
-    return Response(status, (_STAMP, ("content-type", "application/json"), *headers), body)
+    return Response(
+        status, (_STAMP, _PROTOCOL, ("content-type", "application/json"), *headers), body
+    )
 
 
 def _error_response(status: int, message: str, headers: Headers = ()) -> Response:
     """irimi's own error shape (`pipeline.irimi_error`), stamped `control`: a 5xx is irimi's
     failure, anything else a refusal of what the client posted."""
     error_type = "irimi_internal_error" if status >= 500 else "irimi_control_refused"
-    return irimi_error(status, error_type, message[:MAX_REFUSAL], (_STAMP, *headers))
+    return irimi_error(status, error_type, message[:MAX_REFUSAL], (_STAMP, _PROTOCOL, *headers))
 
 
-NO_CONTENT = Response(204, (_STAMP,), b"")
+NO_CONTENT = Response(204, (_STAMP, _PROTOCOL), b"")
 # The answer to a control request that failed for a reason it did not cause. The engine sends the
 # same bytes if building the answer itself raised.
 INTERNAL_ERROR = _error_response(500, "internal")
@@ -181,8 +193,14 @@ class ControlEndpoint:
             return INTERNAL_ERROR
 
     def _answer(self, request: Request, whole_body: bool) -> Response:
-        """Route, then check in this order: the method (405), the run id (400), the body's size
-        (413), its JSON (400) and its fields (400). Only then is the store called."""
+        """Check the protocol version (426), route, then check in this order: the method (405),
+        the run id (400), the body's size (413), its JSON (400) and its fields (400). Only then
+        is the store called."""
+        sent = request.header(PROTOCOL_HEADER)
+        if sent is not None and protocol_major(sent) != protocol_major(PROTOCOL_VERSION):
+            raise _Refused(
+                426, f"this irimi speaks control protocol {PROTOCOL_VERSION}, not {sent}"
+            )
         route = request.path.removeprefix(CONTROL_PREFIX)
         if route == HEALTH_ROUTE:
             _require_method(request, "GET")
@@ -251,9 +269,6 @@ class ControlEndpoint:
         in place of running the tool, or `404` when the
         recording has none for it, or there is no recording. A hit is not a tool call: the SDK
         posts the call to `tool-calls` afterwards, as it posts every call it makes."""
-        unknown = sorted(set(posted) - set(trace.RECORDED_LOOKUP_FIELDS))
-        if unknown:
-            raise _Refused(400, f"unknown field {unknown[0]!r}")
         for field in trace.RECORDED_LOOKUP_FIELDS:
             if field not in posted:  # in the words of the decoders every other route uses
                 raise _Refused(400, f"missing required field {field!r}")

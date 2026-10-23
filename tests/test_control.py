@@ -84,12 +84,19 @@ class _Engine:
     def root(self):
         return self.store.layout.root
 
-    def call(self, method: str, path: str, body: bytes | dict | None = None):
+    def call(
+        self,
+        method: str,
+        path: str,
+        body: bytes | dict | None = None,
+        headers: dict[str, str] | None = None,
+    ):
         """One origin-form request to the listener itself, as the SDK makes it when `IRIMI_CONTROL`
         is on NO_PROXY. Returns `(status, headers, body)`, the header names lower-cased."""
         data = json.dumps(body).encode() if isinstance(body, dict) else body
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
-        conn.request(method, path, body=data, headers={"host": f"127.0.0.1:{self.port}"})
+        sent = {"host": f"127.0.0.1:{self.port}", **(headers or {})}
+        conn.request(method, path, body=data, headers=sent)
         resp = conn.getresponse()
         raw = resp.read()
         conn.close()
@@ -353,7 +360,6 @@ REFUSALS = [
     ("POST", _LOOKUP, {"name": "db.balance"}, 400, "missing required field 'args'"),
     ("POST", _LOOKUP, {"args": {}}, 400, "missing required field 'name'"),
     ("POST", _LOOKUP, {"name": 1, "args": {}}, 400, "'name' is an integer, not a string"),
-    ("POST", _LOOKUP, {**LOOKUP, "run_id": RUN}, 400, "unknown field 'run_id'"),
 ]
 
 
@@ -415,6 +421,51 @@ def test_a_lookup_under_an_engine_that_is_not_replaying_is_a_404_and_records_not
     assert reader.list_runs() == []
     assert not (engine.root / "runs").exists() and not (engine.root / "unattributed").exists()
     assert engine.seen == [] and engine.tool_calls == []
+
+
+@pytest.mark.parametrize("version", ["2", "0", "2.1", "x"])
+def test_another_protocol_major_is_answered_426_naming_the_one_irimi_speaks(engine, version):
+    status, headers, body = engine.call(
+        "POST", _START, _start_body(1.0), {"Irimi-Protocol": version}
+    )
+    message = f"this irimi speaks control protocol 1, not {version}"
+    assert (status, json.loads(body)) == (426, _refused(message))
+    assert STAMP in headers and ("irimi-protocol", "1") in headers
+    assert engine.finish().list_runs() == []
+
+
+@pytest.mark.parametrize("headers", [{}, {"Irimi-Protocol": "1"}, {"Irimi-Protocol": "1.4"}])
+def test_the_same_protocol_major_or_none_is_served(engine, headers):
+    _ok(engine.call("POST", _START, _start_body(1.0), headers))
+    assert [r.run_id for r in engine.finish().list_runs()] == [RUN]
+
+
+def test_every_control_answer_names_the_protocol_irimi_speaks(engine):
+    """A client learns the endpoint's version from any answer, not only from a 426."""
+    answers = [
+        engine.call("GET", "/_irimi/health"),
+        engine.call("POST", _START, _start_body(1.0)),
+        engine.call("POST", _LOOKUP, LOOKUP),
+        engine.call("POST", "/_irimi/nowhere", {}),
+    ]
+    assert [status for status, _, _ in answers] == [200, 204, 404, 404]
+    for _, headers, _ in answers:
+        assert ("irimi-protocol", "1") in headers
+    engine.finish()
+
+
+def test_every_route_ignores_a_field_it_does_not_know(engine):
+    """A minor addition to a body must not break an older endpoint, on any route."""
+    extra = {"added_later": {"x": 1}}
+    _ok(engine.call("POST", _START, {**_start_body(1.0), **extra}))
+    _ok(engine.call("POST", f"/_irimi/runs/{RUN}/tool-calls", {**_tool_call(2.0), **extra}))
+    _ok(engine.call("POST", f"/_irimi/runs/{RUN}/end", {**_end_body(3.0), **extra}))
+    status, _, body = engine.call("POST", _LOOKUP, {**LOOKUP, **extra})
+    assert (status, json.loads(body)) == (404, _refused("no recorded call"))
+    reader = engine.finish()
+    [run] = reader.list_runs()
+    assert (run.run_id, run.outcome) == (RUN, "ok")
+    assert [e.name for e in reader.load_run(RUN).events] == ["db.write"]
 
 
 def _replaying(tmp_path, monkeypatch, *events, policy=None) -> _Engine:

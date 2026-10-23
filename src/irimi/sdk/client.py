@@ -12,20 +12,34 @@ A lookup that fails is a miss, and the tool runs for real; a `404` is the endpoi
 is not a failure.
 Each is logged at WARNING on the `irimi.sdk` logger, once per process per kind of failure, so a
 worker handling a thousand messages against a stopped irimi logs one line, not two thousand.
+
+Every post names the control protocol it speaks in `Irimi-Protocol`. A proxy that speaks another
+major version answers `426`, and the first one is warned naming both versions.
+
+A post that timed out or found nothing listening opens a circuit breaker: for `PAUSE_S` the client
+posts nothing and looks nothing up, so a stalled irimi costs the agent one timeout, not one per
+call. The first post after the pause tries again.
 """
 
 import json
 import logging
 import os
 import threading
+import time
 import urllib.error
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
 from irimi import paths, trace
-from irimi.exchange import RECORDED_ACTION, RUNS_ROUTE, TOOL_CALLS_ACTION
+from irimi.exchange import (
+    PROTOCOL_HEADER,
+    PROTOCOL_VERSION,
+    RECORDED_ACTION,
+    RUNS_ROUTE,
+    TOOL_CALLS_ACTION,
+)
 from irimi.sdk.capture import MAX_CAPTURED_BYTES, serialized
 from irimi.sdk.instrumentation import unlabelled
 from irimi.trace import JSONValue, RecordedOutcome
@@ -34,6 +48,8 @@ LOGGER_NAME = "irimi.sdk"
 logger = logging.getLogger(LOGGER_NAME)
 
 TIMEOUT_S = 2.0
+# How long a timeout or an unreachable endpoint stops every post and lookup.
+PAUSE_S = 30.0
 # The most of a refusal's body a warning quotes. The endpoint's own are shorter.
 MAX_DETAIL = 200
 # The most of an answer the SDK reads. irimi's largest is a recorded tool call's outcome,
@@ -43,8 +59,11 @@ MAX_ANSWER = 16 * MAX_CAPTURED_BYTES
 
 # The run actions the SDK posts: the endpoint's `exchange.RUN_ACTIONS`.
 Action = Literal["start", "tool-calls", "end"]
-# The kinds of failure a warning is logged once for.
-Failure = Literal["unset", "rejected", "timeout", "unreachable", "failed"]
+# The kinds of failure a warning is logged once for. `paused` is a send the breaker skipped, which
+# is never warned of: the failure that opened the breaker was.
+Failure = Literal["unset", "rejected", "timeout", "unreachable", "failed", "mismatch", "paused"]
+# The failures that open the breaker: irimi did not answer in time, or nothing answered at all.
+PAUSING: frozenset[Failure] = frozenset({"timeout", "unreachable"})
 
 
 class Reporter(Protocol):
@@ -69,12 +88,15 @@ class _Failed:
 class ControlClient:
     """Posts to the control endpoint named by `IRIMI_CONTROL`, read at each post."""
 
-    def __init__(self) -> None:
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         # No ProxyHandler entries: urllib's default opener reads HTTP_PROXY, this one never does.
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirects())
         # By what failed and how: a lookup that fails never silences a post's warning.
         self._warned: set[tuple[str, Failure]] = set()
         self._lock = threading.Lock()
+        self._clock = clock
+        # The clock reading before which the breaker skips every send.
+        self._paused_until = float("-inf")
 
     def post(self, run_id: str, action: Action, doc: Mapping[str, Any]) -> None:
         """Send `doc`; on any failure, warn (once per kind) and return. Never raises."""
@@ -82,7 +104,7 @@ class ControlClient:
             sent = self._send(f"{run_id}/{action}", doc)
         except Exception as exc:  # a fault of the SDK's own, which the agent must not pay for
             sent = _Failed("failed", f"{type(exc).__name__}: {exc}")
-        if isinstance(sent, _Failed):
+        if isinstance(sent, _Failed) and sent.kind != "paused":
             what = "a tool call" if action == TOOL_CALLS_ACTION else f"the {action}"
             self._warn_once(
                 "post",
@@ -101,7 +123,7 @@ class ControlClient:
         try:
             sent = self._send(f"{run_id}/{RECORDED_ACTION}", lookup)
             if isinstance(sent, _Failed):
-                if sent.status == 404:
+                if sent.status == 404 or sent.kind == "paused":
                     return None
             else:
                 answer = json.loads(sent)
@@ -119,7 +141,17 @@ class ControlClient:
         return None
 
     def _send(self, route: str, doc: Mapping[str, Any]) -> bytes | _Failed:
-        """POST `doc` to `{IRIMI_CONTROL}/runs/{route}`: the answer's body, or why there is none."""
+        """POST `doc` to `{IRIMI_CONTROL}/runs/{route}`: the answer's body, or why there is none.
+        A timeout or an unreachable endpoint pauses every send for PAUSE_S."""
+        if self._clock() < self._paused_until:
+            return _Failed("paused", "the circuit breaker is open")
+        sent = self._post(route, doc)
+        if isinstance(sent, _Failed) and sent.kind in PAUSING:
+            with self._lock:
+                self._paused_until = self._clock() + PAUSE_S
+        return sent
+
+    def _post(self, route: str, doc: Mapping[str, Any]) -> bytes | _Failed:
         # irimi sets the variable with no trailing slash, but a deployment that sets it by
         # hand may type one, which would make every route `//runs/...`, a 404.
         base = os.environ.get(paths.CONTROL_ENV, "").rstrip("/")
@@ -129,7 +161,7 @@ class ControlClient:
             f"{base}/{RUNS_ROUTE}/{route}",
             data=serialized(dict(doc)),
             method="POST",
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", PROTOCOL_HEADER: PROTOCOL_VERSION},
         )
         try:
             # To irimi's own listener, which `instrument()` labels: the route names the run.
@@ -138,6 +170,9 @@ class ControlClient:
         except urllib.error.HTTPError as exc:  # an answer outside 2xx, a redirect included
             with exc:
                 said = exc.read(MAX_DETAIL).decode("utf-8", "replace")
+            if exc.code == 426:
+                theirs = exc.headers.get(PROTOCOL_HEADER) or "unknown"
+                return _Failed("mismatch", f"{base} speaks {theirs[:MAX_DETAIL]}", exc.code)
             return _Failed("rejected", f"HTTP {exc.code}: {said}", exc.code)
         except urllib.error.URLError as exc:  # no answer: urllib wraps the socket's error
             if isinstance(exc.reason, TimeoutError):
@@ -152,10 +187,22 @@ class ControlClient:
         return body
 
     def _warn_once(self, route: str, failed: _Failed, what: str, consequence: str) -> None:
+        # One mismatch warning whatever the route: the versions are the same for every post.
+        key = ("any" if failed.kind == "mismatch" else route, failed.kind)
         with self._lock:
-            if (route, failed.kind) in self._warned:
+            if key in self._warned:
                 return
-            self._warned.add((route, failed.kind))
+            self._warned.add(key)
+        if failed.kind == "mismatch":
+            logger.warning(
+                "irimi: this SDK speaks control protocol %s, but the proxy at %s; runs are not "
+                "recorded until the two match",
+                PROTOCOL_VERSION,
+                failed.detail,
+            )
+            return
+        if failed.kind in PAUSING:
+            consequence += f"; irimi is not asked again for {PAUSE_S:g}s"
         logger.warning(
             "irimi: could not %s (%s: %s); %s; further failures of this kind are not logged",
             what,

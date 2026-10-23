@@ -151,6 +151,10 @@ RECORDED_ACTION = f"{TOOL_CALLS_ACTION}/recorded"
 # The routes about a tool call, which a run with no SDK start may use: the process run, or
 # `unattributed` for a call made in no run.
 TOOL_ACTIONS = frozenset({TOOL_CALLS_ACTION, RECORDED_ACTION})
+# The header the SDK names its control protocol version in, on every post. The endpoint answers
+# 426 to another major version, so an SDK and a proxy upgraded apart say so instead of losing runs.
+PROTOCOL_HEADER = "irimi-protocol"
+PROTOCOL_VERSION = "1"
 # The header that names the run a request belongs to. irimi reads it and strips it; the SDK
 # puts it on every request a run makes. Here, in layer 0, rather than in `pipeline`, so the
 # SDK, which sits beside `pipeline` and may not import it, spells it the same way. Header
@@ -169,6 +173,11 @@ FIDELITY_FLAGS: dict[AnsweredBy, str] = {
 }
 
 Headers = tuple[tuple[str, str], ...]
+
+
+def protocol_major(version: str) -> str:
+    """The major part of a control protocol version: `1` of `1.2`."""
+    return version.strip().partition(".")[0]
 
 
 def header_value(headers: Headers, name: str) -> str | None:

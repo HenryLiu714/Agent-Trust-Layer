@@ -1,11 +1,9 @@
 """Put `Irimi-Run` on every request a run sends to irimi, so the proxy files it under its run.
 
-`instrument()` patches `http.client.HTTPConnection.putrequest` (urllib, requests/urllib3,
-stripe-python's sync client, slack_sdk's `WebClient`) and, when httpx is installed, its two
-transports (the OpenAI and Anthropic SDKs). The header goes only on a connection to irimi's own
-listener, the host and port `IRIMI_CONTROL` or a proxy variable names, so a run's id never reaches
-a service irimi is not in front of; the SDK's own posts carry none (`unlabelled`). The patches are
-on classes, installed on the first run and never while the SDK is inactive. aiohttp is not covered.
+`instrument()` patches `http.client.HTTPConnection.putrequest` (urllib, requests/urllib3) and, if
+installed, `httpx.HTTPTransport` and `httpx.AsyncHTTPTransport`. Any other transport (aiohttp, or
+anthropic 2.x, which uses httpx2) needs the `Irimi-Run` header set by hand. The header goes only
+to irimi's listener (`IRIMI_CONTROL` or a proxy variable), so a run's id reaches no other service.
 """
 
 import contextlib
@@ -24,42 +22,30 @@ from irimi.protocol.env import CONTROL_ENV, PROXY_ENVS
 from irimi.protocol.headers import RUN_HEADER
 from irimi.sdk._context import current_run_id, is_active
 
-# The port a URL with none names, by scheme.
 DEFAULT_PORTS = {"http": 80, "https": 443}
-# The variables that name irimi's listener: the control endpoint's, and the proxy's, which
-# `runner.child_env` sets from the same `PROXY_ENVS`.
 LISTENER_ENVS = (CONTROL_ENV, *PROXY_ENVS)
 
-# Set while the SDK sends its own posts to the control endpoint: they name their run in their
-# path, and carry no `Irimi-Run`.
+# The SDK's own control posts name their run in the path and carry no `Irimi-Run`.
 _UNLABELLED: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "irimi_unlabelled", default=False
 )
 
-# Reentrant, because patching imports httpx, and an import hook may start a run on the thread that
-# holds it: that call returns at once (`_patching`) rather than wait on itself forever.
+# Reentrant: patching imports httpx, and an import hook may start a run on the thread holding it;
+# that call returns at once (`_patching`) instead of deadlocking.
 _lock = threading.RLock()
-# Set, under `_lock`, once every patch is in place, so a call that finds it set never sends a run's
-# request ahead of them; and set even when a patch raised, so that patch is never retried and
-# nothing is ever wrapped twice.
+# Set even when a patch raised, so nothing is retried or wrapped twice.
 _installed = False
-# Set, under `_lock`, while the first call patches, so a call made inside it never patches again.
 _patching = False
-# What `instrument` replaced, as (class, attribute, original), so `uninstall` can put it back.
 _patched: list[tuple[type, str, Any]] = []
 
 
 def instrument() -> None:
     """Label each request a run sends through irimi with the run's id.
 
-    Patches `http.client` and httpx (if installed) process-wide, on their classes, so a request
-    a run sends to irimi's listener carries `Irimi-Run` and irimi files it under that run. The SDK
-    calls it on the first run; call it at startup to cover clients that cache connections before
-    then. A no-op unless irimi is running the process, and safe to call more than once.
+    Patches `http.client` and httpx process-wide. The SDK calls it on the first run; call it at
+    startup to cover clients that cache connections earlier. A no-op unless irimi is active.
 
     Example:
-        from irimi import sdk
-
         sdk.instrument()
     """
     global _installed, _patching  # noqa: PLW0603  # the patch is process-wide, and so are these
@@ -85,7 +71,7 @@ def instrument() -> None:
 
 @contextlib.contextmanager
 def unlabelled() -> Iterator[None]:
-    """Requests sent inside carry no `Irimi-Run`, even to irimi: the SDK's own control posts."""
+    """Send requests inside without `Irimi-Run`, even to irimi."""
     token = _UNLABELLED.set(True)
     try:
         yield
@@ -94,9 +80,7 @@ def unlabelled() -> Iterator[None]:
 
 
 def run_id_for(host: str | bytes, port: int | None) -> str | None:
-    """The run id a request sent over a connection to `host:port` carries: the current run's, if
-    there is one and the connection is to irimi's listener; None otherwise, and inside
-    `unlabelled()`. Never raises: a request it cannot decide for goes out unlabelled."""
+    """Return the current run's id if `host:port` is irimi's listener, else None. Never raises."""
     try:
         run_id = current_run_id()
         if run_id is None or _UNLABELLED.get():
@@ -111,12 +95,10 @@ def run_id_for(host: str | bytes, port: int | None) -> str | None:
 
 @functools.lru_cache(maxsize=8)
 def _listeners(urls: tuple[str, ...]) -> frozenset[tuple[str, int]]:
-    """irimi's listener as `(host, port)`s: each URL in `urls` that names a host, its port spelled
-    out. Cached by the variables' values, which are read at each request."""
+    """Return the `(host, port)` each URL in `urls` names, skipping any without a host."""
     found = set()
     for given in urls:
-        # A proxy spelled with no scheme, `127.0.0.1:4000`, is an http proxy to urllib, requests
-        # and httpx alike, so it names irimi as surely as one spelled in full.
+        # urllib, requests and httpx all treat a schemeless proxy (`127.0.0.1:4000`) as http.
         url = f"http://{given}" if given and "://" not in given else given
         try:
             parts = urlsplit(url)
@@ -135,8 +117,7 @@ def _patch(owner: type, name: str, wrap: Callable[[Any], Any]) -> None:
 
 
 def uninstall() -> None:
-    """Put back every method `instrument` replaced, so the next call patches afresh. For tests
-    (`_state.reset_for_tests`): an agent has no reason to call it."""
+    """Restore every method `instrument` replaced, so the next call patches afresh. For tests."""
     global _installed, _patching  # noqa: PLW0603  # the patch is process-wide, and so are these
     with _lock:
         while _patched:
@@ -149,8 +130,7 @@ def _labelling_putrequest(original: Callable[..., None]) -> Callable[..., None]:
     @functools.wraps(original)
     def putrequest(self: http.client.HTTPConnection, *args: Any, **kwargs: Any) -> None:
         original(self, *args, **kwargs)
-        # `host` and `port` are where the connection goes: the proxy's when there is one, a
-        # CONNECT tunnel's included, and the origin's otherwise.
+        # `host` and `port` are the proxy's when there is one (CONNECT tunnels included).
         run_id = run_id_for(self.host, self.port)
         if run_id is not None:
             self.putheader(RUN_HEADER, run_id)
@@ -159,9 +139,7 @@ def _labelling_putrequest(original: Callable[..., None]) -> Callable[..., None]:
 
 
 def _httpx_run_id(transport: Any, request: Any) -> str | None:
-    """The run id an httpx request carries, decided as `putrequest` decides, by where the
-    transport connects: its proxy's address when it has one (httpcore's `_proxy_url`), the
-    request URL's otherwise. None when the request already names a run of its own."""
+    """Return the run id for an httpx request by its proxy or URL; None if it has `Irimi-Run`."""
     try:
         if RUN_HEADER in request.headers:
             return None
@@ -177,8 +155,7 @@ def _httpx_run_id(transport: Any, request: Any) -> str | None:
 
 @contextlib.contextmanager
 def _labelled(transport: Any, request: Any) -> Iterator[None]:
-    """`request` carries its run's id while inside, if `_httpx_run_id` gives it one. Both httpx
-    transports send inside it, so the sync and async paths share one rule."""
+    """Set `Irimi-Run` on `request` for the duration of the block, if `_httpx_run_id` gives one."""
     run_id = _httpx_run_id(transport, request)
     if run_id is None:
         yield
@@ -187,8 +164,7 @@ def _labelled(transport: Any, request: Any) -> Iterator[None]:
     try:
         yield
     finally:
-        # Off again once sent: httpx builds a redirect from this request's headers, and the next
-        # hop may not go through irimi. Each hop is labelled by its own transport.
+        # httpx builds a redirect from these headers, and the next hop may not go through irimi.
         del request.headers[RUN_HEADER]
 
 

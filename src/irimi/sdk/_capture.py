@@ -1,10 +1,10 @@
 """Capture a trigger's arguments or a tool's result as JSON, and revive that JSON into values.
 
-`capture` says two things about every value: its JSON, and whether that JSON rebuilds an equal
-value (`replayable`). `revive` is its inverse, which a replay uses for a trigger's args and a read
-tool's recorded result. The rules are the table in `docs/trace-format.md` ("Captured arguments"),
-each row with a test. Capture never raises into the agent: a value it cannot encode, or whose
-`repr` or `model_dump` raises, is captured by its description. Revive never imports a module.
+`capture` returns a value's JSON and whether it rebuilds an equal value (`replayable`); a replay
+uses `revive` to invert it. The rules are the table in `docs/trace-format.md`.
+
+- Capture never raises (the SDK never raises): a value it cannot encode is captured by its repr.
+- Revive never imports a module.
 """
 
 import base64
@@ -28,15 +28,12 @@ from irimi.protocol.trace import (
     importable_module,
 )
 
-# The two markers that describe a value, `REPR_KEY` and `TRUNCATED_KEY`, are the trace format's,
-# so a replay's recording and `revive` refuse one rule; these two are capture's own.
+# `REPR_KEY` and `TRUNCATED_KEY` come from the trace format because the engine also refuses them.
 TYPE_KEY = "__irimi_type__"
 BYTES_KEY = "__irimi_bytes__"
 RESERVED_KEYS = frozenset({REPR_KEY, TYPE_KEY, BYTES_KEY, TRUNCATED_KEY})
 
-# The deepest a captured value nests: a value inside more containers than this is not walked.
 MAX_DEPTH = 32
-# The most of a `repr` a capture keeps.
 MAX_REPR = 1000
 TOO_DEEP = "<too deep>"
 
@@ -44,14 +41,14 @@ type Captured = tuple[JSONValue, bool]
 
 
 def capture(value: object) -> Captured:
-    """`value` as JSON, and whether that JSON rebuilds it, by the table in `docs/trace-format.md`.
+    """Return `value` as JSON and whether that JSON rebuilds it.
 
-    A type is matched exactly, never by `isinstance`, because `revive` builds the base type. A
-    value inside more than `MAX_DEPTH` containers is `{"__irimi_repr__": "<too deep>"}`, and
-    args whose JSON passes `MAX_CAPTURED_BYTES` are replaced whole by the truncation marker; the
-    walk counts bytes as it goes, so a value that holds itself is walked at most that far. A
-    `repr` is cut to `MAX_REPR` outside any secret's shape (`secret_shapes.cut_outside_secrets`),
-    since the store redacts it only after this cut. Never raises."""
+    Types match exactly, not by `isinstance`, because `revive` builds the base type. Past
+    `MAX_DEPTH` a value becomes a "<too deep>" repr; past `MAX_CAPTURED_BYTES` the whole value
+    becomes the truncation marker, which also bounds a self-referencing value. A repr is cut to
+    `MAX_REPR` outside any secret's shape, since the store redacts only after this cut.
+    Never raises (the SDK never raises).
+    """
     return _capture(value, 0)
 
 
@@ -62,7 +59,7 @@ def _capture(value: object, depth: int) -> Captured:
         size = len(serialized(encoded))
     except _TooBig:
         return {TRUNCATED_KEY: True, "bytes": walk.counted}, False
-    except Exception:  # every value is guarded in the walk; this is the last line of defence
+    except Exception:  # the walk guards each value; this catches anything it missed
         return {REPR_KEY: _repr(value)}, False
     if size > MAX_CAPTURED_BYTES:
         return {TRUNCATED_KEY: True, "bytes": size}, False
@@ -72,15 +69,12 @@ def _capture(value: object, depth: int) -> Captured:
 def capture_call(
     fn: Callable[..., Any], args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> Captured:
-    """A trigger's arguments as `{parameter: value}`, bound against `fn`'s signature, captured.
+    """Capture a trigger's arguments as `{parameter: value}`, bound against `fn`'s signature.
 
-    A method's or a classmethod's first parameter named `self` or `cls` is the receiver and is
-    left out (`calls.receiver`): it says nothing about the run, and leaving it in would make every
-    method's run unreplayable. Defaults are not applied: the args are what the caller passed, so
-    a replay of edited code takes the new defaults. When the call does not bind - the agent
-    called the function wrongly, and Python is about to say so - the args are captured as
-    `{"args": [...], "kwargs": {...}}`, not replayable: the call raised TypeError the first time,
-    and the shape is the one a function whose parameters are named `args` and `kwargs` binds to."""
+    The receiver (`self`/`cls`) is left out, else every method's run would be unreplayable.
+    Defaults are not applied, so a replay of edited code takes the new defaults. A call that does
+    not bind is captured as `{"args": [...], "kwargs": {...}}`, not replayable.
+    """
     try:
         sig = signature(fn)
         bound = sig.bind(*args, **kwargs)
@@ -91,44 +85,38 @@ def capture_call(
     self_name = receiver(fn, sig)
     if self_name is not None:
         arguments.pop(self_name, None)
-    # One level less than the dict: each parameter's value may nest MAX_DEPTH deep, as a value
-    # given to `sdk.run(name, inputs=...)` may.
+    # Start one level up so each parameter may nest MAX_DEPTH deep, as `sdk.run` inputs may.
     return _capture(arguments, -1)
 
 
 class NotReplayable(Exception):
-    """A captured value `revive` cannot turn back into the value it was: the reason."""
+    """Raised when `revive` cannot rebuild a captured value; the message says why."""
 
 
 def revive(value: JSONValue) -> Any:
-    """The value `value` was captured from, or NotReplayable naming why not.
+    """Return the value `value` was captured from.
 
-    The inverse of the capture table, row by row:
-
-        JSON scalars, lists, objects            themselves; a tuple was captured as a list, and
-                                                comes back as one
+        JSON scalars, lists, objects            themselves (a tuple comes back as a list)
         {"__irimi_bytes__": <base64>}           bytes
-        {"__irimi_type__": "m:q", "value": v}   the class `m:q` names, in a module this process
-                                                has imported: a dataclass is `cls(**revive(v))`,
-                                                a class with a callable `model_validate` is
+        {"__irimi_type__": "m:q", "value": v}   dataclass `cls(**revive(v))`, or
                                                 `cls.model_validate(revive(v))`
-        {"__irimi_repr__": ...}, anywhere       NotReplayable: its JSON describes the value, it
-        {"__irimi_truncated__": ...}, anywhere  is not the value
+        {"__irimi_repr__": ...}, anywhere       NotReplayable: a description, not the value
+        {"__irimi_truncated__": ...}, anywhere  NotReplayable
 
-    Revive never imports. A stored run names its classes, and importing a module runs its code, so
-    a class is looked up only in a module already in `sys.modules`, and only in what it already
-    holds, never through its `__getattr__`: a tool that returned one has imported it, as has the
-    agent a replay re-runs. A class it cannot find there, that is neither,
-    or whose constructor raises is NotReplayable naming it. Never raises anything else."""
-    # One walk for the refusal, the trace format's (`trace.holds_description`), before any class is
-    # built: the engine refuses the same recorded results.
+    A class is looked up only in a module already in `sys.modules`, never through `__getattr__`,
+    because importing runs code a stored run names.
+
+    Raises:
+        NotReplayable: the value cannot be rebuilt. Nothing else is raised.
+    """
+    # Refuse descriptions before building any class; the engine refuses the same results.
     if holds_description(value):
         raise NotReplayable("the value was recorded as its description, not as itself")
     try:
         return _revive(value)
     except NotReplayable:
         raise
-    except Exception as exc:  # a stored value deeper than the stack, or a class that misbehaves
+    except Exception as exc:  # e.g. a value deeper than the stack, or a misbehaving class
         raise NotReplayable(f"{type(exc).__name__} while reviving") from None
 
 
@@ -152,7 +140,7 @@ def _revive(value: JSONValue) -> Any:
 
 
 def _revive_typed(name: JSONValue, fields: JSONValue) -> Any:
-    """A dataclass or a model, from its `module:qualname` and its captured fields."""
+    """Build a dataclass or model from its `module:qualname` and captured fields."""
     if not isinstance(name, str) or ":" not in name:
         raise NotReplayable(f"{TYPE_KEY} names no class")
     module, _, qualname = name.partition(":")
@@ -163,9 +151,8 @@ def _revive_typed(name: JSONValue, fields: JSONValue) -> Any:
         raise NotReplayable(f"{name} is in a module this process has not imported")
     try:
         for part in qualname.split("."):
-            # Looked up statically: `getattr` would run a module's `__getattr__` (PEP 562), which a
-            # lazy package uses to import on first use, or a metaclass's, so a name in a stored
-            # run could make revive import after all.
+            # `getattr` could run a module's or metaclass's `__getattr__`, which lazy packages use
+            # to import on first use.
             found = inspect.getattr_static(found, part)
     except AttributeError:
         raise NotReplayable(f"{name} is not in its module") from None
@@ -187,7 +174,7 @@ def _revive_typed(name: JSONValue, fields: JSONValue) -> Any:
 
 
 class _Model(Protocol):
-    """The two pydantic methods capture and revive call, so the SDK never imports pydantic."""
+    """Type the pydantic methods capture and revive call, so the SDK never imports pydantic."""
 
     @classmethod
     def model_validate(cls, obj: object) -> object: ...
@@ -196,17 +183,19 @@ class _Model(Protocol):
 
 
 def serialized(value: JSONValue) -> bytes:
-    """`value` as the SDK sends it: the one encoding the size limit is measured in."""
+    """Encode `value` as the SDK sends it; the size limit is measured in this encoding."""
     return json.dumps(value, allow_nan=False).encode()
 
 
 class _TooBig(Exception):
-    """The walk passed MAX_CAPTURED_BYTES: the args are replaced as a whole."""
+    """Raised when the walk passes MAX_CAPTURED_BYTES, so the whole value is replaced."""
 
 
 class _Walk:
-    """One capture's walk over a value. `counted` is a lower bound on the bytes of JSON written
-    so far: every value adds at least one, so the walk visits at most MAX_CAPTURED_BYTES values."""
+    """Walk one value for capture, counting a lower bound of JSON bytes in `counted`.
+
+    Each value adds at least one byte, so the walk visits at most MAX_CAPTURED_BYTES values.
+    """
 
     def __init__(self) -> None:
         self.counted = 0
@@ -232,7 +221,7 @@ class _Walk:
             return value, True
         if kind is int:
             assert isinstance(value, int)
-            text = json.dumps(value)  # ValueError past Python's digit limit: then it is opaque
+            text = json.dumps(value)  # ValueError past Python's digit limit makes it opaque
             self._count(len(text))
             return value, True
         if kind is float:
@@ -279,7 +268,7 @@ class _Walk:
         return self._opaque(value), False
 
     def _typed(self, kind: type, fields: object, depth: int) -> Captured:
-        """A dataclass or a pydantic model: its class, and its fields captured at its own depth."""
+        """Capture a dataclass or pydantic model as its class name and its fields."""
         module = importable_module(kind.__module__)
         name = f"{module}:{kind.__qualname__}"
         self._count(len(name) + len(TYPE_KEY) + 15)

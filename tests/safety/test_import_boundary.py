@@ -24,7 +24,7 @@ import re
 from pathlib import Path
 from typing import cast
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "irimi"
 DOCS = ROOT / "docs" / "architecture.md"
 MITM_ALLOWED = {SRC / "engine" / "mitm.py"}
@@ -281,3 +281,36 @@ def test_the_architecture_docs_place_the_same_packages_in_the_same_layers():
     assert _docs_layers() == expected, (
         "docs/architecture.md's layer table must place the packages as LAYERS in this test does"
     )
+
+
+TESTS = ROOT / "tests"
+
+
+def _test_module_imports(py: Path) -> list[str]:
+    """Every test module `py` imports: a `tests...test_*` module, or `test_*` from a `tests`
+    package."""
+    found = []
+    for node in ast.walk(ast.parse(py.read_text(), filename=str(py))):
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            names = [node.module, *(f"{node.module}.{alias.name}" for alias in node.names)]
+        else:
+            continue
+        found += [
+            name
+            for name in names
+            if name.split(".")[0] == "tests" and name.split(".")[-1].startswith("test_")
+        ]
+    return found
+
+
+def test_no_test_module_imports_another():
+    """A helper two test modules share lives in `tests/support/`, which is not collected, so
+    splitting or renaming one test file never breaks another."""
+    offenders = [
+        f"{py.relative_to(ROOT)} imports {name}"
+        for py in sorted(TESTS.rglob("*.py"))
+        for name in _test_module_imports(py)
+    ]
+    assert offenders == [], "move the shared helper into tests/support/:\n" + "\n".join(offenders)

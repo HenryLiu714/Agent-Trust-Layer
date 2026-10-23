@@ -73,14 +73,14 @@ uv run python examples/refund_agent/seed.py         # once, outside shadow: seed
 uv run irimi shadow -- python examples/refund_agent/agent.py
 ```
 
-`tests/test_phase_exit.py` holds a hermetic criterion per phase, and Phase 2's twin through the
-real `irimi shadow`, all of which run on every `uv run pytest -q`; and one live check of that run.
-The live check is marked `live`, which a plain `uv run pytest` deselects even when `STRIPE_API_KEY`
+`tests/e2e/test_refund_agent.py` holds a hermetic criterion per phase, and Phase 2's twin through
+the real `irimi shadow`, all of which run on every `uv run pytest -q`.
+`tests/live/test_stripe_test_mode.py` holds one live check of that run. The live check is marked `live`, which a plain `uv run pytest` deselects even when `STRIPE_API_KEY`
 is exported. Run it with `uv run pytest -m live`; it still skips unless `STRIPE_API_KEY` is set and
 the `examples` group is installed. Run it by hand before closing a phase:
 
 ```
-STRIPE_API_KEY=sk_test_... uv run pytest -m live -q -rs tests/test_phase_exit.py
+STRIPE_API_KEY=sk_test_... uv run pytest -m live -q -rs tests/live
 ```
 
 With `SLACK_BOT_TOKEN` and `SLACK_CHANNEL` also set, the agent posts to Slack and reads the channel
@@ -92,10 +92,10 @@ spelling it was sent, so a post to `#general` is read back from a channel irimi 
 
 ```
 STRIPE_API_KEY=sk_test_... SLACK_BOT_TOKEN=xoxb-... SLACK_CHANNEL=C0123 \
-  uv run pytest -m live -q -rs tests/test_phase_exit.py
+  uv run pytest -m live -q -rs tests/live
 ```
 
-Phase 3's exit for a server agent has a hermetic half, `tests/test_phase3_exit.py`, which runs on
+Phase 3's exit for a server agent has a hermetic half, `tests/e2e/test_server_agent.py`, which runs on
 every `uv run pytest -q`, and a container half, which needs Docker with compose, `uv` and a
 test-mode key, and is run by hand before closing the phase (`examples/server_agent/README.md`).
 It seeds two charges, builds both images, refunds both charges at once through the agent under
@@ -106,7 +106,7 @@ STRIPE_API_KEY=sk_test_... examples/server_agent/check.sh
 ```
 
 Phase 3's exit for an LLM agent (use case 1) has a hermetic half too,
-`tests/test_phase3_replay_exit.py`, and a live half run by hand before closing the phase
+`tests/e2e/test_llm_agent_replay.py`, and a live half run by hand before closing the phase
 (`examples/llm_refund_agent/README.md`): record the agent against Stripe test mode and the real
 Anthropic API, replay it with `prompt_half.txt`, and check that the replay names the model call as
 where it diverged, the refund as the write that changed, and that Stripe holds no refund.
@@ -158,7 +158,11 @@ src/irimi/
   cli/  __main__.py  testing.py       the command and its composition root; `python -m irimi`
   maps/*.yaml                         the shipped service maps
   fixtures/*.json                     the vendored response objects L1 answers start from
-tests/                                one file per module, plus the invariant and exit tests
+tests/                                unit tests of the modules that need no running engine
+tests/engine/  cli/  sdk/             the engine, the commands and the SDK, each run for real
+tests/safety/                         the rules every run keeps, one file each (see its README)
+tests/e2e/  live/                     whole agents under irimi; `live` calls real services
+tests/support/                        the helpers and fakes the tests share; never collected
 examples/refund_agent/                the fixture agent the proxy is tested against
 examples/server_agent/                a server agent beside `irimi serve`, in containers
 examples/llm_refund_agent/            an LLM agent recorded, its prompt edited, and replayed
@@ -166,7 +170,7 @@ examples/workflows/                   the sample workflows and the harness that 
 tests/workflows/                      the workflows' invariants and per-workflow pins
 ```
 
-Two tests guard the layout itself. `tests/test_import_boundary.py` fails if mitmproxy is imported
+Two tests guard the layout itself. `tests/safety/test_import_boundary.py` fails if mitmproxy is imported
 outside `engine/mitm.py`, or if a module imports a higher layer, another package of its own
 layer, or a module after it in its own package; when you add a module it asks you to place it in
 the layer table (and in `docs/architecture.md`, which it checks against the same table).
@@ -191,7 +195,7 @@ schema; the loader refuses anything outside it by name. Things to know before yo
   kind. This is THE SCOPE RULE; `servicemaps/rules.py` explains why.
 - Shipped maps never set a `target:`. Targets belong in a user's overrides file.
 - `tests/test_servicemap.py` pins the shipped maps' hosts, route counts and a round-trip through a
-  built wheel; `tests/test_pipeline.py` pins how each shipped route classifies. Add to both.
+  built wheel; `tests/test_classify.py` pins how each shipped route classifies. Add to both.
 
 ## Conventions
 

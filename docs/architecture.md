@@ -65,7 +65,7 @@ with the agent's own bytes, and the control endpoint refuses a cut body `413`.
 
 The code is packaged by concept, and the packages sit in layers: a module may import any module
 of a lower layer, and a module listed before it in its own package, and nothing else.
-`tests/test_import_boundary.py` holds the code to this table, with each package's module order,
+`tests/safety/test_import_boundary.py` holds the code to this table, with each package's module order,
 and this table to the test's; it also holds that `mitmproxy` is imported in `engine/mitm.py` and
 nowhere else. Add a module and the test asks you to place it there and here. A package nested in
 another (`services/stripe/`, `record/store/`) is one entry of its parent. Each module's own
@@ -75,7 +75,7 @@ docstring says what it holds.
 | --- | --- | --- | --- |
 | 0 | `core/` | `exchange`, `netaddr`, `secret_shapes`, `money`, `limits`, `opener`, `exitcodes`, `calls`, `bodies` | The vocabulary every other package speaks: requests, responses and exchanges with their kinds, flags and write-set predicates, addresses and the one loopback rule, credential shapes, size bounds, exit codes, a trigger's call bound to its parameters, and the never-raising body parser. |
 | 1 | `protocol/` | `headers`, `env`, `trace`, `entrypoints`, `control`, `replay_files` | What crosses a process boundary or reaches disk as JSON: irimi's headers, the child's environment, the trace format's records and codecs, `module:qualname` entrypoints, the control endpoint's routes and bodies, and the files a replay's child and `irimi.testing` read. The engine and the SDK both import it and never each other. |
-| 2 | `config/`, `sdk/` | `paths`, `files`, `ca`; `sdk/`'s private modules | Side by side: `config` is irimi's state on this machine (where it lives, owner-only files, the local CA); `sdk` is what an agent imports, whose public surface is `irimi.sdk.__all__` and whose imports `tests/test_sdk_surface.py` holds to `core` and `protocol`. |
+| 2 | `config/`, `sdk/` | `paths`, `files`, `ca`; `sdk/`'s private modules | Side by side: `config` is irimi's state on this machine (where it lives, owner-only files, the local CA); `sdk` is what an agent imports, whose public surface is `irimi.sdk.__all__` and whose imports `tests/sdk/test_surface.py` holds to `core` and `protocol`. |
 | 3 | `servicemaps/` | `model`, `rules`, `loader`, `__init__`, `classify` | The service maps as code: the dataclasses and route matching, the validation (the scope rule lives in `rules`), the loader, and `classify`, what a request is by the maps. |
 | 4 | `services/` | `model`, `generic`, `stripe/`, `slack/`, `__init__` | What irimi knows about each service: one `Service` spec per service in `REGISTRY`, the generic echo and fixture answers, and each service's answers, effects and preconditions. |
 | 5 | `record/` | `redact`, `store/` | What a run leaves on disk: the redacted copy of each event, and the run store that writes and reads it. |
@@ -142,7 +142,7 @@ twice - once where a configuration is loaded and again at the decision it protec
   story.
 - **Stamping.** Every response irimi decided carries `Irimi-Answered-By` naming the answer;
   a live forward carries none, because absence is how a client tells the real service's response
-  from ours. `tests/test_invariants.py` checks this against a real run and against policies
+  from ours. `tests/safety/test_answered_by.py` checks this against a real run and against policies
   built to break it. A control endpoint answer carries `control`, which is not an `answered_by`
   value because a control request is never an exchange (#73).
 - **Irimi's own wire vocabulary is never the agent's.** The query pair irimi drops from a read it
@@ -177,7 +177,7 @@ twice - once where a configuration is loaded and again at the decision it protec
   reader.** The first keeps a write irimi says would have been refused from being replayed onto
   later reads as though it had happened; the second is what stops the whole L3 path from silently
   doing nothing in the product while every test that builds a policy bare still passes.
-  `tests/test_invariants.py` holds both against a real run (#45).
+  `tests/safety/test_write_log.py` and `tests/cli/test_main.py` hold them against a real run (#45).
 - **A precondition says `not_evaluable` rather than guessing, in either direction.** A false
   rejection invents a refusal the service never made; a false pass claims a check that never ran,
   and the summary prints `L3 preconditions passed` off it. So a non-200, an unparseable body, an
@@ -197,7 +197,7 @@ twice - once where a configuration is loaded and again at the decision it protec
   path where irimi accepted and faked a write, so an L3 rejection, an idempotency conflict, a
   replay and a delegated write all list nothing by construction, not by a second check - the same
   set the write log holds. A replay listing its events again would promise one refund's
-  `refund.created` twice. `tests/test_invariants.py` holds it against a real run (#47).
+  `refund.created` twice. `tests/safety/test_write_log.py` holds it against a real run (#47).
 
 ## State on disk
 

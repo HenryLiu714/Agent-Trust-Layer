@@ -705,7 +705,7 @@ container, an SDK that ignores the proxy variables, such as stripe-python, canno
 on `ThreadingHTTPServer`, each request one `@sdk.trigger` run with a write tool and a faked refund,
 and a `compose.yaml` that runs it and irimi in two containers wired as above. Its `check.sh` sends
 two refunds at once against Stripe test mode and checks that irimi stored two runs and Stripe
-holds no refund. `tests/test_phase3_exit.py` runs the same two requests hermetically on every test
+holds no refund. `tests/e2e/test_server_agent.py` runs the same two requests hermetically on every test
 run.
 
 ## Comparing two runs
@@ -886,7 +886,7 @@ irimi replay · 725dc6add559a16f -> d63663c6da8905c7
 agent that asks Anthropic what to refund, with a read tool and a write tool over its own SQLite, a
 `prompt.txt` and a `prompt_half.txt`. Its README records a run against Stripe test mode and the
 real Anthropic API, replays it with the half prompt, and says what a pass looks like.
-`tests/test_phase3_replay_exit.py` does the same hermetically on every test run.
+`tests/e2e/test_llm_agent_replay.py` does the same hermetically on every test run.
 
 What a replay cannot do:
 
@@ -1026,7 +1026,7 @@ uv run irimi shadow -- python examples/refund_agent/agent.py
 Bare, the refund is real. Under shadow, the read returns your real test-mode charges, the refund is
 answered from the fixture, the list and the re-read show it through the overlay, and the retry is
 refused with `charge_already_refunded`. Stripe itself never sees a refund.
-`tests/test_phase_exit.py` runs the same flow hermetically on every test run, and live when
+`tests/e2e/test_refund_agent.py` runs the same flow hermetically on every test run, and live when
 `STRIPE_API_KEY` is set; `CONTRIBUTING.md` has the details, including the optional Slack post.
 
 ## Roadmap

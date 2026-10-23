@@ -35,7 +35,7 @@ def decode_body(body: bytes, content_encoding: str) -> Decoded | None:
     hook holds at most twice the cap, while a codec assembles its output into one bytes object,
     and never what a few KB of a bomb would have decoded to. The engine's `_body` and
     `capture.recorded_stream` say what of a cut body is recorded.
-    `tests/test_bounded_decoding.py` measures the bound.
+    `tests/engine/test_bounded_decoding.py` measures the bound.
 
     The encodings are mitmproxy's own: gzip, deflate (and its raw form), br, zstd and the
     identities, each as lenient as mitmproxy's decoder of it. Any other name is not decoded.

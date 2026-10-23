@@ -23,7 +23,7 @@ entrypoint is importable. It refuses a Stripe key that is not `sk_test_`.
 
 ## Two halves
 
-- **Hermetic, in CI.** `tests/test_phase3_replay_exit.py` records the agent under the real
+- **Hermetic, in CI.** `tests/e2e/test_llm_agent_replay.py` records the agent under the real
   `irimi shadow` against a loopback Stripe and a loopback Anthropic that decides from the system
   prompt alone. It replays the run unchanged with the agent's database deleted, and again with
   `PROMPT_FILE=prompt_half.txt`, through `irimi replay` and through `irimi.testing.replay()`. It

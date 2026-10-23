@@ -56,7 +56,7 @@ class NoReader(Reader):
     is recorded `precondition: None` - the same state as a route that declares no check - because
     nothing was asked, and `not_evaluable` is reserved for a question irimi put and could not get
     an answer to. Shadow mode never holds one: `cli.compose.build_engine` wires `UpstreamReader`,
-    and `tests/test_invariants.py` pins that it does.
+    and `tests/cli/test_main.py` pins that it does.
     """
 
     def __call__(self, request: Request) -> Response | None:

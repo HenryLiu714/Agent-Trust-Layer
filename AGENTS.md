@@ -14,9 +14,11 @@ Python 3.12+, managed with `uv`. See `docs/architecture.md` for the module map a
 
 ## Rules that tests enforce
 
+`tests/safety/README.md` names the test that holds each rule and what breaks if it fails.
+
 - `mitmproxy` is imported only in `src/irimi/engine/mitm.py`. Everything else uses the `Engine`
   protocol.
-- A module imports only from lower layers. The layer table is in `tests/test_import_boundary.py`
+- A module imports only from lower layers. The layer table is in `tests/safety/test_import_boundary.py`
   and `docs/architecture.md`; a new module has to be placed in both.
 - Nothing in a mitmproxy hook may raise: a raised hook forwards the flow, and a forwarded write
   escapes shadow mode. Fail closed and flag it.

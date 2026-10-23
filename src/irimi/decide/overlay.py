@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 # A delegated read is never overlaid: its target owns that state. A streamed response never
 # reaches the overlay: mitmproxy does not assemble its body, and its headers are already sent.
-# Both are enforced in `session.ShadowSession.complete` and covered by tests/test_engine_mitm.py.
+# Both are enforced in `session.ShadowSession.complete` and covered by the tests in tests/engine/.
 
 
 @dataclass(frozen=True)

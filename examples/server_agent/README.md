@@ -18,7 +18,7 @@ environment, so it needs no code to go through irimi. Start it with
 
 ## Two halves
 
-- **Hermetic, in CI.** `tests/test_phase3_exit.py` runs the real `irimi serve` and this
+- **Hermetic, in CI.** `tests/e2e/test_server_agent.py` runs the real `irimi serve` and this
   app as two processes against a loopback Stripe, sends two refunds at once and checks that each
   is one run holding only its own charge.
 - **Containers, by hand.** `check.sh` runs irimi and the app in two containers

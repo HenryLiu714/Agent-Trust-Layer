@@ -43,6 +43,7 @@ import sys
 import threading
 from collections.abc import Coroutine
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from http.client import HTTPConnection
 from typing import Any
 from urllib.parse import urlencode, urlsplit
@@ -358,10 +359,38 @@ def handle(message: dict[str, Any]) -> None:
         worker = threading.Thread(target=refund, args=(message,))
         worker.start()
         worker.join()
+    elif how == "in_turn":
+        refund_in_turn(message)
     else:
         refund(message)
     if message.get("audit"):
         audit(message)
+
+
+@dataclass
+class _Turns:
+    """`concurrent_shared_charge`'s order: message 0 refunds first, the other once that refund is
+    answered, and neither run reads the charge again until both have refunded."""
+
+    first_refunded: threading.Event
+    both_refunded: threading.Barrier
+
+
+# Set by `consume` for `concurrent_shared_charge`; None in every other scenario, and when a
+# replay calls one run's trigger alone, which then has no other run to wait for.
+_turns: _Turns | None = None
+
+
+def refund_in_turn(message: dict[str, Any]) -> None:
+    """Refund, then read the charge again, each run's later calls after the other run's refund."""
+    turns = _turns
+    if turns is not None and message["index"] != 0:
+        turns.first_refunded.wait(agentkit.timeout())
+    refund(message)
+    if turns is not None:
+        turns.first_refunded.set()
+        turns.both_refunded.wait(agentkit.timeout())
+    read(message)
 
 
 # Set by `handle_async` once a stuck message is in flight, so the shutdown cancels it mid-run.
@@ -567,7 +596,10 @@ def consume(messages: list[dict[str, Any]], how: str) -> tuple[int, int]:
             return False
         return True
 
-    if how == "threads":
+    if how in ("threads", "in_turn"):
+        if how == "in_turn":
+            global _turns
+            _turns = _Turns(threading.Event(), threading.Barrier(len(messages)))
         with ThreadPoolExecutor(4) as pool:
             done = list(pool.map(safe, messages))
     elif how in ("asyncio", "async_run", "handoff", "task"):
@@ -614,6 +646,7 @@ SCENARIOS: dict[str, tuple[int, str, dict[str, Any]]] = {
     "nested_trigger": (2, "serial", {"audit": True}),
     "one_message_fails": (4, "serial", {}),
     "shared_charge": (2, "serial", {}),
+    "concurrent_shared_charge": (2, "in_turn", {"refund_in": "in_turn"}),
     "async_run": (4, "async_run", {}),
     "cancelled_on_shutdown": (3, "shutdown", {}),
     "worker_methods": (4, "worker", {}),
@@ -643,10 +676,10 @@ SHARED_CHARGE = "ch_QSHARED"  # 4900; two runs each refund 3000 of it
 
 def messages_for(scenario: str) -> list[dict[str, Any]]:
     count, _, extra = SCENARIOS[scenario]
-    if scenario == "shared_charge":
+    if scenario in ("shared_charge", "concurrent_shared_charge"):
         # Indexes 0 and len(CLIENTS): both through urllib, so both reads' bodies are logged (`saw`).
         indexes = (0, len(CLIENTS))
-        return [{"charge": SHARED_CHARGE, "amount": 3000, "index": i} for i in indexes]
+        return [{"charge": SHARED_CHARGE, "amount": 3000, "index": i, **extra} for i in indexes]
     out = [{"charge": charge_id(i), "amount": 100 + i, "index": i, **extra} for i in range(count)]
     if scenario == "one_pool_8":
         for message in out:

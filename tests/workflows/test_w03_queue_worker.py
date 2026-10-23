@@ -391,6 +391,40 @@ def test_a_second_runs_summary_shows_none_of_the_first_runs_writes(run_workflow)
     )
 
 
+@pytest.mark.parametrize("mode", MODES)
+def test_two_concurrent_runs_on_one_charge_each_see_their_own_refund_alone(run_workflow, mode):
+    """Two runs at once refund 30.00 each of one 49.00 charge, the second sent once the first is
+    answered, and both read the charge again once both are faked. Neither run's precondition
+    check sees the other's refund, so both pass, and each later read shows its own refund alone:
+    30.00 refunded, never 60.00. The bare run, against one real Stripe, refuses the second."""
+    shadow = run_workflow(W, "concurrent_shared_charge", mode)
+    runs = [e["run"] for e in shadow.events("run.start")]
+    assert len(runs) == 2 and set(shadow.by_run()) == set(runs)
+    for run_id in runs:
+        mine = [c for c in shadow.calls() if c["run"] == run_id]
+        assert [(c["method"], c["status"], c["answered_by"]) for c in mine] == [
+            ("GET", 200, None),
+            ("POST", 200, "fake-L1"),
+            ("GET", 200, "overlay"),
+        ]
+    assert sorted(e["amount_refunded"] for e in shadow.events("saw")) == [0, 0, 3000, 3000]
+    assert shadow.internet.writes() == []
+    bare = run_workflow(W, "concurrent_shared_charge", "bare")
+    assert [c["status"] for c in bare.calls() if c["method"] == "POST"] == [200, 400]
+    if mode == "shadow":
+        assert shadow.summary().count(PASSED_REFUND) == 2
+        assert REFUSED_REFUND not in shadow.summary()
+        return
+    blocks = shadow.run_blocks()
+    for run_id in runs:
+        assert PASSED_REFUND in blocks[run_id]
+        assert REFUSED_REFUND not in blocks[run_id]
+        assert (
+            "  api.stripe.com  2 reads (1 showing this run's writes)  1 engine read  1 write "
+            "intercepted" in blocks[run_id]
+        )
+
+
 @pytest.mark.parametrize("scenario", ["threads_8", "asyncio_8"])
 @pytest.mark.parametrize("mode", MODES)
 def test_runs_list_prints_one_line_per_message_and_one_for_the_process(
@@ -994,7 +1028,7 @@ def test_irimi_compare_of_two_runs_one_process_made(run_workflow, scenario, mode
 
 
 @pytest.mark.parametrize("mode", MODES)
-@pytest.mark.parametrize("scenario", ["shared_charge"])
+@pytest.mark.parametrize("scenario", ["shared_charge", "concurrent_shared_charge"])
 def test_irimi_compare_of_two_runs_on_one_charge_finds_the_same_refund(
     run_workflow, scenario, mode
 ):

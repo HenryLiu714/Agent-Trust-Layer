@@ -46,7 +46,13 @@ WORKFLOW = Workflow(
         "shared_charge": Scenario(
             ("shared_charge",),
             setup=_charges,
-            doc="two runs refund one charge: the second run's reads see the first run's fake",
+            doc="two runs refund one charge in turn: the second never sees the first run's fake",
+        ),
+        "concurrent_shared_charge": Scenario(
+            ("concurrent_shared_charge",),
+            setup=_charges,
+            doc="two concurrent runs each refund one charge and read it again: each run's read "
+            "and precondition check see its own refund alone",
         ),
         "async_run": Scenario(
             ("async_run",),

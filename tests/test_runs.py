@@ -204,7 +204,7 @@ def test_runs_list_prints_an_ok_an_error_and_an_incomplete_run_newest_first(home
     ]
     assert handbuilt == (
         f"handbuilt  {_local(HAND_BUILT_AT)}  -  incomplete  sdk  refund_ticket  "
-        "2 exchanges  1 writes"
+        "2 exchanges  1 write"
     )
 
     assert main(["runs", "list", "--limit", "1"]) == 0
@@ -241,6 +241,28 @@ def test_runs_list_names_a_damaged_run_and_still_lists_the_others(home, capfd):
     assert err.startswith(f"warning: run handbuilt could not be read: {events}, line 1: blob ")
 
 
+def test_runs_list_counts_the_writes_runs_show_s_summary_prints_a_line_for(home, capfd):
+    """A refund the precondition check rejected never entered the write log, but the summary
+    prints it (`would fail`), and so `runs list` counts it."""
+    rejected = dataclasses.replace(
+        _refund("checked"),
+        answered_by="fake-L1",
+        precondition="rejected",
+        rejection_code="charge_already_refunded",
+    )
+    s = DirectoryStore(home / "store", redact.load_key(home))
+    s.start_run(_ended_run("checked", HAND_BUILT_AT))
+    s.record(rejected)
+    s.close()
+    assert main(["runs", "list"]) == 0
+    listed = capfd.readouterr().out
+    assert listed.endswith("  1 exchange  1 write\n")
+    assert main(["runs", "show", "checked"]) == 0
+    shown = capfd.readouterr().out.splitlines()
+    assert "  api.stripe.com  1 write intercepted" in shown
+    assert "  ✗ refund $49.00 on ch_1  would fail: charge_already_refunded" in shown
+
+
 def _ended_run(run_id: str, started_at: float, **changes) -> RunRecord:
     record = RunRecord(
         schema_version=trace.SCHEMA_VERSION,
@@ -273,7 +295,7 @@ def test_runs_list_shows_a_labelled_run_newer_than_the_limit_s_worth_of_process_
     lines = capfd.readouterr().out.splitlines()
     assert len(lines) == DEFAULT_RUNS_LIMIT
     assert lines[0] == (
-        f"labelled  {_local(labelled_at)}  -  incomplete  header  -  1 exchanges  1 writes"
+        f"labelled  {_local(labelled_at)}  -  incomplete  header  -  1 exchange  1 write"
     )
 
 
@@ -295,7 +317,7 @@ def test_runs_list_and_show_name_the_run_a_replay_replayed(home, capfd):
     assert main(["runs", "list"]) == 0
     assert capfd.readouterr().out.splitlines() == [
         f"labelled  {_local(HAND_BUILT_AT + 7)}  -  incomplete  header, replay of recorded  -  "
-        "1 exchanges  1 writes",
+        "1 exchange  1 write",
         f"started  {_local(HAND_BUILT_AT + 6)}  1.0s  ok  sdk, replay of recorded  -  "
         "0 exchanges  0 writes",
         f"replayed  {_local(HAND_BUILT_AT + 5)}  1.0s  ok  replay of recorded  -  "
@@ -376,7 +398,7 @@ def test_runs_list_reads_no_body_to_count_a_run_s_events(home, capfd, monkeypatc
 
     monkeypatch.setattr(Path, "read_bytes", no_blob_reads)
     assert main(["runs", "list"]) == 0
-    assert capfd.readouterr().out.endswith("2 exchanges  1 writes\n")
+    assert capfd.readouterr().out.endswith("2 exchanges  1 write\n")
 
 
 def test_runs_list_never_prints_a_negative_duration(home, capfd):

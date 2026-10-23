@@ -898,10 +898,11 @@ use. `IRIMI_HOME` moves irimi's state (see `.env.example`).
 `runs list`, `runs show` and `compare` take `--store DIR` too. `runs list` prints each run's id,
 start, duration, status (`ok`, `error`, or `incomplete` for one that never ended), attribution
 (`replay of <run id>` for a replay's run, `header, replay of <run id>` for a run an
-`Irimi-Run` label made in a replay), trigger, and its exchange and write counts. `runs show`
-prints the summary `irimi shadow` printed for the run, from what was stored (a replay's run, which
-printed none, opens its block `irimi replay`); `runs show unattributed` shows the exchanges no run
-claimed. See [Reading a run back](docs/trace-format.md#reading-a-run-back) for where the two summaries differ.
+`Irimi-Run` label made in a replay), trigger, and its exchange and write counts, the writes being
+the ones its summary prints a line for, a write the precondition check refused among them.
+`runs show` prints the summary `irimi shadow` printed for the run, from what was stored (a
+replay's run, which printed none, opens its block `irimi replay`); `runs show unattributed`
+shows the exchanges no run claimed. See [Reading a run back](docs/trace-format.md#reading-a-run-back) for where the two summaries differ.
 
 To install irimi as a standalone tool instead of using the venv, run `uv tool install .` or
 `pipx install .` from the repo root.

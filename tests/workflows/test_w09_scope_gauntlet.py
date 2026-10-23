@@ -586,7 +586,7 @@ def test_a_run_ended_over_the_control_endpoint_no_longer_lists_as_incomplete(run
     shadow = run_workflow(W, "control_runs", mode)
     ran = [
         *(
-            [run_id, "<started>", "<elapsed>", "ok", "sdk", run_id, "1 exchanges", "0 writes"]
+            [run_id, "<started>", "<elapsed>", "ok", "sdk", run_id, "1 exchange", "0 writes"]
             for run_id in CONTROL_RUNS
         ),
         ["ctl-error", "<started>", "<elapsed>", "error", "sdk", "ctl-error"]
@@ -632,7 +632,7 @@ def test_a_start_re_posted_after_its_end_is_dropped_and_the_run_kept_whole(run_w
     assert stored.record == sdk_record(shadow, "ctl-restarted", "restarted_start", "restarted_end")
     assert [report.event_line(e) for e in stored.events] == [read_line(f"/v1/charges/{CHARGE}")]
     [line] = [f for f in listed(shadow) if f[0] == "ctl-restarted"]
-    assert line[3:] == ["ok", "sdk", "ctl-restarted", "1 exchanges", "0 writes"]
+    assert line[3:] == ["ok", "sdk", "ctl-restarted", "1 exchange", "0 writes"]
     assert shown(shadow, "ctl-restarted")[:8] == [
         "run: ctl-restarted",
         "attribution: sdk",

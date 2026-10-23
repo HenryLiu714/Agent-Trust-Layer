@@ -40,8 +40,8 @@ that Stripe holds no refund for either charge, and tears everything down. A pass
 
 ```
 --- irimi runs list
-30c26ae8c452baa9  2026-10-13 20:50:26  0.4s  ok  sdk  handle_refund  3 exchanges  1 writes
-4087dd7e4ab996b9  2026-10-13 20:50:26  0.4s  ok  sdk  handle_refund  3 exchanges  1 writes
+30c26ae8c452baa9  2026-10-13 20:50:26  0.4s  ok  sdk  handle_refund  3 exchanges  1 write
+4087dd7e4ab996b9  2026-10-13 20:50:26  0.4s  ok  sdk  handle_refund  3 exchanges  1 write
 ...
 --- Stripe holds no refund for either charge
 ch_irimiExample00000000001: amount_refunded=0 refunds=0

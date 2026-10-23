@@ -447,7 +447,7 @@ def test_runs_list_prints_one_line_per_message_and_one_for_the_process(
         assert re.fullmatch(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d", f[1]), f
         if f[4] == "sdk":
             assert re.fullmatch(r"\d+\.\ds", f[2]), f
-            assert [f[3], *f[5:]] == ["ok", TRIGGERS[scenario], "3 exchanges", "1 writes"]
+            assert [f[3], *f[5:]] == ["ok", TRIGGERS[scenario], "3 exchanges", "1 write"]
         else:
             assert (f[0], f[3], f[4], f[6:]) == (
                 shadow.engine_run_id(),

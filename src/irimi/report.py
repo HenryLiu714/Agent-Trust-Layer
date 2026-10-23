@@ -797,12 +797,13 @@ def run_list_line(record: RunRecord, events: Sequence[Event] | None) -> str:
     duration = NOT_SET if elapsed is None else f"{elapsed:.1f}s"
     trigger = printable(record.trigger.name) if record.trigger is not None else NOT_SET
     if events is None:
-        exchanges = writes = "?"
+        counts = ["? exchanges", "? writes"]
     else:
-        # Telemetry counts, as it does in the summary's `N exchanges`; a tool call does not.
+        # Telemetry counts, as it does in the summary's `N exchanges`; a tool call does not. The
+        # writes are the ones the summary prints a line for.
         seen = [event for event in events if not isinstance(event, ToolCall)]
-        exchanges = str(len(seen))
-        writes = str(sum(1 for ev in seen if isinstance(ev, Exchange) and is_authored_write(ev)))
+        writes = sum(1 for ev in seen if isinstance(ev, Exchange) and is_intercepted(ev))
+        counts = [_plural(len(seen), "exchange"), _plural(writes, "write")]
     return "  ".join(
         [
             record.run_id,
@@ -811,8 +812,7 @@ def run_list_line(record: RunRecord, events: Sequence[Event] | None) -> str:
             run_status(record),
             run_attribution(record),
             trigger,
-            f"{exchanges} exchanges",
-            f"{writes} writes",
+            *counts,
         ]
     )
 

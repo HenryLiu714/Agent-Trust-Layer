@@ -26,14 +26,12 @@ from irimi.record.store.reader import StoreReader
 from irimi.record.store.writer import DirectoryStore
 from irimi.replay.index import ReplayIndex
 from irimi.replay.policy import ReplayPolicy
-from tests import test_engine_mitm
-from tests.doubles import NullStore
-from tests.test_engine_mitm import _config, _start, _via_proxy
-
-upstream = test_engine_mitm.upstream  # bound here so pytest finds the fixture
+from tests.support.doubles import NullStore
+from tests.support.engine import engine_config, start_engine, via_proxy
+from tests.support.waiting import eventually
 
 RUN = "sdkrun01"
-# The engine's own run, `EngineConfig.run_id` in `test_engine_mitm._config`.
+# The engine's own run, `EngineConfig.run_id` in `engine_config`.
 PROCESS_RUN = "t3st"
 OWN_RUN = "is irimi's own run, which the SDK may not start or end"
 TRIGGER = {
@@ -119,10 +117,10 @@ class _Engine:
 
 @pytest.fixture
 def engine(tmp_path, monkeypatch):
-    cfg = _config(tmp_path, monkeypatch)
+    cfg = engine_config(tmp_path, monkeypatch)
     store = DirectoryStore(tmp_path / "store", redact.load_key(tmp_path))
     tool_calls: list[ToolCall] = []
-    eng, seen, stop = _start(cfg, store=store, on_tool_call=tool_calls.append)
+    eng, seen, stop = start_engine(cfg, store=store, on_tool_call=tool_calls.append)
     stopped = False
 
     def stop_once():
@@ -181,7 +179,7 @@ def test_an_exchange_labelled_with_the_run_lands_between_its_tool_calls(engine, 
     t0 = time.time()
     _ok(engine.call("POST", f"/_irimi/runs/{RUN}/start", _start_body(t0)))
     _ok(engine.call("POST", f"/_irimi/runs/{RUN}/tool-calls", _tool_call(time.time(), "before")))
-    status, _ = _via_proxy(
+    status, _ = via_proxy(
         engine.port,
         "GET",
         f"http://127.0.0.1:{upstream}/hello",
@@ -206,13 +204,9 @@ def test_health_reports_the_engine_serve_mode_and_the_stores_counters(engine):
     health says `written: 1`, and says what `stats()` says."""
     _ok(engine.call("POST", f"/_irimi/runs/{RUN}/start", _start_body(time.time())))
     _ok(engine.call("POST", f"/_irimi/runs/{RUN}/tool-calls", _tool_call(time.time())))
-    deadline = time.monotonic() + 10
-    while True:
-        status, headers, body = engine.call("GET", "/_irimi/health")
-        doc = json.loads(body)
-        if doc["store"]["written"] == 1 or time.monotonic() > deadline:
-            break
-        time.sleep(0.01)
+    eventually(lambda: engine.store.stats().written == 1)
+    status, headers, body = engine.call("GET", "/_irimi/health")
+    doc = json.loads(body)
     assert status == 200
     assert STAMP in headers and ("content-type", "application/json") in headers
     assert doc == {
@@ -224,8 +218,8 @@ def test_health_reports_the_engine_serve_mode_and_the_stores_counters(engine):
 
 
 def test_health_says_serve_when_the_engine_serves(tmp_path, monkeypatch):
-    cfg = dataclasses.replace(_config(tmp_path, monkeypatch), mode=Serve())
-    eng, _, stop = _start(cfg)
+    cfg = dataclasses.replace(engine_config(tmp_path, monkeypatch), mode=Serve())
+    eng, _, stop = start_engine(cfg)
     try:
         conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=10)
         conn.request("GET", "/_irimi/health")
@@ -233,7 +227,7 @@ def test_health_says_serve_when_the_engine_serves(tmp_path, monkeypatch):
         conn.close()
     finally:
         stop()
-    # NullStore, `_start`'s default, counts nothing.
+    # NullStore, `start_engine`'s default, counts nothing.
     assert doc == {
         "engine_version": __version__,
         "serve": True,
@@ -480,12 +474,12 @@ def test_every_route_ignores_a_field_it_does_not_know(engine):
 def _replaying(tmp_path, monkeypatch, *events, policy=None) -> _Engine:
     """An engine replaying a run whose `events` are given, as `cli.compose.build_engine` builds
     one: its policy a `ReplayPolicy` over their `ReplayIndex`, unless `policy` is given."""
-    cfg = _config(tmp_path, monkeypatch)
+    cfg = engine_config(tmp_path, monkeypatch)
     key = redact.load_key(tmp_path)
     store = DirectoryStore(tmp_path / "store", key, replay_of="recorded01")
     policy = policy or ReplayPolicy(ReplayIndex.from_events(list(events), key, cfg.maps), cfg.maps)
     tool_calls: list[ToolCall] = []
-    eng, seen, stop = _start(cfg, policy=policy, store=store, on_tool_call=tool_calls.append)
+    eng, seen, stop = start_engine(cfg, policy=policy, store=store, on_tool_call=tool_calls.append)
     return _Engine(eng.listen_port(), store, seen, tool_calls, stop)
 
 
@@ -536,11 +530,11 @@ def test_a_control_request_through_the_forward_proxy_is_answered_the_same(engine
     """An absolute-form URL naming the listener - an SDK whose `IRIMI_CONTROL` is not on NO_PROXY
     - reaches the endpoint, never the reverse door's 403 or the listener itself."""
     base = f"http://127.0.0.1:{engine.port}/_irimi"
-    status, body = _via_proxy(engine.port, "GET", f"{base}/health")
+    status, body = via_proxy(engine.port, "GET", f"{base}/health")
     assert status == 200 and json.loads(body)["engine_version"] == __version__
     t0 = time.time()
     for path, doc in [("start", _start_body(t0)), ("end", _end_body(t0 + 1))]:
-        status, body = _via_proxy(
+        status, body = via_proxy(
             engine.port, "POST", f"{base}/runs/{RUN}/{path}", body=json.dumps(doc).encode()
         )
         assert (status, body) == (204, b"")
@@ -565,7 +559,7 @@ def test_irimis_own_fields_are_never_read_from_a_posted_start(engine):
 def test_a_path_under_irimi_on_another_host_is_an_ordinary_request(engine, upstream):
     """Only the listener itself serves the control endpoint. The same path on any other host is
     the agent's own request, decided and recorded like every other, and never stamped `control`."""
-    status, body = _via_proxy(engine.port, "GET", f"http://127.0.0.1:{upstream}/_irimi/health")
+    status, body = via_proxy(engine.port, "GET", f"http://127.0.0.1:{upstream}/_irimi/health")
     assert (status, body) == (200, b"hello from upstream")
     [exchange] = engine.seen
     assert (exchange.answered_by, exchange.request.path) == ("live", "/_irimi/health")
@@ -640,13 +634,13 @@ def test_a_decoder_that_raises_anything_but_its_refusal_is_irimi_s_500_never_too
 def test_an_on_tool_call_that_raises_costs_the_callback_not_the_record(
     tmp_path, monkeypatch, caplog
 ):
-    cfg = _config(tmp_path, monkeypatch)
+    cfg = engine_config(tmp_path, monkeypatch)
     store = DirectoryStore(tmp_path / "store", redact.load_key(tmp_path))
 
     def broken(call):
         raise RuntimeError("summary broke")
 
-    eng, _, stop = _start(cfg, store=store, on_tool_call=broken)
+    eng, _, stop = start_engine(cfg, store=store, on_tool_call=broken)
     try:
         with caplog.at_level(logging.ERROR, logger="irimi.engine.control"):
             conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=10)

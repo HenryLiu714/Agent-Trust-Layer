@@ -1,6 +1,6 @@
 """A streamed answer over HTTP/2 on both sides of the proxy.
 
-`tests/test_engine_mitm.py` streams over HTTP/1.1, plain and TLS, and the sample corpus has no
+`tests/engine/test_streaming.py` streams over HTTP/1.1, plain and TLS, and the sample corpus has no
 TLS at all. A real provider speaks HTTP/2 to a client that offers it, and mitmproxy offers the
 upstream what the client offered, so an agent on an HTTP/2 client gets an HTTP/2 upstream. The
 tee sits on mitmproxy's version-independent HTTP layer - one call per DATA frame - and this is
@@ -18,14 +18,8 @@ from h2.config import H2Configuration
 from h2.connection import H2Connection
 from h2.events import DataReceived, RequestReceived, ResponseReceived, StreamEnded
 
-from tests.test_engine_mitm import (
-    STREAM_MAP,
-    THREE_CHUNKS,
-    _config,
-    _leaf_cert_for_loopback,
-    _maps,
-    _start,
-)
+from tests.support.engine import THREE_CHUNKS, engine_config, leaf_cert_for_loopback, start_engine
+from tests.support.maps import STREAM_MAP, map_index
 
 
 def _h2_stream_server(tls_leaf: Path, chunks, gates, alpn: list):
@@ -113,13 +107,13 @@ def _h2_through_the_proxy(cfg, proxy_port: int, upstream_port: int, gates):
 def test_a_stream_over_http2_on_both_sides_is_recorded_as_its_chunks(tmp_path, monkeypatch):
     """Each chunk reaches the agent before the upstream sends the next, and the exchange holds
     the whole stream and each chunk's length, as it does over HTTP/1.1."""
-    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch, STREAM_MAP))
+    cfg = engine_config(tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch, STREAM_MAP))
     gates = [threading.Event(), threading.Event()]
     upstream_alpn: list = []
     listener = _h2_stream_server(
-        _leaf_cert_for_loopback(cfg.ca, tmp_path / "leaf.pem"), THREE_CHUNKS, gates, upstream_alpn
+        leaf_cert_for_loopback(cfg.ca, tmp_path / "leaf.pem"), THREE_CHUNKS, gates, upstream_alpn
     )
-    eng, seen, stop = _start(cfg, trust_upstream_ca=cfg.ca.cert)
+    eng, seen, stop = start_engine(cfg, trust_upstream_ca=cfg.ca.cert)
     try:
         port = eng.listen_port()
         assert port is not None

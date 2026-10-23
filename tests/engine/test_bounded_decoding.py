@@ -37,21 +37,19 @@ from irimi.engine.control import ControlEndpoint
 from irimi.engine.decoding import Decoded, decode_body
 from irimi.record.store.reader import StoreReader
 from irimi.record.store.writer import DirectoryStore
-from tests.doubles import NullStore
-from tests.support.servers import stop_server
-from tests.test_engine_mitm import (
-    STREAM_MAP,
-    _config,
-    _maps,
-    _open_stream,
-    _recorded,
-    _reverse,
-    _start,
-    _stream_server,
-    _streamed_flow,
-    _targeted,
-    _via_proxy,
+from tests.support.doubles import NullStore
+from tests.support.engine import (
+    engine_config,
+    open_stream,
+    recorded,
+    start_engine,
+    stream_server,
+    streamed_flow,
+    via_base_url,
+    via_proxy,
 )
+from tests.support.maps import STREAM_MAP, map_index, targeted_index
+from tests.support.servers import stop_server
 
 CAP = decoding.MAX_DECODED_BODY  # type: ignore[attr-defined]
 LINE = b"x" * 1023 + b"\n"  # a body of whole 1 KiB lines, so a cut one keeps whole lines
@@ -107,8 +105,8 @@ def test_a_cut_stream_is_kept_to_its_last_complete_line(cap_of_10_lines):
     one chunk, flagged."""
     tee = StreamCapture()
     tee(gzip.compress(b"ok\n" + "é".encode() * (20 * len(LINE))))
-    flow = _streamed_flow((b"content-encoding", b"gzip"))
-    response, chunks, cut = _recorded(flow, tee, whole=True)
+    flow = streamed_flow((b"content-encoding", b"gzip"))
+    response, chunks, cut = recorded(flow, tee, whole=True)
     assert (response.body, chunks, cut) == (b"ok\n", (3,), True)
 
 
@@ -277,11 +275,11 @@ def test_a_buffered_read_bomb_reaches_the_agent_whole_and_is_recorded_empty(
         def rewrite(self, write_log, classification, read_request):
             return None
 
-    eng, seen, stop = _start(_config(tmp_path, monkeypatch), overlay=_Overlay())
+    eng, seen, stop = start_engine(engine_config(tmp_path, monkeypatch), overlay=_Overlay())
     base = f"http://127.0.0.1:{bomb_upstream}"
     try:
         # A write first, or the overlay is never asked at all.
-        _via_proxy(eng.listen_port(), "POST", f"{base}/things", body=b"{}")
+        via_proxy(eng.listen_port(), "POST", f"{base}/things", body=b"{}")
         conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=10)
         conn.request("GET", f"{base}/bomb", headers={"host": base.split("/")[2]})
         resp = conn.getresponse()
@@ -301,20 +299,21 @@ def test_a_buffered_read_bomb_reaches_the_agent_whole_and_is_recorded_empty(
 
 
 def test_a_delegated_read_bomb_reaches_the_agent_whole_stamped_and_recorded_empty(
-    tmp_path, monkeypatch, bomb_upstream, gigabyte_gzip
+    tmp_path, monkeypatch, bomb_upstream, gigabyte_gzip, refused_port
 ):
     """A delegated answer is rebuilt to stamp `Irimi-Answered-By`. Only its headers are written
     back, so the agent gets every byte the target sent, never the empty body irimi records."""
-    maps = _targeted(
+    maps = targeted_index(
         tmp_path,
         monkeypatch,
         targets=[("127.0.0.1", "", f"http://127.0.0.1:{bomb_upstream}")],
         target_reads=["127.0.0.1"],
     )
-    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
+    eng, seen, stop = start_engine(engine_config(tmp_path, monkeypatch, maps=maps))
     try:
         conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=10)
-        conn.request("GET", "http://127.0.0.1:9/hello", headers={"host": "127.0.0.1:9"})
+        addressed = f"127.0.0.1:{refused_port}"
+        conn.request("GET", f"http://{addressed}/hello", headers={"host": addressed})
         resp = conn.getresponse()
         status, answered_by, data = resp.status, resp.getheader("irimi-answered-by"), resp.read()
         conn.close()
@@ -356,9 +355,9 @@ def test_a_document_that_decodes_past_the_cap_is_stored_empty_never_in_part(
     is recorded empty and flagged, as the store records any body past MAX_REDACTED_BODY."""
     _BombUpstream.bomb = _pretty_document_bomb()
     store = DirectoryStore(tmp_path / "store", bytes(32))
-    eng, seen, stop = _start(_config(tmp_path, monkeypatch), store=store)
+    eng, seen, stop = start_engine(engine_config(tmp_path, monkeypatch), store=store)
     try:
-        status, data = _via_proxy(eng.listen_port(), "GET", f"http://127.0.0.1:{bomb_upstream}/x")
+        status, data = via_proxy(eng.listen_port(), "GET", f"http://127.0.0.1:{bomb_upstream}/x")
     finally:
         stop()
     assert (status, data == _BombUpstream.bomb) == (200, True)
@@ -375,12 +374,12 @@ def test_a_document_that_decodes_past_the_cap_is_stored_empty_never_in_part(
 def test_a_streamed_bomb_reaches_the_agent_whole_and_is_recorded_cut(
     tmp_path, monkeypatch, gigabyte_gzip
 ):
-    srv = _stream_server([gigabyte_gzip], extra_headers=(("content-encoding", "gzip"),))
-    eng, seen, stop = _start(
-        _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch, STREAM_MAP))
+    srv = stream_server([gigabyte_gzip], extra_headers=(("content-encoding", "gzip"),))
+    eng, seen, stop = start_engine(
+        engine_config(tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch, STREAM_MAP))
     )
     try:
-        conn, resp = _open_stream(eng, srv)
+        conn, resp = open_stream(eng, srv)
         assert resp.read() == gigabyte_gzip
         conn.close()
     finally:
@@ -407,8 +406,8 @@ def test_a_compressed_stream_the_tee_cut_is_recorded_as_the_whole_lines_it_decod
     tee = StreamCapture()
     tee(packed)
     assert tee.truncated
-    flow = _streamed_flow((b"content-encoding", content_encoding.encode()))
-    response, chunks, cut = _recorded(flow, tee, whole=True)
+    flow = streamed_flow((b"content-encoding", content_encoding.encode()))
+    response, chunks, cut = recorded(flow, tee, whole=True)
     assert cut
     assert len(response.body) > len(plain) // 4
     assert plain.startswith(response.body) and response.body.endswith(b"\n")
@@ -423,7 +422,9 @@ def test_a_write_whose_request_is_a_bomb_is_refused_never_faked_from_part_of_it(
     echo, its idempotency key's body hash, its precondition - and tell the agent a write it never
     sent succeeded. It is refused as an undecidable request is: locally, with irimi's own 502,
     flagged, and never forwarded - the upstream answers every POST with 500."""
-    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch)))
+    eng, seen, stop = start_engine(
+        engine_config(tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch))
+    )
     try:
         conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=10)
         url = f"http://127.0.0.1:{bomb_upstream}/things"
@@ -482,8 +483,8 @@ def test_a_bomb_is_refused_on_every_path_a_write_takes(
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     port = srv.server_address[1]
     targets = [("127.0.0.1", path, f"http://127.0.0.1:{port}/w")] if delegated else []
-    maps = _targeted(tmp_path, monkeypatch, targets=targets)
-    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
+    maps = targeted_index(tmp_path, monkeypatch, targets=targets)
+    eng, seen, stop = start_engine(engine_config(tmp_path, monkeypatch, maps=maps))
     answers = []
     try:
         for _ in range(2):
@@ -518,10 +519,10 @@ def test_a_live_request_that_is_a_bomb_is_forwarded_as_the_agent_sent_it(
     _EchoBombUpstream.bomb, _EchoBombUpstream.bodies = gigabyte_gzip, []
     srv = HTTPServer(("127.0.0.1", 0), _EchoBombUpstream)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
-    maps = _maps(tmp_path, monkeypatch, STREAM_MAP)
-    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
+    maps = map_index(tmp_path, monkeypatch, STREAM_MAP)
+    eng, seen, stop = start_engine(engine_config(tmp_path, monkeypatch, maps=maps))
     try:
-        status, data = _via_proxy(
+        status, data = via_proxy(
             eng.listen_port(),
             "POST",
             f"http://127.0.0.1:{srv.server_address[1]}/v1/chat/completions",
@@ -547,10 +548,10 @@ def test_a_live_request_that_is_a_bomb_says_so_when_its_upstream_fails_too(
     with socket.socket() as sock:  # a port nothing listens on
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
-    maps = _maps(tmp_path, monkeypatch, STREAM_MAP)
-    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
+    maps = map_index(tmp_path, monkeypatch, STREAM_MAP)
+    eng, seen, stop = start_engine(engine_config(tmp_path, monkeypatch, maps=maps))
     try:
-        status, _ = _via_proxy(
+        status, _ = via_proxy(
             eng.listen_port(),
             "POST",
             f"http://127.0.0.1:{port}/v1/chat/completions",
@@ -570,9 +571,9 @@ def test_a_control_request_bomb_is_refused_without_decoding_it_whole(
 ):
     """The control endpoint refuses a body past 2 MiB, and checks it decoded. Decoded at
     most to the cap, a 1 GiB bomb is refused as over 2 MiB, and never decoded to its gigabyte."""
-    eng, seen, stop = _start(_config(tmp_path, monkeypatch))
+    eng, seen, stop = start_engine(engine_config(tmp_path, monkeypatch))
     try:
-        status, data = _reverse(
+        status, data = via_base_url(
             eng.listen_port(),
             "POST",
             "/_irimi/runs/r1/start",
@@ -609,9 +610,9 @@ def test_a_control_request_bomb_of_one_line_is_refused_as_too_large_not_as_bad_j
 ):
     """A cut body reaches the endpoint empty, and an empty body is not JSON: it answered 400 for
     JSON it was never sent. A cut body is past 2 MiB whatever its start holds, so 413."""
-    eng, seen, stop = _start(_config(tmp_path, monkeypatch))
+    eng, seen, stop = start_engine(engine_config(tmp_path, monkeypatch))
     try:
-        status, data = _reverse(
+        status, data = via_base_url(
             eng.listen_port(),
             "POST",
             "/_irimi/runs/r1/start",

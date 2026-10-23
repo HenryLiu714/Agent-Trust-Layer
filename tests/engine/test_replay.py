@@ -11,9 +11,7 @@ import asyncio
 import dataclasses
 import http.client
 import json
-import socket
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import cast
 
 import pytest
@@ -37,152 +35,12 @@ from irimi.record.store.writer import DirectoryStore
 from irimi.replay.index import ReplayIndex
 from irimi.replay.policy import ReplayPolicy
 from irimi.servicemaps import classify
-from tests.doubles import NullStore
+from tests.support.builders import FORM_CONTENT_TYPE
 from tests.support.credentials import OTHER_PROMPT_SECRET, PROMPT_SECRET
-from tests.support.servers import stop_server
-from tests.test_invariants import stamping_violations
-
-STRIPE_MAP = """
-version: 1
-service: stripe
-hosts:
-  - 127.0.0.1
-routes:
-  - match:
-      method: GET
-      path: /v1/charges/{charge}
-    operation: charges.retrieve
-    kind: read
-    human: get charge {charge}
-  - match:
-      method: POST
-      path: /v1/refunds
-    operation: refunds.create
-    kind: write
-    human: refund {amount:money} on {charge}
-    fixture: refund
-    precondition: charge_refundable
-    fires:
-      - refund.created
-    ids:
-      id: re_
-  - match:
-      method: GET
-      path: /v1/refunds
-    operation: refunds.list
-    kind: read
-    human: list refunds
-  - match:
-      method: GET
-      path: /v1/refunds/{refund}
-    operation: refunds.retrieve
-    kind: read
-    human: get refund {refund}
-"""
-
-LLM_MAP = """
-version: 1
-service: anthropic
-hosts:
-  - localhost
-routes:
-  - match:
-      method: POST
-      path: /v1/messages
-    operation: messages.create
-    kind: llm
-    human: message with {model}
-    compare_ignores: [metadata, user, stream, stream_options, prompt_cache_key]
-"""
-
-CHARGE = {
-    "id": "ch_REAL1",
-    "object": "charge",
-    "amount": 4900,
-    "amount_refunded": 0,
-    "refunded": False,
-    "currency": "usd",
-}
-FORM = "application/x-www-form-urlencoded"
-
-
-class _Stripe(BaseHTTPRequestHandler):
-    """A Stripe that answers a charge, refuses every id it never minted, and 500s a POST, which a
-    replay must never send it."""
-
-    seen: list[tuple[str, str]] = []
-    charge_status = 200
-
-    def do_GET(self):
-        _Stripe.seen.append(("GET", self.path))
-        if self.path == "/v1/charges/ch_RESET":  # hangs up without an answer: an upstream error
-            self.close_connection = True
-            self.connection.shutdown(socket.SHUT_RDWR)
-            return
-        if self.path == "/v1/charges/ch_REAL1":
-            status, document = _Stripe.charge_status, CHARGE
-        elif self.path.split("?", 1)[0] == "/v1/refunds":
-            status, document = 200, {"object": "list", "has_more": False, "data": []}
-        else:
-            status, document = 404, {"error": {"code": "resource_missing"}}
-        body = json.dumps(document).encode()
-        self.send_response(status)
-        self.send_header("content-type", "application/json")
-        self.send_header("content-length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_POST(self):
-        _Stripe.seen.append(("POST", self.path))
-        self.send_response(500)
-        self.send_header("content-length", "0")
-        self.end_headers()
-
-    def log_message(self, *args):
-        pass
-
-
-class _Llm(BaseHTTPRequestHandler):
-    """A model that answers with its system prompt and a counter, so two answers to two calls are
-    never the same bytes. A body asking to stream gets three server-sent events."""
-
-    seen: list[dict] = []
-
-    def do_POST(self):
-        document = json.loads(self.rfile.read(int(self.headers["content-length"])))
-        _Llm.seen.append(document)
-        text = f"{document.get('system', '')} #{len(_Llm.seen)}"
-        self.send_response(200)
-        if document.get("stream") is True:
-            self.send_header("content-type", "text/event-stream")
-            self.end_headers()
-            for part in ("message_start", text, "message_stop"):
-                self.wfile.write(f"data: {json.dumps({'part': part})}\n\n".encode())
-                self.wfile.flush()
-            return
-        body = json.dumps({"id": "msg_1", "content": [{"type": "text", "text": text}]}).encode()
-        self.send_header("content-type", "application/json")
-        self.send_header("content-length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *args):
-        pass
-
-
-def _serve(handler):
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
-    return srv
-
-
-@pytest.fixture
-def stubs():
-    _Stripe.seen, _Stripe.charge_status, _Llm.seen = [], 200, []
-    stripe, llm = _serve(_Stripe), _serve(_Llm)
-    yield stripe.server_address[1], llm.server_address[1]
-    stop_server(stripe)
-    stop_server(llm)
+from tests.support.doubles import NullStore
+from tests.support.invariants import stamping_violations
+from tests.support.maps import REPLAY_LLM_MAP, REPLAY_STRIPE_MAP
+from tests.support.upstreams import REPLAY_CHARGE, Answer
 
 
 @pytest.fixture
@@ -197,8 +55,8 @@ def home(tmp_path, monkeypatch):
 def maps(tmp_path, home):
     maps_dir = tmp_path / "maps"
     maps_dir.mkdir()
-    (maps_dir / "stripe.yaml").write_text(STRIPE_MAP)
-    (maps_dir / "anthropic.yaml").write_text(LLM_MAP)
+    (maps_dir / "stripe.yaml").write_text(REPLAY_STRIPE_MAP)
+    (maps_dir / "anthropic.yaml").write_text(REPLAY_LLM_MAP)
     return servicemaps.load(cwd=tmp_path, maps_dir=maps_dir)
 
 
@@ -249,7 +107,7 @@ class _Session:
         self.engine.store.close()
 
 
-def _record(home, maps, script):
+def _record_run(home, maps, script):
     """Run `script(session)` under shadow mode, as the run `rec`, and return what it stored."""
     session = _Session(home, maps, ShadowPolicy(reader=UpstreamReader(), maps=maps), "rec")
     try:
@@ -259,10 +117,10 @@ def _record(home, maps, script):
     return StoreReader(home / "store").load_run("rec").events
 
 
-def _replay(home, maps, events, script, run_id="rep"):
+def _replay(stubs, home, maps, events, script, run_id="rep"):
     """Run `script(session)` as a replay of `events`, as the run `run_id`, with every request
     either stub saw so far forgotten. Returns the session, stopped."""
-    _Stripe.seen, _Llm.seen = [], []
+    stubs.forget()
     recording = ReplayIndex.from_events(events, redact.load_key(home), maps)
     policy = ReplayPolicy(recording, maps=maps)
     session = _Session(home, maps, policy, run_id)
@@ -280,9 +138,9 @@ def _message(llm, system="Be brief.", stream=False, **extra):
     return f"http://localhost:{llm}/v1/messages", json.dumps(body | extra).encode()
 
 
-def _refund(session, stripe, amount=100, key="k-1"):
+def _post_refund(session, stripe, amount=100, key="k-1"):
     body = f"charge=ch_REAL1&amount={amount}".encode()
-    headers = {"content-type": FORM, "idempotency-key": key}
+    headers = {"content-type": FORM_CONTENT_TYPE, "idempotency-key": key}
     return session.call("POST", f"http://127.0.0.1:{stripe}/v1/refunds", body, headers)
 
 
@@ -294,35 +152,37 @@ def _charge(session, stripe):
 
 
 def test_an_llm_call_that_differs_only_in_who_asked_is_answered_from_the_recording(
-    home, maps, stubs
+    home, maps, replay_stubs
 ):
     """`metadata` and `stream_options` say who asked and how, never what: the call is a hit,
     served byte for byte and stamped `recording`, and the model is never asked."""
-    _, llm = stubs
+    _, llm = replay_stubs
     url, body = _message(llm)
     recorded = []
-    events = _record(home, maps, lambda s: recorded.append(s.call("POST", url, body)))
+    events = _record_run(home, maps, lambda s: recorded.append(s.call("POST", url, body)))
     other = json.loads(body) | {
         "metadata": {"user_id": "someone-else"},
         "stream_options": {"include_usage": True},
     }
     replies = []
-    session = _replay(home, maps, events, lambda s: replies.append(s.call("POST", url, _j(other))))
+    session = _replay(
+        replay_stubs, home, maps, events, lambda s: replies.append(s.call("POST", url, _j(other)))
+    )
     (status, headers, data), (ex,) = replies[0], session.seen
     assert (status, data) == (recorded[0][0], recorded[0][2])
     assert headers[ANSWERED_BY_HEADER] == "recording"
     assert ex.answered_by == "recording"
-    assert _Llm.seen == []
+    assert replay_stubs.llm.seen == []
 
 
 def _j(document):
     return json.dumps(document).encode()
 
 
-def test_a_cache_control_block_anywhere_does_not_change_the_match(home, maps, stubs):
+def test_a_cache_control_block_anywhere_does_not_change_the_match(home, maps, replay_stubs):
     """A prompt-caching hint is removed at any depth, so a system prompt sent as a block with one
     matches the same block recorded without it."""
-    _, llm = stubs
+    _, llm = replay_stubs
     url = f"http://localhost:{llm}/v1/messages"
     block = {"type": "text", "text": "Be brief."}
     recorded_body = {
@@ -330,74 +190,84 @@ def test_a_cache_control_block_anywhere_does_not_change_the_match(home, maps, st
         "system": [block],
         "messages": [{"role": "user", "content": "hi"}],
     }
-    events = _record(home, maps, lambda s: s.call("POST", url, _j(recorded_body)))
+    events = _record_run(home, maps, lambda s: s.call("POST", url, _j(recorded_body)))
     cached = recorded_body | {"system": [block | {"cache_control": {"type": "ephemeral"}}]}
-    session = _replay(home, maps, events, lambda s: s.call("POST", url, _j(cached)))
+    session = _replay(replay_stubs, home, maps, events, lambda s: s.call("POST", url, _j(cached)))
     assert [ex.answered_by for ex in session.seen] == ["recording"]
-    assert _Llm.seen == []
+    assert replay_stubs.llm.seen == []
 
 
-def test_a_changed_system_prompt_is_a_miss_that_asks_the_model(home, maps, stubs):
-    _, llm = stubs
+def test_a_changed_system_prompt_is_a_miss_that_asks_the_model(home, maps, replay_stubs):
+    _, llm = replay_stubs
     url, body = _message(llm)
-    events = _record(home, maps, lambda s: s.call("POST", url, body))
+    events = _record_run(home, maps, lambda s: s.call("POST", url, body))
     _, changed = _message(llm, system="Be thorough.")
-    session = _replay(home, maps, events, lambda s: s.call("POST", url, changed))
+    session = _replay(replay_stubs, home, maps, events, lambda s: s.call("POST", url, changed))
     (ex,) = session.seen
     assert (ex.answered_by, Flag.REPLAY_MISS in ex.flags) == ("live", True)
-    assert [m["system"] for m in _Llm.seen] == ["Be thorough."]
+    assert [m["system"] for m in replay_stubs.llm.seen] == ["Be thorough."]
 
 
-def test_a_recorded_stream_answers_a_streaming_call_and_never_a_plain_one(home, maps, stubs):
+def test_a_recorded_stream_answers_a_streaming_call_and_never_a_plain_one(home, maps, replay_stubs):
     """A streamed answer is served as its joined chunks to a call that asks to stream. The same
     prompt asked without streaming is a miss: it gets an answer of its own, from the model."""
-    _, llm = stubs
+    _, llm = replay_stubs
     url, streaming = _message(llm, stream=True)
     recorded: dict = {}
-    events = _record(home, maps, lambda s: recorded.setdefault("r", s.call("POST", url, streaming)))
+    events = _record_run(
+        home, maps, lambda s: recorded.setdefault("r", s.call("POST", url, streaming))
+    )
     assert recorded["r"][2].count(b"data: ") == 3
 
     replies: list = []
-    session = _replay(home, maps, events, lambda s: replies.append(s.call("POST", url, streaming)))
+    session = _replay(
+        replay_stubs, home, maps, events, lambda s: replies.append(s.call("POST", url, streaming))
+    )
     (status, headers, data), (ex,) = replies[0], session.seen
     assert (status, data) == (200, recorded["r"][2])
     assert headers["content-type"] == "text/event-stream"
     assert ex.answered_by == "recording"
-    assert _Llm.seen == []
+    assert replay_stubs.llm.seen == []
 
     _, plain = _message(llm)
-    session = _replay(home, maps, events, lambda s: s.call("POST", url, plain))
+    session = _replay(replay_stubs, home, maps, events, lambda s: s.call("POST", url, plain))
     (ex,) = session.seen
     assert (ex.answered_by, Flag.REPLAY_MISS in ex.flags) == ("live", True)
-    assert len(_Llm.seen) == 1
+    assert len(replay_stubs.llm.seen) == 1
 
 
-def test_a_secret_in_a_request_body_matches_its_placeholder_in_the_recording(home, maps, stubs):
+def test_a_secret_in_a_request_body_matches_its_placeholder_in_the_recording(
+    home, maps, replay_stubs
+):
     """The recording holds the secret's placeholder. The live call is redacted with the same
     key before it is keyed, so the same secret matches, and another does not."""
-    _, llm = stubs
+    _, llm = replay_stubs
     url, body = _message(llm, system=f"The key is {PROMPT_SECRET}.")
-    events = _record(home, maps, lambda s: s.call("POST", url, body))
+    events = _record_run(home, maps, lambda s: s.call("POST", url, body))
     stored = next(ex for ex in events if ex.kind == "llm")
     assert PROMPT_SECRET.encode() not in stored.request.body
-    session = _replay(home, maps, events, lambda s: s.call("POST", url, body))
+    session = _replay(replay_stubs, home, maps, events, lambda s: s.call("POST", url, body))
     assert [ex.answered_by for ex in session.seen] == ["recording"]
     _, other = _message(llm, system=f"The key is {OTHER_PROMPT_SECRET}.")
-    session = _replay(home, maps, events, lambda s: s.call("POST", url, other))
+    session = _replay(replay_stubs, home, maps, events, lambda s: s.call("POST", url, other))
     assert [ex.answered_by for ex in session.seen] == ["live"]
 
 
 # ------------------------------------------------------------------------------------- reads
 
 
-def test_a_read_is_answered_once_per_time_it_was_recorded(home, maps, stubs):
+def test_a_read_is_answered_once_per_time_it_was_recorded(home, maps, replay_stubs):
     """Each recorded read answers once: two recorded, two answered from the recording, and the
     third reaches the stub."""
-    stripe, _ = stubs
-    events = _record(home, maps, lambda s: [_charge(s, stripe) for _ in range(2)])
+    stripe, _ = replay_stubs
+    events = _record_run(home, maps, lambda s: [_charge(s, stripe) for _ in range(2)])
     replies: list = []
     session = _replay(
-        home, maps, events, lambda s: replies.extend(_charge(s, stripe) for _ in range(3))
+        replay_stubs,
+        home,
+        maps,
+        events,
+        lambda s: replies.extend(_charge(s, stripe) for _ in range(3)),
     )
     assert [ex.answered_by for ex in session.seen] == ["recording", "recording", "live"]
     assert Flag.REPLAY_MISS in session.seen[2].flags
@@ -406,7 +276,7 @@ def test_a_read_is_answered_once_per_time_it_was_recorded(home, maps, stubs):
         "recording",
         None,
     ]
-    assert _Stripe.seen == [("GET", "/v1/charges/ch_REAL1")]
+    assert replay_stubs.stripe.seen == [("GET", "/v1/charges/ch_REAL1")]
 
 
 # ------------------------------------------------------------------------------------ writes
@@ -414,7 +284,7 @@ def test_a_read_is_answered_once_per_time_it_was_recorded(home, maps, stubs):
 
 def _refund_then_read_it(stripe, amount=100, key="k-1"):
     def script(session):
-        status, _, data = _refund(session, stripe, amount, key)
+        status, _, data = _post_refund(session, stripe, amount, key)
         assert status == 200
         minted = json.loads(data)["id"]
         session.call("GET", f"http://127.0.0.1:{stripe}/v1/refunds/{minted}")
@@ -422,14 +292,14 @@ def _refund_then_read_it(stripe, amount=100, key="k-1"):
     return script
 
 
-def test_the_same_write_is_answered_with_the_recorded_answer(home, maps, stubs):
+def test_the_same_write_is_answered_with_the_recorded_answer(home, maps, replay_stubs):
     """A different `Idempotency-Key` header is not a different write.
     It is answered with the recorded body at the recorded level, with the recorded L3 outcome and
     currency, and the read of the id it minted is answered from the recording too."""
-    stripe, _ = stubs
-    events = _record(home, maps, _refund_then_read_it(stripe))
+    stripe, _ = replay_stubs
+    events = _record_run(home, maps, _refund_then_read_it(stripe))
     recorded = next(ex for ex in events if ex.kind == "write")
-    session = _replay(home, maps, events, _refund_then_read_it(stripe, key="k-other"))
+    session = _replay(replay_stubs, home, maps, events, _refund_then_read_it(stripe, key="k-other"))
     write, read = session.seen
     assert write.response.body == recorded.response.body
     assert (
@@ -450,152 +320,159 @@ def test_the_same_write_is_answered_with_the_recorded_answer(home, maps, stubs):
         (Flag.FROM_RECORDING,),
         "full",
     )
-    assert _Stripe.seen == []
+    assert replay_stubs.stripe.seen == []
     assert stamping_violations(session.seen) == []
 
 
-def test_a_different_write_is_faked_and_checked_against_the_recorded_read(home, maps, stubs):
+def test_a_different_write_is_faked_and_checked_against_the_recorded_read(home, maps, replay_stubs):
     """The amount changed, so the recording has no answer: shadow mode fakes it, never forwards it,
     and decides its precondition from the recording's own read of the charge. The stub is not
     asked for the charge: a replay never checks a precondition against live state."""
-    stripe, _ = stubs
-    events = _record(home, maps, lambda s: _refund(s, stripe, 100))
-    session = _replay(home, maps, events, lambda s: _refund(s, stripe, 250))
+    stripe, _ = replay_stubs
+    events = _record_run(home, maps, lambda s: _post_refund(s, stripe, 100))
+    session = _replay(replay_stubs, home, maps, events, lambda s: _post_refund(s, stripe, 250))
     engine_read, write = session.seen
     assert (write.answered_by, write.precondition.outcome) == ("fake-L1", "passed")
     assert Flag.REPLAY_MISS in write.flags
     assert (engine_read.issued_by, engine_read.answered_by) == ("engine", "recording")
-    assert _Stripe.seen == []
+    assert replay_stubs.stripe.seen == []
 
 
-def test_a_write_the_recording_would_reject_is_rejected(home, maps, stubs):
-    stripe, _ = stubs
-    events = _record(home, maps, lambda s: _refund(s, stripe, 100))
+def test_a_write_the_recording_would_reject_is_rejected(home, maps, replay_stubs):
+    stripe, _ = replay_stubs
+    events = _record_run(home, maps, lambda s: _post_refund(s, stripe, 100))
     replies = []
-    session = _replay(home, maps, events, lambda s: replies.append(_refund(s, stripe, 9900)))
+    session = _replay(
+        replay_stubs, home, maps, events, lambda s: replies.append(_post_refund(s, stripe, 9900))
+    )
     assert replies[0][0] == 400
     write = session.seen[-1]
     assert (write.precondition.outcome, Flag.REPLAY_MISS in write.flags) == ("rejected", True)
-    assert _Stripe.seen == []
+    assert replay_stubs.stripe.seen == []
 
 
-def test_a_missed_write_with_no_recorded_read_is_not_evaluable(home, maps, stubs):
+def test_a_missed_write_with_no_recorded_read_is_not_evaluable(home, maps, replay_stubs):
     """The recording made no read of this charge, and the replay does not make one either."""
-    stripe, llm = stubs
+    stripe, llm = replay_stubs
     url, body = _message(llm)
-    events = _record(home, maps, lambda s: s.call("POST", url, body))
-    session = _replay(home, maps, events, lambda s: _refund(s, stripe, 100))
+    events = _record_run(home, maps, lambda s: s.call("POST", url, body))
+    session = _replay(replay_stubs, home, maps, events, lambda s: _post_refund(s, stripe, 100))
     engine_read, write = session.seen
     assert (engine_read.answered_by, engine_read.response) == ("recording", None)
     assert engine_read.flags == (Flag.REPLAY_MISS,)
     assert write.precondition.outcome == "not_evaluable"
-    assert _Stripe.seen == []
+    assert replay_stubs.stripe.seen == []
 
 
-def test_a_recorded_read_that_failed_is_served_again_to_the_precondition(home, maps, stubs):
+def test_a_recorded_read_that_failed_is_served_again_to_the_precondition(home, maps, replay_stubs):
     """The recorded run's read of the charge got a 500, so a write that misses is checked against
     that 500 and not against the stub, which now answers 200: the write stays L2, as it was."""
-    stripe, _ = stubs
-    _Stripe.charge_status = 500
-    events = _record(home, maps, lambda s: _refund(s, stripe, 100))
-    _Stripe.charge_status = 200
-    session = _replay(home, maps, events, lambda s: _refund(s, stripe, 250))
+    stripe, _ = replay_stubs
+    replay_stubs.stripe.answers["/v1/charges/ch_REAL1"] = Answer(500, REPLAY_CHARGE)
+    events = _record_run(home, maps, lambda s: _post_refund(s, stripe, 100))
+    del replay_stubs.stripe.answers["/v1/charges/ch_REAL1"]
+    session = _replay(replay_stubs, home, maps, events, lambda s: _post_refund(s, stripe, 250))
     engine_read, write = session.seen
     assert (engine_read.answered_by, engine_read.response.status) == ("recording", 500)
     assert write.precondition.outcome == "not_evaluable"
-    assert _Stripe.seen == []
+    assert replay_stubs.stripe.seen == []
 
 
-def test_after_a_write_misses_a_recorded_read_goes_live_and_shows_the_new_write(home, maps, stubs):
+def test_after_a_write_misses_a_recorded_read_goes_live_and_shows_the_new_write(
+    home, maps, replay_stubs
+):
     """The recorded read of the charge shows the recorded refund. Once the refund missed, that is
     not this run's world: the read goes to the stub and the overlay applies the new refund."""
-    stripe, _ = stubs
+    stripe, _ = replay_stubs
 
     def script(amount):
         def run(session):
-            _refund(session, stripe, amount)
+            _post_refund(session, stripe, amount)
             _charge(session, stripe)
 
         return run
 
-    events = _record(home, maps, script(100))
+    events = _record_run(home, maps, script(100))
     replies = []
     session = _replay(
+        replay_stubs,
         home,
         maps,
         events,
-        lambda s: (_refund(s, stripe, 250), replies.append(_charge(s, stripe))),  # type: ignore[func-returns-value]
+        lambda s: (_post_refund(s, stripe, 250), replies.append(_charge(s, stripe))),  # type: ignore[func-returns-value]
     )
     read = session.seen[-1]
     assert (read.answered_by, Flag.REPLAY_MISS in read.flags) == ("overlay", True)
     assert json.loads(replies[0][2])["amount_refunded"] == 250
-    assert _Stripe.seen == [("GET", "/v1/charges/ch_REAL1")]
+    assert replay_stubs.stripe.seen == [("GET", "/v1/charges/ch_REAL1")]
 
 
-def test_a_miss_whose_upstream_then_fails_still_says_it_missed(home, maps, stubs):
+def test_a_miss_whose_upstream_then_fails_still_says_it_missed(home, maps, replay_stubs):
     """A read whose recorded upstream failed holds no answer to serve, so the replay misses and
     forwards it, and the stub hangs up again. The exchange keeps the policy's `replay-miss` beside
     the engine's `upstream-error`, as one whose upstream answered keeps it: the answer's own flags
     are kept on every path. Under shadow mode a live answer has none, and gets only its
     `upstream-error`."""
-    stripe, _ = stubs
+    stripe, _ = replay_stubs
     url = f"http://127.0.0.1:{stripe}/v1/charges/ch_RESET"
-    events = _record(home, maps, lambda s: s.call("GET", url))
+    events = _record_run(home, maps, lambda s: s.call("GET", url))
     (recorded,) = events
     assert (recorded.answered_by, recorded.flags) == ("live", (Flag.UPSTREAM_ERROR,))
-    session = _replay(home, maps, events, lambda s: s.call("GET", url))
+    session = _replay(replay_stubs, home, maps, events, lambda s: s.call("GET", url))
     (read,) = session.seen
     assert (read.answered_by, read.response) == ("live", None)
     assert read.flags == (Flag.REPLAY_MISS, Flag.UPSTREAM_ERROR)
-    assert _Stripe.seen == [("GET", "/v1/charges/ch_RESET")]
+    assert replay_stubs.stripe.seen == [("GET", "/v1/charges/ch_RESET")]
 
 
 def test_a_matcher_that_raises_decides_a_miss_and_still_never_forwards_a_write(
-    home, maps, stubs, monkeypatch
+    home, maps, replay_stubs, monkeypatch
 ):
-    stripe, _ = stubs
-    events = _record(home, maps, lambda s: _refund(s, stripe, 100))
+    stripe, _ = replay_stubs
+    events = _record_run(home, maps, lambda s: _post_refund(s, stripe, 100))
 
     def broken(*args, **kwargs):
         raise RuntimeError("the matcher broke")
 
     monkeypatch.setattr(ReplayIndex, "answer_for", broken)
-    session = _replay(home, maps, events, lambda s: _refund(s, stripe, 100))
+    session = _replay(replay_stubs, home, maps, events, lambda s: _post_refund(s, stripe, 100))
     write = session.seen[-1]
     assert (write.answered_by, Flag.REPLAY_MISS in write.flags) == ("fake-L1", True)
-    assert ("POST", "/v1/refunds") not in _Stripe.seen
+    assert ("POST", "/v1/refunds") not in replay_stubs.stripe.seen
 
 
-def test_a_replay_stamps_every_answer_it_decided(home, maps, stubs):
+def test_a_replay_stamps_every_answer_it_decided(home, maps, replay_stubs):
     """The stamping rule holds in a replay: an answer from the recording says `recording`, a
     replayed write its recorded level, and a live forward nothing."""
-    stripe, llm = stubs
+    stripe, llm = replay_stubs
     url, body = _message(llm)
 
     def script(session):
         session.call("POST", url, body)
         _charge(session, stripe)
-        _refund(session, stripe, 100)
+        _post_refund(session, stripe, 100)
 
-    events = _record(home, maps, script)
+    events = _record_run(home, maps, script)
 
     def changed(session):
         session.call("POST", url, body)
         _charge(session, stripe)
-        _refund(session, stripe, 250)
+        _post_refund(session, stripe, 250)
         _charge(session, stripe)
 
-    session = _replay(home, maps, events, changed)
+    session = _replay(replay_stubs, home, maps, events, changed)
     assert stamping_violations(session.seen) == []
     assert sorted({ex.answered_by for ex in session.seen}) == ["fake-L1", "overlay", "recording"]
 
 
-def test_an_answer_the_engine_cannot_send_fails_closed_and_forwards_nothing(home, maps, stubs):
+def test_an_answer_the_engine_cannot_send_fails_closed_and_forwards_nothing(
+    home, maps, replay_stubs
+):
     """A replay answers with a response read off disk, whose headers need not encode as latin-1.
     `ReplayIndex.answer_for` keeps such a recording from being served, and the engine's own guard is
     the second half: building the response raised out of the request hook, which forwarded the
     write. It is answered as a decision that raised is."""
-    stripe, _ = stubs
+    stripe, _ = replay_stubs
 
     class _Unsendable:
         name = "unsendable"
@@ -606,20 +483,20 @@ def test_an_answer_the_engine_cannot_send_fails_closed_and_forwards_nothing(home
 
     session = _Session(home, maps, _Unsendable(), "rep")
     try:
-        status, headers, _ = _refund(session, stripe, 100)
+        status, headers, _ = _post_refund(session, stripe, 100)
     finally:
         session.stop()
     assert (status, headers[ANSWERED_BY_HEADER]) == (502, "irimi")
     (ex,) = session.seen
     assert Flag.DECISION_FAILED in ex.flags
-    assert _Stripe.seen == []
+    assert replay_stubs.stripe.seen == []
 
 
-def test_the_reads_an_answer_issued_are_recorded_when_it_cannot_be_sent(home, maps, stubs):
+def test_the_reads_an_answer_issued_are_recorded_when_it_cannot_be_sent(home, maps, replay_stubs):
     """The decision returned, so the precondition read it made is in hand: an answer the engine
     then cannot send is refused, and that read is still recorded after the refusal, as every read
     irimi made on the agent's behalf is. A decision that raises instead is a different case."""
-    stripe, _ = stubs
+    stripe, _ = replay_stubs
     url = f"http://127.0.0.1:{stripe}/v1/charges/ch_REAL1"
     probe = Request("GET", "http", "127.0.0.1", stripe, "/v1/charges/ch_REAL1", "", (), b"")
     cls = classify.classify(probe, maps)
@@ -644,7 +521,7 @@ def test_the_reads_an_answer_issued_are_recorded_when_it_cannot_be_sent(home, ma
 
     session = _Session(home, maps, _Unsendable(), "rep")
     try:
-        status, _, _ = _refund(session, stripe, 100)
+        status, _, _ = _post_refund(session, stripe, 100)
     finally:
         session.stop()
     assert status == 502
@@ -655,29 +532,31 @@ def test_the_reads_an_answer_issued_are_recorded_when_it_cannot_be_sent(home, ma
     assert [cast(Exchange, e).issued_by for e in events] == ["agent", "engine"]
 
 
-def test_a_read_the_overlay_translates_is_recorded_translated_whoever_answers_it(home, maps, stubs):
+def test_a_read_the_overlay_translates_is_recorded_translated_whoever_answers_it(
+    home, maps, replay_stubs
+):
     """A page whose cursor names the refund the run minted is translated before it is forwarded,
     and recorded so. The engine translates a read before the policy decides, so a
     replay looks the translated read up, records it translated too, and a replay of that replay
     finds it the same way. Neither replay sends the stub anything."""
-    stripe, _ = stubs
+    stripe, _ = replay_stubs
 
     def script(session):
-        _, _, data = _refund(session, stripe)
+        _, _, data = _post_refund(session, stripe)
         minted = json.loads(data)["id"]
         session.call("GET", f"http://127.0.0.1:{stripe}/v1/refunds?starting_after={minted}")
 
-    events = _record(home, maps, script)
+    events = _record_run(home, maps, script)
     [recorded] = [e for e in events if e.kind == "read" and e.request.path == "/v1/refunds"]
     assert "starting_after" not in recorded.request.query
-    session = _replay(home, maps, events, script)
+    session = _replay(replay_stubs, home, maps, events, script)
     page = session.seen[-1]
     assert Flag.FROM_RECORDING in page.flags
     assert page.request.query == recorded.request.query
     again = StoreReader(home / "store").load_run("rep").events
-    session = _replay(home, maps, again, script, run_id="rep2")
+    session = _replay(replay_stubs, home, maps, again, script, run_id="rep2")
     assert Flag.FROM_RECORDING in session.seen[-1].flags
-    assert _Stripe.seen == []
+    assert replay_stubs.stripe.seen == []
 
 
 class _Asked:
@@ -761,19 +640,19 @@ def test_the_engine_asks_and_records_a_read_translated_and_edits_only_a_forwarde
     assert _carries_a_translation(decision) is on_the_flow
 
 
-def test_the_engine_never_translates_a_delegated_read(home, tmp_path):
+def test_the_engine_never_translates_a_delegated_read(home, tmp_path, refused_port):
     """A delegated read's target owns that service's state, so the overlay never touches it,
     on either side."""
     maps_dir = tmp_path / "targeted"
     maps_dir.mkdir()
-    (maps_dir / "stripe.yaml").write_text(STRIPE_MAP)
+    (maps_dir / "stripe.yaml").write_text(REPLAY_STRIPE_MAP)
     targeted = servicemaps.load(
         cwd=tmp_path,
         maps_dir=maps_dir,
-        targets=[("127.0.0.1", "", "http://127.0.0.1:9")],
+        targets=[("127.0.0.1", "", f"http://127.0.0.1:{refused_port}")],
         target_reads=["127.0.0.1"],
     )
-    delegated = Decided(Delegate(ForwardTo(Target.parse("http://127.0.0.1:9"))))
+    delegated = Decided(Delegate(ForwardTo(Target.parse(f"http://127.0.0.1:{refused_port}"))))
     policy, overlay = _Asked(delegated), _Translating()
     decision = _decided(home, targeted, policy, overlay)
     assert overlay.translated == []
@@ -781,26 +660,28 @@ def test_the_engine_never_translates_a_delegated_read(home, tmp_path):
     assert not _carries_a_translation(decision)
 
 
-def test_a_read_recorded_after_a_write_the_replay_did_not_make_goes_live(home, maps, stubs):
+def test_a_read_recorded_after_a_write_the_replay_did_not_make_goes_live(home, maps, replay_stubs):
     """The recorded run refunded and then read the charge, which showed the refund. A replay that
     reads the charge without refunding - a prompt edit stopped it - is not shown a refund it never
     made: the read misses, the replay diverges, and the stub answers it."""
-    stripe, _ = stubs
+    stripe, _ = replay_stubs
 
     def refund_then_read(session):
-        _refund(session, stripe, 100)
+        _post_refund(session, stripe, 100)
         _charge(session, stripe)
 
-    events = _record(home, maps, refund_then_read)
+    events = _record_run(home, maps, refund_then_read)
     replies = []
-    session = _replay(home, maps, events, lambda s: replies.append(_charge(s, stripe)))
+    session = _replay(
+        replay_stubs, home, maps, events, lambda s: replies.append(_charge(s, stripe))
+    )
     (read,) = session.seen
     assert (read.answered_by, read.flags) == ("live", (Flag.REPLAY_MISS,))
     assert json.loads(replies[0][2])["amount_refunded"] == 0
-    assert _Stripe.seen == [("GET", "/v1/charges/ch_REAL1")]
+    assert replay_stubs.stripe.seen == [("GET", "/v1/charges/ch_REAL1")]
 
 
-def test_an_unchanged_replay_compares_the_same_as_its_recording(home, maps, stubs):
+def test_an_unchanged_replay_compares_the_same_as_its_recording(home, maps, replay_stubs):
     """What `irimi compare` and the replay's diff rest on: a replay that changes nothing prints
     every write, and the `↳` line under it, as its recording printed them, so every compared row
     is `=`. The run reads the charge, refunds it, reads it again through the overlay and pages
@@ -810,21 +691,21 @@ def test_an_unchanged_replay_compares_the_same_as_its_recording(home, maps, stub
     from irimi.report.model import RunView
     from irimi.report.summary import summary_lines
 
-    stripe, llm = stubs
+    stripe, llm = replay_stubs
     url, body = _message(llm)
 
     def script(session):
         session.call("POST", url, body)
         _charge(session, stripe)
-        _, _, data = _refund(session, stripe, 100)
+        _, _, data = _post_refund(session, stripe, 100)
         _charge(session, stripe)
         minted = json.loads(data)["id"]
         session.call("GET", f"http://127.0.0.1:{stripe}/v1/refunds?starting_after={minted}")
 
-    events = _record(home, maps, script)
-    session = _replay(home, maps, events, script)
+    events = _record_run(home, maps, script)
+    session = _replay(replay_stubs, home, maps, events, script)
     assert all(Flag.FROM_RECORDING in ex.flags for ex in session.seen)
-    assert (_Stripe.seen, _Llm.seen) == ([], [])
+    assert (replay_stubs.stripe.seen, replay_stubs.llm.seen) == ([], [])
     reader = StoreReader(home / "store")
     recorded, replayed = reader.load_run("rec"), reader.load_run("rep")
     comparison = compare.compare_runs(recorded, replayed, maps)

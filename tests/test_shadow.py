@@ -100,8 +100,7 @@ def test_banner_is_printed(home, capsys):
     assert main(["shadow", *_py("pass")]) == 0
     out = capsys.readouterr().out
     assert "listening on 127.0.0.1:" in out
-    assert "NOT virtualized" in out
-    assert "backstop: none (Phase 4)" in out
+    assert "only traffic sent through this proxy is shadowed" in out
     assert str(ca.ca_paths().cert) in out
 
 
@@ -246,7 +245,8 @@ def test_banner_names_a_delegated_service(home, tmp_path, capsys):
     assert main(["shadow", *_py("pass")]) == 0
     out = capsys.readouterr().out
     assert "delegated: stripe → http://127.0.0.1:3000 (reads + writes)" in out
-    assert "NOT virtualized" in out  # the existing banner is unchanged, not replaced
+    # The existing banner is unchanged, not replaced.
+    assert "only traffic sent through this proxy is shadowed" in out
 
 
 def test_the_banner_says_when_a_target_left_the_machine(home, capsys):

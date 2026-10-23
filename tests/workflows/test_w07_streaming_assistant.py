@@ -126,14 +126,14 @@ def test_a_telemetry_post_is_stored_as_having_happened_and_its_body_is_not(run_w
     code, out, err = shadow.runs("show", holder)
     assert (code, err) == (0, [])
     # The run has a start and an end now (#74), so its elapsed time is real: normalised here.
-    assert [re.sub(r" · \d+\.\ds · ", " · <elapsed> · ", line) for line in out[7:]] == [
+    assert [re.sub(r" · \d+\.\ds$", " · <elapsed>", line) for line in out[7:]] == [
         "",
         "live      llm       POST api.openai.com/v1/embeddings -> 200",
         "live      llm       POST api.anthropic.com/v1/messages -> 200",
         "live      llm       POST api.openai.com/v1/chat/completions -> 200",
         "telemetry api.smith.langchain.com",
         "",
-        f"irimi shadow · run {holder} · 4 exchanges · <elapsed> · backstop: none (Phase 4)",
+        f"irimi shadow · run {holder} · 4 exchanges · <elapsed>",
         "",
         "  api.anthropic.com  1 llm",
         "  api.openai.com     2 llm",

@@ -137,8 +137,7 @@ def test_under_serve_the_cascade_is_two_runs_and_two_summaries_the_second_empty(
     )
     assert len([line for line in blocks[first] if line.startswith("  ○ ")]) == 3
     assert blocks[second] == [
-        f"irimi shadow · run {second} · 0 exchanges · {_elapsed(serve, second)} · "
-        "backstop: none (Phase 4)",
+        f"irimi shadow · run {second} · 0 exchanges · {_elapsed(serve, second)}",
         "",
         "  0 exchanges · 0 live · 0 delegated · 0 virtualized",
     ]

@@ -371,13 +371,13 @@ def test_a_bare_run_stores_nothing(run_workflow, name, scenario):
 # summary is the one `irimi shadow` printed (#72). W9's control scenarios are the exception: they
 # label their reads with the runs they post (#73).
 UNLABELLED_CASES = [(n, s) for n, s in CASES if n in UNLABELLED and (n, s) not in SDK_RUN_SCENARIOS]
-ELAPSED = re.compile(r" · \d+\.\ds · ")
+ELAPSED = re.compile(r" · \d+\.\ds$")
 
 
 def no_elapsed(lines: list[str]) -> list[str]:
     """The live summary times the child and a stored one its run record: the one field that may
     differ (#72)."""
-    return [ELAPSED.sub(" · <elapsed> · ", line) for line in lines]
+    return [ELAPSED.sub(" · <elapsed>", line) for line in lines]
 
 
 @pytest.mark.parametrize(

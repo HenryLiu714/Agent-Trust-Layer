@@ -402,7 +402,7 @@ def test_the_refund_agents_four_calls_through_the_forward_proxy_are_answered_sha
     # The summary, line by line.
     run_id = seen[0].run_id
     assert report.summary_lines(run_id, seen, 1.0, maps) == [
-        f"irimi shadow · run {run_id} · 7 exchanges · 1.0s · backstop: none (Phase 4)",
+        f"irimi shadow · run {run_id} · 7 exchanges · 1.0s",
         *PHASE2_SUMMARY,
     ]
 

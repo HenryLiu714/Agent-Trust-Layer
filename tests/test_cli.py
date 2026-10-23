@@ -540,12 +540,12 @@ def _startup_on_a_pipe(monkeypatch, index, args=None):
 
 def test_the_banner_reaches_a_piped_stdout_before_anything_else_is_printed(monkeypatch):
     """`irimi serve | tee` showed nothing until the first exchange forced a flush, and a serve
-    nobody talks to showed nothing at all - not the port, not the CA path, not `backstop`."""
+    nobody talks to showed nothing at all - not the port, not the CA path, not the proxy-only
+    notice."""
     visible = _startup_on_a_pipe(monkeypatch, servicemap.MapIndex())
     assert "listening on 127.0.0.1:4000" in visible
     assert "/ca.pem" in visible
-    assert report.BACKSTOP_NOTICE in visible
-    assert report.NOT_VIRTUALIZED_NOTICE in visible
+    assert report.PROXY_ONLY_NOTICE in visible
 
 
 def test_a_delegated_services_warning_reaches_a_piped_stdout_too(monkeypatch):

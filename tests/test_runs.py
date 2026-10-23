@@ -36,7 +36,7 @@ TELEMETRY_ROUTE = """  - match:
     kind: telemetry
 """
 STRIPE_WITH_TELEMETRY = PRECONDITION_STRIPE_MAP.replace("routes:\n", "routes:\n" + TELEMETRY_ROUTE)
-ELAPSED = re.compile(r" · \d+\.\ds · ")
+ELAPSED = re.compile(r" · \d+\.\ds$")
 
 
 def _summary_block(lines: list[str]) -> list[str]:
@@ -46,7 +46,7 @@ def _summary_block(lines: list[str]) -> list[str]:
 
 
 def _no_elapsed(lines: list[str]) -> list[str]:
-    return [ELAPSED.sub(" · <elapsed> · ", line) for line in lines]
+    return [ELAPSED.sub(" · <elapsed>", line) for line in lines]
 
 
 def _process_run(store) -> RunRecord:
@@ -310,7 +310,7 @@ def test_runs_list_and_show_name_the_run_a_replay_replayed(home, capfd):
         "replay of: recorded",
         "trigger: -",
     ]
-    assert "irimi replay · run replayed · 0 exchanges · 1.0s · backstop: none (Phase 4)" in shown
+    assert "irimi replay · run replayed · 0 exchanges · 1.0s" in shown
     assert not any(line.startswith("irimi shadow · ") for line in shown)
     assert main(["runs", "show", "recorded"]) == 0
     shown = capfd.readouterr().out.splitlines()
@@ -319,7 +319,7 @@ def test_runs_list_and_show_name_the_run_a_replay_replayed(home, capfd):
         "attribution: process",
         "trigger: -",
     ]
-    assert "irimi shadow · run recorded · 0 exchanges · 1.0s · backstop: none (Phase 4)" in shown
+    assert "irimi shadow · run recorded · 0 exchanges · 1.0s" in shown
 
 
 def test_a_damaged_replay_record_is_still_marked_and_prints_on_one_line():
@@ -387,7 +387,7 @@ def test_runs_list_never_prints_a_negative_duration(home, capfd):
     assert main(["runs", "list"]) == 0
     assert capfd.readouterr().out.split("  ")[2] == "0.0s"
     assert main(["runs", "show", "stepped"]) == 0
-    assert "irimi shadow · run stepped · 0 exchanges · 0.0s · backstop: none (Phase 4)" in (
+    assert "irimi shadow · run stepped · 0 exchanges · 0.0s" in (
         capfd.readouterr().out.splitlines()
     )
 
@@ -403,7 +403,7 @@ HANDBUILT_EVENTS = [
 
 def _handbuilt_summary(write: str) -> list[str]:
     return [
-        "irimi shadow · run handbuilt · 2 exchanges · 0.0s · backstop: none (Phase 4)",
+        "irimi shadow · run handbuilt · 2 exchanges · 0.0s",
         "",
         "  api.stripe.com  1 write intercepted",
         "  telemetry       1 exchange to 1 host, forwarded live",
@@ -486,7 +486,7 @@ def test_runs_show_cuts_long_args_and_says_how_many_events_were_dropped(home, ca
     assert lines[4] == "args: " + '{"text":"' + "x" * 491 + "…"
     assert len(lines[4]) == len("args: ") + 501
     assert lines[6:9] == ["outcome: ok", "dropped events: 4", ""]
-    assert lines[9].startswith("irimi shadow · run long · 0 exchanges · 1.2s · ")
+    assert lines[9] == "irimi shadow · run long · 0 exchanges · 1.2s"
 
 
 def test_runs_show_an_unknown_id_fails_with_the_documented_message(home, capfd):
@@ -502,7 +502,7 @@ def test_runs_show_unattributed_reads_the_events_no_run_claimed(home, capfd):
     assert lines[:2] == ["run: unattributed", "attribution: header"]
     assert lines[7:9] == [
         "",
-        "irimi shadow · run unattributed · 0 exchanges · 0.0s · backstop: none (Phase 4)",
+        "irimi shadow · run unattributed · 0 exchanges · 0.0s",
     ]
 
 
@@ -533,7 +533,7 @@ def test_a_run_whose_only_writes_are_tool_writes_still_says_they_did_not_happen(
     write = ToolCall("t", "r", "db.write", "write", "shadow", {}, 1, None, 1.0, 2.0)
     read = ToolCall("u", "r", "db.read", "read", "real", {}, 1, None, 1.0, 2.0)
     assert report.summary_lines("r", [], tool_calls=[read, write]) == [
-        "irimi shadow · run r · 0 exchanges · 0.0s · backstop: none (Phase 4)",
+        "irimi shadow · run r · 0 exchanges · 0.0s",
         "",
         "  ○ tool db.write  shadow stand-in ran",
         "",

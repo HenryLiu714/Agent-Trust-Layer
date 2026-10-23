@@ -385,7 +385,7 @@ def test_a_bind_that_is_not_loopback_adds_one_banner_line(host):
 
     lines = report.banner_lines("shadow --serve", None, host, 4000, Path("/ca.pem"))
     assert lines[0].startswith(f"irimi shadow --serve · {report.SERVE_RUNS} · listening on ")
-    assert lines[3:] == [
+    assert lines[2:] == [
         f"listening on {host}: any machine that can reach this port can send traffic through "
         "irimi and call its control endpoint"
     ]
@@ -398,7 +398,7 @@ def test_a_loopback_bind_adds_none(host):
     from irimi import report
 
     lines = report.banner_lines("shadow", "7f3a", host, 4000, Path("/ca.pem"))
-    assert len(lines) == 3
+    assert len(lines) == 2
 
 
 def test_an_ipv6_listener_is_bracketed_where_it_is_a_url(tmp_path):
@@ -744,8 +744,8 @@ class _Served:
         _wait_for(lambda: condition(self.lines))
 
     def banner(self) -> list[str]:
-        self.wait_for(lambda lines: len(lines) >= 3)
-        return self.lines[:3]
+        self.wait_for(lambda lines: len(lines) >= 2)
+        return self.lines[:2]
 
     def stop(self, signame: str = "SIGTERM") -> tuple[int, list[str], str]:
         """Send `signame`, and return the exit code, every line printed and stderr."""
@@ -805,15 +805,15 @@ def test_a_wide_bind_says_so_in_the_banner(home):
 
     served = _Served(home, "serve", "--listen-host", "0.0.0.0")
     try:
-        served.wait_for(lambda lines: len(lines) >= 4)
-        banner = served.lines[:4]
+        served.wait_for(lambda lines: len(lines) >= 3)
+        banner = served.lines[:3]
         match = re.search(r" · listening on 0\.0\.0\.0:(\d+) · ", banner[0])
         assert match, banner
         port = int(match.group(1))
         assert banner == report.banner_lines(
             "shadow --serve", None, "0.0.0.0", port, ca.ca_paths().cert
         )
-        assert banner[3] == (
+        assert banner[2] == (
             "listening on 0.0.0.0: any machine that can reach this port can send traffic through "
             "irimi and call its control endpoint"
         )

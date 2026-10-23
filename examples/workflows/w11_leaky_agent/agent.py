@@ -1,7 +1,7 @@
 """W11 `leaky_agent`: an agent that gets around irimi, one escape per scenario.
 
 `irimi shadow` virtualizes only what is routed through its proxy, and says so in its banner
-("hosts not routed through the proxy are NOT virtualized"). Each escape here is a real way agent
+("only traffic sent through this proxy is shadowed"). Each escape here is a real way agent
 code ends up off that route. Under shadow every escape's write really lands on the fake service.
 These are the cases Phase 4's readiness checks exist to flag.
 

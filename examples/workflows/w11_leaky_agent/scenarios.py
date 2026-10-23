@@ -2,7 +2,7 @@
 
 Every escape that writes is marked `leaks`: under shadow its write really reaches the fake service,
 irimi prints no exchange line for it, and its summary does not count it. That is irimi's documented
-limit today ("hosts not routed through the proxy are NOT virtualized"). When Phase 4's readiness
+limit today ("only traffic sent through this proxy is shadowed"). When Phase 4's readiness
 checks land, each escape's assertion flips from "irimi never saw it" to "irimi flagged it".
 `redirected` writes nothing: a read whose redirects lead it off the proxied route, where irimi
 never sees its last hop (#75). `labelled_sidecar` is `loopback_service`'s write made by a write

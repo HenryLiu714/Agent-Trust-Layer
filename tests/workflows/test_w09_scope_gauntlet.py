@@ -316,7 +316,7 @@ REFUSALS = {
     # Named by its type, never quoted: the same line on every Python (#100, #123).
     "refuse_deep": (400, "'name' is a list, not a string"),
 }
-ELAPSED = re.compile(r" · \d+\.\ds · ")
+ELAPSED = re.compile(r" · \d+\.\ds$")
 
 
 def posted(result, label: str) -> dict:
@@ -384,7 +384,7 @@ def shown(result, run_id: str) -> list[str]:
     """`irimi runs show <run_id>`, its elapsed seconds masked (#72)."""
     code, out, err = result.runs("show", run_id)
     assert (code, err) == (0, [])
-    return [ELAPSED.sub(" · <elapsed> · ", line) for line in out]
+    return [ELAPSED.sub(" · <elapsed>", line) for line in out]
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -459,7 +459,7 @@ def test_a_run_posted_over_the_control_endpoint_is_stored_as_an_sdk_run(run_work
             read_line(path),
             "real      read      tool summarise -> ok",
             "",
-            f"irimi shadow · run {run_id} · 1 exchange · <elapsed> · backstop: none (Phase 4)",
+            f"irimi shadow · run {run_id} · 1 exchange · <elapsed>",
             "",
             "  api.stripe.com  1 read",
             "",
@@ -536,7 +536,7 @@ def test_a_run_that_ends_in_error_keeps_its_error_redacted_then_cut_to_what_a_tr
         "",
         "real      read      tool charge_card -> raised builtins.ValueError",
         "",
-        "irimi shadow · run ctl-error · 0 exchanges · <elapsed> · backstop: none (Phase 4)",
+        "irimi shadow · run ctl-error · 0 exchanges · <elapsed>",
         "",
         "  0 exchanges · 0 live · 0 delegated · 0 virtualized",
     ]
@@ -597,7 +597,7 @@ def test_a_run_ended_over_the_control_endpoint_no_longer_lists_as_incomplete(run
         blocks = shadow.run_blocks()
         assert sorted(blocks) == sorted([*CONTROL_RUNS, "ctl-error"])
         for run_id, block in blocks.items():
-            masked = [ELAPSED.sub(" · <elapsed> · ", line) for line in block]
+            masked = [ELAPSED.sub(" · <elapsed>", line) for line in block]
             assert shown(shadow, run_id)[-len(block) :] == masked
         return
     process = shadow.process_run_id()
@@ -680,7 +680,7 @@ def test_the_process_runs_start_and_end_are_irimis_and_only_its_tool_calls_are_t
         "",
         "real      read      tool look_up -> ok",
         "",
-        f"irimi shadow · run {process} · 0 exchanges · <elapsed> · backstop: none (Phase 4)",
+        f"irimi shadow · run {process} · 0 exchanges · <elapsed>",
         "",
         "  0 exchanges · 0 live · 0 delegated · 0 virtualized",
     ]
@@ -726,8 +726,8 @@ def test_under_serve_irimis_own_run_is_unattributed_and_only_its_tool_calls_are_
         "--- run ctl-restarted ---"
     ]
     [block] = serve.run_blocks().values()
-    assert [ELAPSED.sub(" · <elapsed> · ", line) for line in block] == [
-        "irimi shadow · run ctl-restarted · 1 exchange · <elapsed> · backstop: none (Phase 4)",
+    assert [ELAPSED.sub(" · <elapsed>", line) for line in block] == [
+        "irimi shadow · run ctl-restarted · 1 exchange · <elapsed>",
         "",
         "  api.stripe.com  1 read",
         "",
@@ -736,7 +736,7 @@ def test_under_serve_irimis_own_run_is_unattributed_and_only_its_tool_calls_are_
     [line] = [f for f in listed(serve) if f[0] == "ctl-restarted"]
     assert line[3] == "ok"
     assert shown(serve, "ctl-restarted")[-len(block) :] == [
-        ELAPSED.sub(" · <elapsed> · ", line) for line in block
+        ELAPSED.sub(" · <elapsed>", line) for line in block
     ]
 
 

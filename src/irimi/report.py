@@ -26,9 +26,10 @@ from irimi.servicemap import SELF_TARGET, MapIndex, Route, is_delegated, path_pa
 from irimi.store import StoredRun
 from irimi.trace import Event, RunRecord, TelemetrySeen, ToolCall
 
-NOT_VIRTUALIZED_NOTICE = "hosts not routed through the proxy are NOT virtualized."
-BACKSTOP = "none (Phase 4)"
-BACKSTOP_NOTICE = f"backstop: {BACKSTOP}"
+PROXY_ONLY_NOTICE = (
+    "only traffic sent through this proxy is shadowed; a client that ignores HTTPS_PROXY talks to "
+    "the real service"
+)
 # Where the banner names the run, under serve mode, which has no run of its own: each run is the
 # SDK's, named on its requests, and a request no run names is `unattributed` (#77).
 SERVE_RUNS = "run: per request (SDK), unattributed otherwise"
@@ -65,8 +66,7 @@ def banner_lines(
     run = SERVE_RUNS if run_id is None else f"run {run_id}"
     lines = [
         f"irimi {command} · {run} · listening on {netaddr.authority(host, port)} · ca {ca_cert}",
-        NOT_VIRTUALIZED_NOTICE,
-        BACKSTOP_NOTICE,
+        PROXY_ONLY_NOTICE,
     ]
     if replay_of is not None:
         lines.insert(1, f"replaying {replay_of} as {run_id}")
@@ -78,8 +78,8 @@ def banner_lines(
 def delegated_lines(index: MapIndex, color: bool = False) -> list[str]:
     """One banner line per delegated service or route: what irimi is not answering, and who is.
 
-    `NOT_VIRTUALIZED_NOTICE` tells the reader that a host which is not routed through the proxy
-    is not virtualized. Nothing said that a *routed* host may not be live either: a service or a
+    `PROXY_ONLY_NOTICE` tells the reader that traffic which is not routed through the proxy is
+    not shadowed. Nothing said that a *routed* host may not be live either: a service or a
     route carrying an answer target is answered by an address the developer named, so the "reads
     are real" claim the banner rests on is false for that service (design D20, §4.4).
 
@@ -709,10 +709,7 @@ def _summary(
     )
     delegated = sum(1 for ex in exchanges if ex.answered_by == "delegated")
     virtualized = total - live - delegated
-    lines = [
-        f"irimi {command} · run {run_id} · {_plural(total, 'exchange')} · "
-        f"{elapsed_s:.1f}s · backstop: {BACKSTOP}"
-    ]
+    lines = [f"irimi {command} · run {run_id} · {_plural(total, 'exchange')} · {elapsed_s:.1f}s"]
     host_lines = _host_lines(exchanges, telemetry)
     if host_lines:
         lines += ["", *host_lines]

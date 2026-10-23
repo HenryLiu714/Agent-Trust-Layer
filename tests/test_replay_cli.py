@@ -875,7 +875,7 @@ def test_runs_list_and_show_mark_a_run_a_label_made_in_a_replay(home, capfd):
         "trigger: -",
     ]
     assert [line for line in shown if line.startswith("irimi ")] == [
-        "irimi replay · run labelled-in-replay · 1 exchange · 0.0s · backstop: none (Phase 4)"
+        "irimi replay · run labelled-in-replay · 1 exchange · 0.0s"
     ]
 
 

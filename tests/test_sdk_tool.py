@@ -646,13 +646,13 @@ with urllib.request.urlopen(request, timeout=10) as response:
     response.read()
 print("tool said:", mark_refunded(7))
 """
-ELAPSED = re.compile(r" · \d+\.\ds · ")
+ELAPSED = re.compile(r" · \d+\.\ds$")
 
 
 def _summary(lines: list[str]) -> list[str]:
     """irimi's closing block, from its header on, the elapsed seconds normalized (#72)."""
     start = next(i for i, line in enumerate(lines) if re.search(r" · \d+ exchanges? · ", line))
-    return [ELAPSED.sub(" · <elapsed> · ", line) for line in lines[start:]]
+    return [ELAPSED.sub(" · <elapsed>", line) for line in lines[start:]]
 
 
 def test_irimi_shadow_prints_a_tool_call_in_the_stream_and_the_summary_and_stores_it(
@@ -682,7 +682,7 @@ def test_irimi_shadow_prints_a_tool_call_in_the_stream_and_the_summary_and_store
         "stood in",
     )
     stored = report.stored_summary_lines(run, servicemap.load())
-    assert [ELAPSED.sub(" · <elapsed> · ", line) for line in stored] == live
+    assert [ELAPSED.sub(" · <elapsed>", line) for line in stored] == live
 
 
 def test_the_posted_tool_call_is_valid_json_the_endpoint_reads(posted):

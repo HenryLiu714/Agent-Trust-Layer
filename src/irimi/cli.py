@@ -296,8 +296,8 @@ def print_startup(
     and `serve` is a foreground process that may then print nothing for minutes, so
     `irimi serve > log`, `irimi serve | tee` and any supervisor capturing the process showed none
     of this until an exchange came along and flushed it - and a `serve` nobody talks to showed
-    nothing at all. What was withheld is the port it bound, the CA path a client needs,
-    `backstop: none`, and the red `NOT loopback` line saying the agent's requests are leaving
+    nothing at all. What was withheld is the port it bound, the CA path a client needs, the
+    proxy-only notice, and the red `NOT loopback` line saying the agent's requests are leaving
     this machine. `shadow` flushed already; `serve` did not, and the two are one function now so
     they cannot drift again.
     """

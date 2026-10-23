@@ -127,13 +127,15 @@ def test_child_env_preserves_base_and_does_not_mutate():
 
 def test_banner_lines():
     lines = banner_lines("shadow", "7f3a", "127.0.0.1", 4000, Path("/ca.pem"))
-    assert len(lines) == 3
+    assert len(lines) == 2
     assert "shadow" in lines[0]
     assert "7f3a" in lines[0]
     assert "127.0.0.1:4000" in lines[0]
     assert "/ca.pem" in lines[0]
-    assert lines[1] == "hosts not routed through the proxy are NOT virtualized."
-    assert lines[2] == "backstop: none (Phase 4)"
+    assert lines[1] == (
+        "only traffic sent through this proxy is shadowed; a client that ignores HTTPS_PROXY "
+        "talks to the real service"
+    )
 
 
 def test_exchange_line_live_read():
@@ -151,9 +153,9 @@ def test_exchange_line_shows_flags_and_missing_response():
     assert "[upstream-error]" in line
 
 
-def test_summary_header_names_the_run_the_count_the_time_and_the_backstop():
+def test_summary_header_names_the_run_the_count_and_the_time():
     lines = summary_lines("7f3a", [_exchange(), _exchange()], 2.34)
-    assert lines[0] == "irimi shadow · run 7f3a · 2 exchanges · 2.3s · backstop: none (Phase 4)"
+    assert lines[0] == "irimi shadow · run 7f3a · 2 exchanges · 2.3s"
 
 
 def test_summary_header_says_one_exchange_not_one_exchanges():

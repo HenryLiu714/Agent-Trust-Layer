@@ -83,10 +83,9 @@ as an object, `livemode: false` and the header `irimi-answered-by: fake-L1`. iri
 
 ```
 irimi shadow · run 2336 · listening on 127.0.0.1:4000 · ca /Users/you/.irimi/ca/ca.pem
-hosts not routed through the proxy are NOT virtualized.
-backstop: none (Phase 4)
+only traffic sent through this proxy is shadowed; a client that ignores HTTPS_PROXY talks to the real service
 fake-L1   write     POST api.stripe.com/v1/customers/cus_REAL123 -> 200  [fidelity:L1]
-irimi shadow · run 2336 · 1 exchange · 0.0s · backstop: none (Phase 4)
+irimi shadow · run 2336 · 1 exchange · 0.0s
 
   api.stripe.com  1 write intercepted
 
@@ -164,7 +163,7 @@ This is `w02_nightly_reconcile refund_then_page` under shadow: the agent refunds
 the refunds list starting after the refund irimi minted, and posts to Slack.
 
 ```
-irimi shadow · run 0f83 · 7 exchanges · 0.1s · backstop: none (Phase 4)
+irimi shadow · run 0f83 · 7 exchanges · 0.1s
 
   api.stripe.com  3 reads (1 showing this run's writes)  1 engine read  1 write intercepted
   slack.com       1 engine read  1 write intercepted
@@ -282,8 +281,8 @@ https.
   none.
 - **Targets stay on the machine.** See [Answer targets](#answer-targets).
 - **No backstop yet.** A client that ignores the proxy variables, or ships its own CA bundle, talks
-  to the real service. The banner says `backstop: none (Phase 4)` for this reason, and
-  `w11_leaky_agent` pins each known escape.
+  to the real service. The banner says so on every run, and `w11_leaky_agent` pins each known
+  escape.
 - **HTTP(S) only.** Database writes, files on disk, gRPC and WebSocket traffic are not virtualized
   and happen for real, unless the agent labels the function that makes them with `@sdk.tool`
   ([Tools the proxy cannot see](#tools-the-proxy-cannot-see)). Point database URLs at scratch
@@ -1009,7 +1008,7 @@ by phase.
 - Slack channel names in the summary (#61).
 
 **Later.** A shadow-week report over many runs, with readiness checks for clients that bypass the
-proxy (the Phase 4 backstop the banner names). Then diffs of an agent's behaviour on pull requests,
+proxy. Then diffs of an agent's behaviour on pull requests,
 and a runner inside the customer's own network that shadows new versions against production
 triggers.
 

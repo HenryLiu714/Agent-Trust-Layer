@@ -69,6 +69,9 @@ include = ["/src/irimi", "/README.md", "/LICENSE", "/pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# A live test calls a real service, so a key exported in the shell must not make a plain run do it.
+addopts = ["-m", "not live"]
+markers = ["live: calls a real service with your keys; run with `uv run pytest -m live`"]
 filterwarnings = [
     # mitmproxy's flow filter still calls pyparsing's pre-3.0 names; nothing in irimi does.
     "ignore:.*deprecated.*:DeprecationWarning:mitmproxy",

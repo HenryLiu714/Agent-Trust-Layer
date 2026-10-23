@@ -492,6 +492,7 @@ def test_the_same_five_calls_under_irimi_shadow_print_the_phase_2_summary(
     assert lines[header + 1 : header + 1 + len(PHASE2_SUMMARY)] == PHASE2_SUMMARY
 
 
+@pytest.mark.live
 @pytest.mark.skipif(
     not os.environ.get("STRIPE_API_KEY"),
     reason="live phase-exit check: set STRIPE_API_KEY to a sk_test_ key and seed a charge",
@@ -504,7 +505,7 @@ def test_the_refund_agent_leaves_no_refund_on_a_real_test_mode_charge(home, capf
     shows none of it happened.
 
         uv sync --group examples && uv run python examples/refund_agent/seed.py
-        STRIPE_API_KEY=sk_test_... uv run pytest -q -rs tests/test_phase_exit.py
+        STRIPE_API_KEY=sk_test_... uv run pytest -m live -q -rs tests/test_phase_exit.py
 
     With SLACK_BOT_TOKEN and SLACK_CHANNEL set the agent also posts and reads the channel back,
     and the post must be in what it read. SLACK_CHANNEL has to be a channel id for that: a post

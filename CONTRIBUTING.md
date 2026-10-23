@@ -62,11 +62,13 @@ uv run irimi shadow -- python examples/refund_agent/agent.py
 ```
 
 `tests/test_phase_exit.py` holds a hermetic criterion per phase, and Phase 2's twin through the
-real `irimi shadow`, all of which run on every `uv run pytest -q`; and one live check of that run,
-which skips unless `STRIPE_API_KEY` is set and the `examples` group is installed. Run the live check by hand before closing a phase:
+real `irimi shadow`, all of which run on every `uv run pytest -q`; and one live check of that run.
+The live check is marked `live`, which a plain `uv run pytest` deselects even when `STRIPE_API_KEY`
+is exported. Run it with `uv run pytest -m live`; it still skips unless `STRIPE_API_KEY` is set and
+the `examples` group is installed. Run it by hand before closing a phase:
 
 ```
-STRIPE_API_KEY=sk_test_... uv run pytest -q -rs tests/test_phase_exit.py
+STRIPE_API_KEY=sk_test_... uv run pytest -m live -q -rs tests/test_phase_exit.py
 ```
 
 With `SLACK_BOT_TOKEN` and `SLACK_CHANNEL` also set, the agent posts to Slack and reads the channel
@@ -78,7 +80,7 @@ spelling it was sent, so a post to `#general` is read back from a channel irimi 
 
 ```
 STRIPE_API_KEY=sk_test_... SLACK_BOT_TOKEN=xoxb-... SLACK_CHANNEL=C0123 \
-  uv run pytest -q -rs tests/test_phase_exit.py
+  uv run pytest -m live -q -rs tests/test_phase_exit.py
 ```
 
 Phase 3's exit for a server agent has a hermetic half, `tests/test_phase3_exit.py`, which runs on

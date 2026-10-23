@@ -8,9 +8,9 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from irimi.bodies import json_object, reflect
-from irimi.exchange import Request
-from irimi.servicemap import Route
+from irimi.core.bodies import json_object, reflect
+from irimi.core.exchange import Request
+from irimi.servicemaps import Route
 from irimi.services import generic
 from irimi.services.generic import reflect_over
 from irimi.services.model import AnswerClock

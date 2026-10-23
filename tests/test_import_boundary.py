@@ -1,136 +1,280 @@
-"""The import boundaries the module layout promises (docs/architecture.md, "Layers").
+"""The import boundaries the package layout promises (docs/architecture.md, "Layers").
 
 Both rules are mechanical, so a refactor cannot quietly undo them:
 
   1. mitmproxy is imported in exactly one module, `irimi.engine.mitm`. Everything else talks to
-     the `Engine` protocol, which is what lets the pipeline, the policy and the reports be tested
+     the `Engine` protocol, which is what lets the decision, the store and the reports be tested
      without a proxy and lets the engine be swapped.
-  2. A module imports only from layers below its own. The layers are listed lowest first; a
-     module in one may import any module in an earlier layer and none in its own or a later one.
-     `cli` may import everything else, which is what makes it the composition root; only
-     `__main__`, `python -m irimi`, is above it.
+  2. A module imports only from below it. `LAYERS` lists irimi's packages lowest first, a layer
+     holding one package or several side by side, and each package its modules lowest first. A
+     module may import any module of an earlier layer, and a module listed before it in its own
+     package; never a later one, nor another package of its own layer. A package nested in
+     another (`services/stripe/`) is one entry of its parent, its modules importing each other
+     freely. An import made only for type checking may name a later module of its own package,
+     since it runs nothing. `cli` may import everything else, which is what makes it the
+     composition root; only `__main__`, `python -m irimi`, and the public `irimi.testing` sit
+     above it.
 
-A package is one layer, its modules importing each other freely, unless its submodules are
-placed one by one with dotted entries (`replay.index`): each is then a layer entry of its own,
-held to the rule like any module, and the package's `__init__` may import nothing from irimi.
+docs/architecture.md's layer table places the same packages in the same layers, and a test below
+holds it to `LAYERS`, so the two cannot drift.
 """
 
 import ast
+import re
 from pathlib import Path
 
-SRC = Path(__file__).resolve().parents[1] / "src" / "irimi"
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src" / "irimi"
+DOCS = ROOT / "docs" / "architecture.md"
 MITM_ALLOWED = {SRC / "engine" / "mitm.py"}
 
-LAYERS: list[set[str]] = [
+# Each layer maps its packages to their modules, lowest first; a top-level module that is not a
+# package has no module list (None).
+LAYERS: list[dict[str, list[str] | None]] = [
+    # vocabulary
     {
-        "exchange",
-        "paths",
-        "netaddr",
-        "secret_shapes",
-        "money",
-        "limits",
-        "opener",
-        "files",
-        "exitcodes",
-        "_calls",
+        "core": [
+            "__init__",
+            "exchange",
+            "netaddr",
+            "secret_shapes",
+            "money",
+            "limits",
+            "opener",
+            "exitcodes",
+            "calls",
+            "bodies",
+        ]
     },
-    {"ca", "servicemap", "bodies", "trace"},
-    {"protocol", "_entrypoints"},
-    {"classify", "wire", "redact", "sdk"},
-    {"delegation", "services", "ingress", "reader", "_replay_child", "testing"},
-    {"writelog", "idempotency", "replay.index"},
-    {"preconditions", "overlay", "store"},
-    {"policy"},
-    {"control", "session", "replay.policy"},
-    {"engine"},
-    {"report", "runner"},
-    {"compare"},
-    {"replay.plan", "replay.report"},
-    {"cli"},
-    {"__main__"},
+    # contract
+    {"protocol": ["__init__", "headers", "env", "trace", "entrypoints", "control", "replay_files"]},
+    # machine and agent
+    {
+        "config": ["__init__", "paths", "files", "ca"],
+        "sdk": [
+            "_context",
+            "_errors",
+            "_capture",
+            "_http_labels",
+            "_control_client",
+            "_state",
+            "_runs",
+            "_tools",
+            "__init__",
+        ],
+    },
+    # maps
+    {"servicemaps": ["model", "rules", "loader", "__init__", "classify"]},
+    # services
+    {"services": ["model", "generic", "stripe", "slack", "__init__"]},
+    # disk
+    {"record": ["__init__", "redact", "store"]},
+    # decision
+    {
+        "decide": [
+            "__init__",
+            "targets",
+            "reader",
+            "writelog",
+            "idempotency",
+            "preconditions",
+            "overlay",
+            "policy",
+        ]
+    },
+    # proxy
+    {
+        "engine": [
+            "__init__",
+            "wire",
+            "ingress",
+            "decoding",
+            "capture",
+            "control",
+            "session",
+            "mitm",
+        ]
+    },
+    # output
+    {"report": ["__init__", "terminal", "model", "summary", "runs", "maps"]},
+    # replay
+    {"replay": ["__init__", "child", "index", "policy", "compare", "plan", "report"]},
+    # commands
+    {
+        "cli": [
+            "__init__",
+            "options",
+            "runner",
+            "compose",
+            "init",
+            "maps",
+            "runs",
+            "shadow",
+            "serve",
+            "replay_cmd",
+        ]
+    },
+    # entry points
+    {"__main__": None, "testing": None},
 ]
-LAYER_OF = {name: depth for depth, layer in enumerate(LAYERS) for name in layer}
-# The packages whose submodules are placed one by one.
-SPLIT = {name.partition(".")[0] for name in LAYER_OF if "." in name}
+LAYER_OF = {package: depth for depth, layer in enumerate(LAYERS) for package in layer}
+ORDER = {
+    package: {module: i for i, module in enumerate(modules)}
+    for layer in LAYERS
+    for package, modules in layer.items()
+    if modules is not None
+}
+
+# (package, module); the module is None for a top-level module that is not a package.
+Entry = tuple[str, str | None]
 
 
-def _placed(module: str, names: list[str] | None = None) -> set[str]:
-    """The layer entries an import of `module` names: `irimi.servicemap.loader` -> `servicemap`,
-    `irimi.replay.index` -> `replay.index`, and `from irimi.replay import plan` (`names`) ->
-    `replay.plan`. `irimi` alone, or a split package's `__init__`, is its own name."""
-    parts = module.split(".")
-    if len(parts) < 2 or parts[0] != "irimi":
-        return {parts[0]}
-    top = parts[1]
-    if top not in SPLIT:
-        return {top}
-    if len(parts) > 2:
-        return {f"{top}.{parts[2]}"}
-    if names is not None:
-        return {f"{top}.{n}" if f"{top}.{n}" in LAYER_OF else top for n in names}
-    return {top}
+def _entry(dotted: str) -> Entry | None:
+    """The entry an `irimi.<package>[.<module>[...]]` name falls in, or None for `irimi` itself
+    (`__version__`), which imports nothing from irimi."""
+    parts = dotted.split(".")
+    if len(parts) < 2:
+        return None
+    if parts[1] in LAYER_OF and parts[1] not in ORDER:
+        return (parts[1], None)
+    return (parts[1], parts[2] if len(parts) > 2 else "__init__")
 
 
-def _irimi_imports(py: Path) -> set[str]:
-    """Every irimi layer entry `py` imports, at any depth, deferred imports included."""
-    out: set[str] = set()
-    for node in ast.walk(ast.parse(py.read_text())):
-        if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("irimi"):
-            if node.module == "irimi":
-                out |= {a.name for a in node.names if a.name in LAYER_OF or a.name in SPLIT}
-            else:
-                out |= _placed(node.module, [alias.name for alias in node.names])
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name.startswith("irimi."):
-                    out |= _placed(alias.name)
+def _from_entries(module: str, names: list[str]) -> set[Entry]:
+    """What `from <module> import <names>` imports: a name that is a module of the package
+    `module` names is that module, and any other name comes from `module` itself."""
+    here = _entry(module)
+    out: set[Entry] = set()
+    for name in names:
+        named = _entry(f"{module}.{name}")
+        if here is None:
+            if named is not None and named[0] in LAYER_OF:
+                out.add(named)
+        elif here[1] == "__init__" and named is not None and named[1] in ORDER.get(here[0], {}):
+            out.add(named)
+        else:
+            out.add(here)
     return out
 
 
-def _module_of(py: Path) -> str:
-    parts = py.relative_to(SRC).parts
-    top = parts[0].removesuffix(".py")
-    if top in SPLIT and len(parts) > 1 and parts[1] != "__init__.py":
-        return f"{top}.{parts[1].removesuffix('.py')}"
-    return top
+def _typing_only(tree: ast.AST) -> set[ast.AST]:
+    """The nodes under an `if TYPE_CHECKING:` block."""
+    nodes: set[ast.AST] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If) and getattr(node.test, "id", None) == "TYPE_CHECKING":
+            for child in node.body:
+                nodes |= set(ast.walk(child))
+    return nodes
+
+
+def _irimi_imports(py: Path) -> set[tuple[Entry, bool]]:
+    """Every irimi entry `py` imports, at any depth, deferred imports included, each with whether
+    it is imported only for type checking."""
+    tree = ast.parse(py.read_text())
+    typing_only = _typing_only(tree)
+    out: set[tuple[Entry, bool]] = set()
+    for node in ast.walk(tree):
+        entries: set[Entry] = set()
+        if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            if node.module == "irimi" or node.module.startswith("irimi."):
+                entries = _from_entries(node.module, [alias.name for alias in node.names])
+        elif isinstance(node, ast.Import):
+            entries = {
+                entry
+                for alias in node.names
+                if alias.name.startswith("irimi.") and (entry := _entry(alias.name)) is not None
+            }
+        out |= {(entry, node in typing_only) for entry in entries}
+    return out
+
+
+def _entry_of(py: Path) -> Entry | None:
+    """The entry the file `py` is, or None for irimi's own `__init__`."""
+    parts = py.relative_to(SRC).with_suffix("").parts
+    if parts == ("__init__",):
+        return None
+    if len(parts) == 1:
+        return (parts[0], None)
+    return (parts[0], parts[1])
+
+
+def _mitmproxy_imports(py: Path) -> list[str]:
+    """Every import of mitmproxy in `py`: an `import` or `from` of it, or an `import_module` or
+    `__import__` call with its name as a literal."""
+    found = []
+    for node in ast.walk(ast.parse(py.read_text())):
+        names: list[str] = []
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            names = [node.module]
+        elif isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant):
+            called = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+            if called in {"import_module", "__import__"} and isinstance(node.args[0].value, str):
+                names = [node.args[0].value]
+        found += [f"line {node.lineno}: {n}" for n in names if n.split(".")[0] == "mitmproxy"]
+    return found
 
 
 def test_mitmproxy_is_imported_only_in_engine_mitm():
-    offenders = []
-    for py in SRC.rglob("*.py"):
-        if py in MITM_ALLOWED:
-            continue
-        for line in py.read_text().splitlines():
-            stripped = line.strip()
-            if stripped.startswith(("import mitmproxy", "from mitmproxy")):
-                offenders.append(f"{py.relative_to(SRC)}: {stripped}")
+    offenders = [
+        f"{py.relative_to(SRC)} {found}"
+        for py in sorted(SRC.rglob("*.py"))
+        if py not in MITM_ALLOWED
+        for found in _mitmproxy_imports(py)
+    ]
     assert offenders == [], "mitmproxy may only be imported in irimi/engine/mitm.py:\n" + "\n".join(
         offenders
     )
 
 
 def test_every_module_is_assigned_a_layer():
-    modules = {_module_of(py) for py in SRC.rglob("*.py")} - {"__init__"} - SPLIT
-    assert modules == set(LAYER_OF), "add the new module to LAYERS in this test and to the docs"
+    found = {entry for py in SRC.rglob("*.py") if (entry := _entry_of(py)) is not None}
+    placed: set[Entry] = {
+        (package, module)
+        for layer in LAYERS
+        for package, modules in layer.items()
+        for module in (modules if modules is not None else [None])
+    }
+    assert found == placed, (
+        "place each new module in LAYERS in this test and in docs/architecture.md's layer table"
+    )
 
 
-def test_a_split_packages_init_imports_nothing_from_irimi():
-    offenders = [
-        f"{package}/__init__.py imports irimi.{dep}"
-        for package in sorted(SPLIT)
-        for dep in sorted(_irimi_imports(SRC / package / "__init__.py"))
-    ]
-    assert offenders == [], "\n".join(offenders)
-
-
-def test_no_module_imports_its_own_layer_or_a_higher_one():
+def test_no_module_imports_a_later_module_or_layer():
     offenders = []
     for py in sorted(SRC.rglob("*.py")):
-        me = _module_of(py)
-        if me == "__init__" or me in SPLIT:
+        me = _entry_of(py)
+        if me is None:
             continue
-        for dep in sorted(_irimi_imports(py)):
-            # A split package's `__init__` imports nothing, so any module may import it.
-            if dep != me and dep not in SPLIT and LAYER_OF[dep] >= LAYER_OF[me]:
-                offenders.append(f"{py.relative_to(SRC)} imports irimi.{dep}")
+        package, module = me
+        for (dep_package, dep_module), typing_only in sorted(_irimi_imports(py), key=str):
+            if dep_package == package:
+                if dep_module == module or typing_only:
+                    continue
+                order = ORDER[package]
+                if module is not None and order[str(dep_module)] < order[module]:
+                    continue
+            elif LAYER_OF[dep_package] < LAYER_OF[package]:
+                continue
+            name = f"irimi.{dep_package}" + (f".{dep_module}" if dep_module else "")
+            offenders.append(f"{py.relative_to(SRC)} imports {name}")
     assert offenders == [], "\n".join(offenders)
+
+
+def _docs_layers() -> dict[int, set[str]]:
+    """The packages docs/architecture.md's layer table places in each layer."""
+    section = DOCS.read_text().split("\n## Layers\n", 1)[1].split("\n## ", 1)[0]
+    layers: dict[int, set[str]] = {}
+    for line in section.splitlines():
+        row = re.match(r"\|\s*(\d+)\s*\|([^|]*)\|", line)
+        if row:
+            layers.setdefault(int(row[1]), set()).update(re.findall(r"`(\w+)/?`", row[2]))
+    return layers
+
+
+def test_the_architecture_docs_place_the_same_packages_in_the_same_layers():
+    expected = {depth: set(layer) for depth, layer in enumerate(LAYERS)}
+    assert _docs_layers() == expected, (
+        "docs/architecture.md's layer table must place the packages as LAYERS in this test does"
+    )

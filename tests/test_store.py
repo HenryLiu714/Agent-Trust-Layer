@@ -17,12 +17,22 @@ from pathlib import Path
 
 import pytest
 
-from irimi import exchange, files, limits, redact, trace
-from irimi.exchange import Exchange, Flag, Request, Response
-from irimi.store import StoreStats, layout, writer
-from irimi.store.reader import RunNotFound, StoreReader
-from irimi.store.writer import DirectoryStore
-from irimi.trace import ErrorInfo, RunRecord, TelemetrySeen, ToolCall, TraceFormatError, Trigger
+from irimi.config import files
+from irimi.core import exchange, limits
+from irimi.core.exchange import Exchange, Flag, Request, Response
+from irimi.protocol import trace
+from irimi.protocol.trace import (
+    ErrorInfo,
+    RunRecord,
+    TelemetrySeen,
+    ToolCall,
+    TraceFormatError,
+    Trigger,
+)
+from irimi.record import redact
+from irimi.record.store import StoreStats, layout, writer
+from irimi.record.store.reader import RunNotFound, StoreReader
+from irimi.record.store.writer import DirectoryStore
 from tests.doubles import NullStore
 
 SECRET = "sk_live_StoreUnitSecret"
@@ -1502,7 +1512,7 @@ def test_a_run_irimi_may_not_read_is_an_os_error_not_a_missing_run(root, key, ca
         unattributed.chmod(0)
         caplog.clear()
         try:
-            with caplog.at_level(logging.WARNING, logger="irimi.store"):
+            with caplog.at_level(logging.WARNING, logger="irimi.record.store"):
                 assert [r.run_id for r in reader.list_runs()] == ["good"]
             assert caplog.messages == [
                 f"irimi: skipping stored run shut: [Errno 13] Permission denied: '{shut}/run.json'"
@@ -1517,7 +1527,7 @@ def test_a_run_irimi_may_not_read_is_an_os_error_not_a_missing_run(root, key, ca
     (root / "runs/a-file").write_text("")
     (root / "runs/hollow/run.json").mkdir(parents=True)
     caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="irimi.store"):
+    with caplog.at_level(logging.WARNING, logger="irimi.record.store"):
         assert [r.run_id for r in reader.list_runs()] == ["good", "shut"]
     assert caplog.messages == []
     for run_id in ("gone", "a-file", "hollow"):

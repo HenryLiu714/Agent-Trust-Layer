@@ -9,7 +9,7 @@ import pytest
 
 from examples.workflows.harness.run import check_invariants, compare, replay, replayed_run_id
 from examples.workflows.w02_nightly_reconcile.agent import LEDGER, SOURCE_ENV, customer_id
-from irimi.exchange import Exchange
+from irimi.core.exchange import Exchange
 
 W = "w02_nightly_reconcile"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.

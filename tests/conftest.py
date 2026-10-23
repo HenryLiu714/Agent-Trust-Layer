@@ -6,7 +6,7 @@ SDK's process-wide state after each test. The fixture is autouse, so a new test 
 
 import pytest
 
-from irimi import paths
+from irimi.config import paths
 from irimi.sdk import _state
 
 

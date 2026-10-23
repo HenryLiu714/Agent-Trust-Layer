@@ -1,7 +1,7 @@
 """The two files a replay hands between processes.
 
-- The outcome file: the replay's child (`irimi._replay_child`) writes how its call of a trigger
-  ended (`CallOutcome`), and `irimi replay` ends the replay's run with it.
+- The outcome file: the replay's child (`irimi.replay.child`) writes how its call of a trigger
+  ended (`CallResult`), and `irimi replay` ends the replay's run with it.
 - The result file: `irimi replay --result-file` writes what the replay said (`ReplayResult`), and
   `irimi.testing.replay` reads it back.
 """
@@ -12,14 +12,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from irimi import exitcodes
-from irimi.trace import ErrorInfo, error_to_json
+from irimi.core import exitcodes
+from irimi.protocol.trace import ErrorInfo, error_to_json
 
 RESULT_FIELDS = ("source_run_id", "replay_run_id", "exit_code", "diverged_at", "lines")
 
 
 @dataclass(frozen=True)
-class CallOutcome:
+class CallResult:
     """How the child's call ended: `called` False when the call could not be made, `error` why;
     otherwise what it raised, None when it returned. `cause` is, for a call not made because
     importing the trigger's module raised, that exception's type (`NotCallable.cause`)."""
@@ -64,14 +64,14 @@ class ReplayResult:
         return "\n".join(self.lines)
 
 
-def call_outcome_to_json(outcome: CallOutcome) -> dict[str, Any]:
+def call_outcome_to_json(outcome: CallResult) -> dict[str, Any]:
     d: dict[str, Any] = {"called": outcome.called, "error": error_to_json(outcome.error)}
     if outcome.cause is not None:
         d["cause"] = outcome.cause
     return d
 
 
-def read_call_outcome(path: Path) -> CallOutcome | None:
+def read_call_outcome(path: Path) -> CallResult | None:
     """The outcome the child wrote at `path`, or None when it wrote none that reads: it was
     killed, or never started, or the file is not one `call_outcome_to_json` writes. Never raises:
     the agent can write the file too, since its environment names it, and JSON nested deeper than
@@ -86,12 +86,12 @@ def read_call_outcome(path: Path) -> CallOutcome | None:
     if not isinstance(called, bool) or not (cause is None or isinstance(cause, str)):
         return None
     if error is None:
-        return CallOutcome(called, None, cause)
+        return CallResult(called, None, cause)
     if not (isinstance(error, dict) and set(error) == {"type", "message"}):
         return None
     if not all(isinstance(v, str) for v in error.values()):
         return None
-    return CallOutcome(called, ErrorInfo(error["type"], error["message"]), cause)
+    return CallResult(called, ErrorInfo(error["type"], error["message"]), cause)
 
 
 def replay_result_to_json(result: ReplayResult) -> dict[str, Any]:

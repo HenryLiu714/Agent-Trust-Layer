@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from irimi.exchange import Request
+from irimi.core.exchange import Request
 from irimi.services.model import Read, Write
 from irimi.services.slack.effects import THREAD_FIELDS, apply_read
 

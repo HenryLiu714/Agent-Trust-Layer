@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import brotli  # type: ignore[import-untyped]  # ships no stubs
 import zstandard
 
-from irimi.limits import MAX_DECODED_BODY
+from irimi.core.limits import MAX_DECODED_BODY
 
 # What a body's identity encodings decode to: the bytes as they came, which are already in memory
 # and are no bigger for being "decoded".

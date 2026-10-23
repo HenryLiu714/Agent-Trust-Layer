@@ -6,8 +6,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from irimi import ca, paths
 from irimi.cli import main
+from irimi.config import ca, paths
 
 
 class _Upstream(BaseHTTPRequestHandler):
@@ -257,7 +257,7 @@ def test_engine_start_failure_does_not_spawn_child(home, monkeypatch, capsys):
 
 def test_interrupt_before_ready_exits_cleanly(home, monkeypatch, capsys):
     """Ctrl-C during engine startup must not escape main() as a traceback."""
-    from irimi import runner
+    from irimi.cli import runner
 
     monkeypatch.chdir(home)  # so SHOULD_NOT_EXIST would land here, not in the repo
     real = runner.start_engine
@@ -275,7 +275,7 @@ def test_interrupt_before_ready_exits_cleanly(home, monkeypatch, capsys):
 
 def test_interrupt_while_waiting_exits_cleanly(home, monkeypatch, capsys):
     """Ctrl-C that escapes wait_for_child still stops the engine and prints the summary."""
-    from irimi import runner
+    from irimi.cli import runner
 
     monkeypatch.setattr(
         runner, "wait_for_child", lambda proc, child: (_ for _ in ()).throw(KeyboardInterrupt)
@@ -319,9 +319,9 @@ def test_reverse_door_base_url_host(home, capfd):
 
 def test_banner_names_a_delegated_service(home, tmp_path, capsys):
     """A routed host may not be live either, and the banner says so."""
-    from irimi import servicemap
+    from irimi import servicemaps
 
-    (tmp_path / "cwd" / servicemap.loader.CWD_OVERRIDE_NAME).write_text(
+    (tmp_path / "cwd" / servicemaps.loader.CWD_OVERRIDE_NAME).write_text(
         "service: stripe\ntarget: http://127.0.0.1:3000\ntarget_reads: true\n"
     )
     assert main(["shadow", *_py("pass")]) == 0
@@ -392,7 +392,7 @@ def test_sigterm_stops_the_command_ends_the_run_and_closes_the_store(home, upstr
     import subprocess
     import time
 
-    from irimi.store.reader import StoreReader
+    from irimi.record.store.reader import StoreReader
 
     ready = home / "child.pid"
     src = (
@@ -449,18 +449,18 @@ def test_sigterm_before_the_command_starts_runs_nothing(home, monkeypatch, capsy
     143."""
     import signal
 
-    from irimi.cli import session
-    from irimi.store.reader import StoreReader
+    from irimi.cli import compose
+    from irimi.record.store.reader import StoreReader
 
     monkeypatch.chdir(home)  # so SHOULD_NOT_EXIST would land here, not in the repo
-    prepare = session.prepare_run
+    prepare = compose.prepare_run
 
     def terminated_while_preparing(*args, **kwargs):
         run = prepare(*args, **kwargs)
         signal.raise_signal(signal.SIGTERM)
         return run
 
-    monkeypatch.setattr(session, "prepare_run", terminated_while_preparing)
+    monkeypatch.setattr(compose, "prepare_run", terminated_while_preparing)
     outside: list[int] = []
 
     def record(signum, frame):
@@ -486,7 +486,7 @@ def test_sigterm_while_the_command_starts_is_passed_to_it_once_it_exists(home, m
     import subprocess
     import time
 
-    from irimi.store.reader import StoreReader
+    from irimi.record.store.reader import StoreReader
 
     real = subprocess.Popen
 
@@ -510,8 +510,8 @@ def test_sigterm_after_the_command_exited_signals_no_pid(home, monkeypatch):
     import os
     import signal
 
-    from irimi import runner
-    from irimi.store.reader import StoreReader
+    from irimi.cli import runner
+    from irimi.record.store.reader import StoreReader
 
     killed: list[tuple[int, int]] = []
     real_kill, real_end = os.kill, runner.end_process_run
@@ -538,16 +538,16 @@ def test_an_ignored_sigterm_stays_ignored_and_a_thread_installs_nothing(home, mo
     """
     import signal
 
-    from irimi.cli import session
+    from irimi.cli import compose
 
     during: list[object] = []
-    prepare = session.prepare_run
+    prepare = compose.prepare_run
 
     def seen(*args, **kwargs):
         during.append(signal.getsignal(signal.SIGTERM))
         return prepare(*args, **kwargs)
 
-    monkeypatch.setattr(session, "prepare_run", seen)
+    monkeypatch.setattr(compose, "prepare_run", seen)
     saved = signal.signal(signal.SIGTERM, signal.SIG_IGN)
     try:
         assert main(["shadow", *_py("pass")]) == 0

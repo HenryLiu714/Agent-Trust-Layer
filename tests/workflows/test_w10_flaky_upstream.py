@@ -15,9 +15,9 @@ import pytest
 from examples.workflows.harness.internet import bomb
 from examples.workflows.harness.run import check_invariants, compare, rows_not_shown
 from examples.workflows.w10_flaky_upstream.scenarios import BOMBED, CONTROL_DOWN
-from irimi.exchange import Exchange, Flag
-from irimi.limits import MAX_DECODED_BODY
-from irimi.trace import ErrorInfo
+from irimi.core.exchange import Exchange, Flag
+from irimi.core.limits import MAX_DECODED_BODY
+from irimi.protocol.trace import ErrorInfo
 
 W = "w10_flaky_upstream"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.

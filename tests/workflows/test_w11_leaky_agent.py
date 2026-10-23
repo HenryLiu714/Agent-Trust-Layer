@@ -12,7 +12,7 @@ import pytest
 
 from examples.workflows.harness.run import check_invariants, compare, rows_not_shown
 from examples.workflows.w11_leaky_agent.agent import CHANNEL, CHARGE
-from irimi.exchange import Exchange
+from irimi.core.exchange import Exchange
 
 W = "w11_leaky_agent"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.

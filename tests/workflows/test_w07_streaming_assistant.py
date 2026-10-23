@@ -22,10 +22,11 @@ from examples.workflows.w07_streaming_assistant.scenarios import (
     pair_answer,
     pair_decision,
 )
-from irimi import redact, trace
-from irimi.exchange import Exchange, Flag
-from irimi.limits import MAX_DECODED_BODY, MAX_STORED_BODY
-from irimi.trace import ErrorInfo, TelemetrySeen
+from irimi.core.exchange import Exchange, Flag
+from irimi.core.limits import MAX_DECODED_BODY, MAX_STORED_BODY
+from irimi.protocol import trace
+from irimi.protocol.trace import ErrorInfo, TelemetrySeen
+from irimi.record import redact
 
 W = "w07_streaming_assistant"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.

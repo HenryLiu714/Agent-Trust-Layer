@@ -14,7 +14,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Literal
 
-from irimi.exchange import (
+from irimi.core.exchange import (
     Exchange,
     Flag,
     PreconditionOutcome,
@@ -24,8 +24,8 @@ from irimi.exchange import (
     is_intercepted,
     refused_by_irimi,
 )
-from irimi.servicemap import MapIndex, Route
-from irimi.trace import Event, RunRecord, TelemetrySeen, ToolCall
+from irimi.protocol.trace import Event, RunRecord, TelemetrySeen, ToolCall
+from irimi.servicemaps import MapIndex, Route
 
 # ------------------------------------------------------------------------------------- classify
 

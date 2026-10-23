@@ -1,12 +1,12 @@
 """Test doubles for irimi's seams."""
 
-from irimi.exchange import Exchange
-from irimi.store import StoreStats
-from irimi.trace import ErrorInfo, Outcome, RunRecord, ToolCall
+from irimi.core.exchange import Exchange
+from irimi.protocol.trace import ErrorInfo, RunRecord, RunStatus, ToolCall
+from irimi.record.store import StoreStats
 
 
 class NullStore:
-    """A TraceStore that keeps nothing."""
+    """A RunStore that keeps nothing."""
 
     def start_run(self, record: RunRecord) -> None:
         return None
@@ -21,7 +21,7 @@ class NullStore:
         self,
         run_id: str,
         ended_at: float,
-        outcome: Outcome,
+        outcome: RunStatus,
         error: ErrorInfo | None = None,
         exit_code: int | None = None,
     ) -> None:

@@ -10,8 +10,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from irimi.exchange import Request
-from irimi.servicemap import Route
+from irimi.core.exchange import Request
+from irimi.servicemaps import Route
 
 # Fields of a fixture object the service owns, which the request may therefore never write over.
 # `id` is here as well as in every route's `ids:`, because a body posting `object=charge` to a

@@ -16,9 +16,9 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from irimi._calls import bind
-from irimi._entrypoints import NotCallable, entrypoint, resolve
-from irimi.limits import MAX_CAPTURED_BYTES
+from irimi.core.calls import bind
+from irimi.core.limits import MAX_CAPTURED_BYTES
+from irimi.protocol.entrypoints import NotCallable, entrypoint, resolve
 from irimi.protocol.replay_files import ReplayResult, replay_result_from_json
 from irimi.sdk._capture import capture, capture_call
 

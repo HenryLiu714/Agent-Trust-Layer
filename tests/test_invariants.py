@@ -28,19 +28,21 @@ from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 import pytest
 
-from irimi import ca, classify, ingress, paths, servicemap, wire
-from irimi.engine import EngineConfig, mitm
+from irimi import servicemaps
+from irimi.config import ca, paths
+from irimi.core.exchange import KINDS, Exchange, Flag, Request, Response
+from irimi.decide.overlay import NoOverlay, Overlaid, ServiceOverlay
+from irimi.decide.policy import Decided, Forward, Respond, ShadowPolicy
+from irimi.engine import EngineConfig, ingress, mitm, wire
 from irimi.engine.mitm import MitmEngine
-from irimi.exchange import KINDS, Exchange, Flag, Request, Response
-from irimi.overlay import NoOverlay, Overlaid, ServiceOverlay
-from irimi.policy import Decided, Forward, Respond, ShadowPolicy
+from irimi.engine.wire import stamp
 from irimi.protocol.headers import ANSWERED_BY_HEADER
+from irimi.protocol.trace import RunRecord
 from irimi.replay.index import ReplayIndex
 from irimi.replay.policy import ReplayPolicy
 from irimi.report.model import RunView, build, for_summary
 from irimi.report.summary import OVERLAY_MARKER, Live, summary_lines
-from irimi.trace import RunRecord
-from irimi.wire import stamp
+from irimi.servicemaps import classify
 from tests.doubles import NullStore
 
 # One host, one read route and one write route. The servers in this file all listen on loopback,
@@ -148,7 +150,7 @@ def _maps(tmp_path, monkeypatch, targets=()):
     maps_dir = tmp_path / "maps"
     maps_dir.mkdir(exist_ok=True)
     (maps_dir / "demo.yaml").write_text(DEMO_MAP)
-    return servicemap.load(cwd=tmp_path, maps_dir=maps_dir, targets=targets)
+    return servicemaps.load(cwd=tmp_path, maps_dir=maps_dir, targets=targets)
 
 
 def _run(tmp_path, monkeypatch, maps, calls, policy=None, overlay=None):
@@ -575,16 +577,16 @@ def test_shadow_mode_is_never_built_without_a_reader(tmp_path, monkeypatch):
     `ShadowPolicy()`s in tests keep their meaning. The hole that leaves is a shadow run silently
     skipping L3 because the composition root forgot an argument: the `--base-url-host` failure shape
     again, configured and never consulted. So the one construction site is pinned here."""
-    from irimi.cli import options, session
-    from irimi.reader import NoReader
+    from irimi.cli import compose, options
+    from irimi.decide.reader import NoReader
     from tests.doubles import NullStore
 
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
-    index = servicemap.MapIndex(tuple(servicemap.loader.load_shipped()))
+    index = servicemaps.MapIndex(tuple(servicemaps.loader.load_shipped()))
     args = argparse.Namespace(base_url_host=[], port=4321, bind=options.LISTEN_HOST)
     p = ca.ca_paths()
-    run = session.Run(index, p, "t3st", session._engine_config(args, index, "t3st", p), NullStore())
-    engine = session.build_engine(run, on_exchange=lambda ex: None)
+    run = compose.Run(index, p, "t3st", compose._engine_config(args, index, "t3st", p), NullStore())
+    engine = compose.build_engine(run, on_exchange=lambda ex: None)
     assert isinstance(engine.policy, ShadowPolicy)
     assert not isinstance(engine.policy.reader, NoReader)
     assert engine.policy.maps is run.config.maps
@@ -690,13 +692,13 @@ def _stripe_run(tmp_path, monkeypatch, refunds, *, real_overlay=False):
     read, through an engine holding the real reader. Hands back the exchanges, the overlay that
     watched the write log, and every status in order. With `real_overlay` that overlay passes each
     read on to the real `ServiceOverlay`, which applies the accepted refunds to the closing read."""
-    from irimi.reader import UpstreamReader
+    from irimi.decide.reader import UpstreamReader
 
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "maps-home"))
     maps_dir = tmp_path / "maps"
     maps_dir.mkdir(exist_ok=True)
     (maps_dir / "stripe.yaml").write_text(STRIPE_MAP)
-    maps = servicemap.load(cwd=tmp_path, maps_dir=maps_dir)
+    maps = servicemaps.load(cwd=tmp_path, maps_dir=maps_dir)
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _Charges)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     stripe = srv.server_address[1]

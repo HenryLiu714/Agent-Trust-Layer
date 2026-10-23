@@ -5,8 +5,7 @@ import argparse
 import sys
 from typing import Any
 
-from irimi import compare, exitcodes
-from irimi.cli import CliError, os_error, session
+from irimi.cli import CliError, compose, os_error
 from irimi.cli.options import (
     LAST_RUN,
     RUN_ID_HELP,
@@ -15,9 +14,11 @@ from irimi.cli.options import (
     help_formatted,
     positive_int,
 )
+from irimi.core import exitcodes
+from irimi.protocol.trace import UNATTRIBUTED
+from irimi.record.store.reader import StoreReader
+from irimi.replay import compare
 from irimi.report import runs
-from irimi.store.reader import StoreReader
-from irimi.trace import UNATTRIBUTED
 
 DEFAULT_RUNS_LIMIT = 20  # `irimi runs list` without --limit
 
@@ -92,11 +93,11 @@ def register(subparsers: "argparse._SubParsersAction[Any]") -> None:
 
 def cmd_runs_list(args: argparse.Namespace) -> int:
     """`irimi runs list`: one line per stored run, newest first."""
-    root = session.store_root(args)
+    root = compose.store_root(args)
     try:
         every = StoreReader(root).list_runs()
     except OSError as exc:
-        print(f"error: {os_error(session.store_subject(args), exc)}", file=sys.stderr)
+        print(f"error: {os_error(compose.store_subject(args), exc)}", file=sys.stderr)
         return exitcodes.ERROR
     if not every:
         print(f"no runs in {root}")
@@ -109,7 +110,7 @@ def cmd_runs_list(args: argparse.Namespace) -> int:
         # Counted, never read: no body is loaded, or a few runs of LLM streams cost hundreds of
         # MB to print two numbers each.
         try:
-            events = session.load_stored_run(root, record.run_id, bodies=False).events
+            events = compose.load_stored_run(root, record.run_id, bodies=False).events
         except CliError as exc:
             print(
                 f"warning: run {record.run_id} could not be read: {exc.__cause__}", file=sys.stderr
@@ -123,17 +124,17 @@ def cmd_runs_list(args: argparse.Namespace) -> int:
 
 def cmd_runs_show(args: argparse.Namespace) -> int:
     """`irimi runs show RUN_ID`: a stored run's header, every event, and its summary."""
-    root = session.store_root(args)
+    root = compose.store_root(args)
     try:
-        run_id = session.resolve_run_id(root, args.run_id)
+        run_id = compose.resolve_run_id(root, args.run_id)
     except LookupError as exc:
         raise CliError(str(exc), exitcodes.ERROR) from None
-    run = session.load_stored_run(root, run_id)
+    run = compose.load_stored_run(root, run_id)
     # The unattributed pool is not a run: with nothing in it there is no record to show.
     if run_id == UNATTRIBUTED and not run.events:
         print(f"no unattributed events in {root}")
         return 0
-    for line in runs.run_show_lines(run, session.maps_for_stored_runs()):
+    for line in runs.run_show_lines(run, compose.maps_for_stored_runs()):
         print(line)
     return 0
 
@@ -142,16 +143,16 @@ def cmd_compare(args: argparse.Namespace) -> int:
     """`irimi compare RUN_A RUN_B`: two stored runs' writes side by side. Exits as diff(1) does
     (`COMPARE_EXIT_CODES`): 0 when every write is the same, 1 when any is not, 2 when a run cannot
     be read."""
-    root = session.store_root(args)
+    root = compose.store_root(args)
     stored = []
     for typed in (args.run_a, args.run_b):
         try:
-            run_id = session.resolve_run_id(root, typed)
+            run_id = compose.resolve_run_id(root, typed)
         except LookupError as exc:
             raise CliError(str(exc), exitcodes.ERROR) from None
-        stored.append(session.load_stored_run(root, run_id))
+        stored.append(compose.load_stored_run(root, run_id))
     a, b = stored
-    comparison = compare.compare_runs(a, b, session.maps_for_stored_runs())
+    comparison = compare.compare_runs(a, b, compose.maps_for_stored_runs())
     for line in [*compare.header_lines(a.record, b.record), "", *comparison.lines()]:
         print(line)
     return comparison.exit_code

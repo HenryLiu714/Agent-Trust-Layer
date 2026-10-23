@@ -8,7 +8,7 @@ from examples.workflows.harness.run import Scenario, Workflow
 from examples.workflows.harness.services import JsonService, World
 from examples.workflows.w09_scope_gauntlet.agent import BIG_CHARGE, CHARGE, CUSTOMER, INTENT
 
-# Past `irimi.bodies.MAX_BODY_BYTES` (2 MB), the most irimi parses of a response it reads.
+# Past `irimi.core.bodies.MAX_BODY_BYTES` (2 MB), the most irimi parses of a response it reads.
 BIG_DESCRIPTION_BYTES = 3_000_000
 
 

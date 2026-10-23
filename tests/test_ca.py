@@ -3,7 +3,7 @@ import stat
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
-from irimi import ca, paths
+from irimi.config import ca, paths
 
 
 def _paths(tmp_path, monkeypatch):

@@ -4,9 +4,10 @@ import argparse
 import sys
 from typing import Any
 
-from irimi import ca, exitcodes
 from irimi.cli import os_error
 from irimi.cli.options import epilog, help_formatted
+from irimi.config import ca
+from irimi.core import exitcodes
 
 # A non-HTTP write the agent labels with `@sdk.write_tool` runs only its fake under irimi, so the
 # notice says the rest happen for real, not that all of them do.

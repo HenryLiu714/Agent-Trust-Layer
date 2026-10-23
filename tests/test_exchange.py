@@ -1,6 +1,6 @@
 from dataclasses import replace
 
-from irimi.exchange import Exchange, Request, Response, clip_chunks, media_type
+from irimi.core.exchange import Exchange, Request, Response, clip_chunks, media_type
 
 
 def _req(scheme: str = "https", port: int = 443, query: str = "") -> Request:
@@ -87,7 +87,7 @@ def test_answered_by_names_every_way_an_exchange_is_answered():
     """
     from typing import get_args
 
-    from irimi.exchange import AnsweredBy
+    from irimi.core.exchange import AnsweredBy
 
     assert set(get_args(AnsweredBy)) == {
         "live",
@@ -106,7 +106,7 @@ def test_fake_level_is_the_locally_answered_subset_of_answered_by():
     say `live`."""
     from typing import get_args
 
-    from irimi.exchange import AnsweredBy, FakeLevel
+    from irimi.core.exchange import AnsweredBy, FakeLevel
 
     assert set(get_args(FakeLevel)) == {"fake-L0", "fake-L1"}
     assert set(get_args(FakeLevel)) <= set(get_args(AnsweredBy))
@@ -125,7 +125,7 @@ def test_overlay_is_not_a_fake_level():
     write by anything that reads the level."""
     from typing import get_args
 
-    from irimi.exchange import FakeLevel
+    from irimi.core.exchange import FakeLevel
 
     assert "overlay" not in set(get_args(FakeLevel))
 

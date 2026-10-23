@@ -7,8 +7,8 @@ The events are in `examples/workflows/w04_slack_ops_bot/agent.py`. Its calls car
 import pytest
 
 from examples.workflows.harness.run import CANARIES, check_invariants, compare, rows_not_shown
-from irimi import redact
-from irimi.exchange import Exchange
+from irimi.core.exchange import Exchange
+from irimi.record import redact
 
 W = "w04_slack_ops_bot"
 CHECKED = "faked; checked against live state: would succeed"

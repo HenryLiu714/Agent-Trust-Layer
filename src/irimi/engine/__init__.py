@@ -5,9 +5,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from irimi.ca import CAPaths
-from irimi.exchange import Exchange
-from irimi.servicemap import MapIndex
+from irimi.config.ca import CAPaths
+from irimi.core.exchange import Exchange
+from irimi.servicemaps import MapIndex
 
 OnExchange = Callable[[Exchange], None]
 # Called with the host a client named (its SNI, or the address it dialled) each time a client

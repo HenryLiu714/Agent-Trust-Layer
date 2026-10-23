@@ -16,10 +16,10 @@ import sys
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from irimi._calls import receiver, signature
-from irimi.limits import MAX_CAPTURED_BYTES
-from irimi.secret_shapes import cut_outside_secrets
-from irimi.trace import (
+from irimi.core.calls import receiver, signature
+from irimi.core.limits import MAX_CAPTURED_BYTES
+from irimi.core.secret_shapes import cut_outside_secrets
+from irimi.protocol.trace import (
     MAIN_MODULE,
     REPR_KEY,
     TRUNCATED_KEY,
@@ -75,7 +75,7 @@ def capture_call(
     """A trigger's arguments as `{parameter: value}`, bound against `fn`'s signature, captured.
 
     A method's or a classmethod's first parameter named `self` or `cls` is the receiver and is
-    left out (`_calls.receiver`): it says nothing about the run, and leaving it in would make every
+    left out (`calls.receiver`): it says nothing about the run, and leaving it in would make every
     method's run unreplayable. Defaults are not applied: the args are what the caller passed, so
     a replay of edited code takes the new defaults. When the call does not bind - the agent
     called the function wrongly, and Python is about to say so - the args are captured as

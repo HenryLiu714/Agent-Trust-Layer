@@ -56,9 +56,9 @@ from dataclasses import dataclass, field
 from typing import Any, get_args
 from urllib.parse import parse_qsl
 
-from irimi import bodies, redact, services
-from irimi.classify import classify
-from irimi.exchange import (
+from irimi import services
+from irimi.core import bodies
+from irimi.core.exchange import (
     IDEMPOTENCY_FLAGS,
     LIVE_KINDS,
     AnsweredBy,
@@ -71,9 +71,8 @@ from irimi.exchange import (
     is_authored_write,
     media_type,
 )
-from irimi.reader import Reader
-from irimi.servicemap import MapIndex, Route
-from irimi.trace import (
+from irimi.decide.reader import Reader
+from irimi.protocol.trace import (
     STOPPED_ERROR_TYPES,
     Event,
     JSONValue,
@@ -81,6 +80,9 @@ from irimi.trace import (
     canonical_json,
     holds_description,
 )
+from irimi.record import redact
+from irimi.servicemaps import MapIndex, Route
+from irimi.servicemaps.classify import classify
 
 # What a match key is: a tuple of strings and tuples of strings, comparable and hashable.
 _Key = tuple[Any, ...]

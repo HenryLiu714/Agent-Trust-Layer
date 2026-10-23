@@ -1,4 +1,4 @@
-"""Redaction before anything reaches disk: one or more tests per rule in `irimi.redact`.
+"""Redaction before anything reaches disk: one or more tests per rule in `irimi.record.redact`.
 
 Every test builds its exchange by hand and asks `redact_exchange` or `redact_json` for the copy
 the store will write. `tests/test_trace_e2e.py` runs the same function over what a real
@@ -19,9 +19,12 @@ import time
 
 import pytest
 
-from irimi import delegation, files, paths, redact, secret_shapes
-from irimi.exchange import Exchange, Flag, Request, Response
-from irimi.redact import placeholder, redact_exchange, redact_json
+from irimi.config import files, paths
+from irimi.core import secret_shapes
+from irimi.core.exchange import Exchange, Flag, Request, Response
+from irimi.decide import targets
+from irimi.record import redact
+from irimi.record.redact import placeholder, redact_exchange, redact_json
 from tests.test_trace import _filled
 
 KEY = bytes(range(32))
@@ -161,11 +164,11 @@ def test_a_url_in_a_header_has_its_query_and_fragment_redacted_by_name():
 
 def test_the_credential_header_rule_is_the_one_delegation_strips_by():
     """One statement of "this header is a credential": a target may not see it, and disk may
-    not see it. `redact` states it, and `delegation` states it nowhere."""
+    not see it. `redact` states it, and `targets` states it nowhere."""
     assert callable(redact.is_credential_header)
-    assert not hasattr(delegation, "is_credential_header")
-    assert not hasattr(delegation, "CREDENTIAL_MARKERS")
-    assert not hasattr(delegation, "CREDENTIAL_HEADERS")
+    assert not hasattr(targets, "is_credential_header")
+    assert not hasattr(targets, "CREDENTIAL_MARKERS")
+    assert not hasattr(targets, "CREDENTIAL_HEADERS")
 
 
 # ------------------------------------------------------------------------------ rule 2: secret keys
@@ -530,7 +533,7 @@ def test_an_operation_named_after_the_path_is_redacted_with_the_path():
 
 
 def test_the_answer_target_is_redacted_by_the_requests_rules():
-    """A bare-origin target keeps the request's path (`delegation.target_url`), so a webhook's
+    """A bare-origin target keeps the request's path (`targets.target_url`), so a webhook's
     secret path reaches `Exchange.target` too."""
     path = "/services/T000/B000/XXXXsecret"
     hook = _exchange(
@@ -823,7 +826,7 @@ def test_a_body_too_deep_to_redact_fails_closed_and_the_log_names_no_value(caplo
     """Python 3.12's `json.loads` raises RecursionError on this body and 3.14's parses it, so the
     walk raises instead. Either way the body is not stored."""
     body = b"[" * 100_000 + b'"sk_live_abc"' + b"]" * 100_000
-    with caplog.at_level(logging.WARNING, logger="irimi.redact"):
+    with caplog.at_level(logging.WARNING, logger="irimi.record.redact"):
         stored = redact_exchange(_exchange(_request(headers=(JSON,), body=body)), KEY)
     assert stored.request.body == FAILED_BODY
     assert Flag.REDACTION_FAILED in stored.flags
@@ -835,7 +838,7 @@ def test_a_header_that_cannot_be_hashed_fails_closed_alone(caplog):
     """A lone surrogate cannot be encoded for the HMAC, and the UnicodeEncodeError's own message
     would quote it: the log names the exception's type only."""
     headers = (("authorization", "Bearer \udcff"), ("accept", "*/*"))
-    with caplog.at_level(logging.WARNING, logger="irimi.redact"):
+    with caplog.at_level(logging.WARNING, logger="irimi.record.redact"):
         stored = redact_exchange(_exchange(_request(headers=headers)), KEY)
     assert stored.request.headers == (
         ("authorization", redact.REDACTION_FAILED),
@@ -994,7 +997,7 @@ def test_load_key_creates_a_missing_home_0700(tmp_path):
 KEY_RACER = """
 import sys, time
 from pathlib import Path
-from irimi import redact
+from irimi.record import redact
 
 home, go, ready = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
 ready.touch()

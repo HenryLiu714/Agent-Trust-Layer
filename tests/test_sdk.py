@@ -31,18 +31,20 @@ from typing import Any
 
 import pytest
 
-from irimi import __version__, limits, redact, sdk
-from irimi.exchange import Exchange
-from irimi.limits import MAX_ERROR_TYPE
+from irimi import __version__, sdk
+from irimi.core import limits
+from irimi.core.exchange import Exchange
+from irimi.core.limits import MAX_ERROR_TYPE
 from irimi.protocol.control import RUN_ACTIONS, RunAction
 from irimi.protocol.env import AGENT_VERSION_ENV, CONTROL_ENV, ENGINE_ACTIVE_ENV, PROXY_ENVS
+from irimi.protocol.trace import ErrorInfo, RunRecord, Trigger
+from irimi.record import redact
+from irimi.record.store.reader import StoreReader
+from irimi.record.store.writer import DirectoryStore
 from irimi.sdk import _capture as capture
 from irimi.sdk import _control_client as client
 from irimi.sdk import _runs as runs
 from irimi.sdk._state import state
-from irimi.store.reader import StoreReader
-from irimi.store.writer import DirectoryStore
-from irimi.trace import ErrorInfo, RunRecord, Trigger
 from tests import test_engine_mitm
 from tests.test_engine_mitm import _config, _start, _via_proxy
 
@@ -1185,7 +1187,7 @@ def test_a_proxy_speaking_another_protocol_is_one_warning_naming_both_versions(
 _SCRIPT_AGENT = """\
 import dataclasses, json
 from irimi import sdk
-from irimi import _entrypoints
+from irimi.protocol import entrypoints
 from irimi.sdk import _capture, _runs
 
 @dataclasses.dataclass
@@ -1203,7 +1205,7 @@ def look() -> None: ...
 
 if __name__ == "__main__":
     print(json.dumps([
-        _entrypoints.entrypoint(handle.__wrapped__),
+        entrypoints.entrypoint(handle.__wrapped__),
         _runs.label(look.__wrapped__, None, "@sdk.read_tool"),
         _capture.capture(Ticket(1)),
     ]))

@@ -4,15 +4,16 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from irimi import netaddr, wire
-from irimi.classify import Classification, classify, unclassified
-from irimi.delegation import TargetRefused, refuse_self_target, target_url
-from irimi.exchange import Exchange, Flag, Request
-from irimi.ingress import ReverseDoorRefused, detect_door, rewrite_reverse
-from irimi.netaddr import Target, is_loopback, is_self_host
+from irimi.core import netaddr
+from irimi.core.exchange import Exchange, Flag, Request
+from irimi.core.netaddr import Target, is_loopback, is_self_host
+from irimi.decide.targets import TargetRefused, refuse_self_target, target_url
+from irimi.engine import wire
+from irimi.engine.ingress import ReverseDoorRefused, detect_door, rewrite_reverse
+from irimi.engine.wire import attribute_run, parse
 from irimi.protocol.headers import ANSWERED_BY_HEADER
-from irimi.redact import is_credential_header
-from irimi.wire import attribute_run, parse
+from irimi.record.redact import is_credential_header
+from irimi.servicemaps.classify import Classification, classify, unclassified
 
 
 def _parse(**overrides) -> Request:
@@ -150,16 +151,17 @@ def _index(tmp_path, monkeypatch, *docs: str):
     then `$IRIMI_HOME/maps.yaml`, so a developer with a real overrides file would otherwise see a
     different index, or a MapError.
     """
-    from irimi import paths, servicemap
+    from irimi import servicemaps
+    from irimi.config import paths
 
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "ambient-home"))
     if not docs:
-        return servicemap.load(cwd=tmp_path, maps_dir=servicemap.loader.shipped_dir())
+        return servicemaps.load(cwd=tmp_path, maps_dir=servicemaps.loader.shipped_dir())
     maps_dir = tmp_path / "maps"
     maps_dir.mkdir(exist_ok=True)
     for i, doc in enumerate(docs):
         (maps_dir / f"{i}.yaml").write_text(doc)
-    return servicemap.load(cwd=tmp_path, maps_dir=maps_dir)
+    return servicemaps.load(cwd=tmp_path, maps_dir=maps_dir)
 
 
 def test_classify_uses_the_route_rule(tmp_path, monkeypatch):
@@ -260,7 +262,7 @@ def test_classify_default_kind_beats_the_verb_rule(tmp_path, monkeypatch):
 
 
 def test_classify_with_an_empty_index_is_the_verb_rule():
-    from irimi.servicemap import MapIndex
+    from irimi.servicemaps import MapIndex
 
     assert classify(_req("POST"), MapIndex()).kind == "unknown"
     assert classify(_req(), MapIndex()).kind == "read"
@@ -340,7 +342,7 @@ def test_detect_door_reverse_for_loopback_hosts(host):
 def test_detect_door_resolves_unknown_name_on_own_port(monkeypatch):
     import socket
 
-    from irimi import netaddr
+    from irimi.core import netaddr
 
     def fake_getaddrinfo(host, port, **kwargs):
         if host == "self.test":
@@ -361,7 +363,7 @@ def test_detect_door_takes_the_address_the_connection_arrived_on_as_this_machine
     another port, or no local address at all is still the forward door."""
     import socket
 
-    from irimi import netaddr
+    from irimi.core import netaddr
 
     def fake_getaddrinfo(host, port, **kwargs):
         if host == "irimi":
@@ -848,7 +850,7 @@ def test_a_live_kind_is_downgraded_when_the_route_did_not_name_the_method():
 
     The map is built here rather than loaded, because the loader refuses to produce one.
     """
-    from irimi.servicemap import MapIndex, Route, ServiceMap
+    from irimi.servicemaps import MapIndex, Route, ServiceMap
 
     route = Route(
         method="*",

@@ -12,18 +12,19 @@ import time
 
 import pytest
 
-from irimi import __version__, redact
-from irimi.control import MAX_CONTROL_BODY, MAX_REFUSAL, TOO_DEEP, ControlEndpoint
+from irimi import __version__
+from irimi.core.exchange import Exchange, Request
+from irimi.core.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE
+from irimi.decide.policy import ShadowPolicy
 from irimi.engine import Serve
-from irimi.exchange import Exchange, Request
-from irimi.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE
-from irimi.policy import ShadowPolicy
+from irimi.engine.control import MAX_CONTROL_BODY, MAX_REFUSAL, TOO_DEEP, ControlEndpoint
 from irimi.protocol import control as protocol_control
+from irimi.protocol.trace import MAX_QUOTED, ErrorInfo, ToolCall, Trigger
+from irimi.record import redact
+from irimi.record.store.reader import StoreReader
+from irimi.record.store.writer import DirectoryStore
 from irimi.replay.index import ReplayIndex
 from irimi.replay.policy import ReplayPolicy
-from irimi.store.reader import StoreReader
-from irimi.store.writer import DirectoryStore
-from irimi.trace import MAX_QUOTED, ErrorInfo, ToolCall, Trigger
 from tests import test_engine_mitm
 from tests.doubles import NullStore
 from tests.test_engine_mitm import _config, _start, _via_proxy
@@ -476,7 +477,7 @@ def test_every_route_ignores_a_field_it_does_not_know(engine):
 
 
 def _replaying(tmp_path, monkeypatch, *events, policy=None) -> _Engine:
-    """An engine replaying a run whose `events` are given, as `cli.session.build_engine` builds
+    """An engine replaying a run whose `events` are given, as `cli.compose.build_engine` builds
     one: its policy a `ReplayPolicy` over their `ReplayIndex`, unless `policy` is given."""
     cfg = _config(tmp_path, monkeypatch)
     key = redact.load_key(tmp_path)
@@ -496,7 +497,7 @@ def test_a_lookup_the_recording_answers_is_a_stamped_200_once_and_records_nothin
         "tc-1", "recorded01", "db.balance", "read", "real", LOOKUP["args"], {"n": 1}, None, 1.0, 2.0
     )
     engine = _replaying(tmp_path, monkeypatch, recorded)
-    with caplog.at_level(logging.ERROR, logger="irimi.control"):
+    with caplog.at_level(logging.ERROR, logger="irimi.engine.control"):
         try:
             hit = engine.call("POST", _LOOKUP, LOOKUP)
             again = engine.call("POST", _LOOKUP, LOOKUP)
@@ -508,7 +509,7 @@ def test_a_lookup_the_recording_answers_is_a_stamped_200_once_and_records_nothin
     for status, _, body in (again, deep):
         assert (status, json.loads(body)) == (404, _refused("no recorded call"))
     assert all(STAMP in headers for _, headers, _ in (hit, again, deep))
-    assert [r for r in caplog.records if r.name == "irimi.control"] == []
+    assert [r for r in caplog.records if r.name == "irimi.engine.control"] == []
     assert reader.list_runs() == []
     assert engine.seen == [] and engine.tool_calls == []
 
@@ -576,12 +577,12 @@ def test_a_store_that_raises_answers_500_and_the_next_request_is_served(
         raise RuntimeError("disk on fire")
 
     monkeypatch.setattr(engine.store, "start_run", broken)
-    with caplog.at_level(logging.ERROR, logger="irimi.control"):
+    with caplog.at_level(logging.ERROR, logger="irimi.engine.control"):
         status, headers, body = engine.call("POST", _START, _start_body(time.time()))
     assert (status, json.loads(body)) == (500, INTERNAL)
     assert STAMP in headers
     # Logged with its traceback, which the 500's body does not carry.
-    [logged] = [r for r in caplog.records if r.name == "irimi.control"]
+    [logged] = [r for r in caplog.records if r.name == "irimi.engine.control"]
     assert logged.exc_info is not None and "disk on fire" in str(logged.exc_info[1])
     status, _, _ = engine.call("GET", "/_irimi/health")
     assert status == 200
@@ -628,10 +629,10 @@ def test_a_decoder_that_raises_anything_but_its_refusal_is_irimi_s_500_never_too
     monkeypatch.setattr(protocol_control, "run_start_from_json", broken)
     body = json.dumps(_start_body(1.0)).encode()
     request = Request("POST", "http", "127.0.0.1", 4000, _START, "", (), body)
-    with caplog.at_level(logging.ERROR, logger="irimi.control"):
+    with caplog.at_level(logging.ERROR, logger="irimi.engine.control"):
         response = ControlEndpoint(NullStore(), serve=False).answer(request)
     assert (response.status, json.loads(response.body)) == (500, INTERNAL)
-    [logged] = [r for r in caplog.records if r.name == "irimi.control"]
+    [logged] = [r for r in caplog.records if r.name == "irimi.engine.control"]
     assert logged.exc_info is not None and logged.exc_info[0] is RecursionError
 
 
@@ -646,7 +647,7 @@ def test_an_on_tool_call_that_raises_costs_the_callback_not_the_record(
 
     eng, _, stop = _start(cfg, store=store, on_tool_call=broken)
     try:
-        with caplog.at_level(logging.ERROR, logger="irimi.control"):
+        with caplog.at_level(logging.ERROR, logger="irimi.engine.control"):
             conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=10)
             body = json.dumps(_tool_call(1.0))
             conn.request("POST", f"/_irimi/runs/{RUN}/tool-calls", body=body)
@@ -658,7 +659,7 @@ def test_an_on_tool_call_that_raises_costs_the_callback_not_the_record(
     [call] = StoreReader(tmp_path / "store").load_run(RUN).events
     assert call.name == "db.write"
     # Swallowed, and logged with its traceback.
-    [logged] = [r for r in caplog.records if r.name == "irimi.control"]
+    [logged] = [r for r in caplog.records if r.name == "irimi.engine.control"]
     assert logged.exc_info is not None and "summary broke" in str(logged.exc_info[1])
 
 
@@ -822,10 +823,10 @@ def test_a_body_nested_too_deeply_to_read_is_a_400_never_a_500(
     every Python. A deeply nested field is refused by its decoder, which names the field's type
     and never quotes it: quoting it with `repr` raised RecursionError on some Pythons and stacks
     and not others, so the same body was answered differently on CI's runners."""
-    with caplog.at_level(logging.ERROR, logger="irimi.control"):
+    with caplog.at_level(logging.ERROR, logger="irimi.engine.control"):
         status, headers, raw = engine.call("POST", path, body)
     assert (status, json.loads(raw)) == (400, _refused(expected))
     assert STAMP in headers
-    assert [r for r in caplog.records if r.name == "irimi.control"] == []
+    assert [r for r in caplog.records if r.name == "irimi.engine.control"] == []
     engine.finish()
     assert not (engine.root / "runs").exists() and engine.tool_calls == []

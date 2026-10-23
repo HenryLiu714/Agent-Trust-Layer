@@ -17,18 +17,19 @@ from dataclasses import dataclass, replace
 from types import TracebackType
 from typing import Any, overload
 
-from irimi import __version__, trace
-from irimi._entrypoints import entrypoint
-from irimi.limits import MAX_NAME
+from irimi import __version__
+from irimi.core.limits import MAX_NAME
+from irimi.core.secret_shapes import cut_outside_secrets
+from irimi.protocol import trace
 from irimi.protocol.control import RunStart, run_end_to_json, run_start_to_json
+from irimi.protocol.entrypoints import entrypoint
 from irimi.protocol.env import AGENT_VERSION_ENV
+from irimi.protocol.trace import MAIN_MODULE
 from irimi.sdk import _context as context
 from irimi.sdk._capture import Captured, capture, capture_call
 from irimi.sdk._errors import error_info
 from irimi.sdk._http_labels import instrument
 from irimi.sdk._state import state
-from irimi.secret_shapes import cut_outside_secrets
-from irimi.trace import MAIN_MODULE
 
 
 @dataclass(frozen=True)

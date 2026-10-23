@@ -9,7 +9,7 @@ and the live charge cannot know about the first, because the first was never mad
 
 from typing import Any
 
-from irimi.bodies import is_int
+from irimi.core.bodies import is_int
 from irimi.services.model import (
     NOT_EVALUABLE,
     Check,

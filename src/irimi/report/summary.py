@@ -8,9 +8,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from irimi.bodies import reflect
-from irimi.exchange import Exchange
-from irimi.money import format_minor_units
+from irimi.core.bodies import reflect
+from irimi.core.exchange import Exchange
+from irimi.core.money import format_minor_units
+from irimi.protocol.trace import RunRecord, TelemetrySeen, ToolCall
 from irimi.report import model
 from irimi.report.model import (
     Faked,
@@ -24,8 +25,7 @@ from irimi.report.model import (
     WriteEntry,
 )
 from irimi.report.terminal import answer_word, plural, printable, tool_outcome
-from irimi.servicemap import MapIndex, Route, path_params
-from irimi.trace import RunRecord, TelemetrySeen, ToolCall
+from irimi.servicemaps import MapIndex, Route, path_params
 
 WRITE_MARKER = "○"
 REJECTED_MARKER = "✗"

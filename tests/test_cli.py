@@ -6,10 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from irimi import __version__, ca, cli, exitcodes, paths, servicemap
-from irimi.cli import main, options, session
+from irimi import __version__, cli, servicemaps
+from irimi.cli import compose, main, options
+from irimi.config import ca, paths
+from irimi.core import exitcodes
+from irimi.core.netaddr import Target
 from irimi.engine import Replay, Serve, Shadow
-from irimi.netaddr import Target
 from irimi.protocol.env import AGENT_VERSION_ENV
 from irimi.report.terminal import NOT_LOOPBACK_NOTICE, PROXY_ONLY_NOTICE
 
@@ -280,13 +282,13 @@ def _shipped_index():
     """The shipped maps with no overrides file in play: a real ./irimi.maps.yaml or
     $IRIMI_HOME/maps.yaml would otherwise change the index, or refuse to load at all.
     tests/conftest.py points both at fresh empty directories, so there is nothing to isolate."""
-    from irimi import servicemap
+    from irimi import servicemaps
 
-    return servicemap.load(maps_dir=servicemap.loader.shipped_dir())
+    return servicemaps.load(maps_dir=servicemaps.loader.shipped_dir())
 
 
 def _reverse_hosts(args, index):
-    return session._engine_config(args, index, "t3st", ca.ca_paths()).reverse_hosts
+    return compose._engine_config(args, index, "t3st", ca.ca_paths()).reverse_hosts
 
 
 def test_reverse_hosts_are_the_mapped_hosts():
@@ -308,7 +310,7 @@ def test_engine_config_carries_the_maps():
     """`serve` and `shadow` both build the engine's config here, and the classifier only sees the
     maps because `maps=index` is part of it. The bind is `--bind`'s, and `serve` is set only
     for serve mode, whose health answer says so."""
-    from irimi.cli.session import _engine_config
+    from irimi.cli.compose import _engine_config
 
     index = _shipped_index()
     args = argparse.Namespace(base_url_host=[], port=4321, bind="0.0.0.0")
@@ -326,14 +328,14 @@ def test_the_composition_root_builds_the_service_overlay_and_records_into_the_ru
     """The overlay is handed the engine's own classification of a read and holds no index of its
     own, so the two cannot disagree about which service a read belongs to. The engine records into
     the store `prepare_run` opened, the one `irimi shadow` starts and ends its run in."""
-    from irimi.overlay import ServiceOverlay
+    from irimi.decide.overlay import ServiceOverlay
     from tests.doubles import NullStore
 
     index = _shipped_index()
     args = argparse.Namespace(base_url_host=[], port=4321, bind=options.LISTEN_HOST)
     p = ca.ca_paths()
-    run = session.Run(index, p, "t3st", session._engine_config(args, index, "t3st", p), NullStore())
-    engine = session.build_engine(run, on_exchange=lambda ex: None)
+    run = compose.Run(index, p, "t3st", compose._engine_config(args, index, "t3st", p), NullStore())
+    engine = compose.build_engine(run, on_exchange=lambda ex: None)
     assert isinstance(engine.overlay, ServiceOverlay)
     assert engine.config.maps is index
     assert engine.store is run.store
@@ -345,8 +347,8 @@ def test_the_composition_root_builds_a_replay_policy_over_the_run_s_recording():
     One that names none gets shadow mode's policy, reading the real upstream."""
     from dataclasses import replace
 
-    from irimi.policy import ShadowPolicy
-    from irimi.reader import UpstreamReader
+    from irimi.decide.policy import ShadowPolicy
+    from irimi.decide.reader import UpstreamReader
     from irimi.replay.index import RecordingReader, ReplayIndex
     from irimi.replay.policy import ReplayPolicy
     from tests.doubles import NullStore
@@ -354,18 +356,18 @@ def test_the_composition_root_builds_a_replay_policy_over_the_run_s_recording():
     index = _shipped_index()
     args = argparse.Namespace(base_url_host=[], port=4321, bind=options.LISTEN_HOST)
     p = ca.ca_paths()
-    config = session._engine_config(args, index, "t3st", p)
+    config = compose._engine_config(args, index, "t3st", p)
     recording = ReplayIndex.from_events([], b"k" * 32, index)
-    run = session.Run(
+    run = compose.Run(
         index, p, "t3st", replace(config, mode=Replay("rec1")), NullStore(), None, recording
     )
-    engine = session.build_engine(run, on_exchange=lambda ex: None)
+    engine = compose.build_engine(run, on_exchange=lambda ex: None)
     assert isinstance(engine.policy, ReplayPolicy)
     assert engine.policy.recording is recording
     assert engine.policy.maps is index
     assert isinstance(engine.policy.shadow.reader, RecordingReader)
-    shadow = session.build_engine(
-        session.Run(index, p, "t3st", config, NullStore()), lambda ex: None
+    shadow = compose.build_engine(
+        compose.Run(index, p, "t3st", config, NullStore()), lambda ex: None
     )
     assert isinstance(shadow.policy, ShadowPolicy)
     assert isinstance(shadow.policy.reader, UpstreamReader)
@@ -392,9 +394,9 @@ def test_a_replay_of_a_damaged_run_starts_nothing(tmp_path, monkeypatch, capsys,
     run, with no traceback, no command and no run of its own in the store, and exits 2."""
     import json
 
-    from irimi import redact
-    from irimi.exchange import Exchange, Request, Response
-    from irimi.store.writer import DirectoryStore
+    from irimi.core.exchange import Exchange, Request, Response
+    from irimi.record import redact
+    from irimi.record.store.writer import DirectoryStore
 
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
     monkeypatch.chdir(tmp_path)
@@ -539,9 +541,9 @@ def test_a_trailing_slash_on_the_host_is_the_service_target():
         "http://127.0.0.1:3000",
     )
     # And the loader takes it: the spelling has to reach the service target, not merely parse.
-    from irimi import servicemap
+    from irimi import servicemaps
 
-    index = servicemap.load(targets=[_target_arg("api.stripe.com/=http://127.0.0.1:3000")])
+    index = servicemaps.load(targets=[_target_arg("api.stripe.com/=http://127.0.0.1:3000")])
     stripe = index.service_for("api.stripe.com")
     assert stripe is not None and stripe.target.url == "http://127.0.0.1:3000"
 
@@ -620,7 +622,7 @@ def test_a_target_naming_an_unmapped_host_fails_closed(capsys):
 
 
 def test_the_escape_hatch_warning_says_what_it_allows():
-    from irimi.cli.session import _escape_hatch_warning
+    from irimi.cli.compose import _escape_hatch_warning
 
     plain = cli.parse_args(["serve"])
     assert _escape_hatch_warning(plain) is None
@@ -636,7 +638,7 @@ def test_a_ca_near_its_expiry_is_warned_of(tmp_path, monkeypatch):
     startup says so and names the fix."""
     import datetime as dt
 
-    from irimi.cli.session import _ca_expiry_warning
+    from irimi.cli.compose import _ca_expiry_warning
 
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
     p = ca.ca_paths()
@@ -691,7 +693,7 @@ class _PipedStdout(io.StringIO):
 
 
 def _delegated_service(target: str):
-    return servicemap.ServiceMap(
+    return servicemaps.ServiceMap(
         service="stripe",
         hosts=frozenset({"api.stripe.com"}),
         routes=(),
@@ -707,7 +709,7 @@ def _startup_args(**kwargs):
 def _startup_on_a_pipe(monkeypatch, index, args=None):
     out = _PipedStdout()
     monkeypatch.setattr(sys, "stdout", out)
-    session.print_startup(
+    compose.print_startup(
         "serve", args or _startup_args(), index, "7f3a", "127.0.0.1", 4000, Path("/ca.pem")
     )
     return out.visible
@@ -716,7 +718,7 @@ def _startup_on_a_pipe(monkeypatch, index, args=None):
 def test_the_banner_reaches_a_piped_stdout_before_anything_else_is_printed(monkeypatch):
     """`irimi serve | tee` shows the banner at once, not at the first exchange's flush, so a
     serve nobody talks to still shows the port, the CA path and the proxy-only notice."""
-    visible = _startup_on_a_pipe(monkeypatch, servicemap.MapIndex())
+    visible = _startup_on_a_pipe(monkeypatch, servicemaps.MapIndex())
     assert "listening on 127.0.0.1:4000" in visible
     assert "/ca.pem" in visible
     assert PROXY_ONLY_NOTICE in visible
@@ -726,7 +728,7 @@ def test_a_delegated_services_warning_reaches_a_piped_stdout_too(monkeypatch):
     """The line that says the agent's requests are leaving this machine is the last one that may
     wait for an exchange to flush it."""
     sm = _delegated_service("http://10.0.0.9:3000")
-    visible = _startup_on_a_pipe(monkeypatch, servicemap.MapIndex((sm,)))
+    visible = _startup_on_a_pipe(monkeypatch, servicemaps.MapIndex((sm,)))
     assert "delegated: stripe -> http://10.0.0.9:3000 (writes)" in visible
     assert NOT_LOOPBACK_NOTICE in visible
 
@@ -734,10 +736,10 @@ def test_a_delegated_services_warning_reaches_a_piped_stdout_too(monkeypatch):
 def test_the_escape_hatch_warning_goes_to_stderr_flushed(monkeypatch, capsys):
     out = _PipedStdout()
     monkeypatch.setattr(sys, "stdout", out)
-    session.print_startup(
+    compose.print_startup(
         "shadow",
         _startup_args(allow_remote_target=["stub.internal"]),
-        servicemap.MapIndex(),
+        servicemaps.MapIndex(),
         "7f3a",
         "127.0.0.1",
         4000,
@@ -768,11 +770,11 @@ def _child(source: str = "pass") -> list[str]:
 
 
 def _spy_on_the_store(monkeypatch, close=None):
-    """Swap the class `session._open_store` builds for a real `DirectoryStore` that remembers each
+    """Swap the class `compose._open_store` builds for a real `DirectoryStore` that remembers each
     `close()` and the thread it came from, and may do `close(store)` after the real one."""
     import threading
 
-    from irimi.store.writer import DirectoryStore
+    from irimi.record.store.writer import DirectoryStore
 
     class _Spy(DirectoryStore):
         closed: list[str] = []
@@ -783,7 +785,7 @@ def _spy_on_the_store(monkeypatch, close=None):
             if close is not None:
                 close(self)
 
-    monkeypatch.setattr("irimi.store.writer.DirectoryStore", _Spy)
+    monkeypatch.setattr("irimi.record.store.writer.DirectoryStore", _Spy)
     return _Spy
 
 
@@ -836,8 +838,8 @@ def test_a_store_that_cannot_be_written_stops_the_run_with_one_line(home, capsys
 def test_shadow_stores_its_process_run_with_the_agent_and_engine_versions(home, monkeypatch):
     """The process run's record: its argv, which a replay runs again, the agent's version
     from `IRIMI_AGENT_VERSION`, this irimi's version, and how the child exited."""
-    from irimi.store.reader import StoreReader
-    from irimi.trace import ErrorInfo, trigger_args
+    from irimi.protocol.trace import ErrorInfo, trigger_args
+    from irimi.record.store.reader import StoreReader
 
     monkeypatch.setenv(AGENT_VERSION_ENV, "agent-2.0.1")
     assert main(["shadow", *_child("raise SystemExit(3)")]) == 3
@@ -864,7 +866,7 @@ def test_shadow_closes_the_store_when_the_proxy_never_starts(home, monkeypatch, 
     """`cli` opened the store, so `cli` closes it on every path out, and not only when an
     engine thread got far enough to close it for it: one that never started, or outlived
     `handle.stop()`, did not."""
-    from irimi import runner
+    from irimi.cli import runner
     from irimi.engine import EngineStartError
 
     spy = _spy_on_the_store(monkeypatch)
@@ -900,8 +902,8 @@ def test_a_reader_gone_costs_shadow_no_run_and_leaves_no_engine(home, monkeypatc
     stops them (`shadow.run_child`), or after it."""
     import threading
 
-    from irimi import runner
-    from irimi.store.reader import StoreReader
+    from irimi.cli import runner
+    from irimi.record.store.reader import StoreReader
 
     spy = _spy_on_the_store(monkeypatch)
     out = _ReaderGoneWhen()
@@ -930,7 +932,7 @@ def test_a_reader_gone_by_serve_s_banner_closes_its_store_and_releases_its_lock(
     stopped, the store closed and its `serve.lock` released, so the next serve may take it."""
     import threading
 
-    from irimi.store.lock import ServeLock
+    from irimi.record.store.lock import ServeLock
 
     spy = _spy_on_the_store(monkeypatch)
     out = _ReaderGoneWhen()
@@ -971,7 +973,7 @@ def test_serve_prints_a_line_for_each_tool_call(home, monkeypatch, capsys):
     import threading
 
     from irimi.engine import EngineStartError
-    from irimi.trace import ToolCall
+    from irimi.protocol.trace import ToolCall
 
     wired = []
     stopped = threading.Event()
@@ -1008,8 +1010,8 @@ def test_serve_records_under_the_store_it_was_given(home, monkeypatch, capsys):
     import urllib.request
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
-    from irimi.store.reader import StoreReader
-    from irimi.trace import UNATTRIBUTED
+    from irimi.protocol.trace import UNATTRIBUTED
+    from irimi.record.store.reader import StoreReader
 
     class _Hello(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -1037,7 +1039,7 @@ def test_serve_records_under_the_store_it_was_given(home, monkeypatch, capsys):
     def startup(mode, args, index, run_id, host, port, cert):
         threading.Thread(target=drive, args=(port,), daemon=True).start()
 
-    monkeypatch.setattr(session, "print_startup", startup)
+    monkeypatch.setattr(compose, "print_startup", startup)
     elsewhere = home / "elsewhere"
     args = cli.parse_args(["serve", "--port", "0", "--store", str(elsewhere)])
     try:

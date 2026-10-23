@@ -26,10 +26,10 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from irimi.bodies import JSON_CT
-from irimi.classify import Classification
-from irimi.exchange import FakeLevel, Flag, Request
-from irimi.servicemap import MapError, MapIndex
+from irimi.core.bodies import JSON_CT
+from irimi.core.exchange import FakeLevel, Flag, Request
+from irimi.servicemaps import MapError, MapIndex
+from irimi.servicemaps.classify import Classification
 from irimi.services import generic, slack, stripe
 from irimi.services.model import (
     NOT_EVALUABLE,

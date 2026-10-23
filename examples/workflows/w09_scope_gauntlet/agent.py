@@ -117,7 +117,7 @@ def bodies() -> None:
 
 
 def big_reads() -> None:
-    """Reads whose answer is past `irimi.bodies.MAX_BODY_BYTES`: the charge a refund's L3 check
+    """Reads whose answer is past `irimi.core.bodies.MAX_BODY_BYTES`: the charge a refund's L3 check
     reads, and the same charge read back after the refund, which the overlay would edit."""
     stripe("POST", "/v1/refunds", {"charge": BIG_CHARGE, "amount": "700"}, label="refund_big")
     doc = stripe("GET", f"/v1/charges/{BIG_CHARGE}", label="get_big").json() or {}
@@ -169,7 +169,7 @@ def self_addressed() -> None:
 ENTRYPOINT = "examples.workflows.w09_scope_gauntlet.agent"
 AGENT_VERSION = "w09-by-hand"
 SDK_VERSION = "by-hand"
-# Past `irimi.limits.MAX_ERROR_MESSAGE` (1000), the most of an error message a trace keeps.
+# Past `irimi.core.limits.MAX_ERROR_MESSAGE` (1000), the most of an error message a trace keeps.
 LONG_MESSAGE_CHARS = 1500
 # A key in a posted error, across each cut a trace makes of one. `ghp_`'s shape needs 36
 # characters after it, so the part of the key a cut kept would no longer be its shape.
@@ -177,11 +177,11 @@ ERROR_KEY = "ghp_" + "W9errorKey" + "0" * 26
 # Where ERROR_KEY starts in a posted message: across the 1000-character cut, its 27-character
 # placeholder ending before it.
 ERROR_KEY_AT = 966
-# Past `irimi.limits.MAX_ERROR_TYPE` (300), the most of an error type a trace keeps: a dotted
+# Past `irimi.core.limits.MAX_ERROR_TYPE` (300), the most of an error type a trace keeps: a dotted
 # path of 657 characters, which no class's `module.qualname` comes near, ERROR_KEY one of its
 # names, 264 characters in, across that cut.
 LONG_ERROR_TYPE = "pkg" + ".sub" * 65 + f".{ERROR_KEY}" + ".sub" * 85 + ".RuntimeError"
-# Past `irimi.control.MAX_CONTROL_BODY` (2 MiB), the most a control request may post.
+# Past `irimi.engine.control.MAX_CONTROL_BODY` (2 MiB), the most a control request may post.
 OVERSIZED_BODY_BYTES = 2 * 1024 * 1024 + 1
 # How deep `refuse_deep` nests a tool call's name: deeper than `repr` went on some Pythons, and
 # read by every Python's `json.loads`, so its decoder names it by type on all of them.

@@ -19,8 +19,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
-from irimi.limits import MAX_ANSWER
-from irimi.opener import no_redirect_opener
+from irimi.core.limits import MAX_ANSWER
+from irimi.core.opener import no_redirect_opener
 from irimi.protocol.control import (
     PROTOCOL_VERSION,
     RECORDED_ACTION,
@@ -33,9 +33,9 @@ from irimi.protocol.control import (
 )
 from irimi.protocol.env import CONTROL_ENV
 from irimi.protocol.headers import PROTOCOL_HEADER
+from irimi.protocol.trace import JSONValue
 from irimi.sdk._capture import serialized
 from irimi.sdk._http_labels import unlabelled
-from irimi.trace import JSONValue
 
 LOGGER_NAME = "irimi.sdk"
 logger = logging.getLogger(LOGGER_NAME)

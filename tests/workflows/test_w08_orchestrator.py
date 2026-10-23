@@ -8,9 +8,9 @@ import yaml
 
 from examples.workflows.harness.run import check_invariants, compare, rows_not_shown
 from examples.workflows.w08_orchestrator.scenarios import DOWN_TARGET, SUBAGENT_MAP, UNJUSTIFIED_MAP
-from irimi.exchange import Exchange
-from irimi.servicemap.loader import MapError, parse_service
-from irimi.trace import UNATTRIBUTED, ToolCall
+from irimi.core.exchange import Exchange
+from irimi.protocol.trace import UNATTRIBUTED, ToolCall
+from irimi.servicemaps.loader import MapError, parse_service
 
 W = "w08_orchestrator"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.

@@ -37,7 +37,7 @@ from examples.workflows.harness.run import (
     workflows,
 )
 from examples.workflows.w10_flaky_upstream.scenarios import CONTROL_DOWN
-from irimi import trace
+from irimi.protocol import trace
 from irimi.report.model import RunView
 from irimi.report.summary import summary_lines
 

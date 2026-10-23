@@ -17,22 +17,25 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from irimi import ca, classify, paths, redact, servicemap
-from irimi.delegation import ForwardTo
+from irimi import servicemaps
+from irimi.config import ca, paths
+from irimi.core.exchange import Exchange, Flag, Request, Response
+from irimi.core.netaddr import Target
+from irimi.decide.overlay import ServiceOverlay
+from irimi.decide.policy import Decided, Delegate, Forward, Respond, ShadowPolicy
+from irimi.decide.reader import UpstreamReader
+from irimi.decide.targets import ForwardTo
+from irimi.decide.writelog import Translation
 from irimi.engine import EngineConfig
+from irimi.engine.ingress import Admitted
 from irimi.engine.mitm import IrimiAddon, MitmEngine
-from irimi.exchange import Exchange, Flag, Request, Response
-from irimi.ingress import Admitted
-from irimi.netaddr import Target
-from irimi.overlay import ServiceOverlay
-from irimi.policy import Decided, Delegate, Forward, Respond, ShadowPolicy
 from irimi.protocol.headers import ANSWERED_BY_HEADER
-from irimi.reader import UpstreamReader
+from irimi.record import redact
+from irimi.record.store.reader import StoreReader
+from irimi.record.store.writer import DirectoryStore
 from irimi.replay.index import ReplayIndex
 from irimi.replay.policy import ReplayPolicy
-from irimi.store.reader import StoreReader
-from irimi.store.writer import DirectoryStore
-from irimi.writelog import Translation
+from irimi.servicemaps import classify
 from tests.doubles import NullStore
 from tests.test_invariants import stamping_violations
 
@@ -193,7 +196,7 @@ def maps(tmp_path, home):
     maps_dir.mkdir()
     (maps_dir / "stripe.yaml").write_text(STRIPE_MAP)
     (maps_dir / "anthropic.yaml").write_text(LLM_MAP)
-    return servicemap.load(cwd=tmp_path, maps_dir=maps_dir)
+    return servicemaps.load(cwd=tmp_path, maps_dir=maps_dir)
 
 
 class _Session:
@@ -758,7 +761,7 @@ def test_the_engine_never_translates_a_delegated_read(home, tmp_path):
     maps_dir = tmp_path / "targeted"
     maps_dir.mkdir()
     (maps_dir / "stripe.yaml").write_text(STRIPE_MAP)
-    targeted = servicemap.load(
+    targeted = servicemaps.load(
         cwd=tmp_path,
         maps_dir=maps_dir,
         targets=[("127.0.0.1", "", "http://127.0.0.1:9")],
@@ -796,7 +799,8 @@ def test_an_unchanged_replay_compares_the_same_as_its_recording(home, maps, stub
     every write, and the `↳` line under it, as its recording printed them, so every compared row
     is `=`. The run reads the charge, refunds it, reads it again through the overlay and pages
     the refunds after the one it minted; the replay answers all of it from the recording."""
-    from irimi import compare, exitcodes
+    from irimi.core import exitcodes
+    from irimi.replay import compare
     from irimi.report.model import RunView
     from irimi.report.summary import summary_lines
 

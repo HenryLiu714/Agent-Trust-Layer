@@ -1,27 +1,39 @@
 {
-  "src/irimi/classify.py": {
+  "src/irimi/core/exchange.py": {
+    "caps_run": 4
+  },
+  "src/irimi/decide/idempotency.py": {
     "caps_run": 1
   },
-  "src/irimi/control.py": {
-    "caps_run": 3
-  },
-  "src/irimi/delegation.py": {
+  "src/irimi/decide/targets.py": {
     "caps_run": 1
   },
   "src/irimi/engine/capture.py": {
     "caps_run": 2
   },
+  "src/irimi/engine/control.py": {
+    "caps_run": 3
+  },
   "src/irimi/engine/decoding.py": {
     "caps_run": 1
   },
-  "src/irimi/exchange.py": {
-    "caps_run": 4
-  },
-  "src/irimi/idempotency.py": {
+  "src/irimi/protocol/trace.py": {
     "caps_run": 1
   },
-  "src/irimi/redact.py": {
+  "src/irimi/record/redact.py": {
     "caps_run": 1
+  },
+  "src/irimi/record/store/__init__.py": {
+    "caps_run": 1
+  },
+  "src/irimi/record/store/layout.py": {
+    "caps_run": 2
+  },
+  "src/irimi/record/store/lock.py": {
+    "caps_run": 2
+  },
+  "src/irimi/record/store/writer.py": {
+    "caps_run": 6
   },
   "src/irimi/replay/index.py": {
     "caps_run": 10
@@ -32,25 +44,13 @@
   "src/irimi/replay/report.py": {
     "caps_run": 1
   },
-  "src/irimi/servicemap/rules.py": {
+  "src/irimi/servicemaps/classify.py": {
+    "caps_run": 1
+  },
+  "src/irimi/servicemaps/rules.py": {
     "caps_run": 2
   },
   "src/irimi/services/stripe/effects.py": {
-    "caps_run": 1
-  },
-  "src/irimi/store/__init__.py": {
-    "caps_run": 1
-  },
-  "src/irimi/store/layout.py": {
-    "caps_run": 2
-  },
-  "src/irimi/store/lock.py": {
-    "caps_run": 2
-  },
-  "src/irimi/store/writer.py": {
-    "caps_run": 6
-  },
-  "src/irimi/trace.py": {
     "caps_run": 1
   }
 }

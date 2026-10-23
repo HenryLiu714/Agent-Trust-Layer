@@ -10,7 +10,7 @@ import re
 
 import pytest
 
-from irimi.servicemap.loader import load_shipped
+from irimi.servicemaps.loader import load_shipped
 from irimi.services import generic
 
 

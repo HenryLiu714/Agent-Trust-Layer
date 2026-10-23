@@ -14,11 +14,12 @@ import socket
 
 import pytest
 
-from irimi import ca, paths, servicemap
+from irimi import servicemaps
+from irimi.config import ca, paths
+from irimi.decide.overlay import NoOverlay
+from irimi.decide.policy import ShadowPolicy
 from irimi.engine import EngineConfig, Serve
 from irimi.engine.mitm import IrimiAddon, MitmEngine
-from irimi.overlay import NoOverlay
-from irimi.policy import ShadowPolicy
 from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV
 from tests.doubles import NullStore
 
@@ -34,7 +35,7 @@ def _config(tmp_path, monkeypatch, listen_host="127.0.0.1"):
         listen_host=listen_host,
         listen_port=0,
         reverse_hosts=frozenset({"api.stripe.com"}),
-        maps=servicemap.MapIndex(),
+        maps=servicemaps.MapIndex(),
     )
 
 
@@ -149,7 +150,7 @@ def test_a_request_naming_the_address_irimi_was_reached_at_is_never_forwarded_to
     calls = _counting_requests(monkeypatch)
     cfg = _config(tmp_path, monkeypatch, listen_host="0.0.0.0")
     engine = MitmEngine(cfg, ShadowPolicy(), NullStore(), NoOverlay())
-    from irimi import runner
+    from irimi.cli import runner
 
     handle = runner.start_engine(engine)
     try:
@@ -200,16 +201,16 @@ def test_an_answer_target_naming_the_address_irimi_was_reached_at_is_never_diall
     # is loaded once the port is known, into the index the engine and the policy were built with,
     # which both read per request. A port reserved by binding a socket and closing it could be
     # taken by another test before the engine bound it.
-    maps = servicemap.MapIndex()
+    maps = servicemaps.MapIndex()
     cfg = dataclasses.replace(_config(tmp_path, monkeypatch, listen_host="0.0.0.0"), maps=maps)
     calls = _counting_requests(monkeypatch)
     engine = MitmEngine(cfg, ShadowPolicy(maps=maps), NullStore(), NoOverlay())
-    from irimi import runner
+    from irimi.cli import runner
 
     handle = runner.start_engine(engine)
     try:
         port = handle.port()
-        loaded = servicemap.load(
+        loaded = servicemaps.load(
             allow_target_hosts=frozenset({address}),
             cwd=tmp_path,
             maps_dir=maps_dir,
@@ -239,7 +240,7 @@ def test_a_door_that_cannot_be_told_is_refused_never_forwarded(tmp_path, monkeyp
     about may be one addressed to irimi itself: it is answered 400 by irimi instead."""
     from mitmproxy.test import tflow, tutils
 
-    from irimi import ingress
+    from irimi.engine import ingress
 
     def broken(*args):
         raise ValueError("no address")
@@ -274,7 +275,7 @@ def test_a_failed_decision_under_serve_mode_is_unattributed(tmp_path, monkeypatc
     under a process run that does not exist."""
     from mitmproxy.test import tflow, tutils
 
-    from irimi.trace import UNATTRIBUTED
+    from irimi.protocol.trace import UNATTRIBUTED
 
     class _Broken(ShadowPolicy):
         def decide(self, *args, **kwargs):
@@ -307,7 +308,7 @@ def test_a_loopback_bind_still_finds_its_own_loopback_spellings(tmp_path, monkey
     calls = _counting_requests(monkeypatch)
     cfg = dataclasses.replace(_config(tmp_path, monkeypatch), reverse_hosts=frozenset())
     engine = MitmEngine(cfg, ShadowPolicy(), NullStore(), NoOverlay())
-    from irimi import runner
+    from irimi.cli import runner
 
     handle = runner.start_engine(engine)
     try:
@@ -329,8 +330,8 @@ def test_the_store_calls_back_on_its_writer_once_a_runs_end_is_on_disk(tmp_path)
     the end itself. A run that has not ended is not called back for."""
     import threading
 
-    from irimi.store.reader import StoreReader
-    from irimi.store.writer import DirectoryStore
+    from irimi.record.store.reader import StoreReader
+    from irimi.record.store.writer import DirectoryStore
     from tests.test_store import _exchange, _record
 
     root = tmp_path / "store"
@@ -357,8 +358,9 @@ def test_a_run_s_writes_and_keys_are_dropped_once_its_end_is_on_disk(tmp_path, m
     """The composition root drops a run's writes from the engine's write log, and its idempotency
     keys from the policy's store, as the store reports the run ended, before serve prints its
     summary, so a long serve holds open runs' alone. Another run's stay."""
-    from irimi import cli, idempotency
-    from irimi.cli import session
+    from irimi import cli
+    from irimi.cli import compose
+    from irimi.decide import idempotency
     from tests.test_idempotency import PARAMS, _stored
     from tests.test_store import _exchange, _record
 
@@ -373,7 +375,7 @@ def test_a_run_s_writes_and_keys_are_dropped_once_its_end_is_on_disk(tmp_path, m
         assert run.keys is not None
         left_at_end.append((run.write_log.for_run(run_id), run.keys.get(slot_of[run_id], PARAMS)))
 
-    run = session.prepare_run(args, serve=True, on_run_ended=on_run_ended)
+    run = compose.prepare_run(args, serve=True, on_run_ended=on_run_ended)
     assert run is not None and run.write_log is not None and run.keys is not None
     ended, still_open = _exchange("r1"), _exchange("r2")
     run.write_log.add(ended)
@@ -389,7 +391,7 @@ def test_a_run_s_writes_and_keys_are_dropped_once_its_end_is_on_disk(tmp_path, m
     assert left_at_end == [((), (None, False))]
     assert run.write_log.for_run("r2") == (still_open,)
     assert run.keys.get(slot_of["r2"], PARAMS) == (_stored(), False)
-    engine = session.build_engine(run, lambda ex: None)
+    engine = compose.build_engine(run, lambda ex: None)
     assert engine.write_log is run.write_log
     assert engine.policy.idempotency is run.keys
 
@@ -397,8 +399,8 @@ def test_a_run_s_writes_and_keys_are_dropped_once_its_end_is_on_disk(tmp_path, m
 def test_a_callback_that_raises_is_logged_and_the_store_carries_on(tmp_path, caplog):
     """What `on_run_ended` raises is the caller's problem, never the run's: one WARNING naming the
     exception's type, and the next event is still written."""
-    from irimi.store.reader import StoreReader
-    from irimi.store.writer import DirectoryStore
+    from irimi.record.store.reader import StoreReader
+    from irimi.record.store.writer import DirectoryStore
     from tests.test_store import _exchange, _record
 
     root = tmp_path / "store"
@@ -423,7 +425,7 @@ def test_one_serve_per_store_root(tmp_path):
     is free again once the first releases it, which it may do twice."""
     import os
 
-    from irimi.store.lock import ServeLock, StoreLocked
+    from irimi.record.store.lock import ServeLock, StoreLocked
 
     first = ServeLock.hold(tmp_path / "store")
     try:
@@ -468,7 +470,7 @@ def test_an_ipv6_listener_is_bracketed_where_it_is_a_url(tmp_path):
     control variables say `[::1]:4000`."""
     from pathlib import Path
 
-    from irimi import runner
+    from irimi.cli import runner
     from irimi.report import terminal
 
     [first, *_] = terminal.banner_lines("shadow", "7f3a", "::1", 4000, Path("/ca.pem"))
@@ -548,7 +550,7 @@ def test_a_second_serve_on_one_store_is_refused_before_it_starts(home, capsys):
 
     from irimi import cli
     from irimi.cli import serve
-    from irimi.store.lock import ServeLock
+    from irimi.record.store.lock import ServeLock
 
     def writers() -> int:
         return sum(thread.name == "irimi-store" for thread in threading.enumerate())
@@ -603,7 +605,7 @@ def test_a_signal_during_serve_only_records_itself():
     interpreter's exit cannot end it. With none, the handlers found are put back."""
     import signal
 
-    from irimi import runner
+    from irimi.cli import runner
 
     with _signals_caught_here() as (outside, record):
         with runner.stopping_on_signals() as quiet:
@@ -626,7 +628,7 @@ def test_a_sigint_ignored_when_serve_starts_stays_ignored():
     must not stop the serve. SIGTERM is still serve's."""
     import signal
 
-    from irimi import runner
+    from irimi.cli import runner
 
     with _signals_caught_here() as (outside, record):
         signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -646,11 +648,11 @@ def test_a_signal_before_the_proxy_is_ready_stops_serve_with_no_banner(
     whatever it started, closes the store, releases the lock and exits 0."""
     import signal
 
-    from irimi import cli, runner
-    from irimi.cli import session
-    from irimi.store.lock import ServeLock
+    from irimi import cli
+    from irimi.cli import compose, runner
+    from irimi.record.store.lock import ServeLock
 
-    prepare, start = session.prepare_run, runner.start_engine
+    prepare, start = compose.prepare_run, runner.start_engine
     started = []
 
     def signalled_while_preparing(*args, **kwargs):
@@ -665,7 +667,7 @@ def test_a_signal_before_the_proxy_is_ready_stops_serve_with_no_banner(
             signal.raise_signal(signal.SIGTERM)
         return started[-1]
 
-    monkeypatch.setattr(session, "prepare_run", signalled_while_preparing)
+    monkeypatch.setattr(compose, "prepare_run", signalled_while_preparing)
     monkeypatch.setattr(runner, "start_engine", signalled_while_starting)
     with _signals_caught_here() as (outside, record):
         assert cli.main(["serve", "--port", "0"]) == 0
@@ -681,7 +683,7 @@ def test_an_engine_that_cannot_be_built_leaves_the_store_closed_and_unlocked(hom
     import threading
 
     from irimi import cli
-    from irimi.store.lock import ServeLock
+    from irimi.record.store.lock import ServeLock
 
     def broken(*args, **kwargs):
         raise RuntimeError("no engine")
@@ -734,14 +736,14 @@ def test_a_run_that_cannot_be_read_back_is_one_warning_naming_only_its_type(
     of its summary, naming the exception's type and never its message, which may quote what it
     choked on, as the store's own warnings never do."""
     from irimi.cli import serve
-    from irimi.store.reader import StoreReader
-    from irimi.trace import TraceFormatError
+    from irimi.protocol.trace import TraceFormatError
+    from irimi.record.store.reader import StoreReader
 
     def unreadable(self, run_id, *, bodies=True):
         raise TraceFormatError("cannot read sk_live_CANARY0000000000000000")
 
     monkeypatch.setattr(StoreReader, "load_run", unreadable)
-    serve._ServeOutput(tmp_path / "store").run_ended(servicemap.MapIndex(), "r1")
+    serve._ServeOutput(tmp_path / "store").run_ended(servicemaps.MapIndex(), "r1")
     out, err = capsys.readouterr()
     assert out == ""
     assert err == "warning: run r1 ended but could not be read back: TraceFormatError\n"
@@ -754,21 +756,21 @@ def test_an_engine_that_stops_on_its_own_ends_serve_as_a_failure(home, monkeypat
     import signal
 
     from irimi import cli
-    from irimi.cli import session
+    from irimi.cli import compose
 
     engines = []
 
     def build(*a, **kw):
-        engines.append(session.build_engine(*a, **kw))
+        engines.append(compose.build_engine(*a, **kw))
         return engines[-1]
 
-    printed = session.print_startup
+    printed = compose.print_startup
 
     def startup(*args):
         printed(*args)
         engines[0].shutdown()
 
-    monkeypatch.setattr(session, "print_startup", startup)
+    monkeypatch.setattr(compose, "print_startup", startup)
     before = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
     assert cli.main(["serve", "--port", "0"], engine_factory=build) == 2
     assert capsys.readouterr().err.strip() == "error: the proxy stopped on its own"
@@ -941,9 +943,9 @@ def test_a_served_sdk_agent_gets_one_summary_block_per_run_it_ends(home, tmp_pat
     import urllib.request
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
+    from irimi.protocol.trace import UNATTRIBUTED
+    from irimi.record.store.reader import StoreReader
     from irimi.report.runs import run_status
-    from irimi.store.reader import StoreReader
-    from irimi.trace import UNATTRIBUTED
 
     class _Items(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -1037,7 +1039,7 @@ def _blocks(lines: list[str], reader) -> list[str]:
     from irimi.report.model import RunView
     from irimi.report.summary import summary_lines
 
-    maps = servicemap.load()
+    maps = servicemaps.load()
     ids = []
     for at, line in enumerate(lines):
         if not line.startswith("--- run "):
@@ -1084,7 +1086,7 @@ def test_a_stream_read_to_its_end_is_in_its_runs_block(home, tmp_path_factory):
     import time
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    from irimi.store.reader import StoreReader
+    from irimi.record.store.reader import StoreReader
 
     class _Events(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"

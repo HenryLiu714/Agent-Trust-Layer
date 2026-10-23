@@ -10,17 +10,17 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
-from irimi import exitcodes, runner
-from irimi.cli import CliError, UsageError, session
+from irimi.cli import CliError, UsageError, compose, runner
 from irimi.cli.options import SHADOW_EXIT_CODES, add_proxy_options, epilog, help_formatted
-from irimi.exchange import Exchange
+from irimi.cli.runner import ChildCall
+from irimi.core import exitcodes
+from irimi.core.exchange import Exchange
 from irimi.protocol.env import AGENT_VERSION_ENV
-from irimi.protocol.replay_files import CallOutcome, read_call_outcome
+from irimi.protocol.replay_files import CallResult, read_call_outcome
+from irimi.protocol.trace import UNATTRIBUTED, Event, RunRecord, ToolCall, Trigger
 from irimi.report import terminal
 from irimi.report.model import RunView, for_summary
 from irimi.report.summary import Live, summary_lines
-from irimi.runner import ChildCall
-from irimi.trace import UNATTRIBUTED, Event, RunRecord, ToolCall, Trigger
 
 USAGE = "irimi shadow [options] -- COMMAND [ARGS...]"
 
@@ -48,7 +48,7 @@ def register(subparsers: "argparse._SubParsersAction[Any]") -> None:
 def cmd_shadow(
     args: argparse.Namespace,
     *,
-    engine_factory: session.EngineFactory = session.build_engine,
+    engine_factory: compose.EngineFactory = compose.build_engine,
 ) -> int:
     cmd = list(args.cmd)
     if not cmd:
@@ -61,10 +61,10 @@ def _run_shadow(
     args: argparse.Namespace,
     cmd: list[str],
     child: runner.Child,
-    engine_factory: session.EngineFactory,
+    engine_factory: compose.EngineFactory,
 ) -> int:
     """`irimi shadow -- <cmd>` inside its SIGTERM handler: the run, start to summary."""
-    run = session.prepare_run(args)
+    run = compose.prepare_run(args)
     if run is None:
         return exitcodes.ERROR
     record = process_run(run.run_id, cmd)
@@ -112,11 +112,11 @@ def _sdk_runs(
         *(ev.run_id for ev in ran.events if isinstance(ev, ToolCall)),
     ]
     ids = [rid for rid in dict.fromkeys(seen) if rid not in (process_run_id, UNATTRIBUTED)]
-    root = session.store_root(args)
+    root = compose.store_root(args)
     runs: dict[str, RunRecord | None] = {}
     for run_id in ids:
         try:
-            runs[run_id] = session.load_stored_run(root, run_id, bodies=False).record
+            runs[run_id] = compose.load_stored_run(root, run_id, bodies=False).record
         except CliError:
             runs[run_id] = None
     return runs
@@ -154,7 +154,7 @@ class ChildResult:
     elapsed: float = 0.0
     events: list[Event] = field(default_factory=list)
     stopped: int | None = None
-    call: CallOutcome | None = None
+    call: CallResult | None = None
     # How many TLS handshakes clients refused, by the host each asked for.
     tls_failures: dict[str, int] = field(default_factory=dict)
 
@@ -177,10 +177,10 @@ def _cannot_run(program: str) -> tuple[int, str] | None:
 
 def run_child(
     args: argparse.Namespace,
-    run: session.Run,
+    run: compose.Run,
     child: runner.Child,
     spec: ChildSpec,
-    engine_factory: session.EngineFactory,
+    engine_factory: compose.EngineFactory,
 ) -> ChildResult:
     """`spec` run as `run`'s child, under its engine, as `irimi shadow` and `irimi replay` run
     one: the engine started, the banner, the run's record stored before the child exists, the
@@ -214,7 +214,7 @@ def run_child(
     engine = engine_factory(run, on_exchange, on_tool_call, on_tls_failure)
 
     try:
-        handle = session.start_engine(engine)
+        handle = compose.start_engine(engine)
     except KeyboardInterrupt:
         print("error: interrupted before the proxy was ready", file=sys.stderr)
         return ChildResult(exitcodes.SIGINT, status="not-started")
@@ -224,8 +224,8 @@ def run_child(
     cmd = spec.argv
     try:
         host, port = run.config.listen_host, handle.port()
-        replaying = session.replayed_run(run.config.mode)
-        session.print_startup(
+        replaying = compose.replayed_run(run.config.mode)
+        compose.print_startup(
             spec.banner, args, run.index, run.run_id, host, port, run.ca.cert, replaying
         )
         env = runner.child_env(

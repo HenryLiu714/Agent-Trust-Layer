@@ -6,15 +6,23 @@ import logging
 from collections.abc import Sequence
 from dataclasses import replace
 
-from irimi import idempotency, policy
-from irimi.classify import Classification
-from irimi.delegation import ForwardTo
-from irimi.exchange import LIVE_KINDS, AnsweredBy, Exchange, Flag, Request, Response, WriteOutcome
-from irimi.policy import Decided, Respond, ShadowPolicy
+from irimi.core.exchange import (
+    LIVE_KINDS,
+    AnsweredBy,
+    Exchange,
+    Flag,
+    Request,
+    Response,
+    WriteOutcome,
+)
+from irimi.decide import idempotency, policy
+from irimi.decide.policy import Decided, Respond, ShadowPolicy
+from irimi.decide.targets import ForwardTo
 from irimi.protocol.headers import ANSWERED_BY_HEADER
+from irimi.protocol.trace import JSONValue, ToolCall
 from irimi.replay.index import RecordingReader, ReplayIndex
-from irimi.servicemap import MapIndex
-from irimi.trace import JSONValue, ToolCall
+from irimi.servicemaps import MapIndex
+from irimi.servicemaps.classify import Classification
 
 logger = logging.getLogger(__name__)
 

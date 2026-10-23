@@ -6,7 +6,7 @@ WHAT IT SAYS (`ReplayReport.lines`): which run was replayed as which; for a proc
 only its argv runs again; how the agent ended, its exit code printed and never deciding the exit;
 where the replay diverged; how many of the agent's calls the recording answered and how many it
 missed; then the body of `irimi compare` between the two runs, whose exit code is the replay's. A
-replay whose call the child could not make (`CallOutcome`) has no report: `irimi replay` says why
+replay whose call the child could not make (`CallResult`) has no report: `irimi replay` says why
 and stops. A divergence is the first of the agent's calls the recording was asked for, in the
 order stored (`seq`), that it did not answer: an exchange the agent sent flagged `replay-miss` (a
 precondition read irimi issued never is), or a read tool that ran for real. It is numbered among
@@ -25,14 +25,15 @@ import shlex
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from irimi import compare, exitcodes
-from irimi.exchange import Exchange, Flag
-from irimi.protocol.replay_files import CallOutcome, ReplayResult
+from irimi.core import exitcodes
+from irimi.core.exchange import Exchange, Flag
+from irimi.protocol.replay_files import CallResult, ReplayResult
+from irimi.protocol.trace import RunRecord, StoredRun, ToolCall
+from irimi.replay import compare
 from irimi.replay.index import made_within, nested_in
 from irimi.report.runs import event_line
 from irimi.report.terminal import printable
-from irimi.servicemap import MapIndex
-from irimi.trace import RunRecord, StoredRun, ToolCall
+from irimi.servicemaps import MapIndex
 
 # A version a run did not record, beside one the other run did.
 UNSET = "(unset)"
@@ -48,7 +49,7 @@ class Ended:
     was itself interrupted (SIGINT, SIGTERM) while the agent ran, which is then the replay's."""
 
     code: int
-    call: CallOutcome | None = None
+    call: CallResult | None = None
     stopped: int | None = None
 
 

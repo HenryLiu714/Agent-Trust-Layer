@@ -6,15 +6,15 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from irimi import exitcodes, runner
-from irimi.cli import CliError, session
+from irimi.cli import CliError, compose, runner
 from irimi.cli.options import DEFAULT_PORT, add_proxy_options, epilog, help_formatted
-from irimi.exchange import Exchange
+from irimi.core import exitcodes
+from irimi.core.exchange import Exchange
+from irimi.protocol.trace import UNATTRIBUTED, ToolCall
 from irimi.report import terminal
 from irimi.report.model import RunView
 from irimi.report.summary import summary_lines
-from irimi.servicemap import MapIndex
-from irimi.trace import UNATTRIBUTED, ToolCall
+from irimi.servicemaps import MapIndex
 
 # How often serve's main thread looks for a signal or a stop. A handler only records the
 # signal, and the main thread acts on it within this long.
@@ -45,7 +45,7 @@ def cmd_serve(
     args: argparse.Namespace,
     stop: threading.Event | None = None,
     *,
-    engine_factory: session.EngineFactory = session.build_engine,
+    engine_factory: compose.EngineFactory = compose.build_engine,
 ) -> int:
     """`irimi serve`: the engine as a sidecar, with no child process, until SIGINT or SIGTERM, or
     until `stop` is set.
@@ -105,7 +105,7 @@ class _ServeOutput:
         the run is whole on disk. A run that cannot be read back is one warning naming the
         exception's type only, as the store logs its own: a message may quote what it read."""
         try:
-            stored = session.load_stored_run(self.store_root, run_id)
+            stored = compose.load_stored_run(self.store_root, run_id)
         except CliError as exc:
             why = type(exc.__cause__).__name__
             self.say([f"warning: run {run_id} ended but could not be read back: {why}"], err=True)
@@ -118,13 +118,13 @@ def _run_serve(
     args: argparse.Namespace,
     stop: threading.Event,
     signalled: list[int],
-    engine_factory: session.EngineFactory,
+    engine_factory: compose.EngineFactory,
 ) -> int:
     """`cmd_serve` inside its signal handlers: the engine's life, start to stop, with
     `_ServeOutput` saying what happened. `signalled` holds each signal that arrived."""
-    output = _ServeOutput(session.store_root(args), args.quiet)
+    output = _ServeOutput(compose.store_root(args), args.quiet)
     died = threading.Event()
-    run = session.prepare_run(args, serve=True, on_run_ended=output.run_ended)
+    run = compose.prepare_run(args, serve=True, on_run_ended=output.run_ended)
     if run is None:
         return exitcodes.ERROR
     # The store is closed and its lock released on every way out from here, so a signal never
@@ -133,13 +133,13 @@ def _run_serve(
         engine = engine_factory(run, output.exchange, output.tool_call)
         if signalled:  # stopped before it served: no engine to start, no banner to print
             return 0
-        handle = session.start_engine(engine)
+        handle = compose.start_engine(engine)
         if handle is None:
             return exitcodes.ERROR
         try:
             if not signalled:  # a banner for a proxy already stopping would say it serves
                 host, port = run.config.listen_host, handle.port()
-                session.print_startup("serve", args, run.index, None, host, port, run.ca.cert)
+                compose.print_startup("serve", args, run.index, None, host, port, run.ca.cert)
             threading.Thread(
                 target=runner.watch_engine, args=(handle.thread, stop, died), daemon=True
             ).start()

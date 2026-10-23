@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from irimi import paths
+from irimi.config import paths
 
 
 def test_irimi_home_defaults_to_dot_irimi(monkeypatch):

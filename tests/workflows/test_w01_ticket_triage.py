@@ -31,8 +31,8 @@ from examples.workflows.w01_ticket_triage.agent import (
     handle_ticket,
 )
 from examples.workflows.w01_ticket_triage.scenarios import CUSTOMER
-from irimi import paths
-from irimi.trace import ErrorInfo, ToolCall, Trigger
+from irimi.config import paths
+from irimi.protocol.trace import ErrorInfo, ToolCall, Trigger
 
 W = "w01_ticket_triage"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.

@@ -49,13 +49,14 @@ import pytest
 from examples.llm_refund_agent import agent, seed
 from examples.llm_refund_agent.agent import Ticket, handle_ticket
 from examples.workflows.harness.internet import resolving_only
-from irimi import ca, paths, runner, testing
-from irimi.cli import main
-from irimi.exchange import Exchange
+from irimi import testing
+from irimi.cli import main, runner
+from irimi.config import ca, paths
+from irimi.core.exchange import Exchange
 from irimi.protocol.env import ENGINE_ACTIVE_ENV
 from irimi.protocol.replay_files import replay_result_from_json
-from irimi.store.reader import StoreReader
-from irimi.trace import ToolCall, Trigger
+from irimi.protocol.trace import ToolCall, Trigger
+from irimi.record.store.reader import StoreReader
 from tests.test_phase_exit import _Stripe
 
 ROOT = Path(__file__).resolve().parent.parent

@@ -16,15 +16,15 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, overload
 
-from irimi import trace
-from irimi.limits import MAX_CAPTURED_BYTES
+from irimi.core.limits import MAX_CAPTURED_BYTES
+from irimi.protocol import trace
 from irimi.protocol.env import ENGINE_ACTIVE_ENV, PROXY_ENVS, RUN_ENV
+from irimi.protocol.trace import STOPPED_ERROR_TYPES, TRUNCATED_KEY
 from irimi.sdk import _context as context
 from irimi.sdk._capture import capture, capture_call, revive, serialized
 from irimi.sdk._errors import error_info, recorded_error
 from irimi.sdk._runs import check_name, label, off_the_loop
 from irimi.sdk._state import state
-from irimi.trace import STOPPED_ERROR_TYPES, TRUNCATED_KEY
 
 # The variables whose presence says this process meant to go through a proxy: an inactive SDK
 # with either set ran a write tool for real where irimi was probably meant to be in front.

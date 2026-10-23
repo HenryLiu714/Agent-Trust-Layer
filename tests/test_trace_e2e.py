@@ -6,7 +6,7 @@ of them proves this: a run of the real CLI, over the refund agent's scenario, le
 whose exchanges read back as exactly what the engine handed its store - redacted, with every
 precondition, overlay and webhook field intact and every span in order.
 
-`cli.session` looks `DirectoryStore` up when it opens the store, so each test here swaps in
+`cli.compose` looks `DirectoryStore` up when it opens the store, so each test here swaps in
 `_SpyStore`: the real store, unchanged, which also remembers each exchange the engine handed it.
 Every assertion is made on what `StoreReader` reads back and on the files under the store's root.
 
@@ -30,16 +30,17 @@ from pathlib import Path
 
 import pytest
 
-from irimi import redact, trace
-from irimi.bodies import FORM_CT
 from irimi.cli import main
-from irimi.exchange import Exchange, Flag, Headers, Precondition, header_value, media_type
+from irimi.core.bodies import FORM_CT
+from irimi.core.exchange import Exchange, Flag, Headers, Precondition, header_value, media_type
+from irimi.protocol import trace
 from irimi.protocol.env import RUN_ENV
+from irimi.protocol.trace import StoredRun, trigger_args
+from irimi.record import redact
+from irimi.record.store.reader import StoreReader
+from irimi.record.store.writer import DirectoryStore
 from irimi.report.terminal import exchange_line
-from irimi.servicemap import loader
-from irimi.store.reader import StoreReader
-from irimi.store.writer import DirectoryStore
-from irimi.trace import StoredRun, trigger_args
+from irimi.servicemaps import loader
 from tests import test_engine_mitm, test_phase_exit
 from tests.test_engine_mitm import (
     _carries_run_header,
@@ -131,7 +132,7 @@ def stored(home, monkeypatch):
     `irimi shadow`'s `on_exchange` printed, in the same order: the live exchanges a stored run
     is compared against."""
     _SpyStore.built = []
-    monkeypatch.setattr("irimi.store.writer.DirectoryStore", _SpyStore)
+    monkeypatch.setattr("irimi.record.store.writer.DirectoryStore", _SpyStore)
     printed: list[Exchange] = []
     line = exchange_line
 
@@ -385,7 +386,7 @@ def _run_phase1_under_shadow(tmp_path, monkeypatch, stripe_port: int) -> None:
     """The refund agent's read-and-refund child (`tests.test_phase_exit.CHILD`) under the real
     `irimi shadow`, against the loopback Stripe, which never hears a write. Its calls carry
     `authorization: Bearer sk_test_notreal`."""
-    monkeypatch.setattr("irimi.reader.UpstreamReader", _StandInReader)
+    monkeypatch.setattr("irimi.decide.reader.UpstreamReader", _StandInReader)
     _StandInReader.port = stripe_port
     child = tmp_path / "child.py"
     child.write_text(
@@ -714,8 +715,8 @@ def _run_calls_under_shadow(
     maps_dir = tmp_path / "shipped"
     shutil.copytree(loader.shipped_dir(), maps_dir)
     (maps_dir / "standin.yaml").write_text(STANDIN_MAP)
-    monkeypatch.setattr("irimi.servicemap.loader.shipped_dir", lambda: maps_dir)
-    monkeypatch.setattr("irimi.reader.UpstreamReader", _StandInReader)
+    monkeypatch.setattr("irimi.servicemaps.loader.shipped_dir", lambda: maps_dir)
+    monkeypatch.setattr("irimi.decide.reader.UpstreamReader", _StandInReader)
     _StandInReader.port = stand_in
     spec = [
         {
@@ -757,7 +758,7 @@ def test_a_delegated_slack_webhook_stores_its_secret_path_as_one_placeholder_in_
 ):
     """The credential-path rule over a real delegated write. A `hooks.slack.com/services/T/B/
     <secret>` post through the reverse door, its service pointed at a bare-origin loopback target,
-    reaches that target on its own path (`delegation.target_url`), so the secret is in both the
+    reaches that target on its own path (`targets.target_url`), so the secret is in both the
     request path and `Exchange.target`. On disk both hold the one placeholder of the whole path and
     the target keeps its origin; the target heard, and the agent was answered, unredacted."""
     origin = f"http://127.0.0.1:{redact_stand_in}"

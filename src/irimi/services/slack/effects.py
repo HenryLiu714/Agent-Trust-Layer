@@ -38,7 +38,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from irimi.bodies import is_int
+from irimi.core.bodies import is_int
 from irimi.services.model import Applied, Read, Write
 
 # The body parameters each overlaid read understands. Anything else means irimi cannot say where the

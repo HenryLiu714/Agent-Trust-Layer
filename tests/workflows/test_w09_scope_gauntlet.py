@@ -25,14 +25,17 @@ from examples.workflows.w09_scope_gauntlet.agent import (
     OVERSIZED_BODY_BYTES,
 )
 from examples.workflows.w09_scope_gauntlet.scenarios import BIG_DESCRIPTION_BYTES, WORKFLOW
-from irimi import control, paths, redact, trace
-from irimi.bodies import MAX_BODY_BYTES
-from irimi.exchange import Exchange, Flag
-from irimi.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE, MAX_STORED_BODY
+from irimi.config import paths
+from irimi.core.bodies import MAX_BODY_BYTES
+from irimi.core.exchange import Exchange, Flag
+from irimi.core.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE, MAX_STORED_BODY
+from irimi.engine import control
+from irimi.protocol import trace
+from irimi.protocol.trace import ErrorInfo, RunEnd, RunRecord, ToolCall, Trigger
+from irimi.record import redact
+from irimi.record.store.layout import RUNS_DIR, SERVE_LOCK_FILE
 from irimi.report.runs import MAX_TRIGGER_SHOWN, RUN_LIST_HEADER, event_line
 from irimi.report.terminal import WIDE_BIND_NOTICE, exchange_line
-from irimi.store.layout import RUNS_DIR, SERVE_LOCK_FILE
-from irimi.trace import ErrorInfo, RunEnd, RunRecord, ToolCall, Trigger
 
 W = "w09_scope_gauntlet"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.

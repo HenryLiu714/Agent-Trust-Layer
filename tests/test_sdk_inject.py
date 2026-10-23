@@ -24,15 +24,16 @@ import httpx
 import pytest
 import requests
 
-from irimi import redact, sdk
-from irimi.exchange import Exchange
+from irimi import sdk
+from irimi.core.exchange import Exchange
 from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV
 from irimi.protocol.headers import RUN_HEADER
+from irimi.record import redact
+from irimi.record.store.reader import StoreReader
+from irimi.record.store.writer import DirectoryStore
 from irimi.sdk import _control_client as client
 from irimi.sdk import _http_labels as instrumentation
 from irimi.sdk._state import state
-from irimi.store.reader import StoreReader
-from irimi.store.writer import DirectoryStore
 from tests import test_engine_mitm
 from tests.test_engine_mitm import (
     _config,

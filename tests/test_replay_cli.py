@@ -5,7 +5,7 @@ replay never sent anywhere.
 
 The agent is a module this file writes into the test's working directory, `replay_agent`, started
 by its name (`python -c "import replay_agent; ..."`) so its trigger's entrypoint is
-`replay_agent:handle`, which `irimi._replay_child` imports, never `__main__:handle`. It sends
+`replay_agent:handle`, which `irimi.replay.child` imports, never `__main__:handle`. It sends
 its calls through the forward proxy explicitly, because `irimi shadow` exempts loopback from it
 through `NO_PROXY` and the stubs are on loopback. The maps are `tests/test_replay_engine.py`'s.
 """
@@ -18,12 +18,13 @@ from dataclasses import replace
 
 import pytest
 
-from irimi import __version__, ca, cli, paths
+from irimi import __version__, cli
 from irimi.cli import main
+from irimi.config import ca, paths
 from irimi.protocol.replay_files import ReplayResult, replay_result_from_json
-from irimi.servicemap import loader
-from irimi.store.reader import StoreReader
-from irimi.trace import ErrorInfo, ToolCall
+from irimi.protocol.trace import ErrorInfo, ToolCall
+from irimi.record.store.reader import StoreReader
+from irimi.servicemaps import loader
 from tests import test_replay_engine
 from tests.maps_for_cli import complete_for_check
 from tests.test_replay_engine import LLM_MAP, STRIPE_MAP, _Llm, _Stripe
@@ -548,7 +549,7 @@ def test_a_python_that_cannot_run_irimi_s_replay_child_is_refused_before_anythin
     ended. A Python without irimi, here this one with no site-packages, a path that is no
     program, a virtual environment's directory rather than its Python, and one that does not answer
     in time are each refused before the replay starts: exit 2, and no run stored."""
-    from irimi import runner
+    from irimi.cli import runner
 
     source = _record(home, f"replay_agent.handle({TICKET})")
     bare = _python(tmp_path, "bare-python", "unset PYTHONPATH", "-S")
@@ -783,14 +784,14 @@ def test_a_replay_interrupted_before_its_run_is_stored_exits_130_with_no_run(
 ):
     """A Ctrl-C while the replay's engine starts, before its run is stored: no agent ran and no
     run exists, so the result names none, and the replay exits 130 as `irimi shadow` would."""
-    from irimi.cli import session
+    from irimi.cli import compose
 
     source = _record(home, f"replay_agent.handle({TICKET})")
 
     def interrupted(*args: object, **kwargs: object) -> None:
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(session, "print_startup", interrupted)
+    monkeypatch.setattr(compose, "print_startup", interrupted)
     written = tmp_path / "result.json"
     capfd.readouterr()
     code, _, _ = _replay(capfd, source, "--result-file", str(written))

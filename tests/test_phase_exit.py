@@ -19,7 +19,7 @@ is the whole argument:
   `_StandInReader`; this one needs no stand-in at all.
   `test_the_same_five_calls_under_irimi_shadow_print_the_phase_2_summary` is its twin through the
   real CLI: the same calls from a child of `irimi shadow`, proving the engine the criterion builds
-  is the one `cli.session.build_engine` builds, and that the block it prints on exit is the one
+  is the one `cli.compose.build_engine` builds, and that the block it prints on exit is the one
   pinned.
 
 * `test_the_refund_agent_leaves_no_refund_on_a_real_test_mode_charge` is the live version of
@@ -46,14 +46,15 @@ from pathlib import Path
 
 import pytest
 
-from irimi import ca, paths, policy, reader
 from irimi.cli import main
-from irimi.money import format_minor_units
-from irimi.overlay import ServiceOverlay
+from irimi.config import ca, paths
+from irimi.core.money import format_minor_units
+from irimi.decide import policy, reader
+from irimi.decide.overlay import ServiceOverlay
 from irimi.protocol.headers import ANSWERED_BY_HEADER
+from irimi.protocol.trace import RunRecord
 from irimi.report.model import RunView, for_summary
 from irimi.report.summary import Live, summary_lines
-from irimi.trace import RunRecord
 from tests.maps_for_cli import complete_for_check
 from tests.test_engine_mitm import (
     PRECONDITION_STRIPE_MAP,
@@ -202,8 +203,8 @@ def test_a_refund_through_the_door_is_answered_by_irimi_and_never_leaves_the_mac
 ):
     """The base-URL criterion. One run of the real CLI: a live read that reaches the world,
     a refund that does not, an echo the caller can parse, and a summary that says so."""
-    # `cli.session.build_engine` looks the reader up when it runs, so this is what it builds.
-    monkeypatch.setattr("irimi.reader.UpstreamReader", _StandInReader)
+    # `cli.compose.build_engine` looks the reader up when it runs, so this is what it builds.
+    monkeypatch.setattr("irimi.decide.reader.UpstreamReader", _StandInReader)
     _StandInReader.port = stripe_stand_in
     child = tmp_path / "child.py"
     child.write_text(
@@ -302,7 +303,7 @@ PHASE2_SUMMARY = [
 @pytest.fixture
 def phase2_stub(tmp_path, monkeypatch):
     """The shared loopback Stripe, and an engine over it built the way
-    `cli.session.build_engine` builds one: the real overlay, and a policy holding the real reader.
+    `cli.compose.build_engine` builds one: the real overlay, and a policy holding the real reader.
     Nothing is swapped for a stand-in - through the forward proxy the precondition read goes where
     the agent's reads go.
     Yields (proxy port, stub port, exchanges, maps)."""
@@ -464,7 +465,7 @@ def _run_phase2_under_shadow(
     maps_dir.mkdir()
     (maps_dir / "stripe.yaml").write_text(stripe_map)
     complete_for_check(maps_dir)
-    monkeypatch.setattr("irimi.servicemap.loader.shipped_dir", lambda: maps_dir)
+    monkeypatch.setattr("irimi.servicemaps.loader.shipped_dir", lambda: maps_dir)
     child = tmp_path / "child.py"
     child.write_text(
         (PHASE2_CHILD + calls)
@@ -483,7 +484,7 @@ def test_the_same_five_calls_under_irimi_shadow_print_the_phase_2_summary(
     home, tmp_path, capfd, monkeypatch
 ):
     """The criterion's twin through the real CLI. The criterion builds its engine the way
-    `cli.session.build_engine` builds one; this proves that is the engine `irimi shadow` really
+    `cli.compose.build_engine` builds one; this proves that is the engine `irimi shadow` really
     builds - the real overlay, a policy holding the real reader - and that the block it prints on
     exit is the one the criterion pins. Nothing is swapped but where the shipped maps are read
     from: a directory holding the loopback Stripe's map, so the stub's host is the `stripe`

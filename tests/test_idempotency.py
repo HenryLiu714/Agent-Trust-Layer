@@ -3,14 +3,18 @@
 import threading
 from dataclasses import replace
 
-from irimi import idempotency, servicemap, wire
-from irimi.exchange import Precondition, Request
-from irimi.idempotency import FirstAnswer, Store
-from irimi.servicemap import Route
+from irimi import servicemaps
+from irimi.core.exchange import Precondition, Request
+from irimi.decide import idempotency
+from irimi.decide.idempotency import FirstAnswer, Store
+from irimi.engine import wire
+from irimi.servicemaps import Route
 
-STRIPE = servicemap.MapIndex(tuple(servicemap.loader.load_shipped())).service_for("api.stripe.com")
+STRIPE = servicemaps.MapIndex(tuple(servicemaps.loader.load_shipped())).service_for(
+    "api.stripe.com"
+)
 assert STRIPE is not None
-REFUNDS_CREATE = servicemap.model.match_route(STRIPE, "POST", "/v1/refunds")
+REFUNDS_CREATE = servicemaps.model.match_route(STRIPE, "POST", "/v1/refunds")
 assert REFUNDS_CREATE is not None
 
 FORM = ("content-type", "application/x-www-form-urlencoded")
@@ -100,7 +104,7 @@ def test_canonical_tells_two_objects_on_one_route_apart():
     """`payment_intents.cancel` is one route over every `pi_`, and it posts nothing at all, so
     the path is the whole of what says which object the caller named. Without it a key reused to
     cancel a second intent compared equal to the first and replayed its answer."""
-    cancel = servicemap.model.match_route(STRIPE, "POST", "/v1/payment_intents/pi_AAA/cancel")
+    cancel = servicemaps.model.match_route(STRIPE, "POST", "/v1/payment_intents/pi_AAA/cancel")
     assert cancel is not None
     one = idempotency.canonical(_request(path="/v1/payment_intents/pi_AAA/cancel"), cancel)
     two = idempotency.canonical(_request(path="/v1/payment_intents/pi_BBB/cancel"), cancel)
@@ -111,8 +115,8 @@ def test_canonical_tells_two_objects_on_one_route_apart():
 def test_canonical_tells_two_routes_with_the_same_empty_body_apart():
     """A key reused on another endpoint is another write. Both of these post nothing, so only
     the path separates a cancelled intent from an updated customer."""
-    cancel = servicemap.model.match_route(STRIPE, "POST", "/v1/payment_intents/pi_AAA/cancel")
-    update = servicemap.model.match_route(STRIPE, "POST", "/v1/customers/cus_ZZZ")
+    cancel = servicemaps.model.match_route(STRIPE, "POST", "/v1/payment_intents/pi_AAA/cancel")
+    update = servicemaps.model.match_route(STRIPE, "POST", "/v1/customers/cus_ZZZ")
     assert cancel is not None and update is not None
     assert idempotency.canonical(
         _request(path="/v1/payment_intents/pi_AAA/cancel"), cancel

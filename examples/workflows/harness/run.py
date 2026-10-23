@@ -23,7 +23,7 @@ and says whether anything about it is expected to differ from a bare run.
   in THIS process too, in a copy of the recording's `IRIMI_HOME` and store, so the replay
   never adds its run to a recording another test reads, with a fresh `World` from the same `setup`,
   so anything not answered from the recording reaches the fake internet and shows up there. The
-  replay runs what `irimi replay` runs for that run: its trigger, called by `irimi._replay_child`
+  replay runs what `irimi replay` runs for that run: its trigger, called by `irimi.replay.child`
   from its entrypoint and args, or a process run's argv; or, with `command`, the scenario's own
   agent command (`-- <cmd>`). Every run the SDK starts in the replay's child adopts the replay's
   one run. `replay()` runs it; `run()` never does, since there is nothing to replay before a
@@ -57,20 +57,22 @@ from typing import Any
 
 from examples.workflows.harness.internet import BOMB_SECRET, FakeInternet, Req
 from examples.workflows.harness.services import CLIENT_SECRET_CANARY, World
-from irimi import ca, paths, runner, servicemap, testing, trace
+from irimi import servicemaps, testing
+from irimi.cli import compose, parse_args, runner
 from irimi.cli import main as irimi_main
-from irimi.cli import parse_args, session
-from irimi.cli.session import EngineFactory
-from irimi.exchange import Exchange
+from irimi.cli.compose import EngineFactory
+from irimi.config import ca, paths
+from irimi.core.exchange import Exchange
+from irimi.protocol import trace
 from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV, PROXY_ENVS
 from irimi.protocol.replay_files import replay_result_from_json, replay_result_to_json
+from irimi.protocol.trace import RunRecord, ToolCall
+from irimi.record.store import writer as store_writer
+from irimi.record.store.reader import StoreReader
 from irimi.report.runs import NOT_SET, RUN_LIST_HEADER
 from irimi.report.summary import REJECTED_MARKER, TOOL_SERVICE, WRITE_MARKER
 from irimi.report.terminal import DELEGATED_PREFIX
-from irimi.servicemap import MapIndex, loader
-from irimi.store import writer as store_writer
-from irimi.store.reader import StoreReader
-from irimi.trace import RunRecord, ToolCall
+from irimi.servicemaps import MapIndex, loader
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 WORKFLOWS_DIR = REPO_ROOT / "examples" / "workflows"
@@ -447,8 +449,8 @@ class Result:
             _maps(scenario, self.home.parent),
         ):
             try:
-                return servicemap.load()
-            except servicemap.MapError:
+                return servicemaps.load()
+            except servicemaps.MapError:
                 return None
 
 
@@ -522,7 +524,7 @@ def sdk_replay(recorded: Result, run_id: str, workdir: Path, *call: Any) -> Resu
     `testing.replay(run_id)` for none) called as a test calls it, a `replay` of `recorded` in every
     other way. `testing.replay`'s one seam, `testing._run_irimi`, runs `irimi` in this process
     instead of a subprocess, so the fake internet resolves its names and the scenario's maps load:
-    the agent is still a child process of its own, `_replay_child`, as `irimi replay` starts it.
+    the agent is still a child process of its own, `replay.child`, as `irimi replay` starts it.
     The result's `replay` is what `testing.replay` returned."""
     return _replayed(recorded, run_id, workdir, None, _Replay(call=call))
 
@@ -997,8 +999,8 @@ def _watching_the_store(
     """`irimi shadow` unchanged, but each exchange it prints a line for is appended to `reported`,
     and each one its engine hands the trace store to `handed`, and to `handed_events` with each
     tool call the control endpoint hands it. The block is given the engine factory to pass irimi
-    (`cli.main(engine_factory=)`): `cli.session.build_engine`, handed an `on_exchange` that
-    records each exchange before it prints its line. `cli.session` looks `DirectoryStore` up when
+    (`cli.main(engine_factory=)`): `cli.compose.build_engine`, handed an `on_exchange` that
+    records each exchange before it prints its line. `cli.compose` looks `DirectoryStore` up when
     it opens the store, so swapping that name is enough, as `tests/test_trace_e2e.py` does. Not
     `report.terminal.exchange_line` itself, which `irimi replay` also calls for the line of its
     divergence point."""
@@ -1009,7 +1011,7 @@ def _watching_the_store(
             reported.append(ex)
             on_exchange(ex)
 
-        return session.build_engine(run, printing, *args)
+        return compose.build_engine(run, printing, *args)
 
     class Handed(real):
         def record(self, exchange: Exchange) -> None:

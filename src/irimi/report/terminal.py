@@ -6,11 +6,11 @@ agent's text by.
 import re
 from pathlib import Path
 
-from irimi import netaddr
-from irimi.exchange import AnsweredBy, Exchange, Flag
-from irimi.netaddr import Target
-from irimi.servicemap import MapIndex, is_delegated
-from irimi.trace import Ran, ToolCall
+from irimi.core import netaddr
+from irimi.core.exchange import AnsweredBy, Exchange, Flag
+from irimi.core.netaddr import Target
+from irimi.protocol.trace import Ran, ToolCall
+from irimi.servicemaps import MapIndex, is_delegated
 
 PROXY_ONLY_NOTICE = (
     "only traffic sent through this proxy is shadowed; a client that ignores HTTPS_PROXY talks to "
@@ -68,7 +68,7 @@ def delegated_lines(index: MapIndex, color: bool = False) -> list[str]:
     route carrying an answer target is answered by an address the developer named, so the "reads
     are real" claim the banner rests on is false for that service.
 
-    `servicemap.is_delegated` is the shared condition, rather than a fourth spelling of it here:
+    `servicemaps.is_delegated` is the shared condition, rather than a fourth spelling of it here:
     this banner, the exit summary and `irimi maps list` are three surfaces that must agree about
     which services are delegated, and they agree by construction only if they ask one function.
 

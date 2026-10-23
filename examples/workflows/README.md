@@ -69,7 +69,7 @@ records its real module name; `scenarios.py` seeds the fake services per scenari
   given to `irimi replay` as well (`--entrypoint`, `--args`). It gets a fresh
   `World` from the same `setup` and a fresh fake internet, so whatever the recording did not answer
   shows up in `internet.requests()`. What runs is what `irimi replay` runs for the run: its trigger, called
-  alone by `irimi._replay_child`, which the agent's `main()` never reaches, or a process run's
+  alone by `irimi.replay.child`, which the agent's `main()` never reaches, or a process run's
   argv; with `command=True`, the scenario's own agent command (`-- <cmd>`), the way to replay a run
   `irimi replay` will not call alone (an `sdk.run` block, args stored by their description) or one
   whose trigger needs what `main()` sets up. Every run the child's SDK starts adopts the replay's

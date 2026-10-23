@@ -7,14 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from irimi.exchange import Exchange, Flag, Precondition, Request, Response
-from irimi.netaddr import Target
+from irimi.cli.runner import EngineThread, child_env, exit_code_for
+from irimi.core.exchange import Exchange, Flag, Precondition, Request, Response
+from irimi.core.netaddr import Target
+from irimi.protocol.trace import ErrorInfo, RunRecord, ToolCall
 from irimi.report import model, summary
 from irimi.report.model import RunView, for_summary
 from irimi.report.summary import Live
 from irimi.report.terminal import banner_lines, delegated_lines, exchange_line, tool_call_line
-from irimi.runner import EngineThread, child_env, exit_code_for
-from irimi.trace import ErrorInfo, RunRecord, ToolCall
 
 
 def summary_lines(
@@ -188,8 +188,8 @@ def test_summary_empty():
 def test_an_engine_that_never_binds_is_an_engine_start_error_with_a_message():
     """A ready timeout carries no message of its own; `start_engine` gives it one, so every
     command prints the same line for it."""
+    from irimi.cli.runner import start_engine
     from irimi.engine import EngineStartError
-    from irimi.runner import start_engine
 
     stopped = threading.Event()
 
@@ -280,7 +280,7 @@ def test_exchange_line_names_a_delegated_answer():
 
 
 def _service(**kwargs):
-    from irimi.servicemap import ServiceMap
+    from irimi.servicemaps import ServiceMap
 
     base = {
         "service": "stripe",
@@ -294,7 +294,7 @@ def _service(**kwargs):
 
 
 def _route(**kwargs):
-    from irimi.servicemap import Route
+    from irimi.servicemaps import Route
 
     base = {"method": "POST", "path": "/v1/refunds", "operation": "refunds.create", "kind": "write"}
     base.update(kwargs)
@@ -304,7 +304,7 @@ def _route(**kwargs):
 
 
 def _index(*services):
-    from irimi.servicemap import MapIndex
+    from irimi.servicemaps import MapIndex
 
     return MapIndex(services=tuple(services))
 
@@ -368,9 +368,9 @@ def test_delegated_lines_are_sorted_by_service():
 
 
 def _maps():
-    from irimi import servicemap
+    from irimi import servicemaps
 
-    return servicemap.load()
+    return servicemaps.load()
 
 
 def _block(lines, needle):
@@ -584,7 +584,7 @@ def test_a_currency_with_no_symbol_is_named():
 def test_an_amount_the_template_does_not_mark_as_money_is_printed_as_sent():
     """Only a `{name:money}` hole is minor units: a map whose `amount` counts something else prints
     it as the number it is, and adds nothing to the money line."""
-    from irimi.servicemap import MapIndex
+    from irimi.servicemaps import MapIndex
 
     stripe = _maps().service_for("api.stripe.com")
     assert stripe is not None
@@ -1058,7 +1058,7 @@ def test_tool_call_line_is_in_the_exchange_line_s_columns():
 
 def _sdk_record(run_id, name="handle_ticket", args=None):
     from irimi import __version__
-    from irimi.trace import SCHEMA_VERSION, RunEnd, RunRecord, Trigger
+    from irimi.protocol.trace import SCHEMA_VERSION, RunEnd, RunRecord, Trigger
 
     trigger = Trigger(name=name, entrypoint="agent:handle_ticket", args=args or {}, replayable=True)
     return RunRecord(

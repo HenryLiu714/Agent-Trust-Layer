@@ -13,7 +13,7 @@ from examples.workflows.w04_slack_ops_bot.agent import (
     OPS,
     THREAD_TS,
 )
-from irimi.servicemap import loader
+from irimi.servicemaps import loader
 
 ANSWER = "Payouts are on schedule."
 

@@ -53,7 +53,7 @@ STALE_BEFORE = "2025-06-01"
 # the DSN it was given, key and all.
 UNREACHABLE_HOST = "db.unreachable.internal"
 # What that driver says before the DSN: long enough that the key in it straddles the 1000
-# characters a trace keeps of an error message (`irimi.limits.MAX_ERROR_MESSAGE`), and that the
+# characters a trace keeps of an error message (`irimi.core.limits.MAX_ERROR_MESSAGE`), and that the
 # key's 27-character placeholder ends before that cut.
 CONNECT_RETRIES = "connection timed out, retrying; " * 29
 # What a driver's options say before their password (`DriverOptions`): long enough that the key

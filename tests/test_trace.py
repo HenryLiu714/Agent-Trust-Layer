@@ -13,15 +13,16 @@ from pathlib import Path
 
 import pytest
 
-from irimi import limits, trace
-from irimi.exchange import Exchange, Flag, Kind, Precondition, Request, Response
+from irimi.core import limits
+from irimi.core.exchange import Exchange, Flag, Kind, Precondition, Request, Response
 from irimi.protocol import control as protocol_control
+from irimi.protocol import trace
 from irimi.protocol.control import (
     RecordedOutcome,
     recorded_outcome_from_json,
     recorded_outcome_to_json,
 )
-from irimi.trace import (
+from irimi.protocol.trace import (
     SCHEMA_VERSION,
     BodyRef,
     ErrorInfo,
@@ -841,7 +842,7 @@ def _doc_table(marker: str) -> list[str]:
         ("(`trace.RunRecord`)", lambda: trace.run_to_json(_run_record())),
         ("(`trace.Trigger`)", lambda: trace.run_to_json(_run_record())["trigger"]),
         (
-            "(`irimi.exchange.Exchange`)",
+            "(`irimi.core.exchange.Exchange`)",
             lambda: trace.exchange_to_json(_filled(Exchange), _Blobs().put),
         ),
         ("(`trace.ToolCall`)", lambda: trace.tool_call_to_json(_filled(ToolCall))),

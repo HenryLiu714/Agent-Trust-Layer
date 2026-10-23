@@ -4,7 +4,7 @@ dispatch to the command typed.
 Each command lives in a module of its own (`init`, `serve`, `shadow`, `maps`, `runs`,
 `replay_cmd`), which imports what it needs at its top. `main` imports only the module of the
 command typed, so a command loads only what it runs; `options` holds what their parsers share,
-and `session` the composition root that the commands which start a proxy share.
+and `compose` the composition root that the commands which start a proxy share.
 """
 
 import argparse
@@ -15,10 +15,11 @@ import sys
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 
-from irimi import __version__, exitcodes
+from irimi import __version__
+from irimi.core import exitcodes
 
 if TYPE_CHECKING:  # the quoted annotation below; no runtime import
-    from irimi.cli.session import EngineFactory
+    from irimi.cli.compose import EngineFactory
 
 # Each command's module, in the order `irimi --help` lists the commands.
 COMMANDS = {
@@ -110,7 +111,7 @@ def main(argv: list[str] | None = None, *, engine_factory: "EngineFactory | None
     warning the store's logger could not write, which the logger swallows and leaves buffered; a
     stream closed before irimi started is None, which `print` writes nothing to.
 
-    `engine_factory` builds the engine in place of `session.build_engine`, for the commands that
+    `engine_factory` builds the engine in place of `compose.build_engine`, for the commands that
     start a proxy (`shadow`, `serve` and `replay`): a harness's way to watch or swap the engine."""
     try:
         try:

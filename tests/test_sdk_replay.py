@@ -3,7 +3,7 @@ trigger is called again from its entrypoint and captured args, and `testing.repl
 
 `tests/test_replay_cli.py` drives all of it through the real command; these are its parts, each
 alone: `RunScope`'s adopting branch against a reporter that writes down every post,
-`_calls.call_arguments` and `_entrypoints.resolve`, `irimi._replay_child` as the subprocess it
+`calls.call_arguments` and `entrypoints.resolve`, `irimi.replay.child` as the subprocess it
 is, and `ReplayResult`'s JSON.
 """
 
@@ -20,7 +20,9 @@ from typing import Any
 
 import pytest
 
-from irimi import _calls, _entrypoints, sdk, testing
+from irimi import sdk, testing
+from irimi.core import calls
+from irimi.protocol import entrypoints
 from irimi.protocol.env import (
     ENGINE_ACTIVE_ENV,
     REPLAY_ARGS_FILE_ENV,
@@ -30,16 +32,16 @@ from irimi.protocol.env import (
     RUN_ENV,
 )
 from irimi.protocol.replay_files import (
-    CallOutcome,
+    CallResult,
     ReplayResult,
     read_call_outcome,
     replay_result_from_json,
     replay_result_to_json,
 )
+from irimi.protocol.trace import ErrorInfo
 from irimi.sdk import _capture as capture
 from irimi.sdk import _runs as runs
 from irimi.sdk._state import state
-from irimi.trace import ErrorInfo
 
 REPLAY = "abcd1234abcd1234"
 
@@ -257,7 +259,7 @@ def test_call_arguments_undoes_capture_call_s_binding(fn, args, kwargs):
     a positional-only parameter in its place: the call the run recorded, made again."""
     captured, replayable = capture.capture_call(fn, args, kwargs)
     assert replayable
-    again, named = _calls.call_arguments(fn, capture.revive(captured))
+    again, named = calls.call_arguments(fn, capture.revive(captured))
     assert fn(*again, **named) == fn(*args, **kwargs)
 
 
@@ -280,7 +282,7 @@ def test_call_arguments_refuses_args_that_would_bind_otherwise_than_they_say(fn,
     list or a `**kwargs` that is no object, which would be spread as characters or keys; and a
     `**kwargs` naming a parameter, which would replace that parameter's value."""
     with pytest.raises(TypeError) as raised:
-        _calls.call_arguments(fn, arguments)
+        calls.call_arguments(fn, arguments)
     assert str(raised.value) == error
 
 
@@ -316,15 +318,15 @@ def test_a_trigger_receiving_no_instance_is_called_again_with_its_first_paramete
     or `cls`: captured, it calls the trigger again."""
     captured, replayable = capture.capture_call(fn.__wrapped__, ("desk", "T1"), {})
     assert replayable
-    trigger = _entrypoints.resolve(_entrypoints.entrypoint(fn))
-    again, named = _calls.call_arguments(trigger, capture.revive(captured))
+    trigger = entrypoints.resolve(entrypoints.entrypoint(fn))
+    again, named = calls.call_arguments(trigger, capture.revive(captured))
     assert fn(*again, **named) == ("desk", "T1")
 
 
 def test_resolve_finds_a_function_a_staticmethod_and_a_classmethod_by_name():
-    assert _entrypoints.resolve(f"{__name__}:handle") is handle
-    assert _entrypoints.resolve(f"{__name__}:Desk.static") is Desk.static
-    assert _entrypoints.resolve(f"{__name__}:Desk.by_class") == Desk.by_class
+    assert entrypoints.resolve(f"{__name__}:handle") is handle
+    assert entrypoints.resolve(f"{__name__}:Desk.static") is Desk.static
+    assert entrypoints.resolve(f"{__name__}:Desk.by_class") == Desk.by_class
 
 
 @pytest.mark.parametrize(
@@ -339,15 +341,17 @@ def test_resolve_finds_a_function_a_staticmethod_and_a_classmethod_by_name():
     ],
 )
 def test_resolve_refuses_what_it_cannot_call(entrypoint, reason):
-    with pytest.raises(_entrypoints.NotCallable, match=reason):
-        _entrypoints.resolve(entrypoint)
+    with pytest.raises(entrypoints.NotCallable, match=reason):
+        entrypoints.resolve(entrypoint)
 
 
 CHILD_MODULE = """
 import asyncio
 from dataclasses import dataclass
 
-from irimi import _calls, _entrypoints, sdk, testing
+from irimi import sdk, testing
+from irimi.core import calls
+from irimi.protocol import entrypoints
 
 
 @dataclass(frozen=True)
@@ -423,7 +427,7 @@ def _child(
         **(env or {}),
     }
     done = subprocess.run(
-        [sys.executable, "-m", "irimi._replay_child"],
+        [sys.executable, "-m", "irimi.replay.child"],
         env=env,
         cwd=tmp_path,
         capture_output=True,
@@ -440,7 +444,7 @@ def test_the_child_calls_the_trigger_with_its_revived_args_and_exits_0(tmp_path)
 
     done, outcome = _child(tmp_path, "child_agent:ok", {**TICKET, "note": "hi"})
     assert (done.returncode, done.stdout, done.stderr) == (0, "called ch_1 hi\n", "")
-    assert outcome == CallOutcome(True, None)
+    assert outcome == CallResult(True, None)
 
 
 def test_the_child_runs_a_coroutine_to_its_end(tmp_path):
@@ -465,7 +469,7 @@ def test_the_child_s_trigger_adopts_the_replay_s_run_and_its_handed_off_coroutin
     replaying = {ENGINE_ACTIVE_ENV: "1", RUN_ENV: REPLAY, REPLAY_RUN_ENV: REPLAY}
     done, outcome = _child(tmp_path, entrypoint, TICKET, replaying)
     assert (done.returncode, done.stdout, done.stderr) == (0, printed, "")
-    assert outcome == CallOutcome(True, None)
+    assert outcome == CallResult(True, None)
 
 
 def test_a_trigger_that_raises_exits_1_with_its_traceback_and_says_what_it_raised(tmp_path):
@@ -476,7 +480,7 @@ def test_a_trigger_that_raises_exits_1_with_its_traceback_and_says_what_it_raise
     assert done.returncode == 1
     assert done.stderr.startswith("Traceback (most recent call last):")
     assert done.stderr.endswith("KeyError: 'ch_1'\n")
-    assert outcome == CallOutcome(True, ErrorInfo("builtins.KeyError", "'ch_1'"))
+    assert outcome == CallResult(True, ErrorInfo("builtins.KeyError", "'ch_1'"))
 
 
 @pytest.mark.parametrize(
@@ -511,14 +515,14 @@ def test_a_call_the_child_cannot_make_exits_cannot_call_and_says_why(
 ):
     """Never an agent that ran and raised: the child exits `CANNOT_CALL`, with one `error:` line,
     and its outcome says it never called."""
-    from irimi._replay_child import CANNOT_CALL
+    from irimi.replay.child import CANNOT_CALL
 
     done, outcome = _child(tmp_path, entrypoint, args)
     assert (done.returncode, done.stderr) == (
         CANNOT_CALL,
         f"error: cannot call {entrypoint}: {error}\n",
     )
-    assert outcome == CallOutcome(False, ErrorInfo("cannot-call", error))
+    assert outcome == CallResult(False, ErrorInfo("cannot-call", error))
 
 
 @pytest.mark.parametrize(
@@ -536,7 +540,7 @@ def test_a_call_ended_by_an_interrupt_or_an_exit_says_so_and_ends_the_child_as_i
 
     done, outcome = _child(tmp_path, entrypoint, TICKET)
     assert done.returncode == code
-    assert outcome == CallOutcome(True, error)
+    assert outcome == CallResult(True, error)
 
 
 def test_a_child_interrupted_before_its_call_says_it_never_called_and_stops_as_interrupted(
@@ -549,7 +553,7 @@ def test_a_child_interrupted_before_its_call_says_it_never_called_and_stops_as_i
     assert done.returncode == -signal.SIGINT
     error = "KeyboardInterrupt before the call"
     assert done.stderr.startswith(f"error: cannot call interrupted_agent:main: {error}\n")
-    assert outcome == CallOutcome(False, ErrorInfo("cannot-call", error))
+    assert outcome == CallResult(False, ErrorInfo("cannot-call", error))
 
 
 @pytest.mark.parametrize(
@@ -739,7 +743,7 @@ def test_sdk_replay_passes_its_call_in_a_private_directory_it_removes(monkeypatc
 def test_a_replay_s_child_is_told_which_trigger_to_call_and_no_other_child_is(tmp_path):
     """`runner.child_env(..., call=)` names the trigger and its args file for `replay_child`, and
     drops both from every other child, as `IRIMI_REPLAY_RUN` is dropped."""
-    from irimi import runner
+    from irimi.cli import runner
 
     stale = {
         REPLAY_CALL_ENV: "m:f",

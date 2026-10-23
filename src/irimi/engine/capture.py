@@ -1,9 +1,9 @@
 """Capturing a streamed response for the trace while every chunk goes on to the agent unchanged."""
 
-from irimi import redact
+from irimi.core.exchange import Headers, Response, clip_chunks
+from irimi.core.limits import MAX_STORED_BODY
 from irimi.engine.decoding import decode_body
-from irimi.exchange import Headers, Response, clip_chunks
-from irimi.limits import MAX_STORED_BODY
+from irimi.record import redact
 
 
 class StreamCapture:

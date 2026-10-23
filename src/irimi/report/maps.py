@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from irimi.servicemap import SELF_TARGET, MapIndex
+from irimi.servicemaps import SELF_TARGET, MapIndex
 
 
 def maps_lines(index: MapIndex, override_path: Path | None) -> list[str]:

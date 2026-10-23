@@ -11,7 +11,7 @@ import pytest
 
 from examples.workflows.harness.run import serve_cases, workflows
 from examples.workflows.w10_flaky_upstream.scenarios import CONTROL_DOWN
-from irimi.exchange import Exchange
+from irimi.core.exchange import Exchange
 from irimi.protocol.control import CONTROL_PREFIX
 from irimi.protocol.env import REPLAY_RUN_ENV
 

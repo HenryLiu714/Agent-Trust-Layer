@@ -4,11 +4,11 @@ import json
 from dataclasses import replace
 
 from irimi import services
-from irimi.bodies import MAX_BODY_BYTES
-from irimi.classify import classify
-from irimi.exchange import Exchange, Request, Response
-from irimi.overlay import ServiceOverlay
-from irimi.servicemap import IdSpec, MapIndex, Route, ServiceMap
+from irimi.core.bodies import MAX_BODY_BYTES
+from irimi.core.exchange import Exchange, Request, Response
+from irimi.decide.overlay import ServiceOverlay
+from irimi.servicemaps import IdSpec, MapIndex, Route, ServiceMap
+from irimi.servicemaps.classify import classify
 
 STRIPE = ServiceMap(
     service="stripe",

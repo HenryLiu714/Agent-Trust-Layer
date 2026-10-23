@@ -4,7 +4,7 @@ import copy
 
 import pytest
 
-from irimi.exchange import Request
+from irimi.core.exchange import Request
 from irimi.services.model import Read, Rewritten, Write
 from irimi.services.stripe.effects import apply_read, rewrite_query
 

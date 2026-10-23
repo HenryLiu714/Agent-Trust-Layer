@@ -5,9 +5,9 @@ half: what such a write does to Stripe's later reads."""
 import time
 from typing import Any
 
-from irimi.bodies import reflect
-from irimi.exchange import Request
-from irimi.servicemap import Route
+from irimi.core.bodies import reflect
+from irimi.core.exchange import Request
+from irimi.servicemaps import Route
 from irimi.services.generic import mint_ids, reflect_over
 from irimi.services.model import AnswerClock
 

@@ -16,13 +16,11 @@ SDK = Path(irimi.sdk.__file__).parent
 # mitmproxy. `irimi` itself is allowed too, for the package's `__version__`.
 ALLOWED = (
     "irimi.sdk",
-    "irimi._calls",
-    "irimi._entrypoints",
-    "irimi.limits",
-    "irimi.opener",
+    "irimi.core.calls",
+    "irimi.core.limits",
+    "irimi.core.opener",
+    "irimi.core.secret_shapes",
     "irimi.protocol",
-    "irimi.secret_shapes",
-    "irimi.trace",
 )
 
 

@@ -19,10 +19,10 @@ from examples.workflows.harness.run import (
 )
 from examples.workflows.w03_queue_worker.agent import CLIENTS, LEDGER, POOLED
 from examples.workflows.w03_queue_worker.scenarios import AGENT_VERSION
-from irimi._replay_child import CANNOT_CALL
-from irimi.exchange import Exchange
+from irimi.core.exchange import Exchange
+from irimi.protocol.trace import UNATTRIBUTED, ErrorInfo, ToolCall
+from irimi.replay.child import CANNOT_CALL
 from irimi.report.runs import RUN_LIST_HEADER
-from irimi.trace import UNATTRIBUTED, ErrorInfo, ToolCall
 
 W = "w03_queue_worker"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.

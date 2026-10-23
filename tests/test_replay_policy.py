@@ -11,9 +11,8 @@ from dataclasses import replace
 
 import pytest
 
-from irimi import redact, servicemap
-from irimi.classify import classify
-from irimi.exchange import (
+from irimi import servicemaps
+from irimi.core.exchange import (
     LIVE_KINDS,
     Exchange,
     Flag,
@@ -21,14 +20,16 @@ from irimi.exchange import (
     Request,
     Response,
 )
-from irimi.policy import ShadowPolicy
-from irimi.reader import NoReader, UpstreamReader, answered_as
+from irimi.decide.policy import ShadowPolicy
+from irimi.decide.reader import NoReader, UpstreamReader, answered_as
+from irimi.protocol.trace import ErrorInfo, TelemetrySeen, ToolCall
+from irimi.record import redact
 from irimi.replay.index import RecordingReader, ReplayIndex
 from irimi.replay.policy import ReplayPolicy
-from irimi.trace import ErrorInfo, TelemetrySeen, ToolCall
+from irimi.servicemaps.classify import classify
 from tests.test_policy import answer as decided
 
-SHIPPED = servicemap.MapIndex(tuple(servicemap.loader.load_shipped()))
+SHIPPED = servicemaps.MapIndex(tuple(servicemaps.loader.load_shipped()))
 KEY = b"k" * 32
 JSON = "application/json"
 FORM = "application/x-www-form-urlencoded"
@@ -161,7 +162,7 @@ def test_a_repeated_query_name_keeps_the_order_of_its_values():
 def test_an_ignored_field_never_decides_a_match_and_any_other_does():
     """`nonce` is in `compare_ignores:` on the refund route of a test map built from the shipped
     one."""
-    maps = servicemap.MapIndex(
+    maps = servicemaps.MapIndex(
         tuple(
             replace(
                 sm,
@@ -172,7 +173,7 @@ def test_an_ignored_field_never_decides_a_match_and_any_other_does():
                     for route in sm.routes
                 ),
             )
-            for sm in servicemap.loader.load_shipped()
+            for sm in servicemaps.loader.load_shipped()
         )
     )
     recorded = _stored(_refund(nonce="n-1"), REFUND_ANSWER, answered_by="fake-L1")
@@ -382,10 +383,10 @@ def test_telemetry_is_never_looked_up_and_never_flagged():
 
 
 def test_a_delegated_write_is_never_looked_up_and_never_flagged():
-    maps = servicemap.MapIndex(
+    maps = servicemaps.MapIndex(
         tuple(
-            servicemap.loader.apply_cli_targets(
-                list(servicemap.loader.load_shipped()),
+            servicemaps.loader.apply_cli_targets(
+                list(servicemaps.loader.load_shipped()),
                 [("api.stripe.com", "/v1/refunds", "http://127.0.0.1:3000/refund")],
                 (),
             )

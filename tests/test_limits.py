@@ -1,6 +1,6 @@
-"""The relationships between irimi's size bounds, which `irimi.limits` states one line each."""
+"""The relationships between irimi's size bounds, which `irimi.core.limits` states one line each."""
 
-from irimi import limits
+from irimi.core import limits
 
 
 def test_a_body_is_decoded_as_far_as_it_is_redacted_and_stored_no_larger():

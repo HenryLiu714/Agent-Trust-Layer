@@ -9,7 +9,7 @@ an exception as, so a recorded error is recorded again as the type it was record
 import builtins
 import threading
 
-from irimi import trace
+from irimi.protocol import trace
 
 
 class RecordedToolError(Exception):

@@ -10,8 +10,8 @@ import pytest
 
 from examples.workflows.harness.run import check_invariants, compare, rows_not_shown
 from examples.workflows.harness.services import client_secret
-from irimi import redact
-from irimi.exchange import Exchange
+from irimi.core.exchange import Exchange
+from irimi.record import redact
 from irimi.report.model import run_elapsed
 
 W = "w05_dispute_responder"

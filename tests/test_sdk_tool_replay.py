@@ -2,7 +2,7 @@
 
 Each test records a run first, through a shadow engine and a real `DirectoryStore`, then starts a
 second engine answering from that run - a `ReplayPolicy` over its `ReplayIndex`, which answers the
-control endpoint's lookups too, as `cli.session.build_engine` builds it - with this process set
+control endpoint's lookups too, as `cli.compose.build_engine` builds it - with this process set
 up as `irimi shadow` sets up a replay's child: `IRIMI_REPLAY_RUN` names the engine's run. Every
 claim about what the replay stored is read back off disk once its engine has stopped.
 
@@ -27,8 +27,9 @@ from typing import Any
 
 import pytest
 
-from irimi import redact, runner, sdk
-from irimi.policy import ShadowPolicy
+from irimi import sdk
+from irimi.cli import runner
+from irimi.decide.policy import ShadowPolicy
 from irimi.protocol.control import RECORDED_ACTION, RecordedOutcome
 from irimi.protocol.env import (
     AGENT_VERSION_ENV,
@@ -38,6 +39,10 @@ from irimi.protocol.env import (
     RUN_ENV,
 )
 from irimi.protocol.headers import RUN_HEADER
+from irimi.protocol.trace import ErrorInfo, RunRecord, ToolCall, new_run_id
+from irimi.record import redact
+from irimi.record.store.reader import StoreReader
+from irimi.record.store.writer import DirectoryStore
 from irimi.replay.index import ReplayIndex
 from irimi.replay.policy import ReplayPolicy
 from irimi.sdk import _context as context
@@ -46,9 +51,6 @@ from irimi.sdk import _runs as runs
 from irimi.sdk import _tools as tools
 from irimi.sdk._errors import recorded_error
 from irimi.sdk._state import state
-from irimi.store.reader import StoreReader
-from irimi.store.writer import DirectoryStore
-from irimi.trace import ErrorInfo, RunRecord, ToolCall, new_run_id
 from tests import test_sdk
 from tests.test_engine_mitm import _config, _start
 

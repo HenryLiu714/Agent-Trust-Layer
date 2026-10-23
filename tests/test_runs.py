@@ -18,10 +18,15 @@ from pathlib import Path
 
 import pytest
 
-from irimi import redact, servicemap, trace
+from irimi import servicemaps
 from irimi.cli import main
 from irimi.cli.runs import DEFAULT_RUNS_LIMIT
-from irimi.exchange import Exchange, Precondition, Request, Response
+from irimi.core.exchange import Exchange, Precondition, Request, Response
+from irimi.protocol import trace
+from irimi.protocol.trace import ErrorInfo, RunRecord, ToolCall, Trigger
+from irimi.record import redact
+from irimi.record.store.reader import StoreReader
+from irimi.record.store.writer import DirectoryStore
 from irimi.report.model import RunView
 from irimi.report.runs import (
     ARGS_TOO_DEEP,
@@ -33,9 +38,6 @@ from irimi.report.runs import (
 )
 from irimi.report.summary import NO_TRAFFIC, Live, summary_lines, tool_write_line
 from irimi.report.terminal import printable, tool_call_line
-from irimi.store.reader import StoreReader
-from irimi.store.writer import DirectoryStore
-from irimi.trace import ErrorInfo, RunRecord, ToolCall, Trigger
 from tests import test_phase_exit
 from tests.test_engine_mitm import PRECONDITION_STRIPE_MAP
 from tests.test_phase_exit import PHASE2_SUMMARY, _run_phase2_under_shadow
@@ -93,7 +95,7 @@ def test_the_phase_2_run_prints_the_same_summary_from_its_store_as_it_did_live(
     store = home / "store"
     run = StoreReader(store).load_run(_process_run(store).run_id)
     assert [type(e).__name__ for e in run.events].count("TelemetrySeen") == 1
-    stored = summary_lines(RunView(run.record, run.events), servicemap.load())
+    stored = summary_lines(RunView(run.record, run.events), servicemaps.load())
     assert _no_elapsed(stored) == _no_elapsed(live)
 
     # And `runs show` ends in that same block, maps loaded as `shadow` loaded them.

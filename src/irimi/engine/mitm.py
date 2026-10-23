@@ -2,7 +2,7 @@
 
 It turns flows into `Request`s and `Response`s, carries the session's plans onto them, and
 calls the session back when an answer arrives or the connection fails. What irimi decides and
-records is `irimi.session`'s; nothing here decides anything.
+records is `irimi.engine.session`'s; nothing here decides anything.
 """
 
 import asyncio
@@ -16,19 +16,32 @@ from mitmproxy.addons import default_addons
 from mitmproxy.master import Master
 from mitmproxy.options import Options
 
-from irimi import ca, control, delegation, ingress, netaddr, redact, wire
-from irimi.control import ControlEndpoint
-from irimi.engine import EngineConfig, EngineStartError, OnExchange, OnTlsFailure, Replay, Serve
+from irimi.config import ca
+from irimi.core import netaddr
+from irimi.core.exchange import Flag, Headers, Request, Response, media_type
+from irimi.decide import targets
+from irimi.decide.overlay import Overlay
+from irimi.decide.policy import AnswerPolicy, Delegate, Forward, Respond
+from irimi.decide.writelog import WriteLog
+from irimi.engine import (
+    EngineConfig,
+    EngineStartError,
+    OnExchange,
+    OnTlsFailure,
+    Replay,
+    Serve,
+    control,
+    ingress,
+    wire,
+)
 from irimi.engine.capture import StreamCapture, recorded_stream
+from irimi.engine.control import ControlEndpoint
 from irimi.engine.decoding import Decoded, decode_body
-from irimi.exchange import Flag, Headers, Request, Response, media_type
-from irimi.ingress import Admitted, ControlCall, Refusal
-from irimi.overlay import Overlay
-from irimi.policy import AnswerPolicy, Delegate, Forward, Respond
+from irimi.engine.ingress import Admitted, ControlCall, Refusal
+from irimi.engine.session import Plan, Received, ShadowSession
 from irimi.protocol.headers import ANSWERED_BY_HEADER, REWROTE_HEADER, RUN_HEADER
-from irimi.session import Plan, Received, ShadowSession
-from irimi.store import TraceStore
-from irimi.writelog import WriteLog
+from irimi.record import redact
+from irimi.record.store import RunStore
 
 logger = logging.getLogger(__name__)
 
@@ -179,9 +192,7 @@ def _start_failure(config: EngineConfig, cause: BaseException | None) -> str:
     return f"could not listen on {where}" + ("" if cause is None else f": {cause}")
 
 
-def default_control(
-    config: EngineConfig, policy: AnswerPolicy, store: TraceStore
-) -> ControlEndpoint:
+def default_control(config: EngineConfig, policy: AnswerPolicy, store: RunStore) -> ControlEndpoint:
     """The control endpoint an engine answers with when its composition root gives it none: over
     its own store, with its policy answering a replay's read tools, and no tool-call callback."""
     return ControlEndpoint(
@@ -205,7 +216,7 @@ class IrimiAddon:
         self,
         config: EngineConfig,
         policy: AnswerPolicy,
-        store: TraceStore,
+        store: RunStore,
         overlay: Overlay,
         on_exchange: OnExchange | None,
         on_running: OnRunning,
@@ -414,7 +425,7 @@ class IrimiAddon:
             except Exception as exc:
                 logger.warning("irimi: could not strip %s: %s", name, exc)
 
-    def _to_target(self, flow: http.HTTPFlow, forward: delegation.ForwardTo) -> None:
+    def _to_target(self, flow: http.HTTPFlow, forward: targets.ForwardTo) -> None:
         """Point the flow at its answer target. mitmproxy opens the server connection after this
         hook, so rewriting the flow here is the forward, and a streamed target response still
         streams. The session has already refused a target that is our own listener or cannot be
@@ -526,7 +537,7 @@ class MitmEngine:
         self,
         config: EngineConfig,
         policy: AnswerPolicy,
-        store: TraceStore,
+        store: RunStore,
         overlay: Overlay,
         on_exchange: OnExchange | None = None,
         control: ControlEndpoint | None = None,

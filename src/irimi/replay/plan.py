@@ -7,7 +7,7 @@ WHAT RUNS, in order of precedence (`plan`):
 
 1. `-- CMD` given: that command, as `irimi shadow -- CMD` would run it.
 2. `--entrypoint` given, or the run's trigger has an entrypoint: a call of that function with the
-   args, `--args` or the trigger's, in `python -m irimi._replay_child`, under irimi's own
+   args, `--args` or the trigger's, in `python -m irimi.replay.child`, under irimi's own
    Python or `--python`'s. Args the trigger did not record replayably are refused
    (`not_replayable`).
 3. A process run (`irimi shadow -- <cmd>`): its recorded argv, run again.
@@ -23,13 +23,13 @@ import shlex
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from irimi import redact
+from irimi.protocol.trace import MAIN_MODULE, JSONValue, RunRecord, Trigger, holds_description
+from irimi.record import redact
 from irimi.report.terminal import printable
-from irimi.trace import MAIN_MODULE, JSONValue, RunRecord, Trigger, holds_description
 
 # What `python -m` runs to call a trigger: the child's own module, by its name. Named, not
 # imported: the engine never imports the SDK, which the child does.
-CHILD_MODULE = "irimi._replay_child"
+CHILD_MODULE = "irimi.replay.child"
 
 
 @dataclass(frozen=True)

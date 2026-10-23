@@ -22,34 +22,26 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 from mitmproxy.net import encoding
 
-from irimi import (
-    ca,
-    delegation,
-    exchange,
-    idempotency,
-    netaddr,
-    paths,
-    redact,
-    servicemap,
-    services,
-    session,
-    wire,
-)
-from irimi.control import ControlEndpoint
-from irimi.engine import EngineConfig, EngineStartError, Serve, capture, mitm
+from irimi import servicemaps, services
+from irimi.config import ca, paths
+from irimi.core import exchange, netaddr
+from irimi.core.exchange import Exchange, Flag, Precondition, Request, Response, WriteOutcome
+from irimi.core.limits import MAX_STORED_BODY
+from irimi.decide import idempotency, targets
+from irimi.decide.overlay import NoOverlay, Overlaid
+from irimi.decide.policy import Decided, Respond, ShadowPolicy
+from irimi.decide.writelog import Translation
+from irimi.engine import EngineConfig, EngineStartError, Serve, capture, mitm, session, wire
 from irimi.engine.capture import StreamCapture, recorded_stream
+from irimi.engine.control import ControlEndpoint
 from irimi.engine.mitm import IrimiAddon, MitmEngine
-from irimi.exchange import Exchange, Flag, Precondition, Request, Response, WriteOutcome
-from irimi.limits import MAX_STORED_BODY
-from irimi.overlay import NoOverlay, Overlaid
-from irimi.policy import Decided, Respond, ShadowPolicy
 from irimi.protocol.headers import ANSWERED_BY_HEADER, REWROTE_HEADER, RUN_HEADER
+from irimi.protocol.trace import RunRecord
+from irimi.record import redact
+from irimi.record.store.reader import StoreReader
+from irimi.record.store.writer import DirectoryStore
 from irimi.report import model, summary
 from irimi.report.model import RunView
-from irimi.store.reader import StoreReader
-from irimi.store.writer import DirectoryStore
-from irimi.trace import RunRecord
-from irimi.writelog import Translation
 from tests.doubles import NullStore
 
 
@@ -113,7 +105,7 @@ def _config(tmp_path, monkeypatch, port=0, reverse_hosts=frozenset(), maps=None)
         listen_host="127.0.0.1",
         listen_port=port,
         reverse_hosts=reverse_hosts,
-        maps=maps if maps is not None else servicemap.MapIndex(),
+        maps=maps if maps is not None else servicemaps.MapIndex(),
     )
 
 
@@ -165,7 +157,7 @@ def _maps(tmp_path, monkeypatch, doc=DEMO_MAP):
     maps_dir = tmp_path / "maps"
     maps_dir.mkdir(exist_ok=True)
     (maps_dir / "demo.yaml").write_text(doc)
-    return servicemap.load(cwd=tmp_path, maps_dir=maps_dir)
+    return servicemaps.load(cwd=tmp_path, maps_dir=maps_dir)
 
 
 def _live_summary(seen, maps):
@@ -871,7 +863,7 @@ def test_live_read_carries_no_fidelity_flag(engine, upstream):
 
 
 class _RecordingStore:
-    """A TraceStore that remembers what it was handed. NullStore cannot answer this question."""
+    """A RunStore that remembers what it was handed. NullStore cannot answer this question."""
 
     def __init__(self):
         self.recorded = []
@@ -901,7 +893,7 @@ def _addon(tmp_path, monkeypatch, store):
 
 
 def _exchange(kind, answered_by="live"):
-    from irimi.exchange import Exchange, Request
+    from irimi.core.exchange import Exchange, Request
 
     request = Request(
         method="POST",
@@ -931,10 +923,10 @@ def test_telemetry_is_reported_and_stored_only_as_having_happened(tmp_path, monk
     would re-emit someone else's events on replay. So no blob is written for its body."""
     from dataclasses import replace
 
-    from irimi import redact
-    from irimi.store.reader import StoreReader
-    from irimi.store.writer import DirectoryStore
-    from irimi.trace import TelemetrySeen
+    from irimi.protocol.trace import TelemetrySeen
+    from irimi.record import redact
+    from irimi.record.store.reader import StoreReader
+    from irimi.record.store.writer import DirectoryStore
 
     store = DirectoryStore(tmp_path / "store", redact.load_key(tmp_path))
     addon, seen = _addon(tmp_path, monkeypatch, store)
@@ -955,7 +947,7 @@ def test_telemetry_is_reported_and_stored_only_as_having_happened(tmp_path, monk
 def test_a_store_that_raises_neither_escapes_the_hook_nor_hides_the_exchange(
     tmp_path, monkeypatch, caplog
 ):
-    """A recording failure never affects traffic. `TraceStore.record` may not raise, and
+    """A recording failure never affects traffic. `RunStore.record` may not raise, and
     `session.record` guards it anyway: a store that broke the contract escaped every hook that
     finishes a flow, and took the terminal line and the summary's count of the exchange with it."""
 
@@ -964,7 +956,7 @@ def test_a_store_that_raises_neither_escapes_the_hook_nor_hides_the_exchange(
             raise RuntimeError("the store exploded")
 
     addon, seen = _addon(tmp_path, monkeypatch, _Raising())
-    with caplog.at_level("WARNING", logger="irimi.session"):
+    with caplog.at_level("WARNING", logger="irimi.engine.session"):
         addon.session.record(_exchange("write", answered_by="fake-L0"))
     assert [ex.kind for ex in seen] == ["write"]
     # The type, never the message: a message may quote the value the store choked on.
@@ -1750,7 +1742,7 @@ def _targeted(tmp_path, monkeypatch, targets=(), target_reads=()):
     maps_dir = tmp_path / "maps"
     maps_dir.mkdir(exist_ok=True)
     (maps_dir / "demo.yaml").write_text(DEMO_MAP)
-    return servicemap.load(
+    return servicemaps.load(
         cwd=tmp_path, maps_dir=maps_dir, targets=targets, target_reads=target_reads
     )
 
@@ -1969,10 +1961,10 @@ def test_forward_auth_keeps_the_credential_headers(tmp_path, monkeypatch, target
     )
     sm = maps.services[0]
     routes = tuple(
-        _replace(r, forward_auth=True) if r.target != servicemap.SELF_TARGET else r
+        _replace(r, forward_auth=True) if r.target != servicemaps.SELF_TARGET else r
         for r in sm.routes
     )
-    maps = servicemap.MapIndex((_replace(sm, routes=routes),))
+    maps = servicemaps.MapIndex((_replace(sm, routes=routes),))
     eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
     try:
         _via_proxy(
@@ -2132,9 +2124,9 @@ def test_a_remote_target_is_probed_too_and_an_unreachable_one_is_irimis_json_502
         raise ConnectionRefusedError("refused")
 
     monkeypatch.setattr(session.socket, "create_connection", refuse)
-    forward = delegation.ForwardTo(netaddr.Target.parse("https://sandbox.example.com/v1"))
+    forward = targets.ForwardTo(netaddr.Target.parse("https://sandbox.example.com/v1"))
     refused = session._target_refusal(forward, ("127.0.0.1", 4000))
-    assert isinstance(refused, delegation.TargetUnreachable)
+    assert isinstance(refused, targets.TargetUnreachable)
     assert "'https://sandbox.example.com/v1' could not be reached" in str(refused)
     assert dialled == [("sandbox.example.com", 443)]
 
@@ -2280,7 +2272,7 @@ def test_a_raise_in_the_decision_answers_locally_instead_of_forwarding(
     def boom(*args, **kwargs):
         raise RuntimeError("the decision exploded")
 
-    monkeypatch.setattr(delegation, "target_url", boom)
+    monkeypatch.setattr(targets, "target_url", boom)
     eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
     try:
         status, data = _via_proxy(
@@ -2472,9 +2464,9 @@ def test_a_refused_target_is_not_a_write_either(tmp_path, monkeypatch, target):
 
     def refuse(target, port, local_address=""):
         asked.append((target.url, port, local_address))
-        raise delegation.TargetRefused("refusing this target")
+        raise targets.TargetRefused("refusing this target")
 
-    monkeypatch.setattr(delegation, "refuse_self_target", refuse)
+    monkeypatch.setattr(targets, "refuse_self_target", refuse)
     maps = _targeted(
         tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{target}/w")]
     )
@@ -3194,7 +3186,7 @@ class _StripeStub(BaseHTTPRequestHandler):
 def stripe_stub(tmp_path, monkeypatch):
     """The stub on a free loopback port, and an engine over STRIPE_MAP with the real overlay,
     built the way the CLI builds it. Yields (proxy port, stub port, recorded exchanges)."""
-    from irimi.overlay import ServiceOverlay
+    from irimi.decide.overlay import ServiceOverlay
 
     _StripeStub.seen = []
     _StripeStub.rate_limited = False
@@ -3286,7 +3278,7 @@ def test_a_forged_rewrote_header_cannot_hide_a_refund_that_lands_mid_read(tmp_pa
     the live log and overlays the page. An overlay that read the agent's forged `Irimi-Rewrote:
     starting_after=...` off the recorded request would take the page for the one after a minted
     refund and leave the refund off it."""
-    from irimi.overlay import ServiceOverlay
+    from irimi.decide.overlay import ServiceOverlay
 
     _StripeStub.seen = []
     _HeldRefundsStub.arrived.clear()
@@ -3673,7 +3665,7 @@ class _SlackStub(BaseHTTPRequestHandler):
 @pytest.fixture
 def slack_stub(tmp_path, monkeypatch):
     """`stripe_stub`'s twin over SLACK_OVERLAY_MAP. Yields (proxy port, stub port, exchanges)."""
-    from irimi.overlay import ServiceOverlay
+    from irimi.decide.overlay import ServiceOverlay
 
     _SlackStub.seen = []
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _SlackStub)
@@ -3901,8 +3893,8 @@ class _PreconditionStub(BaseHTTPRequestHandler):
 def precondition_stub(tmp_path, monkeypatch):
     """The stub, and an engine over PRECONDITION_STRIPE_MAP built the way the CLI builds one: the
     real overlay and a policy holding the real reader. Yields (proxy port, stub port, exchanges)."""
-    from irimi.overlay import ServiceOverlay
-    from irimi.reader import UpstreamReader
+    from irimi.decide.overlay import ServiceOverlay
+    from irimi.decide.reader import UpstreamReader
 
     _PreconditionStub.seen = []
     _PreconditionStub.heard = []
@@ -4220,8 +4212,8 @@ class _SlackPreconditionStub(BaseHTTPRequestHandler):
 @pytest.fixture
 def slack_precondition_stub(tmp_path, monkeypatch):
     """`precondition_stub`'s Slack twin. Yields (proxy port, stub port, exchanges)."""
-    from irimi.overlay import ServiceOverlay
-    from irimi.reader import UpstreamReader
+    from irimi.decide.overlay import ServiceOverlay
+    from irimi.decide.reader import UpstreamReader
 
     _SlackPreconditionStub.seen = []
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _SlackPreconditionStub)
@@ -4376,7 +4368,7 @@ def test_a_failed_decision_is_attributed_from_the_run_header_it_stripped(
     def boom(*args, **kwargs):
         raise RuntimeError("the decision exploded")
 
-    monkeypatch.setattr(delegation, "target_url", boom)
+    monkeypatch.setattr(targets, "target_url", boom)
     eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps))
     try:
         status, _ = _via_proxy(

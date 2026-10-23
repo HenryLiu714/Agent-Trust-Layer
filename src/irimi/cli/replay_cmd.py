@@ -12,8 +12,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, TextIO
 
-from irimi import __version__, exitcodes, runner
-from irimi.cli import CliError, UsageError, os_error, session
+from irimi import __version__
+from irimi.cli import CliError, UsageError, compose, os_error, runner
 from irimi.cli.options import (
     RUN_ID_HELP,
     add_proxy_options,
@@ -30,11 +30,12 @@ from irimi.cli.shadow import (
     process_run,
     run_child,
 )
-from irimi.protocol.replay_files import CallOutcome, ReplayResult, replay_result_to_json
+from irimi.core import exitcodes
+from irimi.protocol.replay_files import CallResult, ReplayResult, replay_result_to_json
+from irimi.protocol.trace import UNATTRIBUTED, StoredRun
 from irimi.replay import plan as replay_plan
 from irimi.replay import report as replay_report
 from irimi.report.terminal import printable
-from irimi.trace import UNATTRIBUTED, StoredRun
 
 EXIT_CODES = exitcodes.help_table(
     [
@@ -118,7 +119,7 @@ def register(subparsers: "argparse._SubParsersAction[Any]") -> None:
 
 
 def cmd_replay(
-    args: argparse.Namespace, *, engine_factory: session.EngineFactory = session.build_engine
+    args: argparse.Namespace, *, engine_factory: compose.EngineFactory = compose.build_engine
 ) -> int:
     """`irimi replay RUN`: a stored run's trigger run again through irimi, answered from the
     run's recording, and what the agent did differently. What it runs is `replay.plan`'s
@@ -159,7 +160,7 @@ def _run_replay(
     args: argparse.Namespace,
     child: runner.Child,
     said: list[str],
-    engine_factory: session.EngineFactory,
+    engine_factory: compose.EngineFactory,
 ) -> ReplayResult:
     """`cmd_replay` inside its SIGTERM handler: refused with what irimi said on stderr, or run,
     start to result."""
@@ -188,7 +189,7 @@ def _run_replay(
             )
             call.args_file.write_text(json.dumps(plan.call.args), encoding="utf-8")
             argv = [python, "-m", replay_plan.CHILD_MODULE]
-        run = session.prepare_run(args, source=source)
+        run = compose.prepare_run(args, source=source)
         if run is None:
             return replay_report.refused(args.run_id, said)
         record = process_run(run.run_id, argv, plan.trigger, source.record.run_id)
@@ -233,17 +234,17 @@ def _run_replay(
 def _load_source(args: argparse.Namespace) -> StoredRun:
     """The run `irimi replay` answers from, in the store under `--store`, read whole before
     anything starts, or `replay.plan.Refused` saying why it cannot be."""
-    root = session.store_root(args)
+    root = compose.store_root(args)
     if args.run_id == UNATTRIBUTED:
         # Every serve session's requests no run named, in one pool: not one run to answer from.
         raise replay_plan.Refused(f"{UNATTRIBUTED} is not a run to replay")
     try:
         # The whole id from here on: the replay's messages and its result name the run it read.
-        args.run_id = session.resolve_run_id(root, args.run_id)
+        args.run_id = compose.resolve_run_id(root, args.run_id)
     except LookupError as exc:
         raise replay_plan.Refused(str(exc)) from None
     try:
-        return session.load_stored_run(root, args.run_id)
+        return compose.load_stored_run(root, args.run_id)
     except CliError as exc:
         raise replay_plan.Refused(exc.message) from None
 
@@ -290,7 +291,7 @@ def _replay_python(args: argparse.Namespace, plan: replay_plan.Plan) -> str:
     return args.python
 
 
-def _no_such_module(call: CallOutcome | None) -> bool:
+def _no_such_module(call: CallResult | None) -> bool:
     """Whether a replay's child could not call its trigger because a module it imports is not
     installed under the child's Python."""
     return call is not None and not call.called and call.cause == "builtins.ModuleNotFoundError"
@@ -308,13 +309,13 @@ def _report_replay(
     replay did printed and returned (`replay.report.outcome`). `rerun` is the recorded
     command line a process run's replay ran again."""
     try:
-        replayed = session.load_stored_run(session.store_root(args), run_id)
+        replayed = compose.load_stored_run(compose.store_root(args), run_id)
     except CliError as exc:
         why = exc.__cause__
         print(f"error: the replay's run {run_id} could not be read back: {why}", file=sys.stderr)
         return replay_report.refused(args.run_id, said, run_id)
     ended = replay_report.Ended(ran.code, ran.call, ran.stopped)
-    outcome = replay_report.outcome(source, replayed, ended, session.maps_for_stored_runs(), rerun)
+    outcome = replay_report.outcome(source, replayed, ended, compose.maps_for_stored_runs(), rerun)
     end_the_childs_line()
     for line in outcome.lines():
         print(line, flush=True)

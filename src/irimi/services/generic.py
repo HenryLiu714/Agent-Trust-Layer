@@ -24,9 +24,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from irimi.bodies import reflect
-from irimi.exchange import Request
-from irimi.servicemap import IdSpec, Route, path_params
+from irimi.core.bodies import reflect
+from irimi.core.exchange import Request
+from irimi.servicemaps import IdSpec, Route, path_params
 from irimi.services.model import SERVICE_OWNED, AnswerClock
 
 ID_ALPHABET = string.ascii_letters + string.digits

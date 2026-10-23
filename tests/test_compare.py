@@ -11,15 +11,19 @@ import random
 
 import pytest
 
-from irimi import compare, exitcodes, redact, servicemap, trace
+from irimi import servicemaps
 from irimi.cli import main
-from irimi.exchange import Exchange, Flag, Precondition, Request, Response
+from irimi.core import exitcodes
+from irimi.core.exchange import Exchange, Flag, Precondition, Request, Response
+from irimi.protocol import trace
+from irimi.protocol.trace import ErrorInfo, Event, RunRecord, StoredRun, ToolCall, Trigger
+from irimi.record import redact
+from irimi.record.store.writer import DirectoryStore
+from irimi.replay import compare
 from irimi.replay.index import compared_body
 from irimi.report.model import RunView
 from irimi.report.summary import summary_lines
-from irimi.servicemap import MapError
-from irimi.store.writer import DirectoryStore
-from irimi.trace import ErrorInfo, Event, RunRecord, StoredRun, ToolCall, Trigger
+from irimi.servicemaps import MapError
 from tests import test_phase_exit
 
 home = test_phase_exit.home  # bound here so pytest finds it
@@ -228,7 +232,7 @@ def test_a_refund_whose_reason_alone_differs_is_changed(home, capfd):
 def test_an_ignored_field_is_not_compared_and_any_other_is():
     """`nonce` is in `compare_ignores:` on the refund route of a test map built from the shipped
     one, which a replay never matches on either (`replay.index.compared_body`)."""
-    index = servicemap.MapIndex(
+    index = servicemaps.MapIndex(
         tuple(
             dataclasses.replace(
                 sm,
@@ -239,7 +243,7 @@ def test_an_ignored_field_is_not_compared_and_any_other_is():
                     for route in sm.routes
                 ),
             )
-            for sm in servicemap.loader.load_shipped()
+            for sm in servicemaps.loader.load_shipped()
         )
     )
 
@@ -258,7 +262,7 @@ def test_a_write_answered_otherwise_is_changed_though_its_line_reads_the_same():
     """What irimi did with a write is compared as its data is: a target, a precondition's
     currency, a refusal's reasons. Here the L3 read named another currency for a refund whose line
     shows no amount."""
-    index = servicemap.load()
+    index = servicemaps.load()
     a = dataclasses.replace(_update(b"email=a%40x.com"), precondition=Precondition(currency="usd"))
     b = dataclasses.replace(a, precondition=Precondition(currency="eur"))
     assert compare.compare_runs(_run([a]), _run([b]), index).lines() == [
@@ -275,7 +279,7 @@ def test_a_field_diff_shows_five_fields_each_cut_to_a_readable_length():
     a = _update(f"name={'x' * 100}&email=a&phone=p1&{many}".encode())
     added = "description=d&invoice_prefix=P&balance=5"
     b = _update(f"name={'y' * 100}&email=b&phone=p2&{added}&{many}".encode())
-    lines = compare.compare_runs(_run([a]), _run([b]), servicemap.load()).lines()
+    lines = compare.compare_runs(_run([a]), _run([b]), servicemaps.load()).lines()
     # In name order, as a body's fields are compared; a form integer is a number.
     assert lines[2:8] == [
         "      body.balance: (absent) -> 5",
@@ -308,7 +312,7 @@ def test_an_update_to_another_customer_is_changed_by_the_object_its_path_names()
             _update(b"").request, path="/v1/customers/cus_2", body=b"email=a"
         ),
     )
-    lines = compare.compare_runs(_run([_update(b"email=a")]), _run([other]), servicemap.load())
+    lines = compare.compare_runs(_run([_update(b"email=a")]), _run([other]), servicemaps.load())
     assert lines.lines()[:2] == [
         f"  ~ A {UPDATE}",
         "    B ○ stripe  update customer cus_2  faked; not checked",
@@ -333,7 +337,7 @@ def test_a_webhook_s_redacted_path_is_not_compared_and_its_text_is():
             run_id="",
         )
 
-    index = servicemap.load()
+    index = servicemaps.load()
     a, b = hook("/<redacted:aaaa>", "hi"), hook("/<redacted:bbbb>", "hi")
     assert compare.compare_runs(_run([a]), _run([b]), index).exit_code == exitcodes.OK
     c = hook("/<redacted:aaaa>", "bye")
@@ -353,7 +357,7 @@ def test_an_llm_body_is_compared_less_who_asked_and_how_as_a_replay_matches_it()
     }
     request = _llm("hi").request
     body = dataclasses.replace(request, body=json.dumps(noisy).encode())
-    found = servicemap.load().route_for(request.host, request.method, request.path)
+    found = servicemaps.load().route_for(request.host, request.method, request.path)
     assert found is not None
     assert compared_body(body, "llm", found[1]) == asked
 
@@ -634,7 +638,7 @@ def test_writes_print_as_requests_with_a_warning_when_the_maps_do_not_load(
     def refuse(**_kwargs):
         raise MapError("broken")
 
-    monkeypatch.setattr("irimi.servicemap.load", refuse)
+    monkeypatch.setattr("irimi.servicemaps.load", refuse)
     assert main(["compare", "a", "b"]) == 0
     out, err = capfd.readouterr()
     assert err == "warning: maps did not load; writes are shown as requests\n"
@@ -683,7 +687,7 @@ def test_a_pair_printed_unlike_keeps_the_summary_s_lines_and_a_cut_pair_alike_is
     """Only a pair whose lines print alike though they differ escapes its backslashes: one that
     already prints unlike keeps both summary lines, backslashes and all, and a pair whose two
     sentences are equal, as a cut write compared with itself, has nothing to tell apart."""
-    index = servicemap.load()
+    index = servicemaps.load()
     pair = compare.compare_runs(_run([_post("a\\b")]), _run([_post("a\\c")]), index)
     assert pair.lines()[:2] == [
         '  ~ A ○ slack  post to #C1: "a\\b"  faked; not checked',
@@ -737,7 +741,7 @@ def test_every_write_shape_s_action_is_the_line_the_stored_summary_prints_for_it
         _tool("db.archive", ran="real"),
         dataclasses.replace(_tool("db.x\n"), error=ErrorInfo("Boom\x1b", "no")),
     ]
-    run, index = _run(events), servicemap.load()
+    run, index = _run(events), servicemaps.load()
     summary = summary_lines(RunView(run.record, run.events), index)
     acts = compare.actions(run, index)
     exchanges = [a for a in acts if a.key[0] == compare.EXCHANGE_KEY]
@@ -791,7 +795,7 @@ def test_a_cut_pair_whose_lines_print_alike_though_they_differ_is_told_apart_too
     differ, a newline against a typed `\\n`, each backslash is escaped too, or the reader sees one
     line twice and cannot tell what irimi did not compare."""
     cut = dataclasses.replace(_post("line1\nline2"), flags=(Flag.BODY_TRUNCATED,))
-    pair = compare.compare_runs(_run([cut]), _run([_post("line1\\nline2")]), servicemap.load())
+    pair = compare.compare_runs(_run([cut]), _run([_post("line1\\nline2")]), servicemaps.load())
     assert pair.lines()[:2] == [
         '  ? A ○ slack  post to #C1: "line1\\nline2"  faked; not checked',
         '    B ○ slack  post to #C1: "line1\\\\nline2"  faked; not checked',
@@ -828,7 +832,7 @@ def test_a_pair_that_differs_by_a_character_no_one_can_see_spells_it(a, b, spell
     """`report.terminal.printable` escapes control characters, not a zero-width space, a no-break
     space or a right-to-left override, so two posts that differ only by one printed two identical
     lines under `~`. A pair whose lines print alike spells each such character as its escape."""
-    pair = compare.compare_runs(_run([_post(a)]), _run([_post(b)]), servicemap.load())
+    pair = compare.compare_runs(_run([_post(a)]), _run([_post(b)]), servicemaps.load())
     assert pair.lines()[:2] == [
         f'  ~ A ○ slack  post to #C1: "{spelled_a}"  faked; not checked',
         f'    B ○ slack  post to #C1: "{spelled_b}"  faked; not checked',

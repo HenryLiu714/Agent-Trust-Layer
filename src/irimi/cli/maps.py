@@ -3,9 +3,10 @@
 import argparse
 from typing import Any
 
-from irimi import exitcodes, servicemap
-from irimi.cli import session
+from irimi import servicemaps
+from irimi.cli import compose
 from irimi.cli.options import add_map_options, epilog, help_formatted
+from irimi.core import exitcodes
 from irimi.report.maps import maps_lines
 
 
@@ -35,9 +36,9 @@ def register(subparsers: "argparse._SubParsersAction[Any]") -> None:
 
 
 def cmd_maps_list(args: argparse.Namespace) -> int:
-    index = session.load_maps(frozenset(args.allow_remote_target), args.target, args.target_reads)
+    index = compose.load_maps(frozenset(args.allow_remote_target), args.target, args.target_reads)
     if index is None:
         return exitcodes.ERROR
-    for line in maps_lines(index, servicemap.override_path()):
+    for line in maps_lines(index, servicemaps.override_path()):
         print(line)
     return exitcodes.OK

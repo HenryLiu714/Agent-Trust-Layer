@@ -23,14 +23,17 @@ import pytest
 import irimi
 from examples.workflows.harness.run import CANARIES, TOOL_WRITE, Result, serve_cases, workflows
 from examples.workflows.w10_flaky_upstream.scenarios import CONTROL_DOWN
-from irimi import exchange, paths, redact, trace
-from irimi.exchange import Exchange, Flag
-from irimi.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE
+from irimi.config import paths
+from irimi.core import exchange
+from irimi.core.exchange import Exchange, Flag
+from irimi.core.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE
+from irimi.protocol import trace
+from irimi.protocol.trace import ErrorInfo, RunRecord, StoredRun, TelemetrySeen, ToolCall
+from irimi.record import redact
+from irimi.record.store.layout import SERVE_LOCK_FILE
 from irimi.report.model import RunView, for_summary
 from irimi.report.summary import NO_TRAFFIC, Live, summary_lines
 from irimi.report.terminal import exchange_line, tool_call_line
-from irimi.store.layout import SERVE_LOCK_FILE
-from irimi.trace import ErrorInfo, RunRecord, StoredRun, TelemetrySeen, ToolCall
 
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
 IDS = [f"{n}:{s}" for n, s in CASES]

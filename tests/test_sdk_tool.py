@@ -20,17 +20,20 @@ from typing import Any
 
 import pytest
 
-from irimi import ca, limits, paths, sdk, servicemap, trace
+from irimi import sdk, servicemaps
 from irimi.cli import main
+from irimi.config import ca, paths
+from irimi.core import limits
+from irimi.protocol import trace
 from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV, RUN_ENV
+from irimi.protocol.trace import ErrorInfo, ToolCall
+from irimi.record.store.reader import StoreReader
 from irimi.report.model import RunView
 from irimi.report.summary import summary_lines
 from irimi.sdk import _capture as capture
 from irimi.sdk import _control_client as client
 from irimi.sdk import _tools as tools
 from irimi.sdk._state import state
-from irimi.store.reader import StoreReader
-from irimi.trace import ErrorInfo, ToolCall
 from tests import test_sdk
 
 irimi = test_sdk.irimi  # bound here so pytest finds the fixtures
@@ -709,7 +712,7 @@ def test_irimi_shadow_prints_a_tool_call_in_the_stream_and_the_summary_and_store
         {"order": 7},
         "stood in",
     )
-    stored = summary_lines(RunView(run.record, run.events), servicemap.load())
+    stored = summary_lines(RunView(run.record, run.events), servicemaps.load())
     assert [ELAPSED.sub(" · <elapsed>", line) for line in stored] == live
 
 

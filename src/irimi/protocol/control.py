@@ -1,5 +1,5 @@
 """The control endpoint's routes and the bodies posted to them: what the SDK sends and what
-`irimi.control` reads, spelled once for both.
+`irimi.engine.control` reads, spelled once for both.
 
     POST /_irimi/runs/{run_id}/start                  a `RunStart`
     POST /_irimi/runs/{run_id}/tool-calls             a `trace.ToolCall`, its run id the path's
@@ -14,11 +14,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, NoReturn, get_args
 
-from irimi.trace import (
+from irimi.protocol.trace import (
     ErrorInfo,
     JSONValue,
-    Outcome,
     RunEnd,
+    RunStatus,
     ToolCall,
     TraceFormatError,
     Trigger,
@@ -120,7 +120,9 @@ def run_end_to_json(end: RunEnd) -> dict[str, Any]:
 def run_end_from_json(d: Mapping[str, Any]) -> RunEnd:
     """A posted end. Every field must be present, and only `error` may be null."""
     ended_at = read_optional(d, "ended_at", read_float)
-    outcome: Outcome | None = read_optional(d, "outcome", lambda d, k: read_one_of(d, k, Outcome))
+    outcome: RunStatus | None = read_optional(
+        d, "outcome", lambda d, k: read_one_of(d, k, RunStatus)
+    )
     error = read_error(d, "error")
     if ended_at is None:
         _null("ended_at")

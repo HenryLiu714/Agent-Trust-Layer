@@ -1,6 +1,6 @@
-from irimi.classify import classify
-from irimi.exchange import Exchange, Request, Response
-from irimi.overlay import NoOverlay
+from irimi.core.exchange import Exchange, Request, Response
+from irimi.decide.overlay import NoOverlay
+from irimi.servicemaps.classify import classify
 from tests.doubles import NullStore
 
 

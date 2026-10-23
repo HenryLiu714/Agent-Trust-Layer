@@ -3,9 +3,10 @@
 import json
 from dataclasses import replace
 
-from irimi import bodies, writelog
-from irimi.exchange import Exchange, Request, Response
-from irimi.trace import UNATTRIBUTED
+from irimi.core import bodies
+from irimi.core.exchange import Exchange, Request, Response
+from irimi.decide import writelog
+from irimi.protocol.trace import UNATTRIBUTED
 
 ANSWER = {
     "id": "re_MINTED1",

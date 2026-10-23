@@ -6,12 +6,13 @@ from dataclasses import replace
 
 import pytest
 
-from irimi import exitcodes, redact
-from irimi.exchange import Exchange, Request, Response
-from irimi.protocol.replay_files import CallOutcome, ReplayResult
+from irimi.core import exitcodes
+from irimi.core.exchange import Exchange, Request, Response
+from irimi.protocol.replay_files import CallResult, ReplayResult
+from irimi.protocol.trace import ErrorInfo, RunRecord, StoredRun, ToolCall, Trigger
+from irimi.record import redact
 from irimi.replay import plan as replay_plan
 from irimi.replay import report as replay_report
-from irimi.trace import ErrorInfo, RunRecord, StoredRun, ToolCall, Trigger
 
 TICKET = {"ticket": {"__irimi_type__": "agent:Ticket", "value": {"charge": "ch_1"}}}
 TRIGGER = Trigger("handle", "agent:handle", TICKET, True)
@@ -339,7 +340,7 @@ def test_a_replay_that_made_fewer_calls_than_its_recording_says_how_many_it_neve
 def test_a_trigger_that_raised_is_an_agent_that_ran():
     """A call the child could not make has no outcome: `irimi replay` stops before one
     (`test_replay_cli`)."""
-    raised = CallOutcome(True, ErrorInfo("builtins.KeyError", "'k'"))
+    raised = CallResult(True, ErrorInfo("builtins.KeyError", "'k'"))
     ended = replay_report.outcome(
         _run(_record(), []), _new([]), replay_report.Ended(1, raised), None
     )

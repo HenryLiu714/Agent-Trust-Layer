@@ -41,15 +41,16 @@ import pytest
 
 from examples.server_agent import app
 from examples.server_agent.app import BARRIER_ENV, TOOL_NAME
-from irimi import ca, paths, servicemap
+from irimi import servicemaps
 from irimi.cli import main
-from irimi.exchange import Exchange
+from irimi.config import ca, paths
+from irimi.core.exchange import Exchange
 from irimi.protocol.control import CONTROL_PREFIX
 from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV, PROXY_ENVS, RUN_ENV
+from irimi.protocol.trace import UNATTRIBUTED, ToolCall
+from irimi.record.store.reader import StoreReader
 from irimi.report.model import RunView
 from irimi.report.summary import summary_lines
-from irimi.store.reader import StoreReader
-from irimi.trace import UNATTRIBUTED, ToolCall
 from tests.maps_for_cli import complete_for_check
 from tests.test_engine_mitm import PRECONDITION_STRIPE_MAP
 from tests.test_phase_exit import _Stripe
@@ -67,7 +68,7 @@ import sys
 from pathlib import Path
 
 from irimi import cli
-from irimi.servicemap import loader
+from irimi.servicemaps import loader
 
 maps = Path(sys.argv[1])
 loader.shipped_dir = lambda: maps
@@ -126,7 +127,7 @@ def home(tmp_path, monkeypatch):
     (maps_dir / "stripe.yaml").write_text(PRECONDITION_STRIPE_MAP)
     complete_for_check(maps_dir)
     # This process reads the same maps when it rebuilds each run's summary (`_blocks`).
-    monkeypatch.setattr("irimi.servicemap.loader.shipped_dir", lambda: maps_dir)
+    monkeypatch.setattr("irimi.servicemaps.loader.shipped_dir", lambda: maps_dir)
     return tmp_path
 
 
@@ -343,7 +344,7 @@ def test_two_concurrent_requests_to_a_served_agent_are_two_runs_that_never_mix(
     # Serve printed one block per run, each equal to its stored summary (`_blocks`), naming its
     # own refund and its stood-in tool, and not the other run's.
     assert sorted(_blocks(lines, reader)) == sorted(by_charge.values())
-    maps = servicemap.load()
+    maps = servicemaps.load()
     for charge, run_id in by_charge.items():
         stored = reader.load_run(run_id)
         block = summary_lines(RunView(stored.record, stored.events), maps)

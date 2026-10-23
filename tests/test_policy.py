@@ -8,18 +8,20 @@ from types import SimpleNamespace
 
 import pytest
 
-from irimi import bodies, delegation, reader, servicemap, services
-from irimi.classify import Classification, classify
-from irimi.exchange import Exchange, Flag, Request, Response
-from irimi.netaddr import Target
-from irimi.policy import Decided, Delegate, Respond, ShadowPolicy
-from irimi.reader import UpstreamReader
-from irimi.servicemap import IdSpec
+from irimi import servicemaps, services
+from irimi.core import bodies
+from irimi.core.exchange import Exchange, Flag, Request, Response
+from irimi.core.netaddr import Target
+from irimi.decide import reader, targets
+from irimi.decide.policy import Decided, Delegate, Respond, ShadowPolicy
+from irimi.decide.reader import UpstreamReader
+from irimi.servicemaps import IdSpec
+from irimi.servicemaps.classify import Classification, classify
 from irimi.services import generic
 from irimi.services.slack import answers as slack_answers
 from irimi.services.stripe import answers as stripe_answers
 
-SHIPPED = servicemap.MapIndex(tuple(servicemap.loader.load_shipped()))
+SHIPPED = servicemaps.MapIndex(tuple(servicemaps.loader.load_shipped()))
 
 
 def _req(
@@ -51,7 +53,7 @@ class Flat:
     response: Response | None
     flags: tuple
     issued: tuple
-    forward_to: delegation.ForwardTo | None = None
+    forward_to: targets.ForwardTo | None = None
     precondition: str | None = None
     rejection_code: str = ""
     currency: str = ""
@@ -86,7 +88,7 @@ def flat(decided: Decided) -> Flat:
 def answer(policy, request, classification, write_log=(), run_id=""):
     """`policy`'s decision, flattened, with the answer target resolved first, as the session
     resolves it."""
-    target = delegation.delegate(request, classification)
+    target = targets.delegate(request, classification)
     return flat(policy.decide(request, classification, write_log, run_id, target))
 
 
@@ -185,7 +187,7 @@ def test_livemode_is_overwritten_rather_than_taken_from_the_fixture():
     """Every shipped fixture already says `false`, so the rule is only visible against one that
     does not - and a fixture regenerated from a live-mode example would otherwise tell an agent
     its shadow write happened on the real ledger."""
-    route = servicemap.Route(
+    route = servicemaps.Route(
         method="POST", path="/v1/things", operation="things.create", kind="write", fixture="thing"
     )
     body = stripe_answers.l1_body(_req("POST"), route, {"object": "thing", "livemode": True})
@@ -693,7 +695,7 @@ def test_a_create_still_mints_every_id_it_names():
 def test_a_captured_segment_that_is_not_this_ids_prefix_is_not_used():
     """`named_id` matches on the id prefix, so an unrelated captured segment cannot become the
     id. There is no such shipped route, so the case is built here rather than left untested."""
-    route = servicemap.Route(
+    route = servicemaps.Route(
         method="POST",
         path="/v1/widgets/{widget}/parts/{part}",
         operation="widgets.attach",
@@ -710,7 +712,7 @@ def test_the_id_shaped_capture_wins_when_one_prefix_matches_two_segments():
     """`sub_` matches `sub_sched_1` before `sub_2` - a real Stripe pair, and the first capture is
     the wrong one. An id is its prefix plus one run of id characters, so the second `_` in
     `sub_sched_1` is what rules it out."""
-    route = servicemap.Route(
+    route = servicemaps.Route(
         method="POST",
         path="/v1/subscription_schedules/{schedule}/subscriptions/{subscription}",
         operation="subscriptions.update",
@@ -727,7 +729,7 @@ def test_a_client_secret_is_never_echoed_back_as_the_resource_id():
     """A PaymentIntent's client secret starts with the id's own prefix
     (`pi_ABC_secret_XYZ`), so prefix matching alone hands it back as `id` - a credential in the
     one field an agent is most likely to log or store."""
-    route = servicemap.Route(
+    route = servicemaps.Route(
         method="POST",
         path="/v1/payment_intents/{payment_intent}/cancel",
         operation="payment_intents.cancel",
@@ -746,7 +748,7 @@ def test_a_client_secret_is_never_echoed_back_as_the_resource_id():
 def test_a_percent_encoded_id_is_still_the_id_the_request_names():
     """`cus%5FREAL123` is the same customer as `cus_REAL123` to the service, so reading the raw
     segment would mint a fresh id where the request names one, for any caller that over-encodes."""
-    route = servicemap.Route(
+    route = servicemaps.Route(
         method="POST",
         path="/v1/customers/{customer}",
         operation="customers.update",
@@ -856,7 +858,7 @@ def test_the_body_is_serialized_exactly_once(monkeypatch):
         return json.dumps(*args, **kwargs)
 
     # Rebind the name `json` inside policy rather than mutating the shared stdlib module: the
-    # latter counts every json.dumps in the process, including ones classify or servicemap make,
+    # latter counts every json.dumps in the process, including ones classify or servicemaps make,
     # which turns this into a tripwire for whatever another batch adds to that path.
     monkeypatch.setattr(services, "json", SimpleNamespace(dumps=counting, loads=json.loads))
     _answer(
@@ -1091,10 +1093,10 @@ def test_stripe_python_parses_every_faked_object_with_every_field(
 
 
 def _targeted_index(targets=(), target_reads=()):
-    maps = servicemap.loader.apply_cli_targets(
-        list(servicemap.loader.load_shipped()), targets, target_reads
+    maps = servicemaps.loader.apply_cli_targets(
+        list(servicemaps.loader.load_shipped()), targets, target_reads
     )
-    return servicemap.MapIndex(tuple(maps))
+    return servicemaps.MapIndex(tuple(maps))
 
 
 def _answer_with(index, request):
@@ -1106,7 +1108,7 @@ def test_a_route_target_makes_the_answer_delegated_not_faked():
     ans = _answer_with(index, _req("POST", path="/v1/refunds"))
     assert ans.answered_by == "delegated"
     assert ans.response is None  # the engine forwards; the policy does no I/O
-    assert ans.forward_to == delegation.ForwardTo(
+    assert ans.forward_to == targets.ForwardTo(
         Target.parse("http://127.0.0.1:3000/refund"), forward_auth=False
     )
 
@@ -1165,10 +1167,10 @@ def test_forward_auth_reaches_the_engine_through_the_answer():
     index = _targeted_index([("api.stripe.com", "/v1/refunds", "http://127.0.0.1:3000/r")])
     stripe = index.service_for("api.stripe.com")
     routes = tuple(
-        _replace(r, forward_auth=True) if r.target != servicemap.SELF_TARGET else r
+        _replace(r, forward_auth=True) if r.target != servicemaps.SELF_TARGET else r
         for r in stripe.routes
     )
-    index = servicemap.MapIndex(
+    index = servicemaps.MapIndex(
         tuple(_replace(sm, routes=routes) if sm is stripe else sm for sm in index.services)
     )
     ans = _answer_with(index, _req("POST", path="/v1/refunds"))
@@ -1192,7 +1194,7 @@ def test_an_unmatched_llm_or_telemetry_request_is_never_delegated():
     The classification is built here rather than loaded, because the only way a map could give an
     *unmatched* route a live kind is a live `default_kind`, which the loader refuses.
     """
-    sm = servicemap.loader.load_shipped()[0]
+    sm = servicemaps.loader.load_shipped()[0]
     sm = replace(sm, target=Target.parse("http://127.0.0.1:3000"), target_reads=True)
     for kind in ("llm", "telemetry", "read"):
         cls = Classification(
@@ -1203,7 +1205,7 @@ def test_an_unmatched_llm_or_telemetry_request_is_never_delegated():
             matched=None,  # unlisted: this is the `elif` branch, not `target_for`
             service_map=sm,
         )
-        forward = delegation.delegate(_req("POST", path="/anything"), cls)
+        forward = targets.delegate(_req("POST", path="/anything"), cls)
         if kind == "read":
             assert forward is not None, "target_reads is what delegates a read"
         else:
@@ -1215,25 +1217,25 @@ def test_a_credential_path_host_is_never_delegated_off_the_machine():
     layer it arrived through; this asks the same question of the request and the answer actually
     in front of `delegate`, so a target reaching it some other way is refused rather than
     escaping. The map is built here because the loader will not produce one."""
-    slack = next(sm for sm in servicemap.loader.load_shipped() if sm.service == "slack")
+    slack = next(sm for sm in servicemaps.loader.load_shipped() if sm.service == "slack")
     assert "hooks.slack.com" in slack.hosts
     off_machine = replace(slack, target=Target.parse("http://stub.internal:9000"))
-    index = servicemap.MapIndex((off_machine,))
+    index = servicemaps.MapIndex((off_machine,))
 
     for path in ("/services/T0/B0/SECRET", "/workflows/T0/A0/SECRET/xyz", "/triggers/T0/1/abc"):
         request = _req("POST", host="hooks.slack.com", path=path)
-        forward = delegation.delegate(request, classify(request, index))
+        forward = targets.delegate(request, classify(request, index))
         assert forward is None, f"{path} was delegated to {forward and forward.url}"
 
     # The same service's other hosts are not credential-path hosts, so they still delegate.
     request = _req("POST", host="slack.com", path="/api/chat.postMessage")
-    forward = delegation.delegate(request, classify(request, index))
+    forward = targets.delegate(request, classify(request, index))
     assert forward is not None and forward.url.startswith("http://stub.internal:9000")
 
     # And a loopback target on the credential host is fine - that is the supported way to stub it.
-    local = servicemap.MapIndex((replace(slack, target=Target.parse("http://127.0.0.1:3000")),))
+    local = servicemaps.MapIndex((replace(slack, target=Target.parse("http://127.0.0.1:3000")),))
     request = _req("POST", host="hooks.slack.com", path="/workflows/T0/A0/SECRET/xyz")
-    forward = delegation.delegate(request, classify(request, local))
+    forward = targets.delegate(request, classify(request, local))
     assert forward is not None and forward.url.startswith("http://127.0.0.1:3000")
 
 
@@ -2179,7 +2181,7 @@ def test_a_delegated_write_lists_no_webhooks():
 
 
 def test_an_integer_id_is_minted_as_an_integer_and_echoed_from_its_own_segment():
-    route = servicemap.Route(
+    route = servicemaps.Route(
         method="PATCH",
         path="/repos/{owner}/{repo}/issues/{number}",
         operation="issues.update",
@@ -2193,7 +2195,7 @@ def test_an_integer_id_is_minted_as_an_integer_and_echoed_from_its_own_segment()
 
 
 def test_a_uuid_id_is_minted_as_a_uuid_and_echoed_from_its_own_segment():
-    route = servicemap.Route(
+    route = servicemaps.Route(
         method="POST",
         path="/issues/{id}",
         operation="issues.update",
@@ -2226,8 +2228,8 @@ def test_a_rejection_mints_no_slack_ts():
 def test_a_slack_write_no_envelope_names_gets_the_default_envelope():
     """`ok: true` with the posted channel and a minted `ts`, never the generic echo: slack_sdk
     raises on a body without `ok`."""
-    route = servicemap.Route("POST", "/api/chat.update", "chat.update", "write")
-    slack = servicemap.ServiceMap(service="slack", hosts=frozenset({"slack.com"}), routes=(route,))
+    route = servicemaps.Route("POST", "/api/chat.update", "chat.update", "write")
+    slack = servicemaps.ServiceMap(service="slack", hosts=frozenset({"slack.com"}), routes=(route,))
     request = _req(
         "POST",
         host="slack.com",
@@ -2236,7 +2238,7 @@ def test_a_slack_write_no_envelope_names_gets_the_default_envelope():
         content_type="application/x-www-form-urlencoded",
     )
     fake = services.fake_response(
-        request, classify(request, servicemap.MapIndex((slack,))), services.TsClock()
+        request, classify(request, servicemaps.MapIndex((slack,))), services.TsClock()
     )
     body = json.loads(fake.body)
     assert sorted(body) == ["channel", "ok", "ts"]

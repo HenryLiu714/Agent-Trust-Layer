@@ -33,8 +33,8 @@ from collections.abc import Sequence
 from typing import Any
 from urllib.parse import parse_qsl, urlencode
 
-from irimi.bodies import is_int
-from irimi.exchange import Request
+from irimi.core.bodies import is_int
+from irimi.core.exchange import Request
 from irimi.services.model import SERVICE_OWNED, Applied, Read, Rewritten, Write
 
 # Stripe's own default page size, and what a list read gets when it names no `limit`.

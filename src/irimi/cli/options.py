@@ -5,9 +5,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from irimi import exitcodes
 from irimi.cli import os_error
-from irimi.trace import UNATTRIBUTED, JSONValue
+from irimi.core import exitcodes
+from irimi.protocol.trace import UNATTRIBUTED, JSONValue
 
 LISTEN_HOST = "127.0.0.1"
 DEFAULT_PORT = 4000

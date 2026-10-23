@@ -28,16 +28,15 @@ import zstandard
 from mitmproxy.net import encoding
 from mitmproxy.test import tutils
 
-from irimi import control
-from irimi.control import MAX_CONTROL_BODY, ControlEndpoint
-from irimi.engine import capture, decoding, mitm
+from irimi.core.exchange import Exchange, Flag, Request, Response
+from irimi.core.limits import MAX_STORED_BODY
+from irimi.decide.overlay import Overlaid
+from irimi.engine import capture, control, decoding, mitm
 from irimi.engine.capture import StreamCapture
+from irimi.engine.control import MAX_CONTROL_BODY, ControlEndpoint
 from irimi.engine.decoding import Decoded, decode_body
-from irimi.exchange import Exchange, Flag, Request, Response
-from irimi.limits import MAX_STORED_BODY
-from irimi.overlay import Overlaid
-from irimi.store.reader import StoreReader
-from irimi.store.writer import DirectoryStore
+from irimi.record.store.reader import StoreReader
+from irimi.record.store.writer import DirectoryStore
 from tests.doubles import NullStore
 from tests.test_engine_mitm import (
     STREAM_MAP,

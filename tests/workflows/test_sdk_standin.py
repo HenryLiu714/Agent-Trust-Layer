@@ -331,7 +331,7 @@ def test_a_real_trigger_logs_one_run_with_the_real_id_and_nested_triggers_join(l
 
 @pytest.mark.skipif(sys.version_info < (3, 14), reason="3.12 evaluates annotations at definition")
 def test_a_real_trigger_annotated_with_a_name_never_defined_runs_and_logs_its_types(load_sdk, obs):
-    """The real SDK leaves a trigger's annotations unevaluated (`_calls.signature`), so a name
+    """The real SDK leaves a trigger's annotations unevaluated (`calls.signature`), so a name
     imported only for type checkers never raises into the agent; nor does the log of its types.
     This module's annotations are strings (`from __future__`), so the trigger is compiled
     without its flags."""
@@ -607,7 +607,7 @@ def test_a_real_write_tool_logs_which_function_ran(load_sdk, obs):
 @pytest.mark.parametrize(
     "exc",
     [
-        ImportError("cannot import name 'ToolCall' from 'irimi.trace'"),
+        ImportError("cannot import name 'ToolCall' from 'irimi.protocol.trace'"),
         ModuleNotFoundError("No module named 'some_dependency'", name="some_dependency"),
         ModuleNotFoundError("No module named 'irimi.sdk._capture'", name="irimi.sdk._capture"),
     ],
@@ -713,7 +713,7 @@ def replaying(load_sdk, monkeypatch) -> Callable[..., tuple[types.ModuleType, _R
 
 
 def _outcome(result: Any = None, error: tuple[str, str] | None = None, awaited: bool = False):
-    from irimi.trace import ErrorInfo
+    from irimi.protocol.trace import ErrorInfo
 
     return RecordedOutcome(result, None if error is None else ErrorInfo(*error), awaited)
 

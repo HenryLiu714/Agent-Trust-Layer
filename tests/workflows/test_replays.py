@@ -7,7 +7,7 @@ replay <run id>`, in a copy of the recording's home, against a fresh `World` and
 process that held several runs (W3, W5, W8, W9's control scenarios) is replayed once per run.
 
 `irimi replay` runs what it runs for that run: the run's trigger, called alone by
-`irimi._replay_child` from its entrypoint and its recorded args, or a process run's argv. A run
+`irimi.replay.child` from its entrypoint and its recorded args, or a process run's argv. A run
 it cannot call - an `sdk.run` block or a `header` run with no entrypoint, args stored by their
 description - it refuses, exit 2, and those scenarios are replayed by their command instead
 (`-- <cmd>`, `REFUSED`), which runs the agent's whole process, every run of it adopted into the
@@ -56,12 +56,12 @@ from examples.workflows.harness.run import (
     replay_targets,
     workflows,
 )
-from irimi.compare import ARGS_DIFFER
-from irimi.exchange import LIVE_KINDS, Flag
+from irimi.cli.runner import NO_PROXY_VALUE
+from irimi.core.exchange import LIVE_KINDS, Flag
+from irimi.protocol.trace import ToolCall
 from irimi.replay import plan as replay_plan
 from irimi.replay import report as replay_report
-from irimi.runner import NO_PROXY_VALUE
-from irimi.trace import ToolCall
+from irimi.replay.compare import ARGS_DIFFER
 
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
 W2, W3, W5, W6 = (

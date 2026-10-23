@@ -10,13 +10,13 @@ import time
 from collections.abc import Sequence
 from typing import assert_never
 
-from irimi.exchange import Exchange
+from irimi.core.exchange import Exchange
+from irimi.protocol.trace import Event, RunRecord, StoredRun, TelemetrySeen, ToolCall, trigger_args
 from irimi.report import model
 from irimi.report.model import RunView, run_elapsed
 from irimi.report.summary import summary_lines
 from irimi.report.terminal import exchange_line, plural, printable, tool_call_line
-from irimi.servicemap import MapIndex
-from irimi.trace import Event, RunRecord, StoredRun, TelemetrySeen, ToolCall, trigger_args
+from irimi.servicemaps import MapIndex
 
 # `irimi runs show`'s `args:` line: enough to recognise a trigger by, not a dump of it.
 MAX_ARGS_SHOWN = 500

@@ -401,9 +401,12 @@ class Result:
         """What `irimi runs show <run_id>` prints of a stored run that `irimi compare` prints too
         (#79): the run in one line, its trigger, entrypoint and agent version as compare's header
         names a side, and its summary's write lines without their indent, in the order printed,
-        `↳` lines left out. Raises unless `runs show` exits 0."""
+        `↳` lines left out. Raises unless `runs show` exits 0. An empty unattributed pool is no
+        run, so it has no label and no writes."""
         code, out, err = self.runs("show", run_id, "--store", str(self.store_root()))
         assert (code, err) == (0, []), (run_id, code, err)
+        if out == [f"no unattributed events in {self.store_root()}"]:
+            return "", []
         fields = dict(line.split(": ", 1) for line in out[: out.index("")])
         label = f"{fields['trigger']}  {fields['entrypoint']}  agent {fields['agent version']}"
         start = next(i for i, line in enumerate(out) if line.startswith(_summary_headers(run_id)))

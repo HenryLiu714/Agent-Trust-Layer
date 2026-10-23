@@ -1264,7 +1264,7 @@ def cmd_runs_show(args: argparse.Namespace) -> int:
     """`irimi runs show RUN_ID`: a stored run's header, every event, and its summary (#72)."""
     from irimi import report
     from irimi.store import RunNotFound, StoreReader
-    from irimi.trace import TraceFormatError
+    from irimi.trace import UNATTRIBUTED, TraceFormatError
 
     root = _store_root(args)
     try:
@@ -1275,6 +1275,10 @@ def cmd_runs_show(args: argparse.Namespace) -> int:
     except (TraceFormatError, OSError) as exc:
         print(f"error: run {args.run_id} could not be read: {exc}", file=sys.stderr)
         return 1
+    # The unattributed pool is not a run: with nothing in it there is no record to show.
+    if args.run_id == UNATTRIBUTED and not run.events:
+        print(f"no unattributed events in {root}")
+        return 0
     for line in report.run_show_lines(run, _maps_for_stored_runs()):
         print(line)
     return 0

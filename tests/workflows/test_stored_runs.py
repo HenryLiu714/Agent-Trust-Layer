@@ -531,6 +531,16 @@ def test_irimi_compare_of_every_stored_run_with_itself_is_its_summary_s_writes(
     ids = [record.run_id for record in reader.list_runs()] + [trace.UNATTRIBUTED]
     for run_id in ids:
         label, writes = shadow.shown_writes(run_id)
+        if run_id == trace.UNATTRIBUTED and not reader.load_run(run_id, bodies=False).events:
+            # `runs show` invents no run for an empty pool, so there is no label to compare.
+            assert label == ""
+            code, out, err = shadow.compare_runs(run_id, run_id)
+            assert (code, err, out[-1]) == (
+                0,
+                [],
+                "  0 same · 0 changed · 0 only in A · 0 only in B",
+            ), run_id
+            continue
         # Whether each HTTP write the summary printed, in `seq` order, was stored cut.
         cut = [
             BODY_TRUNCATED_FLAG in e.flags

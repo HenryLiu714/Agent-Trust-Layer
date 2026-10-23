@@ -496,14 +496,21 @@ def test_runs_show_an_unknown_id_fails_with_the_documented_message(home, capfd):
     assert err == f"error: no run nope in {home / 'store'}\n"
 
 
+def test_runs_show_unattributed_on_an_empty_pool_says_so_and_invents_no_run(home, capfd):
+    assert main(["runs", "show", "unattributed"]) == 0
+    out, err = capfd.readouterr()
+    assert out == f"no unattributed events in {home / 'store'}\n"
+    assert err == ""
+
+
 def test_runs_show_unattributed_reads_the_events_no_run_claimed(home, capfd):
+    s = DirectoryStore(home / "store", redact.load_key(home))
+    s.record(_refund("unattributed"))
+    s.close()
     assert main(["runs", "show", "unattributed"]) == 0
     lines = capfd.readouterr().out.splitlines()
     assert lines[:2] == ["run: unattributed", "attribution: header"]
-    assert lines[7:9] == [
-        "",
-        "irimi shadow · run unattributed · 0 exchanges · 0.0s",
-    ]
+    assert "irimi shadow · run unattributed · 1 exchange · 0.0s" in lines
 
 
 def test_runs_show_still_prints_with_a_warning_when_the_maps_do_not_load(home, capfd):

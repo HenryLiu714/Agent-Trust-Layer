@@ -9,8 +9,9 @@ import urllib.error
 import urllib.request
 from typing import Any, Protocol
 
-from irimi import bodies
-from irimi.exchange import AnsweredBy, Request, Response
+from irimi.exchange import AnsweredBy, Flag, Request, Response
+from irimi.limits import MAX_BODY_BYTES
+from irimi.opener import no_redirect_opener
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +40,12 @@ class Reader(Protocol):
     def __call__(self, request: Request) -> Response | None: ...
 
 
-def answered_as(reader: Reader, answered: bool) -> tuple[AnsweredBy, tuple[str, ...]]:
+def answered_as(reader: Reader, answered: bool) -> tuple[AnsweredBy, tuple[Flag, ...]]:
     """`(answered_by, flags)` for a read `reader` made, and `answered` or not: its own
     `answered_by`, and its `flags` or `miss_flags`, when it names them, as
     `recording.RecordingReader` does, and `("live", ())` when it does not."""
     answered_by: AnsweredBy = getattr(reader, "answered_by", "live")
-    flags: tuple[str, ...] = getattr(reader, "flags" if answered else "miss_flags", ())
+    flags: tuple[Flag, ...] = getattr(reader, "flags" if answered else "miss_flags", ())
     return answered_by, flags
 
 
@@ -80,10 +81,8 @@ class UpstreamReader:
     """
 
     def __init__(self) -> None:
-        self._opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({}),
-            urllib.request.HTTPSHandler(context=ssl.create_default_context()),
-            _NoRedirects(),
+        self._opener = no_redirect_opener(
+            urllib.request.HTTPSHandler(context=ssl.create_default_context())
         )
 
     def __call__(self, request: Request) -> Response | None:
@@ -107,24 +106,14 @@ class UpstreamReader:
             return None
 
 
-class _NoRedirects(urllib.request.HTTPRedirectHandler):
-    """Never follows a redirect, so a 3xx is an HTTPError, which `UpstreamReader` returns as the
-    response it is: the engine's read dials the host the classifier saw and no other."""
-
-    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
-        return None
-
-
 def _capped(status: int, headers: Any, body: Any) -> Response | None:
-    """The response, or None when its body is past `bodies.MAX_BODY_BYTES`.
+    """The response, or None when its body is past `MAX_BODY_BYTES`.
 
     Read with a cap rather than whole, so a huge body cannot be pulled into memory on the answer
     path only to be refused by `bodies.json_object` afterwards.
     """
-    data = body.read(bodies.MAX_BODY_BYTES + 1)
-    if len(data) > bodies.MAX_BODY_BYTES:
-        logger.warning(
-            "irimi: a precondition read answered more than %d bytes", bodies.MAX_BODY_BYTES
-        )
+    data = body.read(MAX_BODY_BYTES + 1)
+    if len(data) > MAX_BODY_BYTES:
+        logger.warning("irimi: a precondition read answered more than %d bytes", MAX_BODY_BYTES)
         return None
     return Response(status=status, headers=tuple(headers), body=data)

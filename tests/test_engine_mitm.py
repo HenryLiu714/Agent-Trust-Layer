@@ -25,29 +25,21 @@ from mitmproxy.net import encoding
 from irimi import (
     ca,
     delegation,
+    exchange,
     idempotency,
+    netaddr,
     paths,
-    pipeline,
     redact,
     report,
     servicemap,
     services,
+    wire,
 )
-from irimi.engine import EngineConfig, EngineStartError, mitm
+from irimi.control import ControlEndpoint
+from irimi.engine import EngineConfig, EngineStartError, Serve, capture, mitm
+from irimi.engine.capture import StreamCapture, recorded_stream
 from irimi.engine.mitm import IrimiAddon, MitmEngine
-from irimi.exchange import (
-    DECISION_FAILED_FLAG,
-    IDEMPOTENCY_CONFLICT_FLAG,
-    IDEMPOTENT_REPLAY_FLAG,
-    REFUSED_FLAG,
-    STREAM_TRUNCATED_FLAG,
-    TARGET_FAILED_FLAG,
-    UNCLASSIFIED_FLAG,
-    UPSTREAM_ERROR_FLAG,
-    Exchange,
-    Request,
-    Response,
-)
+from irimi.exchange import Exchange, Flag, Request, Response
 from irimi.overlay import NoOverlay, Overlaid, Translation
 from irimi.policy import Answer, ShadowPolicy
 from irimi.store import MAX_STORED_BODY, DirectoryStore, NullStore, StoreReader
@@ -177,15 +169,25 @@ def _start(
     on_tool_call=None,
     on_tls_failure=None,
 ):
-    """Serve `cfg` on a background loop until the returned stop() is called."""
+    """Serve `cfg` on a background loop until the returned stop() is called, which closes
+    `store` once the engine has stopped."""
     seen = []
+    policy = policy or ShadowPolicy()
+    store = store or NullStore()
+    control = ControlEndpoint(
+        store,
+        serve=isinstance(cfg.mode, Serve),
+        process_run=cfg.run_id,
+        on_tool_call=on_tool_call,
+        policy=policy,
+    )
     eng = MitmEngine(
         cfg,
-        policy=policy or ShadowPolicy(),
-        store=store or NullStore(),
+        policy=policy,
+        store=store,
         overlay=overlay or NoOverlay(),
         on_exchange=seen.append,
-        on_tool_call=on_tool_call,
+        control=control,
         on_tls_failure=on_tls_failure,
     )
     loop = asyncio.new_event_loop()
@@ -205,6 +207,7 @@ def _start(
         eng.shutdown()
         t.join(timeout=15)
         loop.close()
+        store.close()
 
     return eng, seen, stop
 
@@ -293,7 +296,6 @@ def test_get_is_forwarded_live(engine, upstream):
     assert ex.service == "127.0.0.1"
     assert ex.operation == "GET /hello"
     assert ex.run_id == "t3st"
-    assert ex.validation == "unvalidated"
     assert ex.flags == ()
     assert ex.door == "forward"
     assert ex.request.port == upstream  # a loopback upstream on another port is not the door
@@ -313,7 +315,6 @@ def test_post_is_faked_l0(engine, upstream):
     assert ex.answered_by == "fake-L0"
     assert ex.kind == "unknown"
     assert "unclassified" in ex.flags
-    assert ex.validation == "unvalidated"
 
 
 def _raw_tunnel(proxy_port: int, port: int) -> socket.socket:
@@ -427,7 +428,7 @@ def test_mapped_write_is_named_and_faked(tmp_path, monkeypatch, upstream):
     ex = seen[0]
     assert (ex.service, ex.operation, ex.kind) == ("demo", "things.create", "write")
     assert ex.answered_by == "fake-L0"
-    assert ex.flags == ("fidelity:L0",)
+    assert ex.flags == ()
 
 
 def test_mapped_read_is_named_and_forwarded(tmp_path, monkeypatch, upstream):
@@ -642,7 +643,9 @@ def test_shutdown_before_run_makes_run_return(tmp_path, monkeypatch):
     asyncio.run(go())
 
 
-def test_store_is_closed_when_setup_fails(tmp_path, monkeypatch):
+def test_the_engine_never_closes_the_store_even_when_setup_fails(tmp_path, monkeypatch):
+    """The store is the composition root's to open and to close; the CLI closes it on every way
+    out, a failed start included."""
     closed = []
 
     class _Store:
@@ -657,7 +660,7 @@ def test_store_is_closed_when_setup_fails(tmp_path, monkeypatch):
     eng = MitmEngine(cfg, ShadowPolicy(), _Store(), NoOverlay())
     with pytest.raises(FileNotFoundError):
         asyncio.run(eng.run())
-    assert closed == [True]
+    assert closed == []
 
 
 def test_reverse_door_forwards_to_tls_upstream(tmp_path, monkeypatch):
@@ -703,10 +706,10 @@ def test_reverse_door_refuses_unlisted_host(engine):
     }
     (ex,) = seen
     assert (ex.answered_by, ex.kind, ex.door) == ("irimi", "read", "reverse")
-    assert ex.flags == (REFUSED_FLAG,)
+    assert ex.flags == (Flag.REFUSED,)
     assert ex.request.path == "/api.stripe.com/v1"
     assert ex.response.status == 403
-    assert not report.is_intercepted(ex)
+    assert not exchange.is_intercepted(ex)
 
 
 def test_a_refused_post_is_still_listed_among_the_writes(engine):
@@ -717,7 +720,7 @@ def test_a_refused_post_is_still_listed_among_the_writes(engine):
     assert status == 403
     (ex,) = seen
     assert (ex.answered_by, ex.kind) == ("irimi", "unknown")
-    assert report.is_intercepted(ex)
+    assert exchange.is_intercepted(ex)
     assert report.write_sentence(ex, None).endswith("  refused by irimi")
 
 
@@ -727,7 +730,7 @@ def test_reverse_door_refuses_missing_host(engine):
     assert status == 403
     assert "/<upstream-host>/<path>" in json.loads(data)["error"]["message"]
     (ex,) = seen
-    assert (ex.answered_by, ex.flags) == ("irimi", (REFUSED_FLAG,))
+    assert (ex.answered_by, ex.flags) == ("irimi", (Flag.REFUSED,))
 
 
 def test_reverse_door_write_is_faked(tmp_path, monkeypatch):
@@ -834,7 +837,6 @@ def test_faked_write_reflects_a_form_body_and_is_flagged(engine, upstream):
     assert "created" not in body
     ex = seen[0]
     assert ex.answered_by == "fake-L0"
-    assert "fidelity:L0" in ex.flags
 
 
 def test_live_read_carries_no_fidelity_flag(engine, upstream):
@@ -897,7 +899,6 @@ def _exchange(kind, answered_by="live"):
         operation="envelope.send",
         kind=kind,
         answered_by=answered_by,
-        validation="unvalidated",
         run_id="t3st",
     )
 
@@ -1330,7 +1331,7 @@ def test_a_stream_longer_than_the_stored_maximum_reaches_the_client_whole(tmp_pa
         srv.shutdown()
     assert received == b"".join(chunks)
     (ex,) = seen
-    assert ex.flags == (STREAM_TRUNCATED_FLAG,)
+    assert ex.flags == (Flag.STREAM_TRUNCATED,)
     assert ex.response is not None and ex.response.body == received[:MAX_STORED_BODY]
     assert sum(ex.stream_chunks) == MAX_STORED_BODY == 8 * mib
 
@@ -1339,16 +1340,16 @@ def test_a_copy_that_raises_stops_the_recording_and_never_the_stream(tmp_path, m
     """The tee's own copy raises on the second chunk. The client still gets every byte, the
     recording keeps what it copied before, and says it is not the whole stream."""
     calls = itertools.count(1)
-    capture = mitm._StreamTee._capture
+    capture = StreamCapture._capture
 
     def raise_on_the_second(self, chunk):
         if next(calls) == 2:
             raise RuntimeError("the copy broke")
         capture(self, chunk)
 
-    monkeypatch.setattr(mitm._StreamTee, "_capture", raise_on_the_second)
+    monkeypatch.setattr(StreamCapture, "_capture", raise_on_the_second)
     (ex,) = _stream_three_chunks(tmp_path, monkeypatch)
-    assert ex.flags == (STREAM_TRUNCATED_FLAG,)
+    assert ex.flags == (Flag.STREAM_TRUNCATED,)
     assert ex.response is not None and ex.response.body == THREE_CHUNKS[0]
     assert ex.stream_chunks == (len(THREE_CHUNKS[0]),)
 
@@ -1378,7 +1379,7 @@ def test_an_upstream_reset_mid_stream_is_recorded_with_what_arrived_and_flagged(
         stop()
         srv.shutdown()
     (ex,) = seen
-    assert ex.flags == (UPSTREAM_ERROR_FLAG, STREAM_TRUNCATED_FLAG)
+    assert ex.flags == (Flag.UPSTREAM_ERROR, Flag.STREAM_TRUNCATED)
     assert ex.response is not None
     assert (ex.response.status, ex.response.body) == (200, THREE_CHUNKS[0])
     assert ex.stream_chunks == (len(THREE_CHUNKS[0]),)
@@ -1454,7 +1455,7 @@ def test_a_reset_inside_a_character_records_only_the_complete_lines_before_it(
         stop()
         srv.shutdown()
     (ex,) = seen
-    assert ex.flags == (UPSTREAM_ERROR_FLAG, STREAM_TRUNCATED_FLAG)
+    assert ex.flags == (Flag.UPSTREAM_ERROR, Flag.STREAM_TRUNCATED)
     assert ex.response is not None and ex.response.body == first
     assert ex.stream_chunks == (len(first),)
     stored = redact.redact_exchange(ex, bytes(32))
@@ -1525,41 +1526,49 @@ def test_a_streamed_read_is_not_observed_now_that_its_body_is_recorded(tmp_path,
 @pytest.fixture
 def small_cap(monkeypatch):
     """A tee that keeps at most 10 bytes, so its cap is testable without megabytes."""
-    monkeypatch.setattr(mitm, "MAX_STORED_BODY", 10)
+    monkeypatch.setattr(capture, "MAX_STORED_BODY", 10)
 
 
 def _streamed_flow(*headers):
-    """A mitmproxy flow whose response has streamed, for `_recorded_stream` alone."""
+    """A mitmproxy flow whose response has streamed, for `recorded_stream` alone."""
     from mitmproxy.test import tflow, tutils
 
     fields = ((b"content-type", b"text/event-stream"), *headers)
     return tflow.tflow(resp=tutils.tresp(content=None, headers=fields))
 
 
+def _recorded(flow, capture, *, whole):
+    """`recorded_stream` of the response `flow` streamed."""
+    headers = tuple(
+        (k.decode("latin-1"), v.decode("latin-1")) for k, v in flow.response.headers.fields
+    )
+    return recorded_stream(flow.response.status_code, headers, capture, whole=whole)
+
+
 def test_a_capped_stream_is_recorded_up_to_its_last_complete_line(small_cap):
     """The cap cuts the copy inside a character here. The recorded body ends at the last line
     end before it, so it is text redaction can read, with no half of anything on it."""
-    tee = mitm._StreamTee()
+    tee = StreamCapture()
     tee(b"ok\n")
     tee(b"123456\xc3\xa9\n")  # the cap at 10 keeps b"123456\xc3"
     assert tee.truncated
-    response, chunks, cut = mitm._recorded_stream(_streamed_flow(), tee, whole=True)
+    response, chunks, cut = _recorded(_streamed_flow(), tee, whole=True)
     assert (response.body, chunks, cut) == (b"ok\n", (3,), True)
 
 
 def test_a_whole_stream_is_recorded_as_it_came_even_without_a_final_line_end():
-    tee = mitm._StreamTee()
+    tee = StreamCapture()
     tee(b"data: one\n\n")
     tee(b"data: two")
-    response, chunks, cut = mitm._recorded_stream(_streamed_flow(), tee, whole=True)
+    response, chunks, cut = _recorded(_streamed_flow(), tee, whole=True)
     assert (response.body, chunks, cut) == (b"data: one\n\ndata: two", (11, 9), False)
 
 
 def test_a_stream_that_ended_in_an_error_keeps_lines_a_lone_carriage_return_ends():
     """SSE ends a line at CRLF, LF or a lone CR, and redaction reads it the same way."""
-    tee = mitm._StreamTee()
+    tee = StreamCapture()
     tee(b"data: one\r\rdata: tw")
-    response, chunks, cut = mitm._recorded_stream(_streamed_flow(), tee, whole=False)
+    response, chunks, cut = _recorded(_streamed_flow(), tee, whole=False)
     assert (response.body, chunks, cut) == (b"data: one\r\r", (11,), True)
 
 
@@ -1568,10 +1577,10 @@ def test_a_stream_that_cannot_be_decoded_is_recorded_empty_and_flagged(content_e
     """Never as its compressed bytes, which redaction cannot read. mitmproxy raises TypeError for
     an encoding it does not know, which `get_content(strict=False)` does not catch, decodes
     `utf-8` to a str, and has no decoder for two encodings stacked."""
-    tee = mitm._StreamTee()
+    tee = StreamCapture()
     tee(b"not compressed at all\n")
     flow = _streamed_flow((b"content-encoding", content_encoding.encode()))
-    response, chunks, cut = mitm._recorded_stream(flow, tee, whole=True)
+    response, chunks, cut = _recorded(flow, tee, whole=True)
     assert (response.body, chunks, cut) == (b"", (), True)
 
 
@@ -1580,20 +1589,20 @@ def test_a_whole_stream_in_every_encoding_mitmproxy_decodes_is_recorded_decoded(
     """Split anywhere on the wire, it is one chunk once decoded."""
     plain = b"".join(THREE_CHUNKS)
     packed = encoding.encode(plain, content_encoding.lower())
-    tee = mitm._StreamTee()
+    tee = StreamCapture()
     tee(packed[:5])
     tee(packed[5:])
     flow = _streamed_flow((b"content-encoding", content_encoding.encode()))
-    response, chunks, cut = mitm._recorded_stream(flow, tee, whole=True)
+    response, chunks, cut = _recorded(flow, tee, whole=True)
     assert (response.body, chunks, cut) == (plain, (len(plain),), False)
 
 
 def test_an_identity_encoded_stream_keeps_its_chunks():
-    tee = mitm._StreamTee()
+    tee = StreamCapture()
     tee(THREE_CHUNKS[0])
     tee(THREE_CHUNKS[1])
     flow = _streamed_flow((b"content-encoding", b"identity"))
-    response, chunks, cut = mitm._recorded_stream(flow, tee, whole=True)
+    response, chunks, cut = _recorded(flow, tee, whole=True)
     assert response.body == THREE_CHUNKS[0] + THREE_CHUNKS[1]
     assert (chunks, cut) == ((len(THREE_CHUNKS[0]), len(THREE_CHUNKS[1])), False)
 
@@ -1607,10 +1616,10 @@ def test_a_compressed_stream_cut_short_is_recorded_as_whole_decoded_lines_or_emp
     empty. Never the compressed bytes, and never half a line."""
     plain = b"".join(THREE_CHUNKS) * 200
     packed = encoding.encode(plain, content_encoding)
-    tee = mitm._StreamTee()
+    tee = StreamCapture()
     tee(packed[: len(packed) // 2])
     flow = _streamed_flow((b"content-encoding", content_encoding.encode()))
-    response, chunks, cut = mitm._recorded_stream(flow, tee, whole=False)
+    response, chunks, cut = _recorded(flow, tee, whole=False)
     assert cut
     assert plain.startswith(response.body)
     assert bool(response.body) is (content_encoding == "gzip")
@@ -1619,7 +1628,7 @@ def test_a_compressed_stream_cut_short_is_recorded_as_whole_decoded_lines_or_emp
 
 
 def test_the_tee_hands_every_chunk_back_unchanged_and_keeps_a_copy():
-    tee = mitm._StreamTee()
+    tee = StreamCapture()
     assert tee(b"one") == b"one"
     assert tee(b"two") == b"two"
     assert tee(b"") == b""  # mitmproxy's end-of-message call, which is not a chunk
@@ -1627,14 +1636,14 @@ def test_the_tee_hands_every_chunk_back_unchanged_and_keeps_a_copy():
 
 
 def test_the_tee_keeps_a_stream_exactly_as_long_as_its_cap_whole(small_cap):
-    tee = mitm._StreamTee()
+    tee = StreamCapture()
     tee(b"12345")
     tee(b"67890")
     assert (tee.chunks, tee.truncated) == ([b"12345", b"67890"], False)
 
 
 def test_the_tee_cuts_the_chunk_that_crosses_its_cap_and_keeps_nothing_after(small_cap):
-    tee = mitm._StreamTee()
+    tee = StreamCapture()
     assert tee(b"1234567") == b"1234567"
     assert tee(b"89abc") == b"89abc"
     assert tee(b"def") == b"def"
@@ -1642,7 +1651,7 @@ def test_the_tee_cuts_the_chunk_that_crosses_its_cap_and_keeps_nothing_after(sma
 
 
 def test_the_tee_stops_copying_for_good_once_its_copy_raises(monkeypatch):
-    tee = mitm._StreamTee()
+    tee = StreamCapture()
     tee(b"one")
     monkeypatch.setattr(tee, "chunks", None)  # `.append` now raises AttributeError
     assert tee(b"two") == b"two"
@@ -2026,7 +2035,7 @@ def test_an_unreachable_target_is_a_502_with_the_json_body_the_issue_specifies(
     # irimi answered it, with an error, and the flag says why. The write keeps its classification.
     (ex,) = seen
     assert (ex.answered_by, ex.kind) == ("irimi", "write")
-    assert ex.flags == (TARGET_FAILED_FLAG,)
+    assert ex.flags == (Flag.TARGET_FAILED,)
     assert ex.target == target_url
     assert ex.response is not None and ex.response.status == 502
 
@@ -2099,7 +2108,7 @@ def test_a_remote_target_is_probed_too_and_an_unreachable_one_is_irimis_json_502
         raise ConnectionRefusedError("refused")
 
     monkeypatch.setattr(mitm.socket, "create_connection", refuse)
-    forward = delegation.ForwardTo("https://sandbox.example.com/v1")
+    forward = delegation.ForwardTo(netaddr.Target.parse("https://sandbox.example.com/v1"))
     refused = mitm._target_refusal(forward, ("127.0.0.1", 4000))
     assert isinstance(refused, delegation.TargetUnreachable)
     assert "'https://sandbox.example.com/v1' could not be reached" in str(refused)
@@ -2139,13 +2148,13 @@ def test_a_target_naming_our_own_listener_is_refused_with_a_json_502(tmp_path, m
     assert flow.response.status_code == 502
     assert json.loads(flow.response.content)["error"]["type"] == "irimi_target_failed"
     assert "own listener" in json.loads(flow.response.content)["error"]["message"]
-    assert flow.response.headers[pipeline.ANSWERED_BY_HEADER] == "irimi"
+    assert flow.response.headers[wire.ANSWERED_BY_HEADER] == "irimi"
     # The flow was not pointed anywhere: refusing must not leave it aimed at the real service.
     assert (flow.request.host, flow.request.path) == ("127.0.0.1", "/things")
     # Answered and recorded in the request hook, so no later hook has anything left to finish.
     assert META_KEY not in flow.metadata
     (ex,) = seen
-    assert (ex.answered_by, ex.flags) == ("irimi", (TARGET_FAILED_FLAG,))
+    assert (ex.answered_by, ex.flags) == ("irimi", (Flag.TARGET_FAILED,))
 
 
 def test_a_locally_answered_flow_that_errors_keeps_its_own_flags(tmp_path, monkeypatch):
@@ -2174,7 +2183,6 @@ def test_a_locally_answered_flow_that_errors_keeps_its_own_flags(tmp_path, monke
 
     (ex,) = seen
     assert ex.answered_by == "fake-L0"
-    assert "fidelity:L0" in ex.flags
     assert "upstream-error" not in ex.flags
 
 
@@ -2260,7 +2268,7 @@ def test_a_raise_in_the_decision_answers_locally_instead_of_forwarding(
     assert status == 502, "the write reached the real upstream"
     assert json.loads(data)["error"]["type"] == "irimi_decision_failed"
     assert len(seen) == 1, "the exchange must still be recorded"
-    assert seen[0].flags == (UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG)
+    assert seen[0].flags == (Flag.UNCLASSIFIED, Flag.DECISION_FAILED)
     assert (seen[0].kind, seen[0].answered_by) == ("unknown", "irimi")
 
 
@@ -2309,7 +2317,7 @@ def test_a_raise_handing_the_decision_to_a_worker_answers_locally(tmp_path, monk
     assert flow.response.status_code == 502
     assert json.loads(flow.response.content)["error"]["type"] == "irimi_decision_failed"
     (ex,) = seen
-    assert ex.flags == (UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG)
+    assert ex.flags == (Flag.UNCLASSIFIED, Flag.DECISION_FAILED)
     assert (ex.started_at, ex.ended_at) == (100.0, 101.0)
 
 
@@ -2342,7 +2350,7 @@ def test_a_raise_carrying_a_rewrite_onto_the_flow_answers_locally(tmp_path, monk
     assert read.response.status_code == 502
     assert json.loads(read.response.content)["error"]["type"] == "irimi_decision_failed"
     assert read.request.path == "/hello"
-    assert seen[-1].flags == (UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG)
+    assert seen[-1].flags == (Flag.UNCLASSIFIED, Flag.DECISION_FAILED)
 
 
 def test_a_raise_recording_an_engine_read_leaves_the_write_answered(tmp_path, monkeypatch):
@@ -2361,12 +2369,14 @@ def test_a_raise_recording_an_engine_read_leaves_the_write_answered(tmp_path, mo
         headers=(),
         body=b"",
     )
-    issued = pipeline.annotate(
-        probe,
-        Response(status=200, headers=(), body=b"{}"),
-        pipeline.Classification(service="demo", operation="things.list", kind="read", flags=()),
-        "live",
-        "",
+    issued = Exchange(
+        request=probe,
+        response=Response(status=200, headers=(), body=b"{}"),
+        service="demo",
+        operation="things.list",
+        kind="read",
+        answered_by="live",
+        run_id="",
         issued_by="engine",
     )
 
@@ -2430,8 +2440,8 @@ def test_a_refused_target_is_not_a_write_either(tmp_path, monkeypatch, target):
     """
     asked = []
 
-    def refuse(url, port, local_address=""):
-        asked.append((url, port, local_address))
+    def refuse(target, port, local_address=""):
+        asked.append((target.url, port, local_address))
         raise delegation.TargetRefused("refusing this target")
 
     monkeypatch.setattr(delegation, "refuse_self_target", refuse)
@@ -2541,13 +2551,13 @@ def test_the_response_hook_writes_nothing_back_to_a_streamed_flow(tmp_path, monk
 
     after = (flow.response.status_code, tuple(flow.response.headers.fields), flow.response.content)
     assert after == before
-    assert pipeline.ANSWERED_BY_HEADER not in flow.response.headers
+    assert wire.ANSWERED_BY_HEADER not in flow.response.headers
 
 
 def test_the_response_hook_records_a_streamed_flow_from_its_tee_and_writes_nothing_back(
     tmp_path, monkeypatch
 ):
-    """The seam test above, with the stream going through a real `_StreamTee` as
+    """The seam test above, with the stream going through a real `StreamCapture` as
     `responseheaders` sets one up: the flow is still left exactly as it was, and the exchange is
     recorded from the tee's copy."""
     from mitmproxy.test import tflow, tutils
@@ -2575,7 +2585,7 @@ def test_the_response_hook_records_a_streamed_flow_from_its_tee_and_writes_nothi
     asyncio.run(addon.request(flow))
     assert flow.metadata[META_KEY].answered_by == "delegated"
     # What `responseheaders` does for an event stream, and a chunk through it.
-    tee = mitm._StreamTee()
+    tee = StreamCapture()
     flow.metadata[STREAM_KEY] = flow.response.stream = tee
     tee(SSE_FIRST)
     before = (flow.response.status_code, tuple(flow.response.headers.fields), flow.response.content)
@@ -2584,7 +2594,7 @@ def test_the_response_hook_records_a_streamed_flow_from_its_tee_and_writes_nothi
 
     after = (flow.response.status_code, tuple(flow.response.headers.fields), flow.response.content)
     assert after == before
-    assert pipeline.ANSWERED_BY_HEADER not in flow.response.headers
+    assert wire.ANSWERED_BY_HEADER not in flow.response.headers
     assert flow.response.stream is tee and STREAM_KEY not in flow.metadata
     (ex,) = seen
     assert ex.response is not None and ex.response.body == SSE_FIRST
@@ -2614,8 +2624,8 @@ def test_a_streamed_target_response_is_not_buffered(tmp_path, monkeypatch):
             )
             resp = conn.getresponse()
             assert resp.status == 200
-            stamp = pipeline.answered_by_header("delegated")
-            assert resp.getheader(pipeline.ANSWERED_BY_HEADER) == stamp
+            stamp = wire.answered_by_header("delegated")
+            assert resp.getheader(wire.ANSWERED_BY_HEADER) == stamp
             first = resp.read(len(SSE_FIRST))  # times out at 5 s if the proxy buffered the body
             assert first == SSE_FIRST
             _STREAM_GATE.set()
@@ -2711,7 +2721,7 @@ def test_a_run_s_requests_see_its_own_writes_alone(tmp_path, monkeypatch, upstre
             ("run-b", "POST", "/things"),
         ]:
             body = b"{}" if method == "POST" else None
-            headers = {pipeline.RUN_HEADER: run}
+            headers = {exchange.RUN_HEADER: run}
             _via_proxy(eng.listen_port(), method, base + path, body=body, extra_headers=headers)
     finally:
         stop()
@@ -2743,9 +2753,8 @@ def test_an_overlay_that_changes_a_read_stamps_it_overlay(tmp_path, monkeypatch,
     overlay = _OverlayDouble(answer=lambda upstream: Overlaid(changed, "full"))
     status, headers, data, ex = _overlaid_read(tmp_path, monkeypatch, upstream, overlay)
     assert (status, data) == (200, b'{"overlaid": true}')
-    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
     assert ex.answered_by == "overlay"
-    assert "fidelity:overlay" in ex.flags
     assert ex.overlay == "full"
 
 
@@ -2756,7 +2765,7 @@ def test_an_overlay_that_changes_nothing_leaves_the_read_live_and_unstamped(
     status, headers, data, ex = _overlaid_read(tmp_path, monkeypatch, upstream, overlay)
     assert overlay.calls == 1
     assert (status, data) == (200, b"hello from upstream")
-    assert pipeline.ANSWERED_BY_HEADER not in headers
+    assert wire.ANSWERED_BY_HEADER not in headers
     assert ex.answered_by == "live"
     assert ex.overlay is None
     assert ex.response.body == b"hello from upstream"
@@ -2766,7 +2775,7 @@ def test_an_overlay_may_flag_a_read_partial_without_touching_it(tmp_path, monkey
     overlay = _OverlayDouble(answer=lambda upstream: Overlaid(upstream, "partial"))
     status, headers, data, ex = _overlaid_read(tmp_path, monkeypatch, upstream, overlay)
     assert (status, data) == (200, b"hello from upstream")
-    assert pipeline.ANSWERED_BY_HEADER not in headers
+    assert wire.ANSWERED_BY_HEADER not in headers
     assert ex.answered_by == "live"
     assert ex.overlay == "partial"
 
@@ -2779,7 +2788,7 @@ def test_an_overlay_that_raises_does_not_break_the_read(tmp_path, monkeypatch, u
     status, headers, data, ex = _overlaid_read(tmp_path, monkeypatch, upstream, overlay)
     assert overlay.calls == 1
     assert (status, data) == (200, b"hello from upstream")
-    assert pipeline.ANSWERED_BY_HEADER not in headers
+    assert wire.ANSWERED_BY_HEADER not in headers
     assert ex.answered_by == "live"
     assert ex.overlay == "partial"
 
@@ -2806,11 +2815,11 @@ def test_a_rewritten_read_reaches_the_upstream_translated_and_is_recorded_that_w
     assert status == 200
     ((path, received),) = _Upstream.seen
     assert path == "/hello?limit=1"
-    assert pipeline.REWROTE_HEADER not in {k.lower() for k, _ in received}
+    assert wire.REWROTE_HEADER not in {k.lower() for k, _ in received}
     assert overlay.translated_from == ["starting_after=re_MINTED1"]
     ex = seen[-1]
     assert ex.request.query == "limit=1"
-    assert pipeline.REWROTE_HEADER not in {k for k, _ in ex.request.headers}
+    assert wire.REWROTE_HEADER not in {k for k, _ in ex.request.headers}
 
 
 def test_a_rewrite_that_raises_forwards_the_read_unchanged(tmp_path, monkeypatch, upstream):
@@ -2831,7 +2840,7 @@ def test_a_rewrite_that_raises_forwards_the_read_unchanged(tmp_path, monkeypatch
     assert [path for path, _ in _Upstream.seen] == ["/hello?limit=1&starting_after=re_MINTED1"]
     ex = seen[-1]
     assert ex.answered_by == "live"
-    assert DECISION_FAILED_FLAG not in ex.flags
+    assert Flag.DECISION_FAILED not in ex.flags
 
 
 def test_the_overlay_is_not_asked_about_a_read_before_any_write(tmp_path, monkeypatch, upstream):
@@ -2861,14 +2870,14 @@ def test_a_rewrote_header_the_agent_sent_is_not_forwarded_upstream(tmp_path, mon
         status, _, _ = _read_via_proxy(
             eng.listen_port(),
             f"http://127.0.0.1:{upstream}/hello",
-            extra_headers={pipeline.REWROTE_HEADER: "starting_after=re_FORGED"},
+            extra_headers={wire.REWROTE_HEADER: "starting_after=re_FORGED"},
         )
     finally:
         stop()
     assert status == 200
     ((path, received),) = _Upstream.seen
     assert path == "/hello"
-    assert pipeline.REWROTE_HEADER not in {k.lower() for k, _ in received}
+    assert wire.REWROTE_HEADER not in {k.lower() for k, _ in received}
 
 
 def test_a_rewrote_header_the_agent_sent_is_stripped_before_the_runs_first_write(
@@ -2890,7 +2899,7 @@ def test_a_rewrote_header_the_agent_sent_is_stripped_before_the_runs_first_write
             eng.listen_port(),
             f"http://127.0.0.1:{upstream}/hello",
             extra_headers={
-                pipeline.REWROTE_HEADER: "starting_after=re_FORGED",
+                wire.REWROTE_HEADER: "starting_after=re_FORGED",
                 "Irimi-Rewrote": "starting_after=re_FORGED2",
             },
         )
@@ -2900,7 +2909,7 @@ def test_a_rewrote_header_the_agent_sent_is_stripped_before_the_runs_first_write
     assert status == 200
     ((path, received),) = _Upstream.seen
     assert path == "/hello"
-    assert pipeline.REWROTE_HEADER not in {k.lower() for k, _ in received}
+    assert wire.REWROTE_HEADER not in {k.lower() for k, _ in received}
 
 
 def test_a_rewrote_header_the_agent_sent_is_kept_out_of_the_recorded_request(
@@ -2914,11 +2923,11 @@ def test_a_rewrote_header_the_agent_sent_is_kept_out_of_the_recorded_request(
         _read_via_proxy(
             eng.listen_port(),
             f"http://127.0.0.1:{upstream}/hello",
-            extra_headers={pipeline.REWROTE_HEADER: "starting_after=re_FORGED"},
+            extra_headers={wire.REWROTE_HEADER: "starting_after=re_FORGED"},
         )
     finally:
         stop()
-    assert [k for k, _ in seen[-1].request.headers if k == pipeline.REWROTE_HEADER] == []
+    assert [k for k, _ in seen[-1].request.headers if k == wire.REWROTE_HEADER] == []
 
 
 def test_no_rewrote_header_reaches_the_upstream_on_a_translated_read(
@@ -2929,7 +2938,7 @@ def test_no_rewrote_header_reaches_the_upstream_on_a_translated_read(
     from dataclasses import replace
 
     def translate(request):
-        assert all(k != pipeline.REWROTE_HEADER for k, _ in request.headers), (
+        assert all(k != wire.REWROTE_HEADER for k, _ in request.headers), (
             "the engine strips the agent's before the overlay is asked"
         )
         return Translation(replace(request, query="limit=1"), "starting_after=re_MINTED1")
@@ -2940,15 +2949,15 @@ def test_no_rewrote_header_reaches_the_upstream_on_a_translated_read(
         status, _, _ = _read_via_proxy(
             eng.listen_port(),
             f"http://127.0.0.1:{upstream}/hello?limit=1&starting_after=re_MINTED1",
-            extra_headers={pipeline.REWROTE_HEADER: "starting_after=re_FORGED"},
+            extra_headers={wire.REWROTE_HEADER: "starting_after=re_FORGED"},
         )
     finally:
         stop()
     assert status == 200
     ((path, received),) = _Upstream.seen
     assert path == "/hello?limit=1"
-    assert [v for k, v in received if k.lower() == pipeline.REWROTE_HEADER] == []
-    assert [v for k, v in seen[-1].request.headers if k == pipeline.REWROTE_HEADER] == []
+    assert [v for k, v in received if k.lower() == wire.REWROTE_HEADER] == []
+    assert [v for k, v in seen[-1].request.headers if k == wire.REWROTE_HEADER] == []
     assert overlay.translated_from == ["starting_after=re_MINTED1"]
 
 
@@ -2964,7 +2973,7 @@ def test_a_write_carrying_a_rewrote_header_is_still_faked_and_records_none(
             eng.listen_port(),
             f"http://127.0.0.1:{upstream}/things",
             extra_headers={
-                pipeline.REWROTE_HEADER: "starting_after=re_FORGED",
+                wire.REWROTE_HEADER: "starting_after=re_FORGED",
                 "content-type": "application/json",
             },
             method="POST",
@@ -2973,10 +2982,10 @@ def test_a_write_carrying_a_rewrote_header_is_still_faked_and_records_none(
     finally:
         stop()
     assert status == 200
-    assert headers[pipeline.ANSWERED_BY_HEADER] == "fake-L0"
+    assert headers[wire.ANSWERED_BY_HEADER] == "fake-L0"
     ex = seen[-1]
     assert ex.kind == "write"
-    assert [k for k, _ in ex.request.headers if k == pipeline.REWROTE_HEADER] == []
+    assert [k for k, _ in ex.request.headers if k == wire.REWROTE_HEADER] == []
 
 
 # ------------------------------------------------ the Stripe overlay, end to end
@@ -3177,12 +3186,12 @@ def test_a_charge_reread_after_a_faked_refund_shows_the_refund(stripe_stub):
     charge = json.loads(data)
     assert charge["amount_refunded"] == 100
     assert charge["refunded"] is False
-    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
     assert [method for method, _ in _StripeStub.seen] == ["GET"], "a faked write reached Stripe"
 
 
 def test_a_faked_refund_records_the_webhooks_it_would_have_fired(stripe_stub):
-    """Would-fire webhooks through the proxy, where `_Pending` and the response hook's `annotate`
+    """Would-fire webhooks through the proxy, where `_Pending` and the response hook's `Exchange`
     carry them: a faked refund lists `refund.created` and `charge.refunded`, and the read after it
     lists nothing."""
     proxy, stub, seen = stripe_stub
@@ -3218,7 +3227,7 @@ def test_the_refunds_list_shows_the_minted_refund_first(stripe_stub):
     status, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds")
     assert status == 200
     assert json.loads(data)["data"][0]["id"] == refund_id
-    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
 
 
 class _HeldRefundsStub(_StripeStub):
@@ -3257,7 +3266,7 @@ def test_a_forged_rewrote_header_cannot_hide_a_refund_that_lands_mid_read(tmp_pa
         read["result"] = _read_via_proxy(
             eng.listen_port(),
             f"http://127.0.0.1:{stub}/v1/refunds",
-            extra_headers={pipeline.REWROTE_HEADER: "starting_after=re_FORGED"},
+            extra_headers={wire.REWROTE_HEADER: "starting_after=re_FORGED"},
         )
 
     reader = threading.Thread(target=list_refunds)
@@ -3281,7 +3290,7 @@ def test_a_forged_rewrote_header_cannot_hide_a_refund_that_lands_mid_read(tmp_pa
     status, headers, page = read["result"]
     assert status == 200
     assert json.loads(page)["data"][0]["id"] == json.loads(data)["id"]
-    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
 
 
 def _keyed_refund(proxy, stub, key, amount=100):
@@ -3309,13 +3318,13 @@ def test_a_retry_with_the_same_key_is_one_refund_not_two(stripe_stub):
     status, second_headers, second = _keyed_refund(proxy, stub, "k-1")
     assert status == 200
     assert second == first
-    stamp = pipeline.ANSWERED_BY_HEADER
+    stamp = wire.ANSWERED_BY_HEADER
     assert second_headers[stamp] == first_headers[stamp]
     replayed, marker = idempotency.replayed_header("stripe") or ("", "")
     assert replayed not in first_headers
     assert second_headers[replayed] == marker
     refunds = [ex for ex in seen if ex.request.method == "POST"]
-    assert [IDEMPOTENT_REPLAY_FLAG in ex.flags for ex in refunds] == [False, True]
+    assert [Flag.IDEMPOTENT_REPLAY in ex.flags for ex in refunds] == [False, True]
 
     _, _, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_REAL1")
     assert json.loads(data)["amount_refunded"] == 100
@@ -3333,7 +3342,7 @@ def test_a_replayed_refund_records_no_webhooks(stripe_stub):
     _keyed_refund(proxy, stub, "k-1")
     refunds = [ex for ex in seen if ex.request.method == "POST"]
     assert [ex.would_fire for ex in refunds] == [("refund.created", "charge.refunded"), ()]
-    assert [IDEMPOTENT_REPLAY_FLAG in ex.flags for ex in refunds] == [False, True]
+    assert [Flag.IDEMPOTENT_REPLAY in ex.flags for ex in refunds] == [False, True]
 
 
 def test_the_same_key_with_a_different_amount_is_refused(stripe_stub):
@@ -3346,7 +3355,7 @@ def test_the_same_key_with_a_different_amount_is_refused(stripe_stub):
     assert status == 400
     assert json.loads(data)["error"]["type"] == "idempotency_error"
     refused = [ex for ex in seen if ex.request.method == "POST"][-1]
-    assert IDEMPOTENCY_CONFLICT_FLAG in refused.flags
+    assert Flag.IDEMPOTENCY_CONFLICT in refused.flags
 
     _, _, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_REAL1")
     assert json.loads(data)["amount_refunded"] == 100
@@ -3360,7 +3369,7 @@ def test_a_reused_key_on_a_different_write_records_no_webhooks(stripe_stub):
     _keyed_refund(proxy, stub, "k-2", amount=250)
     first, refused = [ex for ex in seen if ex.request.method == "POST"]
     assert first.would_fire == ("refund.created", "charge.refunded")
-    assert IDEMPOTENCY_CONFLICT_FLAG in refused.flags
+    assert Flag.IDEMPOTENCY_CONFLICT in refused.flags
     assert refused.would_fire == ()
 
 
@@ -3369,7 +3378,7 @@ def test_a_read_before_the_refund_is_untouched_and_unstamped(stripe_stub):
     status, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_REAL1")
     assert status == 200
     assert json.loads(data)["amount_refunded"] == 0
-    assert pipeline.ANSWERED_BY_HEADER not in headers
+    assert wire.ANSWERED_BY_HEADER not in headers
     assert seen[-1].answered_by == "live"
     assert seen[-1].overlay is None
     # The same read after the refund IS overlaid, so the untouched one above was untouched
@@ -3383,7 +3392,7 @@ def test_a_read_before_the_refund_is_untouched_and_unstamped(stripe_stub):
     )
     _, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_REAL1")
     assert json.loads(data)["amount_refunded"] == 100
-    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
 
 
 def _fake_refund(proxy, stub, charge="ch_REAL1", amount=100):
@@ -3413,7 +3422,7 @@ def test_a_full_refunds_page_drops_the_oldest_real_refund_and_says_there_is_more
     page = json.loads(data)
     assert [item["id"] for item in page["data"]] == [refund_id, "re_REAL1"]
     assert page["has_more"] is True
-    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
     assert seen[-1].overlay == "full"
 
 
@@ -3433,12 +3442,12 @@ def test_a_cursor_naming_a_minted_refund_is_dropped_before_the_read_reaches_stri
     assert [item["id"] for item in json.loads(data)["data"]] == ["re_REAL1", "re_REAL2"]
     # The body really is the one Stripe sent, so it stays unstamped; the exchange is what records
     # that irimi translated the request, and shows the upstream what it asked.
-    assert pipeline.ANSWERED_BY_HEADER not in headers
+    assert wire.ANSWERED_BY_HEADER not in headers
     ex = seen[-1]
     assert ex.answered_by == "live"
     assert ex.overlay == "full"
     assert ex.request.query == ""
-    assert pipeline.REWROTE_HEADER not in {k for k, _ in ex.request.headers}
+    assert wire.REWROTE_HEADER not in {k for k, _ in ex.request.headers}
 
 
 def test_a_customer_reread_after_a_faked_update_shows_the_posted_fields(stripe_stub):
@@ -3458,7 +3467,7 @@ def test_a_customer_reread_after_a_faked_update_shows_the_posted_fields(stripe_s
     customer = json.loads(data)
     assert customer["email"] == "new@example.test"
     assert customer["metadata"] == {"tier": "pro"}, "Stripe merges metadata, it does not replace it"
-    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
     assert seen[-1].overlay == "full"
     assert [method for method, _ in _StripeStub.seen] == ["GET"], "a faked write reached Stripe"
 
@@ -3481,7 +3490,7 @@ def test_a_payment_intent_reread_after_a_faked_cancel_shows_it_canceled(stripe_s
     assert intent["status"] == "canceled"
     assert intent["cancellation_reason"] == "requested_by_customer"
     assert isinstance(intent["canceled_at"], int)
-    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
     assert seen[-1].overlay == "full"
     assert [method for method, _ in _StripeStub.seen] == ["GET"], "a faked write reached Stripe"
 
@@ -3497,7 +3506,7 @@ def test_a_reread_of_a_minted_refund_by_id_is_answered_not_404d(stripe_stub):
 
     status, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds/{minted}")
     assert status == 200
-    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
     assert json.loads(data)["id"] == minted
     ex = seen[-1]
     assert (ex.kind, ex.answered_by, ex.overlay, ex.issued_by) == (
@@ -3517,7 +3526,7 @@ def test_a_read_of_a_refund_stripe_really_does_not_have_keeps_its_404(stripe_stu
     assert _fake_refund(proxy, stub).startswith("re_")
     status, headers, _ = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds/re_NOTHING")
     assert status == 404
-    assert pipeline.ANSWERED_BY_HEADER not in headers
+    assert wire.ANSWERED_BY_HEADER not in headers
     ex = seen[-1]
     assert ex.answered_by == "live"
     assert ex.overlay is None
@@ -3533,7 +3542,7 @@ def test_a_rate_limited_read_of_a_minted_refund_keeps_its_429(stripe_stub):
     status, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds/{minted}")
     assert status == 429
     assert json.loads(data)["error"]["code"] == "rate_limit"
-    assert pipeline.ANSWERED_BY_HEADER not in headers
+    assert wire.ANSWERED_BY_HEADER not in headers
     ex = seen[-1]
     assert (ex.answered_by, ex.overlay) == ("live", "partial")
 
@@ -3663,7 +3672,7 @@ def test_a_slack_history_read_after_a_faked_post_shows_the_post_first(slack_stub
     status, headers, data = _slack_call(proxy, stub, "conversations.history", {"channel": "C0123"})
     assert status == 200
     assert [m["ts"] for m in json.loads(data)["messages"]] == [minted, REAL_SLACK_TS]
-    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
     assert seen[-1].answered_by == "overlay"
     assert seen[-1].overlay == "full"
     assert _SlackStub.seen == [("POST", "/api/conversations.history")], "a faked post reached Slack"
@@ -3680,7 +3689,7 @@ def test_a_slack_history_read_of_another_channel_is_forwarded_unstamped(slack_st
     status, headers, data = _slack_call(proxy, stub, "conversations.history", {"channel": "C0999"})
     assert status == 200
     assert [m["ts"] for m in json.loads(data)["messages"]] == [REAL_SLACK_TS]
-    assert pipeline.ANSWERED_BY_HEADER not in headers
+    assert wire.ANSWERED_BY_HEADER not in headers
     assert seen[-1].answered_by == "live"
     assert seen[-1].overlay is None
 
@@ -3706,7 +3715,7 @@ def test_a_slack_replies_read_after_a_faked_reply_shows_it_at_the_tail(slack_stu
     assert messages[0]["reply_count"] == 1
     assert messages[0]["latest_reply"] == minted
     assert messages[-1]["thread_ts"] == REAL_SLACK_TS
-    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
     assert seen[-1].answered_by == "overlay"
     assert seen[-1].overlay == "full"
     assert _SlackStub.seen == [("POST", "/api/conversations.replies")], "a faked post reached Slack"
@@ -3724,7 +3733,7 @@ def test_a_slack_read_the_effects_cannot_place_is_recorded_partial_and_left_alon
     status, headers, data = _slack_call(proxy, stub, "conversations.history", {"channel": "C0123"})
     assert status == 200
     assert [m["ts"] for m in json.loads(data)["messages"]] == [REAL_SLACK_TS]
-    assert pipeline.ANSWERED_BY_HEADER not in headers, "nothing of irimi's is in this body"
+    assert wire.ANSWERED_BY_HEADER not in headers, "nothing of irimi's is in this body"
     assert seen[-1].answered_by == "live"
     assert seen[-1].overlay == "partial"
 
@@ -3764,7 +3773,7 @@ def test_a_slack_replies_read_of_a_minted_thread_is_answered_not_thread_not_foun
         proxy, stub, "conversations.replies", {"channel": "C0123", "ts": minted}
     )
     assert status == 200
-    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
     document = json.loads(data)
     assert document["ok"] is True
     assert [m["ts"] for m in document["messages"]] == [minted]
@@ -3898,7 +3907,7 @@ def test_a_refund_of_a_fully_refunded_charge_is_rejected_with_stripes_own_body(
     status, headers, data = _refund(proxy, stub, "ch_FULL1")
     assert status == 400
     assert json.loads(data)["error"]["code"] == "charge_already_refunded"
-    assert headers[pipeline.ANSWERED_BY_HEADER] == "fake-L1"
+    assert headers[wire.ANSWERED_BY_HEADER] == "fake-L1"
     (write,) = _writes(seen)
     assert write.precondition == "rejected"
     assert write.rejection_code == "charge_already_refunded"
@@ -3933,7 +3942,7 @@ def test_a_second_refund_in_one_run_is_rejected_because_the_overlay_applied_the_
     second, headers, data = _refund(proxy, stub, "ch_REAL1", amount=4900)
     assert second == 400
     assert json.loads(data)["error"]["code"] == "charge_already_refunded"
-    assert headers[pipeline.ANSWERED_BY_HEADER] == "fake-L1"
+    assert headers[wire.ANSWERED_BY_HEADER] == "fake-L1"
     assert [ex.precondition for ex in _writes(seen)] == ["passed", "rejected"]
 
 
@@ -3945,7 +3954,7 @@ def test_a_rejected_write_never_enters_the_write_log(precondition_stub):
     assert status == 400
     status, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_FULL1")
     assert status == 200
-    assert pipeline.ANSWERED_BY_HEADER not in headers
+    assert wire.ANSWERED_BY_HEADER not in headers
     assert json.loads(data)["amount_refunded"] == 4900  # the stub's own
     assert seen[-1].answered_by == "live"
     assert seen[-1].overlay is None
@@ -3966,7 +3975,7 @@ def test_a_precondition_read_that_429s_leaves_the_write_faked_at_l2(precondition
     status, headers, data = _refund(proxy, stub, "ch_BUSY1")
     assert status == 200
     assert json.loads(data)["object"] == "refund"
-    assert headers[pipeline.ANSWERED_BY_HEADER] == "fake-L1"
+    assert headers[wire.ANSWERED_BY_HEADER] == "fake-L1"
     (write,) = _writes(seen)
     assert (write.answered_by, write.precondition) == ("fake-L1", "not_evaluable")
     (issued,) = [ex for ex in seen if ex.issued_by == "engine"]
@@ -3994,7 +4003,7 @@ def test_a_precondition_read_that_redirects_is_not_followed_and_decides_nothing(
     status, headers, data = _refund(proxy, stub, "ch_MOVED1")
     assert status == 200
     assert json.loads(data)["object"] == "refund"
-    assert headers[pipeline.ANSWERED_BY_HEADER] == "fake-L1"
+    assert headers[wire.ANSWERED_BY_HEADER] == "fake-L1"
     (write,) = _writes(seen)
     assert (write.answered_by, write.precondition) == ("fake-L1", "not_evaluable")
     (issued,) = [ex for ex in seen if ex.issued_by == "engine"]
@@ -4053,7 +4062,7 @@ def _refund_then_list_summary(proxy, stub, seen, tmp_path, monkeypatch):
     assert status == 200
     status, headers, _ = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds")
     assert status == 200
-    assert headers[pipeline.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
     maps = _maps(tmp_path, monkeypatch, doc=PRECONDITION_STRIPE_MAP)
     return report.summary_lines("t3st", seen, 1.0, maps)
 
@@ -4203,7 +4212,7 @@ def test_a_post_to_an_archived_channel_is_rejected(slack_precondition_stub):
     )
     assert status == 200
     assert json.loads(data) == {"ok": False, "error": "is_archived"}
-    assert headers[pipeline.ANSWERED_BY_HEADER] == "fake-L1"
+    assert headers[wire.ANSWERED_BY_HEADER] == "fake-L1"
     (write,) = _writes(seen)
     assert (write.precondition, write.rejection_code) == ("rejected", "is_archived")
 
@@ -4217,7 +4226,7 @@ def test_a_post_to_a_healthy_channel_passes_and_the_probe_was_a_conversations_in
     )
     assert status == 200
     assert json.loads(data)["ok"] is True
-    assert headers[pipeline.ANSWERED_BY_HEADER] == "fake-L1"
+    assert headers[wire.ANSWERED_BY_HEADER] == "fake-L1"
     (write,) = _writes(seen)
     assert write.precondition == "passed"
     assert _SlackPreconditionStub.seen == [("POST", "/api/conversations.info")]
@@ -4230,7 +4239,7 @@ RUN_HEADERS = {"Irimi-Run": "abc", "irimi-run": "abc"}
 
 
 def _carries_run_header(headers) -> bool:
-    return pipeline.RUN_HEADER in {k.lower() for k, _ in headers}
+    return exchange.RUN_HEADER in {k.lower() for k, _ in headers}
 
 
 def test_a_live_read_is_attributed_and_its_run_header_is_not_forwarded(engine, upstream):
@@ -4344,7 +4353,7 @@ def test_a_failed_decision_is_attributed_from_the_run_header_it_stripped(
         stop()
     assert status == 502
     (ex,) = seen
-    assert DECISION_FAILED_FLAG in ex.flags
+    assert Flag.DECISION_FAILED in ex.flags
     assert ex.run_id == "abc"
     assert not _carries_run_header(ex.request.headers)
 

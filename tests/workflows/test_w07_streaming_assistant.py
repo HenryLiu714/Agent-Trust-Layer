@@ -23,14 +23,8 @@ from examples.workflows.w07_streaming_assistant.scenarios import (
     pair_decision,
 )
 from irimi import redact, trace
-from irimi.engine.mitm import MAX_DECODED_BODY
-from irimi.exchange import (
-    REPLAY_MISS_FLAG,
-    STREAM_TRUNCATED_FLAG,
-    UPSTREAM_ERROR_FLAG,
-    Exchange,
-)
-from irimi.store import MAX_STORED_BODY
+from irimi.exchange import Exchange, Flag
+from irimi.limits import MAX_DECODED_BODY, MAX_STORED_BODY
 from irimi.trace import ErrorInfo, TelemetrySeen
 
 W = "w07_streaming_assistant"
@@ -269,7 +263,7 @@ def test_a_caller_that_hangs_up_ends_the_run_in_error(run_workflow, mode):
     # The stream the agent abandoned is stored with what irimi had copied of it by then, and
     # says it is not the whole stream: it opens with `message_start` and never ends.
     stream = stored_exchanges(shadow)["/v1/messages"]
-    assert stream.flags == (UPSTREAM_ERROR_FLAG, STREAM_TRUNCATED_FLAG)
+    assert stream.flags == (Flag.UPSTREAM_ERROR, Flag.STREAM_TRUNCATED)
     assert stream.response is not None and stream.response.status == 200
     assert stream.response.body.startswith(MESSAGE_START)
     assert not stream.response.body.endswith(MESSAGE_STOP)
@@ -295,7 +289,7 @@ def test_an_upstream_reset_mid_stream_is_stored_as_a_broken_stream(run_workflow,
     assert shadow.exchange_lines() == [LLM_LINES[0], BROKEN_STREAM_LINE]
     assert shadow.result()["caller_events"] == ["start", "error"]
     stream = stored_exchanges(shadow)["/v1/messages"]
-    assert stream.flags == (UPSTREAM_ERROR_FLAG, STREAM_TRUNCATED_FLAG)
+    assert stream.flags == (Flag.UPSTREAM_ERROR, Flag.STREAM_TRUNCATED)
     assert stream.response is not None and stream.response.status == 200
     assert stream.response.body.startswith(MESSAGE_START)
     assert data_lines(stream.response.body)[0]["type"] == "message_start"
@@ -535,12 +529,12 @@ def test_a_gzip_bomb_streams_to_the_agent_whole_and_is_recorded_cut(run_workflow
     recorded = redact.complete_lines((head + BOMB_LINE * lines)[:MAX_STORED_BODY])
     [handed] = [e for e in shadow.handed if e.request.path == "/v1/messages"]
     assert handed.response is not None and handed.response.body == recorded
-    assert (handed.flags, handed.stream_chunks) == ((STREAM_TRUNCATED_FLAG,), (len(recorded),))
+    assert (handed.flags, handed.stream_chunks) == ((Flag.STREAM_TRUNCATED,), (len(recorded),))
     # Stored in the chat's run, flagged once.
     stream = stored_exchanges(shadow)["/v1/messages"]
     [chat] = shadow.sdk_runs()
     assert stream.run_id == chat.run_id
-    assert stream.flags == (STREAM_TRUNCATED_FLAG,)
+    assert stream.flags == (Flag.STREAM_TRUNCATED,)
     assert stream.response is not None and stream.response.body.startswith(MESSAGE_START)
     # Its text as it streamed, in 12-character deltas: the secret is never whole on any line
     # redaction reads, as in `secret_in_stream`.
@@ -716,10 +710,10 @@ def test_a_secret_stored_redacted_replays_as_its_placeholder(replayed):
 # the fake again, whose fault cuts it again. One that fails upstream again keeps its `replay-miss`
 # beside the engine's `upstream-error`: the answer's own flags are kept on every path.
 CUT_STREAMS = {
-    "caller_disconnects": (REPLAY_MISS_FLAG, UPSTREAM_ERROR_FLAG, STREAM_TRUNCATED_FLAG),
-    "upstream_reset": (REPLAY_MISS_FLAG, UPSTREAM_ERROR_FLAG, STREAM_TRUNCATED_FLAG),
-    "reset_before_stream": (REPLAY_MISS_FLAG, UPSTREAM_ERROR_FLAG),
-    "gzip_bomb_stream": (REPLAY_MISS_FLAG, STREAM_TRUNCATED_FLAG),
+    "caller_disconnects": (Flag.REPLAY_MISS, Flag.UPSTREAM_ERROR, Flag.STREAM_TRUNCATED),
+    "upstream_reset": (Flag.REPLAY_MISS, Flag.UPSTREAM_ERROR, Flag.STREAM_TRUNCATED),
+    "reset_before_stream": (Flag.REPLAY_MISS, Flag.UPSTREAM_ERROR),
+    "gzip_bomb_stream": (Flag.REPLAY_MISS, Flag.STREAM_TRUNCATED),
 }
 
 
@@ -730,7 +724,7 @@ def test_a_stream_recorded_cut_is_never_served_and_goes_to_the_model_again(repla
     stream goes to the fake Anthropic again, while the embedding before it is the recording's."""
     recorded, replay = replayed(W, scenario, command=True)
     [cut] = [ex for ex in recorded.reported if ex.request.path == "/v1/messages"]
-    assert {STREAM_TRUNCATED_FLAG, UPSTREAM_ERROR_FLAG} & set(cut.flags)
+    assert {Flag.STREAM_TRUNCATED, Flag.UPSTREAM_ERROR} & set(cut.flags)
     [stream] = [ex for ex in replay.reported if ex.request.path == "/v1/messages"]
     assert (stream.answered_by, stream.flags) == ("live", CUT_STREAMS[scenario])
     assert [ex.answered_by for ex in replay.reported if ex.request.path == "/v1/embeddings"] == [
@@ -765,7 +759,7 @@ def test_replaying_one_of_two_lockstep_chats_leaves_the_other_waiting(run_workfl
             if ex.request.path == "/v1/messages" and (ex.answered_by == "live")
         ]
         # A miss whose upstream failed, and says both, as above.
-        assert (left.response, left.flags) == (None, (REPLAY_MISS_FLAG, UPSTREAM_ERROR_FLAG))
+        assert (left.response, left.flags) == (None, (Flag.REPLAY_MISS, Flag.UPSTREAM_ERROR))
         assert [r.path for r in replay.internet.requests()] == ["/v1/embeddings", "/v1/messages"]
         assert replay.internet.writes() == []
 

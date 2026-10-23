@@ -53,9 +53,10 @@ from dataclasses import dataclass
 from typing import Any, overload
 
 from irimi import paths, trace
+from irimi.limits import MAX_CAPTURED_BYTES
 from irimi.sdk import context, runs
 from irimi.sdk.api import check_name, label
-from irimi.sdk.capture import MAX_CAPTURED_BYTES, capture, capture_call, revive, serialized
+from irimi.sdk.capture import capture, capture_call, revive, serialized
 from irimi.sdk.client import LOGGER_NAME
 from irimi.sdk.errors import error_info, recorded_error
 from irimi.trace import STOPPED_ERROR_TYPES, TRUNCATED_KEY

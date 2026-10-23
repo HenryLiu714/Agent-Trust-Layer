@@ -714,7 +714,7 @@ def test_a_full_refund_replayed_unchanged_is_answered_from_its_recording(replaye
         ("llm#4", 200, "recording"),
     ]
     [refund] = [ex for ex in replay.reported if ex.kind == "write"]
-    assert refund.flags == ("fidelity:L1", "from-recording")
+    assert refund.flags == ("from-recording",)
     assert refund.precondition == "passed"
     # The refund's minted id is the recorded one, so every later call naming it matched.
     [recorded_refund] = [ex for ex in recorded.reported if ex.kind == "write"]
@@ -820,11 +820,11 @@ def test_a_full_refund_replayed_with_the_half_prompt_diverges_at_the_first_llm_c
         "real          llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]"
     )
     [refund] = [ex for ex in replay.reported if ex.kind == "write"]
-    assert refund.flags == ("fidelity:L1", "replay-miss")
+    assert refund.flags == ("replay-miss",)
     assert refund.precondition == "passed"
     [check] = [ex for ex in replay.reported if ex.issued_by == "engine"]
     assert (check.answered_by, check.request.path) == ("recording", "/v1/charges/ch_TICKET1")
-    assert check.flags == ("fidelity:recording", "from-recording")
+    assert check.flags == ("from-recording",)
     assert replay.internet.requests("api.stripe.com") == []
     assert len(replay.internet.requests("api.anthropic.com")) == 4
     assert f"  ○ stripe  refund $24.50 on ch_TICKET1  {PASSED}" in (replay.summaries())
@@ -1472,7 +1472,7 @@ def test_a_full_refund_replayed_with_its_tool_results_changed_diverges_mid_conve
     assert len(replay.internet.requests("api.anthropic.com")) == 3
     assert replay.internet.requests("api.stripe.com") == []
     [refund] = [ex for ex in replay.reported if ex.kind == "write"]
-    assert refund.flags == ("fidelity:L1", "from-recording")
+    assert refund.flags == ("from-recording",)
     assert replay.tools() == [(LOOKUP_TOOL, "recording"), (REPLY_TOOL, "shadow")]
     assert replay.returned() == recorded.returned()
     # What `irimi replay` says of it: where it diverged, the second model call, and exit 0, the
@@ -1501,8 +1501,8 @@ def test_a_retried_refund_replays_as_the_two_refunds_it_recorded(replayed):
     assert check_invariants(replay) == []
     refunds = [ex for ex in replay.reported if ex.kind == "write"]
     assert [ex.flags for ex in refunds] == [
-        ("fidelity:L1", "from-recording"),
-        ("fidelity:L1", "idempotent-replay", "from-recording"),
+        ("from-recording",),
+        ("idempotent-replay", "from-recording"),
     ]
     assert replay.internet.requests() == []
     assert replay.returned() == recorded.returned()
@@ -1561,7 +1561,7 @@ def test_a_verified_refund_replayed_unchanged_serves_the_overlaid_read_as_record
     ]
     [again] = [ex for ex in replay.reported if ex.answered_by == "overlay"]
     [recorded_again] = [ex for ex in recorded.reported if ex.answered_by == "overlay"]
-    assert again.flags == ("fidelity:overlay", "from-recording")
+    assert again.flags == ("from-recording",)
     assert again.response.body == recorded_again.response.body
     assert replay.internet.requests() == []
 
@@ -1583,7 +1583,7 @@ def test_a_replay_that_makes_no_refund_reads_live_where_its_recording_shows_one(
         ("llm#4", 200, None),
     ]
     first, second = [ex for ex in replay.reported if ex.request.path == "/v1/charges/ch_TICKET1"]
-    assert first.flags == ("fidelity:recording", "from-recording")
+    assert first.flags == ("from-recording",)
     assert (second.answered_by, second.flags) == ("live", ("replay-miss",))
     assert json.loads(second.response.body)["amount_refunded"] == 0
     assert [(r.method, r.path) for r in replay.internet.requests("api.stripe.com")] == [
@@ -1648,12 +1648,12 @@ def test_a_replay_that_adds_a_refund_reads_live_after_it_and_sees_it(replayed):
         ("llm#5", 200, None),
     ]
     [refund] = [ex for ex in replay.reported if ex.kind == "write"]
-    assert (refund.precondition, refund.flags) == ("not_evaluable", ("fidelity:L1", "replay-miss"))
+    assert (refund.precondition, refund.flags) == ("not_evaluable", ("replay-miss",))
     [check] = [ex for ex in replay.reported if ex.issued_by == "engine"]
     assert (check.answered_by, check.response, check.flags) == (
         "recording",
         None,
-        ("fidelity:recording", "replay-miss"),
+        ("replay-miss",),
     )
     # No read named a currency, so the amount is printed as minor units of an unknown currency.
     refund_line = (
@@ -1661,7 +1661,7 @@ def test_a_replay_that_adds_a_refund_reads_live_after_it_and_sees_it(replayed):
     )
     assert refund_line in replay.summaries()
     again = [ex for ex in replay.reported if ex.request.path == "/v1/charges/ch_TICKET1"][-1]
-    assert again.flags == ("replay-miss", "fidelity:overlay")
+    assert again.flags == ("replay-miss",)
     assert json.loads(again.response.body)["amount_refunded"] == 4900
     assert [(r.method, r.path) for r in replay.internet.requests("api.stripe.com")] == [
         ("GET", "/v1/charges/ch_TICKET1")
@@ -1710,9 +1710,9 @@ def test_a_lookup_recorded_after_a_refund_the_replay_has_not_made_runs_for_real_
     ]
     stripe = [(ex.answered_by, ex.flags) for ex in replay.reported if ex.kind != "llm"]
     assert stripe == [
-        ("recording", ("fidelity:recording", "from-recording")),
-        ("fake-L1", ("fidelity:L1", "from-recording")),
-        ("overlay", ("fidelity:overlay", "from-recording")),
+        ("recording", ("from-recording",)),
+        ("fake-L1", ("from-recording",)),
+        ("overlay", ("from-recording",)),
     ]
     assert replay.internet.requests("api.stripe.com") == []
     assert replay.returned() == recorded.returned()

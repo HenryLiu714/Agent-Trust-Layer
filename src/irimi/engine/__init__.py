@@ -20,26 +20,38 @@ class EngineStartError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class Shadow:
+    """`irimi shadow -- <cmd>`: one child process, whose run is the engine's own."""
+
+
+@dataclass(frozen=True)
+class Serve:
+    """`irimi serve`: no child process; each run is named by its requests' `Irimi-Run`."""
+
+
+@dataclass(frozen=True)
+class Replay:
+    """`irimi replay`: the engine's run is answered from the stored run `source_run_id`."""
+
+    source_run_id: str
+
+
+EngineMode = Shadow | Serve | Replay
+
+
+@dataclass(frozen=True)
 class EngineConfig:
-    run_id: str
+    run_id: str  # the run a request that names none belongs to
     ca: CAPaths
     confdir: Path
     listen_host: str
     listen_port: int  # 0 = pick a free port
     reverse_hosts: frozenset[str] = frozenset()  # hosts the reverse door may relay to; empty = none
     maps: MapIndex = field(default_factory=MapIndex)  # loaded service maps; empty = verb rule only
-    # `irimi shadow --serve`: no child process, runs named by their requests. Reported by the
-    # control endpoint's health answer.
-    serve: bool = False
-    # The stored run this engine answers from, as a replay: `cli._build_engine` builds a
-    # `ReplayPolicy` over it instead of a `ShadowPolicy`. None is shadow mode. `irimi replay`
-    # sets it.
-    replay_of: str | None = None
+    mode: EngineMode = Shadow()
 
 
 class Engine(Protocol):
-    config: EngineConfig
-
     async def run(self) -> None:
         """Serve until shutdown() is called. Must be awaited inside an event loop."""
         ...

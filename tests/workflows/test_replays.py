@@ -58,14 +58,7 @@ from examples.workflows.harness.run import (
 )
 from irimi import replay as irimi_replay
 from irimi.compare import ARGS_DIFFER
-from irimi.exchange import (
-    BODY_TRUNCATED_FLAG,
-    DECISION_FAILED_FLAG,
-    FROM_RECORDING_FLAG,
-    LIVE_KINDS,
-    REPLAY_MISS_FLAG,
-    TARGET_FAILED_FLAG,
-)
+from irimi.exchange import LIVE_KINDS, Flag
 from irimi.runner import NO_PROXY_VALUE
 from irimi.trace import ToolCall
 
@@ -403,8 +396,8 @@ def flag_problems(replay: Result) -> list[str]:
         for ex in replay.reported
         if ex.kind != "telemetry"
         and ex.answered_by != "delegated"
-        and TARGET_FAILED_FLAG not in ex.flags
-        and len({FROM_RECORDING_FLAG, REPLAY_MISS_FLAG} & set(ex.flags)) != 1
+        and Flag.TARGET_FAILED not in ex.flags
+        and len({Flag.FROM_RECORDING, Flag.REPLAY_MISS} & set(ex.flags)) != 1
     ]
 
 
@@ -465,7 +458,7 @@ def unaccounted(replay: Result, leaks: bool) -> list[str]:
         for ex in replay.reported
         if ex.answered_by in ("live", "overlay")
         and ex.kind in LIVE_KINDS
-        and (ex.kind == "telemetry" or REPLAY_MISS_FLAG in ex.flags)
+        and (ex.kind == "telemetry" or Flag.REPLAY_MISS in ex.flags)
     )
     around = set(NO_PROXY_VALUE.split(","))
     left = []
@@ -512,7 +505,7 @@ def test_every_run_of_every_scenario_replays_from_its_recording(
         lost = flag_problems(replay)
         if case in CUT_BEFORE_THE_POLICY:
             lost = [
-                x for x in lost if DECISION_FAILED_FLAG not in x or BODY_TRUNCATED_FLAG not in x
+                x for x in lost if Flag.DECISION_FAILED not in x or Flag.BODY_TRUNCATED not in x
             ]
         assert lost == [], r.run_id
         # 4. Every answer irimi decided reached the agent stamped as irimi recorded it.
@@ -536,7 +529,7 @@ def test_every_run_of_every_scenario_replays_from_its_recording(
             assert replay.internet.requests() == [], r.run_id
             # 7. And a recording its replay could answer whole is answered whole: nothing misses,
             # and the replay says so.
-            missed = [line(ex) for ex in replay.reported if REPLAY_MISS_FLAG in ex.flags]
+            missed = [line(ex) for ex in replay.reported if Flag.REPLAY_MISS in ex.flags]
             if not alone_differs:
                 assert missed == [], r.run_id
             # A read tool run for real is a miss too, which a scenario's table names.

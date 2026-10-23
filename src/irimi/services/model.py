@@ -13,6 +13,13 @@ from typing import Any, Protocol
 from irimi.exchange import Request
 from irimi.servicemap import Route
 
+# Fields of a fixture object the service owns, which the request may therefore never write over.
+# `id` is here as well as in every route's `ids:`, because a body posting `object=charge` to a
+# refund route would otherwise hand stripe-python the wrong class to build, and `created` and
+# `livemode` are facts about this answer rather than values the caller gets to choose.
+# The read side keeps the same rule: `services.stripe.effects._customer` may not move one.
+SERVICE_OWNED: frozenset[str] = frozenset({"id", "object", "created", "livemode"})
+
 
 @dataclass(frozen=True)
 class Write:
@@ -119,7 +126,7 @@ class Rejection:
 class Idempotency:
     """How a service lets a caller say "this is the same write I already sent".
 
-    `header` is the request header the caller puts the key in, lower-case as `pipeline.parse`
+    `header` is the request header the caller puts the key in, lower-case as `wire.parse`
     normalizes it. `conflict` is what the service answers when that key comes back with different
     parameters - a `Rejection` like any other, so the SDK raises its own error rather than choking
     on something of irimi's. `replayed_header` is the `(name, value)` the service puts on the

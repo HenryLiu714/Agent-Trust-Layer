@@ -10,12 +10,12 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
 from irimi import paths
+from irimi.files import DIR_MODE, FILE_MODE, private_dir, write_private
 
 CA_COMMON_NAME = "irimi local CA"
 CA_VALID_DAYS = 3650
-KEY_MODE = 0o600
+KEY_MODE = FILE_MODE
 CERT_MODE = 0o644
-DIR_MODE = 0o700
 
 
 @dataclass(frozen=True)
@@ -91,30 +91,17 @@ def generate_ca(p: CAPaths) -> None:
     )
     cert_pem = cert.public_bytes(serialization.Encoding.PEM)
 
-    p.key.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(p.key.parent, DIR_MODE)
-    _write_with_mode(p.key, key_pem, KEY_MODE)
-    _write_with_mode(p.cert, cert_pem, CERT_MODE)
-
-
-def _write_with_mode(path: Path, data: bytes, mode: int) -> None:
-    """Create-or-truncate `path` with `mode`, never leaving it world-readable in between.
-
-    Refuses to follow a symlink at `path`, and fixes the mode on the open descriptor
-    before any bytes are written (O_CREAT's mode is subject to umask and ignored when
-    the file already exists).
-    """
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, mode)
-    with os.fdopen(fd, "wb") as f:
-        os.fchmod(fd, mode)
-        f.write(data)
+    private_dir(p.key.parent)
+    os.chmod(p.key.parent, DIR_MODE)  # an existing directory too
+    write_private(p.key, key_pem, mode=KEY_MODE)
+    write_private(p.cert, cert_pem, mode=CERT_MODE)
 
 
 def write_mitm_bundle(p: CAPaths, confdir: Path) -> Path:
     """Write <confdir>/mitmproxy-ca.pem = CA key + CA cert (mode 0600), the file mitmproxy's
     TlsConfig loads to mint per-host leaf certs. Always rewritten so `init --force` is picked up."""
     bundle = confdir / paths.MITM_CA_BUNDLE_NAME
-    confdir.mkdir(parents=True, exist_ok=True)
-    os.chmod(confdir, DIR_MODE)
-    _write_with_mode(bundle, p.key.read_bytes() + p.cert.read_bytes(), KEY_MODE)
+    private_dir(confdir)
+    os.chmod(confdir, DIR_MODE)  # an existing directory too
+    write_private(bundle, p.key.read_bytes() + p.cert.read_bytes(), mode=KEY_MODE)
     return bundle

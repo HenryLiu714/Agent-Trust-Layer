@@ -62,9 +62,9 @@ the first column of each field table below is exactly the keys its encoder write
   takes no lock.
 - Everything under the root is private to its owner: directories `0700`, files `0600`. Redaction
   hides credentials, not the customers, amounts and messages around them.
-- A body over 8 MiB (`store.MAX_STORED_BODY`) is redacted whole, then cut: its first 8 MiB are
+- A body over 8 MiB (`limits.MAX_STORED_BODY`) is redacted whole, then cut: its first 8 MiB are
   stored, its ref says `truncated: true`, and its exchange carries `body-truncated`. A body over
-  64 MiB (`store.MAX_REDACTED_BODY`) is not stored at all: its exchange is stored with that body
+  64 MiB (`limits.MAX_REDACTED_BODY`) is not stored at all: its exchange is stored with that body
   empty and carries `body-truncated`. So a stored body is always a prefix of the whole body after
   redaction, never half a secret - an empty one when it was too big to redact - and
   `body-truncated` says when it is not the whole. A streamed body's `stream_chunks` are cut with
@@ -72,7 +72,7 @@ the first column of each field table below is exactly the keys its encoder write
 - **A streamed response** (`text/event-stream`) is recorded as the chunks the agent was sent,
   joined, with each chunk's length in `stream_chunks` (#71). The engine keeps at most 8 MiB of a
   stream: the agent still gets every chunk after that, and the exchange carries `stream-truncated`
-  (`exchange.STREAM_TRUNCATED_FLAG`). It carries that flag too when the stream ended in an error -
+  (`exchange.Flag.STREAM_TRUNCATED`). It carries that flag too when the stream ended in an error -
   an upstream reset, an agent that hung up - and then its response holds what arrived before it.
   **A stream that is not whole is recorded up to its last complete line**, so a cut never leaves
   half a character (which would make the body unreadable to redaction) or half a secret. A stream
@@ -81,7 +81,7 @@ the first column of each field table below is exactly the keys its encoder write
   empty and flagged `stream-truncated`, never compressed.
   An upstream that ends its stream by closing the connection, with no chunked framing or length,
   cannot be told apart from one that reset it: such a stream is recorded whole and unflagged.
-- **A body is decoded only up to 64 MiB** (`mitm.MAX_DECODED_BODY`, #94). A few KB of gzip, br or
+- **A body is decoded only up to 64 MiB** (`limits.MAX_DECODED_BODY`, #94). A few KB of gzip, br or
   zstd can decode to gigabytes, so each codec stops there. A body cut there is never redacted
   whole, so it is recorded empty, as a body over 64 MiB always is, and its exchange carries
   `body-truncated`: the start of a JSON document is not JSON, and redaction would read it line by
@@ -154,9 +154,9 @@ Redaction is always on; there is no switch and no per-repo rule in Phase 3.
   key across either cut is stored as its own placeholder, or the part of that placeholder the cut
   keeps, and never as part of the key (#179). The control endpoint hands the store a posted error
   whole, and the SDK posts an exception's message whole, up to 65,536 characters
-  (`trace.MAX_POSTED_MESSAGE`), and its type up to 1200 (`trace.MAX_POSTED_TYPE`). A run's end
+  (`limits.MAX_POSTED_MESSAGE`), and its type up to 1200 (`limits.MAX_POSTED_TYPE`). A run's end
   waits for the writer with its type and message each cut outside secrets (below) to 4000
-  characters (`store.MAX_QUEUED_ERROR`), so it costs the store's byte budget nothing and is never
+  characters (`limits.MAX_QUEUED_ERROR`), so it costs the store's byte budget nothing and is never
   dropped by it.
 - **A cut made before redaction is made outside secrets.** Nothing that cuts before the store
   redacts can redact, so a trigger's name (1000 characters) and a captured `repr` (1000), cut by
@@ -221,8 +221,8 @@ A **trigger** (`trace.Trigger`):
 | `replayable` | boolean | Whether `args` captured everything needed to call `entrypoint` again. |
 
 An **error** (`trace.ErrorInfo`) is `{"type": string, "message": string}`. `type` is the
-exception's `module.qualname`, at most 300 characters (`trace.MAX_ERROR_TYPE`, #99), and
-`message` is at most 1000 (`trace.MAX_ERROR_MESSAGE`). The store cuts both, each once it has
+exception's `module.qualname`, at most 300 characters (`limits.MAX_ERROR_TYPE`, #99), and
+`message` is at most 1000 (`limits.MAX_ERROR_MESSAGE`). The store cuts both, each once it has
 redacted the whole of it (see Redaction, #179).
 
 ### Captured arguments
@@ -289,14 +289,13 @@ names:
 | --- | --- | --- |
 | `run_id` | string | The run it belongs to. |
 | `service` | string | The service its map names, or its host when no map claims it. |
-| `operation` | string | The route's operation (`refunds.create`), or `METHOD /path` when no route matched. `""` when irimi refused a request it could not parse, flagged `refused`, or its classify/answer decision itself failed, flagged `decision-failed` (`pipeline.unclassified`). |
+| `operation` | string | The route's operation (`refunds.create`), or `METHOD /path` when no route matched. `""` when irimi refused a request it could not parse, flagged `refused`, or its classify/answer decision itself failed, flagged `decision-failed` (`classify.unclassified`). |
 | `kind` | `read`, `write`, `llm`, `telemetry`, `unknown` | What the classifier said it is. |
 | `answered_by` | `live`, `fake-L0`, `fake-L1`, `delegated`, `overlay`, `recording`, `irimi` | Who produced the response the agent got. `irimi` (v3) is an error irimi answered with itself, as JSON `{"error": {"type", "message"}}`, and its flags say why: `refused`, `decision-failed` or `target-failed`. `recording` (v2, #82) is an answer the service gave a stored run, which a replay sent again: a read, an llm call, or a precondition read. Anything else a replay answers from the stored run keeps the value it was recorded with, and every such exchange is flagged `from-recording`. |
-| `validation` | `validated`, `unvalidated` | Always `unvalidated` in Phase 3. |
 | `door` | `forward`, `reverse` | Which door it came in by. |
 | `issued_by` | `agent`, `engine` | `engine` is a read irimi made on its own account, the L3 precondition read. |
 | `target` | string | The address of the answer target a `delegated` exchange was pointed at, or the one an `irimi` exchange flagged `target-failed` could not reach or apply. `""` otherwise. |
-| `flags` | list of strings | Facts about this exchange, each from the list in `exchange.py`. |
+| `flags` | list of strings | Facts about this exchange, each a value of `exchange.Flag`. |
 | `overlay` | `full`, `partial` or `null` | How much of the run's faked writes the overlay could show in this read. `null` when it did not consider it. |
 | `precondition` | `passed`, `rejected`, `not_evaluable` or `null` | What L3 said about this write before it was faked. `null` when nothing was asked. |
 | `rejection_code` | string | The service's code for an L3 rejection. `""` otherwise. |
@@ -319,7 +318,7 @@ A **request** is `method`, `scheme`, `host`, `port` (integer), `path`, `query` (
   `size` is the stored length. `truncated` says the stored bytes are only the start of the body.
 - The decoder hands the whole ref to the store's `get_body`, but a decoded `Exchange` carries only
   the bytes it returns: `size` and `truncated` do not survive decoding. So the store that cuts a
-  body also flags its exchange `body-truncated` (`exchange.BODY_TRUNCATED_FLAG`, #70).
+  body also flags its exchange `body-truncated` (`exchange.Flag.BODY_TRUNCATED`, #70).
 
 **A `tool_call`** (`trace.ToolCall`) is a tool call the proxy cannot see, reported by the SDK.
 
@@ -428,13 +427,14 @@ sample workflows hold every scenario to that (`tests/workflows/test_stored_runs.
   `replay_of` to the run record. A version 1 run reads under it unchanged.
 - **Version 3** added `irimi` to `answered_by`. A version 2 run reads under it unchanged; there,
   irimi's own errors are recorded as `fake-L0` flagged `decision-failed`, or `delegated` flagged
-  `target-failed`.
+  `target-failed`. An exchange no longer has a `validation` field or `fidelity:*` flags; a reader
+  ignores both in an older run.
 - **These are version bumps:** removing or renaming a field, changing its type or what it means,
   and adding a value to a closed vocabulary: `mode`, `attribution`, `outcome`, `kind`, `ran`,
-  `answered_by`, `validation`, `door`, `issued_by`, `overlay`, `precondition`, and an event's
+  `answered_by`, `door`, `issued_by`, `overlay`, `precondition`, and an event's
   `type`. An older reader refuses a vocabulary value it does not know, rather than reading a new
   mode as an old one.
-- `flags` is open: a reader accepts a flag it does not know. `would_fire` is open too, since its
+- `flags` is open: a reader skips a flag it does not know. `would_fire` is open too, since its
   values are event names from a service map.
 - A record that is not a JSON object, lacks a required field, or holds a value of the wrong type,
   outside a closed vocabulary or not finite is a `TraceFormatError`. No decoder raises anything
@@ -491,7 +491,6 @@ finished before it:
   "operation": "charges.retrieve",
   "kind": "read",
   "answered_by": "live",
-  "validation": "unvalidated",
   "door": "forward",
   "issued_by": "engine",
   "target": "",
@@ -540,11 +539,10 @@ The agent's refund, faked at L1 after the check passed:
   "operation": "refunds.create",
   "kind": "write",
   "answered_by": "fake-L1",
-  "validation": "unvalidated",
   "door": "reverse",
   "issued_by": "agent",
   "target": "",
-  "flags": ["fidelity:L1"],
+  "flags": [],
   "overlay": null,
   "precondition": "passed",
   "rejection_code": "",

@@ -16,6 +16,7 @@ import yaml
 
 from irimi import paths
 from irimi.exchange import ANY_METHOD, KINDS, LIVE_KINDS, Kind
+from irimi.netaddr import Target, default_port
 from irimi.servicemap.model import (
     CREDENTIAL_PATH_HOSTS,
     DEFAULT_KINDS,
@@ -232,8 +233,10 @@ def apply_overrides(maps: list[ServiceMap], path: Path) -> list[ServiceMap]:
                 )
             routes[index] = replace(
                 routes[index],
-                target=_parse_target(
-                    raw.get("target", routes[index].target), f"{source}: `target`"
+                target=(
+                    _parse_target(raw["target"], f"{source}: `target`")
+                    if "target" in raw
+                    else routes[index].target
                 ),
                 forward_auth=_parse_bool(
                     raw.get("forward_auth", routes[index].forward_auth),
@@ -243,7 +246,11 @@ def apply_overrides(maps: list[ServiceMap], path: Path) -> list[ServiceMap]:
         by_name[name] = replace(
             base,
             routes=tuple(routes),
-            target=_parse_target(doc.get("target", base.target), f"{source}: `target`"),
+            target=(
+                _parse_target(doc["target"], f"{source}: `target`")
+                if "target" in doc
+                else base.target
+            ),
             target_reads=_parse_bool(
                 doc.get("target_reads", base.target_reads), f"{source}: `target_reads`"
             ),
@@ -506,8 +513,9 @@ def _parse_default_kind(raw: Any, where: str) -> Kind | None:
     return kind
 
 
-def _parse_target(raw: Any, where: str) -> str:
-    """`self`, or an http(s) origin with an optional path. Query, fragment and userinfo are out.
+def _parse_target(raw: Any, where: str) -> Target | None:
+    """None for `self`, or an http(s) origin with an optional path. Query, fragment and userinfo
+    are out.
 
     Every target reaches this function - shipped map, overrides file and `--target` alike - so it
     is the one place a malformed URL may turn into a MapError. Both `urlsplit` and its `.port`
@@ -517,7 +525,7 @@ def _parse_target(raw: Any, where: str) -> str:
     """
     target = _parse_str(raw, where).strip()
     if target == SELF_TARGET:
-        return target
+        return None
     try:
         parts = urlsplit(target)
         port = parts.port
@@ -537,7 +545,9 @@ def _parse_target(raw: Any, where: str) -> str:
             f"{where}: {target!r} must be a scheme, host, port and path only, with no "
             "query, fragment or credentials"
         )
-    return target.rstrip("/") if parts.path in ("", "/") else target
+    scheme, host = parts.scheme, parts.hostname.lower()
+    path = "" if parts.path in ("", "/") else parts.path
+    return Target(scheme, host, port if port is not None else default_port(scheme), path)
 
 
 def _require_name(raw: Any, where: str) -> str:

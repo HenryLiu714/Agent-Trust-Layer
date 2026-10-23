@@ -15,7 +15,7 @@ if TYPE_CHECKING:  # the quoted annotations below; no runtime import
 
     from irimi.ca import CAPaths
     from irimi.control import OnToolCall
-    from irimi.engine import Engine, EngineConfig, OnExchange, OnTlsFailure
+    from irimi.engine import Engine, EngineConfig, EngineMode, OnExchange, OnTlsFailure
     from irimi.exchange import Exchange
     from irimi.idempotency import Store as IdempotencyStore
     from irimi.recording import Recording
@@ -215,17 +215,14 @@ def _engine_config(
     index: "MapIndex",
     run_id: str,
     ca_paths: "CAPaths",
-    *,
-    serve: bool = False,
-    replay_of: str | None = None,
+    mode: "EngineMode | None" = None,
 ) -> "EngineConfig":
-    """The EngineConfig `serve`, `shadow` and `replay` share. `replay_of` is the stored run a
-    replay answers from.
+    """The EngineConfig `serve`, `shadow` and `replay` share; `mode` is `Shadow()` when None.
 
     `maps=index` is what makes the classifier use the maps: without it the engine falls back to the
     verb rule and every mapped write on a POST-only service reads as `unknown`.
     """
-    from irimi.engine import EngineConfig
+    from irimi.engine import EngineConfig, Shadow
 
     return EngineConfig(
         run_id=run_id,
@@ -235,8 +232,7 @@ def _engine_config(
         listen_port=args.port,
         reverse_hosts=_reverse_hosts(args, index),
         maps=index,
-        serve=serve,
-        replay_of=replay_of,
+        mode=Shadow() if mode is None else mode,
     )
 
 
@@ -269,7 +265,7 @@ def _load_maps(args: argparse.Namespace | None = None) -> "MapIndex | None":
         if port:
             for sm in index.services:
                 for target in (sm.target, *(r.target for r in sm.routes)):
-                    if target != servicemap.SELF_TARGET:
+                    if target is not None:
                         delegation.refuse_self_target(target, port, listen_host)
         return index
     except (servicemap.MapError, delegation.TargetRefused) as exc:
@@ -346,14 +342,14 @@ def cmd_maps_list(args: argparse.Namespace) -> int:
         reads = " + reads" if sm.target_reads else ""
         print(
             f"  {name:<{width}}  {sm.service:<{service_width}}  {len(sm.routes):>3} routes  "
-            f"target: {sm.target}{reads}"
+            f"target: {servicemap.SELF_TARGET if sm.target is None else sm.target.url}{reads}"
         )
         # A service whose *routes* carry targets still says `target: self` in the column above,
         # so each route target gets a line of its own under the host: the column is the
         # service's answer and this is the route's.
         for route in sm.routes:
-            if route.target != servicemap.SELF_TARGET:
-                print(f"  {'':<{width}}  route {route.method} {route.path} -> {route.target}")
+            if route.target is not None:
+                print(f"  {'':<{width}}  route {route.method} {route.path} -> {route.target.url}")
     override = servicemap.override_path()
     if override is not None:
         print(f"  overrides from {override}")
@@ -409,7 +405,7 @@ class _Run:
     store: "TraceStore"
     # The store's `serve.lock`, held, in serve mode only.
     lock: "ServeLock | None" = None
-    # The run `config.replay_of` names, read back to answer from, in a replay only.
+    # The run a `Replay` mode names, read back to answer from, in a replay only.
     recording: "Recording | None" = None
     # Each run's faked writes, dropped as the store reports the run ended. None: the engine
     # keeps its own, and nothing ends its runs.
@@ -442,6 +438,7 @@ def _prepare_run(
     nothing.
     """
     from irimi import ca, idempotency, trace
+    from irimi.engine import EngineMode, Replay, Serve, Shadow
     from irimi.writelog import WriteLog
 
     index = _load_maps(args)
@@ -457,8 +454,12 @@ def _prepare_run(
     # serve mode is many runs at once, and `irimi serve` has no run to replay.
     assert not (serve and source is not None)
     run_id = trace.UNATTRIBUTED if serve else secrets.token_hex(8)
-    replay_of = None if source is None else source.record.run_id
-    config = _engine_config(args, index, run_id, p, serve=serve, replay_of=replay_of)
+    mode: EngineMode = Shadow()
+    if serve:
+        mode = Serve()
+    elif source is not None:
+        mode = Replay(source.record.run_id)
+    config = _engine_config(args, index, run_id, p, mode)
     key = _redaction_key()
     if key is None:
         return None
@@ -478,7 +479,7 @@ def _prepare_run(
         if on_run_ended is not None:
             on_run_ended(index, run_id)
 
-    store = _open_store(args, key, ended, config.replay_of)
+    store = _open_store(args, key, ended, _replayed_run(config.mode))
     if store is None:
         return None
     lock = _hold_serve_lock(args) if serve else None
@@ -486,6 +487,13 @@ def _prepare_run(
         _close_store(store)
         return None
     return _Run(index, p, run_id, config, store, lock, recording, write_log, keys)
+
+
+def _replayed_run(mode: "EngineMode") -> str | None:
+    """The stored run a replay answers from, or None when `mode` is no replay."""
+    from irimi.engine import Replay
+
+    return mode.source_run_id if isinstance(mode, Replay) else None
 
 
 def _redaction_key() -> bytes | None:
@@ -566,7 +574,10 @@ def _build_engine(
     on_tool_call: "OnToolCall | None" = None,
     on_tls_failure: "OnTlsFailure | None" = None,
 ) -> "Engine":
-    """Wire the engine, answer policy, overlay and store for one run."""
+    """Wire the engine, answer policy, overlay, control endpoint and store for one run. The store
+    is the run's, and the caller closes it once the engine has stopped."""
+    from irimi.control import ControlEndpoint
+    from irimi.engine import Serve
     from irimi.engine.mitm import MitmEngine
     from irimi.overlay import ServiceOverlay
     from irimi.policy import AnswerPolicy, ReplayPolicy, ShadowPolicy
@@ -584,13 +595,22 @@ def _build_engine(
         # A replay's reader is the recording, which the policy builds itself: it never reads live
         # state for a precondition.
         policy = ReplayPolicy(run.recording, maps=run.config.maps, keys=run.keys)
+    # The policy that decides the wire answers the SDK's read tools too: from a replay's
+    # recording, or from nothing.
+    control = ControlEndpoint(
+        run.store,
+        serve=isinstance(run.config.mode, Serve),
+        process_run=run.config.run_id,
+        on_tool_call=on_tool_call,
+        policy=policy,
+    )
     return MitmEngine(
         run.config,
         policy,
         run.store,
         overlay,
         on_exchange=on_exchange,
-        on_tool_call=on_tool_call,
+        control=control,
         write_log=run.write_log,
         on_tls_failure=on_tls_failure,
     )
@@ -1031,9 +1051,9 @@ def _under_the_engine(args: argparse.Namespace, run: _Run, child: _Child, launch
     cmd = launch.argv
     try:
         host, port = run.config.listen_host, handle.port()
-        replay_of = run.config.replay_of
+        replaying = _replayed_run(run.config.mode)
         print_startup(
-            launch.banner, args, run.index, run.run_id, host, port, run.ca.cert, replay_of
+            launch.banner, args, run.index, run.run_id, host, port, run.ca.cert, replaying
         )
         env = runner.child_env(
             dict(os.environ),
@@ -1041,7 +1061,7 @@ def _under_the_engine(args: argparse.Namespace, run: _Run, child: _Child, launch
             port,
             run.ca.cert,
             run.run_id,
-            replaying=replay_of is not None,
+            replaying=replaying is not None,
             call=launch.call,
         )
         if child.terminated:  # SIGTERM while irimi started: the command is never run
@@ -1073,7 +1093,7 @@ def _under_the_engine(args: argparse.Namespace, run: _Run, child: _Child, launch
     except KeyboardInterrupt:  # Ctrl-C outside _wait_for_child's own handling
         ran.code = ran.stopped = SIGINT_EXIT_CODE
     finally:
-        # The run ends before the engine stops, because stopping the engine closes the store.
+        # The run ends before the store closes, below, once the engine has stopped.
         # An exchange that finishes after this line is still recorded: a late event is not an
         # error.
         if ran.stored:
@@ -1525,10 +1545,9 @@ def _maps_for_stored_runs() -> "MapIndex | None":
 def _close_store(store: "TraceStore") -> None:
     """Close the store `_prepare_run` opened, on every path out of `serve` and `shadow`.
 
-    The engine closes it too, when it stops. This does not rely on that: an engine that never
-    started, or whose thread outlived `handle.stop()`, has not, and a second close waits out the
-    first. An impatient Ctrl-C here, as in `handle.stop()`, may cut the writer's last seconds
-    short, and never costs the summary."""
+    The engine never closes it: the composition root opened it, so it closes it, once the engine
+    has stopped. An impatient Ctrl-C here, as in `handle.stop()`, may cut the writer's last
+    seconds short, and never costs the summary."""
     try:
         store.close()
     except KeyboardInterrupt:

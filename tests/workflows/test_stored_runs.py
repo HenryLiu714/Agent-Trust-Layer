@@ -23,10 +23,11 @@ import pytest
 import irimi
 from examples.workflows.harness.run import CANARIES, TOOL_WRITE, Result, serve_cases, workflows
 from examples.workflows.w10_flaky_upstream.scenarios import CONTROL_DOWN
-from irimi import paths, redact, report, trace
-from irimi.exchange import BODY_TRUNCATED_FLAG, Exchange
+from irimi import exchange, paths, redact, report, trace
+from irimi.exchange import Exchange, Flag
+from irimi.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE
 from irimi.store import SERVE_LOCK_FILE, StoredRun, header_record
-from irimi.trace import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE, ErrorInfo, TelemetrySeen, ToolCall
+from irimi.trace import ErrorInfo, TelemetrySeen, ToolCall
 
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
 IDS = [f"{n}:{s}" for n, s in CASES]
@@ -571,9 +572,9 @@ def test_irimi_compare_of_every_stored_run_with_itself_is_its_summary_s_writes(
             continue
         # Whether each HTTP write the summary printed, in `seq` order, was stored cut.
         cut = [
-            BODY_TRUNCATED_FLAG in e.flags
+            Flag.BODY_TRUNCATED in e.flags
             for e in reader.load_run(run_id, bodies=False).events
-            if isinstance(e, Exchange) and report.is_intercepted(e)
+            if isinstance(e, Exchange) and exchange.is_intercepted(e)
         ]
         code, out, err = shadow.compare_runs(run_id, run_id)
         assert (code, err) == (1 if any(cut) else 0, []), run_id
@@ -631,15 +632,15 @@ def test_the_corpus_gives_irimi_compare_s_universal_check_something_to_catch(run
             actions = [
                 e
                 for e in events
-                if (isinstance(e, Exchange) and report.is_intercepted(e))
-                or (isinstance(e, ToolCall) and report.is_stood_in(e))
+                if (isinstance(e, Exchange) and exchange.is_intercepted(e))
+                or (isinstance(e, ToolCall) and exchange.fake_ran(e))
             ]
             writes = [e for e in actions if isinstance(e, Exchange)]
             kinds = [isinstance(e, ToolCall) for e in actions]
             seen["answered"] += any(e.precondition != "rejected" for e in writes)
             seen["would fail"] += any(e.precondition == "rejected" for e in writes)
             seen["stood in"] += any(kinds)
-            seen["cut"] += any(BODY_TRUNCATED_FLAG in e.flags for e in writes)
+            seen["cut"] += any(Flag.BODY_TRUNCATED in e.flags for e in writes)
             seen["interleaved"] += kinds != sorted(kinds)
             seen["unattributed"] += run_id == trace.UNATTRIBUTED and bool(actions)
     expected = ["answered", "would fail", "stood in", "cut", "interleaved"]

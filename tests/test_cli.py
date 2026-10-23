@@ -8,6 +8,8 @@ import pytest
 
 from irimi import __version__, ca, cli, paths, report, servicemap
 from irimi.cli import BROKEN_PIPE_EXIT_CODE, main
+from irimi.engine import Replay, Serve, Shadow
+from irimi.netaddr import Target
 
 
 def test_version_flag(capsys):
@@ -180,8 +182,8 @@ def test_engine_config_carries_the_maps():
     assert cfg.maps is index
     assert cfg.reverse_hosts == index.hosts
     assert (cfg.run_id, cfg.listen_host, cfg.listen_port) == ("t3st", "0.0.0.0", 4321)
-    assert cfg.serve is False
-    assert _engine_config(args, index, "t3st", ca.ca_paths(), serve=True).serve is True
+    assert cfg.mode == Shadow()
+    assert _engine_config(args, index, "t3st", ca.ca_paths(), Serve()).mode == Serve()
     for command in (["serve"], ["shadow", "--", "true"]):
         assert build_parser().parse_args(command).listen_host == paths.LISTEN_HOST
 
@@ -221,7 +223,7 @@ def test_the_composition_root_builds_a_replay_policy_over_the_run_s_recording():
     config = cli._engine_config(args, index, "t3st", p)
     recording = Recording.from_events([], b"k" * 32, index)
     run = cli._Run(
-        index, p, "t3st", replace(config, replay_of="rec1"), NullStore(), None, recording
+        index, p, "t3st", replace(config, mode=Replay("rec1")), NullStore(), None, recording
     )
     engine = cli._build_engine(run, on_exchange=lambda ex: None)
     assert isinstance(engine.policy, ReplayPolicy)
@@ -271,7 +273,6 @@ def test_a_replay_of_a_damaged_run_starts_nothing(tmp_path, monkeypatch, capsys,
             operation="charges.retrieve",
             kind="read",
             answered_by="live",
-            validation="unvalidated",
             run_id="rec1",
         )
     )
@@ -410,7 +411,7 @@ def test_a_trailing_slash_on_the_host_is_the_service_target():
 
     index = servicemap.load(targets=[_target_arg("api.stripe.com/=http://127.0.0.1:3000")])
     stripe = index.service_for("api.stripe.com")
-    assert stripe is not None and stripe.target == "http://127.0.0.1:3000"
+    assert stripe is not None and stripe.target.url == "http://127.0.0.1:3000"
 
 
 @pytest.mark.parametrize(
@@ -532,7 +533,10 @@ class _PipedStdout(io.StringIO):
 
 def _delegated_service(target: str):
     return servicemap.ServiceMap(
-        service="stripe", hosts=frozenset({"api.stripe.com"}), routes=(), target=target
+        service="stripe",
+        hosts=frozenset({"api.stripe.com"}),
+        routes=(),
+        target=Target.parse(target),
     )
 
 

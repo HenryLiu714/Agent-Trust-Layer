@@ -1,7 +1,7 @@
 """The service map model: routes, services, the host index, matching and the target precedence.
 
 Pure data and pure functions. Loading is `loader`, validation is `rules`; this module imports
-neither, so the engine's hot path (`pipeline.classify` -> `MapIndex.route_for`) depends on nothing
+neither, so the engine's hot path (`classify.classify` -> `MapIndex.route_for`) depends on nothing
 that reads a file.
 """
 
@@ -10,7 +10,9 @@ from typing import Literal
 from urllib.parse import unquote
 
 from irimi.exchange import ANY_METHOD, KINDS, LIVE_KINDS, Kind
+from irimi.netaddr import Target
 
+# How a map spells "irimi answers this itself": a target of None.
 SELF_TARGET = "self"
 
 # Hosts whose request path is the credential: every path on hooks.slack.com is a webhook secret. A
@@ -76,7 +78,7 @@ class Route:
     compare_ignores: tuple[str, ...] = ()
     # Why a live route may be forwarded on an unsafe method: what makes it persist nothing.
     live_because: str = ""
-    target: str = SELF_TARGET
+    target: Target | None = None  # None: irimi answers it
     forward_auth: bool = False
 
 
@@ -89,7 +91,7 @@ class ServiceMap:
     routes: tuple[Route, ...]
     style: Style = "rest"
     default_kind: Kind | None = None  # the kind for routes this map does not list; None = fallback
-    target: str = SELF_TARGET
+    target: Target | None = None  # None: irimi answers the service itself
     target_reads: bool = False
     # Hosts of this service whose path is the credential, beyond `CREDENTIAL_PATH_HOSTS`.
     credential_path_hosts: frozenset[str] = frozenset()
@@ -253,26 +255,26 @@ def fill_path(pattern: str, params: dict[str, str]) -> str | None:
     return "/" + "/".join(parts) + ("/" if pattern.endswith("/") and parts else "")
 
 
-def target_for(sm: ServiceMap, route: Route) -> str:
-    """The target that answers this route: `self`, or the URL that answers it instead.
+def target_for(sm: ServiceMap, route: Route) -> Target | None:
+    """The target that answers this route instead of irimi, or None when irimi answers it.
 
     A route's own target wins. Otherwise the service target applies to `write` and `unknown`
     routes, and to `read` routes only when the service sets `target_reads: true`. `llm` and
     `telemetry` are always forwarded live and are never targeted. A route cannot opt back out of
     a service target.
     """
-    if route.target != SELF_TARGET:
+    if route.target is not None:
         return route.target
     if route.kind in TARGETABLE_KINDS:
         return sm.target
     if route.kind == "read" and sm.target_reads:
         return sm.target
-    return SELF_TARGET
+    return None
 
 
 def is_delegated(sm: ServiceMap) -> bool:
     """True when this service has a target at all, so the summary and banner must say so."""
-    return sm.target != SELF_TARGET or any(r.target != SELF_TARGET for r in sm.routes)
+    return sm.target is not None or any(r.target is not None for r in sm.routes)
 
 
 def is_pattern(host: str) -> bool:

@@ -20,7 +20,7 @@ from typing import Any, get_args
 
 import pytest
 
-from irimi import ca, exchange, paths, report, sdk, servicemap, trace
+from irimi import ca, exchange, limits, paths, report, sdk, servicemap, trace
 from irimi.cli import main
 from irimi.sdk import capture, client, runs, tools
 from irimi.store import StoreReader
@@ -729,19 +729,19 @@ def test_the_client_posts_exactly_the_endpoints_run_actions():
 
 
 def test_a_tool_name_is_cut_to_the_run_name_limit(posted):
-    @sdk.read_tool(name="n" * (runs.MAX_NAME + 5))
+    @sdk.read_tool(name="n" * (limits.MAX_NAME + 5))
     def long_named() -> None:
         return None
 
     long_named()
     [(_, _, doc)] = posted.posts
-    assert doc["name"] == "n" * runs.MAX_NAME
+    assert doc["name"] == "n" * limits.MAX_NAME
 
 
 def test_a_long_tool_name_is_cut_outside_secrets_so_it_keeps_no_part_of_a_key(posted):
     """A tool's name is cut before irimi redacts it, as a run's is: a key straddling the cut is
     left out whole rather than kept in part, too short for its shape to be redacted."""
-    head = "n" * (runs.MAX_NAME - 10) + " "
+    head = "n" * (limits.MAX_NAME - 10) + " "
 
     @sdk.read_tool(name=head + "ghp_" + "k" * 36)
     def keyed() -> None:

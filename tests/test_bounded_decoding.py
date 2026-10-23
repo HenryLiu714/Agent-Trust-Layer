@@ -2,7 +2,7 @@
 
 irimi records bodies decoded, so that redaction reads text and not gzip. A few KB of gzip, br or
 zstd can decode to gigabytes, and a hook that decoded it whole stalled every flow behind it and
-could exhaust memory. Each codec now runs incrementally and stops at `mitm.MAX_DECODED_BODY`. A
+could exhaust memory. Each codec now runs incrementally and stops at `decoding.MAX_DECODED_BODY`. A
 body cut there is recorded empty, a stream as its start in whole lines, and the exchange is
 flagged, while whatever irimi forwards still carries every byte it was sent.
 
@@ -30,18 +30,10 @@ from mitmproxy.test import tutils
 
 from irimi import control
 from irimi.control import MAX_CONTROL_BODY, ControlEndpoint
-from irimi.engine import mitm
-from irimi.exchange import (
-    BODY_TRUNCATED_FLAG,
-    DECISION_FAILED_FLAG,
-    FIDELITY_DELEGATED_FLAG,
-    STREAM_TRUNCATED_FLAG,
-    UNCLASSIFIED_FLAG,
-    UPSTREAM_ERROR_FLAG,
-    Exchange,
-    Request,
-    Response,
-)
+from irimi.engine import capture, decoding, mitm
+from irimi.engine.capture import StreamCapture
+from irimi.engine.decoding import Decoded, decode_body
+from irimi.exchange import Exchange, Flag, Request, Response
 from irimi.overlay import Overlaid
 from irimi.store import MAX_STORED_BODY, DirectoryStore, NullStore, StoreReader
 from tests.test_engine_mitm import (
@@ -49,6 +41,7 @@ from tests.test_engine_mitm import (
     _config,
     _maps,
     _open_stream,
+    _recorded,
     _reverse,
     _start,
     _stream_server,
@@ -57,7 +50,7 @@ from tests.test_engine_mitm import (
     _via_proxy,
 )
 
-CAP = mitm.MAX_DECODED_BODY
+CAP = decoding.MAX_DECODED_BODY
 LINE = b"x" * 1023 + b"\n"  # a body of whole 1 KiB lines, so a cut one keeps whole lines
 MIB = 1024 * 1024
 
@@ -71,7 +64,7 @@ def _lines(n_bytes: int) -> bytes:
 
 @pytest.fixture
 def cap_of_10_lines(monkeypatch):
-    monkeypatch.setattr(mitm, "MAX_DECODED_BODY", 10 * len(LINE))
+    monkeypatch.setattr(decoding, "MAX_DECODED_BODY", 10 * len(LINE))
     return 10 * len(LINE)
 
 
@@ -83,7 +76,7 @@ def test_a_body_past_the_cap_decodes_to_the_cap_and_says_it_was_cut(
     cap_of_10_lines, content_encoding
 ):
     plain = _lines(100 * len(LINE))
-    decoded = mitm._decoded(encoding.encode(plain, content_encoding), content_encoding)
+    decoded = decode_body(encoding.encode(plain, content_encoding), content_encoding)
     assert decoded is not None
     assert (decoded.body, decoded.cut) == (plain[:cap_of_10_lines], True)
 
@@ -93,7 +86,7 @@ def test_a_body_past_the_cap_decodes_to_the_cap_and_says_it_was_cut(
 def test_a_body_at_or_under_the_cap_decodes_whole(cap_of_10_lines, content_encoding, lines):
     """Exactly the cap is not past it: the one byte more each codec is asked for is not there."""
     plain = LINE * lines
-    decoded = mitm._decoded(encoding.encode(plain, content_encoding), content_encoding)
+    decoded = decode_body(encoding.encode(plain, content_encoding), content_encoding)
     assert decoded is not None
     assert (decoded.body, decoded.cut) == (plain, False)
 
@@ -102,17 +95,17 @@ def test_a_cut_buffered_body_is_recorded_empty(cap_of_10_lines):
     """Never redacted whole, so never stored in part: the start of a document is not one."""
     response = tutils.tresp(content=None, headers=((b"content-encoding", b"gzip"),))
     response.raw_content = gzip.compress(LINE * 11)
-    assert mitm._body(response) == mitm._Decoded(b"", True)
+    assert mitm._body(response) == Decoded(b"", True)
 
 
 def test_a_cut_stream_is_kept_to_its_last_complete_line(cap_of_10_lines):
     """The cap lands inside a line here, and inside a UTF-8 character: a body cut there is one
     redaction cannot read, so it is stored unscanned. What is kept ends at a line end, as
     one chunk, flagged."""
-    tee = mitm._StreamTee()
+    tee = StreamCapture()
     tee(gzip.compress(b"ok\n" + "é".encode() * (20 * len(LINE))))
     flow = _streamed_flow((b"content-encoding", b"gzip"))
-    response, chunks, cut = mitm._recorded_stream(flow, tee, whole=True)
+    response, chunks, cut = _recorded(flow, tee, whole=True)
     assert (response.body, chunks, cut) == (b"ok\n", (3,), True)
 
 
@@ -126,13 +119,13 @@ def test_an_encoding_irimi_does_not_decode_is_not_run_through_python_s_codecs(
     """mitmproxy's decoder fell back to `codecs.decode` for a name it did not know, where `bz2`
     and `zlib` are decompressions with no bound of their own. Neither is an HTTP content coding;
     such a body is undecodable, and recorded as it came."""
-    assert mitm._decoded(packed, content_encoding) is None
+    assert decode_body(packed, content_encoding) is None
 
 
 @pytest.mark.parametrize("content_encoding", ENCODINGS)
 def test_an_empty_body_decodes_to_nothing_in_every_encoding(content_encoding):
     """As mitmproxy's decoders say. brotli's own refuses an empty stream as one that ends early."""
-    assert mitm._decoded(b"", content_encoding) == mitm._Decoded(b"", False)
+    assert decode_body(b"", content_encoding) == Decoded(b"", False)
 
 
 @pytest.mark.parametrize("cut_by", [1, 3, 600])
@@ -141,7 +134,7 @@ def test_a_zstd_stream_that_ends_early_is_still_cut_at_the_cap(cap_of_10_lines, 
     stream ends early, as mitmproxy's decoder keeps them. Read to the cap and then once more, the
     second read comes back empty, and the body cut at the cap must not be called whole."""
     plain = os.urandom(20 * len(LINE))
-    decoded = mitm._decoded(encoding.encode(plain, "zstd")[:-cut_by], "zstd")
+    decoded = decode_body(encoding.encode(plain, "zstd")[:-cut_by], "zstd")
     assert decoded is not None
     assert (decoded.body, decoded.cut) == (plain[:cap_of_10_lines], True)
 
@@ -151,8 +144,8 @@ def test_a_deflate_stream_that_ends_early_is_refused_even_right_at_the_cap(cap_o
     anywhere else. Its last four bytes are the checksum, so all of the body is there."""
     plain = LINE * 10
     assert len(plain) == cap_of_10_lines
-    assert mitm._decoded(zlib.compress(plain)[:-2], "deflate") is None
-    assert mitm._decoded(zlib.compress(plain), "deflate") == mitm._Decoded(plain, False)
+    assert decode_body(zlib.compress(plain)[:-2], "deflate") is None
+    assert decode_body(zlib.compress(plain), "deflate") == Decoded(plain, False)
 
 
 # --------------------------------------------------------------------- real bombs at the real cap
@@ -220,7 +213,7 @@ def test_a_bomb_never_holds_more_than_twice_the_cap(bombs, content_encoding):
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
-    assert body == mitm._Decoded(b"", True)
+    assert body == Decoded(b"", True)
     assert peak < 2 * CAP + 4 * MIB, peak
 
 
@@ -296,7 +289,7 @@ def test_a_buffered_read_bomb_reaches_the_agent_whole_and_is_recorded_empty(
     read = seen[-1]
     assert (read.answered_by, read.flags, read.overlay) == (
         "live",
-        (BODY_TRUNCATED_FLAG,),
+        (Flag.BODY_TRUNCATED,),
         recorded,
     )
     assert read.response is not None and read.response.body == b""
@@ -326,7 +319,7 @@ def test_a_delegated_read_bomb_reaches_the_agent_whole_stamped_and_recorded_empt
     (ex,) = seen
     assert (ex.answered_by, ex.flags) == (
         "delegated",
-        (FIDELITY_DELEGATED_FLAG, BODY_TRUNCATED_FLAG),
+        (Flag.BODY_TRUNCATED,),
     )
     assert ex.response is not None and ex.response.body == b""
 
@@ -366,10 +359,10 @@ def test_a_document_that_decodes_past_the_cap_is_stored_empty_never_in_part(
     assert (status, data == _BombUpstream.bomb) == (200, True)
     (ex,) = seen
     assert ex.response is not None
-    assert (ex.response.body, ex.flags) == (b"", (BODY_TRUNCATED_FLAG,))
+    assert (ex.response.body, ex.flags) == (b"", (Flag.BODY_TRUNCATED,))
     (stored,) = StoreReader(tmp_path / "store").load_run("t3st").events
     assert isinstance(stored, Exchange) and stored.response is not None
-    assert (stored.response.body, stored.flags) == (b"", (BODY_TRUNCATED_FLAG,))
+    assert (stored.response.body, stored.flags) == (b"", (Flag.BODY_TRUNCATED,))
     on_disk = [f.read_bytes() for f in (tmp_path / "store").rglob("*") if f.is_file()]
     assert not any(SECRET in data for data in on_disk)
 
@@ -389,7 +382,7 @@ def test_a_streamed_bomb_reaches_the_agent_whole_and_is_recorded_cut(
         stop()
         srv.shutdown()
     (ex,) = seen
-    assert (ex.kind, ex.answered_by, ex.flags) == ("llm", "live", (STREAM_TRUNCATED_FLAG,))
+    assert (ex.kind, ex.answered_by, ex.flags) == ("llm", "live", (Flag.STREAM_TRUNCATED,))
     assert ex.response is not None
     # A stream keeps its start, in whole lines, as much of it as the store keeps of any body.
     assert ex.response.body == BOMB_LINE * (MAX_STORED_BODY // len(BOMB_LINE))
@@ -405,12 +398,12 @@ def test_a_compressed_stream_the_tee_cut_is_recorded_as_the_whole_lines_it_decod
     line as one chunk, flagged once as not the whole stream."""
     plain = b"".join(b"data: %d\n" % i for i in range(200_000))
     packed = encoding.encode(plain, content_encoding)
-    monkeypatch.setattr(mitm, "MAX_STORED_BODY", len(packed) // 2)
-    tee = mitm._StreamTee()
+    monkeypatch.setattr(capture, "MAX_STORED_BODY", len(packed) // 2)
+    tee = StreamCapture()
     tee(packed)
     assert tee.truncated
     flow = _streamed_flow((b"content-encoding", content_encoding.encode()))
-    response, chunks, cut = mitm._recorded_stream(flow, tee, whole=True)
+    response, chunks, cut = _recorded(flow, tee, whole=True)
     assert cut
     assert len(response.body) > len(plain) // 4
     assert plain.startswith(response.body) and response.body.endswith(b"\n")
@@ -445,7 +438,7 @@ def test_a_write_whose_request_is_a_bomb_is_refused_never_faked_from_part_of_it(
     )
     # The refusal keeps the write's classification, so the summary can name the operation.
     (ex,) = seen
-    assert (ex.answered_by, ex.flags) == ("irimi", (DECISION_FAILED_FLAG, BODY_TRUNCATED_FLAG))
+    assert (ex.answered_by, ex.flags) == ("irimi", (Flag.DECISION_FAILED, Flag.BODY_TRUNCATED))
     assert (ex.service, ex.operation, ex.kind) == ("demo", "things.create", "write")
     assert ex.request.body == b""
 
@@ -505,9 +498,9 @@ def test_a_bomb_is_refused_on_every_path_a_write_takes(
         srv.shutdown()
     assert answers == [(502, "irimi")] * 2
     assert _EchoBombUpstream.bodies == []
-    kind, unclassified = ("write", ()) if delegated else ("unknown", (UNCLASSIFIED_FLAG,))
+    kind, unclassified = ("write", ()) if delegated else ("unknown", (Flag.UNCLASSIFIED,))
     assert [(ex.answered_by, ex.kind, ex.target, ex.flags) for ex in seen] == [
-        ("irimi", kind, "", (*unclassified, DECISION_FAILED_FLAG, BODY_TRUNCATED_FLAG))
+        ("irimi", kind, "", (*unclassified, Flag.DECISION_FAILED, Flag.BODY_TRUNCATED))
     ] * 2
 
 
@@ -536,7 +529,7 @@ def test_a_live_request_that_is_a_bomb_is_forwarded_as_the_agent_sent_it(
     assert (status, data == gigabyte_gzip) == (200, True)
     assert _EchoBombUpstream.bodies == [gigabyte_gzip]
     (ex,) = seen
-    assert (ex.kind, ex.answered_by, ex.flags) == ("llm", "live", (BODY_TRUNCATED_FLAG,))
+    assert (ex.kind, ex.answered_by, ex.flags) == ("llm", "live", (Flag.BODY_TRUNCATED,))
     assert ex.response is not None
     assert (ex.request.body, ex.response.body) == (b"", b"")
 
@@ -563,7 +556,7 @@ def test_a_live_request_that_is_a_bomb_says_so_when_its_upstream_fails_too(
         stop()
     assert status == 502
     (ex,) = seen
-    assert (ex.answered_by, ex.flags) == ("live", (BODY_TRUNCATED_FLAG, UPSTREAM_ERROR_FLAG))
+    assert (ex.answered_by, ex.flags) == ("live", (Flag.BODY_TRUNCATED, Flag.UPSTREAM_ERROR))
     assert ex.request.body == b""
 
 
@@ -640,7 +633,7 @@ def test_the_control_endpoint_refuses_a_body_that_is_not_whole_whatever_it_holds
 
 def test_a_cut_body_is_always_past_the_control_endpoint_s_limit():
     """Why a cut control body is refused as too large without reading it."""
-    assert mitm.MAX_DECODED_BODY > control.MAX_CONTROL_BODY
+    assert decoding.MAX_DECODED_BODY > control.MAX_CONTROL_BODY
 
 
 def test_the_bomb_fixtures_decode_past_the_cap(bombs):
@@ -648,5 +641,5 @@ def test_the_bomb_fixtures_decode_past_the_cap(bombs):
     assert len(bombs["gzip"]) < 2.1 * MIB  # the gzip bomb: about 2 MiB of gzip to 1 GiB
     assert all(len(bomb) < 4 * MIB for bomb in bombs.values())
     for content_encoding, bomb in bombs.items():
-        decoded = mitm._decoded(bomb, content_encoding)
+        decoded = decode_body(bomb, content_encoding)
         assert decoded is not None and decoded.cut, content_encoding

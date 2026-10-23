@@ -28,8 +28,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from irimi.limits import MAX_CAPTURED_BYTES
 from irimi.sdk.api import NotCallable, entrypoint, resolve
-from irimi.sdk.capture import MAX_CAPTURED_BYTES, bind, capture, capture_call
+from irimi.sdk.capture import bind, capture, capture_call
 
 RESULT_FIELDS = ("source_run_id", "replay_run_id", "exit_code", "diverged_at", "lines")
 

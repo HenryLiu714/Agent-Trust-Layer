@@ -8,7 +8,7 @@ reads, and `preconditions` holds the refund check.
 from irimi.services.model import Answer, Idempotency, Rejection, Service
 from irimi.services.stripe import answers, effects, preconditions
 
-# Stripe's idempotency header, lower-case as `pipeline.parse` normalizes it. stripe-python sends
+# Stripe's idempotency header, lower-case as `wire.parse` normalizes it. stripe-python sends
 # one on every POST - a fresh UUID when the caller passes none - so every SDK write passes through
 # the store.
 IDEMPOTENCY_KEY_HEADER = "idempotency-key"

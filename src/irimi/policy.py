@@ -13,26 +13,20 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
-from irimi import bodies, idempotency, pipeline, services, writelog
+from irimi import bodies, idempotency, services, wire, writelog
+from irimi.classify import Classification, classify
 from irimi.delegation import ForwardTo, delegate
 from irimi.exchange import (
     ANY_METHOD,
-    FIDELITY_DELEGATED_FLAG,
-    FIDELITY_FLAGS,
-    FIXTURE_FAILED_FLAG,
-    FROM_RECORDING_FLAG,
-    IDEMPOTENCY_CONFLICT_FLAG,
-    IDEMPOTENT_REPLAY_FLAG,
     LIVE_KINDS,
-    REPLAY_MISS_FLAG,
     AnsweredBy,
     Exchange,
+    Flag,
     OverlayFidelity,
     PreconditionOutcome,
     Request,
     Response,
 )
-from irimi.pipeline import Classification
 from irimi.reader import NoReader, Reader, answered_as
 from irimi.recording import Recording, RecordingReader
 from irimi.servicemap import MapIndex, Route, fill_path
@@ -45,7 +39,7 @@ logger = logging.getLogger(__name__)
 class Answer:
     answered_by: AnsweredBy
     response: Response | None  # None means "forward live"; set means "send this, do not forward"
-    flags: tuple[str, ...] = ()  # merged into the Exchange by the engine
+    flags: tuple[Flag, ...] = ()  # merged into the Exchange by the engine
     # Set only on a `delegated` answer, and then `response` is None: the engine forwards there
     # instead of to the real service, and what comes back is what the agent receives.
     forward_to: ForwardTo | None = None
@@ -220,9 +214,9 @@ class ShadowPolicy:
         _, known = self._recall(request, classification, run_id)
         if known is None:
             return ""
-        if IDEMPOTENCY_CONFLICT_FLAG in known.flags:
-            return IDEMPOTENCY_CONFLICT_FLAG
-        return IDEMPOTENT_REPLAY_FLAG
+        if Flag.IDEMPOTENCY_CONFLICT in known.flags:
+            return Flag.IDEMPOTENCY_CONFLICT
+        return Flag.IDEMPOTENT_REPLAY
 
     def _delegated(self, route: Route | None, forward: ForwardTo) -> Answer:
         """A delegated write is one irimi did not author and cannot check: no precondition reads
@@ -232,7 +226,6 @@ class ShadowPolicy:
         return Answer(
             answered_by="delegated",
             response=None,
-            flags=(FIDELITY_DELEGATED_FLAG,),
             forward_to=forward,
             precondition="not_evaluable" if asked else None,
         )
@@ -315,7 +308,7 @@ class ShadowPolicy:
             # "Read operations only, never a read-like POST", in the one form that can be enforced:
             # ask the maps, which are what says a Slack `conversations.info` POST is a read, and
             # refuse whatever they do not call one.
-            probe_cls = pipeline.classify(probe_request, self.maps)
+            probe_cls = classify(probe_request, self.maps)
             if probe_cls.kind != "read":
                 logger.warning(
                     "irimi: refusing the precondition read %s, which the maps call %s",
@@ -338,13 +331,15 @@ class ShadowPolicy:
             # network failure, a 429 and a body irimi cannot use all leave a trace of the read
             # irimi attempted on the agent's behalf.
             issued = (
-                pipeline.annotate(
-                    probe_request,
-                    response,
-                    probe_cls,
-                    read_answered_by,
-                    run_id,
-                    extra_flags=read_flags,
+                Exchange(
+                    request=probe_request,
+                    response=response,
+                    service=probe_cls.service,
+                    operation=probe_cls.operation,
+                    kind=probe_cls.kind,
+                    answered_by=read_answered_by,
+                    run_id=run_id,
+                    flags=probe_cls.flags + read_flags,
                     issued_by="engine",
                     started_at=started_at,
                     ended_at=ended_at,
@@ -402,16 +397,16 @@ class ShadowPolicy:
 
 
 # The flags a recorded ANSWER carried besides its level: a fixture that did not load, and the two
-# halves of idempotency. A replay that answers again carries its level's fidelity flag, these, and
-# `from-recording`, and no other: the classifier's own flags come back from this request's
-# classification, and the engine's (a body cut at the cap, a lost upstream) are facts about the
-# recorded exchange, never about this one.
-_ANSWER_FLAGS = frozenset({FIXTURE_FAILED_FLAG, IDEMPOTENT_REPLAY_FLAG, IDEMPOTENCY_CONFLICT_FLAG})
+# halves of idempotency. A replay that answers again carries these and `from-recording`, and no
+# other: the classifier's own flags come back from this request's classification, and the
+# engine's (a body cut at the cap, a lost upstream) are facts about the recorded exchange, never
+# about this one.
+_ANSWER_FLAGS = frozenset({Flag.FIXTURE_FAILED, Flag.IDEMPOTENT_REPLAY, Flag.IDEMPOTENCY_CONFLICT})
 # Headers a recorded response carries that describe bytes it no longer has. The body was stored
 # decoded and whole, so its `Content-Encoding` and framing are not the body served; mitmproxy sets
-# the length of what is. And the recorded run's own stamp, which `pipeline.respond` replaces.
+# the length of what is. And the recorded run's own stamp, which `wire.stamp` replaces.
 _RECORDED_ONLY_HEADERS = frozenset(
-    {"content-encoding", "content-length", "transfer-encoding", pipeline.ANSWERED_BY_HEADER}
+    {"content-encoding", "content-length", "transfer-encoding", wire.ANSWERED_BY_HEADER}
 )
 
 
@@ -500,7 +495,7 @@ class ReplayPolicy:
         if kind not in LIVE_KINDS:
             self.recording.diverge()
         answer = self.shadow.answer(request, classification, write_log, run_id)
-        return replace(answer, flags=(*answer.flags, REPLAY_MISS_FLAG))
+        return replace(answer, flags=(*answer.flags, Flag.REPLAY_MISS))
 
     def _from_recording(
         self, request: Request, classification: Classification, run_id: str
@@ -522,7 +517,7 @@ class ReplayPolicy:
         answer = Answer(
             answered_by=answered_by,
             response=_as_served(recorded.response),
-            flags=(FIDELITY_FLAGS[answered_by], *kept, FROM_RECORDING_FLAG),
+            flags=(*kept, Flag.FROM_RECORDING),
             precondition=recorded.precondition,
             rejection_code=recorded.rejection_code,
             would_fire=recorded.would_fire,
@@ -586,7 +581,7 @@ def _probe_request(
 def _local(
     fake: services.Fake,
     status: int,
-    extra_flags: tuple[str, ...] = (),
+    extra_flags: tuple[Flag, ...] = (),
     *,
     precondition: PreconditionOutcome | None = None,
     rejection_code: str = "",
@@ -595,13 +590,13 @@ def _local(
     currency: str = "",
 ) -> Answer:
     """An answer irimi built itself, from the body `services` built: the fake's level is the
-    answer's, and its fidelity flag comes first, then the fake's own flags, then the caller's."""
+    answer's, and its flags are the fake's own, then the caller's."""
     return Answer(
         answered_by=fake.answered_by,
         response=Response(
             status=status, headers=(("content-type", fake.content_type),), body=fake.body
         ),
-        flags=(FIDELITY_FLAGS[fake.answered_by], *fake.flags, *extra_flags),
+        flags=(*fake.flags, *extra_flags),
         precondition=precondition,
         rejection_code=rejection_code,
         issued=issued,
@@ -627,7 +622,7 @@ def _retry_answer(first: idempotency.FirstAnswer, service: str) -> Answer:
     return Answer(
         answered_by=first.answered_by,
         response=Response(status=first.status, headers=headers, body=first.body),
-        flags=(*first.flags, IDEMPOTENT_REPLAY_FLAG),
+        flags=(*first.flags, Flag.IDEMPOTENT_REPLAY),
         precondition=first.precondition,
         rejection_code=first.rejection_code,
         currency=first.currency,
@@ -643,7 +638,7 @@ def _conflict_answer(classification: Classification, refusal: services.Rejection
     this route's write would have been faked at, the way `fake_rejection` carries an L3 one.
     """
     fake = services.fake_rejection(classification, refusal.body)
-    return _local(fake, refusal.status, (IDEMPOTENCY_CONFLICT_FLAG,), rejection_code=refusal.code)
+    return _local(fake, refusal.status, (Flag.IDEMPOTENCY_CONFLICT,), rejection_code=refusal.code)
 
 
 def _remember(store: idempotency.Store, slot: idempotency.Slot | None, answer: Answer) -> None:

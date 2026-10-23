@@ -13,18 +13,7 @@ import pytest
 
 from irimi import compare, recording, redact, report, servicemap, trace
 from irimi.cli import main
-from irimi.exchange import (
-    BODY_TRUNCATED_FLAG,
-    DECISION_FAILED_FLAG,
-    IDEMPOTENCY_CONFLICT_FLAG,
-    IDEMPOTENT_REPLAY_FLAG,
-    STREAM_TRUNCATED_FLAG,
-    TARGET_FAILED_FLAG,
-    UNCLASSIFIED_FLAG,
-    Exchange,
-    Request,
-    Response,
-)
+from irimi.exchange import Exchange, Flag, Request, Response
 from irimi.servicemap import MapError
 from irimi.store import DirectoryStore, StoredRun
 from irimi.trace import ErrorInfo, Event, RunRecord, ToolCall, Trigger
@@ -54,7 +43,6 @@ def _refund(amount: int = 4900, **changes) -> Exchange:
         operation="refunds.create",
         kind="write",
         answered_by="fake-L1",
-        validation="unvalidated",
         run_id="",
         precondition="passed",
     )
@@ -73,7 +61,6 @@ def _post(text: str) -> Exchange:
         operation="chat.postMessage",
         kind="write",
         answered_by="fake-L1",
-        validation="unvalidated",
         run_id="",
     )
 
@@ -86,7 +73,6 @@ def _read(path: str, answered: bytes = b"{}") -> Exchange:
         operation="charges.retrieve",
         kind="read",
         answered_by="live",
-        validation="unvalidated",
         run_id="",
     )
 
@@ -103,7 +89,6 @@ def _llm(prompt: str) -> Exchange:
         operation="messages.create",
         kind="llm",
         answered_by="live",
-        validation="unvalidated",
         run_id="",
     )
 
@@ -201,7 +186,6 @@ def _update(body: bytes) -> Exchange:
         operation="customers.update",
         kind="write",
         answered_by="fake-L1",
-        validation="unvalidated",
         run_id="",
     )
 
@@ -345,7 +329,6 @@ def test_a_webhook_s_redacted_path_is_not_compared_and_its_text_is():
             operation="incoming_webhook",
             kind="write",
             answered_by="fake-L0",
-            validation="unvalidated",
             run_id="",
         )
 
@@ -429,7 +412,7 @@ def test_a_second_refused_refund_is_the_write_added_not_the_first(home, capfd):
 
 def test_reads_llm_calls_read_tools_real_tools_and_a_replayed_retry_are_not_writes(home, capfd):
     a = [_read("/v1/charges/ch_1"), _llm("refund it"), _refund(), _tool()]
-    replayed = _refund(flags=(IDEMPOTENT_REPLAY_FLAG,))
+    replayed = _refund(flags=(Flag.IDEMPOTENT_REPLAY,))
     b = [
         _llm("refund it, politely"),
         _read("/v1/charges/ch_1", b'{"amount": 1}'),
@@ -463,7 +446,7 @@ def test_a_delegated_write_is_a_write_and_prints_where_it_went(home, capfd):
 
 
 def test_two_writes_whose_bodies_were_cut_are_not_compared_and_not_called_the_same(home, capfd):
-    cut = _refund(2450, flags=(BODY_TRUNCATED_FLAG,))
+    cut = _refund(2450, flags=(Flag.BODY_TRUNCATED,))
     code, lines = _compare(home, capfd, [_refund(), _tool()], [cut, _tool()])
     assert (code, lines[3:]) == (
         1,
@@ -484,7 +467,7 @@ def test_a_cut_pair_whose_lines_read_the_same_is_still_not_compared_and_exits_1(
     requests: two cut refunds of different amounts can print the same line, which compared by
     line would be `=` and exit 0. A pair either side of which was cut is `?`, whatever its lines
     say."""
-    cut = _refund(flags=(BODY_TRUNCATED_FLAG,))
+    cut = _refund(flags=(Flag.BODY_TRUNCATED,))
     code, lines = _compare(home, capfd, [_refund(), _tool()], [cut, _tool()])
     assert (code, lines[3:]) == (
         1,
@@ -512,7 +495,7 @@ def test_a_cut_pair_whose_lines_read_the_same_is_still_not_compared_and_exits_1(
 
 def test_a_cut_write_no_write_of_its_key_pairs_with_is_only_in_its_run(home, capfd):
     cut = _post("hi")
-    cut = dataclasses.replace(cut, flags=(BODY_TRUNCATED_FLAG,))
+    cut = dataclasses.replace(cut, flags=(Flag.BODY_TRUNCATED,))
     code, lines = _compare(home, capfd, [_refund(), cut], [_refund()])
     assert (code, lines[3:]) == (
         1,
@@ -703,7 +686,7 @@ def test_a_pair_printed_unlike_keeps_the_summary_s_lines_and_a_cut_pair_alike_is
         '  ~ A ○ slack  post to #C1: "a\\b"  faked; not checked',
         '    B ○ slack  post to #C1: "a\\c"  faked; not checked',
     ]
-    cut = _run([dataclasses.replace(_post("a\\b\n"), flags=(BODY_TRUNCATED_FLAG,))])
+    cut = _run([dataclasses.replace(_post("a\\b\n"), flags=(Flag.BODY_TRUNCATED,))])
     assert compare.compare_runs(cut, cut, index).lines()[:2] == [
         '  ? A ○ slack  post to #C1: "a\\b\\n"  faked; not checked',
         '    B ○ slack  post to #C1: "a\\b\\n"  faked; not checked',
@@ -717,7 +700,7 @@ def test_every_write_shape_s_action_is_the_line_the_stored_summary_prints_for_it
     target = "http://127.0.0.1:9"
     # An unclassified write keeps its host as its service and its request as its operation.
     unclassified = _refund(kind="unknown", answered_by="fake-L0", precondition=None)
-    unclassified = dataclasses.replace(unclassified, flags=(UNCLASSIFIED_FLAG,))
+    unclassified = dataclasses.replace(unclassified, flags=(Flag.UNCLASSIFIED,))
     events: list[Event] = [
         _read("/v1/charges/ch_1"),
         _llm("refund it"),
@@ -729,19 +712,19 @@ def test_every_write_shape_s_action_is_the_line_the_stored_summary_prints_for_it
             target=target,
             precondition=None,
             response=None,
-            flags=(TARGET_FAILED_FLAG,),
+            flags=(Flag.TARGET_FAILED,),
         ),
         # A body that decoded past the cap: the decision failed and its 502 is recorded.
         dataclasses.replace(
             unclassified,
             service="api.stripe.com",
             operation="",
-            flags=(UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG, BODY_TRUNCATED_FLAG),
+            flags=(Flag.UNCLASSIFIED, Flag.DECISION_FAILED, Flag.BODY_TRUNCATED),
         ),
-        _refund(flags=(IDEMPOTENT_REPLAY_FLAG,)),
-        _refund(flags=(IDEMPOTENCY_CONFLICT_FLAG,), rejection_code="idempotency_key_in_use"),
+        _refund(flags=(Flag.IDEMPOTENT_REPLAY,)),
+        _refund(flags=(Flag.IDEMPOTENCY_CONFLICT,), rejection_code="idempotency_key_in_use"),
         _refund(9800, precondition="rejected", rejection_code="amount_too_large"),
-        _refund(flags=(BODY_TRUNCATED_FLAG, STREAM_TRUNCATED_FLAG)),
+        _refund(flags=(Flag.BODY_TRUNCATED, Flag.STREAM_TRUNCATED)),
         _post("hi\nthere\x1b[31m\ud800"),
         _tool(),
         _tool("db.lookup", kind="read", ran="real"),
@@ -801,7 +784,7 @@ def test_a_cut_pair_whose_lines_print_alike_though_they_differ_is_told_apart_too
     """A `?` pair prints both its lines as a `~` pair does: when the two print alike though they
     differ, a newline against a typed `\\n`, each backslash is escaped too, or the reader sees one
     line twice and cannot tell what irimi did not compare."""
-    cut = dataclasses.replace(_post("line1\nline2"), flags=(BODY_TRUNCATED_FLAG,))
+    cut = dataclasses.replace(_post("line1\nline2"), flags=(Flag.BODY_TRUNCATED,))
     pair = compare.compare_runs(_run([cut]), _run([_post("line1\\nline2")]), servicemap.load())
     assert pair.lines()[:2] == [
         '  ? A ○ slack  post to #C1: "line1\\nline2"  faked; not checked',

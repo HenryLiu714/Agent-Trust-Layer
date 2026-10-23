@@ -19,8 +19,8 @@ import time
 
 import pytest
 
-from irimi import delegation, paths, redact, secret_shapes
-from irimi.exchange import REDACTION_FAILED_FLAG, Exchange, Request, Response
+from irimi import delegation, files, paths, redact, secret_shapes
+from irimi.exchange import Exchange, Flag, Request, Response
 from irimi.redact import placeholder, redact_exchange, redact_json
 from tests.test_trace import _filled
 
@@ -55,7 +55,6 @@ def _exchange(request: Request | None = None, response: Response | None = None, 
         "operation": "refunds.create",
         "kind": "write",
         "answered_by": "fake-L1",
-        "validation": "unvalidated",
         "run_id": "r1",
     }
     return Exchange(request=request or _request(), response=response, **{**values, **fields})
@@ -162,8 +161,9 @@ def test_a_url_in_a_header_has_its_query_and_fragment_redacted_by_name():
 
 def test_the_credential_header_rule_is_the_one_delegation_strips_by():
     """One statement of "this header is a credential": a target may not see it, and disk may
-    not see it. `delegation` re-exports it and states it nowhere else."""
-    assert delegation.is_credential_header is redact.is_credential_header
+    not see it. `redact` states it, and `delegation` states it nowhere."""
+    assert callable(redact.is_credential_header)
+    assert not hasattr(delegation, "is_credential_header")
     assert not hasattr(delegation, "CREDENTIAL_MARKERS")
     assert not hasattr(delegation, "CREDENTIAL_HEADERS")
 
@@ -514,7 +514,7 @@ def test_a_credential_path_holding_a_shape_is_replaced_whole_wherever_else_it_is
 
 
 def test_an_operation_named_after_the_path_is_redacted_with_the_path():
-    """A request no route matched is named `METHOD /path` (`pipeline.classify`), and slack.yaml
+    """A request no route matched is named `METHOD /path` (`classify.classify`), and slack.yaml
     lists no route for `/workflows/...`: the operation would store the webhook's secret."""
     path = "/workflows/T1/A1/123/S3CR3T"
     hook = _exchange(
@@ -654,7 +654,7 @@ def test_a_stream_that_could_not_be_redacted_is_one_chunk(monkeypatch):
     stored = _stream(LOUD + LAST, (4, len(LOUD) + len(LAST) - 4))
     assert stored.response is not None and stored.response.body == FAILED_BODY
     assert stored.stream_chunks == (len(FAILED_BODY),)
-    assert REDACTION_FAILED_FLAG in stored.flags
+    assert Flag.REDACTION_FAILED in stored.flags
 
 
 def test_every_split_of_a_stream_still_splits_its_redacted_body():
@@ -787,7 +787,7 @@ def test_a_streamed_body_redaction_leaves_alone_keeps_its_chunks_whatever_its_co
 def test_a_parser_that_raises_stores_neither_body_and_flags_the_exchange(monkeypatch):
     request = _request(headers=(JSON,), body=b'{"amount": 100}')
     response = Response(status=200, headers=(JSON,), body=b'{"id": "re_1"}')
-    ex = _exchange(request, response, flags=("fidelity:L1",))
+    ex = _exchange(request, response, flags=())
 
     def boom(*args, **kwargs):
         raise RuntimeError("parser broke")
@@ -796,10 +796,10 @@ def test_a_parser_that_raises_stores_neither_body_and_flags_the_exchange(monkeyp
     stored = redact_exchange(ex, KEY)
     assert stored.response is not None
     assert (stored.request.body, stored.response.body) == (FAILED_BODY, FAILED_BODY)
-    assert stored.flags == ("fidelity:L1", REDACTION_FAILED_FLAG)
+    assert stored.flags == (Flag.REDACTION_FAILED,)
     assert stored.request.headers == request.headers
     again = redact_exchange(dataclasses.replace(ex, flags=stored.flags), KEY)
-    assert again.flags.count(REDACTION_FAILED_FLAG) == 1
+    assert again.flags.count(Flag.REDACTION_FAILED) == 1
 
 
 @pytest.mark.parametrize(
@@ -816,7 +816,7 @@ def test_json_the_walk_cannot_see_whole_fails_closed_rather_than_scanned_as_text
     ValueError: a walk of the one, or a text scan of the other, would store the secret as sent."""
     stored = redact_exchange(_exchange(_request(headers=(JSON,), body=body)), KEY)
     assert stored.request.body == FAILED_BODY
-    assert stored.flags == (REDACTION_FAILED_FLAG,)
+    assert stored.flags == (Flag.REDACTION_FAILED,)
 
 
 def test_a_body_too_deep_to_redact_fails_closed_and_the_log_names_no_value(caplog):
@@ -826,7 +826,7 @@ def test_a_body_too_deep_to_redact_fails_closed_and_the_log_names_no_value(caplo
     with caplog.at_level(logging.WARNING, logger="irimi.redact"):
         stored = redact_exchange(_exchange(_request(headers=(JSON,), body=body)), KEY)
     assert stored.request.body == FAILED_BODY
-    assert REDACTION_FAILED_FLAG in stored.flags
+    assert Flag.REDACTION_FAILED in stored.flags
     assert "the request body" in caplog.text
     assert "sk_live" not in caplog.text
 
@@ -841,7 +841,7 @@ def test_a_header_that_cannot_be_hashed_fails_closed_alone(caplog):
         ("authorization", redact.REDACTION_FAILED),
         ("accept", "*/*"),
     )
-    assert stored.flags == (REDACTION_FAILED_FLAG,)
+    assert stored.flags == (Flag.REDACTION_FAILED,)
     assert "UnicodeEncodeError" in caplog.text
     assert "\udcff" not in caplog.text
     assert "\\udcff" not in caplog.text  # the exception's message spells it this way
@@ -851,7 +851,7 @@ def test_a_path_that_cannot_be_hashed_fails_closed_and_still_starts_with_a_slash
     ex = _exchange(_request(host="hooks.slack.com", path="/services/\udcff"))
     stored = redact_exchange(ex, KEY)
     assert stored.request.path == "/" + redact.REDACTION_FAILED
-    assert stored.flags == (REDACTION_FAILED_FLAG,)
+    assert stored.flags == (Flag.REDACTION_FAILED,)
 
 
 def test_a_lone_surrogate_in_a_body_that_changed_fails_that_body_alone():
@@ -862,7 +862,7 @@ def test_a_lone_surrogate_in_a_body_that_changed_fails_that_body_alone():
     assert stored.request.body == FAILED_BODY
     assert stored.response is not None
     assert stored.response.body == b'{"id": "re_1"}'
-    assert stored.flags == (REDACTION_FAILED_FLAG,)
+    assert stored.flags == (Flag.REDACTION_FAILED,)
 
 
 # ------------------------------------------------------------------------------ redact_json
@@ -1034,5 +1034,5 @@ def test_load_key_raced_by_separate_processes_gives_each_the_one_0600_key(tmp_pa
     assert len(key) == redact.KEY_BYTES
     path = home / paths.REDACT_KEY_NAME
     assert path.read_bytes() == key
-    assert stat.S_IMODE(path.stat().st_mode) == redact.KEY_MODE
+    assert stat.S_IMODE(path.stat().st_mode) == files.FILE_MODE
     assert [p.name for p in home.iterdir()] == [paths.REDACT_KEY_NAME]

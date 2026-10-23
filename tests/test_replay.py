@@ -222,7 +222,6 @@ def _exchange(
         operation="charges.retrieve",
         kind="read",
         answered_by=answered_by,  # type: ignore[arg-type]
-        validation="unvalidated",
         flags=flags,
         issued_by=issued_by,  # type: ignore[arg-type]
         run_id="new",
@@ -242,7 +241,7 @@ def test_the_divergence_is_the_first_agent_exchange_or_read_tool_the_recording_m
     counted, so the divergence is numbered among the calls the totals count; a read tool that ran
     for real is one."""
     events = [
-        _exchange("/v1/charges/a", ("fidelity:recording", "from-recording")),
+        _exchange("/v1/charges/a", ("from-recording",)),
         _exchange("/v1/charges/p", ("replay-miss",), issued_by="engine"),
         _tool("write", "shadow"),
         _tool("read", "recording"),
@@ -309,7 +308,7 @@ def test_a_replay_that_made_fewer_calls_than_its_recording_says_how_many_it_neve
     """A child that stopped early is no replay that answered every call. A write cut before
     any policy was asked carries no replay flag, and was made all the same."""
     recorded = [_exchange("/v1/charges/a", ()), _tool("read", "real"), _tool("write", "shadow")]
-    hit = _exchange("/v1/charges/a", ("fidelity:recording", "from-recording"))
+    hit = _exchange("/v1/charges/a", ("from-recording",))
     outcome = replay.outcome(_run(_record(), recorded), _new([hit]), replay.Ended(1), None)
     assert outcome.lines()[2:4] == [
         "  no divergence, but 1 of the recording's calls was never made",

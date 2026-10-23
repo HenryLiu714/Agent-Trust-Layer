@@ -7,18 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from irimi.exchange import (
-    BODY_TRUNCATED_FLAG,
-    DECISION_FAILED_FLAG,
-    FROM_RECORDING_FLAG,
-    IDEMPOTENCY_CONFLICT_FLAG,
-    IDEMPOTENT_REPLAY_FLAG,
-    REDACTION_FAILED_FLAG,
-    UNCLASSIFIED_FLAG,
-    Exchange,
-    Request,
-    Response,
-)
+from irimi.exchange import Exchange, Flag, Request, Response
+from irimi.netaddr import Target
 from irimi.report import (
     banner_lines,
     delegated_lines,
@@ -62,7 +52,6 @@ def _exchange(
         operation=f"{method} {path}",
         kind=kind,
         answered_by=answered_by,
-        validation="unvalidated",
         run_id="7f3a",
         flags=flags,
         target=target,
@@ -98,7 +87,7 @@ def _unreachable(target="http://127.0.0.1:3999/refund"):
     return _refund(
         answered_by="delegated",
         target=target,
-        flags=("fidelity:delegated", "target-failed"),
+        flags=("target-failed",),
         status=None,
     )
 
@@ -280,6 +269,8 @@ def _service(**kwargs):
         "routes": (),
     }
     base.update(kwargs)
+    if isinstance(base.get("target"), str):
+        base["target"] = Target.parse(base["target"])
     return ServiceMap(**base)
 
 
@@ -288,6 +279,8 @@ def _route(**kwargs):
 
     base = {"method": "POST", "path": "/v1/refunds", "operation": "refunds.create", "kind": "write"}
     base.update(kwargs)
+    if isinstance(base.get("target"), str):
+        base["target"] = Target.parse(base["target"])
     return Route(**base)
 
 
@@ -412,8 +405,8 @@ def test_a_read_answered_from_the_recording_is_a_read_and_says_so():
     service, so the totals count it answered by irimi."""
     rows = [
         _exchange(),
-        _exchange(answered_by="overlay", flags=("fidelity:overlay", FROM_RECORDING_FLAG)),
-        _exchange(answered_by="recording", flags=("fidelity:recording", FROM_RECORDING_FLAG)),
+        _exchange(answered_by="overlay", flags=(Flag.FROM_RECORDING,)),
+        _exchange(answered_by="recording", flags=(Flag.FROM_RECORDING,)),
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
     assert _host(lines) == (
@@ -426,7 +419,7 @@ def test_a_read_answered_from_the_recording_is_a_read_and_says_so():
 
 def test_llm_calls_answered_from_the_recording_say_so():
     llm = _exchange(method="POST", kind="llm", host="api.anthropic.com", service="anthropic")
-    rows = [llm, dataclasses.replace(llm, answered_by="recording", flags=(FROM_RECORDING_FLAG,))]
+    rows = [llm, dataclasses.replace(llm, answered_by="recording", flags=(Flag.FROM_RECORDING,))]
     line = _block(summary_lines("7f3a", rows, 0.0, _maps()), "api.anthropic.com")
     assert line == "  api.anthropic.com  2 llm (1 from the recording)"
 
@@ -436,7 +429,7 @@ def test_a_replayed_read_the_overlay_could_not_complete_names_who_answered_it():
     replay's recording, which is not `real`."""
     refund = _refund()
     read = dataclasses.replace(
-        _exchange(), answered_by="recording", overlay="partial", flags=(FROM_RECORDING_FLAG,)
+        _exchange(), answered_by="recording", overlay="partial", flags=(Flag.FROM_RECORDING,)
     )
     lines = summary_lines("7f3a", [refund, read], 0.0, _maps())
     assert "    ↳ GET /v1/charges did not show it  recorded (partial)" in lines
@@ -827,7 +820,7 @@ def test_a_write_answered_from_the_recording_says_its_recorded_run_could_not_che
     """A replay answers a recorded write without making a check read: the recorded run made it,
     so a check read in the replay's own run belongs to another write and is never borrowed."""
     recorded = replace(
-        _refund(answered_by="fake-L1", flags=(FROM_RECORDING_FLAG,)), precondition="not_evaluable"
+        _refund(answered_by="fake-L1", flags=(Flag.FROM_RECORDING,)), precondition="not_evaluable"
     )
     lines = summary_lines("7f3a", [_check_read(401), recorded], 0.0, _maps())
     assert _write_block(lines) == [
@@ -1011,13 +1004,12 @@ def test_exchange_line_uses_one_word_per_answer_and_drops_the_fidelity_flags():
         "irimi": "irimi",
     }
     for answered_by, word in cases.items():
-        flags = ("fidelity:L1", "upstream-error")
+        flags = ("upstream-error",)
         line = exchange_line(_exchange(answered_by=answered_by, flags=flags))
         assert line.split()[0] == word, line
-        assert "fidelity:" not in line
         assert "upstream-error" in line
     assert exchange_line(_exchange(answered_by="overlay")).endswith("  [overlay]")
-    recorded = _exchange(answered_by="overlay", flags=(FROM_RECORDING_FLAG,))
+    recorded = _exchange(answered_by="overlay", flags=(Flag.FROM_RECORDING,))
     assert exchange_line(recorded).startswith("recorded ")
 
 
@@ -1105,8 +1097,8 @@ def test_a_replayed_write_is_counted_once():
     write, so one line and one faked write, or "nine would have been rejected" counts retries
     instead of intentions. The exchange itself is still counted, as answered by irimi."""
     rows = [
-        _refund(answered_by="fake-L1", flags=("fidelity:L1",)),
-        _refund(answered_by="fake-L1", flags=("fidelity:L1", IDEMPOTENT_REPLAY_FLAG)),
+        _refund(answered_by="fake-L1", flags=()),
+        _refund(answered_by="fake-L1", flags=(Flag.IDEMPOTENT_REPLAY,)),
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
     assert [line for line in lines if line.startswith("  ○ ")] == [
@@ -1127,7 +1119,7 @@ def test_an_idempotency_conflict_prints_as_a_write_that_would_fail():
             _refund(
                 answered_by="fake-L1",
                 status=400,
-                flags=("fidelity:L1", IDEMPOTENCY_CONFLICT_FLAG),
+                flags=(Flag.IDEMPOTENCY_CONFLICT,),
             ),
             rejection_code="idempotency_error",
         ),
@@ -1157,7 +1149,7 @@ def test_a_write_irimi_could_not_decide_prints_as_refused_and_names_why():
         status=502,
         path="/v1/refunds",
         content_type=FORM,
-        flags=(UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG, BODY_TRUNCATED_FLAG, REDACTION_FAILED_FLAG),
+        flags=(Flag.UNCLASSIFIED, Flag.DECISION_FAILED, Flag.BODY_TRUNCATED, Flag.REDACTION_FAILED),
     )
     lines = summary_lines("7f3a", [cut], 0.0, _maps())
     assert _write_block(lines) == [
@@ -1192,7 +1184,7 @@ def test_a_write_whose_decision_raised_prints_its_sentence_as_refused():
         path="/v1/refunds",
         body=b"charge=ch_3QabcXYZ&amount=4900&currency=usd",
         content_type=FORM,
-        flags=(UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG),
+        flags=(Flag.UNCLASSIFIED, Flag.DECISION_FAILED),
     )
     assert write_sentence(raised, _maps()) == (
         "✗ stripe  refund $49.00 on ch_3QabcXYZ  refused by irimi: irimi could not decide how to "
@@ -1339,7 +1331,7 @@ def test_an_overlaid_read_is_never_filed_under_a_write_the_overlay_could_not_hav
             rejection_code="charge_already_refunded",
         ),
         replace(
-            _refund(answered_by="fake-L1", status=400, flags=(IDEMPOTENCY_CONFLICT_FLAG,)),
+            _refund(answered_by="fake-L1", status=400, flags=(Flag.IDEMPOTENCY_CONFLICT,)),
             rejection_code="idempotency_error",
         ),
         replace(_exchange(path="/v1/refunds", answered_by="overlay"), overlay="full"),
@@ -1413,8 +1405,8 @@ def test_a_replayed_write_neither_prints_a_line_nor_promises_its_events_twice():
     named once, or the summary counts retries instead of intentions."""
     fired = ("refund.created", "charge.refunded")
     rows = [
-        replace(_refund(answered_by="fake-L1", flags=("fidelity:L1",)), would_fire=fired),
-        _refund(answered_by="fake-L1", flags=("fidelity:L1", IDEMPOTENT_REPLAY_FLAG)),
+        replace(_refund(answered_by="fake-L1", flags=()), would_fire=fired),
+        _refund(answered_by="fake-L1", flags=(Flag.IDEMPOTENT_REPLAY,)),
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
     assert _write_block(lines) == [UNCHECKED_REFUND]

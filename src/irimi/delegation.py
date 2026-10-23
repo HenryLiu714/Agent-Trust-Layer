@@ -1,24 +1,19 @@
 """Answer targets: the address that answers a request instead of irimi.
 
 `delegate` is the decision - which target, if any, this request goes to. The rest is what the
-engine needs to act on that decision safely: where to send the request (`target_url`), what it
-may never be sent to (`refuse_self_target`), and which headers it may not carry
-(`is_credential_header`).
+engine needs to act on that decision safely: where to send the request (`target_url`) and what
+it may never be sent to (`refuse_self_target`). Which headers it may not carry is
+`redact.is_credential_header`, the rule disk is held to too.
 """
 
 import logging
-from dataclasses import dataclass
-from urllib.parse import urlsplit
+from dataclasses import dataclass, replace
 
 from irimi import netaddr
+from irimi.classify import Classification
 from irimi.exchange import Request
-from irimi.pipeline import Classification
-
-# The credential-header rule is stated once, in `redact`: a target may not be handed a
-# credential header, and disk may not be handed one either. The `as` form re-exports it, because
-# the engine asks `delegation.is_credential_header` which headers a target is not handed.
-from irimi.redact import is_credential_header as is_credential_header
-from irimi.servicemap import SELF_TARGET, TARGETABLE_KINDS, target_for
+from irimi.netaddr import Target
+from irimi.servicemap import TARGETABLE_KINDS, target_for
 
 logger = logging.getLogger(__name__)
 
@@ -37,15 +32,20 @@ class TargetUnreachable(TargetRefused):
 class ForwardTo:
     """An answer target: the address that answers this request instead of irimi.
 
-    `url` is absolute and already carries the path and query the target should see. `forward_auth`
-    is the route opting in to keeping its `Authorization` header; the engine strips it otherwise.
+    `target.path` already carries the path and query the target should see. `forward_auth` is the
+    route opting in to keeping its `Authorization` header; the engine strips it otherwise.
     """
 
-    url: str
+    target: Target
     forward_auth: bool = False
 
+    @property
+    def url(self) -> str:
+        """The address the request is sent to, as `Exchange.target` records it."""
+        return self.target.url
 
-def target_url(target: str, request: Request, matched: bool) -> str:
+
+def target_url(target: Target, request: Request, matched: bool) -> Target:
     """Where a delegated request is sent, with nginx `proxy_pass` path semantics.
 
     A **bare origin** (`http://127.0.0.1:3000`) keeps the request's own path. A target that
@@ -58,15 +58,14 @@ def target_url(target: str, request: Request, matched: bool) -> str:
 
     The query string is always kept; method, body and headers are not this function's business.
 
-    The result is a URL *string*, which the engine splits again to rewrite the flow, so anything
-    in the request that would re-parse differently has to be escaped on the way in. A literal `#`
-    is the one that bites: `POST /unlisted#x?a=1` would come back out as path `/unlisted` with no
-    query at all, so the target would be sent a different request than the agent made and
-    `Exchange.target` would record a URL that was never used. `#` is legal in a request target
-    and means nothing there; `%23` is the same path to the target and survives the round trip.
+    `Exchange.target` records the result as a URL, which a replay reads back, so anything in the
+    request that would re-parse differently has to be escaped on the way in. A literal `#` is the
+    one that bites: `POST /unlisted#x?a=1` would come back out as path `/unlisted` with no query
+    at all, and `Exchange.target` would record a URL that was never used. `#` is legal in a request
+    target and means nothing there; `%23` is the same path to the target and survives the round
+    trip.
     """
-    parts = urlsplit(target)
-    base = parts.path.rstrip("/")
+    base = target.path.rstrip("/")
     if not base:
         path = request.path
     elif matched:
@@ -74,10 +73,10 @@ def target_url(target: str, request: Request, matched: bool) -> str:
     else:
         path = base + request.path
     query = f"?{request.query}" if request.query else ""
-    return f"{parts.scheme}://{parts.netloc}{path}{query}".replace("#", "%23")
+    return replace(target, path=f"{path}{query}".replace("#", "%23"))
 
 
-def refuse_self_target(target: str, listen_port: int, local_address: str = "") -> None:
+def refuse_self_target(target: Target, listen_port: int, local_address: str = "") -> None:
     """Raise TargetRefused when `target` is this listener's own address.
 
     Targets are loopback-only, so the host alone cannot tell a stub from ourselves - the port is
@@ -89,14 +88,11 @@ def refuse_self_target(target: str, listen_port: int, local_address: str = "") -
     name resolving to it, is our own listener by the rule `detect_door` applies to a request:
     refused here, rather than dialled and refused again by the reverse door.
     """
-    parts = urlsplit(target)
-    port = parts.port or (443 if parts.scheme == "https" else 80)
-    host = parts.hostname or ""
-    if port == listen_port and (
-        netaddr.is_self_host(host) or netaddr.resolves_to_self(host, local_address)
+    if target.port == listen_port and (
+        netaddr.is_self_host(target.host) or netaddr.resolves_to_self(target.host, local_address)
     ):
         raise TargetRefused(
-            f"answer target {target!r} is irimi's own listener on port {listen_port}; "
+            f"answer target {target.url!r} is irimi's own listener on port {listen_port}; "
             "point it at the address that answers the route instead"
         )
 
@@ -123,22 +119,22 @@ def delegate(request: Request, classification: Classification) -> ForwardTo | No
         target, forward_auth = service_map.target, False
     else:
         return None
-    if target == SELF_TARGET:
+    if target is None:
         return None
-    url = target_url(target, request, matched=route is not None)
+    sent_to = target_url(target, request, matched=route is not None)
     # THE SCOPE RULE, decision half (`ServiceMap.credential_hosts`). The loader already
     # refuses a non-loopback target on a service claiming one of these hosts, whichever layer it
     # arrived through. This asks the same question of the request and the answer actually in
     # front of us, so a target that reaches here some other way - a map built in code, a new
     # layer or flag - inherits the rule instead of escaping it. On this host the
     # path IS the credential, for every path and not only the ones a map lists.
-    if request.host in service_map.credential_hosts and not netaddr.is_local_target(url):
+    if request.host in service_map.credential_hosts and not sent_to.is_loopback:
         logger.error(
             "irimi: refusing to delegate %s to %s: the request path is the credential on %s, "
             "so its answer target must be loopback",
             request.path,
-            url,
+            sent_to.url,
             request.host,
         )
         return None
-    return ForwardTo(url=url, forward_auth=forward_auth)
+    return ForwardTo(sent_to, forward_auth=forward_auth)

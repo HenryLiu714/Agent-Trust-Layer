@@ -28,7 +28,6 @@ def _exchange() -> Exchange:
         operation="POST /v1/charges",
         kind="unknown",
         answered_by="fake-L0",
-        validation="unvalidated",
         run_id="7f3a",
     )
 

@@ -2,14 +2,13 @@
 message takes its identity from. `effects` is the other half: what such a
 write does to Slack's later reads."""
 
-import json
 import re
 import threading
 import time
 from dataclasses import dataclass
 from typing import Any
 
-from irimi.bodies import reflect
+from irimi.bodies import json_object, reflect
 from irimi.exchange import Request
 from irimi.servicemap import Route
 from irimi.services import generic
@@ -110,9 +109,8 @@ class TsClock:
         which is what lets the engine call this for every Slack read without knowing which ones
         have messages in them.
         """
-        try:
-            parsed = json.loads(body)
-        except Exception:  # not JSON, or no body at all: there is nothing to observe
+        parsed = json_object(body, max_bytes=None)
+        if parsed is None:  # not a JSON object, or no body at all: there is nothing to observe
             return
         stack: list[Any] = [parsed]
         seen = 0

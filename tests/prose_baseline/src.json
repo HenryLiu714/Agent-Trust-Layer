@@ -1,20 +1,26 @@
 {
+  "src/irimi/classify.py": {
+    "caps_run": 1
+  },
   "src/irimi/control.py": {
     "caps_run": 3
   },
   "src/irimi/delegation.py": {
     "caps_run": 1
   },
-  "src/irimi/engine/mitm.py": {
-    "caps_run": 21
+  "src/irimi/engine/capture.py": {
+    "caps_run": 2
   },
-  "src/irimi/exchange.py": {
-    "caps_run": 5
-  },
-  "src/irimi/idempotency.py": {
+  "src/irimi/engine/decoding.py": {
     "caps_run": 1
   },
-  "src/irimi/pipeline.py": {
+  "src/irimi/engine/mitm.py": {
+    "caps_run": 17
+  },
+  "src/irimi/exchange.py": {
+    "caps_run": 4
+  },
+  "src/irimi/idempotency.py": {
     "caps_run": 1
   },
   "src/irimi/policy.py": {

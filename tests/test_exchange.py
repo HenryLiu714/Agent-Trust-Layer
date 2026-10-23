@@ -64,7 +64,6 @@ def _exchange() -> Exchange:
         operation="GET /v1/charges",
         kind="read",
         answered_by="live",
-        validation="unvalidated",
         run_id="7f3a",
     )
 
@@ -113,35 +112,10 @@ def test_fake_level_is_the_locally_answered_subset_of_answered_by():
     assert set(get_args(FakeLevel)) <= set(get_args(AnsweredBy))
 
 
-def test_every_locally_decided_answer_has_a_fidelity_flag():
-    """One mapping rather than a branch per caller. A new `answered_by` value that forgets its
-    fidelity flag would print as `L0` in the summary and read as the floor it is not."""
-    from typing import get_args
-
-    from irimi.exchange import (
-        FIDELITY_DELEGATED_FLAG,
-        FIDELITY_FLAGS,
-        FIDELITY_L0_FLAG,
-        FIDELITY_L1_FLAG,
-        FIDELITY_OVERLAY_FLAG,
-        FIDELITY_RECORDING_FLAG,
-        AnsweredBy,
-    )
-
-    assert set(FIDELITY_FLAGS) == set(get_args(AnsweredBy)) - {"live", "irimi"}
-    assert FIDELITY_FLAGS == {
-        "fake-L0": FIDELITY_L0_FLAG,
-        "fake-L1": FIDELITY_L1_FLAG,
-        "delegated": FIDELITY_DELEGATED_FLAG,
-        "overlay": FIDELITY_OVERLAY_FLAG,
-        "recording": FIDELITY_RECORDING_FLAG,
-    }
-
-
 def test_target_defaults_to_empty_and_records_a_delegated_address():
     ex = _exchange()
     assert ex.target == ""
-    ex.target = "http://127.0.0.1:3000/refund"
+    ex = replace(ex, target="http://127.0.0.1:3000/refund")
     assert ex.target == "http://127.0.0.1:3000/refund"
 
 
@@ -159,7 +133,7 @@ def test_overlay_is_not_a_fake_level():
 def test_overlay_fidelity_is_unset_until_the_overlay_considers_an_exchange():
     ex = _exchange()
     assert ex.overlay is None
-    ex.overlay = "partial"
+    ex = replace(ex, overlay="partial")
     assert ex.overlay == "partial"
 
 

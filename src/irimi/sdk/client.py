@@ -40,7 +40,9 @@ from irimi.exchange import (
     RUNS_ROUTE,
     TOOL_CALLS_ACTION,
 )
-from irimi.sdk.capture import MAX_CAPTURED_BYTES, serialized
+from irimi.limits import MAX_ANSWER
+from irimi.opener import no_redirect_opener
+from irimi.sdk.capture import serialized
 from irimi.sdk.instrumentation import unlabelled
 from irimi.trace import JSONValue, RecordedOutcome
 
@@ -52,10 +54,6 @@ TIMEOUT_S = 2.0
 PAUSE_S = 30.0
 # The most of a refusal's body a warning quotes. The endpoint's own are shorter.
 MAX_DETAIL = 200
-# The most of an answer the SDK reads. irimi's largest is a recorded tool call's outcome,
-# whose result the SDK posted at most MAX_CAPTURED_BYTES of; one past this is from something else
-# on the port, and is refused rather than read into the agent's memory to its end.
-MAX_ANSWER = 16 * MAX_CAPTURED_BYTES
 
 # The run actions the SDK posts: the endpoint's `exchange.RUN_ACTIONS`.
 Action = Literal["start", "tool-calls", "end"]
@@ -89,8 +87,9 @@ class ControlClient:
     """Posts to the control endpoint named by `IRIMI_CONTROL`, read at each post."""
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
-        # No ProxyHandler entries: urllib's default opener reads HTTP_PROXY, this one never does.
-        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirects())
+        # A 3xx comes from something else on that port, never irimi's endpoint: it is refused
+        # like any answer outside 2xx, rather than followed outside the proxy.
+        self._opener = no_redirect_opener()
         # By what failed and how: a lookup that fails never silences a post's warning.
         self._warned: set[tuple[str, Failure]] = set()
         self._lock = threading.Lock()
@@ -210,13 +209,3 @@ class ControlClient:
             failed.detail,
             consequence,
         )
-
-
-class _NoRedirects(urllib.request.HTTPRedirectHandler):
-    """Never follows a redirect, so a 3xx is refused as an HTTPError like any answer outside 2xx.
-    irimi's endpoint never sends one: it comes from something else on that port, and urllib would
-    have followed a 301, 302 or 303 as a GET to wherever it pointed, outside the proxy, and called
-    the run recorded when that answered."""
-
-    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
-        return None

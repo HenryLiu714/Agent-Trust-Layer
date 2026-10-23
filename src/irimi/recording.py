@@ -50,29 +50,21 @@ engine, whose write log is the engine's, so both are the engine's too.
 """
 
 import hashlib
-import json
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, get_args
 from urllib.parse import parse_qsl
 
-from irimi import bodies, pipeline, redact, services
+from irimi import bodies, redact, services
+from irimi.classify import classify
 from irimi.exchange import (
-    BODY_TRUNCATED_FLAG,
-    DECISION_FAILED_FLAG,
-    FIDELITY_RECORDING_FLAG,
-    FROM_RECORDING_FLAG,
     IDEMPOTENCY_FLAGS,
     LIVE_KINDS,
-    REDACTION_FAILED_FLAG,
-    REPLAY_MISS_FLAG,
-    STREAM_TRUNCATED_FLAG,
-    TARGET_FAILED_FLAG,
-    UPSTREAM_ERROR_FLAG,
     AnsweredBy,
     Exchange,
     FakeLevel,
+    Flag,
     Kind,
     Request,
     Response,
@@ -107,12 +99,12 @@ CACHE_CONTROL = "cache_control"
 # not read. A replay never answers from one as though it were whole.
 UNSERVABLE_FLAGS = frozenset(
     {
-        BODY_TRUNCATED_FLAG,
-        STREAM_TRUNCATED_FLAG,
-        DECISION_FAILED_FLAG,
-        TARGET_FAILED_FLAG,
-        UPSTREAM_ERROR_FLAG,
-        REDACTION_FAILED_FLAG,
+        Flag.BODY_TRUNCATED,
+        Flag.STREAM_TRUNCATED,
+        Flag.DECISION_FAILED,
+        Flag.TARGET_FAILED,
+        Flag.UPSTREAM_ERROR,
+        Flag.REDACTION_FAILED,
     }
 )
 
@@ -140,14 +132,10 @@ def _asks_to_stream(request: Request) -> bool:
 
 
 def _json_body(request: Request) -> dict[str, Any] | None:
-    """The request's body as a JSON object, whatever its content type says, or None. Not
-    `bodies.json_object`, which stops at `bodies.MAX_BODY_BYTES`: a conversation that long is still
-    one llm call, and the one way to tell whether it asks to stream. Never raises."""
-    try:
-        document = json.loads(request.body)
-    except Exception:  # not JSON, not UTF-8, or nested past the parser's depth
-        return None
-    return document if isinstance(document, dict) else None
+    """The request's body as a JSON object, whatever its content type says, or None. Of any
+    size: a conversation past `limits.MAX_BODY_BYTES` is still one llm call, and the one way to
+    tell whether it asks to stream. Never raises."""
+    return bodies.json_object(request.body, max_bytes=None)
 
 
 def _held(exchange: Exchange) -> str:
@@ -226,7 +214,7 @@ def _match_key(request: Request, kind: Kind, maps: MapIndex) -> _Key:
     request classifies to; a body
     `reflect` cannot read is keyed by its sha256. The kind leads, so a read never matches a
     write."""
-    classification = pipeline.classify(request, maps)
+    classification = classify(request, maps)
     # Sorted by name only, and stably: names in any order, but a repeated name's values in theirs,
     # since `sort=created&sort=amount` asks for another order than the reverse.
     pairs = parse_qsl(request.query, keep_blank_values=True)
@@ -275,7 +263,6 @@ def _redacted(request: Request, kind: Kind, redaction_key: bytes) -> Request:
         operation="",
         kind=kind,
         answered_by="live",
-        validation="unvalidated",
         run_id="",
     )
     return redact.redact_exchange(exchange, redaction_key).request
@@ -576,8 +563,8 @@ class RecordingReader:
     recorded `recording`, and flagged `from-recording` or `replay-miss` (`reader.answered_as`)."""
 
     answered_by: AnsweredBy = "recording"
-    flags: tuple[str, ...] = (FIDELITY_RECORDING_FLAG, FROM_RECORDING_FLAG)
-    miss_flags: tuple[str, ...] = (FIDELITY_RECORDING_FLAG, REPLAY_MISS_FLAG)
+    flags: tuple[Flag, ...] = (Flag.FROM_RECORDING,)
+    miss_flags: tuple[Flag, ...] = (Flag.REPLAY_MISS,)
 
     def __init__(self, recording: Recording) -> None:
         self.recording = recording

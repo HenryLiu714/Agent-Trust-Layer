@@ -1,19 +1,17 @@
 """The stamping invariants, in one file, written to fail loudly.
 
-Five claims irimi makes about every exchange, checked against a real run rather than against a
+Three claims irimi makes about every exchange, checked against a real run rather than against a
 hand-built list, and each one demonstrated to fail on a policy that breaks it:
 
   (a) every answer the engine decided carries `Irimi-Answered-By`, its own errors included, and
       no live forward does;
-  (b) nothing carrying that header is stamped anything but `unvalidated`;
-  (c) `ShadowPolicy` cannot produce `validated` at all - that label is reserved for record mode;
-  (d) a `delegated` exchange never reached the host the agent addressed;
-  (e) a write L3 rejected never enters the write log, nor does an idempotent replay or conflict,
+  (b) a `delegated` exchange never reached the host the agent addressed;
+  (c) a write L3 rejected never enters the write log, nor does an idempotent replay or conflict,
       a read irimi issued is never a write, and every read the overlay showed a write
       sits in the summary under a printed write of its own service that the overlay really
       held.
 
-`stamping_violations` is the machinery for (a) and (b): it returns a list of strings rather than
+`stamping_violations` is the machinery for (a): it returns a list of strings rather than
 asserting, so the same function can be asserted empty for an honest run and non-empty for a
 deliberately broken one. A test that cannot fail is the one thing an invariant file must not ship.
 """
@@ -30,24 +28,15 @@ from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 import pytest
 
-from irimi import ca, paths, pipeline, report, reverse_door, servicemap
+from irimi import ca, classify, paths, report, reverse_door, servicemap, wire
 from irimi.engine import EngineConfig, mitm
 from irimi.engine.mitm import MitmEngine
-from irimi.exchange import (
-    IDEMPOTENCY_CONFLICT_FLAG,
-    IDEMPOTENT_REPLAY_FLAG,
-    KINDS,
-    REFUSED_FLAG,
-    TARGET_FAILED_FLAG,
-    Exchange,
-    Request,
-    Response,
-)
+from irimi.exchange import KINDS, Exchange, Flag, Request, Response
 from irimi.overlay import NoOverlay, Overlaid, ServiceOverlay
-from irimi.pipeline import ANSWERED_BY_HEADER, annotate, respond
 from irimi.policy import Answer, ReplayPolicy, ShadowPolicy
 from irimi.recording import Recording
 from irimi.store import NullStore
+from irimi.wire import ANSWERED_BY_HEADER, stamp
 
 # One host, one read route and one write route. The servers in this file all listen on loopback,
 # so the map claims 127.0.0.1; hosts carry no port, so their random ports do not matter.
@@ -73,7 +62,7 @@ routes:
 
 
 class _Recorder(BaseHTTPRequestHandler):
-    """An upstream that writes down every request it is given. Invariant (d) reads that list."""
+    """An upstream that writes down every request it is given. Invariant (b) reads that list."""
 
     seen: list[tuple[str, str]] = []
 
@@ -215,24 +204,22 @@ def _header(response: Response | None) -> str | None:
 
 
 def stamping_violations(exchanges: Sequence[Exchange]) -> list[str]:
-    """Every way the exchanges in `exchanges` break invariant (a) or (b), named one per line."""
+    """Every way the exchanges in `exchanges` break invariant (a), named one per line."""
     out: list[str] = []
     for ex in exchanges:
         where = f"{ex.answered_by} {ex.kind} {ex.request.method} {ex.request.path}"
-        sent = respond(ex)
-        stamp = _header(sent)
-        if ex.answered_by != "live" and sent is not None and stamp is None:
+        sent = None if ex.response is None else stamp(ex.response, ex.answered_by)
+        value = _header(sent)
+        if ex.answered_by != "live" and sent is not None and value is None:
             out.append(f"(a) engine-answered response with no {ANSWERED_BY_HEADER}: {where}")
-        if ex.answered_by == "live" and stamp is not None:
-            out.append(f"(a) live forward carrying {ANSWERED_BY_HEADER}={stamp}: {where}")
-        if stamp is not None and stamp != ex.answered_by:
-            out.append(f"(a) {ANSWERED_BY_HEADER}={stamp} does not name the answer: {where}")
-        if stamp is not None and ex.validation != "unvalidated":
-            out.append(f"(b) {ANSWERED_BY_HEADER}={stamp} on a {ex.validation} exchange: {where}")
+        if ex.answered_by == "live" and value is not None:
+            out.append(f"(a) live forward carrying {ANSWERED_BY_HEADER}={value}: {where}")
+        if value is not None and value != ex.answered_by:
+            out.append(f"(a) {ANSWERED_BY_HEADER}={value} does not name the answer: {where}")
     return out
 
 
-def _exchange(answered_by, kind="write", validation="unvalidated", headers=()):
+def _exchange(answered_by, kind="write", headers=()):
     request = Request(
         method="POST",
         scheme="https",
@@ -250,12 +237,11 @@ def _exchange(answered_by, kind="write", validation="unvalidated", headers=()):
         operation="things.create",
         kind=kind,
         answered_by=answered_by,
-        validation=validation,
         run_id="t3st",
     )
 
 
-# ------------------------------------------------------------------------------ (a) and (b)
+# ----------------------------------------------------------------------------------------- (a)
 
 
 def test_a_real_run_answers_every_way_and_breaks_no_invariant(
@@ -279,7 +265,7 @@ def test_a_real_run_answers_every_way_and_breaks_no_invariant(
     assert sorted(ex.answered_by for ex in seen) == ["delegated", "fake-L0", "live"]
     assert stamping_violations(seen) == []
     # The live read reached the real upstream and neither of the other two did, which is the half
-    # of (a) that no pure function can see, and is invariant (d) for the delegated one.
+    # of (a) that no pure function can see, and is invariant (b) for the delegated one.
     assert _Recorder.seen == [("GET", "/hello")]
     assert reached_upstream_violations(seen, _Recorder.seen) == []
     # And on the wire, which is where it matters: the header the client actually received.
@@ -336,7 +322,7 @@ def test_a_replay_stamps_what_it_answered_and_leaves_a_live_forward_bare(
 def test_the_answer_a_failed_decision_gives_is_stamped_too(tmp_path, monkeypatch, upstream):
     """A path that never sets `_Pending`, and so never reaches `response()`. A 502 sent with no
     header would read as the real service's answer to a client using the header to tell the two
-    apart. `stamping_violations` cannot see that, because it calls `respond` on the recorded
+    apart. `stamping_violations` cannot see that, because it calls `stamp` on the recorded
     Exchange and reads the header that call *would* produce - so this test asserts on `stamped`,
     the header the client actually received.
     """
@@ -387,11 +373,11 @@ def _boom(*args, **kwargs):
 @pytest.mark.parametrize(
     ("case", "status", "flag"),
     [
-        ("unparseable", 400, REFUSED_FLAG),
-        ("unroutable", 400, REFUSED_FLAG),
-        ("base-url-refused", 403, REFUSED_FLAG),
-        ("unrewritable", 400, REFUSED_FLAG),
-        ("target-unreachable", 502, TARGET_FAILED_FLAG),
+        ("unparseable", 400, Flag.REFUSED),
+        ("unroutable", 400, Flag.REFUSED),
+        ("base-url-refused", 403, Flag.REFUSED),
+        ("unrewritable", 400, Flag.REFUSED),
+        ("target-unreachable", 502, Flag.TARGET_FAILED),
     ],
 )
 def test_irimis_own_errors_are_stamped_json_and_recorded(
@@ -431,7 +417,7 @@ def test_irimis_own_errors_are_stamped_json_and_recorded(
 def test_a_policy_that_answers_locally_without_saying_so_is_caught(tmp_path, monkeypatch, upstream):
     """The deliberately broken fourth policy. It synthesizes an answer and stamps it `live`, so
     the agent's write never leaves the machine while the exchange claims the real service did it.
-    The engine records `live`, `respond` therefore adds no header, and the upstream saw nothing -
+    The engine records `live`, `stamp` therefore adds no header, and the upstream saw nothing -
     the three facts invariant (a) exists to make contradictory."""
 
     class _LiarPolicy:
@@ -464,7 +450,7 @@ def reached_upstream_violations(
     """Invariant (a)'s other half, which only an end-to-end run can check: a `live` exchange
     reached the real service, and an engine-answered one did not.
 
-    `respond` cannot catch a policy that answers locally and stamps `live` - the stamp is the only
+    `stamp` cannot catch a policy that answers locally and stamps `live` - the stamp is the only
     thing it has to go on, and a liar's stamp says `live`. What the upstream actually received is
     the fact outside the policy's reach, so the check is written against it.
     """
@@ -475,15 +461,8 @@ def reached_upstream_violations(
         if ex.answered_by == "live" and not reached:
             out.append(f"(a) `live` exchange the upstream never saw: {ex.operation}")
         if ex.answered_by != "live" and reached:
-            out.append(f"(d) {ex.answered_by} exchange that reached the upstream: {ex.operation}")
+            out.append(f"(b) {ex.answered_by} exchange that reached the upstream: {ex.operation}")
     return out
-
-
-def test_a_validated_stamp_on_an_answered_exchange_is_caught():
-    """(b) is not reachable through `annotate`, so the case is built by hand: the check has to
-    fail on it, or it is not checking anything."""
-    assert stamping_violations([_exchange("fake-L0", validation="validated")]) != []
-    assert stamping_violations([_exchange("fake-L0")]) == []
 
 
 def test_a_header_that_names_the_wrong_answer_is_caught():
@@ -491,44 +470,41 @@ def test_a_header_that_names_the_wrong_answer_is_caught():
     assert stamping_violations([forged]) != []
 
 
-# ------------------------------------------------------------------------------------- (c)
-
-
-def test_shadow_policy_cannot_produce_validated(tmp_path, monkeypatch):
-    """(c). `annotate` takes no validation argument and writes the literal `unvalidated`; the only
-    other inhabitant of `Validation` is reserved and never written. Every kind and every
-    answer `ShadowPolicy` can give, through the same function the engine calls."""
+def test_every_answer_shadow_policy_gives_is_stamped_for_who_gave_it(tmp_path, monkeypatch):
+    """(a) over every kind and every answer `ShadowPolicy` can give."""
     maps = _maps(tmp_path, monkeypatch)
     policy = ShadowPolicy()
     stamped = []
     for kind in KINDS:
         for method in ("GET", "POST", "DELETE"):
-            request = pipeline.parse(method, "https", "127.0.0.1", 443, "/things", (), b"{}")
-            cls = pipeline.classify(request, maps)
-            cls = pipeline.Classification(
+            request = wire.parse(method, "https", "127.0.0.1", 443, "/things", (), b"{}")
+            cls = classify.classify(request, maps)
+            cls = classify.Classification(
                 cls.service, cls.operation, kind, cls.flags, cls.matched, cls.service_map
             )
             answer = policy.answer(request, cls)
-            stamped.append(annotate(request, answer.response, cls, answer.answered_by, "t3st"))
-    assert {ex.validation for ex in stamped} == {"unvalidated"}
+            stamped.append(
+                Exchange(
+                    request=request,
+                    response=answer.response,
+                    service=cls.service,
+                    operation=cls.operation,
+                    kind=cls.kind,
+                    answered_by=answer.answered_by,
+                    run_id="t3st",
+                    flags=cls.flags,
+                )
+            )
     assert stamping_violations(stamped) == []
 
 
-def test_annotate_has_no_way_to_ask_for_validated():
-    """The type-level half of (c): there is no parameter to pass it through, so no policy, present
-    or future, can reach `validated` without editing `annotate` itself."""
-    import inspect
-
-    assert "validation" not in inspect.signature(annotate).parameters
-
-
-# ------------------------------------------------------------------------------------- (d)
+# ------------------------------------------------------------------------------------- (b)
 
 
 def test_a_delegated_exchange_never_reaches_the_host_the_agent_addressed(
     tmp_path, monkeypatch, upstream, stub
 ):
-    """(d). The agent addressed the upstream; the target answered. The upstream must have no
+    """(b). The agent addressed the upstream; the target answered. The upstream must have no
     record of it at all - a delegated write that also reached production is the failure this
     whole feature exists to prevent."""
     maps = _maps(
@@ -556,7 +532,7 @@ def stream_stub():
 
 
 def test_a_streamed_delegated_answer_is_stamped_too(tmp_path, monkeypatch, upstream, stream_stub):
-    """`respond` cannot stamp this one: mitmproxy has already sent the headers by the time the
+    """`stamp` cannot stamp this one: mitmproxy has already sent the headers by the time the
     `response` hook runs, so the rebuilt response never reaches the client. Deleting the stamp in
     `responseheaders` leaves this the only test that goes red."""
     maps = _maps(
@@ -611,7 +587,7 @@ def test_shadow_mode_is_never_built_without_a_reader(tmp_path, monkeypatch):
     assert engine.policy.maps is index
 
 
-# ------------------------------------------------------------------------------------- (e)
+# ------------------------------------------------------------------------------------- (c)
 
 # The shipped Stripe map's two routes that L3 touches, claimed on loopback: the refund that names
 # `charge_refundable`, and the charge read its precondition probe has to classify as.
@@ -777,11 +753,11 @@ def test_a_replayed_write_is_never_in_the_write_log_twice(tmp_path, monkeypatch)
     )
     assert replies == [200, 200, 200]
     writes = [ex for ex in seen if ex.kind == "write"]
-    assert [IDEMPOTENT_REPLAY_FLAG in ex.flags for ex in writes] == [False, True]
+    assert [Flag.IDEMPOTENT_REPLAY in ex.flags for ex in writes] == [False, True]
     assert overlay.logs, "the overlay was never handed the write log"
     for log in overlay.logs:
         assert len(log) == 1
-        assert IDEMPOTENT_REPLAY_FLAG not in log[0].flags
+        assert Flag.IDEMPOTENT_REPLAY not in log[0].flags
 
 
 def test_an_idempotency_conflict_is_never_in_the_write_log(tmp_path, monkeypatch):
@@ -792,11 +768,11 @@ def test_an_idempotency_conflict_is_never_in_the_write_log(tmp_path, monkeypatch
     )
     assert replies == [200, 400, 200]
     writes = [ex for ex in seen if ex.kind == "write"]
-    assert [IDEMPOTENCY_CONFLICT_FLAG in ex.flags for ex in writes] == [False, True]
+    assert [Flag.IDEMPOTENCY_CONFLICT in ex.flags for ex in writes] == [False, True]
     assert overlay.logs, "the overlay was never handed the write log"
     for log in overlay.logs:
         assert len(log) == 1
-        assert IDEMPOTENCY_CONFLICT_FLAG not in log[0].flags
+        assert Flag.IDEMPOTENCY_CONFLICT not in log[0].flags
 
 
 def test_only_a_write_that_would_have_happened_lists_its_webhooks(tmp_path, monkeypatch):
@@ -826,8 +802,8 @@ def test_only_a_write_that_would_have_happened_lists_its_webhooks(tmp_path, monk
             assert ex.would_fire == ("refund.created", "charge.refunded")
     for ex in seen:
         refused_or_replayed = (
-            IDEMPOTENT_REPLAY_FLAG in ex.flags
-            or IDEMPOTENCY_CONFLICT_FLAG in ex.flags
+            Flag.IDEMPOTENT_REPLAY in ex.flags
+            or Flag.IDEMPOTENCY_CONFLICT in ex.flags
             or ex.precondition == "rejected"
         )
         if refused_or_replayed or ex.kind == "read":
@@ -872,9 +848,9 @@ def overlay_line_violations(
         what = f"{ex.answered_by} read, overlay {ex.overlay}: {ex.request.method} {ex.request.path}"
         under = next((write for write, read in filed if read is ex), None)
         if under is None:
-            violations.append(f"(e) {what} is under no {ex.service} write")
+            violations.append(f"(c) {what} is under no {ex.service} write")
         elif not any(under is logged for logged in write_log):
-            violations.append(f"(e) {what} is under a write the overlay never held")
+            violations.append(f"(c) {what} is under a write the overlay never held")
     return violations
 
 
@@ -922,7 +898,7 @@ def test_a_replayed_rejection_is_never_in_the_write_log(tmp_path, monkeypatch):
     assert replies == [200, 400, 400, 200]
     writes = [ex for ex in seen if ex.kind == "write"]
     assert [ex.precondition for ex in writes] == ["passed", "rejected", "rejected"]
-    assert IDEMPOTENT_REPLAY_FLAG in writes[-1].flags
+    assert Flag.IDEMPOTENT_REPLAY in writes[-1].flags
     assert overlay.logs, "the overlay was never handed the write log"
     for log in overlay.logs:
         assert [ex.precondition for ex in log] == ["passed"]
@@ -933,7 +909,7 @@ def engine_issued_violations(exchanges: Sequence[Exchange]) -> list[str]:
     A precondition read that were anything else would be irimi performing a write nobody asked
     for, in a tool whose promise is that writes are virtual."""
     return [
-        f"(e) engine-issued {ex.kind}: {ex.request.method} {ex.request.path}"
+        f"(c) engine-issued {ex.kind}: {ex.request.method} {ex.request.path}"
         for ex in exchanges
         if ex.issued_by == "engine" and ex.kind != "read"
     ]

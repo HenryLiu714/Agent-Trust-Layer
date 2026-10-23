@@ -1,8 +1,8 @@
 """Two stored runs side by side, write by write.
 
 A run's actions are the writes it attempted, in `seq` order: each exchange its summary prints a
-write line for (`report.is_intercepted`) and each write tool whose stand-in ran
-(`report.is_stood_in`). An action is compared by its data, never by the line it prints: its key,
+write line for (`exchange.is_intercepted`) and each write tool whose fake ran
+(`exchange.fake_ran`). An action is compared by its data, never by the line it prints: its key,
 what irimi did with it (`outcome`), and what it sent (`fields`), the request less what says who
 asked rather than what, as a replay matches it (`recording.compared_body`). A map's `human:`
 template names a few of a write's fields, so two customer updates that print one line may still
@@ -38,14 +38,7 @@ from typing import Literal
 from urllib.parse import parse_qsl
 
 from irimi import report, services
-from irimi.exchange import (
-    BODY_TRUNCATED_FLAG,
-    DECISION_FAILED_FLAG,
-    IDEMPOTENCY_CONFLICT_FLAG,
-    REFUSED_FLAG,
-    TARGET_FAILED_FLAG,
-    Exchange,
-)
+from irimi.exchange import Exchange, Flag, fake_ran, is_intercepted
 from irimi.recording import compared_body
 from irimi.servicemap import MapIndex, path_params
 from irimi.store import StoredRun
@@ -71,11 +64,11 @@ CUT_NOTE = "a body was cut when stored"
 # write apart from its recording.
 OUTCOME_FLAGS = frozenset(
     {
-        DECISION_FAILED_FLAG,
-        REFUSED_FLAG,
-        BODY_TRUNCATED_FLAG,
-        TARGET_FAILED_FLAG,
-        IDEMPOTENCY_CONFLICT_FLAG,
+        Flag.DECISION_FAILED,
+        Flag.REFUSED,
+        Flag.BODY_TRUNCATED,
+        Flag.TARGET_FAILED,
+        Flag.IDEMPOTENCY_CONFLICT,
     }
 )
 # How many differing fields a pair prints under its lines, how much of each value, and how many
@@ -197,9 +190,9 @@ def actions(run: StoredRun, index: MapIndex | None) -> list[Action]:
     out: list[Action] = []
     checks = report.check_reads([event for event in run.events if isinstance(event, Exchange)])
     for event in run.events:
-        if isinstance(event, Exchange) and report.is_intercepted(event):
+        if isinstance(event, Exchange) and is_intercepted(event):
             out.append(_exchange_action(event, index, checks.get(id(event))))
-        elif isinstance(event, ToolCall) and report.is_stood_in(event):
+        elif isinstance(event, ToolCall) and fake_ran(event):
             error = event.error.type if event.error is not None else None
             out.append(
                 Action(
@@ -255,7 +248,7 @@ def _exchange_action(
     return Action(
         (EXCHANGE_KEY, exchange.service, exchange.operation),
         report.write_sentence(exchange, index, check_read),
-        BODY_TRUNCATED_FLAG in exchange.flags,
+        Flag.BODY_TRUNCATED in exchange.flags,
         _named(outcome),
         fields,
     )

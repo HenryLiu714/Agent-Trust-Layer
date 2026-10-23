@@ -30,18 +30,10 @@ from pathlib import Path
 
 import pytest
 
-from irimi import redact, report, runner, trace
+from irimi import paths, redact, report, trace
 from irimi.bodies import FORM_CT
 from irimi.cli import main
-from irimi.exchange import (
-    FIDELITY_L0_FLAG,
-    TARGET_FAILED_FLAG,
-    UNCLASSIFIED_FLAG,
-    Exchange,
-    Headers,
-    header_value,
-    media_type,
-)
+from irimi.exchange import Exchange, Flag, Headers, header_value, media_type
 from irimi.servicemap import loader
 from irimi.store import DirectoryStore, StoredRun, StoreReader
 from tests import test_engine_mitm, test_phase_exit
@@ -301,7 +293,7 @@ def test_an_invalid_run_header_from_a_shadowed_child_names_no_run_and_reaches_no
     its own, and nothing is created outside the store's root."""
     child = tmp_path / "child.py"
     child.write_text(
-        RUN_HEADER_CHILD.replace("__PORT__", str(upstream)).replace("__RUN_ENV__", runner.RUN_ENV)
+        RUN_HEADER_CHILD.replace("__PORT__", str(upstream)).replace("__RUN_ENV__", paths.RUN_ENV)
     )
     assert main(["shadow", "--port", "0", "--", sys.executable, str(child)]) == 0
     out = capfd.readouterr().out.splitlines()
@@ -808,7 +800,7 @@ def test_an_unreachable_webhook_target_leaves_its_secret_path_nowhere_on_disk(
     assert WEBHOOK_PATH.encode() in answer.body
     disk = stored()
     (ex,) = disk.received
-    assert TARGET_FAILED_FLAG in ex.flags and ex.target == origin + WEBHOOK_PATH
+    assert Flag.TARGET_FAILED in ex.flags and ex.target == origin + WEBHOOK_PATH
 
     hidden = "/" + redact.placeholder(disk.key, WEBHOOK_PATH)
     (written,) = disk.exchanges()
@@ -856,7 +848,7 @@ def test_a_stripe_form_write_through_the_door_stores_its_card_token_and_query_ke
         "api.stripe.com",
         "unknown",
         "fake-L0",
-        (UNCLASSIFIED_FLAG, FIDELITY_L0_FLAG),
+        (Flag.UNCLASSIFIED,),
         STRIPE_FORM,
     )
 

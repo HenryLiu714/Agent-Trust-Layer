@@ -8,6 +8,7 @@ else in irimi parses an address.
 
 import ipaddress
 import socket
+from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 
@@ -81,17 +82,51 @@ def authority(host: str, port: int, default_port: int | None = None) -> str:
     return literal if port == default_port else f"{literal}:{port}"
 
 
-def is_local_target(url: str) -> bool:
-    """True when this answer target names loopback. Anything unparseable is not local.
+def default_port(scheme: str) -> int:
+    """The port a URL of `scheme` names when it names none."""
+    return 443 if scheme == "https" else 80
 
-    One spelling of the question, because three surfaces ask it: `delegation.delegate` refuses a
-    non-loopback target on a credential-path host, and the banner and `irimi maps list` paint a
-    non-loopback target red. The one intended difference from `is_self_host`: a target may not be
-    0.0.0.0 or ::, which reach this machine only by an accident of the OS, while a request whose
-    Host is one of them does reach irimi's listener.
+
+@dataclass(frozen=True)
+class Target:
+    """An http(s) address that answers a request instead of irimi: an answer target.
+
+    `host` is lower-case with no brackets, and `port` is always set. `path` is "" for a bare
+    origin; on a map's target it is the path that replaces the route's, and on the address a
+    request is sent to it is that request's path and query.
     """
-    try:
-        host = urlsplit(url).hostname or ""
-    except ValueError:
-        return False
-    return is_loopback(host)
+
+    scheme: str
+    host: str
+    port: int
+    path: str = ""
+
+    @classmethod
+    def parse(cls, url: str) -> "Target":
+        """`url` as a Target. Raises ValueError for anything but an http(s) URL with a host."""
+        parts = urlsplit(url)
+        port = parts.port
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError(f"{url!r} is not an http(s) URL with a host")
+        path = parts.path + (f"?{parts.query}" if parts.query else "")
+        return cls(parts.scheme, parts.hostname.lower(), port or default_port(parts.scheme), path)
+
+    @property
+    def authority(self) -> str:
+        """`host[:port]` as a URL spells it, the port left out when it is the scheme's default."""
+        return authority(self.host, self.port, default_port(self.scheme))
+
+    @property
+    def is_loopback(self) -> bool:
+        """True when this target names loopback.
+
+        Three surfaces ask it: `delegation.delegate` refuses a non-loopback target on a
+        credential-path host, and the banner and `irimi maps list` paint one red. The one intended
+        difference from `is_self_host`: a target may not be 0.0.0.0 or ::, which reach this machine
+        only by an accident of the OS, while a request whose Host is one of them reaches irimi.
+        """
+        return is_loopback(self.host)
+
+    @property
+    def url(self) -> str:
+        return f"{self.scheme}://{self.authority}{self.path}"

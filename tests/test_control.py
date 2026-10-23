@@ -14,11 +14,13 @@ import pytest
 
 from irimi import __version__, redact, trace
 from irimi.control import MAX_CONTROL_BODY, MAX_REFUSAL, TOO_DEEP, ControlEndpoint
+from irimi.engine import Serve
 from irimi.exchange import Exchange, Request
+from irimi.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE
 from irimi.policy import ReplayPolicy, ShadowPolicy
 from irimi.recording import Recording
 from irimi.store import DirectoryStore, NullStore, StoreReader
-from irimi.trace import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE, MAX_QUOTED, ErrorInfo, ToolCall, Trigger
+from irimi.trace import MAX_QUOTED, ErrorInfo, ToolCall, Trigger
 from tests import test_engine_mitm
 from tests.test_engine_mitm import _config, _start, _via_proxy
 
@@ -215,7 +217,7 @@ def test_health_reports_the_engine_serve_mode_and_the_stores_counters(engine):
 
 
 def test_health_says_serve_when_the_engine_serves(tmp_path, monkeypatch):
-    cfg = dataclasses.replace(_config(tmp_path, monkeypatch), serve=True)
+    cfg = dataclasses.replace(_config(tmp_path, monkeypatch), mode=Serve())
     eng, _, stop = _start(cfg)
     try:
         conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=10)

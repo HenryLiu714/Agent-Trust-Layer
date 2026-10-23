@@ -59,10 +59,6 @@ from irimi.sdk.instrumentation import instrument
 
 logger = logging.getLogger(LOGGER_NAME)
 
-# The longest name a run or a tool call records. A name is a label, as an error message is, and a
-# start past `control.MAX_CONTROL_BODY` would be refused whole. Cut outside any secret's shape,
-# since the store redacts it only after this cut (`api.label`).
-MAX_NAME = 1000
 
 # Every post the SDK makes goes through this one client, so each kind of failure is logged once
 # per process. Read at each post, so a test can put a fresh one in its place.

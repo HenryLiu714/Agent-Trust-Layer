@@ -15,9 +15,9 @@ It is also where "this header is a credential" is stated, once: an answer target
 one (`delegation`) and disk may not be handed one either.
 
 FAILURE IS CLOSED. A value that cannot be redacted is stored as `<redaction-failed>`, never as it
-was, and the exchange gains `REDACTION_FAILED_FLAG`. `redact_exchange` and `redact_json` never
-raise. Layer 2: it imports `exchange`, `paths`, `secret_shapes` (what it looks for in text), `ca`
-(its file modes), `bodies`, `servicemap` and `trace`.
+was, and the exchange gains `Flag.REDACTION_FAILED`. `redact_exchange` and `redact_json` never
+raise. Layer 2: it imports `exchange`, `paths`, `secret_shapes` (what it looks for in text),
+`files` (the key's file), `bodies`, `servicemap` and `trace`.
 """
 
 import hmac
@@ -36,16 +36,8 @@ from urllib.parse import quote_plus, unquote_plus, urlsplit
 
 from irimi import paths
 from irimi.bodies import FORM_CT
-from irimi.ca import DIR_MODE, KEY_MODE
-from irimi.exchange import (
-    REDACTION_FAILED_FLAG,
-    Exchange,
-    Headers,
-    Request,
-    Response,
-    header_value,
-    media_type,
-)
+from irimi.exchange import Exchange, Flag, Headers, Request, Response, header_value, media_type
+from irimi.files import write_private
 from irimi.secret_shapes import SECRET_SHAPE
 from irimi.servicemap import shipped_credential_hosts
 from irimi.trace import JSONValue
@@ -166,9 +158,9 @@ def load_key(home: Path) -> bytes:
 
     A symlink to a regular file is followed: a key shared between machines is mounted that way (a
     Kubernetes Secret volume is a tree of symlinks), and refusing it would leave a user no
-    way to give two installs one key. A missing home is created with `ca.DIR_MODE`, as the
+    way to give two installs one key. A missing home is created with `files.DIR_MODE`, as the
     directory that holds the CA's key is; an existing one keeps its mode, since it holds more than
-    the key and the key's own KEY_MODE is what protects it.
+    the key and the key's own `files.FILE_MODE` is what protects it.
     """
     path = home / paths.REDACT_KEY_NAME
     if not os.path.lexists(path):
@@ -202,21 +194,7 @@ def _create_key(path: Path) -> None:
     There is no fallback for a filesystem without hard links: the OSError is raised. `os.rename`
     replaces, so a loser would overwrite a key the winner had already hashed with.
     """
-    path.parent.mkdir(mode=DIR_MODE, parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.{secrets.token_hex(8)}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, KEY_MODE)
-    try:
-        with os.fdopen(fd, "wb") as f:
-            os.fchmod(fd, KEY_MODE)  # O_CREAT's mode is subject to the umask
-            f.write(secrets.token_bytes(KEY_BYTES))
-            f.flush()
-            os.fsync(fd)
-        try:
-            os.link(tmp, path)
-        except FileExistsError:
-            pass  # another process published first, and its key is this install's key
-    finally:
-        tmp.unlink(missing_ok=True)
+    write_private(path, secrets.token_bytes(KEY_BYTES), how="publish", durable=True)
 
 
 def redact_exchange(exchange: Exchange, key: bytes) -> Exchange:
@@ -225,7 +203,7 @@ def redact_exchange(exchange: Exchange, key: bytes) -> Exchange:
     The request's path, query, headers and body, the response's headers and body, the answer
     target and the operation are redacted. Every other field is copied with `dataclasses.replace`,
     so a field added to Exchange later survives without a change here. A part that could not be
-    redacted is stored as REDACTION_FAILED and the copy gains REDACTION_FAILED_FLAG.
+    redacted is stored as REDACTION_FAILED and the copy gains Flag.REDACTION_FAILED.
 
     `stream_chunks` is the one field that follows the body: a placeholder is not as long as its
     secret, so the chunk lengths are recomputed over the redacted body (`_rechunk`).
@@ -252,8 +230,8 @@ def redact_exchange(exchange: Exchange, key: bytes) -> Exchange:
         partial(_redact_operation, exchange.operation, exchange.request, request.path, key),
     )
     flags = exchange.flags
-    if guard.failed and REDACTION_FAILED_FLAG not in flags:
-        flags = (*flags, REDACTION_FAILED_FLAG)
+    if guard.failed and Flag.REDACTION_FAILED not in flags:
+        flags = (*flags, Flag.REDACTION_FAILED)
     return replace(
         exchange,
         request=request,
@@ -445,7 +423,7 @@ def _redact_path(host: str, path: str, key: bytes) -> str:
 
 
 def _redact_operation(operation: str, sent: Request, stored_path: str, key: bytes) -> str:
-    """A request no route matched is named `METHOD /path` (`pipeline.classify`), so its operation
+    """A request no route matched is named `METHOD /path` (`classify.classify`), so its operation
     is the stored path's: slack.yaml lists no route for `hooks.slack.com/workflows/...`. A
     route's own name is scanned for shapes like any other text."""
     if operation == f"{sent.method} {sent.path}":

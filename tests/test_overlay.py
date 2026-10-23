@@ -108,7 +108,6 @@ def _write_exchange(headers=(), refund_id=MINTED):
         operation="refunds.create",
         kind="write",
         answered_by="fake-L1",
-        validation="unvalidated",
         run_id="7f3a",
     )
 
@@ -145,7 +144,6 @@ def _slack_post_exchange(ts, channel="C0123", headers=(), thread_ts=None):
         operation="chat.postMessage",
         kind="write",
         answered_by="fake-L1",
-        validation="unvalidated",
         run_id="7f3a",
     )
 

@@ -27,9 +27,10 @@ from examples.workflows.w09_scope_gauntlet.agent import (
 from examples.workflows.w09_scope_gauntlet.scenarios import BIG_DESCRIPTION_BYTES, WORKFLOW
 from irimi import control, paths, redact, report, trace
 from irimi.bodies import MAX_BODY_BYTES
-from irimi.exchange import BODY_TRUNCATED_FLAG, Exchange
+from irimi.exchange import Exchange, Flag
+from irimi.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE
 from irimi.store import MAX_STORED_BODY, RUNS_DIR, SERVE_LOCK_FILE
-from irimi.trace import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE, ErrorInfo, RunRecord, ToolCall, Trigger
+from irimi.trace import ErrorInfo, RunRecord, ToolCall, Trigger
 
 W = "w09_scope_gauntlet"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.
@@ -133,7 +134,7 @@ def test_gzip_chunked_and_oversized_bodies_are_still_faked(run_workflow, mode):
     assert update.response is not None
     assert 3_000_000 < len(update.request.body) < MAX_STORED_BODY
     assert 3_000_000 < len(update.response.body) < MAX_STORED_BODY
-    assert BODY_TRUNCATED_FLAG not in update.flags
+    assert Flag.BODY_TRUNCATED not in update.flags
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -847,7 +848,7 @@ def test_a_replay_refuses_a_cut_write_again_and_answers_the_rest_from_its_record
         ("decision-failed", "body-truncated"),
     )
     assert replay.internet.requests() == []
-    assert (refund.precondition, refund.flags) == ("passed", ("fidelity:L1", "from-recording"))
+    assert (refund.precondition, refund.flags) == ("passed", ("from-recording",))
     code, out, err = replay.compare_runs(recorded.process_run_id(), replay.process_run_id())
     assert (code, err) == (1, [])
     assert out[-1] == (
@@ -880,7 +881,7 @@ def test_a_replay_never_writes_into_the_run_it_replays(replayed):
     assert [type(e).__name__ for e in filed] == ["ToolCall", "Exchange", "ToolCall"]
     [read] = [e for e in filed if isinstance(e, Exchange)]
     assert (read.answered_by, read.request.path) == ("recording", f"/v1/charges/{CHARGE}")
-    assert read.flags == ("fidelity:recording", "from-recording", "bad-run-id")
+    assert read.flags == ("from-recording", "bad-run-id")
     assert replay.by_label()["direct_read"] == (200, "recording")
 
 
@@ -948,7 +949,7 @@ def stored_bomb(result, method: str, path: str) -> Exchange:
         e
         for e in result.stored_events()
         if isinstance(e, Exchange) and (e.request.method, e.request.path) == (method, path)
-        if BODY_TRUNCATED_FLAG in e.flags
+        if Flag.BODY_TRUNCATED in e.flags
     ]
     return ex
 
@@ -994,7 +995,7 @@ def test_a_write_whose_body_decodes_past_the_cap_is_refused_and_never_leaves(run
     assert posted == [("POST", "/v1/messages")]
     ex = stored_bomb(shadow, "POST", "/v1/refunds")
     assert (ex.answered_by, ex.service, ex.operation) == ("irimi", "stripe", "refunds.create")
-    assert ex.flags == ("decision-failed", BODY_TRUNCATED_FLAG)
+    assert ex.flags == ("decision-failed", Flag.BODY_TRUNCATED)
     assert ex.request.body == b""
     assert ex.response is not None and ex.response.status == 502
     assert json.loads(ex.response.body)["error"]["type"] == "irimi_decision_failed"
@@ -1026,7 +1027,7 @@ def test_a_live_call_whose_body_decodes_past_the_cap_reaches_the_service_byte_fo
         assert req.headers["content-encoding"] == "gzip"
         assert digest(req.body) == (posted["bytes"], posted["sha256"])
     ex = stored_bomb(shadow, "POST", "/v1/messages")
-    assert (ex.answered_by, ex.flags, ex.request.body) == ("live", (BODY_TRUNCATED_FLAG,), b"")
+    assert (ex.answered_by, ex.flags, ex.request.body) == ("live", (Flag.BODY_TRUNCATED,), b"")
     assert ex.request.header("content-encoding") == "gzip"
     assert ex.response is not None and ex.response.status == 413
 
@@ -1047,7 +1048,7 @@ def test_a_read_back_that_decodes_past_the_cap_is_never_overlaid(run_workflow, m
         assert received["encoding"] == "gzip"
     assert [c["answered_by"] for c in shadow.calls("refunds_padded")] == [None]
     ex = stored_bomb(shadow, "GET", "/v1/refunds")
-    assert (ex.answered_by, ex.flags, ex.overlay) == ("live", (BODY_TRUNCATED_FLAG,), "partial")
+    assert (ex.answered_by, ex.flags, ex.overlay) == ("live", (Flag.BODY_TRUNCATED,), "partial")
     assert ex.response is not None and ex.response.body == b""
     summary = summary_of(shadow)
     refund = summary.index(

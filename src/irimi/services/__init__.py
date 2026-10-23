@@ -27,8 +27,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from irimi.bodies import JSON_CT
-from irimi.exchange import FIXTURE_FAILED_FLAG, FakeLevel, Request
-from irimi.pipeline import Classification
+from irimi.classify import Classification
+from irimi.exchange import FakeLevel, Flag, Request
 from irimi.servicemap import MapError, MapIndex
 from irimi.services import generic, slack, stripe
 from irimi.services.model import (
@@ -167,23 +167,23 @@ class Fake:
     body: bytes
     content_type: str
     answered_by: FakeLevel = "fake-L0"
-    flags: tuple[str, ...] = ()
+    flags: tuple[Flag, ...] = ()
 
 
 def _level(
     classification: Classification,
-) -> tuple[FakeLevel, tuple[str, ...], dict[str, Any] | None]:
+) -> tuple[FakeLevel, tuple[Flag, ...], dict[str, Any] | None]:
     """The level, its flags, and the route's fixture object when the level is L1."""
     route = classification.route
     if route is None or not route.fixture:
         return "fake-L0", (), None
     obj = generic.fixture_object(classification.service, route.fixture)
     if obj is None:
-        return "fake-L0", (FIXTURE_FAILED_FLAG,), None
+        return "fake-L0", (Flag.FIXTURE_FAILED,), None
     return "fake-L1", (), obj
 
 
-def fake_level(classification: Classification) -> tuple[FakeLevel, tuple[str, ...]]:
+def fake_level(classification: Classification) -> tuple[FakeLevel, tuple[Flag, ...]]:
     """The level a write on this route is answered at, and the flag it owes the trace, without
     building (or minting) a body: L1 when the route names a fixture this install can read, L0
     with `fixture-failed` when it names one it cannot, and L0 otherwise."""

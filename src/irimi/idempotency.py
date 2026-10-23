@@ -17,8 +17,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from irimi import bodies, services
-from irimi.exchange import AnsweredBy, PreconditionOutcome, Request
-from irimi.pipeline import Classification
+from irimi.classify import Classification
+from irimi.exchange import AnsweredBy, Flag, PreconditionOutcome, Request
 from irimi.servicemap import Route
 
 
@@ -40,7 +40,7 @@ class FirstAnswer:
     body: bytes
     content_type: str
     answered_by: AnsweredBy
-    flags: tuple[str, ...]
+    flags: tuple[Flag, ...]
     precondition: PreconditionOutcome | None
     rejection_code: str
     currency: str

@@ -16,20 +16,19 @@ from urllib.parse import urlsplit
 from irimi import netaddr
 from irimi.bodies import reflect
 from irimi.exchange import (
-    BODY_TRUNCATED_FLAG,
-    DECISION_FAILED_FLAG,
-    FIDELITY_FLAGS,
-    FROM_RECORDING_FLAG,
-    IDEMPOTENCY_CONFLICT_FLAG,
-    IDEMPOTENT_REPLAY_FLAG,
-    REFUSED_FLAG,
-    TARGET_FAILED_FLAG,
     AnsweredBy,
     Exchange,
+    Flag,
+    failed_target,
+    fake_ran,
     is_authored_write,
+    is_faked,
+    is_intercepted,
+    refused_by_irimi,
 )
 from irimi.money import format_minor_units
-from irimi.servicemap import SELF_TARGET, MapIndex, Route, is_delegated, path_params
+from irimi.netaddr import Target
+from irimi.servicemap import MapIndex, Route, is_delegated, path_params
 from irimi.store import StoredRun
 from irimi.trace import Event, Ran, RunRecord, TelemetrySeen, ToolCall
 
@@ -101,26 +100,26 @@ def delegated_lines(index: MapIndex, color: bool = False) -> list[str]:
     for sm in sorted(index.services, key=lambda s: s.service):
         if not is_delegated(sm):
             continue
-        if sm.target != SELF_TARGET:
+        if sm.target is not None:
             scope = "reads + writes" if sm.target_reads else "writes"
             lines.extend(_delegated_line(sm.service, sm.target, scope, color))
         for route in sm.routes:
-            if route.target != SELF_TARGET:
+            if route.target is not None:
                 what = f"{sm.service} {route.method} {route.path}"
                 scope = "reads" if route.kind == "read" else "writes"
                 lines.extend(_delegated_line(what, route.target, scope, color))
     return lines
 
 
-def _delegated_line(what: str, target: str, scope: str, color: bool) -> list[str]:
+def _delegated_line(what: str, target: Target, scope: str, color: bool) -> list[str]:
     """The line for one delegated service or route, plus the warning line a non-loopback one owes.
 
     The warning is its own line rather than a tail on the first: a target long enough to be worth
     warning about is long enough that the two together wrap at 100 columns, and a wrapped warning
     is the one a reader skims past.
     """
-    line = f"{DELEGATED_PREFIX} {what} -> {target} ({scope})"
-    if netaddr.is_local_target(target):
+    line = f"{DELEGATED_PREFIX} {what} -> {target.url} ({scope})"
+    if target.is_loopback:
         return [line]
     notice = f"{NOT_LOOPBACK_INDENT}{NOT_LOOPBACK_NOTICE}"
     if color:
@@ -156,14 +155,14 @@ def answer_word(exchange: Exchange) -> str:
     is `recorded`, an overlaid one included: no service answered it in this run."""
     if exchange.issued_by == "engine":
         return CHECK_READ
-    if exchange.answered_by == "overlay" and FROM_RECORDING_FLAG in exchange.flags:
+    if exchange.answered_by == "overlay" and Flag.FROM_RECORDING in exchange.flags:
         return ANSWER_WORDS["recording"]
     return ANSWER_WORDS[exchange.answered_by]
 
 
 def _shown_flags(exchange: Exchange) -> list[str]:
-    """The flags the stream prints: the `fidelity:*` ones say again what the first column says."""
-    shown = [flag for flag in exchange.flags if flag not in FIDELITY_FLAGS.values()]
+    """The flags the stream prints, with `overlay` first for a read the overlay changed."""
+    shown: list[str] = list(exchange.flags)
     if exchange.answered_by == "overlay":
         shown.insert(0, OVERLAY_SHOWN)
     return shown
@@ -191,13 +190,6 @@ def tool_call_line(call: ToolCall) -> str:
     return printable(f"{word:<{FIRST_COLUMN}} {call.kind:<9} {call.name} -> {outcome}")
 
 
-def is_stood_in(call: ToolCall) -> bool:
-    """A write tool whose fake ran in its place, which the summary owes a line. Only a fake's
-    call: the SDK runs a write tool's real function only while it is inactive, and then records
-    nothing, so no write tool call it posts ran for real."""
-    return call.kind == "write" and call.ran == "shadow"
-
-
 def tool_write_line(call: ToolCall) -> str:
     """The summary's line for a write tool whose fake ran in its place, escaped as
     `tool_call_line` is."""
@@ -215,11 +207,6 @@ def _tool_outcome(call: ToolCall, returned: str) -> str:
     """`returned`, or `raised <type>`, before either line escapes it."""
     return returned if call.error is None else f"raised {call.error.type}"
 
-
-# The kinds a shadow run answers instead of forwarding, so they are the writes the summary owes
-# the reader a line each. `unknown` is here because an unclassified DELETE is a presumed write:
-# that is why the policy answers it locally, and the summary has to account for it the same way.
-INTERCEPTED_KINDS: frozenset[str] = frozenset({"write", "unknown"})
 
 WRITE_MARKER = "○"
 REJECTED_MARKER = "✗"
@@ -335,49 +322,10 @@ def _amounts(exchange: Exchange, route: Route | None) -> list[tuple[int, str]]:
     return found
 
 
-def is_intercepted(exchange: Exchange) -> bool:
-    """A write this run answered instead of performing - locally, or at an answer target: the
-    writes the summary prints a line for, and the ones `irimi compare` compares.
-
-    A REPLAYED write is not one of them. The agent retried with a key it had already used,
-    the store answered with the first write's own bytes, and it is the same write: counting it
-    again would make "nine would have been rejected" count retries instead of intentions. It is
-    still in the trace and still carries `idempotent-replay` on its own line. A CONFLICT stays,
-    because it is a different write the real service would have refused - which is exactly the
-    line the baseline report exists to print.
-    """
-    return (
-        exchange.kind in INTERCEPTED_KINDS
-        and exchange.answered_by != "live"
-        and IDEMPOTENT_REPLAY_FLAG not in exchange.flags
-    )
-
-
-def _failed_target(exchange: Exchange) -> bool:
-    """A request whose target irimi refused or could not reach, answered `irimi`, or one
-    mitmproxy could not finish dialling, which stays `delegated`."""
-    return TARGET_FAILED_FLAG in exchange.flags
-
-
-def _refused_by_irimi(exchange: Exchange) -> bool:
-    """A request irimi answered with its own error because it refused it or could not decide
-    about it. Asked of the flags, which a run stored under schema 2 carries too."""
-    return DECISION_FAILED_FLAG in exchange.flags or REFUSED_FLAG in exchange.flags
-
-
-def _is_faked(exchange: Exchange) -> bool:
-    """A write irimi answered with a fake of its own: not refused, and sent to no target."""
-    return (
-        not _refused_by_irimi(exchange)
-        and not _failed_target(exchange)
-        and exchange.answered_by != "delegated"
-    )
-
-
 def _would_fail(exchange: Exchange) -> bool:
     """A faked write the real service would have refused: the precondition check rejected it, or
     this run had already used its idempotency key for a different write."""
-    return exchange.precondition == "rejected" or IDEMPOTENCY_CONFLICT_FLAG in exchange.flags
+    return exchange.precondition == "rejected" or Flag.IDEMPOTENCY_CONFLICT in exchange.flags
 
 
 def _status_of(exchange: Exchange) -> str:
@@ -400,7 +348,7 @@ def _host_line(host: str, rows: Sequence[Exchange], width: int) -> str:
     ]
     if agent_reads:
         overlaid = sum(1 for ex in agent_reads if ex.answered_by == "overlay")
-        recorded = sum(1 for ex in agent_reads if FROM_RECORDING_FLAG in ex.flags)
+        recorded = sum(1 for ex in agent_reads if Flag.FROM_RECORDING in ex.flags)
         failed = [ex for ex in agent_reads if ex.response is None or ex.response.status >= 400]
         qualified = []
         if overlaid:
@@ -426,7 +374,7 @@ def _host_line(host: str, rows: Sequence[Exchange], width: int) -> str:
         for ex in rows
         if ex.kind == "read" and ex.issued_by == "agent" and ex.answered_by == "irimi"
     ]
-    unreached_reads = sum(1 for ex in irimi_reads if _failed_target(ex))
+    unreached_reads = sum(1 for ex in irimi_reads if failed_target(ex))
     if len(irimi_reads) > unreached_reads:
         refused_reads = _plural(len(irimi_reads) - unreached_reads, "read")
         phrases.append(f"{refused_reads} {REFUSED_BY_IRIMI}")
@@ -434,22 +382,22 @@ def _host_line(host: str, rows: Sequence[Exchange], width: int) -> str:
         phrases.append(f"{_plural(unreached_reads, 'read')} {UNREACHED}")
     llm = [ex for ex in rows if ex.kind == "llm"]
     if llm:
-        recorded_llm = sum(1 for ex in llm if FROM_RECORDING_FLAG in ex.flags)
+        recorded_llm = sum(1 for ex in llm if Flag.FROM_RECORDING in ex.flags)
         note = f" ({recorded_llm} from the recording)" if recorded_llm else ""
         phrases.append(f"{len(llm)} llm{note}")
     writes = [ex for ex in rows if is_intercepted(ex)]
-    faked = [ex for ex in writes if _is_faked(ex)]
+    faked = [ex for ex in writes if is_faked(ex)]
     if faked:
         unclassified = sum(1 for ex in faked if ex.kind == "unknown")
         note = f" ({unclassified} {UNCLASSIFIED})" if unclassified else ""
         phrases.append(f"{_plural(len(faked), 'faked write')}{note}")
-    refused = sum(1 for ex in writes if _refused_by_irimi(ex))
+    refused = sum(1 for ex in writes if refused_by_irimi(ex))
     if refused:
         phrases.append(f"{_plural(refused, 'write')} {REFUSED_BY_IRIMI}")
-    targeted = sum(1 for ex in writes if ex.answered_by == "delegated" and not _failed_target(ex))
+    targeted = sum(1 for ex in writes if ex.answered_by == "delegated" and not failed_target(ex))
     if targeted:
         phrases.append(f"{_plural(targeted, 'write')} sent to the target")
-    unreachable = sum(1 for ex in writes if _failed_target(ex) and not _refused_by_irimi(ex))
+    unreachable = sum(1 for ex in writes if failed_target(ex) and not refused_by_irimi(ex))
     if unreachable:
         phrases.append(f"{_plural(unreachable, 'write')} {UNREACHED}")
     return printable(f"  {host:<{width}}  {'  '.join(phrases)}".rstrip())
@@ -522,7 +470,7 @@ def check_reads(exchanges: Sequence[Exchange]) -> dict[int, Exchange]:
             is_intercepted(ex)
             and ex.answered_by.startswith("fake-")
             and ex.precondition is not None
-            and FROM_RECORDING_FLAG not in ex.flags
+            and Flag.FROM_RECORDING not in ex.flags
         )
         if not asked:
             continue
@@ -546,7 +494,7 @@ def _auth_failed(check_read: Exchange | None) -> bool:
 def _why_not_checked(exchange: Exchange, check_read: Exchange | None) -> str:
     """Why irimi could not check a write against live state, read off the read it made to. A
     write a replay answered from the recording made its check read in the recorded run."""
-    if check_read is None and FROM_RECORDING_FLAG in exchange.flags:
+    if check_read is None and Flag.FROM_RECORDING in exchange.flags:
         return "the recorded run could not check it"
     if check_read is None:
         return "irimi made no check read"
@@ -574,10 +522,10 @@ def write_sentence(
     prints for it. `check_read` is irimi's check read for it (`check_reads`), which says why a
     check could not be made. A write irimi refused with a body it never read whole is spelled as
     the request it was instead."""
-    refused = _refused_by_irimi(exchange)
+    refused = refused_by_irimi(exchange)
     # A `human:` sentence is never filled in from a body irimi did not read: a refused write whose
     # body was cut renders every field `?`, the same line for every such refund.
-    unread = refused and BODY_TRUNCATED_FLAG in exchange.flags
+    unread = refused and Flag.BODY_TRUNCATED in exchange.flags
     route = route_of(exchange, index)
     if route is not None and route.human and not unread:
         what = render_human(route.human, exchange, route)
@@ -585,11 +533,11 @@ def write_sentence(
         what = f"{exchange.request.method} {exchange.request.host}{exchange.request.path}"
     what = f"{exchange.service}  {what}"
     if refused:
-        if DECISION_FAILED_FLAG not in exchange.flags:
+        if Flag.DECISION_FAILED not in exchange.flags:
             return f"{REJECTED_MARKER} {what}  {REFUSED_BY_IRIMI}"
-        why = TOO_LARGE if BODY_TRUNCATED_FLAG in exchange.flags else DECISION_FAILED
+        why = TOO_LARGE if Flag.BODY_TRUNCATED in exchange.flags else DECISION_FAILED
         return f"{REJECTED_MARKER} {what}  {REFUSED_BY_IRIMI}: {why}"
-    if _failed_target(exchange):
+    if failed_target(exchange):
         return f"{REJECTED_MARKER} {what}  {TARGET_UNREACHABLE} {_target_host(exchange.target)}"
     if exchange.answered_by == "delegated":
         return f"{WRITE_MARKER} {what}  {SENT_TO_TARGET} {_target_host(exchange.target)}"
@@ -667,7 +615,6 @@ def _writes_with_their_reads(
     A read irimi issued itself is never here: `issued_by == "engine"` is a read the AGENT did not
     make, and the whole point of the line is to say which of the agent's reads saw the write.
 
-    Pairs rather than a dict keyed by write: `Exchange` is a mutable dataclass and so unhashable.
     A qualifying read with no such write before it is left out, and cannot happen - the overlay
     stamps or flags a read only on the strength of a same-service write in the log, and every
     write-log entry is a printed write. A replay serves a recorded overlaid read only once every
@@ -708,7 +655,7 @@ def _money_line(writes: Sequence[Exchange], index: MapIndex | None) -> list[str]
     failing: dict[str, int] = {}
     unknown = 0
     for ex in writes:
-        if not _is_faked(ex):
+        if not is_faked(ex):
             continue
         for value, code in _amounts(ex, route_of(ex, index)):
             if not code:
@@ -855,12 +802,12 @@ def _summary(
     real = len(telemetry) + sum(
         1
         for ex in exchanges
-        if ex.answered_by in ("live", "overlay") and FROM_RECORDING_FLAG not in ex.flags
+        if ex.answered_by in ("live", "overlay") and Flag.FROM_RECORDING not in ex.flags
     )
     # A target mitmproxy could not finish dialling answered nothing, so it is not counted as one.
-    targets = sum(1 for ex in exchanges if ex.answered_by == "delegated" and not _failed_target(ex))
+    targets = sum(1 for ex in exchanges if ex.answered_by == "delegated" and not failed_target(ex))
     by_irimi = total - real - targets
-    faked = sum(1 for ex in writes if _is_faked(ex))
+    faked = sum(1 for ex in writes if is_faked(ex))
     scope = " (whole process)" if whole else ""
     lines = [
         f"irimi {command} · run {run_id}{scope} · {_plural(total, 'exchange')} · {elapsed_s:.1f}s"
@@ -874,7 +821,7 @@ def _summary(
     # stored, `seq` order within each run. The start, the id and then the line itself break
     # a tie, since a call posted by hand can repeat another's id and times.
     stood_in = sorted(
-        (call for call in tool_calls if is_stood_in(call)),
+        (call for call in tool_calls if fake_ran(call)),
         key=lambda call: (
             call.ended_at,
             call.started_at,
@@ -932,7 +879,7 @@ def printable(text: str) -> str:
 
 def run_elapsed(record: RunRecord) -> float | None:
     """How long a stored run took, or None for one with no start or no end. Never negative: the
-    wall clock can step back between the two, as `pipeline.annotate` knows for an exchange."""
+    wall clock can step back between the two, as `Exchange` knows of its own."""
     if record.started_at is None or record.ended_at is None:
         return None
     return max(0.0, record.ended_at - record.started_at)

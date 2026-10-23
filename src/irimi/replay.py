@@ -42,13 +42,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from irimi import compare, redact, report
-from irimi.exchange import (
-    FROM_RECORDING_FLAG,
-    REFUSED_FLAG,
-    REPLAY_MISS_FLAG,
-    TARGET_FAILED_FLAG,
-    Exchange,
-)
+from irimi.exchange import Exchange, Flag
 from irimi.recording import made_within
 from irimi.sdk import replay_child
 from irimi.sdk.replay_child import CallOutcome
@@ -355,8 +349,8 @@ def _looked_up(event: object) -> bool:
             event.issued_by == "agent"
             and event.kind != "telemetry"
             and event.answered_by != "delegated"
-            and TARGET_FAILED_FLAG not in event.flags
-            and REFUSED_FLAG not in event.flags
+            and Flag.TARGET_FAILED not in event.flags
+            and Flag.REFUSED not in event.flags
         )
     return isinstance(event, ToolCall) and event.kind == "read"
 
@@ -382,9 +376,9 @@ def _answered(event: object) -> bool | None:
     if isinstance(event, Exchange):
         if event.issued_by != "agent":
             return None
-        if FROM_RECORDING_FLAG in event.flags:
+        if Flag.FROM_RECORDING in event.flags:
             return True
-        return False if REPLAY_MISS_FLAG in event.flags else None
+        return False if Flag.REPLAY_MISS in event.flags else None
     if isinstance(event, ToolCall) and event.kind == "read":
         return {"recording": True, "real": False}.get(event.ran)
     return None

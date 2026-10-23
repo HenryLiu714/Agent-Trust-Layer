@@ -876,7 +876,7 @@ def test_an_agent_that_names_the_recorded_run_never_rewrites_it(home, capfd, mon
     [stray] = StoreReader(store).load_run("unattributed").events
     assert (stray.run_id, stray.flags) == (
         source,
-        ("fidelity:recording", "from-recording", "bad-run-id"),
+        ("from-recording", "bad-run-id"),
     )
 
 

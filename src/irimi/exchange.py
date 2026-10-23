@@ -1,7 +1,10 @@
 """Engine-independent record of one HTTP exchange."""
 
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from typing import Literal
+from enum import StrEnum
+from typing import Any, Literal, Protocol
 
 Kind = Literal["read", "write", "llm", "telemetry", "unknown"]
 # How faithful a locally answered write is. `fake-L0` is the floor - the request's own fields
@@ -36,7 +39,6 @@ PreconditionOutcome = Literal["passed", "rejected", "not_evaluable"]
 # a write - a precondition read - and it is counted apart from the agent's own so that "reads are
 # real" keeps meaning "the reads your agent made are real".
 IssuedBy = Literal["agent", "engine"]
-Validation = Literal["validated", "unvalidated"]
 Door = Literal["forward", "reverse"]
 
 KINDS: tuple[Kind, ...] = ("read", "write", "llm", "telemetry", "unknown")
@@ -44,6 +46,9 @@ KINDS: tuple[Kind, ...] = ("read", "write", "llm", "telemetry", "unknown")
 # beside KINDS, rather than beside the policy, because the map loader has to refuse a
 # `default_kind` that names one and servicemap must not import policy.
 LIVE_KINDS: tuple[Kind, ...] = ("read", "llm", "telemetry")
+# The kinds a shadow run answers instead of forwarding: every kind that is not live. `unknown` is
+# here because an unclassified DELETE is a presumed write, so the summary accounts for it as one.
+INTERCEPTED_KINDS: frozenset[Kind] = frozenset(KINDS) - frozenset(LIVE_KINDS)
 SAFE_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
 # A map route's `match.method` when it names no method: it matches every verb, including the ones
 # that delete things. It lives here, with the rest of the shared wire vocabulary, because both the
@@ -51,85 +56,71 @@ SAFE_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
 # spelling of `"*"` in either of them is the drift `SAFE_METHODS` is here to avoid.
 ANY_METHOD = "*"
 
-# ------------------------------------------------------------------------------ exchange flags
-#
-# Every value that may appear in `Exchange.flags`, so a reader of a trace has one list to check
-# against. A flag is a fact about one exchange, never a counter: the engine adds each at most once.
 
-# The classifier could not say what this request is: `kind` is `unknown`, whether a map declared
-# it or the RFC fallback reached it, and the answer is a local fake rather than a forward.
-UNCLASSIFIED_FLAG = "unclassified"
-# A live-forwarding kind was refused because its route did not name this method (THE SCOPE RULE,
-# decision half, in `pipeline.classify`). The exchange says `unknown`, and this says why.
-DOWNGRADED_FLAG = "kind-downgraded"
-# An answer target was chosen and could not be reached or applied, and the agent got a 502.
-TARGET_FAILED_FLAG = "target-failed"
-# The classify/answer decision itself raised, so the request was answered locally with a 502 (see
-# `IrimiAddon.request`). Not `target-failed`: that one says a target was chosen and could not be
-# reached; this one says we never got as far as choosing.
-DECISION_FAILED_FLAG = "decision-failed"
-# The request hook refused the request before any decision: it could not be parsed or routed, or
-# it came in by base URL for a host irimi does not relay, or it could not be rewritten upstream.
-REFUSED_FLAG = "refused"
-# A live forward that lost the real service before it answered.
-UPSTREAM_ERROR_FLAG = "upstream-error"
-# How faithful a locally decided answer is: the L0 echo, the L1 fixture, or whatever an answer
-# target said. Exactly one of these is on every exchange irimi answered, except its own errors -
-# `FIDELITY_FLAGS` is the mapping, so a new `answered_by` value cannot ship without one.
-FIDELITY_L0_FLAG = "fidelity:L0"
-FIDELITY_L1_FLAG = "fidelity:L1"
-FIDELITY_DELEGATED_FLAG = "fidelity:delegated"
-FIDELITY_OVERLAY_FLAG = "fidelity:overlay"
-FIDELITY_RECORDING_FLAG = "fidelity:recording"
-# A route whose map names a `fixture:` was answered at L0 anyway, because this install could not
-# read the object. The answer is still safe - L0 is the floor - but it is not the fidelity the
-# map promised, and a trace that did not say so would read as a working L1.
-FIXTURE_FAILED_FLAG = "fixture-failed"
-# This write carried an idempotency key the run had already answered, with the same canonical
-# parameters, so the agent got the FIRST answer's own bytes back. The write is in the trace
-# and this says why it is not a second write: it is not in the write log, and the summary counts
-# the write once.
-IDEMPOTENT_REPLAY_FLAG = "idempotent-replay"
-# The same key came back with DIFFERENT parameters, so the write was answered with the service's
-# own `idempotency_error` instead of being faked. Nothing was performed and nothing was
-# minted, so it is not in the write log either - but it IS a distinct write the real service would
-# have refused, and the summary prints it as one.
-IDEMPOTENCY_CONFLICT_FLAG = "idempotency-conflict"
-# The two together: neither is a write the overlay may replay onto a later read. One tuple rather
-# than two clauses at each of the places that has to keep them out.
-IDEMPOTENCY_FLAGS: tuple[str, ...] = (IDEMPOTENT_REPLAY_FLAG, IDEMPOTENCY_CONFLICT_FLAG)
-# Some part of this exchange could not be redacted, so the stored copy holds `<redaction-failed>`
-# in its place. Set only on the copy `redact.redact_exchange` makes for disk, never on the
-# exchange the engine answered with: the live flow is never redacted.
-REDACTION_FAILED_FLAG = "redaction-failed"
-# This exchange's recorded request or response body is not all of it. The trace store kept only
-# its first `store.MAX_STORED_BODY` bytes: a decoded Exchange carries a body's bytes and not
-# its ref's `truncated`, so without this flag a stored run could not tell a cut body from a whole
-# one. Or the body decodes past `mitm.MAX_DECODED_BODY`, the store's `MAX_REDACTED_BODY`, so it
-# was never decoded whole and is recorded empty, as the store records any body past that.
-# Whatever irimi forwarded of such a body, it forwarded unchanged. The store sets it on the copy it
-# writes, and the engine on the exchange it reports.
-BODY_TRUNCATED_FLAG = "body-truncated"
-# The trace store could not use this exchange's run id as a directory name, so it is stored in
-# `unattributed/`: an id `trace.is_valid_run_id` refuses, or one that differs only in case
-# from a run already on a case-insensitive filesystem. Set only on the copy the store writes.
-BAD_RUN_ID_FLAG = "bad-run-id"
-# The recorded body of this streamed response is not the whole stream: the engine stopped
-# copying it at `store.MAX_STORED_BODY`, its copy raised, the stream ended in an error - an
-# upstream reset, an agent that hung up - before its last chunk, or its `Content-Encoding` could
-# not be decoded, or decoded past `mitm.MAX_DECODED_BODY`. The agent got every chunk that
-# arrived either way; this is a fact about the recording only.
-STREAM_TRUNCATED_FLAG = "stream-truncated"
+class Flag(StrEnum):
+    """Every value that may appear in `Exchange.flags`, so a reader of a trace has one list to
+    check against. A flag is a fact about one exchange, never a counter: the engine adds each at
+    most once."""
 
-# A replay looked this request up in the run it replays and found no answer it could give, so it
-# was decided as shadow mode decides it: a read or an llm call forwarded live, a write faked and
-# never forwarded. The first one in a run is where the replay diverged from its recording.
-REPLAY_MISS_FLAG = "replay-miss"
-# A replay answered this exchange from the recording: with the answer the recorded run got for the
-# same request, and the `answered_by` it was recorded with, but `live`, which is `recording`.
-# A write keeps its body, its level, its L3 outcome and its webhooks, so its minted ids are the
-# recorded ones. The one flag a reader counts the recording's answers by.
-FROM_RECORDING_FLAG = "from-recording"
+    # The classifier could not say what this request is: `kind` is `unknown`, whether a map
+    # declared it or the RFC fallback reached it, and the answer is a local fake, not a forward.
+    UNCLASSIFIED = "unclassified"
+    # A live-forwarding kind was refused because its route did not name this method (the scope
+    # rule's decision half, in `classify.classify`). The exchange says `unknown`; this says why.
+    DOWNGRADED = "kind-downgraded"
+    # An answer target was chosen and could not be reached or applied, and the agent got a 502.
+    TARGET_FAILED = "target-failed"
+    # The classify/answer decision itself raised, so the request was answered locally with a 502
+    # (see `IrimiAddon.request`). Not `target-failed`: that one says a target was chosen and
+    # could not be reached; this one says irimi never got as far as choosing.
+    DECISION_FAILED = "decision-failed"
+    # The request hook refused the request before any decision: it could not be parsed or routed,
+    # or it came in by base URL for a host irimi does not relay, or it could not be rewritten.
+    REFUSED = "refused"
+    # A live forward that lost the real service before it answered.
+    UPSTREAM_ERROR = "upstream-error"
+    # A route whose map names a `fixture:` was answered at L0 anyway, because this install could
+    # not read the object. The answer is still safe - L0 is the floor - but it is not the
+    # fidelity the map promised, and a trace that did not say so would read as a working L1.
+    FIXTURE_FAILED = "fixture-failed"
+    # This write carried an idempotency key the run had already answered, with the same canonical
+    # parameters, so the agent got the first answer's own bytes back. It is not in the write log,
+    # and the summary counts the write once.
+    IDEMPOTENT_REPLAY = "idempotent-replay"
+    # The same key came back with different parameters, so the write was answered with the
+    # service's own `idempotency_error` instead of being faked. Nothing was minted, so it is not
+    # in the write log either, but it is a distinct write the real service would have refused.
+    IDEMPOTENCY_CONFLICT = "idempotency-conflict"
+    # Some part of this exchange could not be redacted, so the stored copy holds
+    # `<redaction-failed>` in its place. Set only on the copy `redact.redact_exchange` makes for
+    # disk, never on the exchange the engine answered with: the live flow is never redacted.
+    REDACTION_FAILED = "redaction-failed"
+    # This exchange's recorded request or response body is not all of it. The trace store kept
+    # only its first `limits.MAX_STORED_BODY` bytes, or the body decodes past
+    # `limits.MAX_DECODED_BODY` and is recorded empty. Whatever irimi forwarded of such a body,
+    # it forwarded unchanged. The store sets it on the copy it writes, the engine on its own.
+    BODY_TRUNCATED = "body-truncated"
+    # The trace store could not use this exchange's run id as a directory name, so it is stored in
+    # `unattributed/`: an id `trace.is_valid_run_id` refuses, or one that differs only in case
+    # from a run already on a case-insensitive filesystem. Set only on the copy the store writes.
+    BAD_RUN_ID = "bad-run-id"
+    # The recorded body of this streamed response is not the whole stream: the engine stopped
+    # copying it at `limits.MAX_STORED_BODY`, its copy raised, the stream ended in an error
+    # before its last chunk, or its `Content-Encoding` could not be decoded, or decoded past
+    # `limits.MAX_DECODED_BODY`. The agent got every chunk that arrived either way.
+    STREAM_TRUNCATED = "stream-truncated"
+    # A replay looked this request up in the run it replays and found no answer it could give, so
+    # it was decided as shadow mode decides it: a read or an llm call forwarded live, a write
+    # faked and never forwarded. The first one in a run is where the replay diverged.
+    REPLAY_MISS = "replay-miss"
+    # A replay answered this exchange from the recording, with the answer the recorded run got for
+    # the same request and the `answered_by` it was recorded with (`live` becomes `recording`).
+    # A write keeps its body, its level, its L3 outcome and its webhooks.
+    FROM_RECORDING = "from-recording"
+
+
+# The two halves of idempotency: neither is a write the overlay may apply to a later read.
+IDEMPOTENCY_FLAGS: tuple[Flag, ...] = (Flag.IDEMPOTENT_REPLAY, Flag.IDEMPOTENCY_CONFLICT)
 
 # The control endpoint: a request addressed to irimi's own listener whose path starts here is
 # the SDK reporting a run's start, end or tool calls, and is answered by `irimi.control`. It is
@@ -157,21 +148,10 @@ TOOL_ACTIONS = frozenset({TOOL_CALLS_ACTION, RECORDED_ACTION})
 PROTOCOL_HEADER = "irimi-protocol"
 PROTOCOL_VERSION = "1"
 # The header that names the run a request belongs to. irimi reads it and strips it; the SDK
-# puts it on every request a run makes. Here, in layer 0, rather than in `pipeline`, so the
-# SDK, which sits beside `pipeline` and may not import it, spells it the same way. Header
+# puts it on every request a run makes. Here, in layer 0, rather than in `wire`, so the
+# SDK, which sits beside `wire` and may not import it, spells it the same way. Header
 # names are compared case-insensitively, and irimi stores them lower-case.
 RUN_HEADER = "irimi-run"
-
-# The fidelity flag each way of answering carries. One mapping rather than a branch per caller:
-# the policy reads it, and `tests/test_exchange.py` holds it exhaustive over the values that
-# answer a request. `irimi` has none: an error answers nothing, faithfully or not.
-FIDELITY_FLAGS: dict[AnsweredBy, str] = {
-    "fake-L0": FIDELITY_L0_FLAG,
-    "fake-L1": FIDELITY_L1_FLAG,
-    "delegated": FIDELITY_DELEGATED_FLAG,
-    "overlay": FIDELITY_OVERLAY_FLAG,
-    "recording": FIDELITY_RECORDING_FLAG,
-}
 
 Headers = tuple[tuple[str, str], ...]
 
@@ -185,7 +165,7 @@ def header_value(headers: Headers, name: str) -> str | None:
     """The first value of the header `name`, or None when there is none.
 
     Names are compared case-insensitively: a `Request`'s are already lower-case
-    (`pipeline.parse`), a `Response`'s are as the service or the target sent them. `name` is
+    (`wire.parse`), a `Response`'s are as the service or the target sent them. `name` is
     given lower-case, as every header name irimi spells is. One spelling of the lookup for every
     call site.
     """
@@ -248,6 +228,13 @@ class Response:
     headers: Headers
     body: bytes
 
+    @classmethod
+    def json(cls, status: int, doc: Mapping[str, Any], headers: Headers = ()) -> "Response":
+        """`doc` as a JSON answer: `content-type` first, then `headers`. Raises ValueError for a
+        value strict JSON cannot hold, such as NaN."""
+        body = json.dumps(doc, allow_nan=False).encode()
+        return cls(status, (("content-type", "application/json"), *headers), body)
+
     def header(self, name: str) -> str | None:
         """See `header_value`."""
         return header_value(self.headers, name)
@@ -259,7 +246,7 @@ class Response:
         return self if len(kept) == len(self.headers) else replace(self, headers=kept)
 
 
-@dataclass
+@dataclass(frozen=True)
 class Exchange:
     request: Request
     response: Response | None
@@ -267,10 +254,9 @@ class Exchange:
     operation: str
     kind: Kind
     answered_by: AnsweredBy
-    validation: Validation
     run_id: str
     door: Door = "forward"  # "reverse" = came in as /<host>/<path> on the listener itself
-    flags: tuple[str, ...] = field(default_factory=tuple)
+    flags: tuple[Flag, ...] = field(default_factory=tuple)
     # The answer target's address for a `delegated` exchange. "" for every other one:
     # `target: self` is not an address, and a live forward went to the real service.
     target: str = ""
@@ -312,6 +298,11 @@ class Exchange:
     # no body at all, which has nothing to split.
     stream_chunks: tuple[int, ...] = field(default_factory=tuple)
 
+    def __post_init__(self) -> None:
+        # The wall clock can step back mid-exchange, and a stored run's reader subtracts the two.
+        if self.ended_at < self.started_at:
+            object.__setattr__(self, "ended_at", self.started_at)
+
 
 def clip_chunks(chunks: tuple[int, ...], size: int) -> tuple[int, ...]:
     """The chunk lengths of the first `size` bytes of a body `chunks` splits: the chunks that fit
@@ -329,6 +320,13 @@ def clip_chunks(chunks: tuple[int, ...], size: int) -> tuple[int, ...]:
         kept.append(min(length, room))
         room -= length
     return tuple(kept)
+
+
+# ------------------------------------------------------------------------------ which writes count
+#
+# Two sets of writes, and the facts that split them. The write log holds the authored writes; the
+# summary prints a line for each intercepted write and each tool whose fake ran, and says of each
+# whether it was faked, refused by irimi, or sent to a target that failed.
 
 
 def is_authored_write(exchange: Exchange) -> bool:
@@ -363,7 +361,67 @@ def is_authored_write(exchange: Exchange) -> bool:
     return (
         exchange.kind not in LIVE_KINDS
         and exchange.answered_by not in ("live", "delegated", "irimi")
-        and DECISION_FAILED_FLAG not in exchange.flags
+        and Flag.DECISION_FAILED not in exchange.flags
         and exchange.precondition != "rejected"
         and not any(flag in exchange.flags for flag in IDEMPOTENCY_FLAGS)
     )
+
+
+def is_intercepted(exchange: Exchange) -> bool:
+    """A write this run answered instead of performing - locally, or at an answer target: the
+    writes the summary prints a line for, and the ones `irimi compare` compares. Unlike
+    `is_authored_write`, it keeps a rejected write, a conflict, a target's and irimi's own refusal.
+
+    A REPLAYED write is not one of them. The agent retried with a key it had already used,
+    the store answered with the first write's own bytes, and it is the same write: counting it
+    again would make "nine would have been rejected" count retries instead of intentions. It is
+    still in the trace and still carries `idempotent-replay` on its own line. A CONFLICT stays,
+    because it is a different write the real service would have refused - which is exactly the
+    line the baseline report exists to print.
+    """
+    return (
+        exchange.kind in INTERCEPTED_KINDS
+        and exchange.answered_by != "live"
+        and Flag.IDEMPOTENT_REPLAY not in exchange.flags
+    )
+
+
+def failed_target(exchange: Exchange) -> bool:
+    """A request whose target irimi refused or could not reach, answered `irimi`, or one
+    mitmproxy could not finish dialling, which stays `delegated`. Unlike a delegated write, the
+    target never answered it."""
+    return Flag.TARGET_FAILED in exchange.flags
+
+
+def refused_by_irimi(exchange: Exchange) -> bool:
+    """A request irimi answered with its own error because it refused it or could not decide
+    about it, unlike a failed target, which irimi did decide to send. Asked of the flags, which a
+    run stored under schema 2 carries too."""
+    return Flag.DECISION_FAILED in exchange.flags or Flag.REFUSED in exchange.flags
+
+
+def is_faked(exchange: Exchange) -> bool:
+    """An intercepted write irimi answered with a fake of its own: not refused by irimi, and sent
+    to no target."""
+    return (
+        not refused_by_irimi(exchange)
+        and not failed_target(exchange)
+        and exchange.answered_by != "delegated"
+    )
+
+
+class ToolRun(Protocol):
+    """What `fake_ran` reads of a tool call: `trace.ToolCall` is one."""
+
+    @property
+    def kind(self) -> str: ...
+
+    @property
+    def ran(self) -> str: ...
+
+
+def fake_ran(call: ToolRun) -> bool:
+    """A write tool whose fake ran in its place, which the summary owes a line, as it owes one to
+    an intercepted HTTP write. The SDK runs a write tool's real function only while it is
+    inactive, and then records nothing, so no write tool call it posts ran for real."""
+    return call.kind == "write" and call.ran == "shadow"

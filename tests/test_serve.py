@@ -15,7 +15,7 @@ import socket
 import pytest
 
 from irimi import ca, paths, servicemap
-from irimi.engine import EngineConfig
+from irimi.engine import EngineConfig, Serve
 from irimi.engine.mitm import IrimiAddon, MitmEngine
 from irimi.overlay import NoOverlay
 from irimi.policy import ShadowPolicy
@@ -287,7 +287,7 @@ def test_a_failed_decision_under_serve_mode_is_unattributed(tmp_path, monkeypatc
             self.recorded.append(exchange)
 
     store = _Kept()
-    cfg = dataclasses.replace(_config(tmp_path, monkeypatch), run_id=UNATTRIBUTED, serve=True)
+    cfg = dataclasses.replace(_config(tmp_path, monkeypatch), run_id=UNATTRIBUTED, mode=Serve())
     addon = IrimiAddon(cfg, _Broken(), store, NoOverlay(), None, lambda port, error: None)
     flow = tflow.tflow(
         req=tutils.treq(method=b"POST", host="api.example.com", port=443, path=b"/things")

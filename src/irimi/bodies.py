@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import parse_qsl
 
 from irimi.exchange import Request, media_type
+from irimi.limits import MAX_BODY_BYTES
 
 JSON_CT = "application/json"
 FORM_CT = "application/x-www-form-urlencoded"
@@ -25,7 +26,7 @@ _BRACKET = re.compile(r"\[([^\[\]]*)\]")
 # What `_split_key` returns for the one empty bracket pair it understands, `expand[]`. A real
 # segment can never be this: `_BRACKET` captures what is between the brackets, so a key spelling
 # `[]` out literally arrives as the two characters and not as this marker.
-APPEND = "[]"
+_APPEND = "[]"
 # How deep a bracket path may nest before the key is kept flat instead. Stripe's deepest real key
 # is `line_items[0][price_data][product_data][name]`, four levels; a hostile body can otherwise
 # nest thousands, and unwinding one that deep is a RecursionError inside a mitmproxy hook.
@@ -78,7 +79,7 @@ def _has_non_finite(value: Any) -> bool:
 def _split_key(key: str) -> tuple[str, list[str]]:
     """`metadata[order_id]` -> `("metadata", ["order_id"])`; `a[0][b]` -> `("a", ["0", "b"])`.
 
-    `expand[]` -> `("expand", [APPEND])`: an empty bracket pair on its own is the one bracketed
+    `expand[]` -> `("expand", [_APPEND])`: an empty bracket pair on its own is the one bracketed
     shape with an unambiguous meaning, and it is Stripe's own documented `curl` spelling for a
     repeated array field. Kept flat, `expand[]=a&expand[]=b` would echo the literal JSON key
     `"expand[]"`.
@@ -98,7 +99,7 @@ def _split_key(key: str) -> tuple[str, list[str]]:
     if "".join(f"[{s}]" for s in segments) != tail:
         return key, []
     if segments == [""]:
-        return head, [APPEND]
+        return head, [_APPEND]
     if "" in segments:  # `a[][b]`, `a[b][]`: an append in the middle of a path means nothing here
         return key, []
     return head, segments
@@ -192,7 +193,7 @@ def parse_form(text: str) -> dict[str, Any]:
             bare.setdefault(head, []).append(_form_value(value))
             root.setdefault(head, None)  # hold the position; the value is filled in below
             continue
-        if segments == [APPEND]:
+        if segments == [_APPEND]:
             if isinstance(root.get(head), dict):
                 continue
             bare.pop(head, None)
@@ -224,10 +225,7 @@ def reflect(request: Request) -> dict[str, Any]:
     ct = content_type(request)
     try:
         if _is_json(ct):
-            parsed = json.loads(request.body)
-            if not isinstance(parsed, dict) or _has_non_finite(parsed):
-                return {}
-            return parsed
+            return json_object(request.body, max_bytes=None, finite=True) or {}
         if ct == FORM_CT:
             return parse_form(request.body.decode("utf-8", "replace"))
     except Exception:  # a malformed body reflects nothing; it must never reach the caller
@@ -235,28 +233,24 @@ def reflect(request: Request) -> dict[str, Any]:
     return {}
 
 
-# A live body this size is not an object any service's effects model, and parsing it on the answer
-# path would cost more than the read or the check it is trying to improve.
-MAX_BODY_BYTES = 2_000_000
+def json_object(
+    body: bytes, *, max_bytes: int | None = MAX_BODY_BYTES, finite: bool = False
+) -> dict[str, Any] | None:
+    """`body` as a JSON object, or None when it is not one irimi should decode. Never raises.
 
-
-def json_object(body: bytes) -> dict[str, Any] | None:
-    """`body` as a JSON object, or None when it is not one irimi should decode."""
-    if not body or len(body) > MAX_BODY_BYTES:
+    `max_bytes` refuses a larger body unread: a live body that size is not an object any
+    service's effects model. None reads any size, for a request irimi must read whole. `finite`
+    refuses NaN and the infinities, which `json.loads` reads and a strict parser refuses, for a
+    body irimi echoes back."""
+    if not body or (max_bytes is not None and len(body) > max_bytes):
         return None
     try:
         parsed = json.loads(body)
-    except Exception:
+    except Exception:  # not JSON, not UTF-8, or nested past the parser's depth
         return None
-    return parsed if isinstance(parsed, dict) else None
-
-
-# Fields of a fixture object the service owns, which the request may therefore never write over.
-# `id` is here as well as in every route's `ids:`, because a body posting `object=charge` to a
-# refund route would otherwise hand stripe-python the wrong class to build, and `created` and
-# `livemode` are facts about this answer rather than values the caller gets to choose.
-# The read side keeps the same rule: `services.stripe.effects._customer` may not move one.
-SERVICE_OWNED: frozenset[str] = frozenset({"id", "object", "created", "livemode"})
+    if not isinstance(parsed, dict) or (finite and _has_non_finite(parsed)):
+        return None
+    return parsed
 
 
 def is_int(value: Any) -> bool:

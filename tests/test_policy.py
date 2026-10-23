@@ -8,17 +8,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from irimi import bodies, delegation, pipeline, servicemap, services
-from irimi.exchange import (
-    FIDELITY_L0_FLAG,
-    FIDELITY_L1_FLAG,
-    FIXTURE_FAILED_FLAG,
-    IDEMPOTENCY_CONFLICT_FLAG,
-    IDEMPOTENT_REPLAY_FLAG,
-    Request,
-    Response,
-)
-from irimi.pipeline import classify
+from irimi import bodies, delegation, reader, servicemap, services
+from irimi.classify import Classification, classify
+from irimi.exchange import Exchange, Flag, Request, Response
+from irimi.netaddr import Target
 from irimi.policy import ShadowPolicy
 from irimi.reader import UpstreamReader
 from irimi.servicemap import IdSpec
@@ -71,7 +64,7 @@ def test_shadow_fakes_l0(kind):
     assert isinstance(ans.response, Response)
     assert ans.response.status == 200
     assert ("content-type", "application/json") in ans.response.headers
-    assert ans.flags == (FIDELITY_L0_FLAG,)
+    assert ans.flags == ()
     assert isinstance(json.loads(ans.response.body), dict)
 
 
@@ -344,7 +337,7 @@ def test_a_faker_that_fails_still_answers_locally(monkeypatch, broken, path):
     ans = _answer(_req("POST", path=path))
     assert ans.answered_by == "fake-L0"
     assert ans.response.body == b"{}"
-    assert ans.flags == (FIDELITY_L0_FLAG,)
+    assert ans.flags == ()
 
 
 def test_reflect_reads_a_json_object():
@@ -778,7 +771,7 @@ def test_a_slack_incoming_webhook_answers_the_literal_ok():
     assert ans.response.body == b"ok"
     assert dict(ans.response.headers)["content-type"] == "text/plain"
     assert ans.answered_by == "fake-L0"
-    assert ans.flags == (FIDELITY_L0_FLAG,)
+    assert ans.flags == ()
 
 
 def test_the_web_api_still_gets_the_json_envelope():
@@ -874,7 +867,7 @@ FORM = "application/x-www-form-urlencoded"
 def test_a_mapped_write_is_answered_at_l1_and_says_so():
     ans = _refund()
     assert ans.answered_by == "fake-L1"
-    assert ans.flags == (FIDELITY_L1_FLAG,)
+    assert ans.flags == ()
     assert ans.response.status == 200
     assert ("content-type", "application/json") in ans.response.headers
 
@@ -992,7 +985,7 @@ def test_a_route_whose_fixture_cannot_be_read_falls_back_to_l0_and_says_so(no_fi
     working L1."""
     ans = _refund()
     assert ans.answered_by == "fake-L0"
-    assert ans.flags == (FIDELITY_L0_FLAG, FIXTURE_FAILED_FLAG)
+    assert ans.flags == (Flag.FIXTURE_FAILED,)
     body = json.loads(ans.response.body)
     assert body["charge"] == "ch_test"  # the L0 echo, which still parses
     assert body["id"].startswith("re_")
@@ -1003,7 +996,7 @@ def test_an_unmapped_write_is_still_l0_with_no_flag():
     """L1 is per route. A host no map claims has no fixture to start from and must not pretend."""
     ans = _answer(_req("POST", host="example.invalid", path="/things", body=b"{}"))
     assert ans.answered_by == "fake-L0"
-    assert ans.flags == (FIDELITY_L0_FLAG,)
+    assert ans.flags == ()
 
 
 def test_every_shipped_fixture_route_names_an_object_that_ships():
@@ -1066,7 +1059,7 @@ def test_a_route_target_makes_the_answer_delegated_not_faked():
     assert ans.answered_by == "delegated"
     assert ans.response is None  # the engine forwards; the policy does no I/O
     assert ans.forward_to == delegation.ForwardTo(
-        url="http://127.0.0.1:3000/refund", forward_auth=False
+        Target.parse("http://127.0.0.1:3000/refund"), forward_auth=False
     )
 
 
@@ -1134,15 +1127,6 @@ def test_forward_auth_reaches_the_engine_through_the_answer():
     assert ans.forward_to.forward_auth is True
 
 
-def test_a_delegated_answer_carries_its_own_fidelity_flag():
-    """Symmetry with `fidelity:L0`: every locally decided answer says how it was produced, so a
-    delegated exchange is not the one row in the log with no fidelity at all."""
-    index = _targeted_index([("api.stripe.com", "/v1/refunds", "http://127.0.0.1:3000/r")])
-    ans = _answer_with(index, _req("POST", path="/v1/refunds"))
-    assert ans.flags == ("fidelity:delegated",)
-    assert _answer(_req("POST", path="/v1/refunds")).flags == (FIDELITY_L1_FLAG,)
-
-
 def test_an_unlisted_read_on_a_targeted_service_is_not_delegated_without_target_reads():
     """The unmatched branch of `delegate`, which `target_for` never sees. Replacing its whole
     condition with `elif True:` passed all 421 tests: the two tests whose docstrings claim to
@@ -1161,9 +1145,9 @@ def test_an_unmatched_llm_or_telemetry_request_is_never_delegated():
     *unmatched* route a live kind is a live `default_kind`, which the loader refuses.
     """
     sm = servicemap.loader.load_shipped()[0]
-    sm = replace(sm, target="http://127.0.0.1:3000", target_reads=True)
+    sm = replace(sm, target=Target.parse("http://127.0.0.1:3000"), target_reads=True)
     for kind in ("llm", "telemetry", "read"):
-        cls = pipeline.Classification(
+        cls = Classification(
             service=sm.service,
             operation="",
             kind=kind,
@@ -1185,7 +1169,7 @@ def test_a_credential_path_host_is_never_delegated_off_the_machine():
     escaping. The map is built here because the loader will not produce one."""
     slack = next(sm for sm in servicemap.loader.load_shipped() if sm.service == "slack")
     assert "hooks.slack.com" in slack.hosts
-    off_machine = replace(slack, target="http://stub.internal:9000")
+    off_machine = replace(slack, target=Target.parse("http://stub.internal:9000"))
     index = servicemap.MapIndex((off_machine,))
 
     for path in ("/services/T0/B0/SECRET", "/workflows/T0/A0/SECRET/xyz", "/triggers/T0/1/abc"):
@@ -1199,7 +1183,7 @@ def test_a_credential_path_host_is_never_delegated_off_the_machine():
     assert forward is not None and forward.url.startswith("http://stub.internal:9000")
 
     # And a loopback target on the credential host is fine - that is the supported way to stub it.
-    local = servicemap.MapIndex((replace(slack, target="http://127.0.0.1:3000"),))
+    local = servicemap.MapIndex((replace(slack, target=Target.parse("http://127.0.0.1:3000")),))
     request = _req("POST", host="hooks.slack.com", path="/workflows/T0/A0/SECRET/xyz")
     forward = delegation.delegate(request, classify(request, local))
     assert forward is not None and forward.url.startswith("http://127.0.0.1:3000")
@@ -1248,7 +1232,7 @@ def test_a_slack_post_still_answers_the_envelope_when_the_fixture_cannot_be_read
     ans = _post_message()
     body = json.loads(ans.response.body)
     assert ans.answered_by == "fake-L0"
-    assert FIXTURE_FAILED_FLAG in ans.flags
+    assert Flag.FIXTURE_FAILED in ans.flags
     assert body["ok"] is True
     assert body["channel"] == "C1"
     assert "message" not in body
@@ -1420,7 +1404,7 @@ def test_a_refund_of_a_fully_refunded_charge_is_answered_with_stripes_own_refusa
     assert ans.precondition == "rejected"
     assert ans.rejection_code == "charge_already_refunded"
     assert ans.answered_by == "fake-L1"
-    assert ans.flags == (FIDELITY_L1_FLAG,)
+    assert ans.flags == ()
     assert ans.response.status == 400
     error = json.loads(ans.response.body)["error"]
     assert error["code"] == "charge_already_refunded"
@@ -1573,7 +1557,18 @@ def test_the_runs_own_earlier_refund_is_what_makes_the_second_one_rejected():
     cls = classify(request, SHIPPED)
     first = _checked(_reader(_json(200, _charge())), request)
     assert first.precondition == "passed"
-    log = [pipeline.annotate(request, first.response, cls, first.answered_by, "t3st")]
+    log = [
+        Exchange(
+            request=request,
+            response=first.response,
+            service=cls.service,
+            operation=cls.operation,
+            kind=cls.kind,
+            answered_by=first.answered_by,
+            run_id="t3st",
+            flags=cls.flags,
+        )
+    ]
 
     reader = _reader(_json(200, _charge()))
     second = _checked(reader, request, write_log=log)
@@ -1592,7 +1587,18 @@ def test_an_overlay_that_knows_it_is_incomplete_makes_the_check_not_evaluable(mo
     request = _refund_request()
     cls = classify(request, SHIPPED)
     earlier = _checked(_reader(_json(200, _charge())), request)
-    log = [pipeline.annotate(request, earlier.response, cls, earlier.answered_by, "t3st")]
+    log = [
+        Exchange(
+            request=request,
+            response=earlier.response,
+            service=cls.service,
+            operation=cls.operation,
+            kind=cls.kind,
+            answered_by=earlier.answered_by,
+            run_id="t3st",
+            flags=cls.flags,
+        )
+    ]
     ans = _checked(_reader(_json(200, _charge(refunded_so_far=4900))), request, write_log=log)
     assert ans.precondition == "not_evaluable"
     assert ans.response.status == 200
@@ -1736,7 +1742,7 @@ def test_a_rejection_of_a_write_with_no_fixture_is_honestly_l0():
 def test_a_rejection_whose_fixture_will_not_load_says_so(monkeypatch):
     monkeypatch.setattr(generic, "fixture_object", lambda service, name: None)
     fake = services.fake_rejection(classify(_refund_request(), SHIPPED), {"error": {}})
-    assert (fake.answered_by, fake.flags) == ("fake-L0", (FIXTURE_FAILED_FLAG,))
+    assert (fake.answered_by, fake.flags) == ("fake-L0", (Flag.FIXTURE_FAILED,))
 
 
 # ------------------------------------------------------------------ the upstream reader
@@ -1787,7 +1793,7 @@ def test_the_upstream_reader_returns_what_the_service_answered(upstream, status,
 
 
 def test_the_upstream_reader_refuses_a_body_past_the_cap(upstream, monkeypatch):
-    monkeypatch.setattr(bodies, "MAX_BODY_BYTES", len(_Upstream.body) - 1)
+    monkeypatch.setattr(reader, "MAX_BODY_BYTES", len(_Upstream.body) - 1)
     assert UpstreamReader()(_local(upstream)) is None
 
 
@@ -1859,8 +1865,8 @@ def test_a_replay_carries_the_replay_flag_and_the_original_fidelity_flag():
     policy = ShadowPolicy(reader=_reader(_json(200, _charge())), maps=SHIPPED)
     first = _ask(policy, _refund_request())
     second = _ask(policy, _refund_request())
-    assert first.flags == (FIDELITY_L1_FLAG,)
-    assert second.flags == (FIDELITY_L1_FLAG, IDEMPOTENT_REPLAY_FLAG)
+    assert first.flags == ()
+    assert second.flags == (Flag.IDEMPOTENT_REPLAY,)
 
 
 def test_a_replay_issues_no_precondition_read():
@@ -1888,8 +1894,8 @@ def test_the_same_key_with_a_different_amount_is_an_idempotency_error():
     error = json.loads(ans.response.body)["error"]
     assert error["type"] == "idempotency_error"
     assert "idem-1" in error["message"]
-    assert IDEMPOTENCY_CONFLICT_FLAG in ans.flags
-    assert IDEMPOTENT_REPLAY_FLAG not in ans.flags
+    assert Flag.IDEMPOTENCY_CONFLICT in ans.flags
+    assert Flag.IDEMPOTENT_REPLAY not in ans.flags
     assert ans.rejection_code == "idempotency_error"
     # L3 was never asked, so it decided nothing: a conflict is not `precondition: rejected`.
     assert ans.precondition is None
@@ -1909,7 +1915,7 @@ def test_a_replayed_rejection_is_the_same_rejection():
     assert second.response.status == first.response.status == 400
     assert second.precondition == "rejected"
     assert second.rejection_code == first.rejection_code == "charge_already_refunded"
-    assert second.flags == (*first.flags, IDEMPOTENT_REPLAY_FLAG)
+    assert second.flags == (*first.flags, Flag.IDEMPOTENT_REPLAY)
     assert len(reader.asked) == 1
 
 
@@ -1920,8 +1926,8 @@ def test_a_write_that_sent_no_key_is_never_replayed():
     first = _ask(policy, request)
     second = _ask(policy, request)
     assert json.loads(first.response.body)["id"] != json.loads(second.response.body)["id"]
-    assert IDEMPOTENT_REPLAY_FLAG not in first.flags
-    assert IDEMPOTENT_REPLAY_FLAG not in second.flags
+    assert Flag.IDEMPOTENT_REPLAY not in first.flags
+    assert Flag.IDEMPOTENT_REPLAY not in second.flags
 
 
 def test_a_slack_write_is_never_replayed():
@@ -1933,8 +1939,8 @@ def test_a_slack_write_is_never_replayed():
     first = _ask(policy, request)
     second = _ask(policy, request)
     assert json.loads(first.response.body)["ts"] != json.loads(second.response.body)["ts"]
-    assert IDEMPOTENT_REPLAY_FLAG not in second.flags
-    assert IDEMPOTENCY_CONFLICT_FLAG not in second.flags
+    assert Flag.IDEMPOTENT_REPLAY not in second.flags
+    assert Flag.IDEMPOTENCY_CONFLICT not in second.flags
 
 
 def test_a_key_is_scoped_to_the_stripe_account():
@@ -1946,8 +1952,8 @@ def test_a_key_is_scoped_to_the_stripe_account():
     second = _ask(policy, replace(_refund_request(), headers=other))
     assert json.loads(first.response.body)["id"] != json.loads(second.response.body)["id"]
     assert second.response.status == 200
-    assert IDEMPOTENT_REPLAY_FLAG not in second.flags
-    assert IDEMPOTENCY_CONFLICT_FLAG not in second.flags
+    assert Flag.IDEMPOTENT_REPLAY not in second.flags
+    assert Flag.IDEMPOTENCY_CONFLICT not in second.flags
 
 
 class _BrokenStore:
@@ -1977,7 +1983,7 @@ def test_a_store_that_raises_answers_the_write_afresh(broken):
     assert first.response.status == second.response.status == 200
     assert first.answered_by == second.answered_by == "fake-L1"
     assert json.loads(first.response.body)["id"] != json.loads(second.response.body)["id"]
-    assert IDEMPOTENT_REPLAY_FLAG not in second.flags
+    assert Flag.IDEMPOTENT_REPLAY not in second.flags
 
 
 def test_a_key_reused_on_another_object_of_one_route_is_refused():
@@ -1990,8 +1996,8 @@ def test_a_key_reused_on_another_object_of_one_route_is_refused():
     assert json.loads(first.response.body)["id"] == "pi_AAA"
     assert second.response.status == 400
     assert json.loads(second.response.body)["error"]["type"] == "idempotency_error"
-    assert IDEMPOTENCY_CONFLICT_FLAG in second.flags
-    assert IDEMPOTENT_REPLAY_FLAG not in second.flags
+    assert Flag.IDEMPOTENCY_CONFLICT in second.flags
+    assert Flag.IDEMPOTENT_REPLAY not in second.flags
 
 
 def test_a_key_reused_on_another_route_is_refused():
@@ -2002,7 +2008,7 @@ def test_a_key_reused_on_another_route_is_refused():
     ans = _ask(policy, replace(_req("POST", path="/v1/customers/cus_ZZZ"), headers=AGENT_HEADERS))
     assert ans.response.status == 400
     assert json.loads(ans.response.body)["error"]["type"] == "idempotency_error"
-    assert IDEMPOTENCY_CONFLICT_FLAG in ans.flags
+    assert Flag.IDEMPOTENCY_CONFLICT in ans.flags
 
 
 def test_stripe_python_raises_idempotency_error_on_the_conflict_body():
@@ -2093,7 +2099,7 @@ def test_a_replayed_write_lists_no_webhooks():
     first = _ask(policy, _refund_request())
     second = _ask(policy, _refund_request())
     assert first.would_fire == ("refund.created", "charge.refunded")
-    assert IDEMPOTENT_REPLAY_FLAG in second.flags
+    assert Flag.IDEMPOTENT_REPLAY in second.flags
     assert second.would_fire == ()
 
 
@@ -2104,7 +2110,7 @@ def test_an_idempotency_conflict_lists_no_webhooks():
     policy = ShadowPolicy(reader=_reader(_json(200, _charge())), maps=SHIPPED)
     _ask(policy, _refund_request(b"charge=ch_REAL&amount=100"))
     ans = _ask(policy, _refund_request(b"charge=ch_REAL&amount=250"))
-    assert IDEMPOTENCY_CONFLICT_FLAG in ans.flags
+    assert Flag.IDEMPOTENCY_CONFLICT in ans.flags
     assert ans.rejection_code == "idempotency_error"
     assert ans.precondition is None
     assert ans.would_fire == ()

@@ -31,11 +31,12 @@ from typing import Any
 
 import pytest
 
-from irimi import __version__, exchange, paths, redact, sdk
+from irimi import __version__, exchange, limits, paths, redact, sdk
 from irimi.exchange import Exchange
+from irimi.limits import MAX_ERROR_TYPE
 from irimi.sdk import capture, client, runs
 from irimi.store import DirectoryStore, StoreReader
-from irimi.trace import MAX_ERROR_TYPE, ErrorInfo, RunRecord, Trigger
+from irimi.trace import ErrorInfo, RunRecord, Trigger
 from tests import test_engine_mitm
 from tests.test_engine_mitm import _config, _start, _via_proxy
 
@@ -925,14 +926,14 @@ def test_a_name_that_is_not_a_string_is_refused_and_a_long_one_is_cut(irimi):
     with sdk.run("name " * 1000):
         pass
     names = sorted(r.trigger.name for r in irimi.sdk_runs() if r.trigger is not None)
-    assert names == ["name " * (runs.MAX_NAME // 5)]
+    assert names == ["name " * (limits.MAX_NAME // 5)]
 
 
 def test_a_long_name_is_cut_outside_secrets_so_it_keeps_no_part_of_a_key(irimi):
     """The SDK cuts a name before irimi redacts it: cut inside a key, the part it kept would be
     too short for the key's shape, and reach disk. Cut outside secrets, the key is left out whole.
     """
-    head = "n" * (runs.MAX_NAME - 10) + " "
+    head = "n" * (limits.MAX_NAME - 10) + " "
     with sdk.run(head + "ghp_" + "k" * 36):
         pass
     assert [r.trigger.name for r in irimi.sdk_runs() if r.trigger is not None] == [head]

@@ -6,7 +6,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Protocol
 
-from irimi import bodies, pipeline, services, writelog
+from irimi import bodies, services, writelog
+from irimi.classify import classify
 from irimi.exchange import Exchange, OverlayFidelity, Request, Response
 from irimi.servicemap import MapIndex
 
@@ -80,7 +81,7 @@ class ServiceOverlay:
 
     Constructed with the loaded maps because the seam hands it a `Request` and not a
     `Classification`, while the effect tables key on the read's service and operation.
-    `pipeline.classify` is the one place that answers that question, so it is asked again here
+    `classify.classify` is the one place that answers that question, so it is asked again here
     rather than a second matcher being written; it is a pure dict lookup and its answer is
     identical to the engine's.
 
@@ -180,5 +181,5 @@ class ServiceOverlay:
         return Translation(replace(read_request, query=rewritten.query), rewritten.removed)
 
     def _route(self, request: Request) -> tuple[str, str]:
-        classification = pipeline.classify(request, self.maps)
+        classification = classify(request, self.maps)
         return classification.service, classification.operation

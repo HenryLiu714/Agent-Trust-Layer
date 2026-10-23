@@ -13,10 +13,11 @@ from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, overload
 
+from irimi.limits import MAX_NAME
 from irimi.sdk.capture import capture, capture_call
 from irimi.sdk.client import LOGGER_NAME
 from irimi.sdk.context import is_active
-from irimi.sdk.runs import MAX_NAME, RunScope
+from irimi.sdk.runs import RunScope
 from irimi.secret_shapes import cut_outside_secrets
 from irimi.trace import MAIN_MODULE, importable_module
 

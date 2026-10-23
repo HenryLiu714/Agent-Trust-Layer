@@ -133,8 +133,10 @@ The short version:
 ```
 src/irimi/
   exchange.py paths.py netaddr.py     vocabulary, state locations, "is this loopback?"
+  limits.py files.py opener.py        size bounds; private files; the no-redirect opener
   ca.py  servicemap/  bodies.py       the local CA; the service maps; the never-raising body parser
-  pipeline.py  reverse_door.py        parse -> classify -> annotate -> respond; the /<host>/ door
+  classify.py  wire.py                what a request is; parse, attribute and stamp
+  reverse_door.py                     the /<host>/ door
   delegation.py                       answer targets
   services/                           one spec per service: answers, effects, checks; the L0/L1 body
   reader.py                           the one real read L3 issues

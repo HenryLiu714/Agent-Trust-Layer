@@ -36,6 +36,7 @@ from irimi.exchange import (
     AnsweredBy,
     Door,
     Exchange,
+    Flag,
     Headers,
     IssuedBy,
     Kind,
@@ -43,8 +44,8 @@ from irimi.exchange import (
     PreconditionOutcome,
     Request,
     Response,
-    Validation,
 )
+from irimi.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE, MAX_POSTED_MESSAGE, MAX_POSTED_TYPE
 from irimi.secret_shapes import cut_outside_secrets
 
 # One integer for the whole format. `run.json` carries it and a run's events are read under
@@ -54,12 +55,13 @@ from irimi.secret_shapes import cut_outside_secrets
 # the field existed still reads; adding a field means adding that decoder path. A new value in a
 # closed vocabulary (`kind`, `answered_by`, `mode`, `attribution`: every field read with
 # `_one_of`) IS a bump, because an older reader refuses a value it does not
-# know; `flags` is open, and a reader accepts a flag it does not know. Changing what a field means
+# know; `flags` is open, and a reader skips a flag it does not know. Changing what a field means
 # is a bump too. `docs/trace-format.md`, "Versioning", is the rule in full.
 #
 # Version 2 has `mode` `replay`, `answered_by` and `ran` `recording`, and a run record's
 # `replay_of`. A version 1 run reads under it unchanged, as a run with no `replay_of`.
-# Version 3 has `answered_by` `irimi`; a version 2 run reads under it unchanged.
+# Version 3 has `answered_by` `irimi`, and an exchange has no `validation` or `fidelity:*`
+# flags; a version 2 run reads under it unchanged, those keys and flags ignored.
 SCHEMA_VERSION = 3
 
 # The run id of an exchange no run claimed: `irimi serve` with no `Irimi-Run` header.
@@ -67,7 +69,7 @@ UNATTRIBUTED = "unattributed"
 
 # A run id becomes a directory name in the store, so this pattern is the path-traversal
 # guard: no `/`, no `.` - so no `..` - no space, nothing empty, nothing unbounded.
-# `pipeline.attribute_run` treats an `Irimi-Run` value it refuses as absent. Test a value with
+# `wire.attribute_run` treats an `Irimi-Run` value it refuses as absent. Test a value with
 # `is_valid_run_id`, which uses `fullmatch`, never with `RUN_ID_PATTERN.match`: `$` also matches
 # before a trailing newline, so `.match` accepts `"run\n"` - a name no directory should have.
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -75,23 +77,6 @@ RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # A body is stored as `blobs/<sha256>`, so a `BodyRef` read back from disk is checked
 # against this before a store can join it onto a path.
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
-
-# The longest `ErrorInfo.message` a trace keeps: a run's error is a label, not a log.
-MAX_ERROR_MESSAGE = 1000
-# The longest `ErrorInfo.type` a trace keeps: a class's `module.qualname` is far shorter, but
-# a posted type is whatever the client sent, up to 2 MiB.
-# The store cuts both, and only once it has redacted the whole of each: a key cut in two is
-# no longer its shape, so redaction would not find the half a cut kept.
-MAX_ERROR_TYPE = 300
-# The most of an exception's message `ErrorInfo.from_exception` keeps, far past MAX_ERROR_MESSAGE:
-# the SDK posts the message for the store to redact and cut, and must only keep a post under the
-# control endpoint's 2 MiB.
-MAX_POSTED_MESSAGE = 64 * 1024
-# The most of an exception's type `ErrorInfo.from_exception` keeps: four labels' worth, as the store
-# keeps of an end's while it waits (`store.MAX_QUEUED_ERROR`). A class's `module.qualname` is far
-# shorter, but one made with `type()` may be any length, and one past the control endpoint's 2 MiB
-# cost its run the post, and so its end.
-MAX_POSTED_TYPE = 4 * MAX_ERROR_TYPE
 
 # The most of a string a decoder's message quotes (`_quoted`). The message is read by a person, on
 # `irimi runs show`'s stderr, in `list_runs`'s warning or as a control refusal, and a damaged
@@ -168,6 +153,12 @@ class ErrorInfo:
             ),
             cut_outside_secrets(message, MAX_POSTED_MESSAGE),
         )
+
+    def as_label(self) -> "ErrorInfo":
+        """This error cut to what a trace keeps: its type to MAX_ERROR_TYPE and its message to
+        MAX_ERROR_MESSAGE. Cut only what is already redacted: a cut first can keep half a key,
+        which redaction no longer finds."""
+        return ErrorInfo(self.type[:MAX_ERROR_TYPE], self.message[:MAX_ERROR_MESSAGE])
 
 
 @dataclass(frozen=True)
@@ -370,7 +361,6 @@ def exchange_to_json(ex: Exchange, put_body: PutBody) -> dict[str, Any]:
         "operation": ex.operation,
         "kind": ex.kind,
         "answered_by": ex.answered_by,
-        "validation": ex.validation,
         "door": ex.door,
         "issued_by": ex.issued_by,
         "target": ex.target,
@@ -529,10 +519,9 @@ def exchange_from_json(d: Mapping[str, Any], get_body: GetBody) -> Exchange:
         operation=_str(d, "operation"),
         kind=_one_of(d, "kind", Kind),
         answered_by=_one_of(d, "answered_by", AnsweredBy),
-        validation=_one_of(d, "validation", Validation),
         run_id=_str(d, "run_id"),
         door=_one_of(d, "door", Door),
-        flags=_strings(d, "flags"),
+        flags=_flags(d, "flags"),
         target=_str(d, "target"),
         overlay=_optional(d, "overlay", lambda d, k: _one_of(d, k, OverlayFidelity)),
         precondition=_optional(d, "precondition", lambda d, k: _one_of(d, k, PreconditionOutcome)),
@@ -753,6 +742,14 @@ def _strings(d: Mapping[str, Any], key: str) -> tuple[str, ...]:
         if not isinstance(item, str):
             raise TraceFormatError(f"{key!r}[{index}] is {json_type(item)}, not a string")
     return tuple(value)
+
+
+def _flags(d: Mapping[str, Any], key: str) -> tuple[Flag, ...]:
+    """An exchange's flags: a list of strings, of which a reader keeps the ones it knows. A flag
+    this version does not know - a newer one, or a `fidelity:*` flag an older irimi wrote - says
+    nothing this version can act on."""
+    known = {flag.value for flag in Flag}
+    return tuple(Flag(flag) for flag in _strings(d, key) if flag in known)
 
 
 def _added_later[T](

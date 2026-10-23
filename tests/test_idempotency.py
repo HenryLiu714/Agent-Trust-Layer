@@ -3,7 +3,7 @@
 import threading
 from dataclasses import replace
 
-from irimi import idempotency, pipeline, servicemap
+from irimi import idempotency, servicemap, wire
 from irimi.exchange import Request
 from irimi.idempotency import FirstAnswer, Store
 from irimi.servicemap import Route
@@ -35,8 +35,8 @@ def _request(
     body: bytes = b"",
     query: str = "",
 ) -> Request:
-    """Through `pipeline.parse`, so the header names are lower-cased the way the addon does it."""
-    request = pipeline.parse("POST", "https", host, 443, path, headers, body)
+    """Through `wire.parse`, so the header names are lower-cased the way the addon does it."""
+    request = wire.parse("POST", "https", host, 443, path, headers, body)
     return request if not query else replace(request, query=query)
 
 
@@ -46,7 +46,7 @@ def _stored(body: bytes = b'{"id": "re_MINTED1"}') -> FirstAnswer:
         body=body,
         content_type="application/json",
         answered_by="fake-L1",
-        flags=("fidelity:L1",),
+        flags=(),
         precondition="passed",
         rejection_code="",
         currency="usd",

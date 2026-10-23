@@ -100,7 +100,7 @@ def test_shipped_stripe_map_is_complete():
     stripe = index.service_for("api.stripe.com")
     assert stripe is not None
     assert stripe.style == "rest"
-    assert stripe.target == servicemap.SELF_TARGET
+    assert stripe.target is None
     assert stripe.target_reads is False
     assert stripe.hosts == frozenset(
         {"api.stripe.com", "connect.stripe.com", "files.stripe.com", "meter-events.stripe.com"}
@@ -282,7 +282,7 @@ def test_every_field_round_trips(tmp_path):
     assert listing.fixture == ""  # optional, and meaningless on a live route
     assert create.compare_ignores == ("nonce",)
     assert create.live_because == ""
-    assert create.target == servicemap.SELF_TARGET
+    assert create.target is None
     assert create.forward_auth is False
     assert search.live_because.startswith("search persists nothing")
 
@@ -707,9 +707,9 @@ def test_live_because_and_compare_ignores_are_restricted_to_their_kinds(tmp_path
 
 def test_default_target_is_self(tmp_path):
     sm = load(tmp_path).services[0]
-    assert sm.target == servicemap.SELF_TARGET
+    assert sm.target is None
     for route in sm.routes:
-        assert servicemap.target_for(sm, route) == servicemap.SELF_TARGET
+        assert servicemap.target_for(sm, route) is None
     assert servicemap.is_delegated(sm) is False
 
 
@@ -726,7 +726,7 @@ def test_default_target_is_self(tmp_path):
 def test_loopback_targets_are_accepted(tmp_path, url):
     doc = GOOD.replace("style: rest", f"style: rest\ntarget: {url}")
     sm = load(tmp_path, doc).services[0]
-    assert sm.target == url.rstrip("/")
+    assert sm.target.url == url.rstrip("/")
     assert servicemap.is_delegated(sm) is True
 
 
@@ -734,9 +734,9 @@ def test_a_service_target_answers_writes_and_unknowns_but_not_reads(tmp_path):
     doc = GOOD.replace("style: rest", "style: rest\ntarget: http://127.0.0.1:3000")
     sm = load(tmp_path, doc).services[0]
     listing, _retrieve, create, search = sm.routes
-    assert servicemap.target_for(sm, create) == "http://127.0.0.1:3000"
-    assert servicemap.target_for(sm, listing) == servicemap.SELF_TARGET
-    assert servicemap.target_for(sm, search) == servicemap.SELF_TARGET
+    assert servicemap.target_for(sm, create).url == "http://127.0.0.1:3000"
+    assert servicemap.target_for(sm, listing) is None
+    assert servicemap.target_for(sm, search) is None
 
 
 def test_target_reads_sends_reads_to_the_target_too(tmp_path):
@@ -745,7 +745,7 @@ def test_target_reads_sends_reads_to_the_target_too(tmp_path):
     )
     sm = load(tmp_path, doc).services[0]
     for route in sm.routes:
-        assert servicemap.target_for(sm, route) == "http://127.0.0.1:3000"
+        assert servicemap.target_for(sm, route).url == "http://127.0.0.1:3000"
 
 
 def test_target_reads_without_a_target_is_refused(tmp_path):
@@ -777,7 +777,7 @@ routes:
 """
     sm = load(tmp_path, doc).services[0]
     for route in sm.routes:
-        assert servicemap.target_for(sm, route) == servicemap.SELF_TARGET
+        assert servicemap.target_for(sm, route) is None
 
 
 def test_route_level_target_wins_over_the_service(tmp_path):
@@ -786,7 +786,7 @@ def test_route_level_target_wins_over_the_service(tmp_path):
         "    target: http://127.0.0.1:4111/create\n    ids:\n      id: th_\n",
     )
     sm = load(tmp_path, doc).services[0]
-    assert servicemap.target_for(sm, sm.routes[2]) == "http://127.0.0.1:4111/create"
+    assert servicemap.target_for(sm, sm.routes[2]).url == "http://127.0.0.1:4111/create"
 
 
 def test_route_level_target_on_a_read_is_refused(tmp_path):
@@ -813,7 +813,7 @@ def test_non_loopback_targets_need_allow_target_host(tmp_path):
     doc = GOOD.replace("style: rest", "style: rest\ntarget: http://stub.example:3000")
     refuses(tmp_path, doc, "is not loopback")
     sm = load(tmp_path, doc, allow=frozenset({"stub.example"})).services[0]
-    assert sm.target == "http://stub.example:3000"
+    assert sm.target.url == "http://stub.example:3000"
 
 
 def test_forward_auth_needs_a_target(tmp_path):
@@ -845,8 +845,8 @@ target: http://127.0.0.1:3000
 
 def test_override_sets_a_service_target(tmp_path):
     sm = load(tmp_path, GOOD, override=OVERRIDE).services[0]
-    assert sm.target == "http://127.0.0.1:3000"
-    assert servicemap.target_for(sm, sm.routes[2]) == "http://127.0.0.1:3000"
+    assert sm.target.url == "http://127.0.0.1:3000"
+    assert servicemap.target_for(sm, sm.routes[2]).url == "http://127.0.0.1:3000"
     assert sm.source.endswith(servicemap.loader.CWD_OVERRIDE_NAME)
 
 
@@ -862,23 +862,23 @@ routes:
 """
     sm = load(tmp_path, GOOD, override=override).services[0]
     create = sm.routes[2]
-    assert create.target == "http://127.0.0.1:3000/create"
+    assert create.target.url == "http://127.0.0.1:3000/create"
     assert create.forward_auth is True
-    assert sm.routes[0].target == servicemap.SELF_TARGET  # the other routes are untouched
+    assert sm.routes[0].target is None  # the other routes are untouched
 
 
 def test_override_can_delegate_reads(tmp_path):
     override = OVERRIDE + "target_reads: true\n"
     sm = load(tmp_path, GOOD, override=override).services[0]
     assert sm.target_reads is True
-    assert servicemap.target_for(sm, sm.routes[0]) == "http://127.0.0.1:3000"
+    assert servicemap.target_for(sm, sm.routes[0]).url == "http://127.0.0.1:3000"
 
 
 def test_override_may_hold_several_documents(tmp_path):
     other = GOOD.replace("service: demo", "service: other").replace("demo.example", "other.example")
     override = OVERRIDE + "---\nservice: other\ntarget: http://127.0.0.1:4000\n"
     index = load(tmp_path, GOOD, other, override=override)
-    assert [sm.target for sm in index.services] == [
+    assert [sm.target.url for sm in index.services] == [
         "http://127.0.0.1:3000",
         "http://127.0.0.1:4000",
     ]
@@ -942,7 +942,7 @@ def test_cwd_override_wins_over_home(tmp_path, monkeypatch):
     )
     assert servicemap.override_path(cwd) == cwd / servicemap.loader.CWD_OVERRIDE_NAME
     index = servicemap.load(cwd=cwd, maps_dir=write_maps(tmp_path, GOOD))
-    assert index.services[0].target == "http://127.0.0.1:2"
+    assert index.services[0].target.url == "http://127.0.0.1:2"
 
 
 def test_home_override_is_the_fallback(tmp_path, monkeypatch):
@@ -956,7 +956,7 @@ def test_home_override_is_the_fallback(tmp_path, monkeypatch):
     )
     assert servicemap.override_path(cwd) == home / servicemap.loader.HOME_OVERRIDE_NAME
     index = servicemap.load(cwd=cwd, maps_dir=write_maps(tmp_path, GOOD))
-    assert index.services[0].target == "http://127.0.0.1:1"
+    assert index.services[0].target.url == "http://127.0.0.1:1"
 
 
 def test_no_override_file_is_fine(tmp_path, monkeypatch):
@@ -972,10 +972,10 @@ def test_route_and_servicemap_defaults():
     assert (route.human, route.ids, route.compare_ignores, route.fixture) == ("", {}, (), "")
     assert (route.fires, route.live_because, route.forward_auth) == ((), "", False)
     sm = ServiceMap(service="x", hosts=frozenset({"x.example"}), routes=(route,))
-    assert (sm.style, sm.target, sm.target_reads) == ("rest", servicemap.SELF_TARGET, False)
+    assert (sm.style, sm.target, sm.target_reads) == ("rest", None, False)
     assert sm.credential_path_hosts == frozenset()
     assert sm.default_kind is None
-    assert servicemap.target_for(sm, route) == servicemap.SELF_TARGET
+    assert servicemap.target_for(sm, route) is None
 
 
 # ------------------------------------------------- a maps directory that is missing or holds none
@@ -1215,7 +1215,7 @@ def test_the_conftest_redirects_irimi_home_away_from_the_developers_own(tmp_path
         servicemap.override_path(cwd=tmp_path / "empty")
         == home / servicemap.loader.HOME_OVERRIDE_NAME
     )
-    assert load(tmp_path).services[0].target == "http://127.0.0.1:3000"
+    assert load(tmp_path).services[0].target.url == "http://127.0.0.1:3000"
 
 
 # ------------------------------------------------------------------------------- path parameters
@@ -1290,15 +1290,15 @@ WITH_PATTERN_WRITE = (
 
 def test_a_bare_host_target_sets_the_service_target(tmp_path):
     index = _flagged(tmp_path, targets=[("demo.example", "", "http://127.0.0.1:3000")])
-    assert index.services[0].target == "http://127.0.0.1:3000"
-    assert all(r.target == servicemap.SELF_TARGET for r in index.services[0].routes)
+    assert index.services[0].target.url == "http://127.0.0.1:3000"
+    assert all(r.target is None for r in index.services[0].routes)
 
 
 def test_a_host_and_path_target_sets_only_the_matching_targetable_routes(tmp_path):
     index = _flagged(tmp_path, targets=[("demo.example", "/v1/things", "http://127.0.0.1:3000")])
-    targeted = [r for r in index.services[0].routes if r.target != servicemap.SELF_TARGET]
+    targeted = [r for r in index.services[0].routes if r.target is not None]
     assert [r.kind for r in targeted] == ["write"]  # the GET of the same path is left alone
-    assert index.services[0].target == servicemap.SELF_TARGET
+    assert index.services[0].target is None
 
 
 @pytest.mark.parametrize("spec", ["/v1/things/{thing}/archive", "/v1/things/th_REAL1/archive"])
@@ -1310,7 +1310,7 @@ def test_a_target_path_may_be_the_pattern_or_a_real_path(tmp_path, spec):
         maps_dir=write_maps(tmp_path, WITH_PATTERN_WRITE),
         targets=[("demo.example", spec, "http://127.0.0.1:3000")],
     )
-    targeted = [r for r in index.services[0].routes if r.target != servicemap.SELF_TARGET]
+    targeted = [r for r in index.services[0].routes if r.target is not None]
     assert [r.operation for r in targeted] == ["things.archive"]
 
 
@@ -1346,7 +1346,7 @@ def test_a_flag_target_is_validated_like_every_other_one(tmp_path):
         targets=[("demo.example", "", "http://example.com")],
         allow=frozenset({"example.com"}),
     )
-    assert ok.services[0].target == "http://example.com"
+    assert ok.services[0].target.url == "http://example.com"
 
 
 @pytest.mark.parametrize(
@@ -1388,7 +1388,7 @@ def test_a_flag_target_beats_the_overrides_file(tmp_path):
         "service: demo\ntarget: http://127.0.0.1:1111\n"
     )
     index = _flagged(tmp_path, targets=[("demo.example", "", "http://127.0.0.1:2222")])
-    assert index.services[0].target == "http://127.0.0.1:2222"
+    assert index.services[0].target.url == "http://127.0.0.1:2222"
 
 
 def test_a_credential_path_host_may_only_be_targeted_at_loopback():
@@ -1399,7 +1399,7 @@ def test_a_credential_path_host_may_only_be_targeted_at_loopback():
         maps_dir=servicemap.loader.shipped_dir(),
         targets=[("hooks.slack.com", "", "http://127.0.0.1:3000")],
     )
-    assert index.service_for("hooks.slack.com").target == "http://127.0.0.1:3000"
+    assert index.service_for("hooks.slack.com").target.url == "http://127.0.0.1:3000"
 
     with pytest.raises(MapError) as exc:
         servicemap.load(
@@ -1659,7 +1659,7 @@ def test_every_map_set_a_user_can_start_with_passes_the_services_check(tmp_path,
         target_reads=("api.stripe.com",),
     )
     slack = index.service_for("slack.com")
-    assert slack is not None and slack.target == "http://127.0.0.1:3000"
+    assert slack is not None and slack.target.url == "http://127.0.0.1:3000"
     services.check(index)
     assert {sm.service for sm in index.services} >= set(services.REGISTRY)
 

@@ -46,7 +46,6 @@ def _write(service="stripe", headers=(), body=None, response=True):
         operation="refunds.create",
         kind="write",
         answered_by="fake-L1",
-        validation="unvalidated",
         run_id="7f3a",
     )
 

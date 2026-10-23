@@ -3,13 +3,10 @@
 `loader` calls the three public checks; the rest are the pieces they are made of.
 """
 
-from urllib.parse import urlsplit
-
-from irimi import netaddr
 from irimi.exchange import ANY_METHOD, LIVE_KINDS, SAFE_METHODS
+from irimi.netaddr import Target
 from irimi.servicemap.model import (
     DESTRUCTIVE_METHODS,
-    SELF_TARGET,
     TARGETABLE_KINDS,
     MapError,
     Route,
@@ -36,31 +33,31 @@ COMPARED_KINDS: frozenset[str] = TARGETABLE_KINDS | {"llm"}
 
 def validate_targets(sm: ServiceMap, allow_target_hosts: frozenset[str]) -> None:
     """The target rules that can only be checked once overrides are merged in."""
-    if sm.target_reads and sm.target == SELF_TARGET:
+    if sm.target_reads and sm.target is None:
         raise MapError(
             f"{sm.source}: `target_reads: true` needs a `target:` URL to send the reads to"
         )
     _check_target_host(sm.target, allow_target_hosts, f"{sm.source}: `target`")
     for route in sm.routes:
         where = f"{sm.source}: route {route.method} {route.path}"
-        if route.target != SELF_TARGET and route.kind not in TARGETABLE_KINDS:
+        if route.target is not None and route.kind not in TARGETABLE_KINDS:
             raise MapError(
                 f"{where}: a `target:` is valid on `write` and `unknown` routes only "
                 f"(this one is `{route.kind}`); delegate reads with `target_reads:` on the service"
             )
-        if route.forward_auth and target_for(sm, route) == SELF_TARGET:
+        if route.forward_auth and target_for(sm, route) is None:
             raise MapError(f"{where}: `forward_auth: true` needs a target to forward to")
         _check_target_host(route.target, allow_target_hosts, f"{where}: `target`")
     _check_credential_path_targets(sm)
 
 
-def _check_target_host(target: str, allow_target_hosts: frozenset[str], where: str) -> None:
+def _check_target_host(
+    target: Target | None, allow_target_hosts: frozenset[str], where: str
+) -> None:
     """Targets must be loopback unless `--allow-target-host` names the host."""
-    if target == SELF_TARGET:
+    if target is None or target.is_loopback:
         return
-    if netaddr.is_local_target(target):
-        return
-    host = urlsplit(target).hostname or ""
+    host = target.host
     if host in allow_target_hosts:
         return
     raise MapError(
@@ -126,11 +123,9 @@ def _check_credential_path_targets(sm: ServiceMap) -> None:
         )
 
 
-def _require_loopback_target(target: str, where: str) -> None:
+def _require_loopback_target(target: Target | None, where: str) -> None:
     """A credential-path target must be loopback, with no escape hatch (`credential_hosts`)."""
-    if target == SELF_TARGET:
-        return
-    if netaddr.is_local_target(target):
+    if target is None or target.is_loopback:
         return
     raise MapError(
         f"{where}: a target on this host may only be loopback. The request path is the "

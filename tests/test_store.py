@@ -17,8 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from irimi import exchange, redact, store, trace
-from irimi.exchange import BAD_RUN_ID_FLAG, BODY_TRUNCATED_FLAG, Exchange, Request, Response
+from irimi import exchange, files, limits, redact, store, trace
+from irimi.exchange import Exchange, Flag, Request, Response
 from irimi.store import DirectoryStore, NullStore, RunNotFound, StoreReader, StoreStats
 from irimi.trace import ErrorInfo, RunRecord, TelemetrySeen, ToolCall, TraceFormatError, Trigger
 
@@ -45,7 +45,6 @@ def _exchange(
         operation="things.create",
         kind=kind,
         answered_by="live",
-        validation="unvalidated",
         run_id=run_id,
         started_at=1.0,
         ended_at=2.0,
@@ -86,6 +85,7 @@ class _StoreOs:
 def store_os(monkeypatch) -> _StoreOs:
     proxy = _StoreOs()
     monkeypatch.setattr(store, "os", proxy)
+    monkeypatch.setattr(files, "os", proxy)  # the store writes its files through `files`
     return proxy
 
 
@@ -239,7 +239,7 @@ def test_a_replay_never_writes_into_the_run_it_replays(root, key):
     assert {p.name: p.read_bytes() for p in (root / "runs" / "nightly").iterdir()} == recorded
     (stray,) = StoreReader(root).load_run(trace.UNATTRIBUTED).events
     assert isinstance(stray, Exchange)
-    assert (stray.request.path, BAD_RUN_ID_FLAG in stray.flags) == ("/replayed", True)
+    assert (stray.request.path, Flag.BAD_RUN_ID in stray.flags) == ("/replayed", True)
     assert s.stats().dropped == 2
 
 
@@ -271,7 +271,7 @@ def test_a_replay_writes_only_the_runs_it_makes(root, key):
     assert {p.name: p.read_bytes() for p in (root / "runs" / "sibling").iterdir()} == recorded
     (stray,) = StoreReader(root).load_run(trace.UNATTRIBUTED).events
     assert isinstance(stray, Exchange)
-    assert (stray.run_id, stray.request.path, BAD_RUN_ID_FLAG in stray.flags) == (
+    assert (stray.run_id, stray.request.path, Flag.BAD_RUN_ID in stray.flags) == (
         "sibling",
         "/replayed",
         True,
@@ -403,8 +403,8 @@ def test_an_error_is_redacted_whole_and_only_then_cut(root, key):
     whole, as a stored body is: each key is its whole placeholder, and no part of it is kept.
     """
     secret = "ghp_" + "S" * 36
-    kind = "t" * (trace.MAX_ERROR_TYPE - 30) + "." + secret + ".Boom"
-    message = "m" * (trace.MAX_ERROR_MESSAGE - 30) + " " + secret + " and more"
+    kind = "t" * (limits.MAX_ERROR_TYPE - 30) + "." + secret + ".Boom"
+    message = "m" * (limits.MAX_ERROR_MESSAGE - 30) + " " + secret + " and more"
     s = DirectoryStore(root, key)
     s.start_run(_record("r1"))
     s.record_tool_call(dataclasses.replace(_tool_call("r1", None), error=ErrorInfo(kind, message)))
@@ -413,8 +413,8 @@ def test_an_error_is_redacted_whole_and_only_then_cut(root, key):
     run = StoreReader(root).load_run("r1")
     hidden = redact.placeholder(key, secret)
     cut = ErrorInfo(
-        kind.replace(secret, hidden)[: trace.MAX_ERROR_TYPE],
-        message.replace(secret, hidden)[: trace.MAX_ERROR_MESSAGE],
+        kind.replace(secret, hidden)[: limits.MAX_ERROR_TYPE],
+        message.replace(secret, hidden)[: limits.MAX_ERROR_MESSAGE],
     )
     assert cut.type.endswith(hidden + ".B") and cut.message.endswith(hidden + " a")
     (stored,) = run.events
@@ -480,7 +480,7 @@ def test_a_9_mib_body_stores_its_first_8_mib_and_says_it_was_cut(root, key):
     (ex,) = StoreReader(root).load_run("r1").events
     assert isinstance(ex, Exchange) and ex.response is not None
     assert ex.response.body == body[: store.MAX_STORED_BODY]
-    assert BODY_TRUNCATED_FLAG in ex.flags
+    assert Flag.BODY_TRUNCATED in ex.flags
 
 
 def test_a_body_is_redacted_whole_before_it_is_cut(root, key, monkeypatch):
@@ -521,7 +521,7 @@ def test_a_streamed_body_cut_at_the_maximum_keeps_the_chunks_of_what_is_stored(
     (ex,) = StoreReader(root).load_run("r1").events
     assert isinstance(ex, Exchange) and ex.response is not None
     assert (ex.response.body, ex.stream_chunks) == (b"a" * 8 + b"b" * 8 + b"c" * 4, (8, 8, 4))
-    assert BODY_TRUNCATED_FLAG in ex.flags
+    assert Flag.BODY_TRUNCATED in ex.flags
 
 
 def test_a_stream_redaction_grows_past_the_maximum_is_a_prefix_of_its_redacted_whole(
@@ -539,7 +539,7 @@ def test_a_stream_redaction_grows_past_the_maximum_is_a_prefix_of_its_redacted_w
     assert len(sent) <= cap < len(redacted_line) * 10
     monkeypatch.setattr(store, "MAX_STORED_BODY", cap)
     streamed = dataclasses.replace(
-        _streamed(sent, (len(line),) * 10), flags=(exchange.STREAM_TRUNCATED_FLAG,)
+        _streamed(sent, (len(line),) * 10), flags=(exchange.Flag.STREAM_TRUNCATED,)
     )
     s = DirectoryStore(root, key)
     s.record(streamed)
@@ -548,7 +548,7 @@ def test_a_stream_redaction_grows_past_the_maximum_is_a_prefix_of_its_redacted_w
     assert isinstance(ex, Exchange) and ex.response is not None
     assert ex.response.body == (redacted_line * 10)[:cap]
     assert ex.stream_chunks == (len(redacted_line),) * 6 + (cap - 6 * len(redacted_line),)
-    assert set(ex.flags) == {exchange.STREAM_TRUNCATED_FLAG, BODY_TRUNCATED_FLAG}
+    assert set(ex.flags) == {exchange.Flag.STREAM_TRUNCATED, Flag.BODY_TRUNCATED}
     assert not any(b"sk_live_" in p.read_bytes() for p in root.rglob("*") if p.is_file())
 
 
@@ -564,7 +564,7 @@ def test_a_request_body_too_big_to_redact_leaves_the_streamed_response_s_chunks(
     (ex,) = StoreReader(root).load_run("r1").events
     assert isinstance(ex, Exchange) and ex.response is not None
     assert (ex.request.body, ex.response.body, ex.stream_chunks) == (b"", b"aaaabbbbbb", (4, 6))
-    assert BODY_TRUNCATED_FLAG in ex.flags
+    assert Flag.BODY_TRUNCATED in ex.flags
 
 
 def test_a_streamed_body_too_big_to_redact_is_stored_with_no_chunks(root, key, monkeypatch):
@@ -575,7 +575,7 @@ def test_a_streamed_body_too_big_to_redact_is_stored_with_no_chunks(root, key, m
     (ex,) = StoreReader(root).load_run("r1").events
     assert isinstance(ex, Exchange) and ex.response is not None
     assert (ex.response.body, ex.stream_chunks) == (b"", ())
-    assert BODY_TRUNCATED_FLAG in ex.flags
+    assert Flag.BODY_TRUNCATED in ex.flags
 
 
 # ---------------------------------------------------------------------------------- the run ids
@@ -592,7 +592,7 @@ def test_an_invalid_run_id_lands_in_unattributed_flagged_and_names_no_directory(
     assert sorted(p.name for p in root.iterdir()) == ["unattributed"]
     bad, none = StoreReader(root).load_run(trace.UNATTRIBUTED).events
     assert isinstance(bad, Exchange) and isinstance(none, Exchange)
-    assert (bad.run_id, BAD_RUN_ID_FLAG in bad.flags) == ("../x", True)
+    assert (bad.run_id, Flag.BAD_RUN_ID in bad.flags) == ("../x", True)
     # `unattributed` is the name of "no run", not a bad name.
     assert (none.run_id, none.flags) == (trace.UNATTRIBUTED, ())
 
@@ -623,7 +623,7 @@ def test_two_run_ids_that_differ_only_in_case_never_share_a_directory(root, key)
     if shared:
         (clash,) = reader.load_run(trace.UNATTRIBUTED).events
         assert isinstance(clash, Exchange)
-        assert (clash.run_id, BAD_RUN_ID_FLAG in clash.flags) == ("run1", True)
+        assert (clash.run_id, Flag.BAD_RUN_ID in clash.flags) == ("run1", True)
     else:
         assert _paths(reader.load_run("run1")) == ["/second"]
 
@@ -836,7 +836,7 @@ def test_a_run_of_an_older_schema_version_is_never_appended_to(root, key, monkey
 
 
 def test_a_failed_blob_write_drops_that_event_and_the_next_one_is_written(root, key, monkeypatch):
-    real = store._write_atomically
+    real = store.write_private
     failed = []
 
     def once(path: Path, data: bytes, **kwargs) -> None:
@@ -845,7 +845,7 @@ def test_a_failed_blob_write_drops_that_event_and_the_next_one_is_written(root, 
             raise OSError("disk full")
         real(path, data, **kwargs)
 
-    monkeypatch.setattr(store, "_write_atomically", once)
+    monkeypatch.setattr(store, "write_private", once)
     s = DirectoryStore(root, key)
     s.record(_exchange("r1", "/lost", answer=b"first"))
     s.record(_exchange("r1", "/kept", answer=b"second"))
@@ -1188,7 +1188,7 @@ def test_an_end_waits_with_its_error_cut_outside_secrets_and_is_never_dropped_fo
     record = StoreReader(root).load_run("r1").record
     assert (record.outcome, record.error) == (
         "error",
-        ErrorInfo("t." * (trace.MAX_ERROR_TYPE // 2), "m" * trace.MAX_ERROR_MESSAGE),
+        ErrorInfo("t." * (limits.MAX_ERROR_TYPE // 2), "m" * limits.MAX_ERROR_MESSAGE),
     )
 
 
@@ -1361,21 +1361,21 @@ def test_a_body_too_big_to_redact_is_not_stored_and_its_exchange_says_so(root, k
     (ex,) = StoreReader(root).load_run("r1").events
     assert isinstance(ex, Exchange) and ex.response is not None
     assert (ex.request.body, ex.response.body) == (b"small", b"")
-    assert BODY_TRUNCATED_FLAG in ex.flags
+    assert Flag.BODY_TRUNCATED in ex.flags
 
 
 def test_an_ended_run_is_forgotten_and_a_late_event_reopens_it_from_disk(root, key, monkeypatch):
     """A long `serve` holds only its open runs. A late event after `end_run` reopens the run:
     `seq` continues, the outcome stays, and a drop after the end is added to the stored count -
     once, and to the drop before the end, never counting that one twice."""
-    real = store._write_atomically
+    real = store.write_private
 
     def refuse_late_blob(path: Path, data: bytes, **kwargs) -> None:
         if data in (b"early body", b"late body"):
             raise OSError("disk full")
         real(path, data, **kwargs)
 
-    monkeypatch.setattr(store, "_write_atomically", refuse_late_blob)
+    monkeypatch.setattr(store, "write_private", refuse_late_blob)
     s = DirectoryStore(root, key)
     s.start_run(_record("r1"))
     s.record(_exchange("r1", "/a"))

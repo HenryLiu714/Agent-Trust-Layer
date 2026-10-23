@@ -2,6 +2,7 @@
 
 import asyncio
 import dataclasses
+import enum
 import hashlib
 import itertools
 import json
@@ -12,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from irimi import trace
+from irimi import limits, trace
 from irimi.exchange import Exchange, Kind, Request, Response
 from irimi.trace import (
     SCHEMA_VERSION,
@@ -54,6 +55,9 @@ def _sample(tp, name, n, default=dataclasses.MISSING):
         return 1790600000.0 + next(n) / 4
     if tp is bytes:
         return f"{name} body {next(n)}".encode()
+    if isinstance(tp, type) and issubclass(tp, enum.Enum):
+        members = list(tp)
+        return members[next(n) % len(members)]
     origin, args = typing.get_origin(tp), typing.get_args(tp)
     if origin is typing.Literal:
         choices = [a for a in args if a != default]
@@ -778,10 +782,10 @@ def test_error_info_names_the_exception_by_module_and_qualname_and_keeps_its_mes
     assert info.type == f"{__name__}.{Boom.__qualname__}"
     assert info.message == "x" * 5000
     assert ErrorInfo.from_exception(ValueError("bad")) == ErrorInfo("builtins.ValueError", "bad")
-    said = "x" * (trace.MAX_POSTED_MESSAGE - 10) + " ghp_" + "k" * 36
-    assert ErrorInfo.from_exception(Boom(said)).message == said[: trace.MAX_POSTED_MESSAGE - 9]
-    blob = "x" * (2 * trace.MAX_POSTED_MESSAGE)
-    assert ErrorInfo.from_exception(Boom(blob)).message == "x" * trace.MAX_POSTED_MESSAGE
+    said = "x" * (limits.MAX_POSTED_MESSAGE - 10) + " ghp_" + "k" * 36
+    assert ErrorInfo.from_exception(Boom(said)).message == said[: limits.MAX_POSTED_MESSAGE - 9]
+    blob = "x" * (2 * limits.MAX_POSTED_MESSAGE)
+    assert ErrorInfo.from_exception(Boom(blob)).message == "x" * limits.MAX_POSTED_MESSAGE
 
 
 def test_error_info_cuts_a_type_no_class_statement_would_make():
@@ -791,9 +795,9 @@ def test_error_info_cuts_a_type_no_class_statement_would_make():
     long = type("L" * (3 * 1024 * 1024), (Exception,), {})
     assert (
         ErrorInfo.from_exception(long()).type
-        == f"{__name__}.{'L' * 3 * 1024 * 1024}"[: trace.MAX_POSTED_TYPE]
+        == f"{__name__}.{'L' * 3 * 1024 * 1024}"[: limits.MAX_POSTED_TYPE]
     )
-    head = "K" * (trace.MAX_POSTED_TYPE - len(__name__) - 10) + "_"
+    head = "K" * (limits.MAX_POSTED_TYPE - len(__name__) - 10) + "_"
     keyed = type(head + "ghp_" + "k" * 36, (Exception,), {})
     assert ErrorInfo.from_exception(keyed()).type == f"{__name__}.{head}"
 

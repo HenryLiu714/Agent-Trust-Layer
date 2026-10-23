@@ -61,24 +61,20 @@ from irimi.exchange import (
     Response,
     protocol_major,
 )
-from irimi.pipeline import ANSWERED_BY_HEADER, irimi_error
+from irimi.limits import MAX_CONTROL_BODY
 from irimi.policy import AnswerPolicy
 from irimi.store import TraceStore, header_record, names_a_run_dir
 from irimi.trace import (
-    MAX_ERROR_MESSAGE,
-    MAX_ERROR_TYPE,
     UNATTRIBUTED,
     ErrorInfo,
     RunRecord,
     ToolCall,
     TraceFormatError,
 )
+from irimi.wire import ANSWERED_BY_HEADER, irimi_error
 
 logger = logging.getLogger(__name__)
 
-# The largest body a control request may post. A trigger's arguments and a tool call's result are
-# JSON the SDK captured; a body past this is answered 413 and never parsed.
-MAX_CONTROL_BODY = 2 * 1024 * 1024
 # The longest line a refusal's body says. A refusal may quote what the agent sent - the path, a run
 # id - and a long one must not come back as a long error. A decoder cuts the string it quotes
 # itself, at `trace.MAX_QUOTED`.
@@ -134,14 +130,11 @@ def is_control_request(request: Request, door: Door) -> bool:
 
 
 def _json_response(status: int, doc: Mapping[str, Any], headers: Headers = ()) -> Response:
-    body = json.dumps(doc, allow_nan=False).encode()
-    return Response(
-        status, (_STAMP, _PROTOCOL, ("content-type", "application/json"), *headers), body
-    )
+    return Response.json(status, doc, (_STAMP, _PROTOCOL, *headers))
 
 
 def _error_response(status: int, message: str, headers: Headers = ()) -> Response:
-    """irimi's own error shape (`pipeline.irimi_error`), stamped `control`: a 5xx is irimi's
+    """irimi's own error shape (`wire.irimi_error`), stamped `control`: a 5xx is irimi's
     failure, anything else a refusal of what the client posted."""
     error_type = "irimi_internal_error" if status >= 500 else "irimi_control_refused"
     return irimi_error(status, error_type, message[:MAX_REFUSAL], (_STAMP, _PROTOCOL, *headers))
@@ -339,9 +332,7 @@ def _label(error: ErrorInfo | None) -> ErrorInfo | None:
     prints: its type to MAX_ERROR_TYPE, since a posted type is the client's to say and may be
     2 MiB, and its message to MAX_ERROR_MESSAGE. Never what the store is handed: a cut
     before redaction can keep half a key, which redaction no longer finds."""
-    if error is None:
-        return None
-    return ErrorInfo(error.type[:MAX_ERROR_TYPE], error.message[:MAX_ERROR_MESSAGE])
+    return None if error is None else error.as_label()
 
 
 def _decoded[T](decode: Callable[[Mapping[str, Any]], T], doc: Mapping[str, Any]) -> T:

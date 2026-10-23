@@ -15,8 +15,8 @@ import pytest
 from examples.workflows.harness.internet import bomb
 from examples.workflows.harness.run import check_invariants, compare, rows_not_shown
 from examples.workflows.w10_flaky_upstream.scenarios import BOMBED, CONTROL_DOWN
-from irimi.engine.mitm import MAX_DECODED_BODY
-from irimi.exchange import BODY_TRUNCATED_FLAG, UPSTREAM_ERROR_FLAG, Exchange
+from irimi.exchange import Exchange, Flag
+from irimi.limits import MAX_DECODED_BODY
 from irimi.trace import ErrorInfo
 
 W = "w10_flaky_upstream"
@@ -111,7 +111,7 @@ def test_a_read_the_agent_abandoned_is_recorded_as_an_upstream_error(run_workflo
         "/v1/charges/ch_PAYOUT1",
     ]
     # LOOKS WRONG: stored as printed (#70), the upstream's fault.
-    assert unanswered(shadow) == [("/v1/charges", (UPSTREAM_ERROR_FLAG,))]
+    assert unanswered(shadow) == [("/v1/charges", (Flag.UPSTREAM_ERROR,))]
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -134,7 +134,7 @@ def test_a_reset_on_a_read_reaches_the_agent_as_an_unstamped_502(run_workflow, m
     ]
     assert REFUND_LINE in shadow.summaries()
     # Stored as printed: an exchange with no response reads back as one.
-    assert unanswered(shadow) == [("/v1/charges", (UPSTREAM_ERROR_FLAG,))]
+    assert unanswered(shadow) == [("/v1/charges", (Flag.UPSTREAM_ERROR,))]
 
 
 def unanswered(result) -> list[tuple[str, tuple[str, ...]]]:
@@ -423,7 +423,7 @@ def test_a_bomb_on_the_read_reaches_the_agent_whole_and_is_recorded_empty(
     [read] = [e for e in shadow.reported if e.request.path == "/v1/charges"]
     assert read.response is not None and (read.response.body, read.flags) == (
         b"",
-        (BODY_TRUNCATED_FLAG,),
+        (Flag.BODY_TRUNCATED,),
     )
     [stored] = [
         e
@@ -432,7 +432,7 @@ def test_a_bomb_on_the_read_reaches_the_agent_whole_and_is_recorded_empty(
     ]
     assert stored.response is not None and (stored.response.body, stored.flags) == (
         b"",
-        (BODY_TRUNCATED_FLAG,),
+        (Flag.BODY_TRUNCATED,),
     )
     assert stored.response.header("content-encoding") == encoding
     # The run and, under `irimi shadow`, the process run; serve mode has none.
@@ -544,7 +544,7 @@ def test_a_refund_whose_precondition_read_failed_replays_as_unvalidated(replayed
     [refund] = [ex for ex in replay.reported if ex.request.path == "/v1/refunds"]
     assert (refund.precondition, refund.flags) == (
         "not_evaluable",
-        ("fidelity:L1", "from-recording"),
+        ("from-recording",),
     )
     assert [ex for ex in replay.reported if ex.issued_by == "engine"] == []
     assert replay.internet.requests() == []
@@ -578,17 +578,17 @@ def test_a_read_whose_recording_lost_its_upstream_fails_again_live(replayed, sce
     200 in its place. The miss says so beside its `upstream-error`: the answer's own flags are kept
     whoever failed."""
     recorded, replay = replayed(W, scenario)
-    [lost] = [ex for ex in recorded.reported if UPSTREAM_ERROR_FLAG in ex.flags]
+    [lost] = [ex for ex in recorded.reported if Flag.UPSTREAM_ERROR in ex.flags]
     first, retry = [ex for ex in replay.reported if ex.request.path == "/v1/charges"]
     assert (first.answered_by, first.response, first.flags) == (
         "live",
         None,
-        ("replay-miss", UPSTREAM_ERROR_FLAG),
+        ("replay-miss", Flag.UPSTREAM_ERROR),
     )
-    assert lost.flags == (UPSTREAM_ERROR_FLAG,)
+    assert lost.flags == (Flag.UPSTREAM_ERROR,)
     assert (retry.answered_by, retry.flags) == (
         "recording",
-        ("fidelity:recording", "from-recording"),
+        ("from-recording",),
     )
     assert [(r.method, r.path) for r in replay.internet.requests()] == [("GET", "/v1/charges")]
     assert replay.returned() == recorded.returned()
@@ -606,7 +606,7 @@ def test_a_run_that_died_after_its_write_replays_to_the_same_end(replayed, scena
     assert replay.agent_exit_code() == recorded.exit_code != 0
     [refund] = [ex for ex in replay.reported if ex.request.path == "/v1/refunds"]
     [recorded_refund] = [ex for ex in recorded.reported if ex.request.path == "/v1/refunds"]
-    assert refund.flags == ("fidelity:L1", "from-recording")
+    assert refund.flags == ("from-recording",)
     assert refund.response.body == recorded_refund.response.body
     (source,) = recorded.sdk_runs()
     (mine,) = [r for r in replay.stored().list_runs() if r.replay_of == source.run_id]

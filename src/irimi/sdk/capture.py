@@ -51,6 +51,7 @@ import sys
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from irimi.limits import MAX_CAPTURED_BYTES
 from irimi.secret_shapes import cut_outside_secrets
 from irimi.trace import (
     MAIN_MODULE,
@@ -71,9 +72,6 @@ RESERVED_KEYS = frozenset({REPR_KEY, TYPE_KEY, BYTES_KEY, TRUNCATED_KEY})
 MAX_DEPTH = 32
 # The most of a `repr` a capture keeps.
 MAX_REPR = 1000
-# The largest a trigger's captured args may be, as the SDK posts them. The control endpoint takes
-# a start of up to 2 MiB (`control.MAX_CONTROL_BODY`), so the args fit with room for the rest.
-MAX_CAPTURED_BYTES = 1024 * 1024
 TOO_DEEP = "<too deep>"
 # A method's first parameter with one of these names is its receiver, not an argument (`_receiver`).
 RECEIVER_NAMES = ("self", "cls")

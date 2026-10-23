@@ -23,7 +23,7 @@ path-traversal guard, and it is checked again here rather than trusted. A valid 
 collide: `Run1` and `run1` are both valid, and on a case-insensitive filesystem (macOS APFS by
 default) they are one directory. The first to reach the store keeps it; an event for the other is
 stored in `unattributed/` like an invalid id, and an exchange among them is flagged
-`exchange.BAD_RUN_ID_FLAG`. So is an event of a replay's that names a run the replay did not make -
+`exchange.Flag.BAD_RUN_ID`. So is an event of a replay's that names a run the replay did not make -
 the run it replays, or any other already stored. Two runs are never merged into one
 directory.
 
@@ -58,7 +58,6 @@ import json
 import logging
 import os
 import queue
-import secrets
 import stat
 import threading
 import time
@@ -69,12 +68,16 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from irimi import __version__, redact, trace
-from irimi.ca import DIR_MODE, KEY_MODE
-from irimi.exchange import BAD_RUN_ID_FLAG, BODY_TRUNCATED_FLAG, Exchange, clip_chunks
+from irimi.exchange import Exchange, Flag, clip_chunks
+from irimi.files import FILE_MODE, private_dir, write_private
+from irimi.limits import (
+    MAX_QUEUED_BYTES,
+    MAX_QUEUED_ERROR,
+    MAX_REDACTED_BODY,
+    MAX_STORED_BODY,
+)
 from irimi.secret_shapes import cut_outside_secrets
 from irimi.trace import (
-    MAX_ERROR_MESSAGE,
-    MAX_ERROR_TYPE,
     SCHEMA_VERSION,
     UNATTRIBUTED,
     BodyRef,
@@ -90,23 +93,8 @@ from irimi.trace import (
 
 logger = logging.getLogger(__name__)
 
-# The longest body stored. A longer one keeps its first MAX_STORED_BODY bytes, its ref says
-# `truncated: true`, and its exchange carries BODY_TRUNCATED_FLAG.
-MAX_STORED_BODY = 8 * 1024 * 1024
 # How many items may wait for the writer. A full queue drops the event rather than block a hook.
 QUEUE_SIZE = 10_000
-# How many body bytes may wait for the writer, whatever the item count: 10,000 exchanges of 8 MiB
-# each would otherwise hold 80 GiB. A tool call counts as body bytes, and so does a run's
-# start, each as its whole JSON, of which the control endpoint takes up to 2 MiB. An
-# item that would pass it is dropped, unless the queue holds no bodies at all, so one large
-# exchange still reaches an idle writer.
-MAX_QUEUED_BYTES = 256 * 1024 * 1024
-# The most of an end's error type and of its message that wait for the writer, each cut outside
-# any secret's shape (`secret_shapes.cut_outside_secrets`), so an end costs the byte budget
-# nothing and is never dropped by it, and what the writer redacts, then cuts to a label, is still a
-# prefix of the redacted whole. Four labels' worth, so the label is cut short only when
-# redaction shrank keys by more than three labels.
-MAX_QUEUED_ERROR = 4 * MAX_ERROR_MESSAGE
 # The writer fsyncs the files it has written once it has made this many writes (lines and blobs)
 # since the last sync, whenever the queue has been idle for SYNC_IDLE_S, and on close. Counting
 # writes, not files, bounds what a crash can lose: one long run appends to one file, which as a
@@ -114,13 +102,8 @@ MAX_QUEUED_ERROR = 4 * MAX_ERROR_MESSAGE
 # every path it wrote nor syncs them all at shutdown.
 SYNC_EVERY = 1000
 SYNC_IDLE_S = 1.0
-# A body larger than this is not stored at all: its exchange is stored with that body empty and
-# flagged BODY_TRUNCATED_FLAG, and the bytes never reach the queue or the redactor.
-MAX_REDACTED_BODY = 64 * 1024 * 1024
 # How much of the end of an events.jsonl resuming a run reads to find its last `seq`.
 RESUME_TAIL = 1024 * 1024
-# A stored file's mode: the CA key's, because the store holds data redaction does not remove.
-FILE_MODE = KEY_MODE
 # How long `close()` waits for the writer to drain before it counts what is left as dropped.
 CLOSE_TIMEOUT_S = 10.0
 # A WARNING on the first drop and on every DROP_WARNING_EVERY-th after it.
@@ -335,7 +318,7 @@ class DirectoryStore:
         `replay_of` is the stored run the engine writing here answers from, if it is a replay: each
         run this store starts or makes from a header is that replay's, and it writes no run it did
         not make, the run it replays included (`_not_this_replays`)."""
-        _mkdirs(root)
+        private_dir(root)
         if not root.is_dir() or not os.access(root, os.W_OK | os.X_OK):
             raise PermissionError(f"the trace store {root} is not a writable directory")
         self.layout = StoreLayout(root)
@@ -606,10 +589,7 @@ class DirectoryStore:
         so a stored error is a prefix of the redacted whole, as a stored body is."""
         if error is None:
             return None
-        return ErrorInfo(
-            self._redact_text(error.type)[:MAX_ERROR_TYPE],
-            self._redact_text(error.message)[:MAX_ERROR_MESSAGE],
-        )
+        return ErrorInfo(self._redact_text(error.type), self._redact_text(error.message)).as_label()
 
     def _forget(self, run_id: str, run: _Run) -> None:
         """An ended run is fsynced and forgotten, so a `serve` of thousands of runs holds only the
@@ -660,9 +640,9 @@ class DirectoryStore:
         # so in its flags or the fact is lost on read.
         bodies = (ex.request.body, b"" if ex.response is None else ex.response.body)
         if any(len(body) > MAX_STORED_BODY for body in bodies):
-            flags.append(BODY_TRUNCATED_FLAG)
+            flags.append(Flag.BODY_TRUNCATED)
         if bad_run_id and event.run_id != UNATTRIBUTED:
-            flags.append(BAD_RUN_ID_FLAG)
+            flags.append(Flag.BAD_RUN_ID)
         # `_put_body` keeps the first MAX_STORED_BODY bytes, so a streamed body's chunks are cut
         # there too, and still split the body that is stored.
         chunks = clip_chunks(ex.stream_chunks, MAX_STORED_BODY)
@@ -675,7 +655,7 @@ class DirectoryStore:
         # Content-addressed, so the same bytes are written once - unless a crash tore the file
         # before any fsync, which its size gives away, and then it is written again.
         if not path.exists() or path.stat().st_size != len(data):
-            _write_atomically(path, data)
+            write_private(path, data, how="atomic")
             self._wrote(path)
         return ref
 
@@ -739,7 +719,7 @@ class DirectoryStore:
         cannot be decoded: damage, which includes a `replay_of` that is no run id or
         disagrees with `mode`. Its events and end are dropped and counted, and the record is left
         as it was found, never rewritten as a header run's over the damage."""
-        _mkdirs(events.parent)
+        private_dir(events.parent)
         record: RunRecord | None = None
         writable = True
         if directory is not None and (directory / RUN_FILE).exists():
@@ -771,7 +751,7 @@ class DirectoryStore:
             dropped_events=self._dropped_in(run, record.run_id),
         )
         data = json.dumps(trace.run_to_json(record), allow_nan=False).encode()
-        _write_atomically(run.dir / RUN_FILE, data, durable=True)
+        write_private(run.dir / RUN_FILE, data, how="atomic", durable=True)
         run.record = record
         run.dropped_written = record.dropped_events
 
@@ -830,7 +810,7 @@ def _as_queued(exchange: Exchange) -> Exchange | TelemetrySeen:
         stream_chunks = ()  # an empty body has nothing to split
     if request is exchange.request and response is exchange.response:
         return exchange
-    flags = tuple(dict.fromkeys((*exchange.flags, BODY_TRUNCATED_FLAG)))
+    flags = tuple(dict.fromkeys((*exchange.flags, Flag.BODY_TRUNCATED)))
     return replace(
         exchange, request=request, response=response, flags=flags, stream_chunks=stream_chunks
     )
@@ -850,7 +830,7 @@ def _fsync(path: Path) -> None:
 def _item_bytes(item: _Item) -> int:
     """The bytes `item` holds while it waits: an exchange's two bodies, and a tool call and a
     run's start as their whole JSON, which the control endpoint takes up to
-    `control.MAX_CONTROL_BODY` of. An end holds an error cut to MAX_QUEUED_ERROR."""
+    `limits.MAX_CONTROL_BODY` of. An end holds an error cut to MAX_QUEUED_ERROR."""
     if isinstance(item, _Record) and isinstance(item.event, Exchange):
         response = item.event.response
         return len(item.event.request.body) + (0 if response is None else len(response.body))
@@ -877,20 +857,6 @@ def _item_run_id(item: _Item) -> str:
     return getattr(named, "run_id", UNATTRIBUTED)
 
 
-def _mkdirs(path: Path) -> None:
-    """`path` and every missing parent, each DIR_MODE. `Path.mkdir(parents=True)` would give the
-    parents the umask's mode instead."""
-    missing = []
-    while not path.exists():
-        missing.append(path)
-        path = path.parent
-    for directory in reversed(missing):
-        try:
-            directory.mkdir(mode=DIR_MODE)
-        except FileExistsError:
-            pass  # another process made it first
-
-
 class StoreLocked(OSError):
     """Another process holds this store's `serve.lock`: another `serve` writes it."""
 
@@ -912,7 +878,7 @@ class ServeLock:
     def hold(cls, root: Path) -> "ServeLock":
         """Take `root`'s `serve.lock`. Raises StoreLocked when another process holds it, and
         OSError when the file cannot be opened."""
-        _mkdirs(root)
+        private_dir(root)
         fd = os.open(StoreLayout(root).serve_lock, os.O_RDWR | os.O_CREAT, FILE_MODE)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -965,24 +931,6 @@ def _append_line(path: Path, data: bytes) -> None:
             raise
     finally:
         os.close(fd)
-
-
-def _write_atomically(path: Path, data: bytes, *, durable: bool = False) -> None:
-    """`data` at `path`, FILE_MODE, through a temp file in the same directory and `os.replace`, so
-    a reader never sees half of it. `durable` syncs the temp file first, so a crash cannot leave
-    `path` renamed into place but empty."""
-    _mkdirs(path.parent)
-    tmp = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
-    try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, FILE_MODE)
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-            if durable:
-                f.flush()
-                os.fsync(fd)
-        os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)
 
 
 def _resume_seq(events: Path) -> int:

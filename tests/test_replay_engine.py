@@ -17,17 +17,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from irimi import ca, paths, pipeline, redact, servicemap
+from irimi import ca, classify, paths, redact, servicemap, wire
 from irimi.engine import EngineConfig
 from irimi.engine.mitm import IrimiAddon, MitmEngine
-from irimi.exchange import (
-    DECISION_FAILED_FLAG,
-    FROM_RECORDING_FLAG,
-    REPLAY_MISS_FLAG,
-    UPSTREAM_ERROR_FLAG,
-    Request,
-    Response,
-)
+from irimi.exchange import Exchange, Flag, Request, Response
 from irimi.overlay import ServiceOverlay, Translation
 from irimi.policy import Answer, ReplayPolicy, ShadowPolicy
 from irimi.reader import UpstreamReader
@@ -239,6 +232,7 @@ class _Session:
         self.engine.shutdown()
         self.thread.join(timeout=15)
         self.loop.close()
+        self.engine.store.close()
 
 
 def _record(home, maps, script):
@@ -302,7 +296,7 @@ def test_an_llm_call_that_differs_only_in_who_asked_is_answered_from_the_recordi
     session = _replay(home, maps, events, lambda s: replies.append(s.call("POST", url, _j(other))))
     (status, headers, data), (ex,) = replies[0], session.seen
     assert (status, data) == (recorded[0][0], recorded[0][2])
-    assert headers[pipeline.ANSWERED_BY_HEADER] == "recording"
+    assert headers[wire.ANSWERED_BY_HEADER] == "recording"
     assert ex.answered_by == "recording"
     assert _Llm.seen == []
 
@@ -336,7 +330,7 @@ def test_a_changed_system_prompt_is_a_miss_that_asks_the_model(home, maps, stubs
     _, changed = _message(llm, system="Be thorough.")
     session = _replay(home, maps, events, lambda s: s.call("POST", url, changed))
     (ex,) = session.seen
-    assert (ex.answered_by, REPLAY_MISS_FLAG in ex.flags) == ("live", True)
+    assert (ex.answered_by, Flag.REPLAY_MISS in ex.flags) == ("live", True)
     assert [m["system"] for m in _Llm.seen] == ["Be thorough."]
 
 
@@ -360,7 +354,7 @@ def test_a_recorded_stream_answers_a_streaming_call_and_never_a_plain_one(home, 
     _, plain = _message(llm)
     session = _replay(home, maps, events, lambda s: s.call("POST", url, plain))
     (ex,) = session.seen
-    assert (ex.answered_by, REPLAY_MISS_FLAG in ex.flags) == ("live", True)
+    assert (ex.answered_by, Flag.REPLAY_MISS in ex.flags) == ("live", True)
     assert len(_Llm.seen) == 1
 
 
@@ -392,8 +386,8 @@ def test_a_read_is_answered_once_per_time_it_was_recorded(home, maps, stubs):
         home, maps, events, lambda s: replies.extend(_charge(s, stripe) for _ in range(3))
     )
     assert [ex.answered_by for ex in session.seen] == ["recording", "recording", "live"]
-    assert REPLAY_MISS_FLAG in session.seen[2].flags
-    assert [r[1].get(pipeline.ANSWERED_BY_HEADER) for r in replies] == [
+    assert Flag.REPLAY_MISS in session.seen[2].flags
+    assert [r[1].get(wire.ANSWERED_BY_HEADER) for r in replies] == [
         "recording",
         "recording",
         None,
@@ -433,13 +427,13 @@ def test_the_same_write_is_answered_with_the_recorded_answer(home, maps, stubs):
         )
         == ("fake-L1", "passed", "usd")
     )
-    assert write.flags == ("fidelity:L1", FROM_RECORDING_FLAG)
+    assert write.flags == (Flag.FROM_RECORDING,)
     assert write.would_fire == ("refund.created",)
     # Stripe has never heard of the minted id, so the overlay answered its read when it was
     # recorded: it is still the overlay's answer, from the recording.
     assert (read.answered_by, read.flags, read.overlay) == (
         "overlay",
-        ("fidelity:overlay", FROM_RECORDING_FLAG),
+        (Flag.FROM_RECORDING,),
         "full",
     )
     assert _Stripe.seen == []
@@ -455,7 +449,7 @@ def test_a_different_write_is_faked_and_checked_against_the_recorded_read(home, 
     session = _replay(home, maps, events, lambda s: _refund(s, stripe, 250))
     engine_read, write = session.seen
     assert (write.answered_by, write.precondition) == ("fake-L1", "passed")
-    assert REPLAY_MISS_FLAG in write.flags
+    assert Flag.REPLAY_MISS in write.flags
     assert (engine_read.issued_by, engine_read.answered_by) == ("engine", "recording")
     assert _Stripe.seen == []
 
@@ -467,7 +461,7 @@ def test_a_write_the_recording_would_reject_is_rejected(home, maps, stubs):
     session = _replay(home, maps, events, lambda s: replies.append(_refund(s, stripe, 9900)))
     assert replies[0][0] == 400
     write = session.seen[-1]
-    assert (write.precondition, REPLAY_MISS_FLAG in write.flags) == ("rejected", True)
+    assert (write.precondition, Flag.REPLAY_MISS in write.flags) == ("rejected", True)
     assert _Stripe.seen == []
 
 
@@ -479,7 +473,7 @@ def test_a_missed_write_with_no_recorded_read_is_not_evaluable(home, maps, stubs
     session = _replay(home, maps, events, lambda s: _refund(s, stripe, 100))
     engine_read, write = session.seen
     assert (engine_read.answered_by, engine_read.response) == ("recording", None)
-    assert engine_read.flags == ("fidelity:recording", REPLAY_MISS_FLAG)
+    assert engine_read.flags == (Flag.REPLAY_MISS,)
     assert write.precondition == "not_evaluable"
     assert _Stripe.seen == []
 
@@ -516,7 +510,7 @@ def test_after_a_write_misses_a_recorded_read_goes_live_and_shows_the_new_write(
         home, maps, events, lambda s: (_refund(s, stripe, 250), replies.append(_charge(s, stripe)))
     )
     read = session.seen[-1]
-    assert (read.answered_by, REPLAY_MISS_FLAG in read.flags) == ("overlay", True)
+    assert (read.answered_by, Flag.REPLAY_MISS in read.flags) == ("overlay", True)
     assert json.loads(replies[0][2])["amount_refunded"] == 250
     assert _Stripe.seen == [("GET", "/v1/charges/ch_REAL1")]
 
@@ -531,11 +525,11 @@ def test_a_miss_whose_upstream_then_fails_still_says_it_missed(home, maps, stubs
     url = f"http://127.0.0.1:{stripe}/v1/charges/ch_RESET"
     events = _record(home, maps, lambda s: s.call("GET", url))
     (recorded,) = events
-    assert (recorded.answered_by, recorded.flags) == ("live", (UPSTREAM_ERROR_FLAG,))
+    assert (recorded.answered_by, recorded.flags) == ("live", (Flag.UPSTREAM_ERROR,))
     session = _replay(home, maps, events, lambda s: s.call("GET", url))
     (read,) = session.seen
     assert (read.answered_by, read.response) == ("live", None)
-    assert read.flags == (REPLAY_MISS_FLAG, UPSTREAM_ERROR_FLAG)
+    assert read.flags == (Flag.REPLAY_MISS, Flag.UPSTREAM_ERROR)
     assert _Stripe.seen == [("GET", "/v1/charges/ch_RESET")]
 
 
@@ -551,7 +545,7 @@ def test_a_matcher_that_raises_decides_a_miss_and_still_never_forwards_a_write(
     monkeypatch.setattr(Recording, "take", broken)
     session = _replay(home, maps, events, lambda s: _refund(s, stripe, 100))
     write = session.seen[-1]
-    assert (write.answered_by, REPLAY_MISS_FLAG in write.flags) == ("fake-L1", True)
+    assert (write.answered_by, Flag.REPLAY_MISS in write.flags) == ("fake-L1", True)
     assert ("POST", "/v1/refunds") not in _Stripe.seen
 
 
@@ -591,16 +585,16 @@ def test_an_answer_the_engine_cannot_send_fails_closed_and_forwards_nothing(home
 
         def answer(self, request, classification, write_log=(), run_id=""):
             body = Response(200, (("x-note", "€"),), b"{}")
-            return Answer(answered_by="fake-L0", response=body, flags=("fidelity:L0",))
+            return Answer(answered_by="fake-L0", response=body, flags=())
 
     session = _Session(home, maps, _Unsendable(), "rep")
     try:
         status, headers, _ = _refund(session, stripe, 100)
     finally:
         session.stop()
-    assert (status, headers[pipeline.ANSWERED_BY_HEADER]) == (502, "irimi")
+    assert (status, headers[wire.ANSWERED_BY_HEADER]) == (502, "irimi")
     (ex,) = session.seen
-    assert DECISION_FAILED_FLAG in ex.flags
+    assert Flag.DECISION_FAILED in ex.flags
     assert _Stripe.seen == []
 
 
@@ -611,12 +605,16 @@ def test_the_reads_an_answer_issued_are_recorded_when_it_cannot_be_sent(home, ma
     stripe, _ = stubs
     url = f"http://127.0.0.1:{stripe}/v1/charges/ch_REAL1"
     probe = Request("GET", "http", "127.0.0.1", stripe, "/v1/charges/ch_REAL1", "", (), b"")
-    read = pipeline.annotate(
-        probe,
-        Response(200, (), b"{}"),
-        pipeline.classify(probe, maps),
-        "live",
-        "rep",
+    cls = classify.classify(probe, maps)
+    read = Exchange(
+        request=probe,
+        response=Response(200, (), b"{}"),
+        service=cls.service,
+        operation=cls.operation,
+        kind=cls.kind,
+        answered_by="live",
+        run_id="rep",
+        flags=cls.flags,
         issued_by="engine",
     )
 
@@ -625,9 +623,7 @@ def test_the_reads_an_answer_issued_are_recorded_when_it_cannot_be_sent(home, ma
 
         def answer(self, request, classification, write_log=(), run_id=""):
             body = Response(200, (("x-note", "€"),), b"{}")
-            return Answer(
-                answered_by="fake-L0", response=body, flags=("fidelity:L0",), issued=(read,)
-            )
+            return Answer(answered_by="fake-L0", response=body, flags=(), issued=(read,))
 
     session = _Session(home, maps, _Unsendable(), "rep")
     try:
@@ -636,7 +632,7 @@ def test_the_reads_an_answer_issued_are_recorded_when_it_cannot_be_sent(home, ma
         session.stop()
     assert status == 502
     refusal, issued = session.seen
-    assert DECISION_FAILED_FLAG in refusal.flags
+    assert Flag.DECISION_FAILED in refusal.flags
     assert (issued.issued_by, issued.request.url) == ("engine", url)
     events = StoreReader(home / "store").load_run("rep").events
     assert [e.issued_by for e in events] == ["agent", "engine"]
@@ -659,11 +655,11 @@ def test_a_read_the_overlay_translates_is_recorded_translated_whoever_answers_it
     assert "starting_after" not in recorded.request.query
     session = _replay(home, maps, events, script)
     page = session.seen[-1]
-    assert FROM_RECORDING_FLAG in page.flags
+    assert Flag.FROM_RECORDING in page.flags
     assert page.request.query == recorded.request.query
     again = StoreReader(home / "store").load_run("rep").events
     session = _replay(home, maps, again, script, run_id="rep2")
-    assert FROM_RECORDING_FLAG in session.seen[-1].flags
+    assert Flag.FROM_RECORDING in session.seen[-1].flags
     assert _Stripe.seen == []
 
 
@@ -706,7 +702,17 @@ def _decided(home, maps, policy, overlay, host="127.0.0.1"):
     )
     addon = IrimiAddon(config, policy, NullStore(), overlay, None, lambda *a: None)
     read = Request("GET", "https", host, 443, "/v1/refunds", "starting_after=re_1", (), b"")
-    write = pipeline.annotate(read, None, pipeline.unclassified(read), "fake-L0", "t")
+    unknown = classify.unclassified(read)
+    write = Exchange(
+        request=read,
+        response=None,
+        service=unknown.service,
+        operation=unknown.operation,
+        kind=unknown.kind,
+        answered_by="fake-L0",
+        run_id="t",
+        flags=unknown.flags,
+    )
     return addon._decide(read, (write,), "t", False, ("127.0.0.1", 4000))
 
 
@@ -764,7 +770,7 @@ def test_a_read_recorded_after_a_write_the_replay_did_not_make_goes_live(home, m
     replies = []
     session = _replay(home, maps, events, lambda s: replies.append(_charge(s, stripe)))
     (read,) = session.seen
-    assert (read.answered_by, read.flags) == ("live", (REPLAY_MISS_FLAG,))
+    assert (read.answered_by, read.flags) == ("live", (Flag.REPLAY_MISS,))
     assert json.loads(replies[0][2])["amount_refunded"] == 0
     assert _Stripe.seen == [("GET", "/v1/charges/ch_REAL1")]
 
@@ -789,7 +795,7 @@ def test_an_unchanged_replay_compares_the_same_as_its_recording(home, maps, stub
 
     events = _record(home, maps, script)
     session = _replay(home, maps, events, script)
-    assert all(FROM_RECORDING_FLAG in ex.flags for ex in session.seen)
+    assert all(Flag.FROM_RECORDING in ex.flags for ex in session.seen)
     assert (_Stripe.seen, _Llm.seen) == ([], [])
     reader = StoreReader(home / "store")
     recorded, replayed = reader.load_run("rec"), reader.load_run("rep")

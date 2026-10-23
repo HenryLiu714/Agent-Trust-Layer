@@ -12,27 +12,14 @@ from dataclasses import replace
 import pytest
 
 from irimi import redact, servicemap
+from irimi.classify import classify
 from irimi.exchange import (
-    BODY_TRUNCATED_FLAG,
-    DECISION_FAILED_FLAG,
-    FIDELITY_L1_FLAG,
-    FIDELITY_RECORDING_FLAG,
-    FIXTURE_FAILED_FLAG,
-    FROM_RECORDING_FLAG,
-    IDEMPOTENCY_CONFLICT_FLAG,
-    IDEMPOTENT_REPLAY_FLAG,
     LIVE_KINDS,
-    REDACTION_FAILED_FLAG,
-    REPLAY_MISS_FLAG,
-    STREAM_TRUNCATED_FLAG,
-    TARGET_FAILED_FLAG,
-    UNCLASSIFIED_FLAG,
-    UPSTREAM_ERROR_FLAG,
     Exchange,
+    Flag,
     Request,
     Response,
 )
-from irimi.pipeline import classify
 from irimi.policy import ReplayPolicy, ShadowPolicy
 from irimi.reader import UpstreamReader, answered_as
 from irimi.recording import Recording, RecordingReader
@@ -72,7 +59,6 @@ def _stored(request, response=OK, **fields):
         operation=cls.operation,
         kind=kind,
         answered_by=fields.pop("answered_by", "live" if kind in LIVE_KINDS else "fake-L0"),
-        validation="unvalidated",
         run_id="rec",
         flags=cls.flags + tuple(fields.pop("flags", ())),
         **fields,
@@ -104,7 +90,7 @@ REFUND_ANSWER = Response(200, (("content-type", JSON),), b'{"id": "re_RECORDED1"
 def _recorded_refund(amount=100, **fields):
     defaults = {
         "answered_by": "fake-L1",
-        "flags": (FIDELITY_L1_FLAG,),
+        "flags": (),
         "precondition": "passed",
         "currency": "usd",
         "would_fire": ("refund.created", "charge.refunded"),
@@ -272,12 +258,12 @@ def test_an_event_stream_that_sent_no_body_still_streamed():
 @pytest.mark.parametrize(
     "fields",
     [
-        {"flags": (BODY_TRUNCATED_FLAG,)},
-        {"flags": (STREAM_TRUNCATED_FLAG,)},
-        {"flags": (DECISION_FAILED_FLAG,)},
-        {"flags": (TARGET_FAILED_FLAG,)},
-        {"flags": (UPSTREAM_ERROR_FLAG,)},
-        {"flags": (REDACTION_FAILED_FLAG,)},
+        {"flags": (Flag.BODY_TRUNCATED,)},
+        {"flags": (Flag.STREAM_TRUNCATED,)},
+        {"flags": (Flag.DECISION_FAILED,)},
+        {"flags": (Flag.TARGET_FAILED,)},
+        {"flags": (Flag.UPSTREAM_ERROR,)},
+        {"flags": (Flag.REDACTION_FAILED,)},
         {"answered_by": "delegated"},
     ],
 )
@@ -290,7 +276,7 @@ def test_a_recorded_answer_that_is_not_whole_is_a_miss_in_its_place(fields):
 
 
 def test_a_recorded_request_that_got_no_answer_is_a_miss_in_its_place():
-    recording = _recording(_stored(_req(), None, flags=(UPSTREAM_ERROR_FLAG,)), _stored(_req()))
+    recording = _recording(_stored(_req(), None, flags=(Flag.UPSTREAM_ERROR,)), _stored(_req()))
     assert recording.take(_req(), "read") is None
     assert recording.take(_req(), "read") is not None
 
@@ -340,9 +326,7 @@ def test_a_recorded_read_is_served_as_it_was_recorded():
         ),
         b'{"amount_refunded": 100}',
     )
-    stored = _stored(
-        _req(), recorded, answered_by="overlay", flags=("fidelity:overlay",), overlay="full"
-    )
+    stored = _stored(_req(), recorded, answered_by="overlay", flags=(), overlay="full")
     answer = _answer(ReplayPolicy(_recording(stored), SHIPPED), _req())
     assert answer.response == Response(
         200, (("content-type", JSON), ("request-id", "req_1")), recorded.body
@@ -353,17 +337,17 @@ def test_an_answer_from_the_recording_is_what_it_was_and_says_where_it_came_from
     """A read the overlay edited is still the overlay's, its fidelity carried, so the summary
     hangs its `↳` line under the write again. One the service answered is `recording`: irimi
     answered it this time, from disk. Both carry `from-recording`."""
-    edited = _stored(_req(), answered_by="overlay", flags=("fidelity:overlay",), overlay="full")
+    edited = _stored(_req(), answered_by="overlay", flags=(), overlay="full")
     answer = _answer(ReplayPolicy(_recording(edited), SHIPPED), _req())
     assert (answer.answered_by, answer.flags, answer.overlay) == (
         "overlay",
-        ("fidelity:overlay", FROM_RECORDING_FLAG),
+        (Flag.FROM_RECORDING,),
         "full",
     )
     answer = _answer(ReplayPolicy(_recording(_stored(_req())), SHIPPED), _req())
     assert (answer.answered_by, answer.flags, answer.overlay) == (
         "recording",
-        (FIDELITY_RECORDING_FLAG, FROM_RECORDING_FLAG),
+        (Flag.FROM_RECORDING,),
         None,
     )
 
@@ -373,7 +357,7 @@ def test_a_read_the_recording_lacks_goes_live_flagged_a_miss():
     assert (answer.answered_by, answer.response, answer.flags) == (
         "live",
         None,
-        (REPLAY_MISS_FLAG,),
+        (Flag.REPLAY_MISS,),
     )
 
 
@@ -397,18 +381,18 @@ def test_a_delegated_write_is_never_looked_up_and_never_flagged():
     recording = Recording.from_events([_recorded_refund()], KEY, maps)
     request = _refund()
     answer = ReplayPolicy(recording, maps).answer(request, classify(request, maps))
-    assert (answer.answered_by, REPLAY_MISS_FLAG in answer.flags) == ("delegated", False)
+    assert (answer.answered_by, Flag.REPLAY_MISS in answer.flags) == ("delegated", False)
 
 
 def test_the_same_write_gets_the_recorded_answer_at_its_recorded_level():
     """Its body, level, L3 outcome, currency and webhooks, and never an overlay fidelity, which
     only a read can carry, whatever a recording edited by hand says."""
-    recorded = _recorded_refund(flags=(FIDELITY_L1_FLAG, FIXTURE_FAILED_FLAG, BODY_TRUNCATED_FLAG))
-    recorded = replace(recorded, flags=(FIDELITY_L1_FLAG, FIXTURE_FAILED_FLAG), overlay="full")
+    recorded = _recorded_refund(flags=(Flag.FIXTURE_FAILED, Flag.BODY_TRUNCATED))
+    recorded = replace(recorded, flags=(Flag.FIXTURE_FAILED,), overlay="full")
     answer = _answer(ReplayPolicy(_recording(recorded), SHIPPED), _refund(key="k-other"))
     assert answer.answered_by == "fake-L1"
     assert answer.response.body == REFUND_ANSWER.body
-    assert answer.flags == (FIDELITY_L1_FLAG, FIXTURE_FAILED_FLAG, FROM_RECORDING_FLAG)
+    assert answer.flags == (Flag.FIXTURE_FAILED, Flag.FROM_RECORDING)
     assert (answer.precondition, answer.currency) == ("passed", "usd")
     assert answer.would_fire == ("refund.created", "charge.refunded")
     assert answer.issued == ()
@@ -423,11 +407,11 @@ def test_a_replayed_write_carries_only_its_answers_flags():
         request,
         REFUND_ANSWER,
         answered_by="fake-L0",
-        flags=("fidelity:L0", FIXTURE_FAILED_FLAG, "some-later-flag"),
+        flags=(Flag.FIXTURE_FAILED, "some-later-flag"),
     )
-    assert UNCLASSIFIED_FLAG in recorded.flags
+    assert Flag.UNCLASSIFIED in recorded.flags
     answer = _answer(ReplayPolicy(_recording(recorded), SHIPPED), request)
-    assert answer.flags == ("fidelity:L0", FIXTURE_FAILED_FLAG, FROM_RECORDING_FLAG)
+    assert answer.flags == (Flag.FIXTURE_FAILED, Flag.FROM_RECORDING)
 
 
 def test_a_rejected_write_is_rejected_again():
@@ -436,7 +420,7 @@ def test_a_rejected_write_is_rejected_again():
         _refund(),
         refused,
         answered_by="fake-L1",
-        flags=(FIDELITY_L1_FLAG,),
+        flags=(),
         precondition="rejected",
         rejection_code="amount_too_large",
     )
@@ -473,22 +457,22 @@ def test_a_write_the_recording_lacks_is_faked_checked_against_the_recording_and_
         "passed",
         "usd",
     )
-    assert answer.flags[-1] == REPLAY_MISS_FLAG
+    assert answer.flags[-1] == Flag.REPLAY_MISS
     (read,) = answer.issued
     assert (read.issued_by, read.answered_by) == ("engine", "recording")
-    assert read.flags == (FIDELITY_RECORDING_FLAG, FROM_RECORDING_FLAG)
+    assert read.flags == (Flag.FROM_RECORDING,)
 
 
 def test_a_write_miss_ends_serving_reads_and_an_llm_miss_does_not():
     recording = _recording(_stored(_req()), _stored(_req()), _recorded_refund())
     policy = ReplayPolicy(recording, SHIPPED)
-    assert _answer(policy, _llm(content="new")).flags == (REPLAY_MISS_FLAG,)
+    assert _answer(policy, _llm(content="new")).flags == (Flag.REPLAY_MISS,)
     assert _answer(policy, _req()).answered_by == "recording"
     assert not policy.recording.diverged
-    assert _answer(policy, _refund(250)).flags[-1] == REPLAY_MISS_FLAG
+    assert _answer(policy, _refund(250)).flags[-1] == Flag.REPLAY_MISS
     assert policy.recording.diverged
     answer = _answer(policy, _req())
-    assert (answer.answered_by, answer.flags) == ("live", (REPLAY_MISS_FLAG,))
+    assert (answer.answered_by, answer.flags) == ("live", (Flag.REPLAY_MISS,))
 
 
 def test_an_llm_call_is_still_answered_from_the_recording_once_the_replay_has_diverged():
@@ -496,10 +480,10 @@ def test_an_llm_call_is_still_answered_from_the_recording_once_the_replay_has_di
     changes it only by changing what the agent sends."""
     recording = _recording(_recorded_refund(), _stored(_llm()))
     policy = ReplayPolicy(recording, SHIPPED)
-    assert REPLAY_MISS_FLAG in _answer(policy, _refund(250)).flags
+    assert Flag.REPLAY_MISS in _answer(policy, _refund(250)).flags
     assert policy.recording.diverged
     answer = _answer(policy, _llm())
-    assert (answer.answered_by, answer.flags[-1]) == ("recording", FROM_RECORDING_FLAG)
+    assert (answer.answered_by, answer.flags[-1]) == ("recording", Flag.FROM_RECORDING)
 
 
 def test_an_unknown_request_that_misses_is_faked_and_the_replay_diverges():
@@ -509,7 +493,7 @@ def test_an_unknown_request_that_misses_is_faked_and_the_replay_diverges():
     assert classify(unknown, SHIPPED).kind == "unknown"
     policy = ReplayPolicy(_recording(_stored(_req())), SHIPPED)
     answer = _answer(policy, unknown)
-    assert (answer.answered_by, answer.flags[-1]) == ("fake-L0", REPLAY_MISS_FLAG)
+    assert (answer.answered_by, answer.flags[-1]) == ("fake-L0", Flag.REPLAY_MISS)
     assert policy.recording.diverged
     assert _answer(policy, _req()).answered_by == "live"
 
@@ -518,9 +502,9 @@ def test_a_matched_write_holds_its_idempotency_key_for_a_retry_that_misses():
     """Stripe refuses a key reused for a different write. A replay answered the first from the
     recording, so it is the replay's store that has to remember the key."""
     policy = ReplayPolicy(_recording(_recorded_refund()), SHIPPED)
-    assert FROM_RECORDING_FLAG in _answer(policy, _refund(key="k-9")).flags
+    assert Flag.FROM_RECORDING in _answer(policy, _refund(key="k-9")).flags
     answer = _answer(policy, _refund(amount=250, key="k-9"))
-    assert IDEMPOTENCY_CONFLICT_FLAG in answer.flags
+    assert Flag.IDEMPOTENCY_CONFLICT in answer.flags
     assert answer.response.status == 400
 
 
@@ -531,7 +515,7 @@ def test_a_retry_of_a_matched_write_the_recording_has_no_second_answer_for_is_sh
     first = _answer(policy, _refund(key="k-9"))
     retry = _answer(policy, _refund(key="k-9"))
     assert retry.response.body == first.response.body
-    assert retry.flags == (FIDELITY_L1_FLAG, IDEMPOTENT_REPLAY_FLAG, REPLAY_MISS_FLAG)
+    assert retry.flags == (Flag.IDEMPOTENT_REPLAY, Flag.REPLAY_MISS)
 
 
 def test_a_long_conversation_is_keyed_as_an_llm_call():
@@ -551,7 +535,7 @@ def test_a_matcher_that_raises_decides_a_miss(monkeypatch):
     answer = _answer(policy, _refund())
     assert answer.answered_by == "fake-L1"
     assert answer.response is not None
-    assert answer.flags[-1] == REPLAY_MISS_FLAG
+    assert answer.flags[-1] == Flag.REPLAY_MISS
     assert _answer(policy, _req()).answered_by == "live"  # the write missed: reads go live
 
 
@@ -578,10 +562,10 @@ def test_a_write_irimi_refused_in_the_recording_is_decided_afresh():
         replace(_refund(), body=b""),
         refusal,
         answered_by="fake-L0",
-        flags=(DECISION_FAILED_FLAG, BODY_TRUNCATED_FLAG),
+        flags=(Flag.DECISION_FAILED, Flag.BODY_TRUNCATED),
     )
     answer = _answer(ReplayPolicy(_recording(recorded), SHIPPED), replace(_refund(), body=b""))
-    assert (answer.response.status, answer.flags[-1]) == (200, REPLAY_MISS_FLAG)
+    assert (answer.response.status, answer.flags[-1]) == (200, Flag.REPLAY_MISS)
 
 
 def test_the_policy_is_named_replay():
@@ -639,7 +623,7 @@ def test_a_streamed_answer_is_never_served_to_a_call_that_did_not_ask_for_one():
 
 
 def test_a_precondition_read_is_the_first_the_recording_can_serve():
-    failed = _stored(_req(), None, issued_by="engine", flags=(UPSTREAM_ERROR_FLAG,))
+    failed = _stored(_req(), None, issued_by="engine", flags=(Flag.UPSTREAM_ERROR,))
     good = _stored(_req(), issued_by="engine")
     assert RecordingReader(_recording(failed, good))(_req()) == good.response
 
@@ -653,7 +637,7 @@ def test_a_replay_diverges_for_the_whole_engine():
     runs at once, refuses to replay (`tests/test_cli.py`)."""
     recording = _recording(_stored(_req()), _stored(_req()))
     policy = ReplayPolicy(recording, SHIPPED)
-    assert _answer(policy, _refund(250), run_id="A").flags[-1] == REPLAY_MISS_FLAG
+    assert _answer(policy, _refund(250), run_id="A").flags[-1] == Flag.REPLAY_MISS
     assert _answer(policy, _req(), run_id="B").answered_by == "live"
 
 
@@ -662,7 +646,7 @@ def test_a_recorded_write_irimi_did_not_fake_is_never_answered_again():
     fake with no stamp, and the trace would call it live."""
     recorded = _stored(_refund(), REFUND_ANSWER, answered_by="live")
     answer = _answer(ReplayPolicy(_recording(recorded), SHIPPED), _refund())
-    assert (answer.answered_by, answer.flags[-1]) == ("fake-L1", REPLAY_MISS_FLAG)
+    assert (answer.answered_by, answer.flags[-1]) == ("fake-L1", Flag.REPLAY_MISS)
 
 
 def test_a_reader_that_says_nothing_answers_live_and_the_recording_s_says_so():
@@ -673,30 +657,30 @@ def test_a_reader_that_says_nothing_answers_live_and_the_recording_s_says_so():
         assert answered_as(UpstreamReader(), answered) == ("live", ())
     assert answered_as(RecordingReader(_recording()), True) == (
         "recording",
-        (FIDELITY_RECORDING_FLAG, FROM_RECORDING_FLAG),
+        (Flag.FROM_RECORDING,),
     )
     assert answered_as(RecordingReader(_recording()), False) == (
         "recording",
-        (FIDELITY_RECORDING_FLAG, REPLAY_MISS_FLAG),
+        (Flag.REPLAY_MISS,),
     )
 
 
 def test_a_read_recorded_after_a_write_the_replay_has_not_made_is_a_miss_that_diverges():
     """It shows that write, which this run never made (a prompt edit stopped it). The reads
     before the write are still answered from the recording."""
-    shown = _stored(_req(), answered_by="overlay", flags=("fidelity:overlay",), overlay="full")
+    shown = _stored(_req(), answered_by="overlay", flags=(), overlay="full")
     recording = _recording(_stored(_req()), _recorded_refund(), shown)
     policy = ReplayPolicy(recording, SHIPPED)
     assert _answer(policy, _req()).answered_by == "recording"
     answer = _answer(policy, _req())
-    assert (answer.answered_by, answer.flags) == ("live", (REPLAY_MISS_FLAG,))
+    assert (answer.answered_by, answer.flags) == ("live", (Flag.REPLAY_MISS,))
     assert recording.diverged
 
 
 def test_a_read_recorded_after_a_write_the_replay_made_is_answered():
-    shown = _stored(_req(), answered_by="overlay", flags=("fidelity:overlay",), overlay="full")
+    shown = _stored(_req(), answered_by="overlay", flags=(), overlay="full")
     policy = ReplayPolicy(_recording(_recorded_refund(), shown), SHIPPED)
-    assert FROM_RECORDING_FLAG in _answer(policy, _refund()).flags
+    assert Flag.FROM_RECORDING in _answer(policy, _refund()).flags
     assert _answer(policy, _req()).answered_by == "overlay"
     assert not policy.recording.diverged
 
@@ -722,13 +706,13 @@ def test_a_recorded_write_irimi_could_not_decide_about_is_not_one_a_later_read_s
         refusal,
         kind="unknown",
         answered_by="fake-L0",
-        flags=(UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG, BODY_TRUNCATED_FLAG),
+        flags=(Flag.UNCLASSIFIED, Flag.DECISION_FAILED, Flag.BODY_TRUNCATED),
     )
     policy = ReplayPolicy(_recording(refused, _stored(_req())), SHIPPED)
     answer = _answer(policy, _req())
     assert (answer.answered_by, answer.flags) == (
         "recording",
-        (FIDELITY_RECORDING_FLAG, FROM_RECORDING_FLAG),
+        (Flag.FROM_RECORDING,),
     )
     assert not policy.recording.diverged
 
@@ -743,7 +727,7 @@ def _keyed_refund(amount, key, charge="ch_1"):
 
 
 def _recorded_keyed(amount, key, answer=REFUND_ANSWER, **fields):
-    defaults = {"answered_by": "fake-L1", "flags": (FIDELITY_L1_FLAG,)}
+    defaults = {"answered_by": "fake-L1", "flags": ()}
     return _stored(_keyed_refund(amount, key), answer, **(defaults | fields))
 
 
@@ -774,29 +758,29 @@ def test_a_retry_never_takes_the_answer_to_a_second_distinct_write():
     assert _answer(policy, _keyed_refund(100, "k1")).response.body == REFUND_ANSWER.body
     retry = _answer(policy, _keyed_refund(100, "k1"))
     assert retry.response.body == REFUND_ANSWER.body
-    assert retry.flags == (FIDELITY_L1_FLAG, IDEMPOTENT_REPLAY_FLAG, REPLAY_MISS_FLAG)
+    assert retry.flags == (Flag.IDEMPOTENT_REPLAY, Flag.REPLAY_MISS)
 
 
 def test_a_fresh_write_never_takes_a_recorded_retry():
     """The recorded run retried its refund; this one makes a second refund with a new key. Stripe
     makes a second refund, so the recorded retry - the first refund's bytes, kept out of the write
     log - is not its answer."""
-    retried = _recorded_keyed(100, "k1", flags=(FIDELITY_L1_FLAG, IDEMPOTENT_REPLAY_FLAG))
+    retried = _recorded_keyed(100, "k1", flags=(Flag.IDEMPOTENT_REPLAY,))
     policy = ReplayPolicy(_recording(_recorded_keyed(100, "k1"), retried), SHIPPED)
-    assert FROM_RECORDING_FLAG in _answer(policy, _keyed_refund(100, "k1")).flags
+    assert Flag.FROM_RECORDING in _answer(policy, _keyed_refund(100, "k1")).flags
     fresh = _answer(policy, _keyed_refund(100, "k2"))
-    assert fresh.flags == (FIDELITY_L1_FLAG, REPLAY_MISS_FLAG)
+    assert fresh.flags == (Flag.REPLAY_MISS,)
     assert fresh.response.body != REFUND_ANSWER.body
 
 
 def test_a_recorded_retry_answers_the_same_retry():
     """The other half: a retry the recorded run made too is answered from the recording, as the
     retry it was."""
-    retried = _recorded_keyed(100, "k1", flags=(FIDELITY_L1_FLAG, IDEMPOTENT_REPLAY_FLAG))
+    retried = _recorded_keyed(100, "k1", flags=(Flag.IDEMPOTENT_REPLAY,))
     policy = ReplayPolicy(_recording(_recorded_keyed(100, "k1"), retried), SHIPPED)
     _answer(policy, _keyed_refund(100, "k1"))
     retry = _answer(policy, _keyed_refund(100, "k1"))
-    assert retry.flags == (FIDELITY_L1_FLAG, IDEMPOTENT_REPLAY_FLAG, FROM_RECORDING_FLAG)
+    assert retry.flags == (Flag.IDEMPOTENT_REPLAY, Flag.FROM_RECORDING)
     assert not policy.recording.diverged
 
 
@@ -804,11 +788,11 @@ def test_a_key_reused_for_another_write_is_refused_whatever_the_recording_holds(
     """The recording holds a refund of 100. This run sent a refund of 250 under key `k`, then the
     refund of 100 under the same key, which Stripe refuses with `idempotency_error`."""
     policy = ReplayPolicy(_recording(_recorded_keyed(100, "k-recorded")), SHIPPED)
-    assert REPLAY_MISS_FLAG in _answer(policy, _keyed_refund(250, "k")).flags
+    assert Flag.REPLAY_MISS in _answer(policy, _keyed_refund(250, "k")).flags
     reused = _answer(policy, _keyed_refund(100, "k"))
     assert (reused.response.status, reused.flags[-2:]) == (
         400,
-        (IDEMPOTENCY_CONFLICT_FLAG, REPLAY_MISS_FLAG),
+        (Flag.IDEMPOTENCY_CONFLICT, Flag.REPLAY_MISS),
     )
 
 
@@ -824,7 +808,7 @@ def test_a_checked_write_recorded_after_a_write_the_replay_has_not_made_is_check
     policy = ReplayPolicy(_recording(engine, first, refused), SHIPPED)
     answer = _answer(policy, _keyed_refund(4900, "b"))
     assert (answer.response.status, answer.precondition) == (200, "passed")
-    assert answer.flags[-1] == REPLAY_MISS_FLAG
+    assert answer.flags[-1] == Flag.REPLAY_MISS
     assert policy.recording.diverged
 
 
@@ -838,7 +822,7 @@ def test_a_checked_write_after_the_replay_diverged_is_checked_again():
     new = _keyed_refund(2000, "x")
     cls = classify(new, SHIPPED)
     made = policy.answer(new, cls, (), "rep")
-    assert made.flags[-1] == REPLAY_MISS_FLAG
+    assert made.flags[-1] == Flag.REPLAY_MISS
     logged = Exchange(
         request=new,
         response=made.response,
@@ -846,14 +830,13 @@ def test_a_checked_write_after_the_replay_diverged_is_checked_again():
         operation=cls.operation,
         kind=cls.kind,
         answered_by=made.answered_by,
-        validation="unvalidated",
         run_id="rep",
         flags=made.flags,
         precondition=made.precondition,
     )
     answer = _answer(policy, _keyed_refund(4900, "a"), write_log=(logged,))
     assert (answer.response.status, answer.precondition) == (400, "rejected")
-    assert answer.flags[-1] == REPLAY_MISS_FLAG
+    assert answer.flags[-1] == Flag.REPLAY_MISS
 
 
 def test_an_unchecked_write_is_answered_from_the_recording_after_the_replay_diverged():
@@ -861,11 +844,11 @@ def test_an_unchecked_write_is_answered_from_the_recording_after_the_replay_dive
     still the one, and its minted ids the recorded ones."""
     unchecked = _req("POST", path="/v1/customers/cus_1", body=b"email=a%40b.c", ct=FORM)
     assert not classify(unchecked, SHIPPED).route.precondition
-    recorded = _stored(unchecked, REFUND_ANSWER, answered_by="fake-L0", flags=("fidelity:L0",))
+    recorded = _stored(unchecked, REFUND_ANSWER, answered_by="fake-L0", flags=())
     policy = ReplayPolicy(_recording(recorded), SHIPPED)
     _answer(policy, _keyed_refund(2000, "x"))
     assert policy.recording.diverged
-    assert FROM_RECORDING_FLAG in _answer(policy, unchecked).flags
+    assert Flag.FROM_RECORDING in _answer(policy, unchecked).flags
 
 
 def test_the_recording_never_hands_out_a_read_once_the_replay_has_diverged():

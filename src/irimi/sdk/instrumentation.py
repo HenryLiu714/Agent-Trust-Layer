@@ -1,7 +1,7 @@
 """Putting `Irimi-Run` on every request a run makes through irimi.
 
 The proxy attributes an exchange to a run by its `Irimi-Run` request header
-(`pipeline.attribute_run`), and never by connection or timing, which fail under pools and
+(`wire.attribute_run`), and never by connection or timing, which fail under pools and
 concurrency. So `instrument()` patches the HTTP clients' classes, once per process, to add
 the header from the context variable (`context.current_run_id`), read as each request is sent:
 

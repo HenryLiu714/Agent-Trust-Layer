@@ -4,20 +4,14 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from irimi import netaddr
-from irimi.delegation import TargetRefused, is_credential_header, refuse_self_target, target_url
-from irimi.exchange import DOWNGRADED_FLAG, Request, Response
-from irimi.netaddr import is_loopback, is_self_host
-from irimi.pipeline import (
-    Classification,
-    annotate,
-    attribute_run,
-    classify,
-    parse,
-    respond,
-    unclassified,
-)
+from irimi import netaddr, wire
+from irimi.classify import Classification, classify, unclassified
+from irimi.delegation import TargetRefused, refuse_self_target, target_url
+from irimi.exchange import Exchange, Flag, Request
+from irimi.netaddr import Target, is_loopback, is_self_host
+from irimi.redact import is_credential_header
 from irimi.reverse_door import ReverseDoorRefused, detect_door, rewrite_reverse
+from irimi.wire import attribute_run, parse
 
 
 def _parse(**overrides) -> Request:
@@ -294,59 +288,34 @@ def test_attribute_run_accepts_the_longest_valid_run_id():
     assert attribute_run(_req(headers=(("irimi-run", "a" * 64),)), "dflt") == "a" * 64
 
 
-def test_annotate_carries_the_callers_timestamps():
-    cls = Classification("api.stripe.com", "GET /v1/charges", "read", ())
-    ex = annotate(_req(), None, cls, "live", "7f3a", started_at=1.5, ended_at=2.25)
+def _exchange(**fields) -> Exchange:
+    base = {
+        "request": _req(),
+        "response": None,
+        "service": "api.stripe.com",
+        "operation": "GET /v1/charges",
+        "kind": "read",
+        "answered_by": "live",
+        "run_id": "7f3a",
+    }
+    return Exchange(**(base | fields))
+
+
+def test_an_exchange_carries_the_callers_timestamps():
+    ex = _exchange(started_at=1.5, ended_at=2.25)
     assert (ex.started_at, ex.ended_at) == (1.5, 2.25)
-    assert annotate(_req(), None, cls, "live", "7f3a").started_at == 0.0
+    assert _exchange().started_at == 0.0
 
 
-def test_annotate_never_ends_an_exchange_before_it_started():
+def test_an_exchange_never_ends_before_it_started():
     """The wall clock can step back mid-exchange; a stored run's reader subtracts the two."""
-    cls = Classification("api.stripe.com", "GET /v1/charges", "read", ())
-    ex = annotate(_req(), None, cls, "live", "7f3a", started_at=2.25, ended_at=1.5)
+    ex = _exchange(started_at=2.25, ended_at=1.5)
     assert (ex.started_at, ex.ended_at) == (2.25, 2.25)
 
 
 def test_attribute_run_compares_the_header_name_case_insensitively():
     """As `header_value` does: a `Request` built outside `parse` keeps its spelling."""
     assert attribute_run(_req(headers=(("Irimi-Run", "run_A-1"),)), "dflt") == "run_A-1"
-
-
-@pytest.mark.parametrize("answered_by", ["live", "fake-L0"])
-def test_annotate_copies_fields(answered_by):
-    req = _req()
-    resp = Response(status=200, headers=(), body=b"{}")
-    cls = Classification("api.stripe.com", "GET /v1/charges", "read", ())
-    ex = annotate(req, resp, cls, answered_by, "7f3a")
-    assert ex.request is req
-    assert ex.response is resp
-    assert ex.service == "api.stripe.com"
-    assert ex.operation == "GET /v1/charges"
-    assert ex.kind == "read"
-    assert ex.answered_by == answered_by
-    assert ex.validation == "unvalidated"
-    assert ex.run_id == "7f3a"
-    assert ex.flags == ()
-
-
-def test_annotate_appends_extra_flags():
-    cls = Classification("api.stripe.com", "POST /v1/charges", "unknown", ("unclassified",))
-    ex = annotate(_req("POST"), None, cls, "live", "7f3a", extra_flags=("upstream-error",))
-    assert ex.flags == ("unclassified", "upstream-error")
-    assert ex.response is None
-
-
-def test_respond_returns_exchange_response():
-    resp = Response(status=200, headers=(), body=b"ok")
-    cls = classify(_req())
-    ex = annotate(_req(), resp, cls, "live", "7f3a")
-    assert respond(ex) is resp
-
-
-def test_respond_returns_none_without_response():
-    ex = annotate(_req(), None, classify(_req()), "live", "7f3a")
-    assert respond(ex) is None
 
 
 @pytest.mark.parametrize(
@@ -441,7 +410,7 @@ def test_the_three_loopback_predicates_agree_on_every_spelling_of_loopback(host)
     """One reading of a host underneath all three, so none of them can drift from the others."""
     literal = f"[{host}]" if ":" in host else host
     assert is_self_host(host) and is_loopback(host)
-    assert netaddr.is_local_target(f"http://{literal}:3000")
+    assert Target.parse(f"http://{literal}:3000").is_loopback
 
 
 @pytest.mark.parametrize("host", ["0.0.0.0", "::"])
@@ -451,19 +420,17 @@ def test_the_unspecified_address_is_self_but_never_a_local_target(host):
     literal = f"[{host}]" if ":" in host else host
     assert is_self_host(host)
     assert not is_loopback(host)
-    assert not netaddr.is_local_target(f"http://{literal}:3000")
+    assert not Target.parse(f"http://{literal}:3000").is_loopback
 
 
 def test_irimis_own_error_is_one_json_shape_and_stamped_by_the_caller():
-    from irimi import pipeline
-
-    error = pipeline.irimi_error(403, "irimi_refused", "no", (("x-extra", "1"),))
+    error = wire.irimi_error(403, "irimi_refused", "no", (("x-extra", "1"),))
     assert error.status == 403
     assert error.headers == (("content-type", "application/json"), ("x-extra", "1"))
     assert json.loads(error.body) == {"error": {"type": "irimi_refused", "message": "no"}}
-    stamped = pipeline.stamped(error, "irimi")
-    assert stamped.header(pipeline.ANSWERED_BY_HEADER) == "irimi"
-    assert pipeline.stamped(error, "live") is error
+    stamped = wire.stamp(error, "irimi")
+    assert stamped.header(wire.ANSWERED_BY_HEADER) == "irimi"
+    assert wire.stamp(error, "live") is error
 
 
 def test_an_authority_leaves_out_the_default_port_and_brackets_ipv6():
@@ -558,15 +525,6 @@ def test_rewrite_reverse_refuses_bad_port(path):
 def test_rewrite_reverse_empty_allowlist_refuses_everything():
     with pytest.raises(ReverseDoorRefused):
         rewrite_reverse(_door_req("/api.stripe.com/v1"), frozenset())
-
-
-def test_annotate_door_defaults_to_forward():
-    assert annotate(_req(), None, classify(_req()), "live", "7f3a").door == "forward"
-
-
-def test_annotate_records_reverse_door():
-    ex = annotate(_req(), None, classify(_req()), "live", "7f3a", door="reverse")
-    assert ex.door == "reverse"
 
 
 # ------------------------------------------------- the llm, telemetry and webhook maps
@@ -805,23 +763,23 @@ def test_a_webhook_url_of_another_shape_still_falls_back_to_unknown(tmp_path, mo
 )
 def test_target_url_follows_proxy_pass_path_semantics(target, path, query, matched, expected):
     request = replace(_req("POST"), path=path, query=query)
-    assert target_url(target, request, matched=matched) == expected
+    assert target_url(Target.parse(target), request, matched=matched).url == expected
 
 
 def test_a_target_on_our_own_listener_is_refused():
     """Targets are loopback-only, so the host cannot tell a stub from us - the port can. Dialling
     our own listener is the self-connection loop the reverse door also refuses."""
     with pytest.raises(TargetRefused) as exc:
-        refuse_self_target("http://127.0.0.1:4000", 4000)
+        refuse_self_target(Target.parse("http://127.0.0.1:4000"), 4000)
     assert "own listener" in str(exc.value)
     for spelling in ["http://localhost:4000", "http://127.1:4000", "http://0.0.0.0:4000"]:
         with pytest.raises(TargetRefused):
-            refuse_self_target(spelling, 4000)
+            refuse_self_target(Target.parse(spelling), 4000)
 
 
 def test_a_target_on_another_port_is_allowed():
-    assert refuse_self_target("http://127.0.0.1:3000", 4000) is None
-    assert refuse_self_target("http://127.0.0.1", 4000) is None  # port 80, not ours
+    assert refuse_self_target(Target.parse("http://127.0.0.1:3000"), 4000) is None
+    assert refuse_self_target(Target.parse("http://127.0.0.1"), 4000) is None  # port 80, not ours
 
 
 def test_a_target_naming_the_address_irimi_was_reached_at_is_refused(monkeypatch):
@@ -840,10 +798,11 @@ def test_a_target_naming_the_address_irimi_was_reached_at_is_refused(monkeypatch
     for target in ["http://10.0.0.5:4000", "http://irimi.test:4000/w"]:
         for local in ["10.0.0.5", "::ffff:10.0.0.5"]:
             with pytest.raises(TargetRefused, match="own listener"):
-                refuse_self_target(target, 4000, local)
-        assert refuse_self_target(target, 4000) is None  # reached on loopback: another machine's
-        assert refuse_self_target(target, 4000, "10.0.0.6") is None
-    assert refuse_self_target("http://10.0.0.5:3000", 4000, "10.0.0.5") is None
+                refuse_self_target(Target.parse(target), 4000, local)
+        # Reached on loopback, it is another machine's.
+        assert refuse_self_target(Target.parse(target), 4000) is None
+        assert refuse_self_target(Target.parse(target), 4000, "10.0.0.6") is None
+    assert refuse_self_target(Target.parse("http://10.0.0.5:3000"), 4000, "10.0.0.5") is None
 
 
 def test_classify_reports_the_service_map_even_when_no_route_matched(tmp_path, monkeypatch):
@@ -863,36 +822,21 @@ def test_classify_reports_the_service_map_even_when_no_route_matched(tmp_path, m
     assert unmapped.matched is None and unmapped.service_map is None
 
 
-def test_annotate_records_the_target():
-    ex = annotate(_req(), None, classify(_req()), "delegated", "7f3a", target="http://127.0.0.1:3")
-    assert ex.target == "http://127.0.0.1:3"
-    assert annotate(_req(), None, classify(_req()), "live", "7f3a").target == ""
-
-
-def test_annotate_carries_would_fire_and_defaults_to_empty():
-    """The webhooks an accepted write would have sent ride the same path `precondition` and
-    `target` do."""
-    assert annotate(_req(), None, classify(_req()), "fake-L1", "7f3a").would_fire == ()
-    carried = annotate(
-        _req(), None, classify(_req()), "fake-L1", "7f3a", would_fire=("refund.created",)
-    )
-    assert carried.would_fire == ("refund.created",)
-
-
 def test_a_hash_in_the_request_path_survives_the_target_url():
     """The policy->engine seam is a URL *string*, so the engine splits it again to rewrite the
     flow. A literal `#` in a request target is legal and means nothing there, but `urlsplit`
     reads it as a fragment: unescaped, `POST /unlisted#x?a=1` would reach the target as
     `/unlisted` with no query at all, and `Exchange.target` would record a URL never sent."""
     req = replace(_req("POST"), path="/unlisted#x", query="a=1")
-    url = target_url("http://127.0.0.1:3000", req, matched=False)
+    url = target_url(Target.parse("http://127.0.0.1:3000"), req, matched=False).url
     parts = urlsplit(url)
     assert parts.path == "/unlisted%23x"
     assert parts.query == "a=1"
     assert parts.fragment == ""
     # A `#` in the query is the same hazard one character later.
     req = replace(_req("POST"), path="/p", query="a=1#b")
-    assert urlsplit(target_url("http://127.0.0.1:3000", req, matched=False)).query == "a=1%23b"
+    sent_to = target_url(Target.parse("http://127.0.0.1:3000"), req, matched=False)
+    assert urlsplit(sent_to.url).query == "a=1%23b"
 
 
 def test_a_live_kind_is_downgraded_when_the_route_did_not_name_the_method():
@@ -922,13 +866,13 @@ def test_a_live_kind_is_downgraded_when_the_route_did_not_name_the_method():
     for method in ("DELETE", "PUT", "PATCH"):
         cls = classify(replace(_req(method), host="probe.example", path="/api/v1/dashboard"), index)
         assert cls.kind == "unknown", f"{method} was classified live"
-        assert DOWNGRADED_FLAG in cls.flags
+        assert Flag.DOWNGRADED in cls.flags
     # POST is left alone: it is what a telemetry batch is, and the route still does not name it,
     # so it is downgraded too. Naming the verb is what makes it explicit.
     named = replace(route, method="DELETE")
     index = MapIndex((replace(sm, routes=(named,)),))
     cls = classify(replace(_req("DELETE"), host="probe.example", path="/api/v1/dashboard"), index)
-    assert cls.kind == "telemetry" and DOWNGRADED_FLAG not in cls.flags
+    assert cls.kind == "telemetry" and Flag.DOWNGRADED not in cls.flags
 
 
 # ------------------------------------- credential headers an answer target must not see

@@ -55,6 +55,22 @@ jobs:
       - if: env.COVERAGE_LEG == 'true'
         run: uv run coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
 
+  # Secret scanning over the commits a push or a pull request brings. `.gitleaks.toml` allows the
+  # synthetic credentials the tests and the sample workflows use.
+  gitleaks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The job can only read: a finding fails the check rather than commenting on the PR.
+          GITLEAKS_ENABLE_COMMENTS: false
+
   # The wheel and sdist build, pass twine's checks, and the wheel installs and runs on its own.
   build:
     runs-on: ubuntu-latest

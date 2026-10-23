@@ -726,7 +726,7 @@ class IrimiAddon:
         # of this bug: #13's "log of every write" has to show the one irimi could not decide
         # about, and `unknown` + `unclassified` is the honest classification for it.
         if isinstance(failure, RequestBodyCut):  # the agent's body, not irimi's failure (#94)
-            logger.warning("irimi: answering locally; the request %s", failure)
+            logger.warning("irimi: refused write: %s", failure)
         else:
             logger.exception("irimi: answering locally; the decision raised", exc_info=failure)
         refusal = _irimi_error(
@@ -831,8 +831,9 @@ class IrimiAddon:
             # agent's own bytes, which no hook edits.
             if cut and cls.kind not in LIVE_KINDS:
                 raise RequestBodyCut(
-                    f"its body decodes past the {MAX_DECODED_BODY} bytes irimi decodes, and "
-                    "irimi does not answer a write it cannot read whole"
+                    "request body decompresses to more than "
+                    f"{MAX_DECODED_BODY // (1024 * 1024)} MiB; irimi does not fake a write it "
+                    "cannot read whole"
                 )
             # A READ IS RECORDED AS IRIMI WOULD ASK IT, WHOEVER ANSWERS IT (#82). It is translated
             # before the policy decides, so the policy, the trace and a later replay of that trace

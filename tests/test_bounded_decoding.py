@@ -439,7 +439,10 @@ def test_a_write_whose_request_is_a_bomb_is_refused_never_faked_from_part_of_it(
     assert (status, answered_by) == (502, "fake-L0")
     error = json.loads(data)["error"]
     assert error["type"] == "irimi_decision_failed"
-    assert f"past the {CAP} bytes irimi decodes" in error["message"]
+    assert error["message"] == (
+        "irimi could not decide how to answer this request: request body decompresses to more "
+        f"than {CAP // (1024 * 1024)} MiB; irimi does not fake a write it cannot read whole"
+    )
     (ex,) = seen
     assert (ex.answered_by, ex.flags) == (
         "fake-L0",

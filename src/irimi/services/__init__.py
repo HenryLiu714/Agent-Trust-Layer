@@ -1,25 +1,8 @@
-"""What irimi knows about each service, and the body a locally answered write gets.
+"""What irimi knows about each service, and the body a faked write is answered with.
 
-Each service with Python knowledge of its own is a package (`stripe`, `slack`) whose `SERVICE` is
-one `model.Service` spec, and `REGISTRY` holds them by name. A service with no spec, or a field a
-spec leaves unset, gets the generic behaviour of `generic`. Nothing in this package knows about
-mitmproxy, exchanges or flows, which is what lets a replay run the same effects over a recording.
-`check` holds the specs to the loaded maps.
-
-The body of a faked write:
-
-**L0** is the floor and the fallback: the request's own fields reflected back as a JSON object,
-plus an id minted for every field the matched route names in `ids:`. It is not a fixture - an SDK
-has to be able to parse it and read the fields it just sent, and nothing more.
-
-**L1** applies to a route whose map names a `fixture:`. It starts from that vendored response
-object and writes the request's own fields over it, so the agent receives every field the real
-service would have sent and not only the ones it posted. A fixture this install cannot read is not
-an error: the answer degrades to L0 and the exchange is flagged.
-
-Nothing here may raise. An exception inside a mitmproxy hook makes the flow forward untouched, and
-a forwarded write escapes shadow mode - so a body that cannot be parsed reflects nothing instead,
-and `ShadowPolicy` wraps the one serialization in a guard of its own.
+`REGISTRY` holds one `model.Service` per service package; unset fields behave as `generic`.
+An unreadable fixture falls back to the echo, flagged `fixture-failed`.
+Only `check`, run at load, raises; the answer path never does (fail-closed hook rule).
 """
 
 import json
@@ -87,29 +70,25 @@ GENERIC_ANSWER = Answer(body=generic.body)
 
 
 def of(service: str) -> Service:
-    """The spec of `service`, or an empty one for a service irimi has no Python knowledge of."""
+    """Return the spec of `service`, or an empty one when irimi has none."""
     return REGISTRY.get(service) or Service(name=service)
 
 
 def scope_of(service: str, request: Request) -> tuple[str, ...]:
-    """The values of the headers that scope `service`'s state on this request
-    (`Service.scope_headers`), "" for each one it does not carry. Two requests in different scopes
-    say nothing about each other: the write log, the idempotency store and the precondition read
-    all compare this."""
+    """Return the request's `Service.scope_headers` values, "" for each one it lacks."""
     return tuple(request.header(name) or "" for name in of(service).scope_headers)
 
 
 def probe_headers_of(service: str) -> tuple[str, ...]:
-    """The credential headers a precondition read for `service` carries."""
+    """Return the credential headers a precondition read for `service` carries."""
     return of(service).probe_headers
 
 
 def check(index: MapIndex) -> None:
-    """Refuse maps the registry does not agree with. Raises MapError naming the file.
+    """Refuse maps the registry disagrees with. Raises MapError naming the file.
 
-    The specs key on the maps' service and operation names, and a route names its
-    `precondition:` and `fixture:` by name, so a rename or a typo on either side would silently
-    switch an effect, a check or a fixture off. Called once, when the maps load.
+    Specs key on service, operation, `precondition:` and `fixture:` names, so a rename or typo on
+    either side would silently switch an effect, check or fixture off.
     """
     by_name = {sm.service: sm for sm in index.services}
     for service, spec in REGISTRY.items():
@@ -140,16 +119,8 @@ def check(index: MapIndex) -> None:
                 )
 
 
-# --------------------------------------------------------------------------- answering a write
-
-
 def observe_read(service: str, body: bytes, clock: AnswerClock) -> None:
-    """Let a service learn from a read irimi forwarded rather than answered. Never raises.
-
-    A read's body is the only place the real values a fake has to sort against appear: the write
-    log holds writes, and the trace store is write-only. So a body is observed as it goes past
-    rather than looked up later, and a service with nothing to learn is a no-op.
-    """
+    """Let a service learn from a live read's body as it passes. Never raises."""
     observer = of(service).observe_read
     if observer is not None:
         observer(clock, body)
@@ -157,23 +128,18 @@ def observe_read(service: str, body: bytes, clock: AnswerClock) -> None:
 
 @dataclass(frozen=True)
 class Fake:
-    """A locally answered write: the encoded body, its content type, and how faithful it is.
-
-    `answered_by` is the value the Exchange and the `Irimi-Answered-By` header carry, so the level
-    is decided in the one place that knows which body was built and is never re-derived from the
-    route by a caller.
-    """
+    """A faked write's answer: encoded body, content type and fidelity."""
 
     body: bytes
     content_type: str
-    answered_by: FakeLevel = "fake-L0"
+    answered_by: FakeLevel = "fake-L0"  # also the `Irimi-Answered-By` value
     flags: tuple[Flag, ...] = ()
 
 
 def _level(
     classification: Classification,
 ) -> tuple[FakeLevel, tuple[Flag, ...], dict[str, Any] | None]:
-    """The level, its flags, and the route's fixture object when the level is L1."""
+    """Return the answer level, its flags, and the fixture object when there is one."""
     route = classification.route
     if route is None or not route.fixture:
         return "fake-L0", (), None
@@ -184,19 +150,13 @@ def _level(
 
 
 def fake_level(classification: Classification) -> tuple[FakeLevel, tuple[Flag, ...]]:
-    """The level a write on this route is answered at, and the flag it owes the trace, without
-    building (or minting) a body: L1 when the route names a fixture this install can read, L0
-    with `fixture-failed` when it names one it cannot, and L0 otherwise."""
+    """Return the answer level and flags for a write on this route, without building a body."""
     level, flags, _ = _level(classification)
     return level, flags
 
 
 def fake_response(request: Request, classification: Classification, clock: AnswerClock) -> Fake:
-    """The body, content type and fidelity of a locally answered write. `clock` is the
-    policy's own sequence, which Slack's envelopes take their `ts` from.
-
-    The single place the body is serialized.
-    """
+    """Build a faked write's answer. `clock` is the policy's sequence (Slack's `ts`)."""
     route = classification.route
     answer = of(classification.service).answer or GENERIC_ANSWER
     if route is not None:
@@ -209,12 +169,9 @@ def fake_response(request: Request, classification: Classification, clock: Answe
 
 
 def fake_rejection(classification: Classification, body: dict[str, Any]) -> Fake:
-    """A modeled error body, carried at the level this route's write WOULD have been answered at.
+    """Answer a precondition rejection with `body`, at the level `fake_level` gives the route.
 
-    There is no `fake-L3`: the header says who answered, the exchange field says what L3 decided.
-    The level is `fake_level`'s, so a Slack `reactions.add` (no fixture) is L0 and a
-    `chat.postMessage` whose fixture will not load is L0 with `fixture-failed`, and nothing is
-    minted for a write that never happened.
+    There is no `fake-L3`: the header says who answered; the exchange records the check's result.
     """
     answered_by, flags = fake_level(classification)
     return Fake(json.dumps(body, allow_nan=False).encode(), JSON_CT, answered_by, flags)

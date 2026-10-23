@@ -2,7 +2,7 @@
 
 This is the reference for what irimi writes about a run, and the contract between the phase that
 records runs (Phase 3) and everything that reads them: `irimi runs show` prints a stored run,
-`irimi compare` lines two up, and a replay answers an agent from one (#82). The shape and its JSON codec live in `src/irimi/trace.py`, which does no
+`irimi compare` lines two up, and a replay answers an agent from one (#82). The shape and its JSON codec live in `src/irimi/protocol/trace.py`, which does no
 I/O. The store (#70) writes the files described here. `tests/test_trace.py` holds this page to the
 code: the example at the end decodes with those codecs and re-encodes to itself, key for key, and
 the first column of each field table below is exactly the keys its encoder writes, in order.
@@ -283,7 +283,7 @@ names:
 {"seq": <integer>, "type": "exchange" | "tool_call" | "telemetry", ...fields}
 ```
 
-**An `exchange`** (`irimi.exchange.Exchange`) is one HTTP exchange irimi saw or made.
+**An `exchange`** (`irimi.core.exchange.Exchange`) is one HTTP exchange irimi saw or made.
 
 | Field | Type | Meaning |
 | --- | --- | --- |

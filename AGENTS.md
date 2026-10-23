@@ -20,7 +20,7 @@ Python 3.12+, managed with `uv`. See `docs/architecture.md` for the module map a
   and `docs/architecture.md`; a new module has to be placed in both.
 - Nothing in a mitmproxy hook may raise: a raised hook forwards the flow, and a forwarded write
   escapes shadow mode. Fail closed and flag it.
-- THE SCOPE RULE (`servicemap/rules.py`): no classification that forwards live may apply to an
+- THE SCOPE RULE (`servicemaps/rules.py`): no classification that forwards live may apply to an
   unsafe method it did not name explicitly. Enforce a safety rule at load time and at the decision.
 - Every response irimi decided carries `Irimi-Answered-By`; a live forward carries none.
 - Comments follow CONTRIBUTING's style guide; `tests/test_prose_style.py` holds the counts to a

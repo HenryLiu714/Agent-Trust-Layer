@@ -296,7 +296,7 @@ https.
   `PATCH` without a `live_because:` saying why nothing persists. The classifier
   enforces it again per request: a live kind reaching a method its route did not name is answered
   locally and flagged `kind-downgraded`. Each scope of this rule was once a real bug here;
-  `src/irimi/servicemap/rules.py` tells the story.
+  `src/irimi/servicemaps/rules.py` tells the story.
 - **Stamping.** Every response irimi decided carries `Irimi-Answered-By`; a live forward carries
   none.
 - **Targets stay on the machine.** See [Answer targets](#answer-targets).
@@ -812,7 +812,7 @@ irimi replay · 725dc6add559a16f -> d63663c6da8905c7
   2. `--entrypoint MODULE:FUNC` given, or the run's trigger has an entrypoint: that function, called
      with `--args JSON` or `--args-file PATH` (an object of `{parameter: value}`, captured values
      as the run stores them) or the trigger's recorded args, in a child,
-     `python -m irimi._replay_child`, under irimi's own Python or the agent's (`--python`,
+     `python -m irimi.replay.child`, under irimi's own Python or the agent's (`--python`,
      below). The child imports the function by its name, rebuilds the args from their
      recorded JSON, and calls it, running a coroutine to its end. It exits 0 when
      the call returns and 1 when it raises, and the replay's run ends with what it raised, as the

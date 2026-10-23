@@ -132,21 +132,18 @@ The short version:
 
 ```
 src/irimi/
-  exchange.py paths.py netaddr.py     vocabulary, state locations, "is this loopback?"
-  limits.py files.py opener.py        size bounds; private files; the no-redirect opener
-  ca.py  servicemap/  bodies.py       the local CA; the service maps; the never-raising body parser
-  classify.py  wire.py                what a request is; parse, attribute and stamp
-  reverse_door.py                     the /<host>/ door
-  delegation.py                       answer targets
-  services/                           one spec per service: answers, effects, checks; the L0/L1 body
-  reader.py                           the one real read L3 issues
-  recording.py                        a stored run as a replay answers from it
-  policy.py  overlay.py  store.py     the decision (shadow and replay), and the two seams beside it
-  engine/                             the Engine protocol; mitm.py is the only mitmproxy importer
-  report.py  runner.py                what a run prints; the child env and engine thread
-  compare.py                          two stored runs' writes side by side
-  replay.py                           what `irimi replay` runs, and what it says a replay did
-  cli/  __main__.py                   argparse and the composition root; `python -m irimi`
+  core/                               vocabulary: exchanges, addresses, bounds, the body parser
+  protocol/                           the engine-SDK contract and the trace format
+  config/                             where irimi keeps state; private files; the local CA
+  sdk/                                what an agent imports; `__init__` is the public surface
+  servicemaps/                        the service maps as code, and what a request is by them
+  services/                           one spec per service: answers, effects, checks
+  record/                             redaction and the run store
+  decide/                             targets, the check read, the write log, the policy
+  engine/                             the Engine protocol and session core; mitm.py imports mitmproxy
+  report/                             what a run prints
+  replay/                             re-running a stored run, and comparing two runs
+  cli/  __main__.py  testing.py       the command and its composition root; `python -m irimi`
   maps/*.yaml                         the shipped service maps
   fixtures/*.json                     the vendored response objects L1 answers start from
 tests/                                one file per module, plus the invariant and exit tests
@@ -158,8 +155,9 @@ tests/workflows/                      the workflows' invariants and per-workflow
 ```
 
 Two tests guard the layout itself. `tests/test_import_boundary.py` fails if mitmproxy is imported
-outside `engine/mitm.py` or if a module imports from its own layer or a higher one; when you add a
-module it asks you to place it in the layer table (and in `docs/architecture.md`).
+outside `engine/mitm.py`, or if a module imports a higher layer, another package of its own
+layer, or a module after it in its own package; when you add a module it asks you to place it in
+the layer table (and in `docs/architecture.md`, which it checks against the same table).
 
 ## Adding a service map
 
@@ -178,7 +176,7 @@ schema; the loader refuses anything outside it by name. Things to know before yo
 - Quote a wildcard host (`"*.posthog.com"`) and any `human:` template containing `#`.
 - A live-forwarded kind (`read`, `llm`, `telemetry`) must name its methods and must justify a
   destructive one with `live_because:`. A `default_kind:` may never be a live
-  kind. This is THE SCOPE RULE; `servicemap/rules.py` explains why.
+  kind. This is THE SCOPE RULE; `servicemaps/rules.py` explains why.
 - Shipped maps never set a `target:`. Targets belong in a user's overrides file.
 - `tests/test_servicemap.py` pins the shipped maps' hosts, route counts and a round-trip through a
   built wheel; `tests/test_pipeline.py` pins how each shipped route classifies. Add to both.

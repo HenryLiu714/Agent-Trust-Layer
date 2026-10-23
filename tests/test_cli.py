@@ -793,21 +793,28 @@ def test_a_ctrl_c_while_the_store_closes_still_prints_the_summary(home, monkeypa
 
 def test_serve_prints_a_line_for_each_tool_call(home, monkeypatch, capsys):
     """`serve` wires the control endpoint's tool calls to its stream, as it does exchanges (#76).
-    The engine here refuses to start, so only the wiring is under test."""
+    The engine here refuses to start, so only the wiring is under test. Its `run` serves until
+    `shutdown`, as a real engine's does: a `run` that returned at once would stop the loop before
+    `wait_ready` ran, and the test would fail on the ready timeout instead of the refusal."""
+    import asyncio
+    import threading
+
     from irimi.engine import EngineStartError
     from irimi.trace import ToolCall
 
     wired = []
+    stopped = threading.Event()
 
     class _Refuses:
         async def run(self) -> None:
-            pass
+            while not stopped.is_set():
+                await asyncio.sleep(0.01)
 
         async def wait_ready(self) -> None:
             raise EngineStartError("not started")
 
         def shutdown(self) -> None:
-            pass
+            stopped.set()
 
     def build(run, on_exchange, on_tool_call):
         wired.append(on_tool_call)
@@ -815,6 +822,7 @@ def test_serve_prints_a_line_for_each_tool_call(home, monkeypatch, capsys):
 
     monkeypatch.setattr(cli, "_build_engine", build)
     assert main(["serve", "--port", "0"]) == 1
+    assert "error: not started" in capsys.readouterr().err.splitlines()
     [on_tool_call] = wired
     on_tool_call(ToolCall("t", "r", "db.write", "write", "shadow", {}, None, None, 1.0, 2.0))
     assert "shadow    write     tool db.write -> ok" in capsys.readouterr().out.splitlines()

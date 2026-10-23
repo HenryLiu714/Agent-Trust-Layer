@@ -1,24 +1,9 @@
-"""What `irimi replay` says of a replay once it has run.
+"""Build what `irimi replay` reports once a replay has run. Pure: runs nothing, prints nothing.
 
-Pure, like `compare`: nothing here runs a process or prints.
-
-WHAT IT SAYS (`ReplayReport.lines`): which run was replayed as which; for a process run, that
-only its argv runs again; how the agent ended, its exit code printed and never deciding the exit;
-where the replay diverged; how many of the agent's calls the recording answered and how many it
-missed; then the body of `irimi compare` between the two runs, whose exit code is the replay's. A
-replay whose call the child could not make (`CallResult`) has no report: `irimi replay` says why
-and stops. A divergence is the first of the agent's calls the recording was asked for, in the
-order stored (`seq`), that it did not answer: an exchange the agent sent flagged `replay-miss` (a
-precondition read irimi issued never is), or a read tool that ran for real. It is numbered among
-those calls, so the agent's 4th call is the 4th the totals count. A write tool's fake runs in a
-replay as it does under shadow, and is neither. It is not `replay.index.ReplayIndex.diverged`, the
-engine's state after a missed write, which a missed llm call never sets.
-
-A replay that missed nothing says so only when it made every call the recording holds; one that
-made fewer, an agent that stopped early, says how many it never made. A call recorded within a
-read tool's span is that tool's body's (`replay.index.made_within`, `nested_in`), which a replay
-answering the tool never makes: it is the tool's, and not counted. A run the store dropped events
-of is never called the same: what it lacks is not compared.
+- The divergence point is the first agent call the recording did not answer (a `replay-miss`
+  exchange or a read tool that ran for real); only a missed write sets `ReplayIndex.diverged`.
+- Calls within a read tool's span belong to its body and are not counted (`made_within`).
+- The exit code is `irimi compare`'s, never the agent's; with dropped events it is never OK.
 """
 
 import shlex
@@ -44,9 +29,10 @@ ARGV_ONLY = "argv only: environment, cwd and stdin are not recorded"
 
 @dataclass(frozen=True)
 class Ended:
-    """How a replay's agent ended: its exit code; what `replay_child` said of its call, None for a
-    command, or a child that said nothing; and `stopped`, the exit code of an `irimi replay` that
-    was itself interrupted (SIGINT, SIGTERM) while the agent ran, which is then the replay's."""
+    """How a replay's agent ended.
+
+    `call` is what the child reported, None for a command or a silent child. `stopped` is the exit
+    code of an `irimi replay` interrupted while the agent ran, which then becomes the replay's."""
 
     code: int
     call: CallResult | None = None
@@ -64,18 +50,15 @@ class ReplayReport:
     diverged_at: str | None
     answered: int  # the agent's exchanges and read tools the recording answered
     missed: int  # and those it did not
-    # How many of the recording's calls the replay never made: those of the kinds a replay looks
-    # up (`_looked_up`), less those it answered, and less those the replay made that no policy
-    # was asked of (a write refused for its cut body before any policy saw it).
+    # Recorded calls the replay looks up (`_looked_up`), less those it answered and those it made
+    # without asking the policy (a write refused for its cut body).
     never_made: int
     comparison: compare.Comparison
-    # The recorded command line a process run's replay ran again, or None.
-    rerun: tuple[str, ...] | None = None
+    rerun: tuple[str, ...] | None = None  # the command line a process run's replay ran again
 
     @property
     def exit_code(self) -> int:
-        """The comparison's, but the signal exit code of a replay that was stopped, and never
-        `exitcodes.OK` for a run the store dropped events of."""
+        """Return the comparison's exit code, or the stop signal's; never OK with dropped events."""
         if self.ended.stopped is not None:
             return self.ended.stopped
         dropped = self.source.dropped_events or self.replayed.dropped_events
@@ -92,8 +75,7 @@ class ReplayReport:
         lines.append(f"  agent exited {self.ended.code}")
         if self.ended.stopped is not None:
             lines.append("  stopped: irimi replay was interrupted before the agent ended")
-        # Only of a trigger the source recorded: a run with none, replayed by its command, records
-        # that command line as its trigger, and was given no args.
+        # A source with no trigger was replayed by its command, which has no args to compare.
         if self.source.trigger is not None and compare.args_differ(self.source, self.replayed):
             lines.append(f"  {compare.ARGS_DIFFER}")
         lines.append(f"  {self._diverged()}")
@@ -107,7 +89,7 @@ class ReplayReport:
         return [*lines, "", *self.comparison.lines()]
 
     def result(self) -> ReplayResult:
-        """What `--result-file` writes, and `testing.replay` returns."""
+        """Return what `--result-file` writes and `testing.replay` returns."""
         return ReplayResult(
             self.source.run_id,
             self.replayed.run_id,
@@ -128,8 +110,7 @@ class ReplayReport:
 
 
 def refused(run_id: str, lines: Sequence[str], replay_run_id: str | None = None) -> ReplayResult:
-    """The result of a replay that could not run, or whose run could not be read back: exit
-    `exitcodes.ERROR`, and what irimi said of why."""
+    """Return an `exitcodes.ERROR` result for a replay that could not run or be read back."""
     return ReplayResult(run_id, replay_run_id, exitcodes.ERROR, None, tuple(lines))
 
 
@@ -140,9 +121,9 @@ def outcome(
     index: MapIndex | None,
     rerun: tuple[str, ...] | None = None,
 ) -> ReplayReport:
-    """What replaying `source` as `replayed` did. `index` is the loaded maps, for each write's
-    sentence, as `compare.compare_runs` takes it; `rerun` the recorded command line a process
-    run's replay ran again."""
+    """Return the report of replaying `source` as `replayed`.
+
+    `index` is the loaded maps; `rerun` the recorded command line a process run's replay ran."""
     diverged = None
     answered = missed = unasked = 0
     for event in replayed.events:
@@ -175,15 +156,15 @@ def outcome(
 
 
 def ordinal(n: int) -> str:
-    """`1st`, `2nd`, `3rd`, `4th`, `11th`, `21st`."""
+    """Return `n` as an English ordinal: `1st`, `2nd`, `11th`, `21st`."""
     suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
     return f"{n}{suffix}"
 
 
 def _looked_up(event: object) -> bool:
-    """Whether a replay asks the recording for `event`'s kind of call: an exchange the agent sent,
-    and a read tool. Not telemetry, a delegated answer or one whose target irimi could not reach,
-    which a replay never looks up, nor a request irimi refused before asking the policy."""
+    """Return True if a replay asks the recording for `event`: an agent exchange or a read tool.
+
+    Not telemetry, a target's answer or failure, or a request refused before the policy."""
     if isinstance(event, Exchange):
         return (
             event.issued_by == "agent"
@@ -196,8 +177,7 @@ def _looked_up(event: object) -> bool:
 
 
 def _in_a_tool(event: object, tools: list[ToolCall]) -> bool:
-    """Whether `event` was recorded within one of the read `tools`' spans, its body's: an exchange,
-    or a read tool its body called."""
+    """Return True if `event` (an exchange or read tool) lies within a read tool's span."""
     if isinstance(event, Exchange):
         return any(made_within(event.started_at, event.ended_at, tool) for tool in tools)
     if not isinstance(event, ToolCall):
@@ -206,9 +186,10 @@ def _in_a_tool(event: object, tools: list[ToolCall]) -> bool:
 
 
 def _answered(event: object) -> bool | None:
-    """Whether the recording answered `event`: True, False for a miss, None for an event no
-    recording answers - telemetry, a delegated answer, a precondition read irimi issued, a write
-    tool's stand-in, a tool the replay's SDK did not look up."""
+    """Return whether the recording answered `event`: True, False for a miss, None if not asked.
+
+    Not asked: telemetry, a target's answer, irimi's check read, a write tool's fake, and a tool
+    the replay's SDK did not look up."""
     if isinstance(event, Exchange):
         if event.issued_by != "agent":
             return None

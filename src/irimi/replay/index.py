@@ -1,52 +1,10 @@
-"""A stored run as a replay answers from it: its exchanges, keyed so that a live request can
-find the one the recorded run made in its place, and the replay's own state.
+"""Match a replay's live requests to a stored run's exchanges, and hold the replay's state.
 
-A replay re-runs an agent and answers it from a run it made before. `replay.policy.ReplayPolicy`
-asks this module one question per request - did the recorded run make this same request, and what
-was it answered? - and this module answers it with nothing but the recording: no clock, no I/O,
-no minting. It reads a `trace.StoredRun`'s events.
-
-WHAT "THE SAME REQUEST" IS. Two requests match when their keys do, and the key is built to be
-equal across two runs of one agent while the agent asks for the same thing:
-
-- no headers, so an `Idempotency-Key`, a `User-Agent`, a credential or a port never decides a match,
-  but the ones that say whose state a request is about (`services.scope_of`): a Connect read of
-  `ch_1` in one account is not a read of `ch_1` in another;
-- the body as `bodies.reflect` reads it, less the route's `compare_ignores:` fields, as canonical
-  JSON, so form encoding, key order and a re-spelled number (`1.10` is `1.1`) do not either;
-- an llm call's JSON body less its route's `compare_ignores:` (who asked and how, not what);
-- a write's standing with the run's idempotency store: a retry of a key the run has answered, a
-  key reused for another write, or neither, which the service answers three different ways
-  whatever the bodies say;
-- and the live request is redacted with the store's key first, because the recording was: a
-  secret in a body matches its own placeholder in the recording.
-
-Each recorded exchange answers once, in the order it was recorded, so a third identical read in a
-run that recorded two is a miss. The engine's own precondition reads are kept apart: they are never
-served to the agent, and the agent's reads are never used for one.
-
-A READ TOOL THE PROXY CANNOT SEE IS A READ TOO. The SDK asks for its recorded result by the
-tool's name and its captured args, redacted with the store's key as the recording's were, compared
-as canonical JSON, in order. A recorded tool call answered holds the HTTP its body made inside it,
-and the read tools it called, which a replay that answers the call never makes: the exchanges
-recorded within the call's span are used up with it, and so are the read tool calls within it that
-a later call of the same name and args comes after (`_displacing`), so none of them answers a later
-request or tool call of the agent's with what the tool saw.
-Under the world rule a tool is placed where its body began, its first such exchange, so a write
-its own body made is not one it waits on; and a tool recorded after a write the replay has not
-made is a miss that does not diverge the replay, since its body then runs, and its own HTTP is
-decided as any request is. A recorded call with no outcome to give (`_tool_servable`: a result
-that is a description, as a `Decimal` is captured, or a call stopped from outside) is a miss that
-uses up only itself: the SDK could not use it, and the body that runs in its place is answered
-what it was answered when recorded. A write tool is not kept: its stand-in runs in a replay as it
-did when recorded, and with no tool overlay no recorded read shows what one did, so it
-neither diverges a replay nor holds a read back.
-
-THE REPLAY'S STATE IS HERE, AND ONLY HERE: which recorded exchanges have answered, and whether
-the replay has diverged - made a write the recording could not answer, or reached a recorded answer
-made from a world holding a recorded write the replay has not made - after which a recorded answer
-made from the world (`_depends_on_prior_writes`) is never served again. One replay is one run
-against one engine, whose write log is the engine's, so both are the engine's too.
+- Requests match on kind, method, host, path, sorted query, scope headers, compared body and
+  idempotency standing; the live request is redacted with the store's key first.
+- Each recorded exchange answers once, in recorded order; read tool calls match by name and args.
+- A stale answer is a recorded answer that depended on writes the replay has not made. It is
+  never served, and reaching one in `answer_for` diverges the replay.
 """
 
 import hashlib
@@ -84,23 +42,15 @@ from irimi.record import redact
 from irimi.servicemaps import MapIndex, Route
 from irimi.servicemaps.classify import classify
 
-# What a match key is: a tuple of strings and tuples of strings, comparable and hashable.
 _Key = tuple[Any, ...]
-# What a read tool call is matched by: its name, and its args as canonical JSON.
 _ToolKey = tuple[str, str]
-# Where a recorded exchange waits to be taken: its key, whether it is an llm call that asked to
-# stream (`_stream_bucket`), and the idempotency flag its answer carried
-# (`_idempotency_standing`).
+# A recorded exchange's match key, stream bucket and idempotency flag.
 _Bucket = tuple[_Key, bool, str]
 
-# A prompt-caching hint, at any depth of an llm call's body: it changes what the call costs, never
-# what it asks.
+# A prompt-caching hint: it changes what an llm call costs, never what it asks.
 CACHE_CONTROL = "cache_control"
 
-# A recorded exchange carrying any of these holds an answer that is not the whole answer, or not
-# the service's: a body cut at the cap, a stream that ended early, irimi's own refusal of a write it
-# could not decide about, a target that was never reached, a lost upstream, a part redaction could
-# not read. A replay never answers from one as though it were whole.
+# A recorded answer with any of these flags is partial or not the service's own.
 UNSERVABLE_FLAGS = frozenset(
     {
         Flag.BODY_TRUNCATED,
@@ -112,61 +62,40 @@ UNSERVABLE_FLAGS = frozenset(
     }
 )
 
-# The levels a recorded write or unknown request may be answered again at: the fakes irimi built.
-# A write recorded as anything else was never one irimi answered, and serving it under its recorded
-# `answered_by` would send a fake with no stamp, or call it live.
+# A recorded write or unknown request is served again only if irimi faked it.
 _FAKE_LEVELS: frozenset[str] = frozenset(get_args(FakeLevel))
 
 
 def _stream_bucket(request: Request, kind: Kind) -> bool:
-    """What a request's key carries beside it: whether it is an llm call that asks to stream. Any
-    other kind asks for one answer, whatever its body says.
-
-    The LLM maps leave `stream` out of the compared body, so this is what keeps a call that asked
-    to stream answered from one that asked too, and a streamed answer away from one that did not.
-    """
+    """Return True for an llm call asking to stream (the maps leave `stream` out of the key)."""
     return kind == "llm" and _asks_to_stream(request)
 
 
 def _asks_to_stream(request: Request) -> bool:
-    """Whether this request asks for a streamed answer: a JSON body whose `stream` is `true`, as
-    every llm API spells it. Anything else asks for one answer."""
+    """Return True if the request's JSON body has `stream: true`."""
     document = _json_body(request)
     return document is not None and document.get("stream") is True
 
 
 def _json_body(request: Request) -> dict[str, Any] | None:
-    """The request's body as a JSON object, whatever its content type says, or None. Of any
-    size: a conversation past `limits.MAX_BODY_BYTES` is still one llm call, and the one way to
-    tell whether it asks to stream. Never raises."""
+    """Return the body as a JSON object of any size, whatever its content type, or None."""
     return bodies.json_object(request.body, max_bytes=None)
 
 
 def _idempotency_standing(exchange: Exchange) -> str:
-    """The idempotency flag a recorded answer carried: `idempotent-replay` when it was the run's
-    first answer to its key again, `idempotency-conflict` when the key had come back on another
-    write, and "" for an answer to a key the run had not answered, or no key.
-
-    It is beside the key because the service answers those three differently whatever the body
-    says, and the key leaves the idempotency key out: a retry must not take the recorded answer to
-    a second, distinct write (and enter the write log as one), a fresh write must not take a
-    recorded retry's (and stay out of it), and a key reused for another write is refused."""
+    """Return the idempotency flag a recorded answer carried, or "" for none."""
     return next((flag for flag in IDEMPOTENCY_FLAGS if flag in exchange.flags), "")
 
 
 def _depends_on_prior_writes(exchange: Exchange) -> bool:
-    """Whether a recorded answer was made from the world the recorded run's writes had made: a
-    read, which shows them, or a write L3 checked against them, whose verdict a refund the
-    replay has not made, or one the recording never held, would change. A replay serves one only
-    while that world is the replay's too (`ReplayIndex.answer_for`)."""
+    """Return True if a recorded answer depended on earlier writes: a read, or a checked write."""
     return exchange.kind == "read" or (
         exchange.kind not in LIVE_KINDS and exchange.precondition.outcome is not None
     )
 
 
 def _streamed(exchange: Exchange) -> bool:
-    """Whether a recorded exchange's answer streamed: it has chunks, or it is an event stream
-    that sent no body at all, which records no chunks like a response that did not stream."""
+    """Return True if a recorded answer streamed: it has chunks, or is an empty event stream."""
     if exchange.stream_chunks:
         return True
     content_type = "" if exchange.response is None else exchange.response.header("content-type")
@@ -174,17 +103,10 @@ def _streamed(exchange: Exchange) -> bool:
 
 
 def _servable(exchange: Exchange) -> bool:
-    """Whether a replay may answer with this recorded exchange's response: it has one, it is the
-    whole of what was answered, and it was not a target's or irimi's own error. A delegated answer
-    came from wherever the target was, which a replay is not pointed at. A write or an unknown
-    request must have been one of irimi's own fakes (`_FAKE_LEVELS`).
+    """Return True if a replay may answer with this recorded exchange's response.
 
-    The response must also be one the engine can send. irimi's own writer stores only headers it
-    read as latin-1, but a run from elsewhere - edited by hand, pulled from a bucket, written by
-    another version - may hold any text, and a header that does not encode raises in the request
-    hook, which forwards the flow. Its status must be a final one HTTP defines, 200 to 599:
-    a 1xx is never a whole answer, and a 101 switched the recorded connection to a protocol a
-    replay cannot carry on."""
+    It must be whole, not a target's or irimi's own, a fake if a write, status 200-599, and with
+    latin-1 headers: a header that does not encode raises in the request hook."""
     response = exchange.response
     if response is None or exchange.answered_by in ("delegated", "irimi"):
         return False
@@ -204,22 +126,9 @@ def _servable(exchange: Exchange) -> bool:
 
 
 def _match_key(request: Request, kind: Kind, maps: MapIndex) -> _Key:
-    """The key of a request AS STORED: already redacted. The recorded side calls this on a stored
-    request, and `_live_key` on a live one after redacting it, so both sides are keyed alike.
-
-    Every request is keyed by its kind, method, host, path, query pairs sorted by name and the
-    headers that scope its service's state (`services.scope_of`, which the write log, the
-    idempotency store and L3 compare too): a query can say what an llm call asks as much as a read's
-    (`?alt=sse`, `?api-version=`), and a `Stripe-Account` says whose objects a request names.
-    An llm call whose body is a JSON object (`_json_body`) adds that object less its route's
-    `compare_ignores:` and every `cache_control`, as canonical JSON. Everything else adds its body
-    as `bodies.reflect` reads it minus the `compare_ignores:` fields of the route this stored
-    request classifies to; a body
-    `reflect` cannot read is keyed by its sha256. The kind leads, so a read never matches a
-    write."""
+    """Return the match key of a stored, already redacted request; a read never matches a write."""
     classification = classify(request, maps)
-    # Sorted by name only, and stably: names in any order, but a repeated name's values in theirs,
-    # since `sort=created&sort=amount` asks for another order than the reverse.
+    # Sort stably by name only: `sort=created&sort=amount` asks for another order than the reverse.
     pairs = parse_qsl(request.query, keep_blank_values=True)
     query = tuple(sorted(pairs, key=lambda pair: pair[0]))
     scope = services.scope_of(classification.service, request)
@@ -229,11 +138,10 @@ def _match_key(request: Request, kind: Kind, maps: MapIndex) -> _Key:
 
 
 def compared_body(request: Request, kind: Kind, route: Route | None) -> JSONValue:
-    """What of a request's body says what it asks, as a replay matches it and `irimi compare`
-    compares it: an llm call's JSON object less `route`'s `compare_ignores:` and every
-    `cache_control`; any other body as `bodies.reflect` reads it, less `route`'s
-    `compare_ignores:`; the sha256 of a body neither reads, as `sha256:<hex>`; and "" for no
-    body."""
+    """Return the part of a request's body that replay matching and `irimi compare` compare.
+
+    An llm call's JSON, or `bodies.reflect`'s reading, less `compare_ignores:` (and, for llm,
+    `cache_control`); `sha256:<hex>` for a body neither reads; "" for no body."""
     ignored = route.compare_ignores if route is not None else ()
     if kind == "llm":
         document = _json_body(request)
@@ -250,9 +158,7 @@ def compared_body(request: Request, kind: Kind, route: Route | None) -> JSONValu
 
 
 def _live_key(request: Request, kind: Kind, maps: MapIndex, redaction_key: bytes) -> _Key:
-    """The key of a live request: `_match_key` over the request as the store would have written
-    it, redacted with the store's key (`redact.redact_request`). Every redaction rule is
-    deterministic, so a secret in a live body becomes the placeholder its recording holds."""
+    """Return a live request's match key, redacted with the store's key as its recording was."""
     return _match_key(redact.redact_request(request, redaction_key), kind, maps)
 
 
@@ -265,20 +171,12 @@ def _without_cache_control(value: Any) -> Any:
 
 
 def _tool_key(name: str, args: JSONValue) -> _ToolKey:
-    """A read tool call's key: its name and its args, already redacted, as canonical JSON, so key
-    order never decides a match and `true` is never `1`."""
+    """Return a read tool call's key: its name and its redacted args as canonical JSON."""
     return (name, canonical_json(args))
 
 
 def _tool_servable(call: ToolCall) -> bool:
-    """Whether a recorded read tool call's outcome may be handed back. Not when the store could
-    not redact it: a result stored as `redact.REDACTION_FAILED` would revive as the tool's answer,
-    and an error message as that string would be raised as the recorded error's. Not when it
-    is no outcome to give: a result holding a description of a value (`trace.holds_description`)
-    is not the value, and a call something outside it stopped (`trace.STOPPED_ERROR_TYPES`)
-    recorded none of its own. Each of those the SDK would decline, after the call had used up
-    what its body made, which its body then runs again and needs. Whether any other result can be
-    revived is the SDK's to say."""
+    """Return True if a recorded read tool call has an outcome the SDK can hand back."""
     if call.error is not None:
         return (
             call.error.message != redact.REDACTION_FAILED
@@ -297,32 +195,22 @@ class _Entry:
 @dataclass
 class _ToolEntry:
     call: ToolCall
-    # Where its body began, in the same count as `_Entry.position`: its first inner exchange's,
-    # or its own when it made none.
-    position: int
-    # The agent's exchanges recorded within the call's span: its body's HTTP.
-    inner: list[_Entry]
-    # The read tool calls recorded within the call's span that a later call repeats: the tools its
-    # body called, which would answer that later call in its place (`_displacing`).
-    nested: list["_ToolEntry"] = field(default_factory=list)
+    position: int  # where its body began: its first inner exchange's position, or its own
+    inner: list[_Entry]  # the agent's exchanges recorded within its span
+    nested: list["_ToolEntry"] = field(default_factory=list)  # see `_displacing`
     consumed: bool = False
 
 
 def made_within(started_at: float, ended_at: float, call: ToolCall) -> bool:
-    """Whether an exchange or a tool call made over `started_at`..`ended_at` was made within
-    `call`'s span, which is how a stored run says it was the call's body's: a tool call records no
-    link to its HTTP or to the tools it called. One another task made in the span is taken
-    for the call's too, and so used up with it: in the replay it is then a miss, decided afresh,
-    never an answer from the wrong world. One with no clock (`started_at` 0.0, built outside the
-    engine and the SDK) is within no call. `irimi replay`'s count of the calls a replay never made
-    reads the same rule."""
+    """Return True if something made over `started_at`..`ended_at` falls within `call`'s span.
+
+    Runs record no link from a tool call to its requests, so the span decides, catching other
+    tasks' requests too. A `started_at` of 0.0 (no clock) is within no call."""
     return started_at > 0.0 and call.started_at <= started_at and ended_at <= call.ended_at
 
 
 def nested_in(other: ToolCall, call: ToolCall) -> bool:
-    """Whether the read tool call `other` was made within `call`'s span (`made_within`). Never one
-    with the same span, so two calls clocked alike never use each other up. `irimi replay`'s
-    count of the calls a replay never made reads the same rule."""
+    """Return True if `other` is `made_within` `call`'s span; calls clocked alike never nest."""
     span = (other.started_at, other.ended_at)
     return span != (call.started_at, call.ended_at) and made_within(*span, call)
 
@@ -330,17 +218,9 @@ def nested_in(other: ToolCall, call: ToolCall) -> bool:
 def _displacing(
     within: list[tuple[_ToolKey, _ToolEntry]], tools: dict[_ToolKey, list[_ToolEntry]]
 ) -> list[_ToolEntry]:
-    """The read tool calls `within` a call's span that answering the call uses up: each one that
-    a later recorded call of its name and args, outside that span, comes after, so that it would
-    answer that later call in its place.
+    """Return the read tool calls `within` a call's span that answering the call uses up.
 
-    A span does not say whose a call was. One within it may be the body's, never made once the
-    call is answered, or another task's, made at the same time: two tools gathered, or a sync
-    tool's coroutine left pending while the agent awaits another. Used up, the other task's would
-    be a miss whenever its lookup came second, so a race would decide it. So only one that would
-    answer a later call wrongly is used up, and any other is left to answer its own call. One of
-    another task's that a later call repeats is still used up, and that task's call then takes the
-    later answer: no stored run says whose it was (the follow-up that records the link)."""
+    Only those a later same-key call outside the span follows; the rest may be another task's."""
     inside = {id(entry) for _, entry in within}
     found = []
     for tool_key, entry in within:
@@ -352,8 +232,7 @@ def _displacing(
 
 
 class ReplayIndex:
-    """One stored run's exchanges, ready to answer a replay from, and that replay's state.
-    Thread-safe: the policy that asks it runs on the engine's worker threads."""
+    """One stored run's exchanges and the state of the replay answering from them. Thread-safe."""
 
     def __init__(
         self,
@@ -365,8 +244,7 @@ class ReplayIndex:
     ) -> None:
         self._agent = agent
         self._tools = tools
-        # The recorded writes that entered the write log (`is_authored_write`): the ones every
-        # recorded read after them shows.
+        # The recorded faked writes (`is_authored_write`): every recorded read after one shows it.
         self._writes = [
             entry
             for entries in agent.values()
@@ -383,16 +261,10 @@ class ReplayIndex:
     def from_events(
         cls, events: Sequence[Event], redaction_key: bytes, maps: MapIndex
     ) -> "ReplayIndex":
-        """The recording of a stored run's `events` (`StoredRun.events`, in `seq` order), whose
-        bodies the store redacted with `redaction_key`, keyed against `maps`.
+        """Build the index from a stored run's `events`, in `seq` order and redacted with the key.
 
-        Every exchange the agent made is kept, in order, whether or not it can be served: one that
-        cannot is still the agent's Nth such request, so the request in its place is a miss and the
-        next one still meets its own. Telemetry is never stored as an exchange. Every read
-        tool call is kept the same way, by name and args, counted in the same order as the
-        exchanges so the world rule can compare them; a write tool call is not (module doc).
-        The engine's precondition reads are kept by key, the first that can be served of each, or
-        else the first."""
+        Agent exchanges are kept servable or not, so an unservable one's place is a miss.
+        Telemetry and write tool calls are skipped; per key, the first servable check read wins."""
         agent: dict[_Bucket, list[_Entry]] = {}
         engine: dict[_Key, Exchange] = {}
         calls: list[tuple[_ToolKey, ToolCall, int]] = []
@@ -401,7 +273,7 @@ class ReplayIndex:
             if isinstance(event, ToolCall) and event.kind == "read":
                 try:
                     calls.append((_tool_key(event.name, event.args), event, position))
-                except Exception:  # args this cannot key are args nothing can match
+                except Exception:  # args this cannot key match nothing
                     continue
                 position += 1
                 continue
@@ -409,7 +281,7 @@ class ReplayIndex:
                 continue
             try:
                 found = _match_key(event.request, event.kind, maps)
-            except Exception:  # an exchange this cannot key is one nothing can match
+            except Exception:  # an exchange this cannot key matches nothing
                 continue
             if event.issued_by == "engine":
                 held = engine.get(found)
@@ -441,25 +313,11 @@ class ReplayIndex:
         return cls(agent, tools, engine, maps, redaction_key)
 
     def answer_for(self, request: Request, kind: Kind, held: str = "") -> Exchange | None:
-        """The recorded exchange that answers this live request, or None for a miss. `held` is the
-        idempotency flag the run's own answer to this request would carry
-        (`_idempotency_standing`), which the caller reads off the run's idempotency store; "" for
-        anything that is not a write.
+        """Return the recorded exchange that answers this live request, or None for a miss.
 
-        It is the first recorded exchange of the same kind, key, stream bucket and `held` that has
-        not answered yet, and it never answers again. When that one cannot be served
-        (`_servable`), or is an llm call's stream and this call does not ask for a stream, the
-        request is a miss all the same: the recorded run had no answer this one can be given.
-
-        AN ANSWER MADE FROM A WORLD THE REPLAY IS NOT IN IS A MISS, AND THE REPLAY DIVERGES
-        (`_depends_on_prior_writes`): a read, or a write L3 checked, recorded after a recorded
-        write the replay has not made, or reached once the replay has diverged. It shows that
-        write - a refund in `amount_refunded`, a post in a thread - or was refused because of it,
-        and the run being replayed made no such write, as when a prompt edit stops the agent
-        refunding; or the replay made a write the recorded run did not. It is not consumed, and
-        from then on reads go live and checked writes are checked again, against the recording's
-        own reads and the replay's write log. The check and the take are one step under the lock,
-        so a write that diverges on another thread cannot slip between them."""
+        `held` is a write's idempotency flag (`_idempotency_standing`), else "". The first unused
+        match answers, once; one unservable, or streamed when not asked, is still a miss. A stale
+        match is a miss, is not used up, and diverges the replay."""
         asks = _stream_bucket(request, kind)
         wanted = (_live_key(request, kind, self._maps, self._redaction_key), asks, held)
         with self._lock:
@@ -478,28 +336,17 @@ class ReplayIndex:
         return None
 
     def tool_answer_for(self, name: str, args: JSONValue) -> ToolCall | None:
-        """The recorded read tool call that answers this live one, or None for a miss. `args`
-        are the call's as the SDK captured them, not yet redacted.
+        """Return the recorded read tool call that answers this live one, or None for a miss.
 
-        It is the first recorded read tool call of the same name whose args equal `args` redacted
-        with the store's key, as the recording's were, that has not answered yet, and it never
-        answers again. Args redaction could not read (`redact.REDACTION_FAILED`) match nothing,
-        and one with no outcome to give - one redaction could not read, a result that is a
-        description, a call stopped from outside - is a miss in its place (`_tool_servable`),
-        which uses up nothing else. The exchanges recorded within an answered call, and the read
-        tool calls within it that a later call repeats, are used up with it (module doc).
-
-        A READ TOOL SHOWS THE WORLD, as an HTTP read does (`answer_for`): its result may have been
-        made from what it read over HTTP, which showed every recorded write before it. One recorded
-        after a write the replay has not made, or reached once the replay has diverged, is a miss,
-        and is not used up. Unlike a read's, it does not diverge the replay: its body runs, and
-        what the body reads over HTTP is decided as every request is, by the policy."""
+        `args` are unredacted. An unservable match is a miss using up only itself; an answered
+        one also uses up what was recorded in its span. A stale match is a miss, is not used up,
+        and does not diverge the replay: the tool's body runs instead."""
         redacted = redact.redact_json(args, self._redaction_key)
         if redacted == redact.REDACTION_FAILED:
             return None
         try:
             wanted = _tool_key(name, redacted)
-        except Exception:  # args no recording holds: `from_events` skips what it cannot key
+        except Exception:  # `from_events` skips args it cannot key, so no recording holds these
             return None
         with self._lock:
             for entry in self._tools.get(wanted, ()):
@@ -508,8 +355,7 @@ class ReplayIndex:
                         return None
                     entry.consumed = True
                     if not _tool_servable(entry.call):
-                        # A miss in its place: its body runs, and makes the requests and tool
-                        # calls it was recorded making, which are still there to answer them.
+                        # Its body runs and makes its recorded requests, left unused to answer them.
                         return None
                     for made in entry.inner:
                         made.consumed = True
@@ -519,24 +365,20 @@ class ReplayIndex:
         return None
 
     def _stale(self, position: int) -> bool:
-        """Whether a recorded answer at `position` that shows the world shows one the replay is not
-        in: the replay has diverged, or a recorded write before it has not been made. Called under
-        the lock, by the step that would consume that answer."""
+        """Return True if diverged or a write before `position` is unused; call under the lock."""
         return self._diverged or any(
             not write.consumed and write.position < position for write in self._writes
         )
 
     def engine_read(self, request: Request) -> Response | None:
-        """The response the recorded run's own precondition read of this request got, or None
-        when it made none, or got none. Never consumed: two writes may check one charge."""
+        """Return the recorded check read's response to this request, or None. Never consumed."""
         found = self._engine.get(_live_key(request, "read", self._maps, self._redaction_key))
         if found is None or not _servable(found):
             return None
         return found.response
 
     def diverge(self) -> None:
-        """Say the replay has made a write the recording could not answer. From then on the
-        recorded reads show a world that is not the replay's, and none is served again."""
+        """Mark the replay diverged: no answer depending on prior writes is served after this."""
         with self._lock:
             self._diverged = True
 
@@ -547,14 +389,10 @@ class ReplayIndex:
 
 
 class RecordingReader(Reader):
-    """A `reader.Reader` over a recording: the precondition read of a write a replay could not
-    answer from the recording is answered with the recorded run's own read of the same thing.
+    """A `reader.Reader` that answers irimi's check reads from the recorded run's own reads.
 
-    A REPLAY NEVER CHECKS A PRECONDITION AGAINST LIVE STATE. A charge the recorded run saw
-    unrefunded may since have been refunded for real, and a live check would reject the write the
-    recording accepted. A read the recording lacks is None, which the policy
-    records as `not_evaluable`, as it does any read it could not make. Every read it makes is
-    recorded `recording`, and flagged `from-recording` or `replay-miss` (`reader.answered_as`)."""
+    Never live: a charge refunded since the recording would reject a write it accepted. A read
+    the recording lacks is None (`not_evaluable`)."""
 
     answered_by: AnsweredBy = "recording"
     flags: tuple[Flag, ...] = (Flag.FROM_RECORDING,)

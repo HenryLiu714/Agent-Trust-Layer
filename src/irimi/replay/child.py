@@ -1,11 +1,9 @@
-"""The child `irimi replay` starts to call a stored run's trigger again.
+"""The child process `irimi replay` starts to call a stored run's trigger again.
 
-`irimi replay` runs `python -m irimi.replay.child` with `IRIMI_REPLAY_CALL`,
-`IRIMI_REPLAY_ARGS_FILE` and `IRIMI_REPLAY_OUTCOME_FILE` set (`runner.child_env`). It imports the
-trigger (`entrypoints.resolve`), revives its args, calls it (running a coroutine to its end), and
-writes how the call ended as a `CallResult`, which `irimi replay` ends the run with. It exits 0
-when the call returns, 1 when it raises, and `CANNOT_CALL` with one `error:` line for a call it
-could not make. Imports only the stdlib and the SDK's layers, so it runs under the agent's Python.
+It reads the call, args file and outcome file from the environment (`runner.child_env`), revives
+the args, calls the trigger, and writes a `CallResult`. Exits 0 when the call returns, 1 when it
+raises, `CANNOT_CALL` when it cannot call. Imports only the stdlib and the SDK's layers, so it
+runs under the agent's Python.
 """
 
 import asyncio
@@ -27,17 +25,14 @@ from irimi.protocol.replay_files import CallResult, call_outcome_to_json
 from irimi.sdk._capture import NotReplayable, revive
 from irimi.sdk._errors import error_info
 
-# How the child exits when it could not call the trigger at all: a shell's "found, but cannot be
-# run".
+# A shell's "found, but cannot be run".
 CANNOT_CALL = exitcodes.CANNOT_EXEC
 
 
 def main() -> int:
-    """Call the trigger the environment names. The trigger is normally the run's `@sdk.trigger`,
-    which the SDK adopts as the replay's run, so every request and tool call lands in it and the
-    run posts no end of its own. What the call raised is recorded as a run records it
-    (`_errors.error_info`). The outcome is written on every path: an interruption before the
-    call says the call was never made, and then ends the process."""
+    """Call the trigger the environment names and write its outcome, on every path.
+
+    The SDK adopts an `@sdk.trigger` as the replay's run, so the run posts no end of its own."""
     entrypoint = os.environ.get(REPLAY_CALL_ENV)
     args_file = os.environ.get(REPLAY_ARGS_FILE_ENV)
     outcome_file = os.environ.get(REPLAY_OUTCOME_FILE_ENV)
@@ -52,9 +47,8 @@ def main() -> int:
         fn = resolve(entrypoint)
         args, kwargs = _arguments(fn, _revived(args_file))
     except BaseException as exc:
-        # Whatever stops the child before the call is a call never made, never an agent that ran
-        # and raised: a KeyboardInterrupt as the module loads too, which then ends this
-        # process as it would have.
+        # Anything that stops the child before the call, a KeyboardInterrupt included, is a call
+        # never made, not an agent that raised. A non-Exception still ends the process.
         why = _why_not_called(exc)
         print(f"error: cannot call {entrypoint}: {why}", file=sys.stderr)
         cause = exc.cause if isinstance(exc, NotCallable) else None
@@ -67,8 +61,8 @@ def main() -> int:
         if inspect.iscoroutine(result):
             asyncio.run(result)
     except BaseException as exc:
-        # Whatever ended the call is what its run records, a SystemExit or a KeyboardInterrupt as
-        # a recorded run records it; those two then end this process as they would have.
+        # The run records whatever ended the call; SystemExit and KeyboardInterrupt still end
+        # the process.
         _write(outcome_file, CallResult(True, error_info(exc)))
         if isinstance(exc, SystemExit | KeyboardInterrupt):
             raise
@@ -79,7 +73,7 @@ def main() -> int:
 
 
 def _why_not_called(exc: BaseException) -> str:
-    """The reason a call was never made: a NotCallable's own, else what stopped the child."""
+    """Return why a call was never made: a NotCallable's message, else what stopped the child."""
     if isinstance(exc, NotCallable):
         return str(exc)
     said = str(exc)
@@ -94,8 +88,7 @@ def _arguments(fn: Any, revived: dict[str, Any]) -> tuple[list[Any], dict[str, A
 
 
 def _write(path: str, outcome: CallResult) -> None:
-    """Never raises: a child that cannot say how it ended still exits as it ended, and `irimi
-    replay` then ends the run by its exit code alone."""
+    """Write the outcome file. Never raises: `irimi replay` falls back to the exit code."""
     with contextlib.suppress(Exception):
         Path(path).write_text(json.dumps(call_outcome_to_json(outcome)), encoding="utf-8")
 

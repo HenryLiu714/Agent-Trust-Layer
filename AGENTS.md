@@ -8,8 +8,8 @@ Python 3.12+, managed with `uv`. See `docs/architecture.md` for the module map a
 
 - `make check` runs everything CI runs: `ruff check`, `ruff format --check`, `mypy`, `pytest`.
 - `uv run pytest -q` for the tests alone (about five minutes, no network, no keys).
-- `uv run pytest -q tests/workflows` for the sample-workflow corpus alone; see
-  `examples/workflows/README.md`.
+- `uv run pytest -q tests/e2e/workflows` for the sample-workflow corpus alone; see
+  `tests/e2e/workflows/README.md`.
 - `uv run irimi --help` for the CLI.
 
 ## Rules that tests enforce
@@ -39,4 +39,4 @@ Python 3.12+, managed with `uv`. See `docs/architecture.md` for the module map a
 - Every feature is tested end to end on the sample workflows, not only in unit tests: drive it
   through the real `irimi shadow`, and extend the workflow scenarios and pins that cover the
   behaviour you change rather than writing a new agent, and keep the five invariants holding. A
-  fix that flips a `LOOKS WRONG:` pin updates the pin and drops the marker in the same PR.
+  fix that flips a `KNOWN BUG:` pin updates the pin and drops the marker in the same PR.

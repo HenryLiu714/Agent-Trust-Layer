@@ -103,8 +103,8 @@ To see a whole agent, run a sample workflow. It needs no keys and no network eit
 internet answers for the real host names, so irimi's shipped maps decide every call.
 
 ```
-uv run python -m examples.workflows                                 # list workflows and scenarios
-uv run python -m examples.workflows w01_ticket_triage double_refund # bare, then under shadow
+uv run python -m tests.e2e.workflows                                 # workflows, and where to start
+uv run python -m tests.e2e.workflows w01_ticket_triage double_refund # bare, shadow, then serve
 ```
 
 Your own agent runs the same way: `uv run irimi shadow -- python agent.py`.
@@ -193,7 +193,7 @@ And a refund the real service would have refused, from `w01_ticket_triage double
   None of these writes reached the real service:
   ○ stripe  refund $49.00 on ch_TICKET1  faked; checked against live state: would succeed
   ✗ stripe  refund $49.00 on ch_TICKET1  faked; would fail: charge_already_refunded
-  ○ tool  examples.workflows.w01_ticket_triage.agent:send_reply  fake ran instead
+  ○ tool  tests.e2e.workflows.agents.w01_ticket_triage.agent:send_reply  fake ran instead
   money: $98.00 in faked writes; $49.00 of it would fail
   would have fired: refund.created, charge.refunded
 ```
@@ -961,26 +961,26 @@ To install irimi as a standalone tool instead of using the venv, run `uv tool in
 
 ## Sample workflows
 
-`examples/workflows/` holds eleven small agents, each built to exercise part of irimi, and a harness
+`tests/e2e/workflows/` holds eleven small agents, each built to exercise part of irimi, and a harness
 that runs every scenario bare and under `irimi shadow` against a fake internet. The agents call the
 real host names, so irimi classifies them with its shipped maps; only name resolution is faked.
 The bare run is the baseline, and its writes really land on stateful fake services. The shadow run
-goes through `irimi shadow`, and nothing may land. Nine scenarios run a third time under
+goes through `irimi shadow`, and nothing may land. Every scenario also runs under
 `irimi serve`, with the agent beside irimi rather than its child.
-`examples/workflows/README.md` explains the harness and how to add a workflow.
+`tests/e2e/workflows/README.md` explains the harness and how to add a workflow.
 
 ```
-uv run python -m examples.workflows                                 # list workflows and scenarios
-uv run python -m examples.workflows w09_scope_gauntlet verbs        # one scenario, bare then shadow
-uv run python -m examples.workflows w04_slack_ops_bot own_thread --mode shadow
-uv run pytest -q tests/workflows                                    # the whole corpus
+uv run python -m tests.e2e.workflows                                 # workflows, and where to start
+uv run python -m tests.e2e.workflows w09_scope_gauntlet verbs        # one scenario, every mode
+uv run python -m tests.e2e.workflows w04_slack_ops_bot own_thread --mode shadow
+uv run pytest -q -n auto tests/e2e/workflows                         # the whole corpus
 ```
 
-`tests/workflows/test_invariants.py` holds every scenario to five rules: no write reached a fake
+`tests/e2e/workflows/test_invariants.py` holds every scenario to five rules: no write reached a fake
 service under shadow, no request carried `Irimi-Run` out, no write tool's real function ran, no
 canary credential reached disk, and the agent exited the same way bare and under shadow. Each
-`tests/workflows/test_wNN_*.py` then pins what irimi did. A behaviour that looks wrong is pinned
-under a `LOOKS WRONG:` comment rather than worked around, so a fix shows up as a changed pin.
+`tests/e2e/workflows/test_wNN_*.py` then pins what irimi did. A behaviour that is wrong is pinned
+under a `KNOWN BUG:` comment rather than worked around, so a fix shows up as a changed pin.
 
 Where each feature is exercised end to end:
 
@@ -992,23 +992,23 @@ Where each feature is exercised end to end:
 | Slack: minted threads, names versus ids, `missing_scope`, archived channels, webhooks | W4 `w04_slack_ops_bot` |
 | Would-have-fired webhooks, a signed inbound webhook | W5 `w05_dispute_responder` |
 | SSE streaming, resets mid-stream, telemetry stored as a count | W7 `w07_streaming_assistant` |
-| The trace store: one process run per scenario, one `sdk` run per trigger, redaction on disk | every workflow (`tests/workflows/test_stored_runs.py`), W2, W3; a credential in a live response, W5 |
-| The SDK: triggers and `sdk.run`, nesting, threads and asyncio, errors, captured args | W1, W2, W3, W5, W7, W8, W10; every workflow (`tests/workflows/test_stored_runs.py`) |
+| The trace store: one process run per scenario, one `sdk` run per trigger, redaction on disk | every workflow (`tests/e2e/workflows/test_stored_runs.py`), W2, W3; a credential in a live response, W5 |
+| The SDK: triggers and `sdk.run`, nesting, threads and asyncio, errors, captured args | W1, W2, W3, W5, W7, W8, W10; every workflow (`tests/e2e/workflows/test_stored_runs.py`) |
 | Unmapped internal services, a map the loader refuses, `Irimi-Run` across a hop | W8 `w08_orchestrator` |
 | Upstream failures: 429, 500, timeouts, resets, a failed L3 read, a killed run | W10 `w10_flaky_upstream` |
 | What irimi cannot see: clients that bypass the proxy, loopback services | W11 `w11_leaky_agent` |
 | Tool calls the proxy cannot see: `@sdk.write_tool` fakes, recorded, printed and redacted | W6 `w06_crm_db_agent`, W1, W2 |
-| The control endpoint: runs started, given tool calls and ended over `/_irimi/`, health, every refusal | W9 `w09_scope_gauntlet`; every workflow (`tests/workflows/test_control_endpoint.py`) |
+| The control endpoint: runs started, given tool calls and ended over `/_irimi/`, health, every refusal | W9 `w09_scope_gauntlet`; every workflow (`tests/e2e/workflows/test_control_endpoint.py`) |
 
 Answer targets, overrides, the telemetry maps beyond W7's one LangSmith trace, and the CLI's own
 flags are not in the corpus; they are covered by the engine and CLI tests in `tests/`. Every new
 feature is driven through the real `irimi shadow` in the workflows its issue names, by extending
-their scenarios and pins, and a fix that flips a `LOOKS WRONG:` pin updates it in the same PR
+their scenarios and pins, and a fix that flips a `KNOWN BUG:` pin updates it in the same PR
 (`CONTRIBUTING.md`).
 
 The agents use the SDK API (`@sdk.trigger`, `sdk.run`, `@sdk.read_tool`, `@sdk.write_tool`) through
-`examples/workflows/sdk.py`, which re-exports `irimi.sdk`. Its triggers, runs (#74) and tools
-(#76) are irimi's own; `sdk.py` only wraps them to log which function ran, for the invariants.
+`tests/e2e/workflows/agents/observe.py`, which wraps irimi's own decorators only to log which function ran, for the
+invariants.
 
 ## The refund agent
 

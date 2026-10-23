@@ -12,10 +12,10 @@ test:  ## run the test suite, in parallel
 	uv run pytest -q -n auto
 
 test-fast:  ## the unit tests only: no end-to-end runs, no live calls, no workflow corpus
-	uv run pytest -q -n auto -m "not e2e and not live" --ignore=tests/workflows
+	uv run pytest -q -n auto -m "not e2e and not live" --ignore=tests/e2e/workflows
 
 workflows:  ## the sample-workflow corpus alone
-	uv run pytest -q -n auto tests/workflows
+	uv run pytest -q -n auto tests/e2e/workflows
 
 cov:  ## the test suite with a coverage report
 	uv run pytest -q -n auto --cov --cov-report=term
@@ -24,7 +24,7 @@ live:  ## the live checks; they call real services and skip without STRIPE_API_K
 	uv run pytest -q -rs -m live
 
 demo:  ## one sample workflow, bare and then under irimi shadow, with no keys
-	uv run python -m examples.workflows w01_ticket_triage double_refund
+	uv run python -m tests.e2e.workflows w01_ticket_triage double_refund
 
 lint:  ## ruff: lint and check formatting (what CI runs)
 	uv run ruff check .

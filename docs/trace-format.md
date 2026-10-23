@@ -400,7 +400,7 @@ named; a stored run holds only its own events. The two are the same block when t
 leaves most of its exchanges in those runs, each its own line in `runs list`, and its process run
 holds only the requests that carried no label. All of a process's runs together, the unattributed
 events included and put back in the order they ended, print the block `irimi shadow` printed; the
-sample workflows hold every scenario to that (`tests/workflows/test_stored_runs.py`).
+sample workflows hold every scenario to that (`tests/e2e/workflows/test_stored_runs.py`).
 
 ## Versioning
 

@@ -113,19 +113,18 @@ where it diverged, the refund as the write that changed, and that Stripe holds n
 
 ## Sample workflows
 
-`examples/workflows/` holds eleven small agents, each built to exercise one part of irimi: a
+`tests/e2e/workflows/` holds eleven small agents, each built to exercise one part of irimi: a
 multi-turn LLM tool loop, a nightly batch job, a concurrent queue worker, Slack and Stripe webhook
 handlers, database writes behind `@sdk.write_tool`, SSE streaming, internal services, failure paths,
 and agents that get around the proxy. A harness runs each scenario bare, under `irimi shadow` and
-under `irimi serve` (#77), against a fake internet that answers for the real host
-names, so irimi's shipped maps decide every call. `tests/workflows/` holds every scenario to
-five universal invariants and pins what irimi does in each one. `examples/workflows/README.md`
-explains the harness.
+under `irimi serve`, against a fake internet that answers for the real host names, so irimi's
+shipped maps decide every call. Its tests hold every scenario to five universal invariants and
+pin what irimi does in each one. `tests/e2e/workflows/README.md` explains the harness.
 
 ```
-uv run python -m examples.workflows                              # list workflows and scenarios
-uv run python -m examples.workflows w09_scope_gauntlet verbs     # one scenario, bare then shadow
-uv run pytest -q tests/workflows
+uv run python -m tests.e2e.workflows                             # workflows, and where to start
+uv run python -m tests.e2e.workflows w09_scope_gauntlet verbs    # one scenario, every mode
+uv run pytest -q -n auto tests/e2e/workflows
 ```
 
 When a change alters what irimi answers, a workflow test pins the old answer and fails. Update the
@@ -134,7 +133,7 @@ pin in the same PR, and say in the PR why the new answer is right.
 Every feature is tested on the corpus end to end, as well as in unit tests. Each open issue's
 `Since #89 landed` section names the workflows its feature has to run through and the pins it
 extends or flips. Extend an existing workflow with a scenario before writing a new agent. A pin
-under `LOOKS WRONG:` is a known bug: the PR that fixes it updates the pin and removes the marker.
+under `KNOWN BUG:` is a known bug: the PR that fixes it updates the pin and removes the marker.
 
 ## Where things are
 
@@ -166,8 +165,7 @@ tests/support/                        the helpers and fakes the tests share; nev
 examples/refund_agent/                the fixture agent the proxy is tested against
 examples/server_agent/                a server agent beside `irimi serve`, in containers
 examples/llm_refund_agent/            an LLM agent recorded, its prompt edited, and replayed
-examples/workflows/                   the sample workflows and the harness that runs them
-tests/workflows/                      the workflows' invariants and per-workflow pins
+tests/e2e/workflows/                  the sample workflows, the harness that runs them, their pins
 ```
 
 Two tests guard the layout itself. `tests/safety/test_import_boundary.py` fails if mitmproxy is imported

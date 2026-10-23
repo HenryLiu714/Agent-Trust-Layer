@@ -1039,7 +1039,7 @@ def test_tool_call_line_is_in_the_exchange_line_s_columns():
 
 def _sdk_record(run_id, name="handle_ticket", args=None):
     from irimi import __version__
-    from irimi.trace import SCHEMA_VERSION, RunRecord, Trigger
+    from irimi.trace import SCHEMA_VERSION, RunEnd, RunRecord, Trigger
 
     trigger = Trigger(name=name, entrypoint="agent:handle_ticket", args=args or {}, replayable=True)
     return RunRecord(
@@ -1052,10 +1052,7 @@ def _sdk_record(run_id, name="handle_ticket", args=None):
         engine_version=__version__,
         sdk_version=__version__,
         started_at=1.0,
-        ended_at=2.0,
-        outcome="ok",
-        error=None,
-        exit_code=None,
+        end=RunEnd(2.0, "ok", None, None),
     )
 
 

@@ -358,6 +358,7 @@ def _tool_call(
         "error": error,
         "started_at": started_at,
         "ended_at": time.time(),
+        "awaited": False,
     }
     return _post(control, run_id, "tool-calls", doc, label)
 
@@ -396,6 +397,7 @@ def _refusals(control: str) -> None:
         "error": None,
         "started_at": time.time(),
         "ended_at": time.time(),
+        "awaited": False,
     }
     big = b'{"pad": "' + b"x" * OVERSIZED_BODY_BYTES + b'"}'
     nested = "[" * DEEP_FIELD_LEVELS + "]" * DEEP_FIELD_LEVELS

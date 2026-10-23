@@ -377,13 +377,14 @@ def end_problems(recorded: Result, r: Replayed) -> list[str]:
     stored, `builtins.KeyError` for a `KeyError`, and a process run with its exit. A run the
     recording never saw end (a kill) owes nothing here."""
     source = recorded.stored().load_run(r.run_id).record
-    if r.by_command or source.outcome is None:
+    if r.by_command or source.end is None:
         return []
     mine = r.replay.stored().load_run(r.replay.process_run_id()).record
-    if (mine.outcome, mine.error) != (source.outcome, source.error):
-        recorded_type = source.error.type if source.error is not None else None
-        replayed_type = mine.error.type if mine.error is not None else None
-        return [f"ended {mine.outcome} {replayed_type}, recorded {source.outcome} {recorded_type}"]
+    ours, theirs = mine.end, source.end
+    if (ours.outcome, ours.error) != (theirs.outcome, theirs.error):
+        recorded_type = theirs.error.type if theirs.error is not None else None
+        replayed_type = ours.error.type if ours.error is not None else None
+        return [f"ended {ours.outcome} {replayed_type}, recorded {theirs.outcome} {recorded_type}"]
     return []
 
 
@@ -426,7 +427,7 @@ def owed_exit(recorded: Result, r: Replayed) -> int:
     record = recorded.stored().load_run(r.run_id).record
     if r.by_command or record.attribution == "process" or recorded.exit_code >= 128:
         return recorded.exit_code
-    return 0 if record.outcome == "ok" else 1
+    return 0 if record.end.outcome == "ok" else 1
 
 
 def line(ex) -> str:

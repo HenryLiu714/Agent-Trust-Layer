@@ -30,12 +30,14 @@ from pathlib import Path
 
 import pytest
 
-from irimi import paths, redact, report, trace
+from irimi import redact, report, trace
 from irimi.bodies import FORM_CT
 from irimi.cli import main
 from irimi.exchange import Exchange, Flag, Headers, Precondition, header_value, media_type
+from irimi.protocol.env import RUN_ENV
 from irimi.servicemap import loader
-from irimi.store import DirectoryStore, StoredRun, StoreReader
+from irimi.store import DirectoryStore, StoreReader
+from irimi.trace import StoredRun, trigger_args
 from tests import test_engine_mitm, test_phase_exit
 from tests.test_engine_mitm import (
     _carries_run_header,
@@ -182,8 +184,14 @@ def test_the_phase_2_run_under_irimi_shadow_survives_the_trace_format_event_for_
     assert [path.name for path in (root / "runs").iterdir()] == [run.record.run_id]
     assert run.record.attribution == "process"
     assert run.record.trigger is not None
-    assert run.record.trigger.args == {"argv": [sys.executable, str(tmp_path / "child.py")]}
-    assert (run.record.outcome, run.record.exit_code, run.record.error) == ("ok", 0, None)
+    assert trigger_args(run.record.trigger) == {
+        "argv": [sys.executable, str(tmp_path / "child.py")]
+    }
+    assert (run.record.end.outcome, run.record.end.exit_code, run.record.end.error) == (
+        "ok",
+        0,
+        None,
+    )
     assert run.record.dropped_events == 0
     decoded = _decoded(disk)
     shape = [(ex.issued_by, ex.request.method, ex.request.path, ex.answered_by) for ex in decoded]
@@ -244,9 +252,9 @@ def test_every_exchange_the_phase_2_run_stores_is_timed_and_seq_is_completion_or
     by_start = sorted(decoded, key=lambda ex: ex.started_at)
     assert by_start == [read, refund, check, refunds, charge, retry, recheck]
     record = disk.process_run().record
-    assert record.started_at is not None and record.ended_at is not None
+    assert record.started_at is not None and record.end.ended_at is not None
     assert before <= record.started_at <= read.started_at
-    assert retry.ended_at <= record.ended_at <= after
+    assert retry.ended_at <= record.end.ended_at <= after
 
 
 # Each call names itself in its query, so the recorded exchange can be matched to what it sent.
@@ -300,7 +308,7 @@ def test_an_invalid_run_header_from_a_shadowed_child_names_no_run_and_reaches_no
     its own, and nothing is created outside the store's root."""
     child = tmp_path / "child.py"
     child.write_text(
-        RUN_HEADER_CHILD.replace("__PORT__", str(upstream)).replace("__RUN_ENV__", paths.RUN_ENV)
+        RUN_HEADER_CHILD.replace("__PORT__", str(upstream)).replace("__RUN_ENV__", RUN_ENV)
     )
     assert main(["shadow", "--port", "0", "--", sys.executable, str(child)]) == 0
     out = capfd.readouterr().out.splitlines()

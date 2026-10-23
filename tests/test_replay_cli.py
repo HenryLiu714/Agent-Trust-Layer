@@ -20,7 +20,7 @@ import pytest
 
 from irimi import __version__, ca, paths
 from irimi.cli import main
-from irimi.sdk.replays import ReplayResult
+from irimi.protocol.replay_files import ReplayResult, replay_result_from_json
 from irimi.servicemap import loader
 from irimi.store import StoreReader
 from irimi.trace import ErrorInfo, ToolCall
@@ -222,7 +222,7 @@ def test_an_unchanged_agent_replays_with_no_divergence_and_sends_nothing(home, c
     code, out, err = _replay(capfd, source)
     assert (code, err) == (0, [])
     [replay] = _replay_runs(home, source)
-    assert (replay.mode, replay.attribution, replay.exit_code) == ("replay", "process", 0)
+    assert (replay.mode, replay.attribution, replay.end.exit_code) == ("replay", "process", 0)
     assert out[:2] == [
         f"irimi replay · run {replay.run_id} · listening on " + out[0].split(" · listening on ")[1],
         f"replaying {source} as {replay.run_id}",
@@ -286,7 +286,7 @@ def test_a_process_run_with_no_trigger_replays_by_running_its_argv_again(home, c
     assert "  no divergence: every call was answered from the recording" in out
     assert _Stripe.seen == []
     # The header says only the argv ran again: nothing else of the process was recorded.
-    argv = shlex.join(recorded.trigger.args["argv"])
+    argv = shlex.join(recorded.trigger.argv)
     assert _result(out)[1] == (
         f"  re-ran {argv} (argv only: environment, cwd and stdin are not recorded)"
     )
@@ -377,7 +377,7 @@ def test_sdk_replay_returns_the_result_the_cli_writes(home, capfd, monkeypatch, 
     capfd.readouterr()
     result_file = tmp_path / "result.json"
     code, out, _ = _replay(capfd, source, "--result-file", str(result_file))
-    by_cli = ReplayResult.from_json(json.loads(result_file.read_text()))
+    by_cli = replay_result_from_json(json.loads(result_file.read_text()))
     assert code == by_cli.exit_code == 0
     assert by_cli.lines == tuple(_result(out))
     assert by_cli.diverged_at is None
@@ -431,7 +431,7 @@ def test_a_replay_takes_a_prefix_of_the_run_id_and_names_the_whole_one(home, cap
     code, _, err = _replay(capfd, source[:8], "--result-file", str(result_file))
     assert code == 2
     assert err[0].startswith("error: cannot call replay_agent:Desk.handle: ")
-    result = ReplayResult.from_json(json.loads(result_file.read_text()))
+    result = replay_result_from_json(json.loads(result_file.read_text()))
     assert result.source_run_id == source
 
 
@@ -451,8 +451,12 @@ def test_a_trigger_it_cannot_call_is_a_replay_that_could_not_run(home, capfd, tm
     assert err == [why]
     assert _no_result(out)
     [replay] = _replay_runs(home, source)
-    assert (replay.outcome, replay.exit_code, replay.error.type) == ("error", 126, "cannot-call")
-    result = ReplayResult.from_json(json.loads(result_file.read_text()))
+    assert (replay.end.outcome, replay.end.exit_code, replay.end.error.type) == (
+        "error",
+        126,
+        "cannot-call",
+    )
+    result = replay_result_from_json(json.loads(result_file.read_text()))
     assert result == ReplayResult(source, replay.run_id, 2, None, (why,))
     other = _record(home, f"replay_agent.handle({TICKET})")
     missing = {"ticket": {"__irimi_type__": "replay_agent:NoSuchTicket", "value": {}}}
@@ -615,7 +619,7 @@ def test_a_sigterm_while_python_is_asked_stops_the_replay_with_143(home, capfd, 
     command += ["--python", python, "--result-file", str(written)]
     proc = subprocess.run(command, env=dict(os.environ), capture_output=True, timeout=60)
     assert proc.returncode == 143
-    assert ReplayResult.from_json(json.loads(written.read_text())).exit_code == 143
+    assert replay_result_from_json(json.loads(written.read_text())).exit_code == 143
     assert _replay_runs(home, source) == []
 
 
@@ -649,8 +653,8 @@ def test_a_replay_that_ends_on_what_its_trigger_raised_records_it_as_its_recordi
     assert code == 0
     assert _result(out)[1] == "  agent exited 1"
     [replay] = _replay_runs(home, source.run_id)
-    assert (replay.outcome, replay.exit_code) == ("error", 1)
-    assert replay.error == source.error == ErrorInfo("builtins.KeyError", "'ch_REAL1'")
+    assert (replay.end.outcome, replay.end.exit_code) == ("error", 1)
+    assert replay.end.error == source.end.error == ErrorInfo("builtins.KeyError", "'ch_REAL1'")
 
 
 def test_args_from_a_file_and_a_command_with_a_call_is_a_usage_error(home, capfd, tmp_path):
@@ -691,7 +695,7 @@ def test_a_refused_replay_s_result_file_holds_the_reason_irimi_gave(home, capfd,
     written = tmp_path / "result.json"
     code, out, err = _replay(capfd, source, "--result-file", str(written))
     assert (code, out) == (2, [])
-    result = ReplayResult.from_json(json.loads(written.read_text()))
+    result = replay_result_from_json(json.loads(written.read_text()))
     assert result == ReplayResult(source, None, 2, None, tuple(err))
     assert err == [f"error: no CA at {home / 'ca'}; run `irimi init` first"]
 
@@ -766,7 +770,7 @@ def test_a_replay_sigterm_stops_while_its_agent_runs_exits_143_and_says_so(home,
     assert marker.exists()
     proc.send_signal(signal.SIGTERM)
     assert proc.wait(timeout=30) == 143
-    result = ReplayResult.from_json(json.loads(written.read_text()))
+    result = replay_result_from_json(json.loads(written.read_text()))
     assert result.exit_code == 143
     assert "  stopped: irimi replay was interrupted before the agent ended" in result.lines
 
@@ -788,7 +792,7 @@ def test_a_replay_interrupted_before_its_run_is_stored_exits_130_with_no_run(
     capfd.readouterr()
     code, _, _ = _replay(capfd, source, "--result-file", str(written))
     assert code == 130
-    result = ReplayResult.from_json(json.loads(written.read_text()))
+    result = replay_result_from_json(json.loads(written.read_text()))
     assert (result.replay_run_id, result.exit_code) == (None, 130)
     assert _replay_runs(home, source) == []
 
@@ -811,9 +815,9 @@ def test_a_replay_interrupted_after_its_run_is_stored_names_the_run_and_exits_13
     code, _, err = _replay(capfd, source, "--result-file", str(written))
     [run] = _replay_runs(home, source)
     assert (code, err) == (130, ["error: interrupted"])
-    result = ReplayResult.from_json(json.loads(written.read_text()))
+    result = replay_result_from_json(json.loads(written.read_text()))
     assert result == ReplayResult(source, run.run_id, 130, None, ("error: interrupted",))
-    assert (run.outcome, run.exit_code) == ("ok", 0)
+    assert (run.end.outcome, run.end.exit_code) == ("ok", 0)
 
 
 def test_a_run_that_did_not_end_is_replayed_after_one_warning(home, capfd):
@@ -840,7 +844,7 @@ def test_a_command_that_does_not_start_is_a_replay_that_could_not_run(home, capf
     code, _, err = _replay(capfd, source, "--result-file", str(written), "--", "no-such-agent")
     assert _replay_runs(home, source) == []
     assert (code, err) == (2, ["error: command not found: no-such-agent"])
-    assert ReplayResult.from_json(json.loads(written.read_text())) == ReplayResult(
+    assert replay_result_from_json(json.loads(written.read_text())) == ReplayResult(
         source, None, 2, None, ("error: command not found: no-such-agent",)
     )
 
@@ -996,7 +1000,7 @@ def test_an_outcome_file_the_agent_nested_past_the_stack_is_no_outcome(home, cap
     assert (code, err) == (0, [])
     assert _result(out)[1] == "  agent exited 0"
     [run] = _replay_runs(home, source.run_id)
-    assert ReplayResult.from_json(json.loads(written.read_text())) == ReplayResult(
+    assert replay_result_from_json(json.loads(written.read_text())) == ReplayResult(
         source.run_id, run.run_id, 0, None, tuple(_result(out))
     )
-    assert (run.outcome, run.exit_code) == ("ok", 0)
+    assert (run.end.outcome, run.end.exit_code) == ("ok", 0)

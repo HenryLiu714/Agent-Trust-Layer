@@ -31,25 +31,25 @@ class Reader(Protocol):
     replay's reads the recording (`recording.RecordingReader`), which is why this is a seam
     and not a call inside the engine.
 
-    A reader may also say what its reads are answered by, and the flags a read it answered and one
+    A reader also says what its reads are answered by, and the flags a read it answered and one
     it could not answer carry, so the policy records the read as what it was: `recording` for one
-    a replay answered from disk, `replay-miss` for one the recording lacked. `answered_as`
-    reads it, and a reader that says nothing is a live one.
+    a replay answered from disk, `replay-miss` for one the recording lacked. A reader that
+    subclasses this one is live unless it says otherwise.
     """
+
+    answered_by: AnsweredBy = "live"
+    flags: tuple[Flag, ...] = ()
+    miss_flags: tuple[Flag, ...] = ()
 
     def __call__(self, request: Request) -> Response | None: ...
 
 
 def answered_as(reader: Reader, answered: bool) -> tuple[AnsweredBy, tuple[Flag, ...]]:
-    """`(answered_by, flags)` for a read `reader` made, and `answered` or not: its own
-    `answered_by`, and its `flags` or `miss_flags`, when it names them, as
-    `recording.RecordingReader` does, and `("live", ())` when it does not."""
-    answered_by: AnsweredBy = getattr(reader, "answered_by", "live")
-    flags: tuple[Flag, ...] = getattr(reader, "flags" if answered else "miss_flags", ())
-    return answered_by, flags
+    """`(answered_by, flags)` for a read `reader` made, and `answered` or not."""
+    return reader.answered_by, reader.flags if answered else reader.miss_flags
 
 
-class NoReader:
+class NoReader(Reader):
     """The default: a policy that does not do L3 at all.
 
     Distinct from a reader that tried and could not tell. A precondition on a policy holding this
@@ -63,7 +63,7 @@ class NoReader:
         return None
 
 
-class UpstreamReader:
+class UpstreamReader(Reader):
     """`Reader` over the real service, on stdlib urllib - no new dependency, no proxy.
 
     It dials `request.host:request.port` exactly as the classifier saw them, so a test map

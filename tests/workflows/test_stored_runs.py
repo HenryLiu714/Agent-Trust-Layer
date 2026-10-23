@@ -26,8 +26,8 @@ from examples.workflows.w10_flaky_upstream.scenarios import CONTROL_DOWN
 from irimi import exchange, paths, redact, report, trace
 from irimi.exchange import Exchange, Flag
 from irimi.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE
-from irimi.store import SERVE_LOCK_FILE, StoredRun, header_record
-from irimi.trace import ErrorInfo, TelemetrySeen, ToolCall
+from irimi.store import SERVE_LOCK_FILE
+from irimi.trace import ErrorInfo, RunRecord, StoredRun, TelemetrySeen, ToolCall
 
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
 IDS = [f"{n}:{s}" for n, s in CASES]
@@ -113,12 +113,13 @@ def test_every_shadow_run_stores_one_process_run_with_its_argv_and_exit(
     (run,) = [r for r in records if r.attribution == "process"]
     argv = [sys.executable, "-m", workflow.module]
     assert run.trigger is not None
-    assert run.trigger.args == {"argv": [*argv, *workflow.scenarios[scenario].argv]}
-    assert (run.exit_code, run.outcome) == (
+    assert trace.trigger_args(run.trigger) == {"argv": [*argv, *workflow.scenarios[scenario].argv]}
+    assert run.end is not None
+    assert (run.end.exit_code, run.end.outcome) == (
         shadow.exit_code,
         "ok" if shadow.exit_code == 0 else "error",
     )
-    assert run.started_at is not None and run.ended_at is not None
+    assert run.started_at is not None and run.end.ended_at is not None
     assert [r.dropped_events for r in records] == [0] * len(records)
 
 
@@ -236,13 +237,13 @@ def test_every_run_but_the_process_run_is_one_the_sdk_started(run_workflow, name
         if mode == "shadow" and record.run_id == shadow.process_run_id():
             continue
         if (name, scenario) in SDK_RUN_SCENARIOS:
-            assert (record.attribution, record.mode, record.exit_code) == ("sdk", "shadow", None)
+            assert (record.attribution, record.mode) == ("sdk", "shadow")
+            assert record.end is None or record.end.exit_code is None
             assert record.engine_version == irimi.__version__
             assert None not in (record.trigger, record.sdk_version, record.started_at)
             continue
         assert record.attribution == "header"
-        assert (record.trigger, record.ended_at) == (None, None)
-        assert (record.outcome, record.exit_code, record.error) == (None, None, None)
+        assert (record.trigger, record.end) == (None, None)
         events = reader.load_run(record.run_id).events
         assert events != []
         assert record.started_at == events[0].started_at > 0
@@ -284,16 +285,16 @@ def test_every_run_the_agent_logged_is_stored_with_the_outcome_it_logged(
     for run_id, record in stored.items():
         end = ends.get(run_id)
         if end is None:
-            assert (record.outcome, record.ended_at, record.error) == (None, None, None)
+            assert record.end is None
             continue
-        assert record.outcome == end["outcome"]
-        assert record.ended_at is not None and record.started_at is not None
-        assert record.ended_at >= record.started_at
+        assert record.end is not None and record.end.outcome == end["outcome"]
+        assert record.end.ended_at is not None and record.started_at is not None
+        assert record.end.ended_at >= record.started_at
         if end["outcome"] == "ok":
-            assert record.error is None
+            assert record.end.error is None
         else:
-            assert record.error is not None
-            assert record.error.type.rsplit(".", 1)[-1] == end["error"]
+            assert record.end.error is not None
+            assert record.end.error.type.rsplit(".", 1)[-1] == end["error"]
 
 
 @pytest.mark.parametrize(("name", "scenario", "mode"), MODE_CASES, ids=MODE_IDS)
@@ -526,7 +527,7 @@ def test_all_of_a_serves_runs_together_are_what_it_reported_live(run_workflow, n
     exchanges = sorted((e for e in events if isinstance(e, Exchange)), key=lambda e: e.ended_at)
     telemetry = [e for e in events if isinstance(e, TelemetrySeen)]
     tool_calls = [e for e in events if isinstance(e, ToolCall)]
-    union = StoredRun(header_record(trace.UNATTRIBUTED), [*exchanges, *telemetry, *tool_calls])
+    union = StoredRun(RunRecord.header(trace.UNATTRIBUTED), [*exchanges, *telemetry, *tool_calls])
     maps = serve.maps()
     handed_calls = [e for e in serve.handed_events if isinstance(e, ToolCall)]
     live = report.summary_lines(trace.UNATTRIBUTED, serve.reported, 0.0, maps, handed_calls)

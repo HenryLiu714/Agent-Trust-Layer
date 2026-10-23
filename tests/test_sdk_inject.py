@@ -24,8 +24,10 @@ import httpx
 import pytest
 import requests
 
-from irimi import paths, redact, sdk
-from irimi.exchange import RUN_HEADER, Exchange
+from irimi import redact, sdk
+from irimi.exchange import Exchange
+from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV
+from irimi.protocol.headers import RUN_HEADER
 from irimi.sdk import client, instrumentation, runs
 from irimi.store import DirectoryStore, StoreReader
 from tests import test_engine_mitm
@@ -77,8 +79,8 @@ def _running(cfg: Any, tmp_path: Path, monkeypatch, **start: Any) -> Iterator[_I
     port = eng.listen_port()
     for name in instrumentation.LISTENER_ENVS:  # a developer's own proxy is not irimi
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
-    monkeypatch.setenv(paths.CONTROL_ENV, f"http://127.0.0.1:{port}/_irimi")
+    monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
+    monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{port}/_irimi")
     monkeypatch.setattr(runs, "reporter", client.ControlClient())
     try:
         yield _Irimi(port, seen, store, stop_once)
@@ -285,7 +287,7 @@ def test_the_proxy_variables_name_irimi_when_the_control_endpoint_is_unset(
     """A launcher that passes on only the variables it knows can drop `IRIMI_CONTROL`. irimi
     then never hears of the run, but the proxy variables still name its listener, so the run's
     requests are labelled as before and land together."""
-    monkeypatch.delenv(paths.CONTROL_ENV)
+    monkeypatch.delenv(CONTROL_ENV)
     monkeypatch.setenv("HTTP_PROXY", irimi.proxy)
     run_id = fetch("urllib", irimi.proxy, f"http://127.0.0.1:{upstream}/hello")
     assert [ex.run_id for ex in irimi.seen] == [run_id]
@@ -433,7 +435,7 @@ def test_instrument_patches_once_however_often_and_from_however_many_threads(mon
 
 
 def test_an_inactive_sdk_patches_nothing(monkeypatch):
-    monkeypatch.delenv(paths.ENGINE_ACTIVE_ENV, raising=False)
+    monkeypatch.delenv(ENGINE_ACTIVE_ENV, raising=False)
     originals = _patched_methods()
     sdk.instrument()
     assert _patched_methods() == originals
@@ -462,8 +464,8 @@ def test_the_sdks_own_control_posts_carry_no_run_header(monkeypatch):
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _ControlStandIn)
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}).start()
     try:
-        monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
-        monkeypatch.setenv(paths.CONTROL_ENV, f"http://127.0.0.1:{server.server_address[1]}/_irimi")
+        monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
+        monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{server.server_address[1]}/_irimi")
         monkeypatch.setattr(runs, "reporter", client.ControlClient())
 
         @sdk.trigger
@@ -493,7 +495,7 @@ def test_instrument_returns_only_once_every_patch_is_in_place(monkeypatch):
     the patches half made: its own call waits for the first, rather than returning as soon as the
     first has begun. Here the first call is held between its first patch and the rest, as
     importing httpx would hold it."""
-    monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
+    monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
     holding, release = threading.Event(), threading.Event()
     patch = instrumentation._patch
 
@@ -526,7 +528,7 @@ def test_instrument_called_while_it_patches_returns_rather_than_waiting_on_itsel
     """Patching imports httpx, and an import hook may start a run on the same thread, which calls
     `instrument()` again while the first call holds its lock. That call returns at once: it neither
     deadlocks the agent nor patches a second time."""
-    monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
+    monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
     patch = instrumentation._patch
 
     def reentering_patch(owner: type, name: str, wrap: Callable[[Any], Any]) -> None:
@@ -551,7 +553,7 @@ def test_instrument_called_while_it_patches_returns_rather_than_waiting_on_itsel
 def test_a_proxy_variable_spelled_without_a_scheme_names_irimi(irimi, upstream, monkeypatch):
     """urllib, requests and httpx all read `HTTP_PROXY=127.0.0.1:4000` as an http proxy, so a
     deployment that sets it by hand that way still sends through irimi, and is labelled."""
-    monkeypatch.delenv(paths.CONTROL_ENV)
+    monkeypatch.delenv(CONTROL_ENV)
     monkeypatch.setenv("HTTP_PROXY", irimi.proxy.removeprefix("http://"))
     run_id = fetch("requests", irimi.proxy, f"http://127.0.0.1:{upstream}/hello")
     assert [ex.run_id for ex in irimi.seen] == [run_id]

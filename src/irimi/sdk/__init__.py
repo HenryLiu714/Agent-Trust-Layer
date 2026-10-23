@@ -32,11 +32,12 @@ cannot reach is a warning on the `irimi.sdk` logger, and the run goes on.
 Imports only the stdlib and irimi's lowest layers, never mitmproxy, so it can ship on its own.
 """
 
+from irimi.protocol.replay_files import ReplayResult
 from irimi.sdk.api import Run, run, trigger
 from irimi.sdk.context import current_run_id, is_active, propagate
 from irimi.sdk.errors import RecordedToolError
 from irimi.sdk.instrumentation import instrument
-from irimi.sdk.replays import ReplayError, ReplayResult, replay
+from irimi.sdk.replays import ReplayError, replay
 from irimi.sdk.tools import read_tool, write_tool
 
 __all__ = [

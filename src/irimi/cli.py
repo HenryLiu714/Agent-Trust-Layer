@@ -1,6 +1,5 @@
 import argparse
 import contextlib
-import secrets
 import sys
 import threading
 from collections.abc import Callable, Iterator
@@ -18,14 +17,13 @@ if TYPE_CHECKING:  # the quoted annotations below; no runtime import
     from irimi.engine import Engine, EngineConfig, EngineMode, OnExchange, OnTlsFailure
     from irimi.exchange import Exchange
     from irimi.idempotency import Store as IdempotencyStore
+    from irimi.protocol.replay_files import CallOutcome, ReplayResult
     from irimi.recording import Recording
     from irimi.replay import Plan
     from irimi.runner import ChildCall, EngineThread
-    from irimi.sdk.replay_child import CallOutcome
-    from irimi.sdk.replays import ReplayResult
     from irimi.servicemap import MapIndex
-    from irimi.store import ServeLock, StoredRun, TraceStore
-    from irimi.trace import JSONValue, RunRecord, ToolCall
+    from irimi.store import ServeLock, TraceStore
+    from irimi.trace import JSONValue, RunRecord, StoredRun, ToolCall, Trigger
     from irimi.writelog import WriteLog
 
 SIGINT_EXIT_CODE = 130  # 128 + SIGINT, the shell convention for a Ctrl-C'd command
@@ -448,12 +446,10 @@ def _prepare_run(
     if not ca.ca_exists(p):
         print(f"error: no CA at {p.key.parent}; run `irimi init` first", file=sys.stderr)
         return None
-    # 16 hex characters: the run id is a directory name in the store, and must not collide with
-    # another run's across months of them.
     # A replay is one run against one engine, whose recording is the engine's;
     # serve mode is many runs at once, and `irimi serve` has no run to replay.
     assert not (serve and source is not None)
-    run_id = trace.UNATTRIBUTED if serve else secrets.token_hex(8)
+    run_id = trace.UNATTRIBUTED if serve else trace.new_run_id()
     mode: EngineMode = Shadow()
     if serve:
         mode = Serve()
@@ -600,6 +596,7 @@ def _build_engine(
         process_run=run.config.run_id,
         on_tool_call=on_tool_call,
         policy=policy,
+        replay_of=_replayed_run(run.config.mode),
     )
     return MitmEngine(
         run.config,
@@ -888,15 +885,12 @@ def _passing_sigterm_to_child() -> Iterator[_Child]:
 
 def _shadow(args: argparse.Namespace, cmd: list[str], child: _Child) -> int:
     """`irimi shadow -- <cmd>` inside its SIGTERM handler: the run, start to summary."""
-    import os
-
-    from irimi import report, runner
+    from irimi import report
 
     run = _prepare_run(args)
     if run is None:
         return 1
-    agent_version = os.environ.get(paths.AGENT_VERSION_ENV)
-    record = runner.process_run(run.run_id, cmd, agent_version, 0.0)
+    record = _process_run(run.run_id, cmd)
     ran = _under_the_engine(args, run, child, _Launch("shadow", cmd, record))
     if not ran.summarize:
         return ran.code
@@ -915,6 +909,23 @@ def _shadow(args: argparse.Namespace, cmd: list[str], child: _Child) -> int:
     for line in lines:
         print(line, flush=True)
     return ran.code
+
+
+def _process_run(
+    run_id: str,
+    argv: list[str],
+    trigger: "Trigger | None" = None,
+    replay_of: str | None = None,
+) -> "RunRecord":
+    """The record of the run `irimi shadow` or `irimi replay` starts its child in. Its start is
+    stamped when it is stored, just before the child is spawned."""
+    import os
+
+    from irimi.protocol.env import AGENT_VERSION_ENV
+    from irimi.trace import RunRecord
+
+    agent_version = os.environ.get(AGENT_VERSION_ENV)
+    return RunRecord.process(run_id, argv, agent_version, 0.0, trigger, replay_of)
 
 
 def _end_the_childs_line() -> None:
@@ -1006,7 +1017,7 @@ def _under_the_engine(args: argparse.Namespace, run: _Run, child: _Child, launch
     from dataclasses import replace
 
     from irimi import report, runner
-    from irimi.sdk.replay_child import CallOutcome
+    from irimi.protocol.replay_files import read_call_outcome
 
     cannot = _cannot_run(launch.argv[0])
     if cannot is not None:
@@ -1095,7 +1106,7 @@ def _under_the_engine(args: argparse.Namespace, run: _Run, child: _Child, launch
         # error.
         if ran.stored:
             if launch.call is not None:
-                ran.call = CallOutcome.read(launch.call.outcome_file)
+                ran.call = read_call_outcome(launch.call.outcome_file)
             error = ran.call.error if ran.call is not None else None
             runner.end_process_run(run.store, run.run_id, ran.code, time.time(), error)
         # An impatient second Ctrl-C lands here, while the engine thread is being joined.
@@ -1114,8 +1125,8 @@ def cmd_replay(args: argparse.Namespace) -> int:
     replay made the writes its recording did, 1 when it did not, 2 for a replay that could not
     run, or whose run could not be read back, and 130 or 143 for one SIGINT or SIGTERM stopped.
     `--result-file` writes the result as JSON, the one `sdk.replay()` reads
-    (`sdk.replays.ReplayResult`), whether or not the replay ran, holding what irimi said on
-    stderr of a replay that did not."""
+    (`protocol.replay_files.ReplayResult`), whether or not the replay ran, holding what irimi
+    said on stderr of a replay that did not."""
     args.cmd = _replay_command(args)
     if args.cmd and (args.call is not None or args.args is not None):
         args.parser.error(
@@ -1132,8 +1143,10 @@ def cmd_replay(args: argparse.Namespace) -> int:
     if args.result_file is not None:
         import json
 
+        from irimi.protocol.replay_files import replay_result_to_json
+
         try:
-            args.result_file.write_text(json.dumps(result.to_json()), encoding="utf-8")
+            args.result_file.write_text(json.dumps(replay_result_to_json(result)), encoding="utf-8")
         except OSError as exc:
             why = _os_error(f"--result-file {args.result_file}", exc)
             print(f"error: {why}", file=sys.stderr)
@@ -1145,7 +1158,6 @@ def _replay(args: argparse.Namespace, child: _Child, said: list[str]) -> "Replay
     """`cmd_replay` inside its SIGTERM handler: refused with what irimi said on stderr, or run,
     start to result."""
     import json
-    import os
     import tempfile
     from dataclasses import replace
 
@@ -1161,7 +1173,7 @@ def _replay(args: argparse.Namespace, child: _Child, said: list[str]) -> "Replay
         # A SIGTERM that came while `--python` was asked stopped the replay, which exits as one
         # stopped before its command started, whatever the answer.
         return replace(result, exit_code=SIGTERM_EXIT_CODE) if child.terminated else result
-    if source.record.outcome is None:
+    if source.record.end is None:
         print(
             f"warning: run {args.run_id} did not end; it is replayed as far as it was recorded",
             file=sys.stderr,
@@ -1179,8 +1191,7 @@ def _replay(args: argparse.Namespace, child: _Child, said: list[str]) -> "Replay
         run = _prepare_run(args, source=source)
         if run is None:
             return replay.refused(args.run_id, said)
-        agent_version = os.environ.get(paths.AGENT_VERSION_ENV)
-        record = runner.process_run(run.run_id, argv, agent_version, 0.0, plan.trigger)
+        record = _process_run(run.run_id, argv, plan.trigger, source.record.run_id)
         said_before = len(said)
         ran = _under_the_engine(args, run, child, _Launch("replay", argv, record, call))
     if args.python is None and _no_such_module(ran.call):

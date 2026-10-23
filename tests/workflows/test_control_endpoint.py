@@ -11,8 +11,9 @@ import pytest
 
 from examples.workflows.harness.run import serve_cases, workflows
 from examples.workflows.w10_flaky_upstream.scenarios import CONTROL_DOWN
-from irimi.exchange import CONTROL_PREFIX, Exchange
-from irimi.paths import REPLAY_RUN_ENV
+from irimi.exchange import Exchange
+from irimi.protocol.control import CONTROL_PREFIX
+from irimi.protocol.env import REPLAY_RUN_ENV
 
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
 # Every scenario under `irimi shadow -- <cmd>`, and every one that runs under serve mode.

@@ -33,6 +33,8 @@ import pytest
 from examples.workflows import agentkit
 from examples.workflows import sdk as sdk_module
 from examples.workflows.harness.internet import FakeInternet, Req, Resp, resolving_only
+from irimi.protocol.control import RecordedOutcome
+from irimi.protocol.env import REPLAY_RUN_ENV, RUN_ENV
 
 AGENTS = tuple(
     f"examples.workflows.{name}.agent"
@@ -694,7 +696,6 @@ def replaying(load_sdk, monkeypatch) -> Callable[..., tuple[types.ModuleType, _R
     child has it: active, told it replays (`IRIMI_REPLAY_RUN`, naming its `IRIMI_RUN`), and its
     reporter a `_Recording`."""
     import irimi.sdk as real_sdk
-    from irimi import paths
     from irimi.sdk import runs
 
     def get(
@@ -704,15 +705,15 @@ def replaying(load_sdk, monkeypatch) -> Callable[..., tuple[types.ModuleType, _R
         monkeypatch.setattr(runs, "reporter", recording)
         sdk = load_sdk(real_sdk)
         monkeypatch.setenv(sdk.ENGINE_ACTIVE_ENV, "1" if active else "0")
-        monkeypatch.setenv(paths.RUN_ENV, REPLAY_RUN)
-        monkeypatch.setenv(paths.REPLAY_RUN_ENV, REPLAY_RUN)
+        monkeypatch.setenv(RUN_ENV, REPLAY_RUN)
+        monkeypatch.setenv(REPLAY_RUN_ENV, REPLAY_RUN)
         return sdk, recording
 
     return get
 
 
 def _outcome(result: Any = None, error: tuple[str, str] | None = None, awaited: bool = False):
-    from irimi.trace import ErrorInfo, RecordedOutcome
+    from irimi.trace import ErrorInfo
 
     return RecordedOutcome(result, None if error is None else ErrorInfo(*error), awaited)
 
@@ -933,7 +934,6 @@ def test_a_tool_through_this_module_does_what_the_real_sdk_s_does(
     with `irimi.sdk`'s gives the agent the same thing, runs the same bodies and posts the same
     records."""
     import irimi.sdk as real_sdk
-    from irimi import paths
     from irimi.sdk import runs
 
     outcome = {
@@ -942,7 +942,7 @@ def test_a_tool_through_this_module_does_what_the_real_sdk_s_does(
     }.get(mode)
     sdk, _ = replaying(outcome, active=mode != "bare")
     if mode == "shadow":
-        monkeypatch.delenv(paths.REPLAY_RUN_ENV)
+        monkeypatch.delenv(REPLAY_RUN_ENV)
     seen = []
     for module in (sdk, real_sdk):
         kept = _Kept(outcome)

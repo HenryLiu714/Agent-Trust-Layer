@@ -52,6 +52,8 @@ from examples.workflows.harness.internet import resolving_only
 from irimi import ca, paths, runner, sdk
 from irimi.cli import main
 from irimi.exchange import Exchange
+from irimi.protocol.env import ENGINE_ACTIVE_ENV
+from irimi.protocol.replay_files import replay_result_from_json
 from irimi.sdk import replays
 from irimi.store import StoreReader
 from irimi.trace import ToolCall, Trigger
@@ -235,7 +237,7 @@ def _replay(
     argv = ["replay", "--port", "0", "--store", str(store), "--result-file", str(result_file)]
     done = _irimi(env, *argv, run_id)
     assert result_file.exists(), done.stderr
-    return done, sdk.ReplayResult.from_json(json.loads(result_file.read_text()))
+    return done, replay_result_from_json(json.loads(result_file.read_text()))
 
 
 def _decisions(db: Path) -> list[tuple[Any, ...]]:
@@ -305,7 +307,7 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
     assert sorted(r.attribution for r in records) == ["process", "sdk"]
     [run] = [r for r in records if r.attribution == "sdk"]
     source = run.run_id
-    assert run.outcome == "ok"
+    assert run.end.outcome == "ok"
     # The ticket is the trigger's argument, stored as the dataclass it is, so a replay rebuilds it.
     assert run.trigger == Trigger(
         f"{AGENT}:handle_ticket",
@@ -511,7 +513,7 @@ def test_outside_irimi_the_agent_refunds_what_the_model_decided_and_records_it(
     """The control for every "nothing happened" assertion above: run with no irimi, the agent's
     tools run for real, so `record_decision` writes its row, and the refund is asked of Stripe -
     none when the model decides nothing."""
-    monkeypatch.delenv(paths.ENGINE_ACTIVE_ENV, raising=False)
+    monkeypatch.delenv(ENGINE_ACTIVE_ENV, raising=False)
     db = tmp_path / "agent.sqlite3"
     seed.seed(str(db), TICKET[1], CUSTOMER)
     monkeypatch.setenv(agent.DB_ENV, str(db))
@@ -548,7 +550,7 @@ def test_the_read_tool_raises_for_a_database_that_is_not_there_and_makes_none(
 ):
     """Why deleting the database proves a replay's `lookup_customer` came from the recording: the
     real one, run with no database, raises rather than answer from an empty file it made."""
-    monkeypatch.delenv(paths.ENGINE_ACTIVE_ENV, raising=False)
+    monkeypatch.delenv(ENGINE_ACTIVE_ENV, raising=False)
     db = tmp_path / "agent.sqlite3"
     monkeypatch.setenv(agent.DB_ENV, str(db))
     with pytest.raises(sqlite3.OperationalError):

@@ -6,19 +6,17 @@ from dataclasses import replace
 
 import pytest
 
-from irimi import compare, redact, replay, runner
+from irimi import compare, redact, replay
 from irimi.exchange import Exchange, Request, Response
-from irimi.sdk.replay_child import CallOutcome
-from irimi.sdk.replays import ReplayResult
-from irimi.store import StoredRun
-from irimi.trace import ErrorInfo, RunRecord, ToolCall, Trigger
+from irimi.protocol.replay_files import CallOutcome, ReplayResult
+from irimi.trace import ErrorInfo, RunRecord, StoredRun, ToolCall, Trigger
 
 TICKET = {"ticket": {"__irimi_type__": "agent:Ticket", "value": {"charge": "ch_1"}}}
 TRIGGER = Trigger("handle", "agent:handle", TICKET, True)
 
 
 def _record(trigger: Trigger | None = TRIGGER, attribution: str = "sdk") -> RunRecord:
-    record = runner.process_run("src", ["python", "agent.py"], None, 1.0)
+    record = RunRecord.process("src", ["python", "agent.py"], None, 1.0)
     return replace(record, attribution=attribution, trigger=trigger)
 
 
@@ -83,7 +81,7 @@ def test_an_entrypoint_in_main_is_refused_for_the_child_s_own_main_it_would_call
 )
 def test_a_trigger_in_main_is_refused_with_the_command_that_replays_it(argv, shown, module):
     """A process run's command line names the module a trigger in `__main__` lives in."""
-    record = runner.process_run("src", argv, None, 1.0)
+    record = RunRecord.process("src", argv, None, 1.0)
     with pytest.raises(replay.Refused) as refused:
         replay.plan(record, [], "__main__:handle", None)
     assert str(refused.value) == (
@@ -93,7 +91,7 @@ def test_a_trigger_in_main_is_refused_with_the_command_that_replays_it(argv, sho
 
 
 def test_a_process_run_s_argv_is_no_function_s_parameters():
-    record = runner.process_run("src", ["python", "agent.py"], None, 1.0)
+    record = RunRecord.process("src", ["python", "agent.py"], None, 1.0)
     with pytest.raises(replay.Refused) as refused:
         replay.plan(record, [], "agent:handle", None)
     assert str(refused.value) == (
@@ -108,20 +106,20 @@ def test_a_replay_s_run_of_a_trigger_taking_argv_is_called_with_its_args_not_run
     """A replay's run is a process run that keeps the trigger it called: its entrypoint says its
     args are that function's, even a parameter named `argv`."""
     called = Trigger("main", "agent:main", {"argv": ["agent", "-v"]}, True)
-    record = replace(runner.process_run("src", ["python"], None, 1.0), trigger=called)
+    record = replace(RunRecord.process("src", ["python"], None, 1.0), trigger=called)
     plan = replay.plan(record, [], "agent:other", None)
     assert plan.call == replay.Call("agent:other", {"argv": ["agent", "-v"]})
 
 
 def test_args_with_no_function_to_give_them_to_are_refused():
-    record = runner.process_run("src", ["python", "agent.py"], None, 1.0)
+    record = RunRecord.process("src", ["python", "agent.py"], None, 1.0)
     with pytest.raises(replay.Refused) as refused:
         replay.plan(record, [], None, {"n": 1})
     assert str(refused.value) == "run src has no entrypoint to give --args to; pass --call too"
 
 
 def test_a_process_run_is_its_argv_run_again():
-    record = runner.process_run("src", ["python", "agent.py", "-v"], None, 1.0)
+    record = RunRecord.process("src", ["python", "agent.py", "-v"], None, 1.0)
     plan = replay.plan(record, [], None, None)
     assert (plan.call, plan.argv, plan.trigger, plan.rerun) == (
         None,
@@ -136,7 +134,7 @@ def test_a_process_run_is_its_argv_run_again():
 def test_a_process_run_s_replay_says_it_reran_the_argv_alone():
     """The environment, cwd and stdin the run had are not recorded, so a replay that refunds
     another amount may only have lost an environment variable."""
-    record = runner.process_run("src", ["python", "agent.py", "-v x"], None, 1.0)
+    record = RunRecord.process("src", ["python", "agent.py", "-v x"], None, 1.0)
     replayed = _run(replace(record, run_id="new", replay_of="src"), [])
     rerun = ("python", "agent.py", "-v x")
     lines = replay.outcome(_run(record, []), replayed, replay.Ended(0), None, rerun).lines()
@@ -290,7 +288,7 @@ def test_a_run_with_no_trigger_replayed_by_a_command_says_no_args_differ():
     """A `header` run recorded no trigger, and its replay by `-- CMD` records the command line, as
     a process run does: no args were given, so none are said to differ."""
     source = _run(_record(None, "header"), [])
-    record = runner.process_run("new", ["python", "agent.py"], None, 1.0)
+    record = RunRecord.process("new", ["python", "agent.py"], None, 1.0)
     replayed = _run(replace(record, replay_of="src"), [])
     lines = replay.outcome(source, replayed, replay.Ended(0), None).lines()
     assert lines[:3] == [

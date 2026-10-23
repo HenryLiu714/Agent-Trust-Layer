@@ -37,11 +37,12 @@ import json
 import os
 import sys
 import traceback
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from irimi import paths, trace
+from irimi import trace
+from irimi.protocol.env import REPLAY_ARGS_FILE_ENV, REPLAY_CALL_ENV, REPLAY_OUTCOME_FILE_ENV
+from irimi.protocol.replay_files import CallOutcome, call_outcome_to_json
 from irimi.sdk.api import NotCallable, resolve
 from irimi.sdk.capture import NotReplayable, call_arguments, revive
 from irimi.sdk.errors import error_info
@@ -51,49 +52,14 @@ from irimi.sdk.errors import error_info
 CANNOT_CALL = 126
 
 
-@dataclass(frozen=True)
-class CallOutcome:
-    """How the child's call ended, as it writes it for `irimi replay`: `called` False when the
-    call could not be made, `error` why; otherwise what it raised, None when it returned."""
-
-    called: bool
-    error: trace.ErrorInfo | None
-
-    def to_json(self) -> dict[str, Any]:
-        return {"called": self.called, "error": trace.error_to_json(self.error)}
-
-    @classmethod
-    def read(cls, path: Path) -> "CallOutcome | None":
-        """The outcome the child wrote at `path`, or None when it wrote none that reads: it was
-        killed, or never started, or the file is not one this module writes. Never raises: the
-        agent can write the file too, since its environment names it, and JSON nested deeper than
-        the stack raises RecursionError, which would end `irimi replay` before it ends the run."""
-        try:
-            d = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, RecursionError):
-            return None
-        if not isinstance(d, dict) or set(d) != {"called", "error"}:
-            return None
-        called, error = d["called"], d["error"]
-        if not isinstance(called, bool):
-            return None
-        if error is None:
-            return cls(called, None)
-        if not (isinstance(error, dict) and set(error) == {"type", "message"}):
-            return None
-        if not all(isinstance(v, str) for v in error.values()):
-            return None
-        return cls(called, trace.ErrorInfo(error["type"], error["message"]))
-
-
 def main() -> int:
-    entrypoint = os.environ.get(paths.REPLAY_CALL_ENV)
-    args_file = os.environ.get(paths.REPLAY_ARGS_FILE_ENV)
-    outcome_file = os.environ.get(paths.REPLAY_OUTCOME_FILE_ENV)
+    entrypoint = os.environ.get(REPLAY_CALL_ENV)
+    args_file = os.environ.get(REPLAY_ARGS_FILE_ENV)
+    outcome_file = os.environ.get(REPLAY_OUTCOME_FILE_ENV)
     if not entrypoint or not args_file or not outcome_file:
         print(
-            f"error: {paths.REPLAY_CALL_ENV}, {paths.REPLAY_ARGS_FILE_ENV} and "
-            f"{paths.REPLAY_OUTCOME_FILE_ENV} name no call; irimi replay starts this module",
+            f"error: {REPLAY_CALL_ENV}, {REPLAY_ARGS_FILE_ENV} and "
+            f"{REPLAY_OUTCOME_FILE_ENV} name no call; irimi replay starts this module",
             file=sys.stderr,
         )
         return CANNOT_CALL
@@ -145,7 +111,7 @@ def _write(path: str, outcome: CallOutcome) -> None:
     """Never raises: a child that cannot say how it ended still exits as it ended, and `irimi
     replay` then ends the run by its exit code alone."""
     try:
-        Path(path).write_text(json.dumps(outcome.to_json()), encoding="utf-8")
+        Path(path).write_text(json.dumps(call_outcome_to_json(outcome)), encoding="utf-8")
     except Exception:
         pass
 

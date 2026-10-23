@@ -12,12 +12,13 @@ import time
 
 import pytest
 
-from irimi import __version__, redact, trace
+from irimi import __version__, redact
 from irimi.control import MAX_CONTROL_BODY, MAX_REFUSAL, TOO_DEEP, ControlEndpoint
 from irimi.engine import Serve
 from irimi.exchange import Exchange, Request
 from irimi.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE
 from irimi.policy import ReplayPolicy, ShadowPolicy
+from irimi.protocol import control as protocol_control
 from irimi.recording import Recording
 from irimi.store import DirectoryStore, NullStore, StoreReader
 from irimi.trace import MAX_QUOTED, ErrorInfo, ToolCall, Trigger
@@ -58,6 +59,7 @@ def _tool_call(started_at: float, name: str = "db.write") -> dict:
         "error": None,
         "started_at": started_at,
         "ended_at": started_at + 0.001,
+        "awaited": False,
     }
 
 
@@ -142,14 +144,14 @@ def test_a_start_a_tool_call_and_an_end_are_one_sdk_run_on_disk(engine):
     _ok(engine.call("POST", f"/_irimi/runs/{RUN}/end", _end_body(t0 + 2)))
     run = engine.finish().load_run(RUN)
     record = run.record
-    assert (record.attribution, record.mode, record.outcome) == ("sdk", "shadow", "ok")
+    assert (record.attribution, record.mode, record.end.outcome) == ("sdk", "shadow", "ok")
     assert record.trigger == Trigger("handle_ticket", "agent:handle_ticket", {"ticket": 7}, True)
     assert (record.agent_version, record.sdk_version, record.engine_version) == (
         "agent-1.2",
         "0.1.0",
         __version__,
     )
-    assert (record.started_at, record.ended_at, record.error) == (t0, t0 + 2, None)
+    assert (record.started_at, record.end.ended_at, record.end.error) == (t0, t0 + 2, None)
     [call] = run.events
     assert call == ToolCall(
         tool_call_id="tc-db.write",
@@ -189,7 +191,7 @@ def test_an_exchange_labelled_with_the_run_lands_between_its_tool_calls(engine, 
     assert isinstance(exchange, Exchange) and exchange.request.path == "/hello"
     assert run.record.attribution == "sdk"
     assert run.record.started_at <= exchange.started_at <= exchange.ended_at
-    assert exchange.ended_at <= run.record.ended_at
+    assert exchange.ended_at <= run.record.end.ended_at
     # Only the exchange was reported as one.
     assert [ex.request.path for ex in engine.seen] == ["/hello"]
 
@@ -466,7 +468,7 @@ def test_every_route_ignores_a_field_it_does_not_know(engine):
     assert (status, json.loads(body)) == (404, _refused("no recorded call"))
     reader = engine.finish()
     [run] = reader.list_runs()
-    assert (run.run_id, run.outcome) == (RUN, "ok")
+    assert (run.run_id, run.end.outcome) == (RUN, "ok")
     assert [e.name for e in reader.load_run(RUN).events] == ["db.write"]
 
 
@@ -538,7 +540,7 @@ def test_a_control_request_through_the_forward_proxy_is_answered_the_same(engine
         )
         assert (status, body) == (204, b"")
     record = engine.finish().load_run(RUN).record
-    assert (record.attribution, record.outcome) == ("sdk", "ok")
+    assert (record.attribution, record.end.outcome) == ("sdk", "ok")
     assert engine.seen == []
 
 
@@ -620,7 +622,7 @@ def test_a_decoder_that_raises_anything_but_its_refusal_is_irimi_s_500_never_too
     def broken(doc):
         raise RecursionError("maximum recursion depth exceeded")
 
-    monkeypatch.setattr(trace, "run_from_json", broken)
+    monkeypatch.setattr(protocol_control, "run_start_from_json", broken)
     body = json.dumps(_start_body(1.0)).encode()
     request = Request("POST", "http", "127.0.0.1", 4000, _START, "", (), body)
     with caplog.at_level(logging.ERROR, logger="irimi.control"):
@@ -687,7 +689,7 @@ def test_a_posted_error_message_is_cut_to_the_length_a_trace_keeps(engine):
     run = engine.finish().load_run(RUN)
     [call] = run.events
     cut = ErrorInfo("x.Boom", "m" * MAX_ERROR_MESSAGE)
-    assert (run.record.outcome, run.record.error, call.error) == ("error", cut, cut)
+    assert (run.record.end.outcome, run.record.end.error, call.error) == ("error", cut, cut)
 
 
 def test_a_posted_error_type_is_cut_to_the_length_a_trace_keeps(engine):
@@ -703,7 +705,7 @@ def test_a_posted_error_type_is_cut_to_the_length_a_trace_keeps(engine):
     run = engine.finish().load_run(RUN)
     [call] = run.events
     cut = ErrorInfo("t." * (MAX_ERROR_TYPE // 2), "no")
-    assert (run.record.outcome, run.record.error, call.error) == ("error", cut, cut)
+    assert (run.record.end.outcome, run.record.end.error, call.error) == ("error", cut, cut)
     assert [c.error for c in engine.tool_calls] == [cut]
 
 
@@ -730,7 +732,7 @@ def test_a_posted_error_reaches_the_store_whole_so_a_key_straddling_a_cut_is_red
         kind.replace(secret, hidden)[:MAX_ERROR_TYPE],
         message.replace(secret, hidden)[:MAX_ERROR_MESSAGE],
     )
-    assert (run.record.error, call.error) == (cut, cut)
+    assert (run.record.end.error, call.error) == (cut, cut)
     assert [c.error for c in engine.tool_calls] == [
         ErrorInfo(kind[:MAX_ERROR_TYPE], message[:MAX_ERROR_MESSAGE])
     ]

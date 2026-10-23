@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Protocol
 
-from irimi import bodies, idempotency, preconditions, services, wire
+from irimi import bodies, idempotency, preconditions, services
 from irimi.classify import Classification
 from irimi.delegation import ForwardTo
 from irimi.exchange import (
@@ -26,6 +26,7 @@ from irimi.exchange import (
     Response,
     WriteOutcome,
 )
+from irimi.protocol.headers import ANSWERED_BY_HEADER
 from irimi.reader import NoReader, Reader
 from irimi.recording import Recording, RecordingReader
 from irimi.servicemap import MapIndex, Route
@@ -210,7 +211,7 @@ _ANSWER_FLAGS = frozenset({Flag.FIXTURE_FAILED, Flag.IDEMPOTENT_REPLAY, Flag.IDE
 # decoded and whole, so its `Content-Encoding` and framing are not the body served; mitmproxy sets
 # the length of what is. And the recorded run's own stamp, which `wire.stamp` replaces.
 _RECORDED_ONLY_HEADERS = frozenset(
-    {"content-encoding", "content-length", "transfer-encoding", wire.ANSWERED_BY_HEADER}
+    {"content-encoding", "content-length", "transfer-encoding", ANSWERED_BY_HEADER}
 )
 
 

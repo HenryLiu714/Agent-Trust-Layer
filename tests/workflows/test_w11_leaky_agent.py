@@ -46,7 +46,7 @@ def test_an_escape_writes_for_real_and_irimi_never_sees_it(run_workflow, mode, e
     reader = shadow.stored()
     runs = {r.attribution: r for r in reader.list_runs()}
     assert sorted(runs) == (["process", "sdk"] if mode == "shadow" else ["sdk"])
-    assert {r.outcome for r in runs.values()} == {"ok"}
+    assert {r.end.outcome for r in runs.values()} == {"ok"}
     trigger = runs["sdk"].trigger
     assert trigger is not None and (trigger.name, trigger.args) == ("escape", {"escape": escape})
     assert shadow.stored_events() == []

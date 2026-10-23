@@ -62,6 +62,8 @@ from irimi import store as irimi_store
 from irimi.cli import build_parser
 from irimi.cli import main as irimi_main
 from irimi.exchange import Exchange
+from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV, PROXY_ENVS
+from irimi.protocol.replay_files import replay_result_from_json, replay_result_to_json
 from irimi.sdk import replays as sdk_replays
 from irimi.servicemap import MapIndex, loader
 from irimi.store import StoreReader
@@ -348,8 +350,8 @@ class Result:
         if self.mode != "replay":
             return self.exit_code
         record = self.stored().load_run(self.process_run_id()).record
-        assert record.exit_code is not None, record
-        return record.exit_code
+        assert record.end.exit_code is not None, record
+        return record.end.exit_code
 
     def sdk_runs(self) -> list[RunRecord]:
         """The runs the SDK started, as stored: `attribution: "sdk"`, newest first."""
@@ -697,7 +699,7 @@ def _execute(
 
 def _replay_result(path: Path) -> sdk.ReplayResult:
     """The result file a replay wrote, as `sdk.replay` reads it back."""
-    return sdk.ReplayResult.from_json(json.loads(path.read_text(encoding="utf-8")))
+    return replay_result_from_json(json.loads(path.read_text(encoding="utf-8")))
 
 
 def _calling_sdk_replay(
@@ -717,7 +719,7 @@ def _calling_sdk_replay(
                 got = agent_sdk.replay(run_id, store=store)
         finally:
             sdk_replays._run_irimi = real
-        result_file.write_text(json.dumps(got.to_json()), encoding="utf-8")
+        result_file.write_text(json.dumps(replay_result_to_json(got)), encoding="utf-8")
         return got.exit_code
 
     return run
@@ -953,13 +955,13 @@ def _serve_env(env: dict[str, str], port: int, cert: Path) -> dict[str, str]:
     listener = f"http://127.0.0.1:{port}"
     return {
         **env,
-        **dict.fromkeys(paths.PROXY_ENVS, listener),
+        **dict.fromkeys(PROXY_ENVS, listener),
         "NO_PROXY": runner.NO_PROXY_VALUE,
         "no_proxy": runner.NO_PROXY_VALUE,
         "SSL_CERT_FILE": str(cert),
         "REQUESTS_CA_BUNDLE": str(cert),
-        paths.ENGINE_ACTIVE_ENV: "1",
-        paths.CONTROL_ENV: f"{listener}/_irimi",
+        ENGINE_ACTIVE_ENV: "1",
+        CONTROL_ENV: f"{listener}/_irimi",
     }
 
 

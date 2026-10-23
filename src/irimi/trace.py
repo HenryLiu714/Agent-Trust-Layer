@@ -1,4 +1,4 @@
-"""Trace format v2: the records a stored run is made of, and their JSON codecs.
+"""The trace format: the records a stored run is made of, and their JSON codecs.
 
 Stored runs outlive the version of irimi that wrote them, so the shape is written down once, here
 and in `docs/trace-format.md`, and versioned. This module is the shape and nothing else: frozen
@@ -27,11 +27,13 @@ import hashlib
 import json
 import math
 import re
+import secrets
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, assert_never, get_args
 
+from irimi import __version__
 from irimi.exchange import (
     AnsweredBy,
     Door,
@@ -49,20 +51,8 @@ from irimi.exchange import (
 from irimi.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE, MAX_POSTED_MESSAGE, MAX_POSTED_TYPE
 from irimi.secret_shapes import cut_outside_secrets
 
-# One integer for the whole format. `run.json` carries it and a run's events are read under
-# it; `unattributed/events.jsonl`, which has no `run.json`, is read under this one. A decoder
-# refuses a newer version and ignores keys it does not know. Every field of version 1 is required.
-# A field added after it decodes as its dataclass default when absent, so a recording made before
-# the field existed still reads; adding a field means adding that decoder path. A new value in a
-# closed vocabulary (`kind`, `answered_by`, `mode`, `attribution`: every field read with
-# `_one_of`) IS a bump, because an older reader refuses a value it does not
-# know; `flags` is open, and a reader skips a flag it does not know. Changing what a field means
-# is a bump too. `docs/trace-format.md`, "Versioning", is the rule in full.
-#
-# Version 2 has `mode` `replay`, `answered_by` and `ran` `recording`, and a run record's
-# `replay_of`. A version 1 run reads under it unchanged, as a run with no `replay_of`.
-# Version 3 has `answered_by` `irimi`, and an exchange has no `validation` or `fidelity:*`
-# flags; a version 2 run reads under it unchanged, those keys and flags ignored.
+# One integer for the whole format, in every run.json. A field added later decodes as its default
+# when absent; a new value in a closed vocabulary (`read_one_of`) or a changed meaning bumps it.
 SCHEMA_VERSION = 3
 
 # The run id of an exchange no run claimed: `irimi serve` with no `Irimi-Run` header.
@@ -101,14 +91,25 @@ class TraceFormatError(ValueError):
 
 def mode_for(replay_of: str | None) -> Mode:
     """The mode of a run an engine stores: `replay` when it answers from the stored run `replay_of`,
-    `shadow` when it answers from nothing. One rule for every record an engine writes itself,
-    the process run's and a header run's."""
+    `shadow` when it answers from nothing. One rule for every `RunRecord` constructor."""
     return "shadow" if replay_of is None else "replay"
 
 
 def is_valid_run_id(run_id: str) -> bool:
     """True when `run_id` may name a run - and so a directory. See RUN_ID_PATTERN."""
     return RUN_ID_PATTERN.fullmatch(run_id) is not None
+
+
+def new_run_id() -> str:
+    """A fresh run id: 16 lower-case hex characters. It passes `is_valid_run_id`, and being
+    lower-case it never differs only in case from another, which a case-insensitive filesystem
+    would file in `unattributed/`."""
+    return secrets.token_hex(8)
+
+
+def new_tool_call_id() -> str:
+    """A fresh tool call id: 16 lower-case hex characters."""
+    return secrets.token_hex(8)
 
 
 # The module name a function or class defined in the script being run has.
@@ -171,11 +172,36 @@ class Trigger:
     entrypoint: str | None
     args: JSONValue  # the captured arguments: `irimi.sdk.capture`'s table
     replayable: bool
+    # The command line of a process run's own trigger (`command`), whose `args` are then None.
+    # run.json keeps it as `args: {"argv": [...]}`, the shape it has always had (`trigger_args`).
+    argv: tuple[str, ...] | None = None
+
+    @classmethod
+    def command(cls, argv: Sequence[str]) -> "Trigger":
+        """The trigger of a process run: its command line, which a replay can run again."""
+        return cls(name=argv[0], entrypoint=None, args=None, replayable=True, argv=tuple(argv))
+
+
+def trigger_args(trigger: Trigger) -> JSONValue:
+    """`trigger`'s args as run.json holds them: a command line as `{"argv": [...]}`."""
+    return trigger.args if trigger.argv is None else {"argv": list(trigger.argv)}
+
+
+@dataclass(frozen=True)
+class RunEnd:
+    """How a run ended. `error` is what the run raised, or why its process exited non-zero;
+    `exit_code` is set only for the process run."""
+
+    ended_at: float
+    outcome: Outcome
+    error: ErrorInfo | None
+    exit_code: int | None
 
 
 @dataclass(frozen=True)
 class RunRecord:
-    """One run: `run.json`. None in `outcome` means the run has not ended - or never will."""
+    """One run: `run.json`. Built by `process`, `sdk` or `header`, each of which sets `mode` from
+    `replay_of`. `end` is None for a run that has not ended, or never will."""
 
     schema_version: int
     run_id: str
@@ -188,14 +214,90 @@ class RunRecord:
     engine_version: str
     sdk_version: str | None
     started_at: float | None
-    ended_at: float | None
-    outcome: Outcome | None
-    error: ErrorInfo | None
-    exit_code: int | None  # set only for the process run
+    end: RunEnd | None = None
     dropped_events: int = 0
-    # The run a replay answered this one from. None for every run that is not a replay, and for a
-    # version 1 run.json, which has no such key.
+    # The run a replay answered this one from. None for every run that is not a replay.
     replay_of: str | None = None
+
+    @classmethod
+    def process(
+        cls,
+        run_id: str,
+        argv: Sequence[str],
+        agent_version: str | None,
+        started_at: float,
+        trigger: Trigger | None = None,
+        replay_of: str | None = None,
+    ) -> "RunRecord":
+        """The run `irimi shadow` or `irimi replay` stores for its child: one process tree is one
+        run. Its trigger is the command line, unless a replay gives the trigger it calls."""
+        return cls(
+            schema_version=SCHEMA_VERSION,
+            run_id=run_id,
+            mode=mode_for(replay_of),
+            attribution="process",
+            trigger=Trigger.command(argv) if trigger is None else trigger,
+            agent_version=agent_version,
+            engine_version=__version__,
+            sdk_version=None,
+            started_at=started_at,
+            replay_of=replay_of,
+        )
+
+    @classmethod
+    def sdk(
+        cls,
+        run_id: str,
+        trigger: Trigger,
+        agent_version: str | None,
+        sdk_version: str,
+        started_at: float,
+        replay_of: str | None = None,
+    ) -> "RunRecord":
+        """A run the SDK started, as the control endpoint stores it from the start it posted."""
+        return cls(
+            schema_version=SCHEMA_VERSION,
+            run_id=run_id,
+            mode=mode_for(replay_of),
+            attribution="sdk",
+            trigger=trigger,
+            agent_version=agent_version,
+            engine_version=__version__,
+            sdk_version=sdk_version,
+            started_at=started_at,
+            replay_of=replay_of,
+        )
+
+    @classmethod
+    def header(
+        cls, run_id: str, started_at: float | None = None, replay_of: str | None = None
+    ) -> "RunRecord":
+        """The record of a run id that arrived on an event with no start: every optional field
+        None. The store makes it on the first event of a run with no `run.json`, passing that
+        event's `started_at`, the earliest moment the run is known by: without it a header run
+        would sort after every run that has a start, and `irimi runs list --limit` would hide an
+        agent's labelled runs behind its process runs. `StoreReader` gives it to `unattributed/`,
+        which has none."""
+        return cls(
+            schema_version=SCHEMA_VERSION,
+            run_id=run_id,
+            mode=mode_for(replay_of),
+            attribution="header",
+            trigger=None,
+            agent_version=None,
+            engine_version=__version__,
+            sdk_version=None,
+            started_at=started_at,
+            replay_of=replay_of,
+        )
+
+    @property
+    def argv(self) -> tuple[str, ...] | None:
+        """The command line a process run recorded, or None. A replay's run is a process run too,
+        but one that keeps the trigger it called, whose args are a function's."""
+        if self.attribution != "process" or self.trigger is None:
+            return None
+        return self.trigger.argv
 
 
 @dataclass(frozen=True)
@@ -220,21 +322,6 @@ class ToolCall:
     # record, it reads as False.
     awaited: bool = False
 
-
-@dataclass(frozen=True)
-class RecordedOutcome:
-    """What a recorded read tool call came to, as a replay hands it back: the control
-    endpoint answers the SDK's lookup with it (`recorded_outcome_to_json`), and the SDK reads it
-    (`recorded_outcome_from_json`). `result` is still captured JSON, for the SDK to revive."""
-
-    result: JSONValue
-    error: ErrorInfo | None
-    awaited: bool
-
-
-# What the SDK posts to ask a replay for a read tool's recorded outcome: the tool's name and its
-# args as captured, and nothing else.
-RECORDED_LOOKUP_FIELDS = ("name", "args")
 
 # The markers of a captured value that describe it rather than hold it (`docs/trace-format.md`,
 # "Captured values"): its repr, or its size when it was too large to keep. Trace format, not the
@@ -300,6 +387,14 @@ PutBody = Callable[[bytes], BodyRef | None]
 GetBody = Callable[[BodyRef], bytes]
 
 
+@dataclass(frozen=True)
+class StoredRun:
+    """A run as the store reads it back: its record, and its events in `seq` order."""
+
+    record: RunRecord
+    events: list[Event]  # bodies loaded from blobs/, or empty: see `StoreReader.load_run`
+
+
 def body_ref(body: bytes, truncated: bool = False) -> BodyRef:
     """The ref for `body` as stored: its own digest and length."""
     return BodyRef(hashlib.sha256(body).hexdigest(), len(body), truncated)
@@ -309,6 +404,8 @@ def body_ref(body: bytes, truncated: bool = False) -> BodyRef:
 
 
 def run_to_json(record: RunRecord) -> dict[str, Any]:
+    end = record.end
+    # How the run ended stays four flat keys, each null for a run that has not ended.
     return {
         "schema_version": record.schema_version,
         "run_id": record.run_id,
@@ -319,10 +416,10 @@ def run_to_json(record: RunRecord) -> dict[str, Any]:
         "engine_version": record.engine_version,
         "sdk_version": record.sdk_version,
         "started_at": record.started_at,
-        "ended_at": record.ended_at,
-        "outcome": record.outcome,
-        "error": error_to_json(record.error),
-        "exit_code": record.exit_code,
+        "ended_at": None if end is None else end.ended_at,
+        "outcome": None if end is None else end.outcome,
+        "error": error_to_json(None if end is None else end.error),
+        "exit_code": None if end is None else end.exit_code,
         "dropped_events": record.dropped_events,
         "replay_of": record.replay_of,
     }
@@ -342,11 +439,6 @@ def tool_call_to_json(call: ToolCall) -> dict[str, Any]:
         "ended_at": call.ended_at,
         "awaited": call.awaited,
     }
-
-
-def recorded_outcome_to_json(call: ToolCall) -> dict[str, Any]:
-    """The recorded outcome of `call`, as the control endpoint answers a lookup that hit."""
-    return {"result": call.result, "error": error_to_json(call.error), "awaited": call.awaited}
 
 
 def telemetry_to_json(seen: TelemetrySeen) -> dict[str, Any]:
@@ -399,7 +491,7 @@ def trigger_to_json(trigger: Trigger) -> dict[str, Any]:
     return {
         "name": trigger.name,
         "entrypoint": trigger.entrypoint,
-        "args": trigger.args,
+        "args": trigger_args(trigger),
         "replayable": trigger.replayable,
     }
 
@@ -453,26 +545,35 @@ def run_from_json(d: Mapping[str, Any]) -> RunRecord:
         raise TraceFormatError(f"schema_version is newer than this irimi reads ({SCHEMA_VERSION})")
     if version < 1:
         raise TraceFormatError("schema_version is below 1, the first version")
-    trigger = _optional(d, "trigger", _object)
+    trigger = read_optional(d, "trigger", read_object)
+    run_id = read_str(d, "run_id")
+    mode: Mode = read_one_of(d, "mode", Mode)
+    attribution: Attribution = read_one_of(d, "attribution", Attribution)
+    stored = None if trigger is None else _stored_trigger(trigger, attribution)
+    agent_version = read_optional(d, "agent_version", read_str)
+    engine_version = read_str(d, "engine_version")
+    sdk_version = read_optional(d, "sdk_version", read_str)
+    started_at = read_optional(d, "started_at", read_float)
+    ended_at = read_optional(d, "ended_at", read_float)
+    outcome: Outcome | None = read_optional(d, "outcome", lambda d, k: read_one_of(d, k, Outcome))
+    error = read_error(d, "error")
+    exit_code = read_optional(d, "exit_code", _int)
     record = RunRecord(
         schema_version=version,
-        run_id=_str(d, "run_id"),
-        mode=_one_of(d, "mode", Mode),
-        attribution=_one_of(d, "attribution", Attribution),
-        trigger=None if trigger is None else _trigger_from_json(trigger),
-        agent_version=_optional(d, "agent_version", _str),
-        engine_version=_str(d, "engine_version"),
-        sdk_version=_optional(d, "sdk_version", _str),
-        started_at=_optional(d, "started_at", _float),
-        ended_at=_optional(d, "ended_at", _float),
-        outcome=_optional(d, "outcome", lambda d, k: _one_of(d, k, Outcome)),
-        error=_error_from_json(d, "error"),
-        exit_code=_optional(d, "exit_code", _int),
+        run_id=run_id,
+        mode=mode,
+        attribution=attribution,
+        trigger=stored,
+        agent_version=agent_version,
+        engine_version=engine_version,
+        sdk_version=sdk_version,
+        started_at=started_at,
+        end=_run_end(ended_at, outcome, error, exit_code),
         dropped_events=_int(d, "dropped_events"),
-        replay_of=_added_later(d, "replay_of", _run_id),
+        replay_of=read_optional(d, "replay_of", _run_id),
     )
-    # A replay's run names the run it replayed, and only a replay's: the store stamps both by one
-    # rule, `mode_for`, so a record where they disagree is damage, never half a replay.
+    # A replay's run names the run it replayed, and only a replay's: every constructor sets both by
+    # one rule, `mode_for`, so a record where they disagree is damage, never half a replay.
     if record.mode != mode_for(record.replay_of):
         if record.replay_of is None:
             raise TraceFormatError("'mode' is 'replay', but 'replay_of' is null")
@@ -480,61 +581,83 @@ def run_from_json(d: Mapping[str, Any]) -> RunRecord:
     return record
 
 
+def _run_end(
+    ended_at: float | None, outcome: Outcome | None, error: ErrorInfo | None, exit_code: int | None
+) -> RunEnd | None:
+    """The four flat end keys as one `RunEnd`, None when the run has not ended. A run ends with
+    both a time and an outcome, and one that has not ended has no error or exit code."""
+    if ended_at is not None and outcome is not None:
+        return RunEnd(ended_at, outcome, error, exit_code)
+    if ended_at is not None or outcome is not None:
+        raise TraceFormatError("'ended_at' and 'outcome' are null together or not at all")
+    if error is not None or exit_code is not None:
+        raise TraceFormatError("a run that has not ended has a null 'error' and 'exit_code'")
+    return None
+
+
+def _stored_trigger(d: Mapping[str, Any], attribution: Attribution) -> Trigger:
+    """A run's trigger. A process run's own, with no entrypoint, holds its command line as
+    `args: {"argv": [...]}`, which is read back as `Trigger.argv`."""
+    trigger = trigger_from_json(d)
+    if attribution != "process" or trigger.entrypoint is not None:
+        return trigger
+    args = trigger.args
+    if not (isinstance(args, dict) and set(args) == {"argv"} and isinstance(args["argv"], list)):
+        return trigger
+    words = [word for word in args["argv"] if isinstance(word, str)]
+    if not words or len(words) != len(args["argv"]):
+        return trigger
+    return Trigger(trigger.name, None, None, trigger.replayable, tuple(words))
+
+
 def tool_call_from_json(d: Mapping[str, Any]) -> ToolCall:
     return ToolCall(
-        tool_call_id=_str(d, "tool_call_id"),
-        run_id=_str(d, "run_id"),
-        name=_str(d, "name"),
-        kind=_one_of(d, "kind", ToolKind),
-        ran=_one_of(d, "ran", Ran),
-        args=_json(d, "args"),
-        result=_json(d, "result"),
-        error=_error_from_json(d, "error"),
-        started_at=_float(d, "started_at"),
-        ended_at=_float(d, "ended_at"),
-        awaited=_added_later(d, "awaited", _bool) or False,
-    )
-
-
-def recorded_outcome_from_json(d: Mapping[str, Any]) -> RecordedOutcome:
-    """The outcome `recorded_outcome_to_json` wrote, held to the rules a stored tool call is."""
-    return RecordedOutcome(
-        result=_json(d, "result"),
-        error=_error_from_json(d, "error"),
-        awaited=_bool(d, "awaited"),
+        tool_call_id=read_str(d, "tool_call_id"),
+        run_id=read_str(d, "run_id"),
+        name=read_str(d, "name"),
+        kind=read_one_of(d, "kind", ToolKind),
+        ran=read_one_of(d, "ran", Ran),
+        args=read_json(d, "args"),
+        result=read_json(d, "result"),
+        error=read_error(d, "error"),
+        started_at=read_float(d, "started_at"),
+        ended_at=read_float(d, "ended_at"),
+        awaited=read_bool(d, "awaited"),
     )
 
 
 def telemetry_from_json(d: Mapping[str, Any]) -> TelemetrySeen:
     return TelemetrySeen(
-        run_id=_str(d, "run_id"), host=_str(d, "host"), started_at=_float(d, "started_at")
+        run_id=read_str(d, "run_id"),
+        host=read_str(d, "host"),
+        started_at=read_float(d, "started_at"),
     )
 
 
 def exchange_from_json(d: Mapping[str, Any], get_body: GetBody) -> Exchange:
     """The Exchange `exchange_to_json` wrote, with each body fetched back through `get_body`."""
-    response = _optional(d, "response", _object)
+    response = read_optional(d, "response", read_object)
     return Exchange(
-        request=_request_from_json(_object(d, "request"), get_body),
+        request=_request_from_json(read_object(d, "request"), get_body),
         response=None if response is None else _response_from_json(response, get_body),
-        service=_str(d, "service"),
-        operation=_str(d, "operation"),
-        kind=_one_of(d, "kind", Kind),
-        answered_by=_one_of(d, "answered_by", AnsweredBy),
-        run_id=_str(d, "run_id"),
-        door=_one_of(d, "door", Door),
+        service=read_str(d, "service"),
+        operation=read_str(d, "operation"),
+        kind=read_one_of(d, "kind", Kind),
+        answered_by=read_one_of(d, "answered_by", AnsweredBy),
+        run_id=read_str(d, "run_id"),
+        door=read_one_of(d, "door", Door),
         flags=_flags(d, "flags"),
-        target=_str(d, "target"),
-        overlay=_optional(d, "overlay", lambda d, k: _one_of(d, k, OverlayFidelity)),
+        target=read_str(d, "target"),
+        overlay=read_optional(d, "overlay", lambda d, k: read_one_of(d, k, OverlayFidelity)),
         precondition=Precondition(
-            _optional(d, "precondition", lambda d, k: _one_of(d, k, PreconditionOutcome)),
-            _str(d, "rejection_code"),
-            _str(d, "currency"),
+            read_optional(d, "precondition", lambda d, k: read_one_of(d, k, PreconditionOutcome)),
+            read_str(d, "rejection_code"),
+            read_str(d, "currency"),
         ),
-        issued_by=_one_of(d, "issued_by", IssuedBy),
+        issued_by=read_one_of(d, "issued_by", IssuedBy),
         would_fire=_strings(d, "would_fire"),
-        started_at=_float(d, "started_at"),
-        ended_at=_float(d, "ended_at"),
+        started_at=read_float(d, "started_at"),
+        ended_at=read_float(d, "ended_at"),
         stream_chunks=_chunk_lengths(d, "stream_chunks"),
     )
 
@@ -542,7 +665,7 @@ def exchange_from_json(d: Mapping[str, Any], get_body: GetBody) -> Exchange:
 def event_from_json(d: Mapping[str, Any], get_body: GetBody) -> tuple[int, Event]:
     """One `events.jsonl` line back: its `seq` and its record."""
     seq = _int(d, "seq")
-    kind: EventType = _one_of(d, "type", EventType)
+    kind: EventType = read_one_of(d, "type", EventType)
     if kind == "exchange":
         return seq, exchange_from_json(d, get_body)
     if kind == "tool_call":
@@ -552,30 +675,33 @@ def event_from_json(d: Mapping[str, Any], get_body: GetBody) -> tuple[int, Event
     assert_never(kind)
 
 
-def _trigger_from_json(d: Mapping[str, Any]) -> Trigger:
+def trigger_from_json(d: Mapping[str, Any]) -> Trigger:
+    """A trigger as `trigger_to_json` wrote it, its args as they were written: `run_from_json`
+    reads a process run's command line out of them."""
     return Trigger(
-        name=_str(d, "name"),
-        entrypoint=_optional(d, "entrypoint", _str),
-        args=_json(d, "args"),
-        replayable=_bool(d, "replayable"),
+        name=read_str(d, "name"),
+        entrypoint=read_optional(d, "entrypoint", read_str),
+        args=read_json(d, "args"),
+        replayable=read_bool(d, "replayable"),
     )
 
 
-def _error_from_json(d: Mapping[str, Any], key: str) -> ErrorInfo | None:
-    error = _optional(d, key, _object)
+def read_error(d: Mapping[str, Any], key: str) -> ErrorInfo | None:
+    """The error `error_to_json` wrote under `key`, None for `null`."""
+    error = read_optional(d, key, read_object)
     if error is None:
         return None
-    return ErrorInfo(type=_str(error, "type"), message=_str(error, "message"))
+    return ErrorInfo(type=read_str(error, "type"), message=read_str(error, "message"))
 
 
 def _request_from_json(d: Mapping[str, Any], get_body: GetBody) -> Request:
     return Request(
-        method=_str(d, "method"),
-        scheme=_str(d, "scheme"),
-        host=_str(d, "host"),
+        method=read_str(d, "method"),
+        scheme=read_str(d, "scheme"),
+        host=read_str(d, "host"),
         port=_int(d, "port"),
-        path=_str(d, "path"),
-        query=_str(d, "query"),
+        path=read_str(d, "path"),
+        query=read_str(d, "query"),
         headers=_headers_from_json(d, "headers"),
         body=_body_from_json(d, "body", get_body),
     )
@@ -604,18 +730,19 @@ def _headers_from_json(d: Mapping[str, Any], key: str) -> Headers:
 
 
 def _body_from_json(d: Mapping[str, Any], key: str, get_body: GetBody) -> bytes:
-    ref = _optional(d, key, _object)
+    ref = read_optional(d, key, read_object)
     if ref is None:
         return b""
-    sha256 = _str(ref, "sha256")
+    sha256 = read_str(ref, "sha256")
     if SHA256_PATTERN.fullmatch(sha256) is None:
         raise TraceFormatError(f"{_quoted(sha256)} is not a sha256 digest")
-    return get_body(BodyRef(sha256, _int(ref, "size"), _bool(ref, "truncated")))
+    return get_body(BodyRef(sha256, _int(ref, "size"), read_bool(ref, "truncated")))
 
 
 # One reader per JSON type. Each raises TraceFormatError, never KeyError, TypeError,
 # OverflowError or RecursionError, so a store reading a damaged line has one exception to catch,
-# and the control endpoint answers every malformed body with a 400.
+# and the control endpoint answers every malformed body with a 400. The public ones also read the
+# bodies posted to it (`protocol.control`).
 
 
 def json_type(value: Any) -> str:
@@ -660,14 +787,14 @@ def _present(d: Mapping[str, Any], key: str) -> Any:
     return d[key]
 
 
-def _optional[T](
+def read_optional[T](
     d: Mapping[str, Any], key: str, read: Callable[[Mapping[str, Any], str], T]
 ) -> T | None:
     """`null` is None; any other value is read with `read`. The key itself is still required."""
     return None if _present(d, key) is None else read(d, key)
 
 
-def _str(d: Mapping[str, Any], key: str) -> str:
+def read_str(d: Mapping[str, Any], key: str) -> str:
     value = _present(d, key)
     if not isinstance(value, str):
         raise TraceFormatError(f"{key!r} is {json_type(value)}, not a string")
@@ -678,7 +805,7 @@ def _run_id(d: Mapping[str, Any], key: str) -> str:
     """A run id one record names another run by (`replay_of`), held to `is_valid_run_id`, the rule
     a run id must keep to name a directory: `runs list` prints it in a column, and `irimi replay`
     looks it up as a run. Refused by its length, never quoted, as a decoder refuses any value."""
-    value = _str(d, key)
+    value = read_str(d, key)
     if not is_valid_run_id(value):
         raise TraceFormatError(f"{key!r} is not a run id ({len(value)} characters)")
     return value
@@ -691,7 +818,7 @@ def _int(d: Mapping[str, Any], key: str) -> int:
     return value
 
 
-def _float(d: Mapping[str, Any], key: str) -> float:
+def read_float(d: Mapping[str, Any], key: str) -> float:
     # JSON has one number type, and `json.dumps(0.0)` is `0.0` but a hand-written `0` is not, so an
     # integer is read as a float. Not a non-finite one: `json.loads` reads `NaN` and
     # `Infinity` by default, and a record holding one could not be written back with
@@ -708,7 +835,7 @@ def _float(d: Mapping[str, Any], key: str) -> float:
     return number
 
 
-def _json(d: Mapping[str, Any], key: str) -> JSONValue:
+def read_json(d: Mapping[str, Any], key: str) -> JSONValue:
     """A free JSON value (`args`, `result`), refused when a float anywhere in it is not finite:
     `json.loads` reads `NaN`, and a record holding one could not be written back."""
     value = _present(d, key)
@@ -724,14 +851,14 @@ def _json(d: Mapping[str, Any], key: str) -> JSONValue:
     return value
 
 
-def _bool(d: Mapping[str, Any], key: str) -> bool:
+def read_bool(d: Mapping[str, Any], key: str) -> bool:
     value = _present(d, key)
     if not isinstance(value, bool):
         raise TraceFormatError(f"{key!r} is {json_type(value)}, not a boolean")
     return value
 
 
-def _object(d: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+def read_object(d: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     value = _present(d, key)
     if not isinstance(value, dict):
         raise TraceFormatError(f"{key!r} is {json_type(value)}, not an object")
@@ -756,21 +883,8 @@ def _flags(d: Mapping[str, Any], key: str) -> tuple[Flag, ...]:
     return tuple(Flag(flag) for flag in _strings(d, key) if flag in known)
 
 
-def _added_later[T](
-    d: Mapping[str, Any], key: str, read: Callable[[Mapping[str, Any], str], T]
-) -> T | None:
-    """An optional field version 1 lacked (`replay_of`, `awaited`): absent or `null` is None, so
-    a record made before the field existed reads as one that never set it; any other value is read
-    with `read`."""
-    return None if key not in d else _optional(d, key, read)
-
-
 def _chunk_lengths(d: Mapping[str, Any], key: str) -> tuple[int, ...]:
-    """A streamed response's chunk lengths: absent in an older recording, and read then as its
-    default, `()`. Present, it is a list of
-    positive integers."""
-    if key not in d:
-        return ()
+    """A streamed response's chunk lengths: a list of positive integers."""
     value = _present(d, key)
     if not isinstance(value, list):
         raise TraceFormatError(f"{key!r} is {json_type(value)}, not a list")
@@ -780,10 +894,10 @@ def _chunk_lengths(d: Mapping[str, Any], key: str) -> tuple[int, ...]:
     return tuple(value)
 
 
-def _one_of(d: Mapping[str, Any], key: str, vocabulary: Any) -> Any:
+def read_one_of(d: Mapping[str, Any], key: str, vocabulary: Any) -> Any:
     """A string from a `Literal` vocabulary. A value this version does not know is a format error
     and not a new mode silently read as an old one."""
-    value = _str(d, key)
+    value = read_str(d, key)
     if value not in get_args(vocabulary):
         raise TraceFormatError(f"{key!r} is {_quoted(value)}, not one of {get_args(vocabulary)}")
     return value

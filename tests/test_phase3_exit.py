@@ -43,7 +43,9 @@ from examples.server_agent import app
 from examples.server_agent.app import BARRIER_ENV, TOOL_NAME
 from irimi import ca, paths, report, servicemap
 from irimi.cli import main
-from irimi.exchange import CONTROL_PREFIX, Exchange
+from irimi.exchange import Exchange
+from irimi.protocol.control import CONTROL_PREFIX
+from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV, PROXY_ENVS, RUN_ENV
 from irimi.store import StoreReader
 from irimi.trace import UNATTRIBUTED, ToolCall
 from tests.maps_for_cli import complete_for_check
@@ -130,15 +132,15 @@ def _agent_env(listener: str, stub_port: int, db: Path, *, barrier: bool) -> dic
     """The README's "Serve mode" variables, and the app's own. No `NO_PROXY`: the stub is on
     loopback, and one naming it would send the agent past irimi (see the module doc)."""
     env = {k: v for k, v in os.environ.items() if not k.lower().endswith("_proxy")}
-    for name in ("STRIPE_API_KEY", paths.RUN_ENV, BARRIER_ENV):
+    for name in ("STRIPE_API_KEY", RUN_ENV, BARRIER_ENV):
         env.pop(name, None)
     env.update(
         {
-            **dict.fromkeys(paths.PROXY_ENVS, listener),
+            **dict.fromkeys(PROXY_ENVS, listener),
             "SSL_CERT_FILE": str(ca.ca_paths().cert),
             "REQUESTS_CA_BUNDLE": str(ca.ca_paths().cert),
-            paths.ENGINE_ACTIVE_ENV: "1",
-            paths.CONTROL_ENV: listener + CONTROL_PREFIX.rstrip("/"),
+            ENGINE_ACTIVE_ENV: "1",
+            CONTROL_ENV: listener + CONTROL_PREFIX.rstrip("/"),
             "STRIPE_API_BASE": f"http://127.0.0.1:{stub_port}",
             "STRIPE_API_KEY": "sk_test_hermetic",
             "REFUND_DB": str(db),
@@ -268,7 +270,7 @@ def test_two_concurrent_requests_to_a_served_agent_are_two_runs_that_never_mix(
     # Exactly two runs, both the SDK's and both ended ok, each triggered by its own request.
     reader = StoreReader(store)
     records = reader.list_runs()
-    assert sorted((r.attribution, r.outcome) for r in records) == [("sdk", "ok")] * 2
+    assert sorted((r.attribution, r.end.outcome) for r in records) == [("sdk", "ok")] * 2
     by_charge = {}
     for record in records:
         assert record.trigger is not None
@@ -283,8 +285,8 @@ def test_two_concurrent_requests_to_a_served_agent_are_two_runs_that_never_mix(
     assert sorted(by_charge) == list(CHARGES)
     # And they were open at once: each started before the other ended (the app's barrier).
     earlier, later = sorted(records, key=lambda r: r.started_at or 0.0)
-    assert earlier.ended_at is not None and later.started_at is not None
-    assert later.started_at < earlier.ended_at
+    assert earlier.end is not None and later.started_at is not None
+    assert later.started_at < earlier.end.ended_at
 
     # Each run holds exactly its own: its read of its charge, irimi's L3 read of it, its faked
     # refund, and its stood-in tool call, and nothing that names the other charge.
@@ -402,10 +404,10 @@ def test_a_refund_stripe_refuses_is_a_502_and_a_run_ended_in_error_and_a_bad_bod
     records = reader.list_runs()
     assert sorted(r.trigger.args["charge"] for r in records if r.trigger) == sorted(failing)
     for record in records:
-        assert (record.attribution, record.outcome) == ("sdk", "error")
+        assert (record.attribution, record.end.outcome) == ("sdk", "error")
         charge = record.trigger.args["charge"] if record.trigger else None
-        assert record.error is not None
-        assert (record.error.type, record.error.message) == (
+        assert record.end.error is not None
+        assert (record.end.error.type, record.end.error.message) == (
             "urllib.error.HTTPError",
             f"HTTP Error {failing[charge]}: {reasons[failing[charge]]}",
         )

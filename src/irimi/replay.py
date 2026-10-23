@@ -14,14 +14,14 @@ WHAT RUNS, in order of precedence (`plan`):
 
 Anything else is refused: there is nothing to run. So is a call `replay_child` could never make:
 an entrypoint in `__main__`, which is `replay_child` itself in the child, and a process run's
-`{"argv": [...]}` given to a function as its parameters; and `--args` with no function to give them
+command line given to a function as its parameters; and `--args` with no function to give them
 to.
 
 WHAT IT SAYS (`Outcome.lines`): which run was replayed as which; for a process run, that only its
 argv runs again; how the agent ended, its exit code printed and never deciding the exit; where the
 replay diverged; how many of the agent's calls the recording answered and how many it missed; then
 the body of `irimi compare` between the two runs, whose exit code is the replay's. A replay whose
-call the child could not make (`replay_child.CallOutcome`) has no outcome: `irimi replay` says why
+call the child could not make (`CallOutcome`) has no outcome: `irimi replay` says why
 and stops. A divergence is the first of the agent's calls the recording was asked for, in the
 order stored (`seq`), that it did not answer: an exchange the agent sent flagged `replay-miss` (a
 precondition read irimi issued never is), or a read tool that ran for real. It is numbered among
@@ -43,21 +43,27 @@ from dataclasses import dataclass
 
 from irimi import compare, redact, report
 from irimi.exchange import Exchange, Flag
+from irimi.protocol.replay_files import CallOutcome, ReplayResult
 from irimi.recording import made_within
-from irimi.sdk import replay_child
-from irimi.sdk.replay_child import CallOutcome
-from irimi.sdk.replays import ReplayResult
 from irimi.servicemap import MapIndex
-from irimi.store import StoredRun
-from irimi.trace import MAIN_MODULE, JSONValue, RunRecord, ToolCall, Trigger, holds_description
+from irimi.trace import (
+    MAIN_MODULE,
+    JSONValue,
+    RunRecord,
+    StoredRun,
+    ToolCall,
+    Trigger,
+    holds_description,
+)
 
 # A version a run did not record, beside one the other run did.
 UNSET = "(unset)"
 NO_DIVERGENCE = "no divergence: every call was answered from the recording"
 # What a process run's replay does not reproduce, said under its header.
 ARGV_ONLY = "argv only: environment, cwd and stdin are not recorded"
-# What `python -m` runs to call a trigger: the child's own module, by its name.
-CHILD_MODULE = replay_child.__name__
+# What `python -m` runs to call a trigger: the child's own module, by its name. Named, not
+# imported: the engine never imports the SDK.
+CHILD_MODULE = "irimi.sdk.replay_child"
 
 
 @dataclass(frozen=True)
@@ -100,9 +106,9 @@ def plan(
     entrypoint = call or (trigger.entrypoint if trigger is not None else None)
     if entrypoint is not None:
         if entrypoint.partition(":")[0] == MAIN_MODULE:
-            raise Refused(_started_as_script(source.run_id, entrypoint, recorded_argv(source)))
+            raise Refused(_started_as_script(source.run_id, entrypoint, source.argv))
         # A process run's args are its argv, which no function takes.
-        if args is None and call is not None and recorded_argv(source) is not None:
+        if args is None and call is not None and source.argv is not None:
             raise Refused(
                 f"run {source.run_id} recorded a command line, not a call's arguments; pass "
                 "--args with --call"
@@ -128,7 +134,7 @@ def plan(
         return Plan(Call(entrypoint, args), (), Trigger(name, entrypoint, args, True))
     if args is not None:
         raise Refused(f"run {source.run_id} has no entrypoint to give --args to; pass --call too")
-    argv = recorded_argv(source)
+    argv = source.argv
     if argv is None:
         raise Refused(f"run {source.run_id} has no entrypoint and no argv; pass --call or -- CMD")
     return Plan(None, argv, trigger, rerun=True)
@@ -186,20 +192,6 @@ def not_replayable(trigger: Trigger | None) -> str | None:
     if not isinstance(trigger.args, dict):
         return "they are not an object of parameters"
     return None
-
-
-def recorded_argv(source: RunRecord) -> tuple[str, ...] | None:
-    """The command line a process run recorded (`runner.process_run`), or None. A replay's run is
-    a process run too, but one that keeps the trigger it called, whose entrypoint says its args
-    are a function's, even one with a parameter named `argv`."""
-    trigger = source.trigger
-    if source.attribution != "process" or trigger is None or trigger.entrypoint is not None:
-        return None
-    argv = trigger.args.get("argv") if isinstance(trigger.args, dict) else None
-    if not isinstance(argv, list):
-        return None
-    words = [a for a in argv if isinstance(a, str)]
-    return tuple(words) if words and len(words) == len(argv) else None
 
 
 @dataclass(frozen=True)

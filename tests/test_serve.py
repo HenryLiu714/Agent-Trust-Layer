@@ -19,6 +19,7 @@ from irimi.engine import EngineConfig, Serve
 from irimi.engine.mitm import IrimiAddon, MitmEngine
 from irimi.overlay import NoOverlay
 from irimi.policy import ShadowPolicy
+from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV
 from irimi.store import NullStore
 
 
@@ -336,7 +337,9 @@ def test_the_store_calls_back_on_its_writer_once_a_runs_end_is_on_disk(tmp_path)
 
     def ended(run_id):
         stored = StoreReader(root).load_run(run_id)
-        seen.append((run_id, threading.current_thread().name, stored.record.outcome, stored.events))
+        seen.append(
+            (run_id, threading.current_thread().name, stored.record.end.outcome, stored.events)
+        )
 
     store = DirectoryStore(root, b"k" * 32, ended)
     store.start_run(_record("r1"))
@@ -407,7 +410,7 @@ def test_a_callback_that_raises_is_logged_and_the_store_carries_on(tmp_path, cap
     store.close()
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert warnings == ["irimi: the end-of-run callback raised ValueError"]
-    assert StoreReader(root).load_run("r1").record.outcome == "ok"
+    assert StoreReader(root).load_run("r1").record.end.outcome == "ok"
     assert len(StoreReader(root).load_run("r2").events) == 1
     assert store.stats().dropped == 0
 
@@ -468,7 +471,7 @@ def test_an_ipv6_listener_is_bracketed_where_it_is_a_url(tmp_path):
     assert "listening on [::1]:4000 ·" in first
     env = runner.child_env({}, "::1", 4000, Path("/ca.pem"), "7f3a")
     assert env["HTTPS_PROXY"] == "http://[::1]:4000"
-    assert env[paths.CONTROL_ENV] == "http://[::1]:4000/_irimi"
+    assert env[CONTROL_ENV] == "http://[::1]:4000/_irimi"
 
 
 # -- the command -----------------------------------------------------------------------------------
@@ -964,8 +967,8 @@ def test_a_served_sdk_agent_gets_one_summary_block_per_run_it_ends(home, tmp_pat
     assert code == 0, err
     reader = StoreReader(home / "store")
     records = {r.run_id: r for r in reader.list_runs()}
-    ended = sorted(run_id for run_id, r in records.items() if r.outcome == "ok")
-    [open_run] = [run_id for run_id, r in records.items() if r.outcome is None]
+    ended = sorted(run_id for run_id, r in records.items() if r.end and r.end.outcome == "ok")
+    [open_run] = [run_id for run_id, r in records.items() if r.end is None]
     assert len(records) == 3 and len(ended) == 2
     assert all(r.attribution == "sdk" for r in records.values())
     assert report.run_status(records[open_run]) == "incomplete"
@@ -1001,8 +1004,8 @@ def _run_agent(tmp_path_factory, source: str, listener: str, *argv: str) -> None
             "HTTPS_PROXY": listener,
             "SSL_CERT_FILE": str(ca.ca_paths().cert),
             "REQUESTS_CA_BUNDLE": str(ca.ca_paths().cert),
-            paths.ENGINE_ACTIVE_ENV: "1",
-            paths.CONTROL_ENV: f"{listener}/_irimi",
+            ENGINE_ACTIVE_ENV: "1",
+            CONTROL_ENV: f"{listener}/_irimi",
         }
     )
     done = subprocess.run(

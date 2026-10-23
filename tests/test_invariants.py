@@ -34,9 +34,10 @@ from irimi.engine.mitm import MitmEngine
 from irimi.exchange import KINDS, Exchange, Flag, Request, Response
 from irimi.overlay import NoOverlay, Overlaid, ServiceOverlay
 from irimi.policy import Decided, Forward, ReplayPolicy, Respond, ShadowPolicy
+from irimi.protocol.headers import ANSWERED_BY_HEADER
 from irimi.recording import Recording
 from irimi.store import NullStore
-from irimi.wire import ANSWERED_BY_HEADER, stamp
+from irimi.wire import stamp
 
 # One host, one read route and one write route. The servers in this file all listen on loopback,
 # so the map claims 127.0.0.1; hosts carry no port, so their random ports do not matter.

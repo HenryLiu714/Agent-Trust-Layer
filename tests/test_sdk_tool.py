@@ -16,12 +16,13 @@ import re
 import sys
 import threading
 from collections.abc import Callable
-from typing import Any, get_args
+from typing import Any
 
 import pytest
 
-from irimi import ca, exchange, limits, paths, report, sdk, servicemap, trace
+from irimi import ca, limits, paths, report, sdk, servicemap, trace
 from irimi.cli import main
+from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV, RUN_ENV
 from irimi.sdk import capture, client, runs, tools
 from irimi.store import StoreReader
 from irimi.trace import ErrorInfo, ToolCall
@@ -83,8 +84,8 @@ class _Posted:
 @pytest.fixture
 def posted(monkeypatch) -> _Posted:
     """The SDK active, with no engine: what it would post, kept in order."""
-    monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
-    monkeypatch.delenv(paths.RUN_ENV, raising=False)
+    monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
+    monkeypatch.delenv(RUN_ENV, raising=False)
     reporter = _Posted()
     monkeypatch.setattr(runs, "reporter", reporter)
     return reporter
@@ -266,7 +267,7 @@ def test_a_tool_called_under_irimi_shadow_with_no_trigger_lands_in_the_process_r
 ):
     """`irimi shadow` names its process run in `IRIMI_RUN`; a call made in no SDK run is the
     process's, which may hold tool calls though not an SDK start or end."""
-    monkeypatch.setenv(paths.RUN_ENV, ENGINE_RUN)
+    monkeypatch.setenv(RUN_ENV, ENGINE_RUN)
     assert mark_refunded(9) == {"stood_in": 9, "note": ""}
     reader = irimi.finish()
     [call] = _tool_calls(reader, ENGINE_RUN)
@@ -277,7 +278,7 @@ def test_a_tool_called_under_irimi_shadow_with_no_trigger_lands_in_the_process_r
 def test_a_tool_called_in_no_run_with_no_process_run_is_stored_unattributed(irimi, monkeypatch):
     """`irimi serve` gives no `IRIMI_RUN`: a call outside every run is filed under none, as an
     exchange that names none is, and the control endpoint takes it there."""
-    monkeypatch.delenv(paths.RUN_ENV, raising=False)
+    monkeypatch.delenv(RUN_ENV, raising=False)
     assert look_up(4) == {"order": 4, "status": "paid"}
     reader = irimi.finish()
     [call] = _tool_calls(reader, trace.UNATTRIBUTED)
@@ -573,7 +574,7 @@ def test_an_object_with_an_async_call_is_an_async_stand_in(posted):
 
 
 def test_a_failed_post_never_reaches_the_agent(irimi, monkeypatch, warnings):
-    monkeypatch.setenv(paths.CONTROL_ENV, "http://127.0.0.1:1/_irimi")
+    monkeypatch.setenv(CONTROL_ENV, "http://127.0.0.1:1/_irimi")
     with sdk.run("r"):
         assert mark_refunded(1) == {"stood_in": 1, "note": ""}
     assert [r.levelname for r in warnings()] == ["WARNING"]
@@ -589,7 +590,7 @@ def test_a_failed_post_never_reaches_the_agent(irimi, monkeypatch, warnings):
 def test_an_inactive_write_runs_for_real_posts_nothing_and_warns_once_when_a_proxy_is_set(
     monkeypatch, warnings, no_warning_yet
 ):
-    monkeypatch.delenv(paths.ENGINE_ACTIVE_ENV, raising=False)
+    monkeypatch.delenv(ENGINE_ACTIVE_ENV, raising=False)
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
     reporter = _Posted()
     monkeypatch.setattr(runs, "reporter", reporter)
@@ -616,7 +617,7 @@ def test_an_inactive_write_runs_for_real_posts_nothing_and_warns_once_when_a_pro
 def test_either_spelling_of_the_proxy_variable_is_the_hint(
     monkeypatch, warnings, no_warning_yet, variable
 ):
-    monkeypatch.delenv(paths.ENGINE_ACTIVE_ENV, raising=False)
+    monkeypatch.delenv(ENGINE_ACTIVE_ENV, raising=False)
     for name in tools.PROXY_HINTS:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv(variable, "http://127.0.0.1:9")
@@ -628,7 +629,7 @@ def test_either_spelling_of_the_proxy_variable_is_the_hint(
 def test_an_inactive_write_with_no_proxy_and_an_inactive_read_say_nothing(
     monkeypatch, warnings, no_warning_yet
 ):
-    monkeypatch.delenv(paths.ENGINE_ACTIVE_ENV, raising=False)
+    monkeypatch.delenv(ENGINE_ACTIVE_ENV, raising=False)
     for name in tools.PROXY_HINTS:
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(_RealWriteRan):
@@ -639,7 +640,7 @@ def test_an_inactive_write_with_no_proxy_and_an_inactive_read_say_nothing(
 
 
 def test_an_inactive_async_write_runs_for_real(monkeypatch, no_warning_yet):
-    monkeypatch.delenv(paths.ENGINE_ACTIVE_ENV, raising=False)
+    monkeypatch.delenv(ENGINE_ACTIVE_ENV, raising=False)
     with pytest.raises(_RealWriteRan):
         asyncio.run(mark_refunded_async(1))
 
@@ -720,12 +721,6 @@ def test_the_posted_tool_call_is_valid_json_the_endpoint_reads(posted):
     for _, _, doc in posted.posts:
         json.loads(capture.serialized(doc))
         assert doc["result"] == {capture.REPR_KEY: "nan"}
-
-
-def test_the_client_posts_exactly_the_endpoints_run_actions():
-    """`client.Action` is a `Literal`, which cannot be built from `exchange.RUN_ACTIONS`: this is
-    what keeps the two one list."""
-    assert get_args(client.Action) == exchange.RUN_ACTIONS
 
 
 def test_a_tool_name_is_cut_to_the_run_name_limit(posted):

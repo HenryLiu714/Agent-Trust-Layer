@@ -250,7 +250,7 @@ def test_a_caller_that_hangs_up_ends_the_run_in_error(run_workflow, mode):
     # Stored under the exception's full name: an agent's own class, by its module. Its
     # message is the agent's own, the same on macOS (EPIPE) and Linux (ECONNRESET).
     [run] = shadow.sdk_runs()
-    assert (run.outcome, run.error) == (
+    assert (run.end.outcome, run.end.error) == (
         "error",
         ErrorInfo("examples.workflows.w07_streaming_assistant.agent.ClientGone", HUNG_UP),
     )
@@ -588,12 +588,12 @@ def test_a_stream_its_trigger_hands_off_is_stored_in_its_run_after_the_run_ended
         ("models", None),
     ]
     [run] = shadow.sdk_runs()
-    assert (run.run_id, run.outcome) == (start["run"], "ok")
+    assert (run.run_id, run.end.outcome) == (start["run"], "ok")
     stored = stored_exchanges(shadow)
     stream, models = stored["/v1/messages"], stored["/v1/models"]
     assert stream.response is not None and stream.response.body.endswith(MESSAGE_STOP)
     assert stream.run_id == run.run_id and models.run_id == shadow.engine_run_id()
-    assert run.ended_at is not None and stream.started_at < run.ended_at < stream.ended_at
+    assert run.end.ended_at is not None and stream.started_at < run.end.ended_at < stream.ended_at
     if mode == "shadow":
         return
     assert shadow.run_blocks()[run.run_id][-1] == (

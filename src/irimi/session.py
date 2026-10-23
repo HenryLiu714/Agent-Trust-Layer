@@ -26,7 +26,6 @@ from irimi import delegation, wire
 from irimi.classify import Classification, classify, unclassified
 from irimi.exchange import (
     LIVE_KINDS,
-    RUN_HEADER,
     AnsweredBy,
     Door,
     Exchange,
@@ -42,6 +41,7 @@ from irimi.limits import MAX_DECODED_BODY
 from irimi.netaddr import Target
 from irimi.overlay import Overlaid, Overlay
 from irimi.policy import AnswerPolicy, Decided, Decision, Delegate, Forward, Respond
+from irimi.protocol.headers import ANSWERED_BY_HEADER, REWROTE_HEADER, RUN_HEADER
 from irimi.servicemap import MapIndex
 from irimi.store import TraceStore
 from irimi.writelog import Translation, WriteLog
@@ -287,7 +287,7 @@ class ShadowSession:
         request, run_id = refusal.request, self.run_id
         try:
             run_id = wire.attribute_run(request, run_id)
-            request = request.without_header(RUN_HEADER).without_header(wire.REWROTE_HEADER)
+            request = request.without_header(RUN_HEADER).without_header(REWROTE_HEADER)
         except Exception:
             logger.debug("irimi: could not attribute a refused request", exc_info=True)
         classification = unclassified(request)
@@ -345,7 +345,7 @@ class ShadowSession:
         """The exchange a settled plan is recorded as, ending now. The response is irimi's error
         without its stamp: the stamp is on the wire only."""
         assert isinstance(plan.decision, Respond)
-        response = plan.decision.response.without_header(wire.ANSWERED_BY_HEADER)
+        response = plan.decision.response.without_header(ANSWERED_BY_HEADER)
         return self._exchange(plan, response, plan.answered_by, plan.flags)
 
     def complete(self, plan: Plan, received: Received) -> Completed:
@@ -381,7 +381,7 @@ class ShadowSession:
             # The answer irimi planned, as the engine read it back: stamped when it was planned,
             # recorded without the stamp. A read a replay answered from the recording carries
             # the recorded read's fidelity, the overlay's work in the run it replays.
-            response = upstream.without_header(wire.ANSWERED_BY_HEADER)
+            response = upstream.without_header(ANSWERED_BY_HEADER)
             overlay = decision.overlay
         elif isinstance(decision, Forward):
             # The overlay stays off a delegated read: the target owns that service's state. And

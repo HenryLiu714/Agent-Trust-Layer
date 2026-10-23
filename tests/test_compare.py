@@ -15,8 +15,8 @@ from irimi import compare, recording, redact, report, servicemap, trace
 from irimi.cli import main
 from irimi.exchange import Exchange, Flag, Precondition, Request, Response
 from irimi.servicemap import MapError
-from irimi.store import DirectoryStore, StoredRun
-from irimi.trace import ErrorInfo, Event, RunRecord, ToolCall, Trigger
+from irimi.store import DirectoryStore
+from irimi.trace import ErrorInfo, Event, RunRecord, StoredRun, ToolCall, Trigger
 from tests import test_phase_exit
 
 home = test_phase_exit.home  # bound here so pytest finds it
@@ -98,6 +98,7 @@ def _tool(name: str = "db.mark_refunded", kind: str = "write", ran: str = "shado
 
 
 def _record(run_id: str, args: trace.JSONValue = TICKET, **changes) -> RunRecord:
+    end = trace.RunEnd(changes.pop("ended_at", AT + 1), "ok", None, None)
     record = RunRecord(
         schema_version=trace.SCHEMA_VERSION,
         run_id=run_id,
@@ -108,10 +109,7 @@ def _record(run_id: str, args: trace.JSONValue = TICKET, **changes) -> RunRecord
         engine_version="0.0.0",
         sdk_version="0.0.0",
         started_at=AT,
-        ended_at=AT + 1,
-        outcome="ok",
-        error=None,
-        exit_code=None,
+        end=end,
     )
     return dataclasses.replace(record, **changes)
 

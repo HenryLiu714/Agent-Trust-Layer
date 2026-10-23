@@ -235,7 +235,7 @@ def test_a_model_that_never_stops_is_cut_off_at_max_turns_in_both_modes(run_work
     assert replies(shadow) == replies(bare) == []
     # Stored under the exception's full name; the log above has its short one.
     [run] = shadow.sdk_runs()
-    assert (run.outcome, run.error) == (
+    assert (run.end.outcome, run.end.error) == (
         "error",
         ErrorInfo("builtins.RuntimeError", "ticket T-1001: no answer after 6 turns"),
     )
@@ -259,7 +259,7 @@ def test_the_ticket_is_stored_as_the_runs_trigger_by_its_dataclass(run_workflow,
         {"ticket": {"__irimi_type__": f"{AGENT}:Ticket", "value": ticket}},
         True,
     )
-    assert (run.outcome, run.run_id) == ("ok", shadow.one("run.start")["run"])
+    assert (run.end.outcome, run.run_id) == ("ok", shadow.one("run.start")["run"])
 
 
 # ---------------------------------------------------------------------- irimi compare

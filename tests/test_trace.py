@@ -15,6 +15,12 @@ import pytest
 
 from irimi import limits, trace
 from irimi.exchange import Exchange, Flag, Kind, Precondition, Request, Response
+from irimi.protocol import control as protocol_control
+from irimi.protocol.control import (
+    RecordedOutcome,
+    recorded_outcome_from_json,
+    recorded_outcome_to_json,
+)
 from irimi.trace import (
     SCHEMA_VERSION,
     BodyRef,
@@ -92,8 +98,12 @@ def _filled(cls, n=None):
 
 
 def _run_record(**changes):
-    """A filled RunRecord this version reads: `_filled` knows nothing of `SCHEMA_VERSION`."""
-    return dataclasses.replace(_filled(RunRecord), schema_version=SCHEMA_VERSION, **changes)
+    """A filled RunRecord this version reads: `_filled` knows nothing of `SCHEMA_VERSION`, nor
+    that a trigger holds a call's args or a command line, never both."""
+    filled = _filled(RunRecord)
+    trigger = dataclasses.replace(filled.trigger, argv=None)
+    changes = {"schema_version": SCHEMA_VERSION, "trigger": trigger, **changes}
+    return dataclasses.replace(filled, **changes)
 
 
 def test_the_samples_differ_from_field_to_field():
@@ -177,10 +187,7 @@ def test_the_optional_fields_survive_as_null():
         engine_version="0.0.1",
         sdk_version=None,
         started_at=None,
-        ended_at=None,
-        outcome=None,
-        error=None,
-        exit_code=None,
+        end=None,
     )
     assert trace.run_from_json(_json_round_trip(trace.run_to_json(record))) == record
     ex = dataclasses.replace(
@@ -366,16 +373,10 @@ def _key_paths(d, path=()):
             yield from _key_paths(value, (*path, key))
 
 
-# Fields added after the first v1 format. Each decodes as its default when absent, and has a test
-# of its own below.
-_ADDED_WITHIN_V1 = {("exchange", ("stream_chunks",))}
-_ADDED_IN_V2 = {("run", ("replay_of",)), ("tool_call", ("awaited",))}
-
 _REQUIRED = [
     (name, path)
     for name in ("run", "exchange", "tool_call", "telemetry")
     for path in _key_paths(_decodable(name)[0])
-    if (name, path) not in _ADDED_WITHIN_V1 | _ADDED_IN_V2
 ] + [(f"{event} line", (key,)) for event in _EVENTS for key in ("seq", "type")]
 
 
@@ -385,8 +386,7 @@ _REQUIRED = [
 def test_a_missing_required_field_is_a_trace_format_error(name, path):
     """Every key every encoder writes - the run, its trigger and error, the exchange, its request,
     response and body refs, the tool call and its error, telemetry, and an event line's own `seq`
-    and `type` - is one v1 requires. A field added later within v1 decodes as its default when
-    absent instead (see Versioning in the page), and whoever adds it exempts it here."""
+    and `type` - is required."""
     d, decode = _decodable(name)
     *parents, key = path
     holder = d
@@ -415,10 +415,7 @@ _FIRST_ITEM_REFUSED = {
     "headers": "'headers'[0] is not a [name, value] pair of strings",
     "stream_chunks": "'stream_chunks'[0] is not a positive integer",
 }
-_TYPED = [(name, path) for name, path in _REQUIRED if path[-1] not in _FREE_JSON] + [
-    ("exchange", ("stream_chunks",)),
-    ("tool_call", ("awaited",)),
-]
+_TYPED = [(name, path) for name, path in _REQUIRED if path[-1] not in _FREE_JSON]
 
 
 @pytest.mark.parametrize(
@@ -535,15 +532,6 @@ def test_a_quoted_string_spells_its_control_characters():
     assert str(refused.value) == "'mode' is '\\x1b[2J\\n', not one of ('shadow', 'replay')"
 
 
-def test_a_v1_run_reads_under_v2_as_a_run_that_is_no_replay():
-    """`replay_of` is a v2 field. A run.json v1 wrote has `schema_version: 1` and no
-    `replay_of`, and reads as written, as a run no replay answered."""
-    d = _encoded_run() | {"schema_version": 1, "mode": "shadow"}
-    del d["replay_of"]
-    record = trace.run_from_json(d)
-    assert (record.schema_version, record.mode, record.replay_of) == (1, "shadow", None)
-
-
 def test_a_v2_run_reads_under_v3_as_written():
     """v3 adds the `answered_by` value `irimi` and nothing else, so a v2 run reads unchanged."""
     record = trace.run_from_json(_encoded_run() | {"schema_version": 2})
@@ -596,33 +584,15 @@ def test_a_recorded_outcome_round_trips_and_holds_a_tool_call_s_outcome():
     call = dataclasses.replace(
         _filled(ToolCall), result=None, error=ErrorInfo("builtins.KeyError", "'k'"), awaited=True
     )
-    d = trace.recorded_outcome_to_json(call)
+    d = recorded_outcome_to_json(call)
     assert d == {
         "result": None,
         "error": {"type": "builtins.KeyError", "message": "'k'"},
         "awaited": True,
     }
-    assert trace.recorded_outcome_from_json(d) == trace.RecordedOutcome(None, call.error, True)
+    assert recorded_outcome_from_json(d) == RecordedOutcome(None, call.error, True)
     with pytest.raises(TraceFormatError, match="'awaited'"):
-        trace.recorded_outcome_from_json(d | {"awaited": "yes"})
-
-
-def test_a_tool_call_written_before_awaited_existed_reads_as_one_no_coroutine_gave():
-    """`awaited` was added within v2, so a tool call recorded before it has no such key, and reads
-    as the field's default: a call that returned its result itself."""
-    d = trace.tool_call_to_json(dataclasses.replace(_filled(ToolCall), awaited=True))
-    assert trace.tool_call_from_json(d).awaited is True
-    del d["awaited"]
-    assert trace.tool_call_from_json(d).awaited is False
-
-
-def test_an_exchange_written_before_stream_chunks_existed_reads_as_one_that_did_not_stream():
-    """`stream_chunks` was added within v1, so a recording made before it has no such key, and
-    reads as the field's default: a response that did not stream."""
-    blobs = _Blobs()
-    d = trace.exchange_to_json(_filled(Exchange), blobs.put)
-    del d["stream_chunks"]
-    assert trace.exchange_from_json(d, blobs.get).stream_chunks == ()
+        recorded_outcome_from_json(d | {"awaited": "yes"})
 
 
 @pytest.mark.parametrize(
@@ -662,7 +632,10 @@ _DECODERS = {
     "run_from_json": trace.run_from_json,
     "tool_call_from_json": trace.tool_call_from_json,
     "telemetry_from_json": trace.telemetry_from_json,
-    "recorded_outcome_from_json": trace.recorded_outcome_from_json,
+    "trigger_from_json": trace.trigger_from_json,
+    "recorded_outcome_from_json": recorded_outcome_from_json,
+    "run_start_from_json": protocol_control.run_start_from_json,
+    "run_end_from_json": protocol_control.run_end_from_json,
     "exchange_from_json": lambda d: trace.exchange_from_json(d, _never),
     "event_from_json": lambda d: trace.event_from_json(d, _never),
 }
@@ -677,7 +650,10 @@ def test_a_line_that_is_a_list_nested_too_deep_to_quote_is_named_a_list(decoder)
 
 def test_every_public_decoder_is_in_the_not_an_object_test():
     assert set(_DECODERS) == {
-        name for name in dir(trace) if name.endswith("_from_json") and not name.startswith("_")
+        name
+        for module in (trace, protocol_control)
+        for name in dir(module)
+        if name.endswith("_from_json") and not name.startswith("_")
     }
 
 
@@ -881,7 +857,7 @@ def test_each_field_table_on_the_page_is_what_its_encoder_writes(marker, encode)
 def test_the_documented_example_decodes_with_the_codecs():
     (run_text,) = _doc_blocks("run.json")
     record = trace.run_from_json(json.loads(run_text))
-    assert (record.schema_version, record.attribution, record.outcome) == (
+    assert (record.schema_version, record.attribution, record.end.outcome) == (
         SCHEMA_VERSION,
         "sdk",
         "ok",

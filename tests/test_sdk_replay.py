@@ -20,9 +20,23 @@ from typing import Any
 
 import pytest
 
-from irimi import paths, sdk
+from irimi import sdk
+from irimi.protocol.env import (
+    ENGINE_ACTIVE_ENV,
+    REPLAY_ARGS_FILE_ENV,
+    REPLAY_CALL_ENV,
+    REPLAY_OUTCOME_FILE_ENV,
+    REPLAY_RUN_ENV,
+    RUN_ENV,
+)
+from irimi.protocol.replay_files import (
+    CallOutcome,
+    ReplayResult,
+    read_call_outcome,
+    replay_result_from_json,
+    replay_result_to_json,
+)
 from irimi.sdk import api, capture, runs
-from irimi.sdk.replays import ReplayResult
 from irimi.trace import ErrorInfo
 
 REPLAY = "abcd1234abcd1234"
@@ -46,9 +60,9 @@ def posts(monkeypatch) -> _Posts:
     """This process as `irimi replay` sets up its child: active, and told the run it replays as."""
     reporter = _Posts()
     monkeypatch.setattr(runs, "reporter", reporter)
-    monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
-    monkeypatch.setenv(paths.RUN_ENV, REPLAY)
-    monkeypatch.setenv(paths.REPLAY_RUN_ENV, REPLAY)
+    monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
+    monkeypatch.setenv(RUN_ENV, REPLAY)
+    monkeypatch.setenv(REPLAY_RUN_ENV, REPLAY)
     return reporter
 
 
@@ -179,7 +193,7 @@ def test_a_tool_call_in_an_adopted_run_is_posted_to_the_replay_s_run(posts, inst
 
 
 def test_outside_a_replay_a_trigger_starts_its_own_run(posts, instrumented, monkeypatch):
-    monkeypatch.delenv(paths.REPLAY_RUN_ENV)
+    monkeypatch.delenv(REPLAY_RUN_ENV)
     run_id = handle("T1")
     assert run_id not in (None, REPLAY)
     assert posts.posts == [(run_id, "start"), (run_id, "end")]
@@ -190,9 +204,9 @@ def test_a_replay_id_irimi_did_not_set_adopts_nothing(posts, instrumented, monke
     or another, is not irimi's word: the trigger starts its own run, as it would."""
     for run_env in (None, "another0another0"):
         if run_env is None:
-            monkeypatch.delenv(paths.RUN_ENV)
+            monkeypatch.delenv(RUN_ENV)
         else:
-            monkeypatch.setenv(paths.RUN_ENV, run_env)
+            monkeypatch.setenv(RUN_ENV, run_env)
         posts.posts.clear()
         run_id = handle("T1")
         assert run_id not in (None, REPLAY)
@@ -200,7 +214,7 @@ def test_a_replay_id_irimi_did_not_set_adopts_nothing(posts, instrumented, monke
 
 
 def test_an_inactive_sdk_adopts_nothing(posts, instrumented, monkeypatch):
-    monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "0")
+    monkeypatch.setenv(ENGINE_ACTIVE_ENV, "0")
     assert handle("T1") is None
     assert posts.posts == []
     assert instrumented == []
@@ -392,7 +406,6 @@ def _child(
 ) -> tuple[subprocess.CompletedProcess[str], Any]:
     """`replay_child` run as `irimi replay` runs it, with `env` besides: what it did, and the
     outcome it wrote."""
-    from irimi.sdk.replay_child import CallOutcome
 
     (tmp_path / "child_agent.py").write_text(CHILD_MODULE)
     (tmp_path / "interrupted_agent.py").write_text("raise KeyboardInterrupt\n")
@@ -401,9 +414,9 @@ def _child(
     env = {
         "PATH": "",
         "PYTHONPATH": str(tmp_path),
-        paths.REPLAY_CALL_ENV: entrypoint,
-        paths.REPLAY_ARGS_FILE_ENV: str(args_file),
-        paths.REPLAY_OUTCOME_FILE_ENV: str(outcome_file),
+        REPLAY_CALL_ENV: entrypoint,
+        REPLAY_ARGS_FILE_ENV: str(args_file),
+        REPLAY_OUTCOME_FILE_ENV: str(outcome_file),
         **(env or {}),
     }
     done = subprocess.run(
@@ -414,14 +427,13 @@ def _child(
         text=True,
         check=False,
     )
-    return done, CallOutcome.read(outcome_file)
+    return done, read_call_outcome(outcome_file)
 
 
 TICKET = {"ticket": {"__irimi_type__": "child_agent:Ticket", "value": {"charge": "ch_1"}}}
 
 
 def test_the_child_calls_the_trigger_with_its_revived_args_and_exits_0(tmp_path):
-    from irimi.sdk.replay_child import CallOutcome
 
     done, outcome = _child(tmp_path, "child_agent:ok", {**TICKET, "note": "hi"})
     assert (done.returncode, done.stdout, done.stderr) == (0, "called ch_1 hi\n", "")
@@ -446,9 +458,8 @@ def test_the_child_s_trigger_adopts_the_replay_s_run_and_its_handed_off_coroutin
     """A sync trigger that returns a coroutine hands its run to it: the child runs that
     coroutine to its end, in the replay's run, as it runs an `async def` trigger's. Nothing
     is posted, so no control endpoint is needed."""
-    from irimi.sdk.replay_child import CallOutcome
 
-    replaying = {paths.ENGINE_ACTIVE_ENV: "1", paths.RUN_ENV: REPLAY, paths.REPLAY_RUN_ENV: REPLAY}
+    replaying = {ENGINE_ACTIVE_ENV: "1", RUN_ENV: REPLAY, REPLAY_RUN_ENV: REPLAY}
     done, outcome = _child(tmp_path, entrypoint, TICKET, replaying)
     assert (done.returncode, done.stdout, done.stderr) == (0, printed, "")
     assert outcome == CallOutcome(True, None)
@@ -457,7 +468,6 @@ def test_the_child_s_trigger_adopts_the_replay_s_run_and_its_handed_off_coroutin
 def test_a_trigger_that_raises_exits_1_with_its_traceback_and_says_what_it_raised(tmp_path):
     """The outcome is what a run records an exception as (`errors.error_info`), so the replay's
     run ends on `builtins.KeyError` as its recording's did."""
-    from irimi.sdk.replay_child import CallOutcome
 
     done, outcome = _child(tmp_path, "child_agent:fails", TICKET)
     assert done.returncode == 1
@@ -498,7 +508,7 @@ def test_a_call_the_child_cannot_make_exits_cannot_call_and_says_why(
 ):
     """Never an agent that ran and raised: the child exits `CANNOT_CALL`, with one `error:` line,
     and its outcome says it never called."""
-    from irimi.sdk.replay_child import CANNOT_CALL, CallOutcome
+    from irimi.sdk.replay_child import CANNOT_CALL
 
     done, outcome = _child(tmp_path, entrypoint, args)
     assert (done.returncode, done.stderr) == (
@@ -520,7 +530,6 @@ def test_a_call_ended_by_an_interrupt_or_an_exit_says_so_and_ends_the_child_as_i
 ):
     """What a run records them as, and then the process ends as they would have ended it, never
     as a trigger that raised."""
-    from irimi.sdk.replay_child import CallOutcome
 
     done, outcome = _child(tmp_path, entrypoint, TICKET)
     assert done.returncode == code
@@ -532,7 +541,6 @@ def test_a_child_interrupted_before_its_call_says_it_never_called_and_stops_as_i
 ):
     """Whatever ends the child before the call, a KeyboardInterrupt as its module loads too, is a
     call never made, never an agent that ran; the interruption then ends the process."""
-    from irimi.sdk.replay_child import CallOutcome
 
     done, outcome = _child(tmp_path, "interrupted_agent:main", {})
     assert done.returncode == -signal.SIGINT
@@ -556,15 +564,14 @@ def test_a_child_interrupted_before_its_call_says_it_never_called_and_stops_as_i
     ],
 )
 def test_an_outcome_the_child_did_not_write_reads_as_none(tmp_path, written):
-    from irimi.sdk.replay_child import CallOutcome
 
     path = tmp_path / "outcome.json"
-    assert CallOutcome.read(path) is None
+    assert read_call_outcome(path) is None
     if isinstance(written, bytes):
         path.write_bytes(written)
     else:
         path.write_text(written)
-    assert CallOutcome.read(path) is None
+    assert read_call_outcome(path) is None
 
 
 # -- the result's codec ---------------------------------------------------------------------------
@@ -572,9 +579,9 @@ def test_an_outcome_the_child_did_not_write_reads_as_none(tmp_path, written):
 
 def test_a_replay_result_round_trips_through_its_json():
     result = ReplayResult("src", "new", 1, "#1: live llm ...", ("a", "b"))
-    assert ReplayResult.from_json(json.loads(json.dumps(result.to_json()))) == result
+    assert replay_result_from_json(json.loads(json.dumps(replay_result_to_json(result)))) == result
     refused = ReplayResult("src", None, 2, None, ("error: no run src in /s",))
-    assert ReplayResult.from_json(refused.to_json()) == refused
+    assert replay_result_from_json(replay_result_to_json(refused)) == refused
 
 
 def test_a_replay_result_says_whether_it_is_the_same_and_prints_what_irimi_said():
@@ -588,15 +595,15 @@ def test_a_replay_result_says_whether_it_is_the_same_and_prints_what_irimi_said(
     "broken",
     [
         {"source_run_id": "s"},
-        {**ReplayResult("s", "n", 0, None, ()).to_json(), "extra": 1},
-        {**ReplayResult("s", "n", 0, None, ()).to_json(), "exit_code": True},
-        {**ReplayResult("s", "n", 0, None, ()).to_json(), "lines": "one"},
-        {**ReplayResult("s", "n", 0, None, ()).to_json(), "replay_run_id": 3},
+        {**replay_result_to_json(ReplayResult("s", "n", 0, None, ())), "extra": 1},
+        {**replay_result_to_json(ReplayResult("s", "n", 0, None, ())), "exit_code": True},
+        {**replay_result_to_json(ReplayResult("s", "n", 0, None, ())), "lines": "one"},
+        {**replay_result_to_json(ReplayResult("s", "n", 0, None, ())), "replay_run_id": 3},
     ],
 )
 def test_a_result_it_did_not_write_is_refused(broken):
     with pytest.raises(ValueError):
-        ReplayResult.from_json(broken)
+        replay_result_from_json(broken)
 
 
 def test_sdk_replay_refuses_a_function_from_main_or_one_its_name_does_not_find(monkeypatch):
@@ -670,7 +677,7 @@ def _answering(argv: list[str], seen: dict[str, Any]) -> int:
         seen["args"] = json.loads(open(argv[argv.index("--args-file") + 1]).read())
     result = ReplayResult(argv[-1], "new0new0new0new0", 1, None, ("a",))
     with open(argv[argv.index("--result-file") + 1], "w") as fh:
-        json.dump(result.to_json(), fh)
+        json.dump(replay_result_to_json(result), fh)
     return 1
 
 
@@ -734,9 +741,9 @@ def test_a_replay_s_child_is_told_which_trigger_to_call_and_no_other_child_is(tm
     from irimi import runner
 
     stale = {
-        paths.REPLAY_CALL_ENV: "m:f",
-        paths.REPLAY_ARGS_FILE_ENV: "/stale.json",
-        paths.REPLAY_OUTCOME_FILE_ENV: "/stale-outcome.json",
+        REPLAY_CALL_ENV: "m:f",
+        REPLAY_ARGS_FILE_ENV: "/stale.json",
+        REPLAY_OUTCOME_FILE_ENV: "/stale-outcome.json",
     }
     plain = runner.child_env(stale, "127.0.0.1", 4000, tmp_path / "ca.pem", REPLAY)
     assert not set(stale) & set(plain)
@@ -744,11 +751,11 @@ def test_a_replay_s_child_is_told_which_trigger_to_call_and_no_other_child_is(tm
     child = runner.child_env(
         stale, "127.0.0.1", 4000, tmp_path / "ca.pem", REPLAY, replaying=True, call=call
     )
-    named = (paths.REPLAY_CALL_ENV, paths.REPLAY_ARGS_FILE_ENV, paths.REPLAY_OUTCOME_FILE_ENV)
+    named = (REPLAY_CALL_ENV, REPLAY_ARGS_FILE_ENV, REPLAY_OUTCOME_FILE_ENV)
     assert [child[name] for name in named] == [
         "agent:handle",
         str(tmp_path / "args.json"),
         str(tmp_path / "outcome.json"),
     ]
-    assert child[paths.REPLAY_RUN_ENV] == child[paths.RUN_ENV] == REPLAY
-    assert stale[paths.REPLAY_CALL_ENV] == "m:f"
+    assert child[REPLAY_RUN_ENV] == child[RUN_ENV] == REPLAY
+    assert stale[REPLAY_CALL_ENV] == "m:f"

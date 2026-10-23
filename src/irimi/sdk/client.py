@@ -32,19 +32,23 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
-from irimi import paths, trace
-from irimi.exchange import (
-    PROTOCOL_HEADER,
-    PROTOCOL_VERSION,
-    RECORDED_ACTION,
-    RUNS_ROUTE,
-    TOOL_CALLS_ACTION,
-)
 from irimi.limits import MAX_ANSWER
 from irimi.opener import no_redirect_opener
+from irimi.protocol.control import (
+    PROTOCOL_VERSION,
+    RECORDED_ACTION,
+    RECORDED_LOOKUP_FIELDS,
+    RUNS_ROUTE,
+    TOOL_CALLS_ACTION,
+    RecordedOutcome,
+    RunAction,
+    recorded_outcome_from_json,
+)
+from irimi.protocol.env import CONTROL_ENV
+from irimi.protocol.headers import PROTOCOL_HEADER
 from irimi.sdk.capture import serialized
 from irimi.sdk.instrumentation import unlabelled
-from irimi.trace import JSONValue, RecordedOutcome
+from irimi.trace import JSONValue
 
 LOGGER_NAME = "irimi.sdk"
 logger = logging.getLogger(LOGGER_NAME)
@@ -55,8 +59,6 @@ PAUSE_S = 30.0
 # The most of a refusal's body a warning quotes. The endpoint's own are shorter.
 MAX_DETAIL = 200
 
-# The run actions the SDK posts: the endpoint's `exchange.RUN_ACTIONS`.
-Action = Literal["start", "tool-calls", "end"]
 # The kinds of failure a warning is logged once for. `paused` is a send the breaker skipped, which
 # is never warned of: the failure that opened the breaker was.
 Failure = Literal["unset", "rejected", "timeout", "unreachable", "failed", "mismatch", "paused"]
@@ -68,7 +70,7 @@ class Reporter(Protocol):
     """Where a run's start, its end and its tool calls are sent, and, in a replay, where a read
     tool's recorded result is asked for. `ControlClient` is the one the SDK uses."""
 
-    def post(self, run_id: str, action: Action, doc: Mapping[str, Any]) -> None: ...
+    def post(self, run_id: str, action: RunAction, doc: Mapping[str, Any]) -> None: ...
 
     def recorded(self, run_id: str, name: str, args: JSONValue) -> RecordedOutcome | None: ...
 
@@ -97,7 +99,7 @@ class ControlClient:
         # The clock reading before which the breaker skips every send.
         self._paused_until = float("-inf")
 
-    def post(self, run_id: str, action: Action, doc: Mapping[str, Any]) -> None:
+    def post(self, run_id: str, action: RunAction, doc: Mapping[str, Any]) -> None:
         """Send `doc`; on any failure, warn (once per kind) and return. Never raises."""
         try:
             sent = self._send(f"{run_id}/{action}", doc)
@@ -115,10 +117,10 @@ class ControlClient:
     def recorded(self, run_id: str, name: str, args: JSONValue) -> RecordedOutcome | None:
         """The recorded outcome of the read tool `name` called with `args`, from a replay's
         recording: the endpoint's answer to `runs/{run_id}/tool-calls/recorded`, read by
-        `trace.recorded_outcome_from_json`, or None for a miss. Its `404` is the endpoint's miss,
+        `recorded_outcome_from_json`, or None for a miss. Its `404` is the endpoint's miss,
         said by no warning; any other failure, and an answer that does not decode, is warned once
         per kind and is a miss too. Never raises."""
-        lookup = dict(zip(trace.RECORDED_LOOKUP_FIELDS, (name, args), strict=True))
+        lookup = dict(zip(RECORDED_LOOKUP_FIELDS, (name, args), strict=True))
         try:
             sent = self._send(f"{run_id}/{RECORDED_ACTION}", lookup)
             if isinstance(sent, _Failed):
@@ -127,7 +129,7 @@ class ControlClient:
             else:
                 answer = json.loads(sent)
                 if isinstance(answer, dict):
-                    return trace.recorded_outcome_from_json(answer)
+                    return recorded_outcome_from_json(answer)
                 sent = _Failed("rejected", "the answer is not a recorded call")
         except Exception as exc:  # TraceFormatError included: an answer this cannot read
             sent = _Failed("failed", f"{type(exc).__name__}: {exc}")
@@ -153,9 +155,9 @@ class ControlClient:
     def _post(self, route: str, doc: Mapping[str, Any]) -> bytes | _Failed:
         # irimi sets the variable with no trailing slash, but a deployment that sets it by
         # hand may type one, which would make every route `//runs/...`, a 404.
-        base = os.environ.get(paths.CONTROL_ENV, "").rstrip("/")
+        base = os.environ.get(CONTROL_ENV, "").rstrip("/")
         if not base:
-            return _Failed("unset", f"{paths.CONTROL_ENV} is not set")
+            return _Failed("unset", f"{CONTROL_ENV} is not set")
         request = urllib.request.Request(
             f"{base}/{RUNS_ROUTE}/{route}",
             data=serialized(dict(doc)),

@@ -45,10 +45,11 @@ from pathlib import Path
 
 import pytest
 
-from irimi import ca, paths, policy, reader, report, wire
+from irimi import ca, paths, policy, reader, report
 from irimi.cli import main
 from irimi.money import format_minor_units
 from irimi.overlay import ServiceOverlay
+from irimi.protocol.headers import ANSWERED_BY_HEADER
 from tests.maps_for_cli import complete_for_check
 from tests.test_engine_mitm import (
     PRECONDITION_STRIPE_MAP,
@@ -352,12 +353,12 @@ def test_the_refund_agents_four_calls_through_the_forward_proxy_are_answered_sha
     # 1. The agent's first read is real: it reached the stub and carries no stamp.
     status, headers, _ = _read_via_proxy(proxy, f"{base}/v1/charges")
     assert status == 200
-    assert wire.ANSWERED_BY_HEADER not in headers
+    assert ANSWERED_BY_HEADER not in headers
 
     # 2. The refund is irimi's, and a whole refund object an SDK can parse.
     status, headers, data = _stripe_refund(proxy, stub)
     assert status == 200
-    assert headers[wire.ANSWERED_BY_HEADER] == "fake-L1"
+    assert headers[ANSWERED_BY_HEADER] == "fake-L1"
     refund = json.loads(data)
     assert refund["object"] == "refund"
     assert refund["id"].startswith("re_")
@@ -370,13 +371,13 @@ def test_the_refund_agents_four_calls_through_the_forward_proxy_are_answered_sha
         proxy, f"{base}/v1/refunds?charge={PHASE2_CHARGE}&limit=10"
     )
     assert status == 200
-    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[ANSWERED_BY_HEADER] == "overlay"
     assert [r["id"] for r in json.loads(data)["data"]] == [refund["id"]]
 
     # 4. The charge re-read is shown refunded, though the real charge is untouched.
     status, headers, data = _read_via_proxy(proxy, f"{base}/v1/charges/{PHASE2_CHARGE}")
     assert status == 200
-    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[ANSWERED_BY_HEADER] == "overlay"
     charge = json.loads(data)
     assert charge["amount_refunded"] == PHASE2_AMOUNT
     assert charge["refunded"] is True
@@ -385,7 +386,7 @@ def test_the_refund_agents_four_calls_through_the_forward_proxy_are_answered_sha
     #    key, and what makes it refusable is the first refund, which only irimi's write log knows.
     status, headers, data = _stripe_refund(proxy, stub)
     assert status == 400
-    assert headers[wire.ANSWERED_BY_HEADER] == "fake-L1"
+    assert headers[ANSWERED_BY_HEADER] == "fake-L1"
     assert json.loads(data)["error"]["code"] == "charge_already_refunded"
 
     # Each refund was checked with the real service first, by a read irimi issued on its own

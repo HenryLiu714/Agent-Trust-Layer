@@ -43,12 +43,12 @@ PORT_ENV = "WORKFLOW_INTERNET_PORT"
 # An agent that hangs would hang the test that runs it, because `irimi shadow` waits for its
 # child. SIGALRM's default action ends the process, so a stuck agent dies instead.
 WATCHDOG_S = 90
-# Where `irimi shadow` tells its child the control endpoint is (`irimi.paths.CONTROL_ENV`),
+# Where `irimi shadow` tells its child the control endpoint is (`irimi.protocol.env.CONTROL_ENV`),
 # spelled here because an agent is an ordinary program that does not import irimi.
 CONTROL_ENV = "IRIMI_CONTROL"
-# The process run's id (`irimi.paths.RUN_ENV`), spelled here for the same reason.
+# The process run's id (`irimi.protocol.env.RUN_ENV`), spelled here for the same reason.
 RUN_ENV = "IRIMI_RUN"
-# Set only for the child of an `irimi shadow` that replays (`irimi.paths.REPLAY_RUN_ENV`),
+# Set only for the child of an `irimi shadow` that replays (`irimi.protocol.env.REPLAY_RUN_ENV`),
 # spelled here for the same reason.
 REPLAY_RUN_ENV = "IRIMI_REPLAY_RUN"
 # The logger irimi's SDK speaks on (`irimi.sdk` is its child), spelled here for the same reason. A
@@ -57,7 +57,7 @@ IRIMI_LOGGER = "irimi"
 # Set for an agent that reaches irimi's control endpoint through a gateway that forwards the routes
 # it knows and refuses the one a replay's read tools ask (`lookup_gateway`).
 LOOKUP_REFUSED_ENV = "WORKFLOW_LOOKUP_REFUSED"
-# That route's tail (`irimi.exchange.RECORDED_ACTION`), spelled here for the same reason.
+# That route's tail (`irimi.protocol.control.RECORDED_ACTION`), spelled here for the same reason.
 RECORDED_ROUTE = "/tool-calls/recorded"
 
 _obs_lock = threading.Lock()

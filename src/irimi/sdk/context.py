@@ -12,7 +12,7 @@ import functools
 import os
 from collections.abc import Callable
 
-from irimi import paths
+from irimi.protocol.env import ENGINE_ACTIVE_ENV, REPLAY_RUN_ENV, RUN_ENV
 
 _RUN_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar("irimi_run_id", default=None)
 
@@ -21,7 +21,7 @@ def is_active() -> bool:
     """True when irimi is in front of this process: `IRIMI_ENGINE_ACTIVE` is `1`, as `irimi
     shadow` sets it for its child. Read at each call, never cached. Here rather than in
     `runs`, so `instrumentation`, which `runs` imports, reads the same rule."""
-    return os.environ.get(paths.ENGINE_ACTIVE_ENV) == "1"
+    return os.environ.get(ENGINE_ACTIVE_ENV) == "1"
 
 
 def replay_run_id() -> str | None:
@@ -37,8 +37,8 @@ def replay_run_id() -> str | None:
     every run the agent starts into one that was never started."""
     if not is_active():
         return None
-    replaying = os.environ.get(paths.REPLAY_RUN_ENV) or None
-    if replaying is None or replaying != os.environ.get(paths.RUN_ENV):
+    replaying = os.environ.get(REPLAY_RUN_ENV) or None
+    if replaying is None or replaying != os.environ.get(RUN_ENV):
         return None
     return replaying
 

@@ -44,33 +44,27 @@ from collections.abc import Callable, Mapping
 from typing import Any, NoReturn
 
 from irimi import __version__, trace
-from irimi.exchange import (
+from irimi.exchange import Headers, Request, Response
+from irimi.limits import MAX_CONTROL_BODY
+from irimi.policy import AnswerPolicy
+from irimi.protocol import control as protocol
+from irimi.protocol.control import (
     CONTROL_ANSWER,
     CONTROL_PREFIX,
-    PROTOCOL_HEADER,
     PROTOCOL_VERSION,
     RECORDED_ACTION,
+    RECORDED_LOOKUP_FIELDS,
     RUN_ACTIONS,
     RUNS_ROUTE,
     START_ACTION,
     TOOL_ACTIONS,
     TOOL_CALLS_ACTION,
-    Headers,
-    Request,
-    Response,
     protocol_major,
 )
-from irimi.limits import MAX_CONTROL_BODY
-from irimi.policy import AnswerPolicy
-from irimi.store import TraceStore, header_record, names_a_run_dir
-from irimi.trace import (
-    UNATTRIBUTED,
-    ErrorInfo,
-    RunRecord,
-    ToolCall,
-    TraceFormatError,
-)
-from irimi.wire import ANSWERED_BY_HEADER, irimi_error
+from irimi.protocol.headers import ANSWERED_BY_HEADER, PROTOCOL_HEADER
+from irimi.store import TraceStore, names_a_run_dir
+from irimi.trace import UNATTRIBUTED, ErrorInfo, RunRecord, ToolCall, TraceFormatError
+from irimi.wire import irimi_error
 
 logger = logging.getLogger(__name__)
 
@@ -87,15 +81,6 @@ TOO_DEEP = "the body nests too deeply to read"
 OWN_RUN = "is irimi's own run, which the SDK may not start or end"
 
 HEALTH_ROUTE = "health"
-# The run routes (`RUNS_ROUTE`, `RUN_ACTIONS`) are imported from `exchange`, where the SDK reads
-# them too.
-
-# The `RunRecord` fields each run route takes from the posted body. Every one must be present, and
-# only `agent_version` and `error` may be null. The rest of the record is irimi's to say, so a
-# posted `attribution` or `engine_version` is never read.
-START_FIELDS = ("trigger", "agent_version", "sdk_version", "started_at")
-START_REQUIRED = ("trigger", "sdk_version", "started_at")  # `agent_version` may be null
-END_FIELDS = ("ended_at", "outcome", "error")  # `error` may be null
 # The answer to a lookup the recording cannot answer, and to every lookup when the engine is not
 # replaying: the SDK then runs the tool for real.
 NO_RECORDED_CALL = "no recorded call"
@@ -147,12 +132,16 @@ class ControlEndpoint:
         process_run: str | None = None,
         on_tool_call: OnToolCall | None = None,
         policy: AnswerPolicy | None = None,
+        replay_of: str | None = None,
     ) -> None:
         self.store = store
         self.serve = serve
         # irimi's own run (`EngineConfig.run_id`), the process run under `irimi shadow`: the SDK
         # may post tool calls to it, never its start or its end.
         self.process_run = process_run
+        # The stored run the engine replays, if it is a replay: every run the SDK starts here is
+        # that replay's.
+        self.replay_of = replay_of
         self.on_tool_call = on_tool_call
         # The engine's policy, which answers `tool-calls/recorded` from a replay's recording, and
         # from nothing otherwise. The recording is engine-wide, as its exchanges are: the run id in
@@ -225,10 +214,17 @@ class ControlEndpoint:
         }
 
     def _start(self, run_id: str, posted: Mapping[str, Any]) -> None:
-        record = _sdk_run(run_id, posted, START_FIELDS)
-        for name in START_REQUIRED:
-            if getattr(record, name) is None:
-                _null(name)
+        # Only the posted start is read: the rest of the record is irimi's to say, so a posted
+        # `attribution` or `engine_version` is never read.
+        start = _decoded(protocol.run_start_from_json, posted)
+        record = RunRecord.sdk(
+            run_id,
+            start.trigger,
+            start.agent_version,
+            start.sdk_version,
+            start.started_at,
+            self.replay_of,
+        )
         self.store.start_run(record)
 
     def _tool_call(self, run_id: str, posted: Mapping[str, Any]) -> None:
@@ -252,7 +248,7 @@ class ControlEndpoint:
         in place of running the tool, or `404` when the
         recording has none for it, or there is no recording. A hit is not a tool call: the SDK
         posts the call to `tool-calls` afterwards, as it posts every call it makes."""
-        for field in trace.RECORDED_LOOKUP_FIELDS:
+        for field in RECORDED_LOOKUP_FIELDS:
             if field not in posted:  # in the words of the decoders every other route uses
                 raise _Refused(400, f"missing required field {field!r}")
         name = posted["name"]
@@ -263,16 +259,12 @@ class ControlEndpoint:
         )
         if found is None:
             return _error_response(404, NO_RECORDED_CALL)
-        return _json_response(200, trace.recorded_outcome_to_json(found))
+        return _json_response(200, protocol.recorded_outcome_to_json(found))
 
     def _end(self, run_id: str, posted: Mapping[str, Any]) -> None:
-        record = _sdk_run(run_id, posted, END_FIELDS)
-        if record.ended_at is None:
-            _null("ended_at")
-        if record.outcome is None:
-            _null("outcome")
+        end = _decoded(protocol.run_end_from_json, posted)
         # The store is handed the error whole: it redacts it, and only then cuts it.
-        self.store.end_run(run_id, record.ended_at, record.outcome, record.error)
+        self.store.end_run(run_id, end.ended_at, end.outcome, end.error)
 
 
 def _split_run_route(route: str) -> tuple[str, str] | None:
@@ -337,22 +329,3 @@ def _decoded[T](decode: Callable[[Mapping[str, Any]], T], doc: Mapping[str, Any]
 
 def _refuse_constant(name: str) -> NoReturn:
     raise ValueError(f"{name} is not a finite number")
-
-
-def _null(name: str) -> NoReturn:
-    raise _Refused(400, f"{name!r} may not be null")
-
-
-def _sdk_run(run_id: str, posted: Mapping[str, Any], fields: tuple[str, ...]) -> RunRecord:
-    """A run started by the SDK, with `fields` read from `posted` by `trace.run_from_json`: the
-    decoder of the record they belong to, so a posted value is held to exactly the rules a stored
-    one is - a finite timestamp, an `outcome` from its vocabulary, a trigger with all its keys.
-
-    Every other field is irimi's and comes from the encoder, never from `posted`: the record the
-    store gives a run it knows only by its id, every optional field None, attributed to the SDK
-    (one spelling of that record, not two). A field in `fields` that `posted` lacks is left
-    out, so the decoder names it missing."""
-    base = trace.run_to_json(dataclasses.replace(header_record(run_id), attribution="sdk"))
-    doc = {key: value for key, value in base.items() if key not in fields}
-    doc.update({key: posted[key] for key in fields if key in posted})
-    return _decoded(trace.run_from_json, doc)

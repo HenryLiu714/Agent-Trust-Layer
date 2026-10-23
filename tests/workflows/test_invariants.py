@@ -38,7 +38,7 @@ from examples.workflows.harness.run import (
 )
 from examples.workflows.w10_flaky_upstream.scenarios import CONTROL_DOWN
 from irimi import report, trace
-from irimi.store import StoredRun
+from irimi.trace import StoredRun
 
 TESTS = Path(__file__).parent
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
@@ -86,7 +86,7 @@ def test_every_run_a_serve_ended_prints_its_stored_summary_once(run_workflow, na
     assert "process" not in {r.attribution for r in records}
     printed = [m[1] for line in serve.irimi if (m := RUN_BLOCK.fullmatch(line))]
     assert sorted(printed) == sorted(ends_taken(serve))
-    assert {r.run_id for r in records if r.outcome is not None} <= set(printed)
+    assert {r.run_id for r in records if r.end is not None} <= set(printed)
     maps = serve.maps()
     for run_id, block in serve.run_blocks().items():
         stored = reader.load_run(run_id)
@@ -95,7 +95,7 @@ def test_every_run_a_serve_ended_prints_its_stored_summary_once(run_workflow, na
             continue
         # LOOKS WRONG (`LATE_EVENTS`): the block is the run as it stood at its end, every event
         # that ended by then and none after; the run itself holds more.
-        ended = stored.record.ended_at
+        ended = stored.record.end.ended_at
         assert ended is not None
         before = [e for e in stored.events if _ended_at(e) <= ended]
         assert len(before) < len(stored.events), run_id

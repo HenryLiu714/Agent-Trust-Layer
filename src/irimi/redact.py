@@ -16,7 +16,7 @@ one (`delegation`) and disk may not be handed one either.
 
 FAILURE IS CLOSED. A value that cannot be redacted is stored as `<redaction-failed>`, never as it
 was, and the exchange gains `Flag.REDACTION_FAILED`. `redact_exchange` and `redact_json` never
-raise. Layer 2: it imports `exchange`, `paths`, `secret_shapes` (what it looks for in text),
+raise. Layer 3: it imports `exchange`, `paths`, `secret_shapes` (what it looks for in text),
 `files` (the key's file), `bodies`, `servicemap` and `trace`.
 """
 

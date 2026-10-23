@@ -43,6 +43,7 @@ from irimi.engine.mitm import IrimiAddon, MitmEngine
 from irimi.exchange import Exchange, Flag, Precondition, Request, Response, WriteOutcome
 from irimi.overlay import NoOverlay, Overlaid
 from irimi.policy import Decided, Respond, ShadowPolicy
+from irimi.protocol.headers import ANSWERED_BY_HEADER, REWROTE_HEADER, RUN_HEADER
 from irimi.store import MAX_STORED_BODY, DirectoryStore, NullStore, StoreReader
 from irimi.writelog import Translation
 
@@ -2158,7 +2159,7 @@ def test_a_target_naming_our_own_listener_is_refused_with_a_json_502(tmp_path, m
     assert flow.response.status_code == 502
     assert json.loads(flow.response.content)["error"]["type"] == "irimi_target_failed"
     assert "own listener" in json.loads(flow.response.content)["error"]["message"]
-    assert flow.response.headers[wire.ANSWERED_BY_HEADER] == "irimi"
+    assert flow.response.headers[ANSWERED_BY_HEADER] == "irimi"
     # The flow was not pointed anywhere: refusing must not leave it aimed at the real service.
     assert (flow.request.host, flow.request.path) == ("127.0.0.1", "/things")
     # Answered and recorded in the request hook, so no later hook has anything left to finish.
@@ -2569,7 +2570,7 @@ def test_the_response_hook_writes_nothing_back_to_a_streamed_flow(tmp_path, monk
 
     after = (flow.response.status_code, tuple(flow.response.headers.fields), flow.response.content)
     assert after == before
-    assert wire.ANSWERED_BY_HEADER not in flow.response.headers
+    assert ANSWERED_BY_HEADER not in flow.response.headers
 
 
 def test_the_response_hook_records_a_streamed_flow_from_its_tee_and_writes_nothing_back(
@@ -2612,7 +2613,7 @@ def test_the_response_hook_records_a_streamed_flow_from_its_tee_and_writes_nothi
 
     after = (flow.response.status_code, tuple(flow.response.headers.fields), flow.response.content)
     assert after == before
-    assert wire.ANSWERED_BY_HEADER not in flow.response.headers
+    assert ANSWERED_BY_HEADER not in flow.response.headers
     assert flow.response.stream is tee and STREAM_KEY not in flow.metadata
     (ex,) = seen
     assert ex.response is not None and ex.response.body == SSE_FIRST
@@ -2643,7 +2644,7 @@ def test_a_streamed_target_response_is_not_buffered(tmp_path, monkeypatch):
             resp = conn.getresponse()
             assert resp.status == 200
             stamp = wire.answered_by_header("delegated")
-            assert resp.getheader(wire.ANSWERED_BY_HEADER) == stamp
+            assert resp.getheader(ANSWERED_BY_HEADER) == stamp
             first = resp.read(len(SSE_FIRST))  # times out at 5 s if the proxy buffered the body
             assert first == SSE_FIRST
             _STREAM_GATE.set()
@@ -2743,7 +2744,7 @@ def test_a_run_s_requests_see_its_own_writes_alone(tmp_path, monkeypatch, upstre
             ("run-b", "POST", "/things"),
         ]:
             body = b"{}" if method == "POST" else None
-            headers = {exchange.RUN_HEADER: run}
+            headers = {RUN_HEADER: run}
             _via_proxy(eng.listen_port(), method, base + path, body=body, extra_headers=headers)
     finally:
         stop()
@@ -2775,7 +2776,7 @@ def test_an_overlay_that_changes_a_read_stamps_it_overlay(tmp_path, monkeypatch,
     overlay = _OverlayDouble(answer=lambda upstream: Overlaid(changed, "full"))
     status, headers, data, ex = _overlaid_read(tmp_path, monkeypatch, upstream, overlay)
     assert (status, data) == (200, b'{"overlaid": true}')
-    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[ANSWERED_BY_HEADER] == "overlay"
     assert ex.answered_by == "overlay"
     assert ex.overlay == "full"
 
@@ -2787,7 +2788,7 @@ def test_an_overlay_that_changes_nothing_leaves_the_read_live_and_unstamped(
     status, headers, data, ex = _overlaid_read(tmp_path, monkeypatch, upstream, overlay)
     assert overlay.calls == 1
     assert (status, data) == (200, b"hello from upstream")
-    assert wire.ANSWERED_BY_HEADER not in headers
+    assert ANSWERED_BY_HEADER not in headers
     assert ex.answered_by == "live"
     assert ex.overlay is None
     assert ex.response.body == b"hello from upstream"
@@ -2797,7 +2798,7 @@ def test_an_overlay_may_flag_a_read_partial_without_touching_it(tmp_path, monkey
     overlay = _OverlayDouble(answer=lambda upstream: Overlaid(upstream, "partial"))
     status, headers, data, ex = _overlaid_read(tmp_path, monkeypatch, upstream, overlay)
     assert (status, data) == (200, b"hello from upstream")
-    assert wire.ANSWERED_BY_HEADER not in headers
+    assert ANSWERED_BY_HEADER not in headers
     assert ex.answered_by == "live"
     assert ex.overlay == "partial"
 
@@ -2810,7 +2811,7 @@ def test_an_overlay_that_raises_does_not_break_the_read(tmp_path, monkeypatch, u
     status, headers, data, ex = _overlaid_read(tmp_path, monkeypatch, upstream, overlay)
     assert overlay.calls == 1
     assert (status, data) == (200, b"hello from upstream")
-    assert wire.ANSWERED_BY_HEADER not in headers
+    assert ANSWERED_BY_HEADER not in headers
     assert ex.answered_by == "live"
     assert ex.overlay == "partial"
 
@@ -2837,11 +2838,11 @@ def test_a_rewritten_read_reaches_the_upstream_translated_and_is_recorded_that_w
     assert status == 200
     ((path, received),) = _Upstream.seen
     assert path == "/hello?limit=1"
-    assert wire.REWROTE_HEADER not in {k.lower() for k, _ in received}
+    assert REWROTE_HEADER not in {k.lower() for k, _ in received}
     assert overlay.translated_from == ["starting_after=re_MINTED1"]
     ex = seen[-1]
     assert ex.request.query == "limit=1"
-    assert wire.REWROTE_HEADER not in {k for k, _ in ex.request.headers}
+    assert REWROTE_HEADER not in {k for k, _ in ex.request.headers}
 
 
 def test_a_rewrite_that_raises_forwards_the_read_unchanged(tmp_path, monkeypatch, upstream):
@@ -2892,14 +2893,14 @@ def test_a_rewrote_header_the_agent_sent_is_not_forwarded_upstream(tmp_path, mon
         status, _, _ = _read_via_proxy(
             eng.listen_port(),
             f"http://127.0.0.1:{upstream}/hello",
-            extra_headers={wire.REWROTE_HEADER: "starting_after=re_FORGED"},
+            extra_headers={REWROTE_HEADER: "starting_after=re_FORGED"},
         )
     finally:
         stop()
     assert status == 200
     ((path, received),) = _Upstream.seen
     assert path == "/hello"
-    assert wire.REWROTE_HEADER not in {k.lower() for k, _ in received}
+    assert REWROTE_HEADER not in {k.lower() for k, _ in received}
 
 
 def test_a_rewrote_header_the_agent_sent_is_stripped_before_the_runs_first_write(
@@ -2921,7 +2922,7 @@ def test_a_rewrote_header_the_agent_sent_is_stripped_before_the_runs_first_write
             eng.listen_port(),
             f"http://127.0.0.1:{upstream}/hello",
             extra_headers={
-                wire.REWROTE_HEADER: "starting_after=re_FORGED",
+                REWROTE_HEADER: "starting_after=re_FORGED",
                 "Irimi-Rewrote": "starting_after=re_FORGED2",
             },
         )
@@ -2933,7 +2934,7 @@ def test_a_rewrote_header_the_agent_sent_is_stripped_before_the_runs_first_write
     assert status == 200
     ((path, received),) = _Upstream.seen
     assert path == "/hello"
-    assert wire.REWROTE_HEADER not in {k.lower() for k, _ in received}
+    assert REWROTE_HEADER not in {k.lower() for k, _ in received}
 
 
 def test_a_rewrote_header_the_agent_sent_is_kept_out_of_the_recorded_request(
@@ -2947,11 +2948,11 @@ def test_a_rewrote_header_the_agent_sent_is_kept_out_of_the_recorded_request(
         _read_via_proxy(
             eng.listen_port(),
             f"http://127.0.0.1:{upstream}/hello",
-            extra_headers={wire.REWROTE_HEADER: "starting_after=re_FORGED"},
+            extra_headers={REWROTE_HEADER: "starting_after=re_FORGED"},
         )
     finally:
         stop()
-    assert [k for k, _ in seen[-1].request.headers if k == wire.REWROTE_HEADER] == []
+    assert [k for k, _ in seen[-1].request.headers if k == REWROTE_HEADER] == []
 
 
 def test_no_rewrote_header_reaches_the_upstream_on_a_translated_read(
@@ -2962,7 +2963,7 @@ def test_no_rewrote_header_reaches_the_upstream_on_a_translated_read(
     from dataclasses import replace
 
     def translate(request):
-        assert all(k != wire.REWROTE_HEADER for k, _ in request.headers), (
+        assert all(k != REWROTE_HEADER for k, _ in request.headers), (
             "the engine strips the agent's before the overlay is asked"
         )
         return Translation(replace(request, query="limit=1"), "starting_after=re_MINTED1")
@@ -2973,15 +2974,15 @@ def test_no_rewrote_header_reaches_the_upstream_on_a_translated_read(
         status, _, _ = _read_via_proxy(
             eng.listen_port(),
             f"http://127.0.0.1:{upstream}/hello?limit=1&starting_after=re_MINTED1",
-            extra_headers={wire.REWROTE_HEADER: "starting_after=re_FORGED"},
+            extra_headers={REWROTE_HEADER: "starting_after=re_FORGED"},
         )
     finally:
         stop()
     assert status == 200
     ((path, received),) = _Upstream.seen
     assert path == "/hello?limit=1"
-    assert [v for k, v in received if k.lower() == wire.REWROTE_HEADER] == []
-    assert [v for k, v in seen[-1].request.headers if k == wire.REWROTE_HEADER] == []
+    assert [v for k, v in received if k.lower() == REWROTE_HEADER] == []
+    assert [v for k, v in seen[-1].request.headers if k == REWROTE_HEADER] == []
     assert overlay.translated_from == ["starting_after=re_MINTED1"]
 
 
@@ -2997,7 +2998,7 @@ def test_a_write_carrying_a_rewrote_header_is_still_faked_and_records_none(
             eng.listen_port(),
             f"http://127.0.0.1:{upstream}/things",
             extra_headers={
-                wire.REWROTE_HEADER: "starting_after=re_FORGED",
+                REWROTE_HEADER: "starting_after=re_FORGED",
                 "content-type": "application/json",
             },
             method="POST",
@@ -3006,10 +3007,10 @@ def test_a_write_carrying_a_rewrote_header_is_still_faked_and_records_none(
     finally:
         stop()
     assert status == 200
-    assert headers[wire.ANSWERED_BY_HEADER] == "fake-L0"
+    assert headers[ANSWERED_BY_HEADER] == "fake-L0"
     ex = seen[-1]
     assert ex.kind == "write"
-    assert [k for k, _ in ex.request.headers if k == wire.REWROTE_HEADER] == []
+    assert [k for k, _ in ex.request.headers if k == REWROTE_HEADER] == []
 
 
 # ------------------------------------------------ the Stripe overlay, end to end
@@ -3208,7 +3209,7 @@ def test_a_charge_reread_after_a_faked_refund_shows_the_refund(stripe_stub):
     charge = json.loads(data)
     assert charge["amount_refunded"] == 100
     assert charge["refunded"] is False
-    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[ANSWERED_BY_HEADER] == "overlay"
     assert [method for method, _ in _StripeStub.seen] == ["GET"], "a faked write reached Stripe"
 
 
@@ -3249,7 +3250,7 @@ def test_the_refunds_list_shows_the_minted_refund_first(stripe_stub):
     status, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds")
     assert status == 200
     assert json.loads(data)["data"][0]["id"] == refund_id
-    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[ANSWERED_BY_HEADER] == "overlay"
 
 
 class _HeldRefundsStub(_StripeStub):
@@ -3288,7 +3289,7 @@ def test_a_forged_rewrote_header_cannot_hide_a_refund_that_lands_mid_read(tmp_pa
         read["result"] = _read_via_proxy(
             eng.listen_port(),
             f"http://127.0.0.1:{stub}/v1/refunds",
-            extra_headers={wire.REWROTE_HEADER: "starting_after=re_FORGED"},
+            extra_headers={REWROTE_HEADER: "starting_after=re_FORGED"},
         )
 
     reader = threading.Thread(target=list_refunds)
@@ -3312,7 +3313,7 @@ def test_a_forged_rewrote_header_cannot_hide_a_refund_that_lands_mid_read(tmp_pa
     status, headers, page = read["result"]
     assert status == 200
     assert json.loads(page)["data"][0]["id"] == json.loads(data)["id"]
-    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[ANSWERED_BY_HEADER] == "overlay"
 
 
 def _keyed_refund(proxy, stub, key, amount=100):
@@ -3340,7 +3341,7 @@ def test_a_retry_with_the_same_key_is_one_refund_not_two(stripe_stub):
     status, second_headers, second = _keyed_refund(proxy, stub, "k-1")
     assert status == 200
     assert second == first
-    stamp = wire.ANSWERED_BY_HEADER
+    stamp = ANSWERED_BY_HEADER
     assert second_headers[stamp] == first_headers[stamp]
     replayed, marker = idempotency.replayed_header("stripe") or ("", "")
     assert replayed not in first_headers
@@ -3400,7 +3401,7 @@ def test_a_read_before_the_refund_is_untouched_and_unstamped(stripe_stub):
     status, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_REAL1")
     assert status == 200
     assert json.loads(data)["amount_refunded"] == 0
-    assert wire.ANSWERED_BY_HEADER not in headers
+    assert ANSWERED_BY_HEADER not in headers
     assert seen[-1].answered_by == "live"
     assert seen[-1].overlay is None
     # The same read after the refund IS overlaid, so the untouched one above was untouched
@@ -3414,7 +3415,7 @@ def test_a_read_before_the_refund_is_untouched_and_unstamped(stripe_stub):
     )
     _, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_REAL1")
     assert json.loads(data)["amount_refunded"] == 100
-    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[ANSWERED_BY_HEADER] == "overlay"
 
 
 def _fake_refund(proxy, stub, charge="ch_REAL1", amount=100):
@@ -3444,7 +3445,7 @@ def test_a_full_refunds_page_drops_the_oldest_real_refund_and_says_there_is_more
     page = json.loads(data)
     assert [item["id"] for item in page["data"]] == [refund_id, "re_REAL1"]
     assert page["has_more"] is True
-    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[ANSWERED_BY_HEADER] == "overlay"
     assert seen[-1].overlay == "full"
 
 
@@ -3464,12 +3465,12 @@ def test_a_cursor_naming_a_minted_refund_is_dropped_before_the_read_reaches_stri
     assert [item["id"] for item in json.loads(data)["data"]] == ["re_REAL1", "re_REAL2"]
     # The body really is the one Stripe sent, so it stays unstamped; the exchange is what records
     # that irimi translated the request, and shows the upstream what it asked.
-    assert wire.ANSWERED_BY_HEADER not in headers
+    assert ANSWERED_BY_HEADER not in headers
     ex = seen[-1]
     assert ex.answered_by == "live"
     assert ex.overlay == "full"
     assert ex.request.query == ""
-    assert wire.REWROTE_HEADER not in {k for k, _ in ex.request.headers}
+    assert REWROTE_HEADER not in {k for k, _ in ex.request.headers}
 
 
 def test_a_customer_reread_after_a_faked_update_shows_the_posted_fields(stripe_stub):
@@ -3489,7 +3490,7 @@ def test_a_customer_reread_after_a_faked_update_shows_the_posted_fields(stripe_s
     customer = json.loads(data)
     assert customer["email"] == "new@example.test"
     assert customer["metadata"] == {"tier": "pro"}, "Stripe merges metadata, it does not replace it"
-    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[ANSWERED_BY_HEADER] == "overlay"
     assert seen[-1].overlay == "full"
     assert [method for method, _ in _StripeStub.seen] == ["GET"], "a faked write reached Stripe"
 
@@ -3512,7 +3513,7 @@ def test_a_payment_intent_reread_after_a_faked_cancel_shows_it_canceled(stripe_s
     assert intent["status"] == "canceled"
     assert intent["cancellation_reason"] == "requested_by_customer"
     assert isinstance(intent["canceled_at"], int)
-    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[ANSWERED_BY_HEADER] == "overlay"
     assert seen[-1].overlay == "full"
     assert [method for method, _ in _StripeStub.seen] == ["GET"], "a faked write reached Stripe"
 
@@ -3528,7 +3529,7 @@ def test_a_reread_of_a_minted_refund_by_id_is_answered_not_404d(stripe_stub):
 
     status, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds/{minted}")
     assert status == 200
-    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[ANSWERED_BY_HEADER] == "overlay"
     assert json.loads(data)["id"] == minted
     ex = seen[-1]
     assert (ex.kind, ex.answered_by, ex.overlay, ex.issued_by) == (
@@ -3548,7 +3549,7 @@ def test_a_read_of_a_refund_stripe_really_does_not_have_keeps_its_404(stripe_stu
     assert _fake_refund(proxy, stub).startswith("re_")
     status, headers, _ = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds/re_NOTHING")
     assert status == 404
-    assert wire.ANSWERED_BY_HEADER not in headers
+    assert ANSWERED_BY_HEADER not in headers
     ex = seen[-1]
     assert ex.answered_by == "live"
     assert ex.overlay is None
@@ -3564,7 +3565,7 @@ def test_a_rate_limited_read_of_a_minted_refund_keeps_its_429(stripe_stub):
     status, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds/{minted}")
     assert status == 429
     assert json.loads(data)["error"]["code"] == "rate_limit"
-    assert wire.ANSWERED_BY_HEADER not in headers
+    assert ANSWERED_BY_HEADER not in headers
     ex = seen[-1]
     assert (ex.answered_by, ex.overlay) == ("live", "partial")
 
@@ -3692,7 +3693,7 @@ def test_a_slack_history_read_after_a_faked_post_shows_the_post_first(slack_stub
     status, headers, data = _slack_call(proxy, stub, "conversations.history", {"channel": "C0123"})
     assert status == 200
     assert [m["ts"] for m in json.loads(data)["messages"]] == [minted, REAL_SLACK_TS]
-    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[ANSWERED_BY_HEADER] == "overlay"
     assert seen[-1].answered_by == "overlay"
     assert seen[-1].overlay == "full"
     assert _SlackStub.seen == [("POST", "/api/conversations.history")], "a faked post reached Slack"
@@ -3709,7 +3710,7 @@ def test_a_slack_history_read_of_another_channel_is_forwarded_unstamped(slack_st
     status, headers, data = _slack_call(proxy, stub, "conversations.history", {"channel": "C0999"})
     assert status == 200
     assert [m["ts"] for m in json.loads(data)["messages"]] == [REAL_SLACK_TS]
-    assert wire.ANSWERED_BY_HEADER not in headers
+    assert ANSWERED_BY_HEADER not in headers
     assert seen[-1].answered_by == "live"
     assert seen[-1].overlay is None
 
@@ -3735,7 +3736,7 @@ def test_a_slack_replies_read_after_a_faked_reply_shows_it_at_the_tail(slack_stu
     assert messages[0]["reply_count"] == 1
     assert messages[0]["latest_reply"] == minted
     assert messages[-1]["thread_ts"] == REAL_SLACK_TS
-    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[ANSWERED_BY_HEADER] == "overlay"
     assert seen[-1].answered_by == "overlay"
     assert seen[-1].overlay == "full"
     assert _SlackStub.seen == [("POST", "/api/conversations.replies")], "a faked post reached Slack"
@@ -3753,7 +3754,7 @@ def test_a_slack_read_the_effects_cannot_place_is_recorded_partial_and_left_alon
     status, headers, data = _slack_call(proxy, stub, "conversations.history", {"channel": "C0123"})
     assert status == 200
     assert [m["ts"] for m in json.loads(data)["messages"]] == [REAL_SLACK_TS]
-    assert wire.ANSWERED_BY_HEADER not in headers, "nothing of irimi's is in this body"
+    assert ANSWERED_BY_HEADER not in headers, "nothing of irimi's is in this body"
     assert seen[-1].answered_by == "live"
     assert seen[-1].overlay == "partial"
 
@@ -3793,7 +3794,7 @@ def test_a_slack_replies_read_of_a_minted_thread_is_answered_not_thread_not_foun
         proxy, stub, "conversations.replies", {"channel": "C0123", "ts": minted}
     )
     assert status == 200
-    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[ANSWERED_BY_HEADER] == "overlay"
     document = json.loads(data)
     assert document["ok"] is True
     assert [m["ts"] for m in document["messages"]] == [minted]
@@ -3927,7 +3928,7 @@ def test_a_refund_of_a_fully_refunded_charge_is_rejected_with_stripes_own_body(
     status, headers, data = _refund(proxy, stub, "ch_FULL1")
     assert status == 400
     assert json.loads(data)["error"]["code"] == "charge_already_refunded"
-    assert headers[wire.ANSWERED_BY_HEADER] == "fake-L1"
+    assert headers[ANSWERED_BY_HEADER] == "fake-L1"
     (write,) = _writes(seen)
     assert write.precondition.outcome == "rejected"
     assert write.precondition.rejection_code == "charge_already_refunded"
@@ -3962,7 +3963,7 @@ def test_a_second_refund_in_one_run_is_rejected_because_the_overlay_applied_the_
     second, headers, data = _refund(proxy, stub, "ch_REAL1", amount=4900)
     assert second == 400
     assert json.loads(data)["error"]["code"] == "charge_already_refunded"
-    assert headers[wire.ANSWERED_BY_HEADER] == "fake-L1"
+    assert headers[ANSWERED_BY_HEADER] == "fake-L1"
     assert [ex.precondition.outcome for ex in _writes(seen)] == ["passed", "rejected"]
 
 
@@ -3974,7 +3975,7 @@ def test_a_rejected_write_never_enters_the_write_log(precondition_stub):
     assert status == 400
     status, headers, data = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_FULL1")
     assert status == 200
-    assert wire.ANSWERED_BY_HEADER not in headers
+    assert ANSWERED_BY_HEADER not in headers
     assert json.loads(data)["amount_refunded"] == 4900  # the stub's own
     assert seen[-1].answered_by == "live"
     assert seen[-1].overlay is None
@@ -3995,7 +3996,7 @@ def test_a_precondition_read_that_429s_leaves_the_write_faked_at_l2(precondition
     status, headers, data = _refund(proxy, stub, "ch_BUSY1")
     assert status == 200
     assert json.loads(data)["object"] == "refund"
-    assert headers[wire.ANSWERED_BY_HEADER] == "fake-L1"
+    assert headers[ANSWERED_BY_HEADER] == "fake-L1"
     (write,) = _writes(seen)
     assert (write.answered_by, write.precondition.outcome) == ("fake-L1", "not_evaluable")
     (issued,) = [ex for ex in seen if ex.issued_by == "engine"]
@@ -4023,7 +4024,7 @@ def test_a_precondition_read_that_redirects_is_not_followed_and_decides_nothing(
     status, headers, data = _refund(proxy, stub, "ch_MOVED1")
     assert status == 200
     assert json.loads(data)["object"] == "refund"
-    assert headers[wire.ANSWERED_BY_HEADER] == "fake-L1"
+    assert headers[ANSWERED_BY_HEADER] == "fake-L1"
     (write,) = _writes(seen)
     assert (write.answered_by, write.precondition.outcome) == ("fake-L1", "not_evaluable")
     (issued,) = [ex for ex in seen if ex.issued_by == "engine"]
@@ -4082,7 +4083,7 @@ def _refund_then_list_summary(proxy, stub, seen, tmp_path, monkeypatch):
     assert status == 200
     status, headers, _ = _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds")
     assert status == 200
-    assert headers[wire.ANSWERED_BY_HEADER] == "overlay"
+    assert headers[ANSWERED_BY_HEADER] == "overlay"
     maps = _maps(tmp_path, monkeypatch, doc=PRECONDITION_STRIPE_MAP)
     return report.summary_lines("t3st", seen, 1.0, maps)
 
@@ -4232,7 +4233,7 @@ def test_a_post_to_an_archived_channel_is_rejected(slack_precondition_stub):
     )
     assert status == 200
     assert json.loads(data) == {"ok": False, "error": "is_archived"}
-    assert headers[wire.ANSWERED_BY_HEADER] == "fake-L1"
+    assert headers[ANSWERED_BY_HEADER] == "fake-L1"
     (write,) = _writes(seen)
     assert (write.precondition.outcome, write.precondition.rejection_code) == (
         "rejected",
@@ -4249,7 +4250,7 @@ def test_a_post_to_a_healthy_channel_passes_and_the_probe_was_a_conversations_in
     )
     assert status == 200
     assert json.loads(data)["ok"] is True
-    assert headers[wire.ANSWERED_BY_HEADER] == "fake-L1"
+    assert headers[ANSWERED_BY_HEADER] == "fake-L1"
     (write,) = _writes(seen)
     assert write.precondition.outcome == "passed"
     assert _SlackPreconditionStub.seen == [("POST", "/api/conversations.info")]
@@ -4262,7 +4263,7 @@ RUN_HEADERS = {"Irimi-Run": "abc", "irimi-run": "abc"}
 
 
 def _carries_run_header(headers) -> bool:
-    return exchange.RUN_HEADER in {k.lower() for k, _ in headers}
+    return RUN_HEADER in {k.lower() for k, _ in headers}
 
 
 def test_a_live_read_is_attributed_and_its_run_header_is_not_forwarded(engine, upstream):

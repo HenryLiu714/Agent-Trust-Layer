@@ -30,7 +30,7 @@ from irimi.bodies import MAX_BODY_BYTES
 from irimi.exchange import Exchange, Flag
 from irimi.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE
 from irimi.store import MAX_STORED_BODY, RUNS_DIR, SERVE_LOCK_FILE
-from irimi.trace import ErrorInfo, RunRecord, ToolCall, Trigger
+from irimi.trace import ErrorInfo, RunEnd, RunRecord, ToolCall, Trigger
 
 W = "w09_scope_gauntlet"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.
@@ -359,10 +359,14 @@ def sdk_record(result, run_id: str, start: str, end: str | None) -> RunRecord:
         engine_version=irimi.__version__,
         sdk_version=began["sdk_version"],
         started_at=began["started_at"],
-        ended_at=ended["ended_at"],
-        outcome=ended["outcome"],
-        error=None if error is None else ErrorInfo(error["type"], error["message"]),
-        exit_code=None,
+        end=None
+        if end is None
+        else RunEnd(
+            ended["ended_at"],
+            ended["outcome"],
+            None if error is None else ErrorInfo(error["type"], error["message"]),
+            None,
+        ),
     )
 
 
@@ -471,7 +475,7 @@ def test_a_run_posted_over_the_control_endpoint_is_stored_as_an_sdk_run(run_work
         # In time as well as in `seq`: the run's start, its first tool call, the read, its
         # second tool call and its end, each clock read after the last.
         times = [stored.record.started_at, before.ended_at, read.started_at, read.ended_at]
-        times += [after.started_at, stored.record.ended_at]
+        times += [after.started_at, stored.record.end.ended_at]
         assert times == sorted(times)
         assert shown(shadow, run_id) == [
             f"run: {run_id}",
@@ -545,8 +549,10 @@ def test_a_run_that_ends_in_error_keeps_its_error_redacted_then_cut_to_what_a_tr
     cut = ErrorInfo(kept(run_type, MAX_ERROR_TYPE), kept(run_message, MAX_ERROR_MESSAGE))
     tool_cut = ErrorInfo("builtins.ValueError", kept(tool_message, MAX_ERROR_MESSAGE))
     assert all(hidden in text for text in (cut.type, cut.message, tool_cut.message))
+    expected = sdk_record(shadow, "ctl-error", "error_start", "error_end")
+    assert expected.end is not None
     assert stored.record == dataclasses.replace(
-        sdk_record(shadow, "ctl-error", "error_start", "error_end"), error=cut
+        expected, end=dataclasses.replace(expected.end, error=cut)
     )
     assert stored.events == [dataclasses.replace(tool, error=tool_cut)]
     on_disk = [p.read_bytes() for p in shadow.store_root().rglob("*") if p.is_file()]
@@ -629,10 +635,8 @@ def test_a_run_ended_over_the_control_endpoint_no_longer_lists_as_incomplete(run
         return
     process = shadow.process_run_id()
     trigger = shadow.stored().load_run(process).record.trigger
-    assert trigger is not None and isinstance(trigger.args, dict)
-    argv = trigger.args["argv"]
-    assert isinstance(argv, list)
-    command = listed_command([str(word) for word in argv])
+    assert trigger is not None and trigger.argv is not None
+    command = listed_command(list(trigger.argv))
     assert listed(shadow) == sorted(
         [
             *ran,
@@ -1219,7 +1223,7 @@ def test_a_process_run_with_no_trigger_replays_by_running_its_argv_again(run_wor
     assert replay.internet.requests() == []
     assert replay.exit_code == 0
     # The header says the argv is all that ran again: nothing else of the process was recorded.
-    argv = shlex.join(source.trigger.args["argv"])
+    argv = shlex.join(source.trigger.argv)
     assert replay.replay_result() == [
         f"irimi replay · {source.run_id} -> {replay.process_run_id()}",
         f"  re-ran {argv} (argv only: environment, cwd and stdin are not recorded)",

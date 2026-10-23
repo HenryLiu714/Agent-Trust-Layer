@@ -10,6 +10,7 @@ from irimi import __version__, ca, cli, paths, report, servicemap
 from irimi.cli import BROKEN_PIPE_EXIT_CODE, main
 from irimi.engine import Replay, Serve, Shadow
 from irimi.netaddr import Target
+from irimi.protocol.env import AGENT_VERSION_ENV
 
 
 def test_version_flag(capsys):
@@ -679,26 +680,26 @@ def test_shadow_stores_its_process_run_with_the_agent_and_engine_versions(home, 
     """The process run's record: its argv, which a replay runs again, the agent's version
     from `IRIMI_AGENT_VERSION`, this irimi's version, and how the child exited."""
     from irimi.store import StoreReader
-    from irimi.trace import ErrorInfo
+    from irimi.trace import ErrorInfo, trigger_args
 
-    monkeypatch.setenv(paths.AGENT_VERSION_ENV, "agent-2.0.1")
+    monkeypatch.setenv(AGENT_VERSION_ENV, "agent-2.0.1")
     assert main(["shadow", *_child("raise SystemExit(3)")]) == 3
     (record,) = StoreReader(home / "store").list_runs()
     assert (record.attribution, record.mode) == ("process", "shadow")
     assert record.trigger is not None
-    assert record.trigger.args == {"argv": [sys.executable, "-c", "raise SystemExit(3)"]}
+    assert trigger_args(record.trigger) == {"argv": [sys.executable, "-c", "raise SystemExit(3)"]}
     assert (record.agent_version, record.engine_version, record.sdk_version) == (
         "agent-2.0.1",
         __version__,
         None,
     )
-    assert (record.outcome, record.exit_code, record.error) == (
+    assert (record.end.outcome, record.end.exit_code, record.end.error) == (
         "error",
         3,
         ErrorInfo("exit", "exited 3"),
     )
-    assert record.started_at is not None and record.ended_at is not None
-    assert record.started_at <= record.ended_at
+    assert record.started_at is not None and record.end.ended_at is not None
+    assert record.started_at <= record.end.ended_at
     assert len(record.run_id) == 16
 
 
@@ -764,7 +765,7 @@ def test_a_reader_gone_costs_shadow_no_run_and_leaves_no_engine(home, monkeypatc
     if when == "at-the-banner":
         assert stored == []
     else:
-        assert [(r.outcome, r.exit_code) for r in stored] == [("error", 3)]
+        assert [(r.end.outcome, r.end.exit_code) for r in stored] == [("error", 3)]
 
 
 def test_a_reader_gone_by_serve_s_banner_closes_its_store_and_releases_its_lock(home, monkeypatch):

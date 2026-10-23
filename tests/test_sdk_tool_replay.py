@@ -27,13 +27,22 @@ from typing import Any
 
 import pytest
 
-from irimi import exchange, paths, redact, runner, sdk
+from irimi import redact, runner, sdk
 from irimi.policy import ReplayPolicy, ShadowPolicy
+from irimi.protocol.control import RECORDED_ACTION, RecordedOutcome
+from irimi.protocol.env import (
+    AGENT_VERSION_ENV,
+    CONTROL_ENV,
+    ENGINE_ACTIVE_ENV,
+    REPLAY_RUN_ENV,
+    RUN_ENV,
+)
+from irimi.protocol.headers import RUN_HEADER
 from irimi.recording import Recording
 from irimi.sdk import client, context, runs
 from irimi.sdk.errors import recorded_error
 from irimi.store import DirectoryStore, StoreReader
-from irimi.trace import ErrorInfo, RecordedOutcome, ToolCall
+from irimi.trace import ErrorInfo, RunRecord, ToolCall, new_run_id
 from tests import test_sdk
 from tests.test_engine_mitm import _config, _start
 
@@ -142,10 +151,10 @@ class _Irimi:
         self.cfg = _config(tmp_path, monkeypatch)
         self.root = tmp_path / "store"
         self.key = redact.load_key(tmp_path)
-        monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
-        monkeypatch.delenv(paths.RUN_ENV, raising=False)
-        monkeypatch.delenv(paths.REPLAY_RUN_ENV, raising=False)
-        monkeypatch.delenv(paths.AGENT_VERSION_ENV, raising=False)
+        monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
+        monkeypatch.delenv(RUN_ENV, raising=False)
+        monkeypatch.delenv(REPLAY_RUN_ENV, raising=False)
+        monkeypatch.delenv(AGENT_VERSION_ENV, raising=False)
         monkeypatch.setattr(runs, "reporter", client.ControlClient())
 
     def record(self, script: Callable[[], Any]) -> str:
@@ -161,13 +170,15 @@ class _Irimi:
         events = StoreReader(self.root).load_run(run_id).events
         recording = Recording.from_events(events, self.key, self.cfg.maps)
         # Each replay is a run of its own, the engine's, as each `irimi replay` mints one.
-        self.cfg = dataclasses.replace(self.cfg, run_id=runs.new_run_id())
+        self.cfg = dataclasses.replace(self.cfg, run_id=new_run_id())
         store = DirectoryStore(self.root, self.key, replay_of=run_id)
         # Stored before the script runs, as `irimi replay` stores its run before its child exists,
         # so the run is read back whatever reached the engine.
-        store.start_run(runner.process_run(self.cfg.run_id, ["script"], None, time.time()))
-        self.monkeypatch.setenv(paths.RUN_ENV, self.cfg.run_id)
-        self.monkeypatch.setenv(paths.REPLAY_RUN_ENV, self.cfg.run_id)
+        store.start_run(
+            RunRecord.process(self.cfg.run_id, ["script"], None, time.time(), replay_of=run_id)
+        )
+        self.monkeypatch.setenv(RUN_ENV, self.cfg.run_id)
+        self.monkeypatch.setenv(REPLAY_RUN_ENV, self.cfg.run_id)
         policy = ReplayPolicy(recording, maps=self.cfg.maps)
         result = self._serve(policy, store, script)
         reader = StoreReader(self.root)
@@ -181,7 +192,7 @@ class _Irimi:
     def _serve(self, policy, store, script) -> Any:
         eng, _seen, stop = _start(self.cfg, policy=policy, store=store)
         self.port = eng.listen_port()
-        self.monkeypatch.setenv(paths.CONTROL_ENV, f"http://127.0.0.1:{self.port}/_irimi")
+        self.monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{self.port}/_irimi")
         try:
             with sdk.run("script", inputs={"test": True}):
                 return script()
@@ -280,7 +291,7 @@ def test_the_lookup_route_answers_404_under_an_engine_that_is_not_replaying(tmp_
     try:
         status, body = _post(
             eng.listen_port(),
-            f"/_irimi/runs/abcd1234abcd1234/{exchange.RECORDED_ACTION}",
+            f"/_irimi/runs/abcd1234abcd1234/{RECORDED_ACTION}",
             {"name": "db.balance", "args": {"account": "acc_1"}},
         )
     finally:
@@ -375,7 +386,7 @@ def test_a_lookup_that_fails_runs_the_tool_for_real_and_warns_once(irimi, monkey
     run_id = irimi.record(lambda: balance("acc_1"))
 
     def unreachable() -> Any:
-        monkeypatch.setenv(paths.CONTROL_ENV, f"http://127.0.0.1:{test_sdk._closed_port()}/_irimi")
+        monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{test_sdk._closed_port()}/_irimi")
         return [balance("acc_1"), balance("acc_1")]
 
     result, calls = irimi.replay(run_id, unreachable)
@@ -397,9 +408,9 @@ def test_a_miss_is_said_by_no_warning(irimi, warnings):
 
 
 def test_an_inactive_sdk_never_asks_the_recording(monkeypatch):
-    monkeypatch.delenv(paths.ENGINE_ACTIVE_ENV, raising=False)
-    monkeypatch.setenv(paths.RUN_ENV, "abcd1234abcd1234")
-    monkeypatch.setenv(paths.REPLAY_RUN_ENV, "abcd1234abcd1234")
+    monkeypatch.delenv(ENGINE_ACTIVE_ENV, raising=False)
+    monkeypatch.setenv(RUN_ENV, "abcd1234abcd1234")
+    monkeypatch.setenv(REPLAY_RUN_ENV, "abcd1234abcd1234")
 
     class _Refuses:
         def post(self, *args: Any) -> None:
@@ -416,12 +427,12 @@ def test_an_inactive_sdk_never_asks_the_recording(monkeypatch):
 def test_a_replay_id_irimi_did_not_set_asks_no_recording(monkeypatch, run_env):
     """An `IRIMI_REPLAY_RUN` beside no `IRIMI_RUN`, or another, is a stale export, not irimi's
     word (`context.replay_run_id`): the read tool runs for real and only posts its call."""
-    monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
-    monkeypatch.setenv(paths.REPLAY_RUN_ENV, "abcd1234abcd1234")
+    monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
+    monkeypatch.setenv(REPLAY_RUN_ENV, "abcd1234abcd1234")
     if run_env is None:
-        monkeypatch.delenv(paths.RUN_ENV, raising=False)
+        monkeypatch.delenv(RUN_ENV, raising=False)
     else:
-        monkeypatch.setenv(paths.RUN_ENV, run_env)
+        monkeypatch.setenv(RUN_ENV, run_env)
     posted: list[str] = []
 
     class _Writes:
@@ -445,7 +456,7 @@ def test_a_hit_is_used_up_and_is_not_itself_a_tool_call(irimi):
     recording = Recording.from_events(events, irimi.key, irimi.cfg.maps)
     store = DirectoryStore(irimi.root, irimi.key, replay_of=run_id)
     eng, _seen, stop = _start(irimi.cfg, policy=ReplayPolicy(recording), store=store)
-    route = f"/_irimi/runs/abcd1234abcd1234/{exchange.RECORDED_ACTION}"
+    route = f"/_irimi/runs/abcd1234abcd1234/{RECORDED_ACTION}"
     posted = {"name": "db.balance", "args": {"account": "acc_1"}}
     try:
         first = _post(eng.listen_port(), route, posted)
@@ -520,7 +531,7 @@ def test_a_tool_called_in_no_run_or_the_process_run_may_ask_the_recording(irimi,
     try:
         status, _ = _post(
             eng.listen_port(),
-            f"/_irimi/runs/{run_id}/{exchange.RECORDED_ACTION}",
+            f"/_irimi/runs/{run_id}/{RECORDED_ACTION}",
             {"name": "db.balance", "args": {"account": "acc_1"}},
         )
     finally:
@@ -529,14 +540,14 @@ def test_a_tool_called_in_no_run_or_the_process_run_may_ask_the_recording(irimi,
 
 
 def test_a_replay_s_child_is_told_it_replays_and_a_shadow_run_s_never_is(tmp_path):
-    base = {paths.REPLAY_RUN_ENV: "stale"}
+    base = {REPLAY_RUN_ENV: "stale"}
     shadow = runner.child_env(base, "127.0.0.1", 4000, tmp_path / "ca.pem", "abcd1234abcd1234")
     replay = runner.child_env(
         base, "127.0.0.1", 4000, tmp_path / "ca.pem", "abcd1234abcd1234", replaying=True
     )
-    assert paths.REPLAY_RUN_ENV not in shadow
-    assert replay[paths.REPLAY_RUN_ENV] == "abcd1234abcd1234"
-    assert base == {paths.REPLAY_RUN_ENV: "stale"}
+    assert REPLAY_RUN_ENV not in shadow
+    assert replay[REPLAY_RUN_ENV] == "abcd1234abcd1234"
+    assert base == {REPLAY_RUN_ENV: "stale"}
 
 
 def test_a_run_that_ends_on_a_recorded_error_records_the_recorded_type(irimi):
@@ -550,13 +561,13 @@ def test_a_run_that_ends_on_a_recorded_error_records_the_recorded_type(irimi):
     with pytest.raises(KeyError):
         irimi.record(ends_on_it)
     [recorded] = [r for r in StoreReader(irimi.root).list_runs() if r.attribution == "sdk"]
-    assert recorded.error == ErrorInfo("builtins.KeyError", "'acc_missing'")
+    assert recorded.end.error == ErrorInfo("builtins.KeyError", "'acc_missing'")
     _FORBIDDEN.add("acc_missing")
     with pytest.raises(sdk.RecordedToolError) as raised:
         irimi.replay(recorded.run_id, ends_on_it)
     assert isinstance(raised.value, KeyError)
     replayed = StoreReader(irimi.root).load_run(irimi.cfg.run_id).record
-    assert (replayed.outcome, replayed.error) == (None, None)
+    assert replayed.end is None
 
 
 @pytest.mark.parametrize("kind", ["builtins.KeyboardInterrupt", "builtins.SystemExit"])
@@ -634,9 +645,9 @@ def test_a_recorded_call_that_was_cancelled_is_a_miss_and_the_tool_runs(irimi):
 def test_a_recorded_call_that_was_closed_unawaited_is_a_miss(monkeypatch):
     """`GeneratorExit` is what a coroutine closed before it finished records: no outcome of the
     tool's own either."""
-    monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
-    monkeypatch.setenv(paths.RUN_ENV, "abcd1234abcd1234")
-    monkeypatch.setenv(paths.REPLAY_RUN_ENV, "abcd1234abcd1234")
+    monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
+    monkeypatch.setenv(RUN_ENV, "abcd1234abcd1234")
+    monkeypatch.setenv(REPLAY_RUN_ENV, "abcd1234abcd1234")
     posted: list[Any] = []
 
     class _Closed:
@@ -654,11 +665,11 @@ def test_a_recorded_call_that_was_closed_unawaited_is_a_miss(monkeypatch):
 def test_an_inactive_sdk_is_never_told_it_replays(monkeypatch):
     """`replay_run_id` is the one rule for "this is a replay", which `RunScope` asks too: a
     variable left in an environment irimi is not in front of says nothing."""
-    monkeypatch.setenv(paths.RUN_ENV, "abcd1234abcd1234")
-    monkeypatch.setenv(paths.REPLAY_RUN_ENV, "abcd1234abcd1234")
-    monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
+    monkeypatch.setenv(RUN_ENV, "abcd1234abcd1234")
+    monkeypatch.setenv(REPLAY_RUN_ENV, "abcd1234abcd1234")
+    monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
     assert context.replay_run_id() == "abcd1234abcd1234"
-    monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "0")
+    monkeypatch.setenv(ENGINE_ACTIVE_ENV, "0")
     assert context.replay_run_id() is None
 
 
@@ -688,10 +699,10 @@ def _answering(monkeypatch, status: int, body: bytes) -> Iterator[list[tuple[str
     handler = type("Handler", (_Answers,), {"status": status, "body": body, "seen": seen})
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}).start()
-    monkeypatch.setenv(paths.ENGINE_ACTIVE_ENV, "1")
-    monkeypatch.setenv(paths.RUN_ENV, "abcd1234abcd1234")
-    monkeypatch.setenv(paths.REPLAY_RUN_ENV, "abcd1234abcd1234")
-    monkeypatch.setenv(paths.CONTROL_ENV, f"http://127.0.0.1:{server.server_address[1]}/_irimi")
+    monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
+    monkeypatch.setenv(RUN_ENV, "abcd1234abcd1234")
+    monkeypatch.setenv(REPLAY_RUN_ENV, "abcd1234abcd1234")
+    monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{server.server_address[1]}/_irimi")
     monkeypatch.setattr(runs, "reporter", client.ControlClient())
     try:
         yield seen
@@ -741,8 +752,8 @@ def test_a_lookup_carries_no_run_header_and_never_goes_through_a_proxy(monkeypat
     with _answering(monkeypatch, 200, json.dumps(_HIT).encode()) as seen:
         with sdk.run("labelled", inputs={}):  # which instruments the HTTP clients
             assert balance("acc_1") == {"account": "acc_1", "balance": 1}
-    [lookup] = [h for path, h in seen if path.endswith(exchange.RECORDED_ACTION)]
-    assert exchange.RUN_HEADER not in lookup
+    [lookup] = [h for path, h in seen if path.endswith(RECORDED_ACTION)]
+    assert RUN_HEADER not in lookup
 
 
 class Ledger:

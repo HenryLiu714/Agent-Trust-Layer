@@ -251,7 +251,10 @@ def test_a_raising_read_tool_ends_the_run_in_error_under_shadow(run_workflow, mo
     assert [(e["outcome"], e["error"]) for e in ends] == [("error", "KeyError")]
     # Stored under the exception's full name.
     [run] = shadow.sdk_runs()
-    assert (run.outcome, run.error) == ("error", ErrorInfo("builtins.KeyError", "'acc_missing'"))
+    assert (run.end.outcome, run.end.error) == (
+        "error",
+        ErrorInfo("builtins.KeyError", "'acc_missing'"),
+    )
     # Every tool that raised is recorded with what it raised and no result, the caught ones and
     # the one that ended the run.
     assert [(c.name, c.result, c.error) for c in tool_calls(shadow)] == [
@@ -359,7 +362,7 @@ def test_a_write_stand_in_that_raises_hands_the_agent_its_own_exception_and_a_re
     assert shadow.result()["merged"] == {"kept": "acc_1", "merged": "acc_2", "stood_in": True}
     assert bare.result()["merged"] == {"kept": "acc_1", "merged": "acc_2"}
     [run] = shadow.sdk_runs()
-    assert run.outcome == "ok"
+    assert run.end.outcome == "ok"
     # Args are bound against the real `merge_accounts(keep, drop)`, not the stand-in's `*ids`.
     assert [(c.run_id, c.args, c.result, c.error) for c in tool_calls(shadow)] == [
         (
@@ -770,8 +773,8 @@ def test_tool_raises_replayed_raises_what_was_recorded_and_the_agent_catches_it_
     assert replay.one("run.end")["error"] == recorded.one("run.end")["error"] == "KeyError"
     [source] = recorded.sdk_runs()
     record = replay.stored().load_run(replay.process_run_id()).record
-    assert (record.outcome, record.error) == (source.outcome, source.error)
-    assert record.error == ErrorInfo("builtins.KeyError", "'acc_missing'")
+    assert (record.end.outcome, record.end.error) == (source.end.outcome, source.end.error)
+    assert record.end.error == ErrorInfo("builtins.KeyError", "'acc_missing'")
 
 
 def test_async_tools_replayed_answers_each_read_with_what_its_await_got(replayed):

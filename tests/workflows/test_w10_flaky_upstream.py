@@ -228,9 +228,9 @@ def test_an_agent_that_raises_after_its_write_still_shows_the_write(run_workflow
     assert (end["outcome"], end["error"]) == ("error", "RuntimeError")
     # Stored under the exception's full name, the refund id it names included.
     [run] = shadow.sdk_runs()
-    assert run.outcome == "error" and run.error is not None
-    assert run.error.type == "builtins.RuntimeError"
-    assert run.error.message.startswith("ledger export failed after refund re_")
+    assert run.end.outcome == "error" and run.end.error is not None
+    assert run.end.error.type == "builtins.RuntimeError"
+    assert run.end.error.message.startswith("ledger export failed after refund re_")
     summary = shadow.summaries()
     assert REFUND_LINE in summary
     # LOOKS WRONG: the summary does not say the agent failed. Nothing in it tells this run from
@@ -285,7 +285,7 @@ def test_an_agent_killed_after_its_write_leaves_a_run_with_no_end(run_workflow, 
     # posted one, and the run is incomplete, as a killed run is.
     reader = shadow.stored()
     [run] = shadow.sdk_runs()
-    assert (run.run_id, run.outcome, run.ended_at) == (shadow.one("run.start")["run"], None, None)
+    assert (run.run_id, run.end) == (shadow.one("run.start")["run"], None)
     stored = [e for e in reader.load_run(run.run_id).events if isinstance(e, Exchange)]
     assert [(e.request.method, e.request.path, e.answered_by) for e in stored][-1] == (
         "POST",
@@ -303,7 +303,7 @@ def _killed_under_serve(serve) -> None:
     in a run that did not end, where `irimi shadow -- <cmd>` counted it in the process's block.
     Telling such a run from one still going is #107's."""
     [run] = serve.sdk_runs()
-    assert (run.run_id, run.outcome, run.ended_at) == (serve.one("run.start")["run"], None, None)
+    assert (run.run_id, run.end) == (serve.one("run.start")["run"], None)
     assert serve.run_blocks() == {} and REFUND_LINE not in serve.summaries()
     assert listed_status(serve, run.run_id) == "incomplete"
     code, out, err = serve.runs("show", run.run_id)
@@ -313,7 +313,7 @@ def _killed_under_serve(serve) -> None:
 def process_run(result) -> tuple[object, object, object]:
     """`(outcome, exit_code, error)` of the process run `irimi shadow` stored."""
     (run,) = [r for r in result.stored().list_runs() if r.attribution == "process"]
-    return run.outcome, run.exit_code, run.error
+    return run.end.outcome, run.end.exit_code, run.end.error
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -330,8 +330,8 @@ def test_an_agent_interrupted_after_its_write_ends_its_run_in_keyboard_interrupt
     [end] = shadow.events("run.end")
     assert (end["outcome"], end["error"]) == ("error", "KeyboardInterrupt")
     [run] = shadow.sdk_runs()
-    assert (run.run_id, run.outcome) == (end["run"], "error")
-    assert run.error == ErrorInfo("builtins.KeyboardInterrupt", "")
+    assert (run.run_id, run.end.outcome) == (end["run"], "error")
+    assert run.end.error == ErrorInfo("builtins.KeyboardInterrupt", "")
     stored = [e for e in shadow.stored().load_run(run.run_id).events if isinstance(e, Exchange)]
     assert [(e.request.method, e.request.path, e.answered_by) for e in stored][-1] == (
         "POST",
@@ -386,7 +386,7 @@ def test_an_sdk_that_cannot_reach_irimi_warns_once_and_changes_nothing(
     process = ["process"] if mode == "shadow" else []
     assert sorted(r.attribution for r in records) == ["header", *process]
     [header] = [r for r in records if r.attribution == "header"]
-    assert (header.run_id, header.trigger, header.outcome) == (start["run"], None, None)
+    assert (header.run_id, header.trigger, header.end) == (start["run"], None, None)
 
 
 @pytest.mark.parametrize("scenario", sorted(BOMBED))
@@ -610,15 +610,16 @@ def test_a_run_that_died_after_its_write_replays_to_the_same_end(replayed, scena
     assert refund.response.body == recorded_refund.response.body
     (source,) = recorded.sdk_runs()
     (mine,) = [r for r in replay.stored().list_runs() if r.replay_of == source.run_id]
-    assert (mine.attribution, mine.outcome, mine.exit_code) == (
+    assert mine.end is not None
+    assert (mine.attribution, mine.end.outcome, mine.end.exit_code) == (
         "process",
         "error",
         recorded.exit_code,
     )
     killed = ErrorInfo("exit", f"exited {recorded.exit_code}")
-    assert mine.error == (killed if source.outcome is None else source.error)
+    assert mine.end.error == (killed if source.end is None else source.end.error)
     assert (
-        mine.error.type
+        mine.end.error.type
         == {
             "raise_after_write": "builtins.RuntimeError",
             "sigterm_mid_run": "exit",

@@ -432,7 +432,7 @@ def test_sigterm_stops_the_command_ends_the_run_and_closes_the_store(home, upstr
     with pytest.raises(ProcessLookupError):
         os.kill(child, 0)
     [record] = StoreReader(home / "store").list_runs()
-    assert (record.outcome, record.exit_code) == ("error", 143)
+    assert (record.end.outcome, record.end.exit_code) == ("error", 143)
     [event] = StoreReader(home / "store").load_run(record.run_id).events
     assert event.request.path == "/hello"
     assert "1 exchange ·" in out
@@ -496,7 +496,7 @@ def test_sigterm_while_the_command_starts_is_passed_to_it_once_it_exists(home, m
     assert main(["shadow", *_py("import time; time.sleep(60)")]) == 143
     assert time.monotonic() - started < 30
     [record] = StoreReader(home / "store").list_runs()
-    assert (record.outcome, record.exit_code) == ("error", 143)
+    assert (record.end.outcome, record.end.exit_code) == ("error", 143)
 
 
 def test_sigterm_after_the_command_exited_signals_no_pid(home, monkeypatch):
@@ -525,7 +525,7 @@ def test_sigterm_after_the_command_exited_signals_no_pid(home, monkeypatch):
     assert main(["shadow", *_py("pass")]) == 0
     assert killed == []
     [record] = StoreReader(home / "store").list_runs()
-    assert (record.outcome, record.exit_code) == ("ok", 0)
+    assert (record.end.outcome, record.end.exit_code) == ("ok", 0)
 
 
 def test_an_ignored_sigterm_stays_ignored_and_a_thread_installs_nothing(home, monkeypatch):

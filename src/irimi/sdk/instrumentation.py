@@ -42,15 +42,15 @@ from collections.abc import Callable, Iterator
 from typing import Any
 from urllib.parse import urlsplit
 
-from irimi import paths
-from irimi.exchange import RUN_HEADER
+from irimi.protocol.env import CONTROL_ENV, PROXY_ENVS
+from irimi.protocol.headers import RUN_HEADER
 from irimi.sdk.context import current_run_id, is_active
 
 # The port a URL with none names, by scheme.
 DEFAULT_PORTS = {"http": 80, "https": 443}
 # The variables that name irimi's listener: the control endpoint's, and the proxy's, which
-# `runner.child_env` sets from the same `paths.PROXY_ENVS`.
-LISTENER_ENVS = (paths.CONTROL_ENV, *paths.PROXY_ENVS)
+# `runner.child_env` sets from the same `PROXY_ENVS`.
+LISTENER_ENVS = (CONTROL_ENV, *PROXY_ENVS)
 
 # Set while the SDK sends its own posts to the control endpoint: they name their run in their
 # path, and carry no `Irimi-Run`.

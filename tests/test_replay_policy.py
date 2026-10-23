@@ -22,7 +22,7 @@ from irimi.exchange import (
     Response,
 )
 from irimi.policy import ReplayPolicy, ShadowPolicy
-from irimi.reader import UpstreamReader, answered_as
+from irimi.reader import NoReader, UpstreamReader, answered_as
 from irimi.recording import Recording, RecordingReader
 from irimi.trace import ErrorInfo, TelemetrySeen, ToolCall
 from tests.test_policy import answer as decided
@@ -599,13 +599,6 @@ def test_a_recorded_status_no_response_can_carry_is_a_miss(status):
     assert _recording(_stored(_req(), replace(OK, status=status))).take(_req(), "read") is None
 
 
-def test_an_empty_event_stream_200_recorded_before_streams_were_kept_is_a_miss():
-    """A streamed answer stored with an empty body and no chunks is not a recorded stream."""
-    empty = Response(200, (("content-type", "text/event-stream"),), b"")
-    recording = _recording(_stored(_llm(stream=True), empty))
-    assert recording.take(_llm(stream=True), "llm") is None
-
-
 def test_only_an_llm_call_is_bucketed_by_streaming():
     """A read whose recorded answer was an event stream is served like any read."""
     sse = Response(200, (("content-type", "text/event-stream"),), b"data: 1\n\n")
@@ -659,9 +652,9 @@ def test_a_recorded_write_irimi_did_not_fake_is_never_answered_again():
 
 def test_a_reader_that_says_nothing_answers_live_and_the_recording_s_says_so():
     """`reader.answered_as` is the one rule for what a precondition read is recorded as: a reader
-    that names nothing, as any plain callable, is live."""
+    that names nothing is live."""
     for answered in (True, False):
-        assert answered_as(lambda request: None, answered) == ("live", ())
+        assert answered_as(NoReader(), answered) == ("live", ())
         assert answered_as(UpstreamReader(), answered) == ("live", ())
     assert answered_as(RecordingReader(_recording()), True) == (
         "recording",

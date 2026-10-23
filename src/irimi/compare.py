@@ -41,8 +41,7 @@ from irimi import report, services
 from irimi.exchange import Exchange, Flag, fake_ran, is_intercepted
 from irimi.recording import compared_body
 from irimi.servicemap import MapIndex, path_params
-from irimi.store import StoredRun
-from irimi.trace import JSONValue, RunRecord, ToolCall, canonical_json
+from irimi.trace import JSONValue, RunRecord, StoredRun, ToolCall, canonical_json, trigger_args
 
 # The exit codes, as diff(1)'s: the same, different, or trouble (a run that cannot be read).
 SAME = 0
@@ -340,7 +339,7 @@ def args_differ(a: RunRecord, b: RunRecord) -> bool:
 
 
 def _args(record: RunRecord) -> str:
-    return canonical_json(record.trigger.args if record.trigger is not None else None)
+    return canonical_json(trigger_args(record.trigger) if record.trigger is not None else None)
 
 
 def _row_lines(row: Row) -> list[str]:

@@ -45,15 +45,15 @@ import functools
 import inspect
 import logging
 import os
-import secrets
 import threading
 import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, overload
 
-from irimi import paths, trace
+from irimi import trace
 from irimi.limits import MAX_CAPTURED_BYTES
+from irimi.protocol.env import ENGINE_ACTIVE_ENV, PROXY_ENVS, RUN_ENV
 from irimi.sdk import context, runs
 from irimi.sdk.api import check_name, label
 from irimi.sdk.capture import capture, capture_call, revive, serialized
@@ -66,7 +66,7 @@ logger = logging.getLogger(LOGGER_NAME)
 # The variables whose presence says this process meant to go through a proxy: an inactive SDK
 # with either set ran a write tool for real where irimi was probably meant to be in front.
 # Both spellings of `HTTPS_PROXY`, from the one list of them.
-PROXY_HINTS = tuple(name for name in paths.PROXY_ENVS if name.upper() == "HTTPS_PROXY")
+PROXY_HINTS = tuple(name for name in PROXY_ENVS if name.upper() == "HTTPS_PROXY")
 
 # Set once the "ran for real" WARNING has been logged: once per process, not per call or per tool.
 _warned_real_write = False
@@ -334,7 +334,7 @@ class _Call:
             if exc is None:
                 captured = _bounded(self.args, capture(result)[0])
             call = trace.ToolCall(
-                tool_call_id=secrets.token_hex(8),
+                tool_call_id=trace.new_tool_call_id(),
                 run_id=self.run_id,
                 name=self.spec.name,
                 kind=self.spec.kind,
@@ -378,7 +378,7 @@ def _run_id() -> str:
     """The run a call belongs to: the current one, else the process run `irimi shadow` names for
     its child, else none. irimi files a call for no run in `unattributed/`, as it does an
     exchange that names none."""
-    return context.current_run_id() or os.environ.get(paths.RUN_ENV) or trace.UNATTRIBUTED
+    return context.current_run_id() or os.environ.get(RUN_ENV) or trace.UNATTRIBUTED
 
 
 def _bounded(args: trace.JSONValue, result: trace.JSONValue) -> trace.JSONValue:
@@ -407,5 +407,5 @@ def _warn_if_real_write(spec: _Tool) -> None:
     logger.warning(
         "irimi: write tool %s ran for real: HTTPS_PROXY is set but %s is not",
         spec.name,
-        paths.ENGINE_ACTIVE_ENV,
+        ENGINE_ACTIVE_ENV,
     )

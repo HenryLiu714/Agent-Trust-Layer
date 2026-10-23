@@ -29,8 +29,7 @@ from irimi.exchange import (
 from irimi.money import format_minor_units
 from irimi.netaddr import Target
 from irimi.servicemap import MapIndex, Route, is_delegated, path_params
-from irimi.store import StoredRun
-from irimi.trace import Event, Ran, RunRecord, TelemetrySeen, ToolCall
+from irimi.trace import Event, Ran, RunRecord, StoredRun, TelemetrySeen, ToolCall, trigger_args
 
 PROXY_ONLY_NOTICE = (
     "only traffic sent through this proxy is shadowed; a client that ignores HTTPS_PROXY talks to "
@@ -881,15 +880,15 @@ def printable(text: str) -> str:
 def run_elapsed(record: RunRecord) -> float | None:
     """How long a stored run took, or None for one with no start or no end. Never negative: the
     wall clock can step back between the two, as `Exchange` knows of its own."""
-    if record.started_at is None or record.ended_at is None:
+    if record.started_at is None or record.end is None:
         return None
-    return max(0.0, record.ended_at - record.started_at)
+    return max(0.0, record.end.ended_at - record.started_at)
 
 
 def run_status(record: RunRecord) -> str:
     """`ok` or `error` for a run that ended, and `incomplete` for one that has not, or never will:
     a crashed irimi, or a run known only by its events (`attribution: "header"`)."""
-    return record.outcome if record.outcome is not None else "incomplete"
+    return record.end.outcome if record.end is not None else "incomplete"
 
 
 # `irimi runs list`'s header row, one name per column.
@@ -918,8 +917,9 @@ def run_list_columns(record: RunRecord, events: Sequence[Event] | None) -> list[
     elapsed = run_elapsed(record)
     duration = NOT_SET if elapsed is None else f"{elapsed:.1f}s"
     status = run_status(record)
-    if record.outcome == "error" and record.exit_code is not None:
-        status = f"error (exit {record.exit_code})"
+    end = record.end
+    if end is not None and end.outcome == "error" and end.exit_code is not None:
+        status = f"error (exit {end.exit_code})"
     if events is None:
         counts = ["? exchanges", "? writes"]
     else:
@@ -946,11 +946,9 @@ def _trigger_column(record: RunRecord) -> str:
     trigger = record.trigger
     if trigger is None:
         return NOT_SET
-    args = trigger.args
-    argv = args.get("argv") if record.attribution == "process" and isinstance(args, dict) else None
-    if isinstance(argv, list) and argv and all(isinstance(word, str) for word in argv):
-        words = [str(word) for word in argv]
-        text = shlex.join([os.path.basename(words[0]) or words[0], *words[1:]])
+    argv = record.argv
+    if argv is not None:
+        text = shlex.join([os.path.basename(argv[0]) or argv[0], *argv[1:]])
     else:
         text = trigger.name
     text = printable(text)
@@ -1008,7 +1006,7 @@ def run_header_lines(record: RunRecord) -> list[str]:
     args = NOT_SET
     if trigger is not None:
         try:
-            args = json.dumps(trigger.args, separators=(",", ":"), ensure_ascii=False)
+            args = json.dumps(trigger_args(trigger), separators=(",", ":"), ensure_ascii=False)
         except RecursionError:
             args = ARGS_TOO_DEEP
         if len(args) > MAX_ARGS_SHOWN:
@@ -1026,10 +1024,11 @@ def run_header_lines(record: RunRecord) -> list[str]:
         f"agent version: {printable(record.agent_version or NOT_SET)}",
         f"outcome: {run_status(record)}",
     ]
-    if record.error is not None:
-        lines.append(f"error: {printable(record.error.type)}: {printable(record.error.message)}")
-    if record.exit_code is not None:
-        lines.append(f"exit code: {record.exit_code}")
+    error = record.end.error if record.end is not None else None
+    if error is not None:
+        lines.append(f"error: {printable(error.type)}: {printable(error.message)}")
+    if record.end is not None and record.end.exit_code is not None:
+        lines.append(f"exit code: {record.end.exit_code}")
     if record.dropped_events:
         lines.append(f"dropped events: {record.dropped_events}")
     return lines

@@ -130,10 +130,6 @@ def _hand_built_incomplete_run(store, key) -> None:
             engine_version="0.0.0",
             sdk_version="0.0.0",
             started_at=HAND_BUILT_AT,
-            ended_at=None,
-            outcome=None,
-            error=None,
-            exit_code=None,
         )
     )
     s.record(_refund("handbuilt"))
@@ -283,6 +279,12 @@ def test_runs_list_counts_the_writes_runs_show_s_summary_prints_a_line_for(home,
 
 
 def _ended_run(run_id: str, started_at: float, **changes) -> RunRecord:
+    end = trace.RunEnd(
+        changes.pop("ended_at", started_at + 1.0),
+        changes.pop("outcome", "ok"),
+        changes.pop("error", None),
+        changes.pop("exit_code", 0),
+    )
     record = RunRecord(
         schema_version=trace.SCHEMA_VERSION,
         run_id=run_id,
@@ -293,10 +295,7 @@ def _ended_run(run_id: str, started_at: float, **changes) -> RunRecord:
         engine_version="0.0.0",
         sdk_version=None,
         started_at=started_at,
-        ended_at=started_at + 1.0,
-        outcome="ok",
-        error=None,
-        exit_code=0,
+        end=end,
     )
     return dataclasses.replace(record, **changes)
 
@@ -331,15 +330,16 @@ def test_runs_list_and_show_name_the_run_a_replay_replayed(home, capfd):
     """`irimi replay` stores its one run `attribution: process`, as `irimi shadow` stores one, so
     `runs list` lists a replay as the run it replayed, `replay of <id>`, and `runs show` prints
     its mode and the run it replayed under the attribution, and opens its summary `irimi replay`.
-    The store stamps `replay_of` and `mode: replay` on every run it is told is a
-    replay, as `irimi replay`'s does: an `sdk` run started there and a `header` run an
-    `Irimi-Run` label makes there too, and each keeps its attribution in the column."""
+    Every run a replay stores names `replay_of` and `mode: replay`: an `sdk` run started there
+    and a `header` run an `Irimi-Run` label makes there too, and each keeps its attribution in
+    the column."""
     s = DirectoryStore(home / "store", redact.load_key(home))
     s.start_run(_ended_run("recorded", HAND_BUILT_AT))
     s.close()
     replays = DirectoryStore(home / "store", redact.load_key(home), replay_of="recorded")
-    replays.start_run(_ended_run("replayed", HAND_BUILT_AT + 5))
-    replays.start_run(_ended_run("started", HAND_BUILT_AT + 6, attribution="sdk"))
+    replay = {"mode": "replay", "replay_of": "recorded"}
+    replays.start_run(_ended_run("replayed", HAND_BUILT_AT + 5, **replay))
+    replays.start_run(_ended_run("started", HAND_BUILT_AT + 6, attribution="sdk", **replay))
     replays.record(dataclasses.replace(_refund("labelled"), started_at=HAND_BUILT_AT + 7))
     replays.close()
     assert main(["runs", "list"]) == 0
@@ -398,7 +398,9 @@ def test_a_replay_s_run_json_naming_no_run_is_skipped_by_list_and_refused_by_sho
     s.start_run(_ended_run("recorded", HAND_BUILT_AT))
     s.close()
     replays = DirectoryStore(home / "store", redact.load_key(home), replay_of="recorded")
-    replays.start_run(_ended_run("replayed", HAND_BUILT_AT + 5))
+    replays.start_run(
+        _ended_run("replayed", HAND_BUILT_AT + 5, mode="replay", replay_of="recorded")
+    )
     replays.close()
     run_json = home / "store" / "runs" / "replayed" / "run.json"
     for replay_of in ("a  b", "x" * 5_000_000):
@@ -463,11 +465,11 @@ def test_runs_list_pads_each_column_to_its_widest_cell_under_a_header_row(home, 
 def test_runs_list_shows_a_process_run_s_command_without_its_program_s_directory():
     """Every run of `python agent.py` names the same interpreter path, so the trigger column is
     the program's base name and its arguments, cut to forty characters."""
-    argv: list[trace.JSONValue] = ["/opt/venv/bin/python3", "agent.py", "--ticket", "T-1"]
-    run = _ended_run("p", HAND_BUILT_AT, trigger=Trigger(str(argv[0]), None, {"argv": argv}, True))
+    argv = ["/opt/venv/bin/python3", "agent.py", "--ticket", "T-1"]
+    run = _ended_run("p", HAND_BUILT_AT, trigger=Trigger.command(argv))
     assert report.run_list_columns(run, [])[5] == "python3 agent.py --ticket T-1"
-    long: list[trace.JSONValue] = ["/usr/bin/python3", "agent.py", "x" * 60]
-    run = _ended_run("q", HAND_BUILT_AT, trigger=Trigger("python3", None, {"argv": long}, True))
+    long = ["/usr/bin/python3", "agent.py", "x" * 60]
+    run = _ended_run("q", HAND_BUILT_AT, trigger=Trigger.command(long))
     cell = report.run_list_columns(run, [])[5]
     assert len(cell) == report.MAX_TRIGGER_SHOWN
     assert cell == ("python3 agent.py " + "x" * 60)[: report.MAX_TRIGGER_SHOWN - 1] + "…"
@@ -595,10 +597,7 @@ def test_runs_show_cuts_long_args_and_says_how_many_events_were_dropped(home, ca
         engine_version="0.0.0",
         sdk_version=None,
         started_at=HAND_BUILT_AT,
-        ended_at=HAND_BUILT_AT + 1.25,
-        outcome="ok",
-        error=None,
-        exit_code=None,
+        end=trace.RunEnd(HAND_BUILT_AT + 1.25, "ok", None, None),
         dropped_events=4,
     )
     s.start_run(record)

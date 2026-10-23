@@ -18,13 +18,14 @@ from mitmproxy.options import Options
 
 from irimi import ca, control, delegation, ingress, netaddr, redact, wire
 from irimi.control import ControlEndpoint
-from irimi.engine import EngineConfig, EngineStartError, OnExchange, OnTlsFailure, Serve
+from irimi.engine import EngineConfig, EngineStartError, OnExchange, OnTlsFailure, Replay, Serve
 from irimi.engine.capture import StreamCapture, recorded_stream
 from irimi.engine.decoding import Decoded, decode_body
-from irimi.exchange import RUN_HEADER, Flag, Headers, Request, Response, media_type
+from irimi.exchange import Flag, Headers, Request, Response, media_type
 from irimi.ingress import Admitted, ControlCall, Refusal
 from irimi.overlay import Overlay
 from irimi.policy import AnswerPolicy, Delegate, Forward, Respond
+from irimi.protocol.headers import ANSWERED_BY_HEADER, REWROTE_HEADER, RUN_HEADER
 from irimi.session import Plan, Received, ShadowSession
 from irimi.store import TraceStore
 from irimi.writelog import WriteLog
@@ -184,7 +185,11 @@ def default_control(
     """The control endpoint an engine answers with when its composition root gives it none: over
     its own store, with its policy answering a replay's read tools, and no tool-call callback."""
     return ControlEndpoint(
-        store, serve=isinstance(config.mode, Serve), process_run=config.run_id, policy=policy
+        store,
+        serve=isinstance(config.mode, Serve),
+        process_run=config.run_id,
+        policy=policy,
+        replay_of=config.mode.source_run_id if isinstance(config.mode, Replay) else None,
     )
 
 
@@ -402,7 +407,7 @@ class IrimiAddon:
         """Take irimi's own headers off the flow, as `ingress.admit` took them off the request:
         `Irimi-Run` and an agent-sent `Irimi-Rewrote` never reach the service. A header left on
         is a lesser harm than a raise, which would forward the flow untouched."""
-        for name in (wire.REWROTE_HEADER, RUN_HEADER):
+        for name in (REWROTE_HEADER, RUN_HEADER):
             try:
                 if name in flow.request.headers:
                     del flow.request.headers[name]  # every instance, in any spelling
@@ -453,7 +458,7 @@ class IrimiAddon:
             return
         stamp = wire.answered_by_header(plan.answered_by)
         if stamp is not None:
-            flow.response.headers[wire.ANSWERED_BY_HEADER] = stamp
+            flow.response.headers[ANSWERED_BY_HEADER] = stamp
         if _is_event_stream(flow.response.headers.get("content-type", "")):
             tee = StreamCapture()
             flow.metadata[STREAM_KEY] = tee

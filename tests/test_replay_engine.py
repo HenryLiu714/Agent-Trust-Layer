@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from irimi import ca, classify, paths, redact, servicemap, wire
+from irimi import ca, classify, paths, redact, servicemap
 from irimi.delegation import ForwardTo
 from irimi.engine import EngineConfig
 from irimi.engine.mitm import IrimiAddon, MitmEngine
@@ -26,6 +26,7 @@ from irimi.ingress import Admitted
 from irimi.netaddr import Target
 from irimi.overlay import ServiceOverlay
 from irimi.policy import Decided, Delegate, Forward, ReplayPolicy, Respond, ShadowPolicy
+from irimi.protocol.headers import ANSWERED_BY_HEADER
 from irimi.reader import UpstreamReader
 from irimi.recording import Recording
 from irimi.store import DirectoryStore, NullStore, StoreReader
@@ -300,7 +301,7 @@ def test_an_llm_call_that_differs_only_in_who_asked_is_answered_from_the_recordi
     session = _replay(home, maps, events, lambda s: replies.append(s.call("POST", url, _j(other))))
     (status, headers, data), (ex,) = replies[0], session.seen
     assert (status, data) == (recorded[0][0], recorded[0][2])
-    assert headers[wire.ANSWERED_BY_HEADER] == "recording"
+    assert headers[ANSWERED_BY_HEADER] == "recording"
     assert ex.answered_by == "recording"
     assert _Llm.seen == []
 
@@ -391,7 +392,7 @@ def test_a_read_is_answered_once_per_time_it_was_recorded(home, maps, stubs):
     )
     assert [ex.answered_by for ex in session.seen] == ["recording", "recording", "live"]
     assert Flag.REPLAY_MISS in session.seen[2].flags
-    assert [r[1].get(wire.ANSWERED_BY_HEADER) for r in replies] == [
+    assert [r[1].get(ANSWERED_BY_HEADER) for r in replies] == [
         "recording",
         "recording",
         None,
@@ -596,7 +597,7 @@ def test_an_answer_the_engine_cannot_send_fails_closed_and_forwards_nothing(home
         status, headers, _ = _refund(session, stripe, 100)
     finally:
         session.stop()
-    assert (status, headers[wire.ANSWERED_BY_HEADER]) == (502, "irimi")
+    assert (status, headers[ANSWERED_BY_HEADER]) == (502, "irimi")
     (ex,) = session.seen
     assert Flag.DECISION_FAILED in ex.flags
     assert _Stripe.seen == []

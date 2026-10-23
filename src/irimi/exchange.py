@@ -122,43 +122,7 @@ class Flag(StrEnum):
 # The two halves of idempotency: neither is a write the overlay may apply to a later read.
 IDEMPOTENCY_FLAGS: tuple[Flag, ...] = (Flag.IDEMPOTENT_REPLAY, Flag.IDEMPOTENCY_CONFLICT)
 
-# The control endpoint: a request addressed to irimi's own listener whose path starts here is
-# the SDK reporting a run's start, end or tool calls, and is answered by `irimi.control`. It is
-# never forwarded and never an `Exchange`.
-CONTROL_PREFIX = "/_irimi/"
-# The `Irimi-Answered-By` value every control answer carries. Not an `AnsweredBy`: that vocabulary
-# is the trace's, and a control request never appears in a trace.
-CONTROL_ANSWER = "control"
-# The control endpoint's run routes under CONTROL_PREFIX: `runs/{run_id}/{action}`. Here
-# rather than in `control`, so the SDK, which posts to them from layer 2, spells them the way the
-# endpoint reads them.
-RUNS_ROUTE = "runs"
-START_ACTION = "start"
-TOOL_CALLS_ACTION = "tool-calls"
-END_ACTION = "end"
-RUN_ACTIONS = (START_ACTION, TOOL_CALLS_ACTION, END_ACTION)
-# The one control route that answers with something: `runs/{run_id}/tool-calls/recorded`, where the
-# SDK asks a replay for a read tool's recorded result. Not a run action: it reports nothing.
-RECORDED_ACTION = f"{TOOL_CALLS_ACTION}/recorded"
-# The routes about a tool call, which a run with no SDK start may use: the process run, or
-# `unattributed` for a call made in no run.
-TOOL_ACTIONS = frozenset({TOOL_CALLS_ACTION, RECORDED_ACTION})
-# The header the SDK names its control protocol version in, on every post. The endpoint answers
-# 426 to another major version, so an SDK and a proxy upgraded apart say so instead of losing runs.
-PROTOCOL_HEADER = "irimi-protocol"
-PROTOCOL_VERSION = "1"
-# The header that names the run a request belongs to. irimi reads it and strips it; the SDK
-# puts it on every request a run makes. Here, in layer 0, rather than in `wire`, so the
-# SDK, which sits beside `wire` and may not import it, spells it the same way. Header
-# names are compared case-insensitively, and irimi stores them lower-case.
-RUN_HEADER = "irimi-run"
-
 Headers = tuple[tuple[str, str], ...]
-
-
-def protocol_major(version: str) -> str:
-    """The major part of a control protocol version: `1` of `1.2`."""
-    return version.strip().partition(".")[0]
 
 
 def header_value(headers: Headers, name: str) -> str | None:

@@ -7,16 +7,10 @@ run with `attribute_run`, and stamps every answer it decided with `stamp`.
 from collections.abc import Iterable
 from dataclasses import replace
 
-from irimi.exchange import RUN_HEADER, AnsweredBy, Headers, Request, Response
+from irimi.exchange import AnsweredBy, Headers, Request, Response
+from irimi.protocol.headers import ANSWERED_BY_HEADER, RUN_HEADER
 from irimi.trace import is_valid_run_id
 
-# Stamped on every response irimi decided rather than forwarded, carrying the `answered_by` value
-# itself (`fake-L0`, `fake-L1`, `delegated`, `irimi`). See `answered_by_header` for why a live
-# forward gets none.
-ANSWERED_BY_HEADER = "irimi-answered-by"
-# A name in irimi's own header vocabulary that irimi never sends. The engine strips one an agent
-# sends, as it strips every `Irimi-` header that is not the agent's to set.
-REWROTE_HEADER = "irimi-rewrote"
 # The `answered_by` of every error irimi answers with itself.
 IRIMI_ANSWER: AnsweredBy = "irimi"
 

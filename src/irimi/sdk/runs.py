@@ -9,7 +9,7 @@ Entering it:
    replay is: makes that id current, calls `instrument()`, and captures and posts nothing, since
    `irimi replay` owns that run's record, start and end alike. So everything the child does
    lands in the one run: a trigger `replay_child` calls, a trigger an argv reaches, or several.
-3. A NEW RUN. Otherwise it captures the trigger, mints an id (`new_run_id`) and makes it current,
+3. A NEW RUN. Otherwise it captures the trigger, mints an id (`trace.new_run_id`), makes it current,
    posts the run's `start` and calls `instrument()`.
 4. The body runs.
 5. It posts the run's `end`, unless it adopted the run: outcome `ok`, or `error` with what was
@@ -44,14 +44,15 @@ import asyncio
 import contextvars
 import logging
 import os
-import secrets
 import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, replace
 from types import TracebackType
 from typing import Any
 
-from irimi import __version__, paths, trace
+from irimi import __version__, trace
+from irimi.protocol.control import RunStart, run_end_to_json, run_start_to_json
+from irimi.protocol.env import AGENT_VERSION_ENV
 from irimi.sdk import context, errors
 from irimi.sdk.capture import Captured
 from irimi.sdk.client import LOGGER_NAME, ControlClient, Reporter
@@ -65,13 +66,6 @@ logger = logging.getLogger(LOGGER_NAME)
 reporter: Reporter = ControlClient()
 # Set once `instrument()` has raised and been logged, so a broken one is logged once, not per run.
 _instrument_failed = False
-
-
-def new_run_id() -> str:
-    """A fresh run id: 16 lower-case hex characters. It passes `trace.is_valid_run_id`, and being
-    lower-case it never differs only in case from another, which a case-insensitive filesystem
-    would file in `unattributed/`."""
-    return secrets.token_hex(8)
 
 
 @dataclass(frozen=True)
@@ -185,13 +179,10 @@ class RunScope:
             return self._opened
         args, replayable = self._capture()
         trigger = trace.Trigger(self._name, self._entrypoint, args, replayable)
-        start = {
-            "trigger": trace.trigger_to_json(trigger),
-            "agent_version": os.environ.get(paths.AGENT_VERSION_ENV),
-            "sdk_version": __version__,
-            "started_at": time.time(),
-        }
-        run_id = new_run_id()
+        start = run_start_to_json(
+            RunStart(trigger, os.environ.get(AGENT_VERSION_ENV), __version__, time.time())
+        )
+        run_id = trace.new_run_id()
         self._opened = _Opened(run_id, context.enter(run_id), start)
         return self._opened
 
@@ -254,12 +245,5 @@ def _report_end(opened: _Opened, exc: BaseException | None) -> None:
     if opened.adopted:
         return
     error = None if exc is None else errors.error_info(exc)
-    reporter.post(
-        opened.run_id,
-        "end",
-        {
-            "ended_at": time.time(),
-            "outcome": "ok" if exc is None else "error",
-            "error": trace.error_to_json(error),
-        },
-    )
+    end = trace.RunEnd(time.time(), "ok" if exc is None else "error", error, None)
+    reporter.post(opened.run_id, "end", run_end_to_json(end))

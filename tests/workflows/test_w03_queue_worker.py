@@ -157,7 +157,7 @@ def test_phase_3_exit_holds_for_eight_concurrent_runs(run_workflow, scenario, mo
     process = ["process"] if mode == "shadow" else []
     assert sorted(r.attribution for r in records) == [*process, *["sdk"] * 8]
     runs = [r for r in records if r.attribution == "sdk"]
-    assert {(r.outcome, r.error) for r in runs} == {("ok", None)}
+    assert {(r.end.outcome, r.end.error) for r in runs} == {("ok", None)}
     # What no run names is filed here: without the SDK's labels, every request is.
     assert reader.load_run(UNATTRIBUTED).events == []
     ledger = scenario.startswith("ledger_")
@@ -234,7 +234,7 @@ def test_eight_messages_are_eight_stored_runs_each_holding_only_its_own_charge(
     assert {r.run_id for r in runs} == set(shadow.by_run())
     trigger = TRIGGERS[scenario]
     for record in runs:
-        assert (record.outcome, record.error, record.exit_code) == ("ok", None, None)
+        assert (record.end.outcome, record.end.error, record.end.exit_code) == ("ok", None, None)
         assert (record.sdk_version, record.agent_version) == (irimi.__version__, None)
         assert record.trigger is not None
         assert (record.trigger.name, record.trigger.entrypoint) == (trigger, f"{AGENT}:{trigger}")
@@ -344,10 +344,12 @@ def test_one_failing_message_fails_only_its_own_run(run_workflow, mode):
     assert shadow.by_run()[failed] == ["read:ch_Q2"]
     # Stored: exactly one run ended in error, with the poison message's ValueError.
     stored = [r for r in shadow.stored().list_runs() if r.attribution == "sdk"]
-    assert sorted(r.outcome or "" for r in stored) == ["error", "ok", "ok", "ok"]
-    [error] = [r for r in stored if r.outcome == "error"]
+    assert sorted(r.end.outcome or "" for r in stored) == ["error", "ok", "ok", "ok"]
+    [error] = [r for r in stored if r.end.outcome == "error"]
     assert error.run_id == failed
-    assert error.error == ErrorInfo("builtins.ValueError", "cannot refund ch_Q2: poison message")
+    assert error.end.error == ErrorInfo(
+        "builtins.ValueError", "cannot refund ch_Q2: poison message"
+    )
     assert shadow.exit_code == 0
     assert (shadow.result()["ok"], shadow.result()["failed"]) == (3, 1)
     assert shadow.exchange_lines().count(REFUND_LINE) == 3
@@ -501,10 +503,12 @@ def test_each_async_with_sdk_run_block_is_one_run_with_its_message_as_the_trigge
         assert record.trigger is not None
         assert (record.trigger.name, record.trigger.entrypoint) == ("message", None)
         assert record.trigger.replayable
-        assert record.outcome == ("error" if charge == "ch_Q2" else "ok")
+        assert record.end.outcome == ("error" if charge == "ch_Q2" else "ok")
     assert found["ch_Q0"].trigger.args == {"charge": "ch_Q0", "amount": 100, "index": 0}
     poison = found["ch_Q2"]
-    assert poison.error == ErrorInfo("builtins.ValueError", "cannot refund ch_Q2: poison message")
+    assert poison.end.error == ErrorInfo(
+        "builtins.ValueError", "cannot refund ch_Q2: poison message"
+    )
     assert runs[poison.run_id] == ["read:ch_Q2"]
     assert shadow.exchange_lines().count(REFUND_LINE) == 3
     for result in (shadow, bare):
@@ -527,13 +531,13 @@ def test_a_run_cancelled_at_shutdown_ends_in_error_with_its_cancellation(run_wor
     logged = sorted((e["outcome"], e.get("error")) for e in shadow.events("run.end"))
     assert logged == [("error", "CancelledError"), ("ok", None), ("ok", None)]
     found = stored_by_charge(shadow, lambda args: args["message"])
-    assert {c: r.outcome for c, r in found.items()} == {
+    assert {c: r.end.outcome for c, r in found.items()} == {
         "ch_Q0": "ok",
         "ch_Q1": "error",
         "ch_Q2": "ok",
     }
     cancelled = found["ch_Q1"]
-    assert cancelled.error == ErrorInfo("asyncio.exceptions.CancelledError", "")
+    assert cancelled.end.error == ErrorInfo("asyncio.exceptions.CancelledError", "")
     assert shadow.by_run()[cancelled.run_id] == ["read:ch_Q1"]
     assert shadow.exchange_lines().count(REFUND_LINE) == 2
 
@@ -558,7 +562,7 @@ def test_a_trigger_on_a_method_names_its_class_and_leaves_self_out_of_the_args(r
     for record in found.values():
         assert record.trigger is not None and record.trigger.replayable
         assert set(record.trigger.args) == {"message"}
-        assert (record.outcome, record.agent_version) == ("ok", AGENT_VERSION)
+        assert (record.end.outcome, record.agent_version) == ("ok", AGENT_VERSION)
     if mode == "shadow":
         [process] = [r for r in shadow.stored().list_runs() if r.attribution == "process"]
         assert process.agent_version == AGENT_VERSION
@@ -589,14 +593,14 @@ def test_a_sync_trigger_that_returns_a_coroutine_hands_the_run_to_it(run_workflo
         events = shadow.stored().load_run(record.run_id).events
         if charge == "ch_Q2":
             assert [label.split(":")[0] for label in labels] == ["read"]
-            assert (record.outcome, record.error) == (
+            assert (record.end.outcome, record.end.error) == (
                 "error",
                 ErrorInfo("builtins.ValueError", "cannot refund ch_Q2: poison message"),
             )
             assert len(events) == 1
         else:
             assert sorted(label.split(":")[0] for label in labels) == ["audit", "read", "refund"]
-            assert (record.outcome, record.error) == ("ok", None)
+            assert (record.end.outcome, record.end.error) == ("ok", None)
             assert len(events) == 4
     assert shadow.exchange_lines().count(REFUND_LINE) == 3
 
@@ -625,7 +629,7 @@ def test_runs_that_share_one_pooled_connection_never_mix(run_workflow, mode):
     assert sorted(found) == [f"ch_Q{i}" for i in range(8)]
     reader = shadow.stored()
     for record in found.values():
-        assert record.outcome == "ok"
+        assert record.end.outcome == "ok"
         assert len(reader.load_run(record.run_id).events) == 3
     assert reader.load_run(shadow.engine_run_id()).events == []
     assert shadow.exchange_lines().count(REFUND_LINE) == 8
@@ -654,14 +658,14 @@ def test_a_task_a_sync_trigger_returns_files_its_calls_in_the_run_that_already_e
     assert sorted(found) == ["ch_Q0", "ch_Q1"]
     reader = shadow.stored()
     for record in found.values():
-        assert record.outcome == "ok" and record.ended_at is not None
+        assert record.end.outcome == "ok" and record.end.ended_at is not None
         events = reader.load_run(record.run_id).events
         assert sorted((e.request.method, e.request.path) for e in events) == [
             ("GET", f"/v1/charges/{record.trigger.args['message']['charge']}"),
             ("GET", f"/v1/charges/{record.trigger.args['message']['charge']}"),
             ("POST", "/v1/refunds"),
         ]
-        assert min(e.started_at for e in events) > record.ended_at
+        assert min(e.started_at for e in events) > record.end.ended_at
     assert reader.load_run(shadow.engine_run_id()).events == []
     assert shadow.exchange_lines().count(REFUND_LINE) == 2
     if mode == "serve":
@@ -803,7 +807,7 @@ def test_async_tool_calls_from_eight_tasks_each_land_in_their_task_s_run(run_wor
     found = stored_by_charge(shadow, lambda args: args["message"])
     assert sorted(found) == [f"ch_Q{i}" for i in range(8)]
     for charge, record in found.items():
-        assert record.outcome == "ok"
+        assert record.end.outcome == "ok"
         calls = stored_tool_calls(shadow, record.run_id)
         assert [(c.name, c.ran, c.args, c.result) for c in calls] == [
             (f"{AGENT}:ledger_balance_async", "real", {"charge": charge}, 0),
@@ -1181,7 +1185,7 @@ def test_a_worker_method_s_run_cannot_be_called_alone_and_replays_by_its_command
     [said] = alone.replay_result()
     assert said.startswith("error: cannot call ") and said.endswith(f": {why}")
     stored = alone.stored().load_run(alone.process_run_id())
-    assert (stored.events, stored.record.error) == ([], ErrorInfo("cannot-call", why))
+    assert (stored.events, stored.record.end.error) == ([], ErrorInfo("cannot-call", why))
     _, whole = replayed(W, "ledger_worker", run_id=first, command=True)
     stored = whole.stored().load_run(whole.process_run_id()).events
     calls = [(c.name.rsplit(".", 1)[1], c.ran) for c in stored if isinstance(c, ToolCall)]

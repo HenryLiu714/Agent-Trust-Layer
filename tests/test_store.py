@@ -62,11 +62,12 @@ def _record(run_id: str, started_at: float | None = 10.0, args=None) -> RunRecor
         engine_version="0.0.0",
         sdk_version=None,
         started_at=started_at,
-        ended_at=None,
-        outcome=None,
-        error=None,
-        exit_code=None,
     )
+
+
+def _replays(record: RunRecord, replay_of: str) -> RunRecord:
+    """`record` as a replay of `replay_of` builds it: `mode` set from `replay_of`."""
+    return dataclasses.replace(record, mode="replay", replay_of=replay_of)
 
 
 def _tool_call(run_id: str, args) -> ToolCall:
@@ -128,13 +129,12 @@ def test_a_run_started_recorded_and_ended_reads_back_whole(root, key):
 
     run = StoreReader(root).load_run("r1")
     assert (run.record.attribution, run.record.agent_version) == ("process", "1.2.3")
-    assert (run.record.ended_at, run.record.outcome, run.record.exit_code) == (3.0, "error", 2)
-    assert run.record.error == ErrorInfo("exit", "exited 2")
+    assert run.record.end == trace.RunEnd(3.0, "error", ErrorInfo("exit", "exited 2"), 2)
     assert run.record.dropped_events == 0
     assert _paths(run) == ["/a", "/b"]
     # A trigger's args are redacted before they reach disk, as a body is.
     assert run.record.trigger is not None
-    assert run.record.trigger.args == {
+    assert trace.trigger_args(run.record.trigger) == {
         "argv": ["agent", "--token", redact.placeholder(key, SECRET)]
     }
     assert not any(SECRET.encode() in p.read_bytes() for p in root.rglob("*") if p.is_file())
@@ -147,8 +147,8 @@ def test_the_first_event_of_a_run_with_no_start_creates_a_header_run(root, key):
     s.close()
     record = StoreReader(root).load_run("r2").record
     # Started when its first event did, so it sorts among the runs that have a start.
-    assert record == store.header_record("r2", started_at=1.0)
-    assert (record.attribution, record.trigger, record.outcome) == ("header", None, None)
+    assert record == RunRecord.header("r2", started_at=1.0)
+    assert (record.attribution, record.trigger, record.end) == ("header", None, None)
 
 
 def test_a_start_for_a_header_run_rewrites_its_record(root, key):
@@ -180,7 +180,7 @@ def test_a_start_for_a_run_that_has_ended_is_dropped_and_the_run_kept_whole(root
     assert "r1" not in s._runs  # forgotten again, as at its end: a serve holds only open runs
     run = StoreReader(root).load_run("r1")
     assert run.record == dataclasses.replace(
-        _record("r1"), attribution="sdk", ended_at=20.0, outcome="ok"
+        _record("r1"), attribution="sdk", end=trace.RunEnd(20.0, "ok", None, None)
     )
     assert _paths(run) == ["/v1/things"]
     ended = {p.name: p.read_bytes() for p in (root / "runs" / "r1").iterdir()}
@@ -192,15 +192,27 @@ def test_a_start_for_a_run_that_has_ended_is_dropped_and_the_run_kept_whole(root
 
 
 def test_every_run_a_replay_s_store_starts_is_that_replay_s(root, key):
-    """The process run and an SDK run alike, whatever their records say."""
+    """The process run and an SDK run alike: each record's constructor names the replay, and the
+    store checks it rather than stamping it, so a start that names no replay is dropped, counted
+    on the store alone, with no run directory of its own."""
+    trigger = Trigger("handle", "agent:handle", {}, True)
     s = DirectoryStore(root, key, replay_of="rec1")
-    s.start_run(_record("p1"))
-    s.start_run(dataclasses.replace(_record("s1"), attribution="sdk"))
+    s.start_run(RunRecord.process("p1", ["agent"], None, 10.0, replay_of="rec1"))
+    s.start_run(RunRecord.sdk("s1", trigger, None, "0.0.0", 10.0, replay_of="rec1"))
+    s.start_run(_record("x1"))
     s.close()
+    assert s.stats().dropped == 1
     reader = StoreReader(root)
-    for run_id in ("p1", "s1"):
+    for run_id, attribution in (("p1", "process"), ("s1", "sdk")):
         record = reader.load_run(run_id).record
-        assert (record.mode, record.replay_of) == ("replay", "rec1")
+        assert (record.attribution, record.mode, record.replay_of) == (
+            attribution,
+            "replay",
+            "rec1",
+        )
+    assert not (root / "runs" / "x1").exists()
+    with pytest.raises(RunNotFound):
+        reader.load_run("x1")
     s = DirectoryStore(root / "other", key)
     s.start_run(_record("p2"))
     s.close()
@@ -216,7 +228,7 @@ def test_a_header_run_a_replay_makes_is_that_replay_s(root, key):
     s.close()
     record = StoreReader(root).load_run("r2").record
     assert (record.mode, record.replay_of, record.attribution) == ("replay", "rec1", "header")
-    assert record == store.header_record("r2", started_at=1.0, replay_of="rec1")
+    assert record == RunRecord.header("r2", started_at=1.0, replay_of="rec1")
 
 
 def test_a_replay_never_writes_into_the_run_it_replays(root, key):
@@ -232,7 +244,7 @@ def test_a_replay_never_writes_into_the_run_it_replays(root, key):
     s.close()
     recorded = {p.name: p.read_bytes() for p in (root / "runs" / "nightly").iterdir()}
     s = DirectoryStore(root, key, replay_of="nightly")
-    s.start_run(dataclasses.replace(_record("nightly"), attribution="sdk"))
+    s.start_run(_replays(dataclasses.replace(_record("nightly"), attribution="sdk"), "nightly"))
     s.record(_exchange("nightly", "/replayed"))
     s.end_run("nightly", 30.0, "ok")
     s.close()
@@ -259,10 +271,10 @@ def test_a_replay_writes_only_the_runs_it_makes(root, key):
     s.close()
     recorded = {p.name: p.read_bytes() for p in (root / "runs" / "sibling").iterdir()}
     s = DirectoryStore(root, key, replay_of="replayed")
-    s.start_run(dataclasses.replace(_record("sibling"), attribution="sdk"))
+    s.start_run(_replays(dataclasses.replace(_record("sibling"), attribution="sdk"), "replayed"))
     s.record(_exchange("sibling", "/replayed"))
     s.end_run("sibling", 30.0, "ok")
-    s.start_run(dataclasses.replace(_record("fresh"), attribution="sdk"))
+    s.start_run(_replays(dataclasses.replace(_record("fresh"), attribution="sdk"), "replayed"))
     s.record(_exchange("fresh", "/replayed"))
     s.end_run("fresh", 30.0, "ok")
     s.record(_exchange("fresh", "/late"))
@@ -294,7 +306,7 @@ def test_a_header_run_started_by_an_event_with_no_clock_has_no_start(root, key):
     s = DirectoryStore(root, key)
     s.record(dataclasses.replace(_exchange("r2"), started_at=0.0, ended_at=0.0))
     s.close()
-    assert StoreReader(root).load_run("r2").record == store.header_record("r2")
+    assert StoreReader(root).load_run("r2").record == RunRecord.header("r2")
 
 
 def test_a_header_run_sorts_by_its_first_event_among_runs_that_started(root, key):
@@ -357,7 +369,7 @@ def test_a_late_event_after_the_run_ended_is_still_appended(root, key):
     s.record(_exchange("r1", "/late"))
     s.close()
     run = StoreReader(root).load_run("r1")
-    assert (run.record.outcome, _paths(run)) == ("ok", ["/late"])
+    assert (run.record.end.outcome, _paths(run)) == ("ok", ["/late"])
 
 
 def test_a_tool_calls_args_and_result_are_redacted_and_share_the_runs_seq(root, key):
@@ -389,7 +401,7 @@ def test_an_error_and_a_trigger_name_are_redacted_before_they_reach_disk(root, k
     run = StoreReader(root).load_run("r1")
     hidden = redact.placeholder(key, SECRET)
     assert run.record.trigger is not None and run.record.trigger.name == hidden
-    assert run.record.error == ErrorInfo("x.Err", f"Invalid API key: {hidden}")
+    assert run.record.end.error == ErrorInfo("x.Err", f"Invalid API key: {hidden}")
     (stored,) = run.events
     assert isinstance(stored, ToolCall)
     assert stored.error == ErrorInfo(f"x.{hidden}", f"refused {hidden}")
@@ -419,7 +431,7 @@ def test_an_error_is_redacted_whole_and_only_then_cut(root, key):
     assert cut.type.endswith(hidden + ".B") and cut.message.endswith(hidden + " a")
     (stored,) = run.events
     assert isinstance(stored, ToolCall)
-    assert (run.record.error, stored.error) == (cut, cut)
+    assert (run.record.end.error, stored.error) == (cut, cut)
     assert not any(b"ghp_" in p.read_bytes() for p in root.rglob("*") if p.is_file())
 
 
@@ -667,7 +679,7 @@ def test_a_store_abandoned_without_close_leaves_an_incomplete_run_that_still_rea
     _drain(s, 5)  # the writer has flushed; the process then "dies" without close()
 
     run = StoreReader(root).load_run("r1")
-    assert run.record.outcome is None  # incomplete
+    assert run.record.end is None  # incomplete
     assert _paths(run) == [f"/n{n}" for n in range(5)]
 
     with open(root / "runs/r1/events.jsonl", "a") as f:
@@ -1149,7 +1161,7 @@ def test_a_runs_start_counts_against_the_byte_budget(root, key, monkeypatch):
     reader = StoreReader(root)
     assert reader.load_run("r1").record == started
     late = reader.load_run("r2")
-    assert late.record == dataclasses.replace(store.header_record("r2", 1.0), dropped_events=1)
+    assert late.record == dataclasses.replace(RunRecord.header("r2", 1.0), dropped_events=1)
     assert _paths(late) == ["/no-body"]
 
 
@@ -1186,7 +1198,7 @@ def test_an_end_waits_with_its_error_cut_outside_secrets_and_is_never_dropped_fo
         "t." * (store.MAX_QUEUED_ERROR // 2), "m" * (store.MAX_QUEUED_ERROR - 10) + " "
     )
     record = StoreReader(root).load_run("r1").record
-    assert (record.outcome, record.error) == (
+    assert (record.end.outcome, record.end.error) == (
         "error",
         ErrorInfo("t." * (limits.MAX_ERROR_TYPE // 2), "m" * limits.MAX_ERROR_MESSAGE),
     )
@@ -1202,7 +1214,7 @@ def test_an_end_whose_error_is_not_text_is_a_drop_on_its_run(root, key):
     s.close()
     assert s.stats().dropped == 1
     run = StoreReader(root).load_run("r1")
-    assert (run.record.outcome, run.record.dropped_events) == (None, 1)
+    assert (run.record.end, run.record.dropped_events) == (None, 1)
 
 
 def test_a_start_that_cannot_be_measured_is_a_drop_on_its_run(root, key):
@@ -1216,7 +1228,7 @@ def test_a_start_that_cannot_be_measured_is_a_drop_on_its_run(root, key):
     s.close()
     assert s.stats().dropped == 1
     run = StoreReader(root).load_run("r1")
-    assert run.record == dataclasses.replace(store.header_record("r1", 1.0), dropped_events=1)
+    assert run.record == dataclasses.replace(RunRecord.header("r1", 1.0), dropped_events=1)
     assert _paths(run) == ["/v1/things"]
 
 
@@ -1385,7 +1397,7 @@ def test_an_ended_run_is_forgotten_and_a_late_event_reopens_it_from_disk(root, k
     s.record(_exchange("r1", "/late"))
     s.close()
     run = StoreReader(root).load_run("r1")
-    assert (run.record.outcome, run.record.dropped_events) == ("ok", 2)
+    assert (run.record.end.outcome, run.record.dropped_events) == ("ok", 2)
     assert _paths(run) == ["/a", "/late"]
     lines = [json.loads(line) for line in (root / "runs/r1/events.jsonl").open()]
     assert [line["seq"] for line in lines] == [1, 2]

@@ -1388,7 +1388,7 @@ def test_two_policies_never_share_a_ts_sequence():
 # ------------------------------------------------------------------- L3 preconditions
 
 
-class _Reader:
+class _Reader(reader.Reader):
     """A reader serving canned answers in order, and writing down every request it was asked.
 
     An answer that is an exception is raised instead of returned, so "the reader raised" is one

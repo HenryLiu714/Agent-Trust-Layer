@@ -10,6 +10,7 @@ from irimi.delegation import TargetRefused, refuse_self_target, target_url
 from irimi.exchange import Exchange, Flag, Request
 from irimi.ingress import ReverseDoorRefused, detect_door, rewrite_reverse
 from irimi.netaddr import Target, is_loopback, is_self_host
+from irimi.protocol.headers import ANSWERED_BY_HEADER
 from irimi.redact import is_credential_header
 from irimi.wire import attribute_run, parse
 
@@ -429,7 +430,7 @@ def test_irimis_own_error_is_one_json_shape_and_stamped_by_the_caller():
     assert error.headers == (("content-type", "application/json"), ("x-extra", "1"))
     assert json.loads(error.body) == {"error": {"type": "irimi_refused", "message": "no"}}
     stamped = wire.stamp(error, "irimi")
-    assert stamped.header(wire.ANSWERED_BY_HEADER) == "irimi"
+    assert stamped.header(ANSWERED_BY_HEADER) == "irimi"
     assert wire.stamp(error, "live") is error
 
 

@@ -14,7 +14,9 @@ import logging
 from dataclasses import dataclass, replace
 
 from irimi import netaddr, wire
-from irimi.exchange import CONTROL_PREFIX, RUN_HEADER, Door, Request
+from irimi.exchange import Door, Request
+from irimi.protocol.control import CONTROL_PREFIX
+from irimi.protocol.headers import REWROTE_HEADER, RUN_HEADER
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +114,7 @@ def admit(
     # it, and no forward, target or check read carries it to the service. irimi sends no
     # `Irimi-Rewrote`, so one the agent sent goes too.
     run_id = wire.attribute_run(request, default_run_id)
-    request = request.without_header(wire.REWROTE_HEADER).without_header(RUN_HEADER)
+    request = request.without_header(REWROTE_HEADER).without_header(RUN_HEADER)
     return Admitted(request, run_id, door, listener, started_at, cut)
 
 

@@ -12,8 +12,8 @@ Its `PYTHONPATH` is this process's `sys.path`, so it imports what this process c
 a file only this user can read, never on the command line, where `ps` shows them and the kernel
 caps one argument's length. The run id goes after `--`, so one that starts with `-` is no flag.
 
-`ReplayResult` and its JSON are declared here, the one codec: `irimi replay --result-file` writes
-it with `to_json`, and this reads it back with `from_json`.
+`irimi replay --result-file` writes the `ReplayResult` this reads back, by the one codec in
+`protocol.replay_files`.
 
 Imports only the stdlib and irimi's lowest layers, as the rest of the SDK does: no engine.
 """
@@ -24,15 +24,13 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from irimi.limits import MAX_CAPTURED_BYTES
+from irimi.protocol.replay_files import ReplayResult, replay_result_from_json
 from irimi.sdk.api import NotCallable, entrypoint, resolve
 from irimi.sdk.capture import bind, capture, capture_call
-
-RESULT_FIELDS = ("source_run_id", "replay_run_id", "exit_code", "diverged_at", "lines")
 
 
 def _run_irimi(argv: list[str], env: Mapping[str, str]) -> int:
@@ -42,60 +40,6 @@ def _run_irimi(argv: list[str], env: Mapping[str, str]) -> int:
     return subprocess.run(
         [sys.executable, "-m", "irimi", *argv], env=dict(env), check=False
     ).returncode
-
-
-@dataclass(frozen=True)
-class ReplayResult:
-    """What one `irimi replay` said. `same` is True when the replay made the same writes as the
-    recording; `str(result)` is what `irimi replay` printed, so `assert result.same, result` shows
-    the difference. `replay_run_id` is the run the replay stored, None when it was refused before
-    it ran (`exit_code` 2, the reason in `lines`). `exit_code` is the CLI's, as `irimi compare`'s:
-    0 the same writes, 1 any differ, 2 trouble (a replay that could not run, or call its trigger);
-    and 130 or 143 for one SIGINT or SIGTERM stopped. `diverged_at` is the line of the first call
-    the recording did not answer, None when every call was."""
-
-    source_run_id: str
-    replay_run_id: str | None
-    exit_code: int
-    diverged_at: str | None
-    lines: tuple[str, ...]
-
-    @property
-    def same(self) -> bool:
-        """The replay ran and made the same writes as the recording: exit code 0."""
-        return self.exit_code == 0
-
-    def __str__(self) -> str:
-        return "\n".join(self.lines)
-
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "source_run_id": self.source_run_id,
-            "replay_run_id": self.replay_run_id,
-            "exit_code": self.exit_code,
-            "diverged_at": self.diverged_at,
-            "lines": list(self.lines),
-        }
-
-    @classmethod
-    def from_json(cls, d: Mapping[str, Any]) -> "ReplayResult":
-        """Raises ValueError for anything `to_json` did not write: a missing or unknown field, or
-        one of the wrong type."""
-        if not isinstance(d, Mapping) or set(d) != set(RESULT_FIELDS):
-            raise ValueError(f"a replay result has the fields {', '.join(RESULT_FIELDS)}")
-        source, replayed, code = d["source_run_id"], d["replay_run_id"], d["exit_code"]
-        diverged, lines = d["diverged_at"], d["lines"]
-        if (
-            not isinstance(source, str)
-            or not (replayed is None or isinstance(replayed, str))
-            or not isinstance(code, int)
-            or isinstance(code, bool)
-            or not (diverged is None or isinstance(diverged, str))
-            or not isinstance(lines, list)
-            or not all(isinstance(line, str) for line in lines)
-        ):
-            raise ValueError("a replay result field has the wrong type")
-        return cls(source, replayed, code, diverged, tuple(lines))
 
 
 class ReplayError(Exception):
@@ -136,7 +80,7 @@ def replay(
         env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
         code = _run_irimi([*argv, "--", run_id], env)
         try:
-            return ReplayResult.from_json(json.loads(result_file.read_text(encoding="utf-8")))
+            return replay_result_from_json(json.loads(result_file.read_text(encoding="utf-8")))
         except (OSError, ValueError) as exc:
             raise ReplayError(f"irimi replay exited {code} and wrote no result: {exc}") from None
 

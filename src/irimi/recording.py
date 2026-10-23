@@ -4,7 +4,7 @@ find the one the recorded run made in its place, and the replay's own state.
 A replay re-runs an agent and answers it from a run it made before. `policy.ReplayPolicy` asks
 this module one question per request - did the recorded run make this same request, and what
 was it answered? - and this module answers it with nothing but the recording: no clock, no I/O,
-no minting. It reads `StoredRun.events` (it may not import `store`, which sits above it).
+no minting. It reads a `trace.StoredRun`'s events.
 
 WHAT "THE SAME REQUEST" IS. Two requests match when their keys do, and the key is built to be
 equal across two runs of one agent while the agent asks for the same thing:
@@ -71,6 +71,7 @@ from irimi.exchange import (
     is_authored_write,
     media_type,
 )
+from irimi.reader import Reader
 from irimi.servicemap import MapIndex, Route
 from irimi.trace import (
     STOPPED_ERROR_TYPES,
@@ -180,8 +181,7 @@ def _servable(exchange: Exchange) -> bool:
     another version - may hold any text, and a header that does not encode raises in the request
     hook, which forwards the flow. Its status must be a final one HTTP defines, 200 to 599:
     a 1xx is never a whole answer, and a 101 switched the recorded connection to a protocol a
-    replay cannot carry on. And a `text/event-stream` 200 recorded with no body and no chunks is a
-    stream whose body was not kept, not an empty answer."""
+    replay cannot carry on."""
     response = exchange.response
     if response is None or exchange.answered_by in ("delegated", "irimi"):
         return False
@@ -197,7 +197,7 @@ def _servable(exchange: Exchange) -> bool:
             value.encode("latin-1")
     except UnicodeEncodeError:
         return False
-    return not (response.status == 200 and not response.body and _streamed(exchange))
+    return True
 
 
 def _match_key(request: Request, kind: Kind, maps: MapIndex) -> _Key:
@@ -552,7 +552,7 @@ class Recording:
             return self._diverged
 
 
-class RecordingReader:
+class RecordingReader(Reader):
     """A `reader.Reader` over a recording: the precondition read of a write a replay could not
     answer from the recording is answered with the recorded run's own read of the same thing.
 

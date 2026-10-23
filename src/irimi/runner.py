@@ -10,10 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
-from irimi import __version__, netaddr
+from irimi import netaddr
 from irimi.engine import Engine, EngineStartError
-from irimi.exchange import CONTROL_PREFIX
-from irimi.paths import (
+from irimi.protocol.control import CONTROL_PREFIX
+from irimi.protocol.env import (
     CONTROL_ENV,
     ENGINE_ACTIVE_ENV,
     PROXY_ENVS,
@@ -24,7 +24,7 @@ from irimi.paths import (
     RUN_ENV,
 )
 from irimi.store import TraceStore
-from irimi.trace import SCHEMA_VERSION, ErrorInfo, JSONValue, RunRecord, Trigger
+from irimi.trace import ErrorInfo
 
 # Hosts the child reaches directly, bypassing the proxy.
 NO_PROXY_VALUE = "localhost,127.0.0.1"
@@ -56,7 +56,7 @@ def child_env(
 ) -> dict[str, str]:
     """`base` plus the variables that route the child through irimi. `base` is never mutated.
 
-        HTTP(S)_PROXY, http(s)_proxy  the listener (`paths.PROXY_ENVS`)
+        HTTP(S)_PROXY, http(s)_proxy  the listener (`protocol.env.PROXY_ENVS`)
         NO_PROXY, no_proxy            `NO_PROXY_VALUE`
         SSL_CERT_FILE and the like    irimi's CA certificate
         NODE_USE_ENV_PROXY=1          makes Node honour the proxy variables
@@ -68,7 +68,7 @@ def child_env(
         IRIMI_REPLAY_ARGS_FILE,       its args file and the file the child writes its outcome
         IRIMI_REPLAY_OUTCOME_FILE     to; removed otherwise
 
-    The `IRIMI_*` names are declared in `paths`, where the SDK can import them.
+    The `IRIMI_*` names are declared in `protocol.env`, where the SDK can import them.
     `IRIMI_AGENT_VERSION` is read from the environment the child inherits, not set here.
 
     `replaying` says the engine answers from a stored run: the child is told so in
@@ -115,37 +115,6 @@ def child_env(
 def exit_code_for(returncode: int) -> int:
     """Shell convention: a child killed by signal N exits 128 + N (Popen reports -N)."""
     return 128 - returncode if returncode < 0 else returncode
-
-
-def process_run(
-    run_id: str,
-    cmd: list[str],
-    agent_version: str | None,
-    started_at: float,
-    trigger: Trigger | None = None,
-) -> RunRecord:
-    """The record `irimi shadow` stores for its child before spawning it: one process tree
-    is one run, and its trigger is the command line, which a replay can run again. `irimi replay`
-    gives the trigger it replays instead, and its store makes the record a replay's
-    (`trace.mode_for`)."""
-    argv: list[JSONValue] = list(cmd)
-    if trigger is None:
-        trigger = Trigger(name=cmd[0], entrypoint=None, args={"argv": argv}, replayable=True)
-    return RunRecord(
-        schema_version=SCHEMA_VERSION,
-        run_id=run_id,
-        mode="shadow",
-        attribution="process",
-        trigger=trigger,
-        agent_version=agent_version,
-        engine_version=__version__,
-        sdk_version=None,
-        started_at=started_at,
-        ended_at=None,
-        outcome=None,
-        error=None,
-        exit_code=None,
-    )
 
 
 def end_process_run(

@@ -3,7 +3,7 @@
 For SDKs that ship their own CA bundle or ignore the proxy variables (stripe-python is the
 canonical case). The door is loopback-only and relays to an allow-list of exact hosts. The engine
 enforces the loopback half (`IrimiAddon._through_reverse_door`) whatever address the listener is
-bound to (#77); these functions decide the rest.
+bound to; these functions decide the rest.
 """
 
 from dataclasses import replace
@@ -27,7 +27,7 @@ def detect_door(request: Request, listen_port: int, local_address: str = "") -> 
 
     `local_address` is the address the connection arrived on. A listener bound wider than loopback
     is also this machine at that address, which an agent in another container reaches by name
-    (`http://irimi:4000/...`): a host that is it, or resolves to it, is the listener too (#77)."""
+    (`http://irimi:4000/...`): a host that is it, or resolves to it, is the listener too."""
     if request.port != listen_port:
         return "forward"
     if netaddr.is_self_host(request.host) or netaddr.resolves_to_self(request.host, local_address):

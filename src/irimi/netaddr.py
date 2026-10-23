@@ -34,8 +34,8 @@ def resolves_to_self(host: str, local_address: str = "") -> bool:
     the listener is this machine at that address too: an agent in another container calls it by
     name (`irimi:4000`), and that name resolves to the address it connected to, never to loopback.
     A host that is that address, or resolves to it, is this machine as well, or forwarding it
-    would make the proxy connect to itself until the ports ran out (#4's loop, #77). A literal is
-    compared without a lookup."""
+    would make the proxy connect to itself until the ports ran out. A literal is compared without
+    a lookup."""
     local = _address(local_address)
     if local is not None and _address(host) == local:
         return True
@@ -70,7 +70,7 @@ def is_loopback(address: str) -> bool:
 
 def authority(host: str, port: int) -> str:
     """`host:port` as a URL spells it: an IPv6 literal in brackets (`[::1]:4000`), so the port is
-    not read as one more group of the address (#77)."""
+    not read as one more group of the address."""
     return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
 
 

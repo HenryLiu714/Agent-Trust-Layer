@@ -1,4 +1,4 @@
-"""Answer targets (design D20): the address that answers a request instead of irimi.
+"""Answer targets: the address that answers a request instead of irimi.
 
 `delegate` is the decision - which target, if any, this request goes to. The rest is what the
 engine needs to act on that decision safely: where to send the request (`target_url`), what it
@@ -14,7 +14,7 @@ from irimi import netaddr
 from irimi.exchange import Request
 from irimi.pipeline import Classification
 
-# The credential-header rule is stated once, in `redact` (#69): a target may not be handed a
+# The credential-header rule is stated once, in `redact`: a target may not be handed a
 # credential header, and disk may not be handed one either. The `as` form re-exports it, because
 # the engine asks `delegation.is_credential_header` which headers a target is not handed.
 from irimi.redact import is_credential_header as is_credential_header
@@ -35,7 +35,7 @@ class TargetUnreachable(TargetRefused):
 
 @dataclass(frozen=True)
 class ForwardTo:
-    """An answer target: the address that answers this request instead of irimi (design D20).
+    """An answer target: the address that answers this request instead of irimi.
 
     `url` is absolute and already carries the path and query the target should see. `forward_auth`
     is the route opting in to keeping its `Authorization` header; the engine strips it otherwise.
@@ -46,7 +46,7 @@ class ForwardTo:
 
 
 def target_url(target: str, request: Request, matched: bool) -> str:
-    """Where a delegated request is sent, with nginx `proxy_pass` path semantics (design D20).
+    """Where a delegated request is sent, with nginx `proxy_pass` path semantics.
 
     A **bare origin** (`http://127.0.0.1:3000`) keeps the request's own path. A target that
     **carries a path** (`http://127.0.0.1:3000/refund`) replaces the part of the path the route
@@ -81,12 +81,12 @@ def refuse_self_target(target: str, listen_port: int, local_address: str = "") -
 
     Targets are loopback-only, so the host alone cannot tell a stub from ourselves - the port is
     what separates them. Forwarding to our own listener makes the proxy dial itself until it runs
-    out of ports, which is the loop `detect_door` was written for on the reverse door (#4).
+    out of ports, the same loop `detect_door` prevents on the reverse door.
 
     `local_address` is the address the request's connection reached irimi at. Bound wider than
     loopback, irimi is that address too, so a target `--allow-target-host` lets name it, or a
-    name resolving to it, is our own listener by the rule `detect_door` applies to a request
-    (#77): refused here, rather than dialled and refused again by the reverse door.
+    name resolving to it, is our own listener by the rule `detect_door` applies to a request:
+    refused here, rather than dialled and refused again by the reverse door.
     """
     parts = urlsplit(target)
     port = parts.port or (443 if parts.scheme == "https" else 80)
@@ -128,8 +128,8 @@ def delegate(request: Request, classification: Classification) -> ForwardTo | No
     # THE SCOPE RULE, decision half (servicemap.CREDENTIAL_PATH_HOSTS). The loader already
     # refuses a non-loopback target on a service claiming one of these hosts, whichever layer it
     # arrived through. This asks the same question of the request and the answer actually in
-    # front of us, so a target that reaches here some other way - a layer added later, a map
-    # built in code, a future flag - inherits the rule instead of escaping it. On this host the
+    # front of us, so a target that reaches here some other way - a map built in code, a new
+    # layer or flag - inherits the rule instead of escaping it. On this host the
     # path IS the credential, for every path and not only the ones a map lists.
     if request.host in CREDENTIAL_PATH_HOSTS and not netaddr.is_local_target(url):
         logger.error(

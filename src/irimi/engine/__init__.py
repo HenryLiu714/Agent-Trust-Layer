@@ -26,11 +26,11 @@ class EngineConfig:
     reverse_hosts: frozenset[str] = frozenset()  # hosts the reverse door may relay to; empty = none
     maps: MapIndex = field(default_factory=MapIndex)  # loaded service maps; empty = verb rule only
     # `irimi shadow --serve`: no child process, runs named by their requests. Reported by the
-    # control endpoint's health answer (#73); P3-11 (#77) sets it.
+    # control endpoint's health answer.
     serve: bool = False
-    # The stored run this engine answers from, as a replay (#82): `cli._build_engine` builds a
+    # The stored run this engine answers from, as a replay: `cli._build_engine` builds a
     # `ReplayPolicy` over it instead of a `ShadowPolicy`. None is shadow mode. `irimi replay`
-    # (#84) sets it.
+    # sets it.
     replay_of: str | None = None
 
 

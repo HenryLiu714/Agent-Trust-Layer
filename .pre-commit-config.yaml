@@ -1,0 +1,22 @@
+# Install once with `uvx pre-commit install`. The hooks run the tools from the project's own
+# environment, so they use the versions uv.lock pins, the same ones `make check` and CI run.
+# mypy and the full test suite stay in `make check`: they are too slow for every commit.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix --force-exclude
+        language: system
+        types_or: [python, pyi]
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
+      - id: prose-style
+        name: prose lint (tests/test_prose_style.py)
+        entry: uv run pytest -q -p no:cacheprovider tests/test_prose_style.py
+        language: system
+        pass_filenames: false
+        files: ^(src|tests|examples)/

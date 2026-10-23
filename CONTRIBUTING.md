@@ -3,8 +3,9 @@
 ## Prerequisites
 
 - macOS or Linux.
-- [`uv`](https://docs.astral.sh/uv/). The setup script installs it if it is missing. `uv` fetches
-  the Python it needs (3.14 for development, per `.python-version`); you do not install Python.
+- [`uv`](https://docs.astral.sh/uv/). The setup script prints the install command if it is
+  missing. `uv` fetches the Python it needs (3.14 for development, per `.python-version`); you do
+  not install Python.
 - `make`, optionally. Every `make` target is one `uv` command, listed in the `Makefile`.
 
 ## Set up
@@ -27,25 +28,36 @@ uv run irimi --help
 
 A `v<version>` tag publishes irimi to PyPI through `.github/workflows/release.yml`, with PyPI
 Trusted Publishing, so there is no token to keep (#169). Bump `version` in `pyproject.toml` and
-irimi's own entry in `uv.lock` in a PR; once it is merged, tag that commit on `main` and push the
-tag:
+irimi's own entry in `uv.lock`, and add a `## [<version>]` section to `CHANGELOG.md`, in a PR;
+once it is merged, tag that commit on `main` and push the tag:
 
 ```
 git tag v0.1.0 && git push origin v0.1.0
 ```
 
-The workflow refuses a tag that does not match `pyproject.toml`. A version, once on PyPI, can never
-be uploaded again, even after it is deleted.
+The workflow runs the whole CI suite, builds the wheel and sdist, and installs the wheel into a
+clean Python 3.12 venv to run `irimi --version` and `irimi init`. It refuses a tag that does not
+match `pyproject.toml`, a tag on a commit that is not on `main`, and a version with no
+`CHANGELOG.md` section. Only then does it publish, with attestations, and create a GitHub Release
+with that section as its notes. A version, once on PyPI, can never be uploaded again, even after it
+is deleted.
 
 ## Day to day
 
 ```
+make              # list the targets
 make check        # what CI runs: lint, format check, mypy, tests
-make test         # uv run pytest -q
+make test         # uv run pytest -q -n auto
+make test-fast    # the unit tests: no end-to-end runs, no live calls, no workflow corpus
+make workflows    # the sample-workflow corpus alone
+make cov          # the tests with a coverage report
 make lint         # uv run ruff check . && uv run ruff format --check .
 make fmt          # uv run ruff format . && uv run ruff check --fix .
 make typecheck    # uv run mypy
 ```
+
+`uvx pre-commit install` runs ruff and the prose lint on every commit, with the versions `uv.lock`
+pins. Each test has a 120-second limit (`pytest-timeout`), so a hang fails its test.
 
 The suite runs in about five minutes and needs no network and no keys: the engine tests start a
 real mitmproxy on a random loopback port against local HTTP servers. `tests/conftest.py` points

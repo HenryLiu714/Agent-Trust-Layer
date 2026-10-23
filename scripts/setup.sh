@@ -12,6 +12,9 @@ if ! command -v uv >/dev/null 2>&1; then
   export PATH="$HOME/.local/bin:$PATH"
 fi
 
+# mitmproxy's dependencies do not build on a free-threaded Python, which uv may pick for a bare 3.14.
+export UV_PYTHON="${UV_PYTHON:-3.14+gil}"
+
 echo "Syncing project (this downloads Python 3.14 and dependencies on first run)..."
 uv sync
 

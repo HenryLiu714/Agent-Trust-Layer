@@ -43,12 +43,13 @@ and prints what the agent did differently ([Replaying a run](#replaying-a-run)).
 
 Requirements: macOS or Linux, and [`uv`](https://docs.astral.sh/uv/) (the setup script installs it
 if it is missing). `uv` fetches Python 3.14 for you; installed as a tool, irimi runs on 3.12 or
-newer, though not on a free-threaded build (`python3.14t`), for which mitmproxy has no wheels.
+newer, though not on a free-threaded build (`python3.14t`), for which mitmproxy has no wheels
+([Troubleshooting](#troubleshooting)).
 
 To use irimi on your own agent, install it from PyPI:
 
 ```
-uv tool install irimi         # or: pipx install irimi
+uv tool install --python 3.12 irimi    # or: pipx install --python python3.12 irimi
 irimi init
 irimi shadow -- python agent.py
 ```
@@ -1023,6 +1024,12 @@ conventions. [`docs/architecture.md`](docs/architecture.md) has the module map, 
 moves through the engine, and the rules the tests enforce. Branch per issue, named
 `<issue-number>-<short-slug>`, and open a PR against `main` with `Closes #<n>`. CI runs on Ubuntu
 and macOS, on Python 3.14 and 3.12.
+
+## Troubleshooting
+
+**Build fails in pylsqpack** (`error: call to undeclared function '_Py_DecRefShared'`): uv picked a
+free-threaded Python, for which mitmproxy's dependencies have no wheels. Ask for a GIL build:
+`uv tool install --python 3.12 irimi`, or in a clone, `UV_PYTHON=3.14+gil uv sync`.
 
 ## License
 

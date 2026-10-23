@@ -1,19 +1,6 @@
-"""Trace format v1 end to end: what `irimi shadow` stores, read back off disk.
-
-The unit tests in `tests/test_trace.py` and `tests/test_store.py` prove the codecs and the store
-over exchanges built by hand, and the engine tests prove a real engine stamps its exchanges. None
-of them proves this: a run of the real CLI, over the refund agent's scenario, leaves a run on disk
-whose exchanges read back as exactly what the engine handed its store - redacted, with every
-precondition, overlay and webhook field intact and every span in order.
-
-`cli.compose` looks `DirectoryStore` up when it opens the store, so each test here swaps in
-`_SpyStore`: the real store, unchanged, which also remembers each exchange the engine handed it.
-Every assertion is made on what `StoreReader` reads back and on the files under the store's root.
-
-The last part holds redaction to the same standard: real traffic through the real
-`irimi shadow`, both doors, against loopback stand-ins, with every assertion made on the stored
-lines and blobs.
-"""
+"""What `irimi shadow` stores for the refund scenarios, read back off disk: every exchange the
+engine handed its store, redacted, with its precondition, overlay, webhooks and timing intact.
+`_SpyStore` is the real store, which also remembers each exchange it was handed."""
 
 import base64
 import dataclasses
@@ -21,10 +8,8 @@ import json
 import shutil
 import socket
 import sys
-import threading
 import time
 from bisect import bisect_left
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from itertools import accumulate, pairwise
 from pathlib import Path
 
@@ -41,7 +26,6 @@ from irimi.record.store.reader import StoreReader
 from irimi.record.store.writer import DirectoryStore
 from irimi.report.terminal import exchange_line
 from irimi.servicemaps import loader
-from tests import test_engine_mitm, test_phase_exit
 from tests.support.credentials import (
     AGENT_STRIPE_KEY,
     E2E_LLM_KEY,
@@ -50,32 +34,25 @@ from tests.support.credentials import (
     E2E_SSE_PLAIN_KEY,
     E2E_STRIPE_KEY,
 )
-from tests.support.servers import stop_server
-from tests.test_engine_mitm import (
-    _carries_run_header,
-    _Upstream,
-)
-from tests.test_phase_exit import (
+from tests.support.engine import carries_run_header
+from tests.support.scenarios import (
+    BASE_URL_CHILD,
     CHARGE_ID,
-    CHILD,
-    PHASE2_AMOUNT,
-    PHASE2_CHARGE,
+    REFUND_AMOUNT,
     REFUND_AMOUNT_MINOR,
-    _run_phase2_under_shadow,
-    _StandInReader,
-    _Stripe,
+    REFUND_CHARGE,
+    StandInReader,
+    run_refund_scenario,
 )
+from tests.support.upstreams import Logged, Port, serve
 
 pytestmark = pytest.mark.e2e
 
 # Their fixtures, bound here so pytest finds them: an import would be shadowed by each parameter.
-home = test_phase_exit.home
-stripe_stand_in = test_phase_exit.stripe_stand_in
-upstream = test_engine_mitm.upstream
 
 # The fields the live summary prints from: a stored exchange must carry each of them, or a summary
 # printed from the store cannot say what the live one said.
-PHASE2_FIELDS = (
+REFUND_FIELDS = (
     "precondition.outcome",
     "precondition.rejection_code",
     "overlay",
@@ -181,7 +158,7 @@ def _decoded(disk: _Disk) -> list[Exchange]:
     return decoded
 
 
-def test_the_phase_2_run_under_irimi_shadow_survives_the_trace_format_event_for_event(
+def test_the_refund_scenario_survives_the_trace_format_event_for_event(
     home, tmp_path, monkeypatch, stored
 ):
     """The trace round trip through the real composition. The refund agent's scenario run with
@@ -190,7 +167,7 @@ def test_the_phase_2_run_under_irimi_shadow_survives_the_trace_format_event_for_
     reads - reads back off disk equal to itself redacted, and the six summary fields each arrive
     with the value the live summary prints from."""
     root = tmp_path / "trace"
-    _run_phase2_under_shadow(tmp_path, monkeypatch, "--store", str(root))
+    run_refund_scenario(tmp_path, monkeypatch, "--store", str(root))
 
     disk = stored()
     assert disk.root == root
@@ -211,11 +188,11 @@ def test_the_phase_2_run_under_irimi_shadow_survives_the_trace_format_event_for_
     shape = [(ex.issued_by, ex.request.method, ex.request.path, ex.answered_by) for ex in decoded]
     assert shape == [
         ("agent", "GET", "/v1/charges", "live"),
-        ("engine", "GET", f"/v1/charges/{PHASE2_CHARGE}", "live"),
+        ("engine", "GET", f"/v1/charges/{REFUND_CHARGE}", "live"),
         ("agent", "POST", "/v1/refunds", "fake-L1"),
         ("agent", "GET", "/v1/refunds", "overlay"),
-        ("agent", "GET", f"/v1/charges/{PHASE2_CHARGE}", "overlay"),
-        ("engine", "GET", f"/v1/charges/{PHASE2_CHARGE}", "live"),
+        ("agent", "GET", f"/v1/charges/{REFUND_CHARGE}", "overlay"),
+        ("engine", "GET", f"/v1/charges/{REFUND_CHARGE}", "live"),
         ("agent", "POST", "/v1/refunds", "fake-L1"),
     ]
     _, check, refund, refunds, charge, recheck, retry = decoded
@@ -226,7 +203,7 @@ def test_the_phase_2_run_under_irimi_shadow_survives_the_trace_format_event_for_
     assert (refunds.overlay, charge.overlay) == ("full", "full")
     assert (check.issued_by, recheck.issued_by) == ("engine", "engine")
     defaults = {f.name: f.default for f in dataclasses.fields(Exchange)}
-    for name in PHASE2_FIELDS:
+    for name in REFUND_FIELDS:
         head, _, part = name.partition(".")
         default = getattr(defaults[head], part) if part else defaults[head]
         values = [getattr(ex, head) for ex in decoded]
@@ -235,7 +212,7 @@ def test_the_phase_2_run_under_irimi_shadow_survives_the_trace_format_event_for_
 
     # Bodies never go inline: the refund's form body is a ref in the line and a blob beside it,
     # and the retry posted the same bytes, so both lines name one blob.
-    posted = f"charge={PHASE2_CHARGE}&amount={PHASE2_AMOUNT}".encode()
+    posted = f"charge={REFUND_CHARGE}&amount={REFUND_AMOUNT}".encode()
     lines = disk.lines(run.record.run_id)
     assert not any(posted.decode() in line for line in lines)
     assert disk.blobs()[trace.body_ref(posted).sha256] == posted
@@ -243,7 +220,7 @@ def test_the_phase_2_run_under_irimi_shadow_survives_the_trace_format_event_for_
     assert refund_line["request"]["body"] == retry_line["request"]["body"]
 
 
-def test_every_exchange_the_phase_2_run_stores_is_timed_and_seq_is_completion_order(
+def test_every_exchange_the_refund_scenario_stores_is_timed_in_completion_order(
     home, tmp_path, monkeypatch, stored
 ):
     """Exchange timestamps, read back off disk. Every exchange spans `0 < started_at <= ended_at`
@@ -251,7 +228,7 @@ def test_every_exchange_the_phase_2_run_stores_is_timed_and_seq_is_completion_or
     checked; and `seq` is completion order, so the read is stored before its write while the write
     started first - `started_at` is what recovers start order. The run itself spans them all."""
     before = time.time()
-    _run_phase2_under_shadow(tmp_path, monkeypatch)
+    run_refund_scenario(tmp_path, monkeypatch)
     after = time.time()
     disk = stored()
     decoded = _decoded(disk)
@@ -272,7 +249,7 @@ def test_every_exchange_the_phase_2_run_stores_is_timed_and_seq_is_completion_or
 
 
 # Each call names itself in its query, so the recorded exchange can be matched to what it sent.
-# Placeholders rather than `str.format`, as in `tests.test_phase_exit`'s children. `putheader`
+# Placeholders rather than `str.format`, as in `tests/support/scenarios.py`'s children. `putheader`
 # rather than a dict, because a dict cannot send one header twice.
 RUN_HEADER_CHILD = """
 import http.client, os, urllib.parse
@@ -331,9 +308,9 @@ def test_an_invalid_run_header_from_a_shadowed_child_names_no_run_and_reaches_no
     assert trace.is_valid_run_id(engine_run)
     assert len([line for line in out if line.startswith("CALL ") and line.endswith(" 200")]) == 8
 
-    assert len(_Upstream.seen) == 7  # the seven GETs; the POST was faked and never left
-    for path, received in _Upstream.seen:
-        assert not _carries_run_header(received), f"{path} reached the service carrying Irimi-Run"
+    assert len(upstream.seen) == 7  # the seven GETs; the POST was faked and never left
+    for path, received in upstream.seen:
+        assert not carries_run_header(received), f"{path} reached the service carrying Irimi-Run"
     disk = stored()
     decoded = disk.exchanges()
     assert sorted(decoded, key=lambda ex: ex.request.query) == sorted(
@@ -353,7 +330,7 @@ def test_an_invalid_run_header_from_a_shadowed_child_names_no_run_and_reaches_no
     }
     assert by_case["write"].answered_by == "fake-L0"
     for ex in decoded:
-        assert not _carries_run_header(ex.request.headers)
+        assert not carries_run_header(ex.request.headers)
         assert 0 < ex.started_at <= ex.ended_at
     runs = {r.run_id: r.attribution for r in disk.reader.list_runs()}
     assert runs == {
@@ -367,14 +344,14 @@ def test_an_invalid_run_header_from_a_shadowed_child_names_no_run_and_reaches_no
     assert not (disk.root / "x").exists() and not (disk.root.parent / "x").exists()
 
 
-def test_the_phase_1_run_through_the_reverse_door_survives_the_trace_format(
+def test_the_base_url_refund_survives_the_trace_format(
     home, tmp_path, monkeypatch, stripe_stand_in, stored
 ):
     """The refund agent's read-and-refund run, stored: a read through the forward proxy, and a
     refund through the reverse door answered from the SHIPPED Stripe map's fixture after an L3
     read of the charge. Every exchange decodes equal and is timed, the refund's `door: reverse`
     included, and the engine's read sits inside the refund's span."""
-    _run_phase1_under_shadow(tmp_path, monkeypatch, stripe_stand_in)
+    _run_base_url_refund(tmp_path, monkeypatch, stripe_stand_in)
 
     read, check, refund = _decoded(stored())
     assert [(ex.door, ex.issued_by, ex.kind) for ex in (read, check, refund)] == [
@@ -393,23 +370,23 @@ def test_the_phase_1_run_through_the_reverse_door_survives_the_trace_format(
     assert refund.started_at < check.started_at <= check.ended_at <= refund.ended_at
 
 
-def _run_phase1_under_shadow(tmp_path, monkeypatch, stripe_port: int) -> None:
-    """The refund agent's read-and-refund child (`tests.test_phase_exit.CHILD`) under the real
+def _run_base_url_refund(tmp_path, monkeypatch, stripe_port: Port) -> None:
+    """The refund agent's read-and-refund child (`support.scenarios.BASE_URL_CHILD`) under the real
     `irimi shadow`, against the loopback Stripe, which never hears a write. Its calls carry
     `AGENT_STRIPE_KEY` as their bearer token."""
-    monkeypatch.setattr("irimi.decide.reader.UpstreamReader", _StandInReader)
-    _StandInReader.port = stripe_port
+    monkeypatch.setattr("irimi.decide.reader.UpstreamReader", StandInReader)
+    StandInReader.port = stripe_port
     child = tmp_path / "child.py"
     child.write_text(
-        CHILD.replace("__CHARGES_PORT__", str(stripe_port))
+        BASE_URL_CHILD.replace("__CHARGES_PORT__", str(stripe_port))
         .replace("__CHARGE__", CHARGE_ID)
         .replace("__AMOUNT__", str(REFUND_AMOUNT_MINOR))
     )
     assert main(["shadow", "--port", "0", "--", sys.executable, str(child)]) == 0
-    assert [m for m, _, _ in _Stripe.seen if m != "GET"] == []
+    assert [m for m, _ in stripe_port.seen if m != "GET"] == []
 
 
-def test_the_phase_1_run_redacted_for_disk_carries_no_credential_and_changes_nothing_else(
+def test_the_base_url_refund_redacted_for_disk_keeps_no_credential(
     home, tmp_path, monkeypatch, stripe_stand_in, stored
 ):
     """Redaction over what a real `irimi shadow` run stored. No file under the store's root holds
@@ -417,7 +394,7 @@ def test_the_phase_1_run_redacted_for_disk_carries_no_credential_and_changes_not
     wherever it was sent, the engine's own L3 read included. Nothing else changes: swap the token
     for its placeholder in what the engine recorded and it equals what was stored, bodies byte
     for byte."""
-    _run_phase1_under_shadow(tmp_path, monkeypatch, stripe_stand_in)
+    _run_base_url_refund(tmp_path, monkeypatch, stripe_stand_in)
     disk = stored()
     bearer = f"Bearer {AGENT_STRIPE_KEY}"
     written = _assert_stored_as(disk, _placeholders(disk.key, bearer))
@@ -612,12 +589,10 @@ routes:
 """
 
 
-class _RedactStandIn(BaseHTTPRequestHandler):
+class _RedactStandIn(Logged):
     """Everything on the other side of the proxy in the redaction runs, and the webhook's answer
     target. It records every request as it arrived, which is how a test sees that the live request
     was never redacted."""
-
-    seen: list[tuple[str, str, Headers, bytes]] = []
 
     def _answer(
         self, content_type: str, body: bytes, extra: Headers = (), cuts: tuple[int, ...] = ()
@@ -625,7 +600,7 @@ class _RedactStandIn(BaseHTTPRequestHandler):
         """Answer `body`, written in pieces cut at `cuts`, SSE_CHUNK_GAP_S apart."""
         length = int(self.headers.get("content-length") or 0)
         sent = self.rfile.read(length) if length else b""
-        _RedactStandIn.seen.append((self.command, self.path, tuple(self.headers.items()), sent))
+        self.seen.append((self.command, self.path, tuple(self.headers.items()), sent))
         self.send_response(200)
         self.send_header("content-type", content_type)
         for name, value in extra:
@@ -649,17 +624,12 @@ class _RedactStandIn(BaseHTTPRequestHandler):
         else:  # the webhook's target, answering as Slack does
             self._answer("text/html", b"ok")
 
-    def log_message(self, *args):
-        pass
-
 
 @pytest.fixture
 def redact_stand_in():
-    _RedactStandIn.seen = []
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), _RedactStandIn)
-    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
-    yield srv.server_address[1]
-    stop_server(srv)
+    port = serve(_RedactStandIn, threaded=True)
+    yield port
+    port.stop()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -727,8 +697,8 @@ def _run_calls_under_shadow(
     shutil.copytree(loader.shipped_dir(), maps_dir)
     (maps_dir / "standin.yaml").write_text(STANDIN_MAP)
     monkeypatch.setattr("irimi.servicemaps.loader.shipped_dir", lambda: maps_dir)
-    monkeypatch.setattr("irimi.decide.reader.UpstreamReader", _StandInReader)
-    _StandInReader.port = stand_in
+    monkeypatch.setattr("irimi.decide.reader.UpstreamReader", StandInReader)
+    StandInReader.port = stand_in
     spec = [
         {
             "method": c.method,
@@ -786,7 +756,7 @@ def test_a_delegated_slack_webhook_stores_its_secret_path_as_one_placeholder_in_
         b"ok",
         "delegated",
     )
-    assert [(m, p, b) for m, p, _, b in _RedactStandIn.seen] == [
+    assert [(m, p, b) for m, p, _, b in redact_stand_in.seen] == [
         ("POST", WEBHOOK_PATH, WEBHOOK_BODY)
     ]
     disk = stored()
@@ -869,7 +839,7 @@ def test_a_stripe_form_write_through_the_door_stores_its_card_token_and_query_ke
     )
     assert (answer.status, answer.header("irimi-answered-by")) == (200, "fake-L0")
     assert json.loads(answer.body)["card"] == {"token": CARD_TOKEN}
-    assert _RedactStandIn.seen == []  # a write is never forwarded, and it read nothing first
+    assert redact_stand_in.seen == []  # a write is never forwarded, and it read nothing first
     disk = stored()
     (ex,) = disk.received
     assert (ex.door, ex.request.host, ex.kind, ex.answered_by, ex.flags, ex.request.body) == (
@@ -922,7 +892,7 @@ def test_an_llm_request_stores_a_nested_live_key_and_a_token_key_as_placeholders
         LLM_ANSWER,
         None,
     )
-    ((method, path, heard, sent),) = _RedactStandIn.seen
+    ((method, path, heard, sent),) = redact_stand_in.seen
     assert (method, path, sent, header_value(heard, "x-api-key")) == (
         "POST",
         "/v1/messages",
@@ -1003,7 +973,7 @@ def test_a_live_reads_set_cookie_is_stored_as_a_placeholder_and_its_binary_body_
         SESSION_COOKIE,
     )
     assert answer.header("irimi-answered-by") is None
-    assert [(m, p) for m, p, _, _ in _RedactStandIn.seen] == [("GET", "/v1/session")]
+    assert [(m, p) for m, p, _, _ in redact_stand_in.seen] == [("GET", "/v1/session")]
     disk = stored()
     (ex,) = disk.received
     assert (ex.kind, ex.answered_by) == ("read", "live")

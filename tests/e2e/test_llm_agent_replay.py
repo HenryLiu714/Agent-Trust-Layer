@@ -1,35 +1,9 @@
-"""Record, edit the prompt, replay, the hermetic half: a developer records a run of an LLM agent,
-edits its prompt, replays the run, and sees where it diverged and which writes changed, with no
-write reaching a real service and no substitute-labeled tool running for real.
+"""The LLM refund agent recorded under `irimi shadow`, its prompt edited, and replayed: the replay
+names where it diverged and which writes changed, and no write reaches a real service.
 
-The agent is `examples/llm_refund_agent`, run as its user runs it: `irimi shadow -- python -m
-examples.llm_refund_agent.agent ...` records it, and `irimi replay <run>` and
-`testing.replay(<run>)` replay it, each the real CLI in a process of its own. On the other side, a
-loopback Stripe (the refund agent test's `_Stripe`) and a loopback Anthropic (`_Model`), which
-answers from the system prompt alone: the full remaining amount for `prompt.txt`, half of it for
-`prompt_half.txt`. Both record every request they hear. The live half is the example's README,
-run by hand; it is not in CI.
-
-THE TRAP THIS TEST MUST NOT FALL INTO. `irimi shadow` and `irimi replay` give their child
-`NO_PROXY=localhost,127.0.0.1` (`runner.NO_PROXY_VALUE`), so an agent pointed at a stub on a
-loopback address goes straight to it: irimi then sees nothing, and every assertion that a stub
-heard nothing passes for the wrong reason. So the agent calls the real names, `api.stripe.com` and
-`api.anthropic.com`, on the stubs' ports, which that `NO_PROXY` does not name, and only irimi's
-process resolves them, to loopback (`IRIMI`, with the sample workflows' `resolving_only`). irimi
-classifies them with its real shipped maps, the `llm` route on `api.anthropic.com` included; any
-other name fails to resolve there, so nothing reaches the real internet. Routing is then proved
-from the store: each stub heard exactly the requests irimi stored as live.
-
-`testing.replay` runs `python -m irimi replay` through one seam, `testing._run_irimi`, which this
-test points at the same bootstrap: still a subprocess, and everything else `testing.replay` does is
-its own.
-
-The four features the record-and-replay path rests on, as each block below proves them: (1) the
-AgentRun shape, the run stored with its trigger, args and events; (2) an SDK-labeled trigger
-whose run is stored automatically; (3) SDK-labeled tool calls, a write tool's substitute running
-in a proxied run; (4) the function that runs an AgentRun through the proxy and says what
-changed, `irimi replay` and `testing.replay`.
-"""
+The agent calls `api.stripe.com` and `api.anthropic.com` on the stubs' ports, names only irimi's
+process resolves (`IRIMI`), for the reason `tests/support/scenarios.py` gives about `NO_PROXY`.
+Routing is proved from the store: each stub heard exactly what irimi stored as live."""
 
 import contextlib
 import json
@@ -39,8 +13,6 @@ import socket
 import sqlite3
 import subprocess
 import sys
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -51,7 +23,7 @@ from examples.llm_refund_agent.agent import Ticket, handle_ticket
 from examples.workflows.harness.internet import resolving_only
 from irimi import testing
 from irimi.cli import main, runner
-from irimi.config import ca, paths
+from irimi.config import paths
 from irimi.core.exchange import Exchange
 from irimi.protocol.env import ENGINE_ACTIVE_ENV
 from irimi.protocol.replay_files import replay_result_from_json
@@ -62,11 +34,12 @@ from tests.support.credentials import (
     HERMETIC_STRIPE_KEY,
     REFUSED_LIVE_KEY,
 )
-from tests.test_phase_exit import _Stripe
+from tests.support.scenarios import base_url_stripe
+from tests.support.upstreams import FakeLlm, FakeStripe, ReplayStubs, serve
 
 pytestmark = pytest.mark.e2e
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 AGENT = agent.__name__
 PROMPT = agent.DEFAULT_PROMPT
 PROMPT_HALF = agent.DEFAULT_PROMPT.with_name("prompt_half.txt")
@@ -101,83 +74,54 @@ with resolving_only({SERVED!r}):
 """
 
 
-class _Model(BaseHTTPRequestHandler):
+def _model(handler, body):
     """Anthropic's `POST /v1/messages`, deciding from the system prompt alone: the charge's whole
     remaining amount for `prompt.txt`, half of it for `prompt_half.txt`. A request the real API
     would refuse - no key or version header, no model, `max_tokens` or messages, no JSON-schema
     output format or one that leaves `additionalProperties` open - and any other prompt is a 400.
-    Answers as `claude-opus-5` does, its empty `thinking` block first. Records every request's
-    body."""
-
-    seen: list[dict[str, Any]] = []
-
-    def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)))
-        _Model.seen.append(body)
-        prompts = {PROMPT.read_text(): 1, PROMPT_HALF.read_text(): 2}
-        output = body.get("output_config", {}).get("format", {})
-        well_formed = (
-            self.path == "/v1/messages"
-            and self.headers.get("x-api-key")
-            and self.headers.get("anthropic-version") == agent.ANTHROPIC_VERSION
-            and body.get("model")
-            and body.get("max_tokens")
-            and body.get("messages")
-            and output.get("type") == "json_schema"
-            # Structured outputs refuse an object schema that leaves `additionalProperties` open.
-            and output.get("schema", {}).get("additionalProperties") is False
-            and body.get("system") in prompts
-        )
-        if not well_formed:
-            return self._answer(400, {"type": "error", "error": {"type": "invalid_request_error"}})
-        facts = json.loads(body["messages"][0]["content"])
-        left = facts["charge"]["amount"] - facts["charge"]["amount_refunded"]
-        amount = left // prompts[body["system"]]
-        decision = {"refund_amount": amount, "reply": f"Refunded {amount}."}
-        self._answer(
-            200,
-            {
-                "id": "msg_hermetic",
-                "type": "message",
-                "role": "assistant",
-                "model": body["model"],
-                "content": [
-                    {"type": "thinking", "thinking": "", "signature": "hermetic"},
-                    {"type": "text", "text": json.dumps(decision)},
-                ],
-                "stop_reason": "end_turn",
-                "usage": {"input_tokens": 1, "output_tokens": 1},
-            },
-        )
-
-    def _answer(self, status: int, document: dict[str, Any]) -> None:
-        payload = json.dumps(document).encode()
-        self.send_response(status)
-        self.send_header("content-type", "application/json")
-        self.send_header("content-length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def log_message(self, *args):
-        pass
-
-
-def _serve(handler: type[BaseHTTPRequestHandler]) -> ThreadingHTTPServer:
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
-    return srv
+    Answers as `claude-opus-5` does, its empty `thinking` block first."""
+    prompts = {PROMPT.read_text(): 1, PROMPT_HALF.read_text(): 2}
+    output = body.get("output_config", {}).get("format", {})
+    well_formed = (
+        handler.path == "/v1/messages"
+        and handler.headers.get("x-api-key")
+        and handler.headers.get("anthropic-version") == agent.ANTHROPIC_VERSION
+        and body.get("model")
+        and body.get("max_tokens")
+        and body.get("messages")
+        and output.get("type") == "json_schema"
+        # Structured outputs refuse an object schema that leaves `additionalProperties` open.
+        and output.get("schema", {}).get("additionalProperties") is False
+        and body.get("system") in prompts
+    )
+    if not well_formed:
+        return 400, {"type": "error", "error": {"type": "invalid_request_error"}}
+    facts = json.loads(body["messages"][0]["content"])
+    left = facts["charge"]["amount"] - facts["charge"]["amount_refunded"]
+    amount = left // prompts[body["system"]]
+    decision = {"refund_amount": amount, "reply": f"Refunded {amount}."}
+    return 200, {
+        "id": "msg_hermetic",
+        "type": "message",
+        "role": "assistant",
+        "model": body["model"],
+        "content": [
+            {"type": "thinking", "thinking": "", "signature": "hermetic"},
+            {"type": "text", "text": json.dumps(decision)},
+        ],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
 
 
 @pytest.fixture
 def stubs():
-    """The loopback Stripe and Anthropic: yields their ports."""
-    _Stripe.seen = []
-    _Model.seen = []
-    servers = [_serve(_Stripe), _serve(_Model)]
-    yield tuple(srv.server_address[1] for srv in servers)
-    for srv in servers:
-        srv.shutdown()
-        srv.server_close()
+    """The loopback Stripe and Anthropic: `(stripe, llm)`, which log every request each heard."""
+    stripe = serve(FakeStripe, threaded=True, **base_url_stripe())
+    llm = serve(FakeLlm, threaded=True, reply=_model)
+    yield ReplayStubs(stripe, llm)
+    stripe.stop()
+    llm.stop()
 
 
 @pytest.fixture
@@ -191,11 +135,10 @@ def direct(monkeypatch):
 
 
 @pytest.fixture
-def home(tmp_path, monkeypatch):
-    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
-    monkeypatch.chdir(tmp_path)
-    ca.generate_ca(ca.ca_paths())
-    return tmp_path
+def home(home, monkeypatch):
+    """The shared `home`, which is also the working directory here."""
+    monkeypatch.chdir(home)
+    return home
 
 
 def _agent_env(home: Path, stripe_port: int, model_port: int) -> dict[str, str]:
@@ -282,8 +225,8 @@ def _anonymous(result: testing.ReplayResult) -> tuple[Any, ...]:
     return (result.source_run_id, result.exit_code, result.diverged_at, lines)
 
 
-def _heard_stripe() -> list[tuple[str, str]]:
-    return [(method, path) for method, path, _ in _Stripe.seen]
+def _heard_stripe(stubs) -> list[tuple[str, str]]:
+    return stubs.stripe.seen
 
 
 def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_changed(
@@ -354,15 +297,15 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
     # The proxy was in the path: each stub heard exactly what irimi stored as live, the agent's
     # charge read and irimi's own L3 read of it, and the one model call.
     live = [e for e in events if isinstance(e, Exchange) and e.answered_by == "live"]
-    assert _heard_stripe() == [("GET", "/v1/charges/ch_A")] * 2
-    assert len(_Stripe.seen) == sum(e.request.host == "api.stripe.com" for e in live)
-    assert [m["system"] for m in _Model.seen] == [PROMPT.read_text()]
-    assert len(_Model.seen) == sum(e.kind == "llm" for e in live)
+    assert _heard_stripe(stubs) == [("GET", "/v1/charges/ch_A")] * 2
+    assert len(stubs.stripe.seen) == sum(e.request.host == "api.stripe.com" for e in live)
+    assert [m["system"] for m in stubs.llm.seen] == [PROMPT.read_text()]
+    assert len(stubs.llm.seen) == sum(e.kind == "llm" for e in live)
 
     # --- Replay, unchanged (feature 4). The database is gone, so a real `lookup_customer` would
     # raise: it is answered from the recording.
     db.unlink()
-    _Stripe.seen, _Model.seen = [], []
+    stubs.forget()
     done, same = _replay(env, store, source, home / "same.json")
     assert done.returncode == same.exit_code == 0, done.stderr
     assert same.lines == (
@@ -381,7 +324,7 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
     assert done.stdout.endswith("\n".join(same.lines) + "\n")
     # Neither service heard anything; the read tool answered from the recording, and the write
     # tool's stand-in ran, never its body.
-    assert (_Stripe.seen, _Model.seen) == ([], [])
+    assert (stubs.stripe.seen, stubs.llm.seen) == ([], [])
     assert same.replay_run_id is not None
     tools = _tool_calls(reader, same.replay_run_id)
     assert {name: call.ran for name, call in tools.items()} == {
@@ -418,8 +361,8 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
     )
     # The model heard the edited prompt, once; Stripe heard nothing: the charge read came from
     # the recording, and so did the L3 read the missed refund was checked against.
-    assert [m["system"] for m in _Model.seen] == [PROMPT_HALF.read_text()]
-    assert _Stripe.seen == []
+    assert [m["system"] for m in stubs.llm.seen] == [PROMPT_HALF.read_text()]
+    assert stubs.stripe.seen == []
     assert edited.replay_run_id is not None
     tools = _tool_calls(reader, edited.replay_run_id)
     halved = {"refund_amount": 2450, "reply": "Refunded 2450."}
@@ -441,15 +384,15 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
         monkeypatch.setenv(name, value)
-    _Stripe.seen, _Model.seen = [], []
+    stubs.forget()
     by_function = testing.replay(source, store=store)
     assert _anonymous(by_function) == _anonymous(same)
-    assert (_Stripe.seen, _Model.seen) == ([], [])
+    assert (stubs.stripe.seen, stubs.llm.seen) == ([], [])
     monkeypatch.setenv(agent.PROMPT_FILE_ENV, str(PROMPT_HALF))
     by_function_edited = testing.replay(source, handle_ticket, args=(Ticket(*TICKET),), store=store)
     assert _anonymous(by_function_edited) == _anonymous(edited)
-    assert [m["system"] for m in _Model.seen] == [PROMPT_HALF.read_text()]
-    assert _Stripe.seen == []
+    assert [m["system"] for m in stubs.llm.seen] == [PROMPT_HALF.read_text()]
+    assert stubs.stripe.seen == []
     assert not db.exists()
 
     # --- `irimi runs list`: the recording, its process run, and each replay of it, marked.
@@ -475,7 +418,7 @@ def test_the_agent_sends_no_stripe_key_that_is_not_test_mode(monkeypatch, stubs,
     monkeypatch.setenv(agent.STRIPE_BASE_ENV, f"http://127.0.0.1:{stubs[0]}")
     with pytest.raises(ValueError, match=r"STRIPE_API_KEY must be a test-mode key \(sk_test_"):
         agent.stripe("GET", "/v1/charges/ch_A")
-    assert _Stripe.seen == []
+    assert stubs.stripe.seen == []
 
 
 @pytest.mark.parametrize("stop", ["refusal", "max_tokens"])

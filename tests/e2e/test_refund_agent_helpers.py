@@ -9,7 +9,7 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
-AGENT_PATH = Path(__file__).resolve().parent.parent / "examples" / "refund_agent" / "agent.py"
+AGENT_PATH = Path(__file__).resolve().parents[2] / "examples" / "refund_agent" / "agent.py"
 
 
 def _load_agent():
@@ -23,11 +23,11 @@ def _load_agent():
 agent = _load_agent()
 
 
-def test_door_base_none_without_engine():
+def test_door_base_is_none_outside_irimi():
     assert agent.door_base({"HTTPS_PROXY": "http://127.0.0.1:4000"}, "api.stripe.com") is None
 
 
-def test_door_base_none_without_proxy():
+def test_door_base_is_none_without_a_proxy():
     assert agent.door_base({"IRIMI_ENGINE_ACTIVE": "1"}, "api.stripe.com") is None
 
 
@@ -89,6 +89,6 @@ def test_pick_charge_returns_none_when_nothing_is_refundable():
     assert agent.pick_charge([_charge(amount_refunded=4900)]) is None
 
 
-def test_money_formats_minor_units():
+def test_money_formats_minor_units_in_their_currency():
     assert agent.money(4900, "usd") == "49.00 USD"
     assert agent.money(100, "eur") == "1.00 EUR"

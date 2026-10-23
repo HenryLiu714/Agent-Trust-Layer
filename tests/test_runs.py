@@ -381,7 +381,6 @@ def test_a_damaged_replay_record_is_still_marked_and_prints_on_one_line():
     `report` renders the record it is handed: the first is still marked a replay, and the second
     is escaped as every stored text is."""
     unnamed = _ended_run("x", HAND_BUILT_AT, mode="replay")
-    assert report.run_attribution(unnamed) == "process, replay"
     assert "mode: replay" in report.run_header_lines(unnamed)
     odd = _ended_run("y", HAND_BUILT_AT, attribution="sdk", replay_of="a\nb\x1b")
     assert report.run_attribution(odd) == "sdk, replay of a\\nb\\x1b"

@@ -974,14 +974,10 @@ def run_attribution(record: RunRecord) -> str:
     replayed: `replay of <id>` for the process run `irimi replay` stores, which `process` alone
     lists as a shadow run, and after its attribution for any other, since a replay's store makes
     `header` runs and `sdk` runs too and the column must not hide which (`<attribution>, replay of
-    <id>`). A record that says `mode: replay` and names no run - one no irimi writes, and one no
-    stored run.json can hold, which the decoder refuses, so only one built in Python -
-    is still marked (`<attribution>, replay`)."""
+    <id>`)."""
     if record.replay_of is not None:
         replayed = f"replay of {printable(record.replay_of)}"
         return replayed if record.attribution == "process" else f"{record.attribution}, {replayed}"
-    if record.mode != "shadow":
-        return f"{record.attribution}, {record.mode}"
     return record.attribution
 
 

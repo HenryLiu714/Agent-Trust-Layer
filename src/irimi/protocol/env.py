@@ -12,7 +12,7 @@ RUN_ENV = "IRIMI_RUN"
 CONTROL_ENV = "IRIMI_CONTROL"
 # Set only for the child of an engine that replays a stored run, to the run the replay is: the
 # engine's own, `IRIMI_RUN`, never the run replayed. The SDK reads it as "this is a replay"
-# (`context.replay_run_id`). irimi removes it from a child it does not replay for.
+# (`sdk._context.replay_run_id`). irimi removes it from a child it does not replay for.
 REPLAY_RUN_ENV = "IRIMI_REPLAY_RUN"
 # What `irimi replay` tells the child it starts to call a trigger: the function's
 # `module:qualname`, a JSON file holding its captured args, and the file the child writes how the

@@ -1,51 +1,16 @@
 """`@sdk.read_tool` and `@sdk.write_tool`: tool calls the proxy cannot see, labelled.
 
-The proxy sees only HTTP. A database write, a file write or a call into another library is
-invisible to it, so the agent labels each such tool, and the SDK does for it what shadow mode does
-for a write on the wire:
-
-    | `is_active()` | tool  | Runs                              | Records    |
-    | false         | read  | the real function                 | nothing    |
-    | false         | write | the real function (WARNING, once) | nothing    |
-    | true          | read  | the real function, `ran="real"`   | a ToolCall |
-    | true          | write | ONLY the fake, `ran="shadow"`     | a ToolCall |
-
-In a replay (`IRIMI_REPLAY_RUN` set), a read tool first asks the recording, over the control
-endpoint, for the result the recorded run's same call got:
-
-    | tool  | the recording                | Runs                                 | Records     |
-    | read  | holds it, revivable          | nothing: the revived result, or      | `recording` |
-    |       |                              | RecordedToolError if it raised       |             |
-    | read  | misses, cannot revive it, or | the real function                    | `real`      |
-    |       | was stopped from outside     |                                      |             |
-    | write | is not asked                 | ONLY the fake, as in shadow          | `shadow`    |
-
-A read tool's `ran="real"` in a replay is that replay's miss. A result is revivable when
-`capture.revive` can rebuild it: one recorded as `__irimi_repr__` or `__irimi_truncated__` is a
-description of the value, not the value. A result redaction replaced comes back with its
-placeholder. A write tool's fake runs even when the recorded run made the same call: it is the
-developer's substitute, and nothing recorded can stand for it.
-
-THE SCOPE RULE, APPLIED TO THE SDK: nothing unnamed runs live. `write_tool` cannot be declared
-without its fake, `read_tool` cannot be given one, and every other mistake is a TypeError when the
-agent loads, never at the call.
-
-A recorded call is posted to `{IRIMI_CONTROL}/runs/{run_id}/tool-calls` through `runs.reporter`
-once it has returned or raised, so a post fails as a run's does: it never raises, and each kind of
-failure is warned once per process. The call's run is the current one, or the process run
-`irimi shadow` names in `IRIMI_RUN`, or none at all (`trace.UNATTRIBUTED`). An exception from the
-function or the fake propagates unchanged, the same object, after the post.
-
-HTTP made inside a tool is recorded as ordinary exchanges of the run, with no link to the call.
-
-Which body runs is decided in one place, `_chosen`.
+A database write, a file write or a call into another library is invisible to the proxy, so the
+agent labels each such tool, and the SDK does for it what shadow mode does for a write on the
+wire: under irimi a write runs only its fake, and every call is posted to its run as a `ToolCall`.
+The scope rule holds by signature: `write_tool` cannot be declared without its fake, and every
+other mistake is a TypeError when the agent loads. Which body runs is decided in one place,
+`_chosen`. A post never raises, and the agent's own exception propagates unchanged after it.
 """
 
 import functools
 import inspect
-import logging
 import os
-import threading
 import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
@@ -54,25 +19,17 @@ from typing import Any, overload
 from irimi import trace
 from irimi.limits import MAX_CAPTURED_BYTES
 from irimi.protocol.env import ENGINE_ACTIVE_ENV, PROXY_ENVS, RUN_ENV
-from irimi.sdk import context, runs
-from irimi.sdk.api import check_name, label
-from irimi.sdk.capture import capture, capture_call, revive, serialized
-from irimi.sdk.client import LOGGER_NAME
-from irimi.sdk.errors import error_info, recorded_error
+from irimi.sdk import _context as context
+from irimi.sdk._capture import capture, capture_call, revive, serialized
+from irimi.sdk._errors import error_info, recorded_error
+from irimi.sdk._runs import check_name, label, off_the_loop
+from irimi.sdk._state import state
 from irimi.trace import STOPPED_ERROR_TYPES, TRUNCATED_KEY
-
-logger = logging.getLogger(LOGGER_NAME)
 
 # The variables whose presence says this process meant to go through a proxy: an inactive SDK
 # with either set ran a write tool for real where irimi was probably meant to be in front.
 # Both spellings of `HTTPS_PROXY`, from the one list of them.
 PROXY_HINTS = tuple(name for name in PROXY_ENVS if name.upper() == "HTTPS_PROXY")
-
-# Set once the "ran for real" WARNING has been logged: once per process, not per call or per tool.
-_warned_real_write = False
-_warn_lock = threading.Lock()
-# Set once building a call's record has raised and been logged.
-_record_failed = False
 
 
 @overload
@@ -80,17 +37,28 @@ def read_tool[F: Callable[..., Any]](fn: F, /) -> F: ...
 @overload
 def read_tool[F: Callable[..., Any]](*, name: str | None = None) -> Callable[[F], F]: ...
 def read_tool(fn: Callable[..., Any] | None = None, /, *, name: str | None = None) -> Any:
-    """Label the decorated function as a read the proxy cannot see: it always runs for real, and
-    under irimi each call is recorded in its run (see the module doc).
+    """Label a function as a read the proxy cannot see, such as a database query.
 
-    Usable bare (`@sdk.read_tool`) or called (`@sdk.read_tool(name="lookup")`); `name` defaults
-    to the function's `module:qualname` (`api.label`). It keeps the function's signature and its
-    nature - the wrapper is a coroutine function exactly when the function is - and keeps a
-    `staticmethod` or `classmethod` one, in either decorator order, as `@sdk.trigger` does.
+    The function always runs for real. Under irimi each call, its arguments and its result are
+    recorded in the current run, and in a replay the call is answered from the recording when it
+    can be. Works on sync and async functions and methods, bare or with a name.
 
-    Refused at decoration time, with TypeError: a generator or async-generator function; what has
-    no importable `module:qualname` (`api.entrypoint`); a `name` that is not a string; and a name
-    passed positionally."""
+    Args:
+        fn: The function, when used bare as `@sdk.read_tool`.
+        name: The name calls are recorded under. Defaults to the function's `module:qualname`.
+
+    Returns:
+        The function wrapped, with its signature and its sync or async nature kept.
+
+    Raises:
+        TypeError: At decoration, for a generator function, a class or another callable with no
+            importable `module:qualname`, or a `name` that is not a string or is passed
+            positionally.
+
+    Example:
+        @sdk.read_tool
+        def load_customer(customer_id: str) -> Customer: ...
+    """
     if fn is not None and not callable(fn) and not isinstance(fn, staticmethod | classmethod):
         raise TypeError(f"@sdk.read_tool takes its name as name=, not {fn!r}")
     decorate = _decorator("read", None, name, "@sdk.read_tool")
@@ -100,19 +68,29 @@ def read_tool(fn: Callable[..., Any] | None = None, /, *, name: str | None = Non
 def write_tool[F: Callable[..., Any]](
     *, fake: Callable[..., Any], name: str | None = None
 ) -> Callable[[F], F]:
-    """Label the decorated function as a write the proxy cannot see: under irimi only `fake`
-    runs in its place, called with the same arguments, and each call is recorded in its run (see
-    the module doc).
+    """Label a function as a write the proxy cannot see, and name the fake that replaces it.
 
-    `name` defaults to the function's `module:qualname` (`api.label`). The decorator keeps the
-    function's signature, nature and descriptor as `read_tool` does, so a fake is never handed an
-    instance it does not expect. The fake of a plain method is called as the method is, with the
-    instance first; a `staticmethod` fake is its function.
+    Under irimi only `fake` runs, with the same arguments, and each call is recorded in the
+    current run; without irimi the real function runs. A fake for a method is called as the
+    method is, with the instance first.
 
-    Refused at decoration time, with TypeError: a fake that is not callable, is a generator
-    function, is the function itself, or is sync where the function is `async def` or the
-    reverse; a generator or async-generator function; what has no importable `module:qualname`;
-    and a `name` that is not a string."""
+    Args:
+        fake: The function that runs in the real one's place under irimi. It must be sync or
+            async as the real function is.
+        name: The name calls are recorded under. Defaults to the function's `module:qualname`.
+
+    Returns:
+        A decorator that wraps the function, keeping its signature and its sync or async nature.
+
+    Raises:
+        TypeError: At decoration, for a fake that is not callable, is a generator function, is
+            the function itself or differs from it in sync or async nature; for a generator
+            function or a callable with no importable `module:qualname`; or for a non-string name.
+
+    Example:
+        @sdk.write_tool(fake=lambda row: None)
+        def insert_row(row: Row) -> None: ...
+    """
     if isinstance(fake, staticmethod):
         # A fake written as a static method in its tool's class body is callable, but `inspect`
         # sees neither its nature nor a generator through it: it is judged, and called, as the
@@ -187,10 +165,26 @@ class _Tool:
 
 def _chosen(spec: _Tool, recorded: "_Recorded | None") -> tuple[Callable[..., Any], trace.Ran]:
     """Which body an active call runs, and what the record says ran, given what a replay's
-    recording answered (`_replay_answer`, None outside a replay). THE ONE DISPATCH: a write runs
-    its fake, in a replay too; a read the recording answered runs the recorded outcome; any
-    other read runs the real function. An inactive SDK never gets here: the real function runs,
-    recorded by nobody."""
+    recording answered (`_replay_answer`, None outside a replay). The one dispatch:
+
+        | `is_active()` | tool  | Runs                              | Records    |
+        | false         | read  | the real function                 | nothing    |
+        | false         | write | the real function (warned once)   | nothing    |
+        | true          | read  | the real function, `ran="real"`   | a ToolCall |
+        | true          | write | only the fake, `ran="shadow"`     | a ToolCall |
+
+    In a replay (`IRIMI_REPLAY_RUN` set) a read first asks the recording for the result the
+    recorded run's same call got:
+
+        | tool  | the recording                | Runs                                | Records     |
+        | read  | holds it, revivable          | nothing: the revived result, or     | `recording` |
+        |       |                              | RecordedToolError if it raised      |             |
+        | read  | misses, cannot revive it, or | the real function                   | `real`      |
+        |       | was stopped from outside     |                                     |             |
+        | write | is not asked                 | only the fake, as in shadow         | `shadow`    |
+
+    A write's fake runs even when the recorded run made the same call: nothing recorded can
+    stand for the developer's substitute. An inactive SDK never gets here."""
     if spec.kind == "write":
         assert spec.fake is not None  # `write_tool` requires one
         return spec.fake, "shadow"
@@ -233,13 +227,13 @@ async def _call_async(spec: _Tool, args: tuple[Any, ...], kwargs: dict[str, Any]
     if _asks_the_recording(spec):
         # Only a read in a replay waits on the endpoint, and off the event loop, as a post does:
         # any other call goes straight to its body.
-        recorded = await runs.off_the_loop(_replay_answer, spec, captured)
+        recorded = await off_the_loop(_replay_answer, spec, captured)
     body, ran = _chosen(spec, recorded)
     call = _Call(spec, ran, captured)
     try:
         coroutine = body(*args, **kwargs)
     except BaseException as exc:  # raised before it awaited anything: called with wrong args
-        await runs.off_the_loop(call.send, call.doc(None, exc))
+        await off_the_loop(call.send, call.doc(None, exc))
         raise
     return await _finished_with(call, coroutine)
 
@@ -255,9 +249,9 @@ async def _finished_with[T](call: "_Call", coroutine: Coroutine[Any, Any, T]) ->
         call.send(call.doc(None, exc))
         raise
     except BaseException as exc:
-        await runs.off_the_loop(call.send, call.doc(None, exc))
+        await off_the_loop(call.send, call.doc(None, exc))
         raise
-    await runs.off_the_loop(call.send, call.doc(result, None))
+    await off_the_loop(call.send, call.doc(result, None))
     return result
 
 
@@ -298,7 +292,7 @@ def _replay_answer(spec: _Tool, args: trace.JSONValue) -> _Recorded | None:
     `revive` cannot rebuild, or a recorded call something outside it stopped
     (`trace.STOPPED_ERROR_TYPES`), which has no outcome to give. Never raises."""
     try:
-        outcome = runs.reporter.recorded(_run_id(), spec.name, args)
+        outcome = state.reporter.recorded(_run_id(), spec.name, args)
         if outcome is None:
             return None
         if outcome.error is not None and outcome.error.type in STOPPED_ERROR_TYPES:
@@ -328,7 +322,6 @@ class _Call:
         """This call with its outcome, as it is posted: built on the caller's thread, the result
         captured as the body left it. None, logged once per process, if building it failed: the
         agent's own result or exception goes on whatever happens here."""
-        global _record_failed
         try:
             captured: trace.JSONValue = None
             if exc is None:
@@ -351,20 +344,19 @@ class _Call:
             del doc["run_id"]
             return doc
         except Exception:
-            if not _record_failed:
-                _record_failed = True
-                logger.warning(
-                    "irimi: could not record a call of tool %s; the call goes on, and later "
-                    "failures of this kind are not logged",
-                    self.spec.name,
-                    exc_info=True,
-                )
+            state.warn_once(
+                "record-tool-call",
+                "irimi: could not record a call of tool %s; the call goes on, and later "
+                "failures of this kind are not logged",
+                self.spec.name,
+                exc_info=True,
+            )
             return None
 
     def send(self, doc: dict[str, Any] | None) -> None:
-        """Post `doc` to this call's run. Never raises (`client.ControlClient`)."""
+        """Post `doc` to this call's run. Never raises (`ControlClient`)."""
         if doc is not None:
-            runs.reporter.post(self.run_id, "tool-calls", doc)
+            state.reporter.post(self.run_id, "tool-calls", doc)
 
 
 def _is_async(f: Callable[..., Any]) -> bool:
@@ -395,16 +387,10 @@ def _warn_if_real_write(spec: _Tool) -> None:
     """A write tool about to run for real with the SDK inactive, in a process that names a proxy:
     probably an agent meant to run under irimi whose launcher dropped `IRIMI_ENGINE_ACTIVE`. Logged
     once per process, so a batch of a thousand writes logs one line."""
-    global _warned_real_write
-    if spec.kind != "write" or _warned_real_write:
+    if spec.kind != "write" or not any(os.environ.get(var) for var in PROXY_HINTS):
         return
-    if not any(os.environ.get(var) for var in PROXY_HINTS):
-        return
-    with _warn_lock:
-        if _warned_real_write:
-            return
-        _warned_real_write = True
-    logger.warning(
+    state.warn_once(
+        "real-write",
         "irimi: write tool %s ran for real: HTTPS_PROXY is set but %s is not",
         spec.name,
         ENGINE_ACTIVE_ENV,

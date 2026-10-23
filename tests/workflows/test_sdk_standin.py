@@ -331,7 +331,7 @@ def test_a_real_trigger_logs_one_run_with_the_real_id_and_nested_triggers_join(l
 
 @pytest.mark.skipif(sys.version_info < (3, 14), reason="3.12 evaluates annotations at definition")
 def test_a_real_trigger_annotated_with_a_name_never_defined_runs_and_logs_its_types(load_sdk, obs):
-    """The real SDK leaves a trigger's annotations unevaluated (`capture._signature`), so a name
+    """The real SDK leaves a trigger's annotations unevaluated (`_calls.signature`), so a name
     imported only for type checkers never raises into the agent; nor does the log of its types.
     This module's annotations are strings (`from __future__`), so the trigger is compiled
     without its flags."""
@@ -454,7 +454,7 @@ def test_a_tool_above_a_static_or_class_method_keeps_it_one(load_sdk, obs, monke
     descriptor itself, with the agent's own `name` (None), so the name it records is its own
     default and equals the one this module logs. W3's `ledger_worker` runs it end to end."""
     import irimi.sdk as real_sdk
-    from irimi.sdk import runs
+    from irimi.sdk._state import state
 
     posted: list[tuple[str, str, str]] = []
 
@@ -462,7 +462,7 @@ def test_a_tool_above_a_static_or_class_method_keeps_it_one(load_sdk, obs, monke
         def post(self, run_id: str, action: str, doc: dict[str, Any]) -> None:
             posted.append((action, doc["name"], doc["ran"]))
 
-    monkeypatch.setattr(runs, "reporter", Collect())
+    monkeypatch.setattr(state, "reporter", Collect())
     sdk = load_sdk(real_sdk if real else None)
     monkeypatch.setenv(sdk.ENGINE_ACTIVE_ENV, "1")
 
@@ -500,9 +500,9 @@ def test_a_stand_in_reaches_the_real_tool_as_the_agent_wrote_it(load_sdk, obs, m
     stand-in became two wrappers, so the real write ran under irimi, logged as the stand-in. The
     fallback judges them as the real `tool` does."""
     import irimi.sdk as real_sdk
-    from irimi.sdk import runs
+    from irimi.sdk._state import state
 
-    monkeypatch.setattr(runs, "reporter", types.SimpleNamespace(post=lambda *a: None))
+    monkeypatch.setattr(state, "reporter", types.SimpleNamespace(post=lambda *a: None))
     sdk = load_sdk(real_sdk if real else None)
     monkeypatch.setenv(sdk.ENGINE_ACTIVE_ENV, "1")
 
@@ -609,7 +609,7 @@ def test_a_real_write_tool_logs_which_function_ran(load_sdk, obs):
     [
         ImportError("cannot import name 'ToolCall' from 'irimi.trace'"),
         ModuleNotFoundError("No module named 'some_dependency'", name="some_dependency"),
-        ModuleNotFoundError("No module named 'irimi.sdk.capture'", name="irimi.sdk.capture"),
+        ModuleNotFoundError("No module named 'irimi.sdk._capture'", name="irimi.sdk._capture"),
     ],
     ids=["import-error", "missing-dependency", "missing-submodule"],
 )
@@ -670,7 +670,7 @@ REPLAY_RUN = "abcd1234abcd1234"
 
 
 class _Recording:
-    """A reporter, as `runs.reporter` is, over a recording that answers each lookup with
+    """A reporter, as `state.reporter` is, over a recording that answers each lookup with
     `outcome` (None: a miss), keeping each lookup's tool name and each posted call's `ran`.
     `gate`, when given, holds every lookup until it is set."""
 
@@ -696,13 +696,13 @@ def replaying(load_sdk, monkeypatch) -> Callable[..., tuple[types.ModuleType, _R
     child has it: active, told it replays (`IRIMI_REPLAY_RUN`, naming its `IRIMI_RUN`), and its
     reporter a `_Recording`."""
     import irimi.sdk as real_sdk
-    from irimi.sdk import runs
+    from irimi.sdk._state import state
 
     def get(
         outcome: Any = None, *, active: bool = True, gate: threading.Event | None = None
     ) -> tuple[types.ModuleType, _Recording]:
         recording = _Recording(outcome, gate)
-        monkeypatch.setattr(runs, "reporter", recording)
+        monkeypatch.setattr(state, "reporter", recording)
         sdk = load_sdk(real_sdk)
         monkeypatch.setenv(sdk.ENGINE_ACTIVE_ENV, "1" if active else "0")
         monkeypatch.setenv(RUN_ENV, REPLAY_RUN)
@@ -934,7 +934,7 @@ def test_a_tool_through_this_module_does_what_the_real_sdk_s_does(
     with `irimi.sdk`'s gives the agent the same thing, runs the same bodies and posts the same
     records."""
     import irimi.sdk as real_sdk
-    from irimi.sdk import runs
+    from irimi.sdk._state import state
 
     outcome = {
         "hit": _outcome({"balance": 7}, awaited=form == "returns_coroutine"),
@@ -946,7 +946,7 @@ def test_a_tool_through_this_module_does_what_the_real_sdk_s_does(
     seen = []
     for module in (sdk, real_sdk):
         kept = _Kept(outcome)
-        monkeypatch.setattr(runs, "reporter", kept)
+        monkeypatch.setattr(state, "reporter", kept)
         got, ran = _through(module, kind, form)
         seen.append((got, ran, kept.asked, kept.docs))
     shim, real = seen

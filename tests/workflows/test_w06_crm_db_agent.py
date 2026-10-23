@@ -20,7 +20,7 @@ from examples.workflows.w06_crm_db_agent.agent import (
 from examples.workflows.w06_crm_db_agent.scenarios import STALE_REPLAY_RUN
 from irimi import redact
 from irimi.limits import MAX_ERROR_MESSAGE
-from irimi.sdk.capture import MAX_REPR, REPR_KEY
+from irimi.sdk._capture import MAX_REPR, REPR_KEY
 from irimi.trace import UNATTRIBUTED, ErrorInfo, ToolCall
 
 W = "w06_crm_db_agent"

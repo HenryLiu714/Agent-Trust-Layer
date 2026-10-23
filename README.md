@@ -605,9 +605,8 @@ def find_accounts(segment: str) -> list[Account]: ...
 - **In a replay** (#83), a read tool asks the recording first, by its name and its arguments,
   redacted as the recording's were and taken in the order they were recorded, as an HTTP read
   is. When the recorded run made the same call, nothing runs: the call returns the recorded
-  result, rebuilt from its captured JSON (`irimi.sdk.capture.revive`), and is recorded `ran:
-  recording`. A recorded exception is raised as `sdk.RecordedToolError`, which carries the
-  recorded `type_name` and `message`. For a builtin `Exception`, such as `KeyError`, it is also a
+  result, rebuilt from its recorded JSON, and is recorded `ran: recording`. A recorded exception
+  is raised as `sdk.RecordedToolError`, which carries the recorded `type_name` and `message`. For a builtin `Exception`, such as `KeyError`, it is also a
   subclass of that builtin and bears its name, so the agent's own `except KeyError` catches it as
   it caught the original (all but `ExceptionGroup` and the three `Unicode…Error`s, which take
   more than a message). Otherwise the real function runs (`ran: real`, the replay's miss):
@@ -813,9 +812,9 @@ irimi replay · 725dc6add559a16f -> d63663c6da8905c7
   2. `--entrypoint MODULE:FUNC` given, or the run's trigger has an entrypoint: that function, called
      with `--args JSON` or `--args-file PATH` (an object of `{parameter: value}`, captured values
      as the run stores them) or the trigger's recorded args, in a child,
-     `python -m irimi.sdk.replay_child`, under irimi's own Python or the agent's (`--python`,
-     below). The child imports the function by its name, rebuilds the args
-     (`irimi.sdk.capture.revive`), and calls it, running a coroutine to its end. It exits 0 when
+     `python -m irimi._replay_child`, under irimi's own Python or the agent's (`--python`,
+     below). The child imports the function by its name, rebuilds the args from their
+     recorded JSON, and calls it, running a coroutine to its end. It exits 0 when
      the call returns and 1 when it raises, and the replay's run ends with what it raised, as the
      recorded run did.
   3. A process run (`irimi shadow -- CMD` with no trigger): its recorded command, run again. Only
@@ -836,8 +835,8 @@ irimi replay · 725dc6add559a16f -> d63663c6da8905c7
   A run id that starts with `-` is given as `--run=RUN`. `-- CMD` with `--entrypoint` or `--args`
   is a usage error.
 - **Which Python calls the trigger.** irimi's own, unless `--python PATH` names the agent's. An
-  irimi in the agent's environment (`uv run irimi`, or `sdk.replay()`) runs under the agent's
-  Python already. One installed apart from it (`uv tool install irimi`, `pipx`) runs under its
+  irimi in the agent's environment (`uv run irimi`, or `irimi.testing.replay()`) runs under the
+  agent's Python already. One installed apart from it (`uv tool install irimi`, `pipx`) runs under its
   own, which does not have the agent's packages: the replay could not run, exit 2, and a `hint:`
   names the Python irimi used. Replay it with `--python .venv/bin/python`, the Python itself
   rather than its environment's directory, or whichever Python runs the agent. That Python runs
@@ -873,12 +872,12 @@ irimi replay · 725dc6add559a16f -> d63663c6da8905c7
   SIGTERM stopped it.
   The child's own exit code is printed and decides nothing. `--result-file PATH` writes the result
   as JSON, a refused replay's with what irimi said of why.
-- **From a test**, `sdk.replay(run_id)` replays the run's own trigger, and
-  `sdk.replay(run_id, handle, args=(Ticket(...),))` your function with its arguments, in a
+- **From a test**, `irimi.testing.replay(run_id)` replays the run's own trigger, and
+  `testing.replay(run_id, handle, args=(Ticket(...),))` your function with its arguments, in a
   subprocess running `python -m irimi replay`, and returns a `ReplayResult`: `same`,
   `source_run_id`, `replay_run_id`, `exit_code`, `diverged_at` and `lines`
   (`assert result.same, result` prints the comparison). A replay that cannot start raises
-  `sdk.ReplayError`. A refused replay is a result with
+  `testing.ReplayError`. A refused replay is a result with
   `exit_code` 2, and a stopped one 130 or 143, as the command exits. The args go to
   `irimi replay` in a file only you can read, never on its command line, and the run id as
   `--run=RUN`.

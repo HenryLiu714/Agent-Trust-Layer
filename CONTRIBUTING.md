@@ -233,7 +233,7 @@ PEP 257, Google style where a body is needed.
    the body is no longer than the code.
 3. A module docstring is its purpose (one paragraph) plus a bullet list of guarantees, 15 lines at
    most. Protocol and design rationale go in `docs/`.
-4. Tables are fine where they replace prose, as the decision tables in `sdk/tools.py` and
+4. Tables are fine where they replace prose, as the decision tables in `sdk/_tools.py` and
    `replay.policy.ReplayPolicy` do.
 
 ### User-facing text

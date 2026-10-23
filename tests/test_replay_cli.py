@@ -1,11 +1,11 @@
-"""`irimi replay` and `sdk.replay()` end to end: a run recorded under the real `irimi shadow`
+"""`irimi replay` and `testing.replay()` end to end: a run recorded under the real `irimi shadow`
 into a store, then replayed by the real `irimi replay` against the same Stripe-shaped stub and LLM
 stub on loopback, each of which writes down every request it is given, so a test can prove what a
 replay never sent anywhere.
 
 The agent is a module this file writes into the test's working directory, `replay_agent`, started
 by its name (`python -c "import replay_agent; ..."`) so its trigger's entrypoint is
-`replay_agent:handle`, which `irimi.sdk.replay_child` imports, never `__main__:handle`. It sends
+`replay_agent:handle`, which `irimi._replay_child` imports, never `__main__:handle`. It sends
 its calls through the forward proxy explicitly, because `irimi shadow` exempts loopback from it
 through `NO_PROXY` and the stubs are on loopback. The maps are `tests/test_replay_engine.py`'s.
 """
@@ -369,11 +369,12 @@ def test_a_run_with_no_entrypoint_and_no_argv_is_refused(home, capfd):
 
 
 def test_sdk_replay_returns_the_result_the_cli_writes(home, capfd, monkeypatch, tmp_path):
-    """`sdk.replay(run_id)` and `sdk.replay(run_id, fn, *args)`, from this test's own process, run
-    `irimi replay` as a subprocess and return the result file it writes, equal to the CLI's but for
-    the replay's new run id. The agent is tools-only: the maps `irimi replay` loads in a subprocess
-    are the shipped ones, which the stubs are not on, and a replay of tools needs none."""
-    from irimi import sdk
+    """`testing.replay(run_id)` and `testing.replay(run_id, fn, *args)`, from this test's own
+    process, run `irimi replay` as a subprocess and return the result file it writes, equal to the
+    CLI's but for the replay's new run id. The agent is tools-only: the maps `irimi replay` loads
+    in a subprocess are the shipped ones, which the stubs are not on, and a replay of tools needs
+    none."""
+    from irimi import testing
 
     source = _record(home, f"replay_agent.answer({TICKET})")
     capfd.readouterr()
@@ -387,8 +388,8 @@ def test_sdk_replay_returns_the_result_the_cli_writes(home, capfd, monkeypatch, 
     import replay_agent
 
     for result in (
-        sdk.replay(source),
-        sdk.replay(
+        testing.replay(source),
+        testing.replay(
             source, replay_agent.answer, args=(replay_agent.Ticket("ch_REAL1", "refund please"),)
         ),
     ):
@@ -404,7 +405,7 @@ def test_sdk_replay_returns_the_result_the_cli_writes(home, capfd, monkeypatch, 
     ]
     assert tools == [("replay_agent:lookup", "recording"), ("replay_agent:reply", "shadow")] * 3
     # Args far past what one command-line argument may hold go in a file, never on the line.
-    big = sdk.replay(
+    big = testing.replay(
         source, replay_agent.answer, args=(replay_agent.Ticket("ch_REAL1", "x" * 300_000),)
     )
     capfd.readouterr()
@@ -412,9 +413,9 @@ def test_sdk_replay_returns_the_result_the_cli_writes(home, capfd, monkeypatch, 
 
 
 def test_sdk_replay_of_a_run_the_store_does_not_hold_is_a_result_that_exits_2(home):
-    from irimi import sdk
+    from irimi import testing
 
-    result = sdk.replay("nosuchrun")
+    result = testing.replay("nosuchrun")
     assert result == ReplayResult(
         "nosuchrun",
         None,
@@ -689,7 +690,7 @@ def test_args_nested_deeper_than_the_stack_are_a_usage_error(capfd, tmp_path, fl
 
 
 def test_a_refused_replay_s_result_file_holds_the_reason_irimi_gave(home, capfd, tmp_path):
-    """`sdk.replay`'s caller gets the reason, not only the one who read stderr."""
+    """`testing.replay`'s caller gets the reason, not only the one who read stderr."""
     source = _record(home, f"replay_agent.handle({TICKET})")
     for name in ("ca.pem", "ca.key"):
         (home / "ca" / name).unlink()

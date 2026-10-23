@@ -1,14 +1,9 @@
 """What a read tool raised when the recorded run called it, raised again in a replay.
 
-A replay answers a read tool from its recording, and a recorded call that raised raises again. The
-recording holds what it raised as `trace.ErrorInfo`, a type's `module.qualname` and a message,
-never the exception, and the SDK never imports a class a stored run names. So it raises
-`RecordedToolError`, which carries both; for a builtin `Exception`, which needs no import, the
-class is also a subclass of that builtin, named as it is, so the agent's own `except KeyError`
-catches it as it caught the original. Its `args` are `(message,)`: the original's are not stored.
-
-Here, below `runs` and `tools`, so a run that ends on one records the recorded type too
-(`error_info`).
+The recording holds what a call raised as `trace.ErrorInfo`, a type's `module.qualname` and a
+message, never the exception, and the SDK never imports a class a stored run names. So a replay
+raises `RecordedToolError`, which carries both. `error_info` is what a run or a tool call records
+an exception as, so a recorded error is recorded again as the type it was recorded as.
 """
 
 import builtins
@@ -18,13 +13,24 @@ from irimi import trace
 
 
 class RecordedToolError(Exception):
-    """A recorded exception, raised again: `type_name`, the original's type as
-    `trace.ErrorInfo` spells it (`builtins.KeyError`), and `message`, its `str`. Picklable and
-    copyable, as the agent's own exceptions are.
+    """An exception a read tool raised in the recorded run, raised again in a replay.
 
-    For a builtin exception such as KeyError, the raised error is also a subclass of that builtin
-    and has its name, so existing `except` clauses catch it; `isinstance(e, sdk.RecordedToolError)`
-    tells it apart."""
+    A replay answers a read tool from its recording; when the recorded call raised, the replay
+    raises this in its place. For a builtin exception such as KeyError the raised error is also a
+    subclass of that builtin, with its name, so the agent's existing `except KeyError` catches it
+    as it caught the original; `isinstance(e, sdk.RecordedToolError)` tells it apart. Its `args`
+    are `(message,)`: the original's are not stored. Picklable and copyable.
+
+    Attributes:
+        type_name: The original's type as the recording names it, such as `builtins.KeyError`.
+        message: The original's `str`.
+
+    Example:
+        try:
+            row = lookup_customer(customer_id)
+        except sdk.RecordedToolError as e:
+            log.info("the recorded run's lookup raised %s", e.type_name)
+    """
 
     def __init__(self, type_name: str, message: str) -> None:
         super().__init__(message)
@@ -44,7 +50,8 @@ _as_builtin_lock = threading.Lock()
 
 
 def recorded_error(error: trace.ErrorInfo) -> RecordedToolError:
-    """The RecordedToolError a recorded `error` is raised as (module doc). Never raises."""
+    """The RecordedToolError a recorded `error` is raised as: a subclass of the builtin it
+    names, when it names one. Never raises."""
     module, _, name = error.type.rpartition(".")
     builtin = getattr(builtins, name, None) if module == "builtins" else None
     if isinstance(builtin, type) and issubclass(builtin, Exception):

@@ -36,7 +36,10 @@ from irimi.exchange import Exchange
 from irimi.limits import MAX_ERROR_TYPE
 from irimi.protocol.control import RUN_ACTIONS, RunAction
 from irimi.protocol.env import AGENT_VERSION_ENV, CONTROL_ENV, ENGINE_ACTIVE_ENV, PROXY_ENVS
-from irimi.sdk import capture, client, runs
+from irimi.sdk import _capture as capture
+from irimi.sdk import _control_client as client
+from irimi.sdk import _runs as runs
+from irimi.sdk._state import state
 from irimi.store.reader import StoreReader
 from irimi.store.writer import DirectoryStore
 from irimi.trace import ErrorInfo, RunRecord, Trigger
@@ -83,7 +86,7 @@ def irimi(tmp_path, monkeypatch) -> Iterator[_Irimi]:
     monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
     monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{port}/_irimi")
     monkeypatch.delenv(AGENT_VERSION_ENV, raising=False)
-    monkeypatch.setattr(runs, "reporter", client.ControlClient())
+    monkeypatch.setattr(state, "reporter", client.ControlClient())
     yield _Irimi(port, store, stop_once)
     stop_once()
 
@@ -251,7 +254,7 @@ def test_the_start_is_posted_before_the_body_runs_and_the_end_after_it(monkeypat
     store would make a late start's run `sdk` all the same, so only the order shows it."""
     monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
     log: list[str] = []
-    monkeypatch.setattr(runs, "reporter", _Posts(log))
+    monkeypatch.setattr(state, "reporter", _Posts(log))
 
     @sdk.trigger
     def body() -> None:
@@ -278,7 +281,7 @@ def test_the_sdk_never_posts_through_the_agents_proxy(irimi, monkeypatch):
             monkeypatch.setenv(name, f"http://127.0.0.1:{port}")
         for name in ("NO_PROXY", "no_proxy"):
             monkeypatch.delenv(name, raising=False)
-        monkeypatch.setattr(runs, "reporter", client.ControlClient())
+        monkeypatch.setattr(state, "reporter", client.ControlClient())
         run_id = handle(1)
     assert hits == []
     [run] = irimi.sdk_runs()
@@ -292,7 +295,7 @@ def test_an_async_trigger_waits_for_its_posts_off_the_event_loop(monkeypatch):
     with _recorder(status=204, delay=0.5) as (port, hits):
         monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
         monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{port}/_irimi")
-        monkeypatch.setattr(runs, "reporter", client.ControlClient())
+        monkeypatch.setattr(state, "reporter", client.ControlClient())
 
         async def main() -> tuple[int, int]:
             ticks = 0
@@ -390,7 +393,7 @@ def test_a_trigger_cancelled_while_its_start_is_posted_leaves_no_run_current(mon
     with _recorder(status=204, delay=0.5) as (port, _hits):
         monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
         monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{port}/_irimi")
-        monkeypatch.setattr(runs, "reporter", client.ControlClient())
+        monkeypatch.setattr(state, "reporter", client.ControlClient())
 
         async def caller() -> tuple[bool, str | None]:
             try:
@@ -420,7 +423,7 @@ def test_an_interruption_while_the_end_is_posted_still_leaves_no_run_current(mon
             if action == "end":
                 raise KeyboardInterrupt
 
-    monkeypatch.setattr(runs, "reporter", InterruptedEnd())
+    monkeypatch.setattr(state, "reporter", InterruptedEnd())
 
     @sdk.trigger
     def fails() -> None:
@@ -439,7 +442,7 @@ def test_an_interruption_while_the_end_is_posted_still_leaves_no_run_current(mon
                 posting.set()
                 release.wait(5)
 
-    monkeypatch.setattr(runs, "reporter", SlowEnd())
+    monkeypatch.setattr(state, "reporter", SlowEnd())
 
     @sdk.trigger
     async def fails_async() -> None:
@@ -472,7 +475,7 @@ def test_an_async_trigger_closed_mid_run_ends_its_run_and_raises_nothing(monkeyp
     it. Neither the closer nor `sys.unraisablehook` sees an error of the SDK's."""
     monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
     log: list[str] = []
-    monkeypatch.setattr(runs, "reporter", _Posts(log))
+    monkeypatch.setattr(state, "reporter", _Posts(log))
     unraisable: list[BaseException | None] = []
     monkeypatch.setattr(sys, "unraisablehook", lambda u: unraisable.append(u.exc_value))
 
@@ -688,7 +691,7 @@ def test_a_start_interrupted_while_posted_leaves_no_run_current(irimi, monkeypat
                 self.raised = True
                 raise KeyboardInterrupt
 
-    monkeypatch.setattr(runs, "reporter", Interrupted())
+    monkeypatch.setattr(state, "reporter", Interrupted())
     with pytest.raises(KeyboardInterrupt):
         handle(1)
     assert sdk.current_run_id() is None
@@ -703,7 +706,7 @@ def test_an_instrument_that_raises_costs_one_warning_and_never_the_agents_call(
         raise RuntimeError("patching failed")
 
     monkeypatch.setattr(runs, "instrument", broken)
-    monkeypatch.setattr(runs, "_instrument_failed", False)
+    monkeypatch.setattr(state, "warned", set())
     assert echo(1) == 1 and echo(2) == 2
     [warning] = warnings()
     assert "could not label" in warning.getMessage() and warning.exc_info is not None
@@ -816,14 +819,14 @@ def test_a_sync_trigger_that_returns_a_coroutine_keeps_its_run_until_the_corouti
     task awaits it, and its outcome is the coroutine's. Before, the run ended when the coroutine
     was made, and the body ran outside every run."""
     log: list[str] = []
-    inner = runs.reporter
+    inner = state.reporter
 
     class Order:
         def post(self, run_id: str, action: str, doc: Any) -> None:
             log.append(action)
             inner.post(run_id, action, doc)
 
-    runs.reporter = Order()  # restored by the fixture's monkeypatch
+    state.reporter = Order()  # restored by the fixture's monkeypatch
 
     async def main() -> tuple[str | None, str | None]:
         made = settle("ch_1")
@@ -1009,7 +1012,7 @@ def tripwire(monkeypatch) -> Iterator[list[str]]:
     """A control endpoint that counts every request it gets, which an inactive SDK must not make."""
     with _recorder() as (port, hits):
         monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{port}/_irimi")
-        monkeypatch.setattr(runs, "reporter", client.ControlClient())
+        monkeypatch.setattr(state, "reporter", client.ControlClient())
         yield hits
 
 
@@ -1049,7 +1052,7 @@ def test_active_is_read_at_each_call(tripwire, monkeypatch):
 def test_a_closed_control_port_costs_one_warning_and_no_time(monkeypatch, warnings):
     monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
     monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{_closed_port()}/_irimi")
-    monkeypatch.setattr(runs, "reporter", client.ControlClient())
+    monkeypatch.setattr(state, "reporter", client.ControlClient())
     began = time.monotonic()
     first = handle(1)
     second = asyncio.run(handle_async("ch_1"))
@@ -1063,7 +1066,7 @@ def test_a_closed_control_port_costs_one_warning_and_no_time(monkeypatch, warnin
 def test_an_unset_irimi_control_is_one_warning_and_the_run_goes_on(monkeypatch, warnings):
     monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
     monkeypatch.delenv(CONTROL_ENV, raising=False)
-    monkeypatch.setattr(runs, "reporter", client.ControlClient())
+    monkeypatch.setattr(state, "reporter", client.ControlClient())
     assert handle(1) is not None and handle(2) is not None
     [warning] = warnings()
     assert "unset" in warning.getMessage() and CONTROL_ENV in warning.getMessage()
@@ -1117,7 +1120,7 @@ def test_a_control_endpoint_that_never_answers_times_out(monkeypatch, warnings):
     try:
         monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
         monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{silent.getsockname()[1]}")
-        monkeypatch.setattr(runs, "reporter", client.ControlClient())
+        monkeypatch.setattr(state, "reporter", client.ControlClient())
         monkeypatch.setattr(client, "TIMEOUT_S", 0.2)
         began = time.monotonic()
         assert handle(1) is not None
@@ -1166,7 +1169,7 @@ def test_a_proxy_speaking_another_protocol_is_one_warning_naming_both_versions(
     with its own, and the SDK says both once, whatever it was posting."""
     monkeypatch.setattr(client, "PROTOCOL_VERSION", "2")
     assert handle(1) is not None and handle(2) is not None
-    assert runs.reporter.recorded("r1", "db.read", {}) is None
+    assert state.reporter.recorded("r1", "db.read", {}) is None
     [warning] = warnings()
     said = warning.getMessage()
     assert said == (
@@ -1182,7 +1185,8 @@ def test_a_proxy_speaking_another_protocol_is_one_warning_naming_both_versions(
 _SCRIPT_AGENT = """\
 import dataclasses, json
 from irimi import sdk
-from irimi.sdk import api, capture
+from irimi import _entrypoints
+from irimi.sdk import _capture, _runs
 
 @dataclasses.dataclass
 class Ticket:
@@ -1199,9 +1203,9 @@ def look() -> None: ...
 
 if __name__ == "__main__":
     print(json.dumps([
-        api.entrypoint(handle.__wrapped__),
-        api.label(look.__wrapped__, None, "@sdk.read_tool"),
-        capture.capture(Ticket(1)),
+        _entrypoints.entrypoint(handle.__wrapped__),
+        _runs.label(look.__wrapped__, None, "@sdk.read_tool"),
+        _capture.capture(Ticket(1)),
     ]))
 """
 
@@ -1263,15 +1267,12 @@ def test_a_trigger_keeps_its_functions_name_signature_and_nature():
 def test_the_public_api_is_the_issues():
     assert sorted(sdk.__all__) == [
         "RecordedToolError",
-        "ReplayError",
-        "ReplayResult",
         "Run",
         "current_run_id",
         "instrument",
         "is_active",
         "propagate",
         "read_tool",
-        "replay",
         "run",
         "trigger",
         "write_tool",
@@ -1284,7 +1285,7 @@ def test_importing_the_sdk_imports_no_mitmproxy():
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
-# -- capture: one test per row of the table (sdk/capture.py, docs/trace-format.md) ---------------
+# -- capture: one test per row of the table (sdk/_capture.py, docs/trace-format.md) --------------
 
 
 @dataclasses.dataclass

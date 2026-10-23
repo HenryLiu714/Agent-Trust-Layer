@@ -44,7 +44,7 @@ SERVE_STOP_SIGNALS = ("SIGINT", "SIGTERM")
 # What `probe_python` runs under the Python it asks: it imports irimi's replay child, which calls
 # the trigger and writes how the call ended, and prints that irimi's version. It imports irimi
 # alone: the agent's code runs only in the child, under the replay's engine.
-PYTHON_PROBE = "import irimi.sdk.replay_child, irimi; print(irimi.__version__)"
+PYTHON_PROBE = "import irimi._replay_child, irimi; print(irimi.__version__)"
 PYTHON_PROBE_TIMEOUT_S = 30.0
 
 
@@ -91,7 +91,7 @@ def child_env(
     `IRIMI_REPLAY_RUN`, naming `run_id`. Otherwise any `IRIMI_REPLAY_RUN` in `base` is dropped, so a
     shell that exported one cannot make a shadow run's SDK ask for recorded results.
 
-    `call` is the trigger a replay's child calls, for `irimi.sdk.replay_child`; without it
+    `call` is the trigger a replay's child calls, for `irimi._replay_child`; without it
     its three variables are dropped, as `IRIMI_REPLAY_RUN` is.
 
     `ca_cert` must be the CA certificate (`~/.irimi/ca/ca.pem`), never the mitmproxy bundle,

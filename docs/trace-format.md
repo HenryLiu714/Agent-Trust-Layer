@@ -227,7 +227,7 @@ redacted the whole of it (see Redaction, #179).
 
 ### Captured arguments
 
-An `sdk` run's `trigger.args` are what the SDK captured (#74, `irimi.sdk.capture`). For
+An `sdk` run's `trigger.args` are what the SDK captured (#74, `irimi.sdk._capture`). For
 `@sdk.trigger` they are the call's arguments bound to the function's parameters,
 `{"param": value}`: a method's or classmethod's first parameter named `self` or `cls` is left
 out (a plain function's or a static method's is kept, #84), and defaults are not applied. A call that does not bind is captured as `{"args": [...], "kwargs": {...}}` and is not

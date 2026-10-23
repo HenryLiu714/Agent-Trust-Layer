@@ -19,9 +19,9 @@ from examples.workflows.harness.run import (
 )
 from examples.workflows.w03_queue_worker.agent import CLIENTS, LEDGER, POOLED
 from examples.workflows.w03_queue_worker.scenarios import AGENT_VERSION
+from irimi._replay_child import CANNOT_CALL
 from irimi.exchange import Exchange
 from irimi.report.runs import RUN_LIST_HEADER
-from irimi.sdk.replay_child import CANNOT_CALL
 from irimi.trace import UNATTRIBUTED, ErrorInfo, ToolCall
 
 W = "w03_queue_worker"

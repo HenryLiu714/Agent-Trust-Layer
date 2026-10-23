@@ -8,7 +8,7 @@ Agents write `from examples.workflows import sdk` where a real agent would write
 - **When `irimi.sdk` imports**, this module re-exports it, name by name: each name `irimi.sdk`
   has is the real one, and each it lacks is the stand-in's. The real SDK has `trigger`, `run`,
   `current_run_id`, `propagate`, `is_active`, `read_tool` and `write_tool`.
-  Names this module does not define (`sdk.instrument`, `sdk.replay`, `ReplayResult`, ...) are
+  Names this module does not define (`sdk.instrument`, `sdk.RecordedToolError`, ...) are
   forwarded to `irimi.sdk` by the module `__getattr__`.
   The real SDK's `instrument` labels a run's requests, so the corpus labels no request itself
   whenever the real SDK imports (`labels_requests`): a run's requests are labelled by the SDK
@@ -84,7 +84,7 @@ def _from_real(name: str) -> Any:
 
 def __getattr__(name: str) -> Any:
     """Forward a public name this module does not define to `irimi.sdk`, so an agent can use
-    the rest of the SDK's API (`sdk.replay`) without an edit here."""
+    the rest of the SDK's API (`sdk.instrument`) without an edit here."""
     if not name.startswith("_") and _real is not None and hasattr(_real, name):
         return getattr(_real, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

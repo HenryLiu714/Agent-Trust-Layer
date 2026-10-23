@@ -57,7 +57,7 @@ UNREACHABLE_HOST = "db.unreachable.internal"
 # key's 27-character placeholder ends before that cut.
 CONNECT_RETRIES = "connection timed out, retrying; " * 29
 # What a driver's options say before their password (`DriverOptions`): long enough that the key
-# straddles the 1000 characters the SDK keeps of a captured repr (`irimi.sdk.capture.MAX_REPR`),
+# straddles the 1000 characters the SDK keeps of a captured repr (`irimi.sdk._capture.MAX_REPR`),
 # and that the part of the key a plain cut there kept is 15 characters, too short for its shape
 # and long enough for universal invariant 4 to find.
 DRIVER_NOTE = "retry; " * 136

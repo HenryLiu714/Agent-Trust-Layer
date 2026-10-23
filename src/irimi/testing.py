@@ -1,23 +1,10 @@
-"""`sdk.replay()`: `irimi replay` as a Python function, for a test.
+"""Replay a stored run from a test: `irimi replay` as a Python function.
 
-    result = sdk.replay(run_id)                                 # the run's own trigger and args
-    result = sdk.replay(run_id, handle, args=(Ticket(...),))    # a function of yours, with args
+    result = testing.replay(run_id)
     assert result.same, result
 
-It runs `python -m irimi replay --run=RUN_ID --entrypoint ... --args-file ... --result-file ...`
-as a subprocess and returns what that wrote, as a `ReplayResult`. The agent gets a fresh process,
-whose HTTP clients read `HTTPS_PROXY` and the CA when they are built, as every `irimi shadow`
-child's do: rewiring the environment of this process, whose clients may already exist, would not
-reach them.
-Its `PYTHONPATH` is this process's `sys.path`, so it imports what this process can. The args go in
-a file only this user can read, never on the command line, where `ps` shows them and the kernel
-caps one argument's length. The run id is given as `--run=RUN_ID`, so one that starts with `-` is
-no flag.
-
-`irimi replay --result-file` writes the `ReplayResult` this reads back, by the one codec in
-`protocol.replay_files`.
-
-Imports only the stdlib and irimi's lowest layers, as the rest of the SDK does: no engine.
+This module starts the proxy in a subprocess, so it needs `irimi` installed with the proxy in the
+interpreter that runs the test. Agent code imports `irimi.sdk`, never this.
 """
 
 import json
@@ -29,23 +16,32 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from irimi._calls import bind
+from irimi._entrypoints import NotCallable, entrypoint, resolve
 from irimi.limits import MAX_CAPTURED_BYTES
 from irimi.protocol.replay_files import ReplayResult, replay_result_from_json
-from irimi.sdk.api import NotCallable, entrypoint, resolve
-from irimi.sdk.capture import bind, capture, capture_call
+from irimi.sdk._capture import capture, capture_call
+
+__all__ = ["ReplayError", "ReplayResult", "replay"]
 
 
 def _run_irimi(argv: list[str], env: Mapping[str, str]) -> int:
-    """`irimi <argv>` with `env`, in a subprocess of this interpreter: its exit code. The one seam
-    a test harness that cannot let `irimi` leave its process replaces (the sample workflows', whose
-    fake internet resolves names only there)."""
+    """Run `irimi <argv>` with `env` in a subprocess of this interpreter, and return its exit
+    code; replaced in tests."""
     return subprocess.run(
         [sys.executable, "-m", "irimi", *argv], env=dict(env), check=False
     ).returncode
 
 
 class ReplayError(Exception):
-    """`sdk.replay` could not start a replay, or the replay wrote no result: the reason."""
+    """A replay could not be started as asked, or exited without writing a result.
+
+    Example:
+        try:
+            result = testing.replay(run_id)
+        except testing.ReplayError as e:
+            pytest.fail(str(e))
+    """
 
 
 def replay(
@@ -56,19 +52,36 @@ def replay(
     kwargs: Mapping[str, Any] | None = None,
     store: str | os.PathLike[str] | None = None,
 ) -> ReplayResult:
-    """Replay the stored run `run_id` through irimi, and return what changed.
+    """Replay a stored run through irimi, and return how the replay compared with it.
 
-    `call=None` replays the run's recorded entrypoint with its recorded args. Given `call`, it is
-    called instead, with `args` and `kwargs`: it must be importable as `module:qualname`, as a
-    decorated trigger normally is, and its arguments must capture replayably (`capture`).
-    `store` is the trace store, `$IRIMI_STORE` or else `$IRIMI_HOME/store` by default.
+    The agent runs in a fresh process under a replay engine that answers from the recording, as
+    `irimi replay` runs it. With no `call`, the run's recorded trigger is called with its recorded
+    args; given `call`, that function is called instead with `args` and `kwargs`, for example to
+    replay an edited version. A replay that ran and differed is a result, not an error.
 
-    Never raises on the replay's own exit code: a refused replay is a result with `exit_code`
-    `exitcodes.ERROR`.
-    ReplayError when the replay cannot be started as asked, or exited without writing a result."""
+    Args:
+        run_id: The stored run to replay.
+        call: A function to call in place of the recorded trigger. It must be importable as
+            `module:qualname`, as a decorated trigger normally is.
+        args: Positional arguments for `call`. They must be ones a run can record and revive.
+        kwargs: Keyword arguments for `call`, under the same rule.
+        store: The trace store. Defaults to `$IRIMI_STORE`, else `$IRIMI_HOME/store`.
+
+    Returns:
+        The `ReplayResult`; `result.same` is true when nothing diverged.
+
+    Raises:
+        ReplayError: When `args` or `kwargs` are given without `call`, `call` cannot be imported
+            by its name, its arguments do not bind or cannot be recorded, or the replay exited
+            without writing a result.
+
+    Example:
+        result = testing.replay(run_id, handle, args=(Ticket("T-1"),))
+        assert result.same, result
+    """
     kwargs = {} if kwargs is None else kwargs
     if call is None and (args or kwargs):
-        raise ReplayError("sdk.replay takes args and kwargs only for a call it is given")
+        raise ReplayError("testing.replay takes args and kwargs only for a call it is given")
     planned = None if call is None else (_importable(call), _captured(call, tuple(args), kwargs))
     # A directory only this user can enter: the args are the caller's, unredacted.
     with tempfile.TemporaryDirectory(prefix="irimi-replay-") as tmp:
@@ -90,10 +103,10 @@ def replay(
 
 def _importable(fn: Callable[..., Any]) -> str:
     """`fn`'s `module:qualname`, which the child imports it by, or ReplayError naming why it
-    would import something else, or nothing: `api.resolve`'s refusals, `__main__` among them, are
+    would import something else, or nothing: `resolve`'s refusals, `__main__` among them, are
     the child's, so they are asked of it here, the one rule."""
     try:
-        name = entrypoint(fn, "sdk.replay")
+        name = entrypoint(fn, "testing.replay")
     except TypeError as exc:
         raise ReplayError(str(exc)) from None
     try:

@@ -110,7 +110,7 @@ def test_a_stderr_whose_reader_went_with_stdout_closed_ends_quietly(tmp_path, mo
 
 
 def test_python_m_irimi_is_the_command_and_importing_it_runs_nothing():
-    """`sdk.replay()` runs `python -m irimi`; a tool that imports every module, as pydoc
+    """`testing.replay()` runs `python -m irimi`; a tool that imports every module, as pydoc
     does, must not start the command."""
     import subprocess
 

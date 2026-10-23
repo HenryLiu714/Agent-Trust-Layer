@@ -125,7 +125,7 @@ def cmd_replay(
     to say, and what it prints `replay.report.ReplayReport`'s. Exits with `EXIT_CODES`: as
     `irimi compare` does, 2 for a replay that could not run, or whose run could not be read back,
     and 130 or 143 for one SIGINT or SIGTERM stopped.
-    `--result-file` writes the result as JSON, the one `sdk.replay()` reads
+    `--result-file` writes the result as JSON, the one `testing.replay()` reads
     (`protocol.replay_files.ReplayResult`), whether or not the replay ran, holding what irimi
     said on stderr of a replay that did not."""
     if args.run_id is not None and args.run is not None:

@@ -26,8 +26,9 @@ entrypoint is importable. It refuses a Stripe key that is not `sk_test_`.
 - **Hermetic, in CI.** `tests/test_phase3_replay_exit.py` records the agent under the real
   `irimi shadow` against a loopback Stripe and a loopback Anthropic that decides from the system
   prompt alone. It replays the run unchanged with the agent's database deleted, and again with
-  `PROMPT_FILE=prompt_half.txt`, through `irimi replay` and through `sdk.replay()`. It checks that
-  the unchanged replay reaches neither service and that the edited one asks only the model again.
+  `PROMPT_FILE=prompt_half.txt`, through `irimi replay` and through `irimi.testing.replay()`. It
+  checks that the unchanged replay reaches neither service and that the edited one asks only the
+  model again.
 - **Live, by hand.** The steps below, against Stripe test mode and the real Anthropic API. It is
   not in CI.
 

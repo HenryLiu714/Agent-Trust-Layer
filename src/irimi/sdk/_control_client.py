@@ -1,24 +1,11 @@
-"""How the SDK reaches irimi: one POST to the control endpoint per run start, run end and
-tool call, and in a replay one per read tool call, asking for its recorded result.
+"""How the SDK reaches irimi: one POST to the control endpoint per run start, run end and tool
+call, and in a replay one per read tool call, asking for its recorded result.
 
-`ControlClient.post` sends a JSON body to `{IRIMI_CONTROL}/runs/{run_id}/{action}`, the route the
-control endpoint answers, with stdlib urllib and NEVER THROUGH A PROXY: the endpoint is
-irimi's own listener, `IRIMI_CONTROL` names it directly, and the agent's `HTTP_PROXY` points at
-that same listener, which would only hand the request back to itself. It waits `TIMEOUT_S` at most.
-
-IT NEVER RAISES. A post that fails costs irimi its record of the run, never the agent its call:
-an unset `IRIMI_CONTROL`, a refused connection, a timeout, an answer outside 2xx, or anything else.
-A lookup that fails is a miss, and the tool runs for real; a `404` is the endpoint's own miss, and
-is not a failure.
-Each is logged at WARNING on the `irimi.sdk` logger, once per process per kind of failure, so a
-worker handling a thousand messages against a stopped irimi logs one line, not two thousand.
-
-Every post names the control protocol it speaks in `Irimi-Protocol`. A proxy that speaks another
-major version answers `426`, and the first one is warned naming both versions.
-
-A post that timed out or found nothing listening opens a circuit breaker: for `PAUSE_S` the client
-posts nothing and looks nothing up, so a stalled irimi costs the agent one timeout, not one per
-call. The first post after the pause tries again.
+`ControlClient` posts to `{IRIMI_CONTROL}/runs/{run_id}/{action}` with stdlib urllib, never
+through a proxy, and waits `TIMEOUT_S` at most. It never raises: a failed post costs irimi its
+record of the run, never the agent its call, and is warned once per process per kind of failure.
+A lookup that fails is a miss, so the tool runs for real. A timeout or an unreachable endpoint
+pauses every send for `PAUSE_S`, and a proxy speaking another protocol major answers `426`.
 """
 
 import json
@@ -46,8 +33,8 @@ from irimi.protocol.control import (
 )
 from irimi.protocol.env import CONTROL_ENV
 from irimi.protocol.headers import PROTOCOL_HEADER
-from irimi.sdk.capture import serialized
-from irimi.sdk.instrumentation import unlabelled
+from irimi.sdk._capture import serialized
+from irimi.sdk._http_labels import unlabelled
 from irimi.trace import JSONValue
 
 LOGGER_NAME = "irimi.sdk"

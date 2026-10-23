@@ -23,11 +23,11 @@ and says whether anything about it is expected to differ from a bare run.
   in THIS process too, in a copy of the recording's `IRIMI_HOME` and store, so the replay
   never adds its run to a recording another test reads, with a fresh `World` from the same `setup`,
   so anything not answered from the recording reaches the fake internet and shows up there. The
-  replay runs what `irimi replay` runs for that run: its trigger, called by `irimi.sdk.replay_child`
+  replay runs what `irimi replay` runs for that run: its trigger, called by `irimi._replay_child`
   from its entrypoint and args, or a process run's argv; or, with `command`, the scenario's own
   agent command (`-- <cmd>`). Every run the SDK starts in the replay's child adopts the replay's
   one run. `replay()` runs it; `run()` never does, since there is nothing to replay before a
-  recording exists. `sdk_replay()` calls `sdk.replay()` the same way, from this process.
+  recording exists. `sdk_replay()` calls `testing.replay()` the same way, from this process.
 
 A later mode is a new branch here and not a new harness.
 """
@@ -55,10 +55,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from examples.workflows import sdk as agent_sdk
 from examples.workflows.harness.internet import BOMB_SECRET, FakeInternet, Req
 from examples.workflows.harness.services import CLIENT_SECRET_CANARY, World
-from irimi import ca, paths, runner, sdk, servicemap, trace
+from irimi import ca, paths, runner, servicemap, testing, trace
 from irimi.cli import main as irimi_main
 from irimi.cli import parse_args, session
 from irimi.cli.session import EngineFactory
@@ -68,7 +67,6 @@ from irimi.protocol.replay_files import replay_result_from_json, replay_result_t
 from irimi.report.runs import NOT_SET, RUN_LIST_HEADER
 from irimi.report.summary import REJECTED_MARKER, TOOL_SERVICE, WRITE_MARKER
 from irimi.report.terminal import DELEGATED_PREFIX
-from irimi.sdk import replays as sdk_replays
 from irimi.servicemap import MapIndex, loader
 from irimi.store import writer as store_writer
 from irimi.store.reader import StoreReader
@@ -192,8 +190,8 @@ class Result:
     # The store `run` was told to record into, which other runs may share; None for irimi's
     # default, `$IRIMI_HOME/store`, the run's own.
     store: Path | None = None
-    # A replay's result, as `irimi replay --result-file` wrote it or `sdk.replay` returned it.
-    replay: sdk.ReplayResult | None = None
+    # A replay's result, as `irimi replay --result-file` wrote it or `testing.replay` returned it.
+    replay: testing.ReplayResult | None = None
 
     def events(self, event: str, *, with_time: bool = True) -> list[dict[str, Any]]:
         """Every `event` the agent logged, in order. `with_time=False` drops each one's
@@ -520,20 +518,20 @@ def replay(
 
 
 def sdk_replay(recorded: Result, run_id: str, workdir: Path, *call: Any) -> Result:
-    """`sdk.replay(run_id, fn, args=args)` for `call` = `(fn, *args)` (or `sdk.replay(run_id)`
-    for none) called as a test calls it, through the agents' own `sdk`
-    (`examples/workflows/sdk.py`, which forwards `replay` to `irimi.sdk`), a `replay` of
-    `recorded` in every other way. `sdk.replay`'s one seam, `sdk.replays._run_irimi`, runs `irimi`
-    in this process instead of a subprocess, so the fake internet resolves its names and the
-    scenario's maps load: the agent is still a child process of its own, `replay_child`, as `irimi
-    replay` starts it. The result's `replay` is what `sdk.replay` returned."""
+    """`testing.replay(run_id, fn, args=args)` for `call` = `(fn, *args)` (or
+    `testing.replay(run_id)` for none) called as a test calls it, a `replay` of `recorded` in every
+    other way. `testing.replay`'s one seam, `testing._run_irimi`, runs `irimi` in this process
+    instead of a subprocess, so the fake internet resolves its names and the scenario's maps load:
+    the agent is still a child process of its own, `_replay_child`, as `irimi replay` starts it.
+    The result's `replay` is what `testing.replay` returned."""
     return _replayed(recorded, run_id, workdir, None, _Replay(call=call))
 
 
 @dataclass(frozen=True)
 class _Replay:
     """How `_execute` replays a run: the `options` `irimi replay` is given, whether it runs
-    the scenario's `command`, and, for `sdk_replay`, the `sdk.replay` `call` it makes instead."""
+    the scenario's `command`, and, for `sdk_replay`, the `testing.replay` `call` it makes
+    instead."""
 
     options: tuple[str, ...] = ()
     command: bool = False
@@ -705,8 +703,8 @@ def _execute(
     )
 
 
-def _replay_result(path: Path) -> sdk.ReplayResult:
-    """The result file a replay wrote, as `sdk.replay` reads it back."""
+def _replay_result(path: Path) -> testing.ReplayResult:
+    """The result file a replay wrote, as `testing.replay` reads it back."""
     return replay_result_from_json(json.loads(path.read_text(encoding="utf-8")))
 
 
@@ -717,21 +715,21 @@ def _calling_sdk_replay(
     result_file: Path,
     build: EngineFactory,
 ) -> Callable[[], int]:
-    """`sdk.replay(run_id, fn, args=args, store=store)` for `call` = `(fn, *args)`, or of the
+    """`testing.replay(run_id, fn, args=args, store=store)` for `call` = `(fn, *args)`, or of the
     recorded trigger for an empty `call`, its `irimi` run in this process, building its engine
     with `build`: what it returned written to `result_file`, as `irimi replay --result-file`
     writes it, and its exit code."""
 
     def run() -> int:
-        real = sdk_replays._run_irimi
-        sdk_replays._run_irimi = lambda argv, env: irimi_main(argv, engine_factory=build)
+        real = testing._run_irimi
+        testing._run_irimi = lambda argv, env: irimi_main(argv, engine_factory=build)
         try:
             if call:
-                got = agent_sdk.replay(run_id, call[0], args=tuple(call[1:]), store=store)
+                got = testing.replay(run_id, call[0], args=tuple(call[1:]), store=store)
             else:
-                got = agent_sdk.replay(run_id, store=store)
+                got = testing.replay(run_id, store=store)
         finally:
-            sdk_replays._run_irimi = real
+            testing._run_irimi = real
         result_file.write_text(json.dumps(replay_result_to_json(got)), encoding="utf-8")
         return got.exit_code
 
@@ -845,7 +843,7 @@ def _run_irimi(
     workdir: Path,
 ) -> tuple[int, list[str]]:
     """`run`, which runs irimi in this process, as a user would run it from `cwd`: `irimi shadow
-    -- <agent>`, or `irimi replay <run id>`, or `sdk.replay` (`_calling_sdk_replay`)."""
+    -- <agent>`, or `irimi replay <run id>`, or `testing.replay` (`_calling_sdk_replay`)."""
     buf = io.StringIO()
     with _as_irimi(env, cwd, tmp, internet, scenario, workdir), contextlib.redirect_stdout(buf):
         code = run()

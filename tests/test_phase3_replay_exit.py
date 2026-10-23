@@ -4,7 +4,7 @@ write reaching a real service and no substitute-labeled tool running for real.
 
 The agent is `examples/llm_refund_agent`, run as its user runs it: `irimi shadow -- python -m
 examples.llm_refund_agent.agent ...` records it, and `irimi replay <run>` and
-`sdk.replay(<run>)` replay it, each the real CLI in a process of its own. On the other side, a
+`testing.replay(<run>)` replay it, each the real CLI in a process of its own. On the other side, a
 loopback Stripe (the refund agent test's `_Stripe`) and a loopback Anthropic (`_Model`), which
 answers from the system prompt alone: the full remaining amount for `prompt.txt`, half of it for
 `prompt_half.txt`. Both record every request they hear. The live half is the example's README,
@@ -20,15 +20,15 @@ classifies them with its real shipped maps, the `llm` route on `api.anthropic.co
 other name fails to resolve there, so nothing reaches the real internet. Routing is then proved
 from the store: each stub heard exactly the requests irimi stored as live.
 
-`sdk.replay` runs `python -m irimi replay` through one seam, `sdk.replays._run_irimi`, which this
-test points at the same bootstrap: still a subprocess, and everything else `sdk.replay` does is
+`testing.replay` runs `python -m irimi replay` through one seam, `testing._run_irimi`, which this
+test points at the same bootstrap: still a subprocess, and everything else `testing.replay` does is
 its own.
 
 The four features the record-and-replay path rests on, as each block below proves them: (1) the
 AgentRun shape, the run stored with its trigger, args and events; (2) an SDK-labeled trigger
 whose run is stored automatically; (3) SDK-labeled tool calls, a write tool's substitute running
 in a proxied run; (4) the function that runs an AgentRun through the proxy and says what
-changed, `irimi replay` and `sdk.replay`.
+changed, `irimi replay` and `testing.replay`.
 """
 
 import contextlib
@@ -49,12 +49,11 @@ import pytest
 from examples.llm_refund_agent import agent, seed
 from examples.llm_refund_agent.agent import Ticket, handle_ticket
 from examples.workflows.harness.internet import resolving_only
-from irimi import ca, paths, runner, sdk
+from irimi import ca, paths, runner, testing
 from irimi.cli import main
 from irimi.exchange import Exchange
 from irimi.protocol.env import ENGINE_ACTIVE_ENV
 from irimi.protocol.replay_files import replay_result_from_json
-from irimi.sdk import replays
 from irimi.store.reader import StoreReader
 from irimi.trace import ToolCall, Trigger
 from tests.test_phase_exit import _Stripe
@@ -232,7 +231,7 @@ def _irimi(env: dict[str, str], *argv: str) -> subprocess.CompletedProcess[str]:
 
 def _replay(
     env: dict[str, str], store: Path, run_id: str, result_file: Path
-) -> tuple[subprocess.CompletedProcess[str], sdk.ReplayResult]:
+) -> tuple[subprocess.CompletedProcess[str], testing.ReplayResult]:
     """`irimi replay <run_id>`, and the result it wrote."""
     argv = ["replay", "--port", "0", "--store", str(store), "--result-file", str(result_file)]
     done = _irimi(env, *argv, run_id)
@@ -267,7 +266,7 @@ def _tool_calls(reader: StoreReader, run_id: str) -> dict[str, ToolCall]:
     return named
 
 
-def _anonymous(result: sdk.ReplayResult) -> tuple[Any, ...]:
+def _anonymous(result: testing.ReplayResult) -> tuple[Any, ...]:
     """What a replay said, its own run's id aside: two replays of one run store two runs."""
     assert result.replay_run_id is not None
     lines = tuple(line.replace(result.replay_run_id, "<replay>") for line in result.lines)
@@ -423,7 +422,7 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
         command = [sys.executable, "-c", IRIMI, *argv]
         return subprocess.run(command, env=dict(env), timeout=TIMEOUT_S).returncode
 
-    monkeypatch.setattr(replays, "_run_irimi", run_irimi)
+    monkeypatch.setattr(testing, "_run_irimi", run_irimi)
     for name in [n for n in os.environ if n.lower().endswith("_proxy")]:
         monkeypatch.delenv(name)
     # What `_agent_env` leaves out, a shell's own included, or the replay asks what the recording
@@ -433,11 +432,11 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
     for name, value in env.items():
         monkeypatch.setenv(name, value)
     _Stripe.seen, _Model.seen = [], []
-    by_function = sdk.replay(source, store=store)
+    by_function = testing.replay(source, store=store)
     assert _anonymous(by_function) == _anonymous(same)
     assert (_Stripe.seen, _Model.seen) == ([], [])
     monkeypatch.setenv(agent.PROMPT_FILE_ENV, str(PROMPT_HALF))
-    by_function_edited = sdk.replay(source, handle_ticket, args=(Ticket(*TICKET),), store=store)
+    by_function_edited = testing.replay(source, handle_ticket, args=(Ticket(*TICKET),), store=store)
     assert _anonymous(by_function_edited) == _anonymous(edited)
     assert [m["system"] for m in _Model.seen] == [PROMPT_HALF.read_text()]
     assert _Stripe.seen == []

@@ -1142,8 +1142,8 @@ def test_a_full_refund_recorded_under_serve_is_replayed_as_one_recorded_under_sh
 def test_sdk_replay_from_a_test_returns_the_result_irimi_replay_writes(
     run_workflow, replayed, tmp_path
 ):
-    """`sdk.replay(run_id)`, and `sdk.replay(run_id, handle_ticket, Ticket(...))` with the ticket
-    the run recorded, called as a test calls them: each returns what `irimi replay
+    """`testing.replay(run_id)`, and `testing.replay(run_id, handle_ticket, Ticket(...))` with the
+    ticket the run recorded, called as a test calls them: each returns what `irimi replay
     --result-file` writes for the same run, but for the replay's own new run id, and holds the
     invariants as every replay does, nothing reaching the fake internet."""
     recorded, by_cli = replayed(W, "full_refund")

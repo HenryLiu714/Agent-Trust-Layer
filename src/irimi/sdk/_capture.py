@@ -1,45 +1,10 @@
-"""How the SDK captures a trigger's arguments as JSON.
+"""Capture a trigger's arguments or a tool's result as JSON, and revive that JSON into values.
 
-A run's trigger is stored as `Trigger.args` in its `run.json`, and replay re-runs the
-trigger with those args turned back into values by `revive`, this module's inverse, which a
-replay also uses to hand a read tool its recorded result. So capture says two things about
-every value: its JSON, and whether that JSON is enough to rebuild an equal value (`replayable`).
-The rules are a table, each row has a test, and `docs/trace-format.md` ("Captured arguments") is
-the reference:
-
-    None, bool, int, str, finite float  itself                                   replayable
-    non-finite float                    {"__irimi_repr__": "nan"}, "inf", "-inf" not
-    list, tuple                         a JSON list                              AND of items
-    dict, every key a str               a JSON object                            AND of values
-    dict with any other key             {"__irimi_repr__": <repr(v), cut>}       not
-    dataclass instance                  {"__irimi_type__": "module:qualname",    AND of fields
-                                         "value": <its init fields, captured>}
-    object with a callable model_dump   {"__irimi_type__": "module:qualname",    same
-                                         "value": <v.model_dump(mode="json"), captured>}
-    bytes                               {"__irimi_bytes__": <base64>}            replayable
-    anything else                       {"__irimi_repr__": <repr(v), cut>}       not
-
-A type is matched exactly, never by `isinstance`: an IntEnum, a namedtuple or an OrderedDict is
-"anything else", because `revive` would build the base type, not the value the trigger was given.
-A dict holding one of the four keys capture writes (`RESERVED_KEYS`) is captured by its repr, so a
-revived marker always means capture wrote it. A dataclass or model whose class `revive` could not
-import - defined inside a function (`<locals>` in its qualname), or in a script run by path,
-whose `__main__` is a different module in the process that replays it - is not replayable either.
-A class in a module started with `python -m` is named by the module's real name
-(`importable_module`).
-
-Two bounds keep the walk short whatever the agent passes. A value inside more than `MAX_DEPTH`
-containers is `{"__irimi_repr__": "<too deep>"}`, not replayable; for a trigger, depth counts from
-each parameter's value. And args whose JSON is larger than `MAX_CAPTURED_BYTES` are replaced as a
-whole by `{"__irimi_truncated__": true, "bytes": n}`, not replayable. The walk counts the bytes it
-is producing as it goes and stops as soon as they pass the limit, so a value that holds one large
-object many times, or itself, is walked at most that far; when it stops early, `n` is the count
-so far, already past the limit. A `repr` is the value's own cost: it is cut to 1000 characters
-after it is made, outside any secret's shape (`secret_shapes.cut_outside_secrets`), since the
-store redacts it only after this cut, and the kept half of a key would no longer be its shape.
-
-CAPTURE NEVER RAISES. It runs inside the agent's call, before the agent's own function: a `repr`
-or a `model_dump` that raises makes its value `{"__irimi_repr__": ...}`, never the agent's error.
+`capture` says two things about every value: its JSON, and whether that JSON rebuilds an equal
+value (`replayable`). `revive` is its inverse, which a replay uses for a trigger's args and a read
+tool's recorded result. The rules are the table in `docs/trace-format.md` ("Captured arguments"),
+each row with a test. Capture never raises into the agent: a value it cannot encode, or whose
+`repr` or `model_dump` raises, is captured by its description. Revive never imports a module.
 """
 
 import base64
@@ -51,6 +16,7 @@ import sys
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from irimi._calls import receiver, signature
 from irimi.limits import MAX_CAPTURED_BYTES
 from irimi.secret_shapes import cut_outside_secrets
 from irimi.trace import (
@@ -73,14 +39,19 @@ MAX_DEPTH = 32
 # The most of a `repr` a capture keeps.
 MAX_REPR = 1000
 TOO_DEEP = "<too deep>"
-# A method's first parameter with one of these names is its receiver, not an argument (`_receiver`).
-RECEIVER_NAMES = ("self", "cls")
 
 type Captured = tuple[JSONValue, bool]
 
 
 def capture(value: object) -> Captured:
-    """`value` as JSON, and whether that JSON rebuilds it. See the module doc. Never raises."""
+    """`value` as JSON, and whether that JSON rebuilds it, by the table in `docs/trace-format.md`.
+
+    A type is matched exactly, never by `isinstance`, because `revive` builds the base type. A
+    value inside more than `MAX_DEPTH` containers is `{"__irimi_repr__": "<too deep>"}`, and
+    args whose JSON passes `MAX_CAPTURED_BYTES` are replaced whole by the truncation marker; the
+    walk counts bytes as it goes, so a value that holds itself is walked at most that far. A
+    `repr` is cut to `MAX_REPR` outside any secret's shape (`secret_shapes.cut_outside_secrets`),
+    since the store redacts it only after this cut. Never raises."""
     return _capture(value, 0)
 
 
@@ -104,131 +75,25 @@ def capture_call(
     """A trigger's arguments as `{parameter: value}`, bound against `fn`'s signature, captured.
 
     A method's or a classmethod's first parameter named `self` or `cls` is the receiver and is
-    left out (`_receiver`): it says nothing about the run, and leaving it in would make every
+    left out (`_calls.receiver`): it says nothing about the run, and leaving it in would make every
     method's run unreplayable. Defaults are not applied: the args are what the caller passed, so
     a replay of edited code takes the new defaults. When the call does not bind - the agent
     called the function wrongly, and Python is about to say so - the args are captured as
     `{"args": [...], "kwargs": {...}}`, not replayable: the call raised TypeError the first time,
     and the shape is the one a function whose parameters are named `args` and `kwargs` binds to."""
     try:
-        signature = _signature(fn)
-        bound = signature.bind(*args, **kwargs)
+        sig = signature(fn)
+        bound = sig.bind(*args, **kwargs)
     except Exception:
         encoded, _ = capture({"args": list(args), "kwargs": dict(kwargs)})
         return encoded, False
     arguments = dict(bound.arguments)
-    receiver = _receiver(fn, signature)
-    if receiver is not None:
-        arguments.pop(receiver, None)
+    self_name = receiver(fn, sig)
+    if self_name is not None:
+        arguments.pop(self_name, None)
     # One level less than the dict: each parameter's value may nest MAX_DEPTH deep, as a value
     # given to `sdk.run(name, inputs=...)` may.
     return _capture(arguments, -1)
-
-
-def bind(
-    fn: Callable[..., Any], args: tuple[Any, ...], kwargs: Mapping[str, Any]
-) -> inspect.BoundArguments:
-    """`args` and `kwargs` bound to `fn`'s parameters, as `capture_call` binds a trigger's call:
-    TypeError when they do not bind, as calling `fn` would raise."""
-    return _signature(fn).bind(*args, **kwargs)
-
-
-def _receiver(fn: Callable[..., Any], signature: inspect.Signature) -> str | None:
-    """The name of `fn`'s first parameter when it is the receiver of a method or a classmethod,
-    else None. It is when it is named `self` or `cls` and `fn` is defined in a class body - its
-    qualname says so - unless the class holds it as a `staticmethod`. A plain function or a static
-    method receives no instance, so its first parameter is an argument whatever its name, and
-    leaving it out would make a run replay could not call again. A bound method's receiver is
-    already bound, and not in its signature. A class this cannot look up statically in a module
-    already imported - one defined in a function, or not yet built - is taken by the name alone.
-    Never raises."""
-    first = next(iter(signature.parameters), None)
-    qualname = getattr(fn, "__qualname__", None)
-    if first not in RECEIVER_NAMES or inspect.ismethod(fn) or not isinstance(qualname, str):
-        return None
-    owner, _, name = qualname.rpartition(".")
-    if not owner or owner.endswith("<locals>"):
-        return None  # defined at a module's top level or in a function, not in a class body
-    found: Any = sys.modules.get(getattr(fn, "__module__", None) or "")
-    try:
-        for part in (*owner.split("."), name):
-            found = inspect.getattr_static(found, part)
-    except AttributeError:
-        return first
-    return None if isinstance(found, staticmethod) else first
-
-
-def _signature(fn: Callable[..., Any]) -> inspect.Signature:
-    """`fn`'s parameters, its annotations left unevaluated. Only the names are needed, and on
-    Python 3.14, where annotations are evaluated lazily, `inspect.signature` evaluates them: a
-    function annotated with a name imported under `TYPE_CHECKING` would raise NameError, and its
-    every call be captured as one that does not bind."""
-    if sys.version_info >= (3, 14):
-        import annotationlib
-
-        return inspect.signature(fn, annotation_format=annotationlib.Format.FORWARDREF)
-    return inspect.signature(fn)
-
-
-# The parameters a keyword argument binds to (`call_arguments`).
-_KEYWORDS = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
-
-
-def call_arguments(
-    fn: Callable[..., Any], arguments: Mapping[str, Any]
-) -> tuple[list[Any], dict[str, Any]]:
-    """`capture_call`'s binding undone: the positional and keyword arguments that call `fn`
-    with `arguments`, `{parameter: value}` as a trigger's args are captured, revived. Each value
-    goes where its parameter takes it: the leading positional parameters in their places, up to the
-    first one the call left to its default, `*args` spread out after them, `**kwargs` spread in,
-    and every other by its name. TypeError when they do not bind to `fn`'s parameters, as calling
-    it would raise: a parameter missing or unknown. TypeError too for what no call binds, which
-    args given by hand (`--args`) can say and Python would bind otherwise than they say: a
-    `*args` after a positional parameter left out, whose values would fill that parameter; a
-    `*args` that is no list or a `**kwargs` that is no object, which would be spread as
-    characters or keys; and a `**kwargs` naming a parameter a keyword binds to, whose value it
-    would replace."""
-    positional: list[Any] = []
-    named = dict(arguments)
-    left_out: str | None = None  # the first positional parameter the call left to its default
-    signature = _signature(fn)
-    for name, parameter in signature.parameters.items():
-        kind = parameter.kind
-        is_positional = kind in (
-            inspect.Parameter.POSITIONAL_ONLY,
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        )
-        if name not in named:
-            if is_positional and left_out is None:
-                left_out = name
-            continue
-        if is_positional and left_out is None:
-            positional.append(named.pop(name))
-        elif kind is inspect.Parameter.VAR_POSITIONAL:
-            spread = named.pop(name)
-            if not isinstance(spread, list):
-                raise TypeError(f"{name} must be a list, not {type(spread).__name__}")
-            if left_out is not None:
-                raise TypeError(
-                    f"{name} takes its values after {left_out}, which was left to its default"
-                )
-            positional.extend(spread)
-        elif kind is inspect.Parameter.VAR_KEYWORD:
-            spread = named.pop(name)
-            if not isinstance(spread, dict):
-                raise TypeError(f"{name} must be an object, not {type(spread).__name__}")
-            # Only a name a keyword binds to is taken. A positional-only parameter's, or `*args`'
-            # or `**kwargs`' own, is free for `**kwargs`: `f(1, a=2)` and `f(kwargs=2)` bind so.
-            taken = sorted(
-                key
-                for key in spread
-                if key in signature.parameters and signature.parameters[key].kind in _KEYWORDS
-            )
-            if taken:
-                raise TypeError(f"{name} names {', '.join(taken)}, which is a parameter of its own")
-            named.update(spread)
-    signature.bind(*positional, **named)
-    return positional, named
 
 
 class NotReplayable(Exception):
@@ -236,7 +101,7 @@ class NotReplayable(Exception):
 
 
 def revive(value: JSONValue) -> Any:
-    """The value `value` was captured from (see the module doc), or NotReplayable naming why not.
+    """The value `value` was captured from, or NotReplayable naming why not.
     The inverse of the capture table, row by row:
 
         JSON scalars, lists, objects            themselves; a tuple was captured as a list, and
@@ -249,7 +114,7 @@ def revive(value: JSONValue) -> Any:
         {"__irimi_repr__": ...}, anywhere       NotReplayable: its JSON describes the value, it
         {"__irimi_truncated__": ...}, anywhere  is not the value
 
-    REVIVE NEVER IMPORTS. A stored run names its classes, and importing a module runs its code, so
+    Revive never imports. A stored run names its classes, and importing a module runs its code, so
     a class is looked up only in a module already in `sys.modules`, and only in what it already
     holds, never through its `__getattr__`: a tool that returned one has imported it, as has the
     agent a replay re-runs. A class it cannot find there, that is neither,

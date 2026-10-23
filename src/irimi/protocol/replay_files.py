@@ -1,9 +1,9 @@
 """The two files a replay hands between processes.
 
-- The outcome file: the replay's child (`irimi.sdk.replay_child`) writes how its call of a trigger
+- The outcome file: the replay's child (`irimi._replay_child`) writes how its call of a trigger
   ended (`CallOutcome`), and `irimi replay` ends the replay's run with it.
 - The result file: `irimi replay --result-file` writes what the replay said (`ReplayResult`), and
-  `sdk.replay` reads it back.
+  `irimi.testing.replay` reads it back.
 """
 
 import json
@@ -31,13 +31,23 @@ class CallOutcome:
 
 @dataclass(frozen=True)
 class ReplayResult:
-    """What one `irimi replay` said. `same` is True when the replay made the same writes as the
-    recording; `str(result)` is what `irimi replay` printed, so `assert result.same, result` shows
-    the difference. `replay_run_id` is the run the replay stored, None when it was refused before
-    it ran (`exit_code` 2, the reason in `lines`). `exit_code` is the CLI's (`exitcodes`): 0 the
-    same writes, 1 any differ, 2 a replay that could not run, or call its trigger; and 130 or 143
-    for one SIGINT or SIGTERM stopped. `diverged_at` is the line of the first call
-    the recording did not answer, None when every call was."""
+    """What one replay said, as `irimi.testing.replay` returns it.
+
+    `same` is true when the replay made the same writes as the recording, and `str(result)` is
+    what `irimi replay` printed, so `assert result.same, result` shows the difference.
+
+    Attributes:
+        source_run_id: The stored run that was replayed.
+        replay_run_id: The run the replay stored, or None when it was refused before it ran.
+        exit_code: `irimi replay`'s exit code: 0 the same writes, 1 any differ, 2 a replay that
+            could not run or call its trigger, 130 or 143 one SIGINT or SIGTERM stopped.
+        diverged_at: The line naming the first call the recording did not answer, or None.
+        lines: What `irimi replay` printed, one string per line.
+
+    Example:
+        result = testing.replay(run_id)
+        assert result.same, result
+    """
 
     source_run_id: str
     replay_run_id: str | None

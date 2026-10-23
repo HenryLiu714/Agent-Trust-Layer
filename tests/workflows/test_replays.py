@@ -7,7 +7,7 @@ replay <run id>`, in a copy of the recording's home, against a fresh `World` and
 process that held several runs (W3, W5, W8, W9's control scenarios) is replayed once per run.
 
 `irimi replay` runs what it runs for that run: the run's trigger, called alone by
-`irimi.sdk.replay_child` from its entrypoint and its recorded args, or a process run's argv. A run
+`irimi._replay_child` from its entrypoint and its recorded args, or a process run's argv. A run
 it cannot call - an `sdk.run` block or a `header` run with no entrypoint, args stored by their
 description - it refuses, exit 2, and those scenarios are replayed by their command instead
 (`-- <cmd>`, `REFUSED`), which runs the agent's whole process, every run of it adopted into the

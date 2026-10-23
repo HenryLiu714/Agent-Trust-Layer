@@ -1,10 +1,10 @@
 """The SDK under `irimi replay`: a top-level run adopts the replay's run and posts nothing, a
-trigger is called again from its entrypoint and captured args, and `sdk.replay`'s result codec.
+trigger is called again from its entrypoint and captured args, and `testing.replay`'s result codec.
 
 `tests/test_replay_cli.py` drives all of it through the real command; these are its parts, each
 alone: `RunScope`'s adopting branch against a reporter that writes down every post,
-`capture.call_arguments` and `api.resolve`, `irimi.sdk.replay_child` as the subprocess it is, and
-`ReplayResult`'s JSON.
+`_calls.call_arguments` and `_entrypoints.resolve`, `irimi._replay_child` as the subprocess it
+is, and `ReplayResult`'s JSON.
 """
 
 import asyncio
@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from irimi import sdk
+from irimi import _calls, _entrypoints, sdk, testing
 from irimi.protocol.env import (
     ENGINE_ACTIVE_ENV,
     REPLAY_ARGS_FILE_ENV,
@@ -36,7 +36,9 @@ from irimi.protocol.replay_files import (
     replay_result_from_json,
     replay_result_to_json,
 )
-from irimi.sdk import api, capture, runs
+from irimi.sdk import _capture as capture
+from irimi.sdk import _runs as runs
+from irimi.sdk._state import state
 from irimi.trace import ErrorInfo
 
 REPLAY = "abcd1234abcd1234"
@@ -59,7 +61,7 @@ class _Posts:
 def posts(monkeypatch) -> _Posts:
     """This process as `irimi replay` sets up its child: active, and told the run it replays as."""
     reporter = _Posts()
-    monkeypatch.setattr(runs, "reporter", reporter)
+    monkeypatch.setattr(state, "reporter", reporter)
     monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
     monkeypatch.setenv(RUN_ENV, REPLAY)
     monkeypatch.setenv(REPLAY_RUN_ENV, REPLAY)
@@ -255,7 +257,7 @@ def test_call_arguments_undoes_capture_call_s_binding(fn, args, kwargs):
     a positional-only parameter in its place: the call the run recorded, made again."""
     captured, replayable = capture.capture_call(fn, args, kwargs)
     assert replayable
-    again, named = capture.call_arguments(fn, capture.revive(captured))
+    again, named = _calls.call_arguments(fn, capture.revive(captured))
     assert fn(*again, **named) == fn(*args, **kwargs)
 
 
@@ -278,7 +280,7 @@ def test_call_arguments_refuses_args_that_would_bind_otherwise_than_they_say(fn,
     list or a `**kwargs` that is no object, which would be spread as characters or keys; and a
     `**kwargs` naming a parameter, which would replace that parameter's value."""
     with pytest.raises(TypeError) as raised:
-        capture.call_arguments(fn, arguments)
+        _calls.call_arguments(fn, arguments)
     assert str(raised.value) == error
 
 
@@ -314,14 +316,15 @@ def test_a_trigger_receiving_no_instance_is_called_again_with_its_first_paramete
     or `cls`: captured, it calls the trigger again."""
     captured, replayable = capture.capture_call(fn.__wrapped__, ("desk", "T1"), {})
     assert replayable
-    again, named = capture.call_arguments(api.resolve(api.entrypoint(fn)), capture.revive(captured))
+    trigger = _entrypoints.resolve(_entrypoints.entrypoint(fn))
+    again, named = _calls.call_arguments(trigger, capture.revive(captured))
     assert fn(*again, **named) == ("desk", "T1")
 
 
 def test_resolve_finds_a_function_a_staticmethod_and_a_classmethod_by_name():
-    assert api.resolve(f"{__name__}:handle") is handle
-    assert api.resolve(f"{__name__}:Desk.static") is Desk.static
-    assert api.resolve(f"{__name__}:Desk.by_class") == Desk.by_class
+    assert _entrypoints.resolve(f"{__name__}:handle") is handle
+    assert _entrypoints.resolve(f"{__name__}:Desk.static") is Desk.static
+    assert _entrypoints.resolve(f"{__name__}:Desk.by_class") == Desk.by_class
 
 
 @pytest.mark.parametrize(
@@ -336,15 +339,15 @@ def test_resolve_finds_a_function_a_staticmethod_and_a_classmethod_by_name():
     ],
 )
 def test_resolve_refuses_what_it_cannot_call(entrypoint, reason):
-    with pytest.raises(api.NotCallable, match=reason):
-        api.resolve(entrypoint)
+    with pytest.raises(_entrypoints.NotCallable, match=reason):
+        _entrypoints.resolve(entrypoint)
 
 
 CHILD_MODULE = """
 import asyncio
 from dataclasses import dataclass
 
-from irimi import sdk
+from irimi import _calls, _entrypoints, sdk, testing
 
 
 @dataclass(frozen=True)
@@ -420,7 +423,7 @@ def _child(
         **(env or {}),
     }
     done = subprocess.run(
-        [sys.executable, "-m", "irimi.sdk.replay_child"],
+        [sys.executable, "-m", "irimi._replay_child"],
         env=env,
         cwd=tmp_path,
         capture_output=True,
@@ -466,7 +469,7 @@ def test_the_child_s_trigger_adopts_the_replay_s_run_and_its_handed_off_coroutin
 
 
 def test_a_trigger_that_raises_exits_1_with_its_traceback_and_says_what_it_raised(tmp_path):
-    """The outcome is what a run records an exception as (`errors.error_info`), so the replay's
+    """The outcome is what a run records an exception as (`_errors.error_info`), so the replay's
     run ends on `builtins.KeyError` as its recording's did."""
 
     done, outcome = _child(tmp_path, "child_agent:fails", TICKET)
@@ -508,7 +511,7 @@ def test_a_call_the_child_cannot_make_exits_cannot_call_and_says_why(
 ):
     """Never an agent that ran and raised: the child exits `CANNOT_CALL`, with one `error:` line,
     and its outcome says it never called."""
-    from irimi.sdk.replay_child import CANNOT_CALL
+    from irimi._replay_child import CANNOT_CALL
 
     done, outcome = _child(tmp_path, entrypoint, args)
     assert (done.returncode, done.stderr) == (
@@ -615,29 +618,29 @@ def test_sdk_replay_refuses_a_function_from_main_or_one_its_name_does_not_find(m
 
     in_main.__module__, in_main.__qualname__ = "__main__", "in_main"
     monkeypatch.setattr(sys.modules["__main__"], "in_main", in_main, raising=False)
-    with pytest.raises(sdk.ReplayError) as raised:
-        sdk.replay("r", in_main, args=("T1",))
+    with pytest.raises(testing.ReplayError) as raised:
+        testing.replay("r", in_main, args=("T1",))
     assert str(raised.value) == (
         "__main__:in_main cannot be called by its name: it is in __main__, which in a replay's "
         "child is the child itself"
     )
 
-    with pytest.raises(sdk.ReplayError, match="cannot be called by its name"):
-        sdk.replay("r", local, args=("T1",))
+    with pytest.raises(testing.ReplayError, match="cannot be called by its name"):
+        testing.replay("r", local, args=("T1",))
 
     def impostor(ticket: str) -> str:
         return ticket
 
     impostor.__qualname__ = "handle"  # its name finds `handle`, another function
-    with pytest.raises(sdk.ReplayError) as raised:
-        sdk.replay("r", impostor, args=("T1",))
+    with pytest.raises(testing.ReplayError) as raised:
+        testing.replay("r", impostor, args=("T1",))
     assert str(raised.value) == f"{__name__}:handle names another function than the one given"
-    with pytest.raises(sdk.ReplayError, match="args and kwargs only for a call it is given"):
-        sdk.replay("r", None, args=("T1",))
-    with pytest.raises(sdk.ReplayError, match="args and kwargs only for a call it is given"):
-        sdk.replay("r", kwargs={"ticket": "T1"})
-    with pytest.raises(sdk.ReplayError, match="it is a method"):
-        sdk.replay("r", Desk.answer, args=("T1",))
+    with pytest.raises(testing.ReplayError, match="args and kwargs only for a call it is given"):
+        testing.replay("r", None, args=("T1",))
+    with pytest.raises(testing.ReplayError, match="args and kwargs only for a call it is given"):
+        testing.replay("r", kwargs={"ticket": "T1"})
+    with pytest.raises(testing.ReplayError, match="it is a method"):
+        testing.replay("r", Desk.answer, args=("T1",))
 
 
 @pytest.mark.parametrize(
@@ -649,8 +652,8 @@ def test_sdk_replay_refuses_a_function_from_main_or_one_its_name_does_not_find(m
     ],
 )
 def test_sdk_replay_says_why_the_arguments_it_was_given_cannot_be_replayed(args, error):
-    with pytest.raises(sdk.ReplayError) as raised:
-        sdk.replay("r", handle, args=args)
+    with pytest.raises(testing.ReplayError) as raised:
+        testing.replay("r", handle, args=args)
     assert str(raised.value) == error
 
 
@@ -660,15 +663,15 @@ def pair(a: str, b: str) -> None: ...
 
 def test_sdk_replay_refuses_arguments_each_of_which_fits_but_not_together():
     half = "x" * (capture.MAX_CAPTURED_BYTES // 2)
-    with pytest.raises(sdk.ReplayError) as raised:
-        sdk.replay("r", pair, args=(half,), kwargs={"b": half})
+    with pytest.raises(testing.ReplayError) as raised:
+        testing.replay("r", pair, args=(half,), kwargs={"b": half})
     assert str(raised.value) == (
         "the arguments to pair are larger than a run records (1048576 bytes)"
     )
 
 
 def _answering(argv: list[str], seen: dict[str, Any]) -> int:
-    """A stand-in for `irimi`, through `sdk.replay`'s one seam: writes down what it was given
+    """A stand-in for `irimi`, through `testing.replay`'s one seam: writes down what it was given
     and how the directory holding its files was, and writes a result."""
     tmp = os.path.dirname(argv[argv.index("--result-file") + 1])
     seen["argv"], seen["tmp"] = argv, tmp
@@ -685,17 +688,15 @@ def _answering(argv: list[str], seen: dict[str, Any]) -> int:
 def test_sdk_replay_passes_its_call_in_a_private_directory_it_removes(monkeypatch):
     """The args in a file in a directory only this user can enter, never on the command line;
     the run id as `--run=`, so one starting with `-` is no flag; this process's `sys.path` as the
-    child's; and the directory gone when `sdk.replay` returns, raises, or finds no result."""
-    from irimi.sdk import replays
-
+    child's; and the directory gone when `testing.replay` returns, raises, or finds no result."""
     seen: dict[str, Any] = {}
 
     def run_irimi(argv: list[str], env: Any) -> int:
         seen["pythonpath"] = env["PYTHONPATH"]
         return _answering(argv, seen)
 
-    monkeypatch.setattr(replays, "_run_irimi", run_irimi)
-    result = sdk.replay("-r", handle, kwargs={"ticket": "T1"}, store="/s")
+    monkeypatch.setattr(testing, "_run_irimi", run_irimi)
+    result = testing.replay("-r", handle, kwargs={"ticket": "T1"}, store="/s")
     assert result == ReplayResult("-r", "new0new0new0new0", 1, None, ("a",))
     tmp = seen["tmp"]
     assert seen["argv"] == [
@@ -723,15 +724,15 @@ def test_sdk_replay_passes_its_call_in_a_private_directory_it_removes(monkeypatc
         _answering(argv, seen)
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(replays, "_run_irimi", interrupted)
+    monkeypatch.setattr(testing, "_run_irimi", interrupted)
     with pytest.raises(KeyboardInterrupt):
-        sdk.replay("r")
+        testing.replay("r")
     assert not os.path.exists(seen["tmp"])
     monkeypatch.setattr(
-        replays, "_run_irimi", lambda argv, env: seen.update(tmp=os.path.dirname(argv[4])) or 3
+        testing, "_run_irimi", lambda argv, env: seen.update(tmp=os.path.dirname(argv[4])) or 3
     )
-    with pytest.raises(sdk.ReplayError, match="^irimi replay exited 3 and wrote no result: "):
-        sdk.replay("r")
+    with pytest.raises(testing.ReplayError, match="^irimi replay exited 3 and wrote no result: "):
+        testing.replay("r")
     assert not os.path.exists(seen["tmp"])
 
 

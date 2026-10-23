@@ -1,56 +1,28 @@
-"""The irimi SDK: tell irimi where each of an agent's runs starts and ends.
-
-`irimi shadow -- <cmd>` knows one process as one run. A server-style agent handles many requests
-in one long-lived process, often at once, and the proxy alone sees one interleaved stream of HTTP
-calls. The SDK marks each run in the agent's own code:
-
-    from irimi import sdk
+"""The irimi SDK: mark where each of an agent's runs starts and ends, and label the tools the
+proxy cannot see.
 
     @sdk.trigger
     def handle(ticket: Ticket) -> None: ...
 
-    with sdk.run("nightly", inputs={"date": "2026-09-29"}) as run: ...
-
-It reports each run's start (with what triggered it) and its end to irimi's control endpoint, and
-keeps the run's id in a context variable that `instrument()` puts on every request the run makes.
-
-A tool the proxy cannot see, because it is not HTTP, is labelled read or write; a write names the
-fake that runs in its place under irimi, and each call is recorded in its run:
-
-    @sdk.write_tool(fake=mock_database_write)
-    def database_write(row: Row) -> None: ...
-
-In a replay, a read tool is answered from the recording when it can be, and what it raised then
-comes back as `sdk.RecordedToolError`. `sdk.replay(run_id)` replays a stored run from a test,
-as `irimi replay` does, and returns a `ReplayResult`.
-
-THE SDK IS INERT WITHOUT IRIMI. It is active only while `IRIMI_ENGINE_ACTIVE=1`, which `irimi
-shadow` sets for its child; otherwise a trigger or a run calls straight through, so the SDK is
-safe to leave in production code. And it NEVER RAISES INTO THE AGENT: a control endpoint it
-cannot reach is a warning on the `irimi.sdk` logger, and the run goes on.
-
-Imports only the stdlib and irimi's lowest layers, never mitmproxy, so it can ship on its own.
+The SDK is inert without irimi: it acts only while `IRIMI_ENGINE_ACTIVE=1`, so it is safe to leave
+in production code. It never raises into the agent. This module is its whole public surface;
+replaying a stored run from a test is `irimi.testing`.
 """
 
-from irimi.protocol.replay_files import ReplayResult
-from irimi.sdk.api import Run, run, trigger
-from irimi.sdk.context import current_run_id, is_active, propagate
-from irimi.sdk.errors import RecordedToolError
-from irimi.sdk.instrumentation import instrument
-from irimi.sdk.replays import ReplayError, replay
-from irimi.sdk.tools import read_tool, write_tool
+from irimi.sdk._context import current_run_id, is_active, propagate
+from irimi.sdk._errors import RecordedToolError
+from irimi.sdk._http_labels import instrument
+from irimi.sdk._runs import Run, run, trigger
+from irimi.sdk._tools import read_tool, write_tool
 
 __all__ = [
     "RecordedToolError",
-    "ReplayError",
-    "ReplayResult",
     "Run",
     "current_run_id",
     "instrument",
     "is_active",
     "propagate",
     "read_tool",
-    "replay",
     "run",
     "trigger",
     "write_tool",

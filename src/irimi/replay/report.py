@@ -106,7 +106,7 @@ class ReplayReport:
         return [*lines, "", *self.comparison.lines()]
 
     def result(self) -> ReplayResult:
-        """What `--result-file` writes, and `sdk.replay` returns."""
+        """What `--result-file` writes, and `testing.replay` returns."""
         return ReplayResult(
             self.source.run_id,
             self.replayed.run_id,

@@ -170,7 +170,7 @@ class Trigger:
     name: str  # the display name
     # `module:qualname` of the wrapped function; None for a context-manager run and the process run.
     entrypoint: str | None
-    args: JSONValue  # the captured arguments: `irimi.sdk.capture`'s table
+    args: JSONValue  # the captured arguments: `irimi.sdk._capture`'s table
     replayable: bool
     # The command line of a process run's own trigger (`command`), whose `args` are then None.
     # run.json keeps it as `args: {"argv": [...]}`, the shape it has always had (`trigger_args`).

@@ -1,34 +1,11 @@
 """The child `irimi replay` starts to call a stored run's trigger again.
 
-    IRIMI_REPLAY_CALL=module:qualname IRIMI_REPLAY_ARGS_FILE=args.json \\
-        IRIMI_REPLAY_OUTCOME_FILE=outcome.json python -m irimi.sdk.replay_child
-
-`irimi replay` sets the three variables (`runner.child_env`), with the rest of what `irimi shadow`
-gives its child, so this process's requests go through the replay's engine. It:
-
-1. imports the function `module:qualname` names (`api.resolve`): the module, then each name in
-   the qualname. This is the one place a replay imports the agent's code, as running it would;
-   `capture.revive` never imports, so the args are revived after it, when the classes they name
-   are loaded;
-2. revives the args, the JSON object `{parameter: captured value}` the file holds;
-3. calls the function with them (`capture.call_arguments`), and when the call returns a coroutine,
-   an `async def` trigger's or a run a sync trigger handed off, runs it to its end with
-   `asyncio.run`, so the run's body runs and the run ends.
-
-The function is normally the `@sdk.trigger` the run recorded, so the call is a run, which the SDK
-adopts as the replay's (`runs.RunScope`): every request and tool call lands in the replay's run,
-and posts no end of its own. So the child says how the call ended in the outcome file
-(`CallOutcome`), and `irimi replay` ends the run with it: what the call raised, recorded as a run
-records it (`errors.error_info`), so a replay that ends on a recorded `KeyError` stores
-`builtins.KeyError`, as its recording did.
-
-It exits 0 when the call returns and 1 when it raises, printing the traceback to stderr, as an
-uncaught exception would. A call it cannot make - a module that does not import, a qualname that
-names nothing or whose lookup raises, a method, whose instance a run does not record, a function
-in `__main__`, args that do not revive or do not bind to its parameters - exits `CANNOT_CALL`
-with one `error:` line, and its outcome says why: `irimi replay` reports that as a replay that
-could not run, never as an agent that ran and differed. The outcome is written on every path: an
-interruption before the call says the call was never made, and then ends the process.
+`irimi replay` runs `python -m irimi._replay_child` with `IRIMI_REPLAY_CALL`,
+`IRIMI_REPLAY_ARGS_FILE` and `IRIMI_REPLAY_OUTCOME_FILE` set (`runner.child_env`). It imports the
+trigger (`_entrypoints.resolve`), revives its args, calls it (running a coroutine to its end), and
+writes how the call ended as a `CallOutcome`, which `irimi replay` ends the run with. It exits 0
+when the call returns, 1 when it raises, and `CANNOT_CALL` with one `error:` line for a call it
+could not make. Imports only the stdlib and the SDK's layers, so it runs under the agent's Python.
 """
 
 import asyncio
@@ -41,11 +18,12 @@ from pathlib import Path
 from typing import Any
 
 from irimi import exitcodes, trace
+from irimi._calls import call_arguments
+from irimi._entrypoints import NotCallable, resolve
 from irimi.protocol.env import REPLAY_ARGS_FILE_ENV, REPLAY_CALL_ENV, REPLAY_OUTCOME_FILE_ENV
 from irimi.protocol.replay_files import CallOutcome, call_outcome_to_json
-from irimi.sdk.api import NotCallable, resolve
-from irimi.sdk.capture import NotReplayable, call_arguments, revive
-from irimi.sdk.errors import error_info
+from irimi.sdk._capture import NotReplayable, revive
+from irimi.sdk._errors import error_info
 
 # How the child exits when it could not call the trigger at all: a shell's "found, but cannot be
 # run".
@@ -53,6 +31,11 @@ CANNOT_CALL = exitcodes.CANNOT_EXEC
 
 
 def main() -> int:
+    """Call the trigger the environment names. The trigger is normally the run's `@sdk.trigger`,
+    which the SDK adopts as the replay's run, so every request and tool call lands in it and the
+    run posts no end of its own. What the call raised is recorded as a run records it
+    (`_errors.error_info`). The outcome is written on every path: an interruption before the
+    call says the call was never made, and then ends the process."""
     entrypoint = os.environ.get(REPLAY_CALL_ENV)
     args_file = os.environ.get(REPLAY_ARGS_FILE_ENV)
     outcome_file = os.environ.get(REPLAY_OUTCOME_FILE_ENV)

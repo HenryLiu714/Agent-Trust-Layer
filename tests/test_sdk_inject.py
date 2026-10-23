@@ -28,7 +28,9 @@ from irimi import redact, sdk
 from irimi.exchange import Exchange
 from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV
 from irimi.protocol.headers import RUN_HEADER
-from irimi.sdk import client, instrumentation, runs
+from irimi.sdk import _control_client as client
+from irimi.sdk import _http_labels as instrumentation
+from irimi.sdk._state import state
 from irimi.store.reader import StoreReader
 from irimi.store.writer import DirectoryStore
 from tests import test_engine_mitm
@@ -82,7 +84,7 @@ def _running(cfg: Any, tmp_path: Path, monkeypatch, **start: Any) -> Iterator[_I
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
     monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{port}/_irimi")
-    monkeypatch.setattr(runs, "reporter", client.ControlClient())
+    monkeypatch.setattr(state, "reporter", client.ControlClient())
     try:
         yield _Irimi(port, seen, store, stop_once)
     finally:
@@ -467,7 +469,7 @@ def test_the_sdks_own_control_posts_carry_no_run_header(monkeypatch):
     try:
         monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
         monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{server.server_address[1]}/_irimi")
-        monkeypatch.setattr(runs, "reporter", client.ControlClient())
+        monkeypatch.setattr(state, "reporter", client.ControlClient())
 
         @sdk.trigger
         def twice() -> None:
@@ -542,7 +544,7 @@ def test_instrument_called_while_it_patches_returns_rather_than_waiting_on_itsel
     first_call.start()
     first_call.join(timeout=10)
     deadlocked = first_call.is_alive()
-    if deadlocked:  # free it, so the suite's own `_uninstall` can take the lock
+    if deadlocked:  # free it, so the suite's own `reset_for_tests` can take the lock
         instrumentation._lock.release()
         first_call.join(timeout=10)
     assert not deadlocked

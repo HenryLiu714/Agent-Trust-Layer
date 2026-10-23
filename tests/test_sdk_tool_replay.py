@@ -40,8 +40,12 @@ from irimi.protocol.env import (
 from irimi.protocol.headers import RUN_HEADER
 from irimi.replay.index import ReplayIndex
 from irimi.replay.policy import ReplayPolicy
-from irimi.sdk import client, context, runs
-from irimi.sdk.errors import recorded_error
+from irimi.sdk import _context as context
+from irimi.sdk import _control_client as client
+from irimi.sdk import _runs as runs
+from irimi.sdk import _tools as tools
+from irimi.sdk._errors import recorded_error
+from irimi.sdk._state import state
 from irimi.store.reader import StoreReader
 from irimi.store.writer import DirectoryStore
 from irimi.trace import ErrorInfo, RunRecord, ToolCall, new_run_id
@@ -157,7 +161,7 @@ class _Irimi:
         monkeypatch.delenv(RUN_ENV, raising=False)
         monkeypatch.delenv(REPLAY_RUN_ENV, raising=False)
         monkeypatch.delenv(AGENT_VERSION_ENV, raising=False)
-        monkeypatch.setattr(runs, "reporter", client.ControlClient())
+        monkeypatch.setattr(state, "reporter", client.ControlClient())
 
     def record(self, script: Callable[[], Any]) -> str:
         """`script` run in one SDK run under a shadow engine: the run's id."""
@@ -421,7 +425,7 @@ def test_an_inactive_sdk_never_asks_the_recording(monkeypatch):
         def recorded(self, *args: Any) -> None:
             raise AssertionError("an inactive SDK asks nothing")
 
-    monkeypatch.setattr(runs, "reporter", _Refuses())
+    monkeypatch.setattr(state, "reporter", _Refuses())
     assert balance("acc_1") == {"account": "acc_1", "balance": 100}
 
 
@@ -447,7 +451,7 @@ def test_a_replay_id_irimi_did_not_set_asks_no_recording(monkeypatch, run_env):
         def recorded(self, *args: Any) -> None:
             posted.append("recorded")
 
-    monkeypatch.setattr(runs, "reporter", _Writes())
+    monkeypatch.setattr(state, "reporter", _Writes())
     assert balance("acc_1") == {"account": "acc_1", "balance": 100}
     assert (posted, _REAL_READS) == (["tool-calls"], ["acc_1"])
 
@@ -602,7 +606,7 @@ def test_an_async_tool_outside_a_replay_runs_its_body_without_a_hop_off_the_loop
         hops.append(getattr(fn, "__name__", repr(fn)))
         return await real(fn, *args)
 
-    monkeypatch.setattr(runs, "off_the_loop", counted)
+    monkeypatch.setattr(tools, "off_the_loop", counted)
     irimi.record(lambda: asyncio.run(balance_async("acc_1")))
     assert "_replay_answer" not in hops
 
@@ -659,7 +663,7 @@ def test_a_recorded_call_that_was_closed_unawaited_is_a_miss(monkeypatch):
         def recorded(self, *args: Any) -> RecordedOutcome:
             return RecordedOutcome(None, ErrorInfo("builtins.GeneratorExit", ""), awaited=False)
 
-    monkeypatch.setattr(runs, "reporter", _Closed())
+    monkeypatch.setattr(state, "reporter", _Closed())
     assert balance("acc_1") == {"account": "acc_1", "balance": 100}
     assert [doc["ran"] for doc in posted] == ["real"]
 
@@ -705,7 +709,7 @@ def _answering(monkeypatch, status: int, body: bytes) -> Iterator[list[tuple[str
     monkeypatch.setenv(RUN_ENV, "abcd1234abcd1234")
     monkeypatch.setenv(REPLAY_RUN_ENV, "abcd1234abcd1234")
     monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{server.server_address[1]}/_irimi")
-    monkeypatch.setattr(runs, "reporter", client.ControlClient())
+    monkeypatch.setattr(state, "reporter", client.ControlClient())
     try:
         yield seen
     finally:

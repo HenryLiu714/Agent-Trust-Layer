@@ -1,13 +1,13 @@
 """Test-wide isolation from the developer's own irimi setup.
 
-Isolate every test from the developer's own `$IRIMI_HOME` and `./irimi.maps.yaml`, and undo the
-SDK's HTTP patches after each test. The fixture is autouse, so a new test file inherits it.
+Isolate every test from the developer's own `$IRIMI_HOME` and `./irimi.maps.yaml`, and reset the
+SDK's process-wide state after each test. The fixture is autouse, so a new test file inherits it.
 """
 
 import pytest
 
 from irimi import paths
-from irimi.sdk import instrumentation
+from irimi.sdk import _state
 
 
 @pytest.fixture(autouse=True)
@@ -22,8 +22,9 @@ def no_ambient_irimi(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def no_instrumentation_left_behind():
-    """Every patch a test's runs made to the HTTP clients is undone after it: `instrument()`
-    patches classes for the life of the process, which here is the whole suite."""
+def no_sdk_state_left_behind():
+    """Every patch a test's runs made to the HTTP clients is undone after it, and the SDK's
+    reporter and once-only warnings start fresh: `instrument()` patches classes for the life of
+    the process, which here is the whole suite."""
     yield
-    instrumentation._uninstall()
+    _state.reset_for_tests()

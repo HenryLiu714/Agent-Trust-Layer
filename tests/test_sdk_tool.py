@@ -25,7 +25,10 @@ from irimi.cli import main
 from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV, RUN_ENV
 from irimi.report.model import RunView
 from irimi.report.summary import summary_lines
-from irimi.sdk import capture, client, runs, tools
+from irimi.sdk import _capture as capture
+from irimi.sdk import _control_client as client
+from irimi.sdk import _tools as tools
+from irimi.sdk._state import state
 from irimi.store.reader import StoreReader
 from irimi.trace import ErrorInfo, ToolCall
 from tests import test_sdk
@@ -89,14 +92,14 @@ def posted(monkeypatch) -> _Posted:
     monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
     monkeypatch.delenv(RUN_ENV, raising=False)
     reporter = _Posted()
-    monkeypatch.setattr(runs, "reporter", reporter)
+    monkeypatch.setattr(state, "reporter", reporter)
     return reporter
 
 
 @pytest.fixture
 def no_warning_yet(monkeypatch) -> None:
     """The once-per-process WARNING not yet given, as in a fresh agent process."""
-    monkeypatch.setattr(tools, "_warned_real_write", False)
+    monkeypatch.setattr(state, "warned", set())
 
 
 # -- decoration time: THE SCOPE RULE's shape, applied to the SDK -----------------------------------
@@ -506,7 +509,7 @@ def test_a_record_that_cannot_be_built_costs_the_agent_nothing(posted, monkeypat
         raise RecursionError("too deep to record")
 
     monkeypatch.setattr(tools, "capture", broken)
-    monkeypatch.setattr(tools, "_record_failed", False)
+    monkeypatch.setattr(state, "warned", set())
     assert look_up(1) == {"order": 1, "status": "paid"}
     assert look_up(2) == {"order": 2, "status": "paid"}
     assert posted.posts == []
@@ -581,7 +584,7 @@ def test_a_failed_post_never_reaches_the_agent(irimi, monkeypatch, warnings):
         assert mark_refunded(1) == {"stood_in": 1, "note": ""}
     assert [r.levelname for r in warnings()] == ["WARNING"]
     assert "could not record the start of run" in warnings()[0].getMessage()
-    monkeypatch.setattr(runs, "reporter", client.ControlClient())
+    monkeypatch.setattr(state, "reporter", client.ControlClient())
     mark_refunded(2)
     assert "could not record a tool call of run" in warnings()[-1].getMessage()
 
@@ -595,7 +598,7 @@ def test_an_inactive_write_runs_for_real_posts_nothing_and_warns_once_when_a_pro
     monkeypatch.delenv(ENGINE_ACTIVE_ENV, raising=False)
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
     reporter = _Posted()
-    monkeypatch.setattr(runs, "reporter", reporter)
+    monkeypatch.setattr(state, "reporter", reporter)
     ran: list[int] = []
 
     @sdk.write_tool(fake=lambda order: "stood in", name="db.inactive")

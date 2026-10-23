@@ -32,24 +32,6 @@
   "src/irimi/replay/report.py": {
     "caps_run": 1
   },
-  "src/irimi/sdk/__init__.py": {
-    "caps_run": 2
-  },
-  "src/irimi/sdk/capture.py": {
-    "caps_run": 2
-  },
-  "src/irimi/sdk/client.py": {
-    "caps_run": 1
-  },
-  "src/irimi/sdk/instrumentation.py": {
-    "caps_run": 2
-  },
-  "src/irimi/sdk/runs.py": {
-    "caps_run": 2
-  },
-  "src/irimi/sdk/tools.py": {
-    "caps_run": 3
-  },
   "src/irimi/servicemap/rules.py": {
     "caps_run": 2
   },

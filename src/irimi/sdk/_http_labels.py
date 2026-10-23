@@ -1,33 +1,11 @@
-"""Putting `Irimi-Run` on every request a run makes through irimi.
+"""Put `Irimi-Run` on every request a run sends to irimi, so the proxy files it under its run.
 
-The proxy attributes an exchange to a run by its `Irimi-Run` request header
-(`wire.attribute_run`), and never by connection or timing, which fail under pools and
-concurrency. So `instrument()` patches the HTTP clients' classes, once per process, to add
-the header from the context variable (`context.current_run_id`), read as each request is sent:
-
-- `http.client.HTTPConnection.putrequest`, which `urllib.request`, `requests`/`urllib3`,
-  stripe-python's sync client and slack_sdk's `WebClient` all build their requests through.
-  `HTTPSConnection` inherits it.
-- `httpx.HTTPTransport.handle_request` and `httpx.AsyncHTTPTransport.handle_async_request`, when
-  httpx is installed: the OpenAI and Anthropic SDKs, and stripe-python's async client. aiohttp,
-  which slack_sdk's `AsyncWebClient` is built on, is not covered.
-
-ONLY ON A CONNECTION TO IRIMI. irimi strips the header from everything it forwards, but it
-can strip only what passes through it. A request whose connection goes anywhere but irimi's own
-listener - a `NO_PROXY` host, a client built with no proxy, a sidecar on loopback - is sent with
-no header, so a run's id never reaches a service irimi does not stand in front of. irimi's
-listener is any host and port named by `IRIMI_CONTROL`, which names the control endpoint on it,
-or by the proxy variables, which `irimi shadow` points at it (`runner.child_env`): the proxy
-alone still names it when a launcher passed on only the variables it knows. That
-covers the proxy, a CONNECT tunnel (`http.client` runs `putrequest` on the proxy connection), and
-the reverse door.
-
-NEVER THE SDK'S OWN POSTS. `ControlClient` sends them to irimi's listener inside `unlabelled()`.
-
-The patches are on classes, not instances, so a client created before the first run is covered
-too. They are installed on the first run the SDK starts or, in a replay's child, adopts
-(`runs._report_start`), never on import, and never while the SDK is inactive, so a process
-without irimi in front is untouched.
+`instrument()` patches `http.client.HTTPConnection.putrequest` (urllib, requests/urllib3,
+stripe-python's sync client, slack_sdk's `WebClient`) and, when httpx is installed, its two
+transports (the OpenAI and Anthropic SDKs). The header goes only on a connection to irimi's own
+listener, the host and port `IRIMI_CONTROL` or a proxy variable names, so a run's id never reaches
+a service irimi is not in front of; the SDK's own posts carry none (`unlabelled`). The patches are
+on classes, installed on the first run and never while the SDK is inactive. aiohttp is not covered.
 """
 
 import contextlib
@@ -44,7 +22,7 @@ from urllib.parse import urlsplit
 
 from irimi.protocol.env import CONTROL_ENV, PROXY_ENVS
 from irimi.protocol.headers import RUN_HEADER
-from irimi.sdk.context import current_run_id, is_active
+from irimi.sdk._context import current_run_id, is_active
 
 # The port a URL with none names, by scheme.
 DEFAULT_PORTS = {"http": 80, "https": 443}
@@ -67,16 +45,23 @@ _lock = threading.RLock()
 _installed = False
 # Set, under `_lock`, while the first call patches, so a call made inside it never patches again.
 _patching = False
-# What `instrument` replaced, as (class, attribute, original), so `_uninstall` can put it back.
+# What `instrument` replaced, as (class, attribute, original), so `uninstall` can put it back.
 _patched: list[tuple[type, str, Any]] = []
 
 
 def instrument() -> None:
-    """Make this process's HTTP clients label each request a run sends to irimi with the run's
-    id. Idempotent and thread-safe: the first call patches, and every other returns once the
-    patches are in place, at once after that (and at once when the patching itself makes it). Does
-    nothing while the SDK is inactive. The SDK calls it on the first run it starts; it stays public
-    for code that wants to call it at startup."""
+    """Label each request a run sends through irimi with the run's id.
+
+    Patches `http.client` and httpx (if installed) process-wide, on their classes, so a request
+    a run sends to irimi's listener carries `Irimi-Run` and irimi files it under that run. The SDK
+    calls it on the first run; call it at startup to cover clients that cache connections before
+    then. A no-op unless irimi is running the process, and safe to call more than once.
+
+    Example:
+        from irimi import sdk
+
+        sdk.instrument()
+    """
     global _installed, _patching
     if _installed or not is_active():
         return
@@ -150,9 +135,9 @@ def _patch(owner: type, name: str, wrap: Callable[[Any], Any]) -> None:
     _patched.append((owner, name, original))
 
 
-def _uninstall() -> None:
-    """Put back every method `instrument` replaced, so the next call patches afresh. For tests:
-    an agent has no reason to call it."""
+def uninstall() -> None:
+    """Put back every method `instrument` replaced, so the next call patches afresh. For tests
+    (`_state.reset_for_tests`): an agent has no reason to call it."""
     global _installed, _patching
     with _lock:
         while _patched:

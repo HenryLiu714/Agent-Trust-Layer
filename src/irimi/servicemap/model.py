@@ -17,8 +17,7 @@ SELF_TARGET = "self"
 # sending any of them to a host off this machine hands the secret to whoever is listening. Keyed
 # by HOST, not by (service, operation): `hooks.slack.com` and `slack.com` are one service, so a
 # rule keyed on the service's routes leaves every unlisted path on the webhook host uncovered.
-# A target on such a host must be loopback, with no `--allow-target-host` escape (design §7,
-# threat 8; issue #16).
+# A target on such a host must be loopback, with no `--allow-target-host` escape.
 CREDENTIAL_PATH_HOSTS: frozenset[str] = frozenset({"hooks.slack.com"})
 TARGETABLE_KINDS: frozenset[str] = frozenset({"write", "unknown"})
 # Methods that destroy or replace a resource. Not the complement of SAFE_METHODS: POST is unsafe
@@ -26,7 +25,7 @@ TARGETABLE_KINDS: frozenset[str] = frozenset({"write", "unknown"})
 # exactly the kinds that forward live. These are the ones a live kind has to justify.
 DESTRUCTIVE_METHODS: frozenset[str] = frozenset({"DELETE", "PUT", "PATCH"})
 # What `default_kind` may say: every kind that is *not* forwarded live. Derived, not listed, so a
-# live-forwarding kind added to LIVE_KINDS later is refused as a default the day it is added (#30).
+# live-forwarding kind added to LIVE_KINDS later is refused as a default the day it is added.
 DEFAULT_KINDS: tuple[Kind, ...] = tuple(k for k in KINDS if k not in LIVE_KINDS)
 
 
@@ -45,17 +44,17 @@ class Route:
     human: str = ""
     ids: dict[str, str] = field(default_factory=dict)  # response field -> minted id prefix
     # The vendored response object a locally answered write starts from (`irimi.fixture`), by
-    # name. "" means the L0 echo, which is what every route had before #41 and what a route
-    # whose fixture cannot be read falls back to.
+    # name. "" means the L0 echo, which is also what a route whose fixture cannot be read falls
+    # back to.
     fixture: str = ""
     # The L3 check consulted before a mapped write is faked, by the name of its entry in
-    # `services.PRECONDITIONS`. "" means the write is never precondition-checked (#45).
+    # `services.PRECONDITIONS`. "" means the write is never precondition-checked.
     precondition: str = ""
-    # The webhook event names this write would have caused the real service to send (#47). A
+    # The webhook event names this write would have caused the real service to send. A
     # faked write sends none of them, so the exchange carries them as `would_fire` and the
     # baseline report says what did not fire. Free text: unlike `precondition:` there is no table
     # of a service's events to check a name against, so a misspelled EVENT is not catchable here -
-    # a misspelled KEY is, by `ROUTE_KEYS`. Nothing is delivered; signed delivery is design v0.3.
+    # a misspelled KEY is, by `ROUTE_KEYS`. Nothing is delivered.
     fires: tuple[str, ...] = ()
     volatile: tuple[str, ...] = ()
     persists: bool | None = None
@@ -141,7 +140,7 @@ class MapIndex:
         None when no route does or several do.
 
         For a request whose path cannot be matched again: a stored one on a credential-path host,
-        whose path is a redaction placeholder, while its `operation` is the route's own (#72)."""
+        whose path is a redaction placeholder, while its `operation` is the route's own."""
         sm = self.service_for(host)
         if sm is None:
             return None
@@ -189,9 +188,9 @@ def path_params(pattern: str, path: str) -> dict[str, str]:
     share no literal, and binding `customer` there is the drift this function exists to prevent.
 
     A captured segment is **percent-decoded**, because the service decodes it: `cus%5FREAL123` and
-    `cus_REAL123` address the same customer, and reading the raw segment made `echo.named_id`
-    miss the id the request already named and mint a fresh one - #26 reinstated for any caller
-    that over-encodes (#33). Literal segments are still compared raw, so decoding cannot widen
+    `cus_REAL123` address the same customer, and reading the raw segment would make
+    `echo.named_id` miss the id the request already named and mint a fresh one for any caller
+    that over-encodes. Literal segments are still compared raw, so decoding cannot widen
     what a route matches; it only says what the matched hole held. The two surfaces that read
     these captures - the minted id and the summary's human template - agree because they ask here.
     """
@@ -212,7 +211,7 @@ def target_for(sm: ServiceMap, route: Route) -> str:
     A route's own target wins. Otherwise the service target applies to `write` and `unknown`
     routes, and to `read` routes only when the service sets `target_reads: true`. `llm` and
     `telemetry` are always forwarded live and are never targeted. A route cannot opt back out of
-    a service target in Phase 1.
+    a service target.
     """
     if route.target != SELF_TARGET:
         return route.target
@@ -224,7 +223,7 @@ def target_for(sm: ServiceMap, route: Route) -> str:
 
 
 def is_delegated(sm: ServiceMap) -> bool:
-    """True when this service has a target at all, so the summary and banner must say so (#20)."""
+    """True when this service has a target at all, so the summary and banner must say so."""
     return sm.target != SELF_TARGET or any(r.target != SELF_TARGET for r in sm.routes)
 
 

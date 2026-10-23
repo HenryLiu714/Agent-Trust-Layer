@@ -1,7 +1,8 @@
 # Stripe, derived from the SDK spec's `x-stripeOperations.method_type`: `list` and `retrieve` are
-# reads, `create`, `update` and `delete` are writes. Phase 1 ships the ten routes the refund agent
-# exercises; the OpenAPI importer that generates the rest is a later phase. No route here sets a
-# `target:` — shipped maps never do. Put yours in ./irimi.maps.yaml instead.
+# reads, `create`, `update` and `delete` are writes. Covers charges, refunds, customers, payment
+# intents and balance transactions. An unlisted write is faked as `unknown`; an unlisted GET is a
+# read and is forwarded. To add a route, copy the nearest one and name its `operation:` after the
+# spec's. No route here sets a `target:`; set one in ./irimi.maps.yaml or with `--target`.
 #
 # `match:` is written in block style on purpose: a YAML flow mapping cannot hold a plain scalar
 # containing `{`, so `match: {method: GET, path: /v1/charges/{charge}}` is a parse error.
@@ -34,14 +35,14 @@ routes:
     operation: refunds.create
     kind: write
     human: refund {amount} on {charge}
-    # The vendored response object this write starts from (#41). It names an entry in
-    # `irimi/fixtures/stripe.json`; without it the write is answered with the L0 echo.
+    # The response object a faked write starts from: an entry in `irimi/fixtures/stripe.json`.
+    # Without it the write is answered with an echo of its own fields.
     fixture: refund
     # Checked against the real charge, with this run's own faked refunds applied to it, before
-    # the refund is faked (#45). Names services.PRECONDITIONS.
+    # the refund is faked.
     precondition: charge_refundable
-    # The webhooks Stripe would have sent had this refund been real (#47). Listed on the exchange
-    # as `would_fire` and delivered by nothing; the baseline report is what says they did not fire.
+    # The webhooks Stripe would have sent had this refund been real. They are recorded as
+    # `would_fire` and listed in the summary; nothing delivers them.
     fires:
       - refund.created
       - charge.refunded

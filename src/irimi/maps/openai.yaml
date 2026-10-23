@@ -1,5 +1,5 @@
 # OpenAI. `llm` is a route kind here, never a host default: on an LLM host only the inference
-# routes are `llm`, and everything else on api.openai.com is a real, billable write (design §4.3).
+# routes are `llm`, because everything else on api.openai.com may be a real, billable write.
 # `default_kind: llm` is refused by the loader for exactly that reason.
 #
 # Deliberately unlisted, so the RFC fallback makes them `unknown` + `unclassified` and irimi answers
@@ -36,9 +36,8 @@ routes:
     kind: llm
     human: embed with {model}
 
-  # A models listing is not inference, so it is a `read`, not `llm` - this file's own header says
-  # only the inference routes are `llm`. `llm` also opted the path out of the read overlay, which
-  # the engine gates on `kind: read`, so it could never be overlaid either (#29).
+  # A models listing is not inference, so it is a `read`, not `llm`. Only `read` routes have a
+  # run's faked writes applied to their answers.
   - match:
       method: GET
       path: /v1/models

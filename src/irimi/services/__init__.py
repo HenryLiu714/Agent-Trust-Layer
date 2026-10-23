@@ -1,9 +1,9 @@
-"""Per-service L2 effects and the tables that name them (#43).
+"""Per-service L2 effects and the tables that name them.
 
 One module per service holding what a faked write does to a later read, as plain functions over
 plain data. The overlay decodes the write log and looks the service up here; nothing in this
-package knows about mitmproxy, exchanges, flows or maps, which is what lets replay (#82) run
-the same functions over a recording (use case 1).
+package knows about mitmproxy, exchanges, flows or maps, which is what lets a replay run
+the same functions over a recording.
 """
 
 from irimi.exchange import Request
@@ -54,7 +54,7 @@ EFFECTS: dict[str, ReadEffects] = {
 # The L3 precondition a route's `precondition:` key names, by (service, name). The key is the
 # opt-in and this table is what it opts into: a name with no entry here is refused by
 # `tests/test_servicemap.py` for a shipped map, and degrades to `not_evaluable` at the decision
-# for anyone else's (#45).
+# for anyone else's.
 PRECONDITIONS: dict[tuple[str, str], Check] = {
     (stripe.SERVICE, "charge_refundable"): stripe.CHARGE_REFUNDABLE,
     (slack.SERVICE, "channel_postable"): slack.CHANNEL_POSTABLE,
@@ -67,8 +67,7 @@ REWRITES: dict[str, QueryRewrite] = {stripe.SERVICE: stripe.rewrite_query}
 #
 # Slack has no entry, so a run has exactly one Slack scope, which is the right answer today. If the
 # token's team is wanted later, `SCOPE_HEADERS["slack"] = ("authorization",)` is the whole change:
-# the header is already on each write's own request, and it is only ever compared, never stored
-# (#44).
+# the header is already on each write's own request, and it is only ever compared, never stored.
 SCOPE_HEADERS: dict[str, tuple[str, ...]] = {stripe.SERVICE: ("stripe-account", "stripe-version")}
 
 
@@ -79,7 +78,7 @@ def scope_of(service: str, request: Request) -> tuple[str, ...]:
     return tuple(request.header(name) or "" for name in SCOPE_HEADERS.get(service, ()))
 
 
-# How each service spells "this is the same write as before", by service name (#46). Slack has no
+# How each service spells "this is the same write as before", by service name. Slack has no
 # entry and no store: it ships no idempotency mechanism, and `chat.postMessage` sent twice really
 # is two messages. A service absent here skips the store entirely rather than getting a default.
 IDEMPOTENCY: dict[str, Idempotency] = {stripe.SERVICE: stripe.IDEMPOTENCY}

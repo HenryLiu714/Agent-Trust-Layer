@@ -1,4 +1,4 @@
-"""The body a locally answered write gets: the L0 echo (#11) and the L1 fixture (#41).
+"""The body a locally answered write gets: the L0 echo and the L1 fixture.
 
 **L0** is the floor and the fallback: the request's own fields reflected back as a JSON object,
 plus `created`, plus an id minted for every field the matched route names in `ids:`. It is not a
@@ -82,7 +82,7 @@ TEXT_CT = "text/plain"
 
 # What a live read's body teaches the faker, keyed on service. Same convention as `SHAPES` below:
 # every service-specific fact about a body lives in this package, so the engine can hand it every
-# read it sees without naming a service of its own (#42).
+# read it sees without naming a service of its own.
 READ_OBSERVERS: dict[str, Callable[[bytes], None]] = {slack.SERVICE: slack.observe_slack_history}
 
 
@@ -91,7 +91,7 @@ def observe_read(service: str, body: bytes) -> None:
 
     A read's body is the only place the real values a fake has to sort against appear: the write
     log holds writes, and the trace store is write-only. So a body is observed as it goes past
-    rather than looked up later, and a service with nothing to learn is a no-op (#42).
+    rather than looked up later, and a service with nothing to learn is a no-op.
     """
     observer = READ_OBSERVERS.get(service)
     if observer is not None:
@@ -107,7 +107,7 @@ SHAPES: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {slack.SERVICE: 
 # Routes whose real service does not answer with JSON at all, keyed by service and operation.
 # A Slack incoming webhook answers the literal body `ok` as `text/plain`; the Web API envelope it
 # got instead (the shape keys on the service, and hooks.slack.com is part of `slack`) breaks the
-# common raw-requests idiom `assert resp.text == "ok"` (#29).
+# common raw-requests idiom `assert resp.text == "ok"`.
 LITERAL_BODIES: dict[tuple[str, str], tuple[bytes, str]] = {
     (slack.SERVICE, "incoming_webhook"): (b"ok", TEXT_CT),
 }
@@ -163,7 +163,7 @@ def _fake_dict(request: Request, classification: Classification, route: Route | 
         if obj is not None:
             return l1_body(request, route, obj), "fake-L1", ()
         # The map promised a fixture this install cannot read. L0 is the floor and still answers
-        # the write, but the trace has to say the fidelity is not the one the map named (#41).
+        # the write, but the trace has to say the fidelity is not the one the map named.
         return fake_body(request, classification), "fake-L0", (FIXTURE_FAILED_FLAG,)
     return fake_body(request, classification), "fake-L0", ()
 
@@ -171,9 +171,7 @@ def _fake_dict(request: Request, classification: Classification, route: Route | 
 def fake_response(request: Request, classification: Classification) -> Fake:
     """The body, content type and fidelity of a locally answered write.
 
-    The single place the body is serialized. It used to be encoded twice - once inside `reflect`
-    purely to validate it and throw it away, once here - and this call was the only one outside
-    the never-raise guard in `answer` (#29).
+    The single place the body is serialized.
     """
     route = classification.route
     if route is not None:
@@ -187,8 +185,8 @@ def fake_response(request: Request, classification: Classification) -> Fake:
 def fake_rejection(request: Request, classification: Classification, body: dict[str, Any]) -> Fake:
     """A modeled error body, carried at the level this route's write WOULD have been answered at.
 
-    There is no `fake-L3`: the header says who answered, the exchange field says what L3 decided
-    (#45). The level is not "L1 if the route names a fixture" - a Slack `reactions.add` has no
+    There is no `fake-L3`: the header says who answered, the exchange field says what L3 decided.
+    The level is not "L1 if the route names a fixture" - a Slack `reactions.add` has no
     fixture and is honestly L0, a `chat.postMessage` whose fixture will not load is L0 with the
     `fixture-failed` flag - so it is taken from the one place that knows, by building the body
     this route would have had and discarding it. One dict, once, on a path that is about to make

@@ -20,30 +20,14 @@ from irimi.servicemap.model import (
     target_for,
 )
 
-# ------------------------------------------------------------------------------- THE SCOPE RULE
-#
-# A safety rule must be written at the scope of the property it protects, and checked everywhere
-# that scope can be reached. Written one scope narrower it is not a rule but a rule-shaped hole,
-# and the way through it is simply to reach the same behaviour by the wider scope. That mistake
-# has now shipped three times in this codebase, each time in a new costume:
-#
-#   1. `default_kind: telemetry` performed real control-plane DELETEs. "telemetry is forwarded
-#      live" is a property of one ROUTE, and it was applied to a whole SERVICE (#30).
-#   2. A route with `kind: telemetry` and no `method:` still forwards a DELETE live. The kind was
-#      written at ROUTE scope for a decision that belongs to the METHOD.
-#   3. The webhook loopback rule was keyed on (service, operation). "The URL is the credential"
-#      is a property of the HOST `hooks.slack.com`, so a service-level target delegated every
-#      path the map does not list - `/workflows/...`, `/triggers/...` - off the machine (#16).
-#
-# Each rule below therefore names the scope its property lives at, and is enforced twice:
-#
-#   * at LOAD time, so a configuration that could break it is refused by name, whichever of the
-#     three layers it arrived through - shipped map, overrides file, or `--target` flag; and
-#   * at the DECISION the rule protects, so a configuration that reaches it some other way still
-#     cannot act.
-#
-# The second check is the one that covers the next scope. It asks about the request and the
-# answer in front of it and does not care how either came to be, so a future way of reaching
+# Scope rule: a safety property is checked at the scope it belongs to (method, route, host or
+# service), and twice: when maps are loaded, so a bad configuration is refused by name whichever
+# layer it came through (shipped map, overrides file or `--target` flag), and again at the
+# decision, so a configuration that slips past the loader still cannot act. Examples:
+#   - "telemetry is forwarded live" is per route, so it may not be a service's `default_kind`;
+#   - "forwarded live" is per method, so a live route must name its unsafe methods;
+#   - "the URL is the credential" is per host (hooks.slack.com), so it covers unlisted paths.
+# The decision-time check asks only about the request in front of it, so a new way of reaching
 # delegation or classification inherits the rule instead of escaping it.
 
 
@@ -68,7 +52,7 @@ def validate_targets(sm: ServiceMap, allow_target_hosts: frozenset[str]) -> None
 
 
 def _check_target_host(target: str, allow_target_hosts: frozenset[str], where: str) -> None:
-    """Targets must be loopback until the sandbox exists; `--allow-target-host` is the way out."""
+    """Targets must be loopback unless `--allow-target-host` names the host."""
     if target == SELF_TARGET:
         return
     if netaddr.is_local_target(target):
@@ -87,9 +71,9 @@ def _check_live_kind_methods(sm: ServiceMap, route: Route, where: str) -> None:
 
     The METHOD scope of THE SCOPE RULE. `kind` is written per route, but "forward this to the
     real service" is a decision about a *verb*: `match: {path: /api/{v}/{thing}}` with no
-    `method:` means `*`, and `*` includes DELETE. A route like that classified
-    `DELETE /api/v1/dashboard` as telemetry and performed it for real - #30's bug, one scope down
-    and reachable by omission rather than by deliberately writing `"*"`.
+    `method:` means `*`, and `*` includes DELETE. A route like that would classify
+    `DELETE /api/v1/dashboard` as telemetry and perform it for real, reached by omission rather
+    than by deliberately writing `"*"`.
 
     The rule: **no classification that forwards live may apply to an unsafe method it did not
     name explicitly.** `*` names nothing, so it never satisfies it. A route that really does
@@ -118,8 +102,8 @@ def _check_live_kind_methods(sm: ServiceMap, route: Route, where: str) -> None:
 def _check_credential_path_targets(sm: ServiceMap) -> None:
     """Every target of a service claiming a credential-path host must be loopback.
 
-    The HOST scope of THE SCOPE RULE. The rule used to be keyed on the webhook *route*, which
-    left a service-level target free to delegate every path the map does not list - and on
+    The HOST scope of THE SCOPE RULE. Keyed on the webhook *route*, it would leave a
+    service-level target free to delegate every path the map does not list, and on
     `hooks.slack.com` the unlisted paths (`/workflows/...`, `/triggers/...`) carry the credential
     just as the listed one does. Checking every target the service can answer with covers the
     service target, each route target, the overrides file and `--target` alike, because all four
@@ -173,9 +157,9 @@ def check_route_rules(sm: ServiceMap) -> None:
         if route.volatile and route.kind not in TARGETABLE_KINDS:
             raise MapError(f"{where}: `volatile` belongs on a write, where duplicates are checked")
         if route.fixture and route.kind in LIVE_KINDS:
-            # A key that silently does nothing is the shape of #4's `--allow-host` and #9's
-            # wildcard host: it reads as configured and is never consulted. A live route is
-            # answered by the real service, so it has no body of ours to start from.
+            # A key that silently does nothing reads as configured and is never consulted, so it
+            # is refused. A live route is answered by the real service, so it has no body of ours
+            # to start from.
             raise MapError(
                 f"{where}: `fixture:` names the object a locally answered write starts from, "
                 f"and a `{route.kind}` route is forwarded to the real service, so it would "
@@ -183,17 +167,16 @@ def check_route_rules(sm: ServiceMap) -> None:
             )
         if route.precondition and route.kind in LIVE_KINDS:
             # The same rule as `fixture:`, for the same reason: a live route is forwarded, so a
-            # check that runs before a write is faked would never run on it (#45).
+            # check that runs before a write is faked would never run on it.
             raise MapError(
                 f"{where}: `precondition:` names the check run before a write is faked, and a "
                 f"`{route.kind}` route is forwarded to the real service, which checks its own "
                 "preconditions; it would never be used"
             )
         if route.fires and route.kind in LIVE_KINDS:
-            # The same rule as `fixture:` and `precondition:`, for the same reason (#4, #47): a
+            # The same rule as `fixture:` and `precondition:`, for the same reason: a
             # live route is forwarded, the real service performs the write and sends its own
-            # webhooks, so ours would never be listed. A key that reads as configured and is
-            # never consulted is the `--allow-host` class of bug.
+            # webhooks, so ours would never be listed.
             raise MapError(
                 f"{where}: `fires:` names the webhooks a FAKED write would have sent, and a "
                 f"`{route.kind}` route is forwarded to the real service, which sends its own; "
@@ -202,7 +185,7 @@ def check_route_rules(sm: ServiceMap) -> None:
         repeated_events = sorted({e for e in route.fires if route.fires.count(e) > 1})
         if repeated_events:
             # One write does not fire one event twice, and the baseline report prints this list
-            # verbatim - a repeat would promise two `refund.created` for one refund (#47).
+            # verbatim - a repeat would promise two `refund.created` for one refund.
             raise MapError(
                 f"{where}: `fires:` names {repeated_events[0]!r} more than once. A write fires an "
                 "event once, and the summary prints this list as it is given"

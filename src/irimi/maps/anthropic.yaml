@@ -1,6 +1,6 @@
 # Anthropic. `llm` is a route kind here, never a host default: on an LLM host only the inference
-# routes are `llm`, and everything else on api.anthropic.com is a real, billable write (design
-# §4.3). `default_kind: llm` is refused by the loader for exactly that reason.
+# routes are `llm`, because everything else on api.anthropic.com may be a real, billable write.
+# `default_kind: llm` is refused by the loader for exactly that reason.
 #
 # Deliberately unlisted, so the RFC fallback makes them `unknown` + `unclassified` and irimi answers
 # them locally: /v1/files and /v1/messages/batches. Uploading a file or starting a batch costs money

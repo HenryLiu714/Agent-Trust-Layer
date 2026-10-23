@@ -360,7 +360,7 @@ def _check_pattern(host: str, item: Any, source: str) -> None:
     The rule is label counting, not public suffixes: `*.com` is refused because one label after
     the star is almost always a mistake, while `*.co.uk` and `*.github.io` satisfy it and would
     each claim a whole public suffix. No shipped map uses one. `*foo.com`, `foo.*.com` and
-    `**.foo.com` are refused as the silent-never-matches shape issue #9 was opened about.
+    `**.foo.com` are refused because they would load cleanly and silently never match.
     """
     rest = host[2:] if is_pattern(host) else ""
     if not is_pattern(host) or "*" in rest or "." not in rest or "" in rest.split("."):

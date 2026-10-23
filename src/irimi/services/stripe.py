@@ -1,18 +1,18 @@
-"""Stripe's L2 effects: what a faked write does to a later live read (#43).
+"""Stripe's L2 effects: what a faked write does to a later live read.
 
-The design's v0.1 table, by the write that causes each effect:
+The modelled effects, by the write that causes each one:
 
     refunds.create          a new refund object; on the charge, `amount_refunded` and `refunded`,
                             and the expanded `refunds` list; on page 1 of the refunds list
     customers.update        the posted fields, on the customer
     payment_intents.cancel  `status`, `canceled_at`, `cancellation_reason`
 
-Two reads beyond the table's letter, both so that irimi does not contradict itself (#43):
+Two reads beyond the table's letter, both so that irimi does not contradict itself:
 `charges.list` gets the same charge effect as `charges.retrieve`, because the refund agent finds its
 charge in the list and a list that ignored the refund would disagree with the retrieve; and
 `refunds.retrieve` of a minted id is answered from the write log with the object irimi minted, over
 whatever Stripe said about it - the one read where the seam replaces a STATUS as well as a body,
-because Stripe has never heard of that id and answers `404` (#52).
+because Stripe has never heard of that id and answers `404`.
 
 Two rules run through all of it:
 
@@ -23,9 +23,9 @@ Two rules run through all of it:
   read, a cursor page whose real contents depend on where the minted refund landed: the document is
   left exactly as Stripe sent it and the exchange records that the world irimi showed is
   incomplete. Answering a read outright is the opposite move and needs the opposite justification -
-  see `_refund_retrieve`, where there is no live object to be incomplete about (#52).
+  see `_refund_retrieve`, where there is no live object to be incomplete about.
 
-Pure functions over plain data: no clock, no minting, no I/O, no module state. replay (#82)
+Pure functions over plain data: no clock, no minting, no I/O, no module state. A replay
 runs these same functions over a recording.
 """
 
@@ -63,7 +63,7 @@ CURSOR_PARAMS = frozenset({"starting_after", "ending_before"})
 
 def apply_read(read: Read, document: Any, writes: Sequence[Write]) -> Applied:
     """The run's faked Stripe writes, applied to one live read's parsed body."""
-    # `read.posted` is ignored, not forgotten: a Stripe read is a GET and posts nothing (#44).
+    # `read.posted` is ignored, not forgotten: a Stripe read is a GET and posts nothing.
     operation = read.operation
     if not isinstance(document, dict):
         return Applied(document)
@@ -146,7 +146,7 @@ def _refunds_list(request: Request, document: dict[str, Any], writes: Sequence[W
     params = parse_qsl(request.query, keep_blank_values=True)
     if any(k in CURSOR_PARAMS for k, _ in params):
         # Some page other than the first, and which real items it holds depends on where the
-        # minted refund landed. The v0.1 table models page 1 only.
+        # minted refund landed. The effects model page 1 only.
         return Applied(document, partial=True)
     removed = request.header(REWROTE_HEADER) or ""
     if removed.startswith("starting_after="):
@@ -154,7 +154,7 @@ def _refunds_list(request: Request, document: dict[str, Any], writes: Sequence[W
         # follows it: the minted refund belongs on the page before this one, and prepending it
         # here would hand the agent its own refund twice. Fully modeled, nothing to change -
         # unless an OLDER minted refund also belongs after the cursor, which the real list from
-        # its top leaves out. That page is not modeled, and saying `full` would hide it (#43).
+        # its top leaves out. That page is not modeled, and saying `full` would hide it.
         ids = [r.answer["id"] for r in minted]
         after = removed.partition("=")[2]
         older = minted[: ids.index(after)] if after in ids else []
@@ -188,11 +188,11 @@ def _refunds_list(request: Request, document: dict[str, Any], writes: Sequence[W
 def _refund_retrieve(
     request: Request, document: dict[str, Any], writes: Sequence[Write]
 ) -> Applied:
-    """A refund irimi minted, answered from the write log rather than left as Stripe's 404 (#52).
+    """A refund irimi minted, answered from the write log rather than left as Stripe's 404.
 
     Stripe has never heard of that id and answers `404` with `resource_missing`, so this is the one
     read where the honest answer needs a STATUS as well as a body - `Applied.status` is how the
-    effects say so, and #52 is where that was decided. The object handed back is the very one
+    effects say so. The object handed back is the very one
     irimi answered the write with, which is what the agent was told exists: nothing is invented,
     and none of the live body survives because there is no live object behind it.
 
@@ -201,8 +201,7 @@ def _refund_retrieve(
     not over an error about anything else. A 401, a 429 or a 5xx on the same read is Stripe's answer
     about the credentials or itself, which production would have sent for the real refund too, and
     answering 200 over it is the error-into-success untruth this module's header forbids. So an
-    `error` body whose code is not `resource_missing` keeps the pre-#52 answer: left as sent,
-    flagged `partial`.
+    `error` body whose code is not `resource_missing` is left as sent and flagged `partial`.
 
     A shallow copy, never the write log's own dict - the overlay serializes what it is handed and a
     later effect must not find this one mutated. `slack._posts` copies for the same reason.
@@ -237,7 +236,7 @@ def _customer(customer: dict[str, Any], writes: Sequence[Write]) -> Applied:
             if name == "metadata" and isinstance(value, dict) and isinstance(customer[name], dict):
                 value = {**customer[name], **value}  # Stripe merges metadata
             # `changed` only when a field really moved: an update whose every field was skipped
-            # leaves the live body as Stripe sent it, and must not be stamped `overlay` (#43).
+            # leaves the live body as Stripe sent it, and must not be stamped `overlay`.
             if customer[name] != value:
                 customer[name] = value
                 changed = True
@@ -283,12 +282,12 @@ def _known_list_param(name: str) -> bool:
 def _passes_filters(refund: dict[str, Any], params: Sequence[tuple[str, str]]) -> bool | None:
     """Whether a minted refund belongs on a filtered page: True, False, or None for "cannot tell".
 
-    None is the case the fixture forces (#43). A refund posted with only `charge` is answered from
+    None is the case the fixture forces. A refund posted with only `charge` is answered from
     a fixture whose `payment_intent` is `null`, so a read filtered by `payment_intent=pi_X` cannot
     be told from the minted object whether the refund matches - in production Stripe would have
-    filled that field in. Treating unknown as "does not match" dropped the agent's own refund off
-    a page that then claimed to be complete, which is the untruth this module's header forbids. The
-    caller turns None into `partial` instead.
+    filled that field in. Treating unknown as "does not match" would drop the agent's own refund
+    off a page that then claims to be complete, which is the untruth this module's header forbids.
+    The caller turns None into `partial` instead.
     """
     for name, value in params:
         if name not in ("charge", "payment_intent"):
@@ -315,7 +314,7 @@ def _limit(params: Sequence[tuple[str, str]]) -> int:
 
 # ------------------------------------------------------------------------ the L3 preconditions
 #
-# Whether Stripe would have accepted a refund at all, decided against the charge it names (#45).
+# Whether Stripe would have accepted a refund at all, decided against the charge it names.
 # The charge is the OVERLAID one: the policy fetches it live and applies this run's own faked
 # refunds to it with `_charge` before `_refund_verdict` sees it. That is the point of checking it
 # here rather than trusting the live body alone - a second refund of a charge the run already
@@ -324,21 +323,21 @@ def _limit(params: Sequence[tuple[str, str]]) -> int:
 
 # Stripe sends no `code` for the amount-exceeds error - the message and `param: amount` are the
 # whole of it - so this is irimi's own label for the summary line, and it is deliberately NOT
-# written into the modeled body (#45).
+# written into the modeled body.
 AMOUNT_TOO_LARGE = "amount_too_large"
 CHARGE_ALREADY_REFUNDED = "charge_already_refunded"
 # Stripe's idempotency header, lower-case as `pipeline.parse` normalizes it. stripe-python sends
 # one on every POST - a fresh UUID when the caller passes none - so every SDK write passes through
-# the store (#46).
+# the store.
 IDEMPOTENCY_KEY_HEADER = "idempotency-key"
 # Unlike `charge_already_refunded`, this one is the body's own `type` and not a `code`: Stripe
 # sends no `code` for it, and stripe-python's error factory branches on `type` to raise
-# `IdempotencyError`. It is still the machine name the summary prints (#46).
+# `IdempotencyError`. It is still the machine name the summary prints.
 IDEMPOTENCY_ERROR = "idempotency_error"
 
 
 def _idempotency_conflict(key: str) -> Rejection:
-    """What Stripe answers when a key is reused with different parameters (#46).
+    """What Stripe answers when a key is reused with different parameters.
 
     The message is Stripe's own wording, because the agent's logs are read by a human who will
     search for it, and the `type` is what makes stripe-python raise `IdempotencyError` rather than
@@ -367,8 +366,8 @@ def _refund_probe(proposal: Proposal) -> Probe | None:
     """`GET /v1/charges/{charge}` for the charge this refund names.
 
     A refund posted with `payment_intent` and no `charge` is not checked: resolving the intent to
-    its charge is a second read and a second modeled object, neither of which is in Phase 2's
-    table, and guessing would be worse than saying so (#45).
+    its charge would take a second read and a second modeled object, neither of which irimi
+    models, and guessing would be worse than saying so.
     """
     charge = proposal.posted.get("charge")
     # Not URL-quoted: a Stripe id is `[A-Za-z0-9_]` only, and a value that is not is one the real
@@ -379,7 +378,7 @@ def _refund_probe(proposal: Proposal) -> Probe | None:
 
 
 def _charge_currency(document: Any) -> str:
-    """The currency a charge is denominated in, or "" when this body does not name one (#60).
+    """The currency a charge is denominated in, or "" when this body does not name one.
 
     The document is the L3 precondition read's - `GET /v1/charges/{id}`, issued on the agent's own
     credentials - so this is a code irimi really read off real state and never a default. Anything
@@ -402,7 +401,7 @@ def _refund_verdict(proposal: Proposal, document: Any) -> Rejection | NotEvaluab
     ):
         # irimi never rejects on a body it did not understand: a false rejection is the untruth
         # this whole path exists to prevent. Nor does it pass on one - that would claim the write
-        # was checked against a charge irimi never read. Saying so is `NOT_EVALUABLE` (#45).
+        # was checked against a charge irimi never read. Saying so is `NOT_EVALUABLE`.
         return NOT_EVALUABLE
     charge_id = proposal.posted.get("charge")
     if document.get("refunded") is True:
@@ -421,13 +420,13 @@ def _refund_verdict(proposal: Proposal, document: Any) -> Rejection | NotEvaluab
     amount = proposal.posted.get("amount")
     charged, refunded = document.get("amount"), document.get("amount_refunded")
     # Both sides of the subtraction must be the charge's own numbers. `_int` reads a missing or
-    # malformed one as 0, which would make every refund "too large" - a false rejection (#45).
+    # malformed one as 0, which would make every refund "too large" - a false rejection.
     if not (is_int(charged) and is_int(refunded)):
         return NOT_EVALUABLE
     if not is_int(amount):
         # A refund posting no `amount` is Stripe's "refund whatever is left", which is never over
         # the remaining amount; one posting a malformed amount is the real service's to refuse,
-        # not irimi's to guess at. Neither is a failure to evaluate the charge (#45).
+        # not irimi's to guess at. Neither is a failure to evaluate the charge.
         return None
     remaining = _int(charged) - _int(refunded)
     if _int(amount) > remaining:
@@ -435,7 +434,7 @@ def _refund_verdict(proposal: Proposal, document: Any) -> Rejection | NotEvaluab
         # pure and below it. The SHAPE is Stripe's - `invalid_request_error` with `param: amount` -
         # which is what makes stripe-python raise `InvalidRequestError`.
         # The same reading of the charge's currency the exchange carries, so the prose in this
-        # body and the summary's `$49.00` can never disagree about one charge (#60).
+        # body and the summary's `$49.00` can never disagree about one charge.
         currency = _charge_currency(document).upper()
         message = (
             f"Refund amount ({amount} {currency}) is greater than unrefunded amount on charge "

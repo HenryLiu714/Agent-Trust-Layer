@@ -5,45 +5,14 @@
   "src/irimi/delegation.py": {
     "caps_run": 1
   },
-  "src/irimi/echo/__init__.py": {
-    "issue_ref": 8
-  },
-  "src/irimi/echo/generic.py": {
-    "issue_ref": 9
-  },
-  "src/irimi/echo/slack.py": {
-    "issue_ref": 22,
-    "since_issue": 1
-  },
   "src/irimi/engine/mitm.py": {
     "caps_run": 21
   },
   "src/irimi/exchange.py": {
     "caps_run": 5
   },
-  "src/irimi/fixture.py": {
-    "issue_ref": 1
-  },
   "src/irimi/idempotency.py": {
     "caps_run": 1
-  },
-  "src/irimi/maps/anthropic.yaml": {
-    "section_sign": 1
-  },
-  "src/irimi/maps/openai.yaml": {
-    "design_ref": 1,
-    "issue_ref": 1,
-    "section_sign": 1
-  },
-  "src/irimi/maps/slack.yaml": {
-    "issue_ref": 3
-  },
-  "src/irimi/maps/stripe.yaml": {
-    "issue_ref": 3,
-    "phase": 1
-  },
-  "src/irimi/maps/telemetry.yaml": {
-    "issue_ref": 8
   },
   "src/irimi/pipeline.py": {
     "caps_run": 2
@@ -102,43 +71,14 @@
     "issue_possessive": 1,
     "issue_ref": 21
   },
-  "src/irimi/servicemap/__init__.py": {
-    "decision_code": 1,
-    "design_ref": 1,
-    "issue_ref": 1
-  },
-  "src/irimi/servicemap/loader.py": {
-    "issue_ref": 1
-  },
-  "src/irimi/servicemap/model.py": {
-    "design_ref": 1,
-    "issue_ref": 9,
-    "phase": 1,
-    "section_sign": 1
-  },
   "src/irimi/servicemap/rules.py": {
-    "caps_run": 3,
-    "issue_possessive": 3,
-    "issue_ref": 9
-  },
-  "src/irimi/services/__init__.py": {
-    "issue_ref": 5,
-    "use_case": 1
+    "caps_run": 2
   },
   "src/irimi/services/model.py": {
-    "caps_run": 1,
-    "issue_ref": 9,
-    "use_case": 1
-  },
-  "src/irimi/services/slack.py": {
-    "issue_ref": 29,
-    "phase": 1,
-    "since_issue": 2
+    "caps_run": 1
   },
   "src/irimi/services/stripe.py": {
-    "caps_run": 1,
-    "issue_ref": 23,
-    "phase": 1
+    "caps_run": 1
   },
   "src/irimi/store.py": {
     "caps_run": 11

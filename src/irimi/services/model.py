@@ -1,8 +1,8 @@
-"""What a per-service effect table is handed and what it hands back (#43).
+"""What a per-service effect table is handed and what it hands back.
 
-Plain data, so the effects stay pure functions the replay engine (#82) can run over a
-recording (use case 1). The `Exchange` is deliberately absent: an effect is a function of the
-fields a write carried and the object irimi answered it with, not of the trace.
+Plain data, so the effects stay pure functions a replay can run over a recording. The `Exchange`
+is deliberately absent: an effect is a function of the fields a write carried and the object
+irimi answered it with, not of the trace.
 """
 
 from collections.abc import Callable, Sequence
@@ -29,7 +29,7 @@ class Write:
 
 @dataclass(frozen=True)
 class Read:
-    """One live read the effects are asked about, decoded the way `Write` is (#44).
+    """One live read the effects are asked about, decoded the way `Write` is.
 
     `posted` is the read request's own body, as `bodies.reflect` read it. Stripe's reads are GETs
     that carry their parameters in the query string and post nothing, so theirs is `{}`; Slack's
@@ -54,7 +54,7 @@ class Applied:
     a live read's status staying the service's is most of what makes it a live read. It is an int
     for the one case where the service could not have answered the read at all: a read of an object
     THIS RUN MINTED, which the service has never heard of and refuses, with a status that is as
-    much of that refusal as the body (#52). `stripe._refund_retrieve` is the case - Stripe's `404
+    much of that refusal as the body. `stripe._refund_retrieve` is the case - Stripe's `404
     resource_missing` for a refund irimi faked - and `slack._minted_thread` is its twin needing no
     status at all, because Slack sends `thread_not_found` at HTTP 200. An effect that sets `status`
     sets `changed` too: the body and the status are one answer.
@@ -76,7 +76,7 @@ class Rewritten:
 
 @dataclass(frozen=True)
 class Proposal:
-    """A write irimi is about to fake, before it has an answer (#45).
+    """A write irimi is about to fake, before it has an answer.
 
     `Write` is the same write once it is in the log, with the body irimi answered it with.
     A precondition runs before there is one, which is why it gets its own shape rather than a
@@ -115,7 +115,7 @@ class Rejection:
 
 @dataclass(frozen=True)
 class Idempotency:
-    """How a service lets a caller say "this is the same write I already sent" (#46).
+    """How a service lets a caller say "this is the same write I already sent".
 
     `header` is the request header the caller puts the key in, lower-case as `pipeline.parse`
     normalizes it. `conflict` is what the service answers when that key comes back with different
@@ -130,13 +130,14 @@ class Idempotency:
 
 @dataclass(frozen=True)
 class NotEvaluable:
-    """A verdict's third answer: the probe came back and says nothing this check can read (#45).
+    """A verdict's third answer: the probe came back and says nothing this check can read.
 
     `Rejection` is "the service would have refused this write"; None is "it would have taken it".
-    This is neither, and it is the state #45 names for a missing scope: irimi put the question and
-    did not find out. Recording that as passed would claim a check that never ran - the summary
-    prints `L3 preconditions passed` off it - and rejecting would invent a refusal the service
-    never made. It carries nothing, because the reason belongs in the log line, not in the trace.
+    This is neither: irimi put the question and did not find out, as when the read lacks the
+    scope to see the object. Recording that as passed would claim a check that never ran - the
+    summary prints `L3 preconditions passed` off it - and rejecting would invent a refusal the
+    service never made. It carries nothing, because the reason belongs in the log line, not in the
+    trace.
     """
 
 
@@ -152,7 +153,7 @@ class Check:
     run's own writes already applied to it, and returns a `Rejection`, `NOT_EVALUABLE`, or None
     for passed.
 
-    `currency` is the one fact this read carries that is not a verdict (#60): the currency the
+    `currency` is the one fact this read carries that is not a verdict: the currency the
     write's amounts are denominated in, read off the same document, so the summary can print
     `refund $49.00` for a `Refund.create(charge=, amount=)` that names no currency of its own. It
     returns "" for a document that does not name one, and a check with no such fact to offer

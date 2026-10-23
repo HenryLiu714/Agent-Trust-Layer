@@ -1,4 +1,4 @@
-"""The vendored response objects the L1 faker starts from (#41).
+"""The vendored response objects the L1 faker starts from.
 
 One JSON file per service in `irimi/fixtures/<service>.json`, shipped as package data beside
 `irimi/maps/*.yaml`. Each file is a `_source` line naming where the objects came from and a

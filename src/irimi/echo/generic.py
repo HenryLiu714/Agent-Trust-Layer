@@ -1,4 +1,4 @@
-"""The L0 echo and the L1 fixture body, for any service (#11, #41). Minting, the id a
+"""The L0 echo and the L1 fixture body, for any service. Minting, the id a
 path already names, and writing a request's fields over a fixture object."""
 
 import re
@@ -23,7 +23,7 @@ _ID_TOKEN = re.compile(r"[A-Za-z0-9]+")
 SECRET_MARKER = "_secret"
 
 # What building a locally answered write produces: the body, the level it was built at, and any
-# flag that level owes the trace (`fixture-failed`, #41).
+# flag that level owes the trace (`fixture-failed`).
 Built = tuple[dict[str, Any], FakeLevel, tuple[str, ...]]
 
 
@@ -49,7 +49,7 @@ def named_id(route: Route, path: str, prefix: str) -> str | None:
     A create posts to a collection (`POST /v1/refunds`) and the service mints the id. Every other
     write addresses a resource that exists (`POST /v1/customers/cus_REAL123`,
     `POST /v1/payment_intents/pi_REAL999/cancel`) and the live API answers with the id it was
-    given, so minting a fresh one hands the agent an id for a resource that never existed (#26).
+    given, so minting a fresh one hands the agent an id for a resource that never existed.
 
     The captured segment is matched by `prefix`, not by parameter name, because the two are
     spelled differently: the cancel route captures `{payment_intent}` and mints `id: pi_`, and the
@@ -63,7 +63,7 @@ def named_id(route: Route, path: str, prefix: str) -> str | None:
     OpenAI and Slack all mint them - is preferred over one that merely starts with the prefix.
     That settles both: `sub_sched_1` and the client secret each carry a second `_` and neither is
     id-shaped. Nothing id-shaped leaves the old answer in place, minus a value carrying Stripe's
-    own `_secret` marker, which is never an id and must not be echoed back as one (#33).
+    own `_secret` marker, which is never an id and must not be echoed back as one.
     """
     values = [v for v in path_params(route.path, path).values() if v.startswith(prefix)]
     shaped = [v for v in values if _ID_TOKEN.fullmatch(v[len(prefix) :])]
@@ -92,7 +92,7 @@ def l0_body(request: Request, route: Route | None) -> dict[str, Any]:
 
 # irimi performed nothing, so nothing it answers happened in live mode. Set on every fixture that
 # has the field at all, and on no fixture that does not: a `livemode` on a refund would be a field
-# the real API never sends there (#41).
+# the real API never sends there.
 LIVEMODE = False
 
 
@@ -114,9 +114,9 @@ def _same_json_type(current: Any, value: Any) -> bool:
 def reflect_over(obj: dict[str, Any], reflected: dict[str, Any], route: Route) -> None:
     """Write the request's own fields over a fixture object, in place. Shared by both L1 bodies.
 
-    Extracted from `l1_body` when Slack got an L1 answer of its own (#42): the reflection rules
-    are the same for both, but everything `l1_body` does after them - `created`, `livemode`, the
-    minted ids - is Stripe-shaped, and a Slack message object has none of it.
+    The reflection rules are the same for Stripe and Slack, but everything `l1_body` does after
+    them - `created`, `livemode`, the minted ids - is Stripe-shaped, and a Slack message object
+    has none of it.
     """
     for name, value in reflected.items():
         if name in SERVICE_OWNED or name in route.ids or name not in obj:
@@ -143,7 +143,7 @@ def l1_body(request: Request, route: Route, obj: dict[str, Any]) -> dict[str, An
       not the caller's argument, so they are set last and a posted value cannot reach them.
 
     The id rules are L0's, unchanged: `named_id` first, so an update or a cancel echoes the id its
-    own path names (#26, #33), and a minted id only when the request named none.
+    own path names, and a minted id only when the request named none.
     """
     reflect_over(obj, reflect(request), route)
     obj["created"] = int(time.time())

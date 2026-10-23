@@ -1,6 +1,7 @@
 # Secret scanning: gitleaks' own rules, minus the synthetic credentials the tests and the sample
-# workflows use. Each is built in tests/support/credentials.py or examples/workflows/credentials.py
-# from a prefix and a body; older commits spell some of them out whole. None was issued by a service.
+# workflows use. Each is built in tests/support/credentials.py or
+# tests/e2e/workflows/agents/credentials.py from a prefix and a body; older commits spell some of
+# them out whole. None was issued by a service.
 title = "irimi"
 
 [extend]

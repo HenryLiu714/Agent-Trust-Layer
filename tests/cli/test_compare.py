@@ -2,7 +2,7 @@
 
 Each test stores two runs with `DirectoryStore`, built from hand-made exchanges and tool calls,
 and reads them back through the real `irimi compare`, which loads the shipped maps as `irimi runs
-show` does. `tests/workflows` compares runs the real `irimi shadow` recorded.
+show` does. `tests/e2e/workflows` compares runs the real `irimi shadow` recorded.
 """
 
 import dataclasses

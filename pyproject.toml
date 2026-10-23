@@ -172,6 +172,7 @@ flake8-bugbear.extend-immutable-calls = [
 ]
 # The example agents call the URLs their configuration names, through urllib.
 "examples/**" = ["S310"]
+"tests/e2e/workflows/agents/**" = ["S310"]
 
 [tool.mypy]
 python_version = "3.12"

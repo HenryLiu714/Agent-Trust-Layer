@@ -20,7 +20,6 @@ import pytest
 
 from examples.llm_refund_agent import agent, seed
 from examples.llm_refund_agent.agent import Ticket, handle_ticket
-from examples.workflows.harness.internet import resolving_only
 from irimi import testing
 from irimi.cli import main, runner
 from irimi.config import paths
@@ -29,6 +28,7 @@ from irimi.protocol.env import ENGINE_ACTIVE_ENV
 from irimi.protocol.replay_files import replay_result_from_json
 from irimi.protocol.trace import ToolCall, Trigger
 from irimi.record.store.reader import StoreReader
+from tests.e2e.workflows.harness.internet import resolving_only
 from tests.support.credentials import (
     HERMETIC_ANTHROPIC_KEY,
     HERMETIC_STRIPE_KEY,
@@ -64,7 +64,7 @@ import faulthandler
 import os
 import sys
 
-from examples.workflows.harness.internet import resolving_only
+from tests.e2e.workflows.harness.internet import resolving_only
 from irimi import cli
 
 faulthandler.dump_traceback_later({TIMEOUT_S - 20}, exit=True)

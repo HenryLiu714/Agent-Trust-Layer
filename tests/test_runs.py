@@ -679,11 +679,13 @@ def test_a_run_whose_only_writes_are_tool_writes_still_says_they_did_not_happen(
         "  ○ tool  db.write  fake ran instead",
         "",
         totals,
+        f"  {report.NO_TRAFFIC}",
     ]
     assert report.summary_lines("r", [], tool_calls=[read]) == [
         "irimi shadow · run r · 0 exchanges · 0.0s",
         "",
         totals,
+        f"  {report.NO_TRAFFIC}",
     ]
 
 

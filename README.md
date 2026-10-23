@@ -83,7 +83,7 @@ curl gets back a whole Stripe customer object with `id: cus_REAL123`, your `emai
 as an object, `livemode: false` and the header `irimi-answered-by: fake-L1`. irimi prints:
 
 ```
-irimi shadow · run 2336 · listening on 127.0.0.1:4000 · ca /Users/you/.irimi/ca/ca.pem
+irimi shadow · run 2336 · listening on 127.0.0.1:52817 · ca /Users/you/.irimi/ca/ca.pem
 only traffic sent through this proxy is shadowed; a client that ignores HTTPS_PROXY talks to the real service
 faked         write     POST api.stripe.com/v1/customers/cus_REAL123 -> 200
 irimi shadow · run 2336 · 1 exchange · 0.0s
@@ -268,7 +268,8 @@ plain HTTP or give it its own bundle.
 
 Some SDKs ignore proxy variables or ship their own CA bundle; stripe-python is the canonical case.
 The same listener also accepts plain HTTP at `http://127.0.0.1:4000/<upstream-host>/<path>` and
-handles it like any other request:
+handles it like any other request. `irimi shadow` listens on any free port, which its command
+finds in `HTTPS_PROXY`; pass `--port 4000` to fix it, as `irimi serve` does:
 
 ```python
 stripe.api_base = "http://127.0.0.1:4000/api.stripe.com"
@@ -433,7 +434,7 @@ and again when the answer is chosen:
   `--allow-target-host`. The rule covers every target on the `slack` service.
 - `target_reads: true` without a `target:` is refused.
 
-A delegated service gets a banner line (`delegated: stripe → http://127.0.0.1:3000 (reads +
+A delegated service gets a banner line (`delegated: stripe -> http://127.0.0.1:3000 (reads +
 writes)`) and no overlay, because its target owns read-after-write consistency. An unreachable
 target is a `502` flagged `target-failed`, never a silent fall back to the fake:
 
@@ -783,13 +784,13 @@ with the trigger marked `@sdk.trigger`, edit the prompt, and replay it:
 $ irimi shadow -- python -c "import agent; agent.main()"
 ...
 $ irimi replay 725dc6add559a16f
-irimi replay · run d63663c6da8905c7 · listening on 127.0.0.1:4000 · ca /home/me/.irimi/ca/ca.pem
+irimi replay · run d63663c6da8905c7 · listening on 127.0.0.1:52817 · ca /home/me/.irimi/ca/ca.pem
 replaying 725dc6add559a16f as d63663c6da8905c7
 ...
 real          llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]
 recorded      read      GET api.stripe.com/v1/charges/ch_TICKET1 -> 200  [from-recording]
 ...
-irimi replay · 725dc6add559a16f → d63663c6da8905c7
+irimi replay · 725dc6add559a16f -> d63663c6da8905c7
   agent exited 0
   diverged at the agent's 1st call: real          llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]
   2 from the recording · 5 missed
@@ -918,7 +919,8 @@ irimi replay RUN_ID [-- CMD]      run a stored run's trigger again, answered fro
                                   --args-file PATH), --python PATH, --result-file PATH
 ```
 
-`serve`, `shadow` and `replay` take `--port`, `--listen-host HOST`, `--store DIR`, `--quiet`,
+`serve`, `shadow` and `replay` take `--port` (`shadow` and `replay` default to any free port,
+`serve` to 4000; `--port 0` picks a free one), `--listen-host HOST`, `--store DIR`, `--quiet`,
 `--allow-host HOST`, `--target SPEC`, `--target-reads HOST` and `--allow-target-host HOST`; the
 last four repeat. Every
 run is recorded, redacted, under `--store` (default `$IRIMI_HOME/store`). `shadow` stores its

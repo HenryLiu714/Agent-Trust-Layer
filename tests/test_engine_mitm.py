@@ -158,7 +158,15 @@ def _maps(tmp_path, monkeypatch, doc=DEMO_MAP):
     return servicemap.load(cwd=tmp_path, maps_dir=maps_dir)
 
 
-def _start(cfg, overlay=None, trust_upstream_ca=None, policy=None, store=None, on_tool_call=None):
+def _start(
+    cfg,
+    overlay=None,
+    trust_upstream_ca=None,
+    policy=None,
+    store=None,
+    on_tool_call=None,
+    on_tls_failure=None,
+):
     """Serve `cfg` on a background loop until the returned stop() is called."""
     seen = []
     eng = MitmEngine(
@@ -168,6 +176,7 @@ def _start(cfg, overlay=None, trust_upstream_ca=None, policy=None, store=None, o
         overlay=overlay or NoOverlay(),
         on_exchange=seen.append,
         on_tool_call=on_tool_call,
+        on_tls_failure=on_tls_failure,
     )
     loop = asyncio.new_event_loop()
     t = threading.Thread(target=lambda: loop.run_until_complete(eng.run()), daemon=True)
@@ -582,16 +591,24 @@ def test_repeated_headers_survive_a_local_answer(tmp_path, monkeypatch, upstream
 
 
 def test_port_in_use_raises_engine_start_error(tmp_path, monkeypatch):
+    """A taken port is said in irimi's words, naming its own `--port` and never mitmproxy's
+    `--mode`."""
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     sock.listen()
-    cfg = _config(tmp_path, monkeypatch, port=sock.getsockname()[1])
+    port = sock.getsockname()[1]
+    cfg = _config(tmp_path, monkeypatch, port=port)
     eng = MitmEngine(cfg, ShadowPolicy(), NullStore(), NoOverlay())
+    said = (
+        f"port {port} on 127.0.0.1 is in use; pick another with --port, or --port 0 for any "
+        "free port"
+    )
 
     async def go():
         task = asyncio.ensure_future(eng.run())
-        with pytest.raises(EngineStartError, match="did not start"):
+        with pytest.raises(EngineStartError) as refused:
             await asyncio.wait_for(eng.wait_ready(), 15)
+        assert str(refused.value) == said
         with pytest.raises(EngineStartError):
             await asyncio.wait_for(task, 15)
 
@@ -670,8 +687,8 @@ def test_reverse_door_refuses_unlisted_host(engine):
     assert json.loads(data) == {
         "error": {
             "type": "irimi_refused",
-            "message": "irimi refused this request: reverse door: host 'api.stripe.com' is not "
-            "in a loaded map or --allow-host",
+            "message": "irimi refused this request: base-URL host 'api.stripe.com' is not in a "
+            "loaded map or --allow-host",
         }
     }
     (ex,) = seen
@@ -1704,6 +1721,48 @@ def _via_tls_proxy(cfg, proxy_port, host, port, method, path, body=None):
         return resp.status, resp.read()
     finally:
         conn.close()
+
+
+def test_a_client_that_refuses_irimi_s_ca_is_reported_by_the_host_it_asked_for(
+    tmp_path, monkeypatch
+):
+    """A client that does not trust irimi's CA never sends a request, so no exchange exists; the
+    engine reports the refused handshake by its SNI instead, and nothing raises."""
+    cfg = _config(tmp_path, monkeypatch)
+    refused = []
+    reported = threading.Event()
+
+    def on_tls_failure(host):
+        refused.append(host)
+        reported.set()
+
+    eng, seen, stop = _start(cfg, on_tls_failure=on_tls_failure)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    other = ca.CAPaths(key=elsewhere / "ca.key", cert=elsewhere / "ca.pem")
+    ca.generate_ca(other)  # a CA the client trusts, which is not irimi's
+    try:
+        tunnel = _tunnel(eng.listen_port(), "api.distrustful.test", 443)
+        context = ssl.create_default_context(cafile=str(other.cert))
+        with pytest.raises(ssl.SSLCertVerificationError):
+            context.wrap_socket(tunnel, server_hostname="api.distrustful.test")
+        tunnel.close()
+        assert reported.wait(10)
+    finally:
+        stop()
+    assert refused == ["api.distrustful.test"]
+    assert seen == []
+
+
+def _tunnel(proxy_port, host, port):
+    """A CONNECT tunnel through the proxy to `host`:`port`, before any TLS."""
+    s = socket.create_connection(("127.0.0.1", proxy_port), timeout=10)
+    s.sendall(f"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n".encode())
+    answer = b""
+    while b"\r\n\r\n" not in answer:
+        answer += s.recv(1024)
+    assert answer.startswith(b"HTTP/1.1 200"), answer
+    return s
 
 
 def test_an_https_write_is_answered_when_the_real_host_is_not_listening(tmp_path, monkeypatch):

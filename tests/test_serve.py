@@ -78,7 +78,7 @@ def test_the_reverse_door_refuses_a_peer_that_is_not_loopback(tmp_path, monkeypa
     assert flow.response.status_code == 403
     assert flow.response.headers["irimi-answered-by"] == "irimi"
     assert (
-        "loopback only, refusing '10.0.0.9'"
+        "base-URL requests come from loopback only; refusing '10.0.0.9'"
         in json.loads(flow.response.content)["error"]["message"]
     )
     assert (flow.request.host, flow.request.path) == ("10.0.0.5", "/api.stripe.com/v1/x")
@@ -158,7 +158,7 @@ def test_a_request_naming_the_address_irimi_was_reached_at_is_never_forwarded_to
     finally:
         handle.stop()
     assert status == 403
-    assert f"loopback only, refusing '{address}'".encode() in body
+    assert f"base-URL requests come from loopback only; refusing '{address}'".encode() in body
     assert calls == [(address, port)]
 
 

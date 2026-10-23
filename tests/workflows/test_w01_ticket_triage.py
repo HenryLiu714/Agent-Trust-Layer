@@ -668,7 +668,7 @@ def test_a_run_irimi_may_not_read_is_named_unreadable_not_missing(shared_store_r
         assert half.runs("list", "--store", str(copy)) == (
             1,
             [],
-            [f"error: [Errno 13] Permission denied: '{copy / 'runs'}'"],
+            [f"error: --store {copy}: permission denied"],
         )
         why = f"[Errno 13] Permission denied: '{copy / 'runs' / a / 'run.json'}'"
         assert half.runs("show", a, "--store", str(copy)) == (
@@ -751,7 +751,7 @@ def test_a_full_refund_replayed_unchanged_is_answered_from_its_recording(replaye
     ]
     # What `irimi replay` says of it: every call answered, and the same two writes.
     assert replay.replay_result() == [
-        f"irimi replay · {source} → {replay.process_run_id()}",
+        f"irimi replay · {source} -> {replay.process_run_id()}",
         "  agent exited 0",
         "  no divergence: every call was answered from the recording",
         "  7 from the recording · 0 missed",
@@ -787,7 +787,7 @@ def test_a_full_refund_replayed_without_its_database_reads_the_customer_from_the
     # And `irimi replay` says so: no divergence, the same two writes.
     source = recorded.one("run.start")["run"]
     assert replay.replay_result() == [
-        f"irimi replay · {source} → {replay.process_run_id()}",
+        f"irimi replay · {source} -> {replay.process_run_id()}",
         "  agent exited 0",
         "  no divergence: every call was answered from the recording",
         "  7 from the recording · 0 missed",
@@ -839,7 +839,7 @@ def test_a_full_refund_replayed_with_the_half_prompt_diverges_at_the_first_llm_c
     # changed, and the reply, whose line names no args but whose text changed with the refund.
     source = recorded.one("run.start")["run"]
     assert replay.replay_result() == [
-        f"irimi replay · {source} → {replay.process_run_id()}",
+        f"irimi replay · {source} -> {replay.process_run_id()}",
         "  agent exited 0",
         "  diverged at the agent's 1st call: real          llm       "
         "POST api.anthropic.com/v1/messages -> 200  [replay-miss]",
@@ -871,7 +871,7 @@ def test_the_half_prompt_replayed_by_its_command_writes_no_reply_to_the_seeded_d
     assert replay.internet.requests("api.stripe.com") == []
     source = recorded.one("run.start")["run"]
     assert replay.replay_result() == [
-        f"irimi replay · {source} → {replay.process_run_id()}",
+        f"irimi replay · {source} -> {replay.process_run_id()}",
         "  agent exited 0",
         "  diverged at the agent's 1st call: real          llm       "
         "POST api.anthropic.com/v1/messages -> 200  [replay-miss]",
@@ -944,7 +944,7 @@ def test_each_further_scenario_replayed_unchanged_does_not_diverge(replayed, sce
     assert replay.internet.requests() == []
     source = recorded.one("run.start")["run"]
     code, lines = UNCHANGED[scenario]
-    assert replay.replay_result()[0] == (f"irimi replay · {source} → {replay.process_run_id()}")
+    assert replay.replay_result()[0] == (f"irimi replay · {source} -> {replay.process_run_id()}")
     assert (replay.exit_code, replay.replay_result()[1:]) == (code, lines)
     assert [e["outcome"] for e in replay.events("run.end")] == [
         e["outcome"] for e in recorded.events("run.end")
@@ -997,7 +997,7 @@ def test_the_full_refund_replayed_with_each_prompt_shows_what_compare_shows_of_i
     code, rows = COMPARED[scenario]
     ended = _ending(own)
     assert replay.replay_result() == [
-        f"irimi replay · {source} → {replay.process_run_id()}",
+        f"irimi replay · {source} -> {replay.process_run_id()}",
         f"  agent exited {0 if ended == [('ok', None)] else 1}",
         f"  diverged at {FIRST_CALL}",
         f"  {EDITED_COUNTS[scenario]}",
@@ -1097,7 +1097,7 @@ def test_each_scenario_replayed_with_the_full_refund_s_prompt_shows_the_writes_i
     source = recorded.one("run.start")["run"]
     code, counts, rows = RESTORED[scenario]
     assert replay.replay_result() == [
-        f"irimi replay · {source} → {replay.process_run_id()}",
+        f"irimi replay · {source} -> {replay.process_run_id()}",
         "  agent exited 0",
         f"  diverged at {FIRST_CALL}",
         f"  {counts}",
@@ -1124,7 +1124,7 @@ def test_a_full_refund_recorded_under_serve_is_replayed_as_one_recorded_under_sh
     assert check_invariants(replay) == []
     assert replay.internet.requests() == []
     source = recorded.one("run.start")["run"]
-    assert replay.replay_result()[0] == (f"irimi replay · {source} → {replay.process_run_id()}")
+    assert replay.replay_result()[0] == (f"irimi replay · {source} -> {replay.process_run_id()}")
     assert replay.replay_result()[1:] == by_shadow.replay_result()[1:]
     assert replay.replay_result()[2] == (
         "  no divergence: every call was answered from the recording"
@@ -1191,7 +1191,7 @@ def test_a_full_refund_replayed_with_other_args_says_its_args_differ(replayed):
     recorded, replay = replayed(W, "full_refund", options=("--args", json.dumps(OTHER_TICKET)))
     source = recorded.one("run.start")["run"]
     assert replay.replay_result() == [
-        f"irimi replay · {source} → {replay.process_run_id()}",
+        f"irimi replay · {source} -> {replay.process_run_id()}",
         "  agent exited 0",
         "  (the triggers' args differ)",
         "  diverged at the agent's 1st call: real          llm       "
@@ -1223,7 +1223,7 @@ def test_a_call_of_another_function_is_replayed_in_place_of_the_trigger(replayed
     recorded, replay = replayed(W, "full_refund", options=options)
     source = recorded.one("run.start")["run"]
     assert replay.replay_result() == [
-        f"irimi replay · {source} → {replay.process_run_id()}",
+        f"irimi replay · {source} -> {replay.process_run_id()}",
         "  agent exited 0",
         "  (the triggers' args differ)",
         "  no divergence, but 6 of the recording's calls were never made",
@@ -1283,7 +1283,7 @@ def test_a_full_refund_replayed_under_the_agent_s_python_is_answered_from_its_re
     agent = replay(recorded, source, tmp_path / "agent", no_path, ("--python", str(python)))
     assert "hint: " not in capfd.readouterr().err
     assert agent.replay_result() == [
-        f"irimi replay · {source} → {agent.process_run_id()}",
+        f"irimi replay · {source} -> {agent.process_run_id()}",
         "  agent exited 0",
         "  no divergence: every call was answered from the recording",
         "  7 from the recording · 0 missed",
@@ -1328,7 +1328,7 @@ def test_a_replay_is_replayed_by_the_trigger_it_called(replayed, tmp_path, promp
     )
     amount = "$49.00" if prompt == "full" else "$24.50"
     assert second.replay_result() == [
-        f"irimi replay · {first.process_run_id()} → {second.process_run_id()}",
+        f"irimi replay · {first.process_run_id()} -> {second.process_run_id()}",
         "  agent exited 0",
         "  no divergence: every call was answered from the recording",
         "  7 from the recording · 0 missed",
@@ -1432,7 +1432,7 @@ def test_the_half_prompt_s_replay_replayed_with_the_full_prompt_diverges_back(re
     second = replay(first, first.process_run_id(), tmp_path / "back")
     assert [r.run_id for r in first.stored().list_runs()] == before
     assert second.replay_result() == [
-        f"irimi replay · {first.process_run_id()} → {second.process_run_id()}",
+        f"irimi replay · {first.process_run_id()} -> {second.process_run_id()}",
         "  agent exited 0",
         "  diverged at the agent's 1st call: real          llm       "
         "POST api.anthropic.com/v1/messages -> 200  [replay-miss]",
@@ -1478,7 +1478,7 @@ def test_a_full_refund_replayed_with_its_tool_results_changed_diverges_mid_conve
     source = recorded.one("run.start")["run"]
     assert replay.exit_code == 0
     assert replay.replay_result() == [
-        f"irimi replay · {source} → {replay.process_run_id()}",
+        f"irimi replay · {source} -> {replay.process_run_id()}",
         "  agent exited 0",
         "  diverged at the agent's 4th call: real          llm       "
         "POST api.anthropic.com/v1/messages -> 200  [replay-miss]",

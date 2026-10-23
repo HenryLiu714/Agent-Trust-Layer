@@ -529,6 +529,8 @@ def test_all_of_a_serves_runs_together_are_what_it_reported_live(run_workflow, n
     maps = serve.maps()
     handed_calls = [e for e in serve.handed_events if isinstance(e, ToolCall)]
     live = report.summary_lines(trace.UNATTRIBUTED, serve.reported, 0.0, maps, handed_calls)
+    # The one line only a live block prints, for a run that saw no traffic.
+    live = [line for line in live if line != f"  {report.NO_TRAFFIC}"]
     assert report.stored_summary_lines(union, maps) == live
 
 

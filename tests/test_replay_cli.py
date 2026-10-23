@@ -200,14 +200,14 @@ def _replay(capfd, *argv: str) -> tuple[int, list[str], list[str]]:
 def _result(lines: list[str]) -> list[str]:
     """The result block: from `irimi replay · ` on, the per-exchange stream left out."""
     start = next(
-        i for i, line in enumerate(lines) if line.startswith("irimi replay · ") and "→" in line
+        i for i, line in enumerate(lines) if line.startswith("irimi replay · ") and "->" in line
     )
     return lines[start:]
 
 
 def _no_result(lines: list[str]) -> bool:
     """Whether `irimi replay` printed no result block: an agent it could not call is no replay."""
-    return not any(line.startswith("irimi replay · ") and "→" in line for line in lines)
+    return not any(line.startswith("irimi replay · ") and "->" in line for line in lines)
 
 
 def _replay_runs(home, source: str) -> list:
@@ -226,7 +226,7 @@ def test_an_unchanged_agent_replays_with_no_divergence_and_sends_nothing(home, c
         f"replaying {source} as {replay.run_id}",
     ]
     assert _result(out) == [
-        f"irimi replay · {source} → {replay.run_id}",
+        f"irimi replay · {source} -> {replay.run_id}",
         "  agent exited 0",
         "  no divergence: every call was answered from the recording",
         "  3 from the recording · 0 missed",
@@ -256,7 +256,7 @@ def test_a_changed_prompt_diverges_at_the_llm_call_and_refunds_another_amount(
     assert (code, err) == (1, [])
     [replay] = _replay_runs(home, source)
     assert _result(out) == [
-        f"irimi replay · {source} → {replay.run_id}",
+        f"irimi replay · {source} -> {replay.run_id}",
         "  agent exited 0",
         "  diverged at the agent's 1st call: real          llm       "
         "POST localhost/v1/messages -> 200  [replay-miss]",
@@ -462,7 +462,8 @@ def test_a_trigger_it_cannot_call_is_a_replay_that_could_not_run(home, capfd, tm
 
 def test_a_trigger_recorded_in_main_is_refused(home, capfd):
     """An agent run as `python agent.py` records `__main__:handle`, and `__main__` is the child's
-    own module when it is called: refused, exit 2, before anything runs."""
+    own module when it is called: refused, exit 2, before anything runs, with the command that
+    replays it. An SDK run records no command line, so the module is left for the reader."""
     (home.parent / "script_agent.py").write_text(
         "import replay_agent\nfrom irimi import sdk\n\n@sdk.trigger\ndef main():\n    "
         "replay_agent.plain('ch_REAL1')\n\nmain()\n"
@@ -473,8 +474,9 @@ def test_a_trigger_recorded_in_main_is_refused(home, capfd):
     code, out, err = _replay(capfd, run.run_id)
     assert (code, out) == (2, [])
     assert err == [
-        f"error: run {run.run_id}'s entrypoint __main__:main is in __main__, which is irimi's own "
-        "child when it is called; start the agent by its module name, or pass --call or -- CMD"
+        f"error: run {run.run_id} was started as a script, so irimi cannot import its trigger "
+        f"__main__:main; replay it with: irimi replay {run.run_id} --call <module>:main "
+        "--python <your venv python>"
     ]
 
 
@@ -685,7 +687,7 @@ def test_a_refused_replay_s_result_file_holds_the_reason_irimi_gave(home, capfd,
     assert (code, out) == (2, [])
     result = ReplayResult.from_json(json.loads(written.read_text()))
     assert result == ReplayResult(source, None, 2, None, tuple(err))
-    assert err == [f"error: no CA at {home / 'ca'}. Run `irimi init` first."]
+    assert err == [f"error: no CA at {home / 'ca'}; run `irimi init` first"]
 
 
 def test_a_replay_that_called_a_trigger_can_itself_be_replayed(home, capfd):
@@ -802,9 +804,9 @@ def test_a_replay_interrupted_after_its_run_is_stored_names_the_run_and_exits_13
     capfd.readouterr()
     code, _, err = _replay(capfd, source, "--result-file", str(written))
     [run] = _replay_runs(home, source)
-    assert (code, err) == (130, ["error: interrupted."])
+    assert (code, err) == (130, ["error: interrupted"])
     result = ReplayResult.from_json(json.loads(written.read_text()))
-    assert result == ReplayResult(source, run.run_id, 130, None, ("error: interrupted.",))
+    assert result == ReplayResult(source, run.run_id, 130, None, ("error: interrupted",))
     assert (run.outcome, run.exit_code) == ("ok", 0)
 
 
@@ -824,18 +826,17 @@ def test_a_run_that_did_not_end_is_replayed_after_one_warning(home, capfd):
 
 
 def test_a_command_that_does_not_start_is_a_replay_that_could_not_run(home, capfd, tmp_path):
-    """The run is stored before the command is spawned, and ends with the shell's 127; the replay
-    exits 2, its result naming that run and holding why."""
+    """A command that does not resolve is refused before the proxy starts, so no run is stored;
+    the replay exits 2, its result holding why."""
     source = _record(home, f"replay_agent.handle({TICKET})")
     written = tmp_path / "result.json"
     capfd.readouterr()
     code, _, err = _replay(capfd, source, "--result-file", str(written), "--", "no-such-agent")
-    [run] = _replay_runs(home, source)
+    assert _replay_runs(home, source) == []
     assert (code, err) == (2, ["error: command not found: no-such-agent"])
     assert ReplayResult.from_json(json.loads(written.read_text())) == ReplayResult(
-        source, run.run_id, 2, None, ("error: command not found: no-such-agent",)
+        source, None, 2, None, ("error: command not found: no-such-agent",)
     )
-    assert (run.outcome, run.exit_code) == ("error", 127)
 
 
 def test_an_agent_that_names_the_recorded_run_never_rewrites_it(home, capfd, monkeypatch):

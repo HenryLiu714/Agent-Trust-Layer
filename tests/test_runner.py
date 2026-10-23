@@ -5,6 +5,8 @@ import threading
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from irimi.exchange import (
     BODY_TRUNCATED_FLAG,
     DECISION_FAILED_FLAG,
@@ -164,12 +166,64 @@ def test_summary_header_says_one_exchange_not_one_exchanges():
 
 
 def test_summary_empty():
+    """A run with no exchange says irimi saw no traffic, and why an agent's calls may not show."""
     lines = summary_lines("7f3a", [], 0.0)
     assert "0 exchanges" in lines[0]
-    assert lines[-1] == (
-        "  0 exchanges · 0 real · 0 answered by irimi (0 faked writes) · 0 sent to targets"
-    )
+    assert lines[-2:] == [
+        "  0 exchanges · 0 real · 0 answered by irimi (0 faked writes) · 0 sent to targets",
+        "  irimi saw no HTTP(S) traffic; if the agent made calls, they bypassed the proxy or "
+        "failed TLS",
+    ]
     assert not any("None of these writes" in line for line in lines)
+
+
+def test_an_engine_that_never_binds_is_an_engine_start_error_with_a_message():
+    """A ready timeout carries no message of its own; `start_engine` gives it one, so every
+    command prints the same line for it."""
+    from irimi.engine import EngineStartError
+    from irimi.runner import start_engine
+
+    stopped = threading.Event()
+
+    class _NeverReady:
+        async def run(self) -> None:
+            while not stopped.is_set():
+                await asyncio.sleep(0.01)
+
+        async def wait_ready(self) -> None:
+            await asyncio.Event().wait()
+
+        def shutdown(self) -> None:
+            stopped.set()
+
+    with pytest.raises(EngineStartError) as refused:
+        start_engine(_NeverReady(), timeout=1.0)
+    assert str(refused.value) == "proxy did not start within 1s"
+    assert stopped.is_set()
+
+
+def test_a_run_with_traffic_does_not_say_it_saw_none():
+    assert not any(
+        "saw no HTTP(S) traffic" in line for line in summary_lines("7f3a", [_exchange()])
+    )
+
+
+def test_refused_tls_handshakes_are_counted_per_host_with_the_ca_to_point_at():
+    lines = summary_lines(
+        "7f3a",
+        [],
+        0.0,
+        tls_failures={"api.stripe.com": 2, "hooks.slack.com": 1},
+        ca_cert=Path("/home/me/.irimi/ca/ca.pem"),
+    )
+    assert lines[-3:] == [
+        "  irimi saw no HTTP(S) traffic; if the agent made calls, they bypassed the proxy or "
+        "failed TLS",
+        "  2 connections to api.stripe.com failed TLS: the client did not trust irimi's CA; point "
+        "it at /home/me/.irimi/ca/ca.pem (some clients ignore SSL_CERT_FILE)",
+        "  1 connection to hooks.slack.com failed TLS: the client did not trust irimi's CA; point "
+        "it at /home/me/.irimi/ca/ca.pem (some clients ignore SSL_CERT_FILE)",
+    ]
 
 
 def test_exit_code_for():
@@ -250,20 +304,20 @@ def test_a_service_with_no_target_adds_no_banner_line():
 
 def test_a_service_target_names_the_service_the_target_and_what_it_answers():
     lines = delegated_lines(_index(_service(target="http://127.0.0.1:3000")))
-    assert lines == ["delegated: stripe → http://127.0.0.1:3000 (writes)"]
+    assert lines == ["delegated: stripe -> http://127.0.0.1:3000 (writes)"]
 
 
 def test_target_reads_says_the_reads_are_delegated_too():
     """The banner's "reads are real" claim is exactly what `target_reads` makes false."""
     lines = delegated_lines(_index(_service(target="http://127.0.0.1:3000", target_reads=True)))
-    assert lines == ["delegated: stripe → http://127.0.0.1:3000 (reads + writes)"]
+    assert lines == ["delegated: stripe -> http://127.0.0.1:3000 (reads + writes)"]
 
 
 def test_a_route_target_is_named_even_when_the_service_itself_has_none():
     """`irimi maps list` printed `target: self` for exactly this shape; the banner must not."""
     sm = _service(routes=(_route(target="http://127.0.0.1:3111"), _route(path="/v1/charges")))
     assert delegated_lines(_index(sm)) == [
-        "delegated: stripe POST /v1/refunds → http://127.0.0.1:3111 (writes)"
+        "delegated: stripe POST /v1/refunds -> http://127.0.0.1:3111 (writes)"
     ]
 
 

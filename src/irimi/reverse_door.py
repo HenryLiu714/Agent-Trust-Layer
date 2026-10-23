@@ -45,23 +45,24 @@ def rewrite_reverse(request: Request, allowed_hosts: frozenset[str]) -> Request:
     """
     segment, _, rest = request.path.lstrip("/").partition("/")
     if segment.startswith("["):
-        raise ReverseDoorRefused("reverse door: IPv6 literal upstream hosts are not supported")
+        raise ReverseDoorRefused(
+            "base-URL request names an IPv6 literal host, which irimi does not relay"
+        )
     host, _, port_text = segment.partition(":")
     host = host.lower()
     if not host:
         raise ReverseDoorRefused(
-            "reverse door: path must be /<upstream-host>/<path>, e.g. /api.stripe.com/v1/charges"
+            "a base-URL request's path must be /<upstream-host>/<path>, "
+            "e.g. /api.stripe.com/v1/charges"
         )
     if host not in allowed_hosts:
-        raise ReverseDoorRefused(
-            f"reverse door: host {host!r} is not in a loaded map or --allow-host"
-        )
+        raise ReverseDoorRefused(f"base-URL host {host!r} is not in a loaded map or --allow-host")
     try:
         port = int(port_text) if port_text else REVERSE_DEFAULT_PORT
     except ValueError:
-        raise ReverseDoorRefused(f"reverse door: bad port in {segment!r}") from None
+        raise ReverseDoorRefused(f"bad port in base-URL host {segment!r}") from None
     if not 1 <= port <= 65535:
-        raise ReverseDoorRefused(f"reverse door: bad port in {segment!r}")
+        raise ReverseDoorRefused(f"bad port in base-URL host {segment!r}")
     authority = host if port == REVERSE_DEFAULT_PORT else f"{host}:{port}"
     headers = tuple((k, authority if k == "host" else v) for k, v in request.headers)
     if not any(k == "host" for k, _ in headers):

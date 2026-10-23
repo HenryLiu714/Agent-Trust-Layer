@@ -2,6 +2,7 @@ import datetime as dt
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -36,6 +37,14 @@ def ca_exists(p: CAPaths) -> bool:
 def ca_partial(p: CAPaths) -> bool:
     """True when exactly one of key/cert is present (a broken or interrupted init)."""
     return p.key.is_file() != p.cert.is_file()
+
+
+def state(p: CAPaths) -> Literal["absent", "partial", "present"]:
+    """Whether the CA is there: both files, exactly one of them (a broken or interrupted init), or
+    neither."""
+    if ca_exists(p):
+        return "present"
+    return "partial" if ca_partial(p) else "absent"
 
 
 def generate_ca(p: CAPaths) -> None:

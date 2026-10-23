@@ -153,15 +153,68 @@ def test_signal_exit_code(home):
 
 
 def test_missing_command(home, capsys):
+    """A command that does not resolve is refused before the banner, and stores no run."""
     assert main(["shadow", "--port", "0", "--", "irimi-no-such-binary"]) == 127
-    assert "command not found" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert captured.err.splitlines() == ["error: command not found: irimi-no-such-binary"]
+    assert captured.out == ""
+    assert not (home / "store" / "runs").exists() or not any((home / "store" / "runs").iterdir())
+
+
+def test_a_command_that_is_not_executable_is_refused_before_the_banner(home, tmp_path, capsys):
+    script = tmp_path / "agent.sh"
+    script.write_text("#!/bin/sh\n")
+    assert main(["shadow", "--", str(script)]) == 126
+    captured = capsys.readouterr()
+    assert captured.err.splitlines() == [f"error: could not run {script}: permission denied"]
+    assert captured.out == ""
+
+
+def test_a_client_that_refuses_irimi_s_ca_is_named_in_the_summary(home, tmp_path, capfd):
+    """A client trusting some other CA fails its handshake and never sends a request: the summary
+    counts the refused connection by host, names the CA to point it at, and says irimi saw no
+    traffic."""
+    other = ca.CAPaths(key=tmp_path / "other.key", cert=tmp_path / "other.pem")
+    ca.generate_ca(other)
+    source = (
+        "import ssl, urllib.request\n"
+        f"context = ssl.create_default_context(cafile={str(other.cert)!r})\n"
+        "try:\n"
+        "    urllib.request.urlopen('https://api.distrustful.test/', context=context, timeout=10)\n"
+        "except Exception:\n"
+        "    pass\n"
+    )
+    assert main(["shadow", *_py(source)]) == 0
+    lines = capfd.readouterr().out.splitlines()
+    assert lines[-2:] == [
+        "  irimi saw no HTTP(S) traffic; if the agent made calls, they bypassed the proxy or "
+        "failed TLS",
+        "  1 connection to api.distrustful.test failed TLS: the client did not trust irimi's CA; "
+        f"point it at {ca.ca_paths().cert} (some clients ignore SSL_CERT_FILE)",
+    ]
+
+
+def test_the_summary_starts_on_a_line_of_its_own_after_a_child_that_left_one_open(home, capfd):
+    """irimi cannot see what the child wrote to their shared stdout, so a newline ends whatever
+    line the child left open before the summary's header."""
+    assert main(["shadow", *_py("import sys; sys.stdout.write('no newline')")]) == 0
+    lines = capfd.readouterr().out.splitlines()
+    [header] = [i for i, line in enumerate(lines) if " · 0 exchanges · " in line]
+    assert lines[header].startswith("irimi shadow · run ")
+    assert lines[header - 1] == "no newline"
+
+
+def test_a_store_that_cannot_be_a_directory_is_named_by_the_flag(home, capsys):
+    assert main(["shadow", "--store", "/dev/null/x", *_py("pass")]) == 1
+    assert capsys.readouterr().err.splitlines() == ["error: --store /dev/null/x: not a directory"]
 
 
 def test_no_command_given(home, capsys):
+    usage = "error: nothing to run; usage: irimi shadow -- <command> [args...]"
     assert main(["shadow"]) == 1
-    assert "Usage: irimi shadow" in capsys.readouterr().err
+    assert capsys.readouterr().err.splitlines() == [usage]
     assert main(["shadow", "--"]) == 1
-    assert "Usage: irimi shadow" in capsys.readouterr().err
+    assert capsys.readouterr().err.splitlines() == [usage]
 
 
 def test_no_ca(tmp_path, monkeypatch, capsys):
@@ -189,7 +242,10 @@ def test_engine_start_failure_does_not_spawn_child(home, monkeypatch, capsys):
             "open('SHOULD_NOT_EXIST','w')",
         ]
         assert main(argv) == 1
-        assert "did not start" in capsys.readouterr().err
+        assert capsys.readouterr().err.splitlines() == [
+            f"error: port {port} on 127.0.0.1 is in use; pick another with --port, or --port 0 "
+            "for any free port"
+        ]
         assert not (home / "SHOULD_NOT_EXIST").exists()
     finally:
         sock.close()
@@ -229,7 +285,7 @@ def test_reverse_door_refuses_unlisted_host(home, capfd):
     assert main(["shadow", *_py(_reverse_source("/evil.example/x"))]) == 0
     out = capfd.readouterr().out
     assert '403 {"error": {"type": "irimi_refused", "message": "irimi refused this request: ' in out
-    assert "reverse door: host 'evil.example' is not in a loaded map or --allow-host" in out
+    assert "base-URL host 'evil.example' is not in a loaded map or --allow-host" in out
     # The refusal is irimi's own answer, so it is recorded and counted like one. It was a GET, so
     # it is not listed among the writes, and its host line says irimi refused it.
     assert "1 exchange" in out
@@ -266,7 +322,7 @@ def test_banner_names_a_delegated_service(home, tmp_path, capsys):
     )
     assert main(["shadow", *_py("pass")]) == 0
     out = capsys.readouterr().out
-    assert "delegated: stripe → http://127.0.0.1:3000 (reads + writes)" in out
+    assert "delegated: stripe -> http://127.0.0.1:3000 (reads + writes)" in out
     # The existing banner is unchanged, not replaced.
     assert "only traffic sent through this proxy is shadowed" in out
 
@@ -287,7 +343,7 @@ def test_the_banner_says_when_a_target_left_the_machine(home, capsys):
     ]
     assert main(argv) == 0
     captured = capsys.readouterr()
-    assert "delegated: stripe → http://stub.example:3000 (writes)" in captured.out
+    assert "delegated: stripe -> http://stub.example:3000 (writes)" in captured.out
     assert "NOT loopback" in captured.out
     assert "--allow-target-host" in captured.err  # the existing escape-hatch warning, unchanged
 

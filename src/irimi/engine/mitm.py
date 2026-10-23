@@ -1,6 +1,7 @@
 """mitmproxy-backed Engine. The only module allowed to import mitmproxy."""
 
 import asyncio
+import errno
 import io
 import logging
 import socket
@@ -12,14 +13,14 @@ from urllib.parse import urlsplit
 
 import brotli  # type: ignore[import-untyped]  # ships no stubs
 import zstandard
-from mitmproxy import ctx, http
+from mitmproxy import ctx, http, tls
 from mitmproxy.addons import default_addons
 from mitmproxy.master import Master
 from mitmproxy.options import Options
 
 from irimi import ca, control, delegation, netaddr, pipeline, redact, reverse_door
 from irimi.control import ControlEndpoint, OnToolCall
-from irimi.engine import EngineConfig, EngineStartError, OnExchange
+from irimi.engine import EngineConfig, EngineStartError, OnExchange, OnTlsFailure
 from irimi.exchange import (
     BODY_TRUNCATED_FLAG,
     DECISION_FAILED_FLAG,
@@ -545,6 +546,20 @@ def _target_refusal(
     return None
 
 
+def _start_failure(config: EngineConfig, cause: BaseException | None) -> str:
+    """Why the listener did not bind, in irimi's words: mitmproxy's own message names its own
+    `--mode` flag, which irimi does not have."""
+    where = netaddr.authority(config.listen_host, config.listen_port)
+    if isinstance(cause, OSError) and cause.errno == errno.EADDRINUSE:
+        return (
+            f"port {config.listen_port} on {config.listen_host} is in use; pick another with "
+            "--port, or --port 0 for any free port"
+        )
+    if isinstance(cause, OSError) and cause.strerror:
+        return f"could not listen on {where}: {cause.strerror.lower()}"
+    return f"could not listen on {where}" + ("" if cause is None else f": {cause}")
+
+
 class IrimiAddon:
     """The mitmproxy addon: runs the pipeline on every flow. One instance per engine."""
 
@@ -558,6 +573,7 @@ class IrimiAddon:
         on_running: OnRunning,
         on_tool_call: OnToolCall | None = None,
         write_log: WriteLog | None = None,
+        on_tls_failure: OnTlsFailure | None = None,
     ) -> None:
         self.config = config
         self.policy = policy
@@ -565,6 +581,7 @@ class IrimiAddon:
         self.overlay = overlay
         self.on_exchange = on_exchange
         self.on_running = on_running
+        self.on_tls_failure = on_tls_failure
         # The policy that decides the wire answers the SDK's read tools there too: from a
         # replay's recording, or from nothing.
         self.control = ControlEndpoint(
@@ -585,9 +602,20 @@ class IrimiAddon:
             self.on_running(addrs[0][1], None)
             return
         cause = next((s.last_exception for s in proxyserver.servers if s.last_exception), None)
-        where = f"{self.config.listen_host}:{self.config.listen_port}"
-        self.on_running(None, EngineStartError(f"proxy did not start on {where}: {cause}"))
+        self.on_running(None, EngineStartError(_start_failure(self.config, cause)))
         ctx.master.shutdown()
+
+    def tls_failed_client(self, data: tls.TlsData) -> None:
+        """Report a client that refused irimi's certificate, by the host it asked for. No flow
+        exists for it, so nothing else would say why the agent's call never arrived."""
+        if self.on_tls_failure is None:
+            return
+        try:
+            address = data.context.server.address
+            host = data.conn.sni or (address[0] if address is not None else "an unnamed host")
+            self.on_tls_failure(str(host))
+        except Exception:
+            logger.debug("irimi: could not report a client TLS failure", exc_info=True)
 
     async def request(self, flow: http.HTTPFlow) -> None:
         # When this exchange began, for the trace. Read before anything else the hook does,
@@ -618,7 +646,9 @@ class IrimiAddon:
             listener = (str(local_address), int(local_port))
             door = reverse_door.detect_door(req, listener[1], listener[0])
         except Exception as exc:  # never fail open: a request whose door is unknown may be ours
-            logger.warning("irimi: refusing request whose door could not be told: %s", exc)
+            logger.warning(
+                "irimi: could not tell whether this is a proxy or base-URL request: %s", exc
+            )
             self._refuse(flow, req, "forward", started_at, 400, "could not route this request")
             return
         # THE CONTROL ENDPOINT is answered here and returns, before the reverse door, which
@@ -637,7 +667,7 @@ class IrimiAddon:
                 return
             except Exception as exc:  # never fail open: an unrewritten flow would go to ourselves
                 logger.warning(
-                    "irimi: refusing reverse-door request that could not be rewritten: %s", exc
+                    "irimi: refusing a base-URL request that could not be rewritten: %s", exc
                 )
                 self._refuse(flow, req, door, started_at, 400, "could not rewrite this request")
                 return
@@ -1028,11 +1058,13 @@ class IrimiAddon:
         """
         peer = flow.client_conn.peername[0] if flow.client_conn.peername else ""
         if not netaddr.is_loopback(peer):
-            raise reverse_door.ReverseDoorRefused(f"reverse door: loopback only, refusing {peer!r}")
+            raise reverse_door.ReverseDoorRefused(
+                f"base-URL requests come from loopback only; refusing {peer!r}"
+            )
         req = reverse_door.rewrite_reverse(req, self.config.reverse_hosts)
         host_header = req.header("host")
         if host_header is None:  # `rewrite_reverse` always sets one; never forward without it
-            raise ValueError("reverse door: the rewritten request carries no Host header")
+            raise ValueError("the rewritten base-URL request carries no Host header")
         _point_flow(flow, req.scheme, req.host, req.port, req.path_and_query, host_header)
         return req
 
@@ -1246,6 +1278,7 @@ class MitmEngine:
         on_exchange: OnExchange | None = None,
         on_tool_call: OnToolCall | None = None,
         write_log: WriteLog | None = None,
+        on_tls_failure: OnTlsFailure | None = None,
     ) -> None:
         self.config = config
         self.policy = policy
@@ -1253,6 +1286,7 @@ class MitmEngine:
         self.overlay = overlay
         self.on_exchange = on_exchange
         self.on_tool_call = on_tool_call
+        self.on_tls_failure = on_tls_failure
         # Given by the composition root, which ends its runs as the store reports them ended.
         self.write_log = write_log if write_log is not None else WriteLog()
         self._ready = asyncio.Event()  # binds to the serving loop on first use (Python >= 3.10)
@@ -1312,6 +1346,7 @@ class MitmEngine:
                     self._on_running,
                     self.on_tool_call,
                     self.write_log,
+                    self.on_tls_failure,
                 )
             )
             if self._stopped:  # shutdown() was called before we got here

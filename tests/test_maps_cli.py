@@ -71,9 +71,9 @@ def test_maps_list_shows_a_route_level_target(tmp_path, capsys):
     (tmp_path / "cwd" / servicemap.CWD_OVERRIDE_NAME).write_text(ROUTE_OVERRIDE)
     assert main(["maps", "list"]) == 0
     out = capsys.readouterr().out
-    assert "route POST /api/chat.postMessage → http://127.0.0.1:3111" in out
+    assert "route POST /api/chat.postMessage -> http://127.0.0.1:3111" in out
     # Under every host the service claims, because each of those rows says `target: self`.
-    assert out.count("route POST /api/chat.postMessage → http://127.0.0.1:3111") == 3
+    assert out.count("route POST /api/chat.postMessage -> http://127.0.0.1:3111") == 3
 
 
 def test_maps_list_adds_no_route_lines_when_no_route_is_delegated(capsys):

@@ -8,7 +8,7 @@ import os
 import re
 import shlex
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import assert_never
 from urllib.parse import urlsplit
@@ -118,7 +118,7 @@ def _delegated_line(what: str, target: str, scope: str, color: bool) -> list[str
     warning about is long enough that the two together wrap at 100 columns, and a wrapped warning
     is the one a reader skims past.
     """
-    line = f"{DELEGATED_PREFIX} {what} → {target} ({scope})"
+    line = f"{DELEGATED_PREFIX} {what} -> {target} ({scope})"
     if netaddr.is_local_target(target):
         return [line]
     notice = f"{NOT_LOOPBACK_INDENT}{NOT_LOOPBACK_NOTICE}"
@@ -791,6 +791,19 @@ def _sdk_run_lines(exchanges: Sequence[Exchange], runs: dict[str, RunRecord | No
     return lines
 
 
+def tls_failure_lines(failures: Mapping[str, int], ca_cert: Path | None) -> list[str]:
+    """One line per host whose clients refused irimi's certificate. Such a call never became an
+    exchange, so nothing else in the summary says it was made."""
+    ca = str(ca_cert) if ca_cert is not None else "irimi's CA certificate"
+    return [
+        printable(
+            f"  {_plural(count, 'connection')} to {host} failed TLS: the client did not trust "
+            f"irimi's CA; point it at {ca} (some clients ignore SSL_CERT_FILE)"
+        )
+        for host, count in sorted(failures.items())
+    ]
+
+
 def summary_lines(
     run_id: str,
     exchanges: Sequence[Exchange],
@@ -798,6 +811,8 @@ def summary_lines(
     index: MapIndex | None = None,
     tool_calls: Sequence[ToolCall] = (),
     sdk_runs: dict[str, RunRecord | None] | None = None,
+    tls_failures: Mapping[str, int] | None = None,
+    ca_cert: Path | None = None,
 ) -> list[str]:
     """The exit summary: what the agent tried to write, what was real, and what irimi answered.
 
@@ -810,10 +825,15 @@ def summary_lines(
     writes still get a line, spelled as the request they were. `sdk_runs` are the runs the SDK
     started inside the process, by id, each with its stored record or None: when there are any,
     the header says it covers the whole process and the block ends with a line per run.
+    `tls_failures` counts the handshakes clients refused, by host, which a stored run does not
+    keep; `ca_cert` is the certificate those lines tell the reader to point a client at.
     """
     telemetry = [ex.request.host for ex in exchanges if ex.kind == "telemetry"]
     rest = [ex for ex in exchanges if ex.kind != "telemetry"]
     lines = _summary(run_id, rest, telemetry, elapsed_s, index, tool_calls, whole=bool(sdk_runs))
+    if not exchanges:
+        lines.append(f"  {NO_TRAFFIC}")
+    lines += tls_failure_lines(tls_failures or {}, ca_cert)
     if sdk_runs:
         lines += ["", *_sdk_run_lines(exchanges, sdk_runs)]
     return lines
@@ -830,9 +850,11 @@ def stored_summary_lines(run: StoredRun, index: MapIndex | None) -> list[str]:
     template renders, the path of a request on a credential-path host that the write line spells
     out, because no route matched it or irimi refused it with its body cut, a write irimi
     refused whose body only the store cut, spelled out, or an event the store dropped
-    (docs/trace-format.md, "Reading a run back"). A process run's stored summary covers its own
-    events, never the SDK runs inside it. A replay's run printed no summary live, and its block
-    opens `irimi replay`.
+    (docs/trace-format.md, "Reading a run back"). The live summary's lines for refused TLS
+    handshakes, which the store does not keep, and for a run that saw no traffic have no stored
+    line. A process run's stored summary
+    covers its own events, never the SDK runs inside it. A replay's run printed no summary live,
+    and its block opens `irimi replay`.
     """
     exchanges = [event for event in run.events if isinstance(event, Exchange)]
     telemetry = [event.host for event in run.events if isinstance(event, TelemetrySeen)]
@@ -916,6 +938,13 @@ def _summary(
         f"({_plural(faked, 'faked write')}) · {targets} sent to targets",
     ]
     return lines
+
+
+# What a live run that saw no exchange says: an agent whose client ignored the proxy, or refused
+# irimi's CA, still made its calls. Not said of a stored run, whose traffic its SDK runs may hold.
+NO_TRAFFIC = (
+    "irimi saw no HTTP(S) traffic; if the agent made calls, they bypassed the proxy or failed TLS"
+)
 
 
 # ---------------------------------------------------------------------------------- stored runs

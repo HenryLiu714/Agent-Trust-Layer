@@ -10,6 +10,9 @@ from irimi.exchange import Exchange
 from irimi.servicemap import MapIndex
 
 OnExchange = Callable[[Exchange], None]
+# Called with the host a client named (its SNI, or the address it dialled) each time a client
+# refuses the TLS handshake with irimi, most often because it does not trust irimi's CA.
+OnTlsFailure = Callable[[str], None]
 
 
 class EngineStartError(RuntimeError):

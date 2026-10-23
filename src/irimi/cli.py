@@ -15,12 +15,12 @@ if TYPE_CHECKING:  # the quoted annotations below; no runtime import
 
     from irimi.ca import CAPaths
     from irimi.control import OnToolCall
-    from irimi.engine import Engine, EngineConfig, OnExchange
+    from irimi.engine import Engine, EngineConfig, OnExchange, OnTlsFailure
     from irimi.exchange import Exchange
     from irimi.idempotency import Store as IdempotencyStore
     from irimi.recording import Recording
     from irimi.replay import Plan
-    from irimi.runner import ChildCall
+    from irimi.runner import ChildCall, EngineThread
     from irimi.sdk.replay_child import CallOutcome
     from irimi.sdk.replays import ReplayResult
     from irimi.servicemap import MapIndex
@@ -38,13 +38,13 @@ DEFAULT_RUNS_LIMIT = 20  # `irimi runs list` without --limit
 LAST_RUN = "last"
 RUN_ID_HELP = f"a run id, a prefix only one run id starts with, {LAST_RUN}, or unattributed"
 
-# A non-HTTP write the agent labels with `@sdk.tool` runs only its stand-in under irimi, so the
+# A non-HTTP write the agent labels with `@sdk.tool` runs only its fake under irimi, so the
 # notice says the rest happen for real, not that all of them do.
 NON_HTTP_NOTICE = (
-    "Note: irimi only sees HTTP(S). Side effects that are not HTTP "
-    "(database writes, files, gRPC, WebSockets) are not shadowed and happen for real, "
-    "unless the agent labels the function that makes them with @sdk.tool."
+    "irimi shadows HTTP(S) only: database writes, files, gRPC and WebSockets happen for real, "
+    "unless the agent labels the function that makes them with @sdk.tool"
 )
+NEXT_STEP = "next: irimi shadow -- python3 your_agent.py"
 
 
 def _host_arg(value: str) -> str:
@@ -83,13 +83,17 @@ def _target_arg(value: str) -> tuple[str, str, str]:
     return host, f"{slash}{path}" if slash and path else "", url.strip()
 
 
-def _add_engine_args(parser: argparse.ArgumentParser) -> None:
-    """The options `serve` and `shadow` share."""
+def _add_engine_args(parser: argparse.ArgumentParser, port: int | None) -> None:
+    """The options `serve`, `shadow` and `replay` share. `port` is the default `--port`: 0 for any
+    free port, which the command irimi runs is told in its environment, or None for `shadow`,
+    whose default depends on `--serve`."""
+    if port:
+        default = f"{port}; 0 picks any free port"
+    else:
+        default = "0, any free port, which the command is told"
+        default += f"; {paths.DEFAULT_PORT} with --serve" if port is None else ""
     parser.add_argument(
-        "--port",
-        type=int,
-        default=paths.DEFAULT_PORT,
-        help=f"port to listen on (default {paths.DEFAULT_PORT})",
+        "--port", type=int, default=port, help=f"port to listen on (default {default})"
     )
     parser.add_argument(
         "--listen-host",
@@ -185,7 +189,7 @@ def _args_file_arg(value: str) -> "dict[str, JSONValue]":
     try:
         text = Path(value).read_text(encoding="utf-8")
     except OSError as exc:
-        raise argparse.ArgumentTypeError(f"--args-file {value}: {exc}") from None
+        raise argparse.ArgumentTypeError(_os_error(f"--args-file {value}", exc)) from None
     return _args_arg(text)
 
 
@@ -280,11 +284,8 @@ def _escape_hatch_warning(args: argparse.Namespace) -> str | None:
     hosts = getattr(args, "allow_target_host", None)
     if not hosts:
         return None
-    return (
-        f"WARNING: --allow-target-host {', '.join(sorted(hosts))} - an answer target may now "
-        "leave this machine. Requests to a targeted route go to a host you named, which is "
-        "neither the real service nor loopback."
-    )
+    named = ", ".join(sorted(hosts))
+    return f"warning: targets may leave this machine (--allow-target-host {named})"
 
 
 def print_startup(
@@ -349,7 +350,7 @@ def cmd_maps_list(args: argparse.Namespace) -> int:
         # service's answer and this is the route's.
         for route in sm.routes:
             if route.target != servicemap.SELF_TARGET:
-                print(f"  {'':<{width}}  route {route.method} {route.path} → {route.target}")
+                print(f"  {'':<{width}}  route {route.method} {route.path} -> {route.target}")
     override = servicemap.override_path()
     if override is not None:
         print(f"  overrides from {override}")
@@ -360,27 +361,38 @@ def cmd_init(args: argparse.Namespace) -> int:
     from irimi import ca  # deferred: keeps --version and --help free of the cryptography import
 
     p = ca.ca_paths()
-    if ca.ca_exists(p) and not args.force:
-        print(f"CA already exists at {p.key.parent} (use --force to regenerate).")
-        print(NON_HTTP_NOTICE)
-        return 0
-    if ca.ca_partial(p) and not args.force:
-        print(
-            f"error: CA directory {p.key.parent} is incomplete "
-            f"(expected both {p.key.name} and {p.cert.name}). Run `irimi init --force`.",
-            file=sys.stderr,
-        )
-        return 1
+    match ca.state(p):
+        case "present" if not args.force:
+            print(f"CA already exists at {p.key.parent}; use --force to regenerate")
+            return 0
+        case "partial" if not args.force:
+            print(
+                f"error: CA directory {p.key.parent} is incomplete "
+                f"(expected both {p.key.name} and {p.cert.name}); run `irimi init --force`",
+                file=sys.stderr,
+            )
+            return 1
     try:
         ca.generate_ca(p)
     except OSError as exc:
-        print(f"error: could not write CA to {p.key.parent}: {exc}", file=sys.stderr)
+        why = _os_error(f"could not write the CA to {p.key.parent}", exc)
+        print(f"error: {why}", file=sys.stderr)
         return 1
     print("Generated CA:")
     print(f"  key:  {p.key}")
     print(f"  cert: {p.cert}")
     print(NON_HTTP_NOTICE)
+    print(NEXT_STEP)
     return 0
+
+
+def _os_error(subject: str, exc: OSError) -> str:
+    """An OS error named by what irimi was doing, `<subject>: not a directory`, rather than by
+    Python's `[Errno 20] Not a directory: '...'`. One irimi raised with a message of its own
+    already names its subject, and is said as it is."""
+    if not exc.strerror:
+        return str(exc)
+    return f"{subject}: {exc.strerror[:1].lower()}{exc.strerror[1:]}"
 
 
 @dataclass(frozen=True)
@@ -434,7 +446,7 @@ def _prepare_run(
         return None
     p = ca.ca_paths()
     if not ca.ca_exists(p):
-        print(f"error: no CA at {p.key.parent}. Run `irimi init` first.", file=sys.stderr)
+        print(f"error: no CA at {p.key.parent}; run `irimi init` first", file=sys.stderr)
         return None
     # 16 hex characters: the run id is a directory name in the store, and must not collide with
     # another run's across months of them.
@@ -478,10 +490,14 @@ def _redaction_key() -> bytes | None:
     recording a replay matches against it, or None after printing why it cannot be used."""
     from irimi import redact
 
+    home = paths.irimi_home()
     try:
-        return redact.load_key(paths.irimi_home())
-    except (redact.RedactKeyError, OSError) as exc:
+        return redact.load_key(home)
+    except redact.RedactKeyError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return None
+    except OSError as exc:
+        print(f"error: {_os_error(f'the redaction key in {home}', exc)}", file=sys.stderr)
         return None
 
 
@@ -525,7 +541,7 @@ def _open_store(
     try:
         return DirectoryStore(_store_root(args), key, on_run_ended, replay_of)
     except OSError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        print(f"error: {_os_error(_store_subject(args), exc)}", file=sys.stderr)
         return None
 
 
@@ -537,12 +553,15 @@ def _hold_serve_lock(args: argparse.Namespace) -> "ServeLock | None":
     try:
         return ServeLock.hold(_store_root(args))
     except OSError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        print(f"error: {_os_error(_store_subject(args), exc)}", file=sys.stderr)
         return None
 
 
 def _build_engine(
-    run: _Run, on_exchange: "OnExchange", on_tool_call: "OnToolCall | None" = None
+    run: _Run,
+    on_exchange: "OnExchange",
+    on_tool_call: "OnToolCall | None" = None,
+    on_tls_failure: "OnTlsFailure | None" = None,
 ) -> "Engine":
     """Wire the engine, answer policy, overlay and store for one run."""
     from irimi.engine.mitm import MitmEngine
@@ -570,6 +589,7 @@ def _build_engine(
         on_exchange=on_exchange,
         on_tool_call=on_tool_call,
         write_log=run.write_log,
+        on_tls_failure=on_tls_failure,
     )
 
 
@@ -613,6 +633,8 @@ class _ServeOutput:
         self.store_root = store_root
         self.quiet = quiet
         self._printing = threading.Lock()
+        # Exchanges no run named, which no run's summary prints: the stop line points at them.
+        self.unattributed = 0
 
     def say(self, lines: list[str], *, err: bool = False) -> None:
         with self._printing:
@@ -621,7 +643,10 @@ class _ServeOutput:
 
     def exchange(self, ex: "Exchange") -> None:
         from irimi import report
+        from irimi.trace import UNATTRIBUTED
 
+        if ex.run_id == UNATTRIBUTED:
+            self.unattributed += 1
         if not self.quiet:
             self.say([report.exchange_line(ex)])
 
@@ -656,9 +681,6 @@ class _ServeOutput:
 def _serve(args: argparse.Namespace, stop: threading.Event, signalled: list[int]) -> int:
     """`cmd_serve` inside its signal handlers: the engine's life, start to stop, with
     `_ServeOutput` saying what happened. `signalled` holds each signal that arrived."""
-    from irimi import runner
-    from irimi.engine import EngineStartError
-
     output = _ServeOutput(_store_root(args), args.quiet)
     died = threading.Event()
     run = _prepare_run(args, serve=True, on_run_ended=output.run_ended)
@@ -670,12 +692,8 @@ def _serve(args: argparse.Namespace, stop: threading.Event, signalled: list[int]
         engine = _build_engine(run, output.exchange, output.tool_call)
         if signalled:  # stopped before it served: no engine to start, no banner to print
             return 0
-        try:
-            handle = runner.start_engine(engine)
-        except (EngineStartError, TimeoutError) as exc:
-            # A timeout from the ready future carries no message of its own.
-            reason = str(exc) or f"proxy did not start within {runner.READY_TIMEOUT_S:.0f}s"
-            print(f"error: {reason}", file=sys.stderr)
+        handle = _start_engine(engine)
+        if handle is None:
             return 1
         try:
             if not signalled:  # a banner for a proxy already stopping would say it serves
@@ -693,10 +711,27 @@ def _serve(args: argparse.Namespace, stop: threading.Event, signalled: list[int]
         _close_store(run.store)
         if run.lock is not None:
             run.lock.release()
+    if output.unattributed:
+        count = output.unattributed
+        exchanges = "1 exchange" if count == 1 else f"{count} exchanges"
+        output.say([f"stopped · {exchanges} not in any run: irimi runs show unattributed"])
     if died.is_set():
         print("error: the proxy stopped on its own", file=sys.stderr)
         return 1
     return 0
+
+
+def _start_engine(engine: "Engine") -> "EngineThread | None":
+    """`engine` started on its own thread, or None after printing why it did not: the one place
+    a command says so. A child is never spawned without the proxy."""
+    from irimi import runner
+    from irimi.engine import EngineStartError
+
+    try:
+        return runner.start_engine(engine)
+    except EngineStartError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return None
 
 
 def _watch_engine(thread: threading.Thread, stop: threading.Event, died: threading.Event) -> None:
@@ -751,6 +786,9 @@ def cmd_shadow(args: argparse.Namespace, stop: threading.Event | None = None) ->
     cmd = list(args.cmd)
     if cmd and cmd[0] == "--":
         cmd = cmd[1:]
+    if args.port is None:
+        # A sidecar's agents are pointed at a fixed port; a child is told whichever port is free.
+        args.port = paths.DEFAULT_PORT if args.serve else 0
     if args.serve:
         # Serve mode launches nothing, so a command with it is a mistake in the invocation, and is
         # answered as argparse answers one: usage and exit 2. `stop` is serve's.
@@ -758,7 +796,7 @@ def cmd_shadow(args: argparse.Namespace, stop: threading.Event | None = None) ->
             args.parser.error("--serve runs no command: drop the `-- <command>`, or the --serve")
         return cmd_serve(args, stop)
     if not cmd:
-        print("error: nothing to run. Usage: irimi shadow -- <command> [args...]", file=sys.stderr)
+        print("error: nothing to run; usage: irimi shadow -- <command> [args...]", file=sys.stderr)
         return 1
     with _passing_sigterm_to_child() as child:
         return _shadow(args, cmd, child)
@@ -843,11 +881,28 @@ def _shadow(args: argparse.Namespace, cmd: list[str], child: _Child) -> int:
     if not ran.summarize:
         return ran.code
     sdk_runs = _sdk_runs(args, run.run_id, ran)
-    for line in report.summary_lines(
-        run.run_id, ran.exchanges, ran.elapsed, run.index, ran.tool_calls, sdk_runs
-    ):
+    _end_the_childs_line()
+    lines = report.summary_lines(
+        run.run_id,
+        ran.exchanges,
+        ran.elapsed,
+        run.index,
+        ran.tool_calls,
+        sdk_runs,
+        ran.tls_failures,
+        run.ca.cert,
+    )
+    for line in lines:
         print(line, flush=True)
     return ran.code
+
+
+def _end_the_childs_line() -> None:
+    """Start irimi's next line at the left margin. The child shares irimi's stdout and may leave
+    its last line open (`curl` prints a body with no newline), and irimi cannot see what it
+    wrote: this newline ends such a line, or leaves one blank line after a child that ended its
+    own."""
+    print(flush=True)
 
 
 def _sdk_runs(
@@ -898,6 +953,26 @@ class _Ran:
     stored: bool = False
     stopped: int | None = None
     call: "CallOutcome | None" = None
+    # How many TLS handshakes clients refused, by the host each asked for.
+    tls_failures: dict[str, int] = field(default_factory=dict)
+
+
+def _cannot_run(program: str) -> tuple[int, str] | None:
+    """The shell's exit code and the line saying why `program` cannot be started, or None when it
+    can. Asked before the engine starts, so a mistyped command prints no banner and stores no
+    run."""
+    import os
+    import shutil
+
+    if os.sep not in program and (os.altsep is None or os.altsep not in program):
+        return None if shutil.which(program) else (127, f"command not found: {program}")
+    if not os.path.exists(program):
+        return 127, f"command not found: {program}"
+    if os.path.isdir(program):
+        return 126, f"could not run {program}: it is a directory"
+    if not os.access(program, os.X_OK):
+        return 126, f"could not run {program}: permission denied"
+    return None
 
 
 def _under_the_engine(args: argparse.Namespace, run: _Run, child: _Child, launch: _Launch) -> _Ran:
@@ -911,9 +986,13 @@ def _under_the_engine(args: argparse.Namespace, run: _Run, child: _Child, launch
     from dataclasses import replace
 
     from irimi import report, runner
-    from irimi.engine import EngineStartError
     from irimi.sdk.replay_child import CallOutcome
 
+    cannot = _cannot_run(launch.argv[0])
+    if cannot is not None:
+        print(f"error: {cannot[1]}", file=sys.stderr)
+        _close_store(run.store)
+        return _Ran(cannot[0], summarize=False)
     ran = _Ran(SIGINT_EXIT_CODE)
 
     def on_exchange(ex: "Exchange") -> None:
@@ -929,20 +1008,22 @@ def _under_the_engine(args: argparse.Namespace, run: _Run, child: _Child, launch
         if not args.quiet:
             print(report.tool_call_line(call), flush=True)
 
-    engine = _build_engine(run, on_exchange, on_tool_call)
+    def on_tls_failure(host: str) -> None:
+        # On the proxy's event loop, as the lines above: no flow exists, only a count for the
+        # summary.
+        ran.tls_failures[host] = ran.tls_failures.get(host, 0) + 1
+
+    engine = _build_engine(run, on_exchange, on_tool_call, on_tls_failure)
 
     try:
-        handle = runner.start_engine(engine)
-    except (EngineStartError, TimeoutError) as exc:
-        # A timeout from the ready future carries no message of its own.
-        reason = str(exc) or f"proxy did not start within {runner.READY_TIMEOUT_S:.0f}s"
-        print(f"error: {reason}", file=sys.stderr)
-        _close_store(run.store)
-        return _Ran(1, summarize=False)  # fail closed: the child is never spawned without the proxy
+        handle = _start_engine(engine)
     except KeyboardInterrupt:
-        print("error: interrupted before the proxy was ready.", file=sys.stderr)
+        print("error: interrupted before the proxy was ready", file=sys.stderr)
         _close_store(run.store)
         return _Ran(SIGINT_EXIT_CODE, summarize=False)
+    if handle is None:
+        _close_store(run.store)
+        return _Ran(1, summarize=False)
 
     cmd = launch.argv
     try:
@@ -961,7 +1042,7 @@ def _under_the_engine(args: argparse.Namespace, run: _Run, child: _Child, launch
             call=launch.call,
         )
         if child.terminated:  # SIGTERM while irimi started: the command is never run
-            print("error: terminated before the command started.", file=sys.stderr)
+            print("error: terminated before the command started", file=sys.stderr)
             ran.code, ran.summarize = SIGTERM_EXIT_CODE, False
             return ran
         # The process run is stored before the child exists, so every exchange it makes lands in
@@ -1034,7 +1115,8 @@ def cmd_replay(args: argparse.Namespace) -> int:
         try:
             args.result_file.write_text(json.dumps(result.to_json()), encoding="utf-8")
         except OSError as exc:
-            print(f"error: could not write {args.result_file}: {exc}", file=sys.stderr)
+            why = _os_error(f"--result-file {args.result_file}", exc)
+            print(f"error: {why}", file=sys.stderr)
             return 2
     return result.exit_code
 
@@ -1211,6 +1293,7 @@ def _replayed(
         return replay.refused(args.run_id, said, run_id)
     ended = replay.Ended(ran.code, ran.call, ran.stopped)
     outcome = replay.outcome(source, replayed, ended, _maps_for_stored_runs(), rerun)
+    _end_the_childs_line()
     for line in outcome.lines():
         print(line, flush=True)
     return outcome.result()
@@ -1223,7 +1306,7 @@ def _interrupted(args: argparse.Namespace, said: list[str], run_id: str | None) 
 
     from irimi import replay
 
-    print("error: interrupted.", file=sys.stderr)
+    print("error: interrupted", file=sys.stderr)
     return replace(replay.refused(args.run_id, said, run_id), exit_code=SIGINT_EXIT_CODE)
 
 
@@ -1292,6 +1375,11 @@ def _store_root(args: argparse.Namespace) -> Path:
     return args.store or paths.store_dir()
 
 
+def _store_subject(args: argparse.Namespace) -> str:
+    """The store as an error names it: the `--store` typed, or the default one."""
+    return f"--store {args.store}" if args.store else f"the trace store {_store_root(args)}"
+
+
 def cmd_runs_list(args: argparse.Namespace) -> int:
     """`irimi runs list`: one line per stored run, newest first."""
     from irimi import report
@@ -1303,7 +1391,7 @@ def cmd_runs_list(args: argparse.Namespace) -> int:
     try:
         every = reader.list_runs()
     except OSError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        print(f"error: {_os_error(_store_subject(args), exc)}", file=sys.stderr)
         return 1
     if not every:
         print(f"no runs in {root}")
@@ -1503,13 +1591,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="the same as `irimi shadow --serve`: run the proxy with no command, until SIGINT or "
         "SIGTERM",
     )
-    _add_engine_args(serve)
+    _add_engine_args(serve, paths.DEFAULT_PORT)
     serve.set_defaults(func=cmd_serve)
 
     shadow = subparsers.add_parser(
         "shadow", allow_abbrev=False, help="run a command with its HTTP(S) traffic in shadow mode"
     )
-    _add_engine_args(shadow)
+    _add_engine_args(shadow, None)
     shadow.add_argument(
         "--serve",
         action="store_true",
@@ -1584,7 +1672,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="RUN_ID",
         help=f"the stored run's id, a prefix only it starts with, or {LAST_RUN}",
     )
-    _add_engine_args(replay)
+    _add_engine_args(replay, 0)
     replay.add_argument(
         "--call",
         type=_call_arg,

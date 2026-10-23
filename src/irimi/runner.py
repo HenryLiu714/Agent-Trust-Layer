@@ -187,8 +187,9 @@ class EngineThread:
 def start_engine(engine: Engine, timeout: float = READY_TIMEOUT_S) -> EngineThread:
     """Run `engine` on a background loop and return once its listener is bound.
 
-    Raises EngineStartError (from wait_ready) if it never binds; the caller must then not spawn
-    a child. The thread and loop are cleaned up before the exception propagates.
+    Raises EngineStartError, always with a message, if it never binds or does not within
+    `timeout`; the caller must then not spawn a child. The thread and loop are cleaned up before
+    the exception propagates.
     """
     loop = asyncio.new_event_loop()
 
@@ -205,6 +206,14 @@ def start_engine(engine: Engine, timeout: float = READY_TIMEOUT_S) -> EngineThre
     handle = EngineThread(engine=engine, thread=thread, loop=loop)
     try:
         asyncio.run_coroutine_threadsafe(engine.wait_ready(), loop).result(timeout=timeout)
+    except TimeoutError:
+        handle.stop()
+        raise EngineStartError(f"proxy did not start within {timeout:.0f}s") from None
+    except EngineStartError as exc:
+        handle.stop()
+        if not str(exc):
+            raise EngineStartError("proxy did not start") from None
+        raise
     except BaseException:
         handle.stop()
         raise

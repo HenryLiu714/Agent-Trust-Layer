@@ -75,6 +75,18 @@ def test_serve_help_has_port(capsys):
     assert "--port" in capsys.readouterr().out
 
 
+def test_a_command_s_proxy_takes_any_free_port_and_a_sidecar_s_a_fixed_one(capsys):
+    """A child is told its proxy's port in its environment, so `shadow` and `replay` need none
+    fixed; a sidecar's agents are pointed at one, so `serve` keeps it. The help says so."""
+    parser = cli.build_parser()
+    assert parser.parse_args(["serve"]).port == paths.DEFAULT_PORT
+    assert parser.parse_args(["replay", "abc"]).port == 0
+    assert parser.parse_args(["shadow", "--", "true"]).port is None  # `--serve` decides
+    with pytest.raises(SystemExit):
+        main(["shadow", "--help"])
+    assert "0, any free port" in " ".join(capsys.readouterr().out.split())
+
+
 def test_serve_port_in_use_fails(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
     ca.generate_ca(ca.ca_paths())
@@ -82,8 +94,12 @@ def test_serve_port_in_use_fails(tmp_path, monkeypatch, capsys):
     try:
         sock.bind(("127.0.0.1", 0))
         sock.listen()
-        assert main(["serve", "--port", str(sock.getsockname()[1])]) == 1
-        assert "did not start" in capsys.readouterr().err
+        port = sock.getsockname()[1]
+        assert main(["serve", "--port", str(port)]) == 1
+        assert capsys.readouterr().err.splitlines() == [
+            f"error: port {port} on 127.0.0.1 is in use; pick another with --port, or --port 0 "
+            "for any free port"
+        ]
     finally:
         sock.close()
 
@@ -479,9 +495,7 @@ def test_the_escape_hatch_warning_says_what_it_allows():
     assert _escape_hatch_warning(plain) is None
     loud = build_parser().parse_args(["serve", "--allow-target-host", "stub.internal"])
     warning = _escape_hatch_warning(loud)
-    assert warning.startswith("WARNING:")
-    assert "stub.internal" in warning
-    assert "leave this machine" in warning
+    assert warning == "warning: targets may leave this machine (--allow-target-host stub.internal)"
 
 
 # ------------------------------------------------- the startup lines reach a pipe (flushing)
@@ -550,7 +564,7 @@ def test_a_delegated_services_warning_reaches_a_piped_stdout_too(monkeypatch):
     wait for an exchange to flush it."""
     sm = _delegated_service("http://10.0.0.9:3000")
     visible = _startup_on_a_pipe(monkeypatch, servicemap.MapIndex((sm,)))
-    assert "delegated: stripe → http://10.0.0.9:3000 (writes)" in visible
+    assert "delegated: stripe -> http://10.0.0.9:3000 (writes)" in visible
     assert report.NOT_LOOPBACK_NOTICE in visible
 
 
@@ -824,11 +838,12 @@ def test_serve_prints_a_line_for_each_tool_call(home, monkeypatch, capsys):
     assert "tool-fake     write     db.write -> ok" in capsys.readouterr().out.splitlines()
 
 
-def test_serve_records_under_the_store_it_was_given(home, monkeypatch):
+def test_serve_records_under_the_store_it_was_given(home, monkeypatch, capsys):
     """`--store` on `serve` is where its exchanges go, not `$IRIMI_HOME/store`. Serve mode
     starts no process run, so an exchange that names no run is stored in `unattributed/` and
-    builds none, and the store is closed when serve stops. Stopped by its `stop` event, as
-    the sample-workflow harness stops it, rather than by a signal to the test process."""
+    builds none, and the store is closed when serve stops, with a line pointing at it. Stopped
+    by its `stop` event, as the sample-workflow harness stops it, rather than by a signal to the
+    test process."""
     import threading
     import urllib.request
     from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -872,6 +887,9 @@ def test_serve_records_under_the_store_it_was_given(home, monkeypatch):
     finally:
         upstream.shutdown()
     assert got == [b"hello"]
+    assert capsys.readouterr().out.splitlines()[-1] == (
+        "stopped · 1 exchange not in any run: irimi runs show unattributed"
+    )
     assert not (home / "store").exists()
     assert StoreReader(elsewhere).list_runs() == []
     stored = StoreReader(elsewhere).load_run(UNATTRIBUTED)

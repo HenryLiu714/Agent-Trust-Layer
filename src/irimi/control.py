@@ -55,7 +55,6 @@ from irimi.exchange import (
     START_ACTION,
     TOOL_ACTIONS,
     TOOL_CALLS_ACTION,
-    Door,
     Headers,
     Request,
     Response,
@@ -118,15 +117,6 @@ class _Refused(Exception):
         self.status = status
         self.message = message
         self.headers = headers
-
-
-def is_control_request(request: Request, door: Door) -> bool:
-    """A request addressed to irimi's own listener (`reverse_door.detect_door` says `reverse`)
-    whose path starts with CONTROL_PREFIX. Asked BEFORE the reverse door rewrites the request,
-    which would read `_irimi` as an upstream host and refuse it with a 403. An absolute-form
-    request through the forward proxy that names the listener is `reverse` too, so it is
-    handled the same."""
-    return door == "reverse" and request.path.startswith(CONTROL_PREFIX)
 
 
 def _json_response(status: int, doc: Mapping[str, Any], headers: Headers = ()) -> Response:

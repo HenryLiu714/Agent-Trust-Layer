@@ -265,11 +265,13 @@ def test_a_buffered_read_bomb_reaches_the_agent_whole_and_is_recorded_empty(
     shown = []
 
     class _Overlay:
-        def __call__(self, write_log, read_request, upstream_response, translated_from=None):
+        def __call__(
+            self, write_log, classification, read_request, upstream_response, translated_from=None
+        ):
             shown.append(upstream_response.body)
             return Overlaid(Response(200, (), b"OVERLAID"), said)
 
-        def rewrite(self, write_log, read_request):
+        def rewrite(self, write_log, classification, read_request):
             return None
 
     eng, seen, stop = _start(_config(tmp_path, monkeypatch), overlay=_Overlay())

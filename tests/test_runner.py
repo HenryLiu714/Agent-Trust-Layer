@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from irimi.exchange import Exchange, Flag, Request, Response
+from irimi.exchange import Exchange, Flag, Precondition, Request, Response
 from irimi.netaddr import Target
 from irimi.report import (
     banner_lines,
@@ -519,7 +519,9 @@ def test_an_amount_with_no_currency_in_the_request_is_left_as_it_was_sent():
 def test_an_amount_is_denominated_by_the_currency_the_l3_read_found():
     """The write names no currency; the charge irimi read before faking it does,
     and the exchange carries it across."""
-    write = replace(_refund(body=b"charge=ch_9&amount=4900"), currency="usd")
+    write = replace(
+        _refund(body=b"charge=ch_9&amount=4900"), precondition=Precondition(currency="usd")
+    )
     lines = summary_lines("7f3a", [write], 0.0, _maps())
     assert "  ○ stripe  refund $49.00 on ch_9  faked; not checked" in lines
 
@@ -527,7 +529,10 @@ def test_an_amount_is_denominated_by_the_currency_the_l3_read_found():
 def test_the_requests_own_currency_still_wins_over_the_one_the_read_found():
     """The request is what the caller actually said. A charge in usd and a refund posted in jpy is
     the caller's business to be wrong about, not irimi's to correct."""
-    write = replace(_refund(body=b"charge=ch_9&amount=4900&currency=jpy"), currency="usd")
+    write = replace(
+        _refund(body=b"charge=ch_9&amount=4900&currency=jpy"),
+        precondition=Precondition(currency="usd"),
+    )
     lines = summary_lines("7f3a", [write], 0.0, _maps())
     assert "  ○ stripe  refund ¥4900 on ch_9  faked; not checked" in lines
 
@@ -537,9 +542,7 @@ def test_a_rejected_write_is_denominated_the_same_way():
     `✗` line carries an amount too and must read the same as the `○` one."""
     write = replace(
         _refund(body=b"charge=ch_9&amount=4900"),
-        currency="usd",
-        precondition="rejected",
-        rejection_code="charge_already_refunded",
+        precondition=Precondition("rejected", "charge_already_refunded", "usd"),
     )
     lines = summary_lines("7f3a", [write], 0.0, _maps())
     assert "  ✗ stripe  refund $49.00 on ch_9  faked; would fail: charge_already_refunded" in lines
@@ -785,8 +788,7 @@ def test_a_rejected_write_is_crossed_out_and_names_the_code_it_would_fail_with()
     rows = [
         replace(
             _refund(answered_by="fake-L1", status=400),
-            precondition="rejected",
-            rejection_code="charge_already_refunded",
+            precondition=Precondition("rejected", "charge_already_refunded"),
         )
     ]
     line = _block(summary_lines("7f3a", rows, 0.0, _maps()), "would fail")
@@ -797,7 +799,7 @@ def test_a_rejected_write_is_crossed_out_and_names_the_code_it_would_fail_with()
 
 
 def test_a_passed_write_reads_l3_preconditions_passed():
-    rows = [replace(_refund(answered_by="fake-L1"), precondition="passed")]
+    rows = [replace(_refund(answered_by="fake-L1"), precondition=Precondition("passed"))]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
     assert (
         "  ○ stripe  refund $49.00 on ch_3QabcXYZ  faked; checked against live state: would succeed"
@@ -808,7 +810,7 @@ def test_a_passed_write_reads_l3_preconditions_passed():
 def test_a_write_l3_could_not_evaluate_reads_l2():
     """Faked, but irimi could not find out whether the service would have taken it, and the run
     holds no check read to say why."""
-    rows = [replace(_refund(answered_by="fake-L1"), precondition="not_evaluable")]
+    rows = [replace(_refund(answered_by="fake-L1"), precondition=Precondition("not_evaluable"))]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
     assert (
         "  ○ stripe  refund $49.00 on ch_3QabcXYZ  faked; could not check: irimi made no check read"
@@ -820,7 +822,8 @@ def test_a_write_answered_from_the_recording_says_its_recorded_run_could_not_che
     """A replay answers a recorded write without making a check read: the recorded run made it,
     so a check read in the replay's own run belongs to another write and is never borrowed."""
     recorded = replace(
-        _refund(answered_by="fake-L1", flags=(Flag.FROM_RECORDING,)), precondition="not_evaluable"
+        _refund(answered_by="fake-L1", flags=(Flag.FROM_RECORDING,)),
+        precondition=Precondition("not_evaluable"),
     )
     lines = summary_lines("7f3a", [_check_read(401), recorded], 0.0, _maps())
     assert _write_block(lines) == [
@@ -837,7 +840,10 @@ def _check_read(status=200, path="/v1/charges/ch_3QabcXYZ"):
 def _checked_refund(**kwargs):
     fired = ("refund.created", "charge.refunded")
     return replace(
-        _refund(answered_by="fake-L1"), precondition="not_evaluable", would_fire=fired, **kwargs
+        _refund(answered_by="fake-L1"),
+        precondition=Precondition("not_evaluable"),
+        would_fire=fired,
+        **kwargs,
     )
 
 
@@ -885,7 +891,7 @@ def test_each_write_takes_its_own_check_read():
 
 def test_a_write_on_a_route_with_no_precondition_keeps_its_own_level():
     rows = [_refund(answered_by="fake-L1")]
-    assert rows[0].precondition is None
+    assert rows[0].precondition.outcome is None
     lines = summary_lines("7f3a", rows, 0.0, _maps())
     assert "  ○ stripe  refund $49.00 on ch_3QabcXYZ  faked; not checked" in lines
 
@@ -896,7 +902,7 @@ def test_a_delegated_write_l3_could_not_evaluate_still_reads_delegated():
     rows = [
         replace(
             _refund(answered_by="delegated", target="http://127.0.0.1:3000/refund"),
-            precondition="not_evaluable",
+            precondition=Precondition("not_evaluable"),
         )
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
@@ -910,7 +916,7 @@ def test_an_engine_read_is_counted_apart_from_the_agents_reads_but_still_went_li
     rows = [
         _exchange(),
         replace(_exchange(path="/v1/charges/ch_3QabcXYZ"), issued_by="engine"),
-        replace(_refund(answered_by="fake-L1"), precondition="passed"),
+        replace(_refund(answered_by="fake-L1"), precondition=Precondition("passed")),
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
     assert _host(lines) == "  api.stripe.com  1 read  1 irimi check read  1 faked write"
@@ -954,8 +960,7 @@ def test_a_read_irimi_refused_gets_a_phrase_of_its_own():
 def test_the_money_line_sums_the_faked_writes_and_what_would_fail():
     rejected = replace(
         _refund(answered_by="fake-L1", status=400),
-        precondition="rejected",
-        rejection_code="charge_already_refunded",
+        precondition=Precondition("rejected", "charge_already_refunded"),
     )
     lines = summary_lines("7f3a", [_refund(answered_by="fake-L1"), rejected], 0.0, _maps())
     assert "  money: $98.00 in faked writes; $49.00 of it would fail" in lines
@@ -1121,10 +1126,10 @@ def test_an_idempotency_conflict_prints_as_a_write_that_would_fail():
                 status=400,
                 flags=(Flag.IDEMPOTENCY_CONFLICT,),
             ),
-            rejection_code="idempotency_error",
+            precondition=Precondition(rejection_code="idempotency_error"),
         ),
     ]
-    assert rows[1].precondition is None
+    assert rows[1].precondition.outcome is None
     lines = summary_lines("7f3a", rows, 0.0, _maps())
     line = _block(lines, "would fail")
     assert line == "  ✗ stripe  refund $49.00 on ch_3QabcXYZ  faked; would fail: idempotency_error"
@@ -1243,7 +1248,7 @@ def test_an_overlaid_read_is_listed_under_the_write_it_saw():
     """The per-host count said a read showed this run's writes and never said which read, or which
     write. The reader could not tell whether the agent re-read its own refund."""
     rows = [
-        replace(_refund(answered_by="fake-L1"), precondition="passed"),
+        replace(_refund(answered_by="fake-L1"), precondition=Precondition("passed")),
         replace(_exchange(path="/v1/refunds", answered_by="overlay"), overlay="full"),
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
@@ -1293,7 +1298,7 @@ def test_an_engine_issued_read_never_gets_an_overlay_line():
     one the agent never made, so hanging it there would credit the agent with a look it did not
     take."""
     rows = [
-        replace(_refund(answered_by="fake-L1"), precondition="passed"),
+        replace(_refund(answered_by="fake-L1"), precondition=Precondition("passed")),
         replace(_exchange(path="/v1/charges/ch_3QabcXYZ"), issued_by="engine", overlay="partial"),
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
@@ -1324,15 +1329,14 @@ def test_an_overlaid_read_is_never_filed_under_a_write_the_overlay_could_not_hav
     read after a refund and its refused retry saw the REFUND; filed by position it would hang
     under the `✗` line and tell the reader the agent was shown a refund that was refused."""
     rows = [
-        replace(_refund(answered_by="fake-L1"), precondition="passed"),
+        replace(_refund(answered_by="fake-L1"), precondition=Precondition("passed")),
         replace(
             _refund(answered_by="fake-L1", status=400),
-            precondition="rejected",
-            rejection_code="charge_already_refunded",
+            precondition=Precondition("rejected", "charge_already_refunded"),
         ),
         replace(
             _refund(answered_by="fake-L1", status=400, flags=(Flag.IDEMPOTENCY_CONFLICT,)),
-            rejection_code="idempotency_error",
+            precondition=Precondition(rejection_code="idempotency_error"),
         ),
         replace(_exchange(path="/v1/refunds", answered_by="overlay"), overlay="full"),
     ]
@@ -1349,7 +1353,7 @@ def test_an_engine_read_the_overlay_edited_is_never_counted_as_one_of_the_agents
     """The bracket qualifies the agent's `N reads`, so it counts the agent's reads only. An engine
     read is its own phrase; counted in both, one read would show up twice."""
     rows = [
-        replace(_refund(answered_by="fake-L1"), precondition="passed"),
+        replace(_refund(answered_by="fake-L1"), precondition=Precondition("passed")),
         replace(
             _exchange(path="/v1/charges/ch_3QabcXYZ", answered_by="overlay"),
             issued_by="engine",
@@ -1379,8 +1383,7 @@ def test_a_run_whose_every_write_was_refused_promises_no_webhooks():
     rows = [
         replace(
             _refund(answered_by="fake-L1", status=400),
-            precondition="rejected",
-            rejection_code="charge_already_refunded",
+            precondition=Precondition("rejected", "charge_already_refunded"),
         )
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
@@ -1420,7 +1423,7 @@ def test_a_write_l3_could_not_check_still_promises_its_events():
     rows = [
         replace(
             _refund(answered_by="fake-L1"),
-            precondition="not_evaluable",
+            precondition=Precondition("not_evaluable"),
             would_fire=("refund.created", "charge.refunded"),
         )
     ]

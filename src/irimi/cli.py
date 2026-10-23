@@ -583,10 +583,7 @@ def _build_engine(
     from irimi.policy import AnswerPolicy, ReplayPolicy, ShadowPolicy
     from irimi.reader import UpstreamReader
 
-    # The overlay is built with the same maps the engine classifies against, because it has to
-    # ask the same question of a read - which service, which operation - and there is one place
-    # that answers it.
-    overlay = ServiceOverlay(run.config.maps)
+    overlay = ServiceOverlay()
     policy: AnswerPolicy
     if run.recording is None:
         # The reader is the real upstream, chosen here and nowhere else.

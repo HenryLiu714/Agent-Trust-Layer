@@ -18,7 +18,7 @@ from typing import Any
 
 from irimi import bodies, services
 from irimi.classify import Classification
-from irimi.exchange import AnsweredBy, Flag, PreconditionOutcome, Request
+from irimi.exchange import AnsweredBy, Flag, Precondition, Request
 from irimi.servicemap import Route
 
 
@@ -28,12 +28,10 @@ class FirstAnswer:
 
     Re-deriving would let a fixture that has since become unreadable stamp `fake-L0` over a first
     call answered at `fake-L1`, and the trace would disagree with itself about one write. `flags`
-    carries `fixture-failed` for the same reason, and `precondition` / `rejection_code` carry an
-    L3 rejection so a retried one still prints as a rejection and still stays out of the write
-    log. `currency` rides along for the same reason: it is what the write's own L3 read found on
-    the object it named, and a retry that re-derived it (or dropped it) would have the trace
-    disagree with itself about what one write was denominated in. There is no `issued`: a
-    retry makes no precondition read, which is the point.
+    carries `fixture-failed` for the same reason, and `precondition` carries an L3 rejection, so
+    a retried one still prints as a rejection and still stays out of the write log, and the
+    currency the write's own check read found. There is no `issued`: a retry makes no
+    precondition read, which is the point.
     """
 
     status: int
@@ -41,9 +39,7 @@ class FirstAnswer:
     content_type: str
     answered_by: AnsweredBy
     flags: tuple[Flag, ...]
-    precondition: PreconditionOutcome | None
-    rejection_code: str
-    currency: str
+    precondition: Precondition
 
 
 def idempotency_key_of(service: str, request: Request) -> str:

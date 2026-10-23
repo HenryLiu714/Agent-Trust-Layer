@@ -239,10 +239,10 @@ def _exchange_action(
     flags: list[JSONValue] = [flag for flag in sorted(exchange.flags) if flag in OUTCOME_FLAGS]
     outcome: dict[str, JSONValue] = {
         "answered by": exchange.answered_by,
-        "precondition": exchange.precondition,
-        "rejection code": exchange.rejection_code,
+        "precondition": exchange.precondition.outcome,
+        "rejection code": exchange.precondition.rejection_code,
         "target": exchange.target,
-        "currency": exchange.currency,
+        "currency": exchange.precondition.currency,
         "flags": flags,
     }
     return Action(

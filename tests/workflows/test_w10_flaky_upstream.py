@@ -542,7 +542,7 @@ def test_a_refund_whose_precondition_read_failed_replays_as_unvalidated(replayed
     `tests/test_replay_engine.py`'s."""
     recorded, replay = replayed(W, "precondition_read_fails")
     [refund] = [ex for ex in replay.reported if ex.request.path == "/v1/refunds"]
-    assert (refund.precondition, refund.flags) == (
+    assert (refund.precondition.outcome, refund.flags) == (
         "not_evaluable",
         ("from-recording",),
     )

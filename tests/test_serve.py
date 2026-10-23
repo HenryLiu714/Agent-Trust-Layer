@@ -55,7 +55,7 @@ def _own_address() -> str | None:
 def test_the_reverse_door_refuses_a_peer_that_is_not_loopback(tmp_path, monkeypatch):
     """A wider bind lets other machines reach the listener, but never through the reverse door,
     which relays plain HTTP with the agent's credentials to the real service: the peer check in
-    `IrimiAddon._through_reverse_door` is unchanged. Driven through the addon, because a
+    `ingress.admit` is unchanged. Driven through the addon, because a
     connection from another machine cannot be staged here."""
     from mitmproxy.test import tflow, tutils
 
@@ -238,12 +238,12 @@ def test_a_door_that_cannot_be_told_is_refused_never_forwarded(tmp_path, monkeyp
     about may be one addressed to irimi itself: it is answered 400 by irimi instead."""
     from mitmproxy.test import tflow, tutils
 
-    from irimi import reverse_door
+    from irimi import ingress
 
     def broken(*args):
         raise ValueError("no address")
 
-    monkeypatch.setattr(reverse_door, "detect_door", broken)
+    monkeypatch.setattr(ingress, "detect_door", broken)
     seen = []
     addon = IrimiAddon(
         _config(tmp_path, monkeypatch, listen_host="0.0.0.0"),
@@ -276,7 +276,7 @@ def test_a_failed_decision_under_serve_mode_is_unattributed(tmp_path, monkeypatc
     from irimi.trace import UNATTRIBUTED
 
     class _Broken(ShadowPolicy):
-        def answer(self, *args, **kwargs):
+        def decide(self, *args, **kwargs):
             raise RuntimeError("the decision failed")
 
     class _Kept(NullStore):

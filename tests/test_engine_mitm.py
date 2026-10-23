@@ -33,16 +33,18 @@ from irimi import (
     report,
     servicemap,
     services,
+    session,
     wire,
 )
 from irimi.control import ControlEndpoint
 from irimi.engine import EngineConfig, EngineStartError, Serve, capture, mitm
 from irimi.engine.capture import StreamCapture, recorded_stream
 from irimi.engine.mitm import IrimiAddon, MitmEngine
-from irimi.exchange import Exchange, Flag, Request, Response
-from irimi.overlay import NoOverlay, Overlaid, Translation
-from irimi.policy import Answer, ShadowPolicy
+from irimi.exchange import Exchange, Flag, Precondition, Request, Response, WriteOutcome
+from irimi.overlay import NoOverlay, Overlaid
+from irimi.policy import Decided, Respond, ShadowPolicy
 from irimi.store import MAX_STORED_BODY, DirectoryStore, NullStore, StoreReader
+from irimi.writelog import Translation
 
 
 class _Upstream(BaseHTTPRequestHandler):
@@ -533,10 +535,12 @@ def test_an_upstream_body_in_an_encoding_that_is_not_a_decoding_is_still_recorde
 
 def test_overlay_output_reaches_the_client(tmp_path, monkeypatch, upstream):
     class _Overlay:
-        def __call__(self, write_log, read_request, upstream_response, translated_from=None):
+        def __call__(
+            self, write_log, classification, read_request, upstream_response, translated_from=None
+        ):
             return Overlaid(Response(200, (("content-type", "text/plain"),), b"OVERLAID"))
 
-        def rewrite(self, write_log, read_request):
+        def rewrite(self, write_log, classification, read_request):
             return None
 
     eng, seen, stop = _start(_config(tmp_path, monkeypatch), overlay=_Overlay())
@@ -559,11 +563,13 @@ def test_an_overlaid_read_in_an_encoding_mitmproxy_cannot_apply_still_reaches_th
     exchange was never recorded. The body goes out as the overlay built it."""
 
     class _Overlay:
-        def __call__(self, write_log, read_request, upstream_response, translated_from=None):
+        def __call__(
+            self, write_log, classification, read_request, upstream_response, translated_from=None
+        ):
             body = upstream_response.body + b"-OVERLAID"
             return Overlaid(Response(200, upstream_response.headers, body))
 
-        def rewrite(self, write_log, read_request):
+        def rewrite(self, write_log, classification, read_request):
             return None
 
     eng, seen, stop = _start(_config(tmp_path, monkeypatch), overlay=_Overlay())
@@ -580,10 +586,12 @@ def test_an_overlaid_read_in_an_encoding_mitmproxy_cannot_apply_still_reaches_th
 
 def test_repeated_headers_survive_a_local_answer(tmp_path, monkeypatch, upstream):
     class _Overlay:
-        def __call__(self, write_log, read_request, upstream_response, translated_from=None):
+        def __call__(
+            self, write_log, classification, read_request, upstream_response, translated_from=None
+        ):
             return Overlaid(Response(200, (("set-cookie", "a=1"), ("set-cookie", "b=2")), b""))
 
-        def rewrite(self, write_log, read_request):
+        def rewrite(self, write_log, classification, read_request):
             return None
 
     eng, seen, stop = _start(_config(tmp_path, monkeypatch), overlay=_Overlay())
@@ -863,8 +871,8 @@ class _RecordingStore:
 
 
 def _addon(tmp_path, monkeypatch, store):
-    """An IrimiAddon with no proxy under it. `_finish` is a plain method; driving a whole engine
-    would only add a thread between the assertion and the thing asserted."""
+    """An IrimiAddon with no proxy under it. `session.record` is a plain method; driving a whole
+    engine would only add a thread between the assertion and the thing asserted."""
     from irimi.engine.mitm import IrimiAddon
 
     seen = []
@@ -919,7 +927,7 @@ def test_telemetry_is_reported_and_stored_only_as_having_happened(tmp_path, monk
     envelope = _exchange("telemetry")
     envelope = replace(envelope, request=replace(envelope.request, body=b"an envelope"))
     envelope = replace(envelope, started_at=1.5, ended_at=2.0)
-    addon._finish(envelope)
+    addon.session.record(envelope)
     store.close()
     assert [ex.kind for ex in seen] == ["telemetry"]
     stored = StoreReader(tmp_path / "store").load_run("t3st")
@@ -934,16 +942,16 @@ def test_a_store_that_raises_neither_escapes_the_hook_nor_hides_the_exchange(
     tmp_path, monkeypatch, caplog
 ):
     """A recording failure never affects traffic. `TraceStore.record` may not raise, and
-    `_finish` guards it anyway: a store that broke the contract escaped every hook that finishes
-    a flow, and took the terminal line and the summary's count of the exchange with it."""
+    `session.record` guards it anyway: a store that broke the contract escaped every hook that
+    finishes a flow, and took the terminal line and the summary's count of the exchange with it."""
 
     class _Raising(_RecordingStore):
         def record(self, exchange):
             raise RuntimeError("the store exploded")
 
     addon, seen = _addon(tmp_path, monkeypatch, _Raising())
-    with caplog.at_level("WARNING", logger="irimi.engine.mitm"):
-        addon._finish(_exchange("write", answered_by="fake-L0"))
+    with caplog.at_level("WARNING", logger="irimi.session"):
+        addon.session.record(_exchange("write", answered_by="fake-L0"))
     assert [ex.kind for ex in seen] == ["write"]
     # The type, never the message: a message may quote the value the store choked on.
     assert "the trace store raised RuntimeError" in caplog.text
@@ -954,7 +962,7 @@ def test_a_store_that_raises_neither_escapes_the_hook_nor_hides_the_exchange(
 def test_every_other_kind_is_still_recorded(tmp_path, monkeypatch, kind):
     store = _RecordingStore()
     addon, seen = _addon(tmp_path, monkeypatch, store)
-    addon._finish(_exchange(kind))
+    addon.session.record(_exchange(kind))
     assert [ex.kind for ex in store.recorded] == [kind]
     assert [ex.kind for ex in seen] == [kind]
 
@@ -1126,7 +1134,9 @@ class _RewritingOverlay:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    def __call__(self, write_log, read_request, upstream_response, translated_from=None):
+    def __call__(
+        self, write_log, classification, read_request, upstream_response, translated_from=None
+    ):
         self.calls.append(read_request.path)
         return Overlaid(
             Response(
@@ -1136,7 +1146,7 @@ class _RewritingOverlay:
             )
         )
 
-    def rewrite(self, write_log, read_request):
+    def rewrite(self, write_log, classification, read_request):
         return None
 
 
@@ -2107,9 +2117,9 @@ def test_a_remote_target_is_probed_too_and_an_unreachable_one_is_irimis_json_502
         dialled.append(address)
         raise ConnectionRefusedError("refused")
 
-    monkeypatch.setattr(mitm.socket, "create_connection", refuse)
+    monkeypatch.setattr(session.socket, "create_connection", refuse)
     forward = delegation.ForwardTo(netaddr.Target.parse("https://sandbox.example.com/v1"))
-    refused = mitm._target_refusal(forward, ("127.0.0.1", 4000))
+    refused = session._target_refusal(forward, ("127.0.0.1", 4000))
     assert isinstance(refused, delegation.TargetUnreachable)
     assert "'https://sandbox.example.com/v1' could not be reached" in str(refused)
     assert dialled == [("sandbox.example.com", 443)]
@@ -2245,8 +2255,8 @@ def test_a_raise_in_the_decision_answers_locally_instead_of_forwarding(
     """The never-raise rule, as a whole rather than per call site.
 
     A hook that raises makes mitmproxy forward the flow untouched, so an exception anywhere in
-    the classify/answer decision sends the agent's write to the real service - and `_Pending` is
-    never set, so `response()` returns early and no Exchange is recorded either. The write is
+    the classify/answer decision sends the agent's write to the real service - and no `Plan` is
+    set, so `response()` returns early and no Exchange is recorded either. The write is
     performed for real and is invisible in the trace.
     """
     maps = _targeted(
@@ -2296,12 +2306,10 @@ def _bare_flow(method, path):
 
 def test_a_raise_handing_the_decision_to_a_worker_answers_locally(tmp_path, monkeypatch):
     """The hook awaits `asyncio.to_thread`, and the hand-off can fail on its own - an
-    executor already shut down under a stopping proxy - before `_decide`'s guard is ever reached.
+    executor already shut down under a stopping proxy - before `plan`'s guard is ever reached.
     It takes the same 502 as a decision that raised: the request may be a write. It is timed like
     any other exchange, from the request hook's first line to the answer: the engine's clock
     is a counter here, so an `ended_at` the 502 path forgot would read 100.0, not 101.0."""
-    from irimi.engine import mitm
-
     seen = []
     addon = _bare_addon(tmp_path, monkeypatch, on_exchange=seen.append)
 
@@ -2310,7 +2318,9 @@ def test_a_raise_handing_the_decision_to_a_worker_answers_locally(tmp_path, monk
 
     monkeypatch.setattr(mitm.asyncio, "to_thread", no_threads)
     clock = itertools.count(100)
-    monkeypatch.setattr(mitm, "time", types.SimpleNamespace(time=lambda: float(next(clock))))
+    counter = types.SimpleNamespace(time=lambda: float(next(clock)))
+    monkeypatch.setattr(mitm, "time", counter)
+    monkeypatch.setattr(session, "time", counter)
     flow = _bare_flow(b"POST", b"/things")
     asyncio.run(addon.request(flow))
 
@@ -2322,16 +2332,18 @@ def test_a_raise_handing_the_decision_to_a_worker_answers_locally(tmp_path, monk
 
 
 def test_a_raise_carrying_a_rewrite_onto_the_flow_answers_locally(tmp_path, monkeypatch):
-    """`_apply_rewrite` runs back on the loop, outside `_decide`'s guard, but under the
+    """`_carry_translation` runs back on the loop, outside `plan`'s guard, but under the
     decision's backstop all the same, so a raise there cannot escape the hook and forward a
     half-edited read with nothing recorded."""
     from dataclasses import replace
 
     class _Translating:
-        def __call__(self, write_log, read_request, upstream_response, translated_from=None):
+        def __call__(
+            self, write_log, classification, read_request, upstream_response, translated_from=None
+        ):
             return Overlaid(upstream_response)
 
-        def rewrite(self, write_log, read_request):
+        def rewrite(self, write_log, classification, read_request):
             return Translation(replace(read_request, query="translated=1"), "translated=0")
 
     seen = []
@@ -2343,7 +2355,7 @@ def test_a_raise_carrying_a_rewrite_onto_the_flow_answers_locally(tmp_path, monk
     def boom(flow, rewritten):
         raise RuntimeError("the flow edit exploded")
 
-    monkeypatch.setattr(addon, "_apply_rewrite", boom)
+    monkeypatch.setattr(addon, "_carry_translation", boom)
     read = _bare_flow(b"GET", b"/hello")
     asyncio.run(addon.request(read))
 
@@ -2354,7 +2366,7 @@ def test_a_raise_carrying_a_rewrite_onto_the_flow_answers_locally(tmp_path, monk
 
 
 def test_a_raise_recording_an_engine_read_leaves_the_write_answered(tmp_path, monkeypatch):
-    """`Answer.issued` is recorded last, after the write's own answer is on the flow. A store
+    """`Decided.issued` is recorded last, after the write's own answer is on the flow. A store
     or `on_exchange` that raises there escapes the hook, and mitmproxy forwards a flow only when
     it has no response - so the write is still answered locally and still pending its record."""
     from irimi.engine.mitm import META_KEY
@@ -2383,11 +2395,13 @@ def test_a_raise_recording_an_engine_read_leaves_the_write_answered(tmp_path, mo
     class _Checking:
         name = "checking"
 
-        def answer(self, request, classification, write_log=(), run_id=""):
-            return Answer(
-                answered_by="fake-L0",
-                response=Response(status=200, headers=(), body=b"{}"),
-                precondition="passed",
+        def decide(self, request, classification, write_log=(), run_id="", target=None):
+            return Decided(
+                Respond(
+                    Response(status=200, headers=(), body=b"{}"),
+                    "fake-L0",
+                    WriteOutcome(Precondition("passed")),
+                ),
                 issued=(issued,),
             )
 
@@ -2401,7 +2415,7 @@ def test_a_raise_recording_an_engine_read_leaves_the_write_answered(tmp_path, mo
         asyncio.run(addon.request(flow))
 
     assert flow.response is not None and flow.response.status_code == 200
-    assert flow.metadata[META_KEY].answer.precondition == "passed"
+    assert flow.metadata[META_KEY].decision.outcome.precondition.outcome == "passed"
 
 
 def test_neither_half_of_a_delegated_exchange_is_a_write(tmp_path, monkeypatch, target):
@@ -2419,11 +2433,13 @@ def test_neither_half_of_a_delegated_exchange_is_a_write(tmp_path, monkeypatch, 
         addon = next(a for a in eng._master.addons.chain if isinstance(a, IrimiAddon))
         status, _ = _via_proxy(eng.listen_port(), "GET", "http://127.0.0.1:1/hello")
         assert status == 200
-        assert addon.write_log.for_run("t3st") == (), "a delegated read is in the write log"
+        assert addon.session.write_log.for_run("t3st") == (), "a delegated read is in the write log"
         # Nor is the delegated *write*: the target performed it, or did not, and the overlay
         # cannot apply a write irimi did not author.
         _via_proxy(eng.listen_port(), "POST", "http://127.0.0.1:1/things", body=b"{}")
-        assert addon.write_log.for_run("t3st") == (), "a delegated write is in the write log"
+        assert addon.session.write_log.for_run("t3st") == (), (
+            "a delegated write is in the write log"
+        )
     finally:
         stop()
 
@@ -2458,7 +2474,9 @@ def test_a_refused_target_is_not_a_write_either(tmp_path, monkeypatch, target):
     assert asked == [(f"http://127.0.0.1:{target}/w", eng.listen_port(), "127.0.0.1")]
     # Still recorded - a write irimi could not answer is exactly what the trace has to show.
     assert [ex.flags for ex in seen] == [("target-failed",)]
-    assert addon.write_log.for_run("t3st") == (), "a write performed nowhere is in the write log"
+    assert addon.session.write_log.for_run("t3st") == (), (
+        "a write performed nowhere is in the write log"
+    )
 
 
 def test_an_ipv6_target_gets_a_bracketed_host_header(tmp_path, monkeypatch):
@@ -2541,7 +2559,7 @@ def test_the_response_hook_writes_nothing_back_to_a_streamed_flow(tmp_path, monk
         resp=tutils.tresp(content=None, headers=((b"content-type", b"text/event-stream"),)),
     )
     flow.client_conn.sockname = ("127.0.0.1", 4000)
-    monkeypatch.setattr(mitm, "_probe_target", lambda url: None)  # nothing listens at 3999
+    monkeypatch.setattr(session, "_probe_target", lambda url: None)  # nothing listens at 3999
     asyncio.run(addon.request(flow))
     assert flow.metadata[META_KEY].answered_by == "delegated"
     flow.response.stream = True  # what `responseheaders` does for an event stream
@@ -2581,7 +2599,7 @@ def test_the_response_hook_records_a_streamed_flow_from_its_tee_and_writes_nothi
         resp=tutils.tresp(content=None, headers=((b"content-type", b"text/event-stream"),)),
     )
     flow.client_conn.sockname = ("127.0.0.1", 4000)
-    monkeypatch.setattr(mitm, "_probe_target", lambda url: None)  # nothing listens at 3999
+    monkeypatch.setattr(session, "_probe_target", lambda url: None)  # nothing listens at 3999
     asyncio.run(addon.request(flow))
     assert flow.metadata[META_KEY].answered_by == "delegated"
     # What `responseheaders` does for an event stream, and a chunk through it.
@@ -2656,12 +2674,14 @@ class _OverlayDouble:
         self.rewrites = 0
         self.translated_from: list[str | None] = []
 
-    def __call__(self, write_log, read_request, upstream_response, translated_from=None):
+    def __call__(
+        self, write_log, classification, read_request, upstream_response, translated_from=None
+    ):
         self.calls += 1
         self.translated_from.append(translated_from)
         return self._answer(upstream_response)
 
-    def rewrite(self, write_log, read_request):
+    def rewrite(self, write_log, classification, read_request):
         self.rewrites += 1
         return self._rewrite(read_request)
 
@@ -2687,7 +2707,9 @@ def _engine_with_a_write(tmp_path, monkeypatch, upstream, overlay):
     try:
         addon = next(a for a in eng._master.addons.chain if isinstance(a, IrimiAddon))
         _via_proxy(eng.listen_port(), "POST", f"http://127.0.0.1:{upstream}/things", body=b"{}")
-        assert addon.write_log.for_run("t3st"), "the overlay is asked only once there is a write"
+        assert addon.session.write_log.for_run("t3st"), (
+            "the overlay is asked only once there is a write"
+        )
     except BaseException:
         stop()
         raise
@@ -2701,9 +2723,9 @@ def test_a_run_s_requests_see_its_own_writes_alone(tmp_path, monkeypatch, upstre
     overlaid = []
 
     class _Seeing(ShadowPolicy):
-        def answer(self, request, classification, write_log=(), run_id=""):
+        def decide(self, request, classification, write_log=(), run_id="", target=None):
             decided.append((run_id, request.method, tuple(write_log)))
-            return super().answer(request, classification, write_log, run_id)
+            return super().decide(request, classification, write_log, run_id, target)
 
     class _Overlay(_OverlayDouble):
         def __call__(self, write_log, *args, **kwargs):
@@ -2903,7 +2925,9 @@ def test_a_rewrote_header_the_agent_sent_is_stripped_before_the_runs_first_write
                 "Irimi-Rewrote": "starting_after=re_FORGED2",
             },
         )
-        assert addon.write_log.for_run("t3st") == (), "this test is about the empty-log path"
+        assert addon.session.write_log.for_run("t3st") == (), (
+            "this test is about the empty-log path"
+        )
     finally:
         stop()
     assert status == 200
@@ -3163,9 +3187,7 @@ def stripe_stub(tmp_path, monkeypatch):
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _StripeStub)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     maps = _maps(tmp_path, monkeypatch, doc=STRIPE_MAP)
-    eng, seen, stop = _start(
-        _config(tmp_path, monkeypatch, maps=maps), overlay=ServiceOverlay(maps)
-    )
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps), overlay=ServiceOverlay())
     yield eng.listen_port(), srv.server_address[1], seen
     stop()
     srv.shutdown()
@@ -3191,7 +3213,7 @@ def test_a_charge_reread_after_a_faked_refund_shows_the_refund(stripe_stub):
 
 
 def test_a_faked_refund_records_the_webhooks_it_would_have_fired(stripe_stub):
-    """Would-fire webhooks through the proxy, where `_Pending` and the response hook's `Exchange`
+    """Would-fire webhooks through the proxy, where the `Plan` and the response hook's `Exchange`
     carry them: a faked refund lists `refund.created` and `charge.refunded`, and the read after it
     lists nothing."""
     proxy, stub, seen = stripe_stub
@@ -3259,7 +3281,7 @@ def test_a_forged_rewrote_header_cannot_hide_a_refund_that_lands_mid_read(tmp_pa
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     stub = srv.server_address[1]
     maps = _maps(tmp_path, monkeypatch, doc=STRIPE_MAP)
-    eng, _, stop = _start(_config(tmp_path, monkeypatch, maps=maps), overlay=ServiceOverlay(maps))
+    eng, _, stop = _start(_config(tmp_path, monkeypatch, maps=maps), overlay=ServiceOverlay())
     read: dict = {}
 
     def list_refunds():
@@ -3643,9 +3665,7 @@ def slack_stub(tmp_path, monkeypatch):
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _SlackStub)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     maps = _maps(tmp_path, monkeypatch, doc=SLACK_OVERLAY_MAP)
-    eng, seen, stop = _start(
-        _config(tmp_path, monkeypatch, maps=maps), overlay=ServiceOverlay(maps)
-    )
+    eng, seen, stop = _start(_config(tmp_path, monkeypatch, maps=maps), overlay=ServiceOverlay())
     yield eng.listen_port(), srv.server_address[1], seen
     stop()
     srv.shutdown()
@@ -3877,7 +3897,7 @@ def precondition_stub(tmp_path, monkeypatch):
     maps = _maps(tmp_path, monkeypatch, doc=PRECONDITION_STRIPE_MAP)
     eng, seen, stop = _start(
         _config(tmp_path, monkeypatch, maps=maps),
-        overlay=ServiceOverlay(maps),
+        overlay=ServiceOverlay(),
         policy=ShadowPolicy(reader=UpstreamReader(), maps=maps),
     )
     yield eng.listen_port(), srv.server_address[1], seen
@@ -3909,8 +3929,8 @@ def test_a_refund_of_a_fully_refunded_charge_is_rejected_with_stripes_own_body(
     assert json.loads(data)["error"]["code"] == "charge_already_refunded"
     assert headers[wire.ANSWERED_BY_HEADER] == "fake-L1"
     (write,) = _writes(seen)
-    assert write.precondition == "rejected"
-    assert write.rejection_code == "charge_already_refunded"
+    assert write.precondition.outcome == "rejected"
+    assert write.precondition.rejection_code == "charge_already_refunded"
 
 
 def test_a_rejected_refund_records_no_webhooks(precondition_stub):
@@ -3924,8 +3944,8 @@ def test_a_rejected_refund_records_no_webhooks(precondition_stub):
     assert status == 400
     passed, write = _writes(seen)
     assert passed.would_fire == ("refund.created", "charge.refunded")
-    assert write.precondition == "rejected"
-    assert write.rejection_code == "charge_already_refunded"
+    assert write.precondition.outcome == "rejected"
+    assert write.precondition.rejection_code == "charge_already_refunded"
     assert write.would_fire == ()
 
 
@@ -3943,7 +3963,7 @@ def test_a_second_refund_in_one_run_is_rejected_because_the_overlay_applied_the_
     assert second == 400
     assert json.loads(data)["error"]["code"] == "charge_already_refunded"
     assert headers[wire.ANSWERED_BY_HEADER] == "fake-L1"
-    assert [ex.precondition for ex in _writes(seen)] == ["passed", "rejected"]
+    assert [ex.precondition.outcome for ex in _writes(seen)] == ["passed", "rejected"]
 
 
 def test_a_rejected_write_never_enters_the_write_log(precondition_stub):
@@ -3977,7 +3997,7 @@ def test_a_precondition_read_that_429s_leaves_the_write_faked_at_l2(precondition
     assert json.loads(data)["object"] == "refund"
     assert headers[wire.ANSWERED_BY_HEADER] == "fake-L1"
     (write,) = _writes(seen)
-    assert (write.answered_by, write.precondition) == ("fake-L1", "not_evaluable")
+    assert (write.answered_by, write.precondition.outcome) == ("fake-L1", "not_evaluable")
     (issued,) = [ex for ex in seen if ex.issued_by == "engine"]
     assert issued.response is not None and issued.response.status == 429
 
@@ -3990,7 +4010,7 @@ def test_a_refund_l3_could_not_check_still_lists_its_webhooks(precondition_stub)
     status, _, _ = _refund(proxy, stub, "ch_BUSY1")
     assert status == 200
     (write,) = _writes(seen)
-    assert write.precondition == "not_evaluable"
+    assert write.precondition.outcome == "not_evaluable"
     assert write.would_fire == ("refund.created", "charge.refunded")
 
 
@@ -4005,7 +4025,7 @@ def test_a_precondition_read_that_redirects_is_not_followed_and_decides_nothing(
     assert json.loads(data)["object"] == "refund"
     assert headers[wire.ANSWERED_BY_HEADER] == "fake-L1"
     (write,) = _writes(seen)
-    assert (write.answered_by, write.precondition) == ("fake-L1", "not_evaluable")
+    assert (write.answered_by, write.precondition.outcome) == ("fake-L1", "not_evaluable")
     (issued,) = [ex for ex in seen if ex.issued_by == "engine"]
     assert issued.response is not None and issued.response.status == 302
     assert _PreconditionStub.seen == [("GET", "/v1/charges/ch_MOVED1")]
@@ -4106,8 +4126,8 @@ def test_a_faked_refund_carries_the_currency_its_precondition_read_found(precond
     status, _, _ = _refund(proxy, stub, "ch_REAL1")
     assert status == 200
     (write,) = _writes(seen)
-    assert write.precondition == "passed"
-    assert write.currency == "usd"
+    assert write.precondition.outcome == "passed"
+    assert write.precondition.currency == "usd"
 
 
 def test_a_write_whose_precondition_read_never_answered_carries_no_currency(
@@ -4120,8 +4140,8 @@ def test_a_write_whose_precondition_read_never_answered_carries_no_currency(
     status, _, _ = _refund(proxy, stub, "ch_BUSY1")
     assert status == 200
     (write,) = _writes(seen)
-    assert write.precondition == "not_evaluable"
-    assert write.currency == ""
+    assert write.precondition.outcome == "not_evaluable"
+    assert write.precondition.currency == ""
     maps = _maps(tmp_path, monkeypatch, doc=PRECONDITION_STRIPE_MAP)
     lines = report.summary_lines("t3st", seen, 1.0, maps)
     assert (
@@ -4195,7 +4215,7 @@ def slack_precondition_stub(tmp_path, monkeypatch):
     maps = _maps(tmp_path, monkeypatch, doc=SLACK_PRECONDITION_MAP)
     eng, seen, stop = _start(
         _config(tmp_path, monkeypatch, maps=maps),
-        overlay=ServiceOverlay(maps),
+        overlay=ServiceOverlay(),
         policy=ShadowPolicy(reader=UpstreamReader(), maps=maps),
     )
     yield eng.listen_port(), srv.server_address[1], seen
@@ -4214,7 +4234,10 @@ def test_a_post_to_an_archived_channel_is_rejected(slack_precondition_stub):
     assert json.loads(data) == {"ok": False, "error": "is_archived"}
     assert headers[wire.ANSWERED_BY_HEADER] == "fake-L1"
     (write,) = _writes(seen)
-    assert (write.precondition, write.rejection_code) == ("rejected", "is_archived")
+    assert (write.precondition.outcome, write.precondition.rejection_code) == (
+        "rejected",
+        "is_archived",
+    )
 
 
 def test_a_post_to_a_healthy_channel_passes_and_the_probe_was_a_conversations_info(
@@ -4228,7 +4251,7 @@ def test_a_post_to_a_healthy_channel_passes_and_the_probe_was_a_conversations_in
     assert json.loads(data)["ok"] is True
     assert headers[wire.ANSWERED_BY_HEADER] == "fake-L1"
     (write,) = _writes(seen)
-    assert write.precondition == "passed"
+    assert write.precondition.outcome == "passed"
     assert _SlackPreconditionStub.seen == [("POST", "/api/conversations.info")]
 
 
@@ -4323,7 +4346,7 @@ def test_the_precondition_read_never_carries_the_run_header_and_both_exchanges_a
     assert not _carries_run_header(received), "the run id reached the service on irimi's own read"
     (issued,) = [ex for ex in seen if ex.issued_by == "engine"]
     (write,) = _writes(seen)
-    assert (write.precondition, write.run_id, issued.run_id) == ("passed", "abc", "abc")
+    assert (write.precondition.outcome, write.run_id, issued.run_id) == ("passed", "abc", "abc")
     assert not _carries_run_header(write.request.headers)
 
 

@@ -715,7 +715,7 @@ def test_a_full_refund_replayed_unchanged_is_answered_from_its_recording(replaye
     ]
     [refund] = [ex for ex in replay.reported if ex.kind == "write"]
     assert refund.flags == ("from-recording",)
-    assert refund.precondition == "passed"
+    assert refund.precondition.outcome == "passed"
     # The refund's minted id is the recorded one, so every later call naming it matched.
     [recorded_refund] = [ex for ex in recorded.reported if ex.kind == "write"]
     assert refund.response.body == recorded_refund.response.body
@@ -821,7 +821,7 @@ def test_a_full_refund_replayed_with_the_half_prompt_diverges_at_the_first_llm_c
     )
     [refund] = [ex for ex in replay.reported if ex.kind == "write"]
     assert refund.flags == ("replay-miss",)
-    assert refund.precondition == "passed"
+    assert refund.precondition.outcome == "passed"
     [check] = [ex for ex in replay.reported if ex.issued_by == "engine"]
     assert (check.answered_by, check.request.path) == ("recording", "/v1/charges/ch_TICKET1")
     assert check.flags == ("from-recording",)
@@ -1648,7 +1648,7 @@ def test_a_replay_that_adds_a_refund_reads_live_after_it_and_sees_it(replayed):
         ("llm#5", 200, None),
     ]
     [refund] = [ex for ex in replay.reported if ex.kind == "write"]
-    assert (refund.precondition, refund.flags) == ("not_evaluable", ("replay-miss",))
+    assert (refund.precondition.outcome, refund.flags) == ("not_evaluable", ("replay-miss",))
     [check] = [ex for ex in replay.reported if ex.issued_by == "engine"]
     assert (check.answered_by, check.response, check.flags) == (
         "recording",

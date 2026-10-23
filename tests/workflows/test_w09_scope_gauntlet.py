@@ -848,7 +848,7 @@ def test_a_replay_refuses_a_cut_write_again_and_answers_the_rest_from_its_record
         ("decision-failed", "body-truncated"),
     )
     assert replay.internet.requests() == []
-    assert (refund.precondition, refund.flags) == ("passed", ("from-recording",))
+    assert (refund.precondition.outcome, refund.flags) == ("passed", ("from-recording",))
     code, out, err = replay.compare_runs(recorded.process_run_id(), replay.process_run_id())
     assert (code, err) == (1, [])
     assert out[-1] == (

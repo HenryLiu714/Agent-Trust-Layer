@@ -13,7 +13,7 @@ import pytest
 
 from irimi import compare, recording, redact, report, servicemap, trace
 from irimi.cli import main
-from irimi.exchange import Exchange, Flag, Request, Response
+from irimi.exchange import Exchange, Flag, Precondition, Request, Response
 from irimi.servicemap import MapError
 from irimi.store import DirectoryStore, StoredRun
 from irimi.trace import ErrorInfo, Event, RunRecord, ToolCall, Trigger
@@ -44,7 +44,7 @@ def _refund(amount: int = 4900, **changes) -> Exchange:
         kind="write",
         answered_by="fake-L1",
         run_id="",
-        precondition="passed",
+        precondition=Precondition("passed"),
     )
     return dataclasses.replace(refund, **changes)
 
@@ -258,8 +258,8 @@ def test_a_write_answered_otherwise_is_changed_though_its_line_reads_the_same():
     currency, a refusal's reasons. Here the L3 read named another currency for a refund whose line
     shows no amount."""
     index = servicemap.load()
-    a = dataclasses.replace(_update(b"email=a%40x.com"), currency="usd")
-    b = dataclasses.replace(a, currency="eur")
+    a = dataclasses.replace(_update(b"email=a%40x.com"), precondition=Precondition(currency="usd"))
+    b = dataclasses.replace(a, precondition=Precondition(currency="eur"))
     assert compare.compare_runs(_run([a]), _run([b]), index).lines() == [
         f"  ~ A {UPDATE}",
         f"    B {UPDATE}",
@@ -379,7 +379,7 @@ def test_a_write_tool_b_dropped_is_one_write_only_in_a(home, capfd):
 
 
 def test_a_refund_l3_rejected_in_b_is_the_same_write_changed_and_shows_its_mark(home, capfd):
-    rejected = _refund(9800, precondition="rejected", rejection_code="amount_too_large")
+    rejected = _refund(9800, precondition=Precondition("rejected", "amount_too_large"))
     code, lines = _compare(home, capfd, [_refund()], [rejected])
     assert (code, lines[3:]) == (
         1,
@@ -396,7 +396,7 @@ def test_a_second_refused_refund_is_the_write_added_not_the_first(home, capfd):
     """Lined up by key alone, B's first refund pairs with nothing and its refused second one with
     A's refund: `+` on the refund both runs made, and `~` against the refusal. Lining up the same
     writes first leaves the refusal as the one B added."""
-    refused = _refund(precondition="rejected", rejection_code="charge_already_refunded")
+    refused = _refund(precondition=Precondition("rejected", "charge_already_refunded"))
     code, lines = _compare(home, capfd, [_refund(), _tool()], [_refund(), refused, _tool()])
     assert (code, lines[3:]) == (
         1,
@@ -434,7 +434,9 @@ def test_reads_llm_calls_read_tools_real_tools_and_a_replayed_retry_are_not_writ
 
 def test_a_delegated_write_is_a_write_and_prints_where_it_went(home, capfd):
     """The summary prints a write an answer target answered, so it is compared too."""
-    delegated = _refund(answered_by="delegated", target="http://127.0.0.1:9999", precondition=None)
+    delegated = _refund(
+        answered_by="delegated", target="http://127.0.0.1:9999", precondition=Precondition()
+    )
     code, lines = _compare(home, capfd, [_refund()], [delegated])
     assert (code, lines[3:5]) == (
         1,
@@ -699,18 +701,18 @@ def test_every_write_shape_s_action_is_the_line_the_stored_summary_prints_for_it
     which the summary prints after the HTTP writes."""
     target = "http://127.0.0.1:9"
     # An unclassified write keeps its host as its service and its request as its operation.
-    unclassified = _refund(kind="unknown", answered_by="fake-L0", precondition=None)
+    unclassified = _refund(kind="unknown", answered_by="fake-L0", precondition=Precondition())
     unclassified = dataclasses.replace(unclassified, flags=(Flag.UNCLASSIFIED,))
     events: list[Event] = [
         _read("/v1/charges/ch_1"),
         _llm("refund it"),
         _refund(),
         dataclasses.replace(unclassified, service="api.stripe.com", operation="POST /v1/refunds"),
-        _refund(answered_by="delegated", target=target, precondition=None),
+        _refund(answered_by="delegated", target=target, precondition=Precondition()),
         _refund(
             answered_by="delegated",
             target=target,
-            precondition=None,
+            precondition=Precondition(),
             response=None,
             flags=(Flag.TARGET_FAILED,),
         ),
@@ -722,8 +724,11 @@ def test_every_write_shape_s_action_is_the_line_the_stored_summary_prints_for_it
             flags=(Flag.UNCLASSIFIED, Flag.DECISION_FAILED, Flag.BODY_TRUNCATED),
         ),
         _refund(flags=(Flag.IDEMPOTENT_REPLAY,)),
-        _refund(flags=(Flag.IDEMPOTENCY_CONFLICT,), rejection_code="idempotency_key_in_use"),
-        _refund(9800, precondition="rejected", rejection_code="amount_too_large"),
+        _refund(
+            flags=(Flag.IDEMPOTENCY_CONFLICT,),
+            precondition=Precondition("passed", "idempotency_key_in_use"),
+        ),
+        _refund(9800, precondition=Precondition("rejected", "amount_too_large")),
         _refund(flags=(Flag.BODY_TRUNCATED, Flag.STREAM_TRUNCATED)),
         _post("hi\nthere\x1b[31m\ud800"),
         _tool(),

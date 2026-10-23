@@ -156,7 +156,7 @@ def _shows_the_world(exchange: Exchange) -> bool:
     replay has not made, or one the recording never held, would change. A replay serves one only
     while that world is the replay's too (`Recording.take`)."""
     return exchange.kind == "read" or (
-        exchange.kind not in LIVE_KINDS and exchange.precondition is not None
+        exchange.kind not in LIVE_KINDS and exchange.precondition.outcome is not None
     )
 
 

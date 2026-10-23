@@ -307,7 +307,7 @@ def test_two_concurrent_requests_to_a_served_agent_are_two_runs_that_never_mix(
             ("engine", "GET", f"/v1/charges/{charge}", "live"),
         ]
         [refund] = [e for e in exchanges if e.request.method == "POST"]
-        assert refund.precondition == "passed"
+        assert refund.precondition.outcome == "passed"
         assert refund.response is not None
         assert json.loads(refund.response.body)["id"] == refunds[charge]
         [tool] = [e for e in events if isinstance(e, ToolCall)]

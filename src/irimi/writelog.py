@@ -1,16 +1,28 @@
 """Turns the run's write log (the `Exchange`s irimi faked) into `services.Write`s scoped to one
-read. Shared by the overlay and the L3 precondition check, which live in the same layer and may
-not import each other.
+read, and applies them to that read's document. Shared by the overlay and the precondition check,
+so both show a read the same writes the same way.
 
 `WriteLog` keeps those writes per run: a run sees its own faked writes and no other run's, and a
 run's writes are dropped when it ends.
 """
 
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from typing import Any
 
 from irimi import bodies, services
 from irimi.exchange import Exchange, Request
+
+
+@dataclass(frozen=True)
+class Translation:
+    """A read the overlay translated before it is forwarded: the request irimi asks instead, and
+    the `key=value` query pair it dropped. irimi keeps `removed` and hands it back to the overlay
+    with the response; it never goes on the wire."""
+
+    request: Request
+    removed: str
 
 
 class WriteLog:
@@ -75,9 +87,8 @@ def scoped_writes[T](
     """`entry` (a field of the service's spec) and this service's faked writes in the read's
     scope, or None when the spec leaves that field unset or the run has no such write.
 
-    The overlay's effects and rewrites and the policy's L3 read all start here, so the three agree
-    on which writes a read can see - and none of them parses a body before it knows it has a write
-    to apply.
+    The overlay's effects and rewrites and the precondition check all start here, so the three
+    agree on which writes a read can see.
     """
     if entry is None:
         return None
@@ -85,6 +96,32 @@ def scoped_writes[T](
     if not writes:
         return None
     return entry, writes
+
+
+def apply(
+    service: str,
+    operation: str,
+    request: Request,
+    document: Callable[[], Any],
+    write_log: Sequence[Exchange],
+    translated_from: str | None = None,
+) -> services.Applied | None:
+    """The run's writes in the read's scope applied to the read's document, or None when the
+    service models no effects or the run has no write the read can see.
+
+    The one path from a write log to a read's document, for the overlay and the precondition
+    check alike. `document` is called only once there is a write to apply, so no body is parsed
+    for nothing. A document of None is a body irimi could not read: the writes cannot be shown
+    in it, so it comes back `partial` and unchanged.
+    """
+    found = scoped_writes(services.of(service).effects, service, request, write_log)
+    if found is None:
+        return None
+    read = document()
+    if read is None:
+        return services.Applied(None, partial=True)
+    effects, writes = found
+    return effects(read_of(operation, request, translated_from), read, writes)
 
 
 def read_of(operation: str, request: Request, translated_from: str | None = None) -> services.Read:

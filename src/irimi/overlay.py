@@ -7,15 +7,15 @@ from dataclasses import dataclass, replace
 from typing import Protocol
 
 from irimi import bodies, services, writelog
-from irimi.classify import classify
+from irimi.classify import Classification
 from irimi.exchange import Exchange, OverlayFidelity, Request, Response
-from irimi.servicemap import MapIndex
+from irimi.writelog import Translation
 
 logger = logging.getLogger(__name__)
 
 # A delegated read is never overlaid: its target owns that state. A streamed response never
 # reaches the overlay: mitmproxy does not assemble its body, and its headers are already sent.
-# Both are enforced in `IrimiAddon.response` and covered by tests/test_engine_mitm.py.
+# Both are enforced in `session.ShadowSession.complete` and covered by tests/test_engine_mitm.py.
 
 
 @dataclass(frozen=True)
@@ -30,34 +30,30 @@ class Overlaid:
     The response carries a status as well as a body, and an effect may replace it - for
     one case only, a read of an object this run minted, which the service answers with an error
     because it has never heard of the id. `services.Applied.status` is how an effect says so, and
-    `IrimiAddon.response` stamps `overlay` off the same identity check either way, so a status of
-    irimi's is never handed back as the service's.
+    `ShadowSession.complete` stamps `overlay` off the same identity check either way, so a status
+    of irimi's is never handed back as the service's.
     """
 
     response: Response
     fidelity: OverlayFidelity | None = None
 
 
-@dataclass(frozen=True)
-class Translation:
-    """A read the overlay translated before it is forwarded: the request irimi asks instead, and
-    the `key=value` query pair it dropped. The engine keeps `removed` and hands it back to the
-    overlay with the response; it never goes on the wire."""
-
-    request: Request
-    removed: str
-
-
 class Overlay(Protocol):
     def __call__(
         self,
         write_log: Sequence[Exchange],
+        classification: Classification,
         read_request: Request,
         upstream_response: Response,
         translated_from: str | None = None,
     ) -> Overlaid: ...
 
-    def rewrite(self, write_log: Sequence[Exchange], read_request: Request) -> Translation | None:
+    def rewrite(
+        self,
+        write_log: Sequence[Exchange],
+        classification: Classification,
+        read_request: Request,
+    ) -> Translation | None:
         """The read to forward instead of `read_request`, or None to forward it as it is."""
         ...
 
@@ -66,49 +62,57 @@ class NoOverlay:
     def __call__(
         self,
         write_log: Sequence[Exchange],
+        classification: Classification,
         read_request: Request,
         upstream_response: Response,
         translated_from: str | None = None,
     ) -> Overlaid:
         return Overlaid(upstream_response)
 
-    def rewrite(self, write_log: Sequence[Exchange], read_request: Request) -> Translation | None:
+    def rewrite(
+        self,
+        write_log: Sequence[Exchange],
+        classification: Classification,
+        read_request: Request,
+    ) -> Translation | None:
         return None
 
 
 class ServiceOverlay:
     """The real overlay: `irimi.services`' effect tables, applied to a live read.
 
-    Constructed with the loaded maps because the seam hands it a `Request` and not a
-    `Classification`, while the effect tables key on the read's service and operation.
-    `classify.classify` is the one place that answers that question, so it is asked again here
-    rather than a second matcher being written; it is a pure dict lookup and its answer is
-    identical to the engine's.
+    The effect tables key on the read's service and operation, which the caller's
+    `Classification` already holds.
 
     Both entry points swallow everything. They are called from inside mitmproxy hooks, where a
     raise forwards the flow untouched: on the response side that would hand the agent a read the
     overlay half-edited, and on the request side it would turn a read into a 502.
     """
 
-    def __init__(self, maps: MapIndex) -> None:
-        self.maps = maps
-
     def __call__(
         self,
         write_log: Sequence[Exchange],
+        classification: Classification,
         read_request: Request,
         upstream_response: Response,
         translated_from: str | None = None,
     ) -> Overlaid:
         try:
-            return self._apply(write_log, read_request, upstream_response, translated_from)
+            return self._apply(
+                write_log, classification, read_request, upstream_response, translated_from
+            )
         except Exception:
             logger.exception("irimi: the overlay failed; the agent gets the upstream read")
             return Overlaid(upstream_response, "partial")
 
-    def rewrite(self, write_log: Sequence[Exchange], read_request: Request) -> Translation | None:
+    def rewrite(
+        self,
+        write_log: Sequence[Exchange],
+        classification: Classification,
+        read_request: Request,
+    ) -> Translation | None:
         try:
-            return self._rewrite(write_log, read_request)
+            return self._rewrite(write_log, classification, read_request)
         except Exception:
             logger.exception("irimi: the overlay's rewrite failed; forwarding the read unchanged")
             return None
@@ -118,28 +122,23 @@ class ServiceOverlay:
     def _apply(
         self,
         write_log: Sequence[Exchange],
+        classification: Classification,
         read_request: Request,
         upstream_response: Response,
         translated_from: str | None,
     ) -> Overlaid:
-        service, operation = self._route(read_request)
-        found = writelog.scoped_writes(
-            services.of(service).effects, service, read_request, write_log
+        # A body the overlay cannot read is a body it cannot apply the run's writes to: `apply`
+        # says `partial`, and the agent still gets exactly what the service sent.
+        applied = writelog.apply(
+            classification.service,
+            classification.operation,
+            read_request,
+            lambda: bodies.json_object(upstream_response.body),
+            write_log,
+            translated_from,
         )
-        if found is None:
+        if applied is None:
             return Overlaid(upstream_response)
-        effects, writes = found
-        document = bodies.json_object(upstream_response.body)
-        if document is None:
-            # A body the overlay cannot read is a body it cannot apply the run's writes to. The
-            # agent still gets exactly what the service sent; the exchange says it is incomplete.
-            return Overlaid(upstream_response, "partial")
-        # Reflected here, past the early returns, so a service with no effects table or a run
-        # with no writes for it parses nothing. `bodies.reflect` never raises and reflects `{}` for
-        # a body it cannot read, so it needs no guard of its own.
-        applied = effects(
-            writelog.read_of(operation, read_request, translated_from), document, writes
-        )
         fidelity: OverlayFidelity | None = None
         if applied.partial:
             fidelity = "partial"
@@ -166,20 +165,20 @@ class ServiceOverlay:
             fidelity,
         )
 
-    def _rewrite(self, write_log: Sequence[Exchange], read_request: Request) -> Translation | None:
-        service, operation = self._route(read_request)
+    def _rewrite(
+        self,
+        write_log: Sequence[Exchange],
+        classification: Classification,
+        read_request: Request,
+    ) -> Translation | None:
+        service = classification.service
         found = writelog.scoped_writes(
             services.of(service).rewrite, service, read_request, write_log
         )
         if found is None:
             return None
         rewrite, writes = found
-        # Past the early returns, like `_apply`'s; `bodies.reflect` never raises.
-        rewritten = rewrite(writelog.read_of(operation, read_request), writes)
+        rewritten = rewrite(writelog.read_of(classification.operation, read_request), writes)
         if rewritten is None:
             return None
         return Translation(replace(read_request, query=rewritten.query), rewritten.removed)
-
-    def _route(self, request: Request) -> tuple[str, str]:
-        classification = classify(request, self.maps)
-        return classification.service, classification.operation

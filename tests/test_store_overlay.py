@@ -1,3 +1,4 @@
+from irimi.classify import classify
 from irimi.exchange import Exchange, Request, Response
 from irimi.overlay import NoOverlay
 from irimi.store import NullStore
@@ -40,7 +41,9 @@ def test_null_store_record_and_close_return_none():
 
 def test_no_overlay_returns_upstream_response_unchanged():
     req, resp = _req(), _resp()
-    overlaid = NoOverlay()(write_log=[], read_request=req, upstream_response=resp)
+    overlaid = NoOverlay()(
+        write_log=[], classification=classify(req), read_request=req, upstream_response=resp
+    )
     assert overlaid.response is resp
     assert overlaid.fidelity is None
 
@@ -48,10 +51,19 @@ def test_no_overlay_returns_upstream_response_unchanged():
 def test_no_overlay_ignores_write_log():
     req, resp = _req(), _resp()
     assert (
-        NoOverlay()(write_log=[_exchange()], read_request=req, upstream_response=resp).response
+        NoOverlay()(
+            write_log=[_exchange()],
+            classification=classify(req),
+            read_request=req,
+            upstream_response=resp,
+        ).response
         is resp
     )
 
 
 def test_no_overlay_rewrite_translates_nothing():
-    assert NoOverlay().rewrite(write_log=[_exchange()], read_request=_req()) is None
+    req = _req()
+    assert (
+        NoOverlay().rewrite(write_log=[_exchange()], classification=classify(req), read_request=req)
+        is None
+    )

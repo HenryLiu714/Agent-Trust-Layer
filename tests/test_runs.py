@@ -20,7 +20,7 @@ import pytest
 
 from irimi import redact, report, servicemap, trace
 from irimi.cli import DEFAULT_RUNS_LIMIT, main
-from irimi.exchange import Exchange, Request, Response
+from irimi.exchange import Exchange, Precondition, Request, Response
 from irimi.store import DirectoryStore, StoreReader
 from irimi.trace import ErrorInfo, RunRecord, ToolCall, Trigger
 from tests import test_phase_exit
@@ -267,8 +267,7 @@ def test_runs_list_counts_the_writes_runs_show_s_summary_prints_a_line_for(home,
     rejected = dataclasses.replace(
         _refund("checked"),
         answered_by="fake-L1",
-        precondition="rejected",
-        rejection_code="charge_already_refunded",
+        precondition=Precondition("rejected", "charge_already_refunded"),
     )
     s = DirectoryStore(home / "store", redact.load_key(home))
     s.start_run(_ended_run("checked", HAND_BUILT_AT))

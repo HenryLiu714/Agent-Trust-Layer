@@ -65,7 +65,7 @@ def answered_by_header(answered_by: AnsweredBy) -> str | None:
     answering cannot ship a response that does not say who answered it - the header is how a
     client, a test, or a developer reading a capture tells an answer of ours from the real
     service's. It takes the value rather than the Exchange because the engine asks before there is
-    one: a streamed answer is stamped in `responseheaders`, where only `_Pending` exists.
+    one: a streamed answer is stamped in `responseheaders`, where only the `Plan` exists.
 
     A **live forward gets no header**, deliberately. Everything on that path is the real
     service's: adding a header of ours to it would make the response the agent sees differ from

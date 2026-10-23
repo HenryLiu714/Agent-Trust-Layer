@@ -18,14 +18,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from irimi import ca, classify, paths, redact, servicemap, wire
+from irimi.delegation import ForwardTo
 from irimi.engine import EngineConfig
 from irimi.engine.mitm import IrimiAddon, MitmEngine
 from irimi.exchange import Exchange, Flag, Request, Response
-from irimi.overlay import ServiceOverlay, Translation
-from irimi.policy import Answer, ReplayPolicy, ShadowPolicy
+from irimi.ingress import Admitted
+from irimi.netaddr import Target
+from irimi.overlay import ServiceOverlay
+from irimi.policy import Decided, Delegate, Forward, ReplayPolicy, Respond, ShadowPolicy
 from irimi.reader import UpstreamReader
 from irimi.recording import Recording
 from irimi.store import DirectoryStore, NullStore, StoreReader
+from irimi.writelog import Translation
 from tests.test_invariants import stamping_violations
 
 STRIPE_MAP = """
@@ -208,7 +212,7 @@ class _Session:
             cfg,
             policy,
             DirectoryStore(home / "store", redact.load_key(home)),
-            ServiceOverlay(maps),
+            ServiceOverlay(),
             on_exchange=self.seen.append,
         )
         self.loop = asyncio.new_event_loop()
@@ -419,11 +423,11 @@ def test_the_same_write_is_answered_with_the_recorded_answer(home, maps, stubs):
     write, read = session.seen
     assert write.response.body == recorded.response.body
     assert (
-        (write.answered_by, write.precondition, write.currency)
+        (write.answered_by, write.precondition.outcome, write.precondition.currency)
         == (
             recorded.answered_by,
-            recorded.precondition,
-            recorded.currency,
+            recorded.precondition.outcome,
+            recorded.precondition.currency,
         )
         == ("fake-L1", "passed", "usd")
     )
@@ -448,7 +452,7 @@ def test_a_different_write_is_faked_and_checked_against_the_recorded_read(home, 
     events = _record(home, maps, lambda s: _refund(s, stripe, 100))
     session = _replay(home, maps, events, lambda s: _refund(s, stripe, 250))
     engine_read, write = session.seen
-    assert (write.answered_by, write.precondition) == ("fake-L1", "passed")
+    assert (write.answered_by, write.precondition.outcome) == ("fake-L1", "passed")
     assert Flag.REPLAY_MISS in write.flags
     assert (engine_read.issued_by, engine_read.answered_by) == ("engine", "recording")
     assert _Stripe.seen == []
@@ -461,7 +465,7 @@ def test_a_write_the_recording_would_reject_is_rejected(home, maps, stubs):
     session = _replay(home, maps, events, lambda s: replies.append(_refund(s, stripe, 9900)))
     assert replies[0][0] == 400
     write = session.seen[-1]
-    assert (write.precondition, Flag.REPLAY_MISS in write.flags) == ("rejected", True)
+    assert (write.precondition.outcome, Flag.REPLAY_MISS in write.flags) == ("rejected", True)
     assert _Stripe.seen == []
 
 
@@ -474,7 +478,7 @@ def test_a_missed_write_with_no_recorded_read_is_not_evaluable(home, maps, stubs
     engine_read, write = session.seen
     assert (engine_read.answered_by, engine_read.response) == ("recording", None)
     assert engine_read.flags == (Flag.REPLAY_MISS,)
-    assert write.precondition == "not_evaluable"
+    assert write.precondition.outcome == "not_evaluable"
     assert _Stripe.seen == []
 
 
@@ -488,7 +492,7 @@ def test_a_recorded_read_that_failed_is_served_again_to_the_precondition(home, m
     session = _replay(home, maps, events, lambda s: _refund(s, stripe, 250))
     engine_read, write = session.seen
     assert (engine_read.answered_by, engine_read.response.status) == ("recording", 500)
-    assert write.precondition == "not_evaluable"
+    assert write.precondition.outcome == "not_evaluable"
     assert _Stripe.seen == []
 
 
@@ -583,9 +587,9 @@ def test_an_answer_the_engine_cannot_send_fails_closed_and_forwards_nothing(home
     class _Unsendable:
         name = "unsendable"
 
-        def answer(self, request, classification, write_log=(), run_id=""):
+        def decide(self, request, classification, write_log=(), run_id="", target=None):
             body = Response(200, (("x-note", "€"),), b"{}")
-            return Answer(answered_by="fake-L0", response=body, flags=())
+            return Decided(Respond(body, "fake-L0"))
 
     session = _Session(home, maps, _Unsendable(), "rep")
     try:
@@ -621,9 +625,9 @@ def test_the_reads_an_answer_issued_are_recorded_when_it_cannot_be_sent(home, ma
     class _Unsendable:
         name = "unsendable"
 
-        def answer(self, request, classification, write_log=(), run_id=""):
+        def decide(self, request, classification, write_log=(), run_id="", target=None):
             body = Response(200, (("x-note", "€"),), b"{}")
-            return Answer(answered_by="fake-L0", response=body, flags=(), issued=(read,))
+            return Decided(Respond(body, "fake-L0"), issued=(read,))
 
     session = _Session(home, maps, _Unsendable(), "rep")
     try:
@@ -671,7 +675,7 @@ class _Asked:
     def __init__(self, answer):
         self.answer_with, self.asked = answer, []
 
-    def answer(self, request, classification, write_log=(), run_id=""):
+    def decide(self, request, classification, write_log=(), run_id="", target=None):
         self.asked.append(request)
         return self.answer_with
 
@@ -682,16 +686,18 @@ class _Translating:
     def __init__(self):
         self.translated = []
 
-    def __call__(self, write_log, read_request, upstream_response, translated_from=None):
+    def __call__(
+        self, write_log, classification, read_request, upstream_response, translated_from=None
+    ):
         raise AssertionError("not asked here")
 
-    def rewrite(self, write_log, read_request):
+    def rewrite(self, write_log, classification, read_request):
         self.translated.append(read_request)
         return Translation(dataclasses.replace(read_request, query="translated=1"), "x=1")
 
 
 def _decided(home, maps, policy, overlay, host="127.0.0.1"):
-    """`IrimiAddon._decide` over one read, with one write already in the log."""
+    """`ShadowSession.plan` over one read, with one write already in the log."""
     config = EngineConfig(
         run_id="t",
         ca=ca.ca_paths(),
@@ -713,14 +719,19 @@ def _decided(home, maps, policy, overlay, host="127.0.0.1"):
         run_id="t",
         flags=unknown.flags,
     )
-    return addon._decide(read, (write,), "t", False, ("127.0.0.1", 4000))
+    addon.session.write_log.add(write)
+    return addon.session.plan(Admitted(read, "t", "forward", ("127.0.0.1", 4000)))
+
+
+def _carries_a_translation(plan):
+    return isinstance(plan.decision, Forward) and plan.decision.translation is not None
 
 
 @pytest.mark.parametrize(
     ("answer", "on_the_flow"),
     [
-        (Answer(answered_by="live", response=None), True),
-        (Answer(answered_by="recording", response=Response(200, (), b"{}")), False),
+        (Decided(Forward()), True),
+        (Decided(Respond(Response(200, (), b"{}"), "recording")), False),
     ],
     ids=["forwarded", "answered-from-the-recording"],
 )
@@ -734,7 +745,7 @@ def test_the_engine_asks_and_records_a_read_translated_and_edits_only_a_forwarde
     decision = _decided(home, maps, policy, overlay)
     assert [r.query for r in policy.asked] == ["translated=1"]
     assert decision.request.query == "translated=1"
-    assert (decision.rewritten is not None) is on_the_flow
+    assert _carries_a_translation(decision) is on_the_flow
 
 
 def test_the_engine_never_translates_a_delegated_read(home, tmp_path):
@@ -749,11 +760,12 @@ def test_the_engine_never_translates_a_delegated_read(home, tmp_path):
         targets=[("127.0.0.1", "", "http://127.0.0.1:9")],
         target_reads=["127.0.0.1"],
     )
-    policy, overlay = _Asked(Answer(answered_by="delegated", response=None)), _Translating()
+    delegated = Decided(Delegate(ForwardTo(Target.parse("http://127.0.0.1:9"))))
+    policy, overlay = _Asked(delegated), _Translating()
     decision = _decided(home, targeted, policy, overlay)
     assert overlay.translated == []
     assert decision.request.query == "starting_after=re_1"
-    assert decision.rewritten is None
+    assert not _carries_a_translation(decision)
 
 
 def test_a_read_recorded_after_a_write_the_replay_did_not_make_goes_live(home, maps, stubs):

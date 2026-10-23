@@ -5,6 +5,7 @@ from dataclasses import replace
 
 from irimi import services
 from irimi.bodies import MAX_BODY_BYTES
+from irimi.classify import classify
 from irimi.exchange import Exchange, Request, Response
 from irimi.overlay import ServiceOverlay
 from irimi.servicemap import IdSpec, MapIndex, Route, ServiceMap
@@ -152,9 +153,22 @@ def _raising(*args, **kwargs):
     raise RuntimeError("boom")
 
 
+class _Overlay:
+    """`ServiceOverlay`, handed each read's classification over MAPS as the engine hands it."""
+
+    def __init__(self):
+        self.inner = ServiceOverlay()
+
+    def __call__(self, write_log, read, upstream, translated_from=None):
+        return self.inner(write_log, classify(read, MAPS), read, upstream, translated_from)
+
+    def rewrite(self, write_log, read):
+        return self.inner.rewrite(write_log, classify(read, MAPS), read)
+
+
 def test_a_read_with_an_empty_write_log_is_untouched():
     upstream = _upstream(CHARGE)
-    out = ServiceOverlay(MAPS)([], _read("/v1/charges/ch_REAL1"), upstream)
+    out = _Overlay()([], _read("/v1/charges/ch_REAL1"), upstream)
     assert out.response is upstream
     assert out.fidelity is None
 
@@ -162,14 +176,14 @@ def test_a_read_with_an_empty_write_log_is_untouched():
 def test_a_read_on_a_service_with_no_effects_is_untouched():
     upstream = _upstream(CHARGE)
     read = _read("/v1/charges/ch_REAL1", host="api.example.com")
-    out = ServiceOverlay(MAPS)([_write_exchange()], read, upstream)
+    out = _Overlay()([_write_exchange()], read, upstream)
     assert out.response is upstream
     assert out.fidelity is None
 
 
 def test_a_charge_read_after_a_faked_refund_is_rewritten():
     upstream = _upstream(CHARGE)
-    out = ServiceOverlay(MAPS)([_write_exchange()], _read("/v1/charges/ch_REAL1"), upstream)
+    out = _Overlay()([_write_exchange()], _read("/v1/charges/ch_REAL1"), upstream)
     assert out.response is not upstream
     assert json.loads(out.response.body)["amount_refunded"] == 100
     assert out.fidelity == "full"
@@ -177,14 +191,14 @@ def test_a_charge_read_after_a_faked_refund_is_rewritten():
 
 def test_a_read_of_another_charge_is_left_byte_identical():
     upstream = _upstream({**CHARGE, "id": "ch_OTHER"})
-    out = ServiceOverlay(MAPS)([_write_exchange()], _read("/v1/charges/ch_OTHER"), upstream)
+    out = _Overlay()([_write_exchange()], _read("/v1/charges/ch_OTHER"), upstream)
     assert out.response is upstream
 
 
 def test_a_write_from_another_connected_account_is_not_replayed():
     upstream = _upstream(CHARGE)
     log = [_write_exchange(headers=(("stripe-account", "acct_A"),))]
-    out = ServiceOverlay(MAPS)(log, _read("/v1/charges/ch_REAL1"), upstream)
+    out = _Overlay()(log, _read("/v1/charges/ch_REAL1"), upstream)
     assert out.response is upstream
     assert out.fidelity is None
 
@@ -192,7 +206,7 @@ def test_a_write_from_another_connected_account_is_not_replayed():
 def test_a_write_from_another_api_version_is_not_replayed():
     upstream = _upstream(CHARGE)
     log = [_write_exchange(headers=(("stripe-version", "2024-06-20"),))]
-    out = ServiceOverlay(MAPS)(log, _read("/v1/charges/ch_REAL1"), upstream)
+    out = _Overlay()(log, _read("/v1/charges/ch_REAL1"), upstream)
     assert out.response is upstream
     assert out.fidelity is None
 
@@ -201,14 +215,14 @@ def test_a_write_and_read_in_the_same_scope_are_replayed():
     upstream = _upstream(CHARGE)
     log = [_write_exchange(headers=(("stripe-account", "acct_A"),))]
     read = _read("/v1/charges/ch_REAL1", headers=(("stripe-account", "acct_A"),))
-    out = ServiceOverlay(MAPS)(log, read, upstream)
+    out = _Overlay()(log, read, upstream)
     assert json.loads(out.response.body)["amount_refunded"] == 100
     assert out.fidelity == "full"
 
 
 def test_a_body_that_is_not_json_is_flagged_partial():
     upstream = _upstream(body=b"<html>not json</html>")
-    out = ServiceOverlay(MAPS)([_write_exchange()], _read("/v1/charges/ch_REAL1"), upstream)
+    out = _Overlay()([_write_exchange()], _read("/v1/charges/ch_REAL1"), upstream)
     assert out.response is upstream
     assert out.fidelity == "partial"
 
@@ -216,7 +230,7 @@ def test_a_body_that_is_not_json_is_flagged_partial():
 def test_a_body_over_the_size_cap_is_flagged_partial():
     padded = {**CHARGE, "description": "x" * MAX_BODY_BYTES}
     upstream = _upstream(padded)
-    out = ServiceOverlay(MAPS)([_write_exchange()], _read("/v1/charges/ch_REAL1"), upstream)
+    out = _Overlay()([_write_exchange()], _read("/v1/charges/ch_REAL1"), upstream)
     assert out.response is upstream
     assert out.fidelity == "partial"
 
@@ -225,7 +239,7 @@ def test_an_effect_that_raises_leaves_the_read_alone_and_flags_it(monkeypatch):
     raising = replace(services.REGISTRY["stripe"], effects=_raising)
     monkeypatch.setitem(services.REGISTRY, "stripe", raising)
     upstream = _upstream(CHARGE)
-    out = ServiceOverlay(MAPS)([_write_exchange()], _read("/v1/charges/ch_REAL1"), upstream)
+    out = _Overlay()([_write_exchange()], _read("/v1/charges/ch_REAL1"), upstream)
     assert out.response is upstream
     assert out.fidelity == "partial"
 
@@ -233,7 +247,7 @@ def test_an_effect_that_raises_leaves_the_read_alone_and_flags_it(monkeypatch):
 def test_rewrite_translates_a_cursor_and_names_what_it_removed_off_the_wire():
     """The dropped pair comes back beside the request, never as a header on it, and handed back
     with the response it makes the page after the minted refund a fully modelled one."""
-    overlay, log = ServiceOverlay(MAPS), [_write_exchange()]
+    overlay, log = _Overlay(), [_write_exchange()]
     read = _read("/v1/refunds", query=f"limit=1&starting_after={MINTED}")
     out = overlay.rewrite(log, read)
     assert out is not None
@@ -247,20 +261,20 @@ def test_rewrite_translates_a_cursor_and_names_what_it_removed_off_the_wire():
 
 def test_rewrite_returns_none_when_there_is_nothing_to_translate():
     read = _read("/v1/refunds", query="limit=1&starting_after=re_REAL")
-    assert ServiceOverlay(MAPS).rewrite([_write_exchange()], read) is None
+    assert _Overlay().rewrite([_write_exchange()], read) is None
 
 
 def test_rewrite_never_raises(monkeypatch):
     raising = replace(services.REGISTRY["stripe"], rewrite=_raising)
     monkeypatch.setitem(services.REGISTRY, "stripe", raising)
     read = _read("/v1/refunds", query=f"starting_after={MINTED}")
-    assert ServiceOverlay(MAPS).rewrite([_write_exchange()], read) is None
+    assert _Overlay().rewrite([_write_exchange()], read) is None
 
 
 def test_a_rewrote_header_the_agent_sent_itself_is_not_trusted():
     """The overlay reads the translation from the engine, never from a request header, so a
     forged one cannot suppress the minted refund from page 1."""
-    overlay, log = ServiceOverlay(MAPS), [_write_exchange()]
+    overlay, log = _Overlay(), [_write_exchange()]
     read = _read("/v1/refunds", headers=(("irimi-rewrote", f"starting_after={MINTED}"),))
     assert overlay.rewrite(log, read) is None
     upstream = _upstream({"object": "list", "has_more": False, "data": [{"id": "re_REAL1"}]})
@@ -274,7 +288,7 @@ def test_a_rewrote_header_the_agent_sent_itself_is_not_trusted():
 def test_a_slack_history_read_after_a_faked_post_is_rewritten():
     upstream = _upstream(HISTORY)
     log = [_slack_post_exchange("1800000000.000001")]
-    out = ServiceOverlay(MAPS)(log, _slack_read({"channel": "C0123"}), upstream)
+    out = _Overlay()(log, _slack_read({"channel": "C0123"}), upstream)
     assert out.response is not upstream
     messages = json.loads(out.response.body)["messages"]
     assert [m["ts"] for m in messages] == ["1800000000.000001", "1700000000.000100"]
@@ -283,7 +297,7 @@ def test_a_slack_history_read_after_a_faked_post_is_rewritten():
 
 def test_a_slack_read_with_an_empty_write_log_is_untouched():
     upstream = _upstream(HISTORY)
-    out = ServiceOverlay(MAPS)([], _slack_read({"channel": "C0123"}), upstream)
+    out = _Overlay()([], _slack_read({"channel": "C0123"}), upstream)
     assert out.response is upstream
     assert out.fidelity is None
 
@@ -297,7 +311,7 @@ def test_slack_writes_under_different_tokens_are_all_replayed():
         _slack_post_exchange("1800000000.000002", headers=(("authorization", "Bearer xoxb-B"),)),
     ]
     read = _slack_read({"channel": "C0123"}, headers=(("authorization", "Bearer xoxb-C"),))
-    out = ServiceOverlay(MAPS)(log, read, upstream)
+    out = _Overlay()(log, read, upstream)
     messages = json.loads(out.response.body)["messages"]
     assert [m["ts"] for m in messages] == [
         "1800000000.000002",
@@ -312,7 +326,7 @@ def test_rewrite_leaves_a_slack_read_alone():
     of irimi's in it to translate."""
     read = _slack_read({"channel": "C0123", "cursor": "dXNlcjpVMEc5V0ZYTlo="})
     log = [_slack_post_exchange("1800000000.000001")]
-    assert ServiceOverlay(MAPS).rewrite(log, read) is None
+    assert _Overlay().rewrite(log, read) is None
 
 
 def test_a_slack_replies_read_after_a_faked_reply_is_rewritten():
@@ -324,7 +338,7 @@ def test_a_slack_replies_read_after_a_faked_reply_is_rewritten():
     )
     log = [_slack_post_exchange("1800000000.000001", thread_ts=parent_ts)]
     read = _slack_read({"channel": "C0123", "ts": parent_ts}, operation="conversations.replies")
-    out = ServiceOverlay(MAPS)(log, read, upstream)
+    out = _Overlay()(log, read, upstream)
     assert out.response is not upstream
     messages = json.loads(out.response.body)["messages"]
     assert [m["ts"] for m in messages] == [parent_ts, "1800000000.000001"]
@@ -339,7 +353,7 @@ def test_a_slack_read_the_effects_do_not_model_is_untouched():
     same object, which is how the engine knows not to stamp it."""
     upstream = _upstream({"ok": True, "channel": {"id": "C0123", "name": "general"}})
     read = _slack_read({"channel": "C0123"}, operation="conversations.info")
-    out = ServiceOverlay(MAPS)([_slack_post_exchange("1800000000.000001")], read, upstream)
+    out = _Overlay()([_slack_post_exchange("1800000000.000001")], read, upstream)
     assert out.response is upstream
     assert out.fidelity is None
 
@@ -347,7 +361,7 @@ def test_a_slack_read_the_effects_do_not_model_is_untouched():
 def test_a_read_of_a_minted_refund_comes_back_as_that_refund_at_200():
     """Through the seam, the effects answer the read and the overlay carries the status onto
     the response, so the agent gets the object irimi told it exists rather than Stripe's 404."""
-    overlay = ServiceOverlay(MAPS)
+    overlay = _Overlay()
     upstream = Response(
         status=404,
         headers=(("content-type", "application/json"),),
@@ -363,7 +377,7 @@ def test_a_read_of_a_minted_refund_comes_back_as_that_refund_at_200():
 def test_a_read_of_a_refund_this_run_did_not_mint_keeps_stripes_own_404():
     """The status only moves for an object irimi minted. Stripe's own 404 about Stripe's own state
     reaches the agent byte-identical and unstamped."""
-    overlay = ServiceOverlay(MAPS)
+    overlay = _Overlay()
     upstream = Response(
         status=404,
         headers=(("content-type", "application/json"),),
@@ -377,7 +391,7 @@ def test_a_read_of_a_refund_this_run_did_not_mint_keeps_stripes_own_404():
 
 def test_a_slack_replies_read_of_a_minted_thread_comes_back_as_the_thread():
     """The Slack twin, which needs no status: Slack answers `thread_not_found` at 200."""
-    overlay = ServiceOverlay(MAPS)
+    overlay = _Overlay()
     ts = "1800000000.000001"
     upstream = _upstream({"ok": False, "error": "thread_not_found"})
     log = [_slack_post_exchange(ts)]

@@ -1126,7 +1126,7 @@ def test_replaying_one_of_eight_concurrent_runs_replays_that_run_alone(
     charge = mine.trigger.args["message"]["charge"]
     [refund] = [ex for ex in replay.reported if ex.kind == "write"]
     assert f"charge={charge}&" in refund.request.body.decode() + "&"
-    assert (refund.precondition, refund.flags) == ("passed", ("from-recording",))
+    assert (refund.precondition.outcome, refund.flags) == ("passed", ("from-recording",))
     assert [ex for ex in replay.reported if ex.issued_by == "engine"] == []
     assert replay.internet.requests() == []
     assert {ex.run_id for ex in replay.reported} == {replay.process_run_id()}

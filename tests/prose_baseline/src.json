@@ -14,9 +14,6 @@
   "src/irimi/engine/decoding.py": {
     "caps_run": 1
   },
-  "src/irimi/engine/mitm.py": {
-    "caps_run": 17
-  },
   "src/irimi/exchange.py": {
     "caps_run": 4
   },

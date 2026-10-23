@@ -28,12 +28,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 import pytest
 
-from irimi import ca, classify, paths, report, reverse_door, servicemap, wire
+from irimi import ca, classify, ingress, paths, report, servicemap, wire
 from irimi.engine import EngineConfig, mitm
 from irimi.engine.mitm import MitmEngine
 from irimi.exchange import KINDS, Exchange, Flag, Request, Response
 from irimi.overlay import NoOverlay, Overlaid, ServiceOverlay
-from irimi.policy import Answer, ReplayPolicy, ShadowPolicy
+from irimi.policy import Decided, Forward, ReplayPolicy, Respond, ShadowPolicy
 from irimi.recording import Recording
 from irimi.store import NullStore
 from irimi.wire import ANSWERED_BY_HEADER, stamp
@@ -320,7 +320,7 @@ def test_a_replay_stamps_what_it_answered_and_leaves_a_live_forward_bare(
 
 
 def test_the_answer_a_failed_decision_gives_is_stamped_too(tmp_path, monkeypatch, upstream):
-    """A path that never sets `_Pending`, and so never reaches `response()`. A 502 sent with no
+    """A path that never sets a `Plan`, and so never reaches `response()`. A 502 sent with no
     header would read as the real service's answer to a client using the header to tell the two
     apart. `stamping_violations` cannot see that, because it calls `stamp` on the recorded
     Exchange and reads the header that call *would* produce - so this test asserts on `stamped`,
@@ -330,7 +330,7 @@ def test_the_answer_a_failed_decision_gives_is_stamped_too(tmp_path, monkeypatch
     class _BrokenPolicy:
         name = "broken"
 
-        def answer(self, request, classification, write_log=(), run_id=""):
+        def decide(self, request, classification, write_log=(), run_id="", target=None):
             raise RuntimeError("the decision exploded")
 
     maps = _maps(tmp_path, monkeypatch)
@@ -394,9 +394,9 @@ def test_irimis_own_errors_are_stamped_json_and_recorded(
     if case == "unparseable":
         monkeypatch.setattr(mitm, "_request_from_flow", _boom)
     elif case == "unroutable":
-        monkeypatch.setattr(reverse_door, "detect_door", _boom)
+        monkeypatch.setattr(ingress, "detect_door", _boom)
     elif case == "unrewritable":
-        monkeypatch.setattr(reverse_door, "rewrite_reverse", _boom)
+        monkeypatch.setattr(ingress, "rewrite_reverse", _boom)
 
     def calls(port):
         if case in ("base-url-refused", "unrewritable"):
@@ -423,12 +423,11 @@ def test_a_policy_that_answers_locally_without_saying_so_is_caught(tmp_path, mon
     class _LiarPolicy:
         name = "liar"
 
-        def answer(self, request, classification, write_log=(), run_id=""):
+        def decide(self, request, classification, write_log=(), run_id="", target=None):
             if classification.kind == "read":
-                return Answer(answered_by="live", response=None)
-            return Answer(
-                answered_by="live",
-                response=Response(200, (("content-type", "application/json"),), b"{}"),
+                return Decided(Forward())
+            return Decided(
+                Respond(Response(200, (("content-type", "application/json"),), b"{}"), "live")
             )
 
     maps = _maps(tmp_path, monkeypatch)
@@ -482,15 +481,15 @@ def test_every_answer_shadow_policy_gives_is_stamped_for_who_gave_it(tmp_path, m
             cls = classify.Classification(
                 cls.service, cls.operation, kind, cls.flags, cls.matched, cls.service_map
             )
-            answer = policy.answer(request, cls)
+            decision = policy.decide(request, cls).decision
             stamped.append(
                 Exchange(
                     request=request,
-                    response=answer.response,
+                    response=decision.response if isinstance(decision, Respond) else None,
                     service=cls.service,
                     operation=cls.operation,
                     kind=cls.kind,
-                    answered_by=answer.answered_by,
+                    answered_by=decision.answered_by,
                     run_id="t3st",
                     flags=cls.flags,
                 )
@@ -654,16 +653,20 @@ class _LogCapturingOverlay:
         self.logs: list[tuple[Exchange, ...]] = []
         self.inner = inner
 
-    def __call__(self, write_log, read_request, upstream_response, translated_from=None):
+    def __call__(
+        self, write_log, classification, read_request, upstream_response, translated_from=None
+    ):
         self.logs.append(tuple(write_log))
         if self.inner is not None:
-            return self.inner(write_log, read_request, upstream_response, translated_from)
+            return self.inner(
+                write_log, classification, read_request, upstream_response, translated_from
+            )
         return Overlaid(upstream_response)
 
-    def rewrite(self, write_log, read_request):
+    def rewrite(self, write_log, classification, read_request):
         self.logs.append(tuple(write_log))
         if self.inner is not None:
-            return self.inner.rewrite(write_log, read_request)
+            return self.inner.rewrite(write_log, classification, read_request)
         return None
 
 
@@ -692,7 +695,7 @@ def _stripe_run(tmp_path, monkeypatch, refunds, *, real_overlay=False):
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _Charges)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
     stripe = srv.server_address[1]
-    overlay = _LogCapturingOverlay(ServiceOverlay(maps) if real_overlay else None)
+    overlay = _LogCapturingOverlay(ServiceOverlay() if real_overlay else None)
 
     def refund(port, charge, amount, key):
         headers = {
@@ -739,10 +742,10 @@ def test_a_rejected_write_is_never_in_the_write_log(tmp_path, monkeypatch):
     world. Pinned at the log the overlay is handed, not at one of its downstream effects; a passed
     refund goes first so the log is not empty for the trivial reason."""
     seen, overlay = _l3_run(tmp_path, monkeypatch)
-    assert [ex.precondition for ex in seen if ex.kind == "write"] == ["passed", "rejected"]
+    assert [ex.precondition.outcome for ex in seen if ex.kind == "write"] == ["passed", "rejected"]
     assert overlay.logs, "the overlay was never handed the write log"
     for log in overlay.logs:
-        assert [ex.precondition for ex in log] == ["passed"]
+        assert [ex.precondition.outcome for ex in log] == ["passed"]
 
 
 def test_a_replayed_write_is_never_in_the_write_log_twice(tmp_path, monkeypatch):
@@ -804,10 +807,10 @@ def test_only_a_write_that_would_have_happened_lists_its_webhooks(tmp_path, monk
         refused_or_replayed = (
             Flag.IDEMPOTENT_REPLAY in ex.flags
             or Flag.IDEMPOTENCY_CONFLICT in ex.flags
-            or ex.precondition == "rejected"
+            or ex.precondition.outcome == "rejected"
         )
         if refused_or_replayed or ex.kind == "read":
-            assert ex.would_fire == (), (ex.kind, ex.flags, ex.precondition)
+            assert ex.would_fire == (), (ex.kind, ex.flags, ex.precondition.outcome)
 
     assert overlay.logs, "the overlay was never handed the write log"
     logged = {(ex.request.path, ex.request.body) for ex in overlay.logs[-1]}
@@ -874,7 +877,7 @@ def test_every_overlaid_read_has_a_write_of_its_own_service_to_sit_under(tmp_pat
     owed = [ex for ex in seen if _owes_overlay_line(ex)]
     assert [ex.answered_by for ex in owed] == ["overlay"], "the run showed the agent no write"
     held = [ex for log in overlay.logs for ex in log]
-    assert [ex.precondition for ex in held] == ["passed"] * len(held)
+    assert [ex.precondition.outcome for ex in held] == ["passed"] * len(held)
     assert overlay_line_violations(seen, held) == []
     lines = report.summary_lines("t3st", seen)
     assert sum(line.lstrip().startswith(report.OVERLAY_MARKER) for line in lines) == len(owed)
@@ -897,11 +900,11 @@ def test_a_replayed_rejection_is_never_in_the_write_log(tmp_path, monkeypatch):
     )
     assert replies == [200, 400, 400, 200]
     writes = [ex for ex in seen if ex.kind == "write"]
-    assert [ex.precondition for ex in writes] == ["passed", "rejected", "rejected"]
+    assert [ex.precondition.outcome for ex in writes] == ["passed", "rejected", "rejected"]
     assert Flag.IDEMPOTENT_REPLAY in writes[-1].flags
     assert overlay.logs, "the overlay was never handed the write log"
     for log in overlay.logs:
-        assert [ex.precondition for ex in log] == ["passed"]
+        assert [ex.precondition.outcome for ex in log] == ["passed"]
 
 
 def engine_issued_violations(exchanges: Sequence[Exchange]) -> list[str]:

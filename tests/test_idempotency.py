@@ -4,7 +4,7 @@ import threading
 from dataclasses import replace
 
 from irimi import idempotency, servicemap, wire
-from irimi.exchange import Request
+from irimi.exchange import Precondition, Request
 from irimi.idempotency import FirstAnswer, Store
 from irimi.servicemap import Route
 
@@ -47,9 +47,7 @@ def _stored(body: bytes = b'{"id": "re_MINTED1"}') -> FirstAnswer:
         content_type="application/json",
         answered_by="fake-L1",
         flags=(),
-        precondition="passed",
-        rejection_code="",
-        currency="usd",
+        precondition=Precondition("passed", "", "usd"),
     )
 
 

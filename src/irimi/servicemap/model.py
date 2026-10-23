@@ -129,7 +129,7 @@ class MapIndex:
         """Every exact host in every loaded map. This is the reverse door's allow-list.
 
         Wildcard patterns are deliberately left out. The reverse door relays one literal host per
-        request and `reverse_door.rewrite_reverse` compares it with `host not in allowed_hosts`; an
+        request and `ingress.rewrite_reverse` compares it with `host not in allowed_hosts`; an
         allow-list holding `*.datadoghq.com` would either never match or have to grow a matcher
         that quietly widens what the door relays. Reach a wildcard host through the door with an
         explicit `--allow-host <host>`.

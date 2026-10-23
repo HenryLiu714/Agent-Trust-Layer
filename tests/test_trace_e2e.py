@@ -33,7 +33,7 @@ import pytest
 from irimi import paths, redact, report, trace
 from irimi.bodies import FORM_CT
 from irimi.cli import main
-from irimi.exchange import Exchange, Flag, Headers, header_value, media_type
+from irimi.exchange import Exchange, Flag, Headers, Precondition, header_value, media_type
 from irimi.servicemap import loader
 from irimi.store import DirectoryStore, StoredRun, StoreReader
 from tests import test_engine_mitm, test_phase_exit
@@ -59,7 +59,14 @@ upstream = test_engine_mitm.upstream
 
 # The fields the live summary prints from: a stored exchange must carry each of them, or a summary
 # printed from the store cannot say what the live one said.
-PHASE2_FIELDS = ("precondition", "rejection_code", "overlay", "issued_by", "would_fire", "currency")
+PHASE2_FIELDS = (
+    "precondition.outcome",
+    "precondition.rejection_code",
+    "overlay",
+    "issued_by",
+    "would_fire",
+    "precondition.currency",
+)
 
 
 class _SpyStore(DirectoryStore):
@@ -190,19 +197,19 @@ def test_the_phase_2_run_under_irimi_shadow_survives_the_trace_format_event_for_
         ("agent", "POST", "/v1/refunds", "fake-L1"),
     ]
     _, check, refund, refunds, charge, recheck, retry = decoded
-    assert (refund.precondition, refund.rejection_code, refund.currency) == ("passed", "", "usd")
+    assert refund.precondition == Precondition("passed", "", "usd")
     assert refund.would_fire == ("refund.created", "charge.refunded")
-    assert (retry.precondition, retry.rejection_code, retry.currency) == (
-        "rejected",
-        "charge_already_refunded",
-        "usd",
-    )
+    assert retry.precondition == Precondition("rejected", "charge_already_refunded", "usd")
     assert retry.would_fire == ()
     assert (refunds.overlay, charge.overlay) == ("full", "full")
     assert (check.issued_by, recheck.issued_by) == ("engine", "engine")
     defaults = {f.name: f.default for f in dataclasses.fields(Exchange)}
     for name in PHASE2_FIELDS:
-        assert any(getattr(ex, name) != defaults[name] for ex in decoded), name
+        head, _, part = name.partition(".")
+        default = getattr(defaults[head], part) if part else defaults[head]
+        values = [getattr(ex, head) for ex in decoded]
+        values = [getattr(v, part) for v in values] if part else values
+        assert any(value != default for value in values), name
 
     # Bodies never go inline: the refund's form body is a ref in the line and a blob beside it,
     # and the retry posted the same bytes, so both lines name one blob.
@@ -353,12 +360,12 @@ def test_the_phase_1_run_through_the_reverse_door_survives_the_trace_format(
         ("forward", "engine", "read"),
         ("reverse", "agent", "write"),
     ]
-    assert (refund.request.host, refund.answered_by, refund.currency) == (
+    assert (refund.request.host, refund.answered_by, refund.precondition.currency) == (
         "api.stripe.com",
         "fake-L1",
         "usd",
     )
-    assert refund.precondition == "passed"
+    assert refund.precondition.outcome == "passed"
     for ex in (read, check, refund):
         assert 0 < ex.started_at <= ex.ended_at
     assert refund.started_at < check.started_at <= check.ended_at <= refund.ended_at

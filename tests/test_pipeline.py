@@ -8,9 +8,9 @@ from irimi import netaddr, wire
 from irimi.classify import Classification, classify, unclassified
 from irimi.delegation import TargetRefused, refuse_self_target, target_url
 from irimi.exchange import Exchange, Flag, Request
+from irimi.ingress import ReverseDoorRefused, detect_door, rewrite_reverse
 from irimi.netaddr import Target, is_loopback, is_self_host
 from irimi.redact import is_credential_header
-from irimi.reverse_door import ReverseDoorRefused, detect_door, rewrite_reverse
 from irimi.wire import attribute_run, parse
 
 

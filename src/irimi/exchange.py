@@ -71,7 +71,7 @@ class Flag(StrEnum):
     # An answer target was chosen and could not be reached or applied, and the agent got a 502.
     TARGET_FAILED = "target-failed"
     # The classify/answer decision itself raised, so the request was answered locally with a 502
-    # (see `IrimiAddon.request`). Not `target-failed`: that one says a target was chosen and
+    # (see `ShadowSession.plan`). Not `target-failed`: that one says a target was chosen and
     # could not be reached; this one says irimi never got as far as choosing.
     DECISION_FAILED = "decision-failed"
     # The request hook refused the request before any decision: it could not be parsed or routed,
@@ -247,6 +247,32 @@ class Response:
 
 
 @dataclass(frozen=True)
+class Precondition:
+    """What the precondition check said of one write, as one value.
+
+    `outcome` is None when nothing was asked (see PreconditionOutcome). `rejection_code` is the
+    machine code the summary prints for a write the real service would have refused: an L3
+    rejection's, or a reused idempotency key's, which no check asked. `currency` is the currency
+    the check read off the object the write names, "" when it read none: the summary uses it only
+    when the request named no currency, and it is never a default or a guess.
+    """
+
+    outcome: PreconditionOutcome | None = None
+    rejection_code: str = ""
+    currency: str = ""
+
+
+@dataclass(frozen=True)
+class WriteOutcome:
+    """What irimi decided about a write it answers itself: the precondition check's result, and
+    the webhook events the real service would have sent. `would_fire` is set only for a write
+    irimi accepted and faked; a rejection, a reused key and a retry list nothing."""
+
+    precondition: Precondition = Precondition()
+    would_fire: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Exchange:
     request: Request
     response: Response | None
@@ -265,13 +291,9 @@ class Exchange:
     # a read taken before any write. `full` or `partial` says it did consider it, and `partial`
     # can sit on an unchanged body: see OverlayFidelity.
     overlay: OverlayFidelity | None = None
-    # What L3 decided about this write before it was faked. None when nothing was asked -
-    # a read, a route with no `precondition:` - see PreconditionOutcome.
-    precondition: PreconditionOutcome | None = None
-    # The machine code of an L3 rejection, for the summary line. "" for everything else,
-    # including a rejection's own modeled body when the service sends no code of its own - see
-    # `services.Rejection`.
-    rejection_code: str = ""
+    # What the precondition check said of this write. Its outcome is None when nothing was asked:
+    # a read, a route with no `precondition:`.
+    precondition: Precondition = Precondition()
     # Who asked for this exchange: the agent, or irimi itself to decide about a write.
     issued_by: IssuedBy = "agent"
     # The webhook events this write would have caused the real service to send, off its route's
@@ -280,12 +302,6 @@ class Exchange:
     # because in the first two cases nothing would have happened and in the third the events are
     # already on the first write's own exchange. Empty for every read. Nothing is delivered.
     would_fire: tuple[str, ...] = field(default_factory=tuple)
-    # The currency this write's amounts are denominated in, read off the document irimi itself
-    # read before faking it: the L3 precondition read. "" when no such read happened, or
-    # when its document named none. The summary uses it only when the request named no currency,
-    # as `stripe.Refund.create(charge=, amount=)` does not. Never a default and never a guess -
-    # see `services.Check.currency`.
-    currency: str = ""
     # When this exchange began and ended, in wall-clock `time.time()` seconds. An agent's
     # exchange starts when the request hook first parses the flow and ends when the hook that
     # finishes it builds this record; an engine-issued read spans its `Reader` call. 0.0 only for
@@ -362,7 +378,7 @@ def is_authored_write(exchange: Exchange) -> bool:
         exchange.kind not in LIVE_KINDS
         and exchange.answered_by not in ("live", "delegated", "irimi")
         and Flag.DECISION_FAILED not in exchange.flags
-        and exchange.precondition != "rejected"
+        and exchange.precondition.outcome != "rejected"
         and not any(flag in exchange.flags for flag in IDEMPOTENCY_FLAGS)
     )
 

@@ -2,7 +2,7 @@ import json
 import re
 import socket
 import threading
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace
 
@@ -12,7 +12,7 @@ from irimi import bodies, delegation, reader, servicemap, services
 from irimi.classify import Classification, classify
 from irimi.exchange import Exchange, Flag, Request, Response
 from irimi.netaddr import Target
-from irimi.policy import ShadowPolicy
+from irimi.policy import Decided, Delegate, Respond, ShadowPolicy
 from irimi.reader import UpstreamReader
 from irimi.servicemap import IdSpec
 from irimi.services import generic
@@ -42,15 +42,63 @@ def _req(
     )
 
 
+@dataclass(frozen=True)
+class Flat:
+    """A policy's `Decided`, flattened into the fields these tests assert on: who answers and
+    with what, and what irimi decided about the write."""
+
+    answered_by: str
+    response: Response | None
+    flags: tuple
+    issued: tuple
+    forward_to: delegation.ForwardTo | None = None
+    precondition: str | None = None
+    rejection_code: str = ""
+    currency: str = ""
+    would_fire: tuple = ()
+    overlay: str | None = None
+
+
+def flat(decided: Decided) -> Flat:
+    d, flags, issued = decided.decision, decided.flags, decided.issued
+    if isinstance(d, Respond):
+        p = d.outcome.precondition
+        return Flat(
+            d.answered_by,
+            d.response,
+            flags,
+            issued,
+            None,
+            p.outcome,
+            p.rejection_code,
+            p.currency,
+            d.outcome.would_fire,
+            d.overlay,
+        )
+    if isinstance(d, Delegate):
+        p = d.precondition
+        return Flat(
+            d.answered_by, None, flags, issued, d.target, p.outcome, p.rejection_code, p.currency
+        )
+    return Flat(d.answered_by, None, flags, issued)
+
+
+def answer(policy, request, classification, write_log=(), run_id=""):
+    """`policy`'s decision, flattened, with the answer target resolved first, as the session
+    resolves it."""
+    target = delegation.delegate(request, classification)
+    return flat(policy.decide(request, classification, write_log, run_id, target))
+
+
 def _answer(request: Request):
     """Classify against the shipped maps, then answer - the same order the addon uses."""
-    return ShadowPolicy().answer(request, classify(request, SHIPPED))
+    return answer(ShadowPolicy(), request, classify(request, SHIPPED))
 
 
 @pytest.mark.parametrize("kind", ["read", "llm", "telemetry"])
 def test_shadow_forwards_live(kind):
     cls = replace(classify(_req(), SHIPPED), kind=kind)
-    ans = ShadowPolicy().answer(_req(), cls)
+    ans = answer(ShadowPolicy(), _req(), cls)
     assert ans.answered_by == "live"
     assert ans.response is None
     assert ans.flags == ()
@@ -59,7 +107,7 @@ def test_shadow_forwards_live(kind):
 @pytest.mark.parametrize("kind", ["write", "unknown"])
 def test_shadow_fakes_l0(kind):
     cls = replace(classify(_req("POST"), SHIPPED), kind=kind)
-    ans = ShadowPolicy().answer(_req("POST"), cls)
+    ans = answer(ShadowPolicy(), _req("POST"), cls)
     assert ans.answered_by == "fake-L0"
     assert isinstance(ans.response, Response)
     assert ans.response.status == 200
@@ -71,7 +119,7 @@ def test_shadow_fakes_l0(kind):
 def test_shadow_policy_shape():
     p = ShadowPolicy()
     assert p.name == "shadow"
-    assert callable(p.answer)
+    assert callable(p.decide)
 
 
 def test_unmapped_write_reflects_its_own_fields_and_nothing_else():
@@ -1050,7 +1098,7 @@ def _targeted_index(targets=(), target_reads=()):
 
 
 def _answer_with(index, request):
-    return ShadowPolicy().answer(request, classify(request, index))
+    return answer(ShadowPolicy(), request, classify(request, index))
 
 
 def test_a_route_target_makes_the_answer_delegated_not_faked():
@@ -1395,7 +1443,7 @@ def _refund_request(body: bytes = b"charge=ch_REAL&amount=4900") -> Request:
 def _checked(reader, request, index=SHIPPED, write_log=()):
     """Answer `request` the way the shadow run will: a real reader, the run's maps, its log."""
     policy = ShadowPolicy(reader=reader, maps=index)
-    return policy.answer(request, classify(request, index), write_log, "t3st")
+    return answer(policy, request, classify(request, index), write_log, "t3st")
 
 
 def test_a_refund_of_a_fully_refunded_charge_is_answered_with_stripes_own_refusal():
@@ -1439,7 +1487,7 @@ def test_a_policy_with_no_reader_does_not_do_l3_at_all():
     fixture and the outcome is None, not `not_evaluable`. Every other bare construction in the
     suite relies on this."""
     request = _refund_request()
-    ans = ShadowPolicy().answer(request, classify(request, SHIPPED))
+    ans = answer(ShadowPolicy(), request, classify(request, SHIPPED))
     assert ans.precondition is None
     assert ans.issued == ()
     assert ans.answered_by == "fake-L1"
@@ -1454,7 +1502,7 @@ def test_asked_and_could_not_tell_is_not_the_same_as_never_asked():
     asked = _checked(_reader(_json(200, ["not", "an", "object"])), request)
     assert asked.precondition == "not_evaluable"
     assert asked.answered_by == "fake-L1"  # still faked, at its ordinary level
-    never = ShadowPolicy().answer(request, classify(request, SHIPPED))
+    never = answer(ShadowPolicy(), request, classify(request, SHIPPED))
     assert never.precondition is None
 
 
@@ -1488,7 +1536,7 @@ def test_a_rejected_check_carries_it_too():
 def test_a_policy_with_no_reader_offers_no_currency():
     """Never asked, so nothing claimed - the same rule `precondition: None` follows."""
     request = _refund_request()
-    ans = ShadowPolicy().answer(request, classify(request, SHIPPED))
+    ans = answer(ShadowPolicy(), request, classify(request, SHIPPED))
     assert ans.currency == ""
 
 
@@ -1847,7 +1895,7 @@ def _cancel_request(intent: str) -> Request:
 
 def _ask(policy: ShadowPolicy, request: Request):
     """`_checked`, but against a policy the test holds, so two calls share one run's store."""
-    return policy.answer(request, classify(request, SHIPPED), (), "t3st")
+    return answer(policy, request, classify(request, SHIPPED), (), "t3st")
 
 
 def test_the_same_key_and_params_replay_the_first_answer():
@@ -2075,8 +2123,10 @@ def test_every_precondition_outcome_but_rejected_lists_the_webhooks(reader, outc
     """`precondition` has four states, and three of them mean irimi faked the write: it passed,
     irimi could not find out, or nothing was asked. All three are accepted writes and list their
     events; only `rejected` lists nothing."""
-    ans = ShadowPolicy(reader=reader, maps=SHIPPED).answer(
-        _refund_request(), classify(_refund_request(), SHIPPED)
+    ans = answer(
+        ShadowPolicy(reader=reader, maps=SHIPPED),
+        _refund_request(),
+        classify(_refund_request(), SHIPPED),
     )
     assert ans.precondition == outcome
     assert ans.would_fire == ("refund.created", "charge.refunded")

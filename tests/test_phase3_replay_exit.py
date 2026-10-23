@@ -328,7 +328,10 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
         ("tool", "record_decision", "write", "shadow"),
     ]
     [refund] = [e for e in events if isinstance(e, Exchange) and e.kind == "write"]
-    assert (refund.request.body, refund.precondition) == (b"charge=ch_A&amount=4900", "passed")
+    assert (refund.request.body, refund.precondition.outcome) == (
+        b"charge=ch_A&amount=4900",
+        "passed",
+    )
     # Feature 3: the read tool ran for real, and the write tool's stand-in in its body's place.
     tools = _tool_calls(reader, source)
     assert tools["lookup_customer"].result == {"charge": "ch_A", "name": CUSTOMER}

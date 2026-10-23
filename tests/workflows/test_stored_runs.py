@@ -637,8 +637,8 @@ def test_the_corpus_gives_irimi_compare_s_universal_check_something_to_catch(run
             ]
             writes = [e for e in actions if isinstance(e, Exchange)]
             kinds = [isinstance(e, ToolCall) for e in actions]
-            seen["answered"] += any(e.precondition != "rejected" for e in writes)
-            seen["would fail"] += any(e.precondition == "rejected" for e in writes)
+            seen["answered"] += any(e.precondition.outcome != "rejected" for e in writes)
+            seen["would fail"] += any(e.precondition.outcome == "rejected" for e in writes)
             seen["stood in"] += any(kinds)
             seen["cut"] += any(Flag.BODY_TRUNCATED in e.flags for e in writes)
             seen["interleaved"] += kinds != sorted(kinds)

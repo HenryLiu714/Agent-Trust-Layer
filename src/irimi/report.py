@@ -280,7 +280,7 @@ def _fields(exchange: Exchange, route: Route | None) -> tuple[dict[str, object],
     fields.update(reflect(exchange.request))
     # `or` and not `setdefault`: a body that sent `currency=` sent nothing, and falls back to the
     # L3 read's currency like a body that sent no key at all.
-    return fields, fields.get("currency") or exchange.currency
+    return fields, fields.get("currency") or exchange.precondition.currency
 
 
 def render_human(template: str, exchange: Exchange, route: Route | None) -> str:
@@ -325,7 +325,8 @@ def _amounts(exchange: Exchange, route: Route | None) -> list[tuple[int, str]]:
 def _would_fail(exchange: Exchange) -> bool:
     """A faked write the real service would have refused: the precondition check rejected it, or
     this run had already used its idempotency key for a different write."""
-    return exchange.precondition == "rejected" or Flag.IDEMPOTENCY_CONFLICT in exchange.flags
+    rejected = exchange.precondition.outcome == "rejected"
+    return rejected or Flag.IDEMPOTENCY_CONFLICT in exchange.flags
 
 
 def _status_of(exchange: Exchange) -> str:
@@ -469,7 +470,7 @@ def check_reads(exchanges: Sequence[Exchange]) -> dict[int, Exchange]:
         asked = (
             is_intercepted(ex)
             and ex.answered_by.startswith("fake-")
-            and ex.precondition is not None
+            and ex.precondition.outcome is not None
             and Flag.FROM_RECORDING not in ex.flags
         )
         if not asked:
@@ -544,11 +545,11 @@ def write_sentence(
     # A write the real service would have refused, and irimi is saying so. `✗`, not `○`, and the
     # code is the one the agent's SDK raised on.
     if _would_fail(exchange):
-        code = exchange.rejection_code or "rejected"
+        code = exchange.precondition.rejection_code or "rejected"
         return f"{REJECTED_MARKER} {what}  {FAKED}; {WOULD_FAIL}: {code}"
-    if exchange.precondition == "passed":
+    if exchange.precondition.outcome == "passed":
         status = CHECKED
-    elif exchange.precondition == "not_evaluable":
+    elif exchange.precondition.outcome == "not_evaluable":
         status = f"{COULD_NOT_CHECK}: {_why_not_checked(exchange, check_read)}"
     elif exchange.kind == "unknown":
         status = f"{NOT_CHECKED} ({UNCLASSIFIED})"

@@ -64,8 +64,9 @@ def _has_non_finite(value: Any) -> bool:
 
     json.loads accepts all three and json.dumps writes them straight back out, so the echo would
     be a body a strict JSON parser refuses. This keeps them out of the single `json.dumps` in
-    `fake_response`; the `try` in `answer` is what makes that call safe outright. A walk, not a
-    throwaway serialization of the whole body, which would cost a second full pass over a large one.
+    `fake_response`; the `try` in `ShadowPolicy.decide` is what makes that call safe outright. A
+    walk, not a throwaway serialization of the whole body, which would cost a second full pass
+    over a large one.
     """
     if isinstance(value, float):
         return not math.isfinite(value)

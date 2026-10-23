@@ -17,6 +17,7 @@ from irimi.exchange import (
     LIVE_KINDS,
     Exchange,
     Flag,
+    Precondition,
     Request,
     Response,
 )
@@ -24,6 +25,7 @@ from irimi.policy import ReplayPolicy, ShadowPolicy
 from irimi.reader import UpstreamReader, answered_as
 from irimi.recording import Recording, RecordingReader
 from irimi.trace import ErrorInfo, TelemetrySeen, ToolCall
+from tests.test_policy import answer as decided
 
 SHIPPED = servicemap.MapIndex(tuple(servicemap.loader.load_shipped()))
 KEY = b"k" * 32
@@ -52,6 +54,11 @@ def _stored(request, response=OK, **fields):
     with KEY, as `DirectoryStore` redacts before it writes."""
     cls = classify(request, SHIPPED)
     kind = fields.pop("kind", cls.kind)
+    precondition = Precondition(
+        fields.pop("precondition", None),
+        fields.pop("rejection_code", ""),
+        fields.pop("currency", ""),
+    )
     ex = Exchange(
         request=request,
         response=response,
@@ -61,6 +68,7 @@ def _stored(request, response=OK, **fields):
         answered_by=fields.pop("answered_by", "live" if kind in LIVE_KINDS else "fake-L0"),
         run_id="rec",
         flags=cls.flags + tuple(fields.pop("flags", ())),
+        precondition=precondition,
         **fields,
     )
     return redact.redact_exchange(ex, KEY)
@@ -99,7 +107,7 @@ def _recorded_refund(amount=100, **fields):
 
 
 def _answer(policy, request, write_log=(), run_id="rep"):
-    return policy.answer(request, classify(request, SHIPPED), write_log, run_id)
+    return decided(policy, request, classify(request, SHIPPED), write_log, run_id)
 
 
 # -------------------------------------------------------------------------------- recording
@@ -380,7 +388,7 @@ def test_a_delegated_write_is_never_looked_up_and_never_flagged():
     )
     recording = Recording.from_events([_recorded_refund()], KEY, maps)
     request = _refund()
-    answer = ReplayPolicy(recording, maps).answer(request, classify(request, maps))
+    answer = decided(ReplayPolicy(recording, maps), request, classify(request, maps))
     assert (answer.answered_by, Flag.REPLAY_MISS in answer.flags) == ("delegated", False)
 
 
@@ -821,7 +829,7 @@ def test_a_checked_write_after_the_replay_diverged_is_checked_again():
     policy = ReplayPolicy(_recording(engine, recorded), SHIPPED)
     new = _keyed_refund(2000, "x")
     cls = classify(new, SHIPPED)
-    made = policy.answer(new, cls, (), "rep")
+    made = decided(policy, new, cls, (), "rep")
     assert made.flags[-1] == Flag.REPLAY_MISS
     logged = Exchange(
         request=new,
@@ -832,7 +840,7 @@ def test_a_checked_write_after_the_replay_diverged_is_checked_again():
         answered_by=made.answered_by,
         run_id="rep",
         flags=made.flags,
-        precondition=made.precondition,
+        precondition=Precondition(made.precondition, made.rejection_code, made.currency),
     )
     answer = _answer(policy, _keyed_refund(4900, "a"), write_log=(logged,))
     assert (answer.response.status, answer.precondition) == (400, "rejected")

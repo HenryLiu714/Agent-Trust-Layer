@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from irimi import limits, trace
-from irimi.exchange import Exchange, Flag, Kind, Request, Response
+from irimi.exchange import Exchange, Flag, Kind, Precondition, Request, Response
 from irimi.trace import (
     SCHEMA_VERSION,
     BodyRef,
@@ -183,7 +183,9 @@ def test_the_optional_fields_survive_as_null():
         exit_code=None,
     )
     assert trace.run_from_json(_json_round_trip(trace.run_to_json(record))) == record
-    ex = dataclasses.replace(_filled(Exchange), response=None, overlay=None, precondition=None)
+    ex = dataclasses.replace(
+        _filled(Exchange), response=None, overlay=None, precondition=Precondition()
+    )
     blobs = _Blobs()
     encoded = _json_round_trip(trace.exchange_to_json(ex, blobs.put))
     assert encoded["response"] is None
@@ -898,7 +900,7 @@ def test_the_documented_example_decodes_with_the_codecs():
     assert [seq for seq, _ in lines] == [1, 2, 3, 4]
     (_, check), (_, refund), (_, tool), (_, seen) = lines
     assert isinstance(check, Exchange) and isinstance(refund, Exchange)
-    assert (check.issued_by, refund.precondition) == ("engine", "passed")
+    assert (check.issued_by, refund.precondition.outcome) == ("engine", "passed")
     assert refund.request.body == b"charge=ch_3PqA1&amount=4900"
     assert isinstance(tool, ToolCall) and isinstance(seen, TelemetrySeen)
     assert all(ev.run_id == record.run_id for _, ev in lines)

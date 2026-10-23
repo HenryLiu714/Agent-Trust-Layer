@@ -306,7 +306,7 @@ def phase2_stub(tmp_path, monkeypatch):
     maps = _maps(tmp_path, monkeypatch, doc=PRECONDITION_STRIPE_MAP)
     eng, seen, stop = _start(
         _config(tmp_path, monkeypatch, maps=maps),
-        overlay=ServiceOverlay(maps),
+        overlay=ServiceOverlay(),
         policy=policy.ShadowPolicy(reader=reader.UpstreamReader(), maps=maps),
     )
     yield eng.listen_port(), srv.server_address[1], seen, maps
@@ -395,8 +395,8 @@ def test_the_refund_agents_four_calls_through_the_forward_proxy_are_answered_sha
         ("read", "GET", f"/v1/charges/{PHASE2_CHARGE}"),
     ] * 2
     writes = [ex for ex in seen if ex.kind == "write"]
-    assert [ex.precondition for ex in writes] == ["passed", "rejected"]
-    assert writes[1].rejection_code == "charge_already_refunded"
+    assert [ex.precondition.outcome for ex in writes] == ["passed", "rejected"]
+    assert writes[1].precondition.rejection_code == "charge_already_refunded"
     # On the exchange, not only in the summary line: the refused refund would have fired nothing,
     # and the closing clause must be built from exactly this.
     assert [ex.would_fire for ex in writes] == [("refund.created", "charge.refunded"), ()]

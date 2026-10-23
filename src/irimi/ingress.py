@@ -171,7 +171,9 @@ def rewrite_reverse(request: Request, allowed_hosts: frozenset[str]) -> Request:
             "e.g. /api.stripe.com/v1/charges"
         )
     if host not in allowed_hosts:
-        raise ReverseDoorRefused(f"base-URL host {host!r} is not in a loaded map or --allow-host")
+        raise ReverseDoorRefused(
+            f"base-URL host {host!r} is not in a loaded map or --base-url-host"
+        )
     try:
         port = int(port_text) if port_text else REVERSE_DEFAULT_PORT
     except ValueError:

@@ -1049,7 +1049,7 @@ def test_an_unmapped_write_is_still_l0_with_no_flag():
 
 def test_every_shipped_fixture_route_names_an_object_that_ships():
     """A `fixture:` naming an object the package does not have degrades to L0 silently but for
-    the flag, which is the `--allow-host` class of bug: configured, never consulted."""
+    the flag, which is the `--base-url-host` class of bug: configured, never consulted."""
     for sm in SHIPPED.services:
         for route in sm.routes:
             if route.fixture:

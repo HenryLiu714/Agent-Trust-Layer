@@ -124,7 +124,7 @@ def test_the_refunds_own_charge_refunded_event_is_a_second_run_with_no_calls(run
 
 
 def test_under_serve_the_cascade_is_two_runs_and_two_summaries_the_second_empty(run_workflow):
-    """Under `irimi shadow --serve` each delivery is its own run, printed when it ends: the
+    """Under `irimi serve` each delivery is its own run, printed when it ends: the
     dispute's run with its three faked writes and what they would have fired, and the fed-back
     `charge.refunded`'s run with no calls at all."""
     serve = run_workflow(W, "cascade", "serve")

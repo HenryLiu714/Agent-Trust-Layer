@@ -422,7 +422,7 @@ def test_a_replay_s_run_json_naming_no_run_is_skipped_by_list_and_refused_by_sho
             ["recorded", _local(HAND_BUILT_AT), "1.0s", "ok", "process", "-"]
             + ["0 exchanges", "0 writes"]
         ]
-        assert main(["runs", "show", "replayed"]) == 1
+        assert main(["runs", "show", "replayed"]) == 2
         assert capfd.readouterr() == (
             "",
             f"error: run replayed could not be read: {run_json}: 'replay_of' is not a run id "
@@ -511,7 +511,7 @@ def test_runs_show_takes_a_prefix_only_one_run_id_starts_with(home, capfd):
     s.close()
     assert main(["runs", "show", "9c20"]) == 0
     assert capfd.readouterr().out.splitlines()[0] == "run: 9c207d4b1c0178f3"
-    assert main(["runs", "show", "9c"]) == 1
+    assert main(["runs", "show", "9c"]) == 2
     assert capfd.readouterr() == (
         "",
         "error: run id 9c is ambiguous; it starts 9c207d4b1c0178f3, 9c3aa0000000beef\n",
@@ -530,7 +530,7 @@ def test_runs_show_with_no_run_id_shows_the_newest_run(home, capfd):
 
 
 def test_runs_show_last_in_an_empty_store_says_there_are_no_runs(home, capfd):
-    assert main(["runs", "show"]) == 1
+    assert main(["runs", "show"]) == 2
     assert capfd.readouterr() == ("", f"error: no runs in {home / 'store'}\n")
 
 
@@ -628,7 +628,7 @@ def test_runs_show_cuts_long_args_and_says_how_many_events_were_dropped(home, ca
 
 
 def test_runs_show_an_unknown_id_fails_with_the_documented_message(home, capfd):
-    assert main(["runs", "show", "nope"]) == 1
+    assert main(["runs", "show", "nope"]) == 2
     out, err = capfd.readouterr()
     assert out == ""
     assert err == f"error: no run nope in {home / 'store'}\n"
@@ -783,7 +783,7 @@ def test_runs_show_and_list_name_an_event_nested_too_deep_to_quote_as_damage(hom
     deep = "[" * depth + "]" * depth
     events.write_text(stored.replace('"name": "db.mark_refunded"', f'"name": {deep}'))
     assert events.read_text() != stored
-    assert main(["runs", "show", "handbuilt"]) == 1
+    assert main(["runs", "show", "handbuilt"]) == 2
     out, err = capfd.readouterr()
     refused = "error: run handbuilt could not be read: "
     assert out == "" and err.startswith(refused) and err.count("\n") == 1 and "[[" not in err
@@ -806,7 +806,7 @@ def test_runs_show_names_a_run_json_nested_too_deep_to_quote_as_damage(home, cap
     stored = run_json.read_text()
     run_json.write_text(stored.replace('"sdk_version": "0.0.0"', f'"sdk_version": {deep}'))
     assert run_json.read_text() != stored
-    assert main(["runs", "show", "handbuilt"]) == 1
+    assert main(["runs", "show", "handbuilt"]) == 2
     assert capfd.readouterr() == (
         "",
         f"error: run handbuilt could not be read: {run_json}: 'sdk_version' is a list, not a "

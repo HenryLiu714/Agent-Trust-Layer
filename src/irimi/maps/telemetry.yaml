@@ -17,7 +17,7 @@
 # Several hosts here are wildcard patterns (`*.ingest.sentry.io`), because these vendors hand every
 # project its own subdomain. A pattern classifies traffic sent through the proxy only: it does not
 # admit the host in base-URL mode, so reaching one through `http://127.0.0.1:4000/<host>/...` needs
-# an explicit `--allow-host <host>`. Quote every wildcard: a bare `*` opens a YAML alias.
+# an explicit `--base-url-host <host>`. Quote every wildcard: a bare `*` opens a YAML alias.
 version: 1
 service: langsmith
 style: rest

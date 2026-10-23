@@ -14,7 +14,7 @@
 A new workflow is picked up by name (`harness.run.workflows`), so it is held to these without an
 edit here.
 
-Every scenario runs under `irimi shadow --serve` too (`Scenario.serve_flags`), and is held
+Every scenario runs under `irimi serve` too (`Scenario.serve_flags`), and is held
 to the same five there, and to what serve mode owes each run whose end it took: one
 `--- run <id> ---` block, equal to that run's stored summary.
 """

@@ -142,7 +142,7 @@ def test_a_post_fixture_the_fixtures_file_lacks_is_refused_and_nothing_runs(run_
     route naming an object `slack.json` lacks refuses the map: no proxy, no store, no agent."""
     for mode in MODES:
         shadow = run_workflow(W, "post_fixture_missing", mode)
-        assert shadow.exit_code == 1
+        assert shadow.exit_code == 2
         assert shadow.irimi == []
         assert shadow.obs == []
         assert shadow.internet.requests() == []

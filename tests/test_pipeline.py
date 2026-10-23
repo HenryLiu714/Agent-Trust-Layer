@@ -505,7 +505,7 @@ def test_rewrite_reverse_refuses_unlisted_host():
     with pytest.raises(ReverseDoorRefused) as exc:
         rewrite_reverse(_door_req("/evil.example/x"), ALLOWED)
     assert "evil.example" in str(exc.value)
-    assert "--allow-host" in str(exc.value)
+    assert "--base-url-host" in str(exc.value)
 
 
 def test_rewrite_reverse_refuses_missing_host():
@@ -709,8 +709,8 @@ def test_a_listed_intake_path_is_still_telemetry(tmp_path, monkeypatch):
 
 
 def test_a_telemetry_wildcard_is_not_a_reverse_door_host(tmp_path, monkeypatch):
-    """Decision: a wildcard classifies through the forward door only. `--allow-host` is the way in
-    through the reverse door, and `rewrite_reverse` refuses the host until someone passes it."""
+    """Decision: a wildcard classifies through the forward door only. `--base-url-host` is the way
+    in through the reverse door, and `rewrite_reverse` refuses the host until someone passes it."""
     index = _index(tmp_path, monkeypatch)
     assert "*.ingest.sentry.io" not in index.hosts
     assert "o0.ingest.sentry.io" not in index.hosts
@@ -786,7 +786,7 @@ def test_a_target_on_another_port_is_allowed():
 def test_a_target_naming_the_address_irimi_was_reached_at_is_refused(monkeypatch):
     """Bound wider than loopback, irimi is also the address a connection reached it at, and a
     name resolving to it, as `detect_door` says of a request. A target there, which only
-    `--allow-target-host` lets off loopback, is irimi's own listener too: refused as one, never
+    `--allow-remote-target` lets off loopback, is irimi's own listener too: refused as one, never
     dialled to be refused again by the reverse door."""
     import socket
 

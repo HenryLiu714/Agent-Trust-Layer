@@ -43,7 +43,7 @@ def test_init_incomplete_dir_errors_without_force(tmp_path, monkeypatch, capsys)
     p = _setup(tmp_path, monkeypatch)
     assert main(["init"]) == 0
     p.cert.unlink()
-    assert main(["init"]) == 1
+    assert main(["init"]) == 2
     assert "incomplete" in capsys.readouterr().err
     assert main(["init", "--force"]) == 0
     assert p.cert.is_file()
@@ -55,7 +55,7 @@ def test_init_refuses_symlinked_key(tmp_path, monkeypatch, capsys):
     victim = tmp_path / "victim"
     victim.write_bytes(b"do not touch")
     p.key.symlink_to(victim)
-    assert main(["init", "--force"]) == 1
+    assert main(["init", "--force"]) == 2
     assert capsys.readouterr().err.splitlines() == [
         f"error: could not write the CA to {p.key.parent}: too many levels of symbolic links"
     ]

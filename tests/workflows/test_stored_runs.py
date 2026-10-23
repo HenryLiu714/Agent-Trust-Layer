@@ -7,7 +7,7 @@ exchange irimi reported on its terminal is on disk exactly once, and is, field b
 exchange the engine handed the store with its secrets redacted; the store is private and holds no
 half-written line; and a bare run, with no irimi, stores nothing.
 
-Every scenario runs under `irimi shadow --serve` too, and the promises that do not depend on
+Every scenario runs under `irimi serve` too, and the promises that do not depend on
 irimi having launched the agent are held there as well (`MODE_CASES`): no process run is stored,
 and a request or tool call no run names lands in `unattributed/` instead of in it.
 """
@@ -70,7 +70,7 @@ def started(result: Result) -> bool:
     """irimi printed its banner, `irimi shadow`'s or serve's: its engine ran, so it had
     opened its store."""
     return any(
-        line.startswith(("irimi shadow · run ", "irimi shadow --serve · run: "))
+        line.startswith(("irimi shadow · run ", "irimi serve · run: "))
         and " · listening on " in line
         for line in result.irimi
     )
@@ -477,7 +477,7 @@ SERVE_IDS = [f"{n}:{s}" for n, s in SERVE_CASES]
 def test_every_exchange_and_tool_call_a_serve_reported_is_stored_once_in_its_run(
     run_workflow, name, scenario
 ):
-    """Under `irimi shadow --serve` what irimi printed as it happened is what it stored:
+    """Under `irimi serve` what irimi printed as it happened is what it stored:
     each exchange line and each tool-call line once, and each event in the run that named it, or
     in `unattributed/` when none did. No process run holds the rest. Which run holds each tool
     call and each request is checked against the agent's own log by the checks above, run in

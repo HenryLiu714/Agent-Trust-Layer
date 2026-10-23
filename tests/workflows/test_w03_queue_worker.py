@@ -45,7 +45,7 @@ def ends(result):
 
 @pytest.mark.parametrize("scenario", ["threads_8", "asyncio_8"])
 def test_eight_concurrent_runs_print_eight_summaries_under_serve(run_workflow, scenario):
-    """Under `irimi shadow --serve` the same eight messages are eight runs, and each run's
+    """Under `irimi serve` the same eight messages are eight runs, and each run's
     summary is printed when the SDK ends it: eight `--- run <id> ---` blocks, one per run, each
     holding its own refund and no other run's. The universal checks hold each block to its stored
     summary (`test_invariants.py`). No process run exists to hold anything."""

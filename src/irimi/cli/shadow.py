@@ -6,14 +6,13 @@ import os
 import shutil
 import subprocess
 import sys
-import threading
 import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
-from irimi import runner
-from irimi.cli import CliError, UsageError, serve, session
-from irimi.cli.options import DEFAULT_PORT, add_proxy_options
+from irimi import exitcodes, runner
+from irimi.cli import CliError, UsageError, session
+from irimi.cli.options import SHADOW_EXIT_CODES, add_proxy_options, epilog, help_formatted
 from irimi.exchange import Exchange
 from irimi.protocol.env import AGENT_VERSION_ENV
 from irimi.protocol.replay_files import CallOutcome, read_call_outcome
@@ -23,51 +22,37 @@ from irimi.report.summary import Live, summary_lines
 from irimi.runner import ChildCall
 from irimi.trace import UNATTRIBUTED, Event, RunRecord, ToolCall, Trigger
 
-SIGINT_EXIT_CODE = 130  # 128 + SIGINT, the shell convention for a Ctrl-C'd command
-SIGTERM_EXIT_CODE = 143  # 128 + SIGTERM: `irimi shadow` terminated before its command started
+USAGE = "irimi shadow [options] -- COMMAND [ARGS...]"
 
 
 def register(subparsers: "argparse._SubParsersAction[Any]") -> None:
     shadow = subparsers.add_parser(
-        "shadow", allow_abbrev=False, help="run a command with its HTTP(S) traffic in shadow mode"
+        "shadow",
+        **help_formatted(
+            help="run a command with its HTTP(S) writes faked, then summarize",
+            usage=USAGE,
+            description="Run COMMAND with its HTTP(S) traffic sent through irimi's proxy: reads "
+            "go to the real service,\nwrites are faked. When it exits, print what it would have "
+            "written, and store the run.",
+            epilog=epilog(
+                ["irimi shadow -- python3 agent.py", "irimi shadow --port 4100 -- npm start"],
+                SHADOW_EXIT_CODES,
+            ),
+        ),
     )
-    add_proxy_options(shadow, None)
-    shadow.add_argument(
-        "--serve",
-        action="store_true",
-        help="run no command: serve until SIGINT or SIGTERM, as a sidecar to an agent pointed "
-        "at irimi with HTTPS_PROXY, and print each run's summary as the SDK ends it",
-    )
-    shadow.add_argument(
-        "cmd",
-        nargs=argparse.REMAINDER,
-        metavar="-- <command> [args...]",
-        help="the command to run under the proxy",
-    )
-    shadow.set_defaults(func=cmd_shadow)
+    add_proxy_options(shadow, 0)
+    # What follows `--`, which `main` splits off before argparse sees it.
+    shadow.set_defaults(func=cmd_shadow, cmd=[])
 
 
 def cmd_shadow(
     args: argparse.Namespace,
-    stop: threading.Event | None = None,
     *,
     engine_factory: session.EngineFactory = session.build_engine,
 ) -> int:
     cmd = list(args.cmd)
-    if cmd and cmd[0] == "--":
-        cmd = cmd[1:]
-    if args.port is None:
-        # A sidecar's agents are pointed at a fixed port; a child is told whichever port is free.
-        args.port = DEFAULT_PORT if args.serve else 0
-    if args.serve:
-        # Serve mode launches nothing, so a command with it is a mistake in the invocation, and is
-        # answered as argparse answers one: usage and exit 2. `stop` is serve's.
-        if cmd:
-            raise UsageError("--serve runs no command: drop the `-- <command>`, or the --serve")
-        return serve.cmd_serve(args, stop, engine_factory=engine_factory)
     if not cmd:
-        print("error: nothing to run; usage: irimi shadow -- <command> [args...]", file=sys.stderr)
-        return 1
+        raise UsageError(f"nothing to run: {USAGE}")
     with runner.passing_sigterm_to(runner.Child()) as child:
         return _run_shadow(args, cmd, child, engine_factory)
 
@@ -81,7 +66,7 @@ def _run_shadow(
     """`irimi shadow -- <cmd>` inside its SIGTERM handler: the run, start to summary."""
     run = session.prepare_run(args)
     if run is None:
-        return 1
+        return exitcodes.ERROR
     record = process_run(run.run_id, cmd)
     with run:
         ran = run_child(args, run, child, ChildSpec("shadow", cmd, record), engine_factory)
@@ -160,7 +145,7 @@ ChildStatus = Literal["not-started", "not-spawned", "interrupted", "ran"]
 class ChildResult:
     """A child run under the engine: its exit code, how far it got (`ChildStatus`), how long it
     ran, and what its summary reads of every exchange and tool call the engine reported meanwhile
-    (`model.for_summary`), in the order they came. Short of "ran", `code` is irimi's own (1, 126,
+    (`model.for_summary`), in the order they came. Short of "ran", `code` is irimi's own (2, 126,
     127, 130, 143). `stopped` is the exit code of a SIGINT or SIGTERM that reached irimi while the
     child ran, and `call` how a replay's call ended, as its child wrote it."""
 
@@ -179,13 +164,14 @@ def _cannot_run(program: str) -> tuple[int, str] | None:
     can. Asked before the engine starts, so a mistyped command prints no banner and stores no
     run."""
     if os.sep not in program and (os.altsep is None or os.altsep not in program):
-        return None if shutil.which(program) else (127, f"command not found: {program}")
+        found = shutil.which(program)
+        return None if found else (exitcodes.NOT_FOUND, f"command not found: {program}")
     if not os.path.exists(program):
-        return 127, f"command not found: {program}"
+        return exitcodes.NOT_FOUND, f"command not found: {program}"
     if os.path.isdir(program):
-        return 126, f"could not run {program}: it is a directory"
+        return exitcodes.CANNOT_EXEC, f"could not run {program}: it is a directory"
     if not os.access(program, os.X_OK):
-        return 126, f"could not run {program}: permission denied"
+        return exitcodes.CANNOT_EXEC, f"could not run {program}: permission denied"
     return None
 
 
@@ -205,7 +191,7 @@ def run_child(
     if cannot is not None:
         print(f"error: {cannot[1]}", file=sys.stderr)
         return ChildResult(cannot[0], status="not-started")
-    ran = ChildResult(SIGINT_EXIT_CODE, status="interrupted")
+    ran = ChildResult(exitcodes.SIGINT, status="interrupted")
 
     def on_exchange(ex: Exchange) -> None:
         ran.events.append(for_summary(ex))
@@ -231,9 +217,9 @@ def run_child(
         handle = session.start_engine(engine)
     except KeyboardInterrupt:
         print("error: interrupted before the proxy was ready", file=sys.stderr)
-        return ChildResult(SIGINT_EXIT_CODE, status="not-started")
+        return ChildResult(exitcodes.SIGINT, status="not-started")
     if handle is None:
-        return ChildResult(1, status="not-started")
+        return ChildResult(exitcodes.ERROR, status="not-started")
 
     cmd = spec.argv
     try:
@@ -253,7 +239,7 @@ def run_child(
         )
         if child.terminated:  # SIGTERM while irimi started: the command is never run
             print("error: terminated before the command started", file=sys.stderr)
-            ran.code, ran.status = SIGTERM_EXIT_CODE, "not-started"
+            ran.code, ran.status = exitcodes.SIGTERM, "not-started"
             return ran
         # The process run is stored before the child exists, so every exchange it makes lands in
         # a run that already has its record.
@@ -264,11 +250,11 @@ def run_child(
             child.adopt(proc)
         except FileNotFoundError:
             print(f"error: command not found: {cmd[0]}", file=sys.stderr)
-            ran.code, ran.status = 127, "not-spawned"
+            ran.code, ran.status = exitcodes.NOT_FOUND, "not-spawned"
             return ran
         except OSError as exc:
             print(f"error: could not run {cmd[0]}: {exc}", file=sys.stderr)
-            ran.code, ran.status = 126, "not-spawned"
+            ran.code, ran.status = exitcodes.CANNOT_EXEC, "not-spawned"
             return ran
         # The summary's duration is the child's, not the proxy's: what the reader wants to know is
         # how long the agent ran. monotonic, so a clock change mid-run cannot make it negative.
@@ -276,9 +262,9 @@ def run_child(
         ran.code = runner.exit_code_for(runner.wait_for_child(proc, child))
         ran.elapsed = time.monotonic() - started
         if child.terminated or child.interrupted:
-            ran.stopped = SIGTERM_EXIT_CODE if child.terminated else SIGINT_EXIT_CODE
+            ran.stopped = exitcodes.SIGTERM if child.terminated else exitcodes.SIGINT
     except KeyboardInterrupt:  # Ctrl-C outside wait_for_child's own handling
-        ran.code = ran.stopped = SIGINT_EXIT_CODE
+        ran.code = ran.stopped = exitcodes.SIGINT
     finally:
         # The run ends before the store closes, once the engine has stopped. An exchange that
         # finishes after this line is still recorded: a late event is not an error.

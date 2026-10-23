@@ -122,7 +122,7 @@ def load(
     `--target` / `--target-reads` flags. Validation runs last, over the merged result, so a
     non-loopback target is refused however it arrived. Raises MapError on anything wrong, naming
     the source and the rule. `allow_target_hosts` is the set of non-loopback hosts a target may
-    name (`--allow-target-host`).
+    name (`--allow-remote-target`).
     """
     maps = load_shipped(maps_dir)
     override = override_path(cwd)

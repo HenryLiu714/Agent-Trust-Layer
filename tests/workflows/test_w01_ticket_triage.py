@@ -505,7 +505,7 @@ def test_runs_show_and_list_name_the_file_and_line_of_a_damaged_event(run_workfl
     events.write_text("".join([*lines[:reply], damaged, *lines[reply + 1 :]]))
     refused = f"could not be read: {events}, line {reply + 1}: 'name' is a list, not a string"
     assert result.runs("show", run, "--store", str(copy)) == (
-        1,
+        2,
         [],
         [f"error: run {run} {refused}"],
     )
@@ -519,7 +519,7 @@ def test_runs_show_and_list_name_the_file_and_line_of_a_damaged_event(run_workfl
     record.write_text(json.dumps({**stored, "engine_version": [stored["engine_version"]]}))
     refused = f"{record}: 'engine_version' is a list, not a string"
     assert result.runs("show", run, "--store", str(copy)) == (
-        1,
+        2,
         [],
         [f"error: run {run} could not be read: {refused}"],
     )
@@ -638,7 +638,7 @@ def test_irimi_shadow_whose_reader_goes_away_ends_quietly_with_its_run_stored(
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads a directory whatever its mode")
 def test_a_run_irimi_may_not_read_is_named_unreadable_not_missing(shared_store_run, tmp_path):
     """`half_refund`'s run made `chmod 0` in a copy of the store `full_refund` recorded into too:
-    `runs show` exits 1 and `compare` 2, each saying it `could not be read` and why, where both
+    `runs show` and `compare` exit 2, each saying it `could not be read` and why, where both
     said `no run`, and `runs list` warns that it skips it, where it left it out without a word;
     and the copy itself made `chmod 0`, which `runs list` said held no runs."""
     full = shared_store_run(W, "full_refund")
@@ -652,7 +652,7 @@ def test_a_run_irimi_may_not_read_is_named_unreadable_not_missing(shared_store_r
     shut.chmod(0)
     try:
         refused = [f"error: run {b} could not be read: {why}"]
-        assert half.runs("show", b, "--store", str(copy)) == (1, [], refused)
+        assert half.runs("show", b, "--store", str(copy)) == (2, [], refused)
         assert half.command("compare", a, b, "--store", str(copy)) == (2, [], refused)
         # Every run: the store is the session's, which other tests record into.
         listed = _irimi_process(half, "runs", "list", "--store", str(copy), "--limit", "1000")
@@ -666,13 +666,13 @@ def test_a_run_irimi_may_not_read_is_named_unreadable_not_missing(shared_store_r
     copy.chmod(0)
     try:
         assert half.runs("list", "--store", str(copy)) == (
-            1,
+            2,
             [],
             [f"error: --store {copy}: permission denied"],
         )
         why = f"[Errno 13] Permission denied: '{copy / 'runs' / a / 'run.json'}'"
         assert half.runs("show", a, "--store", str(copy)) == (
-            1,
+            2,
             [],
             [f"error: run {a} could not be read: {why}"],
         )
@@ -1114,7 +1114,7 @@ def test_each_scenario_replayed_with_the_full_refund_s_prompt_shows_the_writes_i
 
 
 def test_a_full_refund_recorded_under_serve_is_replayed_as_one_recorded_under_shadow(replayed):
-    """A deployed agent's run, recorded under `irimi shadow --serve`, replayed unchanged by its
+    """A deployed agent's run, recorded under `irimi serve`, replayed unchanged by its
     trigger alone: `irimi replay` reads only the store, so it says what the replay of the
     shadow recording says, `no divergence`, with nothing sent anywhere and the customer read from
     the recording, there being no database. `irimi runs list` lists serve's run as `sdk`, with no
@@ -1215,13 +1215,18 @@ def test_a_full_refund_replayed_with_other_args_says_its_args_differ(replayed):
 
 
 def test_a_call_of_another_function_is_replayed_in_place_of_the_trigger(replayed):
-    """`--call` names the function to call in place of the recorded entrypoint, and `--args` its
-    parameters: here the read tool `lookup_customer`, called in no run, which the replay's
+    """`--entrypoint` names the function to call in place of the recorded entrypoint, and `--args`
+    its parameters: here the read tool `lookup_customer`, called in no run, which the replay's
     run takes. The recording answers it, and nothing else is called, so the result says the
     recording's other calls were never made and its two writes are only in A, and exits 1. The
     replay's run names the function it called, `module:lookup_customer`, as `@sdk.trigger` names
     a run, never the trigger that did not run."""
-    options = ("--call", f"{AGENT}:lookup_customer", "--args", json.dumps({"customer": CUSTOMER}))
+    options = (
+        "--entrypoint",
+        f"{AGENT}:lookup_customer",
+        "--args",
+        json.dumps({"customer": CUSTOMER}),
+    )
     recorded, replay = replayed(W, "full_refund", options=options)
     source = recorded.one("run.start")["run"]
     assert replay.replay_result() == [
@@ -1393,7 +1398,7 @@ def test_a_replay_whose_run_json_names_no_run_it_replayed_is_refused(replayed, t
     assert listed[run].startswith("replay of ")
     assert damaged.listed_attributions() == {r: a for r, a in listed.items() if r != run}
     shown = damaged.runs("show", run, "--store", str(copy))
-    assert shown == (1, [], [f"error: run {run} could not be read: {refused}"])
+    assert shown == (2, [], [f"error: run {run} could not be read: {refused}"])
     assert damaged.command("replay", run, "--store", str(copy)) == (
         2,
         [],

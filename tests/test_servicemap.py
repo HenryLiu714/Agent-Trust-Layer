@@ -646,7 +646,7 @@ def test_every_shipped_fires_route_is_a_write_irimi_answers_itself():
 
 def test_fires_on_a_live_route_is_refused(tmp_path):
     """A live route is forwarded to the real service, which sends its own webhooks, so a `fires:`
-    on it would never be listed - the `--allow-host` class of key that reads as configured and is
+    on it would never be listed - the `--base-url-host` class of key that reads as configured and is
     never consulted."""
     refuses(
         tmp_path,
@@ -1066,7 +1066,7 @@ def test_a_missing_maps_directory_is_one_line_on_the_cli(tmp_path, monkeypatch, 
 
     missing = tmp_path / "gone"
     monkeypatch.setattr(servicemap.loader, "shipped_dir", lambda: missing)
-    assert main(argv) == 1
+    assert main(argv) == 2
     err = capsys.readouterr().err
     assert err.startswith("error: ")
     assert str(missing) in err
@@ -1184,7 +1184,7 @@ def test_patterns_are_not_in_the_reverse_doors_allow_list(tmp_path):
     """A wildcard classifies through the forward door and is deliberately not an allow-list entry.
 
     `pipeline.rewrite_reverse` compares one literal host with `host not in allowed_hosts`, so a
-    pattern in that set would never match anything. `--allow-host` is how you reach one.
+    pattern in that set would never match anything. `--base-url-host` is how you reach one.
     """
     index = load(tmp_path, WILDCARD, EXACT_UNDER_WILDCARD)
     assert index.hosts == frozenset({"one.demo.example"})
@@ -1339,7 +1339,7 @@ def test_a_flag_target_is_validated_like_every_other_one(tmp_path):
         _flagged(tmp_path, targets=[("demo.example", "", "http://example.com")])
     assert str(exc.value).endswith(
         "target host 'example.com' is not loopback; targets must be 127.0.0.1, ::1 or localhost "
-        "unless you pass --allow-target-host example.com"
+        "unless you pass --allow-remote-target example.com"
     )
     ok = _flagged(
         tmp_path,
@@ -1392,7 +1392,7 @@ def test_a_flag_target_beats_the_overrides_file(tmp_path):
 
 
 def test_a_credential_path_host_may_only_be_targeted_at_loopback():
-    """A Slack incoming webhook URL is the whole credential, so `--allow-target-host` does not
+    """A Slack incoming webhook URL is the whole credential, so `--allow-remote-target` does not
     reach it: sending one off this machine hands the secret to whoever is listening."""
     index = servicemap.load(
         cwd=None,

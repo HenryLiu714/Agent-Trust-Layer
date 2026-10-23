@@ -7,7 +7,7 @@
 # is the credential: `/services/{team}/{bot}/{token}` carries the secret in the path. So do
 # `/workflows/...` and `/triggers/...`, which this map does not list, so the rule is keyed on the
 # host, not on this route: `credential_path_hosts:` makes every target of this service loopback
-# only, with no `--allow-target-host` escape, and keeps every path on the host off disk as sent.
+# only, with no `--allow-remote-target` escape, and keeps every path on the host off disk as sent.
 #
 # Quote any `human:` template containing `#`. An unquoted `#` preceded by a space starts a YAML
 # comment, which silently truncates the template at the channel name.

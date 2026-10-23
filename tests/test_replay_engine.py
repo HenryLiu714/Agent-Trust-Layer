@@ -796,7 +796,7 @@ def test_an_unchanged_replay_compares_the_same_as_its_recording(home, maps, stub
     every write, and the `↳` line under it, as its recording printed them, so every compared row
     is `=`. The run reads the charge, refunds it, reads it again through the overlay and pages
     the refunds after the one it minted; the replay answers all of it from the recording."""
-    from irimi import compare
+    from irimi import compare, exitcodes
     from irimi.report.model import RunView
     from irimi.report.summary import summary_lines
 
@@ -819,7 +819,7 @@ def test_an_unchanged_replay_compares_the_same_as_its_recording(home, maps, stub
     recorded, replayed = reader.load_run("rec"), reader.load_run("rep")
     comparison = compare.compare_runs(recorded, replayed, maps)
     assert [row.mark for row in comparison.rows] == ["same"]
-    assert comparison.exit_code == compare.SAME
+    assert comparison.exit_code == exitcodes.OK
 
     def writes(run):
         lines = summary_lines(RunView(run.record, run.events), maps)

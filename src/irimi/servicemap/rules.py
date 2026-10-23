@@ -54,7 +54,7 @@ def validate_targets(sm: ServiceMap, allow_target_hosts: frozenset[str]) -> None
 def _check_target_host(
     target: Target | None, allow_target_hosts: frozenset[str], where: str
 ) -> None:
-    """Targets must be loopback unless `--allow-target-host` names the host."""
+    """Targets must be loopback unless `--allow-remote-target` names the host."""
     if target is None or target.is_loopback:
         return
     host = target.host
@@ -62,7 +62,7 @@ def _check_target_host(
         return
     raise MapError(
         f"{where}: target host {host!r} is not loopback; targets must be 127.0.0.1, ::1 or "
-        f"localhost unless you pass --allow-target-host {host}"
+        f"localhost unless you pass --allow-remote-target {host}"
     )
 
 
@@ -129,7 +129,7 @@ def _require_loopback_target(target: Target | None, where: str) -> None:
         return
     raise MapError(
         f"{where}: a target on this host may only be loopback. The request path is the "
-        "credential there, so --allow-target-host does not apply to it - and that covers every "
+        "credential there, so --allow-remote-target does not apply to it - and that covers every "
         "path on the host, not only the routes this map happens to list"
     )
 

@@ -104,7 +104,7 @@ def test_a_datetime_trigger_is_stored_by_its_repr_and_cannot_be_replayed(run_wor
     assert trigger["value"].startswith("datetime.datetime(2026, 9, 27, 2, 0")
     # A `datetime` is not JSON, so the SDK captures it as its repr and the run is not replayable.
     # `sdk.run` records no entrypoint, so `irimi replay` refuses it for that first, before it
-    # would ask for `--args`: only `--call` or `-- CMD` replays it.
+    # would ask for `--args`: only `--entrypoint` or `-- CMD` replays it.
     [run] = shadow.sdk_runs()
     assert run.trigger is not None
     assert (run.trigger.name, run.trigger.entrypoint) == ("nightly-reconcile", None)
@@ -113,7 +113,9 @@ def test_a_datetime_trigger_is_stored_by_its_repr_and_cannot_be_replayed(run_wor
     assert not run.trigger.replayable
     code, out, err = shadow.command("replay", run.run_id, "--store", str(shadow.store_root()))
     assert (code, out) == (2, [])
-    assert err == [f"error: run {run.run_id} has no entrypoint and no argv; pass --call or -- CMD"]
+    assert err == [
+        f"error: run {run.run_id} has no entrypoint and no argv; pass --entrypoint or -- CMD"
+    ]
     assert [c["url"] for c in shadow.calls("tag_customer")] == [
         "api.stripe.com/v1/customers/cus_N001",
         "api.stripe.com/v1/customers/cus_N000",

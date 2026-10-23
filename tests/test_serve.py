@@ -1,4 +1,4 @@
-"""Serve mode: `irimi shadow --serve`, a sidecar with no child process.
+"""Serve mode: `irimi serve`, a sidecar with no child process.
 
 The engine half first: a listener bound wider than loopback is this machine at every address it
 was reached at, so a request naming that address, or a name that resolves to it, is never
@@ -182,7 +182,7 @@ def test_an_answer_target_naming_the_address_irimi_was_reached_at_is_never_diall
     tmp_path, monkeypatch
 ):
     """An answer target is irimi's own listener at the address a connection reached it at, as a
-    request is: with `--listen-host 0.0.0.0` and `--allow-target-host` naming this machine's
+    request is: with `--bind 0.0.0.0` and `--allow-remote-target` naming this machine's
     own address, a write the target would answer is refused by irimi as its own listener, with
     `irimi_target_failed`, and no second connection to the listener is opened. Before, the target
     was dialled and the reverse door refused the looped request, as from a peer not on loopback."""
@@ -365,7 +365,7 @@ def test_a_run_s_writes_and_keys_are_dropped_once_its_end_is_on_disk(tmp_path, m
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "home"))
     monkeypatch.chdir(tmp_path)
     ca.generate_ca(ca.ca_paths())
-    args = cli.build_parser().parse_args(["serve", "--store", str(tmp_path / "store")])
+    args = cli.parse_args(["serve", "--store", str(tmp_path / "store")])
     left_at_end = []
     slot_of = {run_id: idempotency.slot_id(run_id, "stripe", (), "k-1") for run_id in ("r1", "r2")}
 
@@ -445,8 +445,8 @@ def test_a_bind_that_is_not_loopback_adds_one_banner_line(host):
 
     from irimi.report import terminal
 
-    lines = terminal.banner_lines("shadow --serve", None, host, 4000, Path("/ca.pem"))
-    assert lines[0].startswith(f"irimi shadow --serve · {terminal.SERVE_RUNS} · listening on ")
+    lines = terminal.banner_lines("serve", None, host, 4000, Path("/ca.pem"))
+    assert lines[0].startswith(f"irimi serve · {terminal.SERVE_RUNS} · listening on ")
     assert lines[2:] == [
         f"listening on {host}: any machine that can reach this port can send traffic through "
         "irimi and call its control endpoint"
@@ -498,16 +498,27 @@ def test_serve_with_a_command_is_a_usage_error(home, monkeypatch, capsys):
         serve, "cmd_serve", lambda *args, **kwargs: pytest.fail("serve was started")
     )
     with pytest.raises(SystemExit) as exc:
-        main(["shadow", "--serve", "--", "echo", "hi"])
+        main(["serve", "--", "echo", "hi"])
     assert exc.value.code == 2
     err = capsys.readouterr().err
-    assert err.startswith("usage: irimi shadow")
-    assert "error: --serve runs no command" in err
+    assert err.startswith("usage: irimi serve")
+    assert "error: unrecognized arguments: -- echo hi" in err
+    assert not (home / "store").exists()
+
+
+def test_serve_has_one_spelling(home, capsys):
+    """`irimi serve` is serve mode; `shadow` has no `--serve`."""
+    from irimi.cli import main
+
+    with pytest.raises(SystemExit) as exc:
+        main(["shadow", "--serve"])
+    assert exc.value.code == 2
+    assert "unrecognized arguments: --serve" in capsys.readouterr().err
     assert not (home / "store").exists()
 
 
 def test_serve_with_a_command_exits_2_from_the_command_line(home):
-    """As a shell runs it: `irimi shadow --serve -- echo hi` exits 2 with argparse's usage, and
+    """As a shell runs it: `irimi serve -- echo hi` exits 2 with argparse's usage, and
     starts and stores nothing."""
     import os
     import subprocess
@@ -515,7 +526,7 @@ def test_serve_with_a_command_exits_2_from_the_command_line(home):
 
     env = {**os.environ, paths.IRIMI_HOME_ENV: str(home)}
     done = subprocess.run(
-        [sys.executable, "-m", "irimi", "shadow", "--serve", "--", "echo", "hi"],
+        [sys.executable, "-m", "irimi", "serve", "--", "echo", "hi"],
         cwd=home,
         env=env,
         capture_output=True,
@@ -523,37 +534,37 @@ def test_serve_with_a_command_exits_2_from_the_command_line(home):
         timeout=60,
     )
     assert done.returncode == 2
-    assert done.stderr.startswith("usage: irimi shadow") and done.stdout == ""
+    assert done.stderr.startswith("usage: irimi serve") and done.stdout == ""
     assert not (home / "store").exists()
 
 
 def test_a_second_serve_on_one_store_is_refused_before_it_starts(home, capsys):
     """Two serves on one root would share `unattributed/events.jsonl`, repeating each other's
     `seq` and cutting each other's lines as a crash's. The second is refused with one line
-    and exit 1, its store closed again, and the first serves on. Once the first stops, the
+    and exit 2, its store closed again, and the first serves on. Once the first stops, the
     root is free again. The second is given a `stop` already set, so a serve that is wrongly let
     through returns at once rather than serving for ever."""
     import threading
 
     from irimi import cli
-    from irimi.cli import shadow
+    from irimi.cli import serve
     from irimi.store.lock import ServeLock
 
     def writers() -> int:
         return sum(thread.name == "irimi-store" for thread in threading.enumerate())
 
     stop = threading.Event()
-    args = cli.build_parser().parse_args(["shadow", "--serve", "--port", "0"])
+    args = cli.parse_args(["serve", "--port", "0"])
     codes: list[int] = []
-    first = threading.Thread(target=lambda: codes.append(shadow.cmd_shadow(args, stop)))
+    first = threading.Thread(target=lambda: codes.append(serve.cmd_serve(args, stop)))
     first.start()
     try:
         _wait_for(lambda: "listening on" in capsys.readouterr().out)
         running = writers()
-        second = cli.build_parser().parse_args(["serve", "--port", "0"])
+        second = cli.parse_args(["serve", "--port", "0"])
         stopped = threading.Event()
         stopped.set()
-        assert second.func(second, stopped) == 1
+        assert second.func(second, stopped) == 2
         err = capsys.readouterr().err.strip().splitlines()
         assert err == [f"error: another irimi serve is writing the trace store {home / 'store'}"]
         assert writers() == running
@@ -737,7 +748,7 @@ def test_a_run_that_cannot_be_read_back_is_one_warning_naming_only_its_type(
 
 
 def test_an_engine_that_stops_on_its_own_ends_serve_as_a_failure(home, monkeypatch, capsys):
-    """A sidecar whose proxy is gone must not look alive to its supervisor: serve exits 1 and
+    """A sidecar whose proxy is gone must not look alive to its supervisor: serve exits 2 and
     says why. Run on the main thread, it installed its signal handlers, and puts back the
     ones it found when it returns."""
     import signal
@@ -759,7 +770,7 @@ def test_an_engine_that_stops_on_its_own_ends_serve_as_a_failure(home, monkeypat
 
     monkeypatch.setattr(session, "print_startup", startup)
     before = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
-    assert cli.main(["serve", "--port", "0"], engine_factory=build) == 1
+    assert cli.main(["serve", "--port", "0"], engine_factory=build) == 2
     assert capsys.readouterr().err.strip() == "error: the proxy stopped on its own"
     assert {signum: signal.getsignal(signum) for signum in before} == before
 
@@ -839,22 +850,20 @@ def _port_of(banner: list[str]) -> int:
 
 @pytest.mark.parametrize(
     ("argv", "signame"),
-    [(["serve"], "SIGTERM"), (["shadow", "--serve"], "SIGTERM"), (["shadow", "--serve"], "SIGINT")],
-    ids=["serve-SIGTERM", "shadow-serve-SIGTERM", "shadow-serve-SIGINT"],
+    [(["serve"], "SIGTERM"), (["serve"], "SIGINT")],
+    ids=["serve-SIGTERM", "serve-SIGINT"],
 )
-def test_serve_and_its_alias_print_one_banner_and_stop_cleanly_on_a_signal(home, argv, signame):
-    """`irimi serve` is `irimi shadow --serve`: one banner, which names no run of its own,
-    and both stop on SIGTERM, as a container runtime stops a sidecar, and on Ctrl-C's SIGINT, by
-    closing the store and exiting 0 with nothing more to say."""
+def test_serve_prints_one_banner_and_stops_cleanly_on_a_signal(home, argv, signame):
+    """`irimi serve` prints one banner, which names no run of its own, and stops on SIGTERM, as a
+    container runtime stops a sidecar, and on Ctrl-C's SIGINT, by closing the store and exiting 0
+    with nothing more to say."""
     from irimi.report import terminal
 
     served = _Served(home, *argv)
     try:
         banner = served.banner()
         port = _port_of(banner)
-        assert banner == terminal.banner_lines(
-            "shadow --serve", None, "127.0.0.1", port, ca.ca_paths().cert
-        )
+        assert banner == terminal.banner_lines("serve", None, "127.0.0.1", port, ca.ca_paths().cert)
         code, lines, err = served.stop(signame)
     finally:
         served.kill()
@@ -864,22 +873,20 @@ def test_serve_and_its_alias_print_one_banner_and_stop_cleanly_on_a_signal(home,
 
 
 def test_a_wide_bind_says_so_in_the_banner(home):
-    """`--listen-host 0.0.0.0` adds the banner line saying who can now reach irimi, as a real
+    """`--bind 0.0.0.0` adds the banner line saying who can now reach irimi, as a real
     serve prints it; the loopback default does not, which the test above pins."""
     import re
 
     from irimi.report import terminal
 
-    served = _Served(home, "serve", "--listen-host", "0.0.0.0")
+    served = _Served(home, "serve", "--bind", "0.0.0.0")
     try:
         served.wait_for(lambda lines: len(lines) >= 3)
         banner = served.lines[:3]
         match = re.search(r" · listening on 0\.0\.0\.0:(\d+) · ", banner[0])
         assert match, banner
         port = int(match.group(1))
-        assert banner == terminal.banner_lines(
-            "shadow --serve", None, "0.0.0.0", port, ca.ca_paths().cert
-        )
+        assert banner == terminal.banner_lines("serve", None, "0.0.0.0", port, ca.ca_paths().cert)
         assert banner[2] == (
             "listening on 0.0.0.0: any machine that can reach this port can send traffic through "
             "irimi and call its control endpoint"
@@ -921,7 +928,7 @@ with sdk.run("run", inputs={"n": 3}):
 
 
 def test_a_served_sdk_agent_gets_one_summary_block_per_run_it_ends(home, tmp_path_factory):
-    """Serve mode end to end: `irimi shadow --serve` as its own process, and an SDK agent in
+    """Serve mode end to end: `irimi serve` as its own process, and an SDK agent in
     another, pointed at it by the variables the README's "Serve mode" names.
 
     The agent runs two triggers, each a read and a write, then a read in no run, then a third run
@@ -955,7 +962,7 @@ def test_a_served_sdk_agent_gets_one_summary_block_per_run_it_ends(home, tmp_pat
 
     upstream = HTTPServer(("127.0.0.1", 0), _Items)
     threading.Thread(target=upstream.serve_forever, daemon=True).start()
-    served = _Served(home, "shadow", "--serve")
+    served = _Served(home, "serve")
     try:
         port = _port_of(served.banner())
         listener = f"http://127.0.0.1:{port}"

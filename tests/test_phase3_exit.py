@@ -1,7 +1,7 @@
 """The server agent end to end, the hermetic half: a server-style agent in a container produces
 attributed runs with their triggers, and two concurrent requests don't mix.
 
-Three processes, as in production: `irimi shadow --serve`, the server agent
+Three processes, as in production: `irimi serve`, the server agent
 `examples/server_agent` beside it, pointed at irimi by the variables the README's "Serve mode"
 names, and a loopback Stripe on the other side. Two `POST /refund` requests at once, for `ch_A`
 and `ch_B`, each held after its charge read until both have made it, so both runs are open at
@@ -157,13 +157,12 @@ def _agent_env(listener: str, stub_port: int, db: Path, *, barrier: bool) -> dic
 
 @contextlib.contextmanager
 def _agent_beside_serve(home: Path, stub_port: int, *, barrier: bool):
-    """`irimi shadow --serve --store <home>/store`, and the app beside it as a process of its own,
+    """`irimi serve --store <home>/store`, and the app beside it as a process of its own,
     pointed at it; yields (the serve, the app's port). Both are killed on the way out, whatever
     failed, so a failed test leaves no process and no port behind."""
     served = _Served(
         home,
-        "shadow",
-        "--serve",
+        "serve",
         "--store",
         str(home / "store"),
         launcher=("-c", IRIMI, str(home / "maps")),

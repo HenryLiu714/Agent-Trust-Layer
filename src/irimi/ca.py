@@ -13,7 +13,11 @@ from irimi import paths
 from irimi.files import DIR_MODE, FILE_MODE, private_dir, write_private
 
 CA_COMMON_NAME = "irimi local CA"
-CA_VALID_DAYS = 3650
+# About two years, so a CA someone trusted somewhere and forgot stops working long before ten;
+# `irimi init --force` makes a new one.
+CA_VALID_DAYS = 825
+# How long before the CA expires the commands that start a proxy warn that it will.
+EXPIRY_WARNING = dt.timedelta(days=30)
 KEY_MODE = FILE_MODE
 CERT_MODE = 0o644
 
@@ -45,6 +49,15 @@ def state(p: CAPaths) -> Literal["absent", "partial", "present"]:
     if ca_exists(p):
         return "present"
     return "partial" if ca_partial(p) else "absent"
+
+
+def expires_at(cert: Path) -> dt.datetime | None:
+    """When the CA certificate at `cert` stops being valid, in UTC, or None when it cannot be
+    read: a CA that is not there is refused elsewhere, with its own message."""
+    try:
+        return x509.load_pem_x509_certificate(cert.read_bytes()).not_valid_after_utc
+    except (OSError, ValueError):
+        return None
 
 
 def generate_ca(p: CAPaths) -> None:

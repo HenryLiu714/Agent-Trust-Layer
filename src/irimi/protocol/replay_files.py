@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from irimi import exitcodes
 from irimi.trace import ErrorInfo, error_to_json
 
 RESULT_FIELDS = ("source_run_id", "replay_run_id", "exit_code", "diverged_at", "lines")
@@ -33,9 +34,9 @@ class ReplayResult:
     """What one `irimi replay` said. `same` is True when the replay made the same writes as the
     recording; `str(result)` is what `irimi replay` printed, so `assert result.same, result` shows
     the difference. `replay_run_id` is the run the replay stored, None when it was refused before
-    it ran (`exit_code` 2, the reason in `lines`). `exit_code` is the CLI's, as `irimi compare`'s:
-    0 the same writes, 1 any differ, 2 trouble (a replay that could not run, or call its trigger);
-    and 130 or 143 for one SIGINT or SIGTERM stopped. `diverged_at` is the line of the first call
+    it ran (`exit_code` 2, the reason in `lines`). `exit_code` is the CLI's (`exitcodes`): 0 the
+    same writes, 1 any differ, 2 a replay that could not run, or call its trigger; and 130 or 143
+    for one SIGINT or SIGTERM stopped. `diverged_at` is the line of the first call
     the recording did not answer, None when every call was."""
 
     source_run_id: str
@@ -47,7 +48,7 @@ class ReplayResult:
     @property
     def same(self) -> bool:
         """The replay ran and made the same writes as the recording: exit code 0."""
-        return self.exit_code == 0
+        return self.exit_code == exitcodes.OK
 
     def __str__(self) -> str:
         return "\n".join(self.lines)

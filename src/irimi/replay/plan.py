@@ -6,9 +6,9 @@ under the replay's engine, and prints `replay.report`'s lines.
 WHAT RUNS, in order of precedence (`plan`):
 
 1. `-- CMD` given: that command, as `irimi shadow -- CMD` would run it.
-2. `--call` given, or the run's trigger has an entrypoint: a call of that function with the args,
-   `--args` or the trigger's, in `python -m irimi.sdk.replay_child`, under irimi's own Python or
-   `--python`'s. Args the trigger did not record replayably are refused
+2. `--entrypoint` given, or the run's trigger has an entrypoint: a call of that function with the
+   args, `--args` or the trigger's, in `python -m irimi.sdk.replay_child`, under irimi's own
+   Python or `--python`'s. Args the trigger did not record replayably are refused
    (`not_replayable`).
 3. A process run (`irimi shadow -- <cmd>`): its recorded argv, run again.
 
@@ -44,9 +44,9 @@ class Call:
 class Plan:
     """What a replay runs: a `Call`, or a command (`argv`), and the trigger its run records - the
     replayed run's, with the call's entrypoint and args when they were given in its place, and
-    named after another function `--call` names. None for a command run for a run that recorded no
-    trigger: its run records the command line, as a process run does. `rerun` is set when `argv`
-    is the process run's own recorded command line."""
+    named after another function `--entrypoint` names. None for a command run for a run that
+    recorded no trigger: its run records the command line, as a process run does. `rerun` is set
+    when `argv` is the process run's own recorded command line."""
 
     call: Call | None
     argv: tuple[str, ...]
@@ -64,8 +64,8 @@ def plan(
     call: str | None,
     args: dict[str, JSONValue] | None,
 ) -> Plan:
-    """What replaying `source` runs, given `irimi replay`'s `-- CMD`, `--call` and `--args` (see the
-    module doc), or Refused."""
+    """What replaying `source` runs, given `irimi replay`'s `-- CMD`, `--entrypoint` and `--args`
+    (see the module doc), or Refused."""
     trigger = source.trigger
     if command:
         return Plan(None, tuple(command), trigger)
@@ -77,7 +77,7 @@ def plan(
         if args is None and call is not None and source.argv is not None:
             raise Refused(
                 f"run {source.run_id} recorded a command line, not a call's arguments; pass "
-                "--args with --call"
+                "--args with --entrypoint"
             )
         if args is None:
             reason = not_replayable(trigger)
@@ -99,10 +99,14 @@ def plan(
             name = entrypoint
         return Plan(Call(entrypoint, args), (), Trigger(name, entrypoint, args, True))
     if args is not None:
-        raise Refused(f"run {source.run_id} has no entrypoint to give --args to; pass --call too")
+        raise Refused(
+            f"run {source.run_id} has no entrypoint to give --args to; pass --entrypoint too"
+        )
     argv = source.argv
     if argv is None:
-        raise Refused(f"run {source.run_id} has no entrypoint and no argv; pass --call or -- CMD")
+        raise Refused(
+            f"run {source.run_id} has no entrypoint and no argv; pass --entrypoint or -- CMD"
+        )
     return Plan(None, argv, trigger, rerun=True)
 
 
@@ -112,7 +116,7 @@ def _started_as_script(run_id: str, entrypoint: str, launched_as: Sequence[str] 
     names the trigger's module; an SDK run's record does not."""
     module = _script_module(launched_as) if launched_as else None
     replay_with = (
-        f"irimi replay {run_id} --call {module or '<module>'}:{entrypoint.partition(':')[2]} "
+        f"irimi replay {run_id} --entrypoint {module or '<module>'}:{entrypoint.partition(':')[2]} "
         "--python <your venv python>"
     )
     if not launched_as:

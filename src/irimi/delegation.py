@@ -85,7 +85,7 @@ def refuse_self_target(target: Target, listen_port: int, local_address: str = ""
     out of ports, the same loop `detect_door` prevents on the reverse door.
 
     `local_address` is the address the request's connection reached irimi at. Bound wider than
-    loopback, irimi is that address too, so a target `--allow-target-host` lets name it, or a
+    loopback, irimi is that address too, so a target `--allow-remote-target` lets name it, or a
     name resolving to it, is our own listener by the rule `detect_door` applies to a request:
     refused here, rather than dialled and refused again by the reverse door.
     """

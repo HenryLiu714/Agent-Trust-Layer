@@ -12,8 +12,10 @@ from irimi.sdk import instrumentation
 
 @pytest.fixture(autouse=True)
 def no_ambient_irimi(tmp_path, monkeypatch):
-    """$IRIMI_HOME and the working directory both point somewhere fresh and empty."""
+    """$IRIMI_HOME and the working directory both point somewhere fresh and empty, and no
+    $IRIMI_STORE moves the store out of that home."""
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "irimi-home"))
+    monkeypatch.delenv(paths.IRIMI_STORE_ENV, raising=False)
     cwd = tmp_path / "cwd"
     cwd.mkdir()
     monkeypatch.chdir(cwd)

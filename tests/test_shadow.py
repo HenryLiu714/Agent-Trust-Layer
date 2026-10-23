@@ -205,21 +205,25 @@ def test_the_summary_starts_on_a_line_of_its_own_after_a_child_that_left_one_ope
 
 
 def test_a_store_that_cannot_be_a_directory_is_named_by_the_flag(home, capsys):
-    assert main(["shadow", "--store", "/dev/null/x", *_py("pass")]) == 1
+    assert main(["shadow", "--store", "/dev/null/x", *_py("pass")]) == 2
     assert capsys.readouterr().err.splitlines() == ["error: --store /dev/null/x: not a directory"]
 
 
 def test_no_command_given(home, capsys):
-    usage = "error: nothing to run; usage: irimi shadow -- <command> [args...]"
-    assert main(["shadow"]) == 1
-    assert capsys.readouterr().err.splitlines() == [usage]
-    assert main(["shadow", "--"]) == 1
-    assert capsys.readouterr().err.splitlines() == [usage]
+    usage = "usage: irimi shadow [options] -- COMMAND [ARGS...]"
+    for argv in (["shadow"], ["shadow", "--"]):
+        with pytest.raises(SystemExit) as exc:
+            main(argv)
+        assert exc.value.code == 2
+        assert capsys.readouterr().err.splitlines() == [
+            usage,
+            f"irimi shadow: error: nothing to run: {usage.removeprefix('usage: ')}",
+        ]
 
 
 def test_no_ca(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
-    assert main(["shadow", "--port", "0", "--", sys.executable, "-c", "pass"]) == 1
+    assert main(["shadow", "--port", "0", "--", sys.executable, "-c", "pass"]) == 2
     captured = capsys.readouterr()
     assert "irimi init" in captured.err
     assert "listening on" not in captured.out
@@ -241,7 +245,7 @@ def test_engine_start_failure_does_not_spawn_child(home, monkeypatch, capsys):
             "-c",
             "open('SHOULD_NOT_EXIST','w')",
         ]
-        assert main(argv) == 1
+        assert main(argv) == 2
         assert capsys.readouterr().err.splitlines() == [
             f"error: port {port} on 127.0.0.1 is in use; pick another with --port, or --port 0 "
             "for any free port"
@@ -285,7 +289,7 @@ def test_reverse_door_refuses_unlisted_host(home, capfd):
     assert main(["shadow", *_py(_reverse_source("/evil.example/x"))]) == 0
     out = capfd.readouterr().out
     assert '403 {"error": {"type": "irimi_refused", "message": "irimi refused this request: ' in out
-    assert "base-URL host 'evil.example' is not in a loaded map or --allow-host" in out
+    assert "base-URL host 'evil.example' is not in a loaded map or --base-url-host" in out
     # The refusal is irimi's own answer, so it is recorded and counted like one. It was a GET, so
     # it is not listed among the writes, and its host line says irimi refused it.
     assert "1 exchange" in out
@@ -293,12 +297,12 @@ def test_reverse_door_refuses_unlisted_host(home, capfd):
     assert "None of these writes" not in out
 
 
-def test_reverse_door_allow_host(home, capfd):
+def test_reverse_door_base_url_host(home, capfd):
     argv = [
         "shadow",
         "--port",
         "0",
-        "--allow-host",
+        "--base-url-host",
         "127.0.0.1",
         "--",
         sys.executable,
@@ -334,7 +338,7 @@ def test_the_banner_says_when_a_target_left_the_machine(home, capsys):
         "0",
         "--target",
         "api.stripe.com=http://stub.example:3000",
-        "--allow-target-host",
+        "--allow-remote-target",
         "stub.example",
         "--",
         sys.executable,
@@ -345,7 +349,7 @@ def test_the_banner_says_when_a_target_left_the_machine(home, capsys):
     captured = capsys.readouterr()
     assert "delegated: stripe -> http://stub.example:3000 (writes)" in captured.out
     assert "NOT loopback" in captured.out
-    assert "--allow-target-host" in captured.err  # the existing escape-hatch warning, unchanged
+    assert "--allow-remote-target" in captured.err  # the existing escape-hatch warning, unchanged
 
 
 def test_no_delegated_service_leaves_the_banner_alone(home, capsys):
@@ -355,10 +359,10 @@ def test_no_delegated_service_leaves_the_banner_alone(home, capsys):
 
 def test_a_redaction_key_irimi_did_not_write_stops_shadow_with_one_line(home, capsys):
     """A run that could not redact what it stores must not start: one `error:` line,
-    exit 1, no traceback, and the child never runs."""
+    exit 2, no traceback, and the child never runs."""
     (home / paths.REDACT_KEY_NAME).write_bytes(b"short")
     marker = home / "ran"
-    assert main(["shadow", *_py(f"open({str(marker)!r}, 'w')")]) == 1
+    assert main(["shadow", *_py(f"open({str(marker)!r}, 'w')")]) == 2
     err = capsys.readouterr().err.strip().splitlines()
     assert len(err) == 1 and err[0].startswith("error: ") and "32" in err[0]
     assert not marker.exists()
@@ -370,7 +374,7 @@ def test_a_store_that_cannot_be_written_stops_shadow_with_one_line(home, tmp_pat
     not_a_dir = tmp_path / "a-file"
     not_a_dir.write_text("")
     marker = home / "ran"
-    assert main(["shadow", "--store", str(not_a_dir), *_py(f"open({str(marker)!r}, 'w')")]) == 1
+    assert main(["shadow", "--store", str(not_a_dir), *_py(f"open({str(marker)!r}, 'w')")]) == 2
     err = capsys.readouterr().err.strip().splitlines()
     assert len(err) == 1 and err[0].startswith("error: ")
     assert not marker.exists()

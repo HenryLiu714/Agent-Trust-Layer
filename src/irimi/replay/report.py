@@ -25,7 +25,7 @@ import shlex
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from irimi import compare
+from irimi import compare, exitcodes
 from irimi.exchange import Exchange, Flag
 from irimi.protocol.replay_files import CallOutcome, ReplayResult
 from irimi.replay.index import made_within, nested_in
@@ -74,11 +74,11 @@ class ReplayReport:
     @property
     def exit_code(self) -> int:
         """The comparison's, but the signal exit code of a replay that was stopped, and never
-        `compare.SAME` for a run the store dropped events of."""
+        `exitcodes.OK` for a run the store dropped events of."""
         if self.ended.stopped is not None:
             return self.ended.stopped
         dropped = self.source.dropped_events or self.replayed.dropped_events
-        return max(self.comparison.exit_code, compare.DIFFERENT if dropped else compare.SAME)
+        return max(self.comparison.exit_code, exitcodes.DIFFERENT if dropped else exitcodes.OK)
 
     def lines(self) -> list[str]:
         header = f"irimi replay · {self.source.run_id} -> {self.replayed.run_id}"
@@ -128,8 +128,8 @@ class ReplayReport:
 
 def refused(run_id: str, lines: Sequence[str], replay_run_id: str | None = None) -> ReplayResult:
     """The result of a replay that could not run, or whose run could not be read back: exit
-    `compare.TROUBLE`, and what irimi said of why."""
-    return ReplayResult(run_id, replay_run_id, compare.TROUBLE, None, tuple(lines))
+    `exitcodes.ERROR`, and what irimi said of why."""
+    return ReplayResult(run_id, replay_run_id, exitcodes.ERROR, None, tuple(lines))
 
 
 def outcome(

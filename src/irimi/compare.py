@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import parse_qsl
 
-from irimi import services
+from irimi import exitcodes, services
 from irimi.exchange import Flag
 from irimi.replay.index import compared_body
 from irimi.report import model
@@ -51,11 +51,6 @@ from irimi.report.summary import tool_write_sentence, write_sentence
 from irimi.report.terminal import printable
 from irimi.servicemap import MapIndex, path_params
 from irimi.trace import JSONValue, RunRecord, StoredRun, canonical_json, trigger_args
-
-# The exit codes, as diff(1)'s: the same, different, or trouble (a run that cannot be read).
-SAME = 0
-DIFFERENT = 1
-TROUBLE = 2
 
 # The first item of an action's key. An exchange's key is three items long and a tool call's two,
 # so no service a map names, `tool` included, can line a write up with a tool call.
@@ -173,9 +168,10 @@ class Comparison:
 
     @property
     def exit_code(self) -> int:
-        """`SAME` when every row is `same`, and `DIFFERENT` otherwise: a pair it could not compare
-        is not called the same."""
-        return SAME if all(row.mark == "same" for row in self.rows) else DIFFERENT
+        """`exitcodes.OK` when every row is `same`, and `DIFFERENT` otherwise: a pair it could not
+        compare is not called the same."""
+        same = all(row.mark == "same" for row in self.rows)
+        return exitcodes.OK if same else exitcodes.DIFFERENT
 
     def lines(self) -> list[str]:
         """Every row, then a blank line and the totals; the totals alone when neither run wrote."""

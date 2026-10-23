@@ -6,6 +6,7 @@ and how every command reads a stored run back.
 """
 
 import argparse
+import datetime as dt
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from typing import Protocol
 from irimi import (
     ca,
     delegation,
+    exitcodes,
     idempotency,
     paths,
     reader,
@@ -126,12 +128,12 @@ def prepare_run(
     store is open: a second serve on one root is refused before its engine starts, and writes
     nothing.
     """
-    index = load_maps(frozenset(args.allow_target_host), args.target, args.target_reads)
+    index = load_maps(frozenset(args.allow_remote_target), args.target, args.target_reads)
     if index is None:
         return None
     try:
-        # A `--listen-host` address is the listener too.
-        delegation.refuse_self_targets(index, args.port, args.listen_host)
+        # A `--bind` address is the listener too.
+        delegation.refuse_self_targets(index, args.port, args.bind)
     except delegation.TargetRefused as exc:
         print(f"error: {exc}", file=sys.stderr)
         return None
@@ -191,16 +193,16 @@ def _engine_config(
     """The EngineConfig `serve`, `shadow` and `replay` share; `mode` is `Shadow()` when None.
 
     `maps=index` is what makes the classifier use the maps: without it the engine falls back to the
-    verb rule and every mapped write on a POST-only service reads as `unknown`. The reverse door
-    relays to every host in a loaded map, plus each `--allow-host`.
+    verb rule and every mapped write on a POST-only service reads as `unknown`. Base-URL mode
+    relays to every host in a loaded map, plus each `--base-url-host`.
     """
     return EngineConfig(
         run_id=run_id,
         ca=ca_paths,
         confdir=paths.mitm_dir(),
-        listen_host=args.listen_host,
+        listen_host=args.bind,
         listen_port=args.port,
-        reverse_hosts=index.hosts | frozenset(args.allow_host),
+        reverse_hosts=index.hosts | frozenset(args.base_url_host),
         maps=index,
         mode=Shadow() if mode is None else mode,
     )
@@ -211,7 +213,7 @@ def load_maps(
     targets: Sequence[tuple[str, str, str]] = (),
     target_reads: Sequence[str] = (),
 ) -> MapIndex | None:
-    """The loaded service maps, with `--target`, `--target-reads` and `--allow-target-host`'s
+    """The loaded service maps, with `--target`, `--target-reads` and `--allow-remote-target`'s
     values, or None after printing why they were refused.
 
     Fail closed: a map, overrides file or `--target` the loader rejects must not start a proxy
@@ -233,17 +235,30 @@ def load_maps(
 
 
 def _escape_hatch_warning(args: argparse.Namespace) -> str | None:
-    """The one line `--allow-target-host` has to print, or None when it was not used.
+    """The one line `--allow-remote-target` has to print, or None when it was not used.
 
     Targets are loopback-only so that a delegated request cannot leave the machine; this flag is
     the deliberate way out of that, so it says so out loud. The delegated-service banner and the
     summary's accounting of delegated writes are printed elsewhere.
     """
-    hosts = getattr(args, "allow_target_host", None)
+    hosts = getattr(args, "allow_remote_target", None)
     if not hosts:
         return None
     named = ", ".join(sorted(hosts))
-    return f"warning: targets may leave this machine (--allow-target-host {named})"
+    return f"warning: targets may leave this machine (--allow-remote-target {named})"
+
+
+def _ca_expiry_warning(ca_cert: Path) -> str | None:
+    """The line a CA that expires within `ca.EXPIRY_WARNING` prints, or None: a client stops
+    trusting the certificates irimi mints once it has expired."""
+    expires = ca.expires_at(ca_cert)
+    now = dt.datetime.now(dt.UTC)
+    if expires is None or expires - now > ca.EXPIRY_WARNING:
+        return None
+    when = expires.date().isoformat()
+    if expires <= now:
+        return f"warning: irimi's CA expired on {when}; run irimi init --force for a new one"
+    return f"warning: irimi's CA expires on {when}; run irimi init --force for a new one"
 
 
 def print_startup(
@@ -256,17 +271,17 @@ def print_startup(
     ca_cert: Path,
     replay_of: str | None = None,
 ) -> None:
-    """Everything a run says before it starts: the escape-hatch warning, the banner, and one line
-    per delegated service. `command` is "shadow", "replay" or "shadow --serve", whose `run_id` is
-    None. `replay_of` is the run a replay answers from.
+    """Everything a run says before it starts: the escape-hatch and CA-expiry warnings, the banner,
+    and one line per delegated service. `command` is "shadow", "replay" or "serve", whose `run_id`
+    is None. `replay_of` is the run a replay answers from.
 
     Every line is flushed. Under a pipe or a supervisor stdout is block-buffered, and `serve` may
     print nothing else for minutes, so without the flush the port, the CA path a client needs and
     the `NOT loopback` line would not appear until the first request.
     """
-    warning = _escape_hatch_warning(args)
-    if warning is not None:
-        print(warning, file=sys.stderr, flush=True)
+    for warning in (_escape_hatch_warning(args), _ca_expiry_warning(ca_cert)):
+        if warning is not None:
+            print(warning, file=sys.stderr, flush=True)
     for line in terminal.banner_lines(command, run_id, host, port, ca_cert, replay_of):
         print(line, flush=True)
     for line in terminal.delegated_lines(index, color=sys.stdout.isatty()):
@@ -302,7 +317,7 @@ def _open_store(
     on_run_ended: Callable[[str], None] | None = None,
     replay_of: str | None = None,
 ) -> TraceStore | None:
-    """The trace store under `--store`, default `$IRIMI_HOME/store`, redacting with `key`, or None
+    """The trace store under `--store` (default `paths.store_dir()`), redacting with `key`, or None
     after printing why its directory cannot be used: a run that would drop every event
     unseen must not start. `replay_of` is the run a replay answers from, which every header run
     the store makes names."""
@@ -410,16 +425,16 @@ def resolve_run_id(root: Path, typed: str) -> str:
     return matches[0] if matches else typed
 
 
-def load_stored_run(root: Path, run_id: str, *, bodies: bool = True, code: int = 2) -> StoredRun:
-    """The run `run_id` in the store at `root`, or CliError saying why not, exiting `code`: no
-    such run, or one that cannot be read. The error's cause is what the store raised, which a
-    caller with wording of its own names instead."""
+def load_stored_run(root: Path, run_id: str, *, bodies: bool = True) -> StoredRun:
+    """The run `run_id` in the store at `root`, or CliError saying why not: no such run, or one
+    that cannot be read. The error's cause is what the store raised, which a caller with wording
+    of its own names instead."""
     try:
         return StoreReader(root).load_run(run_id, bodies=bodies)
     except RunNotFound as exc:
-        raise CliError(f"no run {run_id} in {root}", code) from exc
+        raise CliError(f"no run {run_id} in {root}", exitcodes.ERROR) from exc
     except (TraceFormatError, OSError) as exc:
-        raise CliError(f"run {run_id} could not be read: {exc}", code) from exc
+        raise CliError(f"run {run_id} could not be read: {exc}", exitcodes.ERROR) from exc
 
 
 def maps_for_stored_runs() -> MapIndex | None:

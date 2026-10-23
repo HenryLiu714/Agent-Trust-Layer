@@ -675,7 +675,8 @@ def _answering(argv: list[str], seen: dict[str, Any]) -> int:
     seen["mode"] = stat.S_IMODE(os.stat(tmp).st_mode)
     if "--args-file" in argv:
         seen["args"] = json.loads(open(argv[argv.index("--args-file") + 1]).read())
-    result = ReplayResult(argv[-1], "new0new0new0new0", 1, None, ("a",))
+    run_id = next(word for word in argv if word.startswith("--run="))[len("--run=") :]
+    result = ReplayResult(run_id, "new0new0new0new0", 1, None, ("a",))
     with open(argv[argv.index("--result-file") + 1], "w") as fh:
         json.dump(replay_result_to_json(result), fh)
     return 1
@@ -683,8 +684,8 @@ def _answering(argv: list[str], seen: dict[str, Any]) -> int:
 
 def test_sdk_replay_passes_its_call_in_a_private_directory_it_removes(monkeypatch):
     """The args in a file in a directory only this user can enter, never on the command line;
-    the run id after `--`; this process's `sys.path` as the child's; and the directory gone
-    when `sdk.replay` returns, raises, or finds no result."""
+    the run id as `--run=`, so one starting with `-` is no flag; this process's `sys.path` as the
+    child's; and the directory gone when `sdk.replay` returns, raises, or finds no result."""
     from irimi.sdk import replays
 
     seen: dict[str, Any] = {}
@@ -699,18 +700,17 @@ def test_sdk_replay_passes_its_call_in_a_private_directory_it_removes(monkeypatc
     tmp = seen["tmp"]
     assert seen["argv"] == [
         "replay",
+        "--run=-r",
         "--port",
         "0",
         "--result-file",
         f"{tmp}/result.json",
-        "--call",
+        "--entrypoint",
         f"{__name__}:handle",
         "--args-file",
         f"{tmp}/args.json",
         "--store",
         "/s",
-        "--",
-        "-r",
     ]
     assert (seen["mode"], seen["args"], seen["pythonpath"]) == (
         0o700,

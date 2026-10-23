@@ -17,7 +17,7 @@ SELF_TARGET = "self"
 
 # Hosts whose request path is the credential: every path on hooks.slack.com is a webhook secret. A
 # shipped map may add hosts with `credential_path_hosts:`; nothing removes these. A target on one
-# must be loopback, with no `--allow-target-host` escape, and its paths never reach disk as sent.
+# must be loopback, with no `--allow-remote-target` escape, and its paths never reach disk as sent.
 CREDENTIAL_PATH_HOSTS: frozenset[str] = frozenset({"hooks.slack.com"})
 TARGETABLE_KINDS: frozenset[str] = frozenset({"write", "unknown"})
 # Methods that destroy or replace a resource. Not the complement of SAFE_METHODS: POST is unsafe
@@ -132,7 +132,7 @@ class MapIndex:
         request and `ingress.rewrite_reverse` compares it with `host not in allowed_hosts`; an
         allow-list holding `*.datadoghq.com` would either never match or have to grow a matcher
         that quietly widens what the door relays. Reach a wildcard host through the door with an
-        explicit `--allow-host <host>`.
+        explicit `--base-url-host <host>`.
         """
         return frozenset(self.by_host)
 

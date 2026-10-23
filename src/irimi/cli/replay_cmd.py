@@ -12,12 +12,18 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, TextIO
 
-from irimi import __version__, runner
-from irimi.cli import CliError, UsageError, build_parser, os_error, session
-from irimi.cli.options import LAST_RUN, add_proxy_options, args_arg, args_file_arg, call_arg
+from irimi import __version__, exitcodes, runner
+from irimi.cli import CliError, UsageError, os_error, session
+from irimi.cli.options import (
+    RUN_ID_HELP,
+    add_proxy_options,
+    args_arg,
+    args_file_arg,
+    entrypoint_arg,
+    epilog,
+    help_formatted,
+)
 from irimi.cli.shadow import (
-    SIGINT_EXIT_CODE,
-    SIGTERM_EXIT_CODE,
     ChildResult,
     ChildSpec,
     end_the_childs_line,
@@ -30,33 +36,61 @@ from irimi.replay import report as replay_report
 from irimi.report.terminal import printable
 from irimi.trace import UNATTRIBUTED, StoredRun
 
+EXIT_CODES = exitcodes.help_table(
+    [
+        exitcodes.OK,
+        exitcodes.DIFFERENT,
+        exitcodes.ERROR,
+        exitcodes.SIGINT,
+        exitcodes.BROKEN_PIPE,
+        exitcodes.SIGTERM,
+    ]
+)
+
 
 def register(subparsers: "argparse._SubParsersAction[Any]") -> None:
     replay = subparsers.add_parser(
         "replay",
-        allow_abbrev=False,
-        help="run a stored run's trigger again, answered from its recording, and print what the "
-        "agent did differently",
+        **help_formatted(
+            help="re-run a stored run against its recorded responses and show what changed",
+            usage="irimi replay RUN [options] [-- COMMAND [ARGS...]]",
+            description="Re-run a stored run's entrypoint, or its recorded command, with every "
+            "request answered\nfrom the run's recording, and compare the writes it makes with the "
+            "recorded ones.",
+            epilog=epilog(
+                [
+                    "irimi replay last",
+                    "irimi replay 7729eae4 --entrypoint agent:handle --python .venv/bin/python",
+                    "irimi replay 7729eae4 -- python3 agent.py",
+                ],
+                EXIT_CODES,
+            ),
+        ),
     )
     replay.add_argument(
         "run_id",
-        metavar="RUN_ID",
-        help=f"the stored run's id, a prefix only it starts with, or {LAST_RUN}",
+        nargs="?",
+        metavar="RUN",
+        help=f"the run to replay: {RUN_ID_HELP}",
     )
-    add_proxy_options(replay, 0)
-    replay.add_argument(
-        "--call",
-        type=call_arg,
-        metavar="MODULE:QUALNAME",
+    own = replay.add_argument_group("replay options")
+    own.add_argument(
+        "--run",
+        metavar="RUN",
+        help="the run to replay, for a run id that starts with -: --run=RUN",
+    )
+    own.add_argument(
+        "--entrypoint",
+        type=entrypoint_arg,
+        metavar="MODULE:FUNC",
         help="call this function instead of the run's recorded entrypoint",
     )
-    replay.add_argument(
+    own.add_argument(
         "--python",
         metavar="PATH",
-        help="call the trigger under this Python, the agent's, with irimi installed in it, "
-        "instead of irimi's own",
+        help="the agent's Python interpreter (needs irimi installed)",
     )
-    given = replay.add_mutually_exclusive_group()
+    given = own.add_mutually_exclusive_group()
     given.add_argument(
         "--args",
         type=args_arg,
@@ -69,42 +103,39 @@ def register(subparsers: "argparse._SubParsersAction[Any]") -> None:
         type=args_file_arg,
         dest="args",
         metavar="PATH",
-        help="the same, read from a file: args too long for a command line, or not for `ps`",
+        help="read --args from a file",
     )
-    replay.add_argument(
+    own.add_argument(
         "--result-file",
         type=Path,
         metavar="PATH",
-        help="also write the result as JSON, the one sdk.replay() returns",
+        help="write the result as JSON to PATH",
     )
-    # Not REMAINDER, as `shadow`'s is: that would take every flag after RUN_ID as the command.
-    # After `--`, argparse takes everything as positional, flags included.
-    replay.add_argument(
-        "cmd",
-        nargs="*",
-        metavar="-- <command> [args...]",
-        help="run this command instead of a call of the run's trigger",
-    )
-    # `argv` is what was typed, which `main` sets (`_replay_command`).
-    replay.set_defaults(func=cmd_replay, argv=None)
+    add_proxy_options(replay, 0)
+    # What follows `--`, which `main` splits off before argparse sees it: a command to run in
+    # place of a call of the run's entrypoint.
+    replay.set_defaults(func=cmd_replay, cmd=[])
 
 
 def cmd_replay(
     args: argparse.Namespace, *, engine_factory: session.EngineFactory = session.build_engine
 ) -> int:
-    """`irimi replay RUN_ID`: a stored run's trigger run again through irimi, answered from the
+    """`irimi replay RUN`: a stored run's trigger run again through irimi, answered from the
     run's recording, and what the agent did differently. What it runs is `replay.plan`'s
-    to say, and what it prints `replay.report.ReplayReport`'s. Exits as `irimi compare` does: 0
-    when the replay made the writes its recording did, 1 when it did not, 2 for a replay that
-    could not run, or whose run could not be read back, and 130 or 143 for one SIGINT or SIGTERM
-    stopped.
+    to say, and what it prints `replay.report.ReplayReport`'s. Exits with `EXIT_CODES`: as
+    `irimi compare` does, 2 for a replay that could not run, or whose run could not be read back,
+    and 130 or 143 for one SIGINT or SIGTERM stopped.
     `--result-file` writes the result as JSON, the one `sdk.replay()` reads
     (`protocol.replay_files.ReplayResult`), whether or not the replay ran, holding what irimi
     said on stderr of a replay that did not."""
-    args.cmd = _replay_command(args)
-    if args.cmd and (args.call is not None or args.args is not None):
+    if args.run_id is not None and args.run is not None:
+        raise UsageError("give the run once: RUN, or --run=RUN")
+    if args.run_id is None and args.run is None:
+        raise UsageError("give the run to replay: RUN, or --run=RUN for an id that starts with -")
+    args.run_id = args.run_id if args.run is None else args.run
+    if args.cmd and (args.entrypoint is not None or args.args is not None):
         raise UsageError(
-            "-- CMD runs a command, not a call: drop --call and --args, or the command"
+            "-- CMD runs a command, not a call: drop --entrypoint and --args, or the command"
         )
     if args.cmd and args.python is not None:
         raise UsageError("-- CMD names its own Python: drop --python, or the command")
@@ -120,7 +151,7 @@ def cmd_replay(
         except OSError as exc:
             why = os_error(f"--result-file {args.result_file}", exc)
             print(f"error: {why}", file=sys.stderr)
-            return 2
+            return exitcodes.ERROR
     return result.exit_code
 
 
@@ -134,14 +165,14 @@ def _run_replay(
     start to result."""
     try:
         source = _load_source(args)
-        plan = replay_plan.plan(source.record, list(args.cmd), args.call, args.args)
+        plan = replay_plan.plan(source.record, list(args.cmd), args.entrypoint, args.args)
         python = _replay_python(args, plan)
     except replay_plan.Refused as exc:
         print(f"error: {exc}", file=sys.stderr)
         result = replay_report.refused(args.run_id, said)
         # A SIGTERM that came while `--python` was asked stopped the replay, which exits as one
         # stopped before its command started, whatever the answer.
-        return replace(result, exit_code=SIGTERM_EXIT_CODE) if child.terminated else result
+        return replace(result, exit_code=exitcodes.SIGTERM) if child.terminated else result
     if source.record.end is None:
         print(
             f"warning: run {args.run_id} did not end; it is replayed as far as it was recorded",
@@ -179,7 +210,7 @@ def _run_replay(
         # exits as `irimi shadow` would.
         stored = run.run_id if ran.status == "not-spawned" else None
         result = replay_report.refused(args.run_id, said, stored)
-        if ran.code in (SIGINT_EXIT_CODE, SIGTERM_EXIT_CODE):
+        if ran.code in (exitcodes.SIGINT, exitcodes.SIGTERM):
             return replace(result, exit_code=ran.code)
         return result
     if plan.call is not None and ran.call is not None and not ran.call.called:
@@ -294,39 +325,7 @@ def _interrupted(args: argparse.Namespace, said: list[str], run_id: str | None) 
     """A replay Ctrl-C stopped while no agent ran, so none was waited on: exit 130, as `irimi
     shadow` exits, its result naming the replay's run when one was stored."""
     print("error: interrupted", file=sys.stderr)
-    return replace(replay_report.refused(args.run_id, said, run_id), exit_code=SIGINT_EXIT_CODE)
-
-
-def _replay_command(args: argparse.Namespace) -> list[str]:
-    """`irimi replay`'s `-- CMD`. After `--` argparse takes every word as a positional, RUN_ID
-    first, so `irimi replay -- python agent.py` would read as a replay of a run named `python`.
-    `-- RUN_ID` is how a run id that starts with `-` is given (`sdk.replay` gives every one so),
-    and a command may follow it only after a second `--`. `args.argv` is what was typed.
-
-    The command is read from what was typed, never from `args.cmd`: an older argparse, which
-    Python 3.12's earlier releases ship, strips every `--` from it, the command's own as well,
-    where a newer one strips only the first."""
-    typed = list(args.argv or ())
-    if "--" not in typed:
-        return list(args.cmd)
-    first = typed.index("--")
-    after = typed[first + 1 :]
-    # The subcommand's own words before `--`, parsed again with a stand-in run id after it: the
-    # stand-in is the run id only when none was typed before `--`.
-    before = typed[typed.index("replay") + 1 : first]
-    again = build_parser("replay").parse_known_args(["replay", *before, "--", _NO_RUN_ID])[0]
-    if again.run_id != _NO_RUN_ID:
-        return after  # RUN_ID came before `--`, and every word after it is the command
-    if after[1:] and after[1] != "--":
-        raise UsageError(
-            "RUN_ID comes before `-- CMD`: irimi replay RUN_ID -- CMD, or "
-            "irimi replay -- RUN_ID -- CMD for a run id that starts with -"
-        )
-    return after[2:]
-
-
-# What `_replay_command` puts where a run id typed after `--` would be: no word anyone types.
-_NO_RUN_ID = "\0irimi: no run id\0"
+    return replace(replay_report.refused(args.run_id, said, run_id), exit_code=exitcodes.SIGINT)
 
 
 class _Tee:

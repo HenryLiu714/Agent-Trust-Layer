@@ -40,7 +40,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from irimi import trace
+from irimi import exitcodes, trace
 from irimi.protocol.env import REPLAY_ARGS_FILE_ENV, REPLAY_CALL_ENV, REPLAY_OUTCOME_FILE_ENV
 from irimi.protocol.replay_files import CallOutcome, call_outcome_to_json
 from irimi.sdk.api import NotCallable, resolve
@@ -49,7 +49,7 @@ from irimi.sdk.errors import error_info
 
 # How the child exits when it could not call the trigger at all: a shell's "found, but cannot be
 # run".
-CANNOT_CALL = 126
+CANNOT_CALL = exitcodes.CANNOT_EXEC
 
 
 def main() -> int:

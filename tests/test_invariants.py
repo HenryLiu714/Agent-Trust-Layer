@@ -573,7 +573,7 @@ def test_a_streamed_delegated_answer_is_stamped_too(tmp_path, monkeypatch, upstr
 def test_shadow_mode_is_never_built_without_a_reader(tmp_path, monkeypatch):
     """A policy with no reader does not do L3 and records nothing about it - by design, so bare
     `ShadowPolicy()`s in tests keep their meaning. The hole that leaves is a shadow run silently
-    skipping L3 because the composition root forgot an argument: the `--allow-host` failure shape
+    skipping L3 because the composition root forgot an argument: the `--base-url-host` failure shape
     again, configured and never consulted. So the one construction site is pinned here."""
     from irimi.cli import options, session
     from irimi.reader import NoReader
@@ -581,7 +581,7 @@ def test_shadow_mode_is_never_built_without_a_reader(tmp_path, monkeypatch):
 
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
     index = servicemap.MapIndex(tuple(servicemap.loader.load_shipped()))
-    args = argparse.Namespace(allow_host=[], port=4321, listen_host=options.LISTEN_HOST)
+    args = argparse.Namespace(base_url_host=[], port=4321, bind=options.LISTEN_HOST)
     p = ca.ca_paths()
     run = session.Run(index, p, "t3st", session._engine_config(args, index, "t3st", p), NullStore())
     engine = session.build_engine(run, on_exchange=lambda ex: None)

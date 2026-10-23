@@ -11,7 +11,7 @@ import random
 
 import pytest
 
-from irimi import compare, redact, servicemap, trace
+from irimi import compare, exitcodes, redact, servicemap, trace
 from irimi.cli import main
 from irimi.exchange import Exchange, Flag, Precondition, Request, Response
 from irimi.replay.index import compared_body
@@ -249,9 +249,9 @@ def test_an_ignored_field_is_not_compared_and_any_other_is():
 
     one = refund(b"charge=ch_1&amount=4900&currency=usd&nonce=n-1")
     other = refund(b"currency=usd&nonce=n-2&amount=4900&charge=ch_1")
-    assert compare.compare_runs(_run([one]), _run([other]), index).exit_code == compare.SAME
+    assert compare.compare_runs(_run([one]), _run([other]), index).exit_code == exitcodes.OK
     reason = refund(b"charge=ch_1&amount=4900&currency=usd&nonce=n-1&reason=duplicate")
-    assert compare.compare_runs(_run([one]), _run([reason]), index).exit_code == compare.DIFFERENT
+    assert compare.compare_runs(_run([one]), _run([reason]), index).exit_code == exitcodes.DIFFERENT
 
 
 def test_a_write_answered_otherwise_is_changed_though_its_line_reads_the_same():
@@ -298,7 +298,7 @@ def test_two_stand_ins_given_other_args_are_changed_and_print_the_args():
         "  0 same · 1 changed · 0 only in A · 0 only in B",
     ]
     again = dataclasses.replace(_tool(), args={"ticket": "T-1"})
-    assert compare.compare_runs(_run([a]), _run([again]), None).exit_code == compare.SAME
+    assert compare.compare_runs(_run([a]), _run([again]), None).exit_code == exitcodes.OK
 
 
 def test_an_update_to_another_customer_is_changed_by_the_object_its_path_names():
@@ -335,9 +335,9 @@ def test_a_webhook_s_redacted_path_is_not_compared_and_its_text_is():
 
     index = servicemap.load()
     a, b = hook("/<redacted:aaaa>", "hi"), hook("/<redacted:bbbb>", "hi")
-    assert compare.compare_runs(_run([a]), _run([b]), index).exit_code == compare.SAME
+    assert compare.compare_runs(_run([a]), _run([b]), index).exit_code == exitcodes.OK
     c = hook("/<redacted:aaaa>", "bye")
-    assert compare.compare_runs(_run([a]), _run([c]), index).exit_code == compare.DIFFERENT
+    assert compare.compare_runs(_run([a]), _run([c]), index).exit_code == exitcodes.DIFFERENT
 
 
 def test_an_llm_body_is_compared_less_who_asked_and_how_as_a_replay_matches_it():
@@ -599,7 +599,7 @@ def test_a_label_escapes_the_entrypoint_and_the_agent_version_too(home, capfd):
 def test_an_unknown_run_exits_2_with_the_documented_message(home, capfd, missing):
     present = "b" if missing == "a" else "a"
     _store(home, {present: (_record(present), [])})
-    assert main(["compare", "a", "b"]) == compare.TROUBLE
+    assert main(["compare", "a", "b"]) == exitcodes.ERROR
     out, err = capfd.readouterr()
     assert (out, err) == ("", f"error: no run {missing} in {home / 'store'}\n")
 
@@ -608,7 +608,7 @@ def test_a_damaged_run_exits_2_and_names_it(home, capfd):
     _store(home, {"a": (_record("a"), [_refund()]), "b": (_record("b"), [])})
     for blob in (home / "store" / "blobs").iterdir():
         blob.unlink()
-    assert main(["compare", "a", "b"]) == compare.TROUBLE
+    assert main(["compare", "a", "b"]) == exitcodes.ERROR
     out, err = capfd.readouterr()
     events = home / "store" / "runs" / "a" / "events.jsonl"
     assert out == ""
@@ -622,7 +622,7 @@ def test_a_store_named_with_store_is_the_one_read(home, capfd, tmp_path):
     s.start_run(_record("b"))
     s.close()
     assert main(["compare", "a", "b", "--store", str(elsewhere)]) == 0
-    assert main(["compare", "a", "b"]) == compare.TROUBLE
+    assert main(["compare", "a", "b"]) == exitcodes.ERROR
     assert capfd.readouterr().err == f"error: no run a in {home / 'store'}\n"
 
 
@@ -853,5 +853,5 @@ def test_compare_takes_a_prefix_only_one_run_starts_with_and_last(home, capfd):
 
 def test_compare_refuses_a_prefix_more_than_one_run_starts_with(home, capfd):
     _store(home, {"ab1": (_record("ab1"), []), "ab2": (_record("ab2"), [])})
-    assert main(["compare", "ab", "ab1"]) == compare.TROUBLE
+    assert main(["compare", "ab", "ab1"]) == exitcodes.ERROR
     assert capfd.readouterr() == ("", "error: run id ab is ambiguous; it starts ab1, ab2\n")

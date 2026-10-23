@@ -28,14 +28,13 @@ def test_maps_list_names_the_overrides_file_and_its_target(tmp_path, capsys):
 
 def test_maps_list_reports_a_refused_override(tmp_path, capsys):
     (tmp_path / "cwd" / servicemap.loader.CWD_OVERRIDE_NAME).write_text(BAD_OVERRIDE)
-    assert main(["maps", "list"]) == 1
+    assert main(["maps", "list"]) == 2
     assert "is not loopback" in capsys.readouterr().err
 
 
-def test_maps_without_a_subcommand_is_a_usage_error(capsys):
-    with pytest.raises(SystemExit) as exc:
-        main(["maps"])
-    assert exc.value.code == 2
+def test_maps_without_a_subcommand_lists_the_maps(capsys):
+    assert main(["maps"]) == 0
+    assert "api.stripe.com" in capsys.readouterr().out
 
 
 def test_maps_help_mentions_list(capsys):
@@ -50,7 +49,7 @@ def test_a_refused_map_stops_the_proxy_before_anything_else(tmp_path, capsys, co
     """Fail closed, and before the CA check: a bad policy is not something to start a proxy on."""
     (tmp_path / "cwd" / servicemap.loader.CWD_OVERRIDE_NAME).write_text(BAD_OVERRIDE)
     argv = [command, "--port", "0"] + (["--", "true"] if command == "shadow" else [])
-    assert main(argv) == 1
+    assert main(argv) == 2
     err = capsys.readouterr().err
     assert "is not loopback" in err
     assert "irimi init" not in err

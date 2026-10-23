@@ -721,7 +721,7 @@ def test_reverse_door_refuses_unlisted_host(engine):
         "error": {
             "type": "irimi_refused",
             "message": "irimi refused this request: base-URL host 'api.stripe.com' is not in a "
-            "loaded map or --allow-host",
+            "loaded map or --base-url-host",
         }
     }
     (ex,) = seen

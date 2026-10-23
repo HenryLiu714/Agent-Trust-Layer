@@ -6,7 +6,7 @@ from dataclasses import replace
 
 import pytest
 
-from irimi import compare, redact
+from irimi import exitcodes, redact
 from irimi.exchange import Exchange, Request, Response
 from irimi.protocol.replay_files import CallOutcome, ReplayResult
 from irimi.replay import plan as replay_plan
@@ -38,7 +38,7 @@ def test_call_and_args_replace_the_entrypoint_and_the_args_and_the_trigger_says_
     plan = replay_plan.plan(_record(), [], "agent:other", other)
     assert plan.call == replay_plan.Call("agent:other", other)
     assert plan.trigger == Trigger("agent:other", "agent:other", other, True)
-    # A run with no trigger at all is called by `--call`'s name.
+    # A run with no trigger at all is called by `--entrypoint`'s name.
     bare = replay_plan.plan(_record(None, "header"), [], "agent:other", other)
     assert bare.trigger == Trigger("agent:other", "agent:other", other, True)
 
@@ -65,7 +65,8 @@ def test_an_entrypoint_in_main_is_refused_for_the_child_s_own_main_it_would_call
     qualname = entrypoint.partition(":")[2]
     assert str(refused.value) == (
         f"run src was started as a script, so irimi cannot import its trigger {entrypoint}; "
-        f"replay it with: irimi replay src --call <module>:{qualname} --python <your venv python>"
+        f"replay it with: irimi replay src --entrypoint <module>:{qualname} "
+        "--python <your venv python>"
     )
 
 
@@ -88,7 +89,7 @@ def test_a_trigger_in_main_is_refused_with_the_command_that_replays_it(argv, sho
         replay_plan.plan(record, [], "__main__:handle", None)
     assert str(refused.value) == (
         f"run src was started as a script ({shown}), so irimi cannot import its trigger; replay "
-        f"it with: irimi replay src --call {module}:handle --python <your venv python>"
+        f"it with: irimi replay src --entrypoint {module}:handle --python <your venv python>"
     )
 
 
@@ -97,7 +98,7 @@ def test_a_process_run_s_argv_is_no_function_s_parameters():
     with pytest.raises(replay_plan.Refused) as refused:
         replay_plan.plan(record, [], "agent:handle", None)
     assert str(refused.value) == (
-        "run src recorded a command line, not a call's arguments; pass --args with --call"
+        "run src recorded a command line, not a call's arguments; pass --args with --entrypoint"
     )
     assert replay_plan.plan(record, [], "agent:handle", {"n": 1}).call == replay_plan.Call(
         "agent:handle", {"n": 1}
@@ -117,7 +118,9 @@ def test_args_with_no_function_to_give_them_to_are_refused():
     record = RunRecord.process("src", ["python", "agent.py"], None, 1.0)
     with pytest.raises(replay_plan.Refused) as refused:
         replay_plan.plan(record, [], None, {"n": 1})
-    assert str(refused.value) == "run src has no entrypoint to give --args to; pass --call too"
+    assert (
+        str(refused.value) == "run src has no entrypoint to give --args to; pass --entrypoint too"
+    )
 
 
 def test_a_process_run_is_its_argv_run_again():
@@ -172,7 +175,9 @@ def test_ordinal_spells_a_call_s_place(n, spelled):
 def test_a_run_with_nothing_to_call_or_run_is_refused(record):
     with pytest.raises(replay_plan.Refused) as refused:
         replay_plan.plan(record, [], None, None)
-    assert str(refused.value) == "run src has no entrypoint and no argv; pass --call or -- CMD"
+    assert (
+        str(refused.value) == "run src has no entrypoint and no argv; pass --entrypoint or -- CMD"
+    )
 
 
 @pytest.mark.parametrize(
@@ -338,7 +343,7 @@ def test_a_trigger_that_raised_is_an_agent_that_ran():
     ended = replay_report.outcome(
         _run(_record(), []), _new([]), replay_report.Ended(1, raised), None
     )
-    assert (ended.lines()[1], ended.exit_code) == ("  agent exited 1", compare.SAME)
+    assert (ended.lines()[1], ended.exit_code) == ("  agent exited 1", exitcodes.OK)
 
 
 def test_a_stopped_replay_exits_as_the_signal_did_and_says_so():
@@ -357,12 +362,12 @@ def test_a_run_the_store_dropped_events_of_is_never_called_the_same():
     assert "  the store dropped 2 of the recording's events, which are not compared" in (
         outcome.lines()
     )
-    assert outcome.exit_code == compare.DIFFERENT
+    assert outcome.exit_code == exitcodes.DIFFERENT
 
 
 def test_a_result_is_the_outcome_s_and_a_refusal_holds_its_reason():
     outcome = replay_report.outcome(_run(_record(), []), _new([]), replay_report.Ended(0), None)
     assert outcome.result() == ReplayResult("src", "new", 0, None, tuple(outcome.lines()))
     assert replay_report.refused("src", ["error: no run src in /s"]) == ReplayResult(
-        "src", None, compare.TROUBLE, None, ("error: no run src in /s",)
+        "src", None, exitcodes.ERROR, None, ("error: no run src in /s",)
     )

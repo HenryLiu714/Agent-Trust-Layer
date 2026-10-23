@@ -339,7 +339,7 @@ def test_a_delegated_read_route_says_reads():
 
 
 def test_a_target_that_is_not_loopback_says_so_and_is_red_only_when_asked():
-    """--allow-target-host is how a target stops being loopback, and the line has to say it."""
+    """--allow-remote-target is how a target stops being loopback, and the line has to say it."""
     index = _index(_service(target="http://stub.example:3000"))
     plain, notice = delegated_lines(index)
     assert "NOT loopback" in notice

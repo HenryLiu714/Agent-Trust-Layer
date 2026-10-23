@@ -1,4 +1,4 @@
-"""`irimi serve`, and `irimi shadow --serve`: the engine as a sidecar, with no child process."""
+"""`irimi serve`: the engine as a sidecar, with no child process."""
 
 import argparse
 import sys
@@ -6,9 +6,9 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from irimi import runner
+from irimi import exitcodes, runner
 from irimi.cli import CliError, session
-from irimi.cli.options import DEFAULT_PORT, add_proxy_options
+from irimi.cli.options import DEFAULT_PORT, add_proxy_options, epilog, help_formatted
 from irimi.exchange import Exchange
 from irimi.report import terminal
 from irimi.report.model import RunView
@@ -22,13 +22,20 @@ SERVE_POLL_S = 0.1
 
 
 def register(subparsers: "argparse._SubParsersAction[Any]") -> None:
-    # `irimi serve` is `irimi shadow --serve` under a shorter name: the same function, flags and
-    # banner.
     serve = subparsers.add_parser(
         "serve",
-        allow_abbrev=False,
-        help="the same as `irimi shadow --serve`: run the proxy with no command, until SIGINT or "
-        "SIGTERM",
+        **help_formatted(
+            help="run the proxy for agents you start yourself, until stopped",
+            description="Run irimi's proxy as a sidecar until SIGINT or SIGTERM, for agents you "
+            "start yourself\nand point at it with HTTPS_PROXY. Each run the SDK names prints its "
+            "summary as it ends;\nrequests no run names are stored as unattributed.",
+            epilog=epilog(
+                [
+                    "irimi serve",
+                    "irimi serve --bind 0.0.0.0 --port 4000 --store /data/irimi",
+                ]
+            ),
+        ),
     )
     add_proxy_options(serve, DEFAULT_PORT)
     serve.set_defaults(func=cmd_serve)
@@ -40,8 +47,8 @@ def cmd_serve(
     *,
     engine_factory: session.EngineFactory = session.build_engine,
 ) -> int:
-    """`irimi shadow --serve`, and `irimi serve`, its alias: the engine as a sidecar, with no child
-    process, until SIGINT or SIGTERM, or until `stop` is set.
+    """`irimi serve`: the engine as a sidecar, with no child process, until SIGINT or SIGTERM, or
+    until `stop` is set.
 
     Runs are named by their requests: each SDK run's `Irimi-Run`, and `unattributed` for a request
     that names none. Each exchange and tool call prints its line as it happens, and each run its
@@ -119,7 +126,7 @@ def _run_serve(
     died = threading.Event()
     run = session.prepare_run(args, serve=True, on_run_ended=output.run_ended)
     if run is None:
-        return 1
+        return exitcodes.ERROR
     # The store is closed and its lock released on every way out from here, so a signal never
     # cuts serve short half-way through either.
     with run:
@@ -128,13 +135,11 @@ def _run_serve(
             return 0
         handle = session.start_engine(engine)
         if handle is None:
-            return 1
+            return exitcodes.ERROR
         try:
             if not signalled:  # a banner for a proxy already stopping would say it serves
                 host, port = run.config.listen_host, handle.port()
-                session.print_startup(
-                    "shadow --serve", args, run.index, None, host, port, run.ca.cert
-                )
+                session.print_startup("serve", args, run.index, None, host, port, run.ca.cert)
             threading.Thread(
                 target=runner.watch_engine, args=(handle.thread, stop, died), daemon=True
             ).start()
@@ -149,5 +154,5 @@ def _run_serve(
         output.say([f"stopped · {exchanges} not in any run: irimi runs show unattributed"])
     if died.is_set():
         print("error: the proxy stopped on its own", file=sys.stderr)
-        return 1
-    return 0
+        return exitcodes.ERROR
+    return exitcodes.OK

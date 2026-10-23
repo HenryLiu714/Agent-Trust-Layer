@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from irimi import __version__, ca, cli, paths, servicemap
-from irimi.cli import BROKEN_PIPE_EXIT_CODE, main, options, session
+from irimi import __version__, ca, cli, exitcodes, paths, servicemap
+from irimi.cli import main, options, session
 from irimi.engine import Replay, Serve, Shadow
 from irimi.netaddr import Target
 from irimi.protocol.env import AGENT_VERSION_ENV
@@ -21,9 +21,70 @@ def test_version_flag(capsys):
     assert capsys.readouterr().out.strip() == f"irimi {__version__}"
 
 
-def test_no_command_prints_help_and_fails(capsys):
-    assert main([]) == 1
-    assert "usage: irimi" in capsys.readouterr().out
+def test_no_command_prints_help_and_is_a_usage_error(capsys):
+    """A bare `irimi` exits 2, as a bare `irimi runs list --bogus` does: it was invoked wrongly."""
+    assert main([]) == exitcodes.ERROR
+    assert "usage: irimi" in capsys.readouterr().err
+
+
+def test_shadow_with_no_command_is_a_usage_error(capsys):
+    for argv in (["shadow"], ["shadow", "--port", "0", "--"]):
+        with pytest.raises(SystemExit) as exc:
+            main(argv)
+        assert exc.value.code == exitcodes.ERROR
+        err = capsys.readouterr().err
+        assert err.startswith("usage: irimi shadow [options] -- COMMAND [ARGS...]\n")
+        assert "error: nothing to run" in err
+
+
+def test_runs_and_maps_with_no_subcommand_list(tmp_path, capsys):
+    """`irimi runs` and `irimi maps` are their `list`, options included."""
+    assert main(["runs", "--store", str(tmp_path)]) == exitcodes.OK
+    assert capsys.readouterr().out == f"no runs in {tmp_path}\n"
+    assert main(["maps"]) == exitcodes.OK
+    listed = capsys.readouterr().out
+    assert main(["maps", "list"]) == exitcodes.OK
+    assert capsys.readouterr().out == listed
+
+
+def test_maps_list_previews_a_target(capsys):
+    """`maps list` takes the map options, so a `--target` shows before any proxy starts."""
+    assert main(["maps", "list", "--target", "api.stripe.com=http://127.0.0.1:3000"]) == 0
+    assert "http://127.0.0.1:3000" in capsys.readouterr().out
+    assert main(["maps", "--target", "api.stripe.com=http://example.com"]) == exitcodes.ERROR
+    assert "is not loopback" in capsys.readouterr().err
+
+
+def test_irimi_store_is_the_default_store(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(paths.IRIMI_STORE_ENV, str(tmp_path / "elsewhere"))
+    assert main(["runs", "list"]) == exitcodes.OK
+    assert capsys.readouterr().out == f"no runs in {tmp_path / 'elsewhere'}\n"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["runs", "list", "--", "x"], ["compare", "a", "b", "--", "x"], ["init", "--"]],
+)
+def test_only_shadow_and_replay_take_a_command(argv, capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(argv)
+    assert exc.value.code == exitcodes.ERROR
+    assert (
+        f"unrecognized arguments: {' '.join(argv[argv.index('--') :])}" in capsys.readouterr().err
+    )
+
+
+def test_everything_after_the_first_double_dash_is_the_command():
+    """`--` is split off before argparse sees it, so the command's own flags, and its own `--`,
+    are never irimi's."""
+    args = cli.parse_args(["shadow", "--quiet", "--", "env", "--", "--port", "9"])
+    assert (args.cmd, args.quiet, args.port) == (["env", "--", "--port", "9"], True, 0)
+    replay = cli.parse_args(["replay", "r1", "--", "python3", "-m", "agent", "--quiet"])
+    assert (replay.run_id, replay.cmd, replay.quiet) == (
+        "r1",
+        ["python3", "-m", "agent", "--quiet"],
+        False,
+    )
 
 
 def test_a_stdout_closed_before_irimi_started_is_written_nothing(tmp_path, monkeypatch):
@@ -45,7 +106,7 @@ def test_a_stderr_whose_reader_went_with_stdout_closed_ends_quietly(tmp_path, mo
     None. That is the reader gone too: 141, and nothing raised past `main`."""
     monkeypatch.setattr(sys, "stdout", None)
     monkeypatch.setattr(sys, "stderr", _GoneReader())
-    assert main(["runs", "show", "absent", "--store", str(tmp_path)]) == BROKEN_PIPE_EXIT_CODE
+    assert main(["runs", "show", "absent", "--store", str(tmp_path)]) == exitcodes.BROKEN_PIPE
 
 
 def test_python_m_irimi_is_the_command_and_importing_it_runs_nothing():
@@ -61,7 +122,7 @@ def test_python_m_irimi_is_the_command_and_importing_it_runs_nothing():
 
 def test_serve_without_ca_fails(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
-    assert main(["serve"]) == 1
+    assert main(["serve"]) == exitcodes.ERROR
     assert "irimi init" in capsys.readouterr().err
 
 
@@ -82,10 +143,9 @@ def test_serve_help_has_port(capsys):
 def test_a_command_s_proxy_takes_any_free_port_and_a_sidecar_s_a_fixed_one(capsys):
     """A child is told its proxy's port in its environment, so `shadow` and `replay` need none
     fixed; a sidecar's agents are pointed at one, so `serve` keeps it. The help says so."""
-    parser = cli.build_parser()
-    assert parser.parse_args(["serve"]).port == options.DEFAULT_PORT
-    assert parser.parse_args(["replay", "abc"]).port == 0
-    assert parser.parse_args(["shadow", "--", "true"]).port is None  # `--serve` decides
+    assert cli.parse_args(["serve"]).port == options.DEFAULT_PORT
+    assert cli.parse_args(["replay", "abc"]).port == 0
+    assert cli.parse_args(["shadow", "--", "true"]).port == 0
     with pytest.raises(SystemExit):
         main(["shadow", "--help"])
     assert "0, any free port" in " ".join(capsys.readouterr().out.split())
@@ -99,7 +159,7 @@ def test_serve_port_in_use_fails(tmp_path, monkeypatch, capsys):
         sock.bind(("127.0.0.1", 0))
         sock.listen()
         port = sock.getsockname()[1]
-        assert main(["serve", "--port", str(port)]) == 1
+        assert main(["serve", "--port", str(port)]) == exitcodes.ERROR
         assert capsys.readouterr().err.splitlines() == [
             f"error: port {port} on 127.0.0.1 is in use; pick another with --port, or --port 0 "
             "for any free port"
@@ -133,18 +193,87 @@ def test_no_mode_env_var_anywhere():
     assert offenders == [], "mode comes only from the subcommand:\n" + "\n".join(offenders)
 
 
-def test_serve_help_has_allow_host(capsys):
+def test_serve_help_has_base_url_host(capsys):
     with pytest.raises(SystemExit) as exc:
         main(["serve", "--help"])
     assert exc.value.code == 0
-    assert "--allow-host" in capsys.readouterr().out
+    assert "--base-url-host" in capsys.readouterr().out
 
 
-def test_shadow_help_has_allow_host(capsys):
+def test_shadow_help_has_base_url_host(capsys):
     with pytest.raises(SystemExit) as exc:
         main(["shadow", "--help"])
     assert exc.value.code == 0
-    assert "--allow-host" in capsys.readouterr().out
+    assert "--base-url-host" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("command", "codes"),
+    [
+        ("shadow", [2, 126, 127, 130, 141, 143]),
+        ("replay", [0, 1, 2, 130, 141, 143]),
+        ("compare", [0, 1, 2, 141]),
+    ],
+)
+def test_the_exit_codes_a_ci_job_keys_on_are_in_the_help(command, codes, capsys):
+    with pytest.raises(SystemExit):
+        main([command, "--help"])
+    out = capsys.readouterr().out
+    table = out[out.index("exit status:\n") :].splitlines()[1:]
+    listed = [int(line.split()[0]) for line in table if line.split()[0].isdigit()]
+    assert listed == codes
+    assert all(f"  {code:<5}{exitcodes.MEANINGS[code]}" in table for code in codes)
+
+
+def test_every_command_has_a_description_and_examples():
+    parser = cli.build_parser()
+    commands = [*cli._parser(None)[1].items()]
+    for name in ("runs", "maps"):
+        nested = cli._parser(name)[1][name]
+        sub = next(a for a in nested._actions if isinstance(a, argparse._SubParsersAction))
+        commands += [(f"{name} {n}", p) for n, p in sub.choices.items()]
+    assert parser.epilog is not None and parser.epilog.startswith("examples:")
+    for name, command in commands:
+        assert command.description, name
+        assert command.epilog is not None and command.epilog.startswith("examples:\n  irimi "), name
+
+
+def _subcommand_helps(parser: argparse.ArgumentParser) -> dict[str, str | None]:
+    """Each subcommand `parser` has, by name, with its one-line `help=`; none for a command with no
+    subcommands."""
+    subs = [a for a in parser._actions if isinstance(a, argparse._SubParsersAction)]
+    return {choice.dest: choice.help for sub in subs for choice in sub._choices_actions}
+
+
+def test_the_readme_cli_block_says_what_each_command_s_help_says():
+    """The README's CLI block is written by hand: every command it lists exists, described in the
+    words of its own `help=`, so the two cannot drift."""
+    import re
+
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+    block = readme.split("\n## CLI\n", 1)[1].split("```\n", 2)[1]
+    listed = []
+    for line in block.splitlines():
+        usage, description = re.split(r"\s{2,}", line.strip(), maxsplit=1)
+        words = usage.split()
+        assert words[0] == "irimi", line
+        root, commands = cli._parser(words[1])
+        said, command = _subcommand_helps(root), words[1]
+        assert command in said, line
+        # `runs show`, and `runs [list]`: a subcommand, the default one in brackets.
+        nested = _subcommand_helps(commands[command])
+        if len(words) > 2 and words[2].strip("[]") in nested:
+            said, command = nested, words[2].strip("[]")
+        assert description == said[command], line
+        listed.append(words[1])
+    assert set(listed) == set(cli.COMMANDS)
+
+
+def test_shadow_is_listed_before_serve(capsys):
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    out = capsys.readouterr().out
+    assert out.index("    shadow ") < out.index("    serve ")
 
 
 def _shipped_index():
@@ -162,28 +291,27 @@ def _reverse_hosts(args, index):
 
 def test_reverse_hosts_are_the_mapped_hosts():
     index = _shipped_index()
-    args = cli.build_parser().parse_args(["serve"])
+    args = cli.parse_args(["serve"])
     assert _reverse_hosts(args, index) == index.hosts
     assert {"api.stripe.com", "slack.com"} <= index.hosts
 
 
-def test_reverse_hosts_adds_allow_host_lower_cased():
+def test_reverse_hosts_adds_base_url_host_lower_cased():
     index = _shipped_index()
-    args = cli.build_parser().parse_args(
-        ["serve", "--allow-host", " Foo.Example ", "--allow-host", "bar.example"]
+    args = cli.parse_args(
+        ["serve", "--base-url-host", " Foo.Example ", "--base-url-host", "bar.example"]
     )
     assert _reverse_hosts(args, index) == index.hosts | {"foo.example", "bar.example"}
 
 
 def test_engine_config_carries_the_maps():
     """`serve` and `shadow` both build the engine's config here, and the classifier only sees the
-    maps because `maps=index` is part of it. The bind is `--listen-host`'s, and `serve` is set only
+    maps because `maps=index` is part of it. The bind is `--bind`'s, and `serve` is set only
     for serve mode, whose health answer says so."""
-    from irimi.cli import build_parser
     from irimi.cli.session import _engine_config
 
     index = _shipped_index()
-    args = argparse.Namespace(allow_host=[], port=4321, listen_host="0.0.0.0")
+    args = argparse.Namespace(base_url_host=[], port=4321, bind="0.0.0.0")
     cfg = _engine_config(args, index, "t3st", ca.ca_paths())
     assert cfg.maps is index
     assert cfg.reverse_hosts == index.hosts
@@ -191,7 +319,7 @@ def test_engine_config_carries_the_maps():
     assert cfg.mode == Shadow()
     assert _engine_config(args, index, "t3st", ca.ca_paths(), Serve()).mode == Serve()
     for command in (["serve"], ["shadow", "--", "true"]):
-        assert build_parser().parse_args(command).listen_host == options.LISTEN_HOST
+        assert cli.parse_args(command).bind == options.LISTEN_HOST
 
 
 def test_the_composition_root_builds_the_service_overlay_and_records_into_the_run_s_store():
@@ -202,7 +330,7 @@ def test_the_composition_root_builds_the_service_overlay_and_records_into_the_ru
     from tests.doubles import NullStore
 
     index = _shipped_index()
-    args = argparse.Namespace(allow_host=[], port=4321, listen_host=options.LISTEN_HOST)
+    args = argparse.Namespace(base_url_host=[], port=4321, bind=options.LISTEN_HOST)
     p = ca.ca_paths()
     run = session.Run(index, p, "t3st", session._engine_config(args, index, "t3st", p), NullStore())
     engine = session.build_engine(run, on_exchange=lambda ex: None)
@@ -224,7 +352,7 @@ def test_the_composition_root_builds_a_replay_policy_over_the_run_s_recording():
     from tests.doubles import NullStore
 
     index = _shipped_index()
-    args = argparse.Namespace(allow_host=[], port=4321, listen_host=options.LISTEN_HOST)
+    args = argparse.Namespace(base_url_host=[], port=4321, bind=options.LISTEN_HOST)
     p = ca.ca_paths()
     config = session._engine_config(args, index, "t3st", p)
     recording = ReplayIndex.from_events([], b"k" * 32, index)
@@ -327,9 +455,8 @@ def test_the_unattributed_pool_is_not_a_run_to_replay(tmp_path, monkeypatch, cap
     ],
 )
 def test_a_word_no_argument_takes_is_refused_as_parse_args_refuses_it(argv, tmp_path, capsys):
-    """`main` lets a replay's words after its first `--` go unplaced, which an older argparse
-    (Python 3.12.3) leaves them once an option sits between RUN_ID and `--`. Any other unplaced
-    word is refused with argparse's own message and exit 2, on every Python."""
+    """A word before `--` that no option takes is refused with argparse's own message and exit 2,
+    whether or not a command follows `--`."""
     store = tmp_path / "store"
     with pytest.raises(SystemExit) as exit_:
         main([*argv[:2], "--store", str(store), *argv[2:]])
@@ -341,7 +468,7 @@ def test_a_word_no_argument_takes_is_refused_as_parse_args_refuses_it(argv, tmp_
 @pytest.mark.parametrize(
     ("argv", "abbreviated"),
     [
-        (["shadow", "--allow-t", "x", "--", "true"], "--allow-t"),
+        (["shadow", "--allow-r", "x", "--", "true"], "--allow-r"),
         (["runs", "list", "--lim", "1"], "--lim"),
     ],
 )
@@ -373,19 +500,16 @@ def test_engine_config_defaults_to_no_maps(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("value", ["127.0.0.1:8443", "https://x.example", "x.example/", " "])
-def test_allow_host_rejects_scheme_port_or_path(value, capsys):
+def test_base_url_host_rejects_scheme_port_or_path(value, capsys):
     with pytest.raises(SystemExit) as exc:
-        main(["serve", "--allow-host", value])
+        main(["serve", "--base-url-host", value])
     assert exc.value.code == 2
     assert "bare host name" in capsys.readouterr().err
 
 
-def test_allow_host_is_lower_cased():
-    from irimi.cli import build_parser
-
-    assert build_parser().parse_args(["serve", "--allow-host", " Foo.Example "]).allow_host == [
-        "foo.example"
-    ]
+def test_base_url_host_is_lower_cased():
+    args = cli.parse_args(["serve", "--base-url-host", " Foo.Example "])
+    assert args.base_url_host == ["foo.example"]
 
 
 def test_target_arg_parses_a_service_and_a_route_spec():
@@ -440,72 +564,98 @@ def test_a_malformed_target_flag_is_an_argparse_error(value):
 
 @pytest.mark.parametrize("command", ["serve", "shadow"])
 def test_the_target_flags_are_on_both_engine_commands(command):
-    from irimi.cli import build_parser
-
-    args = build_parser().parse_args(
+    args = cli.parse_args(
         [
             command,
             "--target",
             "api.stripe.com/v1/refunds=http://127.0.0.1:3000",
             "--target-reads",
             "api.stripe.com",
-            "--allow-target-host",
+            "--allow-remote-target",
             "stub.internal",
         ]
         + (["--", "true"] if command == "shadow" else [])
     )
     assert args.target == [("api.stripe.com", "/v1/refunds", "http://127.0.0.1:3000")]
     assert args.target_reads == ["api.stripe.com"]
-    assert args.allow_target_host == ["stub.internal"]
+    assert args.allow_remote_target == ["stub.internal"]
 
 
 def test_a_non_loopback_target_fails_closed_without_the_escape_hatch(capsys):
     code = main(["serve", "--port", "0", "--target", "api.stripe.com=http://example.com"])
-    assert code == 1
+    assert code == exitcodes.ERROR
     assert "is not loopback" in capsys.readouterr().err
 
 
 def test_a_target_on_the_listeners_own_port_fails_closed(capsys):
     code = main(["serve", "--port", "4000", "--target", "api.stripe.com=http://127.0.0.1:4000"])
-    assert code == 1
+    assert code == exitcodes.ERROR
     assert "own listener" in capsys.readouterr().err
 
 
-def test_a_target_on_the_listen_host_fails_closed(capsys):
-    """`--listen-host` is the listener's address too, so a target the escape hatch lets name it,
-    on irimi's own port, is refused before anything starts."""
+def test_a_target_on_the_bind_address_fails_closed(capsys):
+    """`--bind` is the listener's address too, so a target the escape hatch lets name it, on
+    irimi's own port, is refused before anything starts."""
     code = main(
         [
             "serve",
             "--port",
             "4000",
-            "--listen-host",
+            "--bind",
             "10.0.0.5",
-            "--allow-target-host",
+            "--allow-remote-target",
             "10.0.0.5",
             "--target",
             "api.stripe.com=http://10.0.0.5:4000",
         ]
     )
-    assert code == 1
+    assert code == exitcodes.ERROR
     assert "own listener" in capsys.readouterr().err
 
 
 def test_a_target_naming_an_unmapped_host_fails_closed(capsys):
     code = main(["serve", "--port", "0", "--target", "nope.example=http://127.0.0.1:3000"])
-    assert code == 1
+    assert code == exitcodes.ERROR
     assert "no loaded service map claims host" in capsys.readouterr().err
 
 
 def test_the_escape_hatch_warning_says_what_it_allows():
-    from irimi.cli import build_parser
     from irimi.cli.session import _escape_hatch_warning
 
-    plain = build_parser().parse_args(["serve"])
+    plain = cli.parse_args(["serve"])
     assert _escape_hatch_warning(plain) is None
-    loud = build_parser().parse_args(["serve", "--allow-target-host", "stub.internal"])
+    loud = cli.parse_args(["serve", "--allow-remote-target", "stub.internal"])
     warning = _escape_hatch_warning(loud)
-    assert warning == "warning: targets may leave this machine (--allow-target-host stub.internal)"
+    assert warning == (
+        "warning: targets may leave this machine (--allow-remote-target stub.internal)"
+    )
+
+
+def test_a_ca_near_its_expiry_is_warned_of(tmp_path, monkeypatch):
+    """A CA lasts `ca.CA_VALID_DAYS`; within `ca.EXPIRY_WARNING` of its end, and after it, the
+    startup says so and names the fix."""
+    import datetime as dt
+
+    from irimi.cli.session import _ca_expiry_warning
+
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
+    p = ca.ca_paths()
+    ca.generate_ca(p)
+    expires = ca.expires_at(p.cert)
+    assert expires is not None
+    now = dt.datetime.now(dt.UTC)
+    assert dt.timedelta(days=ca.CA_VALID_DAYS - 1) < expires - now <= dt.timedelta(days=825)
+    assert _ca_expiry_warning(p.cert) is None
+    assert _ca_expiry_warning(tmp_path / "missing.pem") is None
+    for ends, said in (
+        (now + dt.timedelta(days=10), "expires"),
+        (now - dt.timedelta(1), "expired"),
+    ):
+        monkeypatch.setattr(ca, "expires_at", lambda cert, ends=ends: ends)
+        assert _ca_expiry_warning(p.cert) == (
+            f"warning: irimi's CA {said} on {ends.date().isoformat()}; run irimi init --force "
+            "for a new one"
+        )
 
 
 # ------------------------------------------------- the startup lines reach a pipe (flushing)
@@ -550,7 +700,7 @@ def _delegated_service(target: str):
 
 
 def _startup_args(**kwargs):
-    kwargs.setdefault("allow_target_host", [])
+    kwargs.setdefault("allow_remote_target", [])
     return argparse.Namespace(**kwargs)
 
 
@@ -586,15 +736,15 @@ def test_the_escape_hatch_warning_goes_to_stderr_flushed(monkeypatch, capsys):
     monkeypatch.setattr(sys, "stdout", out)
     session.print_startup(
         "shadow",
-        _startup_args(allow_target_host=["stub.internal"]),
+        _startup_args(allow_remote_target=["stub.internal"]),
         servicemap.MapIndex(),
         "7f3a",
         "127.0.0.1",
         4000,
         Path("/ca.pem"),
     )
-    assert "--allow-target-host stub.internal" in capsys.readouterr().err
-    assert "--allow-target-host" not in out.visible
+    assert "--allow-remote-target stub.internal" in capsys.readouterr().err
+    assert "--allow-remote-target" not in out.visible
 
 
 def test_serve_and_shadow_print_the_same_startup_lines(monkeypatch):
@@ -645,7 +795,7 @@ def test_a_redaction_key_that_cannot_be_used_stops_the_run_with_one_line(
     home, capsys, command, key
 ):
     """A run that could not redact what it stores must not start, in `serve` as in
-    `shadow`: one `error:` line, exit 1, no traceback, and no store on disk."""
+    `shadow`: one `error:` line, exit 2, no traceback, and no store on disk."""
     path = home / paths.REDACT_KEY_NAME
     if key == "short":
         path.write_bytes(b"short")
@@ -656,7 +806,7 @@ def test_a_redaction_key_that_cannot_be_used_stops_the_run_with_one_line(
     argv = [command, "--port", "0"] + (
         ["--", sys.executable, "-c", "pass"] if command == "shadow" else []
     )
-    assert main(argv) == 1
+    assert main(argv) == exitcodes.ERROR
     err = capsys.readouterr().err.strip().splitlines()
     assert len(err) == 1 and err[0].startswith("error: ") and str(path) in err[0]
     assert not (home / "store").exists()
@@ -678,7 +828,7 @@ def test_a_store_that_cannot_be_written_stops_the_run_with_one_line(home, capsys
         argv = [command, "--port", "0", "--store", str(store)]
         if command == "shadow":
             argv += ["--", sys.executable, "-c", "pass"]
-        assert main(argv) == 1
+        assert main(argv) == exitcodes.ERROR
         err = capsys.readouterr().err.strip().splitlines()
         assert len(err) == 1 and err[0].startswith("error: "), err
 
@@ -723,7 +873,7 @@ def test_shadow_closes_the_store_when_the_proxy_never_starts(home, monkeypatch, 
         raise EngineStartError("proxy did not start on 127.0.0.1:0: refused by the test")
 
     monkeypatch.setattr(runner, "start_engine", refuse)
-    assert main(["shadow", *_child()]) == 1
+    assert main(["shadow", *_child()]) == exitcodes.ERROR
     assert "refused by the test" in capsys.readouterr().err
     assert spy.closed != []
     assert list((home / "store").iterdir()) == []  # no run began, so none is on disk
@@ -765,7 +915,7 @@ def test_a_reader_gone_costs_shadow_no_run_and_leaves_no_engine(home, monkeypatc
     monkeypatch.setattr(runner, "end_process_run", end_then_go)
     monkeypatch.setattr(sys, "stdout", out)
     before = set(threading.enumerate())
-    assert main(["shadow", *_child("raise SystemExit(3)")]) == BROKEN_PIPE_EXIT_CODE
+    assert main(["shadow", *_child("raise SystemExit(3)")]) == exitcodes.BROKEN_PIPE
     assert spy.closed != []
     assert [t for t in threading.enumerate() if t not in before and t.is_alive()] == []
     stored = StoreReader(home / "store").list_runs()
@@ -787,7 +937,7 @@ def test_a_reader_gone_by_serve_s_banner_closes_its_store_and_releases_its_lock(
     out.gone = True
     monkeypatch.setattr(sys, "stdout", out)
     before = set(threading.enumerate())
-    assert main(["serve", "--port", "0"]) == BROKEN_PIPE_EXIT_CODE
+    assert main(["serve", "--port", "0"]) == exitcodes.BROKEN_PIPE
     assert spy.closed != []
     assert [t for t in threading.enumerate() if t not in before and t.is_alive()] == []
     ServeLock.hold(home / "store").release()
@@ -841,7 +991,7 @@ def test_serve_prints_a_line_for_each_tool_call(home, monkeypatch, capsys):
         wired.append(on_tool_call)
         return _Refuses()
 
-    assert main(["serve", "--port", "0"], engine_factory=build) == 1
+    assert main(["serve", "--port", "0"], engine_factory=build) == exitcodes.ERROR
     assert "error: not started" in capsys.readouterr().err.splitlines()
     [on_tool_call] = wired
     on_tool_call(ToolCall("t", "r", "db.write", "write", "shadow", {}, None, None, 1.0, 2.0))
@@ -889,9 +1039,7 @@ def test_serve_records_under_the_store_it_was_given(home, monkeypatch, capsys):
 
     monkeypatch.setattr(session, "print_startup", startup)
     elsewhere = home / "elsewhere"
-    args = cli.build_parser().parse_args(
-        ["shadow", "--serve", "--port", "0", "--store", str(elsewhere)]
-    )
+    args = cli.parse_args(["serve", "--port", "0", "--store", str(elsewhere)])
     try:
         assert args.func(args, stop) == 0
     finally:

@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 IRIMI_HOME_ENV = "IRIMI_HOME"
+IRIMI_STORE_ENV = "IRIMI_STORE"
 CA_KEY_NAME = "ca.key"
 CA_CERT_NAME = "ca.pem"
 REDACT_KEY_NAME = "redact.key"  # the redaction HMAC key (0600), created on first use
@@ -28,6 +29,9 @@ def mitm_dir() -> Path:
 
 
 def store_dir() -> Path:
-    """Where `irimi serve`, `irimi shadow` and `irimi replay` keep the trace store unless
-    `--store` says."""
+    """Where irimi keeps the trace store unless `--store` says: $IRIMI_STORE if set, else
+    `store` under irimi's home."""
+    raw = os.environ.get(IRIMI_STORE_ENV)
+    if raw:
+        return Path(raw).expanduser()
     return irimi_home() / STORE_DIR_NAME

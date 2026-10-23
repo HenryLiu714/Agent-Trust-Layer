@@ -4,13 +4,15 @@
     result = sdk.replay(run_id, handle, args=(Ticket(...),))    # a function of yours, with args
     assert result.same, result
 
-It runs `python -m irimi replay --call ... --args-file ... --result-file ... -- RUN_ID` as a
-subprocess and returns what that wrote, as a `ReplayResult`. The agent gets a fresh process, whose
-HTTP clients read `HTTPS_PROXY` and the CA when they are built, as every `irimi shadow` child's do:
-rewiring the environment of this process, whose clients may already exist, would not reach them.
+It runs `python -m irimi replay --run=RUN_ID --entrypoint ... --args-file ... --result-file ...`
+as a subprocess and returns what that wrote, as a `ReplayResult`. The agent gets a fresh process,
+whose HTTP clients read `HTTPS_PROXY` and the CA when they are built, as every `irimi shadow`
+child's do: rewiring the environment of this process, whose clients may already exist, would not
+reach them.
 Its `PYTHONPATH` is this process's `sys.path`, so it imports what this process can. The args go in
 a file only this user can read, never on the command line, where `ps` shows them and the kernel
-caps one argument's length. The run id goes after `--`, so one that starts with `-` is no flag.
+caps one argument's length. The run id is given as `--run=RUN_ID`, so one that starts with `-` is
+no flag.
 
 `irimi replay --result-file` writes the `ReplayResult` this reads back, by the one codec in
 `protocol.replay_files`.
@@ -59,9 +61,10 @@ def replay(
     `call=None` replays the run's recorded entrypoint with its recorded args. Given `call`, it is
     called instead, with `args` and `kwargs`: it must be importable as `module:qualname`, as a
     decorated trigger normally is, and its arguments must capture replayably (`capture`).
-    `store` is the trace store, `$IRIMI_HOME/store` by default.
+    `store` is the trace store, `$IRIMI_STORE` or else `$IRIMI_HOME/store` by default.
 
-    Never raises on the replay's own exit code: a refused replay is a result with `exit_code` 2.
+    Never raises on the replay's own exit code: a refused replay is a result with `exit_code`
+    `exitcodes.ERROR`.
     ReplayError when the replay cannot be started as asked, or exited without writing a result."""
     kwargs = {} if kwargs is None else kwargs
     if call is None and (args or kwargs):
@@ -70,15 +73,15 @@ def replay(
     # A directory only this user can enter: the args are the caller's, unredacted.
     with tempfile.TemporaryDirectory(prefix="irimi-replay-") as tmp:
         result_file = Path(tmp) / "result.json"
-        argv = ["replay", "--port", "0", "--result-file", str(result_file)]
+        argv = ["replay", f"--run={run_id}", "--port", "0", "--result-file", str(result_file)]
         if planned is not None:
             args_file = Path(tmp) / "args.json"
             args_file.write_text(json.dumps(planned[1]), encoding="utf-8")
-            argv += ["--call", planned[0], "--args-file", str(args_file)]
+            argv += ["--entrypoint", planned[0], "--args-file", str(args_file)]
         if store is not None:
             argv += ["--store", os.fspath(store)]
         env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
-        code = _run_irimi([*argv, "--", run_id], env)
+        code = _run_irimi(argv, env)
         try:
             return replay_result_from_json(json.loads(result_file.read_text(encoding="utf-8")))
         except (OSError, ValueError) as exc:

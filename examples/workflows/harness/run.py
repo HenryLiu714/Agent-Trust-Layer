@@ -12,7 +12,7 @@ and says whether anything about it is expected to differ from a bare run.
 - **shadow**: `irimi shadow -- <agent>` runs in THIS process through `irimi.cli.main`, with the
   fake internet resolving its hosts, so irimi's real shipped maps, policy and overlay decide every
   call. Its writes must not land anywhere.
-- **serve**: `irimi shadow --serve` runs in THIS process too, on a thread of its own, because the
+- **serve**: `irimi serve` runs in THIS process too, on a thread of its own, because the
   fake internet resolves names only here; the agent runs beside it as its own process, pointed at
   it by the variables the README's "Serve mode" names, and irimi is stopped, by its `stop` event
   rather than a signal, when the agent exits. Every scenario runs this way, with its own
@@ -59,8 +59,8 @@ from examples.workflows import sdk as agent_sdk
 from examples.workflows.harness.internet import BOMB_SECRET, FakeInternet, Req
 from examples.workflows.harness.services import CLIENT_SECRET_CANARY, World
 from irimi import ca, paths, runner, sdk, servicemap, trace
-from irimi.cli import build_parser, session
 from irimi.cli import main as irimi_main
+from irimi.cli import parse_args, session
 from irimi.cli.session import EngineFactory
 from irimi.exchange import Exchange
 from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV, PROXY_ENVS
@@ -148,7 +148,7 @@ class Scenario:
     # The scenario exists to show a write irimi cannot stop; universal invariant 1 is inverted.
     leaks: bool = False
     doc: str = ""
-    # The irimi flags it runs with under `irimi shadow --serve`. Every scenario runs there
+    # The irimi flags it runs with under `irimi serve`. Every scenario runs there
     # too, since serve is how irimi runs beside an agent it did not launch; None would keep one to
     # bare and shadow, for a scenario that needs irimi to be the agent's parent.
     serve_flags: tuple[str, ...] | None = ()
@@ -475,7 +475,7 @@ def workflows() -> dict[str, Workflow]:
 
 
 def serve_cases() -> list[tuple[str, str]]:
-    """`(workflow, scenario)` for every scenario that runs under `irimi shadow --serve` too: the
+    """`(workflow, scenario)` for every scenario that runs under `irimi serve` too: the
     ones whose `serve_flags` are set. The one statement of that set, for every test that
     holds serve runs to something."""
     return [
@@ -509,9 +509,9 @@ def replay(
     `recorded`'s scenario, recorded under `irimi shadow` or serve or itself a replay, in a
     copy of its `IRIMI_HOME` and its store under `workdir`, so `recorded` reads its store as it was
     and the replay's holds both, with `env` over the scenario's own environment - `PROMPT=half` is
-    the prompt edit - and `options` given to `irimi replay` too (`--call`, `--args`). What runs is
-    what `irimi replay` runs for the run, or, with `command`, the scenario's agent command. The
-    result file `irimi replay` writes is the result's `replay`.
+    the prompt edit - and `options` given to `irimi replay` too (`--entrypoint`, `--args`). What
+    runs is what `irimi replay` runs for the run, or, with `command`, the scenario's agent command.
+    The result file `irimi replay` writes is the result's `replay`.
 
     Everything else is the run's own: a fresh `World` from the scenario's `setup` and a fresh fake
     internet, so a request the recording does not answer shows up in `internet.requests()`, and its
@@ -861,7 +861,7 @@ def _as_irimi(
     scenario: Scenario,
     workdir: Path,
 ) -> Iterator[None]:
-    """This process made the one irimi runs in, for `irimi shadow` and `irimi shadow --serve`
+    """This process made the one irimi runs in, for `irimi shadow` and `irimi serve`
     alike: the agent's environment, `cwd`, TMPDIR, the scenario's maps, the fake resolver,
     and a CA under the run's `IRIMI_HOME`.
 
@@ -894,10 +894,10 @@ def _run_serve(
     build: EngineFactory,
     flags: tuple[str, ...] = (),
 ) -> tuple[int, list[str]]:
-    """`irimi shadow --serve` in this process, as `_run_shadow` runs `irimi shadow`, on a thread of
+    """`irimi serve` in this process, as `_run_shadow` runs `irimi shadow`, on a thread of
     its own; the agent beside it as its own process; and irimi stopped when the agent exits.
 
-    The command is parsed by irimi's own parser and run by the function `irimi shadow --serve`
+    The command is parsed by irimi's own parser and run by the function `irimi serve`
     runs, with the `stop` event in place of SIGTERM, which would reach this whole test process,
     and `build` building its engine.
     The agent is given exactly the variables an agent container is (README, "Serve mode"): the
@@ -908,8 +908,8 @@ def _run_serve(
     stop = threading.Event()
     codes: list[int] = []
     assert scenario.serve_flags is not None
-    argv = ["shadow", "--serve", "--port", "0", *flags, *scenario.serve_flags]
-    args = build_parser().parse_args(argv)
+    argv = ["serve", "--port", "0", *flags, *scenario.serve_flags]
+    args = parse_args(argv)
     before = set(threading.enumerate())
     with _as_irimi(env, cwd, tmp, internet, scenario, workdir), contextlib.redirect_stdout(buf):
         serving = threading.Thread(
@@ -925,7 +925,7 @@ def _run_serve(
                 # exit is the run's (W8 `map_refused`).
                 serving.join(timeout=SERVE_TIMEOUT_S)
                 if serving.is_alive() or codes in ([], [0]):
-                    raise AssertionError(f"irimi shadow --serve printed no banner: {codes}")
+                    raise AssertionError(f"irimi serve printed no banner: {codes}")
                 return codes[0], buf.getvalue().splitlines()
             agent_env = _serve_env(env, port, ca.ca_paths().cert)
             done = subprocess.run(cmd, env=agent_env, cwd=cwd, timeout=180, check=False)
@@ -934,7 +934,7 @@ def _run_serve(
             stop.set()
             serving.join(timeout=SERVE_TIMEOUT_S)
     if serving.is_alive() or codes != [0]:
-        raise AssertionError(f"irimi shadow --serve did not stop cleanly: {codes}")
+        raise AssertionError(f"irimi serve did not stop cleanly: {codes}")
     # Stopped means stopped: the engine's thread joined and the store closed, its writer thread
     # with it, by the time serve returned. A thread of the engine's event loop's executor,
     # told to shut down as the loop closed, may take a moment to see it, so each is given that
@@ -945,7 +945,7 @@ def _run_serve(
         thread.join(max(0.0, deadline - time.monotonic()))
     left = [t.name for t in started if t.is_alive()]
     if left:
-        raise AssertionError(f"irimi shadow --serve left threads running: {left}")
+        raise AssertionError(f"irimi serve left threads running: {left}")
     return code, buf.getvalue().splitlines()
 
 
@@ -961,7 +961,7 @@ def _served_port(buf: io.StringIO, serving: threading.Thread) -> int | None:
         if not alive:
             return None
         time.sleep(0.01)
-    raise AssertionError(f"irimi shadow --serve printed no banner: {buf.getvalue()!r}")
+    raise AssertionError(f"irimi serve printed no banner: {buf.getvalue()!r}")
 
 
 def _serve_env(env: dict[str, str], port: int, cert: Path) -> dict[str, str]:

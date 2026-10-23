@@ -89,11 +89,11 @@ def test_a_post_read_without_persists_false_is_refused_and_nothing_runs(run_work
     parse_service(yaml.safe_load(SUBAGENT_MAP), "subagent.yaml")
     with pytest.raises(MapError, match="unsafe method downgrades a write.*live_because"):
         parse_service(yaml.safe_load(UNJUSTIFIED_MAP), "subagent.yaml")
-    # Under serve mode the same refusal ends serve before it listens: exit 1, no banner, and
+    # Under serve mode the same refusal ends serve before it listens: exit 2, no banner, and
     # so no agent is started beside it.
     for mode in MODES:
         shadow = run_workflow(W, "map_refused", mode)
-        assert shadow.exit_code == 1
+        assert shadow.exit_code == 2
         assert shadow.irimi == []
         assert shadow.obs == []
         assert shadow.internet.requests() == []

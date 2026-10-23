@@ -41,7 +41,7 @@ def banner_lines(
     ca_cert: Path,
     replay_of: str | None = None,
 ) -> list[str]:
-    """The startup lines. `command` is "shadow", "replay" or "shadow --serve"; `run_id` is None in
+    """The startup lines. `command` is "shadow", "replay" or "serve"; `run_id` is None in
     serve mode, which names its runs per request. A replay says which run it replays as which.
 
     A listener that is not loopback adds a line saying so: every machine that reaches the port can
@@ -72,7 +72,7 @@ def delegated_lines(index: MapIndex, color: bool = False) -> list[str]:
     this banner, the exit summary and `irimi maps list` are three surfaces that must agree about
     which services are delegated, and they agree by construction only if they ask one function.
 
-    A target that is not loopback got there through `--allow-target-host`, so it is named as
+    A target that is not loopback got there through `--allow-remote-target`, so it is named as
     leaving the machine and painted red. `color` is the caller's answer to "is this a terminal";
     captured output stays plain so a test asserts on words rather than escape codes.
     """

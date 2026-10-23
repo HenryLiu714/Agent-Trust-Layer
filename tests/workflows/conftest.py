@@ -13,7 +13,8 @@ the most memory Python held at once while it ran.
 
 `replayed(name, scenario, env, run_id, command, options, mode)` replays a run of a scenario's
 shadow run, or its serve run, by `irimi replay`, in a copy of its home, with `env` over the
-scenario's environment and `options` given to `irimi replay` (`--call`, `--args`), once per session.
+scenario's environment and `options` given to `irimi replay` (`--entrypoint`, `--args`), once per
+session.
 """
 
 import tracemalloc
@@ -92,7 +93,7 @@ def replayed(run_workflow, tmp_path_factory):
     serve run, a deployed agent's recording, and its run `run_id` - by default its one run,
     `replayed_run_id` - replayed by `irimi replay` with `env` over the scenario's own,
     once per session: what `irimi replay` runs for the run, or with `command` the scenario's own
-    agent command, and `options` given to `irimi replay` as well (`--call`, `--args`).
+    agent command, and `options` given to `irimi replay` as well (`--entrypoint`, `--args`).
 
     The replay runs in a copy of the recording's `IRIMI_HOME`, its store included, which `replay`
     makes: a replay records into the store it answers from, and the shadow run's own pins read its

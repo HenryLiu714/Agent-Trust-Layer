@@ -18,7 +18,7 @@ from dataclasses import replace
 
 import pytest
 
-from irimi import __version__, ca, paths
+from irimi import __version__, ca, cli, paths
 from irimi.cli import main
 from irimi.protocol.replay_files import ReplayResult, replay_result_from_json
 from irimi.servicemap import loader
@@ -302,7 +302,7 @@ def test_call_and_args_override_the_recorded_entrypoint_and_args(home, capfd):
         }
     }
     code, out, err = _replay(
-        capfd, source, "--call", "replay_agent:refund_half", "--args", json.dumps(ticket)
+        capfd, source, "--entrypoint", "replay_agent:refund_half", "--args", json.dumps(ticket)
     )
     assert (code, err) == (1, [])
     [replay] = _replay_runs(home, source)
@@ -363,7 +363,9 @@ def test_a_run_with_no_entrypoint_and_no_argv_is_refused(home, capfd):
     capfd.readouterr()
     code, out, err = _replay(capfd, source)
     assert (code, out) == (2, [])
-    assert err == [f"error: run {source} has no entrypoint and no argv; pass --call or -- CMD"]
+    assert err == [
+        f"error: run {source} has no entrypoint and no argv; pass --entrypoint or -- CMD"
+    ]
 
 
 def test_sdk_replay_returns_the_result_the_cli_writes(home, capfd, monkeypatch, tmp_path):
@@ -485,7 +487,7 @@ def test_a_trigger_recorded_in_main_is_refused(home, capfd):
     assert (code, out) == (2, [])
     assert err == [
         f"error: run {run.run_id} was started as a script, so irimi cannot import its trigger "
-        f"__main__:main; replay it with: irimi replay {run.run_id} --call <module>:main "
+        f"__main__:main; replay it with: irimi replay {run.run_id} --entrypoint <module>:main "
         "--python <your venv python>"
     ]
 
@@ -666,7 +668,7 @@ def test_args_from_a_file_and_a_command_with_a_call_is_a_usage_error(home, capfd
     assert (code, err) == (0, [])
     assert "  no divergence: every call was answered from the recording" in out
     with pytest.raises(SystemExit) as usage:
-        main(["replay", source, "--call", "replay_agent:handle", "--", "true"])
+        main(["replay", source, "--entrypoint", "replay_agent:handle", "--", "true"])
     assert usage.value.code == 2
     assert "-- CMD runs a command, not a call" in capfd.readouterr().err
 
@@ -723,7 +725,7 @@ def test_args_that_do_not_bind_and_a_module_that_exits_as_it_loads_cannot_be_cal
     assert (code, _no_result(out)) == (2, True)
     assert err[0].startswith("error: cannot call replay_agent:handle: its args do not bind: ")
     (home.parent / "exits_agent.py").write_text("import sys\nsys.exit(4)\n")
-    code, out, err = _replay(capfd, source, "--call", "exits_agent:handle", "--args", "{}")
+    code, out, err = _replay(capfd, source, "--entrypoint", "exits_agent:handle", "--args", "{}")
     assert (code, _no_result(out)) == (2, True)
     assert err == [
         "error: cannot call exits_agent:handle: importing exits_agent raised SystemExit: 4"
@@ -757,7 +759,7 @@ def test_a_replay_sigterm_stops_while_its_agent_runs_exits_143_and_says_so(home,
     capfd.readouterr()
     marker, written = tmp_path / "started", tmp_path / "result.json"
     command = [sys.executable, "-m", "irimi", "replay", "--port", "0"]
-    command += ["--result-file", str(written), "--", source]
+    command += ["--result-file", str(written), f"--run={source}"]
     proc = subprocess.Popen(
         command,
         env={**os.environ, "WAIT_FOR": str(marker), "PYTHONPATH": str(tmp_path)},
@@ -932,25 +934,37 @@ def test_runs_list_and_show_mark_a_run_a_label_made_in_a_replay(home, capfd):
     ]
 
 
-def test_a_command_given_with_no_run_id_before_it_is_a_usage_error(home, capfd):
-    """After `--` argparse takes the first word as RUN_ID: `irimi replay -- python agent.py` would
-    replay a run named `python`. `-- RUN_ID` alone is a run id, and a command follows it
-    after a second `--`."""
-    source = _record(home, "sys.exit(0 if replay_agent.plain('ch_REAL1') == 200 else 1)")
+@pytest.mark.parametrize(
+    ("typed", "said"),
+    [
+        (["--", sys.executable, "-c", "pass"], "give the run to replay: RUN, or --run=RUN"),
+        (["r1", "--run=r1"], "give the run once: RUN, or --run=RUN"),
+    ],
+)
+def test_a_replay_names_its_run_once_before_any_command(home, capfd, typed, said):
+    """Everything after `--` is the command, so `irimi replay -- python agent.py` names no run,
+    and neither does it name two: RUN or `--run=RUN`."""
     capfd.readouterr()
     with pytest.raises(SystemExit) as usage:
-        main(["replay", "--port", "0", "--", sys.executable, "-c", "pass"])
+        main(["replay", "--port", "0", *typed])
     assert usage.value.code == 2
-    assert capfd.readouterr().err.splitlines()[-1] == (
-        "irimi replay: error: RUN_ID comes before `-- CMD`: irimi replay RUN_ID -- CMD, or irimi "
-        "replay -- RUN_ID -- CMD for a run id that starts with -"
-    )
+    err = capfd.readouterr().err
+    assert err.startswith("usage: irimi replay RUN [options] [-- COMMAND [ARGS...]]\n")
+    assert f"irimi replay: error: {said}" in err
+
+
+def test_a_run_id_that_starts_with_a_dash_is_given_as_run_equals(home, capfd):
+    """`--run=RUN` is the spelling for an id argparse would take as a flag; a command still
+    follows `--`."""
+    source = _record(home, "sys.exit(0 if replay_agent.plain('ch_REAL1') == 200 else 1)")
+    capfd.readouterr()
     command = [sys.executable, "-c", "import replay_agent; replay_agent.plain('ch_REAL1')"]
-    code = main(["replay", "--port", "0", "--", source, "--", *command])
+    code = main(["replay", f"--run={source}", "--port", "0", "--", *command])
     out = capfd.readouterr().out.splitlines()
     assert code == 0
     assert _result(out)[2] == "  no divergence: every call was answered from the recording"
-    assert main(["replay", "--port", "0", "--", source]) == 0
+    assert main(["replay", "--port", "0", f"--run={source}"]) == 0
+    assert cli.parse_args(["replay", "--run=-r1"]).run == "-r1"
 
 
 @pytest.mark.parametrize(
@@ -959,25 +973,11 @@ def test_a_command_given_with_no_run_id_before_it_is_a_usage_error(home, capfd):
         (["replay", "RUN"], []),
         (["replay", "RUN", "--", "pytest", "--", "-k", "x"], ["pytest", "--", "-k", "x"]),
         (["replay", "--store", "s", "RUN", "--", "a", "--"], ["a", "--"]),
-        (["replay", "--", "RUN"], []),
-        (["replay", "--", "-RUN", "--", "pytest", "--", "-k"], ["pytest", "--", "-k"]),
+        (["replay", "--run=-RUN", "--", "pytest", "--", "-k"], ["pytest", "--", "-k"]),
     ],
 )
-@pytest.mark.parametrize("strips_every_dashes", [False, True])
-def test_the_command_is_what_was_typed_whichever_dashes_argparse_strips(
-    typed, command, strips_every_dashes
-):
-    """An older argparse, which Python 3.12's earlier releases ship, strips every `--` from the
-    command, its own too; a newer one only the first. The command is what was typed either way.
-    """
-    from irimi import cli
-    from irimi.cli import replay_cmd
-
-    args = cli.build_parser().parse_args(typed)
-    args.argv = typed
-    if strips_every_dashes:
-        args.cmd = [word for word in args.cmd if word != "--"]
-    assert replay_cmd._replay_command(args) == command
+def test_the_command_is_every_word_after_the_first_double_dash(typed, command):
+    assert cli.parse_args(typed).cmd == command
 
 
 def test_an_outcome_file_the_agent_nested_past_the_stack_is_no_outcome(home, capfd, tmp_path):

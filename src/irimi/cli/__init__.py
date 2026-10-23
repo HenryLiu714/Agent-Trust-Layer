@@ -15,25 +15,34 @@ import sys
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 
-from irimi import __version__
+from irimi import __version__, exitcodes
 
 if TYPE_CHECKING:  # the quoted annotation below; no runtime import
     from irimi.cli.session import EngineFactory
 
-# 128 + SIGPIPE, the shell's status for a command whose reader went away (`irimi runs show X |
-# head -1`), which irimi ends quietly with in place of a traceback and Python's 120.
-BROKEN_PIPE_EXIT_CODE = 141
-
 # Each command's module, in the order `irimi --help` lists the commands.
 COMMANDS = {
     "init": "irimi.cli.init",
-    "serve": "irimi.cli.serve",
     "shadow": "irimi.cli.shadow",
-    "maps": "irimi.cli.maps",
+    "serve": "irimi.cli.serve",
+    "replay": "irimi.cli.replay_cmd",
     "runs": "irimi.cli.runs",
     "compare": "irimi.cli.runs",
-    "replay": "irimi.cli.replay_cmd",
+    "maps": "irimi.cli.maps",
 }
+# The subcommand a command with subcommands runs when none is typed: `irimi runs` lists the runs.
+DEFAULT_SUBCOMMANDS = {"runs": "list", "maps": "list"}
+
+DESCRIPTION = """\
+Shadow mode for AI agents: reads are real, writes are faked.
+
+  faked write  a write irimi answered itself; the real service never saw it
+  target       a URL you name (--target) that answers a service in irimi's place"""
+EPILOG = """\
+examples:
+  irimi init
+  irimi shadow -- python3 agent.py
+  irimi runs show last"""
 
 
 class UsageError(Exception):
@@ -71,7 +80,9 @@ def _parser(
     parser = argparse.ArgumentParser(
         prog="irimi",
         allow_abbrev=False,
-        description="Shadow mode for AI agents: reads are real, writes are virtual.",
+        description=DESCRIPTION,
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"irimi {__version__}")
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
@@ -94,7 +105,7 @@ def _command_typed(argv: list[str]) -> str | None:
 def main(argv: list[str] | None = None, *, engine_factory: "EngineFactory | None" = None) -> int:
     """The `irimi` command. A reader of its output that goes away (`irimi runs show X | head -1`,
     or `2>&1 | head -1`, where the write that fails may be stderr's) ends it quietly with
-    BROKEN_PIPE_EXIT_CODE, wherever it was writing, `--help` included. stdout and stderr
+    `exitcodes.BROKEN_PIPE`, wherever it was writing, `--help` included. stdout and stderr
     are flushed here, not at exit, so a reader gone by the last write is caught too, and so is a
     warning the store's logger could not write, which the logger swallows and leaves buffered; a
     stream closed before irimi started is None, which `print` writes nothing to.
@@ -110,28 +121,45 @@ def main(argv: list[str] | None = None, *, engine_factory: "EngineFactory | None
                     stream.flush()
     except BrokenPipeError:
         _discard_unread_output()
-        return BROKEN_PIPE_EXIT_CODE
+        return exitcodes.BROKEN_PIPE
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    """`argv` parsed as `irimi` parses it, for a caller that runs a command's function itself."""
+    parser, commands = _parser(_command_typed(argv))
+    return _parse(parser, commands, argv)
+
+
+def _parse(
+    parser: argparse.ArgumentParser,
+    commands: dict[str, argparse.ArgumentParser],
+    argv: list[str],
+) -> argparse.Namespace:
+    """`argv` split at its first `--`: argparse parses what comes before, and what comes after is
+    the command `shadow` and `replay` run, `args.cmd`. Every other command takes nothing there."""
+    split = argv.index("--") if "--" in argv else len(argv)
+    before, after = argv[:split], argv[split + 1 :]
+    if before and before[0] in DEFAULT_SUBCOMMANDS:
+        rest = before[1:]
+        if not rest or (rest[0].startswith("-") and rest[0] not in ("-h", "--help")):
+            before = [before[0], DEFAULT_SUBCOMMANDS[before[0]], *rest]
+    args = parser.parse_args(before)
+    if "cmd" in vars(args):
+        args.cmd = after
+    elif split < len(argv):
+        (commands.get(args.command) or parser).error(
+            f"unrecognized arguments: {' '.join(argv[split:])}"
+        )
+    return args
 
 
 def _main(argv: list[str] | None, engine_factory: "EngineFactory | None") -> int:
     argv = sys.argv[1:] if argv is None else argv
     parser, commands = _parser(_command_typed(argv))
-    args, unplaced = parser.parse_known_args(argv)
-    # An older argparse (Python 3.12.3, CI's ubuntu 3.12) fills `replay`'s RUN_ID and an empty
-    # `cmd` before it reaches `--`, and leaves `-- CMD` unplaced, where a newer one takes it as
-    # `cmd`. `replay_cmd` reads the command from what was typed either way, so a replay's
-    # unplaced words are accepted when they are exactly what follows its first `--`; anything else
-    # is refused as `parse_args` refuses it.
-    if unplaced and not (
-        args.command == "replay" and "--" in argv and unplaced == argv[argv.index("--") :]
-    ):
-        parser.error(f"unrecognized arguments: {' '.join(unplaced)}")
-    # What was typed, for `irimi replay`, whose RUN_ID argparse cannot tell from a command's first
-    # word once both follow `--` (`replay_cmd`).
-    args.argv = argv
+    args = _parse(parser, commands, argv)
     if args.command is None:
-        parser.print_help()
-        return 1
+        parser.print_help(sys.stderr)
+        return exitcodes.ERROR
     command: Callable[..., int] = args.func
     try:
         if engine_factory is None:

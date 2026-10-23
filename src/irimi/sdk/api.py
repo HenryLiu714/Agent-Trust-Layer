@@ -152,7 +152,7 @@ def resolve(entrypoint: str) -> Callable[..., Any]:
     return found
 
 
-class run:  # noqa: N801 - the SDK's spelling: `with sdk.run(...)`
+class run:
     """A block that is one run, with `with` or `async with`. `trigger` is any value, captured as
     the run's args (`capture.capture`); the run has no entrypoint, so replay (#84) needs one named
     for it. `name` is the run's display name.

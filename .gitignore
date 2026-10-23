@@ -22,9 +22,7 @@ build/
 # The LLM refund agent's own database, made by its live half in the repo root (#85)
 /llm_refunds.sqlite3*
 
-# Claude Code: agent worktrees and per-user settings
-.claude/worktrees/
-.claude/settings.local.json
+.claude/*
 
 # Editors and OS
 .vscode/

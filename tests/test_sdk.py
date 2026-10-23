@@ -434,7 +434,7 @@ def test_an_interruption_while_the_end_is_posted_still_leaves_no_run_current(mon
         async def caller() -> tuple[BaseException | None, str | None]:
             try:
                 await fails_async()
-            except BaseException as exc:  # noqa: BLE001 - what the agent's caller would see
+            except BaseException as exc:
                 return exc.__context__, sdk.current_run_id()
             return None, sdk.current_run_id()
 
@@ -952,7 +952,7 @@ class _Recorder(http.server.BaseHTTPRequestHandler):
     delay = 0.0
     location = ""
 
-    def do_POST(self) -> None:  # noqa: N802 - the stdlib's spelling
+    def do_POST(self) -> None:
         self.hits.append(self.path)
         time.sleep(self.delay)
         self.send_response(self.status)
@@ -961,7 +961,7 @@ class _Recorder(http.server.BaseHTTPRequestHandler):
         self.send_header("content-length", "0")
         self.end_headers()
 
-    do_GET = do_POST  # noqa: N815
+    do_GET = do_POST
 
     def log_message(self, *args: Any) -> None:
         pass

@@ -1,4 +1,4 @@
-# The only Docker build here is examples/server_agent's (#78), and it needs only these. Without
+# The only Docker build here is examples/server_agent's, and it needs only these. Without
 # this file every build would send .venv and .claude/worktrees to the daemon.
 *
 !pyproject.toml

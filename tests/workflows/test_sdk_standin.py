@@ -103,7 +103,7 @@ def fake_sdk(*, active: bool = True, with_tool: bool = False, **extra: Any) -> t
 
         return decorate(fn) if fn is not None else decorate
 
-    class run:  # noqa: N801
+    class run:
         def __init__(self, trigger: Any = None, name: str = "run") -> None:
             self._cm = entered()
 
@@ -448,8 +448,8 @@ def test_a_tool_above_a_static_or_class_method_keeps_it_one(load_sdk, obs, monke
     instance, a class method's stand-in is handed the class, and the real tool is given the
     descriptor itself, with the agent's own `name` (None), so the name it records is its own
     default and equals the one this module logs. W3's `ledger_worker` runs it end to end."""
-    import irimi.sdk as real_sdk  # noqa: PLC0415
-    from irimi.sdk import runs  # noqa: PLC0415
+    import irimi.sdk as real_sdk
+    from irimi.sdk import runs
 
     posted: list[tuple[str, str, str]] = []
 
@@ -494,8 +494,8 @@ def test_a_stand_in_reaches_the_real_tool_as_the_agent_wrote_it(load_sdk, obs, m
     is async, read as sync and was refused, a generator one passed, and the function and its
     stand-in became two wrappers, so the real write ran under irimi, logged as the stand-in. The
     fallback judges them as the real `tool` does."""
-    import irimi.sdk as real_sdk  # noqa: PLC0415
-    from irimi.sdk import runs  # noqa: PLC0415
+    import irimi.sdk as real_sdk
+    from irimi.sdk import runs
 
     monkeypatch.setattr(runs, "reporter", types.SimpleNamespace(post=lambda *a: None))
     sdk = load_sdk(real_sdk if real else None)
@@ -639,7 +639,7 @@ def test_unknown_public_names_forward_to_the_real_sdk(load_sdk):
     sdk = load_sdk(fake)
     assert sdk.replay is replay
     assert isinstance(sdk.replay("abc"), ReplayResult)
-    from examples.workflows.sdk import ReplayResult as imported  # noqa: PLC0415
+    from examples.workflows.sdk import ReplayResult as imported
 
     assert imported is ReplayResult
     with pytest.raises(AttributeError):
@@ -685,9 +685,9 @@ def replaying(load_sdk, monkeypatch) -> Callable[..., tuple[types.ModuleType, _R
     """`replaying(outcome, active=, gate=)`: this module over the real `irimi.sdk`, as a replay's
     child has it: active, told it replays (`IRIMI_REPLAY_RUN`, naming its `IRIMI_RUN`, #84), and its
     reporter a `_Recording`."""
-    import irimi.sdk as real_sdk  # noqa: PLC0415
-    from irimi import paths  # noqa: PLC0415
-    from irimi.sdk import runs  # noqa: PLC0415
+    import irimi.sdk as real_sdk
+    from irimi import paths
+    from irimi.sdk import runs
 
     def get(
         outcome: Any = None, *, active: bool = True, gate: threading.Event | None = None
@@ -704,7 +704,7 @@ def replaying(load_sdk, monkeypatch) -> Callable[..., tuple[types.ModuleType, _R
 
 
 def _outcome(result: Any = None, error: tuple[str, str] | None = None, awaited: bool = False):
-    from irimi.trace import ErrorInfo, RecordedOutcome  # noqa: PLC0415
+    from irimi.trace import ErrorInfo, RecordedOutcome
 
     return RecordedOutcome(result, None if error is None else ErrorInfo(*error), awaited)
 
@@ -865,7 +865,7 @@ def _through(decorate: Callable[..., Any], kind: str, form: str) -> tuple[Any, l
     """A tool `t.tool` of `kind` in `form`, made with `decorate` (an `sdk.tool`), called as an agent
     calls it: what the call gave the agent (returned, or raised: its name, its message and the two
     classes an agent catches it as), and which bodies ran."""
-    from irimi.sdk import RecordedToolError  # noqa: PLC0415
+    from irimi.sdk import RecordedToolError
 
     ran: list[str] = []
 
@@ -921,9 +921,9 @@ def test_a_tool_through_this_module_does_what_the_real_sdk_s_does(
     in every mode a tool runs in - bare, shadow, and a replay whose recording misses, answers or
     raises - the same tool made with this module's `tool` and with `irimi.sdk.tool` gives the
     agent the same thing, runs the same bodies and posts the same records (#83)."""
-    import irimi.sdk as real_sdk  # noqa: PLC0415
-    from irimi import paths  # noqa: PLC0415
-    from irimi.sdk import runs  # noqa: PLC0415
+    import irimi.sdk as real_sdk
+    from irimi import paths
+    from irimi.sdk import runs
 
     outcome = {
         "hit": _outcome({"balance": 7}, awaited=form == "returns_coroutine"),

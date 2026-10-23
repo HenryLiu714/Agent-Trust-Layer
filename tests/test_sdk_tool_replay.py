@@ -670,7 +670,7 @@ class _Answers(http.server.BaseHTTPRequestHandler):
     body = b""
     seen: list[tuple[str, dict[str, str]]]
 
-    def do_POST(self) -> None:  # noqa: N802 - the stdlib's spelling
+    def do_POST(self) -> None:
         self.seen.append((self.path, {k.lower(): v for k, v in self.headers.items()}))
         self.rfile.read(int(self.headers["content-length"]))
         self.send_response(self.status)

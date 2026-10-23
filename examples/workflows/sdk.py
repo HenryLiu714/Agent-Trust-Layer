@@ -262,7 +262,7 @@ def trigger(fn: Callable[..., Any] | None = None, *, name: str | None = None) ->
     return decorate(fn) if fn is not None else decorate
 
 
-class run:  # noqa: N801 - the SDK's spelling
+class run:
     """`with sdk.run(trigger=..., name=...)` and `async with` alike."""
 
     def __init__(self, trigger: Any = None, name: str = "run") -> None:

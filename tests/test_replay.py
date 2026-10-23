@@ -1,13 +1,13 @@
 """`irimi.replay`, the pure part of `irimi replay`: what a replay runs for a stored run
 (`plan`), why it refuses one (`not_replayable`), and what it says once it has run (`outcome`),
-over records and events built by hand. `tests/test_replay_cli.py` runs the command itself."""
+over records and events built by hand. `tests/cli/test_replay.py` runs the command itself."""
 
 from dataclasses import replace
 
 import pytest
 
 from irimi.core import exitcodes
-from irimi.core.exchange import Exchange, Request, Response
+from irimi.core.exchange import Exchange
 from irimi.protocol.replay_files import CallResult, ReplayResult
 from irimi.protocol.trace import (
     Attribution,
@@ -21,6 +21,7 @@ from irimi.protocol.trace import (
 from irimi.record import redact
 from irimi.replay import plan as replay_plan
 from irimi.replay import report as replay_report
+from tests.support import builders
 
 TICKET: dict[str, JSONValue] = {
     "ticket": {"__irimi_type__": "agent:Ticket", "value": {"charge": "ch_1"}}
@@ -231,23 +232,24 @@ def test_args_not_recorded_replayably_are_refused_unless_args_are_given():
 def _exchange(
     path: str, flags: tuple[str, ...], issued_by: str = "agent", answered_by: str | None = None
 ) -> Exchange:
+    """A read of a Stripe charge in the replay `new`, answered from the recording when `flags`
+    says so and live otherwise."""
     if answered_by is None:
         answered_by = "recording" if "from-recording" in flags else "live"
-    return Exchange(
-        request=Request("GET", "https", "api.stripe.com", 443, path, "", (), b""),
-        response=Response(200, (), b"{}"),
+    return builders.exchange(
+        request=builders.request(path=path),
+        response=builders.response(body=b"{}"),
         service="stripe",
         operation="charges.retrieve",
-        kind="read",
-        answered_by=answered_by,  # type: ignore[arg-type]
-        flags=flags,  # type: ignore[arg-type]
-        issued_by=issued_by,  # type: ignore[arg-type]
+        answered_by=answered_by,
+        flags=flags,
+        issued_by=issued_by,
         run_id="new",
     )
 
 
 def _tool(kind: str, ran: str) -> ToolCall:
-    return ToolCall("t", "new", f"db.{kind}", kind, ran, {}, None, None, 1.0, 1.0)  # type: ignore[arg-type]
+    return builders.tool_call(run_id="new", name=f"db.{kind}", kind=kind, ran=ran, ended_at=1.0)
 
 
 def _run(record: RunRecord, events: list) -> StoredRun:

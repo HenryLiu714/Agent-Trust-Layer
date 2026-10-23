@@ -1,7 +1,7 @@
 """Redaction before anything reaches disk: one or more tests per rule in `irimi.record.redact`.
 
 Every test builds its exchange by hand and asks `redact_exchange` or `redact_json` for the copy
-the store will write. `tests/test_trace_e2e.py` runs the same function over what a real
+the store will write. `tests/e2e/test_trace_roundtrip.py` runs the same function over what a real
 `irimi shadow` run hands its store.
 """
 
@@ -15,7 +15,6 @@ import stat
 import subprocess
 import sys
 import threading
-import time
 
 import pytest
 
@@ -26,6 +25,7 @@ from irimi.decide import targets
 from irimi.protocol.trace import JSONValue
 from irimi.record import redact
 from irimi.record.redact import placeholder, redact_exchange, redact_json
+from tests.support import builders
 from tests.support.credentials import (
     ANTHROPIC,
     AWS,
@@ -44,12 +44,11 @@ from tests.support.credentials import (
     STRIPE_WEBHOOK,
     TEST_KEY,
 )
-from tests.test_trace import _filled
+from tests.support.waiting import eventually
 
 KEY = bytes(range(32))
 OTHER_KEY = bytes(range(1, 33))
 JSON = ("content-type", "application/json")
-FORM = ("content-type", "application/x-www-form-urlencoded")
 FAILED_BODY = redact.REDACTION_FAILED.encode()
 
 
@@ -58,20 +57,12 @@ def _ph(value: str, key: bytes = KEY) -> str:
 
 
 def _request(**fields) -> Request:
-    values = {
-        "method": "POST",
-        "scheme": "https",
-        "host": "api.stripe.com",
-        "port": 443,
-        "path": "/v1/refunds",
-        "query": "",
-        "headers": (),
-        "body": b"",
-    }
-    return Request(**{**values, **fields})
+    """A refund POST to Stripe."""
+    return builders.request(**({"method": "POST", "path": "/v1/refunds"} | fields))
 
 
 def _exchange(request: Request | None = None, response: Response | None = None, **fields):
+    """A refund irimi faked, in run `r1`, with no answer unless given one."""
     values = {
         "service": "stripe",
         "operation": "refunds.create",
@@ -79,7 +70,7 @@ def _exchange(request: Request | None = None, response: Response | None = None, 
         "answered_by": "fake-L1",
         "run_id": "r1",
     }
-    return Exchange(request=request or _request(), response=response, **{**values, **fields})
+    return builders.exchange(request=request or _request(), response=response, **(values | fields))
 
 
 def _body(body: bytes, *headers: tuple[str, str]) -> bytes:
@@ -221,31 +212,33 @@ def test_an_empty_or_null_secret_is_left_as_it_is():
     """A placeholder would turn "no token was sent" into "a token was sent"."""
     body = b'{"token": null, "password": ""}'
     assert _body(body, JSON) == body
-    assert _body(b"token=&amount=1", FORM) == b"token=&amount=1"
+    assert _body(b"token=&amount=1", builders.FORM_HEADER) == b"token=&amount=1"
     ex = _exchange(_request(headers=(("authorization", ""),)))
     assert redact_exchange(ex, KEY).request.headers == (("authorization", ""),)
 
 
 def test_a_form_field_is_matched_by_its_last_bracket_segment():
-    stored = _body(b"card[token]=tok_x&amount=100&expand[]=token", FORM)
+    stored = _body(b"card[token]=tok_x&amount=100&expand[]=token", builders.FORM_HEADER)
     assert stored == f"card[token]={_ph('tok_x')}&amount=100&expand[]=token".encode()
 
 
 def test_an_empty_bracket_segment_names_nothing_so_the_one_before_it_counts():
     """`token[]` is PHP's and Rails' spelling of a list of tokens: its name is `token`, not ``."""
-    stored = _body(b"token[]=t1&a[password][]=p1&expand[]=x", FORM)
+    stored = _body(b"token[]=t1&a[password][]=p1&expand[]=x", builders.FORM_HEADER)
     assert stored == f"token[]={_ph('t1')}&a[password][]={_ph('p1')}&expand[]=x".encode()
 
 
 def test_a_shape_in_a_form_fields_name_is_replaced():
-    stored = _body(f"{LIVE_KEY}=1&x%20{TEST_KEY}=2".encode(), FORM)
+    stored = _body(f"{LIVE_KEY}=1&x%20{TEST_KEY}=2".encode(), builders.FORM_HEADER)
     assert stored == f"{_ph(LIVE_KEY)}=1&x%20{_ph(TEST_KEY)}=2".encode()
 
 
 def test_a_json_body_that_only_claims_to_be_a_form_is_walked_as_json():
     """Read as a form, `{"password": "hunter2"}` is one pair whose name is the whole document and
     whose value is empty, so no secret key is ever seen and `hunter2` has no shape."""
-    stored = _body(f'{{"password": "hunter2", "note": "{LIVE_KEY}"}}'.encode(), FORM)
+    stored = _body(
+        f'{{"password": "hunter2", "note": "{LIVE_KEY}"}}'.encode(), builders.FORM_HEADER
+    )
     assert json.loads(stored) == {"password": _ph("hunter2"), "note": _ph(LIVE_KEY)}
 
 
@@ -582,7 +575,7 @@ def test_a_body_with_nothing_to_redact_comes_back_byte_for_byte():
     body = b'{ "b" : 1,\n  "a": [ "x", "\\u00e9" ], "max_tokens": 5 }'
     assert _body(body, JSON) == body
     form = b"amount=100&metadata%5Bnote%5D=a+b%20c"
-    assert _body(form, FORM) == form
+    assert _body(form, builders.FORM_HEADER) == form
     text = b"event: ping\ndata: {}\n\n"
     assert _response_body(text, ("Content-Type", "text/event-stream")) == text
 
@@ -595,7 +588,7 @@ def test_a_body_that_is_not_utf8_is_stored_unscanned():
 def test_redact_exchange_returns_a_new_exchange_and_copies_every_other_field():
     """`dataclasses.replace`, so every field survives - `started_at` and `ended_at` included, and
     any field added to Exchange later. Nothing in the original changes."""
-    original = _filled(Exchange)
+    original = builders.filled(Exchange)
     before = dataclasses.replace(original)
     stored = redact_exchange(original, KEY)
     assert stored is not original
@@ -1050,10 +1043,12 @@ def test_load_key_raced_by_separate_processes_gives_each_the_one_0600_key(tmp_pa
         for r in ready
     ]
     try:
-        deadline = time.monotonic() + 20
-        while not all(r.exists() for r in ready):
-            assert time.monotonic() < deadline, "a racer never started"
-            time.sleep(0.005)
+        eventually(
+            lambda: all(r.exists() for r in ready),
+            timeout=20,
+            interval=0.005,
+            message="a racer never started",
+        )
         go.touch()
         outs = [racer.communicate(timeout=20) for racer in racers]
     finally:

@@ -3,7 +3,7 @@
 A stored run here is a list of `Exchange`s, as `StoredRun.events` holds them: the store redacts
 before it writes, so a recorded body that held a secret holds its placeholder, which `_stored`
 makes with the same key the live side is redacted with. The real engine is
-`tests/test_replay_engine.py`'s.
+`tests/engine/test_replay.py`'s.
 """
 
 import json
@@ -17,7 +17,6 @@ from irimi.core.exchange import (
     Exchange,
     Flag,
     Precondition,
-    Request,
     Response,
 )
 from irimi.decide.policy import ShadowPolicy
@@ -27,23 +26,23 @@ from irimi.record import redact
 from irimi.replay.index import RecordingReader, ReplayIndex
 from irimi.replay.policy import ReplayPolicy
 from irimi.servicemaps.classify import classify
+from tests.support import builders
+from tests.support.builders import FORM_CONTENT_TYPE
 from tests.support.credentials import OTHER_RECORDED_SECRET, RECORDED_SECRET
-from tests.test_policy import answer as decided
+from tests.support.decisions import answer as decided
 
 SHIPPED = servicemaps.MapIndex(tuple(servicemaps.loader.load_shipped()))
 KEY = b"k" * 32
 JSON = "application/json"
-FORM = "application/x-www-form-urlencoded"
 OK = Response(200, (("content-type", JSON),), b'{"id": "ch_1", "amount": 4900}')
 
 
 def _req(method="GET", host="api.stripe.com", path="/v1/charges/ch_1", body=b"", ct=None, **kw):
+    """A request to Stripe; `ct` is its content type, `query` and `headers` come by keyword."""
     headers = (("content-type", ct),) if ct is not None else ()
-    return Request(
+    return builders.request(
         method=method,
-        scheme="https",
         host=host,
-        port=443,
         path=path,
         query=kw.pop("query", ""),
         headers=headers + tuple(kw.pop("headers", ())),
@@ -88,11 +87,17 @@ def _llm(content="hi", stream=False, **extra):
     return _req("POST", "api.anthropic.com", "/v1/messages", json.dumps(body).encode(), JSON)
 
 
-def _refund(amount=100, key="k-1", nonce=None):
+def _refund_request(amount=100, key="k-1", nonce=None):
     body = f"charge=ch_1&amount={amount}".encode()
     if nonce is not None:
         body += f"&nonce={nonce}".encode()
-    return _req("POST", path="/v1/refunds", body=body, ct=FORM, headers=(("idempotency-key", key),))
+    return _req(
+        "POST",
+        path="/v1/refunds",
+        body=body,
+        ct=FORM_CONTENT_TYPE,
+        headers=(("idempotency-key", key),),
+    )
 
 
 REFUND_ANSWER = Response(200, (("content-type", JSON),), b'{"id": "re_RECORDED1", "amount": 100}')
@@ -106,7 +111,7 @@ def _recorded_refund(amount=100, **fields):
         "currency": "usd",
         "would_fire": ("refund.created", "charge.refunded"),
     }
-    return _stored(_refund(amount), REFUND_ANSWER, **(defaults | fields))
+    return _stored(_refund_request(amount), REFUND_ANSWER, **(defaults | fields))
 
 
 def _answer(policy, request, write_log=(), run_id="rep"):
@@ -177,20 +182,22 @@ def test_an_ignored_field_never_decides_a_match_and_any_other_does():
             for sm in servicemaps.loader.load_shipped()
         )
     )
-    recorded = _stored(_refund(nonce="n-1"), REFUND_ANSWER, answered_by="fake-L1")
+    recorded = _stored(_refund_request(nonce="n-1"), REFUND_ANSWER, answered_by="fake-L1")
     recording = ReplayIndex.from_events([recorded, recorded], KEY, maps)
-    assert recording.answer_for(_refund(nonce="n-other"), "write") is not None
-    assert recording.answer_for(_refund(amount=250, nonce="n-1"), "write") is None
+    assert recording.answer_for(_refund_request(nonce="n-other"), "write") is not None
+    assert recording.answer_for(_refund_request(amount=250, nonce="n-1"), "write") is None
 
 
 def test_the_idempotency_key_header_never_decides_a_match():
     recording = _recording(_recorded_refund())
-    assert recording.answer_for(_refund(key="k-other"), "write") is not None
+    assert recording.answer_for(_refund_request(key="k-other"), "write") is not None
 
 
 def test_a_form_body_and_a_json_body_with_the_same_fields_are_the_same_write():
     """Both are read with `bodies.reflect`, which reads a form's `1` as an integer."""
-    recording = _recording(_stored(_req("POST", path="/v1/refunds", body=b"amount=1", ct=FORM)))
+    recording = _recording(
+        _stored(_req("POST", path="/v1/refunds", body=b"amount=1", ct=FORM_CONTENT_TYPE))
+    )
     json_body = _req("POST", path="/v1/refunds", body=b'{"amount": 1}', ct=JSON)
     assert recording.answer_for(json_body, "write") is not None
 
@@ -217,9 +224,14 @@ def test_a_body_reflect_cannot_read_is_compared_whole():
 
 
 def test_a_read_never_matches_a_recorded_write():
-    recording = _recording(_stored(_req("POST", path="/v1/refunds", body=b"a=1", ct=FORM)))
+    recording = _recording(
+        _stored(_req("POST", path="/v1/refunds", body=b"a=1", ct=FORM_CONTENT_TYPE))
+    )
     assert (
-        recording.answer_for(_req("POST", path="/v1/refunds", body=b"a=1", ct=FORM), "read") is None
+        recording.answer_for(
+            _req("POST", path="/v1/refunds", body=b"a=1", ct=FORM_CONTENT_TYPE), "read"
+        )
+        is None
     )
 
 
@@ -394,7 +406,7 @@ def test_a_delegated_write_is_never_looked_up_and_never_flagged():
         )
     )
     recording = ReplayIndex.from_events([_recorded_refund()], KEY, maps)
-    request = _refund()
+    request = _refund_request()
     answer = decided(ReplayPolicy(recording, maps), request, classify(request, maps))
     assert (answer.answered_by, Flag.REPLAY_MISS in answer.flags) == ("delegated", False)
 
@@ -404,7 +416,7 @@ def test_the_same_write_gets_the_recorded_answer_at_its_recorded_level():
     only a read can carry, whatever a recording edited by hand says."""
     recorded = _recorded_refund(flags=(Flag.FIXTURE_FAILED, Flag.BODY_TRUNCATED))
     recorded = replace(recorded, flags=(Flag.FIXTURE_FAILED,), overlay="full")
-    answer = _answer(ReplayPolicy(_recording(recorded), SHIPPED), _refund(key="k-other"))
+    answer = _answer(ReplayPolicy(_recording(recorded), SHIPPED), _refund_request(key="k-other"))
     assert answer.answered_by == "fake-L1"
     assert answer.response.body == REFUND_ANSWER.body
     assert answer.flags == (Flag.FIXTURE_FAILED, Flag.FROM_RECORDING)
@@ -417,7 +429,7 @@ def test_the_same_write_gets_the_recorded_answer_at_its_recorded_level():
 def test_a_replayed_write_carries_only_its_answers_flags():
     """The classifier's flags come back from this request's own classification, and a flag the
     engine put on the recorded exchange is a fact about that exchange."""
-    request = _req("POST", path="/v1/unmapped", body=b"a=1", ct=FORM)
+    request = _req("POST", path="/v1/unmapped", body=b"a=1", ct=FORM_CONTENT_TYPE)
     recorded = _stored(
         request,
         REFUND_ANSWER,
@@ -432,14 +444,14 @@ def test_a_replayed_write_carries_only_its_answers_flags():
 def test_a_rejected_write_is_rejected_again():
     refused = Response(400, (("content-type", JSON),), b'{"error": {"code": "amount_too_large"}}')
     recorded = _stored(
-        _refund(),
+        _refund_request(),
         refused,
         answered_by="fake-L1",
         flags=(),
         precondition="rejected",
         rejection_code="amount_too_large",
     )
-    answer = _answer(ReplayPolicy(_recording(recorded), SHIPPED), _refund())
+    answer = _answer(ReplayPolicy(_recording(recorded), SHIPPED), _refund_request())
     assert (answer.response.status, answer.precondition, answer.rejection_code) == (
         400,
         "rejected",
@@ -466,7 +478,9 @@ def test_a_write_the_recording_lacks_is_faked_checked_against_the_recording_and_
         ),
         issued_by="engine",
     )
-    answer = _answer(ReplayPolicy(_recording(engine, _recorded_refund()), SHIPPED), _refund(250))
+    answer = _answer(
+        ReplayPolicy(_recording(engine, _recorded_refund()), SHIPPED), _refund_request(250)
+    )
     assert (answer.answered_by, answer.precondition, answer.currency) == (
         "fake-L1",
         "passed",
@@ -484,7 +498,7 @@ def test_a_write_miss_ends_serving_reads_and_an_llm_miss_does_not():
     assert _answer(policy, _llm(content="new")).flags == (Flag.REPLAY_MISS,)
     assert _answer(policy, _req()).answered_by == "recording"
     assert not policy.recording.diverged
-    assert _answer(policy, _refund(250)).flags[-1] == Flag.REPLAY_MISS
+    assert _answer(policy, _refund_request(250)).flags[-1] == Flag.REPLAY_MISS
     assert policy.recording.diverged
     answer = _answer(policy, _req())
     assert (answer.answered_by, answer.flags) == ("live", (Flag.REPLAY_MISS,))
@@ -495,7 +509,7 @@ def test_an_llm_call_is_still_answered_from_the_recording_once_the_replay_has_di
     changes it only by changing what the agent sends."""
     recording = _recording(_recorded_refund(), _stored(_llm()))
     policy = ReplayPolicy(recording, SHIPPED)
-    assert Flag.REPLAY_MISS in _answer(policy, _refund(250)).flags
+    assert Flag.REPLAY_MISS in _answer(policy, _refund_request(250)).flags
     assert policy.recording.diverged
     answer = _answer(policy, _llm())
     assert (answer.answered_by, answer.flags[-1]) == ("recording", Flag.FROM_RECORDING)
@@ -504,7 +518,7 @@ def test_an_llm_call_is_still_answered_from_the_recording_once_the_replay_has_di
 def test_an_unknown_request_that_misses_is_faked_and_the_replay_diverges():
     """An unknown request is answered as a write is: faked, never forwarded, and, missed, a
     change to the world the recording's reads no longer show."""
-    unknown = _req("POST", path="/v1/not_a_route", body=b"a=1", ct=FORM)
+    unknown = _req("POST", path="/v1/not_a_route", body=b"a=1", ct=FORM_CONTENT_TYPE)
     assert classify(unknown, SHIPPED).kind == "unknown"
     policy = ReplayPolicy(_recording(_stored(_req())), SHIPPED)
     answer = _answer(policy, unknown)
@@ -517,8 +531,8 @@ def test_a_matched_write_holds_its_idempotency_key_for_a_retry_that_misses():
     """Stripe refuses a key reused for a different write. A replay answered the first from the
     recording, so it is the replay's store that has to remember the key."""
     policy = ReplayPolicy(_recording(_recorded_refund()), SHIPPED)
-    assert Flag.FROM_RECORDING in _answer(policy, _refund(key="k-9")).flags
-    answer = _answer(policy, _refund(amount=250, key="k-9"))
+    assert Flag.FROM_RECORDING in _answer(policy, _refund_request(key="k-9")).flags
+    answer = _answer(policy, _refund_request(amount=250, key="k-9"))
     assert Flag.IDEMPOTENCY_CONFLICT in answer.flags
     assert answer.response.status == 400
 
@@ -527,8 +541,8 @@ def test_a_retry_of_a_matched_write_the_recording_has_no_second_answer_for_is_sh
     """The retry misses, and shadow mode's store answers it with the first answer's bytes as an
     idempotent replay: the recorded answer, but not given by the recording this time."""
     policy = ReplayPolicy(_recording(_recorded_refund()), SHIPPED)
-    first = _answer(policy, _refund(key="k-9"))
-    retry = _answer(policy, _refund(key="k-9"))
+    first = _answer(policy, _refund_request(key="k-9"))
+    retry = _answer(policy, _refund_request(key="k-9"))
     assert retry.response.body == first.response.body
     assert retry.flags == (Flag.IDEMPOTENT_REPLAY, Flag.REPLAY_MISS)
 
@@ -547,7 +561,7 @@ def test_a_matcher_that_raises_decides_a_miss(monkeypatch):
 
     monkeypatch.setattr(ReplayIndex, "answer_for", broken)
     policy = ReplayPolicy(_recording(_recorded_refund()), SHIPPED)
-    answer = _answer(policy, _refund())
+    answer = _answer(policy, _refund_request())
     assert answer.answered_by == "fake-L1"
     assert answer.response is not None
     assert answer.flags[-1] == Flag.REPLAY_MISS
@@ -574,12 +588,14 @@ def test_a_write_irimi_refused_in_the_recording_is_decided_afresh():
         502, (("content-type", JSON),), b'{"error": {"type": "irimi_decision_failed"}}'
     )
     recorded = _stored(
-        replace(_refund(), body=b""),
+        replace(_refund_request(), body=b""),
         refusal,
         answered_by="fake-L0",
         flags=(Flag.DECISION_FAILED, Flag.BODY_TRUNCATED),
     )
-    answer = _answer(ReplayPolicy(_recording(recorded), SHIPPED), replace(_refund(), body=b""))
+    answer = _answer(
+        ReplayPolicy(_recording(recorded), SHIPPED), replace(_refund_request(), body=b"")
+    )
     assert (answer.response.status, answer.flags[-1]) == (200, Flag.REPLAY_MISS)
 
 
@@ -644,18 +660,18 @@ def test_a_precondition_read_is_the_first_the_recording_can_serve():
 def test_a_replay_diverges_for_the_whole_engine():
     """A replay is one run against one engine, whose write log is the engine's: a write that
     missed is in the world every later read is shown, whichever run asks. Serve mode, many
-    runs at once, refuses to replay (`tests/test_cli.py`)."""
+    runs at once, refuses to replay (`tests/cli/test_replay.py`)."""
     recording = _recording(_stored(_req()), _stored(_req()))
     policy = ReplayPolicy(recording, SHIPPED)
-    assert _answer(policy, _refund(250), run_id="A").flags[-1] == Flag.REPLAY_MISS
+    assert _answer(policy, _refund_request(250), run_id="A").flags[-1] == Flag.REPLAY_MISS
     assert _answer(policy, _req(), run_id="B").answered_by == "live"
 
 
 def test_a_recorded_write_irimi_did_not_fake_is_never_answered_again():
     """Served under its recorded `answered_by`, a write recorded `live` would reach the agent as a
     fake with no stamp, and the trace would call it live."""
-    recorded = _stored(_refund(), REFUND_ANSWER, answered_by="live")
-    answer = _answer(ReplayPolicy(_recording(recorded), SHIPPED), _refund())
+    recorded = _stored(_refund_request(), REFUND_ANSWER, answered_by="live")
+    answer = _answer(ReplayPolicy(_recording(recorded), SHIPPED), _refund_request())
     assert (answer.answered_by, answer.flags[-1]) == ("fake-L1", Flag.REPLAY_MISS)
 
 
@@ -690,7 +706,7 @@ def test_a_read_recorded_after_a_write_the_replay_has_not_made_is_a_miss_that_di
 def test_a_read_recorded_after_a_write_the_replay_made_is_answered():
     shown = _stored(_req(), answered_by="overlay", flags=(), overlay="full")
     policy = ReplayPolicy(_recording(_recorded_refund(), shown), SHIPPED)
-    assert Flag.FROM_RECORDING in _answer(policy, _refund()).flags
+    assert Flag.FROM_RECORDING in _answer(policy, _refund_request()).flags
     assert _answer(policy, _req()).answered_by == "overlay"
     assert not policy.recording.diverged
 
@@ -712,7 +728,7 @@ def test_a_recorded_write_irimi_could_not_decide_about_is_not_one_a_later_read_s
         502, (("content-type", JSON),), b'{"error": {"type": "irimi_decision_failed"}}'
     )
     refused = _stored(
-        replace(_refund(), body=b""),
+        replace(_refund_request(), body=b""),
         refusal,
         kind="unknown",
         answered_by="fake-L0",
@@ -733,7 +749,13 @@ def test_a_recorded_write_irimi_could_not_decide_about_is_not_one_a_later_read_s
 def _keyed_refund(amount, key, charge="ch_1"):
     """A refund whose only idempotency key is the header, as stripe-python sends it."""
     body = f"charge={charge}&amount={amount}".encode()
-    return _req("POST", path="/v1/refunds", body=body, ct=FORM, headers=(("idempotency-key", key),))
+    return _req(
+        "POST",
+        path="/v1/refunds",
+        body=body,
+        ct=FORM_CONTENT_TYPE,
+        headers=(("idempotency-key", key),),
+    )
 
 
 def _recorded_keyed(amount, key, answer=REFUND_ANSWER, **fields):
@@ -852,7 +874,9 @@ def test_a_checked_write_after_the_replay_diverged_is_checked_again():
 def test_an_unchecked_write_is_answered_from_the_recording_after_the_replay_diverged():
     """A write no `precondition:` checked was not made from the world: its recorded answer is
     still the one, and its minted ids the recorded ones."""
-    unchecked = _req("POST", path="/v1/customers/cus_1", body=b"email=a%40b.c", ct=FORM)
+    unchecked = _req(
+        "POST", path="/v1/customers/cus_1", body=b"email=a%40b.c", ct=FORM_CONTENT_TYPE
+    )
     route = classify(unchecked, SHIPPED).route
     assert route is not None
     assert not route.precondition
@@ -885,16 +909,23 @@ def test_a_request_in_another_account_is_another_request():
     header still decides nothing."""
     in_a = (("stripe-account", "acct_A"),)
     read_a = _stored(_req(headers=in_a), replace(OK, body=b'{"a": 1}'))
-    refund_a = _stored(replace(_refund(), headers=_refund().headers + in_a), REFUND_ANSWER)
+    refund_a = _stored(
+        replace(_refund_request(), headers=_refund_request().headers + in_a), REFUND_ANSWER
+    )
     recording = _recording(read_a, refund_a)
     in_b = (("stripe-account", "acct_B"),)
     assert recording.answer_for(_req(headers=in_b), "read") is None
     assert (
-        recording.answer_for(replace(_refund(), headers=_refund().headers + in_b), "write") is None
+        recording.answer_for(
+            replace(_refund_request(), headers=_refund_request().headers + in_b), "write"
+        )
+        is None
     )
     taken = recording.answer_for(_req(headers=(*in_a, ("user-agent", "x"))), "read")
     assert taken is not None and taken.response.body == b'{"a": 1}'
-    assert recording.answer_for(replace(_refund(), headers=_refund().headers + in_a), "write")
+    assert recording.answer_for(
+        replace(_refund_request(), headers=_refund_request().headers + in_a), "write"
+    )
 
 
 # ----------------------------------------------------------------- read tool calls
@@ -991,7 +1022,7 @@ def test_a_read_tool_recorded_after_a_write_the_replay_has_not_made_is_a_miss_al
     assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is not None
     assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is None
     assert not recording.diverged
-    assert recording.answer_for(_refund(), "write") is not None
+    assert recording.answer_for(_refund_request(), "write") is not None
     assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is not None
 
 
@@ -1005,7 +1036,7 @@ def test_an_answered_read_tool_uses_up_the_http_its_body_made():
     tool = _tool(span=(10.0, 11.0))
     recording = _recording(before, tool, _recorded_refund(), after)
     assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is not None
-    assert recording.answer_for(_refund(), "write") is not None
+    assert recording.answer_for(_refund_request(), "write") is not None
     taken = recording.answer_for(_req(), "read")
     assert taken is not None and taken.response.body == shown.body
 
@@ -1022,7 +1053,7 @@ def test_a_write_a_read_tool_s_body_made_does_not_hold_the_tool_back():
 
 def test_a_read_tool_recorded_after_a_write_the_replay_made_is_answered():
     recording = _recording(_recorded_refund(), _tool())
-    assert recording.answer_for(_refund(), "write") is not None
+    assert recording.answer_for(_refund_request(), "write") is not None
     assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is not None
     assert not recording.diverged
 
@@ -1085,7 +1116,7 @@ def test_a_recorded_tool_redaction_could_not_read_uses_up_nothing_its_body_made(
     recording = _recording(read, write, nested, unreadable)
     assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is None
     assert recording.answer_for(_req(), "read") is not None
-    assert recording.answer_for(_refund(), "write") is not None
+    assert recording.answer_for(_refund_request(), "write") is not None
     assert recording.tool_answer_for("db.rate", {"account": "acc_1"}) is nested
     assert not recording.diverged
     assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is None
@@ -1122,7 +1153,7 @@ def test_a_recorded_tool_with_no_outcome_to_give_leaves_its_body_s_http_to_answe
     recording = _recording(read, write, tool, _stored(_req()))
     assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is None
     assert recording.answer_for(_req(), "read") is not None
-    assert recording.answer_for(_refund(), "write") is not None
+    assert recording.answer_for(_refund_request(), "write") is not None
     assert not recording.diverged
     assert recording.answer_for(_req(), "read") is not None  # the agent's own read after, unchanged
     assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is None

@@ -15,7 +15,7 @@ from irimi.services.stripe import preconditions as stripe
 CHARGE_ID = "ch_3QTESTONLY000000"
 
 
-def _refund(**posted):
+def _refund_proposal(**posted):
     return Proposal("refunds.create", {"charge": CHARGE_ID, **posted})
 
 
@@ -53,14 +53,14 @@ def test_the_table_names_both_checks():
 
 
 def test_a_refund_probes_the_charge_it_names():
-    assert stripe.CHARGE_REFUNDABLE.probe(_refund(amount=100)) == Probe(
+    assert stripe.CHARGE_REFUNDABLE.probe(_refund_proposal(amount=100)) == Probe(
         operation="charges.retrieve", params={"charge": CHARGE_ID}
     )
 
 
 def test_a_refund_of_a_fully_refunded_charge_is_charge_already_refunded():
     document = _charge(amount_refunded=4900, refunded=True)
-    rejection = stripe.CHARGE_REFUNDABLE.verdict(_refund(amount=4900), document)
+    rejection = stripe.CHARGE_REFUNDABLE.verdict(_refund_proposal(amount=4900), document)
     assert isinstance(rejection, Rejection)
     assert rejection.status == 400
     assert rejection.code == "charge_already_refunded"
@@ -76,7 +76,7 @@ def test_a_refund_of_a_fully_refunded_charge_is_charge_already_refunded():
 
 def test_a_refund_over_the_remaining_amount_is_stripes_amount_error_with_irimis_label():
     document = _charge(amount_refunded=4000)
-    rejection = stripe.CHARGE_REFUNDABLE.verdict(_refund(amount=1000), document)
+    rejection = stripe.CHARGE_REFUNDABLE.verdict(_refund_proposal(amount=1000), document)
     assert isinstance(rejection, Rejection)
     assert rejection.status == 400
     assert rejection.code == "amount_too_large"
@@ -94,7 +94,8 @@ def test_a_refund_over_the_remaining_amount_is_stripes_amount_error_with_irimis_
 def test_a_refund_within_the_remaining_amount_passes(amount):
     posted = {} if amount is None else {"amount": amount}
     assert (
-        stripe.CHARGE_REFUNDABLE.verdict(_refund(**posted), _charge(amount_refunded=4000)) is None
+        stripe.CHARGE_REFUNDABLE.verdict(_refund_proposal(**posted), _charge(amount_refunded=4000))
+        is None
     )
 
 
@@ -102,7 +103,7 @@ def test_a_boolean_amount_is_not_an_amount():
     # `True` is an `int` in Python, and read as 1 it would be over the remaining 0. A bool is never
     # minor units.
     document = _charge(amount=0)
-    assert stripe.CHARGE_REFUNDABLE.verdict(_refund(amount=True), document) is None
+    assert stripe.CHARGE_REFUNDABLE.verdict(_refund_proposal(amount=True), document) is None
 
 
 @pytest.mark.parametrize(
@@ -114,13 +115,15 @@ def test_a_charge_whose_amounts_are_not_numbers_is_not_evaluable(fields):
     # Read as 0, a missing charge amount would make every refund "too large": a false rejection.
     # Passing instead would claim a comparison irimi could not make, so it says neither.
     document = _charge(**fields)
-    assert stripe.CHARGE_REFUNDABLE.verdict(_refund(amount=100), document) is NOT_EVALUABLE
+    assert stripe.CHARGE_REFUNDABLE.verdict(_refund_proposal(amount=100), document) is NOT_EVALUABLE
 
 
 def test_a_refund_posting_no_amount_passes_because_stripe_refunds_what_is_left():
     """Absent `amount` is not an unreadable one: it is Stripe's "refund the remainder", which is
     never over the remaining amount."""
-    assert stripe.CHARGE_REFUNDABLE.verdict(_refund(), _charge(amount_refunded=100)) is None
+    assert (
+        stripe.CHARGE_REFUNDABLE.verdict(_refund_proposal(), _charge(amount_refunded=100)) is None
+    )
 
 
 def test_a_refund_naming_only_a_payment_intent_has_no_probe():
@@ -147,7 +150,9 @@ def test_a_charge_that_would_leave_the_path_or_is_not_an_id_has_no_probe(charge)
 def test_a_document_irimi_did_not_understand_is_neither_rejected_nor_passed(document):
     """A false rejection is the untruth this path exists to prevent; a false pass is the other
     half of it, because the summary prints `L3 preconditions passed` off one."""
-    assert stripe.CHARGE_REFUNDABLE.verdict(_refund(amount=99999), document) is NOT_EVALUABLE
+    assert (
+        stripe.CHARGE_REFUNDABLE.verdict(_refund_proposal(amount=99999), document) is NOT_EVALUABLE
+    )
 
 
 def test_a_charge_names_the_currency_its_refund_is_denominated_in():

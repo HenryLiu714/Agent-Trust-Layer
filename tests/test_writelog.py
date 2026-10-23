@@ -4,10 +4,11 @@ import json
 from dataclasses import replace
 
 from irimi.core import bodies
-from irimi.core.exchange import Exchange, Request, Response
+from irimi.core.exchange import Exchange, Response
 from irimi.core.limits import MAX_BODY_BYTES
 from irimi.decide import writelog
 from irimi.protocol.trace import UNATTRIBUTED
+from tests.support import builders
 
 ANSWER = {
     "id": "re_MINTED1",
@@ -19,16 +20,7 @@ ANSWER = {
 
 
 def _request(host="api.stripe.com", path="/v1/refunds", method="POST", headers=(), body=b""):
-    return Request(
-        method=method,
-        scheme="https",
-        host=host,
-        port=443,
-        path=path,
-        query="",
-        headers=tuple(headers),
-        body=body,
-    )
+    return builders.request(method=method, host=host, path=path, headers=tuple(headers), body=body)
 
 
 def _read(headers=()):

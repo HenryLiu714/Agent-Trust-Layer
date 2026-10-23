@@ -6,9 +6,10 @@ from dataclasses import replace
 from irimi import services
 from irimi.core.exchange import Exchange, Request, Response
 from irimi.core.limits import MAX_BODY_BYTES
-from irimi.decide.overlay import ServiceOverlay
+from irimi.decide.overlay import NoOverlay, ServiceOverlay
 from irimi.servicemaps import IdSpec, MapIndex, Route, ServiceMap
 from irimi.servicemaps.classify import classify
+from tests.support import builders
 from tests.support.credentials import SLACK_BOT
 
 STRIPE = ServiceMap(
@@ -265,7 +266,7 @@ def test_rewrite_returns_none_when_there_is_nothing_to_translate():
     assert _Overlay().rewrite([_write_exchange()], read) is None
 
 
-def test_rewrite_never_raises(monkeypatch):
+def test_a_rewrite_never_raises(monkeypatch):
     raising = replace(services.REGISTRY["stripe"], rewrite=_raising)
     monkeypatch.setitem(services.REGISTRY, "stripe", raising)
     read = _read("/v1/refunds", query=f"starting_after={MINTED}")
@@ -408,3 +409,40 @@ def test_a_slack_replies_read_of_a_minted_thread_comes_back_as_the_thread():
     document = json.loads(out.response.body)
     assert document["ok"] is True
     assert [m["ts"] for m in document["messages"]] == [ts]
+
+
+# A faked write in the log, and a read whose live answer is an empty JSON list.
+_EMPTY_LIST = Response(status=200, headers=(("content-type", "application/json"),), body=b"[]")
+_FAKED = builders.exchange(
+    response=_EMPTY_LIST, operation="POST /v1/charges", kind="unknown", answered_by="fake-L0"
+)
+
+
+def test_no_overlay_returns_upstream_response_unchanged():
+    req, resp = builders.request(), _EMPTY_LIST
+    overlaid = NoOverlay()(
+        write_log=[], classification=classify(req), read_request=req, upstream_response=resp
+    )
+    assert overlaid.response is resp
+    assert overlaid.fidelity is None
+
+
+def test_no_overlay_ignores_the_write_log():
+    req, resp = builders.request(), _EMPTY_LIST
+    assert (
+        NoOverlay()(
+            write_log=[_FAKED],
+            classification=classify(req),
+            read_request=req,
+            upstream_response=resp,
+        ).response
+        is resp
+    )
+
+
+def test_no_overlay_rewrite_translates_nothing():
+    req = builders.request()
+    assert (
+        NoOverlay().rewrite(write_log=[_FAKED], classification=classify(req), read_request=req)
+        is None
+    )

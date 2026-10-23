@@ -1,3 +1,5 @@
+"""`config.ca`: the local CA irimi generates, and the state of its two files."""
+
 import stat
 
 from cryptography import x509
@@ -20,7 +22,7 @@ def test_generate_writes_key_and_cert_with_modes(tmp_path, monkeypatch):
     assert stat.S_IMODE(p.key.parent.stat().st_mode) == 0o700
 
 
-def test_generated_cert_is_a_ca(tmp_path, monkeypatch):
+def test_the_generated_certificate_is_a_ca(tmp_path, monkeypatch):
     p = _paths(tmp_path, monkeypatch)
     ca.generate_ca(p)
     cert = x509.load_pem_x509_certificate(p.cert.read_bytes())
@@ -33,7 +35,7 @@ def test_generated_cert_is_a_ca(tmp_path, monkeypatch):
     assert cert_pub.public_numbers() == key_pub.public_numbers()
 
 
-def test_exists_and_partial(tmp_path, monkeypatch):
+def test_a_ca_with_one_of_its_two_files_is_partial(tmp_path, monkeypatch):
     p = _paths(tmp_path, monkeypatch)
     assert not ca.ca_exists(p) and not ca.ca_partial(p)
     ca.generate_ca(p)
@@ -42,7 +44,7 @@ def test_exists_and_partial(tmp_path, monkeypatch):
     assert not ca.ca_exists(p) and ca.ca_partial(p)
 
 
-def test_generate_overwrites_and_fixes_mode(tmp_path, monkeypatch):
+def test_generating_again_overwrites_and_fixes_the_mode(tmp_path, monkeypatch):
     p = _paths(tmp_path, monkeypatch)
     ca.generate_ca(p)
     p.key.chmod(0o644)

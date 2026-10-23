@@ -2,12 +2,9 @@
 
 import asyncio
 import dataclasses
-import enum
 import hashlib
-import itertools
 import json
 import re
-import types
 import typing
 from pathlib import Path
 
@@ -32,76 +29,15 @@ from irimi.protocol.trace import (
     TraceFormatError,
     Trigger,
 )
+from tests.support import builders
 
 DOC = Path(__file__).resolve().parents[1] / "docs" / "trace-format.md"
 
-# ------------------------------------------------------------------------ a value in every field
-#
-# Built from the dataclass's own field types, so a field added later is filled - or, when its
-# type is new here, refused - without anyone remembering to touch this file. Every value differs
-# from the field's default: a field the codec forgot then decodes as its default, and the round
-# trip below fails. And every value differs from every other field's, of any type, in the same
-# record and the records nested in it: a codec that writes one field's value under another's key
-# (`"ended_at": ex.started_at`) then decodes to a different record, and fails the round trip too.
-
-
-def _sample(tp, name, n, default=dataclasses.MISSING):
-    """A value of type `tp` for the field `name`, unique by way of `n` (one counter per record)."""
-    if tp is trace.JSONValue:
-        return {"field": name, "n": next(n), "list": [1, 2.5, "s", None, True], "nested": {"k": []}}
-    if dataclasses.is_dataclass(tp):
-        return _filled(tp, n)
-    if tp is str:
-        return f"{name}-{next(n)}"
-    if tp is bool:
-        return True
-    if tp is int:
-        return next(n)
-    if tp is float:
-        # Epoch seconds, in quarters: exactly representable, so equality after JSON is exact.
-        return 1790600000.0 + next(n) / 4
-    if tp is bytes:
-        return f"{name} body {next(n)}".encode()
-    if isinstance(tp, type) and issubclass(tp, enum.Enum):
-        members = list(tp)
-        return members[next(n) % len(members)]
-    origin, args = typing.get_origin(tp), typing.get_args(tp)
-    if origin is typing.Literal:
-        choices = [a for a in args if a != default]
-        return choices[next(n) % len(choices)]
-    if origin in (typing.Union, types.UnionType):
-        (arm,) = [a for a in args if a is not type(None)]
-        return _sample(arm, name, n, default)
-    if origin is tuple and len(args) == 2 and args[1] is Ellipsis:
-        # Three distinct items, neither ascending nor descending: a codec that sorts, reverses or
-        # dedups the sequence fails. For `stream_chunks: tuple[int, ...]` as much as `flags`.
-        first, second, third = (_sample(args[0], f"{name}{i}", n) for i in range(3))
-        return (second, first, third)
-    if origin is tuple:
-        return tuple(_sample(a, f"{name}{i}", n) for i, a in enumerate(args))
-    if isinstance(tp, typing.TypeAliasType):
-        return _sample(tp.__value__, name, n, default)
-    raise AssertionError(f"no sample for field {name!r} of type {tp!r}: teach _sample the type")
-
-
-def _filled(cls, n=None):
-    n = itertools.count(1) if n is None else n
-    values = {}
-    for f in dataclasses.fields(cls):
-        default = f.default
-        if f.default_factory is not dataclasses.MISSING:
-            default = f.default_factory()
-        value = _sample(f.type, f.name, n, default)
-        if default is not dataclasses.MISSING:
-            assert value != default, f"{cls.__name__}.{f.name} sample equals its default"
-        values[f.name] = value
-    return cls(**values)
-
 
 def _run_record(**changes):
-    """A filled RunRecord this version reads: `_filled` knows nothing of `SCHEMA_VERSION`, nor
+    """A filled RunRecord this version reads: `filled` knows nothing of `SCHEMA_VERSION`, nor
     that a trigger holds a call's args or a command line, never both."""
-    filled = _filled(RunRecord)
+    filled = builders.filled(RunRecord)
     trigger = dataclasses.replace(filled.trigger, argv=None)
     changes = {"schema_version": SCHEMA_VERSION, "trigger": trigger, **changes}
     return dataclasses.replace(filled, **changes)
@@ -123,7 +59,7 @@ def test_the_samples_differ_from_field_to_field():
 
     for cls in (Exchange, RunRecord, ToolCall, TelemetrySeen):
         leaves.clear()
-        walk(_filled(cls))
+        walk(builders.filled(cls))
         assert len(leaves) == len(set(leaves)), f"{cls.__name__} repeats a sample value"
 
 
@@ -155,7 +91,7 @@ def _json_round_trip(d):
 
 
 def test_every_exchange_field_survives_the_codec():
-    ex = _filled(Exchange)
+    ex = builders.filled(Exchange)
     blobs = _Blobs()
     encoded = trace.exchange_to_json(ex, blobs.put)
     assert trace.exchange_from_json(_json_round_trip(encoded), blobs.get) == ex
@@ -167,17 +103,17 @@ def test_every_run_record_field_survives_the_codec():
 
 
 def test_every_tool_call_field_survives_the_codec():
-    call = _filled(ToolCall)
+    call = builders.filled(ToolCall)
     assert trace.tool_call_from_json(_json_round_trip(trace.tool_call_to_json(call))) == call
 
 
 def test_every_telemetry_field_survives_the_codec():
-    seen = _filled(TelemetrySeen)
+    seen = builders.filled(TelemetrySeen)
     assert trace.telemetry_from_json(_json_round_trip(trace.telemetry_to_json(seen))) == seen
 
 
 def test_the_optional_fields_survive_as_null():
-    """The other arm of every `X | None`: `_filled` only ever builds the X."""
+    """The other arm of every `X | None`: `filled` only ever builds the X."""
     record = RunRecord(
         schema_version=SCHEMA_VERSION,
         run_id="r1",
@@ -192,7 +128,7 @@ def test_the_optional_fields_survive_as_null():
     )
     assert trace.run_from_json(_json_round_trip(trace.run_to_json(record))) == record
     ex = dataclasses.replace(
-        _filled(Exchange), response=None, overlay=None, precondition=Precondition()
+        builders.filled(Exchange), response=None, overlay=None, precondition=Precondition()
     )
     blobs = _Blobs()
     encoded = _json_round_trip(trace.exchange_to_json(ex, blobs.put))
@@ -208,7 +144,7 @@ def test_trigger_args_hold_any_json():
 
 @pytest.mark.parametrize(
     "event",
-    [_filled(Exchange), _filled(ToolCall), _filled(TelemetrySeen)],
+    [builders.filled(Exchange), builders.filled(ToolCall), builders.filled(TelemetrySeen)],
     ids=["exchange", "tool_call", "telemetry"],
 )
 def test_an_event_line_carries_seq_and_type_and_decodes_back(event):
@@ -224,8 +160,8 @@ def test_an_event_line_carries_seq_and_type_and_decodes_back(event):
 
 def test_bodies_never_go_inline_and_an_empty_one_is_null_and_stores_nothing():
     ex = dataclasses.replace(
-        _filled(Exchange),
-        request=dataclasses.replace(_filled(Request), body=b""),
+        builders.filled(Exchange),
+        request=dataclasses.replace(builders.filled(Request), body=b""),
         response=Response(status=200, headers=(), body=b'{"ok": true}'),
     )
     blobs = _Blobs()
@@ -242,7 +178,7 @@ def test_bodies_never_go_inline_and_an_empty_one_is_null_and_stores_nothing():
 
 def test_headers_keep_their_order_their_repeats_and_their_case():
     headers = (("Set-Cookie", "a=1"), ("X-B", "2"), ("Set-Cookie", "c=3"))
-    ex = dataclasses.replace(_filled(Exchange), response=Response(200, headers, b""))
+    ex = dataclasses.replace(builders.filled(Exchange), response=Response(200, headers, b""))
     blobs = _Blobs()
     encoded = _json_round_trip(trace.exchange_to_json(ex, blobs.put))
     assert encoded["response"]["headers"] == [
@@ -258,7 +194,7 @@ def test_headers_keep_their_order_their_repeats_and_their_case():
 def test_a_body_ref_that_is_not_a_digest_is_refused_before_the_store_is_asked():
     """A store joins the digest onto `blobs/`, so a ref read off disk is a path it cannot trust."""
     blobs = _Blobs()
-    encoded: typing.Any = trace.exchange_to_json(_filled(Exchange), blobs.put)
+    encoded: typing.Any = trace.exchange_to_json(builders.filled(Exchange), blobs.put)
     encoded["request"]["body"]["sha256"] = "../../etc/passwd"
 
     def never(ref):
@@ -274,7 +210,9 @@ def test_get_body_is_handed_the_ref_as_stored_truncated_and_size_included():
     body = b"the first bytes of a longer body"
     stored = BodyRef(hashlib.sha256(body).hexdigest(), 8 * 1024 * 1024, True)
     ex = dataclasses.replace(
-        _filled(Exchange), request=dataclasses.replace(_filled(Request), body=body), response=None
+        builders.filled(Exchange),
+        request=dataclasses.replace(builders.filled(Request), body=body),
+        response=None,
     )
     encoded = _json_round_trip(trace.exchange_to_json(ex, lambda _: stored))
     assert encoded["request"]["body"] == {
@@ -319,7 +257,7 @@ def test_an_unknown_extra_field_is_ignored():
     d = _encoded_run() | {"added_in_a_later_version": {"x": 1}}
     assert trace.run_from_json(d) == trace.run_from_json(_encoded_run())
     blobs = _Blobs()
-    ex = _filled(Exchange)
+    ex = builders.filled(Exchange)
     line: typing.Any = trace.exchange_to_json(ex, blobs.put) | {"added_later": True}
     line["request"] = line["request"] | {"added_later": True}
     assert trace.exchange_from_json(line, blobs.get) == ex
@@ -329,7 +267,7 @@ def test_a_schema_2_exchange_reads_without_its_validation_and_fidelity_flag():
     """Schema 3 dropped both; a run stored under schema 2 still reads, and an unknown flag says
     nothing this version can act on."""
     blobs = _Blobs()
-    ex = dataclasses.replace(_filled(Exchange), flags=(Flag.FROM_RECORDING,))
+    ex = dataclasses.replace(builders.filled(Exchange), flags=(Flag.FROM_RECORDING,))
     line = trace.exchange_to_json(ex, blobs.put) | {
         "validation": "unvalidated",
         "flags": ["fidelity:L1", "from-recording", "added-later"],
@@ -345,10 +283,11 @@ def test_a_schema_version_below_the_first_is_refused(version):
 
 # Values of any JSON, so not records whose keys a decoder requires.
 _FREE_JSON = frozenset({"args", "result"})
+
 _EVENTS = {
-    "exchange": _filled(Exchange),
-    "tool_call": _filled(ToolCall),
-    "telemetry": _filled(TelemetrySeen),
+    "exchange": builders.filled(Exchange),
+    "tool_call": builders.filled(ToolCall),
+    "telemetry": builders.filled(TelemetrySeen),
 }
 
 
@@ -358,12 +297,12 @@ def _decodable(name):
     if name == "run":
         return _encoded_run(), trace.run_from_json
     if name == "exchange":
-        encoded = trace.exchange_to_json(_filled(Exchange), blobs.put)
+        encoded = trace.exchange_to_json(builders.filled(Exchange), blobs.put)
         return encoded, lambda d: trace.exchange_from_json(d, blobs.get)
     if name == "tool_call":
-        return trace.tool_call_to_json(_filled(ToolCall)), trace.tool_call_from_json
+        return trace.tool_call_to_json(builders.filled(ToolCall)), trace.tool_call_from_json
     if name == "telemetry":
-        return trace.telemetry_to_json(_filled(TelemetrySeen)), trace.telemetry_from_json
+        return trace.telemetry_to_json(builders.filled(TelemetrySeen)), trace.telemetry_from_json
     line = trace.event_to_json(1, _EVENTS[name.removesuffix(" line")], blobs.put)
     return line, lambda d: trace.event_from_json(d, blobs.get)
 
@@ -411,6 +350,7 @@ def _nested_list(depth):
 # Deeper than `repr` goes on any Python or stack irimi runs on, and within what 3.14's `json.loads`
 # reads, so what an agent may post to the control endpoint.
 _DEEP = 100_000
+
 # A field that holds a list is refused at its first item, by its place.
 _FIRST_ITEM_REFUSED = {
     "flags": "'flags'[0] is a list, not a string",
@@ -418,6 +358,7 @@ _FIRST_ITEM_REFUSED = {
     "headers": "'headers'[0] is not a [name, value] pair of strings",
     "stream_chunks": "'stream_chunks'[0] is not a positive integer",
 }
+
 _TYPED = [(name, path) for name, path in _REQUIRED if path[-1] not in _FREE_JSON]
 
 
@@ -516,11 +457,13 @@ def test_a_string_a_refusal_quotes_is_cut_to_max_quoted_characters(length, quote
     """A word outside a vocabulary and a `sha256` that is no digest are quoted back, cut, so a
     damaged line's 5 MB string is never a 5 MB message on `runs show`'s stderr."""
     blobs = _Blobs()
-    d: typing.Any = trace.exchange_to_json(_filled(Exchange), blobs.put) | {"kind": "z" * length}
+    d: typing.Any = trace.exchange_to_json(builders.filled(Exchange), blobs.put) | {
+        "kind": "z" * length
+    }
     with pytest.raises(TraceFormatError) as refused:
         trace.exchange_from_json(d, blobs.get)
     assert str(refused.value) == f"'kind' is {quoted}, not one of {typing.get_args(Kind)}"
-    d = trace.exchange_to_json(_filled(Exchange), blobs.put)
+    d = trace.exchange_to_json(builders.filled(Exchange), blobs.put)
     d["request"]["body"]["sha256"] = "z" * length
     with pytest.raises(TraceFormatError) as refused:
         trace.exchange_from_json(d, blobs.get)
@@ -585,7 +528,10 @@ def test_a_run_whose_mode_and_replay_of_disagree_is_refused(mode, replay_of, ref
 def test_a_recorded_outcome_round_trips_and_holds_a_tool_call_s_outcome():
     """What the control endpoint answers a replay's lookup with, and the SDK reads."""
     call = dataclasses.replace(
-        _filled(ToolCall), result=None, error=ErrorInfo("builtins.KeyError", "'k'"), awaited=True
+        builders.filled(ToolCall),
+        result=None,
+        error=ErrorInfo("builtins.KeyError", "'k'"),
+        awaited=True,
     )
     d = recorded_outcome_to_json(call)
     assert d == {
@@ -622,7 +568,7 @@ def test_a_recorded_outcome_round_trips_and_holds_a_tool_call_s_outcome():
 )
 def test_stream_chunks_that_are_not_positive_integers_are_refused(value):
     blobs = _Blobs()
-    d = trace.exchange_to_json(_filled(Exchange), blobs.put) | {"stream_chunks": value}
+    d = trace.exchange_to_json(builders.filled(Exchange), blobs.put) | {"stream_chunks": value}
     with pytest.raises(TraceFormatError, match="stream_chunks"):
         trace.exchange_from_json(d, blobs.get)
 
@@ -685,7 +631,7 @@ def test_a_timestamp_that_is_not_a_finite_float_is_a_trace_format_error(number):
     with pytest.raises(TraceFormatError, match="ended_at"):
         trace.run_from_json(_encoded_run() | {"ended_at": value})
     blobs = _Blobs()
-    encoded = trace.exchange_to_json(_filled(Exchange), blobs.put) | {"started_at": value}
+    encoded = trace.exchange_to_json(builders.filled(Exchange), blobs.put) | {"started_at": value}
     with pytest.raises(TraceFormatError, match="started_at"):
         trace.exchange_from_json(encoded, blobs.get)
 
@@ -695,7 +641,7 @@ def test_free_json_holding_a_number_that_is_not_finite_is_a_trace_format_error(n
     """`args` and `result` hold any JSON, but not what `json.loads` alone would let in: a record
     holding `NaN` could not be written back with `allow_nan=False`."""
     nested = json.loads(f'{{"a": [1, {{"b": {number}}}]}}')
-    call = trace.tool_call_to_json(_filled(ToolCall))
+    call = trace.tool_call_to_json(builders.filled(ToolCall))
     for key in ("args", "result"):
         with pytest.raises(TraceFormatError, match=key):
             trace.tool_call_from_json(call | {key: nested})
@@ -717,7 +663,7 @@ def test_free_json_holding_a_number_that_is_not_finite_is_a_trace_format_error(n
 )
 def test_a_malformed_exchange_is_a_trace_format_error_and_nothing_else(key, value):
     blobs = _Blobs()
-    d = trace.exchange_to_json(_filled(Exchange), blobs.put) | {key: value}
+    d = trace.exchange_to_json(builders.filled(Exchange), blobs.put) | {key: value}
     with pytest.raises(TraceFormatError, match=key):
         trace.exchange_from_json(d, blobs.get)
 
@@ -725,7 +671,7 @@ def test_a_malformed_exchange_is_a_trace_format_error_and_nothing_else(key, valu
 @pytest.mark.parametrize("pairs", [{"a": "1"}, [["a"]], [["a", 1]], ["a: 1"]])
 def test_headers_that_are_not_name_value_pairs_are_refused(pairs):
     blobs = _Blobs()
-    d: typing.Any = trace.exchange_to_json(_filled(Exchange), blobs.put)
+    d: typing.Any = trace.exchange_to_json(builders.filled(Exchange), blobs.put)
     d["request"]["headers"] = pairs
     with pytest.raises(TraceFormatError, match="headers"):
         trace.exchange_from_json(d, blobs.get)
@@ -755,12 +701,12 @@ def test_an_unknown_event_type_is_refused():
 @pytest.mark.parametrize(
     "run_id", ["t3st", "4f1c9a2b7d3e8a60", "a" * 64, "run_1-A", trace.UNATTRIBUTED]
 )
-def test_a_valid_run_id(run_id):
+def test_a_valid_run_id_is_accepted(run_id):
     assert trace.is_valid_run_id(run_id)
 
 
 @pytest.mark.parametrize("run_id", ["", "../x", "a" * 65, "a b", "a/b", "a.b", "..", "a\n", "é"])
-def test_an_invalid_run_id(run_id):
+def test_an_invalid_run_id_is_refused(run_id):
     assert not trace.is_valid_run_id(run_id)
 
 
@@ -846,9 +792,9 @@ def _doc_table(marker: str) -> list[str]:
         ("(`trace.Trigger`)", lambda: trace.run_to_json(_run_record())["trigger"]),
         (
             "(`irimi.core.exchange.Exchange`)",
-            lambda: trace.exchange_to_json(_filled(Exchange), _Blobs().put),
+            lambda: trace.exchange_to_json(builders.filled(Exchange), _Blobs().put),
         ),
-        ("(`trace.ToolCall`)", lambda: trace.tool_call_to_json(_filled(ToolCall))),
+        ("(`trace.ToolCall`)", lambda: trace.tool_call_to_json(builders.filled(ToolCall))),
     ],
     ids=["run", "trigger", "exchange", "tool_call"],
 )

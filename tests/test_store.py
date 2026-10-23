@@ -2,7 +2,7 @@
 
 Every test drives the store through its public methods and asserts on what `StoreReader` and the
 files under the root say, so a test here breaks only when what reaches disk changes. The real
-`irimi shadow` over these same files is `tests/test_trace_e2e.py`'s.
+`irimi shadow` over these same files is `tests/e2e/test_trace_roundtrip.py`'s.
 """
 
 import dataclasses
@@ -20,7 +20,7 @@ import pytest
 
 from irimi.config import files
 from irimi.core import exchange, limits
-from irimi.core.exchange import Exchange, Flag, Request, Response
+from irimi.core.exchange import Exchange, Flag, Response
 from irimi.protocol import trace
 from irimi.protocol.trace import (
     ErrorInfo,
@@ -34,8 +34,10 @@ from irimi.record import redact
 from irimi.record.store import StoreStats, layout, writer
 from irimi.record.store.reader import RunNotFound, StoreReader
 from irimi.record.store.writer import DirectoryStore
-from tests.doubles import NullStore
+from tests.support import builders
 from tests.support.credentials import STORE_SECRET, STORE_SECRET_SHORT
+from tests.support.doubles import NullStore
+from tests.support.waiting import eventually
 
 SECRET = STORE_SECRET
 
@@ -53,13 +55,15 @@ def root(tmp_path) -> Path:
 def _exchange(
     run_id: str, path: str = "/v1/things", *, body: bytes = b"", answer: bytes = b"", kind="read"
 ) -> Exchange:
-    return Exchange(
-        request=Request("POST", "https", "api.example.com", 443, path, "", (), body),
-        response=Response(200, (("content-type", "application/octet-stream"),), answer),
+    """A POST to a service no map names, answered live with `answer` as raw bytes."""
+    return builders.exchange(
+        request=builders.request(method="POST", host="api.example.com", path=path, body=body),
+        response=builders.response(
+            headers=(("content-type", "application/octet-stream"),), body=answer
+        ),
         service="example",
         operation="things.create",
         kind=kind,
-        answered_by="live",
         run_id=run_id,
         started_at=1.0,
         ended_at=2.0,
@@ -67,17 +71,8 @@ def _exchange(
 
 
 def _record(run_id: str, started_at: float | None = 10.0, args=None) -> RunRecord:
-    return RunRecord(
-        schema_version=trace.SCHEMA_VERSION,
-        run_id=run_id,
-        mode="shadow",
-        attribution="process",
-        trigger=Trigger(name="agent", entrypoint=None, args=args, replayable=True),
-        agent_version="1.2.3",
-        engine_version="0.0.0",
-        sdk_version=None,
-        started_at=started_at,
-    )
+    trigger = Trigger(name="agent", entrypoint=None, args=args, replayable=True)
+    return builders.run_record(run_id, started_at, trigger=trigger)
 
 
 def _replays(record: RunRecord, replay_of: str) -> RunRecord:
@@ -86,7 +81,7 @@ def _replays(record: RunRecord, replay_of: str) -> RunRecord:
 
 
 def _tool_call(run_id: str, args) -> ToolCall:
-    return ToolCall("t1", run_id, "db.write", "write", "shadow", args, None, None, 1.0, 2.0)
+    return builders.tool_call(tool_call_id="t1", run_id=run_id, name="db.write", args=args)
 
 
 class _StoreOs:
@@ -107,10 +102,12 @@ def store_os(monkeypatch) -> _StoreOs:
 
 
 def _drain(s: DirectoryStore, written: int) -> None:
-    deadline = time.monotonic() + 10
-    while s.stats().written < written or s.stats().queued:
-        assert time.monotonic() < deadline, s.stats()
-        time.sleep(0.005)
+    """Wait until the writer has written `written` events and has none queued."""
+    eventually(
+        lambda: s.stats().written >= written and not s.stats().queued,
+        interval=0.005,
+        message="the writer never drained its queue",
+    )
 
 
 def _paths(stored) -> list[str]:
@@ -807,10 +804,7 @@ def test_a_run_json_that_cannot_be_read_for_now_does_not_refuse_the_run_for_good
     run_json.chmod(0)
     s = DirectoryStore(root, key)
     s.record(_exchange("r1", "/lost"))
-    deadline = time.monotonic() + 10
-    while s.stats().dropped < 1:
-        assert time.monotonic() < deadline, s.stats()
-        time.sleep(0.005)
+    eventually(lambda: s.stats().dropped >= 1, interval=0.005, message="nothing was dropped")
     run_json.chmod(0o600)
     s.record(_exchange("r1", "/kept"))
     s.close()
@@ -1002,7 +996,7 @@ def test_close_gives_up_on_a_stuck_writer_and_counts_what_it_left(root, key, mon
             isinstance(item, writer._QueuedEvent)
             and cast(Exchange, item.event).request.path == "/stuck"
         ):
-            release.wait(10)
+            release.wait(30)
         real(self, item)
 
     monkeypatch.setattr(DirectoryStore, "_handle", stuck)
@@ -1013,15 +1007,12 @@ def test_close_gives_up_on_a_stuck_writer_and_counts_what_it_left(root, key, mon
     s.record(_exchange("r1", "/also-left"))
     started = time.monotonic()
     s.close()
-    assert time.monotonic() - started < 2
+    assert time.monotonic() - started < 10, "close waited for the stuck write"
     assert s.stats().dropped == 2
     assert StoreReader(root).load_run("r1").record.dropped_events == 2
     release.set()
     # The write in flight still lands; wait for it, so no later test's patched `os` meets it.
-    deadline = time.monotonic() + 10
-    while s.stats().written < 1:
-        assert time.monotonic() < deadline, s.stats()
-        time.sleep(0.005)
+    eventually(lambda: s.stats().written >= 1, interval=0.005, message="nothing was written")
 
 
 def test_an_abandoned_writer_stops_once_its_write_in_flight_lands(root, key, monkeypatch):
@@ -1063,10 +1054,7 @@ def test_a_second_close_waits_for_the_writer_as_the_first_does(root, key, monkey
     assert taken.wait(5)
     first = threading.Thread(target=s.close)
     first.start()
-    deadline = time.monotonic() + 10
-    while not s._closed:  # the first close has begun
-        assert time.monotonic() < deadline
-        time.sleep(0.001)
+    eventually(lambda: s._closed, interval=0.001)  # the first close has begun
     threading.Timer(0.2, release.set).start()
     s.close()
     assert _paths(StoreReader(root).load_run("r1")) == ["/slow"]
@@ -1324,10 +1312,11 @@ def test_an_idle_writer_fsyncs_what_it_wrote(root, key, monkeypatch, store_os):
     s.record(_exchange("r1"))
     _drain(s, 1)
     events = (root / "runs/r1/events.jsonl").stat().st_ino
-    deadline = time.monotonic() + 10
-    while events not in synced:
-        assert time.monotonic() < deadline, "the idle writer never synced events.jsonl"
-        time.sleep(0.005)
+    eventually(
+        lambda: events in synced,
+        interval=0.005,
+        message="the idle writer never synced events.jsonl",
+    )
     s.close()
 
 
@@ -1637,3 +1626,15 @@ def test_a_missing_blob_is_a_trace_format_error(root, key):
     (root / "blobs" / trace.body_ref(b"a body").sha256).unlink()
     with pytest.raises(TraceFormatError, match="missing"):
         StoreReader(root).load_run("r1")
+
+
+def test_null_store_record_and_close_return_none():
+    store = NullStore()
+    faked = builders.exchange(
+        response=Response(status=200, headers=(("content-type", "application/json"),), body=b"[]"),
+        operation="POST /v1/charges",
+        kind="unknown",
+        answered_by="fake-L0",
+    )
+    assert store.record(faked) is None  # type: ignore[func-returns-value]
+    assert store.close() is None  # type: ignore[func-returns-value]

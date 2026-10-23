@@ -1,24 +1,15 @@
 {
-  "tests/test_bounded_decoding.py": {
+  "tests/engine/test_bounded_decoding.py": {
     "caps_run": 4
   },
-  "tests/test_phase3_exit.py": {
+  "tests/safety/test_scope_rule.py": {
+    "caps_run": 4
+  },
+  "tests/sdk/test_tools.py": {
     "caps_run": 1
   },
-  "tests/test_phase3_replay_exit.py": {
+  "tests/test_targets.py": {
     "caps_run": 1
-  },
-  "tests/test_pipeline.py": {
-    "caps_run": 1
-  },
-  "tests/test_policy.py": {
-    "caps_run": 1
-  },
-  "tests/test_sdk_tool.py": {
-    "caps_run": 1
-  },
-  "tests/test_servicemap.py": {
-    "caps_run": 3
   },
   "tests/test_trace.py": {
     "caps_run": 1

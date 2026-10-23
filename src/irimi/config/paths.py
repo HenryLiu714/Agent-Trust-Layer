@@ -29,8 +29,7 @@ def mitm_dir() -> Path:
 
 
 def store_dir() -> Path:
-    """Where irimi keeps the trace store unless `--store` says: $IRIMI_STORE if set, else
-    `store` under irimi's home."""
+    """Return the default trace store: $IRIMI_STORE if set, else `store` under irimi's home."""
     raw = os.environ.get(IRIMI_STORE_ENV)
     if raw:
         return Path(raw).expanduser()

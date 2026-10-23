@@ -1,11 +1,6 @@
-"""What a request or response body says, parsed without ever raising.
+"""Parse request and response bodies; never raises (fail-closed hook rule).
 
-`reflect` reads a request's own fields - a JSON object, or a form body with Stripe's bracketed
-encoding - and `json_object` reads a response's. They are the one parser for each, shared by the
-faker, the write log, the idempotency store, the overlay, the policy and the summary, so
-all of them see the same view of one body. Nothing here raises: every caller is on the answer
-path of a mitmproxy hook, where a raise forwards the flow and a forwarded write escapes shadow
-mode. Layer 1: it imports only `exchange`.
+`reflect` reads a request's fields (JSON or a Stripe-bracketed form); `json_object` a response's.
 """
 
 import json
@@ -21,27 +16,18 @@ from irimi.core.limits import MAX_BODY_BYTES
 JSON_CT = "application/json"
 FORM_CT = "application/x-www-form-urlencoded"
 
-# One bracket segment of a form field name: the `[order_id]` of `metadata[order_id]`.
 _BRACKET = re.compile(r"\[([^\[\]]*)\]")
-# What `_split_key` returns for the one empty bracket pair it understands, `expand[]`. A real
-# segment can never be this: `_BRACKET` captures what is between the brackets, so a key spelling
-# `[]` out literally arrives as the two characters and not as this marker.
+# Marker for `expand[]`; a literal `[]` segment cannot collide because `_BRACKET` strips brackets.
 _APPEND = "[]"
-# How deep a bracket path may nest before the key is kept flat instead. Stripe's deepest real key
-# is `line_items[0][price_data][product_data][name]`, four levels; a hostile body can otherwise
-# nest thousands, and unwinding one that deep is a RecursionError inside a mitmproxy hook.
+# Stripe nests four deep at most; deeper keys stay flat so a hostile nest cannot recurse in a hook.
 _MAX_FORM_DEPTH = 8
 
-# A form value that is a canonical decimal integer of at most 15 digits is echoed as a number:
-# stripe-python posts `amount=4900` and the agent that reads `refund.amount` wants 4900 back.
-# "007" and a 20-digit account number are not canonical, so they stay strings - coercing them
-# would hand back something other than what the caller sent, and 15 digits is the floor where an
-# integer still survives a JSON parser that stores numbers as doubles.
+# Canonical integers echo as numbers; "007" and over 15 digits (a double's exact limit) stay text.
 _INTEGER = re.compile(r"0|[1-9][0-9]{0,14}")
 
 
 def content_type(request: Request) -> str:
-    """The request's content type without parameters, lower-cased. "" when there is none."""
+    """Return the request's media type, lower-cased, or "" when there is none."""
     return media_type(request.header("content-type") or "")
 
 
@@ -50,24 +36,12 @@ def _form_value(value: str) -> Any:
 
 
 def _is_json(ct: str) -> bool:
-    """Every content type that carries a JSON document.
-
-    RFC 6839's `+json` structured suffix covers `application/vnd.api+json` and
-    `application/json-patch+json`; `text/json` is a legacy spelling clients still send. A JSON
-    body under any of them that reflected nothing would be indistinguishable from a malformed one.
-    """
+    """Return True for a JSON content type, including `+json` suffixes and `text/json`."""
     return ct in (JSON_CT, "text/json") or ct.endswith("+json")
 
 
 def _has_non_finite(value: Any) -> bool:
-    """True when `value` holds a float `json.dumps` would write as NaN, Infinity or -Infinity.
-
-    json.loads accepts all three and json.dumps writes them straight back out, so the echo would
-    be a body a strict JSON parser refuses. This keeps them out of the single `json.dumps` in
-    `fake_response`; the `try` in `ShadowPolicy.decide` is what makes that call safe outright. A
-    walk, not a throwaway serialization of the whole body, which would cost a second full pass
-    over a large one.
-    """
+    """Return True if `value` holds NaN or an infinity, which strict JSON parsers refuse."""
     if isinstance(value, float):
         return not math.isfinite(value)
     if isinstance(value, dict):
@@ -78,18 +52,7 @@ def _has_non_finite(value: Any) -> bool:
 
 
 def _split_key(key: str) -> tuple[str, list[str]]:
-    """`metadata[order_id]` -> `("metadata", ["order_id"])`; `a[0][b]` -> `("a", ["0", "b"])`.
-
-    `expand[]` -> `("expand", [_APPEND])`: an empty bracket pair on its own is the one bracketed
-    shape with an unambiguous meaning, and it is Stripe's own documented `curl` spelling for a
-    repeated array field. Kept flat, `expand[]=a&expand[]=b` would echo the literal JSON key
-    `"expand[]"`.
-
-    A key with no brackets, or bracketed in a shape we will not guess at - `a[b`, `a[b]c`,
-    `a[[b]]`, `a[][b]`, `[b]`, or more than `_MAX_FORM_DEPTH` levels - comes back with no segments
-    and stays flat. Echoing such a key unchanged is wrong in a small, visible way; guessing at its
-    structure is wrong in an unpredictable one.
-    """
+    """Split `a[0][b]` into `("a", ["0", "b"])`; a malformed or over-deep key stays flat."""
     head, bracket, rest = key.partition("[")
     if not bracket or not head:
         return key, []
@@ -107,26 +70,12 @@ def _split_key(key: str) -> tuple[str, list[str]]:
 
 
 def _is_string_valued(names: Iterable[str]) -> bool:
-    """True when a value reached through these field names is one the caller chose the text of.
-
-    `STRING_KEYED_FIELDS` names the fields whose *keys* are the caller's, and their values are the
-    caller's for the same reason: a Stripe metadata value is always a string on the live API, so
-    coercing `metadata[order_id]=6735` to an int hands back something other than what was sent.
-    Anywhere else a nested value is coerced exactly like a top-level one.
-    """
+    """Return True if a value under these names is caller text, so never coerced to a number."""
     return any(name in STRING_KEYED_FIELDS for name in names)
 
 
 def _assign(node: dict[str, Any], head: str, segments: list[str], value: str) -> None:
-    """Walk the bracket path, creating a dict per level, and set the leaf.
-
-    The leaf is coerced by `_form_value` unless some name on the way to it is a
-    `STRING_KEYED_FIELDS` one. Left as a string, `line_items[0][quantity]=2` would echo `"2"` while
-    the same number at the top level echoes `2`, and `quantity * 2` would be `"22"` with no raise.
-
-    An existing dict at the leaf is left alone: `a[0][b]=1&a[0]=2` and `a[0]=2&a[0][b]=1` both keep
-    the structure, which is the rule `parse_form` already applies to a bare key one level up.
-    """
+    """Set the leaf at the bracket path, creating dicts; an existing dict at the leaf wins."""
     for segment in segments[:-1]:
         child = node.get(segment)
         if not isinstance(child, dict):
@@ -139,25 +88,14 @@ def _assign(node: dict[str, Any], head: str, segments: list[str], value: str) ->
     node[leaf] = value if _is_string_valued((head, *segments)) else _form_value(value)
 
 
-# Fields whose keys are arbitrary strings chosen by the caller, so `0`, `1`, ... are key names
-# and not array indices. `metadata[0]=zero` and `expand[0]=charge` are byte-wise the same shape on
-# the wire; the field name is the only thing that tells them apart, so it is the field name that
-# decides. Stripe, Slack and Segment all spell this field `metadata`.
+# Fields whose keys the caller chooses, so `metadata[0]` is the key "0", not an array index.
 STRING_KEYED_FIELDS: frozenset[str] = frozenset({"metadata"})
 
 
 def _to_lists(node: Any, field: str = "") -> Any:
-    """Depth first, a dict whose keys are exactly `0`..`n-1` becomes a list.
+    """Turn, depth first, every dict keyed exactly `0`..`n-1` into a list.
 
-    Stripe form-encodes an array as `expand[0]=a&expand[1]=b` and the live API answers with a
-    JSON array. A gap, a repeat or an out-of-range index leaves it a dict: inventing the missing
-    elements would echo fields the caller never sent. The comparison is against canonical decimal
-    strings, so "007" and non-ASCII digits cannot reach it - `str.isdigit()` would let both in.
-
-    A `STRING_KEYED_FIELDS` name is never promoted, at any depth: `metadata[0]=zero` is the key
-    `"0"`, which the live API answers as `{"metadata": {"0": "zero"}}`. Promoting it hands the
-    agent a list, and `refund.metadata["0"]` then raises TypeError instead of returning the value
-    the caller just sent.
+    Stripe form-encodes arrays as `expand[0]=a&expand[1]=b`; `STRING_KEYED_FIELDS` stay dicts.
     """
     if not isinstance(node, dict):
         return node
@@ -170,18 +108,9 @@ def _to_lists(node: Any, field: str = "") -> Any:
 
 
 def parse_form(text: str) -> dict[str, Any]:
-    """A form body as the object the live API would answer with.
+    """Return a form body as the object the live API would answer with.
 
-    Four rules, each a way a flat `dict(parse_qsl(...))` would get it wrong. A bracket-nested key
-    becomes a nested container, so `metadata[order_id]=6735` echoes `metadata` and an SDK can read
-    it. `expand[]=a&expand[]=b` becomes the list `expand`. A repeated bare key collects into a
-    list instead of keeping only the last value. And a value is coerced by `_form_value` wherever
-    it sits, except under a `STRING_KEYED_FIELDS` name.
-
-    Structure always beats a scalar of the same name, whichever order the two arrive in, and a
-    bracket path beats an append. Those are the shapes no real caller sends, so the rule is chosen
-    to be *stable* rather than clever: `a[0][b]=1&a[0]=2` and `a[0]=2&a[0][b]=1` echo the same
-    thing, which is what stops the echo from depending on dict ordering.
+    Structure beats a same-named scalar and a bracket path beats an append, whatever the order.
     """
     root: dict[str, Any] = {}
     bare: dict[str, list[Any]] = {}
@@ -217,12 +146,7 @@ def parse_form(text: str) -> dict[str, Any]:
 
 
 def reflect(request: Request) -> dict[str, Any]:
-    """The request's own fields, as a JSON-serializable dict. Never raises.
-
-    A JSON content type counts only when the body decodes to an object;
-    `application/x-www-form-urlencoded` goes through `parse_form`. Any other content type, and
-    any parse failure, reflects nothing.
-    """
+    """Return a JSON-object or form body's fields as a dict, else {}. Never raises."""
     ct = content_type(request)
     try:
         if _is_json(ct):
@@ -237,12 +161,10 @@ def reflect(request: Request) -> dict[str, Any]:
 def json_object(
     body: bytes, *, max_bytes: int | None = MAX_BODY_BYTES, finite: bool = False
 ) -> dict[str, Any] | None:
-    """`body` as a JSON object, or None when it is not one irimi should decode. Never raises.
+    """Return `body` as a JSON object, or None if it is not one. Never raises.
 
-    `max_bytes` refuses a larger body unread: a live body that size is not an object any
-    service's effects model. None reads any size, for a request irimi must read whole. `finite`
-    refuses NaN and the infinities, which `json.loads` reads and a strict parser refuses, for a
-    body irimi echoes back."""
+    `max_bytes` refuses a larger body unread (None: any size); `finite` also refuses NaN and inf.
+    """
     if not body or (max_bytes is not None and len(body) > max_bytes):
         return None
     try:
@@ -255,5 +177,5 @@ def json_object(
 
 
 def is_int(value: Any) -> bool:
-    """A JSON integer: an `int` that is not a `bool`, which Python counts as one."""
+    """Return True for a JSON integer: an `int` that is not a `bool`."""
     return isinstance(value, int) and not isinstance(value, bool)

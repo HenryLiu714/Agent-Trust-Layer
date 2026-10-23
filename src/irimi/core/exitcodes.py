@@ -1,8 +1,7 @@
 """The exit codes every irimi command shares, and the table their `--help` prints.
 
-A CI job keys on these, so one module owns them: `compare` and `replay` exit as diff(1) does, every
-way irimi could not do what it was asked exits `ERROR`, and the rest follow the shell's convention
-(126 and 127 for a command it cannot start, 128 + the signal for one a signal stopped).
+CI jobs key on these. `compare` and `replay` exit as diff(1) does, any failure exits `ERROR`, and
+the rest follow the shell's convention (126/127 for a command that cannot start, 128 + signal).
 """
 
 from collections.abc import Sequence
@@ -29,8 +28,7 @@ MEANINGS = {
 
 
 def help_table(codes: Sequence[int], lead: str | None = None) -> str:
-    """The `exit status:` block of a command's `--help`: `lead` first, when given, then one line
-    per code in `codes`."""
+    """Return the `exit status:` block of a `--help`: `lead` if given, then a line per code."""
     lines = ["exit status:"]
     if lead is not None:
         lines.append(f"  {lead}")

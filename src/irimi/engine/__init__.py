@@ -46,7 +46,7 @@ class EngineConfig:
     confdir: Path
     listen_host: str
     listen_port: int  # 0 = pick a free port
-    reverse_hosts: frozenset[str] = frozenset()  # hosts the reverse door may relay to; empty = none
+    reverse_hosts: frozenset[str] = frozenset()  # hosts base-URL requests may reach; empty = none
     maps: MapIndex = field(default_factory=MapIndex)  # loaded service maps; empty = verb rule only
     mode: EngineMode = Shadow()
 

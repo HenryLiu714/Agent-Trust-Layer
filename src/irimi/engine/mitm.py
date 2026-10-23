@@ -1,8 +1,11 @@
 """mitmproxy-backed Engine. The only module allowed to import mitmproxy.
 
-It turns flows into `Request`s and `Response`s, carries the session's plans onto them, and
-calls the session back when an answer arrives or the connection fails. What irimi decides and
-records is `irimi.engine.session`'s; nothing here decides anything.
+It turns flows into `Request`s and `Response`s and carries `ShadowSession`'s plans onto them.
+
+Fail-closed hook rule: nothing in a mitmproxy hook may raise. A raised hook forwards the flow, and
+a forwarded write escapes shadow mode. So a request irimi cannot handle gets irimi's own flagged
+answer (a 400 refusal, or a 502 `decision-failed`); once an answer is set, a failure costs only
+its record.
 """
 
 import asyncio
@@ -47,18 +50,15 @@ logger = logging.getLogger(__name__)
 
 META_KEY = "irimi"  # flow.metadata slot holding the flow's `Plan`
 STREAM_KEY = "irimi-stream"  # flow.metadata slot holding a streamed response's capture
-# flow.metadata slot set when the request's body was decoded only up to MAX_DECODED_BODY.
-REQUEST_CUT_KEY = "irimi-request-cut"
+REQUEST_CUT_KEY = "irimi-request-cut"  # flow.metadata slot: request body cut at the cap
 
 # Called once from the running hook with (bound port, None) or (None, why it failed).
 OnRunning = Callable[[int | None, EngineStartError | None], None]
-# Why a request irimi could not parse is refused.
 PARSE_FAILED = "could not parse this request"
 
 
 def _request_line(flow: http.HTTPFlow) -> Request:
-    """The flow's request line alone, for recording a request whose full parse failed, or an
-    empty request when even that fails."""
+    """Return the flow's request line alone, or an empty request if even that fails."""
     try:
         r = flow.request
         return wire.parse(r.method, r.scheme, r.host, r.port, r.path, (), b"")
@@ -69,9 +69,11 @@ def _request_line(flow: http.HTTPFlow) -> Request:
 def _point_flow(
     flow: http.HTTPFlow, scheme: str, host: str, port: int, path: str, host_header: str
 ) -> None:
-    """Send this flow to `scheme://host:port/path` instead. mitmproxy opens the server connection
-    after the request hook, so rewriting the flow there IS the forward. The Host header is set
-    explicitly: the host/port setters only rewrite one that already exists."""
+    """Send this flow to `scheme://host:port/path` instead.
+
+    mitmproxy dials after the request hook, so this is the forward. The Host header is set
+    explicitly: the host/port setters only rewrite an existing one.
+    """
     flow.request.scheme = scheme
     flow.request.host = host
     flow.request.port = port
@@ -86,21 +88,18 @@ def _headers_from_fields(fields: Sequence[tuple[bytes, bytes]]) -> Headers:
 def _recorded_stream(
     flow: http.HTTPFlow, capture: StreamCapture, *, whole: bool
 ) -> tuple[Response, tuple[int, ...], bool]:
-    """The flow's streamed response as the trace records it (`capture.recorded_stream`)."""
+    """Return the flow's streamed response as the trace records it."""
     assert flow.response is not None
     headers = _headers_from_fields(flow.response.headers.fields)
     return recorded_stream(flow.response.status_code, headers, capture, whole=whole)
 
 
 def _body(message: http.Message) -> Decoded:
-    """A buffered body as the trace records it, and whether its decoding stopped at the cap.
+    """Return a buffered body as the trace records it, and whether decoding stopped at the cap.
 
-    A body is recorded as it came when its Content-Encoding cannot be decoded, rather than
-    raising out of a hook. A body that decodes past MAX_DECODED_BODY is recorded empty, as the
-    store records any body past `limits.MAX_REDACTED_BODY`, the same bound: a stored body is a
-    prefix of the whole body redacted, never the start of one redacted on its own, and the start
-    of a JSON document is not JSON. A stream is kept to its lines instead
-    (`capture.recorded_stream`), because it is redacted by line."""
+    An undecodable body is kept as it came. A body cut at the cap is recorded empty: the start of
+    a JSON document is not JSON, so redaction could not scan it.
+    """
     raw = message.raw_content or b""
     content_encoding = message.headers.get("content-encoding", "")
     if not raw or not content_encoding:
@@ -114,7 +113,7 @@ def _body(message: http.Message) -> Decoded:
 
 
 def _request_from_flow(flow: http.HTTPFlow) -> tuple[Request, bool]:
-    """The flow's request, and whether its body's decoding stopped at the cap."""
+    """Return the flow's request, and whether its body's decoding stopped at the cap."""
     body = _body(flow.request)
     request = wire.parse(
         flow.request.method,
@@ -129,7 +128,7 @@ def _request_from_flow(flow: http.HTTPFlow) -> tuple[Request, bool]:
 
 
 def _response_from_flow(flow: http.HTTPFlow) -> tuple[Response, bool]:
-    """The flow's response, and whether its body's decoding stopped at the cap."""
+    """Return the flow's response, and whether its body's decoding stopped at the cap."""
     assert flow.response is not None
     body = _body(flow.response)
     response = Response(
@@ -150,10 +149,8 @@ def _fields(headers: Headers) -> list[tuple[bytes, bytes]]:
 
 
 def _to_mitm_response(r: Response) -> http.Response:
-    # `make` re-encodes the body per its `content-encoding`, and mitmproxy drops an encoding it
-    # cannot apply when that is a ValueError but lets the TypeError of a text codec through
-    # (`rot13`, `utf-8`). So the body goes out as it is, without the encoding, as mitmproxy's own
-    # fallback sends it.
+    # `make` re-encodes per `content-encoding` and lets a text codec's TypeError through
+    # (`rot13`, `utf-8`); the body then goes out as it is, as mitmproxy's own fallback sends it.
     try:
         return http.Response.make(r.status, r.body, _fields(r.headers))
     except TypeError:
@@ -164,11 +161,8 @@ def _to_mitm_response(r: Response) -> http.Response:
 def _send(flow: http.HTTPFlow, out: Response, upstream: Response) -> None:
     """Put `out` on the flow, without re-encoding a body nothing changed.
 
-    `http.Response.make` re-encodes a body per its surviving `content-encoding` header. That is
-    right for a body irimi built and wrong for a live or delegated one it is handing back:
-    `_body` keeps the raw bytes when their encoding cannot be decoded, and re-encoding them would
-    send the agent different bytes than the service sent. So when `out` carries the very body
-    read off the flow, only its status and headers are written back.
+    When `out` carries the body read off the flow, only status and headers are written: `make`
+    would re-encode it and send bytes the service did not send.
     """
     assert flow.response is not None
     if out.body is upstream.body:
@@ -179,8 +173,7 @@ def _send(flow: http.HTTPFlow, out: Response, upstream: Response) -> None:
 
 
 def _start_failure(config: EngineConfig, cause: BaseException | None) -> str:
-    """Why the listener did not bind, in irimi's words: mitmproxy's own message names its own
-    `--mode` flag, which irimi does not have."""
+    """Return why the listener did not bind; mitmproxy's message names a flag irimi lacks."""
     where = netaddr.authority(config.listen_host, config.listen_port)
     if isinstance(cause, OSError) and cause.errno == errno.EADDRINUSE:
         return (
@@ -193,8 +186,7 @@ def _start_failure(config: EngineConfig, cause: BaseException | None) -> str:
 
 
 def default_control(config: EngineConfig, policy: AnswerPolicy, store: RunStore) -> ControlEndpoint:
-    """The control endpoint an engine answers with when its composition root gives it none: over
-    its own store, with its policy answering a replay's read tools, and no tool-call callback."""
+    """Return the control endpoint used when the composition root supplies none."""
     return ControlEndpoint(
         store,
         serve=isinstance(config.mode, Serve),
@@ -207,9 +199,7 @@ def default_control(config: EngineConfig, policy: AnswerPolicy, store: RunStore)
 class IrimiAddon:
     """The mitmproxy addon: carries the session's plans onto flows. One instance per engine.
 
-    Nothing in a hook may raise: a raised request hook forwards the flow, and a forwarded write
-    escapes shadow mode. The request hook runs under one guard that answers with irimi's own 502
-    instead; the steps inside it handle a failure themselves only where it means something else.
+    Hooks never raise (fail-closed hook rule); the request hook runs under one guard.
     """
 
     def __init__(
@@ -245,8 +235,7 @@ class IrimiAddon:
         ctx.master.shutdown()
 
     def tls_failed_client(self, data: tls.TlsData) -> None:
-        """Report a client that refused irimi's certificate, by the host it asked for. No flow
-        exists for it, so nothing else would say why the agent's call never arrived."""
+        """Report a client that refused irimi's certificate; no flow exists to show it otherwise."""
         if self.on_tls_failure is None:
             return
         try:
@@ -259,8 +248,6 @@ class IrimiAddon:
     # ------------------------------------------------------------------------------ request
 
     async def request(self, flow: http.HTTPFlow) -> None:
-        # When this exchange began: before anything else the hook does, so the span is the
-        # whole of irimi's part.
         started_at = time.time()
         try:
             await self._request(flow, started_at)
@@ -277,20 +264,18 @@ class IrimiAddon:
     async def _request(self, flow: http.HTTPFlow, started_at: float) -> None:
         try:
             request, cut = _request_from_flow(flow)
-        except Exception as exc:  # never fail open: an unparseable request is answered by irimi
+        except Exception as exc:
             logger.warning("irimi: refusing request that could not be parsed: %s", exc)
             line = _request_line(flow)
             refusal = Refusal(line, "forward", 400, PARSE_FAILED, started_at, parsed=False)
             self._answer_now(flow, self.session.refuse(refusal))
             return
-        if cut:  # the exchange this flow becomes says its request body is not all there
+        if cut:
             flow.metadata[REQUEST_CUT_KEY] = True
         try:
-            # The socket this request arrived on is our own listener: its port, and the address
-            # it was reached at, which is this machine too when the bind is wider than loopback.
             local_address, local_port = flow.client_conn.sockname[:2]
             listener = (str(local_address), int(local_port))
-        except Exception as exc:  # a request whose door is unknown may be addressed to irimi
+        except Exception as exc:  # an unrouted request may be addressed to irimi itself
             logger.warning(
                 "irimi: could not tell whether this is a proxy or base-URL request: %s", exc
             )
@@ -316,7 +301,7 @@ class IrimiAddon:
         if admitted.door == "reverse":
             try:
                 self._through_reverse_door(flow, admitted.request)
-            except Exception as exc:  # never fail open: an unpointed flow would go to ourselves
+            except Exception as exc:  # an unpointed flow would go to irimi itself
                 logger.warning(
                     "irimi: refusing a base-URL request that could not be rewritten: %s", exc
                 )
@@ -324,19 +309,19 @@ class IrimiAddon:
                 self._answer_now(flow, self.session.refuse(refusal))
                 return
         self._strip_irimi_headers(flow)
-        # The decision runs on a worker thread: mitmproxy 12 awaits an `async def` hook, so the
-        # proxy serves every other flow while one write's precondition read or a target's probe
-        # is in the air. Nothing the session does touches the flow.
+        # A worker thread keeps other flows moving while irimi's check read or a target probe runs.
         try:
             plan = await asyncio.to_thread(self.session.plan, admitted)
-        except Exception as handoff:  # the hand-off itself, e.g. an executor shut down under us
+        except Exception as handoff:  # e.g. the executor shut down
             plan = self.session.decision_failed(admitted, handoff)
         self._carry_out(flow, admitted, plan)
 
     def _carry_out(self, flow: http.HTTPFlow, admitted: Admitted, plan: Plan) -> None:
-        """Put a plan on its flow. irimi's own reads are recorded last, once the request's own
-        answer is on the flow: a callback that raised any earlier would escape the hook with no
-        response set, and mitmproxy would forward a write."""
+        """Put a plan on its flow.
+
+        irimi's own reads are recorded last, once the answer is set, so a raising callback cannot
+        leave the flow bare to be forwarded.
+        """
         decision = plan.decision
         if plan.settled:
             self._answer_now(flow, plan)
@@ -350,13 +335,12 @@ class IrimiAddon:
         elif isinstance(decision, Delegate):
             try:
                 self._to_target(flow, decision.target)
-            except Exception as exc:  # never fail open: an unpointed flow goes to the real API
+            except Exception as exc:  # an unpointed flow would reach the real service
                 message = f"answer target {plan.target!r} could not be applied: {exc}"
                 self._answer_now(flow, self.session.target_failed(plan, message))
                 return
         elif isinstance(decision, Respond):
-            # Guarded, because the answer may not be irimi's own: a replay answers with a
-            # response read off disk, whose headers mitmproxy may refuse to encode.
+            # A replayed response comes off disk, and mitmproxy may refuse to encode its headers.
             try:
                 built = _to_mitm_response(decision.response)
             except Exception as exc:
@@ -373,30 +357,25 @@ class IrimiAddon:
         self._record_issued(plan)
 
     def _carry_translation(self, flow: http.HTTPFlow, translated: Request) -> None:
-        """Carry a translated read onto the flow: its query, all a translation may change."""
+        """Carry a translated read's path and query onto the flow."""
         flow.request.path = translated.path_and_query
 
     def _answer_now(self, flow: http.HTTPFlow, plan: Plan) -> None:
-        """Answer a settled plan: its response on the flow first, so a callback that raises while
-        it is recorded escapes the hook with the answer already set, never with the flow bare."""
+        """Answer a settled plan, setting the response before recording it."""
         assert isinstance(plan.decision, Respond)
         flow.response = _to_mitm_response(plan.decision.response)
         self.session.record(self.session.settle(plan))
         self._record_issued(plan)
 
     def _record_issued(self, plan: Plan) -> None:
-        # Reads irimi made on its own account: they never reach the agent and are never writes.
         # Recorded on the loop, like every other exchange, so the store stays single-threaded.
         for exchange in plan.issued:
             self.session.record(exchange)
 
     def _answer_control(self, flow: http.HTTPFlow, call: ControlCall) -> None:
-        """Answer a control request. `ControlEndpoint.answer` never raises; this guards turning
-        its answer into mitmproxy's anyway, because a control request that escaped this hook would
-        be forwarded to the listener it was addressed to - irimi itself."""
-        # A response to HEAD carries no content (RFC 9110 9.3.2), and mitmproxy sends whatever the
-        # response holds. Nor a Content-Length, which a HEAD answer may only send when it is what
-        # a GET would get (8.6), and a HEAD's 405 is not that.
+        """Answer a control request. Never raises (fail-closed hook rule)."""
+        # A HEAD answer carries no content (RFC 9110 9.3.2), and no Content-Length, since a
+        # HEAD's 405 is not what a GET would get (8.6).
         head = call.request.method == "HEAD"
         try:
             answer = self.control.answer(call.request, whole_body=call.whole_body)
@@ -415,9 +394,10 @@ class IrimiAddon:
         flow.response = response
 
     def _strip_irimi_headers(self, flow: http.HTTPFlow) -> None:
-        """Take irimi's own headers off the flow, as `ingress.admit` took them off the request:
-        `Irimi-Run` and an agent-sent `Irimi-Rewrote` never reach the service. A header left on
-        is a lesser harm than a raise, which would forward the flow untouched."""
+        """Remove irimi's headers before forwarding: only irimi may set them.
+
+        Never raises (fail-closed hook rule); a header left on is the lesser harm.
+        """
         for name in (REWROTE_HEADER, RUN_HEADER):
             try:
                 if name in flow.request.headers:
@@ -426,15 +406,10 @@ class IrimiAddon:
                 logger.warning("irimi: could not strip %s: %s", name, exc)
 
     def _to_target(self, flow: http.HTTPFlow, forward: targets.ForwardTo) -> None:
-        """Point the flow at its answer target. mitmproxy opens the server connection after this
-        hook, so rewriting the flow here is the forward, and a streamed target response still
-        streams. The session has already refused a target that is our own listener or cannot be
-        reached. The exchange keeps the request the agent made; where the answer came from is
-        `Exchange.target`."""
+        """Point the flow at its target, so a streamed target response still streams."""
         target = forward.target
         if not forward.forward_auth:
-            # Every credential-bearing header, not just Authorization: a local stub does not need
-            # your real key, and `Cookie`, `x-api-key` and `DD-API-KEY` are keys too.
+            # A local stub does not need real keys, and `Cookie` or `x-api-key` carry them too.
             for name in list(flow.request.headers.keys()):
                 if redact.is_credential_header(name):
                     del flow.request.headers[name]
@@ -445,7 +420,7 @@ class IrimiAddon:
     def _through_reverse_door(self, flow: http.HTTPFlow, request: Request) -> None:
         """Point a base-URL request's flow at the upstream `ingress.admit` rewrote it to."""
         host_header = request.header("host")
-        if host_header is None:  # `admit` always sets one; never forward without it
+        if host_header is None:  # `admit` always sets one
             raise ValueError("the rewritten base-URL request carries no Host header")
         _point_flow(
             flow, request.scheme, request.host, request.port, request.path_and_query, host_header
@@ -454,13 +429,9 @@ class IrimiAddon:
     # ------------------------------------------------------------------- response and error
 
     def responseheaders(self, flow: http.HTTPFlow) -> None:
-        """Stamp and stream a live or delegated response before its headers go out.
+        """Stamp a live or target response and set up streaming before its headers go out.
 
-        mitmproxy buffers a whole response body before the `response` hook by default, which turns
-        a streamed completion into one late blob, and by then the headers have gone: a streamed
-        answer is stamped here or never. Only a forwarded response can stream; one irimi built has
-        no upstream. A `StreamCapture` sends each chunk to the agent as it arrives and keeps a copy
-        for the trace.
+        By the `response` hook a streamed answer's headers are gone, so it is stamped here or never.
         """
         plan: Plan | None = flow.metadata.get(META_KEY)
         if plan is None or flow.response is None:
@@ -523,8 +494,8 @@ def _mitm_options(config: EngineConfig) -> Options:
     # Addon-registered options are only known once the addons load.
     opts.update_defer(
         onboarding=False,  # mitm.it must not be answered by irimi
-        # `lazy` dials the real host only when there is something to send, so a faked or
-        # delegated request never sends the real service a ClientHello carrying its SNI.
+        # `lazy` dials only when there is something to send, so a faked write or a target's
+        # request never sends the real service a ClientHello.
         connection_strategy="lazy",
         # Raw TCP would relay bytes past every hook; off, they fail as HTTP and are never forwarded.
         rawtcp=False,
@@ -533,8 +504,7 @@ def _mitm_options(config: EngineConfig) -> Options:
 
 
 async def _close_listeners(master: Master) -> None:
-    """Close the proxy's listening sockets, which `Master.run` returns with still open. Only a
-    server that is listening is stopped: one whose bind failed has nothing to close."""
+    """Close the listening sockets `Master.run` leaves open."""
     try:
         proxyserver = master.addons.get("proxyserver")
         for server in list(proxyserver.servers) if proxyserver is not None else ():
@@ -564,7 +534,7 @@ class MitmEngine:
         self.on_exchange = on_exchange
         self.control = control if control is not None else default_control(config, policy, store)
         self.on_tls_failure = on_tls_failure
-        # Given by the composition root, which ends its runs as the store reports them ended.
+        # The composition root ends its runs as the store reports them ended.
         self.write_log = write_log if write_log is not None else WriteLog()
         self._ready = asyncio.Event()  # binds to the serving loop on first use (Python >= 3.10)
         self._start_error: EngineStartError | None = None

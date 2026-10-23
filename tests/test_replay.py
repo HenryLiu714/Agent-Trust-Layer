@@ -60,9 +60,33 @@ def test_an_entrypoint_in_main_is_refused_for_the_child_s_own_main_it_would_call
     with pytest.raises(replay.Refused) as refused:
         replay.plan(record, [], call, None)
     entrypoint = call or "__main__:main"
+    qualname = entrypoint.partition(":")[2]
     assert str(refused.value) == (
-        f"run src's entrypoint {entrypoint} is in __main__, which is irimi's own child when it "
-        "is called; start the agent by its module name, or pass --call or -- CMD"
+        f"run src was started as a script, so irimi cannot import its trigger {entrypoint}; "
+        f"replay it with: irimi replay src --call <module>:{qualname} --python <your venv python>"
+    )
+
+
+@pytest.mark.parametrize(
+    ("argv", "shown", "module"),
+    [
+        (
+            ["/usr/bin/python3", "bots/refunder.py", "--live"],
+            "python3 bots/refunder.py --live",
+            "refunder",
+        ),
+        (["python", "-m", "bots.refunder"], "python -m bots.refunder", "bots.refunder"),
+        (["./refunder.py"], "refunder.py", "refunder"),
+    ],
+)
+def test_a_trigger_in_main_is_refused_with_the_command_that_replays_it(argv, shown, module):
+    """A process run's command line names the module a trigger in `__main__` lives in."""
+    record = runner.process_run("src", argv, None, 1.0)
+    with pytest.raises(replay.Refused) as refused:
+        replay.plan(record, [], "__main__:handle", None)
+    assert str(refused.value) == (
+        f"run src was started as a script ({shown}), so irimi cannot import its trigger; replay "
+        f"it with: irimi replay src --call {module}:handle --python <your venv python>"
     )
 
 
@@ -71,7 +95,7 @@ def test_a_process_run_s_argv_is_no_function_s_parameters():
     with pytest.raises(replay.Refused) as refused:
         replay.plan(record, [], "agent:handle", None)
     assert str(refused.value) == (
-        "run src is a process run, whose args are its argv; pass --args with --call"
+        "run src recorded a command line, not a call's arguments; pass --args with --call"
     )
     assert replay.plan(record, [], "agent:handle", {"n": 1}).call == replay.Call(
         "agent:handle", {"n": 1}
@@ -115,7 +139,7 @@ def test_a_process_run_s_replay_says_it_reran_the_argv_alone():
     rerun = ("python", "agent.py", "-v x")
     lines = replay.outcome(_run(record, []), replayed, replay.Ended(0), None, rerun).lines()
     assert lines[:3] == [
-        "irimi replay · src → new",
+        "irimi replay · src -> new",
         "  re-ran python agent.py '-v x' (argv only: environment, cwd and stdin are not recorded)",
         "  agent exited 0",
     ]
@@ -229,7 +253,7 @@ def test_the_divergence_is_the_first_agent_exchange_or_read_tool_the_recording_m
     assert outcome.diverged_at == "the agent's 3rd call: tool-real     read      db.read -> ok"
     assert (outcome.answered, outcome.missed) == (2, 2)
     assert outcome.lines() == [
-        "irimi replay · src → new",
+        "irimi replay · src -> new",
         "  agent exited 0",
         "  diverged at the agent's 3rd call: tool-real     read      db.read -> ok",
         "  2 from the recording · 2 missed",
@@ -254,7 +278,7 @@ def test_a_replay_that_missed_nothing_says_so_and_names_both_versions_and_other_
     replayed = _run(replace(_record(other), run_id="new", agent_version="v2\n"), [])
     lines = replay.outcome(source, replayed, replay.Ended(3), None).lines()
     assert lines[:4] == [
-        "irimi replay · src → new · agent v1 → v2\\n",
+        "irimi replay · src -> new · agent v1 -> v2\\n",
         "  agent exited 3",
         "  (the triggers' args differ)",
         f"  {replay.NO_DIVERGENCE}",
@@ -269,7 +293,7 @@ def test_a_run_with_no_trigger_replayed_by_a_command_says_no_args_differ():
     replayed = _run(replace(record, replay_of="src"), [])
     lines = replay.outcome(source, replayed, replay.Ended(0), None).lines()
     assert lines[:3] == [
-        "irimi replay · src → new",
+        "irimi replay · src -> new",
         "  agent exited 0",
         f"  {replay.NO_DIVERGENCE}",
     ]

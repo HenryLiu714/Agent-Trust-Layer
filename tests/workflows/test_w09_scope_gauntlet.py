@@ -1220,7 +1220,7 @@ def test_a_process_run_with_no_trigger_replays_by_running_its_argv_again(run_wor
     # The header says the argv is all that ran again: nothing else of the process was recorded.
     argv = shlex.join(source.trigger.args["argv"])
     assert replay.replay_result() == [
-        f"irimi replay · {source.run_id} → {replay.process_run_id()}",
+        f"irimi replay · {source.run_id} -> {replay.process_run_id()}",
         f"  re-ran {argv} (argv only: environment, cwd and stdin are not recorded)",
         "  agent exited 0",
         "  no divergence: every call was answered from the recording",

@@ -111,6 +111,9 @@ THREAD_EXIT_S = 5.0
 # A tool call's line in irimi's stream (`report.tool_call_line`). Its first column says how the
 # tool ran, in words no exchange line starts with, and its second the tool's kind.
 TOOL_LINE = re.compile(r"(tool-real|tool-fake|tool-recorded) +(read|write) +\S.* -> ")
+# How `irimi replay`'s header line starts, which names its two runs with an arrow, as an
+# exchange line names its status.
+REPLAY_HEADER = "irimi replay · "
 # A write tool's line in a summary, without its indent (`report.tool_write_line`). The summary
 # prints these after the HTTP writes, and `irimi compare` among them, in `seq` order.
 TOOL_WRITE = re.compile(rf"{report.WRITE_MARKER} {report.TOOL_SERVICE}  \S+  fake ")
@@ -254,11 +257,15 @@ class Result:
 
     def exchange_lines(self) -> list[str]:
         """irimi's per-exchange lines: `<answered_by> <kind> <METHOD> <host><path> -> <status>`.
-        A tool call's line is in the same stream and the same columns, and is not one."""
+        A tool call's line is in the same stream and the same columns, and is not one; nor are the
+        banner's line for a delegated service, `delegated: <what> -> <target>`, and a replay's
+        header, `irimi replay · <run> -> <run>`."""
         return [
             line
             for line in self.irimi
-            if " -> " in line and not line.startswith(" ") and not TOOL_LINE.match(line)
+            if " -> " in line
+            and not line.startswith((" ", report.DELEGATED_PREFIX, REPLAY_HEADER))
+            and not TOOL_LINE.match(line)
         ]
 
     def tool_call_lines(self) -> list[str]:

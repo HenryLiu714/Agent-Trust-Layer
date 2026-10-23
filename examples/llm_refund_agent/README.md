@@ -58,7 +58,7 @@ A pass looks like this:
   refund as the write that changed:
 
   ```
-  irimi replay · <run id> → <replay id>
+  irimi replay · <run id> -> <replay id>
     agent exited 0
     diverged at the agent's 3rd call: real          llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]
     2 from the recording · 2 missed

@@ -351,7 +351,7 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
     done, same = _replay(env, store, source, home / "same.json")
     assert done.returncode == same.exit_code == 0, done.stderr
     assert same.lines == (
-        f"irimi replay · {source} → {same.replay_run_id}",
+        f"irimi replay · {source} -> {same.replay_run_id}",
         "  agent exited 0",
         "  no divergence: every call was answered from the recording",
         "  4 from the recording · 0 missed",
@@ -386,7 +386,7 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
     )
     assert edited.diverged_at == diverged
     assert edited.lines == (
-        f"irimi replay · {source} → {edited.replay_run_id}",
+        f"irimi replay · {source} -> {edited.replay_run_id}",
         "  agent exited 0",
         f"  diverged at {diverged}",
         "  2 from the recording · 2 missed",

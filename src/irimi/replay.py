@@ -36,6 +36,7 @@ tool never makes: it is the tool's, and not counted. A run the store dropped eve
 called the same: what it lacks is not compared.
 """
 
+import os
 import shlex
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -106,16 +107,12 @@ def plan(
     entrypoint = call or (trigger.entrypoint if trigger is not None else None)
     if entrypoint is not None:
         if entrypoint.partition(":")[0] == MAIN_MODULE:
-            raise Refused(
-                f"run {source.run_id}'s entrypoint {entrypoint} is in __main__, which is "
-                "irimi's own child when it is called; start the agent by its module name, or "
-                "pass --call or -- CMD"
-            )
+            raise Refused(_started_as_script(source.run_id, entrypoint, recorded_argv(source)))
         # A process run's args are its argv, which no function takes.
-        if args is None and call is not None and _argv(source) is not None:
+        if args is None and call is not None and recorded_argv(source) is not None:
             raise Refused(
-                f"run {source.run_id} is a process run, whose args are its argv; pass --args "
-                "with --call"
+                f"run {source.run_id} recorded a command line, not a call's arguments; pass "
+                "--args with --call"
             )
         if args is None:
             reason = not_replayable(trigger)
@@ -138,10 +135,45 @@ def plan(
         return Plan(Call(entrypoint, args), (), Trigger(name, entrypoint, args, True))
     if args is not None:
         raise Refused(f"run {source.run_id} has no entrypoint to give --args to; pass --call too")
-    argv = _argv(source)
+    argv = recorded_argv(source)
     if argv is None:
         raise Refused(f"run {source.run_id} has no entrypoint and no argv; pass --call or -- CMD")
     return Plan(None, argv, trigger, rerun=True)
+
+
+def _started_as_script(run_id: str, entrypoint: str, launched_as: Sequence[str] | None) -> str:
+    """The refusal of a trigger in `__main__`, which in a replay's child is `replay_child` itself,
+    ending with the command that replays it. Only a process run records the command line that
+    names the trigger's module; an SDK run's record does not."""
+    module = _script_module(launched_as) if launched_as else None
+    replay_with = (
+        f"irimi replay {run_id} --call {module or '<module>'}:{entrypoint.partition(':')[2]} "
+        "--python <your venv python>"
+    )
+    if not launched_as:
+        return report.printable(
+            f"run {run_id} was started as a script, so irimi cannot import its trigger "
+            f"{entrypoint}; replay it with: {replay_with}"
+        )
+    words = [os.path.basename(launched_as[0]) or launched_as[0], *launched_as[1:]]
+    return report.printable(
+        f"run {run_id} was started as a script ({shlex.join(words)}), so irimi cannot import "
+        f"its trigger; replay it with: {replay_with}"
+    )
+
+
+def _script_module(argv: Sequence[str]) -> str | None:
+    """The module a `python path/name.py` or `python -m name` command line runs, or None."""
+    program = os.path.basename(argv[0])
+    if program.endswith(".py"):
+        return program[: -len(".py")]
+    if not program.startswith("python") or len(argv) < 2:
+        return None
+    if argv[1] == "-m" and len(argv) > 2:
+        return argv[2]
+    if argv[1].endswith(".py"):
+        return os.path.basename(argv[1])[: -len(".py")]
+    return None
 
 
 def not_replayable(trigger: Trigger | None) -> str | None:
@@ -163,7 +195,7 @@ def not_replayable(trigger: Trigger | None) -> str | None:
     return None
 
 
-def _argv(source: RunRecord) -> tuple[str, ...] | None:
+def recorded_argv(source: RunRecord) -> tuple[str, ...] | None:
     """The command line a process run recorded (`runner.process_run`), or None. A replay's run is
     a process run too, but one that keeps the trigger it called, whose entrypoint says its args
     are a function's, even one with a parameter named `argv`."""
@@ -217,10 +249,10 @@ class Outcome:
         return max(self.comparison.exit_code, compare.DIFFERENT if dropped else compare.SAME)
 
     def lines(self) -> list[str]:
-        header = f"irimi replay · {self.source.run_id} → {self.replayed.run_id}"
+        header = f"irimi replay · {self.source.run_id} -> {self.replayed.run_id}"
         a, b = self.source.agent_version, self.replayed.agent_version
         if a or b:
-            header += f" · agent {report.printable(a or UNSET)} → {report.printable(b or UNSET)}"
+            header += f" · agent {report.printable(a or UNSET)} -> {report.printable(b or UNSET)}"
         lines = [header]
         if self.rerun is not None:
             lines.append(f"  re-ran {report.printable(shlex.join(self.rerun))} ({ARGV_ONLY})")

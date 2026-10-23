@@ -230,7 +230,7 @@ def test_a_replay_that_tags_each_customer_otherwise_compares_its_updates_changed
     ]
     assert replay.exit_code == 1
     result = replay.replay_result()
-    assert result[0] == f"irimi replay · {source} → {replay.process_run_id()}"
+    assert result[0] == f"irimi replay · {source} -> {replay.process_run_id()}"
     assert result[result.index("") + 1 :] == compared
     # `irimi compare` over the same two runs prints the same rows and exits as the replay did.
     code, out, err = replay.compare_runs(source, replay.process_run_id())

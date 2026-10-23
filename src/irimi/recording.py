@@ -1,4 +1,4 @@
-"""A stored run as a replay answers from it (#82): its exchanges, keyed so that a live request can
+"""A stored run as a replay answers from it: its exchanges, keyed so that a live request can
 find the one the recorded run made in its place, and the replay's own state.
 
 A replay re-runs an agent and answers it from a run it made before. `policy.ReplayPolicy` asks
@@ -17,15 +17,15 @@ equal across two runs of one agent while the agent asks for the same thing:
 - an llm call's body less the fields that say who asked and how, not what (`LLM_VOLATILE`);
 - a write's standing with the run's idempotency store: a retry of a key the run has answered, a
   key reused for another write, or neither, which the service answers three different ways
-  whatever the bodies say (#46);
+  whatever the bodies say;
 - and the live request is redacted with the store's key first, because the recording was: a
-  secret in a body matches its own placeholder in the recording (#69).
+  secret in a body matches its own placeholder in the recording.
 
 Each recorded exchange answers once, in the order it was recorded, so a third identical read in a
 run that recorded two is a miss. The engine's own precondition reads are kept apart: they are never
-served to the agent, and the agent's reads are never used for one (#82, "Decided").
+served to the agent, and the agent's reads are never used for one.
 
-A READ TOOL THE PROXY CANNOT SEE IS A READ TOO (#83). The SDK asks for its recorded result by the
+A READ TOOL THE PROXY CANNOT SEE IS A READ TOO. The SDK asks for its recorded result by the
 tool's name and its captured args, redacted with the store's key as the recording's were, compared
 as canonical JSON, in order. A recorded tool call answered holds the HTTP its body made inside it,
 and the read tools it called, which a replay that answers the call never makes: the exchanges
@@ -39,7 +39,7 @@ decided as any request is. A recorded call with no outcome to give (`_tool_serva
 that is a description, as a `Decimal` is captured, or a call stopped from outside) is a miss that
 uses up only itself: the SDK could not use it, and the body that runs in its place is answered
 what it was answered when recorded. A write tool is not kept: its stand-in runs in a replay as it
-did when recorded, and with no tool overlay (#119) no recorded read shows what one did, so it
+did when recorded, and with no tool overlay no recorded read shows what one did, so it
 neither diverges a replay nor holds a read back.
 
 THE REPLAY'S STATE IS HERE, AND ONLY HERE: which recorded exchanges have answered, and whether
@@ -84,14 +84,14 @@ from irimi.trace import STOPPED_ERROR_TYPES, Event, JSONValue, ToolCall, holds_d
 
 # What a match key is: a tuple of strings and tuples of strings, comparable and hashable.
 _Key = tuple[Any, ...]
-# What a read tool call is matched by: its name, and its args as canonical JSON (#83).
+# What a read tool call is matched by: its name, and its args as canonical JSON.
 _ToolKey = tuple[str, str]
 # Where a recorded exchange waits to be taken: its key, whether it is an llm call that asked to
 # stream (`_stream_bucket`), and the idempotency flag its answer carried (`_held`).
 _Bucket = tuple[_Key, bool, str]
 
 # The top-level fields of an llm call's body that say who asked and how the answer travels, never
-# what was asked (#82). `stream` is not in the key, but whether an llm call asks to stream is beside
+# what was asked. `stream` is not in the key, but whether an llm call asks to stream is beside
 # it, read off the recorded call's own request: a call that asked to stream is answered from one
 # that asked too, whether its answer streamed or was a JSON error, and a streamed answer is never
 # served to a call that did not ask for one.
@@ -103,7 +103,7 @@ CACHE_CONTROL = "cache_control"
 # A recorded exchange carrying any of these holds an answer that is not the whole answer, or not
 # the service's: a body cut at the cap, a stream that ended early, irimi's own refusal of a write it
 # could not decide about, a target that was never reached, a lost upstream, a part redaction could
-# not read. A replay never answers from one as though it were whole (#82, "Since #70/#71/#94").
+# not read. A replay never answers from one as though it were whole.
 UNSERVABLE_FLAGS = frozenset(
     {
         BODY_TRUNCATED_FLAG,
@@ -148,18 +148,18 @@ def _json_body(request: Request) -> dict[str, Any] | None:
 def _held(exchange: Exchange) -> str:
     """The idempotency flag a recorded answer carried: `idempotent-replay` when it was the run's
     first answer to its key again, `idempotency-conflict` when the key had come back on another
-    write, and "" for an answer to a key the run had not answered, or no key (#46).
+    write, and "" for an answer to a key the run had not answered, or no key.
 
     It is beside the key because the service answers those three differently whatever the body
     says, and the key leaves the idempotency key out: a retry must not take the recorded answer to
     a second, distinct write (and enter the write log as one), a fresh write must not take a
-    recorded retry's (and stay out of it), and a key reused for another write is refused (#82)."""
+    recorded retry's (and stay out of it), and a key reused for another write is refused."""
     return next((flag for flag in IDEMPOTENCY_FLAGS if flag in exchange.flags), "")
 
 
 def _shows_the_world(exchange: Exchange) -> bool:
     """Whether a recorded answer was made from the world the recorded run's writes had made: a
-    read, which shows them, or a write L3 checked against them (#45), whose verdict a refund the
+    read, which shows them, or a write L3 checked against them, whose verdict a refund the
     replay has not made, or one the recording never held, would change. A replay serves one only
     while that world is the replay's too (`Recording.take`)."""
     return exchange.kind == "read" or (
@@ -168,7 +168,7 @@ def _shows_the_world(exchange: Exchange) -> bool:
 
 
 def _streamed(exchange: Exchange) -> bool:
-    """Whether a recorded exchange's answer streamed (#71): it has chunks, or it is an event stream
+    """Whether a recorded exchange's answer streamed: it has chunks, or it is an event stream
     that sent no body at all, which records no chunks like a response that did not stream."""
     if exchange.stream_chunks:
         return True
@@ -185,11 +185,10 @@ def _servable(exchange: Exchange) -> bool:
     The response must also be one the engine can send. irimi's own writer stores only headers it
     read as latin-1, but a run from elsewhere - edited by hand, pulled from a bucket, written by
     another version - may hold any text, and a header that does not encode raises in the request
-    hook, which forwards the flow (#82). Its status must be a final one HTTP defines, 200 to 599:
+    hook, which forwards the flow. Its status must be a final one HTTP defines, 200 to 599:
     a 1xx is never a whole answer, and a 101 switched the recorded connection to a protocol a
-    replay cannot carry on. And
-    a `text/event-stream` 200 recorded with no body and no chunks is a stream recorded before #71
-    kept streamed bodies, not an empty answer."""
+    replay cannot carry on. And a `text/event-stream` 200 recorded with no body and no chunks is a
+    stream whose body was not kept, not an empty answer."""
     response = exchange.response
     if response is None or exchange.answered_by == "delegated":
         return False
@@ -215,7 +214,7 @@ def _match_key(request: Request, kind: Kind, maps: MapIndex) -> _Key:
     Every request is keyed by its kind, method, host, path, query pairs sorted by name and the
     headers that scope its service's state (`services.scope_of`, which the write log, the
     idempotency store and L3 compare too): a query can say what an llm call asks as much as a read's
-    (`?alt=sse`, `?api-version=`), and a `Stripe-Account` says whose objects a request names (#82).
+    (`?alt=sse`, `?api-version=`), and a `Stripe-Account` says whose objects a request names.
     An llm call whose body is a JSON object (`_json_body`) adds that object less `LLM_VOLATILE` and
     every `cache_control`, as canonical JSON. Everything else adds its body as `bodies.reflect`
     reads it minus the `volatile:` fields of the route this stored request classifies to; a body
@@ -223,7 +222,7 @@ def _match_key(request: Request, kind: Kind, maps: MapIndex) -> _Key:
     write."""
     classification = pipeline.classify(request, maps)
     # Sorted by name only, and stably: names in any order, but a repeated name's values in theirs,
-    # since `sort=created&sort=amount` asks for another order than the reverse (#82).
+    # since `sort=created&sort=amount` asks for another order than the reverse.
     pairs = parse_qsl(request.query, keep_blank_values=True)
     query = tuple(sorted(pairs, key=lambda pair: pair[0]))
     scope = services.scope_of(classification.service, request)
@@ -247,7 +246,7 @@ def _match_key(request: Request, kind: Kind, maps: MapIndex) -> _Key:
 def _live_key(request: Request, kind: Kind, maps: MapIndex, redaction_key: bytes) -> _Key:
     """The key of a live request: `_match_key` over the request as the store would have written
     it, redacted with the store's key. Every redaction rule is deterministic, so a secret in a live
-    body becomes the placeholder its recording holds (#69)."""
+    body becomes the placeholder its recording holds."""
     return _match_key(_redacted(request, kind, redaction_key), kind, maps)
 
 
@@ -287,17 +286,17 @@ def _canonical(value: Any) -> str:
 
 def _tool_key(name: str, args: JSONValue) -> _ToolKey:
     """A read tool call's key: its name and its args, already redacted, as canonical JSON, so key
-    order never decides a match and `true` is never `1` (#83)."""
+    order never decides a match and `true` is never `1`."""
     return (name, _canonical(args))
 
 
 def _tool_servable(call: ToolCall) -> bool:
     """Whether a recorded read tool call's outcome may be handed back. Not when the store could
     not redact it: a result stored as `redact.REDACTION_FAILED` would revive as the tool's answer,
-    and an error message as that string would be raised as the recorded error's (#69). Not when it
+    and an error message as that string would be raised as the recorded error's. Not when it
     is no outcome to give: a result holding a description of a value (`trace.holds_description`)
     is not the value, and a call something outside it stopped (`trace.STOPPED_ERROR_TYPES`)
-    recorded none of its own (#83). Each of those the SDK would decline, after the call had used up
+    recorded none of its own. Each of those the SDK would decline, after the call had used up
     what its body made, which its body then runs again and needs. Whether any other result can be
     revived is the SDK's to say."""
     if call.error is not None:
@@ -321,10 +320,10 @@ class _ToolEntry:
     # Where its body began, in the same count as `_Entry.position`: its first inner exchange's,
     # or its own when it made none.
     position: int
-    # The agent's exchanges recorded within the call's span: its body's HTTP (#83).
+    # The agent's exchanges recorded within the call's span: its body's HTTP.
     inner: list[_Entry]
     # The read tool calls recorded within the call's span that a later call repeats: the tools its
-    # body called, which would answer that later call in its place (`_displacing`, #83).
+    # body called, which would answer that later call in its place (`_displacing`).
     nested: list["_ToolEntry"] = field(default_factory=list)
     consumed: bool = False
 
@@ -332,17 +331,17 @@ class _ToolEntry:
 def made_within(started_at: float, ended_at: float, call: ToolCall) -> bool:
     """Whether an exchange or a tool call made over `started_at`..`ended_at` was made within
     `call`'s span, which is how a stored run says it was the call's body's: a tool call records no
-    link to its HTTP or to the tools it called (#76). One another task made in the span is taken
+    link to its HTTP or to the tools it called. One another task made in the span is taken
     for the call's too, and so used up with it: in the replay it is then a miss, decided afresh,
     never an answer from the wrong world. One with no clock (`started_at` 0.0, built outside the
     engine and the SDK) is within no call. `irimi replay`'s count of the calls a replay never made
-    reads the same rule (#84)."""
+    reads the same rule."""
     return 0.0 < started_at and call.started_at <= started_at and ended_at <= call.ended_at
 
 
 def _nested_in(other: ToolCall, call: ToolCall) -> bool:
     """Whether the read tool call `other` was made within `call`'s span (`made_within`). Never one
-    with the same span, so two calls clocked alike never use each other up (#83)."""
+    with the same span, so two calls clocked alike never use each other up."""
     span = (other.started_at, other.ended_at)
     return span != (call.started_at, call.ended_at) and made_within(*span, call)
 
@@ -352,7 +351,7 @@ def _displacing(
 ) -> list[_ToolEntry]:
     """The read tool calls `within` a call's span that answering the call uses up: each one that
     a later recorded call of its name and args, outside that span, comes after, so that it would
-    answer that later call in its place (#83).
+    answer that later call in its place.
 
     A span does not say whose a call was. One within it may be the body's, never made once the
     call is answered, or another task's, made at the same time: two tools gathered, or a sync
@@ -372,7 +371,7 @@ def _displacing(
 
 
 class Recording:
-    """One stored run's exchanges, ready to answer a replay from, and that replay's state (#82).
+    """One stored run's exchanges, ready to answer a replay from, and that replay's state.
     Thread-safe: the policy that asks it runs on the engine's worker threads."""
 
     def __init__(
@@ -408,9 +407,9 @@ class Recording:
 
         Every exchange the agent made is kept, in order, whether or not it can be served: one that
         cannot is still the agent's Nth such request, so the request in its place is a miss and the
-        next one still meets its own. Telemetry is never stored as an exchange (#70). Every read
+        next one still meets its own. Telemetry is never stored as an exchange. Every read
         tool call is kept the same way, by name and args, counted in the same order as the
-        exchanges so the world rule can compare them; a write tool call is not (#83, module doc).
+        exchanges so the world rule can compare them; a write tool call is not (module doc).
         The engine's precondition reads are kept by key, the first that can be served of each, or
         else the first."""
         agent: dict[_Bucket, list[_Entry]] = {}
@@ -493,7 +492,7 @@ class Recording:
         return None
 
     def take_tool_call(self, name: str, args: JSONValue) -> ToolCall | None:
-        """The recorded read tool call that answers this live one, or None for a miss (#83). `args`
+        """The recorded read tool call that answers this live one, or None for a miss. `args`
         are the call's as the SDK captured them, not yet redacted.
 
         It is the first recorded read tool call of the same name whose args equal `args` redacted
@@ -563,11 +562,11 @@ class Recording:
 
 class RecordingReader:
     """A `reader.Reader` over a recording: the precondition read of a write a replay could not
-    answer from the recording is answered with the recorded run's own read of the same thing (#82).
+    answer from the recording is answered with the recorded run's own read of the same thing.
 
     A REPLAY NEVER CHECKS A PRECONDITION AGAINST LIVE STATE. A charge the recorded run saw
     unrefunded may since have been refunded for real, and a live check would reject the write the
-    recording accepted (design §5.5, "Writes"). A read the recording lacks is None, which the policy
+    recording accepted. A read the recording lacks is None, which the policy
     records as `not_evaluable`, as it does any read it could not make. Every read it makes is
     recorded `recording`, and flagged `from-recording` or `replay-miss` (`reader.answered_as`)."""
 

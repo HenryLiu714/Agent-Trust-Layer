@@ -1,5 +1,5 @@
 """The control endpoint: `/_irimi/` on irimi's own listener, where the SDK reports what the proxy
-cannot see on the wire (#73).
+cannot see on the wire.
 
 The SDK runs inside the agent's process and the proxy in its own. A run's start and end, what
 triggered it and the tool calls it made that are not HTTP reach the proxy here, and the proxy
@@ -9,16 +9,16 @@ against an exchange only by comparing two processes' clocks.
 
     POST /_irimi/runs/{run_id}/start        204   the run's record, attribution `sdk`
     POST /_irimi/runs/{run_id}/tool-calls   204   one tool call, its run id from the path;
-                                                  `unattributed` for one made in no run (#76)
+                                                  `unattributed` for one made in no run
     POST /_irimi/runs/{run_id}/end          204   the run's end
     POST /_irimi/runs/{run_id}/tool-calls/recorded
-                                            200   a replay's recorded result for a read tool
-                                                  (#83); 404 on a miss, or when not replaying
+                                            200   a replay's recorded result for a read tool;
+                                                  404 on a miss, or when not replaying
     GET  /_irimi/health                     200   engine version, serve mode, store counters
 
 A control request is answered here and nowhere else: never forwarded, never decided as an
 exchange, never recorded as one. The one question it puts to the policy is a replay's lookup of a
-read tool's recorded outcome (`AnswerPolicy.recorded_tool_call`, #83), so whether irimi replays is
+read tool's recorded outcome (`AnswerPolicy.recorded_tool_call`), so whether irimi replays is
 the policy's to say, here as on the wire. Every answer is stamped `Irimi-Answered-By: control`,
 because every response irimi decided carries that header and only a live forward carries none.
 Its run id is in the path, never in `Irimi-Run`.
@@ -29,7 +29,7 @@ whose body names what was wrong; anything else that fails is a 500, logged with 
 store only enqueues, so an answer does no disk I/O and never blocks the event loop.
 
 The endpoint is not a boundary. Any client that can reach the listener may call it - loopback only
-unless `serve` binds wider (#77) - and that client is the agent whose run it records.
+unless `serve` binds wider - and that client is the agent whose run it records.
 """
 
 import dataclasses
@@ -69,35 +69,35 @@ from irimi.trace import (
 logger = logging.getLogger(__name__)
 
 # The largest body a control request may post. A trigger's arguments and a tool call's result are
-# JSON the SDK captured; a body past this is answered 413 and never parsed (#73).
+# JSON the SDK captured; a body past this is answered 413 and never parsed.
 MAX_CONTROL_BODY = 2 * 1024 * 1024
 # The longest line a refusal's body says. A refusal may quote what the agent sent - the path, a run
-# id - and a long one must not come back as a long error (#73). A decoder cuts the string it quotes
-# itself, at `trace.MAX_QUOTED` (#100).
+# id - and a long one must not come back as a long error. A decoder cuts the string it quotes
+# itself, at `trace.MAX_QUOTED`.
 MAX_REFUSAL = 200
 # The refusal of a body nested deeper than `json.loads` reads it: a 400 like any other malformed
-# body, never a 500 logged as irimi's failure (#73). How deep that is depends on the Python and
+# body, never a 500 logged as irimi's failure. How deep that is depends on the Python and
 # the parsing thread's stack, about 10,000 on 3.12 and further on 3.14, so a field nested between
-# the two is TOO_DEEP on 3.12 and on 3.14 its decoder's refusal, which names its type (#100).
+# the two is TOO_DEEP on 3.12 and on 3.14 its decoder's refusal, which names its type.
 TOO_DEEP = "the body nests too deeply to read"
-# The refusal of a start or an end for irimi's own run, `EngineConfig.run_id` (#73).
+# The refusal of a start or an end for irimi's own run, `EngineConfig.run_id`.
 OWN_RUN = "is irimi's own run, which the SDK may not start or end"
 
 HEALTH_ROUTE = "health"
 # The run routes (`RUNS_ROUTE`, `RUN_ACTIONS`) are imported from `exchange`, where the SDK reads
-# them too (#74).
+# them too.
 
 # The `RunRecord` fields each run route takes from the posted body. Every one must be present, and
 # only `agent_version` and `error` may be null. The rest of the record is irimi's to say, so a
-# posted `attribution` or `engine_version` is never read (#73).
+# posted `attribution` or `engine_version` is never read.
 START_FIELDS = ("trigger", "agent_version", "sdk_version", "started_at")
 START_REQUIRED = ("trigger", "sdk_version", "started_at")  # `agent_version` may be null
 END_FIELDS = ("ended_at", "outcome", "error")  # `error` may be null
 # The answer to a lookup the recording cannot answer, and to every lookup when the engine is not
-# replaying: the SDK then runs the tool for real (#83).
+# replaying: the SDK then runs the tool for real.
 NO_RECORDED_CALL = "no recorded call"
 
-# Called with each tool call the store accepted, for the live summary (P3-10, #76).
+# Called with each tool call the store accepted, for the live summary.
 OnToolCall = Callable[[ToolCall], None]
 
 _STAMP = (ANSWERED_BY_HEADER, CONTROL_ANSWER)
@@ -134,7 +134,7 @@ def _error_response(status: int, message: str, headers: Headers = ()) -> Respons
 
 NO_CONTENT = Response(204, (_STAMP,), b"")
 # The answer to a control request that failed for a reason it did not cause. The engine sends the
-# same bytes if building the answer itself raised (#73).
+# same bytes if building the answer itself raised.
 INTERNAL_ERROR = _error_response(500, "internal")
 
 
@@ -153,19 +153,19 @@ class ControlEndpoint:
         self.store = store
         self.serve = serve
         # irimi's own run (`EngineConfig.run_id`), the process run under `irimi shadow`: the SDK
-        # may post tool calls to it, never its start or its end (#73).
+        # may post tool calls to it, never its start or its end.
         self.process_run = process_run
         self.on_tool_call = on_tool_call
         # The engine's policy, which answers `tool-calls/recorded` from a replay's recording, and
         # from nothing otherwise. The recording is engine-wide, as its exchanges are: the run id in
-        # the path is checked, never used to choose (#83).
+        # the path is checked, never used to choose.
         self.policy = policy
 
     def answer(self, request: Request, *, whole_body: bool = True) -> Response:
         """The response to one control request. Never raises (see the module doc).
 
         `whole_body` is False when the request's `Content-Encoding` decoded past the engine's own
-        cap (#94): `request.body` is then not the body, and says nothing of its size. Such a body
+        cap: `request.body` is then not the body, and says nothing of its size. Such a body
         is past MAX_CONTROL_BODY, so it is refused 413 unread, whatever `request.body` holds."""
         try:
             return self._answer(request, whole_body)
@@ -189,18 +189,18 @@ class ControlEndpoint:
             raise _Refused(404, f"no control route {request.path!r}")
         _require_method(request, "POST")
         run_id, action = split
-        # A tool call made outside every run, by an agent with no process run (`serve`, #77), is
-        # filed under no run, as an exchange that names none is (#76), and may be looked up (#83).
+        # A tool call made outside every run, by an agent with no process run (`serve`), is
+        # filed under no run, as an exchange that names none is, and may be looked up.
         about_a_tool = action in TOOL_ACTIONS
         unattributed = run_id == UNATTRIBUTED and about_a_tool
         if not names_a_run_dir(run_id) and not unattributed:
             # The store would only count such an event as a drop, or file it in `unattributed/`:
-            # the agent is told instead, and no directory is made (#70).
+            # the agent is told instead, and no directory is made.
             raise _Refused(400, f"{run_id!r} cannot name a run")
         if run_id == self.process_run and not about_a_tool:
             # IRIMI'S OWN RUN IS IRIMI'S TO RECORD, as `attribution` and `engine_version` are. Under
             # `irimi shadow` it is the process run: a start would replace its argv trigger with an
-            # `sdk` record, and an end would close it before the child's exit is recorded (#73).
+            # `sdk` record, and an end would close it before the child's exit is recorded.
             raise _Refused(400, f"{run_id!r} {OWN_RUN}")
         posted = _posted(request, whole_body)
         if action == RECORDED_ACTION:
@@ -231,19 +231,19 @@ class ControlEndpoint:
         if "run_id" in posted:
             raise _Refused(400, "'run_id' comes from the path, not the body")
         call = _decoded(trace.tool_call_from_json, {**posted, "run_id": run_id})
-        # The store is handed the error whole: it redacts it, and only then cuts it (#179).
+        # The store is handed the error whole: it redacts it, and only then cuts it.
         self.store.record_tool_call(call)
         if self.on_tool_call is None:
             return
         # The call is stored whatever the callback does: a live summary that breaks costs the
-        # summary its line, never the run its record (#73).
+        # summary its line, never the run its record.
         try:
             self.on_tool_call(dataclasses.replace(call, error=_label(call.error)))
         except Exception:
             logger.exception("irimi: on_tool_call raised; the tool call is still stored")
 
     def _recorded(self, posted: Mapping[str, Any]) -> Response:
-        """The recorded outcome of the read tool call `posted` names (#83): `200` with its result,
+        """The recorded outcome of the read tool call `posted` names: `200` with its result,
         its error and whether a coroutine gave them (`ToolCall.awaited`), which the SDK hands back
         in place of running the tool, or `404` when the
         recording has none for it, or there is no recording. A hit is not a tool call: the SDK
@@ -270,13 +270,13 @@ class ControlEndpoint:
             _null("ended_at")
         if record.outcome is None:
             _null("outcome")
-        # The store is handed the error whole: it redacts it, and only then cuts it (#179).
+        # The store is handed the error whole: it redacts it, and only then cuts it.
         self.store.end_run(run_id, record.ended_at, record.outcome, record.error)
 
 
 def _split_run_route(route: str) -> tuple[str, str] | None:
     """`runs/{run_id}/{action}` as its run id and its action, or None for no run route. The action
-    is the longest of the run actions and `tool-calls/recorded` (#83) the route ends with, and the
+    is the longest of the run actions and `tool-calls/recorded` the route ends with, and the
     run id everything between `runs/` and it, so an id holding a `/` - `../x` - is refused as an
     id (400) rather than as a route (404)."""
     head = f"{RUNS_ROUTE}/"
@@ -298,7 +298,7 @@ def _require_method(request: Request, method: str) -> None:
 
 def _posted(request: Request, whole_body: bool) -> Mapping[str, Any]:
     """The body as a JSON object. `NaN` and `Infinity` are refused, as the trace decoders refuse
-    a non-finite timestamp and the store writes with `allow_nan=False` (#68, #70)."""
+    a non-finite timestamp and the store writes with `allow_nan=False`."""
     if not whole_body:
         raise _Refused(413, f"the body decodes past the {MAX_CONTROL_BODY} bytes allowed")
     if len(request.body) > MAX_CONTROL_BODY:
@@ -319,8 +319,8 @@ def _posted(request: Request, whole_body: bool) -> Mapping[str, Any]:
 def _label(error: ErrorInfo | None) -> ErrorInfo | None:
     """A posted error cut as the store cuts the one it stores, for the live line a tool call
     prints: its type to MAX_ERROR_TYPE, since a posted type is the client's to say and may be
-    2 MiB (#99), and its message to MAX_ERROR_MESSAGE. Never what the store is handed: a cut
-    before redaction can keep half a key, which redaction no longer finds (#179)."""
+    2 MiB, and its message to MAX_ERROR_MESSAGE. Never what the store is handed: a cut
+    before redaction can keep half a key, which redaction no longer finds."""
     if error is None:
         return None
     return ErrorInfo(error.type[:MAX_ERROR_TYPE], error.message[:MAX_ERROR_MESSAGE])
@@ -328,8 +328,8 @@ def _label(error: ErrorInfo | None) -> ErrorInfo | None:
 
 def _decoded[T](decode: Callable[[Mapping[str, Any]], T], doc: Mapping[str, Any]) -> T:
     """`doc` read by one of the trace decoders, its refusal a 400. A decoder raises only
-    TraceFormatError (#68), however deep the value it refuses: it names the value's type and never
-    quotes it (#100)."""
+    TraceFormatError, however deep the value it refuses: it names the value's type and never
+    quotes it."""
     try:
         return decode(doc)
     except TraceFormatError as exc:
@@ -351,7 +351,7 @@ def _sdk_run(run_id: str, posted: Mapping[str, Any], fields: tuple[str, ...]) ->
 
     Every other field is irimi's and comes from the encoder, never from `posted`: the record the
     store gives a run it knows only by its id, every optional field None, attributed to the SDK
-    (one spelling of that record, not two, #73). A field in `fields` that `posted` lacks is left
+    (one spelling of that record, not two). A field in `fields` that `posted` lacks is left
     out, so the decoder names it missing."""
     base = trace.run_to_json(dataclasses.replace(header_record(run_id), attribution="sdk"))
     doc = {key: value for key, value in base.items() if key not in fields}

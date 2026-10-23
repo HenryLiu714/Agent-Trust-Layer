@@ -1,18 +1,18 @@
-"""Redaction before anything reaches disk (#69, design §5.3, D9).
+"""Redaction before anything reaches disk.
 
-From the trace store (#70) on, irimi writes what the agent sent and what it was sent back:
+The trace store writes what the agent sent and what it was sent back:
 `Authorization` headers, Slack tokens, webhook URLs whose path IS the secret. This module is the
 copy that goes to disk and nothing else. The live flow and the agent's answer are never changed;
 the store's writer thread calls `redact_exchange` and `redact_json`, the engine never does.
 
 Redaction is always on and keyed: a secret becomes `<redacted:` + 16 hex digits of an HMAC-SHA256
 under this install's key + `>`, so the same secret always becomes the same placeholder and a
-replay (#82) can still match a request against its recording. The key is per install
-(`$IRIMI_HOME/redact.key`), so two machines give one secret two placeholders; whether recordings
-move between machines is a Phase 6 decision (push/pull), and `docs/trace-format.md` says so.
+replay can still match a request against its recording. The key is per install
+(`$IRIMI_HOME/redact.key`), so two machines give one secret two placeholders; recordings do not
+move between machines, and `docs/trace-format.md` says so.
 
 It is also where "this header is a credential" is stated, once: an answer target may not be handed
-one (`delegation`, #32) and disk may not be handed one either.
+one (`delegation`) and disk may not be handed one either.
 
 FAILURE IS CLOSED. A value that cannot be redacted is stored as `<redaction-failed>`, never as it
 was, and the exchange gains `REDACTION_FAILED_FLAG`. `redact_exchange` and `redact_json` never
@@ -53,9 +53,9 @@ from irimi.trace import JSONValue
 logger = logging.getLogger(__name__)
 
 # Header names that carry a credential. An answer target is not handed them unless the route sets
-# `forward_auth: true` (#32), and disk is never handed them (#69). Stripping `Authorization` alone
-# was narrower than the rule it implements - "a local stub does not need your real key" - and left
-# `Cookie`, `x-api-key` and `DD-API-KEY` on the request (#32).
+# `forward_auth: true`, and disk is never handed them. `Authorization` alone would be narrower
+# than the rule - "a local stub does not need your real key" - and leave `Cookie`, `x-api-key`
+# and `DD-API-KEY` on the request.
 #
 # A marker list rather than a vendor list, because the vendor list is never finished: every new
 # service brings its own spelling, and the one it is missing is the one that leaks. Over-matching
@@ -79,7 +79,7 @@ CREDENTIAL_HEADERS: frozenset[str] = frozenset({"cookie", "dd-application-key", 
 # The key is 32 random bytes, the HMAC-SHA256 block's worth of secret.
 KEY_BYTES = 32
 
-# What a value that could not be redacted is stored as (#69, rule 7). Never the original.
+# What a value that could not be redacted is stored as. Never the original.
 REDACTION_FAILED = "<redaction-failed>"
 
 # Names whose value is a secret wherever they appear: a query parameter, a form field (the last
@@ -102,30 +102,30 @@ SECRET_KEYS: frozenset[str] = frozenset(
 # Credential shapes (`secret_shapes.SECRET_PATTERNS`) are replaced wherever they appear in text
 # irimi can read: header values, the path, query and form values, JSON strings, and a UTF-8 body
 # that is neither JSON nor a form. They live below this layer, so that a cut made before redaction
-# can avoid them by the same rule (#179).
+# can avoid them by the same rule.
 
 # A header value that is an absolute URL: `Location` hands an OAuth token back in its query or
-# fragment, and `Referer` repeats a page's, with no shape either would be caught by (#69).
+# fragment, and `Referer` repeats a page's, with no shape either would be caught by.
 _ABSOLUTE_URL = re.compile(r"\s*https?://", re.IGNORECASE)
 
-# An SSE field whose value may be one JSON document (#69).
+# An SSE field whose value may be one JSON document.
 _SSE_DATA = "data:"
 
 # A line of a text body with its ending: CRLF, LF or a lone CR, the three SSE ends a line at. Split
-# at LF alone, a CR-only stream was one line that was not JSON, and kept `data: {"token": …}`'s
-# token (#69). A JSON string holds neither CR nor LF raw, so no JSON line is split by this.
+# at LF alone, a CR-only stream would be one line that is not JSON, and keep `data: {"token": …}`'s
+# token. A JSON string holds neither CR nor LF raw, so no JSON line is split by this.
 _LINE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
 
 # `_LINE` over bytes, for `_rechunk`: a chunk length counts bytes, and a line of text does not.
 # Built from `_LINE` so the two cannot disagree on where a line ends, and they split alike: in
-# UTF-8, CR and LF are never a byte of a longer character (#71).
+# UTF-8, CR and LF are never a byte of a longer character.
 _BYTE_LINE = re.compile(_LINE.pattern.encode())
 
 
 def complete_lines(body: bytes) -> bytes:
     """`body` up to the end of its last line, where `_LINE` ends one: CRLF, LF or a lone CR. What
     the engine keeps of a stream that is not whole, so that every line of it is one redaction can
-    read (#71). Never raises."""
+    read. Never raises."""
     return body[: max(body.rfind(b"\n"), body.rfind(b"\r")) + 1]
 
 
@@ -139,8 +139,8 @@ class RedactKeyError(ValueError):
 
 
 def is_credential_header(name: str) -> bool:
-    """True when this header's value is a credential: a target must not be handed it (#32), and
-    disk must not either (#69).
+    """True when this header's value is a credential: a target must not be handed it, and
+    disk must not either.
 
     Compared case-insensitively and by substring, so a vendor header nobody has written down yet
     (`x-acme-api-key`) is covered the day it appears. See CREDENTIAL_MARKERS for why the rule is
@@ -152,7 +152,7 @@ def is_credential_header(name: str) -> bool:
 
 def placeholder(key: bytes, value: str) -> str:
     """The stored stand-in for `value`: the same value under the same key always gives the same
-    one, which is what lets a replay match a request against its recording (design §5.3)."""
+    one, which is what lets a replay match a request against its recording."""
     return "<redacted:" + hmac.new(key, value.encode(), "sha256").hexdigest()[:16] + ">"
 
 
@@ -162,10 +162,10 @@ def load_key(home: Path) -> bytes:
     Raises RedactKeyError when the file is there and is not 32 bytes: a key irimi did not write
     would give every secret a placeholder no earlier recording shares, and silently replacing it
     would do the same to every recording already on disk. So is a path that does not lead to a
-    regular file - a directory, a dangling symlink - rather than a bare OSError (#69).
+    regular file - a directory, a dangling symlink - rather than a bare OSError.
 
     A symlink to a regular file is followed: a key shared between machines is mounted that way (a
-    Kubernetes Secret volume is a tree of symlinks), and refusing it would leave the partner no
+    Kubernetes Secret volume is a tree of symlinks), and refusing it would leave a user no
     way to give two installs one key. A missing home is created with `ca.DIR_MODE`, as the
     directory that holds the CA's key is; an existing one keeps its mode, since it holds more than
     the key and the key's own KEY_MODE is what protects it.
@@ -228,7 +228,7 @@ def redact_exchange(exchange: Exchange, key: bytes) -> Exchange:
     redacted is stored as REDACTION_FAILED and the copy gains REDACTION_FAILED_FLAG.
 
     `stream_chunks` is the one field that follows the body: a placeholder is not as long as its
-    secret, so the chunk lengths are recomputed over the redacted body (`_rechunk`, #71).
+    secret, so the chunk lengths are recomputed over the redacted body (`_rechunk`).
     """
     guard = _Guard()
     secret_path = _secret_path(exchange.request)
@@ -267,7 +267,7 @@ def redact_exchange(exchange: Exchange, key: bytes) -> Exchange:
 
 def redact_json(value: JSONValue, key: bytes) -> JSONValue:
     """`value` with every secret key's value and every secret shape replaced: a trigger's args and a
-    tool call's args and result (#70). Never raises; REDACTION_FAILED when it could not redact."""
+    tool call's args and result. Never raises; REDACTION_FAILED when it could not redact."""
     failed: JSONValue = REDACTION_FAILED
     return _Guard()("a JSON value", failed, partial(_redact_json, value, key))
 
@@ -373,7 +373,7 @@ def _redact_headers(
     headers: Headers, key: bytes, guard: _Guard, secret_path: str | None, *, is_response: bool
 ) -> Headers:
     """Each value by `_redact_header`, and each name scanned for shapes, because a name is text
-    the store writes too (#69)."""
+    the store writes too."""
     what = "a response header" if is_response else "a request header"
     return tuple(
         (
@@ -406,14 +406,14 @@ def _redact_header(
 
 
 def _is_credential_path_host(host: str) -> bool:
-    """Compared without a root dot: `hooks.slack.com.` is the same host (#69)."""
+    """Compared without a root dot: `hooks.slack.com.` is the same host."""
     return host.lower().rstrip(".") in CREDENTIAL_PATH_HOSTS
 
 
 def _secret_path(request: Request) -> str | None:
     """A credential-path host's path, which is a secret wherever else the exchange carries it too:
     irimi's own 502 for an unreachable answer target names the target's URL, and a bare-origin
-    target's URL ends in this path (#69). None on any other host, and for `/`, which is every
+    target's URL ends in this path. None on any other host, and for `/`, which is every
     URL's path and hides nothing."""
     if _is_credential_path_host(request.host) and request.path.strip("/"):
         return request.path
@@ -427,7 +427,7 @@ def _hidden_path(path: str, key: bytes) -> str:
 def _secret_path_swaps(secret_path: str | None, key: bytes) -> list[tuple[str, str]]:
     """Each spelling of `secret_path` a header or a body can hold once the other rules have run,
     and what it is stored as. The shape rule runs first, so a path holding `xoxb-…` is carried as
-    that rule left it, and replacing the path as sent alone kept its team and bot ids (#69)."""
+    that rule left it, and replacing the path as sent alone kept its team and bot ids."""
     if secret_path is None:
         return []
     hidden = _hidden_path(secret_path, key)
@@ -446,7 +446,7 @@ def _redact_path(host: str, path: str, key: bytes) -> str:
 
 def _redact_operation(operation: str, sent: Request, stored_path: str, key: bytes) -> str:
     """A request no route matched is named `METHOD /path` (`pipeline.classify`), so its operation
-    is the stored path's: slack.yaml lists no route for `hooks.slack.com/workflows/...` (#69). A
+    is the stored path's: slack.yaml lists no route for `hooks.slack.com/workflows/...`. A
     route's own name is scanned for shapes like any other text."""
     if operation == f"{sent.method} {sent.path}":
         return f"{sent.method} {stored_path}"
@@ -493,7 +493,7 @@ def _redact_pair(pair: str, key: bytes) -> str:
 
 def _last_segment(name: str) -> str:
     """`card[token]` -> `token`; `a[b][c]` -> `c`; `token` -> `token`. An empty `[]` is a list's
-    and names nothing, so `token[]` -> `token` (#69)."""
+    and names nothing, so `token[]` -> `token`."""
     segments = [segment for segment in name.replace("]", "").split("[") if segment]
     return segments[-1] if segments else ""
 
@@ -514,7 +514,7 @@ def _redact_body(body: bytes, content_type: str, key: bytes, secret_path: str | 
 def _redact_body_text(body: bytes, content_type: str, key: bytes) -> bytes:
     """A body by the rules that read it. One that is not UTF-8 is stored unscanned - a known
     limitation, in `docs/trace-format.md`. A leading byte-order mark is set aside and put back,
-    because `json.loads` refuses one as not JSON (#69).
+    because `json.loads` refuses one as not JSON.
     """
     if not body:
         return body
@@ -531,7 +531,7 @@ def _redact_body_text(body: bytes, content_type: str, key: bytes) -> bytes:
 def _redact_document(text: str, content_type: str, key: bytes) -> str:
     """A body's text: walked as JSON when it is one JSON document, whatever its content type
     claims - `{"password": "…"}` read as a form is one pair whose name is the whole document, so
-    no secret key is ever seen (#69). Otherwise a form when its content type says so, and
+    no secret key is ever seen. Otherwise a form when its content type says so, and
     otherwise line by line (`_redact_line`).
 
     JSON that `json.loads` refuses for a reason other than not being JSON (an integer past its
@@ -554,7 +554,7 @@ def _redact_document(text: str, content_type: str, key: bytes) -> str:
 def _redact_line(line: str, key: bytes) -> str:
     """One line of a body that is not one JSON document. A line that is one (NDJSON), or an SSE
     `data:` field whose value is one, is walked as JSON; a text scan alone kept `data: {"token":
-    "…"}`'s token (#69). Any other line is scanned for shapes.
+    "…"}`'s token. Any other line is scanned for shapes.
     """
     content = line.rstrip("\r\n")
     field = _SSE_DATA if content.startswith(_SSE_DATA) else ""
@@ -584,7 +584,7 @@ def _redact_json_text(text: str, key: bytes) -> str | None:
 
 def _unique_members(pairs: list[tuple[str, JSONValue]]) -> dict[str, JSONValue]:
     """A JSON object's members as a dict, refusing a repeated key, whose earlier values the walk
-    would never see (#69)."""
+    would never see."""
     members = dict(pairs)
     if len(members) != len(pairs):
         raise ValueError("a JSON object repeats a key")
@@ -609,7 +609,7 @@ def _redact_json(value: JSONValue, key: bytes) -> JSONValue:
     if value is None or isinstance(value, bool | int | float):
         return value
     # Not JSON, so nothing here can say what it holds: a tuple's secret would still reach disk,
-    # since `json.dumps` writes a tuple as an array (#69).
+    # since `json.dumps` writes a tuple as an array.
     raise TypeError(f"{type(value).__name__} is not JSON")
 
 

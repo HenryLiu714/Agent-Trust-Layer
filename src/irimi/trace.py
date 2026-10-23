@@ -1,21 +1,21 @@
-"""Trace format v2: the records a stored run is made of, and their JSON codecs (#68, #82).
+"""Trace format v2: the records a stored run is made of, and their JSON codecs.
 
-Phase 3 records runs and every later phase reads them, so the shape is written down once, here and
-in `docs/trace-format.md`, and versioned. This module is the shape and nothing else: frozen
-dataclasses and pure encode/decode functions. It does no I/O - the store (#70) owns the files and
+Stored runs outlive the version of irimi that wrote them, so the shape is written down once, here
+and in `docs/trace-format.md`, and versioned. This module is the shape and nothing else: frozen
+dataclasses and pure encode/decode functions. It does no I/O - the store owns the files and
 hands the exchange codec two callables for the bodies, which never go inline.
 
 THE ROUND TRIP IS THE CONTRACT. Every field of `Exchange`, `RunRecord`, `ToolCall` and
 `TelemetrySeen` is spelled out in its encoder and its decoder, and `tests/test_trace.py` builds
 each record with a non-default value in every field and asks for it back. A field added to any of
-them without codec support fails that test, which is what keeps a recording readable by a replay
-(#82): a stored run gets no second chance to repeat an L3 read.
+them without codec support fails that test, which is what keeps a recording readable by a replay:
+a stored run gets no second chance to repeat an L3 read.
 
 Decoders raise `TraceFormatError` and nothing else on a malformed record - one that is not a JSON
 object, lacks a field, or holds a value of the wrong type, outside its vocabulary or not finite -
 refuse a `schema_version` newer than this module's or below 1, and ignore keys they do not know.
 A value of the wrong type is named by its JSON type and never quoted (`json_type`), so a decoder
-cannot raise while it explains itself (#100). What a message does quote cannot recurse: a float
+cannot raise while it explains itself. What a message does quote cannot recurse: a float
 that is not finite, or a string - a word outside a vocabulary, a `sha256` that is no digest - cut
 to MAX_QUOTED characters, so a damaged line's megabyte string is never a megabyte message.
 The one exception they do not wrap is the caller's own: `exchange_from_json` and `event_from_json`
@@ -45,54 +45,54 @@ from irimi.exchange import (
 )
 from irimi.secret_shapes import cut_outside_secrets
 
-# One integer for the whole format (#68). `run.json` carries it and a run's events are read under
+# One integer for the whole format. `run.json` carries it and a run's events are read under
 # it; `unattributed/events.jsonl`, which has no `run.json`, is read under this one. A decoder
-# refuses a newer version and ignores keys it does not know. Every field v1 shipped with in #68 is
-# required. A field added later must decode as its dataclass default when absent, so a recording
-# made before it existed still reads, and whoever adds it - #71's `stream_chunks` first - adds that
-# decoder path. A new value in a closed vocabulary (`kind`, `answered_by`, `mode`, `attribution`:
-# every field read with `_one_of`) IS a bump, because an older reader refuses a value it does not
+# refuses a newer version and ignores keys it does not know. Every field of version 1 is required.
+# A field added after it decodes as its dataclass default when absent, so a recording made before
+# the field existed still reads; adding a field means adding that decoder path. A new value in a
+# closed vocabulary (`kind`, `answered_by`, `mode`, `attribution`: every field read with
+# `_one_of`) IS a bump, because an older reader refuses a value it does not
 # know; `flags` is open, and a reader accepts a flag it does not know. Changing what a field means
 # is a bump too. `docs/trace-format.md`, "Versioning", is the rule in full.
 #
-# Version 2 is replay's (#82): `mode` gains `replay`, `answered_by` and `ran` gain `recording`, and
-# a run record gains `replay_of`. A v1 run reads under it unchanged, as a run with no `replay_of`.
+# Version 2 has `mode` `replay`, `answered_by` and `ran` `recording`, and a run record's
+# `replay_of`. A version 1 run reads under it unchanged, as a run with no `replay_of`.
 SCHEMA_VERSION = 2
 
-# The run id of an exchange no run claimed: `irimi serve` with no `Irimi-Run` header (#77).
+# The run id of an exchange no run claimed: `irimi serve` with no `Irimi-Run` header.
 UNATTRIBUTED = "unattributed"
 
-# A run id becomes a directory name in the store (#70), so this pattern is the path-traversal
+# A run id becomes a directory name in the store, so this pattern is the path-traversal
 # guard: no `/`, no `.` - so no `..` - no space, nothing empty, nothing unbounded.
 # `pipeline.attribute_run` treats an `Irimi-Run` value it refuses as absent. Test a value with
 # `is_valid_run_id`, which uses `fullmatch`, never with `RUN_ID_PATTERN.match`: `$` also matches
 # before a trailing newline, so `.match` accepts `"run\n"` - a name no directory should have.
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
-# A body is stored as `blobs/<sha256>` (#70), so a `BodyRef` read back from disk is checked
+# A body is stored as `blobs/<sha256>`, so a `BodyRef` read back from disk is checked
 # against this before a store can join it onto a path.
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
-# The longest `ErrorInfo.message` a trace keeps: a run's error is a label, not a log (#68).
+# The longest `ErrorInfo.message` a trace keeps: a run's error is a label, not a log.
 MAX_ERROR_MESSAGE = 1000
-# The longest `ErrorInfo.type` a trace keeps (#99): a class's `module.qualname` is far shorter, but
+# The longest `ErrorInfo.type` a trace keeps: a class's `module.qualname` is far shorter, but
 # a posted type is whatever the client sent, up to 2 MiB.
-# The store cuts both, and only once it has redacted the whole of each (#179): a key cut in two is
+# The store cuts both, and only once it has redacted the whole of each: a key cut in two is
 # no longer its shape, so redaction would not find the half a cut kept.
 MAX_ERROR_TYPE = 300
 # The most of an exception's message `ErrorInfo.from_exception` keeps, far past MAX_ERROR_MESSAGE:
 # the SDK posts the message for the store to redact and cut, and must only keep a post under the
-# control endpoint's 2 MiB (#179).
+# control endpoint's 2 MiB.
 MAX_POSTED_MESSAGE = 64 * 1024
 # The most of an exception's type `ErrorInfo.from_exception` keeps: four labels' worth, as the store
 # keeps of an end's while it waits (`store.MAX_QUEUED_ERROR`). A class's `module.qualname` is far
 # shorter, but one made with `type()` may be any length, and one past the control endpoint's 2 MiB
-# cost its run the post, and so its end (#179).
+# cost its run the post, and so its end.
 MAX_POSTED_TYPE = 4 * MAX_ERROR_TYPE
 
 # The most of a string a decoder's message quotes (`_quoted`). The message is read by a person, on
 # `irimi runs show`'s stderr, in `list_runs`'s warning or as a control refusal, and a damaged
-# line's 5 MB `kind` must not come back as a 5 MB line (#100).
+# line's 5 MB `kind` must not come back as a 5 MB line.
 MAX_QUOTED = 64
 
 type JSONValue = None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
@@ -112,7 +112,7 @@ class TraceFormatError(ValueError):
 
 def mode_for(replay_of: str | None) -> Mode:
     """The mode of a run an engine stores: `replay` when it answers from the stored run `replay_of`,
-    `shadow` when it answers from nothing (#82). One rule for every record an engine writes itself,
+    `shadow` when it answers from nothing. One rule for every record an engine writes itself,
     the process run's and a header run's."""
     return "shadow" if replay_of is None else "replay"
 
@@ -124,8 +124,8 @@ def is_valid_run_id(run_id: str) -> bool:
 
 @dataclass(frozen=True)
 class ErrorInfo:
-    type: str  # the exception's `module.qualname`; a stored one at most MAX_ERROR_TYPE (#99)
-    message: str  # a stored one at most MAX_ERROR_MESSAGE characters (#68)
+    type: str  # the exception's `module.qualname`; a stored one at most MAX_ERROR_TYPE
+    message: str  # a stored one at most MAX_ERROR_MESSAGE characters
 
     @classmethod
     def from_exception(cls, exc: BaseException) -> "ErrorInfo":
@@ -133,9 +133,9 @@ class ErrorInfo:
 
         Its message is `str(exc)`, and its type the class's `module.qualname`, cut to
         MAX_POSTED_MESSAGE and MAX_POSTED_TYPE characters outside any secret's shape: the SDK
-        cannot redact, and the store redacts each whole before it cuts it to a label (#179).
+        cannot redact, and the store redacts each whole before it cuts it to a label.
 
-        Never raises on an exception whose `__str__` does: the SDK (#74, #76) calls this while an
+        Never raises on an exception whose `__str__` does: the SDK calls this while an
         agent's own exception is in flight, and recording it must not replace it with another."""
         kind = type(exc)
         try:
@@ -155,7 +155,7 @@ class Trigger:
     name: str  # the display name
     # `module:qualname` of the wrapped function; None for a context-manager run and the process run.
     entrypoint: str | None
-    args: JSONValue  # the captured arguments: `irimi.sdk.capture`'s table (#74)
+    args: JSONValue  # the captured arguments: `irimi.sdk.capture`'s table
     replayable: bool
 
 
@@ -165,7 +165,7 @@ class RunRecord:
 
     schema_version: int
     run_id: str
-    mode: Mode  # `replay` is a run a replay answered from a stored one (#82)
+    mode: Mode  # `replay` is a run a replay answered from a stored one
     # `process` is the `irimi shadow -- <cmd>` run, `sdk` a run the SDK started, and `header` a
     # run id that arrived on exchanges with no start event.
     attribution: Attribution
@@ -179,21 +179,21 @@ class RunRecord:
     error: ErrorInfo | None
     exit_code: int | None  # set only for the process run
     dropped_events: int = 0
-    # The run a replay answered this one from (#82). None for every run that is not a replay. Added
-    # in v2: a v1 run.json has no such key and reads as None.
+    # The run a replay answered this one from. None for every run that is not a replay, and for a
+    # version 1 run.json, which has no such key.
     replay_of: str | None = None
 
 
 @dataclass(frozen=True)
 class ToolCall:
-    """A tool call the proxy cannot see, reported by the SDK (#76)."""
+    """A tool call the proxy cannot see, reported by the SDK."""
 
     tool_call_id: str
     run_id: str
     name: str
     kind: ToolKind
     # `real` ran the function; `shadow` ran its shadow stand-in; `recording` was answered from the
-    # run a replay replays (#82, used from #83).
+    # run a replay replays.
     ran: Ran
     args: JSONValue
     result: JSONValue
@@ -202,13 +202,14 @@ class ToolCall:
     ended_at: float
     # A sync tool that returned a coroutine: the call ended when the coroutine did, and `result`
     # and `error` are the coroutine's. A replay that answers such a call from the recording hands
-    # the agent a coroutine again, which it awaits as it awaited the first (#83). Added within v2.
+    # the agent a coroutine again, which it awaits as it awaited the first. Absent in an older
+    # record, it reads as False.
     awaited: bool = False
 
 
 @dataclass(frozen=True)
 class RecordedOutcome:
-    """What a recorded read tool call came to, as a replay hands it back (#83): the control
+    """What a recorded read tool call came to, as a replay hands it back: the control
     endpoint answers the SDK's lookup with it (`recorded_outcome_to_json`), and the SDK reads it
     (`recorded_outcome_from_json`). `result` is still captured JSON, for the SDK to revive."""
 
@@ -218,13 +219,13 @@ class RecordedOutcome:
 
 
 # What the SDK posts to ask a replay for a read tool's recorded outcome: the tool's name and its
-# args as captured, and nothing else (#83).
+# args as captured, and nothing else.
 RECORDED_LOOKUP_FIELDS = ("name", "args")
 
 # The markers of a captured value that describe it rather than hold it (`docs/trace-format.md`,
 # "Captured values"): its repr, or its size when it was too large to keep. Trace format, not the
 # SDK's alone: a replay's recording refuses a recorded result holding one, as the SDK's `revive`
-# does, so neither side states the rule apart (#83).
+# does, so neither side states the rule apart.
 REPR_KEY = "__irimi_repr__"
 TRUNCATED_KEY = "__irimi_truncated__"
 DESCRIPTION_KEYS = frozenset({REPR_KEY, TRUNCATED_KEY})
@@ -232,14 +233,14 @@ DESCRIPTION_KEYS = frozenset({REPR_KEY, TRUNCATED_KEY})
 # The `ErrorInfo.type` a tool call records when something outside it stopped it before it
 # finished: its task was cancelled (an `asyncio.wait_for` that timed out), or its coroutine was
 # closed unawaited. It holds no outcome of the tool's own, so a replay never answers with it: the
-# agent's `except TimeoutError` would meet a RecordedToolError where the recording went on (#83).
+# agent's `except TimeoutError` would meet a RecordedToolError where the recording went on.
 # `ErrorInfo.from_exception` spells them so on every supported Python.
 STOPPED_ERROR_TYPES = frozenset({"asyncio.exceptions.CancelledError", "builtins.GeneratorExit"})
 
 
 def holds_description(value: JSONValue) -> bool:
     """Whether a captured value holds a description of a value anywhere in it (`DESCRIPTION_KEYS`
-    as a key of a JSON object at any depth), so that it cannot be rebuilt as the value (#83). Walked
+    as a key of a JSON object at any depth), so that it cannot be rebuilt as the value. Walked
     with a stack, never recursion, so a value nested past the interpreter's stack is answered too.
     Never raises."""
     stack: list[Any] = [value]
@@ -256,7 +257,7 @@ def holds_description(value: JSONValue) -> bool:
 
 @dataclass(frozen=True)
 class TelemetrySeen:
-    """One telemetry exchange, recorded as having happened and nothing more (#70): telemetry is
+    """One telemetry exchange, recorded as having happened and nothing more: telemetry is
     forwarded and its requests and responses are never stored."""
 
     run_id: str
@@ -323,7 +324,7 @@ def tool_call_to_json(call: ToolCall) -> dict[str, Any]:
 
 
 def recorded_outcome_to_json(call: ToolCall) -> dict[str, Any]:
-    """The recorded outcome of `call`, as the control endpoint answers a lookup that hit (#83)."""
+    """The recorded outcome of `call`, as the control endpoint answers a lookup that hit."""
     return {"result": call.result, "error": error_to_json(call.error), "awaited": call.awaited}
 
 
@@ -371,7 +372,7 @@ def event_to_json(seq: int, event: Event, put_body: PutBody) -> dict[str, Any]:
 
 
 def trigger_to_json(trigger: Trigger) -> dict[str, Any]:
-    """`trigger` as `run.json` holds it, and as the SDK posts it in a run's start (#74): one
+    """`trigger` as `run.json` holds it, and as the SDK posts it in a run's start: one
     encoding for the file and the wire, so the endpoint reads a posted trigger with the decoder a
     stored one is read with."""
     return {
@@ -383,7 +384,7 @@ def trigger_to_json(trigger: Trigger) -> dict[str, Any]:
 
 
 def error_to_json(error: ErrorInfo | None) -> dict[str, Any] | None:
-    """`error` as a run or a tool call holds it, and as the SDK posts it in a run's end (#74)."""
+    """`error` as a run or a tool call holds it, and as the SDK posts it in a run's end."""
     return None if error is None else {"type": error.type, "message": error.message}
 
 
@@ -409,7 +410,7 @@ def _response_to_json(response: Response, put_body: PutBody) -> dict[str, Any]:
 
 
 def _headers_to_json(headers: Headers) -> list[list[str]]:
-    # Pairs, not an object: order and repeats (`set-cookie`) are part of what was sent (#68).
+    # Pairs, not an object: order and repeats (`set-cookie`) are part of what was sent.
     return [[name, value] for name, value in headers]
 
 
@@ -426,7 +427,7 @@ def _body_to_json(body: bytes, put_body: PutBody) -> dict[str, Any] | None:
 def run_from_json(d: Mapping[str, Any]) -> RunRecord:
     version = _int(d, "schema_version")
     # The version is not quoted: `str` of an integer past `sys.get_int_max_str_digits()` raises
-    # ValueError, and a decoder raises only TraceFormatError (#100).
+    # ValueError, and a decoder raises only TraceFormatError.
     if version > SCHEMA_VERSION:
         raise TraceFormatError(f"schema_version is newer than this irimi reads ({SCHEMA_VERSION})")
     if version < 1:
@@ -450,7 +451,7 @@ def run_from_json(d: Mapping[str, Any]) -> RunRecord:
         replay_of=_added_later(d, "replay_of", _run_id),
     )
     # A replay's run names the run it replayed, and only a replay's: the store stamps both by one
-    # rule, `mode_for`, so a record where they disagree is damage, never half a replay (#167).
+    # rule, `mode_for`, so a record where they disagree is damage, never half a replay.
     if record.mode != mode_for(record.replay_of):
         if record.replay_of is None:
             raise TraceFormatError("'mode' is 'replay', but 'replay_of' is null")
@@ -591,8 +592,8 @@ def _body_from_json(d: Mapping[str, Any], key: str, get_body: GetBody) -> bytes:
 
 
 # One reader per JSON type. Each raises TraceFormatError, never KeyError, TypeError,
-# OverflowError or RecursionError, so a store reading a damaged line has one exception to catch
-# (#70), and the control endpoint answers every malformed body with a 400 (#73).
+# OverflowError or RecursionError, so a store reading a damaged line has one exception to catch,
+# and the control endpoint answers every malformed body with a 400.
 
 
 def json_type(value: Any) -> str:
@@ -601,7 +602,7 @@ def json_type(value: Any) -> str:
     nested 100,000 deep raises RecursionError, which Python 3.14's `json.loads` reads and 3.12's
     refuses, and of an integer past `sys.get_int_max_str_digits()` ValueError. A decoder that
     quoted its value raised something other than TraceFormatError, on some Pythons and some stacks
-    only (#100, #123)."""
+    only."""
     if value is None:
         return "null"
     if isinstance(value, bool):
@@ -621,7 +622,7 @@ def json_type(value: Any) -> str:
 
 def _quoted(text: str) -> str:
     """A string a refusal quotes, as its `repr`, so a control character is spelled and never
-    printed, and cut after MAX_QUOTED characters with a `…` saying so (#100)."""
+    printed, and cut after MAX_QUOTED characters with a `…` saying so."""
     if len(text) <= MAX_QUOTED:
         return repr(text)
     return f"{text[:MAX_QUOTED]!r}…"
@@ -629,7 +630,7 @@ def _quoted(text: str) -> str:
 
 def _present(d: Mapping[str, Any], key: str) -> Any:
     # Every reader comes through here, so a line that parsed as `null`, `5` or `[]` is refused
-    # here rather than by a TypeError from `in` (#68).
+    # here rather than by a TypeError from `in`.
     if not isinstance(d, Mapping):
         raise TraceFormatError(f"{key!r} must be read from an object, not {json_type(d)}")
     if key not in d:
@@ -654,8 +655,7 @@ def _str(d: Mapping[str, Any], key: str) -> str:
 def _run_id(d: Mapping[str, Any], key: str) -> str:
     """A run id one record names another run by (`replay_of`), held to `is_valid_run_id`, the rule
     a run id must keep to name a directory: `runs list` prints it in a column, and `irimi replay`
-    looks it up as a run. Refused by its length, never quoted, as a decoder refuses any value
-    (#100, #167)."""
+    looks it up as a run. Refused by its length, never quoted, as a decoder refuses any value."""
     value = _str(d, key)
     if not is_valid_run_id(value):
         raise TraceFormatError(f"{key!r} is not a run id ({len(value)} characters)")
@@ -671,7 +671,7 @@ def _int(d: Mapping[str, Any], key: str) -> int:
 
 def _float(d: Mapping[str, Any], key: str) -> float:
     # JSON has one number type, and `json.dumps(0.0)` is `0.0` but a hand-written `0` is not, so an
-    # integer is read as a float (#68). Not a non-finite one: `json.loads` reads `NaN` and
+    # integer is read as a float. Not a non-finite one: `json.loads` reads `NaN` and
     # `Infinity` by default, and a record holding one could not be written back with
     # `allow_nan=False`. An integer too large for a float is refused, not an OverflowError.
     value = _present(d, key)
@@ -688,7 +688,7 @@ def _float(d: Mapping[str, Any], key: str) -> float:
 
 def _json(d: Mapping[str, Any], key: str) -> JSONValue:
     """A free JSON value (`args`, `result`), refused when a float anywhere in it is not finite:
-    `json.loads` reads `NaN`, and a record holding one could not be written back (#68)."""
+    `json.loads` reads `NaN`, and a record holding one could not be written back."""
     value = _present(d, key)
     stack = [value]
     while stack:
@@ -729,15 +729,15 @@ def _strings(d: Mapping[str, Any], key: str) -> tuple[str, ...]:
 def _added_later[T](
     d: Mapping[str, Any], key: str, read: Callable[[Mapping[str, Any], str], T]
 ) -> T | None:
-    """A field added after v1 shipped (#82's `replay_of`, #83's `awaited`): absent or `null` is
-    None, so a record made before it existed reads as one that never set it; any other value is
-    read with `read`."""
+    """An optional field version 1 lacked (`replay_of`, `awaited`): absent or `null` is None, so
+    a record made before the field existed reads as one that never set it; any other value is read
+    with `read`."""
     return None if key not in d else _optional(d, key, read)
 
 
 def _chunk_lengths(d: Mapping[str, Any], key: str) -> tuple[int, ...]:
-    """A streamed response's chunk lengths (#71), the first field added within v1: absent in a
-    recording made before it existed, and read then as its default, `()`. Present, it is a list of
+    """A streamed response's chunk lengths: absent in an older recording, and read then as its
+    default, `()`. Present, it is a list of
     positive integers."""
     if key not in d:
         return ()

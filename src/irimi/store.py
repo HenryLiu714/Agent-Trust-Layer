@@ -1,4 +1,4 @@
-"""The trace store: where a run's record, its exchanges and its tool calls go (#70).
+"""The trace store: where a run's record, its exchanges and its tool calls go.
 
 `TraceStore` is the seam. `NullStore` throws everything away; `DirectoryStore` writes the layout
 `docs/trace-format.md` describes, and `StoreReader` reads it back.
@@ -9,22 +9,22 @@ public method of `DirectoryStore` only puts one item on a bounded queue, with `p
 returns; one daemon writer thread does all the redaction, hashing and file I/O. A full queue drops
 the event, and so does a writer that fails on it. Either way the drop is counted on the store and
 on the event's run (`RunRecord.dropped_events`), and a WARNING is logged on the first drop and
-every 1000th after it: a recording failure never affects traffic (design §5.2).
+every 1000th after it: a recording failure never affects traffic.
 
-NOTHING REACHES DISK UNREDACTED (#69). The writer thread runs `redact.redact_exchange` on every
+NOTHING REACHES DISK UNREDACTED. The writer thread runs `redact.redact_exchange` on every
 exchange, and `redact.redact_json` on every trigger's name and args, every tool call's args and
 result, and every error's type and message, before it hashes or writes anything. A body is
 redacted whole and only then cut at MAX_STORED_BODY, so a secret straddling the cut is never stored
 as half a secret. A streamed body's `stream_chunks` are cut with it, so they still split what is
-stored (#71). An error is redacted whole and only then cut to a label, for the same reason (#179).
+stored. An error is redacted whole and only then cut to a label, for the same reason.
 
 A RUN ID NAMES A DIRECTORY ONLY WHEN THIS STORE CAN USE IT AS ONE. `trace.is_valid_run_id` is the
-path-traversal guard, and it is checked again here rather than trusted (#68). A valid id can still
+path-traversal guard, and it is checked again here rather than trusted. A valid id can still
 collide: `Run1` and `run1` are both valid, and on a case-insensitive filesystem (macOS APFS by
 default) they are one directory. The first to reach the store keeps it; an event for the other is
 stored in `unattributed/` like an invalid id, and an exchange among them is flagged
 `exchange.BAD_RUN_ID_FLAG`. So is an event of a replay's that names a run the replay did not make -
-the run it replays, or any other already stored (#82). Two runs are never merged into one
+the run it replays, or any other already stored. Two runs are never merged into one
 directory.
 
 WHAT IS STORED IS STILL PRIVATE. Redaction hides credentials, not the business data around them -
@@ -37,10 +37,10 @@ different run directories, and a blob is written once whatever its writer. What 
 processes never interleave inside a line. Each writer numbers its own lines, so that file may repeat
 a `seq` across processes; a run's own file never does. A `serve` is the writer that fills that file,
 so a root has at most one: it holds `serve.lock` while it runs (`ServeLock`), and a second one on
-the same root refuses to start (#77).
+the same root refuses to start.
 
 A LONG `irimi serve` STAYS BOUNDED. The queue is capped in items and in bytes - an exchange's
-bodies, a tool call (#76) and a run's start (#99), each whole as JSON - and a body over
+bodies, a tool call and a run's start, each whole as JSON - and a body over
 MAX_REDACTED_BODY is dropped before it is queued, so the writer never redacts hundreds of MB while
 holding the GIL the proxy needs. A telemetry exchange is reduced to its `TelemetrySeen` on the
 caller's side, for the same reason. The files a writer touched are fsynced in batches, a run's
@@ -91,27 +91,27 @@ from irimi.trace import (
 logger = logging.getLogger(__name__)
 
 # The longest body stored. A longer one keeps its first MAX_STORED_BODY bytes, its ref says
-# `truncated: true`, and its exchange carries BODY_TRUNCATED_FLAG (#70).
+# `truncated: true`, and its exchange carries BODY_TRUNCATED_FLAG.
 MAX_STORED_BODY = 8 * 1024 * 1024
 # How many items may wait for the writer. A full queue drops the event rather than block a hook.
 QUEUE_SIZE = 10_000
 # How many body bytes may wait for the writer, whatever the item count: 10,000 exchanges of 8 MiB
-# each would otherwise hold 80 GiB. A tool call counts as body bytes (#76), and so does a run's
-# start, each as its whole JSON, of which the control endpoint takes up to 2 MiB (#99). An
+# each would otherwise hold 80 GiB. A tool call counts as body bytes, and so does a run's
+# start, each as its whole JSON, of which the control endpoint takes up to 2 MiB. An
 # item that would pass it is dropped, unless the queue holds no bodies at all, so one large
 # exchange still reaches an idle writer.
 MAX_QUEUED_BYTES = 256 * 1024 * 1024
 # The most of an end's error type and of its message that wait for the writer, each cut outside
 # any secret's shape (`secret_shapes.cut_outside_secrets`), so an end costs the byte budget
 # nothing and is never dropped by it, and what the writer redacts, then cuts to a label, is still a
-# prefix of the redacted whole (#179). Four labels' worth, so the label is cut short only when
+# prefix of the redacted whole. Four labels' worth, so the label is cut short only when
 # redaction shrank keys by more than three labels.
 MAX_QUEUED_ERROR = 4 * MAX_ERROR_MESSAGE
 # The writer fsyncs the files it has written once it has made this many writes (lines and blobs)
 # since the last sync, whenever the queue has been idle for SYNC_IDLE_S, and on close. Counting
 # writes, not files, bounds what a crash can lose: one long run appends to one file, which as a
-# count of distinct files never reached 1000. And a `serve` running for weeks neither remembers
-# every path it wrote nor syncs them all at shutdown (#70).
+# count of distinct files never reaches 1000. And a `serve` running for weeks neither remembers
+# every path it wrote nor syncs them all at shutdown.
 SYNC_EVERY = 1000
 SYNC_IDLE_S = 1.0
 # A body larger than this is not stored at all: its exchange is stored with that body empty and
@@ -130,17 +130,17 @@ BLOBS_DIR = "blobs"
 RUNS_DIR = "runs"
 RUN_FILE = "run.json"
 EVENTS_FILE = "events.jsonl"
-# The file a `serve` holds an exclusive lock on for as long as it runs (#77).
+# The file a `serve` holds an exclusive lock on for as long as it runs.
 SERVE_LOCK_FILE = "serve.lock"
 
-# Called by the writer thread with a run's id once it has written that run's end (#77).
+# Called by the writer thread with a run's id once it has written that run's end.
 OnRunEnded = Callable[[str], None]
 
 
 @dataclass(frozen=True)
 class StoreStats:
     """What `TraceStore.stats()` reports; the control endpoint's `GET /_irimi/health` answers
-    with it (#73)."""
+    with it."""
 
     queued: int  # items waiting for the writer
     written: int  # event lines written
@@ -204,15 +204,15 @@ def header_record(
 ) -> RunRecord:
     """The record of a run id that arrived on an event with no start: `attribution: "header"`,
     every optional field None. The writer creates it on the first event of a run with no
-    `run.json`, and `StoreReader` gives it to `unattributed/`, which has none (#70).
+    `run.json`, and `StoreReader` gives it to `unattributed/`, which has none.
 
     The writer passes that first event's `started_at`, the earliest moment the run is known by.
-    Without it a header run sorted after every run that has a start, so `irimi runs list` hid an
-    agent's labelled runs behind its process runs as soon as there were more of those than its
-    `--limit` (#72).
+    Without it a header run would sort after every run that has a start, so `irimi runs list`
+    would hide an agent's labelled runs behind its process runs as soon as there were more of
+    those than its `--limit`.
 
     A store a replay writes passes the run it replays: a header run made then is that replay's,
-    and says so (`trace.mode_for`, #82)."""
+    and says so (`trace.mode_for`)."""
     return RunRecord(
         schema_version=SCHEMA_VERSION,
         run_id=run_id,
@@ -236,8 +236,8 @@ def _read_run_json(directory: Path) -> RunRecord:
     OSError when the file cannot be read now, and TraceFormatError, and nothing else, for what it
     holds when this irimi cannot read that: a newer version, bytes that are not UTF-8 or JSON
     (ValueErrors), or JSON nested past the parser's depth (a RecursionError, which would otherwise
-    escape `list_runs` and hide every other run) (#70). Every refusal names the file, a decoder's
-    as well as the parser's: `'name' is a list` alone does not say which run.json it is (#134)."""
+    escape `list_runs` and hide every other run). Every refusal names the file, a decoder's
+    as well as the parser's: `'name' is a list` alone does not say which run.json it is."""
     path = directory / RUN_FILE
     data = path.read_bytes()
     try:
@@ -271,14 +271,14 @@ class StoreLayout:
 @dataclass(frozen=True)
 class _StartRun:
     record: RunRecord
-    # The record as JSON, in bytes, measured once as it is queued (#99).
+    # The record as JSON, in bytes, measured once as it is queued.
     json_bytes: int = 0
 
 
 @dataclass(frozen=True)
 class _EndRun:
     # Counts one item of QUEUE_SIZE and no bytes (`_item_bytes`): its error waits cut to
-    # MAX_QUEUED_ERROR, so the byte budget never drops a run's end (#179).
+    # MAX_QUEUED_ERROR, so the byte budget never drops a run's end.
     run_id: str
     ended_at: float
     outcome: Outcome
@@ -289,8 +289,8 @@ class _EndRun:
 @dataclass(frozen=True)
 class _Record:
     event: Exchange | ToolCall | TelemetrySeen
-    # A tool call as JSON, in bytes, measured once as it is queued (#76): the whole call, since a
-    # posted name or id may be nearly all of its 2 MiB, as its args may (#99).
+    # A tool call as JSON, in bytes, measured once as it is queued: the whole call, since a
+    # posted name or id may be nearly all of its 2 MiB, as its args may.
     json_bytes: int = 0
 
 
@@ -329,12 +329,12 @@ class DirectoryStore:
 
         `on_run_ended` is called on the writer thread with a run's id once that run's end is
         written, so every event queued before the end is already on disk: `serve` prints the
-        run's summary from it (#77). What it raises is logged and swallowed. It runs before the
+        run's summary from it. What it raises is logged and swallowed. It runs before the
         writer takes its next item, so a slow one holds the queue back.
 
         `replay_of` is the stored run the engine writing here answers from, if it is a replay: each
         run this store starts or makes from a header is that replay's, and it writes no run it did
-        not make, the run it replays included (`_not_this_replays`, #82)."""
+        not make, the run it replays included (`_not_this_replays`)."""
         _mkdirs(root)
         if not root.is_dir() or not os.access(root, os.W_OK | os.X_OK):
             raise PermissionError(f"the trace store {root} is not a writable directory")
@@ -351,7 +351,7 @@ class DirectoryStore:
         # By the run id the event named, or `unattributed` for one that names no run directory.
         self._run_drops: Counter[str] = Counter()
         self._runs: dict[str, _Run] = {}  # writer thread only
-        # Writer thread only: the runs a replay's store made, the only ones it writes (#82). Kept
+        # Writer thread only: the runs a replay's store made, the only ones it writes. Kept
         # past a run's end, so a late event reopens it; empty for a store that is no replay's.
         self._made: set[str] = set()
         self._touched: set[Path] = set()  # writer thread only: files not yet fsynced
@@ -363,7 +363,7 @@ class DirectoryStore:
     # -- the public methods: each enqueues one item and returns ------------------------------
 
     def start_run(self, record: RunRecord) -> None:
-        # A start counts against the byte budget as a tool call does (#99), so one that cannot be
+        # A start counts against the byte budget as a tool call does, so one that cannot be
         # measured is a drop, as a tool call's is. A dropped start leaves its run to be made from
         # its first event as a `header` run, as every dropped start does (docs/trace-format.md).
         try:
@@ -401,7 +401,7 @@ class DirectoryStore:
         error: ErrorInfo | None = None,
         exit_code: int | None = None,
     ) -> None:
-        # A posted error may be 2 MiB, and the writer cuts it only once it has redacted it (#179),
+        # A posted error may be 2 MiB, and the writer cuts it only once it has redacted it,
         # so it waits cut outside any secret to MAX_QUEUED_ERROR, and an end is never counted
         # against MAX_QUEUED_BYTES: a run never loses its end to the byte budget. An error that is
         # not text is a drop, never raised into the caller.
@@ -463,7 +463,7 @@ class DirectoryStore:
     def _drop(self, run_id: str, why: str) -> None:
         # A run id that can name no directory is counted under `unattributed`, which has no
         # run.json to write it to: a stream of distinct bad ids must not grow the counter, and one
-        # that is not even a string must not raise here, in the writer's own error path (#70).
+        # that is not even a string must not raise here, in the writer's own error path.
         key = run_id if names_a_run_dir(run_id) else UNATTRIBUTED
         with self._lock:
             self._dropped += 1
@@ -498,7 +498,7 @@ class DirectoryStore:
             except queue.Empty:
                 # `close()` gave up on this writer and drained the queue, its sentinel included:
                 # nothing more will come, so the writer ends here rather than wake up every
-                # SYNC_IDLE_S for the life of the process (#70).
+                # SYNC_IDLE_S for the life of the process.
                 if self._abandoned.is_set():
                     return
                 self._sync()  # idle: make what was written durable before more arrives
@@ -516,7 +516,7 @@ class DirectoryStore:
                     self._sync()
             except Exception as exc:
                 # The type only, and through `_drop`'s rate limit: a full disk fails every event,
-                # and an exception's message may quote the value it choked on (#69).
+                # and an exception's message may quote the value it choked on.
                 logger.debug("irimi: the trace store's writer failed", exc_info=True)
                 self._drop(_item_run_id(item), f"the writer raised {type(exc).__name__}")
 
@@ -530,14 +530,14 @@ class DirectoryStore:
 
     def _start(self, record: RunRecord) -> None:
         run = self._run_dir(record.run_id)
-        # A RUN THAT HAS ENDED IS NOT STARTED AGAIN (#97). A start re-posted after the run's end
+        # A RUN THAT HAS ENDED IS NOT STARTED AGAIN. A start re-posted after the run's end
         # would rewrite its run.json whole, losing its end, its outcome and its first trigger, so
-        # it listed `incomplete` again. It is dropped, and counted on the store alone, in health's
-        # `dropped` (the endpoint answered 204 when it queued it): the run lost nothing, so its
-        # run.json is not rewritten, its `dropped_events` included. `_run` reopens a run forgotten
-        # at its end from disk, so its stored outcome is seen here, and it is forgotten again, so
-        # a serve holds only the runs still open. A `header` run has no outcome, so a start still
-        # rewrites it (#70).
+        # it would list `incomplete` again. It is dropped, and counted on the store alone, in
+        # health's `dropped` (the endpoint answered 204 when it queued it): the run lost nothing,
+        # so its run.json is not rewritten, its `dropped_events` included. `_run` reopens a run
+        # forgotten at its end from disk, so its stored outcome is seen here, and it is forgotten
+        # again, so a serve holds only the runs still open. A `header` run has no outcome, so a
+        # start still rewrites it.
         if run.record is not None and run.record.outcome is not None:
             self._drop(UNATTRIBUTED, "a start was posted for a run that has already ended")
             self._forget(record.run_id, run)
@@ -545,14 +545,14 @@ class DirectoryStore:
         trigger = record.trigger
         if trigger is not None:
             # The name is the command's argv[0], which `args` repeats, so it is redacted as they
-            # are, or it would store what they hide (#69).
+            # are, or it would store what they hide.
             trigger = replace(
                 trigger,
                 name=self._redact_text(trigger.name),
                 args=redact.redact_json(trigger.args, self._key),
             )
         # Every run a replay's store starts is that replay's, the process run and an SDK run alike,
-        # whatever its record says: one rule for a run's mode, `trace.mode_for` (#82).
+        # whatever its record says: one rule for a run's mode, `trace.mode_for`.
         if self._replay_of is not None:
             record = replace(record, mode=mode_for(self._replay_of), replay_of=self._replay_of)
         self._write_record(
@@ -578,14 +578,14 @@ class DirectoryStore:
                 self._on_run_ended(end.run_id)
             except Exception as exc:
                 # The run is stored whatever its caller did with the news. The type only, as
-                # every failure here is logged: a message may quote what it choked on (#69).
+                # every failure here is logged: a message may quote what it choked on.
                 logger.warning("irimi: the end-of-run callback raised %s", type(exc).__name__)
                 logger.debug("irimi: the end-of-run callback's traceback", exc_info=True)
 
     def _run_dir(self, run_id: str) -> _Run:
         """The writer's state for a run directory a start or an end may write. Raises ValueError -
         a drop - for an id that names no directory, before anything is opened for it, so neither
-        creates one, `unattributed/` included (#70)."""
+        creates one, `unattributed/` included."""
         if not names_a_run_dir(run_id):
             raise ValueError("this run id names no run directory")
         run = self._run(run_id)
@@ -594,16 +594,16 @@ class DirectoryStore:
         return run
 
     def _redact_text(self, text: str) -> str:
-        """`text` with every secret shape replaced, REDACTION_FAILED when that failed (#69)."""
+        """`text` with every secret shape replaced, REDACTION_FAILED when that failed."""
         redacted = redact.redact_json(text, self._key)
         return redacted if isinstance(redacted, str) else redact.REDACTION_FAILED
 
     def _redact_error(self, error: ErrorInfo | None) -> ErrorInfo | None:
         """An error as a trace keeps it: its type and its message each redacted as text, whole,
         and only then cut, to MAX_ERROR_TYPE and MAX_ERROR_MESSAGE. An exception's message may quote
-        the key it refused (#69), and a posted type is whatever the client sent (#179). Cut first,
+        the key it refused, and a posted type is whatever the client sent. Cut first,
         a key straddling the cut would no longer be its shape, and its kept half would reach disk:
-        so a stored error is a prefix of the redacted whole, as a stored body is (#179)."""
+        so a stored error is a prefix of the redacted whole, as a stored body is."""
         if error is None:
             return None
         return ErrorInfo(
@@ -630,7 +630,7 @@ class DirectoryStore:
         if not run.writable:
             raise ValueError(f"run {event.run_id!r} is another schema version")
         if run.dir is not None and run.record is None:
-            # `0.0` is an event built with no clock: no start at all (docs/trace-format.md, #72).
+            # `0.0` is an event built with no clock: no start at all (docs/trace-format.md).
             started_at = event.started_at or None
             self._write_record(run, header_record(event.run_id, started_at, self._replay_of))
         stored = self._for_disk(event, bad_run_id=run.dir is None)
@@ -657,14 +657,14 @@ class DirectoryStore:
         ex = redact.redact_exchange(event, self._key)
         flags = list(ex.flags)
         # A decoded Exchange carries only its bytes, not `BodyRef.truncated`, so a cut body says
-        # so in its flags or the fact is lost on read (#68).
+        # so in its flags or the fact is lost on read.
         bodies = (ex.request.body, b"" if ex.response is None else ex.response.body)
         if any(len(body) > MAX_STORED_BODY for body in bodies):
             flags.append(BODY_TRUNCATED_FLAG)
         if bad_run_id and event.run_id != UNATTRIBUTED:
             flags.append(BAD_RUN_ID_FLAG)
         # `_put_body` keeps the first MAX_STORED_BODY bytes, so a streamed body's chunks are cut
-        # there too, and still split the body that is stored (#71).
+        # there too, and still split the body that is stored.
         chunks = clip_chunks(ex.stream_chunks, MAX_STORED_BODY)
         return replace(ex, flags=tuple(dict.fromkeys(flags)), stream_chunks=chunks)
 
@@ -683,8 +683,7 @@ class DirectoryStore:
         """The writer's state for `run_id`, made on first touch. A run id the store cannot use as
         a directory, and `trace.UNATTRIBUTED` itself, share `unattributed/`."""
         if not isinstance(run_id, str):
-            # A line holding it would be one no reader decodes, damaging `unattributed/` for good
-            # (#70).
+            # A line holding it would be one no reader decodes, damaging `unattributed/` for good.
             raise TypeError("a run id is a string")
         if not names_a_run_dir(run_id):
             # Not remembered under its own id: a stream of distinct bad ids must not grow the map.
@@ -707,14 +706,14 @@ class DirectoryStore:
     def _not_this_replays(self, run_id: str) -> bool:
         """True when this store is a replay's and `run_id` names a run it did not make.
 
-        A REPLAY WRITES ONLY THE RUNS IT MAKES (#82). An agent that names its runs itself - an
+        A REPLAY WRITES ONLY THE RUNS IT MAKES. An agent that names its runs itself - an
         `Irimi-Run` label, a run id its SDK reuses, a start it posts by hand - names the recorded
         runs again: the one replayed, and every other the recorded process held. Each directory is
-        another run's, as a clash's is, and appending to one merged two runs in it and rewrote its
-        record as the replay's, so a later replay of it read both. So a run directory this store
-        did not make - recorded, or another process's - is never written by a replay, whether or
-        not it is the run replayed; nor is the run replayed, wherever it is stored. A store that is
-        no replay's resumes an existing run as it always has (`_open`)."""
+        another run's, as a clash's is, and appending to one would merge two runs in it and
+        rewrite its record as the replay's, so a later replay of it would read both. So a run
+        directory this store did not make - recorded, or another process's - is never written by a
+        replay, whether or not it is the run replayed; nor is the run replayed, wherever it is
+        stored. A store that is no replay's resumes an existing run (`_open`)."""
         if self._replay_of is None:
             return False
         if run_id == self._replay_of:
@@ -737,7 +736,7 @@ class DirectoryStore:
         """Start tracking a run. An existing directory - a serve-mode restart - resumes its `seq`
         from its last readable line, after truncating a half-written one, and is never appended
         to when its run.json is another schema version (docs/trace-format.md, "Versioning") or
-        cannot be decoded: damage, which since #167 includes a `replay_of` that is no run id or
+        cannot be decoded: damage, which includes a `replay_of` that is no run id or
         disagrees with `mode`. Its events and end are dropped and counted, and the record is left
         as it was found, never rewritten as a header run's over the damage."""
         _mkdirs(events.parent)
@@ -745,8 +744,7 @@ class DirectoryStore:
         writable = True
         if directory is not None and (directory / RUN_FILE).exists():
             # An OSError - too many open files, say - is left to drop this one event: refusing the
-            # run for good would drop every later one of a run that is only unreadable for now
-            # (#70).
+            # run for good would drop every later one of a run that is only unreadable for now.
             try:
                 record = _read_run_json(directory)
                 writable = record.schema_version == SCHEMA_VERSION
@@ -765,7 +763,7 @@ class DirectoryStore:
         would never append to that run again (`_open`). A run writes it a handful of times. The
         rename is not synced, which would take an fsync of the directory: a crash may lose the
         newest run.json and keep the one before it, whole - a run that reads as not ended, never
-        as damage (#70)."""
+        as damage."""
         assert run.dir is not None
         record = replace(
             record,
@@ -818,7 +816,7 @@ class DirectoryStore:
 def _as_queued(exchange: Exchange) -> Exchange | TelemetrySeen:
     """What `record` queues, at O(1) cost on the caller's thread. Telemetry is forwarded and its
     requests and responses are never stored: one line per exchange records only that it happened
-    and to which host, so a stored run's summary can count it (#70). A body over MAX_REDACTED_BODY
+    and to which host, so a stored run's summary can count it. A body over MAX_REDACTED_BODY
     is dropped here and its exchange flagged, so the queue never holds it and the writer never
     redacts it."""
     if exchange.kind == "telemetry":
@@ -829,7 +827,7 @@ def _as_queued(exchange: Exchange) -> Exchange | TelemetrySeen:
     stream_chunks = exchange.stream_chunks
     if response is not None and len(response.body) > MAX_REDACTED_BODY:
         response = replace(response, body=b"")
-        stream_chunks = ()  # an empty body has nothing to split (#71)
+        stream_chunks = ()  # an empty body has nothing to split
     if request is exchange.request and response is exchange.response:
         return exchange
     flags = tuple(dict.fromkeys((*exchange.flags, BODY_TRUNCATED_FLAG)))
@@ -850,9 +848,9 @@ def _fsync(path: Path) -> None:
 
 
 def _item_bytes(item: _Item) -> int:
-    """The bytes `item` holds while it waits: an exchange's two bodies, and a tool call (#76) and a
-    run's start (#99) as their whole JSON, which the control endpoint takes up to
-    `control.MAX_CONTROL_BODY` of. An end holds an error cut to MAX_QUEUED_ERROR (#179)."""
+    """The bytes `item` holds while it waits: an exchange's two bodies, and a tool call and a
+    run's start as their whole JSON, which the control endpoint takes up to
+    `control.MAX_CONTROL_BODY` of. An end holds an error cut to MAX_QUEUED_ERROR."""
     if isinstance(item, _Record) and isinstance(item.event, Exchange):
         response = item.event.response
         return len(item.event.request.body) + (0 if response is None else len(response.body))
@@ -863,7 +861,7 @@ def _item_bytes(item: _Item) -> int:
 
 def _queued_error(error: ErrorInfo) -> ErrorInfo:
     """`error` as it waits for the writer: its type and its message each cut to MAX_QUEUED_ERROR
-    outside any secret's shape (#179). Raises TypeError for one that is not text."""
+    outside any secret's shape. Raises TypeError for one that is not text."""
     return ErrorInfo(
         cut_outside_secrets(error.type, MAX_QUEUED_ERROR),
         cut_outside_secrets(error.message, MAX_QUEUED_ERROR),
@@ -872,7 +870,7 @@ def _queued_error(error: ErrorInfo) -> ErrorInfo:
 
 def _item_run_id(item: _Item) -> str:
     """The run id `item` names, to count its drop under. `unattributed` when the caller handed the
-    store something that names none: counting a drop is the error path, and must not raise (#70)."""
+    store something that names none: counting a drop is the error path, and must not raise."""
     if isinstance(item, _EndRun):
         return item.run_id
     named = item.record if isinstance(item, _StartRun) else item.event
@@ -894,11 +892,11 @@ def _mkdirs(path: Path) -> None:
 
 
 class StoreLocked(OSError):
-    """Another process holds this store's `serve.lock`: another `serve` writes it (#77)."""
+    """Another process holds this store's `serve.lock`: another `serve` writes it."""
 
 
 class ServeLock:
-    """A root's `serve.lock`, held exclusively by this process until `release()` (#77).
+    """A root's `serve.lock`, held exclusively by this process until `release()`.
 
     `unattributed/events.jsonl` is where a serve files every request no run claims. Two serves
     appending to it would repeat each other's `seq`, and one resuming it would cut off the other's
@@ -935,11 +933,11 @@ class ServeLock:
 
 def names_a_run_dir(run_id: object) -> bool:
     """True when `run_id` may be a directory under `runs/`: `trace.is_valid_run_id`, the
-    path-traversal guard, checked again rather than trusted (#68), and not `unattributed`, which is
+    path-traversal guard, checked again rather than trusted, and not `unattributed`, which is
     the name of "no run". Anything else is stored in `unattributed/` and never opens a path.
 
     Public because the control endpoint refuses, with a 400, the run ids this store would only
-    count as a drop: the agent is told, rather than its run silently going missing (#73)."""
+    count as a drop: the agent is told, rather than its run silently going missing."""
     return isinstance(run_id, str) and run_id != UNATTRIBUTED and trace.is_valid_run_id(run_id)
 
 
@@ -961,8 +959,7 @@ def _append_line(path: Path, data: bytes) -> None:
             # the run for every later read: cut it off again before reporting the drop. Only
             # this line's own bytes, and only while they still end the file: `unattributed/` is
             # shared, and a line another process appended meanwhile is not this one's to cut.
-            # A `write` that raised wrote nothing, so a line the disk never took is left alone
-            # (#70).
+            # A `write` that raised wrote nothing, so a line the disk never took is left alone.
             if start >= 0 and end - start == len(data) - len(view) and os.fstat(fd).st_size == end:
                 os.ftruncate(fd, start)
             raise
@@ -1014,7 +1011,7 @@ def _last_seq(data: bytes) -> int | None:
     when none does. A tail's first line may start mid-line, and a damaged line may hold anything:
     `{"seq": 1e400}` is infinity, which `int()` refuses with an OverflowError, and a line nested
     past the parser's depth is a RecursionError. Either one escaping would drop every later event
-    of the run, on every restart (#70)."""
+    of the run, on every restart."""
     for line in reversed(data[: data.rfind(b"\n") + 1].splitlines()):
         try:
             seq = json.loads(line)["seq"]
@@ -1049,17 +1046,17 @@ class StoreReader:
         irimi cannot read - a newer schema version, damage, or one it may not open - is skipped
         with a WARNING, so one run cannot hide the others. So is one that names another run than
         its directory does: `load_run` would refuse that id, so listing it would name a run that
-        cannot be shown (#70). A store with no `runs/` holds no run; one irimi may not list
-        raises its OSError (#142)."""
+        cannot be shown. A store with no `runs/` holds no run; one irimi may not list
+        raises its OSError."""
         records = []
         try:
-            # `Path.is_dir` read a store irimi may not enter as none, so `runs list` said it held
-            # no runs (#142).
+            # Not `Path.is_dir`, which reads a store irimi may not enter as absent, so `runs list`
+            # would say it holds no runs.
             runs = sorted(self.layout.runs.iterdir())
         except (FileNotFoundError, NotADirectoryError):
             runs = []
         for directory in runs:
-            # One irimi may not read is skipped with a warning too, never silently (#142).
+            # One irimi may not read is skipped with a warning too, never silently.
             try:
                 if not _holds_run_file(directory):
                     continue
@@ -1083,12 +1080,13 @@ class StoreReader:
         `header_record`. Raises RunNotFound for an id with no run, TraceFormatError for a
         damaged run: an unparseable line other than a crash's truncated last one, a missing blob;
         and OSError for one irimi may not read, its directory or a file in it, which is not a
-        missing run (#142).
+        missing run.
 
         `bodies=False` leaves every body empty and reads no blob, though each is still checked to
         exist at its size, so a missing or resized blob is damage either way. It is for a caller
-        that counts events and never reads a body: `irimi runs list` read every body of every run
-        it listed, hundreds of MB for a few runs of LLM streams, to print two numbers (#72)."""
+        that counts events and never reads a body: `irimi runs list` would otherwise read every
+        body of every run it lists, hundreds of MB for a few runs of LLM streams, to print two
+        numbers."""
         get_body = self._get_body if bodies else self._check_body
         if run_id == UNATTRIBUTED:
             events = self.layout.unattributed_events
@@ -1109,7 +1107,7 @@ class StoreReader:
         for line, d in _lines(path):
             # Every refusal names its file and line, as a line that does not parse does: in a run
             # of thousands of events, `'name' is a list` alone cannot be found. A missing blob is
-            # named by the line whose event refers to it (#134).
+            # named by the line whose event refers to it.
             try:
                 numbered.append(trace.event_from_json(d, get_body))
             except TraceFormatError as exc:
@@ -1138,7 +1136,7 @@ class StoreReader:
 
 def _holds_run_file(directory: Path) -> bool:
     """Whether a run directory holds a run.json. An OSError other than its absence is raised:
-    `Path.is_file` reads one as False, and a run irimi may not read was reported missing (#142)."""
+    `Path.is_file` reads one as False, which would report a run irimi may not read as missing."""
     try:
         return stat.S_ISREG((directory / RUN_FILE).stat().st_mode)
     except (FileNotFoundError, NotADirectoryError):
@@ -1149,7 +1147,7 @@ def _lines(path: Path) -> Iterator[tuple[int, Any]]:
     """Each line of an `events.jsonl`, parsed, after its line number from 1. A final line with no
     newline that does not parse was cut off by a crash mid-write, and is skipped; any other that
     does not parse is damage. A file that is not there holds no line; one irimi may not read
-    raises its OSError, never reads as empty (#142)."""
+    raises its OSError, never reads as empty."""
     try:
         data = path.read_bytes()
     except FileNotFoundError:

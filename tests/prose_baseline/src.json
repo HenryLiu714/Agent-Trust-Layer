@@ -4,9 +4,7 @@
     "issue_ref": 9
   },
   "src/irimi/control.py": {
-    "caps_run": 3,
-    "issue_ref": 36,
-    "planning_id": 1
+    "caps_run": 3
   },
   "src/irimi/delegation.py": {
     "caps_run": 1
@@ -84,19 +82,10 @@
     "issue_ref": 10
   },
   "src/irimi/recording.py": {
-    "caps_run": 10,
-    "design_ref": 1,
-    "issue_ref": 35,
-    "section_sign": 1,
-    "since_issue": 1
+    "caps_run": 10
   },
   "src/irimi/redact.py": {
-    "caps_run": 1,
-    "decision_code": 1,
-    "design_ref": 2,
-    "issue_ref": 30,
-    "phase": 1,
-    "section_sign": 2
+    "caps_run": 1
   },
   "src/irimi/replay.py": {
     "caps_run": 1
@@ -192,17 +181,10 @@
     "phase": 1
   },
   "src/irimi/store.py": {
-    "caps_run": 11,
-    "design_ref": 1,
-    "issue_ref": 74,
-    "section_sign": 1,
-    "since_issue": 1
+    "caps_run": 11
   },
   "src/irimi/trace.py": {
-    "caps_run": 1,
-    "issue_possessive": 3,
-    "issue_ref": 56,
-    "phase": 1
+    "caps_run": 1
   },
   "src/irimi/writelog.py": {
     "issue_ref": 3

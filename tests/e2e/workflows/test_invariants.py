@@ -161,6 +161,8 @@ def test_every_known_bug_marker_takes_one_form():
     assert found == []
 
 
+# It runs every scenario bare and in `mode`: a minute alone, and over 120 s on a loaded worker.
+@pytest.mark.timeout(600)
 @pytest.mark.parametrize("mode", ["shadow", "serve"])
 def test_the_corpus_gives_every_invariant_something_to_catch(run_workflow, mode):
     """An invariant nothing exercises passes by default. Each needs at least one scenario whose

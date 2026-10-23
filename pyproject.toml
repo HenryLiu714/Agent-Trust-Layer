@@ -14,18 +14,23 @@ classifiers = [
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
-    "Topic :: Software Development :: Testing",
     "Topic :: Internet :: Proxy Servers",
+    "Topic :: Security",
+    "Topic :: Software Development :: Testing",
+    "Typing :: Typed",
 ]
 requires-python = ">=3.12" # floor for end users; development pins 3.14 via .python-version
 dependencies = [
     "cryptography>=42",
     # >=12 because `IrimiAddon.request` is a coroutine hook, and only 12's addonmanager awaits one
     # (`inspect.iscoroutinefunction` in `invoke_addon`). On 11 the decision would never run (#45).
-    "mitmproxy>=12",
+    # <13 because the addon depends on mitmproxy's hook internals. 12.2.1 is the lowest 12 that
+    # resolves with the other floors.
+    "mitmproxy>=12.2.1,<13",
     # Imported directly to decode a body incrementally, up to a cap (#94). mitmproxy depends on both;
     # >=1.2 because only 1.2's `Decompressor.process` takes `output_buffer_limit`.
     "brotli>=1.2",
@@ -40,6 +45,8 @@ irimi = "irimi.cli:main"
 Homepage = "https://github.com/HenryLiu714/Irimi"
 Source = "https://github.com/HenryLiu714/Irimi"
 Issues = "https://github.com/HenryLiu714/Irimi/issues"
+Documentation = "https://github.com/HenryLiu714/Irimi#readme"
+Changelog = "https://github.com/HenryLiu714/Irimi/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 # `uv sync` installs `dev` by default. `examples` is opt-in: `uv sync --group examples`.
@@ -57,13 +64,13 @@ examples = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/irimi"]
 
-# The sdist is what a wheel builds from, nothing more: no tests, examples, CI or agent settings (#169).
+# The sdist is what a wheel builds from, nothing more: no tests, examples, CI or agent settings.
 [tool.hatch.build.targets.sdist]
 include = ["/src/irimi", "/README.md", "/LICENSE", "/pyproject.toml"]
 

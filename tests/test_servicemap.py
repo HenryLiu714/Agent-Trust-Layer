@@ -253,6 +253,8 @@ def test_the_shipped_maps_and_fixtures_are_inside_a_built_wheel(tmp_path):
         # The entry point the maps are loaded through has to be in there too, or the refusal the
         # missing maps would raise never gets the chance to run.
         assert "irimi/servicemap/loader.py" in wheel.namelist()
+        # Without the PEP 561 marker a user's type checker treats every `irimi` import as untyped.
+        assert "irimi/py.typed" in wheel.namelist()
         fixtures = sorted(
             name.removeprefix("irimi/fixtures/")
             for name in wheel.namelist()

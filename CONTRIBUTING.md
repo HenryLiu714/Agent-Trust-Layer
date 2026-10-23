@@ -185,11 +185,76 @@ schema; the loader refuses anything outside it by name. Things to know before yo
 
 - Branch per issue, named `<issue-number>-<short-slug>`. Open a PR against `main` with
   `Closes #<n>` in the body.
-- Commit messages say what changed and why, in the imperative. The `#<n>` of the issue that
-  motivated a rule belongs in the comment that states the rule, so the next reader can find the
-  bug it closed.
+- Commit messages say what changed and why, in the imperative. The issue a change closes belongs
+  in the commit message and the PR, not in the comment that states the rule: `git blame` finds it.
+  The next section says when a comment may cite an issue.
 - A safety rule is enforced where the configuration is loaded *and* at the decision it protects.
   One check is a rule-shaped hole.
 - Nothing in a mitmproxy hook may raise. Fail closed: answer locally and flag it.
 - CI runs lint, format check, mypy and the tests on Ubuntu and macOS, on Python 3.14 and on 3.12,
   the floor `pyproject.toml` promises.
+
+## Writing comments, docstrings and messages
+
+### Comments
+
+1. A comment says **why**: a constraint, an invariant, or a consequence that is not obvious. It
+   never says **what** the next line does, or **when** or **how** it came to be.
+2. One to three lines is normal. If you need more than six, the content belongs in a docstring or
+   in `docs/` (link it by section name).
+3. Write plain present-tense sentences in sentence case. No all-caps except constants, and no
+   headings made of capitals. Use "-" rather than em-dashes.
+4. No history: no "since #NN", "used to", "now", "Phase N", dates, "Decided ...", "this PR". Git
+   and the PR hold history.
+5. No private references: no design-doc sections or decision numbers, no planning ids, no "use
+   case N", no agent-instruction files, no Notion. If a design decision matters, it lives in
+   `docs/architecture.md`.
+6. Issue numbers: at most one per comment, only as a trailing `See #NN.`, and only when the issue
+   holds a reproduction or discussion that a reader needs. The comment must make sense with the
+   reference deleted. Never use an issue number as a noun ("#30's bug"). Never put one in a
+   docstring summary line, help text, a log or error message, printed output or a shipped map.
+   Prefer pointing at the test that pins the behaviour: `Pinned by tests/test_overlay.py::test_x`.
+7. Don't defend the absence of duplication ("the one place", "rather than a second spelling",
+   "cannot drift"). The structure shows it.
+8. Use the project's terms: a faked write, answered by irimi, replay (re-running a stored run
+   only), retry (an idempotent repeat), target, fake (a write tool's replacement), echo and
+   fixture, precondition check. Do not coin metaphors (door, world, untruth) in prose.
+
+### Docstrings
+
+PEP 257, Google style where a body is needed.
+
+1. The summary line is one line of at most 100 characters, saying what the function returns or
+   does: "Return the run's summary lines.", not "What a run prints: ...".
+2. Add a body only when the contract is not obvious from the signature: arguments with
+   constraints, return semantics, raised exceptions, thread-safety, invariants. As a rough limit,
+   the body is no longer than the code.
+3. A module docstring is its purpose (one paragraph) plus a bullet list of guarantees, 15 lines at
+   most. Protocol and design rationale go in `docs/`.
+4. Tables are fine where they replace prose, as the decision tables in `sdk/tools.py` and
+   `policy.ReplayPolicy` do.
+
+### User-facing text
+
+1. CLI lines to the terminal: `error: <what happened>[; <what to do>]`, `warning: ...`,
+   `hint: ...`. Lower case, one line, no trailing period, flags named exactly as typed. No
+   `WARNING:` or `Note:`.
+2. Logs: `irimi: <what happened>[; <consequence>]` on every logger, the SDK's included.
+3. Never show issue numbers, phase numbers or internal level codes, unless the output has a
+   documented legend (an `irimi --help` epilog or the README).
+4. argparse help is a lower-case verb phrase with no trailing period, two lines or fewer. Every
+   subcommand gets a `description=` and an `epilog=` with one example.
+5. Output uses one arrow, `->`, which is ASCII-safe.
+6. Comments in a shipped map are written for a user copying the map: explain the map's choices in
+   the map's own terms, with no issue or design references.
+
+### Enforcement
+
+`tests/test_prose_style.py` scans comments and docstrings in `src/`, `tests/` and `examples/`, and
+every line of the shipped maps, for private references, history markers, all-caps runs and issue
+numbers. It holds each file to the counts in `tests/prose_baseline/*.json`, which may only fall:
+
+- A change that adds a match fails the test. Rewrite the comment instead of raising a count.
+- A change that removes matches fails the test until you lower the file's counts to match (delete
+  an entry that reaches zero). The failure message prints the counts to write.
+- A file that moves or is renamed takes its baseline entry with it, with the same counts.

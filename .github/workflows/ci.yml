@@ -4,9 +4,15 @@ on:
   push:
     branches: [main]
   pull_request:
+  # release.yml runs this whole workflow before it publishes, so a tag is tested where it points.
+  workflow_call:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -15,26 +21,50 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         # 3.14 is what .python-version pins for development; 3.12 is the floor pyproject promises.
-        python: ["3.14", "3.12"]
+        # `+gil`, because mitmproxy's dependencies do not build on a free-threaded 3.14.
+        python: ["3.14+gil", "3.12"]
         # 3.13 is a classifier too; one Linux leg is enough to keep that claim true.
         include:
           - os: ubuntu-latest
             python: "3.13"
     runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 120 || 30 }}
     # Every uv command has to see the matrix version. `--python` on `uv sync` alone is not enough:
-    # the next `uv run` follows .python-version and rebuilds the venv on 3.14, so the 3.12 legs
-    # silently tested 3.14 (found while verifying #89).
+    # the next `uv run` follows .python-version and rebuilds the venv on 3.14.
     env:
       UV_PYTHON: ${{ matrix.python }}
+      COVERAGE_LEG: ${{ matrix.os == 'ubuntu-latest' && matrix.python == '3.14+gil' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           enable-cache: true
       # All groups, so the tests that drive the real stripe and slack-sdk clients run, not skip.
       - run: uv sync --locked --all-groups
-      - run: uv run python -c "import sys; v = '%d.%d' % sys.version_info[:2]; assert v == '${{ matrix.python }}', v"
+      - run: uv run python -c "import sys; v = '%d.%d' % sys.version_info[:2]; assert v == '${{ matrix.python }}'.removesuffix('+gil'), v"
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy
-      - run: uv run pytest
+      - if: env.COVERAGE_LEG != 'true'
+        run: uv run pytest -n auto
+      # One leg measures coverage and reports it on the run's summary page; there is no threshold.
+      - if: env.COVERAGE_LEG == 'true'
+        run: uv run pytest -n auto --cov --cov-report=term
+      - if: env.COVERAGE_LEG == 'true'
+        run: uv run coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
+
+  # The wheel and sdist build, pass twine's checks, and the wheel installs and runs on its own.
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+      - run: uv build
+      - run: uvx twine check --strict dist/*
+      - name: Smoke-test the wheel in a clean 3.12 venv
+        run: scripts/smoke-test-wheel.sh dist/*.whl

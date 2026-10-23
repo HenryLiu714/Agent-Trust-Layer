@@ -1,10 +1,9 @@
-# The server agent beside `irimi serve`, in two containers, as in production. Run it with
-# `./check.sh`; see README.md.
+# The sidecar app beside `irimi serve`, in two containers, as in production; see README.md.
 services:
   irimi:
     build:
       context: ../..
-      dockerfile: examples/server_agent/Dockerfile.irimi
+      dockerfile: examples/sidecar/Dockerfile.irimi
     # The agent container gets `ca.pem` and nothing else: never `ca.key` or the `mitm/` bundle,
     # which hold the key (`runner.child_env`'s rule). Port 4000 is not published: the control
     # endpoint has no authentication, so only this network reaches it.
@@ -24,7 +23,7 @@ services:
   agent:
     build:
       context: ../..
-      dockerfile: examples/server_agent/Dockerfile.agent
+      dockerfile: examples/sidecar/Dockerfile.agent
     # The app installs no SIGTERM handler; as PID 1 it would ignore one and be killed after 10 s.
     init: true
     depends_on:
@@ -44,7 +43,6 @@ services:
       STRIPE_API_KEY: ${STRIPE_API_KEY:?set STRIPE_API_KEY to a Stripe test-mode key}
       HOST: 0.0.0.0
       PORT: "8080"
-      IRIMI_EXAMPLE_BARRIER: ${IRIMI_EXAMPLE_BARRIER:-}
     volumes:
       - ca-public:/ca:ro
     ports:

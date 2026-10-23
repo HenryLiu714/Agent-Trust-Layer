@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
-# The server agent and `irimi serve` in two containers, two refunds at once against Stripe test
-# mode, and Stripe left untouched.
+# The sidecar example and `irimi serve` in two containers, two refunds at once against Stripe
+# test mode, and Stripe left untouched.
 #
-#     STRIPE_API_KEY=sk_test_... examples/server_agent/check.sh
+#     STRIPE_API_KEY=sk_test_... scripts/live-checks/sidecar.sh
 #
-# Needs Docker with compose, uv, and a Stripe TEST-mode key. It seeds two charges (real, in test
-# mode), refunds both through the agent under irimi, and checks that irimi stored two ok runs and
-# that Stripe holds no refund for either charge. Not in CI: run it once by hand before Phase 3
-# closes, as the Phase 2 live test was.
+# Needs Docker with compose, uv, and a Stripe test-mode key. It seeds two charges (real, in test
+# mode), refunds both through the app under irimi, and checks that irimi stored two ok runs and
+# that Stripe holds no refund for either charge. Not in CI: run it by hand before a release.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
-compose=(docker compose -f "$here/compose.yaml" -p irimi-server-agent)
+compose=(docker compose -f "$root/examples/sidecar/compose.yaml" -p irimi-sidecar)
 
 case "${STRIPE_API_KEY:-}" in
   sk_test_*) ;;
@@ -37,20 +36,19 @@ trap 'exit 143' TERM
 echo "--- seeding two test-mode charges"
 charges=()
 for _ in 1 2; do
-  line="$(cd "$root" && uv run --group examples python examples/refund_agent/seed.py)"
+  line="$(cd "$root" && uv run --group examples python -m examples.seed_stripe)"
   echo "$line"
   charge="$(echo "$line" | awk '{print $3}')"
   case "$charge" in
     ch_*) charges+=("$charge") ;;
-    *) echo "error: seed.py printed no charge id" >&2; exit 1 ;;
+    *) echo "error: the seed printed no charge id" >&2; exit 1 ;;
   esac
 done
 
 echo "--- starting irimi and the agent"
 # An earlier run killed before its trap could tear down would leave its runs in irimi's store.
 "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
-# The barrier holds each refund after its charge read until both have arrived: two runs at once.
-IRIMI_EXAMPLE_BARRIER=2 "${compose[@]}" up --build --detach --wait
+"${compose[@]}" up --build --detach --wait
 
 echo "--- two refunds at once"
 pids=()
@@ -72,22 +70,22 @@ echo "--- irimi runs list"
 runs=""
 logs=""
 # Each run is listed once its end is on disk, and its block printed just after, line by line, from
-# the store's writer thread: wait for both blocks' last line too, or the counts below race it (#78).
+# the store's writer thread: wait for both blocks' last line too, or the counts below race it.
 for _ in $(seq 1 50); do
   runs="$("${compose[@]}" exec -T irimi irimi runs list)"
   logs="$("${compose[@]}" logs --no-log-prefix irimi)"
-  [ "$(echo "$runs" | grep -cE ' ok +sdk +examples\.server_agent\.app:handle_refund ')" = 2 ] &&
+  [ "$(echo "$runs" | grep -cE ' ok +sdk +examples\.sidecar\.app:handle_refund ')" = 2 ] &&
     [ "$(echo "$logs" | grep -cE '^  [0-9]+ exchanges? · [0-9]+ real · ')" = 2 ] && break
   sleep 0.2
 done
 echo "$runs"
-[ "$(echo "$runs" | grep -cE ' ok +sdk +examples\.server_agent\.app:handle_refund ')" = 2 ]
+[ "$(echo "$runs" | grep -cE ' ok +sdk +examples\.sidecar\.app:handle_refund ')" = 2 ]
 # The header row and the two runs.
 [ "$(echo "$runs" | grep -c .)" = 3 ]
 
 echo "--- irimi's output"
 echo "$logs"
-# One block per run, each with its faked refund and its stood-in tool, and each charge's refund
+# One block per run, each with its faked refund and its tool's fake, and each charge's refund
 # in one block only: two requests at once that did not mix.
 [ "$(echo "$logs" | grep -c '^--- run ')" = 2 ]
 [ "$(echo "$logs" | grep -c '^  ○ stripe  refund ')" = 2 ]

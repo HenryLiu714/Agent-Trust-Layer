@@ -1,4 +1,4 @@
-"""The server agent beside `irimi serve`, end to end: two concurrent `POST /refund`s are two
+"""The sidecar example beside `irimi serve`, end to end: two concurrent `POST /refund`s are two
 attributed runs that never mix. The agent's environment holds no `NO_PROXY`, for the reason
 `tests/support/scenarios.py` gives, and routing is proved from the store: the stub answered as
 many charge reads as irimi stored as live."""
@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, wait
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -21,8 +22,7 @@ from urllib.parse import parse_qs, quote
 
 import pytest
 
-from examples.server_agent import app
-from examples.server_agent.app import BARRIER_ENV, TOOL_NAME
+from examples.sidecar import app
 from irimi import servicemaps
 from irimi.cli import main
 from irimi.config import ca
@@ -33,7 +33,7 @@ from irimi.protocol.trace import UNATTRIBUTED, RunEnd, ToolCall
 from irimi.record.store.reader import StoreReader
 from irimi.report.model import RunView
 from irimi.report.summary import summary_lines
-from tests.support.credentials import HERMETIC_STRIPE_KEY
+from tests.support.credentials import HERMETIC_STRIPE_KEY, REFUSED_LIVE_KEY
 from tests.support.engine import Served, port_of, serve_blocks
 from tests.support.maps import PRECONDITION_STRIPE_MAP
 from tests.support.scenarios import base_url_stripe
@@ -45,9 +45,25 @@ pytestmark = pytest.mark.e2e
 ROOT = Path(__file__).resolve().parents[2]
 CHARGES = ("ch_A", "ch_B")
 REASON = "requested_by_customer"
+TOOL_NAME = "db.mark_refunded"
 # How long `ch_A` must stay unanswered, alone at the barrier, before `ch_B` is sent. Without the
 # barrier it is answered in milliseconds; with it, not before `ch_B` arrives.
 HELD_S = 0.5
+# How long a charge read held at the barrier waits for the other: a test that sent one only fails.
+BARRIER_TIMEOUT_S = 30.0
+# The app as `python -m examples.sidecar.app` starts it, without the reverse DNS lookup of its own
+# address that `HTTPServer.server_bind` makes (`socket.getfqdn`): a slow resolver, a macOS CI
+# runner's, can hold a fresh app there past the test's deadline.
+APP = """
+import socket
+import sys
+
+socket.getfqdn = lambda name="": name or "localhost"
+
+from examples.sidecar import app
+
+sys.exit(app.main())
+"""
 # irimi as `irimi.cli.main`, with the shipped maps read from argv[1].
 IRIMI = """
 import sys
@@ -69,10 +85,30 @@ sys.exit(cli.main(sys.argv[2:]))
 FAILING = {"ch_MISSING": 404, "ch_DOWN": 500, "ch_ODD/../refunds?x=1": 404}
 
 
+def _two_at_once(answer: Callable[..., object]) -> Callable[..., object]:
+    """`any_charge` that holds each of the first two charge reads until both have arrived, so two
+    refunds sent one after the other are two runs open at once. Later reads, irimi's check reads
+    among them, are answered at once."""
+    barrier = threading.Barrier(2, timeout=BARRIER_TIMEOUT_S)
+    lock = threading.Lock()
+    arrived = [0]
+
+    def any_charge(handler, charge_id):
+        with lock:
+            arrived[0] += 1
+            hold = arrived[0] <= 2
+        if hold:
+            barrier.wait()
+        return answer(handler, charge_id)
+
+    return any_charge
+
+
 @pytest.fixture
 def stripe_stub():
-    """The refund agent test's Stripe, which answers any charge as refundable, but `FAILING`'s
-    with their errors. `stripe_stub.heard` keeps each request's headers, so a leaked `Irimi-Run`
+    """The refund test's Stripe, which answers any charge as refundable, but `FAILING`'s with
+    their errors, and holds the first two reads of a refundable charge until both are there
+    (`_two_at_once`). `stripe_stub.heard` keeps each request's headers, so a leaked `Irimi-Run`
     shows."""
     failing = {
         f"/v1/charges/{quote(charge, safe='')}": Answer(
@@ -80,7 +116,9 @@ def stripe_stub():
         )
         for charge, status in FAILING.items()
     }
-    port = serve(FakeStripe, threaded=True, **base_url_stripe(), answers=failing)
+    stripe = base_url_stripe()
+    stripe["any_charge"] = _two_at_once(stripe["any_charge"])
+    port = serve(FakeStripe, threaded=True, **stripe, answers=failing)
     yield port
     port.stop()
 
@@ -94,11 +132,11 @@ def home(home, monkeypatch, home_with_maps):
     return home
 
 
-def _agent_env(listener: str, stub_port: int, db: Path, *, barrier: bool) -> dict[str, str]:
+def _agent_env(listener: str, stub_port: int, db: Path) -> dict[str, str]:
     """The README's "Serve mode" variables, and the app's own. No `NO_PROXY`: the stub is on
     loopback, and one naming it would send the agent past irimi (see the module doc)."""
     env = {k: v for k, v in os.environ.items() if not k.lower().endswith("_proxy")}
-    for name in ("STRIPE_API_KEY", RUN_ENV, BARRIER_ENV):
+    for name in ("STRIPE_API_KEY", RUN_ENV):
         env.pop(name, None)
     env.update(
         {
@@ -113,14 +151,13 @@ def _agent_env(listener: str, stub_port: int, db: Path, *, barrier: bool) -> dic
             "HOST": "127.0.0.1",  # never a `HOST` the runner exported
             "PORT": "0",
             "PYTHONFAULTHANDLER": "1",  # a stuck app dumps its stacks on SIGABRT
-            **({BARRIER_ENV: "2"} if barrier else {}),
         }
     )
     return env
 
 
 @contextlib.contextmanager
-def _agent_beside_serve(home: Path, stub_port: int, *, barrier: bool):
+def _agent_beside_serve(home: Path, stub_port: int):
     """`irimi serve --store <home>/store`, and the app beside it as a process of its own,
     pointed at it; yields (the serve, the app's port). Both are killed on the way out, whatever
     failed, so a failed test leaves no process and no port behind."""
@@ -134,11 +171,11 @@ def _agent_beside_serve(home: Path, stub_port: int, *, barrier: bool):
     agent = None
     try:
         listener = f"http://127.0.0.1:{port_of(served.banner())}"
-        env = _agent_env(listener, stub_port, home / "refunds.sqlite3", barrier=barrier)
+        env = _agent_env(listener, stub_port, home / "refunds.sqlite3")
         assert not any(name.lower() == "no_proxy" for name in env), "the trap: see the module doc"
         with open(home / "app.err", "w") as err:
             agent = subprocess.Popen(
-                [sys.executable, "-m", "examples.server_agent.app"],
+                [sys.executable, "-c", APP],
                 cwd=ROOT,
                 env=env,
                 stdout=subprocess.PIPE,
@@ -210,13 +247,13 @@ def test_two_concurrent_requests_to_a_served_agent_are_two_runs_that_never_mix(
     store = home / "store"
     db = home / "refunds.sqlite3"
     with (
-        _agent_beside_serve(home, stripe_stub, barrier=True) as (served, port),
+        _agent_beside_serve(home, stripe_stub) as (served, port),
         ThreadPoolExecutor(2) as pool,
     ):
         first = pool.submit(_post_refund, port, "ch_A")
-        # `ch_A` is inside its run once Stripe has heard its read. The barrier holds it there
-        # until `ch_B` arrives: without it, `ch_A` would be answered alone, and the two runs
-        # would be open at once only by luck.
+        # `ch_A` is inside its run once Stripe has heard its read. The stub holds it there until
+        # `ch_B` arrives: without that, `ch_A` would be answered alone, and the two runs would be
+        # open at once only by luck.
         eventually(lambda: ("GET", "/v1/charges/ch_A") in stripe_stub.seen)
         assert not wait([first], timeout=HELD_S).done, "ch_A was answered alone"
         second = pool.submit(_post_refund, port, "ch_B")
@@ -242,8 +279,8 @@ def test_two_concurrent_requests_to_a_served_agent_are_two_runs_that_never_mix(
     for record in records:
         assert record.trigger is not None
         assert (record.trigger.name, record.trigger.entrypoint) == (
-            "examples.server_agent.app:handle_refund",
-            "examples.server_agent.app:handle_refund",
+            "examples.sidecar.app:handle_refund",
+            "examples.sidecar.app:handle_refund",
         )
         assert record.trigger.replayable
         args = record.trigger.args
@@ -253,13 +290,13 @@ def test_two_concurrent_requests_to_a_served_agent_are_two_runs_that_never_mix(
         assert record.trigger.args == {"charge": charge, "reason": REASON}
         by_charge[charge] = record.run_id
     assert sorted(by_charge) == list(CHARGES)
-    # And they were open at once: each started before the other ended (the app's barrier).
+    # And they were open at once: each started before the other ended (the stub's barrier).
     earlier, later = sorted(records, key=lambda r: r.started_at or 0.0)
     assert earlier.end is not None and later.started_at is not None
     assert later.started_at < earlier.end.ended_at
 
     # Each run holds exactly its own: its read of its charge, irimi's L3 read of it, its faked
-    # refund, and its stood-in tool call, and nothing that names the other charge.
+    # refund, and its tool's fake, and nothing that names the other charge.
     live_charge_reads = 0
     agent_reads_ended, tools_started = [], []
     for charge, run_id in by_charge.items():
@@ -284,9 +321,10 @@ def test_two_concurrent_requests_to_a_served_agent_are_two_runs_that_never_mix(
         assert json.loads(refund.response.body)["id"] == refunds[charge]
         [tool] = [e for e in events if isinstance(e, ToolCall)]
         assert (tool.name, tool.kind, tool.ran) == (TOOL_NAME, "write", "shadow")
+        # Called once Stripe had answered the refund, with the refund's id.
         assert (tool.args, tool.result, tool.error) == (
-            {"charge": charge},
-            {"stood_in": True},
+            {"charge": charge, "refund": refunds[charge]},
+            {"recorded": False},
             None,
         )
         live_charge_reads += sum(e.request.method == "GET" for e in exchanges)
@@ -310,7 +348,7 @@ def test_two_concurrent_requests_to_a_served_agent_are_two_runs_that_never_mix(
     assert not any("irimi-run" in {k.lower() for k, _ in pairs} for pairs in stripe_stub.heard)
 
     # Serve printed one block per run, each equal to its stored summary (`serve_blocks`), naming its
-    # own refund and its stood-in tool, and not the other run's.
+    # own refund and its tool's fake, and not the other run's.
     assert sorted(serve_blocks(lines, reader)) == sorted(by_charge.values())
     maps = servicemaps.load()
     for charge, run_id in by_charge.items():
@@ -348,7 +386,7 @@ def test_a_refund_stripe_refuses_is_a_502_and_a_run_ended_in_error_and_a_bad_bod
         "a number": json.dumps({"charge": 7, "reason": REASON}).encode(),
         "an empty charge": json.dumps({"charge": "", "reason": REASON}).encode(),
     }
-    with _agent_beside_serve(home, stripe_stub, barrier=False) as (served, port):
+    with _agent_beside_serve(home, stripe_stub) as (served, port):
         assert _call(port, "GET", "/healthz") == (200, {"ok": True})
         assert _call(port, "GET", "/refund")[0] == 404
         assert _call(port, "POST", "/refunds", b"{}")[0] == 404
@@ -416,3 +454,13 @@ def test_a_caller_that_sends_less_body_than_it_named_is_cut_off_not_waited_on(mo
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_the_app_sends_no_stripe_key_that_is_not_test_mode(monkeypatch, stripe_stub):
+    """A live key is refused before anything is sent, as every example refuses one."""
+    monkeypatch.delenv(ENGINE_ACTIVE_ENV, raising=False)
+    monkeypatch.setenv("STRIPE_API_KEY", REFUSED_LIVE_KEY)
+    monkeypatch.setenv("STRIPE_API_BASE", f"http://127.0.0.1:{stripe_stub}")
+    with pytest.raises(ValueError, match=r"STRIPE_API_KEY must be a test-mode key \(sk_test_"):
+        app.handle_refund("ch_A", REASON)
+    assert stripe_stub.seen == []

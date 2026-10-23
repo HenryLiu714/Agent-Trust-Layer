@@ -139,7 +139,7 @@ def test_concurrent_runs_each_store_exactly_their_own_events(run_workflow, scena
 @pytest.mark.parametrize("scenario", CONCURRENT)
 def test_phase_3_exit_holds_for_eight_concurrent_runs(run_workflow, scenario, mode):
     """A server-style agent produces attributed runs with their triggers, and two concurrent
-    requests don't mix, as `tests/e2e/test_server_agent.py` asserts it for two
+    requests don't mix, as `tests/e2e/test_sidecar.py` asserts it for two
     requests, held here for eight over W3's six clients, over two shared one-connection pools,
     and with tools. Exactly eight runs, all `sdk` and `ok`, plus the process run under
     `irimi shadow -- <cmd>` and nothing more under serve; each run's trigger args name its

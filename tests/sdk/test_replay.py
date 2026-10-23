@@ -1,7 +1,7 @@
 """The SDK under `irimi replay`: a top-level run adopts the replay's run and posts nothing, a
 trigger is called again from its entrypoint and captured args, and `testing.replay`'s result codec.
 
-`tests/test_replay_cli.py` drives all of it through the real command; these are its parts, each
+`tests/cli/test_replay.py` drives all of it through the real command; these are its parts, each
 alone: `RunScope`'s adopting branch against a reporter that writes down every post,
 `calls.call_arguments` and `entrypoints.resolve`, `irimi.replay.child` as the subprocess it
 is, and `ReplayResult`'s JSON.

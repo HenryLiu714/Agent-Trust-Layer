@@ -8,8 +8,6 @@ labelled at all, since nothing would strip it.
 """
 
 import asyncio
-import contextlib
-import dataclasses
 import http.client
 import http.server
 import socket
@@ -28,99 +26,51 @@ from irimi import sdk
 from irimi.core.exchange import Exchange
 from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV
 from irimi.protocol.headers import RUN_HEADER
-from irimi.record import redact
-from irimi.record.store.reader import StoreReader
-from irimi.record.store.writer import DirectoryStore
 from irimi.sdk import _control_client as client
 from irimi.sdk import _http_labels as instrumentation
 from irimi.sdk._state import state
-from tests import test_engine_mitm
-from tests.support.servers import stop_server
-from tests.test_engine_mitm import (
-    _config,
-    _leaf_cert_for_loopback,
-    _maps,
-    _serve_tls,
-    _start,
-    _Upstream,
+from tests.support.engine import (
+    RunningIrimi,
+    engine_config,
+    leaf_cert_for_loopback,
+    running_irimi,
 )
+from tests.support.maps import map_index
+from tests.support.upstreams import Logged, Upstream, serve, tls_context
 
-upstream = test_engine_mitm.upstream  # bound here so pytest finds the fixture
-
-ENGINE_RUN = "t3st"  # the engine's own run, `_config`'s run id: the process run's place
+ENGINE_RUN = "t3st"  # the engine's own run, `engine_config`'s run id: the process run's place
 CLIENTS = ("urllib", "http.client", "requests", "httpx", "httpx-async")
 
 
-@dataclasses.dataclass
-class _Irimi:
-    port: int
-    seen: list[Exchange]
-    store: DirectoryStore
-    stop: Callable[[], None]
-
-    @property
-    def proxy(self) -> str:
-        return f"http://127.0.0.1:{self.port}"
-
-    def finish(self) -> StoreReader:
-        self.stop()
-        return StoreReader(self.store.layout.root)
-
-
-@contextlib.contextmanager
-def _running(cfg: Any, tmp_path: Path, monkeypatch, **start: Any) -> Iterator[_Irimi]:
-    """`cfg` served by a real engine with a real store, and this process set up as `irimi shadow`
-    sets up its child: active, and reporting to the engine's control endpoint."""
-    store = DirectoryStore(tmp_path / "store", redact.load_key(tmp_path))
-    eng, seen, stop = _start(cfg, store=store, **start)
-    stopped = False
-
-    def stop_once() -> None:
-        nonlocal stopped
-        if not stopped:
-            stopped = True
-            stop()
-
-    port = eng.listen_port()
-    for name in instrumentation.LISTENER_ENVS:  # a developer's own proxy is not irimi
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
-    monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{port}/_irimi")
-    monkeypatch.setattr(state, "reporter", client.ControlClient())
-    try:
-        yield _Irimi(port, seen, store, stop_once)
-    finally:
-        stop_once()
-
-
 @pytest.fixture
-def irimi(tmp_path, monkeypatch, upstream) -> Iterator[_Irimi]:
+def irimi(tmp_path, monkeypatch, upstream) -> Iterator[RunningIrimi]:
     """A running engine whose map claims the upstream, and the SDK set up to report to it. No
     proxy variable is set: each client below is given the proxy explicitly, and ignores the
     environment's, so a developer's own `NO_PROXY` cannot route around irimi."""
-    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch))
-    with _running(cfg, tmp_path, monkeypatch) as running:
+    cfg = engine_config(tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch))
+    with running_irimi(cfg, tmp_path, monkeypatch) as running:
         yield running
 
 
 @pytest.fixture
-def tls(tmp_path, monkeypatch) -> Iterator[tuple[_Irimi, int, Path]]:
+def tls(tmp_path, monkeypatch) -> Iterator[tuple[RunningIrimi, int, Path]]:
     """`(irimi, upstream port, CA cert)`: the upstream behind TLS, with a leaf the irimi CA
     signed, which the engine trusts; its reverse door open to 127.0.0.1, whose upstream is always
     https; and the CA the agent trusts for irimi's own leaves."""
-    cfg = _config(
+    cfg = engine_config(
         tmp_path,
         monkeypatch,
         reverse_hosts=frozenset({"127.0.0.1"}),
-        maps=_maps(tmp_path, monkeypatch),
+        maps=map_index(tmp_path, monkeypatch),
     )
-    _Upstream.seen = []
-    srv = _serve_tls(_leaf_cert_for_loopback(cfg.ca, tmp_path / "leaf.pem"))
+    srv = serve(
+        Upstream, ssl_context=tls_context(leaf_cert_for_loopback(cfg.ca, tmp_path / "leaf.pem"))
+    )
     try:
-        with _running(cfg, tmp_path, monkeypatch, trust_upstream_ca=cfg.ca.cert) as running:
-            yield running, srv.server_address[1], cfg.ca.cert
+        with running_irimi(cfg, tmp_path, monkeypatch, trust_upstream_ca=cfg.ca.cert) as running:
+            yield running, srv, cfg.ca.cert
     finally:
-        stop_server(srv)
+        srv.stop()
 
 
 def _get(name: str, proxy: str, url: str, **kw: Any) -> int:
@@ -180,8 +130,8 @@ def _outside_any_run(name: str, proxy: str, url: str) -> None:
         assert _get(name, proxy, url) == 200
 
 
-def _upstream_saw_the_header() -> bool:
-    return any(RUN_HEADER in {k.lower() for k, _ in headers} for _, headers in _Upstream.seen)
+def _upstream_saw_the_header(upstream) -> bool:
+    return any(RUN_HEADER in {k.lower() for k, _ in headers} for _, headers in upstream.seen)
 
 
 @pytest.mark.parametrize("name", CLIENTS)
@@ -193,8 +143,8 @@ def test_a_request_in_a_run_is_attributed_to_it_and_the_upstream_never_sees_the_
     assert run_id is not None
     [ex] = irimi.seen
     assert (ex.request.path, ex.run_id) == ("/hello", run_id)
-    assert [path for path, _ in _Upstream.seen] == ["/hello"]
-    assert not _upstream_saw_the_header()
+    assert [path for path, _ in upstream.seen] == ["/hello"]
+    assert not _upstream_saw_the_header(upstream)
     # Stored in that run, which the SDK started and ended around it.
     reader = irimi.finish()
     [read] = reader.load_run(run_id).events
@@ -209,7 +159,7 @@ def test_the_same_request_outside_any_run_is_the_engines_own(irimi, upstream, na
     _outside_any_run(name, irimi.proxy, f"http://127.0.0.1:{upstream}/hello")
     [ex] = irimi.seen
     assert ex.run_id == ENGINE_RUN
-    assert not _upstream_saw_the_header()
+    assert not _upstream_saw_the_header(upstream)
 
 
 def test_a_client_made_before_the_first_run_is_covered(irimi, upstream):
@@ -254,7 +204,7 @@ def test_two_threads_sharing_one_session_each_keep_their_own_run(irimi, upstream
     first, second = ids[0], ids[1]
     assert first is not None and second is not None
     assert sorted(ex.run_id for ex in irimi.seen) == sorted([first] * 20 + [second] * 20)
-    assert not _upstream_saw_the_header()
+    assert not _upstream_saw_the_header(upstream)
     reader = irimi.finish()
     for run_id in ids.values():
         assert run_id is not None
@@ -283,8 +233,8 @@ def test_a_request_that_bypasses_irimi_is_never_labelled(irimi, upstream, name):
         return sdk.current_run_id()
 
     assert direct() is not None
-    assert [path for path, _ in _Upstream.seen] == ["/hello"]
-    assert not _upstream_saw_the_header()
+    assert [path for path, _ in upstream.seen] == ["/hello"]
+    assert not _upstream_saw_the_header(upstream)
     assert irimi.seen == []
 
 
@@ -317,7 +267,7 @@ def test_a_request_through_the_reverse_door_is_labelled(tls):
 
     run_id = door()
     assert [(ex.door, ex.run_id) for ex in running.seen] == [("reverse", run_id)]
-    assert not _upstream_saw_the_header()
+    assert not _upstream_saw_the_header(up)
 
 
 def test_a_connect_tunnel_through_irimi_is_labelled_inside_the_tunnel(tls):
@@ -340,8 +290,8 @@ def test_a_connect_tunnel_through_irimi_is_labelled_inside_the_tunnel(tls):
 
     run_id = tunnelled()
     assert [ex.run_id for ex in running.seen] == [run_id]
-    assert [path for path, _ in _Upstream.seen] == ["/hello"]
-    assert not _upstream_saw_the_header()
+    assert [path for path, _ in up.seen] == ["/hello"]
+    assert not _upstream_saw_the_header(up)
 
 
 @pytest.mark.parametrize("method", ["GET", "M-SEARCH"])
@@ -363,7 +313,7 @@ def test_a_plain_tunnel_through_irimi_is_labelled_and_never_relayed_raw(irimi, u
 
     run_id = tunnelled()
     assert [(ex.request.method, ex.run_id) for ex in irimi.seen] == [(method, run_id)]
-    assert not _upstream_saw_the_header()
+    assert not _upstream_saw_the_header(upstream)
 
 
 @pytest.mark.parametrize("name", ["httpx", "httpx-async"])
@@ -450,29 +400,24 @@ def test_an_inactive_sdk_patches_nothing(monkeypatch):
     assert instrumentation._patched == []
 
 
-class _ControlStandIn(http.server.BaseHTTPRequestHandler):
-    heard: list[tuple[str, list[str]]] = []
+class _ControlStandIn(Logged):
+    """A control endpoint that answers every post 204 and logs `(path, header names)`."""
 
     def do_POST(self) -> None:
-        self.rfile.read(int(self.headers.get("content-length", 0)))
-        _ControlStandIn.heard.append((self.path, [k.lower() for k in self.headers]))
+        self.body()
+        self.seen.append((self.path, [k.lower() for k in self.headers]))
         self.send_response(204)
         self.end_headers()
-
-    def log_message(self, *args: Any) -> None:
-        pass
 
 
 def test_the_sdks_own_control_posts_carry_no_run_header(monkeypatch):
     """The control endpoint is on irimi's own listener, which `instrument()` labels, and the
     route already names the run. So every start and end the SDK posts, the ones after the
     patches are in place included, goes out unlabelled."""
-    _ControlStandIn.heard = []
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _ControlStandIn)
-    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}).start()
+    control = serve(_ControlStandIn, threaded=True)
     try:
         monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
-        monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{server.server_address[1]}/_irimi")
+        monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{control}/_irimi")
         monkeypatch.setattr(state, "reporter", client.ControlClient())
 
         @sdk.trigger
@@ -482,16 +427,15 @@ def test_the_sdks_own_control_posts_carry_no_run_header(monkeypatch):
         twice()
         twice()
     finally:
-        server.shutdown()
-        server.server_close()
-    assert [path.rsplit("/", 1)[1] for path, _ in _ControlStandIn.heard] == [
+        control.stop()
+    assert [path.rsplit("/", 1)[1] for path, _ in control.seen] == [
         "start",
         "end",
         "start",
         "end",
     ]
     assert hasattr(http.client.HTTPConnection.putrequest, "__wrapped__")
-    assert all(RUN_HEADER not in names for _, names in _ControlStandIn.heard)
+    assert all(RUN_HEADER not in names for _, names in control.seen)
 
 
 # -- edges: racing first calls, proxy spellings, HTTPS, an own header, redirects ----------------
@@ -610,8 +554,8 @@ def test_https_through_irimi_is_labelled_inside_the_tunnel(tls, name):
 
     run_id = tunnelled()
     assert [ex.run_id for ex in running.seen] == [run_id]
-    assert [path for path, _ in _Upstream.seen] == ["/hello"]
-    assert not _upstream_saw_the_header()
+    assert [path for path, _ in up.seen] == ["/hello"]
+    assert not _upstream_saw_the_header(up)
 
 
 def test_an_http_client_request_that_names_its_own_run_is_the_sdks_first(irimi, upstream):
@@ -631,7 +575,7 @@ def test_an_http_client_request_that_names_its_own_run_is_the_sdks_first(irimi, 
 
     run_id = own()
     assert [ex.run_id for ex in irimi.seen] == [run_id]
-    assert not _upstream_saw_the_header()
+    assert not _upstream_saw_the_header(upstream)
 
 
 REDIRECT_MAP = """
@@ -682,9 +626,11 @@ def test_a_redirect_away_from_irimi_is_not_labelled(tmp_path, monkeypatch, name)
     # `localhost` is the same server under a name the clients below do not proxy.
     _Redirecting.to = f"http://localhost:{port}/landed"
     url = f"http://127.0.0.1:{port}/redirect"
-    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch, doc=REDIRECT_MAP))
+    cfg = engine_config(
+        tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch, doc=REDIRECT_MAP)
+    )
     try:
-        with _running(cfg, tmp_path, monkeypatch) as running:
+        with running_irimi(cfg, tmp_path, monkeypatch) as running:
             proxy = running.proxy
 
             @sdk.trigger

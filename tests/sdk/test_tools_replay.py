@@ -7,7 +7,7 @@ up as `irimi shadow` sets up a replay's child: `IRIMI_REPLAY_RUN` names the engi
 claim about what the replay stored is read back off disk once its engine has stopped.
 
 A read tool's real function raises `_RealReadRan` for the accounts in `_FORBIDDEN`, and a write
-tool's always raises `_RealWriteRan`, so a test that let either run where it must not fails on it.
+tool's always raises `RealWriteRan`, so a test that let either run where it must not fails on it.
 """
 
 import asyncio
@@ -51,10 +51,7 @@ from irimi.sdk import _runs as runs
 from irimi.sdk import _tools as tools
 from irimi.sdk._errors import recorded_error
 from irimi.sdk._state import state
-from tests import test_sdk
-from tests.test_engine_mitm import _config, _start
-
-warnings = test_sdk.warnings  # bound here so pytest finds the fixture
+from tests.support.engine import RealWriteRan, engine_config, start_engine
 
 # The accounts whose real read must not run in this test: the replay must answer them.
 _FORBIDDEN: set[str] = set()
@@ -66,10 +63,6 @@ SECRET = "sk_test_" + "a" * 24
 
 class _RealReadRan(AssertionError):
     """A read tool's real function ran where the recording should have answered it."""
-
-
-class _RealWriteRan(AssertionError):
-    """A write tool's real function ran where only its stand-in may."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -138,7 +131,7 @@ def _debit_stand_in(account: str, amount: int) -> dict[str, Any]:
 
 @sdk.write_tool(fake=_debit_stand_in, name="db.debit")
 def debit(account: str, amount: int) -> dict[str, Any]:
-    raise _RealWriteRan(account)
+    raise RealWriteRan(account)
 
 
 @pytest.fixture(autouse=True)
@@ -156,7 +149,7 @@ class _Irimi:
     def __init__(self, tmp_path, monkeypatch) -> None:
         self.tmp_path = tmp_path
         self.monkeypatch = monkeypatch
-        self.cfg = _config(tmp_path, monkeypatch)
+        self.cfg = engine_config(tmp_path, monkeypatch)
         self.root = tmp_path / "store"
         self.key = redact.load_key(tmp_path)
         monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
@@ -198,7 +191,7 @@ class _Irimi:
         return result, calls
 
     def _serve(self, policy, store, script) -> Any:
-        eng, _seen, stop = _start(self.cfg, policy=policy, store=store)
+        eng, _seen, stop = start_engine(self.cfg, policy=policy, store=store)
         self.port = eng.listen_port()
         self.monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{self.port}/_irimi")
         try:
@@ -292,8 +285,8 @@ def test_a_write_tool_runs_its_stand_in_in_a_replay_and_never_the_real_function(
 
 
 def test_the_lookup_route_answers_404_under_an_engine_that_is_not_replaying(tmp_path, monkeypatch):
-    cfg = _config(tmp_path, monkeypatch)
-    eng, _seen, stop = _start(
+    cfg = engine_config(tmp_path, monkeypatch)
+    eng, _seen, stop = start_engine(
         cfg, store=DirectoryStore(tmp_path / "store", redact.load_key(tmp_path))
     )
     try:
@@ -390,11 +383,13 @@ def _raised(fn: Callable[[], Any]) -> BaseException | None:
     return None
 
 
-def test_a_lookup_that_fails_runs_the_tool_for_real_and_warns_once(irimi, monkeypatch, warnings):
+def test_a_lookup_that_fails_runs_the_tool_for_real_and_warns_once(
+    irimi, monkeypatch, warnings, refused_port
+):
     run_id = irimi.record(lambda: balance("acc_1"))
 
     def unreachable() -> Any:
-        monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{test_sdk._closed_port()}/_irimi")
+        monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{refused_port}/_irimi")
         return [balance("acc_1"), balance("acc_1")]
 
     result, calls = irimi.replay(run_id, unreachable)
@@ -463,7 +458,7 @@ def test_a_hit_is_used_up_and_is_not_itself_a_tool_call(irimi):
     events = StoreReader(irimi.root).load_run(run_id).events
     recording = ReplayIndex.from_events(events, irimi.key, irimi.cfg.maps)
     store = DirectoryStore(irimi.root, irimi.key, replay_of=run_id)
-    eng, _seen, stop = _start(irimi.cfg, policy=ReplayPolicy(recording), store=store)
+    eng, _seen, stop = start_engine(irimi.cfg, policy=ReplayPolicy(recording), store=store)
     route = f"/_irimi/runs/abcd1234abcd1234/{RECORDED_ACTION}"
     posted = {"name": "db.balance", "args": {"account": "acc_1"}}
     try:
@@ -518,8 +513,8 @@ def test_a_hit_is_used_up_and_is_not_itself_a_tool_call(irimi):
 def test_the_lookup_route_is_validated_like_every_control_route(
     tmp_path, monkeypatch, path, body, method, status, said
 ):
-    cfg = _config(tmp_path, monkeypatch)
-    eng, _seen, stop = _start(cfg)
+    cfg = engine_config(tmp_path, monkeypatch)
+    eng, _seen, stop = start_engine(cfg)
     try:
         got, answer = _post(eng.listen_port(), f"/_irimi/{path}", body, method)
     finally:
@@ -535,7 +530,7 @@ def test_a_tool_called_in_no_run_or_the_process_run_may_ask_the_recording(irimi,
     events = StoreReader(irimi.root).load_run(recorded).events
     recording = ReplayIndex.from_events(events, irimi.key, irimi.cfg.maps)
     store = DirectoryStore(irimi.root, irimi.key, replay_of=recorded)
-    eng, _seen, stop = _start(irimi.cfg, policy=ReplayPolicy(recording), store=store)
+    eng, _seen, stop = start_engine(irimi.cfg, policy=ReplayPolicy(recording), store=store)
     try:
         status, _ = _post(
             eng.listen_port(),
@@ -754,10 +749,10 @@ def test_an_answer_past_the_bound_is_a_miss_and_is_never_read_whole(monkeypatch,
     assert "the answer is past 1000 bytes" in said
 
 
-def test_a_lookup_carries_no_run_header_and_never_goes_through_a_proxy(monkeypatch):
+def test_a_lookup_carries_no_run_header_and_never_goes_through_a_proxy(monkeypatch, refused_port):
     """A control request, as the posts are: unlabelled under `instrument()`, and to the
     endpoint itself whatever `HTTP_PROXY` says."""
-    monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{test_sdk._closed_port()}")
+    monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{refused_port}")
     with (
         _answering(monkeypatch, 200, json.dumps(_HIT).encode()) as seen,
         sdk.run("labelled", inputs={}),  # which instruments the HTTP clients

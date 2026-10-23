@@ -3,7 +3,7 @@ engine and store.
 
 Each recorded call is posted over a socket to the engine's control endpoint and read back
 off disk with `StoreReader` once the engine has stopped. A write tool's real function raises
-`_RealWriteRan` wherever a test says it must not run, so a test that let it run fails on it rather
+`RealWriteRan` wherever a test says it must not run, so a test that let it run fails on it rather
 than on a missing record. The last test runs the real `irimi shadow` over a child that makes one
 Stripe write through the proxy and calls one write tool.
 """
@@ -34,16 +34,9 @@ from irimi.sdk import _capture as capture
 from irimi.sdk import _control_client as client
 from irimi.sdk import _tools as tools
 from irimi.sdk._state import state
-from tests import test_sdk
+from tests.support.engine import RealWriteRan
 
-irimi = test_sdk.irimi  # bound here so pytest finds the fixtures
-warnings = test_sdk.warnings
-
-ENGINE_RUN = "t3st"  # the engine's own run, `test_engine_mitm._config`'s: the process run's place
-
-
-class _RealWriteRan(AssertionError):
-    """A write tool's real function ran where only its stand-in may."""
+ENGINE_RUN = "t3st"  # the engine's own run, `engine_config`'s: the process run's place
 
 
 def _stand_in(order: int, *, note: str = "") -> dict[str, Any]:
@@ -57,12 +50,12 @@ async def _stand_in_async(order: int, *, note: str = "") -> dict[str, Any]:
 
 @sdk.write_tool(fake=_stand_in, name="db.mark_refunded")
 def mark_refunded(order: int, *, note: str = "") -> dict[str, Any]:
-    raise _RealWriteRan("the real write ran")
+    raise RealWriteRan("the real write ran")
 
 
 @sdk.write_tool(fake=_stand_in_async, name="db.mark_refunded_async")
 async def mark_refunded_async(order: int, *, note: str = "") -> dict[str, Any]:
-    raise _RealWriteRan("the real write ran")
+    raise RealWriteRan("the real write ran")
 
 
 @sdk.read_tool
@@ -255,7 +248,7 @@ def test_a_stand_in_that_raises_re_raises_the_same_object_and_records_its_error(
 
     @sdk.write_tool(fake=failing_stand_in, name="db.fails")
     def fails(order: int) -> Any:
-        raise _RealWriteRan("the real write ran")
+        raise RealWriteRan("the real write ran")
 
     @sdk.trigger
     def refund() -> None:
@@ -316,7 +309,7 @@ def test_the_args_are_bound_against_the_real_function_not_the_stand_in(posted):
 
     @sdk.write_tool(fake=anything, name="db.charge")
     def charge(customer: str, amount: int) -> str:
-        raise _RealWriteRan("the real write ran")
+        raise RealWriteRan("the real write ran")
 
     assert charge("cus_1", amount=4900) == "stood in"
     [(_, _, doc)] = posted.posts
@@ -330,7 +323,7 @@ def test_the_args_are_captured_before_the_body_runs(posted):
 
     @sdk.write_tool(fake=appending_stand_in, name="db.append")
     def append(rows: list[int]) -> int:
-        raise _RealWriteRan("the real write ran")
+        raise RealWriteRan("the real write ran")
 
     assert append([1, 2]) == 3
     [(_, _, doc)] = posted.posts
@@ -376,17 +369,17 @@ class _Ledger:
 
     @sdk.write_tool(fake=_mark_stand_in, name="ledger.mark")
     def mark(self, order: int) -> str:
-        raise _RealWriteRan("the real write ran")
+        raise RealWriteRan("the real write ran")
 
     @sdk.write_tool(fake=lambda order: f"static {order}", name="ledger.static_below")
     @staticmethod
     def static_below(order: int) -> str:
-        raise _RealWriteRan("the real write ran")
+        raise RealWriteRan("the real write ran")
 
     @staticmethod
     @sdk.write_tool(fake=lambda order: f"static {order}", name="ledger.static_above")
     def static_above(order: int) -> str:
-        raise _RealWriteRan("the real write ran")
+        raise RealWriteRan("the real write ran")
 
     @sdk.read_tool(name="ledger.kind")
     @classmethod
@@ -418,7 +411,7 @@ def test_an_async_stand_in_that_raises_re_raises_the_same_object_and_records_its
 
     @sdk.write_tool(fake=failing, name="db.fails_async")
     async def fails(order: int) -> Any:
-        raise _RealWriteRan("the real write ran")
+        raise RealWriteRan("the real write ran")
 
     with pytest.raises(ValueError) as caught:  # noqa: PT011  # checked by identity below
         asyncio.run(fails(1))
@@ -445,7 +438,7 @@ def test_a_cancelled_async_tool_is_recorded_as_cancelled_and_stays_cancelled(pos
 
     @sdk.write_tool(fake=slow, name="db.slow")
     async def write(order: int) -> str:
-        raise _RealWriteRan("the real write ran")
+        raise RealWriteRan("the real write ran")
 
     async def main() -> None:
         await asyncio.wait_for(write(1), 0.05)
@@ -470,7 +463,7 @@ def test_an_async_tool_closed_mid_call_records_the_close_and_raises_nothing(post
 
     @sdk.write_tool(fake=waits, name="db.waits")
     async def write(order: int) -> str:
-        raise _RealWriteRan("the real write ran")
+        raise RealWriteRan("the real write ran")
 
     coroutine = write(1)
     coroutine.send(None)  # to its first suspension: the stand-in is waiting
@@ -525,7 +518,7 @@ def test_a_stand_in_that_is_the_function_itself_is_refused_when_the_agent_loads(
     other way of leaving a write unnamed is."""
 
     def database_write(order: int) -> None:
-        raise _RealWriteRan("the real write ran")
+        raise RealWriteRan("the real write ran")
 
     with pytest.raises(TypeError, match="is the function itself"):
         sdk.write_tool(fake=database_write)(database_write)
@@ -548,12 +541,12 @@ class _Repository:
     @sdk.write_tool(fake=_save_stand_in, name="repo.save")
     @staticmethod
     def save(row: int) -> str:
-        raise _RealWriteRan("the real write ran")
+        raise RealWriteRan("the real write ran")
 
     @sdk.write_tool(fake=_save_async_stand_in, name="repo.save_async")
     @staticmethod
     async def save_async(row: int) -> str:
-        raise _RealWriteRan("the real write ran")
+        raise RealWriteRan("the real write ran")
 
 
 def test_a_static_method_stand_in_is_judged_and_called_as_its_function(posted):
@@ -574,7 +567,7 @@ def test_an_object_with_an_async_call_is_an_async_stand_in(posted):
 
     @sdk.write_tool(fake=_Mock(), name="db.mocked")
     async def write(order: int) -> str:
-        raise _RealWriteRan("the real write ran")
+        raise RealWriteRan("the real write ran")
 
     assert asyncio.run(write(1)) == "mocked"
     with pytest.raises(TypeError, match="must be a sync function"):
@@ -613,7 +606,7 @@ def test_an_inactive_write_runs_for_real_posts_nothing_and_warns_once_when_a_pro
     assert ran == [1, 2]
     assert reporter.posts == []
     # Another write tool in the same process runs for real too, and is not warned of again.
-    with pytest.raises(_RealWriteRan):
+    with pytest.raises(RealWriteRan):
         mark_refunded(3)
     assert [r.getMessage() for r in warnings()] == [
         "irimi: write tool db.inactive ran for real: HTTPS_PROXY is set but "
@@ -629,7 +622,7 @@ def test_either_spelling_of_the_proxy_variable_is_the_hint(
     for name in tools.PROXY_HINTS:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv(variable, "http://127.0.0.1:9")
-    with pytest.raises(_RealWriteRan):
+    with pytest.raises(RealWriteRan):
         mark_refunded(1)
     assert len(warnings()) == 1
 
@@ -640,7 +633,7 @@ def test_an_inactive_write_with_no_proxy_and_an_inactive_read_say_nothing(
     monkeypatch.delenv(ENGINE_ACTIVE_ENV, raising=False)
     for name in tools.PROXY_HINTS:
         monkeypatch.delenv(name, raising=False)
-    with pytest.raises(_RealWriteRan):
+    with pytest.raises(RealWriteRan):
         mark_refunded(1)
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
     assert look_up(1) == {"order": 1, "status": "paid"}
@@ -649,7 +642,7 @@ def test_an_inactive_write_with_no_proxy_and_an_inactive_read_say_nothing(
 
 def test_an_inactive_async_write_runs_for_real(monkeypatch, no_warning_yet):
     monkeypatch.delenv(ENGINE_ACTIVE_ENV, raising=False)
-    with pytest.raises(_RealWriteRan):
+    with pytest.raises(RealWriteRan):
         asyncio.run(mark_refunded_async(1))
 
 

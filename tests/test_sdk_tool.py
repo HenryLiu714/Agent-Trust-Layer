@@ -716,6 +716,20 @@ def test_a_tool_name_is_cut_to_the_run_name_limit(posted):
     assert doc["name"] == "n" * runs.MAX_NAME
 
 
+def test_a_long_tool_name_is_cut_outside_secrets_so_it_keeps_no_part_of_a_key(posted):
+    """A tool's name is cut before irimi redacts it, as a run's is: a key straddling the cut is
+    left out whole rather than kept in part, too short for its shape to be redacted."""
+    head = "n" * (runs.MAX_NAME - 10) + " "
+
+    @sdk.tool(kind="read", name=head + "ghp_" + "k" * 36)
+    def keyed() -> None:
+        return None
+
+    keyed()
+    [(_, _, doc)] = posted.posts
+    assert doc["name"] == head
+
+
 def test_an_active_tool_logs_nothing(posted, warnings, monkeypatch):
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
     mark_refunded(1)

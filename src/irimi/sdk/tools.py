@@ -58,6 +58,7 @@ from irimi.sdk.api import entrypoint
 from irimi.sdk.capture import MAX_CAPTURED_BYTES, capture, capture_call, revive, serialized
 from irimi.sdk.client import LOGGER_NAME
 from irimi.sdk.errors import error_info, recorded_error
+from irimi.secret_shapes import cut_outside_secrets
 from irimi.trace import STOPPED_ERROR_TYPES, TRUNCATED_KEY
 
 logger = logging.getLogger(LOGGER_NAME)
@@ -147,7 +148,7 @@ def tool[F: Callable[..., Any]](
                 "function it stands in for is"
             )
         label = f"{fn.__module__}.{fn.__qualname__}" if name is None else name
-        spec = _Tool(label[: runs.MAX_NAME], kind, fn, shadow)
+        spec = _Tool(cut_outside_secrets(label, runs.MAX_NAME), kind, fn, shadow)
 
         if is_async:
 

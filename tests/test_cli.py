@@ -315,6 +315,23 @@ def test_a_word_no_argument_takes_is_refused_as_parse_args_refuses_it(argv, tmp_
     assert not store.exists()
 
 
+@pytest.mark.parametrize(
+    ("argv", "abbreviated"),
+    [
+        (["shadow", "--allow-t", "x", "--", "true"], "--allow-t"),
+        (["runs", "list", "--lim", "1"], "--lim"),
+    ],
+)
+def test_an_abbreviated_flag_is_a_usage_error(argv, abbreviated, tmp_path, monkeypatch, capsys):
+    """A flag that lets traffic leave the machine has to be typed in full, so no flag is
+    accepted by a prefix of its name."""
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
+    with pytest.raises(SystemExit) as exit_:
+        main(argv)
+    assert exit_.value.code == 2
+    assert f"unrecognized arguments: {abbreviated}" in capsys.readouterr().err
+
+
 def test_engine_config_defaults_to_no_maps(tmp_path, monkeypatch):
     """An EngineConfig built without maps classifies by the verb rule alone. That is the default
     the engine's own tests rely on; the CLI always passes an index."""

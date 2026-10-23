@@ -1373,12 +1373,15 @@ def _wait_for_child(proc: "subprocess.Popen[bytes]", child: _Child) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="irimi",
+        allow_abbrev=False,
         description="Shadow mode for AI agents: reads are real, writes are virtual.",
     )
     parser.add_argument("--version", action="version", version=f"irimi {__version__}")
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
 
-    init = subparsers.add_parser("init", help="generate the local CA under $IRIMI_HOME/ca")
+    init = subparsers.add_parser(
+        "init", allow_abbrev=False, help="generate the local CA under $IRIMI_HOME/ca"
+    )
     init.add_argument(
         "--force", action="store_true", help="regenerate the CA even if one already exists"
     )
@@ -1388,6 +1391,7 @@ def build_parser() -> argparse.ArgumentParser:
     # banner (#77).
     serve = subparsers.add_parser(
         "serve",
+        allow_abbrev=False,
         help="the same as `irimi shadow --serve`: run the proxy with no command, until SIGINT or "
         "SIGTERM",
     )
@@ -1395,7 +1399,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.set_defaults(func=cmd_serve)
 
     shadow = subparsers.add_parser(
-        "shadow", help="run a command with its HTTP(S) traffic in shadow mode"
+        "shadow", allow_abbrev=False, help="run a command with its HTTP(S) traffic in shadow mode"
     )
     _add_engine_args(shadow)
     shadow.add_argument(
@@ -1412,16 +1416,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     shadow.set_defaults(func=cmd_shadow, parser=shadow)
 
-    maps = subparsers.add_parser("maps", help="show the loaded service maps")
+    maps = subparsers.add_parser("maps", allow_abbrev=False, help="show the loaded service maps")
     maps_sub = maps.add_subparsers(dest="maps_command", metavar="<subcommand>", required=True)
     maps_list = maps_sub.add_parser(
-        "list", help="print each mapped host with its service, route count and answer target"
+        "list",
+        allow_abbrev=False,
+        help="print each mapped host with its service, route count and answer target",
     )
     maps_list.set_defaults(func=cmd_maps_list)
 
-    runs = subparsers.add_parser("runs", help="read back the runs in the trace store")
+    runs = subparsers.add_parser(
+        "runs", allow_abbrev=False, help="read back the runs in the trace store"
+    )
     runs_sub = runs.add_subparsers(dest="runs_command", metavar="<subcommand>", required=True)
-    runs_list = runs_sub.add_parser("list", help="print one line per stored run, newest first")
+    runs_list = runs_sub.add_parser(
+        "list", allow_abbrev=False, help="print one line per stored run, newest first"
+    )
     _add_store_arg(runs_list)
     runs_list.add_argument(
         "--limit",
@@ -1432,7 +1442,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     runs_list.set_defaults(func=cmd_runs_list)
     runs_show = runs_sub.add_parser(
-        "show", help="print a stored run's header, every event and its summary"
+        "show", allow_abbrev=False, help="print a stored run's header, every event and its summary"
     )
     runs_show.add_argument("run_id", metavar="RUN_ID", help="the run's exact id, or unattributed")
     _add_store_arg(runs_show)
@@ -1440,6 +1450,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     compare_runs = subparsers.add_parser(
         "compare",
+        allow_abbrev=False,
         help="print two stored runs' writes side by side: a comparison, not a verdict",
     )
     compare_runs.add_argument(
@@ -1453,6 +1464,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     replay = subparsers.add_parser(
         "replay",
+        allow_abbrev=False,
         help="run a stored run's trigger again, answered from its recording, and print what the "
         "agent did differently",
     )

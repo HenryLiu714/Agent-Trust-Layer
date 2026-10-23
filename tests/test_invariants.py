@@ -3,7 +3,8 @@
 Five claims irimi makes about every exchange, checked against a real run rather than against a
 hand-built list, and each one demonstrated to fail on a policy that breaks it:
 
-  (a) every answer the engine decided carries `Irimi-Answered-By`, and no live forward does;
+  (a) every answer the engine decided carries `Irimi-Answered-By`, its own errors included, and
+      no live forward does;
   (b) nothing carrying that header is stamped anything but `unvalidated`;
   (c) `ShadowPolicy` cannot produce `validated` at all - that label is reserved for record mode;
   (d) a `delegated` exchange never reached the host the agent addressed;
@@ -21,6 +22,7 @@ import argparse
 import asyncio
 import http.client
 import json
+import socket
 import threading
 from collections.abc import Sequence
 from dataclasses import replace
@@ -28,13 +30,15 @@ from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 import pytest
 
-from irimi import ca, paths, pipeline, report, servicemap
-from irimi.engine import EngineConfig
+from irimi import ca, paths, pipeline, report, reverse_door, servicemap
+from irimi.engine import EngineConfig, mitm
 from irimi.engine.mitm import MitmEngine
 from irimi.exchange import (
     IDEMPOTENCY_CONFLICT_FLAG,
     IDEMPOTENT_REPLAY_FLAG,
     KINDS,
+    REFUSED_FLAG,
+    TARGET_FAILED_FLAG,
     Exchange,
     Request,
     Response,
@@ -330,14 +334,11 @@ def test_a_replay_stamps_what_it_answered_and_leaves_a_live_forward_bare(
 
 
 def test_the_answer_a_failed_decision_gives_is_stamped_too(tmp_path, monkeypatch, upstream):
-    """The one path that never sets `_Pending`, and so never reaches `response()` - which is the
-    only place `respond` was being called from.
-
-    It answered a 502 the engine decided, recorded it as `fake-L0`, and sent it with no header at
-    all: a client using the header to tell our answer from the real service's read this one as the
-    real service's. `stamping_violations` could not see it either, because it calls `respond` on
-    the recorded Exchange and reads the header that call *would* produce - so this test asserts on
-    `stamped`, the header the client actually received.
+    """A path that never sets `_Pending`, and so never reaches `response()`. A 502 sent with no
+    header would read as the real service's answer to a client using the header to tell the two
+    apart. `stamping_violations` cannot see that, because it calls `respond` on the recorded
+    Exchange and reads the header that call *would* produce - so this test asserts on `stamped`,
+    the header the client actually received.
     """
 
     class _BrokenPolicy:
@@ -355,9 +356,76 @@ def test_the_answer_a_failed_decision_gives_is_stamped_too(tmp_path, monkeypatch
         tmp_path, monkeypatch, maps, calls, policy=_BrokenPolicy()
     )
     assert status == 502 and json.loads(data)["error"]["type"] == "irimi_decision_failed"
-    assert (seen[0].answered_by, stamped) == ("fake-L0", "fake-L0")
+    assert (seen[0].answered_by, stamped) == ("irimi", "irimi")
     assert stamping_violations(seen) == []
     assert _Recorder.seen == [], "the write reached the real upstream"
+
+
+def _via_base_url(proxy_port, method, path):
+    """A request in base-URL mode: origin-form, addressed to the listener itself."""
+    conn = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=10)
+    conn.request(method, path, body=b"{}", headers={"host": f"127.0.0.1:{proxy_port}"})
+    resp = conn.getresponse()
+    data = resp.read()
+    stamped = resp.getheader(ANSWERED_BY_HEADER)
+    conn.close()
+    return resp.status, data, stamped
+
+
+def _closed_port():
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
+
+
+def _boom(*args, **kwargs):
+    raise RuntimeError("exploded")
+
+
+@pytest.mark.parametrize(
+    ("case", "status", "flag"),
+    [
+        ("unparseable", 400, REFUSED_FLAG),
+        ("unroutable", 400, REFUSED_FLAG),
+        ("base-url-refused", 403, REFUSED_FLAG),
+        ("unrewritable", 400, REFUSED_FLAG),
+        ("target-unreachable", 502, TARGET_FAILED_FLAG),
+    ],
+)
+def test_irimis_own_errors_are_stamped_json_and_recorded(
+    tmp_path, monkeypatch, upstream, case, status, flag
+):
+    """(a) for every error irimi answers with itself: the request hook's refusals and a target it
+    cannot reach. Each carries `Irimi-Answered-By: irimi` on the wire, has the one JSON error
+    shape, and is in the trace flagged with why. One that skipped any of the three would read as
+    the real service's answer, or be missing from the summary."""
+    targets = []
+    if case == "target-unreachable":
+        targets = [("127.0.0.1", "/things", f"http://127.0.0.1:{_closed_port()}/w")]
+    maps = _maps(tmp_path, monkeypatch, targets=targets)
+    if case == "unparseable":
+        monkeypatch.setattr(mitm, "_request_from_flow", _boom)
+    elif case == "unroutable":
+        monkeypatch.setattr(reverse_door, "detect_door", _boom)
+    elif case == "unrewritable":
+        monkeypatch.setattr(reverse_door, "rewrite_reverse", _boom)
+
+    def calls(port):
+        if case in ("base-url-refused", "unrewritable"):
+            return [_via_base_url(port, "POST", "/api.stripe.com/v1/refunds")]
+        return [_via_proxy(port, "POST", f"http://127.0.0.1:{upstream}/things", body=b"{}")]
+
+    seen, ((got, data, stamped),) = _run(tmp_path, monkeypatch, maps, calls)
+    assert (got, stamped) == (status, "irimi")
+    error = json.loads(data)["error"]
+    assert set(error) == {"type", "message"} and error["type"].startswith("irimi_")
+    (ex,) = seen
+    assert ex.answered_by == "irimi" and flag in ex.flags
+    assert ex.response is not None and ex.response.status == status
+    assert stamping_violations(seen) == []
+    assert _Recorder.seen == [], "the request reached the real upstream"
 
 
 def test_a_policy_that_answers_locally_without_saying_so_is_caught(tmp_path, monkeypatch, upstream):
@@ -610,17 +678,17 @@ class _LogCapturingOverlay:
         self.logs: list[tuple[Exchange, ...]] = []
         self.inner = inner
 
-    def __call__(self, write_log, read_request, upstream_response):
+    def __call__(self, write_log, read_request, upstream_response, translated_from=None):
         self.logs.append(tuple(write_log))
         if self.inner is not None:
-            return self.inner(write_log, read_request, upstream_response)
+            return self.inner(write_log, read_request, upstream_response, translated_from)
         return Overlaid(upstream_response)
 
     def rewrite(self, write_log, read_request):
         self.logs.append(tuple(write_log))
         if self.inner is not None:
             return self.inner.rewrite(write_log, read_request)
-        return read_request
+        return None
 
 
 def _l3_run(tmp_path, monkeypatch):

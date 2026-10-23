@@ -59,6 +59,12 @@ def scoped_writes[T](
     return entry, writes
 
 
-def read_of(operation: str, request: Request) -> services.Read:
-    """A live read as the effects are handed it: its operation, and its own body reflected once."""
-    return services.Read(operation=operation, request=request, posted=bodies.reflect(request))
+def read_of(operation: str, request: Request, translated_from: str | None = None) -> services.Read:
+    """A live read as the effects are handed it: its operation, its own body reflected once, and
+    the query pair irimi dropped from it, if any."""
+    return services.Read(
+        operation=operation,
+        request=request,
+        posted=bodies.reflect(request),
+        translated_from=translated_from,
+    )

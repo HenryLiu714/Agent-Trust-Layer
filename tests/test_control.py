@@ -35,6 +35,13 @@ TRIGGER = {
     "replayable": True,
 }
 STAMP = ("irimi-answered-by", "control")
+# The body of a control request irimi failed on itself.
+INTERNAL = {"error": {"type": "irimi_internal_error", "message": "internal"}}
+
+
+def _refused(message: str) -> dict:
+    """The body of a control request the endpoint refused."""
+    return {"error": {"type": "irimi_control_refused", "message": message}}
 
 
 def _tool_call(started_at: float, name: str = "db.write") -> dict:
@@ -359,7 +366,7 @@ def test_a_refused_control_request_answers_its_status_and_names_what_was_wrong(
     engine, method, path, body, status, error
 ):
     got_status, headers, got_body = engine.call(method, path, body)
-    assert (got_status, json.loads(got_body)) == (status, {"error": error})
+    assert (got_status, json.loads(got_body)) == (status, _refused(error))
     assert STAMP in headers
     if status == 405:
         assert ("allow", "GET" if path.endswith("/health") else "POST") in headers
@@ -385,7 +392,7 @@ def test_a_tool_call_made_in_no_run_is_taken_unattributed_but_not_a_start(engine
     A start or an end for `unattributed` is still refused."""
     _ok(engine.call("POST", "/_irimi/runs/unattributed/tool-calls", _tool_call(time.time())))
     status, _, body = engine.call("POST", "/_irimi/runs/unattributed/start", _start_body(1.0))
-    assert (status, json.loads(body)) == (400, {"error": "'unattributed' cannot name a run"})
+    assert (status, json.loads(body)) == (400, _refused("'unattributed' cannot name a run"))
     reader = engine.finish()
     [call] = reader.load_run("unattributed").events
     assert (call.run_id, call.name) == ("unattributed", "db.write")
@@ -402,7 +409,7 @@ def test_a_lookup_under_an_engine_that_is_not_replaying_is_a_404_and_records_not
     no run."""
     route = f"/_irimi/runs/{run_id}/tool-calls/recorded"
     status, headers, body = engine.call("POST", route, LOOKUP)
-    assert (status, json.loads(body)) == (404, {"error": "no recorded call"})
+    assert (status, json.loads(body)) == (404, _refused("no recorded call"))
     assert STAMP in headers
     reader = engine.finish()
     assert reader.list_runs() == []
@@ -441,7 +448,7 @@ def test_a_lookup_the_recording_answers_is_a_stamped_200_once_and_records_nothin
     answer = {"result": {"n": 1}, "error": None, "awaited": False}
     assert (hit[0], json.loads(hit[2])) == (200, answer)
     for status, _, body in (again, deep):
-        assert (status, json.loads(body)) == (404, {"error": "no recorded call"})
+        assert (status, json.loads(body)) == (404, _refused("no recorded call"))
     assert all(STAMP in headers for _, headers, _ in (hit, again, deep))
     assert [r for r in caplog.records if r.name == "irimi.control"] == []
     assert reader.list_runs() == []
@@ -461,7 +468,7 @@ def test_a_policy_whose_lookup_raises_is_irimi_s_500_never_a_forward(tmp_path, m
         status, headers, body = engine.call("POST", _LOOKUP, LOOKUP)
     finally:
         engine.finish()
-    assert (status, json.loads(body)) == (500, {"error": "internal"})
+    assert (status, json.loads(body)) == (500, INTERNAL)
     assert STAMP in headers and engine.seen == []
 
 
@@ -513,7 +520,7 @@ def test_a_store_that_raises_answers_500_and_the_next_request_is_served(
     monkeypatch.setattr(engine.store, "start_run", broken)
     with caplog.at_level(logging.ERROR, logger="irimi.control"):
         status, headers, body = engine.call("POST", _START, _start_body(time.time()))
-    assert (status, json.loads(body)) == (500, {"error": "internal"})
+    assert (status, json.loads(body)) == (500, INTERNAL)
     assert STAMP in headers
     # Logged with its traceback, which the 500's body does not carry.
     [logged] = [r for r in caplog.records if r.name == "irimi.control"]
@@ -531,7 +538,7 @@ def test_an_answer_the_engine_cannot_send_is_a_500_never_a_forward(engine, monke
 
     monkeypatch.setattr(ControlEndpoint, "answer", broken)
     status, headers, body = engine.call("GET", "/_irimi/health")
-    assert (status, json.loads(body)) == (500, {"error": "internal"})
+    assert (status, json.loads(body)) == (500, INTERNAL)
     assert STAMP in headers
     assert engine.seen == []
 
@@ -546,7 +553,7 @@ def test_the_endpoint_answers_500_itself_when_its_store_raises():
     body = json.dumps(_start_body(1.0)).encode()
     request = Request("POST", "http", "127.0.0.1", 4000, _START, "", (), body)
     response = ControlEndpoint(_Broken(), serve=False).answer(request)
-    assert (response.status, json.loads(response.body)) == (500, {"error": "internal"})
+    assert (response.status, json.loads(response.body)) == (500, INTERNAL)
     assert response.header("irimi-answered-by") == "control"
 
 
@@ -565,7 +572,7 @@ def test_a_decoder_that_raises_anything_but_its_refusal_is_irimi_s_500_never_too
     request = Request("POST", "http", "127.0.0.1", 4000, _START, "", (), body)
     with caplog.at_level(logging.ERROR, logger="irimi.control"):
         response = ControlEndpoint(NullStore(), serve=False).answer(request)
-    assert (response.status, json.loads(response.body)) == (500, {"error": "internal"})
+    assert (response.status, json.loads(response.body)) == (500, INTERNAL)
     [logged] = [r for r in caplog.records if r.name == "irimi.control"]
     assert logged.exc_info is not None and logged.exc_info[0] is RecursionError
 
@@ -687,13 +694,13 @@ def test_a_refusal_quotes_at_most_a_line_of_what_it_refused(engine):
     word = "s" * MAX_QUOTED
     assert (status, json.loads(raw)) == (
         400,
-        {"error": f"'kind' is '{word}'…, not one of ('read', 'write')"},
+        _refused(f"'kind' is '{word}'…, not one of ('read', 'write')"),
     )
     status, _, raw = engine.call("POST", f"/_irimi/runs/{'x' * 5_000}/start", _start_body(1.0))
-    error = json.loads(raw)["error"]
+    error = json.loads(raw)["error"]["message"]
     assert status == 400 and error == "'" + "x" * (MAX_REFUSAL - 1)
     status, _, raw = engine.call("POST", _START, {**_start_body(1.0), "started_at": "s" * 1_000})
-    assert (status, json.loads(raw)) == (400, {"error": "'started_at' is a string, not a number"})
+    assert (status, json.loads(raw)) == (400, _refused("'started_at' is a string, not a number"))
 
 
 def test_a_head_request_gets_its_405_without_a_body_and_the_connection_stays_usable(engine):
@@ -759,7 +766,7 @@ def test_a_body_nested_too_deeply_to_read_is_a_400_never_a_500(
     and not others, so the same body was answered differently on CI's runners."""
     with caplog.at_level(logging.ERROR, logger="irimi.control"):
         status, headers, raw = engine.call("POST", path, body)
-    assert (status, json.loads(raw)) == (400, {"error": expected})
+    assert (status, json.loads(raw)) == (400, _refused(expected))
     assert STAMP in headers
     assert [r for r in caplog.records if r.name == "irimi.control"] == []
     engine.finish()

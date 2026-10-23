@@ -39,9 +39,14 @@ def _read(path, query="", headers=()):
     )
 
 
-def _asked(operation, path, query="", headers=()):
+def _asked(operation, path, query="", headers=(), translated_from=None):
     """A `Read` for a Stripe GET: its parameters are in the query string and it posts nothing."""
-    return Read(operation=operation, request=_read(path, query, headers), posted={})
+    return Read(
+        operation=operation,
+        request=_read(path, query, headers),
+        posted={},
+        translated_from=translated_from,
+    )
 
 
 def _charge_doc(**extra):
@@ -247,7 +252,7 @@ def test_an_older_refund_that_might_be_behind_the_cursor_is_partial():
             "refunds.list",
             "/v1/refunds",
             query="payment_intent=pi_1",
-            headers=[("irimi-rewrote", "starting_after=re_MINTED2")],
+            translated_from="starting_after=re_MINTED2",
         ),
         _refunds_page("re_REAL1"),
         [_refund_write("re_MINTED1", payment_intent=None), _refund_write("re_MINTED2")],
@@ -284,9 +289,7 @@ def test_a_cursor_naming_a_real_refund_is_partial_and_unchanged():
 
 def test_the_page_after_a_minted_refund_is_unchanged_and_fully_modelled():
     out = apply_read(
-        _asked(
-            "refunds.list", "/v1/refunds", headers=[("irimi-rewrote", "starting_after=re_MINTED1")]
-        ),
+        _asked("refunds.list", "/v1/refunds", translated_from="starting_after=re_MINTED1"),
         _refunds_page("re_REAL1"),
         [_refund_write()],
     )
@@ -305,7 +308,7 @@ def test_the_page_after_a_minted_refund_with_an_older_one_behind_it_is_partial()
             "refunds.list",
             "/v1/refunds",
             query="limit=1",
-            headers=[("irimi-rewrote", "starting_after=re_MINTED2")],
+            translated_from="starting_after=re_MINTED2",
         ),
         page,
         [_refund_write("re_MINTED1"), _refund_write("re_MINTED2")],

@@ -43,22 +43,42 @@ class Overlaid:
     fidelity: OverlayFidelity | None = None
 
 
+@dataclass(frozen=True)
+class Translation:
+    """A read the overlay translated before it is forwarded: the request irimi asks instead, and
+    the `key=value` query pair it dropped. The engine keeps `removed` and hands it back to the
+    overlay with the response; it never goes on the wire."""
+
+    request: Request
+    removed: str
+
+
 class Overlay(Protocol):
     def __call__(
-        self, write_log: Sequence[Exchange], read_request: Request, upstream_response: Response
+        self,
+        write_log: Sequence[Exchange],
+        read_request: Request,
+        upstream_response: Response,
+        translated_from: str | None = None,
     ) -> Overlaid: ...
 
-    def rewrite(self, write_log: Sequence[Exchange], read_request: Request) -> Request: ...
+    def rewrite(self, write_log: Sequence[Exchange], read_request: Request) -> Translation | None:
+        """The read to forward instead of `read_request`, or None to forward it as it is."""
+        ...
 
 
 class NoOverlay:
     def __call__(
-        self, write_log: Sequence[Exchange], read_request: Request, upstream_response: Response
+        self,
+        write_log: Sequence[Exchange],
+        read_request: Request,
+        upstream_response: Response,
+        translated_from: str | None = None,
     ) -> Overlaid:
         return Overlaid(upstream_response)
 
-    def rewrite(self, write_log: Sequence[Exchange], read_request: Request) -> Request:
-        return read_request
+    def rewrite(self, write_log: Sequence[Exchange], read_request: Request) -> Translation | None:
+        return None
 
 
 class ServiceOverlay:
@@ -79,36 +99,33 @@ class ServiceOverlay:
         self.maps = maps
 
     def __call__(
-        self, write_log: Sequence[Exchange], read_request: Request, upstream_response: Response
+        self,
+        write_log: Sequence[Exchange],
+        read_request: Request,
+        upstream_response: Response,
+        translated_from: str | None = None,
     ) -> Overlaid:
         try:
-            return self._apply(write_log, read_request, upstream_response)
+            return self._apply(write_log, read_request, upstream_response, translated_from)
         except Exception:
             logger.exception("irimi: the overlay failed; the agent gets the upstream read")
             return Overlaid(upstream_response, "partial")
 
-    def rewrite(self, write_log: Sequence[Exchange], read_request: Request) -> Request:
-        # Any header of this name on the agent's own request came from somewhere else; ours is
-        # the one that is true here. Same rule as `pipeline.respond`'s. It is stripped before the
-        # guard, so no path - a rewrite, an early return, a raise - hands `_apply` and
-        # `stripe._refunds_list` a header the agent sent to suppress the minted refund.
-        # The engine strips it too, off every flow and before the decision, because this one only
-        # runs on the rewrite path and that path is closed until the log holds a write. Both stay:
-        # this is the guard for a caller that is not the engine, such as `tests/test_overlay.py`.
-        # A replay is not one: the engine translates its reads.
-        # The same object when there was nothing to strip, so the engine's `is` check means
-        # "nothing to do".
-        stripped = read_request.without_header(pipeline.REWROTE_HEADER)
+    def rewrite(self, write_log: Sequence[Exchange], read_request: Request) -> Translation | None:
         try:
-            return self._rewrite(write_log, stripped)
+            return self._rewrite(write_log, read_request)
         except Exception:
             logger.exception("irimi: the overlay's rewrite failed; forwarding the read unchanged")
-            return stripped
+            return None
 
     # --------------------------------------------------------------------------------- inside
 
     def _apply(
-        self, write_log: Sequence[Exchange], read_request: Request, upstream_response: Response
+        self,
+        write_log: Sequence[Exchange],
+        read_request: Request,
+        upstream_response: Response,
+        translated_from: str | None,
     ) -> Overlaid:
         service, operation = self._route(read_request)
         found = writelog.scoped_writes(services.EFFECTS, service, read_request, write_log)
@@ -123,12 +140,13 @@ class ServiceOverlay:
         # Reflected here, past the early returns, so a service with no effects table or a run
         # with no writes for it parses nothing. `bodies.reflect` never raises and reflects `{}` for
         # a body it cannot read, so it needs no guard of its own.
-        applied = effects(writelog.read_of(operation, read_request), document, writes)
-        rewrote = read_request.header(pipeline.REWROTE_HEADER) is not None
+        applied = effects(
+            writelog.read_of(operation, read_request, translated_from), document, writes
+        )
         fidelity: OverlayFidelity | None = None
         if applied.partial:
             fidelity = "partial"
-        elif applied.changed or rewrote or applied.status is not None:
+        elif applied.changed or translated_from is not None or applied.status is not None:
             # A translated cursor is an effect too, even when the page itself needed no edit. So is
             # a replaced status: the effects that set one also set `changed`, but an
             # exchange stamped `overlay` with `overlay: None` would print a `saw it  overlay` line
@@ -151,22 +169,17 @@ class ServiceOverlay:
             fidelity,
         )
 
-    def _rewrite(self, write_log: Sequence[Exchange], read_request: Request) -> Request:
-        """`read_request` arrives with no `irimi-rewrote` of its own: `rewrite` stripped it."""
+    def _rewrite(self, write_log: Sequence[Exchange], read_request: Request) -> Translation | None:
         service, operation = self._route(read_request)
         found = writelog.scoped_writes(services.REWRITES, service, read_request, write_log)
         if found is None:
-            return read_request
+            return None
         rewrite, writes = found
         # Past the early returns, like `_apply`'s; `bodies.reflect` never raises.
         rewritten = rewrite(writelog.read_of(operation, read_request), writes)
         if rewritten is None:
-            return read_request
-        return replace(
-            read_request,
-            query=rewritten.query,
-            headers=read_request.headers + ((pipeline.REWROTE_HEADER, rewritten.removed),),
-        )
+            return None
+        return Translation(replace(read_request, query=rewritten.query), rewritten.removed)
 
     def _route(self, request: Request) -> tuple[str, str]:
         classification = pipeline.classify(request, self.maps)

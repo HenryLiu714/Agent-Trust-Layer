@@ -35,7 +35,6 @@ from urllib.parse import parse_qsl, urlencode
 
 from irimi.bodies import SERVICE_OWNED, is_int
 from irimi.exchange import Request
-from irimi.pipeline import REWROTE_HEADER
 from irimi.services.model import (
     NOT_EVALUABLE,
     Applied,
@@ -72,7 +71,7 @@ def apply_read(read: Read, document: Any, writes: Sequence[Write]) -> Applied:
     if operation == "charges.list":
         return _charges_list(document, writes)
     if operation == "refunds.list":
-        return _refunds_list(read.request, document, writes)
+        return _refunds_list(read, document, writes)
     if operation == "refunds.retrieve":
         return _refund_retrieve(read.request, document, writes)
     if operation == "customers.retrieve":
@@ -138,17 +137,17 @@ def _charges_list(document: dict[str, Any], writes: Sequence[Write]) -> Applied:
     return Applied(document, changed=changed)
 
 
-def _refunds_list(request: Request, document: dict[str, Any], writes: Sequence[Write]) -> Applied:
+def _refunds_list(read: Read, document: dict[str, Any], writes: Sequence[Write]) -> Applied:
     """Page 1 of `GET /v1/refunds`: the minted refund first, the page kept to its own limit."""
     minted = _minted_refunds(writes)
     if not minted:
         return Applied(document)
-    params = parse_qsl(request.query, keep_blank_values=True)
+    params = parse_qsl(read.request.query, keep_blank_values=True)
     if any(k in CURSOR_PARAMS for k, _ in params):
         # Some page other than the first, and which real items it holds depends on where the
         # minted refund landed. The effects model page 1 only.
         return Applied(document, partial=True)
-    removed = request.header(REWROTE_HEADER) or ""
+    removed = read.translated_from or ""
     if removed.startswith("starting_after="):
         # `rewrite_query` removed a cursor naming a refund irimi minted, so this IS the page that
         # follows it: the minted refund belongs on the page before this one, and prepending it

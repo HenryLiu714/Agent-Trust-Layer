@@ -18,6 +18,7 @@ from irimi.exchange import (
     FROM_RECORDING_FLAG,
     IDEMPOTENCY_CONFLICT_FLAG,
     IDEMPOTENT_REPLAY_FLAG,
+    REFUSED_FLAG,
     TARGET_FAILED_FLAG,
     Exchange,
     is_authored_write,
@@ -189,12 +190,13 @@ WOULD_HAVE_FIRED = "Would have fired:"
 # class of lie as counting a delegated read as live - the summary would show a write
 # safely handled by the stub when the stub was not running.
 TARGET_UNREACHABLE = "target unreachable"
-# A write irimi answered with its own 502 because it could not decide about it: the decision
-# raised, or the body decodes past what irimi reads. It was refused, not faked.
+# A request irimi answered with its own error because it refused it or could not decide about it:
+# the request hook could not handle it, the decision raised, or the body decodes past what irimi
+# reads. It was refused, not faked.
 REFUSED_BY_IRIMI = "refused by irimi"
 # The flags that say why, named in the order the exchange carries them. A fixed list, not every
 # flag: `unclassified` is the classification the refusal was recorded under, not a reason.
-REFUSAL_REASONS: tuple[str, ...] = (DECISION_FAILED_FLAG, BODY_TRUNCATED_FLAG)
+REFUSAL_REASONS: tuple[str, ...] = (DECISION_FAILED_FLAG, REFUSED_FLAG, BODY_TRUNCATED_FLAG)
 
 # Currencies with no minor unit: ¥4900 is four thousand nine hundred yen, not ¥49.00. Stripe's
 # own zero-decimal list, which is the one the amounts in these bodies are denominated in.
@@ -308,9 +310,9 @@ def is_intercepted(exchange: Exchange) -> bool:
 
 
 def _reached_target(exchange: Exchange) -> bool:
-    """A write an answer target actually answered, as opposed to one whose target was never
-    reached. `IrimiAddon.error` flags the second `target-failed`, and records no response unless
-    the target had begun a streamed answer."""
+    """A write an answer target actually answered. A target irimi refused or could not reach is
+    answered `irimi`; one mitmproxy could not finish dialling stays `delegated`, flagged
+    `target-failed` by `IrimiAddon.error`, with no response unless a streamed answer had begun."""
     return exchange.answered_by == "delegated" and TARGET_FAILED_FLAG not in exchange.flags
 
 
@@ -319,8 +321,9 @@ def _failed_target(exchange: Exchange) -> bool:
 
 
 def _refused_by_irimi(exchange: Exchange) -> bool:
-    """A write irimi answered with its own 502 because it could not decide about it."""
-    return DECISION_FAILED_FLAG in exchange.flags
+    """A request irimi answered with its own error because it refused it or could not decide
+    about it. Asked of the flags, which a run stored under schema 2 carries too."""
+    return DECISION_FAILED_FLAG in exchange.flags or REFUSED_FLAG in exchange.flags
 
 
 def _host_line(host: str, rows: Sequence[Exchange], width: int) -> str:
@@ -462,7 +465,7 @@ def write_sentence(exchange: Exchange, index: MapIndex | None) -> str:
     if refused:
         reasons = ", ".join(flag for flag in exchange.flags if flag in REFUSAL_REASONS)
         return f"{REJECTED_MARKER} {what}  {REFUSED_BY_IRIMI} ({reasons})"
-    if exchange.answered_by == "delegated":
+    if exchange.target:
         what = f"{what} → {exchange.target}"
     if _failed_target(exchange):
         return f"{WRITE_MARKER} {what}  unanswered ({TARGET_UNREACHABLE})"

@@ -22,7 +22,7 @@ is relayed, and none leaves a record (#75).
    request on the listener came in as `/<host>/<path>`, and
    `reverse_door.rewrite_reverse` points it upstream. Any `Irimi-Rewrote` the agent itself sent
    is stripped here, off the flow and off the recorded request: that header is irimi's own
-   vocabulary, and the response side believes it (#53). `pipeline.attribute_run` picks the run id
+   vocabulary, and irimi never sends it. `pipeline.attribute_run` picks the run id
    from `Irimi-Run`, which is then stripped the same way, so it never leaves irimi (#67). Then
    `pipeline.classify` says what it is (`read`, `write`, `llm`, `telemetry`, `unknown`). A read
    the overlay can translate (a cursor naming a minted id, #43) is translated now, unless it is
@@ -160,12 +160,10 @@ twice - once where a configuration is loaded and again at the decision it protec
   from ours. `tests/test_invariants.py` checks this against a real run and against policies
   built to break it. A control endpoint answer carries `control`, which is not an `answered_by`
   value because a control request is never an exchange (#73).
-- **Irimi's own wire vocabulary is never the agent's.** `Irimi-Rewrote` names the query pair irimi
-  dropped from a read it translated, and the response side reads it to decide a page already
-  follows a minted refund - so an agent-sent one could suppress the agent's own refund from that
-  page. It is stripped in the `request` hook, before the decision and whatever the write log
-  holds, and again in `ServiceOverlay.rewrite` for callers that do not come through the engine
-  (#53). `Irimi-Run` names the run a request belongs to; the `request` hook reads it and then
+- **Irimi's own wire vocabulary is never the agent's.** The query pair irimi drops from a read it
+  translates stays in the engine, which hands it back to the overlay with the response; it never
+  goes on the wire. An agent-sent `Irimi-Rewrote` is stripped in the `request` hook all the same.
+  `Irimi-Run` names the run a request belongs to; the `request` hook reads it and then
   strips it from the flow and the recorded request, so no live forward, answer target or L3
   read carries the agent's run id to a service, and `Exchange.run_id` is the one place it is
   kept (#67).

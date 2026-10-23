@@ -306,7 +306,7 @@ def test_a_reservation_whose_answer_target_is_down_is_answered_502_and_compared_
     shared_store_run, run_workflow, mode
 ):
     """`target_down` delegates the reservation to an answer target nothing listens on: irimi
-    cannot reach it, the agent gets a 502 marked `delegated`, and the summary says the write went
+    cannot reach it, the agent gets its own 502 marked `irimi`, and the summary says the write went
     unanswered. Bare, the service reserves. Recorded into one store with `with_map`, B under
     shadow or serve, compare pairs the two reservations and shows the unanswered one as its
     summary printed it: a write whose target failed is still a write the agent attempted, which
@@ -314,7 +314,7 @@ def test_a_reservation_whose_answer_target_is_down_is_answered_502_and_compared_
     bare = run_workflow(W, "target_down", "bare")
     down = run_workflow(W, "target_down", mode)
     assert bare.by_label()["reserve"] == (200, None)
-    assert down.by_label()["reserve"] == (502, "delegated")
+    assert down.by_label()["reserve"] == (502, "irimi")
     assert decision(down) == {
         "reserved": False,
         "reason": "http_502",
@@ -350,7 +350,7 @@ def test_a_down_target_s_closing_lines_say_the_tool_write_did_not_happen_either(
     printed as it ends, says the same. Bare, the decision is really recorded."""
     down = run_workflow(W, "target_down_tools", mode)
     bare = run_workflow(W, "target_down_tools", "bare")
-    assert down.by_label()["reserve"] == (502, "delegated")
+    assert down.by_label()["reserve"] == (502, "irimi")
     summary = down.summaries()
     assert [line for line in summary if line.startswith("  ○ ")] == [
         f"  ○ POST {HOST}/reservations → {DOWN_TARGET}/reservations  unanswered (target "

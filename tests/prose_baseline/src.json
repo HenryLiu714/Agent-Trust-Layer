@@ -15,7 +15,7 @@
     "caps_run": 1
   },
   "src/irimi/pipeline.py": {
-    "caps_run": 2
+    "caps_run": 1
   },
   "src/irimi/policy.py": {
     "caps_run": 4

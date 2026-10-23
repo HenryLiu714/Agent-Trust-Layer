@@ -272,12 +272,12 @@ def test_a_buffered_read_bomb_reaches_the_agent_whole_and_is_recorded_empty(
     shown = []
 
     class _Overlay:
-        def __call__(self, write_log, read_request, upstream_response):
+        def __call__(self, write_log, read_request, upstream_response, translated_from=None):
             shown.append(upstream_response.body)
             return Overlaid(Response(200, (), b"OVERLAID"), said)
 
         def rewrite(self, write_log, read_request):
-            return read_request
+            return None
 
     eng, seen, stop = _start(_config(tmp_path, monkeypatch), overlay=_Overlay())
     base = f"http://127.0.0.1:{bomb_upstream}"
@@ -436,18 +436,17 @@ def test_a_write_whose_request_is_a_bomb_is_refused_never_faked_from_part_of_it(
         conn.close()
     finally:
         stop()
-    assert (status, answered_by) == (502, "fake-L0")
+    assert (status, answered_by) == (502, "irimi")
     error = json.loads(data)["error"]
     assert error["type"] == "irimi_decision_failed"
     assert error["message"] == (
         "irimi could not decide how to answer this request: request body decompresses to more "
         f"than {CAP // (1024 * 1024)} MiB; irimi does not fake a write it cannot read whole"
     )
+    # The refusal keeps the write's classification, so the summary can name the operation.
     (ex,) = seen
-    assert (ex.answered_by, ex.flags) == (
-        "fake-L0",
-        (UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG, BODY_TRUNCATED_FLAG),
-    )
+    assert (ex.answered_by, ex.flags) == ("irimi", (DECISION_FAILED_FLAG, BODY_TRUNCATED_FLAG))
+    assert (ex.service, ex.operation, ex.kind) == ("demo", "things.create", "write")
     assert ex.request.body == b""
 
 
@@ -504,10 +503,11 @@ def test_a_bomb_is_refused_on_every_path_a_write_takes(
     finally:
         stop()
         srv.shutdown()
-    assert answers == [(502, "fake-L0")] * 2
+    assert answers == [(502, "irimi")] * 2
     assert _EchoBombUpstream.bodies == []
+    kind, unclassified = ("write", ()) if delegated else ("unknown", (UNCLASSIFIED_FLAG,))
     assert [(ex.answered_by, ex.kind, ex.target, ex.flags) for ex in seen] == [
-        ("fake-L0", "unknown", "", (UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG, BODY_TRUNCATED_FLAG))
+        ("irimi", kind, "", (*unclassified, DECISION_FAILED_FLAG, BODY_TRUNCATED_FLAG))
     ] * 2
 
 
@@ -587,7 +587,10 @@ def test_a_control_request_bomb_is_refused_without_decoding_it_whole(
         stop()
     assert status == 413, data
     assert json.loads(data) == {
-        "error": f"the body decodes past the {MAX_CONTROL_BODY} bytes allowed"
+        "error": {
+            "type": "irimi_control_refused",
+            "message": f"the body decodes past the {MAX_CONTROL_BODY} bytes allowed",
+        }
     }
     assert seen == []
 

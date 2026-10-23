@@ -54,6 +54,5 @@ def test_no_overlay_ignores_write_log():
     )
 
 
-def test_no_overlay_rewrite_returns_the_request_unchanged():
-    req = _req()
-    assert NoOverlay().rewrite(write_log=[_exchange()], read_request=req) is req
+def test_no_overlay_rewrite_translates_nothing():
+    assert NoOverlay().rewrite(write_log=[_exchange()], read_request=_req()) is None

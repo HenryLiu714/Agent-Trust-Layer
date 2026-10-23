@@ -229,36 +229,40 @@ def test_an_effect_that_raises_leaves_the_read_alone_and_flags_it(monkeypatch):
     assert out.fidelity == "partial"
 
 
-def test_rewrite_translates_a_cursor_and_stamps_what_it_removed():
+def test_rewrite_translates_a_cursor_and_names_what_it_removed_off_the_wire():
+    """The dropped pair comes back beside the request, never as a header on it, and handed back
+    with the response it makes the page after the minted refund a fully modelled one."""
+    overlay, log = ServiceOverlay(MAPS), [_write_exchange()]
     read = _read("/v1/refunds", query=f"limit=1&starting_after={MINTED}")
-    out = ServiceOverlay(MAPS).rewrite([_write_exchange()], read)
-    assert out is not read
-    assert out.query == "limit=1"
-    assert ("irimi-rewrote", f"starting_after={MINTED}") in out.headers
+    out = overlay.rewrite(log, read)
+    assert out is not None
+    assert out.request.query == "limit=1"
+    assert out.request.headers == read.headers
+    assert out.removed == f"starting_after={MINTED}"
+    upstream = _upstream({"object": "list", "has_more": False, "data": [{"id": "re_REAL1"}]})
+    applied = overlay(log, out.request, upstream, out.removed)
+    assert (applied.response, applied.fidelity) == (upstream, "full")
 
 
-def test_rewrite_returns_the_same_object_when_there_is_nothing_to_translate():
+def test_rewrite_returns_none_when_there_is_nothing_to_translate():
     read = _read("/v1/refunds", query="limit=1&starting_after=re_REAL")
-    assert ServiceOverlay(MAPS).rewrite([_write_exchange()], read) is read
+    assert ServiceOverlay(MAPS).rewrite([_write_exchange()], read) is None
 
 
 def test_rewrite_never_raises(monkeypatch):
     monkeypatch.setattr("irimi.services.REWRITES", {"stripe": _raising})
     read = _read("/v1/refunds", query=f"starting_after={MINTED}")
-    assert ServiceOverlay(MAPS).rewrite([_write_exchange()], read) is read
-    # The failure path strips an agent-sent `irimi-rewrote` too: it is not ours to forward.
-    spoofed = _read("/v1/refunds", headers=(("irimi-rewrote", "starting_after=re_ANYTHING"),))
-    out = ServiceOverlay(MAPS).rewrite([_write_exchange()], spoofed)
-    assert all(k != "irimi-rewrote" for k, _ in out.headers)
+    assert ServiceOverlay(MAPS).rewrite([_write_exchange()], read) is None
 
 
 def test_a_rewrote_header_the_agent_sent_itself_is_not_trusted():
+    """The overlay reads the translation from the engine, never from a request header, so a
+    forged one cannot suppress the minted refund from page 1."""
     overlay, log = ServiceOverlay(MAPS), [_write_exchange()]
-    read = _read("/v1/refunds", headers=(("irimi-rewrote", "starting_after=re_ANYTHING"),))
-    rewritten = overlay.rewrite(log, read)
-    assert all(k != "irimi-rewrote" for k, _ in rewritten.headers)
+    read = _read("/v1/refunds", headers=(("irimi-rewrote", f"starting_after={MINTED}"),))
+    assert overlay.rewrite(log, read) is None
     upstream = _upstream({"object": "list", "has_more": False, "data": [{"id": "re_REAL1"}]})
-    out = overlay(log, rewritten, upstream)
+    out = overlay(log, read, upstream)
     assert json.loads(out.response.body)["data"][0]["id"] == MINTED
 
 
@@ -301,12 +305,12 @@ def test_slack_writes_under_different_tokens_are_all_replayed():
     assert out.fidelity == "full"
 
 
-def test_rewrite_leaves_a_slack_read_as_the_same_object():
+def test_rewrite_leaves_a_slack_read_alone():
     """Slack has no `REWRITES` entry: its cursor is opaque and server-issued, so there is nothing
     of irimi's in it to translate."""
     read = _slack_read({"channel": "C0123", "cursor": "dXNlcjpVMEc5V0ZYTlo="})
     log = [_slack_post_exchange("1800000000.000001")]
-    assert ServiceOverlay(MAPS).rewrite(log, read) is read
+    assert ServiceOverlay(MAPS).rewrite(log, read) is None
 
 
 def test_a_slack_replies_read_after_a_faked_reply_is_rewritten():

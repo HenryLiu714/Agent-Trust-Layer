@@ -178,9 +178,9 @@ def _streamed(exchange: Exchange) -> bool:
 
 def _servable(exchange: Exchange) -> bool:
     """Whether a replay may answer with this recorded exchange's response: it has one, it is the
-    whole of what was answered, and it was not a target's. A delegated answer came from wherever
-    the target was, which a replay is not pointed at. A write or an unknown request must have been
-    one of irimi's own fakes (`_FAKE_LEVELS`).
+    whole of what was answered, and it was not a target's or irimi's own error. A delegated answer
+    came from wherever the target was, which a replay is not pointed at. A write or an unknown
+    request must have been one of irimi's own fakes (`_FAKE_LEVELS`).
 
     The response must also be one the engine can send. irimi's own writer stores only headers it
     read as latin-1, but a run from elsewhere - edited by hand, pulled from a bucket, written by
@@ -190,7 +190,7 @@ def _servable(exchange: Exchange) -> bool:
     replay cannot carry on. And a `text/event-stream` 200 recorded with no body and no chunks is a
     stream whose body was not kept, not an empty answer."""
     response = exchange.response
-    if response is None or exchange.answered_by == "delegated":
+    if response is None or exchange.answered_by in ("delegated", "irimi"):
         return False
     if exchange.kind not in LIVE_KINDS and exchange.answered_by not in _FAKE_LEVELS:
         return False

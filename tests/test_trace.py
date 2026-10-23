@@ -526,9 +526,15 @@ def test_a_v1_run_reads_under_v2_as_a_run_that_is_no_replay():
     assert (record.schema_version, record.mode, record.replay_of) == (1, "shadow", None)
 
 
-def test_a_v3_run_is_refused():
+def test_a_v2_run_reads_under_v3_as_written():
+    """v3 adds the `answered_by` value `irimi` and nothing else, so a v2 run reads unchanged."""
+    record = trace.run_from_json(_encoded_run() | {"schema_version": 2})
+    assert record.schema_version == 2
+
+
+def test_a_v4_run_is_refused():
     with pytest.raises(TraceFormatError, match="schema_version is newer than this irimi reads"):
-        trace.run_from_json(_encoded_run() | {"schema_version": 3})
+        trace.run_from_json(_encoded_run() | {"schema_version": 4})
 
 
 def test_a_replay_names_the_run_it_replays():

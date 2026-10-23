@@ -28,7 +28,7 @@ from irimi.exchange import (
     Request,
     Response,
 )
-from irimi.overlay import ServiceOverlay
+from irimi.overlay import ServiceOverlay, Translation
 from irimi.policy import Answer, ReplayPolicy, ShadowPolicy
 from irimi.reader import UpstreamReader
 from irimi.recording import Recording
@@ -597,7 +597,7 @@ def test_an_answer_the_engine_cannot_send_fails_closed_and_forwards_nothing(home
         status, headers, _ = _refund(session, stripe, 100)
     finally:
         session.stop()
-    assert (status, headers[pipeline.ANSWERED_BY_HEADER]) == (502, "fake-L0")
+    assert (status, headers[pipeline.ANSWERED_BY_HEADER]) == (502, "irimi")
     (ex,) = session.seen
     assert DECISION_FAILED_FLAG in ex.flags
     assert _Stripe.seen == []
@@ -685,12 +685,12 @@ class _Translating:
     def __init__(self):
         self.translated = []
 
-    def __call__(self, write_log, read_request, upstream_response):
+    def __call__(self, write_log, read_request, upstream_response, translated_from=None):
         raise AssertionError("not asked here")
 
     def rewrite(self, write_log, read_request):
         self.translated.append(read_request)
-        return dataclasses.replace(read_request, query="translated=1")
+        return Translation(dataclasses.replace(read_request, query="translated=1"), "x=1")
 
 
 def _decided(home, maps, policy, overlay, host="127.0.0.1"):
@@ -706,7 +706,7 @@ def _decided(home, maps, policy, overlay, host="127.0.0.1"):
     addon = IrimiAddon(config, policy, NullStore(), overlay, None, lambda *a: None)
     read = Request("GET", "https", host, 443, "/v1/refunds", "starting_after=re_1", (), b"")
     write = pipeline.annotate(read, None, pipeline.unclassified(read), "fake-L0", "t")
-    return addon._decide(read, (write,), "t", False)
+    return addon._decide(read, (write,), "t", False, ("127.0.0.1", 4000))
 
 
 @pytest.mark.parametrize(

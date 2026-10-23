@@ -57,7 +57,8 @@ from irimi.secret_shapes import cut_outside_secrets
 #
 # Version 2 has `mode` `replay`, `answered_by` and `ran` `recording`, and a run record's
 # `replay_of`. A version 1 run reads under it unchanged, as a run with no `replay_of`.
-SCHEMA_VERSION = 2
+# Version 3 has `answered_by` `irimi`; a version 2 run reads under it unchanged.
+SCHEMA_VERSION = 3
 
 # The run id of an exchange no run claimed: `irimi serve` with no `Irimi-Run` header.
 UNATTRIBUTED = "unattributed"

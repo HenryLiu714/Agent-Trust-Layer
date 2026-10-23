@@ -552,7 +552,7 @@ def test_each_refusal_answers_its_status_and_line_and_makes_no_run(run_workflow,
     serve's `serve.lock`, and no process run."""
     shadow = run_workflow(W, "control_runs", mode)
     assert {e["label"]: e["body"] for e in shadow.events("refusal")} == {
-        label: {"error": line} for label, (_, line) in REFUSALS.items()
+        label: control_refusal(line) for label, (_, line) in REFUSALS.items()
     }
     root = shadow.home / paths.STORE_DIR_NAME
     lock = [SERVE_LOCK_FILE] if mode == "serve" else []
@@ -659,7 +659,7 @@ def test_the_process_runs_start_and_end_are_irimis_and_only_its_tool_calls_are_t
     shadow = run_workflow(W, "control_hazards", "shadow")
     process = shadow.process_run_id()
     assert [e["id"] for e in shadow.events("process_run")] == [process]
-    refused = {"error": f"{process!r} is irimi's own run, which the SDK may not start or end"}
+    refused = control_refusal(f"{process!r} is irimi's own run, which the SDK may not start or end")
     assert {e["label"]: e["body"] for e in shadow.events("answer")} == {
         "process_start": refused,
         "process_tool": None,
@@ -709,7 +709,7 @@ def test_under_serve_irimis_own_run_is_unattributed_and_only_its_tool_calls_are_
     `irimi runs show` ends in, as `test_invariants.py` holds every serve's blocks to."""
     serve = run_workflow(W, "control_hazards", "serve")
     assert [e["id"] for e in serve.events("process_run")] == [trace.UNATTRIBUTED]
-    refused = {"error": f"{trace.UNATTRIBUTED!r} cannot name a run"}
+    refused = control_refusal(f"{trace.UNATTRIBUTED!r} cannot name a run")
     assert {e["label"]: e["body"] for e in serve.events("answer")} == {
         "process_start": refused,
         "process_tool": None,
@@ -792,17 +792,19 @@ def test_a_replay_refuses_a_cut_write_again_and_answers_the_rest_from_its_record
 ):
     """A write whose body decoded past irimi's cap was refused, never decided, and a replay
     refuses it again the same way: the engine answers it 502 before any policy is asked, so it
-    carries neither replay flag, and nothing reaches the fake Stripe. That refusal was never a
+    carries neither replay flag, and nothing reaches the fake Stripe. It keeps the route it was
+    classified under. That refusal was never a
     write - the engine never put it in the write log (`is_authored_write`) - so the $9 refund after
     it, which L3 checked, is answered from the recording, check and all, and the replay never
     diverges. `irimi compare` of the recording and its replay calls the cut pair `?` and
     exits 1."""
     recorded, replay = replayed(W, scenario)
     cut, refund = replay.reported
-    assert (cut.kind, cut.response.status, cut.flags) == (
-        "unknown",
+    assert (cut.kind, cut.answered_by, cut.response.status, cut.flags) == (
+        "write",
+        "irimi",
         502,
-        ("unclassified", "decision-failed", "body-truncated"),
+        ("decision-failed", "body-truncated"),
     )
     assert replay.internet.requests() == []
     assert (refund.precondition, refund.flags) == ("passed", ("fidelity:L1", "from-recording"))
@@ -875,14 +877,18 @@ def test_a_replay_writes_no_other_recorded_run_its_agent_names_again(replayed):
 # each run start 413 unread.
 
 BOMB_LINES = [
-    "fake-L0   unknown   POST api.stripe.com/v1/refunds -> 502"
-    "  [unclassified, decision-failed, body-truncated]",
+    "irimi     write     POST api.stripe.com/v1/refunds -> 502  [decision-failed, body-truncated]",
     "live      llm       POST api.anthropic.com/v1/messages -> 413  [body-truncated]",
     f"live      read      GET api.stripe.com/v1/charges/{CHARGE} -> 200",
     "fake-L1   write     POST api.stripe.com/v1/refunds -> 200  [fidelity:L1]",
     "live      read      GET api.stripe.com/v1/refunds -> 200  [body-truncated]",
 ]
 CONTROL_BOMBS = ("control_bomb_lines", "control_bomb_after_a_line", "control_bomb_one_line")
+
+
+def control_refusal(message: str) -> dict:
+    """The body of a control request the endpoint refused."""
+    return {"error": {"type": "irimi_control_refused", "message": message}}
 
 
 def sent(result, label: str) -> dict:
@@ -922,7 +928,7 @@ def test_bodies_that_decode_past_the_cap_are_answered_by_irimi_or_the_service(ru
         "health_after": (502, None),
     }
     assert shadow.by_label() == {
-        "refund_gzip_bomb": (502, "fake-L0"),
+        "refund_gzip_bomb": (502, "irimi"),
         "llm_gzip_bomb": (413, None),
         "refund_plain": (200, "fake-L1"),
         "refunds_padded": (200, None),
@@ -937,7 +943,8 @@ def test_bodies_that_decode_past_the_cap_are_answered_by_irimi_or_the_service(ru
 def test_a_write_whose_body_decodes_past_the_cap_is_refused_and_never_leaves(run_workflow, mode):
     """A refund whose form decodes to 128 MiB. irimi cannot answer it from the start of its body -
     a form is one line, so the start it keeps is nothing at all - and fails closed, as a decision
-    that raised does: its own 502, stamped, recorded `unknown` and flagged. The service never sees
+    that raised does: its own 502, stamped `irimi`, recorded under its route and flagged. The
+    service never sees
     it, and nothing it would have fired is claimed for it. The summary prints it as irimi refused
     it, `✗`, the request as sent and the flags that say why, not a `human:` sentence filled from a
     body irimi never read, and its host line counts it so, not as `unclassified`."""
@@ -945,8 +952,8 @@ def test_a_write_whose_body_decodes_past_the_cap_is_refused_and_never_leaves(run
     posted = [(r.method, r.path) for r in shadow.internet.requests() if r.method == "POST"]
     assert posted == [("POST", "/v1/messages")]
     ex = stored_bomb(shadow, "POST", "/v1/refunds")
-    assert ex.answered_by == "fake-L0"
-    assert ex.flags == ("unclassified", "decision-failed", BODY_TRUNCATED_FLAG)
+    assert (ex.answered_by, ex.service, ex.operation) == ("irimi", "stripe", "refunds.create")
+    assert ex.flags == ("decision-failed", BODY_TRUNCATED_FLAG)
     assert ex.request.body == b""
     assert ex.response is not None and ex.response.status == 502
     assert json.loads(ex.response.body)["error"]["type"] == "irimi_decision_failed"
@@ -1017,7 +1024,7 @@ def test_a_run_start_that_decodes_past_the_cap_is_refused_413_unread(run_workflo
     shadow = run_workflow(W, "bombs", mode)
     allowed = control.MAX_CONTROL_BODY
     assert {e["label"]: e["body"] for e in shadow.events("refusal")} == dict.fromkeys(
-        CONTROL_BOMBS, {"error": f"the body decodes past the {allowed} bytes allowed"}
+        CONTROL_BOMBS, control_refusal(f"the body decodes past the {allowed} bytes allowed")
     )
     root = shadow.home / paths.STORE_DIR_NAME
     # No run but the process run, which serve mode does not have.
@@ -1056,11 +1063,11 @@ def side(result) -> str:
 
 
 @pytest.mark.parametrize("mode", MODES)
-def test_irimi_compare_will_not_compare_two_writes_whose_bodies_were_cut(shared_store_run, mode):
+def test_irimi_compare_keeps_two_cut_writes_of_different_routes_apart(shared_store_run, mode):
     """`cut_refund` and `cut_update` each send one Stripe write whose body irimi could not keep,
-    a refund and a customer update, and then the same plain refund. irimi could not decide
-    either cut write, so it keys both by host alone, and they pair: texts that differ while a body
-    was cut are a `?` row, not a change, and the totals say how many it did not compare."""
+    a refund and a customer update, and then the same plain refund. irimi refuses each cut write
+    but keeps the route it was classified under, so the two are different writes: one only in A,
+    one only in B, never paired."""
     one, a, other, b = recorded_pair(shared_store_run, "cut_refund", "cut_update", mode, "cut")
     code, out, err = other.compare_runs(a, b)
     assert (code, err) == (1, [])
@@ -1070,13 +1077,12 @@ def test_irimi_compare_will_not_compare_two_writes_whose_bodies_were_cut(shared_
         f"  B  {side(other)}",
         "  (the triggers' args differ)",
         "",
-        f"  ? A {CUT_REFUND}",
-        "    B ✗ POST api.stripe.com/v1/customers/cus_GAUNTLET  refused by irimi "
+        f"  - {CUT_REFUND}",
+        "  + ✗ POST api.stripe.com/v1/customers/cus_GAUNTLET  refused by irimi "
         "(decision-failed, body-truncated)",
         f"  = {PLAIN_REFUND}",
         "",
-        "  1 same · 0 changed · 0 only in A · 0 only in B · 1 not compared (a body was cut when "
-        "stored)",
+        "  1 same · 0 changed · 1 only in A · 1 only in B",
     ]
     assert rows_not_shown(other, a, b, out) == []
 

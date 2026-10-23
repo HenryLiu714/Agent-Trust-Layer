@@ -9,6 +9,7 @@ store's end-of-run callback, and then the CLI, driven as a subprocess where a si
 import asyncio
 import contextlib
 import dataclasses
+import json
 import socket
 
 import pytest
@@ -75,9 +76,19 @@ def test_the_reverse_door_refuses_a_peer_that_is_not_loopback(tmp_path, monkeypa
     asyncio.run(addon.request(flow))
 
     assert flow.response.status_code == 403
-    assert b"loopback only, refusing '10.0.0.9'" in flow.response.content
+    assert flow.response.headers["irimi-answered-by"] == "irimi"
+    assert (
+        "loopback only, refusing '10.0.0.9'"
+        in json.loads(flow.response.content)["error"]["message"]
+    )
     assert (flow.request.host, flow.request.path) == ("10.0.0.5", "/api.stripe.com/v1/x")
-    assert seen == []
+    (ex,) = seen
+    assert (ex.answered_by, ex.door, ex.kind, ex.flags) == (
+        "irimi",
+        "reverse",
+        "read",
+        ("refused",),
+    )
 
 
 # -- the self-loop guard, widened ------------------------------------------------------------------
@@ -246,8 +257,14 @@ def test_a_door_that_cannot_be_told_is_refused_never_forwarded(tmp_path, monkeyp
     flow.client_conn.sockname = ("10.0.0.5", 4000)
     asyncio.run(addon.request(flow))
     assert flow.response.status_code == 400
-    assert flow.response.content == b"irimi: could not route request\n"
-    assert seen == []
+    assert json.loads(flow.response.content) == {
+        "error": {
+            "type": "irimi_refused",
+            "message": "irimi refused this request: could not route this request",
+        }
+    }
+    (ex,) = seen
+    assert (ex.answered_by, ex.flags) == ("irimi", ("unclassified", "refused"))
 
 
 def test_a_failed_decision_under_serve_mode_is_unattributed(tmp_path, monkeypatch):

@@ -64,6 +64,7 @@ from irimi.exchange import (
     FROM_RECORDING_FLAG,
     LIVE_KINDS,
     REPLAY_MISS_FLAG,
+    TARGET_FAILED_FLAG,
 )
 from irimi.runner import NO_PROXY_VALUE
 from irimi.trace import ToolCall
@@ -381,12 +382,14 @@ def end_problems(recorded: Result, r: Replayed) -> list[str]:
 
 def flag_problems(replay: Result) -> list[str]:
     """Each exchange a policy decided flagged neither `from-recording` nor `replay-miss`, or both:
-    every one but telemetry and a delegated answer, which a replay never looks up."""
+    every one but telemetry and a delegated answer, which a replay never looks up, whether its
+    target answered or irimi answered for it with `target-failed`."""
     return [
         line(ex)
         for ex in replay.reported
         if ex.kind != "telemetry"
         and ex.answered_by != "delegated"
+        and TARGET_FAILED_FLAG not in ex.flags
         and len({FROM_RECORDING_FLAG, REPLAY_MISS_FLAG} & set(ex.flags)) != 1
     ]
 

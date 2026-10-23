@@ -148,15 +148,17 @@ webhooks the real service would have sent (a route's `fires:` list). Nothing is 
 ### Irimi-Answered-By
 
 Every response irimi decided carries `Irimi-Answered-By`: `fake-L0`, `fake-L1`, `delegated` (an
-answer target answered it) or `overlay` (a live read whose body irimi edited to show the run's
-writes). A response with no such header came from the real service, unchanged. Absence is the
+answer target answered it), `overlay` (a live read whose body irimi edited to show the run's
+writes), `recording` (a replay answered it from the stored run) or `irimi` (an error of irimi's
+own, with a JSON body `{"error": {"type": ..., "message": ...}}`). A response with no such header
+came from the real service, unchanged. Absence is the
 signal: adding a header to a read irimi did not change would make it differ from what the service
 sent.
 
 irimi changes one kind of read on its way out. A later `GET /v1/refunds?starting_after=<minted id>`
-would be an error on the real Stripe, so irimi drops that cursor before forwarding and marks the
-request with `Irimi-Rewrote`, naming what it removed. `Irimi-Rewrote` and `Irimi-Run` are irimi's
-own vocabulary: one the agent sends is stripped and never reaches a service.
+would be an error on the real Stripe, so irimi drops that cursor before forwarding and remembers
+what it removed; nothing of irimi's is added to the request. `Irimi-Rewrote` and `Irimi-Run` are
+irimi's own vocabulary: one the agent sends is stripped and never reaches a service.
 
 ### The summary
 

@@ -29,14 +29,16 @@ from irimi.exchange import (
     DECISION_FAILED_FLAG,
     IDEMPOTENCY_CONFLICT_FLAG,
     IDEMPOTENT_REPLAY_FLAG,
+    REFUSED_FLAG,
     STREAM_TRUNCATED_FLAG,
+    TARGET_FAILED_FLAG,
     UNCLASSIFIED_FLAG,
     UPSTREAM_ERROR_FLAG,
     Exchange,
     Request,
     Response,
 )
-from irimi.overlay import NoOverlay, Overlaid
+from irimi.overlay import NoOverlay, Overlaid, Translation
 from irimi.policy import Answer, ShadowPolicy
 from irimi.store import MAX_STORED_BODY, DirectoryStore, NullStore, StoreReader
 
@@ -515,11 +517,11 @@ def test_an_upstream_body_in_an_encoding_that_is_not_a_decoding_is_still_recorde
 
 def test_overlay_output_reaches_the_client(tmp_path, monkeypatch, upstream):
     class _Overlay:
-        def __call__(self, write_log, read_request, upstream_response):
+        def __call__(self, write_log, read_request, upstream_response, translated_from=None):
             return Overlaid(Response(200, (("content-type", "text/plain"),), b"OVERLAID"))
 
         def rewrite(self, write_log, read_request):
-            return read_request
+            return None
 
     eng, seen, stop = _start(_config(tmp_path, monkeypatch), overlay=_Overlay())
     try:
@@ -541,12 +543,12 @@ def test_an_overlaid_read_in_an_encoding_mitmproxy_cannot_apply_still_reaches_th
     exchange was never recorded. The body goes out as the overlay built it."""
 
     class _Overlay:
-        def __call__(self, write_log, read_request, upstream_response):
+        def __call__(self, write_log, read_request, upstream_response, translated_from=None):
             body = upstream_response.body + b"-OVERLAID"
             return Overlaid(Response(200, upstream_response.headers, body))
 
         def rewrite(self, write_log, read_request):
-            return read_request
+            return None
 
     eng, seen, stop = _start(_config(tmp_path, monkeypatch), overlay=_Overlay())
     url = f"http://127.0.0.1:{upstream}/encoded/{content_encoding}"
@@ -562,11 +564,11 @@ def test_an_overlaid_read_in_an_encoding_mitmproxy_cannot_apply_still_reaches_th
 
 def test_repeated_headers_survive_a_local_answer(tmp_path, monkeypatch, upstream):
     class _Overlay:
-        def __call__(self, write_log, read_request, upstream_response):
+        def __call__(self, write_log, read_request, upstream_response, translated_from=None):
             return Overlaid(Response(200, (("set-cookie", "a=1"), ("set-cookie", "b=2")), b""))
 
         def rewrite(self, write_log, read_request):
-            return read_request
+            return None
 
     eng, seen, stop = _start(_config(tmp_path, monkeypatch), overlay=_Overlay())
     try:
@@ -664,20 +666,45 @@ def test_reverse_door_forwards_to_tls_upstream(tmp_path, monkeypatch):
 
 
 def test_reverse_door_refuses_unlisted_host(engine):
+    """A refusal is irimi's own JSON error, and it is recorded: a request sent by base URL to a
+    host irimi does not relay is in the trace, flagged `refused`, and a GET stays a read."""
     eng, seen = engine
     status, data = _reverse(eng.listen_port(), "GET", "/api.stripe.com/v1")
     assert status == 403
-    assert b"not in a loaded map or --allow-host" in data
-    assert b"api.stripe.com" in data
-    assert seen == []
+    assert json.loads(data) == {
+        "error": {
+            "type": "irimi_refused",
+            "message": "irimi refused this request: reverse door: host 'api.stripe.com' is not "
+            "in a loaded map or --allow-host",
+        }
+    }
+    (ex,) = seen
+    assert (ex.answered_by, ex.kind, ex.door) == ("irimi", "read", "reverse")
+    assert ex.flags == (REFUSED_FLAG,)
+    assert ex.request.path == "/api.stripe.com/v1"
+    assert ex.response.status == 403
+    assert not report.is_intercepted(ex)
+
+
+def test_a_refused_post_is_still_listed_among_the_writes(engine):
+    """The same refusal for a POST is classified as one, so the summary names it a write irimi
+    refused rather than dropping it."""
+    eng, seen = engine
+    status, _ = _reverse(eng.listen_port(), "POST", "/api.stripe.com/v1/refunds", body=b"{}")
+    assert status == 403
+    (ex,) = seen
+    assert (ex.answered_by, ex.kind) == ("irimi", "unknown")
+    assert report.is_intercepted(ex)
+    assert "refused by irimi (refused)" in report.write_sentence(ex, None)
 
 
 def test_reverse_door_refuses_missing_host(engine):
     eng, seen = engine
     status, data = _reverse(eng.listen_port(), "GET", "/")
     assert status == 403
-    assert b"/<upstream-host>/<path>" in data
-    assert seen == []
+    assert "/<upstream-host>/<path>" in json.loads(data)["error"]["message"]
+    (ex,) = seen
+    assert (ex.answered_by, ex.flags) == ("irimi", (REFUSED_FLAG,))
 
 
 def test_reverse_door_write_is_faked(tmp_path, monkeypatch):
@@ -1075,7 +1102,7 @@ class _RewritingOverlay:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    def __call__(self, write_log, read_request, upstream_response):
+    def __call__(self, write_log, read_request, upstream_response, translated_from=None):
         self.calls.append(read_request.path)
         return Overlaid(
             Response(
@@ -1086,7 +1113,7 @@ class _RewritingOverlay:
         )
 
     def rewrite(self, write_log, read_request):
-        return read_request
+        return None
 
 
 def test_an_overlay_is_not_handed_a_streamed_read_and_cannot_rewrite_one(tmp_path, monkeypatch):
@@ -1929,9 +1956,10 @@ def test_an_unreachable_target_is_a_502_with_the_json_body_the_issue_specifies(
     body = json.loads(data)
     assert body["error"]["type"] == "irimi_target_failed"
     assert target_url in body["error"]["message"]
+    # irimi answered it, with an error, and the flag says why. The write keeps its classification.
     (ex,) = seen
-    assert ex.answered_by == "delegated"
-    assert "target-failed" in ex.flags
+    assert (ex.answered_by, ex.kind) == ("irimi", "write")
+    assert ex.flags == (TARGET_FAILED_FLAG,)
     assert ex.target == target_url
     assert ex.response is not None and ex.response.status == 502
 
@@ -1952,7 +1980,7 @@ def test_a_target_that_stops_listening_mid_run_is_still_flagged(tmp_path, monkey
     finally:
         stop()
     assert (first, second) == (200, 502)
-    assert [ex.answered_by for ex in seen] == ["delegated", "delegated"]
+    assert [ex.answered_by for ex in seen] == ["delegated", "irimi"]
     assert "target-failed" not in seen[0].flags
     assert "target-failed" in seen[1].flags
 
@@ -1989,9 +2017,26 @@ def test_a_delegated_write_lists_no_webhooks_whether_or_not_its_target_answers(
     finally:
         stop()
     assert (first, second) == (200, 502)
-    assert [ex.answered_by for ex in seen] == ["delegated", "delegated"]
+    assert [ex.answered_by for ex in seen] == ["delegated", "irimi"]
     assert "target-failed" in seen[1].flags
     assert [ex.would_fire for ex in seen] == [(), ()]
+
+
+def test_a_remote_target_is_probed_too_and_an_unreachable_one_is_irimis_json_502(monkeypatch):
+    """Every target is probed, a remote one as much as a loopback one, on the decision's worker
+    thread, so one nothing answers at gets irimi's JSON 502 rather than mitmproxy's HTML page."""
+    dialled = []
+
+    def refuse(address, timeout):
+        dialled.append(address)
+        raise ConnectionRefusedError("refused")
+
+    monkeypatch.setattr(mitm.socket, "create_connection", refuse)
+    forward = delegation.ForwardTo("https://sandbox.example.com/v1")
+    refused = mitm._target_refusal(forward, ("127.0.0.1", 4000))
+    assert isinstance(refused, delegation.TargetUnreachable)
+    assert "'https://sandbox.example.com/v1' could not be reached" in str(refused)
+    assert dialled == [("sandbox.example.com", 443)]
 
 
 def test_a_target_naming_our_own_listener_is_refused_with_a_json_502(tmp_path, monkeypatch):
@@ -2027,11 +2072,13 @@ def test_a_target_naming_our_own_listener_is_refused_with_a_json_502(tmp_path, m
     assert flow.response.status_code == 502
     assert json.loads(flow.response.content)["error"]["type"] == "irimi_target_failed"
     assert "own listener" in json.loads(flow.response.content)["error"]["message"]
+    assert flow.response.headers[pipeline.ANSWERED_BY_HEADER] == "irimi"
     # The flow was not pointed anywhere: refusing must not leave it aimed at the real service.
     assert (flow.request.host, flow.request.path) == ("127.0.0.1", "/things")
-    pending = flow.metadata[META_KEY]
-    assert pending.answered_by == "delegated"
-    assert "target-failed" in pending.flags
+    # Answered and recorded in the request hook, so no later hook has anything left to finish.
+    assert META_KEY not in flow.metadata
+    (ex,) = seen
+    assert (ex.answered_by, ex.flags) == ("irimi", (TARGET_FAILED_FLAG,))
 
 
 def test_a_locally_answered_flow_that_errors_keeps_its_own_flags(tmp_path, monkeypatch):
@@ -2065,9 +2112,9 @@ def test_a_locally_answered_flow_that_errors_keeps_its_own_flags(tmp_path, monke
 
 
 def test_a_refused_target_is_flagged_once_even_if_the_client_then_vanishes(tmp_path, monkeypatch):
-    """`request()` already answered and flagged this one; the client going away afterwards does
-    not make the target fail a second time. The flag is a fact about the exchange, not a counter.
-    Driven through the addon, like every other client-disappears case."""
+    """`request()` already answered and recorded this one; the client going away afterwards does
+    not record it twice or make the target fail a second time. Driven through the addon, like
+    every other client-disappears case."""
     from mitmproxy.test import tflow, tutils
 
     from irimi.engine.mitm import IrimiAddon
@@ -2093,10 +2140,9 @@ def test_a_refused_target_is_flagged_once_even_if_the_client_then_vanishes(tmp_p
     addon.error(flow)
 
     (ex,) = seen
-    assert ex.answered_by == "delegated"
-    assert ex.flags.count("target-failed") == 1
-    # And the answer's own flags are kept on the failure path, as `response` keeps them.
-    assert ex.flags == ("fidelity:delegated", "target-failed")
+    assert ex.answered_by == "irimi"
+    # The answer's fidelity flag goes with it: nothing answered the request faithfully.
+    assert ex.flags == ("target-failed",)
 
 
 def test_an_untargeted_write_is_still_faked(tmp_path, monkeypatch, target):
@@ -2148,7 +2194,7 @@ def test_a_raise_in_the_decision_answers_locally_instead_of_forwarding(
     assert json.loads(data)["error"]["type"] == "irimi_decision_failed"
     assert len(seen) == 1, "the exchange must still be recorded"
     assert seen[0].flags == (UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG)
-    assert (seen[0].kind, seen[0].answered_by) == ("unknown", "fake-L0")
+    assert (seen[0].kind, seen[0].answered_by) == ("unknown", "irimi")
 
 
 def _bare_addon(tmp_path, monkeypatch, policy=None, overlay=None, on_exchange=None):
@@ -2207,11 +2253,11 @@ def test_a_raise_carrying_a_rewrite_onto_the_flow_answers_locally(tmp_path, monk
     from dataclasses import replace
 
     class _Translating:
-        def __call__(self, write_log, read_request, upstream_response):
+        def __call__(self, write_log, read_request, upstream_response, translated_from=None):
             return Overlaid(upstream_response)
 
         def rewrite(self, write_log, read_request):
-            return replace(read_request, query="translated=1")
+            return Translation(replace(read_request, query="translated=1"), "translated=0")
 
     seen = []
     addon = _bare_addon(tmp_path, monkeypatch, overlay=_Translating(), on_exchange=seen.append)
@@ -2306,9 +2352,8 @@ def test_neither_half_of_a_delegated_exchange_is_a_write(tmp_path, monkeypatch, 
 
 
 def test_a_refused_target_is_not_a_write_either(tmp_path, monkeypatch, target):
-    """A target irimi refuses is answered `502` in `request()`, which DOES set `_Pending`, so
-    unlike a target that could not be dialled it reaches `response()` - but it must not reach the
-    write log, the log the overlay applies to live reads.
+    """A target irimi refuses is answered `502` and recorded in `request()`, and it must not reach
+    the write log, the log the overlay applies to live reads.
 
     Nothing was performed: not at the target, not at the real service, not by the fake. The
     overlay would hand the agent back a write irimi refused to send anywhere.
@@ -2335,7 +2380,7 @@ def test_a_refused_target_is_not_a_write_either(tmp_path, monkeypatch, target):
     assert status == 502 and json.loads(data)["error"]["type"] == "irimi_target_failed"
     assert asked == [(f"http://127.0.0.1:{target}/w", eng.listen_port(), "127.0.0.1")]
     # Still recorded - a write irimi could not answer is exactly what the trace has to show.
-    assert [ex.flags for ex in seen] == [("fidelity:delegated", "target-failed")]
+    assert [ex.flags for ex in seen] == [("target-failed",)]
     assert addon.write_log == [], "a write performed nowhere is in the overlay's write log"
 
 
@@ -2419,6 +2464,7 @@ def test_the_response_hook_writes_nothing_back_to_a_streamed_flow(tmp_path, monk
         resp=tutils.tresp(content=None, headers=((b"content-type", b"text/event-stream"),)),
     )
     flow.client_conn.sockname = ("127.0.0.1", 4000)
+    monkeypatch.setattr(mitm, "_probe_target", lambda url: None)  # nothing listens at 3999
     asyncio.run(addon.request(flow))
     assert flow.metadata[META_KEY].answered_by == "delegated"
     flow.response.stream = True  # what `responseheaders` does for an event stream
@@ -2458,6 +2504,7 @@ def test_the_response_hook_records_a_streamed_flow_from_its_tee_and_writes_nothi
         resp=tutils.tresp(content=None, headers=((b"content-type", b"text/event-stream"),)),
     )
     flow.client_conn.sockname = ("127.0.0.1", 4000)
+    monkeypatch.setattr(mitm, "_probe_target", lambda url: None)  # nothing listens at 3999
     asyncio.run(addon.request(flow))
     assert flow.metadata[META_KEY].answered_by == "delegated"
     # What `responseheaders` does for an event stream, and a chunk through it.
@@ -2527,12 +2574,14 @@ class _OverlayDouble:
 
     def __init__(self, answer=None, rewrite=None):
         self._answer = answer or (lambda upstream: Overlaid(upstream))
-        self._rewrite = rewrite or (lambda request: request)
+        self._rewrite = rewrite or (lambda request: None)
         self.calls = 0
         self.rewrites = 0
+        self.translated_from: list[str | None] = []
 
-    def __call__(self, write_log, read_request, upstream_response):
+    def __call__(self, write_log, read_request, upstream_response, translated_from=None):
         self.calls += 1
+        self.translated_from.append(translated_from)
         return self._answer(upstream_response)
 
     def rewrite(self, write_log, read_request):
@@ -2629,12 +2678,12 @@ def test_an_overlay_that_raises_does_not_break_the_read(tmp_path, monkeypatch, u
 def test_a_rewritten_read_reaches_the_upstream_translated_and_is_recorded_that_way(
     tmp_path, monkeypatch, upstream
 ):
+    """What the translation dropped stays in irimi: the overlay is handed it with the response,
+    and neither the service nor the trace sees a header of irimi's."""
     from dataclasses import replace
 
-    stamp = (pipeline.REWROTE_HEADER, "starting_after=re_MINTED1")
-
     def translate(request):
-        return replace(request, query="limit=1", headers=request.headers + (stamp,))
+        return Translation(replace(request, query="limit=1"), "starting_after=re_MINTED1")
 
     overlay = _OverlayDouble(rewrite=translate)
     eng, seen, stop = _engine_with_a_write(tmp_path, monkeypatch, upstream, overlay)
@@ -2648,10 +2697,11 @@ def test_a_rewritten_read_reaches_the_upstream_translated_and_is_recorded_that_w
     assert status == 200
     ((path, received),) = _Upstream.seen
     assert path == "/hello?limit=1"
-    assert {k.lower(): v for k, v in received}[stamp[0]] == stamp[1]
+    assert pipeline.REWROTE_HEADER not in {k.lower() for k, _ in received}
+    assert overlay.translated_from == ["starting_after=re_MINTED1"]
     ex = seen[-1]
     assert ex.request.query == "limit=1"
-    assert stamp in ex.request.headers
+    assert pipeline.REWROTE_HEADER not in {k for k, _ in ex.request.headers}
 
 
 def test_a_rewrite_that_raises_forwards_the_read_unchanged(tmp_path, monkeypatch, upstream):
@@ -2691,21 +2741,12 @@ def test_the_overlay_is_not_asked_about_a_read_before_any_write(tmp_path, monkey
 
 
 def test_a_rewrote_header_the_agent_sent_is_not_forwarded_upstream(tmp_path, monkeypatch, upstream):
-    """Only irimi may tell the response side that a page follows a minted refund. The overlay
-    strips an agent's own `irimi-rewrote`, and the engine has to carry that onto the flow too, or
-    the header reaches the real service anyway.
-
-    The engine strips it in `request()` before the overlay is asked, so this holds even for an
-    overlay whose `rewrite` strips nothing. It is the non-empty-log twin of
+    """irimi's vocabulary is never the agent's. The engine strips an agent's own
+    `irimi-rewrote` in `request()` before the overlay is asked, so it never reaches the real
+    service on the rewrite path either. It is the non-empty-log twin of
     `test_a_rewrote_header_the_agent_sent_is_stripped_before_the_runs_first_write`.
     """
-    from dataclasses import replace
-
-    def strip(request):
-        kept = tuple((k, v) for k, v in request.headers if k != pipeline.REWROTE_HEADER)
-        return replace(request, headers=kept)
-
-    overlay = _OverlayDouble(rewrite=strip)
+    overlay = _OverlayDouble()
     eng, seen, stop = _engine_with_a_write(tmp_path, monkeypatch, upstream, overlay)
     try:
         status, _, _ = _read_via_proxy(
@@ -2728,8 +2769,8 @@ def test_a_rewrote_header_the_agent_sent_is_stripped_before_the_runs_first_write
     strip cannot run before then. The engine strips the header in `request()` whatever the log
     holds, so irimi's vocabulary never reaches the real service on a read irimi did not touch.
 
-    `_start` with no overlay gives `NoOverlay`, whose `rewrite` returns the request it was handed,
-    so nothing but the engine could have removed the header here. Sent twice, in two spellings:
+    `_start` with no overlay gives `NoOverlay`, whose `rewrite` translates nothing, so nothing
+    but the engine could have removed the header here. Sent twice, in two spellings:
     a forged repeat has to lose every instance, not the first.
     """
     cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch))
@@ -2756,9 +2797,8 @@ def test_a_rewrote_header_the_agent_sent_is_stripped_before_the_runs_first_write
 def test_a_rewrote_header_the_agent_sent_is_kept_out_of_the_recorded_request(
     tmp_path, monkeypatch, upstream
 ):
-    """The Exchange records what irimi asked the service. It did not ask with this header, and the
-    response side reads the recorded request - `ServiceOverlay._apply` looks for `Irimi-Rewrote`
-    there - so leaving it on would let a forgery be believed by a later hook."""
+    """The Exchange records what irimi asked the service. It did not ask with this header, and a
+    trace that showed one would credit irimi with the agent's forgery."""
     cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch))
     eng, seen, stop = _start(cfg)
     try:
@@ -2772,18 +2812,18 @@ def test_a_rewrote_header_the_agent_sent_is_kept_out_of_the_recorded_request(
     assert [k for k, _ in seen[-1].request.headers if k == pipeline.REWROTE_HEADER] == []
 
 
-def test_only_irimis_own_rewrote_header_reaches_the_upstream(tmp_path, monkeypatch, upstream):
-    """The forgery is gone and irimi's own is there, exactly once. Two headers of one name would
-    make `stripe._refunds_list` read whichever mitmproxy happened to hand it first."""
+def test_no_rewrote_header_reaches_the_upstream_on_a_translated_read(
+    tmp_path, monkeypatch, upstream
+):
+    """The forgery is gone, and the translation adds none of irimi's own: the overlay learns what
+    was dropped from the engine, never from a header the agent could have sent."""
     from dataclasses import replace
-
-    stamp = (pipeline.REWROTE_HEADER, "starting_after=re_MINTED1")
 
     def translate(request):
         assert all(k != pipeline.REWROTE_HEADER for k, _ in request.headers), (
             "the engine strips the agent's before the overlay is asked"
         )
-        return replace(request, query="limit=1", headers=request.headers + (stamp,))
+        return Translation(replace(request, query="limit=1"), "starting_after=re_MINTED1")
 
     overlay = _OverlayDouble(rewrite=translate)
     eng, seen, stop = _engine_with_a_write(tmp_path, monkeypatch, upstream, overlay)
@@ -2798,9 +2838,9 @@ def test_only_irimis_own_rewrote_header_reaches_the_upstream(tmp_path, monkeypat
     assert status == 200
     ((path, received),) = _Upstream.seen
     assert path == "/hello?limit=1"
-    present = [v for k, v in received if k.lower() == pipeline.REWROTE_HEADER]
-    assert present == [stamp[1]]
-    assert [v for k, v in seen[-1].request.headers if k == pipeline.REWROTE_HEADER] == [stamp[1]]
+    assert [v for k, v in received if k.lower() == pipeline.REWROTE_HEADER] == []
+    assert [v for k, v in seen[-1].request.headers if k == pipeline.REWROTE_HEADER] == []
+    assert overlay.translated_from == ["starting_after=re_MINTED1"]
 
 
 def test_a_write_carrying_a_rewrote_header_is_still_faked_and_records_none(
@@ -3269,7 +3309,7 @@ def test_a_full_refunds_page_drops_the_oldest_real_refund_and_says_there_is_more
 
 def test_a_cursor_naming_a_minted_refund_is_dropped_before_the_read_reaches_stripe(stripe_stub):
     """Stripe has never heard of the refund irimi minted and would answer the page with an error,
-    so the cursor is dropped and `Irimi-Rewrote` carries what was removed. The page that comes back
+    so the cursor is dropped, and irimi keeps what it removed off the wire. The page that comes back
     is the real list from its top, and the minted refund is NOT prepended again: it belongs on the
     page before this one."""
     proxy, stub, seen = stripe_stub
@@ -3288,7 +3328,7 @@ def test_a_cursor_naming_a_minted_refund_is_dropped_before_the_read_reaches_stri
     assert ex.answered_by == "live"
     assert ex.overlay == "full"
     assert ex.request.query == ""
-    assert (pipeline.REWROTE_HEADER, f"starting_after={refund_id}") in ex.request.headers
+    assert pipeline.REWROTE_HEADER not in {k for k, _ in ex.request.headers}
 
 
 def test_a_customer_reread_after_a_faked_update_shows_the_posted_fields(stripe_stub):

@@ -36,11 +36,15 @@ class Read:
     are POSTs that carry every parameter in the body, and the effects should not each have to
     know which. The caller reflects it once, with `bodies.reflect`, so no effect parses a body of
     its own.
+
+    `translated_from` is the `key=value` query pair irimi dropped from this read before forwarding
+    it (`Rewritten.removed`), and None for a read irimi forwarded as the agent sent it.
     """
 
     operation: str
     request: Request
     posted: dict[str, Any]
+    translated_from: str | None = None
 
 
 @dataclass(frozen=True)
@@ -71,7 +75,7 @@ class Rewritten:
     """A read request an effect table translated before it is forwarded."""
 
     query: str  # the new raw query string, without the leading "?"
-    removed: str  # the `key=value` pair that was dropped, for the Irimi-Rewrote header
+    removed: str  # the `key=value` pair that was dropped, which `Read.translated_from` carries
 
 
 @dataclass(frozen=True)

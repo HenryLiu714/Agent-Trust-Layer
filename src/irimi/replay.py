@@ -39,7 +39,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from irimi import compare, redact, report
-from irimi.exchange import FROM_RECORDING_FLAG, REPLAY_MISS_FLAG, Exchange
+from irimi.exchange import (
+    FROM_RECORDING_FLAG,
+    REFUSED_FLAG,
+    REPLAY_MISS_FLAG,
+    TARGET_FAILED_FLAG,
+    Exchange,
+)
 from irimi.recording import made_within
 from irimi.sdk import replay_child
 from irimi.sdk.api import MAIN_MODULE
@@ -299,12 +305,15 @@ def outcome(
 
 def _looked_up(event: object) -> bool:
     """Whether a replay asks the recording for `event`'s kind of call: an exchange the agent sent,
-    but telemetry and a delegated answer, which a replay never looks up, and a read tool."""
+    and a read tool. Not telemetry, a delegated answer or one whose target irimi could not reach,
+    which a replay never looks up, nor a request irimi refused before asking the policy."""
     if isinstance(event, Exchange):
         return (
             event.issued_by == "agent"
             and event.kind != "telemetry"
             and event.answered_by != "delegated"
+            and TARGET_FAILED_FLAG not in event.flags
+            and REFUSED_FLAG not in event.flags
         )
     return isinstance(event, ToolCall) and event.kind == "read"
 

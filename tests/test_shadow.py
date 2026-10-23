@@ -209,10 +209,12 @@ def test_reverse_door_refuses_unlisted_host(home, capfd):
     # capfd, not capsys: the child writes to the inherited fd 1, which capsys does not see.
     assert main(["shadow", *_py(_reverse_source("/evil.example/x"))]) == 0
     out = capfd.readouterr().out
-    assert (
-        "403 irimi: reverse door: host 'evil.example' is not in a loaded map or --allow-host" in out
-    )
-    assert "0 exchanges" in out
+    assert '403 {"error": {"type": "irimi_refused", "message": "irimi refused this request: ' in out
+    assert "reverse door: host 'evil.example' is not in a loaded map or --allow-host" in out
+    # The refusal is irimi's own answer, so it is recorded and counted like one. It was a GET, so
+    # it is not listed among the writes.
+    assert "1 exchange" in out
+    assert "refused by irimi" not in out
 
 
 def test_reverse_door_allow_host(home, capfd):

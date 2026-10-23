@@ -53,7 +53,7 @@ from irimi.exchange import (
     Request,
     Response,
 )
-from irimi.pipeline import ANSWERED_BY_HEADER
+from irimi.pipeline import ANSWERED_BY_HEADER, irimi_error
 from irimi.policy import AnswerPolicy
 from irimi.store import TraceStore, header_record, names_a_run_dir
 from irimi.trace import (
@@ -129,7 +129,10 @@ def _json_response(status: int, doc: Mapping[str, Any], headers: Headers = ()) -
 
 
 def _error_response(status: int, message: str, headers: Headers = ()) -> Response:
-    return _json_response(status, {"error": message[:MAX_REFUSAL]}, headers)
+    """irimi's own error shape (`pipeline.irimi_error`), stamped `control`: a 5xx is irimi's
+    failure, anything else a refusal of what the client posted."""
+    error_type = "irimi_internal_error" if status >= 500 else "irimi_control_refused"
+    return irimi_error(status, error_type, message[:MAX_REFUSAL], (_STAMP, *headers))
 
 
 NO_CONTENT = Response(204, (_STAMP,), b"")

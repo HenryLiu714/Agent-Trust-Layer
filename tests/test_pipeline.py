@@ -1,8 +1,10 @@
+import json
 from dataclasses import replace
 from urllib.parse import urlsplit
 
 import pytest
 
+from irimi import netaddr
 from irimi.delegation import TargetRefused, is_credential_header, refuse_self_target, target_url
 from irimi.exchange import DOWNGRADED_FLAG, Request, Response
 from irimi.netaddr import is_loopback, is_self_host
@@ -430,6 +432,45 @@ def test_is_loopback():
     assert not is_loopback("10.0.0.1")
     assert not is_loopback("")
     assert not is_loopback("nonsense")
+
+
+@pytest.mark.parametrize(
+    "host", ["localhost", "localhost.", "LOCALHOST", "127.0.0.1", "127.1", "0177.0.0.1", "::1"]
+)
+def test_the_three_loopback_predicates_agree_on_every_spelling_of_loopback(host):
+    """One reading of a host underneath all three, so none of them can drift from the others."""
+    literal = f"[{host}]" if ":" in host else host
+    assert is_self_host(host) and is_loopback(host)
+    assert netaddr.is_local_target(f"http://{literal}:3000")
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::"])
+def test_the_unspecified_address_is_self_but_never_a_local_target(host):
+    """The one intended difference: a request whose Host is 0.0.0.0 reaches irimi's own listener,
+    while a target there reaches this machine only by an accident of the OS."""
+    literal = f"[{host}]" if ":" in host else host
+    assert is_self_host(host)
+    assert not is_loopback(host)
+    assert not netaddr.is_local_target(f"http://{literal}:3000")
+
+
+def test_irimis_own_error_is_one_json_shape_and_stamped_by_the_caller():
+    from irimi import pipeline
+
+    error = pipeline.irimi_error(403, "irimi_refused", "no", (("x-extra", "1"),))
+    assert error.status == 403
+    assert error.headers == (("content-type", "application/json"), ("x-extra", "1"))
+    assert json.loads(error.body) == {"error": {"type": "irimi_refused", "message": "no"}}
+    stamped = pipeline.stamped(error, "irimi")
+    assert stamped.header(pipeline.ANSWERED_BY_HEADER) == "irimi"
+    assert pipeline.stamped(error, "live") is error
+
+
+def test_an_authority_leaves_out_the_default_port_and_brackets_ipv6():
+    assert netaddr.authority("::1", 443, 443) == "[::1]"
+    assert netaddr.authority("::1", 3000, 443) == "[::1]:3000"
+    assert netaddr.authority("127.0.0.1", 80, 80) == "127.0.0.1"
+    assert netaddr.authority("127.0.0.1", 4000) == "127.0.0.1:4000"
 
 
 def test_rewrite_reverse_basic():

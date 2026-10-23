@@ -84,7 +84,7 @@ def test_exchange_default_door_is_forward():
 def test_answered_by_names_every_way_an_exchange_is_answered():
     """`delegated` is a frozen seam value for an answer from a target, counted apart in the
     summary. `fake-L1` is the fixture answer, and `fake-L0` stays beside it: L0 is the echo every
-    route without a fixture is still answered with.
+    route without a fixture is still answered with. `irimi` is an error irimi answered with.
     """
     from typing import get_args
 
@@ -97,6 +97,7 @@ def test_answered_by_names_every_way_an_exchange_is_answered():
         "delegated",
         "overlay",
         "recording",
+        "irimi",
     }
 
 
@@ -126,7 +127,7 @@ def test_every_locally_decided_answer_has_a_fidelity_flag():
         AnsweredBy,
     )
 
-    assert set(FIDELITY_FLAGS) == set(get_args(AnsweredBy)) - {"live"}
+    assert set(FIDELITY_FLAGS) == set(get_args(AnsweredBy)) - {"live", "irimi"}
     assert FIDELITY_FLAGS == {
         "fake-L0": FIDELITY_L0_FLAG,
         "fake-L1": FIDELITY_L1_FLAG,

@@ -285,7 +285,10 @@ def test_the_lookup_route_answers_404_under_an_engine_that_is_not_replaying(tmp_
         )
     finally:
         stop()
-    assert (status, body) == (404, {"error": "no recorded call"})
+    assert (status, body) == (
+        404,
+        {"error": {"type": "irimi_control_refused", "message": "no recorded call"}},
+    )
 
 
 # -- the rest of the replay branch ---------------------------------------------------------------
@@ -450,7 +453,10 @@ def test_a_hit_is_used_up_and_is_not_itself_a_tool_call(irimi):
         stop()
     answer = {"result": {"account": "acc_1", "balance": 100}, "error": None, "awaited": False}
     assert first == (200, answer)
-    assert second == (404, {"error": "no recorded call"})
+    assert second == (
+        404,
+        {"error": {"type": "irimi_control_refused", "message": "no recorded call"}},
+    )
     assert "abcd1234abcd1234" not in {r.run_id for r in StoreReader(irimi.root).list_runs()}
 
 
@@ -505,7 +511,7 @@ def test_the_lookup_route_is_validated_like_every_control_route(
         got, answer = _post(eng.listen_port(), f"/_irimi/{path}", body, method)
     finally:
         stop()
-    assert got == status and said in answer["error"]
+    assert got == status and said in answer["error"]["message"]
 
 
 @pytest.mark.parametrize("run_id", ["unattributed", "t3st"])

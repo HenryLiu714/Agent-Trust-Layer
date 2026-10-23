@@ -14,8 +14,10 @@ FakeLevel = Literal["fake-L0", "fake-L1"]
 # return. `recording` is an answer the service gave a stored run, which a replay sent again from
 # disk, byte for byte: a read, an llm call, or a precondition read. Anything else a replay
 # answers from the recording keeps the `answered_by` it was recorded with - a write its fake level,
-# a read the overlay edited `overlay` - and every such answer carries `from-recording`.
-AnsweredBy = Literal["live", "fake-L0", "fake-L1", "delegated", "overlay", "recording"]
+# a read the overlay edited `overlay` - and every such answer carries `from-recording`. `irimi`
+# is an error irimi answered with itself: a refusal, a failed decision, an unreachable target.
+# Its flags say which.
+AnsweredBy = Literal["live", "fake-L0", "fake-L1", "delegated", "overlay", "recording", "irimi"]
 # How much of the write log the overlay could express in the read it was given. `full` is
 # the whole modeled effect. `partial` is irimi saying "this read is incomplete and I could not
 # fix it" - a page the effects table does not model, a filter it cannot read, a body it cannot
@@ -65,11 +67,14 @@ TARGET_FAILED_FLAG = "target-failed"
 # `IrimiAddon.request`). Not `target-failed`: that one says a target was chosen and could not be
 # reached; this one says we never got as far as choosing.
 DECISION_FAILED_FLAG = "decision-failed"
+# The request hook refused the request before any decision: it could not be parsed or routed, or
+# it came in by base URL for a host irimi does not relay, or it could not be rewritten upstream.
+REFUSED_FLAG = "refused"
 # A live forward that lost the real service before it answered.
 UPSTREAM_ERROR_FLAG = "upstream-error"
 # How faithful a locally decided answer is: the L0 echo, the L1 fixture, or whatever an answer
-# target said. Exactly one of these is on every exchange irimi answered itself - `FIDELITY_FLAGS`
-# is the mapping, so a new `answered_by` value cannot ship without one.
+# target said. Exactly one of these is on every exchange irimi answered, except its own errors -
+# `FIDELITY_FLAGS` is the mapping, so a new `answered_by` value cannot ship without one.
 FIDELITY_L0_FLAG = "fidelity:L0"
 FIDELITY_L1_FLAG = "fidelity:L1"
 FIDELITY_DELEGATED_FLAG = "fidelity:delegated"
@@ -153,7 +158,8 @@ TOOL_ACTIONS = frozenset({TOOL_CALLS_ACTION, RECORDED_ACTION})
 RUN_HEADER = "irimi-run"
 
 # The fidelity flag each way of answering carries. One mapping rather than a branch per caller:
-# the policy reads it, and `tests/test_exchange.py` holds it exhaustive over the non-live values.
+# the policy reads it, and `tests/test_exchange.py` holds it exhaustive over the values that
+# answer a request. `irimi` has none: an error answers nothing, faithfully or not.
 FIDELITY_FLAGS: dict[AnsweredBy, str] = {
     "fake-L0": FIDELITY_L0_FLAG,
     "fake-L1": FIDELITY_L1_FLAG,
@@ -324,18 +330,15 @@ def is_authored_write(exchange: Exchange) -> bool:
     `kind not in LIVE_KINDS` keeps reads out. A delegated read is the one non-live read
     (`target_reads`), and a GET replayed onto later reads is not a write by any reading; a
     delegated service gets no overlay, and neither does a streamed read. `answered_by not in
-    ("live", "delegated")` keeps out what irimi did not author: a live forward, and a DELEGATED
-    WRITE - the target performed it, or did something else with it, or nothing, and irimi
-    cannot replay an effect it does not know. `TARGET_FAILED_FLAG` keeps out a write performed
-    nowhere: a target irimi *refused* is answered in the engine's `request()` hook and recorded
-    like any other answer, and without this clause the overlay would replay a write that never
-    happened.
+    ("live", "delegated", "irimi")` keeps out what irimi did not author: a live forward, a
+    DELEGATED WRITE - the target performed it, or did something else with it, or nothing, and
+    irimi cannot replay an effect it does not know - and irimi's own error answer, for which
+    nothing was faked.
 
-    A WRITE IRIMI COULD NOT DECIDE ABOUT IS NOT A WRITE. `DECISION_FAILED_FLAG` is the
-    engine's own 502 for a request whose decision raised, or whose body decoded past the cap: no
-    policy was asked, nothing was faked, and the engine records it without ever offering it to the
-    write log. Counted here, a replay of that run would wait for a recorded write no replay can
-    make, and diverge at the next read.
+    A WRITE IRIMI COULD NOT DECIDE ABOUT IS NOT A WRITE. A run stored under schema 2 records that
+    502 as `fake-L0` flagged `decision-failed`, so the flag keeps it out too. Counted here, a
+    replay of that run would wait for a recorded write no replay can make, and diverge at the
+    next read.
 
     A REJECTED WRITE IS NOT A WRITE. L3 said the real service would have refused it, and the
     agent got that refusal. Replaying it onto later reads would show the agent a refund that
@@ -349,8 +352,7 @@ def is_authored_write(exchange: Exchange) -> bool:
     """
     return (
         exchange.kind not in LIVE_KINDS
-        and exchange.answered_by not in ("live", "delegated")
-        and TARGET_FAILED_FLAG not in exchange.flags
+        and exchange.answered_by not in ("live", "delegated", "irimi")
         and DECISION_FAILED_FLAG not in exchange.flags
         and exchange.precondition != "rejected"
         and not any(flag in exchange.flags for flag in IDEMPOTENCY_FLAGS)

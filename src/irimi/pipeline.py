@@ -5,6 +5,7 @@ because it is a decision of its own: the reverse door (`irimi.reverse_door`) and
 (`irimi.delegation`).
 """
 
+import json
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 
@@ -17,6 +18,7 @@ from irimi.exchange import (
     AnsweredBy,
     Door,
     Exchange,
+    Headers,
     IssuedBy,
     Kind,
     OverlayFidelity,
@@ -31,24 +33,15 @@ from irimi.trace import is_valid_run_id
 # `RUN_HEADER` is imported from `exchange` above, where the SDK can import it too, so
 # `pipeline.RUN_HEADER` names it too, for the engine's strip.
 # Stamped on every response irimi decided rather than forwarded, carrying the `answered_by` value
-# itself (`fake-L0`, `fake-L1`, `delegated`). See `answered_by_header` for why a live forward gets
-# none.
+# itself (`fake-L0`, `fake-L1`, `delegated`, `irimi`). See `answered_by_header` for why a live
+# forward gets none.
 ANSWERED_BY_HEADER = "irimi-answered-by"
-# Put on a REQUEST irimi rewrote before forwarding it, naming the `key=value` query pair it
-# removed. It lives beside the response stamp because both are irimi's own wire vocabulary
-# and a second spelling in `services` or `overlay` is the drift one home prevents. The only
-# rewrite is a cursor naming a refund irimi minted, which Stripe has never heard of; the
-# header is what tells the response side that this page follows the minted refund, so the effects
-# do not prepend it a second time. Unknown *query* parameters were not an option - Stripe rejects
-# them with a 400 - and a header costs the agent nothing and shows up in any capture.
-#
-# ONLY IRIMI EVER SETS IT. One on the agent's own request is a forgery: the response side reads it
-# to decide a page already follows a minted refund, so an agent that sent one could suppress its
-# own refund from that page. `IrimiAddon.request` strips it off every incoming flow and off the
-# Request the trace records, before the decision and whatever the write log holds, and
-# `ServiceOverlay.rewrite` strips it again for callers that do not come through the engine.
+# A name in irimi's own header vocabulary that irimi never sends. The engine strips one an agent
+# sends, as it strips every `Irimi-` header that is not the agent's to set.
 REWROTE_HEADER = "irimi-rewrote"
 LIVE_ANSWER: AnsweredBy = "live"
+# The `answered_by` of every error irimi answers with itself.
+IRIMI_ANSWER: AnsweredBy = "irimi"
 
 
 @dataclass(frozen=True)
@@ -155,7 +148,8 @@ def _refuse_live_on_an_unnamed_method(
 
 def unclassified(request: Request) -> Classification:
     """How a request irimi could not decide about is recorded: `unknown` under its own host,
-    flagged `unclassified`. The engine's answer when the decision itself raised."""
+    flagged `unclassified`. How the engine records a request it refused, or whose decision
+    raised."""
     return Classification(
         service=request.host, operation="", kind="unknown", flags=(UNCLASSIFIED_FLAG,)
     )
@@ -236,7 +230,7 @@ def answered_by_header(answered_by: AnsweredBy) -> str | None:
     """The `Irimi-Answered-By` value an answer must carry, or None when it must carry none.
 
     The value IS `answered_by`, not a second vocabulary beside it: `fake-L0`, `fake-L1`,
-    `delegated`, `overlay` and `recording`. One rule, so a new way of
+    `delegated`, `overlay`, `recording` and `irimi`. One rule, so a new way of
     answering cannot ship a response that does not say who answered it - the header is how a
     client, a test, or a developer reading a capture tells an answer of ours from the real
     service's. It takes the value rather than the Exchange because the engine asks before there is
@@ -259,10 +253,25 @@ def respond(exchange: Exchange) -> Response | None:
     """
     if exchange.response is None:
         return None
-    stamp = answered_by_header(exchange.answered_by)
+    return stamped(exchange.response, exchange.answered_by)
+
+
+def stamped(response: Response, answered_by: AnsweredBy) -> Response:
+    """`response` carrying the `Irimi-Answered-By` that `answered_by` owes it, or `response`
+    itself for a live forward."""
+    stamp = answered_by_header(answered_by)
     if stamp is None:
-        return exchange.response
+        return response
     # Any header of this name already on the response came from somewhere else - a target that
     # echoes headers, or a service of the same name - and ours is the one that is true here.
-    kept = exchange.response.without_header(ANSWERED_BY_HEADER)
+    kept = response.without_header(ANSWERED_BY_HEADER)
     return replace(kept, headers=kept.headers + ((ANSWERED_BY_HEADER, stamp),))
+
+
+def irimi_error(status: int, error_type: str, message: str, headers: Headers = ()) -> Response:
+    """An error irimi answers with itself: `{"error": {"type": ..., "message": ...}}` as JSON.
+
+    The one shape for every such answer, the engine's and the control endpoint's, so a client
+    parses one format for "irimi refused this". Unstamped: the caller stamps it."""
+    body = json.dumps({"error": {"type": error_type, "message": message}}, allow_nan=False)
+    return Response(status, (("content-type", "application/json"), *headers), body.encode())

@@ -804,7 +804,7 @@ def test_an_unreachable_webhook_target_leaves_its_secret_path_nowhere_on_disk(
         "--target",
         f"hooks.slack.com={origin}",
     )
-    assert (answer.status, answer.header("irimi-answered-by")) == (502, "delegated")
+    assert (answer.status, answer.header("irimi-answered-by")) == (502, "irimi")
     assert WEBHOOK_PATH.encode() in answer.body
     disk = stored()
     (ex,) = disk.received

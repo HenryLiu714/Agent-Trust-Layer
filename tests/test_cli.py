@@ -267,7 +267,7 @@ def test_a_replay_of_a_damaged_run_starts_nothing(tmp_path, monkeypatch, capsys,
         (run / "run.json").write_text("{")
     elif damage == "newer":
         record = json.loads((run / "run.json").read_text())
-        (run / "run.json").write_text(json.dumps(record | {"schema_version": 3}))
+        (run / "run.json").write_text(json.dumps(record | {"schema_version": 4}))
     else:
         for blob in (store / "blobs").iterdir():
             blob.unlink()

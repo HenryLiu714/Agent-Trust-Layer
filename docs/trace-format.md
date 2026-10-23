@@ -90,7 +90,8 @@ the first column of each field table below is exactly the keys its encoder write
   carries every byte it was sent, and the overlay never edits such a read: one the run has a write
   for is `overlay: "partial"`, as a body the overlay cannot parse is. A write is never
   answered from part of its request body: one whose body was cut is answered with irimi's own
-  `502` and recorded as an undecidable request, flagged `decision-failed` and `body-truncated`;
+  `502`, recorded under its classification as `answered_by: "irimi"`, flagged `decision-failed`
+  and `body-truncated`;
   the control endpoint refuses one `413`. Only gzip, deflate (and `deflateraw`), br, zstd and the
   identities (`identity`, `none`) are decoded; a body in any other `Content-Encoding` is recorded
   as it came, and a stream in one is recorded empty and flagged, as above.
@@ -194,7 +195,7 @@ An exchange's `started_at` and `ended_at` are `0.0` only on an exchange built wi
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `schema_version` | integer | The format version this run was written in. `2` here; a run written in `1` reads as one that is no replay. |
+| `schema_version` | integer | The format version this run was written in. `3` here; a run written in `2` reads unchanged, and one written in `1` reads as one that is no replay. |
 | `run_id` | string | The run's id; also its directory name. |
 | `mode` | `"shadow"`, `"replay"` | `replay` is a run a replay answered from a stored run (#82). |
 | `attribution` | `"process"`, `"sdk"`, `"header"` | How the run came to exist. `process` is the `irimi shadow -- <cmd>` run. `sdk` is a run the SDK started around a trigger, by posting its start to the control endpoint (#73). `header` is a run id that arrived on exchanges with no start event. |
@@ -288,13 +289,13 @@ names:
 | --- | --- | --- |
 | `run_id` | string | The run it belongs to. |
 | `service` | string | The service its map names, or its host when no map claims it. |
-| `operation` | string | The route's operation (`refunds.create`), or `METHOD /path` when no route matched. `""` when the classify/answer decision itself failed, flagged `decision-failed` (`pipeline.unclassified`). |
+| `operation` | string | The route's operation (`refunds.create`), or `METHOD /path` when no route matched. `""` when irimi refused a request it could not parse, flagged `refused`, or its classify/answer decision itself failed, flagged `decision-failed` (`pipeline.unclassified`). |
 | `kind` | `read`, `write`, `llm`, `telemetry`, `unknown` | What the classifier said it is. |
-| `answered_by` | `live`, `fake-L0`, `fake-L1`, `delegated`, `overlay`, `recording` | Who produced the response the agent got. `recording` (v2, #82) is an answer the service gave a stored run, which a replay sent again: a read, an llm call, or a precondition read. Anything else a replay answers from the stored run keeps the value it was recorded with, and every such exchange is flagged `from-recording`. |
+| `answered_by` | `live`, `fake-L0`, `fake-L1`, `delegated`, `overlay`, `recording`, `irimi` | Who produced the response the agent got. `irimi` (v3) is an error irimi answered with itself, as JSON `{"error": {"type", "message"}}`, and its flags say why: `refused`, `decision-failed` or `target-failed`. `recording` (v2, #82) is an answer the service gave a stored run, which a replay sent again: a read, an llm call, or a precondition read. Anything else a replay answers from the stored run keeps the value it was recorded with, and every such exchange is flagged `from-recording`. |
 | `validation` | `validated`, `unvalidated` | Always `unvalidated` in Phase 3. |
 | `door` | `forward`, `reverse` | Which door it came in by. |
 | `issued_by` | `agent`, `engine` | `engine` is a read irimi made on its own account, the L3 precondition read. |
-| `target` | string | The address of the answer target a `delegated` exchange was pointed at: the one that answered it, or the one that could not be reached or applied, flagged `target-failed`. `""` otherwise. |
+| `target` | string | The address of the answer target a `delegated` exchange was pointed at, or the one an `irimi` exchange flagged `target-failed` could not reach or apply. `""` otherwise. |
 | `flags` | list of strings | Facts about this exchange, each from the list in `exchange.py`. |
 | `overlay` | `full`, `partial` or `null` | How much of the run's faked writes the overlay could show in this read. `null` when it did not consider it. |
 | `precondition` | `passed`, `rejected`, `not_evaluable` or `null` | What L3 said about this write before it was faked. `null` when nothing was asked. |
@@ -425,6 +426,9 @@ sample workflows hold every scenario to that (`tests/workflows/test_stored_runs.
   correctly without; adding it is not a version bump.
 - **Version 2** (#82) added `replay` to `mode`, `recording` to `answered_by` and `ran`, and
   `replay_of` to the run record. A version 1 run reads under it unchanged.
+- **Version 3** added `irimi` to `answered_by`. A version 2 run reads under it unchanged; there,
+  irimi's own errors are recorded as `fake-L0` flagged `decision-failed`, or `delegated` flagged
+  `target-failed`.
 - **These are version bumps:** removing or renaming a field, changing its type or what it means,
   and adding a value to a closed vocabulary: `mode`, `attribution`, `outcome`, `kind`, `ran`,
   `answered_by`, `validation`, `door`, `issued_by`, `overlay`, `precondition`, and an event's
@@ -450,7 +454,7 @@ reporter sends one event to Sentry.
 
 ```json run.json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "run_id": "4f1c9a2b7d3e8a60",
   "mode": "shadow",
   "attribution": "sdk",

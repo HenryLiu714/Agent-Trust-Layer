@@ -1,1 +1,1 @@
-"""A server-style refund agent beside `irimi shadow --serve`: Phase 3's exit fixture (#78)."""
+"""A server-style refund agent beside `irimi shadow --serve`, driven by an end-to-end test."""

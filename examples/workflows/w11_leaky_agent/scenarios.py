@@ -2,11 +2,12 @@
 
 Every escape that writes is marked `leaks`: under shadow its write really reaches the fake service,
 irimi prints no exchange line for it, and its summary does not count it. That is irimi's documented
-limit today ("only traffic sent through this proxy is shadowed"). When Phase 4's readiness
-checks land, each escape's assertion flips from "irimi never saw it" to "irimi flagged it".
+limit ("only traffic sent through this proxy is shadowed"). Once irimi has a check that flags
+traffic bypassing the proxy, each escape's assertion flips from "irimi never saw it" to "irimi
+flagged it".
 `redirected` writes nothing: a read whose redirects lead it off the proxied route, where irimi
-never sees its last hop (#75). `labelled_sidecar` is `loopback_service`'s write made by a write
-tool, whose stand-in runs under shadow: the one escape the agent can close itself (#76).
+never sees its last hop. `labelled_sidecar` is `loopback_service`'s write made by a write
+tool, whose stand-in runs under shadow: the one escape the agent can close itself.
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ def _services(world: World) -> None:
     )
 
     # An export service that answers through two redirects: to its own `/export/v2`, through
-    # irimi like the first hop, then to wherever `next` names, the loopback sidecar (#75).
+    # irimi like the first hop, then to wherever `next` names, the loopback sidecar.
     def export(req: Req, state: dict) -> Resp:
         return Resp(302, headers={"location": "/export/v2?" + urlencode(req.query)})
 

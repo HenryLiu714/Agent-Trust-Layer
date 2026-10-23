@@ -55,7 +55,7 @@ def charge(
 # The secret half of every PaymentIntent's `client_secret`, and a harness canary. Stripe hands the
 # client secret back on every retrieve made with a secret key, and it lets whoever holds it confirm
 # the payment, so a live read of an intent stores a credential in a response body: the store must
-# keep only its placeholder (#69, #70).
+# keep only its placeholder.
 CLIENT_SECRET_CANARY = "CANARYclientsecret000000000000"
 
 
@@ -709,7 +709,7 @@ class JsonService:
 
 
 def fake_langsmith() -> JsonService:
-    """LangSmith's run intake, which W7 posts one trace to (#70). A telemetry POST is not a write:
+    """LangSmith's run intake, which W7 posts one trace to. A telemetry POST is not a write:
     irimi forwards telemetry live, so a fake that counted this one as a write would fail
     invariant 1 on a request irimi was right to send."""
     return JsonService(

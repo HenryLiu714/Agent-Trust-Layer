@@ -3,8 +3,8 @@
 Every assertion about a write tool is about which body ran. Under shadow the stand-in runs, so
 the CRM and the state directory must be exactly as seeded. Two scenarios pin gaps rather than
 guarantees: `read_after_write` (no tool overlay, so a read tool cannot see a stood-in write) and
-`unlabeled_write` (a write with no `@sdk.tool` label happens for real; the case for Phase 4's
-"production database URL" readiness check).
+`unlabeled_write` (a write with no `@sdk.tool` label happens for real; the case for a future
+check that flags a production database URL).
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from examples.workflows.harness.internet import Req, Resp
 from examples.workflows.harness.run import Scenario, Workflow
 from examples.workflows.harness.services import JsonService, World
 
-# A replay's run id a shell left exported from an earlier replay (#83).
+# A replay's run id a shell left exported from an earlier replay.
 STALE_REPLAY_RUN = "5a1e5a1e5a1e5a1e"
 
 
@@ -37,7 +37,7 @@ WORKFLOW = Workflow(
         ),
         "read_after_write": Scenario(
             ("read_after_write", "smb"),
-            # Run from a shell that exported a stale `IRIMI_REPLAY_RUN` (#83): `irimi shadow`
+            # Run from a shell that exported a stale `IRIMI_REPLAY_RUN`: `irimi shadow`
             # removes it from its child, a bare agent's SDK is inert, and a serve agent, not
             # irimi's child, asks the recording, which an engine that does not replay misses.
             env={"IRIMI_REPLAY_RUN": STALE_REPLAY_RUN},

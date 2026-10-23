@@ -13,9 +13,9 @@ from examples.workflows.w10_flaky_upstream.agent import CHANNEL, CONTROL_FAULTS
 
 CHARGE = "ch_PAYOUT1"
 STRIPE = "api.stripe.com"
-# The scenarios whose read is answered with a bomb (#94), by the encoding it is sent in.
+# The scenarios whose read is answered with a bomb, by the encoding it is sent in.
 BOMBED = {f"{encoding}_bomb_read": encoding for encoding in BOMB_ENCODINGS.values()}
-# The scenarios that take irimi's control endpoint away from the agent, one per fault (#74): the
+# The scenarios that take irimi's control endpoint away from the agent, one per fault: the
 # SDK's posts fail, so its run is stored only as the `header` run its labelled requests make.
 CONTROL_DOWN = tuple(f"control_{how}" for how in CONTROL_FAULTS)
 
@@ -39,8 +39,8 @@ def _seed(llm: Callable[[LlmCall], LlmTurn] = _script) -> Callable[[World], None
 
 
 def _seed_with_a_bomb(encoding: str) -> Callable[[World], None]:
-    """`_seed()`, with the bomb built now: built on the first request it answers, it took longer
-    than the agent's read timeout."""
+    """`_seed()`, with the bomb built now: built on the first request it answers, it would take
+    longer than the agent's read timeout."""
 
     def setup(world: World) -> None:
         bomb(encoding)

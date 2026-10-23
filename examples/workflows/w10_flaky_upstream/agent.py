@@ -5,7 +5,7 @@ Slack. Every call retries on a 429, a 5xx or no answer at all, with a short back
 carries an Idempotency-Key so its retry is the same write. The scenarios break one thing each: a
 rate-limited read, a server error, a stalled read, a reset on a read and on the write, irimi's own
 L3 read failing, a model that answers prose, an agent that raises, is interrupted or is killed
-after its write, a write retried with no key, and irimi's own control endpoint taken away (#74).
+after its write, a write retried with no key, and irimi's own control endpoint taken away.
 
     python -m examples.workflows.launch \\
         examples.workflows.w10_flaky_upstream.agent \\
@@ -38,7 +38,7 @@ ATTEMPTS = 3
 BACKOFF_S = 0.05
 RETRY_STATUSES = frozenset({429, 500, 502, 503})
 READ_TIMEOUT_S = 1.0  # shorter than the fake internet's 2 s stall, so a stall is a timeout
-# How a scenario takes irimi's control endpoint away from the agent (`break_control`, #74).
+# How a scenario takes irimi's control endpoint away from the agent (`break_control`).
 CONTROL_FAULTS = ("unset", "unreachable", "refused")
 
 SYSTEM = (
@@ -81,7 +81,7 @@ def break_control(how: str) -> None:
     can: a launcher that passes on only the variables it knows (`unset`), an endpoint that is gone
     (`unreachable`: a port nothing listens on), or one that refuses every post (`refused`: a 404).
     The SDK never raises into the agent: the run goes on, current and labelled, the SDK warns once,
-    and irimi only lacks the run's record (#74). Bare, there is no endpoint to take away."""
+    and irimi only lacks the run's record. Bare, there is no endpoint to take away."""
     control = os.environ.get(agentkit.CONTROL_ENV)
     if control is None:
         return
@@ -107,7 +107,7 @@ def sync_payouts(
         ),
     )
     # What the read answered, as it came: the agent never asks for an encoding and decodes none,
-    # so a bomb's bytes are what it holds, and they must be the service's under shadow too (#94).
+    # so a bomb's bytes are what it holds, and they must be the service's under shadow too.
     agentkit.obs(
         "listed",
         bytes=len(charges.body),
@@ -134,7 +134,7 @@ def sync_payouts(
         time.sleep(5)  # never reached: SIGTERM's default action ends the process
     if sigint_after_write:
         # An operator presses Ctrl-C mid-run. Python raises KeyboardInterrupt, a BaseException,
-        # which the SDK records as the run's error and re-raises (#74). Python's own handler is put
+        # which the SDK records as the run's error and re-raises. Python's own handler is put
         # back first: a shell starts a background job with SIGINT ignored, and Python then installs
         # none, so the signal would do nothing and the run would end `ok`.
         signal.signal(signal.SIGINT, signal.default_int_handler)

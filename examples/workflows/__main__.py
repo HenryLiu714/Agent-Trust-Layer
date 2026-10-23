@@ -6,7 +6,7 @@
     uv run python -m examples.workflows w03_queue_worker threads_8 --mode serve
 
 `both` runs bare and shadow, and serve too for every scenario that runs there, which is every one
-unless its `serve_flags` is None (#77).
+unless its `serve_flags` is None.
 
 Prints what the agent saw per call, what irimi printed, what reached the fake services, and the
 universal invariants. Needs no keys and no network: every host is served by the fake internet.

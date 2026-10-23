@@ -1,17 +1,17 @@
-"""The irimi SDK as the sample workflows use it, before and after it exists.
+"""The irimi SDK as the sample workflows use it, with a fallback for when it does not import.
 
 Agents write `from examples.workflows import sdk` where a real agent would write
-`from irimi import sdk`, and use the API #74 and #76 specify: `@sdk.trigger`, `sdk.run()`,
+`from irimi import sdk`, and use the SDK's API: `@sdk.trigger`, `sdk.run()`,
 `sdk.current_run_id()`, `sdk.propagate()`, `sdk.active()` and `@sdk.tool(kind=..., shadow=...)`.
 
-- **When `irimi.sdk` exists**, as it has since #74, this module re-exports it, name by name: each
-  name `irimi.sdk` has is the real one, and each it does not have yet is the stand-in's. #74
-  shipped `trigger`, `run`, `current_run_id`, `propagate` and `active`, and #76 shipped `tool`.
+- **When `irimi.sdk` imports**, this module re-exports it, name by name: each name `irimi.sdk`
+  has is the real one, and each it lacks is the stand-in's. The real SDK has `trigger`, `run`,
+  `current_run_id`, `propagate`, `active` and `tool`.
   Names this module does not define (`sdk.instrument`, `sdk.replay`, `ReplayResult`, ...) are
   forwarded to `irimi.sdk` by the module `__getattr__`.
-  Every `irimi.sdk` has `instrument`, a no-op from #74 until #75 filled it in, so the corpus
-  labels no request itself whenever the real SDK imports (`labels_requests`): a run's requests
-  are labelled by the SDK that ships, or not at all.
+  The real SDK's `instrument` labels a run's requests, so the corpus labels no request itself
+  whenever the real SDK imports (`labels_requests`): a run's requests are labelled by the SDK
+  that ships, or not at all.
   Three real names are still wrapped, for the observation log the corpus pins:
   - `tool` wraps the real function and its stand-in so each logs which of them ran
     (`agentkit.obs("tool", ...)`), because that is the harness's proof that no write tool ran for
@@ -19,22 +19,24 @@ Agents write `from examples.workflows import sdk` where a real agent would write
     and is given it as written: a `staticmethod` or `classmethod`, the function's or the
     stand-in's, stays one, the logging wrapper inside it; a stand-in that is the function itself
     stays the function's own wrapper; and the agent's own `name`, so the name irimi stores is the
-    real default. A read tool a replay answers from its recording runs neither (#83), so the
+    real default. A read tool a replay answers from its recording runs neither, so the
     decorated tool is wrapped once more, outside the real one, to log `ran="recording"` for a call
     that returned or raised and in which neither logged.
   - `trigger` and `run` log `run.start` and `run.end` from inside the real run, with the real
     run id, so the pins on them hold in both modes. A trigger's `run.end` carries what it
-    `returned`, so a replay that calls the trigger alone (#84), with no `main()` to log a result,
+    `returned`, so a replay that calls the trigger alone, with no `main()` to log a result,
     is held to what its recording's trigger returned, and its `run.start` the type of each
     argument it was `called_with`, so the replay is held to the values `replay_child` revived.
-- **Until then**, it implements the same API with no control endpoint and no recording:
+- **When it does not import**, this module implements the same API with no control endpoint and
+  no recording:
   - a context-variable run id that nested triggers join;
   - `agentkit.http`, and W3's clients, labelling each request with `Irimi-Run` (which irimi
-    strips, #67), as the real SDK does since #75;
-  - #76's call-time table, so an active write tool runs its stand-in and never the real function.
+    strips), as the real SDK does;
+  - the SDK's call-time table, so an active write tool runs its stand-in and never the real
+    function.
 
-  It raises #76's decoration-time `TypeError`s too, so an agent that is wrong today is wrong in
-  the same way once the SDK lands.
+  It raises the SDK's decoration-time `TypeError`s too, so an agent that is wrong under the
+  fallback is wrong in the same way under the real SDK.
 
 Swapping this module for `irimi.sdk` must never let a write tool run for real under shadow. That
 is why the fallback's table is not simplified.
@@ -60,7 +62,7 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 
 def _load_real() -> ModuleType | None:
-    """`irimi.sdk`, or None when it does not exist yet. Only its absence falls back: an
+    """`irimi.sdk`, or None when it is not installed. Only its absence falls back: an
     ImportError raised inside a broken `irimi.sdk` (or a dependency it lacks) propagates, so the
     corpus never silently tests the stand-in in place of an SDK that fails to import."""
     try:
@@ -75,13 +77,13 @@ _real = _load_real()
 
 
 def _from_real(name: str) -> Any:
-    """`irimi.sdk.<name>`, or None when the real SDK does not have it (yet)."""
+    """`irimi.sdk.<name>`, or None when the real SDK does not have it."""
     return getattr(_real, name, None) if _real is not None else None
 
 
 def __getattr__(name: str) -> Any:
-    """Forward a public name this module does not define to `irimi.sdk`, so an agent can use a
-    later issue's API (`sdk.replay`, #84) without an edit here."""
+    """Forward a public name this module does not define to `irimi.sdk`, so an agent can use
+    the rest of the SDK's API (`sdk.replay`) without an edit here."""
     if not name.startswith("_") and _real is not None and hasattr(_real, name):
         return getattr(_real, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
@@ -91,7 +93,7 @@ ENGINE_ACTIVE_ENV = "IRIMI_ENGINE_ACTIVE"
 _run_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("irimi_run", default=None)
 # Under the real SDK: the real runs whose `run.start` this module has logged and whose `run.end`
 # it has not, so a nested trigger, which joins one, logs nothing. A set of ids rather than a context
-# variable, because a run handed to a coroutine (#74) is logged as ended from the task that awaits
+# variable, because a run handed to a coroutine is logged as ended from the task that awaits
 # it, not the context that logged its start.
 _logged_runs: set[str] = set()
 
@@ -104,10 +106,10 @@ def active() -> bool:
 
 
 def labels_requests() -> bool:
-    """True when the real `irimi.sdk` imports, False when only the stand-in is here. Every real
-    SDK has `instrument`: #74 exported it as a no-op, and #75 made it put `Irimi-Run` on a run's
-    requests. So `agentkit.http` and W3's `call` label by hand only with no real SDK at all; with
-    one, they must not, or the corpus would pass with or without the SDK's patch."""
+    """True when the real `irimi.sdk` imports, False when only the stand-in is here. The real
+    SDK's `instrument` puts `Irimi-Run` on a run's requests. So `agentkit.http` and W3's `call`
+    label by hand only with no real SDK at all; with one, they must not, or the corpus would pass
+    with or without the SDK's patch."""
     return _from_real("instrument") is not None
 
 
@@ -136,9 +138,9 @@ def _logged_run(
     name: str, run_id: str, called_with: dict[str, str] | None
 ) -> Iterator[dict[str, Any]]:
     """Log `run.start`, then `run.end` with how the block ended, and what the block put in the dict
-    it is given as `returned` (#84). The one place both modes log a run, so the corpus's pins on
+    it is given as `returned`. The one place both modes log a run, so the corpus's pins on
     these events mean the same thing in each. A trigger's `run.start` says what it was
-    `called_with`, each parameter's type, so a replay that calls the trigger alone (#84) is held to
+    `called_with`, each parameter's type, so a replay that calls the trigger alone is held to
     the values `replay_child` revived, a `bytes` as `bytes`; an `sdk.run` block has none."""
     if called_with is None:
         agentkit.obs("run.start", name=name, run=run_id)
@@ -188,7 +190,7 @@ def _observed(name: str, called_with: dict[str, str] | None = None) -> Iterator[
 
 def _called_with(f: Callable[..., Any], args: Any, kwargs: Any) -> dict[str, str]:
     """`{parameter: type name}` for a call of `f`, as it binds; empty for a call that does not bind,
-    which then raises its own TypeError (#84). Its annotations are left unevaluated, as the real
+    which then raises its own TypeError. Its annotations are left unevaluated, as the real
     SDK leaves them (`capture._signature`): on Python 3.14 a name imported only for type checkers
     would raise NameError into the agent, where the real trigger runs it, and this logs nothing
     rather than raise."""
@@ -207,8 +209,8 @@ def _called_with(f: Callable[..., Any], args: Any, kwargs: Any) -> dict[str, str
 
 def _around(f: Callable[..., Any], enter: Callable[[dict[str, str]], Any]) -> Callable[..., Any]:
     """`f` inside the context manager `enter(called_with)` makes, given the types `f` is called
-    with, keeping `f`'s signature (which #74 binds the captured args against) and its sync/async
-    nature. What `f` returns is logged with the run's end (#84)."""
+    with, keeping `f`'s signature (which the SDK binds the captured args against) and its sync/async
+    nature. What `f` returns is logged with the run's end."""
     if inspect.iscoroutinefunction(f):
 
         @functools.wraps(f)
@@ -226,7 +228,7 @@ def _around(f: Callable[..., Any], enter: Callable[[dict[str, str]], Any]) -> Ca
             result = f(*args, **kwargs)
             if _real is not None and inspect.iscoroutine(result):
                 # The real trigger hands its run to the coroutine and ends it when the coroutine
-                # ends (#74), so the logged run goes with it: `run.end` is the coroutine's outcome.
+                # ends, so the logged run goes with it: `run.end` is the coroutine's outcome.
                 return _carried(stack.pop_all(), ended, result)
             ended["returned"] = result
             return result
@@ -247,12 +249,12 @@ def trigger(fn: Callable[..., Any] | None = None, *, name: str | None = None) ->
     def decorate(f: Callable[..., Any]) -> Callable[..., Any]:
         if isinstance(f, staticmethod | classmethod):
             # The function inside is the trigger and the descriptor stays one, as the real
-            # trigger keeps it (#74): this module's wrapper cannot call a descriptor.
+            # trigger keeps it: this module's wrapper cannot call a descriptor.
             return type(f)(decorate(f.__func__))
         is_generator = inspect.isgeneratorfunction(f) or inspect.isasyncgenfunction(f)
         run_name = f.__qualname__ if name is None else name
         if real is not None:
-            # A generator goes to the real decorator as it is, for its own TypeError (#74).
+            # A generator goes to the real decorator as it is, for its own TypeError.
             inner = f if is_generator else _around(f, lambda types: _observed(run_name, types))
             return real(inner) if name is None else real(name=name)(inner)  # type: ignore[no-any-return]
         if is_generator:
@@ -303,7 +305,7 @@ class run:
 
 
 # Within one call of a tool `_answered` wraps: a cell `_logged` sets once the function or the
-# stand-in has run, so a call in which neither did logs `ran="recording"` (#83).
+# stand-in has run, so a call in which neither did logs `ran="recording"`.
 _ran_a_body: contextvars.ContextVar[list[bool] | None] = contextvars.ContextVar(
     "ran_a_body", default=None
 )
@@ -317,9 +319,9 @@ def _log_tool(tool_name: str, kind: str, ran: str) -> None:
 
 
 def _logged(fn: Callable[..., Any], tool_name: str, kind: str, ran: str) -> Callable[..., Any]:
-    """`fn`, logging that it ran. Keeps `fn`'s signature and its sync/async nature, which #76
-    checks and binds against. What #76 refuses (a stand-in that is not callable, a generator) is
-    returned as it is, so the real `tool`'s check sees what the agent wrote."""
+    """`fn`, logging that it ran. Keeps `fn`'s signature and its sync/async nature, which the
+    real `tool` checks and binds against. What it refuses (a stand-in that is not callable, a
+    generator) is returned as it is, so the real `tool`'s check sees what the agent wrote."""
     if not callable(fn) or inspect.isgeneratorfunction(fn) or inspect.isasyncgenfunction(fn):
         return fn
     if _is_async(fn):
@@ -342,11 +344,11 @@ def _logged(fn: Callable[..., Any], tool_name: str, kind: str, ran: str) -> Call
 def _answered(decorated: Callable[..., Any], tool_name: str, kind: str) -> Callable[..., Any]:
     """`decorated`, the real `tool`'s wrapper, logging `ran="recording"` for a call in which
     neither the function nor its stand-in ran: a read tool a replay answered from its recording,
-    returning or raising what it was recorded doing (#83). Keeps the wrapper's sync/async nature.
+    returning or raising what it was recorded doing. Keeps the wrapper's sync/async nature.
 
     A recorded call raises again as `sdk.RecordedToolError`, an `Exception`. A call interrupted
     by anything else (a task cancelled while it asked the recording, Ctrl-C) ran nothing and was
-    answered by nothing, and irimi stores no call of it, so it logs nothing either (#83)."""
+    answered by nothing, and irimi stores no call of it, so it logs nothing either."""
 
     def answered(cell: list[bool]) -> None:
         if not cell[0] and active():
@@ -389,7 +391,7 @@ def _answered(decorated: Callable[..., Any], tool_name: str, kind: str) -> Calla
 
 def _is_async(f: Callable[..., Any]) -> bool:
     """`f` is called to get a coroutine: an `async def`, or an object whose `__call__` is one. The
-    real `tool`'s test of a stand-in's nature (#76), so the logging wrapper keeps the nature the
+    real `tool`'s test of a stand-in's nature, so the logging wrapper keeps the nature the
     real `tool` would have seen."""
     if inspect.iscoroutinefunction(f):
         return True
@@ -400,21 +402,21 @@ def tool(*, kind: str, shadow: Callable[..., Any] | None = None, name: str | Non
     real = _from_real("tool")
 
     def decorate(fn: Callable[..., Any]) -> Any:
-        # A `staticmethod` or `classmethod` stays one, as the real `tool` keeps it (#76): this
+        # A `staticmethod` or `classmethod` stays one, as the real `tool` keeps it: this
         # module's logging wrapper goes around the function inside, never around the descriptor,
         # which it could not call with the receiver the descriptor supplies.
         descriptor = type(fn) if isinstance(fn, staticmethod | classmethod) else None
         if descriptor is not None and real is None:
             return descriptor(decorate(fn.__func__))
         inner = fn.__func__ if descriptor is not None else fn
-        # The real SDK's default, and its test: `name=""` is a name (#76).
+        # The real SDK's default, and its test: `name=""` is a name.
         tool_name = f"{inner.__module__}.{inner.__qualname__}" if name is None else name
         if real is None:
             _check_tool(fn, kind, shadow)
         real_fn = _logged(inner, tool_name, kind, "real")
         stand_in = _logged_stand_in(shadow, inner, real_fn, tool_name, kind)
         if real is not None:
-            # The real decorator's own decoration-time checks decide (#76); this one does not
+            # The real decorator's own decoration-time checks decide; this one does not
             # pre-empt them, so W6's `decoration_errors` tests the SDK that ships. It is given
             # what the agent wrote: the descriptor, and the agent's own `name`, None included, so
             # the name irimi stores is the real SDK's default and the log's is this module's, and
@@ -451,7 +453,7 @@ def _logged_stand_in(
     shadow: Any, fn: Callable[..., Any], logged_fn: Callable[..., Any], tool_name: str, kind: str
 ) -> Any:
     """`shadow`, logging that it ran, in the shape the agent wrote it, so the real `tool`'s checks
-    judge what they would without this module (#76): a `staticmethod` stays one, the logging
+    judge what they would without this module: a `staticmethod` stays one, the logging
     wrapper inside it, and a stand-in that is the function itself is the very wrapper `fn` got,
     which the real `tool` refuses as itself. Two wrappers of one function would let the real write
     run under irimi, logged as its stand-in."""
@@ -464,7 +466,7 @@ def _logged_stand_in(
 
 
 def _check_tool(fn: Callable[..., Any], kind: str, shadow: Callable[..., Any] | None) -> None:
-    """#76's decoration-time rules: nothing unnamed runs live, and the error comes at load time."""
+    """The SDK's decoration-time rules: nothing unnamed runs live, and the error comes at load."""
     if kind not in ("read", "write"):
         raise TypeError(f"@sdk.tool kind must be 'read' or 'write', not {kind!r}")
     if kind == "write" and shadow is None:

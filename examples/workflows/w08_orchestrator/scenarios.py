@@ -49,8 +49,8 @@ routes:
 # A loopback answer target nothing listens on: the discard port, which no test machine serves.
 DOWN_TARGET = "http://127.0.0.1:9"
 # The same map with the reservation delegated to `DOWN_TARGET`: irimi cannot reach it, answers the
-# agent 502 itself and says the write went unanswered (#16), a write `irimi compare` compares as
-# its summary prints it (#79).
+# agent 502 itself and says the write went unanswered, a write `irimi compare` compares as
+# its summary prints it.
 TARGET_DOWN_MAP = SUBAGENT_MAP.replace(
     "    operation: reservations.create\n",
     f"    operation: reservations.create\n    target: {DOWN_TARGET}\n",

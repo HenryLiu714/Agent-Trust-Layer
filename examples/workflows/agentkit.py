@@ -2,9 +2,9 @@
 the plumbing of a service that delivers its own inbound calls.
 
 An agent here is an ordinary program. It reads its service base URLs and keys from the
-environment, as a deployed agent would, and makes its calls with the stdlib (`urllib`), for the
-reason #78 gives: CI installs only the `dev` group, and `urllib` honours `HTTPS_PROXY` and
-`SSL_CERT_FILE` with no extra code.
+environment, as a deployed agent would, and makes its calls with the stdlib (`urllib`): the
+corpus needs no SDK installed, and `urllib` honours `HTTPS_PROXY` and `SSL_CERT_FILE` with no
+extra code.
 
 The one thing it does that a real agent would not is keep an observation log, `obs()`: one JSON
 line per event in the file `WORKFLOW_OBS` names. The harness asserts on it, so a test can see what
@@ -43,19 +43,19 @@ PORT_ENV = "WORKFLOW_INTERNET_PORT"
 # An agent that hangs would hang the test that runs it, because `irimi shadow` waits for its
 # child. SIGALRM's default action ends the process, so a stuck agent dies instead.
 WATCHDOG_S = 90
-# Where `irimi shadow` tells its child the control endpoint is (`irimi.paths.CONTROL_ENV`, #73),
+# Where `irimi shadow` tells its child the control endpoint is (`irimi.paths.CONTROL_ENV`),
 # spelled here because an agent is an ordinary program that does not import irimi.
 CONTROL_ENV = "IRIMI_CONTROL"
-# The process run's id (`irimi.paths.RUN_ENV`), spelled here for the same reason (#73).
+# The process run's id (`irimi.paths.RUN_ENV`), spelled here for the same reason.
 RUN_ENV = "IRIMI_RUN"
-# Set only for the child of an `irimi shadow` that replays (`irimi.paths.REPLAY_RUN_ENV`, #83),
+# Set only for the child of an `irimi shadow` that replays (`irimi.paths.REPLAY_RUN_ENV`),
 # spelled here for the same reason.
 REPLAY_RUN_ENV = "IRIMI_REPLAY_RUN"
 # The logger irimi's SDK speaks on (`irimi.sdk` is its child), spelled here for the same reason. A
-# WARNING there is the SDK's only sign that a run's record was lost (#74).
+# WARNING there is the SDK's only sign that a run's record was lost.
 IRIMI_LOGGER = "irimi"
 # Set for an agent that reaches irimi's control endpoint through a gateway that forwards the routes
-# it knows and refuses the one a replay's read tools ask (`lookup_gateway`, #83).
+# it knows and refuses the one a replay's read tools ask (`lookup_gateway`).
 LOOKUP_REFUSED_ENV = "WORKFLOW_LOOKUP_REFUSED"
 # That route's tail (`irimi.exchange.RECORDED_ACTION`), spelled here for the same reason.
 RECORDED_ROUTE = "/tool-calls/recorded"
@@ -64,10 +64,10 @@ _obs_lock = threading.Lock()
 
 
 def start() -> None:
-    """Call first in every agent's `main()`. Logs the proxy, the control endpoint (#73) and the
-    replay's run (#83) the agent was given, so the harness can hold every run to what `irimi
+    """Call first in every agent's `main()`. Logs the proxy, the control endpoint and the
+    replay's run the agent was given, so the harness can hold every run to what `irimi
     shadow` sets, and every bare run to having none of them from irimi. From here on, each record
-    an irimi logger emits is a `log` event too (#74)."""
+    an irimi logger emits is a `log` event too."""
     if hasattr(signal, "SIGALRM"):
         signal.alarm(WATCHDOG_S)
     logging.getLogger(IRIMI_LOGGER).addHandler(_LogToObs())
@@ -81,7 +81,7 @@ def start() -> None:
 
 class _LogToObs(logging.Handler):
     """Each record an irimi logger emits in the agent, as a `log` event. The SDK never raises
-    into the agent: a control endpoint it cannot reach is one WARNING on `irimi.sdk` (#74), and
+    into the agent: a control endpoint it cannot reach is one WARNING on `irimi.sdk`, and
     this is how the harness sees it, and sees that no other run logs one."""
 
     def emit(self, record: logging.LogRecord) -> None:
@@ -286,7 +286,7 @@ def anthropic(
     metadata: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """One Anthropic Messages call. An error status raises: an agent has no answer to go on.
-    `metadata` is the call's own, which says who asked and never what (#82)."""
+    `metadata` is the call's own, which says who asked and never what."""
     body: dict[str, Any] = {
         "model": "claude-sonnet-5",
         "max_tokens": max_tokens,
@@ -351,8 +351,8 @@ def lookup_gateway() -> Iterator[None]:
     """When `LOOKUP_REFUSED_ENV` is set and irimi named a control endpoint, reach it through a
     gateway for the block, as a deploy that fronts irimi with a proxy of its own may: every post is
     forwarded and answered as irimi answered it, and a read tool's lookup of its recorded result
-    (#83) is answered 502, the gateway knowing no such route. So in a replay the lookup fails while
-    the run's start, its end and its tool calls are still recorded (#83: a failed lookup is a miss,
+    is answered 502, the gateway knowing no such route. So in a replay the lookup fails while
+    the run's start, its end and its tool calls are still recorded (a failed lookup is a miss,
     warned once, and the tool runs for real). Otherwise the block runs as it is."""
     control = os.environ.get(CONTROL_ENV)
     if not os.environ.get(LOOKUP_REFUSED_ENV) or control is None:
@@ -394,13 +394,13 @@ def lookup_gateway() -> Iterator[None]:
 
 def gzip_bomb(head: bytes, line: bytes, size: int, tail: bytes = b"") -> bytes:
     """gzip of `head`, then `size` bytes of `line` over and over, then `tail`: a body a few hundred
-    KB long that decodes to as much as `size` says (#94). An agent sends one as a request body; the
+    KB long that decodes to as much as `size` says. An agent sends one as a request body; the
     fake internet answers with one.
 
     The padding is compressed once per `(line, size)` and spliced between `head` and `tail`: each
     of the three is a run of raw deflate blocks ending on a byte boundary, none refers back past
     its own start, and only `tail`'s last block is final. So a second bomb with the same padding
-    costs a CRC over it, not another compression (#94: building one inside a request took longer
+    costs a CRC over it, not another compression (building one inside a request would take longer
     than the agent's read timeout). `size` is a whole number of `_bomb_block(line)`s."""
     block = _bomb_block(line)
     if size % len(block):

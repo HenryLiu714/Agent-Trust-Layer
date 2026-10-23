@@ -19,7 +19,7 @@ from examples.workflows.harness.services import (
 )
 
 CHANNEL = "C0CHAT"
-# Shaped like a live Stripe key, so the redaction rules (#69) would recognise it on disk.
+# Shaped like a live Stripe key, so the redaction rules would recognise it on disk.
 SECRET = "sk_live_CANARYstreamsecret0000000000"
 ANSWER = (
     "Refunds return money to the original payment method. A partial refund leaves the rest "
@@ -126,7 +126,7 @@ class MidLineWritesLLM(ScriptedLLM):
     one of them, and writes the stream in pieces that each end in the middle of a `data:` line:
     every event is cut inside that line and its second half goes out with the next event's first.
     The event that holds the secret is cut in the middle of the secret. So each boundary between
-    two writes falls mid-line, and one falls mid-secret (#71): redaction has to read the chunks
+    two writes falls mid-line, and one falls mid-secret: redaction has to read the chunks
     joined, and the recorded chunk lengths have to follow the redacted line."""
 
     def _anthropic(self, body: dict[str, Any]) -> Resp:
@@ -167,7 +167,7 @@ class MidLineWritesLLM(ScriptedLLM):
 
 class LockstepLLM(ScriptedLLM):
     """Holds each provider's two calls until both have arrived, so the two callers' streams are
-    written at once and irimi copies two flows' chunks interleaved (#71)."""
+    written at once and irimi copies two flows' chunks interleaved."""
 
     def __init__(self, script: Any) -> None:
         super().__init__(script)
@@ -186,7 +186,7 @@ class LockstepLLM(ScriptedLLM):
 
 class BombingLLM(ScriptedLLM):
     """Streams Anthropic's answer gzip-encoded, though the agent never asked for an encoding, with
-    a GiB of `BOMB_LINE` between its last `text_delta` and the events that end it (#94): 2 MiB on
+    a GiB of `BOMB_LINE` between its last `text_delta` and the events that end it: 2 MiB on
     the wire that decode to a GiB, written BOMB_CHUNK at a time. Each padding line is an SSE field
     no client knows, which an SSE parser skips. `heads` holds what each stream decodes to before
     its padding, and `sent` the bytes it wrote."""
@@ -213,9 +213,9 @@ class BombingLLM(ScriptedLLM):
 
 class GzipLLM(ScriptedLLM):
     """Streams Anthropic's answer gzip-encoded, whole, as a service does that compresses what it
-    sends: irimi records the stream decoded and keeps its `content-encoding` header (#71), so a
+    sends: irimi records the stream decoded and keeps its `content-encoding` header, so a
     replay that served those bytes under that header would hand the agent plain text it was told
-    to gunzip (#82). Written `GZIP_CHUNK` bytes at a time."""
+    to gunzip. Written `GZIP_CHUNK` bytes at a time."""
 
     def _anthropic(self, body: dict[str, Any]) -> Resp:
         resp = super()._anthropic(body)
@@ -230,9 +230,8 @@ class GzipLLM(ScriptedLLM):
 class HeldStreamLLM(ScriptedLLM):
     """Holds the last chunk of Anthropic's stream until the agent lists the models, which `hand_off`
     does only once its trigger has returned and its run has ended. So the stream is still open
-    when the run ends, and irimi records it after the run's end, whatever the scheduler does
-    (#77): the case the issue's "Since #70" names, a streamed exchange recorded after its run's
-    SDK end."""
+    when the run ends, and irimi records it after the run's end, whatever the scheduler does:
+    a streamed exchange recorded after its run's SDK end."""
 
     MODELS = {"data": [{"type": "model", "id": "claude-sonnet-5"}], "has_more": False}
 

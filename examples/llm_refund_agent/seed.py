@@ -1,4 +1,4 @@
-"""Seed the agent's own database with the customer a charge belongs to (#85).
+"""Seed the agent's own database with the customer a charge belongs to.
 
     python -m examples.llm_refund_agent.seed CHARGE CUSTOMER_NAME
 

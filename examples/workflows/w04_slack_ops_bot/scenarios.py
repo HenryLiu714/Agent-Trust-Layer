@@ -36,7 +36,7 @@ def _workspace(world: World) -> None:
     world.llm.script = _script
 
 
-# Two answers that print alike: one holds a newline, the other a backslash and an `n` (#79).
+# Two answers that print alike: one holds a newline, the other a backslash and an `n`.
 TWO_LINES = "Payouts are on schedule.\nNext run at 09:00."
 TYPED_ESCAPE = "Payouts are on schedule.\\nNext run at 09:00."
 
@@ -58,7 +58,7 @@ def _no_chat_write(world: World) -> None:
 
 # The shipped Slack map with `chat.postMessage`'s fixture renamed to one `slack.json` lacks, the
 # only route naming `fixture: message`. Every post degrades to `fake-L0`, flagged `fixture-failed`,
-# its answer an envelope with no `message`, and its minted `ts` on the envelope alone (#42, #64).
+# its answer an envelope with no `message`, and its minted `ts` on the envelope alone.
 NO_POST_FIXTURE_MAP = (
     (loader.shipped_dir() / "slack.yaml")
     .read_text()

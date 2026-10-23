@@ -1,4 +1,4 @@
-"""An LLM refund agent: the fixture for use case 1's exit test (#85).
+"""An LLM refund agent: record a run, edit the prompt, replay it.
 
 A support ticket comes in; `handle_ticket`, marked `@sdk.trigger`, decides what to refund:
 
@@ -15,7 +15,7 @@ So the prompt decides the refund: edit it, replay a recorded run (`irimi replay`
 the replay diverged and which writes changed.
 
 Stripe and Anthropic are called with stdlib `urllib.request`, as `examples/server_agent` calls
-Stripe (#78): it honours `HTTPS_PROXY` and `SSL_CERT_FILE` with no code, so the agent goes through
+Stripe: it honours `HTTPS_PROXY` and `SSL_CERT_FILE` with no code, so the agent goes through
 irimi by the environment alone. It sends a Stripe key only when it is a test-mode one (`sk_test_`):
 the check is on the request path, so a replay, which calls `handle_ticket` without `main()`, makes
 it too.
@@ -23,7 +23,7 @@ it too.
     python -m examples.llm_refund_agent <ticket_id> <charge> <message>
 
 Start it by module name, never as `python agent.py`: run as `__main__`, its trigger's entrypoint
-would be `__main__:handle_ticket`, which `irimi replay` cannot import (#84). `main()` sets nothing
+would be `__main__:handle_ticket`, which `irimi replay` cannot import. `main()` sets nothing
 up that `handle_ticket` needs, since a replay calls the trigger alone; the database is seeded
 beforehand (`python -m examples.llm_refund_agent.seed`).
 
@@ -147,7 +147,7 @@ def ask_model(system: str, content: str) -> dict[str, Any]:
     if answer.get("stop_reason") in ("refusal", "max_tokens"):
         raise ValueError(f"the model stopped without a decision: {answer['stop_reason']}")
     text = next((b["text"] for b in answer.get("content", []) if b.get("type") == "text"), None)
-    # Text that is not JSON is no decision either, and the error says what the model said (#85).
+    # Text that is not JSON is no decision either, and the error says what the model said.
     try:
         decision = json.loads(text) if isinstance(text, str) else None
     except json.JSONDecodeError:
@@ -225,5 +225,5 @@ def main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     # Run as a script, its run's entrypoint would be `__main__:handle_ticket`, which `irimi
-    # replay` cannot import (#84): refuse, and say how to start it, as `examples/server_agent` does.
+    # replay` cannot import: refuse, and say how to start it, as `examples/server_agent` does.
     raise SystemExit("start the agent by module name: python -m examples.llm_refund_agent")

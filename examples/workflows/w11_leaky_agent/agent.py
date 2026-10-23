@@ -3,19 +3,19 @@
 `irimi shadow` virtualizes only what is routed through its proxy, and says so in its banner
 ("only traffic sent through this proxy is shadowed"). Each escape here is a real way agent
 code ends up off that route. Under shadow every escape's write really lands on the fake service.
-These are the cases Phase 4's readiness checks exist to flag.
+These are the cases a future check that flags traffic bypassing the proxy would catch.
 
 Each escape runs inside `sdk.run`, so under shadow it is a run whose requests the SDK labels, but
-only those that go through irimi (#75): a run's id must never ride out on an escape, where nothing
+only those that go through irimi: a run's id must never ride out on an escape, where nothing
 would strip it. Universal invariant 2 checks that no fake service ever saw `Irimi-Run`.
 
 `labelled_sidecar` writes to the loopback sidecar through an `@sdk.tool(kind="write")`, so under
-shadow its stand-in runs and nothing escapes (#76).
+shadow its stand-in runs and nothing escapes.
 
 `redirected` writes nothing. It is a read that each client the SDK labels (urllib, `requests`,
 `httpx` sync and async) follows through two redirects: the first stays on a host irimi proxies, the
 second leads to the loopback sidecar, which irimi's own `NO_PROXY` sends direct. Each hop is
-labelled or not by where its own connection goes, so the last one goes out unlabelled (#75). But
+labelled or not by where its own connection goes, so the last one goes out unlabelled. But
 for `requests`, which keeps the first request's proxy across redirects whatever `NO_PROXY` says:
 its last hop goes through irimi after all, labelled, and is stripped there.
 
@@ -188,7 +188,7 @@ def enqueue_job(job: dict[str, Any]) -> dict[str, Any]:
 
 
 def labelled_sidecar() -> None:
-    """The loopback sidecar's write, made by a write tool (#76). The proxy still cannot see it,
+    """The loopback sidecar's write, made by a write tool. The proxy still cannot see it,
     but irimi's SDK runs the tool's stand-in in its place, so the escape is closed: the sidecar
     sees nothing under shadow. The one escape here an agent can close itself today."""
     agentkit.obs("queued", doc=enqueue_job({"job": "refund", "charge": CHARGE}))

@@ -7,7 +7,7 @@ from examples.workflows.harness.services import World
 from examples.workflows.w03_queue_worker.agent import SCENARIOS, SHARED_CHARGE, charge_id
 
 # The version `worker_methods` deploys under: the process run and each run the SDK starts record
-# it (#70, #74).
+# it.
 AGENT_VERSION = "queue-worker 2.1.0"
 
 

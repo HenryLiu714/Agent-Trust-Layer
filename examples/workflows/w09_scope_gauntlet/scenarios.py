@@ -26,7 +26,7 @@ def _big(world: World) -> None:
 
 def _bombs(world: World) -> None:
     """`_stripe`, with `gzip-padded`'s padding built before the agent starts, not inside the
-    request it answers (#94)."""
+    request it answers."""
     agentkit.gzip_bomb(b"", PADDED_LINE, PADDED_BYTES)
     _stripe(world)
 

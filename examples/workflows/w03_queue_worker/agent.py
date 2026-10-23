@@ -2,34 +2,34 @@
 
 Each message names a charge. `handle(message)` is the trigger: it reads the charge and refunds
 part of it. The two calls go through a client chosen by the message's index, because the SDK has
-to label a run's requests whichever client makes them (#75):
+to label a run's requests whichever client makes them:
 
     0  urllib (`agentkit.http`)          3  `requests`
     1  `http.client` through the proxy   4  `httpx.Client`
     2  a raw asyncio HTTP/1.1 client     5  `httpx.AsyncClient`, in an event loop of its own
 
-The SDK patches the clients `http.client` underlies, and httpx's (#75). The raw asyncio client is
+The SDK patches the clients `http.client` underlies, and httpx's. The raw asyncio client is
 one it does not cover, like `aiohttp`: it labels its requests itself, with `sdk.current_run_id()`.
 
 `one_pool_8` sends every run's calls through one of two shared pools that hold one connection
 each, a `requests.Session` and an `httpx.Client` (`POOLED`), so runs share a connection to the
-proxy and only their `Irimi-Run` tells them apart, never the connection (D8, #75).
+proxy and only their `Irimi-Run` tells them apart, never the connection.
 
 Every call is labelled `read:<charge>` or `refund:<charge>`, so a test can check that run R's
 calls name only R's own charge.
 
-A run is marked each way the SDK offers (#74): `@sdk.trigger` on a function, sync or async, and on
+A run is marked each way the SDK offers: `@sdk.trigger` on a function, sync or async, and on
 a `Worker`'s methods, and `async with sdk.run(...)` around a block.
 
-The `ledger_*` scenarios keep the worker's own SQLite ledger of refunds with `@sdk.tool`s (#76):
+The `ledger_*` scenarios keep the worker's own SQLite ledger of refunds with `@sdk.tool`s:
 reads that run for real, a write whose stand-in runs under shadow, sync and async, called from
 four threads at once, from eight asyncio tasks at once and from a thread that lost its run, and,
 on the `Worker`, a plain method, a static method and a class method. `ledger_two_tools_8` writes
 every odd message's row through a second write tool, so tool calls of two names end at once on
-four threads (#120). `ledger_post_waits` makes their posts reach irimi in the other order than
+four threads. `ledger_post_waits` makes their posts reach irimi in the other order than
 the calls ended, every time: the first run's async write ends while the loop's one executor
 thread is busy with the worker's own job, so its post waits, and the second run's sync write,
-made after it, posts at once (#120).
+made after it, posts at once.
 
     python -m examples.workflows.launch \\
         examples.workflows.w03_queue_worker.agent <scenario>
@@ -201,7 +201,7 @@ def call(
         headers["Content-Type"] = "application/x-www-form-urlencoded"
     run_id = sdk.current_run_id()
     if run_id is not None and (client == "asyncio" or not sdk.labels_requests()):
-        # The SDK labels every other client's requests (#75); this one it cannot see.
+        # The SDK labels every other client's requests; this one it cannot see.
         headers["Irimi-Run"] = run_id
     if client == "http.client":
         status, answered_by = _via_http_client(method, url, body, headers)
@@ -219,7 +219,7 @@ def call(
     return None
 
 
-# -- the ledger: the worker's own record of its refunds, as tools the proxy cannot see (#76) -------
+# -- the ledger: the worker's own record of its refunds, as tools the proxy cannot see ------------
 
 LEDGER = "ledger.sqlite3"
 
@@ -251,7 +251,7 @@ async def ledger_balance_async(charge: str) -> int:
 @sdk.tool(kind="read")
 def ledger_history(charge: str) -> Coroutine[Any, Any, list[int]]:
     """A sync read that returns a coroutine: its call ends, and is recorded with what the
-    coroutine returned, when the coroutine does (#76)."""
+    coroutine returned, when the coroutine does."""
     return _history(charge)
 
 
@@ -279,12 +279,12 @@ def record_refund(charge: str, amount: int) -> dict[str, Any]:
 
 @sdk.tool(kind="write", shadow=_record_stand_in)
 def mark_refunded(charge: str, amount: int) -> dict[str, Any]:
-    """`record_refund` under another name: the worker's second way to write the same row (#120)."""
+    """`record_refund` under another name: the worker's second way to write the same row."""
     _insert_refund(charge, amount)
     return {"recorded": True, "charge": charge}
 
 
-# `ledger_post_waits` (#120): set as the first run's async ledger write ends, whichever body
+# `ledger_post_waits`: set as the first run's async ledger write ends, whichever body
 # runs. The SDK records the call's end and queues its post before the task awaits again, so the
 # second run, woken by it, writes after that end; None in every other scenario.
 _ledger_written: asyncio.Event | None = None
@@ -326,8 +326,8 @@ def refund(message: dict[str, Any]) -> None:
     call(message["index"], "POST", "/v1/refunds", form, f"refund:{charge}", message.get("client"))
     if message.get("ledger") == "sync":
         # In whatever thread the refund ran in: a propagated one keeps the run, a bare one has
-        # none, and its call lands in the process run (#76). An odd message of
-        # `ledger_two_tools_8` writes through the second tool (#120).
+        # none, and its call lands in the process run. An odd message of
+        # `ledger_two_tools_8` writes through the second tool.
         two = message.get("two_tools") and message["index"] % 2
         record = mark_refunded if two else record_refund
         agentkit.obs("ledger", charge=charge, recorded=record(charge, message["amount"]))
@@ -335,7 +335,7 @@ def refund(message: dict[str, Any]) -> None:
 
 @sdk.trigger(name="audit")
 def audit(message: dict[str, Any]) -> None:
-    """A trigger called from inside another: it joins the run it is called in (#74)."""
+    """A trigger called from inside another: it joins the run it is called in."""
     charge = message["charge"]
     call(message["index"], "GET", f"/v1/refunds?charge={charge}", None, f"audit:{charge}")
 
@@ -353,8 +353,8 @@ def handle(message: dict[str, Any]) -> None:
             pool.submit(sdk.propagate(refund), message).result()
     elif how == "bare_thread":
         # No `sdk.propagate`: the thread starts with an empty context, so the refund belongs to
-        # no run, and carries no `Irimi-Run` (#75). It falls back to the engine's own run: the
-        # process run under `irimi shadow -- <cmd>`, and `unattributed` only in serve mode (#77).
+        # no run, and carries no `Irimi-Run`. It falls back to the engine's own run: the
+        # process run under `irimi shadow -- <cmd>`, and `unattributed` only in serve mode.
         worker = threading.Thread(target=refund, args=(message,))
         worker.start()
         worker.join()
@@ -374,13 +374,13 @@ async def handle_async(message: dict[str, Any]) -> None:
     await asyncio.to_thread(read, message)
     if message.get("stuck"):
         # Its refund waits on an upstream that never answers, until the worker's shutdown cancels
-        # it: the run ends in CancelledError, a BaseException the SDK records and re-raises (#74).
+        # it: the run ends in CancelledError, a BaseException the SDK records and re-raises.
         assert _in_flight is not None
         _in_flight.set()
         await asyncio.Event().wait()
     await asyncio.to_thread(refund, message)
     if message.get("ledger") == "async":
-        # Each in the message's own task, eight at once (#76).
+        # Each in the message's own task, eight at once.
         charge = message["charge"]
         before = await ledger_balance_async(charge)
         recorded = await record_refund_async(charge, message["amount"])
@@ -389,13 +389,13 @@ async def handle_async(message: dict[str, Any]) -> None:
 
 
 # `ledger_post_waits`' worker job on the loop's one executor thread, done once the second run has
-# written (#120).
+# written.
 _flushed = threading.Event()
 
 
 @sdk.trigger(name="handle_ledger")
 async def handle_ledger(message: dict[str, Any]) -> None:
-    """`ledger_post_waits`' runs (#120). The first starts the worker's own job on the loop's one
+    """`ledger_post_waits`' runs. The first starts the worker's own job on the loop's one
     executor thread, which waits for the second run, then writes its ledger row through the async
     tool, whose post waits off the loop behind that job. The second waits for that write to end,
     writes through the sync tool, which posts at once on the loop, and lets the job finish.
@@ -418,7 +418,7 @@ async def handle_ledger(message: dict[str, Any]) -> None:
 
 async def post_waits(messages: list[dict[str, Any]]) -> list[Any]:
     """`ledger_post_waits`: both messages' runs at once on a loop whose default executor has one
-    thread, the one the SDK posts an async tool's call from (#120)."""
+    thread, the one the SDK posts an async tool's call from."""
     global _ledger_written
     _ledger_written = asyncio.Event()
     asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(1))
@@ -426,19 +426,19 @@ async def post_waits(messages: list[dict[str, Any]]) -> list[Any]:
 
 
 def _journal_stand_in(cls: type, charge: str, net: int) -> dict[str, Any]:
-    """A class method's stand-in is called as the class method is: with the class first (#76)."""
+    """A class method's stand-in is called as the class method is: with the class first."""
     return {"journaled": False, "by": cls.__name__}
 
 
 def _ack_stand_in(worker: Worker, message: dict[str, Any]) -> dict[str, Any]:
-    """A method's stand-in is called as the method is: with the instance first (#76)."""
+    """A method's stand-in is called as the method is: with the instance first."""
     return {"acked": False, "queue": worker.queue}
 
 
 class Worker:
     """The handlers as a worker object's methods, as a consumer framework's class has them. A
     trigger on a method records its class in the entrypoint and leaves `self` out of the args; the
-    async one carries a name of its own, which its runs are stored by (#74)."""
+    async one carries a name of its own, which its runs are stored by."""
 
     def __init__(self, queue: str) -> None:
         self.queue = queue
@@ -456,7 +456,7 @@ class Worker:
         self.book(message)
 
     def book(self, message: dict[str, Any]) -> None:
-        """The worker's ledger tools, as its methods (#76): a static fee, a class-wide journal
+        """The worker's ledger tools, as its methods: a static fee, a class-wide journal
         entry and an ack on this worker's queue."""
         if message.get("ledger") != "worker":
             return
@@ -488,7 +488,7 @@ class Worker:
 def enqueue(message: dict[str, Any]) -> Coroutine[Any, Any, None]:
     """A sync handler that returns its work as a coroutine for the caller's loop to await, as a
     plain decorator over an `async def` does. Its body has not run when it returns, so the run
-    goes with the coroutine, current while it runs and ended when it ends (#74): the nested
+    goes with the coroutine, current while it runs and ended when it ends: the nested
     `audit` it calls joins that run, and the poison message ends it in error."""
     return _process(message)
 
@@ -504,9 +504,9 @@ async def _process(message: dict[str, Any]) -> None:
 @sdk.trigger(name="schedule")
 def schedule(message: dict[str, Any]) -> asyncio.Task[None]:
     """A sync handler that starts its work as a task on the running loop and returns the task,
-    not a coroutine. The SDK hands a run over only to a coroutine (#74), so this run ends when
+    not a coroutine. The SDK hands a run over only to a coroutine, so this run ends when
     `schedule` returns, before the task has run a step; the task was created inside the run, so
-    its context still holds the run's id, and the SDK labels its requests with it (#75)."""
+    its context still holds the run's id, and the SDK labels its requests with it."""
     return asyncio.get_running_loop().create_task(_process_later(message))
 
 
@@ -517,7 +517,7 @@ async def _process_later(message: dict[str, Any]) -> None:
 
 async def handle_in_block(message: dict[str, Any]) -> None:
     """One message as a block that is one run, `async with sdk.run(...)`, with the message as its
-    trigger (#74): no function names it, so the run has no entrypoint."""
+    trigger: no function names it, so the run has no entrypoint."""
     async with sdk.run(trigger=message, name="message"):
         await asyncio.to_thread(read, message)
         if message.get("poison"):
@@ -527,8 +527,8 @@ async def handle_in_block(message: dict[str, Any]) -> None:
 
 async def shut_down(messages: list[dict[str, Any]]) -> list[Any]:
     """Handle every message as a task, then shut down as a worker does on a deploy: once the rest
-    are done, cancel what is still in flight. The stuck message is cancelled mid-run, past its read
-    (#74)."""
+    are done, cancel what is still in flight. The stuck message is cancelled mid-run, past its read.
+    """
     global _in_flight
     _in_flight = asyncio.Event()
     tasks = [asyncio.create_task(handle_async(m)) for m in messages]
@@ -620,7 +620,7 @@ SCENARIOS: dict[str, tuple[int, str, dict[str, Any]]] = {
     "coroutine_handoff": (4, "handoff", {}),
     "one_pool_8": (8, "pooled", {}),
     "task_outlives_trigger": (2, "task", {}),
-    # The worker's ledger tools (#76), in each place a run's identity has to follow them.
+    # The worker's ledger tools, in each place a run's identity has to follow them.
     "ledger_threads_8": (8, "threads", {"refund_in": "propagated_thread", "ledger": "sync"}),
     "ledger_two_tools_8": (
         8,

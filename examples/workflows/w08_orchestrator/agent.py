@@ -1,7 +1,7 @@
 """W8 `orchestrator`: one run that fans out to sub-agents and to an internal service.
 
 `plan_quarter_close()` is the trigger. It calls two sub-agents in-process, each an `@sdk.trigger`
-of its own, which must join the parent run rather than start one (#74):
+of its own, which must join the parent run rather than start one:
 
 - `inventory_agent()` asks the internal service `subagent.internal` for stock (`GET /inventory`)
   and for a price (`POST /quote`: a read spelled as a POST, it prices a basket and changes nothing);
@@ -11,10 +11,10 @@ The orchestrator then reserves the stock (`POST /reservations`, a write) unless 
 it. The internal service is the point: irimi has no map for it unless the scenario adds one.
 
 With `--record`, the sub-agent reads its reorder policy and the orchestrator records its decision
-in the planning file, each an `@sdk.tool` (#76): a tool called inside a nested trigger is a call of
+in the planning file, each an `@sdk.tool`: a tool called inside a nested trigger is a call of
 the run that trigger joined, the parent's. With `--nested-reserve`, a third sub-agent,
 `reservation_agent()`, makes the reservation: a write made inside a nested trigger, which is the
-parent run's own write, as `irimi compare` shows it (#79).
+parent run's own write, as `irimi compare` shows it.
 
     python -m examples.workflows.launch \\
         examples.workflows.w08_orchestrator.agent [--runs N] [--parent-header] [--record]
@@ -34,9 +34,9 @@ from examples.workflows.agentkit import http
 SUBAGENT_HOST = "subagent.internal"
 BUDGET_MINOR = 10_000
 PLAN_FILE = "decisions.jsonl"
-# Set by `--record`: the sub-agent and the orchestrator call their tools (#76).
+# Set by `--record`: the sub-agent and the orchestrator call their tools.
 RECORD = False
-# Set by `--nested-reserve`: the reservation is made by `reservation_agent`, a nested trigger (#79).
+# Set by `--nested-reserve`: the reservation is made by `reservation_agent`, a nested trigger.
 NESTED_RESERVE = False
 
 
@@ -61,7 +61,7 @@ def record_decision(decision: dict[str, Any]) -> dict[str, Any]:
 
 def _headers(parent_header: bool) -> dict[str, str]:
     """With `parent_header`, the agent carries its run id to the internal service itself, in a
-    header of its own. irimi strips `Irimi-Run` from every request that leaves it (#67), so this
+    header of its own. irimi strips `Irimi-Run` from every request that leaves it, so this
     is the only way the service can learn which run called it."""
     run_id = sdk.current_run_id()
     return {"X-Parent-Run": run_id} if parent_header and run_id else {}
@@ -104,8 +104,8 @@ def reserve(items: list[dict[str, Any]], total: int, parent_header: bool) -> age
     )
 
 
-# `reserve` as a sub-agent of its own: a nested trigger joins the run it is called in (#74), so its
-# write is its parent's, and starts no run that `irimi compare` could name (#79).
+# `reserve` as a sub-agent of its own: a nested trigger joins the run it is called in, so its
+# write is its parent's, and starts no run that `irimi compare` could name.
 reservation_agent = sdk.trigger(name="reservation_agent")(reserve)
 
 

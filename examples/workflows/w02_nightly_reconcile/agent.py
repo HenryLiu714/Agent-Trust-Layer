@@ -2,8 +2,8 @@
 
 A cron entry starts it with a date. It pages through every Stripe charge, compares each with the
 local SQLite ledger, and for each mismatch tags the Stripe customer (`metadata[reconciled]`) and
-marks the ledger row reconciled. It ends with one Slack summary. This is use case 0 at volume: the
-baseline report has to say what forty writes in one run would have done.
+marks the ledger row reconciled. It ends with one Slack summary. This is a plain shadow run at
+volume: the summary has to say what forty writes in one run would have done.
 
     python -m examples.workflows.launch \\
         examples.workflows.w02_nightly_reconcile.agent --date 2026-09-27 \\
@@ -106,7 +106,7 @@ def reconcile(date: str) -> int:
 
 def refund_then_page(charge: str) -> None:
     """Refund a charge, then page its refunds from the refund just made: the cursor names an id
-    this run minted, which the real Stripe has never seen (#53)."""
+    this run minted, which the real Stripe has never seen."""
     refund = stripe("POST", "/v1/refunds", {"charge": charge, "amount": "100"}, label="refund")
     refund_id = (refund.json() or {}).get("id")
     first = stripe("GET", f"/v1/refunds?charge={charge}&limit=1", label="list_refunds")
@@ -136,8 +136,8 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     seed_ledger(args.charges, args.mismatches)
 
-    # A scheduler hands over what it has. A `datetime` here is captured as `__irimi_repr__` under
-    # #74's rules and makes the run non-replayable; an ISO string does not.
+    # A scheduler hands over what it has. A `datetime` here is captured as `__irimi_repr__` by the
+    # SDK and makes the run non-replayable; an ISO string does not.
     when: Any = (
         dt.datetime.fromisoformat(args.date + "T02:00:00+00:00")
         if args.datetime_trigger

@@ -8,14 +8,14 @@
 3. OpenAI chat completions with `stream: true`, which may answer with a `post_summary` tool call,
    assembled from its deltas. That tool call becomes a Slack post: the one write.
 4. With `LANGSMITH_TRACING=true`, one trace of the chat POSTed to LangSmith: telemetry, which
-   irimi forwards and stores only as having happened (#70).
+   irimi forwards and stores only as having happened.
 
 Upstream streams are read a few bytes at a time on purpose, so every SSE event is split across
 reads and the parser has to reassemble it (`sse_events`). One that comes compressed is decoded as
-it is read, but only so far (`decoded`, #94). They are read with urllib, or, with
+it is read, but only so far (`decoded`). They are read with urllib, or, with
 `W7_STREAM_CLIENT=httpx`, with `httpx.Client.stream`, as the Anthropic and OpenAI SDKs read theirs:
 the SDK labels each at httpx's transport, and takes the label off again while the stream is still
-open (#75).
+open.
 
     python -m examples.workflows.launch \\
         examples.workflows.w07_streaming_assistant.agent <question> \\
@@ -24,10 +24,10 @@ open (#75).
 The agent delivers the question to itself over loopback. `hang_up` makes that caller reset the
 connection after the first event, the way a closed browser tab does. `two_callers` has two callers
 ask at once, as `<question> (caller 1)` and `<question> (caller 2)`, so two chats stream through
-the proxy side by side (#71). `hand_off` has the trigger open Anthropic's stream and return it, as
+the proxy side by side. `hand_off` has the trigger open Anthropic's stream and return it, as
 a handler returns a streaming response its framework reads after the handler has returned: the run
 ends while its stream is still open, and the handler then lists the models and forwards the rest
-of the stream (#77). Exit codes: 0 answered, 3 the caller went away, 4 an upstream stream broke.
+of the stream. Exit codes: 0 answered, 3 the caller went away, 4 an upstream stream broke.
 """
 
 from __future__ import annotations
@@ -55,13 +55,13 @@ READ_SIZE = 7  # deliberately small: every event straddles several reads
 # A stream that comes compressed is read this much at a time, and decoded only up to
 # DECODED_LIMIT, as a careful client decodes one: past that the agent reads the rest without
 # decoding it, so a few MiB that decode to a GiB cost it nothing, and the run ends as an upstream
-# that broke (#94).
+# that broke.
 ENCODED_READ_SIZE = 64 * 1024
 DECODED_LIMIT = 1024 * 1024
 ANSWERED_BY = "Irimi-Answered-By"
 EXIT = {"ok": 0, "client_gone": 3, "upstream_broke": 4}
 MODES = ("read_all", "hang_up", "two_callers", "hand_off")
-# `httpx` streams the model calls with httpx instead of urllib (#75).
+# `httpx` streams the model calls with httpx instead of urllib.
 STREAM_CLIENT_ENV = "W7_STREAM_CLIENT"
 POST_SUMMARY = {
     "type": "function",
@@ -72,7 +72,7 @@ POST_SUMMARY = {
 class ClientGone(Exception):
     """Our own caller hung up mid-answer. Its message is the same on every OS, and the OS error
     is its `__cause__`: writing to a caller that has gone is EPIPE on macOS and ECONNRESET on
-    Linux, and the stored run error names this message (#123)."""
+    Linux, and the stored run error names this message."""
 
 
 HUNG_UP = "caller hung up"
@@ -272,7 +272,7 @@ def openai_stream(answer: str) -> tuple[str, list[dict[str, Any]]]:
 
 
 # The trigger takes the caller's writer as an argument, so its captured args cannot be replayed:
-# a streaming handler is the ordinary case of a trigger with a non-data argument (#74, #84).
+# a streaming handler is the ordinary case of a trigger with a non-data argument.
 @sdk.trigger
 def chat(question: str, send: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
     embed = agentkit.http(
@@ -302,7 +302,7 @@ def chat(question: str, send: Callable[[str, dict[str, Any]], None]) -> dict[str
     return {"answer": answer, "dims": dims, "decision": decision, "posted": posted}
 
 
-# `hand_off` (#77): the trigger only opens the stream, sending its request inside the run, and
+# `hand_off`: the trigger only opens the stream, sending its request inside the run, and
 # returns it; the run ends as it returns, with the stream still open.
 @sdk.trigger
 def open_chat(question: str) -> Iterator[tuple[str | None, str]]:
@@ -353,7 +353,7 @@ class _Chat(agentkit.Handler):
             _Chat.outcomes[question] = {
                 "outcome": "client_gone",
                 "error": str(exc),
-                # Whichever OS error this OS raised, it is kept as the cause (#123).
+                # Whichever OS error this OS raised, it is kept as the cause.
                 "caused_by_os_error": isinstance(exc.__cause__, OSError),
             }
         except UpstreamBroke as exc:

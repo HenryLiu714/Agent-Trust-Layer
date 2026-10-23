@@ -1,11 +1,11 @@
-"""Run a workflow's agent under its real module name.
+"""Run an agent module's `main(argv)` under its real module name.
 
     python -m examples.workflows.launch examples.workflows.w01_ticket_triage.agent <args...>
 
-`python -m <agent>` would run the agent as `__main__`. Then #74 records a trigger's entrypoint as
-`__main__:handle_ticket`, which #84's replay cannot import, and #76 names every tool
-`__main__.<fn>`. The harness launches every agent through this module instead, which imports the
-agent by name and calls its `main(argv)`.
+`python -m <agent>` would run the agent as `__main__`, and the SDK would record an entrypoint
+(`__main__:handle_ticket`) that replay cannot import and tool names like `__main__.<fn>`. Imported
+by name, the agent's entrypoint and tool names are `module:fn` and `module.fn`, so the harness
+launches every agent through this module.
 """
 
 import importlib

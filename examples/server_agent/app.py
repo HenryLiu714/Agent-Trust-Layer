@@ -1,4 +1,4 @@
-"""A server-style refund agent: the fixture for Phase 3's exit test (#78).
+"""A server-style refund agent, driven by an end-to-end test.
 
 A long-lived HTTP server that irimi does not launch, as a production agent is. Each `POST /refund`
 is one run, `handle_refund`, marked with `@sdk.trigger`, which:
@@ -20,7 +20,7 @@ the reverse door it would need instead is loopback-only, so another container ca
     PORT=8080 STRIPE_API_KEY=sk_test_... python -m examples.server_agent
 
 Start it by module name, as above, never as `python app.py`: run as `__main__`, its trigger's
-entrypoint would be `__main__:handle_refund`, which replay (#84) cannot import, so it refuses to.
+entrypoint would be `__main__:handle_refund`, which replay cannot import, so it refuses to.
 
 Environment: `PORT` (default 8080; 0 picks a free one), `HOST` (default 127.0.0.1; a container
 needs 0.0.0.0), `STRIPE_API_KEY`, `STRIPE_API_BASE` (default https://api.stripe.com; the exit test
@@ -95,7 +95,7 @@ def handle_refund(charge: str, reason: str) -> str:
 
 
 class _Handler(BaseHTTPRequestHandler):
-    # A client that names more body than it sends is cut off, not waited on forever (#78).
+    # A client that names more body than it sends is cut off, not waited on forever.
     timeout = 30.0
 
     def do_GET(self) -> None:
@@ -109,7 +109,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._reply(404, {"error": f"no route {self.path}"})
             return
         try:
-            # A negative length would read to the end of a connection the client holds open (#78).
+            # A negative length would read to the end of a connection the client holds open.
             length = int(self.headers.get("content-length") or 0)
             if length < 0:
                 raise ValueError(f"content-length {length}")
@@ -143,7 +143,7 @@ class _Server(ThreadingHTTPServer):
     """`ThreadingHTTPServer` without the reverse DNS lookup of its own address that
     `HTTPServer.server_bind` makes (`socket.getfqdn`) for a `server_name` nothing here reads.
     It is the one step of start-up that waits on something outside the process, and a slow
-    resolver (a macOS CI runner's) can hold a fresh app there past its deadline (#78)."""
+    resolver (a macOS CI runner's) can hold a fresh app there past its deadline."""
 
     def server_bind(self) -> None:
         socketserver.TCPServer.server_bind(self)
@@ -165,6 +165,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    # Run as a script, every run's entrypoint would be `__main__:handle_refund`, which replay (#84)
-    # cannot import: refuse, and say how to start it (#74).
+    # Run as a script, every run's entrypoint would be `__main__:handle_refund`, which replay
+    # cannot import: refuse, and say how to start it.
     raise SystemExit("start the server agent by module name: python -m examples.server_agent")

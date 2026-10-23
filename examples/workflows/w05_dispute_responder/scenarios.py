@@ -17,7 +17,7 @@ def _world(world: World, small_refunded: int = 0) -> None:
     world.stripe.add_customer(CUSTOMER)
     world.stripe.add_charge("ch_BIG", 5000, customer=CUSTOMER)
     world.stripe.add_charge("ch_SMALL", 1500, customer=CUSTOMER, amount_refunded=small_refunded)
-    # Each charge's intent, as Stripe returns it: with its `client_secret` (#70).
+    # Each charge's intent, as Stripe returns it: with its `client_secret`.
     for intent, amount, order in (("pi_BIG", 5000, "1042"), ("pi_SMALL", 1500, "1043")):
         world.stripe.add_payment_intent(
             intent, amount, status="succeeded", description=f"Order #{order}: headphones"

@@ -1,4 +1,4 @@
-"""Minimal refund agent — the fixture for `irimi shadow`, and Phase 2's exit run.
+"""Minimal refund agent — the fixture for `irimi shadow` and its end-to-end refund test.
 
 It does what an agent does around one consequential write: a live read (list charges), the write
 (refund one of them, in full), and then the three things an agent does after a write:
@@ -35,7 +35,7 @@ def door_base(env: Mapping[str, str], host: str) -> str | None:
     forward proxy; it goes through the door instead. `irimi shadow` sets IRIMI_ENGINE_ACTIVE=1 and
     HTTPS_PROXY=http://127.0.0.1:<port>, and the door lives on that same listener, so the base URL
     is the proxy origin with the upstream host as the first path segment. Deriving it this way
-    keeps `--port` working. `irimi doctor` will print these lines for you later (issue #23):
+    keeps `--port` working. `irimi doctor` will print these lines for you later:
 
         stripe.api_base              = http://127.0.0.1:4000/api.stripe.com
         stripe.upload_api_base       = http://127.0.0.1:4000/files.stripe.com
@@ -53,8 +53,8 @@ def door_base(env: Mapping[str, str], host: str) -> str | None:
 def field(obj: Any, name: str) -> Any:
     """One attribute of a StripeObject, or None when it is absent.
 
-    Since #41 a shadowed Stripe write is answered from a vendored response object, so the fields an
-    agent branches on are there. This stays because a route with no `fixture:` is still answered
+    A shadowed Stripe write is answered from a vendored response object, so the fields an agent
+    branches on are there. This is still needed because a route with no `fixture:` is answered
     with the L0 echo, which carries only the ids the route's map names, and plain attribute access
     on a field it lacks would raise AttributeError. `.get()` is not an option: StripeObject
     rejects it.
@@ -93,7 +93,7 @@ def post_to_slack(text: str) -> None:
     agent would. Set SLACK_CHANNEL to a channel id (`C0123`) for that read to be `overlay: full`:
     `chat.postMessage` accepts `#general` but `conversations.history` requires the id, and irimi's
     faked post echoes back the spelling it was sent, so a post to `#general` is read back as a
-    channel irimi cannot match to it (#44).
+    channel irimi cannot match to it.
     """
     token = os.environ.get("SLACK_BOT_TOKEN")
     channel = os.environ.get("SLACK_CHANNEL")
@@ -165,7 +165,7 @@ def main() -> int:
     # models it - refuses the retry below with `charge_already_refunded` only when the charge reads
     # `refunded: true`, and that is true only once `amount_refunded == amount`. A partial refund
     # leaves the charge refundable, so the retry would be ACCEPTED and there would be no refusal to
-    # notice. Refunding in full is also what makes a bare run and a shadowed one agree (#48).
+    # notice. Refunding in full is also what makes a bare run and a shadowed one agree.
     amount = charge.amount - (field(charge, "amount_refunded") or 0)
 
     try:
@@ -181,7 +181,7 @@ def main() -> int:
     )
 
     # `charge` and `limit` are both parameters irimi's overlay knows how to apply, so this read is
-    # shown the refund in full rather than flagged partial (#43). A refund missing from the list is
+    # shown the refund in full rather than flagged partial. A refund missing from the list is
     # printed, not failed on: a bare run against a busy account may legitimately page it off.
     try:
         refunds = stripe.Refund.list(charge=charge.id, limit=10)
@@ -201,7 +201,7 @@ def main() -> int:
 
     # The retry is a second `Refund.create`, so stripe-python sends it with a fresh
     # Idempotency-Key and it is L3 that must refuse it, not the idempotency store replaying the
-    # first answer (#46, #48). An agent that never notices a refusal is one whose fakes are lying
+    # first answer. An agent that never notices a refusal is one whose fakes are lying
     # to it, so a retry that goes through is this agent's failure, loudly.
     retry: str | None = None
     try:
@@ -212,9 +212,9 @@ def main() -> int:
 
     post_to_slack(f"refunded {money(amount, charge.currency)} on {charge.id}")
     # `currency` is here so the live exit test can build the summary's `$49.00` without parsing
-    # prose: since #60 irimi prints the amount formatted, from the charge its own L3 read saw, and
-    # the test has to know which code that was. It is NOT a `currency=` on `Refund.create` - that
-    # one is still refused, being unverified against real Stripe for a charge refund (#48, #60).
+    # prose: irimi prints the amount formatted, from the charge its own L3 read saw, and the test
+    # has to know which code that was. It is NOT a `currency=` on `Refund.create` - that one is
+    # refused, being unverified against real Stripe for a charge refund.
     print(
         f"AGENT-RESULT charge={charge.id} refund={refund_id or '-'} amount={amount} "
         f"currency={charge.currency} listed={'yes' if listed else 'no'} "

@@ -1,21 +1,21 @@
 """W6 `crm_db_agent`: tools the proxy cannot see, over a local SQLite CRM.
 
-The Phase 3 page's feature 3: "function database_write() gets labeled, the label specifies
-mock_database_write() to be called using the same parameters during mock runs". Every database
-and filesystem write here is an `@sdk.tool(kind="write", shadow=...)`, so under `irimi shadow` the
-stand-in runs and the real body never does. Reads are `@sdk.tool(kind="read")` and run for real.
+A database write labelled with `@sdk.tool` runs its stand-in under shadow, called with the same
+arguments the real function would get. Every database and filesystem write here is an
+`@sdk.tool(kind="write", shadow=...)`, so under `irimi shadow` the stand-in runs and the real
+body never does. Reads are `@sdk.tool(kind="read")` and run for real.
 
     python -m examples.workflows.launch \\
         examples.workflows.w06_crm_db_agent.agent <scenario> [segment]
 
-Beyond `enrich`, each scenario puts one case of #76 through the real `irimi shadow`: a write's
-stand-in that raises and a retry (`merge_retry`), and the same merge right the first time
-(`merge_once`), which `irimi compare` holds the retry against (#79); tools called in no run
+Beyond `enrich`, each scenario puts one case of the tool API through the real `irimi shadow`: a
+write's stand-in that raises and a retry (`merge_retry`), and the same merge right the first time
+(`merge_once`), which `irimi compare` holds the retry against; tools called in no run
 (`outside_run`); HTTP made inside a write's stand-in (`stand_in_http`); and an async read, a sync
 read and a sync write that each return a coroutine, the read's left pending while a sync read
 runs, and an async static method whose stand-in is a static method too (`async_tools`); and two
 writes at once, the one that started first ending last (`overlapping_writes`), which a run stores,
-and `irimi compare` lines up, in the order they ended (#79).
+and `irimi compare` lines up, in the order they ended.
 
 Seeding the CRM on first run is setup, not a tool: it happens in both modes, before the trigger.
 Tools carry explicit, short names (`crm.find_accounts`), the way a developer would name the
@@ -51,23 +51,23 @@ SCENARIOS = (
 )
 STALE_BEFORE = "2025-06-01"
 # A database host the agent cannot reach: `connect_with` raises for it as a driver does, quoting
-# the DSN it was given, key and all (#179).
+# the DSN it was given, key and all.
 UNREACHABLE_HOST = "db.unreachable.internal"
 # What that driver says before the DSN: long enough that the key in it straddles the 1000
 # characters a trace keeps of an error message (`irimi.trace.MAX_ERROR_MESSAGE`), and that the
-# key's 27-character placeholder ends before that cut (#179).
+# key's 27-character placeholder ends before that cut.
 CONNECT_RETRIES = "connection timed out, retrying; " * 29
 # What a driver's options say before their password (`DriverOptions`): long enough that the key
 # straddles the 1000 characters the SDK keeps of a captured repr (`irimi.sdk.capture.MAX_REPR`),
 # and that the part of the key a plain cut there kept is 15 characters, too short for its shape
-# and long enough for universal invariant 4 to find (#179).
+# and long enough for universal invariant 4 to find.
 DRIVER_NOTE = "retry; " * 136
 
 
 class DriverOptions:
     """A driver's options, which print their password, as many drivers' do: a value JSON cannot
     hold, so a tool call's args capture it as its repr, which the SDK cuts before irimi redacts
-    it (#179)."""
+    it."""
 
     def __init__(self, password: str) -> None:
         self.password = password
@@ -107,7 +107,7 @@ def find_accounts(segment: str) -> list[dict[str, Any]]:
 
 @sdk.tool(kind="read", name="crm.fetch_enrichment")
 def fetch_enrichment(account_id: str) -> dict[str, Any]:
-    """A read tool that makes an HTTP call inside it: recorded as an ordinary exchange (#76)."""
+    """A read tool that makes an HTTP call inside it: recorded as an ordinary exchange."""
     url = agentkit.internal("enrich.internal") + f"/v1/companies/{account_id}"
     resp = agentkit.http("GET", url, label="enrichment")
     return resp.json() or {}
@@ -115,11 +115,11 @@ def fetch_enrichment(account_id: str) -> dict[str, Any]:
 
 @sdk.tool(kind="read", name="crm.connect_with")
 def connect_with(dsn: str, options: DriverOptions | None = None) -> dict[str, Any]:
-    """Its argument carries a credential, so a stored tool call must redact it (#69). For a host
+    """Its argument carries a credential, so a stored tool call must redact it. For a host
     it cannot reach it raises, and its message quotes the DSN after its retries, so the key in it
-    straddles where a trace cuts a message, which a stored error must redact all the same (#179).
+    straddles where a trace cuts a message, which a stored error must redact all the same.
     Its `options`, when given, are captured as their repr, which holds a key across the cut the
-    SDK makes of a repr (#179)."""
+    SDK makes of a repr."""
     host = dsn.rpartition("@")[2]
     if host.startswith(UNREACHABLE_HOST):
         raise ConnectionError(f"{CONNECT_RETRIES}could not connect with {dsn}")
@@ -128,7 +128,7 @@ def connect_with(dsn: str, options: DriverOptions | None = None) -> dict[str, An
 
 @sdk.tool(kind="read", name="crm.score_account")
 def score_account(account: dict[str, Any]) -> dict[str, Any]:
-    """Returns values JSON cannot hold: a recorded result is not revivable, so replay (#83) must
+    """Returns values JSON cannot hold: a recorded result is not revivable, so replay must
     run this for real."""
     if account["id"] == "acc_missing":
         raise KeyError(account["id"])
@@ -142,7 +142,7 @@ def flaky_lookup(account_id: str) -> dict[str, Any]:
 
 @sdk.tool(kind="read", name="crm.lookup_owner")
 async def lookup_owner(account_id: str) -> dict[str, Any]:
-    """An async read tool, awaited in the run's event loop (#76)."""
+    """An async read tool, awaited in the run's event loop."""
     with agentkit.sqlite(DB_NAME) as conn:
         row = conn.execute("SELECT name FROM accounts WHERE id = ?", (account_id,)).fetchone()
     await asyncio.sleep(0)
@@ -152,8 +152,8 @@ async def lookup_owner(account_id: str) -> dict[str, Any]:
 @sdk.tool(kind="read", name="crm.last_contact")
 def last_contact(account_id: str) -> Any:
     """A sync read that returns its work as a coroutine, as a plain decorator over an `async def`
-    does: its call ends when the coroutine does (#76), and a replay answers it with a coroutine
-    too, so the agent's `await` gets what it got when it was recorded (#83)."""
+    does: its call ends when the coroutine does, and a replay answers it with a coroutine
+    too, so the agent's `await` gets what it got when it was recorded."""
     return _last_seen(account_id)
 
 
@@ -233,7 +233,7 @@ async def notify_owner(account_id: str, message: str) -> dict[str, Any]:
     return {"queued": account_id}
 
 
-# `overlapping_writes`' two events: the archive has started, and the flag has ended (#79).
+# `overlapping_writes`' two events: the archive has started, and the flag has ended.
 _STARTED: asyncio.Event | None = None
 _RELEASE: asyncio.Event | None = None
 
@@ -271,7 +271,7 @@ async def flag_account(account_id: str) -> dict[str, Any]:
 
 async def _overlapping(account_id: str) -> dict[str, Any]:
     """Two writes at once: the archive starts first and ends only once the flag has ended, its
-    call recorded, so the two end in the other order from the one they started in (#79)."""
+    call recorded, so the two end in the other order from the one they started in."""
     global _STARTED, _RELEASE
     _STARTED, _RELEASE = asyncio.Event(), asyncio.Event()
     archive = asyncio.ensure_future(archive_account(account_id))
@@ -282,7 +282,7 @@ async def _overlapping(account_id: str) -> dict[str, Any]:
 
 
 # Every exception a merge body raised, in order: the agent checks that what it caught is the very
-# object the body raised, which the SDK re-raises after recording it (#76).
+# object the body raised, which the SDK re-raises after recording it.
 RAISED: list[BaseException] = []
 
 
@@ -302,7 +302,7 @@ def _raise_missing(missing: list[str]) -> None:
 
 def _merge_stand_in(*ids: str) -> dict[str, Any]:
     """Validates as the real merge does, against the real CRM, and changes nothing. Its parameters
-    are not the real function's: irimi records the args bound against the real one (#76)."""
+    are not the real function's: irimi records the args bound against the real one."""
     keep, drop = ids
     if missing := _missing(keep, drop):
         _raise_missing(missing)
@@ -320,7 +320,7 @@ def merge_accounts(keep: str, drop: str) -> dict[str, Any]:
 
 def _sync_industry_stand_in(account_id: str, industry: str) -> dict[str, Any]:
     """Checks the account upstream before saying what it would have written: HTTP made inside a
-    write's stand-in is an ordinary exchange of the run (#76)."""
+    write's stand-in is an ordinary exchange of the run."""
     url = agentkit.internal("enrich.internal") + f"/v1/companies/{account_id}"
     upstream = (agentkit.http("GET", url, label="stand_in_check").json() or {}).get("industry")
     return {"stood_in": True, "industry": industry, "upstream": upstream}
@@ -349,14 +349,14 @@ def _schedule_stand_in(account_id: str, days: int) -> Any:
 @sdk.tool(kind="write", shadow=_schedule_stand_in, name="crm.schedule_followup")
 def schedule_followup(account_id: str, days: int) -> Any:
     """A sync write that returns its work as a coroutine, as a plain decorator over an `async def`
-    does. Its body has not run when it returns, so the call ends when the coroutine does (#76): the
+    does. Its body has not run when it returns, so the call ends when the coroutine does: the
     read tool the coroutine awaits is recorded first."""
     return _followup(account_id, days, "followups.jsonl")
 
 
 class Outbox:
     """Tools as a class's static methods, written as a developer groups them, the stand-in beside
-    the tool in the class body (#76): a `staticmethod` stand-in is judged, and called, as the
+    the tool in the class body: a `staticmethod` stand-in is judged, and called, as the
     function inside it, so an async one stands in for an async tool."""
 
     @staticmethod
@@ -388,7 +388,7 @@ def enrich_accounts(scenario: str, segment: str) -> dict[str, Any]:
         before = find_accounts(segment)[0]
         upsert_account({**before, "name": before["name"] + " Renamed"})
         # A write with no label, so real under shadow too: the two reads, made with the same args,
-        # get different rows, and a replay that answered them out of order would say so (#83).
+        # get different rows, and a replay that answered them out of order would say so.
         _touch_last_seen(before["id"])
         after = find_accounts(segment)[0]
         # No tool overlay exists: under shadow the stand-in wrote nothing, so the read tool shows
@@ -402,7 +402,7 @@ def enrich_accounts(scenario: str, segment: str) -> dict[str, Any]:
         return {"touched": "acc_1"}
     if scenario == "merge_retry":
         # The first merge names an account that does not exist; the agent catches what the tool
-        # raised, the same object its body raised, and retries with the right one (#76).
+        # raised, the same object its body raised, and retries with the right one.
         for keep, drop in (("acc_1", "acc_9"), ("acc_1", "acc_2")):
             try:
                 merged = merge_accounts(keep, drop)
@@ -413,7 +413,7 @@ def enrich_accounts(scenario: str, segment: str) -> dict[str, Any]:
         return {"merged": None}
     if scenario == "merge_once":
         # `merge_retry`'s second merge, made right the first time: the run `irimi compare` holds
-        # the retry against (#79).
+        # the retry against.
         return {"merged": merge_accounts("acc_1", "acc_2")}
     if scenario == "outside_run":
         account = find_accounts(segment)[0]
@@ -468,7 +468,7 @@ async def _follow_up_on(account_id: str) -> dict[str, Any]:
     owner = await lookup_owner(account_id)
     # The segment is found while the last contact is still being read: the sync read's coroutine is
     # left pending, so the find is made within that call's span, though its body never made it. A
-    # replay that answers `last_contact` must still answer the find from its own record (#83).
+    # replay that answers `last_contact` must still answer the find from its own record.
     pending = last_contact(account_id)
     segment = find_accounts("smb")
     contact = await pending
@@ -484,7 +484,7 @@ async def _follow_up_on(account_id: str) -> dict[str, Any]:
 
 
 def decoration_errors() -> list[str]:
-    """Each of #76's decoration-time mistakes, which must raise TypeError before any call."""
+    """Each decoration-time mistake `@sdk.tool` refuses: each must raise TypeError before a call."""
 
     def real(x: int) -> int:
         return x
@@ -504,7 +504,7 @@ def decoration_errors() -> list[str]:
         "sync_stand_in_for_async": lambda: sdk.tool(kind="write", shadow=real)(real_async),
         "async_stand_in_for_sync": lambda: sdk.tool(kind="write", shadow=real_async)(real),
         "generator": lambda: sdk.tool(kind="read")(gen),
-        # A stand-in that is a generator, or the function itself (#76): the second would run the
+        # A stand-in that is a generator, or the function itself: the second would run the
         # real write under irimi.
         "generator_stand_in": lambda: sdk.tool(kind="write", shadow=gen)(real),
         "stand_in_is_the_function": lambda: sdk.tool(kind="write", shadow=real)(real),
@@ -532,7 +532,7 @@ def main(argv: list[str]) -> int:
         return 0
     if scenario == "outside_run":
         # Housekeeping before the trigger, in no run: under `irimi shadow` each call is recorded in
-        # the process run `IRIMI_RUN` names (#76).
+        # the process run `IRIMI_RUN` names.
         agentkit.obs(
             "housekeeping", stale=delete_stale(STALE_BEFORE), smb=len(find_accounts("smb"))
         )

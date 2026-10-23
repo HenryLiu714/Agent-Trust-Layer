@@ -15,12 +15,12 @@ and says whether anything about it is expected to differ from a bare run.
 - **serve**: `irimi shadow --serve` runs in THIS process too, on a thread of its own, because the
   fake internet resolves names only here; the agent runs beside it as its own process, pointed at
   it by the variables the README's "Serve mode" names, and irimi is stopped, by its `stop` event
-  rather than a signal, when the agent exits (#77). Every scenario runs this way, with its own
+  rather than a signal, when the agent exits. Every scenario runs this way, with its own
   `Scenario.serve_flags`. A serve that refuses to start (a map it will not load) starts no agent,
   as `irimi shadow` starts none.
 
-- **replay**: one run a scenario stored under `irimi shadow` is replayed by `irimi replay <run id>`
-  (#84), in THIS process too, in a copy of the recording's `IRIMI_HOME` and store, so the replay
+- **replay**: one run a scenario stored under `irimi shadow` is replayed by `irimi replay <run id>`,
+  in THIS process too, in a copy of the recording's `IRIMI_HOME` and store, so the replay
   never adds its run to a recording another test reads, with a fresh `World` from the same `setup`,
   so anything not answered from the recording reaches the fake internet and shows up there. The
   replay runs what `irimi replay` runs for that run: its trigger, called by `irimi.sdk.replay_child`
@@ -83,23 +83,22 @@ CANARIES = {
 }
 # And every credential a fake service hands back in a response body. A live read's response is
 # stored, so one found on disk is a leak on the response side, which the canaries above, all sent
-# by the agent, never reach (#70). Not given to the agent: it is the service's to hand out. A
+# by the agent, never reach. Not given to the agent: it is the service's to hand out. A
 # bomb's first line holds one, so the start of a body cut at irimi's decoding cap is held to it
-# too (#94).
+# too.
 SERVED_CANARIES = {"STRIPE_CLIENT_SECRET": CLIENT_SECRET_CANARY, "BOMB_SECRET": BOMB_SECRET}
 # How much of a canary's start invariant 4 finds on its own: what a cut made before redaction
-# keeps of a key straddling it is no longer the key's shape, so it reached disk as it was, and the
-# whole canary was never there to find (#179). Twelve characters: past the prefix every shape
+# keeps of a key straddling it is no longer the key's shape, so it would reach disk as it is, and
+# the whole canary would never be there to find. Twelve characters: past the prefix every shape
 # starts with (`sk-ant-`, `whsec_`), into the part of a canary that is the canary's own.
 CANARY_PART = 12
 MODES = ("bare", "shadow", "serve")
-# The line irimi's serve mode prints above each run's summary when the SDK ends the run (#77).
+# The line irimi's serve mode prints above each run's summary when the SDK ends the run.
 RUN_BLOCK = re.compile(r"--- run (\S+) ---")
-# The run `irimi shadow`'s banner names, its process run (#70).
+# The run `irimi shadow`'s banner names, its process run.
 BANNER_RUN = re.compile(r"irimi (?:shadow|replay) · run (\S+) · ")
 # An `irimi runs list` line (`report.run_list_line`): run id, started (a date and a time, or `-`),
-# duration and status, then the attribution column, which never holds two spaces, and the trigger
-# (#154).
+# duration and status, then the attribution column, which never holds two spaces, and the trigger.
 RUN_LIST_LINE = re.compile(r"(\S+)  (?:\S+ \S+|-)  \S+  \S+  (.+?)  \S")
 # How long a serve-mode run waits for irimi's banner, and then for irimi to stop.
 SERVE_TIMEOUT_S = 60
@@ -108,14 +107,14 @@ SERVE_TIMEOUT_S = 60
 FAKE_HANDLER = "(process_request_thread)"
 # How long the threads a serve started have to end once it has returned.
 THREAD_EXIT_S = 5.0
-# A tool call's line in irimi's stream (`report.tool_call_line`, #76). Its first column is `ran`,
+# A tool call's line in irimi's stream (`report.tool_call_line`). Its first column is `ran`,
 # and its second the tool's kind followed by ` tool `, which no exchange line has: `recording` is
-# also an `answered_by` an exchange line starts with (#82).
+# also an `answered_by` an exchange line starts with.
 TOOL_LINE = re.compile(r"(real|shadow|recording) +(read|write) +tool .* -> ")
-# A write tool's line in a summary, without its indent (`report.tool_write_line`, #76). The summary
-# prints these after the HTTP writes, and `irimi compare` among them, in `seq` order (#79).
+# A write tool's line in a summary, without its indent (`report.tool_write_line`). The summary
+# prints these after the HTTP writes, and `irimi compare` among them, in `seq` order.
 TOOL_WRITE = re.compile(rf"{report.WRITE_MARKER} tool \S+  shadow stand-in ")
-# How a summary's write line starts, a write irimi answered or one it says would fail (#45).
+# How a summary's write line starts, a write irimi answered or one it says would fail.
 WRITE_LINE_PREFIXES = (f"  {report.WRITE_MARKER} ", f"  {report.REJECTED_MARKER} ")
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy")
 # The only variables an agent inherits from the harness's own environment. Everything else it is
@@ -139,7 +138,7 @@ class Scenario:
     # The scenario exists to show a write irimi cannot stop; universal invariant 1 is inverted.
     leaks: bool = False
     doc: str = ""
-    # The irimi flags it runs with under `irimi shadow --serve` (#77). Every scenario runs there
+    # The irimi flags it runs with under `irimi shadow --serve`. Every scenario runs there
     # too, since serve is how irimi runs beside an agent it did not launch; None would keep one to
     # bare and shadow, for a scenario that needs irimi to be the agent's parent.
     serve_flags: tuple[str, ...] | None = ()
@@ -171,17 +170,17 @@ class Result:
     cwd: Path  # the working directory of irimi (shadow) and of the agent
     tmp: Path  # TMPDIR, and `tempfile`'s directory in this process during a shadow run
     # Every exchange irimi printed a line for, as it printed them (shadow only): the live
-    # exchanges its `on_exchange` saw, which what the store kept is compared against (#70).
+    # exchanges its `on_exchange` saw, which what the store kept is compared against.
     reported: list[Exchange] = field(default_factory=list)
     # Every exchange the engine handed its trace store, in the order it did (shadow only).
     handed: list[Exchange] = field(default_factory=list)
     # Every exchange and every tool call the engine handed its trace store, in the order it did
-    # (shadow only): `handed` with the tool calls the control endpoint passed on (#73) among them.
+    # (shadow only): `handed` with the tool calls the control endpoint passed on among them.
     handed_events: list[Exchange | ToolCall] = field(default_factory=list)
-    # The store `run` was told to record into, which other runs may share (#79); None for irimi's
+    # The store `run` was told to record into, which other runs may share; None for irimi's
     # default, `$IRIMI_HOME/store`, the run's own.
     store: Path | None = None
-    # A replay's result, as `irimi replay --result-file` wrote it or `sdk.replay` returned it (#84).
+    # A replay's result, as `irimi replay --result-file` wrote it or `sdk.replay` returned it.
     replay: sdk.ReplayResult | None = None
 
     def events(self, event: str, *, with_time: bool = True) -> list[dict[str, Any]]:
@@ -204,7 +203,7 @@ class Result:
 
     def returned(self) -> Any:
         """What the one trigger the agent's run started with returned, as its `run.end` logged it
-        (`examples/workflows/sdk.py`, #84): a replay that calls the trigger alone logs no `result`.
+        (`examples/workflows/sdk.py`): a replay that calls the trigger alone logs no `result`.
         Raises unless exactly one run ended, and ended `ok`, and its end says what it returned."""
         end = self.one("run.end")
         assert end["outcome"] == "ok", end
@@ -253,7 +252,7 @@ class Result:
 
     def exchange_lines(self) -> list[str]:
         """irimi's per-exchange lines: `<answered_by> <kind> <METHOD> <host><path> -> <status>`.
-        A tool call's line is in the same stream and the same columns, and is not one (#76)."""
+        A tool call's line is in the same stream and the same columns, and is not one."""
         return [
             line
             for line in self.irimi
@@ -261,13 +260,13 @@ class Result:
         ]
 
     def tool_call_lines(self) -> list[str]:
-        """irimi's per-tool-call lines, in the stream with the exchanges' (#76):
+        """irimi's per-tool-call lines, in the stream with the exchanges':
         `<ran> <kind> tool <name> -> ok` or `-> raised <type>`."""
         return [line for line in self.irimi if TOOL_LINE.match(line)]
 
     def stored(self) -> StoreReader:
-        """The trace store this run wrote: the `store` it was given (#79), or else `irimi
-        shadow`'s default, `$IRIMI_HOME/store` (#70), which is `home / "store"` because the
+        """The trace store this run wrote: the `store` it was given, or else `irimi
+        shadow`'s default, `$IRIMI_HOME/store`, which is `home / "store"` because the
         harness gives every run a home of its own. A store runs share holds all of their runs."""
         return StoreReader(self.store_root())
 
@@ -284,7 +283,7 @@ class Result:
     def run_blocks(self) -> dict[str, list[str]]:
         """Serve mode's summaries, by run id: the lines under each `--- run <id> ---`, which serve
         prints under one lock, so a block ends at the first line that is no summary's: a stream
-        line, or the next block (#77)."""
+        line, or the next block."""
         blocks: dict[str, list[str]] = {}
         current: list[str] | None = None
         for line in self.irimi:
@@ -301,20 +300,20 @@ class Result:
 
     def engine_run_id(self) -> str:
         """The run a request no `Irimi-Run` names is stored in: the process run under
-        `irimi shadow -- <cmd>`, and `unattributed` under serve mode, which has none (#75, #77)."""
+        `irimi shadow -- <cmd>`, and `unattributed` under serve mode, which has none."""
         return trace.UNATTRIBUTED if self.mode == "serve" else self.process_run_id()
 
     def summaries(self) -> list[str]:
         """Every summary line irimi printed: `irimi shadow`'s closing block, or under serve mode
-        each run's block in the order the runs ended, separators left out (#77)."""
+        each run's block in the order the runs ended, separators left out."""
         if self.mode != "serve":
             return self.summary()
         return [line for block in self.run_blocks().values() for line in block]
 
     def summary(self) -> list[str]:
         """irimi's closing block, from its `N exchanges` header on. `irimi replay` prints its result
-        instead (#84), so a replay's is its run's summary as `irimi runs show` prints it, which
-        opens `irimi replay · run` and never `irimi shadow · run` (#154)."""
+        instead, so a replay's is its run's summary as `irimi runs show` prints it, which
+        opens `irimi replay · run` and never `irimi shadow · run`."""
         if self.mode == "replay":
             run_id = self.process_run_id()
             _, out, _ = self.runs("show", run_id, "--store", str(self.store_root()))
@@ -328,14 +327,14 @@ class Result:
         return []
 
     def replay_result(self) -> list[str]:
-        """What `irimi replay` said of the replay (#84): its result's lines, the block it printed
+        """What `irimi replay` said of the replay: its result's lines, the block it printed
         last, or why it could not run."""
         assert self.replay is not None, self.mode
         return list(self.replay.lines)
 
     def agent_exit_code(self) -> int:
         """How the agent exited: the process's exit code, which is irimi's under `irimi shadow`.
-        Under `irimi replay`, whose exit code is the comparison's (#84), its child's, as the
+        Under `irimi replay`, whose exit code is the comparison's, its child's, as the
         replay's run recorded it: a called trigger's 0 or 1, or the agent command's."""
         if self.mode != "replay":
             return self.exit_code
@@ -344,14 +343,14 @@ class Result:
         return record.exit_code
 
     def sdk_runs(self) -> list[RunRecord]:
-        """The runs the SDK started (#74), as stored: `attribution: "sdk"`, newest first."""
+        """The runs the SDK started, as stored: `attribution: "sdk"`, newest first."""
         return [r for r in self.stored().list_runs() if r.attribution == "sdk"]
 
     def process_run_id(self) -> str:
-        """The id of the one run `irimi shadow` stored for the agent's process (#70). A store runs
-        share holds one process run per `irimi shadow` (#79), as a replay's store holds the
-        recording's and its own (#82): this one's is the run its banner named. A replay's is the
-        replay's one run (#84)."""
+        """The id of the one run `irimi shadow` stored for the agent's process. A store runs
+        share holds one process run per `irimi shadow`, as a replay's store holds the
+        recording's and its own: this one's is the run its banner named. A replay's is the
+        replay's one run."""
         runs = [r.run_id for r in self.stored().list_runs() if r.attribution == "process"]
         if self.store is None and self.mode != "replay":
             (run_id,) = runs
@@ -362,12 +361,12 @@ class Result:
 
     def runs(self, *argv: str) -> tuple[int, list[str], list[str]]:
         """`irimi runs <argv>` over this run's store, as its user would type it afterwards: the
-        same `$IRIMI_HOME`, working directory and maps (#72). Returns the exit code and what it
+        same `$IRIMI_HOME`, working directory and maps. Returns the exit code and what it
         printed to stdout and to stderr, line by line."""
         return self.command("runs", *argv)
 
     def command(self, *argv: str) -> tuple[int, list[str], list[str]]:
-        """`irimi <argv>` as `runs` runs it (#79). A store the run was given is not added: name it
+        """`irimi <argv>` as `runs` runs it. A store the run was given is not added: name it
         with `--store`, as its user would."""
         out, err = io.StringIO(), io.StringIO()
         scenario = self.workflow.scenarios[self.scenario]
@@ -384,7 +383,7 @@ class Result:
     def listed_attributions(self) -> dict[str, str]:
         """`irimi runs list` over the store this run recorded into, named with `--store` as its
         user would name it: each run it lists, by id, to its attribution column, which says a
-        replay's run is a `replay of` the run it replayed (#154). Raises unless it exits 0, quiet,
+        replay's run is a `replay of` the run it replayed. Raises unless it exits 0, quiet,
         with every line a run's."""
         code, listed, err = self.runs("list", "--store", str(self.store_root()))
         assert (code, err) == (0, []), (code, err)
@@ -394,12 +393,12 @@ class Result:
 
     def compare_runs(self, run_a: str, run_b: str) -> tuple[int, list[str], list[str]]:
         """`irimi compare <run_a> <run_b>` over the store this run recorded into, named with
-        `--store` as its user would name it (#79): any two runs it holds, `unattributed` too."""
+        `--store` as its user would name it: any two runs it holds, `unattributed` too."""
         return self.command("compare", run_a, run_b, "--store", str(self.store_root()))
 
     def shown_writes(self, run_id: str) -> tuple[str, list[str]]:
-        """What `irimi runs show <run_id>` prints of a stored run that `irimi compare` prints too
-        (#79): the run in one line, its trigger, entrypoint and agent version as compare's header
+        """What `irimi runs show <run_id>` prints of a stored run that `irimi compare` prints too:
+        the run in one line, its trigger, entrypoint and agent version as compare's header
         names a side, and its summary's write lines without their indent, in the order printed,
         `↳` lines left out. Raises unless `runs show` exits 0. An empty unattributed pool is no
         run, so it has no label and no writes."""
@@ -416,7 +415,7 @@ class Result:
     def maps(self) -> MapIndex | None:
         """The maps `irimi runs show` renders this run's writes with: shipped plus the scenario's
         own, loaded from the run's working directory and `$IRIMI_HOME`, as `runs()` loads them.
-        None when they do not load, as `runs show` then carries on without them (#72)."""
+        None when they do not load, as `runs show` then carries on without them."""
         scenario = self.workflow.scenarios[self.scenario]
         with (
             _environ({**os.environ, paths.IRIMI_HOME_ENV: str(self.home)}),
@@ -431,7 +430,7 @@ class Result:
 
 def _summary_headers(run_id: str) -> tuple[str, str]:
     """The line `irimi runs show` opens a stored run's summary with: `irimi replay · run` for a
-    replay's run, which printed no summary live, `irimi shadow · run` for any other (#154)."""
+    replay's run, which printed no summary live, `irimi shadow · run` for any other."""
     return (f"irimi shadow · run {run_id} · ", f"irimi replay · run {run_id} · ")
 
 
@@ -451,7 +450,7 @@ def workflows() -> dict[str, Workflow]:
 
 def serve_cases() -> list[tuple[str, str]]:
     """`(workflow, scenario)` for every scenario that runs under `irimi shadow --serve` too: the
-    ones whose `serve_flags` are set (#77). The one statement of that set, for every test that
+    ones whose `serve_flags` are set. The one statement of that set, for every test that
     holds serve runs to something."""
     return [
         (name, scenario)
@@ -465,7 +464,7 @@ def run(
     workflow: Workflow, scenario_name: str, mode: str, workdir: Path, store: Path | None = None
 ) -> Result:
     """One scenario in one mode. `store` is passed to irimi as `--store`, so two runs can record
-    into one store and be compared (#79); without it irimi records into the run's own home."""
+    into one store and be compared; without it irimi records into the run's own home."""
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
     return _execute(workflow, scenario_name, mode, workdir, store)
@@ -480,8 +479,8 @@ def replay(
     *,
     command: bool = False,
 ) -> Result:
-    """`run_id`, a run `recorded` stored, replayed by `irimi replay <run_id>` (#82, #84):
-    `recorded`'s scenario, recorded under `irimi shadow` or serve (#85) or itself a replay, in a
+    """`run_id`, a run `recorded` stored, replayed by `irimi replay <run_id>`:
+    `recorded`'s scenario, recorded under `irimi shadow` or serve or itself a replay, in a
     copy of its `IRIMI_HOME` and its store under `workdir`, so `recorded` reads its store as it was
     and the replay's holds both, with `env` over the scenario's own environment - `PROMPT=half` is
     the prompt edit - and `options` given to `irimi replay` too (`--call`, `--args`). What runs is
@@ -495,7 +494,7 @@ def replay(
 
 
 def sdk_replay(recorded: Result, run_id: str, workdir: Path, *call: Any) -> Result:
-    """`sdk.replay(run_id, *call)` (#84) called as a test calls it, through the agents' own `sdk`
+    """`sdk.replay(run_id, *call)` called as a test calls it, through the agents' own `sdk`
     (`examples/workflows/sdk.py`, which forwards `replay` to `irimi.sdk`), a `replay` of
     `recorded` in every other way. `sdk.replay`'s one seam, `sdk.replays._run_irimi`, runs `irimi`
     in this process instead of a subprocess, so the fake internet resolves its names and the
@@ -506,7 +505,7 @@ def sdk_replay(recorded: Result, run_id: str, workdir: Path, *call: Any) -> Resu
 
 @dataclass(frozen=True)
 class _Replay:
-    """How `_execute` replays a run (#84): the `options` `irimi replay` is given, whether it runs
+    """How `_execute` replays a run: the `options` `irimi replay` is given, whether it runs
     the scenario's `command`, and, for `sdk_replay`, the `sdk.replay` `call` it makes instead."""
 
     options: tuple[str, ...] = ()
@@ -518,16 +517,16 @@ def _replayed(
     recorded: Result, run_id: str, workdir: Path, env: dict[str, str] | None, how: _Replay
 ) -> Result:
     # A run recorded under serve is replayed as one recorded under `irimi shadow`: `irimi replay`
-    # reads only the store, and serve's runs are the ones a deployed agent records (#85).
+    # reads only the store, and serve's runs are the ones a deployed agent records.
     if recorded.mode not in ("shadow", "serve", "replay"):
         raise ValueError(
             f"replay takes a run recorded under shadow or serve, or replayed, not {recorded.mode}"
         )
     # A replay records into the store it answers from, so it runs in a copy of `recorded`'s home,
     # and of the store it was given: never in `recorded`'s own, which a session-cached recording
-    # or replay shares with every test that reads it. A replay of the cached replay wrote its run
-    # there, and `test_replays.py`'s rule 9 then failed for W1 `full_refund` whenever W1's
-    # replay-of-a-replay tests ran first (found under #85; on main since #84).
+    # or replay shares with every test that reads it. Otherwise a replay of the cached replay
+    # writes its run there, and `test_replays.py`'s rule 9 fails for W1 `full_refund` whenever
+    # W1's replay-of-a-replay tests run first.
     workdir.mkdir(parents=True, exist_ok=True)
     home = workdir / "recorded-home"
     shutil.copytree(recorded.home, home)
@@ -549,9 +548,9 @@ def _replayed(
 
 
 def replayed_run_id(recorded: Result) -> str:
-    """The run a replay of `recorded` answers from (#82): the one run besides the engine's own (the
-    process run, or serve's `unattributed`, #85) that `recorded`'s irimi put exchanges or tool
-    calls in (#83) - the SDK's, or a `header` run whose start never reached irimi (W10's control
+    """The run a replay of `recorded` answers from: the one run besides the engine's own (the
+    process run, or serve's `unattributed`) that `recorded`'s irimi put exchanges or tool
+    calls in - the SDK's, or a `header` run whose start never reached irimi (W10's control
     faults) - or, when there is none, the engine's own: the process run (W9, W11). Read off the
     events it handed its store, so a store that holds other runs too, as a replay's holds its
     recording's, still names `recorded`'s own. A recording with several (W3, W8) has no one run to
@@ -565,11 +564,11 @@ def replayed_run_id(recorded: Result) -> str:
 
 
 def replay_targets(recorded: Result) -> list[str]:
-    """Every run a replay of `recorded` can answer from (#82), in the order they started: each run
+    """Every run a replay of `recorded` can answer from, in the order they started: each run
     its irimi stored besides the process run - an SDK run, a run W9 posted by hand, a `header` run -
     exchanges or none, or the process run alone when there is none (W9's scripts). A process that
     held several runs (W3, W5's cascade, W8) is replayed once per run, each answering that run
-    alone, as the issue's "Replay which run?" says. Read before anything replays into its store."""
+    alone. Read before anything replays into its store."""
     process = recorded.process_run_id()
     runs = [r for r in recorded.stored().list_runs() if r.run_id != process]
     runs.sort(key=lambda r: (r.started_at is None, r.started_at or 0.0, r.run_id))
@@ -577,8 +576,8 @@ def replay_targets(recorded: Result) -> list[str]:
 
 
 def counterpart(recorded: Result, replayed: Result, run_id: str) -> str | None:
-    """The run of `replayed` that stands for `recorded`'s run `run_id` (#82): the replay's one run,
-    which every run its child's SDK started adopted (#84), as its result names it. None when the
+    """The run of `replayed` that stands for `recorded`'s run `run_id`: the replay's one run,
+    which every run its child's SDK started adopted, as its result names it. None when the
     replay stored no run, refused before it ran."""
     assert replayed.replay is not None and replayed.replay.source_run_id == run_id
     return replayed.replay.replay_run_id
@@ -635,7 +634,7 @@ def _execute(
         elif mode == "replay":
             assert replay_of is not None and how is not None
             argv = ["replay", "--port", "0", *flags, "--result-file", str(result_file)]
-            # As its user types it: the run id, then `-- <cmd>` for a command (#84).
+            # As its user types it: the run id, then `-- <cmd>` for a command.
             argv += [*how.options, replay_of, *(["--", *cmd] if how.command else [])]
             with _watching_the_store(reported, handed, handed_events):
                 if how.call is None:
@@ -703,25 +702,25 @@ def _calling_sdk_replay(
 
 def compare(a: Result, b: Result) -> tuple[int, list[str], list[str]]:
     """`irimi compare` over the SDK run each of `a` and `b` started, as `b`'s user would type it,
-    naming the store both recorded into: `run`'s `store`, given to both (#79)."""
+    naming the store both recorded into: `run`'s `store`, given to both."""
     ids = [result.one("run.start")["run"] for result in (a, b)]
     return b.compare_runs(*ids)
 
 
-# Whose summary printed each kind of `irimi compare` row (#79): A's for a write both made the same
+# Whose summary printed each kind of `irimi compare` row: A's for a write both made the same
 # (B's too), for one only A made, and for a pair's A line; B's for one only B made and for a pair's
 # B line, which a `~` or a `?` prints under its A line.
 ROW_SIDES = {"  = ": "AB", "  - ": "A", "  ~ A ": "A", "  ? A ": "A", "  + ": "B", "    B ": "B"}
 
 
-# How a `~` or `?` pair's A row starts, and its B row under it (#79).
+# How a `~` or `?` pair's A row starts, and its B row under it.
 PAIR_A_PREFIXES = ("  ~ A ", "  ? A ")
 PAIR_B_PREFIX = "    B "
 
 
 def rows_not_shown(result: Result, run_a: str, run_b: str, out: list[str]) -> list[str]:
     """Every row of `irimi compare <run_a> <run_b>`'s output `out` that is not a write line the
-    summary of its run printed (`irimi runs show`, #72), or that no row kind starts (#79). Empty
+    summary of its run printed (`irimi runs show`), or that no row kind starts. Empty
     when compare showed each run's own writes and nothing else, but for the one exception compare
     makes: a pair it told apart (`_told_apart`)."""
     shown = {"A": result.shown_writes(run_a)[1], "B": result.shown_writes(run_b)[1]}
@@ -739,8 +738,8 @@ def rows_not_shown(result: Result, run_a: str, run_b: str, out: list[str]) -> li
 
 def _told_apart(a_row: str, b_row: str, shown: dict[str, list[str]]) -> bool:
     """Whether `a_row` over `b_row` is a `~` or `?` pair whose writes the two summaries print as
-    one line, which `irimi compare` prints with each backslash escaped too so the two differ
-    (#79): the rows differ, and with each doubled backslash made one again, both are that line,
+    one line, which `irimi compare` prints with each backslash escaped too so the two differ:
+    the rows differ, and with each doubled backslash made one again, both are that line,
     and each run's summary printed it."""
     if not (a_row.startswith(PAIR_A_PREFIXES) and b_row.startswith(PAIR_B_PREFIX)):
         return False
@@ -797,7 +796,7 @@ def _run_irimi(
     run: Callable[[], int] | None = None,
 ) -> tuple[int, list[str]]:
     """`irimi <argv>` in this process, as a user would run it from `cwd`: `irimi shadow -- <agent>`,
-    or `irimi replay <run id>` (#84), or `run`, which runs it another way (`sdk_replay`)."""
+    or `irimi replay <run id>`, or `run`, which runs it another way (`sdk_replay`)."""
     buf = io.StringIO()
     with _as_irimi(env, cwd, tmp, internet, scenario, workdir), contextlib.redirect_stdout(buf):
         code = irimi_main(argv) if run is None else run()
@@ -814,7 +813,7 @@ def _as_irimi(
     workdir: Path,
 ) -> Iterator[None]:
     """This process made the one irimi runs in, for `irimi shadow` and `irimi shadow --serve`
-    alike (#77): the agent's environment, `cwd`, TMPDIR, the scenario's maps, the fake resolver,
+    alike: the agent's environment, `cwd`, TMPDIR, the scenario's maps, the fake resolver,
     and a CA under the run's `IRIMI_HOME`.
 
     irimi's L3 read is urllib in this process. With no proxy variable set, urllib on macOS falls
@@ -846,7 +845,7 @@ def _run_serve(
     flags: tuple[str, ...] = (),
 ) -> tuple[int, list[str]]:
     """`irimi shadow --serve` in this process, as `_run_shadow` runs `irimi shadow`, on a thread of
-    its own; the agent beside it as its own process; and irimi stopped when the agent exits (#77).
+    its own; the agent beside it as its own process; and irimi stopped when the agent exits.
 
     The command is parsed by irimi's own parser and run by the function `irimi shadow --serve`
     runs, with the `stop` event in place of SIGTERM, which would reach this whole test process.
@@ -885,7 +884,7 @@ def _run_serve(
     if serving.is_alive() or codes != [0]:
         raise AssertionError(f"irimi shadow --serve did not stop cleanly: {codes}")
     # Stopped means stopped: the engine's thread joined and the store closed, its writer thread
-    # with it, by the time serve returned (#77). A thread of the engine's event loop's executor,
+    # with it, by the time serve returned. A thread of the engine's event loop's executor,
     # told to shut down as the loop closed, may take a moment to see it, so each is given that
     # long to end; the fake internet's own handlers may still be finishing an answer.
     started = [t for t in threading.enumerate() if t not in before and FAKE_HANDLER not in t.name]
@@ -915,7 +914,7 @@ def _served_port(buf: io.StringIO, serving: threading.Thread) -> int | None:
 
 def _serve_env(env: dict[str, str], port: int, cert: Path) -> dict[str, str]:
     """The agent's environment beside a serve: the README's serve-mode variables, naming irimi as
-    the agent connects to it, here loopback (#77)."""
+    the agent connects to it, here loopback."""
     listener = f"http://127.0.0.1:{port}"
     return {
         **env,
@@ -947,11 +946,11 @@ def _watching_the_store(
 ) -> Iterator[None]:
     """`irimi shadow` unchanged, but each exchange it prints a line for is appended to `reported`,
     and each one its engine hands the trace store to `handed`, and to `handed_events` with each
-    tool call the control endpoint hands it (#73). `cli` imports `DirectoryStore` when it opens the
+    tool call the control endpoint hands it. `cli` imports `DirectoryStore` when it opens the
     store and builds its engine with `_build_engine`, which it hands the `on_exchange` that prints
-    each line, so swapping the two names is enough, as `tests/test_trace_e2e.py` does (#70). Not
+    each line, so swapping the two names is enough, as `tests/test_trace_e2e.py` does. Not
     `report.exchange_line` itself, which `irimi replay` also calls for the line of its divergence
-    point (#84)."""
+    point."""
     real = irimi_store.DirectoryStore
     build = cli._build_engine
 
@@ -1016,8 +1015,8 @@ def _maps(scenario: Scenario, workdir: Path) -> Iterator[None]:
 
 
 def check_invariants(shadow: Result, bare: Result | None = None) -> list[str]:
-    """What every shadow run owes, whatever the workflow, and every serve run (#77) and replay
-    (#82). Returns the broken ones, worded. Invariant 5 compares exit codes with `bare`, when it
+    """What every shadow run owes, whatever the workflow, and every serve run and replay.
+    Returns the broken ones, worded. Invariant 5 compares exit codes with `bare`, when it
     is given."""
     if shadow.mode not in ("shadow", "serve", "replay"):
         raise ValueError(f"check_invariants takes a shadow, serve or replay run, not {shadow.mode}")
@@ -1035,7 +1034,7 @@ def check_invariants(shadow: Result, bare: Result | None = None) -> list[str]:
             "1. a write reached a fake service: "
             + ", ".join(f"{r.method} {r.host}{r.path}" for r in writes)
         )
-    # A replay answers the leaking read from the recording, so it may leak nothing (#82).
+    # A replay answers the leaking read from the recording, so it may leak nothing.
     if scenario.leaks and not writes and shadow.mode != "replay":
         problems.append("1. a scenario marked `leaks` leaked nothing")
     labelled = [r for r in shadow.internet.requests() if "irimi-run" in r.headers]
@@ -1051,7 +1050,7 @@ def check_invariants(shadow: Result, bare: Result | None = None) -> list[str]:
         problems.append(f"3. a write tool ran for real: {real_writes}")
     roots = [shadow.home, shadow.cwd, shadow.tmp]
     if not shadow.store_root().is_relative_to(shadow.home):
-        roots.append(shadow.store_root())  # a store the run was given, outside its home (#79)
+        roots.append(shadow.store_root())  # a store the run was given, outside its home
     leaked = [found for root in roots for found in _canaries_under(root)]
     if leaked:
         problems.append(f"4. a canary reached disk where irimi writes: {leaked}")
@@ -1083,7 +1082,7 @@ def _live_answers_not_served(result: Result) -> list[str]:
 def _canaries_under(root: Path) -> list[str]:
     """Each canary found whole in a file under `root`, or else its first CANARY_PART characters: a
     key cut before redaction is no longer its shape, so the part a cut kept reached disk as it was,
-    which the whole canary is never found as (#179)."""
+    which the whole canary is never found as."""
     canaries = {**CANARIES, **SERVED_CANARIES}
     found = []
     for path in root.rglob("*"):

@@ -48,7 +48,7 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # How long a `stall` fault holds a request before answering. Agents under test use a shorter
 # client timeout, so a stall reads to them as a timeout.
 STALL_S = 2.0
-# How long `reset-stream` waits between its first chunk and the reset (#71).
+# How long `reset-stream` waits between its first chunk and the reset.
 RESET_AFTER_CHUNK_S = 0.5
 # The longest a held stream (`Resp.hold`) waits before it ends anyway, so a scenario whose release
 # never comes fails on what the agent saw rather than hanging the corpus.
@@ -56,7 +56,7 @@ HOLD_TIMEOUT_S = 30.0
 # The listen backlog. socketserver's default of 5 drops connections from W3's concurrent runs on
 # macOS, where a dropped SYN is retried a second later and reads as a flaky timeout.
 BACKLOG = 128
-# What a bomb fault decodes to (#94): `BOMB_HEAD`, then a GiB of 16-byte lines, far past the most
+# What a bomb fault decodes to: `BOMB_HEAD`, then a GiB of 16-byte lines, far past the most
 # irimi decodes of any body, the same in every codec. Short lines compress about 500 to 1 and cost
 # redaction little per byte; a GiB of bare newlines compresses twice as well, and costs redaction
 # seven times as much. Each is built once, the first time it is asked for, so a scenario builds
@@ -68,17 +68,17 @@ BOMB_LINE = b" " * 15 + b"\n"
 BOMB_SECRET = "CANARYbombsecret00000000000000"
 # How every bomb a fault answers with starts: a JSON document, its credential on a line of its
 # own. Redaction reads the start of a document line by line, as it is not JSON, and no shape gives
-# that line away: only its key says it is a secret (#69, #94).
+# that line away: only its key says it is a secret.
 BOMB_HEAD = b'{\n  "object": "export",\n  "client_secret": "' + BOMB_SECRET.encode() + b'",\n'
 # What `gzip-padded` puts after the service's own answer: 128 MiB of blanks, no line break, so
-# the decoded body is the answer and whitespace, which JSON reads as nothing (#94).
+# the decoded body is the answer and whitespace, which JSON reads as nothing.
 PADDED_LINE = b" "
 PADDED_BYTES = 128 * 1024 * 1024
 # The answers a bomb fault gives, by its action: the `Content-Encoding` each is sent in.
 BOMB_ENCODINGS = {"gzip-bomb": "gzip", "br-bomb": "br", "zstd-bomb": "zstd"}
 # The most a fake service decodes of a gzip request body: one that decodes past it is refused 413
 # by the fake internet, as a server refuses a body too large, and reads as empty. So an agent's
-# own bomb (#94) never costs the harness more than this, bare or forwarded live.
+# own bomb never costs the harness more than this, bare or forwarded live.
 MAX_REQUEST_DECODED = 16 * 1024 * 1024
 
 
@@ -116,7 +116,7 @@ class Req:
     @functools.cached_property
     def decoded(self) -> bytes | None:
         """The body with its gzip undone, up to MAX_REQUEST_DECODED; None when it decodes past
-        that (#94). A gzip body that does not decode is empty, as it always read."""
+        that. A gzip body that does not decode is empty, as it always read."""
         if self.headers.get("content-encoding") != "gzip":
             return self.body
         inflater = zlib.decompressobj(16 + zlib.MAX_WBITS)
@@ -160,12 +160,12 @@ class Resp:
     body: Any = None
     headers: dict[str, str] = field(default_factory=dict)
     # A streamed answer: each chunk is written and flushed on its own, `chunk_delay` apart, framed
-    # with chunked transfer encoding as a real LLM API frames one (#71).
+    # with chunked transfer encoding as a real LLM API frames one.
     chunks: list[bytes] | None = None
     chunk_delay: float = 0.0
     # A stream whose last chunk waits for this to be set, up to HOLD_TIMEOUT_S: the service
     # decides when the stream ends, not the clock, so a scenario can end it after something the
-    # agent does (W7 `hand_off`, #77).
+    # agent does (W7 `hand_off`).
     hold: threading.Event | None = None
 
 
@@ -188,7 +188,7 @@ class Fault:
     `429`, `500` and `garbage` answer at once; `stall` answers late; `reset` resets the connection
     before any response; `reset-stream` lets the service answer, sends the headers and the first
     chunk, and then resets. `gzip-bomb`, `br-bomb` and `zstd-bomb` answer 200 with `bomb()` in
-    that encoding, though the client never asked for one (#94); `gzip-padded` lets the service
+    that encoding, though the client never asked for one; `gzip-padded` lets the service
     answer, and sends its JSON gzip-encoded, on a line of its own followed by `PADDED_BYTES` of
     blanks, which JSON reads as whitespace. A faulted request is still recorded in `log`.
     """
@@ -210,7 +210,7 @@ class FakeInternet:
             for host in service.hosts:
                 self.services[host.lower()] = service
         self.log: list[Req] = []
-        # Every body a `gzip-padded` fault sent, as it went on the wire (#94).
+        # Every body a `gzip-padded` fault sent, as it went on the wire.
         self.padded: list[bytes] = []
         self.faults: list[Fault] = []
         self._lock = threading.Lock()
@@ -334,9 +334,9 @@ class FakeInternet:
 def resolving_only(served: Iterable[str]) -> Iterator[None]:
     """Resolve each name in `served` to loopback, and refuse every other name, for the duration of
     the block and in this process only. The fake internet's resolver, and the one of any test whose
-    irimi reaches loopback stubs by their real names (`tests/test_phase3_replay_exit.py`, #85)."""
-    # One rule for every lookup, so no path through the socket module resolves a real name
-    # (#89): `localhost` and a loopback or unspecified literal go to the real resolver, which
+    irimi reaches loopback stubs by their real names (`tests/test_phase3_replay_exit.py`)."""
+    # One rule for every lookup, so no path through the socket module resolves a real name:
+    # `localhost` and a loopback or unspecified literal go to the real resolver, which
     # answers them without DNS; a served name is loopback; everything else, a public IP
     # literal included, is refused.
     real_getaddrinfo = socket.getaddrinfo
@@ -450,7 +450,7 @@ class _Handler(BaseHTTPRequestHandler):
         headers = dict(resp.headers)
         if resp.chunks is not None:
             # Chunked, as OpenAI and Anthropic send a stream, and not ended by closing the
-            # connection: only a framed body lets a proxy tell a reset from the end (#71).
+            # connection: only a framed body lets a proxy tell a reset from the end.
             self.protocol_version = "HTTP/1.1"
             self.close_connection = True
             headers.setdefault("content-type", "text/event-stream")
@@ -468,7 +468,7 @@ class _Handler(BaseHTTPRequestHandler):
                 if reset_after_first_chunk and i == 0:
                     # A reset overtakes bytes its peer has not read yet and takes them with it,
                     # so the chunk is given time to be read first: the fault is "the first chunk,
-                    # then a reset", and a proxy must see both (#71).
+                    # then a reset", and a proxy must see both.
                     time.sleep(RESET_AFTER_CHUNK_S)
                     self._reset()
                     return

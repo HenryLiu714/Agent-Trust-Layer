@@ -1,7 +1,9 @@
 """`ServiceOverlay`: the effect tables applied to a live read, and the cursor it translates"""
 
 import json
+from dataclasses import replace
 
+from irimi import services
 from irimi.bodies import MAX_BODY_BYTES
 from irimi.exchange import Exchange, Request, Response
 from irimi.overlay import ServiceOverlay
@@ -112,7 +114,7 @@ def _write_exchange(headers=(), refund_id=MINTED):
 
 
 def _slack_post_exchange(ts, channel="C0123", headers=(), thread_ts=None):
-    """A faked `chat.postMessage`, answered in `echo.slack.SLACK_ENVELOPES`' shape."""
+    """A faked `chat.postMessage`, answered in `slack.answers.SLACK_ENVELOPES`' shape."""
     posted = {"channel": channel, "text": "refund issued"}
     if thread_ts is not None:
         posted["thread_ts"] = thread_ts
@@ -222,7 +224,8 @@ def test_a_body_over_the_size_cap_is_flagged_partial():
 
 
 def test_an_effect_that_raises_leaves_the_read_alone_and_flags_it(monkeypatch):
-    monkeypatch.setattr("irimi.services.EFFECTS", {"stripe": _raising})
+    raising = replace(services.REGISTRY["stripe"], effects=_raising)
+    monkeypatch.setitem(services.REGISTRY, "stripe", raising)
     upstream = _upstream(CHARGE)
     out = ServiceOverlay(MAPS)([_write_exchange()], _read("/v1/charges/ch_REAL1"), upstream)
     assert out.response is upstream
@@ -250,7 +253,8 @@ def test_rewrite_returns_none_when_there_is_nothing_to_translate():
 
 
 def test_rewrite_never_raises(monkeypatch):
-    monkeypatch.setattr("irimi.services.REWRITES", {"stripe": _raising})
+    raising = replace(services.REGISTRY["stripe"], rewrite=_raising)
+    monkeypatch.setitem(services.REGISTRY, "stripe", raising)
     read = _read("/v1/refunds", query=f"starting_after={MINTED}")
     assert ServiceOverlay(MAPS).rewrite([_write_exchange()], read) is None
 

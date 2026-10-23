@@ -8,8 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from irimi import bodies, delegation, echo, fixture, pipeline, servicemap, services
-from irimi.echo import slack as echo_slack
+from irimi import bodies, delegation, pipeline, servicemap, services
 from irimi.exchange import (
     FIDELITY_L0_FLAG,
     FIDELITY_L1_FLAG,
@@ -23,6 +22,9 @@ from irimi.pipeline import classify
 from irimi.policy import ShadowPolicy
 from irimi.reader import UpstreamReader
 from irimi.servicemap import IdSpec
+from irimi.services import generic
+from irimi.services.slack import answers as slack_answers
+from irimi.services.stripe import answers as stripe_answers
 
 SHIPPED = servicemap.MapIndex(tuple(servicemap.loader.load_shipped()))
 
@@ -145,7 +147,7 @@ def test_livemode_is_overwritten_rather_than_taken_from_the_fixture():
     route = servicemap.Route(
         method="POST", path="/v1/things", operation="things.create", kind="write", fixture="thing"
     )
-    body = echo.stripe.l1_body(_req("POST"), route, {"object": "thing", "livemode": True})
+    body = stripe_answers.l1_body(_req("POST"), route, {"object": "thing", "livemode": True})
     assert body["livemode"] is False
 
 
@@ -173,7 +175,7 @@ def test_two_slack_writes_in_the_same_second_get_different_timestamps():
     """Slack uses `ts` as a message's identifier and as `thread_ts`, so a collision is two
     messages that are the same message. Random six digits collide 9% of the time in 200,000
     draws; a counter lets a run post a million messages a second before one repeats."""
-    clock = echo.TsClock()
+    clock = services.TsClock()
     seen = [clock.mint() for _ in range(5_000)]
     assert len(set(seen)) == len(seen)
     # And increasing, because that is the other half of what a `ts` means: real ones sort by time,
@@ -185,8 +187,8 @@ def test_two_slack_writes_in_the_same_second_get_different_timestamps():
 def test_a_slack_timestamp_still_names_the_current_second(monkeypatch):
     """The counter must not drift off the clock: a `ts` is a real epoch time, and an SDK that
     renders one as a date has to get today."""
-    monkeypatch.setattr(echo_slack.time, "time", lambda: 1_700_000_000.9)
-    clock = echo.TsClock()
+    monkeypatch.setattr(slack_answers.time, "time", lambda: 1_700_000_000.9)
+    clock = services.TsClock()
     assert clock.mint() == "1700000000.000000"
     assert clock.mint() == "1700000000.000001"
 
@@ -210,7 +212,7 @@ def test_slack_write_reads_the_json_body_slack_sdk_actually_posts():
 def test_a_threaded_post_answers_with_the_thread_it_was_posted_in():
     """A reply's faked `message` carries the posted `thread_ts`. Real Slack puts it there, and
     irimi knows the value exactly - the caller posted it. The fixture names the field so that
-    `echo.reflect_over` has something to write over."""
+    `generic.reflect_over` has something to write over."""
     ans = _answer(
         _req(
             "POST",
@@ -338,9 +340,7 @@ def test_a_faker_that_fails_still_answers_locally(monkeypatch, broken, path):
     def boom(*args, **kwargs):
         raise RuntimeError("boom")
 
-    bodies_of_stripe = list(echo.BODIES["stripe"])
-    bodies_of_stripe[broken] = boom
-    monkeypatch.setitem(echo.BODIES, "stripe", tuple(bodies_of_stripe))
+    monkeypatch.setattr(stripe_answers, ("l0_body", "l1_body")[broken], boom)
     ans = _answer(_req("POST", path=path))
     assert ans.answered_by == "fake-L0"
     assert ans.response.body == b"{}"
@@ -428,13 +428,13 @@ def test_an_answer_for_an_unparseable_body_is_still_json():
     ],
 )
 def test_object_name(operation, expected):
-    assert echo.stripe.object_name(operation) == expected
+    assert stripe_answers.object_name(operation) == expected
 
 
 def test_mint_id_shape_and_uniqueness():
-    first = echo.generic.mint_id("re_")
+    first = generic.mint_id("re_")
     assert re.fullmatch(r"re_[A-Za-z0-9]{24}", first)
-    assert first != echo.generic.mint_id("re_")
+    assert first != generic.mint_id("re_")
 
 
 def test_every_shipped_route_that_mints_an_id_names_a_real_object():
@@ -442,7 +442,7 @@ def test_every_shipped_route_that_mints_an_id_names_a_real_object():
     for service in SHIPPED.services:
         for route in service.routes:
             if "id" in route.ids:
-                assert echo.stripe.object_name(route.operation) not in ("", route.operation)
+                assert stripe_answers.object_name(route.operation) not in ("", route.operation)
 
 
 def test_stripe_python_parses_the_faked_refund():
@@ -659,10 +659,10 @@ def test_a_captured_segment_that_is_not_this_ids_prefix_is_not_used():
         kind="write",
         ids={"id": IdSpec(prefix="wid_")},
     )
-    assert echo.generic.named_id(route, "/v1/widgets/wid_1/parts/prt_9", "wid_") == "wid_1"
-    assert echo.generic.named_id(route, "/v1/widgets/wid_1/parts/prt_9", "prt_") == "prt_9"
-    assert echo.generic.named_id(route, "/v1/widgets/w1/parts/p9", "wid_") is None
-    assert echo.generic.named_id(route, "/v1/widgets", "wid_") is None
+    assert generic.named_id(route, "/v1/widgets/wid_1/parts/prt_9", "wid_") == "wid_1"
+    assert generic.named_id(route, "/v1/widgets/wid_1/parts/prt_9", "prt_") == "prt_9"
+    assert generic.named_id(route, "/v1/widgets/w1/parts/p9", "wid_") is None
+    assert generic.named_id(route, "/v1/widgets", "wid_") is None
 
 
 def test_the_id_shaped_capture_wins_when_one_prefix_matches_two_segments():
@@ -677,9 +677,9 @@ def test_the_id_shaped_capture_wins_when_one_prefix_matches_two_segments():
         ids={"id": IdSpec(prefix="sub_")},
     )
     path = "/v1/subscription_schedules/sub_sched_1/subscriptions/sub_2"
-    assert echo.generic.named_id(route, path, "sub_") == "sub_2"
+    assert generic.named_id(route, path, "sub_") == "sub_2"
     # And the longer prefix still finds its own segment, which the shorter one must not steal.
-    assert echo.generic.named_id(route, path, "sub_sched_") == "sub_sched_1"
+    assert generic.named_id(route, path, "sub_sched_") == "sub_sched_1"
 
 
 def test_a_client_secret_is_never_echoed_back_as_the_resource_id():
@@ -693,17 +693,13 @@ def test_a_client_secret_is_never_echoed_back_as_the_resource_id():
         kind="write",
         ids={"id": IdSpec(prefix="pi_")},
     )
-    assert (
-        echo.generic.named_id(route, "/v1/payment_intents/pi_ABC_secret_XYZ/cancel", "pi_") is None
-    )
-    body = echo.stripe.l0_body(
+    assert generic.named_id(route, "/v1/payment_intents/pi_ABC_secret_XYZ/cancel", "pi_") is None
+    body = stripe_answers.l0_body(
         _req("POST", path="/v1/payment_intents/pi_ABC_secret_XYZ/cancel"), route
     )
     assert body["id"] != "pi_ABC_secret_XYZ"
     assert re.fullmatch(r"pi_[A-Za-z0-9]{24}", body["id"])
-    assert (
-        echo.generic.named_id(route, "/v1/payment_intents/pi_REAL999/cancel", "pi_") == "pi_REAL999"
-    )
+    assert generic.named_id(route, "/v1/payment_intents/pi_REAL999/cancel", "pi_") == "pi_REAL999"
 
 
 def test_a_percent_encoded_id_is_still_the_id_the_request_names():
@@ -716,7 +712,7 @@ def test_a_percent_encoded_id_is_still_the_id_the_request_names():
         kind="write",
         ids={"id": IdSpec(prefix="cus_")},
     )
-    assert echo.generic.named_id(route, "/v1/customers/cus%5FREAL123", "cus_") == "cus_REAL123"
+    assert generic.named_id(route, "/v1/customers/cus%5FREAL123", "cus_") == "cus_REAL123"
     body = json.loads(_answer(_req("POST", path="/v1/customers/cus%5FREAL123")).response.body)
     assert body["id"] == "cus_REAL123"
 
@@ -731,7 +727,7 @@ def test_every_shipped_write_route_that_names_ids_round_trips_or_mints():
                 holes = [p for p in route.path.split("/") if p.startswith("{")]
                 if not holes:
                     sample = route.path.replace("{", "").replace("}", "")
-                    assert echo.generic.named_id(route, sample, prefix) is None, route.operation
+                    assert generic.named_id(route, sample, prefix) is None, route.operation
                     continue
                 # Only the LAST hole carries the prefix; every other one gets a segment that
                 # does not. Filling them all would make `named_id` match the first hole whatever
@@ -744,7 +740,7 @@ def test_every_shipped_write_route_that_names_ids_round_trips_or_mints():
                     else part
                     for i, part in enumerate(parts)
                 )
-                assert echo.generic.named_id(route, filled, prefix) == prefix + "SAMPLE", (
+                assert generic.named_id(route, filled, prefix) == prefix + "SAMPLE", (
                     f"{sm.service}.{route.operation} does not echo the {name} its path names"
                 )
 
@@ -821,7 +817,7 @@ def test_the_body_is_serialized_exactly_once(monkeypatch):
     # Rebind the name `json` inside policy rather than mutating the shared stdlib module: the
     # latter counts every json.dumps in the process, including ones classify or servicemap make,
     # which turns this into a tripwire for whatever another batch adds to that path.
-    monkeypatch.setattr(echo, "json", SimpleNamespace(dumps=counting, loads=json.loads))
+    monkeypatch.setattr(services, "json", SimpleNamespace(dumps=counting, loads=json.loads))
     _answer(
         _req(
             "POST",
@@ -858,13 +854,13 @@ def test_a_real_array_field_is_still_promoted_to_a_list():
 
 @pytest.fixture
 def no_fixtures(tmp_path, monkeypatch):
-    """Point `fixture` at an empty directory, so every `fixture:` route degrades to L0."""
+    """Point the fixtures at an empty directory, so every `fixture:` route degrades to L0."""
     empty = tmp_path / "fixtures"
     empty.mkdir()
-    monkeypatch.setattr(fixture, "fixtures_dir", lambda: empty)
-    fixture.clear_cache()
+    monkeypatch.setattr(generic, "fixtures_dir", lambda: empty)
+    generic.clear_fixture_cache()
     yield
-    fixture.clear_cache()
+    generic.clear_fixture_cache()
 
 
 def _refund(body: bytes = b"charge=ch_test&amount=4900"):
@@ -887,7 +883,7 @@ def test_the_faked_refund_is_a_whole_refund_object_not_just_what_was_posted():
     """The point of L1. An agent branches on `status`, `currency` and `destination_details`,
     and at L0 none of them are there at all - it reads `None` and takes the wrong branch."""
     body = json.loads(_refund().response.body)
-    assert body.keys() == fixture.get("stripe", "refund").keys()
+    assert body.keys() == generic.fixture_object("stripe", "refund").keys()
     assert body["status"] == "succeeded"
     assert body["currency"] == "usd"
     assert body["destination_details"] == {"card": {"type": "reversal"}, "type": "card"}
@@ -915,7 +911,7 @@ def test_a_value_of_the_wrong_type_leaves_the_fixtures_own_in_place():
     """`amount` is a number in every real refund. A form body can say anything, and a string
     there is what makes `refund.amount / 100` raise inside the agent instead of here."""
     body = json.loads(_refund(b"amount=not-a-number").response.body)
-    assert body["amount"] == fixture.get("stripe", "refund")["amount"]
+    assert body["amount"] == generic.fixture_object("stripe", "refund")["amount"]
 
 
 def test_the_service_owns_the_fields_that_say_what_this_object_is():
@@ -987,7 +983,7 @@ def test_two_writes_do_not_share_one_fixture():
     second = json.loads(_refund(b"charge=ch_SECOND").response.body)
     assert first["charge"] == "ch_FIRST"
     assert second["charge"] == "ch_SECOND"
-    assert second["amount"] == fixture.get("stripe", "refund")["amount"]
+    assert second["amount"] == generic.fixture_object("stripe", "refund")["amount"]
 
 
 def test_a_route_whose_fixture_cannot_be_read_falls_back_to_l0_and_says_so(no_fixtures):
@@ -1016,7 +1012,7 @@ def test_every_shipped_fixture_route_names_an_object_that_ships():
     for sm in SHIPPED.services:
         for route in sm.routes:
             if route.fixture:
-                assert fixture.get(sm.service, route.fixture) is not None, (
+                assert generic.fixture_object(sm.service, route.fixture) is not None, (
                     f"{sm.service} {route.method} {route.path}: no such fixture {route.fixture!r}"
                 )
 
@@ -1234,7 +1230,7 @@ def test_a_faked_slack_post_nests_the_fixture_message_inside_the_envelope():
     assert (body["ok"], body["channel"]) == (True, "C1")
     assert body["message"]["text"] == "hi"
     assert body["message"]["type"] == "message"
-    assert body["message"]["user"] == fixture.get("slack", "message")["user"]
+    assert body["message"]["user"] == generic.fixture_object("slack", "message")["user"]
     assert "text" not in body  # the payload nests; it does not leak into the envelope
 
 
@@ -1243,7 +1239,7 @@ def test_the_faked_messages_ts_is_the_envelopes_and_not_the_fixtures():
     the fixture's frozen one would make every faked message the same message."""
     body = json.loads(_post_message().response.body)
     assert body["message"]["ts"] == body["ts"]
-    assert body["ts"] != fixture.get("slack", "message")["ts"]
+    assert body["ts"] != generic.fixture_object("slack", "message")["ts"]
 
 
 def test_a_slack_post_still_answers_the_envelope_when_the_fixture_cannot_be_read(no_fixtures):
@@ -1291,7 +1287,7 @@ def _ts(value: str) -> tuple[int, int]:
 def test_a_minted_ts_sorts_after_a_real_one_the_run_has_seen():
     """A minted `ts` sorts after every real one the run has read. A history read going past first
     is what puts the faked message after the real ones instead of somewhere in the middle."""
-    clock = echo.TsClock()
+    clock = services.TsClock()
     newest = "1999999999.000500"
     clock.observe_history(
         json.dumps({"ok": True, "messages": [{"ts": "1999999998.000000"}, {"ts": newest}]}).encode()
@@ -1302,7 +1298,7 @@ def test_a_minted_ts_sorts_after_a_real_one_the_run_has_seen():
 def test_an_older_real_ts_does_not_move_the_watermark_backwards():
     """Reading an old channel must not rewind the sequence: two messages with one `ts` are two
     messages that are the same message, which is the whole reason `ts` is minted the way it is."""
-    clock = echo.TsClock()
+    clock = services.TsClock()
     clock.last = (1_999_999_999, 500)
     clock.observe_history(json.dumps({"messages": [{"ts": "1000000000.000000"}]}).encode())
     assert clock.mint() == "1999999999.000501"
@@ -1311,7 +1307,7 @@ def test_an_older_real_ts_does_not_move_the_watermark_backwards():
 def test_a_nested_ts_is_observed_wherever_it_sits():
     """`conversations.info` carries the channel's newest message under `latest`, not in a list of
     messages. The walk does not care which shape the body is."""
-    clock = echo.TsClock()
+    clock = services.TsClock()
     clock.observe_history(json.dumps({"channel": {"latest": {"ts": "1999999999.000001"}}}).encode())
     assert _ts(clock.mint()) > (1_999_999_999, 1)
 
@@ -1331,7 +1327,7 @@ def test_a_nested_ts_is_observed_wherever_it_sits():
 def test_observing_a_body_that_carries_no_timestamp_changes_nothing(body):
     """This runs inside a mitmproxy hook, where a raise forwards the flow and a forwarded write
     escapes shadow mode. Every shape a real service - or a hostile one - can send is a no-op."""
-    clock = echo.TsClock()
+    clock = services.TsClock()
     clock.last = (1_700_000_000, 7)
     clock.observe_history(body)
     assert clock.last == (1_700_000_000, 7)
@@ -1340,11 +1336,11 @@ def test_observing_a_body_that_carries_no_timestamp_changes_nothing(body):
 def test_only_a_service_with_an_observer_learns_from_a_read():
     """The engine hands `observe_read` every read it forwards and names no service of its own.
     Which services learn anything from a body is this module's table to hold."""
-    clock = echo.TsClock()
+    clock = services.TsClock()
     body = json.dumps({"messages": [{"ts": "1999999999.000500"}]}).encode()
-    echo.observe_read("stripe", body, clock)
+    services.observe_read("stripe", body, clock)
     assert clock.last == (0, 0)
-    echo.observe_read("slack", body, clock)
+    services.observe_read("slack", body, clock)
     assert clock.last == (1_999_999_999, 500)
 
 
@@ -1590,9 +1586,9 @@ def test_the_runs_own_earlier_refund_is_what_makes_the_second_one_rejected():
 
 def test_an_overlay_that_knows_it_is_incomplete_makes_the_check_not_evaluable(monkeypatch):
     """A write checked against a world irimi knows is incomplete was not checked."""
-    monkeypatch.setitem(
-        services.EFFECTS, "stripe", lambda read, doc, writes: services.Applied(doc, partial=True)
-    )
+    stripe = services.REGISTRY["stripe"]
+    partial = replace(stripe, effects=lambda read, doc, writes: services.Applied(doc, partial=True))
+    monkeypatch.setitem(services.REGISTRY, "stripe", partial)
     request = _refund_request()
     cls = classify(request, SHIPPED)
     earlier = _checked(_reader(_json(200, _charge())), request)
@@ -1651,7 +1647,8 @@ def test_a_probe_the_maps_do_not_call_a_read_is_refused(monkeypatch):
         probe=lambda proposal: services.Probe("refunds.create", "POST", "/v1/refunds"),
         verdict=lambda proposal, document: None,
     )
-    monkeypatch.setitem(services.PRECONDITIONS, ("stripe", "charge_refundable"), check)
+    stripe = replace(services.REGISTRY["stripe"], preconditions={"charge_refundable": check})
+    monkeypatch.setitem(services.REGISTRY, "stripe", stripe)
     reader = _reader()
     ans = _checked(reader, _refund_request())
     assert ans.precondition == "not_evaluable"
@@ -1724,7 +1721,7 @@ def test_a_slack_post_to_an_archived_channel_is_refused_the_way_slack_refuses_it
 
 
 def test_a_rejection_carries_the_level_the_refund_would_have_been_answered_at():
-    fake = echo.fake_rejection(classify(_refund_request(), SHIPPED), {"error": {}})
+    fake = services.fake_rejection(classify(_refund_request(), SHIPPED), {"error": {}})
     assert (fake.answered_by, fake.flags) == ("fake-L1", ())
     assert json.loads(fake.body) == {"error": {}}
 
@@ -1732,13 +1729,13 @@ def test_a_rejection_carries_the_level_the_refund_would_have_been_answered_at():
 def test_a_rejection_of_a_write_with_no_fixture_is_honestly_l0():
     """There is no `fake-L3`, and `reactions.add` has no fixture to be L1 from."""
     request = _req("POST", host="slack.com", path="/api/reactions.add", body=b"{}")
-    fake = echo.fake_rejection(classify(request, SHIPPED), {"ok": False, "error": "x"})
+    fake = services.fake_rejection(classify(request, SHIPPED), {"ok": False, "error": "x"})
     assert (fake.answered_by, fake.flags) == ("fake-L0", ())
 
 
 def test_a_rejection_whose_fixture_will_not_load_says_so(monkeypatch):
-    monkeypatch.setattr(fixture, "get", lambda service, name: None)
-    fake = echo.fake_rejection(classify(_refund_request(), SHIPPED), {"error": {}})
+    monkeypatch.setattr(generic, "fixture_object", lambda service, name: None)
+    fake = services.fake_rejection(classify(_refund_request(), SHIPPED), {"error": {}})
     assert (fake.answered_by, fake.flags) == ("fake-L0", (FIXTURE_FAILED_FLAG,))
 
 
@@ -1928,7 +1925,7 @@ def test_a_write_that_sent_no_key_is_never_replayed():
 
 
 def test_a_slack_write_is_never_replayed():
-    """Slack has no idempotency mechanism, so `services.IDEMPOTENCY` has no entry for it: a
+    """Slack has no idempotency mechanism, so its spec has no `idempotency`: a
     `chat.postMessage` sent twice really is two messages, whatever headers it carries."""
     policy = ShadowPolicy()
     post = _slack_post("C0123")
@@ -2133,7 +2130,7 @@ def test_an_integer_id_is_minted_as_an_integer_and_echoed_from_its_own_segment()
         kind="write",
         ids={"number": IdSpec(format="int"), "id": IdSpec(format="int")},
     )
-    body = echo.generic.l0_body(_req("PATCH", path="/repos/o/r/issues/42"), route)
+    body = generic.l0_body(_req("PATCH", path="/repos/o/r/issues/42"), route)
     assert body["number"] == 42
     assert isinstance(body["id"], int) and not isinstance(body["id"], bool)
     assert 10**9 <= body["id"] < 10**10
@@ -2148,8 +2145,8 @@ def test_a_uuid_id_is_minted_as_a_uuid_and_echoed_from_its_own_segment():
         ids={"id": IdSpec(format="uuid")},
     )
     named = "0b6b1f1e-2c1a-4c55-9a39-6f1b3c9d2e10"
-    assert echo.generic.l0_body(_req("POST", path=f"/issues/{named}"), route)["id"] == named
-    minted = echo.generic.l0_body(_req("POST", path="/issues/not-a-uuid"), route)["id"]
+    assert generic.l0_body(_req("POST", path=f"/issues/{named}"), route)["id"] == named
+    minted = generic.l0_body(_req("POST", path="/issues/not-a-uuid"), route)["id"]
     assert re.fullmatch(
         r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", minted
     )
@@ -2157,7 +2154,7 @@ def test_a_uuid_id_is_minted_as_a_uuid_and_echoed_from_its_own_segment():
 
 def test_a_rejection_mints_no_slack_ts():
     """A rejected post never happened, so it must not move the `ts` sequence later posts sort by."""
-    clock = echo.TsClock()
+    clock = services.TsClock()
     request = _req(
         "POST",
         host="slack.com",
@@ -2165,9 +2162,9 @@ def test_a_rejection_mints_no_slack_ts():
         body=b"channel=C1&text=hi",
         content_type="application/x-www-form-urlencoded",
     )
-    echo.fake_rejection(classify(request, SHIPPED), {"ok": False, "error": "x"})
+    services.fake_rejection(classify(request, SHIPPED), {"ok": False, "error": "x"})
     assert clock.last == (0, 0)
-    assert echo.fake_level(classify(request, SHIPPED)) == ("fake-L1", ())
+    assert services.fake_level(classify(request, SHIPPED)) == ("fake-L1", ())
 
 
 def test_a_slack_write_no_envelope_names_gets_the_default_envelope():
@@ -2182,8 +2179,8 @@ def test_a_slack_write_no_envelope_names_gets_the_default_envelope():
         body=b"channel=C1&text=hi",
         content_type="application/x-www-form-urlencoded",
     )
-    fake = echo.fake_response(
-        request, classify(request, servicemap.MapIndex((slack,))), echo.TsClock()
+    fake = services.fake_response(
+        request, classify(request, servicemap.MapIndex((slack,))), services.TsClock()
     )
     body = json.loads(fake.body)
     assert sorted(body) == ["channel", "ok", "ts"]

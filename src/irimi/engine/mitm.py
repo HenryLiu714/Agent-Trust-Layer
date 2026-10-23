@@ -1137,7 +1137,7 @@ class IrimiAddon:
         # A read irimi forwarded is the only place the real values a later fake has to sort
         # against appear - the write log holds writes, and the trace store is write-only - so
         # every read's body goes past the policy's `observe_read` on its way out. Which services
-        # learn anything from one is `echo`'s to know and not the engine's: a service with no
+        # learn anything from one is `services`' to know and not the engine's: a service with no
         # observer is a no-op, and so is a body that carries nothing. A streamed body is not a
         # document an observer can read, and may be cut short, so the guard names it.
         # A delegated read is observed too: a per-route `target:` can pair delegated reads with

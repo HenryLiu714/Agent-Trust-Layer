@@ -1,7 +1,7 @@
 """AnswerPolicy: decides whether an exchange is forwarded live, delegated, or answered locally,
 and whether a read tool the proxy cannot see is answered from a replay's recording.
 
-The decision is all that lives here. What a local answer *contains* is `irimi.echo`; where a
+The decision is all that lives here. What a local answer *contains* is `irimi.services`; where a
 delegated one goes is `irimi.delegation`; the read L3 issues goes through `irimi.reader`; what a
 replay answers from is `irimi.recording`.
 """
@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
-from irimi import bodies, echo, idempotency, pipeline, services, writelog
+from irimi import bodies, idempotency, pipeline, services, writelog
 from irimi.delegation import ForwardTo, delegate
 from irimi.exchange import (
     ANY_METHOD,
@@ -112,12 +112,12 @@ class ShadowPolicy:
     """Reads, llm and telemetry go live. write and unknown are answered locally.
 
     A locally answered write is the L1 fixture when its route names one and the fixture can be
-    read, and the L0 echo otherwise. `echo.fake_response` decides which and says so; the level it
-    reports is what the Exchange and the `Irimi-Answered-By` header carry.
+    read, and the L0 echo otherwise. `services.fake_response` decides which and says so; the level
+    it reports is what the Exchange and the `Irimi-Answered-By` header carry.
 
     Before that, a write whose route declares a `precondition:` is checked against real state plus
     the run's overlay. A write the check rejects is answered with the service's own error
-    body, at the level `echo.fake_rejection` says, instead of the fake.
+    body, at the level `services.fake_rejection` says, instead of the fake.
     """
 
     name: str = "shadow"
@@ -135,14 +135,14 @@ class ShadowPolicy:
         self.idempotency = keys if keys is not None else idempotency.Store()
         # Per-instance for the same reason: one engine's faked Slack messages never take their
         # `ts` from another's sequence.
-        self.slack_ts = echo.TsClock()
+        self.slack_ts = services.TsClock()
 
     def recorded_tool_call(self, name: str, args: JSONValue) -> ToolCall | None:
         """None: shadow mode answers from no recording, so every read tool runs for real."""
         return None
 
     def observe_read(self, service: str, body: bytes) -> None:
-        echo.observe_read(service, body, self.slack_ts)
+        services.observe_read(service, body, self.slack_ts)
 
     def answer(
         self,
@@ -164,7 +164,7 @@ class ShadowPolicy:
         if route is not None and route.precondition:
             checked = self._precondition(request, classification, route, write_log, run_id)
             if checked.rejection is not None:
-                fake = echo.fake_rejection(classification, checked.rejection.body)
+                fake = services.fake_rejection(classification, checked.rejection.body)
                 answer = _local(
                     fake,
                     checked.rejection.status,
@@ -176,13 +176,13 @@ class ShadowPolicy:
                 _remember(self.idempotency, slot, answer)
                 return answer
         try:
-            fake = echo.fake_response(request, classification, self.slack_ts)
+            fake = services.fake_response(request, classification, self.slack_ts)
         except Exception:
             # The belt to reflect()'s braces, and to the fixture's. Raising here would make
             # mitmproxy forward the flow, and a forwarded write escapes shadow mode - an empty
             # object is far better. L0 is the floor whatever failed above it.
             logger.exception("irimi: the local answer failed; answering with an empty object")
-            fake = echo.Fake(b"{}", bodies.JSON_CT)
+            fake = services.Fake(b"{}", bodies.JSON_CT)
         answer = _local(
             fake,
             200,
@@ -294,7 +294,7 @@ class ShadowPolicy:
             service = classification.service
             # A map naming a check nothing implements is the same class of thing as a fixture that
             # will not load: honest degradation, said out loud.
-            check = services.PRECONDITIONS.get((service, route.precondition))
+            check = services.of(service).preconditions.get(route.precondition)
             if check is None:
                 logger.warning(
                     "irimi: no precondition named %r for %s", route.precondition, service
@@ -362,7 +362,9 @@ class ShadowPolicy:
             document: Any = bodies.json_object(response.body)
             if document is None:
                 return _Checked("not_evaluable", issued)
-            found = writelog.scoped_writes(services.EFFECTS, service, probe_request, write_log)
+            found = writelog.scoped_writes(
+                services.of(service).effects, service, probe_request, write_log
+            )
             if found is not None:
                 effects, writes = found
                 # The same effects the overlay applies to a live read, so the check sees the
@@ -562,7 +564,7 @@ def _probe_request(
     path = fill_path(route.path, probe.params)
     if path is None:
         return None
-    wanted = (*services.probe_headers_of(service), *services.SCOPE_HEADERS.get(service, ()))
+    wanted = (*services.probe_headers_of(service), *services.of(service).scope_headers)
     headers = [(k, v) for k, v in request.headers if k in wanted]
     headers.append(("accept", "application/json"))
     body = b""
@@ -582,7 +584,7 @@ def _probe_request(
 
 
 def _local(
-    fake: echo.Fake,
+    fake: services.Fake,
     status: int,
     extra_flags: tuple[str, ...] = (),
     *,
@@ -592,8 +594,8 @@ def _local(
     would_fire: tuple[str, ...] = (),
     currency: str = "",
 ) -> Answer:
-    """An answer irimi built itself, from the body `echo` built: the fake's level is the answer's,
-    and its fidelity flag comes first, then the fake's own flags, then the caller's."""
+    """An answer irimi built itself, from the body `services` built: the fake's level is the
+    answer's, and its fidelity flag comes first, then the fake's own flags, then the caller's."""
     return Answer(
         answered_by=fake.answered_by,
         response=Response(
@@ -640,7 +642,7 @@ def _conflict_answer(classification: Classification, refusal: services.Rejection
     real service would have answered, and this is one of those. The body is carried at the level
     this route's write would have been faked at, the way `fake_rejection` carries an L3 one.
     """
-    fake = echo.fake_rejection(classification, refusal.body)
+    fake = services.fake_rejection(classification, refusal.body)
     return _local(fake, refusal.status, (IDEMPOTENCY_CONFLICT_FLAG,), rejection_code=refusal.code)
 
 

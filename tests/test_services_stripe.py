@@ -6,7 +6,7 @@ import pytest
 
 from irimi.exchange import Request
 from irimi.services.model import Read, Rewritten, Write
-from irimi.services.stripe import apply_read, rewrite_query
+from irimi.services.stripe.effects import apply_read, rewrite_query
 
 
 def _refund_write(refund_id="re_MINTED1", charge="ch_REAL1", amount=100, **answer):

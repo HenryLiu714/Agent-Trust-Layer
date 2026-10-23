@@ -589,7 +589,7 @@ def test_a_fixture_on_an_unknown_route_is_allowed(tmp_path):
 
 
 def test_every_shipped_precondition_names_a_check_that_exists():
-    """`precondition:` is the opt-in and `services.PRECONDITIONS` is what it opts into. A shipped
+    """`precondition:` is the opt-in and `Service.preconditions` is what it opts into. A shipped
     name with no entry would degrade to `not_evaluable` on every write, silently - a key that reads
     as configured and is never consulted."""
     index = servicemap.load(cwd=None, maps_dir=servicemap.loader.shipped_dir())
@@ -600,8 +600,8 @@ def test_every_shipped_precondition_names_a_check_that_exists():
         if route.precondition
     ]
     assert named, "no shipped route declares a precondition"
-    for key in named:
-        assert key in services.PRECONDITIONS, key
+    for service, name in named:
+        assert name in services.of(service).preconditions, (service, name)
 
 
 def test_a_precondition_on_a_live_route_is_refused(tmp_path):
@@ -617,9 +617,9 @@ def test_a_precondition_on_a_live_route_is_refused(tmp_path):
 def test_every_shipped_fires_list_is_pinned_to_the_writes_the_effects_model():
     """`fires:` is free text with no table to check a name against, so the shipped values are
     pinned here instead. The three routes are exactly the three writes
-    `services/stripe.py` models an effect for: a route that fires an event the overlay does not
-    model is a write whose visible effect and its webhooks disagree, so a fourth route gaining
-    `fires:` breaks this test and has to be thought about rather than drifting in."""
+    `services/stripe/effects.py` models an effect for: a route that fires an event the overlay
+    does not model is a write whose visible effect and its webhooks disagree, so a fourth route
+    gaining `fires:` breaks this test and has to be thought about rather than drifting in."""
     index = servicemap.load(maps_dir=servicemap.loader.shipped_dir())
     fired = {
         (sm.service, route.operation): route.fires
@@ -1661,7 +1661,7 @@ def test_every_map_set_a_user_can_start_with_passes_the_services_check(tmp_path,
     slack = index.service_for("slack.com")
     assert slack is not None and slack.target == "http://127.0.0.1:3000"
     services.check(index)
-    assert {sm.service for sm in index.services} >= set(services.OPERATIONS)
+    assert {sm.service for sm in index.services} >= set(services.REGISTRY)
 
 
 def _shipped_text(name: str) -> str:
@@ -1723,12 +1723,12 @@ def test_the_services_check_refuses_a_name_the_tables_do_not_know(
         assert file in str(exc.value)
 
 
-def test_every_operation_echo_keys_on_is_declared_by_its_service():
-    """`services.check` holds the declared operations to the maps; this holds `echo`'s own tables
-    to the declarations, since `services` cannot import `echo`."""
-    from irimi import echo
-    from irimi.echo import slack as echo_slack
+def test_every_operation_the_answers_key_on_is_declared_by_its_service():
+    """`services.check` holds the declared operations to the maps; this holds each service's
+    answer tables to the declarations."""
+    from irimi.services.slack import answers as slack_answers
 
-    assert set(echo_slack.SLACK_ENVELOPES) <= services.OPERATIONS["slack"]
-    for service, operation in echo.LITERAL_BODIES:
-        assert operation in services.OPERATIONS[service]
+    assert set(slack_answers.SLACK_ENVELOPES) <= services.REGISTRY["slack"].operations
+    for spec in services.REGISTRY.values():
+        for operation in spec.answer.literal if spec.answer is not None else ():
+            assert operation in spec.operations

@@ -1,14 +1,15 @@
 """What a Stripe write is answered with: the generic echo and fixture body, plus the fields every
-Stripe object carries - `created`, the `object` it is, and `livemode`. `services.stripe` is the
-other half: what such a write does to Stripe's later reads."""
+Stripe object carries - `created`, the `object` it is, and `livemode`. `effects` is the other
+half: what such a write does to Stripe's later reads."""
 
 import time
 from typing import Any
 
 from irimi.bodies import reflect
-from irimi.echo.generic import mint_ids, reflect_over
 from irimi.exchange import Request
 from irimi.servicemap import Route
+from irimi.services.generic import mint_ids, reflect_over
+from irimi.services.model import AnswerClock
 
 # irimi performed nothing, so nothing it answers happened in live mode. Set on every fixture that
 # has the field at all, and on no fixture that does not: a `livemode` on a refund would be a field
@@ -51,3 +52,13 @@ def l1_body(request: Request, route: Route, obj: dict[str, Any]) -> dict[str, An
         obj["livemode"] = LIVEMODE
     mint_ids(obj, route, request.path)
     return obj
+
+
+def body(
+    request: Request, route: Route | None, obj: dict[str, Any] | None, clock: AnswerClock
+) -> dict[str, Any]:
+    """A faked Stripe write's body: L1 over the route's fixture object when there is one, else L0.
+    No Stripe answer reads `clock`."""
+    if route is not None and obj is not None:
+        return l1_body(request, route, obj)
+    return l0_body(request, route)

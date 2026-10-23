@@ -27,7 +27,8 @@ def complete_for_check(maps_dir: Path) -> None:
         docs = [d for d in yaml.safe_load_all(path.read_text()) if d is not None]
         if len(docs) == 1:
             defined[docs[0]["service"]] = (path, docs[0])
-    for service, operations in services.OPERATIONS.items():
+    for service, spec in services.REGISTRY.items():
+        operations = spec.operations
         source, shipped_doc = shipped[service]
         if service not in defined:
             (maps_dir / f"shipped-{source.name}").write_text(yaml.safe_dump(shipped_doc))

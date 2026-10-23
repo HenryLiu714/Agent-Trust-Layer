@@ -1,5 +1,5 @@
 """What a Slack write is answered with, and the `ts` sequence every faked
-message takes its identity from. `services.slack` is the other half: what such a
+message takes its identity from. `effects` is the other half: what such a
 write does to Slack's later reads."""
 
 import json
@@ -10,12 +10,22 @@ from dataclasses import dataclass
 from typing import Any
 
 from irimi.bodies import reflect
-from irimi.echo.generic import reflect_over
 from irimi.exchange import Request
 from irimi.servicemap import Route
-from irimi.services.slack import SERVICE
+from irimi.services import generic
+from irimi.services.generic import reflect_over
+from irimi.services.model import AnswerClock
 
-__all__ = ["SERVICE", "SLACK_ENVELOPES", "SlackEnvelope", "TsClock", "enveloped", "slack_l1_body"]
+__all__ = [
+    "LITERAL_BODIES",
+    "SLACK_ENVELOPES",
+    "SlackEnvelope",
+    "TsClock",
+    "body",
+    "enveloped",
+    "observe_read",
+    "slack_l1_body",
+]
 
 # Keys whose value is a real Slack `ts`, wherever they sit in a read's body. `conversations.
 # history` and `.replies` carry one per message, `conversations.info` carries the channel's
@@ -119,6 +129,11 @@ class TsClock:
                 stack.extend(item for item in node if isinstance(item, dict | list))
 
 
+def observe_read(clock: AnswerClock, body: bytes) -> None:
+    """Move the policy's `ts` sequence past every real `ts` in a Slack read's body. Never raises."""
+    clock.observe_history(body)
+
+
 @dataclass(frozen=True)
 class SlackEnvelope:
     """How one Slack write's answer is assembled.
@@ -153,7 +168,7 @@ class SlackEnvelope:
 
 
 # Keyed on operation: every Slack write the shipped map names, except `incoming_webhook`, which
-# `echo.LITERAL_BODIES` answers before any of this runs.
+# `LITERAL_BODIES` answers before any of this runs.
 #
 # `files.upload` is here with no payload for the same reason reactions.add is: `{ok}` is what it
 # answers, and the `ts` the default envelope adds is a field that method never returned. It has no
@@ -176,7 +191,7 @@ def slack_l1_body(
     route: Route,
     envelope: SlackEnvelope,
     obj: dict[str, Any] | None,
-    clock: TsClock,
+    clock: AnswerClock,
 ) -> dict[str, Any]:
     """A Slack write's answer: the envelope, with the fixture object nested inside it.
 
@@ -210,7 +225,7 @@ def slack_l1_body(
 
 
 def enveloped(
-    request: Request, route: Route, obj: dict[str, Any] | None, clock: TsClock
+    request: Request, route: Route, obj: dict[str, Any] | None, clock: AnswerClock
 ) -> dict[str, Any]:
     """A mapped Slack write's answer, in its operation's envelope (`SLACK_ENVELOPES`, else
     `DEFAULT_ENVELOPE`). `obj` is the route's fixture object, or None when it names none or this
@@ -218,3 +233,27 @@ def enveloped(
     instead of reading the fields it just sent."""
     envelope = SLACK_ENVELOPES.get(route.operation, DEFAULT_ENVELOPE)
     return slack_l1_body(request, route, envelope, obj, clock)
+
+
+def body(
+    request: Request, route: Route | None, obj: dict[str, Any] | None, clock: AnswerClock
+) -> dict[str, Any]:
+    """A faked Slack write's body: a mapped write in its envelope, an unmapped one the generic echo.
+
+    An envelope's `ok: true` is a claim of success, and irimi only knows what success looks like
+    for a route it mapped: slack_sdk's `files_upload_v2` reads `upload_url = None` off a success
+    and dies inside urllib, while the echo leaves it raising the `SlackApiError` callers already
+    catch.
+    """
+    if route is None:
+        return generic.l0_body(request, route)
+    return enveloped(request, route, obj, clock)
+
+
+TEXT_CT = "text/plain"
+
+# Operations whose real answer is not JSON at all, by operation. A Slack incoming webhook answers
+# the literal body `ok` as `text/plain`; the Web API envelope it would otherwise get
+# (hooks.slack.com is part of `slack`) breaks the common raw-requests idiom
+# `assert resp.text == "ok"`.
+LITERAL_BODIES: dict[str, tuple[bytes, str]] = {"incoming_webhook": (b"ok", TEXT_CT)}

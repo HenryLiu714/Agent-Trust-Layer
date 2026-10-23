@@ -74,15 +74,14 @@ def test_a_write_with_no_response_or_a_body_that_is_not_a_json_object_is_skipped
 
 
 def test_scoped_writes_is_none_without_a_table_entry_or_a_write():
-    table = {"stripe": "entry"}
-    assert writelog.scoped_writes(table, "slack", _read(), [_write()]) is None
-    assert writelog.scoped_writes(table, "stripe", _read(), []) is None
+    assert writelog.scoped_writes(None, "slack", _read(), [_write()]) is None
+    assert writelog.scoped_writes("entry", "stripe", _read(), []) is None
 
 
 def test_scoped_writes_returns_the_entry_and_the_decoded_writes():
     ex = _write()
     writes = writelog.decode("stripe", _read(), [ex])
-    assert writelog.scoped_writes({"stripe": "entry"}, "stripe", _read(), [ex]) == (
+    assert writelog.scoped_writes("entry", "stripe", _read(), [ex]) == (
         "entry",
         writes,
     )

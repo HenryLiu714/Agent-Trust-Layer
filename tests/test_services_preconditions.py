@@ -8,7 +8,9 @@ has three answers, and `NOT_EVALUABLE` is the one that says irimi asked and did 
 import pytest
 
 from irimi import services
-from irimi.services import NOT_EVALUABLE, Probe, Proposal, slack, stripe
+from irimi.services import NOT_EVALUABLE, Probe, Proposal
+from irimi.services.slack import preconditions as slack
+from irimi.services.stripe import preconditions as stripe
 
 CHARGE_ID = "ch_3QTESTONLY000000"
 
@@ -41,8 +43,10 @@ def _info(**channel):
 
 
 def test_the_table_names_both_checks():
-    assert services.PRECONDITIONS[("stripe", "charge_refundable")] is stripe.CHARGE_REFUNDABLE
-    assert services.PRECONDITIONS[("slack", "channel_postable")] is slack.CHANNEL_POSTABLE
+    assert services.REGISTRY["stripe"].preconditions["charge_refundable"] is (
+        stripe.CHARGE_REFUNDABLE
+    )
+    assert services.REGISTRY["slack"].preconditions["channel_postable"] is slack.CHANNEL_POSTABLE
 
 
 # ------------------------------------------------------------------------------------ stripe

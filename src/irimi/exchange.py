@@ -10,11 +10,12 @@ Kind = Literal["read", "write", "llm", "telemetry", "unknown"]
 FakeLevel = Literal["fake-L0", "fake-L1"]
 # `overlay` is a LIVE read whose body irimi changed so that it shows the run's faked writes,
 # or a replay's answer from such a read in the recording. It is not a `FakeLevel`: nothing was
-# faked, a real response was edited, and the level vocabulary stays the one `echo.fake_response` can
-# return. `recording` is an answer the service gave a stored run, which a replay sent again from
-# disk, byte for byte: a read, an llm call, or a precondition read. Anything else a replay
-# answers from the recording keeps the `answered_by` it was recorded with - a write its fake level,
-# a read the overlay edited `overlay` - and every such answer carries `from-recording`. `irimi`
+# faked, a real response was edited, and the level vocabulary stays the one
+# `services.fake_response` can return. `recording` is an answer the service gave a stored run,
+# which a replay sent again from disk, byte for byte: a read, an llm call, or a precondition
+# read. Anything else a replay answers from the recording keeps the `answered_by` it was
+# recorded with - a write its fake level, a read the overlay edited `overlay` - and every such
+# answer carries `from-recording`. `irimi`
 # is an error irimi answered with itself: a refusal, a failed decision, an unreachable target.
 # Its flags say which.
 AnsweredBy = Literal["live", "fake-L0", "fake-L1", "delegated", "overlay", "recording", "irimi"]

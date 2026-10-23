@@ -22,7 +22,17 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 from mitmproxy.net import encoding
 
-from irimi import ca, delegation, echo, idempotency, paths, pipeline, redact, report, servicemap
+from irimi import (
+    ca,
+    delegation,
+    idempotency,
+    paths,
+    pipeline,
+    redact,
+    report,
+    servicemap,
+    services,
+)
 from irimi.engine import EngineConfig, EngineStartError, mitm
 from irimi.engine.mitm import IrimiAddon, MitmEngine
 from irimi.exchange import (
@@ -1482,10 +1492,12 @@ def test_a_compressed_stream_is_recorded_decoded_as_one_chunk(tmp_path, monkeypa
 
 
 def test_a_streamed_read_is_not_observed_now_that_its_body_is_recorded(tmp_path, monkeypatch):
-    """A streamed body is recorded, and `echo.observe_read` never sees one: a stream is not
+    """A streamed body is recorded, and `services.observe_read` never sees one: a stream is not
     a document an observer can read, and its copy may be cut short."""
     observed = []
-    monkeypatch.setattr(echo, "observe_read", lambda service, body, clock: observed.append(body))
+    monkeypatch.setattr(
+        services, "observe_read", lambda service, body, clock: observed.append(body)
+    )
     _STREAM_GATE.clear()
     srv = HTTPServer(("127.0.0.1", 0), _StreamUpstream)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()

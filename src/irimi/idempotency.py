@@ -5,7 +5,7 @@ performs it once. irimi has to keep that promise itself: stripe-python puts a fr
 POST, so an agent that retries a refund would otherwise get two different minted ids and the
 overlay would apply the refund twice - a charge showing 200 refunded for a single 100 refund.
 Which header names the key, what a reused key is refused with and how a retry's answer is marked
-are the service's (`services.IDEMPOTENCY`); this module is the same for every service.
+are the service's (`Service.idempotency`); this module is the same for every service.
 
 Pure and in-memory. Nothing here decides anything: `policy` looks the answer up and puts the
 first one in, and the store only remembers. That is also what lets `irimi replay` keep the same
@@ -49,10 +49,10 @@ class FirstAnswer:
 def idempotency_key_of(service: str, request: Request) -> str:
     """The idempotency key this request carries, or "" when there is none to key on.
 
-    "" for a service with no entry in `services.IDEMPOTENCY` (Slack has none) and for a caller
+    "" for a service whose spec has no `idempotency` (Slack has none) and for a caller
     that sent no key - a raw HTTP client may not, even though stripe-python always does.
     """
-    spec = services.IDEMPOTENCY.get(service)
+    spec = services.of(service).idempotency
     if spec is None:
         return ""
     return request.header(spec.header) or ""
@@ -60,14 +60,14 @@ def idempotency_key_of(service: str, request: Request) -> str:
 
 def conflict(service: str, key: str) -> services.Rejection | None:
     """What `service` answers when `key` comes back with different parameters. None if unknown."""
-    spec = services.IDEMPOTENCY.get(service)
+    spec = services.of(service).idempotency
     return None if spec is None else spec.conflict(key)
 
 
 def replayed_header(service: str) -> tuple[str, str] | None:
     """The `(name, value)` header `service` marks a retry's answer with, or None when it marks
     none or has no idempotency mechanism."""
-    spec = services.IDEMPOTENCY.get(service)
+    spec = services.of(service).idempotency
     return None if spec is None else spec.replayed_header
 
 

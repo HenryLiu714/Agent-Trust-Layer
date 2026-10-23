@@ -11,7 +11,7 @@ The modelled effects, by the write that causes each one:
 Nothing else Slack answers is overlaid. `conversations.info`, `conversations.list`, `auth.test`,
 `users.info` and the search endpoints are left exactly as Slack sent them.
 
-Two rules run through all of it, both inherited from `stripe.py`:
+Two rules run through all of it, both inherited from Stripe's effects:
 
 * **Never invent a field the live object does not have.** A field Slack's own response omits is
   one the agent can never see in production. The one exception is `THREAD_FIELDS`, below: Slack's
@@ -39,32 +39,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from irimi.bodies import is_int
-from irimi.services.model import (
-    NOT_EVALUABLE,
-    Applied,
-    Check,
-    NotEvaluable,
-    Probe,
-    Proposal,
-    Read,
-    Rejection,
-    Write,
-)
+from irimi.services.model import Applied, Read, Write
 
-SERVICE = "slack"
-# Every Slack operation irimi's Python keys on, here and in `echo.slack`. `services.check` refuses
-# maps that do not name each one.
-OPERATIONS = frozenset(
-    {
-        "chat.postMessage",
-        "conversations.history",
-        "conversations.info",
-        "conversations.replies",
-        "files.upload",
-        "incoming_webhook",
-        "reactions.add",
-    }
-)
 # The body parameters each overlaid read understands. Anything else means irimi cannot say where the
 # faked message belongs on this page, and the read is `partial`, on `stripe.KNOWN_LIST_PARAMS`'
 # precedent. `token` is one slack_sdk may send in the body; it is known and ignored.
@@ -90,7 +66,7 @@ PAGE_SHAPING_PARAMS = frozenset({"oldest", "latest", "inclusive", "limit", "curs
 # state, not the thread's, and stay out.
 THREAD_FIELDS = ("thread_ts", "reply_count", "reply_users_count", "latest_reply", "reply_users")
 # A channel id as `conversations.history` requires it. A name like `#general` is not one.
-_CHANNEL_ID = re.compile(r"[CDG][A-Z0-9]+")
+CHANNEL_ID = re.compile(r"[CDG][A-Z0-9]+")
 _TS = re.compile(r"(\d{1,12})(?:\.(\d{1,6}))?")
 
 
@@ -458,7 +434,7 @@ def _in_channel(mine: str | None, asked: Any) -> bool | None:
 
     None is the case irimi forces on itself. `chat.postMessage` accepts `#general` while
     `conversations.history` requires `C0123`, and real Slack answers the post with the channel id
-    while `echo.slack.slack_l1_body` echoes the posted value verbatim - so the mismatch is irimi's
+    while `answers.slack_l1_body` echoes the posted value verbatim - so the mismatch is irimi's
     own, and silently leaving the agent's own message off a page that then claims to be complete is
     the untruth this module's header forbids. The caller turns None into `partial` instead.
     """
@@ -466,7 +442,7 @@ def _in_channel(mine: str | None, asked: Any) -> bool | None:
         return None
     if mine == asked:
         return True
-    if _CHANNEL_ID.fullmatch(mine) and _CHANNEL_ID.fullmatch(asked):
+    if CHANNEL_ID.fullmatch(mine) and CHANNEL_ID.fullmatch(asked):
         return False
     return None
 
@@ -549,65 +525,3 @@ def _merged(known: list[Any], users: Sequence[Any]) -> list[Any]:
         if isinstance(user, str) and user not in merged:
             merged.append(user)
     return merged
-
-
-# ------------------------------------------------------------------------ the L3 preconditions
-#
-# Whether Slack would have accepted a `chat.postMessage` at all, decided by `conversations.info`
-# on the channel it names. The document `_post_verdict` sees has been through `apply_read`
-# like every other precondition read, and comes back exactly as Slack sent it: no write irimi
-# models changes whether a channel exists, is archived or has the bot in it.
-#
-# Every rejection body is envelope-shaped, not fixture-shaped: they never go through
-# `echo.slack.slack_l1_body`, which always answers `ok: true`, and slack_sdk raises
-# `SlackApiError` off `ok: false`.
-
-
-def _post_probe(proposal: Proposal) -> Probe | None:
-    """`conversations.info` on the channel this post names, when it is spelled as an id."""
-    channel = proposal.posted.get("channel")
-    # `conversations.info` answers with the channel's ID spelling only. `chat.postMessage` also
-    # accepts `#general`, and probing with that name would come back `channel_not_found` for a
-    # channel that exists - irimi reporting a rejection Slack would never have made. So a channel
-    # that is not id-shaped is not probed at all, and the write is recorded `not_evaluable`.
-    # Same tri-state as `stripe._passes_filters`: "cannot tell" is its own answer. The id rule is
-    # `_CHANNEL_ID`, the one `conversations.history` already uses.
-    if not isinstance(channel, str) or not _CHANNEL_ID.fullmatch(channel):
-        return None
-    return Probe(operation="conversations.info", posted={"channel": channel})
-
-
-def _post_verdict(proposal: Proposal, document: Any) -> Rejection | NotEvaluable | None:
-    """`channel_not_found`, `is_archived`, `not_in_channel`, `NOT_EVALUABLE`, or None."""
-    if not isinstance(document, dict):
-        return NOT_EVALUABLE
-    if document.get("ok") is False:
-        if document.get("error") == "channel_not_found":
-            return _rejection("channel_not_found")
-        # An error irimi does not model - `missing_scope`, `invalid_auth`, `ratelimited` - says
-        # nothing about whether the post would have succeeded, and inventing a rejection from it
-        # is the failure mode this check exists to avoid. It is not a pass either: a missing
-        # scope is the `not_evaluable` case, and Slack sends one at HTTP 200, so the policy's own
-        # non-200 rule can never catch it.
-        return NOT_EVALUABLE
-    channel = document.get("channel")
-    if not isinstance(channel, dict):
-        # A success envelope with no channel object is not one this check can read either.
-        return NOT_EVALUABLE
-    if channel.get("is_archived") is True:
-        return _rejection("is_archived")
-    # `is_member` absent is not evidence of anything, and a DM or MPIM has no membership to be
-    # outside of - so only an explicit `false` on a channel or a private group rejects.
-    if channel.get("is_member") is False and (
-        channel.get("is_channel") is True or channel.get("is_group") is True
-    ):
-        return _rejection("not_in_channel")
-    return None
-
-
-def _rejection(error: str) -> Rejection:
-    """Slack's own refusal: HTTP 200 and an `ok: false` envelope naming the error."""
-    return Rejection(status=200, body={"ok": False, "error": error}, code=error)
-
-
-CHANNEL_POSTABLE = Check(probe=_post_probe, verdict=_post_verdict)

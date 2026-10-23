@@ -7,7 +7,7 @@ run's writes are dropped when it ends.
 """
 
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 
 from irimi import bodies, services
 from irimi.exchange import Exchange, Request
@@ -70,16 +70,15 @@ def decode(service: str, request: Request, write_log: Sequence[Exchange]) -> lis
 
 
 def scoped_writes[T](
-    table: Mapping[str, T], service: str, request: Request, write_log: Sequence[Exchange]
+    entry: T | None, service: str, request: Request, write_log: Sequence[Exchange]
 ) -> tuple[T, list[services.Write]] | None:
-    """`table[service]` and this service's faked writes in the read's scope, or None when the
-    service has no entry or the run has no such write.
+    """`entry` (a field of the service's spec) and this service's faked writes in the read's
+    scope, or None when the spec leaves that field unset or the run has no such write.
 
     The overlay's effects and rewrites and the policy's L3 read all start here, so the three agree
     on which writes a read can see - and none of them parses a body before it knows it has a write
     to apply.
     """
-    entry = table.get(service)
     if entry is None:
         return None
     writes = decode(service, request, write_log)

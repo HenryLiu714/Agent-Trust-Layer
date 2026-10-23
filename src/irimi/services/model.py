@@ -1,15 +1,17 @@
-"""What a per-service effect table is handed and what it hands back.
+"""What irimi knows about one service, and what its effects and checks are handed and hand back.
 
-Plain data, so the effects stay pure functions a replay can run over a recording. The `Exchange`
-is deliberately absent: an effect is a function of the fields a write carried and the object
-irimi answered it with, not of the trace.
+`Service` is the whole of it: one per service with Python knowledge of its own, registered in
+`services.REGISTRY`. The rest is plain data, so the effects stay pure functions a replay can run
+over a recording. The `Exchange` is deliberately absent: an effect is a function of the fields a
+write carried and the object irimi answered it with, not of the trace.
 """
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 from irimi.exchange import Request
+from irimi.servicemap import Route
 
 
 @dataclass(frozen=True)
@@ -122,7 +124,7 @@ class Idempotency:
     parameters - a `Rejection` like any other, so the SDK raises its own error rather than choking
     on something of irimi's. `replayed_header` is the `(name, value)` the service puts on the
     answer to a retry (Stripe's `Idempotent-Replayed: true`), or None when it marks none. A
-    service with no entry in `services.IDEMPOTENCY` has no such mechanism and no store.
+    service whose `Service.idempotency` is None has no such mechanism and no store.
     """
 
     header: str
@@ -176,3 +178,62 @@ class Check:
 ReadEffects = Callable[[Read, Any, Sequence[Write]], Applied]
 # `(read, the run's writes for this service) -> Rewritten | None`.
 QueryRewrite = Callable[[Read, Sequence[Write]], "Rewritten | None"]
+
+
+class AnswerClock(Protocol):
+    """The sequence a policy's faked answers take their identity from, such as Slack's `ts`.
+
+    `mint` hands out the next value; `observe_history` moves the sequence past every value a live
+    read's body carries, and never raises. One per policy, so two engines never share one.
+    """
+
+    def mint(self) -> str: ...
+
+    def observe_history(self, body: bytes) -> None: ...
+
+
+# `(request, its route or None, the route's fixture object or None, the policy's clock)
+# -> the body a faked write is answered with`. The object is the caller's to mutate.
+WriteBody = Callable[[Request, Route | None, dict[str, Any] | None, AnswerClock], dict[str, Any]]
+# `(the policy's clock, a live read's body) -> None`. Never raises.
+ReadObserver = Callable[[AnswerClock, bytes], None]
+
+
+@dataclass(frozen=True)
+class Answer:
+    """How a service's faked writes are answered, where that differs from the generic echo.
+
+    `body` builds the JSON body of every faked write on the service, mapped or not. `literal`
+    names the operations whose real answer is not JSON at all, as `(body, content type)`; those
+    are answered before `body` is asked.
+    """
+
+    body: WriteBody
+    literal: Mapping[str, tuple[bytes, str]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class Service:
+    """Everything irimi's Python knows about one service, keyed on its map's `service:` name.
+
+    `operations` is every operation name this code keys on; `services.check` refuses maps that
+    do not name each one, so a rename on either side fails at load rather than switching an
+    effect off. A field left at its default means the service has no such knowledge: `answer`
+    None is the generic echo, `idempotency` None is no store, and so on.
+
+    `scope_headers` are the request headers that scope the service's state: a write made against
+    one Stripe connected account, or one API version, says nothing about a read made against
+    another, so the overlay only applies writes whose values match the read's. `probe_headers`
+    carry the credential a precondition read copies from the write it checks.
+    """
+
+    name: str
+    operations: frozenset[str] = frozenset()
+    answer: Answer | None = None
+    observe_read: ReadObserver | None = None
+    effects: ReadEffects | None = None
+    rewrite: QueryRewrite | None = None
+    preconditions: Mapping[str, Check] = field(default_factory=dict)  # by `precondition:` name
+    idempotency: Idempotency | None = None
+    scope_headers: tuple[str, ...] = ()
+    probe_headers: tuple[str, ...] = ("authorization",)

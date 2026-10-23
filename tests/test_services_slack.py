@@ -7,9 +7,9 @@ import pytest
 
 from irimi.exchange import Request
 from irimi.services.model import Read, Write
-from irimi.services.slack import THREAD_FIELDS, apply_read
+from irimi.services.slack.effects import THREAD_FIELDS, apply_read
 
-# Minted `ts` values sit above every real one, as `echo.TsClock` guarantees.
+# Minted `ts` values sit above every real one, as `services.TsClock` guarantees.
 MINTED1 = "1800000000.000001"
 MINTED2 = "1800000000.000002"
 REAL_OLD = "1700000000.000100"
@@ -22,7 +22,7 @@ def _message(ts, text="hi", user=BOT):
 
 
 def _post_write(channel="C0123", ts=MINTED1, text="hi", **posted):
-    """A `chat.postMessage` as `echo.slack.slack_l1_body` answers it: the envelope echoes the
+    """A `chat.postMessage` as `slack.answers.slack_l1_body` answers it: the envelope echoes the
     posted channel verbatim, and `message.ts` is the envelope's minted `ts`."""
     return Write(
         operation="chat.postMessage",

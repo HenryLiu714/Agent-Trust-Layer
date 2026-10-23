@@ -58,12 +58,12 @@ class Route:
     kind: Kind
     human: str = ""
     ids: dict[str, IdSpec] = field(default_factory=dict)  # response field -> how its id is minted
-    # The vendored response object a locally answered write starts from (`irimi.fixture`), by
-    # name. "" means the L0 echo, which is also what a route whose fixture cannot be read falls
-    # back to.
+    # The vendored response object a locally answered write starts from, by name in
+    # `irimi/fixtures/<service>.json`. "" means the L0 echo, which is also what a route whose
+    # fixture cannot be read falls back to.
     fixture: str = ""
     # The L3 check consulted before a mapped write is faked, by the name of its entry in
-    # `services.PRECONDITIONS`. "" means the write is never precondition-checked.
+    # `Service.preconditions`. "" means the write is never precondition-checked.
     precondition: str = ""
     # The webhook event names this write would have caused the real service to send. A
     # faked write sends none of them, so the exchange carries them as `would_fire` and the
@@ -223,7 +223,7 @@ def path_params(pattern: str, path: str) -> dict[str, str]:
 
     A captured segment is **percent-decoded**, because the service decodes it: `cus%5FREAL123` and
     `cus_REAL123` address the same customer, and reading the raw segment would make
-    `echo.generic.named_id` miss the id the request already named and mint a fresh one for any
+    `services.generic.named_id` miss the id the request already named and mint a fresh one for any
     caller that over-encodes. Literal segments are still compared raw, so decoding cannot widen
     what a route matches; it only says what the matched hole held. The two surfaces that read
     these captures - the minted id and the summary's human template - agree because they ask here.

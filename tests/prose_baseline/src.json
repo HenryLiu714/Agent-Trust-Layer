@@ -50,7 +50,7 @@
   "src/irimi/servicemap/rules.py": {
     "caps_run": 2
   },
-  "src/irimi/services/stripe.py": {
+  "src/irimi/services/stripe/effects.py": {
     "caps_run": 1
   },
   "src/irimi/store.py": {

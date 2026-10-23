@@ -122,7 +122,9 @@ class ServiceOverlay:
         translated_from: str | None,
     ) -> Overlaid:
         service, operation = self._route(read_request)
-        found = writelog.scoped_writes(services.EFFECTS, service, read_request, write_log)
+        found = writelog.scoped_writes(
+            services.of(service).effects, service, read_request, write_log
+        )
         if found is None:
             return Overlaid(upstream_response)
         effects, writes = found
@@ -165,7 +167,9 @@ class ServiceOverlay:
 
     def _rewrite(self, write_log: Sequence[Exchange], read_request: Request) -> Translation | None:
         service, operation = self._route(read_request)
-        found = writelog.scoped_writes(services.REWRITES, service, read_request, write_log)
+        found = writelog.scoped_writes(
+            services.of(service).rewrite, service, read_request, write_log
+        )
         if found is None:
             return None
         rewrite, writes = found

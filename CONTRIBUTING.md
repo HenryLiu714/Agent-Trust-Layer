@@ -136,7 +136,7 @@ src/irimi/
   ca.py  servicemap/  bodies.py       the local CA; the service maps; the never-raising body parser
   pipeline.py  reverse_door.py        parse -> classify -> annotate -> respond; the /<host>/ door
   delegation.py                       answer targets
-  echo/                               the L0 echo and L1 fixture body; Slack's envelopes
+  services/                           one spec per service: answers, effects, checks; the L0/L1 body
   reader.py                           the one real read L3 issues
   recording.py                        a stored run as a replay answers from it
   policy.py  overlay.py  store.py     the decision (shadow and replay), and the two seams beside it

@@ -1,16 +1,33 @@
 """The L0 echo and the L1 fixture body any service gets: the request's own fields, the fixture
 object a route names, and the ids the route mints. Nothing here is any one service's shape; a
-service whose answers carry fields of their own (`echo.stripe`) builds on these."""
+service whose answers carry fields of their own (`stripe.answers`) builds on these.
 
+The fixtures are the vendored response objects the L1 body starts from: one JSON file per service
+in `irimi/fixtures/<service>.json`, shipped as package data beside `irimi/maps/*.yaml`. Each file
+is a `_source` line naming where the objects came from and a `resources` mapping of object name to
+one example object, which is stripe-mock's own `fixtures3.json` shape so that regenerating a subset
+stays a plain projection of the upstream file. A route names the object it starts from with
+`fixture:` in the service map.
+
+Nothing here raises. It is read from inside a mitmproxy hook, where an exception forwards the
+flow and a forwarded write escapes shadow mode: a fixture file that is missing, unreadable or
+malformed answers "no such object" and the caller degrades to the L0 echo, which is the floor.
+"""
+
+import copy
+import json
 import re
 import secrets
 import string
 import uuid
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from irimi.bodies import SERVICE_OWNED, reflect
-from irimi.exchange import FakeLevel, Request
+from irimi.exchange import Request
 from irimi.servicemap import IdSpec, Route, path_params
+from irimi.services.model import AnswerClock
 
 ID_ALPHABET = string.ascii_letters + string.digits
 ID_LENGTH = 24
@@ -25,10 +42,6 @@ _ID_TOKEN = re.compile(r"[A-Za-z0-9]+")
 # Stripe spells a PaymentIntent's client secret `pi_<id>_secret_<token>`, so it starts with the
 # same prefix as the id and is the one value in a path that must never be echoed back as one.
 SECRET_MARKER = "_secret"
-
-# What building a locally answered write produces: the body, the level it was built at, and any
-# flag that level owes the trace (`fixture-failed`).
-Built = tuple[dict[str, Any], FakeLevel, tuple[str, ...]]
 
 
 def mint_id(prefix: str) -> str:
@@ -138,7 +151,7 @@ def reflect_over(obj: dict[str, Any], reflected: dict[str, Any], route: Route) -
 def l1_body(request: Request, route: Route, obj: dict[str, Any]) -> dict[str, Any]:
     """The L1 body: the fixture object with this request's own fields written over it.
 
-    `obj` is the caller's to mutate - `fixture.get` hands out a private deep copy - and the rules
+    `obj` is the caller's to mutate - `fixture_object` hands out a private deep copy - and the rules
     are the ones stripe-mock's own generator applies, minus the OpenAPI schema it has and we do
     not:
 
@@ -158,3 +171,79 @@ def l1_body(request: Request, route: Route, obj: dict[str, Any]) -> dict[str, An
     reflect_over(obj, reflect(request), route)
     mint_ids(obj, route, request.path)
     return obj
+
+
+def body(
+    request: Request, route: Route | None, obj: dict[str, Any] | None, clock: AnswerClock
+) -> dict[str, Any]:
+    """A faked write's body for a service with no answers of its own: L1 over the route's fixture
+    object when there is one, else L0. The generic answer reads no `clock`."""
+    if route is not None and obj is not None:
+        return l1_body(request, route, obj)
+    return l0_body(request, route)
+
+
+# ---------------------------------------------------------------------------------- fixtures
+
+FIXTURES_DIR_NAME = "fixtures"
+SOURCE_KEY = "_source"
+RESOURCES_KEY = "resources"
+
+# A service name that may become a file name. The name comes from a map's `service:`, which is any
+# non-empty string the loader accepted, and `<service>.json` would otherwise let one spelled
+# `../../etc/passwd` choose the file that is read.
+_SERVICE_NAME = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def fixtures_dir() -> Path:
+    """The directory holding the fixture files that ship inside the package."""
+    from importlib.resources import files
+
+    return Path(str(files("irimi").joinpath(FIXTURES_DIR_NAME)))
+
+
+@lru_cache(maxsize=32)
+def _document(service: str) -> dict[str, Any]:
+    """One service's fixture file, parsed and cached. `{}` when there is no usable file.
+
+    Cached because it is read on the answer path of every mapped write, and the file is package
+    data that cannot change under a running process. `fixture_object` deep-copies the object it
+    hands out, so a caller can never mutate what is cached here.
+    """
+    if not _SERVICE_NAME.fullmatch(service):
+        return {}
+    try:
+        text = (fixtures_dir() / f"{service}.json").read_text(encoding="utf-8")
+        document = json.loads(text)
+    except Exception:  # missing, unreadable, or not JSON: the caller falls back to L0
+        return {}
+    return document if isinstance(document, dict) else {}
+
+
+def fixture_objects(service: str) -> dict[str, Any]:
+    """Every fixture object this service ships, by name. `{}` when the file is missing or bad."""
+    resources = _document(service).get(RESOURCES_KEY)
+    if not isinstance(resources, dict):
+        return {}
+    return {name: obj for name, obj in resources.items() if isinstance(obj, dict)}
+
+
+def fixture_object(service: str, name: str) -> dict[str, Any] | None:
+    """A private deep copy of one fixture object, or None when this install does not have it.
+
+    A copy, because the L1 body writes the request's own fields over the object it is given and
+    the cached document has to stay the fixture for the next request.
+    """
+    obj = fixture_objects(service).get(name)
+    return None if obj is None else copy.deepcopy(obj)
+
+
+def fixture_source(service: str) -> str:
+    """The `_source` line of this service's fixture file, or "" when it names none."""
+    value = _document(service).get(SOURCE_KEY)
+    return value if isinstance(value, str) else ""
+
+
+def clear_fixture_cache() -> None:
+    """Forget every parsed fixture file. For tests that write a fixtures directory of their own."""
+    _document.cache_clear()

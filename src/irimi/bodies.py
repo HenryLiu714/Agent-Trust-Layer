@@ -2,7 +2,7 @@
 
 `reflect` reads a request's own fields - a JSON object, or a form body with Stripe's bracketed
 encoding - and `json_object` reads a response's. They are the one parser for each, shared by the
-faker (`echo`), the write log, the idempotency store, the overlay, the policy and the summary, so
+faker, the write log, the idempotency store, the overlay, the policy and the summary, so
 all of them see the same view of one body. Nothing here raises: every caller is on the answer
 path of a mitmproxy hook, where a raise forwards the flow and a forwarded write escapes shadow
 mode. Layer 1: it imports only `exchange`.
@@ -255,7 +255,7 @@ def json_object(body: bytes) -> dict[str, Any] | None:
 # `id` is here as well as in every route's `ids:`, because a body posting `object=charge` to a
 # refund route would otherwise hand stripe-python the wrong class to build, and `created` and
 # `livemode` are facts about this answer rather than values the caller gets to choose.
-# The read side keeps the same rule: `services.stripe._customer` may not move one.
+# The read side keeps the same rule: `services.stripe.effects._customer` may not move one.
 SERVICE_OWNED: frozenset[str] = frozenset({"id", "object", "created", "livemode"})
 
 

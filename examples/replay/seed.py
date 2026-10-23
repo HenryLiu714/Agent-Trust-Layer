@@ -1,17 +1,16 @@
 """Seed the agent's own database with the customer a charge belongs to.
 
-    python -m examples.llm_refund_agent.seed CHARGE CUSTOMER_NAME
+    python -m examples.replay.seed CHARGE CUSTOMER_NAME
 
-Setup, not part of a run: `handle_ticket` reads the database and a replay calls it alone, so the
-database is made before the agent runs, never by its `main()`. Creates both tables `agent.SCHEMA`
-names, in the file `REFUND_DB` names.
+Setup, not part of a run: a replay calls `handle_ticket` alone, so the database is made before the
+agent runs. Creates both tables `agent.SCHEMA` names, in the file `REFUND_DB` names.
 """
 
 import contextlib
 import sqlite3
 import sys
 
-from examples.llm_refund_agent.agent import SCHEMA, db_path
+from examples.replay.agent import SCHEMA, db_path
 
 
 def seed(path: str, charge: str, name: str) -> None:
@@ -25,9 +24,7 @@ def seed(path: str, charge: str, name: str) -> None:
 
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
-        print(
-            "usage: python -m examples.llm_refund_agent.seed CHARGE CUSTOMER_NAME", file=sys.stderr
-        )
+        print("usage: python -m examples.replay.seed CHARGE CUSTOMER_NAME", file=sys.stderr)
         return 2
     seed(db_path(), *argv)
     print(f"seeded {db_path()}: {argv[0]} belongs to {argv[1]}")

@@ -502,7 +502,9 @@ class ScriptedLLM:
 
     def handle(self, req: Req) -> Resp:
         if req.host == "api.anthropic.com":
-            if not req.headers.get("x-api-key", "").startswith("sk-ant-"):
+            # The API takes the key either way; the official SDK sends it as a bearer token.
+            bearer = req.headers.get("authorization", "").removeprefix("Bearer ")
+            if not (req.headers.get("x-api-key") or bearer).startswith("sk-ant-"):
                 return json_error(401, type="error", error={"type": "authentication_error"})
             if req.path == "/v1/messages" and req.method == "POST":
                 return self._anthropic(req.json() or {})

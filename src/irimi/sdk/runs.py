@@ -244,8 +244,9 @@ def _report_start(opened: _Opened) -> None:
         if not _instrument_failed:
             _instrument_failed = True
             logger.warning(
-                "irimi could not label this process's requests with their run; the runs go on "
-                "and are recorded, but their requests may land in the process run.",
+                "irimi: could not label this process's requests with their run; the runs go on "
+                "and are recorded, but their requests may be recorded under the process's run "
+                "instead of their own",
                 exc_info=True,
             )
 

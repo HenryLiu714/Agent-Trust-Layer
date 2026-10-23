@@ -689,11 +689,11 @@ def test_enrich_replayed_where_no_lookup_reaches_irimi_runs_each_read_for_real(r
     [warned] = replay.events("log", with_time=False)
     assert (warned["logger"], warned["level"]) == ("irimi.sdk", "WARNING")
     assert warned["message"].startswith(
-        "irimi could not look up a recorded call of tool crm.connect_with in run "
+        "irimi: could not look up a recorded call of tool crm.connect_with in run "
     )
     assert "(rejected: HTTP 502: " in warned["message"]
     assert warned["message"].endswith(
-        "The tool runs for real; further failures of this kind are not logged."
+        "; the tool runs for real; further failures of this kind are not logged"
     )
     assert replay.exchange_lines() == [
         f"recorded      read      GET enrich.internal/v1/companies/{account} -> 200  "

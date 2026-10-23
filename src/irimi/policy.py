@@ -391,7 +391,7 @@ class ShadowPolicy:
         except Exception:
             # An exception means irimi did put the question and could not answer it, so this is
             # `not_evaluable` and never None.
-            logger.exception("irimi: the precondition check failed; faking the write at L2")
+            logger.exception("irimi: precondition check failed; faking the write unchecked")
             return _Checked("not_evaluable", issued)
 
 

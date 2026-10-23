@@ -88,7 +88,7 @@ class ControlClient:
                 "post",
                 sent,
                 f"record {what} of run {run_id}",
-                "The run goes on, its requests still labelled",
+                "the run goes on, its requests still labelled",
             )
 
     def recorded(self, run_id: str, name: str, args: JSONValue) -> RecordedOutcome | None:
@@ -114,7 +114,7 @@ class ControlClient:
             "lookup",
             sent,
             f"look up a recorded call of tool {name} in run {run_id}",
-            "The tool runs for real",
+            "the tool runs for real",
         )
         return None
 
@@ -157,7 +157,7 @@ class ControlClient:
                 return
             self._warned.add((route, failed.kind))
         logger.warning(
-            "irimi could not %s (%s: %s). %s; further failures of this kind are not logged.",
+            "irimi: could not %s (%s: %s); %s; further failures of this kind are not logged",
             what,
             failed.kind,
             failed.detail,

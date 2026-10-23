@@ -346,8 +346,8 @@ class _Call:
             if not _record_failed:
                 _record_failed = True
                 logger.warning(
-                    "irimi could not record a call of tool %s; the call goes on, and later "
-                    "failures of this kind are not logged.",
+                    "irimi: could not record a call of tool %s; the call goes on, and later "
+                    "failures of this kind are not logged",
                     self.spec.name,
                     exc_info=True,
                 )

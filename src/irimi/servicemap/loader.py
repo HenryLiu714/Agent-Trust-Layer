@@ -449,8 +449,8 @@ def _parse_target(raw: Any, where: str) -> str:
         raise MapError(f"{where}: {target!r} has no host")
     if parts.query or parts.fragment or parts.username or parts.password:
         raise MapError(
-            f"{where}: {target!r} must be a scheme, host, port and path only — no query, "
-            "fragment or credentials"
+            f"{where}: {target!r} must be a scheme, host, port and path only, with no "
+            "query, fragment or credentials"
         )
     return target.rstrip("/") if parts.path in ("", "/") else target
 

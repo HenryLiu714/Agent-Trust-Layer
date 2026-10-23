@@ -23,8 +23,9 @@ cov:  ## the test suite with a coverage report
 live:  ## the live checks; they call real services and skip without STRIPE_API_KEY
 	uv run pytest -q -rs -m live
 
-demo:  ## one sample workflow, bare and then under irimi shadow, with no keys
-	uv run python -m tests.e2e.workflows w01_ticket_triage double_refund
+EXAMPLE ?= hello
+demo:  ## an example under irimi shadow against fake services, no keys (EXAMPLE=hello|quickstart|replay|w01)
+	uv run python scripts/demo.py $(EXAMPLE)
 
 lint:  ## ruff: lint and check formatting (what CI runs)
 	uv run ruff check .

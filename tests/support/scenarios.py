@@ -1,8 +1,12 @@
 """The refund scenario the end-to-end tests share: a loopback Stripe with one refundable
 charge, and a child that refunds it through `irimi shadow`."""
 
+import functools
+import importlib.util
 import sys
 from dataclasses import replace
+from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 from irimi.cli import main
@@ -18,6 +22,21 @@ from tests.support.upstreams import (
 )
 
 CHARGE_ID = "ch_3QTESTONLY000000"
+
+DEMO_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "demo.py"
+
+
+@functools.cache
+def demo() -> ModuleType:
+    """`scripts/demo.py`, loaded by its path: `scripts/` is not a package. Its `run(example,
+    workdir)` runs an example under `irimi shadow` against the fake internet."""
+    spec = importlib.util.spec_from_file_location("irimi_demo", DEMO_SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # its dataclasses look their module up by name
+    spec.loader.exec_module(module)
+    return module
+
 
 REFUND_AMOUNT_MINOR = 100  # the base-URL child's own refund: a partial one of the charge's 4900
 
@@ -77,9 +96,8 @@ BASE_URL_CHILD = '''
 
 The read goes through the forward proxy, which is what `requests`, `httpx` and `slack_sdk` do
 with `HTTPS_PROXY` set. The refund goes through the reverse door, which is what `stripe-python`
-does once `stripe.api_base` is the listener origin plus the upstream host - it ships its own CA
-bundle and ignores the proxy variables, and `examples/refund_agent/agent.py` builds exactly this
-URL in `door_base()`.
+does once `stripe.api_base` is the listener origin plus the upstream host, the base-URL mode
+`examples/quickstart/README.md` names.
 """
 import http.client, os, urllib.parse
 

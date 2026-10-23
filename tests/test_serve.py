@@ -349,6 +349,46 @@ def test_the_store_calls_back_on_its_writer_once_a_runs_end_is_on_disk(tmp_path)
     assert [e.run_id for e in events] == ["r1"]
 
 
+def test_a_run_s_writes_and_keys_are_dropped_once_its_end_is_on_disk(tmp_path, monkeypatch):
+    """The composition root drops a run's writes from the engine's write log, and its idempotency
+    keys from the policy's store, as the store reports the run ended, before serve prints its
+    summary, so a long serve holds open runs' alone. Another run's stay."""
+    from irimi import cli, idempotency
+    from tests.test_idempotency import PARAMS, _stored
+    from tests.test_store import _exchange, _record
+
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    ca.generate_ca(ca.ca_paths())
+    args = cli.build_parser().parse_args(["serve", "--store", str(tmp_path / "store")])
+    left_at_end = []
+    slot_of = {run_id: idempotency.key(run_id, "stripe", (), "k-1") for run_id in ("r1", "r2")}
+
+    def on_run_ended(index, run_id):
+        assert run.keys is not None
+        left_at_end.append((run.write_log.for_run(run_id), run.keys.get(slot_of[run_id], PARAMS)))
+
+    run = cli._prepare_run(args, serve=True, on_run_ended=on_run_ended)
+    assert run is not None and run.write_log is not None and run.keys is not None
+    ended, still_open = _exchange("r1"), _exchange("r2")
+    run.write_log.add(ended)
+    run.write_log.add(still_open)
+    for slot in slot_of.values():
+        run.keys.put(slot, PARAMS, _stored())
+    try:
+        run.store.start_run(_record("r1"))
+        run.store.end_run("r1", 20.0, "ok")
+    finally:
+        run.store.close()
+        run.lock.release()
+    assert left_at_end == [((), (None, False))]
+    assert run.write_log.for_run("r2") == (still_open,)
+    assert run.keys.get(slot_of["r2"], PARAMS) == (_stored(), False)
+    engine = cli._build_engine(run, lambda ex: None)
+    assert engine.write_log is run.write_log
+    assert engine.policy.idempotency is run.keys
+
+
 def test_a_callback_that_raises_is_logged_and_the_store_carries_on(tmp_path, caplog):
     """What `on_run_ended` raises is the caller's problem, never the run's: one WARNING naming the
     exception's type, and the next event is still written."""

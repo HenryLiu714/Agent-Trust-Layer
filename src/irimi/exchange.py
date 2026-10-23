@@ -323,8 +323,8 @@ def clip_chunks(chunks: tuple[int, ...], size: int) -> tuple[int, ...]:
 
 def is_authored_write(exchange: Exchange) -> bool:
     """A write irimi itself authored: it changed state somewhere the real service does not know
-    about. The engine's write log holds exactly these, and they are what the overlay replays onto
-    live reads - so they are also the only writes a later read can have been shown. Each
+    about. A run's write log holds exactly these, and they are what the overlay applies to the
+    run's live reads - so they are also the only writes a later read can have been shown. Each
     clause keeps one thing out that is not that.
 
     `kind not in LIVE_KINDS` keeps reads out. A delegated read is the one non-live read

@@ -139,7 +139,8 @@ def slot_for(request: Request, classification: Classification, run_id: str) -> S
 
 
 class Store:
-    """One run's answered keys. In memory, and reached from the engine's worker thread.
+    """Each run's answered keys, until the run ends. In memory, and reached from the engine's
+    worker thread.
 
     A plain dict behind a lock: the decision runs in `asyncio.to_thread`, so two writes can be in
     here at once, and `setdefault` is what makes the FIRST answer the one the run keeps however
@@ -148,7 +149,8 @@ class Store:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._entries: dict[tuple[str, ...], tuple[Canonical, Stored]] = {}
+        # Keyed by the run a slot leads with (`key`), so a run's entries go in one step.
+        self._runs: dict[str, dict[tuple[str, ...], tuple[Canonical, Stored]]] = {}
 
     def get(self, slot: tuple[str, ...], params: Canonical) -> tuple[Stored | None, bool]:
         """`(the answer to replay, whether this key is held with DIFFERENT parameters)`.
@@ -158,7 +160,7 @@ class Store:
         a different write, which the service refuses.
         """
         with self._lock:
-            entry = self._entries.get(slot)
+            entry = self._runs.get(slot[0], {}).get(slot)
         if entry is None:
             return None, False
         held, stored = entry
@@ -174,4 +176,9 @@ class Store:
         both of its answering paths and not only the happy one.
         """
         with self._lock:
-            self._entries.setdefault(slot, (params, stored))
+            self._runs.setdefault(slot[0], {}).setdefault(slot, (params, stored))
+
+    def end_run(self, run_id: str) -> None:
+        """Drop the run's keys: a run that has ended sends no retry."""
+        with self._lock:
+            self._runs.pop(run_id, None)

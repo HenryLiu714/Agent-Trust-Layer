@@ -17,7 +17,7 @@ from mitmproxy.addons import default_addons
 from mitmproxy.master import Master
 from mitmproxy.options import Options
 
-from irimi import ca, control, delegation, echo, netaddr, pipeline, redact, reverse_door
+from irimi import ca, control, delegation, netaddr, pipeline, redact, reverse_door
 from irimi.control import ControlEndpoint, OnToolCall
 from irimi.engine import EngineConfig, EngineStartError, OnExchange
 from irimi.exchange import (
@@ -43,6 +43,7 @@ from irimi.exchange import (
 from irimi.overlay import Overlaid, Overlay, Translation
 from irimi.policy import Answer, AnswerPolicy
 from irimi.store import MAX_REDACTED_BODY, MAX_STORED_BODY, TraceStore
+from irimi.writelog import WriteLog
 
 logger = logging.getLogger(__name__)
 
@@ -556,6 +557,7 @@ class IrimiAddon:
         on_exchange: OnExchange | None,
         on_running: OnRunning,
         on_tool_call: OnToolCall | None = None,
+        write_log: WriteLog | None = None,
     ) -> None:
         self.config = config
         self.policy = policy
@@ -572,7 +574,7 @@ class IrimiAddon:
             on_tool_call=on_tool_call,
             policy=policy,
         )
-        self.write_log: list[Exchange] = []
+        self.write_log = write_log if write_log is not None else WriteLog()
 
     def running(self) -> None:
         # Without mitmproxy's ErrorCheck addon a failed bind does not sys.exit(); Master.run()
@@ -678,9 +680,9 @@ class IrimiAddon:
         # The decision runs on a worker thread. The hook is `async def`, which mitmproxy 12
         # awaits, so the proxy serves every other flow while one write's L3 precondition read or
         # a target's probe is in the air. Nothing inside `_decide` may touch `flow`: mitmproxy's
-        # flow objects belong to the event loop. The write log is snapshotted here, before the
-        # hand-off.
-        writes = tuple(self.write_log)
+        # flow objects belong to the event loop. The run's writes are read here, before the
+        # hand-off; the tuple is the log's own and never changes.
+        writes = self.write_log.for_run(run_id)
         try:
             decision = await asyncio.to_thread(self._decide, req, writes, run_id, cut, listener)
         except Exception as handoff:  # the hand-off itself, e.g. an executor shut down under us
@@ -1102,14 +1104,14 @@ class IrimiAddon:
         resp = upstream
         # A read irimi forwarded is the only place the real values a later fake has to sort
         # against appear - the write log holds writes, and the trace store is write-only - so
-        # every read's body goes past `echo.observe_read` on its way out. Which services learn
-        # anything from one is `echo`'s to know and not the engine's: a service with no observer
-        # is a no-op, and so is a body that carries nothing. A streamed body is not a
+        # every read's body goes past the policy's `observe_read` on its way out. Which services
+        # learn anything from one is `echo`'s to know and not the engine's: a service with no
+        # observer is a no-op, and so is a body that carries nothing. A streamed body is not a
         # document an observer can read, and may be cut short, so the guard names it.
         # A delegated read is observed too: a per-route `target:` can pair delegated reads with
         # locally faked writes, and the target's values are then the ones the agent sees.
         if not streamed and not cut and pending.classification.kind == "read":
-            echo.observe_read(pending.classification.service, upstream.body)
+            self._observe_read(pending.classification.service, upstream.body)
         # The overlay stays off for a delegated read: the target owns that service's state, and
         # layering our own minted objects over it would corrupt read-after-write there.
         answered_by = pending.answered_by
@@ -1122,9 +1124,9 @@ class IrimiAddon:
             not streamed
             and pending.answered_by == "live"
             and pending.classification.kind == "read"
-            and self.write_log
+            and self.write_log.for_run(pending.run_id)
         ):
-            overlaid = self._overlaid(pending.request, upstream, pending.translated_from)
+            overlaid = self._overlaid(pending, upstream)
             if cut:
                 # A READ CUT AT THE CAP IS NEVER OVERLAID, AND SAYS WHAT IT COULD NOT SHOW.
                 # The overlay is shown what irimi recorded, an empty body, and says `partial` when
@@ -1147,16 +1149,23 @@ class IrimiAddon:
         # the same rule. A target that could not be dialled never reaches here: `_act_on` or
         # `error()` handles that one and does not touch the log.
         if is_authored_write(ex):
-            self.write_log.append(ex)
+            self.write_log.add(ex)
         out = pipeline.respond(ex)
         if out is not None and out is not upstream and not streamed:
             _send(flow, out, upstream)
         self._finish(ex)
 
-    def _overlaid(
-        self, request: Request, upstream: Response, translated_from: str | None
-    ) -> Overlaid:
-        """The overlay's answer for one live read, or the upstream one if it failed.
+    def _observe_read(self, service: str, body: bytes) -> None:
+        """Hand a forwarded read to the policy, whose fakes sort after what it saw. Guarded like
+        `_overlaid`: a raise here would escape the `response` hook."""
+        try:
+            self.policy.observe_read(service, body)
+        except Exception:
+            logger.exception("irimi: the policy could not observe a read")
+
+    def _overlaid(self, pending: _Pending, upstream: Response) -> Overlaid:
+        """The overlay's answer for one live read, over its own run's writes, or the upstream one
+        if it failed.
 
         `ServiceOverlay` guards itself, and this guards the call: THE NEVER-RAISE RULE is the
         addon's, and an overlay swapped in later - a test double, a replay overlay - does not
@@ -1164,7 +1173,8 @@ class IrimiAddon:
         mitmproxy has already committed the flow.
         """
         try:
-            return self.overlay(tuple(self.write_log), request, upstream, translated_from)
+            writes = self.write_log.for_run(pending.run_id)
+            return self.overlay(writes, pending.request, upstream, pending.translated_from)
         except Exception:
             logger.exception("irimi: the overlay raised; the agent gets the upstream read")
             return Overlaid(upstream, "partial")
@@ -1235,6 +1245,7 @@ class MitmEngine:
         overlay: Overlay,
         on_exchange: OnExchange | None = None,
         on_tool_call: OnToolCall | None = None,
+        write_log: WriteLog | None = None,
     ) -> None:
         self.config = config
         self.policy = policy
@@ -1242,6 +1253,8 @@ class MitmEngine:
         self.overlay = overlay
         self.on_exchange = on_exchange
         self.on_tool_call = on_tool_call
+        # Given by the composition root, which ends its runs as the store reports them ended.
+        self.write_log = write_log if write_log is not None else WriteLog()
         self._ready = asyncio.Event()  # binds to the serving loop on first use (Python >= 3.10)
         self._start_error: EngineStartError | None = None
         self._stopped = False
@@ -1298,6 +1311,7 @@ class MitmEngine:
                     self.on_exchange,
                     self._on_running,
                     self.on_tool_call,
+                    self.write_log,
                 )
             )
             if self._stopped:  # shutdown() was called before we got here

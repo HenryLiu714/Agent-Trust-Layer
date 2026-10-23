@@ -37,7 +37,7 @@
     "issue_ref": 1
   },
   "tests/workflows/test_w03_queue_worker.py": {
-    "issue_ref": 7
+    "issue_ref": 4
   },
   "tests/workflows/test_w04_slack_ops_bot.py": {
     "issue_ref": 2

@@ -5,12 +5,45 @@ run's overlay*, and the two live in the same layer and may not import each other
 job in any case - turning `Exchange`es into
 `services.Write`s is neither deciding nor overlaying - and it is pure, so replay decodes a
 recording with the same function.
+
+`WriteLog` keeps those writes per run: a run sees its own faked writes and no other run's, and a
+run's writes are dropped when it ends.
 """
 
+import threading
 from collections.abc import Mapping, Sequence
 
 from irimi import bodies, services
 from irimi.exchange import Exchange, Request
+
+
+class WriteLog:
+    """The faked writes each run has made, keyed by run id.
+
+    Requests that name no run share the id the engine files them under (`unattributed` in serve
+    mode), so they form one log of their own. The engine adds from its event loop and the store
+    ends runs from its writer thread, so one lock covers both.
+    """
+
+    def __init__(self) -> None:
+        self._runs: dict[str, tuple[Exchange, ...]] = {}
+        self._lock = threading.Lock()
+
+    def for_run(self, run_id: str) -> tuple[Exchange, ...]:
+        """This run's writes, oldest first. The tuple is the log's own and never changes, so the
+        caller may read it from another thread without a copy."""
+        with self._lock:
+            return self._runs.get(run_id, ())
+
+    def add(self, exchange: Exchange) -> None:
+        """File `exchange` under its own run."""
+        with self._lock:
+            self._runs[exchange.run_id] = (*self._runs.get(exchange.run_id, ()), exchange)
+
+    def end_run(self, run_id: str) -> None:
+        """Drop the run's writes: nothing reads them once the run has ended."""
+        with self._lock:
+            self._runs.pop(run_id, None)
 
 
 def decode(service: str, request: Request, write_log: Sequence[Exchange]) -> list[services.Write]:

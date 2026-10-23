@@ -9,7 +9,7 @@ from irimi.exchange import Request
 from irimi.services.model import Read, Write
 from irimi.services.slack import THREAD_FIELDS, apply_read
 
-# Minted `ts` values sit above every real one, as `echo.slack_ts` guarantees.
+# Minted `ts` values sit above every real one, as `echo.TsClock` guarantees.
 MINTED1 = "1800000000.000001"
 MINTED2 = "1800000000.000002"
 REAL_OLD = "1700000000.000100"

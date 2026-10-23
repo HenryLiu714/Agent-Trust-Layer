@@ -17,39 +17,6 @@ from irimi.servicemap import Route
 
 SERVICE = "slack"
 
-# The last `ts` slack_ts handed out, as (seconds, sub-second counter). Guarded by a lock: the
-# hooks run on the proxy's event loop today, but `generic.mint_id` is the only other minting
-# function in `echo` and it is thread-safe by construction, so this one says so too rather than
-# resting on that.
-_last_slack_ts: tuple[int, int] = (0, 0)
-_slack_ts_lock = threading.Lock()
-
-
-def slack_ts() -> str:
-    """A Slack `ts`: seconds, a dot, and six digits. Distinct and increasing for the whole run.
-
-    Slack uses `ts` as a message's identifier and as `thread_ts`, so two messages sharing one is
-    two messages that are the same message - an agent that posts twice in a second and then
-    replies in a thread addresses whichever of them it collided with. Drawing the sub-second part
-    at random gave 181,346 distinct values in 200,000 draws.
-
-    A counter rather than a wider random draw, because distinctness is only half of it: real `ts`
-    values increase with time, and code that sorts a transcript by `ts` or asks "is this reply
-    after that message" reads the same answer here as it would from Slack. The counter carries
-    into the next second if a run ever posts more than a million messages inside one.
-    """
-    global _last_slack_ts
-    with _slack_ts_lock:
-        seconds, counter = int(time.time()), 0
-        last_seconds, last_counter = _last_slack_ts
-        if seconds <= last_seconds:
-            seconds, counter = last_seconds, last_counter + 1
-        if counter > 999_999:
-            seconds, counter = seconds + 1, 0
-        _last_slack_ts = (seconds, counter)
-    return f"{seconds}.{counter:06d}"
-
-
 # Keys whose value is a real Slack `ts`, wherever they sit in a read's body. `conversations.
 # history` and `.replies` carry one per message, `conversations.info` carries the channel's
 # `latest`, and a thread carries `thread_ts` and `latest_reply`. Anything else is left alone.
@@ -62,61 +29,97 @@ _SLACK_TS = re.compile(r"\d{1,12}\.\d{6}")
 OBSERVE_BUDGET = 20_000
 
 
-def observe_slack_ts(ts: str) -> None:
-    """Raise the `ts` watermark to `ts` when it is newer than anything minted or seen so far.
+class TsClock:
+    """The `ts` sequence every faked Slack message takes its identity from, one per engine.
 
-    A minted `ts` has to sort after every real message the run has already read, or an agent that
-    orders a transcript by `ts` - which is how a Slack transcript is ordered - finds its own
-    faked message somewhere in the middle of the real ones. `slack_ts` already mints strictly
-    above `_last_slack_ts`, so feeding the real values into that same watermark is the whole
-    mechanism; nothing else has to change and nothing has to be remembered per message.
-
-    The watermark is one per run rather than one per channel. That is coarser than Slack's own
-    ordering and deliberately so: it is strictly stronger, since a `ts` above the newest message
-    seen in *any* channel is above the newest in each; it needs no record of which reads happened,
-    which irimi does not keep; and `slack_ts`'s promise of one increasing sequence survives it.
-
-    Never raises. It is reached from a mitmproxy hook, where a raise forwards the flow.
+    The policy owns it, so two engines in one process, or two tests, never share a sequence. The
+    runs one engine serves do share it, which costs nothing: one increasing sequence across them
+    is still distinct and increasing within each.
     """
-    global _last_slack_ts
-    if not _SLACK_TS.fullmatch(ts):
-        return
-    whole, _, fraction = ts.partition(".")
-    seen = (int(whole), int(fraction))
-    with _slack_ts_lock:
-        if seen > _last_slack_ts:
-            _last_slack_ts = seen
+
+    def __init__(self) -> None:
+        # The last `ts` minted or seen, as (seconds, sub-second counter). Locked, because writes
+        # are faked on the engine's decision threads and reads observed on its event loop.
+        self.last: tuple[int, int] = (0, 0)
+        self._lock = threading.Lock()
+
+    def mint(self) -> str:
+        """A Slack `ts`: seconds, a dot, and six digits. Distinct and increasing for this clock.
+
+        Slack uses `ts` as a message's identifier and as `thread_ts`, so two messages sharing one
+        is two messages that are the same message - an agent that posts twice in a second and then
+        replies in a thread addresses whichever of them it collided with. Drawing the sub-second
+        part at random gave 181,346 distinct values in 200,000 draws.
+
+        A counter rather than a wider random draw, because distinctness is only half of it: real
+        `ts` values increase with time, and code that sorts a transcript by `ts` or asks "is this
+        reply after that message" reads the same answer here as it would from Slack. The counter
+        carries into the next second if a run ever posts more than a million messages inside one.
+        """
+        with self._lock:
+            seconds, counter = int(time.time()), 0
+            last_seconds, last_counter = self.last
+            if seconds <= last_seconds:
+                seconds, counter = last_seconds, last_counter + 1
+            if counter > 999_999:
+                seconds, counter = seconds + 1, 0
+            self.last = (seconds, counter)
+        return f"{seconds}.{counter:06d}"
+
+    def observe(self, ts: str) -> None:
+        """Raise the watermark to `ts` when it is newer than anything minted or seen so far.
+
+        A minted `ts` has to sort after every real message already read, or an agent that orders
+        a transcript by `ts` - which is how a Slack transcript is ordered - finds its own faked
+        message somewhere in the middle of the real ones. `mint` already mints strictly above
+        `last`, so feeding the real values into that same watermark is the whole mechanism;
+        nothing else has to change and nothing has to be remembered per message.
+
+        The watermark is one per clock rather than one per channel. That is coarser than Slack's
+        own ordering and deliberately so: it is strictly stronger, since a `ts` above the newest
+        message seen in *any* channel is above the newest in each; it needs no record of which
+        reads happened, which irimi does not keep; and `mint`'s promise of one increasing sequence
+        survives it.
+
+        Never raises. It is reached from a mitmproxy hook, where a raise forwards the flow.
+        """
+        if not _SLACK_TS.fullmatch(ts):
+            return
+        whole, _, fraction = ts.partition(".")
+        seen = (int(whole), int(fraction))
+        with self._lock:
+            if seen > self.last:
+                self.last = seen
+
+    def observe_history(self, body: bytes) -> None:
+        """Feed every real `ts` in a Slack read's body to the watermark. Never raises.
+
+        The read's body is the only place those values appear - irimi keeps no record of the
+        reads, only of the writes - so the watermark is raised as each body goes past rather than
+        looked up later. A body that carries no `ts` at all, or that is not JSON, is a no-op,
+        which is what lets the engine call this for every Slack read without knowing which ones
+        have messages in them.
+        """
+        try:
+            parsed = json.loads(body)
+        except Exception:  # not JSON, or no body at all: there is nothing to observe
+            return
+        stack: list[Any] = [parsed]
+        seen = 0
+        while stack and seen < OBSERVE_BUDGET:
+            node = stack.pop()
+            seen += 1
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if key in SLACK_TS_KEYS and isinstance(value, str):
+                        self.observe(value)
+                    elif isinstance(value, dict | list):
+                        stack.append(value)
+            elif isinstance(node, list):
+                stack.extend(item for item in node if isinstance(item, dict | list))
 
 
-def observe_slack_history(body: bytes) -> None:
-    """Feed every real `ts` in a Slack read's body to the watermark. Never raises.
-
-    The read's body is the only place those values appear - irimi keeps no record of the run's
-    reads, only of its writes - so the watermark is raised as each body goes past rather than
-    looked up later. A body that carries no `ts` at all, or that is not JSON, is a no-op, which is
-    what lets the engine call this for every Slack read without knowing which ones have messages
-    in them.
-    """
-    try:
-        parsed = json.loads(body)
-    except Exception:  # not JSON, or no body at all: there is nothing to observe
-        return
-    stack: list[Any] = [parsed]
-    seen = 0
-    while stack and seen < OBSERVE_BUDGET:
-        node = stack.pop()
-        seen += 1
-        if isinstance(node, dict):
-            for key, value in node.items():
-                if key in SLACK_TS_KEYS and isinstance(value, str):
-                    observe_slack_ts(value)
-                elif isinstance(value, dict | list):
-                    stack.append(value)
-        elif isinstance(node, list):
-            stack.extend(item for item in node if isinstance(item, dict | list))
-
-
-def slack_body(fields: dict[str, Any]) -> dict[str, Any]:
+def slack_body(fields: dict[str, Any], clock: TsClock) -> dict[str, Any]:
     """Slack's own envelope. slack_sdk raises SlackApiError on any body without `ok: true`.
 
     It replaces the generic body rather than extending it: a Slack response carries no `created`
@@ -127,7 +130,7 @@ def slack_body(fields: dict[str, Any]) -> dict[str, Any]:
     top-level `ts` and `channel` at all. This shape is what a mapped Slack write with no entry
     there still gets.
     """
-    body: dict[str, Any] = {"ok": True, "ts": slack_ts()}
+    body: dict[str, Any] = {"ok": True, "ts": clock.mint()}
     if "channel" in fields:
         body["channel"] = fields["channel"]
     return body
@@ -143,7 +146,7 @@ class SlackEnvelope:
     `slack_body`'s single shape would put a top-level `ts` and `channel` on reactions.add, which
     are chat.postMessage's fields and ones the real API never returns there.
 
-    `ok`, `channel` and `ts` stay envelope-owned. `ts` always comes from `slack_ts` and never from
+    `ok`, `channel` and `ts` stay envelope-owned. `ts` always comes from `TsClock` and never from
     the fixture: it is the message's identity for the rest of the run, and a fixture's frozen one
     would make every faked message the same message.
 
@@ -186,7 +189,11 @@ SLACK_ENVELOPES: dict[str, SlackEnvelope] = {
 
 
 def slack_l1_body(
-    request: Request, route: Route, envelope: SlackEnvelope, obj: dict[str, Any] | None
+    request: Request,
+    route: Route,
+    envelope: SlackEnvelope,
+    obj: dict[str, Any] | None,
+    clock: TsClock,
 ) -> dict[str, Any]:
     """A Slack write's answer: the envelope, with the fixture object nested inside it.
 
@@ -204,7 +211,7 @@ def slack_l1_body(
     if envelope.channel and "channel" in fields:
         body["channel"] = fields["channel"]
     if envelope.ts:
-        body["ts"] = slack_ts()
+        body["ts"] = clock.mint()
     if envelope.payload_key is not None and obj is not None:
         reflect_over(obj, fields, route)
         for name in envelope.optional:
@@ -219,14 +226,14 @@ def slack_l1_body(
     return body
 
 
-def enveloped(request: Request, route: Route) -> Built | None:
+def enveloped(request: Request, route: Route, clock: TsClock) -> Built | None:
     """A mapped Slack write's answer, level and flags; None for an operation `SLACK_ENVELOPES`
     does not name, which the caller answers the generic way."""
     envelope = SLACK_ENVELOPES.get(route.operation)
     if envelope is None:
         return None
     payload = fixture.get(SERVICE, route.fixture) if route.fixture else None
-    body = slack_l1_body(request, route, envelope, payload)
+    body = slack_l1_body(request, route, envelope, payload, clock)
     if payload is not None:
         return body, "fake-L1", ()
     if route.fixture:

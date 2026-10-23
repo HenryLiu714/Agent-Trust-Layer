@@ -1,9 +1,11 @@
 """`writelog`: the run's faked writes, decoded for the overlay and the policy alike"""
 
 import json
+from dataclasses import replace
 
 from irimi import bodies, writelog
 from irimi.exchange import Exchange, Request, Response
+from irimi.trace import UNATTRIBUTED
 
 ANSWER = {
     "id": "re_MINTED1",
@@ -84,6 +86,50 @@ def test_scoped_writes_returns_the_entry_and_the_decoded_writes():
         "entry",
         writes,
     )
+
+
+def test_a_run_sees_its_own_writes_and_no_other_run_s():
+    """Two runs faking writes into one log: each reads back its own, in order, and a run that has
+    made none gets an empty tuple."""
+    log = writelog.WriteLog()
+    a1, b1, a2 = (replace(_write(), run_id=run) for run in ("run-a", "run-b", "run-a"))
+    for ex in (a1, b1, a2):
+        log.add(ex)
+    assert log.for_run("run-a") == (a1, a2)
+    assert log.for_run("run-b") == (b1,)
+    assert log.for_run("run-c") == ()
+
+
+def test_requests_no_run_names_form_a_log_of_their_own():
+    log = writelog.WriteLog()
+    lost, named = replace(_write(), run_id=UNATTRIBUTED), _write()
+    log.add(lost)
+    log.add(named)
+    assert log.for_run(UNATTRIBUTED) == (lost,)
+    assert log.for_run(named.run_id) == (named,)
+
+
+def test_ending_a_run_drops_its_writes_and_no_other_run_s():
+    log = writelog.WriteLog()
+    a, b = (replace(_write(), run_id=run) for run in ("run-a", "run-b"))
+    log.add(a)
+    log.add(b)
+    log.end_run("run-a")
+    log.end_run("never-started")
+    assert log.for_run("run-a") == ()
+    assert log.for_run("run-b") == (b,)
+
+
+def test_a_run_s_writes_already_read_do_not_change_when_it_adds_more():
+    """The engine reads a run's writes on its event loop and hands them to a worker thread, so the
+    tuple it got is the log's own and never changes under the worker."""
+    log = writelog.WriteLog()
+    first = _write()
+    log.add(first)
+    seen = log.for_run(first.run_id)
+    log.add(_write())
+    assert seen == (first,)
+    assert len(log.for_run(first.run_id)) == 2
 
 
 def test_a_body_over_the_size_cap_is_not_a_json_object():

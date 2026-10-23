@@ -165,6 +165,18 @@ def test_two_stores_do_not_share_entries():
     assert two.get(SLOT, PARAMS) == (None, False)
 
 
+def test_ending_a_run_drops_its_keys_and_no_other_run_s():
+    """A long serve holds the keys of the runs still open alone."""
+    store = Store()
+    other = ("9b2c", *SLOT[1:])
+    store.put(SLOT, PARAMS, _stored())
+    store.put(other, PARAMS, _stored())
+    store.end_run(SLOT[0])
+    store.end_run("never-started")
+    assert store.get(SLOT, PARAMS) == (None, False)
+    assert store.get(other, PARAMS) == (_stored(), False)
+
+
 def test_the_key_separates_runs_accounts_and_versions():
     base = idempotency.key("7f3a", "stripe", ("acct_1", "2024-06-20"), "k-1")
     other_run = idempotency.key("9b2c", "stripe", ("acct_1", "2024-06-20"), "k-1")

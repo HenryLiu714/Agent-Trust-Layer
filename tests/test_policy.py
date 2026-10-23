@@ -163,7 +163,8 @@ def test_two_slack_writes_in_the_same_second_get_different_timestamps():
     """Slack uses `ts` as a message's identifier and as `thread_ts`, so a collision is two
     messages that are the same message. Random six digits collide 9% of the time in 200,000
     draws; a counter lets a run post a million messages a second before one repeats."""
-    seen = [echo.slack_ts() for _ in range(5_000)]
+    clock = echo.TsClock()
+    seen = [clock.mint() for _ in range(5_000)]
     assert len(set(seen)) == len(seen)
     # And increasing, because that is the other half of what a `ts` means: real ones sort by time,
     # so code that orders a transcript by `ts` reads the same answer here as it would from Slack.
@@ -174,10 +175,10 @@ def test_two_slack_writes_in_the_same_second_get_different_timestamps():
 def test_a_slack_timestamp_still_names_the_current_second(monkeypatch):
     """The counter must not drift off the clock: a `ts` is a real epoch time, and an SDK that
     renders one as a date has to get today."""
-    monkeypatch.setattr(echo_slack, "_last_slack_ts", (0, 0))
     monkeypatch.setattr(echo_slack.time, "time", lambda: 1_700_000_000.9)
-    assert echo.slack_ts() == "1700000000.000000"
-    assert echo.slack_ts() == "1700000000.000001"
+    clock = echo.TsClock()
+    assert clock.mint() == "1700000000.000000"
+    assert clock.mint() == "1700000000.000001"
 
 
 def test_slack_write_reads_the_json_body_slack_sdk_actually_posts():
@@ -1258,10 +1259,6 @@ def test_slack_sdk_parses_the_faked_post():
 
 
 # ------------------------------------------------------- the `ts` watermark
-#
-# Every test here monkeypatches `echo_slack._last_slack_ts`, which restores it at teardown: the
-# watermark is module state for the life of the process, and a test that raised it and walked away
-# would push every later test's minted `ts` into the future.
 
 
 def _ts(value: str) -> tuple[int, int]:
@@ -1272,33 +1269,32 @@ def _ts(value: str) -> tuple[int, int]:
     return int(whole), int(fraction)
 
 
-def test_a_minted_ts_sorts_after_a_real_one_the_run_has_seen(monkeypatch):
+def test_a_minted_ts_sorts_after_a_real_one_the_run_has_seen():
     """A minted `ts` sorts after every real one the run has read. A history read going past first
     is what puts the faked message after the real ones instead of somewhere in the middle."""
-    monkeypatch.setattr(echo_slack, "_last_slack_ts", (0, 0))
+    clock = echo.TsClock()
     newest = "1999999999.000500"
-    echo.observe_slack_history(
+    clock.observe_history(
         json.dumps({"ok": True, "messages": [{"ts": "1999999998.000000"}, {"ts": newest}]}).encode()
     )
-    assert _ts(echo.slack_ts()) > _ts(newest)
+    assert _ts(clock.mint()) > _ts(newest)
 
 
-def test_an_older_real_ts_does_not_move_the_watermark_backwards(monkeypatch):
+def test_an_older_real_ts_does_not_move_the_watermark_backwards():
     """Reading an old channel must not rewind the sequence: two messages with one `ts` are two
     messages that are the same message, which is the whole reason `ts` is minted the way it is."""
-    monkeypatch.setattr(echo_slack, "_last_slack_ts", (1_999_999_999, 500))
-    echo.observe_slack_history(json.dumps({"messages": [{"ts": "1000000000.000000"}]}).encode())
-    assert echo.slack_ts() == "1999999999.000501"
+    clock = echo.TsClock()
+    clock.last = (1_999_999_999, 500)
+    clock.observe_history(json.dumps({"messages": [{"ts": "1000000000.000000"}]}).encode())
+    assert clock.mint() == "1999999999.000501"
 
 
-def test_a_nested_ts_is_observed_wherever_it_sits(monkeypatch):
+def test_a_nested_ts_is_observed_wherever_it_sits():
     """`conversations.info` carries the channel's newest message under `latest`, not in a list of
     messages. The walk does not care which shape the body is."""
-    monkeypatch.setattr(echo_slack, "_last_slack_ts", (0, 0))
-    echo.observe_slack_history(
-        json.dumps({"channel": {"latest": {"ts": "1999999999.000001"}}}).encode()
-    )
-    assert _ts(echo.slack_ts()) > (1_999_999_999, 1)
+    clock = echo.TsClock()
+    clock.observe_history(json.dumps({"channel": {"latest": {"ts": "1999999999.000001"}}}).encode())
+    assert _ts(clock.mint()) > (1_999_999_999, 1)
 
 
 @pytest.mark.parametrize(
@@ -1313,23 +1309,33 @@ def test_a_nested_ts_is_observed_wherever_it_sits(monkeypatch):
         b'{"ts": null}',
     ],
 )
-def test_observing_a_body_that_carries_no_timestamp_changes_nothing(monkeypatch, body):
+def test_observing_a_body_that_carries_no_timestamp_changes_nothing(body):
     """This runs inside a mitmproxy hook, where a raise forwards the flow and a forwarded write
     escapes shadow mode. Every shape a real service - or a hostile one - can send is a no-op."""
-    monkeypatch.setattr(echo_slack, "_last_slack_ts", (1_700_000_000, 7))
-    echo.observe_slack_history(body)
-    assert echo_slack._last_slack_ts == (1_700_000_000, 7)
+    clock = echo.TsClock()
+    clock.last = (1_700_000_000, 7)
+    clock.observe_history(body)
+    assert clock.last == (1_700_000_000, 7)
 
 
-def test_only_a_service_with_an_observer_learns_from_a_read(monkeypatch):
+def test_only_a_service_with_an_observer_learns_from_a_read():
     """The engine hands `observe_read` every read it forwards and names no service of its own.
     Which services learn anything from a body is this module's table to hold."""
-    monkeypatch.setattr(echo_slack, "_last_slack_ts", (0, 0))
+    clock = echo.TsClock()
     body = json.dumps({"messages": [{"ts": "1999999999.000500"}]}).encode()
-    echo.observe_read("stripe", body)
-    assert echo_slack._last_slack_ts == (0, 0)
-    echo.observe_read("slack", body)
-    assert echo_slack._last_slack_ts == (1_999_999_999, 500)
+    echo.observe_read("stripe", body, clock)
+    assert clock.last == (0, 0)
+    echo.observe_read("slack", body, clock)
+    assert clock.last == (1_999_999_999, 500)
+
+
+def test_two_policies_never_share_a_ts_sequence():
+    """The clock is the policy's, one per engine: what one engine saw or minted does not move
+    another's sequence."""
+    seen, fresh = ShadowPolicy(), ShadowPolicy()
+    seen.observe_read("slack", json.dumps({"messages": [{"ts": "1999999999.000500"}]}).encode())
+    assert seen.slack_ts.last == (1_999_999_999, 500)
+    assert fresh.slack_ts.last == (0, 0)
 
 
 # ------------------------------------------------------------------- L3 preconditions
@@ -1703,7 +1709,7 @@ def _classified(request: Request):
 
 
 def test_a_rejection_carries_the_level_the_refund_would_have_been_answered_at():
-    fake = echo.fake_rejection(*_classified(_refund_request()), {"error": {}})
+    fake = echo.fake_rejection(*_classified(_refund_request()), {"error": {}}, echo.TsClock())
     assert (fake.answered_by, fake.flags) == ("fake-L1", ())
     assert json.loads(fake.body) == {"error": {}}
 
@@ -1711,13 +1717,13 @@ def test_a_rejection_carries_the_level_the_refund_would_have_been_answered_at():
 def test_a_rejection_of_a_write_with_no_fixture_is_honestly_l0():
     """There is no `fake-L3`, and `reactions.add` has no fixture to be L1 from."""
     request = _req("POST", host="slack.com", path="/api/reactions.add", body=b"{}")
-    fake = echo.fake_rejection(*_classified(request), {"ok": False, "error": "x"})
+    fake = echo.fake_rejection(*_classified(request), {"ok": False, "error": "x"}, echo.TsClock())
     assert (fake.answered_by, fake.flags) == ("fake-L0", ())
 
 
 def test_a_rejection_whose_fixture_will_not_load_says_so(monkeypatch):
     monkeypatch.setattr(fixture, "get", lambda service, name: None)
-    fake = echo.fake_rejection(*_classified(_refund_request()), {"error": {}})
+    fake = echo.fake_rejection(*_classified(_refund_request()), {"error": {}}, echo.TsClock())
     assert (fake.answered_by, fake.flags) == ("fake-L0", (FIXTURE_FAILED_FLAG,))
 
 

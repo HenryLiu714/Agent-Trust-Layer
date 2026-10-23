@@ -40,11 +40,9 @@ from irimi.echo.generic import (
 from irimi.echo.slack import (
     SLACK_ENVELOPES,
     SlackEnvelope,
-    observe_slack_history,
-    observe_slack_ts,
+    TsClock,
     slack_body,
     slack_l1_body,
-    slack_ts,
 )
 from irimi.exchange import FIXTURE_FAILED_FLAG, FakeLevel, Request
 from irimi.pipeline import Classification
@@ -60,6 +58,7 @@ __all__ = [
     "TEXT_CT",
     "Fake",
     "SlackEnvelope",
+    "TsClock",
     "fake_body",
     "fake_rejection",
     "fake_response",
@@ -69,12 +68,9 @@ __all__ = [
     "named_id",
     "object_name",
     "observe_read",
-    "observe_slack_history",
-    "observe_slack_ts",
     "reflect_over",
     "slack_body",
     "slack_l1_body",
-    "slack_ts",
 ]
 
 TEXT_CT = "text/plain"
@@ -83,10 +79,12 @@ TEXT_CT = "text/plain"
 # What a live read's body teaches the faker, keyed on service. Same convention as `SHAPES` below:
 # every service-specific fact about a body lives in this package, so the engine can hand it every
 # read it sees without naming a service of its own.
-READ_OBSERVERS: dict[str, Callable[[bytes], None]] = {slack.SERVICE: slack.observe_slack_history}
+READ_OBSERVERS: dict[str, Callable[[TsClock, bytes], None]] = {
+    slack.SERVICE: TsClock.observe_history
+}
 
 
-def observe_read(service: str, body: bytes) -> None:
+def observe_read(service: str, body: bytes, clock: TsClock) -> None:
     """Let a service learn from a read irimi forwarded rather than answered. Never raises.
 
     A read's body is the only place the real values a fake has to sort against appear: the write
@@ -95,13 +93,15 @@ def observe_read(service: str, body: bytes) -> None:
     """
     observer = READ_OBSERVERS.get(service)
     if observer is not None:
-        observer(body)
+        observer(clock, body)
 
 
 # Keyed on the classified service name, not on a host or a route, so every route of that service -
 # including ones other batches add later - gets the shape without a second entry here. The name is
 # the map's when a map claims the host, and the host itself when none does.
-SHAPES: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {slack.SERVICE: slack.slack_body}
+SHAPES: dict[str, Callable[[dict[str, Any], TsClock], dict[str, Any]]] = {
+    slack.SERVICE: slack.slack_body
+}
 
 
 # Routes whose real service does not answer with JSON at all, keyed by service and operation.
@@ -113,7 +113,7 @@ LITERAL_BODIES: dict[tuple[str, str], tuple[bytes, str]] = {
 }
 
 
-def fake_body(request: Request, classification: Classification) -> dict[str, Any]:
+def fake_body(request: Request, classification: Classification, clock: TsClock) -> dict[str, Any]:
     """The body of a locally answered write: the service's own shape when it has one.
 
     A shape is only used for a route the maps actually claim. An unmapped path on a shaped
@@ -126,14 +126,16 @@ def fake_body(request: Request, classification: Classification) -> dict[str, Any
     route = classification.route
     shaper = SHAPES.get(classification.service) if route is not None else None
     if shaper is not None:
-        return shaper(reflect(request))
+        return shaper(reflect(request), clock)
     return l0_body(request, route)
 
 
 # Services whose mapped writes are answered inside an envelope of the service's own, keyed on the
 # classified service name like `SHAPES`. The entry answers None for an operation it has no
 # envelope for, and that write is built the generic way.
-ENVELOPED: dict[str, Callable[[Request, Route], Built | None]] = {slack.SERVICE: slack.enveloped}
+ENVELOPED: dict[str, Callable[[Request, Route, TsClock], Built | None]] = {
+    slack.SERVICE: slack.enveloped
+}
 
 
 @dataclass(frozen=True)
@@ -151,11 +153,13 @@ class Fake:
     flags: tuple[str, ...] = ()
 
 
-def _fake_dict(request: Request, classification: Classification, route: Route | None) -> Built:
+def _fake_dict(
+    request: Request, classification: Classification, route: Route | None, clock: TsClock
+) -> Built:
     """The body as a dict, the level it was built at, and any flag that level owes the trace."""
     if route is not None:
         build = ENVELOPED.get(classification.service)
-        built = build(request, route) if build is not None else None
+        built = build(request, route, clock) if build is not None else None
         if built is not None:
             return built
     if route is not None and route.fixture:
@@ -164,12 +168,13 @@ def _fake_dict(request: Request, classification: Classification, route: Route | 
             return l1_body(request, route, obj), "fake-L1", ()
         # The map promised a fixture this install cannot read. L0 is the floor and still answers
         # the write, but the trace has to say the fidelity is not the one the map named.
-        return fake_body(request, classification), "fake-L0", (FIXTURE_FAILED_FLAG,)
-    return fake_body(request, classification), "fake-L0", ()
+        return fake_body(request, classification, clock), "fake-L0", (FIXTURE_FAILED_FLAG,)
+    return fake_body(request, classification, clock), "fake-L0", ()
 
 
-def fake_response(request: Request, classification: Classification) -> Fake:
-    """The body, content type and fidelity of a locally answered write.
+def fake_response(request: Request, classification: Classification, clock: TsClock) -> Fake:
+    """The body, content type and fidelity of a locally answered write. `clock` is the engine's
+    Slack `ts` sequence.
 
     The single place the body is serialized.
     """
@@ -178,11 +183,13 @@ def fake_response(request: Request, classification: Classification) -> Fake:
         literal = LITERAL_BODIES.get((classification.service, route.operation))
         if literal is not None:
             return Fake(literal[0], literal[1])
-    body, answered_by, flags = _fake_dict(request, classification, route)
+    body, answered_by, flags = _fake_dict(request, classification, route, clock)
     return Fake(json.dumps(body, allow_nan=False).encode(), JSON_CT, answered_by, flags)
 
 
-def fake_rejection(request: Request, classification: Classification, body: dict[str, Any]) -> Fake:
+def fake_rejection(
+    request: Request, classification: Classification, body: dict[str, Any], clock: TsClock
+) -> Fake:
     """A modeled error body, carried at the level this route's write WOULD have been answered at.
 
     There is no `fake-L3`: the header says who answered, the exchange field says what L3 decided.
@@ -192,5 +199,5 @@ def fake_rejection(request: Request, classification: Classification, body: dict[
     this route would have had and discarding it. One dict, once, on a path that is about to make
     a network-free answer either way.
     """
-    _, answered_by, flags = _fake_dict(request, classification, classification.route)
+    _, answered_by, flags = _fake_dict(request, classification, classification.route, clock)
     return Fake(json.dumps(body, allow_nan=False).encode(), JSON_CT, answered_by, flags)

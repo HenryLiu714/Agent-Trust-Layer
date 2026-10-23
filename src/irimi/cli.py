@@ -17,6 +17,7 @@ if TYPE_CHECKING:  # the quoted annotations below; no runtime import
     from irimi.control import OnToolCall
     from irimi.engine import Engine, EngineConfig, OnExchange
     from irimi.exchange import Exchange
+    from irimi.idempotency import Store as IdempotencyStore
     from irimi.recording import Recording
     from irimi.replay import Plan
     from irimi.runner import ChildCall
@@ -25,6 +26,7 @@ if TYPE_CHECKING:  # the quoted annotations below; no runtime import
     from irimi.servicemap import MapIndex
     from irimi.store import ServeLock, StoredRun, TraceStore
     from irimi.trace import JSONValue, RunRecord, ToolCall
+    from irimi.writelog import WriteLog
 
 SIGINT_EXIT_CODE = 130  # 128 + SIGINT, the shell convention for a Ctrl-C'd command
 SIGTERM_EXIT_CODE = 143  # 128 + SIGTERM: `irimi shadow` terminated before its command started
@@ -386,9 +388,15 @@ class _Run:
     lock: "ServeLock | None" = None
     # The run `config.replay_of` names, read back to answer from, in a replay only.
     recording: "Recording | None" = None
+    # Each run's faked writes, dropped as the store reports the run ended. None: the engine
+    # keeps its own, and nothing ends its runs.
+    write_log: "WriteLog | None" = None
+    # Each run's idempotency keys, dropped with its writes. None: the policy keeps its own.
+    keys: "IdempotencyStore | None" = None
 
 
-# What serve mode calls when a run's end is on disk: the maps the run was decided with, and its id.
+# What serve mode calls when a run's end is on disk, after the run's writes and idempotency keys
+# have been dropped: the maps the run was decided with, and its id.
 _OnRunEnded = Callable[["MapIndex", str], None]
 
 
@@ -410,7 +418,8 @@ def _prepare_run(
     store is open: a second serve on one root is refused before its engine starts, and writes
     nothing.
     """
-    from irimi import ca, trace
+    from irimi import ca, idempotency, trace
+    from irimi.writelog import WriteLog
 
     index = _load_maps(args)
     if index is None:
@@ -421,7 +430,7 @@ def _prepare_run(
         return None
     # 16 hex characters: the run id is a directory name in the store, and must not collide with
     # another run's across months of them.
-    # A replay is one run against one engine, whose write log and recording are the engine's;
+    # A replay is one run against one engine, whose recording is the engine's;
     # serve mode is many runs at once, and `irimi serve` has no run to replay.
     assert not (serve and source is not None)
     run_id = trace.UNATTRIBUTED if serve else secrets.token_hex(8)
@@ -436,7 +445,16 @@ def _prepare_run(
 
         # Keyed with this install's redaction key, which made the recording's placeholders.
         recording = Recording.from_events(source.events, key, config.maps)
-    ended = None if on_run_ended is None else (lambda run_id: on_run_ended(index, run_id))
+    write_log = WriteLog()
+    keys = idempotency.Store()
+
+    def ended(run_id: str) -> None:
+        # A run that has ended makes no more requests, so nothing reads its writes or keys again.
+        write_log.end_run(run_id)
+        keys.end_run(run_id)
+        if on_run_ended is not None:
+            on_run_ended(index, run_id)
+
     store = _open_store(args, key, ended, config.replay_of)
     if store is None:
         return None
@@ -444,7 +462,7 @@ def _prepare_run(
     if serve and lock is None:
         _close_store(store)
         return None
-    return _Run(index, p, run_id, config, store, lock, recording)
+    return _Run(index, p, run_id, config, store, lock, recording, write_log, keys)
 
 
 def _redaction_key() -> bytes | None:
@@ -526,11 +544,11 @@ def _build_engine(
     policy: AnswerPolicy
     if run.recording is None:
         # The reader is the real upstream, chosen here and nowhere else.
-        policy = ShadowPolicy(reader=UpstreamReader(), maps=run.config.maps)
+        policy = ShadowPolicy(reader=UpstreamReader(), maps=run.config.maps, keys=run.keys)
     else:
         # A replay's reader is the recording, which the policy builds itself: it never reads live
         # state for a precondition.
-        policy = ReplayPolicy(run.recording, maps=run.config.maps)
+        policy = ReplayPolicy(run.recording, maps=run.config.maps, keys=run.keys)
     return MitmEngine(
         run.config,
         policy,
@@ -538,6 +556,7 @@ def _build_engine(
         overlay,
         on_exchange=on_exchange,
         on_tool_call=on_tool_call,
+        write_log=run.write_log,
     )
 
 

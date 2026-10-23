@@ -101,6 +101,11 @@ class AnswerPolicy(Protocol):
         of running the tool, or None: the tool runs for real. Never raises."""
         ...
 
+    def observe_read(self, service: str, body: bytes) -> None:
+        """Learn from a read the engine forwarded what later fakes have to sort after. Never
+        raises."""
+        ...
+
 
 class ShadowPolicy:
     """Reads, llm and telemetry go live. write and unknown are answered locally.
@@ -116,16 +121,27 @@ class ShadowPolicy:
 
     name: str = "shadow"
 
-    def __init__(self, reader: Reader | None = None, maps: MapIndex | None = None) -> None:
+    def __init__(
+        self,
+        reader: Reader | None = None,
+        maps: MapIndex | None = None,
+        keys: idempotency.Store | None = None,
+    ) -> None:
         self.reader: Reader = reader if reader is not None else NoReader()
         self.maps = maps if maps is not None else MapIndex()
-        # Per-instance, never a class attribute: one store per run, and two policies in one test
-        # process must not answer each other's keys.
-        self.idempotency = idempotency.Store()
+        # Per-instance, never a class attribute: two policies in one test process must not answer
+        # each other's keys. `keys` is the composition root's, which drops a run's as it ends.
+        self.idempotency = keys if keys is not None else idempotency.Store()
+        # Per-instance for the same reason: one engine's faked Slack messages never take their
+        # `ts` from another's sequence.
+        self.slack_ts = echo.TsClock()
 
     def recorded_tool_call(self, name: str, args: JSONValue) -> ToolCall | None:
         """None: shadow mode answers from no recording, so every read tool runs for real."""
         return None
+
+    def observe_read(self, service: str, body: bytes) -> None:
+        echo.observe_read(service, body, self.slack_ts)
 
     def answer(
         self,
@@ -147,7 +163,9 @@ class ShadowPolicy:
         if route is not None and route.precondition:
             checked = self._precondition(request, classification, route, write_log, run_id)
             if checked.rejection is not None:
-                fake = echo.fake_rejection(request, classification, checked.rejection.body)
+                fake = echo.fake_rejection(
+                    request, classification, checked.rejection.body, self.slack_ts
+                )
                 answer = _local(
                     fake,
                     checked.rejection.status,
@@ -159,7 +177,7 @@ class ShadowPolicy:
                 _remember(self.idempotency, slot, answer)
                 return answer
         try:
-            fake = echo.fake_response(request, classification)
+            fake = echo.fake_response(request, classification, self.slack_ts)
         except Exception:
             # The belt to reflect()'s braces, and to the fixture's. Raising here would make
             # mitmproxy forward the flow, and a forwarded write escapes shadow mode - an empty
@@ -238,7 +256,9 @@ class ShadowPolicy:
                 if conflicted:
                     refusal = idempotency.conflict(classification.service, slot.sent)
                     if refusal is not None:
-                        return slot, _conflict_answer(request, classification, refusal)
+                        return slot, _conflict_answer(
+                            request, classification, refusal, self.slack_ts
+                        )
                 elif stored is not None:
                     return slot, _replayed_answer(stored)
         except Exception:
@@ -334,7 +354,7 @@ class ShadowPolicy:
             # The reader's body never passes the engine's `response` hook, so this is the only
             # place Slack's `ts` watermark can learn from the one read that exists to make the
             # fake honest.
-            echo.observe_read(service, response.body)
+            self.observe_read(service, response.body)
             document: Any = bodies.json_object(response.body)
             if document is None:
                 return _Checked("not_evaluable", issued)
@@ -432,10 +452,15 @@ class ReplayPolicy:
 
     name: str = "replay"
 
-    def __init__(self, recording: Recording, maps: MapIndex | None = None) -> None:
+    def __init__(
+        self,
+        recording: Recording,
+        maps: MapIndex | None = None,
+        keys: idempotency.Store | None = None,
+    ) -> None:
         self.recording = recording
         self.maps = maps if maps is not None else MapIndex()
-        self.shadow = ShadowPolicy(reader=RecordingReader(recording), maps=self.maps)
+        self.shadow = ShadowPolicy(reader=RecordingReader(recording), maps=self.maps, keys=keys)
 
     def recorded_tool_call(self, name: str, args: JSONValue) -> ToolCall | None:
         """The recording's answer to a read tool call (`Recording.take_tool_call`). A lookup
@@ -445,6 +470,9 @@ class ReplayPolicy:
         except Exception:
             logger.exception("irimi: the recording could not be searched; the tool runs for real")
             return None
+
+    def observe_read(self, service: str, body: bytes) -> None:
+        self.shadow.observe_read(service, body)
 
     def answer(
         self,
@@ -593,7 +621,10 @@ def _replayed_answer(stored: idempotency.Stored) -> Answer:
 
 
 def _conflict_answer(
-    request: Request, classification: Classification, refusal: services.Rejection
+    request: Request,
+    classification: Classification,
+    refusal: services.Rejection,
+    clock: echo.TsClock,
 ) -> Answer:
     """The service's own `idempotency_error`: this key was used for a different write.
 
@@ -602,7 +633,7 @@ def _conflict_answer(
     real service would have answered, and this is one of those. The body is carried at the level
     this route's write would have been faked at, the way `fake_rejection` carries an L3 one.
     """
-    fake = echo.fake_rejection(request, classification, refusal.body)
+    fake = echo.fake_rejection(request, classification, refusal.body, clock)
     return _local(fake, refusal.status, (IDEMPOTENCY_CONFLICT_FLAG,), rejection_code=refusal.code)
 
 

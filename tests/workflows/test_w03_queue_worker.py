@@ -349,46 +349,45 @@ def test_one_failing_message_fails_only_its_own_run(run_workflow, mode):
     assert shadow.exchange_lines().count(REFUND_LINE) == 3
 
 
+PASSED_REFUND = "  ○ refund $30.00 on ch_QSHARED  unvalidated (L3 preconditions passed)"
+REFUSED_REFUND = "  ✗ refund $30.00 on ch_QSHARED  would fail: amount_too_large"
+
+
 @pytest.mark.parametrize("mode", ["shadow", "serve"])
-def test_a_second_run_sees_the_first_runs_faked_refund(run_workflow, mode):
-    """The write log is the engine's, not the run's, by decision: run 2's read of the charge
-    is overlaid with run 1's faked refund, and L3 then refuses run 2's refund against it. That is
-    what production would have done, since production has one Stripe, and the bare run agrees. The
-    shadow week's report counts exactly this: a refund an earlier run already made would have
-    been rejected, or was a duplicate. "Two concurrent requests don't mix" means attribution: each
-    exchange and tool call is stored in the run that named it.
-    What one run faked, the other still sees, under `irimi shadow -- <cmd>` and under serve mode
+def test_a_second_run_never_sees_the_first_runs_faked_refund(run_workflow, mode):
+    """The write log is the run's: run 2's read of the charge is live, not overlaid with run 1's
+    faked refund, and L3 passes run 2's refund against live state and its own writes alone. The
+    bare run, against one real Stripe, refuses the second refund: a run is judged by what it did,
+    never by what another run only pretended to do. Under `irimi shadow -- <cmd>` and serve mode
     alike."""
     shadow = run_workflow(W, "shared_charge", mode)
     bare = run_workflow(W, "shared_charge", "bare")
-    saw = [e["amount_refunded"] for e in shadow.events("saw")]
-    assert saw == [0, 3000] == [e["amount_refunded"] for e in bare.events("saw")]
+    assert [e["amount_refunded"] for e in shadow.events("saw")] == [0, 0]
+    assert [e["amount_refunded"] for e in bare.events("saw")] == [0, 3000]
     reads = [c["answered_by"] for c in shadow.calls() if c["method"] == "GET"]
-    assert reads == [None, "overlay"]
-    assert [c["status"] for c in shadow.calls() if c["method"] == "POST"] == [200, 400]
+    assert reads == [None, None]
+    assert [c["status"] for c in shadow.calls() if c["method"] == "POST"] == [200, 200]
+    assert [c["status"] for c in bare.calls() if c["method"] == "POST"] == [200, 400]
     assert len({c["run"] for c in shadow.calls()}) == 2
-    refused = "  ✗ refund $30.00 on ch_QSHARED  would fail: amount_too_large"
     if mode == "shadow":
-        assert refused in shadow.summary()
+        assert shadow.summary().count(PASSED_REFUND) == 2
+        assert REFUSED_REFUND not in shadow.summary()
         return
-    # Serve mode prints each run's own summary: the refund faked in the first, refused in the
-    # second, each under its own run.
-    first, second = (e["run"] for e in shadow.events("run.start"))
+    # Serve mode prints each run's own summary: each run's refund faked and passed.
     blocks = shadow.run_blocks()
-    assert "  ○ refund $30.00 on ch_QSHARED  unvalidated (L3 preconditions passed)" in blocks[first]
-    assert refused in blocks[second] and refused not in blocks[first]
+    for start in shadow.events("run.start"):
+        assert PASSED_REFUND in blocks[start["run"]]
+        assert REFUSED_REFUND not in blocks[start["run"]]
 
 
-def test_a_second_runs_summary_says_the_first_runs_write_is_its_own(run_workflow):
-    """LOOKS WRONG: the second run's summary says its read was `showing this run's writes`, but
-    the write the overlay showed it is the first run's: the write log is the engine's (#77), and
-    the host line's wording predates runs (#129). `irimi runs show` prints the same from the store
-    under `irimi shadow -- <cmd>`; serve mode prints it for every run, unasked."""
+def test_a_second_runs_summary_shows_none_of_the_first_runs_writes(run_workflow):
+    """The second run's host line counts a plain read: the overlay showed it no write, because
+    the only write on the charge is the first run's. Serve mode prints it for every run, and
+    `irimi runs show` prints the same from the store."""
     serve = run_workflow(W, "shared_charge", "serve")
     second = serve.events("run.start")[1]["run"]
     assert (
-        "  api.stripe.com  1 read (1 showing this run's writes)  1 engine read  1 write "
-        "intercepted" in serve.run_blocks()[second]
+        "  api.stripe.com  1 read  1 engine read  1 write intercepted" in serve.run_blocks()[second]
     )
 
 
@@ -947,18 +946,6 @@ PAIRS = {
         (label("handle_async"), label("handle_async")),
         [f"  - {refund_text(0)}"],
     ),
-    # Two runs refund one charge in turn. The second is refused because the engine's one write
-    # log shows it the first's faked refund; its summary calls that refund its own, pinned
-    # LOOKS WRONG above. Each stored run holds its own refund alone, so the compare is right where
-    # that summary is not. See #129.
-    "shared_charge": (
-        (0, len(CLIENTS)),
-        (label("handle"), label("handle")),
-        [
-            "  ~ A ○ refund $30.00 on ch_QSHARED  unvalidated (L3 preconditions passed)",
-            "    B ✗ refund $30.00 on ch_QSHARED  would fail: amount_too_large",
-        ],
-    ),
     # A sync method and an async one, under the worker's version: the triggers differ, and so
     # does nothing but the refund.
     "worker_methods": (
@@ -1002,6 +989,30 @@ def test_irimi_compare_of_two_runs_one_process_made(run_workflow, scenario, mode
         *rows,
         "",
         f"  0 same · {changed} changed · {only_a} only in A · 0 only in B",
+    ]
+    assert rows_not_shown(shadow, a, b, out) == []
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("scenario", ["shared_charge"])
+def test_irimi_compare_of_two_runs_on_one_charge_finds_the_same_refund(
+    run_workflow, scenario, mode
+):
+    """Two runs refund one charge, in turn or at once: each run's refund is checked against its
+    own writes alone, so the two runs made the same write, and compare says so."""
+    shadow = run_workflow(W, scenario, mode)
+    a, b = run_of(shadow, 0), run_of(shadow, len(CLIENTS))
+    code, out, err = shadow.compare_runs(a, b)
+    assert (code, err) == (0, [])
+    assert out == [
+        f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+        f"  A  {label('handle')}",
+        f"  B  {label('handle')}",
+        ARGS_DIFFER,
+        "",
+        f"  = {PASSED_REFUND.strip()}",
+        "",
+        "  1 same · 0 changed · 0 only in A · 0 only in B",
     ]
     assert rows_not_shown(shadow, a, b, out) == []
 
@@ -1071,25 +1082,23 @@ def test_replaying_one_of_eight_concurrent_runs_replays_that_run_alone(
     ]
 
 
-def test_replaying_the_second_shared_charge_run_replays_its_refusal(run_workflow, replayed):
-    """`shared_charge`'s second run refunds the charge the first already refunded, and was refused
-    `amount_too_large`, its read showing the first run's refund, which the overlay edited in.
-    Replayed alone, it is answered as it was recorded, read and refusal alike, and its comparison
-    is the same write: the first run is not in the replay to take the refusal first, as it did when
-    a replay re-ran the process."""
+def test_replaying_the_second_shared_charge_run_replays_it_alone(run_workflow, replayed):
+    """`shared_charge`'s second run refunds the charge the first already refunded in shadow, and
+    its refund passed, because its read and its check saw its own writes alone. Replayed alone, it
+    is answered as it was recorded, read and refund alike, and its comparison is the same write."""
     recorded = run_workflow(W, "shared_charge", "shadow")
     second = max(recorded.sdk_runs(), key=lambda r: r.trigger.args["message"]["index"])
     _, replay = replayed(W, "shared_charge", run_id=second.run_id)
     assert replay.answered() == [
-        ("read:ch_QSHARED", 200, "overlay"),
-        ("refund:ch_QSHARED", 400, "fake-L1"),
+        ("read:ch_QSHARED", 200, "recording"),
+        ("refund:ch_QSHARED", 200, "fake-L1"),
     ]
     assert replay.internet.requests() == []
     result = replay.replay_result()
     assert (replay.exit_code, result[result.index("") + 1 :]) == (
         0,
         [
-            "  = ✗ refund $30.00 on ch_QSHARED  would fail: amount_too_large",
+            f"  = {PASSED_REFUND.strip()}",
             "",
             "  1 same · 0 changed · 0 only in A · 0 only in B",
         ],

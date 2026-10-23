@@ -428,10 +428,6 @@ def test_mapped_read_is_named_and_forwarded(tmp_path, monkeypatch, upstream):
 def test_a_slack_read_raises_the_ts_watermark(tmp_path, monkeypatch, upstream):
     """A minted `ts` has to sort after the real messages the run already read, and this hook
     is the only place those values go past - the write log holds writes, not reads."""
-    from irimi import echo
-    from irimi.echo import slack as echo_slack
-
-    monkeypatch.setattr(echo_slack, "_last_slack_ts", (0, 0))
     cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch, doc=SLACK_MAP))
     eng, seen, stop = _start(cfg)
     try:
@@ -442,7 +438,7 @@ def test_a_slack_read_raises_the_ts_watermark(tmp_path, monkeypatch, upstream):
         stop()
     assert status == 200
     assert (seen[0].service, seen[0].kind) == ("slack", "read")
-    whole, _, fraction = echo.slack_ts().partition(".")
+    whole, _, fraction = eng.policy.slack_ts.mint().partition(".")
     assert (int(whole), int(fraction)) > (1_999_999_999, 500)
 
 
@@ -1472,7 +1468,7 @@ def test_a_streamed_read_is_not_observed_now_that_its_body_is_recorded(tmp_path,
     """A streamed body is recorded, and `echo.observe_read` never sees one: a stream is not
     a document an observer can read, and its copy may be cut short."""
     observed = []
-    monkeypatch.setattr(echo, "observe_read", lambda service, body: observed.append(body))
+    monkeypatch.setattr(echo, "observe_read", lambda service, body, clock: observed.append(body))
     _STREAM_GATE.clear()
     srv = HTTPServer(("127.0.0.1", 0), _StreamUpstream)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
@@ -2342,11 +2338,11 @@ def test_neither_half_of_a_delegated_exchange_is_a_write(tmp_path, monkeypatch, 
         addon = next(a for a in eng._master.addons.chain if isinstance(a, IrimiAddon))
         status, _ = _via_proxy(eng.listen_port(), "GET", "http://127.0.0.1:1/hello")
         assert status == 200
-        assert [ex.kind for ex in addon.write_log] == [], "a delegated read is in the write log"
+        assert addon.write_log.for_run("t3st") == (), "a delegated read is in the write log"
         # Nor is the delegated *write*: the target performed it, or did not, and the overlay
         # cannot apply a write irimi did not author.
         _via_proxy(eng.listen_port(), "POST", "http://127.0.0.1:1/things", body=b"{}")
-        assert addon.write_log == [], "a delegated write is in the overlay's write log"
+        assert addon.write_log.for_run("t3st") == (), "a delegated write is in the write log"
     finally:
         stop()
 
@@ -2381,7 +2377,7 @@ def test_a_refused_target_is_not_a_write_either(tmp_path, monkeypatch, target):
     assert asked == [(f"http://127.0.0.1:{target}/w", eng.listen_port(), "127.0.0.1")]
     # Still recorded - a write irimi could not answer is exactly what the trace has to show.
     assert [ex.flags for ex in seen] == [("target-failed",)]
-    assert addon.write_log == [], "a write performed nowhere is in the overlay's write log"
+    assert addon.write_log.for_run("t3st") == (), "a write performed nowhere is in the write log"
 
 
 def test_an_ipv6_target_gets_a_bracketed_host_header(tmp_path, monkeypatch):
@@ -2610,11 +2606,53 @@ def _engine_with_a_write(tmp_path, monkeypatch, upstream, overlay):
     try:
         addon = next(a for a in eng._master.addons.chain if isinstance(a, IrimiAddon))
         _via_proxy(eng.listen_port(), "POST", f"http://127.0.0.1:{upstream}/things", body=b"{}")
-        assert addon.write_log, "the engine only asks the overlay once the log holds a write"
+        assert addon.write_log.for_run("t3st"), "the overlay is asked only once there is a write"
     except BaseException:
         stop()
         raise
     return eng, seen, stop
+
+
+def test_a_run_s_requests_see_its_own_writes_alone(tmp_path, monkeypatch, upstream):
+    """The write log is per run: a write faked in one run is handed to the policy and the overlay
+    for that run's later requests, and never for another run's."""
+    decided = []
+    overlaid = []
+
+    class _Seeing(ShadowPolicy):
+        def answer(self, request, classification, write_log=(), run_id=""):
+            decided.append((run_id, request.method, tuple(write_log)))
+            return super().answer(request, classification, write_log, run_id)
+
+    class _Overlay(_OverlayDouble):
+        def __call__(self, write_log, *args, **kwargs):
+            overlaid.append(tuple(write_log))
+            return super().__call__(write_log, *args, **kwargs)
+
+    cfg = _config(tmp_path, monkeypatch, maps=_maps(tmp_path, monkeypatch))
+    eng, seen, stop = _start(cfg, overlay=_Overlay(), policy=_Seeing())
+    base = f"http://127.0.0.1:{upstream}"
+    try:
+        for run, method, path in [
+            ("run-a", "POST", "/things"),
+            ("run-b", "GET", "/hello"),
+            ("run-a", "GET", "/hello"),
+            ("run-b", "POST", "/things"),
+        ]:
+            body = b"{}" if method == "POST" else None
+            headers = {pipeline.RUN_HEADER: run}
+            _via_proxy(eng.listen_port(), method, base + path, body=body, extra_headers=headers)
+    finally:
+        stop()
+    write_a = seen[0]
+    assert (write_a.run_id, write_a.kind) == ("run-a", "write")
+    assert decided == [
+        ("run-a", "POST", ()),
+        ("run-b", "GET", ()),
+        ("run-a", "GET", (write_a,)),
+        ("run-b", "POST", ()),
+    ]
+    assert overlaid == [(write_a,)]
 
 
 def _overlaid_read(tmp_path, monkeypatch, upstream, overlay):
@@ -2785,7 +2823,7 @@ def test_a_rewrote_header_the_agent_sent_is_stripped_before_the_runs_first_write
                 "Irimi-Rewrote": "starting_after=re_FORGED2",
             },
         )
-        assert addon.write_log == [], "this test is about the empty-log path"
+        assert addon.write_log.for_run("t3st") == (), "this test is about the empty-log path"
     finally:
         stop()
     assert status == 200

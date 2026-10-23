@@ -665,12 +665,13 @@ container, an SDK that ignores the proxy variables, such as stripe-python, canno
   answer is recorded when its stream closes. One the agent reads to its end is in its run's
   summary; one the agent leaves open after its run has ended is stored in the run, but is missing
   from the summary already printed.
-- **One faked world.** What one run faked, a later run sees: the write log is irimi's, not the
-  run's, as production has one Stripe. A refund an earlier run already made is answered as Stripe
-  would answer it, `charge_already_refunded` or `amount_too_large`, and its summary says so.
-- **What it holds.** Nothing per exchange for printing. It does hold that write log, every write
-  it faked, for as long as it runs, and every run that has not ended, one whose end never reached
-  irimi included. Both grow over a long serve.
+- **One write log per run.** A run sees its own faked writes and no other run's: its reads are
+  overlaid, and its precondition checks made, against live state plus its own writes alone. A
+  refund another run already faked does not refuse this run's refund, though production, with one
+  Stripe, would. Requests no run names share one log of their own.
+- **What it holds.** Nothing per exchange for printing. It does hold each open run's write log
+  and idempotency keys, dropped when the run ends, and every run that has not ended, one whose end never reached irimi
+  included. A run whose end never arrives, and the `unattributed` log, grow over a long serve.
 - **Binding.** irimi listens on `127.0.0.1` unless `--listen-host` says otherwise. Any other
   address, `0.0.0.0` and `::` included, prints a banner line: `listening on 0.0.0.0: any machine
   that can reach this port can send traffic through irimi and call its control endpoint`. The

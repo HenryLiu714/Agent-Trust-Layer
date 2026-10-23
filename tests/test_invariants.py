@@ -36,8 +36,8 @@ from irimi.overlay import NoOverlay, Overlaid, ServiceOverlay
 from irimi.policy import Decided, Forward, ReplayPolicy, Respond, ShadowPolicy
 from irimi.protocol.headers import ANSWERED_BY_HEADER
 from irimi.recording import Recording
-from irimi.store import NullStore
 from irimi.wire import stamp
+from tests.doubles import NullStore
 
 # One host, one read route and one write route. The servers in this file all listen on loopback,
 # so the map claims 127.0.0.1; hosts carry no port, so their random ports do not matter.
@@ -573,7 +573,7 @@ def test_shadow_mode_is_never_built_without_a_reader(tmp_path, monkeypatch):
     again, configured and never consulted. So the one construction site is pinned here."""
     from irimi import cli
     from irimi.reader import NoReader
-    from irimi.store import NullStore
+    from tests.doubles import NullStore
 
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
     index = servicemap.MapIndex(tuple(servicemap.loader.load_shipped()))

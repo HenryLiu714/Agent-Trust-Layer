@@ -28,8 +28,8 @@ from examples.workflows.w09_scope_gauntlet.scenarios import BIG_DESCRIPTION_BYTE
 from irimi import control, paths, redact, report, trace
 from irimi.bodies import MAX_BODY_BYTES
 from irimi.exchange import Exchange, Flag
-from irimi.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE
-from irimi.store import MAX_STORED_BODY, RUNS_DIR, SERVE_LOCK_FILE
+from irimi.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE, MAX_STORED_BODY
+from irimi.store.layout import RUNS_DIR, SERVE_LOCK_FILE
 from irimi.trace import ErrorInfo, RunEnd, RunRecord, ToolCall, Trigger
 
 W = "w09_scope_gauntlet"

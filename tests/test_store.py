@@ -17,10 +17,13 @@ from pathlib import Path
 
 import pytest
 
-from irimi import exchange, files, limits, redact, store, trace
+from irimi import exchange, files, limits, redact, trace
 from irimi.exchange import Exchange, Flag, Request, Response
-from irimi.store import DirectoryStore, NullStore, RunNotFound, StoreReader, StoreStats
+from irimi.store import StoreStats, layout, writer
+from irimi.store.reader import RunNotFound, StoreReader
+from irimi.store.writer import DirectoryStore
 from irimi.trace import ErrorInfo, RunRecord, TelemetrySeen, ToolCall, TraceFormatError, Trigger
+from tests.doubles import NullStore
 
 SECRET = "sk_live_StoreUnitSecret"
 
@@ -75,8 +78,8 @@ def _tool_call(run_id: str, args) -> ToolCall:
 
 
 class _StoreOs:
-    """The `os` module as `irimi.store` sees it, with the functions a test sets replaced. Patching
-    `os` itself would change it for every thread in the process, pytest's own included."""
+    """The `os` module as the store's modules see it, with the functions a test sets replaced.
+    Patching `os` itself would change it for every thread in the process, pytest's own included."""
 
     def __getattr__(self, name: str):
         return getattr(os, name)
@@ -85,7 +88,8 @@ class _StoreOs:
 @pytest.fixture
 def store_os(monkeypatch) -> _StoreOs:
     proxy = _StoreOs()
-    monkeypatch.setattr(store, "os", proxy)
+    monkeypatch.setattr(writer, "os", proxy)
+    monkeypatch.setattr(layout, "os", proxy)
     monkeypatch.setattr(files, "os", proxy)  # the store writes its files through `files`
     return proxy
 
@@ -487,17 +491,17 @@ def test_a_9_mib_body_stores_its_first_8_mib_and_says_it_was_cut(root, key):
     s.close()
     (line,) = [json.loads(line) for line in (root / "runs/r1/events.jsonl").open()]
     ref = line["response"]["body"]
-    assert (ref["size"], ref["truncated"]) == (store.MAX_STORED_BODY, True)
-    assert (root / "blobs" / ref["sha256"]).stat().st_size == store.MAX_STORED_BODY
+    assert (ref["size"], ref["truncated"]) == (writer.MAX_STORED_BODY, True)
+    assert (root / "blobs" / ref["sha256"]).stat().st_size == writer.MAX_STORED_BODY
     (ex,) = StoreReader(root).load_run("r1").events
     assert isinstance(ex, Exchange) and ex.response is not None
-    assert ex.response.body == body[: store.MAX_STORED_BODY]
+    assert ex.response.body == body[: writer.MAX_STORED_BODY]
     assert Flag.BODY_TRUNCATED in ex.flags
 
 
 def test_a_body_is_redacted_whole_before_it_is_cut(root, key, monkeypatch):
     """A secret straddling the cut is never stored as half a secret."""
-    monkeypatch.setattr(store, "MAX_STORED_BODY", 20)
+    monkeypatch.setattr(writer, "MAX_STORED_BODY", 20)
     body = b"012345678 " + SECRET.encode()  # the cut at 20 falls inside the key
     s = DirectoryStore(root, key)
     s.record(_exchange("r1", answer=body))
@@ -526,7 +530,7 @@ def test_a_streamed_body_cut_at_the_maximum_keeps_the_chunks_of_what_is_stored(
 ):
     """`_put_body` keeps the first MAX_STORED_BODY bytes, and the chunk lengths are cut at the
     same byte, so they still split the stored body."""
-    monkeypatch.setattr(store, "MAX_STORED_BODY", 20)
+    monkeypatch.setattr(writer, "MAX_STORED_BODY", 20)
     s = DirectoryStore(root, key)
     s.record(_streamed(b"a" * 8 + b"b" * 8 + b"c" * 14, (8, 8, 14)))
     s.close()
@@ -549,7 +553,7 @@ def test_a_stream_redaction_grows_past_the_maximum_is_a_prefix_of_its_redacted_w
     sent = line * 10
     cap = 6 * len(redacted_line) + len(b'data: {"text":"<redac')  # inside the 7th placeholder
     assert len(sent) <= cap < len(redacted_line) * 10
-    monkeypatch.setattr(store, "MAX_STORED_BODY", cap)
+    monkeypatch.setattr(writer, "MAX_STORED_BODY", cap)
     streamed = dataclasses.replace(
         _streamed(sent, (len(line),) * 10), flags=(exchange.Flag.STREAM_TRUNCATED,)
     )
@@ -567,7 +571,7 @@ def test_a_stream_redaction_grows_past_the_maximum_is_a_prefix_of_its_redacted_w
 def test_a_request_body_too_big_to_redact_leaves_the_streamed_response_s_chunks(
     root, key, monkeypatch
 ):
-    monkeypatch.setattr(store, "MAX_REDACTED_BODY", 10)
+    monkeypatch.setattr(writer, "MAX_REDACTED_BODY", 10)
     s = DirectoryStore(root, key)
     streamed = _streamed(b"aaaa" + b"bbbbbb", (4, 6))
     big = dataclasses.replace(streamed.request, body=b"x" * 11)
@@ -580,7 +584,7 @@ def test_a_request_body_too_big_to_redact_leaves_the_streamed_response_s_chunks(
 
 
 def test_a_streamed_body_too_big_to_redact_is_stored_with_no_chunks(root, key, monkeypatch):
-    monkeypatch.setattr(store, "MAX_REDACTED_BODY", 10)
+    monkeypatch.setattr(writer, "MAX_REDACTED_BODY", 10)
     s = DirectoryStore(root, key)
     s.record(_streamed(b"x" * 11, (5, 6)))
     s.close()
@@ -733,7 +737,7 @@ def test_resuming_from_the_tail_truncates_a_half_line_at_its_offset_in_the_file(
     last = whole.splitlines(keepends=True)[-1]
     with open(path, "ab") as f:
         f.write(b'{"seq": 4, "ty')
-    monkeypatch.setattr(store, "RESUME_TAIL", len(last) + 30)
+    monkeypatch.setattr(layout, "RESUME_TAIL", len(last) + 30)
     second = DirectoryStore(root, key)
     second.record(_exchange("r1", "/n3"))
     second.close()
@@ -750,7 +754,7 @@ def test_a_run_json_is_on_disk_whole_before_it_is_renamed_into_place(root, key, 
     store_os.fsync = lambda fd: (synced.add(os.fstat(fd).st_ino), os.fsync(fd))[1]
 
     def replace(src, dst) -> None:
-        if Path(dst).name == store.RUN_FILE:
+        if Path(dst).name == layout.RUN_FILE:
             renamed.append(os.stat(src).st_ino in synced)
         os.replace(src, dst)
 
@@ -836,7 +840,7 @@ def test_a_run_of_an_older_schema_version_is_never_appended_to(root, key, monkey
     first = DirectoryStore(root, key)
     first.record(_exchange("old", "/before"))
     first.close()
-    monkeypatch.setattr(store, "SCHEMA_VERSION", trace.SCHEMA_VERSION + 1)
+    monkeypatch.setattr(writer, "SCHEMA_VERSION", trace.SCHEMA_VERSION + 1)
     second = DirectoryStore(root, key)
     second.record(_exchange("old", "/after"))
     second.close()
@@ -848,16 +852,16 @@ def test_a_run_of_an_older_schema_version_is_never_appended_to(root, key, monkey
 
 
 def test_a_failed_blob_write_drops_that_event_and_the_next_one_is_written(root, key, monkeypatch):
-    real = store.write_private
+    real = writer.write_private
     failed = []
 
     def once(path: Path, data: bytes, **kwargs) -> None:
-        if path.parent.name == store.BLOBS_DIR and not failed:
+        if path.parent.name == layout.BLOBS_DIR and not failed:
             failed.append(path)
             raise OSError("disk full")
         real(path, data, **kwargs)
 
-    monkeypatch.setattr(store, "write_private", once)
+    monkeypatch.setattr(writer, "write_private", once)
     s = DirectoryStore(root, key)
     s.record(_exchange("r1", "/lost", answer=b"first"))
     s.record(_exchange("r1", "/kept", answer=b"second"))
@@ -871,7 +875,7 @@ def test_a_failed_blob_write_drops_that_event_and_the_next_one_is_written(root, 
 def test_a_run_id_that_is_not_a_string_is_a_drop_and_the_writer_goes_on(root, key, monkeypatch):
     """The writer counts a failure under the event's run id. One that cannot be a dict key raised
     in that error path and ended the writer thread, silently losing every later event."""
-    monkeypatch.setattr(store, "CLOSE_TIMEOUT_S", 2.0)
+    monkeypatch.setattr(writer, "CLOSE_TIMEOUT_S", 2.0)
     s = DirectoryStore(root, key)
     s.record(dataclasses.replace(_exchange("r1"), run_id=["not", "a", "string"]))  # type: ignore[arg-type]
     s.record(_exchange("r1", "/after"))
@@ -932,7 +936,7 @@ def test_a_value_json_cannot_hold_is_a_drop_not_a_line_that_is_not_json(root, ke
 
 
 def test_a_full_queue_drops_without_blocking_and_the_run_counts_it(root, key, monkeypatch):
-    monkeypatch.setattr(store, "QUEUE_SIZE", 3)
+    monkeypatch.setattr(writer, "QUEUE_SIZE", 3)
     taken, release = threading.Event(), threading.Event()
     real = DirectoryStore._handle
 
@@ -960,12 +964,12 @@ def test_a_full_queue_drops_without_blocking_and_the_run_counts_it(root, key, mo
 
 
 def test_close_gives_up_on_a_stuck_writer_and_counts_what_it_left(root, key, monkeypatch):
-    monkeypatch.setattr(store, "CLOSE_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(writer, "CLOSE_TIMEOUT_S", 0.2)
     release = threading.Event()
     real = DirectoryStore._handle
 
     def stuck(self, item):
-        if isinstance(item, store._Record) and item.event.request.path == "/stuck":
+        if isinstance(item, writer._QueuedEvent) and item.event.request.path == "/stuck":
             release.wait(10)
         real(self, item)
 
@@ -991,8 +995,8 @@ def test_close_gives_up_on_a_stuck_writer_and_counts_what_it_left(root, key, mon
 def test_an_abandoned_writer_stops_once_its_write_in_flight_lands(root, key, monkeypatch):
     """`close()` drained the queue, the sentinel included, when it gave up on the writer. The
     writer's idle wake-up must see that and end, not poll an empty queue for the process's life."""
-    monkeypatch.setattr(store, "CLOSE_TIMEOUT_S", 0.2)
-    monkeypatch.setattr(store, "SYNC_IDLE_S", 0.01)
+    monkeypatch.setattr(writer, "CLOSE_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(writer, "SYNC_IDLE_S", 0.01)
     release = threading.Event()
     real = DirectoryStore._handle
 
@@ -1051,7 +1055,7 @@ def test_close_is_idempotent_and_an_event_after_it_is_dropped_not_raised(root, k
 def test_the_queue_is_bounded_in_body_bytes_too(root, key, monkeypatch):
     """10,000 items of 8 MiB would be 80 GiB waiting on a slow disk. A body that would pass the
     byte budget is dropped, but one reaching an idle writer's empty queue is always taken."""
-    monkeypatch.setattr(store, "MAX_QUEUED_BYTES", 100)
+    monkeypatch.setattr(writer, "MAX_QUEUED_BYTES", 100)
     taken, release = threading.Event(), threading.Event()
     real = DirectoryStore._handle
 
@@ -1079,7 +1083,7 @@ def test_a_tool_calls_args_and_result_count_against_the_byte_budget(root, key, m
     """The control endpoint takes a tool call of up to 2 MiB, and 10,000 of them would be 20 GiB
     waiting: the call as JSON, its args and result included, counts as body bytes do."""
     size = len(json.dumps(trace.tool_call_to_json(_tool_call("r1", {"x": "y" * 400}))))
-    monkeypatch.setattr(store, "MAX_QUEUED_BYTES", size + size // 2)
+    monkeypatch.setattr(writer, "MAX_QUEUED_BYTES", size + size // 2)
     taken, release = threading.Event(), threading.Event()
     real = DirectoryStore._handle
 
@@ -1109,7 +1113,7 @@ def test_a_tool_calls_name_and_id_count_against_the_byte_budget(root, key, monke
     whole call as JSON counts, as a start's whole record does."""
     named = dataclasses.replace(_tool_call("r1", None), name="n" * 400)
     size = len(json.dumps(trace.tool_call_to_json(named)))
-    monkeypatch.setattr(store, "MAX_QUEUED_BYTES", size + size // 2)
+    monkeypatch.setattr(writer, "MAX_QUEUED_BYTES", size + size // 2)
     taken, release = threading.Event(), threading.Event()
     real = DirectoryStore._handle
 
@@ -1139,7 +1143,7 @@ def test_a_runs_start_counts_against_the_byte_budget(root, key, monkeypatch):
     leaves its run to be made from its first event, a `header` run that says it dropped one."""
     started = _record("r1", args={"x": "y" * 400})
     size = len(json.dumps(trace.run_to_json(started)))
-    monkeypatch.setattr(store, "MAX_QUEUED_BYTES", size + size // 2)
+    monkeypatch.setattr(writer, "MAX_QUEUED_BYTES", size + size // 2)
     taken, release = threading.Event(), threading.Event()
     real = DirectoryStore._handle
 
@@ -1172,7 +1176,7 @@ def test_an_end_waits_with_its_error_cut_outside_secrets_and_is_never_dropped_fo
     cut outside secrets to MAX_QUEUED_ERROR, an end costs the byte budget nothing, and no run
     loses its end to it: a key across that cut is left out whole, and the stored error is still
     a prefix of the redacted whole."""
-    monkeypatch.setattr(store, "MAX_QUEUED_BYTES", 100)
+    monkeypatch.setattr(writer, "MAX_QUEUED_BYTES", 100)
     held: list[object] = []
     taken, release = threading.Event(), threading.Event()
     real = DirectoryStore._handle
@@ -1185,7 +1189,7 @@ def test_an_end_waits_with_its_error_cut_outside_secrets_and_is_never_dropped_fo
 
     monkeypatch.setattr(DirectoryStore, "_handle", paused)
     secret = "ghp_" + "Q" * 36
-    long = "m" * (store.MAX_QUEUED_ERROR - 10) + " " + secret + " " + "m" * 2_000_000
+    long = "m" * (writer.MAX_QUEUED_ERROR - 10) + " " + secret + " " + "m" * 2_000_000
     s = DirectoryStore(root, key)
     s.record(_exchange("r0", "/held", answer=b"x" * 500))  # over budget, so nothing else fits
     assert taken.wait(5)
@@ -1193,9 +1197,9 @@ def test_an_end_waits_with_its_error_cut_outside_secrets_and_is_never_dropped_fo
     assert s.stats().dropped == 0
     release.set()
     s.close()
-    [queued] = [item for item in held if isinstance(item, store._EndRun)]
+    [queued] = [item for item in held if isinstance(item, writer._EndRun)]
     assert queued.error == ErrorInfo(
-        "t." * (store.MAX_QUEUED_ERROR // 2), "m" * (store.MAX_QUEUED_ERROR - 10) + " "
+        "t." * (writer.MAX_QUEUED_ERROR // 2), "m" * (writer.MAX_QUEUED_ERROR - 10) + " "
     )
     record = StoreReader(root).load_run("r1").record
     assert (record.end.outcome, record.end.error) == (
@@ -1234,8 +1238,8 @@ def test_a_start_that_cannot_be_measured_is_a_drop_on_its_run(root, key):
 
 def test_the_writer_fsyncs_in_batches_before_close(root, key, monkeypatch, store_os):
     synced: set[int] = set()  # inodes
-    monkeypatch.setattr(store, "SYNC_EVERY", 3)
-    monkeypatch.setattr(store, "SYNC_IDLE_S", 60.0)  # only the batch syncs before close
+    monkeypatch.setattr(writer, "SYNC_EVERY", 3)
+    monkeypatch.setattr(writer, "SYNC_IDLE_S", 60.0)  # only the batch syncs before close
     store_os.fsync = lambda fd: (synced.add(os.fstat(fd).st_ino), os.fsync(fd))[1]
     s = DirectoryStore(root, key)
     for n in range(4):  # events.jsonl and a blob each: past 3 on the second event
@@ -1252,8 +1256,8 @@ def test_one_long_run_is_fsynced_every_sync_every_writes_not_only_when_it_ends(
     """Counted in distinct files, one run appending to its one events.jsonl never reached a batch,
     and a week-long run was synced only when it ended."""
     synced: set[int] = set()  # inodes
-    monkeypatch.setattr(store, "SYNC_EVERY", 3)
-    monkeypatch.setattr(store, "SYNC_IDLE_S", 60.0)
+    monkeypatch.setattr(writer, "SYNC_EVERY", 3)
+    monkeypatch.setattr(writer, "SYNC_IDLE_S", 60.0)
     store_os.fsync = lambda fd: (synced.add(os.fstat(fd).st_ino), os.fsync(fd))[1]
     s = DirectoryStore(root, key)
     for n in range(4):
@@ -1266,7 +1270,7 @@ def test_one_long_run_is_fsynced_every_sync_every_writes_not_only_when_it_ends(
 def test_an_idle_writer_fsyncs_what_it_wrote(root, key, monkeypatch, store_os):
     """A `serve` that goes quiet does not leave its last lines unsynced until the next event."""
     synced: set[int] = set()  # inodes
-    monkeypatch.setattr(store, "SYNC_IDLE_S", 0.01)
+    monkeypatch.setattr(writer, "SYNC_IDLE_S", 0.01)
     store_os.fsync = lambda fd: (synced.add(os.fstat(fd).st_ino), os.fsync(fd))[1]
     s = DirectoryStore(root, key)
     s.record(_exchange("r1"))
@@ -1314,7 +1318,7 @@ def test_two_stores_on_one_root_never_interleave_inside_a_line(root, key):
 
 
 def test_resuming_a_long_run_reads_only_its_tail(root, key, monkeypatch):
-    monkeypatch.setattr(store, "RESUME_TAIL", 64)  # shorter than one line: falls back to it all
+    monkeypatch.setattr(layout, "RESUME_TAIL", 64)  # shorter than one line: falls back to it all
     first = DirectoryStore(root, key)
     for n in range(3):
         first.record(_exchange("r1", f"/n{n}"))
@@ -1366,7 +1370,7 @@ def test_a_torn_blob_is_written_again_rather_than_trusted(root, key):
 
 
 def test_a_body_too_big_to_redact_is_not_stored_and_its_exchange_says_so(root, key, monkeypatch):
-    monkeypatch.setattr(store, "MAX_REDACTED_BODY", 10)
+    monkeypatch.setattr(writer, "MAX_REDACTED_BODY", 10)
     s = DirectoryStore(root, key)
     s.record(_exchange("r1", body=b"small", answer=b"x" * 11))
     s.close()
@@ -1380,14 +1384,14 @@ def test_an_ended_run_is_forgotten_and_a_late_event_reopens_it_from_disk(root, k
     """A long `serve` holds only its open runs. A late event after `end_run` reopens the run:
     `seq` continues, the outcome stays, and a drop after the end is added to the stored count -
     once, and to the drop before the end, never counting that one twice."""
-    real = store.write_private
+    real = writer.write_private
 
     def refuse_late_blob(path: Path, data: bytes, **kwargs) -> None:
         if data in (b"early body", b"late body"):
             raise OSError("disk full")
         real(path, data, **kwargs)
 
-    monkeypatch.setattr(store, "write_private", refuse_late_blob)
+    monkeypatch.setattr(writer, "write_private", refuse_late_blob)
     s = DirectoryStore(root, key)
     s.start_run(_record("r1"))
     s.record(_exchange("r1", "/a"))

@@ -56,8 +56,17 @@
   "src/irimi/services/stripe/effects.py": {
     "caps_run": 1
   },
-  "src/irimi/store.py": {
-    "caps_run": 11
+  "src/irimi/store/__init__.py": {
+    "caps_run": 1
+  },
+  "src/irimi/store/layout.py": {
+    "caps_run": 2
+  },
+  "src/irimi/store/lock.py": {
+    "caps_run": 2
+  },
+  "src/irimi/store/writer.py": {
+    "caps_run": 6
   },
   "src/irimi/trace.py": {
     "caps_run": 1

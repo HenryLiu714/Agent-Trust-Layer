@@ -1,7 +1,8 @@
 """Owner-only files and directories: the CA, the redaction key and the trace store.
 
 Every private file irimi writes goes through here, so each is created with its mode set before
-any byte lands, never through a symlink at its own path, and in one of three ways (`write_private`).
+any byte lands, never through a symlink at its own path, and in one of three ways (`write_private`),
+or as one more whole line of a file several processes append to (`append_line`).
 """
 
 import os
@@ -63,6 +64,32 @@ def write_private(
                 pass  # another process published first, and its file is the one
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def append_line(path: Path, data: bytes) -> None:
+    """`data`, one whole line, in one `write` on an O_APPEND descriptor, so two processes appending
+    to one file never interleave inside a line."""
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, FILE_MODE)
+    try:
+        start = end = -1  # where this line's bytes begin and end, once the disk took any
+        view = memoryview(data)
+        try:
+            while view:
+                written = os.write(fd, view)
+                end = os.lseek(fd, 0, os.SEEK_CUR)
+                start = end - written if start < 0 else start
+                view = view[written:]
+        except OSError:
+            # A line the disk refused half-way would glue itself onto the next one and damage
+            # the run for every later read: cut it off again before reporting the drop. Only
+            # this line's own bytes, and only while they still end the file: `unattributed/` is
+            # shared, and a line another process appended meanwhile is not this one's to cut.
+            # A `write` that raised wrote nothing, so a line the disk never took is left alone.
+            if start >= 0 and end - start == len(data) - len(view) and os.fstat(fd).st_size == end:
+                os.ftruncate(fd, start)
+            raise
+    finally:
+        os.close(fd)
 
 
 def _write(path: Path, data: bytes, mode: int, flags: int, durable: bool) -> None:

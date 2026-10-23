@@ -388,7 +388,7 @@ def test_sigterm_stops_the_command_ends_the_run_and_closes_the_store(home, upstr
     import subprocess
     import time
 
-    from irimi.store import StoreReader
+    from irimi.store.reader import StoreReader
 
     ready = home / "child.pid"
     src = (
@@ -446,7 +446,7 @@ def test_sigterm_before_the_command_starts_runs_nothing(home, monkeypatch, capsy
     import signal
 
     from irimi import cli
-    from irimi.store import StoreReader
+    from irimi.store.reader import StoreReader
 
     monkeypatch.chdir(home)  # so SHOULD_NOT_EXIST would land here, not in the repo
     prepare = cli._prepare_run
@@ -482,7 +482,7 @@ def test_sigterm_while_the_command_starts_is_passed_to_it_once_it_exists(home, m
     import subprocess
     import time
 
-    from irimi.store import StoreReader
+    from irimi.store.reader import StoreReader
 
     real = subprocess.Popen
 
@@ -507,7 +507,7 @@ def test_sigterm_after_the_command_exited_signals_no_pid(home, monkeypatch):
     import signal
 
     from irimi import runner
-    from irimi.store import StoreReader
+    from irimi.store.reader import StoreReader
 
     killed: list[tuple[int, int]] = []
     real_kill, real_end = os.kill, runner.end_process_run

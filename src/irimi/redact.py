@@ -2,8 +2,9 @@
 
 The trace store writes what the agent sent and what it was sent back:
 `Authorization` headers, Slack tokens, webhook URLs whose path IS the secret. This module is the
-copy that goes to disk and nothing else. The live flow and the agent's answer are never changed;
-the store's writer thread calls `redact_exchange` and `redact_json`, the engine never does.
+copy that goes to disk and nothing else, and the one statement of what of each event and run
+record goes there (`for_disk`, `run_for_disk`). The live flow and the agent's answer are never
+changed; the store's writer thread calls them, the engine never does.
 
 Redaction is always on and keyed: a secret becomes `<redacted:` + 16 hex digits of an HMAC-SHA256
 under this install's key + `>`, so the same secret always becomes the same placeholder and a
@@ -15,9 +16,9 @@ It is also where "this header is a credential" is stated, once: an answer target
 one (`delegation`) and disk may not be handed one either.
 
 FAILURE IS CLOSED. A value that cannot be redacted is stored as `<redaction-failed>`, never as it
-was, and the exchange gains `Flag.REDACTION_FAILED`. `redact_exchange` and `redact_json` never
-raise. Layer 3: it imports `exchange`, `paths`, `secret_shapes` (what it looks for in text),
-`files` (the key's file), `bodies`, `servicemap` and `trace`.
+was, and the exchange gains `Flag.REDACTION_FAILED`. No public redaction function raises. Layer 3:
+it imports `exchange`, `paths`, `secret_shapes` (what it looks for in text), `files` (the key's
+file), `bodies`, `servicemap` and `trace`.
 """
 
 import hmac
@@ -40,7 +41,7 @@ from irimi.exchange import Exchange, Flag, Headers, Request, Response, header_va
 from irimi.files import write_private
 from irimi.secret_shapes import SECRET_SHAPE
 from irimi.servicemap import shipped_credential_hosts
-from irimi.trace import JSONValue
+from irimi.trace import ErrorInfo, Event, JSONValue, RunRecord, TelemetrySeen, ToolCall, Trigger
 
 logger = logging.getLogger(__name__)
 
@@ -243,11 +244,76 @@ def redact_exchange(exchange: Exchange, key: bytes) -> Exchange:
     )
 
 
+def redact_request(request: Request, key: bytes) -> Request:
+    """`request` as `redact_exchange` stores it, for a replay keying a live request as its
+    recording was keyed. Never raises."""
+    return _redact_request(request, key, _Guard(), _secret_path(request))
+
+
 def redact_json(value: JSONValue, key: bytes) -> JSONValue:
     """`value` with every secret key's value and every secret shape replaced: a trigger's args and a
     tool call's args and result. Never raises; REDACTION_FAILED when it could not redact."""
     failed: JSONValue = REDACTION_FAILED
     return _Guard()("a JSON value", failed, partial(_redact_json, value, key))
+
+
+def redact_error(error: ErrorInfo | None, key: bytes) -> ErrorInfo | None:
+    """An error as a trace keeps it: its type and its message each redacted as text, whole, and
+    only then cut, to MAX_ERROR_TYPE and MAX_ERROR_MESSAGE. An exception's message may quote the
+    key it refused, and a posted type is whatever the client sent. Cut first, a key straddling the
+    cut would no longer be its shape, and its kept half would reach disk: so a stored error is a
+    prefix of the redacted whole, as a stored body is."""
+    if error is None:
+        return None
+    return ErrorInfo(
+        _redact_or_fail(error.type, key), _redact_or_fail(error.message, key)
+    ).as_label()
+
+
+def for_disk(event: Event, key: bytes) -> Event:
+    """`event` as the store may write it: an exchange by `redact_exchange`, a tool call's args,
+    result and error, and a telemetry line as it is, since it holds only a host. Never raises."""
+    if isinstance(event, TelemetrySeen):
+        return event
+    if isinstance(event, ToolCall):
+        return replace(
+            event,
+            args=redact_json(event.args, key),
+            result=redact_json(event.result, key),
+            error=redact_error(event.error, key),
+        )
+    return redact_exchange(event, key)
+
+
+def run_for_disk(record: RunRecord, key: bytes) -> RunRecord:
+    """`record` as the store may write it: its trigger's name and args, or its command line, and
+    its end's error, redacted. The name is the command's argv[0], which the command line repeats,
+    so it is redacted as the args are, or it would store what they hide. Never raises."""
+    trigger = record.trigger
+    if trigger is not None:
+        trigger = _redact_trigger(replace(trigger, name=_redact_or_fail(trigger.name, key)), key)
+    end = record.end
+    if end is not None:
+        end = replace(end, error=redact_error(end.error, key))
+    return replace(record, trigger=trigger, end=end)
+
+
+def _redact_trigger(trigger: Trigger, key: bytes) -> Trigger:
+    """`trigger` with its args, or its command line, redacted as one JSON value, as run.json
+    holds them (`trace.trigger_args`)."""
+    if trigger.argv is None:
+        return replace(trigger, args=redact_json(trigger.args, key))
+    redacted = redact_json(list(trigger.argv), key)
+    if isinstance(redacted, list) and all(isinstance(word, str) for word in redacted):
+        return replace(trigger, argv=tuple(str(word) for word in redacted))
+    # A command line that could not be redacted is stored as the args that say so.
+    return replace(trigger, args=redacted, argv=None)
+
+
+def _redact_or_fail(text: str, key: bytes) -> str:
+    """`text` with every secret shape replaced, REDACTION_FAILED when that failed. Never raises."""
+    redacted = redact_json(text, key)
+    return redacted if isinstance(redacted, str) else REDACTION_FAILED
 
 
 class _Guard:

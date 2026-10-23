@@ -55,7 +55,7 @@ from irimi.exchange import Exchange
 from irimi.protocol.env import ENGINE_ACTIVE_ENV
 from irimi.protocol.replay_files import replay_result_from_json
 from irimi.sdk import replays
-from irimi.store import StoreReader
+from irimi.store.reader import StoreReader
 from irimi.trace import ToolCall, Trigger
 from tests.test_phase_exit import _Stripe
 

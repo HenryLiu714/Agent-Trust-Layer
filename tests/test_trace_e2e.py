@@ -36,7 +36,8 @@ from irimi.cli import main
 from irimi.exchange import Exchange, Flag, Headers, Precondition, header_value, media_type
 from irimi.protocol.env import RUN_ENV
 from irimi.servicemap import loader
-from irimi.store import DirectoryStore, StoreReader
+from irimi.store.reader import StoreReader
+from irimi.store.writer import DirectoryStore
 from irimi.trace import StoredRun, trigger_args
 from tests import test_engine_mitm, test_phase_exit
 from tests.test_engine_mitm import (
@@ -129,7 +130,7 @@ def stored(home, monkeypatch):
     `irimi shadow`'s `on_exchange` printed, in the same order: the live exchanges a stored run
     is compared against."""
     _SpyStore.built = []
-    monkeypatch.setattr("irimi.store.DirectoryStore", _SpyStore)
+    monkeypatch.setattr("irimi.store.writer.DirectoryStore", _SpyStore)
     printed: list[Exchange] = []
     line = report.exchange_line
 

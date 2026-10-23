@@ -37,7 +37,8 @@ from irimi.limits import MAX_ERROR_TYPE
 from irimi.protocol.control import RUN_ACTIONS, RunAction
 from irimi.protocol.env import AGENT_VERSION_ENV, CONTROL_ENV, ENGINE_ACTIVE_ENV, PROXY_ENVS
 from irimi.sdk import capture, client, runs
-from irimi.store import DirectoryStore, StoreReader
+from irimi.store.reader import StoreReader
+from irimi.store.writer import DirectoryStore
 from irimi.trace import ErrorInfo, RunRecord, Trigger
 from tests import test_engine_mitm
 from tests.test_engine_mitm import _config, _start, _via_proxy

@@ -58,7 +58,6 @@ from examples.workflows import sdk as agent_sdk
 from examples.workflows.harness.internet import BOMB_SECRET, FakeInternet, Req
 from examples.workflows.harness.services import CLIENT_SECRET_CANARY, World
 from irimi import ca, cli, paths, report, runner, sdk, servicemap, trace
-from irimi import store as irimi_store
 from irimi.cli import build_parser
 from irimi.cli import main as irimi_main
 from irimi.exchange import Exchange
@@ -66,7 +65,8 @@ from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV, PROXY_ENVS
 from irimi.protocol.replay_files import replay_result_from_json, replay_result_to_json
 from irimi.sdk import replays as sdk_replays
 from irimi.servicemap import MapIndex, loader
-from irimi.store import StoreReader
+from irimi.store import writer as store_writer
+from irimi.store.reader import StoreReader
 from irimi.trace import RunRecord, ToolCall
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -988,7 +988,7 @@ def _watching_the_store(
     each line, so swapping the two names is enough, as `tests/test_trace_e2e.py` does. Not
     `report.exchange_line` itself, which `irimi replay` also calls for the line of its divergence
     point."""
-    real = irimi_store.DirectoryStore
+    real = store_writer.DirectoryStore
     build = cli._build_engine
 
     def building(run: Any, on_exchange: Any, *args: Any) -> Any:
@@ -1008,12 +1008,12 @@ def _watching_the_store(
             handed_events.append(call)
             super().record_tool_call(call)
 
-    irimi_store.DirectoryStore = Handed
+    store_writer.DirectoryStore = Handed
     cli._build_engine = building
     try:
         yield
     finally:
-        irimi_store.DirectoryStore = real
+        store_writer.DirectoryStore = real
         cli._build_engine = build
 
 

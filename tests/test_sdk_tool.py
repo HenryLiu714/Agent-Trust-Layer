@@ -24,7 +24,7 @@ from irimi import ca, limits, paths, report, sdk, servicemap, trace
 from irimi.cli import main
 from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV, RUN_ENV
 from irimi.sdk import capture, client, runs, tools
-from irimi.store import StoreReader
+from irimi.store.reader import StoreReader
 from irimi.trace import ErrorInfo, ToolCall
 from tests import test_sdk
 

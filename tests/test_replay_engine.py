@@ -29,8 +29,10 @@ from irimi.policy import Decided, Delegate, Forward, ReplayPolicy, Respond, Shad
 from irimi.protocol.headers import ANSWERED_BY_HEADER
 from irimi.reader import UpstreamReader
 from irimi.recording import Recording
-from irimi.store import DirectoryStore, NullStore, StoreReader
+from irimi.store.reader import StoreReader
+from irimi.store.writer import DirectoryStore
 from irimi.writelog import Translation
+from tests.doubles import NullStore
 from tests.test_invariants import stamping_violations
 
 STRIPE_MAP = """

@@ -41,11 +41,14 @@ from irimi.engine import EngineConfig, EngineStartError, Serve, capture, mitm
 from irimi.engine.capture import StreamCapture, recorded_stream
 from irimi.engine.mitm import IrimiAddon, MitmEngine
 from irimi.exchange import Exchange, Flag, Precondition, Request, Response, WriteOutcome
+from irimi.limits import MAX_STORED_BODY
 from irimi.overlay import NoOverlay, Overlaid
 from irimi.policy import Decided, Respond, ShadowPolicy
 from irimi.protocol.headers import ANSWERED_BY_HEADER, REWROTE_HEADER, RUN_HEADER
-from irimi.store import MAX_STORED_BODY, DirectoryStore, NullStore, StoreReader
+from irimi.store.reader import StoreReader
+from irimi.store.writer import DirectoryStore
 from irimi.writelog import Translation
+from tests.doubles import NullStore
 
 
 class _Upstream(BaseHTTPRequestHandler):
@@ -920,7 +923,8 @@ def test_telemetry_is_reported_and_stored_only_as_having_happened(tmp_path, monk
     from dataclasses import replace
 
     from irimi import redact
-    from irimi.store import DirectoryStore, StoreReader
+    from irimi.store.reader import StoreReader
+    from irimi.store.writer import DirectoryStore
     from irimi.trace import TelemetrySeen
 
     store = DirectoryStore(tmp_path / "store", redact.load_key(tmp_path))

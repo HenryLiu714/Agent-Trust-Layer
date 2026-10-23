@@ -46,7 +46,7 @@ from irimi.cli import main
 from irimi.exchange import Exchange
 from irimi.protocol.control import CONTROL_PREFIX
 from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV, PROXY_ENVS, RUN_ENV
-from irimi.store import StoreReader
+from irimi.store.reader import StoreReader
 from irimi.trace import UNATTRIBUTED, ToolCall
 from tests.maps_for_cli import complete_for_check
 from tests.test_engine_mitm import PRECONDITION_STRIPE_MAP

@@ -1,7 +1,7 @@
 from irimi.classify import classify
 from irimi.exchange import Exchange, Request, Response
 from irimi.overlay import NoOverlay
-from irimi.store import NullStore
+from tests.doubles import NullStore
 
 
 def _req() -> Request:

@@ -20,7 +20,7 @@ from irimi.engine.mitm import IrimiAddon, MitmEngine
 from irimi.overlay import NoOverlay
 from irimi.policy import ShadowPolicy
 from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV
-from irimi.store import NullStore
+from tests.doubles import NullStore
 
 
 def _config(tmp_path, monkeypatch, listen_host="127.0.0.1"):
@@ -329,7 +329,8 @@ def test_the_store_calls_back_on_its_writer_once_a_runs_end_is_on_disk(tmp_path)
     the end itself. A run that has not ended is not called back for."""
     import threading
 
-    from irimi.store import DirectoryStore, StoreReader
+    from irimi.store.reader import StoreReader
+    from irimi.store.writer import DirectoryStore
     from tests.test_store import _exchange, _record
 
     root = tmp_path / "store"
@@ -395,7 +396,8 @@ def test_a_run_s_writes_and_keys_are_dropped_once_its_end_is_on_disk(tmp_path, m
 def test_a_callback_that_raises_is_logged_and_the_store_carries_on(tmp_path, caplog):
     """What `on_run_ended` raises is the caller's problem, never the run's: one WARNING naming the
     exception's type, and the next event is still written."""
-    from irimi.store import DirectoryStore, StoreReader
+    from irimi.store.reader import StoreReader
+    from irimi.store.writer import DirectoryStore
     from tests.test_store import _exchange, _record
 
     root = tmp_path / "store"
@@ -420,7 +422,7 @@ def test_one_serve_per_store_root(tmp_path):
     is free again once the first releases it, which it may do twice."""
     import os
 
-    from irimi.store import ServeLock, StoreLocked
+    from irimi.store.lock import ServeLock, StoreLocked
 
     first = ServeLock.hold(tmp_path / "store")
     try:
@@ -531,7 +533,7 @@ def test_a_second_serve_on_one_store_is_refused_before_it_starts(home, capsys):
     import threading
 
     from irimi import cli
-    from irimi.store import ServeLock
+    from irimi.store.lock import ServeLock
 
     def writers() -> int:
         return sum(thread.name == "irimi-store" for thread in threading.enumerate())
@@ -630,7 +632,7 @@ def test_a_signal_before_the_proxy_is_ready_stops_serve_with_no_banner(
     import signal
 
     from irimi import cli, runner
-    from irimi.store import ServeLock
+    from irimi.store.lock import ServeLock
 
     prepare, start = cli._prepare_run, runner.start_engine
     started = []
@@ -663,7 +665,7 @@ def test_an_engine_that_cannot_be_built_leaves_the_store_closed_and_unlocked(hom
     import threading
 
     from irimi import cli
-    from irimi.store import ServeLock
+    from irimi.store.lock import ServeLock
 
     def broken(*args, **kwargs):
         raise RuntimeError("no engine")
@@ -717,7 +719,7 @@ def test_a_run_that_cannot_be_read_back_is_one_warning_naming_only_its_type(
     of its summary, naming the exception's type and never its message, which may quote what it
     choked on, as the store's own warnings never do."""
     from irimi import cli
-    from irimi.store import StoreReader
+    from irimi.store.reader import StoreReader
     from irimi.trace import TraceFormatError
 
     def unreadable(self, run_id, *, bodies=True):
@@ -927,7 +929,7 @@ def test_a_served_sdk_agent_gets_one_summary_block_per_run_it_ends(home, tmp_pat
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
     from irimi import report
-    from irimi.store import StoreReader
+    from irimi.store.reader import StoreReader
     from irimi.trace import UNATTRIBUTED
 
     class _Items(BaseHTTPRequestHandler):
@@ -1067,7 +1069,7 @@ def test_a_stream_read_to_its_end_is_in_its_runs_block(home, tmp_path_factory):
     import time
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    from irimi.store import StoreReader
+    from irimi.store.reader import StoreReader
 
     class _Events(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"

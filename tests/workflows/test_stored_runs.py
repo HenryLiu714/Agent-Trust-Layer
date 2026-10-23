@@ -26,7 +26,7 @@ from examples.workflows.w10_flaky_upstream.scenarios import CONTROL_DOWN
 from irimi import exchange, paths, redact, report, trace
 from irimi.exchange import Exchange, Flag
 from irimi.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE
-from irimi.store import SERVE_LOCK_FILE
+from irimi.store.layout import SERVE_LOCK_FILE
 from irimi.trace import ErrorInfo, RunRecord, StoredRun, TelemetrySeen, ToolCall
 
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]

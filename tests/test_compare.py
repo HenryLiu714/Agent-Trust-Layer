@@ -15,7 +15,7 @@ from irimi import compare, recording, redact, report, servicemap, trace
 from irimi.cli import main
 from irimi.exchange import Exchange, Flag, Precondition, Request, Response
 from irimi.servicemap import MapError
-from irimi.store import DirectoryStore
+from irimi.store.writer import DirectoryStore
 from irimi.trace import ErrorInfo, Event, RunRecord, StoredRun, ToolCall, Trigger
 from tests import test_phase_exit
 

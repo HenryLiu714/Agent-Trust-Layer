@@ -22,7 +22,7 @@ from irimi import __version__, ca, paths
 from irimi.cli import main
 from irimi.protocol.replay_files import ReplayResult, replay_result_from_json
 from irimi.servicemap import loader
-from irimi.store import StoreReader
+from irimi.store.reader import StoreReader
 from irimi.trace import ErrorInfo, ToolCall
 from tests import test_replay_engine
 from tests.maps_for_cli import complete_for_check

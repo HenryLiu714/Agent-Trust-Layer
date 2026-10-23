@@ -20,9 +20,11 @@ from irimi.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE
 from irimi.policy import ReplayPolicy, ShadowPolicy
 from irimi.protocol import control as protocol_control
 from irimi.recording import Recording
-from irimi.store import DirectoryStore, NullStore, StoreReader
+from irimi.store.reader import StoreReader
+from irimi.store.writer import DirectoryStore
 from irimi.trace import MAX_QUOTED, ErrorInfo, ToolCall, Trigger
 from tests import test_engine_mitm
+from tests.doubles import NullStore
 from tests.test_engine_mitm import _config, _start, _via_proxy
 
 upstream = test_engine_mitm.upstream  # bound here so pytest finds the fixture

@@ -29,7 +29,8 @@ from irimi.exchange import Exchange
 from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV
 from irimi.protocol.headers import RUN_HEADER
 from irimi.sdk import client, instrumentation, runs
-from irimi.store import DirectoryStore, StoreReader
+from irimi.store.reader import StoreReader
+from irimi.store.writer import DirectoryStore
 from tests import test_engine_mitm
 from tests.test_engine_mitm import (
     _config,

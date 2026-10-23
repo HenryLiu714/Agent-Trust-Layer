@@ -21,7 +21,8 @@ import pytest
 from irimi import redact, report, servicemap, trace
 from irimi.cli import DEFAULT_RUNS_LIMIT, main
 from irimi.exchange import Exchange, Precondition, Request, Response
-from irimi.store import DirectoryStore, StoreReader
+from irimi.store.reader import StoreReader
+from irimi.store.writer import DirectoryStore
 from irimi.trace import ErrorInfo, RunRecord, ToolCall, Trigger
 from tests import test_phase_exit
 from tests.test_engine_mitm import PRECONDITION_STRIPE_MAP

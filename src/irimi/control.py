@@ -62,7 +62,8 @@ from irimi.protocol.control import (
     protocol_major,
 )
 from irimi.protocol.headers import ANSWERED_BY_HEADER, PROTOCOL_HEADER
-from irimi.store import TraceStore, names_a_run_dir
+from irimi.store import TraceStore
+from irimi.store.layout import names_a_run_dir
 from irimi.trace import UNATTRIBUTED, ErrorInfo, RunRecord, ToolCall, TraceFormatError
 from irimi.wire import irimi_error
 

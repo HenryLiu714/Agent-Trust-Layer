@@ -248,24 +248,9 @@ def compared_body(request: Request, kind: Kind, route: Route | None) -> JSONValu
 
 def _live_key(request: Request, kind: Kind, maps: MapIndex, redaction_key: bytes) -> _Key:
     """The key of a live request: `_match_key` over the request as the store would have written
-    it, redacted with the store's key. Every redaction rule is deterministic, so a secret in a live
-    body becomes the placeholder its recording holds."""
-    return _match_key(_redacted(request, kind, redaction_key), kind, maps)
-
-
-def _redacted(request: Request, kind: Kind, redaction_key: bytes) -> Request:
-    """`request` as `redact.redact_exchange` stores it. Redaction reads only the request's own
-    parts for its request, so the rest of the exchange it is handed is a placeholder."""
-    exchange = Exchange(
-        request=request,
-        response=None,
-        service="",
-        operation="",
-        kind=kind,
-        answered_by="live",
-        run_id="",
-    )
-    return redact.redact_exchange(exchange, redaction_key).request
+    it, redacted with the store's key (`redact.redact_request`). Every redaction rule is
+    deterministic, so a secret in a live body becomes the placeholder its recording holds."""
+    return _match_key(redact.redact_request(request, redaction_key), kind, maps)
 
 
 def _without_cache_control(value: Any) -> Any:

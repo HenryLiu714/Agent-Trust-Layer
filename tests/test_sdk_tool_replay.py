@@ -41,7 +41,8 @@ from irimi.protocol.headers import RUN_HEADER
 from irimi.recording import Recording
 from irimi.sdk import client, context, runs
 from irimi.sdk.errors import recorded_error
-from irimi.store import DirectoryStore, StoreReader
+from irimi.store.reader import StoreReader
+from irimi.store.writer import DirectoryStore
 from irimi.trace import ErrorInfo, RunRecord, ToolCall, new_run_id
 from tests import test_sdk
 from tests.test_engine_mitm import _config, _start

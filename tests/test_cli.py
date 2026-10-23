@@ -194,7 +194,7 @@ def test_the_composition_root_builds_the_service_overlay_and_records_into_the_ru
     own, so the two cannot disagree about which service a read belongs to. The engine records into
     the store `_prepare_run` opened, the one `irimi shadow` starts and ends its run in."""
     from irimi.overlay import ServiceOverlay
-    from irimi.store import NullStore
+    from tests.doubles import NullStore
 
     index = _shipped_index()
     args = argparse.Namespace(allow_host=[], port=4321, listen_host=paths.LISTEN_HOST)
@@ -215,7 +215,7 @@ def test_the_composition_root_builds_a_replay_policy_over_the_run_s_recording():
     from irimi.policy import ReplayPolicy, ShadowPolicy
     from irimi.reader import UpstreamReader
     from irimi.recording import Recording, RecordingReader
-    from irimi.store import NullStore
+    from tests.doubles import NullStore
 
     index = _shipped_index()
     args = argparse.Namespace(allow_host=[], port=4321, listen_host=paths.LISTEN_HOST)
@@ -258,7 +258,7 @@ def test_a_replay_of_a_damaged_run_starts_nothing(tmp_path, monkeypatch, capsys,
 
     from irimi import redact
     from irimi.exchange import Exchange, Request, Response
-    from irimi.store import DirectoryStore
+    from irimi.store.writer import DirectoryStore
 
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
     monkeypatch.chdir(tmp_path)
@@ -615,7 +615,7 @@ def _spy_on_the_store(monkeypatch, close=None):
     `close()` and the thread it came from, and may do `close(store)` after the real one."""
     import threading
 
-    from irimi.store import DirectoryStore
+    from irimi.store.writer import DirectoryStore
 
     class _Spy(DirectoryStore):
         closed: list[str] = []
@@ -626,7 +626,7 @@ def _spy_on_the_store(monkeypatch, close=None):
             if close is not None:
                 close(self)
 
-    monkeypatch.setattr("irimi.store.DirectoryStore", _Spy)
+    monkeypatch.setattr("irimi.store.writer.DirectoryStore", _Spy)
     return _Spy
 
 
@@ -679,7 +679,7 @@ def test_a_store_that_cannot_be_written_stops_the_run_with_one_line(home, capsys
 def test_shadow_stores_its_process_run_with_the_agent_and_engine_versions(home, monkeypatch):
     """The process run's record: its argv, which a replay runs again, the agent's version
     from `IRIMI_AGENT_VERSION`, this irimi's version, and how the child exited."""
-    from irimi.store import StoreReader
+    from irimi.store.reader import StoreReader
     from irimi.trace import ErrorInfo, trigger_args
 
     monkeypatch.setenv(AGENT_VERSION_ENV, "agent-2.0.1")
@@ -744,7 +744,7 @@ def test_a_reader_gone_costs_shadow_no_run_and_leaves_no_engine(home, monkeypatc
     import threading
 
     from irimi import runner
-    from irimi.store import StoreReader
+    from irimi.store.reader import StoreReader
 
     spy = _spy_on_the_store(monkeypatch)
     out = _ReaderGoneWhen()
@@ -773,7 +773,7 @@ def test_a_reader_gone_by_serve_s_banner_closes_its_store_and_releases_its_lock(
     stopped, the store closed and its `serve.lock` released, so the next serve may take it."""
     import threading
 
-    from irimi.store import ServeLock
+    from irimi.store.lock import ServeLock
 
     spy = _spy_on_the_store(monkeypatch)
     out = _ReaderGoneWhen()
@@ -852,7 +852,7 @@ def test_serve_records_under_the_store_it_was_given(home, monkeypatch, capsys):
     import urllib.request
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
-    from irimi.store import StoreReader
+    from irimi.store.reader import StoreReader
     from irimi.trace import UNATTRIBUTED
 
     class _Hello(BaseHTTPRequestHandler):

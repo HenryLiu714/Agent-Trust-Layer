@@ -22,7 +22,8 @@ if TYPE_CHECKING:  # the quoted annotations below; no runtime import
     from irimi.replay import Plan
     from irimi.runner import ChildCall, EngineThread
     from irimi.servicemap import MapIndex
-    from irimi.store import ServeLock, TraceStore
+    from irimi.store import TraceStore
+    from irimi.store.lock import ServeLock
     from irimi.trace import JSONValue, RunRecord, StoredRun, ToolCall, Trigger
     from irimi.writelog import WriteLog
 
@@ -513,7 +514,7 @@ def _load_source(args: argparse.Namespace) -> "StoredRun":
     anything starts, or `replay.Refused` saying why it cannot be."""
     from irimi import trace
     from irimi.replay import Refused
-    from irimi.store import RunNotFound, StoreReader
+    from irimi.store.reader import RunNotFound, StoreReader
     from irimi.trace import TraceFormatError
 
     root = _store_root(args)
@@ -543,7 +544,7 @@ def _open_store(
     after printing why its directory cannot be used: a run that would drop every event
     unseen must not start. `replay_of` is the run a replay answers from, which every header run
     the store makes names."""
-    from irimi.store import DirectoryStore
+    from irimi.store.writer import DirectoryStore
 
     try:
         return DirectoryStore(_store_root(args), key, on_run_ended, replay_of)
@@ -555,7 +556,7 @@ def _open_store(
 def _hold_serve_lock(args: argparse.Namespace) -> "ServeLock | None":
     """The store's `serve.lock`, held, or None after printing why not: another serve writes this
     store, or the lock file cannot be opened."""
-    from irimi.store import ServeLock
+    from irimi.store.lock import ServeLock
 
     try:
         return ServeLock.hold(_store_root(args))
@@ -681,7 +682,7 @@ class _ServeOutput:
         the run is whole on disk. A run that cannot be read back is one warning naming the
         exception's type only, as the store logs its own: a message may quote what it read."""
         from irimi import report
-        from irimi.store import RunNotFound, StoreReader
+        from irimi.store.reader import RunNotFound, StoreReader
         from irimi.trace import TraceFormatError
 
         try:
@@ -941,7 +942,7 @@ def _sdk_runs(
 ) -> "dict[str, RunRecord | None]":
     """The runs the SDK started inside `irimi shadow`'s process, in the order their first event
     arrived, each with its record read back from the store, or None for one that cannot be."""
-    from irimi.store import RunNotFound, StoreReader
+    from irimi.store.reader import RunNotFound, StoreReader
     from irimi.trace import UNATTRIBUTED, TraceFormatError
 
     seen = [*(ex.run_id for ex in ran.exchanges), *(call.run_id for call in ran.tool_calls)]
@@ -1314,7 +1315,7 @@ def _replayed(
     replay did printed and returned (`replay.outcome`). `rerun` is the recorded command line a
     process run's replay ran again."""
     from irimi import replay
-    from irimi.store import RunNotFound, StoreReader
+    from irimi.store.reader import RunNotFound, StoreReader
     from irimi.trace import TraceFormatError
 
     try:
@@ -1414,7 +1415,7 @@ def _store_subject(args: argparse.Namespace) -> str:
 def cmd_runs_list(args: argparse.Namespace) -> int:
     """`irimi runs list`: one line per stored run, newest first."""
     from irimi import report
-    from irimi.store import RunNotFound, StoreReader
+    from irimi.store.reader import RunNotFound, StoreReader
     from irimi.trace import TraceFormatError
 
     root = _store_root(args)
@@ -1451,7 +1452,7 @@ def _resolve_run_id(root: Path, typed: str) -> str:
     caller's read says there is no such run, as it does for a damaged one `list_runs` skips.
     Raises LookupError, saying why, for `last` in an empty store and for a prefix more than one
     run id starts with."""
-    from irimi.store import StoreReader
+    from irimi.store.reader import StoreReader
     from irimi.trace import UNATTRIBUTED
 
     # An empty prefix would name every run, so it names none.
@@ -1476,7 +1477,7 @@ def _resolve_run_id(root: Path, typed: str) -> str:
 def cmd_runs_show(args: argparse.Namespace) -> int:
     """`irimi runs show RUN_ID`: a stored run's header, every event, and its summary."""
     from irimi import report
-    from irimi.store import RunNotFound, StoreReader
+    from irimi.store.reader import RunNotFound, StoreReader
     from irimi.trace import UNATTRIBUTED, TraceFormatError
 
     root = _store_root(args)
@@ -1507,7 +1508,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
     Exits as diff(1) does: 0 when every write is the same, 1 when any is not, 2 when a run cannot
     be read."""
     from irimi import compare
-    from irimi.store import RunNotFound, StoreReader
+    from irimi.store.reader import RunNotFound, StoreReader
     from irimi.trace import TraceFormatError
 
     root = _store_root(args)

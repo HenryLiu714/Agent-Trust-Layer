@@ -34,8 +34,11 @@ from irimi.engine import capture, decoding, mitm
 from irimi.engine.capture import StreamCapture
 from irimi.engine.decoding import Decoded, decode_body
 from irimi.exchange import Exchange, Flag, Request, Response
+from irimi.limits import MAX_STORED_BODY
 from irimi.overlay import Overlaid
-from irimi.store import MAX_STORED_BODY, DirectoryStore, NullStore, StoreReader
+from irimi.store.reader import StoreReader
+from irimi.store.writer import DirectoryStore
+from tests.doubles import NullStore
 from tests.test_engine_mitm import (
     STREAM_MAP,
     _config,

@@ -1,7 +1,4 @@
-"""The trace store: where a run's record, its exchanges and its tool calls go.
-
-`TraceStore` is the seam. `NullStore` throws everything away; `DirectoryStore` writes the layout
-`docs/trace-format.md` describes, and `StoreReader` reads it back.
+"""`DirectoryStore`: the trace store's writer, which puts each run under the store's root.
 
 NOTHING HERE MAY RAISE INTO ITS CALLER, AND NOTHING HERE MAY BLOCK IT. `record` is called from
 mitmproxy's hooks, and a raised hook forwards the flow, so a write escapes shadow mode. So every
@@ -11,33 +8,17 @@ the event, and so does a writer that fails on it. Either way the drop is counted
 on the event's run (`RunRecord.dropped_events`), and a WARNING is logged on the first drop and
 every 1000th after it: a recording failure never affects traffic.
 
-NOTHING REACHES DISK UNREDACTED. The writer thread runs `redact.redact_exchange` on every
-exchange, and `redact.redact_json` on every trigger's name and args, every tool call's args and
-result, and every error's type and message, before it hashes or writes anything. A body is
+NOTHING REACHES DISK UNREDACTED. The writer thread runs `redact.for_disk` on every event and
+`redact.run_for_disk` on every run's record before it hashes or writes anything. A body is
 redacted whole and only then cut at MAX_STORED_BODY, so a secret straddling the cut is never stored
 as half a secret. A streamed body's `stream_chunks` are cut with it, so they still split what is
 stored. An error is redacted whole and only then cut to a label, for the same reason.
 
-A RUN ID NAMES A DIRECTORY ONLY WHEN THIS STORE CAN USE IT AS ONE. `trace.is_valid_run_id` is the
-path-traversal guard, and it is checked again here rather than trusted. A valid id can still
-collide: `Run1` and `run1` are both valid, and on a case-insensitive filesystem (macOS APFS by
-default) they are one directory. The first to reach the store keeps it; an event for the other is
-stored in `unattributed/` like an invalid id, and an exchange among them is flagged
-`exchange.Flag.BAD_RUN_ID`. So is an event of a replay's that names a run the replay did not make -
-the run it replays, or any other already stored. Two runs are never merged into one
-directory.
-
-WHAT IS STORED IS STILL PRIVATE. Redaction hides credentials, not the business data around them -
-customers, amounts, messages - so every directory the store creates is 0700 and every file 0600, as
-the CA's key is.
-
-ONE PROCESS WRITES A RUN; SEVERAL MAY SHARE A ROOT. Two `irimi shadow`s on the default root write
-different run directories, and a blob is written once whatever its writer. What they can share is
-`unattributed/events.jsonl`, so each line goes out as one `write` on an O_APPEND descriptor and two
-processes never interleave inside a line. Each writer numbers its own lines, so that file may repeat
-a `seq` across processes; a run's own file never does. A `serve` is the writer that fills that file,
-so a root has at most one: it holds `serve.lock` while it runs (`ServeLock`), and a second one on
-the same root refuses to start.
+A valid run id can still collide: `Run1` and `run1` are both valid, and on a case-insensitive
+filesystem (macOS APFS by default) they are one directory. The first to reach the store keeps it;
+an event for the other is stored in `unattributed/` like an invalid id, and an exchange among them
+is flagged `exchange.Flag.BAD_RUN_ID`. So is an event of a replay's that names a run the replay did
+not make (`RunAttribution`). Two runs are never merged into one directory.
 
 A LONG `irimi serve` STAYS BOUNDED. The queue is capped in items and in bytes - an exchange's
 bodies, a tool call and a run's start, each whole as JSON - and a body over
@@ -53,23 +34,21 @@ needs it rather than trusted because it exists, and a run.json is synced before 
 place, so a crash never leaves one empty.
 """
 
-import fcntl
 import json
 import logging
 import os
 import queue
-import stat
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from irimi import redact, trace
 from irimi.exchange import Exchange, Flag, clip_chunks
-from irimi.files import FILE_MODE, private_dir, write_private
+from irimi.files import append_line, private_dir, write_private
 from irimi.limits import (
     MAX_QUEUED_BYTES,
     MAX_QUEUED_ERROR,
@@ -77,6 +56,15 @@ from irimi.limits import (
     MAX_STORED_BODY,
 )
 from irimi.secret_shapes import cut_outside_secrets
+from irimi.store import StoreStats
+from irimi.store.layout import (
+    EVENTS_FILE,
+    RUN_FILE,
+    StoreLayout,
+    names_a_run_dir,
+    read_run_json,
+    resume_seq,
+)
 from irimi.trace import (
     SCHEMA_VERSION,
     UNATTRIBUTED,
@@ -86,7 +74,6 @@ from irimi.trace import (
     Outcome,
     RunEnd,
     RunRecord,
-    StoredRun,
     TelemetrySeen,
     ToolCall,
     TraceFormatError,
@@ -103,121 +90,55 @@ QUEUE_SIZE = 10_000
 # every path it wrote nor syncs them all at shutdown.
 SYNC_EVERY = 1000
 SYNC_IDLE_S = 1.0
-# How much of the end of an events.jsonl resuming a run reads to find its last `seq`.
-RESUME_TAIL = 1024 * 1024
 # How long `close()` waits for the writer to drain before it counts what is left as dropped.
 CLOSE_TIMEOUT_S = 10.0
 # A WARNING on the first drop and on every DROP_WARNING_EVERY-th after it.
 DROP_WARNING_EVERY = 1000
 
-BLOBS_DIR = "blobs"
-RUNS_DIR = "runs"
-RUN_FILE = "run.json"
-EVENTS_FILE = "events.jsonl"
-# The file a `serve` holds an exclusive lock on for as long as it runs.
-SERVE_LOCK_FILE = "serve.lock"
-
 # Called by the writer thread with a run's id once it has written that run's end.
 OnRunEnded = Callable[[str], None]
 
 
-@dataclass(frozen=True)
-class StoreStats:
-    """What `TraceStore.stats()` reports; the control endpoint's `GET /_irimi/health` answers
-    with it."""
+class RunAttribution:
+    """Which run directories a store may write, and whose runs it makes.
 
-    queued: int  # items waiting for the writer
-    written: int  # event lines written
-    dropped: int  # events dropped, for any reason, since the store was built
+    A REPLAY WRITES ONLY THE RUNS IT MAKES. An agent that names its runs itself - an `Irimi-Run`
+    label, a run id its SDK reuses, a start it posts by hand - names the recorded runs again: the
+    one replayed, and every other the recorded process held. Each directory is another run's, as a
+    clash's is, and appending to one would merge two runs in it and rewrite its record as the
+    replay's, so a later replay of it would read both. So a run directory a replay's store did not
+    make - recorded, or another process's - is never written by it, whether or not it is the run
+    replayed; nor is the run replayed, wherever it is stored. A store that is no replay's resumes an
+    existing run. Writer thread only."""
 
+    def __init__(self, replay_of: str | None) -> None:
+        # The stored run the engine writing here answers from, if it is a replay.
+        self.replay_of = replay_of
+        # The runs a replay's store made. Kept past a run's end, so a late event reopens it.
+        self._made: set[str] = set()
 
-class TraceStore(Protocol):
-    """Where a run's record, exchanges and tool calls go. No method may raise (see module doc)."""
+    def accepts_start(self, record: RunRecord) -> bool:
+        """Every run a replay's store starts is that replay's, and every other store's is no
+        replay's: the record's constructor says so."""
+        return record.replay_of == self.replay_of
 
-    def start_run(self, record: RunRecord) -> None: ...
+    def header(self, run_id: str, started_at: float | None = None) -> RunRecord:
+        """The record of a run this store knows only from its events: this store's replay's."""
+        return RunRecord.header(run_id, started_at, self.replay_of)
 
-    def record(self, exchange: Exchange) -> None: ...
-
-    def record_tool_call(self, call: ToolCall) -> None: ...
-
-    def end_run(
-        self,
-        run_id: str,
-        ended_at: float,
-        outcome: Outcome,
-        error: ErrorInfo | None = None,
-        exit_code: int | None = None,
-    ) -> None: ...
-
-    def stats(self) -> StoreStats: ...
-
-    def close(self) -> None: ...
-
-
-class NullStore:
-    """A TraceStore that keeps nothing."""
-
-    def start_run(self, record: RunRecord) -> None:
-        return None
-
-    def record(self, exchange: Exchange) -> None:
-        return None
-
-    def record_tool_call(self, call: ToolCall) -> None:
-        return None
-
-    def end_run(
-        self,
-        run_id: str,
-        ended_at: float,
-        outcome: Outcome,
-        error: ErrorInfo | None = None,
-        exit_code: int | None = None,
-    ) -> None:
-        return None
-
-    def stats(self) -> StoreStats:
-        return StoreStats(queued=0, written=0, dropped=0)
-
-    def close(self) -> None:
-        return None
-
-
-def _read_run_json(directory: Path) -> RunRecord:
-    """A run directory's `run.json`, for the writer resuming a run and the reader alike. Raises
-    OSError when the file cannot be read now, and TraceFormatError, and nothing else, for what it
-    holds when this irimi cannot read that: a newer version, bytes that are not UTF-8 or JSON
-    (ValueErrors), or JSON nested past the parser's depth (a RecursionError, which would otherwise
-    escape `list_runs` and hide every other run). Every refusal names the file, a decoder's
-    as well as the parser's: `'name' is a list` alone does not say which run.json it is."""
-    path = directory / RUN_FILE
-    data = path.read_bytes()
-    try:
-        return trace.run_from_json(json.loads(data.decode("utf-8")))
-    except (ValueError, RecursionError) as exc:  # TraceFormatError is a ValueError
-        raise TraceFormatError(f"{path}: {exc}") from exc
-
-
-class StoreLayout:
-    """The one statement of where each file lives under a store's root."""
-
-    def __init__(self, root: Path) -> None:
-        self.root = root
-        self.blobs = root / BLOBS_DIR
-        self.runs = root / RUNS_DIR
-        self.unattributed_events = root / UNATTRIBUTED / EVENTS_FILE
-        self.serve_lock = root / SERVE_LOCK_FILE
-
-    def run_dir(self, run_id: str) -> Path:
-        """The directory of `run_id`, which the caller has checked with `trace.is_valid_run_id`."""
-        return self.runs / run_id
-
-    def blob(self, sha256: str) -> Path:
-        """The file of a body, whose digest the caller has checked against trace.SHA256_PATTERN."""
-        return self.blobs / sha256
-
-
-# ------------------------------------------------------------------------------------ the writer
+    def claims(self, run_id: str, exists: Callable[[], bool]) -> bool:
+        """True when this store may write `run_id`'s directory, which `exists` says is already
+        there or not. A replay's store remembers a run it claims as one it made, before the
+        directory is opened: one that raises after making it has still made a run of this
+        replay's, which the next event may write."""
+        if self.replay_of is None:
+            return True
+        if run_id == self.replay_of:
+            return False
+        if run_id not in self._made and exists():
+            return False
+        self._made.add(run_id)
+        return True
 
 
 @dataclass(frozen=True)
@@ -239,7 +160,7 @@ class _EndRun:
 
 
 @dataclass(frozen=True)
-class _Record:
+class _QueuedEvent:
     event: Exchange | ToolCall | TelemetrySeen
     # A tool call as JSON, in bytes, measured once as it is queued: the whole call, since a
     # posted name or id may be nearly all of its 2 MiB, as its args may.
@@ -248,7 +169,7 @@ class _Record:
 
 _CLOSE = object()  # the sentinel `close()` enqueues last
 
-_Item = _StartRun | _EndRun | _Record
+_Item = _StartRun | _EndRun | _QueuedEvent
 
 
 @dataclass
@@ -286,14 +207,14 @@ class DirectoryStore:
 
         `replay_of` is the stored run the engine writing here answers from, if it is a replay: each
         run this store starts or makes from a header is that replay's, and it writes no run it did
-        not make, the run it replays included (`_not_this_replays`)."""
+        not make, the run it replays included (`RunAttribution`)."""
         private_dir(root)
         if not root.is_dir() or not os.access(root, os.W_OK | os.X_OK):
             raise PermissionError(f"the trace store {root} is not a writable directory")
         self.layout = StoreLayout(root)
         self._key = key
         self._on_run_ended = on_run_ended
-        self._replay_of = replay_of
+        self._attribution = RunAttribution(replay_of)  # writer thread only
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=QUEUE_SIZE)
         self._lock = threading.Lock()  # guards everything below it and `_closed`
         self._closed = False
@@ -303,9 +224,6 @@ class DirectoryStore:
         # By the run id the event named, or `unattributed` for one that names no run directory.
         self._run_drops: Counter[str] = Counter()
         self._runs: dict[str, _Run] = {}  # writer thread only
-        # Writer thread only: the runs a replay's store made, the only ones it writes. Kept
-        # past a run's end, so a late event reopens it; empty for a store that is no replay's.
-        self._made: set[str] = set()
         self._touched: set[Path] = set()  # writer thread only: files not yet fsynced
         self._unsynced = 0  # writer thread only: writes into them since the last sync
         self._abandoned = threading.Event()  # set when `close()` gave up waiting on the writer
@@ -332,18 +250,21 @@ class DirectoryStore:
             event = _as_queued(exchange)
         except Exception as exc:
             self._drop(
-                _item_run_id(_Record(exchange)), f"it could not be queued: {type(exc).__name__}"
+                _item_run_id(_QueuedEvent(exchange)),
+                f"it could not be queued: {type(exc).__name__}",
             )
             return
-        self._put(_Record(event))
+        self._put(_QueuedEvent(event))
 
     def record_tool_call(self, call: ToolCall) -> None:
         try:
             size = len(json.dumps(trace.tool_call_to_json(call)))
         except Exception as exc:
-            self._drop(_item_run_id(_Record(call)), f"it could not be queued: {type(exc).__name__}")
+            self._drop(
+                _item_run_id(_QueuedEvent(call)), f"it could not be queued: {type(exc).__name__}"
+            )
             return
-        self._put(_Record(call, size))
+        self._put(_QueuedEvent(call, size))
 
     def end_run(
         self,
@@ -481,10 +402,9 @@ class DirectoryStore:
             self._append(item.event)
 
     def _start(self, record: RunRecord) -> None:
-        if record.replay_of != self._replay_of:
-            # Every run a replay's store starts is that replay's, and every other store's is no
-            # replay's: the record's constructor says so. A start that disagrees is dropped and
-            # counted on the store alone, so it makes no run directory of its own.
+        if not self._attribution.accepts_start(record):
+            # A start that disagrees is dropped and counted on the store alone, so it makes no
+            # run directory of its own.
             self._drop(UNATTRIBUTED, "its start names another replay than this store's")
             return
         run = self._run_dir(record.run_id)
@@ -500,32 +420,15 @@ class DirectoryStore:
             self._drop(UNATTRIBUTED, "a start was posted for a run that has already ended")
             self._forget(record.run_id, run)
             return
-        trigger = record.trigger
-        if trigger is not None:
-            # The name is the command's argv[0], which the command line repeats, so it is redacted
-            # as the args are, or it would store what they hide.
-            trigger = self._redact_trigger(replace(trigger, name=self._redact_text(trigger.name)))
-        ended = record.end
-        if ended is not None:
-            ended = replace(ended, error=self._redact_error(ended.error))
-        self._write_record(run, replace(record, trigger=trigger, end=ended))
-
-    def _redact_trigger(self, trigger: trace.Trigger) -> trace.Trigger:
-        """`trigger` with its args, or its command line, redacted as one JSON value, as run.json
-        holds them (`trace.trigger_args`)."""
-        if trigger.argv is None:
-            return replace(trigger, args=redact.redact_json(trigger.args, self._key))
-        redacted = redact.redact_json(list(trigger.argv), self._key)
-        if isinstance(redacted, list) and all(isinstance(word, str) for word in redacted):
-            return replace(trigger, argv=tuple(str(word) for word in redacted))
-        # A command line that could not be redacted is stored as the args that say so.
-        return replace(trigger, args=redacted, argv=None)
+        self._write_record(run, redact.run_for_disk(record, self._key))
 
     def _end(self, end: _EndRun) -> None:
         run = self._run_dir(end.run_id)
-        record = run.record or RunRecord.header(end.run_id, replay_of=self._replay_of)
-        ended = RunEnd(end.ended_at, end.outcome, self._redact_error(end.error), end.exit_code)
-        self._write_record(run, replace(record, end=ended))
+        record = run.record or self._attribution.header(end.run_id)
+        error = redact.redact_error(end.error, self._key)
+        self._write_record(
+            run, replace(record, end=RunEnd(end.ended_at, end.outcome, error, end.exit_code))
+        )
         self._forget(end.run_id, run)
         if self._on_run_ended is not None:
             try:
@@ -546,21 +449,6 @@ class DirectoryStore:
         if run.dir is None or not run.writable:
             raise ValueError("this run cannot be written by this store")
         return run
-
-    def _redact_text(self, text: str) -> str:
-        """`text` with every secret shape replaced, REDACTION_FAILED when that failed."""
-        redacted = redact.redact_json(text, self._key)
-        return redacted if isinstance(redacted, str) else redact.REDACTION_FAILED
-
-    def _redact_error(self, error: ErrorInfo | None) -> ErrorInfo | None:
-        """An error as a trace keeps it: its type and its message each redacted as text, whole,
-        and only then cut, to MAX_ERROR_TYPE and MAX_ERROR_MESSAGE. An exception's message may quote
-        the key it refused, and a posted type is whatever the client sent. Cut first,
-        a key straddling the cut would no longer be its shape, and its kept half would reach disk:
-        so a stored error is a prefix of the redacted whole, as a stored body is."""
-        if error is None:
-            return None
-        return ErrorInfo(self._redact_text(error.type), self._redact_text(error.message)).as_label()
 
     def _forget(self, run_id: str, run: _Run) -> None:
         """An ended run is fsynced and forgotten, so a `serve` of thousands of runs holds only the
@@ -583,41 +471,35 @@ class DirectoryStore:
         if run.dir is not None and run.record is None:
             # `0.0` is an event built with no clock: no start at all (docs/trace-format.md).
             started_at = event.started_at or None
-            self._write_record(run, RunRecord.header(event.run_id, started_at, self._replay_of))
-        stored = self._for_disk(event, bad_run_id=run.dir is None)
+            self._write_record(run, self._attribution.header(event.run_id, started_at))
+        stored = self._prepare(event, bad_run_id=run.dir is None)
         line = json.dumps(
             trace.event_to_json(run.next_seq, stored, self._put_body), allow_nan=False
         )
-        _append_line(run.events, (line + "\n").encode())
+        append_line(run.events, (line + "\n").encode())
         self._wrote(run.events)
         run.next_seq += 1
         with self._lock:
             self._written += 1
 
-    def _for_disk(self, event: Exchange | ToolCall | TelemetrySeen, *, bad_run_id: bool) -> Event:
-        """`event` as it may be written: redacted, and flagged."""
-        if isinstance(event, TelemetrySeen):
-            return event
-        if isinstance(event, ToolCall):
-            return replace(
-                event,
-                args=redact.redact_json(event.args, self._key),
-                result=redact.redact_json(event.result, self._key),
-                error=self._redact_error(event.error),
-            )
-        ex = redact.redact_exchange(event, self._key)
-        flags = list(ex.flags)
+    def _prepare(self, event: Exchange | ToolCall | TelemetrySeen, *, bad_run_id: bool) -> Event:
+        """`event` as it may be written: redacted (`redact.for_disk`), and an exchange flagged for
+        what the store does to it here."""
+        stored = redact.for_disk(event, self._key)
+        if not isinstance(stored, Exchange):
+            return stored
+        flags = list(stored.flags)
         # A decoded Exchange carries only its bytes, not `BodyRef.truncated`, so a cut body says
         # so in its flags or the fact is lost on read.
-        bodies = (ex.request.body, b"" if ex.response is None else ex.response.body)
+        bodies = (stored.request.body, b"" if stored.response is None else stored.response.body)
         if any(len(body) > MAX_STORED_BODY for body in bodies):
             flags.append(Flag.BODY_TRUNCATED)
-        if bad_run_id and event.run_id != UNATTRIBUTED:
+        if bad_run_id and stored.run_id != UNATTRIBUTED:
             flags.append(Flag.BAD_RUN_ID)
         # `_put_body` keeps the first MAX_STORED_BODY bytes, so a streamed body's chunks are cut
         # there too, and still split the body that is stored.
-        chunks = clip_chunks(ex.stream_chunks, MAX_STORED_BODY)
-        return replace(ex, flags=tuple(dict.fromkeys(flags)), stream_chunks=chunks)
+        chunks = clip_chunks(stored.stream_chunks, MAX_STORED_BODY)
+        return replace(stored, flags=tuple(dict.fromkeys(flags)), stream_chunks=chunks)
 
     def _put_body(self, body: bytes) -> BodyRef:
         data = body[:MAX_STORED_BODY]
@@ -642,34 +524,13 @@ class DirectoryStore:
         known = self._runs.get(run_id)
         if known is not None:
             return known
-        if self._clashes(run_id) or self._not_this_replays(run_id):
+        directory = self.layout.run_dir(run_id)
+        if self._clashes(run_id) or not self._attribution.claims(run_id, directory.exists):
             run = self._unattributed()
         else:
-            if self._replay_of is not None:
-                # Before `_open`, which makes the directory: one that raises after making it has
-                # still made a run of this replay's, which the next event may write.
-                self._made.add(run_id)
-            directory = self.layout.run_dir(run_id)
             run = self._open(directory / EVENTS_FILE, directory)
         self._runs[run_id] = run
         return run
-
-    def _not_this_replays(self, run_id: str) -> bool:
-        """True when this store is a replay's and `run_id` names a run it did not make.
-
-        A REPLAY WRITES ONLY THE RUNS IT MAKES. An agent that names its runs itself - an
-        `Irimi-Run` label, a run id its SDK reuses, a start it posts by hand - names the recorded
-        runs again: the one replayed, and every other the recorded process held. Each directory is
-        another run's, as a clash's is, and appending to one would merge two runs in it and
-        rewrite its record as the replay's, so a later replay of it would read both. So a run
-        directory this store did not make - recorded, or another process's - is never written by a
-        replay, whether or not it is the run replayed; nor is the run replayed, wherever it is
-        stored. A store that is no replay's resumes an existing run (`_open`)."""
-        if self._replay_of is None:
-            return False
-        if run_id == self._replay_of:
-            return True
-        return run_id not in self._made and self.layout.run_dir(run_id).exists()
 
     def _unattributed(self) -> _Run:
         run = self._runs.get(UNATTRIBUTED)
@@ -697,12 +558,12 @@ class DirectoryStore:
             # An OSError - too many open files, say - is left to drop this one event: refusing the
             # run for good would drop every later one of a run that is only unreadable for now.
             try:
-                record = _read_run_json(directory)
+                record = read_run_json(directory)
                 writable = record.schema_version == SCHEMA_VERSION
             except TraceFormatError:  # a newer version, or one damage leaves no version to read
                 writable = False
         # A run this store will not append to is not touched at all, its half line included.
-        run = _Run(events, directory, record, _resume_seq(events) if writable else 1, writable)
+        run = _Run(events, directory, record, resume_seq(events) if writable else 1, writable)
         if record is not None:
             run.dropped_before = run.dropped_written = record.dropped_events
         return run
@@ -754,8 +615,7 @@ class DirectoryStore:
                 if not (run.dir is not None and run.writable):
                     continue
                 if self._dropped_in(run, run_id) != run.dropped_written:
-                    record = run.record or RunRecord.header(run_id, replay_of=self._replay_of)
-                    self._write_record(run, record)
+                    self._write_record(run, run.record or self._attribution.header(run_id))
             except Exception as exc:
                 logger.warning(
                     "irimi: the trace store could not record run %r's drops: %s",
@@ -802,10 +662,10 @@ def _item_bytes(item: _Item) -> int:
     """The bytes `item` holds while it waits: an exchange's two bodies, and a tool call and a
     run's start as their whole JSON, which the control endpoint takes up to
     `limits.MAX_CONTROL_BODY` of. An end holds an error cut to MAX_QUEUED_ERROR."""
-    if isinstance(item, _Record) and isinstance(item.event, Exchange):
+    if isinstance(item, _QueuedEvent) and isinstance(item.event, Exchange):
         response = item.event.response
         return len(item.event.request.body) + (0 if response is None else len(response.body))
-    if isinstance(item, _Record | _StartRun):
+    if isinstance(item, _QueuedEvent | _StartRun):
         return item.json_bytes
     return 0
 
@@ -826,253 +686,3 @@ def _item_run_id(item: _Item) -> str:
         return item.run_id
     named = item.record if isinstance(item, _StartRun) else item.event
     return getattr(named, "run_id", UNATTRIBUTED)
-
-
-class StoreLocked(OSError):
-    """Another process holds this store's `serve.lock`: another `serve` writes it."""
-
-
-class ServeLock:
-    """A root's `serve.lock`, held exclusively by this process until `release()`.
-
-    `unattributed/events.jsonl` is where a serve files every request no run claims. Two serves
-    appending to it would repeat each other's `seq`, and one resuming it would cut off the other's
-    line mid-write as a crash's half line. So a root has one serve: a second one is refused at
-    once, never made to wait, and a supervisor restarting serve retries until the old process has
-    exited. The lock is the kernel's: it is released when the process exits, however it exits, so
-    a crashed serve never leaves the root locked."""
-
-    def __init__(self, fd: int) -> None:
-        self._fd: int | None = fd
-
-    @classmethod
-    def hold(cls, root: Path) -> "ServeLock":
-        """Take `root`'s `serve.lock`. Raises StoreLocked when another process holds it, and
-        OSError when the file cannot be opened."""
-        private_dir(root)
-        fd = os.open(StoreLayout(root).serve_lock, os.O_RDWR | os.O_CREAT, FILE_MODE)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            os.close(fd)
-            raise StoreLocked(f"another irimi serve is writing the trace store {root}") from None
-        except BaseException:
-            os.close(fd)
-            raise
-        return cls(fd)
-
-    def release(self) -> None:
-        """Let go of the lock: closing the descriptor releases it. Idempotent."""
-        fd, self._fd = self._fd, None
-        if fd is not None:
-            os.close(fd)
-
-
-def names_a_run_dir(run_id: object) -> bool:
-    """True when `run_id` may be a directory under `runs/`: `trace.is_valid_run_id`, the
-    path-traversal guard, checked again rather than trusted, and not `unattributed`, which is
-    the name of "no run". Anything else is stored in `unattributed/` and never opens a path.
-
-    Public because the control endpoint refuses, with a 400, the run ids this store would only
-    count as a drop: the agent is told, rather than its run silently going missing."""
-    return isinstance(run_id, str) and run_id != UNATTRIBUTED and trace.is_valid_run_id(run_id)
-
-
-def _append_line(path: Path, data: bytes) -> None:
-    """`data`, one whole line, in one `write` on an O_APPEND descriptor, so two processes appending
-    to one file never interleave inside a line."""
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, FILE_MODE)
-    try:
-        start = end = -1  # where this line's bytes begin and end, once the disk took any
-        view = memoryview(data)
-        try:
-            while view:
-                written = os.write(fd, view)
-                end = os.lseek(fd, 0, os.SEEK_CUR)
-                start = end - written if start < 0 else start
-                view = view[written:]
-        except OSError:
-            # A line the disk refused half-way would glue itself onto the next one and damage
-            # the run for every later read: cut it off again before reporting the drop. Only
-            # this line's own bytes, and only while they still end the file: `unattributed/` is
-            # shared, and a line another process appended meanwhile is not this one's to cut.
-            # A `write` that raised wrote nothing, so a line the disk never took is left alone.
-            if start >= 0 and end - start == len(data) - len(view) and os.fstat(fd).st_size == end:
-                os.ftruncate(fd, start)
-            raise
-    finally:
-        os.close(fd)
-
-
-def _resume_seq(events: Path) -> int:
-    """The `seq` after the last readable line of `events`, 1 for a new file. Only the last
-    RESUME_TAIL bytes are read, unless no whole readable line is inside them. A final line with no
-    newline was cut off by a crash: it is truncated away, so the next line starts clean."""
-    if not events.exists():
-        return 1
-    size = events.stat().st_size
-    start = max(0, size - RESUME_TAIL)
-    with open(events, "rb") as f:
-        f.seek(start)
-        data = f.read()
-    last = _last_seq(data)
-    if last is None and start:  # the tail holds no whole line: read them all
-        start, data = 0, events.read_bytes()
-        last = _last_seq(data)
-    complete = start + data.rfind(b"\n") + 1
-    if complete < size:
-        os.truncate(events, complete)
-    return (last or 0) + 1
-
-
-def _last_seq(data: bytes) -> int | None:
-    """The `seq` of the last whole line in `data` that parses and holds an integer `seq`, or None
-    when none does. A tail's first line may start mid-line, and a damaged line may hold anything:
-    `{"seq": 1e400}` is infinity, which `int()` refuses with an OverflowError, and a line nested
-    past the parser's depth is a RecursionError. Either one escaping would drop every later event
-    of the run, on every restart."""
-    for line in reversed(data[: data.rfind(b"\n") + 1].splitlines()):
-        try:
-            seq = json.loads(line)["seq"]
-        except (ValueError, KeyError, TypeError, RecursionError):
-            continue
-        if isinstance(seq, int) and not isinstance(seq, bool):
-            return seq
-    return None
-
-
-# ------------------------------------------------------------------------------------ the reader
-
-
-class RunNotFound(KeyError):
-    """No stored run has this id."""
-
-
-class StoreReader:
-    """Reads what a DirectoryStore wrote under `root`."""
-
-    def __init__(self, root: Path) -> None:
-        self.layout = StoreLayout(root)
-
-    def list_runs(self) -> list[RunRecord]:
-        """Every run, newest `started_at` first and a None `started_at` last. A run.json this
-        irimi cannot read - a newer schema version, damage, or one it may not open - is skipped
-        with a WARNING, so one run cannot hide the others. So is one that names another run than
-        its directory does: `load_run` would refuse that id, so listing it would name a run that
-        cannot be shown. A store with no `runs/` holds no run; one irimi may not list
-        raises its OSError."""
-        records = []
-        try:
-            # Not `Path.is_dir`, which reads a store irimi may not enter as absent, so `runs list`
-            # would say it holds no runs.
-            runs = sorted(self.layout.runs.iterdir())
-        except (FileNotFoundError, NotADirectoryError):
-            runs = []
-        for directory in runs:
-            # One irimi may not read is skipped with a warning too, never silently.
-            try:
-                if not _holds_run_file(directory):
-                    continue
-                record = _read_run_json(directory)
-            except (TraceFormatError, OSError) as exc:
-                logger.warning("irimi: skipping stored run %s: %s", directory.name, exc)
-                continue
-            if record.run_id != directory.name:
-                logger.warning(
-                    "irimi: skipping stored run %s: its run.json names another run", directory.name
-                )
-                continue
-            records.append(record)
-        return sorted(
-            records,
-            key=lambda r: (r.started_at is None, -(r.started_at or 0.0), r.run_id),
-        )
-
-    def load_run(self, run_id: str, *, bodies: bool = True) -> StoredRun:
-        """One run, its events in `seq` order. `UNATTRIBUTED` gives the unattributed events under
-        `RunRecord.header`. Raises RunNotFound for an id with no run, TraceFormatError for a
-        damaged run: an unparseable line other than a crash's truncated last one, a missing blob;
-        and OSError for one irimi may not read, its directory or a file in it, which is not a
-        missing run.
-
-        `bodies=False` leaves every body empty and reads no blob, though each is still checked to
-        exist at its size, so a missing or resized blob is damage either way. It is for a caller
-        that counts events and never reads a body: `irimi runs list` would otherwise read every
-        body of every run it lists, hundreds of MB for a few runs of LLM streams, to print two
-        numbers."""
-        get_body = self._get_body if bodies else self._check_body
-        if run_id == UNATTRIBUTED:
-            events = self.layout.unattributed_events
-            return StoredRun(RunRecord.header(UNATTRIBUTED), self._events(events, get_body))
-        if not trace.is_valid_run_id(run_id):
-            raise RunNotFound(run_id)
-        directory = self.layout.run_dir(run_id)
-        if not _holds_run_file(directory):
-            raise RunNotFound(run_id)
-        record = _read_run_json(directory)
-        # On a case-insensitive filesystem `run1` opens `Run1/`: that is another run, not this one.
-        if record.run_id != run_id:
-            raise RunNotFound(run_id)
-        return StoredRun(record, self._events(directory / EVENTS_FILE, get_body))
-
-    def _events(self, path: Path, get_body: trace.GetBody) -> list[Event]:
-        numbered = []
-        for line, d in _lines(path):
-            # Every refusal names its file and line, as a line that does not parse does: in a run
-            # of thousands of events, `'name' is a list` alone cannot be found. A missing blob is
-            # named by the line whose event refers to it.
-            try:
-                numbered.append(trace.event_from_json(d, get_body))
-            except TraceFormatError as exc:
-                raise TraceFormatError(f"{path}, line {line}: {exc}") from exc
-        return [event for _, event in sorted(numbered, key=lambda pair: pair[0])]
-
-    def _get_body(self, ref: BodyRef) -> bytes:
-        try:
-            data = self.layout.blob(ref.sha256).read_bytes()
-        except OSError as exc:
-            raise TraceFormatError(f"blob {ref.sha256} is missing: {exc}") from exc
-        if len(data) != ref.size:
-            raise TraceFormatError(f"blob {ref.sha256} holds {len(data)} bytes, not {ref.size}")
-        return data
-
-    def _check_body(self, ref: BodyRef) -> bytes:
-        """`_get_body`'s checks without reading the blob: it exists, at the size its ref says."""
-        try:
-            size = self.layout.blob(ref.sha256).stat().st_size
-        except OSError as exc:
-            raise TraceFormatError(f"blob {ref.sha256} is missing: {exc}") from exc
-        if size != ref.size:
-            raise TraceFormatError(f"blob {ref.sha256} holds {size} bytes, not {ref.size}")
-        return b""
-
-
-def _holds_run_file(directory: Path) -> bool:
-    """Whether a run directory holds a run.json. An OSError other than its absence is raised:
-    `Path.is_file` reads one as False, which would report a run irimi may not read as missing."""
-    try:
-        return stat.S_ISREG((directory / RUN_FILE).stat().st_mode)
-    except (FileNotFoundError, NotADirectoryError):
-        return False
-
-
-def _lines(path: Path) -> Iterator[tuple[int, Any]]:
-    """Each line of an `events.jsonl`, parsed, after its line number from 1. A final line with no
-    newline that does not parse was cut off by a crash mid-write, and is skipped; any other that
-    does not parse is damage. A file that is not there holds no line; one irimi may not read
-    raises its OSError, never reads as empty."""
-    try:
-        data = path.read_bytes()
-    except FileNotFoundError:
-        return
-    lines = data.split(b"\n")
-    for i, line in enumerate(lines):
-        if not line:
-            continue
-        try:
-            parsed = json.loads(line)
-        except (ValueError, RecursionError) as exc:
-            if i == len(lines) - 1:  # no newline after it: the crash's half line
-                return
-            raise TraceFormatError(f"{path}, line {i + 1}: {exc}") from exc
-        yield i + 1, parsed

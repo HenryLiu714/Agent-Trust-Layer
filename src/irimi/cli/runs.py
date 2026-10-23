@@ -1,8 +1,12 @@
 """`irimi runs list`, `irimi runs show` and `irimi compare`: the runs in the trace store, read
-back."""
+back. `irimi runs rm` and `irimi runs prune` delete them."""
 
 import argparse
+import re
 import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from irimi.cli import CliError, compose, os_error
@@ -16,11 +20,15 @@ from irimi.cli.options import (
 )
 from irimi.core import exitcodes
 from irimi.protocol.trace import UNATTRIBUTED
+from irimi.record.store import retention
+from irimi.record.store.lock import StoreLocked
 from irimi.record.store.reader import StoreReader
 from irimi.replay import compare
 from irimi.report import runs
+from irimi.report.terminal import plural
 
 DEFAULT_RUNS_LIMIT = 20  # `irimi runs list` without --limit
+DURATION_UNITS = {"h": 3600, "d": 86400}  # `irimi runs prune --older-than`, in seconds
 
 COMPARE_EXIT_CODES = exitcodes.help_table(
     [exitcodes.OK, exitcodes.DIFFERENT, exitcodes.ERROR, exitcodes.BROKEN_PIPE]
@@ -31,8 +39,9 @@ def register(subparsers: "argparse._SubParsersAction[Any]") -> None:
     runs_parser = subparsers.add_parser(
         "runs",
         **help_formatted(
-            help="read back the runs in the trace store",
-            description="Read back the runs irimi stored, redacted. With no subcommand, list them.",
+            help="read back or delete the runs in the trace store",
+            description="Read back the runs irimi stored, redacted, or delete them. With no "
+            "subcommand, list them.",
             epilog=epilog(["irimi runs", "irimi runs show last", "irimi runs show unattributed"]),
         ),
     )
@@ -75,6 +84,43 @@ def register(subparsers: "argparse._SubParsersAction[Any]") -> None:
     )
     add_store_option(runs_show)
     runs_show.set_defaults(func=cmd_runs_show)
+    runs_rm = runs_sub.add_parser(
+        "rm",
+        **help_formatted(
+            help="delete stored runs",
+            description="Delete stored runs, and the stored bodies no other run uses. Refused "
+            "while an irimi serve\nwrites the store, but not while an irimi shadow writes a run "
+            "it names: check that\nfirst.",
+            epilog=epilog(["irimi runs rm last", "irimi runs rm 7729eae4 9c20"]),
+        ),
+    )
+    runs_rm.add_argument("run_ids", nargs="+", metavar="RUN", help=RUN_ID_HELP)
+    add_store_option(runs_rm, "the trace store to delete from")
+    runs_rm.set_defaults(func=cmd_runs_rm)
+    runs_prune = runs_sub.add_parser(
+        "prune",
+        **help_formatted(
+            help="delete stored runs older than a duration",
+            description="Delete every stored run that ended (or, if it has not ended, was last "
+            "written) longer\nago than --older-than, and the stored bodies no other run uses. "
+            "Refused while an irimi\nserve writes the store.",
+            epilog=epilog(
+                ["irimi runs prune --older-than 30d --dry-run", "irimi runs prune --older-than 12h"]
+            ),
+        ),
+    )
+    runs_prune.add_argument(
+        "--older-than",
+        type=duration,
+        required=True,
+        metavar="DURATION",
+        help="delete runs older than DURATION: a whole number of hours or days, such as 12h or 30d",
+    )
+    runs_prune.add_argument(
+        "--dry-run", action="store_true", help="list the runs it would delete, and delete nothing"
+    )
+    add_store_option(runs_prune, "the trace store to delete from")
+    runs_prune.set_defaults(func=cmd_runs_prune)
 
     compare_runs = subparsers.add_parser(
         "compare",
@@ -136,6 +182,72 @@ def cmd_runs_show(args: argparse.Namespace) -> int:
         return 0
     for line in runs.run_show_lines(run, compose.maps_for_stored_runs()):
         print(line)
+    return 0
+
+
+@dataclass(frozen=True)
+class Duration:
+    """An --older-than as typed, and in seconds."""
+
+    typed: str
+    seconds: int
+
+
+def duration(value: str) -> Duration:
+    """argparse type for --older-than: a whole number of hours or days, `12h` or `30d`."""
+    match = re.fullmatch(r"(\d+)([hd])", value)
+    if match is None:
+        raise argparse.ArgumentTypeError(
+            f"{value!r}: give a whole number of hours or days, as 12h or 30d"
+        )
+    return Duration(value, int(match[1]) * DURATION_UNITS[match[2]])
+
+
+def cmd_runs_rm(args: argparse.Namespace) -> int:
+    """`irimi runs rm RUN…`: delete the runs named, or none when any of them is not stored."""
+    root = compose.store_root(args)
+    run_ids = []
+    for typed in args.run_ids:
+        try:
+            run_ids.append(compose.resolve_run_id(root, typed))
+        except LookupError as exc:
+            raise CliError(str(exc), exitcodes.ERROR) from None
+    held, missing = retention.stored_run_ids(root, run_ids)
+    if missing:
+        raise CliError(f"no run {missing[0]} in {root}", exitcodes.ERROR)
+    return _remove(args, root, held, dry_run=False)
+
+
+def cmd_runs_prune(args: argparse.Namespace) -> int:
+    """`irimi runs prune --older-than DURATION`: delete every run older than DURATION."""
+    root = compose.store_root(args)
+    try:
+        run_ids = retention.older_than(root, time.time() - args.older_than.seconds)
+    except OSError as exc:
+        print(f"error: {os_error(compose.store_subject(args), exc)}", file=sys.stderr)
+        return exitcodes.ERROR
+    if not run_ids:
+        print(f"no runs older than {args.older_than.typed} in {root}")
+        return 0
+    return _remove(args, root, run_ids, dry_run=args.dry_run)
+
+
+def _remove(args: argparse.Namespace, root: Path, run_ids: list[str], *, dry_run: bool) -> int:
+    """Delete `run_ids`, or only say what that would delete, and print one line per run."""
+    try:
+        removal = retention.plan(root, run_ids) if dry_run else retention.remove(root, run_ids)
+    except StoreLocked as exc:
+        print(f"error: {exc}; stop it to delete runs", file=sys.stderr)
+        return exitcodes.ERROR
+    except OSError as exc:
+        print(f"error: {os_error(compose.store_subject(args), exc)}", file=sys.stderr)
+        return exitcodes.ERROR
+    verb = "would delete" if dry_run else "deleted"
+    for run_id in removal.runs:
+        print(f"{verb} run {run_id}")
+    bodies = len(removal.blobs)
+    stored = f"{bodies} stored {'body' if bodies == 1 else 'bodies'}"
+    print(f"{verb} {plural(len(removal.runs), 'run')} and {stored} no other run uses")
     return 0
 
 

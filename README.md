@@ -914,6 +914,8 @@ irimi serve [options]                run the proxy for agents you start yourself
 irimi replay RUN [options] [-- CMD]  re-run a stored run against its recorded responses and show what changed
 irimi runs [list] [--limit N|--all]  list stored runs, newest first
 irimi runs show [RUN]                show one stored run
+irimi runs rm RUN...                 delete stored runs
+irimi runs prune --older-than 30d    delete stored runs older than a duration
 irimi compare RUN_A RUN_B            show the writes two stored runs made, side by side
 irimi maps [list] [map options]      list each mapped host with its service, route count and target
 ```
@@ -944,6 +946,10 @@ the newest. `runs show` prints the summary `irimi shadow` printed for the run, f
 replay's run, which printed none, opens its block `irimi replay`); `runs show unattributed`
 shows the exchanges no run claimed. See [Reading a run back](docs/trace-format.md#reading-a-run-back) for where the two summaries differ.
 `irimi runs` and `irimi maps` with no subcommand are their `list`.
+A stored run holds the data the agent read: credentials are redacted, business data is not. `irimi
+runs rm RUN...` deletes runs (a prefix or `last` works here too), `irimi runs prune --older-than
+30d` deletes every run older than that (`h` for hours; `--dry-run` lists them first), and both
+delete the stored bodies no other run uses. Both are refused while a `serve` writes the store.
 
 Exit codes, the same for every command: 0 ok, and for `compare` and `replay` every write the same;
 1 a write differs (`compare`, `replay`); 2 irimi could not do it, or was invoked wrongly; 126 and

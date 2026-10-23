@@ -25,6 +25,7 @@ from irimi.core.exchange import Exchange, Precondition, Request, Response
 from irimi.protocol import trace
 from irimi.protocol.trace import ErrorInfo, RunRecord, ToolCall, Trigger
 from irimi.record import redact
+from irimi.record.store.lock import ServeLock
 from irimi.record.store.reader import StoreReader
 from irimi.record.store.writer import DirectoryStore
 from irimi.report.model import RunView
@@ -827,3 +828,162 @@ def test_runs_show_says_a_trigger_s_args_nest_too_deeply_to_show_and_never_raise
         args = [args]
     record = _ended_run("deep", HAND_BUILT_AT, trigger=Trigger("job", None, args, False))
     assert run_header_lines(record)[4] == f"args: {ARGS_TOO_DEEP}"
+
+
+# ---------------------------------------------------------------------- runs rm and runs prune
+
+
+def _store_with(home, *exchanges: Exchange, runs: tuple[RunRecord, ...] = ()) -> Path:
+    s = DirectoryStore(home / "store", redact.load_key(home))
+    for record in runs:
+        s.start_run(record)
+    for exchange in exchanges:
+        s.record(exchange)
+    s.close()
+    return home / "store"
+
+
+def _own_body(run_id: str) -> Exchange:
+    """A refund whose request body no other run's is, so its blob is this run's alone."""
+    refund = _refund(run_id)
+    body = f"charge=ch_{run_id}&amount=4900&currency=usd".encode()
+    return dataclasses.replace(refund, request=dataclasses.replace(refund.request, body=body))
+
+
+def _blobs(store: Path) -> set[str]:
+    return {blob.name for blob in (store / "blobs").iterdir()}
+
+
+def test_runs_rm_deletes_a_run_and_only_the_bodies_no_other_run_uses(home, capfd):
+    store = _store_with(home, _own_body("kept"), _own_body("gone"))
+    before = _blobs(store)
+    gone = trace.body_ref(_own_body("gone").request.body).sha256
+    assert main(["runs", "rm", "gone"]) == 0
+    assert capfd.readouterr() == (
+        "deleted run gone\ndeleted 1 run and 1 stored body no other run uses\n",
+        "",
+    )
+    assert not (store / "runs" / "gone").exists()
+    # The response body `{}` both runs stored stays: the run kept still reads it whole.
+    assert _blobs(store) == before - {gone}
+    assert StoreReader(store).load_run("kept").events
+
+
+def test_runs_rm_takes_several_runs_a_prefix_and_last(home, capfd):
+    store = _store_with(
+        home,
+        runs=(
+            _ended_run("9c207d4b1c0178f3", HAND_BUILT_AT),
+            _ended_run("aa00000000000001", HAND_BUILT_AT + 1),
+            _ended_run("bb00000000000002", HAND_BUILT_AT + 2),
+        ),
+    )
+    assert main(["runs", "rm", "9c20", "last"]) == 0
+    assert capfd.readouterr().out.splitlines() == [
+        "deleted run 9c207d4b1c0178f3",
+        "deleted run bb00000000000002",
+        "deleted 2 runs and 0 stored bodies no other run uses",
+    ]
+    assert [r.run_id for r in StoreReader(store).list_runs()] == ["aa00000000000001"]
+
+
+def test_runs_rm_deletes_nothing_when_any_run_named_is_not_stored(home, capfd):
+    store = _store_with(home, runs=(_ended_run("kept", HAND_BUILT_AT),))
+    assert main(["runs", "rm", "kept", "nope"]) == 2
+    assert capfd.readouterr() == ("", f"error: no run nope in {store}\n")
+    assert [r.run_id for r in StoreReader(store).list_runs()] == ["kept"]
+
+
+def test_runs_rm_refuses_an_ambiguous_prefix(home, capfd):
+    _store_with(home, runs=(_ended_run("ab1", HAND_BUILT_AT), _ended_run("ab2", HAND_BUILT_AT)))
+    assert main(["runs", "rm", "ab"]) == 2
+    assert capfd.readouterr() == ("", "error: run id ab is ambiguous; it starts ab1, ab2\n")
+
+
+def test_runs_rm_is_refused_while_a_serve_writes_the_store(home, capfd):
+    store = _store_with(home, runs=(_ended_run("kept", HAND_BUILT_AT),))
+    lock = ServeLock.hold(store)
+    try:
+        assert main(["runs", "rm", "kept"]) == 2
+    finally:
+        lock.release()
+    assert capfd.readouterr() == (
+        "",
+        f"error: another irimi serve is writing the trace store {store}; stop it to delete runs\n",
+    )
+    assert (store / "runs" / "kept").is_dir()
+
+
+def test_runs_rm_deletes_a_damaged_run_named_in_full(home, capfd):
+    """`runs list` skips a run.json it cannot read, but the run is still deletable by its id."""
+    store = _store_with(home, _own_body("broken"))
+    (store / "runs" / "broken" / "run.json").write_text("{")
+    assert main(["runs", "rm", "broken"]) == 0
+    assert capfd.readouterr().out.splitlines()[0] == "deleted run broken"
+    assert not (store / "runs" / "broken").exists()
+    assert _blobs(store) == set()
+
+
+def test_runs_rm_unattributed_deletes_the_events_no_run_claimed(home, capfd):
+    store = _store_with(home, _own_body("unattributed"))
+    assert main(["runs", "rm", "unattributed"]) == 0
+    assert capfd.readouterr().out.splitlines()[0] == "deleted run unattributed"
+    assert not (store / "unattributed").exists()
+    assert _blobs(store) == set()
+
+
+def test_runs_prune_deletes_the_runs_older_than_the_duration_and_dry_run_deletes_nothing(
+    home, capfd
+):
+    now = time.time()
+    store = _store_with(
+        home,
+        runs=(
+            _ended_run("month", now - 31 * 86400),
+            # Started long ago but ended inside the window: a run's age is from its end.
+            _ended_run("long", now - 40 * 86400, ended_at=now - 3 * 3600),
+            _ended_run("fresh", now - 60),
+        ),
+    )
+    assert main(["runs", "prune", "--older-than", "30d", "--dry-run"]) == 0
+    assert capfd.readouterr().out.splitlines() == [
+        "would delete run month",
+        "would delete 1 run and 0 stored bodies no other run uses",
+    ]
+    assert len(StoreReader(store).list_runs()) == 3
+    assert main(["runs", "prune", "--older-than", "30d"]) == 0
+    assert capfd.readouterr().out.splitlines()[0] == "deleted run month"
+    assert main(["runs", "prune", "--older-than", "2h"]) == 0
+    assert capfd.readouterr().out.splitlines()[0] == "deleted run long"
+    assert main(["runs", "prune", "--older-than", "2h"]) == 0
+    assert capfd.readouterr().out == f"no runs older than 2h in {store}\n"
+    assert [r.run_id for r in StoreReader(store).list_runs()] == ["fresh"]
+
+
+def test_runs_prune_judges_a_run_that_has_not_ended_by_when_its_files_were_last_written(
+    home, capfd
+):
+    """A run an `irimi shadow` is still writing has no end, and may have started long ago."""
+    long_ago = time.time() - 2 * 86400
+    store = _store_with(home, dataclasses.replace(_own_body("stuck"), started_at=long_ago))
+    assert main(["runs", "prune", "--older-than", "1d"]) == 0
+    assert capfd.readouterr().out == f"no runs older than 1d in {store}\n"
+    run_dir = store / "runs" / "stuck"
+    os.utime(run_dir / "run.json", (long_ago, long_ago))
+    assert main(["runs", "prune", "--older-than", "1d"]) == 0
+    assert capfd.readouterr().out == f"no runs older than 1d in {store}\n"
+    os.utime(run_dir / "events.jsonl", (long_ago, long_ago))
+    assert main(["runs", "prune", "--older-than", "1d"]) == 0
+    assert capfd.readouterr().out.splitlines() == [
+        "deleted run stuck",
+        # Its request's body and its response's `{}`.
+        "deleted 1 run and 2 stored bodies no other run uses",
+    ]
+
+
+@pytest.mark.parametrize("older_than", ["30", "1.5d", "30m", "-1d", "d"])
+def test_runs_prune_refuses_a_duration_that_is_not_whole_hours_or_days(older_than, capsys):
+    with pytest.raises(SystemExit) as exited:
+        main(["runs", "prune", "--older-than", older_than])
+    assert exited.value.code == 2
+    assert "give a whole number of hours or days, as 12h or 30d" in capsys.readouterr().err

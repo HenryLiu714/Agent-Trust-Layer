@@ -2,7 +2,8 @@
 
 `delegate` is the decision - which target, if any, this request goes to. The rest is what the
 engine needs to act on that decision safely: where to send the request (`target_url`) and what
-it may never be sent to (`refuse_self_target`). Which headers it may not carry is
+it may never be sent to (`refuse_self_target`, and `refuse_self_targets` for every target in the
+maps before a listener starts). Which headers it may not carry is
 `redact.is_credential_header`, the rule disk is held to too.
 """
 
@@ -13,7 +14,7 @@ from irimi import netaddr
 from irimi.classify import Classification
 from irimi.exchange import Request
 from irimi.netaddr import Target
-from irimi.servicemap import TARGETABLE_KINDS, target_for
+from irimi.servicemap import TARGETABLE_KINDS, MapIndex, target_for
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,23 @@ def refuse_self_target(target: Target, listen_port: int, local_address: str = ""
             f"answer target {target.url!r} is irimi's own listener on port {listen_port}; "
             "point it at the address that answers the route instead"
         )
+
+
+def refuse_self_targets(index: MapIndex, listen_port: int, bind: str = "") -> None:
+    """Raise TargetRefused when any service or route target in `index` is the listener on
+    `listen_port`, bound at `bind`. A port of 0 is not known until the listener binds, so nothing
+    is refused for it.
+
+    The engine repeats this per request against the port it actually bound, which is the
+    authoritative check; this one lets `--port 4000` with a target on 4000 fail before anything
+    starts rather than on the first request.
+    """
+    if not listen_port:
+        return
+    for sm in index.services:
+        for target in (sm.target, *(r.target for r in sm.routes)):
+            if target is not None:
+                refuse_self_target(target, listen_port, bind)
 
 
 def delegate(request: Request, classification: Classification) -> ForwardTo | None:

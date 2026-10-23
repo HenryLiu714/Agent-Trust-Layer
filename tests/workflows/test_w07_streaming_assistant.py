@@ -611,8 +611,7 @@ def test_a_stream_its_trigger_hands_off_is_stored_in_its_run_after_the_run_ended
 
 # ---------------------------------------------------------------------- irimi compare
 
-NOT_A_VERDICT = "a comparison, not a verdict: nothing was replayed"
-CHAT = "chat  examples.workflows.w07_streaming_assistant.agent:chat  agent -"
+CHAT = "chat  examples.workflows.w07_streaming_assistant.agent:chat"
 # The trigger's args hold the handler's `send` callable, stored as its repr, address and all,
 # so no two chats' args are ever the same.
 ARGS_DIFFER = "  (the triggers' args differ)"
@@ -628,7 +627,7 @@ def test_irimi_compare_of_two_chats_streamed_at_once_shows_no_write(run_workflow
     assert shadow.compare_runs(a, b) == (
         0,
         [
-            f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+            f"irimi compare · {a} vs {b}",
             f"  A  {CHAT}",
             f"  B  {CHAT}",
             ARGS_DIFFER,
@@ -654,7 +653,7 @@ def test_irimi_compare_shows_the_post_a_streamed_tool_call_made_and_nothing_else
     a, b = (result.one("run.start")["run"] for result in (normal, posted))
     assert (code, err) == (1, [])
     assert out == [
-        f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+        f"irimi compare · {a} vs {b}",
         f"  A  {CHAT}",
         f"  B  {CHAT}",
         ARGS_DIFFER,

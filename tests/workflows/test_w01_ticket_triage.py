@@ -189,21 +189,33 @@ def test_the_ticket_is_stored_as_the_runs_trigger_by_its_dataclass(run_workflow,
 
 # ---------------------------------------------------------------------- irimi compare
 
-TRIAGE = f"handle_ticket  {AGENT}:handle_ticket  agent -"
+TRIAGE = f"handle_ticket  {AGENT}:handle_ticket"
 FULL = "○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)"
 REPLY = f"○ tool {AGENT}.send_reply  shadow stand-in ran"
+# The reply the full refund's run sends the customer, which its summary line does not print.
+SENT = "Refund of 4900 requested (statuses: 200)."
+
+
+def reply_changed(now: str, was: str = SENT) -> list[str]:
+    """The reply tool's rows when the two runs sent the customer different text: one line printed
+    twice, and the field that differs under it."""
+    return [f"  ~ A {REPLY}", f"    B {REPLY}", f'      args.body: "{was}" -> "{now}"']
+
+
 # Whose summary printed a compared line: run A's for `=`, `-` and `~ A`, run B's for `+` and `B`.
+# A field that differs, under a pair, is compare's own.
 PRINTED_BY = {"  = ": 0, "  - ": 0, "  ~ A ": 0, "  + ": 1, "    B ": 1}
+FIELD_LINE = "      "
 COMPARED = {
-    # The prompt edit: the same loop, and the one argument it moved.
+    # The prompt edit: the same loop, the one argument it moved, and the reply that says so.
     "half_refund": (
         1,
         [
             f"  ~ A {FULL}",
             "    B ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)",
-            f"  = {REPLY}",
+            *reply_changed("Refund of 2450 requested (statuses: 200)."),
             "",
-            "  1 same · 1 changed · 0 only in A · 0 only in B",
+            "  0 same · 2 changed · 0 only in A · 0 only in B",
         ],
     ),
     "too_large": (
@@ -211,9 +223,9 @@ COMPARED = {
         [
             f"  ~ A {FULL}",
             "    B ✗ refund $98.00 on ch_TICKET1  would fail: amount_too_large",
-            f"  = {REPLY}",
+            *reply_changed("Refund of 9800 requested (statuses: 400)."),
             "",
-            "  1 same · 1 changed · 0 only in A · 0 only in B",
+            "  0 same · 2 changed · 0 only in A · 0 only in B",
         ],
     ),
     # The second refund is the one B added: L3 refused it, and an attempted write is a write.
@@ -222,16 +234,21 @@ COMPARED = {
         [
             f"  = {FULL}",
             "  + ✗ refund $49.00 on ch_TICKET1  would fail: charge_already_refunded",
-            f"  = {REPLY}",
+            *reply_changed("Refund of 4900 requested (statuses: 200, 400)."),
             "",
-            "  2 same · 0 changed · 0 only in A · 1 only in B",
+            "  1 same · 1 changed · 0 only in A · 1 only in B",
         ],
     ),
-    # The repeated send is the same write, answered by the idempotency store: two runs, and
-    # nothing between them to show.
+    # The repeated send is the same write, answered by the idempotency store, and not compared;
+    # the reply that counts both sends is a different reply.
     "retried_refund": (
-        0,
-        [f"  = {FULL}", f"  = {REPLY}", "", "  2 same · 0 changed · 0 only in A · 0 only in B"],
+        1,
+        [
+            f"  = {FULL}",
+            *reply_changed("Refund of 4900 requested (statuses: 200, 200)."),
+            "",
+            "  1 same · 1 changed · 0 only in A · 0 only in B",
+        ],
     ),
     "runaway_loop": (
         1,
@@ -259,7 +276,7 @@ def test_irimi_compare_shows_each_prompt_s_writes_against_the_full_refund_s(
     assert (code, out) == (
         COMPARED[scenario][0],
         [
-            f"irimi compare · {a} vs {b} · a comparison, not a verdict: nothing was replayed",
+            f"irimi compare · {a} vs {b}",
             f"  A  {TRIAGE}",
             f"  B  {TRIAGE}",
             "",
@@ -267,6 +284,8 @@ def test_irimi_compare_shows_each_prompt_s_writes_against_the_full_refund_s(
         ],
     )
     for line in out[4:-2]:
+        if line.startswith(FIELD_LINE):
+            continue
         prefix = next(p for p in PRINTED_BY if line.startswith(p))
         printed = (full, other)[PRINTED_BY[prefix]].summaries()
         assert f"  {line.removeprefix(prefix)}" in printed, line
@@ -352,7 +371,7 @@ def test_irimi_compare_reads_a_run_whose_last_line_a_crash_cut(shared_store_run,
     assert half.command("compare", a, b, "--store", str(copy)) == (
         1,
         [
-            f"irimi compare · {a} vs {b} · a comparison, not a verdict: nothing was replayed",
+            f"irimi compare · {a} vs {b}",
             f"  A  {TRIAGE}",
             f"  B  {TRIAGE}",
             "",
@@ -657,7 +676,7 @@ def test_a_full_refund_replayed_unchanged_is_answered_from_its_recording(replaye
     ]
     # What `irimi replay` says of it: every call answered, and the same two writes.
     assert replay.replay_result() == [
-        f"irimi replay · {source} → {replay.process_run_id()} · - → -",
+        f"irimi replay · {source} → {replay.process_run_id()}",
         "  agent exited 0",
         "  no divergence: every call was answered from the recording",
         "  7 from the recording · 0 missed",
@@ -693,7 +712,7 @@ def test_a_full_refund_replayed_without_its_database_reads_the_customer_from_the
     # And `irimi replay` says so: no divergence, the same two writes.
     source = recorded.one("run.start")["run"]
     assert replay.replay_result() == [
-        f"irimi replay · {source} → {replay.process_run_id()} · - → -",
+        f"irimi replay · {source} → {replay.process_run_id()}",
         "  agent exited 0",
         "  no divergence: every call was answered from the recording",
         "  7 from the recording · 0 missed",
@@ -743,28 +762,25 @@ def test_a_full_refund_replayed_with_the_half_prompt_diverges_at_the_first_llm_c
     # The trigger alone never seeds the helpdesk database, so no reply could have been written;
     # the replay by its command below writes none to the one its `main()` seeds.
     assert not (replay.state / DB_NAME).exists()
-    # What `irimi replay` says of it: where it diverged, the first llm call, and the refund
-    # it changed. The reply compares `=`: a write tool's line names no args.
+    # What `irimi replay` says of it: where it diverged, the first llm call, the refund it
+    # changed, and the reply, whose line names no args but whose text changed with the refund.
     source = recorded.one("run.start")["run"]
     assert replay.replay_result() == [
-        f"irimi replay · {source} → {replay.process_run_id()} · - → -",
+        f"irimi replay · {source} → {replay.process_run_id()}",
         "  agent exited 0",
-        "  diverged at #1: live      llm       POST api.anthropic.com/v1/messages -> 200  "
-        "[replay-miss]",
+        "  diverged at the agent's 1st call: live      llm       "
+        "POST api.anthropic.com/v1/messages -> 200  [replay-miss]",
         "  2 from the recording · 5 missed",
         "",
         "  ~ A ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)",
         "    B ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)",
-        f"  = ○ tool {REPLY_TOOL}  shadow stand-in ran",
+        *reply_changed("Refund of 2450 requested (statuses: 200)."),
         "",
-        "  1 same · 1 changed · 0 only in A · 0 only in B",
+        "  0 same · 2 changed · 0 only in A · 0 only in B",
     ]
     # The result file says the same: the divergence point's line, and the comparison's exit.
     assert replay.replay is not None
-    assert (replay.replay.exit_code, replay.replay.diverged_at) == (
-        1,
-        "#1: live      llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]",
-    )
+    assert (replay.replay.exit_code, replay.replay.diverged_at) == (1, FIRST_CALL)
 
 
 def test_the_half_prompt_replayed_by_its_command_writes_no_reply_to_the_seeded_database(replayed):
@@ -782,17 +798,17 @@ def test_the_half_prompt_replayed_by_its_command_writes_no_reply_to_the_seeded_d
     assert replay.internet.requests("api.stripe.com") == []
     source = recorded.one("run.start")["run"]
     assert replay.replay_result() == [
-        f"irimi replay · {source} → {replay.process_run_id()} · - → -",
+        f"irimi replay · {source} → {replay.process_run_id()}",
         "  agent exited 0",
-        "  diverged at #1: live      llm       POST api.anthropic.com/v1/messages -> 200  "
-        "[replay-miss]",
+        "  diverged at the agent's 1st call: live      llm       "
+        "POST api.anthropic.com/v1/messages -> 200  [replay-miss]",
         "  2 from the recording · 5 missed",
         "",
         "  ~ A ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)",
         "    B ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)",
-        f"  = ○ tool {REPLY_TOOL}  shadow stand-in ran",
+        *reply_changed("Refund of 2450 requested (statuses: 200)."),
         "",
-        "  1 same · 1 changed · 0 only in A · 0 only in B",
+        "  0 same · 2 changed · 0 only in A · 0 only in B",
     ]
 
 
@@ -855,9 +871,7 @@ def test_each_further_scenario_replayed_unchanged_does_not_diverge(replayed, sce
     assert replay.internet.requests() == []
     source = recorded.one("run.start")["run"]
     code, lines = UNCHANGED[scenario]
-    assert replay.replay_result()[0] == (
-        f"irimi replay · {source} → {replay.process_run_id()} · - → -"
-    )
+    assert replay.replay_result()[0] == (f"irimi replay · {source} → {replay.process_run_id()}")
     assert (replay.exit_code, replay.replay_result()[1:]) == (code, lines)
     assert [e["outcome"] for e in replay.events("run.end")] == [
         e["outcome"] for e in recorded.events("run.end")
@@ -866,7 +880,10 @@ def test_each_further_scenario_replayed_unchanged_does_not_diverge(replayed, sce
 
 # Where a replay of a W1 run with another prompt first misses its recording: the first model call,
 # since the system prompt is in every call.
-FIRST_CALL = "#1: live      llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]"
+FIRST_CALL = (
+    "the agent's 1st call: live      llm       POST api.anthropic.com/v1/messages -> 200  "
+    "[replay-miss]"
+)
 
 
 # What each of those replays says of its calls: how many the recording answered, and how many it
@@ -907,7 +924,7 @@ def test_the_full_refund_replayed_with_each_prompt_shows_what_compare_shows_of_i
     code, rows = COMPARED[scenario]
     ended = _ending(own)
     assert replay.replay_result() == [
-        f"irimi replay · {source} → {replay.process_run_id()} · - → -",
+        f"irimi replay · {source} → {replay.process_run_id()}",
         f"  agent exited {0 if ended == [('ok', None)] else 1}",
         f"  diverged at {FIRST_CALL}",
         f"  {EDITED_COUNTS[scenario]}",
@@ -935,9 +952,9 @@ RESTORED = {
         [
             "  ~ A ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)",
             f"    B {FULL}",
-            f"  = {REPLY}",
+            *reply_changed(SENT, was="Refund of 2450 requested (statuses: 200)."),
             "",
-            "  1 same · 1 changed · 0 only in A · 0 only in B",
+            "  0 same · 2 changed · 0 only in A · 0 only in B",
         ],
     ),
     "too_large": (
@@ -946,9 +963,9 @@ RESTORED = {
         [
             "  ~ A ✗ refund $98.00 on ch_TICKET1  would fail: amount_too_large",
             f"    B {FULL}",
-            f"  = {REPLY}",
+            *reply_changed(SENT, was="Refund of 9800 requested (statuses: 400)."),
             "",
-            "  1 same · 1 changed · 0 only in A · 0 only in B",
+            "  0 same · 2 changed · 0 only in A · 0 only in B",
         ],
     ),
     "double_refund": (
@@ -957,15 +974,21 @@ RESTORED = {
         [
             f"  = {FULL}",
             "  - ✗ refund $49.00 on ch_TICKET1  would fail: charge_already_refunded",
-            f"  = {REPLY}",
+            *reply_changed(SENT, was="Refund of 4900 requested (statuses: 200, 400)."),
             "",
-            "  2 same · 0 changed · 1 only in A · 0 only in B",
+            "  1 same · 1 changed · 1 only in A · 0 only in B",
         ],
     ),
+    # The retry is still one write, and the reply no longer counts it.
     "retried_refund": (
-        0,
+        1,
         "3 from the recording · 4 missed",
-        [f"  = {FULL}", f"  = {REPLY}", "", "  2 same · 0 changed · 0 only in A · 0 only in B"],
+        [
+            f"  = {FULL}",
+            *reply_changed(SENT, was="Refund of 4900 requested (statuses: 200, 200)."),
+            "",
+            "  1 same · 1 changed · 0 only in A · 0 only in B",
+        ],
     ),
     # Both writes are new. The refund misses, and the recording holds no L3 read of the charge to
     # check it against (only the agent's own reads of it), nor does a replay read live state for
@@ -1000,7 +1023,7 @@ def test_each_scenario_replayed_with_the_full_refund_s_prompt_shows_the_writes_i
     source = recorded.one("run.start")["run"]
     code, counts, rows = RESTORED[scenario]
     assert replay.replay_result() == [
-        f"irimi replay · {source} → {replay.process_run_id()} · - → -",
+        f"irimi replay · {source} → {replay.process_run_id()}",
         "  agent exited 0",
         f"  diverged at {FIRST_CALL}",
         f"  {counts}",
@@ -1027,9 +1050,7 @@ def test_a_full_refund_recorded_under_serve_is_replayed_as_one_recorded_under_sh
     assert check_invariants(replay) == []
     assert replay.internet.requests() == []
     source = recorded.one("run.start")["run"]
-    assert replay.replay_result()[0] == (
-        f"irimi replay · {source} → {replay.process_run_id()} · - → -"
-    )
+    assert replay.replay_result()[0] == (f"irimi replay · {source} → {replay.process_run_id()}")
     assert replay.replay_result()[1:] == by_shadow.replay_result()[1:]
     assert replay.replay_result()[2] == (
         "  no divergence: every call was answered from the recording"
@@ -1096,11 +1117,11 @@ def test_a_full_refund_replayed_with_other_args_says_its_args_differ(replayed):
     recorded, replay = replayed(W, "full_refund", options=("--args", json.dumps(OTHER_TICKET)))
     source = recorded.one("run.start")["run"]
     assert replay.replay_result() == [
-        f"irimi replay · {source} → {replay.process_run_id()} · - → -",
+        f"irimi replay · {source} → {replay.process_run_id()}",
         "  agent exited 0",
         "  (the triggers' args differ)",
-        "  diverged at #1: live      llm       POST api.anthropic.com/v1/messages -> 200  "
-        "[replay-miss]",
+        "  diverged at the agent's 1st call: live      llm       "
+        "POST api.anthropic.com/v1/messages -> 200  [replay-miss]",
         "  3 from the recording · 4 missed",
         "",
         "  = ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)",
@@ -1128,7 +1149,7 @@ def test_a_call_of_another_function_is_replayed_in_place_of_the_trigger(replayed
     recorded, replay = replayed(W, "full_refund", options=options)
     source = recorded.one("run.start")["run"]
     assert replay.replay_result() == [
-        f"irimi replay · {source} → {replay.process_run_id()} · - → -",
+        f"irimi replay · {source} → {replay.process_run_id()}",
         "  agent exited 0",
         "  (the triggers' args differ)",
         "  no divergence, but 6 of the recording's calls were never made",
@@ -1171,21 +1192,24 @@ def test_a_full_refund_replayed_under_the_agent_s_python_is_answered_from_its_re
     source = recorded.one("run.start")["run"]
     capfd.readouterr()
     alone = replay(recorded, source, tmp_path / "alone", no_path)
-    assert capfd.readouterr().err.splitlines()[-1:] == [
+    hint = (
         f"hint: the trigger was called under irimi's own Python, {sys.executable}, which may not "
         "have the agent's packages; name the agent's Python with --python PATH"
-    ]
-    assert alone.replay_result()[1] == (
-        f"  agent could not be called: importing {AGENT} raised ModuleNotFoundError: No module "
-        "named 'examples'"
     )
+    assert capfd.readouterr().err.splitlines()[-1:] == [hint]
+    # The result is the error and the hint, once each, and no comparison: the agent never ran.
+    assert alone.replay_result() == [
+        f"error: cannot call {AGENT}:handle_ticket: importing {AGENT} raised "
+        "ModuleNotFoundError: No module named 'examples'",
+        hint,
+    ]
     assert (alone.exit_code, alone.agent_exit_code()) == (2, 126)
     assert alone.events("run.start") == []
     assert alone.internet.requests() == []
     agent = replay(recorded, source, tmp_path / "agent", no_path, ("--python", str(python)))
     assert "hint: " not in capfd.readouterr().err
     assert agent.replay_result() == [
-        f"irimi replay · {source} → {agent.process_run_id()} · - → -",
+        f"irimi replay · {source} → {agent.process_run_id()}",
         "  agent exited 0",
         "  no divergence: every call was answered from the recording",
         "  7 from the recording · 0 missed",
@@ -1230,7 +1254,7 @@ def test_a_replay_is_replayed_by_the_trigger_it_called(replayed, tmp_path, promp
     )
     amount = "$49.00" if prompt == "full" else "$24.50"
     assert second.replay_result() == [
-        f"irimi replay · {first.process_run_id()} → {second.process_run_id()} · - → -",
+        f"irimi replay · {first.process_run_id()} → {second.process_run_id()}",
         "  agent exited 0",
         "  no divergence: every call was answered from the recording",
         "  7 from the recording · 0 missed",
@@ -1334,17 +1358,17 @@ def test_the_half_prompt_s_replay_replayed_with_the_full_prompt_diverges_back(re
     second = replay(first, first.process_run_id(), tmp_path / "back")
     assert [r.run_id for r in first.stored().list_runs()] == before
     assert second.replay_result() == [
-        f"irimi replay · {first.process_run_id()} → {second.process_run_id()} · - → -",
+        f"irimi replay · {first.process_run_id()} → {second.process_run_id()}",
         "  agent exited 0",
-        "  diverged at #1: live      llm       POST api.anthropic.com/v1/messages -> 200  "
-        "[replay-miss]",
+        "  diverged at the agent's 1st call: live      llm       "
+        "POST api.anthropic.com/v1/messages -> 200  [replay-miss]",
         "  2 from the recording · 5 missed",
         "",
         "  ~ A ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)",
         "    B ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)",
-        f"  = ○ tool {REPLY_TOOL}  shadow stand-in ran",
+        *reply_changed(SENT, was="Refund of 2450 requested (statuses: 200)."),
         "",
-        "  1 same · 1 changed · 0 only in A · 0 only in B",
+        "  0 same · 2 changed · 0 only in A · 0 only in B",
     ]
     assert second.exit_code == 1
     assert second.internet.requests("api.stripe.com") == []
@@ -1380,10 +1404,10 @@ def test_a_full_refund_replayed_with_its_tool_results_changed_diverges_mid_conve
     source = recorded.one("run.start")["run"]
     assert replay.exit_code == 0
     assert replay.replay_result() == [
-        f"irimi replay · {source} → {replay.process_run_id()} · - → -",
+        f"irimi replay · {source} → {replay.process_run_id()}",
         "  agent exited 0",
-        "  diverged at #4: live      llm       POST api.anthropic.com/v1/messages -> 200  "
-        "[replay-miss]",
+        "  diverged at the agent's 4th call: live      llm       "
+        "POST api.anthropic.com/v1/messages -> 200  [replay-miss]",
         "  4 from the recording · 3 missed",
         "",
         "  = ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)",
@@ -1498,9 +1522,15 @@ def test_a_replay_that_makes_no_refund_reads_live_where_its_recording_shows_one(
     ]
     assert reply.args["body"] == "No refund issued; 0 already refunded."
     code, out, err = replay.compare_runs(recorded.one("run.start")["run"], run_id)
+    # The reply says so, and compare shows the text that changed under the one line it prints.
     assert (code, out[4:], err) == (
         1,
-        [f"  - {FULL}", f"  = {REPLY}", "", "  1 same · 0 changed · 1 only in A · 0 only in B"],
+        [
+            f"  - {FULL}",
+            *reply_changed("No refund issued; 0 already refunded."),
+            "",
+            "  0 same · 1 changed · 1 only in A · 0 only in B",
+        ],
         [],
     )
 

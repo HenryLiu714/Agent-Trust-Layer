@@ -407,7 +407,11 @@ class Result:
         if out == [f"no unattributed events in {self.store_root()}"]:
             return "", []
         fields = dict(line.split(": ", 1) for line in out[: out.index("")])
-        label = f"{fields['trigger']}  {fields['entrypoint']}  agent {fields['agent version']}"
+        # `runs show` prints `-` for what the run did not record, which compare leaves out.
+        version = fields["agent version"]
+        parts = [fields["trigger"], fields["entrypoint"]]
+        parts.append(report.NOT_SET if version == report.NOT_SET else f"agent {version}")
+        label = "  ".join(part for part in parts if part != report.NOT_SET)
         start = next(i for i, line in enumerate(out) if line.startswith(_summary_headers(run_id)))
         writes = [line[2:] for line in out[start:] if line.startswith(WRITE_LINE_PREFIXES)]
         return label, writes
@@ -716,6 +720,16 @@ ROW_SIDES = {"  = ": "AB", "  - ": "A", "  ~ A ": "A", "  ? A ": "A", "  + ": "B
 # How a `~` or `?` pair's A row starts, and its B row under it.
 PAIR_A_PREFIXES = ("  ~ A ", "  ? A ")
 PAIR_B_PREFIX = "    B "
+# How a field that differs starts, which compare prints under a `~` pair whose lines are one.
+FIELD_DIFF_PREFIX = "      "
+
+
+def _under_a_pair(rows: list[str], i: int) -> bool:
+    """Whether row `i` is one of the field lines under a `~` pair: the rows above it, past any
+    other field lines, are the pair's B row and its A row."""
+    while i > 0 and rows[i - 1].startswith(FIELD_DIFF_PREFIX):
+        i -= 1
+    return i >= 2 and rows[i - 1].startswith(PAIR_B_PREFIX) and rows[i - 2].startswith("  ~ A ")
 
 
 def rows_not_shown(result: Result, run_a: str, run_b: str, out: list[str]) -> list[str]:
@@ -727,6 +741,8 @@ def rows_not_shown(result: Result, run_a: str, run_b: str, out: list[str]) -> li
     rows = out[out.index("") + 1 : -2] if out[-2:-1] == [""] else []
     missing = []
     for i, row in enumerate(rows):
+        if row.startswith(FIELD_DIFF_PREFIX) and _under_a_pair(rows, i):
+            continue
         prefix = next((p for p in ROW_SIDES if row.startswith(p)), None)
         if prefix is not None and all(row[len(prefix) :] in shown[s] for s in ROW_SIDES[prefix]):
             continue

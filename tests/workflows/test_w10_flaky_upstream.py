@@ -439,8 +439,7 @@ def test_a_bomb_costs_irimi_its_cap_in_memory_not_what_it_decodes_to(traced_run,
 
 # ---------------------------------------------------------------------- irimi compare
 
-NOT_A_VERDICT = "a comparison, not a verdict: nothing was replayed"
-SYNC = "sync_payouts  examples.workflows.w10_flaky_upstream.agent:sync_payouts  agent -"
+SYNC = "sync_payouts  examples.workflows.w10_flaky_upstream.agent:sync_payouts"
 REFUND = REFUND_LINE.removeprefix("  ")
 POSTED = '○ post to #C0PAYOUT: "refunded 500 on ch_PAYOUT1"  unvalidated (L3 preconditions passed)'
 NO_ACTION = '○ post to #C0PAYOUT: "payout sync: no action"  unvalidated (L3 preconditions passed)'
@@ -496,14 +495,14 @@ def test_irimi_compare_shows_what_each_failure_changed_about_the_runs_writes(
     assert check_invariants(other) == []
     out = compare(retried, other)
     a, b = (result.one("run.start")["run"] for result in (retried, other))
-    header_b = "-  -  agent -" if scenario in CONTROL_DOWN else SYNC
+    header_b = "" if scenario in CONTROL_DOWN else SYNC
     totals = [sum(row.startswith(p) for row in rows) for p in ("  = ", "  ~ ", "  - ", "  + ")]
     assert out == (
         code,
         [
-            f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+            f"irimi compare · {a} vs {b}",
             f"  A  {SYNC}",
-            f"  B  {header_b}",
+            f"  B  {header_b}".rstrip(),
             *(["  (the triggers' args differ)"] if args_differ else []),
             "",
             *rows,

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import os
 import sys
 from typing import Any
 
@@ -27,6 +28,9 @@ from examples.workflows.agentkit import stripe
 CHANNEL = "C0RECON"
 PAGE = 10
 LEDGER = "ledger.db"
+# A source to tag each customer with too, when set: a change to the job that changes every
+# customer update's body and none of the summary's lines.
+SOURCE_ENV = "RECONCILE_SOURCE"
 
 
 def charge_id(i: int) -> str:
@@ -90,12 +94,10 @@ def reconcile(date: str) -> int:
     ledger = load_ledger()
     mismatched = [c for c in all_charges() if ledger.get(c["id"]) != c["amount"]]
     for c in mismatched:
-        tagged = stripe(
-            "POST",
-            f"/v1/customers/{c['customer']}",
-            {"metadata[reconciled]": date, "metadata[charge]": c["id"]},
-            label="tag_customer",
-        )
+        tags = {"metadata[reconciled]": date, "metadata[charge]": c["id"]}
+        if os.environ.get(SOURCE_ENV):
+            tags["metadata[source]"] = os.environ[SOURCE_ENV]
+        tagged = stripe("POST", f"/v1/customers/{c['customer']}", tags, label="tag_customer")
         # The ledger says reconciled only once Stripe says tagged.
         if not tagged.ok:
             raise RuntimeError(f"tagging {c['customer']} for {c['id']}: HTTP {tagged.status}")

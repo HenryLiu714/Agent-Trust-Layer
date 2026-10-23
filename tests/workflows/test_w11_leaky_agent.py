@@ -190,9 +190,8 @@ def test_a_sidecar_write_made_by_a_write_tool_is_stood_in_and_the_escape_closed(
 
 # ---------------------------------------------------------------------- irimi compare
 
-NOT_A_VERDICT = "a comparison, not a verdict: nothing was replayed"
 # Each escape is an `sdk.run` named `escape`, with no function to name its entrypoint.
-ESCAPE = "escape  -  agent -"
+ESCAPE = "escape"
 FAKED_REFUND = f"○ refund $5.00 on {CHARGE}  unvalidated (L3 preconditions passed)"
 
 
@@ -222,7 +221,7 @@ def test_irimi_compare_cannot_show_a_write_that_escaped(shared_store_run, escape
     Phase 4's readiness checks are to flag the escape; compare can only show what irimi stored."""
     a, b, out = compared(shared_store_run, "proxied", escape, mode)
     assert out == [
-        f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+        f"irimi compare · {a} vs {b}",
         f"  A  {ESCAPE}",
         f"  B  {ESCAPE}",
         "  (the triggers' args differ)",
@@ -241,7 +240,7 @@ def test_irimi_compare_shows_the_sidecar_write_a_write_tool_closed(shared_store_
     write, a write only B made."""
     a, b, out = compared(shared_store_run, "loopback_service", "labelled_sidecar", mode)
     assert out == [
-        f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+        f"irimi compare · {a} vs {b}",
         f"  A  {ESCAPE}",
         f"  B  {ESCAPE}",
         "  (the triggers' args differ)",

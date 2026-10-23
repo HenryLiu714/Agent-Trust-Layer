@@ -292,7 +292,7 @@ def test_a_retried_delivery_is_acknowledged_and_handled_once(run_workflow):
 
 # ---------------------------------------------------------------------- irimi compare
 
-ON_MENTION = "on_mention  examples.workflows.w04_slack_ops_bot.agent:on_mention  agent -"
+ON_MENTION = "on_mention  examples.workflows.w04_slack_ops_bot.agent:on_mention"
 ANSWER_POST = 'post to #C0OPS: "Payouts are on schedule."  unvalidated (L3 preconditions passed)'
 WEBHOOK_POST = '○ post via webhook: "ops bot answered alice"  unvalidated (L0)'
 AGAINST_A_PLAIN_MENTION = {
@@ -342,7 +342,7 @@ def test_irimi_compare_shows_what_l3_saw_of_slack_s_refusals(shared_store_run, s
     assert out == (
         code,
         [
-            f"irimi compare · {a} vs {b} · a comparison, not a verdict: nothing was replayed",
+            f"irimi compare · {a} vs {b}",
             f"  A  {ON_MENTION}",
             f"  B  {ON_MENTION}",
             *differ,
@@ -372,7 +372,7 @@ def test_irimi_compare_tells_a_newline_from_a_typed_backslash_n(shared_store_run
     l3 = "unvalidated (L3 preconditions passed)"
     assert (code, err) == (1, [])
     assert out == [
-        f"irimi compare · {a} vs {b} · a comparison, not a verdict: nothing was replayed",
+        f"irimi compare · {a} vs {b}",
         f"  A  {ON_MENTION}",
         f"  B  {ON_MENTION}",
         "",

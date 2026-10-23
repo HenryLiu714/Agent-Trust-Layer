@@ -1,21 +1,26 @@
-"""Two stored runs side by side, write by write, with no verdict.
+"""Two stored runs side by side, write by write.
 
 A run's actions are the writes it attempted, in `seq` order: each exchange its summary prints a
 write line for (`report.is_intercepted`) and each write tool whose stand-in ran
-(`report.is_stood_in`). An action is that summary line, so a comparison and the two summaries
-cannot disagree about what either run did. Two actions are the same by the line before it is
-escaped for printing, since escaping prints a newline and a typed `\n` alike; a pair that differs
-only so prints both its lines with each backslash escaped too, the one place a comparison does not
-print the summary's line (`_row_lines`).
+(`report.is_stood_in`). An action is compared by its data, never by the line it prints: its key,
+what irimi did with it (`outcome`), and what it sent (`fields`), the request less what says who
+asked rather than what, as a replay matches it (`recording.compared_body`). A map's `human:`
+template names a few of a write's fields, so two customer updates that print one line may still
+differ; such a pair prints the fields that differ under its two lines.
+
+The summary's line is still what each action prints (`sentence`). A pair whose lines differ but
+print alike, since escaping prints a newline and a typed `\\n` alike, prints both with each
+backslash escaped too, the one place a comparison does not print the summary's line
+(`_row_lines`).
 
 The two runs' actions are lined up in two passes. The first lines up the actions that are the
-same, key and text, so they anchor the rest. The second lines up what lies between them by what
-each action is: an exchange by its service and operation, a tool call by its name. A refund of a
-different amount is then one write changed, not one removed and another added; and a run that adds
-a second, refused refund after the first shows that one added, where lining up by key alone would
-pair the first refund with the refused one and show the first as added.
+same, so they anchor the rest. The second lines up what lies between them by what each action is:
+an exchange by its service and operation, a tool call by its name. A refund of a different amount
+is then one write changed, not one removed and another added; and a run that adds a second,
+refused refund after the first shows that one added, where lining up by key alone would pair the
+first refund with the refused one and show the first as added.
 
-An action whose body was cut when stored is never the same as another, whatever its text: the
+An action whose body was cut when stored is never the same as another, whatever its data: the
 first pass anchors none, and the second pairs it by key into a `cut` row, `?`.
 
 Pure, like `report`: `compare_runs` returns a `Comparison` and prints nothing. `irimi compare`
@@ -24,17 +29,27 @@ the same lines (`replay.Outcome`), with `args_differ`'s note too, so there is on
 """
 
 import difflib
+import hashlib
 import json
 import unicodedata
 from collections.abc import Callable, Hashable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Literal
+from urllib.parse import parse_qsl
 
-from irimi import report
-from irimi.exchange import BODY_TRUNCATED_FLAG, Exchange
-from irimi.servicemap import MapIndex
+from irimi import report, services
+from irimi.exchange import (
+    BODY_TRUNCATED_FLAG,
+    DECISION_FAILED_FLAG,
+    IDEMPOTENCY_CONFLICT_FLAG,
+    REFUSED_FLAG,
+    TARGET_FAILED_FLAG,
+    Exchange,
+)
+from irimi.recording import compared_body
+from irimi.servicemap import MapIndex, path_params
 from irimi.store import StoredRun
-from irimi.trace import JSONValue, RunRecord, ToolCall
+from irimi.trace import JSONValue, RunRecord, ToolCall, canonical_json
 
 # The exit codes, as diff(1)'s: the same, different, or trouble (a run that cannot be read).
 SAME = 0
@@ -45,17 +60,36 @@ TROUBLE = 2
 # so no service a map names, `tool` included, can line a write up with a tool call.
 EXCHANGE_KEY = "exchange"
 TOOL_KEY = "tool"
-NOT_A_VERDICT = "a comparison, not a verdict: nothing was replayed"
 ARGS_DIFFER = "(the triggers' args differ)"
-# A pair either side of which is flagged `body-truncated`, whatever its two texts: a
-# text rendered from part of a request, or from none (an over-cap body is stored empty), says
-# nothing of what the cut part held, so two cut refunds of different amounts print alike and a
-# pair irimi could not read is never called the same. The flag does not say which body was
-# cut, so a cut response counts too.
+# A pair either side of which is flagged `body-truncated`, whatever its data: a body cut when
+# stored says nothing of what the cut part held, so two cut refunds of different amounts look
+# alike and a pair irimi could not read is never called the same. The flag does not say which
+# body was cut, so a cut response counts too.
 CUT_NOTE = "a body was cut when stored"
+# The flags that say what irimi did with a write, beside `answered_by` and the precondition. Not
+# `from-recording` or `replay-miss`, which say how a replay answered and would set every replayed
+# write apart from its recording.
+OUTCOME_FLAGS = frozenset(
+    {
+        DECISION_FAILED_FLAG,
+        REFUSED_FLAG,
+        BODY_TRUNCATED_FLAG,
+        TARGET_FAILED_FLAG,
+        IDEMPOTENCY_CONFLICT_FLAG,
+    }
+)
+# How many differing fields a pair prints under its lines, how much of each value, and how many
+# levels into an object it names the member that differs.
+MAX_FIELDS_SHOWN = 5
+MAX_VALUE_SHOWN = 60
+MAX_DEPTH_SHOWN = 4
+ABSENT = "(absent)"
 
 Mark = Literal["same", "changed", "cut", "only_a", "only_b"]
 MARKERS: dict[Mark, str] = {"same": "=", "changed": "~", "cut": "?", "only_a": "-", "only_b": "+"}
+
+# A named value of an action, its value as canonical JSON.
+Field = tuple[str, str]
 
 
 @dataclass(frozen=True)
@@ -63,11 +97,13 @@ class Action:
     """One write a run attempted, as `irimi compare` lines it up and compares it."""
 
     key: tuple[str, ...]  # (EXCHANGE_KEY, service, operation), or (TOOL_KEY, the tool's name)
-    # The summary's line for it, without the indent and before it is escaped. Two actions are the
-    # same by this and not by `text`: escaping leaves a backslash as it is, so a Slack post holding
-    # a newline and one holding a typed `\n` print alike and would compare `=`.
+    # The summary's line for it, without the indent and before it is escaped: what it prints.
     sentence: str
     cut: bool = False  # its exchange is flagged `body-truncated`
+    # What irimi did with it, and what it sent: two actions are the same by these and their key.
+    outcome: tuple[Field, ...] = ()
+    # None for data JSON cannot hold, nested too deep or not finite, which is the same as nothing.
+    fields: tuple[Field, ...] | None = ()
 
     @property
     def text(self) -> str:
@@ -87,6 +123,14 @@ class Action:
         """`text` as a reader sees it: each character that prints as nothing dropped, and each that
         prints as a space a space."""
         return "".join(_seen(char) for char in self.text)
+
+    @property
+    def data(self) -> Hashable:
+        """What it is compared by. A cut action's, and one whose fields JSON cannot hold, is a new
+        object, equal to nothing."""
+        if self.cut or self.fields is None:
+            return object()
+        return (self.key, self.outcome, self.fields)
 
 
 # The Unicode categories that print as nothing or as a space: format characters (a zero-width
@@ -153,30 +197,91 @@ def actions(run: StoredRun, index: MapIndex | None) -> list[Action]:
     out: list[Action] = []
     for event in run.events:
         if isinstance(event, Exchange) and report.is_intercepted(event):
-            cut = BODY_TRUNCATED_FLAG in event.flags
-            key = (EXCHANGE_KEY, event.service, event.operation)
-            out.append(Action(key, report.write_sentence(event, index), cut))
+            out.append(_exchange_action(event, index))
         elif isinstance(event, ToolCall) and report.is_stood_in(event):
-            out.append(Action((TOOL_KEY, event.name), report.tool_write_sentence(event)))
+            error = event.error.type if event.error is not None else None
+            out.append(
+                Action(
+                    (TOOL_KEY, event.name),
+                    report.tool_write_sentence(event),
+                    outcome=_named({"raised": error}),
+                    fields=_fields(_spread("args", event.args)),
+                )
+            )
     return out
 
 
+def _spread(name: str, value: JSONValue) -> dict[str, JSONValue]:
+    """An object's members as fields of their own, `name.member` in member order, so a diff names
+    the one that differs; anything else as the one field `name`."""
+    if isinstance(value, dict):
+        return {f"{name}.{member}": value[member] for member in sorted(value)}
+    return {name: value}
+
+
+def _exchange_action(exchange: Exchange, index: MapIndex | None) -> Action:
+    request = exchange.request
+    route = report.route_of(exchange, index)
+    pairs = parse_qsl(request.query, keep_blank_values=True)
+    sent: dict[str, JSONValue] = {}
+    if route is not None:
+        # The objects its path names, by the route's holes. A path the store redacted, a webhook's,
+        # is a placeholder only the key of the install that stored it spells, and names none.
+        named: dict[str, JSONValue] = dict(path_params(route.path, request.path))
+        sent.update(_spread("path", named))
+    else:
+        sent["request"] = f"{request.method} {request.host}{request.path}"
+    sent["query"] = [list(pair) for pair in sorted(pairs, key=lambda pair: pair[0])]
+    sent["scope"] = list(services.scope_of(exchange.service, request))
+    sent.update(_spread("body", compared_body(request, exchange.kind, route)))
+    fields = _fields(sent)
+    if fields is None and request.body:
+        # A body JSON cannot hold is still the same as its own bytes.
+        sent = {k: v for k, v in sent.items() if not k.startswith("body")}
+        sent["body"] = "sha256:" + hashlib.sha256(request.body).hexdigest()
+        fields = _fields(sent)
+    flags: list[JSONValue] = [flag for flag in sorted(exchange.flags) if flag in OUTCOME_FLAGS]
+    outcome: dict[str, JSONValue] = {
+        "answered by": exchange.answered_by,
+        "precondition": exchange.precondition,
+        "rejection code": exchange.rejection_code,
+        "target": exchange.target,
+        "currency": exchange.currency,
+        "flags": flags,
+    }
+    return Action(
+        (EXCHANGE_KEY, exchange.service, exchange.operation),
+        report.write_sentence(exchange, index),
+        BODY_TRUNCATED_FLAG in exchange.flags,
+        _named(outcome),
+        fields,
+    )
+
+
+def _named(values: dict[str, JSONValue]) -> tuple[Field, ...]:
+    """Each value that is set, as canonical JSON, by name. Every value here is a string or a list
+    of strings, which JSON always holds."""
+    return tuple((name, canonical_json(value)) for name, value in values.items() if value)
+
+
+def _fields(values: dict[str, JSONValue]) -> tuple[Field, ...] | None:
+    """Every value, empty ones too, as canonical JSON, by name; None when one is not JSON."""
+    try:
+        return tuple((name, canonical_json(value)) for name, value in values.items())
+    except (ValueError, RecursionError):
+        return None
+
+
 def align(a: Sequence[Action], b: Sequence[Action]) -> tuple[Row, ...]:
-    """`a` and `b` lined up, every action in exactly one row: the same actions first, by key and
-    text, then what lies between them by key alone."""
+    """`a` and `b` lined up, every action in exactly one row: the same actions first, by their
+    data, then what lies between them by key alone."""
     rows: list[Row] = []
-    for tag, x, y in _opcodes(a, b, _anchor):
+    for tag, x, y in _opcodes(a, b, lambda action: action.data):
         if tag == "equal":
             rows += [Row("same", one, other) for one, other in zip(x, y, strict=True)]
         else:
             rows += _by_key(x, y)
     return tuple(rows)
-
-
-def _anchor(action: Action) -> Hashable:
-    """What the first pass lines `action` up by. A cut action's is a new object, equal to nothing,
-    so it anchors nothing as the same and the second pass pairs it by key as `cut`."""
-    return object() if action.cut else (action.key, action.sentence)
 
 
 def _by_key(a: Sequence[Action], b: Sequence[Action]) -> list[Row]:
@@ -203,25 +308,25 @@ def _opcodes(
 
 
 def _pair(x: Action, y: Action) -> Row:
-    """Two actions of one key: `cut` when either was cut, whatever their texts."""
+    """Two actions of one key: `cut` when either was cut, whatever their data."""
     if x.cut or y.cut:
         return Row("cut", x, y)
-    return Row("same" if x.sentence == y.sentence else "changed", x, y)
+    return Row("same" if x.data == y.data else "changed", x, y)
 
 
 def compare_runs(a: StoredRun, b: StoredRun, index: MapIndex | None) -> Comparison:
-    """`a`'s writes against `b`'s. `index` is the loaded maps, for each write's `human:` sentence,
-    as `report.stored_summary_lines` takes it."""
+    """`a`'s writes against `b`'s. `index` is the loaded maps, for each write's `human:` sentence
+    and its route's `volatile:` fields, as `report.stored_summary_lines` takes it."""
     return Comparison(align(actions(a, index), actions(b, index)))
 
 
 def header_lines(a: RunRecord, b: RunRecord) -> list[str]:
-    """`irimi compare`'s header: which two runs, that no verdict follows, and each run's trigger.
-    Says so when the triggers' args differ, since then the runs were not given the same work."""
+    """`irimi compare`'s header: which two runs, and each run's trigger. Says so when the
+    triggers' args differ, since then the runs were not given the same work."""
     lines = [
-        f"irimi compare · {a.run_id} vs {b.run_id} · {NOT_A_VERDICT}",
-        f"  A  {report.run_label(a)}",
-        f"  B  {report.run_label(b)}",
+        f"irimi compare · {a.run_id} vs {b.run_id}",
+        f"  A  {report.run_label(a)}".rstrip(),
+        f"  B  {report.run_label(b)}".rstrip(),
     ]
     if args_differ(a, b):
         lines.append(f"  {ARGS_DIFFER}")
@@ -229,18 +334,17 @@ def header_lines(a: RunRecord, b: RunRecord) -> list[str]:
 
 
 def args_differ(a: RunRecord, b: RunRecord) -> bool:
-    """Compared as the JSON they are stored as, keys sorted: in Python `True == 1`, and the
-    triggers' args `{"n": 1}` and `{"n": true}` differ. Args nested deeper than `json.dumps`
-    writes are called different, since irimi cannot say they are the same."""
+    """Compared as canonical JSON: in Python `True == 1`, and the triggers' args `{"n": 1}` and
+    `{"n": true}` differ. Args JSON cannot write, nested too deep or not finite, are called
+    different, since irimi cannot say they are the same."""
     try:
-        return _canonical(a) != _canonical(b)
-    except RecursionError:
+        return _args(a) != _args(b)
+    except (ValueError, RecursionError):
         return True
 
 
-def _canonical(record: RunRecord) -> str:
-    args: JSONValue = record.trigger.args if record.trigger is not None else None
-    return json.dumps(args, sort_keys=True)
+def _args(record: RunRecord) -> str:
+    return canonical_json(record.trigger.args if record.trigger is not None else None)
 
 
 def _row_lines(row: Row) -> list[str]:
@@ -250,13 +354,67 @@ def _row_lines(row: Row) -> list[str]:
     typed `\\n` print one line, and a `~` over two identical lines tells its reader nothing.
     A pair whose sentences differ but print alike to a reader prints both with each backslash
     escaped first, the newline as `\\n` and the typed one as `\\\\n`, and each character a reader
-    cannot see spelled as its escape: a zero-width space, a no-break space."""
+    cannot see spelled as its escape: a zero-width space, a no-break space. A pair whose sentences
+    are one string prints the fields that differ under them."""
     marker = MARKERS[row.mark]
     if row.mark in ("changed", "cut") and row.a is not None and row.b is not None:
         a, b = row.a.text, row.b.text
         if row.a.seen == row.b.seen and row.a.sentence != row.b.sentence:
             a, b = row.a.escaped, row.b.escaped
-        return [f"  {marker} A {a}", f"    B {b}"]
+        lines = [f"  {marker} A {a}", f"    B {b}"]
+        if row.mark == "changed" and row.a.sentence == row.b.sentence:
+            lines += field_diff(row.a, row.b)
+        return lines
     action = row.a if row.a is not None else row.b
     assert action is not None, row
     return [f"  {marker} {action.text}"]
+
+
+def field_diff(a: Action, b: Action) -> list[str]:
+    """The fields and outcome parts of `a` and `b` that differ, one line each, `A -> B`, at most
+    `MAX_FIELDS_SHOWN` of them, each value cut to `MAX_VALUE_SHOWN` characters and escaped."""
+    differ: list[str] = []
+    for one, other in ((a.fields or (), b.fields or ()), (a.outcome, b.outcome)):
+        x, y = dict(one), dict(other)
+        # Where it went first, then the body's fields, each in name order.
+        for name in sorted(x.keys() | y.keys(), key=lambda n: (n.startswith("body"), n)):
+            if x.get(name) != y.get(name):
+                differ += _differences(name, _parsed(x.get(name)), _parsed(y.get(name)))
+    shown = [f"      {report.printable(line)}" for line in differ[:MAX_FIELDS_SHOWN]]
+    more = len(differ) - MAX_FIELDS_SHOWN
+    return [*shown, f"      and {more} more"] if more > 0 else shown
+
+
+# A field one side of a pair does not have.
+_NONE = object()
+
+
+def _parsed(value: str | None) -> object:
+    return _NONE if value is None else json.loads(value)
+
+
+def _differences(name: str, x: object, y: object, depth: int = 0) -> list[str]:
+    """`name: A -> B` for a field whose values differ, and for each member that differs of two
+    objects, `name.member`, a few levels down, so a long object names the part that changed."""
+    if _json(x) == _json(y):
+        return []
+    if isinstance(x, dict) and isinstance(y, dict) and depth < MAX_DEPTH_SHOWN:
+        return [
+            line
+            for member in sorted(x.keys() | y.keys())
+            for line in _differences(
+                f"{name}.{member}", x.get(member, _NONE), y.get(member, _NONE), depth + 1
+            )
+        ]
+    return [f"{name}: {_shown(x)} -> {_shown(y)}"]
+
+
+def _json(value: object) -> str | None:
+    return None if value is _NONE else canonical_json(value)
+
+
+def _shown(value: object) -> str:
+    text = _json(value)
+    if text is None:
+        return ABSENT
+    return text if len(text) <= MAX_VALUE_SHOWN else f"{text[:MAX_VALUE_SHOWN]}…"

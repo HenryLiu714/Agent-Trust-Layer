@@ -232,8 +232,7 @@ def test_a_tool_called_in_a_nested_trigger_is_a_call_of_its_parent_s_run(run_wor
 
 # ---------------------------------------------------------------------- irimi compare
 
-NOT_A_VERDICT = "a comparison, not a verdict: nothing was replayed"
-PLAN = f"plan_quarter_close  {AGENT}:plan_quarter_close  agent -"
+PLAN = f"plan_quarter_close  {AGENT}:plan_quarter_close"
 RESERVATION = f"○ POST {HOST}/reservations  unvalidated (L0)"
 # What each nested scenario's two orchestrator runs both wrote: the reservation, made by the
 # orchestrator or, with `--nested-reserve`, by `reservation_agent`, a nested trigger; and with
@@ -252,27 +251,38 @@ def test_irimi_compare_of_two_orchestrator_runs_holds_their_nested_triggers_writ
 ):
     """A nested trigger joins its parent's run and starts none, so there is no inner run to
     compare: what a sub-agent wrote is its parent's write (`nested_write`), as a tool it called is.
-    The two orchestrator runs, given the same args, are the same, write for write, and
-    neither shows the other's: each holds its own reservation and no more. The engine's own
-    run holds none of them."""
+    The two orchestrator runs, given the same args, make the same writes, and neither shows the
+    other's: each holds its own reservation and no more. Each decision its write tool records
+    names the reservation irimi minted for that run, which the tool's line does not print, so
+    the two tool calls differ there. The engine's own run holds none of them."""
     shadow = run_workflow(W, scenario, mode)
     a, b = (e["run"] for e in shadow.events("run.start"))
     rows = [f"  = {text}" for text in NESTED[scenario]]
+    if scenario == "nested_tools":
+        first, second = (e["reservation"] for e in shadow.events("decision"))
+        tool = rows.pop()[4:]
+        rows += [
+            f"  ~ A {tool}",
+            f"    B {tool}",
+            f'      args.decision.reservation: "{first}" -> "{second}"',
+        ]
+    changed = sum(row.startswith("  ~ ") for row in rows)
+    same = sum(row.startswith("  = ") for row in rows)
     code, out, err = shadow.compare_runs(a, b)
-    assert (code, err) == (0, [])
+    assert (code, err) == (1 if changed else 0, [])
     assert out == [
-        f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+        f"irimi compare · {a} vs {b}",
         f"  A  {PLAN}",
         f"  B  {PLAN}",
         "",
         *rows,
         "",
-        f"  {len(rows)} same · 0 changed · 0 only in A · 0 only in B",
+        f"  {same} same · {changed} changed · 0 only in A · 0 only in B",
     ]
     assert rows_not_shown(shadow, a, b, out) == []
     code, out, err = shadow.compare_runs(a, shadow.engine_run_id())
     assert (code, err) == (1, [])
-    assert out[-1] == f"  0 same · 0 changed · {len(rows)} only in A · 0 only in B"
+    assert out[-1] == f"  0 same · 0 changed · {same + changed} only in A · 0 only in B"
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -289,7 +299,7 @@ def test_irimi_compare_shows_what_a_map_changed_about_the_runs_writes(shared_sto
     a, b = (result.one("run.start")["run"] for result in (mapped, unmapped))
     assert (code, err) == (1, [])
     assert out == [
-        f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+        f"irimi compare · {a} vs {b}",
         f"  A  {PLAN}",
         f"  B  {PLAN}",
         "",
@@ -328,7 +338,7 @@ def test_a_reservation_whose_answer_target_is_down_is_answered_502_and_compared_
     a, b = (result.one("run.start")["run"] for result in (mapped, unreached))
     assert (code, err) == (1, [])
     assert out == [
-        f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+        f"irimi compare · {a} vs {b}",
         f"  A  {PLAN}",
         f"  B  {PLAN}",
         "",

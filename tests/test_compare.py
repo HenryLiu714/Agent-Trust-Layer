@@ -11,7 +11,7 @@ import random
 
 import pytest
 
-from irimi import compare, redact, report, servicemap, trace
+from irimi import compare, recording, redact, report, servicemap, trace
 from irimi.cli import main
 from irimi.exchange import (
     BODY_TRUNCATED_FLAG,
@@ -35,7 +35,7 @@ home = test_phase_exit.home  # bound here so pytest finds it
 AT = 1_700_000_000.0
 FORM = (("content-type", "application/x-www-form-urlencoded"),)
 TICKET = {"ticket": "T-1"}
-HEADER = "irimi compare · a vs b · a comparison, not a verdict: nothing was replayed"
+HEADER = "irimi compare · a vs b"
 LABELS = [
     "  A  refund_ticket  agent:refund_ticket  agent 1.0",
     "  B  refund_ticket  agent:refund_ticket  agent 1.0",
@@ -188,6 +188,187 @@ def test_a_refund_of_another_amount_is_one_write_changed(home, capfd):
             "  1 same · 1 changed · 0 only in A · 0 only in B",
         ],
     )
+
+
+def _update(body: bytes) -> Exchange:
+    """A customer update irimi faked: `update customer {customer}` names no body field."""
+    path = "/v1/customers/cus_1"
+    return Exchange(
+        request=Request("POST", "https", "api.stripe.com", 443, path, "", FORM, body),
+        response=Response(200, (), b"{}"),
+        service="stripe",
+        operation="customers.update",
+        kind="write",
+        answered_by="fake-L1",
+        validation="unvalidated",
+        run_id="",
+    )
+
+
+UPDATE = "○ update customer cus_1  unvalidated (L1)"
+
+
+def test_two_updates_that_print_alike_but_send_other_fields_are_changed_and_say_which(home, capfd):
+    """The map's sentence names the customer and nothing it sets: compared by that line, an
+    update that blocks the customer and clears its email was the same as one that set an email."""
+    a = [_update(b"email=alice%40x.com")]
+    b = [_update(b"metadata[blocked]=true&email=")]
+    code, lines = _compare(home, capfd, a, b)
+    assert (code, lines[3:]) == (
+        1,
+        [
+            f"  ~ A {UPDATE}",
+            f"    B {UPDATE}",
+            '      body.email: "alice@x.com" -> ""',
+            '      body.metadata: (absent) -> {"blocked":"true"}',
+            "",
+            "  0 same · 1 changed · 0 only in A · 0 only in B",
+        ],
+    )
+
+
+def test_a_refund_whose_reason_alone_differs_is_changed(home, capfd):
+    a = _refund()
+    b = dataclasses.replace(
+        a, request=dataclasses.replace(a.request, body=a.request.body + b"&reason=fraudulent")
+    )
+    code, lines = _compare(home, capfd, [a], [b])
+    assert (code, lines[3:6]) == (
+        1,
+        [f"  ~ A {REFUND}", f"    B {REFUND}", '      body.reason: (absent) -> "fraudulent"'],
+    )
+
+
+def test_a_volatile_field_is_not_compared_and_any_other_is():
+    """`nonce` is `volatile:` on the refund route of a test map built from the shipped one, which
+    a replay never matches on either (`recording.compared_body`)."""
+    index = servicemap.MapIndex(
+        tuple(
+            dataclasses.replace(
+                sm,
+                routes=tuple(
+                    dataclasses.replace(route, volatile=("nonce",))
+                    if route.operation == "refunds.create"
+                    else route
+                    for route in sm.routes
+                ),
+            )
+            for sm in servicemap.load_shipped()
+        )
+    )
+
+    def refund(body: bytes) -> Exchange:
+        request = dataclasses.replace(_refund().request, body=body)
+        return dataclasses.replace(_refund(), request=request)
+
+    one = refund(b"charge=ch_1&amount=4900&currency=usd&nonce=n-1")
+    other = refund(b"currency=usd&nonce=n-2&amount=4900&charge=ch_1")
+    assert compare.compare_runs(_run([one]), _run([other]), index).exit_code == compare.SAME
+    reason = refund(b"charge=ch_1&amount=4900&currency=usd&nonce=n-1&reason=duplicate")
+    assert compare.compare_runs(_run([one]), _run([reason]), index).exit_code == compare.DIFFERENT
+
+
+def test_a_write_answered_otherwise_is_changed_though_its_line_reads_the_same():
+    """What irimi did with a write is compared as its data is: a target, a precondition's
+    currency, a refusal's reasons. Here the L3 read named another currency for a refund whose line
+    shows no amount."""
+    index = servicemap.load()
+    a = dataclasses.replace(_update(b"email=a%40x.com"), currency="usd")
+    b = dataclasses.replace(a, currency="eur")
+    assert compare.compare_runs(_run([a]), _run([b]), index).lines() == [
+        f"  ~ A {UPDATE}",
+        f"    B {UPDATE}",
+        '      currency: "usd" -> "eur"',
+        "",
+        "  0 same · 1 changed · 0 only in A · 0 only in B",
+    ]
+
+
+def test_a_field_diff_shows_five_fields_each_cut_to_a_readable_length():
+    many = "&".join(f"metadata[k{n}]={n}" for n in range(3))
+    a = _update(f"name={'x' * 100}&email=a&phone=p1&{many}".encode())
+    added = "description=d&invoice_prefix=P&balance=5"
+    b = _update(f"name={'y' * 100}&email=b&phone=p2&{added}&{many}".encode())
+    lines = compare.compare_runs(_run([a]), _run([b]), servicemap.load()).lines()
+    # In name order, as a body's fields are compared; a form integer is a number.
+    assert lines[2:8] == [
+        "      body.balance: (absent) -> 5",
+        '      body.description: (absent) -> "d"',
+        '      body.email: "a" -> "b"',
+        '      body.invoice_prefix: (absent) -> "P"',
+        f'      body.name: "{"x" * 59}… -> "{"y" * 59}…',
+        "      and 1 more",
+    ]
+
+
+def test_two_stand_ins_given_other_args_are_changed_and_print_the_args():
+    a = dataclasses.replace(_tool(), args={"ticket": "T-1"})
+    b = dataclasses.replace(_tool(), args={"ticket": "T-2"})
+    assert compare.compare_runs(_run([a]), _run([b]), None).lines() == [
+        f"  ~ A {TOOL}",
+        f"    B {TOOL}",
+        '      args.ticket: "T-1" -> "T-2"',
+        "",
+        "  0 same · 1 changed · 0 only in A · 0 only in B",
+    ]
+    again = dataclasses.replace(_tool(), args={"ticket": "T-1"})
+    assert compare.compare_runs(_run([a]), _run([again]), None).exit_code == compare.SAME
+
+
+def test_an_update_to_another_customer_is_changed_by_the_object_its_path_names():
+    other = dataclasses.replace(
+        _update(b"email=a"),
+        request=dataclasses.replace(
+            _update(b"").request, path="/v1/customers/cus_2", body=b"email=a"
+        ),
+    )
+    lines = compare.compare_runs(_run([_update(b"email=a")]), _run([other]), servicemap.load())
+    assert lines.lines()[:2] == [
+        f"  ~ A {UPDATE}",
+        "    B ○ update customer cus_2  unvalidated (L1)",
+    ]
+
+
+def test_a_webhook_s_redacted_path_is_not_compared_and_its_text_is():
+    """The store redacts a webhook's whole path, the URL being its credential, with the key of
+    the install that stored it: two installs spell one webhook apart, so the path names nothing
+    compare can match. Its text is compared as any body field is."""
+
+    def hook(path: str, text: str) -> Exchange:
+        body = json.dumps({"text": text}).encode()
+        headers = (("content-type", "application/json"),)
+        return Exchange(
+            request=Request("POST", "https", "hooks.slack.com", 443, path, "", headers, body),
+            response=Response(200, (), b"ok"),
+            service="slack",
+            operation="incoming_webhook",
+            kind="write",
+            answered_by="fake-L0",
+            validation="unvalidated",
+            run_id="",
+        )
+
+    index = servicemap.load()
+    a, b = hook("/<redacted:aaaa>", "hi"), hook("/<redacted:bbbb>", "hi")
+    assert compare.compare_runs(_run([a]), _run([b]), index).exit_code == compare.SAME
+    c = hook("/<redacted:aaaa>", "bye")
+    assert compare.compare_runs(_run([a]), _run([c]), index).exit_code == compare.DIFFERENT
+
+
+def test_an_llm_body_is_compared_less_who_asked_and_how_as_a_replay_matches_it():
+    """`recording.compared_body` is the one rule: an llm call's body less `LLM_VOLATILE` and every
+    `cache_control`, at any depth."""
+    asked = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+    noisy = {
+        **asked,
+        "metadata": {"user_id": "u-1"},
+        "stream": True,
+        "user": "u-1",
+        "messages": [{"role": "user", "content": "hi", "cache_control": {"type": "ephemeral"}}],
+    }
+    request = _llm("hi").request
+    body = dataclasses.replace(request, body=json.dumps(noisy).encode())
+    assert recording.compared_body(body, "llm", None) == asked
 
 
 def test_a_slack_post_only_b_made_is_one_write_added(home, capfd):
@@ -389,7 +570,7 @@ def test_a_tool_never_lines_up_with_an_exchange_of_a_service_named_tool(home, ca
     assert (code, [line[:3] for line in lines[3:5]]) == (1, ["  -", "  +"])
 
 
-def test_a_run_with_no_trigger_or_version_is_labelled_with_dashes(home, capfd):
+def test_a_label_leaves_out_what_the_run_did_not_record(home, capfd):
     _store(
         home,
         {
@@ -399,8 +580,8 @@ def test_a_run_with_no_trigger_or_version_is_labelled_with_dashes(home, capfd):
     )
     assert main(["compare", "a", "b"]) == 0
     assert capfd.readouterr().out.splitlines()[1:4] == [
-        "  A  -  -  agent -",
-        "  B  t\\nx  -  agent 1.0",
+        "  A",
+        "  B  t\\nx  agent 1.0",
         "  (the triggers' args differ)",
     ]
 
@@ -576,14 +757,16 @@ def test_every_write_shape_s_action_is_the_line_the_stored_summary_prints_for_it
 
 
 def test_align_keeps_every_action_once_in_its_order_and_a_run_is_the_same_as_itself():
-    """Hand-rolled property test over seeded random runs drawn from few keys and texts, so the
-    same write recurs, as forty `mark_reconciled` stand-ins do in W2."""
+    """Hand-rolled property test over seeded random runs drawn from few keys and fields, so the
+    same write recurs, as forty `mark_reconciled` stand-ins do in W2. The sentence is drawn apart
+    from the fields: two actions are the same by their data, whatever they print."""
     rng = random.Random(79)
 
     def action() -> compare.Action:
         key = (compare.EXCHANGE_KEY, "stripe", rng.choice(["refunds.create", "customers.update"]))
         key = rng.choice([key, (compare.TOOL_KEY, "db.x")])
-        return compare.Action(key, rng.choice("ab"), cut=rng.random() < 0.2)
+        fields = (("body.amount", rng.choice(["1", "2"])),)
+        return compare.Action(key, rng.choice("ab"), cut=rng.random() < 0.2, fields=fields)
 
     def side(rows: tuple[compare.Row, ...], which: str) -> list[compare.Action]:
         return [action for row in rows if (action := getattr(row, which)) is not None]
@@ -602,7 +785,7 @@ def test_align_keeps_every_action_once_in_its_order_and_a_run_is_the_same_as_its
             if row.a.cut or row.b.cut:
                 assert row.mark == "cut", row  # whatever the two texts
             else:
-                assert row.mark == ("same" if row.a.sentence == row.b.sentence else "changed"), row
+                assert row.mark == ("same" if row.a.fields == row.b.fields else "changed"), row
         # A run against itself pairs each action with itself: `?` when it was cut, else `=`.
         assert [(row.mark, row.a, row.b) for row in compare.align(a, a)] == [
             ("cut" if x.cut else "same", x, x) for x in a

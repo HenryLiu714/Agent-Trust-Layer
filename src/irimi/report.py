@@ -157,8 +157,8 @@ def tool_write_line(call: ToolCall) -> str:
 
 def tool_write_sentence(call: ToolCall) -> str:
     """`tool_write_line` without the summary's indent and before it is escaped, which `irimi
-    compare` decides two tool calls are the same by: the real function did not run, so it is
-    a write that did not happen, and it takes the write marker."""
+    compare` prints for it: the real function did not run, so it is a write that did not happen,
+    and it takes the write marker."""
     return f"{WRITE_MARKER} tool {call.name}  shadow stand-in {_tool_outcome(call, 'ran')}"
 
 
@@ -423,7 +423,7 @@ def _host_lines(exchanges: Sequence[Exchange], telemetry: Sequence[str]) -> list
     return lines
 
 
-def _route_of(exchange: Exchange, index: MapIndex | None) -> Route | None:
+def route_of(exchange: Exchange, index: MapIndex | None) -> Route | None:
     """The route a write was classified under, for its `human:` template.
 
     Its path is matched, as the live classification matched it. A stored write on a
@@ -448,14 +448,14 @@ def _write_line(exchange: Exchange, index: MapIndex | None) -> str:
 
 def write_sentence(exchange: Exchange, index: MapIndex | None) -> str:
     """One intercepted write, as the map's own sentence plus what irimi did with it: its summary
-    line without the indent and before it is escaped, which `irimi compare` decides two writes are
-    the same by. A write irimi refused with a body it never read whole is spelled as the
-    request it was instead."""
+    line without the indent and before it is escaped, which `irimi compare` prints for it. A
+    write irimi refused with a body it never read whole is spelled as the request it was
+    instead."""
     refused = _refused_by_irimi(exchange)
     # A `human:` sentence is never filled in from a body irimi did not read: a refused write whose
     # body was cut renders every field `?`, the same line for every such refund.
     unread = refused and BODY_TRUNCATED_FLAG in exchange.flags
-    route = _route_of(exchange, index)
+    route = route_of(exchange, index)
     if route is not None and route.human and not unread:
         what = render_human(route.human, exchange, route)
     else:
@@ -835,13 +835,15 @@ def run_attribution(record: RunRecord) -> str:
 
 def run_label(record: RunRecord) -> str:
     """A stored run in one line, as `irimi compare` names each side: its trigger's name and
-    entrypoint, and the agent version it reported, `-` for each one it has not, escaped as
-    `runs show` escapes them."""
+    entrypoint, and the agent version it reported, each one it has, escaped as `runs show`
+    escapes them; "" for a run that has none."""
     trigger = record.trigger
-    name = trigger.name if trigger is not None else NOT_SET
-    entrypoint = (trigger.entrypoint if trigger is not None else None) or NOT_SET
-    version = record.agent_version or NOT_SET
-    return f"{printable(name)}  {printable(entrypoint)}  agent {printable(version)}"
+    parts = [
+        trigger.name if trigger is not None else None,
+        trigger.entrypoint if trigger is not None else None,
+        f"agent {record.agent_version}" if record.agent_version else None,
+    ]
+    return "  ".join(printable(part) for part in parts if part)
 
 
 def run_header_lines(record: RunRecord) -> list[str]:

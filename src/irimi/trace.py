@@ -24,6 +24,7 @@ the caller unchanged.
 """
 
 import hashlib
+import json
 import math
 import re
 from collections.abc import Callable, Mapping
@@ -254,6 +255,13 @@ def holds_description(value: JSONValue) -> bool:
         elif isinstance(item, list):
             stack.extend(item)
     return False
+
+
+def canonical_json(value: Any) -> str:
+    """`value` as one JSON string whatever its key order or spacing, so `true` is never `1` and
+    `{"a":1,"b":2}` is `{"b":2,"a":1}`. Raises ValueError for a NaN or an infinity, and
+    RecursionError past the depth `json.dumps` writes."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 @dataclass(frozen=True)

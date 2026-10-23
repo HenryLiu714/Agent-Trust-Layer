@@ -92,6 +92,7 @@ REFUSED: dict[tuple[str, str], str] = {
         for s in (
             "clean",
             "forty_mismatches",
+            "two_mismatches",
             "datetime_trigger",
             "same_date_twice",
             "refund_then_page",
@@ -136,12 +137,10 @@ REFUSED: dict[tuple[str, str], str] = {
 # The runs whose trigger, called alone, does not do what it did in its process, and why: what it
 # depended on is the agent's `main()`'s, or another run's. Each replay of one is pinned to
 # how it ended instead of rules 2, 4, 5, 7, 8 and 9: `(the agent's line, the replay's exit, the
-# comparison's totals)`, one per distinct ending among the scenario's runs. Rules 1, 3 and 6 hold.
+# comparison's totals)`, one per distinct ending among the scenario's runs, or, for a trigger the
+# replay could not call, why and no totals: it compares nothing. Rules 1, 3 and 6 hold.
 _SAME_ALONE = "  agent exited {}"
-_METHOD = (
-    "  agent could not be called: it is a method, and a run does not record the instance it was "
-    "called on"
-)
+_METHOD = "it is a method, and a run does not record the instance it was called on"
 _TOTALS = "  {} same · {} changed · {} only in A · {} only in B"
 
 
@@ -151,8 +150,11 @@ class Alone:
     ends: frozenset[tuple[str, int, str]]
 
 
-def _alone(reason: str, *ends: tuple[str, int, tuple[int, int, int, int]]) -> Alone:
-    return Alone(reason, frozenset((agent, code, _TOTALS.format(*t)) for agent, code, t in ends))
+def _alone(reason: str, *ends: tuple[str, int, tuple[int, int, int, int] | None]) -> Alone:
+    return Alone(
+        reason,
+        frozenset((agent, code, _TOTALS.format(*t) if t else "") for agent, code, t in ends),
+    )
 
 
 _LOOP = "the trigger schedules its task on the event loop `main()` runs, and raises without it"
@@ -168,11 +170,11 @@ _RECORD = (
 ALONE: dict[tuple[str, str], Alone] = {
     (W3, "worker_methods"): _alone(
         "a method: a run does not record its instance, so `replay_child` cannot call it",
-        (_METHOD, 2, (0, 0, 1, 0)),
+        (_METHOD, 2, None),
     ),
     (W3, "ledger_worker"): _alone(
         "a method: a run does not record its instance, so `replay_child` cannot call it",
-        (_METHOD, 2, (0, 0, 3, 0)),
+        (_METHOD, 2, None),
     ),
     (W3, "task_outlives_trigger"): _alone(_LOOP, (_SAME_ALONE.format(1), 1, (0, 0, 1, 0))),
     (W3, "unpropagated_thread"): _alone(_THREAD, (_SAME_ALONE.format(0), 1, (0, 0, 0, 1))),
@@ -273,7 +275,8 @@ class Replayed:
     replay: Result
     by_command: bool  # replayed by the scenario's command, since `irimi replay` refuses the run
     counterpart: str | None  # the replay's run, which stands for `run_id` (`counterpart`)
-    compared: tuple[int, list[str]] | None  # the comparison's exit and rows, None if no run
+    # The comparison's exit and rows; None with no run, or an agent the replay could not call.
+    compared: tuple[int, list[str]] | None
 
 
 def refused(recorded: Result, run_id: str) -> str | None:
@@ -298,11 +301,22 @@ def replays_of(run_workflow, replayed, name: str, scenario: str) -> list[Replaye
         _, replay = replayed(name, scenario, run_id=run_id, command=by_command)
         other = counterpart(recorded, replay, run_id)
         compared = None
-        if other is not None:
-            result = replay.replay_result()
+        result = replay.replay_result()
+        if other is not None and "" in result:
             compared = (replay.exit_code, result[result.index("") + 1 :])
         found.append(Replayed(run_id, replay, by_command, other, compared))
     return found
+
+
+def ending(r: Replayed) -> tuple[str, int, str]:
+    """How a replay ended, as `ALONE` pins it: the agent's line, the exit and the totals; or why
+    the replay could not call the trigger (`error: cannot call <entrypoint>: <why>`), the exit,
+    and no totals."""
+    lines = r.replay.replay_result()
+    if r.compared is None:
+        return (lines[0].split(": ", 2)[-1], r.replay.exit_code, "")
+    agent = next(line for line in lines if line.startswith("  agent "))
+    return (agent, r.replay.exit_code, lines[-1])
 
 
 def tool_calls(result: Result, run_ids: set[str]) -> list[ToolCall]:
@@ -504,14 +518,17 @@ def test_every_run_of_every_scenario_replays_from_its_recording(
         # 4. Every answer irimi decided reached the agent stamped as irimi recorded it.
         if not alone_differs:
             assert stamp_problems(replay) == Counter(), r.run_id
-        # 5. The comparison: the replay made the writes its recording did.
-        assert r.compared is not None, r.run_id
-        code, rows = r.compared
-        cut = any(row.startswith("  ? A ") for row in rows)
-        same = all(row.startswith(("  = ", "  ? A ", "    B ")) for row in rows[:-2])
-        totals = " · 0 changed · 0 only in A · 0 only in B" in rows[-1]
-        if case not in COMPARE_DIFFERS and not alone_differs:
-            assert (code, same, totals) == (1 if cut else 0, True, True), (r.run_id, rows)
+        # 5. The comparison: the replay made the writes its recording did. A trigger the replay
+        # could not call compares nothing, which only `ALONE` may pin.
+        if r.compared is None:
+            assert (alone_differs, r.replay.exit_code) == (True, 2), r.run_id
+        else:
+            code, rows = r.compared
+            cut = any(row.startswith("  ? A ") for row in rows)
+            same = all(row.startswith(("  = ", "  ? A ", "    B ")) for row in rows[:-2])
+            totals = " · 0 changed · 0 only in A · 0 only in B" in rows[-1]
+            if case not in COMPARE_DIFFERS and not alone_differs:
+                assert (code, same, totals) == (1 if cut else 0, True, True), (r.run_id, rows)
         assert result_problems(r) == [], r.run_id
         # 6. Nothing else reaches the fake internet.
         assert unaccounted(replay, spec.leaks) == [], r.run_id
@@ -553,11 +570,7 @@ def test_every_run_of_every_scenario_replays_from_its_recording(
     else:
         assert not any(r.by_command for r in replays)
     if alone_differs:
-        ends = {
-            (r.replay.replay_result()[1], r.replay.exit_code, r.replay.replay_result()[-1])
-            for r in replays
-        }
-        assert ends == ALONE[case].ends
+        assert {ending(r) for r in replays} == ALONE[case].ends
     if case in REACHES_THE_INTERNET:
         assert any(r.replay.internet.requests() for r in replays)
     if case in CUT_BEFORE_THE_POLICY:

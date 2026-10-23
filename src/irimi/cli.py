@@ -1008,7 +1008,7 @@ def _replay(args: argparse.Namespace, child: _Child, said: list[str]) -> "Replay
     import tempfile
     from dataclasses import replace
 
-    from irimi import replay, runner
+    from irimi import replay, report, runner
 
     try:
         source = _load_source(args)
@@ -1040,6 +1040,7 @@ def _replay(args: argparse.Namespace, child: _Child, said: list[str]) -> "Replay
             return replay.refused(args.run_id, said)
         agent_version = os.environ.get(paths.AGENT_VERSION_ENV)
         record = runner.process_run(run.run_id, argv, agent_version, 0.0, plan.trigger)
+        said_before = len(said)
         ran = _under_the_engine(args, run, child, _Launch("replay", argv, record, call))
     if args.python is None and _no_such_module(ran.call):
         # irimi's own Python is not the agent's when irimi is installed apart from it, as a tool:
@@ -1056,8 +1057,17 @@ def _replay(args: argparse.Namespace, child: _Child, said: list[str]) -> "Replay
         if ran.code in (SIGINT_EXIT_CODE, SIGTERM_EXIT_CODE):
             return replace(result, exit_code=ran.code)
         return result
+    if plan.call is not None and ran.call is not None and not ran.call.called:
+        # The child said why on stderr, and the hint is said: the agent never ran, so there is no
+        # replay to report and nothing to compare. The result holds both lines.
+        why = ran.call.error.message if ran.call.error is not None else "it was not called"
+        cannot = f"error: cannot call {plan.call.entrypoint}: {report.printable(why)}"
+        lines = [*said[:said_before], cannot, *said[said_before:]]
+        result = replay.refused(args.run_id, lines, run.run_id)
+        return result if ran.stopped is None else replace(result, exit_code=ran.stopped)
     try:
-        return _replayed(args, source, run.run_id, ran, said)
+        rerun = plan.argv if plan.rerun else None
+        return _replayed(args, source, run.run_id, ran, said, rerun)
     except KeyboardInterrupt:
         # Ctrl-C while irimi read the runs back or compared them: the replay's run is stored and
         # ended, and its result names it.
@@ -1141,10 +1151,16 @@ def _no_such_module(call: "CallOutcome | None") -> bool:
 
 
 def _replayed(
-    args: argparse.Namespace, source: "StoredRun", run_id: str, ran: _Ran, said: list[str]
+    args: argparse.Namespace,
+    source: "StoredRun",
+    run_id: str,
+    ran: _Ran,
+    said: list[str],
+    rerun: tuple[str, ...] | None,
 ) -> "ReplayResult":
     """A replay whose run `run_id` was stored and ended: both runs read back, and what the
-    replay did printed and returned (`replay.outcome`)."""
+    replay did printed and returned (`replay.outcome`). `rerun` is the recorded command line a
+    process run's replay ran again."""
     from irimi import replay
     from irimi.store import RunNotFound, StoreReader
     from irimi.trace import TraceFormatError
@@ -1155,7 +1171,7 @@ def _replayed(
         print(f"error: the replay's run {run_id} could not be read back: {exc}", file=sys.stderr)
         return replay.refused(args.run_id, said, run_id)
     ended = replay.Ended(ran.code, ran.call, ran.stopped)
-    outcome = replay.outcome(source, replayed, ended, _maps_for_stored_runs())
+    outcome = replay.outcome(source, replayed, ended, _maps_for_stored_runs(), rerun)
     for line in outcome.lines():
         print(line, flush=True)
     return outcome.result()
@@ -1462,7 +1478,7 @@ def build_parser() -> argparse.ArgumentParser:
     compare_runs = subparsers.add_parser(
         "compare",
         allow_abbrev=False,
-        help="print two stored runs' writes side by side: a comparison, not a verdict",
+        help="print two stored runs' writes side by side",
     )
     compare_runs.add_argument(
         "run_a", metavar="RUN_A", help="the first run's exact id, or unattributed"

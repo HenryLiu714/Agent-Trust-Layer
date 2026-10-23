@@ -14,9 +14,6 @@
   "tests/test_policy.py": {
     "caps_run": 1
   },
-  "tests/test_replay_cli.py": {
-    "issue_ref": 1
-  },
   "tests/test_sdk_tool.py": {
     "caps_run": 1
   },

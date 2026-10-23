@@ -58,19 +58,24 @@ A pass looks like this:
   refund as the write that changed:
 
   ```
-  irimi replay · <run id> → <replay id> · - → -
+  irimi replay · <run id> → <replay id>
     agent exited 0
-    diverged at #3: live      llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]
+    diverged at the agent's 3rd call: live      llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]
     2 from the recording · 2 missed
 
     ~ A ○ refund $49.00 on ch_...  unvalidated (L3 preconditions passed)
       B ○ refund $24.50 on ch_...  unvalidated (L3 preconditions passed)
-    = ○ tool examples.llm_refund_agent.agent.record_decision  shadow stand-in ran
+    ~ A ○ tool examples.llm_refund_agent.agent.record_decision  shadow stand-in ran
+      B ○ tool examples.llm_refund_agent.agent.record_decision  shadow stand-in ran
+        args.decision.refund_amount: 4900 -> 2450
+        args.decision.reply: "Refunded 4900." -> "Refunded 2450."
 
-    1 same · 1 changed · 0 only in A · 0 only in B
+    0 same · 2 changed · 0 only in A · 0 only in B
   ```
 
-  The amounts are whatever the model decided; the exit code is 1, since a write changed.
+  The amounts are whatever the model decided; the exit code is 1, since a write changed. The
+  decision the stand-in recorded changed with the refund, and its line does not print it, so
+  the fields that differ are printed under it.
   `irimi runs list` shows the replay as `replay of <run id>`.
 - **Nothing happened.** The charge on the Stripe dashboard has no refund, and
   `llm_refunds.sqlite3` holds no row in `decisions`.

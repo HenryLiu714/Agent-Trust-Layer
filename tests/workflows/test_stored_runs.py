@@ -507,8 +507,6 @@ def test_all_of_a_serves_runs_together_are_what_it_reported_live(run_workflow, n
 
 # -- irimi compare --------------------------------------------------------------------------------
 
-NOT_A_VERDICT = "a comparison, not a verdict: nothing was replayed"
-
 
 @pytest.mark.parametrize(("name", "scenario", "mode"), MODE_CASES, ids=MODE_IDS)
 def test_irimi_compare_of_every_stored_run_with_itself_is_its_summary_s_writes(
@@ -551,9 +549,9 @@ def test_irimi_compare_of_every_stored_run_with_itself_is_its_summary_s_writes(
         code, out, err = shadow.compare_runs(run_id, run_id)
         assert (code, err) == (1 if any(cut) else 0, []), run_id
         assert out[:4] == [
-            f"irimi compare · {run_id} vs {run_id} · {NOT_A_VERDICT}",
-            f"  A  {label}",
-            f"  B  {label}",
+            f"irimi compare · {run_id} vs {run_id}",
+            f"  A  {label}".rstrip(),
+            f"  B  {label}".rstrip(),
             "",
         ]
         totals = f"  {len(writes) - sum(cut)} same · 0 changed · 0 only in A · 0 only in B"

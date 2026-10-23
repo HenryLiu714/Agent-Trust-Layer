@@ -350,7 +350,7 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
     done, same = _replay(env, store, source, home / "same.json")
     assert done.returncode == same.exit_code == 0, done.stderr
     assert same.lines == (
-        f"irimi replay · {source} → {same.replay_run_id} · - → -",
+        f"irimi replay · {source} → {same.replay_run_id}",
         "  agent exited 0",
         "  no divergence: every call was answered from the recording",
         "  4 from the recording · 0 missed",
@@ -379,19 +379,26 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
     edited_env = {**env, agent.PROMPT_FILE_ENV: str(PROMPT_HALF)}
     done, edited = _replay(edited_env, store, source, home / "edited.json")
     assert done.returncode == edited.exit_code == 1, done.stderr
-    diverged = "#3: live      llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]"
+    diverged = (
+        "the agent's 3rd call: live      llm       POST api.anthropic.com/v1/messages -> 200  "
+        "[replay-miss]"
+    )
     assert edited.diverged_at == diverged
     assert edited.lines == (
-        f"irimi replay · {source} → {edited.replay_run_id} · - → -",
+        f"irimi replay · {source} → {edited.replay_run_id}",
         "  agent exited 0",
         f"  diverged at {diverged}",
         "  2 from the recording · 2 missed",
         "",
         f"  ~ A {FULL}",
         f"    B {HALF}",
-        f"  = {RECORDED}",
+        # The decision the stand-in was given, which its line does not print, changed too.
+        f"  ~ A {RECORDED}",
+        f"    B {RECORDED}",
+        "      args.decision.refund_amount: 4900 -> 2450",
+        '      args.decision.reply: "Refunded 4900." -> "Refunded 2450."',
         "",
-        "  1 same · 1 changed · 0 only in A · 0 only in B",
+        "  0 same · 2 changed · 0 only in A · 0 only in B",
     )
     # The model heard the edited prompt, once; Stripe heard nothing: the charge read came from
     # the recording, and so did the L3 read the missed refund was checked against.

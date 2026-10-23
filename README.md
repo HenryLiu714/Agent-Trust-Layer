@@ -694,20 +694,22 @@ run.
 
 ## Comparing two runs
 
-`irimi compare RUN_A RUN_B` prints the writes two stored runs attempted, side by side, and no
-verdict. Run the same trigger under two versions of an agent, each under `irimi shadow`, and
-compare the two runs `irimi runs list` names:
+`irimi compare RUN_A RUN_B` prints the writes two stored runs attempted, side by side. Run the
+same trigger under two versions of an agent, each under `irimi shadow`, and compare the two runs
+`irimi runs list` names:
 
 ```
-irimi compare · 42e7ad03a867410b vs 5cf7f4695f22ce95 · a comparison, not a verdict: nothing was replayed
+irimi compare · 42e7ad03a867410b vs 5cf7f4695f22ce95
   A  handle_ticket  agent:handle_ticket  agent 1.4.0
   B  handle_ticket  agent:handle_ticket  agent 1.5.0
 
   ~ A ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)
     B ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)
-  = ○ tool agent.send_reply  shadow stand-in ran
+  ~ A ○ tool agent.send_reply  shadow stand-in ran
+    B ○ tool agent.send_reply  shadow stand-in ran
+      args.body: "Refund of 4900 requested." -> "Refund of 2450 requested."
 
-  1 same · 1 changed · 0 only in A · 0 only in B
+  0 same · 2 changed · 0 only in A · 0 only in B
 ```
 
 - **What it compares.** Each run's writes, in the order irimi recorded them finishing: every
@@ -716,16 +718,22 @@ irimi compare · 42e7ad03a867410b vs 5cf7f4695f22ce95 · a comparison, not a ver
   Reads, LLM calls, telemetry and read tools are not compared. A retry the idempotency store
   answered as the write it repeats is that write, once. A header line says when the two triggers
   were given different arguments.
-- **How the writes line up.** Writes that read the same in both runs line up first. What lies
+- **What makes two writes the same.** What each sent and what irimi did with it, never the line
+  it prints: the request's fields as irimi reads them (a form body and a JSON one alike, key order
+  aside), less the fields its route lists under `volatile:`; the objects its path names; its query
+  and the headers that scope it (`Stripe-Account`); and how it was answered, refused or checked.
+  A write tool's stand-in is compared by its arguments. This is the rule a replay matches a
+  request by.
+- **How the writes line up.** Writes that are the same in both runs line up first. What lies
   between them lines up by what each write is, its service and operation or its tool's name, and
-  a pair that reads differently is `~`: a refund of another amount is one write changed. A write
-  only one run made is `-` (only in A) or `+` (only in B). Lines are compared before a control
-  character in them is escaped for printing, so a post holding a newline and one holding a typed
-  `\n` are `~`, though the summary prints the two alike. Such a pair, whose two lines would read
-  the same, prints both with each backslash escaped too: the newline as `\n`, the typed one as
-  `\\n`. A character that prints as nothing or as a space (a zero-width space, a no-break space,
-  a right-to-left override) is spelled as its escape there too, `\u200b`. Every other row prints
-  the summary's own line.
+  a pair that differs is `~`: a refund of another amount is one write changed. A write only one
+  run made is `-` (only in A) or `+` (only in B). A `~` pair whose two lines read the same, an
+  update to one customer that sets another field, prints the fields that differ under it, at most
+  five. A pair whose lines differ only in a control character, a newline against a typed `\n`,
+  prints both with each backslash escaped too: the newline as `\n`, the typed one as `\\n`. A
+  character that prints as nothing or as a space (a zero-width space, a no-break space, a
+  right-to-left override) is spelled as its escape there too, `\u200b`. Every other row prints the
+  summary's own line.
 - **A cut body is `?`.** A pair either of whose writes was stored with a body cut short
   (`body-truncated`, the request's or the response's) is `?`, not compared, whatever its lines
   say, and never `=`: a body cut, or dropped for its size, renders one line for different
@@ -741,14 +749,13 @@ irimi compare · 42e7ad03a867410b vs 5cf7f4695f22ce95 · a comparison, not a ver
   from the model sampling another answer, not only from the agent's code. Replay re-runs a stored
   run's trigger against its own recording, so a difference is the agent's
   ([Replaying a run](#replaying-a-run)).
-- **What it cannot see.** A write is compared by its summary line, so two writes whose lines read
-  the same are `=` even when something the line does not print differed: a refund that names no
-  amount prints `refund ? on ch_…` in both (#135), and a write tool's arguments are not compared.
-  A write whose body was cut is never compared (`?` above), even when only its response was cut
-  and its line is whole, since the flag does not say which. Two writes made at once can finish in
-  either order, so a run that made the same two writes in the other order shows one of them as `-`
-  and again as `+`. Stored values are redacted with this install's key, so a secret compares equal
-  only between two runs one install recorded.
+- **What it cannot see.** A write whose body was cut is never compared (`?` above), even when only
+  its response was cut and its line is whole, since the flag does not say which. Two writes made
+  at once can finish in either order, so a run that made the same two writes in the other order
+  shows one of them as `-` and again as `+`. Stored values are redacted with this install's key,
+  so a secret compares equal only between two runs one install recorded, and a webhook's path,
+  which the store redacts whole, is not compared at all. An id irimi minted for one run's faked
+  write differs in the next, so a later write that names it differs too.
 
 ## Replaying a run
 
@@ -766,17 +773,23 @@ replaying 725dc6add559a16f as d63663c6da8905c7
 live      llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]
 recording read      GET api.stripe.com/v1/charges/ch_TICKET1 -> 200  [fidelity:recording, from-recording]
 ...
-irimi replay · 725dc6add559a16f → d63663c6da8905c7 · - → -
+irimi replay · 725dc6add559a16f → d63663c6da8905c7
   agent exited 0
-  diverged at #1: live      llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]
+  diverged at the agent's 1st call: live      llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]
   2 from the recording · 5 missed
 
   ~ A ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)
     B ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)
-  = ○ tool agent.send_reply  shadow stand-in ran
+  ~ A ○ tool agent.send_reply  shadow stand-in ran
+    B ○ tool agent.send_reply  shadow stand-in ran
+      args.body: "Refund of 4900 requested." -> "Refund of 2450 requested."
 
-  1 same · 1 changed · 0 only in A · 0 only in B
+  0 same · 2 changed · 0 only in A · 0 only in B
 ```
+
+- **Where it diverged.** The first of the agent's own calls, HTTP requests and read tools, that
+  the recording did not answer, numbered as the totals under it count them: irimi's own check
+  reads are neither.
 
 - **What runs**, in order of precedence:
   1. `-- CMD` given: that command, as `irimi shadow -- CMD` runs it.
@@ -788,7 +801,9 @@ irimi replay · 725dc6add559a16f → d63663c6da8905c7 · - → -
      (`irimi.sdk.capture.revive`), and calls it, running a coroutine to its end. It exits 0 when
      the call returns and 1 when it raises, and the replay's run ends with what it raised, as the
      recorded run did.
-  3. A process run (`irimi shadow -- CMD` with no trigger): its recorded command, run again.
+  3. A process run (`irimi shadow -- CMD` with no trigger): its recorded command, run again. Only
+     the argv is recorded, not the environment, working directory or stdin, and the replay's
+     header says so: `re-ran <argv> (argv only: environment, cwd and stdin are not recorded)`.
 
   A run with none of these, an `sdk.run` block or a run whose start never reached irimi, is
   refused: `error: run <id> has no entrypoint and no argv; pass --call or -- CMD`. So are recorded
@@ -798,7 +813,8 @@ irimi replay · 725dc6add559a16f → d63663c6da8905c7 · - → -
   `python agent.py`) is refused too, a process run's argv is no function's args, and `--args`
   needs a function to give them to. A call the child then cannot make - a method, whose instance
   a run does not record, a module that does not import, args whose class it cannot rebuild - is a
-  replay that could not run: `agent could not be called: <why>`, and exit 2.
+  replay that could not run: `error: cannot call <entrypoint>: <why>`, then nothing compared, and
+  exit 2.
 - **RUN_ID comes first.** `irimi replay RUN_ID -- CMD`; a run id that starts with `-` is given
   after `--`, as `irimi replay -- RUN_ID`, and a command then follows a second `--`. `-- CMD`
   with `--call` or `--args` is a usage error.

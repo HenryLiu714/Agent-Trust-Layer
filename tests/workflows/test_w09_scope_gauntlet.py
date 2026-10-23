@@ -7,6 +7,7 @@ import dataclasses
 import hashlib
 import json
 import re
+import shlex
 import sys
 
 import pytest
@@ -1041,7 +1042,6 @@ def test_a_run_start_that_decodes_past_the_cap_is_refused_413_unread(run_workflo
 # `unattributed`, so each pin below records into a store of its own, which one serve run at most
 # records into: A under shadow, and B under shadow (its process run) or serve (`unattributed`).
 
-NOT_A_VERDICT = "a comparison, not a verdict: nothing was replayed"
 PLAIN_REFUND = "○ refund $9.00 on ch_GAUNTLET  unvalidated (L3 preconditions passed)"
 # A write whose body decoded past the cap, as irimi refused it, never a sentence filled from a
 # body irimi did not read.
@@ -1057,9 +1057,10 @@ def recorded_pair(shared_store_run, a: str, b: str, mode: str, store: str):
     return one, one.process_run_id(), other, other.engine_run_id()
 
 
-def side(result) -> str:
-    """How compare's header names the run `result` wrote into."""
-    return "-  -  agent -" if result.mode == "serve" else f"{sys.executable}  -  agent -"
+def side(result, which: str) -> str:
+    """How compare's header names the run `result` wrote into, side `which`: the
+    unattributed pool records nothing of what started it, a process run its command."""
+    return f"  {which}" if result.mode == "serve" else f"  {which}  {sys.executable}"
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -1072,9 +1073,9 @@ def test_irimi_compare_keeps_two_cut_writes_of_different_routes_apart(shared_sto
     code, out, err = other.compare_runs(a, b)
     assert (code, err) == (1, [])
     assert out == [
-        f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
-        f"  A  {side(one)}",
-        f"  B  {side(other)}",
+        f"irimi compare · {a} vs {b}",
+        side(one, "A"),
+        side(other, "B"),
         "  (the triggers' args differ)",
         "",
         f"  - {CUT_REFUND}",
@@ -1100,9 +1101,9 @@ def test_irimi_compare_will_not_call_two_cut_refunds_of_different_amounts_the_sa
     code, out, err = other.compare_runs(a, b)
     assert (code, err) == (1, [])
     assert out == [
-        f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
-        f"  A  {side(one)}",
-        f"  B  {side(other)}",
+        f"irimi compare · {a} vs {b}",
+        side(one, "A"),
+        side(other, "B"),
         "  (the triggers' args differ)",
         "",
         f"  ? A {CUT_REFUND}",
@@ -1141,9 +1142,9 @@ def test_irimi_compare_of_one_key_used_three_times_under_shadow_against_serve(sh
     ]
     assert (code, err) == (0, [])
     assert out == [
-        f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
-        f"  A  {side(one)}",
-        f"  B  {side(other)}",
+        f"irimi compare · {a} vs {b}",
+        side(one, "A"),
+        side(other, "B"),
         "  (the triggers' args differ)",
         "",
         *[f"  = {row}" for row in rows],
@@ -1171,8 +1172,11 @@ def test_a_process_run_with_no_trigger_replays_by_running_its_argv_again(run_wor
     ]
     assert replay.internet.requests() == []
     assert replay.exit_code == 0
+    # The header says the argv is all that ran again: nothing else of the process was recorded.
+    argv = shlex.join(source.trigger.args["argv"])
     assert replay.replay_result() == [
-        f"irimi replay · {source.run_id} → {replay.process_run_id()} · - → -",
+        f"irimi replay · {source.run_id} → {replay.process_run_id()}",
+        f"  re-ran {argv} (argv only: environment, cwd and stdin are not recorded)",
         "  agent exited 0",
         "  no divergence: every call was answered from the recording",
         "  9 from the recording · 0 missed",

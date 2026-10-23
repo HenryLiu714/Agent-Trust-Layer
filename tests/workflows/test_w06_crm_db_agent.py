@@ -558,7 +558,7 @@ def test_a_sync_tool_that_returns_a_coroutine_is_recorded_when_the_coroutine_end
 
 # ---------------------------------------------------------------------- irimi compare
 
-ENRICH = "enrich_accounts  examples.workflows.w06_crm_db_agent.agent:enrich_accounts  agent -"
+ENRICH = "enrich_accounts  examples.workflows.w06_crm_db_agent.agent:enrich_accounts"
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -576,7 +576,7 @@ def test_irimi_compare_shows_the_retry_s_failed_merge_as_the_one_it_added(shared
     a, b = (result.one("run.start")["run"] for result in (once, retry))
     assert (code, err) == (1, [])
     assert out == [
-        f"irimi compare · {a} vs {b} · a comparison, not a verdict: nothing was replayed",
+        f"irimi compare · {a} vs {b}",
         f"  A  {ENRICH}",
         f"  B  {ENRICH}",
         "  (the triggers' args differ)",
@@ -610,8 +610,7 @@ def test_two_writes_at_once_are_compared_in_the_order_they_ended(run_workflow, m
     assert shadow.compare_runs(run.run_id, run.run_id) == (
         0,
         [
-            f"irimi compare · {run.run_id} vs {run.run_id} · a comparison, not a verdict: "
-            "nothing was replayed",
+            f"irimi compare · {run.run_id} vs {run.run_id}",
             f"  A  {ENRICH}",
             f"  B  {ENRICH}",
             "",

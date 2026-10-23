@@ -204,6 +204,11 @@ def _result(lines: list[str]) -> list[str]:
     return lines[start:]
 
 
+def _no_result(lines: list[str]) -> bool:
+    """Whether `irimi replay` printed no result block: an agent it could not call is no replay."""
+    return not any(line.startswith("irimi replay · ") and "→" in line for line in lines)
+
+
 def _replay_runs(home, source: str) -> list:
     return [r for r in StoreReader(home / "store").list_runs() if r.replay_of == source]
 
@@ -220,7 +225,7 @@ def test_an_unchanged_agent_replays_with_no_divergence_and_sends_nothing(home, c
         f"replaying {source} as {replay.run_id}",
     ]
     assert _result(out) == [
-        f"irimi replay · {source} → {replay.run_id} · - → -",
+        f"irimi replay · {source} → {replay.run_id}",
         "  agent exited 0",
         "  no divergence: every call was answered from the recording",
         "  3 from the recording · 0 missed",
@@ -250,9 +255,10 @@ def test_a_changed_prompt_diverges_at_the_llm_call_and_refunds_another_amount(
     assert (code, err) == (1, [])
     [replay] = _replay_runs(home, source)
     assert _result(out) == [
-        f"irimi replay · {source} → {replay.run_id} · - → -",
+        f"irimi replay · {source} → {replay.run_id}",
         "  agent exited 0",
-        "  diverged at #1: live      llm       POST localhost/v1/messages -> 200  [replay-miss]",
+        "  diverged at the agent's 1st call: live      llm       "
+        "POST localhost/v1/messages -> 200  [replay-miss]",
         "  1 from the recording · 2 missed",
         "",
         "  ~ A ○ refund $49.00 on ch_REAL1  unvalidated (L3 preconditions passed)",
@@ -274,6 +280,11 @@ def test_a_process_run_with_no_trigger_replays_by_running_its_argv_again(home, c
     assert replay.trigger == recorded.trigger
     assert "  no divergence: every call was answered from the recording" in out
     assert _Stripe.seen == []
+    # The header says only the argv ran again: nothing else of the process was recorded.
+    argv = shlex.join(recorded.trigger.args["argv"])
+    assert _result(out)[1] == (
+        f"  re-ran {argv} (argv only: environment, cwd and stdin are not recorded)"
+    )
 
 
 def test_call_and_args_override_the_recorded_entrypoint_and_args(home, capfd):
@@ -297,21 +308,26 @@ def test_call_and_args_override_the_recorded_entrypoint_and_args(home, capfd):
     )
     result = _result(out)
     assert result[2:4] == [
-        "  diverged at #3: fake-L1   write     POST 127.0.0.1/v1/refunds -> 200  "
+        "  diverged at the agent's 2nd call: fake-L1   write     POST 127.0.0.1/v1/refunds -> 200  "
         "[fidelity:L1, replay-miss]",
         "  1 from the recording · 1 missed",
     ]
     assert "    B ○ refund $24.50 on ch_REAL1  unvalidated (L3 preconditions passed)" in result
-    # `#3` is the event's own `seq` as stored, which the store numbers from 1 with no gap.
-    lines = (home / "store" / "runs" / replay.run_id / "events.jsonl").read_text().splitlines()
-    [third] = [json.loads(line) for line in lines if json.loads(line)["seq"] == 3]
-    assert (third["request"]["method"], third["request"]["path"]) == ("POST", "/v1/refunds")
+    # The agent's 2nd call, as the totals count two: irimi's check read of the charge, stored
+    # between the two, is not the agent's and is not counted.
+    events = StoreReader(home / "store").load_run(replay.run_id).events
+    made = [(e.issued_by, e.request.method, e.request.path) for e in events]
+    assert made == [
+        ("agent", "GET", "/v1/charges/ch_REAL1"),
+        ("engine", "GET", "/v1/charges/ch_REAL1"),
+        ("agent", "POST", "/v1/refunds"),
+    ]
     # Other args: the model is asked something else, so its call misses, and the header says so.
     other = {"ticket": {**ticket["ticket"], "value": {"charge": "ch_REAL1", "note": "please"}}}
     code, out, err = _replay(capfd, source, "--args", json.dumps(other))
     assert (code, err) == (0, [])
     assert _result(out)[2] == "  (the triggers' args differ)"
-    assert _result(out)[3].startswith("  diverged at #1: live      llm ")
+    assert _result(out)[3].startswith("  diverged at the agent's 1st call: live      llm ")
 
 
 def test_args_stored_by_their_description_are_refused_and_given_with_args_run(home, capfd):
@@ -393,33 +409,35 @@ def test_sdk_replay_of_a_run_the_store_does_not_hold_is_a_result_that_exits_2(ho
     )
 
 
-def test_a_trigger_it_cannot_call_is_a_replay_that_could_not_run(home, capfd):
+def test_a_trigger_it_cannot_call_is_a_replay_that_could_not_run(home, capfd, tmp_path):
     """A method's run, whose instance a run does not record, and args whose class does not revive:
-    the child cannot call either, and the replay says so and exits 2, never an agent that ran and
-    differed."""
+    the child cannot call either, and the replay says why once and exits 2, never an agent that
+    ran and differed, and prints no comparison of a run the agent never made."""
     source = _record(home, f"replay_agent.Desk().handle({TICKET})")
     capfd.readouterr()
-    code, out, err = _replay(capfd, source)
+    result_file = tmp_path / "result.json"
+    code, out, err = _replay(capfd, source, "--result-file", str(result_file))
     assert code == 2
-    assert err == [
+    why = (
         "error: cannot call replay_agent:Desk.handle: it is a method, and a run does not record "
         "the instance it was called on"
-    ]
-    assert _result(out)[1] == (
-        "  agent could not be called: it is a method, and a run does not record the instance it "
-        "was called on"
     )
+    assert err == [why]
+    assert _no_result(out)
     [replay] = _replay_runs(home, source)
     assert (replay.outcome, replay.exit_code, replay.error.type) == ("error", 126, "cannot-call")
+    result = ReplayResult.from_json(json.loads(result_file.read_text()))
+    assert result == ReplayResult(source, replay.run_id, 2, None, (why,))
     other = _record(home, f"replay_agent.handle({TICKET})")
     missing = {"ticket": {"__irimi_type__": "replay_agent:NoSuchTicket", "value": {}}}
     capfd.readouterr()
-    code, out, _ = _replay(capfd, other, "--args", json.dumps(missing))
+    code, out, err = _replay(capfd, other, "--args", json.dumps(missing))
     assert code == 2
-    assert _result(out)[1] == (
-        "  agent could not be called: its args do not revive: replay_agent:NoSuchTicket is not in "
-        "its module"
-    )
+    assert err == [
+        "error: cannot call replay_agent:handle: its args do not revive: "
+        "replay_agent:NoSuchTicket is not in its module"
+    ]
+    assert _no_result(out)
 
 
 def test_a_trigger_recorded_in_main_is_refused(home, capfd):
@@ -462,7 +480,8 @@ def test_a_trigger_only_the_agent_s_python_can_import_is_called_under_python(hom
     code, out, err = _replay(capfd, source)
     assert code == 2
     why = "importing replay_agent raised ModuleNotFoundError: No module named 'replay_agent'"
-    assert _result(out)[1] == f"  agent could not be called: {why}"
+    assert _no_result(out)
+    # The error and the hint, each said once.
     assert err == [
         f"error: cannot call replay_agent:handle: {why}",
         f"hint: the trigger was called under irimi's own Python, {sys.executable}, which may not "
@@ -668,15 +687,15 @@ def test_args_that_do_not_bind_and_a_module_that_exits_as_it_loads_cannot_be_cal
     and a module that exits as it is imported, are calls the child could not make: exit 2."""
     source = _record(home, f"replay_agent.handle({TICKET})")
     capfd.readouterr()
-    code, out, _ = _replay(capfd, source, "--args", json.dumps({"tikket": 1}))
-    assert code == 2
-    assert _result(out)[1].startswith("  agent could not be called: its args do not bind: ")
+    code, out, err = _replay(capfd, source, "--args", json.dumps({"tikket": 1}))
+    assert (code, _no_result(out)) == (2, True)
+    assert err[0].startswith("error: cannot call replay_agent:handle: its args do not bind: ")
     (home.parent / "exits_agent.py").write_text("import sys\nsys.exit(4)\n")
-    code, out, _ = _replay(capfd, source, "--call", "exits_agent:handle", "--args", "{}")
-    assert code == 2
-    assert _result(out)[1] == (
-        "  agent could not be called: importing exits_agent raised SystemExit: 4"
-    )
+    code, out, err = _replay(capfd, source, "--call", "exits_agent:handle", "--args", "{}")
+    assert (code, _no_result(out)) == (2, True)
+    assert err == [
+        "error: cannot call exits_agent:handle: importing exits_agent raised SystemExit: 4"
+    ]
 
 
 def test_a_read_tool_answered_with_the_http_its_body_made_is_no_divergence(home, capfd):

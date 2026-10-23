@@ -52,6 +52,11 @@ WORKFLOW = Workflow(
             setup=_seed(45),
             doc="five pages, forty customer updates and forty write-tool calls in one run",
         ),
+        "two_mismatches": Scenario(
+            ("--charges", "12", "--mismatches", "2"),
+            setup=_seed(12),
+            doc="two customer updates, which a replay with RECONCILE_SOURCE set tags otherwise",
+        ),
         "datetime_trigger": Scenario(
             ("--charges", "12", "--mismatches", "2", "--datetime-trigger"),
             setup=_seed(12),

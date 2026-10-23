@@ -97,11 +97,37 @@ def test_args_with_no_function_to_give_them_to_are_refused():
 def test_a_process_run_is_its_argv_run_again():
     record = runner.process_run("src", ["python", "agent.py", "-v"], None, 1.0)
     plan = replay.plan(record, [], None, None)
-    assert (plan.call, plan.argv, plan.trigger) == (
+    assert (plan.call, plan.argv, plan.trigger, plan.rerun) == (
         None,
         ("python", "agent.py", "-v"),
         record.trigger,
+        True,
     )
+    # A command given in its place is not the recorded one.
+    assert not replay.plan(record, ["python", "other.py"], None, None).rerun
+
+
+def test_a_process_run_s_replay_says_it_reran_the_argv_alone():
+    """The environment, cwd and stdin the run had are not recorded, so a replay that refunds
+    another amount may only have lost an environment variable."""
+    record = runner.process_run("src", ["python", "agent.py", "-v x"], None, 1.0)
+    replayed = _run(replace(record, run_id="new", replay_of="src"), [])
+    rerun = ("python", "agent.py", "-v x")
+    lines = replay.outcome(_run(record, []), replayed, replay.Ended(0), None, rerun).lines()
+    assert lines[:3] == [
+        "irimi replay · src → new",
+        "  re-ran python agent.py '-v x' (argv only: environment, cwd and stdin are not recorded)",
+        "  agent exited 0",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("n", "spelled"),
+    [(1, "1st"), (2, "2nd"), (3, "3rd"), (4, "4th"), (11, "11th"), (12, "12th"), (13, "13th")]
+    + [(21, "21st"), (22, "22nd"), (101, "101st"), (111, "111th")],
+)
+def test_ordinal_spells_a_call_s_place(n, spelled):
+    assert replay.ordinal(n) == spelled
 
 
 @pytest.mark.parametrize(
@@ -187,7 +213,8 @@ def _run(record: RunRecord, events: list) -> StoredRun:
 
 def test_the_divergence_is_the_first_agent_exchange_or_read_tool_the_recording_missed():
     """A precondition read irimi issued and a write tool's stand-in are never one, and are not
-    counted; a read tool that ran for real is."""
+    counted, so the divergence is numbered among the calls the totals count; a read tool that ran
+    for real is one."""
     events = [
         _exchange("/v1/charges/a", ("fidelity:recording", "from-recording")),
         _exchange("/v1/charges/p", ("replay-miss",), issued_by="engine"),
@@ -199,12 +226,12 @@ def test_the_divergence_is_the_first_agent_exchange_or_read_tool_the_recording_m
     source = _run(_record(), [])
     replayed = _run(replace(_record(), run_id="new", replay_of="src"), events)
     outcome = replay.outcome(source, replayed, replay.Ended(0), None)
-    assert outcome.diverged_at == "#5: real      read      tool db.read -> ok"
+    assert outcome.diverged_at == "the agent's 3rd call: real      read      tool db.read -> ok"
     assert (outcome.answered, outcome.missed) == (2, 2)
     assert outcome.lines() == [
-        "irimi replay · src → new · - → -",
+        "irimi replay · src → new",
         "  agent exited 0",
-        "  diverged at #5: real      read      tool db.read -> ok",
+        "  diverged at the agent's 3rd call: real      read      tool db.read -> ok",
         "  2 from the recording · 2 missed",
         "",
         "  + ○ tool db.write  shadow stand-in ran",
@@ -213,7 +240,11 @@ def test_the_divergence_is_the_first_agent_exchange_or_read_tool_the_recording_m
     ]
     assert outcome.exit_code == 1
     assert outcome.result() == ReplayResult(
-        "src", "new", 1, "#5: real      read      tool db.read -> ok", tuple(outcome.lines())
+        "src",
+        "new",
+        1,
+        "the agent's 3rd call: real      read      tool db.read -> ok",
+        tuple(outcome.lines()),
     )
 
 
@@ -223,7 +254,7 @@ def test_a_replay_that_missed_nothing_says_so_and_names_both_versions_and_other_
     replayed = _run(replace(_record(other), run_id="new", agent_version="v2\n"), [])
     lines = replay.outcome(source, replayed, replay.Ended(3), None).lines()
     assert lines[:4] == [
-        "irimi replay · src → new · v1 → v2\\n",
+        "irimi replay · src → new · agent v1 → v2\\n",
         "  agent exited 3",
         "  (the triggers' args differ)",
         f"  {replay.NO_DIVERGENCE}",
@@ -238,7 +269,7 @@ def test_a_run_with_no_trigger_replayed_by_a_command_says_no_args_differ():
     replayed = _run(replace(record, replay_of="src"), [])
     lines = replay.outcome(source, replayed, replay.Ended(0), None).lines()
     assert lines[:3] == [
-        "irimi replay · src → new · - → -",
+        "irimi replay · src → new",
         "  agent exited 0",
         f"  {replay.NO_DIVERGENCE}",
     ]
@@ -267,11 +298,9 @@ def test_a_replay_that_made_fewer_calls_than_its_recording_says_how_many_it_neve
     assert outcome.lines()[2] == f"  {replay.NO_DIVERGENCE}"
 
 
-def test_a_call_the_child_could_not_make_is_a_replay_that_could_not_run():
-    call = CallOutcome(False, ErrorInfo("cannot-call", "it is a method"))
-    outcome = replay.outcome(_run(_record(), []), _new([]), replay.Ended(126, call), None)
-    assert outcome.lines()[1] == "  agent could not be called: it is a method"
-    assert outcome.exit_code == compare.TROUBLE
+def test_a_trigger_that_raised_is_an_agent_that_ran():
+    """A call the child could not make has no outcome: `irimi replay` stops before one
+    (`test_replay_cli`)."""
     raised = CallOutcome(True, ErrorInfo("builtins.KeyError", "'k'"))
     ended = replay.outcome(_run(_record(), []), _new([]), replay.Ended(1, raised), None)
     assert (ended.lines()[1], ended.exit_code) == ("  agent exited 1", compare.SAME)

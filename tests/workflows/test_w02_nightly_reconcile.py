@@ -8,7 +8,7 @@ tool) changes it.
 import pytest
 
 from examples.workflows.harness.run import check_invariants, compare, replay, replayed_run_id
-from examples.workflows.w02_nightly_reconcile.agent import LEDGER, customer_id
+from examples.workflows.w02_nightly_reconcile.agent import LEDGER, SOURCE_ENV, customer_id
 from irimi.exchange import Exchange
 
 W = "w02_nightly_reconcile"
@@ -181,9 +181,9 @@ def test_irimi_compare_shows_a_clean_night_and_forty_mismatches_eighty_writes_ap
     post = 'post to #C0RECON: "reconciled {} for 2026-09-27"  unvalidated (L3 preconditions passed)'
     assert (code, err) == (1, [])
     assert out == [
-        f"irimi compare · {a} vs {b} · a comparison, not a verdict: nothing was replayed",
-        "  A  nightly-reconcile  -  agent -",
-        "  B  nightly-reconcile  -  agent -",
+        f"irimi compare · {a} vs {b}",
+        "  A  nightly-reconcile",
+        "  B  nightly-reconcile",
         "",
         *added,
         f"  ~ A ○ {post.format(0)}",
@@ -191,6 +191,44 @@ def test_irimi_compare_shows_a_clean_night_and_forty_mismatches_eighty_writes_ap
         "",
         "  0 same · 1 changed · 0 only in A · 80 only in B",
     ]
+
+
+def test_a_replay_that_tags_each_customer_otherwise_compares_its_updates_changed(replayed):
+    """Two customer updates, `POST /v1/customers/cus_N00x`, replayed with `RECONCILE_SOURCE` set,
+    so each sends one more field. The map's sentence, `update customer {customer}`, names none of
+    what an update sets, so the two runs print the same lines for both; compared by what they
+    sent, each is changed, the field that differs is printed under it, and the replay exits 1.
+    Replayed by its command: the run is an `sdk.run` block, which records no entrypoint."""
+    recorded, replay = replayed(W, "two_mismatches", {SOURCE_ENV: "backfill"}, command=True)
+    assert check_invariants(replay) == []
+    assert replay.internet.writes() == []
+    source = recorded.one("run.start")["run"]
+    reconciled = "○ tool examples.workflows.w02_nightly_reconcile.agent.mark_reconciled"
+    post = 'post to #C0RECON: "reconciled 2 for 2026-09-27"  unvalidated (L3 preconditions passed)'
+    rows = [
+        line
+        for i in (1, 0)
+        for line in (
+            f"  ~ A ○ update customer {customer_id(i)}  unvalidated (L1)",
+            f"    B ○ update customer {customer_id(i)}  unvalidated (L1)",
+            '      body.metadata.source: (absent) -> "backfill"',
+            f"  = {reconciled}  shadow stand-in ran",
+        )
+    ]
+    compared = [
+        *rows,
+        f"  = ○ {post}",
+        "",
+        "  3 same · 2 changed · 0 only in A · 0 only in B",
+    ]
+    assert replay.exit_code == 1
+    result = replay.replay_result()
+    assert result[0] == f"irimi replay · {source} → {replay.process_run_id()}"
+    assert result[result.index("") + 1 :] == compared
+    # `irimi compare` over the same two runs prints the same rows and exits as the replay did.
+    code, out, err = replay.compare_runs(source, replay.process_run_id())
+    assert (code, err) == (1, [])
+    assert out[out.index("") + 1 :] == compared
 
 
 def test_a_refund_then_page_replay_answers_the_page_naming_its_minted_refund(replayed):

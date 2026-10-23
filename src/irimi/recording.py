@@ -79,8 +79,15 @@ from irimi.exchange import (
     is_authored_write,
     media_type,
 )
-from irimi.servicemap import MapIndex
-from irimi.trace import STOPPED_ERROR_TYPES, Event, JSONValue, ToolCall, holds_description
+from irimi.servicemap import MapIndex, Route
+from irimi.trace import (
+    STOPPED_ERROR_TYPES,
+    Event,
+    JSONValue,
+    ToolCall,
+    canonical_json,
+    holds_description,
+)
 
 # What a match key is: a tuple of strings and tuples of strings, comparable and hashable.
 _Key = tuple[Any, ...]
@@ -227,20 +234,26 @@ def _match_key(request: Request, kind: Kind, maps: MapIndex) -> _Key:
     query = tuple(sorted(pairs, key=lambda pair: pair[0]))
     scope = services.scope_of(classification.service, request)
     head = (kind, request.method, request.host, request.path, query, scope)
+    body = compared_body(request, kind, classification.route)
+    return (*head, body if isinstance(body, str) else canonical_json(body))
+
+
+def compared_body(request: Request, kind: Kind, route: Route | None) -> JSONValue:
+    """What of a request's body says what it asks, as a replay matches it and `irimi compare`
+    compares it: an llm call's JSON object less `LLM_VOLATILE` and every `cache_control`; any other
+    body as `bodies.reflect` reads it, less `route`'s `volatile:` fields; the sha256 of a body
+    neither reads, as `sha256:<hex>`; and "" for no body."""
     if kind == "llm":
         document = _json_body(request)
         if document is not None:
-            return (*head, _canonical(_without_llm_volatile(document)))
-    route = classification.route
+            return _without_llm_volatile(document)
     volatile = route.volatile if route is not None else ()
     posted = bodies.reflect(request)
     if posted:
-        body = _canonical({k: v for k, v in posted.items() if k not in volatile})
-    elif request.body:
-        body = "sha256:" + hashlib.sha256(request.body).hexdigest()
-    else:
-        body = ""
-    return (*head, body)
+        return {k: v for k, v in posted.items() if k not in volatile}
+    if request.body:
+        return "sha256:" + hashlib.sha256(request.body).hexdigest()
+    return ""
 
 
 def _live_key(request: Request, kind: Kind, maps: MapIndex, redaction_key: bytes) -> _Key:
@@ -280,14 +293,10 @@ def _without_cache_control(value: Any) -> Any:
     return value
 
 
-def _canonical(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
-
-
 def _tool_key(name: str, args: JSONValue) -> _ToolKey:
     """A read tool call's key: its name and its args, already redacted, as canonical JSON, so key
     order never decides a match and `true` is never `1`."""
-    return (name, _canonical(args))
+    return (name, canonical_json(args))
 
 
 def _tool_servable(call: ToolCall) -> bool:

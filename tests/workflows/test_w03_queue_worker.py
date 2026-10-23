@@ -899,7 +899,6 @@ def test_tools_on_a_worker_s_methods_keep_their_receiver_and_leave_it_out_of_the
 
 # ---------------------------------------------------------------------- irimi compare
 
-NOT_A_VERDICT = "a comparison, not a verdict: nothing was replayed"
 ARGS_DIFFER = "  (the triggers' args differ)"
 # The trigger each scenario's runs below are started by, and the ledger write tool each refund's
 # run stands in, if any.
@@ -928,8 +927,10 @@ def run_of(result, index: int) -> str:
     return run_id
 
 
-def label(trigger: str, version: str = "-", entrypoint: str | None = None) -> str:
-    return f"{trigger}  {AGENT}:{entrypoint or trigger}  agent {version}"
+def label(trigger: str, version: str | None = None, entrypoint: str | None = None) -> str:
+    """A run as compare names it, leaving out an agent version it did not record."""
+    agent = f"  agent {version}" if version else ""
+    return f"{trigger}  {AGENT}:{entrypoint or trigger}{agent}"
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -939,28 +940,35 @@ def test_irimi_compare_of_two_concurrent_runs_shows_each_run_s_own_writes_alone(
 ):
     """Concurrent runs stay apart through `irimi compare`: the eight runs one process made at once,
     recorded into its one store, each compared with message 0's. Each pair is one refund changed,
-    its charge and amount the run's own, and the ledger's write tool the same: a run that held
-    another's refund or tool call would show a row more, and one that lost its own a row less."""
+    its charge and amount the run's own, and the ledger's write tool changed with it, its line the
+    same and its args the run's own: a run that held another's refund or tool call would show a
+    row more, and one that lost its own a row less."""
     shadow = run_workflow(W, scenario, mode)
     a = run_of(shadow, 0)
     trigger = TRIGGER_OF[scenario]
     tool = LEDGER_WRITE.get(scenario)
-    same = [f"  = ○ tool {AGENT}.{tool}  shadow stand-in ran"] if tool else []
     for i in range(1, 8):
+        line = f"○ tool {AGENT}.{tool}  shadow stand-in ran"
+        ledger = [
+            f"  ~ A {line}",
+            f"    B {line}",
+            f"      args.amount: 100 -> {100 + i}",
+            f'      args.charge: "ch_Q0" -> "ch_Q{i}"',
+        ]
         b = run_of(shadow, i)
         code, out, err = shadow.compare_runs(a, b)
         assert (code, err) == (1, [])
         assert out == [
-            f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+            f"irimi compare · {a} vs {b}",
             f"  A  {label(trigger)}",
             f"  B  {label(trigger)}",
             ARGS_DIFFER,
             "",
             f"  ~ A {refund_text(0)}",
             f"    B {refund_text(i)}",
-            *same,
+            *(ledger if tool else []),
             "",
-            f"  {len(same)} same · 1 changed · 0 only in A · 0 only in B",
+            f"  0 same · {2 if tool else 1} changed · 0 only in A · 0 only in B",
         ]
         assert rows_not_shown(shadow, a, b, out) == []
 
@@ -1015,7 +1023,7 @@ def test_irimi_compare_of_two_runs_one_process_made(run_workflow, scenario, mode
     only_a = sum(row.startswith("  - ") for row in rows)
     assert (code, err) == (1, [])
     assert out == [
-        f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+        f"irimi compare · {a} vs {b}",
         f"  A  {label_a}",
         f"  B  {label_b}",
         ARGS_DIFFER,
@@ -1039,7 +1047,7 @@ def test_irimi_compare_of_two_runs_on_one_charge_finds_the_same_refund(
     code, out, err = shadow.compare_runs(a, b)
     assert (code, err) == (0, [])
     assert out == [
-        f"irimi compare · {a} vs {b} · {NOT_A_VERDICT}",
+        f"irimi compare · {a} vs {b}",
         f"  A  {label('handle')}",
         f"  B  {label('handle')}",
         ARGS_DIFFER,
@@ -1067,12 +1075,13 @@ def test_irimi_compare_finds_a_lost_run_s_writes_in_the_engine_s_run(run_workflo
         for i in range(2)
         for line in [f"  + {refund_text(i)}", *(tool if scenario.startswith("ledger") else [])]
     ]
-    engine_label = "-  -  agent -" if mode == "serve" else f"{sys.executable}  -  agent -"
+    # The unattributed pool records nothing of what started it; a process run its command.
+    engine_label = "  B" if mode == "serve" else f"  B  {sys.executable}"
     assert (code, err) == (1, [])
     assert out == [
-        f"irimi compare · {a} vs {engine} · {NOT_A_VERDICT}",
+        f"irimi compare · {a} vs {engine}",
         f"  A  {label('handle')}",
-        f"  B  {engine_label}",
+        engine_label,
         ARGS_DIFFER,
         "",
         *added,
@@ -1156,7 +1165,9 @@ def test_a_worker_method_s_run_cannot_be_called_alone_and_replays_by_its_command
     _, alone = replayed(W, "ledger_worker", run_id=first)
     assert (alone.exit_code, alone.agent_exit_code()) == (2, CANNOT_CALL)
     why = "it is a method, and a run does not record the instance it was called on"
-    assert alone.replay_result()[1] == f"  agent could not be called: {why}"
+    # Said once, and nothing compared: the agent never ran.
+    [said] = alone.replay_result()
+    assert said.startswith("error: cannot call ") and said.endswith(f": {why}")
     stored = alone.stored().load_run(alone.process_run_id())
     assert (stored.events, stored.record.error) == ([], ErrorInfo("cannot-call", why))
     _, whole = replayed(W, "ledger_worker", run_id=first, command=True)

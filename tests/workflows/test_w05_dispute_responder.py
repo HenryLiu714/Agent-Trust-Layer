@@ -213,7 +213,7 @@ def test_irimi_compare_cannot_tell_two_refunds_of_the_rest_of_a_charge_apart(
     ] == [[1500], [1000]]
     code, out, err = compare(full, rest)
     a, b = (result.one("run.start")["run"] for result in (full, rest))
-    on_event = "on_event  examples.workflows.w05_dispute_responder.agent:on_event  agent -"
+    on_event = "on_event  examples.workflows.w05_dispute_responder.agent:on_event"
     # The same event's bytes, and a signature that names the second it was signed in: the args
     # differ only when the two deliveries were signed in different seconds.
     triggers = [rest.stored().load_run(run_id).record.trigger for run_id in (a, b)]
@@ -222,7 +222,7 @@ def test_irimi_compare_cannot_tell_two_refunds_of_the_rest_of_a_charge_apart(
     differ = ["  (the triggers' args differ)"] if args[0] != args[1] else []
     assert (code, err) == (0, [])
     assert out == [
-        f"irimi compare · {a} vs {b} · a comparison, not a verdict: nothing was replayed",
+        f"irimi compare · {a} vs {b}",
         f"  A  {on_event}",
         f"  B  {on_event}",
         *differ,

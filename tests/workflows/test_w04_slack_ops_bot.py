@@ -8,7 +8,7 @@ import pytest
 
 from examples.workflows.harness.run import CANARIES, check_invariants, compare, rows_not_shown
 from irimi import redact
-from irimi.exchange import FIXTURE_FAILED_FLAG, Exchange
+from irimi.exchange import Exchange
 
 W = "w04_slack_ops_bot"
 CHECKED = "faked; checked against live state: would succeed"
@@ -137,84 +137,17 @@ def test_a_reply_under_the_runs_own_minted_thread_is_answered_from_the_write_log
     assert (bare.one("readback")["sees_reply"], bare.one("readback")["messages"]) == (True, 2)
 
 
-@pytest.mark.parametrize("mode", MODES)
-def test_a_thread_minted_by_posts_whose_fixture_failed_is_read_back_partial(run_workflow, mode):
-    """The post's fixture is unreadable, so both posts degrade to `fake-L0`: an envelope with no
-    `message`, the minted `ts` on the envelope alone. Real Slack has never heard of the
-    thread and irimi has no message to build it from, so `thread_not_found` stands, and each read
-    of the thread says the world irimi showed is incomplete. The read before the reply is the one
-    only the parent's own `ts` can place."""
-    shadow = run_workflow(W, "own_thread_fixture_failed", mode)
-    posts = [ex for ex in shadow.reported if ex.request.path == "/api/chat.postMessage"]
-    assert [(ex.answered_by, ex.flags) for ex in posts] == [
-        ("fake-L0", ("fidelity:L0", FIXTURE_FAILED_FLAG))
-    ] * 2
-    reads = [ex for ex in shadow.reported if ex.request.path == "/api/conversations.replies"]
-    assert [(ex.answered_by, ex.overlay) for ex in reads] == [
-        ("live", None),  # the mention's own thread, read before any write
-        ("live", "partial"),  # the incident's thread, holding its parent alone
-        ("live", "partial"),  # the read-back, after the reply
-    ]
-    check = shadow.one("incident_check")
-    assert (check["ok"], check["error"]) == (False, "thread_not_found")
-    readback = shadow.one("readback")
-    assert (readback["ok"], readback["error"], readback["sees_reply"]) == (
-        False,
-        "thread_not_found",
-        False,
-    )
-    assert _writes_block(shadow.summaries()) == _fixture_failed_writes("real")
-    # Real Slack holds the incident, so the bare run's check sees it alone, and its read-back the
-    # reply.
-    bare = run_workflow(W, "own_thread_fixture_failed", "bare")
-    assert (bare.one("incident_check")["ok"], bare.one("incident_check")["messages"]) == (True, 1)
-    assert bare.one("readback")["sees_reply"] is True
-
-
-def test_a_replay_of_a_thread_minted_by_posts_whose_fixture_failed_reads_it_partial(replayed):
-    """Replayed, both posts are answered with their recorded envelopes, `ts` and all, and each read
-    of the thread with Slack's recorded `thread_not_found`. The overlay runs again over the
-    recording, and places the parent by the envelope's `ts` as the shadow run did."""
-    recorded, replay = replayed(W, "own_thread_fixture_failed")
-    assert replay.internet.requests() == []
-    posts = [ex for ex in replay.reported if ex.request.path == "/api/chat.postMessage"]
-    assert [(ex.answered_by, FIXTURE_FAILED_FLAG in ex.flags) for ex in posts] == [
-        ("fake-L0", True)
-    ] * 2
-    reads = [ex for ex in replay.reported if ex.request.path == "/api/conversations.replies"]
-    assert [(ex.answered_by, ex.overlay) for ex in reads] == [
-        ("recording", None),
-        ("recording", "partial"),
-        ("recording", "partial"),
-    ]
-    for name in ("incident_check", "readback"):
-        assert replay.events(name, with_time=False) == recorded.events(name, with_time=False)
-    assert _writes_block(replay.summaries()) == _fixture_failed_writes("recorded")
-
-
-def _writes_block(summary: list[str]) -> list[str]:
-    """A summary's write lines and the `↳` lines under them, from its first write on."""
-    start = next(i for i, line in enumerate(summary) if line.startswith("  ○ "))
-    end = next(i for i in range(start, len(summary)) if not summary[i].startswith(("  ○", "    ↳")))
-    return summary[start:end]
-
-
-def _fixture_failed_writes(source: str) -> list[str]:
-    """`own_thread_fixture_failed`'s writes, as its summary prints them, each read `source`."""
-    missed = f"    ↳ POST /api/conversations.replies did not show it  {source} (partial)"
-    return [
-        '  ○ slack  post to #C0OPS: "Incident: Payouts are delayed; investigating."'
-        "  faked; checked against live state: would succeed",
-        missed,  # the incident check, which only the parent's envelope `ts` can place
-        '  ○ slack  post to #C0OPS: "Payouts are delayed; investigating."'
-        "  faked; checked against live state: would succeed",
-        "  ○ slack  add :eyes: to a message in C0OPS  faked; not checked",
-        "  ○ slack  upload status.csv to C0OPS  faked; not checked",
-        '  ○ slack  post via webhook: "ops bot answered alice"  faked; not checked',
-        # LOOKS WRONG: the read-back's line hangs under the webhook post, as
-        # `test_the_overlay_line_hangs_under_the_webhook_post_it_cannot_have_seen` pins.
-        missed,
-    ]
+def test_a_post_fixture_the_fixtures_file_lacks_is_refused_and_nothing_runs(run_workflow):
+    """`services.check` holds every `fixture:` to the fixtures irimi ships when the maps load, so a
+    route naming an object `slack.json` lacks refuses the map: no proxy, no store, no agent."""
+    for mode in MODES:
+        shadow = run_workflow(W, "post_fixture_missing", mode)
+        assert shadow.exit_code == 1
+        assert shadow.irimi == []
+        assert shadow.obs == []
+        assert shadow.internet.requests() == []
+        assert sorted(path.name for path in shadow.home.iterdir()) == ["ca"]
+    assert run_workflow(W, "post_fixture_missing", "bare").exit_code == 0
 
 
 @pytest.mark.parametrize("mode", MODES)

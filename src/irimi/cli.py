@@ -247,7 +247,7 @@ def _load_maps(args: argparse.Namespace | None = None) -> "MapIndex | None":
     that would then classify and answer with half a policy. `args` is None for `maps list`, which
     has no engine flags of its own.
     """
-    from irimi import delegation, servicemap
+    from irimi import delegation, servicemap, services
 
     try:
         index = servicemap.load(
@@ -255,6 +255,9 @@ def _load_maps(args: argparse.Namespace | None = None) -> "MapIndex | None":
             targets=getattr(args, "target", ()) or (),
             target_reads=getattr(args, "target_reads", ()) or (),
         )
+        # The Python tables key on the maps' names; a map they disagree with would switch an
+        # effect, a check or a fixture off silently, so it is refused here instead.
+        services.check(index)
         # The loader keeps targets on loopback, where the only thing separating a stub from our
         # own listener is the port - and dialling ourselves is a loop, not a delegation. The
         # addon repeats this per request against the port it actually bound, which is the

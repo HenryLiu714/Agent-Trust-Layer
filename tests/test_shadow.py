@@ -317,7 +317,7 @@ def test_banner_names_a_delegated_service(home, tmp_path, capsys):
     """A routed host may not be live either, and the banner says so."""
     from irimi import servicemap
 
-    (tmp_path / "cwd" / servicemap.CWD_OVERRIDE_NAME).write_text(
+    (tmp_path / "cwd" / servicemap.loader.CWD_OVERRIDE_NAME).write_text(
         "service: stripe\ntarget: http://127.0.0.1:3000\ntarget_reads: true\n"
     )
     assert main(["shadow", *_py("pass")]) == 0

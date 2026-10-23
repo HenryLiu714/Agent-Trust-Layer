@@ -8,7 +8,7 @@
 # containing `{`, so `match: {method: GET, path: /v1/charges/{charge}}` is a parse error.
 version: 1
 service: stripe
-verbs: honest # Stripe reads are GETs, so the HTTP method carries information here
+style: rest # Stripe reads are GETs, so the HTTP method carries information here
 hosts:
   - api.stripe.com
   - connect.stripe.com
@@ -34,7 +34,8 @@ routes:
       path: /v1/refunds
     operation: refunds.create
     kind: write
-    human: refund {amount} on {charge}
+    # `:money` prints the field as an amount in minor units of the charge's currency.
+    human: refund {amount:money} on {charge}
     # The response object a faked write starts from: an entry in `irimi/fixtures/stripe.json`.
     # Without it the write is answered with an echo of its own fields.
     fixture: refund

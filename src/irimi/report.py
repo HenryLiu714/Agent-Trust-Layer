@@ -28,6 +28,7 @@ from irimi.exchange import (
     Exchange,
     is_authored_write,
 )
+from irimi.money import format_minor_units
 from irimi.servicemap import SELF_TARGET, MapIndex, Route, is_delegated, path_params
 from irimi.store import StoredRun
 from irimi.trace import Event, Ran, RunRecord, TelemetrySeen, ToolCall
@@ -253,34 +254,11 @@ UNKNOWN_CURRENCY = "minor units, currency unknown"
 # How much of a run id the summary prints: `irimi replay` and `runs show` take a unique prefix.
 SHORT_ID = 8
 
-# Currencies with no minor unit: ¥4900 is four thousand nine hundred yen, not ¥49.00. Stripe's
-# own zero-decimal list, which is the one the amounts in these bodies are denominated in.
-ZERO_DECIMAL_CURRENCIES: frozenset[str] = frozenset(
-    {
-        "bif",
-        "clp",
-        "djf",
-        "gnf",
-        "jpy",
-        "kmf",
-        "krw",
-        "mga",
-        "pyg",
-        "rwf",
-        "ugx",
-        "vnd",
-        "vuv",
-        "xaf",
-        "xof",
-        "xpf",
-    }
-)
-CURRENCY_SYMBOLS: dict[str, str] = {"usd": "$", "eur": "€", "gbp": "£", "jpy": "¥"}
-
-# A `{name}` hole in a map's `human:` template. Deliberately not `str.format`: a template carries
-# literal braces (Slack's `#{channel}` sits next to none, but a body field might) and `format`
-# raises on an unmatched one, inside the function that prints the run's most important output.
-_FIELD = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# A `{name}` hole in a map's `human:` template, or `{name:money}` for a field holding an amount in
+# minor units. Deliberately not `str.format`: a template carries literal braces (Slack's
+# `#{channel}` sits next to none, but a body field might) and `format` raises on an unmatched one,
+# inside the function that prints the run's most important output.
+_FIELD = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)(?::(money))?\}")
 MISSING_FIELD = "?"
 
 
@@ -288,41 +266,22 @@ def _plural(count: int, word: str) -> str:
     return f"{count} {word}" if count == 1 else f"{count} {word}s"
 
 
-def money(minor_units: int, currency: str) -> str:
-    """Minor units as the amount a person reads: `money(4900, "usd")` -> `$49.00`.
-
-    The currency comes from the request first, and from `Exchange.currency` second - the code the
-    write's L3 precondition read found on the object it named, put there by the policy and never
-    by a default. Those are the only two sources: a write with no such read, or one whose
-    read named no currency, prints its amount as minor units of an unknown currency (see
-    `_field_value`). Dividing by 100 without knowing the currency would print ¥49.00 for a
-    4900-yen refund, which is a wrong number rather than an unformatted one, and that is why the
-    fallback is a document irimi really read and not the first currency it can find.
-    """
-    code = currency.lower()
-    figure = f"{minor_units}" if code in ZERO_DECIMAL_CURRENCIES else f"{minor_units / 100:.2f}"
-    symbol = CURRENCY_SYMBOLS.get(code)
-    return f"{symbol}{figure}" if symbol else f"{figure} {code.upper()}"
-
-
-def _is_amount(name: str) -> bool:
-    return name == "amount" or name.endswith("_amount")
-
-
-def _minor_units(name: str, value: object) -> int | None:
-    """`value` when the field `name` holds an amount in minor units, else None."""
-    if _is_amount(name) and isinstance(value, int) and not isinstance(value, bool):
+def _minor_units(value: object) -> int | None:
+    """`value` when it can be an amount in minor units, else None."""
+    if isinstance(value, int) and not isinstance(value, bool):
         return value
     return None
 
 
-def _field_value(name: str, value: object, currency: object) -> str:
-    """One template field, rendered. Amounts are minor units; everything else is what was sent."""
-    amount = _minor_units(name, value)
+def _field_value(value: object, as_money: bool, currency: object) -> str:
+    """One template field, rendered. A field the template marks `:money` is minor units of the
+    write's currency (the request's, else the one its precondition read found); a currency irimi
+    does not know prints the bare amount rather than a guessed one."""
+    amount = _minor_units(value) if as_money else None
     if amount is None:
         return str(value)
     if isinstance(currency, str) and currency:
-        return money(amount, currency)
+        return format_minor_units(amount, currency)
     return f"{amount} ({UNKNOWN_CURRENCY})"
 
 
@@ -356,7 +315,7 @@ def render_human(template: str, exchange: Exchange, route: Route | None) -> str:
         name = match.group(1)
         if name not in fields:
             return MISSING_FIELD
-        return _field_value(name, fields[name], currency)
+        return _field_value(fields[name], match.group(2) is not None, currency)
 
     return _FIELD.sub(one, template)
 
@@ -369,8 +328,8 @@ def _amounts(exchange: Exchange, route: Route | None) -> list[tuple[int, str]]:
     fields, currency = _fields(exchange, route)
     code = currency.lower() if isinstance(currency, str) else ""
     found: list[tuple[int, str]] = []
-    for name in _FIELD.findall(route.human):
-        amount = _minor_units(name, fields.get(name))
+    for name, spec in _FIELD.findall(route.human):
+        amount = _minor_units(fields.get(name)) if spec else None
         if amount is not None:
             found.append((amount, code))
     return found
@@ -769,7 +728,7 @@ def _money_line(writes: Sequence[Exchange], index: MapIndex | None) -> list[str]
 
 
 def _sum(amounts: dict[str, int]) -> str:
-    return " + ".join(money(value, code) for code, value in amounts.items())
+    return " + ".join(format_minor_units(value, code) for code, value in amounts.items())
 
 
 def _sdk_run_lines(exchanges: Sequence[Exchange], runs: dict[str, RunRecord | None]) -> list[str]:

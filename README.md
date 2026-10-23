@@ -293,7 +293,7 @@ https.
 - **THE SCOPE RULE.** No classification that forwards live may apply to a method it did not name
   explicitly. The loader refuses a `default_kind` that forwards live, a live kind on a route with no
   `method:` (which means `*`, and `*` includes `DELETE`), and a live kind on `DELETE`, `PUT` or
-  `PATCH` without `persists: false` and a `comment:` saying why nothing persists. The classifier
+  `PATCH` without a `live_because:` saying why nothing persists. The classifier
   enforces it again per request: a live kind reaching a method its route did not name is answered
   locally and flagged `kind-downgraded`. Each scope of this rule was once a real bug here;
   `src/irimi/servicemap/rules.py` tells the story.
@@ -312,8 +312,8 @@ https.
 ## Service maps
 
 A service map is YAML that says what a route is: its service and hosts, the operation, its kind,
-the one-line `human:` template the summary prints, and the ids a fake mints. The shipped maps live
-in `src/irimi/maps/` and need no Python to contribute to. Stripe, Slack (including
+the one-line `human:` template the summary prints, and the ids a fake mints. Maps ship with irimi;
+add one by pull request. They live in `src/irimi/maps/`. Stripe, Slack (including
 `hooks.slack.com`), OpenAI, Anthropic, and six telemetry backends (LangSmith, Langfuse, Sentry,
 Datadog, Honeycomb, PostHog) ship today:
 
@@ -349,7 +349,7 @@ One route looks like this:
 ```yaml
 version: 1
 service: stripe
-verbs: honest # Stripe reads are GETs, so the HTTP method carries information here
+style: rest # Stripe reads are GETs, so the HTTP method carries information here
 hosts:
   - api.stripe.com
 routes:
@@ -358,14 +358,14 @@ routes:
       path: /v1/refunds
     operation: refunds.create
     kind: write # read | write | llm | telemetry | unknown
-    human: refund {amount} on {charge}
+    human: refund {amount:money} on {charge} # `:money` prints minor units as money
     fixture: refund # optional: the object in fixtures/stripe.json an L1 answer starts from
     precondition: charge_refundable # optional: the L3 check, from src/irimi/services/
     fires: # optional: the webhooks this write would have caused; nothing is delivered
       - refund.created
       - charge.refunded
     ids:
-      id: re_
+      id: re_ # a prefixed token; `{format: int}` or `{format: uuid}` mint those instead
 ```
 
 - `match.path` may carry `{name}` segments, each matching one path segment; a literal path beats a
@@ -377,8 +377,14 @@ routes:
   `.ingest.sentry.io`); the shipped regional hosts are pinned by test.
 - `fixture:`, `fires:` and `precondition:` are valid only where irimi answers the write itself.
   On a live route they would never be read, and the loader says so.
-- Slack's map sets `verbs: post-only`, because its SDKs send every call as `POST`. Only the map
-  makes `conversations.history` a read that forwards live.
+- Slack's map sets `style: rpc`, because its SDKs send every call as `POST`. Only the map
+  makes `conversations.history` a read that forwards live. Under `style: rest` (the default), a
+  `kind: read` on an unsafe method needs `live_because: "<why this persists nothing>"`.
+- `compare_ignores:` names the body fields left out when two sendings of a request are compared:
+  an idempotent retry, a replay's match and `irimi compare` all ignore them. The LLM maps list
+  the fields that say who asked and how the answer travels (`metadata`, `user`, `stream`, ...).
+- `credential_path_hosts:` names hosts of the map whose request path is the credential
+  (Slack's `hooks.slack.com`). Their targets must be loopback and their paths are redacted.
 - `llm` routes (OpenAI's chat completions, responses and embeddings; Anthropic's messages and
   token counting) are forwarded live and counted in their own bucket. Everything else on those
   hosts is unmapped on purpose, so `/v1/files` or `/v1/batches` is faked, not sent. A
@@ -734,7 +740,7 @@ irimi compare · 42e7ad03a867410b vs 5cf7f4695f22ce95
   were given different arguments.
 - **What makes two writes the same.** What each sent and what irimi did with it, never the line
   it prints: the request's fields as irimi reads them (a form body and a JSON one alike, key order
-  aside), less the fields its route lists under `volatile:`; the objects its path names; its query
+  aside), less the fields its route lists under `compare_ignores:`; the objects its path names; its query
   and the headers that scope it (`Stripe-Account`); and how it was answered, refused or checked.
   A write tool's stand-in is compared by its arguments. This is the rule a replay matches a
   request by.

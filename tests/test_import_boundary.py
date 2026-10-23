@@ -18,11 +18,11 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "irimi"
 MITM_ALLOWED = {SRC / "engine" / "mitm.py"}
 
 LAYERS: list[set[str]] = [
-    {"exchange", "paths", "netaddr", "secret_shapes"},
+    {"exchange", "paths", "netaddr", "secret_shapes", "money"},
     {"ca", "servicemap", "fixture", "bodies", "trace"},
     {"pipeline", "reverse_door", "redact", "sdk"},
-    {"delegation", "echo", "services"},
-    {"writelog", "idempotency", "reader", "recording"},
+    {"delegation", "services"},
+    {"writelog", "idempotency", "reader", "recording", "echo"},
     {"policy", "overlay", "store"},
     {"control"},
     {"engine"},

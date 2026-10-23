@@ -8,7 +8,6 @@ from urllib.parse import urlsplit
 from irimi import netaddr
 from irimi.exchange import ANY_METHOD, LIVE_KINDS, SAFE_METHODS
 from irimi.servicemap.model import (
-    CREDENTIAL_PATH_HOSTS,
     DESTRUCTIVE_METHODS,
     SELF_TARGET,
     TARGETABLE_KINDS,
@@ -19,6 +18,10 @@ from irimi.servicemap.model import (
     path_segments,
     target_for,
 )
+
+# The kinds whose request bodies irimi compares (idempotent retries, replay matching, `compare`),
+# and so the kinds a route's `compare_ignores:` may name fields of.
+COMPARED_KINDS: frozenset[str] = TARGETABLE_KINDS | {"llm"}
 
 # Scope rule: a safety property is checked at the scope it belongs to (method, route, host or
 # service), and twice: when maps are loaded, so a bad configuration is refused by name whichever
@@ -78,8 +81,8 @@ def _check_live_kind_methods(sm: ServiceMap, route: Route, where: str) -> None:
     The rule: **no classification that forwards live may apply to an unsafe method it did not
     name explicitly.** `*` names nothing, so it never satisfies it. A route that really does
     serve a destructive verb live has to say so, and then justify it the way `kind: read`
-    already has to - `persists: false` plus a `comment:`. POST is left alone: it is the honest
-    verb for inference and for telemetry intake, which is what these kinds exist for.
+    already has to, with `live_because:`. POST is left alone: it is the honest verb for inference
+    and for telemetry intake, which is what these kinds exist for.
     """
     if route.kind not in LIVE_KINDS:
         return
@@ -89,13 +92,10 @@ def _check_live_kind_methods(sm: ServiceMap, route: Route, where: str) -> None:
             f"match every method. This route names no `method:`, which means `{ANY_METHOD}` - "
             "and that includes DELETE. Name the methods this route really serves"
         )
-    if route.method in DESTRUCTIVE_METHODS and not (
-        route.persists is False and route.comment.strip()
-    ):
+    if route.method in DESTRUCTIVE_METHODS and not route.live_because:
         raise MapError(
             f"{where}: `kind: {route.kind}` is forwarded to the real service, so `{route.method}` "
-            "would be performed for real. Say `persists: false` and add a `comment:` explaining "
-            "why it persists nothing"
+            'would be performed for real. Add `live_because: "<why this persists nothing>"`'
         )
 
 
@@ -115,7 +115,7 @@ def _check_credential_path_targets(sm: ServiceMap) -> None:
     to the credential host. Routes being service-scoped while the credential is host-scoped is
     the same confusion one level down.
     """
-    hosts = sorted(h for h in sm.hosts if h in CREDENTIAL_PATH_HOSTS)
+    hosts = sorted(h for h in sm.hosts if h in sm.credential_hosts)
     if not hosts:
         return
     because = f"{sm.source}: service {sm.service!r} claims {hosts[0]}"
@@ -127,7 +127,7 @@ def _check_credential_path_targets(sm: ServiceMap) -> None:
 
 
 def _require_loopback_target(target: str, where: str) -> None:
-    """A credential-path target must be loopback, with no escape hatch (CREDENTIAL_PATH_HOSTS)."""
+    """A credential-path target must be loopback, with no escape hatch (`credential_hosts`)."""
     if target == SELF_TARGET:
         return
     if netaddr.is_local_target(target):
@@ -140,7 +140,7 @@ def _require_loopback_target(target: str, where: str) -> None:
 
 
 def check_route_rules(sm: ServiceMap) -> None:
-    """Per-route rules that need the service's own fields (`verbs`) to judge."""
+    """Per-route rules that need the service's own fields (`style`) to judge."""
     seen: set[tuple[str, str]] = set()
     for route in sm.routes:
         where = f"{sm.source}: route {route.method} {route.path}"
@@ -149,13 +149,16 @@ def check_route_rules(sm: ServiceMap) -> None:
         if key in seen:
             raise MapError(f"{where}: appears twice in the same map")
         seen.add(key)
-        if route.persists is not None and route.kind not in LIVE_KINDS:
+        if route.live_because and route.kind not in LIVE_KINDS:
             raise MapError(
-                f"{where}: `persists` belongs on a route that is forwarded live "
+                f"{where}: `live_because` belongs on a route that is forwarded live "
                 f"({', '.join(LIVE_KINDS)}); it is what justifies forwarding an unsafe method"
             )
-        if route.volatile and route.kind not in TARGETABLE_KINDS:
-            raise MapError(f"{where}: `volatile` belongs on a write, where duplicates are checked")
+        if route.compare_ignores and route.kind not in COMPARED_KINDS:
+            raise MapError(
+                f"{where}: `compare_ignores` belongs on a `write`, `unknown` or `llm` route, "
+                f"whose bodies irimi compares; a `{route.kind}` route's never are"
+            )
         if route.fixture and route.kind in LIVE_KINDS:
             # A key that silently does nothing reads as configured and is never consulted, so it
             # is refused. A live route is answered by the real service, so it has no body of ours
@@ -192,14 +195,14 @@ def check_route_rules(sm: ServiceMap) -> None:
             )
         _check_live_kind_methods(sm, route, where)
         if (
-            sm.verbs == "honest"
+            sm.style == "rest"
             and route.kind == "read"
             and route.method not in SAFE_METHODS
-            and not (route.persists is False and route.comment.strip())
+            and not route.live_because
         ):
             raise MapError(
-                f"{where}: `kind: read` on an unsafe method downgrades a write. Say "
-                "`persists: false` and add a `comment:` explaining why it persists nothing"
+                f"{where}: `kind: read` on an unsafe method downgrades a write. Add "
+                '`live_because: "<why this persists nothing>"`'
             )
 
 

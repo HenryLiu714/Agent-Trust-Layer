@@ -18,9 +18,12 @@ CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf
 # Every scenario under `irimi shadow -- <cmd>`, and every one that runs under serve mode.
 MODE_CASES = [(n, s, "shadow") for n, s in CASES] + [(n, s, "serve") for n, s in serve_cases()]
 MODE_IDS = [f"{n}:{s}:{m}" for n, s, m in MODE_CASES]
-# The scenarios whose shadow run starts no agent: irimi refused to start (W8 `map_refused`). Every
+# The scenarios whose shadow run starts no agent: irimi refused its maps and did not start. Every
 # other one starts its agent as often as the bare run does, so a lost agent fails.
-NO_AGENT_UNDER_SHADOW = {("w08_orchestrator", "map_refused")}
+NO_AGENT_UNDER_SHADOW = {
+    ("w08_orchestrator", "map_refused"),
+    ("w04_slack_ops_bot", "post_fixture_missing"),
+}
 # How the SDK's one warning for a write tool that ran for real ends.
 REAL_WRITE_WARNING = "HTTPS_PROXY is set but IRIMI_ENGINE_ACTIVE is not"
 

@@ -175,7 +175,7 @@ schema; the loader refuses anything outside it by name. Things to know before yo
   `tests/test_servicemap.py` pins every shipped list; update it with the map.
 - Quote a wildcard host (`"*.posthog.com"`) and any `human:` template containing `#`.
 - A live-forwarded kind (`read`, `llm`, `telemetry`) must name its methods and must justify a
-  destructive one with `persists: false` and a `comment:`. A `default_kind:` may never be a live
+  destructive one with `live_because:`. A `default_kind:` may never be a live
   kind. This is THE SCOPE RULE; `servicemap/rules.py` explains why.
 - Shipped maps never set a `target:`. Targets belong in a user's overrides file.
 - `tests/test_servicemap.py` pins the shipped maps' hosts, route counts and a round-trip through a

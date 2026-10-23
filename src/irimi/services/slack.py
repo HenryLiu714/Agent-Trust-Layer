@@ -15,11 +15,8 @@ Two rules run through all of it, both inherited from `stripe.py`:
 
 * **Never invent a field the live object does not have.** A field Slack's own response omits is
   one the agent can never see in production. The one exception is `THREAD_FIELDS`, below: Slack's
-  own closed set, added to a parent whose first reply the run faked. The rule is about *live*
-  objects, so it does not reach a message irimi minted itself: `_posts` completes its own copy of a
-  faked reply with the `thread_ts` the caller posted, which real Slack would have sent. The
-  shipped fixture names the field and the write's own answer already carries it, so that is
-  normally a no-op; it covers a fixture that does not name it.
+  own closed set, added to a parent whose first reply the run faked. A message irimi minted is not
+  a live object, so `_posts` may complete it.
 * **Say `partial` rather than half-apply.** A page the table does not model, a parameter it cannot
   read, a channel it cannot tell is the one asked about, a post whose answer carries no message to
   show: the document is left exactly as Slack sent it and the exchange records that the world irimi
@@ -55,6 +52,19 @@ from irimi.services.model import (
 )
 
 SERVICE = "slack"
+# Every Slack operation irimi's Python keys on, here and in `echo.slack`. `services.check` refuses
+# maps that do not name each one.
+OPERATIONS = frozenset(
+    {
+        "chat.postMessage",
+        "conversations.history",
+        "conversations.info",
+        "conversations.replies",
+        "files.upload",
+        "incoming_webhook",
+        "reactions.add",
+    }
+)
 # The body parameters each overlaid read understands. Anything else means irimi cannot say where the
 # faked message belongs on this page, and the read is `partial`, on `stripe.KNOWN_LIST_PARAMS`'
 # precedent. `token` is one slack_sdk may send in the body; it is known and ignored.
@@ -210,12 +220,9 @@ def _replies(read: Read, document: dict[str, Any], posts: Sequence[_Post]) -> Ap
     if not isinstance(messages, list) or not isinstance(thread, str):
         return Applied(document, partial=True)
     changed, partial = _threads(messages, posts, channel)
-    # `conversations.replies` answers the parent first and then the replies OLDEST-first, not
-    # newest-first as a reader may expect, so a faked reply, newer than every real one, belongs at
-    # the tail of the LAST page. A page with more behind it gets no insertion
-    # and is not `partial`: the reply genuinely belongs further on, and flagging a complete page
-    # would be a false alarm. Its parent's counts still move, above: Slack reports the thread's
-    # true `reply_count` on every page of it.
+    # Replies come oldest-first, so a faked reply belongs at the tail of the LAST page. A page
+    # with more behind it gets no insertion and is not `partial`; its parent's counts still move,
+    # above, because Slack reports a thread's true `reply_count` on every page of it.
     if document.get("has_more") is not True:
         shown = _shown(messages)
         tail: list[_Post] = []
@@ -239,11 +246,10 @@ def _minted_thread(read: Read, posts: Sequence[_Post]) -> Applied | None:
 
     Built rather than edited, because there is no live body to preserve: Slack answered
     `thread_not_found` - the caller asks only then - and every message in this thread is one irimi
-    minted. Slack's shape for it
-    is the parent first, then the replies oldest-first, `has_more: false` - and a thread of this
-    run's own posts has exactly one page. `_threads` then moves the parent's own thread fields, so
-    a reader sees `reply_count` beside the replies it is counting, which is the whole reason
-    `THREAD_FIELDS` may add fields at all.
+    minted. Slack's shape for it is the parent first, then the replies oldest-first,
+    `has_more: false` - and a thread of this run's own posts has exactly one page. `_threads` then
+    moves the parent's own thread fields, so a reader sees `reply_count` beside the replies it is
+    counting, which is the whole reason `THREAD_FIELDS` may add fields at all.
 
     None - and the caller's `partial` - for every way the page cannot be built honestly: a read
     that is not `conversations.replies`, a `ts` that is not a string, a parameter the effects
@@ -251,9 +257,9 @@ def _minted_thread(read: Read, posts: Sequence[_Post]) -> Applied | None:
     this builds the whole of it), a `ts` this run did not mint as a THREAD PARENT, a REPLY whose
     answer carried no message to show (the fixture failed and the write degraded to `fake-L0`),
     and any message whose channel `_in_channel` will not answer a definite True for. That last one
-    is stricter
-    than the editing path's `is not False`: leaving a post off a page is one kind of incomplete,
-    and building a whole page for a channel irimi cannot match is another kind of wrong.
+    is stricter than the editing path's `is not False`: leaving a post off a page is one kind of
+    incomplete, and building a whole page for a channel irimi cannot match is another kind of
+    wrong.
 
     A PARENT whose answer carried no message to show is found here too, by the envelope's `ts`
     (`_Post.ts`), and declined by the `parent.message is None` guard below: the caller's
@@ -387,9 +393,8 @@ def _posts(writes: Sequence[Write]) -> list[_Post]:
             thread_ts = None
         own = dict(message) if usable and isinstance(message, dict) else None
         if own is not None and thread_ts is not None:
-            # Real Slack puts `thread_ts` on every reply. Set it on our copy (not the write log's)
-            # in case a fixture lacks it. `parent_user_id` is left out: irimi cannot always know
-            # it.
+            # Every reply carries its thread's `thread_ts`; set it on our copy in case the fixture
+            # lacks it. `parent_user_id` is left out: irimi cannot always know it.
             own["thread_ts"] = thread_ts
         out.append(
             _Post(
@@ -569,12 +574,7 @@ def _post_probe(proposal: Proposal) -> Probe | None:
     # `_CHANNEL_ID`, the one `conversations.history` already uses.
     if not isinstance(channel, str) or not _CHANNEL_ID.fullmatch(channel):
         return None
-    return Probe(
-        operation="conversations.info",
-        method="POST",
-        path="/api/conversations.info",
-        posted={"channel": channel},
-    )
+    return Probe(operation="conversations.info", posted={"channel": channel})
 
 
 def _post_verdict(proposal: Proposal, document: Any) -> Rejection | NotEvaluable | None:

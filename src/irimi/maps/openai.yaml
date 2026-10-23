@@ -11,9 +11,12 @@
 # containing `{`, so `match: {method: GET, path: /v1/models/{model}}` is a parse error.
 version: 1
 service: openai
-verbs: honest # OpenAI reads are GETs, so the HTTP method carries information here
+style: rest # OpenAI reads are GETs, so the HTTP method carries information here
 hosts:
   - api.openai.com
+# `compare_ignores:` on each inference route names the top-level body fields that say who asked
+# and how the answer travels, never what was asked. A replay matches a call without them, and
+# `irimi compare` ignores them.
 routes:
   - match:
       method: POST
@@ -21,6 +24,7 @@ routes:
     operation: chat.completions.create
     kind: llm
     human: chat completion with {model}
+    compare_ignores: [metadata, user, stream, stream_options, prompt_cache_key]
 
   - match:
       method: POST
@@ -28,6 +32,7 @@ routes:
     operation: responses.create
     kind: llm
     human: response with {model}
+    compare_ignores: [metadata, user, stream, stream_options, prompt_cache_key]
 
   - match:
       method: POST
@@ -35,6 +40,7 @@ routes:
     operation: embeddings.create
     kind: llm
     human: embed with {model}
+    compare_ignores: [metadata, user, stream, stream_options, prompt_cache_key]
 
   # A models listing is not inference, so it is a `read`, not `llm`. Only `read` routes have a
   # run's faked writes applied to their answers.

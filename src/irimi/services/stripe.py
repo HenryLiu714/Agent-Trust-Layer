@@ -18,7 +18,7 @@ Two rules run through all of it:
 
 * **Never invent a field the live object does not have.** A field Stripe's own response omits is
   one the agent can never see in production, and putting one there hands it a body no live read
-  can produce. This is `echo.reflect_over`'s rule, applied to reads.
+  can produce. This is `echo.generic.reflect_over`'s rule, applied to reads.
 * **Say `partial` rather than half-apply.** A page the table does not model, a filter it cannot
   read, a cursor page whose real contents depend on where the minted refund landed: the document is
   left exactly as Stripe sent it and the exchange records that the world irimi showed is
@@ -50,6 +50,21 @@ from irimi.services.model import (
 )
 
 SERVICE = "stripe"
+# Every Stripe operation irimi's Python keys on. `services.check` refuses maps that do not name
+# each one.
+OPERATIONS = frozenset(
+    {
+        "charges.list",
+        "charges.retrieve",
+        "customers.retrieve",
+        "customers.update",
+        "payment_intents.cancel",
+        "payment_intents.retrieve",
+        "refunds.create",
+        "refunds.list",
+        "refunds.retrieve",
+    }
+)
 # Stripe's own default page size, and what a list read gets when it names no `limit`.
 DEFAULT_LIST_LIMIT = 10
 MAX_LIST_LIMIT = 100
@@ -227,9 +242,9 @@ def _customer(customer: dict[str, Any], writes: Sequence[Write]) -> Applied:
         if write.operation != "customers.update" or write.answer.get("id") != customer.get("id"):
             continue
         for name, value in write.posted.items():
-            # `name not in customer` is `echo.reflect_over`'s rule: a field the live object does
-            # not have is one the real service would not have returned. It also keeps `expand[0]`
-            # and friends out, without a second list of parameter names to maintain.
+            # `name not in customer` is `echo.generic.reflect_over`'s rule: a field the live object
+            # does not have is one the real service would not have returned. It also keeps
+            # `expand[0]` and friends out, without a second list of parameter names to maintain.
             if name in SERVICE_OWNED or name not in customer:
                 continue
             if name == "metadata" and isinstance(value, dict) and isinstance(customer[name], dict):
@@ -358,7 +373,13 @@ def _idempotency_conflict(key: str) -> Rejection:
     )
 
 
-IDEMPOTENCY = Idempotency(header=IDEMPOTENCY_KEY_HEADER, conflict=_idempotency_conflict)
+# Stripe marks the answer to a retry `Idempotent-Replayed: true`. Header names are case-insensitive
+# on the wire, and every header irimi sets is written lower-case.
+IDEMPOTENCY = Idempotency(
+    header=IDEMPOTENCY_KEY_HEADER,
+    conflict=_idempotency_conflict,
+    replayed_header=("idempotent-replayed", "true"),
+)
 
 
 def _refund_probe(proposal: Proposal) -> Probe | None:
@@ -373,7 +394,7 @@ def _refund_probe(proposal: Proposal) -> Probe | None:
     # service would refuse. One that would change the path or start a query is not probed at all.
     if not isinstance(charge, str) or not charge or "/" in charge or "?" in charge:
         return None
-    return Probe(operation="charges.retrieve", method="GET", path=f"/v1/charges/{charge}")
+    return Probe(operation="charges.retrieve", params={"charge": charge})
 
 
 def _charge_currency(document: Any) -> str:
@@ -381,7 +402,7 @@ def _charge_currency(document: Any) -> str:
 
     The document is the L3 precondition read's - `GET /v1/charges/{id}`, issued on the agent's own
     credentials - so this is a code irimi really read off real state and never a default. Anything
-    that is not a non-empty string is "": `report.money` formats only when it has a currency, and
+    that is not a non-empty string is "": the summary formats money only when it has a currency, and
     a wrong symbol is worse than an unformatted amount. No coercion and no `str()`, for the same
     reason `_refund_verdict` refuses to subtract numbers it cannot read.
     """

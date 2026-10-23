@@ -9,13 +9,13 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from irimi import fixture
 from irimi.bodies import reflect
-from irimi.echo.generic import Built, reflect_over
-from irimi.exchange import FIXTURE_FAILED_FLAG, Request
+from irimi.echo.generic import reflect_over
+from irimi.exchange import Request
 from irimi.servicemap import Route
+from irimi.services.slack import SERVICE
 
-SERVICE = "slack"
+__all__ = ["SERVICE", "SLACK_ENVELOPES", "SlackEnvelope", "TsClock", "enveloped", "slack_l1_body"]
 
 # Keys whose value is a real Slack `ts`, wherever they sit in a read's body. `conversations.
 # history` and `.replies` carry one per message, `conversations.info` carries the channel's
@@ -119,32 +119,16 @@ class TsClock:
                 stack.extend(item for item in node if isinstance(item, dict | list))
 
 
-def slack_body(fields: dict[str, Any], clock: TsClock) -> dict[str, Any]:
-    """Slack's own envelope. slack_sdk raises SlackApiError on any body without `ok: true`.
-
-    It replaces the generic body rather than extending it: a Slack response carries no `created`
-    and no `object`, and an SDK that sees them would be reading fields the real API never sends.
-
-    This is the fallback: an operation named in `SLACK_ENVELOPES`
-    is built by `slack_l1_body` instead, which knows whether that method's real answer carries a
-    top-level `ts` and `channel` at all. This shape is what a mapped Slack write with no entry
-    there still gets.
-    """
-    body: dict[str, Any] = {"ok": True, "ts": clock.mint()}
-    if "channel" in fields:
-        body["channel"] = fields["channel"]
-    return body
-
-
 @dataclass(frozen=True)
 class SlackEnvelope:
     """How one Slack write's answer is assembled.
 
     A Slack response is an envelope, and what sits inside it differs per method: chat.postMessage
     answers `{ok, channel, ts, message}`, reactions.add answers `{ok}` and nothing else. So the
-    envelope is described per operation rather than built one way for the whole service -
-    `slack_body`'s single shape would put a top-level `ts` and `channel` on reactions.add, which
-    are chat.postMessage's fields and ones the real API never returns there.
+    envelope is described per operation rather than built one way for the whole service: one
+    shape would put a top-level `ts` and `channel` on reactions.add, which are chat.postMessage's
+    fields and ones the real API never returns there. An operation with no entry here gets the
+    default `SlackEnvelope()`, `{ok, channel, ts}`.
 
     `ok`, `channel` and `ts` stay envelope-owned. `ts` always comes from `TsClock` and never from
     the fixture: it is the message's identity for the rest of the run, and a fixture's frozen one
@@ -169,12 +153,10 @@ class SlackEnvelope:
 
 
 # Keyed on operation: every Slack write the shipped map names, except `incoming_webhook`, which
-# LITERAL_BODIES answers before any of this runs. A mapped Slack write that is not in here - one
-# a user's own map adds - keeps the generic `slack_body` shape, which is the floor rather than
-# the shape of any particular method.
+# `echo.LITERAL_BODIES` answers before any of this runs.
 #
 # `files.upload` is here with no payload for the same reason reactions.add is: `{ok}` is what it
-# answers, and the `ts` the generic shape added is a field that method never returned. It has no
+# answers, and the `ts` the default envelope adds is a field that method never returned. It has no
 # `fixture:` because Slack retired it in March 2025 and slack_sdk uploads through
 # `files.getUploadURLExternal` instead, so a `file` object here would fake a method nothing
 # calls - but "no fixture" is not "no known shape".
@@ -186,6 +168,7 @@ SLACK_ENVELOPES: dict[str, SlackEnvelope] = {
     "reactions.add": SlackEnvelope(payload_key=None, channel=False, ts=False),
     "files.upload": SlackEnvelope(payload_key=None, channel=False, ts=False),
 }
+DEFAULT_ENVELOPE = SlackEnvelope()
 
 
 def slack_l1_body(
@@ -226,21 +209,12 @@ def slack_l1_body(
     return body
 
 
-def enveloped(request: Request, route: Route, clock: TsClock) -> Built | None:
-    """A mapped Slack write's answer, level and flags; None for an operation `SLACK_ENVELOPES`
-    does not name, which the caller answers the generic way."""
-    envelope = SLACK_ENVELOPES.get(route.operation)
-    if envelope is None:
-        return None
-    payload = fixture.get(SERVICE, route.fixture) if route.fixture else None
-    body = slack_l1_body(request, route, envelope, payload, clock)
-    if payload is not None:
-        return body, "fake-L1", ()
-    if route.fixture:
-        # The map promised a fixture this install cannot read. The envelope still answers,
-        # because an SDK that sees no `ok` raises instead of reading the fields it just
-        # sent - but the trace has to say the fidelity is not the one the map named.
-        return body, "fake-L0", (FIXTURE_FAILED_FLAG,)
-    # An operation Slack answers with the envelope alone. There is no fixture to read and
-    # no payload to build, so L0 is the honest level even though the body is complete.
-    return body, "fake-L0", ()
+def enveloped(
+    request: Request, route: Route, obj: dict[str, Any] | None, clock: TsClock
+) -> dict[str, Any]:
+    """A mapped Slack write's answer, in its operation's envelope (`SLACK_ENVELOPES`, else
+    `DEFAULT_ENVELOPE`). `obj` is the route's fixture object, or None when it names none or this
+    install cannot read it: the envelope still answers, because an SDK that sees no `ok` raises
+    instead of reading the fields it just sent."""
+    envelope = SLACK_ENVELOPES.get(route.operation, DEFAULT_ENVELOPE)
+    return slack_l1_body(request, route, envelope, obj, clock)

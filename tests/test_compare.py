@@ -240,21 +240,21 @@ def test_a_refund_whose_reason_alone_differs_is_changed(home, capfd):
     )
 
 
-def test_a_volatile_field_is_not_compared_and_any_other_is():
-    """`nonce` is `volatile:` on the refund route of a test map built from the shipped one, which
-    a replay never matches on either (`recording.compared_body`)."""
+def test_an_ignored_field_is_not_compared_and_any_other_is():
+    """`nonce` is in `compare_ignores:` on the refund route of a test map built from the shipped
+    one, which a replay never matches on either (`recording.compared_body`)."""
     index = servicemap.MapIndex(
         tuple(
             dataclasses.replace(
                 sm,
                 routes=tuple(
-                    dataclasses.replace(route, volatile=("nonce",))
+                    dataclasses.replace(route, compare_ignores=("nonce",))
                     if route.operation == "refunds.create"
                     else route
                     for route in sm.routes
                 ),
             )
-            for sm in servicemap.load_shipped()
+            for sm in servicemap.loader.load_shipped()
         )
     )
 
@@ -357,8 +357,8 @@ def test_a_webhook_s_redacted_path_is_not_compared_and_its_text_is():
 
 
 def test_an_llm_body_is_compared_less_who_asked_and_how_as_a_replay_matches_it():
-    """`recording.compared_body` is the one rule: an llm call's body less `LLM_VOLATILE` and every
-    `cache_control`, at any depth."""
+    """`recording.compared_body` is the one rule: an llm call's body less its route's
+    `compare_ignores:` and every `cache_control`, at any depth."""
     asked = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
     noisy = {
         **asked,
@@ -369,7 +369,9 @@ def test_an_llm_body_is_compared_less_who_asked_and_how_as_a_replay_matches_it()
     }
     request = _llm("hi").request
     body = dataclasses.replace(request, body=json.dumps(noisy).encode())
-    assert recording.compared_body(body, "llm", None) == asked
+    found = servicemap.load().route_for(request.host, request.method, request.path)
+    assert found is not None
+    assert recording.compared_body(body, "llm", found[1]) == asked
 
 
 def test_a_slack_post_only_b_made_is_one_write_added(home, capfd):

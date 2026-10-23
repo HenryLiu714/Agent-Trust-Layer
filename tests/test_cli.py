@@ -149,7 +149,7 @@ def _shipped_index():
     tests/conftest.py points both at fresh empty directories, so there is nothing to isolate."""
     from irimi import servicemap
 
-    return servicemap.load(maps_dir=servicemap.shipped_dir())
+    return servicemap.load(maps_dir=servicemap.loader.shipped_dir())
 
 
 def test_reverse_hosts_are_the_mapped_hosts():

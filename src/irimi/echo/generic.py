@@ -1,18 +1,22 @@
-"""The L0 echo and the L1 fixture body, for any service. Minting, the id a
-path already names, and writing a request's fields over a fixture object."""
+"""The L0 echo and the L1 fixture body any service gets: the request's own fields, the fixture
+object a route names, and the ids the route mints. Nothing here is any one service's shape; a
+service whose answers carry fields of their own (`echo.stripe`) builds on these."""
 
 import re
 import secrets
 import string
-import time
+import uuid
 from typing import Any
 
 from irimi.bodies import SERVICE_OWNED, reflect
 from irimi.exchange import FakeLevel, Request
-from irimi.servicemap import Route, path_params
+from irimi.servicemap import IdSpec, Route, path_params
 
 ID_ALPHABET = string.ascii_letters + string.digits
 ID_LENGTH = 24
+# A minted integer id has ten digits: positive, and well inside the 2**53 a JSON reader keeps exact.
+INT_ID_FLOOR = 10**9
+INT_ID_SPAN = 9 * 10**9
 
 # What an id looks like after its prefix: one run of id characters, no second `_`. Stripe, OpenAI
 # and Slack all mint `<prefix><token>`, which is what lets `named_id` tell `sub_2` from
@@ -32,19 +36,17 @@ def mint_id(prefix: str) -> str:
     return prefix + "".join(secrets.choice(ID_ALPHABET) for _ in range(ID_LENGTH))
 
 
-def object_name(operation: str) -> str:
-    """The `object` an operation's route mints, derived from the operation name.
-
-    The first dot-segment with a single trailing `s` stripped: `refunds.create` -> `refund`,
-    `payment_intents.cancel` -> `payment_intent`. There is no `object:` field in the route schema,
-    and a segment that does not end in `s` is returned unchanged.
-    """
-    head = operation.partition(".")[0]
-    return head[:-1] if len(head) > 1 and head.endswith("s") else head
+def mint(spec: IdSpec) -> str | int:
+    """A fresh id in the route's format: a prefixed token, a ten-digit integer, or a UUID."""
+    if spec.format == "int":
+        return INT_ID_FLOOR + secrets.randbelow(INT_ID_SPAN)
+    if spec.format == "uuid":
+        return str(uuid.uuid4())
+    return mint_id(spec.prefix)
 
 
 def named_id(route: Route, path: str, prefix: str) -> str | None:
-    """The id this request already names in its own path, or None when it names none.
+    """The prefixed id this request already names in its own path, or None when it names none.
 
     A create posts to a collection (`POST /v1/refunds`) and the service mints the id. Every other
     write addresses a resource that exists (`POST /v1/customers/cus_REAL123`,
@@ -72,28 +74,41 @@ def named_id(route: Route, path: str, prefix: str) -> str | None:
     return next((v for v in values if SECRET_MARKER not in v), None)
 
 
-def l0_body(request: Request, route: Route | None) -> dict[str, Any]:
-    """The generic L0 body: reflected fields, `created`, and the route's ids.
+def _named(route: Route, path: str, name: str, spec: IdSpec) -> str | int | None:
+    """The id `name` already has in this request's path, in `spec`'s format, or None.
 
-    An id is minted only when the request does not already name one - see `named_id`. A minted id
-    still overwrites a reflected *body* field of the same name: what the service would have
-    returned wins over what the caller happened to post. `object` is only added when the route
-    carries an `id`, because that is the only case where we know the echo names a resource.
+    A prefixed id is found by its prefix (`named_id`). An integer or a UUID has no prefix to
+    match, so it is the capture spelled like the field (`{number}` for `ids: {number: ...}`),
+    when that capture is one.
     """
+    if spec.format == "prefix":
+        return named_id(route, path, spec.prefix)
+    value = path_params(route.path, path).get(name)
+    if value is None:
+        return None
+    if spec.format == "int":
+        return int(value) if value.isascii() and value.isdigit() else None
+    try:
+        return str(uuid.UUID(value))
+    except ValueError:
+        return None
+
+
+def mint_ids(body: dict[str, Any], route: Route, path: str) -> None:
+    """Set every field the route names in `ids:`, in place: the id the path already names, else a
+    minted one. A minted id overwrites a reflected field of the same name: what the service would
+    have returned wins over what the caller happened to post."""
+    for name, spec in route.ids.items():
+        named = _named(route, path, name, spec)
+        body[name] = named if named is not None else mint(spec)
+
+
+def l0_body(request: Request, route: Route | None) -> dict[str, Any]:
+    """The L0 body: the request's own fields reflected back, and the route's ids."""
     body = reflect(request)
-    body["created"] = int(time.time())
-    if route is not None and route.ids:
-        for name, prefix in route.ids.items():
-            body[name] = named_id(route, request.path, prefix) or mint_id(prefix)
-        if "id" in route.ids:
-            body["object"] = object_name(route.operation)
+    if route is not None:
+        mint_ids(body, route, request.path)
     return body
-
-
-# irimi performed nothing, so nothing it answers happened in live mode. Set on every fixture that
-# has the field at all, and on no fixture that does not: a `livemode` on a refund would be a field
-# the real API never sends there.
-LIVEMODE = False
 
 
 def _same_json_type(current: Any, value: Any) -> bool:
@@ -112,12 +127,7 @@ def _same_json_type(current: Any, value: Any) -> bool:
 
 
 def reflect_over(obj: dict[str, Any], reflected: dict[str, Any], route: Route) -> None:
-    """Write the request's own fields over a fixture object, in place. Shared by both L1 bodies.
-
-    The reflection rules are the same for Stripe and Slack, but everything `l1_body` does after
-    them - `created`, `livemode`, the minted ids - is Stripe-shaped, and a Slack message object
-    has none of it.
-    """
+    """Write the request's own fields over a fixture object, in place. Every L1 body uses it."""
     for name, value in reflected.items():
         if name in SERVICE_OWNED or name in route.ids or name not in obj:
             continue
@@ -142,13 +152,9 @@ def l1_body(request: Request, route: Route, obj: dict[str, Any]) -> dict[str, An
     * `SERVICE_OWNED` fields and every field the route mints an id for are the service's answer,
       not the caller's argument, so they are set last and a posted value cannot reach them.
 
-    The id rules are L0's, unchanged: `named_id` first, so an update or a cancel echoes the id its
-    own path names, and a minted id only when the request named none.
+    The id rules are L0's, unchanged: the id the path names first, so an update or a cancel echoes
+    the id its own path names, and a minted id only when the request named none.
     """
     reflect_over(obj, reflect(request), route)
-    obj["created"] = int(time.time())
-    if "livemode" in obj:
-        obj["livemode"] = LIVEMODE
-    for name, prefix in route.ids.items():
-        obj[name] = named_id(route, request.path, prefix) or mint_id(prefix)
+    mint_ids(obj, route, request.path)
     return obj

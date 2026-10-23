@@ -298,7 +298,7 @@ def test_post_is_faked_l0(engine, upstream):
     assert status == 200
     body = json.loads(data)
     assert body["a"] == 1  # the L0 echo reflects the request's own fields
-    assert sorted(body) == ["a", "created"]  # unmapped: nothing minted
+    assert sorted(body) == ["a"]  # unmapped: nothing minted, and no other service's fields
     ex = seen[0]
     assert ex.answered_by == "fake-L0"
     assert ex.kind == "unknown"
@@ -821,7 +821,7 @@ def test_faked_write_reflects_a_form_body_and_is_flagged(engine, upstream):
     body = json.loads(data)
     assert body["amount"] == 4900
     assert body["charge"] == "ch_test"
-    assert isinstance(body["created"], int)
+    assert "created" not in body
     ex = seen[0]
     assert ex.answered_by == "fake-L0"
     assert "fidelity:L0" in ex.flags
@@ -2213,7 +2213,7 @@ def test_an_untargeted_write_is_still_faked(tmp_path, monkeypatch, target):
     finally:
         stop()
     assert status == 200
-    assert json.loads(data).keys() == {"created"}  # the L0 echo, not the target
+    assert json.loads(data) == {}  # the L0 echo, not the target
     assert _Target.seen == []
     (ex,) = seen
     assert ex.answered_by == "fake-L0" and ex.target == ""
@@ -2983,7 +2983,7 @@ routes:
       path: /v1/refunds
     operation: refunds.create
     kind: write
-    human: refund {amount} on {charge}
+    human: refund {amount:money} on {charge}
     fixture: refund
     ids:
       id: re_
@@ -3299,8 +3299,9 @@ def test_a_retry_with_the_same_key_is_one_refund_not_two(stripe_stub):
     assert second == first
     stamp = pipeline.ANSWERED_BY_HEADER
     assert second_headers[stamp] == first_headers[stamp]
-    assert idempotency.REPLAYED_HEADER not in first_headers
-    assert second_headers[idempotency.REPLAYED_HEADER] == idempotency.REPLAYED_VALUE
+    replayed, marker = idempotency.replayed_header("stripe") or ("", "")
+    assert replayed not in first_headers
+    assert second_headers[replayed] == marker
     refunds = [ex for ex in seen if ex.request.method == "POST"]
     assert [IDEMPOTENT_REPLAY_FLAG in ex.flags for ex in refunds] == [False, True]
 
@@ -3539,12 +3540,12 @@ def test_a_minted_refund_read_by_id_is_listed_under_its_refund(stripe_stub, tmp_
 # ------------------------------------------------- the Slack overlay, end to end
 
 # The loopback upstream claimed as `slack`, with the shipped map's two routes that matter here.
-# `verbs: post-only` because a Slack read is a POST, as it is in `maps/slack.yaml`; `fixture:
+# `style: rpc` because a Slack read is a POST, as it is in `maps/slack.yaml`; `fixture:
 # message` resolves against the shipped Slack fixtures, keyed by the service name.
 SLACK_OVERLAY_MAP = """
 version: 1
 service: slack
-verbs: post-only
+style: rpc
 hosts:
   - 127.0.0.1
 routes:

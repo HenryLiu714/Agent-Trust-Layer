@@ -10,9 +10,7 @@ and handles each `app_mention` as one run (`@sdk.trigger on_mention`):
 4. a read-back of its own thread, logging whether it sees its reply.
 
 A mention that says "incident" first opens a top-level incident message and replies under THAT
-message's `ts`, so the read-back asks about a thread this run minted. With
-`SLACK_CHECK_INCIDENT` set, it also reads that thread before replying, when it holds the parent
-alone.
+message's `ts`, so the read-back asks about a thread this run minted.
 
 The agent delivers its own events over loopback, through no proxy: an inbound webhook is not the
 agent's egress, and irimi must never see it. Each delivery is signed as Slack signs it and the
@@ -64,16 +62,6 @@ def on_mention(event: dict[str, Any]) -> None:
         if not opened.get("ok"):
             return
         thread = opened["ts"]
-        if os.environ.get("SLACK_CHECK_INCIDENT"):
-            # Check the incident landed before replying under it: a read of a thread whose only
-            # message is the parent this run posted, so no reply of the run's can place it.
-            check = agentkit.slack("conversations.replies", channel=opened["channel"], ts=thread)
-            agentkit.obs(
-                "incident_check",
-                ok=check.get("ok"),
-                error=check.get("error"),
-                messages=len(check.get("messages") or []),
-            )
 
     posted = agentkit.slack("chat.postMessage", channel=post_to, text=answer, thread_ts=thread)
     _check("post_reply", posted)

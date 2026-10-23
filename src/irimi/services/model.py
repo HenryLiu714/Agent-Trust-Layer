@@ -6,7 +6,7 @@ irimi answered it with, not of the trace.
 """
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from irimi.exchange import Request
@@ -18,8 +18,8 @@ class Write:
 
     `operation` is the map's own name for it (`refunds.create`). `posted` is the caller's own
     fields, as `bodies.reflect` read them off the request. `answer` is the object irimi answered
-    with - already carrying the minted ids, `created`, and every fixture field the caller never
-    sent - which is why no effect ever mints anything of its own.
+    with - already carrying the minted ids and every fixture field the caller never sent - which
+    is why no effect ever mints anything of its own.
     """
 
     operation: str
@@ -54,14 +54,10 @@ class Applied:
     `changed` and `partial` are independent: a page the table cannot model is `partial` with
     nothing changed, and that is a fact the trace has to carry rather than a body edit.
 
-    `status` is None for every effect that edits a live body - the service's own status stands, and
-    a live read's status staying the service's is most of what makes it a live read. It is an int
-    for the one case where the service could not have answered the read at all: a read of an object
-    THIS RUN MINTED, which the service has never heard of and refuses, with a status that is as
-    much of that refusal as the body. `stripe._refund_retrieve` is the case - Stripe's `404
-    resource_missing` for a refund irimi faked - and `slack._minted_thread` is its twin needing no
-    status at all, because Slack sends `thread_not_found` at HTTP 200. An effect that sets `status`
-    sets `changed` too: the body and the status are one answer.
+    `status` is None for every effect that edits a live body: the service's own status stands. It
+    is set only when the read targets an object this run minted and the service answered
+    not-found, so the effect answers the whole read, status included. An effect that sets
+    `status` sets `changed` too: the body and the status are one answer.
     """
 
     document: Any
@@ -93,11 +89,12 @@ class Proposal:
 
 @dataclass(frozen=True)
 class Probe:
-    """The one real read a precondition needs. The policy turns it into a request and issues it."""
+    """The one real read a precondition needs, named by the map's operation and the values of its
+    route's `{name}` segments. The policy builds the request from the map's route and issues it,
+    and refuses anything the map does not call a read."""
 
-    operation: str  # what the map should classify it as; the policy refuses anything not a read
-    method: str
-    path: str
+    operation: str
+    params: dict[str, str] = field(default_factory=dict)  # `{charge}` -> `ch_1`
     query: str = ""
     posted: dict[str, Any] | None = None  # a JSON body for a read-like POST (Slack); None = none
 
@@ -108,8 +105,7 @@ class Rejection:
 
     `body` is the service's own error shape, so the SDK raises its ordinary error rather than
     choking on something of irimi's. `code` is the machine name the summary prints; it is the
-    body's own code where the service sends one, and irimi's label where it does not - see
-    `stripe.AMOUNT_TOO_LARGE`.
+    body's own code where the service sends one, and irimi's label where it does not.
     """
 
     status: int
@@ -124,12 +120,14 @@ class Idempotency:
     `header` is the request header the caller puts the key in, lower-case as `pipeline.parse`
     normalizes it. `conflict` is what the service answers when that key comes back with different
     parameters - a `Rejection` like any other, so the SDK raises its own error rather than choking
-    on something of irimi's. A service with no entry in `services.IDEMPOTENCY` has no such
-    mechanism and no store.
+    on something of irimi's. `replayed_header` is the `(name, value)` the service puts on the
+    answer to a retry (Stripe's `Idempotent-Replayed: true`), or None when it marks none. A
+    service with no entry in `services.IDEMPOTENCY` has no such mechanism and no store.
     """
 
     header: str
     conflict: Callable[[str], Rejection]  # the key the caller reused -> the service's refusal
+    replayed_header: tuple[str, str] | None = None
 
 
 @dataclass(frozen=True)

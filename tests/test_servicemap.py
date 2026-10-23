@@ -5,13 +5,13 @@ import pytest
 
 from irimi import paths, servicemap, services
 from irimi.exchange import KINDS, LIVE_KINDS, SAFE_METHODS
-from irimi.servicemap import MapError, MapIndex, Route, ServiceMap
+from irimi.servicemap import IdSpec, MapError, MapIndex, Route, ServiceMap
 
 # A complete, valid one-service document. Tests mutate a copy of this to make one thing wrong.
 GOOD = """
 version: 1
 service: demo
-verbs: honest
+style: rest
 hosts:
   - demo.example
   - files.demo.example
@@ -36,15 +36,14 @@ routes:
     fixture: thing
     ids:
       id: th_
-    volatile:
+    compare_ignores:
       - nonce
   - match:
       method: POST
       path: /v1/search
     operation: things.search
     kind: read
-    persists: false
-    comment: search persists nothing; Stripe's own spec calls it a POST read
+    live_because: search persists nothing; Stripe's own spec calls it a POST read
 """
 
 
@@ -64,7 +63,7 @@ def load(tmp_path, *docs: str, allow=frozenset(), override: str | None = None):
     cwd = tmp_path / "cwd"
     cwd.mkdir(exist_ok=True)
     if override is not None:
-        (cwd / servicemap.CWD_OVERRIDE_NAME).write_text(override)
+        (cwd / servicemap.loader.CWD_OVERRIDE_NAME).write_text(override)
     return servicemap.load(
         allow_target_hosts=allow, cwd=cwd, maps_dir=write_maps(tmp_path, *(docs or (GOOD,)))
     )
@@ -81,7 +80,7 @@ def refuses(tmp_path, doc: str, message: str, **kwargs):
 
 
 def test_shipped_maps_load():
-    index = servicemap.load(cwd=None, maps_dir=servicemap.shipped_dir())
+    index = servicemap.load(cwd=None, maps_dir=servicemap.loader.shipped_dir())
     assert {sm.service for sm in index.services} == {
         "anthropic",
         "datadog",
@@ -97,64 +96,63 @@ def test_shipped_maps_load():
 
 
 def test_shipped_stripe_map_is_complete():
-    index = servicemap.load(maps_dir=servicemap.shipped_dir())
+    index = servicemap.load(maps_dir=servicemap.loader.shipped_dir())
     stripe = index.service_for("api.stripe.com")
     assert stripe is not None
-    assert stripe.verbs == "honest"
+    assert stripe.style == "rest"
     assert stripe.target == servicemap.SELF_TARGET
     assert stripe.target_reads is False
     assert stripe.hosts == frozenset(
         {"api.stripe.com", "connect.stripe.com", "files.stripe.com", "meter-events.stripe.com"}
     )
     assert len(stripe.routes) == 10
-    refund = servicemap.match_route(stripe, "POST", "/v1/refunds")
+    refund = servicemap.model.match_route(stripe, "POST", "/v1/refunds")
     assert refund is not None
     assert (refund.operation, refund.kind) == ("refunds.create", "write")
-    assert refund.human == "refund {amount} on {charge}"
-    assert refund.ids == {"id": "re_", "balance_transaction": "txn_"}
-    assert refund.volatile == ()
+    assert refund.human == "refund {amount:money} on {charge}"
+    assert refund.ids == {"id": IdSpec(prefix="re_"), "balance_transaction": IdSpec(prefix="txn_")}
+    assert refund.compare_ignores == ()
     assert refund.fixture == "refund"
     assert refund.fires == ("refund.created", "charge.refunded")
 
 
-def test_shipped_slack_map_is_post_only_and_owns_the_webhook_host():
-    index = servicemap.load(maps_dir=servicemap.shipped_dir())
+def test_shipped_slack_map_is_rpc_style_and_owns_the_webhook_host():
+    index = servicemap.load(maps_dir=servicemap.loader.shipped_dir())
     slack = index.service_for("slack.com")
     assert slack is not None
-    assert slack.verbs == "post-only"
+    assert slack.style == "rpc"
+    assert slack.credential_path_hosts == frozenset({"hooks.slack.com"})
     # One service, not two: `_check_unique` forbids the host appearing in both, and a second
     # service would split the Slack summary in two.
     assert index.service_for("hooks.slack.com") is slack
-    post = servicemap.match_route(slack, "POST", "/api/chat.postMessage")
-    history = servicemap.match_route(slack, "POST", "/api/conversations.history")
+    post = servicemap.model.match_route(slack, "POST", "/api/chat.postMessage")
+    history = servicemap.model.match_route(slack, "POST", "/api/conversations.history")
     assert post is not None and post.kind == "write"
     assert post.human == 'post to #{channel}: "{text}"'
     assert history is not None and history.kind == "read"
 
 
 def test_no_shipped_route_downgrades_a_write_to_a_read():
-    """The classification invariant: a declared write is never a read without `persists: false`.
+    """The classification invariant: a declared write is never a read without `live_because:`.
 
-    `_check_route_rules` refuses it at load time for a service whose verbs are honest, so a
-    violation is a MapError rather than a silent downgrade; this asserts the property itself, so it
-    keeps holding if the rule ever moves. A `post-only` service is exempt by design: its SDKs POST
-    every call, so there is no honest verb to downgrade from.
+    `_check_route_rules` refuses it at load time for a `style: rest` service, so a violation is a
+    MapError rather than a silent downgrade; this asserts the property itself, so it keeps holding
+    if the rule ever moves. A `style: rpc` service is exempt by design: its SDKs POST every call,
+    so there is no honest verb to downgrade from.
     """
-    index = servicemap.load(maps_dir=servicemap.shipped_dir())
-    honest = [sm for sm in index.services if sm.verbs == "honest"]
-    assert honest, "the shipped maps should still contain a service with honest verbs"
-    for sm in honest:
+    index = servicemap.load(maps_dir=servicemap.loader.shipped_dir())
+    rest = [sm for sm in index.services if sm.style == "rest"]
+    assert rest, "the shipped maps should still contain a `style: rest` service"
+    for sm in rest:
         for route in sm.routes:
             if route.kind == "read" and route.method not in SAFE_METHODS:
-                where = f"{sm.service} {route.operation}"
-                assert route.persists is False, where
-                assert route.comment.strip(), where
+                assert route.live_because, f"{sm.service} {route.operation}"
 
 
 def test_slack_read_templates_still_name_the_channel():
     """An unquoted `#` starts a YAML comment, so `human: look up #{channel}` would load as
     `look up`. The three Slack reads that name a channel have to stay quoted in the file."""
-    index = servicemap.load(maps_dir=servicemap.shipped_dir())
+    index = servicemap.load(maps_dir=servicemap.loader.shipped_dir())
     slack = index.service_for("slack.com")
     assert slack is not None
     humans = {route.operation: route.human for route in slack.routes}
@@ -166,7 +164,7 @@ def test_slack_read_templates_still_name_the_channel():
 def test_no_shipped_human_template_is_eaten_by_a_yaml_comment():
     """The class of bug the test above catches one instance of, checked against the raw files."""
     offenders = []
-    for path in sorted(p for p in servicemap.shipped_dir().iterdir() if p.suffix == ".yaml"):
+    for path in sorted(p for p in servicemap.loader.shipped_dir().iterdir() if p.suffix == ".yaml"):
         for number, line in enumerate(path.read_text().splitlines(), 1):
             stripped = line.strip()
             if not stripped.startswith("human:"):
@@ -181,7 +179,7 @@ def test_no_shipped_human_template_is_eaten_by_a_yaml_comment():
 
 
 def test_shipped_maps_have_no_target_and_a_human_on_every_write():
-    for sm in servicemap.load(maps_dir=servicemap.shipped_dir()).services:
+    for sm in servicemap.load(maps_dir=servicemap.loader.shipped_dir()).services:
         assert not servicemap.is_delegated(sm), f"{sm.service} ships with a target"
         for route in sm.routes:
             if route.kind == "write":
@@ -200,7 +198,7 @@ FIXTURE_FILE_NAMES = ["slack.json", "stripe.json"]
 
 
 def test_the_shipped_maps_directory_holds_every_map():
-    names = sorted(p.name for p in servicemap.shipped_dir().iterdir() if p.suffix == ".yaml")
+    names = sorted(p.name for p in servicemap.loader.shipped_dir().iterdir() if p.suffix == ".yaml")
     assert names == MAP_FILE_NAMES
 
 
@@ -271,7 +269,7 @@ def test_every_field_round_trips(tmp_path):
     index = load(tmp_path)
     sm = index.services[0]
     assert sm.service == "demo"
-    assert sm.verbs == "honest"
+    assert sm.style == "rest"
     assert sm.hosts == frozenset({"demo.example", "files.demo.example"})
     assert sm.source.endswith("0.yaml")
     listing, retrieve, create, search = sm.routes
@@ -279,15 +277,14 @@ def test_every_field_round_trips(tmp_path):
     assert listing.human == "list things"
     assert retrieve.human == ""  # optional
     assert create.kind == "write"
-    assert create.ids == {"id": "th_"}
+    assert create.ids == {"id": IdSpec(prefix="th_")}
     assert create.fixture == "thing"
     assert listing.fixture == ""  # optional, and meaningless on a live route
-    assert create.volatile == ("nonce",)
-    assert create.persists is None
+    assert create.compare_ignores == ("nonce",)
+    assert create.live_because == ""
     assert create.target == servicemap.SELF_TARGET
     assert create.forward_auth is False
-    assert search.persists is False
-    assert search.comment.startswith("search persists nothing")
+    assert search.live_because.startswith("search persists nothing")
 
 
 def test_index_lookups(tmp_path):
@@ -337,7 +334,7 @@ def test_empty_index_is_usable():
 )
 def test_match_route_finds(tmp_path, method, path, operation):
     sm = load(tmp_path).services[0]
-    route = servicemap.match_route(sm, method, path)
+    route = servicemap.model.match_route(sm, method, path)
     assert route is not None and route.operation == operation
 
 
@@ -351,7 +348,7 @@ def test_match_route_finds(tmp_path, method, path, operation):
     ],
 )
 def test_match_route_misses(tmp_path, method, path):
-    assert servicemap.match_route(load(tmp_path).services[0], method, path) is None
+    assert servicemap.model.match_route(load(tmp_path).services[0], method, path) is None
 
 
 def test_literal_segment_beats_a_pattern(tmp_path):
@@ -366,8 +363,8 @@ def test_literal_segment_beats_a_pattern(tmp_path):
 """
     )
     sm = load(tmp_path, doc).services[0]
-    latest = servicemap.match_route(sm, "GET", "/v1/things/latest")
-    other = servicemap.match_route(sm, "GET", "/v1/things/th_1")
+    latest = servicemap.model.match_route(sm, "GET", "/v1/things/latest")
+    other = servicemap.model.match_route(sm, "GET", "/v1/things/th_1")
     assert latest is not None and latest.operation == "things.latest"
     assert other is not None and other.operation == "things.retrieve"
 
@@ -387,7 +384,7 @@ routes:
 """
     sm = load(tmp_path, doc).services[0]
     for method in ("GET", "POST", "PATCH"):
-        route = servicemap.match_route(sm, method, "/anything")
+        route = servicemap.model.match_route(sm, method, "/anything")
         assert route is not None and route.operation == "demo.anything"
 
 
@@ -399,14 +396,14 @@ routes:
     [
         ("version: 1", "version: 2", "`version` must be 1"),
         ("service: demo", "service: ''", "`service` is required"),
-        ("verbs: honest", "verbs: sometimes", "`verbs` must be one of"),
+        ("style: rest", "style: sometimes", "`style` must be one of"),
         ("kind: read\n    human: list things", "kind: reed\n    human: list things", "`kind` must"),
         ("operation: things.list", "operation: things.list\n    nope: 1", "unknown route key(s)"),
         ("hosts:", "nope:\nhosts:", "unknown map key(s)"),
         ("      id: th_", "      id: ''", "must be a non-empty id prefix"),
         ("      path: /v1/things\n", "\n", "must start with"),
         ("      method: GET\n      path: /v1/things\n", "      verb: GET\n", "unknown match"),
-        ("volatile:\n      - nonce", "volatile: 3", "must be a list of strings"),
+        ("compare_ignores:\n      - nonce", "compare_ignores: 3", "must be a list of strings"),
         ("    fixture: thing", "    fixture: 3", "`fixture` must be a string"),
         ("    fixture: thing", "    fires: 3", "`fires` must be a list of strings"),
         ("    fixture: thing", "    fires:\n      - 3", "`fires` entry must be a string"),
@@ -466,10 +463,10 @@ def test_empty_and_invalid_files_are_refused(tmp_path):
 # ------------------------------------------------------------ no write downgraded to a read
 
 
-def test_unsafe_method_read_needs_persists_false_and_a_comment(tmp_path):
-    """On a `verbs: honest` service, `kind: read` on any unsafe method is a downgraded write."""
-    base = GOOD.replace("    persists: false\n", "").replace(
-        "    comment: search persists nothing; Stripe's own spec calls it a POST read\n", ""
+def test_unsafe_method_read_needs_live_because(tmp_path):
+    """On a `style: rest` service, `kind: read` on any unsafe method is a downgraded write."""
+    base = GOOD.replace(
+        "    live_because: search persists nothing; Stripe's own spec calls it a POST read\n", ""
     )
     refuses(tmp_path, base, "downgrades a write")
     as_delete = base.replace(
@@ -480,18 +477,19 @@ def test_unsafe_method_read_needs_persists_false_and_a_comment(tmp_path):
     refuses(tmp_path, as_delete, "would be performed for real")
 
 
-def test_persists_false_without_a_comment_is_refused(tmp_path):
+def test_an_empty_live_because_is_no_justification(tmp_path):
     doc = GOOD.replace(
-        "    comment: search persists nothing; Stripe's own spec calls it a POST read\n", ""
+        "    live_because: search persists nothing; Stripe's own spec calls it a POST read\n",
+        "    live_because: '  '\n",
     )
-    refuses(tmp_path, doc, "add a `comment:`")
+    refuses(tmp_path, doc, "Add `live_because:")
 
 
 def test_post_only_services_are_exempt(tmp_path):
     doc = """
 version: 1
 service: postonly
-verbs: post-only
+style: rpc
 hosts: [postonly.example]
 routes:
   - match:
@@ -507,15 +505,15 @@ routes:
 
 @pytest.mark.parametrize("kind", ["write", "unknown"])
 def test_default_kind_is_accepted_for_the_kinds_that_are_answered_locally(tmp_path, kind):
-    sm = load(tmp_path, GOOD.replace("verbs: honest", f"default_kind: {kind}")).services[0]
+    sm = load(tmp_path, GOOD.replace("style: rest", f"default_kind: {kind}")).services[0]
     assert sm.default_kind == kind
 
 
 def test_default_kinds_is_derived_from_the_live_set(tmp_path):
     """The rule is `not forwarded live`, not a hand-kept list: a live kind added to LIVE_KINDS
     later must be refused as a default the day it is added, with no second edit here."""
-    assert set(servicemap.DEFAULT_KINDS) == set(KINDS) - set(LIVE_KINDS)
-    assert set(servicemap.DEFAULT_KINDS).isdisjoint(LIVE_KINDS)
+    assert set(servicemap.model.DEFAULT_KINDS) == set(KINDS) - set(LIVE_KINDS)
+    assert set(servicemap.model.DEFAULT_KINDS).isdisjoint(LIVE_KINDS)
 
 
 def test_default_kind_defaults_to_none(tmp_path):
@@ -525,13 +523,13 @@ def test_default_kind_defaults_to_none(tmp_path):
 def test_default_kind_may_not_be_read(tmp_path):
     refuses(
         tmp_path,
-        GOOD.replace("verbs: honest", "default_kind: read"),
+        GOOD.replace("style: rest", "default_kind: read"),
         "may not be `read`",
     )
 
 
 def test_default_kind_may_not_be_llm(tmp_path):
-    refuses(tmp_path, GOOD.replace("verbs: honest", "default_kind: llm"), "may not be `llm`")
+    refuses(tmp_path, GOOD.replace("style: rest", "default_kind: llm"), "may not be `llm`")
 
 
 def test_default_kind_may_not_be_telemetry(tmp_path):
@@ -540,7 +538,7 @@ def test_default_kind_may_not_be_telemetry(tmp_path):
     `DELETE /api/v1/dashboard/{id}` for real. The loader refuses it."""
     refuses(
         tmp_path,
-        GOOD.replace("verbs: honest", "default_kind: telemetry"),
+        GOOD.replace("style: rest", "default_kind: telemetry"),
         "may not be `telemetry`",
     )
 
@@ -549,12 +547,12 @@ def test_default_kind_may_not_be_telemetry(tmp_path):
 def test_every_live_kind_is_refused_as_a_default_with_its_own_reason(tmp_path, kind):
     """Each refusal explains itself: a generic message would not tell a map author what to write
     instead. The loop is over LIVE_KINDS so a new live kind fails here until it has a reason."""
-    reason = servicemap.DEFAULT_KIND_REASONS[kind]
-    refuses(tmp_path, GOOD.replace("verbs: honest", f"default_kind: {kind}"), reason)
+    reason = servicemap.loader.DEFAULT_KIND_REASONS[kind]
+    refuses(tmp_path, GOOD.replace("style: rest", f"default_kind: {kind}"), reason)
 
 
 def test_default_kind_must_be_a_kind(tmp_path):
-    refuses(tmp_path, GOOD.replace("verbs: honest", "default_kind: maybe"), "must be one of")
+    refuses(tmp_path, GOOD.replace("style: rest", "default_kind: maybe"), "must be one of")
 
 
 def test_an_override_cannot_set_default_kind(tmp_path):
@@ -586,7 +584,7 @@ def test_a_fixture_on_an_unknown_route_is_allowed(tmp_path):
         "    operation: things.create\n    kind: unknown",
     )
     index = load(tmp_path, doc)
-    create = servicemap.match_route(index.services[0], "POST", "/v1/things")
+    create = servicemap.model.match_route(index.services[0], "POST", "/v1/things")
     assert create is not None and create.fixture == "thing"
 
 
@@ -594,7 +592,7 @@ def test_every_shipped_precondition_names_a_check_that_exists():
     """`precondition:` is the opt-in and `services.PRECONDITIONS` is what it opts into. A shipped
     name with no entry would degrade to `not_evaluable` on every write, silently - a key that reads
     as configured and is never consulted."""
-    index = servicemap.load(cwd=None, maps_dir=servicemap.shipped_dir())
+    index = servicemap.load(cwd=None, maps_dir=servicemap.loader.shipped_dir())
     named = [
         (sm.service, route.precondition)
         for sm in index.services
@@ -622,7 +620,7 @@ def test_every_shipped_fires_list_is_pinned_to_the_writes_the_effects_model():
     `services/stripe.py` models an effect for: a route that fires an event the overlay does not
     model is a write whose visible effect and its webhooks disagree, so a fourth route gaining
     `fires:` breaks this test and has to be thought about rather than drifting in."""
-    index = servicemap.load(maps_dir=servicemap.shipped_dir())
+    index = servicemap.load(maps_dir=servicemap.loader.shipped_dir())
     fired = {
         (sm.service, route.operation): route.fires
         for sm in index.services
@@ -639,7 +637,7 @@ def test_every_shipped_fires_list_is_pinned_to_the_writes_the_effects_model():
 def test_every_shipped_fires_route_is_a_write_irimi_answers_itself():
     """A live route is forwarded and the real service sends its own webhooks, so `fires:` on one
     would never be read. The loader refuses it; this holds that no shipped map has one."""
-    index = servicemap.load(maps_dir=servicemap.shipped_dir())
+    index = servicemap.load(maps_dir=servicemap.loader.shipped_dir())
     for sm in index.services:
         for route in sm.routes:
             if route.fires:
@@ -664,7 +662,7 @@ def test_fires_on_an_unknown_route_is_allowed(tmp_path):
         "    operation: things.create\n    kind: unknown",
     ).replace("    fixture: thing", "    fixture: thing\n    fires:\n      - thing.created")
     index = load(tmp_path, doc)
-    create = servicemap.match_route(index.services[0], "POST", "/v1/things")
+    create = servicemap.model.match_route(index.services[0], "POST", "/v1/things")
     assert create is not None and create.fires == ("thing.created",)
 
 
@@ -691,16 +689,16 @@ def test_a_misspelled_fires_key_is_refused(tmp_path):
     )
 
 
-def test_persists_and_volatile_are_restricted_to_their_kinds(tmp_path):
+def test_live_because_and_compare_ignores_are_restricted_to_their_kinds(tmp_path):
     refuses(
         tmp_path,
-        GOOD.replace("    ids:\n      id: th_\n", "    persists: true\n"),
-        "`persists` belongs on a route that is forwarded live",
+        GOOD.replace("    ids:\n      id: th_\n", "    live_because: it is safe\n"),
+        "`live_because` belongs on a route that is forwarded live",
     )
     refuses(
         tmp_path,
-        GOOD.replace("    human: list things", "    volatile: [x]"),
-        "`volatile` belongs on a write",
+        GOOD.replace("    human: list things", "    compare_ignores: [x]"),
+        "`compare_ignores` belongs on a `write`, `unknown` or `llm` route",
     )
 
 
@@ -726,14 +724,14 @@ def test_default_target_is_self(tmp_path):
     ],
 )
 def test_loopback_targets_are_accepted(tmp_path, url):
-    doc = GOOD.replace("verbs: honest", f"verbs: honest\ntarget: {url}")
+    doc = GOOD.replace("style: rest", f"style: rest\ntarget: {url}")
     sm = load(tmp_path, doc).services[0]
     assert sm.target == url.rstrip("/")
     assert servicemap.is_delegated(sm) is True
 
 
 def test_a_service_target_answers_writes_and_unknowns_but_not_reads(tmp_path):
-    doc = GOOD.replace("verbs: honest", "verbs: honest\ntarget: http://127.0.0.1:3000")
+    doc = GOOD.replace("style: rest", "style: rest\ntarget: http://127.0.0.1:3000")
     sm = load(tmp_path, doc).services[0]
     listing, _retrieve, create, search = sm.routes
     assert servicemap.target_for(sm, create) == "http://127.0.0.1:3000"
@@ -743,7 +741,7 @@ def test_a_service_target_answers_writes_and_unknowns_but_not_reads(tmp_path):
 
 def test_target_reads_sends_reads_to_the_target_too(tmp_path):
     doc = GOOD.replace(
-        "verbs: honest", "verbs: honest\ntarget: http://127.0.0.1:3000\ntarget_reads: true"
+        "style: rest", "style: rest\ntarget: http://127.0.0.1:3000\ntarget_reads: true"
     )
     sm = load(tmp_path, doc).services[0]
     for route in sm.routes:
@@ -753,7 +751,7 @@ def test_target_reads_sends_reads_to_the_target_too(tmp_path):
 def test_target_reads_without_a_target_is_refused(tmp_path):
     refuses(
         tmp_path,
-        GOOD.replace("verbs: honest", "verbs: honest\ntarget_reads: true"),
+        GOOD.replace("style: rest", "style: rest\ntarget_reads: true"),
         "needs a `target:` URL to send the reads to",
     )
 
@@ -783,7 +781,7 @@ routes:
 
 
 def test_route_level_target_wins_over_the_service(tmp_path):
-    doc = GOOD.replace("verbs: honest", "verbs: honest\ntarget: http://127.0.0.1:3000").replace(
+    doc = GOOD.replace("style: rest", "style: rest\ntarget: http://127.0.0.1:3000").replace(
         "    ids:\n      id: th_\n",
         "    target: http://127.0.0.1:4111/create\n    ids:\n      id: th_\n",
     )
@@ -808,11 +806,11 @@ def test_route_level_target_on_a_read_is_refused(tmp_path):
     ],
 )
 def test_bad_target_values_are_refused(tmp_path, value, message):
-    refuses(tmp_path, GOOD.replace("verbs: honest", f"verbs: honest\ntarget: {value!r}"), message)
+    refuses(tmp_path, GOOD.replace("style: rest", f"style: rest\ntarget: {value!r}"), message)
 
 
 def test_non_loopback_targets_need_allow_target_host(tmp_path):
-    doc = GOOD.replace("verbs: honest", "verbs: honest\ntarget: http://stub.example:3000")
+    doc = GOOD.replace("style: rest", "style: rest\ntarget: http://stub.example:3000")
     refuses(tmp_path, doc, "is not loopback")
     sm = load(tmp_path, doc, allow=frozenset({"stub.example"})).services[0]
     assert sm.target == "http://stub.example:3000"
@@ -828,10 +826,10 @@ def test_forward_auth_needs_a_target(tmp_path):
 
 
 def test_target_must_be_a_string_and_booleans_must_be_booleans(tmp_path):
-    refuses(tmp_path, GOOD.replace("verbs: honest", "verbs: honest\ntarget: 3000"), "must be a str")
+    refuses(tmp_path, GOOD.replace("style: rest", "style: rest\ntarget: 3000"), "must be a str")
     refuses(
         tmp_path,
-        GOOD.replace("verbs: honest", "verbs: honest\ntarget_reads: yes please"),
+        GOOD.replace("style: rest", "style: rest\ntarget_reads: yes please"),
         "must be true or false",
     )
 
@@ -849,7 +847,7 @@ def test_override_sets_a_service_target(tmp_path):
     sm = load(tmp_path, GOOD, override=OVERRIDE).services[0]
     assert sm.target == "http://127.0.0.1:3000"
     assert servicemap.target_for(sm, sm.routes[2]) == "http://127.0.0.1:3000"
-    assert sm.source.endswith(servicemap.CWD_OVERRIDE_NAME)
+    assert sm.source.endswith(servicemap.loader.CWD_OVERRIDE_NAME)
 
 
 def test_override_sets_a_route_target_and_forward_auth(tmp_path):
@@ -936,9 +934,13 @@ def test_cwd_override_wins_over_home(tmp_path, monkeypatch):
     home.mkdir()
     cwd.mkdir(exist_ok=True)  # tests/conftest.py already made this one and chdir'd into it
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(home))
-    (home / servicemap.HOME_OVERRIDE_NAME).write_text("service: demo\ntarget: http://127.0.0.1:1\n")
-    (cwd / servicemap.CWD_OVERRIDE_NAME).write_text("service: demo\ntarget: http://127.0.0.1:2\n")
-    assert servicemap.override_path(cwd) == cwd / servicemap.CWD_OVERRIDE_NAME
+    (home / servicemap.loader.HOME_OVERRIDE_NAME).write_text(
+        "service: demo\ntarget: http://127.0.0.1:1\n"
+    )
+    (cwd / servicemap.loader.CWD_OVERRIDE_NAME).write_text(
+        "service: demo\ntarget: http://127.0.0.1:2\n"
+    )
+    assert servicemap.override_path(cwd) == cwd / servicemap.loader.CWD_OVERRIDE_NAME
     index = servicemap.load(cwd=cwd, maps_dir=write_maps(tmp_path, GOOD))
     assert index.services[0].target == "http://127.0.0.1:2"
 
@@ -949,8 +951,10 @@ def test_home_override_is_the_fallback(tmp_path, monkeypatch):
     home.mkdir()
     cwd.mkdir(exist_ok=True)  # tests/conftest.py already made this one and chdir'd into it
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(home))
-    (home / servicemap.HOME_OVERRIDE_NAME).write_text("service: demo\ntarget: http://127.0.0.1:1\n")
-    assert servicemap.override_path(cwd) == home / servicemap.HOME_OVERRIDE_NAME
+    (home / servicemap.loader.HOME_OVERRIDE_NAME).write_text(
+        "service: demo\ntarget: http://127.0.0.1:1\n"
+    )
+    assert servicemap.override_path(cwd) == home / servicemap.loader.HOME_OVERRIDE_NAME
     index = servicemap.load(cwd=cwd, maps_dir=write_maps(tmp_path, GOOD))
     assert index.services[0].target == "http://127.0.0.1:1"
 
@@ -965,10 +969,11 @@ def test_no_override_file_is_fine(tmp_path, monkeypatch):
 
 def test_route_and_servicemap_defaults():
     route = Route(method="POST", path="/x", operation="x.create", kind="write")
-    assert (route.human, route.ids, route.volatile, route.fixture) == ("", {}, (), "")
-    assert (route.fires, route.persists, route.comment, route.forward_auth) == ((), None, "", False)
+    assert (route.human, route.ids, route.compare_ignores, route.fixture) == ("", {}, (), "")
+    assert (route.fires, route.live_because, route.forward_auth) == ((), "", False)
     sm = ServiceMap(service="x", hosts=frozenset({"x.example"}), routes=(route,))
-    assert (sm.verbs, sm.target, sm.target_reads) == ("honest", servicemap.SELF_TARGET, False)
+    assert (sm.style, sm.target, sm.target_reads) == ("rest", servicemap.SELF_TARGET, False)
+    assert sm.credential_path_hosts == frozenset()
     assert sm.default_kind is None
     assert servicemap.target_for(sm, route) == servicemap.SELF_TARGET
 
@@ -979,7 +984,7 @@ def test_route_and_servicemap_defaults():
 def test_missing_maps_directory_is_a_named_refusal(tmp_path):
     missing = tmp_path / "nope"
     with pytest.raises(MapError) as exc:
-        servicemap.load_shipped(maps_dir=missing)
+        servicemap.loader.load_shipped(maps_dir=missing)
     assert str(missing) in str(exc.value)
     assert "cannot read the service maps directory" in str(exc.value)
 
@@ -988,7 +993,7 @@ def test_empty_maps_directory_is_a_named_refusal(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
     with pytest.raises(MapError) as exc:
-        servicemap.load_shipped(maps_dir=empty)
+        servicemap.loader.load_shipped(maps_dir=empty)
     assert str(empty) in str(exc.value)
     assert "no service maps found" in str(exc.value)
 
@@ -999,7 +1004,7 @@ def test_a_directory_with_no_yaml_is_the_same_refusal(tmp_path):
     directory.mkdir()
     (directory / "notes.txt").write_text("not a map\n")
     with pytest.raises(MapError) as exc:
-        servicemap.load_shipped(maps_dir=directory)
+        servicemap.loader.load_shipped(maps_dir=directory)
     assert "no service maps found" in str(exc.value)
 
 
@@ -1022,7 +1027,7 @@ def test_a_maps_directory_that_cannot_be_scanned_is_a_named_refusal(tmp_path, mo
 
     monkeypatch.setattr(Path, "iterdir", refuse)
     with pytest.raises(MapError) as exc:
-        servicemap.load_shipped(maps_dir=directory)
+        servicemap.loader.load_shipped(maps_dir=directory)
     assert str(directory) in str(exc.value)
     assert "cannot read the service maps directory" in str(exc.value)
     assert "Permission denied" in str(exc.value)
@@ -1047,7 +1052,7 @@ def test_an_unreadable_maps_directory_is_a_named_refusal(tmp_path):
         else:
             pytest.skip("this filesystem does not honour mode 0o000 on a directory")
         with pytest.raises(MapError) as exc:
-            servicemap.load_shipped(maps_dir=directory)
+            servicemap.loader.load_shipped(maps_dir=directory)
     finally:
         os.chmod(directory, 0o700)
     assert str(directory) in str(exc.value)
@@ -1203,10 +1208,13 @@ def test_the_conftest_redirects_irimi_home_away_from_the_developers_own(tmp_path
     assert paths.irimi_home() == home
 
     home.mkdir(parents=True, exist_ok=True)
-    (home / servicemap.HOME_OVERRIDE_NAME).write_text(
+    (home / servicemap.loader.HOME_OVERRIDE_NAME).write_text(
         "service: demo\ntarget: http://127.0.0.1:3000\n"
     )
-    assert servicemap.override_path(cwd=tmp_path / "empty") == home / servicemap.HOME_OVERRIDE_NAME
+    assert (
+        servicemap.override_path(cwd=tmp_path / "empty")
+        == home / servicemap.loader.HOME_OVERRIDE_NAME
+    )
     assert load(tmp_path).services[0].target == "http://127.0.0.1:3000"
 
 
@@ -1376,7 +1384,7 @@ def test_a_flag_naming_an_unknown_host_or_route_is_an_error(tmp_path):
 def test_a_flag_target_beats_the_overrides_file(tmp_path):
     cwd = tmp_path / "cwd"
     cwd.mkdir(exist_ok=True)
-    (cwd / servicemap.CWD_OVERRIDE_NAME).write_text(
+    (cwd / servicemap.loader.CWD_OVERRIDE_NAME).write_text(
         "service: demo\ntarget: http://127.0.0.1:1111\n"
     )
     index = _flagged(tmp_path, targets=[("demo.example", "", "http://127.0.0.1:2222")])
@@ -1388,7 +1396,7 @@ def test_a_credential_path_host_may_only_be_targeted_at_loopback():
     reach it: sending one off this machine hands the secret to whoever is listening."""
     index = servicemap.load(
         cwd=None,
-        maps_dir=servicemap.shipped_dir(),
+        maps_dir=servicemap.loader.shipped_dir(),
         targets=[("hooks.slack.com", "", "http://127.0.0.1:3000")],
     )
     assert index.service_for("hooks.slack.com").target == "http://127.0.0.1:3000"
@@ -1396,7 +1404,7 @@ def test_a_credential_path_host_may_only_be_targeted_at_loopback():
     with pytest.raises(MapError) as exc:
         servicemap.load(
             cwd=None,
-            maps_dir=servicemap.shipped_dir(),
+            maps_dir=servicemap.loader.shipped_dir(),
             allow_target_hosts=frozenset({"stub.internal"}),
             targets=[("hooks.slack.com", "", "http://stub.internal:3000")],
         )
@@ -1412,7 +1420,7 @@ def test_a_loopback_webhook_route_does_not_license_an_off_machine_service_target
     with pytest.raises(MapError) as exc:
         servicemap.load(
             cwd=None,
-            maps_dir=servicemap.shipped_dir(),
+            maps_dir=servicemap.loader.shipped_dir(),
             allow_target_hosts=frozenset({"stub.internal"}),
             targets=[
                 # The route-level rule is satisfied: this one really is loopback.
@@ -1430,7 +1438,7 @@ def test_the_rule_follows_the_host_through_the_overrides_file_too(tmp_path):
     with pytest.raises(MapError) as exc:
         servicemap.load(
             cwd=None,
-            maps_dir=servicemap.shipped_dir(),
+            maps_dir=servicemap.loader.shipped_dir(),
             allow_target_hosts=frozenset({"stub.internal"}),
             targets=[("slack.com", "/api/chat.postMessage", "http://stub.internal:9000")],
         )
@@ -1443,7 +1451,7 @@ def test_the_webhook_rule_covers_the_other_host_of_the_same_service():
     with pytest.raises(MapError):
         servicemap.load(
             cwd=None,
-            maps_dir=servicemap.shipped_dir(),
+            maps_dir=servicemap.loader.shipped_dir(),
             allow_target_hosts=frozenset({"stub.internal"}),
             targets=[("slack.com", "", "http://stub.internal:3000")],
         )
@@ -1477,7 +1485,7 @@ def test_a_live_kind_may_not_match_every_method(tmp_path):
     assert load(tmp_path, named).service_for("probe.example") is not None
 
 
-@pytest.mark.parametrize("method", sorted(servicemap.DESTRUCTIVE_METHODS))
+@pytest.mark.parametrize("method", sorted(servicemap.model.DESTRUCTIVE_METHODS))
 @pytest.mark.parametrize("kind", ["read", "llm", "telemetry"])
 def test_a_live_kind_on_a_destructive_method_must_justify_itself(tmp_path, method, kind):
     """Naming the verb is necessary but not sufficient: `DELETE api.datadoghq.com/api/v1/
@@ -1489,7 +1497,7 @@ def test_a_live_kind_on_a_destructive_method_must_justify_itself(tmp_path, metho
     refuses(tmp_path, doc, "would be performed for real")
     justified = doc.replace(
         "    human: send a probe event",
-        "    human: send a probe event\n    persists: false\n    comment: why it is safe",
+        "    human: send a probe event\n    live_because: why it is safe",
     )
     assert load(tmp_path, justified).service_for("probe.example") is not None
 
@@ -1500,3 +1508,227 @@ def test_post_is_still_the_honest_verb_for_inference_and_intake(tmp_path):
     shipped `llm` and `telemetry` route carrying one."""
     doc = _ANY_METHOD_TELEMETRY.replace("      path:", "      method: POST\n      path:")
     assert load(tmp_path, doc).service_for("probe.example") is not None
+
+
+# ------------------------------------------------------------------- retired and renamed keys
+
+
+@pytest.mark.parametrize(
+    ("good", "retired", "message"),
+    [
+        ("style: rest", "verbs: honest", "`verbs:` is now `style:`"),
+        (
+            "    compare_ignores:\n      - nonce",
+            "    volatile:\n      - nonce",
+            "is now `compare_ignores:`",
+        ),
+        (
+            "    live_because: search persists nothing; Stripe's own spec calls it a POST read",
+            "    persists: false",
+            "`persists:` is now `live_because:",
+        ),
+        (
+            "    live_because: search persists nothing; Stripe's own spec calls it a POST read",
+            "    comment: search persists nothing",
+            "`comment:` is gone",
+        ),
+    ],
+)
+def test_a_retired_key_is_refused_naming_its_replacement(tmp_path, good, retired, message):
+    assert good in GOOD
+    refuses(tmp_path, GOOD.replace(good, retired, 1), message)
+
+
+def test_a_route_level_error_names_the_route(tmp_path):
+    refuses(
+        tmp_path,
+        GOOD.replace("    fixture: thing", "    fixtrue: thing"),
+        "route POST /v1/things: unknown route key(s) fixtrue",
+    )
+    refuses(
+        tmp_path,
+        GOOD.replace("      method: GET\n      path: /v1/things\n", "      verb: GET\n", 1),
+        "routes[0]: unknown match key(s) verb",
+    )
+
+
+# ------------------------------------------------------------------------------------ id formats
+
+
+def test_ids_accept_an_integer_or_a_uuid_format_beside_a_prefix(tmp_path):
+    doc = GOOD.replace(
+        "    ids:\n      id: th_\n",
+        "    ids:\n      id: th_\n"
+        "      number:\n        format: int\n"
+        "      ref:\n        format: uuid\n",
+    )
+    create = servicemap.model.match_route(load(tmp_path, doc).services[0], "POST", "/v1/things")
+    assert create is not None
+    assert create.ids == {
+        "id": IdSpec(prefix="th_"),
+        "number": IdSpec(format="int"),
+        "ref": IdSpec(format="uuid"),
+    }
+
+
+@pytest.mark.parametrize(
+    ("spec", "message"),
+    [
+        ("\n        format: hex", "`ids.id.format` must be one of"),
+        ("\n        prefix: th_", "unknown id key(s) prefix"),
+        (" 3", "`ids.id` must be a string"),
+    ],
+)
+def test_a_bad_id_format_is_refused(tmp_path, spec, message):
+    refuses(tmp_path, GOOD.replace("      id: th_\n", f"      id:{spec}\n"), message)
+
+
+# ------------------------------------------------------------------------------- human templates
+
+
+def test_a_human_hole_may_name_the_money_format_and_nothing_else(tmp_path):
+    marked = GOOD.replace("human: create thing {name}", "human: charge {amount:money} for {name}")
+    create = servicemap.model.match_route(load(tmp_path, marked).services[0], "POST", "/v1/things")
+    assert create is not None and create.human == "charge {amount:money} for {name}"
+    refuses(
+        tmp_path,
+        GOOD.replace("human: create thing {name}", "human: create thing {name:upper}"),
+        "`:upper` is not a format a hole may name",
+    )
+
+
+# ------------------------------------------------------------------------- credential path hosts
+
+
+def test_a_map_may_declare_credential_path_hosts_of_its_own(tmp_path):
+    doc = GOOD.replace("routes:", "credential_path_hosts:\n  - files.demo.example\nroutes:", 1)
+    sm = load(tmp_path, doc).services[0]
+    assert sm.credential_path_hosts == frozenset({"files.demo.example"})
+    # The code's floor still applies on top of whatever a map declares.
+    assert sm.credential_hosts == frozenset({"files.demo.example", "hooks.slack.com"})
+
+
+def test_a_declared_credential_host_must_be_one_of_the_maps_hosts(tmp_path):
+    doc = GOOD.replace("routes:", "credential_path_hosts:\n  - elsewhere.example\nroutes:", 1)
+    refuses(tmp_path, doc, "'elsewhere.example' is not one of this map's exact `hosts`")
+
+
+def test_a_declared_credential_host_keeps_its_targets_on_loopback(tmp_path):
+    doc = GOOD.replace(
+        "routes:",
+        "target: http://stub.example:3000\ncredential_path_hosts:\n  - demo.example\nroutes:",
+        1,
+    )
+    refuses(
+        tmp_path,
+        doc,
+        "a target on this host may only be loopback",
+        allow=frozenset({"stub.example"}),
+    )
+
+
+def test_an_override_may_not_touch_credential_path_hosts(tmp_path):
+    override = "service: demo\ncredential_path_hosts: []\n"
+    refuses(tmp_path, GOOD, "`credential_path_hosts` belongs to the shipped map", override=override)
+
+
+def test_the_shipped_credential_hosts_are_the_floor_plus_the_maps():
+    assert servicemap.shipped_credential_hosts() >= servicemap.model.CREDENTIAL_PATH_HOSTS
+    assert "hooks.slack.com" in servicemap.shipped_credential_hosts()
+
+
+# ------------------------------------------------------ the Python tables agree with the maps
+
+
+def test_the_shipped_maps_pass_the_services_check():
+    services.check(servicemap.load(cwd=None, maps_dir=servicemap.loader.shipped_dir()))
+
+
+def test_every_map_set_a_user_can_start_with_passes_the_services_check(tmp_path, monkeypatch):
+    """Maps ship with irimi, and an overrides file and the target flags only set targets, so no
+    user configuration leaves out a service or an operation `services.check` requires."""
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "home"))
+    (tmp_path / servicemap.loader.CWD_OVERRIDE_NAME).write_text(
+        "service: slack\ntarget: http://127.0.0.1:3000\n---\n"
+        "service: stripe\nroutes:\n"
+        "  - match: {method: POST, path: /v1/refunds}\n    target: http://127.0.0.1:3001\n"
+    )
+    index = servicemap.load(
+        cwd=tmp_path,
+        targets=(("api.stripe.com", "", "http://127.0.0.1:3002"),),
+        target_reads=("api.stripe.com",),
+    )
+    slack = index.service_for("slack.com")
+    assert slack is not None and slack.target == "http://127.0.0.1:3000"
+    services.check(index)
+    assert {sm.service for sm in index.services} >= set(services.OPERATIONS)
+
+
+def _shipped_text(name: str) -> str:
+    return (servicemap.loader.shipped_dir() / name).read_text()
+
+
+def _check_maps(tmp_path, **replaced: tuple[str, str]):
+    """Load the shipped maps with one file's text edited, and run `services.check` over them."""
+    directory = tmp_path / "maps"
+    directory.mkdir()
+    for path in servicemap.loader.shipped_dir().iterdir():
+        if path.suffix == ".yaml":
+            text = path.read_text()
+            if path.name in replaced:
+                old, new = replaced[path.name]
+                assert old in text
+                text = text.replace(old, new, 1)
+            (directory / path.name).write_text(text)
+    services.check(servicemap.load(cwd=tmp_path, maps_dir=directory))
+
+
+@pytest.mark.parametrize(
+    ("file", "old", "new", "message"),
+    [
+        (
+            "slack.yaml",
+            "operation: chat.postMessage",
+            "operation: chat.post",
+            "no route names operation 'chat.postMessage', which irimi's slack tables key on",
+        ),
+        (
+            "stripe.yaml",
+            "service: stripe",
+            "service: stripe2",
+            "define no service 'stripe', which irimi's built-in tables key on",
+        ),
+        (
+            "stripe.yaml",
+            "precondition: charge_refundable",
+            "precondition: charge_refundible",
+            "`precondition: charge_refundible` names no check irimi has for stripe",
+        ),
+        (
+            "stripe.yaml",
+            "fixture: refund",
+            "fixture: refnud",
+            "`fixture: refnud` names no object in fixtures/stripe.json",
+        ),
+    ],
+)
+def test_the_services_check_refuses_a_name_the_tables_do_not_know(
+    tmp_path, monkeypatch, file, old, new, message
+):
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "home"))
+    with pytest.raises(MapError) as exc:
+        _check_maps(tmp_path, **{file: (old, new)})
+    assert message in str(exc.value)
+    if "define no service" not in message:
+        assert file in str(exc.value)
+
+
+def test_every_operation_echo_keys_on_is_declared_by_its_service():
+    """`services.check` holds the declared operations to the maps; this holds `echo`'s own tables
+    to the declarations, since `services` cannot import `echo`."""
+    from irimi import echo
+    from irimi.echo import slack as echo_slack
+
+    assert set(echo_slack.SLACK_ENVELOPES) <= services.OPERATIONS["slack"]
+    for service, operation in echo.LITERAL_BODIES:
+        assert operation in services.OPERATIONS[service]

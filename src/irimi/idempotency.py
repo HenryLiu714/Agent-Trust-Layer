@@ -1,12 +1,14 @@
 """The run's answers to writes that carried an idempotency key, so a retry is one write.
 
-A service lets a caller name a write (`Idempotency-Key`), and promises that sending it twice
+A service may let a caller name a write with an idempotency key, and promise that sending it twice
 performs it once. irimi has to keep that promise itself: stripe-python puts a fresh UUID on every
 POST, so an agent that retries a refund would otherwise get two different minted ids and the
 overlay would apply the refund twice - a charge showing 200 refunded for a single 100 refund.
+Which header names the key, what a reused key is refused with and how a retry's answer is marked
+are the service's (`services.IDEMPOTENCY`); this module is the same for every service.
 
 Pure and in-memory. Nothing here decides anything: `policy` looks the answer up and puts the
-first one in, and the store only remembers. That is also what lets replay keep the same
+first one in, and the store only remembers. That is also what lets `irimi replay` keep the same
 promise over a recording with the same code.
 """
 
@@ -19,25 +21,19 @@ from irimi.exchange import AnsweredBy, PreconditionOutcome, Request
 from irimi.pipeline import Classification
 from irimi.servicemap import Route
 
-# What irimi puts on a replayed answer. Stripe spells it `Idempotent-Replayed`; header names are
-# case-insensitive on the wire and every header irimi sets is written lower-case, like
-# `content-type` and `pipeline.ANSWERED_BY_HEADER`.
-REPLAYED_HEADER = "idempotent-replayed"
-REPLAYED_VALUE = "true"
-
 
 @dataclass(frozen=True)
-class Stored:
-    """The whole of a first answer, so a replay reproduces it rather than re-deriving it.
+class FirstAnswer:
+    """The whole of a key's first answer, so a retry reproduces it rather than re-deriving it.
 
     Re-deriving would let a fixture that has since become unreadable stamp `fake-L0` over a first
     call answered at `fake-L1`, and the trace would disagree with itself about one write. `flags`
     carries `fixture-failed` for the same reason, and `precondition` / `rejection_code` carry an
-    L3 rejection so a replayed one still prints as a rejection and still stays out of the write
+    L3 rejection so a retried one still prints as a rejection and still stays out of the write
     log. `currency` rides along for the same reason: it is what the write's own L3 read found on
-    the object it named, and a replay that re-derived it (or dropped it) would have the trace
+    the object it named, and a retry that re-derived it (or dropped it) would have the trace
     disagree with itself about what one write was denominated in. There is no `issued`: a
-    replay makes no precondition read, which is the point.
+    retry makes no precondition read, which is the point.
     """
 
     status: int
@@ -50,7 +46,7 @@ class Stored:
     currency: str
 
 
-def key_of(service: str, request: Request) -> str:
+def idempotency_key_of(service: str, request: Request) -> str:
     """The idempotency key this request carries, or "" when there is none to key on.
 
     "" for a service with no entry in `services.IDEMPOTENCY` (Slack has none) and for a caller
@@ -68,74 +64,83 @@ def conflict(service: str, key: str) -> services.Rejection | None:
     return None if spec is None else spec.conflict(key)
 
 
+def replayed_header(service: str) -> tuple[str, str] | None:
+    """The `(name, value)` header `service` marks a retry's answer with, or None when it marks
+    none or has no idempotency mechanism."""
+    spec = services.IDEMPOTENCY.get(service)
+    return None if spec is None else spec.replayed_header
+
+
 # What two sendings of one key are compared by: the whole of the write the caller named, as
-# `(method, path, query, the posted fields that are not volatile)`. The route is NOT enough
+# `(method, path, query, the posted fields the route does not ignore)`. The route is NOT enough
 # to tell two writes apart - `payment_intents.cancel` is one route over every `pi_`, and it posts
 # an empty body - so a key reused to cancel a different intent, or on another endpoint entirely,
-# would compare equal on its fields alone and replay the first write's object at the second
-# caller. Stripe compares the whole request and refuses a key that comes back on a different one,
-# which is what carrying the identity in here makes irimi do too.
+# would compare equal on its fields alone and answer the second caller with the first write's
+# object. A service compares the whole request and refuses a key that comes back on a different
+# one, which is what carrying the identity in here makes irimi do too.
 Canonical = tuple[str, str, str, dict[str, Any]]
 
 
 def canonical(request: Request, route: Route) -> Canonical:
     """The write as the store compares two sendings of one key.
 
-    The fields are the caller's own minus the route's `volatile:` names, because a field that
-    always differs between two sendings must not make every retry look like a different request.
-    `bodies.reflect` is the one never-raising parser for both form and JSON bodies, and it is what
-    `writelog` and the preconditions read a request with, so the store compares the same view of
-    the write they do.
+    The fields are the caller's own minus the route's `compare_ignores:` names, because a field
+    that always differs between two sendings must not make every retry look like a different
+    request. `bodies.reflect` is the one never-raising parser for both form and JSON bodies, and
+    it is what `writelog` and the preconditions read a request with, so the store compares the
+    same view of the write they do.
     The method, path and query are in front of it because a key names one write and not one
     route: without them a write whose parameters are all in its path - `payment_intents.cancel`
     posts nothing at all - is indistinguishable from every other write on the same route.
     """
     posted = bodies.reflect(request)
-    fields = {name: value for name, value in posted.items() if name not in route.volatile}
+    fields = {name: value for name, value in posted.items() if name not in route.compare_ignores}
     return request.method, request.path, request.query, fields
 
 
-def key(run_id: str, service: str, scope: tuple[str, ...], idempotency_key: str) -> tuple[str, ...]:
+def slot_id(
+    run_id: str, service: str, scope: tuple[str, ...], idempotency_key: str
+) -> tuple[str, ...]:
     """The slot one write occupies.
 
-    Scoped like the overlay - the service, then `services.scope_of`'s `(Stripe-Account,
-    Stripe-Version)`, which is what `scope` carries - because a key reused against another
-    connected account or another API version is another write. `run_id` leads, because serve mode
-    puts many runs in one process and a key is only promised unique within one
-    caller's own sequence.
+    Scoped like the overlay - the service, then the values of its scope headers
+    (`services.scope_of`), which is what `scope` carries - because a key reused against another
+    scope (for Stripe, another connected account or API version) is another write. `run_id`
+    leads, because serve mode puts many runs in one process and a key is only promised unique
+    within one caller's own sequence.
     """
     return (run_id, service, *scope, idempotency_key)
 
 
 @dataclass(frozen=True)
 class Slot:
-    """Where one write sits in the store (`key`), what two sendings of it are compared by
-    (`canonical`), and the idempotency key exactly as the caller sent it, for the service's own
+    """Where one write sits in the store (`id`), what two sendings of it are compared by
+    (`params`), and the idempotency key exactly as the caller sent it, for the service's own
     conflict body."""
 
-    key: tuple[str, ...]
+    id: tuple[str, ...]
     params: Canonical
-    sent: str
+    idempotency_key: str
 
 
 def slot_for(request: Request, classification: Classification, run_id: str) -> Slot | None:
     """The `Slot` a write the store covers occupies, else None.
 
-    Three conditions, each the literal reading of "mapped Stripe writes". The route must be
-    matched, because `volatile:` is what makes two sendings comparable and an unmapped POST has
-    none. The kind must be `write`, so a route THE SCOPE RULE downgraded to `unknown` is answered
-    the way an unclassified request is and not out of a store. And the service must be one that
-    HAS an idempotency mechanism, which is `key_of` returning something.
+    Three conditions. The route must be matched, because its `compare_ignores:` is what makes two
+    sendings comparable and an unmapped POST has none. The kind must be `write`, so a route that
+    THE SCOPE RULE downgraded to `unknown` is answered the way an unclassified request is and not
+    out of a store. And the service must be one that HAS an idempotency mechanism, which is
+    `idempotency_key_of` returning something.
     """
     route = classification.route
     if route is None or classification.kind != "write":
         return None
     service = classification.service
-    sent = key_of(service, request)
+    sent = idempotency_key_of(service, request)
     if not sent:
         return None
     scope = services.scope_of(service, request)
-    return Slot(key(run_id, service, scope, sent), canonical(request, route), sent)
+    return Slot(slot_id(run_id, service, scope, sent), canonical(request, route), sent)
 
 
 class Store:
@@ -149,34 +154,34 @@ class Store:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        # Keyed by the run a slot leads with (`key`), so a run's entries go in one step.
-        self._runs: dict[str, dict[tuple[str, ...], tuple[Canonical, Stored]]] = {}
+        # Keyed by the run a slot id leads with (`slot_id`), so a run's entries go in one step.
+        self._runs: dict[str, dict[tuple[str, ...], tuple[Canonical, FirstAnswer]]] = {}
 
-    def get(self, slot: tuple[str, ...], params: Canonical) -> tuple[Stored | None, bool]:
-        """`(the answer to replay, whether this key is held with DIFFERENT parameters)`.
+    def get(self, slot: tuple[str, ...], params: Canonical) -> tuple[FirstAnswer | None, bool]:
+        """`(the answer a retry gets, whether this key is held with DIFFERENT parameters)`.
 
         The two outcomes are distinct and neither is an error: `(None, False)` is a key never seen,
-        `(stored, False)` is a retry to replay, and `(None, True)` is the caller reusing a key for
-        a different write, which the service refuses.
+        `(first, False)` is a retry, and `(None, True)` is the caller reusing a key for a
+        different write, which the service refuses.
         """
         with self._lock:
             entry = self._runs.get(slot[0], {}).get(slot)
         if entry is None:
             return None, False
-        held, stored = entry
+        held, first = entry
         if held != params:
             return None, True
-        return stored, False
+        return first, False
 
-    def put(self, slot: tuple[str, ...], params: Canonical, stored: Stored) -> None:
+    def put(self, slot: tuple[str, ...], params: Canonical, first: FirstAnswer) -> None:
         """Remember the first answer to this slot. A second put for the same slot is ignored.
 
-        Stripe stores the first response under a key whether it was accepted or rejected, so a
-        replay of a rejected write returns the same refusal - which is why `policy` calls this on
+        A service stores the first response under a key whether it was accepted or rejected, so a
+        retry of a rejected write returns the same refusal - which is why `policy` calls this on
         both of its answering paths and not only the happy one.
         """
         with self._lock:
-            self._runs.setdefault(slot[0], {}).setdefault(slot, (params, stored))
+            self._runs.setdefault(slot[0], {}).setdefault(slot, (params, first))
 
     def end_run(self, run_id: str) -> None:
         """Drop the run's keys: a run that has ended sends no retry."""

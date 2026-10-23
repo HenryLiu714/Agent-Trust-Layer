@@ -47,7 +47,7 @@ from irimi.exchange import (
     media_type,
 )
 from irimi.secret_shapes import SECRET_SHAPE
-from irimi.servicemap import CREDENTIAL_PATH_HOSTS
+from irimi.servicemap import shipped_credential_hosts
 from irimi.trace import JSONValue
 
 logger = logging.getLogger(__name__)
@@ -407,7 +407,7 @@ def _redact_header(
 
 def _is_credential_path_host(host: str) -> bool:
     """Compared without a root dot: `hooks.slack.com.` is the same host."""
-    return host.lower().rstrip(".") in CREDENTIAL_PATH_HOSTS
+    return host.lower().rstrip(".") in shipped_credential_hosts()
 
 
 def _secret_path(request: Request) -> str | None:

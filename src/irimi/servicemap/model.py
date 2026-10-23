@@ -6,18 +6,16 @@ that reads a file.
 """
 
 from dataclasses import dataclass, field
+from typing import Literal
 from urllib.parse import unquote
 
 from irimi.exchange import ANY_METHOD, KINDS, LIVE_KINDS, Kind
 
 SELF_TARGET = "self"
 
-# Hosts whose request path IS the credential. A Slack incoming webhook URL is the entire secret:
-# `/services/{team}/{bot}/{token}`, `/workflows/...` and `/triggers/...` are all real forms, and
-# sending any of them to a host off this machine hands the secret to whoever is listening. Keyed
-# by HOST, not by (service, operation): `hooks.slack.com` and `slack.com` are one service, so a
-# rule keyed on the service's routes leaves every unlisted path on the webhook host uncovered.
-# A target on such a host must be loopback, with no `--allow-target-host` escape.
+# Hosts whose request path is the credential: every path on hooks.slack.com is a webhook secret. A
+# shipped map may add hosts with `credential_path_hosts:`; nothing removes these. A target on one
+# must be loopback, with no `--allow-target-host` escape, and its paths never reach disk as sent.
 CREDENTIAL_PATH_HOSTS: frozenset[str] = frozenset({"hooks.slack.com"})
 TARGETABLE_KINDS: frozenset[str] = frozenset({"write", "unknown"})
 # Methods that destroy or replace a resource. Not the complement of SAFE_METHODS: POST is unsafe
@@ -29,8 +27,25 @@ DESTRUCTIVE_METHODS: frozenset[str] = frozenset({"DELETE", "PUT", "PATCH"})
 DEFAULT_KINDS: tuple[Kind, ...] = tuple(k for k in KINDS if k not in LIVE_KINDS)
 
 
+# Whether a service's HTTP methods say what a call does. `rest`: a read is a safe method, so a
+# `kind: read` on POST needs `live_because:`. `rpc`: every call is a POST (Slack's Web API).
+Style = Literal["rest", "rpc"]
+# How a route mints the id a field holds: `<prefix><24 alphanumerics>`, a positive integer, or a
+# UUID.
+IdFormat = Literal["prefix", "int", "uuid"]
+
+
 class MapError(ValueError):
     """A map or overrides file the loader refuses. str(exc) names the source and the rule."""
+
+
+@dataclass(frozen=True)
+class IdSpec:
+    """How a faked write mints one response field's id. `prefix` is set for the `prefix` format
+    only (`ids: {id: re_}`); `{format: int}` and `{format: uuid}` carry none."""
+
+    format: IdFormat = "prefix"
+    prefix: str = ""
 
 
 @dataclass(frozen=True)
@@ -42,7 +57,7 @@ class Route:
     operation: str
     kind: Kind
     human: str = ""
-    ids: dict[str, str] = field(default_factory=dict)  # response field -> minted id prefix
+    ids: dict[str, IdSpec] = field(default_factory=dict)  # response field -> how its id is minted
     # The vendored response object a locally answered write starts from (`irimi.fixture`), by
     # name. "" means the L0 echo, which is also what a route whose fixture cannot be read falls
     # back to.
@@ -56,9 +71,11 @@ class Route:
     # of a service's events to check a name against, so a misspelled EVENT is not catchable here -
     # a misspelled KEY is, by `ROUTE_KEYS`. Nothing is delivered.
     fires: tuple[str, ...] = ()
-    volatile: tuple[str, ...] = ()
-    persists: bool | None = None
-    comment: str = ""
+    # Body fields left out when two sendings of this request are compared: an idempotent retry,
+    # a replay's match and `irimi compare` all ignore them.
+    compare_ignores: tuple[str, ...] = ()
+    # Why a live route may be forwarded on an unsafe method: what makes it persist nothing.
+    live_because: str = ""
     target: str = SELF_TARGET
     forward_auth: bool = False
 
@@ -70,11 +87,19 @@ class ServiceMap:
     service: str
     hosts: frozenset[str]
     routes: tuple[Route, ...]
-    verbs: str = "honest"
+    style: Style = "rest"
     default_kind: Kind | None = None  # the kind for routes this map does not list; None = fallback
     target: str = SELF_TARGET
     target_reads: bool = False
+    # Hosts of this service whose path is the credential, beyond `CREDENTIAL_PATH_HOSTS`.
+    credential_path_hosts: frozenset[str] = frozenset()
     source: str = ""  # where it came from, for error messages
+
+    @property
+    def credential_hosts(self) -> frozenset[str]:
+        """Every host whose path is the credential for this service: the code's floor and the
+        map's own."""
+        return CREDENTIAL_PATH_HOSTS | self.credential_path_hosts
 
 
 @dataclass
@@ -152,6 +177,15 @@ class MapIndex:
         ]
         return named[0] if len(named) == 1 else None
 
+    def operation_route(self, host: str, operation: str) -> Route | None:
+        """The one route of `host`'s service that names `operation`, whatever its method, or None
+        when no route does or several do. A precondition's read is built from it."""
+        sm = self.service_for(host)
+        if sm is None:
+            return None
+        named = [route for route in sm.routes if route.operation == operation]
+        return named[0] if len(named) == 1 else None
+
 
 def match_route(sm: ServiceMap, method: str, path: str) -> Route | None:
     """The route matching `method` and `path`, or None.
@@ -189,8 +223,8 @@ def path_params(pattern: str, path: str) -> dict[str, str]:
 
     A captured segment is **percent-decoded**, because the service decodes it: `cus%5FREAL123` and
     `cus_REAL123` address the same customer, and reading the raw segment would make
-    `echo.named_id` miss the id the request already named and mint a fresh one for any caller
-    that over-encodes. Literal segments are still compared raw, so decoding cannot widen
+    `echo.generic.named_id` miss the id the request already named and mint a fresh one for any
+    caller that over-encodes. Literal segments are still compared raw, so decoding cannot widen
     what a route matches; it only says what the matched hole held. The two surfaces that read
     these captures - the minted id and the summary's human template - agree because they ask here.
     """
@@ -203,6 +237,20 @@ def path_params(pattern: str, path: str) -> dict[str, str]:
         for part, segment in zip(parts, segments, strict=True)
         if is_hole(part)
     }
+
+
+def fill_path(pattern: str, params: dict[str, str]) -> str | None:
+    """A route pattern with each `{name}` replaced by `params[name]`, or None when a name has no
+    value or a value would add segments, a query or a fragment. The inverse of `path_params`."""
+    parts: list[str] = []
+    for part in path_segments(pattern):
+        if is_hole(part):
+            value = params.get(part[1:-1], "")
+            if not value or any(c in value for c in "/?#"):
+                return None
+            part = value
+        parts.append(part)
+    return "/" + "/".join(parts) + ("/" if pattern.endswith("/") and parts else "")
 
 
 def target_for(sm: ServiceMap, route: Route) -> str:

@@ -1,8 +1,8 @@
 """The body a locally answered write gets: the L0 echo and the L1 fixture.
 
 **L0** is the floor and the fallback: the request's own fields reflected back as a JSON object,
-plus `created`, plus an id minted for every field the matched route names in `ids:`. It is not a
-fixture - an SDK has to be able to parse it and read the fields it just sent, and nothing more.
+plus an id minted for every field the matched route names in `ids:`. It is not a fixture - an SDK
+has to be able to parse it and read the fields it just sent, and nothing more.
 
 **L1** applies to a route whose map names a `fixture:`. It starts from that vendored response
 object (`irimi.fixture`) and writes the request's own fields over it, so the agent receives every
@@ -13,10 +13,10 @@ Nothing here may raise. An exception inside a mitmproxy hook makes the flow forw
 a forwarded write escapes shadow mode - so a body that cannot be parsed reflects nothing instead,
 and `ShadowPolicy` wraps the one serialization in a guard of its own.
 
-The package is three modules, mirroring `irimi.services`: `generic` (the L0 echo and the L1
-fixture body, for any service), `slack` (Slack's envelopes and its `ts` sequence), and this one,
-which picks between them per service and serializes the answer. A service with a write-side shape
-of its own is added by an entry in `ENVELOPED` / `SHAPES` / `READ_OBSERVERS`, not a branch here.
+The package mirrors `irimi.services`: `generic` (the echo and fixture body any service gets),
+`stripe` (the fields every Stripe object carries), `slack` (Slack's envelopes and its `ts`
+sequence), and this module, which picks between them per service and serializes the answer. A
+service with a write-side shape of its own is an entry in the tables below, not a branch here.
 """
 
 import json
@@ -24,63 +24,29 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from irimi import fixture
-from irimi.bodies import JSON_CT, reflect
-from irimi.echo import slack
-from irimi.echo.generic import (
-    LIVEMODE,
-    Built,
-    l0_body,
-    l1_body,
-    mint_id,
-    named_id,
-    object_name,
-    reflect_over,
-)
-from irimi.echo.slack import (
-    SLACK_ENVELOPES,
-    SlackEnvelope,
-    TsClock,
-    slack_body,
-    slack_l1_body,
-)
+from irimi import fixture, services
+from irimi.bodies import JSON_CT
+from irimi.echo import generic, slack, stripe
+from irimi.echo.generic import Built
+from irimi.echo.slack import TsClock
 from irimi.exchange import FIXTURE_FAILED_FLAG, FakeLevel, Request
 from irimi.pipeline import Classification
 from irimi.servicemap import Route
 
-__all__ = [
-    "ENVELOPED",
-    "LITERAL_BODIES",
-    "LIVEMODE",
-    "READ_OBSERVERS",
-    "SHAPES",
-    "SLACK_ENVELOPES",
-    "TEXT_CT",
-    "Fake",
-    "SlackEnvelope",
-    "TsClock",
-    "fake_body",
-    "fake_rejection",
-    "fake_response",
-    "l0_body",
-    "l1_body",
-    "mint_id",
-    "named_id",
-    "object_name",
-    "observe_read",
-    "reflect_over",
-    "slack_body",
-    "slack_l1_body",
-]
+__all__ = ["Fake", "TsClock", "fake_level", "fake_rejection", "fake_response", "observe_read"]
 
 TEXT_CT = "text/plain"
 
+# `(request, route or None) -> L0 body` and `(request, route, fixture object) -> L1 body`.
+L0Body = Callable[[Request, Route | None], dict[str, Any]]
+L1Body = Callable[[Request, Route, dict[str, Any]], dict[str, Any]]
 
-# What a live read's body teaches the faker, keyed on service. Same convention as `SHAPES` below:
-# every service-specific fact about a body lives in this package, so the engine can hand it every
-# read it sees without naming a service of its own.
+
+# What a live read's body teaches the faker, keyed on service. Every service-specific fact about a
+# body lives in this package, so the engine can hand it every read it sees without naming a
+# service of its own.
 READ_OBSERVERS: dict[str, Callable[[TsClock, bytes], None]] = {
-    slack.SERVICE: TsClock.observe_history
+    services.slack.SERVICE: TsClock.observe_history
 }
 
 
@@ -96,45 +62,30 @@ def observe_read(service: str, body: bytes, clock: TsClock) -> None:
         observer(clock, body)
 
 
-# Keyed on the classified service name, not on a host or a route, so every route of that service -
-# including ones other batches add later - gets the shape without a second entry here. The name is
-# the map's when a map claims the host, and the host itself when none does.
-SHAPES: dict[str, Callable[[dict[str, Any], TsClock], dict[str, Any]]] = {
-    slack.SERVICE: slack.slack_body
+# The echo and fixture bodies of a service whose objects carry fields of their own, keyed on the
+# classified service name. A service with no entry gets `generic`'s.
+BODIES: dict[str, tuple[L0Body, L1Body]] = {
+    services.stripe.SERVICE: (stripe.l0_body, stripe.l1_body),
 }
+GENERIC_BODIES: tuple[L0Body, L1Body] = (generic.l0_body, generic.l1_body)
 
 
 # Routes whose real service does not answer with JSON at all, keyed by service and operation.
 # A Slack incoming webhook answers the literal body `ok` as `text/plain`; the Web API envelope it
-# got instead (the shape keys on the service, and hooks.slack.com is part of `slack`) breaks the
-# common raw-requests idiom `assert resp.text == "ok"`.
+# would otherwise get (hooks.slack.com is part of `slack`) breaks the common raw-requests idiom
+# `assert resp.text == "ok"`.
 LITERAL_BODIES: dict[tuple[str, str], tuple[bytes, str]] = {
-    (slack.SERVICE, "incoming_webhook"): (b"ok", TEXT_CT),
+    (services.slack.SERVICE, "incoming_webhook"): (b"ok", TEXT_CT),
 }
 
 
-def fake_body(request: Request, classification: Classification, clock: TsClock) -> dict[str, Any]:
-    """The body of a locally answered write: the service's own shape when it has one.
-
-    A shape is only used for a route the maps actually claim. An unmapped path on a shaped
-    service gets the generic echo instead, because `ok: true` is a claim of success and we only
-    know what success looks like for a route we mapped. Answering an unmapped call that way sends
-    slack_sdk down its success branch into an uncatchable crash later (`files_upload_v2` reads
-    `upload_url = None` and dies inside urllib); the generic echo leaves it raising the
-    `SlackApiError` that callers already catch.
-    """
-    route = classification.route
-    shaper = SHAPES.get(classification.service) if route is not None else None
-    if shaper is not None:
-        return shaper(reflect(request), clock)
-    return l0_body(request, route)
-
-
 # Services whose mapped writes are answered inside an envelope of the service's own, keyed on the
-# classified service name like `SHAPES`. The entry answers None for an operation it has no
-# envelope for, and that write is built the generic way.
-ENVELOPED: dict[str, Callable[[Request, Route, TsClock], Built | None]] = {
-    slack.SERVICE: slack.enveloped
+# classified service name. An unmapped path on such a service gets the generic echo instead,
+# because an envelope's `ok: true` is a claim of success and we only know what success looks like
+# for a route we mapped: slack_sdk's `files_upload_v2` reads `upload_url = None` off a success and
+# dies inside urllib, while the echo leaves it raising the `SlackApiError` callers already catch.
+ENVELOPED: dict[str, Callable[[Request, Route, dict[str, Any] | None, TsClock], dict[str, Any]]] = {
+    services.slack.SERVICE: slack.enveloped
 }
 
 
@@ -153,23 +104,39 @@ class Fake:
     flags: tuple[str, ...] = ()
 
 
-def _fake_dict(
-    request: Request, classification: Classification, route: Route | None, clock: TsClock
-) -> Built:
+def _level(
+    classification: Classification,
+) -> tuple[FakeLevel, tuple[str, ...], dict[str, Any] | None]:
+    """The level, its flags, and the route's fixture object when the level is L1."""
+    route = classification.route
+    if route is None or not route.fixture:
+        return "fake-L0", (), None
+    obj = fixture.get(classification.service, route.fixture)
+    if obj is None:
+        return "fake-L0", (FIXTURE_FAILED_FLAG,), None
+    return "fake-L1", (), obj
+
+
+def fake_level(classification: Classification) -> tuple[FakeLevel, tuple[str, ...]]:
+    """The level a write on this route is answered at, and the flag it owes the trace, without
+    building (or minting) a body: L1 when the route names a fixture this install can read, L0
+    with `fixture-failed` when it names one it cannot, and L0 otherwise."""
+    level, flags, _ = _level(classification)
+    return level, flags
+
+
+def _fake_dict(request: Request, classification: Classification, clock: TsClock) -> Built:
     """The body as a dict, the level it was built at, and any flag that level owes the trace."""
-    if route is not None:
-        build = ENVELOPED.get(classification.service)
-        built = build(request, route, clock) if build is not None else None
-        if built is not None:
-            return built
-    if route is not None and route.fixture:
-        obj = fixture.get(classification.service, route.fixture)
-        if obj is not None:
-            return l1_body(request, route, obj), "fake-L1", ()
-        # The map promised a fixture this install cannot read. L0 is the floor and still answers
-        # the write, but the trace has to say the fidelity is not the one the map named.
-        return fake_body(request, classification, clock), "fake-L0", (FIXTURE_FAILED_FLAG,)
-    return fake_body(request, classification, clock), "fake-L0", ()
+    route = classification.route
+    service = classification.service
+    level, flags, obj = _level(classification)
+    build = ENVELOPED.get(service)
+    if route is not None and build is not None:
+        return build(request, route, obj, clock), level, flags
+    l0_body, l1_body = BODIES.get(service, GENERIC_BODIES)
+    if route is not None and obj is not None:
+        return l1_body(request, route, obj), level, flags
+    return l0_body(request, route), level, flags
 
 
 def fake_response(request: Request, classification: Classification, clock: TsClock) -> Fake:
@@ -183,21 +150,17 @@ def fake_response(request: Request, classification: Classification, clock: TsClo
         literal = LITERAL_BODIES.get((classification.service, route.operation))
         if literal is not None:
             return Fake(literal[0], literal[1])
-    body, answered_by, flags = _fake_dict(request, classification, route, clock)
+    body, answered_by, flags = _fake_dict(request, classification, clock)
     return Fake(json.dumps(body, allow_nan=False).encode(), JSON_CT, answered_by, flags)
 
 
-def fake_rejection(
-    request: Request, classification: Classification, body: dict[str, Any], clock: TsClock
-) -> Fake:
+def fake_rejection(classification: Classification, body: dict[str, Any]) -> Fake:
     """A modeled error body, carried at the level this route's write WOULD have been answered at.
 
     There is no `fake-L3`: the header says who answered, the exchange field says what L3 decided.
-    The level is not "L1 if the route names a fixture" - a Slack `reactions.add` has no
-    fixture and is honestly L0, a `chat.postMessage` whose fixture will not load is L0 with the
-    `fixture-failed` flag - so it is taken from the one place that knows, by building the body
-    this route would have had and discarding it. One dict, once, on a path that is about to make
-    a network-free answer either way.
+    The level is `fake_level`'s, so a Slack `reactions.add` (no fixture) is L0 and a
+    `chat.postMessage` whose fixture will not load is L0 with `fixture-failed`, and nothing is
+    minted for a write that never happened.
     """
-    _, answered_by, flags = _fake_dict(request, classification, classification.route, clock)
+    answered_by, flags = fake_level(classification)
     return Fake(json.dumps(body, allow_nan=False).encode(), JSON_CT, answered_by, flags)

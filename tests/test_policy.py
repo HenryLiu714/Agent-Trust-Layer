@@ -22,8 +22,9 @@ from irimi.exchange import (
 from irimi.pipeline import classify
 from irimi.policy import ShadowPolicy
 from irimi.reader import UpstreamReader
+from irimi.servicemap import IdSpec
 
-SHIPPED = servicemap.MapIndex(tuple(servicemap.load_shipped()))
+SHIPPED = servicemap.MapIndex(tuple(servicemap.loader.load_shipped()))
 
 
 def _req(
@@ -78,8 +79,9 @@ def test_shadow_policy_shape():
     assert callable(p.answer)
 
 
-def test_unmapped_write_reflects_and_stamps_created():
-    """Nothing matched, so there is no id to mint and no object to name."""
+def test_unmapped_write_reflects_its_own_fields_and_nothing_else():
+    """Nothing matched, so there is no id to mint, and the echo of a service irimi has no shape
+    for carries none of Stripe's fields."""
     ans = _answer(
         _req(
             "POST",
@@ -92,8 +94,16 @@ def test_unmapped_write_reflects_and_stamps_created():
     body = json.loads(ans.response.body)
     assert body["a"] == 1
     assert body["b"] == "two"
-    assert isinstance(body["created"], int)
+    assert "created" not in body
     assert "id" not in body
+    assert "object" not in body
+
+
+def test_an_unmapped_stripe_write_still_gets_stripes_created():
+    """Stripe's answer path adds `created` to every Stripe echo, a route or not."""
+    ans = _answer(_req("POST", path="/v1/charges/ch_1/refund"))
+    body = json.loads(ans.response.body)
+    assert isinstance(body["created"], int)
     assert "object" not in body
 
 
@@ -135,7 +145,7 @@ def test_livemode_is_overwritten_rather_than_taken_from_the_fixture():
     route = servicemap.Route(
         method="POST", path="/v1/things", operation="things.create", kind="write", fixture="thing"
     )
-    body = echo.l1_body(_req("POST"), route, {"object": "thing", "livemode": True})
+    body = echo.stripe.l1_body(_req("POST"), route, {"object": "thing", "livemode": True})
     assert body["livemode"] is False
 
 
@@ -275,9 +285,7 @@ def test_an_unlisted_slack_route_does_not_get_the_slack_envelope():
     branch into an uncatchable crash later (`files_upload_v2` reads `upload_url = None` and dies
     inside urllib); the generic echo leaves it raising the SlackApiError callers already catch."""
     ans = _answer(_req("POST", host="slack.com", path="/api/files.getUploadURLExternal"))
-    body = json.loads(ans.response.body)
-    assert "ok" not in body
-    assert "created" in body
+    assert json.loads(ans.response.body) == {}
 
 
 def test_reactions_add_answers_the_bare_ok_slack_really_sends():
@@ -316,21 +324,23 @@ def test_files_upload_answers_the_bare_ok_too():
 
 @pytest.mark.parametrize(
     ("broken", "path"),
-    [("fake_body", "/v1/charges/ch_1/refund"), ("l1_body", "/v1/refunds")],
+    [(0, "/v1/charges/ch_1/refund"), (1, "/v1/refunds")],
 )
 def test_a_faker_that_fails_still_answers_locally(monkeypatch, broken, path):
     """A raising policy makes mitmproxy forward the flow, and a forwarded write is a real write.
 
     Both bodies, because L1 put a second one on the path: `/v1/refunds` is a fixture route and
     the unmapped Stripe path is an L0 one, so each parameter breaks the function its own request
-    actually reaches. Breaking only `fake_body` would leave the L1 route answering normally and
+    actually reaches. Breaking only the L0 body would leave the L1 route answering normally and
     the test passing while proving nothing about it.
     """
 
     def boom(*args, **kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(echo, broken, boom)
+    bodies_of_stripe = list(echo.BODIES["stripe"])
+    bodies_of_stripe[broken] = boom
+    monkeypatch.setitem(echo.BODIES, "stripe", tuple(bodies_of_stripe))
     ans = _answer(_req("POST", path=path))
     assert ans.answered_by == "fake-L0"
     assert ans.response.body == b"{}"
@@ -402,7 +412,7 @@ def test_reflect_never_raises_on_a_deeply_nested_body():
 
 def test_an_answer_for_an_unparseable_body_is_still_json():
     ans = _answer(_req("POST", host="example.invalid", path="/x", body=b"\xff" * 64))
-    assert json.loads(ans.response.body).keys() == {"created"}
+    assert json.loads(ans.response.body) == {}
 
 
 @pytest.mark.parametrize(
@@ -418,13 +428,13 @@ def test_an_answer_for_an_unparseable_body_is_still_json():
     ],
 )
 def test_object_name(operation, expected):
-    assert echo.object_name(operation) == expected
+    assert echo.stripe.object_name(operation) == expected
 
 
 def test_mint_id_shape_and_uniqueness():
-    first = echo.mint_id("re_")
+    first = echo.generic.mint_id("re_")
     assert re.fullmatch(r"re_[A-Za-z0-9]{24}", first)
-    assert first != echo.mint_id("re_")
+    assert first != echo.generic.mint_id("re_")
 
 
 def test_every_shipped_route_that_mints_an_id_names_a_real_object():
@@ -432,7 +442,7 @@ def test_every_shipped_route_that_mints_an_id_names_a_real_object():
     for service in SHIPPED.services:
         for route in service.routes:
             if "id" in route.ids:
-                assert echo.object_name(route.operation) not in ("", route.operation)
+                assert echo.stripe.object_name(route.operation) not in ("", route.operation)
 
 
 def test_stripe_python_parses_the_faked_refund():
@@ -647,12 +657,12 @@ def test_a_captured_segment_that_is_not_this_ids_prefix_is_not_used():
         path="/v1/widgets/{widget}/parts/{part}",
         operation="widgets.attach",
         kind="write",
-        ids={"id": "wid_"},
+        ids={"id": IdSpec(prefix="wid_")},
     )
-    assert echo.named_id(route, "/v1/widgets/wid_1/parts/prt_9", "wid_") == "wid_1"
-    assert echo.named_id(route, "/v1/widgets/wid_1/parts/prt_9", "prt_") == "prt_9"
-    assert echo.named_id(route, "/v1/widgets/w1/parts/p9", "wid_") is None
-    assert echo.named_id(route, "/v1/widgets", "wid_") is None
+    assert echo.generic.named_id(route, "/v1/widgets/wid_1/parts/prt_9", "wid_") == "wid_1"
+    assert echo.generic.named_id(route, "/v1/widgets/wid_1/parts/prt_9", "prt_") == "prt_9"
+    assert echo.generic.named_id(route, "/v1/widgets/w1/parts/p9", "wid_") is None
+    assert echo.generic.named_id(route, "/v1/widgets", "wid_") is None
 
 
 def test_the_id_shaped_capture_wins_when_one_prefix_matches_two_segments():
@@ -664,12 +674,12 @@ def test_the_id_shaped_capture_wins_when_one_prefix_matches_two_segments():
         path="/v1/subscription_schedules/{schedule}/subscriptions/{subscription}",
         operation="subscriptions.update",
         kind="write",
-        ids={"id": "sub_"},
+        ids={"id": IdSpec(prefix="sub_")},
     )
     path = "/v1/subscription_schedules/sub_sched_1/subscriptions/sub_2"
-    assert echo.named_id(route, path, "sub_") == "sub_2"
+    assert echo.generic.named_id(route, path, "sub_") == "sub_2"
     # And the longer prefix still finds its own segment, which the shorter one must not steal.
-    assert echo.named_id(route, path, "sub_sched_") == "sub_sched_1"
+    assert echo.generic.named_id(route, path, "sub_sched_") == "sub_sched_1"
 
 
 def test_a_client_secret_is_never_echoed_back_as_the_resource_id():
@@ -681,13 +691,19 @@ def test_a_client_secret_is_never_echoed_back_as_the_resource_id():
         path="/v1/payment_intents/{payment_intent}/cancel",
         operation="payment_intents.cancel",
         kind="write",
-        ids={"id": "pi_"},
+        ids={"id": IdSpec(prefix="pi_")},
     )
-    assert echo.named_id(route, "/v1/payment_intents/pi_ABC_secret_XYZ/cancel", "pi_") is None
-    body = echo.l0_body(_req("POST", path="/v1/payment_intents/pi_ABC_secret_XYZ/cancel"), route)
+    assert (
+        echo.generic.named_id(route, "/v1/payment_intents/pi_ABC_secret_XYZ/cancel", "pi_") is None
+    )
+    body = echo.stripe.l0_body(
+        _req("POST", path="/v1/payment_intents/pi_ABC_secret_XYZ/cancel"), route
+    )
     assert body["id"] != "pi_ABC_secret_XYZ"
     assert re.fullmatch(r"pi_[A-Za-z0-9]{24}", body["id"])
-    assert echo.named_id(route, "/v1/payment_intents/pi_REAL999/cancel", "pi_") == "pi_REAL999"
+    assert (
+        echo.generic.named_id(route, "/v1/payment_intents/pi_REAL999/cancel", "pi_") == "pi_REAL999"
+    )
 
 
 def test_a_percent_encoded_id_is_still_the_id_the_request_names():
@@ -698,9 +714,9 @@ def test_a_percent_encoded_id_is_still_the_id_the_request_names():
         path="/v1/customers/{customer}",
         operation="customers.update",
         kind="write",
-        ids={"id": "cus_"},
+        ids={"id": IdSpec(prefix="cus_")},
     )
-    assert echo.named_id(route, "/v1/customers/cus%5FREAL123", "cus_") == "cus_REAL123"
+    assert echo.generic.named_id(route, "/v1/customers/cus%5FREAL123", "cus_") == "cus_REAL123"
     body = json.loads(_answer(_req("POST", path="/v1/customers/cus%5FREAL123")).response.body)
     assert body["id"] == "cus_REAL123"
 
@@ -710,11 +726,12 @@ def test_every_shipped_write_route_that_names_ids_round_trips_or_mints():
     echo it, and one without must mint, so no route answers with a fresh id for a named one."""
     for sm in SHIPPED.services:
         for route in sm.routes:
-            for name, prefix in route.ids.items():
+            for name, spec in route.ids.items():
+                prefix = spec.prefix
                 holes = [p for p in route.path.split("/") if p.startswith("{")]
                 if not holes:
                     sample = route.path.replace("{", "").replace("}", "")
-                    assert echo.named_id(route, sample, prefix) is None, route.operation
+                    assert echo.generic.named_id(route, sample, prefix) is None, route.operation
                     continue
                 # Only the LAST hole carries the prefix; every other one gets a segment that
                 # does not. Filling them all would make `named_id` match the first hole whatever
@@ -727,7 +744,7 @@ def test_every_shipped_write_route_that_names_ids_round_trips_or_mints():
                     else part
                     for i, part in enumerate(parts)
                 )
-                assert echo.named_id(route, filled, prefix) == prefix + "SAMPLE", (
+                assert echo.generic.named_id(route, filled, prefix) == prefix + "SAMPLE", (
                     f"{sm.service}.{route.operation} does not echo the {name} its path names"
                 )
 
@@ -1037,7 +1054,9 @@ def test_stripe_python_parses_every_faked_object_with_every_field(
 
 
 def _targeted_index(targets=(), target_reads=()):
-    maps = servicemap.apply_cli_targets(list(servicemap.load_shipped()), targets, target_reads)
+    maps = servicemap.loader.apply_cli_targets(
+        list(servicemap.loader.load_shipped()), targets, target_reads
+    )
     return servicemap.MapIndex(tuple(maps))
 
 
@@ -1145,7 +1164,7 @@ def test_an_unmatched_llm_or_telemetry_request_is_never_delegated():
     The classification is built here rather than loaded, because the only way a map could give an
     *unmatched* route a live kind is a live `default_kind`, which the loader refuses.
     """
-    sm = servicemap.load_shipped()[0]
+    sm = servicemap.loader.load_shipped()[0]
     sm = replace(sm, target="http://127.0.0.1:3000", target_reads=True)
     for kind in ("llm", "telemetry", "read"):
         cls = pipeline.Classification(
@@ -1168,7 +1187,7 @@ def test_a_credential_path_host_is_never_delegated_off_the_machine():
     layer it arrived through; this asks the same question of the request and the answer actually
     in front of `delegate`, so a target reaching it some other way is refused rather than
     escaping. The map is built here because the loader will not produce one."""
-    slack = next(sm for sm in servicemap.load_shipped() if sm.service == "slack")
+    slack = next(sm for sm in servicemap.loader.load_shipped() if sm.service == "slack")
     assert "hooks.slack.com" in slack.hosts
     off_machine = replace(slack, target="http://stub.internal:9000")
     index = servicemap.MapIndex((off_machine,))
@@ -1704,12 +1723,8 @@ def test_a_slack_post_to_an_archived_channel_is_refused_the_way_slack_refuses_it
     assert ans.answered_by == "fake-L1"
 
 
-def _classified(request: Request):
-    return request, classify(request, SHIPPED)
-
-
 def test_a_rejection_carries_the_level_the_refund_would_have_been_answered_at():
-    fake = echo.fake_rejection(*_classified(_refund_request()), {"error": {}}, echo.TsClock())
+    fake = echo.fake_rejection(classify(_refund_request(), SHIPPED), {"error": {}})
     assert (fake.answered_by, fake.flags) == ("fake-L1", ())
     assert json.loads(fake.body) == {"error": {}}
 
@@ -1717,13 +1732,13 @@ def test_a_rejection_carries_the_level_the_refund_would_have_been_answered_at():
 def test_a_rejection_of_a_write_with_no_fixture_is_honestly_l0():
     """There is no `fake-L3`, and `reactions.add` has no fixture to be L1 from."""
     request = _req("POST", host="slack.com", path="/api/reactions.add", body=b"{}")
-    fake = echo.fake_rejection(*_classified(request), {"ok": False, "error": "x"}, echo.TsClock())
+    fake = echo.fake_rejection(classify(request, SHIPPED), {"ok": False, "error": "x"})
     assert (fake.answered_by, fake.flags) == ("fake-L0", ())
 
 
 def test_a_rejection_whose_fixture_will_not_load_says_so(monkeypatch):
     monkeypatch.setattr(fixture, "get", lambda service, name: None)
-    fake = echo.fake_rejection(*_classified(_refund_request()), {"error": {}}, echo.TsClock())
+    fake = echo.fake_rejection(classify(_refund_request(), SHIPPED), {"error": {}})
     assert (fake.answered_by, fake.flags) == ("fake-L0", (FIXTURE_FAILED_FLAG,))
 
 
@@ -2105,3 +2120,71 @@ def test_a_delegated_write_lists_no_webhooks():
     ans = _answer_with(index, _req("POST", path="/v1/refunds"))
     assert ans.answered_by == "delegated"
     assert ans.would_fire == ()
+
+
+# ------------------------------------------------------------------ id formats and a rejection
+
+
+def test_an_integer_id_is_minted_as_an_integer_and_echoed_from_its_own_segment():
+    route = servicemap.Route(
+        method="PATCH",
+        path="/repos/{owner}/{repo}/issues/{number}",
+        operation="issues.update",
+        kind="write",
+        ids={"number": IdSpec(format="int"), "id": IdSpec(format="int")},
+    )
+    body = echo.generic.l0_body(_req("PATCH", path="/repos/o/r/issues/42"), route)
+    assert body["number"] == 42
+    assert isinstance(body["id"], int) and not isinstance(body["id"], bool)
+    assert 10**9 <= body["id"] < 10**10
+
+
+def test_a_uuid_id_is_minted_as_a_uuid_and_echoed_from_its_own_segment():
+    route = servicemap.Route(
+        method="POST",
+        path="/issues/{id}",
+        operation="issues.update",
+        kind="write",
+        ids={"id": IdSpec(format="uuid")},
+    )
+    named = "0b6b1f1e-2c1a-4c55-9a39-6f1b3c9d2e10"
+    assert echo.generic.l0_body(_req("POST", path=f"/issues/{named}"), route)["id"] == named
+    minted = echo.generic.l0_body(_req("POST", path="/issues/not-a-uuid"), route)["id"]
+    assert re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", minted
+    )
+
+
+def test_a_rejection_mints_no_slack_ts():
+    """A rejected post never happened, so it must not move the `ts` sequence later posts sort by."""
+    clock = echo.TsClock()
+    request = _req(
+        "POST",
+        host="slack.com",
+        path="/api/chat.postMessage",
+        body=b"channel=C1&text=hi",
+        content_type="application/x-www-form-urlencoded",
+    )
+    echo.fake_rejection(classify(request, SHIPPED), {"ok": False, "error": "x"})
+    assert clock.last == (0, 0)
+    assert echo.fake_level(classify(request, SHIPPED)) == ("fake-L1", ())
+
+
+def test_a_slack_write_no_envelope_names_gets_the_default_envelope():
+    """`ok: true` with the posted channel and a minted `ts`, never the generic echo: slack_sdk
+    raises on a body without `ok`."""
+    route = servicemap.Route("POST", "/api/chat.update", "chat.update", "write")
+    slack = servicemap.ServiceMap(service="slack", hosts=frozenset({"slack.com"}), routes=(route,))
+    request = _req(
+        "POST",
+        host="slack.com",
+        path="/api/chat.update",
+        body=b"channel=C1&text=hi",
+        content_type="application/x-www-form-urlencoded",
+    )
+    fake = echo.fake_response(
+        request, classify(request, servicemap.MapIndex((slack,))), echo.TsClock()
+    )
+    body = json.loads(fake.body)
+    assert sorted(body) == ["channel", "ok", "ts"]
+    assert (body["ok"], body["channel"], fake.answered_by) == (True, "C1", "fake-L0")

@@ -46,6 +46,7 @@ from irimi.cli import main
 from irimi.exchange import CONTROL_PREFIX, Exchange
 from irimi.store import StoreReader
 from irimi.trace import UNATTRIBUTED, ToolCall
+from tests.maps_for_cli import complete_for_check
 from tests.test_engine_mitm import PRECONDITION_STRIPE_MAP
 from tests.test_phase_exit import _Stripe
 from tests.test_serve import _blocks, _port_of, _Served, _wait_for
@@ -119,6 +120,7 @@ def home(tmp_path, monkeypatch):
     maps_dir = tmp_path / "maps"
     maps_dir.mkdir()
     (maps_dir / "stripe.yaml").write_text(PRECONDITION_STRIPE_MAP)
+    complete_for_check(maps_dir)
     # This process reads the same maps when it rebuilds each run's summary (`_blocks`).
     monkeypatch.setattr("irimi.servicemap.loader.shipped_dir", lambda: maps_dir)
     return tmp_path

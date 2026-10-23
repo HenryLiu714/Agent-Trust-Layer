@@ -5,12 +5,12 @@ from dataclasses import replace
 
 from irimi import idempotency, pipeline, servicemap
 from irimi.exchange import Request
-from irimi.idempotency import Store, Stored
+from irimi.idempotency import FirstAnswer, Store
 from irimi.servicemap import Route
 
-STRIPE = servicemap.MapIndex(tuple(servicemap.load_shipped())).service_for("api.stripe.com")
+STRIPE = servicemap.MapIndex(tuple(servicemap.loader.load_shipped())).service_for("api.stripe.com")
 assert STRIPE is not None
-REFUNDS_CREATE = servicemap.match_route(STRIPE, "POST", "/v1/refunds")
+REFUNDS_CREATE = servicemap.model.match_route(STRIPE, "POST", "/v1/refunds")
 assert REFUNDS_CREATE is not None
 
 FORM = ("content-type", "application/x-www-form-urlencoded")
@@ -40,8 +40,8 @@ def _request(
     return request if not query else replace(request, query=query)
 
 
-def _stored(body: bytes = b'{"id": "re_MINTED1"}') -> Stored:
-    return Stored(
+def _stored(body: bytes = b'{"id": "re_MINTED1"}') -> FirstAnswer:
+    return FirstAnswer(
         status=200,
         body=body,
         content_type="application/json",
@@ -58,26 +58,26 @@ def _stored(body: bytes = b'{"id": "re_MINTED1"}') -> Stored:
 
 def test_the_key_is_the_header_the_service_names():
     request = _request(headers=(("Idempotency-Key", "abc"),))
-    assert idempotency.key_of("stripe", request) == "abc"
+    assert idempotency.idempotency_key_of("stripe", request) == "abc"
 
 
 def test_a_service_with_no_idempotency_has_no_key():
     request = _request(
         host="slack.com", path="/api/chat.postMessage", headers=(("Idempotency-Key", "abc"),)
     )
-    assert idempotency.key_of("slack", request) == ""
+    assert idempotency.idempotency_key_of("slack", request) == ""
 
 
 def test_a_request_that_sent_no_key_has_none():
-    assert idempotency.key_of("stripe", _request()) == ""
+    assert idempotency.idempotency_key_of("stripe", _request()) == ""
 
 
 # --------------------------------------------------------------------- what two sendings compare
 
 
-def test_canonical_params_drop_the_routes_volatile_names():
+def test_canonical_params_drop_the_routes_compare_ignores_names():
     assert REFUNDS_CREATE is not None
-    route = replace(REFUNDS_CREATE, volatile=("nonce",))
+    route = replace(REFUNDS_CREATE, compare_ignores=("nonce",))
     request = _request(headers=(FORM,), body=b"charge=ch_1&amount=100&nonce=n-1")
     assert idempotency.canonical(request, route) == (
         "POST",
@@ -102,7 +102,7 @@ def test_canonical_tells_two_objects_on_one_route_apart():
     """`payment_intents.cancel` is one route over every `pi_`, and it posts nothing at all, so
     the path is the whole of what says which object the caller named. Without it a key reused to
     cancel a second intent compared equal to the first and replayed its answer."""
-    cancel = servicemap.match_route(STRIPE, "POST", "/v1/payment_intents/pi_AAA/cancel")
+    cancel = servicemap.model.match_route(STRIPE, "POST", "/v1/payment_intents/pi_AAA/cancel")
     assert cancel is not None
     one = idempotency.canonical(_request(path="/v1/payment_intents/pi_AAA/cancel"), cancel)
     two = idempotency.canonical(_request(path="/v1/payment_intents/pi_BBB/cancel"), cancel)
@@ -113,8 +113,8 @@ def test_canonical_tells_two_objects_on_one_route_apart():
 def test_canonical_tells_two_routes_with_the_same_empty_body_apart():
     """A key reused on another endpoint is another write. Both of these post nothing, so only
     the path separates a cancelled intent from an updated customer."""
-    cancel = servicemap.match_route(STRIPE, "POST", "/v1/payment_intents/pi_AAA/cancel")
-    update = servicemap.match_route(STRIPE, "POST", "/v1/customers/cus_ZZZ")
+    cancel = servicemap.model.match_route(STRIPE, "POST", "/v1/payment_intents/pi_AAA/cancel")
+    update = servicemap.model.match_route(STRIPE, "POST", "/v1/customers/cus_ZZZ")
     assert cancel is not None and update is not None
     assert idempotency.canonical(
         _request(path="/v1/payment_intents/pi_AAA/cancel"), cancel
@@ -178,10 +178,10 @@ def test_ending_a_run_drops_its_keys_and_no_other_run_s():
 
 
 def test_the_key_separates_runs_accounts_and_versions():
-    base = idempotency.key("7f3a", "stripe", ("acct_1", "2024-06-20"), "k-1")
-    other_run = idempotency.key("9b2c", "stripe", ("acct_1", "2024-06-20"), "k-1")
-    other_account = idempotency.key("7f3a", "stripe", ("acct_2", "2024-06-20"), "k-1")
-    other_version = idempotency.key("7f3a", "stripe", ("acct_1", "2025-01-01"), "k-1")
+    base = idempotency.slot_id("7f3a", "stripe", ("acct_1", "2024-06-20"), "k-1")
+    other_run = idempotency.slot_id("9b2c", "stripe", ("acct_1", "2024-06-20"), "k-1")
+    other_account = idempotency.slot_id("7f3a", "stripe", ("acct_2", "2024-06-20"), "k-1")
+    other_version = idempotency.slot_id("7f3a", "stripe", ("acct_1", "2025-01-01"), "k-1")
     assert len({base, other_run, other_account, other_version}) == 4
 
 

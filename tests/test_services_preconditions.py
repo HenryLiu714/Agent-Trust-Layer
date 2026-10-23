@@ -50,7 +50,7 @@ def test_the_table_names_both_checks():
 
 def test_a_refund_probes_the_charge_it_names():
     assert stripe.CHARGE_REFUNDABLE.probe(_refund(amount=100)) == Probe(
-        operation="charges.retrieve", method="GET", path=f"/v1/charges/{CHARGE_ID}"
+        operation="charges.retrieve", params={"charge": CHARGE_ID}
     )
 
 
@@ -166,7 +166,8 @@ def test_a_charge_names_the_currency_its_refund_is_denominated_in():
 )
 def test_a_charge_that_names_no_currency_offers_none(document):
     """No coercion: a currency irimi is not sure of is no currency, and the amount then prints as
-    the write sent it. A wrong symbol is worse than an unformatted number (`report.money`)."""
+    the write sent it. A wrong symbol is worse than an unformatted number
+    (`money.format_minor_units`)."""
     assert stripe.CHARGE_REFUNDABLE.currency(document) == ""
 
 
@@ -182,8 +183,6 @@ def test_a_slack_post_has_no_currency_to_offer():
 def test_a_post_to_an_id_shaped_channel_probes_conversations_info():
     assert slack.CHANNEL_POSTABLE.probe(_post("C0123")) == Probe(
         operation="conversations.info",
-        method="POST",
-        path="/api/conversations.info",
         posted={"channel": "C0123"},
     )
 

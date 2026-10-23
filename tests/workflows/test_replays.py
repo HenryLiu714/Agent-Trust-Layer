@@ -254,7 +254,7 @@ ENDS_DIFFER = {
 # divergence", since a tool it posts says it ran for real. A serve that refused its map recorded
 # nothing to replay (W8 `map_refused`).
 NAMES_ITS_OWN_RUNS = {(W9, "control_runs"), (W9, "control_hazards")}
-NOTHING_RECORDED = {(W8, "map_refused")}
+NOTHING_RECORDED = {(W8, "map_refused"), ("w04_slack_ops_bot", "post_fixture_missing")}
 # Rule 8's exception: the scenarios whose agent makes fewer calls in a replay, and why.
 CALLS_FEWER = {
     (W6, "enrich"): (

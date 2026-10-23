@@ -25,6 +25,7 @@ from irimi.servicemap import loader
 from irimi.store import StoreReader
 from irimi.trace import ErrorInfo, ToolCall
 from tests import test_replay_engine
+from tests.maps_for_cli import complete_for_check
 from tests.test_replay_engine import LLM_MAP, STRIPE_MAP, _Llm, _Stripe
 
 stubs = test_replay_engine.stubs
@@ -164,6 +165,7 @@ def home(tmp_path, monkeypatch, stubs):
     maps_dir.mkdir()
     (maps_dir / "stripe.yaml").write_text(STRIPE_MAP)
     (maps_dir / "anthropic.yaml").write_text(LLM_MAP)
+    complete_for_check(maps_dir)
     monkeypatch.setattr(loader, "shipped_dir", lambda: maps_dir)
     (tmp_path / "replay_agent.py").write_text(AGENT)
     monkeypatch.chdir(tmp_path)

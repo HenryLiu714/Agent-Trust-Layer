@@ -20,7 +20,7 @@
 # an explicit `--allow-host <host>`. Quote every wildcard: a bare `*` opens a YAML alias.
 version: 1
 service: langsmith
-verbs: honest
+style: rest
 hosts:
   # LangSmith's EU tenant is a *prefix* on the same name, not a subdomain of it, so the US host
   # alone misses every EU workspace. Listed exactly rather than as `*.smith.langchain.com`,
@@ -60,13 +60,12 @@ routes:
     # end_time and outputs onto LangSmith's own record of this run and touches nothing the agent
     # can later read back as application state. Not forwarding it would leave every traced run
     # open forever.
-    persists: false
-    comment: closes out the agent's own trace run; no application state
+    live_because: closes out the agent's own trace run; no application state
 
 ---
 version: 1
 service: langfuse
-verbs: honest
+style: rest
 hosts:
   # The shared cloud host is listed exactly as well as by pattern, so the common case resolves
   # without walking the suffixes. An exact host always beats a pattern.
@@ -90,7 +89,7 @@ routes:
 ---
 version: 1
 service: sentry
-verbs: honest
+style: rest
 hosts:
   # Sentry split ingest by region in 2024. A DSN issued since then is `o<org>.ingest.us.sentry.io`,
   # which ends in `.ingest.us.sentry.io` and not in `.ingest.sentry.io`, so the legacy pattern
@@ -131,7 +130,7 @@ routes:
 ---
 version: 1
 service: datadog
-verbs: honest
+style: rest
 hosts:
   # Datadog splits its sites across three TLDs, not three subdomains. US3, US5, AP1 and AP2 are
   # subdomains of datadoghq.com and the first pattern already covers them, but EU1 is
@@ -179,7 +178,7 @@ routes:
 ---
 version: 1
 service: honeycomb
-verbs: honest
+style: rest
 hosts:
   # Honeycomb's EU instance is its own host; `api.honeycomb.io` misses it.
   - api.honeycomb.io
@@ -202,7 +201,7 @@ routes:
 ---
 version: 1
 service: posthog
-verbs: honest
+style: rest
 hosts:
   # One pattern covers the regional ingest hosts too: a pattern matches one *or more* leading
   # labels, so `*.posthog.com` already matches `eu.i.posthog.com`, and a second

@@ -319,7 +319,7 @@ def _pair(x: Action, y: Action) -> Row:
 
 def compare_runs(a: StoredRun, b: StoredRun, index: MapIndex | None) -> Comparison:
     """`a`'s writes against `b`'s. `index` is the loaded maps, for each write's `human:` sentence
-    and its route's `volatile:` fields, as `report.stored_summary_lines` takes it."""
+    and its route's `compare_ignores:` fields, as `report.stored_summary_lines` takes it."""
     return Comparison(align(actions(a, index), actions(b, index)))
 
 

@@ -362,7 +362,7 @@ def test_a_run_s_writes_and_keys_are_dropped_once_its_end_is_on_disk(tmp_path, m
     ca.generate_ca(ca.ca_paths())
     args = cli.build_parser().parse_args(["serve", "--store", str(tmp_path / "store")])
     left_at_end = []
-    slot_of = {run_id: idempotency.key(run_id, "stripe", (), "k-1") for run_id in ("r1", "r2")}
+    slot_of = {run_id: idempotency.slot_id(run_id, "stripe", (), "k-1") for run_id in ("r1", "r2")}
 
     def on_run_ended(index, run_id):
         assert run.keys is not None

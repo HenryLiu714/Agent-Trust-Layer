@@ -566,6 +566,22 @@ def test_a_currency_with_no_symbol_is_named():
     assert "  ○ stripe  refund 49.00 SEK on ch_9  faked; not checked" in lines
 
 
+def test_an_amount_the_template_does_not_mark_as_money_is_printed_as_sent():
+    """Only a `{name:money}` hole is minor units: a map whose `amount` counts something else prints
+    it as the number it is, and adds nothing to the money line."""
+    from irimi.servicemap import MapIndex
+
+    stripe = _maps().service_for("api.stripe.com")
+    assert stripe is not None
+    routes = tuple(
+        replace(r, human="refund {amount} on {charge}") if r.operation == "refunds.create" else r
+        for r in stripe.routes
+    )
+    lines = summary_lines("7f3a", [_refund()], 0.0, MapIndex((replace(stripe, routes=routes),)))
+    assert "  ○ stripe  refund 4900 on ch_3QabcXYZ  faked; not checked" in lines
+    assert not any(line.startswith("  money:") for line in lines)
+
+
 def test_a_template_hole_the_request_does_not_fill_is_marked_not_dropped():
     lines = summary_lines("7f3a", [_refund(body=b"amount=4900&currency=usd")], 0.0, _maps())
     assert "  ○ stripe  refund $49.00 on ?  faked; not checked" in lines

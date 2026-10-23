@@ -5,7 +5,7 @@ import json
 from irimi.bodies import MAX_BODY_BYTES
 from irimi.exchange import Exchange, Request, Response
 from irimi.overlay import ServiceOverlay
-from irimi.servicemap import MapIndex, Route, ServiceMap
+from irimi.servicemap import IdSpec, MapIndex, Route, ServiceMap
 
 STRIPE = ServiceMap(
     service="stripe",
@@ -14,7 +14,7 @@ STRIPE = ServiceMap(
         Route("GET", "/v1/charges/{charge}", "charges.retrieve", "read"),
         Route("GET", "/v1/refunds", "refunds.list", "read"),
         Route("GET", "/v1/refunds/{refund}", "refunds.retrieve", "read"),
-        Route("POST", "/v1/refunds", "refunds.create", "write", ids={"id": "re_"}),
+        Route("POST", "/v1/refunds", "refunds.create", "write", ids={"id": IdSpec(prefix="re_")}),
     ),
 )
 SLACK = ServiceMap(
@@ -26,7 +26,7 @@ SLACK = ServiceMap(
         Route("POST", "/api/conversations.replies", "conversations.replies", "read"),
         Route("POST", "/api/conversations.info", "conversations.info", "read"),
     ),
-    verbs="post-only",
+    style="rpc",
 )
 MAPS = MapIndex(services=(STRIPE, SLACK))
 MINTED = "re_MINTED1"

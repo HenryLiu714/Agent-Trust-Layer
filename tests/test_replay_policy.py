@@ -38,7 +38,7 @@ from irimi.reader import UpstreamReader, answered_as
 from irimi.recording import Recording, RecordingReader
 from irimi.trace import ErrorInfo, TelemetrySeen, ToolCall
 
-SHIPPED = servicemap.MapIndex(tuple(servicemap.load_shipped()))
+SHIPPED = servicemap.MapIndex(tuple(servicemap.loader.load_shipped()))
 KEY = b"k" * 32
 JSON = "application/json"
 FORM = "application/x-www-form-urlencoded"
@@ -163,20 +163,21 @@ def test_a_repeated_query_name_keeps_the_order_of_its_values():
     assert recording.take(same, "read") is not None
 
 
-def test_a_volatile_field_never_decides_a_match_and_any_other_does():
-    """`nonce` is `volatile:` on the refund route of a test map built from the shipped one."""
+def test_an_ignored_field_never_decides_a_match_and_any_other_does():
+    """`nonce` is in `compare_ignores:` on the refund route of a test map built from the shipped
+    one."""
     maps = servicemap.MapIndex(
         tuple(
             replace(
                 sm,
                 routes=tuple(
-                    replace(route, volatile=("nonce",))
+                    replace(route, compare_ignores=("nonce",))
                     if route.operation == "refunds.create"
                     else route
                     for route in sm.routes
                 ),
             )
-            for sm in servicemap.load_shipped()
+            for sm in servicemap.loader.load_shipped()
         )
     )
     recorded = _stored(_refund(nonce="n-1"), REFUND_ANSWER, answered_by="fake-L1")
@@ -386,8 +387,8 @@ def test_telemetry_is_never_looked_up_and_never_flagged():
 def test_a_delegated_write_is_never_looked_up_and_never_flagged():
     maps = servicemap.MapIndex(
         tuple(
-            servicemap.apply_cli_targets(
-                list(servicemap.load_shipped()),
+            servicemap.loader.apply_cli_targets(
+                list(servicemap.loader.load_shipped()),
                 [("api.stripe.com", "/v1/refunds", "http://127.0.0.1:3000/refund")],
                 (),
             )

@@ -11,8 +11,23 @@ import re
 import pytest
 
 from irimi import fixture
+from irimi.servicemap.loader import load_shipped
 
-SHIPPED = ("balance_transaction", "charge", "customer", "payment_intent", "refund")
+
+def named_by_maps(service: str) -> list[str]:
+    """Every object a shipped map's `fixture:` names for `service`."""
+    return sorted(
+        {
+            r.fixture
+            for sm in load_shipped()
+            if sm.service == service
+            for r in sm.routes
+            if r.fixture
+        }
+    )
+
+
+SHIPPED = tuple(named_by_maps("stripe"))
 
 
 @pytest.fixture(autouse=True)
@@ -36,8 +51,11 @@ def write_fixtures(tmp_path, monkeypatch, name: str, document) -> None:
 # ------------------------------------------------------------------- the file that really ships
 
 
-def test_the_shipped_stripe_fixtures_hold_every_object_the_maps_name():
-    assert sorted(fixture.objects("stripe")) == sorted(SHIPPED)
+@pytest.mark.parametrize("service", ["stripe", "slack"])
+def test_the_shipped_fixtures_hold_exactly_the_objects_the_maps_name(service):
+    """An object no route names is one nothing answers with, and one a route names but the file
+    lacks is a write degraded to L0."""
+    assert sorted(fixture.objects(service)) == named_by_maps(service)
 
 
 def test_the_shipped_fixtures_name_where_they_came_from():
@@ -50,12 +68,9 @@ def test_the_shipped_fixtures_name_where_they_came_from():
 # The id prefix Stripe gives each object type the shipped fixture holds, nested ones included.
 STRIPE_ID_PREFIXES = {
     "account": "acct_",
-    "balance_transaction": "txn_",
-    "charge": "ch_",
     "customer": "cus_",
     "payment_intent": "pi_",
     "refund": "re_",
-    "source": "src_",
 }
 
 

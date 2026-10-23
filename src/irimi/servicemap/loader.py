@@ -4,8 +4,10 @@ Three layers, each beating the one before it, merged and then validated as one s
 whichever layer a value arrived through. See `rules` for the rules and `model` for what comes out.
 """
 
+import re
 from collections.abc import Sequence
 from dataclasses import replace
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -15,29 +17,46 @@ import yaml
 from irimi import paths
 from irimi.exchange import ANY_METHOD, KINDS, LIVE_KINDS, Kind
 from irimi.servicemap.model import (
+    CREDENTIAL_PATH_HOSTS,
     DEFAULT_KINDS,
     SELF_TARGET,
     TARGETABLE_KINDS,
+    IdSpec,
     MapError,
     MapIndex,
     Route,
     ServiceMap,
+    Style,
     is_pattern,
     match_path,
     path_segments,
 )
 from irimi.servicemap.rules import check_route_rules, check_unique, validate_targets
 
-SCHEMA_VERSION = 1
+MAP_SCHEMA_VERSION = 1
 
 MAPS_DIR_NAME = "maps"
 CWD_OVERRIDE_NAME = "irimi.maps.yaml"  # in the working directory, checked first
 HOME_OVERRIDE_NAME = "maps.yaml"  # in $IRIMI_HOME, the fallback
 
-VERB_STYLES = ("honest", "post-only")  # does the HTTP method carry information for this service?
+STYLES: tuple[Style, ...] = ("rest", "rpc")
+ID_FORMATS = ("int", "uuid")
+# The one format a `human:` hole may name: `{amount:money}` prints minor units as money.
+HUMAN_FORMATS = frozenset({"money"})
+_HUMAN_HOLE = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*(?::([^}]*))?\}")
 
 SERVICE_KEYS = frozenset(
-    {"version", "service", "hosts", "verbs", "default_kind", "target", "target_reads", "routes"}
+    {
+        "version",
+        "service",
+        "hosts",
+        "style",
+        "default_kind",
+        "target",
+        "target_reads",
+        "credential_path_hosts",
+        "routes",
+    }
 )
 ROUTE_KEYS = frozenset(
     {
@@ -49,9 +68,8 @@ ROUTE_KEYS = frozenset(
         "fixture",
         "fires",
         "precondition",
-        "volatile",
-        "persists",
-        "comment",
+        "compare_ignores",
+        "live_because",
         "target",
         "forward_auth",
     }
@@ -59,6 +77,16 @@ ROUTE_KEYS = frozenset(
 MATCH_KEYS = frozenset({"method", "path"})
 OVERRIDE_SERVICE_KEYS = frozenset({"service", "target", "target_reads", "routes"})
 OVERRIDE_ROUTE_KEYS = frozenset({"match", "target", "forward_auth"})
+# Keys a map may no longer use, and what to write instead.
+RETIRED_SERVICE_KEYS = {"verbs": "is now `style:` (`honest` is `rest`, `post-only` is `rpc`)"}
+RETIRED_ROUTE_KEYS = {
+    "volatile": "is now `compare_ignores:`",
+    "persists": 'is now `live_because: "<why this persists nothing>"`, on a live route',
+    "comment": (
+        "is gone: a live route says why it may be forwarded with `live_because:`, and any other "
+        "note is a YAML comment"
+    ),
+}
 
 
 # --------------------------------------------------------------------------------------- loading
@@ -133,14 +161,15 @@ def parse_service(doc: Any, source: str) -> ServiceMap:
     """Validate one YAML document and build a ServiceMap. Raises MapError."""
     if not isinstance(doc, dict):
         raise MapError(f"{source}: a map document must be a mapping, got {type(doc).__name__}")
+    _reject_retired_keys(doc, RETIRED_SERVICE_KEYS, source)
     _reject_unknown_keys(doc, SERVICE_KEYS, source, "map")
     version = doc.get("version")
-    if version != SCHEMA_VERSION:
-        raise MapError(f"{source}: `version` must be {SCHEMA_VERSION}, got {version!r}")
+    if version != MAP_SCHEMA_VERSION:
+        raise MapError(f"{source}: `version` must be {MAP_SCHEMA_VERSION}, got {version!r}")
     service = _require_name(doc.get("service"), f"{source}: `service`")
-    verbs = doc.get("verbs", "honest")
-    if verbs not in VERB_STYLES:
-        raise MapError(f"{source}: `verbs` must be one of {list(VERB_STYLES)}, got {verbs!r}")
+    style = doc.get("style", "rest")
+    if style not in STYLES:
+        raise MapError(f"{source}: `style` must be one of {list(STYLES)}, got {style!r}")
     hosts = _parse_hosts(doc.get("hosts"), source)
     raw_routes = doc.get("routes")
     if not isinstance(raw_routes, list) or not raw_routes:
@@ -148,11 +177,14 @@ def parse_service(doc: Any, source: str) -> ServiceMap:
     sm = ServiceMap(
         service=service,
         hosts=hosts,
-        routes=tuple(_parse_route(r, source) for r in raw_routes),
-        verbs=verbs,
+        routes=tuple(_parse_route(r, source, i) for i, r in enumerate(raw_routes)),
+        style=style,
         default_kind=_parse_default_kind(doc.get("default_kind"), f"{source}: `default_kind`"),
         target=_parse_target(doc.get("target", SELF_TARGET), f"{source}: `target`"),
         target_reads=_parse_bool(doc.get("target_reads", False), f"{source}: `target_reads`"),
+        credential_path_hosts=_parse_credential_hosts(
+            doc.get("credential_path_hosts", []), hosts, f"{source}: `credential_path_hosts`"
+        ),
         source=source,
     )
     check_route_rules(sm)
@@ -170,6 +202,11 @@ def apply_overrides(maps: list[ServiceMap], path: Path) -> list[ServiceMap]:
     for doc in _read_documents(path):
         if not isinstance(doc, dict):
             raise MapError(f"{source}: an override document must be a mapping")
+        if "credential_path_hosts" in doc:
+            raise MapError(
+                f"{source}: `credential_path_hosts` belongs to the shipped map; an override may "
+                "not change which paths are credentials"
+            )
         _reject_unknown_keys(doc, OVERRIDE_SERVICE_KEYS, source, "override")
         name = _require_name(doc.get("service"), f"{source}: `service`")
         base = by_name.get(name)
@@ -179,11 +216,12 @@ def apply_overrides(maps: list[ServiceMap], path: Path) -> list[ServiceMap]:
                 f"(known: {', '.join(sorted(by_name))})"
             )
         routes = list(base.routes)
-        for raw in doc.get("routes") or []:
+        for i, raw in enumerate(doc.get("routes") or []):
             if not isinstance(raw, dict):
                 raise MapError(f"{source}: each entry of `routes` must be a mapping")
-            _reject_unknown_keys(raw, OVERRIDE_ROUTE_KEYS, source, "override route")
-            method, route_path = _parse_match(raw.get("match"), source)
+            method, route_path = _parse_match(raw.get("match"), f"{source}: routes[{i}]")
+            where = f"{source}: route {method} {route_path}"
+            _reject_unknown_keys(raw, OVERRIDE_ROUTE_KEYS, where, "override route")
             index = next(
                 (i for i, r in enumerate(routes) if r.method == method and r.path == route_path),
                 None,
@@ -294,12 +332,13 @@ def _read_documents(path: Path) -> list[Any]:
     return docs
 
 
-def _parse_route(raw: Any, source: str) -> Route:
+def _parse_route(raw: Any, source: str, position: int) -> Route:
     if not isinstance(raw, dict):
         raise MapError(f"{source}: each entry of `routes` must be a mapping")
-    _reject_unknown_keys(raw, ROUTE_KEYS, source, "route")
-    method, path = _parse_match(raw.get("match"), source)
+    method, path = _parse_match(raw.get("match"), f"{source}: routes[{position}]")
     where = f"{source}: route {method} {path}"
+    _reject_retired_keys(raw, RETIRED_ROUTE_KEYS, where)
+    _reject_unknown_keys(raw, ROUTE_KEYS, where, "route")
     kind = raw.get("kind")
     if kind not in KINDS:
         raise MapError(f"{where}: `kind` must be one of {list(KINDS)}, got {kind!r}")
@@ -308,14 +347,15 @@ def _parse_route(raw: Any, source: str) -> Route:
         path=path,
         operation=_require_name(raw.get("operation"), f"{where}: `operation`"),
         kind=kind,
-        human=_parse_str(raw.get("human", ""), f"{where}: `human`"),
+        human=_parse_human(raw.get("human", ""), f"{where}: `human`"),
         ids=_parse_ids(raw.get("ids", {}), where),
         fixture=_parse_str(raw.get("fixture", ""), f"{where}: `fixture`").strip(),
         fires=_parse_str_list(raw.get("fires", []), f"{where}: `fires`"),
         precondition=_parse_str(raw.get("precondition", ""), f"{where}: `precondition`").strip(),
-        volatile=_parse_str_list(raw.get("volatile", []), f"{where}: `volatile`"),
-        persists=_parse_optional_bool(raw.get("persists"), f"{where}: `persists`"),
-        comment=_parse_str(raw.get("comment", ""), f"{where}: `comment`"),
+        compare_ignores=_parse_str_list(
+            raw.get("compare_ignores", []), f"{where}: `compare_ignores`"
+        ),
+        live_because=_parse_str(raw.get("live_because", ""), f"{where}: `live_because`").strip(),
         target=_parse_target(raw.get("target", SELF_TARGET), f"{where}: `target`"),
         forward_auth=_parse_bool(raw.get("forward_auth", False), f"{where}: `forward_auth`"),
     )
@@ -370,17 +410,62 @@ def _check_pattern(host: str, item: Any, source: str) -> None:
         )
 
 
-def _parse_ids(raw: Any, where: str) -> dict[str, str]:
+def _parse_ids(raw: Any, where: str) -> dict[str, IdSpec]:
+    """`{field: <prefix>}`, or `{field: {format: int}}` / `{field: {format: uuid}}`."""
     if not isinstance(raw, dict):
-        raise MapError(f"{where}: `ids` must be a mapping of field name to id prefix")
-    out: dict[str, str] = {}
+        raise MapError(f"{where}: `ids` must be a mapping of field name to how its id is minted")
+    out: dict[str, IdSpec] = {}
     for key, value in raw.items():
         name = _parse_str(key, f"{where}: `ids` key")
+        if isinstance(value, dict):
+            _reject_unknown_keys(value, frozenset({"format"}), f"{where}: `ids.{name}`", "id")
+            id_format = value.get("format")
+            if id_format not in ID_FORMATS:
+                raise MapError(
+                    f"{where}: `ids.{name}.format` must be one of {list(ID_FORMATS)}, "
+                    f"got {id_format!r}"
+                )
+            out[name] = IdSpec(format=id_format)
+            continue
         prefix = _parse_str(value, f"{where}: `ids.{name}`")
         if not prefix:
             raise MapError(f"{where}: `ids.{name}` must be a non-empty id prefix")
-        out[name] = prefix
+        out[name] = IdSpec(prefix=prefix)
     return out
+
+
+def _parse_human(raw: Any, where: str) -> str:
+    """A summary template. A hole may name one format, `{amount:money}`; any other is refused,
+    because the summary would print it as literal text."""
+    template = _parse_str(raw, where)
+    for spec in _HUMAN_HOLE.findall(template):
+        if spec and spec not in HUMAN_FORMATS:
+            raise MapError(
+                f"{where}: `:{spec}` is not a format a hole may name "
+                f"(known: {', '.join(sorted(HUMAN_FORMATS))})"
+            )
+    return template
+
+
+def _parse_credential_hosts(raw: Any, hosts: frozenset[str], where: str) -> frozenset[str]:
+    """Hosts of this map whose request path is the credential. Each must be one of the map's own
+    exact hosts, because the rule is keyed on a host the map claims."""
+    named = frozenset(name.lower() for name in _parse_str_list(raw, where))
+    for host in sorted(named):
+        if host not in hosts or is_pattern(host):
+            raise MapError(f"{where}: {host!r} is not one of this map's exact `hosts`")
+    return named
+
+
+@lru_cache(maxsize=1)
+def shipped_credential_hosts() -> frozenset[str]:
+    """`CREDENTIAL_PATH_HOSTS` plus every host a shipped map declares in `credential_path_hosts:`,
+    for code with no `MapIndex` at hand. Never raises: maps that do not load leave the floor."""
+    try:
+        maps = load_shipped()
+    except Exception:
+        return CREDENTIAL_PATH_HOSTS
+    return CREDENTIAL_PATH_HOSTS.union(*(sm.credential_path_hosts for sm in maps))
 
 
 # Why each live-forwarding kind is refused as a service-wide default. The *rule* is LIVE_KINDS;
@@ -480,8 +565,9 @@ def _parse_bool(raw: Any, where: str) -> bool:
     return raw
 
 
-def _parse_optional_bool(raw: Any, where: str) -> bool | None:
-    return None if raw is None else _parse_bool(raw, where)
+def _reject_retired_keys(doc: dict[Any, Any], retired: dict[str, str], where: str) -> None:
+    for key in sorted(str(k) for k in doc if k in retired):
+        raise MapError(f"{where}: `{key}:` {retired[key]}")
 
 
 def _reject_unknown_keys(

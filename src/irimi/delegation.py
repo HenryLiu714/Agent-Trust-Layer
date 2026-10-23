@@ -18,7 +18,7 @@ from irimi.pipeline import Classification
 # credential header, and disk may not be handed one either. The `as` form re-exports it, because
 # the engine asks `delegation.is_credential_header` which headers a target is not handed.
 from irimi.redact import is_credential_header as is_credential_header
-from irimi.servicemap import CREDENTIAL_PATH_HOSTS, SELF_TARGET, TARGETABLE_KINDS, target_for
+from irimi.servicemap import SELF_TARGET, TARGETABLE_KINDS, target_for
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +50,11 @@ def target_url(target: str, request: Request, matched: bool) -> str:
 
     A **bare origin** (`http://127.0.0.1:3000`) keeps the request's own path. A target that
     **carries a path** (`http://127.0.0.1:3000/refund`) replaces the part of the path the route
-    matched. A route pattern always matches the request's whole path - `_match_path` requires the
-    same number of segments - so for a mapped route there is no remainder and the target's path
-    is the whole new path. A request that matched no route (a service-level target covering a
-    route its map does not list) has nothing matched, so its own path is appended instead.
+    matched. A route pattern always matches the request's whole path - `model.match_path` in
+    `servicemap` requires the same number of segments - so for a mapped route there is no
+    remainder and the target's path is the whole new path. A request that matched no route (a
+    service-level target covering a route its map does not list) has nothing matched, so its own
+    path is appended instead.
 
     The query string is always kept; method, body and headers are not this function's business.
 
@@ -125,13 +126,13 @@ def delegate(request: Request, classification: Classification) -> ForwardTo | No
     if target == SELF_TARGET:
         return None
     url = target_url(target, request, matched=route is not None)
-    # THE SCOPE RULE, decision half (servicemap.CREDENTIAL_PATH_HOSTS). The loader already
+    # THE SCOPE RULE, decision half (`ServiceMap.credential_hosts`). The loader already
     # refuses a non-loopback target on a service claiming one of these hosts, whichever layer it
     # arrived through. This asks the same question of the request and the answer actually in
     # front of us, so a target that reaches here some other way - a map built in code, a new
     # layer or flag - inherits the rule instead of escaping it. On this host the
     # path IS the credential, for every path and not only the ones a map lists.
-    if request.host in CREDENTIAL_PATH_HOSTS and not netaddr.is_local_target(url):
+    if request.host in service_map.credential_hosts and not netaddr.is_local_target(url):
         logger.error(
             "irimi: refusing to delegate %s to %s: the request path is the credential on %s, "
             "so its answer target must be loopback",

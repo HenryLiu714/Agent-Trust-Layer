@@ -600,7 +600,7 @@ def test_shadow_mode_is_never_built_without_a_reader(tmp_path, monkeypatch):
     from irimi.store import NullStore
 
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
-    index = servicemap.MapIndex(tuple(servicemap.load_shipped()))
+    index = servicemap.MapIndex(tuple(servicemap.loader.load_shipped()))
     args = argparse.Namespace(allow_host=[], port=4321, listen_host=paths.LISTEN_HOST)
     p = ca.ca_paths()
     run = cli._Run(index, p, "t3st", cli._engine_config(args, index, "t3st", p), NullStore())
@@ -626,7 +626,7 @@ routes:
       path: /v1/refunds
     operation: refunds.create
     kind: write
-    human: refund {amount} on {charge}
+    human: refund {amount:money} on {charge}
     fixture: refund
     precondition: charge_refundable
     ids:

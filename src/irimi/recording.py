@@ -12,9 +12,9 @@ equal across two runs of one agent while the agent asks for the same thing:
 - no headers, so an `Idempotency-Key`, a `User-Agent`, a credential or a port never decides a match,
   but the ones that say whose state a request is about (`services.scope_of`): a Connect read of
   `ch_1` in one account is not a read of `ch_1` in another;
-- the body as `bodies.reflect` reads it, less the route's `volatile:` fields, as canonical JSON, so
-  form encoding, key order and a re-spelled number (`1.10` is `1.1`) do not either;
-- an llm call's body less the fields that say who asked and how, not what (`LLM_VOLATILE`);
+- the body as `bodies.reflect` reads it, less the route's `compare_ignores:` fields, as canonical
+  JSON, so form encoding, key order and a re-spelled number (`1.10` is `1.1`) do not either;
+- an llm call's JSON body less its route's `compare_ignores:` (who asked and how, not what);
 - a write's standing with the run's idempotency store: a retry of a key the run has answered, a
   key reused for another write, or neither, which the service answers three different ways
   whatever the bodies say;
@@ -97,12 +97,6 @@ _ToolKey = tuple[str, str]
 # stream (`_stream_bucket`), and the idempotency flag its answer carried (`_held`).
 _Bucket = tuple[_Key, bool, str]
 
-# The top-level fields of an llm call's body that say who asked and how the answer travels, never
-# what was asked. `stream` is not in the key, but whether an llm call asks to stream is beside
-# it, read off the recorded call's own request: a call that asked to stream is answered from one
-# that asked too, whether its answer streamed or was a JSON error, and a streamed answer is never
-# served to a call that did not ask for one.
-LLM_VOLATILE = frozenset({"metadata", "user", "stream", "stream_options", "prompt_cache_key"})
 # A prompt-caching hint, at any depth of an llm call's body: it changes what the call costs, never
 # what it asks.
 CACHE_CONTROL = "cache_control"
@@ -130,7 +124,11 @@ _FAKE_LEVELS: frozenset[str] = frozenset(get_args(FakeLevel))
 
 def _stream_bucket(request: Request, kind: Kind) -> bool:
     """What a request's key carries beside it: whether it is an llm call that asks to stream. Any
-    other kind asks for one answer, whatever its body says."""
+    other kind asks for one answer, whatever its body says.
+
+    The LLM maps leave `stream` out of the compared body, so this is what keeps a call that asked
+    to stream answered from one that asked too, and a streamed answer away from one that did not.
+    """
     return kind == "llm" and _asks_to_stream(request)
 
 
@@ -222,9 +220,10 @@ def _match_key(request: Request, kind: Kind, maps: MapIndex) -> _Key:
     headers that scope its service's state (`services.scope_of`, which the write log, the
     idempotency store and L3 compare too): a query can say what an llm call asks as much as a read's
     (`?alt=sse`, `?api-version=`), and a `Stripe-Account` says whose objects a request names.
-    An llm call whose body is a JSON object (`_json_body`) adds that object less `LLM_VOLATILE` and
-    every `cache_control`, as canonical JSON. Everything else adds its body as `bodies.reflect`
-    reads it minus the `volatile:` fields of the route this stored request classifies to; a body
+    An llm call whose body is a JSON object (`_json_body`) adds that object less its route's
+    `compare_ignores:` and every `cache_control`, as canonical JSON. Everything else adds its body
+    as `bodies.reflect` reads it minus the `compare_ignores:` fields of the route this stored
+    request classifies to; a body
     `reflect` cannot read is keyed by its sha256. The kind leads, so a read never matches a
     write."""
     classification = pipeline.classify(request, maps)
@@ -240,17 +239,20 @@ def _match_key(request: Request, kind: Kind, maps: MapIndex) -> _Key:
 
 def compared_body(request: Request, kind: Kind, route: Route | None) -> JSONValue:
     """What of a request's body says what it asks, as a replay matches it and `irimi compare`
-    compares it: an llm call's JSON object less `LLM_VOLATILE` and every `cache_control`; any other
-    body as `bodies.reflect` reads it, less `route`'s `volatile:` fields; the sha256 of a body
-    neither reads, as `sha256:<hex>`; and "" for no body."""
+    compares it: an llm call's JSON object less `route`'s `compare_ignores:` and every
+    `cache_control`; any other body as `bodies.reflect` reads it, less `route`'s
+    `compare_ignores:`; the sha256 of a body neither reads, as `sha256:<hex>`; and "" for no
+    body."""
+    ignored = route.compare_ignores if route is not None else ()
     if kind == "llm":
         document = _json_body(request)
         if document is not None:
-            return _without_llm_volatile(document)
-    volatile = route.volatile if route is not None else ()
+            kept = {k: v for k, v in document.items() if k not in ignored}
+            result: dict[str, Any] = _without_cache_control(kept)
+            return result
     posted = bodies.reflect(request)
     if posted:
-        return {k: v for k, v in posted.items() if k not in volatile}
+        return {k: v for k, v in posted.items() if k not in ignored}
     if request.body:
         return "sha256:" + hashlib.sha256(request.body).hexdigest()
     return ""
@@ -277,12 +279,6 @@ def _redacted(request: Request, kind: Kind, redaction_key: bytes) -> Request:
         run_id="",
     )
     return redact.redact_exchange(exchange, redaction_key).request
-
-
-def _without_llm_volatile(document: dict[str, Any]) -> dict[str, Any]:
-    kept = {k: v for k, v in document.items() if k not in LLM_VOLATILE}
-    result: dict[str, Any] = _without_cache_control(kept)
-    return result
 
 
 def _without_cache_control(value: Any) -> Any:

@@ -52,7 +52,7 @@ routes:
       path: /v1/refunds
     operation: refunds.create
     kind: write
-    human: refund {amount} on {charge}
+    human: refund {amount:money} on {charge}
     fixture: refund
     precondition: charge_refundable
     fires:
@@ -85,6 +85,7 @@ routes:
     operation: messages.create
     kind: llm
     human: message with {model}
+    compare_ignores: [metadata, user, stream, stream_options, prompt_cache_key]
 """
 
 CHARGE = {

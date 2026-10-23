@@ -159,7 +159,7 @@ def _index(tmp_path, monkeypatch, *docs: str):
 
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "ambient-home"))
     if not docs:
-        return servicemap.load(cwd=tmp_path, maps_dir=servicemap.shipped_dir())
+        return servicemap.load(cwd=tmp_path, maps_dir=servicemap.loader.shipped_dir())
     maps_dir = tmp_path / "maps"
     maps_dir.mkdir(exist_ok=True)
     for i, doc in enumerate(docs):
@@ -182,7 +182,7 @@ def test_classify_matched_carries_the_service_map_and_route(tmp_path, monkeypatc
     assert cls.matched == index.route_for("api.stripe.com", "POST", "/v1/refunds")
     service_map, route = cls.matched
     assert service_map.service == "stripe"
-    assert route.human == "refund {amount} on {charge}"
+    assert route.human == "refund {amount:money} on {charge}"
 
 
 def test_classification_route_is_the_matched_route_or_none(tmp_path, monkeypatch):

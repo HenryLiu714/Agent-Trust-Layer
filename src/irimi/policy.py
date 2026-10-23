@@ -16,6 +16,7 @@ from typing import Any, Protocol
 from irimi import bodies, echo, idempotency, pipeline, services, writelog
 from irimi.delegation import ForwardTo, delegate
 from irimi.exchange import (
+    ANY_METHOD,
     FIDELITY_DELEGATED_FLAG,
     FIDELITY_FLAGS,
     FIXTURE_FAILED_FLAG,
@@ -34,7 +35,7 @@ from irimi.exchange import (
 from irimi.pipeline import Classification
 from irimi.reader import NoReader, Reader, answered_as
 from irimi.recording import Recording, RecordingReader
-from irimi.servicemap import MapIndex, Route
+from irimi.servicemap import MapIndex, Route, fill_path
 from irimi.trace import JSONValue, ToolCall
 
 logger = logging.getLogger(__name__)
@@ -163,9 +164,7 @@ class ShadowPolicy:
         if route is not None and route.precondition:
             checked = self._precondition(request, classification, route, write_log, run_id)
             if checked.rejection is not None:
-                fake = echo.fake_rejection(
-                    request, classification, checked.rejection.body, self.slack_ts
-                )
+                fake = echo.fake_rejection(classification, checked.rejection.body)
                 answer = _local(
                     fake,
                     checked.rejection.status,
@@ -200,8 +199,8 @@ class ShadowPolicy:
     ) -> None:
         """Keep `answer` as this write's, under its idempotency key, as `answer` keeps its own: a
         replay calls it for a write it answered from the recording, so the agent's retry
-        meets it. Never raises: a key that cannot be read costs that retry its replay, and nothing
-        else."""
+        meets it. Never raises: a key that cannot be read costs that retry its first answer, and
+        nothing else."""
         try:
             slot = idempotency.slot_for(request, classification, run_id)
         except Exception:
@@ -252,15 +251,13 @@ class ShadowPolicy:
         try:
             slot = idempotency.slot_for(request, classification, run_id)
             if slot is not None:
-                stored, conflicted = self.idempotency.get(slot.key, slot.params)
+                first, conflicted = self.idempotency.get(slot.id, slot.params)
                 if conflicted:
-                    refusal = idempotency.conflict(classification.service, slot.sent)
+                    refusal = idempotency.conflict(classification.service, slot.idempotency_key)
                     if refusal is not None:
-                        return slot, _conflict_answer(
-                            request, classification, refusal, self.slack_ts
-                        )
-                elif stored is not None:
-                    return slot, _replayed_answer(stored)
+                        return slot, _conflict_answer(classification, refusal)
+                elif first is not None:
+                    return slot, _retry_answer(first, classification.service)
         except Exception:
             logger.exception("irimi: the idempotency store failed; answering this write afresh")
             slot = None
@@ -307,7 +304,14 @@ class ShadowPolicy:
             probe = check.probe(proposal)
             if probe is None:
                 return _Checked("not_evaluable", issued)
-            probe_request = _probe_request(request, service, probe)
+            probe_request = _probe_request(request, service, probe, self.maps)
+            if probe_request is None:
+                logger.warning(
+                    "irimi: no route of %s's map builds the precondition read %s",
+                    service,
+                    probe.operation,
+                )
+                return _Checked("not_evaluable", issued)
             # "Read operations only, never a read-like POST", in the one form that can be enforced:
             # ask the maps, which are what says a Slack `conversations.info` POST is a read, and
             # refuse whatever they do not call one.
@@ -540,14 +544,25 @@ def _as_served(recorded: Response) -> Response:
     return Response(status=recorded.status, headers=headers, body=recorded.body)
 
 
-def _probe_request(request: Request, service: str, probe: services.Probe) -> Request:
-    """The precondition read, addressed where the write was and carrying its credentials.
+def _probe_request(
+    request: Request, service: str, probe: services.Probe, maps: MapIndex
+) -> Request | None:
+    """The precondition read, addressed where the write was and carrying its credentials, or None
+    when the write's host has no single route naming the probe's operation (or the probe does not
+    fill its path).
 
-    The agent's credentials and its account and version scope are exactly what make this read see
-    the world the write would have been made in. Nothing else of the agent's is copied: its other
-    headers would send an `Idempotency-Key` on a GET.
+    The method and path are the map's route for the operation, so a probe repeats neither. The
+    agent's credentials (`services.probe_headers_of`) and its scope headers are exactly what make
+    this read see the world the write would have been made in. Nothing else of the agent's is
+    copied: its other headers would send an `Idempotency-Key` on a GET.
     """
-    wanted = ("authorization", *services.SCOPE_HEADERS.get(service, ()))
+    route = maps.operation_route(request.host, probe.operation)
+    if route is None or route.method == ANY_METHOD:
+        return None
+    path = fill_path(route.path, probe.params)
+    if path is None:
+        return None
+    wanted = (*services.probe_headers_of(service), *services.SCOPE_HEADERS.get(service, ()))
     headers = [(k, v) for k, v in request.headers if k in wanted]
     headers.append(("accept", "application/json"))
     body = b""
@@ -555,11 +570,11 @@ def _probe_request(request: Request, service: str, probe: services.Probe) -> Req
         body = json.dumps(probe.posted).encode()
         headers.append(("content-type", "application/json; charset=utf-8"))
     return Request(
-        method=probe.method,
+        method=route.method,
         scheme=request.scheme,
         host=request.host,
         port=request.port,
-        path=probe.path,
+        path=path,
         query=probe.query,
         headers=tuple(headers),
         body=body,
@@ -593,39 +608,31 @@ def _local(
     )
 
 
-def _replayed_answer(stored: idempotency.Stored) -> Answer:
-    """The first answer to this key, again.
+def _retry_answer(first: idempotency.FirstAnswer, service: str) -> Answer:
+    """The first answer to this key, again, marked the way `service` marks a retry's answer.
 
-    Every field is the stored one. `answered_by` in particular is not re-derived: a fixture that
-    has become unreadable since the first call would make the replay `fake-L0` over an original
-    stamped `fake-L1`, and the trace would disagree with itself about one write. `issued` is `()`
-    because a replay makes no precondition read - the write was checked once, when it was made.
-    `currency` is the stored one too, so a replayed refund's exchange and the first one's agree
-    about what that single write was denominated in.
+    Every field is the first answer's. `answered_by` in particular is not re-derived: a fixture
+    that has become unreadable since the first call would make the retry `fake-L0` over an
+    original stamped `fake-L1`, and the trace would disagree with itself about one write. `issued`
+    is `()` because a retry makes no precondition read - the write was checked once, when it was
+    made. `currency` is the first one too, so a retried refund's exchange and the first one's
+    agree about what that single write was denominated in.
     """
+    headers: tuple[tuple[str, str], ...] = (("content-type", first.content_type),)
+    marker = idempotency.replayed_header(service)
+    if marker is not None:
+        headers = (*headers, marker)
     return Answer(
-        answered_by=stored.answered_by,
-        response=Response(
-            status=stored.status,
-            headers=(
-                ("content-type", stored.content_type),
-                (idempotency.REPLAYED_HEADER, idempotency.REPLAYED_VALUE),
-            ),
-            body=stored.body,
-        ),
-        flags=(*stored.flags, IDEMPOTENT_REPLAY_FLAG),
-        precondition=stored.precondition,
-        rejection_code=stored.rejection_code,
-        currency=stored.currency,
+        answered_by=first.answered_by,
+        response=Response(status=first.status, headers=headers, body=first.body),
+        flags=(*first.flags, IDEMPOTENT_REPLAY_FLAG),
+        precondition=first.precondition,
+        rejection_code=first.rejection_code,
+        currency=first.currency,
     )
 
 
-def _conflict_answer(
-    request: Request,
-    classification: Classification,
-    refusal: services.Rejection,
-    clock: echo.TsClock,
-) -> Answer:
+def _conflict_answer(classification: Classification, refusal: services.Rejection) -> Answer:
     """The service's own `idempotency_error`: this key was used for a different write.
 
     NOT `precondition: rejected` - `precondition` says what L3 decided, and L3 was never asked.
@@ -633,26 +640,26 @@ def _conflict_answer(
     real service would have answered, and this is one of those. The body is carried at the level
     this route's write would have been faked at, the way `fake_rejection` carries an L3 one.
     """
-    fake = echo.fake_rejection(request, classification, refusal.body, clock)
+    fake = echo.fake_rejection(classification, refusal.body)
     return _local(fake, refusal.status, (IDEMPOTENCY_CONFLICT_FLAG,), rejection_code=refusal.code)
 
 
 def _remember(store: idempotency.Store, slot: idempotency.Slot | None, answer: Answer) -> None:
     """Keep this answer under its key, so the agent's retry gets it back.
 
-    Stripe stores the first response under a key whether it was accepted or REJECTED, so this is
-    called on both of `answer`'s local paths. Guarded like the lookup: a store that cannot
-    remember costs the next retry its replay, and nothing else - raising here would forward a
-    write that has already been answered.
+    A service stores the first response under a key whether it was accepted or REJECTED, so this
+    is called on both of `answer`'s local paths. Guarded like the lookup: a store that cannot
+    remember costs the next retry its first answer, and nothing else - raising here would forward
+    a write that has already been answered.
     """
     if slot is None or answer.response is None:
         return
     try:
         content_type = answer.response.header("content-type") or bodies.JSON_CT
         store.put(
-            slot.key,
+            slot.id,
             slot.params,
-            idempotency.Stored(
+            idempotency.FirstAnswer(
                 status=answer.response.status,
                 body=answer.response.body,
                 content_type=content_type,

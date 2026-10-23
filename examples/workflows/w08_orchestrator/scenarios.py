@@ -9,6 +9,7 @@ map file to irimi's shipped directory. That gap is part of what `with_map` docum
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from examples.workflows.harness.internet import Req, Resp
@@ -21,7 +22,7 @@ PRICES = {"SKU-A": 1200, "SKU-B": 800, "SKU-C": 5000}
 SUBAGENT_MAP = f"""\
 version: 1
 service: subagent
-verbs: honest
+style: rest
 hosts:
   - {SUBAGENT_HOST}
 routes:
@@ -35,8 +36,7 @@ routes:
       path: /quote
     operation: quote.create
     kind: read
-    persists: false
-    comment: prices a basket and stores nothing, so it is forwarded like a GET
+    live_because: prices a basket and stores nothing, so it is forwarded like a GET
   - match:
       method: POST
       path: /reservations
@@ -56,9 +56,9 @@ TARGET_DOWN_MAP = SUBAGENT_MAP.replace(
     f"    operation: reservations.create\n    target: {DOWN_TARGET}\n",
 )
 
-# The same map without `persists: false`. The loader refuses a live kind on POST unless the route
+# The same map without `live_because:`. The loader refuses a live kind on POST unless the route
 # says it persists nothing, so irimi does not start and the agent never runs: fail closed.
-UNJUSTIFIED_MAP = SUBAGENT_MAP.replace("    persists: false\n", "")
+UNJUSTIFIED_MAP = re.sub(r"    live_because: .*\n", "", SUBAGENT_MAP)
 
 
 def _inventory(req: Req, state: dict[str, Any]) -> Resp:
@@ -115,7 +115,7 @@ WORKFLOW = Workflow(
             setup=_world,
             extra_maps={"subagent.yaml": UNJUSTIFIED_MAP},
             diverges=True,
-            doc="a POST read with no `persists: false`: irimi refuses the map and never starts",
+            doc="a POST read with no `live_because:`: irimi refuses the map and never starts",
         ),
         "run_header_across_hop": Scenario(
             ("--parent-header",),

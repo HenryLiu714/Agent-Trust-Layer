@@ -56,9 +56,8 @@ def _no_chat_write(world: World) -> None:
     world.slack.scopes.discard("chat:write")
 
 
-# The shipped Slack map with `chat.postMessage`'s fixture renamed to one `slack.json` lacks, the
-# only route naming `fixture: message`. Every post degrades to `fake-L0`, flagged `fixture-failed`,
-# its answer an envelope with no `message`, and its minted `ts` on the envelope alone.
+# The shipped Slack map with `chat.postMessage`'s fixture renamed to one `slack.json` lacks. irimi
+# refuses a map whose `fixture:` names nothing, so it never starts.
 NO_POST_FIXTURE_MAP = (
     (loader.shipped_dir() / "slack.yaml")
     .read_text()
@@ -84,14 +83,13 @@ WORKFLOW = Workflow(
             setup=_workspace,
             doc="open a top-level message, reply under its minted ts, read that thread (#52)",
         ),
-        "own_thread_fixture_failed": Scenario(
+        "post_fixture_missing": Scenario(
             ("own_thread",),
-            env={"SLACK_CHECK_INCIDENT": "1"},
             setup=_workspace,
             extra_maps={"slack.yaml": NO_POST_FIXTURE_MAP},
-            doc="own_thread with the post's fixture unreadable, reading the incident's thread "
-            "before replying: both posts fake-L0, and each read of the thread they minted "
-            "partial (#64)",
+            diverges=True,
+            doc="the post's `fixture:` names an object slack.json lacks: irimi refuses the map "
+            "and never starts",
         ),
         "channel_by_name": Scenario(
             ("channel_by_name",),

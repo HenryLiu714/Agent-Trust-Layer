@@ -47,7 +47,9 @@ import pytest
 
 from irimi import ca, paths, pipeline, policy, reader, report
 from irimi.cli import main
+from irimi.money import format_minor_units
 from irimi.overlay import ServiceOverlay
+from tests.maps_for_cli import complete_for_check
 from tests.test_engine_mitm import (
     PRECONDITION_STRIPE_MAP,
     _config,
@@ -247,7 +249,7 @@ def test_a_refund_through_the_door_is_answered_by_irimi_and_never_leaves_the_mac
     # `$1.00`, not `100`: the child posts no currency, and `_Stripe`'s charge is in `usd`, which
     # irimi's own precondition read of it carried onto the write's exchange.
     assert (
-        f"  ○ stripe  refund {report.money(REFUND_AMOUNT_MINOR, 'usd')} on {CHARGE_ID}  "
+        f"  ○ stripe  refund {format_minor_units(REFUND_AMOUNT_MINOR, 'usd')} on {CHARGE_ID}  "
         "faked; checked against live state: would succeed" in out
     )
     assert "  None of these writes reached the real service:" in out
@@ -269,7 +271,7 @@ PHASE2_CHARGE = "ch_REAL1"
 PHASE2_AMOUNT = 4900
 # The amount as a person reads it: the refund names no currency and irimi's own precondition read
 # of `ch_REAL1` found `usd` on the charge, which the write's exchange carries.
-PHASE2_MONEY = report.money(PHASE2_AMOUNT, "usd")
+PHASE2_MONEY = format_minor_units(PHASE2_AMOUNT, "usd")
 # The refund agent's summary under its header line, as the criterion and its CLI twin both assert
 # it: the overlaid reads hang under the refund they saw, and the engine's reads are counted but
 # kept out of the agent's `N reads`.
@@ -282,8 +284,8 @@ PHASE2_SUMMARY = [
     f"    ↳ GET /v1/charges/{PHASE2_CHARGE} saw it  overlay",
     f"  ✗ stripe  refund {PHASE2_MONEY} on {PHASE2_CHARGE}  faked; would fail: "
     "charge_already_refunded",
-    f"  money: {report.money(2 * PHASE2_AMOUNT, 'usd')} in faked writes; {PHASE2_MONEY} of it "
-    "would fail",
+    f"  money: {format_minor_units(2 * PHASE2_AMOUNT, 'usd')} in faked writes; "
+    f"{PHASE2_MONEY} of it would fail",
     "  would have fired: refund.created, charge.refunded",
     "",
     "  127.0.0.1  3 reads (2 showing this run's writes)  2 irimi check reads  2 faked writes",
@@ -454,6 +456,7 @@ def _run_phase2_under_shadow(
     maps_dir = tmp_path / "shipped"
     maps_dir.mkdir()
     (maps_dir / "stripe.yaml").write_text(stripe_map)
+    complete_for_check(maps_dir)
     monkeypatch.setattr("irimi.servicemap.loader.shipped_dir", lambda: maps_dir)
     child = tmp_path / "child.py"
     child.write_text(
@@ -540,7 +543,7 @@ def test_the_refund_agent_leaves_no_refund_on_a_real_test_mode_charge(home, capf
     # The agent prints the charge's currency, because irimi formats the amount in the summary from
     # the code its own precondition read found on that charge - so the expected line cannot be
     # built from the amount alone.
-    money = report.money(amount, result["currency"])
+    money = format_minor_units(amount, result["currency"])
     assert result["refund"].startswith("re_"), "the agent did not get a parseable refund id"
     # What the agent saw: its refund in the list and the charge refunded in full, both overlaid,
     # and the retry refused by L3 because of a refund that exists only in irimi's write log.

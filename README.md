@@ -51,7 +51,7 @@ To use irimi on your own agent, install it from PyPI:
 ```
 uv tool install --python 3.12 irimi    # or: pipx install --python python3.12 irimi
 irimi init
-irimi shadow -- python agent.py
+irimi shadow -- python3 agent.py
 ```
 
 An irimi installed apart from your agent runs under a Python of its own, without your agent's
@@ -99,15 +99,17 @@ irimi shadow · run 2336 · 1 exchange · 0.0s
 
 `--quiet` leaves out the line per exchange and prints only the banner and the summary.
 
-To see a whole agent, run a sample workflow. It needs no keys and no network either: a fake
-internet answers for the real host names, so irimi's shipped maps decide every call.
+To see an agent, run [`examples/hello_agent.py`](examples/hello_agent.py): a few lines of stdlib,
+one real read and two writes irimi fakes. It needs no keys:
 
 ```
-uv run python -m tests.e2e.workflows                                 # workflows, and where to start
-uv run python -m tests.e2e.workflows w01_ticket_triage double_refund # bare, shadow, then serve
+uv run irimi shadow -- python3 examples/hello_agent.py
 ```
 
-Your own agent runs the same way: `uv run irimi shadow -- python agent.py`.
+`make demo` runs it against fake services on loopback, so it needs no network either, and
+`make demo EXAMPLE=quickstart` runs one of the [other examples](examples/README.md) the same way.
+
+Your own agent runs the same way: `uv run irimi shadow -- python3 agent.py`.
 
 ## How it works
 
@@ -701,12 +703,12 @@ container, an SDK that ignores the proxy variables, such as stripe-python, canno
   second serve on the same store exits 2 at once. A supervisor's restart retries until the old
   process has exited.
 
-**A worked example** is [`examples/server_agent/`](examples/server_agent/README.md): a refund agent
+**A worked example** is [`examples/sidecar/`](examples/sidecar/README.md): a refund agent
 on `ThreadingHTTPServer`, each request one `@sdk.trigger` run with a write tool and a faked refund,
-and a `compose.yaml` that runs it and irimi in two containers wired as above. Its `check.sh` sends
-two refunds at once against Stripe test mode and checks that irimi stored two runs and Stripe
-holds no refund. `tests/e2e/test_server_agent.py` runs the same two requests hermetically on every test
-run.
+and a `compose.yaml` that runs it and irimi in two containers wired as above.
+`scripts/live-checks/sidecar.sh` sends two refunds at once against Stripe test mode and checks that
+irimi stored two runs and Stripe holds no refund. `tests/e2e/test_sidecar.py` runs the same two
+requests hermetically on every test run.
 
 ## Comparing two runs
 
@@ -882,11 +884,11 @@ irimi replay · 725dc6add559a16f -> d63663c6da8905c7
   `irimi replay` in a file only you can read, never on its command line, and the run id as
   `--run=RUN`.
 
-**A worked example** is [`examples/llm_refund_agent/`](examples/llm_refund_agent/README.md): an
-agent that asks Anthropic what to refund, with a read tool and a write tool over its own SQLite, a
-`prompt.txt` and a `prompt_half.txt`. Its README records a run against Stripe test mode and the
-real Anthropic API, replays it with the half prompt, and says what a pass looks like.
-`tests/e2e/test_llm_agent_replay.py` does the same hermetically on every test run.
+**A worked example** is [`examples/replay/`](examples/replay/README.md): an agent on the
+official `anthropic` SDK that asks Claude what to refund, with a read tool and a write tool over its
+own SQLite, a `prompt.txt` and a `prompt_half.txt`. Its README records a run against Stripe test
+mode and the real Anthropic API, replays it with the half prompt, and says what a pass looks like.
+`tests/e2e/test_replay_example.py` does the same hermetically on every test run.
 
 What a replay cannot do:
 
@@ -1010,24 +1012,16 @@ The agents use the SDK API (`@sdk.trigger`, `sdk.run`, `@sdk.read_tool`, `@sdk.w
 `tests/e2e/workflows/agents/observe.py`, which wraps irimi's own decorators only to log which function ran, for the
 invariants.
 
-## The refund agent
+## The examples
 
-`examples/refund_agent/agent.py` is the live check: it lists charges from Stripe test mode,
-refunds one, lists refunds, re-reads the charge and retries the refund. It refuses any key that is
-not `sk_test_`, and it needs the opt-in `examples` group:
-
-```
-uv sync --group examples
-export STRIPE_API_KEY=sk_test_...
-uv run python examples/refund_agent/seed.py              # once, outside shadow: seeds a charge
-uv run irimi shadow -- python examples/refund_agent/agent.py
-```
-
-Bare, the refund is real. Under shadow, the read returns your real test-mode charges, the refund is
+[`examples/README.md`](examples/README.md) lists them: what each shows, what it needs and its
+command. [`examples/quickstart/`](examples/quickstart/README.md) is the place to start: a refund
+agent on stripe-python that lists charges, refunds one, lists refunds, re-reads the charge and
+retries the refund. Under shadow the read returns your real test-mode charges, the refund is
 answered from the fixture, the list and the re-read show it through the overlay, and the retry is
 refused with `charge_already_refunded`. Stripe itself never sees a refund.
-`tests/e2e/test_refund_agent.py` runs the same flow hermetically on every test run, and live when
-`STRIPE_API_KEY` is set; `CONTRIBUTING.md` has the details, including the optional Slack post.
+`tests/e2e/test_quickstart.py` runs it hermetically on every test run, and
+`tests/live/test_stripe_test_mode.py` against Stripe test mode (`make live`).
 
 ## Roadmap
 

@@ -64,52 +64,34 @@ real mitmproxy on a random loopback port against local HTTP servers. `tests/conf
 `IRIMI_HOME` and the working directory at empty temporary directories, so your own overrides file
 and CA are never in play.
 
-The example agent needs the Stripe SDK (and optionally Slack's). They are an opt-in group:
+The examples (`examples/README.md`) need the official Stripe and Anthropic SDKs, an opt-in group
+(`uv sync --group examples`). `make demo EXAMPLE=quickstart` runs one under `irimi shadow` against
+fake services, with no keys. Each example is driven end to end on every `uv run pytest -q`:
+`tests/e2e/test_quickstart.py`, `test_replay_example.py`, `test_sidecar.py` and `test_demo.py`.
+
+The live checks call real services. `tests/live/test_stripe_test_mode.py` runs the quickstart agent
+against Stripe test mode and checks that Stripe holds no refund afterwards. It is marked `live`,
+which a plain `uv run pytest` deselects even when `STRIPE_API_KEY` is exported. Run it with
+`uv run pytest -m live`; it still skips unless `STRIPE_API_KEY` is set:
 
 ```
-uv sync --group examples
-export STRIPE_API_KEY=sk_test_...
-uv run python examples/refund_agent/seed.py         # once, outside shadow: seeds a charge
-uv run irimi shadow -- python examples/refund_agent/agent.py
-```
-
-`tests/e2e/test_refund_agent.py` holds a hermetic criterion per phase, and Phase 2's twin through
-the real `irimi shadow`, all of which run on every `uv run pytest -q`.
-`tests/live/test_stripe_test_mode.py` holds one live check of that run. The live check is marked `live`, which a plain `uv run pytest` deselects even when `STRIPE_API_KEY`
-is exported. Run it with `uv run pytest -m live`; it still skips unless `STRIPE_API_KEY` is set and
-the `examples` group is installed. Run it by hand before closing a phase:
-
-```
+uv run python -m examples.seed_stripe          # once, outside shadow: seeds a charge
 STRIPE_API_KEY=sk_test_... uv run pytest -m live -q -rs tests/live
 ```
 
-With `SLACK_BOT_TOKEN` and `SLACK_CHANNEL` also set, the agent posts to Slack and reads the channel
-back, and the check asserts the post is in what it read. Give `SLACK_CHANNEL` as a channel **id**
-(`C0123`), not `#general`: that is what makes the read-back `overlay: full`. `chat.postMessage`
-accepts the name but `conversations.history` wants the id, and irimi's faked post echoes back the
-spelling it was sent, so a post to `#general` is read back from a channel irimi cannot match to it
-(#44).
+`scripts/live-checks/sidecar.sh` runs the sidecar example and `irimi serve` in two containers. It
+needs Docker with compose, `uv` and a test-mode key. It seeds two charges, builds both images,
+refunds both charges at once through the app under irimi, checks that irimi stored two ok runs and
+that Stripe holds no refund, and tears down:
 
 ```
-STRIPE_API_KEY=sk_test_... SLACK_BOT_TOKEN=xoxb-... SLACK_CHANNEL=C0123 \
-  uv run pytest -m live -q -rs tests/live
+STRIPE_API_KEY=sk_test_... scripts/live-checks/sidecar.sh
 ```
 
-Phase 3's exit for a server agent has a hermetic half, `tests/e2e/test_server_agent.py`, which runs on
-every `uv run pytest -q`, and a container half, which needs Docker with compose, `uv` and a
-test-mode key, and is run by hand before closing the phase (`examples/server_agent/README.md`).
-It seeds two charges, builds both images, refunds both charges at once through the agent under
-irimi, checks that irimi stored two ok runs and that Stripe holds no refund, and tears down:
-
-```
-STRIPE_API_KEY=sk_test_... examples/server_agent/check.sh
-```
-
-Phase 3's exit for an LLM agent (use case 1) has a hermetic half too,
-`tests/e2e/test_llm_agent_replay.py`, and a live half run by hand before closing the phase
-(`examples/llm_refund_agent/README.md`): record the agent against Stripe test mode and the real
-Anthropic API, replay it with `prompt_half.txt`, and check that the replay names the model call as
-where it diverged, the refund as the write that changed, and that Stripe holds no refund.
+`examples/replay/README.md` has the replay example's live run: record the agent against Stripe test
+mode and the real Anthropic API, replay it with `prompt_half.txt`, and check that the replay names
+the model call as where it diverged, the refund as the write that changed, and that Stripe holds no
+refund. Run the live checks by hand before a release.
 
 ## Sample workflows
 
@@ -162,9 +144,7 @@ tests/engine/  cli/  sdk/             the engine, the commands and the SDK, each
 tests/safety/                         the rules every run keeps, one file each (see its README)
 tests/e2e/  live/                     whole agents under irimi; `live` calls real services
 tests/support/                        the helpers and fakes the tests share; never collected
-examples/refund_agent/                the fixture agent the proxy is tested against
-examples/server_agent/                a server agent beside `irimi serve`, in containers
-examples/llm_refund_agent/            an LLM agent recorded, its prompt edited, and replayed
+examples/                             the examples, each with a README; examples/README.md lists them
 tests/e2e/workflows/                  the sample workflows, the harness that runs them, their pins
 ```
 

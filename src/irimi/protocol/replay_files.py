@@ -20,10 +20,12 @@ RESULT_FIELDS = ("source_run_id", "replay_run_id", "exit_code", "diverged_at", "
 @dataclass(frozen=True)
 class CallOutcome:
     """How the child's call ended: `called` False when the call could not be made, `error` why;
-    otherwise what it raised, None when it returned."""
+    otherwise what it raised, None when it returned. `cause` is, for a call not made because
+    importing the trigger's module raised, that exception's type (`NotCallable.cause`)."""
 
     called: bool
     error: ErrorInfo | None
+    cause: str | None = None
 
 
 @dataclass(frozen=True)
@@ -52,7 +54,10 @@ class ReplayResult:
 
 
 def call_outcome_to_json(outcome: CallOutcome) -> dict[str, Any]:
-    return {"called": outcome.called, "error": error_to_json(outcome.error)}
+    d: dict[str, Any] = {"called": outcome.called, "error": error_to_json(outcome.error)}
+    if outcome.cause is not None:
+        d["cause"] = outcome.cause
+    return d
 
 
 def read_call_outcome(path: Path) -> CallOutcome | None:
@@ -64,18 +69,18 @@ def read_call_outcome(path: Path) -> CallOutcome | None:
         d = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError):
         return None
-    if not isinstance(d, dict) or set(d) != {"called", "error"}:
+    if not isinstance(d, dict) or set(d) - {"cause"} != {"called", "error"}:
         return None
-    called, error = d["called"], d["error"]
-    if not isinstance(called, bool):
+    called, error, cause = d["called"], d["error"], d.get("cause")
+    if not isinstance(called, bool) or not (cause is None or isinstance(cause, str)):
         return None
     if error is None:
-        return CallOutcome(called, None)
+        return CallOutcome(called, None, cause)
     if not (isinstance(error, dict) and set(error) == {"type", "message"}):
         return None
     if not all(isinstance(v, str) for v in error.values()):
         return None
-    return CallOutcome(called, ErrorInfo(error["type"], error["message"]))
+    return CallOutcome(called, ErrorInfo(error["type"], error["message"]), cause)
 
 
 def replay_result_to_json(result: ReplayResult) -> dict[str, Any]:

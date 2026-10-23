@@ -72,7 +72,8 @@ def main() -> int:
         # process as it would have.
         why = _why_not_called(exc)
         print(f"error: cannot call {entrypoint}: {why}", file=sys.stderr)
-        _write(outcome_file, CallOutcome(False, trace.ErrorInfo("cannot-call", why)))
+        cause = exc.cause if isinstance(exc, NotCallable) else None
+        _write(outcome_file, CallOutcome(False, trace.ErrorInfo("cannot-call", why), cause))
         if not isinstance(exc, Exception):
             raise
         return CANNOT_CALL

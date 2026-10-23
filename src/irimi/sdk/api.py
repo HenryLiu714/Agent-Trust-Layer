@@ -19,7 +19,7 @@ from irimi.sdk.client import LOGGER_NAME
 from irimi.sdk.context import is_active
 from irimi.sdk.runs import RunScope
 from irimi.secret_shapes import cut_outside_secrets
-from irimi.trace import MAIN_MODULE, importable_module
+from irimi.trace import MAIN_MODULE, ErrorInfo, importable_module
 
 logger = logging.getLogger(LOGGER_NAME)
 
@@ -152,7 +152,13 @@ def _warn_script(f: Callable[..., Any]) -> None:
 
 
 class NotCallable(Exception):
-    """The trigger cannot be called from what `irimi replay` gave this process: the reason."""
+    """The trigger cannot be called from what `irimi replay` gave this process: the reason.
+    `cause` is the type of what importing its module raised, as `trace.ErrorInfo` names a type
+    (`builtins.ModuleNotFoundError`), and None when the import was not the trouble."""
+
+    def __init__(self, reason: str, cause: str | None = None) -> None:
+        super().__init__(reason)
+        self.cause = cause
 
 
 def resolve(entrypoint: str) -> Callable[..., Any]:
@@ -172,7 +178,10 @@ def resolve(entrypoint: str) -> Callable[..., Any]:
         found: Any = importlib.import_module(module_name)
     except (Exception, SystemExit) as exc:
         # SystemExit too: a module that parses its argv as it is imported exits on irimi's.
-        raise NotCallable(f"importing {module_name} raised {type(exc).__name__}: {exc}") from None
+        raise NotCallable(
+            f"importing {module_name} raised {type(exc).__name__}: {exc}",
+            ErrorInfo.from_exception(exc).type,
+        ) from None
     owner: Any = None
     for part in qualname.split("."):
         owner = found

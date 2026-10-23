@@ -117,12 +117,31 @@ def test_child_traffic_is_recorded(home, upstream, capfd):
     assert main(["shadow", *_py(src)]) == 0
     out = capfd.readouterr().out
     assert "200 hello from upstream" in out
-    assert "live" in out
+    assert "real" in out
     assert "read" in out
     assert "GET" in out
     assert "1 exchange ·" in out
     assert "1 read" in out
-    assert "1 exchange · 1 live · 0 delegated · 0 virtualized" in out
+    assert "1 exchange · 1 real · 0 answered by irimi (0 faked writes) · 0 sent to targets" in out
+
+
+def test_quiet_prints_the_banner_and_the_summary_and_no_line_per_exchange(home, upstream, capfd):
+    # capfd, not capsys: the child writes to the inherited fd 1, which capsys does not see.
+    src = (
+        "import http.client, os, urllib.parse;"
+        "u = urllib.parse.urlparse(os.environ['HTTPS_PROXY']);"
+        "c = http.client.HTTPConnection(u.hostname, u.port, timeout=10);"
+        f"c.request('GET', 'http://127.0.0.1:{upstream}/hello', "
+        f"headers={{'host': '127.0.0.1:{upstream}'}});"
+        "r = c.getresponse(); print(r.status, r.read().decode())"
+    )
+    assert main(["shadow", "--quiet", *_py(src)]) == 0
+    out = capfd.readouterr().out
+    assert "200 hello from upstream" in out
+    assert "only traffic sent through this proxy is shadowed" in out
+    assert "1 exchange · 1 real · 0 answered by irimi (0 faked writes) · 0 sent to targets" in out
+    assert " -> " not in out
+    assert "/hello" not in out
 
 
 def test_exit_code_propagates(home):
@@ -212,9 +231,10 @@ def test_reverse_door_refuses_unlisted_host(home, capfd):
     assert '403 {"error": {"type": "irimi_refused", "message": "irimi refused this request: ' in out
     assert "reverse door: host 'evil.example' is not in a loaded map or --allow-host" in out
     # The refusal is irimi's own answer, so it is recorded and counted like one. It was a GET, so
-    # it is not listed among the writes.
+    # it is not listed among the writes, and its host line says irimi refused it.
     assert "1 exchange" in out
-    assert "refused by irimi" not in out
+    assert "1 read refused by irimi" in out
+    assert "None of these writes" not in out
 
 
 def test_reverse_door_allow_host(home, capfd):

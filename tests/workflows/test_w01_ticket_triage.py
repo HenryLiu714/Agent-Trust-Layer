@@ -37,6 +37,9 @@ from irimi.trace import ErrorInfo, ToolCall, Trigger
 W = "w01_ticket_triage"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.
 MODES = ("shadow", "serve")
+PASSED = "faked; checked against live state: would succeed"
+# A refund a replay missed: its check read found no answer in the recording.
+UNCHECKED = "faked; could not check: irimi's check read of stripe got no usable answer"
 AGENT = "examples.workflows.w01_ticket_triage.agent"
 REFUND = "issue_refund#2"
 
@@ -66,9 +69,9 @@ def test_a_full_refund_walks_the_same_loop_as_bare_and_neither_write_happens(run
     assert replies(bare) == [("T-1001", "Refund of 4900 requested (statuses: 200).")]
     assert replies(shadow) == []
     summary = shadow.summaries()
-    refund = "  ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)"
+    refund = f"  ○ stripe  refund $49.00 on ch_TICKET1  {PASSED}"
     # The tool write's line follows the HTTP write's.
-    reply = f"  ○ tool {AGENT}.send_reply  shadow stand-in ran"
+    reply = f"  ○ tool  {AGENT}.send_reply  fake ran instead"
     assert summary[summary.index(refund) : summary.index(refund) + 2] == [refund, reply]
     # irimi recorded both calls in the run, under the default name: the function's own
     # `module.qualname`, the real module's because the harness launches through `launch.py`.
@@ -87,9 +90,7 @@ def test_the_half_prompt_changes_only_the_refund(run_workflow, mode):
     bare = run_workflow(W, "half_refund", "bare")
     shadow = run_workflow(W, "half_refund", mode)
     assert bare.world.stripe.refunds[0]["amount"] == 2450
-    assert "  ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)" in (
-        shadow.summaries()
-    )
+    assert f"  ○ stripe  refund $24.50 on ch_TICKET1  {PASSED}" in (shadow.summaries())
     # The loop has the same shape as the full refund's: the prompt moved one argument.
     full = run_workflow(W, "full_refund", mode)
     assert [c.get("label") for c in shadow.calls()] == [c.get("label") for c in full.calls()]
@@ -103,9 +104,11 @@ def test_a_refund_larger_than_the_charge_is_refused_the_way_stripe_refuses_it(ru
     assert bare.result()["refund_statuses"] == shadow.result()["refund_statuses"] == [400]
     assert shadow.by_label()[REFUND] == (400, "fake-L1")
     summary = shadow.summaries()
-    assert "  ✗ refund $98.00 on ch_TICKET1  would fail: amount_too_large" in summary
-    # A write L3 rejected fires nothing.
-    assert "  These writes did not happen." in summary
+    assert "  ✗ stripe  refund $98.00 on ch_TICKET1  faked; would fail: amount_too_large" in summary
+    # A write L3 rejected fires nothing, and all of its amount would fail.
+    assert "  None of these writes reached the real service:" in summary
+    assert not any(line.startswith("  would have fired:") for line in summary)
+    assert "  money: $98.00 in faked writes; $98.00 of it would fail" in summary
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -115,11 +118,83 @@ def test_a_second_refund_is_refused_because_the_overlay_shows_the_first(run_work
     assert bare.result()["refund_statuses"] == shadow.result()["refund_statuses"] == [200, 400]
     assert shadow.by_label()["issue_refund#3"] == (400, "fake-L1")
     summary = shadow.summaries()
-    assert "  ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)" in summary
-    assert "  ✗ refund $49.00 on ch_TICKET1  would fail: charge_already_refunded" in summary
+    assert f"  ○ stripe  refund $49.00 on ch_TICKET1  {PASSED}" in summary
+    assert (
+        "  ✗ stripe  refund $49.00 on ch_TICKET1  faked; would fail: charge_already_refunded"
+        in summary
+    )
     # Each refund's L3 read went to Stripe; the second saw the first only through the overlay.
     reads = shadow.internet.requests("api.stripe.com")
     assert [(r.method, r.path) for r in reads] == [("GET", "/v1/charges/ch_TICKET1")] * 3
+
+
+# What two runs of one scenario print differently in a summary: run ids, whole and cut to the
+# summary's 8 characters, and the elapsed seconds.
+RUN_IDS = re.compile(r"\b[0-9a-f]{16}\b|(?<=run )[0-9a-f]{8}\b|(?<=irimi replay )[0-9a-f]{8}\b")
+ELAPSED = re.compile(r" · \d+\.\ds$")
+
+
+def _masked(lines: list[str]) -> list[str]:
+    """`lines` with the run ids and elapsed seconds in them masked."""
+    return [ELAPSED.sub(" · <elapsed>", RUN_IDS.sub("<run>", line)) for line in lines]
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_quiet_prints_the_banner_and_the_summary_and_no_line_per_exchange(run_workflow, mode):
+    """`--quiet` drops the stream and nothing else: the run is `double_refund`'s, and so is its
+    summary."""
+    loud = run_workflow(W, "double_refund", mode)
+    quiet = run_workflow(W, "double_refund_quiet", mode)
+    assert loud.exchange_lines() and loud.tool_call_lines()
+    assert quiet.exchange_lines() == quiet.tool_call_lines() == []
+    assert any(" · listening on " in line for line in quiet.irimi)
+    assert quiet.summaries() and _masked(quiet.summaries()) == _masked(loud.summaries())
+    assert check_invariants(quiet) == []
+
+
+def test_runs_show_takes_a_unique_run_id_prefix_and_last(run_workflow):
+    """`runs show` finds a run by the first 8 characters of its id, the summary's short id, and
+    `last` or no id at all for the newest run, each printing what its whole id prints."""
+    shadow = run_workflow(W, "double_refund", "shadow")
+    [run] = shadow.sdk_runs()
+    store = ("--store", str(shadow.store_root()))
+    full = shadow.runs("show", run.run_id, *store)
+    assert full[0] == 0 and full[2] == []
+    assert shadow.runs("show", run.run_id[:8], *store) == full
+    newest = shadow.stored().list_runs()[0].run_id
+    last = shadow.runs("show", "last", *store)
+    assert last == shadow.runs("show", newest, *store)
+    assert last[0] == 0
+    assert shadow.runs("show", *store) == last
+    code, listed, err = shadow.runs("list", *store)
+    assert (code, err) == (0, [])
+    assert listed[0].split() == [
+        "run",
+        "started",
+        "took",
+        "status",
+        "attribution",
+        "trigger",
+        "exchanges",
+        "writes",
+    ]
+
+
+def test_the_shadow_summary_names_the_sdk_run_inside_the_process_and_how_to_replay_it(
+    run_workflow,
+):
+    """The live summary covers the whole process, so it says so, and ends with the SDK run that
+    holds the exchanges, by the short id `irimi replay` takes."""
+    shadow = run_workflow(W, "double_refund", "shadow")
+    [run] = shadow.sdk_runs()
+    summary = shadow.summary()
+    process = shadow.process_run_id()
+    assert summary[0].startswith(f"irimi shadow · run {process} (whole process) · 10 exchanges · ")
+    assert summary[-3:] == [
+        "",
+        f"  run {run.run_id[:8]}  handle_ticket(...)  10 exchanges · 2 writes",
+        f"  replay with: irimi replay {run.run_id[:8]}",
+    ]
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -135,15 +210,15 @@ def test_a_refund_the_model_repeats_with_the_same_key_is_one_write(run_workflow,
         first, again = result.events("refund")
         assert first["id"] == again["id"]
         assert (first["replayed"], again["replayed"]) == (None, "true")
-    refund = "fake-L1   write     POST api.stripe.com/v1/refunds -> 200"
+    refund = "faked         write     POST api.stripe.com/v1/refunds -> 200"
     assert [line for line in shadow.exchange_lines() if "/v1/refunds" in line] == [
-        f"{refund}  [fidelity:L1]",
-        f"{refund}  [fidelity:L1, idempotent-replay]",
+        refund,
+        f"{refund}  [idempotent-replay]",
     ]
     summary = shadow.summaries()
-    assert "  api.stripe.com     1 read  1 engine read  1 write intercepted" in summary
+    assert "  api.stripe.com     1 read  1 irimi check read  1 faked write" in summary
     assert [line for line in summary if "refund $" in line] == [
-        "  ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)"
+        f"  ○ stripe  refund $49.00 on ch_TICKET1  {PASSED}"
     ]
 
 
@@ -190,8 +265,8 @@ def test_the_ticket_is_stored_as_the_runs_trigger_by_its_dataclass(run_workflow,
 # ---------------------------------------------------------------------- irimi compare
 
 TRIAGE = f"handle_ticket  {AGENT}:handle_ticket"
-FULL = "○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)"
-REPLY = f"○ tool {AGENT}.send_reply  shadow stand-in ran"
+FULL = f"○ stripe  refund $49.00 on ch_TICKET1  {PASSED}"
+REPLY = f"○ tool  {AGENT}.send_reply  fake ran instead"
 # The reply the full refund's run sends the customer, which its summary line does not print.
 SENT = "Refund of 4900 requested (statuses: 200)."
 
@@ -212,7 +287,7 @@ COMPARED = {
         1,
         [
             f"  ~ A {FULL}",
-            "    B ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)",
+            f"    B ○ stripe  refund $24.50 on ch_TICKET1  {PASSED}",
             *reply_changed("Refund of 2450 requested (statuses: 200)."),
             "",
             "  0 same · 2 changed · 0 only in A · 0 only in B",
@@ -222,7 +297,7 @@ COMPARED = {
         1,
         [
             f"  ~ A {FULL}",
-            "    B ✗ refund $98.00 on ch_TICKET1  would fail: amount_too_large",
+            "    B ✗ stripe  refund $98.00 on ch_TICKET1  faked; would fail: amount_too_large",
             *reply_changed("Refund of 9800 requested (statuses: 400)."),
             "",
             "  0 same · 2 changed · 0 only in A · 0 only in B",
@@ -233,7 +308,7 @@ COMPARED = {
         1,
         [
             f"  = {FULL}",
-            "  + ✗ refund $49.00 on ch_TICKET1  would fail: charge_already_refunded",
+            "  + ✗ stripe  refund $49.00 on ch_TICKET1  faked; would fail: charge_already_refunded",
             *reply_changed("Refund of 4900 requested (statuses: 200, 400)."),
             "",
             "  1 same · 1 changed · 0 only in A · 1 only in B",
@@ -376,7 +451,7 @@ def test_irimi_compare_reads_a_run_whose_last_line_a_crash_cut(shared_store_run,
             f"  B  {TRIAGE}",
             "",
             f"  ~ A {FULL}",
-            "    B ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)",
+            f"    B ○ stripe  refund $24.50 on ch_TICKET1  {PASSED}",
             f"  - {REPLY}",
             "",
             "  0 same · 1 changed · 1 only in A · 0 only in B",
@@ -437,7 +512,7 @@ def test_runs_show_and_list_name_the_file_and_line_of_a_damaged_event(run_workfl
     code, out, err = result.runs("list", "--store", str(copy))
     assert (code, err) == (0, [f"warning: run {run} {refused}"])
     [listed] = [line for line in out if line.startswith(f"{run}  ")]
-    assert listed.endswith("  ? exchanges  ? writes"), listed
+    assert listed.split()[-4:] == ["?", "exchanges", "?", "writes"], listed
     events.write_text("".join(lines))
     record = copy / "runs" / run / "run.json"
     stored = json.loads(record.read_text())
@@ -454,7 +529,7 @@ def test_runs_show_and_list_name_the_file_and_line_of_a_damaged_event(run_workfl
         f"irimi: skipping stored run {run}: {refused}\n",
     )
     others = [r.run_id for r in result.stored().list_runs() if r.run_id != run]
-    assert [line.split()[0] for line in listed.stdout.splitlines()] == others != []
+    assert [line.split()[0] for line in listed.stdout.splitlines()[1:]] == others != []
     # That warning into a stderr whose reader has gone, the listing read whole: the logger
     # swallows the failed write, which stays buffered, and the interpreter's flush of it at exit
     # made the exit 120.
@@ -533,7 +608,7 @@ def test_irimi_shadow_whose_reader_goes_away_ends_quietly_with_its_run_stored(
         os.close(write)
     assert (ended.returncode, ended.stderr, started.exists()) == (141, "", False)
     stored = _irimi_process(half, "runs", "list", "--store", str(copy), "--limit", "1000")
-    assert {line.split()[0] for line in stored.stdout.splitlines()} == before
+    assert {line.split()[0] for line in stored.stdout.splitlines()[1:]} == before
     proc = subprocess.Popen(
         [sys.executable, "-m", "irimi", *shadow],
         env={**os.environ, paths.IRIMI_HOME_ENV: str(half.home)},
@@ -554,8 +629,8 @@ def test_irimi_shadow_whose_reader_goes_away_ends_quietly_with_its_run_stored(
             proc.kill()
     assert (proc.returncode, err) == (141, "")
     listed = _irimi_process(half, "runs", "list", "--store", str(copy), "--limit", "1000")
-    [new] = [line for line in listed.stdout.splitlines() if line.split()[0] not in before]
-    assert new.split("  ")[3:5] == ["error", "process"], new
+    [new] = [line for line in listed.stdout.splitlines()[1:] if line.split()[0] not in before]
+    assert re.split(r" {2,}", new)[3:5] == ["error (exit 5)", "process"], new
     shown = _irimi_process(half, "runs", "show", new.split()[0], "--store", str(copy))
     assert "exit code: 5" in shown.stdout.splitlines(), shown.stdout
 
@@ -584,7 +659,7 @@ def test_a_run_irimi_may_not_read_is_named_unreadable_not_missing(shared_store_r
     finally:
         shut.chmod(0o700)
     assert (listed.returncode, listed.stderr) == (0, f"irimi: skipping stored run {b}: {why}\n")
-    assert [line.split()[0] for line in listed.stdout.splitlines()] == others
+    assert [line.split()[0] for line in listed.stdout.splitlines()[1:]] == others
     assert a in others
     # The store itself: `runs list` says why it could not list it, where it said `no runs in`
     # the store, as if it held none, and `runs show` that a run in it could not be read.
@@ -663,16 +738,16 @@ def test_a_full_refund_replayed_unchanged_is_answered_from_its_recording(replaye
     assert [line for line in shown if line.startswith("irimi ")] == [
         next(line for line in shown if line.startswith(f"irimi shadow · run {source} · "))
     ]
-    assert "  api.stripe.com     1 read (1 from the recording)  1 write intercepted" in summary
+    assert "  api.stripe.com     1 read (1 from the recording)  1 faked write" in summary
     assert "  api.anthropic.com  4 llm (4 from the recording)" in summary
-    assert "  ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)" in summary
+    assert f"  ○ stripe  refund $49.00 on ch_TICKET1  {PASSED}" in summary
     # The tools the proxy cannot see: the customer comes from the recording, so the real
     # SQLite read never runs (the corpus logs which body ran), and the reply through its stand-in.
     assert recorded.tools() == [(LOOKUP_TOOL, "real"), (REPLY_TOOL, "shadow")]
     assert replay.tools() == [(LOOKUP_TOOL, "recording"), (REPLY_TOOL, "shadow")]
     assert replay.tool_call_lines() == [
-        f"recording read      tool {LOOKUP_TOOL} -> ok",
-        f"shadow    write     tool {REPLY_TOOL} -> ok",
+        f"tool-recorded read      {LOOKUP_TOOL} -> ok",
+        f"tool-fake     write     {REPLY_TOOL} -> ok",
     ]
     # What `irimi replay` says of it: every call answered, and the same two writes.
     assert replay.replay_result() == [
@@ -681,8 +756,8 @@ def test_a_full_refund_replayed_unchanged_is_answered_from_its_recording(replaye
         "  no divergence: every call was answered from the recording",
         "  7 from the recording · 0 missed",
         "",
-        "  = ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)",
-        f"  = ○ tool {REPLY_TOOL}  shadow stand-in ran",
+        f"  = ○ stripe  refund $49.00 on ch_TICKET1  {PASSED}",
+        f"  = ○ tool  {REPLY_TOOL}  fake ran instead",
         "",
         "  2 same · 0 changed · 0 only in A · 0 only in B",
     ]
@@ -717,8 +792,8 @@ def test_a_full_refund_replayed_without_its_database_reads_the_customer_from_the
         "  no divergence: every call was answered from the recording",
         "  7 from the recording · 0 missed",
         "",
-        "  = ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)",
-        f"  = ○ tool {REPLY_TOOL}  shadow stand-in ran",
+        f"  = ○ stripe  refund $49.00 on ch_TICKET1  {PASSED}",
+        f"  = ○ tool  {REPLY_TOOL}  fake ran instead",
         "",
         "  2 same · 0 changed · 0 only in A · 0 only in B",
     ]
@@ -742,7 +817,7 @@ def test_a_full_refund_replayed_with_the_half_prompt_diverges_at_the_first_llm_c
         ("llm#4", 200, None),
     ]
     assert replay.exchange_lines()[0] == (
-        "live      llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]"
+        "real          llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]"
     )
     [refund] = [ex for ex in replay.reported if ex.kind == "write"]
     assert refund.flags == ("fidelity:L1", "replay-miss")
@@ -752,9 +827,7 @@ def test_a_full_refund_replayed_with_the_half_prompt_diverges_at_the_first_llm_c
     assert check.flags == ("fidelity:recording", "from-recording")
     assert replay.internet.requests("api.stripe.com") == []
     assert len(replay.internet.requests("api.anthropic.com")) == 4
-    assert "  ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)" in (
-        replay.summaries()
-    )
+    assert f"  ○ stripe  refund $24.50 on ch_TICKET1  {PASSED}" in (replay.summaries())
     assert replay.returned()["refund_statuses"] == recorded.returned()["refund_statuses"] == [200]
     # The customer is looked up before any write misses, so the recording still answers it. The
     # reply's text changed with the prompt, and its stand-in runs all the same.
@@ -768,12 +841,12 @@ def test_a_full_refund_replayed_with_the_half_prompt_diverges_at_the_first_llm_c
     assert replay.replay_result() == [
         f"irimi replay · {source} → {replay.process_run_id()}",
         "  agent exited 0",
-        "  diverged at the agent's 1st call: live      llm       "
+        "  diverged at the agent's 1st call: real          llm       "
         "POST api.anthropic.com/v1/messages -> 200  [replay-miss]",
         "  2 from the recording · 5 missed",
         "",
-        "  ~ A ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)",
-        "    B ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)",
+        f"  ~ A ○ stripe  refund $49.00 on ch_TICKET1  {PASSED}",
+        f"    B ○ stripe  refund $24.50 on ch_TICKET1  {PASSED}",
         *reply_changed("Refund of 2450 requested (statuses: 200)."),
         "",
         "  0 same · 2 changed · 0 only in A · 0 only in B",
@@ -800,12 +873,12 @@ def test_the_half_prompt_replayed_by_its_command_writes_no_reply_to_the_seeded_d
     assert replay.replay_result() == [
         f"irimi replay · {source} → {replay.process_run_id()}",
         "  agent exited 0",
-        "  diverged at the agent's 1st call: live      llm       "
+        "  diverged at the agent's 1st call: real          llm       "
         "POST api.anthropic.com/v1/messages -> 200  [replay-miss]",
         "  2 from the recording · 5 missed",
         "",
-        "  ~ A ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)",
-        "    B ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)",
+        f"  ~ A ○ stripe  refund $49.00 on ch_TICKET1  {PASSED}",
+        f"    B ○ stripe  refund $24.50 on ch_TICKET1  {PASSED}",
         *reply_changed("Refund of 2450 requested (statuses: 200)."),
         "",
         "  0 same · 2 changed · 0 only in A · 0 only in B",
@@ -839,7 +912,7 @@ UNCHANGED = {
             "  9 from the recording · 0 missed",
             "",
             f"  = {FULL}",
-            "  = ✗ refund $49.00 on ch_TICKET1  would fail: charge_already_refunded",
+            "  = ✗ stripe  refund $49.00 on ch_TICKET1  faked; would fail: charge_already_refunded",
             f"  = {REPLY}",
             "",
             "  3 same · 0 changed · 0 only in A · 0 only in B",
@@ -881,7 +954,7 @@ def test_each_further_scenario_replayed_unchanged_does_not_diverge(replayed, sce
 # Where a replay of a W1 run with another prompt first misses its recording: the first model call,
 # since the system prompt is in every call.
 FIRST_CALL = (
-    "the agent's 1st call: live      llm       POST api.anthropic.com/v1/messages -> 200  "
+    "the agent's 1st call: real          llm       POST api.anthropic.com/v1/messages -> 200  "
     "[replay-miss]"
 )
 
@@ -950,7 +1023,7 @@ RESTORED = {
         1,
         "2 from the recording · 5 missed",
         [
-            "  ~ A ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)",
+            f"  ~ A ○ stripe  refund $24.50 on ch_TICKET1  {PASSED}",
             f"    B {FULL}",
             *reply_changed(SENT, was="Refund of 2450 requested (statuses: 200)."),
             "",
@@ -961,7 +1034,7 @@ RESTORED = {
         1,
         "2 from the recording · 5 missed",
         [
-            "  ~ A ✗ refund $98.00 on ch_TICKET1  would fail: amount_too_large",
+            "  ~ A ✗ stripe  refund $98.00 on ch_TICKET1  faked; would fail: amount_too_large",
             f"    B {FULL}",
             *reply_changed(SENT, was="Refund of 9800 requested (statuses: 400)."),
             "",
@@ -973,7 +1046,7 @@ RESTORED = {
         "3 from the recording · 4 missed",
         [
             f"  = {FULL}",
-            "  - ✗ refund $49.00 on ch_TICKET1  would fail: charge_already_refunded",
+            "  - ✗ stripe  refund $49.00 on ch_TICKET1  faked; would fail: charge_already_refunded",
             *reply_changed(SENT, was="Refund of 4900 requested (statuses: 200, 400)."),
             "",
             "  1 same · 1 changed · 1 only in A · 0 only in B",
@@ -992,13 +1065,14 @@ RESTORED = {
     ),
     # Both writes are new. The refund misses, and the recording holds no L3 read of the charge to
     # check it against (only the agent's own reads of it), nor does a replay read live state for
-    # one: `not_evaluable`, L2, and its amount printed as sent, no checked read having named a
-    # currency, where `irimi compare` of two recorded runs prints `$49.00`.
+    # one: `not_evaluable`, so it could not be checked, and its amount printed as minor units, no
+    # checked read having named a currency, where `irimi compare` of two recorded runs prints
+    # `$49.00`.
     "runaway_loop": (
         1,
         "1 from the recording · 6 missed",
         [
-            "  + ○ refund 4900 on ch_TICKET1  unvalidated (L2)",
+            f"  + ○ stripe  refund 4900 (minor units, currency unknown) on ch_TICKET1  {UNCHECKED}",
             f"  + {REPLY}",
             "",
             "  0 same · 0 changed · 0 only in A · 2 only in B",
@@ -1120,12 +1194,12 @@ def test_a_full_refund_replayed_with_other_args_says_its_args_differ(replayed):
         f"irimi replay · {source} → {replay.process_run_id()}",
         "  agent exited 0",
         "  (the triggers' args differ)",
-        "  diverged at the agent's 1st call: live      llm       "
+        "  diverged at the agent's 1st call: real          llm       "
         "POST api.anthropic.com/v1/messages -> 200  [replay-miss]",
         "  3 from the recording · 4 missed",
         "",
-        "  = ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)",
-        f"  = ○ tool {REPLY_TOOL}  shadow stand-in ran",
+        f"  = ○ stripe  refund $49.00 on ch_TICKET1  {PASSED}",
+        f"  = ○ tool  {REPLY_TOOL}  fake ran instead",
         "",
         "  2 same · 0 changed · 0 only in A · 0 only in B",
     ]
@@ -1155,8 +1229,8 @@ def test_a_call_of_another_function_is_replayed_in_place_of_the_trigger(replayed
         "  no divergence, but 6 of the recording's calls were never made",
         "  1 from the recording · 0 missed",
         "",
-        "  - ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)",
-        f"  - ○ tool {REPLY_TOOL}  shadow stand-in ran",
+        f"  - ○ stripe  refund $49.00 on ch_TICKET1  {PASSED}",
+        f"  - ○ tool  {REPLY_TOOL}  fake ran instead",
         "",
         "  0 same · 0 changed · 2 only in A · 0 only in B",
     ]
@@ -1214,8 +1288,8 @@ def test_a_full_refund_replayed_under_the_agent_s_python_is_answered_from_its_re
         "  no divergence: every call was answered from the recording",
         "  7 from the recording · 0 missed",
         "",
-        "  = ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)",
-        f"  = ○ tool {REPLY_TOOL}  shadow stand-in ran",
+        f"  = ○ stripe  refund $49.00 on ch_TICKET1  {PASSED}",
+        f"  = ○ tool  {REPLY_TOOL}  fake ran instead",
         "",
         "  2 same · 0 changed · 0 only in A · 0 only in B",
     ]
@@ -1259,8 +1333,8 @@ def test_a_replay_is_replayed_by_the_trigger_it_called(replayed, tmp_path, promp
         "  no divergence: every call was answered from the recording",
         "  7 from the recording · 0 missed",
         "",
-        f"  = ○ refund {amount} on ch_TICKET1  unvalidated (L3 preconditions passed)",
-        f"  = ○ tool {REPLY_TOOL}  shadow stand-in ran",
+        f"  = ○ stripe  refund {amount} on ch_TICKET1  {PASSED}",
+        f"  = ○ tool  {REPLY_TOOL}  fake ran instead",
         "",
         "  2 same · 0 changed · 0 only in A · 0 only in B",
     ]
@@ -1360,12 +1434,12 @@ def test_the_half_prompt_s_replay_replayed_with_the_full_prompt_diverges_back(re
     assert second.replay_result() == [
         f"irimi replay · {first.process_run_id()} → {second.process_run_id()}",
         "  agent exited 0",
-        "  diverged at the agent's 1st call: live      llm       "
+        "  diverged at the agent's 1st call: real          llm       "
         "POST api.anthropic.com/v1/messages -> 200  [replay-miss]",
         "  2 from the recording · 5 missed",
         "",
-        "  ~ A ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)",
-        "    B ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)",
+        f"  ~ A ○ stripe  refund $24.50 on ch_TICKET1  {PASSED}",
+        f"    B ○ stripe  refund $49.00 on ch_TICKET1  {PASSED}",
         *reply_changed(SENT, was="Refund of 2450 requested (statuses: 200)."),
         "",
         "  0 same · 2 changed · 0 only in A · 0 only in B",
@@ -1406,12 +1480,12 @@ def test_a_full_refund_replayed_with_its_tool_results_changed_diverges_mid_conve
     assert replay.replay_result() == [
         f"irimi replay · {source} → {replay.process_run_id()}",
         "  agent exited 0",
-        "  diverged at the agent's 4th call: live      llm       "
+        "  diverged at the agent's 4th call: real          llm       "
         "POST api.anthropic.com/v1/messages -> 200  [replay-miss]",
         "  4 from the recording · 3 missed",
         "",
-        "  = ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)",
-        f"  = ○ tool {REPLY_TOOL}  shadow stand-in ran",
+        f"  = ○ stripe  refund $49.00 on ch_TICKET1  {PASSED}",
+        f"  = ○ tool  {REPLY_TOOL}  fake ran instead",
         "",
         "  2 same · 0 changed · 0 only in A · 0 only in B",
     ]
@@ -1556,8 +1630,9 @@ def test_a_replay_that_adds_a_refund_reads_live_after_it_and_sees_it(replayed):
     """The other direction of a changed agent: `checked_charge` recorded no write, and its replay
     with `PROMPT=verify` refunds. The refund misses and is faked; the recording made no read of the
     charge to check it against, and a replay never checks against live state, so it is
-    `not_evaluable`, L2. The replay diverges: its second read, which the recording holds, shows a
-    world without the refund, so it goes live, and the overlay shows the refund in it."""
+    `not_evaluable`, and could not be checked. The replay diverges: its second read, which the
+    recording holds, shows a world without the refund, so it goes live, and the overlay shows the
+    refund in it."""
     recorded, replay = replayed(W, "checked_charge", {"PROMPT": "verify"})
     assert check_invariants(replay) == []
     assert replay.answered() == [
@@ -1578,8 +1653,11 @@ def test_a_replay_that_adds_a_refund_reads_live_after_it_and_sees_it(replayed):
         None,
         ("fidelity:recording", "replay-miss"),
     )
-    # No read named a currency, so the amount is printed as sent.
-    assert "  ○ refund 4900 on ch_TICKET1  unvalidated (L2)" in replay.summaries()
+    # No read named a currency, so the amount is printed as minor units of an unknown currency.
+    refund_line = (
+        f"  ○ stripe  refund 4900 (minor units, currency unknown) on ch_TICKET1  {UNCHECKED}"
+    )
+    assert refund_line in replay.summaries()
     again = [ex for ex in replay.reported if ex.request.path == "/v1/charges/ch_TICKET1"][-1]
     assert again.flags == ("replay-miss", "fidelity:overlay")
     assert json.loads(again.response.body)["amount_refunded"] == 4900

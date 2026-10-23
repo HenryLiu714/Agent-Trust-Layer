@@ -195,9 +195,10 @@ def actions(run: StoredRun, index: MapIndex | None) -> list[Action]:
     calls, telemetry and read tools are not actions, and neither is a retry the idempotency store
     answered as the write it repeats."""
     out: list[Action] = []
+    checks = report.check_reads([event for event in run.events if isinstance(event, Exchange)])
     for event in run.events:
         if isinstance(event, Exchange) and report.is_intercepted(event):
-            out.append(_exchange_action(event, index))
+            out.append(_exchange_action(event, index, checks.get(id(event))))
         elif isinstance(event, ToolCall) and report.is_stood_in(event):
             error = event.error.type if event.error is not None else None
             out.append(
@@ -219,7 +220,9 @@ def _spread(name: str, value: JSONValue) -> dict[str, JSONValue]:
     return {name: value}
 
 
-def _exchange_action(exchange: Exchange, index: MapIndex | None) -> Action:
+def _exchange_action(
+    exchange: Exchange, index: MapIndex | None, check_read: Exchange | None
+) -> Action:
     request = exchange.request
     route = report.route_of(exchange, index)
     pairs = parse_qsl(request.query, keep_blank_values=True)
@@ -251,7 +254,7 @@ def _exchange_action(exchange: Exchange, index: MapIndex | None) -> Action:
     }
     return Action(
         (EXCHANGE_KEY, exchange.service, exchange.operation),
-        report.write_sentence(exchange, index),
+        report.write_sentence(exchange, index, check_read),
         BODY_TRUNCATED_FLAG in exchange.flags,
         _named(outcome),
         fields,

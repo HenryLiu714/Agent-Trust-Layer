@@ -38,8 +38,8 @@ def test_an_unmapped_services_post_read_is_faked_and_the_agent_takes_another_bra
         "quote": (200, "fake-L0"),
         "charges": (200, None),
     }
-    quote_line = "fake-L0   unknown   POST subagent.internal/quote -> 200"
-    assert f"{quote_line}  [unclassified, fidelity:L0]" in shadow.exchange_lines()
+    quote_line = "faked         unknown   POST subagent.internal/quote -> 200"
+    assert f"{quote_line}  [unclassified]" in shadow.exchange_lines()
     # The echo reflects what was posted and mints a timestamp; it prices nothing.
     quote = shadow.events("quote")[0]["doc"]
     assert quote["skus"] == ["SKU-A", "SKU-B"] and "total" not in quote
@@ -64,13 +64,15 @@ def test_a_map_naming_the_post_read_forwards_it_and_fakes_the_reservation(run_wo
         "reserve": (200, "fake-L0"),
     }
     lines = shadow.exchange_lines()
-    assert "live      read      POST subagent.internal/quote -> 200" in lines
-    assert "fake-L0   write     POST subagent.internal/reservations -> 200  [fidelity:L0]" in lines
+    assert "real          read      POST subagent.internal/quote -> 200" in lines
+    assert "faked         write     POST subagent.internal/reservations -> 200" in lines
     # The route's `ids:` mints the reservation id the agent then holds on to.
     reservation = decision(shadow)["reservation"]
     assert reservation.startswith("rsv_") and reservation != "rsv_0001"
     assert decision(shadow)["reserved"] is True
-    assert "  ○ POST subagent.internal/reservations  unvalidated (L0)" in shadow.summaries()
+    assert "  ○ subagent  POST subagent.internal/reservations  faked; not checked" in (
+        shadow.summaries()
+    )
     # The quote reached the service; the reservation did not.
     assert [(r.method, r.path) for r in shadow.internet.requests(HOST)] == [
         ("GET", "/inventory"),
@@ -137,7 +139,7 @@ def test_irimi_strips_its_run_header_at_the_hop_and_only_the_agents_own_header_s
     # was its run's, and the run's summary names the reservation it faked.
     assert [r.run_id for r in shadow.stored().list_runs()] == [run_id]
     assert shadow.stored().load_run(UNATTRIBUTED).events == []
-    assert f"  ○ POST {HOST}/reservations  unvalidated (L0)" in shadow.run_blocks()[run_id]
+    assert f"  {RESERVATION}" in shadow.run_blocks()[run_id]
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -166,9 +168,7 @@ def test_every_sub_agent_call_joins_its_parents_run(run_workflow, mode):
     if mode == "serve":
         assert set(shadow.run_blocks()) == runs
         for block in shadow.run_blocks().values():
-            assert [line for line in block if line.startswith("  ○ ")] == [
-                f"  ○ POST {HOST}/reservations  unvalidated (L0)"
-            ]
+            assert [line for line in block if line.startswith("  ○ ")] == [f"  {RESERVATION}"]
     assert {run_id for run_id, a in records.items() if a == "sdk"} == runs
     entrypoint = "examples.workflows.w08_orchestrator.agent:plan_quarter_close"
     assert {(r.trigger.name, r.trigger.entrypoint) for r in shadow.sdk_runs() if r.trigger} == {
@@ -222,7 +222,7 @@ def test_a_tool_called_in_a_nested_trigger_is_a_call_of_its_parent_s_run(run_wor
         ]
     assert reader.load_run(shadow.engine_run_id()).events == []
     assert [line for line in shadow.summaries() if "○ tool" in line] == [
-        f"  ○ tool {AGENT}.record_decision  shadow stand-in ran"
+        f"  ○ tool  {AGENT}.record_decision  fake ran instead"
     ] * 2
     assert [e["decisions_so_far"] for e in shadow.events("policy")] == [0, 0]
     assert [e["decisions_so_far"] for e in bare.events("policy")] == [0, 1]
@@ -233,13 +233,15 @@ def test_a_tool_called_in_a_nested_trigger_is_a_call_of_its_parent_s_run(run_wor
 # ---------------------------------------------------------------------- irimi compare
 
 PLAN = f"plan_quarter_close  {AGENT}:plan_quarter_close"
-RESERVATION = f"○ POST {HOST}/reservations  unvalidated (L0)"
+RESERVATION = f"○ subagent  POST {HOST}/reservations  faked; not checked"
+# What a write sent to `DOWN_TARGET` prints: the target irimi could not reach, by host and port.
+UNREACHED = f"✗ subagent  POST {HOST}/reservations  could not reach target {DOWN_TARGET.removeprefix('http://')}"
 # What each nested scenario's two orchestrator runs both wrote: the reservation, made by the
 # orchestrator or, with `--nested-reserve`, by `reservation_agent`, a nested trigger; and with
 # `--record` the decision's write tool. The sub-agent's read tool is no write.
 NESTED = {
     "nested_runs": [RESERVATION],
-    "nested_tools": [RESERVATION, f"○ tool {AGENT}.record_decision  shadow stand-in ran"],
+    "nested_tools": [RESERVATION, f"○ tool  {AGENT}.record_decision  fake ran instead"],
     "nested_write": [RESERVATION],
 }
 
@@ -304,7 +306,7 @@ def test_irimi_compare_shows_what_a_map_changed_about_the_runs_writes(shared_sto
         f"  B  {PLAN}",
         "",
         f"  - {RESERVATION}",
-        f"  + ○ POST {HOST}/quote  unclassified (L0)",
+        f"  + ○ {HOST}  POST {HOST}/quote  faked; not checked (unclassified)",
         "",
         "  0 same · 0 changed · 1 only in A · 1 only in B",
     ]
@@ -316,9 +318,9 @@ def test_a_reservation_whose_answer_target_is_down_is_answered_502_and_compared_
     shared_store_run, run_workflow, mode
 ):
     """`target_down` delegates the reservation to an answer target nothing listens on: irimi
-    cannot reach it, the agent gets its own 502 marked `irimi`, and the summary says the write went
-    unanswered. Bare, the service reserves. Recorded into one store with `with_map`, B under
-    shadow or serve, compare pairs the two reservations and shows the unanswered one as its
+    cannot reach it, the agent gets its own 502 marked `irimi`, and the summary says the write could
+    not reach its target. Bare, the service reserves. Recorded into one store with `with_map`, B
+    under shadow or serve, compare pairs the two reservations and shows the unanswered one as its
     summary printed it: a write whose target failed is still a write the agent attempted, which
     a set of answered actions alone would drop."""
     bare = run_workflow(W, "target_down", "bare")
@@ -343,8 +345,7 @@ def test_a_reservation_whose_answer_target_is_down_is_answered_502_and_compared_
         f"  B  {PLAN}",
         "",
         f"  ~ A {RESERVATION}",
-        f"    B ○ POST {HOST}/reservations → {DOWN_TARGET}/reservations  unanswered (target "
-        "unreachable)",
+        f"    B {UNREACHED}",
         "",
         "  0 same · 1 changed · 0 only in A · 0 only in B",
     ]
@@ -354,24 +355,24 @@ def test_a_reservation_whose_answer_target_is_down_is_answered_502_and_compared_
 @pytest.mark.parametrize("mode", MODES)
 def test_a_down_target_s_closing_lines_say_the_tool_write_did_not_happen_either(run_workflow, mode):
     """`target_down` with `--record`: the reservation goes unanswered, its target down, and the
-    orchestrator records its decision through the write tool's stand-in. The closing lines say the
-    reservation did not reach the internal service, and that the tool writes did not happen
-    either, beyond what the tool's own `○ tool` line says. Under serve, the run's block,
-    printed as it ends, says the same. Bare, the decision is really recorded."""
+    orchestrator records its decision through the write tool's fake. The writes block says that
+    neither reached the real service: the reservation could not reach its target, and the tool's
+    fake ran instead. Under serve, the run's block, printed as it ends, says the same. Bare, the
+    decision is really recorded."""
     down = run_workflow(W, "target_down_tools", mode)
     bare = run_workflow(W, "target_down_tools", "bare")
     assert down.by_label()["reserve"] == (502, "irimi")
     summary = down.summaries()
-    assert [line for line in summary if line.startswith("  ○ ")] == [
-        f"  ○ POST {HOST}/reservations → {DOWN_TARGET}/reservations  unanswered (target "
-        "unreachable)",
-        f"  ○ tool {AGENT}.record_decision  shadow stand-in ran",
+    start = summary.index("  None of these writes reached the real service:")
+    assert summary[start + 1 : start + 4] == [
+        f"  {UNREACHED}",
+        f"  ○ tool  {AGENT}.record_decision  fake ran instead",
+        "",
     ]
-    assert summary[-2:] == [
-        "  These writes did not reach subagent. The tool writes did not happen.",
-        f"  1 was not answered at all: {DOWN_TARGET}/reservations could not be reached, and the "
-        "agent got a 502.",
-    ]
+    assert f"  {HOST}  2 reads  1 write that could not reach the target" in summary
+    assert "  4 exchanges · 3 real · 1 answered by irimi (0 faked writes) · 0 sent to targets" in (
+        summary
+    )
     assert not (down.state / "decisions.jsonl").exists()
     assert len((bare.state / "decisions.jsonl").read_text().splitlines()) == 1
 

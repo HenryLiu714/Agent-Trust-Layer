@@ -11,6 +11,7 @@ through `NO_PROXY` and the stubs are on loopback. The maps are `tests/test_repla
 """
 
 import json
+import re
 import shlex
 import sys
 from dataclasses import replace
@@ -230,7 +231,7 @@ def test_an_unchanged_agent_replays_with_no_divergence_and_sends_nothing(home, c
         "  no divergence: every call was answered from the recording",
         "  3 from the recording · 0 missed",
         "",
-        "  = ○ refund $49.00 on ch_REAL1  unvalidated (L3 preconditions passed)",
+        "  = ○ stripe  refund $49.00 on ch_REAL1  faked; checked against live state: would succeed",
         "",
         "  1 same · 0 changed · 0 only in A · 0 only in B",
     ]
@@ -257,12 +258,14 @@ def test_a_changed_prompt_diverges_at_the_llm_call_and_refunds_another_amount(
     assert _result(out) == [
         f"irimi replay · {source} → {replay.run_id}",
         "  agent exited 0",
-        "  diverged at the agent's 1st call: live      llm       "
+        "  diverged at the agent's 1st call: real          llm       "
         "POST localhost/v1/messages -> 200  [replay-miss]",
         "  1 from the recording · 2 missed",
         "",
-        "  ~ A ○ refund $49.00 on ch_REAL1  unvalidated (L3 preconditions passed)",
-        "    B ○ refund $24.50 on ch_REAL1  unvalidated (L3 preconditions passed)",
+        "  ~ A ○ stripe  refund $49.00 on ch_REAL1  faked; checked against live state: "
+        "would succeed",
+        "    B ○ stripe  refund $24.50 on ch_REAL1  faked; checked against live state: "
+        "would succeed",
         "",
         "  0 same · 1 changed · 0 only in A · 0 only in B",
     ]
@@ -308,11 +311,15 @@ def test_call_and_args_override_the_recorded_entrypoint_and_args(home, capfd):
     )
     result = _result(out)
     assert result[2:4] == [
-        "  diverged at the agent's 2nd call: fake-L1   write     POST 127.0.0.1/v1/refunds -> 200  "
-        "[fidelity:L1, replay-miss]",
+        "  diverged at the agent's 2nd call: faked         write     "
+        "POST 127.0.0.1/v1/refunds -> 200  "
+        "[replay-miss]",
         "  1 from the recording · 1 missed",
     ]
-    assert "    B ○ refund $24.50 on ch_REAL1  unvalidated (L3 preconditions passed)" in result
+    assert (
+        "    B ○ stripe  refund $24.50 on ch_REAL1  faked; checked against live state: "
+        "would succeed" in result
+    )
     # The agent's 2nd call, as the totals count two: irimi's check read of the charge, stored
     # between the two, is not the agent's and is not counted.
     events = StoreReader(home / "store").load_run(replay.run_id).events
@@ -327,7 +334,7 @@ def test_call_and_args_override_the_recorded_entrypoint_and_args(home, capfd):
     code, out, err = _replay(capfd, source, "--args", json.dumps(other))
     assert (code, err) == (0, [])
     assert _result(out)[2] == "  (the triggers' args differ)"
-    assert _result(out)[3].startswith("  diverged at the agent's 1st call: live      llm ")
+    assert _result(out)[3].startswith("  diverged at the agent's 1st call: real          llm ")
 
 
 def test_args_stored_by_their_description_are_refused_and_given_with_args_run(home, capfd):
@@ -407,6 +414,19 @@ def test_sdk_replay_of_a_run_the_store_does_not_hold_is_a_result_that_exits_2(ho
         None,
         (f"error: no run nosuchrun in {home / 'store'}",),
     )
+
+
+def test_a_replay_takes_a_prefix_of_the_run_id_and_names_the_whole_one(home, capfd, tmp_path):
+    """A prefix only one run id starts with names that run: the replay reads it, and its
+    result and messages name the whole id."""
+    source = _record(home, f"replay_agent.Desk().handle({TICKET})")
+    capfd.readouterr()
+    result_file = tmp_path / "result.json"
+    code, _, err = _replay(capfd, source[:8], "--result-file", str(result_file))
+    assert code == 2
+    assert err[0].startswith("error: cannot call replay_agent:Desk.handle: ")
+    result = ReplayResult.from_json(json.loads(result_file.read_text()))
+    assert result.source_run_id == source
 
 
 def test_a_trigger_it_cannot_call_is_a_replay_that_could_not_run(home, capfd, tmp_path):
@@ -499,7 +519,7 @@ def test_a_trigger_only_the_agent_s_python_can_import_is_called_under_python(hom
         "  no divergence: every call was answered from the recording",
         "  3 from the recording · 0 missed",
         "",
-        "  = ○ refund $49.00 on ch_REAL1  unvalidated (L3 preconditions passed)",
+        "  = ○ stripe  refund $49.00 on ch_REAL1  faked; checked against live state: would succeed",
         "",
         "  1 same · 0 changed · 0 only in A · 0 only in B",
     ]
@@ -877,7 +897,9 @@ def test_runs_list_and_show_mark_a_run_a_label_made_in_a_replay(home, capfd):
     replays = {r.attribution: r.run_id for r in _replay_runs(home, source)}
     assert replays == {"process": replays["process"], "header": "labelled-in-replay"}
     assert main(["runs", "list"]) == 0
-    listed = [line.split("  ") for line in capfd.readouterr().out.splitlines()]
+    # A header row, then the runs, their columns padded to two spaces or more.
+    rows = capfd.readouterr().out.splitlines()[1:]
+    listed = [re.split(r"  +", line) for line in rows]
     attribution = {columns[0]: columns[4] for columns in listed}
     assert attribution[source] == "sdk"
     assert attribution[replays["process"]] == f"replay of {source}"

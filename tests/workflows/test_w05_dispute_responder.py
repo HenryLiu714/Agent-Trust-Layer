@@ -42,12 +42,12 @@ def test_a_large_dispute_is_tagged_alerted_and_fought_without_a_refund(run_workf
     assert actions(shadow) == [("charge.dispute.created", "fight")]
     # `/v1/disputes/{id}` is a route the Stripe map does not name: a GET on a mapped host with no
     # route falls back to the verb rule, so it is forwarded live as a read.
-    assert "live      read      GET api.stripe.com/v1/disputes/dp_BIG -> 200" in (
+    assert "real          read      GET api.stripe.com/v1/disputes/dp_BIG -> 200" in (
         shadow.exchange_lines()
     )
     summary = shadow.summaries()
-    assert "  ○ update customer cus_DISPUTER  unvalidated (L1)" in summary
-    assert "  These writes did not happen. Would have fired: customer.updated." in summary
+    assert "  ○ stripe  update customer cus_DISPUTER  faked; not checked" in summary
+    assert "  would have fired: customer.updated" in summary
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -85,16 +85,16 @@ def test_a_small_dispute_is_refunded_and_the_refund_would_have_fired_two_events(
         "/v1/refunds",
     ]
     summary = shadow.summaries()
-    assert (
-        "  These writes did not happen. Would have fired: customer.updated, refund.created, "
-        "charge.refunded." in summary
-    )
+    assert "  would have fired: customer.updated, refund.created, charge.refunded" in summary
     # LOOKS WRONG: a refund with no `amount` refunds the whole charge. Stripe (and the bare run)
     # answer 1500, but irimi's L1 refund carries its fixture's amount, 100, although its own L3
     # read found the charge and its 1500 unrefunded. The summary cannot say how much either.
     assert [e["amount"] for e in bare.events("refund")] == [1500]
     assert [e["amount"] for e in shadow.events("refund")] == [100]
-    assert "  ○ refund ? on ch_SMALL  unvalidated (L3 preconditions passed)" in summary
+    assert (
+        "  ○ stripe  refund ? on ch_SMALL  faked; checked against live state: would succeed"
+        in summary
+    )
 
 
 def test_the_refunds_own_charge_refunded_event_is_a_second_run_with_no_calls(run_workflow):
@@ -116,9 +116,8 @@ def test_the_refunds_own_charge_refunded_event_is_a_second_run_with_no_calls(run
     refund_id = shadow.events("refund")[0]["id"]
     assert shadow.events("event")[1]["id"] == f"evt_refunded_{refund_id}"
     # The event fed back is one irimi says the refund would have fired.
-    assert shadow.summary()[-1] == (
-        "  These writes did not happen. Would have fired: customer.updated, refund.created, "
-        "charge.refunded."
+    assert "  would have fired: customer.updated, refund.created, charge.refunded" in (
+        shadow.summary()
     )
 
 
@@ -131,15 +130,14 @@ def test_under_serve_the_cascade_is_two_runs_and_two_summaries_the_second_empty(
     assert {c["run"] for c in serve.calls()} == {first}
     blocks = serve.run_blocks()
     assert set(blocks) == {first, second}
-    assert blocks[first][-1] == (
-        "  These writes did not happen. Would have fired: customer.updated, refund.created, "
-        "charge.refunded."
+    assert (
+        "  would have fired: customer.updated, refund.created, charge.refunded" in (blocks[first])
     )
     assert len([line for line in blocks[first] if line.startswith("  ○ ")]) == 3
     assert blocks[second] == [
         f"irimi shadow · run {second} · 0 exchanges · {_elapsed(serve, second)}",
         "",
-        "  0 exchanges · 0 live · 0 delegated · 0 virtualized",
+        "  0 exchanges · 0 real · 0 answered by irimi (0 faked writes) · 0 sent to targets",
     ]
 
 
@@ -171,7 +169,7 @@ def test_a_replayed_event_id_is_handled_once(run_workflow):
     for mode in MODES:
         shadow = run_workflow(W, "replayed_event", mode)
         writes = [line.split()[0] for line in shadow.exchange_lines() if " write " in line]
-        assert writes == ["fake-L1"] * 3
+        assert writes == ["faked"] * 3
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -227,10 +225,10 @@ def test_irimi_compare_cannot_tell_two_refunds_of_the_rest_of_a_charge_apart(
         f"  B  {on_event}",
         *differ,
         "",
-        "  = ○ update customer cus_DISPUTER  unvalidated (L1)",
-        '  = ○ post to #C0DISPUTES: "dispute dp_SMALL on ch_SMALL (1500): refund"  unvalidated '
-        "(L3 preconditions passed)",
-        "  = ○ refund ? on ch_SMALL  unvalidated (L3 preconditions passed)",
+        "  = ○ stripe  update customer cus_DISPUTER  faked; not checked",
+        '  = ○ slack  post to #C0DISPUTES: "dispute dp_SMALL on ch_SMALL (1500): refund"'
+        "  faked; checked against live state: would succeed",
+        "  = ○ stripe  refund ? on ch_SMALL  faked; checked against live state: would succeed",
         "",
         "  3 same · 0 changed · 0 only in A · 0 only in B",
     ]

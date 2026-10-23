@@ -33,6 +33,8 @@ WRITE_TOOLS = [
     "crm.export_csv",
     "crm.notify_owner",
 ]
+# The totals line of a run whose only exchanges are the two enrichment reads.
+TWO_REAL = "  2 exchanges · 2 real · 0 answered by irimi (0 faked writes) · 0 sent to targets"
 # The seeded `smb` accounts, as `find_accounts` returns them.
 SEED_SMB = [
     {
@@ -107,8 +109,8 @@ def test_read_tools_run_for_real_in_both_modes_and_the_call_sequence_is_the_same
 def test_http_made_inside_a_read_tool_is_an_ordinary_exchange_of_the_run(run_workflow, mode):
     shadow = run_workflow(W, "enrich", mode)
     assert shadow.exchange_lines() == [
-        "live      read      GET enrich.internal/v1/companies/acc_1 -> 200",
-        "live      read      GET enrich.internal/v1/companies/acc_2 -> 200",
+        "real          read      GET enrich.internal/v1/companies/acc_1 -> 200",
+        "real          read      GET enrich.internal/v1/companies/acc_2 -> 200",
     ]
     # Each exchange is in the run the tool was called in, with no link to the call, and
     # neither count holds a tool call.
@@ -118,7 +120,7 @@ def test_http_made_inside_a_read_tool_is_an_ordinary_exchange_of_the_run(run_wor
         "/v1/companies/acc_1",
         "/v1/companies/acc_2",
     ]
-    assert "  2 exchanges · 2 live · 0 delegated · 0 virtualized" in shadow.summaries()
+    assert TWO_REAL in shadow.summaries()
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -130,27 +132,27 @@ def test_irimi_prints_every_tool_call_and_a_summary_line_for_each_stood_in_write
     The run's only writes are tool writes, and the summary still says they did not happen."""
     shadow = run_workflow(W, "enrich", mode)
     assert shadow.tool_call_lines() == [
-        "real      read      tool crm.connect_with -> ok",
-        "real      read      tool crm.find_accounts -> ok",
-        "real      read      tool crm.fetch_enrichment -> ok",
-        "real      read      tool crm.score_account -> ok",
-        "shadow    write     tool crm.upsert_account -> ok",
-        "real      read      tool crm.fetch_enrichment -> ok",
-        "real      read      tool crm.score_account -> ok",
-        "shadow    write     tool crm.upsert_account -> ok",
-        "shadow    write     tool crm.bulk_update -> ok",
-        "shadow    write     tool crm.delete_stale -> ok",
-        "shadow    write     tool crm.export_csv -> ok",
-        "shadow    write     tool crm.notify_owner -> ok",
+        "tool-real     read      crm.connect_with -> ok",
+        "tool-real     read      crm.find_accounts -> ok",
+        "tool-real     read      crm.fetch_enrichment -> ok",
+        "tool-real     read      crm.score_account -> ok",
+        "tool-fake     write     crm.upsert_account -> ok",
+        "tool-real     read      crm.fetch_enrichment -> ok",
+        "tool-real     read      crm.score_account -> ok",
+        "tool-fake     write     crm.upsert_account -> ok",
+        "tool-fake     write     crm.bulk_update -> ok",
+        "tool-fake     write     crm.delete_stale -> ok",
+        "tool-fake     write     crm.export_csv -> ok",
+        "tool-fake     write     crm.notify_owner -> ok",
     ]
     summary = shadow.summaries()
-    assert summary[summary.index("  enrich.internal  2 reads") + 1 :] == [
+    assert summary[1 : summary.index("  enrich.internal  2 reads")] == [
         "",
-        *[f"  ○ tool {name}  shadow stand-in ran" for name in WRITE_TOOLS],
+        "  None of these writes reached the real service:",
+        *[f"  ○ tool  {name}  fake ran instead" for name in WRITE_TOOLS],
         "",
-        "  2 exchanges · 2 live · 0 delegated · 0 virtualized",
-        "  These writes did not happen.",
     ]
+    assert TWO_REAL in summary
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -257,9 +259,9 @@ def test_a_raising_read_tool_ends_the_run_in_error_under_shadow(run_workflow, mo
         ("crm.score_account", None, ErrorInfo("builtins.KeyError", "'acc_missing'")),
     ]
     assert shadow.tool_call_lines() == [
-        "real      read      tool crm.connect_with -> raised builtins.ConnectionError",
-        "real      read      tool crm.flaky_lookup -> raised builtins.KeyError",
-        "real      read      tool crm.score_account -> raised builtins.KeyError",
+        "tool-real     read      crm.connect_with -> raised builtins.ConnectionError",
+        "tool-real     read      crm.flaky_lookup -> raised builtins.KeyError",
+        "tool-real     read      crm.score_account -> raised builtins.KeyError",
     ]
     # Bare, the SDK is inactive: no run is opened at all.
     assert bare.events("run.start") == []
@@ -373,16 +375,18 @@ def test_a_write_stand_in_that_raises_hands_the_agent_its_own_exception_and_a_re
         ),
     ]
     assert shadow.tool_call_lines() == [
-        "shadow    write     tool crm.merge_accounts -> raised builtins.LookupError",
-        "shadow    write     tool crm.merge_accounts -> ok",
+        "tool-fake     write     crm.merge_accounts -> raised builtins.LookupError",
+        "tool-fake     write     crm.merge_accounts -> ok",
     ]
-    assert shadow.summaries()[1:] == [
+    summary = shadow.summaries()
+    totals = "  0 exchanges · 0 real · 0 answered by irimi (0 faked writes) · 0 sent to targets"
+    assert summary[1 : summary.index(totals) + 1] == [
         "",
-        "  ○ tool crm.merge_accounts  shadow stand-in raised builtins.LookupError",
-        "  ○ tool crm.merge_accounts  shadow stand-in ran",
+        "  None of these writes reached the real service:",
+        "  ○ tool  crm.merge_accounts  fake raised builtins.LookupError",
+        "  ○ tool  crm.merge_accounts  fake ran instead",
         "",
-        "  0 exchanges · 0 live · 0 delegated · 0 virtualized",
-        "  These writes did not happen.",
+        totals,
     ]
 
 
@@ -403,7 +407,7 @@ def test_under_serve_a_tool_called_outside_every_run_is_unattributed(run_workflo
         ("crm.upsert_account", "shadow"),
     ]
     assert [line for line in serve.run_blocks()[run.run_id] if "○ tool" in line] == [
-        "  ○ tool crm.upsert_account  shadow stand-in ran"
+        "  ○ tool  crm.upsert_account  fake ran instead"
     ]
     assert len(serve.tool_call_lines()) == 4
     assert rows(serve) == SEED
@@ -439,14 +443,14 @@ def test_a_tool_called_outside_every_run_lands_in_the_process_run(run_workflow):
     ]
     assert reader.load_run(UNATTRIBUTED).events == []
     assert shadow.tool_call_lines() == [
-        "shadow    write     tool crm.delete_stale -> ok",
-        "real      read      tool crm.find_accounts -> ok",
-        "real      read      tool crm.find_accounts -> ok",
-        "shadow    write     tool crm.upsert_account -> ok",
+        "tool-fake     write     crm.delete_stale -> ok",
+        "tool-real     read      crm.find_accounts -> ok",
+        "tool-real     read      crm.find_accounts -> ok",
+        "tool-fake     write     crm.upsert_account -> ok",
     ]
     assert [line for line in shadow.summary() if "○ tool" in line] == [
-        "  ○ tool crm.delete_stale  shadow stand-in ran",
-        "  ○ tool crm.upsert_account  shadow stand-in ran",
+        "  ○ tool  crm.delete_stale  fake ran instead",
+        "  ○ tool  crm.upsert_account  fake ran instead",
     ]
     # The read after the stood-in delete still sees the stale account: no tool overlay, as in
     # `read_after_write`. Bare, it was really deleted.
@@ -472,9 +476,9 @@ def test_http_made_inside_a_write_stand_in_is_an_ordinary_exchange_of_the_run(ru
         ("stand_in_check", 200, None, run.run_id)
     ]
     assert shadow.exchange_lines() == [
-        "live      read      GET enrich.internal/v1/companies/acc_1 -> 200"
+        "real          read      GET enrich.internal/v1/companies/acc_1 -> 200"
     ]
-    assert shadow.tool_call_lines() == ["shadow    write     tool crm.sync_industry -> ok"]
+    assert shadow.tool_call_lines() == ["tool-fake     write     crm.sync_industry -> ok"]
     events = shadow.stored().load_run(run.run_id).events
     assert [type(e).__name__ for e in events] == ["Exchange", "ToolCall"]
     assert events[0].request.path == "/v1/companies/acc_1"
@@ -483,7 +487,7 @@ def test_http_made_inside_a_write_stand_in_is_an_ordinary_exchange_of_the_run(ru
         "industry": "aerospace",
         "upstream": "manufacturing",
     }
-    assert "  ○ tool crm.sync_industry  shadow stand-in ran" in shadow.summaries()
+    assert "  ○ tool  crm.sync_industry  fake ran instead" in shadow.summaries()
     assert rows(shadow) == SEED
     assert bare.calls() == []
     assert rows(bare)[0] == ("acc_1", "Acme", "smb", "2026-01-01", 0, "aerospace")
@@ -535,16 +539,16 @@ def test_a_sync_tool_that_returns_a_coroutine_is_recorded_when_the_coroutine_end
         {"stood_in": True, "to": owner},
     )
     assert shadow.tool_call_lines() == [
-        "real      read      tool crm.lookup_owner -> ok",
-        "real      read      tool crm.find_accounts -> ok",
-        "real      read      tool crm.last_contact -> ok",
-        "real      read      tool crm.lookup_owner -> ok",
-        "shadow    write     tool crm.schedule_followup -> ok",
-        "shadow    write     tool crm.send_reminder -> ok",
+        "tool-real     read      crm.lookup_owner -> ok",
+        "tool-real     read      crm.find_accounts -> ok",
+        "tool-real     read      crm.last_contact -> ok",
+        "tool-real     read      crm.lookup_owner -> ok",
+        "tool-fake     write     crm.schedule_followup -> ok",
+        "tool-fake     write     crm.send_reminder -> ok",
     ]
     assert [line for line in shadow.summaries() if "○ tool" in line] == [
-        "  ○ tool crm.schedule_followup  shadow stand-in ran",
-        "  ○ tool crm.send_reminder  shadow stand-in ran",
+        "  ○ tool  crm.schedule_followup  fake ran instead",
+        "  ○ tool  crm.send_reminder  fake ran instead",
     ]
     assert shadow.result()["scheduled"] == {"stood_in": True, "owner": owner, "in_days": 7}
     assert shadow.result()["reminded"] == {"stood_in": True, "to": owner}
@@ -581,8 +585,8 @@ def test_irimi_compare_shows_the_retry_s_failed_merge_as_the_one_it_added(shared
         f"  B  {ENRICH}",
         "  (the triggers' args differ)",
         "",
-        "  + ○ tool crm.merge_accounts  shadow stand-in raised builtins.LookupError",
-        "  = ○ tool crm.merge_accounts  shadow stand-in ran",
+        "  + ○ tool  crm.merge_accounts  fake raised builtins.LookupError",
+        "  = ○ tool  crm.merge_accounts  fake ran instead",
         "",
         "  1 same · 0 changed · 0 only in A · 1 only in B",
     ]
@@ -604,8 +608,8 @@ def test_two_writes_at_once_are_compared_in_the_order_they_ended(run_workflow, m
     assert archive.started_at < flag.started_at <= flag.ended_at <= archive.ended_at
     [run] = shadow.sdk_runs()
     rows = [
-        "  = ○ tool crm.flag_account  shadow stand-in ran",
-        "  = ○ tool crm.archive_account  shadow stand-in ran",
+        "  = ○ tool  crm.flag_account  fake ran instead",
+        "  = ○ tool  crm.archive_account  fake ran instead",
     ]
     assert shadow.compare_runs(run.run_id, run.run_id) == (
         0,
@@ -692,8 +696,8 @@ def test_enrich_replayed_where_no_lookup_reaches_irimi_runs_each_read_for_real(r
         "The tool runs for real; further failures of this kind are not logged."
     )
     assert replay.exchange_lines() == [
-        f"recording read      GET enrich.internal/v1/companies/{account} -> 200  "
-        "[fidelity:recording, from-recording]"
+        f"recorded      read      GET enrich.internal/v1/companies/{account} -> 200  "
+        "[from-recording]"
         for account in ("acc_1", "acc_2")
     ]
     assert replay.internet.requests() == []
@@ -750,9 +754,9 @@ def test_tool_raises_replayed_raises_what_was_recorded_and_the_agent_catches_it_
         {"event": "lookup_failed", "error": "KeyError", "key": "'acc_1'"}
     ]
     assert replay.tool_call_lines() == [
-        "recording read      tool crm.connect_with -> raised builtins.ConnectionError",
-        "recording read      tool crm.flaky_lookup -> raised builtins.KeyError",
-        "recording read      tool crm.score_account -> raised builtins.KeyError",
+        "tool-recorded read      crm.connect_with -> raised builtins.ConnectionError",
+        "tool-recorded read      crm.flaky_lookup -> raised builtins.KeyError",
+        "tool-recorded read      crm.score_account -> raised builtins.KeyError",
     ]
     assert [(c.name, c.error) for c in replayed_calls(replay)] == [
         ("crm.connect_with", connect_error(recorded)),

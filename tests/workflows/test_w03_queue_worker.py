@@ -19,6 +19,7 @@ from examples.workflows.harness.run import (
 )
 from examples.workflows.w03_queue_worker.agent import CLIENTS, LEDGER, POOLED
 from examples.workflows.w03_queue_worker.scenarios import AGENT_VERSION
+from irimi import report
 from irimi.exchange import Exchange
 from irimi.sdk.replay_child import CANNOT_CALL
 from irimi.trace import UNATTRIBUTED, ErrorInfo, ToolCall
@@ -30,7 +31,8 @@ AGENT = "examples.workflows.w03_queue_worker.agent"
 # The trigger each scenario's runs are started by: `handle` on a thread pool, `handle_async` under
 # `asyncio.gather`.
 TRIGGERS = {"threads_8": "handle", "asyncio_8": "handle_async"}
-REFUND_LINE = "fake-L1   write     POST api.stripe.com/v1/refunds -> 200  [fidelity:L1]"
+REFUND_LINE = "faked         write     POST api.stripe.com/v1/refunds -> 200"
+CHECKED = "faked; checked against live state: would succeed"
 
 
 def own_charge_only(labels):
@@ -53,9 +55,12 @@ def test_eight_concurrent_runs_print_eight_summaries_under_serve(run_workflow, s
     blocks = serve.run_blocks()
     assert set(blocks) == set(runs)
     for run_id, block in blocks.items():
-        [refund] = [line for line in block if "○ refund" in line]
+        [refund] = [line for line in block if "○ stripe  refund" in line]
         [read] = [c["label"] for c in serve.calls() if c["run"] == run_id and c["method"] == "GET"]
-        assert refund.startswith("  ○ refund $") and read.split(":")[1] in refund, (block, read)
+        assert refund.startswith("  ○ stripe  refund $") and read.split(":")[1] in refund, (
+            block,
+            read,
+        )
     assert [r.attribution for r in serve.stored().list_runs()] == ["sdk"] * 8
     assert serve.exchange_lines().count(REFUND_LINE) == 8
     assert serve.result()["ok"] == 8
@@ -169,10 +174,9 @@ def test_phase_3_exit_holds_for_eight_concurrent_runs(run_workflow, scenario, mo
         assert writes == ([("write", "shadow")] if ledger else []), calls
     assert sorted(charges) == [f"ch_Q{i}" for i in range(8)]
     code, out, err = result.runs("list")
-    assert (code, len(out), err) == (0, 8 + len(process), [])
-    assert sorted(line.split("  ", 1)[0] for line in out if "  sdk  " in line) == sorted(
-        charges.values()
-    )
+    # The header row, then a row per run.
+    assert (code, len(out), err) == (0, 1 + 8 + len(process), [])
+    assert sorted(line.split()[0] for line in out if "  sdk  " in line) == sorted(charges.values())
     # Invariant 3 for a SQLite file: what the write tool would have written
     # does not exist. Bare, the same eight rows really land; a scenario with no tools has no ledger.
     if ledger:
@@ -194,8 +198,8 @@ def test_phase_3_exit_holds_for_eight_concurrent_runs(run_workflow, scenario, mo
         blocks = result.run_blocks()
         assert set(blocks) == set(charges.values())
         for charge, run_id in charges.items():
-            [refund] = [line for line in blocks[run_id] if "○ refund" in line]
-            assert refund.endswith(f" on {charge}  unvalidated (L3 preconditions passed)"), refund
+            [refund] = [line for line in blocks[run_id] if "○ stripe  refund" in line]
+            assert refund.endswith(f" on {charge}  {CHECKED}"), refund
             tools = [line for line in blocks[run_id] if "○ tool" in line]
             assert len(tools) == (1 if ledger else 0), blocks[run_id]
     assert check_invariants(result, bare) == []
@@ -349,8 +353,10 @@ def test_one_failing_message_fails_only_its_own_run(run_workflow, mode):
     assert shadow.exchange_lines().count(REFUND_LINE) == 3
 
 
-PASSED_REFUND = "  ○ refund $30.00 on ch_QSHARED  unvalidated (L3 preconditions passed)"
-REFUSED_REFUND = "  ✗ refund $30.00 on ch_QSHARED  would fail: amount_too_large"
+PASSED_REFUND = (
+    "  ○ stripe  refund $30.00 on ch_QSHARED  faked; checked against live state: would succeed"
+)
+REFUSED_REFUND = "  ✗ stripe  refund $30.00 on ch_QSHARED  faked; would fail: amount_too_large"
 
 
 @pytest.mark.parametrize("mode", ["shadow", "serve"])
@@ -387,7 +393,7 @@ def test_a_second_runs_summary_shows_none_of_the_first_runs_writes(run_workflow)
     serve = run_workflow(W, "shared_charge", "serve")
     second = serve.events("run.start")[1]["run"]
     assert (
-        "  api.stripe.com  1 read  1 engine read  1 write intercepted" in serve.run_blocks()[second]
+        "  api.stripe.com  1 read  1 irimi check read  1 faked write" in serve.run_blocks()[second]
     )
 
 
@@ -420,8 +426,8 @@ def test_two_concurrent_runs_on_one_charge_each_see_their_own_refund_alone(run_w
         assert PASSED_REFUND in blocks[run_id]
         assert REFUSED_REFUND not in blocks[run_id]
         assert (
-            "  api.stripe.com  2 reads (1 showing this run's writes)  1 engine read  1 write "
-            "intercepted" in blocks[run_id]
+            "  api.stripe.com  2 reads (1 showing this run's writes)  1 irimi check read  "
+            "1 faked write" in blocks[run_id]
         )
 
 
@@ -438,7 +444,8 @@ def test_runs_list_prints_one_line_per_message_and_one_for_the_process(
     shadow = run_workflow(W, scenario, mode)
     code, out, err = shadow.runs("list")
     assert (code, err) == (0, [])
-    fields = [line.split("  ") for line in out]
+    assert out[0].split() == list(report.RUN_LIST_HEADER)
+    fields = [re.split(r"  +", line) for line in out[1:]]
     assert len(fields) == (9 if mode == "shadow" else 8)
     runs = sorted(f[0] for f in fields if f[4] == "sdk")
     assert runs == sorted(shadow.by_run())
@@ -664,7 +671,7 @@ def test_a_task_a_sync_trigger_returns_files_its_calls_in_the_run_that_already_e
         # `LATE_EVENTS`, #125).
         for record in found.values():
             assert shadow.run_blocks()[record.run_id][-1] == (
-                "  0 exchanges · 0 live · 0 delegated · 0 virtualized"
+                "  0 exchanges · 0 real · 0 answered by irimi (0 faked writes) · 0 sent to targets"
             )
         assert not [line for line in shadow.summaries() if "○" in line]
 
@@ -703,11 +710,11 @@ def test_tool_calls_from_four_threads_each_land_in_their_own_run(run_workflow, m
         ]
     assert stored_tool_calls(shadow, shadow.engine_run_id()) == []
     assert Counter(shadow.tool_call_lines()) == {
-        f"real      read      tool {AGENT}.ledger_balance -> ok": 8,
-        f"shadow    write     tool {AGENT}.record_refund -> ok": 8,
+        f"tool-real     read      {AGENT}.ledger_balance -> ok": 8,
+        f"tool-fake     write     {AGENT}.record_refund -> ok": 8,
     }
     tool_lines = [line for line in shadow.summaries() if "○ tool" in line]
-    assert tool_lines == [f"  ○ tool {AGENT}.record_refund  shadow stand-in ran"] * 8
+    assert tool_lines == [f"  ○ tool  {AGENT}.record_refund  fake ran instead"] * 8
     assert shadow.query(LEDGER, "SELECT * FROM refunds") == []
     assert sorted(bare.query(LEDGER, "SELECT * FROM refunds")) == [
         (f"ch_Q{i}", 100 + i) for i in range(8)
@@ -734,7 +741,7 @@ def test_two_write_tools_ending_at_once_print_in_the_order_they_ended(run_workfl
     }
     ended = sorted(calls, key=lambda c: (c.ended_at, c.started_at, c.tool_call_id))
     assert [line for line in shadow.summary() if "○ tool" in line] == [
-        f"  ○ tool {c.name}  shadow stand-in ran" for c in ended
+        f"  ○ tool  {c.name}  fake ran instead" for c in ended
     ]
     assert shadow.query(LEDGER, "SELECT * FROM refunds") == []
     assert sorted(bare.query(LEDGER, "SELECT * FROM refunds")) == [
@@ -758,8 +765,8 @@ def test_tool_writes_whose_posts_came_in_the_other_order_print_in_the_order_they
     bare = run_workflow(W, "ledger_post_waits", "bare")
     first, second = f"{AGENT}.record_refund_async", f"{AGENT}.mark_refunded"
     assert shadow.tool_call_lines() == [
-        f"shadow    write     tool {second} -> ok",
-        f"shadow    write     tool {first} -> ok",
+        f"tool-fake     write     {second} -> ok",
+        f"tool-fake     write     {first} -> ok",
     ]
     calls = {c.name: c for c in shadow.stored_events() if isinstance(c, ToolCall)}
     assert calls.keys() == {first, second}
@@ -767,8 +774,8 @@ def test_tool_writes_whose_posts_came_in_the_other_order_print_in_the_order_they
     assert calls[first].run_id != calls[second].run_id
     if mode == "shadow":
         assert [line for line in shadow.summary() if "○ tool" in line] == [
-            f"  ○ tool {first}  shadow stand-in ran",
-            f"  ○ tool {second}  shadow stand-in ran",
+            f"  ○ tool  {first}  fake ran instead",
+            f"  ○ tool  {second}  fake ran instead",
         ]
     else:
         blocks = shadow.run_blocks()
@@ -776,8 +783,8 @@ def test_tool_writes_whose_posts_came_in_the_other_order_print_in_the_order_they
             run_id: [line for line in blocks[run_id] if "○ tool" in line]
             for run_id in (calls[first].run_id, calls[second].run_id)
         } == {
-            calls[first].run_id: [f"  ○ tool {first}  shadow stand-in ran"],
-            calls[second].run_id: [f"  ○ tool {second}  shadow stand-in ran"],
+            calls[first].run_id: [f"  ○ tool  {first}  fake ran instead"],
+            calls[second].run_id: [f"  ○ tool  {second}  fake ran instead"],
         }
     assert shadow.query(LEDGER, "SELECT * FROM refunds") == []
     assert sorted(bare.query(LEDGER, "SELECT * FROM refunds")) == [("ch_Q0", 100), ("ch_Q1", 101)]
@@ -887,8 +894,8 @@ def test_tools_on_a_worker_s_methods_keep_their_receiver_and_leave_it_out_of_the
             ),
         ]
     assert [line for line in shadow.summaries() if "○ tool" in line] == [
-        f"  ○ tool {AGENT}.Worker.journal  shadow stand-in ran",
-        f"  ○ tool {AGENT}.Worker.ack  shadow stand-in ran",
+        f"  ○ tool  {AGENT}.Worker.journal  fake ran instead",
+        f"  ○ tool  {AGENT}.Worker.ack  fake ran instead",
     ] * 4
     assert shadow.query(LEDGER, "SELECT * FROM acks") == []
     assert [(e["journal"], e["ack"]) for e in bare.events("ledger")] == [
@@ -914,7 +921,9 @@ LEDGER_WRITE = {"ledger_threads_8": "record_refund", "ledger_asyncio_8": "record
 
 def refund_text(i: int) -> str:
     """Message `i`'s refund of `100 + i` cents, as the summary prints it without its indent."""
-    return f"○ refund $1.{i:02d} on ch_Q{i}  unvalidated (L3 preconditions passed)"
+    return (
+        f"○ stripe  refund $1.{i:02d} on ch_Q{i}  faked; checked against live state: would succeed"
+    )
 
 
 def run_of(result, index: int) -> str:
@@ -948,7 +957,7 @@ def test_irimi_compare_of_two_concurrent_runs_shows_each_run_s_own_writes_alone(
     trigger = TRIGGER_OF[scenario]
     tool = LEDGER_WRITE.get(scenario)
     for i in range(1, 8):
-        line = f"○ tool {AGENT}.{tool}  shadow stand-in ran"
+        line = f"○ tool  {AGENT}.{tool}  fake ran instead"
         ledger = [
             f"  ~ A {line}",
             f"    B {line}",
@@ -1069,7 +1078,7 @@ def test_irimi_compare_finds_a_lost_run_s_writes_in_the_engine_s_run(run_workflo
     shadow = run_workflow(W, scenario, mode)
     a, engine = run_of(shadow, 0), shadow.engine_run_id()
     code, out, err = shadow.compare_runs(a, engine)
-    tool = [f"  + ○ tool {AGENT}.record_refund  shadow stand-in ran"]
+    tool = [f"  + ○ tool  {AGENT}.record_refund  fake ran instead"]
     added = [
         line
         for i in range(2)

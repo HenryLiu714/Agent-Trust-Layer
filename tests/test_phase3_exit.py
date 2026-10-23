@@ -342,16 +342,19 @@ def test_two_concurrent_requests_to_a_served_agent_are_two_runs_that_never_mix(
     for charge, run_id in by_charge.items():
         block = report.stored_summary_lines(reader.load_run(run_id), maps)
         # `?`: the refund names no amount, as Stripe refunds what is left (W5 prints the same).
-        assert f"  ○ refund ? on {charge}  unvalidated (L3 preconditions passed)" in block
-        assert f"  ○ tool {TOOL_NAME}  shadow stand-in ran" in block
+        assert (
+            f"  ○ stripe  refund ? on {charge}  faked; checked against live state: would succeed"
+            in block
+        )
+        assert f"  ○ tool  {TOOL_NAME}  fake ran instead" in block
         other = next(c for c in CHARGES if c != charge)
         assert not any(other in line for line in block), block
 
-    # `irimi runs list` over the store: the two runs, one line each.
+    # `irimi runs list` over the store: a header row, then the two runs, one line each.
     capsys.readouterr()
     assert main(["runs", "list", "--store", str(store)]) == 0
     listed = capsys.readouterr().out.splitlines()
-    assert sorted(line.split("  ")[0] for line in listed) == sorted(by_charge.values())
+    assert sorted(line.split()[0] for line in listed[1:]) == sorted(by_charge.values())
 
 
 def test_a_refund_stripe_refuses_is_a_502_and_a_run_ended_in_error_and_a_bad_body_no_run(

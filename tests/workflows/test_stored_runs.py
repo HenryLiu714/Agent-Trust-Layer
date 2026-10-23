@@ -72,11 +72,22 @@ def started(result: Result) -> bool:
     )
 
 
+def is_quiet(result: Result) -> bool:
+    """The run was given `--quiet`, so irimi printed no line per exchange or tool call."""
+    scenario = result.workflow.scenarios[result.scenario]
+    flags = scenario.serve_flags if result.mode == "serve" else scenario.shadow_flags
+    return "--quiet" in (flags or ())
+
+
 def reported(result: Result) -> list[str]:
     """irimi's per-exchange lines, with the one secret the corpus puts in one - W4's incoming
     webhook path, which the terminal still prints - swapped for the placeholder the store
-    holds instead."""
+    holds instead. Under `--quiet`, which prints none, the lines of the exchanges the engine
+    reported."""
     lines = result.exchange_lines()
+    if is_quiet(result):
+        assert lines == [], lines
+        lines = [report.exchange_line(e) for e in result.reported]
     secret = CANARIES["SLACK_WEBHOOK_PATH"]
     if not any(secret in line for line in lines):
         return lines
@@ -139,7 +150,7 @@ def test_every_stored_event_is_the_exchange_irimi_handed_its_store_redacted(
     stored with its args, result and error redacted. Under serve mode what no
     run names is `unattributed`, so there it is no exception."""
     shadow = run_workflow(name, scenario, mode)
-    assert len(shadow.handed) == len(shadow.reported) == len(shadow.exchange_lines())
+    assert len(shadow.handed) == len(shadow.reported) == len(reported(shadow))
     assert all(a is b for a, b in zip(shadow.handed, shadow.reported, strict=True))
     exchanges = [e for e in shadow.handed_events if isinstance(e, Exchange)]
     assert len(exchanges) == len(shadow.handed)
@@ -343,7 +354,8 @@ def test_every_tool_call_the_agent_made_is_stored_in_its_run_and_printed_once(
     assert {ran for _, ran in bare.tools()} <= {"real"}
     shadow = run_workflow(name, scenario, mode)
     stored = [e for e in shadow.stored_events() if isinstance(e, ToolCall)]
-    assert sorted(shadow.tool_call_lines()) == sorted(report.tool_call_line(c) for c in stored)
+    printed = [] if is_quiet(shadow) else sorted(report.tool_call_line(c) for c in stored)
+    assert sorted(shadow.tool_call_lines()) == printed
     if (name, scenario) in BY_HAND_SCENARIOS:
         return
     if not started(shadow):
@@ -380,6 +392,18 @@ def no_elapsed(lines: list[str]) -> list[str]:
     return [ELAPSED.sub(" · <elapsed>", line) for line in lines]
 
 
+# The summary's totals line, which a live summary of a process with SDK runs follows with them.
+TOTALS = re.compile(r"  \d+ exchanges? · \d+ real · ")
+WHOLE_PROCESS = " (whole process) · "
+
+
+def process_part(live: list[str]) -> list[str]:
+    """A live summary without what only the live one prints: its header's `(whole process)` and
+    the lines naming the SDK runs after the totals."""
+    end = next(i for i, line in enumerate(live) if TOTALS.match(line)) + 1
+    return [live[0].replace(WHOLE_PROCESS, " · ", 1), *live[1:end]]
+
+
 @pytest.mark.parametrize(
     ("name", "scenario"), UNLABELLED_CASES, ids=[f"{n}:{s}" for n, s in UNLABELLED_CASES]
 )
@@ -410,7 +434,8 @@ def test_every_run_the_process_stored_prints_the_summary_irimi_shadow_printed(
     """A stored run prints what irimi printed live, for an agent that labels its runs. The live
     summary is the process's: every exchange the proxy saw, whatever run each named. Its runs
     together hold the same events, so a summary over all of them, the unattributed ones included, is
-    the block `irimi shadow` printed, line for line but for the elapsed seconds.
+    the block `irimi shadow` printed, line for line but for the elapsed seconds and what only the
+    live block says: that it covers the whole process, and which SDK runs were in it.
 
     The events are put back in the order the engine reported them, the order they ended in, since
     a read hangs under the write before it. W4's webhook post is the case this caught: its stored
@@ -433,7 +458,8 @@ def test_every_run_the_process_stored_prints_the_summary_irimi_shadow_printed(
     tool_calls = [e for e in events if isinstance(e, ToolCall)]
     process = reader.load_run(shadow.process_run_id()).record
     union = StoredRun(process, [*exchanges, *telemetry, *tool_calls])
-    assert no_elapsed(report.stored_summary_lines(union, shadow.maps())) == no_elapsed(live)
+    stored = report.stored_summary_lines(union, shadow.maps())
+    assert no_elapsed(stored) == no_elapsed(process_part(live))
 
 
 # -- serve mode -----------------------------------------------------------------------------------
@@ -460,7 +486,8 @@ def test_every_exchange_and_tool_call_a_serve_reported_is_stored_once_in_its_run
     assert sorted(stored) == sorted(line for line in reported(serve) if not is_telemetry(line))
     assert all(e.run_id == run_id for run_id, run_events in events.items() for e in run_events)
     calls = [e for e in flat if isinstance(e, ToolCall)]
-    assert sorted(serve.tool_call_lines()) == sorted(report.tool_call_line(c) for c in calls)
+    printed = [] if is_quiet(serve) else sorted(report.tool_call_line(c) for c in calls)
+    assert sorted(serve.tool_call_lines()) == printed
 
 
 @pytest.mark.parametrize(("name", "scenario"), SERVE_CASES, ids=SERVE_IDS)

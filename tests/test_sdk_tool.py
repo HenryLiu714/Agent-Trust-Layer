@@ -665,10 +665,10 @@ def test_irimi_shadow_prints_a_tool_call_in_the_stream_and_the_summary_and_store
     assert main(["shadow", "--port", "0", "--", sys.executable, str(agent)]) == 0
     lines = capfd.readouterr().out.splitlines()
     assert "tool said: stood in" in lines
-    assert "shadow    write     tool db.mark_refunded -> ok" in lines
+    assert "tool-fake     write     db.mark_refunded -> ok" in lines
     live = _summary(lines)
-    assert live[live.index("  ○ update customer cus_1  unvalidated (L1)") + 1] == (
-        "  ○ tool db.mark_refunded  shadow stand-in ran"
+    assert live[live.index("  ○ stripe  update customer cus_1  faked; not checked") + 1] == (
+        "  ○ tool  db.mark_refunded  fake ran instead"
     )
     # Stored in the process run, which then prints the summary `irimi shadow` printed.
     reader = StoreReader(tmp_path / "home" / "store")

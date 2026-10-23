@@ -34,12 +34,15 @@ SIGTERM_EXIT_CODE = 143  # 128 + SIGTERM: `irimi shadow` terminated before its c
 # head -1`), which irimi ends quietly with in place of a traceback and Python's 120.
 BROKEN_PIPE_EXIT_CODE = 141
 DEFAULT_RUNS_LIMIT = 20  # `irimi runs list` without --limit
+# What `runs show`, `compare` and `replay` take for the newest stored run.
+LAST_RUN = "last"
+RUN_ID_HELP = f"a run id, a prefix only one run id starts with, {LAST_RUN}, or unattributed"
 
 # A non-HTTP write the agent labels with `@sdk.tool` runs only its stand-in under irimi, so the
 # notice says the rest happen for real, not that all of them do.
 NON_HTTP_NOTICE = (
     "Note: irimi only sees HTTP(S). Side effects that are not HTTP "
-    "(database writes, files, gRPC, WebSockets) are not virtualized and happen for real, "
+    "(database writes, files, gRPC, WebSockets) are not shadowed and happen for real, "
     "unless the agent labels the function that makes them with @sdk.tool."
 )
 
@@ -133,6 +136,11 @@ def _add_engine_args(parser: argparse.ArgumentParser) -> None:
         metavar="HOST",
         help="let an answer target name HOST instead of loopback. This sends the agent's "
         "requests off this machine; targets are loopback-only without it (repeatable)",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="print only the banner and the summary, not a line per exchange and tool call",
     )
     _add_store_arg(parser, "where to record runs, redacted")
 
@@ -490,6 +498,11 @@ def _load_source(args: argparse.Namespace) -> "StoredRun":
         # Every serve session's requests no run named, in one pool: not one run to answer from.
         raise Refused(f"{trace.UNATTRIBUTED} is not a run to replay")
     try:
+        # The whole id from here on: the replay's messages and its result name the run it read.
+        args.run_id = _resolve_run_id(root, args.run_id)
+    except LookupError as exc:
+        raise Refused(str(exc)) from None
+    try:
         return StoreReader(root).load_run(args.run_id)
     except RunNotFound:
         raise Refused(f"no run {args.run_id} in {root}") from None
@@ -596,8 +609,9 @@ class _ServeOutput:
     the store's writer thread. One lock covers every line, so two runs' summaries never
     interleave, nor does an exchange's line split one."""
 
-    def __init__(self, store_root: Path) -> None:
+    def __init__(self, store_root: Path, quiet: bool = False) -> None:
         self.store_root = store_root
+        self.quiet = quiet
         self._printing = threading.Lock()
 
     def say(self, lines: list[str], *, err: bool = False) -> None:
@@ -608,14 +622,16 @@ class _ServeOutput:
     def exchange(self, ex: "Exchange") -> None:
         from irimi import report
 
-        self.say([report.exchange_line(ex)])
+        if not self.quiet:
+            self.say([report.exchange_line(ex)])
 
     def tool_call(self, call: "ToolCall") -> None:
         """The tool's name and what it raised, never its args or result, which are stored
         redacted and would print raw here."""
         from irimi import report
 
-        self.say([report.tool_call_line(call)])
+        if not self.quiet:
+            self.say([report.tool_call_line(call)])
 
     def run_ended(self, index: "MapIndex", run_id: str) -> None:
         """The run's summary, read back from the store as `irimi runs show` reads it, under
@@ -643,7 +659,7 @@ def _serve(args: argparse.Namespace, stop: threading.Event, signalled: list[int]
     from irimi import runner
     from irimi.engine import EngineStartError
 
-    output = _ServeOutput(_store_root(args))
+    output = _ServeOutput(_store_root(args), args.quiet)
     died = threading.Event()
     run = _prepare_run(args, serve=True, on_run_ended=output.run_ended)
     if run is None:
@@ -826,11 +842,32 @@ def _shadow(args: argparse.Namespace, cmd: list[str], child: _Child) -> int:
     ran = _under_the_engine(args, run, child, _Launch("shadow", cmd, record))
     if not ran.summarize:
         return ran.code
+    sdk_runs = _sdk_runs(args, run.run_id, ran)
     for line in report.summary_lines(
-        run.run_id, ran.exchanges, ran.elapsed, run.index, ran.tool_calls
+        run.run_id, ran.exchanges, ran.elapsed, run.index, ran.tool_calls, sdk_runs
     ):
         print(line, flush=True)
     return ran.code
+
+
+def _sdk_runs(
+    args: argparse.Namespace, process_run_id: str, ran: "_Ran"
+) -> "dict[str, RunRecord | None]":
+    """The runs the SDK started inside `irimi shadow`'s process, in the order their first event
+    arrived, each with its record read back from the store, or None for one that cannot be."""
+    from irimi.store import RunNotFound, StoreReader
+    from irimi.trace import UNATTRIBUTED, TraceFormatError
+
+    seen = [*(ex.run_id for ex in ran.exchanges), *(call.run_id for call in ran.tool_calls)]
+    ids = [rid for rid in dict.fromkeys(seen) if rid not in (process_run_id, UNATTRIBUTED)]
+    reader = StoreReader(_store_root(args))
+    runs: dict[str, RunRecord | None] = {}
+    for run_id in ids:
+        try:
+            runs[run_id] = reader.load_run(run_id, bodies=False).record
+        except (TraceFormatError, OSError, RunNotFound):
+            runs[run_id] = None
+    return runs
 
 
 @dataclass(frozen=True)
@@ -881,14 +918,16 @@ def _under_the_engine(args: argparse.Namespace, run: _Run, child: _Child, launch
 
     def on_exchange(ex: "Exchange") -> None:
         ran.exchanges.append(ex)
-        print(report.exchange_line(ex), flush=True)
+        if not args.quiet:
+            print(report.exchange_line(ex), flush=True)
 
     def on_tool_call(call: "ToolCall") -> None:
         # On the proxy's event loop, after the store took the call: it only appends and
         # prints. The line names the tool and what it raised, never its args or result, which
         # are stored redacted and would be printed raw here.
         ran.tool_calls.append(call)
-        print(report.tool_call_line(call), flush=True)
+        if not args.quiet:
+            print(report.tool_call_line(call), flush=True)
 
     engine = _build_engine(run, on_exchange, on_tool_call)
 
@@ -1262,13 +1301,15 @@ def cmd_runs_list(args: argparse.Namespace) -> int:
     root = _store_root(args)
     reader = StoreReader(root)
     try:
-        records = reader.list_runs()[: args.limit]
+        every = reader.list_runs()
     except OSError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    if not records:
+    if not every:
         print(f"no runs in {root}")
         return 0
+    records = every if args.all else every[: args.limit]
+    rows = []
     for record in records:
         # One damaged run is named and counted as `?`, never allowed to hide the others: the
         # store's own rule for `list_runs`.
@@ -1279,8 +1320,38 @@ def cmd_runs_list(args: argparse.Namespace) -> int:
         except (TraceFormatError, OSError, RunNotFound) as exc:
             print(f"warning: run {record.run_id} could not be read: {exc}", file=sys.stderr)
             events = None
-        print(report.run_list_line(record, events))
+        rows.append(report.run_list_columns(record, events))
+    for line in report.run_list_lines(rows, older=len(every) - len(records)):
+        print(line)
     return 0
+
+
+def _resolve_run_id(root: Path, typed: str) -> str:
+    """The stored run `typed` names: `unattributed`, `last` for the newest run, a whole run id,
+    or a prefix only one run id starts with. A prefix no run has is returned as typed, so the
+    caller's read says there is no such run, as it does for a damaged one `list_runs` skips.
+    Raises LookupError, saying why, for `last` in an empty store and for a prefix more than one
+    run id starts with."""
+    from irimi.store import StoreReader
+    from irimi.trace import UNATTRIBUTED
+
+    # An empty prefix would name every run, so it names none.
+    if typed in ("", UNATTRIBUTED):
+        return typed
+    try:
+        ids = [record.run_id for record in StoreReader(root).list_runs()]
+    except OSError:
+        return typed
+    if typed in ids:
+        return typed
+    if typed == LAST_RUN:
+        if not ids:
+            raise LookupError(f"no runs in {root}")
+        return ids[0]
+    matches = [run_id for run_id in ids if run_id.startswith(typed)]
+    if len(matches) > 1:
+        raise LookupError(f"run id {typed} is ambiguous; it starts {', '.join(sorted(matches))}")
+    return matches[0] if matches else typed
 
 
 def cmd_runs_show(args: argparse.Namespace) -> int:
@@ -1291,15 +1362,20 @@ def cmd_runs_show(args: argparse.Namespace) -> int:
 
     root = _store_root(args)
     try:
-        run = StoreReader(root).load_run(args.run_id)
+        run_id = _resolve_run_id(root, args.run_id)
+    except LookupError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    try:
+        run = StoreReader(root).load_run(run_id)
     except RunNotFound:
-        print(f"error: no run {args.run_id} in {root}", file=sys.stderr)
+        print(f"error: no run {run_id} in {root}", file=sys.stderr)
         return 1
     except (TraceFormatError, OSError) as exc:
-        print(f"error: run {args.run_id} could not be read: {exc}", file=sys.stderr)
+        print(f"error: run {run_id} could not be read: {exc}", file=sys.stderr)
         return 1
     # The unattributed pool is not a run: with nothing in it there is no record to show.
-    if args.run_id == UNATTRIBUTED and not run.events:
+    if run_id == UNATTRIBUTED and not run.events:
         print(f"no unattributed events in {root}")
         return 0
     for line in report.run_show_lines(run, _maps_for_stored_runs()):
@@ -1318,7 +1394,12 @@ def cmd_compare(args: argparse.Namespace) -> int:
     root = _store_root(args)
     reader = StoreReader(root)
     runs = []
-    for run_id in (args.run_a, args.run_b):
+    for typed in (args.run_a, args.run_b):
+        try:
+            run_id = _resolve_run_id(root, typed)
+        except LookupError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return compare.TROUBLE
         try:
             runs.append(reader.load_run(run_id))
         except RunNotFound:
@@ -1467,11 +1548,18 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help=f"print at most N runs (default {DEFAULT_RUNS_LIMIT})",
     )
+    runs_list.add_argument("--all", action="store_true", help="print every run")
     runs_list.set_defaults(func=cmd_runs_list)
     runs_show = runs_sub.add_parser(
         "show", allow_abbrev=False, help="print a stored run's header, every event and its summary"
     )
-    runs_show.add_argument("run_id", metavar="RUN_ID", help="the run's exact id, or unattributed")
+    runs_show.add_argument(
+        "run_id",
+        nargs="?",
+        default=LAST_RUN,
+        metavar="RUN_ID",
+        help=f"{RUN_ID_HELP} (default {LAST_RUN})",
+    )
     _add_store_arg(runs_show)
     runs_show.set_defaults(func=cmd_runs_show)
 
@@ -1480,12 +1568,8 @@ def build_parser() -> argparse.ArgumentParser:
         allow_abbrev=False,
         help="print two stored runs' writes side by side",
     )
-    compare_runs.add_argument(
-        "run_a", metavar="RUN_A", help="the first run's exact id, or unattributed"
-    )
-    compare_runs.add_argument(
-        "run_b", metavar="RUN_B", help="the second run's exact id, or unattributed"
-    )
+    compare_runs.add_argument("run_a", metavar="RUN_A", help=f"the first run: {RUN_ID_HELP}")
+    compare_runs.add_argument("run_b", metavar="RUN_B", help=f"the second run: {RUN_ID_HELP}")
     _add_store_arg(compare_runs)
     compare_runs.set_defaults(func=cmd_compare)
 
@@ -1495,7 +1579,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="run a stored run's trigger again, answered from its recording, and print what the "
         "agent did differently",
     )
-    replay.add_argument("run_id", metavar="RUN_ID", help="the stored run's exact id")
+    replay.add_argument(
+        "run_id",
+        metavar="RUN_ID",
+        help=f"the stored run's id, a prefix only it starts with, or {LAST_RUN}",
+    )
     _add_engine_args(replay)
     replay.add_argument(
         "--call",

@@ -33,6 +33,7 @@ changed, `irimi replay` and `sdk.replay`.
 import contextlib
 import json
 import os
+import re
 import socket
 import sqlite3
 import subprocess
@@ -61,9 +62,9 @@ PROMPT = agent.DEFAULT_PROMPT
 PROMPT_HALF = agent.DEFAULT_PROMPT.with_name("prompt_half.txt")
 TICKET = ("T1", "ch_A", "double charged")
 CUSTOMER = "Ada"
-FULL = "○ refund $49.00 on ch_A  unvalidated (L3 preconditions passed)"
-HALF = "○ refund $24.50 on ch_A  unvalidated (L3 preconditions passed)"
-RECORDED = f"○ tool {AGENT}.record_decision  shadow stand-in ran"
+FULL = "○ stripe  refund $49.00 on ch_A  faked; checked against live state: would succeed"
+HALF = "○ stripe  refund $24.50 on ch_A  faked; checked against live state: would succeed"
+RECORDED = f"○ tool  {AGENT}.record_decision  fake ran instead"
 # The names the stubs answer as, which only irimi's process resolves, to loopback.
 SERVED = ("api.stripe.com", "api.anthropic.com")
 # How long one irimi process may take: a CI runner starts an agent in seconds, so this is a hang.
@@ -380,7 +381,7 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
     done, edited = _replay(edited_env, store, source, home / "edited.json")
     assert done.returncode == edited.exit_code == 1, done.stderr
     diverged = (
-        "the agent's 3rd call: live      llm       POST api.anthropic.com/v1/messages -> 200  "
+        "the agent's 3rd call: real          llm       POST api.anthropic.com/v1/messages -> 200  "
         "[replay-miss]"
     )
     assert edited.diverged_at == diverged
@@ -439,7 +440,9 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
     # --- `irimi runs list`: the recording, its process run, and each replay of it, marked.
     capsys.readouterr()
     assert main(["runs", "list", "--store", str(store)]) == 0
-    columns = [line.split("  ") for line in capsys.readouterr().out.splitlines()]
+    # Its columns are padded, so two spaces or more separate them, and a header row comes first.
+    rows = capsys.readouterr().out.splitlines()[1:]
+    columns = [re.split(r"  +", line) for line in rows]
     listed = {column[0]: column[4] for column in columns}
     assert len(listed) == len(columns)
     replayed = [same, edited, by_function, by_function_edited]

@@ -9,7 +9,9 @@ exact output over stores built by `irimi shadow` and by hand.
 
 import dataclasses
 import json
+import os
 import re
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -69,11 +71,10 @@ def test_the_phase_2_run_prints_the_same_summary_from_its_store_as_it_did_live(
     live = _summary_block(capfd.readouterr().out.splitlines())
     # The refund agent's block, with the telemetry call on a line of its own and in the counts.
     assert live[1:] == [
-        *PHASE2_SUMMARY[:2],
+        *PHASE2_SUMMARY[:-2],
         "  telemetry  1 exchange to 1 host, forwarded live",
-        *PHASE2_SUMMARY[2:-2],
-        "  8 exchanges · 6 live · 0 delegated · 2 virtualized",
-        PHASE2_SUMMARY[-1],
+        "",
+        "  8 exchanges · 6 real · 2 answered by irimi (2 faked writes) · 0 sent to targets",
     ]
 
     store = home / "store"
@@ -89,6 +90,14 @@ def test_the_phase_2_run_prints_the_same_summary_from_its_store_as_it_did_live(
 
 
 # ------------------------------------------------------------------------------ runs list
+
+
+def _rows(out: str) -> list[list[str]]:
+    """`irimi runs list`'s rows, each split into its cells: the header row comes first, and the
+    columns are padded, so two spaces or more separate one cell from the next."""
+    header, *rows = out.splitlines()
+    assert header.split() == list(report.RUN_LIST_HEADER), header
+    return [re.split(r"  +", row.rstrip()) for row in rows]
 
 
 def _shadow(capfd, *code: str) -> str:
@@ -196,19 +205,32 @@ def test_runs_list_prints_an_ok_an_error_and_an_incomplete_run_newest_first(home
     capfd.readouterr()
 
     assert main(["runs", "list"]) == 0
-    *shadowed, handbuilt = capfd.readouterr().out.splitlines()
-    python = sys.executable
-    assert [re.sub(STARTED, "<started>", re.sub(r"\d+\.\ds", "<dur>", ln)) for ln in shadowed] == [
-        f"{error}  <started>  <dur>  error  process  {python}  0 exchanges  0 writes",
-        f"{ok}  <started>  <dur>  ok  process  {python}  0 exchanges  0 writes",
+    *shadowed, handbuilt = _rows(capfd.readouterr().out)
+    # A process run's trigger is its command line, the program without its directory.
+    python = os.path.basename(sys.executable)
+    failing = report.printable(shlex.join([python, "-c", "import sys\nsys.exit(3)"]))
+    assert [[re.sub(STARTED, "<started>", c) for c in row] for row in shadowed] == [
+        [error, "<started>", shadowed[0][2], "error (exit 3)", "process", failing]
+        + ["0 exchanges", "0 writes"],
+        [ok, "<started>", shadowed[1][2], "ok", "process", f"{python} -c pass"]
+        + ["0 exchanges", "0 writes"],
     ]
-    assert handbuilt == (
-        f"handbuilt  {_local(HAND_BUILT_AT)}  -  incomplete  sdk  refund_ticket  "
-        "2 exchanges  1 write"
-    )
+    assert all(re.fullmatch(r"\d+\.\ds", row[2]) for row in shadowed)
+    assert handbuilt == [
+        "handbuilt",
+        _local(HAND_BUILT_AT),
+        "-",
+        "incomplete",
+        "sdk",
+        "refund_ticket",
+        "2 exchanges",
+        "1 write",
+    ]
 
     assert main(["runs", "list", "--limit", "1"]) == 0
-    assert [line.split()[0] for line in capfd.readouterr().out.splitlines()] == [error]
+    out = capfd.readouterr().out
+    assert [row[0] for row in _rows(out.split("\n(")[0] + "\n")] == [error]
+    assert out.splitlines()[-1] == "(2 older runs; use --limit or --all)"
 
 
 def test_runs_list_over_a_missing_or_empty_store_says_so_and_succeeds(home, capfd):
@@ -233,9 +255,9 @@ def test_runs_list_names_a_damaged_run_and_still_lists_the_others(home, capfd):
         blob.unlink()
     assert main(["runs", "list"]) == 0
     out, err = capfd.readouterr()
-    assert out.splitlines() == [
-        f"handbuilt  {_local(HAND_BUILT_AT)}  -  incomplete  sdk  refund_ticket  "
-        "? exchanges  ? writes"
+    assert _rows(out) == [
+        ["handbuilt", _local(HAND_BUILT_AT), "-", "incomplete", "sdk", "refund_ticket"]
+        + ["? exchanges", "? writes"]
     ]
     events = home / "store" / "runs" / "handbuilt" / "events.jsonl"
     assert err.startswith(f"warning: run handbuilt could not be read: {events}, line 1: blob ")
@@ -259,8 +281,8 @@ def test_runs_list_counts_the_writes_runs_show_s_summary_prints_a_line_for(home,
     assert listed.endswith("  1 exchange  1 write\n")
     assert main(["runs", "show", "checked"]) == 0
     shown = capfd.readouterr().out.splitlines()
-    assert "  api.stripe.com  1 write intercepted" in shown
-    assert "  ✗ refund $49.00 on ch_1  would fail: charge_already_refunded" in shown
+    assert "  api.stripe.com  1 faked write" in shown
+    assert "  ✗ stripe  refund $49.00 on ch_1  faked; would fail: charge_already_refunded" in shown
 
 
 def _ended_run(run_id: str, started_at: float, **changes) -> RunRecord:
@@ -292,11 +314,20 @@ def test_runs_list_shows_a_labelled_run_newer_than_the_limit_s_worth_of_process_
     s.record(dataclasses.replace(_refund("labelled"), started_at=labelled_at))
     s.close()
     assert main(["runs", "list"]) == 0
-    lines = capfd.readouterr().out.splitlines()
-    assert len(lines) == DEFAULT_RUNS_LIMIT
-    assert lines[0] == (
-        f"labelled  {_local(labelled_at)}  -  incomplete  header  -  1 exchange  1 write"
-    )
+    *listed, older = capfd.readouterr().out.splitlines()
+    rows = _rows("\n".join(listed))
+    assert len(rows) == DEFAULT_RUNS_LIMIT
+    assert rows[0] == [
+        "labelled",
+        _local(labelled_at),
+        "-",
+        "incomplete",
+        "header",
+        "-",
+        "1 exchange",
+        "1 write",
+    ]
+    assert older == "(2 older runs; use --limit or --all)"
 
 
 def test_runs_list_and_show_name_the_run_a_replay_replayed(home, capfd):
@@ -315,14 +346,15 @@ def test_runs_list_and_show_name_the_run_a_replay_replayed(home, capfd):
     replays.record(dataclasses.replace(_refund("labelled"), started_at=HAND_BUILT_AT + 7))
     replays.close()
     assert main(["runs", "list"]) == 0
-    assert capfd.readouterr().out.splitlines() == [
-        f"labelled  {_local(HAND_BUILT_AT + 7)}  -  incomplete  header, replay of recorded  -  "
-        "1 exchange  1 write",
-        f"started  {_local(HAND_BUILT_AT + 6)}  1.0s  ok  sdk, replay of recorded  -  "
-        "0 exchanges  0 writes",
-        f"replayed  {_local(HAND_BUILT_AT + 5)}  1.0s  ok  replay of recorded  -  "
-        "0 exchanges  0 writes",
-        f"recorded  {_local(HAND_BUILT_AT)}  1.0s  ok  process  -  0 exchanges  0 writes",
+    assert _rows(capfd.readouterr().out) == [
+        ["labelled", _local(HAND_BUILT_AT + 7), "-", "incomplete", "header, replay of recorded"]
+        + ["-", "1 exchange", "1 write"],
+        ["started", _local(HAND_BUILT_AT + 6), "1.0s", "ok", "sdk, replay of recorded"]
+        + ["-", "0 exchanges", "0 writes"],
+        ["replayed", _local(HAND_BUILT_AT + 5), "1.0s", "ok", "replay of recorded"]
+        + ["-", "0 exchanges", "0 writes"],
+        ["recorded", _local(HAND_BUILT_AT), "1.0s", "ok", "process", "-"]
+        + ["0 exchanges", "0 writes"],
     ]
     assert main(["runs", "show", "replayed"]) == 0
     shown = capfd.readouterr().out.splitlines()
@@ -356,7 +388,7 @@ def test_a_damaged_replay_record_is_still_marked_and_prints_on_one_line():
     odd = _ended_run("y", HAND_BUILT_AT, attribution="sdk", replay_of="a\nb\x1b")
     assert report.run_attribution(odd) == "sdk, replay of a\\nb\\x1b"
     assert "replay of: a\\nb\\x1b" in report.run_header_lines(odd)
-    assert "\n" not in report.run_list_line(odd, [])
+    assert not any("\n" in cell for cell in report.run_list_columns(odd, []))
     assert report.run_attribution(_ended_run("z", HAND_BUILT_AT)) == "process"
 
 
@@ -375,9 +407,10 @@ def test_a_replay_s_run_json_naming_no_run_is_skipped_by_list_and_refused_by_sho
     for replay_of in ("a  b", "x" * 5_000_000):
         run_json.write_text(json.dumps(json.loads(run_json.read_text()) | {"replay_of": replay_of}))
         assert main(["runs", "list"]) == 0
-        assert capfd.readouterr().out == (
-            f"recorded  {_local(HAND_BUILT_AT)}  1.0s  ok  process  -  0 exchanges  0 writes\n"
-        )
+        assert _rows(capfd.readouterr().out) == [
+            ["recorded", _local(HAND_BUILT_AT), "1.0s", "ok", "process", "-"]
+            + ["0 exchanges", "0 writes"]
+        ]
         assert main(["runs", "show", "replayed"]) == 1
         assert capfd.readouterr() == (
             "",
@@ -408,34 +441,108 @@ def test_runs_list_never_prints_a_negative_duration(home, capfd):
     s.start_run(_ended_run("stepped", HAND_BUILT_AT, ended_at=HAND_BUILT_AT - 10))
     s.close()
     assert main(["runs", "list"]) == 0
-    assert capfd.readouterr().out.split("  ")[2] == "0.0s"
+    assert _rows(capfd.readouterr().out)[0][2] == "0.0s"
     assert main(["runs", "show", "stepped"]) == 0
     assert "irimi shadow · run stepped · 0 exchanges · 0.0s" in (
         capfd.readouterr().out.splitlines()
     )
 
 
+def test_runs_list_pads_each_column_to_its_widest_cell_under_a_header_row(home, capfd):
+    s = DirectoryStore(home / "store", redact.load_key(home))
+    s.start_run(_ended_run("short", HAND_BUILT_AT))
+    s.start_run(_ended_run("a-much-longer-id", HAND_BUILT_AT + 1, outcome="error", exit_code=12))
+    s.close()
+    assert main(["runs", "list"]) == 0
+    header, *rows = capfd.readouterr().out.splitlines()
+    assert header.split() == list(report.RUN_LIST_HEADER)
+    starts = [header.index(name) for name in report.RUN_LIST_HEADER]
+    for row in rows:
+        for start in starts[1:]:
+            assert row[start - 2 : start] == "  " and row[start] != " ", (row, start)
+    assert [cells[3] for cells in _rows("\n".join([header, *rows]))] == ["error (exit 12)", "ok"]
+
+
+def test_runs_list_shows_a_process_run_s_command_without_its_program_s_directory():
+    """Every run of `python agent.py` names the same interpreter path, so the trigger column is
+    the program's base name and its arguments, cut to forty characters."""
+    argv: list[trace.JSONValue] = ["/opt/venv/bin/python3", "agent.py", "--ticket", "T-1"]
+    run = _ended_run("p", HAND_BUILT_AT, trigger=Trigger(str(argv[0]), None, {"argv": argv}, True))
+    assert report.run_list_columns(run, [])[5] == "python3 agent.py --ticket T-1"
+    long: list[trace.JSONValue] = ["/usr/bin/python3", "agent.py", "x" * 60]
+    run = _ended_run("q", HAND_BUILT_AT, trigger=Trigger("python3", None, {"argv": long}, True))
+    cell = report.run_list_columns(run, [])[5]
+    assert len(cell) == report.MAX_TRIGGER_SHOWN
+    assert cell == ("python3 agent.py " + "x" * 60)[: report.MAX_TRIGGER_SHOWN - 1] + "…"
+
+
+def test_runs_list_says_how_many_older_runs_it_left_out_and_all_lists_every_one(home, capfd):
+    s = DirectoryStore(home / "store", redact.load_key(home))
+    for i in range(DEFAULT_RUNS_LIMIT + 2):
+        s.start_run(_ended_run(f"proc{i:02d}", HAND_BUILT_AT + i))
+    s.close()
+    assert main(["runs", "list", "--limit", "3"]) == 0
+    *listed, older = capfd.readouterr().out.splitlines()
+    assert [row[0] for row in _rows("\n".join(listed))] == ["proc21", "proc20", "proc19"]
+    assert older == f"({DEFAULT_RUNS_LIMIT - 1} older runs; use --limit or --all)"
+    assert main(["runs", "list", "--all"]) == 0
+    rows = _rows(capfd.readouterr().out)
+    assert len(rows) == DEFAULT_RUNS_LIMIT + 2
+
+
 # ------------------------------------------------------------------------------ runs show
 
+
+def test_runs_show_takes_a_prefix_only_one_run_id_starts_with(home, capfd):
+    s = DirectoryStore(home / "store", redact.load_key(home))
+    s.start_run(_ended_run("9c207d4b1c0178f3", HAND_BUILT_AT))
+    s.start_run(_ended_run("9c3aa0000000beef", HAND_BUILT_AT + 1))
+    s.close()
+    assert main(["runs", "show", "9c20"]) == 0
+    assert capfd.readouterr().out.splitlines()[0] == "run: 9c207d4b1c0178f3"
+    assert main(["runs", "show", "9c"]) == 1
+    assert capfd.readouterr() == (
+        "",
+        "error: run id 9c is ambiguous; it starts 9c207d4b1c0178f3, 9c3aa0000000beef\n",
+    )
+
+
+def test_runs_show_with_no_run_id_shows_the_newest_run(home, capfd):
+    s = DirectoryStore(home / "store", redact.load_key(home))
+    s.start_run(_ended_run("older", HAND_BUILT_AT))
+    s.start_run(_ended_run("newer", HAND_BUILT_AT + 1))
+    s.close()
+    assert main(["runs", "show"]) == 0
+    assert capfd.readouterr().out.splitlines()[0] == "run: newer"
+    assert main(["runs", "show", "last"]) == 0
+    assert capfd.readouterr().out.splitlines()[0] == "run: newer"
+
+
+def test_runs_show_last_in_an_empty_store_says_there_are_no_runs(home, capfd):
+    assert main(["runs", "show"]) == 1
+    assert capfd.readouterr() == ("", f"error: no runs in {home / 'store'}\n")
+
+
 HANDBUILT_EVENTS = [
-    "fake-L0   write     POST api.stripe.com/v1/refunds -> 200",
-    "shadow    write     tool db.mark_refunded -> raised db.Locked",
+    "faked         write     POST api.stripe.com/v1/refunds -> 200",
+    "tool-fake     write     db.mark_refunded -> raised db.Locked",
     "telemetry api.smith.langchain.com",
 ]
 
 
-def _handbuilt_summary(write: str) -> list[str]:
+def _handbuilt_summary(write: str, money: list[str]) -> list[str]:
     return [
         "irimi shadow · run handbuilt · 2 exchanges · 0.0s",
         "",
-        "  api.stripe.com  1 write intercepted",
+        "  None of these writes reached the real service:",
+        f"  ○ stripe  {write}  faked; not checked",
+        "  ○ tool  db.mark_refunded  fake raised db.Locked",
+        *money,
+        "",
+        "  api.stripe.com  1 faked write",
         "  telemetry       1 exchange to 1 host, forwarded live",
         "",
-        f"  ○ {write}  unvalidated (L0)",
-        "  ○ tool db.mark_refunded  shadow stand-in raised db.Locked",
-        "",
-        "  2 exchanges · 1 live · 0 delegated · 1 virtualized",
-        "  These writes did not happen.",
+        "  2 exchanges · 1 real · 1 answered by irimi (1 faked write) · 0 sent to targets",
     ]
 
 
@@ -456,7 +563,7 @@ def test_runs_show_prints_the_header_every_event_and_the_summary(home, capfd):
         *HANDBUILT_EVENTS,
         "",
         # The shipped Stripe map's `human:` template, with the request's own fields in it.
-        *_handbuilt_summary("refund $49.00 on ch_1"),
+        *_handbuilt_summary("refund $49.00 on ch_1", ["  money: $49.00 in faked writes"]),
     ]
 
 
@@ -544,7 +651,9 @@ def test_runs_show_still_prints_with_a_warning_when_the_maps_do_not_load(home, c
     assert main(["runs", "show", "handbuilt"]) == 0
     out, err = capfd.readouterr()
     assert err == "warning: maps did not load; writes are shown as requests\n"
-    assert out.splitlines()[-10:] == _handbuilt_summary("POST api.stripe.com/v1/refunds")
+    # No `human:` sentence names the amount, so there is no money line either.
+    summary = _handbuilt_summary("POST api.stripe.com/v1/refunds", [])
+    assert out.splitlines()[-len(summary) :] == summary
 
 
 def test_a_tool_call_line_escapes_the_control_characters_it_was_posted_with():
@@ -553,8 +662,8 @@ def test_a_tool_call_line_escapes_the_control_characters_it_was_posted_with():
     name = "evil\x1b[2J\nshadow    write     tool x"
     call = ToolCall("t", "r", name, "write", "shadow", {}, None, ErrorInfo("a\nb", "m"), 1.0, 2.0)
     escaped = "evil\\x1b[2J\\nshadow    write     tool x"
-    assert report.tool_call_line(call) == f"shadow    write     tool {escaped} -> raised a\\nb"
-    assert report.tool_write_line(call) == f"  ○ tool {escaped}  shadow stand-in raised a\\nb"
+    assert report.tool_call_line(call) == f"tool-fake     write     {escaped} -> raised a\\nb"
+    assert report.tool_write_line(call) == f"  ○ tool  {escaped}  fake raised a\\nb"
 
 
 def test_a_run_whose_only_writes_are_tool_writes_still_says_they_did_not_happen():
@@ -562,24 +671,27 @@ def test_a_run_whose_only_writes_are_tool_writes_still_says_they_did_not_happen(
     tool, which ran for real, gets no line and no closing sentence."""
     write = ToolCall("t", "r", "db.write", "write", "shadow", {}, 1, None, 1.0, 2.0)
     read = ToolCall("u", "r", "db.read", "read", "real", {}, 1, None, 1.0, 2.0)
+    totals = "  0 exchanges · 0 real · 0 answered by irimi (0 faked writes) · 0 sent to targets"
     assert report.summary_lines("r", [], tool_calls=[read, write]) == [
         "irimi shadow · run r · 0 exchanges · 0.0s",
         "",
-        "  ○ tool db.write  shadow stand-in ran",
+        "  None of these writes reached the real service:",
+        "  ○ tool  db.write  fake ran instead",
         "",
-        "  0 exchanges · 0 live · 0 delegated · 0 virtualized",
-        "  These writes did not happen.",
+        totals,
     ]
-    assert report.summary_lines("r", [], tool_calls=[read])[-1] == (
-        "  0 exchanges · 0 live · 0 delegated · 0 virtualized"
-    )
+    assert report.summary_lines("r", [], tool_calls=[read]) == [
+        "irimi shadow · run r · 0 exchanges · 0.0s",
+        "",
+        totals,
+    ]
 
 
 def test_tool_call_line_is_in_the_exchange_line_s_columns():
     call = ToolCall("t", "r", "db.mark_refunded", "write", "shadow", {}, None, None, 1.0, 2.0)
-    assert report.tool_call_line(call) == "shadow    write     tool db.mark_refunded -> ok"
+    assert report.tool_call_line(call) == "tool-fake     write     db.mark_refunded -> ok"
     real = ToolCall("t", "r", "crm.lookup", "read", "real", {}, {}, None, 1.0, 2.0)
-    assert report.tool_call_line(real) == "real      read      tool crm.lookup -> ok"
+    assert report.tool_call_line(real) == "tool-real     read      crm.lookup -> ok"
 
 
 def test_runs_show_prints_a_stored_message_s_control_characters_escaped(home, capfd):
@@ -667,10 +779,10 @@ def test_runs_show_and_list_name_an_event_nested_too_deep_to_quote_as_damage(hom
         assert err == f"{refused}{events}, line 2: 'name' is a list, not a string\n"
     assert main(["runs", "list"]) == 0
     out, err = capfd.readouterr()
-    assert out == (
-        f"handbuilt  {_local(HAND_BUILT_AT)}  -  incomplete  sdk  refund_ticket  "
-        "? exchanges  ? writes\n"
-    )
+    assert _rows(out) == [
+        ["handbuilt", _local(HAND_BUILT_AT), "-", "incomplete", "sdk", "refund_ticket"]
+        + ["? exchanges", "? writes"]
+    ]
     assert err.startswith("warning: run handbuilt could not be read: ") and "[[" not in err
 
 

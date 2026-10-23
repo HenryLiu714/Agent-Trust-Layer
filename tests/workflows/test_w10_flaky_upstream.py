@@ -8,6 +8,7 @@ A failed L3 read is irimi's alone, and only its summary shows it. The agent is
 """
 
 import hashlib
+import re
 
 import pytest
 
@@ -24,7 +25,9 @@ MODES = ("shadow", "serve")
 # What a shadow run holds besides a body it decodes: its exchanges, its store's queue, the fake
 # internet's answers. Measured at 2 to 45 MiB on top of twice the cap.
 MEMORY_MARGIN = 64 * 1024 * 1024
-REFUND_LINE = "  ○ refund $5.00 on ch_PAYOUT1  unvalidated (L3 preconditions passed)"
+REFUND_LINE = (
+    "  ○ stripe  refund $5.00 on ch_PAYOUT1  faked; checked against live state: would succeed"
+)
 # What the agent saw when nothing failed: the list and the model live, the refund and the Slack
 # post faked. A run whose SDK cannot reach irimi must see exactly this.
 ANSWERED = [
@@ -44,12 +47,13 @@ def retries(result):
 
 
 def listed_status(result, run_id: str | None = None) -> str:
-    """A run's status column in `irimi runs list`: the process run's, or `run_id`'s."""
+    """A run's status column in `irimi runs list`: the process run's, or `run_id`'s. Columns are
+    padded, so any run of two or more spaces separates two fields."""
     code, out, err = result.runs("list")
     assert (code, err) == (0, [])
     run_id = run_id or result.process_run_id()
     [line] = [line for line in out if line.startswith(run_id + "  ")]
-    return line.split("  ")[3]
+    return re.split(r"  +", line)[3]
 
 
 def shown_outcome(result) -> list[str]:
@@ -68,8 +72,8 @@ def test_a_rate_limited_read_fails_under_shadow_too_and_is_retried(run_workflow)
     for mode in MODES:
         lines = run_workflow(W, "rate_limited", mode).exchange_lines()
         assert lines[:2] == [
-            "live      read      GET api.stripe.com/v1/charges -> 429",
-            "live      read      GET api.stripe.com/v1/charges -> 200",
+            "real          read      GET api.stripe.com/v1/charges -> 429",
+            "real          read      GET api.stripe.com/v1/charges -> 200",
         ]
 
 
@@ -80,7 +84,7 @@ def test_a_server_error_on_a_read_is_forwarded_and_retried(run_workflow):
     for mode in MODES:
         shadow = run_workflow(W, "server_error_read", mode)
         lines = shadow.exchange_lines()
-        assert lines[0] == "live      read      GET api.stripe.com/v1/charges -> 500"
+        assert lines[0] == "real          read      GET api.stripe.com/v1/charges -> 500"
         assert REFUND_LINE in shadow.summaries()
 
 
@@ -97,8 +101,8 @@ def test_a_read_the_agent_abandoned_is_recorded_as_an_upstream_error(run_workflo
     # reads as the service's fault. Which of the two reads prints first is a race between irimi
     # noticing the hang-up and the retry's answer, so their order is not pinned.
     assert sorted(shadow.exchange_lines()[:2]) == [
-        "live      read      GET api.stripe.com/v1/charges -> -  [upstream-error]",
-        "live      read      GET api.stripe.com/v1/charges -> 200",
+        "real          read      GET api.stripe.com/v1/charges -> -  [upstream-error]",
+        "real          read      GET api.stripe.com/v1/charges -> 200",
     ]
     # Two agent reads and the refund's L3 read: the stall was not retried by irimi itself.
     assert [r.path for r in shadow.internet.requests("api.stripe.com")] == [
@@ -125,8 +129,8 @@ def test_a_reset_on_a_read_reaches_the_agent_as_an_unstamped_502(run_workflow, m
     ]
     assert retries(shadow) == [("list_charges", 502)]
     assert sorted(shadow.exchange_lines()[:2]) == [
-        "live      read      GET api.stripe.com/v1/charges -> -  [upstream-error]",
-        "live      read      GET api.stripe.com/v1/charges -> 200",
+        "real          read      GET api.stripe.com/v1/charges -> -  [upstream-error]",
+        "real          read      GET api.stripe.com/v1/charges -> 200",
     ]
     assert REFUND_LINE in shadow.summaries()
     # Stored as printed: an exchange with no response reads back as one.
@@ -155,13 +159,20 @@ def test_a_failed_precondition_read_degrades_the_check_and_the_agent_never_knows
     ]
     assert statuses(shadow, "refund") == statuses(bare, "refund") == [200]
     assert retries(shadow) == []
-    assert "live      read      GET api.stripe.com/v1/charges/ch_PAYOUT1 -> 500" in (
+    assert "irimi-check   read      GET api.stripe.com/v1/charges/ch_PAYOUT1 -> 500" in (
         shadow.exchange_lines()
     )
-    # The check could not be made, so the refund is faked at L2. LOOKS WRONG: with no currency
-    # the L3 read would have supplied, its amount prints in minor units.
-    refunds = [line for line in shadow.summaries() if "○ refund" in line]
-    assert refunds == ["  ○ refund 500 on ch_PAYOUT1  unvalidated (L2)"]
+    # The check could not be made, and the summary says why. LOOKS WRONG: with no currency the
+    # L3 read would have supplied, its amount prints in minor units.
+    refunds = [line for line in shadow.summaries() if "○ stripe  refund" in line]
+    assert refunds == [f"  {UNCHECKED_REFUND}"]
+
+
+# The refund whose precondition check read got a 500, as its summary line prints it.
+UNCHECKED_REFUND = (
+    "○ stripe  refund 500 (minor units, currency unknown) on ch_PAYOUT1  faked; could not check: "
+    "stripe answered irimi's check read with 500"
+)
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -193,7 +204,7 @@ def test_a_keyless_write_retried_after_a_500_is_two_posts_bare_and_one_fake_unde
     assert len(bare.world.stripe.refunds) == 1  # the 500 was answered before Stripe acted
     # Shadow: the 500 cannot happen, the write is faked once, and the summary shows one refund.
     assert statuses(shadow, "refund") == [200]
-    assert [line for line in shadow.summaries() if "○ refund" in line] == [REFUND_LINE]
+    assert [line for line in shadow.summaries() if "○ stripe  refund" in line] == [REFUND_LINE]
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -202,11 +213,10 @@ def test_a_model_that_answers_prose_leads_to_no_write_but_the_status_post(run_wo
     assert [e["text"][:5] for e in shadow.events("llm_fallback")] == ["Sure!"]
     assert shadow.calls("refund") == []
     assert (
-        "live      llm       POST api.anthropic.com/v1/messages -> 200" in shadow.exchange_lines()
+        "real          llm       POST api.anthropic.com/v1/messages -> 200"
+        in shadow.exchange_lines()
     )
-    assert [line for line in shadow.summaries() if "○" in line] == [
-        '  ○ post to #C0PAYOUT: "payout sync: no action"  unvalidated (L3 preconditions passed)'
-    ]
+    assert [line for line in shadow.summaries() if "○" in line] == [f"  {NO_ACTION}"]
     assert len(shadow.world.llm.calls) == 1
 
 
@@ -235,7 +245,7 @@ def test_an_agent_that_raises_after_its_write_still_shows_the_write(run_workflow
     assert process_run(shadow) == ("error", 1, ErrorInfo("exit", "exited 1"))
     # `irimi runs list` and `runs show` print it where the summary cannot. The summary pin
     # above stays: a stored run's summary is the live one, and the live one says nothing.
-    assert listed_status(shadow) == "error"
+    assert listed_status(shadow) == "error (exit 1)"
     assert shown_outcome(shadow) == ["outcome: error", "error: exit: exited 1", "exit code: 1"]
 
 
@@ -256,15 +266,19 @@ def test_an_agent_killed_after_its_write_leaves_a_run_with_no_end(run_workflow, 
     # LOOKS WRONG: as after a raise, the summary ends as a finished run's does, with no word that
     # the agent was killed.
     summary = shadow.summaries()
-    assert summary[-1] == (
-        "  These writes did not happen. Would have fired: refund.created, charge.refunded."
-    )
-    # The header names the process run, 16 random hex characters, which can spell `143` by chance.
-    said = [line.replace(shadow.engine_run_id(), "<run>").lower() for line in summary]
+    sdk_run = shadow.one("run.start")["run"]
+    assert "  would have fired: refund.created, charge.refunded" in summary
+    assert summary[-1] == f"  replay with: irimi replay {sdk_run[:8]}"
+    # The header names the process run and the last lines the SDK's, random hex characters,
+    # which can spell `143` by chance.
+    said = [
+        line.replace(shadow.engine_run_id(), "<run>").replace(sdk_run[:8], "<run>").lower()
+        for line in summary
+    ]
     assert not any(word in line for line in said for word in ("143", "kill", "signal"))
     # The stored process run ends with the child's code, which is how the kill is visible.
     assert process_run(shadow) == ("error", 143, ErrorInfo("exit", "exited 143"))
-    assert listed_status(shadow) == "error"
+    assert listed_status(shadow) == "error (exit 143)"
     assert shown_outcome(shadow) == ["outcome: error", "error: exit: exited 143", "exit code: 143"]
     # The agent's own run is the one the SDK started, and it reads back whole, the faked
     # refund included, with no end: the default SIGTERM handler raises nothing, so the SDK never
@@ -404,7 +418,7 @@ def test_a_bomb_on_the_read_reaches_the_agent_whole_and_is_recorded_empty(
         ]
     assert [c["answered_by"] for c in shadow.calls("list_charges")] == [None]
     assert shadow.exchange_lines()[0] == (
-        "live      read      GET api.stripe.com/v1/charges -> 200  [body-truncated]"
+        "real          read      GET api.stripe.com/v1/charges -> 200  [body-truncated]"
     )
     [read] = [e for e in shadow.reported if e.request.path == "/v1/charges"]
     assert read.response is not None and (read.response.body, read.flags) == (
@@ -441,8 +455,9 @@ def test_a_bomb_costs_irimi_its_cap_in_memory_not_what_it_decodes_to(traced_run,
 
 SYNC = "sync_payouts  examples.workflows.w10_flaky_upstream.agent:sync_payouts"
 REFUND = REFUND_LINE.removeprefix("  ")
-POSTED = '○ post to #C0PAYOUT: "refunded 500 on ch_PAYOUT1"  unvalidated (L3 preconditions passed)'
-NO_ACTION = '○ post to #C0PAYOUT: "payout sync: no action"  unvalidated (L3 preconditions passed)'
+CHECKED = "faked; checked against live state: would succeed"
+POSTED = f'○ slack  post to #C0PAYOUT: "refunded 500 on ch_PAYOUT1"  {CHECKED}'
+NO_ACTION = f'○ slack  post to #C0PAYOUT: "payout sync: no action"  {CHECKED}'
 WROTE_BOTH = [f"  = {REFUND}", f"  = {POSTED}"]
 # Each scenario's run against `rate_limited`'s, both recorded into one store: the exit code,
 # whether the triggers' args differ, and the rows. `rate_limited` retried its read and then
@@ -461,7 +476,11 @@ AGAINST_A_RETRIED_READ = {
     "precondition_read_fails": (
         1,
         False,
-        [f"  ~ A {REFUND}", "    B ○ refund 500 on ch_PAYOUT1  unvalidated (L2)", f"  = {POSTED}"],
+        [
+            f"  ~ A {REFUND}",
+            f"    B {UNCHECKED_REFUND}",
+            f"  = {POSTED}",
+        ],
     ),
     # The model answered prose, and the agent posted that it did nothing: the refund is gone, and
     # the post is the same post, changed.
@@ -515,11 +534,12 @@ def test_irimi_compare_shows_what_each_failure_changed_about_the_runs_writes(
 
 
 def test_a_refund_whose_precondition_read_failed_replays_as_unvalidated(replayed):
-    """irimi's own read of the charge got a 500 in the recorded run, so the refund was faked at
-    L2. The replayed refund is the same write, answered with its recorded answer and its recorded
-    `not_evaluable`, and is checked against nothing: no precondition read, recorded or live, and
-    no request reaches the fake Stripe. The recording serving a failed read to a write that
-    missed is `tests/test_replay_engine.py`'s."""
+    """irimi's own read of the charge got a 500 in the recorded run, so the refund was faked
+    unchecked. The replayed refund is the same write, answered with its recorded answer and its
+    recorded `not_evaluable`, and is checked against nothing: no precondition read, recorded or
+    live, and no request reaches the fake Stripe, so its summary line says the recorded run could
+    not check it. The recording serving a failed read to a write that missed is
+    `tests/test_replay_engine.py`'s."""
     recorded, replay = replayed(W, "precondition_read_fails")
     [refund] = [ex for ex in replay.reported if ex.request.path == "/v1/refunds"]
     assert (refund.precondition, refund.flags) == (
@@ -528,7 +548,10 @@ def test_a_refund_whose_precondition_read_failed_replays_as_unvalidated(replayed
     )
     assert [ex for ex in replay.reported if ex.issued_by == "engine"] == []
     assert replay.internet.requests() == []
-    assert "  ○ refund 500 on ch_PAYOUT1  unvalidated (L2)" in replay.summaries()
+    assert (
+        "  ○ stripe  refund 500 (minor units, currency unknown) on ch_PAYOUT1  faked; could not "
+        "check: the recorded run could not check it"
+    ) in replay.summaries()
 
 
 @pytest.mark.parametrize(

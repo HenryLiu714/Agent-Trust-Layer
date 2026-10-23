@@ -139,7 +139,7 @@ class NotEvaluable:
     `Rejection` is "the service would have refused this write"; None is "it would have taken it".
     This is neither: irimi put the question and did not find out, as when the read lacks the
     scope to see the object. Recording that as passed would claim a check that never ran - the
-    summary prints `L3 preconditions passed` off it - and rejecting would invent a refusal the
+    summary prints `checked against live state` off it - and rejecting would invent a refusal the
     service never made. It carries nothing, because the reason belongs in the log line, not in the
     trace.
     """

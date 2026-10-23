@@ -784,7 +784,7 @@ def test_a_ctrl_c_while_the_store_closes_still_prints_the_summary(home, monkeypa
     except KeyboardInterrupt:  # caught here, or it would stop the whole pytest session
         pytest.fail("a Ctrl-C in the store's close escaped `irimi shadow`")
     assert code == 0
-    assert "0 exchanges · 0 live" in capsys.readouterr().out
+    assert "0 exchanges · 0 real" in capsys.readouterr().out
 
 
 def test_serve_prints_a_line_for_each_tool_call(home, monkeypatch, capsys):
@@ -821,7 +821,7 @@ def test_serve_prints_a_line_for_each_tool_call(home, monkeypatch, capsys):
     assert "error: not started" in capsys.readouterr().err.splitlines()
     [on_tool_call] = wired
     on_tool_call(ToolCall("t", "r", "db.write", "write", "shadow", {}, None, None, 1.0, 2.0))
-    assert "shadow    write     tool db.write -> ok" in capsys.readouterr().out.splitlines()
+    assert "tool-fake     write     db.write -> ok" in capsys.readouterr().out.splitlines()
 
 
 def test_serve_records_under_the_store_it_was_given(home, monkeypatch):

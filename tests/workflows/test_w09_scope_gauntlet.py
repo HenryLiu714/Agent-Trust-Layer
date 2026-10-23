@@ -58,12 +58,11 @@ def test_the_scope_rule_fakes_every_method_no_route_names(run_workflow, mode):
         ("POST", "/v1/subscriptions"),
     ]:
         assert (
-            f"fake-L0   unknown   {verb} api.stripe.com{path} -> 200  [unclassified, fidelity:L0]"
-            in lines
+            f"faked         unknown   {verb} api.stripe.com{path} -> 200  [unclassified]" in lines
         )
     # The L0 floor: a mapped write whose route ships no `fixture:` is still a write, and faked.
-    assert "fake-L0   write     POST slack.com/api/reactions.add -> 200  [fidelity:L0]" in lines
-    assert "  ○ add :eyes: to a message in C0GAUNT  unvalidated (L0)" in summary_of(shadow)
+    assert "faked         write     POST slack.com/api/reactions.add -> 200" in lines
+    assert "  ○ slack  add :eyes: to a message in C0GAUNT  faked; not checked" in summary_of(shadow)
     # Bare, the same calls really reach Stripe; the fake refuses the ones it does not know.
     bare = run_workflow(W, "verbs", "bare")
     assert [(r.method, r.path) for r in bare.internet.writes()] == [
@@ -92,17 +91,24 @@ def test_one_idempotency_key_is_one_write_and_a_reused_key_is_stripes_own_error(
     assert ids["refund_same_key"] == (first_id, "true")
     assert ids["refund_key_reused"] == (None, None)
     assert len({ids["refund_first"][0], ids["refund_nokey_1"][0], ids["refund_nokey_2"][0]}) == 3
-    refund = "fake-L1   write     POST api.stripe.com/v1/refunds"
+    refund = "faked         write     POST api.stripe.com/v1/refunds"
     lines = shadow.exchange_lines()
-    assert f"{refund} -> 200  [fidelity:L1, idempotent-replay]" in lines
-    assert f"{refund} -> 400  [fidelity:L1, idempotency-conflict]" in lines
+    assert f"{refund} -> 200  [idempotent-replay]" in lines
+    assert f"{refund} -> 400  [idempotency-conflict]" in lines
     # A replayed key issues no second L3 read; each keyless refund issues its own.
     engine_reads = [r for r in shadow.internet.requests() if r.path == "/v1/charges/ch_GAUNTLET"]
     assert len(engine_reads) == 3
     # The summary counts the two keyless refunds as two writes: a duplicate it does not flag.
     summary = "\n".join(summary_of(shadow))
     assert summary.count("refund $0.50 on ch_GAUNTLET") == 2
-    assert "✗ refund 200 on ch_GAUNTLET  would fail: idempotency_error" in summary
+    assert REUSED_KEY in summary
+
+
+# The refund that reused an idempotency key with other parameters, as its summary line prints it.
+REUSED_KEY = (
+    "✗ stripe  refund 200 (minor units, currency unknown) on ch_GAUNTLET  faked; would fail: "
+    "idempotency_error"
+)
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -147,13 +153,16 @@ def test_a_read_past_the_body_limit_leaves_the_check_and_the_overlay_unable_to_s
     assert shadow.exchange_lines() == [
         # LOOKS WRONG: the L3 read was answered 200, but irimi refused the body for its size and
         # records the read with no response and no flag, the same line as a read that got nothing.
-        f"live      read      GET api.stripe.com/v1/charges/{BIG_CHARGE} -> -",
-        "fake-L1   write     POST api.stripe.com/v1/refunds -> 200  [fidelity:L1]",
-        f"live      read      GET api.stripe.com/v1/charges/{BIG_CHARGE} -> 200",
+        f"irimi-check   read      GET api.stripe.com/v1/charges/{BIG_CHARGE} -> -",
+        "faked         write     POST api.stripe.com/v1/refunds -> 200",
+        f"real          read      GET api.stripe.com/v1/charges/{BIG_CHARGE} -> 200",
     ]
     summary = summary_of(shadow)
-    assert f"  ○ refund 700 on {BIG_CHARGE}  unvalidated (L2)" in summary
-    assert f"    ↳ GET /v1/charges/{BIG_CHARGE} did not show it  live (partial)" in summary
+    assert (
+        f"  ○ stripe  refund 700 (minor units, currency unknown) on {BIG_CHARGE}  faked; could not "
+        "check: irimi's check read of stripe got no usable answer"
+    ) in summary
+    assert f"    ↳ GET /v1/charges/{BIG_CHARGE} did not show it  real (partial)" in summary
     # LOOKS WRONG: stored the same way (#70) - an engine read with no response and no flag, so a
     # stored run cannot tell "too big" apart from "no answer" either.
     assert engine_reads(shadow) == [(None, ())]
@@ -243,15 +252,19 @@ def test_every_spelling_of_the_proxys_own_address_is_the_reverse_door(run_workfl
     }
     assert shadow.internet.requests() == []
     # The door relays over https, and the fake internet speaks only http, so irimi's L3 read of
-    # the charge gets no answer here and each refund is faked at L2. The failed engine read prints
-    # with no response and no flag, as the oversized one does in `big_reads`.
-    read = "live      read      GET api.stripe.com/v1/charges/ch_GAUNTLET -> -"
-    write = "fake-L1   write     POST api.stripe.com/v1/refunds -> 200  [fidelity:L1]"
+    # the charge gets no answer here and each refund is faked without a check. The failed check
+    # read prints with no response and no flag, as the oversized one does in `big_reads`.
+    read = "irimi-check   read      GET api.stripe.com/v1/charges/ch_GAUNTLET -> -"
+    write = "faked         write     POST api.stripe.com/v1/refunds -> 200"
     assert shadow.exchange_lines() == [read, write] * 3
     assert engine_reads(shadow) == [(None, ())] * 3  # stored as `big_reads` stores its one
     if mode == "shadow":
         refunds = [line for line in shadow.summary() if "○" in line]
-        assert refunds == ["  ○ refund 600 on ch_GAUNTLET  unvalidated (L2)"] * 3
+        refund = (
+            "  ○ stripe  refund 600 (minor units, currency unknown) on ch_GAUNTLET  faked; could "
+            "not check: irimi's check read of stripe got no usable answer"
+        )
+        assert refunds == [refund] * 3
         return
     # A plain script starts no run, so under serve every refund is `unattributed` and no run's
     # summary prints. The bind wider than loopback is in the banner, once.
@@ -371,14 +384,26 @@ def stored_tool_call(result, run_id: str, label: str) -> ToolCall:
 
 
 def read_line(path: str) -> str:
-    return f"live      read      GET api.stripe.com{path} -> 200"
+    return f"real          read      GET api.stripe.com{path} -> 200"
 
 
 def listed(result) -> list[list[str]]:
-    """`irimi runs list`, each line's fields, its start time and duration masked."""
+    """`irimi runs list`, each row's fields under its header row, its start time and duration
+    masked. Columns are padded, so any run of two or more spaces separates two fields."""
     code, out, err = result.runs("list")
     assert (code, err) == (0, [])
-    return sorted([f[0], "<started>", "<elapsed>", *f[3:]] for f in (o.split("  ") for o in out))
+    assert out[0].split() == list(report.RUN_LIST_HEADER)
+    rows = (re.split(r"  +", line.rstrip()) for line in out[1:])
+    return sorted([f[0], "<started>", "<elapsed>", *f[3:]] for f in rows)
+
+
+def listed_command(argv: list[str]) -> str:
+    """A process run's trigger column: its command line without the program's directory, cut to
+    `report.MAX_TRIGGER_SHOWN` characters."""
+    command = shlex.join([argv[0].rsplit("/", 1)[-1], *argv[1:]])
+    if len(command) <= report.MAX_TRIGGER_SHOWN:
+        return command
+    return command[: report.MAX_TRIGGER_SHOWN - 1] + "…"
 
 
 def shown(result, run_id: str) -> list[str]:
@@ -456,15 +481,15 @@ def test_a_run_posted_over_the_control_endpoint_is_stored_as_an_sdk_run(run_work
             f"agent version: {AGENT_VERSION}",
             "outcome: ok",
             "",
-            "real      read      tool look_up -> ok",
+            "tool-real     read      look_up -> ok",
             read_line(path),
-            "real      read      tool summarise -> ok",
+            "tool-real     read      summarise -> ok",
             "",
             f"irimi shadow · run {run_id} · 1 exchange · <elapsed>",
             "",
             "  api.stripe.com  1 read",
             "",
-            "  1 exchange · 1 live · 0 delegated · 0 virtualized",
+            "  1 exchange · 1 real · 0 answered by irimi (0 faked writes) · 0 sent to targets",
         ]
 
 
@@ -486,9 +511,9 @@ def test_two_runs_posted_at_once_do_not_mix(run_workflow, mode):
         tag, path = CONTROL_RUNS[run_id]
         assert [e.run_id for e in reader.load_run(run_id).events] == [run_id] * 3
         assert shown(shadow, run_id)[8:11] == [
-            "real      read      tool look_up -> ok",
+            "tool-real     read      look_up -> ok",
             read_line(path),
-            "real      read      tool summarise -> ok",
+            "tool-real     read      summarise -> ok",
         ]
 
 
@@ -535,11 +560,11 @@ def test_a_run_that_ends_in_error_keeps_its_error_redacted_then_cut_to_what_a_tr
         "outcome: error",
         f"error: {cut.type}: {cut.message}",
         "",
-        "real      read      tool charge_card -> raised builtins.ValueError",
+        "tool-real     read      charge_card -> raised builtins.ValueError",
         "",
         "irimi shadow · run ctl-error · 0 exchanges · <elapsed>",
         "",
-        "  0 exchanges · 0 live · 0 delegated · 0 virtualized",
+        "  0 exchanges · 0 real · 0 answered by irimi (0 faked writes) · 0 sent to targets",
     ]
 
 
@@ -602,11 +627,24 @@ def test_a_run_ended_over_the_control_endpoint_no_longer_lists_as_incomplete(run
             assert shown(shadow, run_id)[-len(block) :] == masked
         return
     process = shadow.process_run_id()
-    argv0 = shadow.stored().load_run(process).record.trigger.name
+    trigger = shadow.stored().load_run(process).record.trigger
+    assert trigger is not None and isinstance(trigger.args, dict)
+    argv = trigger.args["argv"]
+    assert isinstance(argv, list)
+    command = listed_command([str(word) for word in argv])
     assert listed(shadow) == sorted(
         [
             *ran,
-            [process, "<started>", "<elapsed>", "ok", "process", argv0, "0 exchanges", "0 writes"],
+            [
+                process,
+                "<started>",
+                "<elapsed>",
+                "ok",
+                "process",
+                command,
+                "0 exchanges",
+                "0 writes",
+            ],
         ]
     )
 
@@ -679,11 +717,11 @@ def test_the_process_runs_start_and_end_are_irimis_and_only_its_tool_calls_are_t
         "outcome: ok",
         "exit code: 0",
         "",
-        "real      read      tool look_up -> ok",
+        "tool-real     read      look_up -> ok",
         "",
         f"irimi shadow · run {process} · 0 exchanges · <elapsed>",
         "",
-        "  0 exchanges · 0 live · 0 delegated · 0 virtualized",
+        "  0 exchanges · 0 real · 0 answered by irimi (0 faked writes) · 0 sent to targets",
     ]
     # A tool call posted for no run at all, as the SDK posts one where there is no process run
     # (`irimi serve`), is taken too, and filed in `unattributed/`: the one post that may name
@@ -691,7 +729,7 @@ def test_the_process_runs_start_and_end_are_irimis_and_only_its_tool_calls_are_t
     unattributed = shadow.stored().load_run(trace.UNATTRIBUTED).events
     assert unattributed == [stored_tool_call(shadow, trace.UNATTRIBUTED, "unattributed_tool")]
     # Printed like the process run's: one line each, the same text, so counted, not looked for.
-    assert shadow.tool_call_lines() == ["real      read      tool look_up -> ok"] * 2
+    assert shadow.tool_call_lines() == ["tool-real     read      look_up -> ok"] * 2
     # Bare, there is no process run: the agent posts for a stand-in id, to the fake internet.
     bare = run_workflow(W, "control_hazards", "bare")
     assert [e["id"] for e in bare.events("process_run")] == ["no-process-run"]
@@ -732,7 +770,7 @@ def test_under_serve_irimis_own_run_is_unattributed_and_only_its_tool_calls_are_
         "",
         "  api.stripe.com  1 read",
         "",
-        "  1 exchange · 1 live · 0 delegated · 0 virtualized",
+        "  1 exchange · 1 real · 0 answered by irimi (0 faked writes) · 0 sent to targets",
     ]
     [line] = [f for f in listed(serve) if f[0] == "ctl-restarted"]
     assert line[3] == "ok"
@@ -758,7 +796,7 @@ def test_an_unmapped_hosts_posts_are_faked_even_when_they_are_reads(run_workflow
         "slack_unrouted": (200, "fake-L0"),
     }
     assert (
-        "fake-L0   unknown   POST slack.com/api/chat.delete -> 200  [unclassified, fidelity:L0]"
+        "faked         unknown   POST slack.com/api/chat.delete -> 200  [unclassified]"
         in shadow.exchange_lines()
     )
     assert [r.path for r in shadow.internet.requests()] == ["/health"]
@@ -771,7 +809,8 @@ def test_a_get_that_writes_escapes_and_the_scenario_says_so(run_workflow, mode):
         ("GET", "legacy.internal", "/api/delete_user")
     ]
     assert (
-        "live      read      GET legacy.internal/api/delete_user -> 200" in shadow.exchange_lines()
+        "real          read      GET legacy.internal/api/delete_user -> 200"
+        in shadow.exchange_lines()
     )
 
 
@@ -782,8 +821,8 @@ def test_a_replay_answers_the_get_that_writes_from_its_recording_so_it_writes_no
     assert [(r.method, r.path) for r in recorded.internet.writes()] == [("GET", "/api/delete_user")]
     assert replay.internet.writes() == []
     assert (
-        "recording read      GET legacy.internal/api/delete_user -> 200"
-        "  [fidelity:recording, from-recording]" in replay.exchange_lines()
+        "recorded      read      GET legacy.internal/api/delete_user -> 200"
+        "  [from-recording]" in replay.exchange_lines()
     )
 
 
@@ -878,11 +917,12 @@ def test_a_replay_writes_no_other_recorded_run_its_agent_names_again(replayed):
 # each run start 413 unread.
 
 BOMB_LINES = [
-    "irimi     write     POST api.stripe.com/v1/refunds -> 502  [decision-failed, body-truncated]",
-    "live      llm       POST api.anthropic.com/v1/messages -> 413  [body-truncated]",
-    f"live      read      GET api.stripe.com/v1/charges/{CHARGE} -> 200",
-    "fake-L1   write     POST api.stripe.com/v1/refunds -> 200  [fidelity:L1]",
-    "live      read      GET api.stripe.com/v1/refunds -> 200  [body-truncated]",
+    "irimi         write     POST api.stripe.com/v1/refunds -> 502  "
+    "[decision-failed, body-truncated]",
+    "real          llm       POST api.anthropic.com/v1/messages -> 413  [body-truncated]",
+    f"irimi-check   read      GET api.stripe.com/v1/charges/{CHARGE} -> 200",
+    "faked         write     POST api.stripe.com/v1/refunds -> 200",
+    "real          read      GET api.stripe.com/v1/refunds -> 200  [body-truncated]",
 ]
 CONTROL_BOMBS = ("control_bomb_lines", "control_bomb_after_a_line", "control_bomb_one_line")
 
@@ -947,8 +987,8 @@ def test_a_write_whose_body_decodes_past_the_cap_is_refused_and_never_leaves(run
     that raised does: its own 502, stamped `irimi`, recorded under its route and flagged. The
     service never sees
     it, and nothing it would have fired is claimed for it. The summary prints it as irimi refused
-    it, `✗`, the request as sent and the flags that say why, not a `human:` sentence filled from a
-    body irimi never read, and its host line counts it so, not as `unclassified`."""
+    it, `✗`, the request as sent and why, not a `human:` sentence filled from a body irimi never
+    read, and its host line counts it so, not as `unclassified`."""
     shadow = run_workflow(W, "bombs", mode)
     posted = [(r.method, r.path) for r in shadow.internet.requests() if r.method == "POST"]
     assert posted == [("POST", "/v1/messages")]
@@ -960,15 +1000,13 @@ def test_a_write_whose_body_decodes_past_the_cap_is_refused_and_never_leaves(run
     assert json.loads(ex.response.body)["error"]["type"] == "irimi_decision_failed"
     summary = summary_of(shadow)
     assert [line for line in summary if line.startswith("  api.stripe.com ")] == [
-        "  api.stripe.com     1 read  1 engine read  2 writes intercepted (1 refused by irimi)"
+        "  api.stripe.com     1 read  1 irimi check read  1 faked write  1 write refused by irimi"
     ]
     assert [line for line in summary if line.startswith(("  ○", "  ✗"))] == [
         f"  {CUT_REFUND}",
-        f"  ○ refund $9.00 on {CHARGE}  unvalidated (L3 preconditions passed)",
+        f"  ○ stripe  refund $9.00 on {CHARGE}  faked; checked against live state: would succeed",
     ]
-    assert summary[-1] == (
-        "  These writes did not happen. Would have fired: refund.created, charge.refunded."
-    )
+    assert "  would have fired: refund.created, charge.refunded" in summary
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -1012,8 +1050,10 @@ def test_a_read_back_that_decodes_past_the_cap_is_never_overlaid(run_workflow, m
     assert (ex.answered_by, ex.flags, ex.overlay) == ("live", (BODY_TRUNCATED_FLAG,), "partial")
     assert ex.response is not None and ex.response.body == b""
     summary = summary_of(shadow)
-    refund = summary.index(f"  ○ refund $9.00 on {CHARGE}  unvalidated (L3 preconditions passed)")
-    assert summary[refund + 1] == "    ↳ GET /v1/refunds did not show it  live (partial)"
+    refund = summary.index(
+        f"  ○ stripe  refund $9.00 on {CHARGE}  faked; checked against live state: would succeed"
+    )
+    assert summary[refund + 1] == "    ↳ GET /v1/refunds did not show it  real (partial)"
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -1042,10 +1082,15 @@ def test_a_run_start_that_decodes_past_the_cap_is_refused_413_unread(run_workflo
 # `unattributed`, so each pin below records into a store of its own, which one serve run at most
 # records into: A under shadow, and B under shadow (its process run) or serve (`unattributed`).
 
-PLAIN_REFUND = "○ refund $9.00 on ch_GAUNTLET  unvalidated (L3 preconditions passed)"
+PLAIN_REFUND = (
+    "○ stripe  refund $9.00 on ch_GAUNTLET  faked; checked against live state: would succeed"
+)
 # A write whose body decoded past the cap, as irimi refused it, never a sentence filled from a
 # body irimi did not read.
-CUT_REFUND = "✗ POST api.stripe.com/v1/refunds  refused by irimi (decision-failed, body-truncated)"
+CUT_REFUND = (
+    "✗ stripe  POST api.stripe.com/v1/refunds  refused by irimi: "
+    "its body is too large to read whole"
+)
 
 
 def recorded_pair(shared_store_run, a: str, b: str, mode: str, store: str):
@@ -1079,8 +1124,8 @@ def test_irimi_compare_keeps_two_cut_writes_of_different_routes_apart(shared_sto
         "  (the triggers' args differ)",
         "",
         f"  - {CUT_REFUND}",
-        "  + ✗ POST api.stripe.com/v1/customers/cus_GAUNTLET  refused by irimi "
-        "(decision-failed, body-truncated)",
+        "  + ✗ stripe  POST api.stripe.com/v1/customers/cus_GAUNTLET  refused by irimi: its body "
+        "is too large to read whole",
         f"  = {PLAIN_REFUND}",
         "",
         "  1 same · 0 changed · 1 only in A · 1 only in B",
@@ -1135,10 +1180,10 @@ def test_irimi_compare_of_one_key_used_three_times_under_shadow_against_serve(sh
     assert b == trace.UNATTRIBUTED
     code, out, err = other.compare_runs(a, b)
     rows = [
-        "○ refund $1.00 on ch_GAUNTLET  unvalidated (L3 preconditions passed)",
-        "✗ refund 200 on ch_GAUNTLET  would fail: idempotency_error",
-        "○ refund $0.50 on ch_GAUNTLET  unvalidated (L3 preconditions passed)",
-        "○ refund $0.50 on ch_GAUNTLET  unvalidated (L3 preconditions passed)",
+        "○ stripe  refund $1.00 on ch_GAUNTLET  faked; checked against live state: would succeed",
+        REUSED_KEY,
+        "○ stripe  refund $0.50 on ch_GAUNTLET  faked; checked against live state: would succeed",
+        "○ stripe  refund $0.50 on ch_GAUNTLET  faked; checked against live state: would succeed",
     ]
     assert (code, err) == (0, [])
     assert out == [
@@ -1181,12 +1226,17 @@ def test_a_process_run_with_no_trigger_replays_by_running_its_argv_again(run_wor
         "  no divergence: every call was answered from the recording",
         "  9 from the recording · 0 missed",
         "",
-        "  = ○ DELETE api.stripe.com/v1/customers/cus_GAUNTLET  unclassified (L0)",
-        "  = ○ PATCH api.stripe.com/v1/customers/cus_GAUNTLET  unclassified (L0)",
-        "  = ○ PUT api.stripe.com/v1/charges/ch_GAUNTLET  unclassified (L0)",
-        "  = ○ POST api.stripe.com/v1/subscriptions  unclassified (L0)",
-        "  = ○ cancel pi_GAUNTLET  unvalidated (L1)",
-        "  = ○ add :eyes: to a message in C0GAUNT  unvalidated (L0)",
+        *(
+            f"  = ○ stripe  {request}  faked; not checked (unclassified)"
+            for request in (
+                "DELETE api.stripe.com/v1/customers/cus_GAUNTLET",
+                "PATCH api.stripe.com/v1/customers/cus_GAUNTLET",
+                "PUT api.stripe.com/v1/charges/ch_GAUNTLET",
+                "POST api.stripe.com/v1/subscriptions",
+            )
+        ),
+        "  = ○ stripe  cancel pi_GAUNTLET  faked; not checked",
+        "  = ○ slack  add :eyes: to a message in C0GAUNT  faked; not checked",
         "",
         "  6 same · 0 changed · 0 only in A · 0 only in B",
     ]

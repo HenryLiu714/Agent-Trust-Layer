@@ -91,6 +91,12 @@ WORKFLOW = Workflow(
         "half_refund": _scenario("half", "the prompt edit: refund half instead"),
         "too_large": _scenario("too_large", "the model asks for twice the charge"),
         "double_refund": _scenario("double", "the model refunds twice with different keys"),
+        "double_refund_quiet": _scenario(
+            "double",
+            "double_refund under --quiet: the banner and the summary, and no line per exchange",
+            shadow_flags=("--quiet",),
+            serve_flags=("--quiet",),
+        ),
         "retried_refund": _scenario(
             "retry", "the model sends one refund twice in a turn, same key: one write (#46)"
         ),

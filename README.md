@@ -85,16 +85,19 @@ as an object, `livemode: false` and the header `irimi-answered-by: fake-L1`. iri
 ```
 irimi shadow · run 2336 · listening on 127.0.0.1:4000 · ca /Users/you/.irimi/ca/ca.pem
 only traffic sent through this proxy is shadowed; a client that ignores HTTPS_PROXY talks to the real service
-fake-L1   write     POST api.stripe.com/v1/customers/cus_REAL123 -> 200  [fidelity:L1]
+faked         write     POST api.stripe.com/v1/customers/cus_REAL123 -> 200
 irimi shadow · run 2336 · 1 exchange · 0.0s
 
-  api.stripe.com  1 write intercepted
+  None of these writes reached the real service:
+  ○ stripe  update customer cus_REAL123  faked; not checked
+  would have fired: customer.updated
 
-  ○ update customer cus_REAL123  unvalidated (L1)
+  api.stripe.com  1 faked write
 
-  1 exchange · 0 live · 0 delegated · 1 virtualized
-  These writes did not happen. Would have fired: customer.updated.
+  1 exchange · 0 real · 1 answered by irimi (1 faked write) · 0 sent to targets
 ```
+
+`--quiet` leaves out the line per exchange and prints only the banner and the summary.
 
 To see a whole agent, run a sample workflow. It needs no keys and no network either: a fake
 internet answers for the real host names, so irimi's shipped maps decide every call.
@@ -166,57 +169,70 @@ This is `w02_nightly_reconcile refund_then_page` under shadow: the agent refunds
 the refunds list starting after the refund irimi minted, and posts to Slack.
 
 ```
-irimi shadow · run 0f83 · 7 exchanges · 0.1s
+irimi shadow · run 4916e84bd660e390 (whole process) · 7 exchanges · 0.1s
 
-  api.stripe.com  3 reads (1 showing this run's writes)  1 engine read  1 write intercepted
-  slack.com       1 engine read  1 write intercepted
-
-  ○ refund $1.00 on ch_N000  unvalidated (L3 preconditions passed)
+  None of these writes reached the real service:
+  ○ stripe  refund $1.00 on ch_N000  faked; checked against live state: would succeed
     ↳ GET /v1/refunds saw it  overlay
-  ○ post to #C0RECON: "reconciled 0 for 2026-09-27"  unvalidated (L3 preconditions passed)
+  ○ slack  post to #C0RECON: "reconciled 0 for 2026-09-27"  faked; checked against live state: would succeed
+  money: $1.00 in faked writes
+  would have fired: refund.created, charge.refunded
 
-  7 exchanges · 5 live · 0 delegated · 2 virtualized
-  These writes did not happen. Would have fired: refund.created, charge.refunded.
+  api.stripe.com  3 reads (1 showing this run's writes)  1 irimi check read  1 faked write
+  slack.com       1 irimi check read  1 faked write
+
+  7 exchanges · 5 real · 2 answered by irimi (2 faked writes) · 0 sent to targets
+
+  run fd8aff2d  nightly-reconcile(...)  7 exchanges · 2 writes
+  replay with: irimi replay fd8aff2d
 ```
 
 And a refund the real service would have refused, from `w01_ticket_triage double_refund`:
 
 ```
-  ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)
-  ✗ refund $49.00 on ch_TICKET1  would fail: charge_already_refunded
+  None of these writes reached the real service:
+  ○ stripe  refund $49.00 on ch_TICKET1  faked; checked against live state: would succeed
+  ✗ stripe  refund $49.00 on ch_TICKET1  faked; would fail: charge_already_refunded
+  ○ tool  examples.workflows.w01_ticket_triage.agent.send_reply  fake ran instead
+  money: $98.00 in faked writes; $49.00 of it would fail
+  would have fired: refund.created, charge.refunded
 ```
 
-- Each write gets one line, written from its route's `human:` template with this request's fields.
-  The bracket says what irimi knew: `L3 preconditions passed`, `L2` when the check could not be
-  made, `L1` or `L0` when the route has no check, and `unclassified` for a route no map names.
-- A write irimi could not decide about got irimi's own 502: it was refused, not faked. Its line
-  takes `✗` and the flags that say why, as
-  `✗ refund $49.00 on ch_N000  refused by irimi (decision-failed)` when the decision raised. A
-  body that decodes past what irimi reads is never read, so no `human:` sentence is filled in
-  from it, and the line spells out the request:
-  `✗ POST api.stripe.com/v1/refunds  refused by irimi (decision-failed, body-truncated)`. Its
-  host line counts it the same way, `2 writes intercepted (1 refused by irimi)`.
-- An `engine read` is one irimi made itself for an L3 check. It is counted apart, so "reads are
-  real" means the reads your agent made.
+- Each write gets one line: its service, a sentence written from its route's `human:` template
+  with this request's fields, and what irimi did with it:
+  - `faked; checked against live state: would succeed`: irimi read the real object first and the
+    write would have been taken.
+  - `faked; would fail: <code>`: the real service would have refused it with that code, which the
+    agent got. It takes `✗`.
+  - `faked; could not check: <why>`: the check read failed, as `stripe answered irimi's check read
+    with 401`. A write whose check read was refused for its credentials promises no webhooks.
+  - `faked; not checked`: the route has no check (`not checked (unclassified)` for a route no map
+    names).
+  - `sent to target <host>`, or `could not reach target <host>` when the agent got a 502.
+  - `refused by irimi`: irimi answered with its own error, as
+    `refused by irimi: its body is too large to read whole`, which spells out the request rather
+    than fill a `human:` sentence from a body irimi never read.
 - A `↳` line is one of the agent's own later reads of that service. `saw it  overlay` is a read
-  irimi edited to show the write. `saw it in part` and `did not show it  live (partial)` mean irimi
-  knows the world it showed was incomplete.
-- `live` means forwarded to the real service; `delegated` means an answer target answered;
-  `virtualized` means irimi did.
-- An amount is formatted from the currency the request carried, or the one the L3 read found.
-  Otherwise it prints as sent: dividing by 100 without knowing the currency would print `¥49.00`
-  for a 4900-yen refund.
-- `Would have fired:` lists webhooks for accepted writes only. A refused write, an idempotent retry
-  and a delegated write list none.
-- A write tool the SDK ran as its stand-in gets a line after the HTTP writes, in the order the
-  calls ended: `○ tool db.mark_refunded  shadow stand-in ran`, or `raised <type>`, and it did not
-  happen either: a run whose only writes are tool writes still closes with
-  `These writes did not happen.`
-  A run with a write delegated or unanswered closes by naming the services its writes did not
-  reach, and then the tool writes:
-  `These writes did not reach stripe. The tool writes did not happen.` A read tool gets no line,
-  and neither is counted as an exchange
+  irimi edited to show the write. `saw it in part` and `did not show it  real (partial)` mean
+  irimi knows the world it showed was incomplete.
+- The money line sums the amounts the faked writes name, per currency, and says how much of it
+  would fail. An amount is formatted from the currency the request carried, or the one irimi's
+  check read found; otherwise it prints as `4900 (minor units, currency unknown)`, because dividing
+  by 100 without knowing the currency would print `¥49.00` for a 4900-yen refund.
+- `would have fired:` lists webhooks for accepted writes only. A refused write, an idempotent retry
+  and a write sent to a target list none.
+- Each host line counts the agent's reads, with the ones that failed (`1 read (1 failed: 401)`),
+  apart from `irimi check reads`, the reads irimi made itself to check a write, so "reads are
+  real" means the reads your agent made.
+- `real` means forwarded to the real service; `answered by irimi` means irimi answered, a faked
+  write or otherwise; `sent to targets` means an answer target answered.
+- A write tool the SDK ran as its fake gets a line after the HTTP writes, in the order the calls
+  ended: `○ tool  db.mark_refunded  fake ran instead`, or `fake raised <type>`. A read tool gets
+  no line, and neither is counted as an exchange
   ([Tools the proxy cannot see](#tools-the-proxy-cannot-see)).
+- Under `irimi shadow`, the summary counts the whole process. When the SDK started runs in it, the
+  header says `(whole process)` and the block ends with a line per run and the command that
+  replays one; `irimi replay` and `irimi runs show` take that short prefix, or `last`.
 
 ### The child process
 
@@ -286,7 +302,7 @@ https.
 - **No backstop yet.** A client that ignores the proxy variables, or ships its own CA bundle, talks
   to the real service. The banner says so on every run, and `w11_leaky_agent` pins each known
   escape.
-- **HTTP(S) only.** Database writes, files on disk, gRPC and WebSocket traffic are not virtualized
+- **HTTP(S) only.** Database writes, files on disk, gRPC and WebSocket traffic are not shadowed
   and happen for real, unless the agent labels the function that makes them with `@sdk.tool`
   ([Tools the proxy cannot see](#tools-the-proxy-cannot-see)). Point database URLs at scratch
   data. Bytes sent through the proxy that are not HTTP, and a connection upgraded to anything but
@@ -566,7 +582,7 @@ def find_accounts(segment: str) -> list[Account]: ...
   raised, if anything. A result that would take the call's args and result together past 1 MiB is
   stored as `{"__irimi_truncated__": true, "bytes": n}`.
 - **Where it shows.** `irimi shadow` prints a line per call among the exchange lines
-  (`shadow    write     tool db.write -> ok`), and the summary a line per write whose stand-in ran
+  (`tool-fake     write     db.write -> ok`), and the summary a line per write whose stand-in ran
   ([The summary](#the-summary)). `irimi runs show` prints both from the store.
 - **An exception propagates unchanged**, the same object, from the function or the stand-in, and
   the call is recorded with what it raised. A failed post to irimi is a warning on the `irimi.sdk`
@@ -703,18 +719,18 @@ irimi compare · 42e7ad03a867410b vs 5cf7f4695f22ce95
   A  handle_ticket  agent:handle_ticket  agent 1.4.0
   B  handle_ticket  agent:handle_ticket  agent 1.5.0
 
-  ~ A ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)
-    B ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)
-  ~ A ○ tool agent.send_reply  shadow stand-in ran
-    B ○ tool agent.send_reply  shadow stand-in ran
+  ~ A ○ stripe  refund $49.00 on ch_TICKET1  faked; checked against live state: would succeed
+    B ○ stripe  refund $24.50 on ch_TICKET1  faked; checked against live state: would succeed
+  ~ A ○ tool  agent.send_reply  fake ran instead
+    B ○ tool  agent.send_reply  fake ran instead
       args.body: "Refund of 4900 requested." -> "Refund of 2450 requested."
 
   0 same · 2 changed · 0 only in A · 0 only in B
 ```
 
 - **What it compares.** Each run's writes, in the order irimi recorded them finishing: every
-  write line its summary prints, faked, refused (`✗`) or delegated, and every write tool whose
-  stand-in ran.
+  write line its summary prints, faked, refused (`✗`) or sent to a target, and every write tool
+  whose fake ran.
   Reads, LLM calls, telemetry and read tools are not compared. A retry the idempotency store
   answered as the write it repeats is that write, once. A header line says when the two triggers
   were given different arguments.
@@ -770,18 +786,18 @@ $ irimi replay 725dc6add559a16f
 irimi replay · run d63663c6da8905c7 · listening on 127.0.0.1:4000 · ca /home/me/.irimi/ca/ca.pem
 replaying 725dc6add559a16f as d63663c6da8905c7
 ...
-live      llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]
-recording read      GET api.stripe.com/v1/charges/ch_TICKET1 -> 200  [fidelity:recording, from-recording]
+real          llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]
+recorded      read      GET api.stripe.com/v1/charges/ch_TICKET1 -> 200  [from-recording]
 ...
 irimi replay · 725dc6add559a16f → d63663c6da8905c7
   agent exited 0
-  diverged at the agent's 1st call: live      llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]
+  diverged at the agent's 1st call: real          llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]
   2 from the recording · 5 missed
 
-  ~ A ○ refund $49.00 on ch_TICKET1  unvalidated (L3 preconditions passed)
-    B ○ refund $24.50 on ch_TICKET1  unvalidated (L3 preconditions passed)
-  ~ A ○ tool agent.send_reply  shadow stand-in ran
-    B ○ tool agent.send_reply  shadow stand-in ran
+  ~ A ○ stripe  refund $49.00 on ch_TICKET1  faked; checked against live state: would succeed
+    B ○ stripe  refund $24.50 on ch_TICKET1  faked; checked against live state: would succeed
+  ~ A ○ tool  agent.send_reply  fake ran instead
+    B ○ tool  agent.send_reply  fake ran instead
       args.body: "Refund of 4900 requested." -> "Refund of 2450 requested."
 
   0 same · 2 changed · 0 only in A · 0 only in B
@@ -894,16 +910,17 @@ irimi shadow [options] --serve    run the shadow proxy as a sidecar until SIGINT
 irimi serve [options]             the same as `irimi shadow --serve`
 irimi shadow [options] -- CMD     run CMD with its HTTP(S) traffic in shadow mode, then summarize
 irimi maps list                   print each mapped host, its service, route count and target
-irimi runs list [--limit N]       print one line per stored run, newest first (default 20)
-irimi runs show RUN_ID            print a stored run: its record, every event, its summary
+irimi runs list [--limit N|--all] print one line per stored run, newest first (default 20)
+irimi runs show [RUN_ID]          print a stored run: its record, every event, its summary
 irimi compare RUN_A RUN_B         print two stored runs' writes side by side, no verdict
 irimi replay RUN_ID [-- CMD]      run a stored run's trigger again, answered from its recording,
                                   and print what changed: --call M:Q, --args JSON (or
                                   --args-file PATH), --python PATH, --result-file PATH
 ```
 
-`serve`, `shadow` and `replay` take `--port`, `--listen-host HOST`, `--store DIR`, `--allow-host HOST`,
-`--target SPEC`, `--target-reads HOST` and `--allow-target-host HOST`; the last four repeat. Every
+`serve`, `shadow` and `replay` take `--port`, `--listen-host HOST`, `--store DIR`, `--quiet`,
+`--allow-host HOST`, `--target SPEC`, `--target-reads HOST` and `--allow-target-host HOST`; the
+last four repeat. Every
 run is recorded, redacted, under `--store` (default `$IRIMI_HOME/store`). `shadow` stores its
 command as one `process` run with the command's exit code, and the agent's version when
 `IRIMI_AGENT_VERSION` is set. Serve mode starts no run of its own ([Serve mode](#serve-mode)). A
@@ -911,12 +928,15 @@ map, overrides file or `--target` the loader refuses stops `serve` and `shadow` 
 starts, with the rule it broke on stderr, and so does a redaction key or `--store` irimi cannot
 use. `IRIMI_HOME` moves irimi's state (see `.env.example`).
 
-`runs list`, `runs show` and `compare` take `--store DIR` too. `runs list` prints each run's id,
-start, duration, status (`ok`, `error`, or `incomplete` for one that never ended), attribution
-(`replay of <run id>` for a replay's run, `header, replay of <run id>` for a run an
-`Irimi-Run` label made in a replay), trigger, and its exchange and write counts, the writes being
-the ones its summary prints a line for, a write the precondition check refused among them.
-`runs show` prints the summary `irimi shadow` printed for the run, from what was stored (a
+`runs list`, `runs show` and `compare` take `--store DIR` too. `runs list` prints a header row,
+then each run's id, start, duration, status (`ok`, `error (exit N)`, `error`, or `incomplete` for
+one that never ended), attribution (`replay of <run id>` for a replay's run, `header, replay of
+<run id>` for a run an `Irimi-Run` label made in a replay), trigger (a process run's command with
+its program's directory left out), and its exchange and write counts, the writes being the ones
+its summary prints a line for, a write the precondition check refused among them. It says how many
+older runs it left out; `--all` lists them. `runs show`, `compare` and `replay` take a run id, any
+prefix only one run id starts with, or `last` for the newest run; `runs show` with no run shows
+the newest. `runs show` prints the summary `irimi shadow` printed for the run, from what was stored (a
 replay's run, which printed none, opens its block `irimi replay`); `runs show unattributed`
 shows the exchanges no run claimed. See [Reading a run back](docs/trace-format.md#reading-a-run-back) for where the two summaries differ.
 

@@ -247,21 +247,21 @@ def test_a_refund_through_the_door_is_answered_by_irimi_and_never_leaves_the_mac
     # `$1.00`, not `100`: the child posts no currency, and `_Stripe`'s charge is in `usd`, which
     # irimi's own precondition read of it carried onto the write's exchange.
     assert (
-        f"  ○ refund {report.money(REFUND_AMOUNT_MINOR, 'usd')} on {CHARGE_ID}  "
-        "unvalidated (L3 preconditions passed)" in out
+        f"  ○ stripe  refund {report.money(REFUND_AMOUNT_MINOR, 'usd')} on {CHARGE_ID}  "
+        "faked; checked against live state: would succeed" in out
     )
-    assert "  These writes did not happen." in out
+    assert "  None of these writes reached the real service:" in out
     assert "1 read" in out
 
     # 6. And irimi checked with Stripe before answering. The charge GET in (1) is a read
     #    irimi issued on its own account, and it is recorded `issued_by: engine` so that it can be
     #    counted apart from the agent's: "reads are real" means the reads the AGENT made. It did
-    #    reach the service, so the run's `live` bucket holds it beside the agent's own read. The
+    #    reach the service, so the run's `real` count holds it beside the agent's own read. The
     #    agent's read went to the stand-in's own address, so Stripe's line holds no read of the
     #    agent's at all: irimi's check read is not counted as one.
     host = next(line for line in out.splitlines() if line.startswith("  api.stripe.com  "))
-    assert host == "  api.stripe.com  1 engine read  1 write intercepted"
-    assert "  3 exchanges · 2 live · 0 delegated · 1 virtualized" in out
+    assert host == "  api.stripe.com  1 irimi check read  1 faked write"
+    assert "  3 exchanges · 2 real · 1 answered by irimi (1 faked write) · 0 sent to targets" in out
 
 
 # The loopback Stripe's one refundable charge: 4900, nothing refunded (`tests.test_engine_mitm`).
@@ -275,15 +275,20 @@ PHASE2_MONEY = report.money(PHASE2_AMOUNT, "usd")
 # kept out of the agent's `N reads`.
 PHASE2_SUMMARY = [
     "",
-    "  127.0.0.1  3 reads (2 showing this run's writes)  2 engine reads  2 writes intercepted",
-    "",
-    f"  ○ refund {PHASE2_MONEY} on {PHASE2_CHARGE}  unvalidated (L3 preconditions passed)",
+    "  None of these writes reached the real service:",
+    f"  ○ stripe  refund {PHASE2_MONEY} on {PHASE2_CHARGE}  faked; checked against live state: "
+    "would succeed",
     "    ↳ GET /v1/refunds saw it  overlay",
     f"    ↳ GET /v1/charges/{PHASE2_CHARGE} saw it  overlay",
-    f"  ✗ refund {PHASE2_MONEY} on {PHASE2_CHARGE}  would fail: charge_already_refunded",
+    f"  ✗ stripe  refund {PHASE2_MONEY} on {PHASE2_CHARGE}  faked; would fail: "
+    "charge_already_refunded",
+    f"  money: {report.money(2 * PHASE2_AMOUNT, 'usd')} in faked writes; {PHASE2_MONEY} of it "
+    "would fail",
+    "  would have fired: refund.created, charge.refunded",
     "",
-    "  7 exchanges · 5 live · 0 delegated · 2 virtualized",
-    "  These writes did not happen. Would have fired: refund.created, charge.refunded.",
+    "  127.0.0.1  3 reads (2 showing this run's writes)  2 irimi check reads  2 faked writes",
+    "",
+    "  7 exchanges · 5 real · 2 answered by irimi (2 faked writes) · 0 sent to targets",
 ]
 
 
@@ -553,18 +558,19 @@ def test_the_refund_agent_leaves_no_refund_on_a_real_test_mode_charge(home, capf
     # reads and irimi's two precondition reads alike.
     lines = out.splitlines()
     assert (
-        "  api.stripe.com  3 reads (2 showing this run's writes)  2 engine reads  "
-        "2 writes intercepted"
+        "  api.stripe.com  3 reads (2 showing this run's writes)  2 irimi check reads  "
+        "2 faked writes"
     ) in lines
-    write = lines.index(f"  ○ refund {money} on {charge_id}  unvalidated (L3 preconditions passed)")
+    write = lines.index(
+        f"  ○ stripe  refund {money} on {charge_id}  faked; checked against live state: "
+        "would succeed"
+    )
     assert lines[write + 1 : write + 4] == [
         "    ↳ GET /v1/refunds saw it  overlay",
         f"    ↳ GET /v1/charges/{charge_id} saw it  overlay",
-        f"  ✗ refund {money} on {charge_id}  would fail: charge_already_refunded",
+        f"  ✗ stripe  refund {money} on {charge_id}  faked; would fail: charge_already_refunded",
     ]
-    assert (
-        "  These writes did not happen. Would have fired: refund.created, charge.refunded."
-    ) in lines
+    assert "  would have fired: refund.created, charge.refunded" in lines
 
     # Slack is optional. Its read-back is asserted to show the post - not to be `overlay: full`,
     # which only a channel id makes it.

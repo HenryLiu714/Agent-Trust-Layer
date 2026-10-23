@@ -40,8 +40,8 @@ LABELS = [
     "  A  refund_ticket  agent:refund_ticket  agent 1.0",
     "  B  refund_ticket  agent:refund_ticket  agent 1.0",
 ]
-REFUND = "○ refund $49.00 on ch_1  unvalidated (L3 preconditions passed)"
-TOOL = "○ tool db.mark_refunded  shadow stand-in ran"
+REFUND = "○ stripe  refund $49.00 on ch_1  faked; checked against live state: would succeed"
+TOOL = "○ tool  db.mark_refunded  fake ran instead"
 
 
 def _refund(amount: int = 4900, **changes) -> Exchange:
@@ -182,7 +182,8 @@ def test_a_refund_of_another_amount_is_one_write_changed(home, capfd):
         1,
         [
             f"  ~ A {REFUND}",
-            "    B ○ refund $24.50 on ch_1  unvalidated (L3 preconditions passed)",
+            "    B ○ stripe  refund $24.50 on ch_1  faked; checked against live state: "
+            "would succeed",
             f"  = {TOOL}",
             "",
             "  1 same · 1 changed · 0 only in A · 0 only in B",
@@ -205,7 +206,7 @@ def _update(body: bytes) -> Exchange:
     )
 
 
-UPDATE = "○ update customer cus_1  unvalidated (L1)"
+UPDATE = "○ stripe  update customer cus_1  faked; not checked"
 
 
 def test_two_updates_that_print_alike_but_send_other_fields_are_changed_and_say_which(home, capfd):
@@ -325,7 +326,7 @@ def test_an_update_to_another_customer_is_changed_by_the_object_its_path_names()
     lines = compare.compare_runs(_run([_update(b"email=a")]), _run([other]), servicemap.load())
     assert lines.lines()[:2] == [
         f"  ~ A {UPDATE}",
-        "    B ○ update customer cus_2  unvalidated (L1)",
+        "    B ○ stripe  update customer cus_2  faked; not checked",
     ]
 
 
@@ -377,7 +378,7 @@ def test_a_slack_post_only_b_made_is_one_write_added(home, capfd):
         1,
         [
             f"  = {REFUND}",
-            '  + ○ post to #C1: "refunded T-1"  unvalidated (L1)',
+            '  + ○ slack  post to #C1: "refunded T-1"  faked; not checked',
             "",
             "  1 same · 0 changed · 0 only in A · 1 only in B",
         ],
@@ -399,7 +400,7 @@ def test_a_refund_l3_rejected_in_b_is_the_same_write_changed_and_shows_its_mark(
         1,
         [
             f"  ~ A {REFUND}",
-            "    B ✗ refund $98.00 on ch_1  would fail: amount_too_large",
+            "    B ✗ stripe  refund $98.00 on ch_1  faked; would fail: amount_too_large",
             "",
             "  0 same · 1 changed · 0 only in A · 0 only in B",
         ],
@@ -416,7 +417,7 @@ def test_a_second_refused_refund_is_the_write_added_not_the_first(home, capfd):
         1,
         [
             f"  = {REFUND}",
-            "  + ✗ refund $49.00 on ch_1  would fail: charge_already_refunded",
+            "  + ✗ stripe  refund $49.00 on ch_1  faked; would fail: charge_already_refunded",
             f"  = {TOOL}",
             "",
             "  2 same · 0 changed · 0 only in A · 1 only in B",
@@ -454,7 +455,7 @@ def test_a_delegated_write_is_a_write_and_prints_where_it_went(home, capfd):
         1,
         [
             f"  ~ A {REFUND}",
-            "    B ○ refund $49.00 on ch_1 → http://127.0.0.1:9999  unvalidated (delegated)",
+            "    B ○ stripe  refund $49.00 on ch_1  sent to target 127.0.0.1:9999",
         ],
     )
 
@@ -466,7 +467,8 @@ def test_two_writes_whose_bodies_were_cut_are_not_compared_and_not_called_the_sa
         1,
         [
             f"  ? A {REFUND}",
-            "    B ○ refund $24.50 on ch_1  unvalidated (L3 preconditions passed)",
+            "    B ○ stripe  refund $24.50 on ch_1  faked; checked against live state: "
+            "would succeed",
             f"  = {TOOL}",
             "",
             "  1 same · 0 changed · 0 only in A · 0 only in B · 1 not compared "
@@ -514,7 +516,7 @@ def test_a_cut_write_no_write_of_its_key_pairs_with_is_only_in_its_run(home, cap
         1,
         [
             f"  = {REFUND}",
-            '  - ○ post to #C1: "hi"  unvalidated (L1)',
+            '  - ○ slack  post to #C1: "hi"  faked; not checked',
             "",
             "  1 same · 0 changed · 1 only in A · 0 only in B",
         ],
@@ -556,8 +558,8 @@ def test_a_write_s_text_is_escaped_so_one_write_is_one_line_and_printing_never_r
     assert (code, lines[3:5]) == (
         1,
         [
-            '  ~ A ○ post to #C1: "hi"  unvalidated (L1)',
-            '    B ○ post to #C1: "hi\\nthere\\x1b[31m\\ud800"  unvalidated (L1)',
+            '  ~ A ○ slack  post to #C1: "hi"  faked; not checked',
+            '    B ○ slack  post to #C1: "hi\\nthere\\x1b[31m\\ud800"  faked; not checked',
         ],
     )
 
@@ -649,7 +651,8 @@ def test_writes_print_as_requests_with_a_warning_when_the_maps_do_not_load(
     out, err = capfd.readouterr()
     assert err == "warning: maps did not load; writes are shown as requests\n"
     assert out.splitlines()[4] == (
-        "  = ○ POST api.stripe.com/v1/refunds  unvalidated (L3 preconditions passed)"
+        "  = ○ stripe  POST api.stripe.com/v1/refunds  faked; checked against live state: "
+        "would succeed"
     )
 
 
@@ -671,8 +674,8 @@ def test_a_newline_and_a_typed_backslash_n_print_alike_and_are_still_not_the_sam
     assert (code, lines[3:]) == (
         1,
         [
-            '  ~ A ○ post to #C1: "line1\\nline2"  unvalidated (L1)',
-            '    B ○ post to #C1: "line1\\\\nline2"  unvalidated (L1)',
+            '  ~ A ○ slack  post to #C1: "line1\\nline2"  faked; not checked',
+            '    B ○ slack  post to #C1: "line1\\\\nline2"  faked; not checked',
             "",
             "  0 same · 1 changed · 0 only in A · 0 only in B",
         ],
@@ -681,8 +684,8 @@ def test_a_newline_and_a_typed_backslash_n_print_alike_and_are_still_not_the_sam
     raised = [dataclasses.replace(_tool(), error=ErrorInfo(kind, "")) for kind in ("a\nb", "a\\nb")]
     comparison = compare.compare_runs(_run(raised[:1]), _run(raised[1:]), None)
     assert comparison.lines() == [
-        "  ~ A ○ tool db.mark_refunded  shadow stand-in raised a\\nb",
-        "    B ○ tool db.mark_refunded  shadow stand-in raised a\\\\nb",
+        "  ~ A ○ tool  db.mark_refunded  fake raised a\\nb",
+        "    B ○ tool  db.mark_refunded  fake raised a\\\\nb",
         "",
         "  0 same · 1 changed · 0 only in A · 0 only in B",
     ]
@@ -695,13 +698,13 @@ def test_a_pair_printed_unlike_keeps_the_summary_s_lines_and_a_cut_pair_alike_is
     index = servicemap.load()
     pair = compare.compare_runs(_run([_post("a\\b")]), _run([_post("a\\c")]), index)
     assert pair.lines()[:2] == [
-        '  ~ A ○ post to #C1: "a\\b"  unvalidated (L1)',
-        '    B ○ post to #C1: "a\\c"  unvalidated (L1)',
+        '  ~ A ○ slack  post to #C1: "a\\b"  faked; not checked',
+        '    B ○ slack  post to #C1: "a\\c"  faked; not checked',
     ]
     cut = _run([dataclasses.replace(_post("a\\b\n"), flags=(BODY_TRUNCATED_FLAG,))])
     assert compare.compare_runs(cut, cut, index).lines()[:2] == [
-        '  ? A ○ post to #C1: "a\\b\\n"  unvalidated (L1)',
-        '    B ○ post to #C1: "a\\b\\n"  unvalidated (L1)',
+        '  ? A ○ slack  post to #C1: "a\\b\\n"  faked; not checked',
+        '    B ○ slack  post to #C1: "a\\b\\n"  faked; not checked',
     ]
 
 
@@ -799,8 +802,8 @@ def test_a_cut_pair_whose_lines_print_alike_though_they_differ_is_told_apart_too
     cut = dataclasses.replace(_post("line1\nline2"), flags=(BODY_TRUNCATED_FLAG,))
     pair = compare.compare_runs(_run([cut]), _run([_post("line1\\nline2")]), servicemap.load())
     assert pair.lines()[:2] == [
-        '  ? A ○ post to #C1: "line1\\nline2"  unvalidated (L1)',
-        '    B ○ post to #C1: "line1\\\\nline2"  unvalidated (L1)',
+        '  ? A ○ slack  post to #C1: "line1\\nline2"  faked; not checked',
+        '    B ○ slack  post to #C1: "line1\\\\nline2"  faked; not checked',
     ]
 
 
@@ -812,8 +815,9 @@ def test_a_run_of_hundreds_of_one_write_is_lined_up_write_by_write():
     many = [_tool() for _ in range(250)]
     comparison = compare.compare_runs(_run([_post("hi"), *many]), _run([_refund(), *many]), None)
     assert comparison.lines() == [
-        "  - ○ POST slack.com/api/chat.postMessage  unvalidated (L1)",
-        "  + ○ POST api.stripe.com/v1/refunds  unvalidated (L3 preconditions passed)",
+        "  - ○ slack  POST slack.com/api/chat.postMessage  faked; not checked",
+        "  + ○ stripe  POST api.stripe.com/v1/refunds  faked; checked against live state: "
+        "would succeed",
         *[f"  = {TOOL}"] * 250,
         "",
         "  250 same · 0 changed · 1 only in A · 1 only in B",
@@ -835,6 +839,28 @@ def test_a_pair_that_differs_by_a_character_no_one_can_see_spells_it(a, b, spell
     under `~`. A pair whose lines print alike spells each such character as its escape."""
     pair = compare.compare_runs(_run([_post(a)]), _run([_post(b)]), servicemap.load())
     assert pair.lines()[:2] == [
-        f'  ~ A ○ post to #C1: "{spelled_a}"  unvalidated (L1)',
-        f'    B ○ post to #C1: "{spelled_b}"  unvalidated (L1)',
+        f'  ~ A ○ slack  post to #C1: "{spelled_a}"  faked; not checked',
+        f'    B ○ slack  post to #C1: "{spelled_b}"  faked; not checked',
     ]
+
+
+def test_compare_takes_a_prefix_only_one_run_starts_with_and_last(home, capfd):
+    """Each side may be a prefix only one run id starts with, or `last` for the newest run; the
+    header names the whole ids."""
+    _store(
+        home,
+        {
+            "alpha1": (_record("alpha1"), [_refund()]),
+            "beta22": (_record("beta22", started_at=AT + 5, ended_at=AT + 6), [_refund()]),
+        },
+    )
+    assert main(["compare", "alp", "last"]) == 0
+    out, err = capfd.readouterr()
+    assert err == ""
+    assert out.splitlines()[0] == "irimi compare · alpha1 vs beta22"
+
+
+def test_compare_refuses_a_prefix_more_than_one_run_starts_with(home, capfd):
+    _store(home, {"ab1": (_record("ab1"), []), "ab2": (_record("ab2"), [])})
+    assert main(["compare", "ab", "ab1"]) == compare.TROUBLE
+    assert capfd.readouterr() == ("", "error: run id ab is ambiguous; it starts ab1, ab2\n")

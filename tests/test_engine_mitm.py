@@ -691,7 +691,7 @@ def test_a_refused_post_is_still_listed_among_the_writes(engine):
     (ex,) = seen
     assert (ex.answered_by, ex.kind) == ("irimi", "unknown")
     assert report.is_intercepted(ex)
-    assert "refused by irimi (refused)" in report.write_sentence(ex, None)
+    assert report.write_sentence(ex, None).endswith("  refused by irimi")
 
 
 def test_reverse_door_refuses_missing_host(engine):
@@ -3468,12 +3468,12 @@ def test_a_rate_limited_read_of_a_minted_refund_keeps_its_429(stripe_stub):
 
 def test_a_minted_refund_read_by_id_is_listed_under_its_refund(stripe_stub, tmp_path, monkeypatch):
     """The summary line for a minted refund read by id, off a real run: the read hangs under the
-    refund as one that saw it, not as `did not show it  live (partial)`."""
+    refund as one that saw it, not as `did not show it  real (partial)`."""
     proxy, stub, seen = stripe_stub
     minted = _fake_refund(proxy, stub)
     assert _read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds/{minted}")[0] == 200
     lines = report.summary_lines("t3st", seen, 1.0, _maps(tmp_path, monkeypatch, doc=STRIPE_MAP))
-    write = next(i for i, line in enumerate(lines) if line.startswith("  ○ refund 100 on ch_REAL1"))
+    write = next(i for i, line in enumerate(lines) if line.startswith("  ○ stripe  refund 100"))
     assert lines[write + 1] == f"    ↳ GET /v1/refunds/{minted} saw it  overlay"
 
 
@@ -3991,18 +3991,20 @@ def test_an_overlaid_read_is_listed_under_the_write_it_saw_through_the_proxy(
 ):
     """The `↳` line off a real run: the refunds list the overlay edited to show the refund
     sits directly under that refund, and is the only `↳` line. The precondition read L3 issued
-    between them is counted as an engine read and never in `N reads`; it is live and
+    between them is counted as an irimi check read and never in `N reads`; it is live and
     unedited, so it owes no line either way."""
     proxy, stub, seen = precondition_stub
     lines = _refund_then_list_summary(proxy, stub, seen, tmp_path, monkeypatch)
     # `$49.00` and not `4900`: the write names no currency, and irimi's own precondition read of
     # `ch_REAL1` found `usd` on the charge.
-    write = lines.index("  ○ refund $49.00 on ch_REAL1  unvalidated (L3 preconditions passed)")
+    write = lines.index(
+        "  ○ stripe  refund $49.00 on ch_REAL1  faked; checked against live state: would succeed"
+    )
     assert lines[write + 1] == "    ↳ GET /v1/refunds saw it  overlay"
     assert [line for line in lines if "↳" in line] == [lines[write + 1]]
-    assert lines[2] == (
-        "  127.0.0.1  1 read (1 showing this run's writes)  1 engine read  1 write intercepted"
-    )
+    assert (
+        "  127.0.0.1  1 read (1 showing this run's writes)  1 irimi check read  1 faked write"
+    ) in lines
 
 
 def test_the_closing_line_names_the_webhooks_a_real_refund_would_have_sent(
@@ -4013,9 +4015,7 @@ def test_the_closing_line_names_the_webhooks_a_real_refund_would_have_sent(
     proxy, stub, seen = precondition_stub
     lines = _refund_then_list_summary(proxy, stub, seen, tmp_path, monkeypatch)
     assert [ex.would_fire for ex in _writes(seen)] == [("refund.created", "charge.refunded")]
-    assert lines[-1] == (
-        "  These writes did not happen. Would have fired: refund.created, charge.refunded."
-    )
+    assert "  would have fired: refund.created, charge.refunded" in lines
 
 
 def test_a_faked_refund_carries_the_currency_its_precondition_read_found(precondition_stub):
@@ -4033,7 +4033,8 @@ def test_a_write_whose_precondition_read_never_answered_carries_no_currency(
     precondition_stub, tmp_path, monkeypatch
 ):
     """`ch_BUSY1` 429s, so no document was read and there is nothing to denominate the amount
-    with. The write is still faked at L2 and its line still prints raw minor units."""
+    with. The write is still faked, and its line prints minor units of an unknown currency and
+    the status the check read came back with."""
     proxy, stub, seen = precondition_stub
     status, _, _ = _refund(proxy, stub, "ch_BUSY1")
     assert status == 200
@@ -4042,7 +4043,10 @@ def test_a_write_whose_precondition_read_never_answered_carries_no_currency(
     assert write.currency == ""
     maps = _maps(tmp_path, monkeypatch, doc=PRECONDITION_STRIPE_MAP)
     lines = report.summary_lines("t3st", seen, 1.0, maps)
-    assert any(line.startswith("  ○ refund 100 on ch_BUSY1  ") for line in lines), lines
+    assert (
+        "  ○ stripe  refund 100 (minor units, currency unknown) on ch_BUSY1  faked; could not "
+        "check: stripe answered irimi's check read with 429"
+    ) in lines
 
 
 # SLACK_OVERLAY_MAP with the shipped map's `precondition:` on `chat.postMessage`, and the

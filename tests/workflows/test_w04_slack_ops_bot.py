@@ -11,6 +11,7 @@ from irimi import redact
 from irimi.exchange import FIXTURE_FAILED_FLAG, Exchange
 
 W = "w04_slack_ops_bot"
+CHECKED = "faked; checked against live state: would succeed"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.
 MODES = ("shadow", "serve")
 WEBHOOK_PATH = CANARIES["SLACK_WEBHOOK_PATH"]
@@ -47,10 +48,9 @@ def test_a_mention_is_one_run_and_its_reply_is_read_back_through_the_overlay(run
     assert {c["run"] for c in shadow.calls()} == {run_id}
     # L3 probed the channel before faking the post.
     lines = shadow.exchange_lines()
-    assert "live      read      POST slack.com/api/conversations.info -> 200" in lines
-    assert (
-        '  ○ post to #C0OPS: "Payouts are on schedule."  unvalidated (L3 preconditions passed)'
-        in (shadow.summaries())
+    assert "irimi-check   read      POST slack.com/api/conversations.info -> 200" in lines
+    assert f'  ○ slack  post to #C0OPS: "Payouts are on schedule."  {CHECKED}' in (
+        shadow.summaries()
     )
     # The bare run sees the same thing, from the real (fake) Slack.
     bare = run_workflow(W, "mention_in_thread", "bare")
@@ -71,7 +71,7 @@ def test_the_incoming_webhooks_secret_path_is_printed_until_87_lands(run_workflo
     # The per-exchange line prints the webhook's secret path. When it names the route and not
     # the credential, this assertion flips. See #87.
     assert (
-        f"fake-L0   write     POST hooks.slack.com{WEBHOOK_PATH} -> 200  [fidelity:L0]"
+        f"faked         write     POST hooks.slack.com{WEBHOOK_PATH} -> 200"
         in shadow.exchange_lines()
     )
     # The store already hides it: the whole path is one placeholder, and invariant 4
@@ -97,8 +97,8 @@ def test_runs_show_prints_the_webhook_post_as_the_maps_sentence_from_its_stored_
     code, out, err = shadow.runs("show", run_id)
     assert (code, err) == (0, [])
     placeholder = redact.placeholder(redact.load_key(shadow.home), WEBHOOK_PATH)
-    assert f"fake-L0   write     POST hooks.slack.com/{placeholder} -> 200  [fidelity:L0]" in out
-    sentence = '  ○ post via webhook: "ops bot answered alice"  unvalidated (L0)'
+    assert f"faked         write     POST hooks.slack.com/{placeholder} -> 200" in out
+    sentence = '  ○ slack  post via webhook: "ops bot answered alice"  faked; not checked'
     assert sentence in shadow.summaries()
     assert sentence in out
     assert not any(line.startswith("  ○ POST hooks.slack.com") for line in out)
@@ -108,7 +108,9 @@ def test_runs_show_prints_the_webhook_post_as_the_maps_sentence_from_its_stored_
 def test_the_overlay_line_hangs_under_the_webhook_post_it_cannot_have_seen(run_workflow, mode):
     shadow = run_workflow(W, "mention_in_thread", mode)
     summary = shadow.summaries()
-    webhook = summary.index('  ○ post via webhook: "ops bot answered alice"  unvalidated (L0)')
+    webhook = summary.index(
+        '  ○ slack  post via webhook: "ops bot answered alice"  faked; not checked'
+    )
     # LOOKS WRONG: the read-back saw the chat.postMessage reply, but its ↳ line hangs under the
     # incoming-webhook post, because hooks.slack.com is the same `slack` service and the webhook
     # was the run's most recent authored Slack write. No read can ever show a webhook post.
@@ -161,7 +163,7 @@ def test_a_thread_minted_by_posts_whose_fixture_failed_is_read_back_partial(run_
         "thread_not_found",
         False,
     )
-    assert _writes_block(shadow.summaries()) == _fixture_failed_writes("live")
+    assert _writes_block(shadow.summaries()) == _fixture_failed_writes("real")
     # Real Slack holds the incident, so the bare run's check sees it alone, and its read-back the
     # reply.
     bare = run_workflow(W, "own_thread_fixture_failed", "bare")
@@ -187,7 +189,7 @@ def test_a_replay_of_a_thread_minted_by_posts_whose_fixture_failed_reads_it_part
     ]
     for name in ("incident_check", "readback"):
         assert replay.events(name, with_time=False) == recorded.events(name, with_time=False)
-    assert _writes_block(replay.summaries()) == _fixture_failed_writes("recording")
+    assert _writes_block(replay.summaries()) == _fixture_failed_writes("recorded")
 
 
 def _writes_block(summary: list[str]) -> list[str]:
@@ -201,14 +203,14 @@ def _fixture_failed_writes(source: str) -> list[str]:
     """`own_thread_fixture_failed`'s writes, as its summary prints them, each read `source`."""
     missed = f"    ↳ POST /api/conversations.replies did not show it  {source} (partial)"
     return [
-        '  ○ post to #C0OPS: "Incident: Payouts are delayed; investigating."'
-        "  unvalidated (L3 preconditions passed)",
+        '  ○ slack  post to #C0OPS: "Incident: Payouts are delayed; investigating."'
+        "  faked; checked against live state: would succeed",
         missed,  # the incident check, which only the parent's envelope `ts` can place
-        '  ○ post to #C0OPS: "Payouts are delayed; investigating."'
-        "  unvalidated (L3 preconditions passed)",
-        "  ○ add :eyes: to a message in C0OPS  unvalidated (L0)",
-        "  ○ upload status.csv to C0OPS  unvalidated (L0)",
-        '  ○ post via webhook: "ops bot answered alice"  unvalidated (L0)',
+        '  ○ slack  post to #C0OPS: "Payouts are delayed; investigating."'
+        "  faked; checked against live state: would succeed",
+        "  ○ slack  add :eyes: to a message in C0OPS  faked; not checked",
+        "  ○ slack  upload status.csv to C0OPS  faked; not checked",
+        '  ○ slack  post via webhook: "ops bot answered alice"  faked; not checked',
         # LOOKS WRONG: the read-back's line hangs under the webhook post, as
         # `test_the_overlay_line_hangs_under_the_webhook_post_it_cannot_have_seen` pins.
         missed,
@@ -230,14 +232,17 @@ def test_a_post_to_a_channel_name_is_unprobed_and_its_read_back_misses(run_workf
         "channel_not_found",
         False,
     )
-    # A name is not probed by L3, so the post is L2, not "L3 preconditions passed".
+    # A name is not probed by L3, so irimi could not check the post.
     # LOOKS WRONG (no issue yet; #61 covers ids only): the doubled `##` is the human template's
     # `#{channel}` over a name that already has one.
     lines = shadow.exchange_lines()
-    assert "live      read      POST slack.com/api/conversations.info -> 200" not in lines
+    assert "irimi-check   read      POST slack.com/api/conversations.info -> 200" not in lines
     summary = shadow.summaries()
-    assert '  ○ post to ##ops: "Payouts are on schedule."  unvalidated (L2)' in summary
-    assert "    ↳ POST /api/conversations.replies did not show it  live (partial)" in summary
+    assert (
+        '  ○ slack  post to ##ops: "Payouts are on schedule."'
+        "  faked; could not check: irimi made no check read"
+    ) in summary
+    assert "    ↳ POST /api/conversations.replies did not show it  real (partial)" in summary
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -248,11 +253,10 @@ def test_a_missing_scope_is_refused_by_slack_but_faked_as_passed_by_shadow(run_w
     assert bare.one("post_reply")["error"] == "missing_scope"
     assert shadow.one("post_reply")["ok"] is True
     # LOOKS WRONG: L3's probe is `conversations.info`, which a token without `chat:write` can
-    # still call, so the check passes and the summary claims "L3 preconditions passed" for a post
+    # still call, so the check passes and the summary says it would succeed for a post
     # Slack would have refused. L3 cannot see scopes; `not_evaluable` would be the honest answer.
-    assert (
-        '  ○ post to #C0OPS: "Payouts are on schedule."  unvalidated (L3 preconditions passed)'
-        in (shadow.summaries())
+    assert f'  ○ slack  post to #C0OPS: "Payouts are on schedule."  {CHECKED}' in (
+        shadow.summaries()
     )
 
 
@@ -262,8 +266,9 @@ def test_an_archived_channel_is_refused_the_same_way_bare_and_under_shadow(run_w
     shadow = run_workflow(W, "archived_channel", mode)
     assert bare.exit_code == shadow.exit_code == 1
     assert bare.one("post_reply")["error"] == shadow.one("post_reply")["error"] == "is_archived"
-    assert '  ✗ post to #C0OLDOPS: "Payouts are on schedule."  would fail: is_archived' in (
-        shadow.summaries()
+    assert (
+        '  ✗ slack  post to #C0OLDOPS: "Payouts are on schedule."  faked; would fail: is_archived'
+        in (shadow.summaries())
     )
     # The agent does not read back after a refused post.
     assert shadow.events("readback") == []
@@ -285,16 +290,19 @@ def test_a_retried_delivery_is_acknowledged_and_handled_once(run_workflow):
     [run] = serve.events("run.start")
     assert [r.run_id for r in serve.stored().list_runs()] == [run["run"]]
     [block] = serve.run_blocks().values()
-    assert [line for line in block if "○ post to" in line] == [
-        '  ○ post to #C0OPS: "Payouts are on schedule."  unvalidated (L3 preconditions passed)'
+    assert [line for line in block if "○ slack  post to" in line] == [
+        f'  ○ slack  post to #C0OPS: "Payouts are on schedule."  {CHECKED}'
     ]
 
 
 # ---------------------------------------------------------------------- irimi compare
 
 ON_MENTION = "on_mention  examples.workflows.w04_slack_ops_bot.agent:on_mention"
-ANSWER_POST = 'post to #C0OPS: "Payouts are on schedule."  unvalidated (L3 preconditions passed)'
-WEBHOOK_POST = '○ post via webhook: "ops bot answered alice"  unvalidated (L0)'
+ANSWER_POST = (
+    'slack  post to #C0OPS: "Payouts are on schedule."'
+    "  faked; checked against live state: would succeed"
+)
+WEBHOOK_POST = '○ slack  post via webhook: "ops bot answered alice"  faked; not checked'
 AGAINST_A_PLAIN_MENTION = {
     # Slack would refuse the bot's post for a missing scope, which L3 cannot see: the run
     # is faked as if it posted, so it compares the same, exit 0.
@@ -303,8 +311,8 @@ AGAINST_A_PLAIN_MENTION = {
         [],
         [
             f"  = ○ {ANSWER_POST}",
-            "  = ○ add :eyes: to a message in C0OPS  unvalidated (L0)",
-            "  = ○ upload status.csv to C0OPS  unvalidated (L0)",
+            "  = ○ slack  add :eyes: to a message in C0OPS  faked; not checked",
+            "  = ○ slack  upload status.csv to C0OPS  faked; not checked",
             f"  = {WEBHOOK_POST}",
         ],
     ),
@@ -315,11 +323,12 @@ AGAINST_A_PLAIN_MENTION = {
         ["  (the triggers' args differ)"],
         [
             f"  ~ A ○ {ANSWER_POST}",
-            '    B ✗ post to #C0OLDOPS: "Payouts are on schedule."  would fail: is_archived',
-            "  ~ A ○ add :eyes: to a message in C0OPS  unvalidated (L0)",
-            "    B ○ add :eyes: to a message in C0OLDOPS  unvalidated (L0)",
-            "  ~ A ○ upload status.csv to C0OPS  unvalidated (L0)",
-            "    B ○ upload status.csv to C0OLDOPS  unvalidated (L0)",
+            '    B ✗ slack  post to #C0OLDOPS: "Payouts are on schedule."'
+            "  faked; would fail: is_archived",
+            "  ~ A ○ slack  add :eyes: to a message in C0OPS  faked; not checked",
+            "    B ○ slack  add :eyes: to a message in C0OLDOPS  faked; not checked",
+            "  ~ A ○ slack  upload status.csv to C0OPS  faked; not checked",
+            "    B ○ slack  upload status.csv to C0OLDOPS  faked; not checked",
             f"  = {WEBHOOK_POST}",
         ],
     ),
@@ -369,17 +378,17 @@ def test_irimi_compare_tells_a_newline_from_a_typed_backslash_n(shared_store_run
     assert check_invariants(typed) == []
     code, out, err = compare(newline, typed)
     a, b = (result.one("run.start")["run"] for result in (newline, typed))
-    l3 = "unvalidated (L3 preconditions passed)"
+    l3 = "faked; checked against live state: would succeed"
     assert (code, err) == (1, [])
     assert out == [
         f"irimi compare · {a} vs {b}",
         f"  A  {ON_MENTION}",
         f"  B  {ON_MENTION}",
         "",
-        f'  ~ A ○ post to #C0OPS: "Payouts are on schedule.\\nNext run at 09:00."  {l3}',
-        f'    B ○ post to #C0OPS: "Payouts are on schedule.\\\\nNext run at 09:00."  {l3}',
-        "  = ○ add :eyes: to a message in C0OPS  unvalidated (L0)",
-        "  = ○ upload status.csv to C0OPS  unvalidated (L0)",
+        f'  ~ A ○ slack  post to #C0OPS: "Payouts are on schedule.\\nNext run at 09:00."  {l3}',
+        f'    B ○ slack  post to #C0OPS: "Payouts are on schedule.\\\\nNext run at 09:00."  {l3}',
+        "  = ○ slack  add :eyes: to a message in C0OPS  faked; not checked",
+        "  = ○ slack  upload status.csv to C0OPS  faked; not checked",
         f"  = {WEBHOOK_POST}",
         "",
         "  3 same · 1 changed · 0 only in A · 0 only in B",
@@ -400,7 +409,7 @@ def test_rows_not_shown_finds_a_row_no_summary_printed_and_a_pair_not_told_apart
     code, out, err = compare(newline, typed)
     assert rows_not_shown(typed, a, b, out) == []
     pair = out.index(next(row for row in out if row.startswith("  ~ A ")))
-    added = '  + ○ post to #C0OPS: "Payouts are late."  unvalidated (L3 preconditions passed)'
+    added = f'  + ○ slack  post to #C0OPS: "Payouts are late."  {CHECKED}'
     assert rows_not_shown(typed, a, b, [*out[:-2], added, *out[-2:]]) == [added]
     # B's line printed as a row only A made.
     only_a = f"  - {out[pair + 1].removeprefix('    B ')}"

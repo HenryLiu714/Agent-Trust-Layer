@@ -97,9 +97,10 @@ MODES = ("bare", "shadow", "serve")
 RUN_BLOCK = re.compile(r"--- run (\S+) ---")
 # The run `irimi shadow`'s banner names, its process run.
 BANNER_RUN = re.compile(r"irimi (?:shadow|replay) · run (\S+) · ")
-# An `irimi runs list` line (`report.run_list_line`): run id, started (a date and a time, or `-`),
-# duration and status, then the attribution column, which never holds two spaces, and the trigger.
-RUN_LIST_LINE = re.compile(r"(\S+)  (?:\S+ \S+|-)  \S+  \S+  (.+?)  \S")
+# An `irimi runs list` row (`report.run_list_lines`): run id, started (a date and a time, or `-`),
+# duration and status (`error (exit N)` or one word), then the attribution column, which never
+# holds two spaces, and the trigger. Columns are padded, so any run of spaces separates them.
+RUN_LIST_LINE = re.compile(r"(\S+) +(?:\S+ \S+|-) +\S+ +(?:error \(exit -?\d+\)|\S+) +(.+?)  ")
 # How long a serve-mode run waits for irimi's banner, and then for irimi to stop.
 SERVE_TIMEOUT_S = 60
 # What the name of a thread the fake internet answers a request on ends in: the one kind of
@@ -107,13 +108,12 @@ SERVE_TIMEOUT_S = 60
 FAKE_HANDLER = "(process_request_thread)"
 # How long the threads a serve started have to end once it has returned.
 THREAD_EXIT_S = 5.0
-# A tool call's line in irimi's stream (`report.tool_call_line`). Its first column is `ran`,
-# and its second the tool's kind followed by ` tool `, which no exchange line has: `recording` is
-# also an `answered_by` an exchange line starts with.
-TOOL_LINE = re.compile(r"(real|shadow|recording) +(read|write) +tool .* -> ")
+# A tool call's line in irimi's stream (`report.tool_call_line`). Its first column says how the
+# tool ran, in words no exchange line starts with, and its second the tool's kind.
+TOOL_LINE = re.compile(r"(tool-real|tool-fake|tool-recorded) +(read|write) +\S.* -> ")
 # A write tool's line in a summary, without its indent (`report.tool_write_line`). The summary
 # prints these after the HTTP writes, and `irimi compare` among them, in `seq` order.
-TOOL_WRITE = re.compile(rf"{report.WRITE_MARKER} tool \S+  shadow stand-in ")
+TOOL_WRITE = re.compile(rf"{report.WRITE_MARKER} {report.TOOL_SERVICE}  \S+  fake ")
 # How a summary's write line starts, a write irimi answered or one it says would fail.
 WRITE_LINE_PREFIXES = (f"  {report.WRITE_MARKER} ", f"  {report.REJECTED_MARKER} ")
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy")
@@ -142,6 +142,8 @@ class Scenario:
     # too, since serve is how irimi runs beside an agent it did not launch; None would keep one to
     # bare and shadow, for a scenario that needs irimi to be the agent's parent.
     serve_flags: tuple[str, ...] | None = ()
+    # The irimi flags it runs with under `irimi shadow -- <cmd>`.
+    shadow_flags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -384,10 +386,11 @@ class Result:
         """`irimi runs list` over the store this run recorded into, named with `--store` as its
         user would name it: each run it lists, by id, to its attribution column, which says a
         replay's run is a `replay of` the run it replayed. Raises unless it exits 0, quiet,
-        with every line a run's."""
-        code, listed, err = self.runs("list", "--store", str(self.store_root()))
+        with every line after the header row a run's."""
+        code, listed, err = self.runs("list", "--all", "--store", str(self.store_root()))
         assert (code, err) == (0, []), (code, err)
-        columns = [RUN_LIST_LINE.match(line) for line in listed]
+        assert listed[0].split() == list(report.RUN_LIST_HEADER), listed
+        columns = [RUN_LIST_LINE.match(line) for line in listed[1:]]
         assert None not in columns, listed
         return {m[1]: m[2] for m in columns if m is not None}
 
@@ -632,7 +635,7 @@ def _execute(
         if mode == "bare":
             code = _run_bare(cmd, agent_env, cwd, internet)
         elif mode == "shadow":
-            argv = ["shadow", "--port", "0", *flags, "--", *cmd]
+            argv = ["shadow", "--port", "0", *flags, *scenario.shadow_flags, "--", *cmd]
             with _watching_the_store(reported, handed, handed_events):
                 code, irimi_out = _run_irimi(argv, agent_env, cwd, tmp, internet, scenario, workdir)
         elif mode == "replay":

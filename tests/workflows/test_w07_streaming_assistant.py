@@ -36,15 +36,15 @@ from irimi.trace import ErrorInfo, TelemetrySeen
 W = "w07_streaming_assistant"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.
 MODES = ("shadow", "serve")
-TRACE_LINE = "live      telemetry POST api.smith.langchain.com/runs -> 202"
+TRACE_LINE = "real          telemetry POST api.smith.langchain.com/runs -> 202"
 LLM_LINES = [
-    "live      llm       POST api.openai.com/v1/embeddings -> 200",
-    "live      llm       POST api.anthropic.com/v1/messages -> 200",
-    "live      llm       POST api.openai.com/v1/chat/completions -> 200",
+    "real          llm       POST api.openai.com/v1/embeddings -> 200",
+    "real          llm       POST api.anthropic.com/v1/messages -> 200",
+    "real          llm       POST api.openai.com/v1/chat/completions -> 200",
 ]
 # A stream that broke after irimi had sent the agent its headers: stored with what arrived.
 BROKEN_STREAM_LINE = (
-    "live      llm       POST api.anthropic.com/v1/messages -> 200"
+    "real          llm       POST api.anthropic.com/v1/messages -> 200"
     "  [upstream-error, stream-truncated]"
 )
 MESSAGE_START = b"event: message_start\n"
@@ -128,9 +128,9 @@ def test_a_telemetry_post_is_stored_as_having_happened_and_its_body_is_not(run_w
     # The run has a start and an end now, so its elapsed time is real: normalised here.
     assert [re.sub(r" · \d+\.\ds$", " · <elapsed>", line) for line in out[7:]] == [
         "",
-        "live      llm       POST api.openai.com/v1/embeddings -> 200",
-        "live      llm       POST api.anthropic.com/v1/messages -> 200",
-        "live      llm       POST api.openai.com/v1/chat/completions -> 200",
+        "real          llm       POST api.openai.com/v1/embeddings -> 200",
+        "real          llm       POST api.anthropic.com/v1/messages -> 200",
+        "real          llm       POST api.openai.com/v1/chat/completions -> 200",
         "telemetry api.smith.langchain.com",
         "",
         f"irimi shadow · run {holder} · 4 exchanges · <elapsed>",
@@ -139,7 +139,7 @@ def test_a_telemetry_post_is_stored_as_having_happened_and_its_body_is_not(run_w
         "  api.openai.com     2 llm",
         "  telemetry          1 exchange to 1 host, forwarded live",
         "",
-        "  4 exchanges · 4 live · 0 delegated · 0 virtualized",
+        "  4 exchanges · 4 real · 0 answered by irimi (0 faked writes) · 0 sent to targets",
     ]
 
 
@@ -315,7 +315,7 @@ def test_a_reset_before_the_stream_opens_reaches_the_agent_as_an_unstamped_502(r
     assert (stream["status"], stream["answered_by"]) == (502, None)
     assert shadow.exchange_lines() == [
         LLM_LINES[0],
-        "live      llm       POST api.anthropic.com/v1/messages -> -  [upstream-error]",
+        "real          llm       POST api.anthropic.com/v1/messages -> -  [upstream-error]",
     ]
     for result in (bare, shadow):
         assert result.result()["caller_events"] == ["start", "error"]
@@ -336,11 +336,12 @@ def test_a_tool_call_streamed_in_pieces_becomes_one_faked_slack_post(run_workflo
     assert shadow.world.slack.messages[CHANNEL] == []
     assert shadow.exchange_lines() == [
         *LLM_LINES,
-        "live      read      POST slack.com/api/conversations.info -> 200",
-        "fake-L1   write     POST slack.com/api/chat.postMessage -> 200  [fidelity:L1]",
+        "irimi-check   read      POST slack.com/api/conversations.info -> 200",
+        "faked         write     POST slack.com/api/chat.postMessage -> 200",
     ]
-    assert f'  ○ post to #{CHANNEL}: "{text}"  unvalidated (L3 preconditions passed)' in (
-        shadow.summaries()
+    assert (
+        f'  ○ slack  post to #{CHANNEL}: "{text}"  faked; checked against live state: would succeed'
+        in (shadow.summaries())
     )
     # The stored OpenAI stream holds every 5-character argument delta `SplittingLLM` sent, in
     # order: the tool call is recorded as it streamed, not as the agent assembled it.
@@ -526,7 +527,7 @@ def test_a_gzip_bomb_streams_to_the_agent_whole_and_is_recorded_cut(run_workflow
     assert [c["answered_by"] for c in shadow.calls("anthropic_stream")] == [None]
     assert shadow.exchange_lines() == [
         LLM_LINES[0],
-        "live      llm       POST api.anthropic.com/v1/messages -> 200  [stream-truncated]",
+        "real          llm       POST api.anthropic.com/v1/messages -> 200  [stream-truncated]",
     ]
     # Recorded as the start of what it decodes to, to its last whole line, as one chunk.
     [head] = shadow.world.llm.heads
@@ -602,11 +603,14 @@ def test_a_stream_its_trigger_hands_off_is_stored_in_its_run_after_the_run_ended
     if mode == "shadow":
         return
     assert shadow.run_blocks()[run.run_id][-1] == (
-        "  0 exchanges · 0 live · 0 delegated · 0 virtualized"
+        "  0 exchanges · 0 real · 0 answered by irimi (0 faked writes) · 0 sent to targets"
     )
     code, out, err = shadow.runs("show", run.run_id)
     assert (code, err) == (0, [])
-    assert out[-1] == "  1 exchange · 1 live · 0 delegated · 0 virtualized"
+    assert (
+        out[-1]
+        == "  1 exchange · 1 real · 0 answered by irimi (0 faked writes) · 0 sent to targets"
+    )
 
 
 # ---------------------------------------------------------------------- irimi compare
@@ -658,8 +662,8 @@ def test_irimi_compare_shows_the_post_a_streamed_tool_call_made_and_nothing_else
         f"  B  {CHAT}",
         ARGS_DIFFER,
         "",
-        f'  + ○ post to #{CHANNEL}: "Summary: refunds go back to the card within 5-10 days."  '
-        "unvalidated (L3 preconditions passed)",
+        f'  + ○ slack  post to #{CHANNEL}: "Summary: refunds go back to the card within 5-10 '
+        'days."  faked; checked against live state: would succeed',
         "",
         "  0 same · 0 changed · 0 only in A · 1 only in B",
     ]
@@ -671,10 +675,7 @@ def test_irimi_compare_shows_the_post_a_streamed_tool_call_made_and_nothing_else
 # Every chat's trigger is given its caller's `send`, a callable `irimi replay` cannot call it with
 # (above), so each replay here runs the agent's own command (`-- <cmd>`).
 
-RECORDED_LINES = [
-    line.replace("live     ", "recording") + "  [fidelity:recording, from-recording]"
-    for line in LLM_LINES
-]
+RECORDED_LINES = [line.replace("real    ", "recorded") + "  [from-recording]" for line in LLM_LINES]
 
 
 def test_both_streams_replay_from_the_recording_and_the_agent_reassembles_them(replayed):

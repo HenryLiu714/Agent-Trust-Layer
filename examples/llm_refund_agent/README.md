@@ -60,13 +60,13 @@ A pass looks like this:
   ```
   irimi replay · <run id> → <replay id>
     agent exited 0
-    diverged at the agent's 3rd call: live      llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]
+    diverged at the agent's 3rd call: real          llm       POST api.anthropic.com/v1/messages -> 200  [replay-miss]
     2 from the recording · 2 missed
 
-    ~ A ○ refund $49.00 on ch_...  unvalidated (L3 preconditions passed)
-      B ○ refund $24.50 on ch_...  unvalidated (L3 preconditions passed)
-    ~ A ○ tool examples.llm_refund_agent.agent.record_decision  shadow stand-in ran
-      B ○ tool examples.llm_refund_agent.agent.record_decision  shadow stand-in ran
+    ~ A ○ stripe  refund $49.00 on ch_...  faked; checked against live state: would succeed
+      B ○ stripe  refund $24.50 on ch_...  faked; checked against live state: would succeed
+    ~ A ○ tool  examples.llm_refund_agent.agent.record_decision  fake ran instead
+      B ○ tool  examples.llm_refund_agent.agent.record_decision  fake ran instead
         args.decision.refund_amount: 4900 -> 2450
         args.decision.reply: "Refunded 4900." -> "Refunded 2450."
 

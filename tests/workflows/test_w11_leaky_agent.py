@@ -17,7 +17,7 @@ from irimi.exchange import Exchange
 W = "w11_leaky_agent"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.
 MODES = ("shadow", "serve")
-NOTHING_SEEN = "0 exchanges · 0 live · 0 delegated · 0 virtualized"
+NOTHING_SEEN = "0 exchanges · 0 real · 0 answered by irimi (0 faked writes) · 0 sent to targets"
 
 ESCAPES = {
     "proxyless_client": ("POST", "api.stripe.com", "/v1/refunds"),
@@ -96,11 +96,12 @@ def test_the_control_through_the_proxy_is_faked_and_the_ledger_is_untouched(run_
     assert shadow.internet.writes() == []
     assert shadow.answered() == [("refund", 200, "fake-L1")]
     assert shadow.world.stripe.charges[CHARGE]["amount_refunded"] == 0
-    assert "fake-L1   write     POST api.stripe.com/v1/refunds -> 200  [fidelity:L1]" in (
+    assert "faked         write     POST api.stripe.com/v1/refunds -> 200" in (
         shadow.exchange_lines()
     )
-    assert "○ refund $5.00 on ch_LEAKY  unvalidated (L3 preconditions passed)" in "\n".join(
-        shadow.summaries()
+    assert (
+        "○ stripe  refund $5.00 on ch_LEAKY  faked; checked against live state: would succeed"
+        in "\n".join(shadow.summaries())
     )
 
 
@@ -178,21 +179,20 @@ def test_a_sidecar_write_made_by_a_write_tool_is_stood_in_and_the_escape_closed(
         "shadow",
         {"job": {"job": "refund", "charge": CHARGE}},
     )
-    assert shadow.tool_call_lines() == [f"shadow    write     tool {tool} -> ok"]
+    assert shadow.tool_call_lines() == [f"tool-fake     write     {tool} -> ok"]
     summary = shadow.summaries()
-    assert summary[-4:] == [
-        f"  ○ tool {tool}  shadow stand-in ran",
-        "",
-        f"  {NOTHING_SEEN}",
-        "  These writes did not happen.",
-    ]
+    start = summary.index("  None of these writes reached the real service:")
+    assert summary[start + 1 : start + 3] == [f"  ○ tool  {tool}  fake ran instead", ""]
+    assert f"  {NOTHING_SEEN}" in summary
 
 
 # ---------------------------------------------------------------------- irimi compare
 
 # Each escape is an `sdk.run` named `escape`, with no function to name its entrypoint.
 ESCAPE = "escape"
-FAKED_REFUND = f"○ refund $5.00 on {CHARGE}  unvalidated (L3 preconditions passed)"
+FAKED_REFUND = (
+    f"○ stripe  refund $5.00 on {CHARGE}  faked; checked against live state: would succeed"
+)
 
 
 def compared(shared_store_run, a: str, b: str, mode: str) -> tuple[str, str, list[str]]:
@@ -245,7 +245,7 @@ def test_irimi_compare_shows_the_sidecar_write_a_write_tool_closed(shared_store_
         f"  B  {ESCAPE}",
         "  (the triggers' args differ)",
         "",
-        "  + ○ tool examples.workflows.w11_leaky_agent.agent.enqueue_job  shadow stand-in ran",
+        "  + ○ tool  examples.workflows.w11_leaky_agent.agent.enqueue_job  fake ran instead",
         "",
         "  0 same · 0 changed · 0 only in A · 1 only in B",
     ]

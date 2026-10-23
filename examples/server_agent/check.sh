@@ -76,23 +76,24 @@ logs=""
 for _ in $(seq 1 50); do
   runs="$("${compose[@]}" exec -T irimi irimi runs list)"
   logs="$("${compose[@]}" logs --no-log-prefix irimi)"
-  [ "$(echo "$runs" | grep -c '  ok  sdk  handle_refund  ')" = 2 ] &&
-    [ "$(echo "$logs" | grep -c '^  These writes did not happen\.')" = 2 ] && break
+  [ "$(echo "$runs" | grep -cE ' ok +sdk +handle_refund ')" = 2 ] &&
+    [ "$(echo "$logs" | grep -cE '^  [0-9]+ exchanges? · [0-9]+ real · ')" = 2 ] && break
   sleep 0.2
 done
 echo "$runs"
-[ "$(echo "$runs" | grep -c '  ok  sdk  handle_refund  ')" = 2 ]
-[ "$(echo "$runs" | grep -c .)" = 2 ]
+[ "$(echo "$runs" | grep -cE ' ok +sdk +handle_refund ')" = 2 ]
+# The header row and the two runs.
+[ "$(echo "$runs" | grep -c .)" = 3 ]
 
 echo "--- irimi's output"
 echo "$logs"
 # One block per run, each with its faked refund and its stood-in tool, and each charge's refund
 # in one block only: two requests at once that did not mix.
 [ "$(echo "$logs" | grep -c '^--- run ')" = 2 ]
-[ "$(echo "$logs" | grep -c '^  ○ refund ')" = 2 ]
-[ "$(echo "$logs" | grep -c '^  ○ tool db.mark_refunded  shadow stand-in ran$')" = 2 ]
+[ "$(echo "$logs" | grep -c '^  ○ stripe  refund ')" = 2 ]
+[ "$(echo "$logs" | grep -c '^  ○ tool  db.mark_refunded  fake ran instead$')" = 2 ]
 for charge in "${charges[@]}"; do
-  [ "$(echo "$logs" | grep -c "^  ○ refund ? on $charge  ")" = 1 ]
+  [ "$(echo "$logs" | grep -c "^  ○ stripe  refund ? on $charge  ")" = 1 ]
 done
 
 echo "--- Stripe holds no refund for either charge"

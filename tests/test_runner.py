@@ -22,10 +22,11 @@ from irimi.report import (
     delegated_lines,
     exchange_line,
     summary_lines,
+    tool_call_line,
     write_sentence,
 )
 from irimi.runner import EngineThread, child_env, exit_code_for
-from irimi.trace import ToolCall
+from irimi.trace import ErrorInfo, ToolCall
 
 
 def _exchange(
@@ -140,7 +141,7 @@ def test_banner_lines():
 
 def test_exchange_line_live_read():
     line = exchange_line(_exchange())
-    assert "live" in line
+    assert line.startswith("real ")
     assert "read" in line
     assert "GET" in line
     assert "api.stripe.com/v1/charges" in line
@@ -165,8 +166,10 @@ def test_summary_header_says_one_exchange_not_one_exchanges():
 def test_summary_empty():
     lines = summary_lines("7f3a", [], 0.0)
     assert "0 exchanges" in lines[0]
-    assert any("0 live · 0 delegated · 0 virtualized" in line for line in lines)
-    assert not any("did not happen" in line for line in lines)
+    assert lines[-1] == (
+        "  0 exchanges · 0 real · 0 answered by irimi (0 faked writes) · 0 sent to targets"
+    )
+    assert not any("None of these writes" in line for line in lines)
 
 
 def test_exit_code_for():
@@ -195,8 +198,8 @@ def test_engine_thread_stop_is_idempotent():
 
 
 def test_exchange_line_columns_line_up_for_the_nine_character_values():
-    """`telemetry` and `delegated` are nine characters. At eight, every row carrying one was
-    pushed a column right in the most-read output the tool produces."""
+    """The kind column is nine wide for `telemetry`, and the first column as wide as its longest
+    word, so no row is pushed a column right in the most-read output the tool produces."""
     lines = [
         exchange_line(_exchange(answered_by=answered_by, kind=kind))
         for answered_by, kind in [
@@ -211,7 +214,7 @@ def test_exchange_line_columns_line_up_for_the_nine_character_values():
 
 
 def test_exchange_line_names_a_delegated_answer():
-    assert exchange_line(_exchange(answered_by="delegated")).startswith("delegated")
+    assert exchange_line(_exchange(answered_by="delegated")).startswith("target ")
 
 
 def _service(**kwargs):
@@ -308,16 +311,34 @@ def _block(lines, needle):
     return next(line for line in lines if needle in line)
 
 
+def _host(lines, host="api.stripe.com"):
+    """`host`'s line in the per-host block. A write line can name a host too, in its request, so
+    the line is found by the host column it starts with."""
+    return next(line for line in lines if line.startswith(f"  {host} "))
+
+
+def _totals(lines):
+    return _block(lines, " answered by irimi (")
+
+
+def _fired(lines):
+    """The `would have fired:` line, or None when the summary promises no webhooks."""
+    return next((line for line in lines if line.startswith("  would have fired:")), None)
+
+
+NOTHING_HAPPENED = "  None of these writes reached the real service:"
+
+
 def test_a_host_line_separates_reads_from_intercepted_writes():
     lines = summary_lines("7f3a", [_exchange(), _exchange(), _refund()], 0.0, _maps())
-    assert _block(lines, "api.stripe.com") == "  api.stripe.com  2 reads  1 write intercepted"
+    assert _host(lines) == "  api.stripe.com  2 reads  1 faked write"
 
 
 def test_a_delegated_read_is_never_counted_as_a_live_read():
     """The claim behind `reads are real` is what that count means to whoever reads it, and a read
     answered by a target is not a real read."""
     rows = [_exchange(), _exchange(answered_by="delegated", target="http://127.0.0.1:3000")]
-    line = _block(summary_lines("7f3a", rows, 0.0, _maps()), "api.stripe.com")
+    line = _host(summary_lines("7f3a", rows, 0.0, _maps()))
     assert line == "  api.stripe.com  1 read  1 read from the target"
 
 
@@ -326,7 +347,7 @@ def test_an_overlaid_read_is_a_real_read_and_says_it_shows_the_run_s_writes():
     understate the reads the agent really made. Its body is not what the service
     sent, though, so the line says that too."""
     rows = [_exchange(), _exchange(answered_by="overlay")]
-    line = _block(summary_lines("7f3a", rows, 0.0, _maps()), "api.stripe.com")
+    line = _host(summary_lines("7f3a", rows, 0.0, _maps()))
     assert line == "  api.stripe.com  2 reads (1 showing this run's writes)"
 
 
@@ -334,17 +355,19 @@ def test_a_read_answered_from_the_recording_is_a_read_and_says_so():
     """A replay answers a read with what the recorded run was sent: a real read, made by the
     recorded run, so it is counted with the reads, as what it was - one the overlay edited is
     still overlaid - and qualified by its `from-recording` flag. irimi answered it, not the
-    service, so the closing line counts it virtualized."""
+    service, so the totals count it answered by irimi."""
     rows = [
         _exchange(),
         _exchange(answered_by="overlay", flags=("fidelity:overlay", FROM_RECORDING_FLAG)),
         _exchange(answered_by="recording", flags=("fidelity:recording", FROM_RECORDING_FLAG)),
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
-    assert _block(lines, "api.stripe.com") == (
+    assert _host(lines) == (
         "  api.stripe.com  3 reads (1 showing this run's writes, 2 from the recording)"
     )
-    assert "  3 exchanges · 1 live · 0 delegated · 2 virtualized" in lines
+    assert _totals(lines) == (
+        "  3 exchanges · 1 real · 2 answered by irimi (0 faked writes) · 0 sent to targets"
+    )
 
 
 def test_llm_calls_answered_from_the_recording_say_so():
@@ -356,33 +379,38 @@ def test_llm_calls_answered_from_the_recording_say_so():
 
 def test_a_replayed_read_the_overlay_could_not_complete_names_who_answered_it():
     """A read flagged `partial` the overlay left alone is whoever answered it: the service, or a
-    replay's recording, which is not `live`."""
+    replay's recording, which is not `real`."""
     refund = _refund()
     read = dataclasses.replace(
         _exchange(), answered_by="recording", overlay="partial", flags=(FROM_RECORDING_FLAG,)
     )
     lines = summary_lines("7f3a", [refund, read], 0.0, _maps())
-    assert "    ↳ GET /v1/charges did not show it  recording (partial)" in lines
+    assert "    ↳ GET /v1/charges did not show it  recorded (partial)" in lines
 
 
 def test_an_overlaid_read_is_counted_live_and_never_virtualized():
-    """`virtualized` means irimi answered instead of the service. It answered this one WITH the
-    service, so counting it there claimed a read the agent really made was fabricated."""
+    """`answered by irimi` means irimi answered instead of the service. It answered this one WITH
+    the service, so counting it there would claim a read the agent really made was fabricated."""
     rows = [_exchange(answered_by="overlay"), _refund()]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
-    assert "  2 exchanges · 1 live · 0 delegated · 1 virtualized" in lines
+    assert _totals(lines) == (
+        "  2 exchanges · 1 real · 1 answered by irimi (1 faked write) · 0 sent to targets"
+    )
 
 
 def test_an_intercepted_write_that_was_delegated_says_so_in_its_host_line():
     rows = [_refund(), _refund(answered_by="delegated", target="http://127.0.0.1:3000/refund")]
-    line = _block(summary_lines("7f3a", rows, 0.0, _maps()), "api.stripe.com")
-    assert line == "  api.stripe.com  2 writes intercepted (1 delegated)"
+    line = _host(summary_lines("7f3a", rows, 0.0, _maps()))
+    assert line == "  api.stripe.com  1 faked write  1 write sent to the target"
 
 
 def test_an_unclassified_write_is_counted_and_named():
     rows = [_refund(), _exchange(method="DELETE", kind="unknown", answered_by="fake-L0")]
-    line = _block(summary_lines("7f3a", rows, 0.0, _maps()), "api.stripe.com")
-    assert line == "  api.stripe.com  2 writes intercepted (1 unclassified)"
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert _host(lines) == "  api.stripe.com  2 faked writes (1 unclassified)"
+    assert "  ○ stripe  DELETE api.stripe.com/v1/charges  faked; not checked (unclassified)" in (
+        lines
+    )
 
 
 def test_llm_gets_its_own_word():
@@ -418,24 +446,27 @@ def test_a_telemetry_host_still_gets_a_host_line_for_its_control_plane_writes():
         ),
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
-    assert "  api.datadoghq.com  1 write intercepted (1 unclassified)" in lines
+    assert "  api.datadoghq.com  1 faked write (1 unclassified)" in lines
     assert "  telemetry          1 exchange to 1 host, forwarded live" in lines
 
 
 def test_a_write_is_rendered_from_the_maps_human_template():
     lines = summary_lines("7f3a", [_refund()], 0.0, _maps())
-    assert "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L0)" in lines
+    assert "  ○ stripe  refund $49.00 on ch_3QabcXYZ  faked; not checked" in lines
 
 
 def test_an_amount_with_no_currency_in_the_request_is_left_as_it_was_sent():
     """Dividing by 100 without knowing the currency prints ¥49.00 for a 4900-yen refund, which is
-    a wrong number rather than an unformatted one.
+    a wrong number rather than an unformatted one, so the amount says it is in minor units.
 
     A write MAY be denominated by the L3 precondition read that checked it - the charge's own
     `currency`, carried across on the exchange. This write had no such read, so nothing knows
     what it is in."""
     lines = summary_lines("7f3a", [_refund(body=b"charge=ch_9&amount=4900")], 0.0, _maps())
-    assert "  ○ refund 4900 on ch_9  unvalidated (L0)" in lines
+    assert (
+        "  ○ stripe  refund 4900 (minor units, currency unknown) on ch_9  faked; not checked"
+        in lines
+    )
 
 
 def test_an_amount_is_denominated_by_the_currency_the_l3_read_found():
@@ -443,7 +474,7 @@ def test_an_amount_is_denominated_by_the_currency_the_l3_read_found():
     and the exchange carries it across."""
     write = replace(_refund(body=b"charge=ch_9&amount=4900"), currency="usd")
     lines = summary_lines("7f3a", [write], 0.0, _maps())
-    assert "  ○ refund $49.00 on ch_9  unvalidated (L0)" in lines
+    assert "  ○ stripe  refund $49.00 on ch_9  faked; not checked" in lines
 
 
 def test_the_requests_own_currency_still_wins_over_the_one_the_read_found():
@@ -451,7 +482,7 @@ def test_the_requests_own_currency_still_wins_over_the_one_the_read_found():
     the caller's business to be wrong about, not irimi's to correct."""
     write = replace(_refund(body=b"charge=ch_9&amount=4900&currency=jpy"), currency="usd")
     lines = summary_lines("7f3a", [write], 0.0, _maps())
-    assert "  ○ refund ¥4900 on ch_9  unvalidated (L0)" in lines
+    assert "  ○ stripe  refund ¥4900 on ch_9  faked; not checked" in lines
 
 
 def test_a_rejected_write_is_denominated_the_same_way():
@@ -464,26 +495,26 @@ def test_a_rejected_write_is_denominated_the_same_way():
         rejection_code="charge_already_refunded",
     )
     lines = summary_lines("7f3a", [write], 0.0, _maps())
-    assert "  ✗ refund $49.00 on ch_9  would fail: charge_already_refunded" in lines
+    assert "  ✗ stripe  refund $49.00 on ch_9  faked; would fail: charge_already_refunded" in lines
 
 
 def test_a_zero_decimal_currency_is_not_divided():
     lines = summary_lines(
         "7f3a", [_refund(body=b"charge=ch_9&amount=4900&currency=jpy")], 0.0, _maps()
     )
-    assert "  ○ refund ¥4900 on ch_9  unvalidated (L0)" in lines
+    assert "  ○ stripe  refund ¥4900 on ch_9  faked; not checked" in lines
 
 
 def test_a_currency_with_no_symbol_is_named():
     lines = summary_lines(
         "7f3a", [_refund(body=b"charge=ch_9&amount=4900&currency=sek")], 0.0, _maps()
     )
-    assert "  ○ refund 49.00 SEK on ch_9  unvalidated (L0)" in lines
+    assert "  ○ stripe  refund 49.00 SEK on ch_9  faked; not checked" in lines
 
 
 def test_a_template_hole_the_request_does_not_fill_is_marked_not_dropped():
     lines = summary_lines("7f3a", [_refund(body=b"amount=4900&currency=usd")], 0.0, _maps())
-    assert "  ○ refund $49.00 on ?  unvalidated (L0)" in lines
+    assert "  ○ stripe  refund $49.00 on ?  faked; not checked" in lines
 
 
 def test_a_path_parameter_fills_a_hole_the_body_does_not():
@@ -495,7 +526,8 @@ def test_a_path_parameter_fills_a_hole_the_body_does_not():
             path="/v1/payment_intents/pi_REAL999/cancel",
         )
     ]
-    assert "  ○ cancel pi_REAL999  unvalidated (L0)" in summary_lines("7f3a", rows, 0.0, _maps())
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert "  ○ stripe  cancel pi_REAL999  faked; not checked" in lines
 
 
 def test_an_unmapped_write_is_spelled_as_the_request_it_was():
@@ -510,16 +542,16 @@ def test_an_unmapped_write_is_spelled_as_the_request_it_was():
         )
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
-    assert "  ○ POST api.unmapped.test/do/a/thing  unclassified (L0)" in lines
+    assert (
+        "  ○ api.unmapped.test  POST api.unmapped.test/do/a/thing  faked; not checked "
+        "(unclassified)" in lines
+    )
 
 
 def test_a_delegated_write_names_the_address_that_answered_it():
     rows = [_refund(answered_by="delegated", target="http://127.0.0.1:3000/refund")]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
-    assert (
-        "  ○ refund $49.00 on ch_3QabcXYZ → http://127.0.0.1:3000/refund  unvalidated (delegated)"
-        in lines
-    )
+    assert "  ○ stripe  refund $49.00 on ch_3QabcXYZ  sent to target 127.0.0.1:3000" in lines
 
 
 def test_the_three_buckets_are_counted_on_one_line():
@@ -530,70 +562,82 @@ def test_the_three_buckets_are_counted_on_one_line():
         _refund(answered_by="delegated", target="http://127.0.0.1:3000/refund"),
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
-    assert "  4 exchanges · 2 live · 1 delegated · 1 virtualized" in lines
+    assert lines[-1] == (
+        "  4 exchanges · 2 real · 1 answered by irimi (1 faked write) · 1 sent to targets"
+    )
 
 
 def test_the_closing_line_is_the_plain_claim_when_nothing_was_delegated():
+    """The writes block opens with the claim that none of its writes reached the real service."""
     lines = summary_lines("7f3a", [_refund()], 0.0, _maps())
-    assert lines[-1] == "  These writes did not happen."
+    assert lines[1:4] == [
+        "",
+        NOTHING_HAPPENED,
+        "  ○ stripe  refund $49.00 on ch_3QabcXYZ  faked; not checked",
+    ]
 
 
 def test_the_closing_lines_say_where_a_delegated_write_went():
     rows = [_refund(), _refund(answered_by="delegated", target="http://127.0.0.1:3000/refund")]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
-    assert lines[-2] == "  These writes did not reach stripe."
-    assert lines[-1] == "  1 was delegated to http://127.0.0.1:3000/refund."
+    assert _write_block(lines) == [
+        "  ○ stripe  refund $49.00 on ch_3QabcXYZ  faked; not checked",
+        "  ○ stripe  refund $49.00 on ch_3QabcXYZ  sent to target 127.0.0.1:3000",
+    ]
+    assert NOTHING_HAPPENED in lines
 
 
 def test_a_write_whose_target_was_never_reached_is_not_counted_as_delegated():
-    """The host line said `1 delegated` for a write no stub ever saw, which reads as a working
-    delegation when the developer's stub was simply not running."""
-    line = _block(summary_lines("7f3a", [_unreachable()], 0.0, _maps()), "api.stripe.com")
-    assert line == "  api.stripe.com  1 write intercepted (1 target unreachable)"
+    """A write no stub ever saw must not read as a working delegation when the developer's stub
+    was simply not running."""
+    lines = summary_lines("7f3a", [_unreachable()], 0.0, _maps())
+    assert _host(lines) == "  api.stripe.com  1 write that could not reach the target"
+    assert not any("sent to target 127" in line for line in lines)
+    assert _totals(lines) == (
+        "  1 exchange · 0 real · 1 answered by irimi (0 faked writes) · 0 sent to targets"
+    )
 
 
 def test_a_delegated_write_and_an_unreachable_one_are_counted_apart():
     rows = [_refund(answered_by="delegated", target="http://127.0.0.1:3000/refund"), _unreachable()]
-    assert _block(summary_lines("7f3a", rows, 0.0, _maps()), "api.stripe.com") == (
-        "  api.stripe.com  2 writes intercepted (1 delegated, 1 target unreachable)"
+    assert _host(summary_lines("7f3a", rows, 0.0, _maps())) == (
+        "  api.stripe.com  1 write sent to the target  1 write that could not reach the target"
     )
 
 
 def test_an_unreachable_target_says_the_write_was_not_answered_at_all():
     lines = summary_lines("7f3a", [_unreachable()], 0.0, _maps())
-    assert (
-        "  ○ refund $49.00 on ch_3QabcXYZ → http://127.0.0.1:3999/refund  "
-        "unanswered (target unreachable)" in lines
+    assert "  ✗ stripe  refund $49.00 on ch_3QabcXYZ  could not reach target 127.0.0.1:3999" in (
+        lines
     )
 
 
 def test_the_closing_lines_never_claim_an_unreachable_target_answered():
     lines = summary_lines("7f3a", [_unreachable()], 0.0, _maps())
-    assert lines[-2] == "  These writes did not reach stripe."
-    assert lines[-1] == (
-        "  1 was not answered at all: http://127.0.0.1:3999/refund could not be reached, "
-        "and the agent got a 502."
-    )
-    assert not any("delegated to" in line for line in lines)
+    assert NOTHING_HAPPENED in lines
+    assert not any("sent to target 127" in line for line in lines)
+    assert _fired(lines) is None
 
 
 def test_a_delegated_write_and_an_unreachable_one_each_get_their_own_sentence():
     rows = [_refund(answered_by="delegated", target="http://127.0.0.1:3000/refund"), _unreachable()]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
-    assert lines[-3] == "  These writes did not reach stripe."
-    assert lines[-2] == "  1 was delegated to http://127.0.0.1:3000/refund."
-    assert lines[-1].startswith("  1 was not answered at all:")
+    assert _write_block(lines) == [
+        "  ○ stripe  refund $49.00 on ch_3QabcXYZ  sent to target 127.0.0.1:3000",
+        "  ✗ stripe  refund $49.00 on ch_3QabcXYZ  could not reach target 127.0.0.1:3999",
+    ]
 
 
 def test_two_unreachable_writes_read_as_were():
-    assert summary_lines("7f3a", [_unreachable()] * 2, 0.0, _maps())[-1].startswith(
-        "  2 were not answered at all:"
-    )
+    line = _host(summary_lines("7f3a", [_unreachable()] * 2, 0.0, _maps()))
+    assert line == "  api.stripe.com  2 writes that could not reach the target"
 
 
 def test_two_delegated_writes_read_as_were():
     rows = [_refund(answered_by="delegated", target="http://127.0.0.1:3000/refund")] * 2
-    assert summary_lines("7f3a", rows, 0.0, _maps())[-1].startswith("  2 were delegated to")
+    assert _host(summary_lines("7f3a", rows, 0.0, _maps())) == (
+        "  api.stripe.com  2 writes sent to the target"
+    )
 
 
 def _tool_call(
@@ -608,23 +652,23 @@ def _tool_call(
 
 
 def test_a_delegated_write_s_closing_lines_say_the_tool_writes_did_not_happen_either():
-    """A run whose writes were delegated or went unanswered closes by saying they did not reach
-    their service. A write tool whose stand-in ran did not happen either, and the closing
-    lines said nothing of it: only its own `○ tool` line did. A read tool, which ran for
-    real, is no write and changes nothing."""
+    """A write tool whose fake ran did not happen either, so it gets a line in the writes block
+    under the same opening claim, after the HTTP writes. A read tool, which ran for real, is no
+    write and changes nothing."""
     tools = [_tool_call(), _tool_call(kind="read", ran="real", name="db.lookup")]
     delegated = _refund(answered_by="delegated", target="http://127.0.0.1:3000/refund")
     faked = replace(_refund(answered_by="fake-L1"), would_fire=("refund.created",))
     lines = summary_lines("7f3a", [faked, delegated], 0.0, _maps(), tools)
-    assert lines[-2:] == [
-        "  These writes did not reach stripe. The tool writes did not happen. "
-        "Would have fired: refund.created.",
-        "  1 was delegated to http://127.0.0.1:3000/refund.",
+    assert _write_block(lines) == [
+        "  ○ stripe  refund $49.00 on ch_3QabcXYZ  faked; not checked",
+        "  ○ stripe  refund $49.00 on ch_3QabcXYZ  sent to target 127.0.0.1:3000",
+        "  ○ tool  db.mark_refunded  fake ran instead",
     ]
-    lines = summary_lines("7f3a", [_unreachable()], 0.0, _maps(), tools)
-    assert lines[-2] == "  These writes did not reach stripe. The tool writes did not happen."
+    assert _fired(lines) == "  would have fired: refund.created"
+    lines = summary_lines("7f3a", [], 0.0, _maps(), tools)
+    assert lines[1:4] == ["", NOTHING_HAPPENED, "  ○ tool  db.mark_refunded  fake ran instead"]
     lines = summary_lines("7f3a", [delegated], 0.0, _maps(), tools[1:])
-    assert lines[-2] == "  These writes did not reach stripe."
+    assert not any("○ tool" in line for line in lines)
 
 
 def test_stood_in_tool_writes_print_in_the_order_they_ended_whatever_order_they_came_in():
@@ -641,25 +685,32 @@ def test_stood_in_tool_writes_print_in_the_order_they_ended_whatever_order_they_
         _tool_call(name="db.tie_higher_id_a", ended_at=4.0, tool_call_id="b"),
         _tool_call(name="db.tie_higher_id_b", ended_at=4.0, tool_call_id="b"),
     ]
-    printed = [f"  ○ tool {call.name}  shadow stand-in ran" for call in ended]
+    printed = [f"  ○ tool  {call.name}  fake ran instead" for call in ended]
     for calls in itertools.permutations(ended):
         lines = summary_lines("7f3a", [], 0.0, None, calls)
         assert [line for line in lines if "○ tool" in line] == printed
 
 
+def test_a_tool_fake_that_raised_says_so():
+    call = replace(_tool_call(), error=ErrorInfo("builtins.KeyError", "k"))
+    lines = summary_lines("7f3a", [], 0.0, None, [call])
+    assert "  ○ tool  db.mark_refunded  fake raised builtins.KeyError" in lines
+
+
 def test_a_run_that_only_read_claims_nothing_about_writes():
     lines = summary_lines("7f3a", [_exchange()], 0.0, _maps())
-    assert not any("did not happen" in line or "did not reach" in line for line in lines)
+    assert NOTHING_HAPPENED not in lines
+    assert _fired(lines) is None
+    assert not any(line.startswith("  money:") for line in lines)
 
 
 def test_the_write_line_names_the_fidelity_the_answer_actually_had():
-    """`L0`, `L1` or `delegated`, read off `answered_by` so there is no second mapping to keep in
-    step. A summary claiming `L0` for an L1 answer is the same class of untruth as counting a
-    delegated read as live."""
-    lines = summary_lines("7f3a", [_refund(answered_by="fake-L1")], 0.0, _maps())
-    assert "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L1)" in lines
-    lines = summary_lines("7f3a", [_refund()], 0.0, _maps())
-    assert "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L0)" in lines
+    """A faked write's line says it was faked and whether irimi checked it, whichever body it was
+    answered with: the echo and the fixture read alike, and neither prints an `L` code."""
+    for answered_by in ("fake-L0", "fake-L1"):
+        lines = summary_lines("7f3a", [_refund(answered_by=answered_by)], 0.0, _maps())
+        assert "  ○ stripe  refund $49.00 on ch_3QabcXYZ  faked; not checked" in lines
+        assert not any("(L" in line for line in lines)
 
 
 # ------------------------------------------------------ what the precondition check said
@@ -667,7 +718,7 @@ def test_the_write_line_names_the_fidelity_the_answer_actually_had():
 
 def test_a_rejected_write_is_crossed_out_and_names_the_code_it_would_fail_with():
     """A write L3 rejected is the line the baseline report exists to print: the real service would
-    have refused it. Printed as `unvalidated (L1)` it read as a write that was faked."""
+    have refused it. Printed with the `○` marker it read as a write that would have gone through."""
     rows = [
         replace(
             _refund(answered_by="fake-L1", status=400),
@@ -677,32 +728,108 @@ def test_a_rejected_write_is_crossed_out_and_names_the_code_it_would_fail_with()
     ]
     line = _block(summary_lines("7f3a", rows, 0.0, _maps()), "would fail")
     assert line.startswith("  ✗ ")
-    assert line == "  ✗ refund $49.00 on ch_3QabcXYZ  would fail: charge_already_refunded"
+    assert line == (
+        "  ✗ stripe  refund $49.00 on ch_3QabcXYZ  faked; would fail: charge_already_refunded"
+    )
 
 
 def test_a_passed_write_reads_l3_preconditions_passed():
     rows = [replace(_refund(answered_by="fake-L1"), precondition="passed")]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
-    assert "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L3 preconditions passed)" in lines
+    assert (
+        "  ○ stripe  refund $49.00 on ch_3QabcXYZ  faked; checked against live state: would succeed"
+        in lines
+    )
 
 
 def test_a_write_l3_could_not_evaluate_reads_l2():
-    """Faked at L1, but irimi could not find out whether the service would have taken it, so what
-    it knew was the overlay's worth of truth and no more."""
+    """Faked, but irimi could not find out whether the service would have taken it, and the run
+    holds no check read to say why."""
     rows = [replace(_refund(answered_by="fake-L1"), precondition="not_evaluable")]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
-    assert "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L2)" in lines
+    assert (
+        "  ○ stripe  refund $49.00 on ch_3QabcXYZ  faked; could not check: irimi made no check read"
+        in lines
+    )
+
+
+def test_a_write_answered_from_the_recording_says_its_recorded_run_could_not_check_it():
+    """A replay answers a recorded write without making a check read: the recorded run made it,
+    so a check read in the replay's own run belongs to another write and is never borrowed."""
+    recorded = replace(
+        _refund(answered_by="fake-L1", flags=(FROM_RECORDING_FLAG,)), precondition="not_evaluable"
+    )
+    lines = summary_lines("7f3a", [_check_read(401), recorded], 0.0, _maps())
+    assert _write_block(lines) == [
+        "  ○ stripe  refund $49.00 on ch_3QabcXYZ  faked; could not check: the recorded run "
+        "could not check it"
+    ]
+
+
+def _check_read(status=200, path="/v1/charges/ch_3QabcXYZ"):
+    """irimi's own precondition read, which the engine records before the write it decides."""
+    return replace(_exchange(path=path, status=status), issued_by="engine")
+
+
+def _checked_refund(**kwargs):
+    fired = ("refund.created", "charge.refunded")
+    return replace(
+        _refund(answered_by="fake-L1"), precondition="not_evaluable", would_fire=fired, **kwargs
+    )
+
+
+def test_a_check_read_refused_for_its_credentials_says_so_and_promises_no_webhooks():
+    """The service answered irimi's check read 401 or 403 for the agent's own credentials, so
+    the real write would most likely have been refused too: the line says why it was not checked,
+    and the webhooks it would have fired are not promised."""
+    for status in (401, 403):
+        lines = summary_lines("7f3a", [_check_read(status), _checked_refund()], 0.0, _maps())
+        assert _write_block(lines) == [
+            "  ○ stripe  refund $49.00 on ch_3QabcXYZ  faked; could not check: stripe answered "
+            f"irimi's check read with {status}"
+        ]
+        assert _fired(lines) is None
+
+
+def test_a_check_read_that_failed_otherwise_still_promises_its_webhooks():
+    """A 429 or a 500 says nothing about the write, which was faked, so its events are owed."""
+    for status in (429, 500):
+        lines = summary_lines("7f3a", [_check_read(status), _checked_refund()], 0.0, _maps())
+        assert _write_block(lines) == [
+            "  ○ stripe  refund $49.00 on ch_3QabcXYZ  faked; could not check: stripe answered "
+            f"irimi's check read with {status}"
+        ]
+        assert _fired(lines) == "  would have fired: refund.created, charge.refunded"
+
+
+def test_a_check_read_with_no_answer_or_an_unusable_one_says_which():
+    lines = summary_lines("7f3a", [_check_read(None), _checked_refund()], 0.0, _maps())
+    assert (
+        "could not check: irimi's check read of stripe got no usable answer"
+        in (_write_block(lines)[0])
+    )
+    lines = summary_lines("7f3a", [_check_read(200), _checked_refund()], 0.0, _maps())
+    assert "could not check: irimi could not tell from its check read" in _write_block(lines)[0]
+
+
+def test_each_write_takes_its_own_check_read():
+    """Two refunds, each checked by a read of its own: the first's 401 is not the second's."""
+    rows = [_check_read(401), _checked_refund(), _check_read(429), _checked_refund()]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert [line.rsplit(" ", 1)[1] for line in _write_block(lines)] == ["401", "429"]
+    assert _fired(lines) == "  would have fired: refund.created, charge.refunded"
 
 
 def test_a_write_on_a_route_with_no_precondition_keeps_its_own_level():
     rows = [_refund(answered_by="fake-L1")]
     assert rows[0].precondition is None
     lines = summary_lines("7f3a", rows, 0.0, _maps())
-    assert "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L1)" in lines
+    assert "  ○ stripe  refund $49.00 on ch_3QabcXYZ  faked; not checked" in lines
 
 
 def test_a_delegated_write_l3_could_not_evaluate_still_reads_delegated():
-    """`L2` is a claim about a fake irimi built, and irimi built nothing here - the target did."""
+    """A precondition outcome is a claim about a fake irimi built, and irimi built nothing here -
+    the target did."""
     rows = [
         replace(
             _refund(answered_by="delegated", target="http://127.0.0.1:3000/refund"),
@@ -710,34 +837,194 @@ def test_a_delegated_write_l3_could_not_evaluate_still_reads_delegated():
         )
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
-    assert (
-        "  ○ refund $49.00 on ch_3QabcXYZ → http://127.0.0.1:3000/refund  unvalidated (delegated)"
-        in lines
-    )
-    assert not any("(L2)" in line for line in lines)
+    assert "  ○ stripe  refund $49.00 on ch_3QabcXYZ  sent to target 127.0.0.1:3000" in lines
+    assert not any("could not check" in line for line in lines)
 
 
 def test_an_engine_read_is_counted_apart_from_the_agents_reads_but_still_went_live():
     """irimi's own precondition read reached the real service, so it is an exchange and it is
-    `live`; but the agent did not make it, and `N reads` is the agent's number."""
+    real; but the agent did not make it, and `N reads` is the agent's number."""
     rows = [
         _exchange(),
         replace(_exchange(path="/v1/charges/ch_3QabcXYZ"), issued_by="engine"),
         replace(_refund(answered_by="fake-L1"), precondition="passed"),
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
-    assert _block(lines, "api.stripe.com  ") == (
-        "  api.stripe.com  1 read  1 engine read  1 write intercepted"
-    )
+    assert _host(lines) == "  api.stripe.com  1 read  1 irimi check read  1 faked write"
     assert lines[0].startswith("irimi shadow · run 7f3a · 3 exchanges · ")
-    assert "  3 exchanges · 2 live · 0 delegated · 1 virtualized" in lines
+    assert _totals(lines) == (
+        "  3 exchanges · 2 real · 1 answered by irimi (1 faked write) · 0 sent to targets"
+    )
 
 
 def test_the_summary_still_names_a_write_without_the_maps():
     """`index=None` is the empty-map case, and the write still gets a line: the summary degrades
     to the request it saw rather than dropping a write it could not name."""
     lines = summary_lines("7f3a", [_refund()], 0.0, None)
-    assert "  ○ POST api.stripe.com/v1/refunds  unvalidated (L0)" in lines
+    assert "  ○ stripe  POST api.stripe.com/v1/refunds  faked; not checked" in lines
+
+
+# ------------------------------------------------------------------- failed reads
+
+
+def test_a_host_line_counts_the_agent_s_failed_reads():
+    """A run whose reads came back 401 worked blind, and `1 read` alone hid it."""
+    rows = [_exchange(status=401), _exchange(), _exchange(status=404), _exchange(status=401)]
+    line = _host(summary_lines("7f3a", rows, 0.0, _maps()))
+    assert line == "  api.stripe.com  4 reads (3 failed: 401, 404)"
+    line = _host(summary_lines("7f3a", [_exchange(status=None)], 0.0, _maps()))
+    assert line == "  api.stripe.com  1 read (1 failed: no answer)"
+
+
+def test_a_read_irimi_refused_gets_a_phrase_of_its_own():
+    rows = [_exchange(answered_by="irimi", status=403, flags=("refused",))]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert _host(lines) == "  api.stripe.com  1 read refused by irimi"
+    assert _totals(lines) == (
+        "  1 exchange · 0 real · 1 answered by irimi (0 faked writes) · 0 sent to targets"
+    )
+
+
+# ------------------------------------------------------------------- money
+
+
+def test_the_money_line_sums_the_faked_writes_and_what_would_fail():
+    rejected = replace(
+        _refund(answered_by="fake-L1", status=400),
+        precondition="rejected",
+        rejection_code="charge_already_refunded",
+    )
+    lines = summary_lines("7f3a", [_refund(answered_by="fake-L1"), rejected], 0.0, _maps())
+    assert "  money: $98.00 in faked writes; $49.00 of it would fail" in lines
+
+
+def test_the_money_line_keeps_each_currency_apart():
+    rows = [_refund(), _refund(body=b"charge=ch_9&amount=4900&currency=jpy")]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert "  money: $49.00 + ¥4900 in faked writes" in lines
+
+
+def test_an_amount_in_an_unknown_currency_is_counted_apart():
+    rows = [_refund(), _refund(body=b"charge=ch_9&amount=4900")]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert "  money: $49.00 in faked writes; 1 amount in an unknown currency not counted" in lines
+
+
+def test_no_money_line_when_no_amount_has_a_known_currency():
+    rows = [_refund(body=b"charge=ch_9&amount=4900")]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert not any(line.startswith("  money:") for line in lines)
+
+
+def test_writes_irimi_did_not_fake_are_not_in_the_money_line():
+    rows = [_refund(answered_by="delegated", target="http://127.0.0.1:3000/refund")]
+    lines = summary_lines("7f3a", rows, 0.0, _maps())
+    assert not any(line.startswith("  money:") for line in lines)
+
+
+# ------------------------------------------------------------------- the stream
+
+
+def test_exchange_line_marks_irimi_s_own_check_read():
+    line = exchange_line(_check_read())
+    assert line.startswith("irimi-check   read      GET api.stripe.com/v1/charges/ch_3QabcXYZ")
+
+
+def test_exchange_line_uses_one_word_per_answer_and_drops_the_fidelity_flags():
+    cases = {
+        "live": "real",
+        "overlay": "real",
+        "fake-L0": "faked",
+        "fake-L1": "faked",
+        "delegated": "target",
+        "recording": "recorded",
+        "irimi": "irimi",
+    }
+    for answered_by, word in cases.items():
+        flags = ("fidelity:L1", "upstream-error")
+        line = exchange_line(_exchange(answered_by=answered_by, flags=flags))
+        assert line.split()[0] == word, line
+        assert "fidelity:" not in line
+        assert "upstream-error" in line
+    assert exchange_line(_exchange(answered_by="overlay")).endswith("  [overlay]")
+    recorded = _exchange(answered_by="overlay", flags=(FROM_RECORDING_FLAG,))
+    assert exchange_line(recorded).startswith("recorded ")
+
+
+def test_exchange_line_escapes_control_characters_in_the_agent_s_text():
+    line = exchange_line(_exchange(path="/v1/charges/\x1b[31mred\n"))
+    assert "\x1b" not in line and "\n" not in line
+    assert "/v1/charges/\\x1b[31mred\\n" in line
+
+
+def test_tool_call_line_is_in_the_exchange_line_s_columns():
+    real = tool_call_line(_tool_call(kind="read", ran="real", name="db.lookup"))
+    fake = tool_call_line(_tool_call())
+    recorded = tool_call_line(_tool_call(kind="read", ran="recording", name="db.lookup"))
+    assert real == "tool-real     read      db.lookup -> ok"
+    assert fake == "tool-fake     write     db.mark_refunded -> ok"
+    assert recorded == "tool-recorded read      db.lookup -> ok"
+    assert real.index("read") == exchange_line(_exchange()).index("read")
+
+
+# ------------------------------------------------------------------- SDK runs in the process
+
+
+def _sdk_record(run_id, name="handle_ticket", args=None):
+    from irimi import __version__
+    from irimi.trace import SCHEMA_VERSION, RunRecord, Trigger
+
+    trigger = Trigger(name=name, entrypoint="agent:handle_ticket", args=args or {}, replayable=True)
+    return RunRecord(
+        schema_version=SCHEMA_VERSION,
+        run_id=run_id,
+        mode="shadow",
+        attribution="sdk",
+        trigger=trigger,
+        agent_version=None,
+        engine_version=__version__,
+        sdk_version=__version__,
+        started_at=1.0,
+        ended_at=2.0,
+        outcome="ok",
+        error=None,
+        exit_code=None,
+    )
+
+
+def test_a_summary_over_sdk_runs_says_it_covers_the_process_and_lists_each_run():
+    sdk_run = "b7aa0abc12345678"
+    rows = [
+        replace(_exchange(), run_id=sdk_run),
+        replace(_refund(), run_id=sdk_run),
+        replace(_exchange(), run_id="cafe0000cafe0000"),
+    ]
+    runs = {
+        sdk_run: _sdk_record(sdk_run, args={"ticket": "T1"}),
+        "cafe0000cafe0000": None,
+    }
+    lines = summary_lines("7f3a", rows, 0.0, _maps(), sdk_runs=runs)
+    assert lines[0] == "irimi shadow · run 7f3a (whole process) · 3 exchanges · 0.0s"
+    assert lines[-4:] == [
+        "",
+        "  run b7aa0abc  handle_ticket(...)  2 exchanges · 1 write",
+        "  run cafe0000  ?  1 exchange · 0 writes",
+        "  replay with: irimi replay b7aa0abc",
+    ]
+
+
+def test_an_sdk_run_with_no_args_prints_empty_brackets():
+    run = "b7aa0abc12345678"
+    lines = summary_lines(
+        "7f3a", [replace(_exchange(), run_id=run)], 0.0, _maps(), sdk_runs={run: _sdk_record(run)}
+    )
+    assert "  run b7aa0abc  handle_ticket()  1 exchange · 0 writes" in lines
+
+
+def test_a_summary_with_no_sdk_runs_keeps_its_plain_header():
+    lines = summary_lines("7f3a", [_exchange()], 0.0, _maps(), sdk_runs={})
+    assert lines[0] == "irimi shadow · run 7f3a · 1 exchange · 0.0s"
+    assert not any("replay with" in line for line in lines)
 
 
 # ------------------------------------------------------------------- idempotency keys
@@ -745,18 +1032,20 @@ def test_the_summary_still_names_a_write_without_the_maps():
 
 def test_a_replayed_write_is_counted_once():
     """The agent retried with the key it already sent and got the first answer back: the same
-    write, so one line and one intercepted write, or "nine would have been rejected" counts
-    retries instead of intentions. The exchange itself is still counted and virtualized."""
+    write, so one line and one faked write, or "nine would have been rejected" counts retries
+    instead of intentions. The exchange itself is still counted, as answered by irimi."""
     rows = [
         _refund(answered_by="fake-L1", flags=("fidelity:L1",)),
         _refund(answered_by="fake-L1", flags=("fidelity:L1", IDEMPOTENT_REPLAY_FLAG)),
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
     assert [line for line in lines if line.startswith("  ○ ")] == [
-        "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L1)"
+        "  ○ stripe  refund $49.00 on ch_3QabcXYZ  faked; not checked"
     ]
-    assert _block(lines, "api.stripe.com") == "  api.stripe.com  1 write intercepted"
-    assert "  2 exchanges · 0 live · 0 delegated · 2 virtualized" in lines
+    assert _host(lines) == "  api.stripe.com  1 faked write"
+    assert _totals(lines) == (
+        "  2 exchanges · 0 real · 2 answered by irimi (1 faked write) · 0 sent to targets"
+    )
 
 
 def test_an_idempotency_conflict_prints_as_a_write_that_would_fail():
@@ -776,8 +1065,8 @@ def test_an_idempotency_conflict_prints_as_a_write_that_would_fail():
     assert rows[1].precondition is None
     lines = summary_lines("7f3a", rows, 0.0, _maps())
     line = _block(lines, "would fail")
-    assert line == "  ✗ refund $49.00 on ch_3QabcXYZ  would fail: idempotency_error"
-    assert _block(lines, "api.stripe.com") == "  api.stripe.com  2 writes intercepted"
+    assert line == "  ✗ stripe  refund $49.00 on ch_3QabcXYZ  faked; would fail: idempotency_error"
+    assert _host(lines) == "  api.stripe.com  2 faked writes"
 
 
 # ------------------------------------------------------------ a write irimi refused
@@ -786,12 +1075,11 @@ def test_an_idempotency_conflict_prints_as_a_write_that_would_fail():
 def test_a_write_irimi_could_not_decide_prints_as_refused_and_names_why():
     """irimi answered this refund with its own 502: its body decodes past what irimi reads,
     so it was recorded with no body and flagged. Rendered through its route's `human:` template it
-    printed `○ refund ? on ?  unclassified (L0)`, a faked write described from a body irimi never
-    read. It prints as refused, `✗`, as the request it was, with the flags that say why in the
-    order it carries them, and no other flag. It is still a write that did not happen.
+    would be described from a body irimi never read. It prints as refused, `✗`, as the request it
+    was, saying why in words. It is still a write that did not happen.
 
     Its host line counts it as its line names it, `refused by irimi`: counted `unclassified`, the
-    word a route no map names prints, the host line named a write no line showed."""
+    word a route no map names prints, the host line would name a write no line showed."""
     cut = _exchange(
         method="POST",
         kind="unknown",
@@ -802,17 +1090,23 @@ def test_a_write_irimi_could_not_decide_prints_as_refused_and_names_why():
         flags=(UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG, BODY_TRUNCATED_FLAG, REDACTION_FAILED_FLAG),
     )
     lines = summary_lines("7f3a", [cut], 0.0, _maps())
-    assert [line for line in lines if line.startswith(("  ○ ", "  ✗ "))] == [
-        "  ✗ POST api.stripe.com/v1/refunds  refused by irimi (decision-failed, body-truncated)"
+    assert _write_block(lines) == [
+        "  ✗ stripe  POST api.stripe.com/v1/refunds  refused by irimi: its body is too large to "
+        "read whole"
     ]
-    assert _block(lines, "api.stripe.com") == (
-        "  api.stripe.com  1 write intercepted (1 refused by irimi)"
-    )
-    assert lines[-1] == "  These writes did not happen."
+    assert _host(lines) == "  api.stripe.com  1 write refused by irimi"
+    assert NOTHING_HAPPENED in lines
     presumed = _exchange(method="DELETE", kind="unknown", answered_by="fake-L0")
     lines = summary_lines("7f3a", [cut, presumed], 0.0, _maps())
-    assert _block(lines, "api.stripe.com") == (
-        "  api.stripe.com  2 writes intercepted (1 unclassified, 1 refused by irimi)"
+    assert _host(lines) == (
+        "  api.stripe.com  1 faked write (1 unclassified)  1 write refused by irimi"
+    )
+
+
+def test_a_write_the_request_hook_refused_says_refused_by_irimi():
+    refused = replace(_refund(answered_by="irimi", status=400, flags=("refused",)), kind="unknown")
+    assert write_sentence(refused, _maps()) == (
+        "✗ stripe  refund $49.00 on ch_3QabcXYZ  refused by irimi"
     )
 
 
@@ -831,12 +1125,14 @@ def test_a_write_whose_decision_raised_prints_its_sentence_as_refused():
         flags=(UNCLASSIFIED_FLAG, DECISION_FAILED_FLAG),
     )
     assert write_sentence(raised, _maps()) == (
-        "✗ refund $49.00 on ch_3QabcXYZ  refused by irimi (decision-failed)"
+        "✗ stripe  refund $49.00 on ch_3QabcXYZ  refused by irimi: irimi could not decide how to "
+        "answer it"
     )
     body = b"charge=ch_3QabcXYZ&amount=2450&currency=usd"
     half = replace(raised, request=replace(raised.request, body=body))
     assert write_sentence(half, _maps()) == (
-        "✗ refund $24.50 on ch_3QabcXYZ  refused by irimi (decision-failed)"
+        "✗ stripe  refund $24.50 on ch_3QabcXYZ  refused by irimi: irimi could not decide how to "
+        "answer it"
     )
 
 
@@ -875,6 +1171,12 @@ def _slack_history(answered_by="live"):
     )
 
 
+PASSED_REFUND = (
+    "  ○ stripe  refund $49.00 on ch_3QabcXYZ  faked; checked against live state: would succeed"
+)
+UNCHECKED_REFUND = "  ○ stripe  refund $49.00 on ch_3QabcXYZ  faked; not checked"
+
+
 def test_an_overlaid_read_is_listed_under_the_write_it_saw():
     """The per-host count said a read showed this run's writes and never said which read, or which
     write. The reader could not tell whether the agent re-read its own refund."""
@@ -883,10 +1185,7 @@ def test_an_overlaid_read_is_listed_under_the_write_it_saw():
         replace(_exchange(path="/v1/refunds", answered_by="overlay"), overlay="full"),
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
-    assert _write_block(lines) == [
-        "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L3 preconditions passed)",
-        "    ↳ GET /v1/refunds saw it  overlay",
-    ]
+    assert _write_block(lines) == [PASSED_REFUND, "    ↳ GET /v1/refunds saw it  overlay"]
 
 
 def test_a_partial_overlay_hit_says_it_saw_only_part():
@@ -898,20 +1197,20 @@ def test_a_partial_overlay_hit_says_it_saw_only_part():
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
     assert _write_block(lines) == [
-        "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L1)",
+        UNCHECKED_REFUND,
         "    ↳ GET /v1/refunds saw it in part  overlay (partial)",
     ]
 
 
 def test_a_read_irimi_knew_was_incomplete_says_so_even_though_it_answered_none_of_it():
-    """A Slack read whose channel the two sides spell differently comes back untouched and `live`,
+    """A Slack read whose channel the two sides spell differently comes back untouched and real,
     yet irimi knows it did not show the post. Staying silent because the body was not edited
     would hide the one thing irimi knows about that read."""
     rows = [_slack_post(), replace(_slack_history(), overlay="partial")]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
     assert _write_block(lines) == [
-        '  ○ post to #C0123: "refunded"  unvalidated (L1)',
-        "    ↳ POST /api/conversations.history did not show it  live (partial)",
+        '  ○ slack  post to #C0123: "refunded"  faked; not checked',
+        "    ↳ POST /api/conversations.history did not show it  real (partial)",
     ]
 
 
@@ -924,7 +1223,7 @@ def test_a_translated_read_that_needed_no_edit_gets_no_overlay_line():
         replace(_exchange(path="/v1/refunds"), overlay="full"),
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
-    assert _write_block(lines) == ["  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L1)"]
+    assert _write_block(lines) == [UNCHECKED_REFUND]
 
 
 def test_an_engine_issued_read_never_gets_an_overlay_line():
@@ -936,9 +1235,7 @@ def test_an_engine_issued_read_never_gets_an_overlay_line():
         replace(_exchange(path="/v1/charges/ch_3QabcXYZ"), issued_by="engine", overlay="partial"),
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
-    assert _write_block(lines) == [
-        "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L3 preconditions passed)"
-    ]
+    assert _write_block(lines) == [PASSED_REFUND]
 
 
 def test_an_overlaid_read_is_filed_under_its_own_services_write():
@@ -953,9 +1250,9 @@ def test_an_overlaid_read_is_filed_under_its_own_services_write():
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
     assert _write_block(lines) == [
-        "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L1)",
+        UNCHECKED_REFUND,
         "    ↳ GET /v1/charges/ch_3QabcXYZ saw it  overlay",
-        '  ○ post to #C0123: "refunded"  unvalidated (L1)',
+        '  ○ slack  post to #C0123: "refunded"  faked; not checked',
         "    ↳ POST /api/conversations.history saw it  overlay",
     ]
 
@@ -979,10 +1276,10 @@ def test_an_overlaid_read_is_never_filed_under_a_write_the_overlay_could_not_hav
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
     assert _write_block(lines) == [
-        "  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L3 preconditions passed)",
+        PASSED_REFUND,
         "    ↳ GET /v1/refunds saw it  overlay",
-        "  ✗ refund $49.00 on ch_3QabcXYZ  would fail: charge_already_refunded",
-        "  ✗ refund $49.00 on ch_3QabcXYZ  would fail: idempotency_error",
+        "  ✗ stripe  refund $49.00 on ch_3QabcXYZ  faked; would fail: charge_already_refunded",
+        "  ✗ stripe  refund $49.00 on ch_3QabcXYZ  faked; would fail: idempotency_error",
     ]
 
 
@@ -997,8 +1294,8 @@ def test_an_engine_read_the_overlay_edited_is_never_counted_as_one_of_the_agents
             overlay="full",
         ),
     ]
-    line = _block(summary_lines("7f3a", rows, 0.0, _maps()), "api.stripe.com  ")
-    assert line == "  api.stripe.com  1 engine read  1 write intercepted"
+    line = _host(summary_lines("7f3a", rows, 0.0, _maps()))
+    assert line == "  api.stripe.com  1 irimi check read  1 faked write"
 
 
 def test_the_closing_line_names_each_event_once_in_first_seen_order():
@@ -1010,15 +1307,13 @@ def test_the_closing_line_names_each_event_once_in_first_seen_order():
         replace(_refund(answered_by="fake-L1"), would_fire=fired),
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
-    assert lines[-1] == (
-        "  These writes did not happen. Would have fired: refund.created, charge.refunded."
-    )
-    assert sum("Would have fired" in line for line in lines) == 1
+    assert _fired(lines) == "  would have fired: refund.created, charge.refunded"
+    assert sum("would have fired" in line for line in lines) == 1
 
 
 def test_a_run_whose_every_write_was_refused_promises_no_webhooks():
-    """A write the real service would have refused fires nothing. `Would have fired: nothing.` would
-    be a claim; the bare sentence is the truth."""
+    """A write the real service would have refused fires nothing. `would have fired: nothing` would
+    be a claim; no line at all is the truth."""
     rows = [
         replace(
             _refund(answered_by="fake-L1", status=400),
@@ -1027,8 +1322,8 @@ def test_a_run_whose_every_write_was_refused_promises_no_webhooks():
         )
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
-    assert lines[-1] == "  These writes did not happen."
-    assert not any("Would have fired" in line for line in lines)
+    assert NOTHING_HAPPENED in lines
+    assert _fired(lines) is None
 
 
 def test_a_delegated_write_lists_none_of_its_own_but_does_not_hide_the_faked_ones():
@@ -1039,10 +1334,8 @@ def test_a_delegated_write_lists_none_of_its_own_but_does_not_hide_the_faked_one
         _slack_post(answered_by="delegated", target="http://127.0.0.1:3000/slack"),
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
-    assert lines[-2] == (
-        "  These writes did not reach slack, stripe. Would have fired: refund.created."
-    )
-    assert lines[-1] == "  1 was delegated to http://127.0.0.1:3000/slack."
+    assert _fired(lines) == "  would have fired: refund.created"
+    assert '  ○ slack  post to #C0123: "refunded"  sent to target 127.0.0.1:3000' in lines
 
 
 def test_a_replayed_write_neither_prints_a_line_nor_promises_its_events_twice():
@@ -1054,10 +1347,8 @@ def test_a_replayed_write_neither_prints_a_line_nor_promises_its_events_twice():
         _refund(answered_by="fake-L1", flags=("fidelity:L1", IDEMPOTENT_REPLAY_FLAG)),
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
-    assert _write_block(lines) == ["  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L1)"]
-    assert lines[-1] == (
-        "  These writes did not happen. Would have fired: refund.created, charge.refunded."
-    )
+    assert _write_block(lines) == [UNCHECKED_REFUND]
+    assert _fired(lines) == "  would have fired: refund.created, charge.refunded"
 
 
 def test_a_write_l3_could_not_check_still_promises_its_events():
@@ -1072,7 +1363,25 @@ def test_a_write_l3_could_not_check_still_promises_its_events():
         )
     ]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
-    assert _write_block(lines) == ["  ○ refund $49.00 on ch_3QabcXYZ  unvalidated (L2)"]
-    assert lines[-1] == (
-        "  These writes did not happen. Would have fired: refund.created, charge.refunded."
-    )
+    assert _write_block(lines) == [
+        "  ○ stripe  refund $49.00 on ch_3QabcXYZ  faked; could not check: irimi made no check read"
+    ]
+    assert _fired(lines) == "  would have fired: refund.created, charge.refunded"
+
+
+def test_the_summary_s_blocks_come_in_order():
+    """The writes first, under the claim that none happened, with their money and webhooks; then
+    the hosts; then the totals."""
+    write = replace(_refund(answered_by="fake-L1"), would_fire=("refund.created",))
+    lines = summary_lines("7f3a", [_exchange(), write], 0.0, _maps())
+    assert lines[1:] == [
+        "",
+        NOTHING_HAPPENED,
+        UNCHECKED_REFUND,
+        "  money: $49.00 in faked writes",
+        "  would have fired: refund.created",
+        "",
+        "  api.stripe.com  1 read  1 faked write",
+        "",
+        "  2 exchanges · 1 real · 1 answered by irimi (1 faked write) · 0 sent to targets",
+    ]

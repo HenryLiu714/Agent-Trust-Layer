@@ -226,15 +226,15 @@ def test_the_divergence_is_the_first_agent_exchange_or_read_tool_the_recording_m
     source = _run(_record(), [])
     replayed = _run(replace(_record(), run_id="new", replay_of="src"), events)
     outcome = replay.outcome(source, replayed, replay.Ended(0), None)
-    assert outcome.diverged_at == "the agent's 3rd call: real      read      tool db.read -> ok"
+    assert outcome.diverged_at == "the agent's 3rd call: tool-real     read      db.read -> ok"
     assert (outcome.answered, outcome.missed) == (2, 2)
     assert outcome.lines() == [
         "irimi replay · src → new",
         "  agent exited 0",
-        "  diverged at the agent's 3rd call: real      read      tool db.read -> ok",
+        "  diverged at the agent's 3rd call: tool-real     read      db.read -> ok",
         "  2 from the recording · 2 missed",
         "",
-        "  + ○ tool db.write  shadow stand-in ran",
+        "  + ○ tool  db.write  fake ran instead",
         "",
         "  0 same · 0 changed · 0 only in A · 1 only in B",
     ]
@@ -243,7 +243,7 @@ def test_the_divergence_is_the_first_agent_exchange_or_read_tool_the_recording_m
         "src",
         "new",
         1,
-        "the agent's 3rd call: real      read      tool db.read -> ok",
+        "the agent's 3rd call: tool-real     read      db.read -> ok",
         tuple(outcome.lines()),
     )
 

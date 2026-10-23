@@ -15,7 +15,9 @@ W = "w02_nightly_reconcile"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.
 MODES = ("shadow", "serve")
 AGENT = "examples.workflows.w02_nightly_reconcile.agent"
-CUSTOMER_UPDATE = "fake-L1   write     POST api.stripe.com/v1/customers/"
+CUSTOMER_UPDATE = "faked         write     POST api.stripe.com/v1/customers/"
+PASSED = "faked; checked against live state: would succeed"
+TOTALS = "  47 exchanges · 6 real · 41 answered by irimi (41 faked writes) · 0 sent to targets"
 
 
 def reconciled_rows(result):
@@ -31,7 +33,7 @@ def test_a_clean_night_pages_everything_and_posts_one_summary(run_workflow, mode
     # LOOKS WRONG (#61): the human template writes `#{channel}` over a channel id, so an id
     # prints as `#C0RECON`, a channel name no one has.
     assert (
-        '  ○ post to #C0RECON: "reconciled 0 for 2026-09-27"  unvalidated (L3 preconditions passed)'
+        f'  ○ slack  post to #C0RECON: "reconciled 0 for 2026-09-27"  {PASSED}'
         in shadow.summaries()
     )
     # The SDK's run wrapped the whole job, and the read tool ran for real inside it.
@@ -50,20 +52,20 @@ def test_forty_mismatches_are_forty_faked_writes_and_the_ledger_is_untouched(run
     assert [c["answered_by"] for c in shadow.calls("tag_customer")] == ["fake-L1"] * 40
     assert sum(line.startswith(CUSTOMER_UPDATE) for line in shadow.exchange_lines()) == 40
     summary = shadow.summaries()
-    assert "  api.stripe.com  5 reads  40 writes intercepted" in summary
-    assert sum("○ update customer cus_N0" in line for line in summary) == 40
-    assert "  47 exchanges · 6 live · 0 delegated · 41 virtualized" in summary
+    assert "  api.stripe.com  5 reads  40 faked writes" in summary
+    assert sum("○ stripe  update customer cus_N0" in line for line in summary) == 40
+    assert TOTALS in summary
     # Forty writes fire one event name, listed once.
-    assert summary[-1] == "  These writes did not happen. Would have fired: customer.updated."
+    assert "  would have fired: customer.updated" in summary
     # And forty ledger marks, one line each after the forty updates, as the HTTP writes are each
     # a line however many there are.
     tool_lines = [line for line in summary if line.startswith("  ○ tool ")]
-    assert tool_lines == [f"  ○ tool {AGENT}.mark_reconciled  shadow stand-in ran"] * 40
+    assert tool_lines == [f"  ○ tool  {AGENT}.mark_reconciled  fake ran instead"] * 40
     assert summary.index(tool_lines[0]) > max(
-        i for i, line in enumerate(summary) if "○ update customer" in line
+        i for i, line in enumerate(summary) if "○ stripe  update customer" in line
     )
     assert (
-        shadow.tool_call_lines().count(f"shadow    write     tool {AGENT}.mark_reconciled -> ok")
+        shadow.tool_call_lines().count(f"tool-fake     write     {AGENT}.mark_reconciled -> ok")
         == 40
     )
     # The write tool ran its stand-in forty times under shadow, and for real forty times bare.
@@ -82,14 +84,16 @@ def test_forty_mismatches_store_all_47_exchanges_and_drop_none(run_workflow, mod
     shadow = run_workflow(W, "forty_mismatches", mode)
     stored = [e for e in shadow.stored_events() if isinstance(e, Exchange)]
     assert len(stored) == len(shadow.exchange_lines()) == 47
-    process = ["0 exchanges  0 writes"] if mode == "shadow" else []
+    process = ["0 exchanges 0 writes"] if mode == "shadow" else []
     assert [r.dropped_events for r in shadow.stored().list_runs()] == [0] * (len(process) + 1)
     # `irimi runs list` counts them in the run that holds them, and its writes are the summary's
-    # `41 virtualized`: forty customer updates and the Slack post.
+    # `41 faked writes`: forty customer updates and the Slack post. Its last two columns, after
+    # the header row.
     code, out, err = shadow.runs("list")
     assert (code, err) == (0, [])
-    assert sorted(line.split("  ", 6)[6] for line in out) == [*process, "47 exchanges  41 writes"]
-    assert "  47 exchanges · 6 live · 0 delegated · 41 virtualized" in shadow.summaries()
+    counts = sorted(" ".join(line.split()[-4:]) for line in out[1:])
+    assert counts == [*process, "47 exchanges 41 writes"]
+    assert TOTALS in shadow.summaries()
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -122,8 +126,11 @@ def test_the_same_date_twice_is_six_writes_in_both_modes(run_workflow, mode):
     bare = run_workflow(W, "same_date_twice", "bare")
     # Nothing in the run stops the repeat, so the report shows each customer update twice: the
     # duplicate a future check for repeated writes would flag. Bare, the same six reach Stripe.
-    lines = [line for line in shadow.summaries() if "○ update customer" in line]
-    assert lines == [f"  ○ update customer cus_N00{i}  unvalidated (L1)" for i in (2, 1, 0)] * 2
+    lines = [line for line in shadow.summaries() if "○ stripe  update customer" in line]
+    assert (
+        lines
+        == [f"  ○ stripe  update customer cus_N00{i}  faked; not checked" for i in (2, 1, 0)] * 2
+    )
     assert [r.path for r in bare.internet.writes() if r.host == "api.stripe.com"] == [
         f"/v1/customers/cus_N00{i}" for i in (2, 1, 0)
     ] * 2
@@ -153,10 +160,10 @@ def test_paging_from_a_minted_refund_is_translated_and_finds_the_real_one(run_wo
     refund_reads = [r.query for r in shadow.internet.requests() if r.path == "/v1/refunds"]
     assert refund_reads == [{"charge": "ch_N000", "limit": "1"}] * 2
     summary = shadow.summaries()
-    i = summary.index("  ○ refund $1.00 on ch_N000  unvalidated (L3 preconditions passed)")
+    i = summary.index(f"  ○ stripe  refund $1.00 on ch_N000  {PASSED}")
     assert summary[i + 1] == "    ↳ GET /v1/refunds saw it  overlay"
     # The translated page is `live` with no line of its own.
-    assert "live      read      GET api.stripe.com/v1/refunds -> 200" in shadow.exchange_lines()
+    assert "real          read      GET api.stripe.com/v1/refunds -> 200" in shadow.exchange_lines()
 
 
 def test_irimi_compare_shows_a_clean_night_and_forty_mismatches_eighty_writes_apart(
@@ -169,16 +176,16 @@ def test_irimi_compare_shows_a_clean_night_and_forty_mismatches_eighty_writes_ap
     assert check_invariants(forty) == []
     code, out, err = compare(clean, forty)
     a, b = (result.one("run.start")["run"] for result in (clean, forty))
-    reconciled = "○ tool examples.workflows.w02_nightly_reconcile.agent.mark_reconciled"
+    reconciled = "○ tool  examples.workflows.w02_nightly_reconcile.agent.mark_reconciled"
     added = [
         line
         for i in reversed(range(40))
         for line in (
-            f"  + ○ update customer {customer_id(i)}  unvalidated (L1)",
-            f"  + {reconciled}  shadow stand-in ran",
+            f"  + ○ stripe  update customer {customer_id(i)}  faked; not checked",
+            f"  + {reconciled}  fake ran instead",
         )
     ]
-    post = 'post to #C0RECON: "reconciled {} for 2026-09-27"  unvalidated (L3 preconditions passed)'
+    post = 'slack  post to #C0RECON: "reconciled {} for 2026-09-27"  ' + PASSED
     assert (code, err) == (1, [])
     assert out == [
         f"irimi compare · {a} vs {b}",
@@ -203,16 +210,16 @@ def test_a_replay_that_tags_each_customer_otherwise_compares_its_updates_changed
     assert check_invariants(replay) == []
     assert replay.internet.writes() == []
     source = recorded.one("run.start")["run"]
-    reconciled = "○ tool examples.workflows.w02_nightly_reconcile.agent.mark_reconciled"
-    post = 'post to #C0RECON: "reconciled 2 for 2026-09-27"  unvalidated (L3 preconditions passed)'
+    reconciled = "○ tool  examples.workflows.w02_nightly_reconcile.agent.mark_reconciled"
+    post = f'slack  post to #C0RECON: "reconciled 2 for 2026-09-27"  {PASSED}'
     rows = [
         line
         for i in (1, 0)
         for line in (
-            f"  ~ A ○ update customer {customer_id(i)}  unvalidated (L1)",
-            f"    B ○ update customer {customer_id(i)}  unvalidated (L1)",
+            f"  ~ A ○ stripe  update customer {customer_id(i)}  faked; not checked",
+            f"    B ○ stripe  update customer {customer_id(i)}  faked; not checked",
             '      body.metadata.source: (absent) -> "backfill"',
-            f"  = {reconciled}  shadow stand-in ran",
+            f"  = {reconciled}  fake ran instead",
         )
     ]
     compared = [
@@ -249,11 +256,11 @@ def test_a_refund_then_page_replay_answers_the_page_naming_its_minted_refund(rep
     ]
     assert replay.internet.requests() == []
     summary = replay.summaries()
-    i = summary.index("  ○ refund $1.00 on ch_N000  unvalidated (L3 preconditions passed)")
+    i = summary.index(f"  ○ stripe  refund $1.00 on ch_N000  {PASSED}")
     assert summary[i + 1] == "    ↳ GET /v1/refunds saw it  overlay"
     assert (
         "  api.stripe.com  3 reads (1 showing this run's writes, 3 from the recording)"
-        "  1 write intercepted"
+        "  1 faked write"
     ) in summary
 
 

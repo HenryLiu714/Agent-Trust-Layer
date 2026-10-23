@@ -1,8 +1,4 @@
 {
-  "src/irimi/bodies.py": {
-    "issue_possessive": 1,
-    "issue_ref": 9
-  },
   "src/irimi/control.py": {
     "caps_run": 3
   },
@@ -23,19 +19,13 @@
     "caps_run": 21
   },
   "src/irimi/exchange.py": {
-    "caps_run": 5,
-    "decision_code": 1,
-    "design_ref": 2,
-    "issue_ref": 46,
-    "section_sign": 1
+    "caps_run": 5
   },
   "src/irimi/fixture.py": {
     "issue_ref": 1
   },
   "src/irimi/idempotency.py": {
-    "caps_run": 1,
-    "issue_ref": 10,
-    "phase": 1
+    "caps_run": 1
   },
   "src/irimi/maps/anthropic.yaml": {
     "section_sign": 1
@@ -55,31 +45,11 @@
   "src/irimi/maps/telemetry.yaml": {
     "issue_ref": 8
   },
-  "src/irimi/overlay.py": {
-    "caps_run": 3,
-    "decision_code": 1,
-    "design_ref": 1,
-    "issue_ref": 12,
-    "phase": 1,
-    "section_sign": 1,
-    "since_issue": 2
-  },
   "src/irimi/pipeline.py": {
-    "caps_run": 2,
-    "decision_code": 1,
-    "issue_ref": 21,
-    "section_sign": 1,
-    "since_issue": 4
+    "caps_run": 2
   },
   "src/irimi/policy.py": {
-    "caps_run": 4,
-    "issue_ref": 39,
-    "phase": 1
-  },
-  "src/irimi/reader.py": {
-    "caps_run": 1,
-    "issue_possessive": 1,
-    "issue_ref": 10
+    "caps_run": 4
   },
   "src/irimi/recording.py": {
     "caps_run": 10
@@ -89,13 +59,6 @@
   },
   "src/irimi/replay.py": {
     "caps_run": 1
-  },
-  "src/irimi/report.py": {
-    "decision_code": 1,
-    "design_ref": 1,
-    "issue_possessive": 3,
-    "issue_ref": 95,
-    "section_sign": 1
   },
   "src/irimi/sdk/__init__.py": {
     "caps_run": 2,
@@ -138,9 +101,6 @@
     "caps_run": 3,
     "issue_possessive": 1,
     "issue_ref": 21
-  },
-  "src/irimi/secret_shapes.py": {
-    "issue_ref": 4
   },
   "src/irimi/servicemap/__init__.py": {
     "decision_code": 1,
@@ -185,8 +145,5 @@
   },
   "src/irimi/trace.py": {
     "caps_run": 1
-  },
-  "src/irimi/writelog.py": {
-    "issue_ref": 3
   }
 }

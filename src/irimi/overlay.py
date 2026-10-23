@@ -12,40 +12,15 @@ from irimi.servicemap import MapIndex
 
 logger = logging.getLogger(__name__)
 
-# ------------------------------------------------ TWO THINGS THE FIRST REAL OVERLAY MUST KNOW
-#
-# 1. A DELEGATED SERVICE GETS NO OVERLAY (design D20, §4.4; issue #20).
-#    `target_reads: true` makes the target, not production, the world the agent sees. The target
-#    owns read-after-write consistency for that service, and layering irimi's minted objects over
-#    its state would corrupt it - the agent would see its own faked refund twice, or once over a
-#    charge the target already refunded. The Phase 2 overlay is per-service and skips every
-#    service `servicemap.is_delegated` is true for. For the same reason, L3 preconditions for a
-#    delegated service must read from the target rather than from the real upstream, or they
-#    check the write against a world the agent is not in.
-#
-#    Half of this is already enforced upstream of here and should stay that way:
-#    `IrimiAddon.response` does not call the overlay for a delegated read, and `write_log` does
-#    not collect one either - a delegated `GET`, and a failed target's `502`, are not writes, and
-#    replaying them onto other services' live reads is the bug that condition was narrowed to
-#    prevent. The `502` half is excluded by its `target-failed` flag, not by never reaching the
-#    guard: a target that could not be *dialled* is handled in `error()`, but one irimi *refused*
-#    is answered in `request()` and does reach `response()`.
-#
-# 2. A STREAMED READ NEVER REACHES YOU AT ALL (issue #28).
-#    `IrimiAddon.responseheaders` streams any live `text/event-stream` response, `kind: read`
-#    included, and mitmproxy never assembles the body of a streamed response. An overlay handed
-#    such a response would see `body == b""` - not what the service sent - and returning anything
-#    for it would turn a streamed read into a buffered, empty-bodied one.
-#
-#    This half is enforced by the engine rather than left to you to remember: `IrimiAddon.response`
-#    skips the overlay for a streamed flow, and writes nothing back to one either, because those
-#    headers went out before the hook ran. Do not build an overlay that depends on being asked
-#    about streams; build one that is correct for the bodies it is given.
-#
-# Both hazards are pinned by tests now that `ServiceOverlay` exists (#43): `test_engine_mitm` holds
-# that a delegated read and a delegated write both stay out of `write_log`, and that a streamed read
-# is neither overlaid nor rewritten. They stay written out here because the next service's
-# effects table is the reader who needs them, and a test says what breaks, not why it matters.
+# The engine never calls the overlay for two kinds of read, so an effects table need not handle
+# them:
+#   - Reads of a service with an answer target (`target_reads: true`). The target owns that
+#     service's state, and adding irimi's faked objects on top would show the agent its own write
+#     twice. Neither a delegated read nor a failed target's `502` (flagged `target-failed`) enters
+#     the write log, and irimi runs no precondition check on a write it delegates.
+#   - Streamed responses. mitmproxy does not assemble a streamed body (the overlay would see
+#     `b""`), and its headers are already sent before the overlay could run.
+# Both are enforced in `IrimiAddon.response` and covered by tests/test_engine_mitm.py.
 
 
 @dataclass(frozen=True)
@@ -57,7 +32,7 @@ class Overlaid:
     from one it must stamp `overlay`. `fidelity` is independent of that: a page the effects
     cannot model is `partial` with the body left alone, and the exchange has to say so.
 
-    The response carries a status as well as a body, and since #52 an effect may replace it - for
+    The response carries a status as well as a body, and an effect may replace it - for
     one case only, a read of an object this run minted, which the service answers with an error
     because it has never heard of the id. `services.Applied.status` is how an effect says so, and
     `IrimiAddon.response` stamps `overlay` off the same identity check either way, so a status of
@@ -87,7 +62,7 @@ class NoOverlay:
 
 
 class ServiceOverlay:
-    """The real overlay: `irimi.services`' effect tables, applied to a live read (#43).
+    """The real overlay: `irimi.services`' effect tables, applied to a live read.
 
     Constructed with the loaded maps because the seam hands it a `Request` and not a
     `Classification`, while the effect tables key on the read's service and operation.
@@ -116,13 +91,13 @@ class ServiceOverlay:
         # Any header of this name on the agent's own request came from somewhere else; ours is
         # the one that is true here. Same rule as `pipeline.respond`'s. It is stripped before the
         # guard, so no path - a rewrite, an early return, a raise - hands `_apply` and
-        # `stripe._refunds_list` a header the agent sent to suppress the minted refund (#43).
-        # Since #53 the engine strips it too, off every flow and before the decision, because this
-        # one only runs on the rewrite path and that path is closed until the log holds a write.
-        # Both stay: this is the guard for a caller that is not the engine, such as
-        # `tests/test_overlay.py`. A replay is not one: the engine translates its reads (#82).
-        # The same object when there was nothing to strip, so the engine's `is` check still
-        # means "nothing to do".
+        # `stripe._refunds_list` a header the agent sent to suppress the minted refund.
+        # The engine strips it too, off every flow and before the decision, because this one only
+        # runs on the rewrite path and that path is closed until the log holds a write. Both stay:
+        # this is the guard for a caller that is not the engine, such as `tests/test_overlay.py`.
+        # A replay is not one: the engine translates its reads.
+        # The same object when there was nothing to strip, so the engine's `is` check means
+        # "nothing to do".
         stripped = read_request.without_header(pipeline.REWROTE_HEADER)
         try:
             return self._rewrite(write_log, stripped)
@@ -147,7 +122,7 @@ class ServiceOverlay:
             return Overlaid(upstream_response, "partial")
         # Reflected here, past the early returns, so a service with no effects table or a run
         # with no writes for it parses nothing. `bodies.reflect` never raises and reflects `{}` for
-        # a body it cannot read, so it needs no guard of its own (#44).
+        # a body it cannot read, so it needs no guard of its own.
         applied = effects(writelog.read_of(operation, read_request), document, writes)
         rewrote = read_request.header(pipeline.REWROTE_HEADER) is not None
         fidelity: OverlayFidelity | None = None
@@ -155,13 +130,13 @@ class ServiceOverlay:
             fidelity = "partial"
         elif applied.changed or rewrote or applied.status is not None:
             # A translated cursor is an effect too, even when the page itself needed no edit. So is
-            # a replaced status (#52): the effects that set one also set `changed` today, but an
+            # a replaced status: the effects that set one also set `changed`, but an
             # exchange stamped `overlay` with `overlay: None` would print a `saw it  overlay` line
             # off a fidelity the trace says was never considered, so it is held here by
             # construction rather than by that convention.
             fidelity = "full"
         # An effect may replace the status only for a read of an object this run minted, which the
-        # service refused because it never heard of the id (`Applied.status`, #52). Both halves of
+        # service refused because it never heard of the id (`Applied.status`). Both halves of
         # the test, so a status-only answer is rebuilt rather than dropped: identity is how the
         # engine tells an untouched read from one to stamp.
         status = upstream_response.status if applied.status is None else applied.status
@@ -183,7 +158,7 @@ class ServiceOverlay:
         if found is None:
             return read_request
         rewrite, writes = found
-        # Past the early returns, like `_apply`'s; `bodies.reflect` never raises (#44).
+        # Past the early returns, like `_apply`'s; `bodies.reflect` never raises.
         rewritten = rewrite(writelog.read_of(operation, read_request), writes)
         if rewritten is None:
             return read_request

@@ -28,16 +28,16 @@ from irimi.exchange import (
 from irimi.servicemap import MapIndex, Route, ServiceMap
 from irimi.trace import is_valid_run_id
 
-# `RUN_HEADER` is imported from `exchange` above, where the SDK can import it too (#74), so
-# `pipeline.RUN_HEADER` still names it for the engine's strip.
+# `RUN_HEADER` is imported from `exchange` above, where the SDK can import it too, so
+# `pipeline.RUN_HEADER` names it too, for the engine's strip.
 # Stamped on every response irimi decided rather than forwarded, carrying the `answered_by` value
 # itself (`fake-L0`, `fake-L1`, `delegated`). See `answered_by_header` for why a live forward gets
 # none.
 ANSWERED_BY_HEADER = "irimi-answered-by"
 # Put on a REQUEST irimi rewrote before forwarding it, naming the `key=value` query pair it
-# removed (#43). It lives beside the response stamp because both are irimi's own wire vocabulary
+# removed. It lives beside the response stamp because both are irimi's own wire vocabulary
 # and a second spelling in `services` or `overlay` is the drift one home prevents. The only
-# rewrite today is a cursor naming a refund irimi minted, which Stripe has never heard of; the
+# rewrite is a cursor naming a refund irimi minted, which Stripe has never heard of; the
 # header is what tells the response side that this page follows the minted refund, so the effects
 # do not prepend it a second time. Unknown *query* parameters were not an option - Stripe rejects
 # them with a 400 - and a header costs the agent nothing and shows up in any capture.
@@ -46,7 +46,7 @@ ANSWERED_BY_HEADER = "irimi-answered-by"
 # to decide a page already follows a minted refund, so an agent that sent one could suppress its
 # own refund from that page. `IrimiAddon.request` strips it off every incoming flow and off the
 # Request the trace records, before the decision and whatever the write log holds, and
-# `ServiceOverlay.rewrite` strips it again for callers that do not come through the engine (#53).
+# `ServiceOverlay.rewrite` strips it again for callers that do not come through the engine.
 REWROTE_HEADER = "irimi-rewrote"
 LIVE_ANSWER: AnsweredBy = "live"
 
@@ -57,12 +57,12 @@ class Classification:
     operation: str
     kind: Kind
     flags: tuple[str, ...]
-    # What MapIndex.route_for returned, so the faker (#11), the summary (#13) and the answer
-    # target (#16) do not have to look the route up a second time. None when nothing matched.
+    # What MapIndex.route_for returned, so the faker, the summary and the answer
+    # target do not have to look the route up a second time. None when nothing matched.
     matched: tuple[ServiceMap, Route] | None = None
     # The service claiming this host, which is not the same question as `matched`: a service-level
     # `target:` delegates the routes its own map does not list too, and for those `matched` is
-    # None while this is set. None when no map claims the host at all (#16).
+    # None while this is set. None when no map claims the host at all.
     service_map: ServiceMap | None = None
 
     @property
@@ -96,7 +96,7 @@ def parse(
 
 
 def classify(request: Request, maps: MapIndex | None = None) -> Classification:
-    """What this request is, by the precedence the design fixes (§4.3, D4).
+    """What this request is, by a fixed precedence, most specific first.
 
     A route rule in a service map wins; then that service's `default_kind`; then the RFC 9110
     fallback, where `GET`/`HEAD`/`OPTIONS` are reads; then `unknown`. A host no map claims keeps
@@ -137,11 +137,11 @@ def _refuse_live_on_an_unnamed_method(
     """THE SCOPE RULE, decision half (see `servicemap.rules`): no classification that forwards
     live may apply to an unsafe method it did not name explicitly.
 
-    The loader refuses a live kind on `*` and makes a destructive one justify itself, so no map
-    can reach this today. This asks the question of the request in front of us instead of of the
+    The loader refuses a live kind on `*` and makes a destructive one justify itself, so no
+    shipped map reaches this. This asks the question of the request in front of us instead of of the
     configuration, so a live kind that arrives by some route the loader does not police - a
-    `default_kind` rule that drifts again, a wildcard host, a map built in code, a layer added
-    later - is answered locally rather than performed on the real service. Downgrading to
+    `default_kind` rule that drifts, a wildcard host, a map built in code, a new layer - is
+    answered locally rather than performed on the real service. Downgrading to
     `unknown` is the fail-safe direction: a write answered locally costs the agent an echo, and
     a DELETE forwarded live cannot be undone.
     """
@@ -165,7 +165,7 @@ def attribute_run(request: Request, default_run_id: str) -> str:
     """The run this exchange belongs to: the Irimi-Run header if the client sent a valid one,
     else the engine's own run id. A value `trace.is_valid_run_id` refuses - blank, `../x`, a
     space, 65 characters - is treated as absent, because a run id becomes a directory name in the
-    trace store (#68). The header is stripped whatever its value (#67). Its name is compared as
+    trace store. The header is stripped whatever its value. Its name is compared as
     `header_value` compares, so a `Request` built outside `parse` is attributed the same way."""
     for name, value in request.headers:
         if name.lower() == RUN_HEADER and is_valid_run_id(value.strip()):
@@ -192,21 +192,21 @@ def annotate(
     ended_at: float = 0.0,
     stream_chunks: tuple[int, ...] = (),
 ) -> Exchange:
-    """Build the Exchange. Anything the engine answered is unvalidated; live forwards are also
-    unvalidated for now (validated is reserved for record mode, later phases). `overlay` is how
+    """Build the Exchange. Every exchange is unvalidated, the engine's answers and live forwards
+    alike: `validated` is reserved for a record mode irimi does not have. `overlay` is how
     much of the write log the overlay expressed in this read, and is None for everything it did
     not consider. `precondition` is what L3 decided about a write before it was faked, and is None
-    when nothing was asked (#45). `issued_by` is `engine` for a read irimi made on its own account
-    to decide about a write, and `agent` for everything the agent sent (#45). `rejection_code` is
-    the machine code of an L3 rejection, and "" for everything else (#45). `would_fire` is the
-    webhook events an accepted write would have caused, and is empty for everything else (#47).
+    when nothing was asked. `issued_by` is `engine` for a read irimi made on its own account
+    to decide about a write, and `agent` for everything the agent sent. `rejection_code` is
+    the machine code of an L3 rejection, and "" for everything else. `would_fire` is the
+    webhook events an accepted write would have caused, and is empty for everything else.
     `currency` is the currency the write's L3 precondition read found on the object it named, for
-    the summary's amount, and is "" whenever no such read happened (#60). `started_at` and
+    the summary's amount, and is "" whenever no such read happened. `started_at` and
     `ended_at` are the wall-clock seconds the exchange began and ended, which the caller reads
-    because only it knows when that was (#68). `ended_at` is never before `started_at`: the wall
+    because only it knows when that was. `ended_at` is never before `started_at`: the wall
     clock can step back mid-exchange, and a stored run's reader subtracts the two.
     `stream_chunks` is the length of each chunk of a streamed response's recorded body, and is
-    empty for a response that did not stream (#71)."""
+    empty for a response that did not stream."""
     validation: Validation = "unvalidated"
     return Exchange(
         request=request,
@@ -235,12 +235,12 @@ def annotate(
 def answered_by_header(answered_by: AnsweredBy) -> str | None:
     """The `Irimi-Answered-By` value an answer must carry, or None when it must carry none.
 
-    The value IS `answered_by`, not a second vocabulary beside it: `fake-L0`, `fake-L1` since #41,
-    `delegated` since #16, `overlay` since #43 and `recording` since #82. One rule, so a new way of
+    The value IS `answered_by`, not a second vocabulary beside it: `fake-L0`, `fake-L1`,
+    `delegated`, `overlay` and `recording`. One rule, so a new way of
     answering cannot ship a response that does not say who answered it - the header is how a
     client, a test, or a developer reading a capture tells an answer of ours from the real
     service's. It takes the value rather than the Exchange because the engine asks before there is
-    one: a streamed answer is stamped in `responseheaders`, where only `_Pending` exists yet.
+    one: a streamed answer is stamped in `responseheaders`, where only `_Pending` exists.
 
     A **live forward gets no header**, deliberately. Everything on that path is the real
     service's: adding a header of ours to it would make the response the agent sees differ from
@@ -251,7 +251,7 @@ def answered_by_header(answered_by: AnsweredBy) -> str | None:
 
 
 def respond(exchange: Exchange) -> Response | None:
-    """What goes back to the client: the answer, stamped with who produced it (#12).
+    """What goes back to the client: the answer, stamped with who produced it.
 
     Pure: it returns the response to send and never touches the flow. The engine forwards
     `exchange.response` unchanged when this hands back the very object it was given, which is how

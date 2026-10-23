@@ -1,5 +1,5 @@
 """AnswerPolicy: decides whether an exchange is forwarded live, delegated, or answered locally,
-and whether a read tool the proxy cannot see is answered from a replay's recording (#83).
+and whether a read tool the proxy cannot see is answered from a replay's recording.
 
 The decision is all that lives here. What a local answer *contains* is `irimi.echo`; where a
 delegated one goes is `irimi.delegation`; the read L3 issues goes through `irimi.reader`; what a
@@ -48,20 +48,20 @@ class Answer:
     # Set only on a `delegated` answer, and then `response` is None: the engine forwards there
     # instead of to the real service, and what comes back is what the agent receives.
     forward_to: ForwardTo | None = None
-    # What L3 decided about this write before it was faked (#45). None when nothing was asked.
+    # What L3 decided about this write before it was faked. None when nothing was asked.
     precondition: PreconditionOutcome | None = None
     # The machine code of the rejection, for the summary line. "" for every other answer.
     rejection_code: str = ""
     # The reads this decision issued on its own account, already annotated. The engine records
     # them; they never reach the agent.
     issued: tuple[Exchange, ...] = ()
-    # The webhook events this write would have made the real service send (#47). Set on ONE path:
+    # The webhook events this write would have made the real service send. Set on ONE path:
     # the accepted local fake below. Delegation, live kinds, an idempotency replay, an idempotency
     # conflict and an L3 rejection all return before it, so "only an accepted write lists its
-    # webhooks" holds by construction rather than by a second check - the same move #46 made for
-    # "a replayed write issues no precondition read".
+    # webhooks" holds by construction rather than by a second check, as "a replayed write issues
+    # no precondition read" does.
     would_fire: tuple[str, ...] = ()
-    # The currency this write's L3 precondition read found on the object the write names (#60).
+    # The currency this write's L3 precondition read found on the object the write names.
     # "" when there was no such read, or when its document named none. Set on the two paths that
     # HAD a document to read - the accepted fake and the L3 rejection - because both print an
     # amount: `report.write_sentence` renders the map's `human:` sentence before it branches on
@@ -69,14 +69,14 @@ class Answer:
     currency: str = ""
     # How much of the run's writes this answer's body shows, for an answer the engine does not
     # put past the overlay itself: a read a replay answered from the recording, whose bytes the
-    # overlay edited in the run it replays (#82). None for every other answer.
+    # overlay edited in the run it replays. None for every other answer.
     overlay: OverlayFidelity | None = None
 
 
 @dataclass(frozen=True)
 class _Checked:
-    """What L3 made of one write (#45): the outcome, the read it issued, the rejection when the
-    service would have refused it, and the currency that read found (#60). The default is "nothing
+    """What L3 made of one write: the outcome, the read it issued, the rejection when the
+    service would have refused it, and the currency that read found. The default is "nothing
     was asked" - a route with no `precondition:`, or a policy with no reader."""
 
     outcome: PreconditionOutcome | None = None
@@ -98,7 +98,7 @@ class AnswerPolicy(Protocol):
 
     def recorded_tool_call(self, name: str, args: JSONValue) -> ToolCall | None:
         """The recorded read tool call that answers this one, which the SDK hands back in place
-        of running the tool, or None: the tool runs for real (#83). Never raises."""
+        of running the tool, or None: the tool runs for real. Never raises."""
         ...
 
 
@@ -110,7 +110,7 @@ class ShadowPolicy:
     reports is what the Exchange and the `Irimi-Answered-By` header carry.
 
     Before that, a write whose route declares a `precondition:` is checked against real state plus
-    the run's overlay (#45). A write the check rejects is answered with the service's own error
+    the run's overlay. A write the check rejects is answered with the service's own error
     body, at the level `echo.fake_rejection` says, instead of the fake.
     """
 
@@ -120,11 +120,11 @@ class ShadowPolicy:
         self.reader: Reader = reader if reader is not None else NoReader()
         self.maps = maps if maps is not None else MapIndex()
         # Per-instance, never a class attribute: one store per run, and two policies in one test
-        # process must not answer each other's keys (#46).
+        # process must not answer each other's keys.
         self.idempotency = idempotency.Store()
 
     def recorded_tool_call(self, name: str, args: JSONValue) -> ToolCall | None:
-        """None: shadow mode answers from no recording, so every read tool runs for real (#76)."""
+        """None: shadow mode answers from no recording, so every read tool runs for real."""
         return None
 
     def answer(
@@ -161,7 +161,7 @@ class ShadowPolicy:
         try:
             fake = echo.fake_response(request, classification)
         except Exception:
-            # The belt to reflect()'s braces, and now to the fixture's. Raising here would make
+            # The belt to reflect()'s braces, and to the fixture's. Raising here would make
             # mitmproxy forward the flow, and a forwarded write escapes shadow mode - an empty
             # object is far better. L0 is the floor whatever failed above it.
             logger.exception("irimi: the local answer failed; answering with an empty object")
@@ -181,7 +181,7 @@ class ShadowPolicy:
         self, request: Request, classification: Classification, run_id: str, answer: Answer
     ) -> None:
         """Keep `answer` as this write's, under its idempotency key, as `answer` keeps its own: a
-        replay calls it for a write it answered from the recording (#82), so the agent's retry
+        replay calls it for a write it answered from the recording, so the agent's retry
         meets it. Never raises: a key that cannot be read costs that retry its replay, and nothing
         else."""
         try:
@@ -194,10 +194,10 @@ class ShadowPolicy:
     def idempotency_flag(
         self, request: Request, classification: Classification, run_id: str
     ) -> str:
-        """The idempotency flag this policy's answer to this write would carry (#46):
+        """The idempotency flag this policy's answer to this write would carry:
         `idempotent-replay` when the run has answered its key with the same parameters,
         `idempotency-conflict` when with others, and "" when it has not, or there is no key. A
-        replay takes a recorded write only from one that carried the same (#82): the service
+        replay takes a recorded write only from one that carried the same: the service
         answers a retry, a reused key and a fresh write three ways whatever their bodies say. Never
         raises: `_recall` is guarded."""
         _, known = self._recall(request, classification, run_id)
@@ -208,8 +208,8 @@ class ShadowPolicy:
         return IDEMPOTENT_REPLAY_FLAG
 
     def _delegated(self, route: Route | None, forward: ForwardTo) -> Answer:
-        """A delegated write is one irimi did not author and cannot check, and nothing in Phase 2
-        reads from a target (#45). A policy with no reader asked nothing, delegated or not."""
+        """A delegated write is one irimi did not author and cannot check: no precondition reads
+        from a target. A policy with no reader asked nothing, delegated or not."""
         declared = route is not None and bool(route.precondition)
         asked = declared and not isinstance(self.reader, NoReader)
         return Answer(
@@ -223,7 +223,7 @@ class ShadowPolicy:
     def _recall(
         self, request: Request, classification: Classification, run_id: str
     ) -> tuple[idempotency.Slot | None, Answer | None]:
-        """`(the slot this write occupies, the answer the run already gave it)` (#46).
+        """`(the slot this write occupies, the answer the run already gave it)`.
 
         Before L3, and before anything is minted. A retry with a key this run has already answered
         is the SAME write: it gets the first answer's own bytes, issues no precondition read, and
@@ -254,14 +254,14 @@ class ShadowPolicy:
         write_log: Sequence[Exchange],
         run_id: str,
     ) -> _Checked:
-        """Check the write against real state plus this run's overlay, before faking it (#45).
+        """Check the write against real state plus this run's overlay, before faking it.
 
         Its own guard, not the one `answer` already has: that one degrades a *faker* failure to
         the L0 echo, and a precondition that could not be evaluated is a different thing - the
         write is still faked at its ordinary level, and the exchange says the check did not happen.
         Collapsing them would answer a perfectly fakeable write with `{}`.
 
-        `currency` is the currency (#60): the code the check read off the same document the
+        `currency` is the currency: the code the check read off the same document the
         verdict saw, or "" from every path that never got a document. A `NOT_EVALUABLE` verdict
         keeps it - irimi did read the charge, it just could not decide whether the write would
         have been taken, and what a write is denominated in is a different question from whether
@@ -269,7 +269,7 @@ class ShadowPolicy:
         """
         # This policy does not do L3. Nothing was asked, so nothing is claimed: `None`, the state
         # of a route with no `precondition:`, and not `not_evaluable`, which is for a question
-        # irimi put and could not get an answer to (#45).
+        # irimi put and could not get an answer to.
         if isinstance(self.reader, NoReader):
             return _Checked()
         issued: tuple[Exchange, ...] = ()
@@ -290,7 +290,7 @@ class ShadowPolicy:
             probe_request = _probe_request(request, service, probe)
             # "Read operations only, never a read-like POST", in the one form that can be enforced:
             # ask the maps, which are what says a Slack `conversations.info` POST is a read, and
-            # refuse whatever they do not call one (#45).
+            # refuse whatever they do not call one.
             probe_cls = pipeline.classify(probe_request, self.maps)
             if probe_cls.kind != "read":
                 logger.warning(
@@ -300,7 +300,7 @@ class ShadowPolicy:
                 )
                 return _Checked("not_evaluable", issued)
             # The read's own span, not the write's: the engine records it as an exchange of its
-            # own, and its timestamps are the `Reader` call's (#68).
+            # own, and its timestamps are the `Reader` call's.
             started_at = time.time()
             try:
                 response = self.reader(probe_request)
@@ -312,7 +312,7 @@ class ShadowPolicy:
             read_answered_by, read_flags = answered_as(self.reader, response is not None)
             # Recorded before any verdict, and with no response when the reader got none, so a
             # network failure, a 429 and a body irimi cannot use all leave a trace of the read
-            # irimi attempted on the agent's behalf (#45).
+            # irimi attempted on the agent's behalf.
             issued = (
                 pipeline.annotate(
                     probe_request,
@@ -328,12 +328,12 @@ class ShadowPolicy:
             )
             if response is None:
                 return _Checked("not_evaluable", issued)
-            # Only a 200 is evaluable. A 429, a 404 or a 5xx says nothing about the write (#45).
+            # Only a 200 is evaluable. A 429, a 404 or a 5xx says nothing about the write.
             if response.status != 200:
                 return _Checked("not_evaluable", issued)
             # The reader's body never passes the engine's `response` hook, so this is the only
             # place Slack's `ts` watermark can learn from the one read that exists to make the
-            # fake honest (#42).
+            # fake honest.
             echo.observe_read(service, response.body)
             document: Any = bodies.json_object(response.body)
             if document is None:
@@ -353,17 +353,17 @@ class ShadowPolicy:
                     # The overlay is saying the world it can show is incomplete, and a write
                     # checked against a world known to be incomplete was not checked. Passing
                     # it could bless a write production would refuse; rejecting it could
-                    # invent a refusal that never would have happened (#45).
+                    # invent a refusal that never would have happened.
                     return _Checked("not_evaluable", issued)
                 document = applied.document
             # Off the same document the verdict sees, and before it, so a `NOT_EVALUABLE` verdict
-            # still carries it - see the docstring (#60).
+            # still carries it - see the docstring.
             currency = check.currency(document) if check.currency is not None else ""
             verdict = check.verdict(proposal, document)
             if isinstance(verdict, services.NotEvaluable):
                 # The check read the document and could not tell - a Slack `missing_scope`, a
                 # charge whose own numbers will not parse. Distinct from a pass, which claims
-                # the write was checked and would have been taken (#45).
+                # the write was checked and would have been taken.
                 return _Checked("not_evaluable", issued, currency=currency)
             return _Checked(
                 "rejected" if verdict is not None else "passed", issued, verdict, currency
@@ -379,11 +379,11 @@ class ShadowPolicy:
 # halves of idempotency. A replay that answers again carries its level's fidelity flag, these, and
 # `from-recording`, and no other: the classifier's own flags come back from this request's
 # classification, and the engine's (a body cut at the cap, a lost upstream) are facts about the
-# recorded exchange, never about this one (#82).
+# recorded exchange, never about this one.
 _ANSWER_FLAGS = frozenset({FIXTURE_FAILED_FLAG, IDEMPOTENT_REPLAY_FLAG, IDEMPOTENCY_CONFLICT_FLAG})
 # Headers a recorded response carries that describe bytes it no longer has. The body was stored
 # decoded and whole, so its `Content-Encoding` and framing are not the body served; mitmproxy sets
-# the length of what is. And the recorded run's own stamp, which `pipeline.respond` replaces (#82).
+# the length of what is. And the recorded run's own stamp, which `pipeline.respond` replaces.
 _RECORDED_ONLY_HEADERS = frozenset(
     {"content-encoding", "content-length", "transfer-encoding", pipeline.ANSWERED_BY_HEADER}
 )
@@ -391,7 +391,7 @@ _RECORDED_ONLY_HEADERS = frozenset(
 
 class ReplayPolicy:
     """Answers a run from a stored one where it can, decides the rest as shadow mode would, and
-    never forwards a write (#82).
+    never forwards a write.
 
     | request | in the recording (`from-recording`) | not in it (`replay-miss`) |
     | --- | --- | --- |
@@ -418,7 +418,7 @@ class ReplayPolicy:
     every read is answered as shadow mode answers it: live, with the overlay applying every write
     in the write log, recorded and new alike. A write L3 checked is checked again, for the same
     reason. An llm call that misses changes nothing about the world irimi shows, so it does not end
-    serving reads. The engine translates a read before it asks (#43), as it translated the one it
+    serving reads. The engine translates a read before it asks, as it translated the one it
     recorded, and a recorded read is not overlaid again: a matched write's effect is already in
     those bytes.
 
@@ -438,7 +438,7 @@ class ReplayPolicy:
         self.shadow = ShadowPolicy(reader=RecordingReader(recording), maps=self.maps)
 
     def recorded_tool_call(self, name: str, args: JSONValue) -> ToolCall | None:
-        """The recording's answer to a read tool call (`Recording.take_tool_call`, #83). A lookup
+        """The recording's answer to a read tool call (`Recording.take_tool_call`). A lookup
         that raises is logged and is a miss, as a request's is: the tool runs for real."""
         try:
             return self.recording.take_tool_call(name, args)
@@ -497,8 +497,8 @@ class ReplayPolicy:
         )
         if kind not in LIVE_KINDS:
             # Shadow mode keeps the answer under its idempotency key, so a retry that misses later
-            # with the same key and other parameters is refused as the service would refuse it
-            # (#46). Kept without `from-recording`: shadow mode answers that retry.
+            # with the same key and other parameters is refused as the service would refuse it.
+            # Kept without `from-recording`: shadow mode answers that retry.
             self.shadow.remember(
                 request, classification, run_id, replace(answer, flags=answer.flags[:-1])
             )
@@ -517,7 +517,7 @@ def _probe_request(request: Request, service: str, probe: services.Probe) -> Req
 
     The agent's credentials and its account and version scope are exactly what make this read see
     the world the write would have been made in. Nothing else of the agent's is copied: its other
-    headers would send an `Idempotency-Key` on a GET (#45).
+    headers would send an `Idempotency-Key` on a GET.
     """
     wanted = ("authorization", *services.SCOPE_HEADERS.get(service, ()))
     headers = [(k, v) for k, v in request.headers if k in wanted]
@@ -566,14 +566,14 @@ def _local(
 
 
 def _replayed_answer(stored: idempotency.Stored) -> Answer:
-    """The first answer to this key, again (#46).
+    """The first answer to this key, again.
 
     Every field is the stored one. `answered_by` in particular is not re-derived: a fixture that
     has become unreadable since the first call would make the replay `fake-L0` over an original
     stamped `fake-L1`, and the trace would disagree with itself about one write. `issued` is `()`
     because a replay makes no precondition read - the write was checked once, when it was made.
     `currency` is the stored one too, so a replayed refund's exchange and the first one's agree
-    about what that single write was denominated in (#60).
+    about what that single write was denominated in.
     """
     return Answer(
         answered_by=stored.answered_by,
@@ -595,7 +595,7 @@ def _replayed_answer(stored: idempotency.Stored) -> Answer:
 def _conflict_answer(
     request: Request, classification: Classification, refusal: services.Rejection
 ) -> Answer:
-    """The service's own `idempotency_error`: this key was used for a different write (#46).
+    """The service's own `idempotency_error`: this key was used for a different write.
 
     NOT `precondition: rejected` - `precondition` says what L3 decided, and L3 was never asked.
     `rejection_code` is still set, because the summary's `would fail:` line is about what the
@@ -607,7 +607,7 @@ def _conflict_answer(
 
 
 def _remember(store: idempotency.Store, slot: idempotency.Slot | None, answer: Answer) -> None:
-    """Keep this answer under its key, so the agent's retry gets it back (#46).
+    """Keep this answer under its key, so the agent's retry gets it back.
 
     Stripe stores the first response under a key whether it was accepted or REJECTED, so this is
     called on both of `answer`'s local paths. Guarded like the lookup: a store that cannot

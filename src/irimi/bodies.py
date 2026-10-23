@@ -52,9 +52,8 @@ def _is_json(ct: str) -> bool:
     """Every content type that carries a JSON document.
 
     RFC 6839's `+json` structured suffix covers `application/vnd.api+json` and
-    `application/json-patch+json`; `text/json` is a legacy spelling clients still send. Before
-    this, only the exact `application/json` was parsed and the rest reflected nothing, which is
-    indistinguishable from a malformed body (#29).
+    `application/json-patch+json`; `text/json` is a legacy spelling clients still send. A JSON
+    body under any of them that reflected nothing would be indistinguishable from a malformed one.
     """
     return ct == JSON_CT or ct == "text/json" or ct.endswith("+json")
 
@@ -64,9 +63,8 @@ def _has_non_finite(value: Any) -> bool:
 
     json.loads accepts all three and json.dumps writes them straight back out, so the echo would
     be a body a strict JSON parser refuses. This keeps them out of the single `json.dumps` in
-    `fake_response`; the `try` in `answer` is what makes that call safe outright. It replaces a
-    throwaway serialization of the whole body, which cost a second full pass over a large one and
-    was discarded either way (#29).
+    `fake_response`; the `try` in `answer` is what makes that call safe outright. A walk, not a
+    throwaway serialization of the whole body, which would cost a second full pass over a large one.
     """
     if isinstance(value, float):
         return not math.isfinite(value)
@@ -82,8 +80,8 @@ def _split_key(key: str) -> tuple[str, list[str]]:
 
     `expand[]` -> `("expand", [APPEND])`: an empty bracket pair on its own is the one bracketed
     shape with an unambiguous meaning, and it is Stripe's own documented `curl` spelling for a
-    repeated array field. It stayed flat before, so `expand[]=a&expand[]=b` echoed the literal
-    JSON key `"expand[]"` (#33).
+    repeated array field. Kept flat, `expand[]=a&expand[]=b` would echo the literal JSON key
+    `"expand[]"`.
 
     A key with no brackets, or bracketed in a shape we will not guess at - `a[b`, `a[b]c`,
     `a[[b]]`, `a[][b]`, `[b]`, or more than `_MAX_FORM_DEPTH` levels - comes back with no segments
@@ -111,8 +109,8 @@ def _is_string_valued(names: Iterable[str]) -> bool:
 
     `STRING_KEYED_FIELDS` names the fields whose *keys* are the caller's, and their values are the
     caller's for the same reason: a Stripe metadata value is always a string on the live API, so
-    coercing `metadata[order_id]=6735` to an int hands back something other than what was sent
-    (#27). Anywhere else a nested value is coerced exactly like a top-level one.
+    coercing `metadata[order_id]=6735` to an int hands back something other than what was sent.
+    Anywhere else a nested value is coerced exactly like a top-level one.
     """
     return any(name in STRING_KEYED_FIELDS for name in names)
 
@@ -121,8 +119,8 @@ def _assign(node: dict[str, Any], head: str, segments: list[str], value: str) ->
     """Walk the bracket path, creating a dict per level, and set the leaf.
 
     The leaf is coerced by `_form_value` unless some name on the way to it is a
-    `STRING_KEYED_FIELDS` one. `line_items[0][quantity]=2` echoed the string `"2"` while the same
-    number at the top level echoed `2`, so `quantity * 2` was `"22"` with no raise (#33).
+    `STRING_KEYED_FIELDS` one. Left as a string, `line_items[0][quantity]=2` would echo `"2"` while
+    the same number at the top level echoes `2`, and `quantity * 2` would be `"22"` with no raise.
 
     An existing dict at the leaf is left alone: `a[0][b]=1&a[0]=2` and `a[0]=2&a[0][b]=1` both keep
     the structure, which is the rule `parse_form` already applies to a bare key one level up.
@@ -157,7 +155,7 @@ def _to_lists(node: Any, field: str = "") -> Any:
     A `STRING_KEYED_FIELDS` name is never promoted, at any depth: `metadata[0]=zero` is the key
     `"0"`, which the live API answers as `{"metadata": {"0": "zero"}}`. Promoting it hands the
     agent a list, and `refund.metadata["0"]` then raises TypeError instead of returning the value
-    the caller just sent - #27's failure class moved one step along.
+    the caller just sent.
     """
     if not isinstance(node, dict):
         return node
@@ -170,9 +168,9 @@ def _to_lists(node: Any, field: str = "") -> Any:
 
 
 def parse_form(text: str) -> dict[str, Any]:
-    """A form body as the object the live API would answer with (#27, #33).
+    """A form body as the object the live API would answer with.
 
-    Four rules, one per bug in the flat `dict(parse_qsl(...))` this replaces. A bracket-nested key
+    Four rules, each a way a flat `dict(parse_qsl(...))` would get it wrong. A bracket-nested key
     becomes a nested container, so `metadata[order_id]=6735` echoes `metadata` and an SDK can read
     it. `expand[]=a&expand[]=b` becomes the list `expand`. A repeated bare key collects into a
     list instead of keeping only the last value. And a value is coerced by `_form_value` wherever
@@ -181,7 +179,7 @@ def parse_form(text: str) -> dict[str, Any]:
     Structure always beats a scalar of the same name, whichever order the two arrive in, and a
     bracket path beats an append. Those are the shapes no real caller sends, so the rule is chosen
     to be *stable* rather than clever: `a[0][b]=1&a[0]=2` and `a[0]=2&a[0][b]=1` echo the same
-    thing, which is what stops the echo from depending on dict ordering (#33).
+    thing, which is what stops the echo from depending on dict ordering.
     """
     root: dict[str, Any] = {}
     bare: dict[str, list[Any]] = {}

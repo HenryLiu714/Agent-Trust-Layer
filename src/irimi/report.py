@@ -1,4 +1,4 @@
-"""What a run prints: the startup banner, one line per exchange, and the exit summary (#13, #20).
+"""What a run prints: the startup banner, one line per exchange, and the exit summary.
 
 Pure text: every function here returns lines and touches nothing. `cli` prints them.
 """
@@ -31,9 +31,9 @@ PROXY_ONLY_NOTICE = (
     "the real service"
 )
 # Where the banner names the run, under serve mode, which has no run of its own: each run is the
-# SDK's, named on its requests, and a request no run names is `unattributed` (#77).
+# SDK's, named on its requests, and a request no run names is `unattributed`.
 SERVE_RUNS = "run: per request (SDK), unattributed otherwise"
-# The line a listener bound wider than loopback adds to the banner (#77).
+# The line a listener bound wider than loopback adds to the banner.
 WIDE_BIND_NOTICE = (
     "any machine that can reach this port can send traffic through irimi and call its control "
     "endpoint"
@@ -56,13 +56,12 @@ def banner_lines(
     replay_of: str | None = None,
 ) -> list[str]:
     """The startup lines. `command` is "shadow", "replay" or "shadow --serve"; `run_id` is None in
-    serve mode, which names its runs per request (#77). A replay says which run it replays as which
-    (#84).
+    serve mode, which names its runs per request. A replay says which run it replays as which.
 
     A listener that is not loopback adds a line saying so: every machine that reaches the port can
-    send its traffic through irimi and post runs to the control endpoint, which is not a boundary
-    (#73). `0.0.0.0` and `::` are not loopback. The reverse door stays loopback-only whatever the
-    bind (#77)."""
+    send its traffic through irimi and post runs to the control endpoint, which is not a boundary.
+    `0.0.0.0` and `::` are not loopback. The reverse door stays loopback-only whatever the
+    bind."""
     run = SERVE_RUNS if run_id is None else f"run {run_id}"
     lines = [
         f"irimi {command} · {run} · listening on {netaddr.authority(host, port)} · ca {ca_cert}",
@@ -79,9 +78,9 @@ def delegated_lines(index: MapIndex, color: bool = False) -> list[str]:
     """One banner line per delegated service or route: what irimi is not answering, and who is.
 
     `PROXY_ONLY_NOTICE` tells the reader that traffic which is not routed through the proxy is
-    not shadowed. Nothing said that a *routed* host may not be live either: a service or a
+    not shadowed. These lines say that a *routed* host may not be live either: a service or a
     route carrying an answer target is answered by an address the developer named, so the "reads
-    are real" claim the banner rests on is false for that service (design D20, §4.4).
+    are real" claim the banner rests on is false for that service.
 
     `servicemap.is_delegated` is the shared condition, rather than a fourth spelling of it here:
     this banner, the exit summary and `irimi maps list` are three surfaces that must agree about
@@ -126,8 +125,8 @@ def exchange_line(exchange: Exchange) -> str:
     """One line per finished exchange."""
     status = exchange.response.status if exchange.response else "-"
     flags = f"  [{', '.join(exchange.flags)}]" if exchange.flags else ""
-    # Both columns are nine wide: `telemetry` and `delegated` are nine characters, and at eight
-    # every row carrying one was pushed a column right in the most-read output the tool produces.
+    # Both columns are nine wide: `telemetry` and `delegated` are nine characters, so no row
+    # carrying one is pushed a column right in the most-read output the tool produces.
     return (
         f"{exchange.answered_by:<9} {exchange.kind:<9} {exchange.request.method} "
         f"{exchange.request.host}{exchange.request.path} -> {status}{flags}"
@@ -135,35 +134,35 @@ def exchange_line(exchange: Exchange) -> str:
 
 
 def tool_call_line(call: ToolCall) -> str:
-    """One line per tool call the SDK reported (#76), in `exchange_line`'s columns (#72). Its name
+    """One line per tool call the SDK reported, in `exchange_line`'s columns. Its name
     and error type are whatever was posted to the control endpoint, so each control character is
-    escaped, as `runs show` escapes a run's text (#72): one call is one line."""
+    escaped, as `runs show` escapes a run's text: one call is one line."""
     outcome = _tool_outcome(call, "ok")
     return printable(f"{call.ran:<9} {call.kind:<9} tool {call.name} -> {outcome}")
 
 
 def is_stood_in(call: ToolCall) -> bool:
-    """A write tool whose stand-in ran in its place, which the summary owes a line (#76). Only a
+    """A write tool whose stand-in ran in its place, which the summary owes a line. Only a
     stand-in's call: the SDK runs a write tool's real function only while it is inactive, and
     then records nothing, so no write tool call it posts ran for real."""
     return call.kind == "write" and call.ran == "shadow"
 
 
 def tool_write_line(call: ToolCall) -> str:
-    """The summary's line for a write tool whose stand-in ran in its place (#76), escaped as
+    """The summary's line for a write tool whose stand-in ran in its place, escaped as
     `tool_call_line` is."""
     return f"  {printable(tool_write_sentence(call))}"
 
 
 def tool_write_sentence(call: ToolCall) -> str:
     """`tool_write_line` without the summary's indent and before it is escaped, which `irimi
-    compare` decides two tool calls are the same by (#79): the real function did not run, so it is
+    compare` decides two tool calls are the same by: the real function did not run, so it is
     a write that did not happen, and it takes the write marker."""
     return f"{WRITE_MARKER} tool {call.name}  shadow stand-in {_tool_outcome(call, 'ran')}"
 
 
 def _tool_outcome(call: ToolCall, returned: str) -> str:
-    """`returned`, or `raised <type>`, before either line escapes it (#76)."""
+    """`returned`, or `raised <type>`, before either line escapes it."""
     return returned if call.error is None else f"raised {call.error.type}"
 
 
@@ -175,7 +174,7 @@ INTERCEPTED_KINDS: frozenset[str] = frozenset({"write", "unknown"})
 WRITE_MARKER = "○"
 REJECTED_MARKER = "✗"
 # One of the agent's own reads that irimi either edited to show this run's writes, or knows it
-# could not fully show them (#48). It hangs under the write it is about, so a reader sees the
+# could not fully show them. It hangs under the write it is about, so a reader sees the
 # write and the reads that then saw it as one thing.
 OVERLAY_MARKER = "↳"
 SAW_IT = "saw it"
@@ -187,14 +186,14 @@ DID_NOT_HAPPEN = "These writes did not happen."
 WOULD_HAVE_FIRED = "Would have fired:"
 # A delegated write whose target never answered. It is neither delegated nor faked: nothing
 # answered it at all, and the agent got a 502. Saying "delegated" for it would be the same
-# class of lie as counting a delegated read as live (#20) - the summary would show a write
+# class of lie as counting a delegated read as live - the summary would show a write
 # safely handled by the stub when the stub was not running.
 TARGET_UNREACHABLE = "target unreachable"
 # A write irimi answered with its own 502 because it could not decide about it: the decision
-# raised, or the body decodes past what irimi reads (#94). It was refused, not faked (#112).
+# raised, or the body decodes past what irimi reads. It was refused, not faked.
 REFUSED_BY_IRIMI = "refused by irimi"
 # The flags that say why, named in the order the exchange carries them. A fixed list, not every
-# flag: `unclassified` is the classification the refusal was recorded under, not a reason (#112).
+# flag: `unclassified` is the classification the refusal was recorded under, not a reason.
 REFUSAL_REASONS: tuple[str, ...] = (DECISION_FAILED_FLAG, BODY_TRUNCATED_FLAG)
 
 # Currencies with no minor unit: ¥4900 is four thousand nine hundred yen, not ¥49.00. Stripe's
@@ -237,7 +236,7 @@ def money(minor_units: int, currency: str) -> str:
 
     The currency comes from the request first, and from `Exchange.currency` second - the code the
     write's L3 precondition read found on the object it named, put there by the policy and never
-    by a default (#60). Those are the only two sources: a write with no such read, or one whose
+    by a default. Those are the only two sources: a write with no such read, or one whose
     read named no currency, gets no formatting at all (see `_field_value` and `render_human`).
     Dividing by 100 without knowing the currency would print ¥49.00 for a 4900-yen refund, which
     is a wrong number rather than an unformatted one, and that is why the fallback is a document
@@ -271,14 +270,14 @@ def render_human(template: str, exchange: Exchange, route: Route | None) -> str:
 
     The currency is the one field that may come from outside the request: a write whose L3
     precondition read named one carries it on the exchange, and it fills in for a request that
-    named none (#60). The request still wins when it named one.
+    named none. The request still wins when it named one.
     """
     fields: dict[str, object] = {}
     if route is not None:
         fields.update(path_params(route.path, exchange.request.path))
     fields.update(reflect(exchange.request))
     # `or` and not `setdefault`: a body that sent `currency=` sent nothing, and falls back to the
-    # L3 read's currency like a body that sent no key at all (#60).
+    # L3 read's currency like a body that sent no key at all.
     currency = fields.get("currency") or exchange.currency
 
     def one(match: re.Match[str]) -> str:
@@ -292,9 +291,9 @@ def render_human(template: str, exchange: Exchange, route: Route | None) -> str:
 
 def is_intercepted(exchange: Exchange) -> bool:
     """A write this run answered instead of performing - locally, or at an answer target: the
-    writes the summary prints a line for, and the ones `irimi compare` compares (#79).
+    writes the summary prints a line for, and the ones `irimi compare` compares.
 
-    A REPLAYED write is not one of them (#46). The agent retried with a key it had already used,
+    A REPLAYED write is not one of them. The agent retried with a key it had already used,
     the store answered with the first write's own bytes, and it is the same write: counting it
     again would make "nine would have been rejected" count retries instead of intentions. It is
     still in the trace and still carries `idempotent-replay` on its own line. A CONFLICT stays,
@@ -311,7 +310,7 @@ def is_intercepted(exchange: Exchange) -> bool:
 def _reached_target(exchange: Exchange) -> bool:
     """A write an answer target actually answered, as opposed to one whose target was never
     reached. `IrimiAddon.error` flags the second `target-failed`, and records no response unless
-    the target had begun a streamed answer (#71)."""
+    the target had begun a streamed answer."""
     return exchange.answered_by == "delegated" and TARGET_FAILED_FLAG not in exchange.flags
 
 
@@ -320,26 +319,26 @@ def _failed_target(exchange: Exchange) -> bool:
 
 
 def _refused_by_irimi(exchange: Exchange) -> bool:
-    """A write irimi answered with its own 502 because it could not decide about it (#112)."""
+    """A write irimi answered with its own 502 because it could not decide about it."""
     return DECISION_FAILED_FLAG in exchange.flags
 
 
 def _host_line(host: str, rows: Sequence[Exchange], width: int) -> str:
     """One host's counts, in the order a reader asks them: what was real, then what was not."""
     phrases: list[str] = []
-    # An OVERLAID read is a real read (#43): it went to the real service and came back, and irimi
-    # then wrote the run's own faked writes into the body. Leaving it out of this count told the
-    # reader a read they really made never happened, which is the same class of untruth as #20
-    # below. It is counted here and its count qualifies `N reads` in brackets, because the body is
-    # not what the service sent (#48).
+    # An OVERLAID read is a real read: it went to the real service and came back, and irimi
+    # then wrote the run's own faked writes into the body. Leaving it out of this count would tell
+    # the reader a read they really made never happened, the mirror of counting a delegated read
+    # as live (below). It is counted here and its count qualifies `N reads` in brackets, because
+    # the body is not what the service sent.
     #
-    # An engine-issued read is a real read that the AGENT did not make (#45). Counting it in
+    # An engine-issued read is a real read that the AGENT did not make. Counting it in
     # `N reads` would inflate the one number this tool rests on, so it is a different number in
-    # its own phrase, never inside the headline's brackets (#48).
+    # its own phrase, never inside the headline's brackets.
     #
     # A read a replay answered from the recording is a real read too, made by the recorded run
     # and handed to this one byte for byte: it is counted with them, as what it was (`overlay` for
-    # one the overlay edited then), and qualified by its `from-recording` flag (#82).
+    # one the overlay edited then), and qualified by its `from-recording` flag.
     agent_reads = [
         ex
         for ex in rows
@@ -363,7 +362,7 @@ def _host_line(host: str, rows: Sequence[Exchange], width: int) -> str:
     if engine_reads:
         phrases.append(_plural(engine_reads, "engine read"))
     # A delegated read is NOT a real read, and `reads are real` is what that count means to
-    # whoever reads it. Counting it with the live ones is the honesty bug #20 was filed for.
+    # whoever reads it. Counted with the live ones, it would claim a target's answer was real.
     target_reads = sum(1 for ex in rows if ex.kind == "read" and ex.answered_by == "delegated")
     if target_reads:
         phrases.append(f"{_plural(target_reads, 'read')} from the target")
@@ -376,7 +375,7 @@ def _host_line(host: str, rows: Sequence[Exchange], width: int) -> str:
     if writes:
         detail = []
         # A write irimi refused is recorded `unknown`, but its line says `refused by irimi`, and
-        # so does its count here: `unclassified` is what a route no map names prints (#112).
+        # so does its count here: `unclassified` is what a route no map names prints.
         refused = sum(1 for ex in writes if _refused_by_irimi(ex))
         unclassified = sum(1 for ex in writes if ex.kind == "unknown" and not _refused_by_irimi(ex))
         delegated = sum(1 for ex in writes if _reached_target(ex))
@@ -399,11 +398,11 @@ def _host_lines(exchanges: Sequence[Exchange], telemetry: Sequence[str]) -> list
 
     Telemetry gets a single line however many vendors it reached: a run posts to Datadog, Sentry
     and PostHog in the same breath and a line each would bury the two hosts the agent's work is
-    actually on. It also says where they went, because they went there for real (#20).
+    actually on. It also says where they went, because they went there for real.
 
     `telemetry` is one host per telemetry exchange, and `exchanges` holds none: the store keeps a
     telemetry exchange only as a `TelemetrySeen` with its host, so a host is all this line may
-    count if a stored run is to print it (#72).
+    count if a stored run is to print it.
     """
     by_host: dict[str, list[Exchange]] = {}
     for ex in exchanges:
@@ -427,7 +426,7 @@ def _route_of(exchange: Exchange, index: MapIndex | None) -> Route | None:
     Its path is matched, as the live classification matched it. A stored write on a
     credential-path host has a redaction placeholder for a path, which matches no route, so the
     route is then found by the `operation` the exchange recorded: a webhook post prints `post via
-    webhook: "..."` from the store as it did live (#72)."""
+    webhook: "..."` from the store as it did live."""
     if index is None:
         return None
     request = exchange.request
@@ -438,20 +437,20 @@ def _route_of(exchange: Exchange, index: MapIndex | None) -> Route | None:
 
 
 def _write_line(exchange: Exchange, index: MapIndex | None) -> str:
-    """One intercepted write's summary line. Escaped as `runs show` escapes a run's text (#72): a
-    template's fields are the agent's own, a newline in a Slack post split the line, and a lone
-    surrogate made printing it raise (#79)."""
+    """One intercepted write's summary line. Escaped as `runs show` escapes a run's text: a
+    template's fields are the agent's own, a newline in a Slack post would split the line, and a
+    lone surrogate would make printing it raise."""
     return f"  {printable(write_sentence(exchange, index))}"
 
 
 def write_sentence(exchange: Exchange, index: MapIndex | None) -> str:
     """One intercepted write, as the map's own sentence plus what irimi did with it: its summary
     line without the indent and before it is escaped, which `irimi compare` decides two writes are
-    the same by (#79). A write irimi refused with a body it never read whole is spelled as the
-    request it was instead (#112)."""
+    the same by. A write irimi refused with a body it never read whole is spelled as the
+    request it was instead."""
     refused = _refused_by_irimi(exchange)
     # A `human:` sentence is never filled in from a body irimi did not read: a refused write whose
-    # body was cut renders every field `?`, the same line for every such refund (#112).
+    # body was cut renders every field `?`, the same line for every such refund.
     unread = refused and BODY_TRUNCATED_FLAG in exchange.flags
     route = _route_of(exchange, index)
     if route is not None and route.human and not unread:
@@ -459,7 +458,7 @@ def write_sentence(exchange: Exchange, index: MapIndex | None) -> str:
     else:
         what = f"{exchange.request.method} {exchange.request.host}{exchange.request.path}"
     # A write irimi could not decide about got irimi's own 502: it was refused, not faked, so it
-    # takes `✗` and names the flags that say why, in the order it carries them (#112).
+    # takes `✗` and names the flags that say why, in the order it carries them.
     if refused:
         reasons = ", ".join(flag for flag in exchange.flags if flag in REFUSAL_REASONS)
         return f"{REJECTED_MARKER} {what}  {REFUSED_BY_IRIMI} ({reasons})"
@@ -468,8 +467,8 @@ def write_sentence(exchange: Exchange, index: MapIndex | None) -> str:
     if _failed_target(exchange):
         return f"{WRITE_MARKER} {what}  unanswered ({TARGET_UNREACHABLE})"
     # A write the real service would have refused, and irimi is saying so: L3 checked it against
-    # real state (#45), or this run had already used its idempotency key for a different write
-    # (#46). It did not merely go unperformed, and this is the line the baseline report exists to
+    # real state, or this run had already used its idempotency key for a different write.
+    # It did not merely go unperformed, and this is the line the baseline report exists to
     # print. `✗`, not `○`, and the code is the one the agent's SDK raised on.
     if exchange.precondition == "rejected" or IDEMPOTENCY_CONFLICT_FLAG in exchange.flags:
         code = exchange.rejection_code or "rejected"
@@ -482,14 +481,14 @@ def _fidelity(exchange: Exchange) -> str:
     """How faithful this answer was, as the summary says it.
 
     Derived from `answered_by` and `precondition` together, in one place, so a level added to
-    either cannot print as the floor it is not (#20's rule, #45's second input). `L3` is not an
+    either cannot print as the floor it is not. `L3` is not an
     `answered_by` value and never will be - the header says who answered, this says how much irimi
     knew when it did, and `L2` here means "the overlay's worth of truth, and no more": the write
     was faked, and irimi could not find out whether the service would have taken it.
 
     Only a locally faked answer gets the precondition spelling. A DELEGATED write reads
     `delegated` whatever L3 said about it, because `L2` is a claim about a fake irimi built and
-    irimi built nothing here - the target did (#45).
+    irimi built nothing here - the target did.
     """
     level = exchange.answered_by.removeprefix(FAKE_PREFIX)
     if not exchange.answered_by.startswith(FAKE_PREFIX):
@@ -502,11 +501,11 @@ def _fidelity(exchange: Exchange) -> str:
 
 
 def _shows_overlay(exchange: Exchange) -> bool:
-    """One of the agent's own reads the summary owes a `↳` line (#48).
+    """One of the agent's own reads the summary owes a `↳` line.
 
     Edited to show the run's writes, or known to be incomplete - not merely `overlay: full`, which
-    a read irimi only translated also carries while staying `live` and untouched (#43). Never a
-    read irimi issued itself: the line says which of the AGENT's reads saw the write (#45).
+    a read irimi only translated also carries while staying `live` and untouched. Never a
+    read irimi issued itself: the line says which of the AGENT's reads saw the write.
     """
     return (
         exchange.kind == "read"
@@ -518,10 +517,10 @@ def _shows_overlay(exchange: Exchange) -> bool:
 def _overlay_lines(reads: Sequence[Exchange]) -> list[str]:
     """The `↳` lines under one write: which of the agent's reads were shown it, and how fully.
 
-    Three cases, because `overlay` and `answered_by` say different things (#43). `answered_by ==
+    Three cases, because `overlay` and `answered_by` say different things. `answered_by ==
     "overlay"` means irimi edited the body; `overlay == "partial"` means irimi knows the world it
     showed was incomplete, and it can sit on a body irimi never touched - a Slack read whose
-    channel the two sides spell differently (#44). A read irimi merely TRANSLATED, live and
+    channel the two sides spell differently. A read irimi merely TRANSLATED, live and
     `overlay: full`, is not an overlay hit and gets no line at all.
     """
     lines: list[str] = []
@@ -532,7 +531,7 @@ def _overlay_lines(reads: Sequence[Exchange]) -> list[str]:
         elif ex.answered_by == "overlay":
             verb, column = SAW_PART, "overlay (partial)"
         else:
-            # Untouched, so it is whoever answered it: the service, or a replay's recording (#82).
+            # Untouched, so it is whoever answered it: the service, or a replay's recording.
             verb, column = DID_NOT_SHOW, f"{ex.answered_by} (partial)"
         lines.append(f"    {OVERLAY_MARKER} {what} {verb}  {column}")
     return lines
@@ -541,7 +540,7 @@ def _overlay_lines(reads: Sequence[Exchange]) -> list[str]:
 def _writes_with_their_reads(
     exchanges: Sequence[Exchange],
 ) -> list[tuple[Exchange, list[Exchange]]]:
-    """Every printed write, in order, each with the overlaid reads that are about it (#48).
+    """Every printed write, in order, each with the overlaid reads that are about it.
 
     A read is filed under the most recent write before it that the overlay could have shown it:
     one of the SAME SERVICE, and one irimi authored (`is_authored_write`, the write log's own
@@ -552,13 +551,13 @@ def _writes_with_their_reads(
     ever saw it.
 
     A read irimi issued itself is never here: `issued_by == "engine"` is a read the AGENT did not
-    make, and the whole point of the line is to say which of the agent's reads saw the write (#45).
+    make, and the whole point of the line is to say which of the agent's reads saw the write.
 
     Pairs rather than a dict keyed by write: `Exchange` is a mutable dataclass and so unhashable.
     A qualifying read with no such write before it is left out, and cannot happen - the overlay
     stamps or flags a read only on the strength of a same-service write in the log, and every
     write-log entry is a printed write. A replay serves a recorded overlaid read only once every
-    recorded write before it has been made (`recording.Recording.take`, #82), so it holds there
+    recorded write before it has been made (`recording.Recording.take`), so it holds there
     too. `tests/test_invariants.py` holds it over a real run.
     """
     paired: list[tuple[Exchange, list[Exchange]]] = []
@@ -577,7 +576,7 @@ def _would_fire(writes: Sequence[Exchange]) -> list[str]:
     """Every webhook event the run's faked writes would have caused, each named once, in the order
     the run first listed it.
 
-    Off `Exchange.would_fire` and never off `route.fires` (#47): `would_fire` is already empty for
+    Off `Exchange.would_fire` and never off `route.fires`: `would_fire` is already empty for
     an L3 rejection, an idempotency conflict, a replay and a delegated write, so this needs no
     filter of its own. Re-deriving the list from the map at print time would bring all four back.
     De-duplicated because two refunds carry two identical tuples and one refund's `refund.created`
@@ -597,15 +596,15 @@ def _closing_lines(writes: Sequence[Exchange], tool_writes: Sequence[ToolCall]) 
     delegated to <target>` would claim a stub answered a write no stub ever saw, and the run
     would read as a working delegation while the developer's stub was not running at all.
 
-    The webhooks the faked writes would have fired close the first sentence in either branch
-    (#48). A run whose every write was refused names none and keeps the bare sentence: `Would
+    The webhooks the faked writes would have fired close the first sentence in either branch.
+    A run whose every write was refused names none and keeps the bare sentence: `Would
     have fired: nothing.` would be a claim, and silence is the truth.
 
-    A write tool whose stand-in ran did not happen either (#76): a run whose only writes are tool
+    A write tool whose stand-in ran did not happen either: a run whose only writes are tool
     writes closes with the bare sentence, and one with HTTP writes too says what it says of those.
     When one of those was delegated or went unanswered, the first line says which services they
     did not reach and then, in a sentence of its own, that the tool writes did not happen, which
-    nothing but their own lines said before (#121).
+    nothing but their own lines would otherwise say.
     """
     if not writes:
         return [f"  {DID_NOT_HAPPEN}"] if tool_writes else []
@@ -639,12 +638,12 @@ def summary_lines(
     index: MapIndex | None = None,
     tool_calls: Sequence[ToolCall] = (),
 ) -> list[str]:
-    """The exit summary (#13): what ran, what was real, what irimi answered, and what that means.
+    """The exit summary: what ran, what was real, what irimi answered, and what that means.
 
     Built from the exchanges the engine reported, in the order they arrived, and the tool calls
-    the control endpoint passed on (#76), which `_summary` puts in the order they ended (#120).
+    the control endpoint passed on, which `_summary` puts in the order they ended.
     `stored_summary_lines` prints the same block from a stored run, and both are `_summary`, so
-    the two cannot drift (#72).
+    the two cannot drift.
 
     `index` is the loaded maps, used only to find each write's `human:` template. Without it the
     writes still get a line, spelled as the request they were.
@@ -655,7 +654,7 @@ def summary_lines(
 
 
 def stored_summary_lines(run: StoredRun, index: MapIndex | None) -> list[str]:
-    """The exit summary of a stored run: the lines `summary_lines` printed live for it (#72).
+    """The exit summary of a stored run: the lines `summary_lines` printed live for it.
 
     A `TelemetrySeen` stands for a telemetry exchange, which is always forwarded live: the policy
     never answers or delegates one. The elapsed seconds are the run's own, `ended_at - started_at`,
@@ -663,17 +662,17 @@ def stored_summary_lines(run: StoredRun, index: MapIndex | None) -> list[str]:
 
     Where a stored line may still differ from the live one: redaction replaced a field a `human:`
     template renders, the path of a request on a credential-path host that the write line spells
-    out, because no route matched it or irimi refused it with its body cut (#112), a write irimi
-    refused whose body only the store cut, spelled out and naming `body-truncated` stored (#112),
+    out, because no route matched it or irimi refused it with its body cut, a write irimi
+    refused whose body only the store cut, spelled out and naming `body-truncated` stored,
     or an event the store dropped (docs/trace-format.md, "Reading a run back"). A replay's run
-    printed no summary live, and its block opens `irimi replay` (#154).
+    printed no summary live, and its block opens `irimi replay`.
     """
     exchanges = [event for event in run.events if isinstance(event, Exchange)]
     telemetry = [event.host for event in run.events if isinstance(event, TelemetrySeen)]
     tool_calls = [event for event in run.events if isinstance(event, ToolCall)]
     elapsed = run_elapsed(run.record)
     # A replay's run opens `irimi replay · run`: `irimi replay` printed its comparison and no
-    # summary, and a block opening `irimi shadow` said a replay was a shadow run (#154).
+    # summary, and a block opening `irimi shadow` would say a replay was a shadow run.
     command = "replay" if run.record.mode == "replay" else "shadow"
     return _summary(
         run.record.run_id, exchanges, telemetry, elapsed or 0.0, index, tool_calls, command
@@ -690,18 +689,18 @@ def _summary(
     command: str = "shadow",
 ) -> list[str]:
     """The one implementation of the summary. `exchanges` holds no telemetry; `telemetry` is one
-    host per telemetry exchange, each of them forwarded live (#72). A tool call is not an exchange
+    host per telemetry exchange, each of them forwarded live. A tool call is not an exchange
     and is in no count: each write tool whose stand-in ran gets a line after the HTTP writes, and a
-    read tool, run for real or answered from a replay's recording, gets none (#76, #83)."""
+    read tool, run for real or answered from a replay's recording, gets none."""
     paired = _writes_with_their_reads(exchanges)
     writes = [write for write, _ in paired]
     total = len(exchanges) + len(telemetry)
     # An overlaid read was forwarded to the real service and answered by it; irimi edited the body
     # afterwards to show the run's own faked writes. This line's buckets are about WHO answered,
-    # so it belongs with `live`: counting it as `virtualized` claimed irimi had answered a read
-    # the agent really made (#43). That its body was edited is said in the per-host block above,
-    # and which write it saw is said by its `↳` line under that write (#48). One a replay answered
-    # from the recording reached no service, so it is irimi's, `virtualized` (#82).
+    # so it belongs with `live`: counting it as `virtualized` would claim irimi answered a read
+    # the agent really made. That its body was edited is said in the per-host block above,
+    # and which write it saw is said by its `↳` line under that write. One a replay answered
+    # from the recording reached no service, so it is irimi's, `virtualized`.
     live = len(telemetry) + sum(
         1
         for ex in exchanges
@@ -719,7 +718,7 @@ def _summary(
         write_lines += _overlay_lines(reads)
     # In the order the calls ended, whatever order they came in: live, the order their posts
     # reached the control endpoint, which two tools ending at once on two threads can reverse, and
-    # stored, `seq` order within each run (#120). The start, the id and then the line itself break
+    # stored, `seq` order within each run. The start, the id and then the line itself break
     # a tie, since a call posted by hand can repeat another's id and times.
     stood_in = sorted(
         (call for call in tool_calls if is_stood_in(call)),
@@ -733,11 +732,10 @@ def _summary(
     write_lines += [tool_write_line(call) for call in stood_in]
     if write_lines:
         lines += ["", *write_lines]
-    # The three buckets #20 asks for, on one line: `live` means forwarded to the real service -
-    # reads, inference and telemetry alike - `delegated` means an answer target answered it, and
-    # `virtualized` means irimi did. The per-host block above is where the words are, because
-    # `live` alone stopped being a synonym for `reads are real` the moment either of the other
-    # two existed.
+    # Three buckets on one line: `live` means forwarded to the real service - reads, inference
+    # and telemetry alike - `delegated` means an answer target answered it, and `virtualized`
+    # means irimi did. The per-host block above is where the words are, because `live` alone is
+    # not a synonym for `reads are real` once either of the other two is in play.
     lines += [
         "",
         f"  {_plural(total, 'exchange')} · {live} live · "
@@ -749,31 +747,31 @@ def _summary(
 
 # ---------------------------------------------------------------------------------- stored runs
 
-# `irimi runs show`'s `args:` line: enough to recognise a trigger by, not a dump of it (#72).
+# `irimi runs show`'s `args:` line: enough to recognise a trigger by, not a dump of it.
 MAX_ARGS_SHOWN = 500
 NOT_SET = "-"
 # The `args:` of a trigger nested deeper than `json.dumps` writes. Python 3.14's `json.loads` reads
-# a `run.json` some levels deeper than its `json.dumps` writes back, so a damaged one read fine and
-# then raised RecursionError out of `runs show` (#100).
+# a `run.json` some levels deeper than its `json.dumps` writes back, so a damaged one reads fine
+# and would then raise RecursionError out of `runs show`.
 ARGS_TOO_DEEP = "(nested too deeply to show)"
 # A C0 or C1 control character, DEL included. A stored run's text is the agent's own - an error
 # message is `str(exc)` - and printed raw, a newline breaks `runs show`'s one `key: value` per line
-# and an escape sequence is obeyed by the terminal reading it (#72). A lone surrogate too
+# and an escape sequence is obeyed by the terminal reading it. A lone surrogate too
 # (`os.fsdecode` of a filename that is not UTF-8): a UTF-8 terminal cannot encode it, and printed
-# raw it raised UnicodeEncodeError out of `runs show` (#100's rule that a stored run prints).
+# raw it would raise UnicodeEncodeError out of `runs show`, and a stored run always prints.
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\ud800-\udfff]")
 
 
 def printable(text: str) -> str:
     """`text` on one line, each control character and lone surrogate spelled as its Python escape
     (`\\n`, `\\x1b`, `\\udcff`). For printing only, never for comparing: a backslash is left as it
-    is, so a newline and a typed `\\n` print alike (#79)."""
+    is, so a newline and a typed `\\n` print alike."""
     return _CONTROL.sub(lambda m: repr(m.group())[1:-1], text)
 
 
 def run_elapsed(record: RunRecord) -> float | None:
     """How long a stored run took, or None for one with no start or no end. Never negative: the
-    wall clock can step back between the two, as `pipeline.annotate` knows for an exchange (#72)."""
+    wall clock can step back between the two, as `pipeline.annotate` knows for an exchange."""
     if record.started_at is None or record.ended_at is None:
         return None
     return max(0.0, record.ended_at - record.started_at)
@@ -781,12 +779,12 @@ def run_elapsed(record: RunRecord) -> float | None:
 
 def run_status(record: RunRecord) -> str:
     """`ok` or `error` for a run that ended, and `incomplete` for one that has not, or never will:
-    a crashed irimi, or a run known only by its events (`attribution: "header"`) (#72)."""
+    a crashed irimi, or a run known only by its events (`attribution: "header"`)."""
     return record.outcome if record.outcome is not None else "incomplete"
 
 
 def run_list_line(record: RunRecord, events: Sequence[Event] | None) -> str:
-    """One `irimi runs list` line (#72). `events` is None for a run whose events could not be
+    """One `irimi runs list` line. `events` is None for a run whose events could not be
     read, which then shows `?` for both counts rather than zero. Only each event's kind and how it
     was answered are read, so a caller may pass events loaded without their bodies."""
     started = NOT_SET
@@ -817,12 +815,12 @@ def run_list_line(record: RunRecord, events: Sequence[Event] | None) -> str:
 
 
 def run_attribution(record: RunRecord) -> str:
-    """`irimi runs list`'s attribution column (#154). A run a replay stored is listed as the run it
+    """`irimi runs list`'s attribution column. A run a replay stored is listed as the run it
     replayed: `replay of <id>` for the process run `irimi replay` stores, which `process` alone
     lists as a shadow run, and after its attribution for any other, since a replay's store makes
     `header` runs and `sdk` runs too and the column must not hide which (`<attribution>, replay of
-    <id>`). A record that says `mode: replay` and names no run - one no irimi writes, and since
-    #167 one no stored run.json can hold, which the decoder refuses, so only one built in Python -
+    <id>`). A record that says `mode: replay` and names no run - one no irimi writes, and one no
+    stored run.json can hold, which the decoder refuses, so only one built in Python -
     is still marked (`<attribution>, replay`)."""
     if record.replay_of is not None:
         replayed = f"replay of {printable(record.replay_of)}"
@@ -833,9 +831,9 @@ def run_attribution(record: RunRecord) -> str:
 
 
 def run_label(record: RunRecord) -> str:
-    """A stored run in one line, as `irimi compare` names each side (#79): its trigger's name and
+    """A stored run in one line, as `irimi compare` names each side: its trigger's name and
     entrypoint, and the agent version it reported, `-` for each one it has not, escaped as
-    `runs show` escapes them (#72)."""
+    `runs show` escapes them."""
     trigger = record.trigger
     name = trigger.name if trigger is not None else NOT_SET
     entrypoint = (trigger.entrypoint if trigger is not None else None) or NOT_SET
@@ -844,7 +842,7 @@ def run_label(record: RunRecord) -> str:
 
 
 def run_header_lines(record: RunRecord) -> list[str]:
-    """`irimi runs show`'s header block: one `key: value` per line (#72)."""
+    """`irimi runs show`'s header block: one `key: value` per line."""
     trigger = record.trigger
     entrypoint = (trigger.entrypoint if trigger is not None else None) or NOT_SET
     args = NOT_SET
@@ -856,7 +854,7 @@ def run_header_lines(record: RunRecord) -> list[str]:
         if len(args) > MAX_ARGS_SHOWN:
             args = args[:MAX_ARGS_SHOWN] + "…"
     lines = [f"run: {record.run_id}", f"attribution: {record.attribution}"]
-    # A replay's run says so, and which run it replayed (#154); a shadow run's block is as it was.
+    # A replay's run says so, and which run it replayed; a shadow run's block has neither line.
     if record.mode != "shadow":
         lines.append(f"mode: {record.mode}")
     if record.replay_of is not None:
@@ -879,7 +877,7 @@ def run_header_lines(record: RunRecord) -> list[str]:
 
 def event_line(event: Event) -> str:
     """One stored event, as `irimi runs show` prints it: an exchange and a tool call in the
-    columns the terminal printed them in, and telemetry as the host it went to (#72)."""
+    columns the terminal printed them in, and telemetry as the host it went to."""
     match event:
         case Exchange():
             return exchange_line(event)
@@ -893,7 +891,7 @@ def event_line(event: Event) -> str:
 
 def run_show_lines(run: StoredRun, index: MapIndex | None) -> list[str]:
     """Everything `irimi runs show` prints: the header block, every event in `seq` order, and the
-    run's summary, a blank line between each (#72)."""
+    run's summary, a blank line between each."""
     events = [event_line(event) for event in run.events]
     lines = run_header_lines(run.record)
     if events:

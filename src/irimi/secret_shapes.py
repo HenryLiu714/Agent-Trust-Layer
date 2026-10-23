@@ -1,4 +1,4 @@
-"""The shapes a secret is found by in text (#69), and the one cut made before redaction (#179).
+"""The shapes a secret is found by in text, and the one cut made before redaction.
 
 `redact` replaces every match of SECRET_SHAPE with its placeholder before anything reaches disk.
 This module says only where the shapes are, so that a cut made before redaction - by the SDK,
@@ -24,14 +24,14 @@ SECRET_PATTERNS: tuple[str, ...] = (
 )
 # One pass over the text, the patterns tried in the order above at each position, so `sk-ant-` is
 # replaced whole before the wider `sk-` could claim it. A shape must not follow a letter or a
-# digit: without that, `task_test_runner` stored as `ta<redacted:…>` and any slug holding `risk-`
-# followed by 20 more characters lost its tail. A real key follows a space, a quote, `=`, `/`, `_`
-# or the start of the value, and still matches.
+# digit: without that, `task_test_runner` would be stored as `ta<redacted:…>` and any slug holding
+# `risk-` followed by 20 more characters would lose its tail. A real key follows a space, a
+# quote, `=`, `/`, `_` or the start of the value, and still matches.
 #
 # Unless that letter or digit ends an escape. Text stored raw spells a separator as one: a JSON
 # string inside an SSE line as `\n` or `\u0020`, a path, a header or a form field's name as `%20`,
 # `%3D` or `%2F`. Each ends in a letter or a digit, so `key:\nsk_live_…` and
-# `/Bearer%20sk_live_…` were stored whole (#69).
+# `/Bearer%20sk_live_…` would otherwise be stored whole.
 _BOUNDARY = r"(?:(?<![A-Za-z0-9])|(?<=\\[bfnrt])|(?<=\\u[0-9A-Fa-f]{4})|(?<=%[0-9A-Fa-f]{2}))"
 SECRET_SHAPE = re.compile(_BOUNDARY + "(?:" + "|".join(SECRET_PATTERNS) + ")")
 
@@ -42,7 +42,7 @@ def cut_outside_secrets(text: str, limit: int) -> str:
 
     For a cut made before redaction. Cut inside a key, the part kept is no longer the key's
     shape, so redaction stores it as it is, or, for a shape whose prefix still matches
-    (`sk_test_…`), as a placeholder of its own, not the key's (#179). Cut here, what is kept,
+    (`sk_test_…`), as a placeholder of its own, not the key's. Cut here, what is kept,
     redacted, is a prefix of the whole redacted: no shape crosses the cut, and every shape that
     ends by it is matched in the cut text as it is in the whole. Only a key across the cut is
     lost, never the text around it. Raises TypeError when `text` is not a string."""

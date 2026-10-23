@@ -1,9 +1,9 @@
-"""The run's faked writes, decoded out of the trace and matched to the reads they can affect (#45).
+"""The run's faked writes, decoded out of the trace and matched to the reads they can affect.
 
-`overlay` had this to itself until L3: a precondition checks a write against real state *plus the
-run's overlay*, so `policy` needs the same decoding, and the two live in the same layer and may
-not import each other. It is its own job in any case - turning `Exchange`es into
-`services.Write`s is neither deciding nor overlaying - and it is pure, so replay (#82) decodes a
+Both `overlay` and `policy` need it: a precondition checks a write against real state *plus the
+run's overlay*, and the two live in the same layer and may not import each other. It is its own
+job in any case - turning `Exchange`es into
+`services.Write`s is neither deciding nor overlaying - and it is pure, so replay decodes a
 recording with the same function.
 """
 
@@ -60,6 +60,5 @@ def scoped_writes[T](
 
 
 def read_of(operation: str, request: Request) -> services.Read:
-    """A live read as the effects are handed it: its operation, and its own body reflected once
-    (#44)."""
+    """A live read as the effects are handed it: its operation, and its own body reflected once."""
     return services.Read(operation=operation, request=request, posted=bodies.reflect(request))

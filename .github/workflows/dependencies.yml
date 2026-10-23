@@ -1,0 +1,42 @@
+name: dependencies
+
+# uv.lock decides what CI tests. Once a week, test the two ends of what pyproject.toml allows:
+# the newest release of everything, and the lowest version of every direct dependency.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependencies-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - resolution: highest
+            python: "3.14+gil"
+          # The floors are a promise to users on the oldest Python pyproject allows.
+          - resolution: lowest-direct
+            python: "3.12"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      UV_PYTHON: ${{ matrix.python }}
+      UV_RESOLUTION: ${{ matrix.resolution }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+      # Re-resolve instead of installing uv.lock; the job never commits the result.
+      - run: uv sync --upgrade --all-groups
+      - run: uv tree --frozen --depth 1
+      - run: uv run --no-sync pytest -n auto

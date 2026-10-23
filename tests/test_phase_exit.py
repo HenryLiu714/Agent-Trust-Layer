@@ -65,6 +65,8 @@ from tests.test_engine_mitm import (
     _start,
 )
 
+pytestmark = pytest.mark.e2e
+
 AGENT_PATH = Path(__file__).resolve().parent.parent / "examples" / "refund_agent" / "agent.py"
 
 CHARGE_ID = "ch_3QTESTONLY000000"

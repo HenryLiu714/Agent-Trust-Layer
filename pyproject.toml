@@ -49,18 +49,34 @@ Documentation = "https://github.com/HenryLiu714/Irimi#readme"
 Changelog = "https://github.com/HenryLiu714/Irimi/blob/main/CHANGELOG.md"
 
 [dependency-groups]
-# `uv sync` installs `dev` by default. `examples` is opt-in: `uv sync --group examples`.
-dev = [
-    "httpx>=0.28.1",
-    "mypy>=1.11",
-    "pytest>=8",
-    "requests>=2.34.2",
-    "ruff>=0.6",
-    "types-pyyaml>=6",
+# `uv sync` installs `dev`, which is `lint` plus `test`. `examples` is opt-in:
+# `uv sync --group examples`. Each floor is the minor version uv.lock holds; the weekly
+# dependencies workflow tests the floors and the newest releases.
+lint = [
+    "mypy>=2.3",
+    "ruff>=0.16",
+    "types-pyyaml>=6.0",
+]
+test = [
+    # patch = ["subprocess"] below needs coverage 7.10; pytest-cov 7.0 leaves subprocesses to it.
+    "coverage>=7.10",
+    "pytest>=9.1",
+    "pytest-cov>=7.0",
+    "pytest-timeout>=2.4",
+    "pytest-xdist>=3.8",
+    # The HTTP clients and service SDKs the tests and the workflow agents drive.
+    "httpx>=0.28",
+    "requests>=2.34",
+    "slack-sdk>=3.44",
+    "stripe>=15.6",
 ]
 examples = [
-    "slack-sdk>=3",
-    "stripe>=10",
+    "slack-sdk>=3.44",
+    "stripe>=15.6",
+]
+dev = [
+    { include-group = "lint" },
+    { include-group = "test" },
 ]
 
 [build-system]
@@ -77,14 +93,31 @@ include = ["/src/irimi", "/README.md", "/LICENSE", "/pyproject.toml"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # A live test calls a real service, so a key exported in the shell must not make a plain run do it.
-addopts = ["-m", "not live"]
-markers = ["live: calls a real service with your keys; run with `uv run pytest -m live`"]
+addopts = ["-ra", "--strict-markers", "-m", "not live"]
+# A hung engine thread or child process fails its test instead of holding the job.
+timeout = 120
+markers = [
+    "live: calls a real service with your keys; run with `uv run pytest -m live`",
+    "e2e: drives the real `irimi` command end to end; `make test-fast` leaves these out",
+    "slow: takes seconds rather than milliseconds",
+]
 filterwarnings = [
     # mitmproxy's flow filter still calls pyparsing's pre-3.0 names; nothing in irimi does.
     "ignore:.*deprecated.*:DeprecationWarning:mitmproxy",
     "ignore:.*deprecated.*:DeprecationWarning:pyparsing",
     "ignore:.*deprecated.*:DeprecationWarning:ldap3",
 ]
+
+[tool.coverage.run]
+source = ["irimi"]
+branch = true
+# Most end-to-end tests run irimi in a child process (`irimi shadow`, the replay child).
+patch = ["subprocess"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = ["if TYPE_CHECKING:", "@overload", "raise NotImplementedError"]
 
 [tool.ruff]
 line-length = 100

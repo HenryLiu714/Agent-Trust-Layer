@@ -59,6 +59,8 @@ from irimi.protocol.trace import ToolCall, Trigger
 from irimi.record.store.reader import StoreReader
 from tests.test_phase_exit import _Stripe
 
+pytestmark = pytest.mark.e2e
+
 ROOT = Path(__file__).resolve().parent.parent
 AGENT = agent.__name__
 PROMPT = agent.DEFAULT_PROMPT

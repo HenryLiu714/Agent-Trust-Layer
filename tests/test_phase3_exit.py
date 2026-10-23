@@ -56,6 +56,8 @@ from tests.test_engine_mitm import PRECONDITION_STRIPE_MAP
 from tests.test_phase_exit import _Stripe
 from tests.test_serve import _blocks, _port_of, _Served, _wait_for
 
+pytestmark = pytest.mark.e2e
+
 ROOT = Path(__file__).resolve().parent.parent
 CHARGES = ("ch_A", "ch_B")
 REASON = "requested_by_customer"

@@ -57,6 +57,8 @@ from tests.test_phase_exit import (
     _Stripe,
 )
 
+pytestmark = pytest.mark.e2e
+
 # Their fixtures, bound here so pytest finds them: an import would be shadowed by each parameter.
 home = test_phase_exit.home
 stripe_stand_in = test_phase_exit.stripe_stand_in

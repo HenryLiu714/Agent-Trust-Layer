@@ -16,6 +16,10 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         # 3.14 is what .python-version pins for development; 3.12 is the floor pyproject promises.
         python: ["3.14", "3.12"]
+        # 3.13 is a classifier too; one Linux leg is enough to keep that claim true.
+        include:
+          - os: ubuntu-latest
+            python: "3.13"
     runs-on: ${{ matrix.os }}
     # Every uv command has to see the matrix version. `--python` on `uv sync` alone is not enough:
     # the next `uv run` follows .python-version and rebuilds the venv on 3.14, so the 3.12 legs
@@ -27,7 +31,8 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - run: uv sync --locked
+      # All groups, so the tests that drive the real stripe and slack-sdk clients run, not skip.
+      - run: uv sync --locked --all-groups
       - run: uv run python -c "import sys; v = '%d.%d' % sys.version_info[:2]; assert v == '${{ matrix.python }}', v"
       - run: uv run ruff check .
       - run: uv run ruff format --check .

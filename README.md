@@ -1023,7 +1023,7 @@ uv run pytest -q   # the tests alone: about three minutes, no network, no keys
 conventions. [`docs/architecture.md`](docs/architecture.md) has the module map, how one request
 moves through the engine, and the rules the tests enforce. Branch per issue, named
 `<issue-number>-<short-slug>`, and open a PR against `main` with `Closes #<n>`. CI runs on Ubuntu
-and macOS, on Python 3.14 and 3.12.
+and macOS, on Python 3.14 and 3.12, and on 3.13 on Ubuntu.
 
 ## Troubleshooting
 

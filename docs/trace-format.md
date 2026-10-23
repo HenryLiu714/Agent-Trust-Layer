@@ -209,7 +209,7 @@ An exchange's `started_at` and `ended_at` are `0.0` only on an exchange built wi
 | `error` | error or `null` | Why the run failed, when `outcome` is `"error"`. |
 | `exit_code` | integer or `null` | The child's exit code, set only for the `process` run. |
 | `dropped_events` | integer | Events the store could not write. `0` means the run is whole. |
-| `replay_of` | string or `null` | Added in v2 (#82). The run a replay answered this one from; `null` for a run that is no replay. Absent in a v1 run, and read then as `null`. A run id, as `run_id` is (`trace.is_valid_run_id`), set exactly when `mode` is `replay`: a record holding anything else is refused (#167). |
+| `replay_of` | string or `null` | Added in v2 (#82). The run a replay answered this one from; `null` for a run that is no replay. A run id, as `run_id` is (`trace.is_valid_run_id`), set exactly when `mode` is `replay`: a record holding anything else is refused (#167). |
 
 A **trigger** (`trace.Trigger`):
 
@@ -305,7 +305,7 @@ names:
 | `ended_at` | number | When irimi finished the exchange. `started_at <= ended_at`. |
 | `request` | request | What was asked, as irimi forwarded and recorded it. |
 | `response` | response or `null` | What came back. `null` when nothing did: an upstream lost before its headers, an unreachable target. |
-| `stream_chunks` | list of integers | Added in #71. The byte length of each chunk of a streamed response, in arrival order: they sum to the stored response body's length, and none is 0. `[]` for a response that did not stream, and for a stored body that is empty: there is nothing to split. Absent in a recording made before #71, and read then as `[]`. |
+| `stream_chunks` | list of integers | Added in #71. The byte length of each chunk of a streamed response, in arrival order: they sum to the stored response body's length, and none is 0. `[]` for a response that did not stream, and for a stored body that is empty: there is nothing to split. |
 
 A **request** is `method`, `scheme`, `host`, `port` (integer), `path`, `query` (without the `?`),
 `headers` and `body`. A **response** is `status` (integer), `headers` and `body`.
@@ -334,7 +334,7 @@ A **request** is `method`, `scheme`, `host`, `port` (integer), `path`, `query` (
 | `error` | error or `null` | What it raised. A call something outside it stopped before it finished, its task cancelled or its coroutine closed unawaited, records `asyncio.exceptions.CancelledError` or `builtins.GeneratorExit` (`trace.STOPPED_ERROR_TYPES`): no outcome of the tool's own, so a replay never answers with it (#83). |
 | `started_at` | number | When the call began. |
 | `ended_at` | number | When it returned or raised. |
-| `awaited` | boolean | Added in #83. `true` for a sync tool that returned a coroutine: the call ended when the coroutine did, and `result` and `error` are the coroutine's, so a replay that answers it from the recording hands the agent a coroutine again. `false` for any other call. Absent in a recording made before #83, and read then as `false`. |
+| `awaited` | boolean | Added in #83. `true` for a sync tool that returned a coroutine: the call ended when the coroutine did, and `result` and `error` are the coroutine's, so a replay that answers it from the recording hands the agent a coroutine again. `false` for any other call. |
 
 **A `telemetry`** event (`trace.TelemetrySeen`) records only that one telemetry exchange happened:
 `run_id`, `host` and `started_at`. Telemetry is forwarded, and its requests and responses are never
@@ -416,15 +416,12 @@ sample workflows hold every scenario to that (`tests/workflows/test_stored_runs.
 - A decoder refuses a `schema_version` greater than its own, or less than 1, with
   `trace.TraceFormatError`.
 - A decoder ignores a field it does not know, in any record or nested object.
-- **Every field version 1 shipped with is required**: every field on this page as #68 wrote it.
+- **Every field on this page is required.**
 - **A field added later is optional on decode.** When it is absent the decoder gives the field's
-  dataclass default, so a recording made before the field existed still reads. Whoever adds the
-  field adds that decoder path and its test, and marks the field on this page with the issue that
-  added it; #71's `stream_chunks` is the first, added within version 1, #82's `replay_of` the
-  second, and #83's `awaited` the third, added within version 2. A field added within a version must be one an older reader, which ignores it, still reads
-  correctly without; adding it is not a version bump.
-- **Version 2** (#82) added `replay` to `mode`, `recording` to `answered_by` and `ran`, and
-  `replay_of` to the run record. A version 1 run reads under it unchanged.
+  default. A field added within a version must be one an older reader, which ignores it, still
+  reads correctly without; adding it is not a version bump.
+- **Version 2** added `replay` to `mode`, `recording` to `answered_by` and `ran`, and
+  `replay_of` to the run record.
 - **Version 3** added `irimi` to `answered_by`. A version 2 run reads under it unchanged; there,
   irimi's own errors are recorded as `fake-L0` flagged `decision-failed`, or `delegated` flagged
   `target-failed`. An exchange no longer has a `validation` field or `fidelity:*` flags; a reader

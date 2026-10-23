@@ -1,9 +1,8 @@
 """Deleting stored runs, for `irimi runs rm` and `irimi runs prune`.
 
-A run's bodies are content-addressed blobs that other runs may share, so removing a run removes
-only the blobs no remaining run refers to. A serve may be writing the store at any moment, so
-removal holds the store's `serve.lock` and is refused while a serve holds it. An `irimi shadow`
-takes no lock, so pruning judges a run that has not ended by when its files were last written.
+- Only blobs no remaining run refers to are removed; blobs are shared by content.
+- Removal holds `serve.lock`, so it is refused while a serve runs.
+- An `irimi shadow` takes no lock, so a run that has not ended is aged by its files' mtime.
 """
 
 import os
@@ -33,10 +32,7 @@ class Removal:
 
 
 def stored_run_ids(root: Path, run_ids: Iterable[str]) -> tuple[list[str], list[str]]:
-    """`run_ids` split into those the store at `root` holds and those it does not. A run id is
-    held when `runs/` has a directory of exactly that name, so a damaged run can still be removed,
-    and `run1` never names `Run1/` on a case-insensitive filesystem. `unattributed` is held when
-    any event went there."""
+    """Split `run_ids` into those with a `runs/` directory of exactly that name, and the rest."""
     layout = StoreLayout(root)
     try:
         names = {entry.name for entry in layout.runs.iterdir() if entry.is_dir()}
@@ -54,9 +50,7 @@ def stored_run_ids(root: Path, run_ids: Iterable[str]) -> tuple[list[str], list[
 
 
 def older_than(root: Path, cutoff: float) -> list[str]:
-    """The runs whose last known moment is before `cutoff`, newest first: the end of an ended run,
-    else when its run.json or events file was last written. A run.json irimi cannot read is
-    skipped, as `StoreReader.list_runs` skips it; `irimi runs rm` still takes it by id."""
+    """Return the readable runs last active before `cutoff`, newest first (see `_last_moment`)."""
     layout = StoreLayout(root)
     return [
         record.run_id
@@ -66,8 +60,10 @@ def older_than(root: Path, cutoff: float) -> list[str]:
 
 
 def plan(root: Path, run_ids: Iterable[str]) -> Removal:
-    """What removing `run_ids`, each one the store holds, deletes. Raises OSError when an events
-    file cannot be read, so no blob another run needs is ever counted as unused."""
+    """Return what removing `run_ids` (all held) would delete.
+
+    Raises OSError when an events file cannot be read, so no needed blob is counted as unused.
+    """
     layout = StoreLayout(root)
     runs = tuple(dict.fromkeys(run_ids))
     removed = {_events_of(layout, run_id) for run_id in runs}
@@ -84,9 +80,10 @@ def plan(root: Path, run_ids: Iterable[str]) -> Removal:
 
 
 def remove(root: Path, run_ids: Iterable[str]) -> Removal:
-    """Delete `run_ids`, each one the store holds, and the blobs only they refer to, holding the
-    store's `serve.lock` throughout. Raises StoreLocked while a serve holds it, and OSError when a
-    file cannot be read or deleted; whatever was deleted before that stays deleted."""
+    """Delete `run_ids` (all held) and the blobs only they refer to, under `serve.lock`.
+
+    Raises StoreLocked while a serve runs, or OSError; what was deleted before stays deleted.
+    """
     lock = ServeLock.hold(root)
     try:
         removal = plan(root, run_ids)
@@ -118,9 +115,7 @@ def _digests(events: Path) -> set[str]:
 
 
 def _last_moment(record: RunRecord, directory: Path) -> float:
-    """When the run ended, or for one that has not, when any of its files was last written: a
-    run an `irimi shadow` is still writing is never older than the cutoff, however long ago it
-    started."""
+    """Return when the run ended, else when its files were last written, so a live run is kept."""
     if record.end is not None:
         return record.end.ended_at
     written = []

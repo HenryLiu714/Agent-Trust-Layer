@@ -1,12 +1,6 @@
-"""The serve lock: one `serve` writes a store's root at a time.
+"""The serve lock: one `serve` per store root, as two would repeat `seq`s in `unattributed/`.
 
-ONE PROCESS WRITES A RUN; SEVERAL MAY SHARE A ROOT. Two `irimi shadow`s on the default root write
-different run directories, and a blob is written once whatever its writer. What they can share is
-`unattributed/events.jsonl`, so each line goes out as one `write` on an O_APPEND descriptor
-(`files.append_line`) and two processes never interleave inside a line. Each writer numbers its own
-lines, so that file may repeat a `seq` across processes; a run's own file never does. A `serve` is
-the writer that fills that file, so a root has at most one: it holds `serve.lock` while it runs
-(`ServeLock`), and a second one on the same root refuses to start.
+Other processes may share the root; their O_APPEND lines never interleave.
 """
 
 import fcntl
@@ -22,22 +16,14 @@ class StoreLocked(OSError):
 
 
 class ServeLock:
-    """A root's `serve.lock`, held exclusively by this process until `release()`.
-
-    `unattributed/events.jsonl` is where a serve files every request no run claims. Two serves
-    appending to it would repeat each other's `seq`, and one resuming it would cut off the other's
-    line mid-write as a crash's half line. So a root has one serve: a second one is refused at
-    once, never made to wait, and a supervisor restarting serve retries until the old process has
-    exited. The lock is the kernel's: it is released when the process exits, however it exits, so
-    a crashed serve never leaves the root locked."""
+    """A root's `serve.lock`, held until `release()`; the kernel frees it if the process dies."""
 
     def __init__(self, fd: int) -> None:
         self._fd: int | None = fd
 
     @classmethod
     def hold(cls, root: Path) -> "ServeLock":
-        """Take `root`'s `serve.lock`. Raises StoreLocked when another process holds it, and
-        OSError when the file cannot be opened."""
+        """Take `root`'s `serve.lock`, or raise StoreLocked at once if another process holds it."""
         private_dir(root)
         fd = os.open(StoreLayout(root).serve_lock, os.O_RDWR | os.O_CREAT, FILE_MODE)
         try:
@@ -51,7 +37,7 @@ class ServeLock:
         return cls(fd)
 
     def release(self) -> None:
-        """Let go of the lock: closing the descriptor releases it. Idempotent."""
+        """Release the lock by closing its descriptor. Idempotent."""
         fd, self._fd = self._fd, None
         if fd is not None:
             os.close(fd)

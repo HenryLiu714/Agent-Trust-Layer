@@ -9,6 +9,8 @@ import pytest
 from irimi.config import paths
 from irimi.sdk import _state
 
+pytest_plugins = ["tests.support.fixtures"]
+
 
 @pytest.fixture(autouse=True)
 def no_ambient_irimi(tmp_path, monkeypatch):

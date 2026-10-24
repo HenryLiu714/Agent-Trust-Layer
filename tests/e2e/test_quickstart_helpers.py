@@ -1,5 +1,4 @@
-"""The quickstart agent's helpers: which charge it picks, how it prints money, and how it sets
-stripe-python up from the environment."""
+"""The quickstart agent's helpers: picking a charge, printing money, configuring stripe-python."""
 
 from types import SimpleNamespace
 

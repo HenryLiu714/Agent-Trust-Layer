@@ -1,6 +1,6 @@
-"""What `irimi shadow` stores for the refund scenarios, read back off disk: every exchange the
-engine handed its store, redacted, with its precondition, overlay, webhooks and timing intact.
-`_SpyStore` is the real store, which also remembers each exchange it was handed."""
+"""What `irimi shadow` stores, read back off disk: each exchange redacted, its other fields intact.
+
+`_SpyStore` is the real store, also remembering each exchange it was handed."""
 
 import base64
 import dataclasses
@@ -48,10 +48,8 @@ from tests.support.upstreams import Logged, Port, serve
 
 pytestmark = pytest.mark.e2e
 
-# Their fixtures, bound here so pytest finds them: an import would be shadowed by each parameter.
-
-# The fields the live summary prints from: a stored exchange must carry each of them, or a summary
-# printed from the store cannot say what the live one said.
+# The fields the live summary prints from: a stored exchange must carry each, so a summary
+# printed from the store says what the live one said.
 REFUND_FIELDS = (
     "precondition.outcome",
     "precondition.rejection_code",
@@ -63,8 +61,7 @@ REFUND_FIELDS = (
 
 
 class _SpyStore(DirectoryStore):
-    """The store `irimi shadow` opens, unchanged, remembering each exchange the engine handed it,
-    in the order it did: the live exchanges a stored one is compared against."""
+    """The real store, also remembering each exchange the engine handed it, in order."""
 
     built: list["_SpyStore"] = []
 
@@ -91,12 +88,12 @@ class _Disk:
         return StoreReader(self.root)
 
     def process_run(self) -> StoredRun:
-        """The one run `irimi shadow` started for its child."""
+        """Return the one run `irimi shadow` started for its child."""
         (record,) = [r for r in self.reader.list_runs() if r.attribution == "process"]
         return self.reader.load_run(record.run_id)
 
     def exchanges(self) -> list[Exchange]:
-        """Every stored exchange: run by run, each in `seq` order, then the unattributed ones."""
+        """Return every stored exchange, run by run in `seq` order, then the unattributed ones."""
         ids = [r.run_id for r in self.reader.list_runs()] + [trace.UNATTRIBUTED]
         runs = [self.reader.load_run(run_id) for run_id in ids]
         return [event for run in runs for event in run.events if isinstance(event, Exchange)]
@@ -109,16 +106,16 @@ class _Disk:
         return {path.name: path.read_bytes() for path in blobs.iterdir()} if blobs.is_dir() else {}
 
     def files_holding(self, needle: bytes) -> list[Path]:
-        """Every file under the root whose bytes hold `needle`: lines, blobs and run records."""
+        """Return every file under the root whose bytes hold `needle`."""
         return [p for p in self.root.rglob("*") if p.is_file() and needle in p.read_bytes()]
 
 
 @pytest.fixture
 def stored(home, monkeypatch):
-    """Returns a function giving the store the run opened, read back after `main` returned. The
-    store dropped nothing and has nothing left to write, and it was handed exactly the exchanges
-    `irimi shadow`'s `on_exchange` printed, in the same order: the live exchanges a stored run
-    is compared against."""
+    """Return a function giving the run's store, read back after `main` returned.
+
+    It checks the store dropped nothing, has nothing queued, and was handed exactly the exchanges
+    `irimi shadow` printed, in order."""
     _SpyStore.built = []
     monkeypatch.setattr("irimi.record.store.writer.DirectoryStore", _SpyStore)
     printed: list[Exchange] = []
@@ -141,14 +138,15 @@ def stored(home, monkeypatch):
 
 
 def _assert_same(stored: Exchange, expected: Exchange) -> None:
-    """Field by field over `dataclasses.fields(Exchange)`, so a failure names the field."""
+    """Compare two exchanges field by field, so a failure names the field."""
     for field in dataclasses.fields(Exchange):
         assert getattr(stored, field.name) == getattr(expected, field.name), field.name
 
 
 def _decoded(disk: _Disk) -> list[Exchange]:
-    """The process run's exchanges read back off disk, in `seq` order: each is the exchange the
-    engine handed the store, redacted, and `seq` runs 1..n with no gap."""
+    """Return the process run's stored exchanges, checking each against its live one, redacted.
+
+    `seq` must run 1..n with no gap."""
     run = disk.process_run()
     seqs = [json.loads(line)["seq"] for line in disk.lines(run.record.run_id)]
     assert seqs == list(range(1, len(disk.received) + 1))
@@ -161,11 +159,10 @@ def _decoded(disk: _Disk) -> list[Exchange]:
 def test_the_refund_scenario_survives_the_trace_format_event_for_event(
     home, tmp_path, monkeypatch, stored
 ):
-    """The trace round trip through the real composition. The refund agent's scenario run with
-    `--store` leaves one run directory: the process run, with its argv and `outcome: ok`. Every
-    exchange `irimi shadow` handed its store - the agent's five calls and the engine's two L3
-    reads - reads back off disk equal to itself redacted, and the six summary fields each arrive
-    with the value the live summary prints from."""
+    """The refund scenario's run reads back off disk equal to what the engine stored, redacted.
+
+    It leaves one process run with its argv and `outcome: ok`, holding the agent's five calls and
+    irimi's two check reads, and every summary field arrives with its live value."""
     root = tmp_path / "trace"
     run_refund_scenario(tmp_path, monkeypatch, "--store", str(root))
 
@@ -223,10 +220,10 @@ def test_the_refund_scenario_survives_the_trace_format_event_for_event(
 def test_every_exchange_the_refund_scenario_stores_is_timed_in_completion_order(
     home, tmp_path, monkeypatch, stored
 ):
-    """Exchange timestamps, read back off disk. Every exchange spans `0 < started_at <= ended_at`
-    inside the run; each engine-issued L3 read spans its `Reader` call, inside the write it
-    checked; and `seq` is completion order, so the read is stored before its write while the write
-    started first - `started_at` is what recovers start order. The run itself spans them all."""
+    """Stored exchanges are timed inside their run, and `seq` is completion order.
+
+    Each irimi check read sits inside the write it checked, so it is stored first though the write
+    started first: `started_at` recovers start order."""
     before = time.time()
     run_refund_scenario(tmp_path, monkeypatch)
     after = time.time()
@@ -249,8 +246,7 @@ def test_every_exchange_the_refund_scenario_stores_is_timed_in_completion_order(
 
 
 # Each call names itself in its query, so the recorded exchange can be matched to what it sent.
-# Placeholders rather than `str.format`, as in `tests/support/scenarios.py`'s children. `putheader`
-# rather than a dict, because a dict cannot send one header twice.
+# `putheader` rather than a dict, because a dict cannot send one header twice.
 RUN_HEADER_CHILD = """
 import http.client, os, urllib.parse
 
@@ -290,13 +286,11 @@ call("POST", "write", [("Irimi-Run", "../x")])
 def test_an_invalid_run_header_from_a_shadowed_child_names_no_run_and_reaches_no_service(
     home, tmp_path, capfd, upstream, stored
 ):
-    """The run-id path-traversal guard through the real CLI, with the run header's strip beside
-    it. A run id becomes a directory in the trace store, so a value `trace.is_valid_run_id`
-    refuses - `../x`, 65 characters, a space - is no run id and the exchange keeps the engine's
-    own, read or faked write alike. A valid one names its run in any spelling of the header name,
-    trimmed, and a repeated header's first valid value wins. Whatever the value, no service ever
-    sees the header and no stored request carries it. On disk, each valid id is a `header` run of
-    its own, and nothing is created outside the store's root."""
+    """An `Irimi-Run` value that is no valid run id names no run, and no service sees the header.
+
+    A run id becomes a store directory, so `../x`, 65 characters or a space leave the exchange in
+    the engine's run. A valid id names its run in any header spelling, trimmed, the first valid
+    value of a repeated header winning; nothing is created outside the store's root."""
     child = tmp_path / "child.py"
     child.write_text(
         RUN_HEADER_CHILD.replace("__PORT__", str(upstream)).replace("__RUN_ENV__", RUN_ENV)
@@ -347,10 +341,10 @@ def test_an_invalid_run_header_from_a_shadowed_child_names_no_run_and_reaches_no
 def test_the_base_url_refund_survives_the_trace_format(
     home, tmp_path, monkeypatch, stripe_stand_in, stored
 ):
-    """The refund agent's read-and-refund run, stored: a read through the forward proxy, and a
-    refund through the reverse door answered from the SHIPPED Stripe map's fixture after an L3
-    read of the charge. Every exchange decodes equal and is timed, the refund's `door: reverse`
-    included, and the engine's read sits inside the refund's span."""
+    """A proxied read and a base-URL refund, faked from the shipped map's fixture, store intact.
+
+    Each exchange decodes equal and is timed, the refund's `door: reverse` included, and irimi's
+    check read sits inside the refund's span."""
     _run_base_url_refund(tmp_path, monkeypatch, stripe_stand_in)
 
     read, check, refund = _decoded(stored())
@@ -371,9 +365,9 @@ def test_the_base_url_refund_survives_the_trace_format(
 
 
 def _run_base_url_refund(tmp_path, monkeypatch, stripe_port: Port) -> None:
-    """The refund agent's read-and-refund child (`support.scenarios.BASE_URL_CHILD`) under the real
-    `irimi shadow`, against the loopback Stripe, which never hears a write. Its calls carry
-    `AGENT_STRIPE_KEY` as their bearer token."""
+    """Run `BASE_URL_CHILD` under `irimi shadow` against the loopback Stripe, which hears no write.
+
+    Its calls carry `AGENT_STRIPE_KEY` as their bearer token."""
     monkeypatch.setattr("irimi.decide.reader.UpstreamReader", StandInReader)
     StandInReader.port = stripe_port
     child = tmp_path / "child.py"
@@ -389,11 +383,10 @@ def _run_base_url_refund(tmp_path, monkeypatch, stripe_port: Port) -> None:
 def test_the_base_url_refund_redacted_for_disk_keeps_no_credential(
     home, tmp_path, monkeypatch, stripe_stand_in, stored
 ):
-    """Redaction over what a real `irimi shadow` run stored. No file under the store's root holds
-    `sk_test_` - no line, no blob, no run record - and the one bearer token is one placeholder
-    wherever it was sent, the engine's own L3 read included. Nothing else changes: swap the token
-    for its placeholder in what the engine recorded and it equals what was stored, bodies byte
-    for byte."""
+    """No stored file holds `sk_test_`, and the bearer token is one placeholder wherever it went.
+
+    That covers irimi's check read too. Swapping the token for its placeholder in what the engine
+    recorded gives exactly what was stored."""
     _run_base_url_refund(tmp_path, monkeypatch, stripe_stand_in)
     disk = stored()
     bearer = f"Bearer {AGENT_STRIPE_KEY}"
@@ -406,29 +399,20 @@ def test_the_base_url_refund_redacted_for_disk_keeps_no_credential(
 
 # ------------------------------------------------------------ redaction over real traffic
 #
-# Each redaction rule that real traffic exercises, through the real `irimi shadow`: the child below
-# makes the calls a test hands it, through the forward proxy or the reverse door, and prints what
-# it was answered. The store's writer redacts each exchange before it writes it, and
-# `_assert_stored_as` holds the two promises over the files it wrote: no secret is in any of
-# them, and swapping each secret for its placeholder in what the engine recorded gives exactly
-# what was stored - so one secret has one placeholder everywhere it went, and every other byte
-# survives. Every upstream is loopback: the stand-in below, or nothing at all.
+# Each redaction rule over real `irimi shadow` traffic, proxied or base-URL. `_assert_stored_as`
+# checks no secret is on disk and every other byte survives. Every upstream is loopback.
 
 
 def _placeholders(key: bytes, *secrets: str) -> dict[str, str]:
-    """Each secret and the placeholder it must be stored as."""
+    """Map each secret to the placeholder it must be stored as."""
     return {secret: redact.placeholder(key, secret) for secret in secrets}
 
 
 def _with_placeholders(ex: Exchange, hidden: dict[str, str]) -> Exchange:
-    """`ex` with each secret in `hidden` swapped for its stand-in in every part `redact` reads: the
-    request's path, query, headers and body, the response's headers and body, the answer target
-    and the operation. Longest secret first, so a header value holding a shorter secret is swapped
-    whole.
+    """Return `ex` with each secret in `hidden` swapped for its placeholder wherever `redact` reads.
 
-    A body is swapped byte for byte, then held to the re-serialization rule: a JSON body a rule
-    changed is re-serialized compact, and every other body - a form, a stream, bytes that are not
-    UTF-8 - keeps its bytes. A streamed body's chunks then follow it (`_chunks_after`)."""
+    Longest secret first, so a value holding a shorter secret is swapped whole. A changed JSON body
+    is re-serialized compact; any other body keeps its bytes, and a stream's chunks follow it."""
     order = sorted(hidden, key=len, reverse=True)
 
     def text(value: str) -> str:
@@ -479,9 +463,10 @@ def _with_placeholders(ex: Exchange, hidden: dict[str, str]) -> Exchange:
 
 
 def _chunks_after(sent: bytes, stored: bytes, chunks: tuple[int, ...]) -> tuple[int, ...]:
-    """The rule for a stream's chunks once its body is redacted, stated apart from `redact`'s
-    own: the two bodies pair up line for line; a boundary in an unchanged line keeps its place in
-    it, one in a changed line moves to that line's end, and boundaries that meet make one chunk."""
+    """Return a stream's chunks after redaction, by a rule stated apart from `redact`'s own.
+
+    A boundary in an unchanged line keeps its place, one in a changed line moves to that line's
+    end, and boundaries that meet make one chunk."""
     if sent == stored:
         return chunks
     old, new = sent.splitlines(keepends=True), stored.splitlines(keepends=True)
@@ -499,9 +484,8 @@ def _chunks_after(sent: bytes, stored: bytes, chunks: tuple[int, ...]) -> tuple[
 
 
 def _assert_stored_as(disk: _Disk, hidden: dict[str, str]) -> list[Exchange]:
-    """Redaction's two promises over what the store wrote: no secret in `hidden` is in any file
-    under its root, and each stored exchange is the one the engine handed the store with exactly
-    those secrets swapped for their placeholders - every field compared, bodies byte for byte.
+    """Check no secret in `hidden` is on disk and each stored exchange is its live one, swapped.
+
     Returns the stored exchanges."""
     for secret in hidden:
         assert disk.files_holding(secret.encode()) == [], secret
@@ -511,7 +495,7 @@ def _assert_stored_as(disk: _Disk, hidden: dict[str, str]) -> list[Exchange]:
     return written
 
 
-# The stand-in's own secrets and answers. Each is a value no rule would touch unless it is one.
+# The stub's own secrets and answers. Each is a value no rule would touch unless it is one.
 WEBHOOK_TOKEN = "xq9WebhookPathSecret24"  # a real one is 24 alphanumerics, no credential shape
 WEBHOOK_PATH = f"/services/T0REDACT/B0REDACT/{WEBHOOK_TOKEN}"
 WEBHOOK_BODY = b'{"text":"deploy finished"}'
@@ -546,22 +530,20 @@ SSE_BODY = (
     b'data: {"text":"key: ' + SSE_PLAIN_KEY.encode() + b'"}\n\n'
     b'data: {"text":"key:\\n' + SSE_ESCAPED_KEY.encode() + b'"}\n\n'
 )
-# Where the stand-in cuts SSE_BODY into chunks: inside the first key, at the end of the blank
-# line after it, and inside the second key. So a stored boundary moves to the end of a line
-# redaction changed, and one in a line it left alone keeps its place.
+# Chunk cuts inside the first key, after the blank line, and inside the second key, so both
+# boundary rules in `_chunks_after` are exercised.
 SSE_CUTS = (
     SSE_BODY.index(b"StreamedPlain"),
     SSE_BODY.index(b"\n\n") + 2,
     SSE_BODY.index(b"AfterAnEscape"),
 )
-# How long the stand-in waits between chunks, so the proxy reads each one on its own.
+# How long the stub waits between chunks, so the proxy reads each one on its own.
 SSE_CHUNK_GAP_S = 0.05
 SESSION_COOKIE = "session=cookie-secret-77; Path=/; HttpOnly"
 BINARY_BODY = b"\x89PNG\r\n\x1a\n\xff\xfe\x00 not UTF-8, stored as it came"
 
-# The stand-in's host, claimed as a service so its routes classify: an LLM that answers JSON or a
-# stream, and a read that sets a cookie over a binary body. Added beside the shipped maps, which
-# the Slack webhook and the Stripe write need.
+# The stub's host as a service, so its routes classify. It sits beside the shipped maps, which the
+# Slack webhook and the Stripe write need.
 STANDIN_MAP = """
 version: 1
 service: standin
@@ -590,9 +572,9 @@ routes:
 
 
 class _RedactStandIn(Logged):
-    """Everything on the other side of the proxy in the redaction runs, and the webhook's answer
-    target. It records every request as it arrived, which is how a test sees that the live request
-    was never redacted."""
+    """The upstream and webhook target in the redaction runs, recording each request as it came.
+
+    That record shows the live request was never redacted."""
 
     def _answer(
         self, content_type: str, body: bytes, extra: Headers = (), cuts: tuple[int, ...] = ()
@@ -634,8 +616,7 @@ def redact_stand_in():
 
 @dataclasses.dataclass(frozen=True)
 class _Call:
-    """One request for CALLS_CHILD to make. `host` "" is the reverse door: the listener's own
-    authority, which only the child knows."""
+    """One request for CALLS_CHILD to make; `host` "" sends it in base-URL mode, to the listener."""
 
     method: str
     target: str
@@ -656,11 +637,8 @@ class _Answer:
         return header_value(self.headers, name)
 
 
-# Makes the calls in the JSON file it is handed, in order, each through the listener, and writes
-# what came back to the second file. A file and not stdout: irimi prints each exchange's line to
-# the same stdout as it finishes, and a streamed one finishes as the child reads it, so the two
-# interleave. `putheader` rather than a dict, as in RUN_HEADER_CHILD, so what the test lists is
-# exactly what is sent.
+# Makes the calls in its first file through the listener and writes the answers to its second.
+# A file, not stdout: irimi's own lines interleave with a stream the child is still reading.
 CALLS_CHILD = """
 import base64, http.client, json, os, sys, urllib.parse
 
@@ -690,9 +668,10 @@ with open(sys.argv[2], "w") as f:
 def _run_calls_under_shadow(
     tmp_path, monkeypatch, stand_in: int, calls: list[_Call], *flags: str
 ) -> list[_Answer]:
-    """`calls` from a child of the real `irimi shadow`, over the shipped maps plus STANDIN_MAP, and
-    what the child was answered for each. `flags` go before the `--`. The engine's own L3 reader
-    is pointed at the stand-in, so nothing here can dial a real host even by mistake."""
+    """Make `calls` from a child of `irimi shadow` and return what it was answered for each.
+
+    The maps are the shipped ones plus STANDIN_MAP, and `flags` go before the `--`. irimi's check
+    reads go to the stub, so nothing can dial a real host."""
     maps_dir = tmp_path / "shipped"
     shutil.copytree(loader.shipped_dir(), maps_dir)
     (maps_dir / "standin.yaml").write_text(STANDIN_MAP)
@@ -724,8 +703,7 @@ def _run_calls_under_shadow(
 
 
 def _webhook_call() -> _Call:
-    """An incoming-webhook post through the reverse door, as slack_sdk's WebhookClient makes it
-    once its URL is the door's."""
+    """Return a base-URL Slack webhook post, as slack_sdk's WebhookClient makes it."""
     return _Call(
         "POST",
         "/hooks.slack.com" + WEBHOOK_PATH,
@@ -737,11 +715,10 @@ def _webhook_call() -> _Call:
 def test_a_delegated_slack_webhook_stores_its_secret_path_as_one_placeholder_in_path_and_target(
     home, tmp_path, monkeypatch, redact_stand_in, stored
 ):
-    """The credential-path rule over a real delegated write. A `hooks.slack.com/services/T/B/
-    <secret>` post through the reverse door, its service pointed at a bare-origin loopback target,
-    reaches that target on its own path (`targets.target_url`), so the secret is in both the
-    request path and `Exchange.target`. On disk both hold the one placeholder of the whole path and
-    the target keeps its origin; the target heard, and the agent was answered, unredacted."""
+    """A webhook sent to a target stores its secret path as one placeholder in path and target.
+
+    A bare-origin target gets the request's own path, so the secret is in both. On disk the target
+    keeps its origin; the target heard, and the agent was answered, unredacted."""
     origin = f"http://127.0.0.1:{redact_stand_in}"
     (answer,) = _run_calls_under_shadow(
         tmp_path,
@@ -778,10 +755,9 @@ def test_a_delegated_slack_webhook_stores_its_secret_path_as_one_placeholder_in_
 def test_an_unreachable_webhook_target_leaves_its_secret_path_nowhere_on_disk(
     home, tmp_path, monkeypatch, redact_stand_in, stored
 ):
-    """Redaction over a target's failure answer. When a webhook's loopback target is not
-    listening, irimi answers a 502 whose JSON names the target, and a bare-origin target's URL
-    carries the secret path. The agent is told (its answer is never redacted), and the copy for
-    disk holds the path nowhere: not the request, not `Exchange.target`, not the 502's body."""
+    """irimi's 502 for an unreachable webhook target names the target, but not on disk.
+
+    The agent's answer holds the secret path; the stored request, target and 502 body do not."""
     closed = socket.socket()
     closed.bind(("127.0.0.1", 0))
     dead = closed.getsockname()[1]
@@ -817,13 +793,11 @@ def test_an_unreachable_webhook_target_leaves_its_secret_path_nowhere_on_disk(
 def test_a_stripe_form_write_through_the_door_stores_its_card_token_and_query_key_as_placeholders(
     home, tmp_path, monkeypatch, redact_stand_in, stored
 ):
-    """The secret-key rule over a real faked write. A Stripe form post through the reverse door
-    with `card[token]=…&amount=100` and `?api_key=…` stores the token (by its last bracket
-    segment) and the query key (by its name) as placeholders, and the bearer header as one;
-    `amount=100` and every other byte survive. `/v1/payment_methods` is a route the shipped map
-    does not list, so irimi answers with the L0 echo, which reflects the token back as JSON
-    (`{"card": {"token": …}}`): the one token is one placeholder in the form and in the answer.
-    The agent's own answer is irimi's, unredacted."""
+    """A faked form write stores its card token, query key and bearer as placeholders.
+
+    The token is found by its last bracket segment, the key by its name; every other byte
+    survives. The unlisted route gets the echo, which reflects the token back, so the one token is
+    one placeholder in the form and in the answer. The agent's answer is unredacted."""
     (answer,) = _run_calls_under_shadow(
         tmp_path,
         monkeypatch,
@@ -867,11 +841,10 @@ def test_a_stripe_form_write_through_the_door_stores_its_card_token_and_query_ke
 def test_an_llm_request_stores_a_nested_live_key_and_a_token_key_as_placeholders_not_max_tokens(
     home, tmp_path, monkeypatch, redact_stand_in, stored
 ):
-    """The JSON redaction rules over a real live LLM call through the forward proxy. An `sk_live_`
-    key three objects deep and a whole `token` key are placeholders on disk, `max_tokens` is not,
-    and the `x-api-key` header is one placeholder. The model's answer echoes the nested key, and
-    it is stored as the same placeholder as the request's. The stand-in heard, and the agent was
-    answered, unredacted - a live forward carries no `Irimi-Answered-By`."""
+    """A live LLM call stores a nested `sk_live_` key and a `token` key as placeholders.
+
+    `max_tokens` is kept and `x-api-key` is one placeholder. The answer echoes the nested key and
+    stores the same placeholder. The stub heard, and the agent got, everything unredacted."""
     authority = f"127.0.0.1:{redact_stand_in}"
     (answer,) = _run_calls_under_shadow(
         tmp_path,
@@ -915,10 +888,9 @@ def test_an_llm_request_stores_a_nested_live_key_and_a_token_key_as_placeholders
 def test_a_streamed_sse_answer_is_stored_whole_with_each_live_key_as_its_placeholder(
     home, tmp_path, monkeypatch, redact_stand_in, stored
 ):
-    """The text redaction rule over a real, recorded `text/event-stream` answer. The agent reads
-    the whole stream unredacted, both keys included. The engine streams it through and records
-    the chunks it sent, and the run's own store holds that body with each key as its placeholder:
-    the second key too, which follows a JSON `\\n` escape inside the data line."""
+    """A recorded event stream is stored whole, each key as its placeholder.
+
+    The agent reads it unredacted. The second key follows a JSON `\\n` escape in its data line."""
     authority = f"127.0.0.1:{redact_stand_in}"
     (answer,) = _run_calls_under_shadow(
         tmp_path,
@@ -943,7 +915,7 @@ def test_a_streamed_sse_answer_is_stored_whole_with_each_live_key_as_its_placeho
     (ex,) = disk.received
     assert (ex.kind, ex.answered_by, ex.flags) == ("llm", "live", ())
     assert ex.response is not None and ex.response.body == SSE_BODY
-    # The proxy may read two of the stand-in's pieces as one; more than one chunk is what it pins.
+    # The proxy may read two of the stub's pieces as one; more than one chunk is what it pins.
     assert len(ex.stream_chunks) > 1 and sum(ex.stream_chunks) == len(SSE_BODY)
 
     hidden = _placeholders(disk.key, SSE_PLAIN_KEY, SSE_ESCAPED_KEY)
@@ -957,9 +929,9 @@ def test_a_streamed_sse_answer_is_stored_whole_with_each_live_key_as_its_placeho
 def test_a_live_reads_set_cookie_is_stored_as_a_placeholder_and_its_binary_body_unchanged(
     home, tmp_path, monkeypatch, redact_stand_in, stored
 ):
-    """The response-header redaction rule and its binary limitation over a real live read. The
-    response's `Set-Cookie` is one placeholder on disk; its body is not UTF-8, so it is stored
-    unscanned and byte for byte. The agent got the cookie and the body as the stand-in sent them."""
+    """A live read's `Set-Cookie` is stored as a placeholder, its non-UTF-8 body byte for byte.
+
+    The agent got the cookie and the body as the stub sent them."""
     authority = f"127.0.0.1:{redact_stand_in}"
     (answer,) = _run_calls_under_shadow(
         tmp_path,

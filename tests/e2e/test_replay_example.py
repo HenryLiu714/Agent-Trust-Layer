@@ -1,9 +1,6 @@
-"""The replay example recorded under `irimi shadow`, its prompt edited, and replayed: the replay
-names where it diverged and which writes changed, and no write reaches a real service.
+"""The replay example recorded, its prompt edited and replayed: the replay shows what changed.
 
-The agent calls `api.stripe.com` and `api.anthropic.com` on the stubs' ports, names only irimi's
-process resolves (`IRIMI`), for the reason `tests/support/scenarios.py` gives about `NO_PROXY`.
-Routing is proved from the store: each stub heard exactly what irimi stored as live."""
+Stubs use names only irimi resolves, for the `NO_PROXY` reason in `tests/support/scenarios.py`."""
 
 import contextlib
 import json
@@ -60,15 +57,11 @@ PROMPT_FILE_ENV = "PROMPT_FILE"
 DB_ENV = "REFUND_DB"
 # The names the stubs answer as, which only irimi's process resolves, to loopback.
 SERVED = ("api.stripe.com", "api.anthropic.com")
-# How long one irimi process may take: a CI runner starts an agent in seconds, so this is a hang.
-# irimi dumps every thread's stack to its stderr before the test gives up on it, so a hang on a
-# slow runner says where it was.
+# A hang guard for one irimi process. irimi dumps every thread's stack to stderr before the test
+# gives up, so a hang says where it was.
 TIMEOUT_S = 120
-# irimi as `irimi.cli.main`, in a process where `SERVED` resolves to loopback, the stubs' ports
-# being in the agent's URLs, and no other name resolves at all. irimi's L3 read names no proxy
-# (`UpstreamReader`), but anything else there that asks urllib would take the shell's or
-# the system's proxy past the fake names: `*` keeps it direct, as the sample workflows keep theirs.
-# irimi sets its child's own `NO_PROXY`.
+# `irimi.cli.main` in a process where only `SERVED` resolves, to loopback. `NO_PROXY=*` keeps
+# irimi's own urllib calls off the shell's proxy; irimi sets its child's `NO_PROXY` itself.
 IRIMI = f"""
 import faulthandler
 import os
@@ -85,11 +78,10 @@ with resolving_only({SERVED!r}):
 
 
 def _model(handler, body):
-    """Anthropic's `POST /v1/messages`, deciding from the system prompt alone: the charge's whole
-    remaining amount for `prompt.txt`, half of it for `prompt_half.txt`. A request the real API
-    would refuse - no key or version header, no model, `max_tokens` or messages, no JSON-schema
-    output format or one that leaves `additionalProperties` open - and any other prompt is a 400.
-    Answers as a thinking model does, its empty `thinking` block first."""
+    """Answer Anthropic's `POST /v1/messages`: refund all for `prompt.txt`, half for the other.
+
+    A request the real API would refuse, or any other prompt, is a 400. The answer opens with an
+    empty `thinking` block, as a thinking model's does."""
     prompts = {PROMPT.read_text(): 1, PROMPT_HALF.read_text(): 2}
     output = body.get("output_config", {}).get("format", {})
     key = handler.headers.get("x-api-key") or handler.headers.get("authorization", "")
@@ -137,8 +129,7 @@ def stubs():
 
 @pytest.fixture
 def direct(monkeypatch):
-    """The agent called in this process reaches a loopback stub directly, whatever proxy the shell
-    or the system names: an in-process call is not under irimi, and is not meant to be."""
+    """Send the agent's in-process calls straight to the stubs, whatever proxy the shell names."""
     for name in [n for n in os.environ if n.lower().endswith("_proxy")]:
         monkeypatch.delenv(name)
     monkeypatch.setenv("NO_PROXY", "*")
@@ -153,8 +144,9 @@ def home(home, monkeypatch):
 
 
 def _agent_env(home: Path, stripe_port: int, model_port: int) -> dict[str, str]:
-    """The environment irimi and so the agent run in: the stubs by their real names, test keys,
-    and the agent's own database. No proxy of the runner's own: irimi sets its child's."""
+    """Return the environment for irimi and the agent: stubs by real names, test keys, a database.
+
+    It drops the runner's own proxy variables: irimi sets its child's."""
     env = {k: v for k, v in os.environ.items() if not k.lower().endswith("_proxy")}
     for name in (STRIPE_KEY_ENV, ANTHROPIC_KEY_ENV, MODEL_ENV, PROMPT_FILE_ENV):
         env.pop(name, None)
@@ -173,9 +165,9 @@ def _agent_env(home: Path, stripe_port: int, model_port: int) -> dict[str, str]:
 
 
 def _irimi(env: dict[str, str], *argv: str) -> subprocess.CompletedProcess[str]:
-    """`irimi <argv>` through `IRIMI`, from the repository root, so the child it starts imports
-    `examples.replay` as the agent's user would. A hang fails with what irimi printed,
-    its threads' stacks included."""
+    """Run `irimi <argv>` through `IRIMI` from the repository root, as the example's user would.
+
+    A hang fails the test with irimi's stderr, its threads' stacks included."""
     try:
         return subprocess.run(
             [sys.executable, "-c", IRIMI, *argv],
@@ -242,12 +234,10 @@ def _heard_stripe(stubs) -> list[tuple[str, str]]:
 def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_changed(
     home, stubs, monkeypatch, capsys
 ):
-    """Record an LLM agent's run, edit its prompt, replay it: the replay shows where it diverged
-    and which writes changed, and no write or write tool ran for real."""
+    """A replay after a prompt edit shows what changed, and no write runs for real."""
     assert set(SERVED).isdisjoint(runner.NO_PROXY_VALUE.split(",")), "the trap: see the module doc"
-    # The bootstrap's rule, before irimi relies on it: each served name is loopback, so nothing
-    # irimi sends in this test can leave the machine. Were it the real address, a forward
-    # would hang on a real host's closed port until the timeout, rather than fail here.
+    # Each served name resolves to loopback, so nothing irimi sends can leave the machine. Checked
+    # first, so a wrong address fails here rather than hanging on a real host.
     with resolving_only(SERVED):
         for name in SERVED:
             assert socket.gethostbyname(name) == "127.0.0.1"
@@ -257,8 +247,7 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
     db = home / "agent.sqlite3"
     seed.seed(str(db), TICKET[1], CUSTOMER)
 
-    # --- Record: the agent under `irimi shadow`, as its user runs it. Features 1 and 2: one run,
-    # the SDK's, stored with its trigger and its args.
+    # --- Record: the agent under `irimi shadow`. The SDK's run is stored with its trigger and args.
     command = [sys.executable, "-m", "examples.replay.agent", *TICKET]
     shadow = _irimi(env, "shadow", "--port", "0", "--store", str(store), "--", *command)
     assert shadow.returncode == 0, shadow.stderr
@@ -296,7 +285,7 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
         b"charge=ch_A&amount=4900",
         "passed",
     )
-    # Feature 3: the read tool ran for real, and the write tool's fake in its body's place.
+    # The read tool ran for real, and the write tool's fake ran in place of its body.
     tools = _tool_calls(reader, source)
     assert tools["db.lookup_customer"].result == {"charge": "ch_A", "name": CUSTOMER}
     decided = {"refund_amount": 4900, "reply": "Refunded 4900."}
@@ -304,16 +293,16 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
     assert tools["db.record_decision"].result == {"recorded": False}
     # Neither write happened: Stripe heard no refund, and the database holds no decision.
     assert _decisions(db) == []
-    # The proxy was in the path: each stub heard exactly what irimi stored as live, the agent's
-    # charge read and irimi's own L3 read of it, and the one model call.
+    # Each stub heard exactly what irimi stored as live: the agent's charge read, irimi's check
+    # read of it, and the one model call.
     live = [e for e in events if isinstance(e, Exchange) and e.answered_by == "live"]
     assert _heard_stripe(stubs) == [("GET", "/v1/charges/ch_A")] * 2
     assert len(stubs.stripe.seen) == sum(e.request.host == "api.stripe.com" for e in live)
     assert [m["system"] for m in stubs.llm.seen] == [PROMPT.read_text()]
     assert len(stubs.llm.seen) == sum(e.kind == "llm" for e in live)
 
-    # --- Replay, unchanged (feature 4). The database is gone, so a real `lookup_customer` would
-    # raise: it is answered from the recording.
+    # --- Replay, unchanged. The database is gone, so a real `lookup_customer` would raise: it is
+    # answered from the recording.
     db.unlink()
     stubs.forget()
     done, same = _replay(env, store, source, home / "same.json")
@@ -344,7 +333,7 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
     assert tools["db.lookup_customer"].result == {"charge": "ch_A", "name": CUSTOMER}
     assert not db.exists()
 
-    # --- Replay, the prompt edited (feature 4): the model is asked again, and decides half.
+    # --- Replay with the prompt edited: the model is asked again, and decides half.
     edited_env = {**env, PROMPT_FILE_ENV: str(PROMPT_HALF)}
     done, edited = _replay(edited_env, store, source, home / "edited.json")
     assert done.returncode == edited.exit_code == 1, done.stderr
@@ -369,8 +358,8 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
         "",
         "  0 same · 2 changed · 0 only in A · 0 only in B",
     )
-    # The model heard the edited prompt, once; Stripe heard nothing: the charge read came from
-    # the recording, and so did the L3 read the missed refund was checked against.
+    # The model heard the edited prompt once. Stripe heard nothing: the charge read and the check
+    # read for the changed refund both came from the recording.
     assert [m["system"] for m in stubs.llm.seen] == [PROMPT_HALF.read_text()]
     assert stubs.stripe.seen == []
     assert edited.replay_run_id is not None
@@ -380,7 +369,7 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
     assert tools["db.record_decision"].ran == "shadow"
     assert not db.exists()
 
-    # --- The function form, from a test (feature 4): the same two replays, the same results.
+    # --- `irimi.testing.replay`: the same two replays, the same results.
     def run_irimi(argv: list[str], env: dict[str, str]) -> int:
         command = [sys.executable, "-c", IRIMI, *argv]
         return subprocess.run(command, env=dict(env), timeout=TIMEOUT_S, check=False).returncode
@@ -388,8 +377,8 @@ def test_an_llm_agent_recorded_then_replayed_with_its_prompt_edited_shows_what_c
     monkeypatch.setattr(testing, "_run_irimi", run_irimi)
     for name in [n for n in os.environ if n.lower().endswith("_proxy")]:
         monkeypatch.delenv(name)
-    # What `_agent_env` leaves out, a shell's own included, or the replay asks what the recording
-    # never did.
+    # Clear what `_agent_env` leaves out, the shell's values included, so the replay asks nothing
+    # the recording did not.
     for name in (MODEL_ENV, PROMPT_FILE_ENV):
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
@@ -430,8 +419,7 @@ def stripe_settings(monkeypatch):
 
 @pytest.fixture
 def model_answering(monkeypatch, direct):
-    """`model_answering(answer)` points the agent's anthropic client at a loopback model that
-    answers every call with the message `answer` completes."""
+    """Yield `answering(answer)`, which points the agent at a model that always answers `answer`."""
     ports = []
 
     def answering(answer: dict[str, Any]) -> None:
@@ -453,8 +441,7 @@ def model_answering(monkeypatch, direct):
 
 
 def test_the_agent_sends_no_stripe_key_that_is_not_test_mode(monkeypatch, stubs, stripe_settings):
-    """The check is on the trigger's path, so a replay, which calls the trigger without `main()`,
-    makes it too: a live key is refused before anything is sent."""
+    """The trigger refuses a live key before sending anything, so a replay checks the key too."""
     monkeypatch.setenv(STRIPE_KEY_ENV, REFUSED_LIVE_KEY)
     monkeypatch.setenv(STRIPE_BASE_ENV, f"http://127.0.0.1:{stubs[0]}")
     with pytest.raises(ValueError, match=r"STRIPE_API_KEY must be a test-mode key \(sk_test_"):
@@ -464,8 +451,7 @@ def test_the_agent_sends_no_stripe_key_that_is_not_test_mode(monkeypatch, stubs,
 
 @pytest.mark.parametrize("stop", ["refusal", "max_tokens"])
 def test_the_agent_takes_no_decision_from_an_answer_that_stopped_short(model_answering, stop):
-    """A refused answer, or one cut at `max_tokens`, holds no decision to act on, whatever its text
-    says."""
+    """A refused answer, or one cut at `max_tokens`, holds no decision, whatever its text says."""
     text = json.dumps({"refund_amount": 1, "reply": ""})
     model_answering({"stop_reason": stop, "content": [{"type": "text", "text": text}]})
     with pytest.raises(ValueError, match=f"stopped without a decision: {stop}"):
@@ -492,8 +478,9 @@ def test_the_agent_takes_no_decision_from_an_answer_that_stopped_short(model_ans
     ],
 )
 def test_the_agent_takes_no_decision_from_an_answer_that_holds_none(model_answering, answer):
-    """An answer is acted on only when its text is the decision `DECISION_SCHEMA` asks for: an
-    integer amount (not `true`, which Python counts as 1) and a reply."""
+    """Only text matching `DECISION_SCHEMA` is a decision: an integer amount and a reply.
+
+    `true` is not an amount, though Python counts it as 1."""
     model_answering(answer)
     with pytest.raises(ValueError, match="the model did not answer with a decision: "):
         agent.ask_model(PROMPT.read_text(), "{}")
@@ -503,9 +490,9 @@ def test_the_agent_takes_no_decision_from_an_answer_that_holds_none(model_answer
 def test_outside_irimi_the_agent_refunds_what_the_model_decided_and_records_it(
     tmp_path, monkeypatch, stripe_settings, amount
 ):
-    """The control for every "nothing happened" assertion above: run with no irimi, the agent's
-    tools run for real, so `record_decision` writes its row, and the refund is asked of Stripe -
-    none when the model decides nothing."""
+    """Without irimi the tools run for real and the refund is sent, the control for the tests above.
+
+    No refund is sent when the model decides nothing."""
     monkeypatch.delenv(ENGINE_ACTIVE_ENV, raising=False)
     monkeypatch.setenv(STRIPE_KEY_ENV, HERMETIC_STRIPE_KEY)
     db = tmp_path / "agent.sqlite3"
@@ -544,8 +531,9 @@ def test_outside_irimi_the_agent_refunds_what_the_model_decided_and_records_it(
 def test_the_read_tool_raises_for_a_database_that_is_not_there_and_makes_none(
     tmp_path, monkeypatch
 ):
-    """Why deleting the database proves a replay's `lookup_customer` came from the recording: the
-    real one, run with no database, raises rather than answer from an empty file it made."""
+    """The real `lookup_customer` raises without a database rather than create an empty one.
+
+    So a replay that answers it with the database gone answered from the recording."""
     monkeypatch.delenv(ENGINE_ACTIVE_ENV, raising=False)
     db = tmp_path / "agent.sqlite3"
     monkeypatch.setenv(DB_ENV, str(db))

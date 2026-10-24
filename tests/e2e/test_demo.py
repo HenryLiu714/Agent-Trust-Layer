@@ -1,5 +1,4 @@
-"""`scripts/demo.py`, what `make demo` runs: each example under `irimi shadow` against the fake
-internet, with no keys, and no write reaching a fake service."""
+"""`scripts/demo.py` runs each example keyless under `irimi shadow`, and no write gets through."""
 
 import pytest
 

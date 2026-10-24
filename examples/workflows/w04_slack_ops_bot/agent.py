@@ -39,6 +39,9 @@ ALICE = "U0ALICE"
 THREAD_TS = "1790000000.000100"  # the parent of the thread the bot is mentioned in
 MENTION_TS = "1790000000.000200"
 
+# The follow-up text an operator configures, posted after every answer.
+FOLLOW_UP_ENV = "OPS_FOLLOW_UP"
+
 _seen_events: set[str] = set()
 _seen_lock = threading.Lock()
 _failures: list[str] = []
@@ -65,6 +68,10 @@ def on_mention(event: dict[str, Any]) -> None:
 
     posted = agentkit.slack("chat.postMessage", channel=post_to, text=answer, thread_ts=thread)
     _check("post_reply", posted)
+    # An operator's canned follow-up, posted in the thread after every answer.
+    follow_up = os.environ.get(FOLLOW_UP_ENV)
+    if follow_up:
+        agentkit.slack("chat.postMessage", channel=post_to, text=follow_up, thread_ts=thread)
     reacted = agentkit.slack("reactions.add", channel=channel, name="eyes", timestamp=event["ts"])
     agentkit.obs("reacted", ok=reacted.get("ok"), keys=sorted(reacted))
     agentkit.slack(

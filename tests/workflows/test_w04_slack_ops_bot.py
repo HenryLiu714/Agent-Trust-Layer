@@ -351,3 +351,35 @@ def test_rows_not_shown_finds_a_row_no_summary_printed_and_a_pair_not_told_apart
     forged = [out[pair].replace("\\nNext", "\\\\\\\\nNext"), out[pair + 1]]
     tampered = [*out[:pair], *forged, *out[pair + 2 :]]
     assert rows_not_shown(typed, a, b, tampered) == forged
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_irimi_compare_escapes_every_write_that_prints_like_another(shared_store_run, mode):
+    """B posts the typed backslash-n and then the newline, A the newline alone. The newline post
+    is one both made, and the typed one only B made; the two print alike, so compare prints both
+    rows with each backslash escaped, the `=` row's newline as `\\n` and the `+` row's typed one
+    as `\\\\n`, even though they are no pair."""
+    newline = shared_store_run(W, "two_line_answer")
+    both = shared_store_run(W, "typed_escape_then_two_lines", mode)
+    assert check_invariants(both) == []
+    code, out, err = compare(newline, both)
+    a, b = (result.one("run.start")["run"] for result in (newline, both))
+    assert (code, err) == (1, [])
+    assert out == [
+        f"irimi compare · {a} vs {b}",
+        f"  A  {ON_MENTION}",
+        f"  B  {ON_MENTION}",
+        "",
+        f'  + ○ slack  post to #C0OPS: "Payouts are on schedule.\\\\nNext run at 09:00."  '
+        f"{CHECKED}",
+        f'  = ○ slack  post to #C0OPS: "Payouts are on schedule.\\nNext run at 09:00."  {CHECKED}',
+        "  = ○ slack  add :eyes: to a message in C0OPS  faked; not checked",
+        "  = ○ slack  upload status.csv to C0OPS  faked; not checked",
+        f"  = {WEBHOOK_POST}",
+        "",
+        "  4 same · 0 changed · 0 only in A · 1 only in B",
+    ]
+    assert rows_not_shown(both, a, b, out) == []
+    # The `+` row alone, with nothing else printed alike, is not a line B's summary printed.
+    alone = [*out[:5], *out[6:]]
+    assert rows_not_shown(both, a, b, alone) == [out[4]]

@@ -8,8 +8,8 @@ asked rather than what, as a replay matches it (`replay.index.compared_body`). A
 template names a few of a write's fields, so two customer updates that print one line may still
 differ; such a pair prints the fields that differ under its two lines.
 
-The summary's line is still what each action prints (`sentence`). A pair whose lines differ but
-print alike, since escaping prints a newline and a typed `\\n` alike, prints both with each
+The summary's line is still what each action prints (`sentence`). Two actions whose lines differ
+but print alike, since escaping prints a newline and a typed `\\n` alike, print with each
 backslash escaped too, the one place a comparison does not print the summary's line
 (`_row_lines`).
 
@@ -35,6 +35,7 @@ alignment.
 import difflib
 import hashlib
 import json
+import re
 import unicodedata
 from collections.abc import Callable, Hashable, Iterator, Sequence
 from dataclasses import dataclass
@@ -176,7 +177,8 @@ class Comparison:
 
     def lines(self) -> list[str]:
         """Every row, then a blank line and the totals; the totals alone when neither run wrote."""
-        rows = [line for row in self.rows for line in _row_lines(row)]
+        alike = _printed_alike(self.rows)
+        rows = [line for row in self.rows for line in _row_lines(row, alike)]
         return [*rows, "", self._totals()] if rows else [self._totals()]
 
     def _totals(self) -> str:
@@ -213,8 +215,19 @@ def _spread(name: str, value: JSONValue) -> dict[str, JSONValue]:
     """An object's members as fields of their own, `name.member` in member order, so a diff names
     the one that differs; anything else as the one field `name`."""
     if isinstance(value, dict):
-        return {f"{name}.{member}": value[member] for member in sorted(value)}
+        return {_member(name, member): value[member] for member in sorted(value)}
     return {name: value}
+
+
+# A member name a field diff prints as it is; any other is printed as its JSON string.
+_PLAIN_MEMBER = re.compile(r"[A-Za-z0-9_$@:\[\]-]+")
+
+
+def _member(name: str, member: str) -> str:
+    """`name.member`, the member quoted as a JSON string unless it is plain: two members that
+    differ by a newline and a typed `\\n`, a dot or a character that prints as nothing then
+    never print as one name."""
+    return f"{name}.{member if _PLAIN_MEMBER.fullmatch(member) else canonical_json(member)}"
 
 
 def _exchange_action(entry: WriteEntry) -> Action:
@@ -345,27 +358,39 @@ def _args(record: RunRecord) -> str:
     return canonical_json(trigger_args(record.trigger) if record.trigger is not None else None)
 
 
-def _row_lines(row: Row) -> list[str]:
+def _printed_alike(rows: Sequence[Row]) -> frozenset[str]:
+    """Each `seen` text two of the comparison's actions with different sentences share: in a pair,
+    or in two rows, as a post B added beside the one it shares with A."""
+    sentences: dict[str, set[str]] = {}
+    for row in rows:
+        for action in (row.a, row.b):
+            if action is not None:
+                sentences.setdefault(action.seen, set()).add(action.sentence)
+    return frozenset(seen for seen, alike in sentences.items() if len(alike) > 1)
+
+
+def _row_lines(row: Row, alike: frozenset[str] = frozenset()) -> list[str]:
     """A pair that differs prints both sides, A over B; every other row prints its one action.
 
     Escaping leaves a backslash as it is, so a Slack post holding a newline and one holding a
     typed `\\n` print one line, and a `~` over two identical lines tells its reader nothing.
-    A pair whose sentences differ but print alike to a reader prints both with each backslash
-    escaped first, the newline as `\\n` and the typed one as `\\\\n`, and each character a reader
-    cannot see spelled as its escape: a zero-width space, a no-break space. A pair whose sentences
-    are one string prints the fields that differ under them."""
+    An action whose sentence prints like another's in the comparison (`alike`) prints with each
+    backslash escaped first, the newline as `\\n` and the typed one as `\\\\n`, and each
+    character a reader cannot see spelled as its escape: a zero-width space, a no-break space. A
+    pair whose sentences are one string prints the fields that differ under them."""
     marker = MARKERS[row.mark]
+
+    def shown(action: Action) -> str:
+        return action.escaped if action.seen in alike else action.text
+
     if row.mark in ("changed", "cut") and row.a is not None and row.b is not None:
-        a, b = row.a.text, row.b.text
-        if row.a.seen == row.b.seen and row.a.sentence != row.b.sentence:
-            a, b = row.a.escaped, row.b.escaped
-        lines = [f"  {marker} A {a}", f"    B {b}"]
+        lines = [f"  {marker} A {shown(row.a)}", f"    B {shown(row.b)}"]
         if row.mark == "changed" and row.a.sentence == row.b.sentence:
             lines += field_diff(row.a, row.b)
         return lines
     action = row.a if row.a is not None else row.b
     assert action is not None, row
-    return [f"  {marker} {action.text}"]
+    return [f"  {marker} {shown(action)}"]
 
 
 def field_diff(a: Action, b: Action) -> list[str]:
@@ -401,7 +426,7 @@ def _differences(name: str, x: object, y: object, depth: int = 0) -> list[str]:
             line
             for member in sorted(x.keys() | y.keys())
             for line in _differences(
-                f"{name}.{member}", x.get(member, _NONE), y.get(member, _NONE), depth + 1
+                _member(name, member), x.get(member, _NONE), y.get(member, _NONE), depth + 1
             )
         ]
     return [f"{name}: {_shown(x)} -> {_shown(y)}"]

@@ -614,6 +614,17 @@ def test_irimi_compare_of_every_stored_run_with_itself_is_its_summary_s_writes(
                 rows = rows[1:]
         http = [w for w in writes if not TOOL_WRITE.match(w)]
         assert len(http) == len(cut), (run_id, http, cut)
+        # Two writes whose lines print alike (W4's newline and typed backslash-n) are each
+        # printed with every backslash escaped too: the row is its line, backslashes doubled.
+        compared = [
+            (
+                mark,
+                text.replace("\\\\", "\\")
+                if writes.count(text.replace("\\\\", "\\")) > 1
+                else text,
+            )
+            for mark, text in compared
+        ]
         assert [row for row in compared if not TOOL_WRITE.match(row[1])] == [
             ("?" if c else "=", w) for w, c in zip(http, cut, strict=True)
         ], run_id

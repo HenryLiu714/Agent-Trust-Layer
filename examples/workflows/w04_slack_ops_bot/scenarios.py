@@ -9,6 +9,7 @@ from examples.workflows.harness.services import LlmCall, LlmTurn, World
 from examples.workflows.w04_slack_ops_bot.agent import (
     ALICE,
     ARCHIVED,
+    FOLLOW_UP_ENV,
     MENTION_TS,
     OPS,
     THREAD_TS,
@@ -119,6 +120,13 @@ WORKFLOW = Workflow(
             setup=_answering(TYPED_ESCAPE),
             doc="mention_in_thread with an answer holding a typed backslash-n, which prints as "
             "two_line_answer's newline does, and is not the same post (#79)",
+        ),
+        "typed_escape_then_two_lines": Scenario(
+            ("mention_in_thread",),
+            env={FOLLOW_UP_ENV: TWO_LINES},
+            setup=_answering(TYPED_ESCAPE),
+            doc="typed_escape_answer, then two_line_answer's text as a follow-up in the same run: "
+            "beside two_line_answer, one post both made and one that prints alike only B made",
         ),
         "duplicate_delivery": Scenario(
             ("duplicate_delivery",),

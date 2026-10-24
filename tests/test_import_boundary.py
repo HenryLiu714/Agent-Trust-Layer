@@ -168,25 +168,64 @@ def _typing_only(tree: ast.AST) -> set[ast.AST]:
     return nodes
 
 
+def _absolute(py: Path, node: ast.ImportFrom) -> str | None:
+    """The module a `from` import in `py` names, a relative one (`from . import x`) resolved
+    against `py`'s package, so it is held to the layers as the absolute spelling is."""
+    if node.level == 0:
+        return node.module
+    package = list(py.relative_to(SRC.parent).parent.parts)
+    base = package[: len(package) - node.level + 1]
+    return ".".join([*base, *([node.module] if node.module else [])]) or None
+
+
 def _irimi_imports(py: Path) -> set[tuple[Entry, bool]]:
-    """Every irimi entry `py` imports, at any depth, deferred imports included, each with whether
-    it is imported only for type checking."""
+    """Every irimi entry `py` imports, at any depth, deferred and relative imports included, each
+    with whether it is imported only for type checking. A package imported whole counts for each
+    of its modules `py` reaches through it as an attribute (`replay.policy`)."""
     tree = ast.parse(py.read_text())
     typing_only = _typing_only(tree)
     out: set[tuple[Entry, bool]] = set()
+    bound: dict[str, str] = {}
     for node in ast.walk(tree):
         entries: set[Entry] = set()
-        if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            if node.module == "irimi" or node.module.startswith("irimi."):
-                entries = _from_entries(node.module, [alias.name for alias in node.names])
+        if isinstance(node, ast.ImportFrom) and (module := _absolute(py, node)):
+            if module == "irimi" or module.startswith("irimi."):
+                entries = _from_entries(module, [alias.name for alias in node.names])
+                for alias in node.names:
+                    bound[alias.asname or alias.name] = f"{module}.{alias.name}"
         elif isinstance(node, ast.Import):
             entries = {
                 entry
                 for alias in node.names
                 if alias.name.startswith("irimi.") and (entry := _entry(alias.name)) is not None
             }
+            for alias in node.names:
+                if alias.name == "irimi" or alias.name.startswith("irimi."):
+                    if alias.asname:
+                        bound[alias.asname] = alias.name
+                    else:
+                        bound[alias.name.partition(".")[0]] = alias.name.partition(".")[0]
         out |= {(entry, node in typing_only) for entry in entries}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and (entry := _reached(node, bound)) is not None:
+            out.add((entry, node in typing_only))
     return out
+
+
+def _reached(node: ast.Attribute, bound: dict[str, str]) -> Entry | None:
+    """The module of a package an attribute chain (`replay.policy.X`, `irimi.replay.policy`)
+    reaches through a name bound to irimi or one of its packages, or None."""
+    chain: list[str] = []
+    current: ast.expr = node
+    while isinstance(current, ast.Attribute):
+        chain.insert(0, current.attr)
+        current = current.value
+    if not isinstance(current, ast.Name) or current.id not in bound:
+        return None
+    parts = [*bound[current.id].split("."), *chain]
+    if len(parts) < 3 or parts[2] not in ORDER.get(parts[1], {}):
+        return None
+    return (parts[1], parts[2])
 
 
 def _entry_of(py: Path) -> Entry | None:
@@ -281,3 +320,34 @@ def test_the_architecture_docs_place_the_same_packages_in_the_same_layers():
     assert _docs_layers() == expected, (
         "docs/architecture.md's layer table must place the packages as LAYERS in this test does"
     )
+
+
+def test_a_relative_import_is_held_to_the_layers_as_an_absolute_one():
+    def imported(where: Path, source: str) -> str | None:
+        node = ast.parse(source).body[0]
+        assert isinstance(node, ast.ImportFrom)
+        return _absolute(where, node)
+
+    shadow = SRC / "cli" / "shadow.py"
+    assert imported(shadow, "from . import compose") == "irimi.cli"
+    assert imported(shadow, "from .runner import Child") == "irimi.cli.runner"
+    assert imported(shadow, "from ..engine import Engine") == "irimi.engine"
+    assert imported(SRC / "cli" / "__init__.py", "from .compose import Run") == "irimi.cli.compose"
+    assert imported(SRC / "record" / "store" / "reader.py", "from ... import sdk") == "irimi"
+    assert _from_entries("irimi.cli", ["compose"]) == {("cli", "compose")}
+
+
+def test_a_module_reached_through_its_package_counts_as_imported(tmp_path):
+    """`from irimi import replay` and then `replay.policy` uses `replay.policy`, which an early
+    module of `replay/` must not, however the package was imported."""
+    source = tmp_path / "x.py"
+    for code, reached in (
+        ("from irimi import replay\nreplay.policy.ReplayPolicy", ("replay", "policy")),
+        ("import irimi.replay\nirimi.replay.plan.plan", ("replay", "plan")),
+        ("import irimi.replay as r\nr.report", ("replay", "report")),
+        ("from irimi import services\nservices.check", None),
+    ):
+        source.write_text(code)
+        found = {entry for entry, _ in _irimi_imports(source)}
+        assert reached is None or reached in found, code
+        assert ("services", "check") not in found

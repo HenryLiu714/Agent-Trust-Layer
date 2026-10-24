@@ -22,7 +22,7 @@ htmlcov/
 # irimi state if someone points IRIMI_HOME at the repo
 .irimi/
 
-# The LLM refund agent's own database, made by its live half in the repo root (#85)
+# The LLM refund agent's own database, made by its live half in the repo root
 /llm_refunds.sqlite3*
 
 .claude/*

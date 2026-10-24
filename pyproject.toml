@@ -26,12 +26,10 @@ classifiers = [
 requires-python = ">=3.12" # floor for end users; development pins 3.14 via .python-version
 dependencies = [
     "cryptography>=42",
-    # >=12 because `IrimiAddon.request` is a coroutine hook, and only 12's addonmanager awaits one
-    # (`inspect.iscoroutinefunction` in `invoke_addon`). On 11 the decision would never run (#45).
-    # <13 because the addon depends on mitmproxy's hook internals. 12.2.1 is the lowest 12 that
-    # resolves with the other floors.
+    # 12 is the first whose addon manager awaits a coroutine hook, and the decision is one;
+    # 12.2.1 the first that resolves with the other floors. <13: the addon uses hook internals.
     "mitmproxy>=12.2.1,<13",
-    # Imported directly to decode a body incrementally, up to a cap (#94). mitmproxy depends on both;
+    # Imported directly to decode a body incrementally, up to a cap. mitmproxy depends on both;
     # >=1.2 because only 1.2's `Decompressor.process` takes `output_buffer_limit`.
     "brotli>=1.2",
     "pyyaml>=6",

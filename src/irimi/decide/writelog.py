@@ -3,7 +3,9 @@ read, and applies them to that read's document. Shared by the overlay and the pr
 so both show a read the same writes the same way.
 
 `WriteLog` keeps those writes per run: a run sees its own faked writes and no other run's, and a
-run's writes are dropped when it ends.
+run's writes are dropped when it ends. A write the run sends after that, from a task that
+outlived it, is answered but not filed: no later read applies it, as none applies the run's
+earlier writes, and a long serve keeps nothing for a run that has ended.
 """
 
 import threading
@@ -14,6 +16,7 @@ from typing import Any
 from irimi import services
 from irimi.core import bodies
 from irimi.core.exchange import Exchange, Request
+from irimi.core.limits import MAX_ENDED_RUNS
 
 
 @dataclass(frozen=True)
@@ -26,6 +29,23 @@ class Translation:
     removed: str
 
 
+class EndedRuns:
+    """The ids of the runs that have ended, the newest MAX_ENDED_RUNS of them. Not locked: its
+    owner's lock covers it."""
+
+    def __init__(self) -> None:
+        self._ids: dict[str, None] = {}  # oldest first
+
+    def add(self, run_id: str) -> None:
+        self._ids.pop(run_id, None)
+        self._ids[run_id] = None
+        if len(self._ids) > MAX_ENDED_RUNS:
+            del self._ids[next(iter(self._ids))]
+
+    def __contains__(self, run_id: str) -> bool:
+        return run_id in self._ids
+
+
 class WriteLog:
     """The faked writes each run has made, keyed by run id.
 
@@ -36,6 +56,7 @@ class WriteLog:
 
     def __init__(self) -> None:
         self._runs: dict[str, tuple[Exchange, ...]] = {}
+        self._ended = EndedRuns()
         self._lock = threading.Lock()
 
     def for_run(self, run_id: str) -> tuple[Exchange, ...]:
@@ -45,14 +66,18 @@ class WriteLog:
             return self._runs.get(run_id, ())
 
     def add(self, exchange: Exchange) -> None:
-        """File `exchange` under its own run."""
+        """File `exchange` under its own run, unless that run has ended (the module doc)."""
         with self._lock:
+            if exchange.run_id in self._ended:
+                return
             self._runs[exchange.run_id] = (*self._runs.get(exchange.run_id, ()), exchange)
 
     def end_run(self, run_id: str) -> None:
-        """Drop the run's writes: nothing reads them once the run has ended."""
+        """Drop the run's writes, and file none it sends later: nothing reads them once the run
+        has ended."""
         with self._lock:
             self._runs.pop(run_id, None)
+            self._ended.add(run_id)
 
 
 def decode(service: str, request: Request, write_log: Sequence[Exchange]) -> list[services.Write]:

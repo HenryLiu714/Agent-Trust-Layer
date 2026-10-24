@@ -9,7 +9,7 @@ from collections.abc import Callable
 from examples.workflows.harness.internet import BOMB_ENCODINGS, Req, bomb
 from examples.workflows.harness.run import Scenario, Workflow
 from examples.workflows.harness.services import LlmCall, LlmTurn, World
-from examples.workflows.w10_flaky_upstream.agent import CHANNEL, CONTROL_FAULTS
+from examples.workflows.w10_flaky_upstream.agent import CHANNEL, CONTROL_FAULTS, OTHER_CHARGE
 
 CHARGE = "ch_PAYOUT1"
 STRIPE = "api.stripe.com"
@@ -59,6 +59,15 @@ def _list(req: Req) -> bool:
 
 def _refund(req: Req) -> bool:
     return req.method == "POST" and req.path == "/v1/refunds"
+
+
+def _refund_read(req: Req) -> bool:
+    return req.method == "GET" and req.path.startswith("/v1/refunds/")
+
+
+def _check_read_of(charge: str) -> Callable[[Req], bool]:
+    """irimi's own check read of `charge`, which the agent never makes."""
+    return lambda req: req.method == "GET" and req.path == f"/v1/charges/{charge}"
 
 
 def _precondition_read(req: Req) -> bool:
@@ -120,11 +129,33 @@ WORKFLOW = Workflow(
             faults=((STRIPE, "500", _refund, 1),),
             doc="a 500 on a keyless refund: bare retries it, shadow never sees the 500",
         ),
+        "refund_read_unavailable": Scenario(
+            ("--confirm-refund",),
+            setup=_seed(),
+            faults=((STRIPE, "503-json", _refund_read, 1),),
+            doc="the refund's read-back gets a 503 with an empty JSON body once, and is retried",
+        ),
+        "two_checks_refused": Scenario(
+            ("--refund-both",),
+            setup=_seed(),
+            faults=(
+                (STRIPE, "429-paired", _check_read_of(CHARGE), 1),
+                (STRIPE, "401-paired", _check_read_of(OTHER_CHARGE), 1),
+            ),
+            doc="two refunds at once in one run, irimi's check reads in the air together and "
+            "answered 429 and 401: each refund says why it could not be checked",
+        ),
         "malformed_llm": Scenario(
             setup=_seed(_prose), doc="the model answers prose; the agent does nothing"
         ),
         "raise_after_write": Scenario(
             ("--raise-after-write",), setup=_seed(), doc="the agent raises after its refund"
+        ),
+        "raise_with_key": Scenario(
+            ("--raise-with-key",),
+            setup=_seed(),
+            doc="the agent raises after its refund with an error that is one key, 4000 "
+            "characters past any cut irimi makes of a message",
         ),
         "sigterm_mid_run": Scenario(
             ("--sigterm-after-write",),
@@ -150,6 +181,12 @@ WORKFLOW = Workflow(
             ("--control", "refused"),
             setup=_seed(),
             doc="the control endpoint answers 404: the SDK warns once, the agent is unchanged",
+        ),
+        "control_stalled": Scenario(
+            ("--control", "stalled"),
+            setup=_seed(),
+            doc="the control endpoint accepts a connection and never answers: the SDK warns once "
+            "and pauses its posts, the agent is unchanged",
         ),
     },
 )

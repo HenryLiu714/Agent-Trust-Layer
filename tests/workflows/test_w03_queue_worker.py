@@ -670,6 +670,10 @@ def test_a_task_a_sync_trigger_returns_files_its_calls_in_the_run_that_already_e
         assert min(e.started_at for e in events) > record.end.ended_at
     assert reader.load_run(shadow.engine_run_id()).events == []
     assert shadow.exchange_lines().count(REFUND_LINE) == 2
+    # Each refund is faked, but filed under no run: its run had ended, and irimi keeps nothing
+    # for a run that has ended, however long it serves.
+    assert shadow.write_log is not None
+    assert [shadow.write_log.for_run(record.run_id) for record in found.values()] == [(), ()]
     if mode == "serve":
         # Serve mode prints each run's block once its end is on disk, which is before the
         # task has run a step. LOOKS WRONG: so each block says the run made no call at all, and

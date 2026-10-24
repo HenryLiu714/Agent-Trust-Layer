@@ -26,3 +26,7 @@ MAX_ERROR_TYPE = 300  # an error type a trace keeps
 MAX_POSTED_MESSAGE = 64 * KiB  # the most of a message the SDK posts for the store to cut
 MAX_POSTED_TYPE = 4 * MAX_ERROR_TYPE  # the most of a type the SDK posts
 MAX_QUEUED_ERROR = 4 * MAX_ERROR_MESSAGE  # the most of an end's error that waits for the writer
+
+# Runs. The ended runs a write log and a key store remember, so a write sent after its run ended
+# is never filed under it again: a serve of many runs holds this many ids and nothing more.
+MAX_ENDED_RUNS = 4096

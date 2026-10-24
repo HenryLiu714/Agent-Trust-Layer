@@ -9,6 +9,7 @@ after its write, a write retried with no key, and irimi's own control endpoint t
 
     python -m examples.workflows.w10_flaky_upstream.agent \\
         [--no-key] [--raise-after-write] [--sigterm-after-write] [--sigint-after-write] \\
+        [--confirm-refund] [--raise-with-key] [--refund-both] \\
         [--control {unset,unreachable,refused}]
 
 What it is for: a shadow run is only as good as the failures it shows. A failed READ reaches the
@@ -25,6 +26,7 @@ import os
 import signal
 import socket
 import sys
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -33,12 +35,17 @@ from examples.workflows import agentkit, sdk
 from examples.workflows.agentkit import NetworkError, Response, stripe
 
 CHANNEL = "C0PAYOUT"
+# The charge `--refund-both` refunds beside the one the model picks.
+OTHER_CHARGE = "ch_PAYOUT2"
+STAGGER_S = 0.1
 ATTEMPTS = 3
 BACKOFF_S = 0.05
 RETRY_STATUSES = frozenset({429, 500, 502, 503})
 READ_TIMEOUT_S = 1.0  # shorter than the fake internet's 2 s stall, so a stall is a timeout
 # How a scenario takes irimi's control endpoint away from the agent (`break_control`).
-CONTROL_FAULTS = ("unset", "unreachable", "refused")
+CONTROL_FAULTS = ("unset", "unreachable", "refused", "stalled")
+# The connections a `stalled` control endpoint accepted, and never answered.
+_stalled_connections: list[socket.socket] = []
 
 SYSTEM = (
     "You approve payout corrections. Given recent charges, answer with JSON only: "
@@ -75,10 +82,31 @@ def decide(charges: list[dict[str, Any]]) -> dict[str, Any] | None:
     return decision if isinstance(decision, dict) and decision.get("refund") else None
 
 
+def _refund_both_at_once(charges: list[str], amount: int) -> str:
+    """Refund each charge on a thread of its own, the second started while the first is in the
+    air, in this run."""
+
+    def refund(charge: str) -> None:
+        headers = {"Idempotency-Key": f"payout-{charge}"}
+        form = {"charge": charge, "amount": str(amount)}
+        resp = stripe("POST", "/v1/refunds", form, headers=headers, label=f"refund_{charge}")
+        agentkit.obs("refunded", status=resp.status, id=(resp.json() or {}).get("id"))
+
+    threads = [threading.Thread(target=sdk.propagate(refund), args=(c,)) for c in charges]
+    for thread in threads:
+        thread.start()
+        # The first refund's request goes first, so the two are made in one order every time.
+        time.sleep(STAGGER_S)
+    for thread in threads:
+        thread.join()
+    return "refunded both"
+
+
 def break_control(how: str) -> None:
     """Take away the control endpoint `irimi shadow` named, before the run starts, as a deploy
     can: a launcher that passes on only the variables it knows (`unset`), an endpoint that is gone
-    (`unreachable`: a port nothing listens on), or one that refuses every post (`refused`: a 404).
+    (`unreachable`: a port nothing listens on), one that refuses every post (`refused`: a 404),
+    or one that accepts a connection and never answers (`stalled`).
     The SDK never raises into the agent: the run goes on, current and labelled, the SDK warns once,
     and irimi only lacks the run's record. Bare, there is no endpoint to take away."""
     control = os.environ.get(agentkit.CONTROL_ENV)
@@ -91,13 +119,37 @@ def break_control(how: str) -> None:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
         os.environ[agentkit.CONTROL_ENV] = f"http://127.0.0.1:{port}/_irimi"
+    elif how == "stalled":
+        os.environ[agentkit.CONTROL_ENV] = f"http://127.0.0.1:{_stalled_endpoint()}/_irimi"
     else:
         os.environ[agentkit.CONTROL_ENV] = control + "/gone"
 
 
+def _stalled_endpoint() -> int:
+    """A port that accepts every connection and answers none, so each post waits out the SDK's
+    timeout: the accepted connections are kept, and counted, until the agent exits."""
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+
+    def accept() -> None:
+        while True:
+            conn, _ = server.accept()
+            _stalled_connections.append(conn)
+
+    threading.Thread(target=accept, daemon=True).start()
+    return int(server.getsockname()[1])
+
+
 @sdk.trigger
 def sync_payouts(
-    use_key: bool, raise_after_write: bool, sigterm_after_write: bool, sigint_after_write: bool
+    use_key: bool,
+    raise_after_write: bool,
+    sigterm_after_write: bool,
+    sigint_after_write: bool,
+    confirm_refund: bool = False,
+    raise_with_key: bool = False,
+    refund_both: bool = False,
 ) -> str:
     charges = retrying(
         "list_charges",
@@ -118,6 +170,8 @@ def sync_payouts(
         agentkit.slack("chat.postMessage", channel=CHANNEL, text="payout sync: no action")
         return "no action"
 
+    if refund_both:
+        return _refund_both_at_once([decision["refund"], OTHER_CHARGE], int(decision["amount"]))
     form = {"charge": decision["refund"], "amount": str(decision["amount"])}
     headers = {"Idempotency-Key": f"payout-{decision['refund']}"} if use_key else {}
     refund = retrying(
@@ -125,6 +179,16 @@ def sync_payouts(
     )
     refund_id = (refund.json() or {}).get("id")
     agentkit.obs("refunded", status=refund.status, id=refund_id)
+    if confirm_refund:
+        # Read the refund back, retrying as every other call does, before telling anyone.
+        confirmed = retrying(
+            "confirm_refund",
+            lambda: stripe("GET", f"/v1/refunds/{refund_id}", label="confirm_refund"),
+        )
+        agentkit.obs("confirmed", status=confirmed.status, id=(confirmed.json() or {}).get("id"))
+    if raise_with_key:
+        # A client library that puts the whole credential in its error, and nothing else.
+        raise RuntimeError(agentkit.key("LONG_ERROR_KEY"))
     if raise_after_write:
         raise RuntimeError(f"ledger export failed after refund {refund_id}")
     if sigterm_after_write:
@@ -154,6 +218,9 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--raise-after-write", action="store_true")
     parser.add_argument("--sigterm-after-write", action="store_true")
     parser.add_argument("--sigint-after-write", action="store_true")
+    parser.add_argument("--confirm-refund", action="store_true")
+    parser.add_argument("--raise-with-key", action="store_true")
+    parser.add_argument("--refund-both", action="store_true")
     parser.add_argument("--control", choices=CONTROL_FAULTS)
     args = parser.parse_args(argv)
     if args.control:
@@ -163,7 +230,12 @@ def main(argv: list[str]) -> int:
         args.raise_after_write,
         args.sigterm_after_write,
         args.sigint_after_write,
+        args.confirm_refund,
+        args.raise_with_key,
+        args.refund_both,
     )
+    if args.control == "stalled":
+        agentkit.obs("control_connections", count=len(_stalled_connections))
     agentkit.obs("result", outcome=outcome)
     return 0
 

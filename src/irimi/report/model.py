@@ -10,10 +10,12 @@ A live `irimi shadow` and a stored run are summarised alike: both are a `RunView
 run keeps of each exchange only what the summary reads (`for_summary`).
 """
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Literal
 
+from irimi.core.bodies import reflect
 from irimi.core.exchange import (
     Exchange,
     Flag,
@@ -419,8 +421,10 @@ def _check_reads(
     the write's place among the events. A write whose read the run did not record has no entry.
 
     The engine records a check read before the write it was made for, both in the write's run,
-    so each such write takes the latest unclaimed read of its service before it, preferring one
-    made while the write was being decided."""
+    and makes it while deciding the write. So each such write takes an unclaimed read of its
+    service made within its span, else the latest before it. Two writes decided at once both
+    span both reads: each prefers the read that names an object its own request names, then the
+    earliest, which the write that started first made first."""
     found: dict[int, Exchange] = {}
     unclaimed: list[Exchange] = []
     for at, ex in exchanges:
@@ -432,11 +436,27 @@ def _check_reads(
             continue
         same = [c for c in unclaimed if c.service == ex.service and c.run_id == ex.run_id]
         during = [c for c in same if ex.started_at <= c.started_at <= ex.ended_at]
-        picked = (during or same)[-1:]
+        named = _named_in(ex)
+        during.sort(key=lambda c: (not _names_any(c, named), c.started_at))
+        picked = during[:1] or same[-1:]
         if picked:
             found[at] = picked[0]
             unclaimed = [c for c in unclaimed if c is not picked[0]]
     return found
+
+
+def _named_in(write: Exchange) -> set[str]:
+    """What a write's request names that looks like an id: each string value of its body and each
+    path segment, of three characters or more, holding a digit."""
+    values = [v for v in reflect(write.request).values() if isinstance(v, str)]
+    values += write.request.path.split("/")
+    return {v for v in values if len(v) >= 3 and any(char.isdigit() for char in v)}
+
+
+def _names_any(read: Exchange, named: set[str]) -> bool:
+    """Whether a check read's path or query holds one of `named` whole."""
+    words = set(re.split(r"[/?&=]", f"{read.request.path}?{read.request.query}"))
+    return not words.isdisjoint(named)
 
 
 def auth_failed(check_read: Exchange | None) -> bool:

@@ -141,6 +141,12 @@ class ServiceOverlay:
         )
         if applied is None:
             return Overlaid(upstream_response)
+        if (applied.changed or applied.status is not None) and not _may_answer_over(
+            upstream_response.status, applied.status
+        ):
+            # A 401, a 429 or a 5xx is the service's answer about the caller or itself, which
+            # production would have sent too: never edited into a success, and `partial`.
+            return Overlaid(upstream_response, "partial")
         fidelity: OverlayCoverage | None = None
         if applied.partial:
             fidelity = "partial"
@@ -184,3 +190,9 @@ class ServiceOverlay:
         if rewritten is None:
             return None
         return Translation(replace(read_request, query=rewritten.query), rewritten.removed)
+
+
+def _may_answer_over(upstream: int, replaced: int | None) -> bool:
+    """Whether the effects may change a read the service answered `upstream`: a success, or the
+    not-found an effect answers in full (`Applied.status`) for an object this run minted."""
+    return 200 <= upstream < 300 or (upstream == 404 and replaced is not None)

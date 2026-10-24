@@ -162,8 +162,8 @@ def test_a_failed_precondition_read_degrades_the_check_and_the_agent_never_knows
     assert "irimi-check   read      GET api.stripe.com/v1/charges/ch_PAYOUT1 -> 500" in (
         shadow.exchange_lines()
     )
-    # The check could not be made, and the summary says why. LOOKS WRONG: with no currency the
-    # L3 read would have supplied, its amount prints in minor units.
+    # The check could not be made, and the summary says why. With no currency from the check
+    # read, the amount prints in minor units, currency unknown.
     refunds = [line for line in shadow.summaries() if "○ stripe  refund" in line]
     assert refunds == [f"  {UNCHECKED_REFUND}"]
 
@@ -351,6 +351,7 @@ CONTROL_KIND = {
     "control_unset": "(unset: IRIMI_CONTROL is not set)",
     "control_unreachable": "(unreachable: ",
     "control_refused": "(rejected: HTTP 404: ",
+    "control_stalled": "(timeout: ",
 }
 
 
@@ -359,12 +360,12 @@ CONTROL_KIND = {
 def test_an_sdk_that_cannot_reach_irimi_warns_once_and_changes_nothing(
     run_workflow, mode, scenario
 ):
-    """The SDK never raises into the agent. With its control endpoint unset, gone, or
-    refusing every post, the run goes on: its id is current, logged and on every request, and the
-    agent makes the calls it makes with the SDK working and exits 0, as it does bare. The SDK
-    logs one WARNING on `irimi.sdk`, though both the start and the end failed: once per kind of
-    failure. irimi never hears of the run, so the store holds only the `header` run its labelled
-    requests made, with no trigger and no end."""
+    """The SDK never raises into the agent. With its control endpoint unset, gone, refusing
+    every post or never answering, the run goes on: its id is current, logged and on every
+    request, and the agent makes the calls it makes with the SDK working and exits 0, as it does
+    bare. The SDK logs one WARNING on `irimi.sdk`, though both the start and the end failed: once
+    per kind of failure. irimi never hears of the run, so the store holds only the `header` run
+    its labelled requests made, with no trigger and no end."""
     bare = run_workflow(W, scenario, "bare")
     shadow = run_workflow(W, scenario, mode)
     assert shadow.exit_code == bare.exit_code == 0
@@ -629,3 +630,93 @@ def test_a_run_that_died_after_its_write_replays_to_the_same_end(replayed, scena
     ended = [(e["outcome"], e.get("error")) for e in recorded.events("run.end")]
     assert [(e["outcome"], e.get("error")) for e in replay.events("run.end")] == ended
     assert replay.internet.requests() == []
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_an_error_on_a_read_of_a_faked_refund_is_never_turned_into_the_refund(run_workflow, mode):
+    """The refund's read-back gets a 503 whose JSON names no error. The service said something
+    about itself, which production would have said too: the overlay leaves it as sent, unstamped,
+    and flags the read `partial`. The agent retries, the service answers the refund it never made
+    404, and the overlay answers it with the refund this run faked. Bare, the same 503 is retried
+    into the real refund."""
+    shadow = run_workflow(W, "refund_read_unavailable", mode)
+    bare = run_workflow(W, "refund_read_unavailable", "bare")
+    assert [(c["status"], c["answered_by"]) for c in shadow.calls("confirm_refund")] == [
+        (503, None),
+        (200, "overlay"),
+    ]
+    assert statuses(bare, "confirm_refund") == [503, 200]
+    assert retries(shadow) == retries(bare) == [("confirm_refund", 503)]
+    [refunded] = shadow.events("refunded")
+    [confirmed] = shadow.events("confirmed")
+    assert (confirmed["status"], confirmed["id"]) == (200, refunded["id"])
+    reads = [
+        (e.response.status if e.response else None, e.answered_by, e.overlay)
+        for e in shadow.stored_events()
+        if isinstance(e, Exchange) and e.request.path.startswith("/v1/refunds/")
+    ]
+    assert reads == [(503, "live", "partial"), (200, "overlay", "full")]
+    lines = [line for line in shadow.summaries() if "/v1/refunds/" in line]
+    path = f"/v1/refunds/{refunded['id']}"
+    assert lines == [
+        f"    ↳ GET {path} did not show it  real (partial)",
+        f"    ↳ GET {path} saw it  overlay",
+    ]
+    assert shadow.internet.writes() == []
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_an_error_that_is_one_long_key_is_stored_as_its_placeholder(run_workflow, mode):
+    """The agent raises with an error whose message is one key, thousands of characters past the
+    cut a trace makes of a message. The key is redacted whole before anything is cut, so the run
+    stores its placeholder: never a part of the key, and never an empty message."""
+    shadow = run_workflow(W, "raise_with_key", mode)
+    assert shadow.exit_code == run_workflow(W, "raise_with_key", "bare").exit_code == 1
+    [run] = shadow.sdk_runs()
+    assert run.end is not None and run.end.error is not None
+    assert run.end.error.type == "builtins.RuntimeError"
+    assert re.fullmatch(r"<redacted:[0-9a-f]{16}>", run.end.error.message)
+    code, out, err = shadow.runs("show", run.run_id)
+    assert (code, err) == (0, [])
+    assert [line for line in out if line.startswith("error: ")] == [
+        f"error: builtins.RuntimeError: {run.end.error.message}"
+    ]
+    assert check_invariants(shadow) == []
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_two_writes_checked_at_once_each_say_why_their_own_check_failed(run_workflow, mode):
+    """One run refunds two charges at once, so irimi's two check reads are in the air together:
+    Stripe answers the first charge's 429 and the second's 401. Each refund says the reason its
+    own check read got, and only the 429's is counted as would have fired: a 401 is the agent's
+    own credentials refused. The first refund is stored before the second's check read, so this
+    holds by order; two reads both stored before either refund are `tests/test_fix_report.py`'s."""
+    shadow = run_workflow(W, "two_checks_refused", mode)
+    assert [
+        (c["label"], c["status"], c["answered_by"])
+        for c in shadow.calls()
+        if c["label"] and c["label"].startswith("refund_")
+    ] == [("refund_ch_PAYOUT1", 200, "fake-L1"), ("refund_ch_PAYOUT2", 200, "fake-L1")]
+    lines = [line for line in shadow.summaries() if "○ stripe  refund" in line]
+    assert lines == [
+        f"  ○ stripe  refund 500 (minor units, currency unknown) on {charge}  faked; could not "
+        f"check: stripe answered irimi's check read with {status}"
+        for charge, status in (("ch_PAYOUT1", 429), ("ch_PAYOUT2", 401))
+    ]
+    assert "  would have fired: refund.created, charge.refunded" in shadow.summaries()
+    checks = [
+        (e.request.path, e.response.status if e.response else None)
+        for e in shadow.stored_events()
+        if isinstance(e, Exchange) and e.issued_by == "engine"
+    ]
+    assert checks == [("/v1/charges/ch_PAYOUT1", 429), ("/v1/charges/ch_PAYOUT2", 401)]
+    assert shadow.internet.writes() == []
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_control_endpoint_that_never_answers_is_waited_for_once(run_workflow, mode):
+    """The endpoint accepts the run's start and never answers it: the SDK gives up after its
+    timeout and pauses every post after it, so the run's end is never sent, and the agent waits
+    once, not once per post."""
+    shadow = run_workflow(W, "control_stalled", mode)
+    assert [e["count"] for e in shadow.events("control_connections")] == [1]

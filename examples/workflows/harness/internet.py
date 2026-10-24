@@ -48,6 +48,8 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # How long a `stall` fault holds a request before answering. Agents under test use a shorter
 # client timeout, so a stall reads to them as a timeout.
 STALL_S = 2.0
+# How long the second of two `-paired` requests is answered after the first.
+PAIR_GAP_S = 0.2
 # How long `reset-stream` waits between its first chunk and the reset.
 RESET_AFTER_CHUNK_S = 0.5
 # The longest a held stream (`Resp.hold`) waits before it ends anyway, so a scenario whose release
@@ -185,12 +187,15 @@ class Service(Protocol):
 class Fault:
     """Answer the next `times` matching requests with `action` instead of the service.
 
-    `429`, `500` and `garbage` answer at once; `stall` answers late; `reset` resets the connection
-    before any response; `reset-stream` lets the service answer, sends the headers and the first
-    chunk, and then resets. `gzip-bomb`, `br-bomb` and `zstd-bomb` answer 200 with `bomb()` in
-    that encoding, though the client never asked for one; `gzip-padded` lets the service
-    answer, and sends its JSON gzip-encoded, on a line of its own followed by `PADDED_BYTES` of
-    blanks, which JSON reads as whitespace. A faulted request is still recorded in `log`.
+    `401`, `429`, `500` and `garbage` answer at once, and `503-json` with an empty JSON
+    object, an error that names no error type; `stall` answers late; `reset` resets the
+    connection before any response; `reset-stream` lets the service answer, sends the headers
+    and the first chunk, and then resets. `gzip-bomb`, `br-bomb` and `zstd-bomb` answer 200 with
+    `bomb()` in that encoding, though the client never asked for one; `gzip-padded` lets the
+    service answer, and sends its JSON gzip-encoded, on a line of its own followed by
+    `PADDED_BYTES` of blanks, which JSON reads as whitespace. An action ending in `-paired` waits,
+    up to `STALL_S`, for another such request to arrive, and then answers as the action, the
+    first to arrive first. A faulted request is still recorded in `log`.
     """
 
     host: str
@@ -214,6 +219,8 @@ class FakeInternet:
         self.padded: list[bytes] = []
         self.faults: list[Fault] = []
         self._lock = threading.Lock()
+        # Where `-paired` faults wait for each other.
+        self._pair = threading.Barrier(2, timeout=STALL_S)
         self._server: ThreadingHTTPServer | None = None
 
     # -- lifecycle -------------------------------------------------------------------------
@@ -291,10 +298,20 @@ class FakeInternet:
     def answer(self, req: Req) -> tuple[Resp | None, str | None]:
         fault = self._take_fault(req)
         action = fault.action if fault is not None else None
+        if action is not None and action.endswith("-paired"):
+            # Answered only once the other `-paired` request has arrived too, so both are in the
+            # air at once; then in the order they arrived, PAIR_GAP_S apart, as the action.
+            with contextlib.suppress(threading.BrokenBarrierError):
+                time.sleep(PAIR_GAP_S * self._pair.wait())
+            action = action.removesuffix("-paired")
+        if action == "401":
+            return json_error(401, error={"type": "invalid_request_error"}), None
         if action == "429":
             return json_error(429, error={"type": "rate_limit_error"}), None
         if action == "500":
             return json_error(500, error={"type": "api_error"}), None
+        if action == "503-json":
+            return Resp(503, {}), None
         if action == "garbage":
             return Resp(
                 200, "<html>upstream proxy error</html>", {"content-type": "text/html"}

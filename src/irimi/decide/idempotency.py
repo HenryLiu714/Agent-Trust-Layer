@@ -19,6 +19,7 @@ from typing import Any
 from irimi import services
 from irimi.core import bodies
 from irimi.core.exchange import AnsweredBy, Flag, Precondition, Request
+from irimi.decide.writelog import EndedRuns
 from irimi.servicemaps import Route
 from irimi.servicemaps.classify import Classification
 
@@ -153,6 +154,7 @@ class Store:
         self._lock = threading.Lock()
         # Keyed by the run a slot id leads with (`slot_id`), so a run's entries go in one step.
         self._runs: dict[str, dict[tuple[str, ...], tuple[Canonical, FirstAnswer]]] = {}
+        self._ended = EndedRuns()
 
     def get(self, slot: tuple[str, ...], params: Canonical) -> tuple[FirstAnswer | None, bool]:
         """`(the answer a retry gets, whether this key is held with DIFFERENT parameters)`.
@@ -175,12 +177,16 @@ class Store:
 
         A service stores the first response under a key whether it was accepted or rejected, so a
         retry of a rejected write returns the same refusal - which is why `policy` calls this on
-        both of its answering paths and not only the happy one.
+        both of its answering paths and not only the happy one. A run that has ended keeps no
+        key, as its write log keeps no write (`writelog`).
         """
         with self._lock:
+            if slot[0] in self._ended:
+                return
             self._runs.setdefault(slot[0], {}).setdefault(slot, (params, first))
 
     def end_run(self, run_id: str) -> None:
-        """Drop the run's keys: a run that has ended sends no retry."""
+        """Drop the run's keys, and keep none it sends later."""
         with self._lock:
             self._runs.pop(run_id, None)
+            self._ended.add(run_id)

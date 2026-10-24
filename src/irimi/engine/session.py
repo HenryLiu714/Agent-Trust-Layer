@@ -141,7 +141,7 @@ class ShadowSession:
                     "cannot read whole"
                 )
                 return self.decision_failed(admitted, cut, classification=cls)
-            target = targets.delegate(request, cls)
+            target = targets.resolve(request, cls)
             writes = self.write_log.for_run(admitted.run_id)
             # Translated before the policy sees it, so policy, trace and replay share one request.
             # A read sent to a target is never translated: the target owns that service's state.

@@ -13,7 +13,7 @@ from irimi.core.exchange import (
     failed_target,
     fake_ran,
     is_authored_write,
-    is_intercepted,
+    is_summary_write,
     refused_by_irimi,
 )
 from irimi.protocol.trace import Event, RunRecord, TelemetrySeen, ToolCall
@@ -90,7 +90,7 @@ WriteStatus = Faked | Refused | SentToTarget | TargetUnreachable
 
 @dataclass(frozen=True)
 class Write:
-    """A write the summary prints a line for (`is_intercepted`).
+    """A write the summary prints a line for (`is_summary_write`).
 
     `authored` when it is in the write log (`is_authored_write`); `asked` when irimi made a check
     read for it in this run."""
@@ -119,7 +119,7 @@ def disposition(exchange: Exchange) -> Disposition:
         return _agent_read(exchange, recorded)
     if exchange.kind == "llm":
         return Llm(recorded)
-    if not is_intercepted(exchange):
+    if not is_summary_write(exchange):
         return Uncounted()
     asked = (
         exchange.answered_by.startswith("fake-")

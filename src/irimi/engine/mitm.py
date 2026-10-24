@@ -307,7 +307,7 @@ class IrimiAddon:
             return
         if admitted.door == "reverse":
             try:
-                self._through_reverse_door(flow, admitted.request)
+                self._through_base_url(flow, admitted.request)
             except Exception as exc:  # an unpointed flow would go to irimi itself
                 logger.warning(
                     "irimi: refusing a base-URL request that could not be rewritten: %s", exc
@@ -418,7 +418,7 @@ class IrimiAddon:
             flow, target.scheme, target.host, target.port, target.path or "/", target.authority
         )
 
-    def _through_reverse_door(self, flow: http.HTTPFlow, request: Request) -> None:
+    def _through_base_url(self, flow: http.HTTPFlow, request: Request) -> None:
         """Point a base-URL request's flow at the upstream `ingress.admit` rewrote it to."""
         host_header = request.header("host")
         if host_header is None:  # `admit` always sets one

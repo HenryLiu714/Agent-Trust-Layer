@@ -264,7 +264,7 @@ def test_irimis_own_errors_are_stamped_json_and_recorded(
     elif case == "unroutable":
         monkeypatch.setattr(ingress, "detect_door", _boom)
     elif case == "unrewritable":
-        monkeypatch.setattr(ingress, "rewrite_reverse", _boom)
+        monkeypatch.setattr(ingress, "rewrite_base_url", _boom)
 
     def calls(port):
         if case in ("base-url-refused", "unrewritable"):

@@ -88,7 +88,7 @@ class AnswerPolicy(Protocol):
         run_id: str = "",
         target: ForwardTo | None = None,
     ) -> Decided:
-        """Return how this request is answered; `target` comes from `targets.delegate`."""
+        """Return how this request is answered; `target` comes from `targets.resolve`."""
         ...
 
     def recorded_tool_call(self, name: str, args: JSONValue) -> ToolCall | None:

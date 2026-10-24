@@ -71,7 +71,7 @@ def test_llm_and_telemetry_are_never_delegated():
     assert llm.answered_by == "live" and llm.forward_to is None
 
 
-def test_delegate_returns_none_for_a_host_no_map_claims():
+def test_resolve_returns_none_for_a_host_no_map_claims():
     ans = answer_shipped(make_request("POST", host="nowhere.example", path="/x"))
     assert ans.answered_by == "fake-L0" and ans.forward_to is None
 
@@ -95,7 +95,7 @@ def test_forward_auth_reaches_the_engine_through_the_answer():
 def test_an_unlisted_read_on_a_targeted_service_is_not_delegated_without_target_reads():
     """An unlisted read on a targeted service stays live without `target_reads`.
 
-    This is `delegate`'s unmatched branch, which the listed-route tests never reach."""
+    This is `resolve`'s unmatched branch, which the listed-route tests never reach."""
     index = shipped_with_targets([("api.stripe.com", "", "http://127.0.0.1:3000")])
     ans = answer_with(index, make_request("GET", path="/v1/tax/calculations"))  # GET, and unlisted
     assert ans.answered_by == "live"
@@ -118,7 +118,7 @@ def test_an_unmatched_llm_or_telemetry_request_is_never_delegated():
             matched=None,  # unlisted: this is the `elif` branch, not `target_for`
             service_map=sm,
         )
-        forward = targets.delegate(make_request("POST", path="/anything"), cls)
+        forward = targets.resolve(make_request("POST", path="/anything"), cls)
         if kind == "read":
             assert forward is not None, "target_reads is what delegates a read"
         else:
@@ -128,7 +128,7 @@ def test_an_unmatched_llm_or_telemetry_request_is_never_delegated():
 def test_a_credential_path_host_is_never_delegated_off_the_machine():
     """A credential-path host is never sent to an off-machine target (the scope rule, at decision).
 
-    The loader refuses this map, so it is built by hand to test `delegate` itself."""
+    The loader refuses this map, so it is built by hand to test `resolve` itself."""
     slack = next(sm for sm in servicemaps.loader.load_shipped() if sm.service == "slack")
     assert "hooks.slack.com" in slack.hosts
     off_machine = replace(slack, target=Target.parse("http://stub.internal:9000"))
@@ -136,18 +136,18 @@ def test_a_credential_path_host_is_never_delegated_off_the_machine():
 
     for path in ("/services/T0/B0/SECRET", "/workflows/T0/A0/SECRET/xyz", "/triggers/T0/1/abc"):
         request = make_request("POST", host="hooks.slack.com", path=path)
-        forward = targets.delegate(request, classify(request, index))
+        forward = targets.resolve(request, classify(request, index))
         assert forward is None, f"{path} was delegated to {forward and forward.url}"
 
     # The same service's other hosts are not credential-path hosts, so they still delegate.
     request = make_request("POST", host="slack.com", path="/api/chat.postMessage")
-    forward = targets.delegate(request, classify(request, index))
+    forward = targets.resolve(request, classify(request, index))
     assert forward is not None and forward.url.startswith("http://stub.internal:9000")
 
     # A loopback target on the credential host is the supported way to stub it.
     local = servicemaps.MapIndex((replace(slack, target=Target.parse("http://127.0.0.1:3000")),))
     request = make_request("POST", host="hooks.slack.com", path="/workflows/T0/A0/SECRET/xyz")
-    forward = targets.delegate(request, classify(request, local))
+    forward = targets.resolve(request, classify(request, local))
     assert forward is not None and forward.url.startswith("http://127.0.0.1:3000")
 
 

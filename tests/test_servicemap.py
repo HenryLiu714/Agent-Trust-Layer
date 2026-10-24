@@ -116,7 +116,7 @@ def test_no_shipped_human_template_is_eaten_by_a_yaml_comment():
 
 def test_shipped_maps_have_no_target_and_a_human_on_every_write():
     for sm in servicemaps.load(maps_dir=servicemaps.loader.shipped_dir()).services:
-        assert not servicemaps.is_delegated(sm), f"{sm.service} ships with a target"
+        assert not servicemaps.has_target(sm), f"{sm.service} ships with a target"
         for route in sm.routes:
             if route.kind == "write":
                 assert route.human, f"{sm.service} {route.operation} has no human template"
@@ -529,7 +529,7 @@ def test_default_target_is_self(tmp_path):
     assert sm.target is None
     for route in sm.routes:
         assert servicemaps.target_for(sm, route) is None
-    assert servicemaps.is_delegated(sm) is False
+    assert servicemaps.has_target(sm) is False
 
 
 @pytest.mark.parametrize(
@@ -546,7 +546,7 @@ def test_loopback_targets_are_accepted(tmp_path, url):
     doc = GOOD_MAP.replace("style: rest", f"style: rest\ntarget: {url}")
     sm = load_docs(tmp_path, doc).services[0]
     assert sm.target.url == url.rstrip("/")
-    assert servicemaps.is_delegated(sm) is True
+    assert servicemaps.has_target(sm) is True
 
 
 def test_a_service_target_answers_writes_and_unknowns_but_not_reads(tmp_path):
@@ -1150,7 +1150,7 @@ def test_target_reads_marks_the_service_delegated(tmp_path):
         target_reads=["demo.example"],
     )
     assert index.services[0].target_reads is True
-    assert servicemaps.is_delegated(index.services[0])
+    assert servicemaps.has_target(index.services[0])
 
 
 def test_target_reads_without_a_target_is_still_refused_when_it_comes_from_a_flag(tmp_path):

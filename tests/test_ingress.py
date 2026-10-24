@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 
 from irimi.core.exchange import Request
-from irimi.engine.ingress import ReverseDoorRefused, detect_door, rewrite_reverse
+from irimi.engine.ingress import BaseUrlRefused, detect_door, rewrite_base_url
 from tests.support import builders
 from tests.support.maps import index_from
 
@@ -96,7 +96,7 @@ def test_a_request_for_a_real_host_came_through_the_proxy():
 
 
 def test_a_base_url_path_is_rewritten_to_the_service_it_names():
-    req = rewrite_reverse(_door_req("/api.stripe.com/v1/charges", query="limit=1"), ALLOWED)
+    req = rewrite_base_url(_door_req("/api.stripe.com/v1/charges", query="limit=1"), ALLOWED)
     assert req.scheme == "https"
     assert req.host == "api.stripe.com"
     assert req.port == 443
@@ -108,7 +108,7 @@ def test_a_base_url_path_is_rewritten_to_the_service_it_names():
 
 
 def test_a_base_url_rewrite_sets_the_host_header():
-    req = rewrite_reverse(_door_req("/api.stripe.com/v1/charges", query="limit=1"), ALLOWED)
+    req = rewrite_base_url(_door_req("/api.stripe.com/v1/charges", query="limit=1"), ALLOWED)
     assert ("host", "api.stripe.com") in req.headers
     assert ("accept", "*/*") in req.headers
     assert not any("localhost" in value for _, value in req.headers)
@@ -116,22 +116,22 @@ def test_a_base_url_rewrite_sets_the_host_header():
 
 def test_a_base_url_rewrite_adds_a_missing_host_header():
     bare = replace(_door_req("/api.stripe.com/v1"), headers=(("accept", "*/*"),))
-    assert ("host", "api.stripe.com") in rewrite_reverse(bare, ALLOWED).headers
+    assert ("host", "api.stripe.com") in rewrite_base_url(bare, ALLOWED).headers
     bare = replace(_door_req("/127.0.0.1:8443/v1"), headers=())
-    assert rewrite_reverse(bare, ALLOWED).headers == (("host", "127.0.0.1:8443"),)
+    assert rewrite_base_url(bare, ALLOWED).headers == (("host", "127.0.0.1:8443"),)
 
 
 def test_a_base_url_rewrite_refuses_an_ipv6_literal():
-    with pytest.raises(ReverseDoorRefused, match="IPv6"):
-        rewrite_reverse(_door_req("/[::1]:8443/x"), ALLOWED | {"::1"})
+    with pytest.raises(BaseUrlRefused, match="IPv6"):
+        rewrite_base_url(_door_req("/[::1]:8443/x"), ALLOWED | {"::1"})
 
 
 def test_a_base_url_rewrite_lower_cases_the_host():
-    assert rewrite_reverse(_door_req("/API.Stripe.COM/v1"), ALLOWED).host == "api.stripe.com"
+    assert rewrite_base_url(_door_req("/API.Stripe.COM/v1"), ALLOWED).host == "api.stripe.com"
 
 
 def test_a_base_url_rewrite_keeps_an_explicit_port():
-    req = rewrite_reverse(_door_req("/127.0.0.1:8443/hello"), ALLOWED)
+    req = rewrite_base_url(_door_req("/127.0.0.1:8443/hello"), ALLOWED)
     assert req.host == "127.0.0.1"
     assert req.port == 8443
     assert req.path == "/hello"
@@ -140,31 +140,31 @@ def test_a_base_url_rewrite_keeps_an_explicit_port():
 
 @pytest.mark.parametrize("path", ["/api.stripe.com", "/api.stripe.com/"])
 def test_a_base_url_rewrite_of_a_bare_host_is_the_root(path):
-    assert rewrite_reverse(_door_req(path), ALLOWED).path == "/"
+    assert rewrite_base_url(_door_req(path), ALLOWED).path == "/"
 
 
 def test_a_base_url_rewrite_keeps_a_deeper_path():
-    req = rewrite_reverse(_door_req("/api.stripe.com/v1/charges/ch_1/refunds"), ALLOWED)
+    req = rewrite_base_url(_door_req("/api.stripe.com/v1/charges/ch_1/refunds"), ALLOWED)
     assert req.path == "/v1/charges/ch_1/refunds"
 
 
 def test_a_base_url_rewrite_keeps_the_method_and_body():
     door = _door_req("/api.stripe.com/v1/refunds", method="POST")
-    req = rewrite_reverse(replace(door, body=b"charge=ch_1"), ALLOWED)
+    req = rewrite_base_url(replace(door, body=b"charge=ch_1"), ALLOWED)
     assert req.method == "POST"
     assert req.body == b"charge=ch_1"
 
 
 def test_a_base_url_rewrite_refuses_an_unlisted_host():
-    with pytest.raises(ReverseDoorRefused) as exc:
-        rewrite_reverse(_door_req("/evil.example/x"), ALLOWED)
+    with pytest.raises(BaseUrlRefused) as exc:
+        rewrite_base_url(_door_req("/evil.example/x"), ALLOWED)
     assert "evil.example" in str(exc.value)
     assert "--base-url-host" in str(exc.value)
 
 
 def test_a_base_url_rewrite_refuses_a_missing_host():
-    with pytest.raises(ReverseDoorRefused) as exc:
-        rewrite_reverse(_door_req("/"), ALLOWED)
+    with pytest.raises(BaseUrlRefused) as exc:
+        rewrite_base_url(_door_req("/"), ALLOWED)
     assert "/<upstream-host>/<path>" in str(exc.value)
 
 
@@ -172,14 +172,14 @@ def test_a_base_url_rewrite_refuses_a_missing_host():
     "path", ["/api.stripe.com:abc/v1", "/api.stripe.com:0/v1", "/api.stripe.com:70000/v1"]
 )
 def test_a_base_url_rewrite_refuses_a_bad_port(path):
-    with pytest.raises(ReverseDoorRefused) as exc:
-        rewrite_reverse(_door_req(path), ALLOWED)
+    with pytest.raises(BaseUrlRefused) as exc:
+        rewrite_base_url(_door_req(path), ALLOWED)
     assert "bad port" in str(exc.value)
 
 
 def test_a_base_url_rewrite_with_no_hosts_refuses_everything():
-    with pytest.raises(ReverseDoorRefused):
-        rewrite_reverse(_door_req("/api.stripe.com/v1"), frozenset())
+    with pytest.raises(BaseUrlRefused):
+        rewrite_base_url(_door_req("/api.stripe.com/v1"), frozenset())
 
 
 def test_a_telemetry_wildcard_is_not_a_base_url_host(tmp_path, monkeypatch):
@@ -187,5 +187,5 @@ def test_a_telemetry_wildcard_is_not_a_base_url_host(tmp_path, monkeypatch):
     index = index_from(tmp_path, monkeypatch)
     assert "*.ingest.sentry.io" not in index.hosts
     assert "o0.ingest.sentry.io" not in index.hosts
-    with pytest.raises(ReverseDoorRefused):
-        rewrite_reverse(_door_req("/o0.ingest.sentry.io/api/7/envelope/"), index.hosts)
+    with pytest.raises(BaseUrlRefused):
+        rewrite_base_url(_door_req("/o0.ingest.sentry.io/api/7/envelope/"), index.hosts)

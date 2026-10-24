@@ -39,7 +39,7 @@ KINDS: tuple[Kind, ...] = ("read", "write", "llm", "telemetry", "unknown")
 # Here, not in policy: the map loader refuses a live `default_kind` and may not import policy.
 LIVE_KINDS: tuple[Kind, ...] = ("read", "llm", "telemetry")
 # `unknown` is included because an unclassified DELETE is a presumed write.
-INTERCEPTED_KINDS: frozenset[Kind] = frozenset(KINDS) - frozenset(LIVE_KINDS)
+WRITE_KINDS: frozenset[Kind] = frozenset(KINDS) - frozenset(LIVE_KINDS)
 SAFE_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
 # A route's `match.method` when it names none: it matches every verb, including destructive ones.
 ANY_METHOD = "*"
@@ -232,10 +232,10 @@ def is_authored_write(exchange: Exchange) -> bool:
     )
 
 
-def is_intercepted(exchange: Exchange) -> bool:
+def is_summary_write(exchange: Exchange) -> bool:
     """Return True for a write answered by irimi or a target, except a retry: one summary line."""
     return (
-        exchange.kind in INTERCEPTED_KINDS
+        exchange.kind in WRITE_KINDS
         and exchange.answered_by != "live"
         and Flag.IDEMPOTENT_REPLAY not in exchange.flags
     )
@@ -252,7 +252,7 @@ def refused_by_irimi(exchange: Exchange) -> bool:
 
 
 def is_faked(exchange: Exchange) -> bool:
-    """Return True for an intercepted write irimi faked: not refused, not sent to a target."""
+    """Return True for a write irimi faked: not refused, not sent to a target."""
     return (
         not refused_by_irimi(exchange)
         and not failed_target(exchange)

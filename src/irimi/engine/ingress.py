@@ -20,7 +20,7 @@ ROUTE_FAILED = "could not route this request"
 REWRITE_FAILED = "could not rewrite this request"
 
 
-class ReverseDoorRefused(ValueError):
+class BaseUrlRefused(ValueError):
     """irimi will not relay this base-URL request; str(exc) is the one-line reason."""
 
 
@@ -84,8 +84,8 @@ def admit(
         return ControlCall(request, whole_body=not cut)
     if door == "reverse":
         try:
-            request = _through_reverse_door(request, peer, reverse_hosts)
-        except ReverseDoorRefused as exc:
+            request = _through_base_url(request, peer, reverse_hosts)
+        except BaseUrlRefused as exc:
             logger.warning("irimi: %s", exc)
             return Refusal(request, door, 403, str(exc), started_at, cut)
         except Exception as exc:
@@ -120,41 +120,39 @@ def detect_door(request: Request, listen_port: int, local_address: str = "") -> 
     return "forward"
 
 
-def _through_reverse_door(request: Request, peer: str, allowed_hosts: frozenset[str]) -> Request:
-    """Rewrite a base-URL request to its upstream; raise ReverseDoorRefused off loopback."""
+def _through_base_url(request: Request, peer: str, allowed_hosts: frozenset[str]) -> Request:
+    """Rewrite a base-URL request to its upstream; raise BaseUrlRefused off loopback."""
     if not netaddr.is_loopback(peer):
-        raise ReverseDoorRefused(f"base-URL requests come from loopback only; refusing {peer!r}")
-    return rewrite_reverse(request, allowed_hosts)
+        raise BaseUrlRefused(f"base-URL requests come from loopback only; refusing {peer!r}")
+    return rewrite_base_url(request, allowed_hosts)
 
 
-def rewrite_reverse(request: Request, allowed_hosts: frozenset[str]) -> Request:
+def rewrite_base_url(request: Request, allowed_hosts: frozenset[str]) -> Request:
     """Rewrite `/<host>[:<port>]/<rest>` on the listener to `https://<host>[:<port>]/<rest>`.
 
-    Raises ReverseDoorRefused for a missing or IPv6 host, a bad port, or a host not allowed.
+    Raises BaseUrlRefused for a missing or IPv6 host, a bad port, or a host not allowed.
     """
     # One slash off, not every one: `//v1/x` names no host, not the host `v1`.
     segment, _, rest = request.path.removeprefix("/").partition("/")
     if segment.startswith("["):
-        raise ReverseDoorRefused(
+        raise BaseUrlRefused(
             "base-URL request names an IPv6 literal host, which irimi does not relay"
         )
     host, _, port_text = segment.partition(":")
     host = host.lower()
     if not host:
-        raise ReverseDoorRefused(
+        raise BaseUrlRefused(
             "a base-URL request's path must be /<upstream-host>/<path>, "
             "e.g. /api.stripe.com/v1/charges"
         )
     if host not in allowed_hosts:
-        raise ReverseDoorRefused(
-            f"base-URL host {host!r} is not in a loaded map or --base-url-host"
-        )
+        raise BaseUrlRefused(f"base-URL host {host!r} is not in a loaded map or --base-url-host")
     try:
         port = int(port_text) if port_text else REVERSE_DEFAULT_PORT
     except ValueError:
-        raise ReverseDoorRefused(f"bad port in base-URL host {segment!r}") from None
+        raise BaseUrlRefused(f"bad port in base-URL host {segment!r}") from None
     if not 1 <= port <= 65535:
-        raise ReverseDoorRefused(f"bad port in base-URL host {segment!r}")
+        raise BaseUrlRefused(f"bad port in base-URL host {segment!r}")
     authority = host if port == REVERSE_DEFAULT_PORT else f"{host}:{port}"
     headers = tuple((k, authority if k == "host" else v) for k, v in request.headers)
     if not any(k == "host" for k, _ in headers):

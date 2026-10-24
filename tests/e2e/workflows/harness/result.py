@@ -21,7 +21,7 @@ from irimi.protocol.trace import RunRecord, ToolCall
 from irimi.record.store.reader import StoreReader
 from irimi.report.runs import NOT_SET, RUN_LIST_HEADER
 from irimi.report.summary import REJECTED_MARKER, TOOL_SERVICE, WRITE_MARKER
-from irimi.report.terminal import DELEGATED_PREFIX
+from irimi.report.terminal import TARGET_PREFIX
 from irimi.servicemaps import MapIndex
 from tests.e2e.workflows.harness.internet import FakeInternet
 from tests.e2e.workflows.harness.scenario import Workflow, environ, scenario_maps
@@ -146,7 +146,7 @@ class Result:
             line
             for line in self.irimi
             if " -> " in line
-            and not line.startswith((" ", DELEGATED_PREFIX, REPLAY_HEADER))
+            and not line.startswith((" ", TARGET_PREFIX, REPLAY_HEADER))
             and not TOOL_LINE.match(line)
         ]
 

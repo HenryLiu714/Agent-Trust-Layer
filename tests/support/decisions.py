@@ -78,7 +78,7 @@ def flat(decided: Decided) -> Flat:
 
 def answer(policy, request, classification, write_log=(), run_id=""):
     """`policy`'s decision, flattened, with the target resolved first as the session does."""
-    target = targets.delegate(request, classification)
+    target = targets.resolve(request, classification)
     return flat(policy.decide(request, classification, write_log, run_id, target))
 
 

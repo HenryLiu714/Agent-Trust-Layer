@@ -18,7 +18,7 @@ irimi's `Request` and `Response` and carries plans onto them. What irimi decides
    `Irimi-Run` and irimi's headers removed (a base-URL request is rewritten to its upstream here),
    or a `Refusal`, answered by `ShadowSession.refuse` with irimi's own `400` or `403`.
 2. **`ShadowSession.plan`**, on a worker thread (`asyncio.to_thread`), builds a `Plan`:
-   `classify.classify` gives the kind; `targets.delegate` resolves the target once; a read the
+   `classify.classify` gives the kind; `targets.resolve` finds the target once; a read the
    overlay can translate (a cursor naming a minted id) is translated; the `AnswerPolicy` returns a
    `Decision`: `Forward`, `Delegate` or `Respond`. The policy runs the precondition check
    (`decide/preconditions.py`), whose check read is carried on the plan. A `Respond` is stamped

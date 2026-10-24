@@ -506,7 +506,7 @@ def test_irimi_compare_of_every_stored_run_with_itself_is_its_summary_s_writes(
         cut = [
             Flag.BODY_TRUNCATED in e.flags
             for e in reader.load_run(run_id, bodies=False).events
-            if isinstance(e, Exchange) and exchange.is_intercepted(e)
+            if isinstance(e, Exchange) and exchange.is_summary_write(e)
         ]
         code, out, err = shadow.compare_runs(run_id, run_id)
         assert (code, err) == (1 if any(cut) else 0, []), run_id
@@ -576,7 +576,7 @@ def test_the_corpus_gives_irimi_compare_s_universal_check_something_to_catch(run
             actions = [
                 e
                 for e in events
-                if (isinstance(e, Exchange) and exchange.is_intercepted(e))
+                if (isinstance(e, Exchange) and exchange.is_summary_write(e))
                 or (isinstance(e, ToolCall) and exchange.fake_ran(e))
             ]
             writes = [e for e in actions if isinstance(e, Exchange)]

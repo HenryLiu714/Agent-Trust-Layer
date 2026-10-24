@@ -70,7 +70,7 @@ def refuse_self_targets(index: MapIndex, listen_port: int, bind: str = "") -> No
                 refuse_self_target(target, listen_port, bind)
 
 
-def delegate(request: Request, classification: Classification) -> ForwardTo | None:
+def resolve(request: Request, classification: Classification) -> ForwardTo | None:
     """Return the target for this request, or None when irimi answers it itself."""
     service_map = classification.service_map
     if service_map is None:

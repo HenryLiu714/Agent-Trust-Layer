@@ -15,7 +15,7 @@ from irimi.core.exchange import Flag, Request
 from irimi.decide.overlay import NoOverlay
 from irimi.decide.policy import ShadowPolicy
 from irimi.engine import EngineConfig
-from irimi.engine.ingress import ReverseDoorRefused, rewrite_reverse
+from irimi.engine.ingress import BaseUrlRefused, rewrite_base_url
 from irimi.engine.mitm import MitmEngine
 from irimi.protocol.trace import RunRecord
 from irimi.report import model, summary
@@ -79,7 +79,7 @@ def test_a_base_url_request_to_an_unlisted_host_is_403(engine):
     assert ex.flags == (Flag.REFUSED,)
     assert ex.request.path == "/api.stripe.com/v1"
     assert ex.response.status == 403
-    assert not exchange.is_intercepted(ex)
+    assert not exchange.is_summary_write(ex)
 
 
 def test_a_refused_post_is_still_listed_among_the_writes(engine):
@@ -89,7 +89,7 @@ def test_a_refused_post_is_still_listed_among_the_writes(engine):
     assert status == 403
     (ex,) = seen
     assert (ex.answered_by, ex.kind) == ("irimi", "unknown")
-    assert exchange.is_intercepted(ex)
+    assert exchange.is_summary_write(ex)
     (entry,) = model.build(RunView(RunRecord.header("t3st"), [ex]), None).writes
     assert summary.write_sentence(entry).endswith("  refused by irimi")
 
@@ -275,5 +275,5 @@ def test_a_refused_get_still_carries_its_json(kept_engine: tuple[int, KeptStore]
 def test_a_base_url_path_whose_first_segment_is_empty_names_no_host(path: str) -> None:
     """Only the one leading slash is taken off: `//v1/charges` is not the host `v1`."""
     request = Request("POST", "http", "127.0.0.1", 4000, path, "", (), b"")
-    with pytest.raises(ReverseDoorRefused, match="path must be /<upstream-host>/<path>"):
-        rewrite_reverse(request, frozenset({"v1", "api.stripe.com"}))
+    with pytest.raises(BaseUrlRefused, match="path must be /<upstream-host>/<path>"):
+        rewrite_base_url(request, frozenset({"v1", "api.stripe.com"}))

@@ -260,7 +260,7 @@ def print_startup(
         print(line, flush=True)
     # No stdout at all (`>&-`) is no terminal either.
     color = sys.stdout is not None and sys.stdout.isatty()
-    for line in terminal.delegated_lines(index, color=color):
+    for line in terminal.target_lines(index, color=color):
         print(line, flush=True)
 
 

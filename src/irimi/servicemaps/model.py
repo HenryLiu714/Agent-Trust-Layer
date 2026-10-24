@@ -225,7 +225,7 @@ def service_target_for(sm: ServiceMap, kind: Kind) -> Target | None:
     return None
 
 
-def is_delegated(sm: ServiceMap) -> bool:
+def has_target(sm: ServiceMap) -> bool:
     """Return True when the service has any target, which the summary and banner report."""
     return sm.target is not None or any(r.target is not None for r in sm.routes)
 

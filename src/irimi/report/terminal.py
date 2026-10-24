@@ -7,7 +7,7 @@ from irimi.core import netaddr
 from irimi.core.exchange import AnsweredBy, Exchange, Flag
 from irimi.core.netaddr import Target
 from irimi.protocol.trace import Ran, ToolCall
-from irimi.servicemaps import MapIndex, is_delegated
+from irimi.servicemaps import MapIndex, has_target
 
 PROXY_ONLY_NOTICE = (
     "only traffic sent through this proxy is shadowed; a client that ignores HTTPS_PROXY talks to "
@@ -21,9 +21,9 @@ WIDE_BIND_NOTICE = (
 )
 
 # Marks a service or route sent to a target: a routed host may not be live either.
-DELEGATED_PREFIX = "target:"
+TARGET_PREFIX = "target:"
 NOT_LOOPBACK_NOTICE = "not loopback: these requests leave this machine"
-NOT_LOOPBACK_INDENT = " " * len(f"{DELEGATED_PREFIX} ")
+NOT_LOOPBACK_INDENT = " " * len(f"{TARGET_PREFIX} ")
 RED = "\033[31m"
 RESET = "\033[0m"
 
@@ -52,26 +52,26 @@ def banner_lines(
     return lines
 
 
-def delegated_lines(index: MapIndex, color: bool = False) -> list[str]:
+def target_lines(index: MapIndex, color: bool = False) -> list[str]:
     """Return a banner line per service or route sent to a target, with non-loopback warnings."""
     lines: list[str] = []
     for sm in sorted(index.services, key=lambda s: s.service):
-        if not is_delegated(sm):
+        if not has_target(sm):
             continue
         if sm.target is not None:
             scope = "reads + writes" if sm.target_reads else "writes"
-            lines.extend(_delegated_line(sm.service, sm.target, scope, color))
+            lines.extend(_target_line(sm.service, sm.target, scope, color))
         for route in sm.routes:
             if route.target is not None:
                 what = f"{sm.service} {route.method} {route.path}"
                 scope = "reads" if route.kind == "read" else "writes"
-                lines.extend(_delegated_line(what, route.target, scope, color))
+                lines.extend(_target_line(what, route.target, scope, color))
     return lines
 
 
-def _delegated_line(what: str, target: Target, scope: str, color: bool) -> list[str]:
+def _target_line(what: str, target: Target, scope: str, color: bool) -> list[str]:
     """Return one target's line, plus a warning on its own line so a long URL cannot hide it."""
-    line = f"{DELEGATED_PREFIX} {what} -> {target.url} ({scope})"
+    line = f"{TARGET_PREFIX} {what} -> {target.url} ({scope})"
     if target.is_loopback:
         return [line]
     notice = f"{NOT_LOOPBACK_INDENT}{NOT_LOOPBACK_NOTICE}"

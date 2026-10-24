@@ -15,7 +15,7 @@ from irimi.protocol.trace import ErrorInfo, RunRecord
 from irimi.report import model, summary
 from irimi.report.model import RunView, for_summary
 from irimi.report.summary import Live
-from irimi.report.terminal import banner_lines, delegated_lines, exchange_line, tool_call_line
+from irimi.report.terminal import banner_lines, exchange_line, target_lines, tool_call_line
 from tests.support import builders
 from tests.support.builders import FORM_CONTENT_TYPE
 
@@ -230,47 +230,47 @@ def _index(*services):
 
 def test_a_service_with_no_target_adds_no_banner_line():
     """No targeted service, no new lines: the banner a reader already knows stays as it was."""
-    assert delegated_lines(_index(_service(routes=(_route(),)))) == []
+    assert target_lines(_index(_service(routes=(_route(),)))) == []
 
 
 def test_a_service_target_names_the_service_the_target_and_what_it_answers():
-    lines = delegated_lines(_index(_service(target="http://127.0.0.1:3000")))
+    lines = target_lines(_index(_service(target="http://127.0.0.1:3000")))
     assert lines == ["target: stripe -> http://127.0.0.1:3000 (writes)"]
 
 
 def test_target_reads_says_the_reads_are_delegated_too():
     """The banner's "reads are real" claim is exactly what `target_reads` makes false."""
-    lines = delegated_lines(_index(_service(target="http://127.0.0.1:3000", target_reads=True)))
+    lines = target_lines(_index(_service(target="http://127.0.0.1:3000", target_reads=True)))
     assert lines == ["target: stripe -> http://127.0.0.1:3000 (reads + writes)"]
 
 
 def test_a_route_target_is_named_even_when_the_service_itself_has_none():
     """`irimi maps list` printed `target: self` for exactly this shape; the banner must not."""
     sm = _service(routes=(_route(target="http://127.0.0.1:3111"), _route(path="/v1/charges")))
-    assert delegated_lines(_index(sm)) == [
+    assert target_lines(_index(sm)) == [
         "target: stripe POST /v1/refunds -> http://127.0.0.1:3111 (writes)"
     ]
 
 
 def test_a_delegated_read_route_says_reads():
     sm = _service(routes=(_route(kind="read", target="http://127.0.0.1:3111"),))
-    assert delegated_lines(_index(sm))[0].endswith("(reads)")
+    assert target_lines(_index(sm))[0].endswith("(reads)")
 
 
 def test_a_target_that_is_not_loopback_says_so_and_is_red_only_when_asked():
     """--allow-remote-target is how a target stops being loopback, and the line has to say it."""
     index = _index(_service(target="http://stub.example:3000"))
-    plain, notice = delegated_lines(index)
+    plain, notice = target_lines(index)
     assert "not loopback" in notice
     assert all("\033[" not in line for line in (plain, notice))
     assert all(len(line) <= 100 for line in (plain, notice))
-    coloured = delegated_lines(index, color=True)
+    coloured = target_lines(index, color=True)
     assert len(coloured) == 2
     assert all(c.startswith("\033[31m") and c.endswith("\033[0m") for c in coloured)
 
 
 def test_a_loopback_target_is_never_painted_red():
-    (line,) = delegated_lines(_index(_service(target="http://127.0.0.1:3000")), color=True)
+    (line,) = target_lines(_index(_service(target="http://127.0.0.1:3000")), color=True)
     assert "\033[" not in line
     assert "not loopback" not in line
 
@@ -280,7 +280,7 @@ def test_delegated_lines_are_sorted_by_service():
         _service(service="stripe", target="http://127.0.0.1:3000"),
         _service(service="acme", hosts=frozenset({"acme.test"}), target="http://127.0.0.1:3001"),
     )
-    assert [line.split()[1] for line in delegated_lines(index)] == ["acme", "stripe"]
+    assert [line.split()[1] for line in target_lines(index)] == ["acme", "stripe"]
 
 
 # ------------------------------------------------------------------ the exit summary

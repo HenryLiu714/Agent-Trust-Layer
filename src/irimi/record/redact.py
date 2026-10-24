@@ -491,11 +491,11 @@ def _redact_body_text(body: bytes, content_type: str, key: bytes) -> bytes:
 
 
 def _redact_document(text: str, content_type: str, key: bytes) -> str:
-    """Redact a body's text as JSON if it parses (whatever its content type), else as a form
-    if declared, else line by line.
+    """Redact a body's text as JSON, else as a declared form, else line by line.
 
-    JSON refused for another reason (an integer past the digit limit, a repeated key) raises to
-    the guard and fails closed: a text scan would miss a secret key's value.
+    The text is tried as JSON whatever its content type. JSON refused for another reason (an
+    integer past the digit limit, a repeated key) raises to the guard and fails closed: a text
+    scan would miss a secret key's value.
     """
     walked = _redact_json_text(text, key)
     if walked is not None:

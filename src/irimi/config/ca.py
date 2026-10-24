@@ -33,12 +33,12 @@ def ca_paths() -> CAPaths:
 
 
 def ca_exists(p: CAPaths) -> bool:
-    """True only when both the key and the cert are present."""
+    """Return True only when both the key and the cert are present."""
     return p.key.is_file() and p.cert.is_file()
 
 
 def ca_partial(p: CAPaths) -> bool:
-    """True when exactly one of key/cert is present (a broken or interrupted init)."""
+    """Return True when exactly one of key/cert is present (a broken or interrupted init)."""
     return p.key.is_file() != p.cert.is_file()
 
 
@@ -108,8 +108,10 @@ def generate_ca(p: CAPaths) -> None:
 
 
 def write_mitm_bundle(p: CAPaths, confdir: Path) -> Path:
-    """Write <confdir>/mitmproxy-ca.pem = CA key + CA cert (mode 0600), the file mitmproxy's
-    TlsConfig loads to mint per-host leaf certs. Always rewritten so `init --force` is picked up."""
+    """Write `<confdir>/mitmproxy-ca.pem`, the CA key plus cert (mode 0600), and return its path.
+
+    mitmproxy's TlsConfig loads it to mint per-host leaf certs. It is always rewritten, so
+    `init --force` is picked up."""
     bundle = confdir / paths.MITM_CA_BUNDLE_NAME
     private_dir(confdir)
     os.chmod(confdir, DIR_MODE)  # an existing directory too

@@ -95,7 +95,7 @@ RETIRED_ROUTE_KEYS = {
 
 
 def shipped_dir() -> Path:
-    """The directory holding the maps that ship inside the package."""
+    """Return the directory holding the maps that ship inside the package."""
     return Path(str(files("irimi").joinpath(MAPS_DIR_NAME)))
 
 
@@ -301,7 +301,7 @@ def apply_cli_targets(
 
 
 def _names_route(route: Route, spec: str) -> bool:
-    """True when `spec` names `route`: its pattern verbatim, or a path that pattern matches."""
+    """Return True when `spec` names `route`: its pattern verbatim, or a path it matches."""
     return route.path == spec or match_path(route.path, path_segments(spec)) is not None
 
 

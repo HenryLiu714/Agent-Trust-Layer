@@ -582,7 +582,7 @@ class MitmEngine:
                 self._ready.set()
 
     async def wait_ready(self) -> None:
-        """Returns once the listener is bound; raises EngineStartError if it never will be."""
+        """Return once the listener is bound; raise EngineStartError if it never will be."""
         await self._ready.wait()
         if self._start_error is not None:
             raise self._start_error

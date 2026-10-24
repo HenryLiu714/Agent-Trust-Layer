@@ -61,9 +61,9 @@ class Engine(Protocol):
         ...
 
     async def wait_ready(self) -> None:
-        """Returns once the listener is bound; listen_port() is valid afterwards."""
+        """Return once the listener is bound; listen_port() is valid afterwards."""
         ...
 
     def listen_port(self) -> int | None:
-        """The bound port, or None before ready."""
+        """Return the bound port, or None before ready."""
         ...

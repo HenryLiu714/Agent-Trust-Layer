@@ -1,5 +1,6 @@
-"""The control endpoint: `/_irimi/` on irimi's listener, where the SDK reports what the wire cannot
-show. The proxy stays the only writer to the trace store.
+"""The control endpoint: `/_irimi/` on irimi's listener, where the SDK reports what it saw.
+
+The SDK reports what the wire cannot show; the proxy stays the only writer to the trace store.
 
     POST runs/{run_id}/start                204  the run's record, attribution `sdk`
     POST runs/{run_id}/tool-calls           204  one tool call; `unattributed` for no run

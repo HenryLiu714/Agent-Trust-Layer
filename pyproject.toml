@@ -142,9 +142,6 @@ ignore = [
     # D400 wants a period; D415 also accepts `?` and `!`. A summary may open with a lower-case
     # name: irimi, argparse, mitmproxy.
     "D400", "D403",
-    # The style guide's blank line after the summary and its imperative mood: enforced once the
-    # docstrings follow it.
-    "D205", "D401",
     # An assert narrows a type mypy cannot follow; none guards input, so `-O` loses no check.
     "S101",
     # A hook and the SDK never raise, so an exception neither can act on is dropped on purpose.
@@ -171,6 +168,8 @@ flake8-bugbear.extend-immutable-calls = [
     "RUF001",
     # A test names a staticmethod's first parameter `self` or `cls` to check nothing binds it.
     "PLW0211",
+    # A test's docstring states the property it checks, not a command.
+    "D401",
 ]
 # The example agents call the URLs their configuration names, through urllib.
 "examples/**" = ["S310"]

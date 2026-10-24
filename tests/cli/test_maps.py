@@ -67,13 +67,12 @@ routes:
 
 
 def test_maps_list_shows_a_route_level_target(tmp_path, capsys):
-    """The listing read the *service* target, so a target set on a single route was invisible and
-    every one of Slack's three hosts printed `target: self` for a partly delegated service."""
+    """A target set on one route is listed under every host its service claims."""
     (tmp_path / "cwd" / servicemaps.loader.CWD_OVERRIDE_NAME).write_text(ROUTE_OVERRIDE)
     assert main(["maps", "list"]) == 0
     out = capsys.readouterr().out
     assert "route POST /api/chat.postMessage -> http://127.0.0.1:3111" in out
-    # Under every host the service claims, because each of those rows says `target: self`.
+    # Each of Slack's three hosts says `target: self`, so each lists the route's target.
     assert out.count("route POST /api/chat.postMessage -> http://127.0.0.1:3111") == 3
 
 

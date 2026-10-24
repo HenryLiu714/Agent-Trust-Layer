@@ -1,11 +1,6 @@
-"""Reading a stored run back: its summary, `irimi runs list` and `irimi runs show`.
+"""Stored runs read back: their summary, `irimi runs list`, `show`, `rm` and `prune`.
 
-The claim under test is that the store holds everything the live summary prints. The first test
-proves it the only way that counts: the refund agent's scenario, plus one telemetry call,
-runs under the real `irimi shadow`, and the summary printed from what it stored is the block the
-CLI printed on exit, line for line, but for the elapsed seconds. The rest pin the two commands'
-exact output over stores built by `irimi shadow` and by hand.
-"""
+Stores are built by the real `irimi shadow` and by hand."""
 
 import dataclasses
 import json
@@ -43,8 +38,8 @@ from tests.support import builders
 from tests.support.maps import PRECONDITION_STRIPE_MAP
 from tests.support.scenarios import REFUND_SUMMARY, run_refund_scenario
 
-# The loopback Stripe's map with one telemetry route on it. A GET, because the stand-in fails the
-# helper on any other verb it hears; telemetry is forwarded live, so the stand-in answers it.
+# The loopback Stripe's map plus one telemetry route, which is forwarded live. A GET, because the
+# fake Stripe fails the scenario on any other verb it hears.
 TELEMETRY_ROUTE = """  - match:
       method: GET
       path: /v1/telemetry
@@ -73,9 +68,9 @@ def _process_run(store) -> RunRecord:
 def test_the_refund_scenario_prints_the_same_summary_stored_as_live(
     home, tmp_path, capfd, monkeypatch
 ):
-    """A stored run prints the summary it printed live. The only field allowed to differ is the
-    elapsed seconds: the live summary times the child, and the stored one the run record's own
-    start and end."""
+    """A stored run prints the summary it printed live, but for the elapsed seconds.
+
+    The live summary times the child; the stored one, the run record's start and end."""
     run_refund_scenario(
         tmp_path,
         monkeypatch,
@@ -107,8 +102,7 @@ def test_the_refund_scenario_prints_the_same_summary_stored_as_live(
 
 
 def _rows(out: str) -> list[list[str]]:
-    """`irimi runs list`'s rows, each split into its cells: the header row comes first, and the
-    columns are padded, so two spaces or more separate one cell from the next."""
+    """Return `irimi runs list`'s rows after its header, split at two or more spaces."""
     header, *rows = out.splitlines()
     assert header.split() == list(RUN_LIST_HEADER), header
     return [re.split(r"  +", row.rstrip()) for row in rows]
@@ -130,8 +124,7 @@ HAND_BUILT_AT = 1_700_000_000.0
 
 
 def _hand_built_incomplete_run(store, key) -> None:
-    """A run that started and never ended, as a crashed irimi leaves one: one faked write, one
-    tool call and one telemetry exchange in it."""
+    """Store a run that never ended, holding a faked write, a tool call and a telemetry call."""
     s = DirectoryStore(store, key)
     s.start_run(
         RunRecord(
@@ -166,7 +159,7 @@ def _hand_built_incomplete_run(store, key) -> None:
 
 
 def _refund(run_id: str) -> Exchange:
-    """A refund irimi faked at L0 without a precondition check, in a hand-built run."""
+    """A refund irimi echoed without a precondition check, in a hand-built run."""
     return builders.refund_exchange(
         answered_by="fake-L0",
         precondition=Precondition(),
@@ -260,8 +253,7 @@ def test_runs_list_names_a_damaged_run_and_still_lists_the_others(home, capfd):
 
 
 def test_runs_list_counts_the_writes_runs_show_s_summary_prints_a_line_for(home, capfd):
-    """A refund the precondition check rejected never entered the write log, but the summary
-    prints it (`would fail`), and so `runs list` counts it."""
+    """`runs list` counts a refund the precondition check rejected, as the summary prints it."""
     rejected = dataclasses.replace(
         _refund("checked"),
         answered_by="fake-L1",
@@ -303,8 +295,7 @@ def _ended_run(run_id: str, started_at: float, **changes) -> RunRecord:
 
 
 def test_runs_list_shows_a_labelled_run_newer_than_the_limit_s_worth_of_process_runs(home, capfd):
-    """A `header` run once had no start, so it sorted after every run that had one and the
-    default `runs list` hid it behind twenty older process runs."""
+    """A `header` run sorts by its first event, ahead of older process runs past the limit."""
     s = DirectoryStore(home / "store", redact.load_key(home))
     for i in range(DEFAULT_RUNS_LIMIT + 1):
         s.start_run(_ended_run(f"proc{i:02d}", HAND_BUILT_AT + i))
@@ -329,12 +320,9 @@ def test_runs_list_shows_a_labelled_run_newer_than_the_limit_s_worth_of_process_
 
 
 def test_runs_list_and_show_name_the_run_a_replay_replayed(home, capfd):
-    """`irimi replay` stores its one run `attribution: process`, as `irimi shadow` stores one, so
-    `runs list` lists a replay as the run it replayed, `replay of <id>`, and `runs show` prints
-    its mode and the run it replayed under the attribution, and opens its summary `irimi replay`.
-    Every run a replay stores names `replay_of` and `mode: replay`: an `sdk` run started there
-    and a `header` run an `Irimi-Run` label makes there too, and each keeps its attribution in
-    the column."""
+    """Every run a replay stores is listed `replay of <id>` and shown with its mode and source.
+
+    An `sdk` or `header` run made in a replay keeps its attribution in the column too."""
     s = DirectoryStore(home / "store", redact.load_key(home))
     s.start_run(_ended_run("recorded", HAND_BUILT_AT))
     s.close()
@@ -377,10 +365,9 @@ def test_runs_list_and_show_name_the_run_a_replay_replayed(home, capfd):
 
 
 def test_a_damaged_replay_record_is_still_marked_and_prints_on_one_line():
-    """No irimi writes a `mode: replay` run that names no run, or a `replay_of` that is not a run
-    id, and the decoder refuses a run.json that holds either (the next test), but
-    `report` renders the record it is handed: the first is still marked a replay, and the second
-    is escaped as every stored text is."""
+    """`report` marks a replay that names no run, and escapes a `replay_of` that is no run id.
+
+    The decoder refuses both in a run.json (the next test); `report` renders what it is handed."""
     unnamed = _ended_run("x", HAND_BUILT_AT, mode="replay")
     assert "mode: replay" in run_header_lines(unnamed)
     odd = _ended_run("y", HAND_BUILT_AT, attribution="sdk", replay_of="a\nb\x1b")
@@ -391,10 +378,9 @@ def test_a_damaged_replay_record_is_still_marked_and_prints_on_one_line():
 
 
 def test_a_replay_s_run_json_naming_no_run_is_skipped_by_list_and_refused_by_show(home, capfd):
-    """A `replay_of` with two spaces broke `runs list`'s columns, and a 5 MB one was printed whole
-    on its line. The decoder refuses one `is_valid_run_id` refuses, by its length, so
-    `runs list` skips the run, as it skips any run.json it cannot read, and `runs show`
-    names the file and why."""
+    """A `replay_of` that is no run id is skipped by `runs list` and named by `runs show`.
+
+    The error gives its length, so a 5 MB value is never printed."""
     s = DirectoryStore(home / "store", redact.load_key(home))
     s.start_run(_ended_run("recorded", HAND_BUILT_AT))
     s.close()
@@ -420,8 +406,7 @@ def test_a_replay_s_run_json_naming_no_run_is_skipped_by_list_and_refused_by_sho
 
 
 def test_runs_list_reads_no_body_to_count_a_run_s_events(home, capfd, monkeypatch):
-    """Counting needs each event's kind and answer, never its body: a few runs of LLM streams were
-    hundreds of MB read to print two numbers."""
+    """`runs list` counts from each event's kind and answer, never reading a body."""
     _hand_built_incomplete_run(home / "store", redact.load_key(home))
     real_read_bytes = Path.read_bytes
 
@@ -435,8 +420,7 @@ def test_runs_list_reads_no_body_to_count_a_run_s_events(home, capfd, monkeypatc
 
 
 def test_runs_list_never_prints_a_negative_duration(home, capfd):
-    """The wall clock can step back between a run's start and its end. Nor does the summary
-    `runs show` ends in, which times the run the same way."""
+    """A run whose end is before its start, as a stepped clock leaves it, prints 0.0s."""
     s = DirectoryStore(home / "store", redact.load_key(home))
     s.start_run(_ended_run("stepped", HAND_BUILT_AT, ended_at=HAND_BUILT_AT - 10))
     s.close()
@@ -464,8 +448,7 @@ def test_runs_list_pads_each_column_to_its_widest_cell_under_a_header_row(home, 
 
 
 def test_runs_list_shows_a_process_run_s_command_without_its_program_s_directory():
-    """Every run of `python agent.py` names the same interpreter path, so the trigger column is
-    the program's base name and its arguments, cut to forty characters."""
+    """The trigger column is the program's base name and its arguments, cut to forty characters."""
     argv = ["/opt/venv/bin/python3", "agent.py", "--ticket", "T-1"]
     run = _ended_run("p", HAND_BUILT_AT, trigger=Trigger.command(argv))
     assert run_list_columns(run, [])[5] == "python3 agent.py --ticket T-1"
@@ -603,8 +586,7 @@ def test_runs_show_cuts_long_args_and_says_how_many_events_were_dropped(home, ca
     )
     s.start_run(record)
     s.close()
-    # The store counts its own drops; this run's record says four, as a store that dropped them
-    # would have written it.
+    # The store counts its own drops, so the record is rewritten to say four.
     (home / "store" / "runs" / "long" / "run.json").write_text(
         json.dumps(trace.run_to_json(record))
     )
@@ -641,8 +623,7 @@ def test_runs_show_unattributed_reads_the_events_no_run_claimed(home, capfd):
 
 
 def test_runs_show_still_prints_with_a_warning_when_the_maps_do_not_load(home, capfd):
-    """A broken overrides file costs `runs show` the `human:` sentences and nothing else: the
-    write prints as the request it was, and the command succeeds."""
+    """With broken maps, `runs show` prints writes as requests, warns once and succeeds."""
     _hand_built_incomplete_run(home / "store", redact.load_key(home))
     (home / "maps.yaml").write_text("version: 99\n")
     assert main(["runs", "show", "handbuilt"]) == 0
@@ -654,8 +635,7 @@ def test_runs_show_still_prints_with_a_warning_when_the_maps_do_not_load(home, c
 
 
 def test_a_tool_call_line_escapes_the_control_characters_it_was_posted_with():
-    """A name and an error type are whatever reached the control endpoint: one call is one
-    line, and an escape sequence is shown, never obeyed."""
+    """A posted tool name and error type are escaped, so one call prints as one line."""
     name = "evil\x1b[2J\nshadow    write     tool x"
     call = ToolCall("t", "r", name, "write", "shadow", {}, None, ErrorInfo("a\nb", "m"), 1.0, 2.0)
     escaped = "evil\\x1b[2J\\nshadow    write     tool x"
@@ -664,8 +644,7 @@ def test_a_tool_call_line_escapes_the_control_characters_it_was_posted_with():
 
 
 def test_a_run_whose_only_writes_are_tool_writes_still_says_they_did_not_happen():
-    """A write tool whose stand-in ran did not happen, as a faked HTTP write did not; a read
-    tool, which ran for real, gets no line and no closing sentence."""
+    """A write tool whose fake ran is listed as not happening; a read tool gets no line."""
     write = ToolCall("t", "r", "db.write", "write", "shadow", {}, 1, None, 1.0, 2.0)
     read = ToolCall("u", "r", "db.read", "read", "real", {}, 1, None, 1.0, 2.0)
     totals = "  0 exchanges · 0 real · 0 answered by irimi (0 faked writes) · 0 sent to targets"
@@ -696,10 +675,7 @@ def test_tool_call_line_is_in_the_exchange_line_s_columns():
 
 
 def test_runs_show_prints_a_stored_message_s_control_characters_escaped(home, capfd):
-    """A stored error is the agent's own `str(exc)`. Printed raw, a newline broke the header's one
-    `key: value` per line and an escape sequence was obeyed by the terminal. Every header
-    field the agent wrote is escaped, a C1 control (`\\x9b`, an 8-bit CSI) as well, which JSON
-    leaves raw in `args`."""
+    """Every header field the agent wrote is escaped, C1 controls such as `\\x9b` included."""
     s = DirectoryStore(home / "store", redact.load_key(home))
     s.start_run(
         _ended_run(
@@ -728,9 +704,7 @@ def test_runs_show_prints_a_stored_message_s_control_characters_escaped(home, ca
 
 
 def test_runs_show_prints_a_lone_surrogate_escaped_and_never_raises(home, capfd):
-    """A lone surrogate is what `os.fsdecode` makes of a filename that is not UTF-8, and JSON
-    carries it as `\\udcff`. Printed raw, it raised UnicodeEncodeError out of `irimi runs show`
-    and `runs list`: a stored run must print, whatever the agent stored."""
+    """A lone surrogate, as `os.fsdecode` makes of a non-UTF-8 filename, prints escaped."""
     s = DirectoryStore(home / "store", redact.load_key(home))
     s.start_run(
         _ended_run(
@@ -754,18 +728,15 @@ def test_runs_show_prints_a_lone_surrogate_escaped_and_never_raises(home, capfd)
 
 # ------------------------------------------------------------------- a value nested too deep
 #
-# A line nested this deep is read by every Python's `json.loads` (3.12's stops near 10,000), so its
-# refusal is the decoder's everywhere. 3.14's reads one 100,000 deep too, which 3.12's refuses as
-# the parse's damage, and there a decoder that quoted the value with `repr` raised RecursionError
-# out of `irimi runs show` as a traceback: `StoreReader` had no guard of its own.
+# Every Python's `json.loads` reads 5,000 deep (3.12's stops near 10,000); only 3.14's reads
+# 100,000, where quoting the value with `repr` would raise RecursionError.
 _READ_EVERYWHERE = 5_000
 _READ_ON_3_14 = 100_000
 
 
 @pytest.mark.parametrize("depth", [_READ_EVERYWHERE, _READ_ON_3_14])
 def test_runs_show_and_list_name_an_event_nested_too_deep_to_quote_as_damage(home, capfd, depth):
-    """Damage like any other: `runs show` names it and exits 1, and `runs list` still lists the
-    run, its counts `?`. Never the value itself, and never a traceback."""
+    """`runs show` names the damage without quoting it, and `runs list` still lists the run."""
     _hand_built_incomplete_run(home / "store", redact.load_key(home))
     events = home / "store" / "runs" / "handbuilt" / "events.jsonl"
     stored = events.read_text()
@@ -806,9 +777,9 @@ def test_runs_show_names_a_run_json_nested_too_deep_to_quote_as_damage(home, cap
 
 
 def test_runs_show_says_a_trigger_s_args_nest_too_deeply_to_show_and_never_raises():
-    """Python 3.14's `json.loads` reads a run.json some levels deeper than its `json.dumps` writes
-    back, so a damaged one read fine and then raised RecursionError out of `runs show`.
-    Built in Python a million deep, past what either Python writes, so the same on both."""
+    """Args too deep for `json.dumps` print as `ARGS_TOO_DEEP` instead of raising.
+
+    Built a million deep, past what any Python writes, so the test is the same on each."""
     args: list = []
     for _ in range(1_000_000):
         args = [args]

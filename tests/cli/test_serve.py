@@ -1,10 +1,6 @@
 """Serve mode: `irimi serve`, a sidecar with no child process.
 
-The engine half first: a listener bound wider than loopback is this machine at every address it
-was reached at, so a request naming that address, or a name that resolves to it, is never
-forwarded to irimi itself; and the reverse door stays loopback-only whatever the bind. Then the
-store's end-of-run callback, and then the CLI, driven as a subprocess where a signal is the point.
-"""
+The engine under a wide bind, the store's end-of-run callback, then the command itself."""
 
 import asyncio
 import contextlib
@@ -50,8 +46,9 @@ def _config(tmp_path, monkeypatch, listen_host="127.0.0.1"):
 
 
 def _own_address() -> str | None:
-    """The machine's non-loopback IPv4 address: the one a connected UDP socket would send from.
-    Connecting a UDP socket sends nothing; it only asks the routing table. None with no route."""
+    """Return this machine's non-loopback IPv4 address, or None with no route.
+
+    Connecting a UDP socket sends nothing; it only asks the routing table."""
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         try:
             sock.connect(("192.0.2.1", 9))  # TEST-NET-1: routed like any address, never answered
@@ -61,14 +58,14 @@ def _own_address() -> str | None:
     return None if address.startswith("127.") or address == "0.0.0.0" else address
 
 
-# -- the reverse door stays loopback-only ---------------------------------------------------------
+# -- base-URL requests stay loopback-only ---------------------------------------------------------
 
 
 def test_the_reverse_door_refuses_a_peer_that_is_not_loopback(tmp_path, monkeypatch):
-    """A wider bind lets other machines reach the listener, but never through the reverse door,
-    which relays plain HTTP with the agent's credentials to the real service: the peer check in
-    `ingress.admit` is unchanged. Driven through the addon, because a
-    connection from another machine cannot be staged here."""
+    """Under a wide bind, a base-URL request from a peer that is not loopback is refused.
+
+    Base-URL mode relays the agent's credentials, so `ingress.admit` checks the peer. Driven
+    through the addon, since a connection from another machine cannot be staged here."""
     from mitmproxy.test import tflow, tutils
 
     seen: list[Exchange] = []
@@ -108,8 +105,7 @@ def test_the_reverse_door_refuses_a_peer_that_is_not_loopback(tmp_path, monkeypa
 
 
 def _counting_requests(monkeypatch) -> list[tuple[str, int]]:
-    """Every request the addon's hook is called with, as the (address, port) its connection
-    arrived on. A request irimi forwarded to itself arrives a second time."""
+    """Record the (address, port) each request hook call arrived on; a self-loop arrives twice."""
     calls: list[tuple[str, int]] = []
     hook = IrimiAddon.request
 
@@ -138,12 +134,10 @@ def _absolute_get(address: str, port: int, url: str) -> tuple[int, bytes]:
 def test_a_request_naming_the_address_irimi_was_reached_at_is_never_forwarded_to_it(
     tmp_path, monkeypatch, named
 ):
-    """Bound to 0.0.0.0, irimi is this machine at its non-loopback address too, which is not a
-    loopback literal and does not resolve to one. A forward-proxy request for that address on
-    irimi's port - or for a name that resolves to it, as `irimi` does in compose - is irimi's own
-    listener: answered by irimi, here the reverse door's refusal of a peer that is not loopback,
-    and never forwarded, which would open a connection to the listener and arrive a second time
-    in a loop. The name is resolved by a `getaddrinfo` patch, in the process that runs irimi."""
+    """Bound to 0.0.0.0, a request for this machine's own address on irimi's port is answered.
+
+    So is one for a name resolving to it, as `irimi` does in compose (patched `getaddrinfo`).
+    Forwarding either would loop back into the listener."""
     import os
 
     address = _own_address()
@@ -193,11 +187,9 @@ routes:
 def test_an_answer_target_naming_the_address_irimi_was_reached_at_is_never_dialled(
     tmp_path, monkeypatch
 ):
-    """An answer target is irimi's own listener at the address a connection reached it at, as a
-    request is: with `--bind 0.0.0.0` and `--allow-remote-target` naming this machine's
-    own address, a write the target would answer is refused by irimi as its own listener, with
-    `irimi_target_failed`, and no second connection to the listener is opened. Before, the target
-    was dialled and the reverse door refused the looped request, as from a peer not on loopback."""
+    """A target at this machine's own address and irimi's port is refused, never dialled.
+
+    The write gets `irimi_target_failed`, and no second connection reaches the listener."""
     import json
     import os
 
@@ -208,10 +200,8 @@ def test_an_answer_target_naming_the_address_irimi_was_reached_at_is_never_diall
     maps_dir = tmp_path / "maps"
     maps_dir.mkdir()
     (maps_dir / "demo.yaml").write_text(TARGETED_MAP)
-    # The target has to name the port the engine bound, so the engine binds port 0 and the target
-    # is loaded once the port is known, into the index the engine and the policy were built with,
-    # which both read per request. A port reserved by binding a socket and closing it could be
-    # taken by another test before the engine bound it.
+    # The target names the port the engine bound, so it is loaded into the shared index once that
+    # port is known; a port reserved in advance could be taken by another test.
     maps = servicemaps.MapIndex()
     cfg = dataclasses.replace(_config(tmp_path, monkeypatch, listen_host="0.0.0.0"), maps=maps)
     calls = _counting_requests(monkeypatch)
@@ -246,9 +236,7 @@ def test_an_answer_target_naming_the_address_irimi_was_reached_at_is_never_diall
 
 
 def test_a_door_that_cannot_be_told_is_refused_never_forwarded(tmp_path, monkeypatch):
-    """Telling the doors apart parses the address a connection arrived on and may resolve a
-    name. If that raises, the hook would forward the flow, and the request it was asking
-    about may be one addressed to irimi itself: it is answered 400 by irimi instead."""
+    """If telling proxy from base URL raises, irimi answers 400 instead of forwarding the flow."""
     from mitmproxy.test import tflow, tutils
 
     from irimi.engine import ingress
@@ -282,9 +270,7 @@ def test_a_door_that_cannot_be_told_is_refused_never_forwarded(tmp_path, monkeyp
 
 
 def test_a_failed_decision_under_serve_mode_is_unattributed(tmp_path, monkeypatch):
-    """Serve mode's engine run is `trace.UNATTRIBUTED`, and the failed-decision path reads
-    the same fallback as every other: irimi's own 502, filed under no run, not
-    under a process run that does not exist."""
+    """Under serve, irimi's 502 for a failed decision is filed under `trace.UNATTRIBUTED`."""
     from mitmproxy.test import tflow, tutils
 
     from irimi.protocol.trace import UNATTRIBUTED
@@ -316,8 +302,7 @@ def test_a_failed_decision_under_serve_mode_is_unattributed(tmp_path, monkeypatc
 
 
 def test_a_loopback_bind_still_finds_its_own_loopback_spellings(tmp_path, monkeypatch):
-    """The default bind is unchanged: `127.1` on irimi's port is irimi, through the forward door
-    as through the reverse one, and goes no further than the reverse door's allow-list."""
+    """Under the loopback bind, `127.1` on irimi's port is irimi, via the proxy as via base URL."""
     calls = _counting_requests(monkeypatch)
     cfg = dataclasses.replace(_config(tmp_path, monkeypatch), reverse_hosts=frozenset())
     engine = MitmEngine(cfg, ShadowPolicy(), NullStore(), NoOverlay())
@@ -338,9 +323,9 @@ def test_a_loopback_bind_still_finds_its_own_loopback_spellings(tmp_path, monkey
 
 
 def test_the_store_calls_back_on_its_writer_once_a_runs_end_is_on_disk(tmp_path):
-    """`on_run_ended` is called with the run's id by the writer thread after it wrote the end, so
-    a reader opened in the callback finds the run whole: every event queued before the end, and
-    the end itself. A run that has not ended is not called back for."""
+    """`on_run_ended` runs on the writer thread once the run is whole on disk, end included.
+
+    A run that has not ended is not called back for."""
     import threading
 
     from irimi.record.store.reader import StoreReader
@@ -368,9 +353,7 @@ def test_the_store_calls_back_on_its_writer_once_a_runs_end_is_on_disk(tmp_path)
 
 
 def test_a_run_s_writes_and_keys_are_dropped_once_its_end_is_on_disk(tmp_path, monkeypatch):
-    """The composition root drops a run's writes from the engine's write log, and its idempotency
-    keys from the policy's store, as the store reports the run ended, before serve prints its
-    summary, so a long serve holds open runs' alone. Another run's stay."""
+    """A run's write log and idempotency keys are dropped when its end is on disk; others stay."""
     from irimi import cli
     from irimi.cli import compose
     from irimi.decide import idempotency
@@ -412,8 +395,7 @@ def test_a_run_s_writes_and_keys_are_dropped_once_its_end_is_on_disk(tmp_path, m
 
 
 def test_a_callback_that_raises_is_logged_and_the_store_carries_on(tmp_path, caplog):
-    """What `on_run_ended` raises is the caller's problem, never the run's: one WARNING naming the
-    exception's type, and the next event is still written."""
+    """A raising `on_run_ended` logs one warning naming its type, and the store writes on."""
     from irimi.record.store.reader import StoreReader
     from irimi.record.store.writer import DirectoryStore
 
@@ -437,8 +419,7 @@ def test_a_callback_that_raises_is_logged_and_the_store_carries_on(tmp_path, cap
 
 
 def test_one_serve_per_store_root(tmp_path):
-    """A second holder of a root's `serve.lock` is refused while the first holds it, and the lock
-    is free again once the first releases it, which it may do twice."""
+    """A second `serve.lock` holder is refused until the first releases, which may happen twice."""
     import os
 
     from irimi.record.store.lock import ServeLock, StoreLocked
@@ -482,8 +463,7 @@ def test_a_loopback_bind_adds_none(host):
 
 
 def test_an_ipv6_listener_is_bracketed_where_it_is_a_url(tmp_path):
-    """`::1:4000` reads as an address with one more group; the banner and the child's proxy and
-    control variables say `[::1]:4000`."""
+    """The banner and the child's proxy and control variables bracket IPv6: `[::1]:4000`."""
     from pathlib import Path
 
     from irimi.cli import runner
@@ -507,8 +487,7 @@ def home(home, monkeypatch):
 
 
 def test_serve_with_a_command_is_a_usage_error(home, monkeypatch, capsys):
-    """Serve mode launches nothing, so `-- echo hi` with it is answered as argparse answers a bad
-    invocation: usage on stderr, exit 2, and nothing started or stored."""
+    """`serve -- echo hi` is a usage error: exit 2, nothing started or stored."""
     from irimi.cli import main, serve
 
     monkeypatch.setattr(
@@ -535,8 +514,7 @@ def test_serve_has_one_spelling(home, capsys):
 
 
 def test_serve_with_a_command_exits_2_from_the_command_line(home):
-    """As a shell runs it: `irimi serve -- echo hi` exits 2 with argparse's usage, and
-    starts and stores nothing."""
+    """Run from a shell, `irimi serve -- echo hi` exits 2 with usage and stores nothing."""
     import os
     import subprocess
     import sys
@@ -557,11 +535,10 @@ def test_serve_with_a_command_exits_2_from_the_command_line(home):
 
 
 def test_a_second_serve_on_one_store_is_refused_before_it_starts(home, capsys):
-    """Two serves on one root would share `unattributed/events.jsonl`, repeating each other's
-    `seq` and cutting each other's lines as a crash's. The second is refused with one line
-    and exit 2, its store closed again, and the first serves on. Once the first stops, the
-    root is free again. The second is given a `stop` already set, so a serve that is wrongly let
-    through returns at once rather than serving for ever."""
+    """A second serve on one store exits 2 with one line, and the first serves on.
+
+    Two would share `unattributed/events.jsonl`. The second gets a `stop` already set, so if it
+    were wrongly let through it would return at once."""
     import threading
 
     from irimi import cli
@@ -596,9 +573,7 @@ def test_a_second_serve_on_one_store_is_refused_before_it_starts(home, capsys):
 
 @contextlib.contextmanager
 def _signals_caught_here():
-    """SIGINT and SIGTERM recorded by the test's own handlers for the length of the block, and
-    the handlers before it put back after: a signal serve failed to catch is a list entry, not the
-    death of the test process."""
+    """Record SIGINT and SIGTERM in a list for the block, so an uncaught one cannot kill pytest."""
     import signal
 
     outside: list[int] = []
@@ -615,10 +590,10 @@ def _signals_caught_here():
 
 
 def test_a_signal_during_serve_only_records_itself():
-    """Serve's handlers take no lock: one that ran inside `Event.wait` on the main thread and set
-    the event would wait on itself for ever. Each signal is recorded and nothing else; once
-    one has arrived, serve is stopping and both are ignored on the way out, so a second during the
-    interpreter's exit cannot end it. With none, the handlers found are put back."""
+    """Serve's signal handlers only record the signal, and both are ignored once one arrives.
+
+    A handler that set an event inside `Event.wait` would deadlock. With no signal, the handlers
+    found are put back."""
     import signal
 
     from irimi.cli import runner
@@ -640,8 +615,7 @@ def test_a_signal_during_serve_only_records_itself():
 
 
 def test_a_sigint_ignored_when_serve_starts_stays_ignored():
-    """`irimi serve &` from a script inherits an ignored SIGINT, and a Ctrl-C meant for the script
-    must not stop the serve. SIGTERM is still serve's."""
+    """An inherited ignored SIGINT, as `irimi serve &` gets, stays ignored; SIGTERM still stops."""
     import signal
 
     from irimi.cli import runner
@@ -659,9 +633,7 @@ def test_a_sigint_ignored_when_serve_starts_stays_ignored():
 def test_a_signal_before_the_proxy_is_ready_stops_serve_with_no_banner(
     home, monkeypatch, capsys, when
 ):
-    """A signal that arrives while serve loads its maps and opens its store, or while its engine
-    binds, is held until serve can act on it: it prints no banner that would say it serves, stops
-    whatever it started, closes the store, releases the lock and exits 0."""
+    """A signal during startup stops serve with no banner, the store closed and the lock freed."""
     import signal
 
     from irimi import cli
@@ -694,8 +666,7 @@ def test_a_signal_before_the_proxy_is_ready_stops_serve_with_no_banner(
 
 
 def test_an_engine_that_cannot_be_built_leaves_the_store_closed_and_unlocked(home, monkeypatch):
-    """What the engine factory raises reaches the caller, after the store is closed and its lock
-    released: nothing it opened outlives it."""
+    """An engine factory's error reaches the caller after the store is closed and unlocked."""
     import threading
 
     from irimi import cli
@@ -712,9 +683,9 @@ def test_an_engine_that_cannot_be_built_leaves_the_store_closed_and_unlocked(hom
 
 
 def test_two_blocks_printed_at_once_never_interleave(tmp_path, monkeypatch):
-    """The store's writer prints a run's summary while the engine's thread prints exchange lines:
-    `_ServeOutput` prints each call's lines under one lock, so a block comes out whole. The
-    stdout here yields between writes, which is where two unlocked writers would interleave."""
+    """`_ServeOutput` prints each call's lines under one lock, so a block comes out whole.
+
+    The stdout here yields between writes, where two unlocked writers would interleave."""
     import sys
     import threading
     import time
@@ -748,9 +719,9 @@ def test_two_blocks_printed_at_once_never_interleave(tmp_path, monkeypatch):
 def test_a_run_that_cannot_be_read_back_is_one_warning_naming_only_its_type(
     tmp_path, monkeypatch, capsys
 ):
-    """A run whose end is on disk but which cannot be read back prints one line on stderr instead
-    of its summary, naming the exception's type and never its message, which may quote what it
-    choked on, as the store's own warnings never do."""
+    """An ended run that cannot be read back gets one warning naming the error's type only.
+
+    The message may quote what the reader choked on."""
     from irimi.cli import serve
     from irimi.protocol.trace import TraceFormatError
     from irimi.record.store.reader import StoreReader
@@ -766,9 +737,7 @@ def test_a_run_that_cannot_be_read_back_is_one_warning_naming_only_its_type(
 
 
 def test_an_engine_that_stops_on_its_own_ends_serve_as_a_failure(home, monkeypatch, capsys):
-    """A sidecar whose proxy is gone must not look alive to its supervisor: serve exits 2 and
-    says why. Run on the main thread, it installed its signal handlers, and puts back the
-    ones it found when it returns."""
+    """Serve exits 2 and says why when its proxy stops, and puts back the signal handlers."""
     import signal
 
     from irimi import cli
@@ -799,9 +768,7 @@ def test_an_engine_that_stops_on_its_own_ends_serve_as_a_failure(home, monkeypat
     ids=["serve-SIGTERM", "serve-SIGINT"],
 )
 def test_serve_prints_one_banner_and_stops_cleanly_on_a_signal(home, argv, signame):
-    """`irimi serve` prints one banner, which names no run of its own, and stops on SIGTERM, as a
-    container runtime stops a sidecar, and on Ctrl-C's SIGINT, by closing the store and exiting 0
-    with nothing more to say."""
+    """`irimi serve` prints one banner naming no run, and exits 0 quietly on SIGTERM or SIGINT."""
     from irimi.report import terminal
 
     served = Served(home, *argv)
@@ -818,8 +785,7 @@ def test_serve_prints_one_banner_and_stops_cleanly_on_a_signal(home, argv, signa
 
 
 def test_a_wide_bind_says_so_in_the_banner(home):
-    """`--bind 0.0.0.0` adds the banner line saying who can now reach irimi, as a real
-    serve prints it; the loopback default does not, which the test above pins."""
+    """A real serve with `--bind 0.0.0.0` prints the banner line saying who can reach irimi."""
     import re
 
     from irimi.report import terminal
@@ -873,14 +839,10 @@ with sdk.run("run", inputs={"n": 3}):
 
 
 def test_a_served_sdk_agent_gets_one_summary_block_per_run_it_ends(home, tmp_path_factory):
-    """Serve mode end to end: `irimi serve` as its own process, and an SDK agent in
-    another, pointed at it by the variables the README's "Serve mode" names.
+    """Each run a served SDK agent ends prints a block equal to its stored summary.
 
-    The agent runs two triggers, each a read and a write, then a read in no run, then a third run
-    it never ends: it exits mid-run. Each ended run prints a `--- run <id> ---` block equal to
-    the summary of that run, read from the store; the read in no run lands in
-    `unattributed/`, which builds no run; and after SIGTERM, which exits 0, the run the agent never
-    ended loads as `incomplete`. The health answer says serve mode."""
+    The agent runs two triggers, a read in no run (stored in `unattributed/`), and a third run it
+    never ends, which loads as `incomplete`."""
     import json
     import threading
     import urllib.request
@@ -911,7 +873,7 @@ def test_a_served_sdk_agent_gets_one_summary_block_per_run_it_ends(home, tmp_pat
     try:
         port = port_of(served.banner())
         listener = f"http://127.0.0.1:{port}"
-        # The control endpoint says it serves: `EngineConfig.serve`, which the CLI sets.
+        # The control endpoint's health answer says serve mode.
         direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with direct.open(f"{listener}/_irimi/health", timeout=10) as health:
             assert json.load(health)["serve"] is True
@@ -950,8 +912,7 @@ def test_a_served_sdk_agent_gets_one_summary_block_per_run_it_ends(home, tmp_pat
 
 
 def _run_agent(tmp_path_factory, source: str, listener: str, *argv: str) -> None:
-    """`source` as an agent of its own, in its own process, pointed at the serve on `listener` by
-    the variables the README's "Serve mode" names, and nothing else of the test's proxies."""
+    """Run `source` as its own process, pointed at `listener` by the serve-mode variables."""
     import os
     import subprocess
     import sys
@@ -1006,12 +967,9 @@ for n in range(10):
 
 
 def test_a_stream_read_to_its_end_is_in_its_runs_block(home, tmp_path_factory):
-    """A streamed answer is recorded once its last chunk has gone through irimi, and the run's
-    block is printed when the SDK's end is on disk. For a stream the agent reads to its
-    end, the record comes first: mitmproxy sends the agent the stream's end only after the
-    `response` hook has queued the exchange, and the agent posts its run's end after that. So the
-    block of each run holds its stream. A stream the agent leaves open past its run's end is
-    recorded when it closes, after the block, as the README says."""
+    """A stream the agent reads to its end is recorded before its run ends, so it is in the block.
+
+    mitmproxy sends the stream's end only after the `response` hook queued the exchange."""
     import threading
     import time
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1107,8 +1065,7 @@ def test_serve_help_has_base_url_host(capsys):
 
 
 def test_a_reader_gone_by_serve_s_banner_closes_its_store_and_releases_its_lock(home, monkeypatch):
-    """`irimi serve | head -1`, its reader gone before the banner: 141, with the engine
-    stopped, the store closed and its `serve.lock` released, so the next serve may take it."""
+    """A reader gone before the banner exits 141 with the engine stopped and the store unlocked."""
     import threading
 
     from irimi.record.store.lock import ServeLock
@@ -1126,9 +1083,8 @@ def test_a_reader_gone_by_serve_s_banner_closes_its_store_and_releases_its_lock(
 
 def test_serve_prints_a_line_for_each_tool_call(home, monkeypatch, capsys):
     """`serve` wires the control endpoint's tool calls to its stream, as it does exchanges.
-    The engine here refuses to start, so only the wiring is under test. Its `run` serves until
-    `shutdown`, as a real engine's does: a `run` that returned at once would stop the loop before
-    `wait_ready` ran, and the test would fail on the ready timeout instead of the refusal."""
+
+    The engine refuses to start; its `run` waits for `shutdown`, so `wait_ready` raises first."""
     import asyncio
     import threading
 
@@ -1162,11 +1118,9 @@ def test_serve_prints_a_line_for_each_tool_call(home, monkeypatch, capsys):
 
 
 def test_serve_records_under_the_store_it_was_given(home, monkeypatch, capsys):
-    """`--store` on `serve` is where its exchanges go, not `$IRIMI_HOME/store`. Serve mode
-    starts no process run, so an exchange that names no run is stored in `unattributed/` and
-    builds none, and the store is closed when serve stops, with a line pointing at it. Stopped
-    by its `stop` event, as the sample-workflow harness stops it, rather than by a signal to the
-    test process."""
+    """`serve --store` stores there, an exchange in no run under `unattributed/`, named at stop.
+
+    Stopped by its `stop` event, as the corpus harness stops it, not by a signal."""
     import threading
     import urllib.request
     from http.server import BaseHTTPRequestHandler, HTTPServer

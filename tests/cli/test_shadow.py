@@ -21,7 +21,7 @@ def _env_dump_source(dump) -> str:
 
 
 def _base_url_source(path: str) -> str:
-    """Child that talks to the reverse door on the listener it was given, then prints the reply."""
+    """Child that sends a base-URL request to its listener, then prints the reply."""
     return (
         "import http.client, os, urllib.parse;"
         "u = urllib.parse.urlparse(os.environ['HTTPS_PROXY']);"
@@ -147,9 +147,9 @@ def test_a_command_that_is_not_executable_is_refused_before_the_banner(home, tmp
 
 
 def test_a_client_that_refuses_irimi_s_ca_is_named_in_the_summary(home, tmp_path, capfd):
-    """A client trusting some other CA fails its handshake and never sends a request: the summary
-    counts the refused connection by host, names the CA to point it at, and says irimi saw no
-    traffic."""
+    """A client that distrusts irimi's CA is counted by host, with the CA to point it at.
+
+    It never sends a request, so the summary also says irimi saw no traffic."""
     other = ca.CAPaths(key=tmp_path / "other.key", cert=tmp_path / "other.pem")
     ca.generate_ca(other)
     source = (
@@ -171,8 +171,7 @@ def test_a_client_that_refuses_irimi_s_ca_is_named_in_the_summary(home, tmp_path
 
 
 def test_the_summary_starts_on_a_line_of_its_own_after_a_child_that_left_one_open(home, capfd):
-    """irimi cannot see what the child wrote to their shared stdout, so a newline ends whatever
-    line the child left open before the summary's header."""
+    """A newline ends any line the child left open before the summary's header."""
     assert main(["shadow", *python_child("import sys; sys.stdout.write('no newline')")]) == 0
     lines = capfd.readouterr().out.splitlines()
     [header] = [i for i, line in enumerate(lines) if " · 0 exchanges · " in line]
@@ -266,8 +265,7 @@ def test_a_base_url_request_to_an_unlisted_host_is_refused(home, capfd):
     out = capfd.readouterr().out
     assert '403 {"error": {"type": "irimi_refused", "message": "irimi refused this request: ' in out
     assert "base-URL host 'evil.example' is not in a loaded map or --base-url-host" in out
-    # The refusal is irimi's own answer, so it is recorded and counted like one. It was a GET, so
-    # it is not listed among the writes, and its host line says irimi refused it.
+    # The refusal is recorded and counted as irimi's own answer; a GET, so not among the writes.
     assert "1 exchange" in out
     assert "1 read refused by irimi" in out
     assert "None of these writes" not in out
@@ -294,7 +292,7 @@ def test_base_url_host_admits_one_more_host(home, capfd):
 
 
 def test_banner_names_a_delegated_service(home, tmp_path, capsys):
-    """A routed host may not be live either, and the banner says so."""
+    """The banner names a service whose requests go to a target."""
     from irimi import servicemaps
 
     (tmp_path / "cwd" / servicemaps.loader.CWD_OVERRIDE_NAME).write_text(
@@ -303,7 +301,7 @@ def test_banner_names_a_delegated_service(home, tmp_path, capsys):
     assert main(["shadow", *python_child("pass")]) == 0
     out = capsys.readouterr().out
     assert "delegated: stripe -> http://127.0.0.1:3000 (reads + writes)" in out
-    # The existing banner is unchanged, not replaced.
+    # Added to the usual banner, not in place of it.
     assert "only traffic sent through this proxy is shadowed" in out
 
 
@@ -325,7 +323,7 @@ def test_the_banner_says_when_a_target_left_the_machine(home, capsys):
     captured = capsys.readouterr()
     assert "delegated: stripe -> http://stub.example:3000 (writes)" in captured.out
     assert "NOT loopback" in captured.out
-    assert "--allow-remote-target" in captured.err  # the existing escape-hatch warning, unchanged
+    assert "--allow-remote-target" in captured.err  # the escape-hatch warning
 
 
 def test_no_delegated_service_leaves_the_banner_alone(home, capsys):
@@ -334,12 +332,9 @@ def test_no_delegated_service_leaves_the_banner_alone(home, capsys):
 
 
 def test_sigterm_stops_the_command_ends_the_run_and_closes_the_store(home, upstream):
-    """SIGTERM is how a supervisor or a container runtime stops `irimi shadow`. It is passed to
-    the command, whose exit then ends the run as any exit does: the run is stored ended with the
-    command's code, what was queued is written before irimi exits, the summary is printed, and
-    irimi exits with the command's code, 143 for a command SIGTERM ended. Python's default action
-    would end irimi at once, leaving the command running with its proxy gone, the run incomplete
-    and the store never closed."""
+    """A SIGTERM is passed to the command, and irimi ends the run, prints the summary and exits 143.
+
+    Python's default action would end irimi at once, leaving the command running proxy-less."""
     import os
     import signal
     import subprocess
@@ -401,9 +396,7 @@ def test_sigterm_stops_the_command_ends_the_run_and_closes_the_store(home, upstr
 
 
 def test_sigterm_before_the_command_starts_runs_nothing(home, monkeypatch, capsys):
-    """A SIGTERM that arrives while irimi loads its maps or binds is held until the command would
-    start, and the command then never does: no run is stored, the store is closed and irimi exits
-    143."""
+    """A SIGTERM during startup is held, then stops irimi with 143 before the command starts."""
     import signal
 
     from irimi.cli import compose
@@ -436,9 +429,7 @@ def test_sigterm_before_the_command_starts_runs_nothing(home, monkeypatch, capsy
 
 
 def test_sigterm_while_the_command_starts_is_passed_to_it_once_it_exists(home, monkeypatch):
-    """A SIGTERM that lands after the command was started but before irimi holds it, when there is
-    no command to pass it to, is held and passed on as the command is adopted: the command
-    ends at once, and the run is stored with its 143."""
+    """A SIGTERM as the command starts is held and passed on once irimi holds the command."""
     import signal
     import subprocess
     import time
@@ -462,9 +453,7 @@ def test_sigterm_while_the_command_starts_is_passed_to_it_once_it_exists(home, m
 
 
 def test_sigterm_after_the_command_exited_signals_no_pid(home, monkeypatch):
-    """Once the command has been reaped its pid may be another process's, so a SIGTERM that comes
-    while irimi ends the run and closes the store is passed to no one: the run keeps the
-    command's own exit, and irimi closes the store and exits with it."""
+    """A SIGTERM after the command is reaped signals no pid, which may be another process's."""
     import os
     import signal
 
@@ -492,9 +481,7 @@ def test_sigterm_after_the_command_exited_signals_no_pid(home, monkeypatch):
 
 
 def test_an_ignored_sigterm_stays_ignored_and_a_thread_installs_nothing(home, monkeypatch):
-    """`irimi shadow` started with SIGTERM ignored leaves it ignored, as serve does, and one run off
-    the main thread, where Python allows no handler, installs none and still runs its command.
-    """
+    """An ignored SIGTERM stays ignored, and a run off the main thread installs no handler."""
     import signal
 
     from irimi.cli import compose
@@ -553,9 +540,7 @@ def test_shadow_help_has_base_url_host(capsys):
 def test_a_redaction_key_that_cannot_be_used_stops_the_run_with_one_line(
     home, capsys, command, key
 ):
-    """A run that could not redact what it stores must not start, in `serve` as in
-    `shadow`: one `error:` line, exit 2, no traceback, no store on disk, and the child never
-    runs."""
+    """An unusable redaction key stops the run with one `error:` line, before any store or child."""
     path = home / paths.REDACT_KEY_NAME
     if key == "short":
         path.write_bytes(b"short")
@@ -577,9 +562,9 @@ def test_a_redaction_key_that_cannot_be_used_stops_the_run_with_one_line(
 
 @pytest.mark.parametrize("command", ["serve", "shadow"])
 def test_a_store_that_cannot_be_written_stops_the_run_with_one_line(home, capsys, command):
-    """A store that would drop every event behind one warning must not start a run that looks
-    recorded, in `serve` as in `shadow`: a file, and - unless root, whom no mode stops - a
-    read-only directory and one that cannot be created under it. The child never runs."""
+    """An unwritable store stops the run with one `error:` line, and the child never runs.
+
+    Read-only directories are skipped as root, whom no mode stops."""
     import os
 
     stores = [home / "ca" / "ca.pem"]
@@ -599,8 +584,7 @@ def test_a_store_that_cannot_be_written_stops_the_run_with_one_line(home, capsys
 
 
 def test_shadow_stores_its_process_run_with_the_agent_and_engine_versions(home, monkeypatch):
-    """The process run's record: its argv, which a replay runs again, the agent's version
-    from `IRIMI_AGENT_VERSION`, this irimi's version, and how the child exited."""
+    """The process run records its argv, both versions and how the child exited."""
     from irimi.protocol.trace import ErrorInfo, trigger_args
     from irimi.record.store.reader import StoreReader
 
@@ -627,9 +611,7 @@ def test_shadow_stores_its_process_run_with_the_agent_and_engine_versions(home, 
 
 
 def test_shadow_closes_the_store_when_the_proxy_never_starts(home, monkeypatch, capsys):
-    """`cli` opened the store, so `cli` closes it on every path out, and not only when an
-    engine thread got far enough to close it for it: one that never started, or outlived
-    `handle.stop()`, did not."""
+    """The CLI closes the store it opened even when the proxy never starts."""
     from irimi.cli import runner
     from irimi.engine import EngineStartError
 
@@ -647,11 +629,9 @@ def test_shadow_closes_the_store_when_the_proxy_never_starts(home, monkeypatch, 
 
 @pytest.mark.parametrize("when", ["at-the-banner", "at-the-summary"])
 def test_a_reader_gone_costs_shadow_no_run_and_leaves_no_engine(home, monkeypatch, when):
-    """`irimi shadow -- cmd | head -1`. A reader gone by the banner stops irimi before the
-    command starts, so no run is stored; one gone by the summary, once the command has ended,
-    finds the run ended with the command's exit code. Either way irimi exits 141 with the engine
-    stopped and the store closed: the write that failed was inside the `try` whose `finally`
-    stops them (`shadow.run_child`), or after it."""
+    """A reader gone exits 141 with the engine stopped and the store closed.
+
+    Gone by the banner, no run is stored; gone by the summary, the run has the command's exit."""
     import threading
 
     from irimi.cli import runner
@@ -681,9 +661,7 @@ def test_a_reader_gone_costs_shadow_no_run_and_leaves_no_engine(home, monkeypatc
 
 
 def test_a_ctrl_c_while_the_store_closes_still_prints_the_summary(home, monkeypatch, capsys):
-    """The impatient second Ctrl-C of `handle.stop()` can land in the store's close as well, which
-    waits up to `store.CLOSE_TIMEOUT_S` for the writer. It must not cost the summary or the
-    child's exit code."""
+    """A Ctrl-C during the store's close costs neither the summary nor the child's exit code."""
     import threading
 
     def interrupt(store):

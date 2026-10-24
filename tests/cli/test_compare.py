@@ -1,9 +1,6 @@
-"""`irimi compare`: two stored runs' writes side by side, and no verdict.
+"""`irimi compare`: two stored runs' writes side by side.
 
-Each test stores two runs with `DirectoryStore`, built from hand-made exchanges and tool calls,
-and reads them back through the real `irimi compare`, which loads the shipped maps as `irimi runs
-show` does. `tests/e2e/workflows` compares runs the real `irimi shadow` recorded.
-"""
+Runs are stored from hand-made events and read back through the real command and shipped maps."""
 
 import dataclasses
 import json
@@ -40,7 +37,7 @@ TOOL = "○ tool  db.mark_refunded  fake ran instead"
 
 
 def _refund(amount: int = 4900, **changes) -> Exchange:
-    """A refund irimi faked after its L3 read passed, as `report` prints `REFUND` for 4900."""
+    """A refund irimi faked after its precondition check passed; `REFUND` prints it at 4900."""
     return builders.refund_exchange(amount, **changes)
 
 
@@ -129,8 +126,9 @@ def _run(events: list[Event]) -> StoredRun:
 
 
 def _compare(home, capfd, a: list[Event], b: list[Event], **b_record) -> tuple[int, list[str]]:
-    """`irimi compare a b` over two runs holding `a`'s and `b`'s events; its exit code and the
-    lines it printed after the header. Nothing may go to stderr."""
+    """Return `irimi compare a b`'s exit code and the lines after its header.
+
+    The two runs hold `a`'s and `b`'s events. Nothing may go to stderr."""
     _store(home, {"a": (_record("a"), a), "b": (_record("b", **b_record), b)})
     code = main(["compare", "a", "b"])
     out, err = capfd.readouterr()
@@ -188,8 +186,7 @@ UPDATE = "○ stripe  update customer cus_1  faked; not checked"
 
 
 def test_two_updates_that_print_alike_but_send_other_fields_are_changed_and_say_which(home, capfd):
-    """The map's sentence names the customer and nothing it sets: compared by that line, an
-    update that blocks the customer and clears its email was the same as one that set an email."""
+    """Two updates whose map sentence names only the customer are compared by their fields."""
     a: list[Event] = [_update(b"email=alice%40x.com")]
     b: list[Event] = [_update(b"metadata[blocked]=true&email=")]
     code, lines = _compare(home, capfd, a, b)
@@ -219,8 +216,9 @@ def test_a_refund_whose_reason_alone_differs_is_changed(home, capfd):
 
 
 def test_an_ignored_field_is_not_compared_and_any_other_is():
-    """`nonce` is in `compare_ignores:` on the refund route of a test map built from the shipped
-    one, which a replay never matches on either (`replay.index.compared_body`)."""
+    """A field in the route's `compare_ignores:` is left out, as a replay's match leaves it out.
+
+    The test map is the shipped one with `nonce` ignored on the refund route."""
     index = servicemaps.MapIndex(
         tuple(
             dataclasses.replace(
@@ -248,9 +246,9 @@ def test_an_ignored_field_is_not_compared_and_any_other_is():
 
 
 def test_a_write_answered_otherwise_is_changed_though_its_line_reads_the_same():
-    """What irimi did with a write is compared as its data is: a target, a precondition's
-    currency, a refusal's reasons. Here the L3 read named another currency for a refund whose line
-    shows no amount."""
+    """What irimi did with a write is compared too: here, the currency its check read found.
+
+    The target and a refusal's reasons are compared the same way."""
     index = servicemaps.load()
     a = dataclasses.replace(_update(b"email=a%40x.com"), precondition=Precondition(currency="usd"))
     b = dataclasses.replace(a, precondition=Precondition(currency="eur"))
@@ -309,9 +307,9 @@ def test_an_update_to_another_customer_is_changed_by_the_object_its_path_names()
 
 
 def test_a_webhook_s_redacted_path_is_not_compared_and_its_text_is():
-    """The store redacts a webhook's whole path, the URL being its credential, with the key of
-    the install that stored it: two installs spell one webhook apart, so the path names nothing
-    compare can match. Its text is compared as any body field is."""
+    """A webhook's redacted path is left out of the comparison, and its text is compared.
+
+    The path is redacted with each install's own key, so two installs spell one webhook apart."""
 
     def hook(path: str, text: str) -> Exchange:
         body = json.dumps({"text": text}).encode()
@@ -334,8 +332,7 @@ def test_a_webhook_s_redacted_path_is_not_compared_and_its_text_is():
 
 
 def test_an_llm_body_is_compared_less_who_asked_and_how_as_a_replay_matches_it():
-    """`replay.index.compared_body` is the one rule: an llm call's body less its route's
-    `compare_ignores:` and every `cache_control`, at any depth."""
+    """An llm body is compared less its route's `compare_ignores:` and every `cache_control`."""
     asked = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
     noisy = {
         **asked,
@@ -387,9 +384,7 @@ def test_a_refund_l3_rejected_in_b_is_the_same_write_changed_and_shows_its_mark(
 
 
 def test_a_second_refused_refund_is_the_write_added_not_the_first(home, capfd):
-    """Lined up by key alone, B's first refund pairs with nothing and its refused second one with
-    A's refund: `+` on the refund both runs made, and `~` against the refusal. Lining up the same
-    writes first leaves the refusal as the one B added."""
+    """Equal writes pair first, so B's refused second refund is the one marked `+`."""
     refused = _refund(precondition=Precondition("rejected", "charge_already_refunded"))
     code, lines = _compare(home, capfd, [_refund(), _tool()], [_refund(), refused, _tool()])
     assert (code, lines[3:]) == (
@@ -412,8 +407,7 @@ def test_reads_llm_calls_read_tools_real_tools_and_a_replayed_retry_are_not_writ
         _read("/v1/charges/ch_1", b'{"amount": 1}'),
         _read("/v1/customers/cus_1"),
         _tool("db.lookup", kind="read", ran="real"),
-        # A write tool the SDK ran for real is in no summary: it posts none, and none is a write
-        # that did not happen.
+        # A write tool the SDK ran for real is in no summary: it is not a faked write.
         _tool("db.archive", ran="real"),
         _refund(),
         replayed,
@@ -427,7 +421,7 @@ def test_reads_llm_calls_read_tools_real_tools_and_a_replayed_retry_are_not_writ
 
 
 def test_a_delegated_write_is_a_write_and_prints_where_it_went(home, capfd):
-    """The summary prints a write an answer target answered, so it is compared too."""
+    """The summary prints a write a target answered, so it is compared too."""
     delegated = _refund(
         answered_by="delegated", target="http://127.0.0.1:9999", precondition=Precondition()
     )
@@ -459,10 +453,9 @@ def test_two_writes_whose_bodies_were_cut_are_not_compared_and_not_called_the_sa
 
 
 def test_a_cut_pair_whose_lines_read_the_same_is_still_not_compared_and_exits_1(home, capfd):
-    """A body cut when stored, or dropped past the decoding cap, renders one line for different
-    requests: two cut refunds of different amounts can print the same line, which compared by
-    line would be `=` and exit 0. A pair either side of which was cut is `?`, whatever its lines
-    say."""
+    """A pair with either side cut is `?` whatever its lines say.
+
+    A cut body prints one line for different requests, so two cut refunds can print alike."""
     cut = _refund(flags=(Flag.BODY_TRUNCATED,))
     code, lines = _compare(home, capfd, [_refund(), _tool()], [cut, _tool()])
     assert (code, lines[3:]) == (
@@ -524,7 +517,7 @@ def test_args_are_compared_as_json_so_true_is_not_1_and_key_order_is_nothing():
 
 
 def test_args_nested_deeper_than_json_writes_are_called_different_and_never_raise():
-    """A million deep, past what either Python's `json.dumps` writes, as `test_runs` builds it."""
+    """Args a million deep, past what `json.dumps` writes, compare as different."""
     deep: trace.JSONValue = []
     for _ in range(1_000_000):
         deep = [deep]
@@ -533,8 +526,9 @@ def test_args_nested_deeper_than_json_writes_are_called_different_and_never_rais
 
 
 def test_a_write_s_text_is_escaped_so_one_write_is_one_line_and_printing_never_raises(home, capfd):
-    """A Slack post's text is the agent's own: unescaped, a newline would split the row, the
-    terminal would obey an escape sequence, and a lone surrogate would raise out of `print`."""
+    """A post's text is escaped: newlines, escape sequences and lone surrogates.
+
+    Unescaped, a newline would split the row and a lone surrogate would raise out of `print`."""
     code, lines = _compare(home, capfd, [_post("hi")], [_post("hi\nthere\x1b[31m\ud800")])
     assert (code, lines[3:5]) == (
         1,
@@ -546,8 +540,7 @@ def test_a_write_s_text_is_escaped_so_one_write_is_one_line_and_printing_never_r
 
 
 def test_a_tool_never_lines_up_with_an_exchange_of_a_service_named_tool(home, capfd):
-    """An exchange's key is longer than a tool call's, so a service a map calls `tool` cannot pair
-    one of its writes with a tool call of its operation's name."""
+    """A write of a service named `tool` never pairs with a tool call of its operation's name."""
     write = dataclasses.replace(_refund(), service="tool", operation="db.mark_refunded")
     code, lines = _compare(home, capfd, [write], [_tool()])
     assert (code, [line[:3] for line in lines[3:5]]) == (1, ["  -", "  +"])
@@ -570,8 +563,7 @@ def test_a_label_leaves_out_what_the_run_did_not_record(home, capfd):
 
 
 def test_a_label_escapes_the_entrypoint_and_the_agent_version_too(home, capfd):
-    """Each is the agent's own text, as the trigger's name is, so each is escaped as `runs show`
-    escapes it: one side is one line, and a terminal obeys no escape sequence in it."""
+    """The entrypoint and agent version are escaped as `runs show` escapes them."""
     trigger = Trigger("t", "mod:f\x1b[2J", {"n": 1}, False)
     _store(
         home,
@@ -647,10 +639,9 @@ def test_an_action_s_text_is_its_summary_line_without_the_indent():
 
 
 def test_a_newline_and_a_typed_backslash_n_print_alike_and_are_still_not_the_same(home, capfd):
-    """Escaping leaves a backslash as it is, so the two posts print one line. Compared as printed,
-    an agent that started double-escaping its Slack posts compared `=` and exited 0; and printed as
-    the summary prints them, the `~` pair was two identical lines. A pair whose lines print alike
-    prints both with each backslash escaped too."""
+    """A newline and a typed `\\n` are changed, and the pair escapes its backslashes to differ.
+
+    Escaping leaves a backslash as it is, so the summary prints both posts as one line."""
     code, lines = _compare(home, capfd, [_post("line1\nline2")], [_post("line1\\nline2")])
     assert (code, lines[3:]) == (
         1,
@@ -661,7 +652,7 @@ def test_a_newline_and_a_typed_backslash_n_print_alike_and_are_still_not_the_sam
             "  0 same · 1 changed · 0 only in A · 0 only in B",
         ],
     )
-    # A tool's name is its key, but the error type its stand-in raised is only in its line.
+    # A tool's name is its key, but the error type its fake raised is only in its line.
     raised: list[Event] = [
         dataclasses.replace(_tool(), error=ErrorInfo(kind, "")) for kind in ("a\nb", "a\\nb")
     ]
@@ -675,9 +666,9 @@ def test_a_newline_and_a_typed_backslash_n_print_alike_and_are_still_not_the_sam
 
 
 def test_a_pair_printed_unlike_keeps_the_summary_s_lines_and_a_cut_pair_alike_is_not_escaped():
-    """Only a pair whose lines print alike though they differ escapes its backslashes: one that
-    already prints unlike keeps both summary lines, backslashes and all, and a pair whose two
-    sentences are equal, as a cut write compared with itself, has nothing to tell apart."""
+    """Only a pair that prints alike though it differs escapes its backslashes.
+
+    A pair that prints unlike, or a cut write compared with itself, keeps the summary's lines."""
     index = servicemaps.load()
     pair = compare.compare_runs(_run([_post("a\\b")]), _run([_post("a\\c")]), index)
     assert pair.lines()[:2] == [
@@ -692,9 +683,9 @@ def test_a_pair_printed_unlike_keeps_the_summary_s_lines_and_a_cut_pair_alike_is
 
 
 def test_every_write_shape_s_action_is_the_line_the_stored_summary_prints_for_it(home):
-    """Each exchange shape the engine records and each tool call: the actions are exactly the
-    summary's write lines, byte for byte, the exchanges in `seq` order and then the tool calls,
-    which the summary prints after the HTTP writes."""
+    """For every recorded write shape, the actions are the summary's write lines, byte for byte.
+
+    Exchanges come in `seq` order, then tool calls, as the summary prints them."""
     target = "http://127.0.0.1:9"
     # An unclassified write keeps its host as its service and its request as its operation.
     unclassified = _refund(kind="unknown", answered_by="fake-L0", precondition=Precondition())
@@ -746,9 +737,9 @@ def test_every_write_shape_s_action_is_the_line_the_stored_summary_prints_for_it
 
 
 def test_align_keeps_every_action_once_in_its_order_and_a_run_is_the_same_as_itself():
-    """Hand-rolled property test over seeded random runs drawn from few keys and fields, so the
-    same write recurs, as forty `mark_reconciled` stand-ins do in W2. The sentence is drawn apart
-    from the fields: two actions are the same by their data, whatever they print."""
+    """Property test over seeded random runs drawn from few keys and fields, so writes recur.
+
+    The text is drawn apart from the fields: two actions are the same by their data alone."""
     rng = random.Random(79)
 
     def action() -> compare.Action:
@@ -786,9 +777,7 @@ def test_align_keeps_every_action_once_in_its_order_and_a_run_is_the_same_as_its
 
 
 def test_a_cut_pair_whose_lines_print_alike_though_they_differ_is_told_apart_too():
-    """A `?` pair prints both its lines as a `~` pair does: when the two print alike though they
-    differ, a newline against a typed `\\n`, each backslash is escaped too, or the reader sees one
-    line twice and cannot tell what irimi did not compare."""
+    """A `?` pair that prints alike though it differs escapes its backslashes, as `~` does."""
     cut = dataclasses.replace(_post("line1\nline2"), flags=(Flag.BODY_TRUNCATED,))
     pair = compare.compare_runs(_run([cut]), _run([_post("line1\\nline2")]), servicemaps.load())
     assert pair.lines()[:2] == [
@@ -798,10 +787,9 @@ def test_a_cut_pair_whose_lines_print_alike_though_they_differ_is_told_apart_too
 
 
 def test_a_run_of_hundreds_of_one_write_is_lined_up_write_by_write():
-    """`difflib`'s junk heuristic, on by default, takes out of matching any item more than 1% of a
-    sequence of 200 or more. Two runs that each made 250 identical stand-ins after a first write
-    that differs then matched nothing: every stand-in printed `-` and again `+`. Lined up with it
-    off, the first writes are one `-` and one `+`, and each stand-in is `=`."""
+    """250 identical fakes after differing first writes each line up as `=`.
+
+    `difflib`'s junk heuristic, which would drop an item over 1% of a long sequence, is off."""
     many = [_tool() for _ in range(250)]
     comparison = compare.compare_runs(_run([_post("hi"), *many]), _run([_refund(), *many]), None)
     assert comparison.lines() == [
@@ -824,9 +812,9 @@ def test_a_run_of_hundreds_of_one_write_is_lined_up_write_by_write():
     ],
 )
 def test_a_pair_that_differs_by_a_character_no_one_can_see_spells_it(a, b, spelled_a, spelled_b):
-    """`report.terminal.printable` escapes control characters, not a zero-width space, a no-break
-    space or a right-to-left override, so two posts that differ only by one printed two identical
-    lines under `~`. A pair whose lines print alike spells each such character as its escape."""
+    """A pair that prints alike spells invisible characters, such as a zero-width space, as escapes.
+
+    `report.terminal.printable` escapes control characters only."""
     pair = compare.compare_runs(_run([_post(a)]), _run([_post(b)]), servicemaps.load())
     assert pair.lines()[:2] == [
         f'  ~ A ○ slack  post to #C1: "{spelled_a}"  faked; not checked',
@@ -835,8 +823,7 @@ def test_a_pair_that_differs_by_a_character_no_one_can_see_spells_it(a, b, spell
 
 
 def test_compare_takes_a_prefix_only_one_run_starts_with_and_last(home, capfd):
-    """Each side may be a prefix only one run id starts with, or `last` for the newest run; the
-    header names the whole ids."""
+    """Each side may be a unique run-id prefix or `last`; the header names the whole ids."""
     _store(
         home,
         {

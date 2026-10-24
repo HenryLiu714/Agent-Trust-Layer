@@ -1,14 +1,6 @@
-"""`irimi replay` and `testing.replay()` end to end: a run recorded under the real `irimi shadow`
-into a store, then replayed by the real `irimi replay` against the same Stripe-shaped stub and LLM
-stub on loopback, each of which writes down every request it is given, so a test can prove what a
-replay never sent anywhere.
+"""`irimi replay` and `testing.replay()`: runs recorded by the real `irimi shadow`, replayed.
 
-The agent is a module this file writes into the test's working directory, `replay_agent`, started
-by its name (`python -c "import replay_agent; ..."`) so its trigger's entrypoint is
-`replay_agent:handle`, which `irimi.replay.child` imports, never `__main__:handle`. It sends
-its calls through the forward proxy explicitly, because `irimi shadow` exempts loopback from it
-through `NO_PROXY` and the stubs are on loopback. The maps are `tests/support/maps.py`'s.
-"""
+The agent names the proxy explicitly, for the `NO_PROXY` reason `support/scenarios.py` gives."""
 
 import json
 import re
@@ -155,8 +147,7 @@ TICKET = "replay_agent.Ticket('ch_REAL1', 'refund please')"
 
 @pytest.fixture
 def home(tmp_path, monkeypatch, replay_stubs, home_with_maps):
-    """`$IRIMI_HOME` with a CA, the test maps in place of the shipped ones, the agent module in the
-    working directory, and the stubs' ports in the environment the agent reads them from."""
+    """Return an `$IRIMI_HOME` with a CA and the test maps, the agent module and stub ports set."""
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "home"))
     ca.generate_ca(ca.ca_paths())
     home_with_maps({"stripe.yaml": REPLAY_STRIPE_MAP, "anthropic.yaml": REPLAY_LLM_MAP})
@@ -169,9 +160,9 @@ def home(tmp_path, monkeypatch, replay_stubs, home_with_maps):
 
 
 def _record_run(home, code: str, stubs) -> str:
-    """Run `code` under `irimi shadow`, after `import replay_agent`, and return the one run it
-    stored besides the process run: the SDK's, or the process run when there is none. Forgets every
-    request the stubs saw while it ran."""
+    """Run `code` under `irimi shadow` and return the SDK run it stored, else the process run.
+
+    The stubs forget every request they saw while it ran."""
     before = {r.run_id for r in StoreReader(home / "store").list_runs()}
     command = [sys.executable, "-c", f"import replay_agent, sys; {code}"]
     assert main(["shadow", "--port", "0", "--", *command]) == 0
@@ -375,11 +366,9 @@ def test_a_run_with_no_entrypoint_and_no_argv_is_refused(home, capfd, replay_stu
 def test_sdk_replay_returns_the_result_the_cli_writes(
     home, capfd, monkeypatch, tmp_path, replay_stubs
 ):
-    """`testing.replay(run_id)` and `testing.replay(run_id, fn, *args)`, from this test's own
-    process, run `irimi replay` as a subprocess and return the result file it writes, equal to the
-    CLI's but for the replay's new run id. The agent is tools-only: the maps `irimi replay` loads
-    in a subprocess are the shipped ones, which the stubs are not on, and a replay of tools needs
-    none."""
+    """`testing.replay` returns the result the CLI writes, but for the replay's new run id.
+
+    The agent is tools-only: a subprocess `irimi replay` loads the shipped maps, not the stubs'."""
     from irimi import testing
 
     source = _record_run(home, f"replay_agent.answer({TICKET})", replay_stubs)
@@ -435,8 +424,7 @@ def test_sdk_replay_of_a_run_the_store_does_not_hold_is_a_result_that_exits_2(ho
 def test_a_replay_takes_a_prefix_of_the_run_id_and_names_the_whole_one(
     home, capfd, tmp_path, replay_stubs
 ):
-    """A prefix only one run id starts with names that run: the replay reads it, and its
-    result and messages name the whole id."""
+    """A unique run-id prefix names its run, and the result and messages name the whole id."""
     source = _record_run(home, f"replay_agent.Desk().handle({TICKET})", replay_stubs)
     capfd.readouterr()
     result_file = tmp_path / "result.json"
@@ -450,9 +438,7 @@ def test_a_replay_takes_a_prefix_of_the_run_id_and_names_the_whole_one(
 def test_a_trigger_it_cannot_call_is_a_replay_that_could_not_run(
     home, capfd, tmp_path, replay_stubs
 ):
-    """A method's run, whose instance a run does not record, and args whose class does not revive:
-    the child cannot call either, and the replay says why once and exits 2, never an agent that
-    ran and differed, and prints no comparison of a run the agent never made."""
+    """A method trigger, or args that do not revive, exits 2 with one reason and no comparison."""
     source = _record_run(home, f"replay_agent.Desk().handle({TICKET})", replay_stubs)
     capfd.readouterr()
     result_file = tmp_path / "result.json"
@@ -485,9 +471,9 @@ def test_a_trigger_it_cannot_call_is_a_replay_that_could_not_run(
 
 
 def test_a_trigger_recorded_in_main_is_refused(home, capfd):
-    """An agent run as `python agent.py` records `__main__:handle`, and `__main__` is the child's
-    own module when it is called: refused, exit 2, before anything runs, with the command that
-    replays it. An SDK run records no command line, so the module is left for the reader."""
+    """A `__main__` trigger is refused with exit 2 before anything runs, naming the command to use.
+
+    An SDK run records no command line, so the module is left as `<module>`."""
     (home.parent / "script_agent.py").write_text(
         "import replay_agent\nfrom irimi import sdk\n\n@sdk.trigger\ndef main():\n    "
         "replay_agent.plain('ch_REAL1')\n\nmain()\n"
@@ -505,8 +491,7 @@ def test_a_trigger_recorded_in_main_is_refused(home, capfd):
 
 
 def _python(tmp_path, name: str, setup: str, flags: str = "") -> str:
-    """A Python for `--python`: a script that runs `setup` in the shell, then this test's
-    interpreter with `flags` and every argument it was given."""
+    """Return a `--python` script that runs `setup`, then this interpreter with `flags`."""
     path = tmp_path / name
     path.write_text(f'#!/bin/sh\n{setup}\nexec {shlex.quote(sys.executable)} {flags} "$@"\n')
     path.chmod(0o755)
@@ -516,10 +501,9 @@ def _python(tmp_path, name: str, setup: str, flags: str = "") -> str:
 def test_a_trigger_only_the_agent_s_python_can_import_is_called_under_python(
     home, capfd, tmp_path, replay_stubs
 ):
-    """irimi installed apart from the agent, as a tool, runs under a Python that cannot import the
-    agent: here the agent's module leaves the working directory once its run is recorded.
-    Under irimi's own Python the call is never made, exit 2, and irimi says which Python that was;
-    `--python` names a Python whose path holds the module, which calls it as it was recorded."""
+    """A trigger irimi's own Python cannot import exits 2 with a hint, and `--python` calls it.
+
+    The agent's module leaves the working directory once its run is recorded."""
     source = _record_run(home, f"replay_agent.handle({TICKET})", replay_stubs)
     site = tmp_path / "agent-site"
     site.mkdir()
@@ -557,10 +541,9 @@ def test_a_trigger_only_the_agent_s_python_can_import_is_called_under_python(
 def test_a_python_that_cannot_run_irimi_s_replay_child_is_refused_before_anything_runs(
     home, capfd, tmp_path, monkeypatch, replay_stubs
 ):
-    """`--python` must import irimi's replay child, which calls the trigger and says how the call
-    ended. A Python without irimi, here this one with no site-packages, a path that is no
-    program, a virtual environment's directory rather than its Python, and one that does not answer
-    in time are each refused before the replay starts: exit 2, and no run stored."""
+    """A `--python` that cannot run irimi's replay child exits 2 and stores no run.
+
+    Covered: no irimi, no such program, a venv directory, a slow Python and a null byte."""
     from irimi.cli import runner
 
     source = _record_run(home, f"replay_agent.handle({TICKET})", replay_stubs)
@@ -578,8 +561,7 @@ def test_a_python_that_cannot_run_irimi_s_replay_child_is_refused_before_anythin
     code, out, err = _replay(capfd, source, "--python", missing)
     assert (code, out) == (2, [])
     assert err == [f"error: --python {missing} could not be run: No such file or directory"]
-    # `--python .venv`, as uv's own `--python` takes it: named relative and absolute, one is looked
-    # up on PATH and the other cannot be executed, so neither says the directory is the trouble.
+    # `--python .venv`, as uv takes it: relative or absolute, the error names the directory.
     (tmp_path / "venv" / "bin").mkdir(parents=True)
     for venv in ("venv", str(tmp_path / "venv")):
         code, out, err = _replay(capfd, source, "--python", venv)
@@ -600,9 +582,7 @@ def test_a_python_that_cannot_run_irimi_s_replay_child_is_refused_before_anythin
 def test_a_python_with_another_irimi_is_warned_of_and_called_under(
     home, capfd, tmp_path, replay_stubs
 ):
-    """The agent's Python calls the trigger with its own irimi's replay child, which may not
-    be this irimi's version: a tool's irimi upgraded apart from the agent's. irimi says so, and
-    the replay runs."""
+    """A `--python` whose irimi is another version gets a warning, and the replay runs."""
     source = _record_run(home, f"replay_agent.handle({TICKET})", replay_stubs)
     older = tmp_path / "older-irimi"
     (older / "irimi-0.0.1.dist-info").mkdir(parents=True)
@@ -625,10 +605,9 @@ def test_a_python_with_another_irimi_is_warned_of_and_called_under(
 def test_a_sigterm_while_python_is_asked_stops_the_replay_with_143(
     home, capfd, tmp_path, replay_stubs
 ):
-    """SIGTERM to `irimi replay` while it asks `--python`, here sent by that Python itself,
-    which then fails: the replay was stopped, not refused, so it exits 143, as one stopped before
-    its command started, and stores no run. `irimi replay` runs as its own process, so the signal
-    reaches it alone."""
+    """A SIGTERM while `--python` is probed exits 143, not 2, and stores no run.
+
+    `irimi replay` runs as its own process, so the signal reaches it alone."""
     import os
     import subprocess
 
@@ -648,8 +627,7 @@ def test_a_sigterm_while_python_is_asked_stops_the_replay_with_143(
 def test_python_with_a_command_is_a_usage_error_and_for_a_process_run_refused(
     home, capfd, replay_stubs
 ):
-    """A command names its own Python: `--python` with `-- CMD` is a usage error, and for a
-    process run, which a replay runs by its recorded command, it is refused, exit 2."""
+    """`--python` with `-- CMD` is a usage error, and with a process run it exits 2."""
     source = _record_run(home, f"replay_agent.handle({TICKET})", replay_stubs)
     capfd.readouterr()
     with pytest.raises(SystemExit) as usage:
@@ -667,8 +645,7 @@ def test_python_with_a_command_is_a_usage_error_and_for_a_process_run_refused(
 
 
 def test_a_replay_that_ends_on_what_its_trigger_raised_records_it_as_its_recording_did(home, capfd):
-    """The adopted run posts no end, so the child says what the call raised and `irimi replay`
-    ends the run with it: `builtins.KeyError`, as the recorded run ended."""
+    """A replay ends its run with the error the trigger raised, as the recorded run ended."""
     command = [sys.executable, "-c", f"import replay_agent; replay_agent.fails({TICKET})"]
     assert main(["shadow", "--port", "0", "--", *command]) == 1
     [source] = [r for r in StoreReader(home / "store").list_runs() if r.attribution == "sdk"]
@@ -702,8 +679,7 @@ def test_args_from_a_file_and_a_command_with_a_call_is_a_usage_error(
 
 @pytest.mark.parametrize("flag", ["--args", "--args-file"])
 def test_args_nested_deeper_than_the_stack_are_a_usage_error(capfd, tmp_path, flag):
-    """`--args` is typed by hand, or its file written so: JSON nested deeper than the stack raises
-    RecursionError, which argparse would let through as a traceback."""
+    """`--args` JSON nested deeper than the stack is a usage error, not a traceback."""
     deep = "[" * 200_000 + "]" * 200_000
     (tmp_path / "args.json").write_text(deep)
     value = deep if flag == "--args" else str(tmp_path / "args.json")
@@ -732,8 +708,7 @@ def test_a_refused_replay_s_result_file_holds_the_reason_irimi_gave(
 
 
 def test_a_replay_that_called_a_trigger_can_itself_be_replayed(home, capfd, replay_stubs):
-    """A replay's run is a process run that keeps the trigger it replayed, entrypoint and args, so
-    replaying it calls that trigger again."""
+    """A replay's run keeps the trigger it replayed, so replaying it calls that trigger again."""
     source = _record_run(home, f"replay_agent.handle({TICKET})", replay_stubs)
     capfd.readouterr()
     assert _replay(capfd, source)[0] == 0
@@ -748,8 +723,7 @@ def test_a_replay_that_called_a_trigger_can_itself_be_replayed(home, capfd, repl
 def test_args_that_do_not_bind_and_a_module_that_exits_as_it_loads_cannot_be_called(
     home, capfd, replay_stubs
 ):
-    """Never an agent that ran and raised: args with a parameter the function does not take,
-    and a module that exits as it is imported, are calls the child could not make: exit 2."""
+    """Args that do not bind, or a module that exits on import, are calls not made: exit 2."""
     source = _record_run(home, f"replay_agent.handle({TICKET})", replay_stubs)
     capfd.readouterr()
     code, out, err = _replay(capfd, source, "--args", json.dumps({"tikket": 1}))
@@ -766,8 +740,7 @@ def test_args_that_do_not_bind_and_a_module_that_exits_as_it_loads_cannot_be_cal
 def test_a_read_tool_answered_with_the_http_its_body_made_is_no_divergence(
     home, capfd, replay_stubs
 ):
-    """The tool's GET was recorded within its span, its body's: a replay that answers the tool
-    never makes it, and that is no call the replay failed to make."""
+    """HTTP a read tool's body made is not missed when the replay answers the tool."""
     source = _record_run(home, f"replay_agent.checks({TICKET})", replay_stubs)
     capfd.readouterr()
     code, out, err = _replay(capfd, source)
@@ -782,8 +755,8 @@ def test_a_read_tool_answered_with_the_http_its_body_made_is_no_divergence(
 def test_a_replay_sigterm_stops_while_its_agent_runs_exits_143_and_says_so(
     home, capfd, tmp_path, replay_stubs
 ):
-    """SIGTERM to `irimi replay`, as a supervisor sends it, is passed to the agent, and the
-    replay is one it stopped: exit 143, said in its result, never a replay that came out the same.
+    """A SIGTERM reaches the agent, and the replay exits 143 and says it was stopped.
+
     `irimi replay` runs as its own process here, so the signal reaches it alone."""
     import os
     import signal
@@ -811,8 +784,7 @@ def test_a_replay_sigterm_stops_while_its_agent_runs_exits_143_and_says_so(
 def test_a_replay_interrupted_before_its_run_is_stored_exits_130_with_no_run(
     home, capfd, monkeypatch, tmp_path, replay_stubs
 ):
-    """A Ctrl-C while the replay's engine starts, before its run is stored: no agent ran and no
-    run exists, so the result names none, and the replay exits 130 as `irimi shadow` would."""
+    """A Ctrl-C before the replay's run is stored exits 130, and the result names no run."""
     from irimi.cli import compose
 
     source = _record_run(home, f"replay_agent.handle({TICKET})", replay_stubs)
@@ -833,8 +805,7 @@ def test_a_replay_interrupted_before_its_run_is_stored_exits_130_with_no_run(
 def test_a_replay_interrupted_after_its_run_is_stored_names_the_run_and_exits_130(
     home, capfd, monkeypatch, tmp_path, replay_stubs
 ):
-    """A Ctrl-C while irimi compares the runs, after the agent ran: the replay's run is stored and
-    ended, so the result names it, and the replay exits 130."""
+    """A Ctrl-C while the runs are compared exits 130, and the result names the ended run."""
     from irimi.replay import report as replay_report
 
     source = _record_run(home, f"replay_agent.handle({TICKET})", replay_stubs)
@@ -871,8 +842,7 @@ def test_a_run_that_did_not_end_is_replayed_after_one_warning(home, capfd, repla
 def test_a_command_that_does_not_start_is_a_replay_that_could_not_run(
     home, capfd, tmp_path, replay_stubs
 ):
-    """A command that does not resolve is refused before the proxy starts, so no run is stored;
-    the replay exits 2, its result holding why."""
+    """A command that does not resolve exits 2 before the proxy starts, its result saying why."""
     source = _record_run(home, f"replay_agent.handle({TICKET})", replay_stubs)
     written = tmp_path / "result.json"
     capfd.readouterr()
@@ -887,9 +857,9 @@ def test_a_command_that_does_not_start_is_a_replay_that_could_not_run(
 def test_an_agent_that_names_the_recorded_run_never_rewrites_it(
     home, capfd, monkeypatch, replay_stubs
 ):
-    """A replayed agent that posts a start for the run it replays, and labels a request with its
-    id, is stored in `unattributed/`, flagged `bad-run-id`: the recording is byte for byte as it
-    was."""
+    """Starting or labelling the recorded run goes to `unattributed/`, flagged `bad-run-id`.
+
+    The recording stays byte for byte as it was."""
     source = _record_run(home, f"replay_agent.handle({TICKET})", replay_stubs)
     store = home / "store"
     before = {p.name: p.read_bytes() for p in (store / "runs" / source).iterdir()}
@@ -923,11 +893,7 @@ def test_an_agent_that_names_the_recorded_run_never_rewrites_it(
 
 
 def test_runs_list_and_show_mark_a_run_a_label_made_in_a_replay(home, capfd, replay_stubs):
-    """A label made in a replay, through the real commands, for the run `tests/cli/test_runs.py` can
-    only build by hand: a replayed command that labels a request with an `Irimi-Run` of its own
-    makes a `header` run in the replay's store, which `runs list` lists as `header, replay of
-    <id>` beside the replay's own `replay of <id>`, and `runs show` prints as a replay's, opening
-    `irimi replay · run`."""
+    """An `Irimi-Run` label made in a replay is a header run listed and shown as a replay's."""
     source = _record_run(home, f"replay_agent.handle({TICKET})", replay_stubs)
     (home.parent / "labels.py").write_text(
         "import http.client, os, urllib.parse\n"
@@ -978,8 +944,7 @@ def test_runs_list_and_show_mark_a_run_a_label_made_in_a_replay(home, capfd, rep
     ],
 )
 def test_a_replay_names_its_run_once_before_any_command(home, capfd, typed, said):
-    """Everything after `--` is the command, so `irimi replay -- python agent.py` names no run,
-    and neither does it name two: RUN or `--run=RUN`."""
+    """A replay names its run exactly once before `--`, as RUN or `--run=RUN`."""
     capfd.readouterr()
     with pytest.raises(SystemExit) as usage:
         main(["replay", "--port", "0", *typed])
@@ -990,8 +955,7 @@ def test_a_replay_names_its_run_once_before_any_command(home, capfd, typed, said
 
 
 def test_a_run_id_that_starts_with_a_dash_is_given_as_run_equals(home, capfd, replay_stubs):
-    """`--run=RUN` is the spelling for an id argparse would take as a flag; a command still
-    follows `--`."""
+    """`--run=RUN` spells an id argparse would take as a flag; a command still follows `--`."""
     source = _record_run(
         home, "sys.exit(0 if replay_agent.plain('ch_REAL1') == 200 else 1)", replay_stubs
     )
@@ -1019,9 +983,7 @@ def test_the_command_is_every_word_after_the_first_double_dash(typed, command):
 
 
 def test_an_outcome_file_the_agent_nested_past_the_stack_is_no_outcome(home, capfd, tmp_path):
-    """The agent's environment names the outcome file, so it can write one: JSON nested deeper than
-    the stack is no outcome, and the replay still ends its run, stops its engine and writes its
-    result, the agent's exit deciding the run's end."""
+    """An outcome file nested past the stack is ignored; the agent's exit ends the run."""
     (home.parent / "deep_agent.py").write_text(
         "import os\nfrom irimi import sdk\n\n\n@sdk.trigger\ndef handle(n):\n"
         "    outcome = os.environ.get('IRIMI_REPLAY_OUTCOME_FILE')\n"
@@ -1046,8 +1008,7 @@ def test_an_outcome_file_the_agent_nested_past_the_stack_is_no_outcome(home, cap
 
 
 def test_a_replay_of_a_run_the_store_does_not_hold_starts_nothing(tmp_path, monkeypatch, capsys):
-    """`irimi replay` reads the recording before anything runs, and a run the store does not hold
-    is refused, exit 2 as `irimi compare` refuses it: an error, no command and no store."""
+    """An unknown run exits 2 before any command runs or any store is made."""
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
     monkeypatch.chdir(tmp_path)
     ca.generate_ca(ca.ca_paths())
@@ -1061,9 +1022,7 @@ def test_a_replay_of_a_run_the_store_does_not_hold_starts_nothing(tmp_path, monk
 
 @pytest.mark.parametrize("damage", ["events", "run.json", "newer", "blob"])
 def test_a_replay_of_a_damaged_run_starts_nothing(tmp_path, monkeypatch, capsys, damage):
-    """A recording `StoreReader` cannot read - a line that does not parse, a run.json that does
-    not, a newer schema version, a missing blob - refuses the replay as `runs show` refuses the
-    run, with no traceback, no command and no run of its own in the store, and exits 2."""
+    """A recording `StoreReader` cannot read exits 2 with one line, no command and no new run."""
     import json
 
     from irimi.core.exchange import Exchange, Request, Response
@@ -1109,8 +1068,7 @@ def test_a_replay_of_a_damaged_run_starts_nothing(tmp_path, monkeypatch, capsys,
 
 
 def test_the_unattributed_pool_is_not_a_run_to_replay(tmp_path, monkeypatch, capsys):
-    """`unattributed` holds every serve session's requests no run named: there is no one run in it
-    to answer from. Refused with exit 2."""
+    """`unattributed` holds no single run to answer from, so replaying it exits 2."""
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
     monkeypatch.chdir(tmp_path)
     ca.generate_ca(ca.ca_paths())

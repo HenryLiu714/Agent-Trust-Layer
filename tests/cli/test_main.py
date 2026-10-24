@@ -1,5 +1,4 @@
-"""The `irimi` command itself: its parser and help, the startup lines, and the composition root
-that builds each command's engine and store."""
+"""The `irimi` command itself: parser, help, startup lines and the composition root."""
 
 import argparse
 import io
@@ -18,14 +17,13 @@ from irimi.engine import Replay, Serve, Shadow
 from irimi.engine.mitm import MitmEngine
 from irimi.report.terminal import NOT_LOOPBACK_NOTICE, PROXY_ONLY_NOTICE
 
-# ------------------------------------------------------------------------ the L3 reader
+# ------------------------------------------------------------- the precondition reader
 
 
 def test_shadow_mode_is_never_built_without_a_reader(tmp_path, monkeypatch):
-    """A policy with no reader does not do L3 and records nothing about it - by design, so bare
-    `ShadowPolicy()`s in tests keep their meaning. The hole that leaves is a shadow run silently
-    skipping L3 because the composition root forgot an argument: the `--base-url-host` failure shape
-    again, configured and never consulted. So the one construction site is pinned here."""
+    """The composition root gives shadow mode's policy a reader, so precondition checks run.
+
+    A bare `ShadowPolicy()` has none and checks nothing, which is what other tests rely on."""
     from irimi.cli import compose, options
     from irimi.decide.reader import NoReader
     from tests.support.doubles import NullStore
@@ -94,8 +92,7 @@ def test_only_shadow_and_replay_take_a_command(argv, capsys):
 
 
 def test_everything_after_the_first_double_dash_is_the_command():
-    """`--` is split off before argparse sees it, so the command's own flags, and its own `--`,
-    are never irimi's."""
+    """`--` is split off before argparse sees it, so the command's flags are never irimi's."""
     args = cli.parse_args(["shadow", "--quiet", "--", "env", "--", "--port", "9"])
     assert (args.cmd, args.quiet, args.port) == (["env", "--", "--port", "9"], True, 0)
     replay = cli.parse_args(["replay", "r1", "--", "python3", "-m", "agent", "--quiet"])
@@ -107,8 +104,7 @@ def test_everything_after_the_first_double_dash_is_the_command():
 
 
 def test_a_stdout_closed_before_irimi_started_is_written_nothing(tmp_path, monkeypatch):
-    """Python makes `sys.stdout` None when fd 1 is closed at startup (`irimi runs list >&-`):
-    `print` writes nothing to it, and `main`'s flush of stdout must not raise there."""
+    """`main` does not raise when stdout is None, as Python sets it when fd 1 starts closed."""
     monkeypatch.setattr(sys, "stdout", None)
     assert main(["runs", "list", "--store", str(tmp_path)]) == 0
 
@@ -121,16 +117,14 @@ class _GoneReader(io.StringIO):
 
 
 def test_a_stderr_whose_reader_went_with_stdout_closed_ends_quietly(tmp_path, monkeypatch):
-    """`irimi runs show X >&- 2>&1`-like: the first write that fails is stderr's, and stdout is
-    None. That is the reader gone too: 141, and nothing raised past `main`."""
+    """A broken stderr with stdout None exits 141 and raises nothing past `main`."""
     monkeypatch.setattr(sys, "stdout", None)
     monkeypatch.setattr(sys, "stderr", _GoneReader())
     assert main(["runs", "show", "absent", "--store", str(tmp_path)]) == exitcodes.BROKEN_PIPE
 
 
 def test_python_m_irimi_is_the_command_and_importing_it_runs_nothing():
-    """`testing.replay()` runs `python -m irimi`; a tool that imports every module, as pydoc
-    does, must not start the command."""
+    """`python -m irimi` runs the command, and importing `irimi.__main__` runs nothing."""
     import subprocess
 
     ran = subprocess.run(
@@ -144,8 +138,9 @@ def test_python_m_irimi_is_the_command_and_importing_it_runs_nothing():
 
 
 def test_a_command_s_proxy_takes_any_free_port_and_a_sidecar_s_a_fixed_one(capsys):
-    """A child is told its proxy's port in its environment, so `shadow` and `replay` need none
-    fixed; a sidecar's agents are pointed at one, so `serve` keeps it. The help says so."""
+    """`shadow` and `replay` default to a free port, and `serve` to a fixed one.
+
+    A child learns its proxy's port from its environment; a sidecar's agents are pointed at one."""
     assert cli.parse_args(["serve"]).port == options.DEFAULT_PORT
     assert cli.parse_args(["replay", "abc"]).port == 0
     assert cli.parse_args(["shadow", "--", "true"]).port == 0
@@ -197,15 +192,13 @@ def test_every_command_has_a_description_and_examples():
 
 
 def _subcommand_helps(parser: argparse.ArgumentParser) -> dict[str, str | None]:
-    """Each subcommand `parser` has, by name, with its one-line `help=`; none for a command with no
-    subcommands."""
+    """Return each of `parser`'s subcommands by name, with its one-line `help=`."""
     subs = [a for a in parser._actions if isinstance(a, argparse._SubParsersAction)]
     return {choice.dest: choice.help for sub in subs for choice in sub._choices_actions}
 
 
 def test_the_readme_cli_block_says_what_each_command_s_help_says():
-    """The README's CLI block is written by hand: every command it lists exists, described in the
-    words of its own `help=`, so the two cannot drift."""
+    """Every command the README's CLI block lists exists, described in its own `help=` words."""
     import re
 
     readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
@@ -235,9 +228,7 @@ def test_shadow_is_listed_before_serve(capsys):
 
 
 def _shipped_index():
-    """The shipped maps with no overrides file in play: a real ./irimi.maps.yaml or
-    $IRIMI_HOME/maps.yaml would otherwise change the index, or refuse to load at all.
-    tests/conftest.py points both at fresh empty directories, so there is nothing to isolate."""
+    """Return the shipped maps with no overrides file in play."""
     from irimi import servicemaps
 
     return servicemaps.load(maps_dir=servicemaps.loader.shipped_dir())
@@ -263,9 +254,7 @@ def test_reverse_hosts_adds_base_url_host_lower_cased():
 
 
 def test_engine_config_carries_the_maps():
-    """`serve` and `shadow` both build the engine's config here, and the classifier only sees the
-    maps because `maps=index` is part of it. The bind is `--bind`'s, and `serve` is set only
-    for serve mode, whose health answer says so."""
+    """The engine config holds the maps the classifier uses, `--bind`'s address and the mode."""
     from irimi.cli.compose import _engine_config
 
     index = _shipped_index()
@@ -281,9 +270,7 @@ def test_engine_config_carries_the_maps():
 
 
 def test_the_composition_root_builds_the_service_overlay_and_records_into_the_run_s_store():
-    """The overlay is handed the engine's own classification of a read and holds no index of its
-    own, so the two cannot disagree about which service a read belongs to. The engine records into
-    the store `prepare_run` opened, the one `irimi shadow` starts and ends its run in."""
+    """The engine gets a `ServiceOverlay` and records into the store `prepare_run` opened."""
     from irimi.decide.overlay import ServiceOverlay
     from irimi.engine.mitm import MitmEngine
     from tests.support.doubles import NullStore
@@ -300,9 +287,7 @@ def test_the_composition_root_builds_the_service_overlay_and_records_into_the_ru
 
 
 def test_the_composition_root_builds_a_replay_policy_over_the_run_s_recording():
-    """A config naming a run to replay gets a `ReplayPolicy` over the recording `prepare_run`
-    read, and a reader over the recording, never the upstream.
-    One that names none gets shadow mode's policy, reading the real upstream."""
+    """A replay config's policy and reader use the recording; shadow mode reads upstream."""
     from dataclasses import replace
 
     from irimi.decide.policy import ShadowPolicy
@@ -343,8 +328,7 @@ def test_the_composition_root_builds_a_replay_policy_over_the_run_s_recording():
     ],
 )
 def test_a_word_no_argument_takes_is_refused_as_parse_args_refuses_it(argv, tmp_path, capsys):
-    """A word before `--` that no option takes is refused with argparse's own message and exit 2,
-    whether or not a command follows `--`."""
+    """A stray word before `--` gets argparse's message and exit 2, with or without a command."""
     store = tmp_path / "store"
     with pytest.raises(SystemExit) as exit_:
         main([*argv[:2], "--store", str(store), *argv[2:]])
@@ -361,8 +345,7 @@ def test_a_word_no_argument_takes_is_refused_as_parse_args_refuses_it(argv, tmp_
     ],
 )
 def test_an_abbreviated_flag_is_a_usage_error(argv, abbreviated, tmp_path, monkeypatch, capsys):
-    """A flag that lets traffic leave the machine has to be typed in full, so no flag is
-    accepted by a prefix of its name."""
+    """No flag is accepted by a prefix, so one that lets traffic leave is typed in full."""
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
     with pytest.raises(SystemExit) as exit_:
         main(argv)
@@ -371,8 +354,7 @@ def test_an_abbreviated_flag_is_a_usage_error(argv, abbreviated, tmp_path, monke
 
 
 def test_engine_config_defaults_to_no_maps(tmp_path, monkeypatch):
-    """An EngineConfig built without maps classifies by the verb rule alone. That is the default
-    the engine's own tests rely on; the CLI always passes an index."""
+    """An `EngineConfig` built without maps has an empty index; the CLI always passes one."""
     from irimi.engine import EngineConfig
 
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
@@ -416,9 +398,7 @@ def test_target_arg_parses_a_service_and_a_route_spec():
 
 
 def test_a_trailing_slash_on_the_host_is_the_service_target():
-    """`api.stripe.com/=<url>` is how a reader used to nginx `proxy_pass` spells "the whole
-    service". Read as the route path `/`, which no map claims, a spelling that means the right
-    thing would fail with "no `write` or `unknown` route matches '/'"."""
+    """`api.stripe.com/=<url>`, as nginx's `proxy_pass` spells it, targets the whole service."""
     from irimi.cli.options import _target_arg
 
     assert _target_arg("api.stripe.com/=http://127.0.0.1:3000") == (
@@ -483,8 +463,7 @@ def test_a_target_on_the_listeners_own_port_fails_closed(capsys):
 
 
 def test_a_target_on_the_bind_address_fails_closed(capsys):
-    """`--bind` is the listener's address too, so a target the escape hatch lets name it, on
-    irimi's own port, is refused before anything starts."""
+    """A target on `--bind`'s address and irimi's own port is refused before anything starts."""
     code = main(
         [
             "serve",
@@ -521,8 +500,7 @@ def test_the_escape_hatch_warning_says_what_it_allows():
 
 
 def test_a_ca_near_its_expiry_is_warned_of(tmp_path, monkeypatch):
-    """A CA lasts `ca.CA_VALID_DAYS`; within `ca.EXPIRY_WARNING` of its end, and after it, the
-    startup says so and names the fix."""
+    """Within `ca.EXPIRY_WARNING` of the CA's end, or after it, startup warns and names the fix."""
     import datetime as dt
 
     from irimi.cli.compose import _ca_expiry_warning
@@ -553,10 +531,7 @@ def test_a_ca_near_its_expiry_is_warned_of(tmp_path, monkeypatch):
 class _PipedStdout(io.StringIO):
     """A stdout that behaves like a pipe: written text is invisible until `flush()`.
 
-    Python gives a piped stdout a block buffer, so an unflushed `print` sits in it until
-    something else forces it out. `serve` may print nothing else for minutes, so this stands in
-    for `irimi serve > log` and asserts what a reader of that log can actually see.
-    """
+    `serve` may print nothing else for minutes, so an unflushed line would sit in the buffer."""
 
     def __init__(self):
         super().__init__()
@@ -603,8 +578,7 @@ def _startup_on_a_pipe(monkeypatch, index, args=None):
 
 
 def test_the_banner_reaches_a_piped_stdout_before_anything_else_is_printed(monkeypatch):
-    """`irimi serve | tee` shows the banner at once, not at the first exchange's flush, so a
-    serve nobody talks to still shows the port, the CA path and the proxy-only notice."""
+    """`irimi serve | tee` shows the banner at once, before any exchange flushes it."""
     visible = _startup_on_a_pipe(monkeypatch, servicemaps.MapIndex())
     assert "listening on 127.0.0.1:4000" in visible
     assert "/ca.pem" in visible
@@ -612,8 +586,7 @@ def test_the_banner_reaches_a_piped_stdout_before_anything_else_is_printed(monke
 
 
 def test_a_delegated_services_warning_reaches_a_piped_stdout_too(monkeypatch):
-    """The line that says the agent's requests are leaving this machine is the last one that may
-    wait for an exchange to flush it."""
+    """The line saying requests leave this machine is flushed at startup too."""
     sm = _delegated_service("http://10.0.0.9:3000")
     visible = _startup_on_a_pipe(monkeypatch, servicemaps.MapIndex((sm,)))
     assert "delegated: stripe -> http://10.0.0.9:3000 (writes)" in visible

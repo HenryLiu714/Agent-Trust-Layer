@@ -20,8 +20,7 @@ def test_init_creates_ca_and_prints_paths(tmp_path, monkeypatch, capsys):
 
 
 def test_a_second_init_changes_nothing(tmp_path, monkeypatch, capsys):
-    """A CA already there is left alone, and the note on what irimi shadows is printed only by
-    the run that generated one."""
+    """An existing CA is left alone, and only the run that generates one prints the HTTP note."""
     p = _setup(tmp_path, monkeypatch)
     assert main(["init"]) == 0
     key_before, cert_before = p.key.read_bytes(), p.cert.read_bytes()
@@ -74,8 +73,7 @@ def test_the_ca_state_tells_present_partial_and_absent_apart(tmp_path, monkeypat
 
 
 def test_the_non_http_notice_names_the_way_to_label_a_non_http_write(tmp_path, monkeypatch, capsys):
-    """A non-HTTP side effect happens for real only when its function is unlabelled:
-    `irimi init` must not say every one does."""
+    """The notice says a non-HTTP side effect is real only when its function is unlabelled."""
     _setup(tmp_path, monkeypatch)
     assert main(["init"]) == 0
     out = capsys.readouterr().out

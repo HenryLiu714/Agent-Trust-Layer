@@ -47,6 +47,7 @@ from irimi import __version__
 from irimi.core.exchange import Headers, Request, Response
 from irimi.core.limits import MAX_CONTROL_BODY
 from irimi.decide.policy import AnswerPolicy
+from irimi.engine import EngineConfig, Replay, Serve
 from irimi.engine.wire import irimi_error
 from irimi.protocol import control as protocol
 from irimi.protocol import trace
@@ -149,6 +150,25 @@ class ControlEndpoint:
         # from nothing otherwise. The recording is engine-wide, as its exchanges are: the run id in
         # the path is checked, never used to choose.
         self.policy = policy
+
+    @classmethod
+    def for_engine(
+        cls,
+        config: EngineConfig,
+        store: RunStore,
+        policy: AnswerPolicy,
+        on_tool_call: OnToolCall | None = None,
+    ) -> "ControlEndpoint":
+        """The endpoint an engine built from `config` answers with: its own run is the process
+        run, and a replay's every SDK run is that replay's."""
+        return cls(
+            store,
+            serve=isinstance(config.mode, Serve),
+            process_run=config.run_id,
+            on_tool_call=on_tool_call,
+            policy=policy,
+            replay_of=config.mode.source_run_id if isinstance(config.mode, Replay) else None,
+        )
 
     def answer(self, request: Request, *, whole_body: bool = True) -> Response:
         """The response to one control request. Never raises (see the module doc).

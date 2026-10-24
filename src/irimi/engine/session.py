@@ -40,9 +40,9 @@ from irimi.decide import targets
 from irimi.decide.overlay import Overlaid, Overlay
 from irimi.decide.policy import AnswerPolicy, Decided, Decision, Delegate, Forward, Respond
 from irimi.decide.writelog import Translation, WriteLog
-from irimi.engine import wire
+from irimi.engine import ingress, wire
 from irimi.engine.ingress import Admitted, Refusal
-from irimi.protocol.headers import ANSWERED_BY_HEADER, REWROTE_HEADER, RUN_HEADER
+from irimi.protocol.headers import ANSWERED_BY_HEADER
 from irimi.record.store import RunStore
 from irimi.servicemaps import MapIndex
 from irimi.servicemaps.classify import Classification, classify, unclassified
@@ -287,8 +287,7 @@ class ShadowSession:
         it is forwarded, so only the recorded request loses irimi's own headers."""
         request, run_id = refusal.request, self.run_id
         try:
-            run_id = wire.attribute_run(request, run_id)
-            request = request.without_header(RUN_HEADER).without_header(REWROTE_HEADER)
+            run_id, request = ingress.attributed(request, run_id)
         except Exception:
             logger.debug("irimi: could not attribute a refused request", exc_info=True)
         classification = unclassified(request)
@@ -344,9 +343,12 @@ class ShadowSession:
 
     def settle(self, plan: Plan) -> Exchange:
         """The exchange a settled plan is recorded as, ending now. The response is irimi's error
-        without its stamp: the stamp is on the wire only."""
+        without its stamp: the stamp is on the wire only. An answer to HEAD is recorded with no
+        content, as it is sent."""
         assert isinstance(plan.decision, Respond)
         response = plan.decision.response.without_header(ANSWERED_BY_HEADER)
+        if plan.request.method == "HEAD":
+            response = replace(response, body=b"")
         return self._exchange(plan, response, plan.answered_by, plan.flags)
 
     def complete(self, plan: Plan, received: Received) -> Completed:

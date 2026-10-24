@@ -2204,7 +2204,7 @@ def test_a_locally_answered_flow_that_errors_keeps_its_own_flags(tmp_path, monke
 
     (ex,) = seen
     assert ex.answered_by == "fake-L0"
-    assert "upstream-error" not in ex.flags
+    assert ex.flags == ()
 
 
 def test_a_refused_target_is_flagged_once_even_if_the_client_then_vanishes(tmp_path, monkeypatch):

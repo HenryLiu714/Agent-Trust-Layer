@@ -129,10 +129,10 @@ def header_value(headers: Headers, name: str) -> str | None:
     """The first value of the header `name`, or None when there is none.
 
     Names are compared case-insensitively: a `Request`'s are already lower-case
-    (`wire.parse`), a `Response`'s are as the service or the target sent them. `name` is
-    given lower-case, as every header name irimi spells is. One spelling of the lookup for every
-    call site.
+    (`wire.parse`), a `Response`'s are as the service or the target sent them, and `name` as
+    the caller spells it. One spelling of the lookup for every call site.
     """
+    name = name.lower()
     for key, value in headers:
         if key.lower() == name:
             return value
@@ -141,6 +141,7 @@ def header_value(headers: Headers, name: str) -> str | None:
 
 def without_header(headers: Headers, name: str) -> Headers:
     """`headers` minus every header called `name` (compared as `header_value` compares)."""
+    name = name.lower()
     return tuple((k, v) for k, v in headers if k.lower() != name)
 
 

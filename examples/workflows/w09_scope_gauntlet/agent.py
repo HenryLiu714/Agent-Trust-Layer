@@ -24,7 +24,7 @@ import threading
 import time
 import urllib.request
 from collections.abc import Callable
-from http.client import HTTPConnection
+from http.client import HTTPConnection, HTTPException
 from typing import Any
 from urllib.parse import urlencode, urlsplit
 
@@ -156,6 +156,68 @@ def self_addressed() -> None:
         )
         http("GET", f"{listener}/_irimi/health", label=f"health_{spelling}")
         http("GET", f"{listener}/_irimi/nope", label=f"nope_{spelling}")
+
+
+# The host `base_url_hosts` names with `--base-url-host`, and one no map or flag names.
+ALLOWED_BASE_URL_HOST = "billing.example.test"
+REFUSED_BASE_URL_HOST = "ledger.example.test"
+
+
+def base_url_hosts() -> None:
+    """Base-URL requests irimi relays and those it refuses before deciding anything.
+
+    A write to a host `--base-url-host` names is relayed and faked. Every other one is answered by
+    irimi itself, 403 with its JSON error: a host no map or flag names, a path that names no host
+    or an empty one, and a port that is no port. Each answer's body is logged, so a test reads
+    what irimi said."""
+    listener = f"http://127.0.0.1:{urlsplit(agentkit.proxy() or '').port}"
+    calls = (
+        ("POST", f"/{ALLOWED_BASE_URL_HOST}/v1/invoices", "allowed_post"),
+        ("POST", f"/{REFUSED_BASE_URL_HOST}/v1/entries", "unknown_host_post"),
+        ("GET", f"/{REFUSED_BASE_URL_HOST}/v1/entries", "unknown_host_get"),
+        ("POST", "/", "no_host_post"),
+        ("POST", "//v1/entries", "empty_host_post"),
+        ("POST", f"/{ALLOWED_BASE_URL_HOST}:99999/v1/invoices", "bad_port_post"),
+    )
+    for method, path, label in calls:
+        form = {"amount": "700"} if method == "POST" else None
+        resp = http(method, listener + path, form=form, label=label)
+        agentkit.obs("answer", label=label, status=resp.status, body=resp.json())
+    _head_then_get(listener)
+
+
+# The host the HEAD in `base_url_hosts` names, which no map or flag names either.
+HEAD_HOST = "evil.example.com"
+
+
+def _head_then_get(listener: str) -> None:
+    """A refused base-URL HEAD, then a GET on the same kept-alive connection. An answer to HEAD
+    has no content: a body sent after it would be read as the start of the GET's answer."""
+    parts = urlsplit(listener)
+    conn = HTTPConnection(parts.hostname or "127.0.0.1", parts.port, timeout=agentkit.timeout())
+    try:
+        for method, path, label in (
+            ("HEAD", f"/{HEAD_HOST}/x", "head_unknown_host"),
+            ("GET", f"/{REFUSED_BASE_URL_HOST}/v1/entries", "get_after_head"),
+        ):
+            conn.request(method, path)
+            resp = conn.getresponse()
+            body = resp.read()
+            answered_by = resp.getheader("Irimi-Answered-By")
+            agentkit.obs_http(
+                method, listener + path, label, status=resp.status, answered_by=answered_by
+            )
+            agentkit.obs(
+                "answer",
+                label=label,
+                status=resp.status,
+                body=json.loads(body) if body else None,
+                content_length=resp.getheader("Content-Length"),
+            )
+    except (OSError, HTTPException) as err:
+        agentkit.obs("answer", label="keep_alive_broke", error=type(err).__name__)
+    finally:
+        conn.close()
 
 
 # -- the control endpoint, called as the SDK will call it -----------------------------------------
@@ -423,6 +485,17 @@ def _refusals(control: str) -> None:
         headers = {"Content-Type": "application/json"} if body is not None else None
         resp = http(method, control + route, json_body=doc, body=body, headers=headers, label=label)
         agentkit.obs("refusal", label=label, body=resp.json())
+    # A start from an SDK that speaks another major version of the control protocol.
+    label = "refuse_protocol"
+    resp = http(
+        "POST",
+        f"{control}/runs/ctl-refused-protocol/start",
+        json_body=started,
+        headers={"Irimi-Protocol": "2"},
+        label=label,
+    )
+    agentkit.obs("refusal", label=label, body=resp.json())
+    agentkit.obs("protocol", label=label, spoken=resp.headers.get("irimi-protocol"))
 
 
 def _health(control: str, label: str) -> None:
@@ -605,6 +678,7 @@ GROUPS = {
     "big_reads": big_reads,
     "headers": headers,
     "self_addressed": self_addressed,
+    "base_url_hosts": base_url_hosts,
     "control_runs": control_runs,
     "control_hazards": control_hazards,
     "bombs": bombs,

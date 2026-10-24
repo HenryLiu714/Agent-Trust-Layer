@@ -8,9 +8,15 @@ from examples.workflows import agentkit
 from examples.workflows.harness.internet import PADDED_BYTES, PADDED_LINE, Req, Resp
 from examples.workflows.harness.run import Scenario, Workflow
 from examples.workflows.harness.services import JsonService, World
-from examples.workflows.w09_scope_gauntlet.agent import BIG_CHARGE, CHARGE, CUSTOMER, INTENT
+from examples.workflows.w09_scope_gauntlet.agent import (
+    ALLOWED_BASE_URL_HOST,
+    BIG_CHARGE,
+    CHARGE,
+    CUSTOMER,
+    INTENT,
+)
 
-# Past `irimi.core.bodies.MAX_BODY_BYTES` (2 MB), the most irimi parses of a response it reads.
+# Past `irimi.core.limits.MAX_BODY_BYTES` (2 MiB), the most irimi parses of a response it reads.
 BIG_DESCRIPTION_BYTES = 3_000_000
 
 
@@ -99,6 +105,14 @@ WORKFLOW = Workflow(
             doc="a refund to the proxy's own address as 127.0.0.1, 127.1 and 0.0.0.0; in serve "
             "mode with irimi bound to 0.0.0.0",
             serve_flags=("--bind", "0.0.0.0"),  # noqa: S104  # the bind this scenario tests
+        ),
+        "base_url_hosts": Scenario(
+            ("base_url_hosts",),
+            setup=_stripe,
+            doc="base-URL writes: one to a host --base-url-host names, faked; and one to a host "
+            "nothing names, a path with no host and a bad port, each refused by irimi itself",
+            shadow_flags=("--base-url-host", ALLOWED_BASE_URL_HOST),
+            serve_flags=("--base-url-host", ALLOWED_BASE_URL_HOST),
         ),
         "control_runs": Scenario(
             ("control_runs",),

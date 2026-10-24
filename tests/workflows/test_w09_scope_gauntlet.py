@@ -16,13 +16,16 @@ import irimi
 from examples.workflows.harness.run import check_invariants, rows_not_shown
 from examples.workflows.w09_scope_gauntlet.agent import (
     AGENT_VERSION,
+    ALLOWED_BASE_URL_HOST,
     BIG_CHARGE,
     CHARGE,
     CUSTOMER,
     ENTRYPOINT,
     ERROR_KEY,
+    HEAD_HOST,
     LONG_MESSAGE_CHARS,
     OVERSIZED_BODY_BYTES,
+    REFUSED_BASE_URL_HOST,
 )
 from examples.workflows.w09_scope_gauntlet.scenarios import BIG_DESCRIPTION_BYTES, WORKFLOW
 from irimi.config import paths
@@ -309,6 +312,137 @@ def test_the_control_endpoint_answers_at_every_spelling_and_is_never_an_exchange
     assert bare.exit_code == shadow.exit_code == 0
 
 
+# Why irimi refuses each base-URL request `base_url_hosts` sends that it will not relay.
+UNKNOWN_HOST = f"base-URL host {REFUSED_BASE_URL_HOST!r} is not in a loaded map or --base-url-host"
+# A path whose first segment is empty, `/` or `//v1/...`, names no host.
+NO_HOST = (
+    "a base-URL request's path must be /<upstream-host>/<path>, e.g. /api.stripe.com/v1/charges"
+)
+BASE_URL_REFUSALS = {
+    "unknown_host_post": UNKNOWN_HOST,
+    "unknown_host_get": UNKNOWN_HOST,
+    "no_host_post": NO_HOST,
+    "empty_host_post": NO_HOST,
+    "bad_port_post": f"bad port in base-URL host '{ALLOWED_BASE_URL_HOST}:99999'",
+    "head_unknown_host": f"base-URL host {HEAD_HOST!r} is not in a loaded map or --base-url-host",
+    "get_after_head": UNKNOWN_HOST,
+}
+# Each request `base_url_hosts` sends that irimi refuses, as stored: method, path, kind, and
+# whether it is unclassified. Its host is the listener's: a refused request is never rewritten.
+REFUSED_AS_STORED = [
+    ("POST", f"/{REFUSED_BASE_URL_HOST}/v1/entries", "unknown", True),
+    ("GET", f"/{REFUSED_BASE_URL_HOST}/v1/entries", "read", False),
+    ("POST", "/", "unknown", True),
+    ("POST", "//v1/entries", "unknown", True),
+    ("POST", f"/{ALLOWED_BASE_URL_HOST}:99999/v1/invoices", "unknown", True),
+    ("HEAD", f"/{HEAD_HOST}/x", "read", False),
+    ("GET", f"/{REFUSED_BASE_URL_HOST}/v1/entries", "read", False),
+]
+
+
+def refused_error(why: str) -> dict[str, dict[str, str]]:
+    return {"error": {"type": "irimi_refused", "message": f"irimi refused this request: {why}"}}
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_base_url_request_irimi_will_not_relay_is_answered_stamped_and_stored_by_irimi(
+    run_workflow, mode
+):
+    """A base-URL write to the host `--base-url-host` names is relayed and faked. Every other
+    base-URL request is refused before anything is decided: 403, stamped `irimi`, with irimi's
+    one JSON error saying why. Each is stored as an exchange flagged `refused`, answered by
+    irimi, keeping the classification irimi gave it (a GET or HEAD is a read), and none reaches
+    the fake internet. Bare, there is no irimi, and the same calls reach the fake internet's
+    port."""
+    shadow = run_workflow(W, "base_url_hosts", mode)
+    assert shadow.by_label() == {
+        "allowed_post": (200, "fake-L0"),
+        **dict.fromkeys(BASE_URL_REFUSALS, (403, "irimi")),
+    }
+    bodies = {a["label"]: a["body"] for a in shadow.events("answer")}
+    assert bodies == {
+        "allowed_post": {"amount": 700},
+        **{label: refused_error(why) for label, why in BASE_URL_REFUSALS.items()},
+        "head_unknown_host": None,
+    }
+    assert shadow.internet.requests() == []
+    stored = [e for e in shadow.stored_events() if isinstance(e, Exchange)]
+    assert {e.run_id for e in stored} == {shadow.engine_run_id()}
+    assert {e.door for e in stored} == {"reverse"}
+    unclassified = (Flag.UNCLASSIFIED,)
+    assert [
+        (e.request.method, e.request.host, e.request.path, e.kind, e.answered_by, e.flags)
+        for e in stored
+    ] == [
+        ("POST", ALLOWED_BASE_URL_HOST, "/v1/invoices", "unknown", "fake-L0", unclassified),
+        *(
+            (method, "127.0.0.1", path, kind, "irimi", unclassified * odd + (Flag.REFUSED,))
+            for method, path, kind, odd in REFUSED_AS_STORED
+        ),
+    ]
+    for e, why in zip(stored[1:], BASE_URL_REFUSALS.values(), strict=True):
+        assert e.response is not None and e.response.status == 403
+        if e.request.method != "HEAD":
+            assert json.loads(e.response.body) == refused_error(why)
+    assert shadow.exchange_lines() == [
+        f"faked         unknown   POST {ALLOWED_BASE_URL_HOST}/v1/invoices -> 200  [unclassified]",
+        *(
+            f"irimi         {kind:<9} {method} 127.0.0.1{path} -> 403  "
+            f"[{'unclassified, ' if odd else ''}refused]"
+            for method, path, kind, odd in REFUSED_AS_STORED
+        ),
+    ]
+    if mode == "shadow":
+        summary = shadow.summary()
+        assert summary[summary.index("  None of these writes reached the real service:") :] == [
+            "  None of these writes reached the real service:",
+            f"  ○ {ALLOWED_BASE_URL_HOST}  POST {ALLOWED_BASE_URL_HOST}/v1/invoices  faked; not "
+            "checked (unclassified)",
+            *(
+                f"  ✗ 127.0.0.1  POST 127.0.0.1{path}  refused by irimi"
+                for method, path, _, _ in REFUSED_AS_STORED
+                if method == "POST"
+            ),
+            "",
+            "  127.0.0.1             3 reads refused by irimi  4 writes refused by irimi",
+            f"  {ALLOWED_BASE_URL_HOST}  1 faked write (1 unclassified)",
+            "",
+            "  8 exchanges · 0 real · 8 answered by irimi (1 faked write) · 0 sent to targets",
+        ]
+    else:
+        stopped = "stopped · 8 exchanges not in any run: irimi runs show unattributed"
+        assert shadow.irimi[-1] == stopped
+    bare = run_workflow(W, "base_url_hosts", "bare")
+    assert bare.by_label() == dict.fromkeys(shadow.by_label(), (502, None))
+    assert bare.exit_code == shadow.exit_code == 0
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_irimi_s_refusal_of_a_head_has_no_content_and_keeps_the_connection_usable(
+    run_workflow, mode
+):
+    """irimi's own answer to a HEAD carries no content and no Content-Length: content after it
+    would be read as the start of the next answer on the connection. So the GET sent next on the
+    same kept-alive connection gets its own whole answer. The HEAD is stored with no body."""
+    shadow = run_workflow(W, "base_url_hosts", mode)
+    answers = {a["label"]: a for a in shadow.events("answer", with_time=False)}
+    assert "keep_alive_broke" not in answers
+    assert answers["head_unknown_host"] == {
+        "event": "answer",
+        "label": "head_unknown_host",
+        "status": 403,
+        "body": None,
+        "content_length": None,
+    }
+    after = answers["get_after_head"]
+    assert (after["status"], after["body"]) == (403, refused_error(UNKNOWN_HOST))
+    [stored] = [
+        e for e in shadow.stored_events() if isinstance(e, Exchange) and e.request.method == "HEAD"
+    ]
+    assert (stored.answered_by, stored.flags) == ("irimi", (Flag.REFUSED,))
+    assert stored.response is not None and stored.response.body == b""
+
+
 # -- the control endpoint, called as the SDK will call it -----------------------------------------
 #
 # `control_runs` and `control_hazards` do the SDK's job by hand, with posts the test controls
@@ -338,6 +472,7 @@ REFUSALS = {
     ),
     # Named by its type, never quoted: the same line on every Python.
     "refuse_deep": (400, "'name' is a list, not a string"),
+    "refuse_protocol": (426, "this irimi speaks control protocol 1, not 2"),
 }
 ELAPSED = re.compile(r" · \d+\.\ds$")
 
@@ -596,6 +731,8 @@ def test_each_refusal_answers_its_status_and_line_and_makes_no_run(run_workflow,
     assert {e["label"]: e["body"] for e in shadow.events("refusal")} == {
         label: control_refusal(line) for label, (_, line) in REFUSALS.items()
     }
+    # An SDK speaking another major is told which one this irimi speaks, in the header too.
+    assert [e["spoken"] for e in shadow.events("protocol")] == ["1"]
     root = shadow.home / paths.STORE_DIR_NAME
     lock = [SERVE_LOCK_FILE] if mode == "serve" else []
     assert sorted(p.name for p in root.iterdir()) == ["blobs", "runs", *lock]

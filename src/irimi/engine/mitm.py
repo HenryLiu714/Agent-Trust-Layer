@@ -8,6 +8,7 @@ records is `irimi.engine.session`'s; nothing here decides anything.
 import asyncio
 import errno
 import logging
+import os
 import time
 from collections.abc import Callable, Sequence
 
@@ -18,7 +19,7 @@ from mitmproxy.options import Options
 
 from irimi.config import ca
 from irimi.core import netaddr
-from irimi.core.exchange import Flag, Headers, Request, Response, media_type
+from irimi.core.exchange import Exchange, Flag, Headers, Request, Response, media_type
 from irimi.decide import targets
 from irimi.decide.overlay import Overlay
 from irimi.decide.policy import AnswerPolicy, Delegate, Forward, Respond
@@ -28,8 +29,6 @@ from irimi.engine import (
     EngineStartError,
     OnExchange,
     OnTlsFailure,
-    Replay,
-    Serve,
     control,
     ingress,
     wire,
@@ -161,6 +160,15 @@ def _to_mitm_response(r: Response) -> http.Response:
         return http.Response.make(r.status, r.body, fields)
 
 
+def _without_content(response: http.Response) -> http.Response:
+    """`response` as an answer to HEAD: no content (RFC 9110 9.3.2), which mitmproxy would send
+    and the client would read as the start of its next response. Nor a Content-Length, which a
+    HEAD answer may only send when it is what a GET would get (8.6)."""
+    response.raw_content = b""
+    response.headers.pop("content-length", None)
+    return response
+
+
 def _send(flow: http.HTTPFlow, out: Response, upstream: Response) -> None:
     """Put `out` on the flow, without re-encoding a body nothing changed.
 
@@ -187,21 +195,18 @@ def _start_failure(config: EngineConfig, cause: BaseException | None) -> str:
             f"port {config.listen_port} on {config.listen_host} is in use; pick another with "
             "--port, or --port 0 for any free port"
         )
-    if isinstance(cause, OSError) and cause.strerror:
-        return f"could not listen on {where}: {cause.strerror.lower()}"
-    return f"could not listen on {where}" + ("" if cause is None else f": {cause}")
+    if isinstance(cause, OSError) and cause.errno:
+        return f"could not listen on {where}: {os.strerror(cause.errno).lower()}"
+    # mitmproxy's OSError carries its own sentence, naming flags irimi does not have.
+    if cause is None or isinstance(cause, OSError):
+        return f"could not listen on {where}"
+    return f"could not listen on {where}: {cause}"
 
 
 def default_control(config: EngineConfig, policy: AnswerPolicy, store: RunStore) -> ControlEndpoint:
     """The control endpoint an engine answers with when its composition root gives it none: over
     its own store, with its policy answering a replay's read tools, and no tool-call callback."""
-    return ControlEndpoint(
-        store,
-        serve=isinstance(config.mode, Serve),
-        process_run=config.run_id,
-        policy=policy,
-        replay_of=config.mode.source_run_id if isinstance(config.mode, Replay) else None,
-    )
+    return ControlEndpoint.for_engine(config, store, policy)
 
 
 class IrimiAddon:
@@ -359,6 +364,8 @@ class IrimiAddon:
             # response read off disk, whose headers mitmproxy may refuse to encode.
             try:
                 built = _to_mitm_response(decision.response)
+                if plan.request.method == "HEAD":
+                    built = _without_content(built)
             except Exception as exc:
                 refused = self.session.decision_failed(
                     admitted, exc, request=plan.request, issued=plan.issued
@@ -380,7 +387,8 @@ class IrimiAddon:
         """Answer a settled plan: its response on the flow first, so a callback that raises while
         it is recorded escapes the hook with the answer already set, never with the flow bare."""
         assert isinstance(plan.decision, Respond)
-        flow.response = _to_mitm_response(plan.decision.response)
+        response = _to_mitm_response(plan.decision.response)
+        flow.response = _without_content(response) if plan.request.method == "HEAD" else response
         self.session.record(self.session.settle(plan))
         self._record_issued(plan)
 
@@ -394,25 +402,15 @@ class IrimiAddon:
         """Answer a control request. `ControlEndpoint.answer` never raises; this guards turning
         its answer into mitmproxy's anyway, because a control request that escaped this hook would
         be forwarded to the listener it was addressed to - irimi itself."""
-        # A response to HEAD carries no content (RFC 9110 9.3.2), and mitmproxy sends whatever the
-        # response holds. Nor a Content-Length, which a HEAD answer may only send when it is what
-        # a GET would get (8.6), and a HEAD's 405 is not that.
         head = call.request.method == "HEAD"
         try:
             answer = self.control.answer(call.request, whole_body=call.whole_body)
             response = _to_mitm_response(answer)
-            if head:
-                response.raw_content = b""
-                response.headers.pop("content-length", None)
         except Exception:
             logger.exception("irimi: could not send the control endpoint's answer")
             error = control.INTERNAL_ERROR
-            response = http.Response.make(
-                error.status, b"" if head else error.body, _fields(error.headers)
-            )
-            if head:
-                response.headers.pop("content-length", None)
-        flow.response = response
+            response = http.Response.make(error.status, error.body, _fields(error.headers))
+        flow.response = _without_content(response) if head else response
 
     def _strip_irimi_headers(self, flow: http.HTTPFlow) -> None:
         """Take irimi's own headers off the flow, as `ingress.admit` took them off the request:
@@ -467,13 +465,17 @@ class IrimiAddon:
             return
         if plan.answered_by not in ("live", "delegated"):
             return
-        stamp = wire.answered_by_header(plan.answered_by)
-        if stamp is not None:
-            flow.response.headers[ANSWERED_BY_HEADER] = stamp
-        if _is_event_stream(flow.response.headers.get("content-type", "")):
-            tee = StreamCapture()
-            flow.metadata[STREAM_KEY] = tee
-            flow.response.stream = tee
+        try:
+            stamp = wire.answered_by_header(plan.answered_by)
+            if stamp is not None:
+                flow.response.headers[ANSWERED_BY_HEADER] = stamp
+            if _is_event_stream(flow.response.headers.get("content-type", "")):
+                tee = StreamCapture()
+                flow.metadata[STREAM_KEY] = tee
+                flow.response.stream = tee
+        except Exception:
+            # Unstreamed, the `response` hook stamps and records it whole.
+            logger.exception("irimi: could not prepare a response to stream")
 
     def response(self, flow: http.HTTPFlow) -> None:
         plan: Plan | None = flow.metadata.pop(META_KEY, None)
@@ -494,7 +496,7 @@ class IrimiAddon:
         except Exception:
             logger.exception("irimi: could not record a response; the agent gets it as it came")
             return
-        self.session.record(completed.exchange)
+        self._record(completed.exchange)
 
     def error(self, flow: http.HTTPFlow) -> None:
         plan: Plan | None = flow.metadata.pop(META_KEY, None)
@@ -510,7 +512,15 @@ class IrimiAddon:
         except Exception:
             logger.exception("irimi: could not record a failed connection")
             return
-        self.session.record(exchange)
+        self._record(exchange)
+
+    def _record(self, exchange: Exchange) -> None:
+        """Record an exchange once its answer has gone: nothing is left to fail closed for, so a
+        callback that raises is logged rather than raised out of the hook."""
+        try:
+            self.session.record(exchange)
+        except Exception:
+            logger.exception("irimi: the exchange callback raised")
 
 
 def _mitm_options(config: EngineConfig) -> Options:

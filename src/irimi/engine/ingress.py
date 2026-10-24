@@ -110,13 +110,19 @@ def admit(
                 "irimi: refusing a base-URL request that could not be rewritten: %s", exc
             )
             return Refusal(request, door, 400, REWRITE_FAILED, started_at, cut)
-    # irimi's own wire vocabulary is never the agent's. `Irimi-Run` names the run this request
-    # belongs to, which only irimi asks, so it is read and then taken off: `Exchange.run_id` holds
-    # it, and no forward, target or check read carries it to the service. irimi sends no
-    # `Irimi-Rewrote`, so one the agent sent goes too.
-    run_id = wire.attribute_run(request, default_run_id)
-    request = request.without_header(REWROTE_HEADER).without_header(RUN_HEADER)
+    run_id, request = attributed(request, default_run_id)
     return Admitted(request, run_id, door, listener, started_at, cut)
+
+
+def attributed(request: Request, default_run_id: str) -> tuple[str, Request]:
+    """The run `request` belongs to, and the request without irimi's own headers.
+
+    irimi's own wire vocabulary is never the agent's. `Irimi-Run` names the run, which only irimi
+    asks, so it is read and then taken off: `Exchange.run_id` holds it, and no forward, target or
+    check read carries it to the service. irimi sends no `Irimi-Rewrote`, so one the agent sent
+    goes too."""
+    run_id = wire.attribute_run(request, default_run_id)
+    return run_id, request.without_header(REWROTE_HEADER).without_header(RUN_HEADER)
 
 
 def is_control_request(request: Request, door: Door) -> bool:
@@ -159,7 +165,8 @@ def rewrite_reverse(request: Request, allowed_hosts: frozenset[str]) -> Request:
     had none. Raises ReverseDoorRefused when the first segment is missing, is an IPv6 literal, has
     a bad port, or names a host (compared lower-case) that is not in `allowed_hosts`.
     """
-    segment, _, rest = request.path.lstrip("/").partition("/")
+    # One slash off, not every one: `//v1/x` names no host, not the host `v1`.
+    segment, _, rest = request.path.removeprefix("/").partition("/")
     if segment.startswith("["):
         raise ReverseDoorRefused(
             "base-URL request names an IPv6 literal host, which irimi does not relay"

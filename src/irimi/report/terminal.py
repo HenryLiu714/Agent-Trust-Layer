@@ -26,7 +26,7 @@ WIDE_BIND_NOTICE = (
 )
 
 # A delegated service or route: the banner has to say that a *routed* host may not be live either.
-DELEGATED_PREFIX = "delegated:"
+DELEGATED_PREFIX = "target:"
 NOT_LOOPBACK_NOTICE = "NOT loopback - these requests leave this machine"
 NOT_LOOPBACK_INDENT = " " * len(f"{DELEGATED_PREFIX} ")
 RED = "\033[31m"

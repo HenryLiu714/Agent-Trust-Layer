@@ -13,7 +13,7 @@ from irimi.core.exchange import Exchange
 from irimi.protocol.trace import UNATTRIBUTED, ToolCall
 from irimi.report import terminal
 from irimi.report.model import RunView
-from irimi.report.summary import summary_lines
+from irimi.report.summary import summary_lines, tls_failure_lines
 from irimi.servicemaps import MapIndex
 
 # How often serve's main thread looks for a signal or a stop. A handler only records the
@@ -81,6 +81,10 @@ class _ServeOutput:
         self._printing = threading.Lock()
         # Exchanges no run named, which no run's summary prints: the stop line points at them.
         self.unattributed = 0
+        # The CA a client refusing irimi's certificate is told to trust, and the hosts it was
+        # told for: no run's summary says a handshake failed, so serve warns once per host.
+        self.ca_cert: Path | None = None
+        self._tls_warned: set[str] = set()
 
     def say(self, lines: list[str], *, err: bool = False) -> None:
         with self._printing:
@@ -98,6 +102,14 @@ class _ServeOutput:
         redacted and would print raw here."""
         if not self.quiet:
             self.say([terminal.tool_call_line(call)])
+
+    def tls_failure(self, host: str) -> None:
+        """A client that refused irimi's certificate for `host`, warned of the first time."""
+        if host in self._tls_warned:
+            return
+        self._tls_warned.add(host)
+        [line] = tls_failure_lines({host: 1}, self.ca_cert)
+        self.say([f"warning: {line.strip()}"], err=True)
 
     def run_ended(self, index: MapIndex, run_id: str) -> None:
         """The run's summary, read back from the store as `irimi runs show` reads it, under
@@ -130,9 +142,10 @@ def _run_serve(
     # The store is closed and its lock released on every way out from here, so a signal never
     # cuts serve short half-way through either.
     with run:
-        engine = engine_factory(run, output.exchange, output.tool_call)
+        output.ca_cert = run.ca.cert
+        engine = engine_factory(run, output.exchange, output.tool_call, output.tls_failure)
         if signalled:  # stopped before it served: no engine to start, no banner to print
-            return 0
+            return exitcodes.OK
         handle = compose.start_engine(engine)
         if handle is None:
             return exitcodes.ERROR

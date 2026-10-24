@@ -94,6 +94,10 @@ def _world(world: World) -> None:
     )
 
 
+# A `--target` on a host that is not this machine, which irimi refuses unless allowed by name.
+REMOTE_TARGET = "api.stripe.com/v1/refunds=http://ledger.example.test/refund"
+
+
 WORKFLOW = Workflow(
     name="w08_orchestrator",
     summary="An orchestrator run with nested sub-agent triggers and an internal HTTP service: "
@@ -116,6 +120,15 @@ WORKFLOW = Workflow(
             extra_maps={"subagent.yaml": UNJUSTIFIED_MAP},
             diverges=True,
             doc="a POST read with no `live_because:`: irimi refuses the map and never starts",
+        ),
+        "remote_target_refused": Scenario(
+            (),
+            setup=_world,
+            diverges=True,
+            shadow_flags=("--target", REMOTE_TARGET),
+            serve_flags=("--target", REMOTE_TARGET),
+            doc="a --target off this machine without --allow-remote-target: irimi refuses it "
+            "and never starts",
         ),
         "run_header_across_hop": Scenario(
             ("--parent-header",),

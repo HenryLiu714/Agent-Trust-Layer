@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from irimi.core import netaddr
 from irimi.core.exchange import Request
 from irimi.core.netaddr import Target
-from irimi.servicemaps import TARGETABLE_KINDS, MapIndex, target_for
+from irimi.servicemaps import MapIndex, service_target_for, target_for
 from irimi.servicemaps.classify import Classification
 
 logger = logging.getLogger(__name__)
@@ -120,10 +120,9 @@ def delegate(request: Request, classification: Classification) -> ForwardTo | No
 
     A matched route asks `servicemaps.target_for`, which is the one place the route-over-service
     precedence lives. A request that matched no route can still be delegated by a **service**
-    target: the map's author pointed the whole service at their stub, and answering the routes
-    their map happens not to list with our own fake would give the agent a world that is half
-    theirs and half ours. `target_reads` is what extends that to reads; `llm` and `telemetry` are
-    never delegated, which is `target_for`'s rule restated here for the unmatched case.
+    target (`service_target_for`): the map's author pointed the whole service at their stub, and
+    answering the routes their map happens not to list with our own fake would give the agent a
+    world that is half theirs and half ours.
     """
     service_map = classification.service_map
     if service_map is None:
@@ -131,12 +130,8 @@ def delegate(request: Request, classification: Classification) -> ForwardTo | No
     route = classification.route
     if route is not None:
         target, forward_auth = target_for(service_map, route), route.forward_auth
-    elif classification.kind in TARGETABLE_KINDS or (
-        classification.kind == "read" and service_map.target_reads
-    ):
-        target, forward_auth = service_map.target, False
     else:
-        return None
+        target, forward_auth = service_target_for(service_map, classification.kind), False
     if target is None:
         return None
     sent_to = target_url(target, request, matched=route is not None)

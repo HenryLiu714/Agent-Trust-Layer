@@ -323,20 +323,20 @@ def test_a_service_with_no_target_adds_no_banner_line():
 
 def test_a_service_target_names_the_service_the_target_and_what_it_answers():
     lines = delegated_lines(_index(_service(target="http://127.0.0.1:3000")))
-    assert lines == ["delegated: stripe -> http://127.0.0.1:3000 (writes)"]
+    assert lines == ["target: stripe -> http://127.0.0.1:3000 (writes)"]
 
 
 def test_target_reads_says_the_reads_are_delegated_too():
     """The banner's "reads are real" claim is exactly what `target_reads` makes false."""
     lines = delegated_lines(_index(_service(target="http://127.0.0.1:3000", target_reads=True)))
-    assert lines == ["delegated: stripe -> http://127.0.0.1:3000 (reads + writes)"]
+    assert lines == ["target: stripe -> http://127.0.0.1:3000 (reads + writes)"]
 
 
 def test_a_route_target_is_named_even_when_the_service_itself_has_none():
     """`irimi maps list` printed `target: self` for exactly this shape; the banner must not."""
     sm = _service(routes=(_route(target="http://127.0.0.1:3111"), _route(path="/v1/charges")))
     assert delegated_lines(_index(sm)) == [
-        "delegated: stripe POST /v1/refunds -> http://127.0.0.1:3111 (writes)"
+        "target: stripe POST /v1/refunds -> http://127.0.0.1:3111 (writes)"
     ]
 
 

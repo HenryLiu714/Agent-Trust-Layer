@@ -405,3 +405,21 @@ def test_replaying_the_second_of_two_identical_runs_replays_it_alone(
     ]
     assert replay.internet.requests() == []
     assert replay.exit_code == 0
+
+
+def test_a_target_off_this_machine_is_refused_unless_allowed_by_name(run_workflow):
+    """A `--target` whose host is not this machine is refused before irimi starts, under
+    `irimi shadow` and serve alike: exit 2, one error naming the flag that allows it by its
+    current spelling, no banner, no agent and no store."""
+    for mode in MODES:
+        shadow = run_workflow(W, "remote_target_refused", mode)
+        assert shadow.exit_code == 2
+        assert (shadow.irimi, shadow.obs) == ([], [])
+        [error] = shadow.irimi_errors
+        assert error.startswith("error: ") and error.endswith(
+            "route POST /v1/refunds: `target`: target host 'ledger.example.test' is not "
+            "loopback; targets must be 127.0.0.1, ::1 or localhost unless you pass "
+            "--allow-remote-target ledger.example.test"
+        )
+        assert sorted(path.name for path in shadow.home.iterdir()) == ["ca"]
+    assert run_workflow(W, "remote_target_refused", "bare").exit_code == 0

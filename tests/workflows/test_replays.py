@@ -89,6 +89,8 @@ REFUSED: dict[tuple[str, str], str] = {
             "clean",
             "forty_mismatches",
             "two_mismatches",
+            "zero_width_key",
+            "long_run_name",
             "datetime_trigger",
             "same_date_twice",
             "refund_then_page",
@@ -115,12 +117,13 @@ REFUSED: dict[tuple[str, str], str] = {
     (W9, "control_hazards"): _BY_HAND,
     **{
         (W10, s): _NO_ENTRYPOINT
-        for s in ("control_unset", "control_unreachable", "control_refused")
+        for s in ("control_unset", "control_unreachable", "control_refused", "control_stalled")
     },
     **{
         (W11, s): _NO_ENTRYPOINT
         for s in (
             "proxied",
+            "untrusting_client",
             "proxyless_client",
             "no_proxy_star",
             "raw_socket",
@@ -250,7 +253,11 @@ ENDS_DIFFER = {
 # divergence", since a tool it posts says it ran for real. A serve that refused its map recorded
 # nothing to replay (W8 `map_refused`).
 NAMES_ITS_OWN_RUNS = {(W9, "control_runs"), (W9, "control_hazards")}
-NOTHING_RECORDED = {(W8, "map_refused"), ("w04_slack_ops_bot", "post_fixture_missing")}
+NOTHING_RECORDED = {
+    (W8, "map_refused"),
+    (W8, "remote_target_refused"),
+    ("w04_slack_ops_bot", "post_fixture_missing"),
+}
 # Rule 8's exception: the scenarios whose agent makes fewer calls in a replay, and why.
 CALLS_FEWER = {
     (W6, "enrich"): (
@@ -292,9 +299,11 @@ def replays_of(run_workflow, replayed, name: str, scenario: str) -> list[Replaye
     if not recorded.stored().list_runs():
         return []
     found = []
+    # The proxy options the recording ran with, `--base-url-host` among them, are the replay's.
+    options = recorded.workflow.scenarios[scenario].shadow_flags
     for run_id in replay_targets(recorded):
         by_command = refused(recorded, run_id) is not None
-        _, replay = replayed(name, scenario, run_id=run_id, command=by_command)
+        _, replay = replayed(name, scenario, run_id=run_id, command=by_command, options=options)
         other = counterpart(recorded, replay, run_id)
         compared = None
         result = replay.replay_result()
@@ -394,14 +403,16 @@ def end_problems(recorded: Result, r: Replayed) -> list[str]:
 
 def flag_problems(replay: Result) -> list[str]:
     """Each exchange a policy decided flagged neither `from-recording` nor `replay-miss`, or both:
-    every one but telemetry and a delegated answer, which a replay never looks up, whether its
-    target answered or irimi answered for it with `target-failed`."""
+    every one but telemetry, a delegated answer, which a replay never looks up, whether its
+    target answered or irimi answered for it with `target-failed`, and a request irimi refused
+    before any policy was asked (`refused`)."""
     return [
         line(ex)
         for ex in replay.reported
         if ex.kind != "telemetry"
         and ex.answered_by != "delegated"
         and Flag.TARGET_FAILED not in ex.flags
+        and Flag.REFUSED not in ex.flags
         and len({Flag.FROM_RECORDING, Flag.REPLAY_MISS} & set(ex.flags)) != 1
     ]
 

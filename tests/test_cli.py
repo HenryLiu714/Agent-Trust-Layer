@@ -469,12 +469,13 @@ def test_the_unattributed_pool_is_not_a_run_to_replay(tmp_path, monkeypatch, cap
 )
 def test_a_word_no_argument_takes_is_refused_as_parse_args_refuses_it(argv, tmp_path, capsys):
     """A word before `--` that no option takes is refused with argparse's own message and exit 2,
-    whether or not a command follows `--`."""
+    by the command it was typed to, whether or not a command follows `--`."""
     store = tmp_path / "store"
     with pytest.raises(SystemExit) as exit_:
         main([*argv[:2], "--store", str(store), *argv[2:]])
     assert exit_.value.code == 2
-    assert "irimi: error: unrecognized arguments: --bogus" in capsys.readouterr().err
+    prog = "irimi replay" if argv[0] == "replay" else "irimi runs list"
+    assert f"{prog}: error: unrecognized arguments: --bogus" in capsys.readouterr().err
     assert not store.exists()
 
 
@@ -741,7 +742,7 @@ def test_a_delegated_services_warning_reaches_a_piped_stdout_too(monkeypatch):
     wait for an exchange to flush it."""
     sm = _delegated_service("http://10.0.0.9:3000")
     visible = _startup_on_a_pipe(monkeypatch, servicemaps.MapIndex((sm,)))
-    assert "delegated: stripe -> http://10.0.0.9:3000 (writes)" in visible
+    assert "target: stripe -> http://10.0.0.9:3000 (writes)" in visible
     assert NOT_LOOPBACK_NOTICE in visible
 
 
@@ -1003,7 +1004,7 @@ def test_serve_prints_a_line_for_each_tool_call(home, monkeypatch, capsys):
         def shutdown(self) -> None:
             stopped.set()
 
-    def build(run, on_exchange, on_tool_call):
+    def build(run, on_exchange, on_tool_call, on_tls_failure=None):
         wired.append(on_tool_call)
         return _Refuses()
 

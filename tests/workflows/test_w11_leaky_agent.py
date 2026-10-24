@@ -272,3 +272,49 @@ def test_an_escape_escapes_its_replay_too(replayed, scenario):
         for ex in recorded.stored_events()
         if isinstance(ex, Exchange)
     } & set(escaped)
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_client_that_refuses_irimi_s_ca_is_named_with_the_ca_to_trust(run_workflow, mode):
+    """An HTTPS read by a client that trusts its own bundle, which never holds irimi's CA: the
+    handshake fails, the read never happens, and irimi says so once for its host, naming the
+    certificate to trust. `irimi shadow` says it in its summary; serve, which prints no summary
+    for the process, warns on stderr, once per host. The refund after it is faked as ever."""
+    shadow = run_workflow(W, "untrusting_client", mode)
+    bare = run_workflow(W, "untrusting_client", "bare")
+    assert [(c["label"], c.get("status"), c.get("error")) for c in shadow.calls()] == [
+        ("untrusting_read", None, "URLError"),
+        ("refund", 200, None),
+    ]
+    assert bare.calls("untrusting_read")[0]["error"] == "URLError"
+    # Stripe hears only irimi's check read of the charge for the refund, never the agent's read.
+    stored = [e for e in shadow.stored_events() if isinstance(e, Exchange)]
+    assert [(e.request.method, e.issued_by) for e in stored] == [
+        ("GET", "engine"),
+        ("POST", "agent"),
+    ]
+    assert len(shadow.internet.requests("api.stripe.com")) == 1
+    line = (
+        "1 connection to api.stripe.com failed TLS: the client did not trust irimi's CA; point it "
+        f"at {shadow.home / 'ca' / 'ca.pem'} (some clients ignore SSL_CERT_FILE)"
+    )
+    if mode == "shadow":
+        assert [x for x in shadow.summary() if "failed TLS" in x] == [f"  {line}"]
+        assert shadow.irimi_errors == []
+    else:
+        assert shadow.irimi_errors == [f"warning: {line}"]
+        assert not [x for x in shadow.irimi if "failed TLS" in x]
+    assert check_invariants(shadow, bare) == []
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_the_banner_says_only_proxied_traffic_is_shadowed(run_workflow, mode):
+    """The escapes above are why the banner's one notice is there: under `irimi shadow` and serve
+    alike, the line after the listener's says that a client ignoring HTTPS_PROXY reaches the real
+    service, and nothing else in the banner claims more."""
+    shadow = run_workflow(W, "proxyless_client", mode)
+    first = next(i for i, line in enumerate(shadow.irimi) if " · listening on " in line)
+    assert shadow.irimi[first + 1] == (
+        "only traffic sent through this proxy is shadowed; a client that ignores HTTPS_PROXY "
+        "talks to the real service"
+    )

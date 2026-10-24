@@ -58,6 +58,12 @@ WORKFLOW = Workflow(
     "socket, a loopback sidecar. The cases Phase 4's readiness checks must flag.",
     scenarios={
         "proxied": Scenario(("proxied",), setup=_services, doc="control: the refund, faked"),
+        "untrusting_client": Scenario(
+            ("untrusting_client",),
+            setup=_services,
+            doc="an HTTPS read by a client that trusts its own empty bundle, not irimi's CA: the "
+            "handshake fails and irimi says so; then the control refund, faked",
+        ),
         "proxyless_client": Scenario(
             ("proxyless_client",),
             setup=_services,

@@ -266,9 +266,13 @@ def target_for(sm: ServiceMap, route: Route) -> Target | None:
     """
     if route.target is not None:
         return route.target
-    if route.kind in TARGETABLE_KINDS:
-        return sm.target
-    if route.kind == "read" and sm.target_reads:
+    return service_target_for(sm, route.kind)
+
+
+def service_target_for(sm: ServiceMap, kind: Kind) -> Target | None:
+    """The service's own target for a request of `kind`, which a route's target would beat: for
+    `write` and `unknown`, and for `read` only under `target_reads: true`."""
+    if kind in TARGETABLE_KINDS or (kind == "read" and sm.target_reads):
         return sm.target
     return None
 

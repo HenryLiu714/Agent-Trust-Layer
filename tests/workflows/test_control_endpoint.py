@@ -23,6 +23,7 @@ MODE_IDS = [f"{n}:{s}:{m}" for n, s, m in MODE_CASES]
 # other one starts its agent as often as the bare run does, so a lost agent fails.
 NO_AGENT_UNDER_SHADOW = {
     ("w08_orchestrator", "map_refused"),
+    ("w08_orchestrator", "remote_target_refused"),
     ("w04_slack_ops_bot", "post_fixture_missing"),
 }
 # How the SDK's one warning for a write tool that ran for real ends.

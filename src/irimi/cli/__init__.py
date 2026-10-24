@@ -33,6 +33,13 @@ COMMANDS = {
 }
 # The subcommand a command with subcommands runs when none is typed: `irimi runs` lists the runs.
 DEFAULT_SUBCOMMANDS = {"runs": "list", "maps": "list"}
+# Flags irimi 0.1 spelled otherwise. They are refused like any unknown flag, with a hint.
+RENAMED_FLAGS = {
+    "--listen-host": "--bind",
+    "--allow-host": "--base-url-host",
+    "--allow-target-host": "--allow-remote-target",
+    "--call": "--entrypoint",
+}
 
 DESCRIPTION = """\
 Shadow mode for AI agents: reads are real, writes are faked.
@@ -127,37 +134,62 @@ def main(argv: list[str] | None = None, *, engine_factory: "EngineFactory | None
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     """`argv` parsed as `irimi` parses it, for a caller that runs a command's function itself."""
-    parser, commands = _parser(_command_typed(argv))
-    return _parse(parser, commands, argv)
+    return _parse(build_parser(_command_typed(argv)), argv)
 
 
-def _parse(
-    parser: argparse.ArgumentParser,
-    commands: dict[str, argparse.ArgumentParser],
-    argv: list[str],
-) -> argparse.Namespace:
+def _parse(parser: argparse.ArgumentParser, argv: list[str]) -> argparse.Namespace:
     """`argv` split at its first `--`: argparse parses what comes before, and what comes after is
-    the command `shadow` and `replay` run, `args.cmd`. Every other command takes nothing there."""
+    the command `shadow` and `replay` run, `args.cmd`. Every other command takes nothing there.
+    An argument no parser takes is refused by the command it was typed to, with its usage."""
     split = argv.index("--") if "--" in argv else len(argv)
     before, after = argv[:split], argv[split + 1 :]
     if before and before[0] in DEFAULT_SUBCOMMANDS:
         rest = before[1:]
         if not rest or (rest[0].startswith("-") and rest[0] not in ("-h", "--help")):
             before = [before[0], DEFAULT_SUBCOMMANDS[before[0]], *rest]
-    args = parser.parse_args(before)
+    args, extras = parser.parse_known_args(before)
     if "cmd" in vars(args):
         args.cmd = after
-    elif split < len(argv):
-        (commands.get(args.command) or parser).error(
-            f"unrecognized arguments: {' '.join(argv[split:])}"
-        )
+    else:
+        extras += argv[split:]
+    if extras:
+        refusal = [f"unrecognized arguments: {' '.join(extras)}", *_hints(args, extras)]
+        _innermost(parser, args).error("\n".join(refusal))
     return args
+
+
+def _hints(args: argparse.Namespace, extras: list[str]) -> list[str]:
+    """What to type instead of the unrecognized `extras`: a renamed flag's name, `irimi serve`,
+    or a command to run that was typed without its `--`."""
+    hints = []
+    for extra in extras:
+        flag = extra.partition("=")[0]
+        if flag in RENAMED_FLAGS:
+            hints.append(f"hint: {flag} is spelled {RENAMED_FLAGS[flag]}")
+        elif flag == "--serve":
+            hints.append("hint: serve mode is its own command: irimi serve")
+    if "cmd" in vars(args) and not extras[0].startswith("-"):
+        hints.append("hint: put the command to run after --")
+    return hints
+
+
+def _innermost(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> argparse.ArgumentParser:
+    """The parser of the command `args` names, a subcommand's (`irimi runs show`) included: the
+    one whose usage an error in its arguments shows."""
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            chosen = action.choices.get(getattr(args, action.dest, None) or "")
+            if chosen is not None:
+                return _innermost(chosen, args)
+    return parser
 
 
 def _main(argv: list[str] | None, engine_factory: "EngineFactory | None") -> int:
     argv = sys.argv[1:] if argv is None else argv
-    parser, commands = _parser(_command_typed(argv))
-    args = _parse(parser, commands, argv)
+    parser = build_parser(_command_typed(argv))
+    args = _parse(parser, argv)
     if args.command is None:
         parser.print_help(sys.stderr)
         return exitcodes.ERROR
@@ -167,7 +199,7 @@ def _main(argv: list[str] | None, engine_factory: "EngineFactory | None") -> int
             return command(args)
         return command(args, engine_factory=engine_factory)
     except UsageError as exc:
-        commands[args.command].error(str(exc))
+        _innermost(parser, args).error(str(exc))
     except CliError as exc:
         print(f"error: {exc.message}", file=sys.stderr)
         return exc.code

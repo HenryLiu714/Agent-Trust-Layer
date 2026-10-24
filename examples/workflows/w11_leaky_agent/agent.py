@@ -34,6 +34,7 @@ import ipaddress
 import json
 import os
 import socket
+import ssl
 import subprocess
 import sys
 import urllib.error
@@ -111,6 +112,22 @@ def _refund_request() -> dict[str, Any]:
 def proxied() -> None:
     """The control: the same refund, through the proxy as configured."""
     agentkit.stripe("POST", "/v1/refunds", {"charge": CHARGE, "amount": "500"}, label="refund")
+
+
+def untrusting_client() -> None:
+    """HTTPS through the proxy with a client that trusts a bundle of its own, which holds no
+    CA at all, and never SSL_CERT_FILE: it refuses irimi's certificate and its call fails. Then
+    the control refund, through the proxy as configured."""
+    pinned = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler(), urllib.request.HTTPSHandler(context=pinned)
+    )
+    url = f"https://api.stripe.com/v1/charges/{CHARGE}"
+    try:
+        _send(opener, "untrusting_read", url)
+    except OSError as err:
+        agentkit.obs_http("GET", url, "untrusting_read", error=type(err).__name__)
+    proxied()
 
 
 def proxyless_client() -> None:
@@ -228,6 +245,7 @@ async def _httpx_async_get(url: str) -> httpx.Response:
 
 ESCAPES = {
     "proxied": proxied,
+    "untrusting_client": untrusting_client,
     "proxyless_client": proxyless_client,
     "no_proxy_star": no_proxy_star,
     "raw_socket": raw_socket,

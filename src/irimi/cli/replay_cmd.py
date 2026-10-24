@@ -15,7 +15,7 @@ from typing import Any, TextIO, cast
 from irimi import __version__
 from irimi.cli import CliError, UsageError, compose, os_error, runner
 from irimi.cli.options import (
-    RUN_ID_HELP,
+    STORED_RUN_HELP,
     add_proxy_options,
     args_arg,
     args_file_arg,
@@ -72,7 +72,7 @@ def register(subparsers: "argparse._SubParsersAction[Any]") -> None:
         "run_id",
         nargs="?",
         metavar="RUN",
-        help=f"the run to replay: {RUN_ID_HELP}",
+        help=f"the run to replay: {STORED_RUN_HELP}",
     )
     own = replay.add_argument_group("replay options")
     own.add_argument(

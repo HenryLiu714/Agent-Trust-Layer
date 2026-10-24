@@ -327,7 +327,7 @@ def test_banner_names_a_delegated_service(home, tmp_path, capsys):
     )
     assert main(["shadow", *_py("pass")]) == 0
     out = capsys.readouterr().out
-    assert "delegated: stripe -> http://127.0.0.1:3000 (reads + writes)" in out
+    assert "target: stripe -> http://127.0.0.1:3000 (reads + writes)" in out
     # The existing banner is unchanged, not replaced.
     assert "only traffic sent through this proxy is shadowed" in out
 
@@ -348,7 +348,7 @@ def test_the_banner_says_when_a_target_left_the_machine(home, capsys):
     ]
     assert main(argv) == 0
     captured = capsys.readouterr()
-    assert "delegated: stripe -> http://stub.example:3000 (writes)" in captured.out
+    assert "target: stripe -> http://stub.example:3000 (writes)" in captured.out
     assert "NOT loopback" in captured.out
     assert "--allow-remote-target" in captured.err  # the existing escape-hatch warning, unchanged
 

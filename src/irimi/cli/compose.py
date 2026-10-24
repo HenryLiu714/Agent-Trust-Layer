@@ -231,11 +231,10 @@ def load_maps(
 def _escape_hatch_warning(args: argparse.Namespace) -> str | None:
     """The one line `--allow-remote-target` has to print, or None when it was not used.
 
-    Targets are loopback-only so that a delegated request cannot leave the machine; this flag is
-    the deliberate way out of that, so it says so out loud. The delegated-service banner and the
-    summary's accounting of delegated writes are printed elsewhere.
+    Targets are loopback-only so that a request sent to a target cannot leave the machine; this
+    flag is the deliberate way out of that, so it says so out loud.
     """
-    hosts = getattr(args, "allow_remote_target", None)
+    hosts = args.allow_remote_target
     if not hosts:
         return None
     named = ", ".join(sorted(hosts))
@@ -278,7 +277,9 @@ def print_startup(
             print(warning, file=sys.stderr, flush=True)
     for line in terminal.banner_lines(command, run_id, host, port, ca_cert, replay_of):
         print(line, flush=True)
-    for line in terminal.delegated_lines(index, color=sys.stdout.isatty()):
+    # No stdout at all (`>&-`) is no terminal either.
+    color = sys.stdout is not None and sys.stdout.isatty()
+    for line in terminal.delegated_lines(index, color=color):
         print(line, flush=True)
 
 
@@ -362,14 +363,7 @@ def build_engine(
         policy = ReplayPolicy(run.recording, maps=run.config.maps, keys=run.keys)
     # The policy that decides the wire answers the SDK's read tools too: from a replay's
     # recording, or from nothing.
-    control = ControlEndpoint(
-        run.store,
-        serve=isinstance(run.config.mode, Serve),
-        process_run=run.config.run_id,
-        on_tool_call=on_tool_call,
-        policy=policy,
-        replay_of=replayed_run(run.config.mode),
-    )
+    control = ControlEndpoint.for_engine(run.config, run.store, policy, on_tool_call)
     return MitmEngine(
         run.config,
         policy,

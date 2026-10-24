@@ -13,6 +13,11 @@ LISTEN_HOST = "127.0.0.1"
 DEFAULT_PORT = 4000
 # What `runs show`, `compare` and `replay` take for the newest stored run.
 LAST_RUN = "last"
+# `replay` takes no `unattributed`: that pool is every serve session's unclaimed traffic, no run.
+STORED_RUN_HELP = (
+    f"a run id from `irimi runs list`, a prefix only one run id starts with, or {LAST_RUN} for "
+    "the newest"
+)
 RUN_ID_HELP = (
     f"a run id from `irimi runs list`, a prefix only one run id starts with, {LAST_RUN} for the "
     f"newest, or {UNATTRIBUTED} for traffic no run claimed"

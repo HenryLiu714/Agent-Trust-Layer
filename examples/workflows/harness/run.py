@@ -65,6 +65,7 @@ from irimi.cli import main as irimi_main
 from irimi.cli.compose import EngineFactory
 from irimi.config import ca, paths
 from irimi.core.exchange import Exchange
+from irimi.decide.writelog import WriteLog
 from irimi.engine import Engine, OnExchange, OnTlsFailure
 from irimi.engine.control import OnToolCall
 from irimi.protocol import trace
@@ -91,6 +92,7 @@ CANARIES = {
     "ANTHROPIC_API_KEY": credentials.ANTHROPIC_API_KEY,
     "OPENAI_API_KEY": credentials.OPENAI_API_KEY,
     "SLACK_WEBHOOK_PATH": credentials.SLACK_WEBHOOK_PATH,
+    "LONG_ERROR_KEY": credentials.LONG_ERROR_KEY,
 }
 # And every credential a fake service hands back in a response body. A live read's response is
 # stored, so one found on disk is a leak on the response side, which the canaries above, all sent
@@ -198,6 +200,10 @@ class Result:
     store: Path | None = None
     # A replay's result, as `irimi replay --result-file` wrote it or `testing.replay` returned it.
     replay: testing.ReplayResult | None = None
+    # Every line irimi printed to stderr (shadow, serve and replay): its warnings and errors.
+    irimi_errors: list[str] = field(default_factory=list)
+    # The engine's write log as irimi left it, once every run it decided has ended or not.
+    write_log: WriteLog | None = None
 
     def events(self, event: str, *, with_time: bool = True) -> list[dict[str, Any]]:
         """Every `event` the agent logged, in order. `with_time=False` drops each one's
@@ -269,7 +275,7 @@ class Result:
     def exchange_lines(self) -> list[str]:
         """irimi's per-exchange lines: `<answered_by> <kind> <METHOD> <host><path> -> <status>`.
         A tool call's line is in the same stream and the same columns, and is not one; nor are the
-        banner's line for a delegated service, `delegated: <what> -> <target>`, and a replay's
+        banner's line for a service sent to a target, `target: <what> -> <url>`, and a replay's
         header, `irimi replay · <run> -> <run>`."""
         return [
             line
@@ -644,9 +650,11 @@ def _execute(
     internet = FakeInternet(world.services())
     internet.start()
     irimi_out: list[str] = []
+    irimi_errors: list[str] = []
     reported: list[Exchange] = []
     handed: list[Exchange] = []
     handed_events: list[Exchange | ToolCall] = []
+    write_logs: list[WriteLog] = []
     result_file = workdir / "result.json"
     try:
         for host, action, match, times in scenario.faults:
@@ -660,11 +668,11 @@ def _execute(
             code = _run_bare(cmd, agent_env, cwd, internet)
         elif mode == "shadow":
             argv = ["shadow", "--port", "0", *flags, *scenario.shadow_flags, "--", *cmd]
-            with _watching_the_store(reported, handed, handed_events) as build:
+            with _watching_the_store(reported, handed, handed_events, write_logs) as build:
                 run_irimi: Callable[[], int] = functools.partial(
                     irimi_main, argv, engine_factory=build
                 )
-                code, irimi_out = _run_irimi(
+                code, irimi_out, irimi_errors = _run_irimi(
                     run_irimi, agent_env, cwd, tmp, internet, scenario, workdir
                 )
         elif mode == "replay":
@@ -672,19 +680,19 @@ def _execute(
             argv = ["replay", "--port", "0", *flags, "--result-file", str(result_file)]
             # As its user types it: the run id, then `-- <cmd>` for a command.
             argv += [*how.options, replay_of, *(["--", *cmd] if how.command else [])]
-            with _watching_the_store(reported, handed, handed_events) as build:
+            with _watching_the_store(reported, handed, handed_events, write_logs) as build:
                 if how.call is None:
                     run_irimi = functools.partial(irimi_main, argv, engine_factory=build)
                 else:
                     run_irimi = _calling_sdk_replay(replay_of, how.call, store, result_file, build)
-                code, irimi_out = _run_irimi(
+                code, irimi_out, irimi_errors = _run_irimi(
                     run_irimi, agent_env, cwd, tmp, internet, scenario, workdir
                 )
         else:
             if scenario.serve_flags is None:
                 raise ValueError(f"{workflow.name}:{scenario_name} does not run in serve mode")
-            with _watching_the_store(reported, handed, handed_events) as build:
-                code, irimi_out = _run_serve(
+            with _watching_the_store(reported, handed, handed_events, write_logs) as build:
+                code, irimi_out, irimi_errors = _run_serve(
                     cmd, agent_env, cwd, tmp, internet, scenario, workdir, build, flags
                 )
     finally:
@@ -708,6 +716,8 @@ def _execute(
         handed_events,
         store,
         _replay_result(result_file) if mode == "replay" else None,
+        irimi_errors,
+        write_logs[0] if write_logs else None,
     )
 
 
@@ -775,8 +785,9 @@ def _under_a_pair(rows: list[str], i: int) -> bool:
 def rows_not_shown(result: Result, run_a: str, run_b: str, out: list[str]) -> list[str]:
     """Every row of `irimi compare <run_a> <run_b>`'s output `out` that is not a write line the
     summary of its run printed (`irimi runs show`), or that no row kind starts. Empty
-    when compare showed each run's own writes and nothing else, but for the one exception compare
-    makes: a pair it told apart (`_told_apart`)."""
+    when compare showed each run's own writes and nothing else, but for the exception compare
+    makes for writes that print alike: a pair it told apart (`_told_apart`), or one write's row
+    printed with its backslashes escaped (`_escaped_alone`)."""
     shown = {"A": result.shown_writes(run_a)[1], "B": result.shown_writes(run_b)[1]}
     rows = out[out.index("") + 1 : -2] if out[-2:-1] == [""] else []
     missing = []
@@ -786,10 +797,39 @@ def rows_not_shown(result: Result, run_a: str, run_b: str, out: list[str]) -> li
         prefix = next((p for p in ROW_SIDES if row.startswith(p)), None)
         if prefix is not None and all(row[len(prefix) :] in shown[s] for s in ROW_SIDES[prefix]):
             continue
+        if prefix is not None and _escaped_alone(row, prefix, rows, shown):
+            continue
         pair = rows[i : i + 2] if row.startswith(PAIR_A_PREFIXES) else rows[max(i - 1, 0) : i + 1]
         if not (len(pair) == 2 and _told_apart(pair[0], pair[1], shown)):
             missing.append(row)
     return missing
+
+
+def _unescaped(text: str) -> str:
+    return text.replace("\\\\", "\\")
+
+
+def _escaped_alone(row: str, prefix: str, rows: list[str], shown: dict[str, list[str]]) -> bool:
+    """Whether `row`, a row of one write, is printed with each backslash escaped too, as `irimi
+    compare` prints every write whose line another write in the comparison prints alike: with
+    each doubled backslash made one again, it is a line its side's summary printed, its text is
+    not that line, another row prints that line too, and no side has more rows of that line
+    than its summary printed."""
+    text = row[len(prefix) :]
+    line = _unescaped(text)
+    if text == line or not all(line in shown[side] for side in ROW_SIDES[prefix]):
+        return False
+    alike = [
+        (r, p)
+        for r in rows
+        for p in ROW_SIDES
+        if r.startswith(p) and _unescaped(r[len(p) :]) == line
+    ]
+    if len(alike) < 2:
+        return False
+    return all(
+        sum(side in ROW_SIDES[p] for _, p in alike) <= shown[side].count(line) for side in "AB"
+    )
 
 
 def _told_apart(a_row: str, b_row: str, shown: dict[str, list[str]]) -> bool:
@@ -849,13 +889,17 @@ def _run_irimi(
     internet: FakeInternet,
     scenario: Scenario,
     workdir: Path,
-) -> tuple[int, list[str]]:
+) -> tuple[int, list[str], list[str]]:
     """`run`, which runs irimi in this process, as a user would run it from `cwd`: `irimi shadow
     -- <agent>`, or `irimi replay <run id>`, or `testing.replay` (`_calling_sdk_replay`)."""
-    buf = io.StringIO()
-    with _as_irimi(env, cwd, tmp, internet, scenario, workdir), contextlib.redirect_stdout(buf):
+    buf, err = io.StringIO(), _Tee(sys.stderr)
+    with (
+        _as_irimi(env, cwd, tmp, internet, scenario, workdir),
+        contextlib.redirect_stdout(buf),
+        contextlib.redirect_stderr(err),
+    ):
         code = run()
-    return code, buf.getvalue().splitlines()
+    return code, buf.getvalue().splitlines(), err.getvalue().splitlines()
 
 
 @contextlib.contextmanager
@@ -899,7 +943,7 @@ def _run_serve(
     workdir: Path,
     build: EngineFactory,
     flags: tuple[str, ...] = (),
-) -> tuple[int, list[str]]:
+) -> tuple[int, list[str], list[str]]:
     """`irimi serve` in this process, as `_run_shadow` runs `irimi shadow`, on a thread of
     its own; the agent beside it as its own process; and irimi stopped when the agent exits.
 
@@ -910,14 +954,18 @@ def _run_serve(
     proxy, the CA, `IRIMI_ENGINE_ACTIVE` and `IRIMI_CONTROL`, and never `IRIMI_RUN`, so a
     request no SDK run names is `unattributed`.
     """
-    buf = io.StringIO()
+    buf, err = io.StringIO(), _Tee(sys.stderr)
     stop = threading.Event()
     codes: list[int] = []
     assert scenario.serve_flags is not None
     argv = ["serve", "--port", "0", *flags, *scenario.serve_flags]
     args = parse_args(argv)
     before = set(threading.enumerate())
-    with _as_irimi(env, cwd, tmp, internet, scenario, workdir), contextlib.redirect_stdout(buf):
+    with (
+        _as_irimi(env, cwd, tmp, internet, scenario, workdir),
+        contextlib.redirect_stdout(buf),
+        contextlib.redirect_stderr(err),
+    ):
         serving = threading.Thread(
             target=lambda: codes.append(args.func(args, stop, engine_factory=build)),
             name="irimi-serve",
@@ -932,7 +980,7 @@ def _run_serve(
                 serving.join(timeout=SERVE_TIMEOUT_S)
                 if serving.is_alive() or codes in ([], [0]):
                     raise AssertionError(f"irimi serve printed no banner: {codes}")
-                return codes[0], buf.getvalue().splitlines()
+                return codes[0], buf.getvalue().splitlines(), err.getvalue().splitlines()
             agent_env = _serve_env(env, port, ca.ca_paths().cert)
             done = subprocess.run(cmd, env=agent_env, cwd=cwd, timeout=180, check=False)
             code = runner.exit_code_for(done.returncode)
@@ -952,7 +1000,19 @@ def _run_serve(
     left = [t.name for t in started if t.is_alive()]
     if left:
         raise AssertionError(f"irimi serve left threads running: {left}")
-    return code, buf.getvalue().splitlines()
+    return code, buf.getvalue().splitlines(), err.getvalue().splitlines()
+
+
+class _Tee(io.StringIO):
+    """irimi's stderr, kept for the result and still written where it went before."""
+
+    def __init__(self, also: Any) -> None:
+        super().__init__()
+        self._also = also
+
+    def write(self, text: str) -> int:
+        self._also.write(text)
+        return super().write(text)
 
 
 def _served_port(buf: io.StringIO, serving: threading.Thread) -> int | None:
@@ -1000,12 +1060,16 @@ def _environ(env: dict[str, str]) -> Iterator[None]:
 
 @contextlib.contextmanager
 def _watching_the_store(
-    reported: list[Exchange], handed: list[Exchange], handed_events: list[Exchange | ToolCall]
+    reported: list[Exchange],
+    handed: list[Exchange],
+    handed_events: list[Exchange | ToolCall],
+    write_logs: list[WriteLog],
 ) -> Iterator[EngineFactory]:
     """`irimi shadow` unchanged, but each exchange it prints a line for is appended to `reported`,
     and each one its engine hands the trace store to `handed`, and to `handed_events` with each
-    tool call the control endpoint hands it. The block is given the engine factory to pass irimi
-    (`cli.main(engine_factory=)`): `cli.compose.build_engine`, handed an `on_exchange` that
+    tool call the control endpoint hands it, and the engine's write log to `write_logs`. The block
+    is given the engine factory to pass irimi (`cli.main(engine_factory=)`):
+    `cli.compose.build_engine`, handed an `on_exchange` that
     records each exchange before it prints its line. `cli.compose` looks `DirectoryStore` up when
     it opens the store, so swapping that name is enough, as `tests/test_trace_e2e.py` does. Not
     `report.terminal.exchange_line` itself, which `irimi replay` also calls for the line of its
@@ -1021,6 +1085,8 @@ def _watching_the_store(
             reported.append(ex)
             on_exchange(ex)
 
+        if run.write_log is not None:
+            write_logs.append(run.write_log)
         return compose.build_engine(run, printing, on_tool_call, on_tls_failure)
 
     class Handed(store_writer.DirectoryStore):

@@ -39,6 +39,7 @@ from irimi.servicemaps.model import (
     fill_path,
     is_delegated,
     path_params,
+    service_target_for,
     target_for,
 )
 
@@ -55,6 +56,7 @@ __all__ = [
     "load",
     "override_path",
     "path_params",
+    "service_target_for",
     "shipped_credential_hosts",
     "target_for",
 ]

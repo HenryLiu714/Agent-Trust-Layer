@@ -639,19 +639,19 @@ def test_an_absent_irimi_sdk_falls_back_to_the_stand_in(load_sdk, obs, monkeypat
 
 
 def test_unknown_public_names_forward_to_the_real_sdk(load_sdk):
-    class ReplayResult:
+    class RecordedToolError(Exception):
         pass
 
-    def replay(run_id: str, fn: Any = None, /, *args: Any, **kwargs: Any) -> ReplayResult:
-        return ReplayResult()
+    def instrument(*clients: Any) -> RecordedToolError:
+        return RecordedToolError()
 
-    fake = fake_sdk(replay=replay, ReplayResult=ReplayResult, _private=object())
+    fake = fake_sdk(instrument=instrument, RecordedToolError=RecordedToolError, _private=object())
     sdk = load_sdk(fake)
-    assert sdk.replay is replay
-    assert isinstance(sdk.replay("abc"), ReplayResult)
-    from examples.workflows.sdk import ReplayResult as imported
+    assert sdk.instrument is instrument
+    assert isinstance(sdk.instrument(), RecordedToolError)
+    from examples.workflows.sdk import RecordedToolError as imported
 
-    assert imported is ReplayResult
+    assert imported is RecordedToolError
     with pytest.raises(AttributeError):
         _ = sdk._private
     with pytest.raises(AttributeError):

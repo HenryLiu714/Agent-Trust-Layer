@@ -1,7 +1,4 @@
-"""W5 `dispute_responder`: a Stripe webhook consumer, pinned per scenario.
-
-The labels and events are in `tests/e2e/workflows/agents/w05_dispute_responder/agent.py`.
-"""
+"""W5 `dispute_responder`: a Stripe webhook consumer, pinned per scenario."""
 
 import base64
 import json
@@ -43,8 +40,7 @@ def test_a_large_dispute_is_tagged_alerted_and_fought_without_a_refund(run_workf
         ("slack.com/api/chat.postMessage", 200, "fake-L1"),
     ]
     assert actions(shadow) == [("charge.dispute.created", "fight")]
-    # `/v1/disputes/{id}` is a route the Stripe map does not name: a GET on a mapped host with no
-    # route falls back to the verb rule, so it is forwarded live as a read.
+    # The Stripe map names no `/v1/disputes/{id}` route, so the verb rule forwards the GET live.
     assert "real          read      GET api.stripe.com/v1/disputes/dp_BIG -> 200" in (
         shadow.exchange_lines()
     )
@@ -58,10 +54,9 @@ def test_the_intents_client_secret_reaches_the_agent_and_only_its_placeholder_re
     run_workflow,
     mode,
 ):
-    """Reads are real, so the agent is handed the payment intent's real `client_secret`. The store
-    keeps that live read's response with the secret swapped for its placeholder and nothing else
-    changed, and invariant 4 finds the canary in no file under irimi's home. The one
-    corpus response that carries a credential: every other canary is one the agent sends."""
+    """The agent gets the live `client_secret`; the store keeps it only as its placeholder.
+
+    This is the corpus's one response that carries a credential."""
     shadow = run_workflow(W, "over_threshold", mode)
     path = "/v1/payment_intents/pi_BIG"
     [live] = [ex for ex in shadow.reported if ex.request.path == path]
@@ -89,9 +84,8 @@ def test_a_small_dispute_is_refunded_and_the_refund_would_have_fired_two_events(
     ]
     summary = shadow.summaries()
     assert "  would have fired: customer.updated, refund.created, charge.refunded" in summary
-    # KNOWN BUG: a refund with no `amount` is faked with its fixture's 100, where Stripe (and the
-    # bare run) refund the whole 1500 that irimi's own check read found unrefunded. The summary
-    # cannot say how much either.
+    # KNOWN BUG: a refund with no `amount` is faked with its fixture's 100, where Stripe refunds
+    # the whole 1500 irimi's check read found unrefunded, and the summary says neither.
     assert [e["amount"] for e in bare.events("refund")] == [1500]
     assert [e["amount"] for e in shadow.events("refund")] == [100]
     assert (
@@ -114,20 +108,17 @@ def test_the_refunds_own_charge_refunded_event_is_a_second_run_with_no_calls(run
     runs = shadow.events("run.start")
     assert [r["name"] for r in runs] == [f"{AGENT}:on_event"] * 2
     assert {c["run"] for c in shadow.calls()} == {runs[0]["run"]}
-    # The second run is built from irimi's minted refund: in production this event would never
-    # arrive for a shadowed refund. The summary's would-have-fired list is where it shows instead.
+    # The second run is built from irimi's minted refund. In production this event never arrives
+    # for a faked refund; the summary's would-have-fired list names it instead.
     refund_id = shadow.events("refund")[0]["id"]
     assert shadow.events("event")[1]["id"] == f"evt_refunded_{refund_id}"
-    # The event fed back is one irimi says the refund would have fired.
     assert "  would have fired: customer.updated, refund.created, charge.refunded" in (
         shadow.summary()
     )
 
 
 def test_under_serve_the_cascade_is_two_runs_and_two_summaries_the_second_empty(run_workflow):
-    """Under `irimi serve` each delivery is its own run, printed when it ends: the
-    dispute's run with its three faked writes and what they would have fired, and the fed-back
-    `charge.refunded`'s run with no calls at all."""
+    """Under serve each delivery is a run: the dispute's with three faked writes, the next empty."""
     serve = run_workflow(W, "cascade", "serve")
     first, second = (r["run"] for r in serve.events("run.start"))
     assert {c["run"] for c in serve.calls()} == {first}
@@ -177,8 +168,7 @@ def test_a_replayed_event_id_is_handled_once(run_workflow):
 
 @pytest.mark.parametrize("mode", MODES)
 def test_the_raw_webhook_body_is_stored_as_the_triggers_bytes_and_is_replayable(run_workflow, mode):
-    """A `bytes` argument is captured whole: `on_event(raw, signature)` stores the body it verified
-    as `__irimi_bytes__`, which replay can hand back byte for byte."""
+    """A `bytes` trigger argument is stored whole as `__irimi_bytes__`, so the run is replayable."""
     shadow = run_workflow(W, "over_threshold", mode)
     [run] = shadow.sdk_runs()
     assert run.trigger is not None and run.trigger.replayable
@@ -200,13 +190,11 @@ def test_the_raw_webhook_body_is_stored_as_the_triggers_bytes_and_is_replayable(
 def test_irimi_compare_cannot_tell_two_refunds_of_the_rest_of_a_charge_apart(
     shared_store_run, run_workflow, mode
 ):
-    """`under_threshold` and `partly_refunded` deliver the same dispute event, and the agent
-    refunds what is left of `ch_SMALL`: all 1500 of it, or the 1000 left after an earlier refund
-    of 500, as the bare runs' refunds show. Recorded into one store, B under shadow or serve.
+    """Compare calls refunds of 1500 and of the 1000 left on `ch_SMALL` the same, and exits 0.
 
-    KNOWN BUG: a refund with no `amount` prints `refund ? on ch_SMALL`, so compare calls the two
-    refunds the same and exits 0, though irimi's own check read of each charge knew how much was
-    left."""
+    `under_threshold` and `partly_refunded` deliver one dispute; the agent refunds what is left.
+    KNOWN BUG: a refund with no `amount` prints `refund ? on ch_SMALL`, though irimi's check read
+    of each charge knew how much was left."""
     full = shared_store_run(W, "under_threshold")
     rest = shared_store_run(W, "partly_refunded", mode)
     assert check_invariants(rest) == []
@@ -217,8 +205,7 @@ def test_irimi_compare_cannot_tell_two_refunds_of_the_rest_of_a_charge_apart(
     code, out, err = compare(full, rest)
     a, b = (result.one("run.start")["run"] for result in (full, rest))
     on_event = "tests.e2e.workflows.agents.w05_dispute_responder.agent:on_event"
-    # The same event's bytes, and a signature that names the second it was signed in: the args
-    # differ only when the two deliveries were signed in different seconds.
+    # The signature names the second it was signed in, so the args differ only across seconds.
     triggers = [rest.stored().load_run(run_id).record.trigger for run_id in (a, b)]
     args = [trigger.args for trigger in triggers if trigger is not None]
     assert [arg["raw"] for arg in args if isinstance(arg, dict)] == [args[0]["raw"]] * 2
@@ -244,18 +231,17 @@ def test_irimi_compare_cannot_tell_two_refunds_of_the_rest_of_a_charge_apart(
 
 
 def test_the_raw_webhook_body_is_revived_as_bytes_and_the_trigger_replays(replayed):
-    """`on_event(raw, signature)` is given the webhook's raw body, which the SDK captures as
-    `__irimi_bytes__`, and `irimi replay` revives as the same bytes (`capture.revive`): the
-    trigger, called alone, verifies the same signature over them, handles the same dispute, and is
-    answered from its recording, so nothing reaches the fake internet and the writes are the
-    same."""
+    """Replay revives the raw body as the same bytes, so the trigger verifies and replays whole.
+
+    The trigger handles the same dispute from its recording, and nothing reaches the fake
+    internet."""
     recorded, replay = replayed(W, "under_threshold")
     [run] = recorded.sdk_runs()
     assert run.trigger is not None and run.trigger.replayable
     assert set(run.trigger.args["raw"]) == {"__irimi_bytes__"}
     assert base64.b64decode(run.trigger.args["raw"]["__irimi_bytes__"]).startswith(b"{")
     assert (replay.exit_code, replay.agent_exit_code()) == (0, 0)
-    # The trigger was called with `bytes` again, as when it was recorded, and did what it did.
+    # The trigger is called with `bytes` again, and returns what it returned when recorded.
     called_with = {"raw": "bytes", "signature": "str"}
     assert replay.one("run.start")["called_with"] == called_with
     assert recorded.one("run.start")["called_with"] == called_with

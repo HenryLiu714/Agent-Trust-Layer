@@ -1,14 +1,6 @@
-"""What every sample agent shares: its HTTP client, its observation log, its configuration, and
-the plumbing of a service that delivers its own inbound calls.
+"""What every sample agent shares: a urllib HTTP client, its observation log and configuration.
 
-An agent here is an ordinary program. It reads its service base URLs and keys from the
-environment, as a deployed agent would, and makes its calls with the stdlib (`urllib`), which
-honours `HTTPS_PROXY` and `SSL_CERT_FILE` with no extra code.
-
-The one thing it does that a real agent would not is keep an observation log, `obs()`: one JSON
-line per event in the file `WORKFLOW_OBS` names. The harness asserts on it, so a test can see what
-the AGENT saw (a status, an `Irimi-Answered-By`, a branch it took) and not only what irimi printed.
-"""
+The observation log (`obs()`) lets a test assert on what the agent saw, not only irimi's output."""
 
 from __future__ import annotations
 
@@ -41,14 +33,12 @@ from irimi.protocol.env import CONTROL_ENV, REPLAY_RUN_ENV
 OBS_ENV = "WORKFLOW_OBS"
 STATE_ENV = "WORKFLOW_STATE"
 TIMEOUT_ENV = "WORKFLOW_HTTP_TIMEOUT"
-# The port the harness serves every host name on. Unset in production, where a name's own port
-# (80) serves it.
+# The port the harness serves every host name on; unset outside the harness.
 PORT_ENV = "WORKFLOW_INTERNET_PORT"
 # An agent that hangs would hang the test that runs it, because `irimi shadow` waits for its
 # child. SIGALRM's default action ends the process, so a stuck agent dies instead.
 WATCHDOG_S = 90
-# Every irimi logger is named after its module, so this one hears the SDK's. A WARNING there is the
-# SDK's only sign that a run's record was lost.
+# The parent of every irimi logger, the SDK's included: a WARNING there means a run record was lost.
 IRIMI_LOGGER = irimi.__name__
 # Set for an agent that reaches irimi's control endpoint through a gateway that forwards the routes
 # it knows and refuses the one a replay's read tools ask (`lookup_gateway`).
@@ -60,10 +50,9 @@ _obs_lock = threading.Lock()
 
 
 def start() -> None:
-    """Call first in every agent's `main()`. Logs the proxy, the control endpoint and the
-    replay's run the agent was given, so the harness can hold every run to what `irimi
-    shadow` sets, and every bare run to having none of them from irimi. From here on, each record
-    an irimi logger emits is a `log` event too."""
+    """Start an agent: log the proxy, control endpoint and replay run it was given.
+
+    From here on, each record an irimi logger emits is a `log` event too."""
     if hasattr(signal, "SIGALRM"):
         signal.alarm(WATCHDOG_S)
     logging.getLogger(IRIMI_LOGGER).addHandler(_LogToObs())
@@ -76,9 +65,9 @@ def start() -> None:
 
 
 class _LogToObs(logging.Handler):
-    """Each record an irimi logger emits in the agent, as a `log` event. The SDK never raises
-    into the agent: a control endpoint it cannot reach is one WARNING on `irimi.sdk`, and
-    this is how the harness sees it, and sees that no other run logs one."""
+    """Log each record an irimi logger emits in the agent as a `log` event.
+
+    The SDK never raises, so a WARNING is how the harness sees an unreachable control endpoint."""
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -88,8 +77,7 @@ class _LogToObs(logging.Handler):
 
 
 def proxy() -> str | None:
-    """The HTTP proxy the agent was given, as urllib reads it: `irimi shadow`'s listener, the fake
-    internet in a bare run, or None."""
+    """Return the HTTP proxy the agent was given, as urllib reads it, or None."""
     return os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
 
 
@@ -104,7 +92,7 @@ def obs(event: str, **data: Any) -> None:
 
 
 def base(service: str) -> str:
-    """`STRIPE_API_BASE` and friends, with the real service as the default."""
+    """Return `STRIPE_API_BASE` and friends, with the real service as the default."""
     defaults = {
         "stripe": "https://api.stripe.com",
         "slack": "https://slack.com",
@@ -117,7 +105,7 @@ def base(service: str) -> str:
 
 
 def internal(host: str) -> str:
-    """An internal service's base URL, `http://<host>`, on the harness's port when there is one."""
+    """Return an internal service's base URL, on the harness's port when there is one."""
     port = os.environ.get(PORT_ENV)
     return f"http://{host}:{port}" if port else f"http://{host}"
 
@@ -130,7 +118,7 @@ def key(name: str) -> str:
 
 
 def state_dir() -> Path:
-    """Where an agent keeps its local state (SQLite files, exports)."""
+    """Return where an agent keeps its local state (SQLite files, exports)."""
     path = Path(os.environ.get(STATE_ENV) or ".")
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -142,9 +130,7 @@ def timeout() -> float:
 
 @contextlib.contextmanager
 def sqlite(name: str) -> Iterator[sqlite3.Connection]:
-    """One transaction on the SQLite file `name` in the state directory: committed if the block
-    ends normally, rolled back if it raises, and always closed. `sqlite3`'s own context manager
-    commits but never closes."""
+    """Run one transaction on the state directory's SQLite file `name`, and always close it."""
     with contextlib.closing(sqlite3.connect(state_dir() / name)) as conn, conn:
         yield conn
 
@@ -185,8 +171,9 @@ def http(
     timeout_s: float | None = None,
     label: str | None = None,
 ) -> Response:
-    """One request with urllib. An HTTP error status is returned, not raised; a request with no
-    answer raises `NetworkError`. Either way the observation log gets one `http` event."""
+    """Send one request with urllib and log it as an `http` event.
+
+    An error status is returned, not raised; a request with no answer raises `NetworkError`."""
     sent = dict(headers or {})
     data = body
     if json_body is not None:
@@ -207,7 +194,7 @@ def http(
 
 
 def _open(opener: Any, request: urllib.request.Request, timeout_s: float) -> Response:
-    """`opener(request)`, read whole, with an HTTP error status returned as a `Response`."""
+    """Return `opener(request)` read whole, an HTTP error status included."""
     try:
         with opener(request, timeout=timeout_s) as raw:
             return Response(raw.status, {k.lower(): v for k, v in raw.headers.items()}, raw.read())
@@ -226,8 +213,7 @@ def obs_http(
     error: str | None = None,
     **extra: Any,
 ) -> None:
-    """Log one call as `http()` logs it, for a call made some other way (another client, a raw
-    socket). A call with no answer logs its `error` and no `status` at all."""
+    """Log a call made some other way as `http()` logs one; a call with no answer logs `error`."""
     parts = urlsplit(url)
     record: dict[str, Any] = {"method": method, "url": f"{parts.hostname}{parts.path}"}
     record.update(label=label, run=sdk.current_run_id(), **extra)
@@ -247,8 +233,7 @@ def stripe(method: str, path: str, form: dict[str, Any] | None = None, **kw: Any
 
 
 def slack(method: str, *, label: str | None = None, **params: Any) -> dict[str, Any]:
-    """A Slack Web API call. Slack answers errors at 200 with `ok: false`, so this returns the
-    document and leaves `ok` to the caller."""
+    """Call the Slack Web API and return the document, leaving `ok: false` to the caller."""
     headers = {"Authorization": f"Bearer {key('SLACK_BOT_TOKEN')}"}
     url = f"{base('slack')}/api/{method}"
     resp = http("POST", url, json_body=params, headers=headers, label=label)
@@ -265,8 +250,7 @@ def anthropic(
     label: str | None = None,
     metadata: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """One Anthropic Messages call. An error status raises: an agent has no answer to go on.
-    `metadata` is the call's own, which says who asked and never what."""
+    """Make one Anthropic Messages call; an error status raises."""
     body: dict[str, Any] = {
         "model": "claude-sonnet-5",
         "max_tokens": max_tokens,
@@ -294,9 +278,8 @@ def text_of(message: dict[str, Any]) -> str:
 
 # -- a service that delivers its own inbound calls -------------------------------------------------
 #
-# A webhook consumer or an endpoint serves on loopback and, standing in for its caller (a helpdesk,
-# Slack, Stripe), delivers each inbound call to itself. An inbound call is not the agent's egress,
-# so it goes through no proxy: irimi must never see it.
+# A webhook consumer serves on loopback and delivers each inbound call to itself, in place of its
+# caller. An inbound call is not the agent's egress, so it goes through no proxy.
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -328,12 +311,10 @@ def serve(handler: type[BaseHTTPRequestHandler]) -> Iterator[int]:
 
 @contextlib.contextmanager
 def lookup_gateway() -> Iterator[None]:
-    """When `LOOKUP_REFUSED_ENV` is set and irimi named a control endpoint, reach it through a
-    gateway for the block, as a deploy that fronts irimi with a proxy of its own may: every post is
-    forwarded and answered as irimi answered it, and a read tool's lookup of its recorded result
-    is answered 502, the gateway knowing no such route. So in a replay the lookup fails while
-    the run's start, its end and its tool calls are still recorded (a failed lookup is a miss,
-    warned once, and the tool runs for real). Otherwise the block runs as it is."""
+    """Reach the control endpoint through a gateway that refuses recorded lookups, if asked to.
+
+    With `LOOKUP_REFUSED_ENV` set, every post is forwarded but a read tool's lookup gets a 502, so
+    a replay misses it and runs the tool for real while the run is still recorded."""
     control = os.environ.get(CONTROL_ENV)
     if not os.environ.get(LOOKUP_REFUSED_ENV) or control is None:
         yield
@@ -374,15 +355,10 @@ def lookup_gateway() -> Iterator[None]:
 
 
 def gzip_bomb(head: bytes, line: bytes, size: int, tail: bytes = b"") -> bytes:
-    """gzip of `head`, then `size` bytes of `line` over and over, then `tail`: a body a few hundred
-    KB long that decodes to as much as `size` says. An agent sends one as a request body; the
-    fake internet answers with one.
+    """Return gzip of `head`, `size` bytes of repeated `line`, then `tail`, in a few hundred KB.
 
-    The padding is compressed once per `(line, size)` and spliced between `head` and `tail`: each
-    of the three is a run of raw deflate blocks ending on a byte boundary, none refers back past
-    its own start, and only `tail`'s last block is final. So a second bomb with the same padding
-    costs a CRC over it, not another compression (building one inside a request would take longer
-    than the agent's read timeout). `size` is a whole number of `_bomb_block(line)`s."""
+    The padding is compressed once per `(line, size)` and spliced in as byte-aligned raw deflate
+    blocks, so a second bomb costs only a CRC. `size` is a whole number of `_bomb_block(line)`s."""
     block = _bomb_block(line)
     if size % len(block):
         raise ValueError(f"size must be a multiple of {len(block)}")
@@ -407,13 +383,13 @@ def gzip_bomb(head: bytes, line: bytes, size: int, tail: bytes = b"") -> bytes:
 
 
 def _bomb_block(line: bytes) -> bytes:
-    """About a MiB of `line`, whole lines, the unit a bomb's padding is built of."""
+    """Return about a MiB of whole `line`s, the unit a bomb's padding is built of."""
     return line * max(1, (1024 * 1024) // len(line))
 
 
 @functools.cache
 def _bomb_padding(line: bytes, size: int) -> bytes:
-    """`size` bytes of `line` as raw deflate blocks, none of them final, ending byte-aligned."""
+    """Return `size` bytes of `line` as raw deflate blocks, none final, ending byte-aligned."""
     block = _bomb_block(line)
     deflater = zlib.compressobj(9, zlib.DEFLATED, -zlib.MAX_WBITS)
     parts = [deflater.compress(block) for _ in range(size // len(block))]
@@ -421,8 +397,7 @@ def _bomb_padding(line: bytes, size: int) -> bytes:
 
 
 def deliver(port: int, path: str, body: bytes, headers: dict[str, str] | None = None) -> Response:
-    """POST one inbound call to our own server on `port`, through no proxy. It is not logged:
-    the observation log's `http` events are the agent's egress."""
+    """POST one inbound call to our own server on `port`, through no proxy and unlogged."""
     sent = {"Content-Type": "application/json", **(headers or {})}
     request = urllib.request.Request(f"http://127.0.0.1:{port}{path}", body, sent, method="POST")
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))

@@ -81,7 +81,7 @@ WORKFLOW = Workflow(
         "own_thread": Scenario(
             ("own_thread",),
             setup=_workspace,
-            doc="open a top-level message, reply under its minted ts, read that thread (#52)",
+            doc="open a top-level message, reply under its minted ts, read that thread",
         ),
         "post_fixture_missing": Scenario(
             ("own_thread",),
@@ -95,30 +95,30 @@ WORKFLOW = Workflow(
             ("channel_by_name",),
             env={"SLACK_POST_CHANNEL": "#ops"},
             setup=_workspace,
-            doc="post to #ops by name: not probed by L3, and read back by the echoed name (#44)",
+            doc="post to #ops by name: not checked, and read back by the echoed name",
         ),
         "missing_scope": Scenario(
             ("missing_scope",),
             setup=_no_chat_write,
             diverges=True,
-            doc="no chat:write: Slack refuses the post, shadow fakes it (L3 cannot see scopes)",
+            doc="no chat:write: Slack refuses the post, shadow fakes it (no check sees scopes)",
         ),
         "archived_channel": Scenario(
             ("archived_channel",),
             setup=_workspace,
-            doc="an archived channel: L3's is_archived agrees with Slack's own refusal",
+            doc="an archived channel: the precondition check agrees with Slack's own refusal",
         ),
         "two_line_answer": Scenario(
             ("mention_in_thread",),
             setup=_answering(TWO_LINES),
             doc="mention_in_thread with a two-line answer: the post's newline, escaped wherever "
-            "irimi prints it (#72, #79)",
+            "irimi prints it",
         ),
         "typed_escape_answer": Scenario(
             ("mention_in_thread",),
             setup=_answering(TYPED_ESCAPE),
             doc="mention_in_thread with an answer holding a typed backslash-n, which prints as "
-            "two_line_answer's newline does, and is not the same post (#79)",
+            "two_line_answer's newline does, and is not the same post",
         ),
         "duplicate_delivery": Scenario(
             ("duplicate_delivery",),

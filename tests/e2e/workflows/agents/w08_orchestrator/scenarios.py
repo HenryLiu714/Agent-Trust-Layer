@@ -1,11 +1,6 @@
-"""W8's scenarios: an internal service irimi has no map for, the same service with one, and a run
-that crosses a service hop.
+"""W8's scenarios: an internal service irimi has no map for, the same service with one, and a hop.
 
-The map is added with `Scenario.extra_maps`, beside the shipped maps, and not with the overrides
-file: an override may only retarget a service a shipped map already names (`loader.apply_overrides`
-refuses an unknown one), so today a user cannot classify their own internal API without adding a
-map file to irimi's shipped directory. That gap is part of what `with_map` documents.
-"""
+The map comes through `Scenario.extra_maps`: an override may only retarget a shipped service."""
 
 from __future__ import annotations
 
@@ -46,11 +41,10 @@ routes:
       id: rsv_
 """
 
-# A loopback answer target nothing listens on: the discard port, which no test machine serves.
+# A loopback target nothing listens on: the discard port, which no test machine serves.
 DOWN_TARGET = "http://127.0.0.1:9"
-# The same map with the reservation delegated to `DOWN_TARGET`: irimi cannot reach it, answers the
-# agent 502 itself and says the write went unanswered, a write `irimi compare` compares as
-# its summary prints it.
+# The same map with the reservation sent to `DOWN_TARGET`, which irimi cannot reach, so it answers
+# the agent 502 itself.
 TARGET_DOWN_MAP = SUBAGENT_MAP.replace(
     "    operation: reservations.create\n",
     f"    operation: reservations.create\n    target: {DOWN_TARGET}\n",
@@ -134,28 +128,28 @@ WORKFLOW = Workflow(
             setup=_world,
             extra_maps={"subagent.yaml": SUBAGENT_MAP},
             doc="nested_runs with tools: the sub-agent's read tool and the orchestrator's write "
-            "tool each land in their own parent's run (#76)",
+            "tool each land in their own parent's run",
         ),
         "target_down": Scenario(
             (),
             setup=_world,
             extra_maps={"subagent.yaml": TARGET_DOWN_MAP},
-            doc="with_map with the reservation delegated to an answer target nothing listens on: "
-            "irimi answers 502 and the write goes unanswered (#16, #79)",
+            doc="with_map with the reservation sent to a target nothing listens on: "
+            "irimi answers 502 and the write goes unanswered",
         ),
         "target_down_tools": Scenario(
             ("--record",),
             setup=_world,
             extra_maps={"subagent.yaml": TARGET_DOWN_MAP},
-            doc="target_down with the decision recorded through its write tool's stand-in: the "
-            "closing lines say the tool write did not happen either (#121)",
+            doc="target_down with the decision recorded through its write tool's fake: the "
+            "closing lines say the tool write did not happen either",
         ),
         "nested_write": Scenario(
             ("--runs", "2", "--nested-reserve"),
             setup=_world,
             extra_maps={"subagent.yaml": SUBAGENT_MAP},
             doc="nested_runs with the reservation made by a nested trigger: its write is its "
-            "parent run's, as `irimi compare` shows it (#79)",
+            "parent run's, as `irimi compare` shows it",
         ),
     },
 )

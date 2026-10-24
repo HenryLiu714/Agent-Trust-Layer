@@ -1,17 +1,6 @@
-"""W2 `nightly_reconcile`: a scheduled batch job, one run per invocation, many writes per run.
+"""W2 `nightly_reconcile`: a scheduled batch job with many writes in one run.
 
-A cron entry starts it with a date. It pages through every Stripe charge, compares each with the
-local SQLite ledger, and for each mismatch tags the Stripe customer (`metadata[reconciled]`) and
-marks the ledger row reconciled. It ends with one Slack summary. This is a plain shadow run at
-volume: the summary has to say what forty writes in one run would have done.
-
-    python -m tests.e2e.workflows.agents.w02_nightly_reconcile.agent --date 2026-09-27 \\
-        [--charges 45] [--mismatches 40] [--datetime-trigger] [--twice] [--refund-then-page]
-
-The ledger is seeded by the agent itself before the run starts (`seed_ledger`), standing in for the
-ledger the nightly job finds in production: one row per charge `ch_N000`..., the first
-`--mismatches` of them off by one cent.
-"""
+It pages every Stripe charge, tags each ledger mismatch in Stripe and SQLite, and posts to Slack."""
 
 from __future__ import annotations
 
@@ -41,7 +30,7 @@ def customer_id(i: int) -> str:
 
 
 def seed_ledger(charges: int, mismatches: int) -> None:
-    """The ledger as the job finds it. Not part of the run: setup, like a restored backup."""
+    """Seed the ledger the job finds; this is setup, like a restored backup, not part of the run."""
     with agentkit.sqlite(LEDGER) as db:
         db.execute(
             "CREATE TABLE IF NOT EXISTS ledger "
@@ -71,7 +60,7 @@ def mark_reconciled(charge: str, date: str) -> dict[str, Any]:
 
 
 def all_charges() -> list[dict[str, Any]]:
-    """Every charge, page by page, newest first, with `starting_after` as Stripe pages."""
+    """Return every charge, page by page, newest first, with `starting_after` as Stripe pages."""
     out: list[dict[str, Any]] = []
     after: str | None = None
     while True:
@@ -106,8 +95,7 @@ def reconcile(date: str) -> int:
 
 
 def refund_then_page(charge: str) -> None:
-    """Refund a charge, then page its refunds from the refund just made: the cursor names an id
-    this run minted, which the real Stripe has never seen."""
+    """Refund a charge, then page its refunds from that refund, an id the real Stripe never saw."""
     refund = stripe("POST", "/v1/refunds", {"charge": charge, "amount": "100"}, label="refund")
     refund_id = (refund.json() or {}).get("id")
     first = stripe("GET", f"/v1/refunds?charge={charge}&limit=1", label="list_refunds")

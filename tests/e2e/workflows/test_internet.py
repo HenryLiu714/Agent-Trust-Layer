@@ -43,10 +43,10 @@ def test_resolving_refuses_every_lookup_of_a_name_it_does_not_serve():
 
 
 def test_resolving_only_serves_the_names_it_is_given_whatever_their_case():
-    """`resolving_only`, the fake internet's resolver taken out of it for a test whose irimi
-    reaches loopback stubs by their real names (`tests/e2e/test_llm_agent_replay.py`): a name
-    given in any case resolves to loopback in any case and with a trailing dot, every other name is
-    refused, and the socket module is restored even when the block raises."""
+    """`resolving_only` resolves its names to loopback in any case, refuses others, and restores.
+
+    It is the fake internet's resolver alone, for a test whose irimi reaches loopback stubs by
+    their real names (`tests/e2e/test_replay_example.py`)."""
     originals = (socket.getaddrinfo, socket.gethostbyname, socket.gethostbyname_ex)
     # The block raises on purpose, to show the socket module is restored all the same.
     with (  # noqa: PT012

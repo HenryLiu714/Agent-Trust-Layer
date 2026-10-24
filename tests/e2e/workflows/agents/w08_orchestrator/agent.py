@@ -1,24 +1,6 @@
-"""W8 `orchestrator`: one run that fans out to sub-agents and to an internal service.
+"""W8 `orchestrator`: one run that fans out to nested sub-agent triggers and an internal service.
 
-`plan_quarter_close()` is the trigger. It calls two sub-agents in-process, each an `@sdk.trigger`
-of its own, which must join the parent run rather than start one:
-
-- `inventory_agent()` asks the internal service `subagent.internal` for stock (`GET /inventory`)
-  and for a price (`POST /quote`: a read spelled as a POST, it prices a basket and changes nothing);
-- `finance_agent()` reads Stripe's recent charges to check there is budget.
-
-The orchestrator then reserves the stock (`POST /reservations`, a write) unless it could not price
-it. The internal service is the point: irimi has no map for it unless the scenario adds one.
-
-With `--record`, the sub-agent reads its reorder policy and the orchestrator records its decision
-in the planning file, each a tool (`@sdk.read_tool` or `@sdk.write_tool`): a tool called inside a
-nested trigger is a call of the run that trigger joined, the parent's. With `--nested-reserve`, a
-third sub-agent, `reservation_agent()`, makes the reservation: a write made inside a nested
-trigger, which is the parent run's own write, as `irimi compare` shows it.
-
-    python -m tests.e2e.workflows.agents.w08_orchestrator.agent [--runs N] [--parent-header]
-        [--record] [--nested-reserve]
-"""
+irimi has no map for the internal service unless a scenario adds one; `POST /quote` is a read."""
 
 from __future__ import annotations
 
@@ -42,8 +24,7 @@ NESTED_RESERVE = False
 
 @observe.read_tool
 def load_reorder_policy() -> dict[str, Any]:
-    """What the sub-agent reads before it plans: the decisions recorded so far, which the bare
-    run's real `record_decision` adds to and the shadow run's stand-in never does."""
+    """Return the count of decisions so far, which only the real `record_decision` adds to."""
     path = agentkit.state_dir() / PLAN_FILE
     return {"decisions_so_far": len(path.read_text().splitlines()) if path.exists() else 0}
 
@@ -60,9 +41,7 @@ def record_decision(decision: dict[str, Any]) -> dict[str, Any]:
 
 
 def _headers(parent_header: bool) -> dict[str, str]:
-    """With `parent_header`, the agent carries its run id to the internal service itself, in a
-    header of its own. irimi strips `Irimi-Run` from every request that leaves it, so this
-    is the only way the service can learn which run called it."""
+    """Return the agent's own run header; irimi strips `Irimi-Run`, so the service sees this."""
     run_id = sdk.current_run_id()
     return {"X-Parent-Run": run_id} if parent_header and run_id else {}
 
@@ -88,7 +67,7 @@ def inventory_agent(parent_header: bool) -> dict[str, Any]:
 
 @observe.trigger(name="finance_agent")
 def finance_agent() -> int:
-    """Recent revenue, in minor units: the budget the reservation is checked against."""
+    """Return recent revenue in minor units, the budget the reservation is checked against."""
     doc = agentkit.stripe("GET", "/v1/charges?limit=10", label="charges").json() or {}
     return sum(c.get("amount", 0) - c.get("amount_refunded", 0) for c in doc.get("data", []))
 
@@ -115,8 +94,7 @@ def plan_quarter_close(parent_header: bool = False) -> dict[str, Any]:
     revenue = finance_agent()
     total = stock["quote"].get("total")
     if not isinstance(total, int):
-        # The branch a shadow run takes when the quote was faked: an L0 echo of the request, with
-        # no `total`, so the orchestrator cannot price the basket and reserves nothing.
+        # A faked quote is an echo of the request with no `total`, so nothing is reserved.
         decision = {"reserved": False, "reason": "no_price"}
     elif total > revenue + BUDGET_MINOR:
         decision = {"reserved": False, "reason": "over_budget", "total": total}

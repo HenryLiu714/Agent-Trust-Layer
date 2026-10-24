@@ -1,22 +1,6 @@
-"""The five universal invariants, over every scenario of every sample workflow.
+"""The five invariants the corpus README lists, over every scenario of every sample workflow.
 
-1. No write reached a fake service under shadow (inverted for a scenario marked `leaks`), and
-   every live answer the agent saw came from a fake service, so that is where a write would land.
-2. No request that reached a fake service carried `Irimi-Run`.
-3. No write tool's real function ran under shadow.
-4. No canary credential reached disk where irimi writes: its home, its working directory, TMPDIR,
-   and a store it was given outside its home. The trace store is under its home, so
-   this is the redaction test across the corpus, of what the agent sends (`CANARIES`) and of what
-   a live read hands back (`SERVED_CANARIES`), and of the start of each, which is what a cut made
-   before redaction leaves of a key.
-5. The agent exited under shadow as it did bare, unless the scenario is marked `diverges`.
-
-A new workflow is picked up by name (`harness.scenario.workflows`), so it is held to these
-without an edit here.
-
-Every scenario runs under `irimi serve` too (`Scenario.serve_flags`), and is held
-to the same five there, and to what serve mode owes each run whose end it took: one
-`--- run <id> ---` block, equal to that run's stored summary.
+Each scenario is held to them under `irimi shadow`, under `irimi serve` and in its replays.
 """
 
 import ast
@@ -41,17 +25,13 @@ from tests.e2e.workflows.harness.scenario import cases, workflows
 
 TESTS = Path(__file__).parent
 CASES = cases()
-# How a pinned bug is marked, the issues that track it in parentheses when there are any.
 # Spelled in two parts so this file's own source never reads as a marker.
 MARKER = "KNOWN" + " BUG"
 MARKER_FORM = re.compile(MARKER + r"(?: \(#\d+(?:, #\d+)*\))?: \S")
-# The marker the corpus used before this one.
 RETIRED_MARKER = "LOOKS" + " WRONG"
-# The scenarios whose runs hold events recorded after their end. Serve prints a run's block
-# as soon as its end is on disk, so an event stored after that is in the run and not in its block.
-# KNOWN BUG (#125): each block says less than its run holds, because W3
-# `task_outlives_trigger`'s task makes its calls after its run has ended, and W7 `hand_off`'s
-# stream, sent inside its run, is recorded after its last chunk, which is after the run's end.
+# Serve prints a run's block once its end is on disk, so an event stored later is not in it.
+# KNOWN BUG (#125): each block says less than its run holds: W3 `task_outlives_trigger`'s task
+# calls after its run ends, and W7 `hand_off`'s stream is recorded after the run's end.
 LATE_EVENTS = {
     ("w03_queue_worker", "task_outlives_trigger"),
     ("w07_streaming_assistant", "hand_off"),
@@ -76,10 +56,10 @@ def test_every_serve_run_keeps_the_universal_invariants(run_workflow, name, scen
 
 @pytest.mark.parametrize(("name", "scenario"), CASES, ids=[f"{n}:{s}" for n, s in CASES])
 def test_every_run_a_serve_ended_prints_its_stored_summary_once(run_workflow, name, scenario):
-    """Serve mode prints a run's summary when its end is on disk, read back from the store:
-    one `--- run <id> ---` block per end irimi took, none for a run that did not end (W10
-    `sigterm_mid_run`, killed) or whose end never reached it (W10's `CONTROL_DOWN`), and each
-    equal to the stored summary of its run. It starts no process run, so none is stored."""
+    """Serve prints one `--- run <id> ---` block per run end it took, equal to the stored summary.
+
+    A run that did not end (W10 `sigterm_mid_run`) or whose end never arrived (W10's
+    `CONTROL_DOWN`) gets no block. Serve stores no process run."""
     serve = run_workflow(name, scenario, "serve")
     reader = serve.stored()
     records = reader.list_runs()
@@ -93,8 +73,7 @@ def test_every_run_a_serve_ended_prints_its_stored_summary_once(run_workflow, na
         if (name, scenario) not in LATE_EVENTS:
             assert block == summary_lines(RunView(stored.record, stored.events), maps), run_id
             continue
-        # The known bug `LATE_EVENTS` names: the block is the run as it stood at its end, every
-        # event that ended by then and none after, while the run itself holds more.
+        # The bug `LATE_EVENTS` names: the block is the run as it stood at its end.
         ended = stored.record.end.ended_at
         assert ended is not None
         before = [e for e in stored.events if _ended_at(e) <= ended]
@@ -103,8 +82,9 @@ def test_every_run_a_serve_ended_prints_its_stored_summary_once(run_workflow, na
 
 
 def ends_taken(result: Result) -> list[str]:
-    """Every run whose end irimi took, once per end: each the SDK ended (`run.end`), but where W10
-    takes the control endpoint away, and each W9 ended by hand, its post answered 204."""
+    """Return each run whose end irimi took: SDK ends, and W9's hand-posted ends answered 204.
+
+    W10's `CONTROL_DOWN` scenarios take the control endpoint away, so irimi takes none."""
     if result.workflow.name == "w10_flaky_upstream" and result.scenario in CONTROL_DOWN:
         return []
     by_hand = [
@@ -129,10 +109,9 @@ def test_every_workflow_has_scenarios_and_a_summary():
 
 
 def test_a_scenario_whose_doc_names_a_known_bug_has_a_known_bug_pin():
-    """A fix that flips a known-bug pin drops the marker in the same PR, the scenario's doc
-    included, so no scenario's doc names a known bug once its pins have stopped saying it. Each
-    scenario whose doc carries the marker is named in a test of its workflow whose docstring
-    carries it too."""
+    """A scenario whose doc carries the marker is named by a test docstring that carries it too.
+
+    So a fix that flips a known-bug pin drops the marker from the scenario's doc as well."""
     stale = []
     for name, wf in workflows().items():
         module = ast.parse((TESTS / f"test_{name}.py").read_text())
@@ -149,9 +128,9 @@ def test_a_scenario_whose_doc_names_a_known_bug_has_a_known_bug_pin():
 
 
 def test_every_known_bug_marker_takes_one_form():
-    """A pinned bug is marked one way across the corpus's code and its README, so a reader can
-    find every one, and see which an issue tracks: the marker, then the issues in parentheses
-    when there are any, then a colon and the bug in one sentence."""
+    """Every pinned-bug marker in the corpus's code and README takes one greppable form.
+
+    The marker, any tracking issues in parentheses, then a colon and the bug in one sentence."""
     found = []
     for path in sorted([*TESTS.rglob("*.py"), TESTS / "README.md"]):
         for number, line in enumerate(path.read_text().splitlines(), 1):
@@ -165,11 +144,11 @@ def test_every_known_bug_marker_takes_one_form():
 @pytest.mark.timeout(600)
 @pytest.mark.parametrize("mode", ["shadow", "serve"])
 def test_the_corpus_gives_every_invariant_something_to_catch(run_workflow, mode):
-    """An invariant nothing exercises passes by default. Each needs at least one scenario whose
-    shadow run, and whose serve run, could have broken it: a write irimi held back, an
-    `Irimi-Run` label irimi had to strip, a write tool irimi's SDK had to stand in for, a
-    credential irimi handled - sent by the agent, and handed back by a live read - and an escape
-    the fake services did see."""
+    """Each invariant has at least one scenario, in shadow and in serve, that could break it.
+
+    An invariant nothing exercises passes by default: so the corpus holds a held-back write, a
+    stripped `Irimi-Run` label, a write tool's fake, a credential sent and one handed back by a
+    live read, and an escape the fake services saw."""
     runs = [
         (run_workflow(name, scenario, "bare"), run_workflow(name, scenario, mode))
         for name, scenario in CASES
@@ -222,8 +201,7 @@ def test_the_corpus_gives_every_invariant_something_to_catch(run_workflow, mode)
 
 
 def test_invariant_4_reads_a_store_a_run_was_given_outside_its_home(shared_store_run, tmp_path):
-    """A run recorded into a store runs share keeps it outside its own home: a canary on
-    disk there is still on disk where irimi writes."""
+    """A canary in a shared store outside the run's home is still on disk where irimi writes."""
     shadow = shared_store_run("w01_ticket_triage", "full_refund")
     assert not shadow.store_root().is_relative_to(shadow.home)
     assert check_invariants(shadow) == []
@@ -239,9 +217,9 @@ def test_invariant_4_reads_a_store_a_run_was_given_outside_its_home(shared_store
 def test_invariant_4_finds_the_start_of_a_canary_a_cut_left_on_disk(
     shared_store_run, tmp_path, name
 ):
-    """A key cut before redaction is no longer its shape, so the part the cut kept is stored as it
-    is, and the whole canary is never on disk to be found. Invariant 4 finds its first
-    CANARY_PART characters too, and names a canary found whole once."""
+    """Invariant 4 finds a canary's first `CANARY_PART` characters, and a whole canary once.
+
+    A key cut before redaction loses its shape, so only the part the cut kept reaches disk."""
     shadow = shared_store_run("w01_ticket_triage", "full_refund")
     value = {**CANARIES, **SERVED_CANARIES}[name]
     stored = tmp_path / "events.jsonl"
@@ -289,9 +267,7 @@ REPLAYS = [
 def test_every_replay_holds_the_invariants_and_never_forwards_a_write(
     replayed, name, scenario, env, command
 ):
-    """Invariants 1 to 4 over each replay, and what a replay owes besides: the agent exits as it
-    did when it was recorded, and no write reaches a fake service, whether the recording answered
-    it or shadow mode faked it."""
+    """Each replay keeps invariants 1-4, exits as recorded, and sends no write to a fake service."""
     recorded, replay = replayed(name, scenario, env, command=command)
     assert check_invariants(replay) == []
     assert replay.internet.writes() == []

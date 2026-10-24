@@ -1,11 +1,6 @@
 """W6's scenarios: labelled database and filesystem tools under shadow, and the gaps around them.
 
-Every assertion about a write tool is about which body ran. Under shadow the stand-in runs, so
-the CRM and the state directory must be exactly as seeded. Two scenarios pin gaps rather than
-guarantees: `read_after_write` (no tool overlay, so a read tool cannot see a stood-in write) and
-`unlabeled_write` (a write with no `@sdk.write_tool` label happens for real; the case for a future
-check that flags a production database URL).
-"""
+`read_after_write` and `unlabeled_write` pin gaps: no tool overlay; unlabelled writes are real."""
 
 from __future__ import annotations
 
@@ -30,7 +25,7 @@ def _enrichment(world: World) -> None:
 WORKFLOW = Workflow(
     name="w06_crm_db_agent",
     summary="Tools the proxy cannot see: SQLite and file writes labelled with @sdk.write_tool, "
-    "run as their stand-ins under shadow, plus the gaps (no tool overlay, unlabelled writes).",
+    "replaced by their fakes under shadow, plus the gaps (no tool overlay, unlabelled writes).",
     scenarios={
         "enrich": Scenario(
             ("enrich", "smb"),
@@ -39,11 +34,10 @@ WORKFLOW = Workflow(
         ),
         "read_after_write": Scenario(
             ("read_after_write", "smb"),
-            # Run from a shell that exported a stale `IRIMI_REPLAY_RUN`: `irimi shadow`
-            # removes it from its child, a bare agent's SDK is inert, and a serve agent, not
-            # irimi's child, asks the recording, which an engine that does not replay misses.
+            # A stale exported `IRIMI_REPLAY_RUN`: shadow removes it from its child, a bare SDK
+            # is inert, and a serve agent's lookups miss, as serve does not replay.
             env={"IRIMI_REPLAY_RUN": STALE_REPLAY_RUN},
-            doc="a read tool after a stood-in write sees the old row (no tool overlay), and after "
+            doc="a read tool after a faked write sees the old row (no tool overlay), and after "
             "an unlabelled one, which is real, the new last_seen; run with a stale "
             "IRIMI_REPLAY_RUN exported",
         ),
@@ -60,17 +54,17 @@ WORKFLOW = Workflow(
         ),
         "decoration_errors": Scenario(
             ("decoration_errors",),
-            doc="each of #76's decoration-time TypeErrors, raised before any call",
+            doc="each decoration-time TypeError the tool decorators raise, before any call",
         ),
         "merge_retry": Scenario(
             ("merge_retry",),
-            doc="a write's stand-in raises and the agent, holding the very exception it raised, "
+            doc="a write's fake raises and the agent, holding the very exception it raised, "
             "retries: both calls recorded, the first with its error",
         ),
         "merge_once": Scenario(
             ("merge_once",),
-            doc="merge_retry's merge made right the first time: one call, its stand-in run, which "
-            "`irimi compare` holds the retry against (#79)",
+            doc="merge_retry's merge made right the first time: one call, its fake run, which "
+            "`irimi compare` holds the retry against",
         ),
         "outside_run": Scenario(
             ("outside_run",),
@@ -80,19 +74,19 @@ WORKFLOW = Workflow(
         "stand_in_http": Scenario(
             ("stand_in_http",),
             setup=_enrichment,
-            doc="a write's stand-in makes an HTTP read: an ordinary exchange of the run, labelled",
+            doc="a write's fake makes an HTTP read: an ordinary exchange of the run, labelled",
         ),
         "overlapping_writes": Scenario(
             ("overlapping_writes",),
             doc="two async writes at once, the archive started first and ended last: stored, "
-            "summarised and compared in the order they ended (#79)",
+            "summarised and compared in the order they ended",
         ),
         "async_tools": Scenario(
             ("async_tools",),
             doc="an async read, a sync read that returns a coroutine, left pending while a sync "
             "read finds the segment, and a sync write that returns one: its call ends, and is "
             "recorded, when the coroutine does, after the read tool it awaits; then an async "
-            "static method whose stand-in is a static method in the same class body",
+            "static method whose fake is a static method in the same class body",
         ),
     },
 )

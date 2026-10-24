@@ -1,15 +1,6 @@
-"""What every shadow run leaves in its trace store, over every scenario of every workflow.
+"""What every shadow and serve run leaves in its trace store, over every corpus scenario.
 
-`irimi shadow` stores under `$IRIMI_HOME/store`, and the harness gives every run a home of its
-own, so each scenario's store holds that run and nothing else (`Result.stored()`). The promises:
-a run that started irimi stores exactly one process run, with the agent's argv and exit; every
-exchange irimi reported on its terminal is on disk exactly once, and is, field by field, the
-exchange the engine handed the store with its secrets redacted; the store is private and holds no
-half-written line; and a bare run, with no irimi, stores nothing.
-
-Every scenario runs under `irimi serve` too, and the promises that do not depend on
-irimi having launched the agent are held there as well (`MODE_CASES`): no process run is stored,
-and a request or tool call no run names lands in `unattributed/` instead of in it.
+Each run has its own home, so each scenario's store holds that run alone (`Result.stored()`).
 """
 
 import dataclasses
@@ -42,9 +33,8 @@ IDS = [f"{n}:{s}" for n, s in CASES]
 # Every scenario under `irimi shadow -- <cmd>`, and every one that runs under serve mode.
 MODE_CASES = [(n, s, mode) for mode in ("shadow", "serve") for n, s in CASES]
 MODE_IDS = [f"{n}:{s}:{m}" for n, s, m in MODE_CASES]
-# The workflows whose agents are plain scripts, with no `@sdk.trigger` and no `sdk.run`: they send
-# no `Irimi-Run`, so every exchange they make lands in the process run. W11 was one until each of
-# its escapes became an `sdk.run`.
+# The workflows whose agents are plain scripts with no trigger or `sdk.run`: they send no
+# `Irimi-Run`, so every exchange lands in the process run.
 UNLABELLED = ("w09_scope_gauntlet",)
 # W9's scenarios that do the SDK's job by hand, posting runs to the control endpoint.
 BY_HAND_SCENARIOS = {
@@ -54,9 +44,8 @@ BY_HAND_SCENARIOS = {
 # W10's scenarios that take the control endpoint away, so the SDK's posts fail: irimi knows
 # each run only by its labelled requests, as the `header` run the first of them made.
 RECORD_LOST = {("w10_flaky_upstream", s) for s in CONTROL_DOWN}
-# The scenarios whose runs, but the process run, are all ones the SDK started: every
-# scenario of every workflow that uses the SDK, but those whose SDK cannot reach irimi, and W9's
-# by hand.
+# The scenarios whose runs, but the process run, are all ones the SDK started (or W9 posted by
+# hand): every SDK workflow's, but those whose SDK cannot reach irimi.
 SDK_RUN_SCENARIOS = {
     (n, s) for n, s in CASES if n not in UNLABELLED and (n, s) not in RECORD_LOST
 } | BY_HAND_SCENARIOS
@@ -72,8 +61,7 @@ RUN_ID = re.compile(r"[0-9a-f]{16}")
 
 
 def started(result: Result) -> bool:
-    """irimi printed its banner, `irimi shadow`'s or serve's: its engine ran, so it had
-    opened its store."""
+    """Return whether irimi printed its banner, so its engine ran and opened its store."""
     return any(
         line.startswith(("irimi shadow · run ", "irimi serve · run: "))
         and " · listening on " in line
@@ -82,17 +70,16 @@ def started(result: Result) -> bool:
 
 
 def is_quiet(result: Result) -> bool:
-    """The run was given `--quiet`, so irimi printed no line per exchange or tool call."""
+    """Return whether the run was given `--quiet`, so irimi printed no exchange or tool lines."""
     scenario = result.workflow.scenarios[result.scenario]
     flags = scenario.serve_flags if result.mode == "serve" else scenario.shadow_flags
     return "--quiet" in (flags or ())
 
 
 def reported(result: Result) -> list[str]:
-    """irimi's per-exchange lines, with the one secret the corpus puts in one - W4's incoming
-    webhook path, which the terminal still prints - swapped for the placeholder the store
-    holds instead. Under `--quiet`, which prints none, the lines of the exchanges the engine
-    reported."""
+    """Return irimi's exchange lines, W4's webhook path swapped for the store's placeholder.
+
+    Under `--quiet`, which prints none, the lines of the exchanges the engine reported."""
     lines = result.exchange_lines()
     if is_quiet(result):
         assert lines == [], lines
@@ -133,9 +120,9 @@ def test_every_shadow_run_stores_one_process_run_with_its_argv_and_exit(
 
 @pytest.mark.parametrize(("name", "scenario"), CASES, ids=IDS)
 def test_every_exchange_irimi_reported_is_stored_exactly_once(run_workflow, name, scenario):
-    """Across all of the process's runs: each stored exchange prints as one of irimi's own lines,
-    and each telemetry line is one `TelemetrySeen` for its host. Order is compared within nothing,
-    because the runs of W3 interleave freely."""
+    """Each stored exchange prints as one of irimi's lines, and each telemetry line is stored once.
+
+    Compared unordered, because W3's runs interleave freely."""
     shadow = run_workflow(name, scenario, "shadow")
     events = shadow.stored_events()
     lines = reported(shadow)
@@ -149,16 +136,11 @@ def test_every_exchange_irimi_reported_is_stored_exactly_once(run_workflow, name
 def test_every_stored_event_is_the_exchange_irimi_handed_its_store_redacted(
     run_workflow, name, scenario, mode
 ):
-    """The store against the stream, over the whole corpus. The engine handed its store exactly the
-    exchanges irimi printed, the same objects in the same order. Run by run, in `seq` order, each
-    stored event is one of them: an exchange equal to itself after `redact.redact_exchange`,
-    compared over every field of `Exchange`, and telemetry reduced to its host and time. No
-    corpus run names an id the store refuses, so nothing is unattributed but the tool call W9's
-    `control_hazards` posts there by hand.
+    """Each stored event, run by run in `seq` order, is the event irimi handed its store, redacted.
 
-    A tool call the control endpoint handed the store is in its run's order among them,
-    stored with its args, result and error redacted. Under serve mode what no
-    run names is `unattributed`, so there it is no exception."""
+    The store gets exactly the exchanges irimi printed. Exchanges compare field by field after
+    `redact.redact_exchange`, telemetry by host and time, tool calls with args, result and error
+    redacted. Under shadow only W9's `control_hazards` posts anything to `unattributed`."""
     shadow = run_workflow(name, scenario, mode)
     assert len(shadow.handed) == len(shadow.reported) == len(reported(shadow))
     assert all(a is b for a, b in zip(shadow.handed, shadow.reported, strict=True))
@@ -192,8 +174,7 @@ def test_every_stored_event_is_the_exchange_irimi_handed_its_store_redacted(
 
 
 def redacted_tool_call(call: ToolCall, key: bytes) -> ToolCall:
-    """`call` as the store keeps it: its args, its result and its error redacted, the error's
-    type and message each whole, and only then cut to what a trace keeps."""
+    """Return `call` as the store keeps it: args, result and error redacted whole, then cut."""
     error = call.error
     if error is not None:
         kind, message = (redact.redact_json(text, key) for text in (error.type, error.message))
@@ -209,10 +190,9 @@ def redacted_tool_call(call: ToolCall, key: bytes) -> ToolCall:
 
 @pytest.mark.parametrize(("name", "scenario", "mode"), MODE_CASES, ids=MODE_IDS)
 def test_every_store_is_private_and_holds_no_half_written_line(run_workflow, name, scenario, mode):
-    """What the store keeps is redacted, not public: every directory it made is 0700 and every
-    file 0600, as the CA key is, serve's `serve.lock` included. Every `events.jsonl`
-    ends in a newline - a killed agent (W10 `sigterm_mid_run`) included - so a reader skips no
-    truncated last line, and no temp file of an atomic write is left behind."""
+    """Every store directory is 0700 and file 0600, with no half-written line or temp file left.
+
+    Every `events.jsonl` ends in a newline, a killed agent's (W10 `sigterm_mid_run`) included."""
     shadow = run_workflow(name, scenario, mode)
     root = shadow.home / paths.STORE_DIR_NAME
     if not started(shadow):
@@ -227,16 +207,10 @@ def test_every_store_is_private_and_holds_no_half_written_line(run_workflow, nam
 
 @pytest.mark.parametrize(("name", "scenario", "mode"), MODE_CASES, ids=MODE_IDS)
 def test_every_run_but_the_process_run_is_one_the_sdk_started(run_workflow, name, scenario, mode):
-    """Every SDK workflow's runs are ones the SDK started, and so are W9's by hand:
-    `attribution: "sdk"`, with the trigger, SDK version and start it posted, the engine's version,
-    and no exit code, which is the process run's alone. None is a `header` run, which would mean
-    an exchange named a run whose start never reached irimi.
+    """Every SDK workflow's runs are `sdk` runs with the posted trigger and versions, no exit code.
 
-    A `header` run is still what a run id known only by its events becomes: its record is the one
-    the first of them created, with no trigger and no end, and it started when that event
-    did, so `irimi runs list` sorts it among the runs that started. W10's `CONTROL_DOWN`
-    makes one: its SDK cannot post the run's start, but its requests still name the run. Under serve
-    mode there is no process run, and every run is one of these."""
+    A run id known only by its events (W10's `CONTROL_DOWN`) is a `header` run with no trigger or
+    end, started when its first event did."""
     shadow = run_workflow(name, scenario, mode)
     if not started(shadow):
         return
@@ -261,15 +235,11 @@ def test_every_run_but_the_process_run_is_one_the_sdk_started(run_workflow, name
 def test_every_run_the_agent_logged_is_stored_with_the_outcome_it_logged(
     run_workflow, name, scenario, mode
 ):
-    """The SDK end to end: the runs the agent saw are the runs irimi stored. Each `run.start`
-    the corpus logged, with the real run id, is one `sdk` run with that trigger name, and no `sdk`
-    run is stored that the agent did not log, but W9's by hand. Each `run.end` is that run's
-    outcome, its error stored under the exception's `module.qualname` where the log has the class
-    name alone. A run the agent logged no end for - W10 `sigterm_mid_run`, killed - is stored with
-    no outcome: incomplete. A run whose SDK could not reach irimi (`RECORD_LOST`) is the `header`
-    run its requests made. Every scenario of an SDK workflow logs a run, but `NO_RUN_SCENARIOS`, so
-    this check is never met by a scenario that silently stopped starting them. The same holds under
-    serve mode, whose agent irimi did not start."""
+    """The runs the agent logged are the `sdk` runs irimi stored, each with its logged outcome.
+
+    Errors are stored by `module.qualname`; a run with no logged end (W10 `sigterm_mid_run`) has
+    none, and `RECORD_LOST` runs are `header` runs. Every SDK scenario logs a run, but
+    `NO_RUN_SCENARIOS`, so a scenario that stops starting runs fails."""
     shadow = run_workflow(name, scenario, mode)
     if not started(shadow):
         assert shadow.events("run.start") == []
@@ -281,8 +251,7 @@ def test_every_run_the_agent_logged_is_stored_with_the_outcome_it_logged(
         return
     if name not in UNLABELLED:
         assert bool(logged) is ((name, scenario) not in NO_RUN_SCENARIOS), logged
-    # Minted lower-case: an id that differed from another only in case would be filed in
-    # `unattributed/` on a case-insensitive filesystem.
+    # Minted lower-case: on a case-insensitive filesystem, ids differing only in case would clash.
     assert all(RUN_ID.fullmatch(run_id) for run_id in logged), logged
     if (name, scenario) in RECORD_LOST:
         headers = {r.run_id for r in shadow.stored().list_runs() if r.attribution == "header"}
@@ -309,14 +278,11 @@ def test_every_run_the_agent_logged_is_stored_with_the_outcome_it_logged(
 def test_every_request_a_run_sent_through_irimi_is_stored_in_that_run(
     run_workflow, name, scenario, mode
 ):
-    """Run attribution end to end: the SDK labels each request a run sends to irimi with the run's
-    id, read as the request is sent, so irimi stores it in that run, whichever client, thread, task
-    or pooled connection sent it. Each call the agent logged inside a run (its `run`, the context's
-    id when it was made) is one of that run's stored exchanges, by method and host, or its
-    telemetry, by host: a run also holds irimi's own L3 reads, so this is containment, not equality.
-    A call that belonged to no run is not checked here (W3 `unpropagated_thread` pins where it
-    lands), nor a `leaks` scenario, whose call went around irimi on purpose (W11). The SDK labels
-    the same way under serve mode."""
+    """Each call the agent logged inside a run is stored in that run, whatever client sent it.
+
+    Matched by method and host, or by host for telemetry. A run also holds irimi's check reads, so
+    this is containment. Calls in no run (W3 `unpropagated_thread`) and `leaks` scenarios are
+    skipped."""
     shadow = run_workflow(name, scenario, mode)
     if not started(shadow) or shadow.workflow.scenarios[scenario].leaks:
         return
@@ -345,20 +311,11 @@ def test_every_request_a_run_sent_through_irimi_is_stored_in_that_run(
 def test_every_tool_call_the_agent_made_is_stored_in_its_run_and_printed_once(
     run_workflow, name, scenario, mode
 ):
-    """The tool decorators end to end: what irimi recorded is what the agent did. The corpus's `sdk`
-    wraps each tool's real function and stand-in to log which ran, in which run (`tool` events),
-    and that log is the witness the store is checked against: under shadow, each run holds exactly
-    the calls the agent logged in it, by name, kind and which body ran, a call made in no run held
-    by the process run (`IRIMI_RUN`), or under serve mode by `unattributed`; none is lost,
-    duplicated, mixed between runs or left unattributed under shadow, whatever thread or task made
-    it. Compared as counts per run, not in order: a
-    call is stored when it ends and logged when its body starts, so a tool awaited inside another's
-    coroutine (W6 `async_tools`) is logged second and stored first. irimi printed one line per
-    stored call, and none for anything else.
+    """Each run stores exactly the tool calls the agent logged in it, and irimi prints each once.
 
-    W9's control scenarios post tool calls by hand, not through a tool, so only the lines are
-    checked there. Bare, the SDK is inert: every tool ran its real function, irimi printed nothing
-    and stored nothing (`test_a_bare_run_stores_nothing`)."""
+    `observe.py` logs which body ran in which run; calls in no run go to the process run, or to
+    `unattributed` under serve. Compared as counts: a call is logged when it starts and stored when
+    it ends (W6 `async_tools`). W9's hand-posted calls check only the lines."""
     bare = run_workflow(name, scenario, "bare")
     assert bare.tool_call_lines() == []
     assert {ran for _, ran in bare.tools()} <= {"real"}
@@ -381,24 +338,21 @@ def test_every_tool_call_the_agent_made_is_stored_in_its_run_and_printed_once(
 
 @pytest.mark.parametrize(("name", "scenario"), CASES, ids=IDS)
 def test_a_bare_run_stores_nothing(run_workflow, name, scenario):
-    """No irimi, no store: the bare baseline leaves its `IRIMI_HOME` without a store or a
-    redaction key, whatever the agent's SDK stand-in does."""
+    """A bare run leaves its `IRIMI_HOME` with no store and no redaction key."""
     bare = run_workflow(name, scenario, "bare")
     assert bare.handed == bare.reported == []
     assert not (bare.home / paths.STORE_DIR_NAME).exists()
     assert not (bare.home / paths.REDACT_KEY_NAME).exists()
 
 
-# The `UNLABELLED` workflows' every exchange lands in the process run, so the process run's stored
-# summary is the one `irimi shadow` printed. W9's control scenarios are the exception: they
-# label their reads with the runs they post.
+# An `UNLABELLED` workflow's exchanges all land in the process run, so its stored summary is the
+# live one; W9's control scenarios label their reads with the runs they post.
 UNLABELLED_CASES = [(n, s) for n, s in CASES if n in UNLABELLED and (n, s) not in SDK_RUN_SCENARIOS]
 ELAPSED = re.compile(r" · \d+\.\ds$")
 
 
 def no_elapsed(lines: list[str]) -> list[str]:
-    """The live summary times the child and a stored one its run record: the one field that may
-    differ."""
+    """Return `lines` with the elapsed time masked, the one field live and stored may differ in."""
     return [ELAPSED.sub(" · <elapsed>", line) for line in lines]
 
 
@@ -408,8 +362,7 @@ WHOLE_PROCESS = " (whole process) · "
 
 
 def process_part(live: list[str]) -> list[str]:
-    """A live summary without what only the live one prints: its header's `(whole process)` and
-    the lines naming the SDK runs after the totals."""
+    """Return `live` without its `(whole process)` header clause and the SDK run lines after it."""
     end = next(i for i, line in enumerate(live) if TOTALS.match(line)) + 1
     return [live[0].replace(WHOLE_PROCESS, " · ", 1), *live[1:end]]
 
@@ -420,14 +373,10 @@ def process_part(live: list[str]) -> list[str]:
 def test_an_unlabelled_agent_s_process_run_prints_the_summary_irimi_shadow_printed(
     run_workflow, name, scenario
 ):
-    """A stored run prints what irimi printed live, on the corpus, through the real CLI: `irimi runs
-    show <process run>` ends in the block `irimi shadow` printed on exit, line for line but for the
-    elapsed seconds. W9 covers L0 and L1 fakes, idempotent replays and conflicts, unreadable bodies
-    and an engine read with no response.
+    """`runs show` of an unlabelled agent's process run ends in the summary `irimi shadow` printed.
 
-    For an agent that labels its runs the live summary is still the process's, every exchange the
-    proxy saw whatever run it named, while each stored run holds its own: the two agree only
-    here, where the process run is the only run (docs/trace-format.md, "Reading a run back")."""
+    Line for line but for the elapsed time. W9 covers echo and fixture answers, retries and
+    conflicts, unreadable bodies and a check read with no response."""
     shadow = run_workflow(name, scenario, "shadow")
     live = shadow.summary()
     assert live, "irimi printed no summary"
@@ -441,21 +390,11 @@ def test_an_unlabelled_agent_s_process_run_prints_the_summary_irimi_shadow_print
 def test_every_run_the_process_stored_prints_the_summary_irimi_shadow_printed(
     run_workflow, name, scenario
 ):
-    """A stored run prints what irimi printed live, for an agent that labels its runs. The live
-    summary is the process's: every exchange the proxy saw, whatever run each named. Its runs
-    together hold the same events, so a summary over all of them, the unattributed ones included, is
-    the block `irimi shadow` printed, line for line but for the elapsed seconds and what only the
-    live block says: that it covers the whole process, and which SDK runs were in it.
+    """A summary over all of a process's stored runs is the summary `irimi shadow` printed live.
 
-    The events are put back in the order the engine reported them, the order they ended in, since
-    a read hangs under the write before it. W4's webhook post is the case this caught: its stored
-    path is a placeholder that no route matches, and its line lost its `human:` sentence until the
-    route was found by its stored operation instead.
-
-    The tool calls too, each a line under the writes when its stand-in ran: W1's reply, W2's
-    forty ledger marks and W6's six database and file writes. They are left as stored, run by run
-    and each run's in `seq` order: the summary prints them in the order they ended, as the live
-    one did, whatever order their posts reached irimi in."""
+    Exchanges are put back in the order they ended, since a read hangs under the write before it;
+    tool calls stay as stored, since the summary orders them by end. W4's webhook post checks a
+    route found by its stored operation."""
     shadow = run_workflow(name, scenario, "shadow")
     live = shadow.summary()
     if not live:
@@ -479,11 +418,7 @@ def test_every_run_the_process_stored_prints_the_summary_irimi_shadow_printed(
 def test_every_exchange_and_tool_call_a_serve_reported_is_stored_once_in_its_run(
     run_workflow, name, scenario
 ):
-    """Under `irimi serve` what irimi printed as it happened is what it stored:
-    each exchange line and each tool-call line once, and each event in the run that named it, or
-    in `unattributed/` when none did. No process run holds the rest. Which run holds each tool
-    call and each request is checked against the agent's own log by the checks above, run in
-    both modes."""
+    """Serve stores each line it printed once, in the run that named it or in `unattributed/`."""
     serve = run_workflow(name, scenario, "serve")
     reader = serve.stored()
     ids = [record.run_id for record in reader.list_runs()] + [trace.UNATTRIBUTED]
@@ -499,9 +434,9 @@ def test_every_exchange_and_tool_call_a_serve_reported_is_stored_once_in_its_run
 
 @pytest.mark.parametrize(("name", "scenario"), CASES, ids=IDS)
 def test_a_serve_stores_no_process_run_and_drops_nothing(run_workflow, name, scenario):
-    """Serve mode starts no process run: every run it stored is one a request or the SDK
-    named, decided in shadow mode, and none dropped an event. A serve that refused to start (W8
-    `map_refused`) opened no store."""
+    """Serve stores only `sdk` and `header` shadow runs, none dropping an event, and no process run.
+
+    A serve that refused to start (W8 `map_refused`) opens no store."""
     serve = run_workflow(name, scenario, "serve")
     if not started(serve):
         assert not (serve.home / paths.STORE_DIR_NAME).exists()
@@ -515,14 +450,9 @@ def test_a_serve_stores_no_process_run_and_drops_nothing(run_workflow, name, sce
 
 @pytest.mark.parametrize(("name", "scenario"), CASES, ids=IDS)
 def test_all_of_a_serves_runs_together_are_what_it_reported_live(run_workflow, name, scenario):
-    """A stored run prints what irimi printed live, under serve mode: "all of a process's runs
-    together (unattributed included, in the order the exchanges ended) are the live block". Serve
-    prints no closing block, so the live block is the summary of what it reported as it happened:
-    every exchange it printed a line for, in the order they came, and every tool call the control
-    endpoint passed on, which the summary prints in the order they ended, so the stored ones are
-    left run by run. That is the summary over every stored run and `unattributed/` together:
-    redacting and storing them changed nothing a summary shows, and no event was lost between
-    runs."""
+    """A summary over all of a serve's stored runs equals the summary of what it reported live.
+
+    So redacting and storing changes nothing a summary shows, and no event is lost between runs."""
     serve = run_workflow(name, scenario, "serve")
     if not started(serve):
         return
@@ -550,17 +480,11 @@ def test_all_of_a_serves_runs_together_are_what_it_reported_live(run_workflow, n
 def test_irimi_compare_of_every_stored_run_with_itself_is_its_summary_s_writes(
     run_workflow, name, scenario, mode
 ):
-    """Compare over the whole corpus, through the real CLI: `irimi compare <r> <r>`, for every run
-    the store holds and `unattributed`, prints its header, one row for each write line `irimi runs
-    show <r>`'s summary printed, and the totals, or the totals alone for a run that wrote nothing.
-    Each side is named as `runs show` names the run.
+    """`irimi compare r r` prints one `=` row per write line `runs show r`'s summary printed.
 
-    Each row is `=`, but for a write whose body was cut when stored (W9 `bombs`): irimi never
-    calls a cut write the same, not even as itself, so it is a `?` pair whose two lines are its
-    summary line, the totals count it as not compared, and the run exits 1. Every other run exits
-    0. The summary prints a run's HTTP writes and then its tool writes, each in `seq` order;
-    compare prints the two interleaved in `seq` order. So each kind is compared in order, and the
-    totals count both. Under serve mode `unattributed` holds what no run named."""
+    A write whose body was cut when stored (W9 `bombs`) is a `?` pair counted as not compared,
+    and the run exits 1. Compare interleaves HTTP and tool writes in `seq` order, so each kind is
+    checked in order separately."""
     shadow = run_workflow(name, scenario, mode)
     if not started(shadow):
         return
@@ -621,13 +545,14 @@ def test_irimi_compare_of_every_stored_run_with_itself_is_its_summary_s_writes(
         ], run_id
 
 
+# It reads every scenario's stored runs in `mode`: over 120 s on a loaded worker.
+@pytest.mark.timeout(600)
 @pytest.mark.parametrize("mode", ["shadow", "serve"])
 def test_the_corpus_gives_irimi_compare_s_universal_check_something_to_catch(run_workflow, mode):
-    """The check above passes by default over runs that wrote nothing. Across the corpus it must
-    meet, in each mode: a write irimi answered, one it says would fail, a write tool stood in, a
-    write whose body was cut when stored, a run whose HTTP and tool writes interleave in `seq`
-    order (so compare's order is not the summary's), and under serve mode, where what no run
-    names is `unattributed`, `unattributed` holding a write."""
+    """The corpus gives the compare check above every kind of write to meet, in each mode.
+
+    A faked write, one that would fail, a write tool's fake, a cut body, interleaved HTTP and tool
+    writes, and under serve a write in `unattributed`."""
     seen: Counter[str] = Counter()
     for name, scenario in CASES:
         result = run_workflow(name, scenario, mode)

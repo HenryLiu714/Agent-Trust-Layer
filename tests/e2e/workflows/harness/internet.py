@@ -1,26 +1,6 @@
-"""The fake internet: one loopback server that answers for every host a sample workflow talks to.
+"""The fake internet: one loopback server answering for every host a sample workflow calls.
 
-A workflow's agent calls the real host names (`api.stripe.com`, `slack.com`, `api.anthropic.com`),
-so irimi classifies them with its real, shipped maps. Only the address those names resolve to is
-fake, and it is fake in exactly one place: `FakeInternet.resolving()` patches the resolver in the
-process that runs irimi, so mitmproxy's upstream connection and irimi's own L3 read both land here.
-It patches all three of the socket module's name lookups (`getaddrinfo`, `gethostbyname`,
-`gethostbyname_ex`) under one rule, so no path in that process resolves a real name. Any name the
-fake internet does not serve fails to resolve, so a harness run can never reach the real internet.
-
-The agent itself never resolves these names:
-
-- under `irimi shadow` it sends every request to irimi's proxy (the names are not in `NO_PROXY`);
-- in a bare run the harness points `HTTP_PROXY` at this server, which accepts the absolute-form
-  request a client sends to a proxy and answers it as the host it names.
-
-Every request is recorded in `log` before it is answered. A write that reaches `log` under shadow
-is a write that escaped, and that is the first universal invariant (`run.check_invariants`).
-
-What the name patch cannot stop: a client that dials an IP literal need not ask the resolver
-(asyncio short-cuts literals), so it is refused here only when it does ask. Nothing in a workflow
-dials a public IP; a scenario that needs one needs a guard of its own.
-"""
+Agents call real host names, so irimi uses its shipped maps; only name resolution is fake."""
 
 from __future__ import annotations
 
@@ -50,42 +30,35 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 STALL_S = 2.0
 # How long `reset-stream` waits between its first chunk and the reset.
 RESET_AFTER_CHUNK_S = 0.5
-# The longest a held stream (`Resp.hold`) waits before it ends anyway, so a scenario whose release
-# never comes fails on what the agent saw rather than hanging the corpus.
+# The longest a held stream (`Resp.hold`) waits, so a release that never comes fails, not hangs.
 HOLD_TIMEOUT_S = 30.0
 # The listen backlog. socketserver's default of 5 drops connections from W3's concurrent runs on
 # macOS, where a dropped SYN is retried a second later and reads as a flaky timeout.
 BACKLOG = 128
-# What a bomb fault decodes to: `BOMB_HEAD`, then a GiB of 16-byte lines, far past the most
-# irimi decodes of any body, the same in every codec. Short lines compress about 500 to 1 and cost
-# redaction little per byte; a GiB of bare newlines compresses twice as well, and costs redaction
-# seven times as much. Each is built once, the first time it is asked for, so a scenario builds
-# its own in `setup`: built on the request it answers, it took longer than the agent's timeout.
+# What a bomb fault decodes to: `BOMB_HEAD`, then a GiB of 16-byte lines, far past irimi's decoding
+# cap. Short lines keep redaction cheap. A scenario builds its bomb in `setup`, because building it
+# on the request takes longer than the agent's timeout.
 BOMB_DECODED_BYTES = 1024 * 1024 * 1024
 BOMB_LINE = b" " * 15 + b"\n"
-# A served credential, a canary like `services.CLIENT_SECRET_CANARY` (`run.SERVED_CANARIES`): a
-# body irimi decodes only in part is still recorded, and must reach disk redacted or not at all.
+# A served canary (`invariants.SERVED_CANARIES`): a body irimi decodes only in part is still
+# recorded, and must reach disk redacted or not at all.
 BOMB_SECRET = credentials.BOMB_SECRET
-# How every bomb a fault answers with starts: a JSON document, its credential on a line of its
-# own. Redaction reads the start of a document line by line, as it is not JSON, and no shape gives
-# that line away: only its key says it is a secret.
+# How every bomb starts: a JSON document with its credential on a line of its own, which only its
+# key marks as a secret, since redaction reads a cut document line by line.
 BOMB_HEAD = b'{\n  "object": "export",\n  "client_secret": "' + BOMB_SECRET.encode() + b'",\n'
-# What `gzip-padded` puts after the service's own answer: 128 MiB of blanks, no line break, so
-# the decoded body is the answer and whitespace, which JSON reads as nothing.
+# What `gzip-padded` puts after the service's answer: 128 MiB of blanks, which JSON ignores.
 PADDED_LINE = b" "
 PADDED_BYTES = 128 * 1024 * 1024
 # The answers a bomb fault gives, by its action: the `Content-Encoding` each is sent in.
 BOMB_ENCODINGS = {"gzip-bomb": "gzip", "br-bomb": "br", "zstd-bomb": "zstd"}
-# The most a fake service decodes of a gzip request body: one that decodes past it is refused 413
-# by the fake internet, as a server refuses a body too large, and reads as empty. So an agent's
-# own bomb never costs the harness more than this, bare or forwarded live.
+# The most a fake service decodes of a gzip request body; past it the request is refused 413, so
+# an agent's own bomb never costs the harness more than this.
 MAX_REQUEST_DECODED = 16 * 1024 * 1024
 
 
 @functools.cache
 def bomb(encoding: str) -> bytes:
-    """`BOMB_HEAD` and `BOMB_DECODED_BYTES` of `BOMB_LINE`, in `encoding`: 2 MiB of gzip, or a
-    few hundred KB of br or zstd. Built once per encoding."""
+    """Return `BOMB_HEAD` plus `BOMB_DECODED_BYTES` of `BOMB_LINE`, compressed in `encoding`."""
     if encoding == "gzip":
         return agentkit.gzip_bomb(BOMB_HEAD, BOMB_LINE, BOMB_DECODED_BYTES)
     block = BOMB_LINE * (1024 * 1024 // len(BOMB_LINE))
@@ -115,8 +88,9 @@ class Req:
 
     @functools.cached_property
     def decoded(self) -> bytes | None:
-        """The body with its gzip undone, up to MAX_REQUEST_DECODED; None when it decodes past
-        that. A gzip body that does not decode is empty, as it always read."""
+        """Return the body with its gzip undone, or None past MAX_REQUEST_DECODED.
+
+        A gzip body that does not decode reads as empty."""
         if self.headers.get("content-encoding") != "gzip":
             return self.body
         inflater = zlib.decompressobj(16 + zlib.MAX_WBITS)
@@ -129,7 +103,7 @@ class Req:
             return b""
 
     def too_big(self) -> bool:
-        """The body decodes past MAX_REQUEST_DECODED: the fake internet refuses it 413."""
+        """Return whether the body decodes past MAX_REQUEST_DECODED, which is refused 413."""
         return self.decoded is None
 
     def text(self) -> str:
@@ -142,7 +116,7 @@ class Req:
             return None
 
     def params(self) -> dict[str, Any]:
-        """The query plus the body's fields, JSON or form, flat. Slack takes either body."""
+        """Return the query plus the body's fields, JSON or form, flat; Slack takes either body."""
         out: dict[str, Any] = dict(self.query)
         doc = self.json()
         if isinstance(doc, dict):
@@ -163,16 +137,15 @@ class Resp:
     # with chunked transfer encoding as a real LLM API frames one.
     chunks: list[bytes] | None = None
     chunk_delay: float = 0.0
-    # A stream whose last chunk waits for this to be set, up to HOLD_TIMEOUT_S: the service
-    # decides when the stream ends, not the clock, so a scenario can end it after something the
-    # agent does (W7 `hand_off`).
+    # A stream whose last chunk waits for this, up to HOLD_TIMEOUT_S, so a scenario can end it
+    # after something the agent does (W7 `hand_off`).
     hold: threading.Event | None = None
 
 
 class Service(Protocol):
-    """A fake service: the hosts it answers for, its answers, and which of its requests are
-    writes. `is_write` is the service's own truth, not irimi's classification: a Slack read is a
-    POST, and an LLM call is a POST that changes nothing."""
+    """A fake service: its hosts, its answers, and which of its requests are writes.
+
+    `is_write` is the service's own truth, not irimi's: a Slack read and an LLM call are POSTs."""
 
     hosts: tuple[str, ...]
 
@@ -185,13 +158,10 @@ class Service(Protocol):
 class Fault:
     """Answer the next `times` matching requests with `action` instead of the service.
 
-    `429`, `500` and `garbage` answer at once; `stall` answers late; `reset` resets the connection
-    before any response; `reset-stream` lets the service answer, sends the headers and the first
-    chunk, and then resets. `gzip-bomb`, `br-bomb` and `zstd-bomb` answer 200 with `bomb()` in
-    that encoding, though the client never asked for one; `gzip-padded` lets the service
-    answer, and sends its JSON gzip-encoded, on a line of its own followed by `PADDED_BYTES` of
-    blanks, which JSON reads as whitespace. A faulted request is still recorded in `log`.
-    """
+    `429`, `500` and `garbage` answer at once; `stall` answers late; `reset` resets before any
+    response; `reset-stream` resets after the first chunk; `*-bomb` answers with `bomb()`;
+    `gzip-padded` gzips the service's answer followed by `PADDED_BYTES` of blanks. A faulted
+    request is still recorded in `log`."""
 
     host: str
     action: str
@@ -243,12 +213,11 @@ class FakeInternet:
         return int(self._server.server_address[1])
 
     def base(self, host: str) -> str:
-        """The base URL an agent is given for `host`: the real name, this server's port."""
+        """Return the base URL an agent is given for `host`: the real name, this server's port."""
         return f"http://{host}:{self.port}"
 
     def resolving(self) -> contextlib.AbstractContextManager[None]:
-        """Resolve every host this fake internet serves to loopback, and refuse every other name,
-        for the duration of the block and in this process only (`resolving_only`)."""
+        """Resolve this fake internet's hosts to loopback and refuse every other name."""
         return resolving_only(self.services)
 
     # -- what happened ---------------------------------------------------------------------
@@ -267,8 +236,7 @@ class FakeInternet:
             return [r for r in self.log if host is None or r.host == host]
 
     def writes(self) -> list[Req]:
-        """Every request the service it reached counts as a write. A request for a host no fake
-        serves counts as one unless its method is safe: an unknown write is still a write."""
+        """Return every request its service counts as a write, and unsafe ones to unserved hosts."""
         with self._lock:
             log = list(self.log)
         return [r for r in log if self._is_write(r)]
@@ -332,21 +300,17 @@ class FakeInternet:
 
 @contextlib.contextmanager
 def resolving_only(served: Iterable[str]) -> Iterator[None]:
-    """Resolve each name in `served` to loopback, and refuse every other name, for the duration of
-    the block and in this process only. The fake internet's resolver, and the one of any test whose
-    irimi reaches loopback stubs by their real names (`tests/e2e/test_llm_agent_replay.py`)."""
-    # One rule for every lookup, so no path through the socket module resolves a real name:
-    # `localhost` and a loopback or unspecified literal go to the real resolver, which
-    # answers them without DNS; a served name is loopback; everything else, a public IP
-    # literal included, is refused.
+    """Resolve each name in `served` to loopback and refuse every other name, in this process."""
+    # One rule for all three socket lookups: loopback literals go to the real resolver, a served
+    # name is loopback, and everything else, a public IP literal included, is refused. A client
+    # that dials an IP literal without asking the resolver is not stopped here.
     real_getaddrinfo = socket.getaddrinfo
     real_gethostbyname = socket.gethostbyname
     real_gethostbyname_ex = socket.gethostbyname_ex
     names = frozenset(name.lower() for name in served)
 
     def route(host: Any) -> bool:
-        """True to pass `host` to the real resolver, False to answer loopback; raises for a
-        name that is not served."""
+        """Return True for the real resolver, False for loopback; raise for an unserved name."""
         name = host.decode() if isinstance(host, bytes) else host
         if not isinstance(name, str) or _is_loopback(name):
             return True  # None, or a type the real function refuses itself
@@ -377,8 +341,7 @@ def resolving_only(served: Iterable[str]) -> Iterator[None]:
 
 
 def _is_loopback(name: str) -> bool:
-    """`localhost`, or a loopback or unspecified address: what irimi binds and dials locally. Any
-    other IP literal is refused like any unserved name, so a public address never resolves."""
+    """Return whether `name` is `localhost` or a loopback or unspecified address."""
     if name.lower() == "localhost":
         return True
     try:
@@ -413,8 +376,8 @@ class _Handler(BaseHTTPRequestHandler):
         return self.rfile.read(length) if length else b""
 
     def _serve(self) -> None:
-        # A request whose body cannot be read is still recorded, without the body: a write that
-        # reached a fake service with a broken body still reached it.
+        # A request whose body cannot be read is still recorded: a write with a broken body
+        # still reached the service.
         try:
             body = self._read_body()
         except (OSError, ValueError):
@@ -465,9 +428,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.write(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
                 self.wfile.flush()
                 if reset_after_first_chunk and i == 0:
-                    # A reset overtakes bytes its peer has not read yet and takes them with it,
-                    # so the chunk is given time to be read first: the fault is "the first chunk,
-                    # then a reset", and a proxy must see both.
+                    # A reset discards bytes the peer has not read, so the chunk gets time to
+                    # arrive first: a proxy must see both the chunk and the reset.
                     time.sleep(RESET_AFTER_CHUNK_S)
                     self._reset()
                     return

@@ -1,14 +1,6 @@
 """W11's scenarios: one escape each, and a control that goes through the proxy.
 
-Every escape that writes is marked `leaks`: under shadow its write really reaches the fake service,
-irimi prints no exchange line for it, and its summary does not count it. That is irimi's documented
-limit ("only traffic sent through this proxy is shadowed"). Once irimi has a check that flags
-traffic bypassing the proxy, each escape's assertion flips from "irimi never saw it" to "irimi
-flagged it".
-`redirected` writes nothing: a read whose redirects lead it off the proxied route, where irimi
-never sees its last hop. `labelled_sidecar` is `loopback_service`'s write made by a write
-tool, whose stand-in runs under shadow: the one escape the agent can close itself.
-"""
+An escape that writes is marked `leaks`: its write reaches the fake service unseen by irimi."""
 
 from __future__ import annotations
 
@@ -55,7 +47,7 @@ def _services(world: World) -> None:
 WORKFLOW = Workflow(
     name="w11_leaky_agent",
     summary="An agent that gets around irimi on purpose: no proxy handler, NO_PROXY=*, a raw "
-    "socket, a loopback sidecar. The cases Phase 4's readiness checks must flag.",
+    "socket, a loopback sidecar: the bypasses irimi's banner warns of.",
     scenarios={
         "proxied": Scenario(("proxied",), setup=_services, doc="control: the refund, faked"),
         "proxyless_client": Scenario(
@@ -91,8 +83,7 @@ WORKFLOW = Workflow(
         "labelled_sidecar": Scenario(
             ("labelled_sidecar",),
             setup=_services,
-            doc="the same sidecar write as a write tool: its stand-in runs, the escape is closed "
-            "(#76)",
+            doc="the same sidecar write as a write tool: its fake runs, the escape is closed",
         ),
     },
 )

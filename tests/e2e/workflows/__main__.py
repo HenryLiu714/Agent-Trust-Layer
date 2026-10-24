@@ -1,14 +1,6 @@
-"""Run a sample workflow by hand.
+"""Run a sample workflow by hand, keyless and offline, and check the invariants.
 
-    uv run python -m tests.e2e.workflows                          # workflows, and where to start
-    uv run python -m tests.e2e.workflows --all                    # every scenario of every one
-    uv run python -m tests.e2e.workflows w09_scope_gauntlet       # one workflow's scenarios
-    uv run python -m tests.e2e.workflows w09_scope_gauntlet verbs # bare, shadow, then serve
-    uv run python -m tests.e2e.workflows w09_scope_gauntlet verbs --mode shadow
-
-Prints what the agent saw per call, what irimi printed, what reached the fake services, and the
-universal invariants. Needs no keys and no network: every host is served by the fake internet.
-"""
+Usage: `python -m tests.e2e.workflows [--all | WORKFLOW [SCENARIO] [--mode MODE]]`."""
 
 from __future__ import annotations
 

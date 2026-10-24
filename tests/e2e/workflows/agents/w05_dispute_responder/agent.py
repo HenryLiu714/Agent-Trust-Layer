@@ -1,26 +1,6 @@
-"""W5 `dispute_responder`: a Stripe webhook consumer that answers disputes.
+"""W5 `dispute_responder`: a signed Stripe webhook consumer; the raw body is the trigger's argument.
 
-Stripe calls the agent at `POST /stripe/webhook`. The agent verifies `Stripe-Signature` and hands
-the raw body to one run, `@sdk.trigger on_event(raw, signature)`: the raw bytes ARE the trigger's
-argument, as they are in any webhook handler that verifies before it parses.
-
-On `charge.dispute.created` it:
-
-1. reads the dispute (`/v1/disputes/{id}`, a route the Stripe map does not name), the charge, the
-   payment intent, whose description names the order and which Stripe returns with its
-   `client_secret`, a credential, and the customer;
-2. asks the model to draft evidence;
-3. tags the customer (`POST /v1/customers/{id}` metadata) and alerts `#disputes` on Slack;
-4. refunds the charge in full when the dispute is under $20, because fighting it costs more.
-
-On `charge.refunded` it does nothing: a refund it issued comes back to it as an event, and an
-idempotent consumer notes it and stops. Every event id is handled once, however often it arrives.
-
-The agent delivers its own events over loopback, through no proxy: an inbound webhook is not the
-agent's egress, and irimi must never see it.
-
-    python -m tests.e2e.workflows.agents.w05_dispute_responder.agent <scenario>
-"""
+It tags, alerts and fights each dispute, or refunds one under $20; each event id is handled once."""
 
 from __future__ import annotations
 
@@ -125,8 +105,8 @@ class _Webhook(agentkit.Handler):
         try:
             outcome = on_event(raw, signature)
         except Exception as exc:
-            # A handler that raised answers 500, which Stripe retries and `main` counts as a
-            # failure. Left to escape, it would drop the connection with no answer.
+            # Answer 500, which Stripe retries and `main` counts as a failure; an escaping
+            # exception would drop the connection with no answer.
             agentkit.obs("handler_failed", error=f"{type(exc).__name__}: {exc}")
             self.reply(500, {"received": False})
             return
@@ -164,7 +144,7 @@ def dispute_created(dispute_id: str) -> dict[str, Any]:
 
 
 def charge_refunded(refund: dict[str, Any]) -> dict[str, Any]:
-    """The event Stripe sends after a refund, built from the refund answer the agent got."""
+    """Return the event Stripe sends after a refund, built from the refund answer the agent got."""
     return {
         "id": f"evt_refunded_{refund['id']}",
         "type": "charge.refunded",
@@ -185,9 +165,8 @@ def main(argv: list[str]) -> int:
         if scenario == "replayed_event":
             answers.append(_deliver(port, dispute_created(dispute)))
         if scenario == "cascade":
-            # In production Stripe would now send `charge.refunded` for the refund. Under shadow
-            # the refund never happened, so that event never comes: this delivers the one it
-            # would have been, built from irimi's answer, to prove the consumer would not loop.
+            # Under shadow Stripe never sends `charge.refunded`, so deliver the event it would
+            # have, built from irimi's answer, to show the consumer would not loop.
             answers += [_deliver(port, charge_refunded(r)) for r in _refunds]
     agentkit.obs("result", scenario=scenario, answers=answers)
     # A forged event must be refused; every other delivery must be accepted.

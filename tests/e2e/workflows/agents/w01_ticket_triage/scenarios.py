@@ -1,8 +1,6 @@
-"""W1's scenarios: one ticket each, a different system prompt each.
+"""W1's scenarios: one ticket each, with a different system prompt each.
 
-The scripted model reads the system prompt and the tool results it has been given so far, and
-nothing else, so the same prompt always walks the same loop and a changed prompt changes it.
-"""
+The scripted model reads only the prompt and tool results, so a new prompt changes its loop."""
 
 from __future__ import annotations
 
@@ -98,26 +96,26 @@ WORKFLOW = Workflow(
             serve_flags=("--quiet",),
         ),
         "retried_refund": _scenario(
-            "retry", "the model sends one refund twice in a turn, same key: one write (#46)"
+            "retry", "the model sends one refund twice in a turn, same key: one write"
         ),
         "runaway_loop": _scenario("runaway", "the model never stops; the agent gives up at turn 6"),
         "verified_refund": _scenario(
             "verify",
             "refund the whole charge, then read the charge again, which the overlay answers with "
-            "the refund in it (#43); replayed with `PROMPT=verify_only`, which refunds nothing, "
-            "that recorded read shows a refund the replay never made (#82)",
+            "the refund in it; replayed with `PROMPT=verify_only`, which refunds nothing, "
+            "that recorded read shows a refund the replay never made",
         ),
         "checked_charge": _scenario(
             "verify_only",
             "refund nothing and read the charge twice; replayed with `PROMPT=verify`, which "
-            "refunds, the second read is the recording's no longer: it goes live, overlaid (#82)",
+            "refunds, the second read is not answered from the recording: it goes live, overlaid",
         ),
         "late_lookup": _scenario(
             "late_lookup",
             "refund the whole charge, and only then look the customer up and read the charge "
             "again; replayed with `PROMPT=verify`, which looks the customer up before the refund, "
-            "that recorded lookup shows a world with a refund the replay has not made yet: the "
-            "tool runs for real, and the replay goes on answering from the recording (#83)",
+            "that recorded lookup reflects a refund the replay has not made yet: the "
+            "tool runs for real, and the replay goes on answering from the recording",
         ),
     },
 )

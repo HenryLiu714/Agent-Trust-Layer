@@ -1,38 +1,6 @@
 """W3 `queue_worker`: an in-process queue consumer, one run per message, runs that must not mix.
 
-Each message names a charge. `handle(message)` is the trigger: it reads the charge and refunds
-part of it. The two calls go through a client chosen by the message's index, because the SDK has
-to label a run's requests whichever client makes them:
-
-    0  urllib (`agentkit.http`)          3  `requests`
-    1  `http.client` through the proxy   4  `httpx.Client`
-    2  a raw asyncio HTTP/1.1 client     5  `httpx.AsyncClient`, in an event loop of its own
-
-The SDK patches the clients `http.client` underlies, and httpx's. The raw asyncio client is
-one it does not cover, like `aiohttp`: it labels its requests itself, with `sdk.current_run_id()`.
-
-`one_pool_8` sends every run's calls through one of two shared pools that hold one connection
-each, a `requests.Session` and an `httpx.Client` (`POOLED`), so runs share a connection to the
-proxy and only their `Irimi-Run` tells them apart, never the connection.
-
-Every call is labelled `read:<charge>` or `refund:<charge>`, so a test can check that run R's
-calls name only R's own charge.
-
-A run is marked each way the SDK offers: `@sdk.trigger` on a function, sync or async, and on
-a `Worker`'s methods, and `async with sdk.run(...)` around a block.
-
-The `ledger_*` scenarios keep the worker's own SQLite ledger of refunds with tool decorators:
-reads that run for real, a write whose stand-in runs under shadow, sync and async, called from
-four threads at once, from eight asyncio tasks at once and from a thread that lost its run, and,
-on the `Worker`, a plain method, a static method and a class method. `ledger_two_tools_8` writes
-every odd message's row through a second write tool, so tool calls of two names end at once on
-four threads. `ledger_post_waits` makes their posts reach irimi in the other order than
-the calls ended, every time: the first run's async write ends while the loop's one executor
-thread is busy with the worker's own job, so its post waits, and the second run's sync write,
-made after it, posts at once.
-
-    python -m tests.e2e.workflows.agents.w03_queue_worker.agent <scenario>
-"""
+Each run reads and refunds its own charge, labelled `read:<charge>` and `refund:<charge>`."""
 
 from __future__ import annotations
 
@@ -53,8 +21,11 @@ import requests
 from irimi import sdk
 from tests.e2e.workflows.agents import agentkit, observe
 
+# The client message `i` uses is `CLIENTS[i % 6]`: the SDK labels every one but the raw asyncio
+# client, which labels its requests itself, as an `aiohttp` user would.
 CLIENTS = ("urllib", "http.client", "asyncio", "requests", "httpx", "httpx-async")
-# The shared clients `one_pool_8` alternates between, each with a pool of one connection.
+# The shared clients `one_pool_8` alternates between, each with a pool of one connection, so runs
+# share a connection and only their `Irimi-Run` tells them apart.
 POOLED = ("requests-pooled", "httpx-pooled")
 
 
@@ -66,8 +37,7 @@ def charge_id(i: int) -> str:
 
 
 def _target(url: str) -> tuple[str, int, str]:
-    """Where to connect and what to put on the request line: the proxy and the absolute URL when
-    one is configured, as every proxied client does; the host and the path otherwise."""
+    """Return where to connect and the request target: the proxy and absolute URL, if configured."""
     proxy = agentkit.proxy()
     parts = urlsplit(proxy or url)
     if proxy:
@@ -134,7 +104,7 @@ _pooled_call = threading.local()
 
 
 def _pool(client: str) -> Any:
-    """`client`'s one shared instance, made on first use, with room for one connection."""
+    """Return `client`'s one shared instance, made on first use, with room for one connection."""
     with _pools_lock:
         if client not in _pools:
             if client == "requests-pooled":
@@ -189,7 +159,8 @@ def call(
     label: str,
     client: str | None = None,
 ) -> Any:
-    """One Stripe call through `client`, or message `index`'s, logged like `agentkit.http` logs.
+    """Make one Stripe call through `client`, or message `index`'s, logged as `agentkit.http` logs.
+
     Returns the answer's JSON for the urllib client, None for the others."""
     client = client or CLIENTS[index % len(CLIENTS)]
     if client == "urllib":
@@ -226,7 +197,7 @@ LEDGER = "ledger.sqlite3"
 
 
 def seed_ledger() -> None:
-    """Setup, not a tool: it happens in both modes, before any message."""
+    """Create the ledger tables; this is setup, not a tool, so it happens in every mode."""
     with agentkit.sqlite(LEDGER) as db:
         db.execute("CREATE TABLE IF NOT EXISTS refunds (charge TEXT, amount INTEGER)")
         db.execute("CREATE TABLE IF NOT EXISTS acks (charge TEXT, queue TEXT)")
@@ -251,8 +222,7 @@ async def ledger_balance_async(charge: str) -> int:
 
 @observe.read_tool
 def ledger_history(charge: str) -> Coroutine[Any, Any, list[int]]:
-    """A sync read that returns a coroutine: its call ends, and is recorded with what the
-    coroutine returned, when the coroutine does."""
+    """Return a coroutine from a sync read tool, whose call ends when the coroutine does."""
     return _history(charge)
 
 
@@ -285,9 +255,8 @@ def mark_refunded(charge: str, amount: int) -> dict[str, Any]:
     return {"recorded": True, "charge": charge}
 
 
-# `ledger_post_waits`: set as the first run's async ledger write ends, whichever body
-# runs. The SDK records the call's end and queues its post before the task awaits again, so the
-# second run, woken by it, writes after that end; None in every other scenario.
+# `ledger_post_waits`: set as the first run's async ledger write ends, so the second run writes
+# after it; None in every other scenario.
 _ledger_written: asyncio.Event | None = None
 
 
@@ -326,9 +295,8 @@ def refund(message: dict[str, Any]) -> None:
     form = {"charge": charge, "amount": str(message["amount"])}
     call(message["index"], "POST", "/v1/refunds", form, f"refund:{charge}", message.get("client"))
     if message.get("ledger") == "sync":
-        # In whatever thread the refund ran in: a propagated one keeps the run, a bare one has
-        # none, and its call lands in the process run. An odd message of
-        # `ledger_two_tools_8` writes through the second tool.
+        # In the refund's thread: a propagated one keeps the run, a bare one lands in the process
+        # run. An odd message of `ledger_two_tools_8` writes through the second tool.
         two = message.get("two_tools") and message["index"] % 2
         record = mark_refunded if two else record_refund
         agentkit.obs("ledger", charge=charge, recorded=record(charge, message["amount"]))
@@ -336,7 +304,7 @@ def refund(message: dict[str, Any]) -> None:
 
 @observe.trigger(name="audit")
 def audit(message: dict[str, Any]) -> None:
-    """A trigger called from inside another: it joins the run it is called in."""
+    """Read the refunds: a trigger called inside another, so it joins that run."""
     charge = message["charge"]
     call(message["index"], "GET", f"/v1/refunds?charge={charge}", None, f"audit:{charge}")
 
@@ -353,9 +321,8 @@ def handle(message: dict[str, Any]) -> None:
         with ThreadPoolExecutor(1) as pool:
             pool.submit(sdk.propagate(refund), message).result()
     elif how == "bare_thread":
-        # No `sdk.propagate`: the thread starts with an empty context, so the refund belongs to
-        # no run, and carries no `Irimi-Run`. It falls back to the engine's own run: the
-        # process run under `irimi shadow -- <cmd>`, and `unattributed` only in serve mode.
+        # No `sdk.propagate`: the refund carries no `Irimi-Run`, so it lands in the engine's own
+        # run, the process run under shadow and `unattributed` under serve.
         worker = threading.Thread(target=refund, args=(message,))
         worker.start()
         worker.join()
@@ -369,20 +336,18 @@ def handle(message: dict[str, Any]) -> None:
 
 @dataclass
 class _Turns:
-    """`concurrent_shared_charge`'s order: message 0 refunds first, the other once that refund is
-    answered, and neither run reads the charge again until both have refunded."""
+    """Order `concurrent_shared_charge`: message 0 refunds first, and no read until both have."""
 
     first_refunded: threading.Event
     both_refunded: threading.Barrier
 
 
-# Set by `consume` for `concurrent_shared_charge`; None in every other scenario, and when a
-# replay calls one run's trigger alone, which then has no other run to wait for.
+# Set by `consume` for `concurrent_shared_charge`; None otherwise, and in a replay of one run.
 _turns: _Turns | None = None
 
 
 def refund_in_turn(message: dict[str, Any]) -> None:
-    """Refund, then read the charge again, each run's later calls after the other run's refund."""
+    """Refund, then read the charge again once the other run has refunded too."""
     turns = _turns
     if turns is not None and message["index"] != 0:
         turns.first_refunded.wait(agentkit.timeout())
@@ -402,8 +367,8 @@ async def handle_async(message: dict[str, Any]) -> None:
     # `to_thread` copies the context, so the run follows the call into the thread.
     await asyncio.to_thread(read, message)
     if message.get("stuck"):
-        # Its refund waits on an upstream that never answers, until the worker's shutdown cancels
-        # it: the run ends in CancelledError, a BaseException the SDK records and re-raises.
+        # It waits until the worker's shutdown cancels it: the run ends in CancelledError, which
+        # the SDK records and re-raises.
         assert _in_flight is not None
         _in_flight.set()
         await asyncio.Event().wait()
@@ -417,18 +382,16 @@ async def handle_async(message: dict[str, Any]) -> None:
         agentkit.obs("ledger", charge=charge, before=before, recorded=recorded, history=history)
 
 
-# `ledger_post_waits`' worker job on the loop's one executor thread, done once the second run has
-# written.
+# `ledger_post_waits`' job on the loop's one executor thread, done once the second run has written.
 _flushed = threading.Event()
 
 
 @observe.trigger(name="handle_ledger")
 async def handle_ledger(message: dict[str, Any]) -> None:
-    """`ledger_post_waits`' runs. The first starts the worker's own job on the loop's one
-    executor thread, which waits for the second run, then writes its ledger row through the async
-    tool, whose post waits off the loop behind that job. The second waits for that write to end,
-    writes through the sync tool, which posts at once on the loop, and lets the job finish.
-    Called alone, by a replay, each run just writes its row."""
+    """Write one ledger row so the two runs' posts reach irimi in reverse of the order they ended.
+
+    The first run's async post waits behind a job on the loop's one executor thread; the second
+    run's sync write posts at once and then lets the job finish. A replay just writes the row."""
     charge, amount = message["charge"], message["amount"]
     together = _ledger_written is not None
     if message["index"] == 0:
@@ -446,8 +409,7 @@ async def handle_ledger(message: dict[str, Any]) -> None:
 
 
 async def post_waits(messages: list[dict[str, Any]]) -> list[Any]:
-    """`ledger_post_waits`: both messages' runs at once on a loop whose default executor has one
-    thread, the one the SDK posts an async tool's call from."""
+    """Run both messages at once on a loop whose default executor has one thread."""
     global _ledger_written  # noqa: PLW0603  # one scenario's knob, set once per process
     _ledger_written = asyncio.Event()
     asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(1))
@@ -455,19 +417,19 @@ async def post_waits(messages: list[dict[str, Any]]) -> list[Any]:
 
 
 def _journal_stand_in(cls: type, charge: str, net: int) -> dict[str, Any]:
-    """A class method's stand-in is called as the class method is: with the class first."""
+    """Fake the class method; it is called as the class method is, with the class first."""
     return {"journaled": False, "by": cls.__name__}
 
 
 def _ack_stand_in(worker: Worker, message: dict[str, Any]) -> dict[str, Any]:
-    """A method's stand-in is called as the method is: with the instance first."""
+    """Fake the method; it is called as the method is, with the instance first."""
     return {"acked": False, "queue": worker.queue}
 
 
 class Worker:
-    """The handlers as a worker object's methods, as a consumer framework's class has them. A
-    trigger on a method records its class in the entrypoint and leaves `self` out of the args; the
-    async one carries a name of its own, which its runs are stored by."""
+    """The handlers as a worker's methods, as a consumer framework's class has them.
+
+    A method trigger records its class in the entrypoint and leaves `self` out of the args."""
 
     def __init__(self, queue: str) -> None:
         self.queue = queue
@@ -485,8 +447,7 @@ class Worker:
         self.book(message)
 
     def book(self, message: dict[str, Any]) -> None:
-        """The worker's ledger tools, as its methods: a static fee, a class-wide journal
-        entry and an ack on this worker's queue."""
+        """Book the refund through method tools: a static fee, a class journal entry and an ack."""
         if message.get("ledger") != "worker":
             return
         charge, amount = message["charge"], message["amount"]
@@ -515,10 +476,9 @@ class Worker:
 
 @observe.trigger(name="enqueue")
 def enqueue(message: dict[str, Any]) -> Coroutine[Any, Any, None]:
-    """A sync handler that returns its work as a coroutine for the caller's loop to await, as a
-    plain decorator over an `async def` does. Its body has not run when it returns, so the run
-    goes with the coroutine, current while it runs and ended when it ends: the nested
-    `audit` it calls joins that run, and the poison message ends it in error."""
+    """Return the work as a coroutine for the caller's loop, as a decorator over `async def` does.
+
+    The run goes with the coroutine and ends when it ends, so the nested `audit` joins it."""
     return _process(message)
 
 
@@ -532,10 +492,9 @@ async def _process(message: dict[str, Any]) -> None:
 
 @observe.trigger(name="schedule")
 def schedule(message: dict[str, Any]) -> asyncio.Task[None]:
-    """A sync handler that starts its work as a task on the running loop and returns the task,
-    not a coroutine. The SDK hands a run over only to a coroutine, so this run ends when
-    `schedule` returns, before the task has run a step; the task was created inside the run, so
-    its context still holds the run's id, and the SDK labels its requests with it."""
+    """Start the work as a task and return it; the run ends when `schedule` returns.
+
+    The task was created inside the run, so its context keeps the run's id for its requests."""
     return asyncio.get_running_loop().create_task(_process_later(message))
 
 
@@ -545,8 +504,7 @@ async def _process_later(message: dict[str, Any]) -> None:
 
 
 async def handle_in_block(message: dict[str, Any]) -> None:
-    """One message as a block that is one run, `async with sdk.run(...)`, with the message as its
-    trigger: no function names it, so the run has no entrypoint."""
+    """Handle one message in an `async with sdk.run(...)` block, a run with no entrypoint."""
     async with observe.run("message", inputs=message):
         await asyncio.to_thread(read, message)
         if message.get("poison"):
@@ -555,9 +513,7 @@ async def handle_in_block(message: dict[str, Any]) -> None:
 
 
 async def shut_down(messages: list[dict[str, Any]]) -> list[Any]:
-    """Handle every message as a task, then shut down as a worker does on a deploy: once the rest
-    are done, cancel what is still in flight. The stuck message is cancelled mid-run, past its read.
-    """
+    """Handle every message as a task, then cancel what is still in flight, as a deploy does."""
     global _in_flight  # noqa: PLW0603  # one scenario's knob, set once per process
     _in_flight = asyncio.Event()
     tasks = [asyncio.create_task(handle_async(m)) for m in messages]
@@ -570,8 +526,7 @@ async def shut_down(messages: list[dict[str, Any]]) -> list[Any]:
 
 
 def tally(messages: list[dict[str, Any]], outcomes: list[Any]) -> list[bool]:
-    """Each message's verdict from what `asyncio.gather` returned for it. A ValueError or a
-    cancellation fails the message and is logged; anything else raised is the worker's own bug."""
+    """Return each message's verdict from `asyncio.gather`; a ValueError or cancel fails it."""
     done = []
     for message, outcome in zip(messages, outcomes, strict=True):
         if isinstance(outcome, ValueError | asyncio.CancelledError):
@@ -587,8 +542,7 @@ def consume(messages: list[dict[str, Any]], how: str) -> tuple[int, int]:
     """Process every message; one failure does not stop the queue. Returns (ok, failed)."""
 
     def safe(message: dict[str, Any]) -> bool:
-        # Each worker returns its own verdict; a shared counter bumped from four threads would
-        # race.
+        # Each worker returns its own verdict; a shared counter would race.
         try:
             handle(message)
         except ValueError as exc:

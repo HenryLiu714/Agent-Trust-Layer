@@ -1,5 +1,4 @@
-"""The five invariants every shadow run, serve run and replay owes, whatever the workflow, and
-the canary credentials invariant 4 looks for on disk."""
+"""The five invariants every shadow run, serve run and replay holds, and the canary credentials."""
 
 from __future__ import annotations
 
@@ -11,8 +10,8 @@ from tests.e2e.workflows.harness.internet import BOMB_SECRET
 from tests.e2e.workflows.harness.result import Result
 from tests.e2e.workflows.harness.services import CLIENT_SECRET_CANARY
 
-# Every credential a workflow is given is a canary: fake, recognisable, and greppable. The fake
-# services accept them by prefix. A canary found on disk under irimi's home is a redaction leak.
+# Every credential a workflow is given is a fake, greppable canary the fake services accept by
+# prefix. A canary found on disk under irimi's home is a redaction leak.
 CANARIES = {
     "STRIPE_API_KEY": credentials.STRIPE_API_KEY,
     "SLACK_BOT_TOKEN": credentials.SLACK_BOT_TOKEN,
@@ -22,30 +21,25 @@ CANARIES = {
     "OPENAI_API_KEY": credentials.OPENAI_API_KEY,
     "SLACK_WEBHOOK_PATH": credentials.SLACK_WEBHOOK_PATH,
 }
-# And every credential a fake service hands back in a response body. A live read's response is
-# stored, so one found on disk is a leak on the response side, which the canaries above, all sent
-# by the agent, never reach. Not given to the agent: it is the service's to hand out. A
-# bomb's first line holds one, so the start of a body cut at irimi's decoding cap is held to it
-# too.
+# The credentials a fake service hands back in a response body: one on disk is a leak on the
+# response side, which the agent's canaries never reach. A bomb's first line holds one, so the
+# start of a body cut at irimi's decoding cap is checked too.
 SERVED_CANARIES = {"STRIPE_CLIENT_SECRET": CLIENT_SECRET_CANARY, "BOMB_SECRET": BOMB_SECRET}
-# How much of a canary's start invariant 4 finds on its own: what a cut made before redaction
-# keeps of a key straddling it is no longer the key's shape, so it would reach disk as it is, and
-# the whole canary would never be there to find. Twelve characters: past the prefix every shape
-# starts with (`sk-ant-`, `whsec_`), into the part of a canary that is the canary's own.
+# How much of a canary's start invariant 4 also looks for: a key cut before redaction loses its
+# shape and reaches disk as it is. Twelve characters reach past every shape's prefix (`sk-ant-`).
 CANARY_PART = 12
 
 
 def check_invariants(shadow: Result, bare: Result | None = None) -> list[str]:
-    """What every shadow run owes, whatever the workflow, and every serve run and replay.
-    Returns the broken ones, worded. Invariant 5 compares exit codes with `bare`, when it
-    is given."""
+    """Return the invariants a shadow, serve or replay run broke, worded.
+
+    Invariant 5 compares exit codes with `bare`, when it is given."""
     if shadow.mode not in ("shadow", "serve", "replay"):
         raise ValueError(f"check_invariants takes a shadow, serve or replay run, not {shadow.mode}")
     scenario = shadow.workflow.scenarios[shadow.scenario]
     problems = []
-    # Invariant 1 watches the fake internet, so it holds only if irimi's upstream IS the fake
-    # internet. A live answer the agent saw that no fake served came from somewhere else, and a
-    # write sent there would pass invariant 1 unseen.
+    # Invariant 1 watches the fake internet, so a live answer no fake served means irimi's
+    # upstream was somewhere else, where a write would pass unseen.
     unserved = _live_answers_not_served(shadow)
     if unserved:
         problems.append(f"1. the agent saw live answers no fake service gave: {unserved}")
@@ -83,8 +77,7 @@ def check_invariants(shadow: Result, bare: Result | None = None) -> list[str]:
 
 
 def _live_answers_not_served(result: Result) -> list[str]:
-    """Each call the agent saw answered live (no `Irimi-Answered-By`) by a host the fake internet
-    serves, and that the fake internet has no matching request for."""
+    """Return each live answer from a fake host that the fake internet has no request for."""
     received = Counter((r.method, f"{r.host}{r.path}") for r in result.internet.requests())
     missing = []
     for call in result.calls():
@@ -101,9 +94,7 @@ def _live_answers_not_served(result: Result) -> list[str]:
 
 
 def _canaries_under(root: Path) -> list[str]:
-    """Each canary found whole in a file under `root`, or else its first CANARY_PART characters: a
-    key cut before redaction is no longer its shape, so the part a cut kept reached disk as it was,
-    which the whole canary is never found as."""
+    """Return each canary found under `root`, whole or as its first CANARY_PART characters."""
     canaries = {**CANARIES, **SERVED_CANARIES}
     found = []
     for path in root.rglob("*"):

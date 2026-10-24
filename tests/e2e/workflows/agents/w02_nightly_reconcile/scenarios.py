@@ -60,7 +60,7 @@ WORKFLOW = Workflow(
         "datetime_trigger": Scenario(
             ("--charges", "12", "--mismatches", "2", "--datetime-trigger"),
             setup=_seed(12),
-            doc="the trigger is a datetime, which #74 captures as non-replayable",
+            doc="the trigger is a datetime, which the SDK captures as non-replayable",
         ),
         "same_date_twice": Scenario(
             ("--charges", "12", "--mismatches", "3", "--twice"),
@@ -70,7 +70,7 @@ WORKFLOW = Workflow(
         "refund_then_page": Scenario(
             ("--charges", "3", "--refund-then-page"),
             setup=_seed(3, prior_refund=True),
-            doc="page refunds with starting_after naming a refund this run minted (#53)",
+            doc="page refunds with starting_after naming a refund this run minted",
         ),
     },
 )

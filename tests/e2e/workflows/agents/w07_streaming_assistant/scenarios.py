@@ -69,8 +69,7 @@ def pair_decision(caller: str) -> str:
 
 
 def pair_script(call: LlmCall) -> LlmTurn:
-    """`two_callers`: each chat's answers name its caller, so a stream recorded against the other
-    caller's request would show."""
+    """Answer naming the caller, so a stream recorded against the other caller would show."""
     caller = "1" if "caller 1" in call.last_user_text() else "2"
     if call.provider == "anthropic":
         return LlmTurn(text=pair_answer(caller))
@@ -82,8 +81,7 @@ def _sse(doc: dict[str, Any]) -> bytes:
 
 
 class SplittingLLM(ScriptedLLM):
-    """Streams an OpenAI tool call the way OpenAI does: the id and name in one delta, then the
-    arguments a few characters per delta. The shared fake sends a whole call in one delta."""
+    """Streams an OpenAI tool call as OpenAI does: id and name, then the arguments in pieces."""
 
     def _openai(self, body: dict[str, Any]) -> Resp:
         resp = super()._openai(body)
@@ -113,8 +111,7 @@ def _event(name: str, doc: dict[str, Any]) -> bytes:
 
 
 def _mid_data_line(event: bytes) -> int:
-    """An offset strictly inside `event`'s `data:` line: the middle of its secret if it holds it,
-    else the middle of the line."""
+    """Return an offset inside `event`'s `data:` line: mid-secret if it holds the secret."""
     if SECRET.encode() in event:
         return event.index(SECRET.encode()) + len(SECRET) // 2
     start = event.index(b"\ndata: ") + 1
@@ -122,12 +119,9 @@ def _mid_data_line(event: bytes) -> int:
 
 
 class MidLineWritesLLM(ScriptedLLM):
-    """Streams Anthropic's text LONG_DELTA characters per `text_delta`, with the secret whole in
-    one of them, and writes the stream in pieces that each end in the middle of a `data:` line:
-    every event is cut inside that line and its second half goes out with the next event's first.
-    The event that holds the secret is cut in the middle of the secret. So each boundary between
-    two writes falls mid-line, and one falls mid-secret: redaction has to read the chunks
-    joined, and the recorded chunk lengths have to follow the redacted line."""
+    """Streams Anthropic's text in writes that each end mid-`data:` line, one of them mid-secret.
+
+    Redaction has to read the chunks joined, and recorded chunk lengths follow the redacted line."""
 
     def _anthropic(self, body: dict[str, Any]) -> Resp:
         resp = super()._anthropic(body)
@@ -166,8 +160,7 @@ class MidLineWritesLLM(ScriptedLLM):
 
 
 class LockstepLLM(ScriptedLLM):
-    """Holds each provider's two calls until both have arrived, so the two callers' streams are
-    written at once and irimi copies two flows' chunks interleaved."""
+    """Holds each provider's two calls until both arrive, so the two streams interleave."""
 
     def __init__(self, script: Any) -> None:
         super().__init__(script)
@@ -185,11 +178,10 @@ class LockstepLLM(ScriptedLLM):
 
 
 class BombingLLM(ScriptedLLM):
-    """Streams Anthropic's answer gzip-encoded, though the agent never asked for an encoding, with
-    a GiB of `BOMB_LINE` between its last `text_delta` and the events that end it: 2 MiB on
-    the wire that decode to a GiB, written BOMB_CHUNK at a time. Each padding line is an SSE field
-    no client knows, which an SSE parser skips. `heads` holds what each stream decodes to before
-    its padding, and `sent` the bytes it wrote."""
+    """Streams Anthropic's answer gzip-encoded, with a GiB of `BOMB_LINE` padding before its end.
+
+    The padding lines are SSE fields a parser skips. `heads` holds each stream's decoded start
+    and `sent` the bytes it wrote."""
 
     def __init__(self, script: Any) -> None:
         super().__init__(script)
@@ -212,10 +204,9 @@ class BombingLLM(ScriptedLLM):
 
 
 class GzipLLM(ScriptedLLM):
-    """Streams Anthropic's answer gzip-encoded, whole, as a service does that compresses what it
-    sends: irimi records the stream decoded and keeps its `content-encoding` header, so a
-    replay that served those bytes under that header would hand the agent plain text it was told
-    to gunzip. Written `GZIP_CHUNK` bytes at a time."""
+    """Streams Anthropic's whole answer gzip-encoded, `GZIP_CHUNK` bytes at a time.
+
+    irimi records it decoded, so a replay must not serve it under the `content-encoding` header."""
 
     def _anthropic(self, body: dict[str, Any]) -> Resp:
         resp = super()._anthropic(body)
@@ -228,10 +219,9 @@ class GzipLLM(ScriptedLLM):
 
 
 class HeldStreamLLM(ScriptedLLM):
-    """Holds the last chunk of Anthropic's stream until the agent lists the models, which `hand_off`
-    does only once its trigger has returned and its run has ended. So the stream is still open
-    when the run ends, and irimi records it after the run's end, whatever the scheduler does:
-    a streamed exchange recorded after its run's SDK end."""
+    """Holds the last chunk of Anthropic's stream until the agent lists the models.
+
+    `hand_off` lists them after its run ends, so the stream is recorded after the run's end."""
 
     MODELS: ClassVar[dict[str, Any]] = {
         "data": [{"type": "model", "id": "claude-sonnet-5"}],
@@ -285,8 +275,7 @@ def _gzipped(world: World) -> None:
 
 
 def _bombing(world: World) -> None:
-    """`BombingLLM`, its padding built now: built on the request it answers, it would take longer
-    than the agent's read timeout."""
+    """Set up `BombingLLM`, building its padding now rather than within the agent's timeout."""
     agentkit.gzip_bomb(b"", BOMB_LINE, BOMB_DECODED_BYTES)
     world.llm = BombingLLM(chat_script)
 
@@ -302,7 +291,7 @@ WORKFLOW = Workflow(
             (QUESTION, "read_all"),
             env={"LANGSMITH_TRACING": "true"},
             setup=_traced,
-            doc="two streams, no post, and one LangSmith trace: telemetry (#70)",
+            doc="two streams, no post, and one LangSmith trace: telemetry",
         ),
         "httpx_streams": Scenario(
             (QUESTION, "read_all"),
@@ -348,13 +337,13 @@ WORKFLOW = Workflow(
             ("What is the test key?", "read_all"),
             setup=_bombing,
             doc="Anthropic's stream comes gzip-encoded, a GiB of padding before its end: the agent "
-            "decodes its start and gives up, irimi records the start of it (#94)",
+            "decodes its start and gives up, irimi records the start of it",
         ),
         "gzip_stream": Scenario(
             (QUESTION, "read_all"),
             setup=_gzipped,
             doc="Anthropic's stream comes gzip-encoded and whole: the agent decodes it, irimi "
-            "records it decoded (#71), and a replay serves it decoded, without the encoding (#82)",
+            "records it decoded, and a replay serves it decoded, without the encoding",
         ),
         "two_callers": Scenario(
             (QUESTION, "two_callers"),
@@ -365,7 +354,7 @@ WORKFLOW = Workflow(
             (QUESTION, "hand_off"),
             setup=_held,
             doc="the trigger returns Anthropic's stream still open, as a handler returns a "
-            "streaming response: the run ends first, and the stream is recorded after it (#77)",
+            "streaming response: the run ends first, and the stream is recorded after it",
         ),
     },
 )

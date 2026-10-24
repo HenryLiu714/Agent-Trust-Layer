@@ -1,33 +1,6 @@
 """W7 `streaming_assistant`: a chat endpoint that streams LLM output back to its own caller.
 
-`POST /chat` answers with `text/event-stream`. The trigger, `chat`, makes three model calls:
-
-1. OpenAI embeddings for the question (a plain JSON call);
-2. Anthropic Messages with `stream: true`, whose text deltas it forwards to the caller as they
-   arrive;
-3. OpenAI chat completions with `stream: true`, which may answer with a `post_summary` tool call,
-   assembled from its deltas. That tool call becomes a Slack post: the one write.
-4. With `LANGSMITH_TRACING=true`, one trace of the chat POSTed to LangSmith: telemetry, which
-   irimi forwards and stores only as having happened.
-
-Upstream streams are read a few bytes at a time on purpose, so every SSE event is split across
-reads and the parser has to reassemble it (`sse_events`). One that comes compressed is decoded as
-it is read, but only so far (`decoded`). They are read with urllib, or, with
-`W7_STREAM_CLIENT=httpx`, with `httpx.Client.stream`, as the Anthropic and OpenAI SDKs read theirs:
-the SDK labels each at httpx's transport, and takes the label off again while the stream is still
-open.
-
-    python -m tests.e2e.workflows.agents.w07_streaming_assistant.agent <question> \\
-        {read_all,hang_up,two_callers,hand_off}
-
-The agent delivers the question to itself over loopback. `hang_up` makes that caller reset the
-connection after the first event, the way a closed browser tab does. `two_callers` has two callers
-ask at once, as `<question> (caller 1)` and `<question> (caller 2)`, so two chats stream through
-the proxy side by side. `hand_off` has the trigger open Anthropic's stream and return it, as
-a handler returns a streaming response its framework reads after the handler has returned: the run
-ends while its stream is still open, and the handler then lists the models and forwards the rest
-of the stream. Exit codes: 0 answered, 3 the caller went away, 4 an upstream stream broke.
-"""
+`chat` embeds, streams Anthropic and OpenAI answers, and may post one Slack summary."""
 
 from __future__ import annotations
 
@@ -52,10 +25,8 @@ import httpx
 from tests.e2e.workflows.agents import agentkit, observe
 
 READ_SIZE = 7  # deliberately small: every event straddles several reads
-# A stream that comes compressed is read this much at a time, and decoded only up to
-# DECODED_LIMIT, as a careful client decodes one: past that the agent reads the rest without
-# decoding it, so a few MiB that decode to a GiB cost it nothing, and the run ends as an upstream
-# that broke.
+# A compressed stream is read this much at a time and decoded only up to DECODED_LIMIT, as a
+# careful client does, so a few MiB that decode to a GiB cost the agent nothing.
 ENCODED_READ_SIZE = 64 * 1024
 DECODED_LIMIT = 1024 * 1024
 ANSWERED_BY = "Irimi-Answered-By"
@@ -70,9 +41,7 @@ POST_SUMMARY = {
 
 
 class ClientGone(Exception):
-    """Our own caller hung up mid-answer. Its message is the same on every OS, and the OS error
-    is its `__cause__`: writing to a caller that has gone is EPIPE on macOS and ECONNRESET on
-    Linux, and the stored run error names this message."""
+    """Our own caller hung up mid-answer; the OS error, which differs by OS, is its `__cause__`."""
 
 
 HUNG_UP = "caller hung up"
@@ -83,7 +52,7 @@ class UpstreamBroke(Exception):
 
 
 def sse_events(chunks: Iterator[bytes]) -> Iterator[tuple[str | None, str]]:
-    """`(event, data)` per server-sent event, however the bytes were split across chunks."""
+    """Yield `(event, data)` per server-sent event, however the bytes were split across chunks."""
     buf = b""
     for chunk in chunks:
         buf += chunk.replace(b"\r\n", b"\n")
@@ -102,9 +71,7 @@ def sse_events(chunks: Iterator[bytes]) -> Iterator[tuple[str | None, str]]:
 def stream_post(
     url: str, body: dict[str, Any], headers: dict[str, str], label: str
 ) -> Iterator[bytes]:
-    """POST and yield the response body as it arrives. A stream that never opens (an error status,
-    or no answer at all) or fails mid-body is logged and raised as `UpstreamBroke`, so the caller
-    is told and the run ends as a broken upstream rather than a crash in the handler thread."""
+    """POST and yield the response body as it arrives; any failure raises `UpstreamBroke`."""
     if os.environ.get(STREAM_CLIENT_ENV) == "httpx":
         yield from _stream_post_httpx(url, body, headers, label)
         return
@@ -145,9 +112,9 @@ def stream_post(
 
 
 def decoded(chunks: Iterator[bytes], encoding: str, label: str) -> Iterator[bytes]:
-    """`chunks` of a gzip stream, decoded up to DECODED_LIMIT bytes and no further; every chunk is
-    still read. Once they end, logs `stream_encoded`: how many bytes came, their SHA-256, and how
-    many it decoded, so a test can hold the bytes the agent got to the ones the service sent."""
+    """Yield a gzip stream's chunks decoded up to DECODED_LIMIT, still reading every chunk.
+
+    At the end it logs `stream_encoded` with the bytes' count, SHA-256 and how many it decoded."""
     if encoding.lower() != "gzip":
         agentkit.obs("stream_error", label=label, error=f"encoding {encoding}")
         raise UpstreamBroke(f"{label}: cannot decode {encoding}")
@@ -178,7 +145,7 @@ def decoded(chunks: Iterator[bytes], encoding: str, label: str) -> Iterator[byte
 def _stream_post_httpx(
     url: str, body: dict[str, Any], headers: dict[str, str], label: str
 ) -> Iterator[bytes]:
-    """`stream_post` with `httpx.Client.stream`, logged and raised the same way."""
+    """Stream as `stream_post` does, with `httpx.Client.stream`."""
     opened = False
     try:
         with (
@@ -204,7 +171,7 @@ def _stream_post_httpx(
 
 
 def anthropic_events(question: str) -> Iterator[tuple[str | None, str]]:
-    """Anthropic's answer to `question`, streamed, as server-sent events."""
+    """Return Anthropic's streamed answer to `question` as server-sent events."""
     body = {
         "model": "claude-sonnet-5",
         "max_tokens": 512,
@@ -225,8 +192,9 @@ def anthropic_stream(
     send: Callable[[str, dict[str, Any]], None],
     events: Iterator[tuple[str | None, str]] | None = None,
 ) -> str:
-    """The text of Anthropic's streamed answer, each delta forwarded to the caller as it arrives:
-    from `events` when the stream is already open (`hand_off`), or from a stream opened here."""
+    """Return Anthropic's streamed answer, forwarding each delta to the caller as it arrives.
+
+    It reads `events` when the stream is already open (`hand_off`), or opens one."""
     text, stopped = "", False
     for name, data in events if events is not None else anthropic_events(question):
         event = json.loads(data)
@@ -303,8 +271,8 @@ def chat(question: str, send: Callable[[str, dict[str, Any]], None]) -> dict[str
     return {"answer": answer, "dims": dims, "decision": decision, "posted": posted}
 
 
-# `hand_off`: the trigger only opens the stream, sending its request inside the run, and
-# returns it; the run ends as it returns, with the stream still open.
+# `hand_off`: the trigger opens the stream inside the run and returns it, so the run ends with
+# the stream still open.
 @observe.trigger
 def open_chat(question: str) -> Iterator[tuple[str | None, str]]:
     events = anthropic_events(question)
@@ -313,8 +281,9 @@ def open_chat(question: str) -> Iterator[tuple[str | None, str]]:
 
 
 def handed_off(question: str, send: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
-    """`hand_off`'s handler: the stream its trigger returned, read after the run has ended. It
-    lists the models first, in no run, and that is what lets the fake service end the stream."""
+    """Read the stream `open_chat` returned after its run has ended.
+
+    It lists the models first, in no run, which is what lets the fake service end the stream."""
     events = open_chat(question)
     agentkit.http(
         "GET",
@@ -366,7 +335,7 @@ class _Chat(agentkit.Handler):
 
 
 def call_self(port: int, question: str, hang_up: bool) -> list[tuple[str | None, str]]:
-    """The inbound caller, on loopback and never through a proxy."""
+    """Ask our own server as the inbound caller, on loopback and never through a proxy."""
     if hang_up:
         return _hang_up_after_first_event(port, question)
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
@@ -400,7 +369,7 @@ def _hang_up_after_first_event(port: int, question: str) -> list[tuple[str | Non
 
 
 def _ask(port: int, question: str, hang_up: bool) -> dict[str, Any]:
-    """One caller's chat: what the caller received, and how the agent's handler ended it."""
+    """Return what one caller received and how the agent's handler ended the chat."""
     try:
         events = call_self(port, question, hang_up)
         _Chat.finished.acquire(timeout=60)

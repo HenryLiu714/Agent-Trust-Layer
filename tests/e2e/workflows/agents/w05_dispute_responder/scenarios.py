@@ -53,7 +53,7 @@ WORKFLOW = Workflow(
             ("under_threshold",),
             setup=_partly_refunded,
             doc="under_threshold with 500 of the charge refunded before: the same event, and a "
-            "refund of the 1000 left, which `irimi compare` cannot tell from 1500 (#79)",
+            "refund of the 1000 left, which `irimi compare` cannot tell from 1500",
         )
     },
 )

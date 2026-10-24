@@ -1,8 +1,6 @@
 """W2 `nightly_reconcile`: a scheduled batch at volume, pinned per scenario.
 
-The agent is `agents/w02_nightly_reconcile/agent.py`. Its ledger is a SQLite file in
-the run's state directory, seeded by the agent before the run; only `mark_reconciled` (a write
-tool) changes it.
+Its ledger is a SQLite file the agent seeds; only the `mark_reconciled` write tool changes it.
 """
 
 import pytest
@@ -59,8 +57,7 @@ def test_forty_mismatches_are_forty_faked_writes_and_the_ledger_is_untouched(run
     assert TOTALS in summary
     # Forty writes fire one event name, listed once.
     assert "  would have fired: customer.updated" in summary
-    # And forty ledger marks, one line each after the forty updates, as the HTTP writes are each
-    # a line however many there are.
+    # Forty ledger marks, one line each, after the forty updates.
     tool_lines = [line for line in summary if line.startswith("  ○ tool ")]
     assert tool_lines == [f"  ○ tool  {AGENT}:mark_reconciled  fake ran instead"] * 40
     assert summary.index(tool_lines[0]) > max(
@@ -70,7 +67,7 @@ def test_forty_mismatches_are_forty_faked_writes_and_the_ledger_is_untouched(run
         shadow.tool_call_lines().count(f"tool-fake     write     {AGENT}:mark_reconciled -> ok")
         == 40
     )
-    # The write tool ran its stand-in forty times under shadow, and for real forty times bare.
+    # The write tool's fake ran forty times under shadow; bare, the real one ran forty times.
     assert shadow.tools("write") == [(f"{AGENT}:mark_reconciled", "shadow")] * 40
     assert bare.tools("write") == [(f"{AGENT}:mark_reconciled", "real")] * 40
     assert reconciled_rows(shadow) == 0
@@ -80,17 +77,16 @@ def test_forty_mismatches_are_forty_faked_writes_and_the_ledger_is_untouched(run
 
 @pytest.mark.parametrize("mode", MODES)
 def test_forty_mismatches_store_all_47_exchanges_and_drop_none(run_workflow, mode):
-    """The busiest run in the corpus, stored whole: every exchange irimi reported is on
-    disk, and no run records a dropped event. Under serve mode the run is the only one,
-    with no process run beside it, and its block is printed from the store at its end."""
+    """The corpus's busiest run is stored whole: every reported exchange, no dropped event.
+
+    Under serve the run is the only one, with no process run beside it."""
     shadow = run_workflow(W, "forty_mismatches", mode)
     stored = [e for e in shadow.stored_events() if isinstance(e, Exchange)]
     assert len(stored) == len(shadow.exchange_lines()) == 47
     process = ["0 exchanges 0 writes"] if mode == "shadow" else []
     assert [r.dropped_events for r in shadow.stored().list_runs()] == [0] * (len(process) + 1)
-    # `irimi runs list` counts them in the run that holds them, and its writes are the summary's
-    # `41 faked writes`: forty customer updates and the Slack post. Its last two columns, after
-    # the header row.
+    # `runs list` counts the summary's `41 faked writes`: forty customer updates and the Slack
+    # post, in the last two columns after the header row.
     code, out, err = shadow.runs("list")
     assert (code, err) == (0, [])
     counts = sorted(" ".join(line.split()[-4:]) for line in out[1:])
@@ -104,9 +100,8 @@ def test_a_datetime_trigger_is_stored_by_its_repr_and_cannot_be_replayed(run_wor
     [trigger] = shadow.events("trigger")
     assert trigger["type"] == "datetime"
     assert trigger["value"].startswith("datetime.datetime(2026, 9, 27, 2, 0")
-    # A `datetime` is not JSON, so the SDK captures it as its repr and the run is not replayable.
-    # `sdk.run` records no entrypoint, so `irimi replay` refuses it for that first, before it
-    # would ask for `--args`: only `--entrypoint` or `-- CMD` replays it.
+    # A `datetime` is not JSON, so it is captured as its repr. `sdk.run` records no entrypoint,
+    # which `irimi replay` refuses first: only `--entrypoint` or `-- CMD` replays it.
     [run] = shadow.sdk_runs()
     assert run.trigger is not None
     assert (run.trigger.name, run.trigger.entrypoint) == ("nightly-reconcile", None)
@@ -128,8 +123,7 @@ def test_a_datetime_trigger_is_stored_by_its_repr_and_cannot_be_replayed(run_wor
 def test_the_same_date_twice_is_six_writes_in_both_modes(run_workflow, mode):
     shadow = run_workflow(W, "same_date_twice", mode)
     bare = run_workflow(W, "same_date_twice", "bare")
-    # Nothing in the run stops the repeat, so the report shows each customer update twice: the
-    # duplicate a future check for repeated writes would flag. Bare, the same six reach Stripe.
+    # Nothing stops the repeat, so each customer update shows twice; bare, all six reach Stripe.
     lines = [line for line in shadow.summaries() if "○ stripe  update customer" in line]
     assert (
         lines
@@ -147,8 +141,7 @@ def test_paging_from_a_minted_refund_is_translated_and_finds_the_real_one(run_wo
     bare = run_workflow(W, "refund_then_page", "bare")
     [seen] = shadow.events("refunds")
     assert seen["minted"].startswith("re_") and seen["minted"] != "re_PRIOR000"
-    # The first page shows the refund irimi faked; the page after it shows the real, older one,
-    # exactly as it does bare.
+    # The first page shows the faked refund; the next shows the real, older one, as bare.
     assert seen["first"] == [seen["minted"]]
     assert seen["after"] == bare.events("refunds")[0]["after"] == ["re_PRIOR000"]
     assert [
@@ -159,8 +152,7 @@ def test_paging_from_a_minted_refund_is_translated_and_finds_the_real_one(run_wo
         ("page_refunds", None),
         (None, "fake-L1"),
     ]
-    # irimi dropped the cursor naming its own refund before forwarding: Stripe never heard
-    # the minted id.
+    # irimi drops the cursor naming its own refund before forwarding the read.
     refund_reads = [r.query for r in shadow.internet.requests() if r.path == "/v1/refunds"]
     assert refund_reads == [{"charge": "ch_N000", "limit": "1"}] * 2
     summary = shadow.summaries()
@@ -173,8 +165,7 @@ def test_paging_from_a_minted_refund_is_translated_and_finds_the_real_one(run_wo
 def test_irimi_compare_shows_a_clean_night_and_forty_mismatches_eighty_writes_apart(
     shared_store_run,
 ):
-    """Compare at volume: forty customer updates and forty write tools only B made, each in the
-    order B made it, and the one Slack post both made, changed by its count."""
+    """Compare at volume shows B's eighty extra writes in order, and the Slack post changed."""
     clean = shared_store_run(W, "clean")
     forty = shared_store_run(W, "forty_mismatches")
     assert check_invariants(forty) == []
@@ -205,11 +196,10 @@ def test_irimi_compare_shows_a_clean_night_and_forty_mismatches_eighty_writes_ap
 
 
 def test_a_replay_that_tags_each_customer_otherwise_compares_its_updates_changed(replayed):
-    """Two customer updates, `POST /v1/customers/cus_N00x`, replayed with `RECONCILE_SOURCE` set,
-    so each sends one more field. The map's sentence, `update customer {customer}`, names none of
-    what an update sets, so the two runs print the same lines for both; compared by what they
-    sent, each is changed, the field that differs is printed under it, and the replay exits 1.
-    Replayed by its command: the run is an `sdk.run` block, which records no entrypoint."""
+    """Updates whose lines print alike compare changed by their body field, and the replay exits 1.
+
+    `RECONCILE_SOURCE` adds a field the map's `update customer {customer}` sentence omits. The run
+    is an `sdk.run` block with no entrypoint, so it is replayed by its command."""
     recorded, replay = replayed(W, "two_mismatches", {SOURCE_ENV: "backfill"}, command=True)
     assert check_invariants(replay) == []
     assert replay.internet.writes() == []
@@ -243,14 +233,13 @@ def test_a_replay_that_tags_each_customer_otherwise_compares_its_updates_changed
 
 
 def test_a_refund_then_page_replay_answers_the_page_naming_its_minted_refund(replayed):
-    """The refund is answered with its recorded answer, so its minted `re_` is the recorded one,
-    and the page whose cursor names it is translated as it was recorded and answered from
-    the recording. Nothing reaches the fake internet. Replayed by its command: the run is an
-    `sdk.run` block, which records no entrypoint to call."""
+    """The replay answers a page whose cursor names the recorded minted refund from the recording.
+
+    Nothing reaches the fake internet. The run is an `sdk.run` block, so it is replayed by its
+    command."""
     recorded, replay = replayed(W, "refund_then_page", command=True)
     assert replay.events("refunds", with_time=False) == recorded.events("refunds", with_time=False)
-    # Each answer is what it was when recorded: the first page is still the overlay's, its
-    # bytes edited to show the refund, and the page after it the service's, from disk.
+    # Each answer is as recorded: the first page the overlay's, the next the service's, from disk.
     assert [(c["label"], c["answered_by"]) for c in replay.calls()] == [
         ("list_charges", "recording"),
         ("refund", "fake-L1"),
@@ -269,9 +258,9 @@ def test_a_refund_then_page_replay_answers_the_page_naming_its_minted_refund(rep
 
 
 def test_a_replay_of_a_replay_answers_the_page_from_the_first_replay(replayed, tmp_path):
-    """A replay is a stored run like any other, so it can be replayed. The engine records a
-    read as it would ask it, translated, whoever answers it, so the second replay finds the page
-    the first one answered just as the first found the recorded one."""
+    """A replay of a replay answers the translated page from the first replay's recording.
+
+    The engine records a read translated, whoever answers it, so each replay finds the page."""
     recorded, first = replayed(W, "refund_then_page", command=True)
     before = [r.run_id for r in first.stored().list_runs()]
     second = replay(first, replayed_run_id(first), tmp_path / "again", command=True)
@@ -282,8 +271,7 @@ def test_a_replay_of_a_replay_answers_the_page_from_the_first_replay(replayed, t
     ]
     assert second.internet.requests() == []
     assert second.events("refunds", with_time=False) == recorded.events("refunds", with_time=False)
-    # `runs list` lists each replay as the run it replayed, and `runs show` names it. Every
-    # run the store holds, by its attribution column: the recording's two as they were.
+    # `runs list` and `runs show` name the run each replay replayed.
     source = replayed_run_id(recorded)
     middle, last = first.process_run_id(), second.process_run_id()
     assert second.listed_attributions() == {

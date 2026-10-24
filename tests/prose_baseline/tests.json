@@ -1,7 +1,4 @@
 {
-  "tests/e2e/workflows/agents/w09_scope_gauntlet/agent.py": {
-    "caps_run": 2
-  },
   "tests/e2e/workflows/test_invariants.py": {
     "issue_ref": 1
   },
@@ -16,9 +13,6 @@
   },
   "tests/e2e/workflows/test_w07_streaming_assistant.py": {
     "issue_ref": 3
-  },
-  "tests/e2e/workflows/test_w08_orchestrator.py": {
-    "caps_run": 2
   },
   "tests/e2e/workflows/test_w10_flaky_upstream.py": {
     "issue_ref": 3

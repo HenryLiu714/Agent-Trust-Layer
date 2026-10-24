@@ -1,16 +1,6 @@
-"""The SDK's run and tool decorators, logging what ran to the observation log the corpus pins.
+"""The SDK's run and tool decorators, wrapped to log `run.start`, `run.end` and `tool` events.
 
-An agent takes `trigger`, `run`, `read_tool` and `write_tool` from here and the rest of the SDK
-from `irimi.sdk`. Each wrapper hands the real decorator what the agent wrote, so the real SDK's
-decoration-time checks and default names decide, and logs (`agentkit.obs`):
-
-- `run.start` and `run.end` from inside the real run, with its id: a trigger's start carries the
-  type of each argument it was `called_with`, and its end what it `returned`, so a replay that
-  calls the trigger alone is held to what the recording's trigger was given and returned;
-- `tool` for each tool call, with which body ran: `real`, `shadow` (the fake) or `recording` (a
-  read a replay answered, in which neither body ran). It is the corpus's proof that no write
-  tool ran for real under shadow.
-"""
+The `tool` event's `ran` (`real`, `shadow` or `recording`) proves no write tool ran for real."""
 
 from __future__ import annotations
 
@@ -27,15 +17,13 @@ from tests.e2e.workflows.agents import agentkit
 
 F = TypeVar("F", bound=Callable[..., Any])
 
-# The runs whose `run.start` this module has logged and whose `run.end` it has not, so a nested
-# trigger, which joins one, logs nothing. A set of ids rather than a context variable, because a
-# run handed to a coroutine ends in the task that awaits it, not the context that started it.
+# Runs with a logged `run.start` and no `run.end` yet, so a nested trigger logs nothing. A set, not
+# a context variable: a run handed to a coroutine ends in the task that awaits it.
 _logged_runs: set[str] = set()
 
 
 def _default_name(f: Callable[..., Any]) -> str:
-    """The SDK's default name for a trigger or a tool: `module:qualname`, the module's real name
-    when the agent was started with `python -m`."""
+    """Return the SDK's default name for a trigger or tool: `module:qualname`, `-m` aware."""
     module = f.__module__
     if module == "__main__":
         name = getattr(getattr(sys.modules[module], "__spec__", None), "name", None)
@@ -48,8 +36,7 @@ def _default_name(f: Callable[..., Any]) -> str:
 def _logged_run(
     name: str, run_id: str, called_with: dict[str, str] | None
 ) -> Iterator[dict[str, Any]]:
-    """Log `run.start`, then `run.end` with how the block ended and what it put in the dict it is
-    given as `returned`."""
+    """Log `run.start`, then `run.end` with how the block ended and what it put in the dict."""
     if called_with is None:
         agentkit.obs("run.start", name=name, run=run_id)
     else:
@@ -66,8 +53,7 @@ def _logged_run(
 
 @contextlib.contextmanager
 def _observed(name: str, called_with: dict[str, str] | None = None) -> Iterator[dict[str, Any]]:
-    """Entered inside a real trigger or `run`: log the run it started. The SDK decides whether
-    there is a run and whether this entry joined an outer one, so this only reads its id."""
+    """Log the run a real trigger or `run` started, unless the SDK joined it to an outer one."""
     run_id = sdk.current_run_id()
     if run_id is None or run_id in _logged_runs:
         yield {}
@@ -81,9 +67,9 @@ def _observed(name: str, called_with: dict[str, str] | None = None) -> Iterator[
 
 
 def _called_with(f: Callable[..., Any], args: Any, kwargs: Any) -> dict[str, str]:
-    """`{parameter: type name}` for a call of `f`, or empty for a call that does not bind. The
-    annotations stay unevaluated, as the SDK leaves them, so a name imported only for type
-    checkers raises nothing here."""
+    """Return `{parameter: type name}` for a call of `f`, or empty if it does not bind.
+
+    Annotations stay unevaluated, as the SDK leaves them."""
     try:
         if sys.version_info >= (3, 14):
             import annotationlib  # exists from 3.14 only
@@ -98,8 +84,7 @@ def _called_with(f: Callable[..., Any], args: Any, kwargs: Any) -> dict[str, str
 
 
 def _around(f: Callable[..., Any], enter: Callable[[dict[str, str]], Any]) -> Callable[..., Any]:
-    """`f` inside the context manager `enter(called_with)` makes, keeping `f`'s signature, which
-    the SDK binds captured args against, and its sync or async nature."""
+    """Wrap `f` in `enter(called_with)`, keeping its signature and its sync or async nature."""
     if inspect.iscoroutinefunction(f):
 
         @functools.wraps(f)
@@ -125,7 +110,7 @@ def _around(f: Callable[..., Any], enter: Callable[[dict[str, str]], Any]) -> Ca
 
 
 async def _carried(observed: contextlib.ExitStack, ended: dict[str, Any], coroutine: Any) -> Any:
-    """`coroutine`, awaited inside the observation a sync trigger opened before it returned it."""
+    """Await `coroutine` inside the observation a sync trigger opened before returning it."""
     with observed:
         ended["returned"] = result = await coroutine
         return result
@@ -195,8 +180,7 @@ def _log_tool(tool_name: str, kind: str, ran: str) -> None:
 
 
 def _logged(fn: Callable[..., Any], tool_name: str, kind: str, ran: str) -> Callable[..., Any]:
-    """`fn`, logging that it ran, with its signature and sync or async nature. What the SDK
-    refuses (a fake that is not callable, a generator) is returned as it is, for the SDK's check."""
+    """Wrap `fn` to log that it ran; what the SDK refuses is returned as is, for its own check."""
     if not callable(fn) or inspect.isgeneratorfunction(fn) or inspect.isasyncgenfunction(fn):
         return fn
     if _is_async(fn):
@@ -217,9 +201,7 @@ def _logged(fn: Callable[..., Any], tool_name: str, kind: str, ran: str) -> Call
 
 
 def _answered(decorated: Callable[..., Any], tool_name: str, kind: str) -> Callable[..., Any]:
-    """`decorated`, the SDK's tool wrapper, logging `ran="recording"` for a call that returned or
-    raised an `Exception` while neither body ran. A call interrupted by anything else ran nothing,
-    is stored by no one, and logs nothing."""
+    """Wrap the SDK's tool wrapper to log `ran="recording"` for a call in which neither body ran."""
 
     def answered(cell: list[bool]) -> None:
         if not cell[0] and sdk.is_active():
@@ -263,8 +245,7 @@ def _answered(decorated: Callable[..., Any], tool_name: str, kind: str) -> Calla
 
 
 def _is_async(f: Callable[..., Any]) -> bool:
-    """`f` is called to get a coroutine: an `async def`, or an object whose `__call__` is one, as
-    the SDK tests a fake's nature."""
+    """Return whether calling `f` gives a coroutine, as the SDK tests a fake's nature."""
     if inspect.iscoroutinefunction(f):
         return True
     return not inspect.isroutine(f) and inspect.iscoroutinefunction(type(f).__call__)
@@ -286,12 +267,10 @@ def write_tool(*, fake: Callable[..., Any], name: str | None = None) -> Callable
 def _tool(
     kind: str, fake: Any, name: str | None, real: Callable[[Any], Callable[[Any], Any]]
 ) -> Callable[[Any], Any]:
-    """The decorator `read_tool` and `write_tool` return. `real` makes the SDK's decorator from
-    the logged fake (None for a read)."""
+    """Return `read_tool`'s or `write_tool`'s decorator; `real` builds the SDK's from the fake."""
 
     def decorate(fn: Any) -> Any:
-        # A `staticmethod` or `classmethod` stays one: the logging wrapper goes around the function
-        # inside, which the descriptor then supplies its receiver to.
+        # A `staticmethod` or `classmethod` stays one, the wrapper going around the function inside.
         descriptor = type(fn) if isinstance(fn, staticmethod | classmethod) else None
         inner = fn.__func__ if descriptor is not None else fn
         # The agent's own `name` goes to the SDK as written, so the name irimi stores is the
@@ -310,9 +289,9 @@ def _tool(
 def _logged_fake(
     fake: Any, fn: Callable[..., Any], logged_fn: Callable[..., Any], tool_name: str, kind: str
 ) -> Any:
-    """`fake`, logging that it ran, in the shape the agent wrote it: a `staticmethod` stays one,
-    and a fake that is the function itself is `fn`'s own wrapper, which the SDK refuses as itself.
-    Two wrappers of one function would let the real write run under irimi, logged as its fake."""
+    """Wrap `fake` to log that it ran, in the shape the agent wrote it.
+
+    A fake that is the function itself reuses `fn`'s wrapper, so the SDK still refuses it."""
     if fake is None:
         return None
     static = isinstance(fake, staticmethod)

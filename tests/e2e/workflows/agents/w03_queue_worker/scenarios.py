@@ -6,8 +6,7 @@ from tests.e2e.workflows.agents.w03_queue_worker.agent import SCENARIOS, SHARED_
 from tests.e2e.workflows.harness.scenario import Scenario, Workflow
 from tests.e2e.workflows.harness.services import World
 
-# The version `worker_methods` deploys under: the process run and each run the SDK starts record
-# it.
+# The version `worker_methods` deploys under, which the process run and each SDK run record.
 AGENT_VERSION = "queue-worker 2.1.0"
 
 
@@ -88,38 +87,38 @@ WORKFLOW = Workflow(
             ("ledger_threads_8",),
             setup=_charges,
             doc="threads_8 with the ledger tools: each message's read tool on its pool thread and "
-            "its write tool in the propagated refund thread, all landing in its own run (#76)",
+            "its write tool in the propagated refund thread, all landing in its own run",
         ),
         "ledger_two_tools_8": Scenario(
             ("ledger_two_tools_8",),
             setup=_charges,
             doc="ledger_threads_8 with every odd message's ledger row written by a second write "
-            "tool: two tool names ending at once, printed in the order they ended (#120)",
+            "tool: two tool names ending at once, printed in the order they ended",
         ),
         "ledger_post_waits": Scenario(
             ("ledger_post_waits",),
             setup=_charges,
-            doc="two runs whose ledger writes' posts reach irimi in the other order than the "
+            doc="two runs whose ledger writes' posts reach irimi in reverse of the order the "
             "writes ended: an async write's post waits behind the loop's one busy executor "
-            "thread, and a sync write after it posts at once (#120)",
+            "thread, and a sync write after it posts at once",
         ),
         "ledger_asyncio_8": Scenario(
             ("ledger_asyncio_8",),
             setup=_charges,
             doc="asyncio_8 with the ledger tools: an async read, an async write and a sync read "
-            "that returns a coroutine, in eight tasks at once, each call in its task's run (#76)",
+            "that returns a coroutine, in eight tasks at once, each call in its task's run",
         ),
         "ledger_unpropagated": Scenario(
             ("ledger_unpropagated",),
             setup=_charges,
             doc="the ledger write made in a thread started without sdk.propagate: it has no run, "
-            "so it lands in the process run (#76)",
+            "so it lands in the process run",
         ),
         "ledger_worker": Scenario(
             ("ledger_worker",),
             setup=_charges,
             doc="the worker's ledger tools as its methods: a static read, a class-method write and "
-            "a plain-method write, each stand-in called as its method is (#76)",
+            "a plain-method write, each fake called as its method is",
         ),
         "task_outlives_trigger": Scenario(
             ("task_outlives_trigger",),

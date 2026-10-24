@@ -1,10 +1,6 @@
 """The control endpoint across every scenario of every sample workflow.
 
-Every workflow that uses the SDK posts each run's start and end to it, and W9 calls it by
-hand. These hold all of them: a control request is never an exchange, `IRIMI_CONTROL` reaches
-every agent `irimi shadow` starts and no bare one, and `IRIMI_REPLAY_RUN` none of either but in a
-replay, a bare agent, with no irimi, starts no run and calls no control endpoint, and the
-SDK warns only where W10 takes the endpoint away.
+SDK workflows post each run's start and end to it, and W9 calls it by hand.
 """
 
 import pytest
@@ -43,19 +39,11 @@ def test_no_control_request_is_ever_an_exchange(run_workflow, name, scenario, mo
 def test_irimi_control_reaches_every_shadow_agent_and_no_bare_one(
     run_workflow, name, scenario, mode
 ):
-    """Through `runner.child_env`: the endpoint on the listener the agent's proxy names. A bare
-    agent's environment is `INHERITED_ENV` and the scenario's own, so it has none. Under serve
-    mode the agent is not irimi's child, and is given both as the README's serve-mode guide says,
-    with the same result.
+    """Each shadow or serve agent gets `IRIMI_CONTROL` on its proxy's listener; a bare one none.
 
-    `IRIMI_REPLAY_RUN` is irimi's word that it replays, so an `irimi shadow` that does not
-    replay removes a stale one its own environment holds, as W6 `read_after_write`'s does; a bare
-    agent and a serve agent, which are not irimi's children, keep it, and are told nothing else.
-    `test_replays.py` holds every replay's agent to being told.
-
-    `agentkit.start()` logs all three, first thing in every agent. A bare run always starts its
-    agent, and a shadow run starts it as often, but for the scenarios where irimi refused to start
-    (`NO_AGENT_UNDER_SHADOW`): there the agent logged nothing at all."""
+    Serve agents are given it as the README's serve-mode guide says. A non-replaying
+    `irimi shadow` removes a stale `IRIMI_REPLAY_RUN` (W6 `read_after_write`); bare and serve
+    agents keep it. `NO_AGENT_UNDER_SHADOW` scenarios start no agent under shadow."""
     shadow = run_workflow(name, scenario, mode)
     bare = run_workflow(name, scenario, "bare")
     assert bare.events("start")
@@ -84,9 +72,9 @@ BY_HAND = {
 
 @pytest.mark.parametrize(("name", "scenario"), CASES, ids=[f"{n}:{s}" for n, s in CASES])
 def test_a_bare_agent_starts_no_run_and_calls_no_control_endpoint(run_workflow, name, scenario):
-    """Without irimi the SDK is inert: `IRIMI_ENGINE_ACTIVE` is unset, so no trigger and no
-    `sdk.run` starts a run, and nothing is posted anywhere. Nothing reached the fake internet,
-    which is where a post that ignored NO_PROXY or the missing `IRIMI_CONTROL` would land."""
+    """Without irimi the SDK is inert: no run starts and nothing is posted anywhere.
+
+    The fake internet is where a post that ignored NO_PROXY or the missing `IRIMI_CONTROL` lands."""
     bare = run_workflow(name, scenario, "bare")
     assert bare.events("run.start") == bare.events("run.end") == []
     if (name, scenario) in BY_HAND:
@@ -98,14 +86,10 @@ def test_a_bare_agent_starts_no_run_and_calls_no_control_endpoint(run_workflow, 
 def test_the_sdk_warns_only_where_its_control_endpoint_is_taken_away(
     run_workflow, name, scenario, mode
 ):
-    """A post that fails is the SDK's one WARNING on `irimi.sdk`, once per process per kind of
-    failure, and never an exception; `agentkit.start()` logs each irimi log record. Every
-    post in the corpus is accepted, so no run warns, but those of W10's `CONTROL_DOWN`, whose
-    start and end both fail and warn once between them.
+    """Only W10's `CONTROL_DOWN` runs warn; a bare run warns once of a write tool run for real.
 
-    A bare agent's SDK is inert, and warns of one thing only: a write tool that ran for real while
-    a proxy variable was set, as every bare run's is, once per process however many ran.
-    Under serve mode the same posts go to the endpoint the agent was given."""
+    A failed post is one warning on `irimi.sdk` per process per kind of failure, never an
+    exception. A bare agent's warning fires when a proxy variable is set, once per process."""
     bare = run_workflow(name, scenario, "bare")
     warned = [(e["logger"], e["level"], e["message"]) for e in bare.events("log")]
     real_writes = [tool for tool, ran in bare.tools("write") if ran == "real"]

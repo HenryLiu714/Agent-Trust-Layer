@@ -1,5 +1,4 @@
-"""What a sample workflow is: its scenarios, found by name, and the maps and environment a run of
-one is given."""
+"""Sample workflows and their scenarios, found by name, and the maps and environment a run gets."""
 
 from __future__ import annotations
 
@@ -33,11 +32,10 @@ class Scenario:
     faults: tuple[tuple[str, str, Callable[[Req], bool], int], ...] = ()
     # The agent's exit code under shadow is expected to differ from the bare run's.
     diverges: bool = False
-    # The scenario exists to show a write irimi cannot stop; universal invariant 1 is inverted.
+    # The scenario shows a write irimi cannot stop, so the no-write-escapes invariant is inverted.
     leaks: bool = False
     doc: str = ""
-    # The irimi flags it runs with under `irimi serve`, where every scenario runs too, since serve
-    # is how irimi runs beside an agent it did not launch.
+    # The irimi flags it runs with under `irimi serve`, which every scenario also runs under.
     serve_flags: tuple[str, ...] = ()
     # The irimi flags it runs with under `irimi shadow -- <cmd>`.
     shadow_flags: tuple[str, ...] = ()
@@ -55,13 +53,11 @@ class Workflow:
 
 
 def workflows() -> dict[str, Workflow]:
-    """Every workflow package under `agents/`, found by name so a new one needs no registry
-    edit."""
+    """Return every workflow package under `agents/`, found by name rather than registered."""
     found: dict[str, Workflow] = {}
     for info in pkgutil.iter_modules([str(AGENTS_DIR)]):
         is_workflow = info.ispkg and info.name.startswith("w") and info.name[1:3].isdigit()
-        # A package with no scenarios.py yet is half-written, not broken: skip it. One whose
-        # scenarios.py fails to import is broken, and that error is not swallowed.
+        # A package with no scenarios.py is half-written and skipped; an import error still raises.
         if is_workflow and (AGENTS_DIR / info.name / "scenarios.py").exists():
             module = importlib.import_module(f"{AGENTS_PACKAGE}.{info.name}.scenarios")
             found[info.name] = module.WORKFLOW
@@ -69,14 +65,13 @@ def workflows() -> dict[str, Workflow]:
 
 
 def cases() -> list[tuple[str, str]]:
-    """`(workflow, scenario)` for every scenario of every workflow, in order: what each test that
-    holds every run to something is parametrized over."""
+    """Return `(workflow, scenario)` for every scenario of every workflow, in order."""
     return [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
 
 
 @contextlib.contextmanager
 def environ(env: dict[str, str]) -> Iterator[None]:
-    """`os.environ` is exactly `env` for the block."""
+    """Make `os.environ` exactly `env` for the block."""
     saved = dict(os.environ)
     os.environ.clear()
     os.environ.update(env)
@@ -89,7 +84,7 @@ def environ(env: dict[str, str]) -> Iterator[None]:
 
 @contextlib.contextmanager
 def scenario_maps(scenario: Scenario, workdir: Path) -> Iterator[None]:
-    """The shipped maps, plus the scenario's own, read from a directory of this run's."""
+    """Load the shipped maps plus the scenario's own, from a directory of this run's."""
     if not scenario.extra_maps:
         yield
         return

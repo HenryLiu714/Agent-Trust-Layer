@@ -1,16 +1,6 @@
-"""W9 `scope_gauntlet`: one call per classification edge, from a plain script with no SDK.
+"""W9 `scope_gauntlet`: one labelled call per classification edge, from a plain script with no SDK.
 
-This is not an agent that does a job. It is the fastest check that irimi's safety rules hold on
-the wire: THE SCOPE RULE, the L0 floor, idempotency, bodies irimi cannot read whole, irimi's own
-headers arriving from the agent, and requests addressed to the proxy itself. Under `irimi shadow`
-the run is attributed `process`, but for the runs the control groups start over the control
-endpoint, doing by hand what the SDK does for the other workflows.
-
-    python -m tests.e2e.workflows.agents.w09_scope_gauntlet.agent <group>
-
-Each group is one scenario in `scenarios.py`. Every call is logged with a label, which is what the
-tests key their expectations on.
-"""
+Its control groups post runs to the control endpoint by hand, doing what the SDK does elsewhere."""
 
 from __future__ import annotations
 
@@ -44,7 +34,7 @@ def verbs() -> None:
     stripe("HEAD", "/v1/charges", label="head_charges")
     stripe("OPTIONS", "/v1/charges", label="options_charges")
     # The Stripe map names GET and POST on /v1/customers/{customer}, never DELETE or PATCH, and
-    # names no PUT anywhere. THE SCOPE RULE: none of these may be forwarded.
+    # no PUT anywhere, so by the scope rule none of these may be forwarded.
     stripe("DELETE", f"/v1/customers/{CUSTOMER}", label="delete_customer")
     stripe(
         "PATCH", f"/v1/customers/{CUSTOMER}", {"email": "x@example.test"}, label="patch_customer"
@@ -54,8 +44,8 @@ def verbs() -> None:
     stripe("POST", "/v1/subscriptions", {"customer": CUSTOMER}, label="unrouted_post")
     # A mapped write with an empty body: `payment_intents.cancel` posts nothing at all.
     stripe("POST", f"/v1/payment_intents/{INTENT}/cancel", label="cancel_empty_body")
-    # The L0 floor: a route that names a write but ships no `fixture:` is still faked, at L0, and
-    # never forwarded. Slack's `reactions.add` is one.
+    # A write route with no `fixture:` is still faked, with an echo, and never forwarded. Slack's
+    # `reactions.add` is one.
     slack(
         "reactions.add",
         label="reaction_no_fixture",
@@ -78,8 +68,7 @@ def idempotency() -> None:
 
 
 def _refund(form: dict[str, str], headers: dict[str, str], label: str) -> None:
-    """A refund, logging the id it was answered with and whether Stripe called it a replay: a
-    replayed key must hand back the first answer's id, not mint a second."""
+    """Refund and log the answer's id and `Idempotent-Replayed`; a retry returns the first id."""
     resp = stripe("POST", "/v1/refunds", form, headers=headers, label=label)
     agentkit.obs(
         "refund",
@@ -118,15 +107,14 @@ def bodies() -> None:
 
 
 def big_reads() -> None:
-    """Reads whose answer is past `irimi.core.bodies.MAX_BODY_BYTES`: the charge a refund's L3 check
-    reads, and the same charge read back after the refund, which the overlay would edit."""
+    """Read a charge past `irimi.core.bodies.MAX_BODY_BYTES`, by the check and after a refund."""
     stripe("POST", "/v1/refunds", {"charge": BIG_CHARGE, "amount": "700"}, label="refund_big")
     doc = stripe("GET", f"/v1/charges/{BIG_CHARGE}", label="get_big").json() or {}
     agentkit.obs("big_charge", amount_refunded=doc.get("amount_refunded"))
 
 
 def headers() -> None:
-    """irimi's own vocabulary, sent by the agent: both must be stripped before anything leaves."""
+    """Send irimi's own headers from the agent; both must be stripped before anything leaves."""
     stripe(
         "GET",
         f"/v1/refunds?charge={CHARGE}",
@@ -137,12 +125,10 @@ def headers() -> None:
 
 
 def self_addressed() -> None:
-    """A refund sent to the proxy's own address, under three spellings of this machine: the
-    reverse door (`/<host>/<path>`). Whatever the spelling, it must be recognised as addressed to
-    irimi, and never forwarded to itself or anywhere else.
+    """Send a base-URL refund (`/<host>/<path>`) to the proxy under three spellings of this machine.
 
-    At each spelling it also calls the control endpoint: its health check, and a path under
-    `/_irimi/` that names no route. Both are answered by irimi and are never an exchange."""
+    Each must be answered by irimi, never forwarded. Each spelling also calls the control
+    endpoint's health check and an unknown `/_irimi/` path, which are never exchanges."""
     proxy = urlsplit(agentkit.proxy() or "")
     auth = {"Authorization": f"Bearer {agentkit.key('STRIPE_API_KEY')}"}
     stripe_authority = urlsplit(base("stripe")).netloc
@@ -161,46 +147,37 @@ def self_addressed() -> None:
 
 # -- the control endpoint, called as the SDK will call it -----------------------------------------
 #
-# These groups do the SDK's job by hand (posting a run's start and end, and its tool calls), so
-# `irimi shadow` itself is shown storing an `sdk` run from posts the test controls exactly: its
-# trigger, its tool calls in order with the exchange labelled `Irimi-Run: <id>` between them, and
-# its outcome, and every refusal the SDK itself never provokes.
+# These groups post a run's start, tool calls and end by hand, so a test controls exactly what
+# `irimi shadow` stores, and can provoke every refusal the SDK never does.
 
-# The trigger's entrypoint each run posts: this module, by the name `launch` keeps for it.
+# The module half of each posted run's entrypoint: this module's importable name.
 ENTRYPOINT = "tests.e2e.workflows.agents.w09_scope_gauntlet.agent"
 AGENT_VERSION = "w09-by-hand"
 SDK_VERSION = "by-hand"
 # Past `irimi.core.limits.MAX_ERROR_MESSAGE` (1000), the most of an error message a trace keeps.
 LONG_MESSAGE_CHARS = 1500
-# A key in a posted error, across each cut a trace makes of one. `ghp_`'s shape needs 36
-# characters after it, so the part of the key a cut kept would no longer be its shape.
+# A key in a posted error, across each cut a trace makes of one; `ghp_`'s shape needs 36
+# characters, so a cut part of it would not match the shape.
 ERROR_KEY = "ghp_" + "W9errorKey" + "0" * 26
-# Where ERROR_KEY starts in a posted message: across the 1000-character cut, its 27-character
-# placeholder ending before it.
+# Where ERROR_KEY starts in a posted message: across the cut, its placeholder ending before it.
 ERROR_KEY_AT = 966
-# Past `irimi.core.limits.MAX_ERROR_TYPE` (300), the most of an error type a trace keeps: a dotted
-# path of 657 characters, which no class's `module.qualname` comes near, ERROR_KEY one of its
-# names, 264 characters in, across that cut.
+# Past `irimi.core.limits.MAX_ERROR_TYPE` (300): a 657-character dotted path with ERROR_KEY
+# among its names, across that cut.
 LONG_ERROR_TYPE = "pkg" + ".sub" * 65 + f".{ERROR_KEY}" + ".sub" * 85 + ".RuntimeError"
 # Past `irimi.engine.control.MAX_CONTROL_BODY` (2 MiB), the most a control request may post.
 OVERSIZED_BODY_BYTES = 2 * 1024 * 1024 + 1
-# How deep `refuse_deep` nests a tool call's name: deeper than `repr` went on some Pythons, and
-# read by every Python's `json.loads`, so its decoder names it by type on all of them.
+# How deep `refuse_deep` nests a tool call's name: deeper than `repr` goes on some Pythons, yet
+# within what every Python's `json.loads` reads.
 DEEP_FIELD_LEVELS = 5_000
 # How long `_settle` waits for irimi's store to write what is queued.
 SETTLE_S = 5.0
 
 
 def control_runs() -> None:
-    """The SDK's job, by hand: runs started, given tool calls and ended over the control endpoint,
-    each with a Stripe read labelled with its run between two tool calls.
+    """Post runs by hand over the control endpoint, each with a labelled read between tool calls.
 
-    One run posts direct to `IRIMI_CONTROL` (`127.0.0.1`, which NO_PROXY sends straight to the
-    listener) and one through the proxy to itself (`127.1`). Two more run at once, on two threads
-    kept in lockstep, so their posts and reads interleave on the wire and must not mix. One ends
-    in error, its message past what a trace keeps, and its error type too, a key across
-    each cut. Then every refusal the endpoint documents, and the health check before and
-    after."""
+    One run posts direct, one through the proxy to itself, two in lockstep on two threads, and one
+    ends in error with a key across each cut; then every documented refusal."""
     control = _control_base()
     _health(control, "health_before")
     _run_by_hand(control, "ctl-direct", f"/v1/charges/{CHARGE}", "direct")
@@ -242,21 +219,17 @@ def control_runs() -> None:
 
 
 def _keyed_message(head: str, filler: str) -> str:
-    """An error message of LONG_MESSAGE_CHARS characters, `head` and then `filler`, with ERROR_KEY
-    from ERROR_KEY_AT, across the cut a trace makes of it."""
+    """Return a LONG_MESSAGE_CHARS message with ERROR_KEY at ERROR_KEY_AT, across the cut."""
     before = head + filler * (ERROR_KEY_AT - len(head) - 1) + " "
     after = " " + filler * (LONG_MESSAGE_CHARS - len(before) - len(ERROR_KEY) - 1)
     return before + ERROR_KEY + after
 
 
 def control_hazards() -> None:
-    """Posts the SDK must never make, made, so what irimi does with each is pinned: a start
-    re-posted for a run that has ended, and a start and an end for the process run's own id,
-    `IRIMI_RUN`, which irimi starts and ends itself, or under serve mode for `unattributed`, its
-    own run. Between those two, a tool call posted to that run, which may hold one. Last, a
-    tool call posted to `unattributed`, as the SDK posts one made in no run by an agent with no
-    process run (`irimi serve`): the one post that may name it. Then the health check,
-    whose `dropped` is where irimi says it dropped the re-posted start."""
+    """Make the posts the SDK never makes, so what irimi does with each is pinned.
+
+    That is a start re-posted for an ended run, a start, tool call and end for irimi's own run, and
+    a tool call for `unattributed`. The health check's `dropped` counts the re-posted start."""
     control = _control_base()
     _start(control, "ctl-restarted", "restarted_start")
     stripe(
@@ -267,9 +240,8 @@ def control_hazards() -> None:
     )
     _end(control, "ctl-restarted", "restarted_end")
     _start(control, "ctl-restarted", "restarted_again", name="ctl-restarted again")
-    # irimi's own run: the process run `IRIMI_RUN` names under `irimi shadow -- <cmd>`, and
-    # `unattributed` under serve mode, which gives the agent `IRIMI_CONTROL` and no `IRIMI_RUN`.
-    # Bare, there is neither; the calls are made to the same URL shape all the same.
+    # irimi's own run: the process run under shadow, `unattributed` under serve; a bare run has
+    # neither, but makes the same calls.
     process_run = os.environ.get(RUN_ENV) or (
         "unattributed" if os.environ.get(CONTROL_ENV) else "no-process-run"
     )
@@ -291,16 +263,14 @@ def control_hazards() -> None:
 
 
 def _control_base() -> str:
-    """`IRIMI_CONTROL`, which `irimi shadow` gives its child. A bare run has none, so it posts to
-    the same URL shape at its proxy's address, which is the fake internet: every call is made in
-    both modes and the agent exits the same way."""
+    """Return `IRIMI_CONTROL`, or for a bare run the same URL shape on the fake internet."""
     given = os.environ.get(CONTROL_ENV)
     agentkit.obs("control_base", given=given is not None)
     return given or (agentkit.proxy() or "").rstrip("/") + "/_irimi"
 
 
 def _through_proxy(control: str) -> str:
-    """The same endpoint spelled `127.1`, which is not in NO_PROXY: through the proxy to itself."""
+    """Return the endpoint spelled `127.1`, not in NO_PROXY, so posts go through the proxy."""
     parts = urlsplit(control)
     return parts._replace(netloc=f"127.1:{parts.port}").geturl()
 
@@ -308,8 +278,7 @@ def _through_proxy(control: str) -> str:
 def _run_by_hand(
     control: str, run_id: str, read_path: str, tag: str, step: Callable[[], object] = lambda: None
 ) -> None:
-    """One run as the SDK reports it: start, a tool call, a read labelled with the run, a second
-    tool call, end ok. `step` is called between each, to keep two threads in lockstep."""
+    """Post one run as the SDK would, calling `step` between posts to keep threads in lockstep."""
     _start(control, run_id, f"{tag}_start")
     step()
     _tool_call(control, run_id, "look_up", f"{tag}_tool_1", result={"found": read_path})
@@ -377,15 +346,13 @@ def _end(
 
 
 def _post(control: str, run_id: str, action: str, doc: dict[str, Any], label: str) -> Response:
-    """One control post, and what it posted, logged, so a test can compare the stored record with
-    the posted one field by field."""
+    """Make one control post, logging the body so a test can compare it with the stored record."""
     agentkit.obs("posted", label=label, run=run_id, action=action, body=doc)
     return http("POST", f"{control}/runs/{run_id}/{action}", json_body=doc, label=label)
 
 
 def _refusals(control: str) -> None:
-    """Each documented refusal, once. A refused post must make no run directory, so each names a
-    run id of its own that nothing else uses."""
+    """Provoke each documented refusal once, each under a run id nothing else uses."""
     ended = {"ended_at": time.time(), "outcome": "ok", "error": None}
     started = {"agent_version": None, "sdk_version": SDK_VERSION, "started_at": time.time()}
     tool: dict[str, Any] = {
@@ -427,18 +394,14 @@ def _refusals(control: str) -> None:
 
 
 def _health(control: str, label: str) -> None:
-    """`GET /_irimi/health`, once irimi's store has written what it had queued, so its counters
-    are exact."""
+    """Log `GET /_irimi/health` once the store has written what it had queued."""
     _settle(control)
     resp = http("GET", f"{control}/health", label=label)
     agentkit.obs("health", label=label, body=resp.json())
 
 
 def _settle(control: str) -> None:
-    """Wait, unlogged, until the health check says the store has nothing queued. Every run here
-    ends with a post that queues a run.json write, not an event line, so once the queue is empty
-    every event line before it has been written. Bare, the fake internet answers, and there is
-    nothing to wait for."""
+    """Wait, unlogged, until the health check says the store has nothing queued."""
     deadline = time.monotonic() + SETTLE_S
     request = urllib.request.Request(f"{control}/health")
     while time.monotonic() < deadline:
@@ -454,23 +417,18 @@ def _settle(control: str) -> None:
     agentkit.obs("settle_timeout")
 
 
-# What each body `bombs` sends decodes to, past irimi's decoding cap (`mitm.MAX_DECODED_BODY`,
-# 64 MiB) and the fake internet's (`internet.MAX_REQUEST_DECODED`): a few hundred KB of gzip each.
+# What each body `bombs` sends decodes to, past irimi's decoding cap and the fake internet's.
 BOMB_PADDING_BYTES = 128 * 1024 * 1024
-# The padding `bombs` puts after a body's own text: lines of blanks, which JSON reads as whitespace,
-# and one line of blanks or of `x` that never ends, which leaves irimi no whole line to keep.
+# Padding after a body's text: lines of blanks, which JSON ignores, or one endless line, which
+# leaves irimi no whole line to keep.
 BLANK_LINE = b" " * 15 + b"\n"
 
 
 def bombs() -> None:
-    """Bodies that decode to far more than they weigh, sent and read back.
+    """Send and read back bodies that decode to far more than they weigh.
 
-    A refund whose form decodes to 128 MiB, which has no line break in it; a model call forwarded
-    live, its JSON followed by 128 MiB of blank lines; a refund and then the charge's refunds read
-    back, answered with the service's own list followed by 128 MiB of blanks (`gzip-padded`), which
-    the overlay would edit; and three run starts posted to the control endpoint, each a valid start
-    followed by 128 MiB of blanks: in lines, on its own line with no line after it, and on the
-    same line. Each one sent and each one read is logged with its length and SHA-256."""
+    A refund, a live model call, a padded refunds read and three control starts; each body sent or
+    read is logged with its length and SHA-256."""
     auth = {"Authorization": f"Bearer {agentkit.key('STRIPE_API_KEY')}"}
     form = urlencode({"charge": CHARGE, "amount": "800"}).encode() + b"&metadata[note]="
     _send_bomb(
@@ -517,21 +475,17 @@ def bombs() -> None:
 
 
 def cut_refund() -> None:
-    """`bombs`'s two refunds alone, the cut one for 700 where `bombs`'s is for 800: a write whose
-    body irimi could not keep, made differently from `bombs`'s, which `irimi compare` lines
-    up with it."""
+    """Make `bombs`'s two refunds alone, the cut one for 700, not 800, for `irimi compare`."""
     _cut_write("/v1/refunds", {"charge": CHARGE, "amount": "700"})
 
 
 def cut_update() -> None:
-    """`cut_refund` with the cut write an update of the customer: a different write than `bombs`'s
-    on the same host, its body cut the same way."""
+    """Do as `cut_refund` does, the cut write being a customer update instead."""
     _cut_write(f"/v1/customers/{CUSTOMER}", {"name": "Gauntlet Ltd"})
 
 
 def _cut_write(path: str, fields: dict[str, str]) -> None:
-    """A Stripe write whose form decodes to 128 MiB with no line break in it, as `bombs`'s refund
-    does, and then `bombs`'s plain refund."""
+    """Send a write that decodes to 128 MiB with no line break, then `bombs`'s plain refund."""
     form = urlencode(fields).encode() + b"&metadata[note]="
     _send_bomb(
         "cut_write",
@@ -564,7 +518,7 @@ def _log_bytes(event: str, label: str, body: bytes, encoding: str | None) -> Non
 
 
 def unmapped_hosts() -> None:
-    """Hosts no map claims, and a mapped POST-only host's unrouted method."""
+    """Call hosts no map claims, and a mapped RPC host's unrouted method."""
     gql = agentkit.internal("graphql.internal")
     http("POST", gql + "/graphql", json_body={"query": "{ orders { id } }"}, label="graphql_query")
     http(
@@ -578,14 +532,13 @@ def unmapped_hosts() -> None:
 
 
 def get_that_writes() -> None:
-    """A write spelled as a GET. irimi forwards reads, so this one escapes, and the scenario says
-    so: it is the case for a map entry, not a bug irimi can see."""
+    """Make a write spelled as a GET, which irimi forwards as a read, so it escapes."""
     legacy = agentkit.internal("legacy.internal")
     http("GET", legacy + "/api/delete_user?id=7", label="get_delete_user")
 
 
 def _chunked_post(url: str, pieces: list[bytes], headers: dict[str, str]) -> None:
-    """A chunked request body, which urllib cannot send: http.client, through the proxy by hand."""
+    """POST a chunked body, which urllib cannot send, with http.client through the proxy."""
     proxy = agentkit.proxy()
     assert proxy, "the gauntlet always runs behind a proxy"
     p = urlsplit(proxy)

@@ -1,24 +1,6 @@
-"""W4 `slack_ops_bot`: an ops bot driven by the Slack Events API.
+"""W4 `slack_ops_bot`: a Slack Events API bot that answers each mention in one run.
 
-Slack calls the bot at `POST /slack/events`. The bot answers `url_verification` with its challenge,
-and handles each `app_mention` as one run (`@sdk.trigger on_mention`):
-
-1. `conversations.replies` on the thread it was mentioned in, and `users.info` on the author;
-2. one LLM call for the answer;
-3. a threaded `chat.postMessage` reply, `reactions.add` on the mention, `files.upload` of a CSV,
-   and a status line to the incoming webhook (whose URL path is the credential);
-4. a read-back of its own thread, logging whether it sees its reply.
-
-A mention that says "incident" first opens a top-level incident message and replies under THAT
-message's `ts`, so the read-back asks about a thread this run minted.
-
-The agent delivers its own events over loopback, through no proxy: an inbound webhook is not the
-agent's egress, and irimi must never see it. Each delivery is signed as Slack signs it and the
-handler verifies it. Slack retries a slow delivery with `X-Slack-Retry-Num`; the bot dedupes on
-`event_id`, so a retry is acknowledged and not handled twice.
-
-    python -m tests.e2e.workflows.agents.w04_slack_ops_bot.agent <scenario>
-"""
+It delivers its own signed events over loopback, through no proxy, and dedupes retries."""
 
 from __future__ import annotations
 
@@ -74,7 +56,7 @@ def on_mention(event: dict[str, Any]) -> None:
     agentkit.http("POST", hook, json_body={"text": f"ops bot answered {name}"})
     if not posted.get("ok"):
         return
-    # Read back where Slack said the reply went, as an agent would.
+    # Read back where Slack said the reply went, and whether the reply is there.
     back = agentkit.slack("conversations.replies", channel=posted["channel"], ts=thread)
     texts = [m.get("text") for m in back.get("messages") or []]
     agentkit.obs(
@@ -125,8 +107,8 @@ class _Events(agentkit.Handler):
             try:
                 on_mention(payload["event"])
             except Exception as exc:
-                # A handler that raised answers 500, as a web framework would, and fails the
-                # run's exit code. Left to escape, it would drop the connection with no answer.
+                # Answer 500, as a web framework would, and fail the exit code; an escaping
+                # exception would drop the connection with no answer.
                 _failures.append(f"on_mention: {type(exc).__name__}: {exc}")
                 self.reply(500, {"ok": False})
                 return

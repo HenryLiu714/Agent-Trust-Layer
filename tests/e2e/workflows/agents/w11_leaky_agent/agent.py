@@ -1,30 +1,6 @@
-"""W11 `leaky_agent`: an agent that gets around irimi, one escape per scenario.
+"""W11 `leaky_agent`: an agent that gets around irimi's proxy, one escape per scenario.
 
-`irimi shadow` virtualizes only what is routed through its proxy, and says so in its banner
-("only traffic sent through this proxy is shadowed"). Each escape here is a real way agent
-code ends up off that route. Under shadow every escape's write really lands on the fake service.
-These are the cases a future check that flags traffic bypassing the proxy would catch.
-
-Each escape runs inside `sdk.run`, so under shadow it is a run whose requests the SDK labels, but
-only those that go through irimi: a run's id must never ride out on an escape, where nothing
-would strip it. Universal invariant 2 checks that no fake service ever saw `Irimi-Run`.
-
-`labelled_sidecar` writes to the loopback sidecar through an `@sdk.write_tool`, so under
-shadow its stand-in runs and nothing escapes.
-
-`redirected` writes nothing. It is a read that each client the SDK labels (urllib, `requests`,
-`httpx` sync and async) follows through two redirects: the first stays on a host irimi proxies, the
-second leads to the loopback sidecar, which irimi's own `NO_PROXY` sends direct. Each hop is
-labelled or not by where its own connection goes, so the last one goes out unlabelled. But
-for `requests`, which keeps the first request's proxy across redirects whatever `NO_PROXY` says:
-its last hop goes through irimi after all, labelled, and is stripped there.
-
-    python -m tests.e2e.workflows.agents.w11_leaky_agent.agent <escape>
-
-Safety: no escape ever resolves a real host name. A client that bypasses the proxy resolves the
-name itself, so this agent resolves the fake internet's names to 127.0.0.1 (`_local_dns`) and
-refuses every other name. A raw socket and a loopback sidecar dial 127.0.0.1 directly.
-"""
+Each escape runs inside `sdk.run`; no run id may ride out on one, where nothing would strip it."""
 
 from __future__ import annotations
 
@@ -62,8 +38,7 @@ def port() -> int:
 
 @contextlib.contextmanager
 def _local_dns() -> Iterator[None]:
-    """The fake internet's names resolve to loopback; every other name fails. Never the real
-    internet, whatever the escape."""
+    """Resolve the fake internet's names to loopback and fail every other, so no escape goes out."""
     real = socket.getaddrinfo
 
     def fake(host: Any, *args: Any, **kwargs: Any) -> Any:
@@ -83,7 +58,7 @@ def _local_dns() -> Iterator[None]:
 
 
 def _send(opener: urllib.request.OpenerDirector, label: str, url: str, **kw: Any) -> int:
-    """One request through `opener`, logged the way `agentkit.http` logs one."""
+    """Send one request through `opener`, logged as `agentkit.http` logs one."""
     request = urllib.request.Request(url, **kw)
     status: int
     try:
@@ -109,19 +84,19 @@ def _refund_request() -> dict[str, Any]:
 
 
 def proxied() -> None:
-    """The control: the same refund, through the proxy as configured."""
+    """Refund through the proxy as configured: the control case."""
     agentkit.stripe("POST", "/v1/refunds", {"charge": CHARGE, "amount": "500"}, label="refund")
 
 
 def proxyless_client() -> None:
-    """A client built with no proxy handler: what `requests` does with `trust_env=False`."""
+    """Refund with no proxy handler, as `requests` does with `trust_env=False`."""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with _local_dns():
         _send(opener, "refund", agentkit.base("stripe") + "/v1/refunds", **_refund_request())
 
 
 def no_proxy_star() -> None:
-    """A subprocess started with `NO_PROXY=*`, as a job runner or a shell profile might."""
+    """Refund from a subprocess started with `NO_PROXY=*`, as a job runner might start one."""
     env = {**os.environ, "NO_PROXY": "*", "no_proxy": "*"}
     cmd = [
         sys.executable,
@@ -133,8 +108,7 @@ def no_proxy_star() -> None:
 
 
 def _child_refund() -> None:
-    """In the `NO_PROXY=*` child: an ordinary urllib call, which honours NO_PROXY and goes
-    direct."""
+    """Refund in the `NO_PROXY=*` child with plain urllib, which honours it and goes direct."""
     with _local_dns():
         _send(
             urllib.request.build_opener(),
@@ -145,7 +119,7 @@ def _child_refund() -> None:
 
 
 def raw_socket() -> None:
-    """HTTP/1.1 written by hand on a TCP socket: no HTTP client, so no proxy variables at all."""
+    """Post to Slack in HTTP/1.1 written by hand on a socket, which reads no proxy variables."""
     body = json.dumps({"channel": CHANNEL, "text": "posted around irimi"}).encode()
     head = (
         "POST /api/chat.postMessage HTTP/1.1\r\n"
@@ -169,8 +143,7 @@ def raw_socket() -> None:
 
 
 def loopback_service() -> None:
-    """A sidecar on loopback (a queue, a database's HTTP API). `irimi shadow` itself sets
-    `NO_PROXY=localhost,127.0.0.1`, so the default configuration sends this straight to it."""
+    """Write to a loopback sidecar, which irimi's own `NO_PROXY` sends direct."""
     agentkit.http(
         "POST",
         agentkit.internal("127.0.0.1") + "/queue/jobs",
@@ -185,7 +158,7 @@ def _enqueue_stand_in(job: dict[str, Any]) -> dict[str, Any]:
 
 @observe.write_tool(fake=_enqueue_stand_in)
 def enqueue_job(job: dict[str, Any]) -> dict[str, Any]:
-    """`loopback_service`'s write, labelled as one."""
+    """Make `loopback_service`'s write, labelled as a write tool."""
     resp = agentkit.http(
         "POST", agentkit.internal("127.0.0.1") + "/queue/jobs", json_body=job, label="enqueue"
     )
@@ -193,16 +166,14 @@ def enqueue_job(job: dict[str, Any]) -> dict[str, Any]:
 
 
 def labelled_sidecar() -> None:
-    """The loopback sidecar's write, made by a write tool. The proxy still cannot see it,
-    but irimi's SDK runs the tool's stand-in in its place, so the escape is closed: the sidecar
-    sees nothing under shadow. The one escape here an agent can close itself today."""
+    """Make the sidecar write through a write tool, whose fake runs under shadow instead."""
     agentkit.obs("queued", doc=enqueue_job({"job": "refund", "charge": CHARGE}))
 
 
 def redirected() -> None:
-    """The same read by each client the SDK labels, following both redirects: the export
-    service's, through irimi, then the hop to the sidecar on loopback, direct (through irimi for
-    `requests`)."""
+    """Read through two redirects to the loopback sidecar with each client the SDK labels.
+
+    The last hop goes direct, except with `requests`, which keeps the first hop's proxy."""
     sidecar = agentkit.internal("127.0.0.1") + "/queue/stats"
     url = agentkit.internal(FILES_HOST) + "/export?" + urlencode({"next": sidecar})
     for client in REDIRECT_CLIENTS:

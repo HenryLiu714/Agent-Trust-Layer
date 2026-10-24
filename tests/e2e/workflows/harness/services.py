@@ -1,12 +1,6 @@
-"""The fake services behind the fake internet: Stripe, Slack, a scripted LLM, and generic JSON
-services for a workflow's own internal APIs.
+"""Stateful fake Stripe, Slack, LLM and internal JSON services, the baseline a bare run writes to.
 
-Each one is stateful in the way the real service is, so a BARE run of a workflow (no irimi) really
-refunds, really posts, and really rejects a second refund. That bare run is the baseline a shadow
-run is compared with: an agent that behaves the same under shadow while the fake records no write
-is shadow mode working. Error bodies copy the real services' shapes, because the agents branch on
-them and irimi's fakes copy the same shapes.
-"""
+Error bodies copy the real services' shapes, because the agents branch on them."""
 
 from __future__ import annotations
 
@@ -53,10 +47,8 @@ def charge(
     }
 
 
-# The secret half of every PaymentIntent's `client_secret`, and a harness canary. Stripe hands the
-# client secret back on every retrieve made with a secret key, and it lets whoever holds it confirm
-# the payment, so a live read of an intent stores a credential in a response body: the store must
-# keep only its placeholder.
+# The secret half of every PaymentIntent's `client_secret`, and a canary: Stripe returns it on
+# every retrieve, so a live read of an intent puts a credential in a stored response body.
 CLIENT_SECRET_CANARY = credentials.CLIENT_SECRET
 
 
@@ -711,9 +703,9 @@ class JsonService:
 
 
 def fake_langsmith() -> JsonService:
-    """LangSmith's run intake, which W7 posts one trace to. A telemetry POST is not a write:
-    irimi forwards telemetry live, so a fake that counted this one as a write would fail
-    invariant 1 on a request irimi was right to send."""
+    """Return LangSmith's run intake, which W7 posts one trace to.
+
+    Telemetry is forwarded live, so this fake counts no POST as a write."""
     return JsonService(
         ("api.smith.langchain.com",),
         {("POST", "/runs"): lambda req, state: Resp(202, {"status": "accepted"})},

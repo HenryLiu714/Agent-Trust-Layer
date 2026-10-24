@@ -1,20 +1,6 @@
-"""W10 `flaky_upstream`: an agent that retries, against services that fail.
+"""W10 `flaky_upstream`: an agent that retries against services that fail, one failure per scenario.
 
-`sync_payouts` reads recent charges, asks the model which one to refund, refunds it, and tells
-Slack. Every call retries on a 429, a 5xx or no answer at all, with a short backoff, and a write
-carries an Idempotency-Key so its retry is the same write. The scenarios break one thing each: a
-rate-limited read, a server error, a stalled read, a reset on a read and on the write, irimi's own
-L3 read failing, a model that answers prose, an agent that raises, is interrupted or is killed
-after its write, a write retried with no key, and irimi's own control endpoint taken away.
-
-    python -m tests.e2e.workflows.agents.w10_flaky_upstream.agent \\
-        [--no-key] [--raise-after-write] [--sigterm-after-write] [--sigint-after-write] \\
-        [--control {unset,unreachable,refused}]
-
-What it is for: a shadow run is only as good as the failures it shows. A failed READ reaches the
-real service under shadow and fails there too. A failed WRITE never does, because the write never
-leaves irimi, so the agent's retry path for it is never exercised. The scenarios pin both.
-"""
+A failed read fails under shadow too; a failed write never does, so its retry path never runs."""
 
 from __future__ import annotations
 
@@ -48,7 +34,7 @@ SYSTEM = (
 
 
 def retrying(label: str, call: Callable[[], Response]) -> Response:
-    """`call` until it answers with something other than a retryable status, `ATTEMPTS` times."""
+    """Call `call` until it answers a non-retryable status, at most `ATTEMPTS` times."""
     for attempt in range(1, ATTEMPTS + 1):
         try:
             resp = call()
@@ -64,7 +50,7 @@ def retrying(label: str, call: Callable[[], Response]) -> Response:
 
 
 def decide(charges: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """The model's decision, or None when its answer is not the JSON it was asked for."""
+    """Return the model's decision, or None when its answer is not the JSON it was asked for."""
     summary = json.dumps([{k: c[k] for k in ("id", "amount", "currency")} for c in charges])
     message = agentkit.anthropic(SYSTEM, [{"role": "user", "content": f"Charges: {summary}"}])
     text = agentkit.text_of(message)
@@ -77,11 +63,9 @@ def decide(charges: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 
 def break_control(how: str) -> None:
-    """Take away the control endpoint `irimi shadow` named, before the run starts, as a deploy
-    can: a launcher that passes on only the variables it knows (`unset`), an endpoint that is gone
-    (`unreachable`: a port nothing listens on), or one that refuses every post (`refused`: a 404).
-    The SDK never raises into the agent: the run goes on, current and labelled, the SDK warns once,
-    and irimi only lacks the run's record. Bare, there is no endpoint to take away."""
+    """Take the control endpoint away before the run, as a deploy can (`how`: CONTROL_FAULTS).
+
+    The SDK never raises, so the run goes on labelled, warns once, and only its record is lost."""
     control = os.environ.get(CONTROL_ENV)
     if control is None:
         return
@@ -106,8 +90,8 @@ def sync_payouts(
             "GET", "/v1/charges?limit=5", label="list_charges", timeout_s=READ_TIMEOUT_S
         ),
     )
-    # What the read answered, as it came: the agent never asks for an encoding and decodes none,
-    # so a bomb's bytes are what it holds, and they must be the service's under shadow too.
+    # The agent decodes nothing, so a bomb's bytes are what it holds, and must be the service's
+    # under shadow too.
     agentkit.obs(
         "listed",
         bytes=len(charges.body),
@@ -133,10 +117,8 @@ def sync_payouts(
         os.kill(os.getpid(), signal.SIGTERM)
         time.sleep(5)  # never reached: SIGTERM's default action ends the process
     if sigint_after_write:
-        # An operator presses Ctrl-C mid-run. Python raises KeyboardInterrupt, a BaseException,
-        # which the SDK records as the run's error and re-raises. Python's own handler is put
-        # back first: a shell starts a background job with SIGINT ignored, and Python then installs
-        # none, so the signal would do nothing and the run would end `ok`.
+        # Ctrl-C mid-run: the SDK records the KeyboardInterrupt and re-raises. Python's handler is
+        # restored first, since a shell's background job starts with SIGINT ignored.
         signal.signal(signal.SIGINT, signal.default_int_handler)
         os.kill(os.getpid(), signal.SIGINT)
         time.sleep(5)  # interrupted: the KeyboardInterrupt is raised by now

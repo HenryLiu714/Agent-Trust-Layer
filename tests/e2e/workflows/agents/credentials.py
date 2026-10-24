@@ -1,8 +1,6 @@
-"""Every synthetic credential the sample workflows use, and none of them real.
+"""Every synthetic credential the sample workflows use, none of them real.
 
-Each is its prefix joined to a body, so no file holds a whole key for a secret scanner to flag;
-`.gitleaks.toml` allowlists the joined values. `tests/support/credentials.py` is the tests' copy.
-"""
+Each joins a prefix to a body, so no file holds a whole key; `.gitleaks.toml` allows the values."""
 
 # Given to every workflow's agent: fake, recognisable, and greppable. The fake services accept
 # them by prefix, and one found on disk under irimi's home is a redaction leak.

@@ -27,8 +27,7 @@ def _big(world: World) -> None:
 
 
 def _bombs(world: World) -> None:
-    """`_stripe`, with `gzip-padded`'s padding built before the agent starts, not inside the
-    request it answers."""
+    """Set up `_stripe`, building `gzip-padded`'s padding before the agent starts."""
     agentkit.gzip_bomb(b"", PADDED_LINE, PADDED_BYTES)
     _stripe(world)
 
@@ -78,19 +77,19 @@ def _legacy(world: World) -> None:
 
 WORKFLOW = Workflow(
     name="w09_scope_gauntlet",
-    summary="Every classification edge from a plain script: THE SCOPE RULE, the L0 floor, "
-    "idempotency, unreadable bodies, forged irimi headers, the reverse door, unmapped hosts, "
-    "and the control endpoint (#73).",
+    summary="Every classification edge from a plain script: the scope rule, fixture-less writes, "
+    "idempotency, unreadable bodies, forged irimi headers, base-URL requests, unmapped hosts, "
+    "and the control endpoint.",
     scenarios={
         "verbs": Scenario(
             ("verbs",),
             setup=_stripe,
-            doc="DELETE/PATCH/PUT/unrouted POST are faked; a fixture-less write is faked at L0",
+            doc="DELETE/PATCH/PUT/unrouted POST are faked; a fixture-less write gets an echo",
         ),
         "idempotency": Scenario(("idempotency",), setup=_stripe, doc="one key, three uses"),
         "bodies": Scenario(("bodies",), setup=_stripe, doc="gzip, chunked, and a 3 MB body"),
         "big_reads": Scenario(
-            ("big_reads",), setup=_big, doc="a 3 MB charge: the L3 read and the overlay give up"
+            ("big_reads",), setup=_big, doc="a 3 MB charge: the check read and the overlay give up"
         ),
         "headers": Scenario(("headers",), setup=_stripe, doc="Irimi-Rewrote and Irimi-Run forged"),
         "self_addressed": Scenario(
@@ -104,19 +103,19 @@ WORKFLOW = Workflow(
             ("control_runs",),
             setup=_stripe,
             doc="the SDK's job by hand over the control endpoint: runs started, given tool calls "
-            "and labelled reads, and ended; two at once; one in error; every refusal (#73)",
+            "and labelled reads, and ended; two at once; one in error; every refusal",
         ),
         "control_hazards": Scenario(
             ("control_hazards",),
             setup=_stripe,
             doc="a start re-posted after its run ended; a start, a tool call and an end posted "
-            "for the process run's own id; a tool call posted for no run (#76)",
+            "for the process run's own id; a tool call posted for no run",
         ),
         "bombs": Scenario(
             ("bombs",),
             setup=_bombs,
             faults=(("api.stripe.com", "gzip-padded", _refunds_read, 1),),
-            doc="bodies that decode past irimi's cap (#94): a refund, a model call forwarded live, "
+            doc="bodies that decode past irimi's cap: a refund, a model call forwarded live, "
             "a read-back after a refund, and run starts posted to the control endpoint",
         ),
         "cut_refund": Scenario(
@@ -124,13 +123,13 @@ WORKFLOW = Workflow(
             setup=_stripe,
             doc="bombs's two refunds alone, the cut one for another amount: irimi stores no body "
             "for it, so both print alike, and `irimi compare` will not call the two the same, a "
-            "`?` row (#79)",
+            "`?` row",
         ),
         "cut_update": Scenario(
             ("cut_update",),
             setup=_stripe,
             doc="cut_refund with the cut write a customer update: `irimi compare` will not compare "
-            "it with the cut refund, a `?` row (#79)",
+            "it with the cut refund, a `?` row",
         ),
         "unmapped_hosts": Scenario(
             ("unmapped_hosts",), setup=_internal, doc="GraphQL and Slack's unrouted method"

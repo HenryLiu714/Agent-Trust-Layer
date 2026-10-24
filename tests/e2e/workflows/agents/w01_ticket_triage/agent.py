@@ -1,25 +1,6 @@
-"""W1 `ticket_triage`: a support-ticket webhook answered by a multi-turn LLM tool loop.
+"""W1 `ticket_triage`: a helpdesk ticket webhook answered by a multi-turn Anthropic tool loop.
 
-A helpdesk POSTs a ticket to `/tickets`. `handle_ticket` is the trigger: it runs an Anthropic
-`tool_use` loop of up to `MAX_TURNS` turns in which the model may call four tools:
-
-- `get_charge`       a Stripe read (HTTP, seen by the proxy)
-- `lookup_customer`  a read tool over the agent's own SQLite (`@sdk.read_tool`)
-- `issue_refund`     a Stripe write (HTTP, faked by the proxy under shadow)
-- `send_reply`       a write tool over the same SQLite (`@sdk.write_tool`), whose stand-in
-                     runs under shadow and whose real body must never run there
-
-The system prompt is picked by `PROMPT` (a named variant), so editing the prompt changes what the
-scripted model does: this is the agent whose replay diverges after a prompt edit. Every model
-call carries `metadata.user_id`, a session id new in each process, as a helpdesk integration tags
-its calls, so no two runs send the same bytes: a replay matches a call by what it asks.
-
-    python -m tests.e2e.workflows.agents.w01_ticket_triage.agent \
-        <ticket_id> <charge> <customer> <message>
-
-The agent serves `/tickets` on loopback and delivers the one ticket to itself, as a helpdesk
-would. It exits 0 when the ticket was handled and 1 when the handler failed.
-"""
+Tools: a Stripe read and refund, a SQLite read tool and write tool. `PROMPT` picks the prompt."""
 
 from __future__ import annotations
 
@@ -36,12 +17,11 @@ MAX_TURNS = 6
 # Who is asking, new in every process: in the model call's `metadata`, never in what it asks.
 SESSION = {"user_id": f"helpdesk-{uuid.uuid4().hex}"}
 DB_NAME = "helpdesk.sqlite3"
-# Set for a run whose helpdesk database is gone, as a replay's may be since its recording:
-# the agent seeds nothing, so a real `lookup_customer` raises (`no such table`).
+# Set for a run whose helpdesk database is gone, as a replay's may be: the agent seeds nothing,
+# so a real `lookup_customer` raises (`no such table`).
 DB_LOST_ENV = "HELPDESK_DB_LOST"
-# Set for a replay of an edit to the agent's own code rather than its prompt: every tool
-# result the model is sent carries the tag, so the first model call, which holds no tool result
-# yet, still matches its recording, and every later one does not. The replay diverges mid-loop.
+# Set to replay an edit to the agent's code: every tool result carries the tag, so only the first
+# model call, which holds no tool result, matches its recording, and the replay diverges mid-loop.
 RESULT_TAG_ENV = "TOOL_RESULT_TAG"
 PROMPTS = {
     "full": "You are a refund agent. Refund the full remaining amount of a disputed charge.",
@@ -72,7 +52,7 @@ class Ticket:
 
 
 def seed(customer: str) -> None:
-    """The helpdesk database as the agent finds it. Setup, not a tool: it happens in both modes."""
+    """Seed the helpdesk database; this is setup, not a tool, so it happens in every mode."""
     with agentkit.sqlite(DB_NAME) as conn:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS customers (id TEXT PRIMARY KEY, name TEXT, tier TEXT)"
@@ -113,9 +93,8 @@ def run_tool(ticket: Ticket, turn: int, name: str, args: dict[str, Any]) -> str:
     if name == "lookup_customer":
         return _tool_result(name, body=lookup_customer(args["customer"]))
     if name == "issue_refund":
-        # One key per turn: a call the model repeats within a turn is the same refund, sent again,
-        # and Stripe (or irimi's idempotency store) answers it once. A refund asked for in a
-        # later turn is a new request with a new key.
+        # One key per turn: a call the model repeats within a turn is a retry of the same refund,
+        # and a refund in a later turn is a new request with a new key.
         headers = {"Idempotency-Key": f"{ticket.ticket_id}-turn{turn}"}
         form = {"charge": args["charge"], "amount": str(args["amount"])}
         resp = agentkit.stripe(

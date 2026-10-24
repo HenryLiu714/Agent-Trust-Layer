@@ -55,7 +55,7 @@ def refuse_self_target(target: Target, listen_port: int, local_address: str = ""
         netaddr.is_self_host(target.host) or netaddr.resolves_to_self(target.host, local_address)
     ):
         raise TargetRefused(
-            f"answer target {target.url!r} is irimi's own listener on port {listen_port}; "
+            f"target {target.url!r} is irimi's own listener on port {listen_port}; "
             "point it at the address that answers the route instead"
         )
 
@@ -91,8 +91,8 @@ def delegate(request: Request, classification: Classification) -> ForwardTo | No
     # Scope rule: every path on a credential-path host is a credential, so its target is loopback.
     if request.host in service_map.credential_hosts and not sent_to.is_loopback:
         logger.error(
-            "irimi: refusing to delegate %s to %s: the request path is the credential on %s, "
-            "so its answer target must be loopback",
+            "irimi: refusing to send %s to target %s: the request path is the credential on %s, "
+            "so its target must be loopback",
             request.path,
             sent_to.url,
             request.host,

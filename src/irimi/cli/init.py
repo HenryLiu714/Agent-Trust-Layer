@@ -38,7 +38,10 @@ def cmd_init(args: argparse.Namespace) -> int:
     p = ca.ca_paths()
     match ca.state(p):
         case "present" if not args.force:
-            print(f"CA already exists at {p.key.parent}; use --force to regenerate")
+            print(
+                f"hint: CA already exists at {p.key.parent}; use --force to regenerate",
+                file=sys.stderr,
+            )
             return exitcodes.OK
         case "partial" if not args.force:
             print(

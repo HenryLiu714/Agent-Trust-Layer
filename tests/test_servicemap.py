@@ -472,7 +472,7 @@ def test_fires_on_a_live_route_is_refused(tmp_path):
     assert_refused(
         tmp_path,
         GOOD_MAP.replace("    human: list things", "    fires:\n      - thing.listed"),
-        "`fires:` names the webhooks a FAKED write would have sent",
+        "`fires:` names the webhooks a faked write would have sent",
     )
 
 

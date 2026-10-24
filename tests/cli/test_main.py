@@ -589,7 +589,7 @@ def test_a_delegated_services_warning_reaches_a_piped_stdout_too(monkeypatch):
     """The line saying requests leave this machine is flushed at startup too."""
     sm = _delegated_service("http://10.0.0.9:3000")
     visible = _startup_on_a_pipe(monkeypatch, servicemaps.MapIndex((sm,)))
-    assert "delegated: stripe -> http://10.0.0.9:3000 (writes)" in visible
+    assert "target: stripe -> http://10.0.0.9:3000 (writes)" in visible
     assert NOT_LOOPBACK_NOTICE in visible
 
 

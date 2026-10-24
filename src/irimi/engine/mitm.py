@@ -336,7 +336,7 @@ class IrimiAddon:
             try:
                 self._to_target(flow, decision.target)
             except Exception as exc:  # an unpointed flow would reach the real service
-                message = f"answer target {plan.target!r} could not be applied: {exc}"
+                message = f"target {plan.target!r} could not be applied: {exc}"
                 self._answer_now(flow, self.session.target_failed(plan, message))
                 return
         elif isinstance(decision, Respond):

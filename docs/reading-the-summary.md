@@ -59,8 +59,9 @@ only traffic sent through this proxy is shadowed; a client that ignores HTTPS_PR
 - A listener bound off loopback adds `listening on <host>: any machine that can reach this port can
   send traffic through irimi and call its control endpoint`.
 - Each service or route sent to a target adds
-  `delegated: <service> -> <url> (writes)` (or `(reads + writes)`, or a route's
-  `<service> <METHOD> <path>`), and a second line warning when the target is not on loopback.
+  `target: <service> -> <url> (writes)` (or `(reads + writes)`, or a route's
+  `<service> <METHOD> <path>`), and a second line, `not loopback: these requests leave this
+  machine`, when the target is not on loopback.
 
 ## The line per exchange
 

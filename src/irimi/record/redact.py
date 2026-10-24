@@ -174,7 +174,7 @@ def redact_exchange(exchange: Exchange, key: bytes) -> Exchange:
             stream_chunks = _rechunk(exchange.response.body, response.body, stream_chunks)
     # A bare-origin target keeps the request's path, so it follows the request host's rules.
     target = guard(
-        "the answer target",
+        "the target",
         REDACTION_FAILED,
         partial(_redact_url, exchange.target, exchange.request.host, key),
     )

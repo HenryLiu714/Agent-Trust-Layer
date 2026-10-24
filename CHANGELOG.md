@@ -71,11 +71,15 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
 - The generic echo for a service with no Python support reflects the request's fields and minted
   ids only; Stripe's answers keep `created`, `object` and `livemode`.
 - `Irimi-Rewrote` is never sent to a real service.
-- An answer target is probed off the event loop, and an unreachable remote target gets irimi's
-  JSON 502 instead of mitmproxy's HTML page.
+- A target is probed off the event loop, and an unreachable remote target gets irimi's JSON 502
+  instead of mitmproxy's HTML page.
+- The banner names each target as `target: <service> -> <url> (writes)`, not `delegated: ...`,
+  and warns `not loopback: these requests leave this machine` for one off this machine. irimi's
+  messages and logs say "target" where they said "answer target" or "delegate".
 - An entrypoint started as `python -m pkg.agent` is recorded as `pkg.agent:function`, so
   `irimi replay` can import it.
 - CLI messages read `error: ...`, `warning: ...` and `hint: ...`, and log lines start `irimi: `.
+  `irimi init` run over an existing CA prints `hint: CA already exists ...` to stderr.
 - `mitmproxy` is pinned below 13, since the engine depends on its hook internals.
 
 ### Added

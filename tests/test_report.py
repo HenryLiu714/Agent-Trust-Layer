@@ -232,20 +232,20 @@ def test_a_service_with_no_target_adds_no_banner_line():
 
 def test_a_service_target_names_the_service_the_target_and_what_it_answers():
     lines = delegated_lines(_index(_service(target="http://127.0.0.1:3000")))
-    assert lines == ["delegated: stripe -> http://127.0.0.1:3000 (writes)"]
+    assert lines == ["target: stripe -> http://127.0.0.1:3000 (writes)"]
 
 
 def test_target_reads_says_the_reads_are_delegated_too():
     """The banner's "reads are real" claim is exactly what `target_reads` makes false."""
     lines = delegated_lines(_index(_service(target="http://127.0.0.1:3000", target_reads=True)))
-    assert lines == ["delegated: stripe -> http://127.0.0.1:3000 (reads + writes)"]
+    assert lines == ["target: stripe -> http://127.0.0.1:3000 (reads + writes)"]
 
 
 def test_a_route_target_is_named_even_when_the_service_itself_has_none():
     """`irimi maps list` printed `target: self` for exactly this shape; the banner must not."""
     sm = _service(routes=(_route(target="http://127.0.0.1:3111"), _route(path="/v1/charges")))
     assert delegated_lines(_index(sm)) == [
-        "delegated: stripe POST /v1/refunds -> http://127.0.0.1:3111 (writes)"
+        "target: stripe POST /v1/refunds -> http://127.0.0.1:3111 (writes)"
     ]
 
 
@@ -258,7 +258,7 @@ def test_a_target_that_is_not_loopback_says_so_and_is_red_only_when_asked():
     """--allow-remote-target is how a target stops being loopback, and the line has to say it."""
     index = _index(_service(target="http://stub.example:3000"))
     plain, notice = delegated_lines(index)
-    assert "NOT loopback" in notice
+    assert "not loopback" in notice
     assert all("\033[" not in line for line in (plain, notice))
     assert all(len(line) <= 100 for line in (plain, notice))
     coloured = delegated_lines(index, color=True)
@@ -269,7 +269,7 @@ def test_a_target_that_is_not_loopback_says_so_and_is_red_only_when_asked():
 def test_a_loopback_target_is_never_painted_red():
     (line,) = delegated_lines(_index(_service(target="http://127.0.0.1:3000")), color=True)
     assert "\033[" not in line
-    assert "NOT loopback" not in line
+    assert "not loopback" not in line
 
 
 def test_delegated_lines_are_sorted_by_service():
@@ -367,7 +367,7 @@ def test_a_replayed_read_the_overlay_could_not_complete_names_who_answered_it():
     assert "    ↳ GET /v1/charges did not show it  recorded (partial)" in lines
 
 
-def test_an_overlaid_read_is_counted_live_and_never_virtualized():
+def test_an_overlaid_read_is_counted_real_not_answered_by_irimi():
     """An overlaid read counts as real, not answered by irimi: the service answered it too."""
     rows = [_exchange(answered_by="overlay"), _refund()]
     lines = summary_lines("7f3a", rows, 0.0, _maps())

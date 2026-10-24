@@ -26,8 +26,11 @@ def test_a_second_init_changes_nothing(tmp_path, monkeypatch, capsys):
     key_before, cert_before = p.key.read_bytes(), p.cert.read_bytes()
     capsys.readouterr()
     assert main(["init"]) == 0
-    out = capsys.readouterr().out
-    assert out.splitlines() == [f"CA already exists at {p.key.parent}; use --force to regenerate"]
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        f"hint: CA already exists at {p.key.parent}; use --force to regenerate"
+    ]
     assert p.key.read_bytes() == key_before
     assert p.cert.read_bytes() == cert_before
 

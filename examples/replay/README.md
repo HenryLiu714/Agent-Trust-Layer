@@ -48,8 +48,8 @@ PROMPT_FILE=examples/replay/prompt_half.txt uv run irimi replay <run id>
 id>` line; that is the run to replay. The model is `claude-opus-5-5`; set `ANTHROPIC_MODEL` to use
 another. The recording and the edited replay each make one model call of a few hundred tokens each
 way, a few US cents at most together; a replay with no prompt change is answered from the
-recording and costs nothing, and Stripe test mode is free. The agent's database is `llm_refunds.sqlite3` in the working directory; `REFUND_DB` moves
-it.
+recording and costs nothing, and Stripe test mode is free. The agent's database is
+`llm_refunds.sqlite3` in the working directory; `REFUND_DB` moves it.
 
 The replay ends with a block that names the model call as where it diverged, and the refund and
 the recorded decision as the writes that changed:

@@ -30,7 +30,8 @@ run id that starts with `-`.
 ## `irimi init`
 
 Create the local certificate authority irimi signs HTTPS traffic with, in `$IRIMI_HOME/ca`
-(`~/.irimi/ca` by default). Running it again does nothing; `--force` makes a new CA. Only the
+(`~/.irimi/ca` by default). Running it again changes nothing and prints `hint: CA already exists
+at <dir>; use --force to regenerate` to stderr; `--force` makes a new CA. Only the
 processes irimi starts are told to trust it ([security.md](security.md#trust-boundaries)).
 
 ## `irimi shadow`

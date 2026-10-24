@@ -37,7 +37,8 @@ def validate_targets(sm: ServiceMap, allow_target_hosts: frozenset[str]) -> None
         if route.target is not None and route.kind not in TARGETABLE_KINDS:
             raise MapError(
                 f"{where}: a `target:` is valid on `write` and `unknown` routes only "
-                f"(this one is `{route.kind}`); delegate reads with `target_reads:` on the service"
+                f"(this one is `{route.kind}`); send reads to the target with `target_reads:` "
+                "on the service"
             )
         if route.forward_auth and target_for(sm, route) is None:
             raise MapError(f"{where}: `forward_auth: true` needs a target to forward to")
@@ -147,7 +148,7 @@ def check_route_rules(sm: ServiceMap) -> None:
             )
         if route.fires and route.kind in LIVE_KINDS:
             raise MapError(
-                f"{where}: `fires:` names the webhooks a FAKED write would have sent, and a "
+                f"{where}: `fires:` names the webhooks a faked write would have sent, and a "
                 f"`{route.kind}` route is forwarded to the real service, which sends its own; "
                 "they would never be listed"
             )

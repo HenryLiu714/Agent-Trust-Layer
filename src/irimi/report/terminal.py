@@ -21,8 +21,8 @@ WIDE_BIND_NOTICE = (
 )
 
 # Marks a service or route sent to a target: a routed host may not be live either.
-DELEGATED_PREFIX = "delegated:"
-NOT_LOOPBACK_NOTICE = "NOT loopback - these requests leave this machine"
+DELEGATED_PREFIX = "target:"
+NOT_LOOPBACK_NOTICE = "not loopback: these requests leave this machine"
 NOT_LOOPBACK_INDENT = " " * len(f"{DELEGATED_PREFIX} ")
 RED = "\033[31m"
 RESET = "\033[0m"

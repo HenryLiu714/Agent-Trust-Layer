@@ -488,7 +488,7 @@ def test_a_credential_path_is_replaced_wherever_else_the_exchange_carries_it():
 
     `/` alone is every URL's path and is left alone."""
     path = "/services/T000/B000/XXXXsecret"
-    reason = f"answer target 'http://127.0.0.1:9/{path[1:]}' could not be reached"
+    reason = f"target 'http://127.0.0.1:9/{path[1:]}' could not be reached"
     response = Response(
         status=502,
         headers=(JSON, ("x-echo", f"got {path}")),
@@ -512,7 +512,7 @@ def test_a_credential_path_holding_a_shape_is_replaced_whole_wherever_else_it_is
 
     The shape rule runs first, so without this the team and bot ids would survive beside it."""
     path = f"/services/T0SHAPE/B0SHAPE/{SLACK_BOT}12-abc"
-    reason = f"answer target 'http://127.0.0.1:9{path}' could not be reached"
+    reason = f"target 'http://127.0.0.1:9{path}' could not be reached"
     response = Response(
         status=502,
         headers=(JSON, ("x-echo", f"got {path}")),

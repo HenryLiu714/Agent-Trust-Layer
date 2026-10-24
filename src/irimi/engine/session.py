@@ -218,7 +218,7 @@ class ShadowSession:
         if isinstance(cause, RequestBodyCut):  # the agent's body, not irimi's failure
             logger.warning("irimi: refused write: %s", cause)
         else:
-            logger.error("irimi: answering locally; the decision raised", exc_info=cause)
+            logger.error("irimi: the decision raised; answering with irimi's 502", exc_info=cause)
         request = request if request is not None else admitted.request
         return self._irimi_error(
             request,
@@ -466,7 +466,7 @@ def _probe_target(target: Target) -> None:
         socket.create_connection((target.host, target.port), TARGET_PROBE_TIMEOUT_S).close()
     except OSError as exc:
         raise targets.TargetUnreachable(
-            f"answer target {target.url!r} could not be reached: {exc}"
+            f"target {target.url!r} could not be reached: {exc}"
         ) from None
 
 
@@ -483,5 +483,5 @@ def _target_refusal(
     except targets.TargetRefused as exc:
         return exc
     except Exception as exc:
-        return targets.TargetRefused(f"answer target {forward.url!r} could not be applied: {exc}")
+        return targets.TargetRefused(f"target {forward.url!r} could not be applied: {exc}")
     return None

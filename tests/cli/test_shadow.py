@@ -12,6 +12,7 @@ from irimi.cli import main, runner
 from irimi.config import ca, paths
 from irimi.core import exitcodes
 from irimi.protocol.env import AGENT_VERSION_ENV
+from irimi.report.terminal import PROXY_ONLY_NOTICE
 from tests.support.engine import ReaderGoneWhen, python_child, spy_on_the_store
 from tests.support.waiting import eventually
 
@@ -300,7 +301,7 @@ def test_banner_names_a_delegated_service(home, tmp_path, capsys):
     )
     assert main(["shadow", *python_child("pass")]) == 0
     out = capsys.readouterr().out
-    assert "delegated: stripe -> http://127.0.0.1:3000 (reads + writes)" in out
+    assert "target: stripe -> http://127.0.0.1:3000 (reads + writes)" in out
     # Added to the usual banner, not in place of it.
     assert "only traffic sent through this proxy is shadowed" in out
 
@@ -321,14 +322,17 @@ def test_the_banner_says_when_a_target_left_the_machine(home, capsys):
     ]
     assert main(argv) == 0
     captured = capsys.readouterr()
-    assert "delegated: stripe -> http://stub.example:3000 (writes)" in captured.out
-    assert "NOT loopback" in captured.out
+    assert "target: stripe -> http://stub.example:3000 (writes)" in captured.out
+    assert "not loopback" in captured.out
     assert "--allow-remote-target" in captured.err  # the escape-hatch warning
 
 
 def test_no_delegated_service_leaves_the_banner_alone(home, capsys):
     assert main(["shadow", *python_child("pass")]) == 0
-    assert "delegated:" not in capsys.readouterr().out
+    lines = capsys.readouterr().out.splitlines()
+    banner = lines[: lines.index("")] if "" in lines else lines
+    assert PROXY_ONLY_NOTICE in banner
+    assert not [line for line in banner if line.startswith("target:")]
 
 
 def test_sigterm_stops_the_command_ends_the_run_and_closes_the_store(home, upstream):
